@@ -12,7 +12,6 @@ import {
   TableColumn,
   TableHeader,
   TableRow,
-  Chip,
 } from '@nextui-org/react';
 import { QRCodeSVG } from 'qrcode.react';
 import { toast } from 'sonner';
@@ -112,8 +111,8 @@ const AccountPage = () => {
     <div>
       {/* 失效账号警告横幅 */}
       {invalidAccounts.length > 0 && (
-        <div className="mx-4 mt-4 p-3 bg-red-50 border border-red-300 rounded-lg flex items-center gap-2 text-red-700 text-sm">
-          <span className="text-lg">⚠️</span>
+        <div className="mac-alert-danger mx-4 mt-4">
+          <span>⚠️</span>
           <span>
             有 <strong>{invalidAccounts.length}</strong> 个账号 Token 已失效（微信读书重新登录过或被踢下线），订阅无法自动更新。请点击对应账号的
             <strong>「重新登录」</strong>按钮扫码恢复。
@@ -121,8 +120,8 @@ const AccountPage = () => {
         </div>
       )}
 
-      <div className="flex justify-between m-4">
-        <div className="font-bold">共{data?.items.length || 0}个账号</div>
+      <div className="mac-content-toolbar">
+        <span className="mac-content-title">账号管理 · {data?.items.length || 0} 个</span>
         <Button
           onPress={openAdd}
           size="sm"
@@ -155,18 +154,11 @@ const AccountPage = () => {
                 <TableCell>{item.name}</TableCell>
                 <TableCell>
                   {isBlocked ? (
-                    <Chip className="capitalize" size="sm" variant="flat">
-                      今日小黑屋
-                    </Chip>
+                    <span className="mac-badge mac-badge-warning">今日小黑屋</span>
+                  ) : item.status === 0 ? (
+                    <span className="mac-badge mac-badge-danger">{statusMap[item.status].label}</span>
                   ) : (
-                    <Chip
-                      className="capitalize"
-                      color={statusMap[item.status].color}
-                      size="sm"
-                      variant="flat"
-                    >
-                      {statusMap[item.status].label}
-                    </Chip>
+                    <span className="mac-badge mac-badge-success">{statusMap[item.status].label}</span>
                   )}
                 </TableCell>
                 <TableCell>

@@ -3,9 +3,6 @@ import {
   Avatar,
   Button,
   Divider,
-  Listbox,
-  ListboxItem,
-  ListboxSection,
   Modal,
   ModalBody,
   ModalContent,
@@ -86,13 +83,13 @@ const Feeds = () => {
     }
   }, [feedData?.items]);
 
-  const handleDragStart = (e: any, index: number) => {
+  const handleDragStart = (e: React.DragEvent, index: number) => {
     setDraggedItem(index);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', index.toString());
   };
 
-  const handleDragEnter = (e: any, index: number) => {
+  const handleDragEnter = (e: React.DragEvent, index: number) => {
     e.preventDefault();
     if (draggedItem === null || draggedItem === index) return;
     const newItems = [...orderedFeeds];
@@ -219,18 +216,11 @@ const Feeds = () => {
 
   return (
     <>
-      <div className="h-full flex justify-between">
-        <div className="w-64 p-4 h-full">
-          <div className="pb-4 flex justify-between align-middle items-center">
-            <Button
-              color="primary"
-              size="sm"
-              onPress={onOpen}
-              endContent={<PlusIcon />}
-            >
-              添加
-            </Button>
-            <div className="font-normal text-sm">
+      <div className="h-full flex">
+        <div className="mac-sidebar">
+          <div className="mac-sidebar-header" style={{ minHeight: '44px' }}>
+            <span className="mac-sidebar-title">订阅源 · {feedData?.items?.length || 0}</span>
+            <div className="flex items-center gap-1">
               <Button
                 size="sm"
                 variant="light"
@@ -239,10 +229,19 @@ const Feeds = () => {
                   setIsManageMode(!isManageMode);
                   setSelectedIds([]);
                 }}
+                style={{ minWidth: 0, padding: '2px 8px', fontSize: '12px', height: '24px' }}
               >
-                {isManageMode ? '退出管理' : '管理'}
+                {isManageMode ? '退出' : '管理'}
               </Button>
-              共{feedData?.items?.length || 0}个订阅
+              <Button
+                color="primary"
+                size="sm"
+                onPress={onOpen}
+                endContent={<PlusIcon />}
+                style={{ minWidth: 0, padding: '2px 10px', fontSize: '12px', height: '24px' }}
+              >
+                添加
+              </Button>
             </div>
           </div>
           {isManageMode && (feedData?.items?.length || 0) > 0 && (
@@ -274,31 +273,24 @@ const Feeds = () => {
           )}
 
           {feedData?.items ? (
-            <Listbox
-              aria-label="订阅源"
-              emptyContent="暂无订阅"
-              onAction={(key) => {
-                const newId = key as string;
-                setCurrentMpId(newId);
-                navigate(newId ? `/feeds/${newId}` : `/feeds`);
-              }}
-            >
-              <ListboxSection showDivider>
-                <ListboxItem
-                  key={''}
-                  className={`${isActive('') ? 'sidebar-item-active' : ''} sidebar-item transition-all`}
-                  startContent={<Avatar name="ALL" className="sidebar-avatar"></Avatar>}
-                >
-                  全部
-                </ListboxItem>
-              </ListboxSection>
-            </Listbox>
+            <ul className="px-0 pt-1 pb-0">
+              <li
+                className={`mac-sidebar-item ${isActive('') && !isManageMode ? 'active' : ''}`}
+                onClick={() => {
+                  setCurrentMpId('');
+                  navigate('/feeds');
+                }}
+              >
+                <Avatar name="ALL" className="sidebar-avatar min-w-6 min-h-6 w-6 h-6"></Avatar>
+                全部
+              </li>
+            </ul>
           ) : (
             ''
           )}
           {feedData?.items ? (
-            <div className="flex-1 overflow-hidden mt-1 px-1">
-              <ul className="overflow-y-auto h-[calc(100vh-260px)] flex flex-col gap-1 w-full pb-10">
+            <div className="flex-1 overflow-hidden px-0">
+              <ul className="overflow-y-auto h-[calc(100vh-148px)] flex flex-col w-full pb-4">
                 {orderedFeeds.map((item, index) => {
                   const isSelected = selectedIds.includes(item.id);
                   return (
@@ -309,13 +301,13 @@ const Feeds = () => {
                       onDragEnter={(e) => isManageMode && handleDragEnter(e, index)}
                       onDragEnd={isManageMode ? handleDragEnd : undefined}
                       onDragOver={(e) => e.preventDefault()}
-                      className={`flex items-center px-2 py-1.5 rounded-medium cursor-pointer ${
+                      className={`mac-sidebar-item ${
                         isActive(item.id) && !isManageMode
-                          ? 'bg-default-200 sidebar-item-active'
+                          ? 'active'
                           : isSelected && isManageMode
-                            ? 'bg-danger-50'
-                            : 'hover:bg-default-100'
-                      } ${isManageMode ? 'cursor-grab active:cursor-grabbing' : ''} transition-all`}
+                            ? 'selected-manage'
+                            : ''
+                      } ${isManageMode ? 'drag-handle' : ''}`}
                       onClick={() => {
                         if (isManageMode) {
                           toggleSelect(item.id);
@@ -325,18 +317,16 @@ const Feeds = () => {
                         }
                       }}
                     >
-                      <div className="flex items-center gap-2 w-full">
-                        {isManageMode && (
-                          <div onClick={(e) => e.stopPropagation()}>
-                            <Checkbox
-                              isSelected={isSelected}
-                              onValueChange={() => toggleSelect(item.id)}
-                            />
-                          </div>
-                        )}
-                        <Avatar src={item.mpCover} className="sidebar-avatar min-w-8 min-h-8 w-8 h-8"></Avatar>
-                        <span className="truncate text-sm flex-1">{item.mpName}</span>
-                      </div>
+                      {isManageMode && (
+                        <div onClick={(e) => e.stopPropagation()}>
+                          <Checkbox
+                            isSelected={isSelected}
+                            onValueChange={() => toggleSelect(item.id)}
+                          />
+                        </div>
+                      )}
+                      <Avatar src={item.mpCover} className="sidebar-avatar min-w-6 min-h-6 w-6 h-6"></Avatar>
+                      <span className="truncate text-sm flex-1">{item.mpName}</span>
                     </li>
                   );
                 })}
@@ -344,11 +334,11 @@ const Feeds = () => {
             </div>
           ) : null}
         </div>
-        <div className="flex-1 h-full flex flex-col">
-          <div className="p-4 pb-0 flex justify-between">
-            <h3 className="text-medium font-mono flex-1 overflow-hidden text-ellipsis break-keep text-nowrap pr-1">
+        <div className="mac-content">
+          <div className="mac-content-toolbar">
+            <span className="mac-content-title">
               {currentMpInfo?.mpName || '全部'}
-            </h3>
+            </span>
             {currentMpInfo ? (
               <div className="flex h-5 items-center space-x-4 text-small">
                 <div className="font-light">
@@ -562,7 +552,7 @@ const Feeds = () => {
               </div>
             )}
           </div>
-          <div className="p-2 overflow-y-auto">
+          <div className="flex-1 overflow-auto p-3">
             <ArticleList></ArticleList>
           </div>
         </div>
