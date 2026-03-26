@@ -62,6 +62,7 @@ textarea,
 select {
   font-family: -apple-system, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC', 'Noto Sans SC', sans-serif !important;
   font-feature-settings: 'kern' 1, 'liga' 1;
+  font-size: 15px;
 }
 
 /* ── Custom Thin Scrollbar ── */
@@ -140,7 +141,7 @@ select {
 .mac-nav-pill {
   padding: 4px 12px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--mac-gray-5);
   cursor: pointer;
@@ -172,8 +173,8 @@ select {
 
 /* ── macOS Sidebar ── */
 .mac-sidebar {
-  width: 240px;
-  min-width: 240px;
+  width: 260px;
+  min-width: 260px;
   background: var(--mac-sidebar-bg);
   border-right: 0.5px solid var(--mac-separator-opaque);
   height: 100%;
@@ -184,14 +185,14 @@ select {
 }
 
 .mac-sidebar-header {
-  padding: 8px 12px 4px;
+  padding: 8px 10px 4px;
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
 .mac-sidebar-title {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -202,12 +203,13 @@ select {
 .mac-sidebar-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 10px;
-  margin: 1px 6px;
-  border-radius: var(--mac-radius-sm);
+  gap: 10px;
+  padding: 0 16px;
+  height: 48px;
+  margin: 2px 8px;
+  border-radius: 8px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 400;
   transition: background 0.12s ease;
   user-select: none;
@@ -273,11 +275,11 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px;
+  padding: 8px 16px;
   border-bottom: 0.5px solid var(--mac-separator-opaque);
-  min-height: 44px;
+  min-height: 40px;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .mac-content-title {
@@ -290,27 +292,183 @@ select {
   min-width: 0;
 }
 
-/* ── macOS Table ── */
-.mac-table-wrapper {
-  overflow: auto;
+/* ── macOS Compact Article List ── */
+.compact-list {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.compact-row {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  height: 54px;
+  border-bottom: 0.5px solid var(--mac-separator);
+  transition: background 0.15s ease;
+  gap: 12px;
+  cursor: default;
+}
+
+.compact-row:hover {
+  background: #f5f5f7 !important;
+}
+
+.dark .compact-row:hover {
+  background: #2b2b2d !important;
+}
+
+.compact-title {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 500;
+  color: #1d1d1f;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: none !important;
+}
+
+.dark .compact-title {
+  color: #f5f5f7;
+}
+
+.compact-source {
+  width: 25%;
+  font-size: 14px;
+  color: #86868b;
+  white-space: nowrap;
+  overflow: visible;
+}
+
+.compact-time {
+  width: 15%;
+  font-size: 14px;
+  color: #86868b;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.compact-action {
+  width: 10% ;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.compact-action-link {
+  font-size: 13px;
+  color: var(--mac-blue);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.compact-list-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  background: var(--mac-gray-1);
+  border-bottom: 0.5px solid var(--mac-separator-opaque);
+  color: var(--mac-gray-5);
+  font-size: 12px;
+  font-weight: 600;
+  gap: 12px;
+  user-select: none;
+}
+
+.dark .compact-list-header {
+  background: var(--mac-gray-2);
+}
+
+.compact-col-check {
+  width: 40px;
+  flex-shrink: 0;
+}
+
+.compact-col-title {
   flex: 1;
 }
 
-/* Article row refinements */
-.article-row {
-  transition: background 0.12s ease !important;
-  border-bottom: 0.5px solid var(--mac-separator) !important;
+.compact-col-source {
+  width: 25%;
 }
 
-.article-row:hover {
-  background: var(--mac-fill) !important;
-  transform: none;
-  box-shadow: none;
-  border-color: var(--mac-separator) !important;
+.compact-col-time {
+  width: 15%;
+  text-align: right;
 }
 
-.dark .article-row:hover {
-  background: var(--mac-fill) !important;
+.compact-col-action {
+  width: 10%;
+  text-align: right;
+}
+
+.compact-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: nowrap;
+}
+
+.article-toolbar {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  border-bottom: 0.5px solid var(--mac-separator-opaque);
+  background: var(--mac-content-bg);
+}
+
+.article-toolbar-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #1a1a1a;
+  display: flex;
+  align-items: center;
+}
+
+.dark .article-toolbar-title {
+  color: #f0f0f0;
+}
+
+.mac-badge-count {
+  font-size: 14px;
+  color: #888;
+  font-weight: 400;
+  margin-left: 6px;
+}
+
+.mac-btn-outline {
+  background: transparent !important;
+  border: 1px solid var(--mac-gray-3) !important;
+  color: var(--mac-gray-6) !important;
+  height: 32px !important;
+  padding: 0 12px !important;
+  font-size: 13px !important;
+  border-radius: 6px !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dark .mac-btn-outline {
+  border-color: var(--mac-gray-4) !important;
+  color: #f0f0f0 !important;
+}
+
+.sidebar-manage-header {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+}
+
+.sidebar-manage-label {
+  font-size: 13px;
+  color: #888;
+  font-weight: 500;
 }
 
 /* ── macOS Chip / Badge ── */
@@ -365,7 +523,7 @@ select {
   gap: 4px;
   padding: 5px 12px;
   border-radius: var(--mac-radius-sm);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
   border: none;
@@ -407,7 +565,7 @@ select {
 
 /* Link-style action items */
 .mac-action-link {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--mac-blue);
   cursor: pointer;
   padding: 2px 4px;
@@ -446,7 +604,7 @@ select {
   background: rgba(255,59,48,0.06);
   border: 0.5px solid rgba(255,59,48,0.25);
   border-radius: var(--mac-radius-sm);
-  font-size: 13px;
+  font-size: 14px;
   color: #c0392b;
 }
 
@@ -461,7 +619,7 @@ select {
   border: 0.5px solid var(--mac-separator-opaque);
   border-radius: var(--mac-radius-sm);
   padding: 6px 10px;
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   width: 100%;

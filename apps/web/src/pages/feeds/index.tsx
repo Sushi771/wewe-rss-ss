@@ -2,7 +2,6 @@
 import {
   Avatar,
   Button,
-  Divider,
   Modal,
   ModalBody,
   ModalContent,
@@ -14,8 +13,8 @@ import {
   useDisclosure,
   Link,
   Checkbox,
+  Input,
 } from '@nextui-org/react';
-import { PlusIcon } from '@web/components/PlusIcon';
 import { trpc } from '@web/utils/trpc';
 import { useMemo, useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -76,6 +75,40 @@ const Feeds = () => {
   const [isRefreshedAll, setIsRefreshedAll] = useState(false);
 
   const { mutateAsync: updateOrder } = trpc.feed.updateOrder.useMutation();
+
+  const [search, setSearch] = useState('');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [articleSelectedIds, setArticleSelectedIds] = useState<Set<string>>(new Set());
+  const [isBatchExporting, setIsBatchExporting] = useState(false);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isSearchOpen) {
+        setIsSearchOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSearchOpen]);
+
+  const handleBatchExport = async () => {
+    if (articleSelectedIds.size === 0) return;
+    setIsBatchExporting(true);
+    const ids = Array.from(articleSelectedIds);
+    let successCount = 0;
+    try {
+      for (const articleId of ids) {
+        await queryUtils.client.article.saveToObsidian.mutate(articleId);
+        successCount++;
+      }
+      toast.success(`成功导出 ${successCount} 篇文章`);
+      setArticleSelectedIds(new Set());
+    } catch (err: any) {
+      toast.error(`导出中断 (${successCount}/${ids.length} 成功)`, { description: err.message });
+    } finally {
+      setIsBatchExporting(false);
+    }
+  };
 
   useEffect(() => {
     if (feedData?.items) {
@@ -218,34 +251,41 @@ const Feeds = () => {
     <>
       <div className="h-full flex">
         <div className="mac-sidebar">
-          <div className="mac-sidebar-header" style={{ minHeight: '44px' }}>
-            <span className="mac-sidebar-title">订阅源 · {feedData?.items?.length || 0}</span>
+          <div className="sidebar-manage-header">
+            <span className="sidebar-manage-label">
+              订阅源 · {feedData?.items?.length || 0}
+            </span>
             <div className="flex items-center gap-1">
-              <Button
-                size="sm"
-                variant="light"
-                color={isManageMode ? 'primary' : 'default'}
-                onPress={() => {
-                  setIsManageMode(!isManageMode);
-                  setSelectedIds([]);
-                }}
-                style={{ minWidth: 0, padding: '2px 8px', fontSize: '12px', height: '24px' }}
-              >
-                {isManageMode ? '退出' : '管理'}
-              </Button>
-              <Button
-                color="primary"
-                size="sm"
-                onPress={onOpen}
-                endContent={<PlusIcon />}
-                style={{ minWidth: 0, padding: '2px 10px', fontSize: '12px', height: '24px' }}
-              >
-                添加
-              </Button>
+              <Tooltip content={isManageMode ? '退出管理' : '管理订阅源'}>
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="light"
+                  color={isManageMode ? 'primary' : 'default'}
+                  onPress={() => {
+                    setIsManageMode(!isManageMode);
+                    setSelectedIds([]);
+                  }}
+                  className="w-8 h-8 min-w-0"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                </Button>
+              </Tooltip>
+              <Tooltip content="添加订阅源">
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="light"
+                  onPress={onOpen}
+                  className="w-8 h-8 min-w-0"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: '#666' }}><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                </Button>
+              </Tooltip>
             </div>
           </div>
           {isManageMode && (feedData?.items?.length || 0) > 0 && (
-            <div className="pb-2 flex justify-between items-center">
+            <div className="px-4 pb-2 flex justify-between items-center">
               <Checkbox
                 isSelected={selectedIds.length === feedData?.items?.length}
                 onChange={() => {
@@ -335,225 +375,219 @@ const Feeds = () => {
           ) : null}
         </div>
         <div className="mac-content">
-          <div className="mac-content-toolbar">
-            <span className="mac-content-title">
+          <div className="article-toolbar">
+            <div className="article-toolbar-title">
               {currentMpInfo?.mpName || '全部'}
-            </span>
-            {currentMpInfo ? (
-              <div className="flex h-5 items-center space-x-4 text-small">
-                <div className="font-light">
-                  最后更新时间:
-                  {dayjs(currentMpInfo.syncTime * 1e3).format(
-                    'YYYY-MM-DD HH:mm:ss',
-                  )}
-                </div>
-                <Divider orientation="vertical" />
-                <Tooltip
-                  content="频繁调用可能会导致一段时间内不可用"
-                  color="danger"
-                >
-                  <Link
-                    size="sm"
-                    href="#"
-                    isDisabled={isGetArticlesLoading}
-                    onClick={async (ev) => {
-                      ev.preventDefault();
-                      ev.stopPropagation();
-                      const mpId = currentMpInfo.id;
-                      try {
-                        await refreshMpArticles({ mpId });
-                        await refetchFeedList();
-                        await queryUtils.article.list.reset();
-                        setRefreshedMpIds((prev) => [...prev, mpId]);
-                        toast.success('更新完成', {
-                          description: `公众号 ${currentMpInfo.mpName} 已更新`,
-                        });
-                        setTimeout(() => {
-                          setRefreshedMpIds((prev) =>
-                            prev.filter((id) => id !== mpId),
-                          );
-                        }, 3000);
-                      } catch (e) {
-                        toast.error('更新失败');
-                      }
-                    }}
-                  >
-                    {isGetArticlesLoading
-                      ? '更新中...'
-                      : refreshedMpIds.includes(currentMpInfo.id)
-                        ? '更新完成'
-                        : '立即更新'}
-                  </Link>
-                </Tooltip>
-                <Divider orientation="vertical" />
-                {currentMpInfo.hasHistory === 1 && (
-                  <>
-                    <Tooltip
-                      content={
-                        inProgressHistoryMp?.id === currentMpInfo.id
-                          ? `正在获取第${inProgressHistoryMp.page}页...`
-                          : `历史文章需要分批次拉取，请耐心等候，频繁调用可能会导致一段时间内不可用`
-                      }
-                      color={
-                        inProgressHistoryMp?.id === currentMpInfo.id
-                          ? 'primary'
-                          : 'danger'
-                      }
-                    >
-                      <Link
+              <span className="mac-badge-count">
+                · {queryUtils.article.list.getInfiniteData({ 
+                  limit: 20, 
+                  mpId: currentMpId,
+                  search: undefined 
+                })?.pages[0]?.items?.length || 0}
+              </span>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              {currentMpInfo ? (
+                <div className="flex items-center gap-4 mr-4">
+                  <div className="text-[12px] text-neutral-400 font-light whitespace-nowrap hidden lg:block">
+                    最后更新: {dayjs(currentMpInfo.syncTime * 1e3).format('MM-DD HH:mm')}
+                  </div>
+                  
+                  <Tooltip content="自动同步">
+                    <div className="flex items-center">
+                      <Switch
                         size="sm"
-                        href="#"
-                        isDisabled={
-                          (inProgressHistoryMp?.id
-                            ? inProgressHistoryMp?.id !== currentMpInfo.id
-                            : false) ||
-                          isGetHistoryArticlesLoading ||
-                          isGetArticlesLoading
-                        }
-                        onClick={async (ev) => {
-                          ev.preventDefault();
-                          ev.stopPropagation();
+                        onValueChange={async (value) => {
+                          await updateMpInfo({
+                            id: currentMpInfo.id,
+                            data: { status: value ? 1 : 0 },
+                          });
+                          await refetchFeedList();
+                        }}
+                        isSelected={currentMpInfo?.status === 1}
+                      />
+                    </div>
+                  </Tooltip>
 
+                  {currentMpInfo.hasHistory === 1 && (
+                    <Tooltip content={inProgressHistoryMp?.id === currentMpInfo.id ? '停止获取' : '获取历史文章'}>
+                      <Button
+                        isIconOnly
+                        size="sm"
+                        variant="light"
+                        className="w-8 h-8 min-w-0"
+                        isLoading={isGetHistoryArticlesLoading}
+                        onPress={async () => {
                           if (inProgressHistoryMp?.id === currentMpInfo.id) {
-                            await getHistoryArticles({
-                              mpId: '',
-                            });
+                            await getHistoryArticles({ mpId: '' });
                           } else {
-                            await getHistoryArticles({
-                              mpId: currentMpInfo.id,
-                            });
+                            await getHistoryArticles({ mpId: currentMpInfo.id });
                           }
-
                           await refetchInProgressHistoryMp();
                         }}
                       >
-                        {inProgressHistoryMp?.id === currentMpInfo.id
-                          ? `停止获取历史文章`
-                          : `获取历史文章`}
-                      </Link>
+                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+                      </Button>
                     </Tooltip>
-                    <Divider orientation="vertical" />
+                  )}
+
+                  <Tooltip content="删除此订阅 (保留文章)">
+                    <Button
+                      isIconOnly
+                      size="sm"
+                      variant="light"
+                      color="danger"
+                      className="w-8 h-8 min-w-0 opacity-40 hover:opacity-100"
+                      isLoading={isDeleteFeedLoading}
+                      onPress={async () => {
+                        if (window.confirm('确定删除吗？')) {
+                          await deleteFeed(currentMpInfo.id);
+                          navigate('/dash/feeds');
+                          await refetchFeedList();
+                        }
+                      }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                    </Button>
+                  </Tooltip>
+                </div>
+              ) : null}
+
+              <div className="flex items-center gap-2">
+                {articleSelectedIds.size > 0 && (
+                  <Button
+                    size="sm"
+                    color="primary"
+                    variant="flat"
+                    className="h-8 mr-2 font-medium"
+                    isLoading={isBatchExporting}
+                    onPress={handleBatchExport}
+                  >
+                    批量导出 Obsidian ({articleSelectedIds.size})
+                  </Button>
+                )}
+                
+                <Tooltip content={isSearchOpen ? '关闭搜索' : '搜索文章'}>
+                  <Button
+                    isIconOnly
+                    size="sm"
+                    variant="light"
+                    color={isSearchOpen ? 'primary' : 'default'}
+                    className="w-8 h-8 min-w-0"
+                    onPress={() => setIsSearchOpen(!isSearchOpen)}
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  </Button>
+                </Tooltip>
+
+                {currentMpInfo ? (
+                  <>
+                    <Tooltip content="更新此公众号文章">
+                      <Button
+                        size="sm"
+                        className="mac-btn-outline"
+                        isDisabled={isGetArticlesLoading}
+                        onPress={async () => {
+                          const mpId = currentMpInfo.id;
+                          try {
+                            await refreshMpArticles({ mpId });
+                            await refetchFeedList();
+                            await queryUtils.article.list.reset();
+                            setRefreshedMpIds((prev) => [...prev, mpId]);
+                            toast.success('更新完成');
+                            setTimeout(() => {
+                              setRefreshedMpIds((prev) => prev.filter((id) => id !== mpId));
+                            }, 3000);
+                          } catch (e) {
+                            toast.error('更新失败');
+                          }
+                        }}
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                        {isGetArticlesLoading ? '更新中' : refreshedMpIds.includes(currentMpInfo.id) ? '完成' : '更新'}
+                      </Button>
+                    </Tooltip>
+                    
+                    <Link
+                      size="sm"
+                      target="_blank"
+                      isExternal
+                      href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
+                      className="text-[#888] hover:text-primary transition-colors text-[13px] ml-2"
+                    >
+                      RSS
+                    </Link>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      size="sm"
+                      className="mac-btn-outline"
+                      isDisabled={isRefreshAllMpArticlesRunning || isGetArticlesLoading}
+                      onPress={async () => {
+                        try {
+                          await refreshMpArticles({});
+                          await refetchFeedList();
+                          await queryUtils.article.list.reset();
+                          setIsRefreshedAll(true);
+                          toast.success('全部更新完成');
+                          setTimeout(() => setIsRefreshedAll(false), 3000);
+                        } catch (e) {
+                          toast.error('更新失败');
+                        }
+                      }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                      {isRefreshAllMpArticlesRunning || isGetArticlesLoading ? '更新中' : isRefreshedAll ? '完成' : '更新全部'}
+                    </Button>
+                    
+                    <Button
+                      size="sm"
+                      className="mac-btn-outline"
+                      onPress={handleExportOpml}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      导出OPML
+                    </Button>
+
+                    <Link
+                      size="sm"
+                      target="_blank"
+                      isExternal
+                      href={`${serverOriginUrl}/feeds/all.atom`}
+                      className="text-[#888] hover:text-primary transition-colors text-[13px] ml-2"
+                    >
+                      RSS
+                    </Link>
                   </>
                 )}
-
-                <Tooltip content="启用服务端定时更新">
-                  <div>
-                    <Switch
-                      size="sm"
-                      onValueChange={async (value) => {
-                        await updateMpInfo({
-                          id: currentMpInfo.id,
-                          data: {
-                            status: value ? 1 : 0,
-                          },
-                        });
-
-                        await refetchFeedList();
-                      }}
-                      isSelected={currentMpInfo?.status === 1}
-                    ></Switch>
-                  </div>
-                </Tooltip>
-                <Divider orientation="vertical" />
-                <Tooltip content="仅删除订阅源，已获取的文章不会被删除">
-                  <Link
-                    href="#"
-                    color="danger"
-                    size="sm"
-                    isDisabled={isDeleteFeedLoading}
-                    onClick={async (ev) => {
-                      ev.preventDefault();
-                      ev.stopPropagation();
-
-                      if (window.confirm('确定删除吗？')) {
-                        await deleteFeed(currentMpInfo.id);
-                        navigate('/dash/feeds');
-                        await refetchFeedList();
-                      }
-                    }}
-                  >
-                    删除
-                  </Link>
-                </Tooltip>
-
-                <Divider orientation="vertical" />
-                <Tooltip
-                  content={
-                    <div>
-                      可添加.atom/.rss/.json格式输出, limit=20&page=1控制分页
-                    </div>
-                  }
-                >
-                  <Link
-                    size="sm"
-                    showAnchorIcon
-                    target="_blank"
-                    href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
-                    color="foreground"
-                  >
-                    RSS
-                  </Link>
-                </Tooltip>
               </div>
-            ) : (
-              <div className="flex gap-2">
-                <Tooltip
-                  content="频繁调用可能会导致一段时间内不可用"
-                  color="danger"
-                >
-                  <Link
-                    size="sm"
-                    href="#"
-                    isDisabled={
-                      isRefreshAllMpArticlesRunning || isGetArticlesLoading
-                    }
-                    onClick={async (ev) => {
-                      ev.preventDefault();
-                      ev.stopPropagation();
-                      try {
-                        await refreshMpArticles({});
-                        await refetchFeedList();
-                        await queryUtils.article.list.reset();
-                        setIsRefreshedAll(true);
-                        toast.success('全部更新完成');
-                        setTimeout(() => {
-                          setIsRefreshedAll(false);
-                        }, 3000);
-                      } catch (e) {
-                        toast.error('更新失败');
-                      }
-                    }}
-                  >
-                    {isRefreshAllMpArticlesRunning || isGetArticlesLoading
-                      ? '更新中...'
-                      : isRefreshedAll
-                        ? '全部更新完成'
-                        : '更新全部'}
-                  </Link>
-                </Tooltip>
-                <Link
-                  href="#"
-                  color="foreground"
-                  onClick={handleExportOpml}
-                  size="sm"
-                >
-                  导出OPML
-                </Link>
-                <Divider orientation="vertical" />
-                <Link
-                  size="sm"
-                  showAnchorIcon
-                  target="_blank"
-                  href={`${serverOriginUrl}/feeds/all.atom`}
-                  color="foreground"
-                >
-                  RSS
-                </Link>
-              </div>
-            )}
+            </div>
           </div>
+          {isSearchOpen && (
+            <div className="px-4 py-2 border-b-[0.5px] border-neutral-200 dark:border-neutral-700 bg-neutral-50/50 dark:bg-neutral-900/50 animate-in slide-in-from-top duration-200">
+              <Input
+                autoFocus
+                placeholder="搜索文章标题..."
+                size="sm"
+                variant="bordered"
+                value={search}
+                onValueChange={setSearch}
+                isClearable
+                onClear={() => setSearch('')}
+                classNames={{
+                  inputWrapper: 'h-9 px-3 bg-white dark:bg-neutral-800',
+                }}
+              />
+            </div>
+          )}
           <div className="flex-1 overflow-auto p-3">
-            <ArticleList></ArticleList>
+            <ArticleList 
+              search={search} 
+              selectedIds={articleSelectedIds} 
+              onSelectionChange={setArticleSelectedIds}
+            />
           </div>
         </div>
       </div>
