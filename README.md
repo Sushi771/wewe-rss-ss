@@ -177,9 +177,6 @@ pnpm run start:server
 
 **PayPal**: [paypal.me/cooderl](https://paypal.me/cooderl)
 
-**微信**:  
-<img width="300" src="https://r2-assets.111965.xyz/donate-wechat.jpg" alt="Donate_WeChat.jpg">
-
 ## 👨‍💻 贡献者
 
 <a href="https://github.com/cooderl/wewe-rss/graphs/contributors">
