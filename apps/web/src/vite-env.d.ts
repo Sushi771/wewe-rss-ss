@@ -7,7 +7,7 @@ interface ImportMetaEnv {
 
 interface Window {
   __WEWE_RSS_SERVER_ORIGIN_URL__?: string;
-  __WEWE_RSS_ENABLED_AUTH_CODE__?: boolean;
+  __WEWE_RSS_ENABLED_AUTH_CODE__?: boolean | string;
 }
 
 declare const __APP_VERSION__: string;

@@ -47,6 +47,7 @@
     "prisma": "^5.10.2",
     "reflect-metadata": "^0.2.1",
     "rxjs": "^7.8.1",
+    "turndown": "^7.2.2",
     "zod": "^3.22.4"
   },
   "devDependencies": {
@@ -58,6 +59,7 @@
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.19",
     "@types/supertest": "^6.0.2",
+    "@types/turndown": "^5.0.6",
     "@typescript-eslint/eslint-plugin": "^7.0.2",
     "@typescript-eslint/parser": "^7.0.2",
     "eslint": "^8.56.0",

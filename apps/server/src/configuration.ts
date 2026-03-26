@@ -3,9 +3,7 @@ const configuration = () => {
   const port = process.env.PORT || 4000;
   const host = process.env.HOST || '0.0.0.0';
 
-  const maxRequestPerMinute = parseInt(
-    `${process.env.MAX_REQUEST_PER_MINUTE}|| 60`,
-  );
+  const maxRequestPerMinute = parseInt(process.env.MAX_REQUEST_PER_MINUTE || '60');
 
   const authCode = process.env.AUTH_CODE;
   const platformUrl = process.env.PLATFORM_URL || 'https://weread.111965.xyz';
@@ -15,7 +13,7 @@ const configuration = () => {
 
   const databaseType = process.env.DATABASE_TYPE || 'mysql';
 
-  const updateDelayTime = parseInt(`${process.env.UPDATE_DELAY_TIME} || 60`);
+  const updateDelayTime = parseInt(process.env.UPDATE_DELAY_TIME || '3');
 
   const enableCleanHtml = process.env.ENABLE_CLEAN_HTML === 'true';
   return {
@@ -28,6 +26,9 @@ const configuration = () => {
       mode: feedMode,
       updateDelayTime,
       enableCleanHtml,
+      obsidianPath:
+        process.env.OBSIDIAN_PATH ||
+        'C:\\Users\\ss\\Documents\\Obsidian Vault\\公众号的文章（待分类）',
     },
     database: {
       type: databaseType,

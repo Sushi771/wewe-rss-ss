@@ -46,7 +46,7 @@ const Nav = () => {
 
   return (
     <div>
-      <Navbar isBordered>
+      <Navbar isBordered className="navbar-glass">
         <Tooltip
           content={
             <div className="p-1">

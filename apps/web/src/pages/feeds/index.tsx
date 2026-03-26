@@ -1,3 +1,4 @@
+
 import {
   Avatar,
   Button,
@@ -15,10 +16,11 @@ import {
   Tooltip,
   useDisclosure,
   Link,
+  Checkbox,
 } from '@nextui-org/react';
 import { PlusIcon } from '@web/components/PlusIcon';
 import { trpc } from '@web/utils/trpc';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import dayjs from 'dayjs';
@@ -68,8 +70,57 @@ const Feeds = () => {
     trpc.feed.delete.useMutation({});
 
   const [wxsLink, setWxsLink] = useState('');
+  const [isManageMode, setIsManageMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [draggedItem, setDraggedItem] = useState<number | null>(null);
+  const [orderedFeeds, setOrderedFeeds] = useState(feedData?.items || []);
+
+  const [refreshedMpIds, setRefreshedMpIds] = useState<string[]>([]);
+  const [isRefreshedAll, setIsRefreshedAll] = useState(false);
+
+  const { mutateAsync: updateOrder } = trpc.feed.updateOrder.useMutation();
+
+  useEffect(() => {
+    if (feedData?.items) {
+      setOrderedFeeds(feedData.items);
+    }
+  }, [feedData?.items]);
+
+  const handleDragStart = (e: any, index: number) => {
+    setDraggedItem(index);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', index.toString());
+  };
+
+  const handleDragEnter = (e: any, index: number) => {
+    e.preventDefault();
+    if (draggedItem === null || draggedItem === index) return;
+    const newItems = [...orderedFeeds];
+    const draggedContent = newItems[draggedItem];
+    newItems.splice(draggedItem, 1);
+    newItems.splice(index, 0, draggedContent);
+    setDraggedItem(index);
+    setOrderedFeeds(newItems);
+  };
+
+  const handleDragEnd = async () => {
+    setDraggedItem(null);
+    try {
+      await updateOrder(
+        orderedFeeds.map((item, idx) => ({ id: item.id, order: idx }))
+      );
+      refetchFeedList();
+      toast.success('排序已保存');
+    } catch (e) {
+      toast.error('排序保存失败');
+    }
+  };
 
   const [currentMpId, setCurrentMpId] = useState(id || '');
+
+  useEffect(() => {
+    setCurrentMpId(id || '');
+  }, [id]);
 
   const handleConfirm = async () => {
     console.log('wxsLink', wxsLink);
@@ -100,6 +151,30 @@ const Feeds = () => {
     refetchFeedList();
     setWxsLink('');
     onClose();
+  };
+
+  const { mutateAsync: batchDeleteFeeds, isLoading: isBatchDeleteLoading } =
+    trpc.feed.batchDelete.useMutation({});
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.length === 0) return;
+
+    if (window.confirm(`确定删除选中的 ${selectedIds.length} 个订阅源吗？`)) {
+      await batchDeleteFeeds(selectedIds);
+      toast.success(`成功删除 ${selectedIds.length} 个订阅源`);
+      setSelectedIds([]);
+      setIsManageMode(false);
+      refetchFeedList();
+      if (selectedIds.includes(currentMpId)) {
+        navigate('/dash/feeds');
+      }
+    }
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id],
+    );
   };
 
   const isActive = (key: string) => {
@@ -156,47 +231,118 @@ const Feeds = () => {
               添加
             </Button>
             <div className="font-normal text-sm">
-              共{feedData?.items.length || 0}个订阅
+              <Button
+                size="sm"
+                variant="light"
+                color={isManageMode ? 'primary' : 'default'}
+                onPress={() => {
+                  setIsManageMode(!isManageMode);
+                  setSelectedIds([]);
+                }}
+              >
+                {isManageMode ? '退出管理' : '管理'}
+              </Button>
+              共{feedData?.items?.length || 0}个订阅
             </div>
           </div>
+          {isManageMode && (feedData?.items?.length || 0) > 0 && (
+            <div className="pb-2 flex justify-between items-center">
+              <Checkbox
+                isSelected={selectedIds.length === feedData?.items?.length}
+                onChange={() => {
+                  if (selectedIds.length === feedData?.items?.length) {
+                    setSelectedIds([]);
+                  } else {
+                    setSelectedIds(feedData?.items?.map((i) => i.id) || []);
+                  }
+                }}
+                size="sm"
+              >
+                全选
+              </Checkbox>
+              <Button
+                color="danger"
+                size="sm"
+                variant="flat"
+                isDisabled={selectedIds.length === 0 || isBatchDeleteLoading}
+                onPress={handleBatchDelete}
+                isLoading={isBatchDeleteLoading}
+              >
+                删除 ({selectedIds.length})
+              </Button>
+            </div>
+          )}
 
           {feedData?.items ? (
             <Listbox
               aria-label="订阅源"
               emptyContent="暂无订阅"
-              onAction={(key) => setCurrentMpId(key as string)}
+              onAction={(key) => {
+                const newId = key as string;
+                setCurrentMpId(newId);
+                navigate(newId ? `/feeds/${newId}` : `/feeds`);
+              }}
             >
               <ListboxSection showDivider>
                 <ListboxItem
                   key={''}
-                  href={`/feeds`}
-                  className={isActive('') ? 'bg-primary-50 text-primary' : ''}
-                  startContent={<Avatar name="ALL"></Avatar>}
+                  className={`${isActive('') ? 'sidebar-item-active' : ''} sidebar-item transition-all`}
+                  startContent={<Avatar name="ALL" className="sidebar-avatar"></Avatar>}
                 >
                   全部
                 </ListboxItem>
-              </ListboxSection>
-
-              <ListboxSection className="overflow-y-auto h-[calc(100vh-260px)]">
-                {feedData?.items.map((item) => {
-                  return (
-                    <ListboxItem
-                      href={`/feeds/${item.id}`}
-                      className={
-                        isActive(item.id) ? 'bg-primary-50 text-primary' : ''
-                      }
-                      key={item.id}
-                      startContent={<Avatar src={item.mpCover}></Avatar>}
-                    >
-                      {item.mpName}
-                    </ListboxItem>
-                  );
-                }) || []}
               </ListboxSection>
             </Listbox>
           ) : (
             ''
           )}
+          {feedData?.items ? (
+            <div className="flex-1 overflow-hidden mt-1 px-1">
+              <ul className="overflow-y-auto h-[calc(100vh-260px)] flex flex-col gap-1 w-full pb-10">
+                {orderedFeeds.map((item, index) => {
+                  const isSelected = selectedIds.includes(item.id);
+                  return (
+                    <li
+                      key={item.id}
+                      draggable={isManageMode}
+                      onDragStart={(e) => isManageMode && handleDragStart(e, index)}
+                      onDragEnter={(e) => isManageMode && handleDragEnter(e, index)}
+                      onDragEnd={isManageMode ? handleDragEnd : undefined}
+                      onDragOver={(e) => e.preventDefault()}
+                      className={`flex items-center px-2 py-1.5 rounded-medium cursor-pointer ${
+                        isActive(item.id) && !isManageMode
+                          ? 'bg-default-200 sidebar-item-active'
+                          : isSelected && isManageMode
+                            ? 'bg-danger-50'
+                            : 'hover:bg-default-100'
+                      } ${isManageMode ? 'cursor-grab active:cursor-grabbing' : ''} transition-all`}
+                      onClick={() => {
+                        if (isManageMode) {
+                          toggleSelect(item.id);
+                        } else {
+                          setCurrentMpId(item.id);
+                          navigate(`/feeds/${item.id}`);
+                        }
+                      }}
+                    >
+                      <div className="flex items-center gap-2 w-full">
+                        {isManageMode && (
+                          <div onClick={(e) => e.stopPropagation()}>
+                            <Checkbox
+                              isSelected={isSelected}
+                              onValueChange={() => toggleSelect(item.id)}
+                            />
+                          </div>
+                        )}
+                        <Avatar src={item.mpCover} className="sidebar-avatar min-w-8 min-h-8 w-8 h-8"></Avatar>
+                        <span className="truncate text-sm flex-1">{item.mpName}</span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
         </div>
         <div className="flex-1 h-full flex flex-col">
           <div className="p-4 pb-0 flex justify-between">
@@ -223,12 +369,30 @@ const Feeds = () => {
                     onClick={async (ev) => {
                       ev.preventDefault();
                       ev.stopPropagation();
-                      await refreshMpArticles({ mpId: currentMpInfo.id });
-                      await refetchFeedList();
-                      await queryUtils.article.list.reset();
+                      const mpId = currentMpInfo.id;
+                      try {
+                        await refreshMpArticles({ mpId });
+                        await refetchFeedList();
+                        await queryUtils.article.list.reset();
+                        setRefreshedMpIds((prev) => [...prev, mpId]);
+                        toast.success('更新完成', {
+                          description: `公众号 ${currentMpInfo.mpName} 已更新`,
+                        });
+                        setTimeout(() => {
+                          setRefreshedMpIds((prev) =>
+                            prev.filter((id) => id !== mpId),
+                          );
+                        }, 3000);
+                      } catch (e) {
+                        toast.error('更新失败');
+                      }
                     }}
                   >
-                    {isGetArticlesLoading ? '更新中...' : '立即更新'}
+                    {isGetArticlesLoading
+                      ? '更新中...'
+                      : refreshedMpIds.includes(currentMpInfo.id)
+                        ? '更新完成'
+                        : '立即更新'}
                   </Link>
                 </Tooltip>
                 <Divider orientation="vertical" />
@@ -313,7 +477,7 @@ const Feeds = () => {
 
                       if (window.confirm('确定删除吗？')) {
                         await deleteFeed(currentMpInfo.id);
-                        navigate('/feeds');
+                        navigate('/dash/feeds');
                         await refetchFeedList();
                       }
                     }}
@@ -356,14 +520,25 @@ const Feeds = () => {
                     onClick={async (ev) => {
                       ev.preventDefault();
                       ev.stopPropagation();
-                      await refreshMpArticles({});
-                      await refetchFeedList();
-                      await queryUtils.article.list.reset();
+                      try {
+                        await refreshMpArticles({});
+                        await refetchFeedList();
+                        await queryUtils.article.list.reset();
+                        setIsRefreshedAll(true);
+                        toast.success('全部更新完成');
+                        setTimeout(() => {
+                          setIsRefreshedAll(false);
+                        }, 3000);
+                      } catch (e) {
+                        toast.error('更新失败');
+                      }
                     }}
                   >
                     {isRefreshAllMpArticlesRunning || isGetArticlesLoading
                       ? '更新中...'
-                      : '更新全部'}
+                      : isRefreshedAll
+                        ? '全部更新完成'
+                        : '更新全部'}
                   </Link>
                 </Tooltip>
                 <Link

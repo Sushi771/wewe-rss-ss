@@ -75,6 +75,10 @@ export class FeedsService {
 
     const feeds = await this.prismaService.feed.findMany({
       where: { status: 1 },
+      orderBy: [
+        { order: 'asc' } as any,
+        { createdAt: 'asc' },
+      ],
     });
     this.logger.debug('feeds length:' + feeds.length);
 
@@ -93,9 +97,6 @@ export class FeedsService {
         );
       } catch (err) {
         this.logger.error('handleUpdateFeedsCron error', err);
-      } finally {
-        // wait 30s for next feed
-        await new Promise((resolve) => setTimeout(resolve, 30 * 1e3));
       }
     }
   }
@@ -283,6 +284,7 @@ export class FeedsService {
         syncTime: 0,
         updateTime: Math.floor(Date.now() / 1e3),
         hasHistory: -1,
+        order: 0,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -335,9 +337,6 @@ export class FeedsService {
       await this.trpcService.refreshMpArticlesAndUpdateFeed(id);
     } catch (err) {
       this.logger.error('updateFeed error', err);
-    } finally {
-      // wait 30s for next feed
-      await new Promise((resolve) => setTimeout(resolve, 30 * 1e3));
     }
   }
 }
