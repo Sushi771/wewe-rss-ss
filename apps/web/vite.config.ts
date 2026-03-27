@@ -42,6 +42,10 @@ export default defineConfig({
         find: '@web',
         replacement: resolve(projectRootDir, './src'),
       },
+      {
+        find: '@wewe-rss/shared',
+        replacement: resolve(projectRootDir, '../../packages/shared/src'),
+      },
     ],
   },
   build: {

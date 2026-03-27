@@ -3,7 +3,9 @@ const configuration = () => {
   const port = process.env.PORT || 4000;
   const host = process.env.HOST || '0.0.0.0';
 
-  const maxRequestPerMinute = parseInt(process.env.MAX_REQUEST_PER_MINUTE || '60');
+  const maxRequestPerMinute = parseInt(
+    process.env.MAX_REQUEST_PER_MINUTE || '60',
+  );
 
   const authCode = process.env.AUTH_CODE;
   const platformUrl = process.env.PLATFORM_URL || 'https://weread.111965.xyz';

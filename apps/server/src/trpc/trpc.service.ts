@@ -99,11 +99,17 @@ export class TrpcService {
           this.logger.error(`账号（${id}）处理请求参数出错: ${errMsg}`);
           // 10s 后重试
           await new Promise((resolve) => setTimeout(resolve, 10 * 1e3));
-        } else if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        } else if (
+          error.code === 'ECONNABORTED' ||
+          error.message.includes('timeout')
+        ) {
           this.logger.warn(`账号（${id}）请求超时 (15s+)，将自动重试`);
           // 超时不封号，直接进入重试逻辑
         } else {
-          this.logger.error("Can't handle this error:", errMsg || error.message);
+          this.logger.error(
+            "Can't handle this error:",
+            errMsg || error.message,
+          );
         }
 
         return Promise.reject(error);
@@ -338,10 +344,7 @@ export class TrpcService {
       return;
     }
     const mps = await this.prismaService.feed.findMany({
-      orderBy: [
-        { order: 'asc' } as any,
-        { createdAt: 'asc' },
-      ],
+      orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],
     });
     this.isRefreshAllMpArticlesRunning = true;
     try {

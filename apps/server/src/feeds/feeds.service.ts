@@ -75,10 +75,7 @@ export class FeedsService {
 
     const feeds = await this.prismaService.feed.findMany({
       where: { status: 1 },
-      orderBy: [
-        { order: 'asc' } as any,
-        { createdAt: 'asc' },
-      ],
+      orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],
     });
     this.logger.debug('feeds length:' + feeds.length);
 
