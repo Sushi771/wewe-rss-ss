@@ -1,4 +1,3 @@
-
 import {
   Avatar,
   Button,
@@ -78,7 +77,9 @@ const Feeds = () => {
 
   const [search, setSearch] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [articleSelectedIds, setArticleSelectedIds] = useState<Set<string>>(new Set());
+  const [articleSelectedIds, setArticleSelectedIds] = useState<Set<string>>(
+    new Set(),
+  );
   const [isBatchExporting, setIsBatchExporting] = useState(false);
 
   useEffect(() => {
@@ -103,8 +104,10 @@ const Feeds = () => {
       }
       toast.success(`成功导出 ${successCount} 篇文章`);
       setArticleSelectedIds(new Set());
-    } catch (err: any) {
-      toast.error(`导出中断 (${successCount}/${ids.length} 成功)`, { description: err.message });
+    } catch (err: unknown) {
+      toast.error(`导出中断 (${successCount}/${ids.length} 成功)`, {
+        description: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setIsBatchExporting(false);
     }
@@ -137,7 +140,7 @@ const Feeds = () => {
     setDraggedItem(null);
     try {
       await updateOrder(
-        orderedFeeds.map((item, idx) => ({ id: item.id, order: idx }))
+        orderedFeeds.map((item, idx) => ({ id: item.id, order: idx })),
       );
       refetchFeedList();
       toast.success('排序已保存');
@@ -249,13 +252,13 @@ const Feeds = () => {
 
   return (
     <>
-      <div className="h-full flex">
+      <div className="flex h-full">
         <div className="mac-sidebar">
-          <div className="sidebar-manage-header">
-            <span className="sidebar-manage-label">
+          <div className="flex items-center justify-between px-4 py-3">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
               订阅源 · {feedData?.items?.length || 0}
             </span>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-0.5">
               <Tooltip content={isManageMode ? '退出管理' : '管理订阅源'}>
                 <Button
                   isIconOnly
@@ -266,9 +269,22 @@ const Feeds = () => {
                     setIsManageMode(!isManageMode);
                     setSelectedIds([]);
                   }}
-                  className="w-8 h-8 min-w-0"
+                  className="h-7 w-7 min-w-0"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
                 </Button>
               </Tooltip>
               <Tooltip content="添加订阅源">
@@ -277,15 +293,29 @@ const Feeds = () => {
                   size="sm"
                   variant="light"
                   onPress={onOpen}
-                  className="w-8 h-8 min-w-0"
+                  className="h-7 w-7 min-w-0"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: '#666' }}><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{ color: '#666' }}
+                  >
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg>
                 </Button>
               </Tooltip>
             </div>
           </div>
           {isManageMode && (feedData?.items?.length || 0) > 0 && (
-            <div className="px-4 pb-2 flex justify-between items-center">
+            <div className="flex items-center justify-between px-4 pb-2">
               <Checkbox
                 isSelected={selectedIds.length === feedData?.items?.length}
                 onChange={() => {
@@ -313,7 +343,7 @@ const Feeds = () => {
           )}
 
           {feedData?.items ? (
-            <ul className="px-0 pt-1 pb-0">
+            <ul className="px-0 pb-0 pt-1">
               <li
                 className={`mac-sidebar-item ${isActive('') && !isManageMode ? 'active' : ''}`}
                 onClick={() => {
@@ -321,7 +351,10 @@ const Feeds = () => {
                   navigate('/feeds');
                 }}
               >
-                <Avatar name="ALL" className="sidebar-avatar min-w-6 min-h-6 w-6 h-6"></Avatar>
+                <Avatar
+                  name="ALL"
+                  className="sidebar-avatar h-6 min-h-6 w-6 min-w-6"
+                ></Avatar>
                 全部
               </li>
             </ul>
@@ -330,15 +363,19 @@ const Feeds = () => {
           )}
           {feedData?.items ? (
             <div className="flex-1 overflow-hidden px-0">
-              <ul className="overflow-y-auto h-[calc(100vh-148px)] flex flex-col w-full pb-4">
+              <ul className="flex h-[calc(100vh-148px)] w-full flex-col overflow-y-auto pb-4">
                 {orderedFeeds.map((item, index) => {
                   const isSelected = selectedIds.includes(item.id);
                   return (
                     <li
                       key={item.id}
                       draggable={isManageMode}
-                      onDragStart={(e) => isManageMode && handleDragStart(e, index)}
-                      onDragEnter={(e) => isManageMode && handleDragEnter(e, index)}
+                      onDragStart={(e) =>
+                        isManageMode && handleDragStart(e, index)
+                      }
+                      onDragEnter={(e) =>
+                        isManageMode && handleDragEnter(e, index)
+                      }
                       onDragEnd={isManageMode ? handleDragEnd : undefined}
                       onDragOver={(e) => e.preventDefault()}
                       className={`mac-sidebar-item ${
@@ -365,8 +402,13 @@ const Feeds = () => {
                           />
                         </div>
                       )}
-                      <Avatar src={item.mpCover} className="sidebar-avatar min-w-6 min-h-6 w-6 h-6"></Avatar>
-                      <span className="truncate text-sm flex-1">{item.mpName}</span>
+                      <Avatar
+                        src={item.mpCover}
+                        className="sidebar-avatar h-6 min-h-6 w-6 min-w-6"
+                      ></Avatar>
+                      <span className="flex-1 truncate text-sm">
+                        {item.mpName}
+                      </span>
                     </li>
                   );
                 })}
@@ -375,25 +417,26 @@ const Feeds = () => {
           ) : null}
         </div>
         <div className="mac-content">
-          <div className="article-toolbar">
-            <div className="article-toolbar-title">
-              {currentMpInfo?.mpName || '全部'}
-              <span className="mac-badge-count">
-                · {queryUtils.article.list.getInfiniteData({ 
-                  limit: 20, 
+          <div className="mac-toolbar">
+            <div className="flex flex-1 items-center gap-2 overflow-hidden">
+              <span className="truncate text-[15px] font-semibold">
+                {currentMpId ? currentMpInfo?.mpName || '加载中...' : '全部'} ·{' '}
+                {queryUtils.article.list.getInfiniteData({
+                  limit: 20,
                   mpId: currentMpId,
-                  search: undefined 
+                  search: undefined,
                 })?.pages[0]?.items?.length || 0}
               </span>
             </div>
-            
+
             <div className="flex items-center gap-2">
               {currentMpInfo ? (
-                <div className="flex items-center gap-4 mr-4">
-                  <div className="text-[12px] text-neutral-400 font-light whitespace-nowrap hidden lg:block">
-                    最后更新: {dayjs(currentMpInfo.syncTime * 1e3).format('MM-DD HH:mm')}
+                <div className="mr-4 flex items-center gap-4">
+                  <div className="hidden whitespace-nowrap text-[12px] font-light text-neutral-400 lg:block">
+                    最后更新:{' '}
+                    {dayjs(currentMpInfo.syncTime * 1e3).format('MM-DD HH:mm')}
                   </div>
-                  
+
                   <Tooltip content="自动同步">
                     <div className="flex items-center">
                       <Switch
@@ -411,23 +454,44 @@ const Feeds = () => {
                   </Tooltip>
 
                   {currentMpInfo.hasHistory === 1 && (
-                    <Tooltip content={inProgressHistoryMp?.id === currentMpInfo.id ? '停止获取' : '获取历史文章'}>
+                    <Tooltip
+                      content={
+                        inProgressHistoryMp?.id === currentMpInfo.id
+                          ? '停止获取'
+                          : '获取历史文章'
+                      }
+                    >
                       <Button
                         isIconOnly
                         size="sm"
                         variant="light"
-                        className="w-8 h-8 min-w-0"
+                        className="h-8 w-8 min-w-0"
                         isLoading={isGetHistoryArticlesLoading}
                         onPress={async () => {
                           if (inProgressHistoryMp?.id === currentMpInfo.id) {
                             await getHistoryArticles({ mpId: '' });
                           } else {
-                            await getHistoryArticles({ mpId: currentMpInfo.id });
+                            await getHistoryArticles({
+                              mpId: currentMpInfo.id,
+                            });
                           }
                           await refetchInProgressHistoryMp();
                         }}
                       >
-                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M12 8v4l3 3" />
+                          <circle cx="12" cy="12" r="10" />
+                        </svg>
                       </Button>
                     </Tooltip>
                   )}
@@ -438,7 +502,7 @@ const Feeds = () => {
                       size="sm"
                       variant="light"
                       color="danger"
-                      className="w-8 h-8 min-w-0 opacity-40 hover:opacity-100"
+                      className="h-8 w-8 min-w-0 opacity-40 hover:opacity-100"
                       isLoading={isDeleteFeedLoading}
                       onPress={async () => {
                         if (window.confirm('确定删除吗？')) {
@@ -448,7 +512,23 @@ const Feeds = () => {
                         }
                       }}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M3 6h18" />
+                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                        <line x1="10" y1="11" x2="10" y2="17" />
+                        <line x1="14" y1="11" x2="14" y2="17" />
+                      </svg>
                     </Button>
                   </Tooltip>
                 </div>
@@ -460,24 +540,37 @@ const Feeds = () => {
                     size="sm"
                     color="primary"
                     variant="flat"
-                    className="h-8 mr-2 font-medium"
+                    className="mr-2 h-8 font-medium"
                     isLoading={isBatchExporting}
                     onPress={handleBatchExport}
                   >
                     批量导出 Obsidian ({articleSelectedIds.size})
                   </Button>
                 )}
-                
+
                 <Tooltip content={isSearchOpen ? '关闭搜索' : '搜索文章'}>
                   <Button
                     isIconOnly
                     size="sm"
                     variant="light"
                     color={isSearchOpen ? 'primary' : 'default'}
-                    className="w-8 h-8 min-w-0"
+                    className="h-8 w-8 min-w-0"
                     onPress={() => setIsSearchOpen(!isSearchOpen)}
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <circle cx="11" cy="11" r="8" />
+                      <path d="m21 21-4.3-4.3" />
+                    </svg>
                   </Button>
                 </Tooltip>
 
@@ -497,24 +590,45 @@ const Feeds = () => {
                             setRefreshedMpIds((prev) => [...prev, mpId]);
                             toast.success('更新完成');
                             setTimeout(() => {
-                              setRefreshedMpIds((prev) => prev.filter((id) => id !== mpId));
+                              setRefreshedMpIds((prev) =>
+                                prev.filter((id) => id !== mpId),
+                              );
                             }, 3000);
                           } catch (e) {
                             toast.error('更新失败');
                           }
                         }}
                       >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-                        {isGetArticlesLoading ? '更新中' : refreshedMpIds.includes(currentMpInfo.id) ? '完成' : '更新'}
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M21 2v6h-6" />
+                          <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+                          <path d="M3 22v-6h6" />
+                          <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+                        </svg>
+                        {isGetArticlesLoading
+                          ? '更新中'
+                          : refreshedMpIds.includes(currentMpInfo.id)
+                            ? '完成'
+                            : '更新'}
                       </Button>
                     </Tooltip>
-                    
+
                     <Link
                       size="sm"
                       target="_blank"
                       isExternal
                       href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
-                      className="text-[#888] hover:text-primary transition-colors text-[13px] ml-2"
+                      className="hover:text-primary ml-2 text-[13px] text-[#888] transition-colors"
                     >
                       RSS
                     </Link>
@@ -524,7 +638,9 @@ const Feeds = () => {
                     <Button
                       size="sm"
                       className="mac-btn-outline"
-                      isDisabled={isRefreshAllMpArticlesRunning || isGetArticlesLoading}
+                      isDisabled={
+                        isRefreshAllMpArticlesRunning || isGetArticlesLoading
+                      }
                       onPress={async () => {
                         try {
                           await refreshMpArticles({});
@@ -538,16 +654,49 @@ const Feeds = () => {
                         }
                       }}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-                      {isRefreshAllMpArticlesRunning || isGetArticlesLoading ? '更新中' : isRefreshedAll ? '完成' : '更新全部'}
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M21 2v6h-6" />
+                        <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+                        <path d="M3 22v-6h6" />
+                        <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+                      </svg>
+                      {isRefreshAllMpArticlesRunning || isGetArticlesLoading
+                        ? '更新中'
+                        : isRefreshedAll
+                          ? '完成'
+                          : '更新全部'}
                     </Button>
-                    
+
                     <Button
                       size="sm"
                       className="mac-btn-outline"
                       onPress={handleExportOpml}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
                       导出OPML
                     </Button>
 
@@ -556,7 +705,7 @@ const Feeds = () => {
                       target="_blank"
                       isExternal
                       href={`${serverOriginUrl}/feeds/all.atom`}
-                      className="text-[#888] hover:text-primary transition-colors text-[13px] ml-2"
+                      className="hover:text-primary ml-2 text-[13px] text-[#888] transition-colors"
                     >
                       RSS
                     </Link>
@@ -566,26 +715,45 @@ const Feeds = () => {
             </div>
           </div>
           {isSearchOpen && (
-            <div className="px-4 py-2 border-b-[0.5px] border-neutral-200 dark:border-neutral-700 bg-neutral-50/50 dark:bg-neutral-900/50 animate-in slide-in-from-top duration-200">
+            <div className="animate-in slide-in-from-top border-b-[0.5px] border-neutral-200 bg-neutral-50/80 px-4 py-3 backdrop-blur-md duration-200 dark:border-neutral-700 dark:bg-neutral-900/80">
               <Input
                 autoFocus
-                placeholder="搜索文章标题..."
+                placeholder="搜索标题或内容..."
                 size="sm"
-                variant="bordered"
+                variant="flat"
                 value={search}
                 onValueChange={setSearch}
                 isClearable
                 onClear={() => setSearch('')}
                 classNames={{
-                  inputWrapper: 'h-9 px-3 bg-white dark:bg-neutral-800',
+                  inputWrapper:
+                    'h-8 px-3 bg-white dark:bg-neutral-800 rounded-lg shadow-sm',
+                  input: 'text-[13px]',
                 }}
+                startContent={
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-neutral-400"
+                  >
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="m21 21-4.3-4.3" />
+                  </svg>
+                }
               />
             </div>
           )}
           <div className="flex-1 overflow-auto p-3">
-            <ArticleList 
-              search={search} 
-              selectedIds={articleSelectedIds} 
+            <ArticleList
+              search={search}
+              selectedIds={articleSelectedIds}
               onSelectionChange={setArticleSelectedIds}
             />
           </div>

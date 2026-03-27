@@ -42,16 +42,7 @@ const Nav = () => {
 
   return (
     <div>
-      <Navbar
-        isBordered={false}
-        className="navbar-glass mac-nav-override"
-        style={{
-          minHeight: '44px',
-          maxHeight: '44px',
-          height: '44px',
-          borderBottom: '0.5px solid var(--mac-separator-opaque)',
-        }}
-      >
+      <Navbar isBordered={false} className="mac-toolbar">
         <Tooltip
           content={
             <div className="p-1">
@@ -59,7 +50,7 @@ const Nav = () => {
                 <Link
                   href={`https://github.com/cooderl/wewe-rss/releases/latest`}
                   target="_blank"
-                  className="mb-1 block text-medium"
+                  className="text-medium mb-1 block"
                 >
                   发现新版本：v{releaseVersion}
                 </Link>
@@ -69,7 +60,10 @@ const Nav = () => {
           }
           placement="left"
         >
-          <NavbarBrand className="cursor-default" style={{ flexGrow: 0, marginRight: '16px' }}>
+          <NavbarBrand
+            className="cursor-default"
+            style={{ flexGrow: 0, marginRight: '16px' }}
+          >
             <Badge
               content={isFoundNewVersion ? '' : null}
               color="danger"
@@ -97,7 +91,7 @@ const Nav = () => {
 
         {/* macOS-style pill navigation */}
         <NavbarContent className="hidden sm:flex" justify="center">
-           <div className="mac-nav-pills">
+          <div className="mac-nav-pills">
             {navbarItemLink.map((item) => (
               <RouterLink
                 key={item.href}

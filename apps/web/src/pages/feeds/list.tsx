@@ -1,10 +1,5 @@
-import { FC, useMemo, useState } from 'react';
-import {
-  Button,
-  Spinner,
-  Link,
-  Checkbox,
-} from '@nextui-org/react';
+import { FC, useMemo } from 'react';
+import { Button, Spinner, Link, Checkbox } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import dayjs from 'dayjs';
 import { useParams } from 'react-router-dom';
@@ -16,7 +11,11 @@ interface ArticleListProps {
   onSelectionChange: (selectedIds: Set<string>) => void;
 }
 
-const ArticleList: FC<ArticleListProps> = ({ search, selectedIds, onSelectionChange }) => {
+const ArticleList: FC<ArticleListProps> = ({
+  search,
+  selectedIds,
+  onSelectionChange,
+}) => {
   const { id } = useParams();
   const trpcUtils = trpc.useUtils();
 
@@ -36,16 +35,12 @@ const ArticleList: FC<ArticleListProps> = ({ search, selectedIds, onSelectionCha
     );
 
   const items = useMemo(() => {
-    const items = data
-      ? data.pages.reduce((acc, page) => [...acc, ...page.items], [] as any[])
-      : [];
-
-    return items;
+    return data?.pages.flatMap((page) => page.items) || [];
   }, [data]);
 
   const handleSelectAll = (isSelected: boolean) => {
     if (isSelected) {
-      onSelectionChange(new Set(items.map((item: any) => item.id)));
+      onSelectionChange(new Set(items.map((item) => item.id)));
     } else {
       onSelectionChange(new Set());
     }
@@ -53,34 +48,30 @@ const ArticleList: FC<ArticleListProps> = ({ search, selectedIds, onSelectionCha
 
   // Batch export moved to parent component for toolbar integration
 
-
-
   const allSelected = items.length > 0 && selectedIds.size === items.length;
 
   return (
-    <div className="flex flex-col h-full">
-
-
-      <div className="flex-1 overflow-y-auto mt-2">
+    <div className="flex h-full flex-col">
+      <div className="mt-2 flex-1 overflow-y-auto">
         <div className="compact-list">
-          <div className="compact-list-header border-b-[0.5px] border-neutral-200 dark:border-neutral-700 pb-2 mb-2">
+          <div className="compact-list-header">
             <div className="compact-col-check">
-              <Checkbox 
-                size="sm" 
+              <Checkbox
+                size="sm"
                 isSelected={allSelected}
                 onValueChange={handleSelectAll}
               />
             </div>
-            <div className="compact-col-title text-[#888] font-medium text-[13px]">文章标题</div>
-            <div className="compact-col-source text-[#888] font-medium text-[13px]">公众号</div>
-            <div className="compact-col-time text-[#888] font-medium text-[13px] text-right">发布时间</div>
-            <div className="compact-col-action text-[#888] font-medium text-[13px] text-right">操作</div>
+            <div className="compact-col-title">文章标题</div>
+            <div className="compact-col-source">公众号</div>
+            <div className="compact-col-time">发布时间</div>
+            <div className="compact-col-action">操作</div>
           </div>
 
-          {items?.map((item: any) => (
+          {items?.map((item) => (
             <div key={item.id} className="compact-row">
               <div className="compact-col-check">
-                <Checkbox 
+                <Checkbox
                   size="sm"
                   isSelected={selectedIds.has(item.id)}
                   onValueChange={(isSelected) => {
@@ -92,15 +83,13 @@ const ArticleList: FC<ArticleListProps> = ({ search, selectedIds, onSelectionCha
                 />
               </div>
               <Link
-                className="compact-title visited:text-neutral-400 text-[15px]"
+                className="compact-title"
                 target="_blank"
                 href={`https://mp.weixin.qq.com/s/${item.id}`}
               >
                 {item.title}
               </Link>
-              <div className="compact-source">
-                {item.feed?.mpName || '-'}
-              </div>
+              <div className="compact-source">{item.feed?.mpName || '-'}</div>
               <div className="compact-time">
                 {dayjs(item.publishTime * 1e3).format('YYYY-MM-DD HH:mm')}
               </div>
@@ -111,10 +100,15 @@ const ArticleList: FC<ArticleListProps> = ({ search, selectedIds, onSelectionCha
                     ev.preventDefault();
                     ev.stopPropagation();
                     try {
-                      await trpcUtils.client.article.saveToObsidian.mutate(item.id);
+                      await trpcUtils.client.article.saveToObsidian.mutate(
+                        item.id,
+                      );
                       toast.success('已导出');
-                    } catch (err: any) {
-                      toast.error('失败', { description: err.message });
+                    } catch (err: unknown) {
+                      toast.error('失败', {
+                        description:
+                          err instanceof Error ? err.message : String(err),
+                      });
                     }
                   }}
                 >
@@ -123,27 +117,23 @@ const ArticleList: FC<ArticleListProps> = ({ search, selectedIds, onSelectionCha
               </div>
             </div>
           ))}
-          
+
           {isLoading && (
-            <div className="p-4 flex justify-center">
+            <div className="flex justify-center p-4">
               <Spinner size="sm" />
             </div>
           )}
 
           {hasNextPage && !isLoading && (
-            <div className="p-4 flex justify-center">
-              <Button
-                size="sm"
-                variant="light"
-                onPress={() => fetchNextPage()}
-              >
+            <div className="flex justify-center p-4">
+              <Button size="sm" variant="light" onPress={() => fetchNextPage()}>
                 加载更多
               </Button>
             </div>
           )}
 
           {!isLoading && items?.length === 0 && (
-            <div className="p-10 text-center text-neutral-400 text-sm">
+            <div className="p-10 text-center text-sm text-neutral-400">
               暂无数据
             </div>
           )}

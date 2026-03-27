@@ -37,7 +37,7 @@ export const SunIcon = (props) => (
   </svg>
 );
 
-export function ThemeSwitcher(props) {
+export function ThemeSwitcher() {
   const { setTheme, theme } = useTheme();
   const {
     Component,
@@ -61,9 +61,9 @@ export function ThemeSwitcher(props) {
           {...getWrapperProps()}
           className={slots.wrapper({
             class: [
-              'w-8 h-8',
+              'h-8 w-8',
               'flex items-center justify-center',
-              'rounded-lg bg-default-100 hover:bg-default-200',
+              'bg-default-100 hover:bg-default-200 rounded-lg',
             ],
           })}
         >
