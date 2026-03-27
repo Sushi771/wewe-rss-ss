@@ -1,18 +1,20 @@
-const { PrismaClient } = require('./apps/server/node_modules/@prisma/client');
-const axios = require('./apps/server/node_modules/axios');
+const { PrismaClient } = require('../apps/server/node_modules/@prisma/client');
+const axios = require('../apps/server/node_modules/axios');
 const path = require('path');
 
 const prisma = new PrismaClient({
   datasources: {
     db: {
-      url: 'file:' + path.join(__dirname, 'apps', 'server', 'data', 'wewe-rss.db')
-    }
-  }
+      url:
+        'file:' +
+        path.join(__dirname, '..', 'apps', 'server', 'data', 'wewe-rss.db'),
+    },
+  },
 });
 
 async function main() {
   const account = await prisma.account.findFirst({
-    where: { status: 1 }
+    where: { status: 1 },
   });
 
   if (!account) {
@@ -27,13 +29,16 @@ async function main() {
   console.log('Fetching articles for:', mpId);
 
   try {
-    const res = await axios.get(`${platformUrl}/api/v2/platform/mps/${mpId}/articles`, {
-      headers: {
-        xid: account.id,
-        Authorization: `Bearer ${account.token}`
+    const res = await axios.get(
+      `${platformUrl}/api/v2/platform/mps/${mpId}/articles`,
+      {
+        headers: {
+          xid: account.id,
+          Authorization: `Bearer ${account.token}`,
+        },
+        params: { page: 1 },
       },
-      params: { page: 1 }
-    });
+    );
 
     console.log('Platform Response:', JSON.stringify(res.data, null, 2));
   } catch (err) {
@@ -46,7 +51,7 @@ async function main() {
 }
 
 main()
-  .catch(e => console.error(e))
+  .catch((e) => console.error(e))
   .finally(async () => {
     await prisma.$disconnect();
   });

@@ -1,18 +1,20 @@
-const { PrismaClient } = require('./apps/server/node_modules/@prisma/client');
-const got = require('./apps/server/node_modules/got');
+const { PrismaClient } = require('../apps/server/node_modules/@prisma/client');
+const got = require('../apps/server/node_modules/got');
 const path = require('path');
 
 const prisma = new PrismaClient({
   datasources: {
     db: {
-      url: 'file:' + path.join(__dirname, 'apps', 'server', 'data', 'wewe-rss.db')
-    }
-  }
+      url:
+        'file:' +
+        path.join(__dirname, '..', 'apps', 'server', 'data', 'wewe-rss.db'),
+    },
+  },
 });
 
 async function main() {
   const account = await prisma.account.findFirst({
-    where: { status: 1 }
+    where: { status: 1 },
   });
 
   if (!account) {
@@ -29,10 +31,10 @@ async function main() {
       json: { url },
       headers: {
         xid: account.id,
-        Authorization: `Bearer ${account.token}`
+        Authorization: `Bearer ${account.token}`,
       },
       responseType: 'json',
-      timeout: 10000
+      timeout: 10000,
     });
 
     console.log('wxs2mp Response:', JSON.stringify(res.body, null, 2));
@@ -46,7 +48,7 @@ async function main() {
 }
 
 main()
-  .catch(e => console.error(e))
+  .catch((e) => console.error(e))
   .finally(async () => {
     await prisma.$disconnect();
   });

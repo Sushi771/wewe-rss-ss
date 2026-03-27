@@ -7,9 +7,9 @@ async function main() {
     include: {
       articles: {
         orderBy: { publishTime: 'desc' },
-        take: 5
-      }
-    }
+        take: 5,
+      },
+    },
   });
 
   if (!feed) {
@@ -21,7 +21,7 @@ async function main() {
 }
 
 main()
-  .catch(e => console.error(e))
+  .catch((e) => console.error(e))
   .finally(async () => {
     await prisma.$disconnect();
   });

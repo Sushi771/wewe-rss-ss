@@ -17,9 +17,18 @@
     "start:server": "pnpm --filter server start:prod",
     "start:web": "pnpm --filter web start",
     "fmt": "prettier --write .",
-    "fmt.check": "prettier --check ."
+    "fmt.check": "prettier --check .",
+    "lint": "pnpm --filter \"*\" lint",
+    "accounts:check": "node scripts/check_accounts.js",
+    "feed:check": "node scripts/check_feed.js",
+    "feed:debug": "node scripts/debug_feed.js",
+    "test:endpoints": "node scripts/test_endpoints.js",
+    "test:platform": "node scripts/test_platform.js"
   },
   "devDependencies": {
-    "prettier": "^3.2.5"
+    "husky": "^9.0.11",
+    "lint-staged": "^15.2.2",
+    "prettier": "^3.2.5",
+    "prettier-plugin-tailwindcss": "^0.5.11"
   }
 }

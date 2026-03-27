@@ -41,10 +41,32 @@
   {{ORIGIN_URL}}/feeds/MP_WXS_123.json?limit=30&title_include=张三|李四|王五&title_exclude=张三丰|赵六
   ```
 
-- **手动更新**：支持通过`/feeds/:feed`接口触发单个feedid更新
   ```
   {{ORIGIN_URL}}/feeds/MP_WXS_123.rss?update=true
   ```
+
+## 🛠️ 开发者生产力 (Developer Productivity)
+
+为了提升开发效率与工程化质量，项目引入了以下优化方案：
+
+### 🍱 脚本归档与统一
+
+- **统一脚本目录**：将所有运维、检查与测试脚本从根目录迁移至 `scripts/` 目录，保持根目录整洁。
+- **标准化命令**：在根目录 `package.json` 中统一封装了常用任务：
+  - `pnpm accounts:check`: 快速检查库中账号状态。
+  - `pnpm feed:check`: 验证订阅源可用性。
+  - `pnpm feed:debug`: 开启详细日志调试特定订阅源。
+  - `pnpm lint`: 一键执行全站代码静态检查。
+
+### 🤖 自动化质量门禁
+
+- **持续集成 (CI)**：新增 GitHub Actions 工作流，覆盖所有 Pull Request 的格式化、Lint 与构建检测，确保主干代码稳定性。
+- **提交前置检查**：集成 `husky` 与 `lint-staged`，在 `git commit` 时自动触发 Prettier 格式化，强制维持代码风格一致。
+
+### 💅 极致工程化体验
+
+- **CSS 自动规范**：引入 `prettier-plugin-tailwindcss` 插件，自动对 Tailwind CSS 类名进行排序，极大提升样式代码的可读性。
+- **开发指南**：新增 [DEVELOPMENT.md](./DEVELOPMENT.md) 文档，为新贡献者提供快速上手说明。
 
 ## 🚀 部署
 
