@@ -3,7 +3,6 @@ import { Button, Spinner, Link, Checkbox } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import dayjs from 'dayjs';
 import { useParams } from 'react-router-dom';
-import { toast } from 'sonner';
 
 interface ArticleListProps {
   search: string;
@@ -17,7 +16,6 @@ const ArticleList: FC<ArticleListProps> = ({
   onSelectionChange,
 }) => {
   const { id } = useParams();
-  const trpcUtils = trpc.useUtils();
 
   const mpId = id || '';
 
@@ -63,9 +61,7 @@ const ArticleList: FC<ArticleListProps> = ({
               />
             </div>
             <div className="compact-col-title">文章标题</div>
-            <div className="compact-col-source">公众号</div>
-            <div className="compact-col-time">发布时间</div>
-            <div className="compact-col-action">操作</div>
+            <div className="compact-col-metadata">信息</div>
           </div>
 
           {items?.map((item) => (
@@ -89,30 +85,11 @@ const ArticleList: FC<ArticleListProps> = ({
               >
                 {item.title}
               </Link>
-              <div className="compact-source">{item.feed?.mpName || '-'}</div>
-              <div className="compact-time">
-                {dayjs(item.publishTime * 1e3).format('YYYY-MM-DD HH:mm')}
-              </div>
-              <div className="compact-action">
-                <span
-                  className="compact-action-link"
-                  onClick={async (ev) => {
-                    ev.preventDefault();
-                    ev.stopPropagation();
-                    try {
-                      await trpcUtils.client.article.saveToObsidian.mutate(
-                        item.id,
-                      );
-                      toast.success('已导出');
-                    } catch (err: unknown) {
-                      toast.error('失败', {
-                        description:
-                          err instanceof Error ? err.message : String(err),
-                      });
-                    }
-                  }}
-                >
-                  导出 Obsidian
+              <div className="compact-metadata">
+                <span>{item.feed?.mpName || '未知'}</span>
+                <span className="opacity-40">·</span>
+                <span className="text-[13px] opacity-60">
+                  {dayjs(item.publishTime * 1e3).format('MM-DD HH:mm')}
                 </span>
               </div>
             </div>

@@ -5,11 +5,11 @@ import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ConfigurationType } from './configuration';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { readFileSync } from 'fs';
 
 const packageJson = JSON.parse(
-  readFileSync(resolve(__dirname, '..', './package.json'), 'utf-8'),
+  readFileSync(join(process.cwd(), 'package.json'), 'utf-8'),
 );
 
 const appVersion = packageJson.version;
@@ -25,10 +25,10 @@ async function bootstrap() {
   app.use(json({ limit: '10mb' }));
   app.use(urlencoded({ extended: true, limit: '10mb' }));
 
-  app.useStaticAssets(join(__dirname, '..', 'client', 'assets'), {
+  app.useStaticAssets(join(process.cwd(), 'client', 'assets'), {
     prefix: '/dash/assets/',
   });
-  app.setBaseViewsDir(join(__dirname, '..', 'client'));
+  app.setBaseViewsDir(join(process.cwd(), 'client'));
   app.setViewEngine('hbs');
 
   if (isProd) {

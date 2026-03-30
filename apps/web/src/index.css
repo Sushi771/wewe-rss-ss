@@ -62,7 +62,7 @@ textarea,
 select {
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Icons', 'Helvetica Neue', 'PingFang SC', 'Noto Sans SC', sans-serif !important;
   font-feature-settings: 'kern' 1, 'liga' 1;
-  font-size: 14px; /* Default macOS font size is usually 13-14px */
+  font-size: 15px; /* Quartz 15px typography */
 }
 
 /* ── Custom Thin Scrollbar ── */
@@ -125,11 +125,11 @@ select {
   align-items: center;
   gap: 10px;
   padding: 0 12px;
-  height: 36px; /* Native sidebar height */
-  margin: 1px 12px;
-  border-radius: 6px;
+  height: 40px; /* Increased for 16px font */
+  margin: 2px 12px;
+  border-radius: 8px; /* Slightly more rounded */
   cursor: pointer;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 400;
   transition: background 0.12s ease;
   user-select: none;
@@ -203,7 +203,7 @@ select {
 
 .compact-title {
   flex: 1;
-  font-size: 15px; /* Restored to stable version's 15px for optimal legibility */
+  font-size: 15px;
   font-weight: 500;
   color: #1d1d1f;
   overflow: hidden;
@@ -214,7 +214,7 @@ select {
 }
 
 .compact-title:visited {
-  color: #8e8e93 !important; /* Standard read state from port 4000 */
+  color: #8e8e93 !important;
 }
 
 .dark .compact-title {
@@ -225,28 +225,16 @@ select {
   color: #636366 !important;
 }
 
-.compact-source {
-  width: 25%;
-  font-size: 13px;
+.compact-metadata {
+  width: 30%;
+  font-size: 14px;
   color: #86868b;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.compact-time {
-  width: 15%;
-  font-size: 13px;
-  color: #86868b;
-  text-align: right;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.compact-action {
-  width: 10% ;
-  text-align: right;
-  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .compact-action-link {
@@ -274,18 +262,8 @@ select {
   flex: 1;
 }
 
-.compact-col-source {
-  width: 25%;
-}
-
-.compact-col-time {
-  width: 15%;
-  text-align: right;
-}
-
-.compact-col-action {
-  width: 10%;
-  text-align: right;
+.compact-col-metadata {
+  width: 30%;
 }
 
 .compact-header-row {
@@ -331,7 +309,7 @@ select {
   color: var(--mac-gray-6) !important;
   height: 32px !important;
   padding: 0 12px !important;
-  font-size: 13px !important;
+  font-size: 15px !important;
   border-radius: 6px !important;
   display: inline-flex;
   align-items: center;
@@ -352,9 +330,11 @@ select {
 }
 
 .sidebar-manage-label {
-  font-size: 13px;
-  color: #888;
-  font-weight: 500;
+  font-size: 14px;
+  color: var(--mac-gray-5);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 /* ── macOS Chip / Badge ── */
@@ -409,7 +389,7 @@ select {
   gap: 4px;
   padding: 5px 12px;
   border-radius: var(--mac-radius-sm);
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
   cursor: pointer;
   border: none;
@@ -451,7 +431,7 @@ select {
 
 /* Link-style action items */
 .mac-action-link {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--mac-blue);
   cursor: pointer;
   padding: 2px 4px;
@@ -490,7 +470,7 @@ select {
   background: rgba(255,59,48,0.06);
   border: 0.5px solid rgba(255,59,48,0.25);
   border-radius: var(--mac-radius-sm);
-  font-size: 14px;
+  font-size: 15px;
   color: #c0392b;
 }
 
@@ -505,7 +485,7 @@ select {
   border: 0.5px solid var(--mac-separator-opaque);
   border-radius: var(--mac-radius-sm);
   padding: 6px 10px;
-  font-size: 14px;
+  font-size: 15px;
   outline: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   width: 100%;

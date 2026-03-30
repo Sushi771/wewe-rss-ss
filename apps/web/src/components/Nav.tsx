@@ -10,6 +10,7 @@ import {
 } from '@nextui-org/react';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import { GitHubIcon } from './GitHubIcon';
+import { UserIcon } from './UserIcon';
 import { useLocation, Link as RouterLink } from 'react-router-dom';
 import { appVersion, serverOriginUrl } from '@web/utils/env';
 import { useEffect, useState } from 'react';
@@ -18,10 +19,6 @@ const navbarItemLink = [
   {
     href: '/feeds',
     name: '公众号源',
-  },
-  {
-    href: '/accounts',
-    name: '账号管理',
   },
 ];
 
@@ -104,19 +101,38 @@ const Nav = () => {
           </div>
         </NavbarContent>
 
-        <NavbarContent justify="end" style={{ gap: '8px' }}>
+        <NavbarContent justify="end" style={{ gap: '12px' }}>
+          <NavbarItem>
+            <Tooltip content="账号管理">
+              <Link
+                as={RouterLink}
+                to="/accounts"
+                color="foreground"
+                style={{ opacity: 0.7 }}
+                className={
+                  pathname.startsWith('/accounts')
+                    ? 'text-primary opacity-100'
+                    : ''
+                }
+              >
+                <UserIcon />
+              </Link>
+            </Tooltip>
+          </NavbarItem>
           <NavbarItem>
             <ThemeSwitcher></ThemeSwitcher>
           </NavbarItem>
           <NavbarItem>
-            <Link
-              href="https://github.com/cooderl/wewe-rss"
-              target="_blank"
-              color="foreground"
-              style={{ opacity: 0.7 }}
-            >
-              <GitHubIcon />
-            </Link>
+            <Tooltip content="GitHub">
+              <Link
+                href="https://github.com/cooderl/wewe-rss"
+                target="_blank"
+                color="foreground"
+                style={{ opacity: 0.7 }}
+              >
+                <GitHubIcon />
+              </Link>
+            </Tooltip>
           </NavbarItem>
         </NavbarContent>
       </Navbar>

@@ -1,13 +1,18 @@
 {
-  "extends": "../../tsconfig.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "module": "commonjs",
     "declaration": true,
     "removeComments": true,
-    "allowSyntheticDefaultImports": true,
     "target": "ES2021",
     "sourceMap": true,
     "outDir": "./dist",
-    "esModuleInterop":true
-  }
+    "baseUrl": ".",
+    "paths": {
+      "@server/*": ["./src/*"],
+      "@wewe-rss/shared": ["../../packages/shared/src/index"]
+    }
+  },
+  "include": ["src/**/*", "test/**/*", "*.ts"],
+  "exclude": ["node_modules", "dist"]
 }

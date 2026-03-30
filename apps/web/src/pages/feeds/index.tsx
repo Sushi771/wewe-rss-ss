@@ -255,7 +255,7 @@ const Feeds = () => {
       <div className="flex h-full">
         <div className="mac-sidebar">
           <div className="flex items-center justify-between px-4 py-3">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+            <span className="text-[13px] font-semibold uppercase tracking-wider text-neutral-400">
               订阅源 · {feedData?.items?.length || 0}
             </span>
             <div className="flex items-center gap-0.5">
@@ -432,7 +432,7 @@ const Feeds = () => {
             <div className="flex items-center gap-2">
               {currentMpInfo ? (
                 <div className="mr-4 flex items-center gap-4">
-                  <div className="hidden whitespace-nowrap text-[12px] font-light text-neutral-400 lg:block">
+                  <div className="hidden whitespace-nowrap text-[14px] font-light text-neutral-400 lg:block">
                     最后更新:{' '}
                     {dayjs(currentMpInfo.syncTime * 1e3).format('MM-DD HH:mm')}
                   </div>
@@ -628,7 +628,7 @@ const Feeds = () => {
                       target="_blank"
                       isExternal
                       href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
-                      className="hover:text-primary ml-2 text-[13px] text-[#888] transition-colors"
+                      className="hover:text-primary ml-2 text-[15px] text-[#888] transition-colors"
                     >
                       RSS
                     </Link>
@@ -705,7 +705,7 @@ const Feeds = () => {
                       target="_blank"
                       isExternal
                       href={`${serverOriginUrl}/feeds/all.atom`}
-                      className="hover:text-primary ml-2 text-[13px] text-[#888] transition-colors"
+                      className="hover:text-primary ml-2 text-[15px] text-[#888] transition-colors"
                     >
                       RSS
                     </Link>
@@ -728,7 +728,7 @@ const Feeds = () => {
                 classNames={{
                   inputWrapper:
                     'h-8 px-3 bg-white dark:bg-neutral-800 rounded-lg shadow-sm',
-                  input: 'text-[13px]',
+                  input: 'text-[15px]',
                 }}
                 startContent={
                   <svg
@@ -750,7 +750,7 @@ const Feeds = () => {
               />
             </div>
           )}
-          <div className="flex-1 overflow-auto p-3">
+          <div className="flex-1 overflow-auto">
             <ArticleList
               search={search}
               selectedIds={articleSelectedIds}

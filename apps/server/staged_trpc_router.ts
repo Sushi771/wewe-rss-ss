@@ -13,7 +13,6 @@ import { PrismaService } from '@server/prisma/prisma.service';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
 import TurndownService from 'turndown';
-import dayjs from 'dayjs';
 import got from 'got';
 import { load } from 'cheerio';
 import * as fs from 'node:fs';
@@ -352,14 +351,11 @@ export class TrpcRouter {
           // Attempt to save to Obsidian if configured
           try {
             if (obsidianPath) {
-              const dateFolder = dayjs().format('YYYY-MM-DD');
-              const finalPath = path.join(obsidianPath, dateFolder);
-
-              if (!fs.existsSync(finalPath)) {
-                await fs.promises.mkdir(finalPath, { recursive: true });
+              if (!fs.existsSync(obsidianPath)) {
+                await fs.promises.mkdir(obsidianPath, { recursive: true });
               }
               const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-');
-              const filePath = path.join(finalPath, `${safeTitle}.md`);
+              const filePath = path.join(obsidianPath, `${safeTitle}.md`);
               await fs.promises.writeFile(filePath, markdown);
               this.logger.log(
                 `Auto-saved to Obsidian during export: ${filePath}`,
@@ -404,15 +400,12 @@ export class TrpcRouter {
             obsidianPath,
           );
 
-          const dateFolder = dayjs().format('YYYY-MM-DD');
-          const finalPath = path.join(obsidianPath, dateFolder);
-
-          if (!fs.existsSync(finalPath)) {
-            await fs.promises.mkdir(finalPath, { recursive: true });
+          if (!fs.existsSync(obsidianPath)) {
+            await fs.promises.mkdir(obsidianPath, { recursive: true });
           }
 
           const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-');
-          const filePath = path.join(finalPath, `${safeTitle}.md`);
+          const filePath = path.join(obsidianPath, `${safeTitle}.md`);
 
           await fs.promises.writeFile(filePath, markdown);
 
