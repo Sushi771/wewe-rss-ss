@@ -87,7 +87,7 @@ const ArticleList: FC<ArticleListProps> = ({
                 {item.title}
               </a>
               <div className="compact-metadata">
-                <span className="max-w-[120px] truncate">
+                <span className="flex-1 truncate text-right">
                   {item.feed?.mpName || '未知'}
                 </span>
                 <span className="text-[10px] opacity-20">|</span>

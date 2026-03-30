@@ -226,7 +226,7 @@ select {
 }
 
 .compact-metadata {
-  width: 200px;
+  width: 300px;
   flex-shrink: 0;
   font-size: 13px;
   color: #86868b;
@@ -266,7 +266,7 @@ select {
 }
 
 .compact-col-metadata {
-  width: 200px;
+  width: 300px;
   flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
