@@ -1,5 +1,5 @@
 import { FC, useMemo } from 'react';
-import { Button, Spinner, Link, Checkbox } from '@nextui-org/react';
+import { Button, Spinner, Checkbox } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import dayjs from 'dayjs';
 import { useParams } from 'react-router-dom';
@@ -78,17 +78,20 @@ const ArticleList: FC<ArticleListProps> = ({
                   }}
                 />
               </div>
-              <Link
-                className="compact-title"
+              <a
+                className="compact-title text-[15px] hover:text-[#007AFF] dark:hover:text-[#0A84FF]"
                 target="_blank"
+                rel="noopener noreferrer"
                 href={`https://mp.weixin.qq.com/s/${item.id}`}
               >
                 {item.title}
-              </Link>
+              </a>
               <div className="compact-metadata">
-                <span>{item.feed?.mpName || '未知'}</span>
-                <span className="opacity-40">·</span>
-                <span className="text-[13px] opacity-60">
+                <span className="max-w-[120px] truncate">
+                  {item.feed?.mpName || '未知'}
+                </span>
+                <span className="text-[10px] opacity-20">|</span>
+                <span className="text-[13px] font-medium opacity-50">
                   {dayjs(item.publishTime * 1e3).format('MM-DD HH:mm')}
                 </span>
               </div>

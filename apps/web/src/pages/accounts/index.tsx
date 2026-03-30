@@ -6,12 +6,7 @@ import {
   Button,
   useDisclosure,
   Spinner,
-  Table,
-  TableBody,
-  TableCell,
-  TableColumn,
-  TableHeader,
-  TableRow,
+  Tooltip,
 } from '@nextui-org/react';
 import { QRCodeSVG } from 'qrcode.react';
 import { toast } from 'sonner';
@@ -25,17 +20,12 @@ import { useEffect, useState } from 'react';
 const AccountPage = () => {
   const { isOpen, onOpen, onClose, onOpenChange } = useDisclosure();
   const [count, setCount] = useState(0);
-  // 当重新登录某个失效账号时，记录其 ID，用于更新而非新建
   const [reloginAccountId, setReloginAccountId] = useState<string | null>(null);
 
   const { refetch, data, isFetching } = trpc.account.list.useQuery({});
-
   const queryUtils = trpc.useUtils();
-
   const { mutateAsync: updateAccount } = trpc.account.edit.useMutation({});
-
   const { mutateAsync: deleteAccount } = trpc.account.delete.useMutation({});
-
   const { mutateAsync: addAccount } = trpc.account.add.useMutation({});
 
   const { mutateAsync, data: loginData } =
@@ -58,21 +48,15 @@ const AccountPage = () => {
         if (data.vid && data.token) {
           const name = data.username!;
           if (reloginAccountId) {
-            // 重新登录：更新已有账号的 token 并重新启用
             await updateAccount({
               id: reloginAccountId,
-              data: { token: data.token, status: 1 /* ENABLE */ },
+              data: { token: data.token, status: 1 },
             });
-            toast.success('重新登录成功', {
-              description: `账号 ${reloginAccountId} Token 已更新`,
-            });
+            toast.success('重新登录成功');
             setReloginAccountId(null);
           } else {
-            // 新增账号
             await addAccount({ id: `${data.vid}`, name, token: data.token });
-            toast.success('添加成功', {
-              description: `用户名：${name}(${data.vid})`,
-            });
+            toast.success('添加成功');
           }
           onClose();
           refetch();
@@ -84,7 +68,7 @@ const AccountPage = () => {
   );
 
   useEffect(() => {
-    let timerId;
+    let timerId: NodeJS.Timeout;
     if (count > 0 && isOpen) {
       timerId = setTimeout(() => {
         setCount(count - 1);
@@ -108,72 +92,108 @@ const AccountPage = () => {
   };
 
   return (
-    <div>
-      {/* 失效账号警告横幅 */}
-      {invalidAccounts.length > 0 && (
-        <div className="mac-alert-danger mx-4 mt-4">
-          <span>⚠️</span>
-          <span>
-            有 <strong>{invalidAccounts.length}</strong> 个账号 Token 已失效（微信读书重新登录过或被踢下线），订阅无法自动更新。请点击对应账号的
-            <strong>「重新登录」</strong>按钮扫码恢复。
+    <div className="flex h-full flex-col">
+      {/* 状态栏 */}
+      <div className="mac-toolbar">
+        <div className="flex flex-1 items-center gap-2 overflow-hidden">
+          <span className="truncate text-[15px] font-semibold">
+            账号管理 · {data?.items.length || 0}
           </span>
+          {isFetching && <Spinner size="sm" color="current" />}
         </div>
-      )}
-
-      <div className="mac-content-toolbar">
-        <span className="mac-content-title">账号管理 · {data?.items.length || 0} 个</span>
-        <Button
-          onPress={openAdd}
-          size="sm"
-          color="primary"
-          endContent={<PlusIcon />}
-        >
-          添加读书账号
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            onPress={openAdd}
+            size="sm"
+            color="primary"
+            variant="flat"
+            className="h-8 font-medium"
+            startContent={<PlusIcon />}
+          >
+            添加账号
+          </Button>
+        </div>
       </div>
-      <Table aria-label="Example static collection table">
-        <TableHeader>
-          <TableColumn>ID</TableColumn>
-          <TableColumn>用户名</TableColumn>
-          <TableColumn>状态</TableColumn>
-          <TableColumn>更新时间</TableColumn>
-          <TableColumn>操作</TableColumn>
-        </TableHeader>
-        <TableBody
-          emptyContent={<div className="m-auto text-center">暂无数据</div>}
-          isLoading={isFetching}
-          loadingContent={<Spinner />}
-        >
+
+      <div className="flex-1 overflow-y-auto">
+        {/* 失效账号警告横幅 */}
+        {invalidAccounts.length > 0 && (
+          <div className="mac-alert-danger mx-4 mt-4">
+            <span className="text-[14px]">
+              <strong>{invalidAccounts.length}</strong> 个账号 Token
+              已失效，订阅无法更新。请重新登录扫码恢复。
+            </span>
+          </div>
+        )}
+
+        {/* 紧凑列表 */}
+        <div className="compact-list mt-4">
+          <div className="compact-list-header">
+            <div className="w-[180px] px-4">用户名</div>
+            <div className="w-[120px]">状态</div>
+            <div className="flex-1">上次活跃</div>
+            <div className="w-[160px] px-4 text-right">操作</div>
+          </div>
+
+          {!isFetching && data?.items.length === 0 && (
+            <div className="py-20 text-center text-[15px] text-neutral-400">
+              暂无账号信息
+            </div>
+          )}
+
           {data?.items.map((item) => {
             const isBlocked = data?.blocks.includes(item.id);
             const isInvalid = item.status === 0;
 
             return (
-              <TableRow key={item.id}>
-                <TableCell>{item.id}</TableCell>
-                <TableCell>{item.name}</TableCell>
-                <TableCell>
+              <div key={item.id} className="compact-row group">
+                {/* 用户名 + ID (Hover) */}
+                <div className="w-[180px] px-4">
+                  <Tooltip
+                    content={`VID: ${item.id}`}
+                    placement="right"
+                    closeDelay={0}
+                  >
+                    <div className="flex cursor-default flex-col overflow-hidden">
+                      <span className="truncate text-[15px] font-medium text-neutral-800 dark:text-neutral-200">
+                        {item.name}
+                      </span>
+                      <span className="text-[11px] text-neutral-400">
+                        WeRead Account
+                      </span>
+                    </div>
+                  </Tooltip>
+                </div>
+
+                {/* 状态 */}
+                <div className="w-[120px]">
                   {isBlocked ? (
-                    <span className="mac-badge mac-badge-warning">今日小黑屋</span>
+                    <span className="mac-badge mac-badge-warning">小黑屋</span>
                   ) : item.status === 0 ? (
-                    <span className="mac-badge mac-badge-danger">{statusMap[item.status].label}</span>
+                    <span className="mac-badge mac-badge-danger">
+                      {statusMap[item.status].label}
+                    </span>
                   ) : (
-                    <span className="mac-badge mac-badge-success">{statusMap[item.status].label}</span>
+                    <span className="mac-badge mac-badge-success">
+                      {statusMap[item.status].label}
+                    </span>
                   )}
-                </TableCell>
-                <TableCell>
-                  {dayjs(item.updatedAt).format('YYYY-MM-DD')}
-                </TableCell>
-                <TableCell className="flex gap-2">
+                </div>
+
+                {/* 时间 */}
+                <div className="flex-1 text-[13px] text-neutral-400">
+                  {dayjs(item.updatedAt).format('YYYY-MM-DD HH:mm')}
+                </div>
+
+                {/* 操作 */}
+                <div className="flex w-[160px] items-center justify-end gap-4 px-4">
                   {isInvalid ? (
-                    // 失效账号：只显示"重新登录"和"删除"
-                    <Button
-                      size="sm"
-                      color="warning"
-                      onPress={() => openRelogin(item.id)}
+                    <span
+                      className="mac-action-link"
+                      onClick={() => openRelogin(item.id)}
                     >
                       重新登录
-                    </Button>
+                    </span>
                   ) : (
                     <StatusDropdown
                       value={item.status}
@@ -182,32 +202,33 @@ const AccountPage = () => {
                           id: item.id,
                           data: { status: value },
                         }).then(() => {
-                          toast.success('更新成功!');
+                          toast.success('已更新');
                           refetch();
                         });
                       }}
                     ></StatusDropdown>
                   )}
-
-                  <Button
-                    size="sm"
-                    color="danger"
-                    onPress={() => {
-                      deleteAccount(item.id).then(() => {
-                        toast.success('删除成功!');
-                        refetch();
-                      });
+                  <span
+                    className="mac-action-link danger"
+                    onClick={() => {
+                      if (window.confirm('确定删除吗？')) {
+                        deleteAccount(item.id).then(() => {
+                          toast.success('已删除');
+                          refetch();
+                        });
+                      }
                     }}
                   >
                     删除
-                  </Button>
-                </TableCell>
-              </TableRow>
+                  </span>
+                </div>
+              </div>
             );
-          }) || []}
-        </TableBody>
-      </Table>
+          })}
+        </div>
+      </div>
 
+      {/* 登录弹窗 */}
       <Modal
         isOpen={isOpen}
         onOpenChange={async () => {
@@ -215,47 +236,53 @@ const AccountPage = () => {
           setReloginAccountId(null);
           await queryUtils.platform.getLoginResult.cancel();
         }}
+        size="xs"
+        backdrop="blur"
+        classNames={{
+          base: 'rounded-2xl',
+          header: 'border-b-[0.5px] border-neutral-100 dark:border-neutral-800',
+        }}
       >
         <ModalContent>
           {() => (
             <>
-              <ModalHeader className="flex flex-col gap-1">
-                {reloginAccountId
-                  ? `重新登录账号 ${reloginAccountId}`
-                  : '添加读书账号'}
+              <ModalHeader>
+                <span className="text-[17px] font-semibold">
+                  {reloginAccountId ? '重新授权' : '添加读书账号'}
+                </span>
               </ModalHeader>
-              <ModalBody>
-                <div className="m-auto pb-8 text-center">
+              <ModalBody className="py-8">
+                <div className="flex flex-col items-center">
                   {reloginAccountId && (
-                    <div className="mb-3 text-sm text-orange-600 bg-orange-50 border border-orange-200 rounded p-2">
-                      请使用账号 <strong>{reloginAccountId}</strong> 对应的微信扫描下方二维码重新授权
+                    <div className="mb-6 rounded-lg bg-orange-50 px-3 py-2 text-center text-[13px] text-orange-500 dark:bg-orange-900/20">
+                      请使用账号 <strong>{reloginAccountId}</strong> 扫码
                     </div>
                   )}
                   {loginData ? (
-                    <div>
-                      <div className="relative">
-                        {loginResult?.message && (
-                          <div className="absolute top-0 left-0 bottom-0 right-0 bg-white bg-opacity-75 flex justify-center items-center">
-                            <div className="text-xl">
-                              {loginResult?.message}
-                            </div>
-                          </div>
-                        )}
-                        <QRCodeSVG size={150} value={loginData?.scanUrl} />
-                      </div>
-                      <div className="mt-4">
-                        微信扫码登录{' '}
-                        {!loginResult?.message && count > 0 && (
-                          <span className="text-red-400">({count}s)</span>
-                        )}
-                      </div>
+                    <div className="relative rounded-xl border border-neutral-100 bg-white p-3 shadow-sm">
+                      {loginResult?.message && (
+                        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-white/90 p-4 text-center">
+                          <span className="text-[15px] font-medium text-neutral-800">
+                            {loginResult.message}
+                          </span>
+                        </div>
+                      )}
+                      <QRCodeSVG size={180} value={loginData.scanUrl} />
                     </div>
                   ) : (
-                    <div className="m-auto flex justify-center align-middle items-center">
-                      <Spinner />
-                      二维码加载中
+                    <div className="flex h-[200px] flex-col items-center justify-center gap-3">
+                      <Spinner color="primary" />
+                      <span className="text-[14px] text-neutral-400">
+                        生成二维码...
+                      </span>
                     </div>
                   )}
+                  <div className="mt-6 text-[14px] font-medium text-neutral-500">
+                    微信扫码登录{' '}
+                    {!loginResult?.message && count > 0 && (
+                      <span className="text-red-500">({count}s)</span>
+                    )}
+                  </div>
                 </div>
               </ModalBody>
             </>

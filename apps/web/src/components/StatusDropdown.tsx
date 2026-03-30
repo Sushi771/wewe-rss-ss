@@ -4,7 +4,6 @@ import {
   DropdownTrigger,
   DropdownMenu,
   DropdownItem,
-  Button,
 } from '@nextui-org/react';
 import { statusMap } from '@web/constants';
 
@@ -18,9 +17,22 @@ export function StatusDropdown({
   return (
     <Dropdown>
       <DropdownTrigger>
-        <Button size="sm" variant="bordered" className="capitalize">
+        <div className="hover:text-primary flex cursor-pointer items-center gap-1 text-[14px] text-neutral-600 transition-colors dark:text-neutral-400">
           {statusMap[value].label}
-        </Button>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </div>
       </DropdownTrigger>
       <DropdownMenu
         disabledKeys={['0']}

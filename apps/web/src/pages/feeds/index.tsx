@@ -10,7 +10,6 @@ import {
   Textarea,
   Tooltip,
   useDisclosure,
-  Link,
   Checkbox,
   Input,
 } from '@nextui-org/react';
@@ -255,7 +254,7 @@ const Feeds = () => {
       <div className="flex h-full">
         <div className="mac-sidebar">
           <div className="flex items-center justify-between px-4 py-3">
-            <span className="text-[13px] font-semibold uppercase tracking-wider text-neutral-400">
+            <span className="text-[13px] font-bold uppercase tracking-widest text-neutral-400/80">
               订阅源 · {feedData?.items?.length || 0}
             </span>
             <div className="flex items-center gap-0.5">
@@ -351,10 +350,24 @@ const Feeds = () => {
                   navigate('/feeds');
                 }}
               >
-                <Avatar
-                  name="ALL"
-                  className="sidebar-avatar h-6 min-h-6 w-6 min-w-6"
-                ></Avatar>
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-neutral-200/50 text-neutral-500 transition-colors group-[.active]:bg-white/20 group-[.active]:text-white dark:bg-neutral-800/50 dark:text-neutral-400">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <rect x="3" y="3" width="7" height="7" />
+                    <rect x="14" y="3" width="7" height="7" />
+                    <rect x="14" y="14" width="7" height="7" />
+                    <rect x="3" y="14" width="7" height="7" />
+                  </svg>
+                </div>
                 全部
               </li>
             </ul>
@@ -606,7 +619,7 @@ const Feeds = () => {
                           viewBox="0 0 24 24"
                           fill="none"
                           stroke="currentColor"
-                          strokeWidth="2"
+                          strokeWidth="2.5"
                           strokeLinecap="round"
                           strokeLinejoin="round"
                         >
@@ -615,29 +628,30 @@ const Feeds = () => {
                           <path d="M3 22v-6h6" />
                           <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
                         </svg>
-                        {isGetArticlesLoading
-                          ? '更新中'
-                          : refreshedMpIds.includes(currentMpInfo.id)
-                            ? '完成'
-                            : '更新'}
+                        <span className="text-[14px]">
+                          {isGetArticlesLoading
+                            ? '更新中'
+                            : refreshedMpIds.includes(currentMpInfo.id)
+                              ? '完成'
+                              : '更新'}
+                        </span>
                       </Button>
                     </Tooltip>
 
-                    <Link
-                      size="sm"
+                    <a
                       target="_blank"
-                      isExternal
+                      rel="noopener noreferrer"
                       href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
-                      className="hover:text-primary ml-2 text-[15px] text-[#888] transition-colors"
+                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
                     >
                       RSS
-                    </Link>
+                    </a>
                   </>
                 ) : (
                   <>
                     <Button
                       size="sm"
-                      className="mac-btn-outline"
+                      className="mac-btn-outline h-8"
                       isDisabled={
                         isRefreshAllMpArticlesRunning || isGetArticlesLoading
                       }
@@ -661,7 +675,7 @@ const Feeds = () => {
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        strokeWidth="2"
+                        strokeWidth="2.5"
                         strokeLinecap="round"
                         strokeLinejoin="round"
                       >
@@ -670,16 +684,18 @@ const Feeds = () => {
                         <path d="M3 22v-6h6" />
                         <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
                       </svg>
-                      {isRefreshAllMpArticlesRunning || isGetArticlesLoading
-                        ? '更新中'
-                        : isRefreshedAll
-                          ? '完成'
-                          : '更新全部'}
+                      <span className="text-[14px]">
+                        {isRefreshAllMpArticlesRunning || isGetArticlesLoading
+                          ? '更新中'
+                          : isRefreshedAll
+                            ? '完成'
+                            : '更新全部'}
+                      </span>
                     </Button>
 
                     <Button
                       size="sm"
-                      className="mac-btn-outline"
+                      className="mac-btn-outline h-8"
                       onPress={handleExportOpml}
                     >
                       <svg
@@ -689,7 +705,7 @@ const Feeds = () => {
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        strokeWidth="2"
+                        strokeWidth="2.5"
                         strokeLinecap="round"
                         strokeLinejoin="round"
                       >
@@ -697,18 +713,17 @@ const Feeds = () => {
                         <polyline points="7 10 12 15 17 10" />
                         <line x1="12" y1="15" x2="12" y2="3" />
                       </svg>
-                      导出OPML
+                      <span className="text-[14px]">导出 OPML</span>
                     </Button>
 
-                    <Link
-                      size="sm"
+                    <a
                       target="_blank"
-                      isExternal
+                      rel="noopener noreferrer"
                       href={`${serverOriginUrl}/feeds/all.atom`}
-                      className="hover:text-primary ml-2 text-[15px] text-[#888] transition-colors"
+                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
                     >
                       RSS
-                    </Link>
+                    </a>
                   </>
                 )}
               </div>

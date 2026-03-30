@@ -226,15 +226,18 @@ select {
 }
 
 .compact-metadata {
-  width: 30%;
-  font-size: 14px;
+  width: 200px;
+  flex-shrink: 0;
+  font-size: 13px;
   color: #86868b;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+  padding-left: 12px;
 }
 
 .compact-action-link {
@@ -263,7 +266,9 @@ select {
 }
 
 .compact-col-metadata {
-  width: 30%;
+  width: 200px;
+  flex-shrink: 0;
+  text-align: right;
 }
 
 .compact-header-row {
