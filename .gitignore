@@ -130,3 +130,8 @@ dist
 .pnp.*
 
 .DS_Store
+
+# Portable build outputs
+portable-build/
+WeWe-RSS-Portable-*.zip
+
