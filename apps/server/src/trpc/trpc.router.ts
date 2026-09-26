@@ -20,6 +20,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import pMap from '@cjs-exporter/p-map';
+import { WereadService } from '@server/weread/weread.service';
 
 @Injectable()
 export class TrpcRouter {
@@ -27,6 +28,7 @@ export class TrpcRouter {
     private readonly trpcService: TrpcService,
     private readonly prismaService: PrismaService,
     private readonly configService: ConfigService,
+    private readonly wereadService: WereadService,
   ) {}
 
   private readonly logger = new Logger(this.constructor.name);
@@ -473,10 +475,39 @@ export class TrpcRouter {
       },
     });
 
-    const html = await request(url, { responseType: 'text' }).text();
+    let html = '';
+    try {
+      html = await request(url, { responseType: 'text' }).text();
+    } catch (err: any) {
+      this.logger.warn(
+        `Direct fetch from ${url} failed: ${err.message}, trying weread...`,
+      );
+    }
+
+    if (
+      !html ||
+      (!html.includes('rich_media_content') && !html.includes('js_content'))
+    ) {
+      const wereadHtml = await this.wereadService.getArticleContent(
+        id,
+        article.mpId,
+      );
+      if (wereadHtml) {
+        html = wereadHtml;
+      }
+    }
+
+    if (!html) {
+      throw new Error(`Failed to load article content for ${id}`);
+    }
+
     const $ = load(html, { decodeEntities: false });
     const { originUrl } = this.configService.get('feed');
     const serverHost = originUrl || 'http://localhost:4000';
+
+    const contentEl = $('.rich_media_content').length
+      ? $('.rich_media_content')
+      : $('#js_content');
 
     if (downloadPath) {
       const attachmentsDir = path.join(downloadPath, 'attachments');
@@ -484,12 +515,12 @@ export class TrpcRouter {
         await fs.promises.mkdir(attachmentsDir, { recursive: true });
       }
 
-      const imgs = $('.rich_media_content img').get();
+      const imgs = contentEl.find('img').get();
       await pMap(
         imgs,
         async (img) => {
           const $img = $(img);
-          const dataSrc = $img.attr('data-src');
+          const dataSrc = $img.attr('data-src') || $img.attr('src');
           if (dataSrc) {
             const ext = dataSrc.includes('wx_fmt=')
               ? dataSrc.split('wx_fmt=')[1].split('&')[0]
@@ -519,9 +550,9 @@ export class TrpcRouter {
       );
     } else {
       // For browser export, we use proxy URLs
-      $('.rich_media_content img').each((_, img) => {
+      contentEl.find('img').each((_, img) => {
         const $img = $(img);
-        const dataSrc = $img.attr('data-src');
+        const dataSrc = $img.attr('data-src') || $img.attr('src');
         if (dataSrc) {
           const proxyUrl = `${serverHost}/proxy/image?url=${encodeURIComponent(
             dataSrc,
@@ -531,7 +562,7 @@ export class TrpcRouter {
       });
     }
 
-    const contentHtml = $.html($('.rich_media_content'));
+    const contentHtml = $.html(contentEl);
 
     const turndownService = new TurndownService();
     const markdown = turndownService.turndown(contentHtml);
@@ -575,12 +606,28 @@ export class TrpcRouter {
       }),
 
     createLoginUrl: this.trpcService.protectedProcedure.mutation(async () => {
-      return this.trpcService.createLoginUrl();
+      try {
+        return await this.trpcService.createLoginUrl();
+      } catch (err: any) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: err.message || '获取微信登录二维码失败',
+          cause: err.stack,
+        });
+      }
     }),
     getLoginResult: this.trpcService.protectedProcedure
       .input(PlatformSchemas.getLoginResult)
       .query(async ({ input }) => {
-        return this.trpcService.getLoginResult(input.id);
+        try {
+          return await this.trpcService.getLoginResult(input.id);
+        } catch (err: any) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: err.message || '轮询登录状态失败',
+            cause: err.stack,
+          });
+        }
       }),
   });
 

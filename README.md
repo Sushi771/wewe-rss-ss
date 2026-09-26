@@ -6,36 +6,43 @@
 更优雅的微信公众号订阅方式。
 
 ![主界面](https://raw.githubusercontent.com/cooderl/wewe-rss/main/assets/preview1.png)
+
 </div>
 
 ## ✨ 功能
 
 ### 🎨 极致视觉与交互
+
 - **macOS 原生品质体验**：深度参考 macOS 系统设计语言，全站采用 Glassmorphism 玻璃拟态效果，搭配 SF Pro 系统字体，提供极具品质感的视觉反馈。
 - **智能动态交互**：引入骨架屏加载动画与丝滑交互动效，确保从加载到阅读的每一个环节都流畅自然。
 - **自适应系统主题**：完美适配深色模式，色彩配比经过精心调优，缓解长时间阅读的视觉疲劳。
 
 ### 🔍 智慧搜索与管理
+
 - **集成式文章搜索**：顶部工具栏内置可折叠搜索框，支持键盘快捷键 (ESC) 快速关闭，在大规模订阅源中也能瞬间定位目标内容。
 - **多维文章列表**：采用响应式百分比布局 (50/25/15/10 黄金比例)，彻底解决小屏幕下的文字截断问题，信息呈现错落有致。
 - **侧边栏极简高效**：支持鼠标拖拽自由排序，内置批量管理模式，支持一键清空或导出。
 
 ### 🚀 跨平台协作增强
+
 - **Obsidian 深度联动**：增强版导出功能，支持批量将文章一键保存至 Obsidian，自动处理图片本地化，补全知识管理闭环。
 - **同步进度可视化**：实时反馈公众号更新状态，批量同步进度与结果一目了然。
 - **阅读体验智能优化**：内置正文 HTML 自动清理与排版引擎，还原最清爽的阅读感受。
 - **历史回溯能力**：支持获取公众号历史发布文章，不再错过任何精彩内容。
 
-### 🛡️ 核心与稳定
-- **V2.x 接口重构**：使用全新接口体系，运行更加稳定，显著降低封控风险。
-- **科学更新策略**：优化连续更新延迟策略，默认间隔 3s，在效率与安全之间实现完美平衡。
+### 🛡️ 微信读书原生直连架构与文章同步升级
+
+- **彻底告别外部代理（解耦 502 问题）**：移除旧版依赖已离线的外部中转平台（`weread.111965.xyz`），直接对接微信读书官方 Native 扫码网关，实现全本地化无中转直连。
+- **官方 Native 扫码登录**：基于微信读书最新 Web 鉴权规范（`/api/auth/getLoginUid` 与 `/api/auth/getLoginInfo`），支持微信扫码在手机端一键确认登录，无需复杂抓包。
+- **微信文章短链算法精准还原**：解决微信读书内部字符转写问题（自动剥离 `MP_WXS_` 复合前缀并将 `~` 还原为 `_`），修复生成的公众号短链打开显示“参数错误”的问题。
+- **双重全文读取与 Obsidian 导出**：微信直连与微信读书官方 `/web/mp/content` 全文接口双重兜底，自动绕过反爬验证，确保正文渲染与 Obsidian 导出顺畅无阻。
 - **全格式 RSS 支持**：生成标准微信公众号 RSS (支持 `.atom`, `.rss`, `.json` 格式)，完美适配各类阅读器。
 - **所有订阅源一键导出**：支持导出全量订阅源为 OPML 格式。
-
 
 ### 高级功能
 
 - **标题过滤**：支持通过`/feeds/all.(json|rss|atom)`接口和`/feeds/:feed`对标题进行过滤
+
   ```
   {{ORIGIN_URL}}/feeds/all.atom?title_include=张三
   {{ORIGIN_URL}}/feeds/MP_WXS_123.json?limit=30&title_include=张三|李四|王五&title_exclude=张三丰|赵六
@@ -85,11 +92,13 @@
 #### MySQL (推荐)
 
 1. 创建docker网络
+
    ```sh
    docker network create wewe-rss
    ```
 
 2. 启动 MySQL 数据库
+
    ```sh
    docker run -d \
      --name db \
@@ -172,11 +181,10 @@ pnpm run start:server
 ## 📱 使用方式
 
 1. 进入账号管理，点击添加账号，微信扫码登录微信读书账号。
-  
-   **注意不要勾选24小时后自动退出**
-   
-   <img width="400" src="./assets/preview2.png"/>
 
+   **注意不要勾选24小时后自动退出**
+
+   <img width="400" src="./assets/preview2.png"/>
 
 2. 进入公众号源，点击添加，通过提交微信公众号分享链接，订阅微信公众号。
    **添加频率过高容易被封控，等24小时解封**
@@ -199,9 +207,10 @@ pnpm run start:server
    cp ./apps/web/.env.local.example ./apps/web/.env
    cp ./apps/server/.env.local.example ./apps/server/.env
    ```
-3. 执行 `pnpm install && pnpm run build:web && pnpm dev` 
-   
+3. 执行 `pnpm install && pnpm run build:web && pnpm dev`
+
    ⚠️ **注意：此命令仅用于本地开发，不要用于部署！**
+
 4. 前端访问 `http://localhost:5173`，后端访问 `http://localhost:4000`
 
 ## ⚠️ 风险声明

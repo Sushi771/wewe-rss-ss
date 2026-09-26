@@ -30,6 +30,9 @@ const AccountPage = () => {
 
   const { mutateAsync, data: loginData } =
     trpc.platform.createLoginUrl.useMutation({
+      onError(err) {
+        toast.error(err.message || '获取登录二维码失败');
+      },
       onSuccess(data) {
         if (data.uuid) {
           setCount(60);
@@ -42,12 +45,27 @@ const AccountPage = () => {
       id: loginData?.uuid ?? '',
     },
     {
+      refetchInterval: (data) => {
+        if (data?.vid) return false;
+        if (
+          data?.message &&
+          (data.message.includes('过期') || data.message.includes('取消'))
+        ) {
+          return false;
+        }
+        return 1500;
+      },
       refetchIntervalInBackground: false,
-      enabled: !!loginData?.uuid,
+      enabled: !!loginData?.uuid && isOpen,
       async onSuccess(data) {
         if (data.vid && data.token) {
-          const name = data.username!;
-          if (reloginAccountId) {
+          const name = data.username || `WeRead_${data.vid}`;
+          if (reloginAccountId && `${data.vid}` !== reloginAccountId) {
+            toast.warning(
+              `扫码账号 (${name}) 与原账号 (${reloginAccountId}) 不一致，已作为新账号保存`,
+            );
+            await addAccount({ id: `${data.vid}`, name, token: data.token });
+          } else if (reloginAccountId) {
             await updateAccount({
               id: reloginAccountId,
               data: { token: data.token, status: 1 },
@@ -60,7 +78,11 @@ const AccountPage = () => {
           }
           onClose();
           refetch();
-        } else if (data.message) {
+        } else if (
+          data.message &&
+          !data.message.includes('扫码') &&
+          !data.message.includes('确认')
+        ) {
           toast.error(`登录失败: ${data.message}`);
         }
       },

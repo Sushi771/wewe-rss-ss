@@ -17,13 +17,10 @@ dayjs.extend(timezone);
  */
 const blockedAccountsMap = new Map<string, string[]>();
 
-/** Token 失效错误，不应重试 */
-class TokenInvalidError extends Error {
-  constructor(accountId: string) {
-    super(`账号 ${accountId} Token 已失效，请重新登录`);
-    this.name = 'TokenInvalidError';
-  }
-}
+import {
+  WereadService,
+  TokenInvalidError,
+} from '@server/weread/weread.service';
 
 @Injectable()
 export class TrpcService {
@@ -46,6 +43,7 @@ export class TrpcService {
   constructor(
     private readonly prismaService: PrismaService,
     private readonly configService: ConfigService,
+    private readonly wereadService: WereadService,
   ) {
     const { url } =
       this.configService.get<ConfigurationType['platform']>('platform')!;
@@ -105,6 +103,13 @@ export class TrpcService {
         ) {
           this.logger.warn(`账号（${id}）请求超时 (15s+)，将自动重试`);
           // 超时不封号，直接进入重试逻辑
+        } else if (
+          error.response?.status === 502 ||
+          error.response?.status === 504
+        ) {
+          this.logger.error(
+            `微信读书中转服务异常 (${error.response.status})：上游服务器 (${error.config?.baseURL}) 无法连接或源站已离线`,
+          );
         } else {
           this.logger.error(
             "Can't handle this error:",
@@ -161,42 +166,36 @@ export class TrpcService {
     const account = await this.getAvailableAccount();
 
     try {
-      const res = await this.request
-        .get<
-          {
-            id: string;
-            title: string;
-            picUrl: string;
-            publishTime: number;
-          }[]
-        >(`/api/v2/platform/mps/${mpId}/articles`, {
-          headers: {
-            xid: account.id,
-            Authorization: `Bearer ${account.token}`,
-          },
-          params: {
-            page,
-          },
-        })
-        .then((res) => res.data)
-        .then((res) => {
-          this.logger.log(
-            `getMpArticles(${mpId}) page: ${page} articles: ${res.length}`,
-          );
-          if (res.length > 0) {
-            this.logger.debug(
-              `First article from platform: ${res[0].title} (${res[0].id})`,
-            );
-          }
-          return res;
-        });
+      const res = await this.wereadService.getMpArticles(mpId, page, account);
+      this.logger.log(
+        `getMpArticles(${mpId}) page: ${page} articles: ${res.length}`,
+      );
+      if (res.length > 0) {
+        this.logger.debug(
+          `First article from weread: ${res[0].title} (${res[0].id})`,
+        );
+      }
       return res;
-    } catch (err) {
+    } catch (err: any) {
       // Token 失效时不重试（账号已被禁用，重试无意义）
-      if (err instanceof TokenInvalidError) {
+      if (
+        err instanceof TokenInvalidError ||
+        err.name === 'TokenInvalidError'
+      ) {
+        if (account?.id) {
+          await this.prismaService.account
+            .update({
+              where: { id: account.id },
+              data: { status: statusMap.INVALID },
+            })
+            .catch(() => {});
+          this.logger.error(
+            `账号（${account.id}）登录失效，已禁用，请在账号页面重新登录`,
+          );
+        }
         throw err;
       }
-      this.logger.error(`retry(${4 - retryCount}) getMpArticles  error: `, err);
+      this.logger.error(`retry(${4 - retryCount}) getMpArticles error: `, err);
       if (retryCount > 0) {
         return this.getMpArticles(mpId, page, retryCount - 1);
       } else {
@@ -373,48 +372,14 @@ export class TrpcService {
   }
 
   async getMpInfo(url: string) {
-    url = url.trim();
-    const account = await this.getAvailableAccount();
-
-    return this.request
-      .post<
-        {
-          id: string;
-          cover: string;
-          name: string;
-          intro: string;
-          updateTime: number;
-        }[]
-      >(
-        `/api/v2/platform/wxs2mp`,
-        { url },
-        {
-          headers: {
-            xid: account.id,
-            Authorization: `Bearer ${account.token}`,
-          },
-        },
-      )
-      .then((res) => res.data);
+    return this.wereadService.getMpInfo(url);
   }
 
   async createLoginUrl() {
-    return this.request
-      .get<{
-        uuid: string;
-        scanUrl: string;
-      }>(`/api/v2/login/platform`)
-      .then((res) => res.data);
+    return this.wereadService.createLoginUrl();
   }
 
   async getLoginResult(id: string) {
-    return this.request
-      .get<{
-        message: string;
-        vid?: number;
-        token?: string;
-        username?: string;
-      }>(`/api/v2/login/platform/${id}`, { timeout: 120 * 1e3 })
-      .then((res) => res.data);
+    return this.wereadService.getLoginResult(id);
   }
 }

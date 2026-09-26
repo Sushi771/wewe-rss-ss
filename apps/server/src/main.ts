@@ -8,6 +8,14 @@ import { ConfigurationType } from './configuration';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
 const packageJson = JSON.parse(
   readFileSync(join(process.cwd(), 'package.json'), 'utf-8'),
 );
