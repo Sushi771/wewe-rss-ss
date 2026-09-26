@@ -44,19 +44,6 @@ const Feeds = () => {
     trpc.feed.add.useMutation({});
   const { mutateAsync: refreshMpArticles, isLoading: isGetArticlesLoading } =
     trpc.feed.refreshArticles.useMutation();
-  const {
-    mutateAsync: getHistoryArticles,
-    isLoading: isGetHistoryArticlesLoading,
-  } = trpc.feed.getHistoryArticles.useMutation();
-
-  const { data: inProgressHistoryMp, refetch: refetchInProgressHistoryMp } =
-    trpc.feed.getInProgressHistoryMp.useQuery(undefined, {
-      refetchOnWindowFocus: true,
-      refetchInterval: 10 * 1e3,
-      refetchOnMount: true,
-      refetchOnReconnect: true,
-    });
-
   const { data: isRefreshAllMpArticlesRunning } =
     trpc.feed.isRefreshAllMpArticlesRunning.useQuery();
 
@@ -466,48 +453,9 @@ const Feeds = () => {
                     </div>
                   </Tooltip>
 
-                  {currentMpInfo.hasHistory === 1 && (
-                    <Tooltip
-                      content={
-                        inProgressHistoryMp?.id === currentMpInfo.id
-                          ? '停止获取'
-                          : '获取历史文章'
-                      }
-                    >
-                      <Button
-                        isIconOnly
-                        size="sm"
-                        variant="light"
-                        className="h-8 w-8 min-w-0"
-                        isLoading={isGetHistoryArticlesLoading}
-                        onPress={async () => {
-                          if (inProgressHistoryMp?.id === currentMpInfo.id) {
-                            await getHistoryArticles({ mpId: '' });
-                          } else {
-                            await getHistoryArticles({
-                              mpId: currentMpInfo.id,
-                            });
-                          }
-                          await refetchInProgressHistoryMp();
-                        }}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          width="16"
-                          height="16"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M12 8v4l3 3" />
-                          <circle cx="12" cy="12" r="10" />
-                        </svg>
-                      </Button>
-                    </Tooltip>
-                  )}
+                  <Tooltip content="微信读书当前只能检查最新一篇；历史需接入可验证的分页来源，已有文章会保留。">
+                    <span className="text-xs text-neutral-400">历史未验证</span>
+                  </Tooltip>
 
                   <Tooltip content="删除此订阅 (保留文章)">
                     <Button

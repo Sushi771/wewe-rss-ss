@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
-import { defaultCount, statusMap } from '@server/constants';
+import { statusMap } from '@server/constants';
 import { PrismaService } from '@server/prisma/prisma.service';
 import { TRPCError, initTRPC } from '@trpc/server';
 import Axios, { AxiosInstance } from 'axios';
@@ -205,6 +205,11 @@ export class TrpcService {
   }
 
   async refreshMpArticlesAndUpdateFeed(mpId: string, page = 1) {
+    if (page !== 1) {
+      throw new Error(
+        '当前微信读书封面接口只支持检查最新一篇，无法按页获取公众号历史文章。',
+      );
+    }
     const articles = await this.getMpArticles(mpId, page);
 
     if (articles.length > 0) {
@@ -248,8 +253,9 @@ export class TrpcService {
       );
     }
 
-    // 如果文章数量小于 defaultCount，则认为没有更多历史文章
-    const hasHistory = articles.length < defaultCount ? 0 : 1;
+    // /api/mp/cover 只返回最新一篇；条数不能证明历史已到末页。
+    // -1 表示历史覆盖未知，也会纠正旧版本错误写入的 0。
+    const hasHistory = -1;
 
     await this.prismaService.feed.update({
       where: { id: mpId },
@@ -268,71 +274,9 @@ export class TrpcService {
   };
 
   async getHistoryMpArticles(mpId: string) {
-    if (this.inProgressHistoryMp.id === mpId) {
-      this.logger.log(`getHistoryMpArticles(${mpId}) is running`);
-      return;
-    }
-
-    this.inProgressHistoryMp = {
-      id: mpId,
-      page: 1,
-    };
-
-    if (!this.inProgressHistoryMp.id) {
-      return;
-    }
-
-    try {
-      const feed = await this.prismaService.feed.findFirstOrThrow({
-        where: {
-          id: mpId,
-        },
-      });
-
-      // 如果完整同步过历史文章，则直接返回
-      if (feed.hasHistory === 0) {
-        this.logger.log(`getHistoryMpArticles(${mpId}) has no history`);
-        return;
-      }
-
-      const total = await this.prismaService.article.count({
-        where: {
-          mpId,
-        },
-      });
-      this.inProgressHistoryMp.page = Math.ceil(total / defaultCount);
-
-      // 最多尝试一千次
-      let i = 1e3;
-      while (i-- > 0) {
-        if (this.inProgressHistoryMp.id !== mpId) {
-          this.logger.log(
-            `getHistoryMpArticles(${mpId}) is not running, break`,
-          );
-          break;
-        }
-        const { hasHistory } = await this.refreshMpArticlesAndUpdateFeed(
-          mpId,
-          this.inProgressHistoryMp.page,
-        );
-        if (hasHistory < 1) {
-          this.logger.log(
-            `getHistoryMpArticles(${mpId}) has no history, break`,
-          );
-          break;
-        }
-        this.inProgressHistoryMp.page++;
-
-        await new Promise((resolve) =>
-          setTimeout(resolve, this.updateDelayTime * 1e3),
-        );
-      }
-    } finally {
-      this.inProgressHistoryMp = {
-        id: '',
-        page: 1,
-      };
-    }
+    throw new Error(
+      `公众号 ${mpId} 的历史获取尚不可用：当前微信读书接口只返回最新一篇，请接入可验证的分页来源后重试。现有文章与进度已保留。`,
+    );
   }
 
   isRefreshAllMpArticlesRunning = false;

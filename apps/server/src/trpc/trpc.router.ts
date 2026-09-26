@@ -252,7 +252,7 @@ export class TrpcRouter {
         }),
       )
       .mutation(async ({ input: { mpId = '' } }) => {
-        this.trpcService.getHistoryMpArticles(mpId);
+        await this.trpcService.getHistoryMpArticles(mpId);
       }),
     getInProgressHistoryMp: this.trpcService.protectedProcedure.query(
       async () => {

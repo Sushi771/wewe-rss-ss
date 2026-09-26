@@ -83,6 +83,10 @@
       "ts"
     ],
     "rootDir": "src",
+    "moduleNameMapper": {
+      "^@server/(.*)$": "<rootDir>/$1",
+      "^@wewe-rss/shared$": "<rootDir>/../../../packages/shared/src/index.ts"
+    },
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"

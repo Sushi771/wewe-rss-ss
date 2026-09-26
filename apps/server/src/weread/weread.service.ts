@@ -368,6 +368,11 @@ export class WereadService {
       publishTime: number;
     }[]
   > {
+    if (page !== 1) {
+      throw new Error(
+        '微信读书 /api/mp/cover 仅返回最新一篇，不支持历史分页。',
+      );
+    }
     let cookies = this.parseToken(account.token, account.id);
     let cookieStr = this.stringifyCookies(cookies);
 

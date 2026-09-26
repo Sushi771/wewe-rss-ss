@@ -2,6 +2,12 @@
 
 All notable changes to the WeWe-RSS project will be documented in this file.
 
+## [2026-09-26] - Guard latest-only cover from false history completion
+
+- `/api/mp/cover` returns at most the latest article; zero or one result now leaves `hasHistory=-1` (unknown) instead of marking history complete.
+- Requests for page 2 or later fail before fetching or writing. The old history loop and UI action are disabled until a verified paginated source is available; saved articles remain untouched.
+- Added four targeted Jest cases for zero/one cover item and rejected history requests. Server and web builds passed. The running local deployment was not changed, and real historical pagination was not validated.
+
 ## [2026-09-26] - WeRead Native Auth Architecture & MP Article Link/Content Fixes
 
 ### 🌟 Background & Root Cause
