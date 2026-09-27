@@ -241,4 +241,35 @@ describe('local collection with real SQLite migrations', () => {
       (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } })).syncTime,
     ).toBe(before.syncTime);
   });
+  it('preserves the existing publication date and skips new undated cover records', async () => {
+    const before = await prisma.article.findUniqueOrThrow({
+      where: { id: 'cover-id' },
+    });
+    jest.spyOn(trpc, 'getMpArticles').mockResolvedValueOnce([
+      { id: 'cover-id', title: '旧文章封面', picUrl: '', publishTime: null },
+      {
+        id: 'undated-new-cover',
+        title: '未知时间',
+        picUrl: '',
+        publishTime: null,
+      },
+    ]);
+    const result = await trpc.refreshMpArticlesAndUpdateFeed('cover-feed');
+    expect(result).toMatchObject({
+      source: 'cover',
+      saved: 1,
+      skippedUnknownDate: 1,
+    });
+    expect(
+      (await prisma.article.findUniqueOrThrow({ where: { id: 'cover-id' } }))
+        .publishTime,
+    ).toBe(before.publishTime);
+    expect(
+      await prisma.article.findUnique({ where: { id: 'undated-new-cover' } }),
+    ).toBeNull();
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: 'cover-feed' } }))
+        .syncTime,
+    ).toBe(5);
+  });
 });

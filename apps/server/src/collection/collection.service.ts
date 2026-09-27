@@ -11,6 +11,7 @@ import {
   mergeMetrics,
   Metrics,
 } from './collection-format';
+import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
 
 type CollectedArticle = ReturnType<typeof canonicalArticleUrl> & {
   title: string;
@@ -23,6 +24,143 @@ type ImportInput = { directory: string; mpId?: string; mpName?: string };
 @Injectable()
 export class CollectionService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private readonly publicCollections = new Set<string>();
+
+  async collectPublicAlbums(input: { mpId: string; albumIds: string[] }) {
+    if (this.publicCollections.has(input.mpId))
+      throw new Error('该公众号正在采集公开合集，请等待本次结束');
+    this.publicCollections.add(input.mpId);
+    try {
+      await this.prisma.feed.findUniqueOrThrow({ where: { id: input.mpId } });
+      const result = await fetchPublicAlbums(input.mpId, input.albumIds);
+      // Album create_time and original ct differ by seconds. Titles only select candidates;
+      // an original page's biz/mid/idx must prove identity before a legacy ID is reused.
+      const candidates = await this.prisma.article.findMany({
+        where: {
+          mpId: input.mpId,
+          sourceUrl: null,
+          title: { in: result.articles.map((a) => a.title) },
+        },
+        select: { id: true, title: true },
+      });
+      const legacy = new Map<
+        string,
+        { id: string; publishTime: number | null }
+      >();
+      for (const candidate of candidates) {
+        const identity = await resolvePublicArticle(candidate.id, input.mpId);
+        if (!result.articles.some((item) => item.id === identity.id)) continue;
+        if (legacy.has(identity.id))
+          throw new Error(
+            '多条旧记录指向同一原文，需要先核对重复身份；本次未写入',
+          );
+        legacy.set(identity.id, {
+          id: candidate.id,
+          publishTime: identity.publishTime,
+        });
+      }
+      let created = 0,
+        updated = 0,
+        merged = 0;
+      // Fetch every selected album page before writing. Partial or challenged responses never mark a successful import.
+      await this.prisma.$transaction(
+        async (tx) => {
+          for (const item of result.articles) {
+            const baseUrl = item.url.split('&sn=')[0];
+            let existing = await tx.article.findFirst({
+              where: {
+                mpId: input.mpId,
+                OR: [
+                  { id: item.id },
+                  { sourceUrl: baseUrl },
+                  { sourceUrl: { startsWith: `${baseUrl}&sn=` } },
+                ],
+              },
+            });
+            const original = legacy.get(item.id);
+            let mergedFields = {};
+            if (original) {
+              const old = await tx.article.findUniqueOrThrow({
+                where: { id: original.id },
+              });
+              if (existing && existing.id !== old.id) {
+                const metrics = mergeMetrics(
+                  JSON.parse(existing.metrics || '{}'),
+                  JSON.parse(old.metrics || '{}'),
+                );
+                mergedFields = {
+                  contentHtml: old.contentHtml || existing.contentHtml,
+                  metrics: JSON.stringify(metrics),
+                  readCount:
+                    metrics.read?.value ?? old.readCount ?? existing.readCount,
+                  likeCount:
+                    metrics.like?.value ?? old.likeCount ?? existing.likeCount,
+                };
+                await tx.article.delete({ where: { id: existing.id } });
+                merged++;
+              }
+              existing = old;
+            }
+            const data = {
+              title: item.title,
+              // Retain a verified original publication date after canonical identity is bound.
+              publishTime:
+                original?.publishTime ??
+                existing?.publishTime ??
+                item.publishTime,
+              ...mergedFields,
+              sourceUrl: item.url,
+              picUrl: item.picUrl,
+            };
+            if (existing) {
+              await tx.article.update({ where: { id: existing.id }, data });
+              updated++;
+            } else {
+              await tx.article.create({
+                data: { ...data, id: item.id, mpId: input.mpId },
+              });
+              created++;
+            }
+          }
+          const latest = await tx.article.aggregate({
+            where: { mpId: input.mpId },
+            _max: { publishTime: true },
+          });
+          await tx.feed.update({
+            where: { id: input.mpId },
+            data: {
+              publicAlbumIds: JSON.stringify([...new Set(input.albumIds)]),
+              localDirectory: null,
+              syncTime: Math.floor(Date.now() / 1000),
+              updateTime: latest._max.publishTime || 0,
+              hasHistory: -1,
+            },
+          });
+        },
+        { timeout: 60000 },
+      );
+      return {
+        source: 'public-album' as const,
+        hasHistory: -1,
+        articles: result.articles.length,
+        created,
+        updated,
+        merged,
+        pages: result.pages,
+        albums: result.albums,
+        oldestPublishTime: Math.min(
+          ...result.articles.map((a) => a.publishTime),
+        ),
+        newestPublishTime: Math.max(
+          ...result.articles.map((a) => a.publishTime),
+        ),
+        message: `公开合集在线取得 ${result.articles.length} 篇（新增 ${created}，更新 ${updated}，合并已核验重复 ${merged}），共 ${result.pages} 页。仅覆盖所选合集；合集外文章与次条完整性未验证，阅读、点赞、收藏未获取。`,
+      };
+    } finally {
+      this.publicCollections.delete(input.mpId);
+    }
+  }
 
   private async scan(input: ImportInput) {
     if (!path.isAbsolute(input.directory))
@@ -277,6 +415,7 @@ export class CollectionService {
             },
             update: {
               localDirectory: scan.root,
+              publicAlbumIds: null,
               updateTime: Math.max(existing?.updateTime || 0, maxTime),
               hasHistory: -1,
             },

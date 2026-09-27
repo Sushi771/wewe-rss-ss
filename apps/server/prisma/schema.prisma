@@ -32,6 +32,7 @@ model Feed {
   hasHistory Int?      @default(1) @map("has_history")
   order      Int       @default(0) @map("order")
   localDirectory String? @map("local_directory")
+  publicAlbumIds String? @map("public_album_ids")
   articles   Article[]
 
   @@map("feeds")

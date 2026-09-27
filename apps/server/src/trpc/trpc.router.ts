@@ -22,6 +22,7 @@ import * as crypto from 'node:crypto';
 import pMap from '@cjs-exporter/p-map';
 import { WereadService } from '@server/weread/weread.service';
 import { CollectionService } from '../collection/collection.service';
+import { articlePageRequest } from '../collection/article-page';
 import {
   csvCell,
   metricLabels,
@@ -42,6 +43,24 @@ export class TrpcRouter {
   private readonly logger = new Logger(this.constructor.name);
 
   collectionRouter = this.trpcService.router({
+    collectPublicAlbums: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          mpId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+          albumIds: z
+            .array(z.string().regex(/^\d{10,30}$/))
+            .min(1)
+            .max(10),
+        }),
+      )
+      .mutation(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '公开合集绑定只能在服务器本机操作',
+          });
+        return this.collectionService.collectPublicAlbums(input);
+      }),
     preview: this.trpcService.protectedProcedure
       .input(
         z.object({
@@ -143,7 +162,9 @@ export class TrpcRouter {
               metrics[k]?.value ?? '',
               metrics[k]?.fileTime ?? '',
             ]),
-            a.sourceUrl ? 'WeChatDownload' : '未提供',
+            Object.keys(metrics).length
+              ? 'WeChatDownload CSV 指标'
+              : '未获取指标',
           ]);
         }
         return {
@@ -384,6 +405,52 @@ export class TrpcRouter {
   });
 
   articleRouter = this.trpcService.router({
+    summary: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          mpId: z.string().optional(),
+          search: z.string().optional(),
+        }),
+      )
+      .query(async ({ input }) => {
+        const where = {
+          mpId: input.mpId || undefined,
+          ...(input.search
+            ? {
+                OR: [
+                  { title: { contains: input.search } },
+                  { feed: { mpName: { contains: input.search } } },
+                ],
+              }
+            : {}),
+        };
+        const [range, readAvailable, likeAvailable, cachedBodies] =
+          await this.prismaService.$transaction([
+            this.prismaService.article.aggregate({
+              where,
+              _count: true,
+              _min: { publishTime: true },
+              _max: { publishTime: true },
+            }),
+            this.prismaService.article.count({
+              where: { ...where, readCount: { not: null } },
+            }),
+            this.prismaService.article.count({
+              where: { ...where, likeCount: { not: null } },
+            }),
+            this.prismaService.article.count({
+              where: { ...where, contentHtml: { not: null } },
+            }),
+          ]);
+        return {
+          articles: range._count,
+          readAvailable,
+          likeAvailable,
+          cachedBodies,
+          oldestPublishTime: range._min.publishTime,
+          newestPublishTime: range._max.publishTime,
+        };
+      }),
     list: this.trpcService.protectedProcedure
       .input(ArticleSchemas.list)
       .query(async ({ input }) => {
@@ -592,32 +659,9 @@ export class TrpcRouter {
 
     const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
-    const request = got.extend({
-      retry: { limit: 3, methods: ['GET'] },
-      timeout: 8 * 1e3,
-      headers: {
-        accept:
-          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-        'accept-encoding': 'gzip, deflate, br',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'max-age=0',
-        'sec-ch-ua':
-          '" Not A;Brand";v="99", "Chromium";v="101", "Google Chrome";v="101"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"macOS"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'none',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1',
-        'user-agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.64 Safari/537.36',
-      },
-    });
-
     let html = article.contentHtml || '';
     try {
-      if (!html) html = await request(url, { responseType: 'text' }).text();
+      if (!html) html = await articlePageRequest(url).text();
     } catch (err: any) {
       this.logger.warn(
         `Direct fetch from ${url} failed: ${err.message}, trying weread...`,

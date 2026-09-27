@@ -21,6 +21,7 @@ import dayjs from 'dayjs';
 import { serverOriginUrl } from '@web/utils/env';
 import ArticleList from './list';
 import LocalCollection from './collection';
+import PublicAlbums from './public-albums';
 
 const Feeds = () => {
   const { id } = useParams();
@@ -72,6 +73,17 @@ const Feeds = () => {
 
   const [refreshedMpIds, setRefreshedMpIds] = useState<string[]>([]);
   const [isRefreshedAll, setIsRefreshedAll] = useState(false);
+  const [isCollectingAlbums, setIsCollectingAlbums] = useState(false);
+  const [updateStates, setUpdateStates] = useState<
+    Record<string, { source: string; message: string; time: number }>
+  >({});
+
+  const rememberUpdate = (mpId: string, source: string, message: string) => {
+    setUpdateStates((previous) => ({
+      ...previous,
+      [mpId]: { source, message, time: Date.now() },
+    }));
+  };
 
   const { mutateAsync: updateOrder } = trpc.feed.updateOrder.useMutation();
 
@@ -177,6 +189,7 @@ const Feeds = () => {
           description: `公众号 ${item.name}`,
         });
         await queryUtils.article.list.reset();
+        await queryUtils.article.summary.invalidate();
       } else {
         toast.error('添加失败', { description: '请检查链接是否正确' });
       }
@@ -217,6 +230,18 @@ const Feeds = () => {
   const currentMpInfo = useMemo(() => {
     return feedData?.items.find((item) => item.id === currentMpId);
   }, [currentMpId, feedData?.items]);
+  const currentUpdate = updateStates[currentMpId];
+  const currentAlbumIds = useMemo<string[]>(() => {
+    try {
+      const ids: unknown = JSON.parse(currentMpInfo?.publicAlbumIds || '[]');
+      return Array.isArray(ids)
+        ? ids.filter((item): item is string => typeof item === 'string')
+        : [];
+    } catch {
+      return [];
+    }
+  }, [currentMpInfo?.publicAlbumIds]);
+  const hasPublicAlbums = currentAlbumIds.length > 0;
 
   const handleExportOpml = async (ev) => {
     ev.preventDefault();
@@ -431,21 +456,24 @@ const Feeds = () => {
           ) : null}
         </div>
         <div className="mac-content">
-          <div className="mac-toolbar">
-            <div className="flex flex-1 items-center gap-2 overflow-hidden">
+          <div className="mac-toolbar !h-auto shrink-0 !flex-wrap !py-2">
+            <div className="flex min-w-0 basis-full items-center gap-2 overflow-hidden">
               <span className="truncate text-[15px] font-semibold">
                 {currentMpId ? currentMpInfo?.mpName || '加载中...' : '全部'}
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
               {currentMpInfo ? (
                 <div className="mr-4 flex items-center gap-4">
                   <div className="hidden whitespace-nowrap text-[14px] font-light text-neutral-400 lg:block">
-                    {currentMpInfo.localDirectory
-                      ? '本地导入：'
-                      : '封面预览模式'}{' '}
-                    {currentMpInfo.localDirectory && currentMpInfo.syncTime > 0
+                    {hasPublicAlbums
+                      ? '公开合集补采：'
+                      : currentMpInfo.localDirectory
+                        ? '本地导入：'
+                        : '封面预览模式'}{' '}
+                    {(hasPublicAlbums || currentMpInfo.localDirectory) &&
+                    currentMpInfo.syncTime > 0
                       ? dayjs(currentMpInfo.syncTime * 1e3).format(
                           'MM-DD HH:mm',
                         )
@@ -454,9 +482,11 @@ const Feeds = () => {
 
                   <Tooltip
                     content={
-                      currentMpInfo.localDirectory
-                        ? '定时读取已采集文件；新文章需先在 WeChatDownload 下载'
-                        : '定时查询封面预览，无法补齐多篇文章'
+                      hasPublicAlbums
+                        ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
+                        : currentMpInfo.localDirectory
+                          ? '定时读取已采集文件；新文章需先在 WeChatDownload 下载'
+                          : '定时查询封面预览，无法补齐多篇文章'
                     }
                   >
                     <div className="flex items-center">
@@ -555,13 +585,34 @@ const Feeds = () => {
                 </div>
               ) : null}
 
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                {currentMpInfo && (
+                  <PublicAlbums
+                    mpId={currentMpInfo.id}
+                    name={currentMpInfo.mpName}
+                    albumIds={currentAlbumIds}
+                    hasLocalDirectory={!!currentMpInfo.localDirectory}
+                    isDisabled={
+                      isGetArticlesLoading ||
+                      !!isRefreshAllMpArticlesRunning ||
+                      isCollectingAlbums
+                    }
+                    onBusyChange={setIsCollectingAlbums}
+                    onResult={(source, message) =>
+                      rememberUpdate(currentMpInfo.id, source, message)
+                    }
+                  />
+                )}
                 <LocalCollection
                   mpId={currentMpInfo?.id}
                   directory={currentMpInfo?.localDirectory}
                   name={currentMpInfo?.mpName}
                   search={search}
                   selectedIds={articleSelectedIds}
+                  onImported={(message) => {
+                    if (currentMpInfo)
+                      rememberUpdate(currentMpInfo.id, 'local', message);
+                  }}
                 />
                 {articleSelectedIds.size > 0 && (
                   <Button
@@ -604,23 +655,41 @@ const Feeds = () => {
 
                 {currentMpInfo ? (
                   <>
-                    <Tooltip content="更新此公众号文章">
+                    <Tooltip
+                      content={
+                        hasPublicAlbums
+                          ? '在线刷新已绑定的公开合集；合集外文章与次条完整性未验证'
+                          : currentMpInfo.localDirectory
+                            ? '重新读取绑定的本地文件；新增文章需先完成真实采集'
+                            : '查询封面预览；当前通道无法补齐历史与次条'
+                      }
+                    >
                       <Button
                         size="sm"
                         className="mac-btn-outline"
-                        isDisabled={isGetArticlesLoading}
+                        isDisabled={isGetArticlesLoading || isCollectingAlbums}
                         onPress={async () => {
                           const mpId = currentMpInfo.id;
                           try {
                             const results = await refreshMpArticles({ mpId });
                             await refetchFeedList();
                             await queryUtils.article.list.reset();
+                            await queryUtils.article.summary.invalidate();
                             if (results.every((r) => r.source === 'local'))
                               setRefreshedMpIds((prev) => [...prev, mpId]);
                             for (const result of results) {
+                              rememberUpdate(
+                                mpId,
+                                result.source,
+                                result.message,
+                              );
                               if (result.source === 'local')
                                 toast.success(result.message, {
                                   duration: 8000,
+                                });
+                              else if (result.source === 'error')
+                                toast.error(result.message, {
+                                  duration: 10000,
                                 });
                               else
                                 toast.warning(result.message, {
@@ -633,6 +702,11 @@ const Feeds = () => {
                               );
                             }, 3000);
                           } catch (e) {
+                            rememberUpdate(
+                              mpId,
+                              'error',
+                              e instanceof Error ? e.message : '更新失败',
+                            );
                             toast.error(
                               e instanceof Error ? e.message : '更新失败',
                             );
@@ -659,7 +733,7 @@ const Feeds = () => {
                           {isGetArticlesLoading
                             ? '更新中'
                             : refreshedMpIds.includes(currentMpInfo.id)
-                              ? '完成'
+                              ? '已读文件'
                               : '更新'}
                         </span>
                       </Button>
@@ -680,13 +754,24 @@ const Feeds = () => {
                       size="sm"
                       className="mac-btn-outline h-8"
                       isDisabled={
-                        isRefreshAllMpArticlesRunning || isGetArticlesLoading
+                        isRefreshAllMpArticlesRunning ||
+                        isGetArticlesLoading ||
+                        isCollectingAlbums
                       }
                       onPress={async () => {
                         try {
                           const results = await refreshMpArticles({});
                           await refetchFeedList();
                           await queryUtils.article.list.reset();
+                          await queryUtils.article.summary.invalidate();
+                          for (const result of results) {
+                            if ('id' in result && typeof result.id === 'string')
+                              rememberUpdate(
+                                result.id,
+                                result.source,
+                                result.message,
+                              );
+                          }
                           setIsRefreshedAll(
                             results.every((r) => r.source === 'local'),
                           );
@@ -736,7 +821,7 @@ const Feeds = () => {
                         {isRefreshAllMpArticlesRunning || isGetArticlesLoading
                           ? '更新中'
                           : isRefreshedAll
-                            ? '完成'
+                            ? '文件已读'
                             : '更新全部'}
                       </span>
                     </Button>
@@ -777,6 +862,53 @@ const Feeds = () => {
               </div>
             </div>
           </div>
+          {currentMpInfo && (
+            <div
+              role={currentUpdate?.source === 'error' ? 'alert' : 'status'}
+              className="border-b border-neutral-200 bg-neutral-50 px-4 py-3 text-sm dark:border-neutral-700 dark:bg-neutral-900"
+            >
+              <p
+                className={
+                  hasPublicAlbums
+                    ? 'font-medium text-orange-700 dark:text-orange-300'
+                    : 'font-medium'
+                }
+              >
+                {currentUpdate?.source === 'error'
+                  ? '本次更新失败 · 下方仍为已有存量'
+                  : hasPublicAlbums
+                    ? '公开合集补采 · 采集范围受限'
+                    : currentMpInfo.localDirectory
+                      ? '本地文件导入 · 完整采集范围未验证'
+                      : '封面预览 · 尚未接通完整采集'}
+              </p>
+              <p className="mt-1 text-neutral-500">
+                {hasPublicAlbums
+                  ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个公开合集；合集外文章和同次推送的次条完整性未验证。该通道不提供阅读、点赞或收藏。`
+                  : currentMpInfo.localDirectory
+                    ? '“更新”读取已下载文件，无法证明公众号最新文章、历史缺口和同次推送的次条已补齐。'
+                    : '当前更新仅查询封面预览，无法补齐多篇文章、历史缺口和同次推送的次条。下方包含此前保存的旧数据。'}
+                {(hasPublicAlbums || currentMpInfo.localDirectory) &&
+                currentMpInfo.syncTime > 0
+                  ? ` 上次${hasPublicAlbums ? '合集补采' : '文件导入'}：${dayjs(currentMpInfo.syncTime * 1e3).format('YYYY-MM-DD HH:mm')}。`
+                  : ''}
+              </p>
+              {currentUpdate && (
+                <p
+                  className={
+                    currentUpdate.source === 'error'
+                      ? 'mt-1 text-red-600'
+                      : currentUpdate.source === 'public-album'
+                        ? 'mt-1 text-orange-700 dark:text-orange-300'
+                        : 'mt-1 text-neutral-500'
+                  }
+                >
+                  本次操作 {dayjs(currentUpdate.time).format('HH:mm:ss')}：
+                  {currentUpdate.message}
+                </p>
+              )}
+            </div>
+          )}
           {isSearchOpen && (
             <div className="animate-in slide-in-from-top border-b-[0.5px] border-neutral-200 bg-neutral-50/80 px-4 py-3 backdrop-blur-md duration-200 dark:border-neutral-700 dark:bg-neutral-900/80">
               <Input

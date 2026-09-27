@@ -17,12 +17,14 @@ export default function LocalCollection({
   name,
   search,
   selectedIds,
+  onImported,
 }: {
   mpId?: string;
   directory?: string | null;
   name?: string;
   search: string;
   selectedIds: Set<string>;
+  onImported?: (message: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [directory, setDirectory] = useState('');
@@ -49,7 +51,7 @@ export default function LocalCollection({
           setOpen(true);
         }}
       >
-        本地采集
+        导入采集文件
       </Button>
       <Button
         size="sm"
@@ -110,6 +112,9 @@ export default function LocalCollection({
                 先预览，再导入。以后点击“更新”会重新读取此目录；新文章仍需先在下载工具中采集。
               </li>
             </ol>
+            <p className="text-warning-700 text-sm">
+              此入口只导入已有文件，不会登录微信或发起公众号批量采集。导入成功不代表历史、翻页及次条已完整获取。
+            </p>
             <Input
               label="采集目录完整路径"
               placeholder="D:\公众号采集\某公众号"
@@ -211,8 +216,10 @@ export default function LocalCollection({
                   await Promise.all([
                     utils.feed.list.invalidate(),
                     utils.article.list.reset(),
+                    utils.article.summary.invalidate(),
                   ]);
                   toast.success(result.message, { duration: 8000 });
+                  onImported?.(result.message);
                   setOpen(false);
                 } catch (e) {
                   toast.error(e instanceof Error ? e.message : String(e));

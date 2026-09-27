@@ -3,6 +3,11 @@ import { PrismaService } from '@server/prisma/prisma.service';
 import got, { Got } from 'got';
 import axios from 'axios';
 import { load } from 'cheerio';
+import {
+  articlePageRequest,
+  articlePublishTime,
+  articleContentHtml,
+} from '../collection/article-page';
 
 export class TokenInvalidError extends Error {
   constructor(accountId: string) {
@@ -365,7 +370,8 @@ export class WereadService {
       id: string;
       title: string;
       picUrl: string;
-      publishTime: number;
+      publishTime: number | null;
+      contentHtml?: string;
     }[]
   > {
     let cookies = this.parseToken(account.token, account.id);
@@ -500,35 +506,42 @@ export class WereadService {
 
     const picUrl =
       coverObj.pic || coverObj.cover || coverObj.picUrl || payload.picUrl || '';
-    let publishTime =
-      coverObj.updateTime ||
-      payload.updateTime ||
-      Math.floor(Date.now() / 1000);
+    // Cover updateTime describes the cover, not the article's publication.
+    // Unknown dates must never become the current collection time.
+    let publishTime: number | null = null;
+    let contentHtml: string | undefined;
+
+    try {
+      const html = await articlePageRequest(
+        `https://mp.weixin.qq.com/s/${encodeURIComponent(cleanArticleId)}`,
+        { retry: { limit: 0 } },
+      ).text();
+      publishTime = articlePublishTime(html);
+      contentHtml = articleContentHtml(html);
+    } catch {
+      // An upstream challenge or timeout is not publication metadata.
+    }
 
     // 尝试从 /web/mp/content 获取最准确的发布时间戳
     try {
-      const contentResp = await axios.get<string>(
-        `https://weread.qq.com/web/mp/content?reviewId=${encodeURIComponent(rawReviewId)}`,
-        {
-          headers: {
-            Cookie: cookieStr,
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-            Referer: 'https://weread.qq.com/',
+      if (publishTime == null) {
+        const contentResp = await axios.get<string>(
+          `https://weread.qq.com/web/mp/content?reviewId=${encodeURIComponent(rawReviewId)}`,
+          {
+            headers: {
+              Cookie: cookieStr,
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+              Referer: 'https://weread.qq.com/',
+            },
+            timeout: 6 * 1e3,
           },
-          timeout: 6 * 1e3,
-        },
-      );
-      if (contentResp.data) {
-        const ctMatch = contentResp.data.match(
-          /(?:create_time|ct|CreateTime)\s*[:=]\s*['"]?(\d{10})['"]?/i,
         );
-        if (ctMatch && ctMatch[1]) {
-          publishTime = parseInt(ctMatch[1], 10);
-        }
+        publishTime = articlePublishTime(contentResp.data || '');
+        contentHtml ||= articleContentHtml(contentResp.data || '');
       }
     } catch {
-      // 容错，使用默认时间
+      // Leave the date unknown; callers preserve existing dates or skip insertion.
     }
 
     return [
@@ -536,7 +549,8 @@ export class WereadService {
         id: cleanArticleId,
         title: String(title),
         picUrl: String(picUrl),
-        publishTime: Number(publishTime),
+        publishTime,
+        contentHtml,
       },
     ];
   }

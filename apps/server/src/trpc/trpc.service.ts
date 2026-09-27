@@ -210,6 +210,12 @@ export class TrpcService {
     const feed = await this.prismaService.feed.findUniqueOrThrow({
       where: { id: mpId },
     });
+    if (feed.publicAlbumIds) {
+      return this.collectionService.collectPublicAlbums({
+        mpId,
+        albumIds: JSON.parse(feed.publicAlbumIds),
+      });
+    }
     if (feed.localDirectory) {
       return this.collectionService.importDirectory({
         directory: feed.localDirectory,
@@ -220,46 +226,32 @@ export class TrpcService {
       throw new Error('微信读书封面接口不支持翻页，请使用本地采集导入历史文章');
     const articles = await this.getMpArticles(mpId, page);
 
-    if (articles.length > 0) {
-      let results;
-      const { type } =
-        this.configService.get<ConfigurationType['database']>('database')!;
-      if (type === 'sqlite') {
-        // sqlite3 不支持 createMany
-        const inserts = articles.map(({ id, picUrl, publishTime, title }) =>
-          this.prismaService.article.upsert({
-            create: { id, mpId, picUrl, publishTime, title },
-            update: {
-              publishTime,
-              title,
-            },
+    let saved = 0;
+    let skippedUnknownDate = 0;
+    const unknownDates = articles.filter((a) => a.publishTime == null).length;
+    await this.prismaService.$transaction(async (tx) => {
+      for (const { id, picUrl, publishTime, title, contentHtml } of articles) {
+        const existing = await tx.article.findUnique({ where: { id } });
+        if (existing) {
+          await tx.article.update({
             where: { id },
-          }),
-        );
-        this.logger.log(
-          `Upserting ${articles.length} articles for mpId: ${mpId}`,
-        );
-        results = await this.prismaService.$transaction(inserts);
-      } else {
-        this.logger.log(
-          `Creating many (${articles.length}) articles for mpId: ${mpId}`,
-        );
-        results = await (this.prismaService.article as any).createMany({
-          data: articles.map(({ id, picUrl, publishTime, title }) => ({
-            id,
-            mpId,
-            picUrl,
-            publishTime,
-            title,
-          })),
-          skipDuplicates: true,
-        });
+            data: {
+              title,
+              contentHtml,
+              ...(publishTime == null ? {} : { publishTime }),
+            },
+          });
+          saved++;
+        } else if (publishTime != null) {
+          await tx.article.create({
+            data: { id, mpId, picUrl, publishTime, title, contentHtml },
+          });
+          saved++;
+        } else {
+          skippedUnknownDate++;
+        }
       }
-
-      this.logger.log(
-        `refreshMpArticlesAndUpdateFeed results: ${JSON.stringify(results)}`,
-      );
-    }
+    });
 
     // A cover is a preview, never evidence that history is exhausted.
     const hasHistory = -1;
@@ -275,7 +267,10 @@ export class TrpcService {
       hasHistory,
       source: 'cover' as const,
       articles: articles.length,
-      message: `仅取得封面预览 ${articles.length} 篇，不代表完整更新。请通过“本地采集”接入 WeChatDownload。`,
+      saved,
+      skippedUnknownDate,
+      unknownDates,
+      message: `仅取得封面预览 ${articles.length} 篇，不代表完整更新。${unknownDates ? `其中 ${unknownDates} 篇未取得真实发布时间；已有记录保留原日期，${skippedUnknownDate} 篇新记录未写入。` : ''}已有下载文件可通过“导入采集文件”接入。`,
     };
   }
 
@@ -288,6 +283,12 @@ export class TrpcService {
     const feed = await this.prismaService.feed.findUniqueOrThrow({
       where: { id: mpId },
     });
+    if (feed.publicAlbumIds) {
+      return this.collectionService.collectPublicAlbums({
+        mpId,
+        albumIds: JSON.parse(feed.publicAlbumIds),
+      });
+    }
     if (!feed.localDirectory)
       throw new Error(
         '微信读书封面接口无法补齐历史文章，请先导入 WeChatDownload 本地采集目录',

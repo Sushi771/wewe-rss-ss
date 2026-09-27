@@ -292,6 +292,7 @@ export class FeedsService {
         hasHistory: -1,
         order: 0,
         localDirectory: null,
+        publicAlbumIds: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };

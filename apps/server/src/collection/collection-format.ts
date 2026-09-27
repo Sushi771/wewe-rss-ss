@@ -180,7 +180,9 @@ export function metricsMarkdown(article: {
   return (
     `# ${article.title.replace(/[\r\n]/g, ' ')}\n\n原文：${article.sourceUrl || `https://mp.weixin.qq.com/s/${article.id}`}\n\n` +
     `| 指标 | 数值 | 数据文件时间（UTC） |\n| --- | --- | --- |\n${lines.join('\n')}\n\n` +
-    `数据来源：WeChatDownload 导入（未提供的指标留空；带“+”为下限，文件时间不是精确采集时间）。\n\n`
+    (Object.keys(metrics).length
+      ? `指标来源：WeChatDownload CSV 导入（未提供的指标留空；带“+”为下限，文件时间不是精确采集时间）。\n\n`
+      : `指标来源：未获取。原文链接或公开合集不代表已取得阅读、点赞或收藏数据。\n\n`)
   );
 }
 

@@ -135,3 +135,6 @@ dist
 portable-build/
 WeWe-RSS-Portable-*.zip
 
+# Local browser acceptance evidence (may contain personal subscription data)
+output/playwright/
+
