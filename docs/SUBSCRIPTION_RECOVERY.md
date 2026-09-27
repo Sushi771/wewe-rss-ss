@@ -1,0 +1,81 @@
+# 公众号订阅恢复调查（2026-09-27）
+
+## 当前状态
+
+**已实现用户选择的免费本地批量导入路径；微信读书原生多篇接口仍未恢复。** WeChatDownload 负责采集，WeWe-RSS 负责读取本地 CSV/HTML、保存文章与指标、提供 RSS 和 Markdown/Obsidian 导出。原有文章库与启动入口保留。
+
+后端 13 项测试及前后端构建通过；作者公开 CSV 样本单次导入 30 篇，重复导入新增 0 篇，匹配到样本中的 1 篇 HTML 正文。样本测试使用临时数据库，没有混入个人文章库。用户实际公众号的当前采集、Edge 界面操作尚待验证，不能把样本兼容性等同于实时采集成功。使用方法见 [LOCAL_COLLECTION.md](./LOCAL_COLLECTION.md)。
+
+## 项目结构与原故障原因（修复前）
+
+- `apps/web`：React/Vite 管理界面。
+- `apps/server`：NestJS、tRPC、Prisma 后端；本机使用 SQLite。
+- `WereadService.getMpArticles` 当前请求 `/api/mp/cover`，最后固定返回一个元素的数组，`page` 参数未参与请求。封面接口不能提供公众号的完整文章列表。
+- `TrpcService.refreshMpArticlesAndUpdateFeed` 将返回数量小于 20 解释为历史同步结束。封面接口始终最多一篇，因此错误写入 `hasHistory=0`。
+- `getHistoryMpArticles` 遇到 `hasHistory=0` 立即退出，而且以数据库文章数推算远端页码；对残缺数据和多图文推送都不可靠。
+- 前端单号更新统一提示“更新完成”；批量更新在服务端吞掉单号异常后也会显示成功，不能反映采集能力受限。
+- `启动WeWe-RSS.bat` 只执行 `start:server`，运行 `apps/server/dist`，并不编译源码。功能改动必须重新构建并重启才能生效。
+
+## 本机实测
+
+测试对象包括用户反馈的公众号。测试输出仅保留状态、错误码、响应结构，不记录 Cookie、Token、二维码授权码或验证码凭据。
+
+| 测试 | 结果 | 能得出的结论 |
+| --- | --- | --- |
+| 微信读书 `/api/mp/cover` | HTTP 200，单篇 `reviewId` 和标题 | 当前封面轮询可用，但不能补齐同一时间段的其他文章 |
+| 旧 Web 凭据请求 `/web/mp/articles` | `-2012` | 旧凭据不能正常访问文章列表 |
+| 用户重新扫码，客户端登录及续期 | 成功 | 新登录流程可取得有效客户端凭据 |
+| 新凭据读取 `/shelf/sync` | 成功，返回用户书架及公众号 | 账号登录有效；不能把所有列表失败都解释成登录过期 |
+| 新凭据请求 `/mp/chapters` | HTTP 499，`-2041` | 当前客户端文章目录请求受限制 |
+| 新凭据请求 `/web/mp/articles` | HTTP 200，业务错误 `-2041` | HTTP 200 不等于业务成功 |
+| 用户完成腾讯官方验证组件，附带 ticket/randstr 重试 | 仍为 `-2041` | 本次人工验证未恢复列表；不能宣称扫码或验证码即可解决 |
+
+微信读书官方阅读页加载的脚本仍包含 `/web/mp/articles` 及 `-2041` 的人工验证分支。
+所以仅凭 `-2041` 不能断言该接口对所有账号永久关闭，也不能证明它现在可用于本项目。
+2026-09-26 更新记录中“接口已废弃”的绝对表述需要结合这一实测修正。
+
+## GitHub 方案核查
+
+核查日期：2026-09-27。以下功能声明来自项目作者；未在本机成功采集前，不将其视为验收通过。
+
+| 方案 | 核查结果 | 本项目适用性 |
+| --- | --- | --- |
+| [wechat-article-exporter](https://github.com/wechat-article/wechat-article-exporter) | 作者宣布 2026-07-30 停止维护，核心公众号后台列表接口关闭；凭据通道仍需较多手工操作 | 不作为可直接替换的自动订阅方案 |
+| [we-mp-rss](https://github.com/rachelos/we-mp-rss) | 仍有开发活动，但近期存在授权后不能同步的反馈；其 `weread_mp` 文档也说明 cover 模式仅取最新一篇 | 更换整个应用不能证明问题会消失；用户也没有公众号后台账号 |
+| [WeChatDownload](https://github.com/qiye45/wechatDownload) | 作者提供批量下载、Markdown/CSV 导出、阅读/点赞等指标与本地 MCP；需要在电脑微信打开链接取得临时凭据。仓库主要提供说明和工具分发，不应称为完整开源采集后端 | 候选：本地批量采集，再接入现有资料库和导出；不能等同无人值守订阅 |
+| [Wechat2RSS](https://wechat2rss.xlab.app/deploy/) | 作者提供全文 RSS 私有部署，授权价格为 15 元/月或 150 元/年，软件授权不含托管 | 候选：验证后通过 RSS/API 接入现有界面和导出；购买由用户决定 |
+
+相关一手资料：
+
+- [Exporter 停止维护说明](https://github.com/wechat-article/wechat-article-exporter/issues/200)
+- [WeRSS 微信读书采集说明](https://github.com/rachelos/we-mp-rss/blob/main/docs/weread-mp.md)
+- [WeRSS 近期无法同步反馈](https://github.com/rachelos/we-mp-rss/issues/466)
+- [WeChatDownload 本地 MCP 接口说明](https://github.com/qiye45/wechatDownload/blob/main/skills/wechat-article-downloader/SKILL.md)
+- [WeChatDownload 自动监听功能请求](https://github.com/qiye45/wechatDownload/issues/356)
+- [WeChatDownload 近期下载停滞反馈](https://github.com/qiye45/wechatDownload/issues/583)
+
+## 已实现的热度数据处理
+
+现在分别保存源文件提供的阅读量、点赞量、分享量、评论量、在看量、收藏量与来源文件时间。CSV 不能提供精确采集时间，因此不会将文件修改时间标成采集时间。
+
+- 作者文档声称支持的指标仍需用真实文章核验字段和含义。
+- “在看”“收藏”“分享”是不同指标，不能互相替代。
+- 未获取到的数值记为缺失，不用 0 冒充真实零值。
+- 公开页面的 `10万+` 属于下限展示，不能假定为精确的 100000。
+- 目前尚未验证可稳定获得他人公众号文章的收藏总数。
+- Markdown 可附元数据；另导出 CSV 供排序筛选。不能让获取热度数据失败阻止已有正文导出。
+
+## 验收与未完成项
+
+已自动验证：主/次条分开入库、重复去重、旧短链 ID 合并、损坏 CSV 拒绝且不部分写入、热度缺失/零值/下限区分、排序分页、RSS 长链接、本地正文与图片的 Obsidian 导出、封面与批量失败提示。原先三个测试骨架缺少依赖且断言过时，已补齐后纳入 13 项通过测试。
+
+仍需使用用户当前公众号采集文件完成下面第 1 项的现场采集确认，以及第 7 项的 Edge 交互确认。浏览器自动化接口连接失败，不能声称已完成 Edge 实测。
+
+1. 使用同一真实公众号，单次更新取得多篇不同文章，并确认包含同次推送的次条文章。
+2. 翻页不重复、不跳页；重复更新不产生重复记录。
+3. 修复历史状态：受限、失败、单篇封面不能标记为完整历史同步结束。
+4. 上游失败明确反馈，不更新完整同步成功状态、不无限重试。
+5. 原有 Markdown、Obsidian 导出及图片本地化通过实际文章验证。
+6. 若接入指标，验证缺失值、时间戳、阅读/点赞/在看/收藏的区分。
+7. 重新构建，通过现有 BAT 启动，在 Edge 验证更新与导出。
+8. 文档明确采集方式、必要手工步骤、费用和限制，再同步 GitHub。

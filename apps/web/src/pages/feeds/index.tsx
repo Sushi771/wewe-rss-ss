@@ -20,6 +20,7 @@ import { toast } from 'sonner';
 import dayjs from 'dayjs';
 import { serverOriginUrl } from '@web/utils/env';
 import ArticleList from './list';
+import LocalCollection from './collection';
 
 const Feeds = () => {
   const { id } = useParams();
@@ -433,12 +434,7 @@ const Feeds = () => {
           <div className="mac-toolbar">
             <div className="flex flex-1 items-center gap-2 overflow-hidden">
               <span className="truncate text-[15px] font-semibold">
-                {currentMpId ? currentMpInfo?.mpName || '加载中...' : '全部'} ·{' '}
-                {queryUtils.article.list.getInfiniteData({
-                  limit: 20,
-                  mpId: currentMpId,
-                  search: undefined,
-                })?.pages[0]?.items?.length || 0}
+                {currentMpId ? currentMpInfo?.mpName || '加载中...' : '全部'}
               </span>
             </div>
 
@@ -446,11 +442,23 @@ const Feeds = () => {
               {currentMpInfo ? (
                 <div className="mr-4 flex items-center gap-4">
                   <div className="hidden whitespace-nowrap text-[14px] font-light text-neutral-400 lg:block">
-                    最后更新:{' '}
-                    {dayjs(currentMpInfo.syncTime * 1e3).format('MM-DD HH:mm')}
+                    {currentMpInfo.localDirectory
+                      ? '本地导入：'
+                      : '封面预览模式'}{' '}
+                    {currentMpInfo.localDirectory && currentMpInfo.syncTime > 0
+                      ? dayjs(currentMpInfo.syncTime * 1e3).format(
+                          'MM-DD HH:mm',
+                        )
+                      : ''}
                   </div>
 
-                  <Tooltip content="自动同步">
+                  <Tooltip
+                    content={
+                      currentMpInfo.localDirectory
+                        ? '定时读取已采集文件；新文章需先在 WeChatDownload 下载'
+                        : '定时查询封面预览，无法补齐多篇文章'
+                    }
+                  >
                     <div className="flex items-center">
                       <Switch
                         size="sm"
@@ -548,6 +556,13 @@ const Feeds = () => {
               ) : null}
 
               <div className="flex items-center gap-2">
+                <LocalCollection
+                  mpId={currentMpInfo?.id}
+                  directory={currentMpInfo?.localDirectory}
+                  name={currentMpInfo?.mpName}
+                  search={search}
+                  selectedIds={articleSelectedIds}
+                />
                 {articleSelectedIds.size > 0 && (
                   <Button
                     size="sm"
@@ -597,18 +612,30 @@ const Feeds = () => {
                         onPress={async () => {
                           const mpId = currentMpInfo.id;
                           try {
-                            await refreshMpArticles({ mpId });
+                            const results = await refreshMpArticles({ mpId });
                             await refetchFeedList();
                             await queryUtils.article.list.reset();
-                            setRefreshedMpIds((prev) => [...prev, mpId]);
-                            toast.success('更新完成');
+                            if (results.every((r) => r.source === 'local'))
+                              setRefreshedMpIds((prev) => [...prev, mpId]);
+                            for (const result of results) {
+                              if (result.source === 'local')
+                                toast.success(result.message, {
+                                  duration: 8000,
+                                });
+                              else
+                                toast.warning(result.message, {
+                                  duration: 10000,
+                                });
+                            }
                             setTimeout(() => {
                               setRefreshedMpIds((prev) =>
                                 prev.filter((id) => id !== mpId),
                               );
                             }, 3000);
                           } catch (e) {
-                            toast.error('更新失败');
+                            toast.error(
+                              e instanceof Error ? e.message : '更新失败',
+                            );
                           }
                         }}
                       >
@@ -657,14 +684,35 @@ const Feeds = () => {
                       }
                       onPress={async () => {
                         try {
-                          await refreshMpArticles({});
+                          const results = await refreshMpArticles({});
                           await refetchFeedList();
                           await queryUtils.article.list.reset();
-                          setIsRefreshedAll(true);
-                          toast.success('全部更新完成');
+                          setIsRefreshedAll(
+                            results.every((r) => r.source === 'local'),
+                          );
+                          const complete = results.filter(
+                            (r) => r.source === 'local',
+                          ).length;
+                          const incomplete = results.filter(
+                            (r) => r.source !== 'local',
+                          );
+                          if (incomplete.length)
+                            toast.warning(
+                              `本地导入完成 ${complete} 个；${incomplete.length} 个未完成完整同步`,
+                              {
+                                description: incomplete
+                                  .map((r) => r.message)
+                                  .join('；'),
+                                duration: 12000,
+                              },
+                            );
+                          else
+                            toast.success(`本地导入完成 ${complete} 个公众号`);
                           setTimeout(() => setIsRefreshedAll(false), 3000);
                         } catch (e) {
-                          toast.error('更新失败');
+                          toast.error(
+                            e instanceof Error ? e.message : '更新失败',
+                          );
                         }
                       }}
                     >

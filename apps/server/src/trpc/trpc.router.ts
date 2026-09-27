@@ -21,6 +21,13 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import pMap from '@cjs-exporter/p-map';
 import { WereadService } from '@server/weread/weread.service';
+import { CollectionService } from '../collection/collection.service';
+import {
+  csvCell,
+  metricLabels,
+  Metrics,
+  metricsMarkdown,
+} from '../collection/collection-format';
 
 @Injectable()
 export class TrpcRouter {
@@ -29,9 +36,124 @@ export class TrpcRouter {
     private readonly prismaService: PrismaService,
     private readonly configService: ConfigService,
     private readonly wereadService: WereadService,
+    private readonly collectionService: CollectionService,
   ) {}
 
   private readonly logger = new Logger(this.constructor.name);
+
+  collectionRouter = this.trpcService.router({
+    preview: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          directory: z.string().min(1).max(1000),
+          mpId: z.string().optional(),
+          mpName: z.string().max(100).optional(),
+        }),
+      )
+      .mutation(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '本地采集只能在服务器本机操作',
+          });
+        return this.collectionService.preview(input);
+      }),
+    importDirectory: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          directory: z.string().min(1).max(1000),
+          mpId: z.string().optional(),
+          mpName: z.string().max(100).optional(),
+        }),
+      )
+      .mutation(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '本地采集只能在服务器本机操作',
+          });
+        return this.collectionService.importDirectory(input);
+      }),
+    exportMetrics: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          mpId: z.string().optional(),
+          search: z.string().optional(),
+          ids: z.array(z.string()).max(5000).optional(),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        const where = {
+          mpId: input.mpId || undefined,
+          id: input.ids ? { in: input.ids } : undefined,
+          ...(input.search
+            ? {
+                OR: [
+                  { title: { contains: input.search } },
+                  { feed: { mpName: { contains: input.search } } },
+                ],
+              }
+            : {}),
+        };
+        const count = await this.prismaService.article.count({ where });
+        if (count > 10000)
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: '单次最多导出 10000 篇，请选择公众号或缩小搜索范围',
+          });
+        const articles = await this.prismaService.article.findMany({
+          where,
+          orderBy: [{ publishTime: 'desc' }, { id: 'desc' }],
+          select: {
+            id: true,
+            title: true,
+            sourceUrl: true,
+            publishTime: true,
+            metrics: true,
+            feed: { select: { mpName: true } },
+          },
+        });
+        const keys = Object.keys(metricLabels) as (keyof Metrics)[];
+        const rows: unknown[][] = [
+          [
+            '标题',
+            '公众号',
+            '链接',
+            '发布时间（北京时间）',
+            ...keys.flatMap((k) => [
+              `${metricLabels[k]}（原始值）`,
+              `${metricLabels[k]}（数值/下限）`,
+              `${metricLabels[k]}数据文件时间（UTC）`,
+            ]),
+            '数据来源',
+          ],
+        ];
+        for (const a of articles) {
+          const metrics: Metrics = JSON.parse(a.metrics || '{}');
+          rows.push([
+            a.title,
+            a.feed.mpName,
+            a.sourceUrl || `https://mp.weixin.qq.com/s/${a.id}`,
+            new Date(a.publishTime * 1000 + 8 * 3600000)
+              .toISOString()
+              .slice(0, 19)
+              .replace('T', ' '),
+            ...keys.flatMap((k) => [
+              metrics[k]?.display ?? '',
+              metrics[k]?.value ?? '',
+              metrics[k]?.fileTime ?? '',
+            ]),
+            a.sourceUrl ? 'WeChatDownload' : '未提供',
+          ]);
+        }
+        return {
+          csv:
+            '\uFEFF' +
+            rows.map((row) => row.map(csvCell).join(',')).join('\r\n'),
+          count: articles.length,
+        };
+      }),
+  });
 
   accountRouter = this.trpcService.router({
     list: this.trpcService.protectedProcedure
@@ -234,9 +356,9 @@ export class TrpcRouter {
       )
       .mutation(async ({ input: { mpId } }) => {
         if (mpId) {
-          await this.trpcService.refreshMpArticlesAndUpdateFeed(mpId);
+          return [await this.trpcService.refreshMpArticlesAndUpdateFeed(mpId)];
         } else {
-          await this.trpcService.refreshAllMpArticlesAndUpdateFeed();
+          return this.trpcService.refreshAllMpArticlesAndUpdateFeed();
         }
       }),
 
@@ -252,7 +374,7 @@ export class TrpcRouter {
         }),
       )
       .mutation(async ({ input: { mpId = '' } }) => {
-        this.trpcService.getHistoryMpArticles(mpId);
+        return this.trpcService.getHistoryMpArticles(mpId);
       }),
     getInProgressHistoryMp: this.trpcService.protectedProcedure.query(
       async () => {
@@ -280,8 +402,9 @@ export class TrpcRouter {
         const items = await this.prismaService.article.findMany({
           orderBy: [
             {
-              publishTime: 'desc',
+              [input.sort || 'publishTime']: 'desc',
             },
+            { id: 'desc' },
           ],
           take: limit + 1,
           where,
@@ -290,7 +413,16 @@ export class TrpcRouter {
                 id: cursor,
               }
             : undefined,
-          include: {
+          select: {
+            id: true,
+            mpId: true,
+            title: true,
+            picUrl: true,
+            publishTime: true,
+            sourceUrl: true,
+            metrics: true,
+            readCount: true,
+            likeCount: true,
             feed: true,
           },
         });
@@ -360,8 +492,10 @@ export class TrpcRouter {
               if (!fs.existsSync(finalPath)) {
                 await fs.promises.mkdir(finalPath, { recursive: true });
               }
-              const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-');
-              const filePath = path.join(finalPath, `${safeTitle}.md`);
+              const safeTitle = title
+                .replace(/[\\/:*?"<>|]/g, '-')
+                .slice(0, 100);
+              const filePath = path.join(finalPath, `${safeTitle}-${id}.md`);
               await fs.promises.writeFile(filePath, markdown);
               this.logger.log(
                 `Auto-saved to Obsidian during export: ${filePath}`,
@@ -401,20 +535,19 @@ export class TrpcRouter {
           this.configService.get<ConfigurationType['feed']>('feed')!;
 
         try {
-          const { markdown, title } = await this.getArticleMarkdown(
-            id,
-            obsidianPath,
-          );
-
           const dateFolder = dayjs().format('YYYY-MM-DD');
           const finalPath = path.join(obsidianPath, dateFolder);
+          const { markdown, title } = await this.getArticleMarkdown(
+            id,
+            finalPath,
+          );
 
           if (!fs.existsSync(finalPath)) {
             await fs.promises.mkdir(finalPath, { recursive: true });
           }
 
-          const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-');
-          const filePath = path.join(finalPath, `${safeTitle}.md`);
+          const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 100);
+          const filePath = path.join(finalPath, `${safeTitle}-${id}.md`);
 
           await fs.promises.writeFile(filePath, markdown);
 
@@ -431,6 +564,13 @@ export class TrpcRouter {
   });
 
   private async downloadImage(url: string, destPath: string) {
+    const inline = url.match(
+      /^data:image\/(png|jpeg|gif|webp);base64,([A-Za-z0-9+/=]+)$/,
+    );
+    if (inline) {
+      await fs.promises.writeFile(destPath, Buffer.from(inline[2], 'base64'));
+      return;
+    }
     const response = await got(url, {
       responseType: 'buffer',
       headers: {
@@ -450,7 +590,7 @@ export class TrpcRouter {
       throw new Error(`No article with id '${id}'`);
     }
 
-    const url = `https://mp.weixin.qq.com/s/${id}`;
+    const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
     const request = got.extend({
       retry: { limit: 3, methods: ['GET'] },
@@ -475,9 +615,9 @@ export class TrpcRouter {
       },
     });
 
-    let html = '';
+    let html = article.contentHtml || '';
     try {
-      html = await request(url, { responseType: 'text' }).text();
+      if (!html) html = await request(url, { responseType: 'text' }).text();
     } catch (err: any) {
       this.logger.warn(
         `Direct fetch from ${url} failed: ${err.message}, trying weread...`,
@@ -488,10 +628,9 @@ export class TrpcRouter {
       !html ||
       (!html.includes('rich_media_content') && !html.includes('js_content'))
     ) {
-      const wereadHtml = await this.wereadService.getArticleContent(
-        id,
-        article.mpId,
-      );
+      const wereadHtml =
+        !article.sourceUrl &&
+        (await this.wereadService.getArticleContent(id, article.mpId));
       if (wereadHtml) {
         html = wereadHtml;
       }
@@ -508,6 +647,14 @@ export class TrpcRouter {
     const contentEl = $('.rich_media_content').length
       ? $('.rich_media_content')
       : $('#js_content');
+    if (
+      !contentEl.length ||
+      (!contentEl.text().trim() && !contentEl.find('img').length)
+    ) {
+      throw new Error(
+        '未获取到正文，请在 WeChatDownload 下载对应 HTML 后重新导入',
+      );
+    }
 
     if (downloadPath) {
       const attachmentsDir = path.join(downloadPath, 'attachments');
@@ -522,11 +669,14 @@ export class TrpcRouter {
           const $img = $(img);
           const dataSrc = $img.attr('data-src') || $img.attr('src');
           if (dataSrc) {
-            const ext = dataSrc.includes('wx_fmt=')
-              ? dataSrc.split('wx_fmt=')[1].split('&')[0]
-              : 'jpg';
+            const ext = dataSrc.startsWith('data:image/')
+              ? dataSrc.slice(11).split(';')[0]
+              : dataSrc.includes('wx_fmt=')
+                ? dataSrc.split('wx_fmt=')[1].split('&')[0]
+                : 'jpg';
             const hash = crypto.createHash('md5').update(dataSrc).digest('hex');
-            const fileName = `image_${hash}.${ext}`;
+            const safeExt = /^(png|jpe?g|gif|webp)$/.test(ext) ? ext : 'jpg';
+            const fileName = `image_${hash}.${safeExt}`;
             const localPath = path.join(attachmentsDir, fileName);
 
             try {
@@ -554,9 +704,9 @@ export class TrpcRouter {
         const $img = $(img);
         const dataSrc = $img.attr('data-src') || $img.attr('src');
         if (dataSrc) {
-          const proxyUrl = `${serverHost}/proxy/image?url=${encodeURIComponent(
-            dataSrc,
-          )}`;
+          const proxyUrl = dataSrc.startsWith('data:image/')
+            ? dataSrc
+            : `${serverHost}/proxy/image?url=${encodeURIComponent(dataSrc)}`;
           $img.attr('src', proxyUrl);
         }
       });
@@ -569,7 +719,7 @@ export class TrpcRouter {
 
     return {
       title: article.title,
-      markdown: markdown || '获取全文内容失败，可能该文章类型不支持。',
+      markdown: (article.sourceUrl ? metricsMarkdown(article) : '') + markdown,
     };
   }
 
@@ -636,6 +786,7 @@ export class TrpcRouter {
     account: this.accountRouter,
     article: this.articleRouter,
     platform: this.platformRouter,
+    collection: this.collectionRouter,
   });
 
   async applyMiddleware(app: INestApplication) {
@@ -654,6 +805,14 @@ export class TrpcRouter {
           }
           return {
             errorMsg: null,
+            isLocal:
+              ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
+                req.socket.remoteAddress || '',
+              ) &&
+              (!req.headers.origin ||
+                /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(
+                  req.headers.origin,
+                )),
           };
         },
         middleware: (req, res, next) => {

@@ -132,12 +132,17 @@ export class FeedsService {
     return html;
   }
 
-  async tryGetContent(id: string) {
+  async tryGetContent(
+    id: string,
+    sourceUrl?: string | null,
+    contentHtml?: string | null,
+  ) {
+    if (contentHtml) return contentHtml;
     let content = mpCache.get(id);
     if (content) {
       return content;
     }
-    const url = `https://mp.weixin.qq.com/s/${id}`;
+    const url = sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
     content = await this.getHtmlByUrl(url).catch((e) => {
       this.logger.error(`getHtmlByUrl(${url}) error: ${e.message}`);
 
@@ -196,14 +201,18 @@ export class FeedsService {
 
     const mapper = async (item) => {
       const { title, id, publishTime, picUrl, mpId } = item;
-      const link = `https://mp.weixin.qq.com/s/${id}`;
+      const link = item.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
       const mpName = feeds.find((item) => item.id === mpId)?.mpName || '-';
       const published = new Date(publishTime * 1e3);
 
       let content = '';
       if (enableFullText) {
-        content = await this.tryGetContent(id);
+        content = await this.tryGetContent(
+          id,
+          item.sourceUrl,
+          item.contentHtml,
+        );
       }
 
       feed.addItem({
@@ -282,6 +291,7 @@ export class FeedsService {
         updateTime: Math.floor(Date.now() / 1e3),
         hasHistory: -1,
         order: 0,
+        localDirectory: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };

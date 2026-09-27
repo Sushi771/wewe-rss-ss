@@ -31,6 +31,7 @@ model Feed {
   updatedAt  DateTime? @default(now()) @updatedAt @map("updated_at")
   hasHistory Int?      @default(1) @map("has_history")
   order      Int       @default(0) @map("order")
+  localDirectory String? @map("local_directory")
   articles   Article[]
 
   @@map("feeds")
@@ -42,6 +43,11 @@ model Article {
   title       String    @map("title")
   picUrl      String    @map("pic_url")
   publishTime Int       @map("publish_time")
+  sourceUrl   String?   @unique @map("source_url")
+  contentHtml String?   @map("content_html")
+  metrics     String?   @map("metrics")
+  readCount   Int?      @map("read_count")
+  likeCount   Int?      @map("like_count")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime? @default(now()) @updatedAt @map("updated_at")
   feed        Feed      @relation(fields: [mpId], references: [id], onDelete: Cascade)

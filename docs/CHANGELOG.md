@@ -2,12 +2,23 @@
 
 All notable changes to the WeWe-RSS project will be documented in this file.
 
+## [2026-09-27] - 本地多篇采集与热度导出
+
+- 新增 WeChatDownload 采集目录预览、批量导入和目录绑定。支持 UTF-8 CSV、HTML 正文、目录内图片，同次推送的不同 idx 分别入库；重复导入更新已有文章及指标。
+- 公众号绑定目录后，“更新”和定时任务读取本地已采集文件。新文章仍需在下载工具中采集，不声称恢复了微信读书无人值守多篇订阅。
+- 修复封面单篇被当作完整更新、错误标记历史已结束、批量更新吞掉单号错误的问题。未绑定目录时明确提示“封面预览”。识别上游 errCode / errcode 错误。
+- 保存原文长链接，文章列表与 RSS 使用真实来源地址。优先用已导入正文导出 Markdown / Obsidian；缺正文时明确失败，不再把失败提示文本当成功全文。
+- 新增阅读/点赞排序及热度 CSV；分别记录阅读、点赞、分享、评论、在看、收藏。源文件缺失项留空，0 保留为 0，10万+ 保留下限标记；记录文件时间，不冒充精确采集时间。公开示例没有收藏量。
+- 修复 Obsidian 当日目录附件相对路径，导出文件名包含文章 ID 避免同名覆盖。
+- Windows 启动脚本新增源码变更检测、数据库备份、构建及迁移，构建失败停止启动，避免继续运行旧 dist。
+- 调查与使用说明见 [SUBSCRIPTION_RECOVERY.md](./SUBSCRIPTION_RECOVERY.md) 和 [LOCAL_COLLECTION.md](./LOCAL_COLLECTION.md)。真实账号采集、Edge 界面验收仍待完成。
+
 ## [2026-09-26] - WeRead Native Auth Architecture & MP Article Link/Content Fixes
 
 ### 🌟 Background & Root Cause
 
 - **External Proxy 502 Outage**: Previously, the project routed login and sync requests through an external relay (`https://weread.111965.xyz`). That service permanently shut down, causing `502 Bad Gateway` and blocking all logins.
-- **WeRead Deprecated `/web/mp/articles`**: WeRead decommissioned its old public account article list endpoint (which now constantly returns `-2041`). The community standard shifted to incremental cover polling via `/api/mp/cover`.
+- **WeRead Deprecated `/web/mp/articles`**: The local article-list request returned `-2041`, so the adapter was changed to `/api/mp/cover`. September 27 correction: the official reader still references the article-list route; this error does not prove permanent decommissioning, and cover polling cannot provide complete multi-article synchronization.
 - **WeChat Article Link "参数错误"**: WeRead returns compound review IDs (`MP_WXS_<mpId>_<token>`) and replaces URL-safe underscores `_` with tildes `~`. Appending these raw strings to `https://mp.weixin.qq.com/s/...` caused WeChat to return "参数错误".
 - **Content Reading & Export Failures**: Direct requests to WeChat articles trigger anti-scraping verification challenges (`secitptpage/verify.html`), causing Markdown and Obsidian exports to fail.
 
@@ -23,7 +34,7 @@ All notable changes to the WeWe-RSS project will be documented in this file.
   - Migrated existing database articles to use standard 22-character tokens.
 - **Dual-Layer Fulltext Extraction & Markdown Export**:
   - Implemented fallback mechanism: direct WeChat fetch $\to$ WeRead native `/web/mp/content` API.
-  - Seamlessly bypasses WeChat anti-bot verification challenges, ensuring 100% reliable Obsidian and Markdown exports.
+  - Attempts a WeRead fallback when direct HTML is unavailable. Both upstream paths can fail; this is not a guarantee of full-text availability.
   - Supports both `.rich_media_content` and `#js_content` DOM structures.
 - **Accurate Article Publish Timestamps**:
   - Automatically parses real publication timestamps from article HTML scripts instead of defaulting to sync execution time.

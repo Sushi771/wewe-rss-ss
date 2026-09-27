@@ -408,7 +408,12 @@ export class WereadService {
 
     if (
       resData &&
-      (resData.errcode === -2012 || resData.data?.errcode === -2012)
+      [
+        resData.errcode,
+        resData.errCode,
+        resData.data?.errcode,
+        resData.data?.errCode,
+      ].includes(-2012)
     ) {
       needRetryWithRenewal = true;
     }
@@ -457,9 +462,14 @@ export class WereadService {
     }
 
     // 解析最新文章信息
-    if (!resData) {
-      return [];
-    }
+    if (!resData) throw new Error('微信读书封面接口返回空响应');
+    const errorCode =
+      resData.errcode ||
+      resData.errCode ||
+      resData.data?.errcode ||
+      resData.data?.errCode;
+    if (errorCode === -2012) throw new TokenInvalidError(account.id);
+    if (errorCode) throw new Error(`微信读书接口返回 ${errorCode}，未完成更新`);
 
     const payload = resData.data || resData;
     const coverObj = payload.mpCover || payload.cover || payload;
@@ -472,7 +482,7 @@ export class WereadService {
       this.logger.warn(
         `No valid article found in weread cover response for ${mpId}`,
       );
-      return [];
+      throw new Error('微信读书封面未返回有效文章，未完成更新');
     }
 
     const rawReviewId = String(reviewId).trim();
@@ -488,7 +498,8 @@ export class WereadService {
     }
     const cleanArticleId = token.replace(/~/g, '_');
 
-    const picUrl = coverObj.cover || coverObj.picUrl || payload.picUrl || '';
+    const picUrl =
+      coverObj.pic || coverObj.cover || coverObj.picUrl || payload.picUrl || '';
     let publishTime =
       coverObj.updateTime ||
       payload.updateTime ||

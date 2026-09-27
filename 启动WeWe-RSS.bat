@@ -10,6 +10,13 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :4000 ^| findstr LISTENING') 
 )
 timeout /t 1 >nul
 
+node scripts\prepare-local.cjs
+if errorlevel 1 (
+    echo Build or database preparation failed.
+    pause
+    exit /b 1
+)
+
 start /b cmd /c "timeout /t 3 >nul && start http://localhost:4000/dash"
 call pnpm run start:server
 echo.

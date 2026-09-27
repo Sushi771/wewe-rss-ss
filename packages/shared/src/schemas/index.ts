@@ -64,6 +64,7 @@ export const ArticleSchemas = {
     cursor: z.string().nullish(),
     mpId: z.string().nullish(),
     search: z.string().nullish(),
+    sort: z.enum(['publishTime', 'readCount', 'likeCount']).optional(),
   }),
   add: z.object({
     id: z.string(),
