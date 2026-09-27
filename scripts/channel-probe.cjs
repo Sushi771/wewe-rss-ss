@@ -12,6 +12,15 @@ const root = path.join(
 );
 const executable = path.join(root, 'windows', '微信公众号批量下载工具4.7.exe');
 const archive = path.join(root, 'wechatDownload4.7.zip');
+// Packaged Codex can redirect LocalAppData into its package's LocalCache.
+// Check the actual physical path too; the logical path alone can mislead users.
+const physicalRoot = path.join(
+  os.homedir(),
+  'AppData', 'Local', 'Packages', 'OpenAI.Codex_2p2nqsd0c76g0',
+  'LocalCache', 'Local', 'WeWe-RSS', 'WeChatDownload-4.7',
+);
+const physicalExecutable = path.join(physicalRoot, 'windows', '微信公众号批量下载工具4.7.exe');
+const physicalArchive = path.join(physicalRoot, 'wechatDownload4.7.zip');
 const endpoint = 'http://127.0.0.1:4545/mcp';
 const expectedSha256 =
   '2f9dfb81f47ab82122f29beea05756d2f51cabc5eda4e1a24ecdc6f2e5292f48';
@@ -66,6 +75,10 @@ async function main() {
     checkedAt: new Date().toISOString(),
     executablePresent: fs.existsSync(executable),
     archivePresent: fs.existsSync(archive),
+    physicalExecutablePath: physicalExecutable,
+    physicalExecutablePresent: fs.existsSync(physicalExecutable),
+    physicalArchivePath: physicalArchive,
+    physicalArchivePresent: fs.existsSync(physicalArchive),
     archiveSha256: null,
     matchesOfficial47Archive: null,
     mcpReachable: false,

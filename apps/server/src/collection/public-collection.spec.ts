@@ -172,6 +172,14 @@ describe('public album integration in isolated SQLite', () => {
         sourceUrl: articles[0].url,
       },
     });
+    (fetchPublicAlbums as jest.Mock).mockResolvedValueOnce({
+      articles: articles.map((article) => ({
+        ...article,
+        url: article.url.split('&sn=')[0],
+      })),
+      pages: 2,
+      albums: [{ id: albumIds[0], title: '测试合集', pages: 2, articles: 2 }],
+    });
     expect(await service.collectPublicAlbums({ mpId, albumIds })).toMatchObject(
       { created: 0, updated: 2, merged: 1 },
     );
@@ -182,6 +190,7 @@ describe('public album integration in isolated SQLite', () => {
       await prisma.article.findUniqueOrThrow({ where: { id: 'legacy-short' } }),
     ).toMatchObject({
       publishTime: time,
+      sourceUrl: articles[0].url,
       readCount: 5,
       likeCount: 0,
       contentHtml: '<div id="js_content">保留正文</div>',
@@ -212,5 +221,83 @@ describe('public album integration in isolated SQLite', () => {
     expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
       beforeArticles,
     );
+  });
+  it('persists explicit album collection coverage without collecting twice and records failures', async () => {
+    const callsBefore = (fetchPublicAlbums as jest.Mock).mock.calls.length;
+    expect(await trpc.collectPublicAlbums({ mpId, albumIds })).toMatchObject({
+      status: 'partial',
+      complete: false,
+      coverage: 'selected-albums',
+    });
+    expect((fetchPublicAlbums as jest.Mock).mock.calls.length).toBe(
+      callsBefore + 1,
+    );
+    expect(
+      JSON.parse(
+        (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }))
+          .lastCollectionResult!,
+      ),
+    ).toMatchObject({
+      source: 'public-album',
+      status: 'partial',
+      complete: false,
+    });
+    (fetchPublicAlbums as jest.Mock).mockRejectedValueOnce(
+      new Error('公开合集返回验证页或无效列表，本次未写入'),
+    );
+    await expect(trpc.collectPublicAlbums({ mpId, albumIds })).rejects.toThrow(
+      '公开合集返回验证页',
+    );
+    expect(
+      JSON.parse(
+        (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }))
+          .lastCollectionResult!,
+      ),
+    ).toMatchObject({
+      source: 'error',
+      status: 'failed',
+      complete: false,
+    });
+  });
+  it('preserves the running operation status when a concurrent update is rejected', async () => {
+    let resolvePage!: (value: unknown) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    (fetchPublicAlbums as jest.Mock).mockImplementationOnce(() => {
+      markStarted();
+      return new Promise((resolve) => {
+        resolvePage = resolve;
+      });
+    });
+    const first = trpc.collectPublicAlbums({ mpId, albumIds });
+    await started;
+    const running = (
+      await prisma.feed.findUniqueOrThrow({ where: { id: mpId } })
+    ).lastCollectionResult;
+    expect(JSON.parse(running!)).toMatchObject({
+      status: 'running',
+      complete: false,
+    });
+    await expect(trpc.refreshMpArticlesAndUpdateFeed(mpId)).rejects.toThrow(
+      '正在采集',
+    );
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }))
+        .lastCollectionResult,
+    ).toBe(running);
+    resolvePage({ articles, pages: 2, albums: [] });
+    await first;
+    expect(
+      JSON.parse(
+        (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }))
+          .lastCollectionResult!,
+      ),
+    ).toMatchObject({ status: 'partial' });
+    // The mutex must also be released after completion.
+    await expect(
+      trpc.refreshMpArticlesAndUpdateFeed(mpId),
+    ).resolves.toMatchObject({ status: 'partial' });
   });
 });

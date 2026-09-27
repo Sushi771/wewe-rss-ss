@@ -51,7 +51,7 @@ export default function LocalCollection({
           setOpen(true);
         }}
       >
-        导入采集文件
+        导入已有文件
       </Button>
       <Button
         size="sm"
@@ -89,27 +89,15 @@ export default function LocalCollection({
         hideCloseButton={busy}
       >
         <ModalContent>
-          <ModalHeader>导入 WeChatDownload 本地采集</ModalHeader>
+          <ModalHeader>一次性导入已有文件</ModalHeader>
           <ModalBody>
             <ol className="list-decimal space-y-2 pl-5 text-sm">
               <li>
-                在{' '}
-                <a
-                  className="text-blue-600 underline"
-                  href="https://github.com/qiye45/wechatDownload"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  WeChatDownload
-                </a>{' '}
-                按教程获取凭据，批量下载公众号文章。
+                适用于迁移已经持有的 CSV 元数据和 HTML
+                正文。填写文件所在的本机目录，可包含下三级子目录。
               </li>
               <li>
-                导出文章数据 CSV，并保存 HTML
-                正文。这里填写它们所在的本机目录，可包含下三级子目录。
-              </li>
-              <li>
-                先预览，再导入。以后点击“更新”会重新读取此目录；新文章仍需先在下载工具中采集。
+                先预览，再导入。本次导入不改变在线采集来源，也不会绑定目录或开启定时读取。
               </li>
             </ol>
             <p className="text-warning-700 text-sm">
@@ -226,7 +214,7 @@ export default function LocalCollection({
                 }
               }}
             >
-              导入并绑定目录
+              导入一次
             </Button>
           </ModalFooter>
         </ModalContent>

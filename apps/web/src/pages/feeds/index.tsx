@@ -168,11 +168,9 @@ const Feeds = () => {
   }, [id]);
 
   const handleConfirm = async () => {
-    console.log('wxsLink', wxsLink);
     // TODO show operation in progress
     const wxsLinks = wxsLink.split('\n').filter((link) => link.trim() !== '');
     for (const link of wxsLinks) {
-      console.log('add wxsLink', link);
       const res = await getMpInfo({ wxsLink: link });
       if (res[0]) {
         const item = res[0];
@@ -230,7 +228,31 @@ const Feeds = () => {
   const currentMpInfo = useMemo(() => {
     return feedData?.items.find((item) => item.id === currentMpId);
   }, [currentMpId, feedData?.items]);
-  const currentUpdate = updateStates[currentMpId];
+  const persistedUpdate = useMemo(() => {
+    try {
+      const result = JSON.parse(currentMpInfo?.lastCollectionResult || 'null');
+      if (
+        !result ||
+        typeof result.source !== 'string' ||
+        typeof result.message !== 'string' ||
+        !Number.isFinite(result.attemptedAt)
+      )
+        return undefined;
+      return {
+        source: result.source,
+        message: result.message,
+        time: result.attemptedAt * 1000,
+      };
+    } catch {
+      return undefined;
+    }
+  }, [currentMpInfo?.lastCollectionResult]);
+  const liveUpdate = updateStates[currentMpId];
+  const currentUpdate =
+    persistedUpdate && (!liveUpdate || persistedUpdate.time > liveUpdate.time)
+      ? persistedUpdate
+      : liveUpdate || persistedUpdate;
+  const updateBlocked = currentUpdate?.source === 'unavailable';
   const currentAlbumIds = useMemo<string[]>(() => {
     try {
       const ids: unknown = JSON.parse(currentMpInfo?.publicAlbumIds || '[]');
@@ -470,7 +492,7 @@ const Feeds = () => {
                     {hasPublicAlbums
                       ? '公开合集补采：'
                       : currentMpInfo.localDirectory
-                        ? '本地导入：'
+                        ? '旧文件来源（已停用自动读取）'
                         : '封面预览模式'}{' '}
                     {(hasPublicAlbums || currentMpInfo.localDirectory) &&
                     currentMpInfo.syncTime > 0
@@ -485,7 +507,7 @@ const Feeds = () => {
                       hasPublicAlbums
                         ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
                         : currentMpInfo.localDirectory
-                          ? '定时读取已采集文件；新文章需先在 WeChatDownload 下载'
+                          ? '尚无已验证的内置列表通道；定时任务会记录阻塞状态，不读取本地目录'
                           : '定时查询封面预览，无法补齐多篇文章'
                     }
                   >
@@ -522,9 +544,36 @@ const Feeds = () => {
                           if (inProgressHistoryMp?.id === currentMpInfo.id) {
                             await getHistoryArticles({ mpId: '' });
                           } else {
-                            await getHistoryArticles({
-                              mpId: currentMpInfo.id,
-                            });
+                            try {
+                              const result = await getHistoryArticles({
+                                mpId: currentMpInfo.id,
+                              });
+                              rememberUpdate(
+                                currentMpInfo.id,
+                                result.source,
+                                result.message,
+                              );
+                              if (result.status === 'blocked')
+                                toast.error(result.message);
+                              else toast.warning(result.message);
+                            } catch (error) {
+                              rememberUpdate(
+                                currentMpInfo.id,
+                                'error',
+                                error instanceof Error
+                                  ? error.message
+                                  : '历史采集失败',
+                              );
+                              toast.error(
+                                error instanceof Error
+                                  ? error.message
+                                  : '历史采集失败',
+                              );
+                            } finally {
+                              await refetchFeedList();
+                              await queryUtils.article.list.reset();
+                              await queryUtils.article.summary.invalidate();
+                            }
                           }
                           await refetchInProgressHistoryMp();
                         }}
@@ -660,7 +709,7 @@ const Feeds = () => {
                         hasPublicAlbums
                           ? '在线刷新已绑定的公开合集；合集外文章与次条完整性未验证'
                           : currentMpInfo.localDirectory
-                            ? '重新读取绑定的本地文件；新增文章需先完成真实采集'
+                            ? '尚无已验证的内置列表通道；更新不再读取外部目录'
                             : '查询封面预览；当前通道无法补齐历史与次条'
                       }
                     >
@@ -675,7 +724,10 @@ const Feeds = () => {
                             await refetchFeedList();
                             await queryUtils.article.list.reset();
                             await queryUtils.article.summary.invalidate();
-                            if (results.every((r) => r.source === 'local'))
+                            if (
+                              results.length > 0 &&
+                              results.every((r) => r.complete)
+                            )
                               setRefreshedMpIds((prev) => [...prev, mpId]);
                             for (const result of results) {
                               rememberUpdate(
@@ -683,11 +735,14 @@ const Feeds = () => {
                                 result.source,
                                 result.message,
                               );
-                              if (result.source === 'local')
+                              if (result.complete)
                                 toast.success(result.message, {
                                   duration: 8000,
                                 });
-                              else if (result.source === 'error')
+                              else if (
+                                result.status === 'failed' ||
+                                result.status === 'blocked'
+                              )
                                 toast.error(result.message, {
                                   duration: 10000,
                                 });
@@ -702,6 +757,7 @@ const Feeds = () => {
                               );
                             }, 3000);
                           } catch (e) {
+                            await refetchFeedList();
                             rememberUpdate(
                               mpId,
                               'error',
@@ -733,7 +789,7 @@ const Feeds = () => {
                           {isGetArticlesLoading
                             ? '更新中'
                             : refreshedMpIds.includes(currentMpInfo.id)
-                              ? '已读文件'
+                              ? '更新完成'
                               : '更新'}
                         </span>
                       </Button>
@@ -773,17 +829,16 @@ const Feeds = () => {
                               );
                           }
                           setIsRefreshedAll(
-                            results.every((r) => r.source === 'local'),
+                            results.length > 0 &&
+                              results.every((r) => r.complete),
                           );
                           const complete = results.filter(
-                            (r) => r.source === 'local',
+                            (r) => r.complete,
                           ).length;
-                          const incomplete = results.filter(
-                            (r) => r.source !== 'local',
-                          );
+                          const incomplete = results.filter((r) => !r.complete);
                           if (incomplete.length)
                             toast.warning(
-                              `本地导入完成 ${complete} 个；${incomplete.length} 个未完成完整同步`,
+                              `完整更新 ${complete} 个；${incomplete.length} 个采集受限或阻塞`,
                               {
                                 description: incomplete
                                   .map((r) => r.message)
@@ -791,8 +846,7 @@ const Feeds = () => {
                                 duration: 12000,
                               },
                             );
-                          else
-                            toast.success(`本地导入完成 ${complete} 个公众号`);
+                          else toast.success(`完整更新 ${complete} 个公众号`);
                           setTimeout(() => setIsRefreshedAll(false), 3000);
                         } catch (e) {
                           toast.error(
@@ -821,7 +875,7 @@ const Feeds = () => {
                         {isRefreshAllMpArticlesRunning || isGetArticlesLoading
                           ? '更新中'
                           : isRefreshedAll
-                            ? '文件已读'
+                            ? '更新完成'
                             : '更新全部'}
                       </span>
                     </Button>
@@ -864,7 +918,11 @@ const Feeds = () => {
           </div>
           {currentMpInfo && (
             <div
-              role={currentUpdate?.source === 'error' ? 'alert' : 'status'}
+              role={
+                currentUpdate?.source === 'error' || updateBlocked
+                  ? 'alert'
+                  : 'status'
+              }
               className="border-b border-neutral-200 bg-neutral-50 px-4 py-3 text-sm dark:border-neutral-700 dark:bg-neutral-900"
             >
               <p
@@ -876,17 +934,21 @@ const Feeds = () => {
               >
                 {currentUpdate?.source === 'error'
                   ? '本次更新失败 · 下方仍为已有存量'
-                  : hasPublicAlbums
-                    ? '公开合集补采 · 采集范围受限'
-                    : currentMpInfo.localDirectory
-                      ? '本地文件导入 · 完整采集范围未验证'
-                      : '封面预览 · 尚未接通完整采集'}
+                  : currentUpdate?.source === 'pending'
+                    ? '采集中 · 下方仍为已有存量'
+                    : updateBlocked
+                      ? '更新受阻 · 尚未接通内置列表通道'
+                      : hasPublicAlbums
+                        ? '公开合集补采 · 采集范围受限'
+                        : currentMpInfo.localDirectory
+                          ? '内置采集未接通 · 已停用目录自动读取'
+                          : '封面预览 · 尚未接通完整采集'}
               </p>
               <p className="mt-1 text-neutral-500">
                 {hasPublicAlbums
                   ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个公开合集；合集外文章和同次推送的次条完整性未验证。该通道不提供阅读、点赞或收藏。`
                   : currentMpInfo.localDirectory
-                    ? '“更新”读取已下载文件，无法证明公众号最新文章、历史缺口和同次推送的次条已补齐。'
+                    ? '此号仅保留旧文件导入记录。“更新”和定时任务不再读取目录；尚未取得可覆盖公众号近期列表的内置授权通道。已有数据和导出仍可使用。'
                     : '当前更新仅查询封面预览，无法补齐多篇文章、历史缺口和同次推送的次条。下方包含此前保存的旧数据。'}
                 {(hasPublicAlbums || currentMpInfo.localDirectory) &&
                 currentMpInfo.syncTime > 0
@@ -896,14 +958,15 @@ const Feeds = () => {
               {currentUpdate && (
                 <p
                   className={
-                    currentUpdate.source === 'error'
+                    currentUpdate.source === 'error' || updateBlocked
                       ? 'mt-1 text-red-600'
                       : currentUpdate.source === 'public-album'
                         ? 'mt-1 text-orange-700 dark:text-orange-300'
                         : 'mt-1 text-neutral-500'
                   }
                 >
-                  本次操作 {dayjs(currentUpdate.time).format('HH:mm:ss')}：
+                  最近操作{' '}
+                  {dayjs(currentUpdate.time).format('YYYY-MM-DD HH:mm:ss')}：
                   {currentUpdate.message}
                 </p>
               )}

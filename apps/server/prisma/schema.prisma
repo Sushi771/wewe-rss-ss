@@ -33,6 +33,7 @@ model Feed {
   order      Int       @default(0) @map("order")
   localDirectory String? @map("local_directory")
   publicAlbumIds String? @map("public_album_ids")
+  lastCollectionResult String? @map("last_collection_result")
   articles   Article[]
 
   @@map("feeds")

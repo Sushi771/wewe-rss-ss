@@ -87,7 +87,12 @@ export class FeedsService {
     for (const feed of feeds) {
       this.logger.debug('feed', feed.id);
       try {
-        await this.trpcService.refreshMpArticlesAndUpdateFeed(feed.id);
+        const result = await this.trpcService.refreshMpArticlesAndUpdateFeed(
+          feed.id,
+        );
+        this.logger.warn(
+          `[Scheduled Update] ${feed.id}: ${result.status} (${result.coverage}); ${result.message}`,
+        );
 
         await new Promise((resolve) =>
           setTimeout(resolve, updateDelayTime * 1e3),
@@ -293,6 +298,7 @@ export class FeedsService {
         order: 0,
         localDirectory: null,
         publicAlbumIds: null,
+        lastCollectionResult: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };

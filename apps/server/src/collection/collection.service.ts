@@ -79,6 +79,7 @@ export class CollectionService {
               },
             });
             const original = legacy.get(item.id);
+            const knownSourceUrl = existing?.sourceUrl;
             let mergedFields = {};
             if (original) {
               const old = await tx.article.findUniqueOrThrow({
@@ -110,7 +111,9 @@ export class CollectionService {
                 existing?.publishTime ??
                 item.publishTime,
               ...mergedFields,
-              sourceUrl: item.url,
+              sourceUrl: item.url.includes('&sn=')
+                ? item.url
+                : existing?.sourceUrl || knownSourceUrl || item.url,
               picUrl: item.picUrl,
             };
             if (existing) {
@@ -142,6 +145,9 @@ export class CollectionService {
       );
       return {
         source: 'public-album' as const,
+        status: 'partial' as const,
+        complete: false as const,
+        coverage: 'selected-albums' as const,
         hasHistory: -1,
         articles: result.articles.length,
         created,
@@ -385,8 +391,38 @@ export class CollectionService {
 
   async importDirectory(input: ImportInput) {
     const scan = await this.scan(input);
+    // A CSV title/date is not proof that a legacy short link is this article.
+    // Resolve all candidates before the transaction so a challenge leaves the DB unchanged.
+    const legacy = new Map<
+      string,
+      { id: string; publishTime: number | null }
+    >();
+    for (const mpId of new Set(scan.items.map((item) => item.mpId))) {
+      const items = scan.items.filter((item) => item.mpId === mpId);
+      const candidates = await this.prisma.article.findMany({
+        where: {
+          mpId,
+          sourceUrl: null,
+          title: { in: items.map((item) => item.title) },
+        },
+        select: { id: true },
+      });
+      for (const candidate of candidates) {
+        const identity = await resolvePublicArticle(candidate.id, mpId);
+        if (!items.some((item) => item.id === identity.id)) continue;
+        if (legacy.has(identity.id))
+          throw new Error(
+            '多条旧记录指向同一原文，需要先核对重复身份；本次未写入',
+          );
+        legacy.set(identity.id, {
+          id: candidate.id,
+          publishTime: identity.publishTime,
+        });
+      }
+    }
     let created = 0,
-      updated = 0;
+      updated = 0,
+      merged = 0;
     await this.prisma.$transaction(
       async (tx) => {
         const ids = [...new Set(scan.items.map((a) => a.mpId))];
@@ -408,16 +444,13 @@ export class CollectionService {
               id: mpId,
               mpName: input.mpName?.trim() || existing?.mpName || mpId,
               mpCover: '',
-              mpIntro: 'WeChatDownload 本地采集',
+              mpIntro: '历史文件一次性导入',
               updateTime: maxTime,
               hasHistory: -1,
-              localDirectory: scan.root,
+              status: 0,
             },
             update: {
-              localDirectory: scan.root,
-              publicAlbumIds: null,
               updateTime: Math.max(existing?.updateTime || 0, maxTime),
-              hasHistory: -1,
             },
           });
         }
@@ -432,18 +465,30 @@ export class CollectionService {
               ],
             },
           });
-          // Legacy short-link IDs remain usable; only merge an unambiguous same-title, same-time match.
-          if (!existing) {
-            const candidates = await tx.article.findMany({
-              where: {
-                mpId: item.mpId,
-                title: item.title,
-                publishTime: item.publishTime,
-                sourceUrl: null,
-              },
-              take: 2,
+          const original = legacy.get(item.id);
+          if (original) {
+            const old = await tx.article.findUniqueOrThrow({
+              where: { id: original.id },
             });
-            if (candidates.length === 1) existing = candidates[0];
+            if (existing && existing.id !== old.id) {
+              const metrics = mergeMetrics(
+                JSON.parse(existing.metrics || '{}'),
+                JSON.parse(old.metrics || '{}'),
+              );
+              const preserved = {
+                ...old,
+                sourceUrl: old.sourceUrl || existing.sourceUrl,
+                contentHtml: old.contentHtml || existing.contentHtml,
+                metrics: JSON.stringify(metrics),
+                readCount:
+                  metrics.read?.value ?? old.readCount ?? existing.readCount,
+                likeCount:
+                  metrics.like?.value ?? old.likeCount ?? existing.likeCount,
+              };
+              await tx.article.delete({ where: { id: existing.id } });
+              existing = preserved;
+              merged++;
+            } else existing = old;
           }
           const metrics = mergeMetrics(
             JSON.parse(existing?.metrics || '{}'),
@@ -451,14 +496,17 @@ export class CollectionService {
           );
           const data = {
             title: item.title,
-            publishTime: item.publishTime,
+            publishTime:
+              original?.publishTime ??
+              existing?.publishTime ??
+              item.publishTime,
             sourceUrl: item.url.includes('&sn=')
               ? item.url
               : existing?.sourceUrl || item.url,
             contentHtml: item.contentHtml || existing?.contentHtml,
             metrics: JSON.stringify(metrics),
-            readCount: metrics.read?.value ?? null,
-            likeCount: metrics.like?.value ?? null,
+            readCount: metrics.read?.value ?? existing?.readCount ?? null,
+            likeCount: metrics.like?.value ?? existing?.likeCount ?? null,
           };
           if (existing) {
             await tx.article.update({ where: { id: existing.id }, data });
@@ -470,22 +518,22 @@ export class CollectionService {
             created++;
           }
         }
-        await tx.feed.updateMany({
-          where: { id: { in: [...new Set(scan.items.map((a) => a.mpId))] } },
-          data: { syncTime: Math.floor(Date.now() / 1000) },
-        });
       },
       { timeout: 60000 },
     );
     return {
       created,
       updated,
+      merged,
       articles: scan.items.length,
       bodies: scan.items.filter((a) => a.contentHtml).length,
       warnings: scan.warnings,
       source: 'local' as const,
+      status: 'partial' as const,
+      complete: false as const,
+      coverage: 'imported-files' as const,
       hasHistory: -1,
-      message: `本地导入 ${scan.items.length} 篇（新增 ${created}，更新 ${updated}）。这是已采集文件，公众号新文章需先在 WeChatDownload 下载。`,
+      message: `一次性导入 ${scan.items.length} 篇（新增 ${created}，更新 ${updated}）。仅导入所选历史文件，不代表公众号完整更新，也不绑定目录或启用定时订阅。`,
     };
   }
 }

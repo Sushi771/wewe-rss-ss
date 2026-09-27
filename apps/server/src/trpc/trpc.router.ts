@@ -59,7 +59,7 @@ export class TrpcRouter {
             code: 'FORBIDDEN',
             message: '公开合集绑定只能在服务器本机操作',
           });
-        return this.collectionService.collectPublicAlbums(input);
+        return this.trpcService.collectPublicAlbums(input);
       }),
     preview: this.trpcService.protectedProcedure
       .input(

@@ -197,7 +197,7 @@ export class TrpcService {
         }
         throw err;
       }
-      this.logger.error(`retry(${4 - retryCount}) getMpArticles error: `, err);
+      this.logger.error(`retry(${4 - retryCount}) getMpArticles failed`);
       if (retryCount > 0) {
         return this.getMpArticles(mpId, page, retryCount - 1);
       } else {
@@ -207,6 +207,99 @@ export class TrpcService {
   }
 
   async refreshMpArticlesAndUpdateFeed(mpId: string, page = 1) {
+    return this.recordCollectionResult(mpId, () =>
+      this.refreshArticles(mpId, page),
+    );
+  }
+
+  async collectPublicAlbums(input: { mpId: string; albumIds: string[] }) {
+    return this.recordCollectionResult(input.mpId, () =>
+      this.collectionService.collectPublicAlbums(input),
+    );
+  }
+
+  private readonly activeCollections = new Set<string>();
+
+  private async recordCollectionResult<
+    T extends {
+      source: string;
+      status: string;
+      complete: false;
+      coverage: string;
+      articles: number;
+      message: string;
+    },
+  >(mpId: string, collect: () => Promise<T>): Promise<T> {
+    if (this.activeCollections.has(mpId))
+      throw new Error('该公众号正在采集，请等待本次结束');
+    this.activeCollections.add(mpId);
+    try {
+      await this.prismaService.feed.update({
+        where: { id: mpId },
+        data: {
+          lastCollectionResult: JSON.stringify({
+            source: 'pending',
+            status: 'running',
+            complete: false,
+            coverage: 'none',
+            articles: 0,
+            message: '正在采集，尚未完成更新。',
+            attemptedAt: Math.floor(Date.now() / 1000),
+          }),
+        },
+      });
+      let result: T;
+      try {
+        result = await collect();
+      } catch (error: any) {
+        // Never persist raw HTTP errors: their config/URL may contain credentials.
+        const message =
+          error?.isAxiosError || error?.options || error?.config
+            ? '采集请求失败，请检查网络或上游访问状态；本次未完成更新。'
+            : String(error?.message || '采集失败')
+                .replace(/https?:\/\/[^\s]+/gi, '[链接已隐藏]')
+                .replace(
+                  /\b(token|key|pass_ticket|uin|cookie|authorization)\s*[:=]\s*[^\s,;]+/gi,
+                  '$1=[已隐藏]',
+                )
+                .slice(0, 500);
+        await this.prismaService.feed.update({
+          where: { id: mpId },
+          data: {
+            lastCollectionResult: JSON.stringify({
+              source: 'error',
+              status: 'failed',
+              complete: false,
+              coverage: 'none',
+              articles: 0,
+              message,
+              attemptedAt: Math.floor(Date.now() / 1000),
+            }),
+          },
+        });
+        throw new Error(message);
+      }
+      await this.prismaService.feed.update({
+        where: { id: mpId },
+        data: {
+          lastCollectionResult: JSON.stringify({
+            source: result.source,
+            status: result.status,
+            complete: result.complete,
+            coverage: result.coverage,
+            articles: result.articles,
+            message: result.message,
+            attemptedAt: Math.floor(Date.now() / 1000),
+          }),
+        },
+      });
+      return result;
+    } finally {
+      this.activeCollections.delete(mpId);
+    }
+  }
+
+  private async refreshArticles(mpId: string, page: number) {
     const feed = await this.prismaService.feed.findUniqueOrThrow({
       where: { id: mpId },
     });
@@ -217,13 +310,9 @@ export class TrpcService {
       });
     }
     if (feed.localDirectory) {
-      return this.collectionService.importDirectory({
-        directory: feed.localDirectory,
-        mpId,
-      });
+      return this.unavailableCollection();
     }
-    if (page !== 1)
-      throw new Error('微信读书封面接口不支持翻页，请使用本地采集导入历史文章');
+    if (page !== 1) return this.unavailableCollection();
     const articles = await this.getMpArticles(mpId, page);
 
     let saved = 0;
@@ -266,11 +355,28 @@ export class TrpcService {
     return {
       hasHistory,
       source: 'cover' as const,
+      status: 'partial' as const,
+      complete: false as const,
+      coverage: 'cover' as const,
       articles: articles.length,
       saved,
       skippedUnknownDate,
       unknownDates,
-      message: `仅取得封面预览 ${articles.length} 篇，不代表完整更新。${unknownDates ? `其中 ${unknownDates} 篇未取得真实发布时间；已有记录保留原日期，${skippedUnknownDate} 篇新记录未写入。` : ''}已有下载文件可通过“导入采集文件”接入。`,
+      message: `仅取得封面预览 ${articles.length} 篇，不代表完整更新。${unknownDates ? `其中 ${unknownDates} 篇未取得真实发布时间；已有记录保留原日期，${skippedUnknownDate} 篇新记录未写入。` : ''}完整公众号列表通道尚未验证，近期缺口与次条仍可能遗漏。`,
+    };
+  }
+
+  private unavailableCollection() {
+    return {
+      source: 'unavailable' as const,
+      status: 'blocked' as const,
+      complete: false as const,
+      coverage: 'none' as const,
+      reason: 'NO_VERIFIED_LIST_CHANNEL' as const,
+      hasHistory: -1,
+      articles: 0,
+      message:
+        '完整公众号列表通道尚未验证，本次未采集。历史文件仅可显式一次性导入；更新和定时任务不会读取外部目录。',
     };
   }
 
@@ -280,6 +386,10 @@ export class TrpcService {
   };
 
   async getHistoryMpArticles(mpId: string) {
+    return this.recordCollectionResult(mpId, () => this.collectHistory(mpId));
+  }
+
+  private async collectHistory(mpId: string) {
     const feed = await this.prismaService.feed.findUniqueOrThrow({
       where: { id: mpId },
     });
@@ -289,14 +399,7 @@ export class TrpcService {
         albumIds: JSON.parse(feed.publicAlbumIds),
       });
     }
-    if (!feed.localDirectory)
-      throw new Error(
-        '微信读书封面接口无法补齐历史文章，请先导入 WeChatDownload 本地采集目录',
-      );
-    return this.collectionService.importDirectory({
-      directory: feed.localDirectory,
-      mpId,
-    });
+    return this.unavailableCollection();
   }
 
   isRefreshAllMpArticlesRunning = false;
@@ -312,6 +415,9 @@ export class TrpcService {
       id: string;
       name: string;
       source: string;
+      status: 'partial' | 'blocked' | 'failed';
+      complete: false;
+      coverage: string;
       message: string;
       articles: number;
     }[] = [];
@@ -324,14 +430,17 @@ export class TrpcService {
           );
           const result = await this.refreshMpArticlesAndUpdateFeed(id);
           results.push({ id, name: mpName, ...result });
-          this.logger.log(
-            `[Batch Update] Successfully updated: ${mpName} (${id})`,
+          this.logger.warn(
+            `[Batch Update] ${result.status} (${result.coverage}): ${mpName} (${id})`,
           );
         } catch (err: any) {
           results.push({
             id,
             name: mpName,
             source: 'error',
+            status: 'failed',
+            complete: false,
+            coverage: 'none',
             message: err.message,
             articles: 0,
           });

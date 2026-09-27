@@ -3,10 +3,16 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { PrismaClient } from '@prisma/client';
 import { CollectionService } from './collection.service';
-import { parsePublishTime } from './collection-format';
+import { canonicalArticleUrl, parsePublishTime } from './collection-format';
+import { resolvePublicArticle } from './public-album';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { FeedsService } from '../feeds/feeds.service';
+
+jest.mock('./public-album', () => ({
+  fetchPublicAlbums: jest.fn(),
+  resolvePublicArticle: jest.fn(),
+}));
 
 describe('local collection with real SQLite migrations', () => {
   let root: string,
@@ -43,6 +49,10 @@ describe('local collection with real SQLite migrations', () => {
       }
     }
     service = new CollectionService(prisma as any);
+    (resolvePublicArticle as jest.Mock).mockResolvedValue({
+      ...canonicalArticleUrl(url(1)),
+      publishTime: parsePublishTime('2024-12-06 08:35:06'),
+    });
     const config = {
       get: (key: string) =>
         ({
@@ -123,8 +133,12 @@ describe('local collection with real SQLite migrations', () => {
     expect(article.likeCount).toBe(0);
     expect(article.contentHtml).toContain('data:image/png;base64,');
     expect(
-      (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } })).hasHistory,
-    ).toBe(-1);
+      await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
+    ).toMatchObject({
+      hasHistory: 1,
+      localDirectory: null,
+      syncTime: 0,
+    });
   });
   it('exports cached body, local images, and metrics through the real router without network access', async () => {
     const caller = router.appRouter.createCaller({
@@ -182,8 +196,12 @@ describe('local collection with real SQLite migrations', () => {
       errorMsg: null,
       isLocal: true,
     } as any);
-    expect((await caller.feed.refreshArticles({ mpId }))[0]).toMatchObject({
+    expect(
+      await caller.collection.importDirectory({ directory, mpId }),
+    ).toMatchObject({
       source: 'local',
+      status: 'partial',
+      complete: false,
       created: 0,
       updated: 2,
     });
@@ -194,7 +212,87 @@ describe('local collection with real SQLite migrations', () => {
     expect(article.readCount).toBe(200);
     expect(article.contentHtml).toContain('正文内容');
   });
-  it('does not claim cover polling completed history and reports failures in batch results', async () => {
+  it('keeps existing subscription configuration during explicit import', async () => {
+    const binding = JSON.stringify(['2527940920407949313']);
+    await prisma.feed.update({
+      where: { id: mpId },
+      data: {
+        publicAlbumIds: binding,
+        localDirectory: 'C:/legacy-path',
+        status: 0,
+        syncTime: 15,
+      },
+    });
+    await service.importDirectory({ directory, mpId });
+    expect(
+      await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
+    ).toMatchObject({
+      publicAlbumIds: binding,
+      localDirectory: 'C:/legacy-path',
+      status: 0,
+      syncTime: 15,
+    });
+    await prisma.feed.update({
+      where: { id: mpId },
+      data: { publicAlbumIds: null, status: 1 },
+    });
+  });
+  it('creates a one-time imported feed without enabling scheduling or directory binding', async () => {
+    const other = 'MP_WXS_123456789';
+    const newDir = path.join(root, 'new-account');
+    await fs.mkdir(newDir);
+    await fs.writeFile(
+      path.join(newDir, 'articles.csv'),
+      'title,url,time\n新号,https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5&mid=200&idx=1,2024-12-06 08:35:06\n',
+    );
+    await service.importDirectory({ directory: newDir, mpName: '仅历史导入' });
+    expect(
+      await prisma.feed.findUniqueOrThrow({ where: { id: other } }),
+    ).toMatchObject({
+      status: 0,
+      localDirectory: null,
+      publicAlbumIds: null,
+      syncTime: 0,
+    });
+    await prisma.feed.delete({ where: { id: other } });
+  });
+  it('does not read legacy directories in manual, history, batch or scheduled updates', async () => {
+    await prisma.feed.update({
+      where: { id: mpId },
+      data: { localDirectory: directory },
+    });
+    const readFiles = jest.spyOn(service, 'importDirectory');
+    const before = await prisma.article.findMany({
+      where: { mpId },
+      orderBy: { id: 'asc' },
+    });
+    expect(await trpc.refreshMpArticlesAndUpdateFeed(mpId)).toMatchObject({
+      source: 'unavailable',
+      status: 'blocked',
+      complete: false,
+    });
+    expect(await trpc.getHistoryMpArticles(mpId)).toMatchObject({
+      source: 'unavailable',
+      status: 'blocked',
+      complete: false,
+    });
+    expect(
+      JSON.parse(
+        (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }))
+          .lastCollectionResult!,
+      ),
+    ).toMatchObject({ status: 'blocked', coverage: 'none' });
+    await feeds.handleUpdateFeedsCron();
+    expect(readFiles).not.toHaveBeenCalled();
+    expect(
+      await prisma.article.findMany({
+        where: { mpId },
+        orderBy: { id: 'asc' },
+      }),
+    ).toEqual(before);
+    readFiles.mockRestore();
+  });
+  it('does not claim cover polling completed history and returns structured batch coverage', async () => {
     await prisma.feed.create({
       data: {
         id: 'cover-feed',
@@ -211,18 +309,48 @@ describe('local collection with real SQLite migrations', () => {
     });
     expect(
       await trpc.refreshMpArticlesAndUpdateFeed('cover-feed'),
-    ).toMatchObject({ source: 'cover', hasHistory: -1 });
+    ).toMatchObject({
+      source: 'cover',
+      hasHistory: -1,
+      status: 'partial',
+      complete: false,
+    });
     expect(
       (await prisma.feed.findUniqueOrThrow({ where: { id: 'cover-feed' } }))
         .syncTime,
     ).toBe(5);
-    await expect(trpc.getHistoryMpArticles('cover-feed')).rejects.toThrow(
-      '无法补齐历史',
-    );
+    expect(await trpc.getHistoryMpArticles('cover-feed')).toMatchObject({
+      source: 'unavailable',
+      status: 'blocked',
+    });
     await fs.writeFile(path.join(directory, 'articles.csv'), csv('200', true));
     const results = await trpc.refreshAllMpArticlesAndUpdateFeed();
-    expect(results.find((r) => r.id === mpId)?.source).toBe('error');
+    expect(results.find((r) => r.id === mpId)?.source).toBe('unavailable');
     expect(results.find((r) => r.id === 'cover-feed')?.source).toBe('cover');
+  });
+  it('persists a sanitized failure and leaves article records unchanged', async () => {
+    const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
+    const fail = jest.spyOn(trpc, 'getMpArticles').mockRejectedValueOnce({
+      isAxiosError: true,
+      message: 'request failed key=secret',
+      config: { headers: { Cookie: 'secret' } },
+    });
+    await expect(
+      trpc.refreshMpArticlesAndUpdateFeed('cover-feed'),
+    ).rejects.toThrow('采集请求失败');
+    const feed = await prisma.feed.findUniqueOrThrow({
+      where: { id: 'cover-feed' },
+    });
+    expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject({
+      status: 'failed',
+      complete: false,
+      source: 'error',
+    });
+    expect(feed.lastCollectionResult).not.toContain('secret');
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      before,
+    );
+    fail.mockRestore();
   });
   it('rejects an invalid later row without partially changing records or sync time', async () => {
     const before = await prisma.feed.findUniqueOrThrow({ where: { id: mpId } });
@@ -271,5 +399,113 @@ describe('local collection with real SQLite migrations', () => {
       (await prisma.feed.findUniqueOrThrow({ where: { id: 'cover-feed' } }))
         .syncTime,
     ).toBe(5);
+  });
+
+  it('does not merge a same-title same-time short link with a different proven identity', async () => {
+    await fs.writeFile(path.join(directory, 'articles.csv'), csv());
+    await prisma.article.create({
+      data: {
+        id: 'unrelated-short',
+        mpId,
+        title: '主条',
+        picUrl: '',
+        publishTime: parsePublishTime('2024-12-06 08:35:06'),
+      },
+    });
+    (resolvePublicArticle as jest.Mock).mockResolvedValueOnce({
+      ...canonicalArticleUrl(url(9)),
+      publishTime: parsePublishTime('2024-12-06 08:35:06'),
+    });
+    expect(await service.importDirectory({ directory, mpId })).toMatchObject({
+      created: 0,
+      updated: 2,
+      merged: 0,
+    });
+    expect(
+      await prisma.article.findUniqueOrThrow({
+        where: { id: 'unrelated-short' },
+      }),
+    ).toMatchObject({ sourceUrl: null });
+    await prisma.article.delete({ where: { id: 'unrelated-short' } });
+  });
+
+  it('requires original identity before changing any rows or directory binding', async () => {
+    await prisma.article.update({
+      where: { id: 'legacy-short-link' },
+      data: { sourceUrl: null },
+    });
+    const beforeFeed = await prisma.feed.findUniqueOrThrow({
+      where: { id: mpId },
+    });
+    const beforeArticles = await prisma.article.findMany({
+      orderBy: { id: 'asc' },
+    });
+    (resolvePublicArticle as jest.Mock).mockRejectedValueOnce(
+      new Error('无法核验原文'),
+    );
+    await expect(service.importDirectory({ directory, mpId })).rejects.toThrow(
+      '无法核验原文',
+    );
+    expect(
+      await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
+    ).toEqual(beforeFeed);
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      beforeArticles,
+    );
+  });
+
+  it('merges proven cross-source duplicates despite date skew and preserves body, metrics and legacy ID on repeat', async () => {
+    const identity = canonicalArticleUrl(url(1));
+    await prisma.article.create({
+      data: {
+        id: identity.id,
+        mpId,
+        title: '主条',
+        picUrl: '',
+        sourceUrl: identity.url,
+        publishTime: parsePublishTime('2024-12-06 08:34:27'),
+        metrics: JSON.stringify({
+          favorite: { value: 4, display: '4', fileTime: '2026-09-27' },
+        }),
+      },
+    });
+    await fs.writeFile(
+      path.join(directory, 'articles.csv'),
+      csv().replaceAll('08:35:06', '08:34:27').replaceAll('&sn=abc', ''),
+    );
+    expect(await service.importDirectory({ directory, mpId })).toMatchObject({
+      created: 0,
+      updated: 2,
+      merged: 1,
+    });
+    expect(
+      await prisma.article.findUnique({ where: { id: identity.id } }),
+    ).toBeNull();
+    const original = await prisma.article.findUniqueOrThrow({
+      where: { id: 'legacy-short-link' },
+    });
+    expect(original.publishTime).toBe(parsePublishTime('2024-12-06 08:35:06'));
+    expect(original.sourceUrl).toBe(identity.url);
+    expect(original.contentHtml).toContain('正文内容');
+    expect(JSON.parse(original.metrics!).favorite.value).toBe(4);
+    expect(await service.importDirectory({ directory, mpId })).toMatchObject({
+      created: 0,
+      updated: 2,
+      merged: 0,
+    });
+    expect(
+      (
+        await prisma.article.findUniqueOrThrow({
+          where: { id: 'legacy-short-link' },
+        })
+      ).publishTime,
+    ).toBe(original.publishTime);
+    expect(
+      (
+        await prisma.article.findUniqueOrThrow({
+          where: { id: 'legacy-short-link' },
+        })
+      ).sourceUrl,
+    ).toBe(identity.url);
   });
 });

@@ -269,7 +269,7 @@ export class WereadService {
     }[]
   > {
     url = url.trim();
-    this.logger.log(`Resolving WeChat MP info for URL: ${url}`);
+    this.logger.log('Resolving WeChat MP info from an article link');
 
     let html = '';
     try {
@@ -281,9 +281,9 @@ export class WereadService {
         },
       });
       html = resp.body;
-    } catch (err: any) {
-      this.logger.error(`Failed to fetch article page ${url}: ${err.message}`);
-      throw new Error(`无法访问微信公众号文章链接: ${err.message}`);
+    } catch {
+      this.logger.error('Failed to fetch WeChat article page');
+      throw new Error('无法访问微信公众号文章链接，请检查网络或微信验证状态');
     }
 
     const $ = load(html, { decodeEntities: false });
