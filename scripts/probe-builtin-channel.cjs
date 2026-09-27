@@ -357,7 +357,10 @@ async function captureAndVerify() {
     JSON.stringify(summary, null, 2),
   );
   await fs.writeFile(
-    path.join(out, `authorized-summary-${summary.at.replace(/[:.]/g, '-')}.json`),
+    path.join(
+      out,
+      `authorized-summary-${summary.at.replace(/[:.]/g, '-')}.json`,
+    ),
     JSON.stringify(summary, null, 2),
   );
   console.log(JSON.stringify(summary, null, 2));

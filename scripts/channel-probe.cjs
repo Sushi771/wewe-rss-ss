@@ -16,10 +16,20 @@ const archive = path.join(root, 'wechatDownload4.7.zip');
 // Check the actual physical path too; the logical path alone can mislead users.
 const physicalRoot = path.join(
   os.homedir(),
-  'AppData', 'Local', 'Packages', 'OpenAI.Codex_2p2nqsd0c76g0',
-  'LocalCache', 'Local', 'WeWe-RSS', 'WeChatDownload-4.7',
+  'AppData',
+  'Local',
+  'Packages',
+  'OpenAI.Codex_2p2nqsd0c76g0',
+  'LocalCache',
+  'Local',
+  'WeWe-RSS',
+  'WeChatDownload-4.7',
 );
-const physicalExecutable = path.join(physicalRoot, 'windows', '微信公众号批量下载工具4.7.exe');
+const physicalExecutable = path.join(
+  physicalRoot,
+  'windows',
+  '微信公众号批量下载工具4.7.exe',
+);
 const physicalArchive = path.join(physicalRoot, 'wechatDownload4.7.zip');
 const endpoint = 'http://127.0.0.1:4545/mcp';
 const expectedSha256 =

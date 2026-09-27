@@ -8,7 +8,7 @@ export function BaseLayout() {
     <div>
       <main className="h-screen overflow-hidden">
         <Nav></Nav>
-        <div className="h-[calc(100vh-44px)] max-w-[1280px] mx-auto pb-0">
+        <div className="mx-auto h-[calc(100vh-44px)] max-w-[1280px] pb-0">
           <Outlet />
         </div>
       </main>

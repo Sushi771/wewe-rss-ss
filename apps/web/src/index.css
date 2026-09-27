@@ -4,48 +4,50 @@
 
 /* ── macOS Design Tokens ── */
 :root {
-  --mac-blue: #007AFF; /* Standard Apple Blue */
-  --mac-blue-hover: #0062CC;
-  --mac-red: #FF3B30;
-  --mac-green: #34C759;
-  --mac-orange: #FF9500;
-  --mac-gray-1: #F2F2F7;
-  --mac-gray-2: #E5E5EA;
-  --mac-gray-3: #D1D1D6;
-  --mac-gray-4: #AEAEB2;
-  --mac-gray-5: #8E8E93;
-  --mac-gray-6: #1C1C1E;
+  --mac-blue: #007aff; /* Standard Apple Blue */
+  --mac-blue-hover: #0062cc;
+  --mac-red: #ff3b30;
+  --mac-green: #34c759;
+  --mac-orange: #ff9500;
+  --mac-gray-1: #f2f2f7;
+  --mac-gray-2: #e5e5ea;
+  --mac-gray-3: #d1d1d6;
+  --mac-gray-4: #aeaeb2;
+  --mac-gray-5: #8e8e93;
+  --mac-gray-6: #1c1c1e;
   --mac-separator: rgba(0, 0, 0, 0.08); /* More subtle separator */
-  --mac-separator-opaque: #D1D1D6;
+  --mac-separator-opaque: #d1d1d6;
   --mac-fill: rgba(0, 0, 0, 0.04);
   --mac-fill-2: rgba(0, 0, 0, 0.08);
   --mac-radius: 8px; /* Standard 8px radius */
   --mac-radius-sm: 6px;
   --mac-radius-lg: 12px;
-  --mac-shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
-  --mac-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  --mac-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --mac-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   --mac-nav-height: 48px; /* Slightly taller for modern look */
   --mac-sidebar-bg: rgba(246, 246, 246, 0.7); /* More translucent */
-  --mac-content-bg: #FFFFFF;
-  --mac-window-bg: #F5F5F7;
+  --mac-content-bg: #ffffff;
+  --mac-window-bg: #f5f5f7;
 }
 
 .dark {
   --mac-separator: rgba(255, 255, 255, 0.1);
-  --mac-separator-opaque: #38383A;
+  --mac-separator-opaque: #38383a;
   --mac-fill: rgba(255, 255, 255, 0.05);
   --mac-fill-2: rgba(255, 255, 255, 0.1);
-  --mac-gray-1: #1C1C1E;
-  --mac-gray-2: #2C2C2E;
-  --mac-gray-3: #3A3A3C;
+  --mac-gray-1: #1c1c1e;
+  --mac-gray-2: #2c2c2e;
+  --mac-gray-3: #3a3a3c;
   --mac-gray-4: #636366;
   --mac-sidebar-bg: rgba(28, 28, 30, 0.7);
-  --mac-content-bg: #1C1C1E;
+  --mac-content-bg: #1c1c1e;
   --mac-window-bg: #000000;
 }
 
 /* ── Global Reset & System Font ── */
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -60,8 +62,12 @@ button,
 input,
 textarea,
 select {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Icons', 'Helvetica Neue', 'PingFang SC', 'Noto Sans SC', sans-serif !important;
-  font-feature-settings: 'kern' 1, 'liga' 1;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Icons',
+    'Helvetica Neue', 'PingFang SC', 'Noto Sans SC', sans-serif !important;
+  font-feature-settings:
+    'kern' 1,
+    'liga' 1;
   font-size: 15px; /* Quartz 15px typography */
 }
 
@@ -360,7 +366,7 @@ select {
 
 .dark .mac-badge-success {
   background: rgba(48, 209, 88, 0.18);
-  color: #30D158;
+  color: #30d158;
 }
 
 .mac-badge-warning {
@@ -370,7 +376,7 @@ select {
 
 .dark .mac-badge-warning {
   background: rgba(255, 149, 0, 0.18);
-  color: #FF9500;
+  color: #ff9500;
 }
 
 .mac-badge-danger {
@@ -380,7 +386,7 @@ select {
 
 .dark .mac-badge-danger {
   background: rgba(255, 59, 48, 0.18);
-  color: #FF3B30;
+  color: #ff3b30;
 }
 
 .mac-badge-default {
@@ -419,11 +425,11 @@ select {
 .mac-btn-danger {
   background: transparent;
   color: var(--mac-red);
-  border: 0.5px solid rgba(255,59,48,0.3);
+  border: 0.5px solid rgba(255, 59, 48, 0.3);
 }
 
 .mac-btn-danger:hover {
-  background: rgba(255,59,48,0.08);
+  background: rgba(255, 59, 48, 0.08);
 }
 
 .mac-btn-ghost {
@@ -456,7 +462,7 @@ select {
 }
 
 .mac-action-link.danger:hover {
-  background: rgba(255,59,48,0.08);
+  background: rgba(255, 59, 48, 0.08);
 }
 
 /* ── macOS Card ── */
@@ -473,15 +479,15 @@ select {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  background: rgba(255,59,48,0.06);
-  border: 0.5px solid rgba(255,59,48,0.25);
+  background: rgba(255, 59, 48, 0.06);
+  border: 0.5px solid rgba(255, 59, 48, 0.25);
   border-radius: var(--mac-radius-sm);
   font-size: 15px;
   color: #c0392b;
 }
 
 .dark .mac-alert-danger {
-  background: rgba(255,59,48,0.1);
+  background: rgba(255, 59, 48, 0.1);
   color: #ff6b6b;
 }
 
@@ -493,13 +499,15 @@ select {
   padding: 6px 10px;
   font-size: 15px;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
   width: 100%;
 }
 
 .mac-input:focus {
   border-color: var(--mac-blue);
-  box-shadow: 0 0 0 3px rgba(0,102,204,0.15);
+  box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.15);
 }
 
 /* ── Keyword Chip ── */
@@ -535,7 +543,9 @@ select {
 }
 
 @keyframes shimmer {
-  to { background-position: -200% 0; }
+  to {
+    background-position: -200% 0;
+  }
 }
 
 /* ── Divider / Separator ── */

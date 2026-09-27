@@ -105,6 +105,7 @@
 ## 漏采与最终验收
 
 用户截图来自手机微信：
+
 - C:\Users\ss\AppData\Local\Temp\codex-clipboard-71e6442e-382d-480d-9430-404d1b13e1c6.png
 - C:\Users\ss\AppData\Local\Temp\codex-clipboard-199bb6c6-e81d-4b37-92ef-e80663f3737c.png
 

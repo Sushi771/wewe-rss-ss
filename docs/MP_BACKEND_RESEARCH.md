@@ -4,10 +4,10 @@
 
 ## 固定版本与许可
 
-| 项目 | 本次固定 HEAD | 提交时间（UTC） | LICENSE |
-| --- | --- | --- | --- |
-| rachelos/we-mp-rss | `126993c81a00466e9a6bbab041eef34ab27abe9c` | 2026-09-24 01:27:27 | MIT，Copyright 2025 RACHEL |
-| wechat-article/wechat-article-exporter | `a7bffa6e481a188510a701d30b399b76573434e5` | 2026-08-07 05:45:46 | MIT，Copyright 2024 Jock |
+| 项目                                   | 本次固定 HEAD                              | 提交时间（UTC）     | LICENSE                    |
+| -------------------------------------- | ------------------------------------------ | ------------------- | -------------------------- |
+| rachelos/we-mp-rss                     | `126993c81a00466e9a6bbab041eef34ab27abe9c` | 2026-09-24 01:27:27 | MIT，Copyright 2025 RACHEL |
+| wechat-article/wechat-article-exporter | `a7bffa6e481a188510a701d30b399b76573434e5` | 2026-08-07 05:45:46 | MIT，Copyright 2024 Jock   |
 
 许可依据分别为 [we-mp-rss LICENSE](https://github.com/rachelos/we-mp-rss/blob/126993c81a00466e9a6bbab041eef34ab27abe9c/LICENSE) 和 [exporter LICENSE](https://github.com/wechat-article/wechat-article-exporter/blob/a7bffa6e481a188510a701d30b399b76573434e5/LICENSE)。若后续移植实质代码，保留对应版权和许可文本。本轮未移植实现。
 
@@ -29,14 +29,14 @@
 
 主线脱敏证据：`output/playwright/mp-backend/backend-first-probe.json`，生成于 2026-09-27 13:32:48（北京时间）；`databaseTouched=false`。
 
-| 步骤 | 实际结果 | 可以证明 |
-| --- | --- | --- |
-| 本人独立浏览器扫码进入后台 | 公众号后台登录成功 | 新账号前提满足 |
-| 编辑器账号名片搜索目标 | searchbiz `scene=1, begin=0, count=10`，HTTP 200，`ret=0`，含目标昵称与 `fakeid=Mzg5NTQzMTQxMg==` | 目标搜索可用，标识吻合已知 biz |
-| 编辑器超链接自号列表 | appmsgpublish `fakeid=''`，HTTP 200，`ret=0` | 该会话能请求自号列表 |
-| 同请求换为搜索所得目标 fakeid（13:32:09.425） | HTTP 200，`ret=200013`，`err_msg=freq control` | 目标首屏受上游限制；没有取得文章 |
-| 间隔 142.448 秒后浏览器同源复核（13:34:31.873） | 相同 appmsgpublish 参数，HTTP 200，`ret=200013`，`err_msg=freq control` | 同源复核仍受阻；不是下一页 |
-| 第三次目标请求：遗留引用 appmsg（13:35:44.453） | 不同路径、源码支持的参数，HTTP 200，`ret=200013`，`err_msg=freq control` | 第二种列表路径首屏也受阻 |
+| 步骤                                            | 实际结果                                                                                          | 可以证明                         |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------- |
+| 本人独立浏览器扫码进入后台                      | 公众号后台登录成功                                                                                | 新账号前提满足                   |
+| 编辑器账号名片搜索目标                          | searchbiz `scene=1, begin=0, count=10`，HTTP 200，`ret=0`，含目标昵称与 `fakeid=Mzg5NTQzMTQxMg==` | 目标搜索可用，标识吻合已知 biz   |
+| 编辑器超链接自号列表                            | appmsgpublish `fakeid=''`，HTTP 200，`ret=0`                                                      | 该会话能请求自号列表             |
+| 同请求换为搜索所得目标 fakeid（13:32:09.425）   | HTTP 200，`ret=200013`，`err_msg=freq control`                                                    | 目标首屏受上游限制；没有取得文章 |
+| 间隔 142.448 秒后浏览器同源复核（13:34:31.873） | 相同 appmsgpublish 参数，HTTP 200，`ret=200013`，`err_msg=freq control`                           | 同源复核仍受阻；不是下一页       |
+| 第三次目标请求：遗留引用 appmsg（13:35:44.453） | 不同路径、源码支持的参数，HTTP 200，`ret=200013`，`err_msg=freq control`                          | 第二种列表路径首屏也受阻         |
 
 第二次请求为浏览器同源 fetch，证据 `output/playwright/mp-backend/backend-same-origin-recheck.json`；与首轮间隔精确为 142.448 秒。
 

@@ -1,6 +1,5 @@
 # Development Guide
 
-
 ## Project Structure
 
 - `apps/server`: NestJS backend.

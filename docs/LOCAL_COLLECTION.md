@@ -44,14 +44,14 @@
 
 ## 热度字段
 
-| 含义 | 支持的 CSV 字段（部分） | 缺失时 |
-| --- | --- | --- |
-| 阅读 | `read_num` / `read_count` / `阅读量` | 留空 |
-| 点赞 | `like_num` / `like_count` / `点赞数` | 留空 |
-| 分享 | `share_num` / `share_count` / `分享数` | 留空 |
-| 评论 | `comment_count` / `评论数` | `{}` 也视为缺失 |
-| 在看 | `wow_num` / `在看数` | 留空 |
-| 收藏 | `favorite_count` / `favorite_num` / `收藏数` | 留空 |
+| 含义 | 支持的 CSV 字段（部分）                      | 缺失时          |
+| ---- | -------------------------------------------- | --------------- |
+| 阅读 | `read_num` / `read_count` / `阅读量`         | 留空            |
+| 点赞 | `like_num` / `like_count` / `点赞数`         | 留空            |
+| 分享 | `share_num` / `share_count` / `分享数`       | 留空            |
+| 评论 | `comment_count` / `评论数`                   | `{}` 也视为缺失 |
+| 在看 | `wow_num` / `在看数`                         | 留空            |
+| 收藏 | `favorite_count` / `favorite_num` / `收藏数` | 留空            |
 
 作者公开示例是 `title,url,time,like_num,read_num,share_num,comment_count`。没有证据表明能稳定取得其他公众号文章的收藏总数，程序不会用分享或在看冒充收藏。采集软件是否把取不到的指标输出为 0，本项目无法判定；CSV 中真实写入的 0 会原样保存。
 

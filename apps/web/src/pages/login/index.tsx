@@ -9,7 +9,7 @@ const LoginPage = () => {
   const navigate = useNavigate();
 
   return (
-    <div className="m-auto mt-[10vh] flex w-full max-w-sm flex-col gap-4 rounded-large bg-content1 px-8 pb-10 pt-6 shadow-small">
+    <div className="rounded-large bg-content1 shadow-small m-auto mt-[10vh] flex w-full max-w-sm flex-col gap-4 px-8 pb-10 pt-6">
       <Input
         value={codeValue}
         onValueChange={setCodeValue}

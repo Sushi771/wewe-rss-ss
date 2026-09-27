@@ -19,10 +19,10 @@
 
 ## 审查的候选实现
 
-| 候选 | 固定提交 / 许可文件 | 入口及真实上游 | 会话、依赖和实际判断 |
-| --- | --- | --- | --- |
-| hjyl-cheng/wechat-pcspider | `930c4a39331eb657cd7059615f39bac5bc6d7dcc`（2026-01-16）；LICENSE 为 Apache-2.0，README 又写仅学习研究、勿商业使用，二者存在表述冲突，未移植源码 | `ArticlesInfo.read_like_nums → __get_appmsgext` POST `https://mp.weixin.qq.com/mp/getappmsgext`；`get_article_stats_from_url` GET 第一方 `/s` | 前者需要文章会话 `appmsg_token` 和 Cookie；后者使用文章页 `uin/key/pass_ticket`。原捕获流程使用 mitmproxy、PC 微信及证书，并将凭据写文件；本轮仅审查，未安装运行。普通文章与部分视频分支可见；不足以证明贴图/转载/转发覆盖。 |
-| wechat-article/wechat-article-exporter | `a7bffa6e481a188510a701d30b399b76573434e5`（2026-08-07）；MIT，Copyright 2024 Jock | `ExtractSetCookie.response` 观察 `https://mp.weixin.qq.com/s?__biz=`；`profile_ext_getmsg.get.ts` GET 第一方 `/mp/profile_ext?action=getmsg` | 插件经 mitmproxy 捕获文章 URL/Set-Cookie，写 `credentials.json` 并在 `*:8088` 提供服务。类型声明含 `uin/key/pass_ticket/wap_sid2/appmsg_token/cookie`。其 getmsg 与已失败路线没有可证明的新差异，未重跑。此插件没有提供当前目标号指标成功证据。 |
+| 候选                                   | 固定提交 / 许可文件                                                                                                                              | 入口及真实上游                                                                                                                                | 会话、依赖和实际判断                                                                                                                                                                                                                            |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| hjyl-cheng/wechat-pcspider             | `930c4a39331eb657cd7059615f39bac5bc6d7dcc`（2026-01-16）；LICENSE 为 Apache-2.0，README 又写仅学习研究、勿商业使用，二者存在表述冲突，未移植源码 | `ArticlesInfo.read_like_nums → __get_appmsgext` POST `https://mp.weixin.qq.com/mp/getappmsgext`；`get_article_stats_from_url` GET 第一方 `/s` | 前者需要文章会话 `appmsg_token` 和 Cookie；后者使用文章页 `uin/key/pass_ticket`。原捕获流程使用 mitmproxy、PC 微信及证书，并将凭据写文件；本轮仅审查，未安装运行。普通文章与部分视频分支可见；不足以证明贴图/转载/转发覆盖。                    |
+| wechat-article/wechat-article-exporter | `a7bffa6e481a188510a701d30b399b76573434e5`（2026-08-07）；MIT，Copyright 2024 Jock                                                               | `ExtractSetCookie.response` 观察 `https://mp.weixin.qq.com/s?__biz=`；`profile_ext_getmsg.get.ts` GET 第一方 `/mp/profile_ext?action=getmsg`  | 插件经 mitmproxy 捕获文章 URL/Set-Cookie，写 `credentials.json` 并在 `*:8088` 提供服务。类型声明含 `uin/key/pass_ticket/wap_sid2/appmsg_token/cookie`。其 getmsg 与已失败路线没有可证明的新差异，未重跑。此插件没有提供当前目标号指标成功证据。 |
 
 可定位源码：
 
@@ -37,12 +37,12 @@
 
 ## 字段语义与拒绝移植的行为
 
-| 原字段 | 候选源码中的称呼 | 当前可采信程度 |
-| --- | --- | --- |
-| `appmsgstat.read_num` / HTML `read_num_new`、`read_num` | 阅读 | 本篇公开页为空；未取得授权响应，尚未核实值和计数上限 |
-| `old_like_num` / `old_like_count` | 旧赞 / 拇指赞 | 需要真实响应与当前微信 UI 对照，不能只凭字段名接到正式点赞排序 |
-| `like_num` / `like_count` | 源码不同位置混称点赞、喜欢、收藏 | 与拇指赞不能自动等同；在看/喜欢语义仍待当前响应与 UI 验证 |
-| `favorite_count` | README 示例与 `like_count` 同值，另有删除重复字段脚本 | 不能证明收藏总数；保持 null / unavailable |
+| 原字段                                                  | 候选源码中的称呼                                      | 当前可采信程度                                                 |
+| ------------------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------- |
+| `appmsgstat.read_num` / HTML `read_num_new`、`read_num` | 阅读                                                  | 本篇公开页为空；未取得授权响应，尚未核实值和计数上限           |
+| `old_like_num` / `old_like_count`                       | 旧赞 / 拇指赞                                         | 需要真实响应与当前微信 UI 对照，不能只凭字段名接到正式点赞排序 |
+| `like_num` / `like_count`                               | 源码不同位置混称点赞、喜欢、收藏                      | 与拇指赞不能自动等同；在看/喜欢语义仍待当前响应与 UI 验证      |
+| `favorite_count`                                        | README 示例与 `like_count` 同值，另有删除重复字段脚本 | 不能证明收藏总数；保持 null / unavailable                      |
 
 `extract_stats_from_html.py` 把空字段及解析异常归零，且即使未取得指标也可能返回 `success=True`。其中 `like_count: '(.*?)'` 未限定字段边界，会匹配 `old_like_count` 后半段。这些行为不符合缺失保留和语义要求，未用于项目采集。新探针明确限定字段边界，并保留 `empty`、`numeric_unverified`、`non_numeric_redacted` 三种观察状态。
 

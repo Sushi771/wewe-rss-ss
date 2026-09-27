@@ -6,3 +6,8 @@ apps/web/.next
 dist
 node_modules
 pnpm-lock.yaml
+
+# Generated application bundles and local runtime/evidence files
+apps/server/client/
+apps/server/data/
+output/
