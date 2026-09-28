@@ -38,12 +38,11 @@ const Feeds = () => {
 
   const queryUtils = trpc.useUtils();
 
-  const { mutateAsync: getMpInfo, isLoading: isGetMpInfoLoading } =
-    trpc.platform.getMpInfo.useMutation({});
+  const { mutateAsync: addFromArticle, isLoading: isGetMpInfoLoading } =
+    trpc.feed.addFromArticle.useMutation({});
   const { mutateAsync: updateMpInfo } = trpc.feed.edit.useMutation({});
 
-  const { mutateAsync: addFeed, isLoading: isAddFeedLoading } =
-    trpc.feed.add.useMutation({});
+  const isAddFeedLoading = isGetMpInfoLoading;
   const { mutateAsync: refreshMpArticles, isLoading: isGetArticlesLoading } =
     trpc.feed.refreshArticles.useMutation();
   const {
@@ -176,33 +175,27 @@ const Feeds = () => {
   }, [id]);
 
   const handleConfirm = async () => {
-    // TODO show operation in progress
     const wxsLinks = wxsLink.split('\n').filter((link) => link.trim() !== '');
+    const failedLinks: string[] = [];
     for (const link of wxsLinks) {
-      const res = await getMpInfo({ wxsLink: link });
-      if (res[0]) {
-        const item = res[0];
-        await addFeed({
-          id: item.id,
-          mpName: item.name,
-          mpCover: item.cover,
-          mpIntro: item.intro,
-          updateTime: item.updateTime,
-          status: 1,
-        });
-        await refreshMpArticles({ mpId: item.id });
-        toast.success('添加成功', {
-          description: `公众号 ${item.name}`,
+      try {
+        const result = await addFromArticle({ articleUrl: link.trim() });
+        toast.success('订阅已受理，文章更新中', {
+          description: `公众号 ${result.feed.mpName}`,
         });
         await queryUtils.article.list.reset();
         await queryUtils.article.summary.invalidate();
-      } else {
-        toast.error('添加失败', { description: '请检查链接是否正确' });
+      } catch (error) {
+        failedLinks.push(link);
+        toast.error('添加失败或待核对', {
+          description:
+            error instanceof Error ? error.message : '请检查私有实例和文章链接',
+        });
       }
     }
     refetchFeedList();
-    setWxsLink('');
-    onClose();
+    setWxsLink(failedLinks.join('\n'));
+    if (!failedLinks.length) onClose();
   };
 
   const { mutateAsync: batchDeleteFeeds, isLoading: isBatchDeleteLoading } =
@@ -280,7 +273,7 @@ const Feeds = () => {
   const collectionChannel = collectionRoute?.channel;
   const collectionChannelLabel = collectionChannel
     ? {
-        mp2rss: '后台文章来源',
+        wechat2rss: 'Wechat2RSS 私有实例',
         'public-album': '公开合集补采',
         unavailable: '暂无可用通道',
       }[collectionChannel]
@@ -294,8 +287,8 @@ const Feeds = () => {
       }[collectionRoute.selectedBy]
     : '';
   const collectionDescription =
-    collectionChannel === 'mp2rss'
-      ? '“更新”从后台来源读取最多20篇并保存本地；若来源尚未配置或未订阅此号，会显示具体失败状态。Mp2RSS 首次订阅不回补历史文章，最新20篇覆盖仍需实测。'
+    collectionChannel === 'wechat2rss'
+      ? '“更新”提交一次上游任务并读取当前缓存；任务受理不等于新文章已取得。定时读取缓存并保存本地。订阅前历史及非群发文章不保证覆盖。'
       : collectionChannel === 'public-album'
         ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个公开合集；合集外文章和同次推送的次条完整性未验证。该通道不提供阅读、点赞或收藏。`
         : collectionChannel === 'unavailable'
@@ -533,7 +526,7 @@ const Feeds = () => {
 
                   <Tooltip
                     content={
-                      collectionChannel === 'mp2rss'
+                      collectionChannel === 'wechat2rss'
                         ? '定时使用同一后台来源；全局定时任务仍需在服务端启用。'
                         : collectionChannel === 'public-album'
                           ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
@@ -1049,7 +1042,7 @@ const Feeds = () => {
                 <Button
                   color="primary"
                   isDisabled={
-                    !wxsLink.startsWith('https://mp.weixin.qq.com/s/')
+                    !wxsLink.trim().startsWith('https://mp.weixin.qq.com/s')
                   }
                   onPress={handleConfirm}
                   isLoading={

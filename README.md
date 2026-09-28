@@ -9,19 +9,17 @@
 
 </div>
 
-## 当前开发进度（2026-09-28）
+## 公众号订阅恢复实施状态（2026-09-29）
 
-**2026-09-29 最新设计阶段：** 已停止微信读书直连协议重试与电脑微信采集，转向可替换的 `SubscriptionProvider`；第一候选为 Wechat2RSS 私有部署。已提交[架构与字段映射设计](docs/SUBSCRIPTION_PROVIDER_DESIGN.md)，尚未购买、部署、接入或修改生产数据库。Wechat2RSS 官方 `/api/query` 示例未给出可用于保留旧 ID 的文章唯一身份或图片字段，真实目标五篇、正文、图片和历史查询仍须先验收。下方旧目标/来源文字为历史检查点，以此段为准。
+当前按[正式实施任务书](docs/SUBSCRIPTION_IMPLEMENTATION_TASK.md)推进，工作状态以[精简交接](docs/DEVELOPMENT_HANDOFF.md)为准。Wechat2RSS 私有实例是第一候选，已有的 RSS、Markdown、Obsidian、SQLite 与按号批量导出继续由本项目负责。旧微信读书直连、中转复刻和电脑微信采集已停止。
 
-**最新方向：恢复微信读书后台订阅，先验证最近 5 篇、正确分页及正文，再接现有项目。订阅尚未恢复。** 已完成 [weread-omni 完整客户端对照](docs/WEREAD_CLIENT_FLOW_AUDIT.md)：旧实验已走同类客户端扫码/登录/续期，续期后首屏仍 -2041，未发现支持重试的实质新条件。本轮没有重新扫码、请求文章或接入 SDK。停止电脑微信窗口、滚动、剪贴板和抓包，不重写界面或部署中转；历史文章、图片与导出保留。以下全历史目标和付费来源状态为先前检查点，不再是当前执行顺序。
+代码已增加显式 Provider 路由和默认关闭的 Wechat2RSS 接线；本机尚无授权实例，目标公众号五篇、正文、图片、持续新文和订阅前历史均未真实验证。生产库仍是只读核对的 12 号、1447 篇，本轮不修改生产数据。模拟测试或构建通过不表示订阅已恢复。
 
-**订阅前全部历史尽可能完整地回补、最新 20 篇及持续更新仍未完成真实验收。** 当前生产已受控切换到统一后台更新版本，移除电脑微信采集产品入口；Mp2RSS 首次订阅不回补历史，本机又无 Feed Key，因此当前适配器仅是后续增量候选，不能实现已确认的完整历史目标。生产定时仍关闭，12号/1447篇旧数据保留，缺失互动指标继续为 null。详见 [开发交接](docs/DEVELOPMENT_HANDOFF.md) 和 [来源决策](docs/ONE_CLICK_COLLECTION_SOURCE.md) 顶部。
+本机服务在 `apps/server/.env.local` 填写 `WECHAT2RSS_ENABLED=1`、`WECHAT2RSS_BASE_URL`、`WECHAT2RSS_TOKEN`，并用 `WECHAT2RSS_FEED_IDS` 逐号放行已有订阅。密钥不进入 Git。私有实例可参照独立的 `docker-compose.wechat2rss.yml`；授权、Docker、本人扫码齐备后才启动。实例图片代理在模板中关闭，使正文使用原始微信图片地址；真实附件仍须单篇核验。定时仍需显式启用，并先通过 SQLite 副本和备份验收。
 
-个人公众号后台扫码与目标号搜索已实测成功，但两个后台列表路径共三次首屏均返回 `200013 / freq control`，未取得目标列表或分页。普通更新和定时任务不再读取外部下载目录；已有文件只支持显式一次性导入。外部下载器不是后续开发依赖。
+Wechat2RSS 官方文档说明只抓当时最新 20 篇、只收录群发消息；本地旧文章不会因此删除。订阅前未被上游抓到的历史和非群发内容是独立能力缺口，不以近期订阅通过代替全历史完成。
 
-以上后台扫码与 `200013` 属旧来源验证记录，不再作为当前更新入口。当前生产使用受控固定产物与登录启动任务；旧 `启动WeWe-RSS.bat` 仍不可用于验证。详细部署审计与历史检查点见 [本机产物与隔离演练](docs/LOCAL_RELEASE_REHEARSAL.md)。
-
-最新结果见 [开发交接](docs/DEVELOPMENT_HANDOFF.md) 与 [下一轮任务](docs/NEXT_BUILTIN_COLLECTION_TASK.md)。项目原则已固定后续新窗口使用 **GPT-6 Sol / 极高（xhigh）**，要求优先参考 GitHub 成熟方案并持续同步源码、注释与文档，详见 [AGENTS.md](AGENTS.md)。
+独立部署模板使用 [官方部署指南](https://wechat2rss.xlab.app/deploy/deploy)中的 `ttttmr/wechat2rss` 镜像，固定到 2026-09-29 从 [Docker Hub 标签接口](https://hub.docker.com/v2/repositories/ttttmr/wechat2rss/tags/latest)核对的 digest `sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f`。模板仅绑定本机 `127.0.0.1:18080`，使用独立的忽略目录持久化；`RSS_KEEP_OLD_COUNT=-1` 只保留以后已抓到的文章，不补订阅前缺口。用户完成授权与本人登录后，可用 `node --env-file=apps/server/.env.local scripts/acceptance-wechat2rss.cjs --execute MP_WXS_<数字ID>` 做只读字段探测；不加 `--execute` 仅检查配置存在性。
 
 ## ✨ 功能
 

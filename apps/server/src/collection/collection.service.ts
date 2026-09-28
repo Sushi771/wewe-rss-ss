@@ -13,6 +13,7 @@ import {
 } from './collection-format';
 import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
 import { fetchMp2RssRecent20 } from './mp2rss';
+import { wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import {
   assertSavedArticleIdentity,
@@ -37,6 +38,167 @@ export class CollectionService {
   constructor(private readonly prisma: PrismaService) {}
 
   private readonly publicCollections = new Set<string>();
+  private readonly lastWechat2RssRefresh = new Map<string, number>();
+
+  async collectWechat2RssRecent(input: {
+    mpId: string;
+    mpName: string;
+    trigger: 'local-manual' | 'scheduled' | 'public';
+  }) {
+    if (this.publicCollections.has(input.mpId))
+      throw new Error('该公众号正在更新，请等待本次结束');
+    this.publicCollections.add(input.mpId);
+    try {
+      const feed = await this.prisma.feed.findUniqueOrThrow({
+        where: { id: input.mpId },
+      });
+      if (feed.mpName !== input.mpName)
+        throw new Error('订阅名称已变化，本次未写入');
+      const provider = wechat2RssProvider();
+      const account = await provider.checkAccountStatus();
+      if (!account.available) {
+        return {
+          source: 'wechat2rss' as const,
+          status: 'blocked' as const,
+          complete: false as const,
+          coverage: 'none' as const,
+          articles: 0,
+          created: 0,
+          updated: 0,
+          message: account.challenged
+            ? '上游账号受限，等待本人在私有实例处理；本次未读取文章。'
+            : '私有实例没有可用登录账号；本次未读取文章。',
+        };
+      }
+      // /add accepts an asynchronous job. Scheduled reads avoid submitting one per feed.
+      const now = Date.now();
+      const accepted =
+        input.trigger !== 'scheduled' &&
+        now - (this.lastWechat2RssRefresh.get(input.mpId) || 0) >= 15 * 60_000;
+      if (accepted) {
+        await provider.refreshSubscription(input.mpId);
+        this.lastWechat2RssRefresh.set(input.mpId, now);
+      }
+      const page = await provider.fetchArticles(input.mpId, input.mpName);
+      if (!page.articles.length) {
+        return {
+          source: 'wechat2rss' as const,
+          status: accepted ? ('pending' as const) : ('blocked' as const),
+          complete: false as const,
+          coverage: 'none' as const,
+          articles: 0,
+          created: 0,
+          updated: 0,
+          accepted,
+          message: accepted
+            ? '上游已受理更新任务，当前缓存还没有可核验文章；稍后读取，不代表更新成功。'
+            : '上游缓存没有可核验文章；本次未写入。',
+        };
+      }
+      let created = 0;
+      let updated = 0;
+      await this.prisma.$transaction(
+        async (tx) => {
+          for (const item of page.articles) {
+            // Title and time only detect a possible legacy collision; never merge by them.
+            const matches = await tx.article.findMany({
+              where: {
+                mpId: input.mpId,
+                OR: [
+                  { id: item.id },
+                  { sourceUrl: item.url },
+                  { verifiedSourceUrl: item.url },
+                ],
+              },
+            });
+            if (matches.length > 1)
+              throw new Error('原文身份对应多条旧记录，本批未写入');
+            const existing = matches[0];
+            if (existing) assertSavedArticleIdentity(existing, item);
+            if (!existing) {
+              const possibleLegacy = await tx.article.findFirst({
+                where: {
+                  mpId: input.mpId,
+                  title: item.title,
+                  publishTime: item.publishTime,
+                },
+              });
+              if (possibleLegacy)
+                throw new Error('疑似旧短链身份未核实，本批未写入');
+              await tx.article.create({
+                data: {
+                  id: item.id,
+                  mpId: input.mpId,
+                  title: item.title,
+                  publishTime: item.publishTime,
+                  sourceUrl: item.url,
+                  verifiedSourceUrl: item.url,
+                  contentHtml: item.contentHtml,
+                  picUrl: item.picUrl,
+                  lastBodyStatus: item.contentHtml
+                    ? 'available'
+                    : 'unavailable',
+                },
+              });
+              created++;
+            } else {
+              const data = {
+                ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
+                ...(!existing.verifiedSourceUrl
+                  ? { verifiedSourceUrl: item.url }
+                  : {}),
+                ...(!existing.contentHtml && item.contentHtml
+                  ? { contentHtml: item.contentHtml }
+                  : {}),
+                ...(!existing.picUrl && item.picUrl
+                  ? { picUrl: item.picUrl }
+                  : {}),
+                ...(!existing.lastBodyStatus && item.contentHtml
+                  ? { lastBodyStatus: 'available' }
+                  : {}),
+              };
+              if (Object.keys(data).length) {
+                await tx.article.update({ where: { id: existing.id }, data });
+                updated++;
+              }
+            }
+          }
+          const latest = await tx.article.aggregate({
+            where: { mpId: input.mpId },
+            _max: { publishTime: true },
+          });
+          await tx.feed.update({
+            where: { id: input.mpId },
+            data: {
+              collectionChannel: 'wechat2rss',
+              syncTime: Math.floor(Date.now() / 1000),
+              updateTime: latest._max.publishTime || feed.updateTime,
+              hasHistory: -1,
+            },
+          });
+        },
+        { timeout: 60000 },
+      );
+      return {
+        source: 'wechat2rss' as const,
+        status: 'partial' as const,
+        complete: false as const,
+        coverage: page.coverage,
+        articles: page.articles.length,
+        created,
+        updated,
+        accepted,
+        bodyMissing: page.bodyMissing,
+        imageBlocked: page.imageBlocked,
+        message:
+          `读取私有实例缓存 ${page.articles.length} 篇，归档新增 ${created}、补全 ${updated}。` +
+          (accepted ? '上游新任务仍可能进行中。' : '') +
+          ` 正文缺失 ${page.bodyMissing}，图片受限 ${page.imageBlocked}；订阅前历史与非群发不保证覆盖。`,
+      };
+    } finally {
+      this.publicCollections.delete(input.mpId);
+    }
+  }
 
   async retryArticleBody(id: string): Promise<BodyRetryResult> {
     const initial = await this.prisma.article.findUniqueOrThrow({

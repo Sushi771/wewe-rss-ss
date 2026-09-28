@@ -78,6 +78,8 @@ web_modules/
 .env.test.local
 .env.production.local
 .env.local
+.env.wechat2rss
+.wechat2rss-data/
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
@@ -137,6 +139,7 @@ WeWe-RSS-Portable-*.zip
 
 # Local browser acceptance evidence (may contain personal subscription data)
 output/playwright/
+output/subscription-implementation/
 tools/wechat-desktop-collector/.paused
 .local-releases/
 .playwright-cli/

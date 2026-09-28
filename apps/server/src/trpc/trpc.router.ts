@@ -14,7 +14,6 @@ import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
 import TurndownService from 'turndown';
 import dayjs from 'dayjs';
-import got from 'got';
 import { load } from 'cheerio';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -28,6 +27,7 @@ import {
 } from '../collection/article-page';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { resolveCollectionRoute } from '../collection/collection-channel';
+import { allowedImageUrl, fetchAllowedImage } from '../collection/image-fetch';
 import {
   bodyRetryAvailability,
   BodyRetryBlockedError,
@@ -281,6 +281,11 @@ export class TrpcRouter {
   });
 
   feedRouter = this.trpcService.router({
+    addFromArticle: this.trpcService.protectedProcedure
+      .input(z.object({ articleUrl: z.string().url() }))
+      .mutation(async ({ input }) =>
+        this.trpcService.addSubscriptionFromArticle(input.articleUrl),
+      ),
     list: this.trpcService.protectedProcedure
       .input(FeedSchemas.list)
       .query(async ({ input }) => {
@@ -670,18 +675,13 @@ export class TrpcRouter {
       /^data:image\/(png|jpeg|gif|webp);base64,([A-Za-z0-9+/=]+)$/,
     );
     if (inline) {
-      await fs.promises.writeFile(destPath, Buffer.from(inline[2], 'base64'));
+      const bytes = Buffer.from(inline[2], 'base64');
+      if (bytes.length > 10_000_000) throw new Error('IMAGE_TOO_LARGE');
+      await fs.promises.writeFile(destPath, bytes);
       return;
     }
-    const response = await got(url, {
-      responseType: 'buffer',
-      headers: {
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.64 Safari/537.36',
-        referer: 'https://mp.weixin.qq.com/',
-      },
-    });
-    await fs.promises.writeFile(destPath, response.body);
+    const image = await fetchAllowedImage(url);
+    await fs.promises.writeFile(destPath, image.bytes);
   }
 
   private async getArticleMarkdown(id: string, downloadPath?: string) {
@@ -700,24 +700,19 @@ export class TrpcRouter {
         code: 'PRECONDITION_FAILED',
         message: BODY_UNAVAILABLE_MESSAGE,
       });
-    try {
-      if (!html) html = await articlePageRequest(url).text();
-    } catch (err: any) {
-      this.logger.warn(
-        `Direct fetch from ${url} failed: ${err.message}, trying weread...`,
-      );
-    }
-
-    if (
-      !html ||
-      (!html.includes('rich_media_content') && !html.includes('js_content'))
-    ) {
-      const wereadHtml =
-        !article.sourceUrl &&
-        (await this.wereadService.getArticleContent(id, article.mpId));
-      if (wereadHtml) {
-        html = wereadHtml;
-      }
+    if (!html) {
+      const source = new URL(url);
+      if (
+        source.protocol !== 'https:' ||
+        source.hostname !== 'mp.weixin.qq.com' ||
+        source.username ||
+        source.password ||
+        source.port
+      )
+        throw new Error('文章来源未核验，不能远程读取');
+      html = await articlePageRequest(url)
+        .text()
+        .catch(() => '');
     }
 
     if (!html) {
@@ -768,15 +763,8 @@ export class TrpcRouter {
                 await this.downloadImage(dataSrc, localPath);
               }
               $img.attr('src', `attachments/${fileName}`);
-            } catch (err: any) {
-              this.logger.error(
-                `Failed to download image ${dataSrc}: ${err.message}`,
-              );
-              // Fallback to proxy if local download fails or just keep data-src
-              const proxyUrl = `${serverHost}/proxy/image?url=${encodeURIComponent(
-                dataSrc,
-              )}`;
-              $img.attr('src', proxyUrl);
+            } catch {
+              throw new Error('图片未能安全下载，离线导出未完成');
             }
           }
         },
@@ -788,10 +776,18 @@ export class TrpcRouter {
         const $img = $(img);
         const dataSrc = $img.attr('data-src') || $img.attr('src');
         if (dataSrc) {
-          const proxyUrl = dataSrc.startsWith('data:image/')
-            ? dataSrc
-            : `${serverHost}/proxy/image?url=${encodeURIComponent(dataSrc)}`;
-          $img.attr('src', proxyUrl);
+          try {
+            if (dataSrc.startsWith('data:image/')) $img.attr('src', dataSrc);
+            else {
+              allowedImageUrl(dataSrc);
+              $img.attr(
+                'src',
+                `${serverHost}/proxy/image?url=${encodeURIComponent(dataSrc)}`,
+              );
+            }
+          } catch {
+            $img.remove();
+          }
         }
       });
     }

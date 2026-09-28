@@ -5,12 +5,18 @@ import { PrismaClient } from '@prisma/client';
 import { CollectionService } from './collection.service';
 import { resolveCollectionRoute } from './collection-channel';
 import { canonicalArticleUrl } from './collection-format';
-import { fetchMp2RssRecent20 } from './mp2rss';
+import {
+  enabledWechat2RssFeedIds,
+  wechat2RssProvider,
+} from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { TrpcService } from '../trpc/trpc.service';
 import { FeedsService } from '../feeds/feeds.service';
 
-jest.mock('./mp2rss', () => ({ fetchMp2RssRecent20: jest.fn() }));
+jest.mock('./provider-registry', () => ({
+  enabledWechat2RssFeedIds: jest.fn(),
+  wechat2RssProvider: jest.fn(),
+}));
 jest.mock('./sqlite-backup', () => ({ createVerifiedSqliteBackup: jest.fn() }));
 
 const config = {
@@ -19,15 +25,16 @@ const config = {
 } as any;
 
 describe('backend collection routing', () => {
-  it('migrates a saved desktop choice in memory without changing data', () => {
+  it('blocks legacy sources and requires an explicit Wechat2RSS selection', () => {
+    (enabledWechat2RssFeedIds as jest.Mock).mockReturnValue(new Set());
     expect(
       resolveCollectionRoute({
         id: 'MP_WXS_1000000000',
         collectionChannel: 'desktop-wechat',
       }),
-    ).toEqual({ channel: 'mp2rss', selectedBy: 'saved' });
+    ).toEqual({ channel: 'unavailable', selectedBy: 'invalid' });
     expect(resolveCollectionRoute({ id: 'MP_WXS_1000000000' })).toEqual({
-      channel: 'mp2rss',
+      channel: 'unavailable',
       selectedBy: 'legacy',
     });
   });
@@ -71,6 +78,23 @@ describe('backend collection routing', () => {
 
   beforeEach(async () => {
     jest.resetAllMocks();
+    process.env.WECHAT2RSS_ENABLED = '1';
+    (enabledWechat2RssFeedIds as jest.Mock).mockReturnValue(new Set(ids));
+    (wechat2RssProvider as jest.Mock).mockReturnValue({
+      checkAccountStatus: jest
+        .fn()
+        .mockResolvedValue({ available: true, challenged: false }),
+      refreshSubscription: jest
+        .fn()
+        .mockResolvedValue({ accepted: true, pending: true }),
+      fetchArticles: jest.fn().mockImplementation(async (id: string) => ({
+        articles: [article(id)],
+        coverage: 'recent-window',
+        upstreamCount: 1,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      })),
+    });
     (createVerifiedSqliteBackup as jest.Mock).mockResolvedValue({
       integrityCheck: 'ok',
     });
@@ -84,7 +108,7 @@ describe('backend collection routing', () => {
           mpCover: '',
           mpIntro: '',
           updateTime: 0,
-          collectionChannel: index === 0 ? 'desktop-wechat' : null,
+          collectionChannel: null,
         },
       });
     }
@@ -97,6 +121,7 @@ describe('backend collection routing', () => {
   });
 
   afterAll(async () => {
+    delete process.env.WECHAT2RSS_ENABLED;
     await prisma?.$disconnect();
     if (
       root &&
@@ -107,26 +132,26 @@ describe('backend collection routing', () => {
   });
 
   it('visits all 12 feeds, persists unique articles, and repeats with zero new rows', async () => {
-    (fetchMp2RssRecent20 as jest.Mock).mockImplementation(
-      async (id: string) => [article(id)],
-    );
     const first =
       await service.refreshAllMpArticlesAndUpdateFeed('local-manual');
     expect(first).toHaveLength(12);
-    expect(first.every((item) => item.source === 'mp2rss')).toBe(true);
+    expect(first.every((item) => item.source === 'wechat2rss')).toBe(true);
     expect(
-      new Set((fetchMp2RssRecent20 as jest.Mock).mock.calls.map((c) => c[0]))
-        .size,
+      new Set(
+        (
+          wechat2RssProvider as jest.Mock
+        ).mock.results[0].value.fetchArticles.mock.calls.map((c) => c[0]),
+      ).size,
     ).toBe(12);
     expect(await prisma.article.count()).toBe(12);
     expect(
-      await prisma.feed.count({ where: { collectionChannel: 'mp2rss' } }),
+      await prisma.feed.count({ where: { collectionChannel: 'wechat2rss' } }),
     ).toBe(12);
     const second =
       await service.refreshAllMpArticlesAndUpdateFeed('local-manual');
     expect(second).toHaveLength(12);
     expect(await prisma.article.count()).toBe(12);
-    expect((fetchMp2RssRecent20 as jest.Mock).mock.calls).toHaveLength(24);
+    expect((wechat2RssProvider as jest.Mock).mock.calls).toHaveLength(24);
   });
 
   it('isolates one failed feed and keeps its old body, image, metrics and ID', async () => {
@@ -145,17 +170,25 @@ describe('backend collection routing', () => {
         likeCount: null,
       },
     });
-    (fetchMp2RssRecent20 as jest.Mock).mockImplementation(
-      async (id: string) => {
+    (wechat2RssProvider as jest.Mock).mockImplementation(() => ({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      refreshSubscription: async () => ({ accepted: true, pending: true }),
+      fetchArticles: async (id: string) => {
         if (id === ids[3]) throw new Error('provider unavailable');
-        return [article(id)];
+        return {
+          articles: [article(id)],
+          coverage: 'recent-window',
+          upstreamCount: 1,
+          bodyMissing: 0,
+          imageBlocked: 0,
+        };
       },
-    );
+    }));
     const results =
       await service.refreshAllMpArticlesAndUpdateFeed('local-manual');
     expect(results).toHaveLength(12);
     expect(results[3].status).toBe('failed');
-    expect(results[4].source).toBe('mp2rss');
+    expect(results[4].source).toBe('wechat2rss');
     expect(await prisma.article.count()).toBe(11);
     expect(
       await prisma.article.findUniqueOrThrow({ where: { id: old.id } }),
@@ -174,12 +207,9 @@ describe('backend collection routing', () => {
     delete process.env.DISABLE_SCHEDULED_UPDATES;
     try {
       await prisma.feed.update({ where: { id: ids[11] }, data: { status: 0 } });
-      (fetchMp2RssRecent20 as jest.Mock).mockImplementation(
-        async (id: string) => [article(id)],
-      );
       const scheduled = new FeedsService(prisma as any, service, config);
       await scheduled.handleUpdateFeedsCron();
-      expect((fetchMp2RssRecent20 as jest.Mock).mock.calls).toHaveLength(11);
+      expect((wechat2RssProvider as jest.Mock).mock.calls).toHaveLength(11);
       expect(await prisma.article.count()).toBe(11);
       expect(await prisma.article.count({ where: { mpId: ids[11] } })).toBe(0);
     } finally {

@@ -268,18 +268,20 @@ describe('local collection with real SQLite migrations', () => {
     });
     await prisma.feed.delete({ where: { id: other } });
   });
-  it('does not import a legacy directory when the backend key is missing', async () => {
+  it('blocks an unselected provider without reading a legacy directory', async () => {
     await prisma.feed.update({
       where: { id: mpId },
       data: { localDirectory: directory },
     });
     const readFiles = jest.spyOn(service, 'importDirectory');
     const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
-    await expect(trpc.refreshMpArticlesAndUpdateFeed(mpId)).rejects.toThrow(
-      'MP2RSS_FEED_KEY_NOT_CONFIGURED',
+    expect((await trpc.refreshMpArticlesAndUpdateFeed(mpId)).status).toBe(
+      'blocked',
     );
     const results = await trpc.refreshAllMpArticlesAndUpdateFeed();
-    expect(results.find((result) => result.id === mpId)?.status).toBe('failed');
+    expect(results.find((result) => result.id === mpId)?.status).toBe(
+      'blocked',
+    );
     expect(readFiles).not.toHaveBeenCalled();
     expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
       before,

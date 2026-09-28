@@ -1,0 +1,16 @@
+# 独立私有实例；镜像 digest 由 Docker Hub 在 2026-09-29 核对。
+# 本文件只是部署准备；授权、Docker 和本人登录齐备后才能启动。
+services:
+  wechat2rss:
+    image: ttttmr/wechat2rss@sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f
+    env_file:
+      - .env.wechat2rss
+    environment:
+      RSS_KEEP_OLD_COUNT: '-1'
+      RSS_MAX_ITEM_COUNT: '100'
+      RSS_PROXY_DISABLE_IMG: '1'
+    volumes:
+      - ./.wechat2rss-data:/wechat2rss
+    ports:
+      - '127.0.0.1:18080:8080'
+    restart: on-failure:3

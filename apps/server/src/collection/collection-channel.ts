@@ -1,3 +1,5 @@
+import { enabledWechat2RssFeedIds } from './provider-registry';
+
 type ChannelFeed = {
   id: string;
   collectionChannel?: string | null;
@@ -6,7 +8,7 @@ type ChannelFeed = {
 };
 
 export type CollectionRoute = {
-  channel: 'mp2rss' | 'public-album' | 'unavailable';
+  channel: 'wechat2rss' | 'public-album' | 'unavailable';
   selectedBy: 'saved' | 'environment' | 'legacy' | 'invalid';
 };
 
@@ -28,14 +30,14 @@ export function parseBoundAlbumIds(
   return undefined;
 }
 
-/** 旧桌面选择仅作为历史值读取；新更新统一走后台来源。 */
+/** Existing legacy values are historical. Only an explicitly enabled feed uses Wechat2RSS. */
 export function resolveCollectionRoute(feed: ChannelFeed): CollectionRoute {
+  const enabled = enabledWechat2RssFeedIds().has(feed.id);
   if (feed.collectionChannel != null) {
-    if (
-      feed.collectionChannel === 'desktop-wechat' ||
-      feed.collectionChannel === 'mp2rss'
-    )
-      return { channel: 'mp2rss', selectedBy: 'saved' };
+    if (feed.collectionChannel === 'wechat2rss')
+      return process.env.WECHAT2RSS_ENABLED === '1'
+        ? { channel: 'wechat2rss', selectedBy: 'saved' }
+        : { channel: 'unavailable', selectedBy: 'invalid' };
     if (
       feed.collectionChannel === 'public-album' &&
       parseBoundAlbumIds(feed.publicAlbumIds)
@@ -48,5 +50,7 @@ export function resolveCollectionRoute(feed: ChannelFeed): CollectionRoute {
     return parseBoundAlbumIds(feed.publicAlbumIds)
       ? { channel: 'public-album', selectedBy: 'legacy' }
       : { channel: 'unavailable', selectedBy: 'invalid' };
-  return { channel: 'mp2rss', selectedBy: 'legacy' };
+  return enabled
+    ? { channel: 'wechat2rss', selectedBy: 'environment' }
+    : { channel: 'unavailable', selectedBy: 'legacy' };
 }

@@ -9,6 +9,7 @@ import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
+import { wechat2RssProvider } from '../collection/provider-registry';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { BodyRetryBlockedError } from '../collection/article-body-retry';
 import { Feed } from '@prisma/client';
@@ -172,46 +173,15 @@ export class TrpcService {
     return account[Math.floor(Math.random() * account.length)];
   }
 
-  async getMpArticles(mpId: string, page = 1, retryCount = 3) {
-    const account = await this.getAvailableAccount();
-
-    try {
-      const res = await this.wereadService.getMpArticles(mpId, page, account);
-      this.logger.log(
-        `getMpArticles(${mpId}) page: ${page} articles: ${res.length}`,
-      );
-      if (res.length > 0) {
-        this.logger.debug(
-          `First article from weread: ${res[0].title} (${res[0].id})`,
-        );
-      }
-      return res;
-    } catch (err: any) {
-      // Token 失效时不重试（账号已被禁用，重试无意义）
-      if (
-        err instanceof TokenInvalidError ||
-        err.name === 'TokenInvalidError'
-      ) {
-        if (account?.id) {
-          await this.prismaService.account
-            .update({
-              where: { id: account.id },
-              data: { status: statusMap.INVALID },
-            })
-            .catch(() => {});
-          this.logger.error(
-            `账号（${account.id}）登录失效，已禁用，请在账号页面重新登录`,
-          );
-        }
-        throw err;
-      }
-      this.logger.error(`retry(${4 - retryCount}) getMpArticles failed`);
-      if (retryCount > 0) {
-        return this.getMpArticles(mpId, page, retryCount - 1);
-      } else {
-        throw err;
-      }
-    }
+  async getMpArticles(
+    mpId: string,
+    page = 1,
+    retryCount = 3,
+  ): Promise<Awaited<ReturnType<WereadService['getMpArticles']>>> {
+    void mpId;
+    void page;
+    void retryCount;
+    throw new Error('旧微信读书文章接口已停用。');
   }
 
   async refreshMpArticlesAndUpdateFeed(
@@ -223,10 +193,10 @@ export class TrpcService {
     let route: CollectionRoute;
     return this.recordCollectionResult(
       mpId,
-      (feed) => this.refreshArticles(feed, page, route),
+      (feed) => this.refreshArticles(feed, page, route, trigger),
       (feed) => {
         route = resolveCollectionRoute(feed);
-        return route.channel === 'mp2rss';
+        return route.channel === 'wechat2rss';
       },
     );
   }
@@ -266,6 +236,11 @@ export class TrpcService {
       bodyFetch?: { succeeded: number; unavailable: number };
       bodyCache?: { available: number; retained: number; missing: number };
       bodyUnavailable?: { id: string; cached: boolean }[];
+      created?: number;
+      updated?: number;
+      accepted?: boolean;
+      bodyMissing?: number;
+      imageBlocked?: number;
     },
   >(
     mpId: string,
@@ -343,6 +318,11 @@ export class TrpcService {
             bodyFetch: result.bodyFetch,
             bodyCache: result.bodyCache,
             bodyUnavailable: result.bodyUnavailable,
+            created: result.created,
+            updated: result.updated,
+            accepted: result.accepted,
+            bodyMissing: result.bodyMissing,
+            imageBlocked: result.imageBlocked,
             attemptedAt: Math.floor(Date.now() / 1000),
           }),
         },
@@ -357,13 +337,15 @@ export class TrpcService {
     feed: Feed,
     page: number,
     route: CollectionRoute,
+    trigger: 'local-manual' | 'scheduled' | 'public',
   ) {
     const mpId = feed.id;
-    if (route.channel === 'mp2rss') {
+    if (route.channel === 'wechat2rss') {
       if (page !== 1) return this.unavailableCollection();
-      return this.collectionService.collectMp2RssRecent20({
+      return this.collectionService.collectWechat2RssRecent({
         mpId,
         mpName: feed.mpName,
+        trigger,
       });
     }
     if (route.channel === 'public-album') {
@@ -412,9 +394,9 @@ export class TrpcService {
 
   private async collectHistory(feed: Feed) {
     const route = resolveCollectionRoute(feed);
-    if (route.channel === 'mp2rss')
+    if (route.channel === 'wechat2rss')
       return this.unavailableCollection(
-        '后台来源只读取最近20篇，历史分页未启用。',
+        '订阅前历史查询尚未通过私有实例验证；已有本地历史保留。',
       );
     if (route.channel === 'public-album') {
       const albumIds = parseBoundAlbumIds(feed.publicAlbumIds);
@@ -442,7 +424,7 @@ export class TrpcService {
       id: string;
       name: string;
       source: string;
-      status: 'partial' | 'blocked' | 'failed';
+      status: 'partial' | 'pending' | 'blocked' | 'failed';
       complete: false;
       coverage: string;
       message: string;
@@ -490,15 +472,50 @@ export class TrpcService {
     return results;
   }
 
-  async getMpInfo(url: string) {
-    return this.wereadService.getMpInfo(url);
+  async getMpInfo(
+    url: string,
+  ): Promise<Awaited<ReturnType<WereadService['getMpInfo']>>> {
+    void url;
+    throw new Error('旧微信读书订阅入口已停用；请使用私有实例添加订阅。');
   }
 
-  async createLoginUrl() {
-    return this.wereadService.createLoginUrl();
+  async addSubscriptionFromArticle(articleUrl: string) {
+    const provider = wechat2RssProvider();
+    await createVerifiedSqliteBackup();
+    const accepted = await provider.addSubscription(articleUrl);
+    const old = await this.prismaService.feed.findUnique({
+      where: { id: accepted.feedId },
+    });
+    if (old && old.mpName !== accepted.name)
+      throw new Error('私有实例与现有订阅名称不一致，请先核对身份。');
+    const feed =
+      old ||
+      (await this.prismaService.feed.create({
+        data: {
+          id: accepted.feedId,
+          mpName: accepted.name,
+          mpCover: '',
+          mpIntro: '',
+          updateTime: 0,
+          syncTime: 0,
+          collectionChannel: 'wechat2rss',
+        },
+      }));
+    return { feed, accepted: true as const, pending: true as const };
   }
 
-  async getLoginResult(id: string) {
-    return this.wereadService.getLoginResult(id);
+  async createLoginUrl(): Promise<
+    Awaited<ReturnType<WereadService['createLoginUrl']>>
+  > {
+    throw new Error('旧微信读书登录入口已停用；请在 Wechat2RSS 私有实例登录。');
+  }
+
+  async getLoginResult(
+    id: string,
+  ): Promise<Awaited<ReturnType<WereadService['getLoginResult']>>> {
+    void id;
+    throw new Error(
+      '旧微信读书登录入口已停用；请在 Wechat2RSS 私有实例查看状态。',
+    );
   }
 }

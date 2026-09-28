@@ -1,5 +1,5 @@
 import { Controller, Get, Response, Render, Query } from '@nestjs/common';
-import got from 'got';
+import { fetchAllowedImage } from './collection/image-fetch';
 import { AppService } from './app.service';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from './configuration';
@@ -34,21 +34,11 @@ export class AppController {
   @Get('/proxy/image')
   async proxyImage(@Query('url') url: string, @Response() res: Res) {
     try {
-      const response = await got(url, {
-        responseType: 'buffer',
-        headers: {
-          'user-agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.64 Safari/537.36',
-          referer: 'https://mp.weixin.qq.com/',
-        },
-      });
-      res.setHeader(
-        'Content-Type',
-        response.headers['content-type'] || 'image/jpeg',
-      );
-      res.send(response.body);
-    } catch (err: any) {
-      res.status(400).send(`Failed to proxy image: ${err.message}`);
+      const image = await fetchAllowedImage(url);
+      res.setHeader('Content-Type', image.type);
+      res.send(image.bytes);
+    } catch {
+      res.status(400).send('图片来源不受支持或下载失败');
     }
   }
 
