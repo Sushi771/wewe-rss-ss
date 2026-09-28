@@ -12,13 +12,7 @@ const { processIdentity } = require('./switch.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const database = path.join(root, 'apps/server/data/wewe-rss.db');
-const pauseFile = path.join(root, 'tools/wechat-desktop-collector/.paused');
 const reportDir = path.join(root, 'output/playwright/local-release-audit');
-
-function assertPaused() {
-  if (fs.readFileSync(pauseFile, 'utf8').trim() !== 'USER_PAUSED')
-    throw new Error('共享微信暂停标记不符，拒绝开机启动');
-}
 
 function classifyListener(owners, release, snapshot = processIdentity) {
   if (owners.length === 0) return { status: 'free' };
@@ -36,7 +30,8 @@ function classifyListener(owners, release, snapshot = processIdentity) {
 
 async function startAtLogon() {
   if (process.platform !== 'win32') throw new Error('登录任务仅支持 Windows');
-  assertPaused();
+  // Login starts only the web server. The collector checks its own pause
+  // marker before any desktop input; an absent marker is normal after success.
   const { release, manifest } = readActiveRelease();
   const owners = processIdentity('Port', undefined, 4000);
   const listener = classifyListener(owners, release);
@@ -62,7 +57,6 @@ async function startAtLogon() {
 }
 
 function activateRunning(candidate) {
-  assertPaused();
   const { release } = checkedRelease(candidate);
   const listener = classifyListener(
     processIdentity('Port', undefined, 4000),

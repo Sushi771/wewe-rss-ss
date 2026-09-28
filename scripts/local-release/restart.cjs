@@ -53,11 +53,6 @@ function commandLine(release, database, port) {
   return `${node} ${args.join(' ')}`;
 }
 
-function assertPaused(hash) {
-  assert.equal(fs.readFileSync(pauseFile, 'utf8').trim(), 'USER_PAUSED');
-  assert.equal(fileHash(pauseFile), hash, '共享暂停文件发生变化');
-}
-
 async function controlledRestart(options) {
   if (process.platform !== 'win32') throw new Error('仅支持 Windows 本机');
   if (options.production === options.rehearsal)
@@ -91,8 +86,10 @@ async function controlledRestart(options) {
     assert.equal(source, fs.realpathSync(productionDatabase));
     loadProductionEnvironment();
   }
-  assert.equal(fs.readFileSync(pauseFile, 'utf8').trim(), 'USER_PAUSED');
-  const pauseHash = fileHash(pauseFile);
+  // The shared pause marker belongs to the collector, not the web server.
+  // A successful authorized collection removes it; the service must still be
+  // able to start at the next login. Rehearsal and production both keep
+  // scheduled desktop collection disabled in runtime.cjs.
   const audit = path.join(
     root,
     'output/playwright/local-release-audit',
@@ -171,7 +168,6 @@ async function controlledRestart(options) {
       );
   };
   const start = (bundlePath, bundle, label) => {
-    assertPaused(pauseHash);
     requireFreePort(port);
     marker(bundle);
     const log = fs.openSync(path.join(audit, `${label}.log`), 'wx');
@@ -250,7 +246,6 @@ async function controlledRestart(options) {
     await waitReady(port, newChild);
     const newIdentity = processIdentity('Snapshot', newChild.pid, port);
     assert.equal(newIdentity.pid, newChild.pid);
-    assertPaused(pauseHash);
     // Advance the ignored local pointer only after the new production process is ready.
     // The logon task has a stable action and follows this pointer after future deployments.
     if (options.production) writeActiveRelease(release);
@@ -279,7 +274,6 @@ async function controlledRestart(options) {
           fallbackChild.pid,
           port,
         );
-        assertPaused(pauseHash);
         if (options.production) writeActiveRelease(previous);
         const summary = {
           passed: options.rehearsal && options.injectFailure === true,
