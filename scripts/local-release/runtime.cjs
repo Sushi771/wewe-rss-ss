@@ -19,6 +19,7 @@ async function runtime() {
       port: { type: 'string' },
       'obsidian-root': { type: 'string' },
       'guard-report': { type: 'string' },
+      'pause-file': { type: 'string' },
       rehearsal: { type: 'boolean', default: false },
     },
   });
@@ -110,6 +111,21 @@ async function runtime() {
     }),
   );
   if (command === 'probe') return;
+  // helper 与应用同版；暂停文件必须位于版本目录之外，供将来的切换/回滚共用。
+  if (manifest.desktopHelperIncluded !== true)
+    throw new Error('产物缺少固定版本的桌面 helper');
+  if (!values['pause-file'] || !path.isAbsolute(values['pause-file']))
+    throw new Error('启动必须指定共享暂停文件的绝对路径');
+  const pauseFile = path.resolve(values['pause-file']);
+  const pauseParent = fs.realpathSync(path.dirname(pauseFile));
+  if (
+    path.basename(pauseFile) !== '.paused' ||
+    pauseParent === release ||
+    inside(release, pauseParent) ||
+    (fs.existsSync(pauseFile) && inside(release, fs.realpathSync(pauseFile)))
+  )
+    throw new Error('暂停文件必须在产物外并命名为 .paused');
+  process.env.WECHAT_DESKTOP_PAUSE_FILE = pauseFile;
   // 当前入口仅负责安全部署演练。生产切换需另行接入共享暂停状态与旧版本回滚，不能默默漏掉 helper。
   if (!values.rehearsal || !values['obsidian-root'] || !values['guard-report'])
     throw new Error(

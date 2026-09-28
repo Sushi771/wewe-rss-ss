@@ -195,6 +195,8 @@ async function helperPath() {
   );
   for (const candidate of [
     path.resolve(process.cwd(), relative),
+    // 版本化本机产物以 release/server 为工作目录；helper 随同一版本固定。
+    path.resolve(process.cwd(), '..', relative),
     path.resolve(process.cwd(), '..', '..', relative),
   ]) {
     try {

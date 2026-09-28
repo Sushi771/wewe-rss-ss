@@ -847,10 +847,18 @@ function Collect-Articles {
 
 $runMutex = [Threading.Mutex]::new($false, 'Local\WeWeRssDesktopCollector')
 $ownsMutex = $false
-$pausePath = Join-Path $PSScriptRoot '.paused'
+$pausePath = $null
 try {
     try { $ownsMutex = $runMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
     if (-not $ownsMutex) { Fail 'GLOBAL_COLLECTOR_BUSY' }
+    # 版本化应用必须共用一份暂停状态；源码运行仍使用原位置。
+    $pausePath = if ($env:WECHAT_DESKTOP_PAUSE_FILE) {
+        if (-not [IO.Path]::IsPathFullyQualified($env:WECHAT_DESKTOP_PAUSE_FILE) -or
+            [IO.Path]::GetFileName($env:WECHAT_DESKTOP_PAUSE_FILE) -cne '.paused') {
+            Fail 'INVALID_PAUSE_FILE'
+        }
+        [IO.Path]::GetFullPath($env:WECHAT_DESKTOP_PAUSE_FILE)
+    } else { Join-Path $PSScriptRoot '.paused' }
     if (Test-Path -LiteralPath $pausePath) {
         if (-not $ResumeAfterUserConsent) { Fail 'USER_PAUSED' }
         Remove-Item -LiteralPath $pausePath

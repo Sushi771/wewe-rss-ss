@@ -1,24 +1,8 @@
 @echo off
+chcp 65001 >nul 2>&1
 cd /d "%~dp0"
-set NO_PROXY=localhost,127.0.0.1,0.0.0.0
-echo Starting WeWe RSS Server...
-
-echo Releasing port 4000...
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :4000 ^| findstr LISTENING') do (
-    echo Killing PID %%a
-    taskkill /F /PID %%a >nul 2>&1
-)
-timeout /t 1 >nul
-
 node scripts\prepare-local.cjs
-if errorlevel 1 (
-    echo Build or database preparation failed.
-    pause
-    exit /b 1
-)
-
-start /b cmd /c "timeout /t 3 >nul && start http://localhost:4000/dash"
-call pnpm run start:server
 echo.
-echo Server stopped or failed to start.
+echo 当前服务不会被此入口停止或迁移。请查看 docs\LOCAL_RELEASE_REHEARSAL.md。
 pause
+exit /b 1

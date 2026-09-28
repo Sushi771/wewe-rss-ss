@@ -187,6 +187,8 @@ async function rehearse() {
       database,
       '--port',
       String(port),
+      '--pause-file',
+      pauseFile,
       '--rehearsal',
       '--obsidian-root',
       vault,
