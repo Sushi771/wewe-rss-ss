@@ -1,11 +1,32 @@
 #!/usr/bin/env node
 /* Read-only private-instance preflight. Never writes the upstream or local database. */
 const path = require('node:path');
+const fs = require('node:fs');
+
+// The server loads .env.local at startup; this standalone preflight must read
+// the same ignored file without starting the server or enabling collection.
+const serverRoot = path.resolve(__dirname, '../apps/server');
+const privateEnv = path.join(serverRoot, '.env.local');
+if (fs.existsSync(privateEnv)) {
+  const { createRequire } = require('node:module');
+  const serverRequire = createRequire(path.join(serverRoot, 'package.json'));
+  const parseEnv = createRequire(serverRequire.resolve('@nestjs/config'))(
+    'dotenv',
+  ).parse;
+  const values = parseEnv(fs.readFileSync(privateEnv));
+  for (const key of [
+    'WECHAT2RSS_BASE_URL',
+    'WECHAT2RSS_TOKEN',
+    'WECHAT2RSS_ENABLED',
+  ]) {
+    if (process.env[key] === undefined && values[key] !== undefined)
+      process.env[key] = values[key];
+  }
+}
 
 const feedId = process.argv.find((value) => /^MP_WXS_\d{5,15}$/.test(value));
 const execute = process.argv.includes('--execute');
 const configured = {
-  enabled: process.env.WECHAT2RSS_ENABLED === '1',
   baseUrl: Boolean(process.env.WECHAT2RSS_BASE_URL),
   token: Boolean(process.env.WECHAT2RSS_TOKEN),
   target: Boolean(feedId),
@@ -48,7 +69,8 @@ async function main() {
       JSON.stringify({
         mode: 'preflight-only',
         configured,
-        next: '设置本机私有环境后，使用 --execute MP_WXS_<数字ID> 执行只读联调。',
+        appEnabled: process.env.WECHAT2RSS_ENABLED === '1',
+        next: '在 apps/server/.env.local 配置私有实例后，使用 --execute MP_WXS_<数字ID> 执行只读联调；无需启用应用采集。',
       }),
     );
     return;
