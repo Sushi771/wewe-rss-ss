@@ -2,7 +2,7 @@
 
 ## 当前工作区与基线
 
-- 仓库 `C:/Users/ss/.gemini/antigravity/playground/sparse-comet/wewe-rss-ss`，`main`，基线 HEAD `2429a7401716a25f07cca9a3ecff806a20019a12`；接手时干净，随后本轮代码变更待提交。
+- 仓库 `C:/Users/ss/.gemini/antigravity/playground/sparse-comet/wewe-rss-ss`，`main`，设计基线 `2429a7401716a25f07cca9a3ecff806a20019a12`；接手时干净。本轮实施提交 `f6ec5177323e91c8d3141e2e2b4131c0579ffdb7` 已推送并核对远端 `main`，提交后工作区干净。GitHub CI 运行 [36457604405](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36457604405) 首次核对时仍在执行，后继须核对最终结论。
 - 生产 SQLite 只读核对：`quick_check=ok`，12 个订阅、1447 篇文章，其中 44 篇有缓存正文、1434 篇有封面 URL；11 个 `collection_channel=null`，1 个历史 `desktop-wechat`。本轮尚未生产写入、迁移、服务重启或微信操作。
 - 本机 `apps/server/.env` 与 `.env.local` 未见 Wechat2RSS 配置；未发现可调用的 Docker CLI，私有实例、本人授权及扫码条件未就绪。当前窗口运行模型/思考深度没有可查询的已应用设置，不把任务书的型号要求当作核实结果。
 
@@ -11,7 +11,7 @@
 - 将上传任务书保存为 `SUBSCRIPTION_IMPLEMENTATION_TASK.md`；把旧规则与长交接移入历史文件，当前执行规则集中在根 `AGENTS.md`。
 - 新增显式 Wechat2RSS Provider、JSON Feed 候选解析、原文 URL 身份和时区核验、正文与图片清洗；默认关闭，旧桌面及 Mp2RSS 值不再隐式成为更新来源。`/api/query` 和 RSS 已纳入只读联调脚本的字段探测，不作为 JSON Feed 的先决条件；真实字段可能要求调整主输入。
 - 现有链接添加、单号/全部/定时入口接新 Provider；手动受理上游异步任务后读取缓存，定时只读缓存。保留原 SQLite、RSS、Markdown、Obsidian 出口。下载及代理图片限制微信 CDN、重定向、大小和超时；旧 WeRead 文章/登录入口不再执行。
-- 服务端 16 套 / 136 项离线测试通过，服务端与网页构建、服务端与网页 lint 均通过；`pnpm fmt.check` 仅待本轮最后一次脚本格式调整后复核。只读联调脚本默认检查配置，已确认 `enabled/baseUrl/token/target` 当前均不存在。
+- 服务端 16 套 / 136 项离线测试通过，服务端与网页构建、服务端与网页 lint、`pnpm fmt.check`、`git diff --check` 均通过。只读联调脚本默认检查配置，已确认 `enabled/baseUrl/token/target` 当前均不存在。
 - 使用 SQLite 在线备份制作忽略目录下的一致性副本；生产与副本的 `feeds`、`articles` 全字段摘要分别相同（`f2373354...`、`35123e9f...`），两边完整性检查 `ok`、迁移 pending 为空。另在独立副本做**模拟文章**导入：1447→1448，重复新增/更新 0，全部旧文章逐字段不变，其他订阅不变，重新连接后可读。它只证明代码保护路径，**不是**真实 Wechat2RSS 验收。没有修改生产数据。
 - 独立部署模板使用官方 `ttttmr/wechat2rss` 镜像，固定 Docker Hub 2026-09-29 核对的 `latest` digest `sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f`，仅本机端口、独立数据目录、私有环境文件；本机无 Docker CLI、授权与扫码，尚未部署。
 
