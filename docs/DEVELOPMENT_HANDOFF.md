@@ -1,27 +1,25 @@
 # 公众号订阅恢复：当前精简交接（2026-09-29）
 
-## 当前工作区与基线
+## 当前工作区与数据
 
-- 仓库 `C:/Users/ss/.gemini/antigravity/playground/sparse-comet/wewe-rss-ss`，`main`，设计基线 `2429a7401716a25f07cca9a3ecff806a20019a12`；接手时干净。本轮实施提交 `f6ec5177323e91c8d3141e2e2b4131c0579ffdb7` 已推送并核对远端 `main`，提交后工作区干净。GitHub CI 运行 [36457604405](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36457604405) 首次核对时仍在执行，后继须核对最终结论。
-- 生产 SQLite 只读核对：`quick_check=ok`，12 个订阅、1447 篇文章，其中 44 篇有缓存正文、1434 篇有封面 URL；11 个 `collection_channel=null`，1 个历史 `desktop-wechat`。本轮尚未生产写入、迁移、服务重启或微信操作。
-- 本机 `apps/server/.env` 与 `.env.local` 未见 Wechat2RSS 配置；未发现可调用的 Docker CLI，私有实例、本人授权及扫码条件未就绪。当前窗口运行模型/思考深度没有可查询的已应用设置，不把任务书的型号要求当作核实结果。
+- 仓库 `C:/Users/ss/.gemini/antigravity/playground/sparse-comet/wewe-rss-ss`，分支 `main`。设计基线 `2429a7401716a25f07cca9a3ecff806a20019a12`；上一已推送实施/交接提交 `f6ec5177323e91c8d3141e2e2b4131c0579ffdb7`、`61c3372594755338945fba1243bd8c23b566894e`。接手以 `git rev-parse HEAD`、远端和 CI 实测为准。
+- 本轮从干净的 `61c3372` 继续。生产 SQLite **只读**核对 `quick_check=ok`、12 个订阅、1447 篇文章；没有生产迁移、写库或服务重启。用 SQLite 在线备份建立临时副本，应用本轮 `provider_refresh_attempt_time` 加性迁移后，`feeds` 和 `articles` 的原有列逐行摘要、数量与完整性检查均保持不变；临时副本已清理。正式上线仍须重新核验一致性备份与实际路径，并先在副本跑完整导入流程。
+- 本机 `apps/server/.env`、`.env.local` 没有 Wechat2RSS 配置；Docker CLI、合法私有实例、本人授权和扫码条件仍缺。当前窗口运行模型/思考深度没有可查询的已应用设置，记为**未核实**。
 
-## 本轮实施中
+## 已实现与已验证
 
-- 将上传任务书保存为 `SUBSCRIPTION_IMPLEMENTATION_TASK.md`；把旧规则与长交接移入历史文件，当前执行规则集中在根 `AGENTS.md`。
-- 新增显式 Wechat2RSS Provider、JSON Feed 候选解析、原文 URL 身份和时区核验、正文与图片清洗；默认关闭，旧桌面及 Mp2RSS 值不再隐式成为更新来源。`/api/query` 和 RSS 已纳入只读联调脚本的字段探测，不作为 JSON Feed 的先决条件；真实字段可能要求调整主输入。
-- 现有链接添加、单号/全部/定时入口接新 Provider；手动受理上游异步任务后读取缓存，定时只读缓存。保留原 SQLite、RSS、Markdown、Obsidian 出口。下载及代理图片限制微信 CDN、重定向、大小和超时；旧 WeRead 文章/登录入口不再执行。
-- 服务端 16 套 / 136 项离线测试通过，服务端与网页构建、服务端与网页 lint、`pnpm fmt.check`、`git diff --check` 均通过。只读联调脚本默认检查配置，已确认 `enabled/baseUrl/token/target` 当前均不存在。
-- 使用 SQLite 在线备份制作忽略目录下的一致性副本；生产与副本的 `feeds`、`articles` 全字段摘要分别相同（`f2373354...`、`35123e9f...`），两边完整性检查 `ok`、迁移 pending 为空。另在独立副本做**模拟文章**导入：1447→1448，重复新增/更新 0，全部旧文章逐字段不变，其他订阅不变，重新连接后可读。它只证明代码保护路径，**不是**真实 Wechat2RSS 验收。没有修改生产数据。
-- 独立部署模板使用官方 `ttttmr/wechat2rss` 镜像，固定 Docker Hub 2026-09-29 核对的 `latest` digest `sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f`，仅本机端口、独立数据目录、私有环境文件；本机无 Docker CLI、授权与扫码，尚未部署。
+- `f6ec517` 已加入显式 Wechat2RSS Provider、默认关闭开关、链接添加和手动/批量/定时入口；JSON Feed 仅为候选输入，真实字段仍待验。旧来源不会隐式执行。正文和图片清洗、SQLite 受保护导入、原有 RSS/Markdown/Obsidian 导出保留。
+- 本轮新增 `feeds.provider_refresh_attempt_time`：手动 `/add` 在请求前原子占用每号 15 分钟冷却，失败及进程重启后仍生效；定时任务仍只读上游缓存。已有 `syncTime` 只在取得并写入可核验的非空缓存页后推进，不能代表上游异步任务完成。缓存为空且处于冷却期显示 pending，不将任务受理称作文章归档。
+- 隔离 SQLite 回归覆盖重启后抑制重复 `/add`、冷却到期可重试、失败不推进成功时间，以及经过 JSON Feed 候选解析的正文和图片写入 Obsidian 本地附件；导出会从图片 URL 路径或 `wx_fmt` 保留受支持的扩展名。它们是**模拟上游**测试，不能证明目标号实际可取。此前独立副本模拟导入 1447→1448、重复新增/更新 0、旧值不变，只证明保护路径。
+- 本轮检查：Prisma generate/validate、服务端全量测试 **16 套 / 139 项通过**、服务端构建、服务端 ESLint、`pnpm fmt.check`、`git diff --check` 均通过；导出扩展名修正后相关回归 7 项再次通过。新提交/CI 以本轮最终核对为准。
 
 ## 下一具体工作单元
 
-1. 先检查当前 Git HEAD、CI 和本机配置状态；修复 CI 若出现的新失败。核查 `scripts/acceptance-wechat2rss.cjs` 在真实私有实例的只读结果，JSON Feed 是否确有稳定原文 URL、带时区发布时间、正文及可下载图片；RSS 或 `/api/query` 可作同一 Provider 主输入。不要按模拟样本宣称上游通过。
-2. 若实例仍缺失，可补持久化的上游任务受理时间/冷却与图片离线导出回归；源码已把单进程重复 `/add` 限到 15 分钟，进程重启后的冷却尚未持久化。进一步检查现有按号导出在新正文中的附件路径。
-3. 实例可用后优先“妈妈部落畅聊阁”真实五篇；核对身份、时间、正文、图片落盘与离线展示，再以**真实输出**在 SQLite 副本验收导入、去重、重启和旧值保护；副本和一致性备份通过前生产保持关闭。
-4. 条件与副本验收通过后，逐号受控接入、第二号、全部原订阅及定时和导出真实验收。完整历史、非群发和自然新文增量分别记录。
+1. 先核对本轮 GitHub 提交、远端 `main` 与 CI。若私有实例仍缺，不重复旧微信读书探针；只处理发现的实际代码/部署缺陷。部署新构建前必须先在副本验证新增加性迁移，再核验生产一致性备份并运行 `prisma migrate deploy`，不能直接用新二进制读取旧 schema。
+2. 实例可用后只读运行 `scripts/acceptance-wechat2rss.cjs`，先核验“妈妈部落畅聊阁”至少五篇不同真实文章的稳定身份、原文 URL、时区时间、正文和图片可下载性。JSON Feed 不足时比较同一实例的 RSS 和 `/api/query`，只凭真实字段选择输入。
+3. 再以真实输出在 SQLite 副本验收导入、旧 ID/正文/图片/指标保护、重复更新、重启、图片离线展示和按号导出。通过后才逐号受控生产接入，并验证第二号、全部原订阅、定时触发和自然新文增量。
+4. 完整历史、非群发文章及长期停机窗口缺口独立记录，不把近期缓存读取视为全史恢复。没有自然新文时增量保持待验。
 
-## 外部动作与边界
+## 外部动作
 
-用户需自行取得符合用途的私有实例授权、在本机填写 `WECHAT2RSS_BASE_URL` / `WECHAT2RSS_TOKEN`、在私有实例完成本人登录扫码；若本机部署，还需 Docker 运行环境。不要把密钥发到聊天。购买、租机器、扫码不由代理代做。旧微信读书协议、闭源中转和电脑微信采集路线保持停止。
+用户需自行取得符合个人学习研究用途的 Wechat2RSS 私有实例授权，在 Git 忽略的 `apps/server/.env.local` 填写 `WECHAT2RSS_BASE_URL`、`WECHAT2RSS_TOKEN` 并完成本人扫码；`apps/server/.env` 已被 Git 跟踪，**不要把凭据写入该文件**。若本机部署，还需 Docker 环境。凭据不要发到聊天或提交 Git。购买、租服务器、扫码不由代理代做。只有这些条件缺失时，不创建空转后继任务。

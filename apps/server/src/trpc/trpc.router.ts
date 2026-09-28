@@ -748,11 +748,20 @@ export class TrpcRouter {
           const $img = $(img);
           const dataSrc = $img.attr('data-src') || $img.attr('src');
           if (dataSrc) {
-            const ext = dataSrc.startsWith('data:image/')
-              ? dataSrc.slice(11).split(';')[0]
-              : dataSrc.includes('wx_fmt=')
-                ? dataSrc.split('wx_fmt=')[1].split('&')[0]
-                : 'jpg';
+            let ext = 'jpg';
+            if (dataSrc.startsWith('data:image/'))
+              ext = dataSrc.slice(11).split(';')[0];
+            else {
+              try {
+                const imageUrl = new URL(dataSrc);
+                ext =
+                  imageUrl.searchParams.get('wx_fmt') ||
+                  path.extname(imageUrl.pathname).slice(1) ||
+                  'jpg';
+              } catch {
+                // The download validator reports an invalid URL below.
+              }
+            }
             const hash = crypto.createHash('md5').update(dataSrc).digest('hex');
             const safeExt = /^(png|jpe?g|gif|webp)$/.test(ext) ? ext : 'jpg';
             const fileName = `image_${hash}.${safeExt}`;

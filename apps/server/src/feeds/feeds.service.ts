@@ -310,6 +310,7 @@ export class FeedsService {
         publicAlbumIds: null,
         lastCollectionResult: null,
         collectionChannel: null,
+        providerRefreshAttemptTime: 0,
         createdAt: new Date(),
         updatedAt: new Date(),
       };

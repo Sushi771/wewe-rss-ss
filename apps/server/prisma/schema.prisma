@@ -35,6 +35,8 @@ model Feed {
   publicAlbumIds String? @map("public_album_ids")
   lastCollectionResult String? @map("last_collection_result")
   collectionChannel String? @map("collection_channel")
+  /// Unix seconds when a manual Wechat2RSS /add attempt was reserved, including failed requests.
+  providerRefreshAttemptTime Int @default(0) @map("provider_refresh_attempt_time")
   articles   Article[]
 
   @@map("feeds")

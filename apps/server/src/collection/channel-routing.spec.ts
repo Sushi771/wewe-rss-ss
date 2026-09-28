@@ -5,12 +5,14 @@ import { PrismaClient } from '@prisma/client';
 import { CollectionService } from './collection.service';
 import { resolveCollectionRoute } from './collection-channel';
 import { canonicalArticleUrl } from './collection-format';
+import { parseWechat2RssJsonFeed } from './provider-article';
 import {
   enabledWechat2RssFeedIds,
   wechat2RssProvider,
 } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { TrpcService } from '../trpc/trpc.service';
+import { TrpcRouter } from '../trpc/trpc.router';
 import { FeedsService } from '../feeds/feeds.service';
 
 jest.mock('./provider-registry', () => ({
@@ -152,6 +154,158 @@ describe('backend collection routing', () => {
     expect(second).toHaveLength(12);
     expect(await prisma.article.count()).toBe(12);
     expect((wechat2RssProvider as jest.Mock).mock.calls).toHaveLength(24);
+  });
+
+  it('keeps the refresh cooldown across service restart and retries after it expires', async () => {
+    await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual');
+    const firstProvider = (wechat2RssProvider as jest.Mock).mock.results[0]
+      .value;
+    expect(firstProvider.refreshSubscription).toHaveBeenCalledTimes(1);
+    const attempted = await prisma.feed.findUniqueOrThrow({
+      where: { id: ids[0] },
+    });
+    expect(attempted.providerRefreshAttemptTime).toBeGreaterThan(0);
+
+    const restarted = new TrpcService(
+      prisma as any,
+      config,
+      {} as any,
+      new CollectionService(prisma as any),
+    );
+    const cached = await restarted.refreshMpArticlesAndUpdateFeed(
+      ids[0],
+      1,
+      'local-manual',
+    );
+    expect(cached).toMatchObject({ accepted: false, created: 0 });
+    const secondProvider = (wechat2RssProvider as jest.Mock).mock.results[1]
+      .value;
+    expect(secondProvider.refreshSubscription).toHaveBeenCalledTimes(1);
+
+    await prisma.feed.update({
+      where: { id: ids[0] },
+      data: {
+        providerRefreshAttemptTime:
+          attempted.providerRefreshAttemptTime - 16 * 60,
+      },
+    });
+    await restarted.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual');
+    const thirdProvider = (wechat2RssProvider as jest.Mock).mock.results[2]
+      .value;
+    expect(thirdProvider.refreshSubscription).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains a failed /add attempt and does not advance successful cache time', async () => {
+    (wechat2RssProvider as jest.Mock).mockReturnValue({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      refreshSubscription: jest
+        .fn()
+        .mockRejectedValue(new Error('upstream failed')),
+      fetchArticles: jest.fn().mockResolvedValue({
+        articles: [],
+        coverage: 'recent-window',
+        upstreamCount: 0,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      }),
+    });
+    await expect(
+      service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).rejects.toThrow('upstream failed');
+    const afterFailure = await prisma.feed.findUniqueOrThrow({
+      where: { id: ids[0] },
+    });
+    expect(afterFailure.providerRefreshAttemptTime).toBeGreaterThan(0);
+    expect(afterFailure.syncTime).toBe(0);
+
+    const restarted = new TrpcService(
+      prisma as any,
+      config,
+      {} as any,
+      new CollectionService(prisma as any),
+    );
+    const result = await restarted.refreshMpArticlesAndUpdateFeed(
+      ids[0],
+      1,
+      'local-manual',
+    );
+    expect(result).toMatchObject({ status: 'pending', accepted: false });
+    const provider = (wechat2RssProvider as jest.Mock).mock.results[0].value;
+    expect(provider.refreshSubscription).toHaveBeenCalledTimes(1);
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).syncTime,
+    ).toBe(0);
+  });
+
+  it('exports a parsed provider body and its image as a local attachment', async () => {
+    const identity = article(ids[0]);
+    const imageUrl = 'https://mmbiz.qpic.cn/offline.png';
+    const page = parseWechat2RssJsonFeed(
+      {
+        items: [
+          {
+            url: identity.url,
+            title: '离线正文',
+            date_published: '2024-01-02T03:04:05+08:00',
+            content_html: `<p>可离线阅读</p><img src="${imageUrl}">`,
+          },
+        ],
+      },
+      ids[0],
+    );
+    (wechat2RssProvider as jest.Mock).mockReturnValue({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      refreshSubscription: async () => ({ accepted: true, pending: true }),
+      fetchArticles: async () => page,
+    });
+    await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual');
+    const offlineConfig = {
+      get: (key: string) =>
+        ({
+          platform: { url: '' },
+          feed: {
+            updateDelayTime: 0,
+            obsidianPath: path.join(root, 'vault'),
+          },
+        })[key],
+    } as any;
+    const router = new TrpcRouter(
+      service,
+      prisma as any,
+      offlineConfig,
+      {} as any,
+      new CollectionService(prisma as any),
+    );
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(
+        new Response(png, { headers: { 'content-type': 'image/png' } }),
+      );
+    try {
+      const caller = router.appRouter.createCaller({
+        errorMsg: null,
+        isLocal: true,
+      } as any);
+      const exported = await caller.article.saveToObsidian(identity.id);
+      const markdown = await fs.readFile(exported.path, 'utf8');
+      expect(markdown).toContain('可离线阅读');
+      const attachment = markdown.match(
+        /attachments\/image_[a-f0-9]+\.png/,
+      )?.[0];
+      expect(attachment).toBeTruthy();
+      expect(markdown).not.toContain(imageUrl);
+      expect(
+        await fs.readFile(path.join(path.dirname(exported.path), attachment!)),
+      ).toEqual(png);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][0].toString()).toBe(imageUrl);
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 
   it('isolates one failed feed and keeps its old body, image, metrics and ID', async () => {

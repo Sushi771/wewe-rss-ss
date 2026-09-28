@@ -38,7 +38,6 @@ export class CollectionService {
   constructor(private readonly prisma: PrismaService) {}
 
   private readonly publicCollections = new Set<string>();
-  private readonly lastWechat2RssRefresh = new Map<string, number>();
 
   async collectWechat2RssRecent(input: {
     mpId: string;
@@ -71,19 +70,35 @@ export class CollectionService {
         };
       }
       // /add accepts an asynchronous job. Scheduled reads avoid submitting one per feed.
-      const now = Date.now();
-      const accepted =
+      const now = Math.floor(Date.now() / 1000);
+      // Reserve before the HTTP call. A crash or uncertain response must not
+      // submit a second asynchronous /add job immediately after restart.
+      const reserved =
         input.trigger !== 'scheduled' &&
-        now - (this.lastWechat2RssRefresh.get(input.mpId) || 0) >= 15 * 60_000;
-      if (accepted) {
-        await provider.refreshSubscription(input.mpId);
-        this.lastWechat2RssRefresh.set(input.mpId, now);
+        (
+          await this.prisma.feed.updateMany({
+            where: {
+              id: input.mpId,
+              providerRefreshAttemptTime: { lte: now - 15 * 60 },
+            },
+            data: { providerRefreshAttemptTime: now },
+          })
+        ).count === 1;
+      let accepted = false;
+      if (reserved) {
+        const result = await provider.refreshSubscription(input.mpId);
+        accepted = result.accepted;
       }
       const page = await provider.fetchArticles(input.mpId, input.mpName);
       if (!page.articles.length) {
         return {
           source: 'wechat2rss' as const,
-          status: accepted ? ('pending' as const) : ('blocked' as const),
+          status:
+            accepted ||
+            reserved ||
+            feed.providerRefreshAttemptTime > now - 15 * 60
+              ? ('pending' as const)
+              : ('blocked' as const),
           complete: false as const,
           coverage: 'none' as const,
           articles: 0,
@@ -92,7 +107,9 @@ export class CollectionService {
           accepted,
           message: accepted
             ? '上游已受理更新任务，当前缓存还没有可核验文章；稍后读取，不代表更新成功。'
-            : '上游缓存没有可核验文章；本次未写入。',
+            : reserved || feed.providerRefreshAttemptTime > now - 15 * 60
+              ? '上游更新请求处于冷却期，缓存尚无可核验文章；稍后只读检查。'
+              : '上游缓存没有可核验文章；本次未写入。',
         };
       }
       let created = 0;
