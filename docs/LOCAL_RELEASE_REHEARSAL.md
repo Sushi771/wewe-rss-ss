@@ -1,5 +1,33 @@
 # Windows 本机版本化产物与隔离部署演练（2026-09-28）
 
+## 最新检查点：受控生产切换通过
+
+受控入口 `scripts/local-release/switch.cjs` 使用 `process-identity.ps1` 的同一进程句柄，
+核对 PID、UTC 启动时间、可执行路径、完整命令行和监听端口后才停止进程。
+进程核验采用本机 PowerShell 7.6.5 的 `Win32_Process`、`Get-NetTCPConnection` 与
+`.NET Process.StartTime/Kill/WaitForExit`；依据为 [Win32_Process](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process)、
+[Get-NetTCPConnection](https://learn.microsoft.com/en-us/powershell/module/nettcpip/get-nettcpconnection)、
+[Process.Kill](https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.kill)。
+没有复制第三方源码或加入新依赖；适用范围限本机 Windows 和现有固定 Node 24.11.1 产物。
+
+最终新版与旧版包分别为
+`.local-releases/2026-09-28T05-53-01-700Z-0323c0f75918`、
+`.local-releases/2026-09-28T05-57-22-862Z-4100c9829431`。
+故障注入副本 `controlled-switch-1790574018580-55676` 验证迁移后旧版进程回滚；
+正常副本 `controlled-switch-1790574610284-75844` 验证新版真实启动与 RSS。
+生产切换 `controlled-switch-1790578399794-61616` 为 `passed=true`：
+停止 PID 58000，取停止后新一致性备份和保护基线，三迁移后旧列完全相同、新列 null，
+新 PID 68272 监听 4000；页面和两号 RSS 均 200、各 20 条。备份 SHA-256 为
+`e1eaafc8a869bf78ab7dbaaff1470137b5c76d69b7e2269baa5fbca65acd73be`，独立复算一致。
+数据库为 12 号/1433 篇，`.paused=USER_PAUSED` 不变。生产故障时切换器会用旧包启动
+当前 schema 的库，不自动恢复备份；回滚包曾在已迁移副本上实测可读。
+
+`switch.cjs` 是从固定旧启动命令跨越三项待迁移的**一次性桥接入口**。
+生产现在已经是新 schema 和新进程，不得再次用旧 PID/旧 schema 参数运行它。
+目前缺少当前 schema 的受控日常重启/开机启动入口；下一轮先补这项运维能力。
+真实最新 20 篇、第二号重复 0、手动/定时、正文/Obsidian/图片的生产验收仍未完成，
+定时和微信 UI/剪贴板保持暂停。下方“生产尚未切换”的章节为历史检查点。
+
 ## 最新检查点：固定旧版回滚应用，新旧进程副本切换通过
 
 窗口 `01a0e632-1cd4-7ba2-b93f-41052d3bdeae` 从 Git 提交

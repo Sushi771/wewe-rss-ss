@@ -21,6 +21,7 @@ async function runtime() {
       'guard-report': { type: 'string' },
       'pause-file': { type: 'string' },
       rehearsal: { type: 'boolean', default: false },
+      production: { type: 'boolean', default: false },
     },
   });
   const command = positionals[0];
@@ -138,11 +139,30 @@ async function runtime() {
   )
     throw new Error('暂停文件必须在产物外并命名为 .paused');
   process.env.WECHAT_DESKTOP_PAUSE_FILE = pauseFile;
-  // 当前入口仅负责安全部署演练。生产切换需另行接入共享暂停状态与旧版本回滚，不能默默漏掉 helper。
-  if (!values.rehearsal || !values['obsidian-root'] || !values['guard-report'])
-    throw new Error(
-      '启动仅支持 --rehearsal，并须指定隔离导出目录与网络审计文件',
-    );
+  if (values.rehearsal === values.production)
+    throw new Error('启动须且只能选择 --rehearsal 或 --production');
+  if (values.production) {
+    if (
+      Number(values.port) !== 4000 ||
+      values['guard-report'] ||
+      values['obsidian-root']
+    )
+      throw new Error('生产模式固定 4000 端口，禁止演练参数');
+    if (process.env.LOCAL_RELEASE_CONTROLLED_START !== manifest.id)
+      throw new Error('生产模式必须由受控切换器启动');
+    Object.assign(process.env, {
+      HOST: '0.0.0.0',
+      PORT: '4000',
+      DISABLE_SCHEDULED_UPDATES: '1',
+      WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
+      WECHAT_DESKTOP_MP_IDS: '',
+      ...(legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),
+    });
+    require(path.join(server, 'dist/apps/server/src/main.js'));
+    return;
+  }
+  if (!values['obsidian-root'] || !values['guard-report'])
+    throw new Error('演练启动须指定隔离导出目录与网络审计文件');
   if (
     !path.isAbsolute(values['obsidian-root']) ||
     !path.isAbsolute(values['guard-report'])
