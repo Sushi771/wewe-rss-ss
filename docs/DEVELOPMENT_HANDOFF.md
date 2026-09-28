@@ -19,6 +19,18 @@ guard 计数 0。helper 已入清单且无包内 `.paused`；Node 4 项与 Power
 当前新 runtime 仍只准演练；旧 BAT 已停用，不能用于重启。微信 Esc 暂停和首次恢复 60 秒单篇无写库限制不变。
 最新20篇、第二号、重复新增0、持续更新与图片真实验收均未通过。GitHub 同步与后继窗口登记在本节后续补记。
 
+### GitHub 同步与单线后继
+
+本轮源码、注释和检查点已提交推送 GitHub `main`：
+[`1b9faae8f71a83ac0bcd7297a15dafa37a723aa6`](https://github.com/Sushi771/wewe-rss-ss/commit/1b9faae8f71a83ac0bcd7297a15dafa37a723aa6)。
+推送后 `ls-remote` 与本地 HEAD 一致，工作区干净；原有提交钩子通过。本交接登记另做一笔提交，后继须以实际 Git 状态为准。
+
+已创建同一本地项目、同一 checkout 的后继主窗口 **`01a0e632-1cd4-7ba2-b93f-41052d3bdeae`**，
+创建调用显式指定 `model=gpt-6-sol`、`thinking=xhigh`，返回 threadId 后确认 **active / inProgress**。
+完整授权、代码进展、验证证据、生产/暂停状态和下一工作单元已传递。前任
+`01a0e61b-1171-7290-a115-e229827e3d19` 到此仅登记并同步交接，不再并发修改源码；
+后继看到本登记已提交并推送后接手。
+
 ## 2026-09-28 最新用户原则：Sol / 极高、GitHub 复用与持续同步
 
 本窗口 `01a0e5eb-7a1c-7810-bd78-a7ff99f85481` 收到用户明确新要求，已写入根 [AGENTS.md](../AGENTS.md)：
