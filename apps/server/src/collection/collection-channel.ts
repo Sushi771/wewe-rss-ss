@@ -6,7 +6,7 @@ type ChannelFeed = {
 };
 
 export type CollectionRoute = {
-  channel: 'desktop-wechat' | 'public-album' | 'cover' | 'unavailable';
+  channel: 'mp2rss' | 'public-album' | 'unavailable';
   selectedBy: 'saved' | 'environment' | 'legacy' | 'invalid';
 };
 
@@ -28,29 +28,25 @@ export function parseBoundAlbumIds(
   return undefined;
 }
 
-/** 通道选择不代表覆盖完整、桌面授权有效或已通过定时验收。 */
-export function resolveCollectionRoute(
-  feed: ChannelFeed,
-  desktopMpIds = process.env.WECHAT_DESKTOP_MP_IDS || '',
-): CollectionRoute {
+/** 旧桌面选择仅作为历史值读取；新更新统一走后台来源。 */
+export function resolveCollectionRoute(feed: ChannelFeed): CollectionRoute {
   if (feed.collectionChannel != null) {
-    if (feed.collectionChannel === 'desktop-wechat')
-      return { channel: feed.collectionChannel, selectedBy: 'saved' };
+    if (
+      feed.collectionChannel === 'desktop-wechat' ||
+      feed.collectionChannel === 'mp2rss'
+    )
+      return { channel: 'mp2rss', selectedBy: 'saved' };
     if (
       feed.collectionChannel === 'public-album' &&
       parseBoundAlbumIds(feed.publicAlbumIds)
     )
       return { channel: 'public-album', selectedBy: 'saved' };
-    // 未知持久值不能静默回退为封面、旧合集或桌面操作。
+    // 未知持久值不能静默回退到另一来源。
     return { channel: 'unavailable', selectedBy: 'invalid' };
   }
-  if (desktopMpIds.split(',').some((id) => id.trim() === feed.id))
-    return { channel: 'desktop-wechat', selectedBy: 'environment' };
   if (feed.publicAlbumIds)
     return parseBoundAlbumIds(feed.publicAlbumIds)
       ? { channel: 'public-album', selectedBy: 'legacy' }
       : { channel: 'unavailable', selectedBy: 'invalid' };
-  if (feed.localDirectory)
-    return { channel: 'unavailable', selectedBy: 'legacy' };
-  return { channel: 'cover', selectedBy: 'legacy' };
+  return { channel: 'mp2rss', selectedBy: 'legacy' };
 }

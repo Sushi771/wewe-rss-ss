@@ -1,5 +1,13 @@
 # Windows 本机版本化产物与隔离部署演练（2026-09-28）
 
+## 2026-09-28 最新产物与生产切换
+
+固定产物 `.local-releases/2026-09-28T14-40-10-239Z-294f5da06040` 在生产库备份副本的受控重启演练 `controlled-restart-1790606823517-34684/summary.json` 为 `passed=true`、未回滚；生产受控切换 `controlled-restart-1790607025719-4744/summary.json` 也为 `passed=true`、未回滚。新 PID **33332** 独占4000、`/dash` HTTP 200、两号 RSS 各20条、数据库只读核对12号/1447篇；本机 `active.json` 指针为该产物 ID。两次审计和停止后备份仅在 Git 忽略目录。没有真实来源采集或新文章写库，定时关闭。下方较早 PID/产物是历史检查点。
+
+## 2026-09-28 后台来源产物已切换
+
+新固定产物 `.local-releases/2026-09-28T14-18-01-291Z-1443d69290ec` 不打包桌面 helper，`runtime.cjs` 对新包不读取共享 `.paused`；旧包仅供受控回滚保留相应兼容。副本冷启动审计 `controlled-restart-1790605312313-21788/summary.json` 通过，产物完整性通过。受控生产重启审计 `controlled-restart-1790605592428-24028/summary.json` 通过，旧 PID 28008 停止，新 PID 19388 占有4000端口，停止后备份及字段基线由启动器核验；只读复核12号/1447篇、`/dash` 200。没有 Mp2RSS Feed Key 或真实目标响应，定时仍关闭，不能据此认定新文章来源已可用。以下有关“生产仍是旧包”或“定时始终关闭”的描述为历史或旧产物规则；新包只在 Feed Key 存在且 `ENABLE_SCHEDULED_UPDATES=1` 时允许定时启动。
+
 ## 2026-09-28 用户登录开机任务
 
 本机已注册 `WeWe-RSS-Logon-Start`，仅当前用户交互登录触发、有限权限、

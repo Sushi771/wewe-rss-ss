@@ -47,10 +47,6 @@ const Feeds = () => {
   const { mutateAsync: refreshMpArticles, isLoading: isGetArticlesLoading } =
     trpc.feed.refreshArticles.useMutation();
   const {
-    mutateAsync: collectDesktopRecent20,
-    isLoading: isCollectingDesktop,
-  } = trpc.collection.collectDesktopRecent20.useMutation();
-  const {
     mutateAsync: getHistoryArticles,
     isLoading: isGetHistoryArticlesLoading,
   } = trpc.feed.getHistoryArticles.useMutation();
@@ -284,9 +280,8 @@ const Feeds = () => {
   const collectionChannel = collectionRoute?.channel;
   const collectionChannelLabel = collectionChannel
     ? {
-        'desktop-wechat': '电脑微信“文章”页',
+        mp2rss: '后台文章来源',
         'public-album': '公开合集补采',
-        cover: '封面预览',
         unavailable: '暂无可用通道',
       }[collectionChannel]
     : '等待获取通道状态';
@@ -299,17 +294,15 @@ const Feeds = () => {
       }[collectionRoute.selectedBy]
     : '';
   const collectionDescription =
-    collectionChannel === 'desktop-wechat'
-      ? '“更新”将尝试采集此号“文章”页最近20篇唯一文章；需保持电脑微信已登录并打开此号主页的“文章”页。贴图等其他类型及主次条覆盖尚未验收。普通更新和定时任务不会解除暂停；桌面定时采集默认关闭，持续更新仍待实测。'
+    collectionChannel === 'mp2rss'
+      ? '“更新”从后台来源读取最多20篇并保存本地；若来源尚未配置或未订阅此号，会显示具体失败状态。Mp2RSS 首次订阅不回补历史文章，最新20篇覆盖仍需实测。'
       : collectionChannel === 'public-album'
         ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个公开合集；合集外文章和同次推送的次条完整性未验证。该通道不提供阅读、点赞或收藏。`
-        : collectionChannel === 'cover'
-          ? '“更新”仅查询封面预览，无法补齐多篇文章、历史缺口和同次推送的次条。下方包含此前保存的旧数据。'
-          : collectionChannel === 'unavailable'
-            ? collectionRoute?.selectedBy === 'invalid'
-              ? '采集通道配置无效；“更新”和定时任务会记录阻塞。可在专用采集成功后重新保存通道。已有数据和导出仍可使用。'
-              : '尚无可用的内置列表通道；“更新”和定时任务会记录阻塞，不读取旧本地目录。已有数据和导出仍可使用。'
-            : '正在获取后续更新使用的通道。';
+        : collectionChannel === 'unavailable'
+          ? collectionRoute?.selectedBy === 'invalid'
+            ? '采集通道配置无效；“更新”和定时任务会记录阻塞。可在专用采集成功后重新保存通道。已有数据和导出仍可使用。'
+            : '尚无可用的内置列表通道；“更新”和定时任务会记录阻塞，不读取旧本地目录。已有数据和导出仍可使用。'
+          : '正在获取后续更新使用的通道。';
 
   const handleExportOpml = async (ev) => {
     ev.preventDefault();
@@ -540,13 +533,11 @@ const Feeds = () => {
 
                   <Tooltip
                     content={
-                      collectionChannel === 'desktop-wechat'
-                        ? '定时沿用电脑微信“文章”页通道，桌面定时采集默认关闭。此开关不会解除暂停，仍需微信可交互且打开此号主页。'
+                      collectionChannel === 'mp2rss'
+                        ? '定时使用同一后台来源；全局定时任务仍需在服务端启用。'
                         : collectionChannel === 'public-album'
                           ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
-                          : collectionChannel === 'cover'
-                            ? '定时查询封面预览，无法补齐多篇文章'
-                            : '尚无可用的内置列表通道；定时任务会记录阻塞状态，不读取本地目录'
+                          : '尚无可用的后台来源；定时任务会记录阻塞状态'
                     }
                   >
                     <div className="flex items-center">
@@ -685,8 +676,7 @@ const Feeds = () => {
                         isDisabled={
                           isGetArticlesLoading ||
                           !!isRefreshAllMpArticlesRunning ||
-                          isCollectingAlbums ||
-                          isCollectingDesktop
+                          isCollectingAlbums
                         }
                         onBusyChange={setIsCollectingAlbums}
                         onResult={(source, message) =>
@@ -694,44 +684,6 @@ const Feeds = () => {
                         }
                       />
                     </span>
-                  </Tooltip>
-                )}
-                {currentMpInfo && (
-                  <Tooltip content="先在电脑微信选中此号主页的“文章”页。点击会开始或恢复20篇采集，并用“复制链接”覆盖剪贴板；按 Esc 可暂停。采集成功后保存为后续更新通道，失败保留原通道；不会开启定时采集。贴图等类型及主次条覆盖尚未验收。">
-                    <Button
-                      size="sm"
-                      className="mac-btn-outline"
-                      isLoading={isCollectingDesktop}
-                      isDisabled={
-                        isGetArticlesLoading ||
-                        !!isRefreshAllMpArticlesRunning ||
-                        isCollectingAlbums
-                      }
-                      onPress={async () => {
-                        const mpId = currentMpInfo.id;
-                        try {
-                          const result = await collectDesktopRecent20({ mpId });
-                          await refetchFeedList();
-                          await queryUtils.article.list.reset();
-                          await queryUtils.article.summary.invalidate();
-                          rememberUpdate(
-                            mpId,
-                            result.source,
-                            result.message,
-                            result.status,
-                          );
-                          toast.warning(result.message, { duration: 10000 });
-                        } catch (error) {
-                          await refetchFeedList();
-                          const message =
-                            error instanceof Error ? error.message : '采集失败';
-                          rememberUpdate(mpId, 'error', message);
-                          toast.error(message, { duration: 10000 });
-                        }
-                      }}
-                    >
-                      电脑微信最新20篇
-                    </Button>
                   </Tooltip>
                 )}
                 <LocalCollection
@@ -790,11 +742,7 @@ const Feeds = () => {
                       <Button
                         size="sm"
                         className="mac-btn-outline"
-                        isDisabled={
-                          isGetArticlesLoading ||
-                          isCollectingAlbums ||
-                          isCollectingDesktop
-                        }
+                        isDisabled={isGetArticlesLoading || isCollectingAlbums}
                         onPress={async () => {
                           const mpId = currentMpInfo.id;
                           try {

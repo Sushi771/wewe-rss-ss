@@ -18,9 +18,9 @@ function checkedRelease(candidate) {
   const manifest = verifyRelease(release);
   if (
     manifest.schemaCompatibility !== 'current' ||
-    manifest.desktopHelperIncluded !== true
+    typeof manifest.desktopHelperIncluded !== 'boolean'
   )
-    throw new Error('当前产物不兼容生产 schema 或缺少桌面 helper');
+    throw new Error('当前产物不兼容生产 schema 或缺少来源标识');
   if (manifest.id !== path.basename(release))
     throw new Error('产物目录与清单 ID 不一致');
   return { release, manifest };

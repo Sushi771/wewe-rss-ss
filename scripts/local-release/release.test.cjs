@@ -159,12 +159,11 @@ test(
 );
 
 test('登录入口只将当前固定产物的完整进程身份视为已经运行', () => {
-  const release = path.join(testRoot, 'release');
+  const release = fixture();
   const database = path.resolve(
     __dirname,
     '../../apps/server/data/wewe-rss.db',
   );
-  fs.mkdirSync(release);
   const expected = {
     pid: 42,
     executable: path.join(release, 'runtime/node.exe'),

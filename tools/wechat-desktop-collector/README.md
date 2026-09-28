@@ -1,8 +1,10 @@
-# WeChat desktop article collector
+# WeChat desktop article collector (retired)
+
+This helper is retained only as historical implementation evidence. The server no longer calls or packages it, and the web UI has no desktop collection entry. Do not run it for subscription updates. The prior local edits remain available for audit.
 
 Windows helper for WeWe-RSS. It reads the requested account's visible **文章** page in `WeChatAppEx.exe`, opens cards through the official UI, and uses **更多 → 复制链接**. It does not read WeChat files, chats, sessions, cookies, or previous clipboard contents.
 
-**Acceptance status:** offline fixes are complete; the repaired helper has not passed a real single-article run. The user stopped previous automation with Esc. UI and clipboard operations remain paused pending explicit renewed authorization. See [the repair checkpoint](../../docs/DESKTOP_COLLECTION_REPAIR.md).
+**Historical acceptance status (2026-09-28):** the authorized single-article probe passed, and this helper collected 20 unique regular articles for each of two existing accounts. The production Mama feed imported 20 verified articles and a repeated ordinary update created 0. The user subsequently stopped Computer Use with Esc; the second account's production import and automatic multi-account updates were not verified. See [the source decision](../../docs/ONE_CLICK_COLLECTION_SOURCE.md).
 
 ## Invocation and pause handling
 
@@ -43,7 +45,7 @@ This example abbreviates the array. Production requires 20 unique regular cards;
 
 - Windows with PowerShell 7; Windows PowerShell 5.1 is unverified. The local UI Automation assemblies and Win32 APIs need no downloaded helper or .NET SDK.
 - A unique `WeChatAppEx.exe` window titled `微信`, with the requested account's **文章** page in the **currently selected tab**. The helper checks the account document, app group, account label, article link and cards; it does not switch to the user's first tab.
-- Browser tabs expose unique UIA `TabItem` RuntimeIds and `SelectionItemPattern`, with exactly one selected tab. The list exposes a vertical `ScrollPattern`; resetting to zero restores a stable visible header and first list marker. These capabilities remain unverified on the current WeChat version. Failure stops before opening an article.
+- Browser tabs expose unique UIA `TabItem` RuntimeIds and `SelectionItemPattern`, or the current version's `view_22` Pane strip with one selected Pane identified by its visible close button. The list exposes a vertical `ScrollPattern`; resetting to zero restores a stable visible header and first list marker. The Pane fallback and list reset passed a real 20-article run for two accounts. Failure stops before opening an article.
 - Regular cards have a date, one title and the observed reading metric structure. A bounded pinned card can omit the metric. All titles in each ancestor count, including offscreen ones. Clicked controls must fit fully inside the window. Ambiguous structure and unverified collapsed multi-article controls stop collection.
 - Every article opens in exactly one new tab. The helper proves ownership against the original tab set and rechecks before copy/close; after closing it confirms the original set and selection. Text alone never proves ownership. Cancellation, foreground loss or uncertainty may leave the new tab open; it does not close user tabs to recover.
 - The desktop stays unlocked and free of competing input. The helper activates WeChat, clicks, scrolls, and replaces the clipboard through the official copy action. It does not read or restore the old clipboard.

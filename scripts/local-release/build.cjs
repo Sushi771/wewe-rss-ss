@@ -163,10 +163,13 @@ function build(options = {}) {
     'apps/web/vite.config.ts',
     'apps/web/tailwind.config.ts',
     'apps/web/postcss.config.js',
-    'tools/wechat-desktop-collector/collect.ps1',
   ])
     inputs[file] = fileHash(
       path.join(file.startsWith('tools/') ? root : sourceRoot, file),
+    );
+  if (legacy)
+    inputs['tools/wechat-desktop-collector/collect.ps1'] = fileHash(
+      path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
     );
   const sourceHash = hash(JSON.stringify(inputs));
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
@@ -325,13 +328,16 @@ function build(options = {}) {
   fs.mkdirSync(path.join(release, 'runtime'));
   fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
   const dependencies = copyPackages(target, client, sourceServer);
-  // 固定 helper 代码随应用发布；.paused 是跨版本共享的运行状态，绝不复制进产物。
-  const helperDir = path.join(release, 'tools/wechat-desktop-collector');
-  fs.mkdirSync(helperDir, { recursive: true });
-  fs.copyFileSync(
-    path.join(root, 'tools/wechat-desktop-collector/collect.ps1'),
-    path.join(helperDir, 'collect.ps1'),
-  );
+  // Historical rollback packages retain their own helper. Current packages
+  // contain no desktop collector code or executable.
+  if (legacy) {
+    const helperDir = path.join(release, 'tools/wechat-desktop-collector');
+    fs.mkdirSync(helperDir, { recursive: true });
+    fs.copyFileSync(
+      path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
+      path.join(helperDir, 'collect.ps1'),
+    );
+  }
   const manifest = {
     format: 1,
     id,
@@ -351,7 +357,7 @@ function build(options = {}) {
       engineSha256: fileHash(engine),
     },
     dependencies,
-    desktopHelperIncluded: true,
+    desktopHelperIncluded: legacy,
     ...fingerprint(release),
   };
   writeJson(path.join(release, 'release.json'), manifest);

@@ -12,7 +12,7 @@ import {
   Metrics,
 } from './collection-format';
 import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
-import { fetchDesktopRecent20 } from './desktop-wechat';
+import { fetchMp2RssRecent20 } from './mp2rss';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import {
   assertSavedArticleIdentity,
@@ -31,12 +31,6 @@ type CollectedArticle = ReturnType<typeof canonicalArticleUrl> & {
   contentHtml?: string;
 };
 type ImportInput = { directory: string; mpId?: string; mpName?: string };
-
-export type DesktopBodySummary = {
-  bodyFetch: { succeeded: number; unavailable: number };
-  bodyCache: { available: number; retained: number; missing: number };
-  bodyUnavailable: { id: string; cached: boolean }[];
-};
 
 @Injectable()
 export class CollectionService {
@@ -138,43 +132,33 @@ export class CollectionService {
     }
   }
 
-  async collectDesktopRecent20(input: {
-    mpId: string;
-    mpName: string;
-    resumeAfterUserConsent?: boolean;
-  }) {
+  async collectMp2RssRecent20(input: { mpId: string; mpName: string }) {
     if (this.publicCollections.has(input.mpId))
-      throw new Error('该公众号正在采集，请等待本次结束');
+      throw new Error('该公众号正在更新，请等待本次结束');
     this.publicCollections.add(input.mpId);
     try {
       const feed = await this.prisma.feed.findUniqueOrThrow({
         where: { id: input.mpId },
       });
       if (feed.mpName !== input.mpName)
-        throw new Error('订阅账号名称与电脑微信目标不一致；本次未写入文章');
-      // Complete the desktop list and all 20 public original-page checks first.
-      const articles = await fetchDesktopRecent20(input.mpId, input.mpName, {
-        resumeAfterUserConsent: input.resumeAfterUserConsent,
-      });
+        throw new Error('订阅号名称已变化，本次未写入文章');
+      // The complete upstream page and all original identities are checked before a write.
+      const articles = await fetchMp2RssRecent20(input.mpId, input.mpName);
       let created = 0;
       let updated = 0;
-      const bodies: DesktopBodySummary = {
-        bodyFetch: { succeeded: 0, unavailable: 0 },
-        bodyCache: { available: 0, retained: 0, missing: 0 },
-        bodyUnavailable: [],
-      };
       await this.prisma.$transaction(
         async (tx) => {
           for (const item of articles) {
-            const shortId = item.shortUrl.split('/').at(-1)!;
             const baseUrl = item.url.split('&sn=')[0];
             const matches = await tx.article.findMany({
               where: {
                 mpId: input.mpId,
                 OR: [
                   { id: item.id },
-                  { id: shortId },
-                  { sourceUrl: item.shortUrl },
+                  ...(item.shortUrl
+                    ? [{ id: item.shortUrl.split('/').at(-1)! }]
+                    : []),
+                  ...(item.shortUrl ? [{ sourceUrl: item.shortUrl }] : []),
                   { sourceUrl: item.url },
                   { sourceUrl: baseUrl },
                   { sourceUrl: { startsWith: `${baseUrl}&sn=` } },
@@ -184,32 +168,22 @@ export class CollectionService {
               },
             });
             if (matches.length > 1)
-              throw new Error(
-                '数据库中同一原文对应多条旧记录，请核对后再更新；本次未写入文章',
-              );
+              throw new Error('同一原文对应多条旧记录，本次未写入文章');
             const existing = matches[0];
-            if (existing) assertSavedArticleIdentity(existing, item);
-            const lastBodyStatus = item.lastBodyStatus;
-            const hasBody = Boolean(existing?.contentHtml || item.contentHtml);
-            if (lastBodyStatus === 'available') bodies.bodyFetch.succeeded++;
-            else {
-              bodies.bodyFetch.unavailable++;
-              bodies.bodyUnavailable.push({
-                id: existing?.id || item.id,
-                cached: hasBody,
+            if (existing)
+              assertSavedArticleIdentity(existing, {
+                ...item,
+                shortUrl: item.shortUrl || undefined,
               });
-            }
-            if (hasBody) bodies.bodyCache.available++;
-            else bodies.bodyCache.missing++;
-            if (existing?.contentHtml) bodies.bodyCache.retained++;
             if (existing) {
-              // Keep the old primary key, cached body, cover and all metrics.
               const data = {
                 title: item.title,
-                publishTime: item.publishTime,
-                lastBodyStatus,
+                publishTime: item.publishTime!,
                 verifiedSourceUrl: existing.verifiedSourceUrl || item.url,
-                ...(existing.sourceUrl ? {} : { sourceUrl: item.shortUrl }),
+                lastBodyStatus: item.contentHtml ? 'available' : 'unavailable',
+                ...(existing.sourceUrl
+                  ? {}
+                  : { sourceUrl: item.shortUrl || item.url }),
                 ...(existing.picUrl ? {} : { picUrl: item.picUrl }),
                 ...(existing.contentHtml
                   ? {}
@@ -218,11 +192,11 @@ export class CollectionService {
               if (
                 existing.title !== data.title ||
                 existing.publishTime !== data.publishTime ||
-                (!existing.sourceUrl && item.shortUrl) ||
+                !existing.verifiedSourceUrl ||
+                (!existing.sourceUrl && data.sourceUrl) ||
                 (!existing.picUrl && item.picUrl) ||
                 (!existing.contentHtml && item.contentHtml) ||
-                existing.lastBodyStatus !== lastBodyStatus ||
-                !existing.verifiedSourceUrl
+                existing.lastBodyStatus !== data.lastBodyStatus
               ) {
                 await tx.article.update({ where: { id: existing.id }, data });
                 updated++;
@@ -233,12 +207,14 @@ export class CollectionService {
                   id: item.id,
                   mpId: input.mpId,
                   title: item.title,
-                  publishTime: item.publishTime,
-                  picUrl: item.picUrl,
-                  sourceUrl: item.shortUrl,
-                  contentHtml: item.contentHtml,
-                  lastBodyStatus,
+                  publishTime: item.publishTime!,
+                  sourceUrl: item.shortUrl || item.url,
                   verifiedSourceUrl: item.url,
+                  picUrl: item.picUrl,
+                  contentHtml: item.contentHtml,
+                  lastBodyStatus: item.contentHtml
+                    ? 'available'
+                    : 'unavailable',
                 },
               });
               created++;
@@ -251,28 +227,25 @@ export class CollectionService {
           await tx.feed.update({
             where: { id: input.mpId },
             data: {
+              collectionChannel: 'mp2rss',
               syncTime: Math.floor(Date.now() / 1000),
               updateTime: latest._max.publishTime || 0,
               hasHistory: -1,
-              collectionChannel: 'desktop-wechat',
             },
           });
         },
         { timeout: 60000 },
       );
       return {
-        source: 'desktop-wechat' as const,
+        source: 'mp2rss' as const,
         status: 'partial' as const,
         complete: false as const,
-        coverage: 'article-tab-latest-20-unique' as const,
-        hasHistory: -1,
+        coverage: 'provider-recent-20' as const,
         articles: articles.length,
         created,
         updated,
-        ...bodies,
-        oldestPublishTime: articles.at(-1)!.publishTime,
-        newestPublishTime: articles[0].publishTime,
-        message: `电脑微信“文章”页核验最近 ${articles.length} 篇唯一文章信息（新增 ${created}，更新 ${updated}）。本次取得正文 ${bodies.bodyFetch.succeeded}/${articles.length}，未取得 ${bodies.bodyFetch.unavailable}；可用缓存 ${bodies.bodyCache.available}（保留旧正文 ${bodies.bodyCache.retained}），仍缺正文 ${bodies.bodyCache.missing}，可更新订阅重试。贴图及其他内容类型未验证，历史未补全；互动指标未采集。`,
+        hasHistory: -1,
+        message: `后台来源取得并核验 ${articles.length} 篇（新增 ${created}，更新 ${updated}）。Mp2RSS 首次订阅不回补历史；更早文章、收录延迟和其他内容类型覆盖仍需实测。`,
       };
     } finally {
       this.publicCollections.delete(input.mpId);

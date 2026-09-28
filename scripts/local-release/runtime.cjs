@@ -124,21 +124,22 @@ async function runtime() {
     }),
   );
   if (command === 'probe') return;
-  // helper 与应用同版；暂停文件必须位于版本目录之外，供将来的切换/回滚共用。
-  if (manifest.desktopHelperIncluded !== true)
-    throw new Error('产物缺少固定版本的桌面 helper');
-  if (!values['pause-file'] || !path.isAbsolute(values['pause-file']))
-    throw new Error('启动必须指定共享暂停文件的绝对路径');
-  const pauseFile = path.resolve(values['pause-file']);
-  const pauseParent = fs.realpathSync(path.dirname(pauseFile));
-  if (
-    path.basename(pauseFile) !== '.paused' ||
-    pauseParent === release ||
-    inside(release, pauseParent) ||
-    (fs.existsSync(pauseFile) && inside(release, fs.realpathSync(pauseFile)))
-  )
-    throw new Error('暂停文件必须在产物外并命名为 .paused');
-  process.env.WECHAT_DESKTOP_PAUSE_FILE = pauseFile;
+  // Legacy rollback bundles still carry the shared pause marker. Current
+  // backend-only bundles never read it or start the desktop helper.
+  if (manifest.desktopHelperIncluded === true) {
+    if (!values['pause-file'] || !path.isAbsolute(values['pause-file']))
+      throw new Error('旧产物启动必须指定共享暂停文件的绝对路径');
+    const pauseFile = path.resolve(values['pause-file']);
+    const pauseParent = fs.realpathSync(path.dirname(pauseFile));
+    if (
+      path.basename(pauseFile) !== '.paused' ||
+      pauseParent === release ||
+      inside(release, pauseParent) ||
+      (fs.existsSync(pauseFile) && inside(release, fs.realpathSync(pauseFile)))
+    )
+      throw new Error('暂停文件必须在产物外并命名为 .paused');
+    process.env.WECHAT_DESKTOP_PAUSE_FILE = pauseFile;
+  }
   if (values.rehearsal === values.production)
     throw new Error('启动须且只能选择 --rehearsal 或 --production');
   if (values.production) {
@@ -150,10 +151,16 @@ async function runtime() {
       throw new Error('生产模式固定 4000 端口，禁止演练参数');
     if (process.env.LOCAL_RELEASE_CONTROLLED_START !== manifest.id)
       throw new Error('生产模式必须由受控切换器启动');
+    // Enable only after a real provider key and an explicit production switch.
+    const scheduled =
+      !legacy &&
+      manifest.desktopHelperIncluded === false &&
+      Boolean(process.env.MP2RSS_FEED_KEY) &&
+      process.env.ENABLE_SCHEDULED_UPDATES === '1';
     Object.assign(process.env, {
       HOST: '0.0.0.0',
       PORT: '4000',
-      DISABLE_SCHEDULED_UPDATES: '1',
+      DISABLE_SCHEDULED_UPDATES: scheduled ? '0' : '1',
       WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
       WECHAT_DESKTOP_MP_IDS: '',
       ...(legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),

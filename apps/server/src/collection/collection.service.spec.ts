@@ -268,102 +268,25 @@ describe('local collection with real SQLite migrations', () => {
     });
     await prisma.feed.delete({ where: { id: other } });
   });
-  it('does not read legacy directories in manual, history, batch or scheduled updates', async () => {
+  it('does not import a legacy directory when the backend key is missing', async () => {
     await prisma.feed.update({
       where: { id: mpId },
       data: { localDirectory: directory },
     });
     const readFiles = jest.spyOn(service, 'importDirectory');
-    const before = await prisma.article.findMany({
-      where: { mpId },
-      orderBy: { id: 'asc' },
-    });
-    expect(await trpc.refreshMpArticlesAndUpdateFeed(mpId)).toMatchObject({
-      source: 'unavailable',
-      status: 'blocked',
-      complete: false,
-    });
-    expect(await trpc.getHistoryMpArticles(mpId)).toMatchObject({
-      source: 'unavailable',
-      status: 'blocked',
-      complete: false,
-    });
-    expect(
-      JSON.parse(
-        (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }))
-          .lastCollectionResult!,
-      ),
-    ).toMatchObject({ status: 'blocked', coverage: 'none' });
-    await feeds.handleUpdateFeedsCron();
-    expect(readFiles).not.toHaveBeenCalled();
-    expect(
-      await prisma.article.findMany({
-        where: { mpId },
-        orderBy: { id: 'asc' },
-      }),
-    ).toEqual(before);
-    readFiles.mockRestore();
-  });
-  it('does not claim cover polling completed history and returns structured batch coverage', async () => {
-    await prisma.feed.create({
-      data: {
-        id: 'cover-feed',
-        mpName: '封面测试',
-        mpCover: '',
-        mpIntro: '',
-        updateTime: 0,
-        syncTime: 5,
-        hasHistory: 1,
-      },
-    });
-    await prisma.account.create({
-      data: { id: 'test', name: 'test', token: 'test' },
-    });
-    expect(
-      await trpc.refreshMpArticlesAndUpdateFeed('cover-feed'),
-    ).toMatchObject({
-      source: 'cover',
-      hasHistory: -1,
-      status: 'partial',
-      complete: false,
-    });
-    expect(
-      (await prisma.feed.findUniqueOrThrow({ where: { id: 'cover-feed' } }))
-        .syncTime,
-    ).toBe(5);
-    expect(await trpc.getHistoryMpArticles('cover-feed')).toMatchObject({
-      source: 'unavailable',
-      status: 'blocked',
-    });
-    await fs.writeFile(path.join(directory, 'articles.csv'), csv('200', true));
-    const results = await trpc.refreshAllMpArticlesAndUpdateFeed();
-    expect(results.find((r) => r.id === mpId)?.source).toBe('unavailable');
-    expect(results.find((r) => r.id === 'cover-feed')?.source).toBe('cover');
-  });
-  it('persists a sanitized failure and leaves article records unchanged', async () => {
     const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
-    const fail = jest.spyOn(trpc, 'getMpArticles').mockRejectedValueOnce({
-      isAxiosError: true,
-      message: 'request failed key=secret',
-      config: { headers: { Cookie: 'secret' } },
-    });
-    await expect(
-      trpc.refreshMpArticlesAndUpdateFeed('cover-feed'),
-    ).rejects.toThrow('采集请求失败');
-    const feed = await prisma.feed.findUniqueOrThrow({
-      where: { id: 'cover-feed' },
-    });
-    expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject({
-      status: 'failed',
-      complete: false,
-      source: 'error',
-    });
-    expect(feed.lastCollectionResult).not.toContain('secret');
+    await expect(trpc.refreshMpArticlesAndUpdateFeed(mpId)).rejects.toThrow(
+      'MP2RSS_FEED_KEY_NOT_CONFIGURED',
+    );
+    const results = await trpc.refreshAllMpArticlesAndUpdateFeed();
+    expect(results.find((result) => result.id === mpId)?.status).toBe('failed');
+    expect(readFiles).not.toHaveBeenCalled();
     expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
       before,
     );
-    fail.mockRestore();
+    readFiles.mockRestore();
   });
+
   it('rejects an invalid later row without partially changing records or sync time', async () => {
     const before = await prisma.feed.findUniqueOrThrow({ where: { id: mpId } });
     await fs.writeFile(path.join(directory, 'articles.csv'), csv('999', true));
@@ -381,38 +304,6 @@ describe('local collection with real SQLite migrations', () => {
       (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } })).syncTime,
     ).toBe(before.syncTime);
   });
-  it('preserves the existing publication date and skips new undated cover records', async () => {
-    const before = await prisma.article.findUniqueOrThrow({
-      where: { id: 'cover-id' },
-    });
-    jest.spyOn(trpc, 'getMpArticles').mockResolvedValueOnce([
-      { id: 'cover-id', title: '旧文章封面', picUrl: '', publishTime: null },
-      {
-        id: 'undated-new-cover',
-        title: '未知时间',
-        picUrl: '',
-        publishTime: null,
-      },
-    ]);
-    const result = await trpc.refreshMpArticlesAndUpdateFeed('cover-feed');
-    expect(result).toMatchObject({
-      source: 'cover',
-      saved: 1,
-      skippedUnknownDate: 1,
-    });
-    expect(
-      (await prisma.article.findUniqueOrThrow({ where: { id: 'cover-id' } }))
-        .publishTime,
-    ).toBe(before.publishTime);
-    expect(
-      await prisma.article.findUnique({ where: { id: 'undated-new-cover' } }),
-    ).toBeNull();
-    expect(
-      (await prisma.feed.findUniqueOrThrow({ where: { id: 'cover-feed' } }))
-        .syncTime,
-    ).toBe(5);
-  });
-
   it('does not merge a same-title same-time short link with a different proven identity', async () => {
     await fs.writeFile(path.join(directory, 'articles.csv'), csv());
     await prisma.article.create({

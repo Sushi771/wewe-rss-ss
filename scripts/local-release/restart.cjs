@@ -36,6 +36,7 @@ function requireFreePort(port) {
 
 function commandLine(release, database, port) {
   const node = path.join(release, 'runtime/node.exe');
+  const manifest = verifyRelease(release);
   const args = [
     path.join(release, 'runtime.cjs'),
     'start',
@@ -43,10 +44,10 @@ function commandLine(release, database, port) {
     database,
     '--port',
     String(port),
-    '--pause-file',
-    pauseFile,
-    '--production',
   ];
+  if (manifest.desktopHelperIncluded === true)
+    args.push('--pause-file', pauseFile);
+  args.push('--production');
   // 该本机 checkout 的路径无空格。若迁移到含空格路径，应先重新演练命令行编码。
   if ([node, ...args].some((item) => /\s/.test(item)))
     throw new Error('产物或数据库路径含空格，当前身份白名单不适用');
@@ -80,16 +81,13 @@ async function controlledRestart(options) {
     previous === release ? manifest : verifyRelease(previous);
   for (const item of [manifest, previousManifest]) {
     assert.equal(item.schemaCompatibility, 'current', '只允许当前 schema 产物');
-    assert.equal(item.desktopHelperIncluded, true);
+    assert.equal(typeof item.desktopHelperIncluded, 'boolean');
   }
   if (options.production) {
     assert.equal(source, fs.realpathSync(productionDatabase));
     loadProductionEnvironment();
   }
-  // The shared pause marker belongs to the collector, not the web server.
-  // A successful authorized collection removes it; the service must still be
-  // able to start at the next login. Rehearsal and production both keep
-  // scheduled desktop collection disabled in runtime.cjs.
+  // Only an older rollback package needs the historical pause marker.
   const audit = path.join(
     root,
     'output/playwright/local-release-audit',
@@ -178,9 +176,9 @@ async function controlledRestart(options) {
       database,
       '--port',
       String(port),
-      '--pause-file',
-      pauseFile,
     ];
+    if (bundle.desktopHelperIncluded === true)
+      args.push('--pause-file', pauseFile);
     if (options.rehearsal)
       args.push(
         '--rehearsal',

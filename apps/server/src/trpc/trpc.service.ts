@@ -219,38 +219,15 @@ export class TrpcService {
     page = 1,
     trigger: 'local-manual' | 'scheduled' | 'public' = 'public',
   ) {
+    this.logger.debug(`Backend update trigger: ${trigger}`);
     let route: CollectionRoute;
     return this.recordCollectionResult(
       mpId,
       (feed) => this.refreshArticles(feed, page, route),
       (feed) => {
-        // 同号锁内解析一次，权限检查与执行共用这次选择。
         route = resolveCollectionRoute(feed);
-        if (route.channel !== 'desktop-wechat') return false;
-        if (trigger === 'public')
-          throw new Error(
-            '电脑微信采集需要在本机页面手动操作，公开订阅请求不会操作桌面',
-          );
-        if (
-          trigger === 'scheduled' &&
-          process.env.WECHAT_DESKTOP_ALLOW_SCHEDULED !== '1'
-        )
-          throw new Error('电脑微信定时采集尚未启用，请先完成本机手动验证');
-        return true;
+        return route.channel === 'mp2rss';
       },
-    );
-  }
-
-  async collectDesktopRecent20(mpId: string) {
-    return this.recordCollectionResult(
-      mpId,
-      (feed) =>
-        this.collectionService.collectDesktopRecent20({
-          mpId,
-          mpName: feed.mpName,
-          resumeAfterUserConsent: true,
-        }),
-      true,
     );
   }
 
@@ -382,9 +359,9 @@ export class TrpcService {
     route: CollectionRoute,
   ) {
     const mpId = feed.id;
-    if (route.channel === 'desktop-wechat') {
-      if (page !== 1) return this.unavailableDesktopHistory();
-      return this.collectionService.collectDesktopRecent20({
+    if (route.channel === 'mp2rss') {
+      if (page !== 1) return this.unavailableCollection();
+      return this.collectionService.collectMp2RssRecent20({
         mpId,
         mpName: feed.mpName,
       });
@@ -392,81 +369,18 @@ export class TrpcService {
     if (route.channel === 'public-album') {
       const albumIds = parseBoundAlbumIds(feed.publicAlbumIds);
       if (!albumIds) return this.unavailableAlbums();
-      return this.collectionService.collectPublicAlbums({
-        mpId,
-        albumIds,
-      });
+      return this.collectionService.collectPublicAlbums({ mpId, albumIds });
     }
-    if (route.channel === 'unavailable') {
-      if (route.selectedBy === 'invalid')
-        return this.unavailableCollection(
-          '采集通道配置无效，本次未采集。请在本机重新执行所需通道的专用采集。',
-        );
-      return this.unavailableCollection();
-    }
-    if (page !== 1) return this.unavailableCollection();
-    const articles = await this.getMpArticles(mpId, page);
-
-    let saved = 0;
-    let skippedUnknownDate = 0;
-    const unknownDates = articles.filter((a) => a.publishTime == null).length;
-    await this.prismaService.$transaction(async (tx) => {
-      for (const { id, picUrl, publishTime, title, contentHtml } of articles) {
-        const existing = await tx.article.findUnique({ where: { id } });
-        if (existing) {
-          await tx.article.update({
-            where: { id },
-            data: {
-              title,
-              contentHtml,
-              ...(publishTime == null ? {} : { publishTime }),
-            },
-          });
-          saved++;
-        } else if (publishTime != null) {
-          await tx.article.create({
-            data: { id, mpId, picUrl, publishTime, title, contentHtml },
-          });
-          saved++;
-        } else {
-          skippedUnknownDate++;
-        }
-      }
-    });
-
-    // A cover is a preview, never evidence that history is exhausted.
-    const hasHistory = -1;
-
-    await this.prismaService.feed.update({
-      where: { id: mpId },
-      data: {
-        hasHistory,
-      },
-    });
-
-    return {
-      hasHistory,
-      source: 'cover' as const,
-      status: 'partial' as const,
-      complete: false as const,
-      coverage: 'cover' as const,
-      articles: articles.length,
-      saved,
-      skippedUnknownDate,
-      unknownDates,
-      message: `仅取得封面预览 ${articles.length} 篇，不代表完整更新。${unknownDates ? `其中 ${unknownDates} 篇未取得真实发布时间；已有记录保留原日期，${skippedUnknownDate} 篇新记录未写入。` : ''}完整公众号列表通道尚未验证，近期缺口与次条仍可能遗漏。`,
-    };
+    return this.unavailableCollection(
+      route.selectedBy === 'invalid'
+        ? '后台来源配置无效，本次未更新。'
+        : '该订阅暂无可用后台来源，本次未更新。',
+    );
   }
 
   private unavailableAlbums() {
     return this.unavailableCollection(
       '所选公开合集通道缺少有效的合集绑定，本次未采集。请在本机重新绑定合集。',
-    );
-  }
-
-  private unavailableDesktopHistory() {
-    return this.unavailableCollection(
-      '电脑微信通道仅采集“文章”页最近20篇，不支持历史分页；本次未采集。',
     );
   }
 
@@ -498,8 +412,10 @@ export class TrpcService {
 
   private async collectHistory(feed: Feed) {
     const route = resolveCollectionRoute(feed);
-    if (route.channel === 'desktop-wechat')
-      return this.unavailableDesktopHistory();
+    if (route.channel === 'mp2rss')
+      return this.unavailableCollection(
+        '后台来源只读取最近20篇，历史分页未启用。',
+      );
     if (route.channel === 'public-album') {
       const albumIds = parseBoundAlbumIds(feed.publicAlbumIds);
       if (!albumIds) return this.unavailableAlbums();

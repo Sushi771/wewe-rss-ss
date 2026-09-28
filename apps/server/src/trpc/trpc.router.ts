@@ -53,16 +53,6 @@ export class TrpcRouter {
   private readonly logger = new Logger(this.constructor.name);
 
   collectionRouter = this.trpcService.router({
-    collectDesktopRecent20: this.trpcService.protectedProcedure
-      .input(z.object({ mpId: z.string().regex(/^MP_WXS_\d{5,15}$/) }))
-      .mutation(async ({ input, ctx }) => {
-        if (!(ctx as any).isLocal)
-          throw new TRPCError({
-            code: 'FORBIDDEN',
-            message: '电脑微信采集只能在服务器本机操作',
-          });
-        return this.trpcService.collectDesktopRecent20(input.mpId);
-      }),
     collectPublicAlbums: this.trpcService.protectedProcedure
       .input(
         z.object({

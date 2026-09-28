@@ -420,7 +420,58 @@ function Get-TabSnapshot {
     $window = Assert-TargetWindow
     $tabs = @(Find-Control $window ([System.Windows.Automation.ControlType]::TabItem) '' '' $false)
     $script:Diagnostic = @{ tabItems = $tabs.Count }
-    if ($tabs.Count -eq 0) { Fail 'TAB_OWNERSHIP_UNVERIFIED' }
+    if ($tabs.Count -eq 0) {
+        # Current WeChatAppEx exposes its tab strip as Pane children of view_22,
+        # without TabItem or SelectionItemPattern. Only the active Pane has a
+        # visible Close button. Reject any other shape before using tab IDs.
+        $strips = @(Find-Control $window ([System.Windows.Automation.ControlType]::Pane) '' 'view_22' $false)
+        # During article navigation the browser briefly removes view_22 from
+        # UIA. Wait for the same target window to expose it again; never infer
+        # ownership from a missing strip or from coordinates alone.
+        for ($retry = 0; $strips.Count -eq 0 -and $retry -lt 10; $retry++) {
+            Start-Sleep -Milliseconds 100
+            $window = Assert-TargetWindow
+            $strips = @(Find-Control $window ([System.Windows.Automation.ControlType]::Pane) '' 'view_22' $false)
+        }
+        $script:Diagnostic = @{ tabItems = 0; tabStrips = $strips.Count; paneTabs = 0 }
+        if ($strips.Count -ne 1) { Fail 'TAB_OWNERSHIP_UNVERIFIED' }
+        $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+        $container = $walker.GetFirstChild($strips[0])
+        if ($null -eq $container -or $container.Current.ControlType -ne [System.Windows.Automation.ControlType]::Pane) {
+            Fail 'TAB_OWNERSHIP_UNVERIFIED'
+        }
+        $windowRect = $window.Current.BoundingRectangle
+        $snapshot = @()
+        $child = $walker.GetFirstChild($container)
+        while ($null -ne $child) {
+            $current = $child.Current
+            $rect = $current.BoundingRectangle
+            # The container also has an offscreen overlay Pane with infinite
+            # bounds. It is not a browser tab and must never enter a snapshot.
+            if ($current.ControlType -eq [System.Windows.Automation.ControlType]::Pane -and
+                -not $current.IsOffscreen -and $rect.Width -gt 30 -and $rect.Height -gt 15 -and
+                $rect.Height -lt 70 -and $windowRect.Contains($rect)) {
+                $closeButtons = @(Find-Control $child ([System.Windows.Automation.ControlType]::Button) '关闭')
+                if ($closeButtons.Count -gt 1) { Fail 'TAB_OWNERSHIP_UNVERIFIED' }
+                $snapshot += [pscustomobject]@{
+                    Id = ($child.GetRuntimeId() -join '-')
+                    Selected = $closeButtons.Count -eq 1
+                    Left = $rect.Left
+                    Right = $rect.Right
+                }
+            }
+            $child = $walker.GetNextSibling($child)
+        }
+        $script:Diagnostic.paneTabs = $snapshot.Count
+        if ($snapshot.Count -lt 1 -or @($snapshot | Where-Object Selected).Count -ne 1 -or
+            @($snapshot.Id | Sort-Object -Unique).Count -ne $snapshot.Count) { Fail 'TAB_OWNERSHIP_UNVERIFIED' }
+        for ($i = 1; $i -lt $snapshot.Count; $i++) {
+            # Themed tab edges overlap by about seven pixels in this build.
+            if ($snapshot[$i].Left -lt ($snapshot[$i - 1].Right - 12) -or
+                $snapshot[$i].Left -le $snapshot[$i - 1].Left) { Fail 'TAB_OWNERSHIP_UNVERIFIED' }
+        }
+        return @($snapshot | Select-Object Id, Selected)
+    }
     $snapshot = @()
     foreach ($tab in $tabs) {
         $pattern = $null
@@ -829,7 +880,9 @@ function Collect-Articles {
         if ($articles.Count -ge $Limit) { break }
         if ($visitedThisView) { $stalledScrolls = 0; continue }
         $stalledScrolls++
-        if ($stalledScrolls -ge 4) { Fail 'FEWER_THAN_REQUESTED_UNIQUE_ARTICLES' }
+        # Some account cards exceed a viewport. Four 120-unit wheel events can
+        # still show the same card; allow bounded scrolling to the next one.
+        if ($stalledScrolls -ge 20) { Fail 'FEWER_THAN_REQUESTED_UNIQUE_ARTICLES' }
         $profilePage = Get-HomeContext
         Set-Stage 'SCROLL_LIST'
         Scroll-ArticleList $profilePage
@@ -861,7 +914,9 @@ try {
     } else { Join-Path $PSScriptRoot '.paused' }
     if (Test-Path -LiteralPath $pausePath) {
         if (-not $ResumeAfterUserConsent) { Fail 'USER_PAUSED' }
-        Remove-Item -LiteralPath $pausePath
+        # A read-only single-article probe must not lift the persistent pause.
+        # The separately invoked full collection resumes only after it passes.
+        if (-not $SingleArticleProbe) { Remove-Item -LiteralPath $pausePath }
     }
     [WeChatCollectorWin32]::StartCancellationWatch()
     $result = Collect-Articles

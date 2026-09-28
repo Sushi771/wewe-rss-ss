@@ -30,8 +30,7 @@ function classifyListener(owners, release, snapshot = processIdentity) {
 
 async function startAtLogon() {
   if (process.platform !== 'win32') throw new Error('登录任务仅支持 Windows');
-  // Login starts only the web server. The collector checks its own pause
-  // marker before any desktop input; an absent marker is normal after success.
+  // Login starts only the verified web server package.
   const { release, manifest } = readActiveRelease();
   const owners = processIdentity('Port', undefined, 4000);
   const listener = classifyListener(owners, release);
