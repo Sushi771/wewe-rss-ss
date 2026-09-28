@@ -31,7 +31,11 @@ async function unusedPort() {
 
 async function rehearse() {
   const { values } = parseArgs({
-    options: { release: { type: 'string' }, source: { type: 'string' } },
+    options: {
+      release: { type: 'string' },
+      source: { type: 'string' },
+      legacy: { type: 'string' },
+    },
   });
   if (!values.release || !values.source)
     throw new Error(
@@ -41,6 +45,13 @@ async function rehearse() {
   const release = fs.realpathSync(values.release);
   const source = fs.realpathSync(values.source);
   const manifest = verifyRelease(release);
+  const legacyRelease = values.legacy ? fs.realpathSync(values.legacy) : null;
+  const legacyManifest = legacyRelease ? verifyRelease(legacyRelease) : null;
+  if (
+    legacyManifest &&
+    legacyManifest.schemaCompatibility !== 'legacy-additive'
+  )
+    throw new Error('回滚包必须使用固定旧 schema 源码');
   const audit = path.join(
     root,
     'output/playwright/local-release-audit',
@@ -106,6 +117,78 @@ async function rehearse() {
     '20260928020000_article_body_status',
     '20260928030000_article_body_retry',
   ]);
+  async function smokeLegacy(stage) {
+    const port = await unusedPort();
+    const guardReport = path.join(audit, `legacy-${stage}-guard.json`);
+    const log = fs.openSync(path.join(audit, `legacy-${stage}.log`), 'wx');
+    fs.writeFileSync(
+      database + '.rehearsal.json',
+      JSON.stringify({ releaseId: legacyManifest.id, database }),
+    );
+    const child = spawn(
+      path.join(legacyRelease, 'runtime/node.exe'),
+      [
+        path.join(legacyRelease, 'runtime.cjs'),
+        'start',
+        '--database',
+        database,
+        '--port',
+        String(port),
+        '--pause-file',
+        pauseFile,
+        '--rehearsal',
+        '--obsidian-root',
+        path.join(audit, `legacy-${stage}-vault`),
+        '--guard-report',
+        guardReport,
+      ],
+      {
+        cwd: audit,
+        env: { ...env, CRON_EXPRESSION: '0 0 1 1 *' },
+        windowsHide: true,
+        shell: false,
+        stdio: ['ignore', log, log],
+      },
+    );
+    const closed = once(child, 'close');
+    try {
+      let ready = false;
+      const deadline = Date.now() + 360000;
+      while (Date.now() < deadline) {
+        if (child.exitCode !== null)
+          throw new Error(`旧版 ${stage} 提前退出；查看日志`);
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/dash`, {
+            signal: AbortSignal.timeout(1000),
+          });
+          ready = response.ok;
+        } catch {
+          /* 等待版本校验和启动 */
+        }
+        if (ready) break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      assert(ready, `旧版 ${stage} 启动超时`);
+      const rss = await fetch(
+        `http://127.0.0.1:${port}/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary`,
+      );
+      assert.equal(rss.status, 200);
+      assert.equal(((await rss.text()).match(/<item>/g) || []).length, 20);
+      assert.deepEqual(readJson(guardReport), {
+        installed: true,
+        blockedNetwork: 0,
+        blockedChildren: 0,
+      });
+    } finally {
+      if (child.exitCode === null) child.kill();
+      await closed;
+      fs.closeSync(log);
+    }
+    return { stage, processStopped: true, rssItems: 20 };
+  }
+  const legacyBefore = legacyRelease
+    ? await smokeLegacy('before-migration')
+    : null;
   const runtime = (command, db = database) =>
     run(node, [path.join(release, 'runtime.cjs'), command, '--database', db], {
       cwd: audit,
@@ -147,7 +230,10 @@ async function rehearse() {
   fs.writeFileSync(path.join(audit, 'migrate-repeat.log'), migrate());
   inspect(database, ['--baseline', migratedBaseline, '--require-current']);
   fs.writeFileSync(path.join(audit, 'runtime-probe.jsonl'), runtime('probe'));
-  writeJson(database + '.rehearsal.json', { releaseId: manifest.id, database });
+  fs.writeFileSync(
+    database + '.rehearsal.json',
+    JSON.stringify({ releaseId: manifest.id, database }),
+  );
   const localRequire = createRequire(path.join(server, 'package.json'));
   const { PrismaClient } = localRequire('@prisma/client');
   const prisma = new PrismaClient({
@@ -206,7 +292,7 @@ async function rehearse() {
   const closed = once(child, 'close');
   let result;
   try {
-    const deadline = Date.now() + 45000;
+    const deadline = Date.now() + 180000;
     let ready = false;
     while (Date.now() < deadline) {
       if (child.exitCode !== null)
@@ -322,6 +408,9 @@ async function rehearse() {
     path.join(audit, 'copy-after-smoke.json'),
   ]);
   inspect(database, ['--baseline', migratedBaseline, '--require-current']);
+  const legacyAfter = legacyRelease
+    ? await smokeLegacy('after-migration')
+    : null;
   // 回滚演练恢复到一个新路径，绝不覆盖源库或销毁演练后的状态。
   assert.equal(fileHash(backup.backup), backup.sha256);
   const rollback = path.join(audit, 'rollback.db');
@@ -361,6 +450,8 @@ async function rehearse() {
     databaseRollbackVerified: true,
     pauseUnchanged: true,
     processStopped: true,
+    legacyProcessBeforeMigration: legacyBefore,
+    legacyProcessAfterMigration: legacyAfter,
     ...result,
   };
   writeJson(path.join(audit, 'summary.json'), summary);

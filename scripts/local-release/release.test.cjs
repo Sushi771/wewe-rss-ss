@@ -10,6 +10,7 @@ const {
   cleanEnvironment,
   run,
 } = require('./lib.cjs');
+const { verifySourceSnapshot } = require('./verify-source.cjs');
 const testRoot = path.resolve(
   __dirname,
   '../../output/playwright/local-release-tests',
@@ -101,4 +102,38 @@ test('隔离 guard 在真正发包/启动进程前拦截网络与子进程', () 
     blockedNetwork: 4,
     blockedChildren: 1,
   });
+});
+
+test('旧源码必须逐文件等于固定提交，提交外源码和篡改均拒绝', () => {
+  const folder = path.join(testRoot, randomUUID());
+  const source = path.join(folder, 'apps/server/src');
+  fs.mkdirSync(source, { recursive: true });
+  const main = path.join(source, 'main.ts');
+  fs.writeFileSync(main, 'export const oldSchema = true;\n');
+  run('git', ['init', '-q'], { cwd: folder });
+  run('git', ['add', '.'], { cwd: folder });
+  run(
+    'git',
+    [
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '-qm',
+      'snapshot',
+    ],
+    { cwd: folder },
+  );
+  const commit = run('git', ['rev-parse', 'HEAD'], { cwd: folder }).trim();
+  assert.equal(verifySourceSnapshot(folder, commit, folder), 1);
+  const extra = path.join(source, 'extra.ts');
+  fs.writeFileSync(extra, 'export const extra = true;\n');
+  assert.throws(
+    () => verifySourceSnapshot(folder, commit, folder),
+    /提交外文件/,
+  );
+  fs.unlinkSync(extra);
+  fs.appendFileSync(main, '// changed\n');
+  assert.throws(() => verifySourceSnapshot(folder, commit, folder), /不符/);
 });

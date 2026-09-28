@@ -1,5 +1,43 @@
 # Windows 本机版本化产物与隔离部署演练（2026-09-28）
 
+## 最新检查点：固定旧版回滚应用，新旧进程副本切换通过
+
+窗口 `01a0e632-1cd4-7ba2-b93f-41052d3bdeae` 从 Git 提交
+`9755d166e398f77baf52317f63ef36024037881d` 导出旧 schema 源码，逐项核对 171 个 Git 文件。
+构建器只借用本机现有依赖，旧源码、生成的 Prisma Client/匹配引擎、服务端及前端均进入独立清单，
+不覆盖在用的 `dist`、Client 或 DLL。旧版回滚包为
+`.local-releases/2026-09-28T04-42-23-554Z-fd2efa8df9f9`；新版包为
+`.local-releases/2026-09-28T04-54-43-039Z-abe939a7fbdb`。两者均留在 Git 忽略目录。
+
+最终副本演练 `output/playwright/local-release-audit/2026-09-28T04-54-43-039Z-abe939a7fbdb-1790571667179/summary.json`
+为 `passed=true`：生产 SQLite 只读在线备份后，旧版进程在旧 schema 上启动并返回妈妈号 20 条 RSS；
+三迁移与重复迁移通过，新版进程完成页面/静态资源、两号列表和 RSS、缓存正文、Markdown/Obsidian 冒烟；
+随后旧版进程在同一份**已迁移**副本上再次启动并返回 20 条 RSS。所有测试进程都由演练脚本自身创建和结束。
+12 号/1430 篇原有列逐值哈希一致，四个新列为 null；网络/子进程 guard 计数均为 0，暂停文件与生产库不变。
+旧版静态页面来自旧源码，JS 实际通过旧服务读取，CSS 为 240698 字节，不再复用新版页面。
+
+首次切换演练的最后一个旧进程在 180 秒内没有输出启动日志而超时；保留该失败目录
+`output/playwright/local-release-audit/2026-09-28T03-54-01-837Z-284b827baab6-1790569753054/`。
+在该副本上单独执行旧版探针及受控重试均通过；最终两份固定产物的完整演练随后通过。
+不能把第一次超时改写成成功。Node 产物测试 5 项、Python SQLite 检查 6 项通过。
+
+**生产尚未切换。** PID 58000 仍是 2026-09-27 17:08:16 启动的
+`C:\Program Files\nodejs\node.exe`，命令行为 `dist/apps/server/src/main`，监听 `0.0.0.0:4000`；
+生产仍为旧 schema、12 号/1430 篇，`.paused=USER_PAUSED`。当前 runtime 仍只接受 `--rehearsal`，
+旧 BAT 仍失败退出。下一实质单元须实现核验 PID/启动时间/可执行文件/命令行/监听端口的受控启动器，
+只结束被核验的 WeWe-RSS 进程；先用副本验证失败切换与进程回滚，再取**新的**生产一致性备份及保护基线。
+失败时保留迁移后数据库，使用已证明可读新列的旧应用进程回滚，不自动用旧备份覆盖可能已有新增数据的库。
+完成这些条件后才推进生产迁移和切换。最新 20 篇真实发现、第二号重复新增 0、持续更新与图片仍未验收；
+微信 UI/剪贴板 Esc 暂停保持，未来获明确授权的首次仅 60 秒单篇无写库。
+
+旧版前端复用本机已安装的 Vite `5.4.21` 与 `@vitejs/plugin-react` `4.7.0` 的 Node API，
+两者均为 MIT 许可；旧应用源码来自本项目固定提交（根 LICENSE 为 MIT）。
+适用条件是本机 Windows、同一已安装依赖闭包、SQLite 旧 schema 与已验证的三项加性迁移；
+此本机产物含绝对 junction，不是跨机器分发包。
+[Vite JavaScript API](https://vite.dev/guide/api-javascript.html) 和
+[pnpm 10.x deploy 说明](https://github.com/pnpm/pnpm.io/blob/main/versioned_docs/version-10.x/cli/deploy.md)
+已核对；这里未复制第三方源码，常规可移植分发仍应使用项目原有 `pnpm deploy --legacy --prod` 路线。
+
 ## 最新检查点：helper 固定入包，共享暂停状态，旧启动器已停用
 
 本轮产物 `.local-releases/2026-09-28T03-54-01-837Z-284b827baab6` 将 `collect.ps1` 纳入版本清单并校验哈希，

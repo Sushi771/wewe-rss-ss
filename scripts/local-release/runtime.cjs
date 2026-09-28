@@ -30,6 +30,9 @@ async function runtime() {
     );
   const release = __dirname;
   const manifest = verifyRelease(release);
+  const legacy = manifest.schemaCompatibility === 'legacy-additive';
+  if (!legacy && manifest.schemaCompatibility !== 'current')
+    throw new Error('未知应用 schema 兼容模式');
   if (fileHash(process.execPath) !== manifest.files['runtime/node.exe'])
     throw new Error('必须使用产物内固定版本的 Node');
   if (command === 'verify') {
@@ -48,8 +51,10 @@ async function runtime() {
       '--database',
       database,
       '--migrations',
-      path.join(server, 'prisma/migrations'),
-      '--require-current',
+      legacy
+        ? path.join(release, 'known-migrations')
+        : path.join(server, 'prisma/migrations'),
+      ...(!legacy ? ['--require-current'] : []),
     ]),
   );
   const env = cleanEnvironment({
@@ -88,14 +93,20 @@ async function runtime() {
       articles: await client.article.count(),
       sqlite: version,
     };
-    await client.article.findFirst({
-      select: {
-        lastBodyStatus: true,
-        verifiedSourceUrl: true,
-        lastBodyRetry: true,
-      },
-    });
-    await client.feed.findFirst({ select: { collectionChannel: true } });
+    if (legacy) {
+      // 固定旧 schema 的 Client 必须能在迁移前后读同一份副本，供进程回滚。
+      await client.article.findFirst({ select: { id: true } });
+      await client.feed.findFirst({ select: { id: true } });
+    } else {
+      await client.article.findFirst({
+        select: {
+          lastBodyStatus: true,
+          verifiedSourceUrl: true,
+          lastBodyRetry: true,
+        },
+      });
+      await client.feed.findFirst({ select: { collectionChannel: true } });
+    }
   } finally {
     await client.$disconnect();
   }
@@ -107,6 +118,7 @@ async function runtime() {
       clientPath,
       engineSha256: manifest.prisma.engineSha256,
       counts,
+      schemaCompatibility: manifest.schemaCompatibility,
       pending: inspected.pending,
     }),
   );
@@ -156,6 +168,7 @@ async function runtime() {
     WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
     WECHAT_DESKTOP_MP_IDS: '',
     PLATFORM_URL: 'http://127.0.0.1:1',
+    ...(legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),
     REHEARSAL_GUARD_REPORT: values['guard-report'],
   });
   require('./offline-guard.cjs');

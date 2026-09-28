@@ -2,6 +2,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { isBuiltin } = require('node:module');
+const { parseArgs } = require('node:util');
+const { verifySourceSnapshot } = require('./verify-source.cjs');
 const {
   slash,
   readJson,
@@ -11,13 +13,14 @@ const {
   packageDir,
   walk,
   fingerprint,
+  inside,
   cleanEnvironment,
   run,
 } = require('./lib.cjs');
 const root = path.resolve(__dirname, '../..');
 const server = path.join(root, 'apps/server');
 
-function copyPackages(destination, generatedClient) {
+function copyPackages(destination, generatedClient, packageSource = server) {
   const seen = new Map();
   const versions = [];
   function link(name, target, parent) {
@@ -71,17 +74,58 @@ function copyPackages(destination, generatedClient) {
     return target;
   }
   for (const name of Object.keys(
-    readJson(path.join(server, 'package.json')).dependencies,
+    readJson(path.join(packageSource, 'package.json')).dependencies,
   ).sort()) {
     if (name === '@wewe-rss/shared') continue; // 源码与服务端一起编译，并改写为产物内相对路径。
-    link(name, copy(name, server), destination);
+    link(name, copy(name, packageSource), destination);
   }
   return versions;
 }
 
-function build() {
+function build(options = {}) {
   if (process.platform !== 'win32')
     throw new Error('此入口只验证 Windows 本机 SQLite 部署');
+  const sourceRoot = options.sourceRoot
+    ? fs.realpathSync(options.sourceRoot)
+    : root;
+  const legacy = sourceRoot !== root;
+  if (legacy && !inside(path.join(root, '.local-releases'), sourceRoot))
+    throw new Error('旧版源码快照必须位于本项目忽略的 .local-releases 目录');
+  if (
+    legacy &&
+    options.sourceCommit !== '9755d166e398f77baf52317f63ef36024037881d'
+  )
+    throw new Error('旧版源码必须显式固定为已知可连接旧 schema 的提交');
+  if (legacy) verifySourceSnapshot(sourceRoot, options.sourceCommit, root);
+  const sourceServer = path.join(sourceRoot, 'apps/server');
+  const sourceWeb = path.join(sourceRoot, 'apps/web');
+  if (legacy) {
+    // 旧源码留在忽略目录，只借用已安装依赖；不覆盖运行中的 dist、Client 或 DLL。
+    for (const [local, installed] of [
+      [path.join(sourceRoot, 'node_modules'), path.join(root, 'node_modules')],
+      [
+        path.join(sourceServer, 'node_modules'),
+        path.join(server, 'node_modules'),
+      ],
+      [
+        path.join(sourceWeb, 'node_modules'),
+        path.join(root, 'apps/web/node_modules'),
+      ],
+      [
+        path.join(sourceRoot, 'packages/shared/node_modules'),
+        path.join(root, 'packages/shared/node_modules'),
+      ],
+    ]) {
+      if (!fs.existsSync(local))
+        fs.symlinkSync(
+          installed,
+          local,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      if (fs.realpathSync(local) !== fs.realpathSync(installed))
+        throw new Error('旧源码依赖链接不指向本项目已安装依赖');
+    }
+  }
   const inputs = {};
   for (const directory of [
     'apps/server/src',
@@ -92,8 +136,9 @@ function build() {
     'packages/shared/src',
     'scripts/local-release',
   ]) {
-    if (!fs.existsSync(path.join(root, directory))) continue;
-    walk(path.join(root, directory), (relative, kind) => {
+    const base = directory === 'scripts/local-release' ? root : sourceRoot;
+    if (!fs.existsSync(path.join(base, directory))) continue;
+    walk(path.join(base, directory), (relative, kind) => {
       if (
         kind !== 'file' ||
         relative.includes('__pycache__') ||
@@ -101,7 +146,7 @@ function build() {
       )
         return;
       inputs[slash(path.join(directory, relative))] = fileHash(
-        path.join(root, directory, relative),
+        path.join(base, directory, relative),
       );
     });
   }
@@ -120,7 +165,9 @@ function build() {
     'apps/web/postcss.config.js',
     'tools/wechat-desktop-collector/collect.ps1',
   ])
-    inputs[file] = fileHash(path.join(root, file));
+    inputs[file] = fileHash(
+      path.join(file.startsWith('tools/') ? root : sourceRoot, file),
+    );
   const sourceHash = hash(JSON.stringify(inputs));
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
   const release = path.join(root, '.local-releases', id);
@@ -136,7 +183,7 @@ function build() {
   );
   const engine = path.join(originalClient, 'query_engine-windows.dll.node');
   const schema = fs
-    .readFileSync(path.join(server, 'prisma/schema.prisma'), 'utf8')
+    .readFileSync(path.join(sourceServer, 'prisma/schema.prisma'), 'utf8')
     .replace(
       'provider      = "prisma-client-js"',
       `provider = "node ${slash(path.join(installed, 'generator-build/index.js'))}"\n  output = "${slash(client)}"`,
@@ -165,15 +212,15 @@ function build() {
   )
     throw new Error('生成的 Prisma 引擎与现有 Client 不匹配');
   const paths = {
-    '@server/*': [slash(path.join(server, 'src/*'))],
+    '@server/*': [slash(path.join(sourceServer, 'src/*'))],
     '@wewe-rss/shared': [
-      slash(path.join(root, 'packages/shared/src/index.ts')),
+      slash(path.join(sourceRoot, 'packages/shared/src/index.ts')),
     ],
     '@prisma/client': [slash(client)],
   };
   const tsconfig = path.join(workspace, 'tsconfig.json');
   writeJson(tsconfig, {
-    extends: slash(path.join(server, 'tsconfig.build.json')),
+    extends: slash(path.join(sourceServer, 'tsconfig.build.json')),
     compilerOptions: {
       paths,
       typeRoots: [slash(path.join(server, 'node_modules/@types'))],
@@ -184,7 +231,7 @@ function build() {
     },
   });
   const tsc = path.join(packageDir('typescript', server), 'bin/tsc');
-  run(process.execPath, [tsc, '-p', tsconfig], { cwd: server, env });
+  run(process.execPath, [tsc, '-p', tsconfig], { cwd: sourceServer, env });
   const compiledRoot = path.join(target, 'dist/apps/server/src');
   walk(path.join(target, 'dist'), (relative, kind) => {
     if (kind !== 'file' || !relative.endsWith('.js')) return;
@@ -207,7 +254,7 @@ function build() {
       );
     fs.writeFileSync(file, rewritten);
   });
-  const web = path.join(root, 'apps/web');
+  const web = sourceWeb;
   const webConfig = path.join(workspace, 'tsconfig.web.json');
   writeJson(webConfig, {
     extends: slash(path.join(web, 'tsconfig.json')),
@@ -221,22 +268,43 @@ function build() {
     },
   });
   run(process.execPath, [tsc, '-p', webConfig, '--noEmit'], { cwd: web, env });
-  fs.writeFileSync(
-    path.join(workspace, 'web.log'),
-    run(
-      process.execPath,
-      [
-        path.join(packageDir('vite', web), 'bin/vite.js'),
-        'build',
-        '--outDir',
-        path.join(target, 'client'),
-      ],
-      { cwd: web, env },
-    ),
-  );
-  fs.cpSync(path.join(server, 'prisma'), path.join(target, 'prisma'), {
+  if (legacy) {
+    fs.writeFileSync(
+      path.join(workspace, 'web.log'),
+      run(
+        process.execPath,
+        [
+          path.join(__dirname, 'build-legacy-web.cjs'),
+          sourceWeb,
+          path.join(target, 'client'),
+        ],
+        { cwd: root, env },
+      ),
+    );
+  } else {
+    fs.writeFileSync(
+      path.join(workspace, 'web.log'),
+      run(
+        process.execPath,
+        [
+          path.join(packageDir('vite', web), 'bin/vite.js'),
+          'build',
+          '--outDir',
+          path.join(target, 'client'),
+        ],
+        { cwd: web, env },
+      ),
+    );
+  }
+  fs.cpSync(path.join(sourceServer, 'prisma'), path.join(target, 'prisma'), {
     recursive: true,
   });
+  if (legacy)
+    fs.cpSync(
+      path.join(server, 'prisma/migrations'),
+      path.join(release, 'known-migrations'),
+      { recursive: true },
+    );
   fs.mkdirSync(path.join(target, 'scripts'));
   for (const file of ['backup-sqlite.py', 'verify-preservation.py'])
     fs.copyFileSync(
@@ -244,7 +312,7 @@ function build() {
       path.join(target, 'scripts', file),
     );
   fs.copyFileSync(
-    path.join(server, 'package.json'),
+    path.join(sourceServer, 'package.json'),
     path.join(target, 'package.json'),
   );
   for (const file of [
@@ -256,7 +324,7 @@ function build() {
     fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
   fs.mkdirSync(path.join(release, 'runtime'));
   fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
-  const dependencies = copyPackages(target, client);
+  const dependencies = copyPackages(target, client, sourceServer);
   // 固定 helper 代码随应用发布；.paused 是跨版本共享的运行状态，绝不复制进产物。
   const helperDir = path.join(release, 'tools/wechat-desktop-collector');
   fs.mkdirSync(helperDir, { recursive: true });
@@ -272,6 +340,8 @@ function build() {
     arch: process.arch,
     nodeVersion: process.version,
     sourceHash,
+    sourceCommit: legacy ? options.sourceCommit : null,
+    schemaCompatibility: legacy ? 'legacy-additive' : 'current',
     inputs,
     prisma: {
       clientVersion: readJson(path.join(installed, 'package.json')).version,
@@ -300,7 +370,16 @@ function build() {
 if (require.main === module) {
   try {
     fs.mkdirSync(path.join(root, '.local-releases'), { recursive: true });
-    build();
+    const { values } = parseArgs({
+      options: {
+        'source-root': { type: 'string' },
+        'source-commit': { type: 'string' },
+      },
+    });
+    build({
+      sourceRoot: values['source-root'],
+      sourceCommit: values['source-commit'],
+    });
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
