@@ -151,6 +151,12 @@ describe('local collection with real SQLite migrations', () => {
       errorMsg: null,
       isLocal: true,
     } as any);
+    const browserExport =
+      await caller.article.exportMarkdown('legacy-short-link');
+    expect(browserExport.markdown).toContain('正文内容');
+    await expect(fs.stat(path.join(root, 'vault'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
     const result = await caller.article.saveToObsidian('legacy-short-link');
     const markdown = await fs.readFile(result.path, 'utf8');
     expect(markdown).toContain('正文内容');

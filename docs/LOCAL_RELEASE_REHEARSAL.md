@@ -1,5 +1,20 @@
 # Windows 本机版本化产物与隔离部署演练（2026-09-28）
 
+## 2026-09-28 导出修复产物已受控部署
+
+`article.exportMarkdown` 现只返回浏览器 Markdown，不会意外覆盖
+`saveToObsidian` 写出的本地图片 Markdown。产物
+`.local-releases/2026-09-28T07-33-41-582Z-d45394439895` 的当前 schema
+副本冷启动审计 `controlled-restart-1790581126983-69728` 为 `passed=true`；
+生产跨版受控重启 `controlled-restart-1790581408694-69172` 为 `passed=true`。
+新 PID 13464，旧 PID 30568 已退出，4000 由新进程独占。停止后备份与原库
+SHA-256 相同，重启后所有字段与备份基线相同，12 号/1433 篇。
+生产本机浏览器 Markdown 调用返回 200，vault 文件前后 SHA-256 全等；
+现存两篇 13 张本地图片的路径/文件头检查见
+[导出审计](EXISTING_EXPORT_AUDIT.md)。旧 `rehearse.cjs` 只适用于旧 schema，
+本轮对当前 schema 的尝试按待迁移项预期拒绝；正式演练使用
+`restart.cjs --mode start --rehearsal`。开机计划任务尚未注册。
+
 ## 2026-09-28 当前 schema 的受控重启与冷启动
 
 新增 `scripts/local-release/restart.cjs`。它仅接受完整性通过的当前 schema 固定产物；

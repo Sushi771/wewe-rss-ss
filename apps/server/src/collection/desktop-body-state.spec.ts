@@ -375,6 +375,7 @@ describe('已核验元数据与独立正文状态（隔离SQLite）', () => {
     expect(
       (await caller().article.exportMarkdown(legacyId)).markdown,
     ).toContain('保留旧正文与图片');
+    expect(await fs.readFile(exported.path, 'utf8')).toBe(markdown);
     const beforeFiles = await fs.readdir(path.join(root, 'vault'), {
       recursive: true,
     });

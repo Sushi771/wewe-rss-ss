@@ -616,33 +616,7 @@ export class TrpcRouter {
       .mutation(async ({ input: id }) => {
         try {
           const { markdown, title } = await this.getArticleMarkdown(id);
-          const { obsidianPath } =
-            this.configService.get<ConfigurationType['feed']>('feed')!;
-
-          // Attempt to save to Obsidian if configured
-          try {
-            if (obsidianPath) {
-              const dateFolder = dayjs().format('YYYY-MM-DD');
-              const finalPath = path.join(obsidianPath, dateFolder);
-
-              if (!fs.existsSync(finalPath)) {
-                await fs.promises.mkdir(finalPath, { recursive: true });
-              }
-              const safeTitle = title
-                .replace(/[\\/:*?"<>|]/g, '-')
-                .slice(0, 100);
-              const filePath = path.join(finalPath, `${safeTitle}-${id}.md`);
-              await fs.promises.writeFile(filePath, markdown);
-              this.logger.log(
-                `Auto-saved to Obsidian during export: ${filePath}`,
-              );
-            }
-          } catch (err: any) {
-            this.logger.error(
-              `Auto-save to Obsidian failed during export: ${err.message}`,
-            );
-          }
-
+          // Browser Markdown must not overwrite an Obsidian file with proxy image URLs.
           return { markdown, title };
         } catch (err: any) {
           this.logger.error(`Export Markdown error for ${id}: ${err.message}`);

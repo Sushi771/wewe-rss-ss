@@ -1,5 +1,36 @@
 # 开发检查点与下一轮交接（2026-09-27）
 
+## 2026-09-28 现存导出审计与无写入 Markdown 修复已部署
+
+本窗口 `01a0e6e6-a4d0-74d1-869d-6729c688cbcf` 从前任交接提交
+`c356ec8d1e75bc26892b56675ab258498b2a65ce` 和干净工作区接手。
+生产现存两篇可匹配数据库的 Obsidian Markdown 共引用 13 个本地图片，
+路径均存在且图片文件头有效；妈妈号一篇有来源链接，苏洵号一篇没有
+`source_url`/`verified_source_url`。妈妈号现存最近 20 条只有 3 条缓存正文，
+苏洵号只有 1 条；不能以旧 RSS 数量或这两篇导出认定最新内容完整。
+
+修复 `article.exportMarkdown` 的意外 vault 写入：浏览器 Markdown 带代理图片 URL，
+原实现可能覆盖同名 Obsidian 本地图片文档；现只返回内容，显式
+`saveToObsidian` 仍负责写文件。两个隔离 SQLite 测试套件 20 项通过。
+固定产物 `.local-releases/2026-09-28T07-33-41-582Z-d45394439895`
+在当前 schema 副本冷启动演练 `controlled-restart-1790581126983-69728`
+为 `passed=true`。生产受控跨版重启 `controlled-restart-1790581408694-69172`
+为 `passed=true`；旧 PID 30568 退出，新 PID **13464** 自北京时间
+2026-09-28 15:43:38 监听 4000。停止后备份 SHA-256
+`9e59b69f6216a1512657d8b29d8bcdb142dff29fa5073d1e020a92d958a616b1`，
+生产库与停止后全字段基线相等，12 号/1433 篇、迁移 pending 空。
+`/dash` 与两号 RSS 均 HTTP 200，`?limit=20` 各 20 条。生产本机
+`article.exportMarkdown` 对一篇已有缓存正文返回 200，调用前后 vault
+Markdown 与图片 SHA-256 全等。没有重新执行生产 Obsidian 写入、图片下载
+或任何真实新文章采集。详见 [现存导出审计](EXISTING_EXPORT_AUDIT.md)。
+
+未找到本机 WeWe-RSS 开机计划任务。当前 `restart.cjs --mode start`
+可作为登录后任务动作，已在副本验证；固定产物路径需要随部署维护，
+生产任务尚未注册。下一独立工程单元可实现并验证受控的开机任务接入，
+不能按端口杀进程或解除 `.paused=USER_PAUSED`。真实采集验收仍按根
+`AGENTS.md` 的暂停和完成标准进行；若独立工作耗尽，只在当前窗口等待授权。
+本轮 GitHub 提交、推送与后继登记在完成后补记；下方 PID 30568 为历史状态。
+
 ## 2026-09-28 当前 schema 受控重启已部署，真实持续采集仍待验收
 
 窗口 `01a0e6d1-bbb5-7613-921e-cd1c96af52b3` 从 `a7685f0`、干净工作区接手。

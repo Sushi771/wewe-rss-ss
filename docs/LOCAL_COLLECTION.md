@@ -1,5 +1,13 @@
 # 内置采集边界、公开合集补采与一次性文件导入
 
+## 2026-09-28 当前导出与启动入口
+
+`article.exportMarkdown` 仅返回浏览器 Markdown，不写 Obsidian；页面的
+“批量导出 Obsidian”调用 `article.saveToObsidian`，将图片写入当天日期目录的
+`attachments/`。现存文件与生产只读核查见 [导出审计](EXISTING_EXPORT_AUDIT.md)。
+下方旧“启动与维护”描述的 BAT 已停用；当前 schema 的受控重启和冷启动只使用
+`scripts/local-release/restart.cjs`，详见 [本机产物检查点](LOCAL_RELEASE_REHEARSAL.md)。
+
 ## 当前产品边界（2026-09-27 本轮修订）
 
 目标是由 WeWe-RSS 内置授权、列表分页、正文获取和入库；外部下载器、MCP 包装、读取下载目录均不能成为订阅依赖。目前**完整公众号列表通道仍未验收**。已验证的公开合集只覆盖绑定范围，不能覆盖“全部”页中的所有内容。
