@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const net = require('node:net');
 const { randomUUID } = require('node:crypto');
 const {
   fingerprint,
@@ -11,6 +12,7 @@ const {
   run,
 } = require('./lib.cjs');
 const { verifySourceSnapshot } = require('./verify-source.cjs');
+const { requireFreePort } = require('./restart.cjs');
 const testRoot = path.resolve(
   __dirname,
   '../../output/playwright/local-release-tests',
@@ -137,3 +139,20 @@ test('旧源码必须逐文件等于固定提交，提交外源码和篡改均�
   fs.appendFileSync(main, '// changed\n');
   assert.throws(() => verifySourceSnapshot(folder, commit, folder), /不符/);
 });
+
+test(
+  '冷启动拒绝占用端口，且保留原监听者',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const listener = net.createServer();
+    await new Promise((resolve) => listener.listen(0, '127.0.0.1', resolve));
+    const port = listener.address().port;
+    try {
+      assert.throws(() => requireFreePort(port), /已有监听进程/);
+      assert.equal(listener.listening, true);
+    } finally {
+      await new Promise((resolve) => listener.close(resolve));
+    }
+    assert.doesNotThrow(() => requireFreePort(port));
+  },
+);

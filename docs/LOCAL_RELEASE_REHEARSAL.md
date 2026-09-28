@@ -1,5 +1,49 @@
 # Windows 本机版本化产物与隔离部署演练（2026-09-28）
 
+## 2026-09-28 当前 schema 的受控重启与冷启动
+
+新增 `scripts/local-release/restart.cjs`。它仅接受完整性通过的当前 schema 固定产物；
+`--mode restart` 要求指定旧进程的 PID、UTC 启动时间、程序路径和完整命令行，
+并再次核对 4000 端口归属及由本项目固定产物生成的命令行，才通过同一进程句柄停止。
+`--mode start` 用于开机后冷启动，要求 4000 端口没有任何监听者；端口冲突只报错，
+不结束占用者。两个模式都核验 `USER_PAUSED`、当前迁移全部已应用、产物清单和 SQLite
+在线备份的完整性及 SHA-256。重启在旧进程停止后重新备份并以此检查全部字段基线；
+启动失败只恢复原应用进程，绝不以旧备份覆盖可能有新数据的库。定时始终关闭。
+
+受控入口的生产命令形态如下；`--expected-*` 必须来自紧接着执行的
+`process-identity.ps1 -Action Snapshot -TargetPid <PID> -Port 4000`，不能复用旧检查点。
+`--previous` 省略时为同一版本。冷启动改为 `--mode start` 并省略四个 `--expected-*`。
+开机任务应在本机用户登录后用固定 Node 运行此冷启动命令，工作目录为项目根目录；
+入口不会自行注册或改写已有系统任务。
+
+```powershell
+node scripts/local-release/restart.cjs --mode restart --production `
+  --release .local-releases/<当前固定版本> `
+  --database apps/server/data/wewe-rss.db `
+  --expected-pid <PID> --expected-start-utc <UTC> `
+  --expected-executable <完整路径> --expected-command-line <完整命令行>
+```
+
+旧 `switch.cjs` 仍仅适用于旧 schema 到当前 schema 的一次性部署，不能用于日常重启。
+生产及隔离验收结果以 [开发交接](DEVELOPMENT_HANDOFF.md) 顶部的新检查点为准。
+
+本轮副本故障注入、正常重启和冷启动审计依次为
+`controlled-restart-1790579353232-72208`、`controlled-restart-1790579435562-50008`、
+`controlled-restart-1790579508080-73076`，三份 `summary.json` 均 `passed=true`；
+前者实际回滚原应用进程，后两者新进程就绪，guard 计数全部为 0。持有端口
+48923 的独立监听者在冲突测试后仍存在，由测试自身停止。生产第一次传入被
+PowerShell `ConvertFrom-Json` 改写的启动时间时，身份检查拒绝且旧进程继续运行；
+用 `ConvertFrom-Json -DateKind String` 保留 UTC 原文后再执行成功。
+
+生产审计 `controlled-restart-1790579694242-79552/summary.json` 为 `passed=true`；
+旧 PID 68272 退出，新 PID 30568 于 2026-09-28 15:15:03 北京时间启动。
+停止后备份 SHA-256 为
+`9e59b69f6216a1512657d8b29d8bcdb142dff29fa5073d1e020a92d958a616b1`，
+独立复算一致；生产库 12 号/1433 篇、无待迁移，全部字段与停止后基线全等。
+`/dash` 和妈妈/苏洵 RSS 均 200，两个 RSS 各 20 条；暂停文件仍为 `USER_PAUSED`，
+定时仍关闭。生产一篇已有缓存正文的 `article.byId` 只读响应与 SQLite 原文
+SHA-256 一致。这些是现存数据的读取验证，不是最新 20 篇真实采集验收。
+
 ## 最新检查点：受控生产切换通过
 
 受控入口 `scripts/local-release/switch.cjs` 使用 `process-identity.ps1` 的同一进程句柄，

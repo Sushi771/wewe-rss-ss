@@ -1,8 +1,8 @@
 # Windows 进程身份核验。Stop 操作持有 Process 对象句柄，避免按 PID 二次查找后误杀复用 PID。
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop')][string]$Action,
-    [Parameter(Mandatory)][int]$TargetPid,
+    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port')][string]$Action,
+    [int]$TargetPid,
     [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
     [string]$ExpectedStartUtc,
     [string]$ExpectedExecutable,
@@ -10,6 +10,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Action -eq 'Port') {
+    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object LocalAddress, OwningProcess)
+    ConvertTo-Json -InputObject $listeners -Compress -Depth 3
+    return
+}
 if ($TargetPid -le 0) { throw '无效的目标 PID' }
 $process = [System.Diagnostics.Process]::GetProcessById($TargetPid)
 try {

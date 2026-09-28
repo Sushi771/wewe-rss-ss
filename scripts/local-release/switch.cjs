@@ -29,11 +29,10 @@ function processIdentity(action, pid, port, expected) {
     path.join(__dirname, 'process-identity.ps1'),
     '-Action',
     action,
-    '-TargetPid',
-    String(pid),
     '-Port',
     String(port),
   ];
+  if (action !== 'Port') args.push('-TargetPid', String(pid));
   if (expected)
     args.push(
       '-ExpectedStartUtc',
@@ -471,4 +470,12 @@ if (require.main === module)
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });
-module.exports = { controlledSwitch, processIdentity, sameIdentity };
+module.exports = {
+  controlledSwitch,
+  processIdentity,
+  sameIdentity,
+  unusedPort,
+  waitReady,
+  stopOwned,
+  loadProductionEnvironment,
+};
