@@ -23,6 +23,7 @@ RUN cd /app-sqlite && \
     pnpm exec prisma generate
 
 FROM base AS app-sqlite
+RUN apk add --no-cache python3
 COPY --from=build /app-sqlite /app
 
 WORKDIR /app

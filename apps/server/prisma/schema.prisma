@@ -34,6 +34,7 @@ model Feed {
   localDirectory String? @map("local_directory")
   publicAlbumIds String? @map("public_album_ids")
   lastCollectionResult String? @map("last_collection_result")
+  collectionChannel String? @map("collection_channel")
   articles   Article[]
 
   @@map("feeds")
@@ -47,6 +48,12 @@ model Article {
   publishTime Int       @map("publish_time")
   sourceUrl   String?   @unique @map("source_url")
   contentHtml String?   @map("content_html")
+  /// 最近一次通过元数据核验的原文正文结果；null 表示未记录，独立于已有正文缓存。
+  lastBodyStatus String? @map("last_body_status")
+  /// 已通过原文核验的 biz/mid/idx 完整链接，独立保存以保护旧短链 ID 和来源。
+  verifiedSourceUrl String? @map("verified_source_url")
+  /// 最近一次显式单篇正文重试结果，失败不改 lastBodyStatus 或旧正文。
+  lastBodyRetry String? @map("last_body_retry")
   metrics     String?   @map("metrics")
   readCount   Int?      @map("read_count")
   likeCount   Int?      @map("like_count")

@@ -12,6 +12,17 @@ import {
   Metrics,
 } from './collection-format';
 import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
+import { fetchDesktopRecent20 } from './desktop-wechat';
+import { createVerifiedSqliteBackup } from './sqlite-backup';
+import {
+  assertSavedArticleIdentity,
+  bodyRetryTarget,
+  bodyRetryFailure,
+  bodyRetryMessages,
+  BodyRetryResult,
+  BodyRetryBlockedError,
+  fetchArticleBody,
+} from './article-body-retry';
 
 type CollectedArticle = ReturnType<typeof canonicalArticleUrl> & {
   title: string;
@@ -21,11 +32,252 @@ type CollectedArticle = ReturnType<typeof canonicalArticleUrl> & {
 };
 type ImportInput = { directory: string; mpId?: string; mpName?: string };
 
+export type DesktopBodySummary = {
+  bodyFetch: { succeeded: number; unavailable: number };
+  bodyCache: { available: number; retained: number; missing: number };
+  bodyUnavailable: { id: string; cached: boolean }[];
+};
+
 @Injectable()
 export class CollectionService {
   constructor(private readonly prisma: PrismaService) {}
 
   private readonly publicCollections = new Set<string>();
+
+  async retryArticleBody(id: string): Promise<BodyRetryResult> {
+    const initial = await this.prisma.article.findUniqueOrThrow({
+      where: { id },
+    });
+    if (this.publicCollections.has(initial.mpId))
+      throw new BodyRetryBlockedError(
+        '该公众号正在采集或重试正文，请等待本次结束',
+      );
+    this.publicCollections.add(initial.mpId);
+    try {
+      bodyRetryTarget(initial);
+      // 失败状态也属于写入；备份失败时没有网络请求或数据库变化。
+      try {
+        await createVerifiedSqliteBackup();
+      } catch {
+        throw new BodyRetryBlockedError(
+          '一致性备份失败，本次未请求原文或写入状态。',
+        );
+      }
+      const article = await this.prisma.article.findUniqueOrThrow({
+        where: { id },
+      });
+      if (article.mpId !== initial.mpId)
+        throw new BodyRetryBlockedError('文章所属订阅已变更，请重新读取文章。');
+      bodyRetryTarget(article);
+      const attemptedAt = Math.floor(Date.now() / 1000);
+      const unchangedIdentity = (current: typeof article) => {
+        if (
+          [
+            'mpId',
+            'title',
+            'publishTime',
+            'sourceUrl',
+            'verifiedSourceUrl',
+          ].some((key) => current[key] !== article[key])
+        )
+          throw new BodyRetryBlockedError(
+            '文章信息在重试期间已变更，请重新读取文章。',
+          );
+      };
+      try {
+        const fetched = await fetchArticleBody(article);
+        return await this.prisma.$transaction(async (tx) => {
+          const current = await tx.article.findUniqueOrThrow({ where: { id } });
+          unchangedIdentity(current);
+          const status = fetched.contentHtml ? 'available' : 'unavailable';
+          const result: BodyRetryResult = {
+            status,
+            code: status,
+            attemptedAt,
+            cached: Boolean(current.contentHtml || fetched.contentHtml),
+            filled: Boolean(!current.contentHtml && fetched.contentHtml),
+            message: bodyRetryMessages[status],
+          };
+          await tx.article.update({
+            where: { id },
+            data: {
+              lastBodyStatus: status,
+              verifiedSourceUrl:
+                current.verifiedSourceUrl || fetched.verifiedSourceUrl,
+              lastBodyRetry: JSON.stringify(result),
+              ...(!current.contentHtml && fetched.contentHtml
+                ? { contentHtml: fetched.contentHtml }
+                : {}),
+            },
+          });
+          return result;
+        });
+      } catch (error) {
+        const code = bodyRetryFailure(error);
+        // 不持久化 HTTP/数据库错误原文，避免带出请求参数或正文。
+        return await this.prisma.$transaction(async (tx) => {
+          const current = await tx.article.findUniqueOrThrow({ where: { id } });
+          unchangedIdentity(current);
+          const result: BodyRetryResult = {
+            status: 'failed',
+            code,
+            attemptedAt,
+            cached: Boolean(current.contentHtml),
+            filled: false,
+            message: bodyRetryMessages[code],
+          };
+          await tx.article.update({
+            where: { id },
+            data: { lastBodyRetry: JSON.stringify(result) },
+          });
+          return result;
+        });
+      }
+    } finally {
+      this.publicCollections.delete(initial.mpId);
+    }
+  }
+
+  async collectDesktopRecent20(input: {
+    mpId: string;
+    mpName: string;
+    resumeAfterUserConsent?: boolean;
+  }) {
+    if (this.publicCollections.has(input.mpId))
+      throw new Error('该公众号正在采集，请等待本次结束');
+    this.publicCollections.add(input.mpId);
+    try {
+      const feed = await this.prisma.feed.findUniqueOrThrow({
+        where: { id: input.mpId },
+      });
+      if (feed.mpName !== input.mpName)
+        throw new Error('订阅账号名称与电脑微信目标不一致；本次未写入文章');
+      // Complete the desktop list and all 20 public original-page checks first.
+      const articles = await fetchDesktopRecent20(input.mpId, input.mpName, {
+        resumeAfterUserConsent: input.resumeAfterUserConsent,
+      });
+      let created = 0;
+      let updated = 0;
+      const bodies: DesktopBodySummary = {
+        bodyFetch: { succeeded: 0, unavailable: 0 },
+        bodyCache: { available: 0, retained: 0, missing: 0 },
+        bodyUnavailable: [],
+      };
+      await this.prisma.$transaction(
+        async (tx) => {
+          for (const item of articles) {
+            const shortId = item.shortUrl.split('/').at(-1)!;
+            const baseUrl = item.url.split('&sn=')[0];
+            const matches = await tx.article.findMany({
+              where: {
+                mpId: input.mpId,
+                OR: [
+                  { id: item.id },
+                  { id: shortId },
+                  { sourceUrl: item.shortUrl },
+                  { sourceUrl: item.url },
+                  { sourceUrl: baseUrl },
+                  { sourceUrl: { startsWith: `${baseUrl}&sn=` } },
+                  { verifiedSourceUrl: baseUrl },
+                  { verifiedSourceUrl: { startsWith: `${baseUrl}&sn=` } },
+                ],
+              },
+            });
+            if (matches.length > 1)
+              throw new Error(
+                '数据库中同一原文对应多条旧记录，请核对后再更新；本次未写入文章',
+              );
+            const existing = matches[0];
+            if (existing) assertSavedArticleIdentity(existing, item);
+            const lastBodyStatus = item.lastBodyStatus;
+            const hasBody = Boolean(existing?.contentHtml || item.contentHtml);
+            if (lastBodyStatus === 'available') bodies.bodyFetch.succeeded++;
+            else {
+              bodies.bodyFetch.unavailable++;
+              bodies.bodyUnavailable.push({
+                id: existing?.id || item.id,
+                cached: hasBody,
+              });
+            }
+            if (hasBody) bodies.bodyCache.available++;
+            else bodies.bodyCache.missing++;
+            if (existing?.contentHtml) bodies.bodyCache.retained++;
+            if (existing) {
+              // Keep the old primary key, cached body, cover and all metrics.
+              const data = {
+                title: item.title,
+                publishTime: item.publishTime,
+                lastBodyStatus,
+                verifiedSourceUrl: existing.verifiedSourceUrl || item.url,
+                ...(existing.sourceUrl ? {} : { sourceUrl: item.shortUrl }),
+                ...(existing.picUrl ? {} : { picUrl: item.picUrl }),
+                ...(existing.contentHtml
+                  ? {}
+                  : { contentHtml: item.contentHtml }),
+              };
+              if (
+                existing.title !== data.title ||
+                existing.publishTime !== data.publishTime ||
+                (!existing.sourceUrl && item.shortUrl) ||
+                (!existing.picUrl && item.picUrl) ||
+                (!existing.contentHtml && item.contentHtml) ||
+                existing.lastBodyStatus !== lastBodyStatus ||
+                !existing.verifiedSourceUrl
+              ) {
+                await tx.article.update({ where: { id: existing.id }, data });
+                updated++;
+              }
+            } else {
+              await tx.article.create({
+                data: {
+                  id: item.id,
+                  mpId: input.mpId,
+                  title: item.title,
+                  publishTime: item.publishTime,
+                  picUrl: item.picUrl,
+                  sourceUrl: item.shortUrl,
+                  contentHtml: item.contentHtml,
+                  lastBodyStatus,
+                  verifiedSourceUrl: item.url,
+                },
+              });
+              created++;
+            }
+          }
+          const latest = await tx.article.aggregate({
+            where: { mpId: input.mpId },
+            _max: { publishTime: true },
+          });
+          await tx.feed.update({
+            where: { id: input.mpId },
+            data: {
+              syncTime: Math.floor(Date.now() / 1000),
+              updateTime: latest._max.publishTime || 0,
+              hasHistory: -1,
+              collectionChannel: 'desktop-wechat',
+            },
+          });
+        },
+        { timeout: 60000 },
+      );
+      return {
+        source: 'desktop-wechat' as const,
+        status: 'partial' as const,
+        complete: false as const,
+        coverage: 'article-tab-latest-20-unique' as const,
+        hasHistory: -1,
+        articles: articles.length,
+        created,
+        updated,
+        ...bodies,
+        oldestPublishTime: articles.at(-1)!.publishTime,
+        newestPublishTime: articles[0].publishTime,
+        message: `电脑微信“文章”页核验最近 ${articles.length} 篇唯一文章信息（新增 ${created}，更新 ${updated}）。本次取得正文 ${bodies.bodyFetch.succeeded}/${articles.length}，未取得 ${bodies.bodyFetch.unavailable}；可用缓存 ${bodies.bodyCache.available}（保留旧正文 ${bodies.bodyCache.retained}），仍缺正文 ${bodies.bodyCache.missing}，可更新订阅重试。贴图及其他内容类型未验证，历史未补全；互动指标未采集。`,
+      };
+    } finally {
+      this.publicCollections.delete(input.mpId);
+    }
+  }
 
   async collectPublicAlbums(input: { mpId: string; albumIds: string[] }) {
     if (this.publicCollections.has(input.mpId))
@@ -134,6 +386,7 @@ export class CollectionService {
             where: { id: input.mpId },
             data: {
               publicAlbumIds: JSON.stringify([...new Set(input.albumIds)]),
+              collectionChannel: 'public-album',
               localDirectory: null,
               syncTime: Math.floor(Date.now() / 1000),
               updateTime: latest._max.publishTime || 0,

@@ -11,6 +11,12 @@ jest.mock('./public-album', () => ({
   fetchPublicAlbums: jest.fn(),
   resolvePublicArticle: jest.fn(),
 }));
+// 本套件使用独立临时库；备份顺序由 desktop-collection.spec 单独验证。
+jest.mock('./sqlite-backup', () => ({
+  createVerifiedSqliteBackup: jest
+    .fn()
+    .mockResolvedValue({ integrityCheck: 'ok' }),
+}));
 
 describe('public album integration in isolated SQLite', () => {
   let root: string,

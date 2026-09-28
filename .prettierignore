@@ -11,3 +11,5 @@ pnpm-lock.yaml
 apps/server/client/
 apps/server/data/
 output/
+.local-releases/
+.playwright-cli/

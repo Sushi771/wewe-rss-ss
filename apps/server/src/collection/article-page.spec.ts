@@ -55,4 +55,23 @@ describe('article publication evidence', () => {
     expect(html).not.toMatch(/onclick|script|iframe|evil|secret|data-src/);
     expect(articleContentHtml('<p>请验证</p>')).toBeUndefined();
   });
+
+  it.each([
+    '<script>notAnArticle()</script>',
+    '<iframe src="https://example.test/embed"></iframe>',
+    '<img src="https://example.test/tracker"><img>',
+    '<p>&nbsp;\u200b</p>',
+  ])('does not count sanitized empty content as a body: %s', (body) => {
+    expect(
+      articleContentHtml(`<div id="js_content">${body}</div>`),
+    ).toBeUndefined();
+  });
+
+  it('keeps an allowed image-only body', () => {
+    expect(
+      articleContentHtml(
+        '<div id="js_content"><img data-src="https://mmbiz.qpic.cn/image.jpg"></div>',
+      ),
+    ).toContain('src="https://mmbiz.qpic.cn/image.jpg"');
+  });
 });

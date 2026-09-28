@@ -47,6 +47,10 @@ const Feeds = () => {
   const { mutateAsync: refreshMpArticles, isLoading: isGetArticlesLoading } =
     trpc.feed.refreshArticles.useMutation();
   const {
+    mutateAsync: collectDesktopRecent20,
+    isLoading: isCollectingDesktop,
+  } = trpc.collection.collectDesktopRecent20.useMutation();
+  const {
     mutateAsync: getHistoryArticles,
     isLoading: isGetHistoryArticlesLoading,
   } = trpc.feed.getHistoryArticles.useMutation();
@@ -75,13 +79,21 @@ const Feeds = () => {
   const [isRefreshedAll, setIsRefreshedAll] = useState(false);
   const [isCollectingAlbums, setIsCollectingAlbums] = useState(false);
   const [updateStates, setUpdateStates] = useState<
-    Record<string, { source: string; message: string; time: number }>
+    Record<
+      string,
+      { source: string; message: string; time: number; status?: string }
+    >
   >({});
 
-  const rememberUpdate = (mpId: string, source: string, message: string) => {
+  const rememberUpdate = (
+    mpId: string,
+    source: string,
+    message: string,
+    status?: string,
+  ) => {
     setUpdateStates((previous) => ({
       ...previous,
-      [mpId]: { source, message, time: Date.now() },
+      [mpId]: { source, message, time: Date.now(), status },
     }));
   };
 
@@ -242,6 +254,7 @@ const Feeds = () => {
         source: result.source,
         message: result.message,
         time: result.attemptedAt * 1000,
+        status: typeof result.status === 'string' ? result.status : undefined,
       };
     } catch {
       return undefined;
@@ -252,7 +265,11 @@ const Feeds = () => {
     persistedUpdate && (!liveUpdate || persistedUpdate.time > liveUpdate.time)
       ? persistedUpdate
       : liveUpdate || persistedUpdate;
-  const updateBlocked = currentUpdate?.source === 'unavailable';
+  const updateFailed =
+    currentUpdate?.source === 'error' ||
+    currentUpdate?.source === 'unavailable' ||
+    currentUpdate?.status === 'failed' ||
+    currentUpdate?.status === 'blocked';
   const currentAlbumIds = useMemo<string[]>(() => {
     try {
       const ids: unknown = JSON.parse(currentMpInfo?.publicAlbumIds || '[]');
@@ -263,7 +280,36 @@ const Feeds = () => {
       return [];
     }
   }, [currentMpInfo?.publicAlbumIds]);
-  const hasPublicAlbums = currentAlbumIds.length > 0;
+  const collectionRoute = currentMpInfo?.collectionRoute;
+  const collectionChannel = collectionRoute?.channel;
+  const collectionChannelLabel = collectionChannel
+    ? {
+        'desktop-wechat': '电脑微信“文章”页',
+        'public-album': '公开合集补采',
+        cover: '封面预览',
+        unavailable: '暂无可用通道',
+      }[collectionChannel]
+    : '等待获取通道状态';
+  const collectionSelectionLabel = collectionRoute
+    ? {
+        saved: '已保存',
+        environment: '旧环境配置',
+        legacy: '兼容旧配置',
+        invalid: '配置无效',
+      }[collectionRoute.selectedBy]
+    : '';
+  const collectionDescription =
+    collectionChannel === 'desktop-wechat'
+      ? '“更新”将尝试采集此号“文章”页最近20篇唯一文章；需保持电脑微信已登录并打开此号主页的“文章”页。贴图等其他类型及主次条覆盖尚未验收。普通更新和定时任务不会解除暂停；桌面定时采集默认关闭，持续更新仍待实测。'
+      : collectionChannel === 'public-album'
+        ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个公开合集；合集外文章和同次推送的次条完整性未验证。该通道不提供阅读、点赞或收藏。`
+        : collectionChannel === 'cover'
+          ? '“更新”仅查询封面预览，无法补齐多篇文章、历史缺口和同次推送的次条。下方包含此前保存的旧数据。'
+          : collectionChannel === 'unavailable'
+            ? collectionRoute?.selectedBy === 'invalid'
+              ? '采集通道配置无效；“更新”和定时任务会记录阻塞。可在专用采集成功后重新保存通道。已有数据和导出仍可使用。'
+              : '尚无可用的内置列表通道；“更新”和定时任务会记录阻塞，不读取旧本地目录。已有数据和导出仍可使用。'
+            : '正在获取后续更新使用的通道。';
 
   const handleExportOpml = async (ev) => {
     ev.preventDefault();
@@ -489,26 +535,18 @@ const Feeds = () => {
               {currentMpInfo ? (
                 <div className="mr-4 flex items-center gap-4">
                   <div className="hidden whitespace-nowrap text-[14px] font-light text-neutral-400 lg:block">
-                    {hasPublicAlbums
-                      ? '公开合集补采：'
-                      : currentMpInfo.localDirectory
-                        ? '旧文件来源（已停用自动读取）'
-                        : '封面预览模式'}{' '}
-                    {(hasPublicAlbums || currentMpInfo.localDirectory) &&
-                    currentMpInfo.syncTime > 0
-                      ? dayjs(currentMpInfo.syncTime * 1e3).format(
-                          'MM-DD HH:mm',
-                        )
-                      : ''}
+                    更新通道：{collectionChannelLabel}
                   </div>
 
                   <Tooltip
                     content={
-                      hasPublicAlbums
-                        ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
-                        : currentMpInfo.localDirectory
-                          ? '尚无已验证的内置列表通道；定时任务会记录阻塞状态，不读取本地目录'
-                          : '定时查询封面预览，无法补齐多篇文章'
+                      collectionChannel === 'desktop-wechat'
+                        ? '定时沿用电脑微信“文章”页通道，桌面定时采集默认关闭。此开关不会解除暂停，仍需微信可交互且打开此号主页。'
+                        : collectionChannel === 'public-album'
+                          ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
+                          : collectionChannel === 'cover'
+                            ? '定时查询封面预览，无法补齐多篇文章'
+                            : '尚无可用的内置列表通道；定时任务会记录阻塞状态，不读取本地目录'
                     }
                   >
                     <div className="flex items-center">
@@ -552,6 +590,7 @@ const Feeds = () => {
                                 currentMpInfo.id,
                                 result.source,
                                 result.message,
+                                result.status,
                               );
                               if (result.status === 'blocked')
                                 toast.error(result.message);
@@ -636,21 +675,64 @@ const Feeds = () => {
 
               <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
                 {currentMpInfo && (
-                  <PublicAlbums
-                    mpId={currentMpInfo.id}
-                    name={currentMpInfo.mpName}
-                    albumIds={currentAlbumIds}
-                    hasLocalDirectory={!!currentMpInfo.localDirectory}
-                    isDisabled={
-                      isGetArticlesLoading ||
-                      !!isRefreshAllMpArticlesRunning ||
-                      isCollectingAlbums
-                    }
-                    onBusyChange={setIsCollectingAlbums}
-                    onResult={(source, message) =>
-                      rememberUpdate(currentMpInfo.id, source, message)
-                    }
-                  />
+                  <Tooltip content="补采成功后，将保存公开合集为后续普通更新和定时任务使用的通道；失败保留原通道。">
+                    <span className="inline-flex">
+                      <PublicAlbums
+                        mpId={currentMpInfo.id}
+                        name={currentMpInfo.mpName}
+                        albumIds={currentAlbumIds}
+                        hasLocalDirectory={!!currentMpInfo.localDirectory}
+                        isDisabled={
+                          isGetArticlesLoading ||
+                          !!isRefreshAllMpArticlesRunning ||
+                          isCollectingAlbums ||
+                          isCollectingDesktop
+                        }
+                        onBusyChange={setIsCollectingAlbums}
+                        onResult={(source, message) =>
+                          rememberUpdate(currentMpInfo.id, source, message)
+                        }
+                      />
+                    </span>
+                  </Tooltip>
+                )}
+                {currentMpInfo && (
+                  <Tooltip content="先在电脑微信选中此号主页的“文章”页。点击会开始或恢复20篇采集，并用“复制链接”覆盖剪贴板；按 Esc 可暂停。采集成功后保存为后续更新通道，失败保留原通道；不会开启定时采集。贴图等类型及主次条覆盖尚未验收。">
+                    <Button
+                      size="sm"
+                      className="mac-btn-outline"
+                      isLoading={isCollectingDesktop}
+                      isDisabled={
+                        isGetArticlesLoading ||
+                        !!isRefreshAllMpArticlesRunning ||
+                        isCollectingAlbums
+                      }
+                      onPress={async () => {
+                        const mpId = currentMpInfo.id;
+                        try {
+                          const result = await collectDesktopRecent20({ mpId });
+                          await refetchFeedList();
+                          await queryUtils.article.list.reset();
+                          await queryUtils.article.summary.invalidate();
+                          rememberUpdate(
+                            mpId,
+                            result.source,
+                            result.message,
+                            result.status,
+                          );
+                          toast.warning(result.message, { duration: 10000 });
+                        } catch (error) {
+                          await refetchFeedList();
+                          const message =
+                            error instanceof Error ? error.message : '采集失败';
+                          rememberUpdate(mpId, 'error', message);
+                          toast.error(message, { duration: 10000 });
+                        }
+                      }}
+                    >
+                      电脑微信最新20篇
+                    </Button>
+                  </Tooltip>
                 )}
                 <LocalCollection
                   mpId={currentMpInfo?.id}
@@ -704,19 +786,15 @@ const Feeds = () => {
 
                 {currentMpInfo ? (
                   <>
-                    <Tooltip
-                      content={
-                        hasPublicAlbums
-                          ? '在线刷新已绑定的公开合集；合集外文章与次条完整性未验证'
-                          : currentMpInfo.localDirectory
-                            ? '尚无已验证的内置列表通道；更新不再读取外部目录'
-                            : '查询封面预览；当前通道无法补齐历史与次条'
-                      }
-                    >
+                    <Tooltip content={collectionDescription}>
                       <Button
                         size="sm"
                         className="mac-btn-outline"
-                        isDisabled={isGetArticlesLoading || isCollectingAlbums}
+                        isDisabled={
+                          isGetArticlesLoading ||
+                          isCollectingAlbums ||
+                          isCollectingDesktop
+                        }
                         onPress={async () => {
                           const mpId = currentMpInfo.id;
                           try {
@@ -734,6 +812,7 @@ const Feeds = () => {
                                 mpId,
                                 result.source,
                                 result.message,
+                                result.status,
                               );
                               if (result.complete)
                                 toast.success(result.message, {
@@ -826,6 +905,7 @@ const Feeds = () => {
                                 result.id,
                                 result.source,
                                 result.message,
+                                result.status,
                               );
                           }
                           setIsRefreshedAll(
@@ -918,47 +998,27 @@ const Feeds = () => {
           </div>
           {currentMpInfo && (
             <div
-              role={
-                currentUpdate?.source === 'error' || updateBlocked
-                  ? 'alert'
-                  : 'status'
-              }
+              role={updateFailed ? 'alert' : 'status'}
               className="border-b border-neutral-200 bg-neutral-50 px-4 py-3 text-sm dark:border-neutral-700 dark:bg-neutral-900"
             >
               <p
                 className={
-                  hasPublicAlbums
+                  collectionChannel === 'public-album' ||
+                  collectionChannel === 'unavailable'
                     ? 'font-medium text-orange-700 dark:text-orange-300'
                     : 'font-medium'
                 }
               >
-                {currentUpdate?.source === 'error'
-                  ? '本次更新失败 · 下方仍为已有存量'
-                  : currentUpdate?.source === 'pending'
-                    ? '采集中 · 下方仍为已有存量'
-                    : updateBlocked
-                      ? '更新受阻 · 尚未接通内置列表通道'
-                      : hasPublicAlbums
-                        ? '公开合集补采 · 采集范围受限'
-                        : currentMpInfo.localDirectory
-                          ? '内置采集未接通 · 已停用目录自动读取'
-                          : '封面预览 · 尚未接通完整采集'}
-              </p>
-              <p className="mt-1 text-neutral-500">
-                {hasPublicAlbums
-                  ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个公开合集；合集外文章和同次推送的次条完整性未验证。该通道不提供阅读、点赞或收藏。`
-                  : currentMpInfo.localDirectory
-                    ? '此号仅保留旧文件导入记录。“更新”和定时任务不再读取目录；尚未取得可覆盖公众号近期列表的内置授权通道。已有数据和导出仍可使用。'
-                    : '当前更新仅查询封面预览，无法补齐多篇文章、历史缺口和同次推送的次条。下方包含此前保存的旧数据。'}
-                {(hasPublicAlbums || currentMpInfo.localDirectory) &&
-                currentMpInfo.syncTime > 0
-                  ? ` 上次${hasPublicAlbums ? '合集补采' : '文件导入'}：${dayjs(currentMpInfo.syncTime * 1e3).format('YYYY-MM-DD HH:mm')}。`
+                普通更新通道：{collectionChannelLabel}
+                {collectionSelectionLabel
+                  ? ` · ${collectionSelectionLabel}`
                   : ''}
               </p>
+              <p className="mt-1 text-neutral-500">{collectionDescription}</p>
               {currentUpdate && (
                 <p
                   className={
-                    currentUpdate.source === 'error' || updateBlocked
+                    updateFailed
                       ? 'mt-1 text-red-600'
                       : currentUpdate.source === 'public-album'
                         ? 'mt-1 text-orange-700 dark:text-orange-300'

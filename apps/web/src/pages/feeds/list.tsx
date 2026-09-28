@@ -3,6 +3,7 @@ import { Button, Spinner, Checkbox } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import dayjs from 'dayjs';
 import { useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 
 interface ArticleListProps {
   search: string;
@@ -27,6 +28,30 @@ const ArticleList: FC<ArticleListProps> = ({
   const { id } = useParams();
 
   const mpId = id || '';
+  const queryUtils = trpc.useUtils();
+  const bodyRetry = trpc.article.retryBody.useMutation();
+  const retryBody = async (articleId: string, title: string) => {
+    try {
+      const result = await bodyRetry.mutateAsync(articleId);
+      if (result.status === 'available')
+        toast.success(`${title}：${result.message}`);
+      else if (result.status === 'failed')
+        toast.error(`${title}：${result.message}`);
+      else toast.warning(`${title}：${result.message}`);
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : '正文重试失败，请重新读取文章状态。',
+      );
+    } finally {
+      await Promise.all([
+        queryUtils.article.list.invalidate(),
+        queryUtils.article.summary.invalidate(),
+        queryUtils.article.byId.invalidate(articleId),
+      ]);
+    }
+  };
   const [sort, setSort] = useState<'publishTime' | 'readCount' | 'likeCount'>(
     'publishTime',
   );
@@ -168,7 +193,7 @@ const ArticleList: FC<ArticleListProps> = ({
           </div>
 
           {items?.map((item) => (
-            <div key={item.id} className="compact-row">
+            <div key={item.id} className="compact-row article-row">
               <div className="compact-col-check">
                 <Checkbox
                   size="sm"
@@ -190,6 +215,58 @@ const ArticleList: FC<ArticleListProps> = ({
                 {item.title}
               </a>
               <div className="flex w-[300px] shrink-0 flex-col items-end gap-0.5 text-neutral-500">
+                <div
+                  className="flex items-center gap-2 text-xs"
+                  aria-live="polite"
+                >
+                  <span>{item.bodyCached ? '正文已缓存' : '正文未缓存'}</span>
+                  {(!item.bodyCached ||
+                    item.lastBodyStatus === 'unavailable' ||
+                    item.bodyRetryResult?.status === 'failed') && (
+                    <Button
+                      size="sm"
+                      variant="light"
+                      aria-label={`重试正文：${item.title}`}
+                      title={
+                        item.bodyRetry.allowed
+                          ? '仅请求本篇官方原文，不操作微信窗口；保留已有正文。'
+                          : item.bodyRetry.reason
+                      }
+                      isDisabled={
+                        !item.bodyRetry.allowed || bodyRetry.isLoading
+                      }
+                      isLoading={
+                        bodyRetry.isLoading && bodyRetry.variables === item.id
+                      }
+                      onPress={() => retryBody(item.id, item.title)}
+                    >
+                      重试正文
+                    </Button>
+                  )}
+                </div>
+                {!item.bodyCached && !item.bodyRetry.allowed && (
+                  <span className="text-right text-xs">
+                    {item.bodyRetry.reason}
+                  </span>
+                )}
+                {item.bodyRetryResult && (
+                  <span
+                    className="text-right text-xs"
+                    title={`${dayjs(item.bodyRetryResult.attemptedAt * 1e3).format('YYYY-MM-DD HH:mm:ss')} ${item.bodyRetryResult.message}`}
+                  >
+                    最近重试：
+                    {item.bodyRetryResult.status === 'available'
+                      ? '正文可用'
+                      : item.bodyRetryResult.status === 'unavailable'
+                        ? '未取得正文'
+                        : '失败'}
+                    {item.bodyRetryResult.filled
+                      ? '，已补入正文'
+                      : item.bodyRetryResult.cached
+                        ? '，已有缓存保留'
+                        : ''}
+                  </span>
+                )}
                 <span
                   className="whitespace-nowrap text-xs"
                   title="指标来自采集源数据，可能不是实时值；未获取不代表 0"

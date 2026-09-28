@@ -22,7 +22,17 @@ import * as crypto from 'node:crypto';
 import pMap from '@cjs-exporter/p-map';
 import { WereadService } from '@server/weread/weread.service';
 import { CollectionService } from '../collection/collection.service';
-import { articlePageRequest } from '../collection/article-page';
+import {
+  articlePageRequest,
+  BODY_UNAVAILABLE_MESSAGE,
+} from '../collection/article-page';
+import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
+import { resolveCollectionRoute } from '../collection/collection-channel';
+import {
+  bodyRetryAvailability,
+  BodyRetryBlockedError,
+  readBodyRetryResult,
+} from '../collection/article-body-retry';
 import {
   csvCell,
   metricLabels,
@@ -43,6 +53,16 @@ export class TrpcRouter {
   private readonly logger = new Logger(this.constructor.name);
 
   collectionRouter = this.trpcService.router({
+    collectDesktopRecent20: this.trpcService.protectedProcedure
+      .input(z.object({ mpId: z.string().regex(/^MP_WXS_\d{5,15}$/) }))
+      .mutation(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '电脑微信采集只能在服务器本机操作',
+          });
+        return this.trpcService.collectDesktopRecent20(input.mpId);
+      }),
     collectPublicAlbums: this.trpcService.protectedProcedure
       .input(
         z.object({
@@ -91,6 +111,7 @@ export class TrpcRouter {
             code: 'FORBIDDEN',
             message: '本地采集只能在服务器本机操作',
           });
+        await createVerifiedSqliteBackup({ allowMysqlSkip: true });
         return this.collectionService.importDirectory(input);
       }),
     exportMetrics: this.trpcService.protectedProcedure
@@ -296,7 +317,10 @@ export class TrpcRouter {
         }
 
         return {
-          items: items,
+          items: items.map((feed) => ({
+            ...feed,
+            collectionRoute: resolveCollectionRoute(feed),
+          })),
           nextCursor,
         };
       }),
@@ -312,7 +336,7 @@ export class TrpcRouter {
             message: `No feed with id '${id}'`,
           });
         }
-        return feed;
+        return { ...feed, collectionRoute: resolveCollectionRoute(feed) };
       }),
     add: this.trpcService.protectedProcedure
       .input(FeedSchemas.add)
@@ -375,11 +399,18 @@ export class TrpcRouter {
           mpId: z.string().optional(),
         }),
       )
-      .mutation(async ({ input: { mpId } }) => {
+      .mutation(async ({ input: { mpId }, ctx }) => {
+        const trigger = (ctx as any).isLocal ? 'local-manual' : 'public';
         if (mpId) {
-          return [await this.trpcService.refreshMpArticlesAndUpdateFeed(mpId)];
+          return [
+            await this.trpcService.refreshMpArticlesAndUpdateFeed(
+              mpId,
+              1,
+              trigger,
+            ),
+          ];
         } else {
-          return this.trpcService.refreshAllMpArticlesAndUpdateFeed();
+          return this.trpcService.refreshAllMpArticlesAndUpdateFeed(trigger);
         }
       }),
 
@@ -453,7 +484,7 @@ export class TrpcRouter {
       }),
     list: this.trpcService.protectedProcedure
       .input(ArticleSchemas.list)
-      .query(async ({ input }) => {
+      .query(async ({ input, ctx }) => {
         const limit = input.limit ?? 1000;
         const { cursor, mpId, search } = input;
 
@@ -487,6 +518,10 @@ export class TrpcRouter {
             picUrl: true,
             publishTime: true,
             sourceUrl: true,
+            lastBodyStatus: true,
+            verifiedSourceUrl: true,
+            lastBodyRetry: true,
+            contentHtml: true,
             metrics: true,
             readCount: true,
             likeCount: true,
@@ -503,13 +538,18 @@ export class TrpcRouter {
         }
 
         return {
-          items,
+          items: items.map(({ contentHtml, ...item }) => ({
+            ...item,
+            bodyCached: Boolean(contentHtml),
+            bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
+            bodyRetryResult: readBodyRetryResult(item.lastBodyRetry),
+          })),
           nextCursor,
         };
       }),
     byId: this.trpcService.protectedProcedure
       .input(z.string())
-      .query(async ({ input: id }) => {
+      .query(async ({ input: id, ctx }) => {
         const article = await this.prismaService.article.findUnique({
           where: { id },
         });
@@ -519,7 +559,36 @@ export class TrpcRouter {
             message: `No article with id '${id}'`,
           });
         }
-        return article;
+        return {
+          ...article,
+          bodyCached: Boolean(article.contentHtml),
+          bodyRetry: bodyRetryAvailability(article, !!(ctx as any).isLocal),
+          bodyRetryResult: readBodyRetryResult(article.lastBodyRetry),
+        };
+      }),
+
+    retryBody: this.trpcService.protectedProcedure
+      .input(z.string().min(1).max(200))
+      .mutation(async ({ input: id, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '单篇正文重试只能在服务器本机操作',
+          });
+        try {
+          return await this.trpcService.retryArticleBody(id);
+        } catch (error) {
+          throw new TRPCError({
+            code:
+              error instanceof BodyRetryBlockedError
+                ? 'BAD_REQUEST'
+                : 'INTERNAL_SERVER_ERROR',
+            message:
+              error instanceof BodyRetryBlockedError
+                ? error.message
+                : '正文重试未完成，请重新读取文章状态。',
+          });
+        }
       }),
 
     add: this.trpcService.protectedProcedure
@@ -577,6 +646,7 @@ export class TrpcRouter {
           return { markdown, title };
         } catch (err: any) {
           this.logger.error(`Export Markdown error for ${id}: ${err.message}`);
+          if (err instanceof TRPCError) throw err;
           throw new TRPCError({
             code: 'INTERNAL_SERVER_ERROR',
             message: '获取文章内容失败',
@@ -621,6 +691,7 @@ export class TrpcRouter {
           return { success: true, path: filePath };
         } catch (err: any) {
           this.logger.error(`Save to Obsidian error for ${id}: ${err.message}`);
+          if (err instanceof TRPCError) throw err;
           throw new TRPCError({
             code: 'INTERNAL_SERVER_ERROR',
             message: `保存到 Obsidian 失败: ${err.message}`,
@@ -660,6 +731,11 @@ export class TrpcRouter {
     const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
     let html = article.contentHtml || '';
+    if (!html && article.lastBodyStatus === 'unavailable')
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: BODY_UNAVAILABLE_MESSAGE,
+      });
     try {
       if (!html) html = await articlePageRequest(url).text();
     } catch (err: any) {

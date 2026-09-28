@@ -12,6 +12,7 @@ import { load } from 'cheerio';
 import { minify } from 'html-minifier';
 import { LRUCache } from 'lru-cache';
 import pMap from '@cjs-exporter/p-map';
+import { BODY_UNAVAILABLE_MESSAGE } from '../collection/article-page';
 
 console.log('CRON_EXPRESSION: ', process.env.CRON_EXPRESSION);
 
@@ -69,8 +70,11 @@ export class FeedsService {
   @Cron(process.env.CRON_EXPRESSION || '35 5,17 * * *', {
     name: 'updateFeeds',
     timeZone: 'Asia/Shanghai',
+    disabled: process.env.DISABLE_SCHEDULED_UPDATES === '1',
   })
   async handleUpdateFeedsCron() {
+    // 隔离演练和受控切换时，不读账号、不触发任何采集或状态写入。
+    if (process.env.DISABLE_SCHEDULED_UPDATES === '1') return;
     this.logger.debug('Called handleUpdateFeedsCron');
 
     const feeds = await this.prismaService.feed.findMany({
@@ -89,6 +93,8 @@ export class FeedsService {
       try {
         const result = await this.trpcService.refreshMpArticlesAndUpdateFeed(
           feed.id,
+          1,
+          'scheduled',
         );
         this.logger.warn(
           `[Scheduled Update] ${feed.id}: ${result.status} (${result.coverage}); ${result.message}`,
@@ -141,8 +147,11 @@ export class FeedsService {
     id: string,
     sourceUrl?: string | null,
     contentHtml?: string | null,
+    lastBodyStatus?: string | null,
   ) {
     if (contentHtml) return contentHtml;
+    // 已核验但无正文的条目仍输出元数据，RSS读取不隐式重试上游。
+    if (lastBodyStatus === 'unavailable') return BODY_UNAVAILABLE_MESSAGE;
     let content = mpCache.get(id);
     if (content) {
       return content;
@@ -217,6 +226,7 @@ export class FeedsService {
           id,
           item.sourceUrl,
           item.contentHtml,
+          item.lastBodyStatus,
         );
       }
 
@@ -299,6 +309,7 @@ export class FeedsService {
         localDirectory: null,
         publicAlbumIds: null,
         lastCollectionResult: null,
+        collectionChannel: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };

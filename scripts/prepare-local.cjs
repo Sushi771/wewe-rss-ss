@@ -1,4 +1,6 @@
-// Called after the old server exits so Prisma's Windows DLL is not locked.
+// 旧版原位启动准备，仅保留兼容入口；不要用于本轮尚未部署的三份迁移。
+// 已知限制：裸复制备份、共享 Client/DLL 和无版本回滚。新流程先运行
+// scripts/local-release/build.cjs 与 rehearse.cjs，见 docs/LOCAL_RELEASE_REHEARSAL.md。
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');

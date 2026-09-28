@@ -25,7 +25,7 @@ export const articlePageRequest = got.extend({
   },
 });
 
-/** Only publication metadata in a real article body is usable as its date. */
+/** 只读取原文结构中的发布时间；正文是否可缓存由独立检查判断。 */
 export function articlePublishTime(html: string): number | null {
   const $ = load(html);
   if (!$('#js_content, .rich_media_content').length) return null;
@@ -41,7 +41,7 @@ export function articlePublishTime(html: string): number | null {
 
 export function articleIdentity(html: string) {
   const $ = load(html);
-  if (!$('#js_content').length) throw new Error('没有可验证的原文正文');
+  if (!$('#js_content').length) throw new Error('没有可核验的原文结构');
   const value = (name: string, pattern: string) =>
     html.match(
       new RegExp(`\\bvar\\s+${name}\\s*=\\s*["'](${pattern})["']`),
@@ -104,5 +104,14 @@ export function articleContentHtml(html: string): string | undefined {
       }
     }
   }
+  // 在清洗之后判断：脚本、被拒绝的图片和空白容器不算已取得正文。
+  if (
+    !content.text().replace(/[\s\u200b-\u200d\ufeff]/gu, '') &&
+    !content.find('img[src]').length
+  )
+    return undefined;
   return `<div class="rich_media_content" id="js_content">${content.html()}</div>`;
 }
+
+export const BODY_UNAVAILABLE_MESSAGE =
+  '正文暂不可用，已保存核验后的文章信息；可在本机文章列表重试正文或更新订阅。';

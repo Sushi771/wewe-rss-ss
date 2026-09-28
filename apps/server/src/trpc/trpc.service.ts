@@ -9,6 +9,14 @@ import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
+import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
+import { BodyRetryBlockedError } from '../collection/article-body-retry';
+import { Feed } from '@prisma/client';
+import {
+  CollectionRoute,
+  parseBoundAlbumIds,
+  resolveCollectionRoute,
+} from '../collection/collection-channel';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -206,9 +214,43 @@ export class TrpcService {
     }
   }
 
-  async refreshMpArticlesAndUpdateFeed(mpId: string, page = 1) {
-    return this.recordCollectionResult(mpId, () =>
-      this.refreshArticles(mpId, page),
+  async refreshMpArticlesAndUpdateFeed(
+    mpId: string,
+    page = 1,
+    trigger: 'local-manual' | 'scheduled' | 'public' = 'public',
+  ) {
+    let route: CollectionRoute;
+    return this.recordCollectionResult(
+      mpId,
+      (feed) => this.refreshArticles(feed, page, route),
+      (feed) => {
+        // 同号锁内解析一次，权限检查与执行共用这次选择。
+        route = resolveCollectionRoute(feed);
+        if (route.channel !== 'desktop-wechat') return false;
+        if (trigger === 'public')
+          throw new Error(
+            '电脑微信采集需要在本机页面手动操作，公开订阅请求不会操作桌面',
+          );
+        if (
+          trigger === 'scheduled' &&
+          process.env.WECHAT_DESKTOP_ALLOW_SCHEDULED !== '1'
+        )
+          throw new Error('电脑微信定时采集尚未启用，请先完成本机手动验证');
+        return true;
+      },
+    );
+  }
+
+  async collectDesktopRecent20(mpId: string) {
+    return this.recordCollectionResult(
+      mpId,
+      (feed) =>
+        this.collectionService.collectDesktopRecent20({
+          mpId,
+          mpName: feed.mpName,
+          resumeAfterUserConsent: true,
+        }),
+      true,
     );
   }
 
@@ -220,6 +262,22 @@ export class TrpcService {
 
   private readonly activeCollections = new Set<string>();
 
+  async retryArticleBody(id: string) {
+    const article = await this.prismaService.article.findUniqueOrThrow({
+      where: { id },
+    });
+    if (this.activeCollections.has(article.mpId))
+      throw new BodyRetryBlockedError(
+        '该公众号正在采集或重试正文，请等待本次结束',
+      );
+    this.activeCollections.add(article.mpId);
+    try {
+      return await this.collectionService.retryArticleBody(id);
+    } finally {
+      this.activeCollections.delete(article.mpId);
+    }
+  }
+
   private async recordCollectionResult<
     T extends {
       source: string;
@@ -228,12 +286,28 @@ export class TrpcService {
       coverage: string;
       articles: number;
       message: string;
+      bodyFetch?: { succeeded: number; unavailable: number };
+      bodyCache?: { available: number; retained: number; missing: number };
+      bodyUnavailable?: { id: string; cached: boolean }[];
     },
-  >(mpId: string, collect: () => Promise<T>): Promise<T> {
+  >(
+    mpId: string,
+    collect: (feed: Feed) => Promise<T>,
+    requireSqlite: boolean | ((feed: Feed) => boolean) = false,
+  ): Promise<T> {
     if (this.activeCollections.has(mpId))
       throw new Error('该公众号正在采集，请等待本次结束');
     this.activeCollections.add(mpId);
     try {
+      const feed = await this.prismaService.feed.findUniqueOrThrow({
+        where: { id: mpId },
+      });
+      const sqliteRequired =
+        typeof requireSqlite === 'function'
+          ? requireSqlite(feed)
+          : requireSqlite;
+      // 包括 running/failed 状态在内，任何本次采集写入都必须晚于备份核验。
+      await createVerifiedSqliteBackup({ allowMysqlSkip: !sqliteRequired });
       await this.prismaService.feed.update({
         where: { id: mpId },
         data: {
@@ -250,7 +324,7 @@ export class TrpcService {
       });
       let result: T;
       try {
-        result = await collect();
+        result = await collect(feed);
       } catch (error: any) {
         // Never persist raw HTTP errors: their config/URL may contain credentials.
         const message =
@@ -289,6 +363,9 @@ export class TrpcService {
             coverage: result.coverage,
             articles: result.articles,
             message: result.message,
+            bodyFetch: result.bodyFetch,
+            bodyCache: result.bodyCache,
+            bodyUnavailable: result.bodyUnavailable,
             attemptedAt: Math.floor(Date.now() / 1000),
           }),
         },
@@ -299,17 +376,32 @@ export class TrpcService {
     }
   }
 
-  private async refreshArticles(mpId: string, page: number) {
-    const feed = await this.prismaService.feed.findUniqueOrThrow({
-      where: { id: mpId },
-    });
-    if (feed.publicAlbumIds) {
-      return this.collectionService.collectPublicAlbums({
+  private async refreshArticles(
+    feed: Feed,
+    page: number,
+    route: CollectionRoute,
+  ) {
+    const mpId = feed.id;
+    if (route.channel === 'desktop-wechat') {
+      if (page !== 1) return this.unavailableDesktopHistory();
+      return this.collectionService.collectDesktopRecent20({
         mpId,
-        albumIds: JSON.parse(feed.publicAlbumIds),
+        mpName: feed.mpName,
       });
     }
-    if (feed.localDirectory) {
+    if (route.channel === 'public-album') {
+      const albumIds = parseBoundAlbumIds(feed.publicAlbumIds);
+      if (!albumIds) return this.unavailableAlbums();
+      return this.collectionService.collectPublicAlbums({
+        mpId,
+        albumIds,
+      });
+    }
+    if (route.channel === 'unavailable') {
+      if (route.selectedBy === 'invalid')
+        return this.unavailableCollection(
+          '采集通道配置无效，本次未采集。请在本机重新执行所需通道的专用采集。',
+        );
       return this.unavailableCollection();
     }
     if (page !== 1) return this.unavailableCollection();
@@ -366,7 +458,21 @@ export class TrpcService {
     };
   }
 
-  private unavailableCollection() {
+  private unavailableAlbums() {
+    return this.unavailableCollection(
+      '所选公开合集通道缺少有效的合集绑定，本次未采集。请在本机重新绑定合集。',
+    );
+  }
+
+  private unavailableDesktopHistory() {
+    return this.unavailableCollection(
+      '电脑微信通道仅采集“文章”页最近20篇，不支持历史分页；本次未采集。',
+    );
+  }
+
+  private unavailableCollection(
+    message = '完整公众号列表通道尚未验证，本次未采集。历史文件仅可显式一次性导入；更新和定时任务不会读取外部目录。',
+  ) {
     return {
       source: 'unavailable' as const,
       status: 'blocked' as const,
@@ -375,8 +481,7 @@ export class TrpcService {
       reason: 'NO_VERIFIED_LIST_CHANNEL' as const,
       hasHistory: -1,
       articles: 0,
-      message:
-        '完整公众号列表通道尚未验证，本次未采集。历史文件仅可显式一次性导入；更新和定时任务不会读取外部目录。',
+      message,
     };
   }
 
@@ -386,17 +491,21 @@ export class TrpcService {
   };
 
   async getHistoryMpArticles(mpId: string) {
-    return this.recordCollectionResult(mpId, () => this.collectHistory(mpId));
+    return this.recordCollectionResult(mpId, (feed) =>
+      this.collectHistory(feed),
+    );
   }
 
-  private async collectHistory(mpId: string) {
-    const feed = await this.prismaService.feed.findUniqueOrThrow({
-      where: { id: mpId },
-    });
-    if (feed.publicAlbumIds) {
+  private async collectHistory(feed: Feed) {
+    const route = resolveCollectionRoute(feed);
+    if (route.channel === 'desktop-wechat')
+      return this.unavailableDesktopHistory();
+    if (route.channel === 'public-album') {
+      const albumIds = parseBoundAlbumIds(feed.publicAlbumIds);
+      if (!albumIds) return this.unavailableAlbums();
       return this.collectionService.collectPublicAlbums({
-        mpId,
-        albumIds: JSON.parse(feed.publicAlbumIds),
+        mpId: feed.id,
+        albumIds,
       });
     }
     return this.unavailableCollection();
@@ -404,7 +513,9 @@ export class TrpcService {
 
   isRefreshAllMpArticlesRunning = false;
 
-  async refreshAllMpArticlesAndUpdateFeed() {
+  async refreshAllMpArticlesAndUpdateFeed(
+    trigger: 'local-manual' | 'public' = 'public',
+  ) {
     if (this.isRefreshAllMpArticlesRunning) {
       throw new Error('批量更新正在进行，请稍后再试');
     }
@@ -428,7 +539,11 @@ export class TrpcService {
           this.logger.log(
             `[Batch Update] Starting update for: ${mpName} (${id})`,
           );
-          const result = await this.refreshMpArticlesAndUpdateFeed(id);
+          const result = await this.refreshMpArticlesAndUpdateFeed(
+            id,
+            1,
+            trigger,
+          );
           results.push({ id, name: mpName, ...result });
           this.logger.warn(
             `[Batch Update] ${result.status} (${result.coverage}): ${mpName} (${id})`,

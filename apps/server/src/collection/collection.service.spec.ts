@@ -13,6 +13,12 @@ jest.mock('./public-album', () => ({
   fetchPublicAlbums: jest.fn(),
   resolvePublicArticle: jest.fn(),
 }));
+// 禁止隔离测试读取环境中可能指向生产库的 DATABASE_URL。
+jest.mock('./sqlite-backup', () => ({
+  createVerifiedSqliteBackup: jest
+    .fn()
+    .mockResolvedValue({ integrityCheck: 'ok' }),
+}));
 
 describe('local collection with real SQLite migrations', () => {
   let root: string,

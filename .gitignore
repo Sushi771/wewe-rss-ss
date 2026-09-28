@@ -137,4 +137,9 @@ WeWe-RSS-Portable-*.zip
 
 # Local browser acceptance evidence (may contain personal subscription data)
 output/playwright/
+tools/wechat-desktop-collector/.paused
+.local-releases/
+.playwright-cli/
+__pycache__/
+*.pyc
 
