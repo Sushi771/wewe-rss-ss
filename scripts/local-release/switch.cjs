@@ -42,7 +42,12 @@ function processIdentity(action, pid, port, expected) {
       '-ExpectedCommandLine',
       expected.commandLine,
     );
-  return JSON.parse(run('pwsh', args, { env: cleanEnvironment() }));
+  // Task Scheduler does not inherit Codex's bundled pwsh path. Use Windows' fixed executable.
+  const powershell = path.join(
+    process.env.SystemRoot || 'C:\\Windows',
+    'System32/WindowsPowerShell/v1.0/powershell.exe',
+  );
+  return JSON.parse(run(powershell, args, { env: cleanEnvironment() }));
 }
 
 function sameIdentity(actual, expected) {

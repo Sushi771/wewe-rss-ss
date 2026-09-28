@@ -2,6 +2,12 @@
 
 ## 2026-09-28 当前导出与启动入口
 
+用户登录后的计划任务 `WeWe-RSS-Logon-Start` 已注册，使用当前产物指针和
+受控冷启动入口；运行条件、失败记录与维护命令见
+[本机产物检查点](LOCAL_RELEASE_REHEARSAL.md) 顶部。它不会恢复微信采集暂停，
+也没有经过真实 Windows 注销/重启触发验收。下方旧“启动与维护”BAT 描述
+为历史记录，不应再执行。
+
 `article.exportMarkdown` 仅返回浏览器 Markdown，不写 Obsidian；页面的
 “批量导出 Obsidian”调用 `article.saveToObsidian`，将图片写入当天日期目录的
 `attachments/`。现存文件与生产只读核查见 [导出审计](EXISTING_EXPORT_AUDIT.md)。

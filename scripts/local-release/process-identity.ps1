@@ -1,4 +1,4 @@
-# Windows 进程身份核验。Stop 操作持有 Process 对象句柄，避免按 PID 二次查找后误杀复用 PID。
+﻿# Windows 进程身份核验。Stop 操作持有 Process 对象句柄，避免按 PID 二次查找后误杀复用 PID。
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port')][string]$Action,

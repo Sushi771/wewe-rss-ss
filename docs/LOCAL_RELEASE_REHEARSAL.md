@@ -1,5 +1,43 @@
 # Windows 本机版本化产物与隔离部署演练（2026-09-28）
 
+## 2026-09-28 用户登录开机任务
+
+本机已注册 `WeWe-RSS-Logon-Start`，仅当前用户交互登录触发、有限权限、
+`IgnoreNew`。任务动作固定为 `C:\Program Files\nodejs\node.exe` 运行
+`scripts/local-release/logon-start.cjs start`，工作目录是项目根。入口从忽略的
+`.local-releases/active.json` 读取当前固定产物；每次生产 `restart.cjs`
+成功启动/回滚进程后自动更新指针，因此部署新包不必手工修改计划任务动作。
+初次安装或恢复任务使用：
+
+```powershell
+& 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File scripts/local-release/register-logon-task.ps1 `
+  -Release .local-releases/<当前正在运行的固定产物>
+```
+
+注册器先验证 4000 端口是指定产物的完整启动命令，再激活指针；同名非本项目
+任务拒绝覆盖。登录入口检查共享 `USER_PAUSED`、清单完整性、端口与进程身份：
+同包服务已在运行则成功跳过；4000 被其他进程占用则失败并保留占用者；空闲才
+调用 `restart.cjs --mode start --production` 的完整备份、schema 与启动检查。
+运行或故障结果存于本机 `output/playwright/local-release-audit/logon-start.jsonl`；
+任务计划程序可查 `Get-ScheduledTaskInfo -TaskName WeWe-RSS-Logon-Start`。
+此任务只恢复阅读服务，定时采集和微信 UI/剪贴板仍暂停。
+
+Node 测试 7 项通过；副本冷启动审计 `controlled-restart-1790582781805-34720`
+为 `passed=true`，guard 两项均 0。任务手动运行时生产 PID 13464 已存在，
+`LastTaskResult=0` 且日志 `already-running`；临时无效指针时任务代码 1、日志
+明确报错，恢复指针后再次运行代码 0。未实际注销或重启 Windows，登录触发
+尚无重启后实测。生产未重启、未写库；`.paused=USER_PAUSED`。
+
+依据固定于 MicrosoftDocs/windows-powershell-docs 的
+[`c3934e67de374f52fa6759f916c112c30a1240c7`](https://github.com/MicrosoftDocs/windows-powershell-docs/tree/c3934e67de374f52fa6759f916c112c30a1240c7)
+文档版本：[Register-ScheduledTask](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/register-scheduledtask)、
+[New-ScheduledTaskAction](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtaskaction)、
+[New-ScheduledTaskSettingsSet](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtasksettingsset)。
+该文档仓库文字 CC BY 4.0、代码示例 MIT；本项目只参考 Windows 参数语义，
+没有复制示例源码或增加第三方依赖。适用范围为本机 Windows 任务计划程序、
+现有固定 Node 24.11.1 产物及当前 schema。
+
 ## 2026-09-28 导出修复产物已受控部署
 
 `article.exportMarkdown` 现只返回浏览器 Markdown，不会意外覆盖

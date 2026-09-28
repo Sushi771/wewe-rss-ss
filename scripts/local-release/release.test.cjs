@@ -12,7 +12,8 @@ const {
   run,
 } = require('./lib.cjs');
 const { verifySourceSnapshot } = require('./verify-source.cjs');
-const { requireFreePort } = require('./restart.cjs');
+const { requireFreePort, commandLine } = require('./restart.cjs');
+const { classifyListener } = require('./logon-start.cjs');
 const testRoot = path.resolve(
   __dirname,
   '../../output/playwright/local-release-tests',
@@ -156,3 +157,36 @@ test(
     assert.doesNotThrow(() => requireFreePort(port));
   },
 );
+
+test('登录入口只将当前固定产物的完整进程身份视为已经运行', () => {
+  const release = path.join(testRoot, 'release');
+  const database = path.resolve(
+    __dirname,
+    '../../apps/server/data/wewe-rss.db',
+  );
+  fs.mkdirSync(release);
+  const expected = {
+    pid: 42,
+    executable: path.join(release, 'runtime/node.exe'),
+    commandLine: commandLine(release, fs.realpathSync(database), 4000),
+  };
+  const owners = [{ OwningProcess: 42 }];
+  assert.equal(classifyListener([], release).status, 'free');
+  assert.equal(
+    classifyListener(owners, release, () => expected).status,
+    'already-running',
+  );
+  assert.throws(
+    () =>
+      classifyListener(owners, release, () => ({
+        ...expected,
+        commandLine: 'other',
+      })),
+    /非当前产物/,
+  );
+  assert.throws(
+    () =>
+      classifyListener([{ OwningProcess: 42 }, { OwningProcess: 43 }], release),
+    /多个监听/,
+  );
+});

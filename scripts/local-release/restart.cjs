@@ -19,6 +19,7 @@ const {
   stopOwned,
   loadProductionEnvironment,
 } = require('./switch.cjs');
+const { writeActiveRelease } = require('./active-release.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const pauseFile = path.join(root, 'tools/wechat-desktop-collector/.paused');
@@ -250,6 +251,9 @@ async function controlledRestart(options) {
     const newIdentity = processIdentity('Snapshot', newChild.pid, port);
     assert.equal(newIdentity.pid, newChild.pid);
     assertPaused(pauseHash);
+    // Advance the ignored local pointer only after the new production process is ready.
+    // The logon task has a stable action and follows this pointer after future deployments.
+    if (options.production) writeActiveRelease(release);
     const summary = {
       passed: true,
       mode: options.production ? 'production' : 'rehearsal',
@@ -276,6 +280,7 @@ async function controlledRestart(options) {
           port,
         );
         assertPaused(pauseHash);
+        if (options.production) writeActiveRelease(previous);
         const summary = {
           passed: options.rehearsal && options.injectFailure === true,
           mode: options.production ? 'production' : 'rehearsal',
