@@ -4,6 +4,7 @@ import { AppService } from './app.service';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from './configuration';
 import { Response as Res } from 'express';
+import { privateOnlineMode } from './private-access';
 
 @Controller()
 export class AppController {
@@ -52,6 +53,7 @@ export class AppController {
     return {
       weweRssServerOriginUrl,
       enabledAuthCode: !!code,
+      privateOnlineMode: privateOnlineMode(),
       iconUrl: weweRssServerOriginUrl
         ? `${weweRssServerOriginUrl}/favicon.ico`
         : 'https://r2-assets.111965.xyz/wewe-rss.png',

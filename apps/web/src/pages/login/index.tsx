@@ -2,6 +2,8 @@ import { Button, Input } from '@nextui-org/react';
 import { setAuthCode } from '@web/utils/auth';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { privateOnlineMode, serverOriginUrl } from '@web/utils/env';
+import { toast } from 'sonner';
 
 const LoginPage = () => {
   const [codeValue, setCodeValue] = useState('');
@@ -18,7 +20,22 @@ const LoginPage = () => {
       />
       <Button
         color="primary"
-        onPress={() => {
+        onPress={async () => {
+          if (privateOnlineMode) {
+            const response = await fetch(`${serverOriginUrl}/auth/login`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ code: codeValue }),
+            });
+            if (!response.ok) {
+              toast.error('登录码无效');
+              return;
+            }
+            setCodeValue('');
+            window.location.assign('/dash/');
+            return;
+          }
           setAuthCode(codeValue);
           navigate('/');
         }}

@@ -33,6 +33,8 @@
     "@nestjs/throttler": "^5.1.2",
     "@prisma/client": "5.10.1",
     "@trpc/server": "^10.45.1",
+    "@wewe-rss/shared": "workspace:*",
+    "archiver": "^8.0.0",
     "axios": "^1.6.7",
     "cheerio": "1.0.0-rc.12",
     "class-transformer": "^0.5.1",
@@ -48,8 +50,7 @@
     "reflect-metadata": "^0.2.1",
     "rxjs": "^7.8.1",
     "turndown": "^7.2.2",
-    "zod": "^3.22.4",
-    "@wewe-rss/shared": "workspace:*"
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.3.2",

@@ -12,6 +12,7 @@ import {
   Metrics,
 } from './collection-format';
 import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
+import { archiveProviderImages } from './archive-provider-images';
 import { fetchMp2RssRecent20 } from './mp2rss';
 import { wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
@@ -89,7 +90,9 @@ export class CollectionService {
         const result = await provider.refreshSubscription(input.mpId);
         accepted = result.accepted;
       }
-      const page = await provider.fetchArticles(input.mpId, input.mpName);
+      const page = await archiveProviderImages(
+        await provider.fetchArticles(input.mpId, input.mpName),
+      );
       if (!page.articles.length) {
         return {
           source: 'wechat2rss' as const,

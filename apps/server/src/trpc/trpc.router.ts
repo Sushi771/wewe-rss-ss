@@ -28,6 +28,7 @@ import {
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { resolveCollectionRoute } from '../collection/collection-channel';
 import { allowedImageUrl, fetchAllowedImage } from '../collection/image-fetch';
+import { hasPrivateSession, privateOnlineMode } from '../private-access';
 import {
   bodyRetryAvailability,
   BodyRetryBlockedError,
@@ -51,6 +52,63 @@ export class TrpcRouter {
   ) {}
 
   private readonly logger = new Logger(this.constructor.name);
+
+  /** Stage one feed for an authenticated browser ZIP download. Never write to OBSIDIAN_PATH. */
+  async buildOfflineFeedDirectory(feedId: string, directory: string) {
+    const feed = await this.prismaService.feed.findUnique({
+      where: { id: feedId },
+    });
+    if (!feed) return null;
+    const articles = await this.prismaService.article.findMany({
+      where: { mpId: feedId },
+      orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
+      select: { id: true, title: true, sourceUrl: true, contentHtml: true },
+    });
+    if (articles.length > 5000) throw new Error('离线导出文章超过上限');
+    await fs.promises.mkdir(directory, { recursive: true });
+    let complete = 0;
+    const incomplete: string[] = [];
+    for (const [index, article] of articles.entries()) {
+      const safeTitle =
+        article.title
+          .replace(/[\\/:*?"<>|\x00-\x1f]/g, '-')
+          .replace(/[. ]+$/g, '')
+          .slice(0, 75) || '未命名';
+      const relative = `articles/${String(index + 1).padStart(4, '0')}-${safeTitle}`;
+      const articleDirectory = path.join(directory, relative);
+      await fs.promises.mkdir(articleDirectory, { recursive: true });
+      let markdown: string;
+      if (article.contentHtml) {
+        try {
+          markdown = (
+            await this.getArticleMarkdown(article.id, articleDirectory)
+          ).markdown;
+          complete++;
+        } catch {
+          incomplete.push(relative);
+          markdown = `# ${article.title}\n\n正文或图片未能完整归档，本篇未通过离线验收。\n\n原文：${article.sourceUrl || '未记录'}\n`;
+        }
+      } else {
+        incomplete.push(relative);
+        markdown = `# ${article.title}\n\n正文尚未缓存，本篇无法离线阅读。\n\n原文：${article.sourceUrl || '未记录'}\n`;
+      }
+      await fs.promises.writeFile(
+        path.join(articleDirectory, 'index.md'),
+        markdown,
+      );
+    }
+    await fs.promises.writeFile(
+      path.join(directory, 'README.md'),
+      `# ${feed.mpName}\n\n共 ${articles.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
+        '文章位于 articles/ 下，每篇的图片路径相对其 index.md。未完整篇目在各自文件中明确标注。\n',
+    );
+    return {
+      name: feed.mpName,
+      articles: articles.length,
+      complete,
+      incomplete,
+    };
+  }
 
   collectionRouter = this.trpcService.router({
     collectPublicAlbums: this.trpcService.protectedProcedure
@@ -187,8 +245,19 @@ export class TrpcRouter {
       }),
   });
 
+  private legacyAccountProcedure = this.trpcService.protectedProcedure.use(
+    ({ next }) => {
+      if (privateOnlineMode())
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: '线上私人站点不提供旧账号管理',
+        });
+      return next();
+    },
+  );
+
   accountRouter = this.trpcService.router({
-    list: this.trpcService.protectedProcedure
+    list: this.legacyAccountProcedure
       .input(AccountSchemas.list)
       .query(async ({ input }) => {
         const limit = input.limit ?? 1000;
@@ -230,7 +299,7 @@ export class TrpcRouter {
           nextCursor,
         };
       }),
-    byId: this.trpcService.protectedProcedure
+    byId: this.legacyAccountProcedure
       .input(z.string())
       .query(async ({ input: id }) => {
         const account = await this.prismaService.account.findUnique({
@@ -244,7 +313,7 @@ export class TrpcRouter {
         }
         return account;
       }),
-    add: this.trpcService.protectedProcedure
+    add: this.legacyAccountProcedure
       .input(AccountSchemas.add)
       .mutation(async ({ input }) => {
         const { id, ...data } = input;
@@ -259,7 +328,7 @@ export class TrpcRouter {
 
         return account;
       }),
-    edit: this.trpcService.protectedProcedure
+    edit: this.legacyAccountProcedure
       .input(AccountSchemas.edit)
       .mutation(async ({ input }) => {
         const { id, data } = input;
@@ -270,7 +339,7 @@ export class TrpcRouter {
         this.trpcService.removeBlockedAccount(id);
         return account;
       }),
-    delete: this.trpcService.protectedProcedure
+    delete: this.legacyAccountProcedure
       .input(z.string())
       .mutation(async ({ input: id }) => {
         await this.prismaService.account.delete({ where: { id } });
@@ -627,6 +696,11 @@ export class TrpcRouter {
     saveToObsidian: this.trpcService.protectedProcedure
       .input(z.string())
       .mutation(async ({ input: id }) => {
+        if (privateOnlineMode())
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '线上站点只支持浏览器 ZIP 下载',
+          });
         const article = await this.prismaService.article.findUnique({
           where: { id },
         });
@@ -813,7 +887,7 @@ export class TrpcRouter {
   }
 
   platformRouter = this.trpcService.router({
-    getMpArticles: this.trpcService.protectedProcedure
+    getMpArticles: this.legacyAccountProcedure
       .input(PlatformSchemas.getMpArticles)
       .mutation(async ({ input: { mpId } }) => {
         try {
@@ -828,7 +902,7 @@ export class TrpcRouter {
           });
         }
       }),
-    getMpInfo: this.trpcService.protectedProcedure
+    getMpInfo: this.legacyAccountProcedure
       .input(PlatformSchemas.getMpInfo)
       .mutation(async ({ input: { wxsLink: url } }) => {
         try {
@@ -844,7 +918,7 @@ export class TrpcRouter {
         }
       }),
 
-    createLoginUrl: this.trpcService.protectedProcedure.mutation(async () => {
+    createLoginUrl: this.legacyAccountProcedure.mutation(async () => {
       try {
         return await this.trpcService.createLoginUrl();
       } catch (err: any) {
@@ -855,7 +929,7 @@ export class TrpcRouter {
         });
       }
     }),
-    getLoginResult: this.trpcService.protectedProcedure
+    getLoginResult: this.legacyAccountProcedure
       .input(PlatformSchemas.getLoginResult)
       .query(async ({ input }) => {
         try {
@@ -887,7 +961,14 @@ export class TrpcRouter {
           const authCode =
             this.configService.get<ConfigurationType['auth']>('auth')!.code;
 
-          if (authCode && req.headers.authorization !== authCode) {
+          if (privateOnlineMode() && !hasPrivateSession(req)) {
+            return { errorMsg: '请先登录' };
+          }
+          if (
+            !privateOnlineMode() &&
+            authCode &&
+            req.headers.authorization !== authCode
+          ) {
             return {
               errorMsg: 'authCode不正确！',
             };

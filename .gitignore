@@ -79,6 +79,8 @@ web_modules/
 .env.production.local
 .env.local
 .env.wechat2rss
+.env.private-online
+private-data/
 .wechat2rss-data/
 
 # parcel-bundler cache (https://parceljs.org/)

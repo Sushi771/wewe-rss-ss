@@ -1,5 +1,6 @@
 import {
   Badge,
+  Button,
   Image,
   Link,
   Navbar,
@@ -12,7 +13,7 @@ import { ThemeSwitcher } from './ThemeSwitcher';
 import { GitHubIcon } from './GitHubIcon';
 import { UserIcon } from './UserIcon';
 import { useLocation, Link as RouterLink } from 'react-router-dom';
-import { appVersion, serverOriginUrl } from '@web/utils/env';
+import { appVersion, privateOnlineMode, serverOriginUrl } from '@web/utils/env';
 import { useEffect, useState } from 'react';
 
 const navbarItemLink = [
@@ -102,23 +103,42 @@ const Nav = () => {
         </NavbarContent>
 
         <NavbarContent justify="end" style={{ gap: '12px' }}>
-          <NavbarItem>
-            <Tooltip content="账号管理">
-              <Link
-                as={RouterLink}
-                to="/accounts"
-                color="foreground"
-                style={{ opacity: 0.7 }}
-                className={
-                  pathname.startsWith('/accounts')
-                    ? 'text-primary opacity-100'
-                    : ''
-                }
+          {!privateOnlineMode && (
+            <NavbarItem>
+              <Tooltip content="账号管理">
+                <Link
+                  as={RouterLink}
+                  to="/accounts"
+                  color="foreground"
+                  style={{ opacity: 0.7 }}
+                  className={
+                    pathname.startsWith('/accounts')
+                      ? 'text-primary opacity-100'
+                      : ''
+                  }
+                >
+                  <UserIcon />
+                </Link>
+              </Tooltip>
+            </NavbarItem>
+          )}
+          {privateOnlineMode && pathname !== '/login' && (
+            <NavbarItem>
+              <Button
+                size="sm"
+                variant="light"
+                onPress={async () => {
+                  await fetch(`${serverOriginUrl}/auth/logout`, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                  });
+                  window.location.assign('/dash/login');
+                }}
               >
-                <UserIcon />
-              </Link>
-            </Tooltip>
-          </NavbarItem>
+                退出登录
+              </Button>
+            </NavbarItem>
+          )}
           <NavbarItem>
             <ThemeSwitcher></ThemeSwitcher>
           </NavbarItem>

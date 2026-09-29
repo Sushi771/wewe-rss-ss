@@ -7,6 +7,8 @@ import configuration, { ConfigurationType } from './configuration';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { FeedsModule } from './feeds/feeds.module';
+import { PrivateAccessController } from './private-access.controller';
+import { OfflineExportController } from './offline-export.controller';
 
 @Module({
   imports: [
@@ -33,7 +35,11 @@ import { FeedsModule } from './feeds/feeds.module';
       },
     }),
   ],
-  controllers: [AppController],
+  controllers: [
+    AppController,
+    PrivateAccessController,
+    OfflineExportController,
+  ],
   providers: [AppService],
 })
 export class AppModule {}

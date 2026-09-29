@@ -4,6 +4,16 @@ node_modules
 *.md
 dist
 .env
+.env.*
+.wechat2rss-data
+private-data
+apps/server/data
+output
+.local-releases
+*.db
+*.sqlite
+*.sqlite3
+*.zip
 .next
 .DS_Store
 ./wewe-rss-dingtalk

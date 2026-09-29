@@ -18,7 +18,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import dayjs from 'dayjs';
-import { serverOriginUrl } from '@web/utils/env';
+import { privateOnlineMode, serverOriginUrl } from '@web/utils/env';
 import ArticleList from './list';
 import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
@@ -679,18 +679,20 @@ const Feeds = () => {
                     </span>
                   </Tooltip>
                 )}
-                <LocalCollection
-                  mpId={currentMpInfo?.id}
-                  directory={currentMpInfo?.localDirectory}
-                  name={currentMpInfo?.mpName}
-                  search={search}
-                  selectedIds={articleSelectedIds}
-                  onImported={(message) => {
-                    if (currentMpInfo)
-                      rememberUpdate(currentMpInfo.id, 'local', message);
-                  }}
-                />
-                {articleSelectedIds.size > 0 && (
+                {!privateOnlineMode && (
+                  <LocalCollection
+                    mpId={currentMpInfo?.id}
+                    directory={currentMpInfo?.localDirectory}
+                    name={currentMpInfo?.mpName}
+                    search={search}
+                    selectedIds={articleSelectedIds}
+                    onImported={(message) => {
+                      if (currentMpInfo)
+                        rememberUpdate(currentMpInfo.id, 'local', message);
+                    }}
+                  />
+                )}
+                {!privateOnlineMode && articleSelectedIds.size > 0 && (
                   <Button
                     size="sm"
                     color="primary"
@@ -822,6 +824,12 @@ const Feeds = () => {
                       className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
                     >
                       RSS
+                    </a>
+                    <a
+                      href={`${serverOriginUrl}/download/feed/${currentMpInfo.id}.zip`}
+                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
+                    >
+                      下载本号 ZIP
                     </a>
                   </>
                 ) : (

@@ -1,0 +1,39 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.private-online
+    environment:
+      NODE_ENV: production
+      PRIVATE_ONLINE_MODE: '1'
+      AUTH_CODE: ${AUTH_CODE:?set AUTH_CODE in private env file}
+      SERVER_ORIGIN_URL: ${SERVER_ORIGIN_URL:?set HTTPS tailnet URL}
+      WECHAT2RSS_BASE_URL: http://wechat2rss:8080
+      WECHAT2RSS_TOKEN: ${PRIVATE_UPSTREAM_TOKEN:?set upstream token}
+      WECHAT2RSS_ENABLED: ${WECHAT2RSS_ENABLED:-0}
+      DATABASE_URL: file:../data/wewe-rss.db
+      DATABASE_TYPE: sqlite
+      CRON_EXPRESSION: ${CRON_EXPRESSION:-35 5,17 * * *}
+    volumes:
+      - ./private-data/sqlite:/app/data
+    ports:
+      - '127.0.0.1:4000:4000'
+    depends_on:
+      - wechat2rss
+    restart: unless-stopped
+
+  wechat2rss:
+    image: ttttmr/wechat2rss@sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f
+    environment:
+      LIC_EMAIL: ${LIC_EMAIL:?set personal license email}
+      LIC_CODE: ${LIC_CODE:?set personal license code}
+      RSS_TOKEN: ${PRIVATE_UPSTREAM_TOKEN:?set upstream token}
+      RSS_HOST: wechat2rss:8080
+      RSS_KEEP_OLD_COUNT: '-1'
+      RSS_MAX_ITEM_COUNT: '100'
+      RSS_PROXY_DISABLE_IMG: '1'
+    volumes:
+      - ./private-data/wechat2rss:/wechat2rss
+    ports:
+      - '127.0.0.1:18080:8080'
+    restart: unless-stopped

@@ -7,6 +7,7 @@ type ListedFeed = { id: number | string; name: string; link: string };
 function privateHost(hostname: string): boolean {
   if (
     hostname === 'localhost' ||
+    hostname === 'wechat2rss' ||
     hostname === '127.0.0.1' ||
     hostname === '[::1]'
   )

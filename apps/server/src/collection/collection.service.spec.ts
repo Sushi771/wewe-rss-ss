@@ -166,6 +166,42 @@ describe('local collection with real SQLite migrations', () => {
     expect(
       (await fs.stat(path.join(path.dirname(result.path), image!))).size,
     ).toBeGreaterThan(0);
+    const offlineDirectory = path.join(root, 'offline-feed');
+    const offline = await router.buildOfflineFeedDirectory(
+      mpId,
+      offlineDirectory,
+    );
+    expect(offline).toMatchObject({ articles: 2, complete: 1 });
+    const exported = await fs.readFile(
+      path.join(offlineDirectory, offline!.incomplete[0], 'index.md'),
+      'utf8',
+    );
+    expect(exported).toContain('无法离线阅读');
+    const completedFolder = (
+      await fs.readdir(path.join(offlineDirectory, 'articles'))
+    ).find((name) => !offline!.incomplete.some((item) => item.endsWith(name)));
+    expect(completedFolder).toBeTruthy();
+    const completeMarkdown = await fs.readFile(
+      path.join(offlineDirectory, 'articles', completedFolder!, 'index.md'),
+      'utf8',
+    );
+    expect(completeMarkdown).toMatch(/attachments\/image_[a-f0-9]+\.png/);
+    const readme = await fs.readFile(
+      path.join(offlineDirectory, 'README.md'),
+      'utf8',
+    );
+    expect(readme).toContain('未完整 1 篇');
+    process.env.PRIVATE_ONLINE_MODE = '1';
+    try {
+      await expect(caller.account.byId('legacy-account')).rejects.toThrow(
+        '线上私人站点',
+      );
+      await expect(caller.platform.createLoginUrl()).rejects.toThrow(
+        '线上私人站点',
+      );
+    } finally {
+      delete process.env.PRIVATE_ONLINE_MODE;
+    }
     const csv = await caller.collection.exportMetrics({ mpId });
     expect(csv.count).toBe(2);
     expect(csv.csv).toContain('10万+');

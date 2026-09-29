@@ -7,6 +7,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { ConfigurationType } from './configuration';
 import { join } from 'path';
 import { readFileSync } from 'fs';
+import { assertPrivateConfig, privateAccessGuard } from './private-access';
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -24,12 +25,14 @@ const appVersion = packageJson.version;
 console.log('appVersion: v' + appVersion);
 
 async function bootstrap() {
+  assertPrivateConfig();
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const configService = app.get(ConfigService);
 
   const { host, isProd, port } =
     configService.get<ConfigurationType['server']>('server')!;
 
+  app.use(privateAccessGuard);
   app.use(json({ limit: '10mb' }));
   app.use(urlencoded({ extended: true, limit: '10mb' }));
 

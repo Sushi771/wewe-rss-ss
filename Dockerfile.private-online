@@ -1,0 +1,21 @@
+FROM node:22-alpine AS build
+RUN corepack enable && corepack prepare pnpm@10.32.0 --activate
+WORKDIR /src
+ENV DATABASE_URL=file:../data/build-only.db
+COPY . .
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter server build && pnpm --filter web build
+RUN pnpm --config.ignore-scripts=true --filter server deploy --legacy --prod /out
+
+FROM node:22-alpine
+RUN apk add --no-cache python3
+WORKDIR /app
+COPY --from=build /out /app
+COPY --from=build /src/apps/server/dist /app/dist
+COPY --from=build /src/apps/server/client /app/client
+COPY --from=build /src/apps/server/prisma /app/prisma
+COPY --from=build /src/apps/server/scripts /app/scripts
+RUN ./node_modules/.bin/prisma generate
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=4000 DATABASE_URL=file:../data/wewe-rss.db DATABASE_TYPE=sqlite
+EXPOSE 4000
+CMD ["node", "dist/apps/server/src/main.js"]

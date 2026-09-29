@@ -33,3 +33,14 @@ jobs:
 
       - name: Type check Web
         run: pnpm --filter web build
+      - name: Test Server
+        run: pnpm --filter server test --runInBand
+      - name: Build Server
+        run: pnpm --filter server build
+
+  private-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build private online image
+        run: docker build -f Dockerfile.private-online -t wewe-rss-private:ci .

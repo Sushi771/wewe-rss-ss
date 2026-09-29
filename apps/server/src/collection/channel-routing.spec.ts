@@ -286,6 +286,7 @@ describe('backend collection routing', () => {
         new Response(png, { headers: { 'content-type': 'image/png' } }),
       );
     try {
+      await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual');
       const caller = router.appRouter.createCaller({
         errorMsg: null,
         isLocal: true,
