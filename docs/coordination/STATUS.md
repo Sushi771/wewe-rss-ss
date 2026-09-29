@@ -12,6 +12,9 @@
 - A [认证研究](RESEARCH_BOOK_ARTICLES_AUTH.md)追到 Mac 腾讯客户端同主机 `vid/skey` 日志、移动 token 到 Web Cookie 桥接及 Rust Web 登录生命周期；仍无证据将本人现有 Windows 凭据直接用于 `/book/articles`。B [候选矩阵](SOURCE_CANDIDATE_MATRIX.md)按真实腾讯请求排除旧端点换壳、闭源中转与禁止的桌面数据路径。C [公开页面发现](PUBLIC_PAGE_DISCOVERY.md)核验了原文 `appmsgalbuminfo` 到官方合集的代码链和八份目标 HTML；该链找到两个已知合集，尚无全号主页/全量目录。
 - 三个 Codex 独立 task 创建请求只先返回 `clientThreadId`，三个 worktree 实际生成，但正式 ID 长时间未出现在任务列表；按用户指定回退到各自 worktree 的子 Agent。A 的延迟 task 仅合并独立 Rust 增量，避免重复研究。A/B/C 和 Probe 输出均经总控 review 合入 main。生产 SQLite 未写入。
 - 工程核对发现：合集 `create_time` 与原文 `ct` 相差数十秒时，已有正文补取会错误拒绝；现仅对未绑定原文且规范身份一致、时间差不超过 60 秒的文章接受原文时间并校正。公开合集请求严格检查 `verify_status`、不跟随验证跳转、页间隔 2 秒；空合集封面不覆盖旧封面。相关隔离 SQLite/Jest 62 项与服务端构建通过，仍未在生产库启用该通道。
+- [生产 SQLite 副本演练](TARGET_ALBUM_REHEARSAL.md)用旧保存的真实目标两页 JSON 离线回放当前代码，两次均解析 19 篇；副本 12 个订阅、1447 篇不变，旧文章 ID/时间/正文/指标和非空封面保护检查均为 0 异常。旧 JSON 键集合与今日在线结果相同，但演练不能代替自然新增或全部导出验收。生产库只读。
+- C 对一篇此前未保存 HTML 的当前列表文章作一次匿名原文 GET，返回正文页并见到两个已知合集之一；[报告](PUBLIC_PAGE_DISCOVERY.md)明确旧 `var biz/mid/idx` 解析未形成身份闭环，未将其计入真实文章验收，也未为补证据重发。B 对 [`profile_ext` 凭据链](SOURCE_CANDIDATE_MATRIX.md)追到个人微信短期会话来源；已核实现依赖项目禁止的客户端缓存或抓包，尚无合法独立续期链，不据此探针。
+- 新发现 [2026-08 的公开索引十篇案例](https://lovstudio.ai/blog/wechat-cross-account-index-ret-200013-2026)，另起独立搜狗微信移动索引专项核查真实请求代码和运行依赖；在审查前不把案例成功外推至本目标。
 
 ## 前轮判断（已由上节更新）
 

@@ -18,13 +18,13 @@
 
 ## 公开页能力边界
 
-| 入口或字段 | 一手依据 | 能得到什么 | 仍缺什么 |
-| --- | --- | --- | --- |
-| 目标官方原文 `/s` 或 `/s?...` | 八份已保存 HTML 的 `appmsgalbuminfo` 与 `album_info_list` | 已关联文章所属的确切腾讯合集链接、账号 `biz`、正文和原文时间 | 不能保证每篇都有合集，也不列出该账号其他合集；当前新文章仍需重新访问并核验 |
-| `album_keep_read_info` | 八份已保存 HTML | 所属合集的前后篇短链，七份有两个方向 | 不是全号列表；短链身份需打开原文或与已验合集列表比对 |
-| `/mp/appmsgalbum?action=getalbum` | 四份旧腾讯响应、[当前 RSSHub 直接请求腾讯的源码](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/wechat/msgalbum.ts)、[开源翻页源码](https://github.com/SlowGrowth1314/opencli-weixin-album/blob/c45aed6516e8682202d45a3ff5ee1cdc6d3fe0f2/download-album.ts#L337-L365) | 已知 `__biz+album_id` 的单合集列表、`msgid/itemidx/create_time/url` 与分页游标 | 2026-09-30 的目标首屏和增量须复测；一个合集不覆盖全号 |
-| `/mp/profile_ext?action=home/getmsg` | 目标原文内联代码会构造官方 `action=home` 链接；[旧列表源码](https://github.com/happyjared/python-learning/blob/master/wechat/wx_mps.py)要求 `pass_ticket/appmsg_token/Cookie`；[既有实测](../CHANNEL_INVESTIGATION.md#本轮架构与实测结论2026-09-27-1256-起优先于下方历史记录) | 原文能指向公众号主页身份 | 不证明匿名可读全号列表；已有无会话 `no session` 和目标会话空列表，不能无新依据重发 |
-| `/mp/homepage` | [RSSHub 专门路由的真实 POST](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/tingshuitz/guangzhou.ts)要求特定栏目 `hid/sn` | 已知栏目时可能取栏目列表 | 八份原文及旧 URL 没有目标栏目的 `hid`；文章 `sn` 不等于栏目 `sn`，当前不能构造目标请求 |
+| 入口或字段                           | 一手依据                                                                                                                                                                                                                                                                       | 能得到什么                                                                     | 仍缺什么                                                                               |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| 目标官方原文 `/s` 或 `/s?...`        | 八份已保存 HTML 的 `appmsgalbuminfo` 与 `album_info_list`                                                                                                                                                                                                                      | 已关联文章所属的确切腾讯合集链接、账号 `biz`、正文和原文时间                   | 不能保证每篇都有合集，也不列出该账号其他合集；当前新文章仍需重新访问并核验             |
+| `album_keep_read_info`               | 八份已保存 HTML                                                                                                                                                                                                                                                                | 所属合集的前后篇短链，七份有两个方向                                           | 不是全号列表；短链身份需打开原文或与已验合集列表比对                                   |
+| `/mp/appmsgalbum?action=getalbum`    | 四份旧腾讯响应、[当前 RSSHub 直接请求腾讯的源码](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/wechat/msgalbum.ts)、[开源翻页源码](https://github.com/SlowGrowth1314/opencli-weixin-album/blob/c45aed6516e8682202d45a3ff5ee1cdc6d3fe0f2/download-album.ts#L337-L365) | 已知 `__biz+album_id` 的单合集列表、`msgid/itemidx/create_time/url` 与分页游标 | 2026-09-30 的目标首屏和增量须复测；一个合集不覆盖全号                                  |
+| `/mp/profile_ext?action=home/getmsg` | 目标原文内联代码会构造官方 `action=home` 链接；[旧列表源码](https://github.com/happyjared/python-learning/blob/master/wechat/wx_mps.py)要求 `pass_ticket/appmsg_token/Cookie`；[既有实测](../CHANNEL_INVESTIGATION.md#本轮架构与实测结论2026-09-27-1256-起优先于下方历史记录)  | 原文能指向公众号主页身份                                                       | 不证明匿名可读全号列表；已有无会话 `no session` 和目标会话空列表，不能无新依据重发     |
+| `/mp/homepage`                       | [RSSHub 专门路由的真实 POST](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/tingshuitz/guangzhou.ts)要求特定栏目 `hid/sn`                                                                                                                                             | 已知栏目时可能取栏目列表                                                       | 八份原文及旧 URL 没有目标栏目的 `hid`；文章 `sn` 不等于栏目 `sn`，当前不能构造目标请求 |
 
 旧 HTML 的 `album_info_list` 是页面脚本变量，内联代码另有 `openAlbumPage` 函数接受 `albumLink` 并拼接场景、当前 `msgid/idx` 等导航参数；已证这不是正文中偶然出现的合集字符串，但未追到把该变量传入函数的具体调用点。[腾讯公开合集客户端 JS](https://res.wx.qq.com/mmbizwap/zh_CN/htmledition/js/album/appmsg/album80ec10.js)实际对 `/mp/appmsgalbum?action=getalbum&__biz=...&album_id=...&count=...` 发 GET，并在翻页时加 `begin_msgid/begin_itemidx`。本机保存的同版本脚本在 2026-09-27 第 380–381 行也有该请求构造。文章页内的 `profile_ext?action=home` 代码在部分客户端切到原生 `profile`；它不是新的网页文章分页证据。
 
@@ -44,11 +44,10 @@
 
 本次旧 `var biz/mid/idx` 提取正则未得到与请求 URL 一致的三元组；采集脚本只报告三个布尔比较为 false，未区分字段缺失和字段异值。响应未保存，按一次请求上限**不重新请求**，因此这篇仍缺原文身份闭环，不能算“新取到一篇目标真文章”，也不能作为五篇门槛的一部分。`album_info_list` 这次没有单独提取，`appmsgalbuminfo/tags` 的无新 ID 结论仅覆盖这两个字段，不排除前者单独列出其他合集。后续若有独立新文章或正常访问机会，解析器须同时记录身份字段的**存在性及是否匹配**、`album_info_list` 的官方链接与账号归属、严格 DOM 内图片计数，只保存脱敏摘要；遇验证码则停止该 URL，不为补本次缺项重发。
 
-## 当前验证顺序与停止条件
+## 后续验证与停止条件
 
-1. 独立 Probe Agent 正用**旧官方 HTML 确认的目标 `biz+复旦数学营 album_id`**只请求一次 2026-09-30 匿名首屏；C 线不重复该请求。先看 HTTP/业务状态、账号身份、条目数和字段名。若遇验证码、限流、身份不符立即停止相应网络请求。
-2. 首屏若成功，按真实 `msgid+itemidx`、URL `__biz/mid/idx`、原文发布时间核验不同文章，再做有限分页与增量；每条新内容应保留确切来源和采集时间。五篇目标真实新来源文章是接入 Provider 前的验收门槛，**不是**单次接口能力探针前置条件。
-3. 从新增目标原文 HTML 中提取 `album_info_list` 与 `appmsgalbuminfo`，只接受腾讯官方 `/mp/appmsgalbum`、账号 `biz` 一致且 `album_id` 为页面明示的链接；按 ID 去重后可发现**该文章所属**新合集。若页面没有这些字段，不猜 ID、不把 `album_keep_read_info` 短链当成新合集。
-4. 对 `profile_ext`、`homepage` 继续查公开源码与客户端实现；只有得到与旧空列表/频控实测有实质差异的认证来源或栏目 `hid/sn` 一手依据，才考虑另一条隔离只读探针。2026-09-30 另一篇**非目标**官方文章的单次匿名 GET 返回腾讯验证 302，已停止该 URL 请求；这不否定上述已保存目标 HTML 字段或其他源码研究。
+1. 已知目标合集的当日两页、19 个键与 6 篇原文身份/发布时间已在[合集 Probe](TARGET_ALBUM_PROBE.md)核验。下一次自然更新须与当前键集合比较，区分所选合集的新增与全号覆盖。
+2. 对新的目标原文，先核对 `biz/mid/idx` 的字段存在性和值，再严格解析 `album_info_list` 与 `appmsgalbuminfo`；只接受腾讯官方 `/mp/appmsgalbum`、账号 `biz` 一致且页面明示的 `album_id`。没有字段就不猜 ID，不为补本次遗漏重发同一 URL。
+3. 对 `profile_ext`、`homepage` 继续查公开源码与合法认证来源；只有与旧空列表/频控实测有实质差异的一手依据，才设计隔离只读探针。遇腾讯验证、限流、身份不符立即停止对应 URL。2026-09-30 另一篇**非目标**官方文章的单次匿名 GET 返回腾讯验证 302，已停止该 URL 请求。
 
 本报告只排除“旧目标分享 URL 参数自身含合集 ID”和“已发现两合集足以代表全号”两项推断；公开原文发现其他目标合集、合集持续更新、公众号全部列表仍可继续研究和逐项验证。
