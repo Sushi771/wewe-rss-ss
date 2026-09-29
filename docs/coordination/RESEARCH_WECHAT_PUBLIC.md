@@ -25,3 +25,9 @@
 - **推测：**若目标号确有持续维护、包含至少五篇当前文章的公开合集，那么该合集可成为局部订阅的独立来源；是否覆盖新文章、多个合集如何发现、`create_time` 与原文发布时间是否一致，必须以目标真实响应核验。一个合集首屏、Mock、旧库都不能宣称全号恢复。
 - **已排除为当前可执行实验：**凭 `MP_WXS_3895431412` 猜 `__biz` 或 `album_id`；凭文章 URL 的 `sn` 猜主页 `sn`；仅凭 README 或 2026-03 运营后台旧成功重发受限的 `appmsgpublish`；把 `getmsg` 旧脚本的 Cookie 当作公开匿名鉴权；将公开合集页面的其他号文章凑目标五篇。
 - **最小新条件：**只有发现目标号**自己发布的**官方 `mp.weixin.qq.com/mp/appmsgalbum` 链接，且链接同时明确 `__biz`、`album_id`，才请 B 在隔离环境做一次目标首屏：先把 `__biz` 与已有可信目标文章身份比对，再 GET 合集第一页，仅留 HTTP/业务状态、账号昵称、数量、字段名；若确实属目标，再核对至少五篇不同 `key` 或 `msgid+itemidx`、canonical URL、标题及逐篇原文发布时间，然后有限翻页和第二次增量。遇验证、频控或身份不符即停。**当前缺 `album_id`，所以无目标请求条件，也不要求用户现在重新登录。**
+
+## 原文反查合集的限题复核（2026-09-30）
+
+- **已证明的本轮结果：**从[公开仓库中同时列出合集及其文章的样例](https://github.com/huanghanchi/Quant-AI-OR-Math-Statistics/blob/main/README.md)选一个**非目标号**文章，去掉文章 URL 已带的 `cur_album_id`，只对腾讯公开原文页作一次无 Cookie、无 Key 的匿名 GET，且不跟随重定向。结果为 HTTP **302**，重定向指向腾讯验证路径；该重定向响应中未检出官方 `appmsgalbum` 链接，`appmsgalbum`、`album_id`、`cur_album_id` 字段均为 0 次。没有取得文章 HTML，因此**不能判断**正常原文 HTML 是否暴露合集 ID。未重试、未访问目标号，未保存原始 HTML、文章 URL 或重定向 URL。
+- **有证据支持但不构成通用发现：**[RSSHub 2024 年一手 issue](https://github.com/DIYgod/RSSHub/issues/17326)记载作者在某篇文章内人工找到“目录”，点击后得到官方 `appmsgalbum` 链接。这证明**个别文章可由作者在正文放入合集链接**，不证明任意文章自动带所属合集元数据。[2026 年开源原文抓取代码](https://github.com/jj-cheng25/weixin-articles-mcp/blob/main/src/weixin_articles_mcp/fetcher.py#L401-L449)实际 GET 原文，并在挑战页报错；其[解析器](https://github.com/jj-cheng25/weixin-articles-mcp/blob/main/src/weixin_articles_mcp/parser.py#L904-L969)提取标题、账号、时间、正文、`biz/mid/idx`，没有提取合集 ID。[公开合集抓取代码](https://github.com/SlowGrowth1314/opencli-weixin-album/blob/c45aed6516e8682202d45a3ff5ee1cdc6d3fe0f2/download-album.ts#L100-L136)则要求事先输入合集 URL；这些代码未提供“任意原文反查所属合集”的可审查实现。
+- **决策：**样例未证实发现方式，故当前没有让 B 请求一篇目标旧文章的新实验条件。若以后从目标号自己发布的正文、菜单或其他可信公开材料得到明确官方合集链接，再按前述 `__biz + album_id` 规范验证。单凭他号文章分享 URL 的 `cur_album_id`、目标旧 URL 的 `__biz`，或本次 302 均不能推导目标号合集 ID。
