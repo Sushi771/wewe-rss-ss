@@ -24,3 +24,9 @@ node scripts/research/probe-refreshed-mobile-search-cursor.cjs --execute --db <A
 ```
 
 `node --check`、`--plan`、`--self-test` 已通过。假 SQLite、私有恢复和两枚前序 marker 验账号来源；假网络验证一次首屏 + 一次原样游标续页、同页交集 1 和新增 1、短/长链计数以及无敏感输出；无 `continueFlag`、验证码、限流时按请求上限停止。离线自测的生产库读写和真实网络请求均为 0。
+
+## 2026-09-30 总控唯一在线续页结果与分类修正边界
+
+总控按本脚本做了唯一一次对照：隔离 init、首屏、续页各 1 次，三者 HTTP 200；首屏精确号名 11 条，续页精确号名 15 条，两页目标候选去重键交集 0、次页新增键 15，`offset` 前进；未请求第三页/原文，生产写入 0。**26 条只是搜索卡片来源名匹配，尚未经原文 `__biz/ct` 核号。**
+
+本脚本的 `linkShape` 把所有非 `https:` URL 一律合并成 `malformed`，`targetBiz` 也仅接受 `https:`。本次 30 条 `doc_url` 全被归到该混合桶、显式 biz 匹配 0，**不能据此认定链接无效或目标 biz 不匹配**：正常 `http://mp.weixin.qq.com/s?...`、协议相对/相对 URL、转义 URL 和真正解析失败都没有被分别计数；脚本没有保存原始 URL，无法从这次摘要反推真实形状。腾讯公开页面 JS 只按 `doc_url.includes("mp.weixin.qq.com")` 选择公众号跳转，在 PC 直接 `window.open(doc_url)`，并未限定 HTTPS。下一次仅做重新分类和任选一候选的身份可核条件，见 [URL 身份诊断](SEARCH_RESULT_URL_IDENTITY_DIAGNOSTIC.md)；不把本轮原有混合统计修饰为新文章证据。
