@@ -70,7 +70,7 @@ async function main() {
         mode: 'preflight-only',
         configured,
         appEnabled: process.env.WECHAT2RSS_ENABLED === '1',
-        next: '在 apps/server/.env.local 配置私有实例后，使用 --execute MP_WXS_<数字ID> 执行只读联调；无需启用应用采集。',
+        next: '私有实例完成授权、扫码并添加目标号后，使用 --execute MP_WXS_<数字ID> 执行只读联调；无需启用应用采集。',
       }),
     );
     return;
