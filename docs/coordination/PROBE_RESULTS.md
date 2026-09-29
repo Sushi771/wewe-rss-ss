@@ -10,3 +10,9 @@
 ## 待实验条件
 
 只在 Agent A 提供可核验、与旧失败流程有实质差异的公开取文源码、请求参数及适用的本人合法认证来源后，设计一次隔离、低频、只读验证。当前 `/book/articles` 线索中的 `skey/vid` 来源仍未核实；不得把 `wrk-` Agent Key、Web Cookie 或移动 `accessToken` 猜作其认证值。若新来源得到首屏，先核对目标 `MP_WXS_3895431412` 的真实不同文章至少 5 篇及号身份、稳定身份、原文链接、发布时间；未达到前不接入 Provider、不写生产 SQLite。验证码、账号限制或明确频控出现时立即停止当次实验，只保留脱敏结论。
+
+## `/book/articles` 认证前提的离线字段核查
+
+- 仅检查 [旧客户端审计](../WEREAD_CLIENT_FLOW_AUDIT.md)所指向的两份固定、Git 忽略的脱敏证据：`output/playwright/weread-client-audit/old-flow-summary.json` 与 `output/playwright/complete-acceptance/old-weread-experiment-review.json`。两份文件均未出现独立 `skey` 或 `wr_skey` 字段名。审计文档记录旧客户端 `/login` 的 `vid/accessToken/refreshToken` 来源、续期后的新 `accessToken`，未记录单独的 `skey`。这些摘要不是原始响应的完整字段清单，**缺席不能证明腾讯接口从未返回 `skey`**。
+- 对本机现存、仓库根目录已知的 Git 忽略私有 `.env` 文件仅做赋值左侧变量名的布尔检查：`.env.weread-gateway` 存在 `WEREAD_API_KEY` 键名；未发现独立包含 `skey` 或 `vid` 的赋值键名。另一个现存的历史上游私有 `.env` 文件也未发现此类键名。没有递归扫描其他输出目录、读取凭据值、原始响应、账号记录或生产 SQLite。
+- 因此目前不能确认本人已有一组来源明确、同属 WeBook `/book/articles` 认证体系的 `skey/vid`。这条离线核查不授权发起请求；待新的合法来源证据出现后，再由总控决定是否设计一次只读实验。
