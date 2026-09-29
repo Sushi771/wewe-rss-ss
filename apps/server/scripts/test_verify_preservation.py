@@ -108,10 +108,10 @@ class PreservationTests(unittest.TestCase):
                 nonlocal injected
                 statements.append(sql)
                 result = super().execute(sql, *args)
-                if sql.startswith("SELECT id FROM feeds") and not injected:
+                if sql.startswith("SELECT id, mp_name") and not injected:
                     injected = True
                     with contextlib.closing(real_connect(database)) as writer, writer:
-                        writer.execute("INSERT INTO feeds VALUES ('other-feed')")
+                        writer.execute("INSERT INTO feeds (id) VALUES ('other-feed')")
                         writer.execute("INSERT INTO articles (id, mp_id) VALUES ('new', 'other-feed')")
                 return result
 
@@ -121,6 +121,7 @@ class PreservationTests(unittest.TestCase):
 
         with patch.object(preservation.sqlite3, "connect", side_effect=read_connect):
             snapshot = self.state()
+        self.assertTrue(injected)
         self.assertEqual(snapshot["feedIds"], [self.mp_id])
         self.assertEqual(list(snapshot["records"]), [self.article_id])
         self.assertIn("PRAGMA query_only=ON", statements)

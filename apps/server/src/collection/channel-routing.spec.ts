@@ -61,6 +61,20 @@ describe('backend collection routing', () => {
     };
   };
 
+  const mockArticlePage = (incoming: ReturnType<typeof article>) => {
+    (wechat2RssProvider as jest.Mock).mockReturnValue({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      refreshSubscription: async () => ({ accepted: true, pending: true }),
+      fetchArticles: async () => ({
+        articles: [incoming],
+        coverage: 'recent-window',
+        upstreamCount: 1,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      }),
+    });
+  };
+
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-backend-route-'));
     const url = `file:${path.join(root, 'test.db').replace(/\\/g, '/')}`;
@@ -154,6 +168,134 @@ describe('backend collection routing', () => {
     expect(second).toHaveLength(12);
     expect(await prisma.article.count()).toBe(12);
     expect((wechat2RssProvider as jest.Mock).mock.calls).toHaveLength(24);
+  });
+
+  it('matches a short-ID row across sn and incoming parameter order while filling only missing fields', async () => {
+    const incoming = article(ids[0]);
+    incoming.contentHtml =
+      '<div class="rich_media_content" id="js_content">新正文</div>';
+    const canonical = new URL(incoming.url);
+    const reordered = new URL('https://mp.weixin.qq.com/s');
+    for (const key of ['sn', 'idx', 'mid', '__biz'])
+      reordered.searchParams.set(key, canonical.searchParams.get(key)!);
+    reordered.searchParams.set('tracking', 'ignored');
+    const previousUrl = incoming.url.replace('sn=abcd', 'sn=previous');
+    await prisma.article.create({
+      data: {
+        id: 'legacy-short-id',
+        mpId: ids[0],
+        title: '旧标题',
+        publishTime: incoming.publishTime - 100,
+        sourceUrl: previousUrl,
+        picUrl: 'https://mmbiz.qpic.cn/old.jpg',
+        contentHtml: null,
+        lastBodyStatus: 'unavailable',
+        metrics: '{"read":{"value":0}}',
+        readCount: 0,
+        likeCount: 0,
+      },
+    });
+    mockArticlePage({ ...incoming, url: reordered.toString() });
+    expect(
+      await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).toMatchObject({ created: 0, updated: 1 });
+    expect(await prisma.article.count({ where: { mpId: ids[0] } })).toBe(1);
+    expect(
+      await prisma.article.findUniqueOrThrow({
+        where: { id: 'legacy-short-id' },
+      }),
+    ).toMatchObject({
+      title: '旧标题',
+      publishTime: incoming.publishTime - 100,
+      sourceUrl: previousUrl,
+      verifiedSourceUrl: incoming.url,
+      picUrl: 'https://mmbiz.qpic.cn/old.jpg',
+      contentHtml: incoming.contentHtml,
+      lastBodyStatus: 'available',
+      metrics: '{"read":{"value":0}}',
+      readCount: 0,
+      likeCount: 0,
+    });
+    expect(
+      await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).toMatchObject({ created: 0, updated: 0 });
+  });
+
+  it('keeps an existing body and its last retry status when a provider repeats cached content', async () => {
+    const incoming = article(ids[0]);
+    incoming.contentHtml =
+      '<div class="rich_media_content" id="js_content">新正文</div>';
+    await prisma.article.create({
+      data: {
+        id: 'legacy-with-body',
+        mpId: ids[0],
+        title: '旧标题',
+        publishTime: incoming.publishTime,
+        sourceUrl: incoming.url.replace('sn=abcd', 'sn=previous'),
+        picUrl: 'https://mmbiz.qpic.cn/old.jpg',
+        contentHtml: '<div>旧正文</div>',
+        lastBodyStatus: 'unavailable',
+      },
+    });
+    mockArticlePage(incoming);
+    expect(
+      await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).toMatchObject({ created: 0, updated: 1 });
+    expect(
+      await prisma.article.findUniqueOrThrow({
+        where: { id: 'legacy-with-body' },
+      }),
+    ).toMatchObject({
+      contentHtml: '<div>旧正文</div>',
+      lastBodyStatus: 'unavailable',
+      verifiedSourceUrl: incoming.url,
+    });
+  });
+
+  it('rejects multiple legacy matches and cross-feed identity conflicts without saving an article', async () => {
+    const incoming = article(ids[0]);
+    for (const [id, sn] of [
+      ['legacy-one', 'first'],
+      ['legacy-two', 'second'],
+    ]) {
+      await prisma.article.create({
+        data: {
+          id,
+          mpId: ids[0],
+          title: id,
+          publishTime: incoming.publishTime,
+          sourceUrl: incoming.url.replace('sn=abcd', `sn=${sn}`),
+          picUrl: '',
+        },
+      });
+    }
+    mockArticlePage(incoming);
+    await expect(
+      service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).rejects.toThrow('原文身份对应多条旧记录');
+    expect(await prisma.article.count({ where: { mpId: ids[0] } })).toBe(2);
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).syncTime,
+    ).toBe(0);
+
+    await prisma.article.deleteMany({ where: { mpId: ids[0] } });
+    await prisma.article.create({
+      data: {
+        id: 'wrong-feed-short-id',
+        mpId: ids[1],
+        title: '错误绑定',
+        publishTime: incoming.publishTime,
+        sourceUrl: incoming.url.replace('sn=abcd', 'sn=previous'),
+        picUrl: '',
+      },
+    });
+    await expect(
+      service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).rejects.toThrow('已保存文章与原文身份冲突');
+    expect(await prisma.article.count({ where: { mpId: ids[0] } })).toBe(0);
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).syncTime,
+    ).toBe(0);
   });
 
   it('keeps the refresh cooldown across service restart and retries after it expires', async () => {
