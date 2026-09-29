@@ -29,6 +29,6 @@ node scripts/research/probe-refreshed-mobile-target-search.cjs --execute --db <A
 
 ## 2026-09-30 总控唯一首屏结果
 
-新隔离 Web init 与目标搜索各一次，均 HTTP 200；完整五 Cookie 的 `wr_vid` 与恢复账号匹配。搜索顶层 `ret=-1`、`content.ret=0`，返回 `content.data` **15 桶/15 条**；其中 **11 条** `source.title` 精确匹配目标准确号名，11 条都有 `docID`、`doc_url`、`timestamp` 和 `source.dateTime` 字段，文章键摘要各不相同。显式 `doc_url.__biz` 与目标 `biz` 匹配数为 **0**，所以本轮没有把这 11 条当作目标号已核验文章。响应含 `offset/searchID/cookies/continueFlag`，`continueFlag=true`；本次没有使用它们续页。总请求 **2**，分页、原文、页面导航与生产库写入均 **0**；私有搜索 marker 保留，未输出原始 URL、标题、游标、Cookie 或 token。
+新隔离 Web init 与目标搜索各一次，均 HTTP 200；完整五 Cookie 的 `wr_vid` 与恢复账号匹配。搜索顶层 `ret=-1`、`content.ret=0`，返回 `content.data` **15 桶/15 条**；其中 **11 条** `source.title` 精确匹配目标准确号名，11 条都有 `docID`、`doc_url`、`timestamp` 和 `source.dateTime` 字段，文章键摘要各不相同。探针按**仅 HTTPS**的 URL 分类器记录目标 `biz` 匹配数为 **0**；后来发现腾讯页面可直接打开 HTTP 原文 URL，因此这个 0 可能是假阴性，不能推断卡片没有目标 `biz`。本轮仍未把 11 条当作目标号已核验文章。响应含 `offset/searchID/cookies/continueFlag`，`continueFlag=true`；本次没有使用它们续页。总请求 **2**，分页、原文、页面导航与生产库写入均 **0**；私有搜索 marker 保留，未输出原始 URL、标题、游标、Cookie 或 token。
 
-这个结果证明**当前本人会话的腾讯官方搜索首屏确实返回目标准确来源名卡片**，与旧凭据 `-2012` 的失败有实质差异。索引时间不是已核发表时间，来源名也不能替代 `biz`；下一轮分别核一次官方游标续页是否真新增，以及某条官方原文链接的账号身份、原文 `ct`、正文和图片。首屏 11 条不是五篇真实文章验收，更不是全号订阅恢复。
+这个结果证明**当前本人会话的腾讯官方搜索首屏确实返回目标准确来源名卡片**，与旧凭据 `-2012` 的失败有实质差异。索引时间不是已核发表时间，来源名也不能替代 `biz`；下一轮先纠正 HTTP/HTTPS URL 分类并核卡片原文身份，再核原文 `ct`、正文和图片。首屏 11 条不是五篇真实文章验收，更不是全号订阅恢复。
