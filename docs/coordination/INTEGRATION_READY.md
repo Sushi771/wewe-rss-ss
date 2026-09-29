@@ -16,6 +16,8 @@
 
 规范文章 ID 当前为 `WX_<公众号数字ID>_<mid>_<idx>`，必须从可核验的原文链接取得。`assertProviderPage` 只能保证适配器交付的 ID、链接、公众号和时间**自洽**；它不能单独证明上游字段就是实际发布时间，也不能把 `chapter.updateTime` 转成发布时间。若新来源只给 review ID 或短链，须先取得有证据的身份对应关系，再决定是否扩展契约。
 
+2026-09-30 追加：Provider 原始文章 URL 在写入前规范化为 HTTPS 的 `__biz/mid/idx/sn` 顺序，且单页超过 1000 条时在映射前拒绝；`assertProviderPage` 只接受规范 URL。旧短 ID 行可按不含 `sn` 的规范身份匹配，任何跨号或多条匹配均拒绝，单条旧行仍须经 `assertSavedArticleIdentity` 核验。只有旧正文为空且本次确实补上正文时，才把 `lastBodyStatus` 改为 `available`；已有正文及其最近重试状态保持原值。旧标题、可信时间、原有来源和有效指标保持不变。该逻辑仅在模拟 Provider 与临时 SQLite 测试，尚未用于真实新来源。
+
 ## SQLite 副本演练
 
 - 从当前生产 SQLite **只读**在线备份到本 worktree 的 Git 忽略目录；备份 `integrity_check=ok`，12 个订阅、1447 篇文章。
@@ -28,7 +30,7 @@
 ## 本轮验证
 
 - `python -m unittest apps/server/scripts/test_verify_preservation.py -v`：16/16 通过，覆盖旧来源、已核验来源、文章创建时间、订阅配置、空值回填和 v1/v2 兼容提示。
-- 服务端全量 Jest：19 套、151 项通过；新增跨号 Provider 页导致整次更新失败、文章与成功同步时间不变的端到端用例单独复测通过（合计 152 项）。覆盖重复刷新、冷却、图片离线导出、定时路径与旧字段保留。
+- 服务端全量 Jest：19 套、156 项通过，覆盖跨号 Provider 页、多条同身份旧记录、`sn` 与参数顺序变化、重复刷新、冷却、图片离线导出、定时路径与旧字段保留。
 - 锁文件安装后 `pnpm build:server` 与 `pnpm build:web` 均成功。当前锁文件解析 `prisma@5.22.0` 与 `@prisma/client@5.10.1`，安装有版本不一致警告；本机生成、测试和构建通过，目标部署环境仍要单独验收。Windows 本机没有证明容器运行或线上部署。
 
 ## 依赖真实来源的下一步

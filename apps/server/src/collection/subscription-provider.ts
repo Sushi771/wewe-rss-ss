@@ -48,6 +48,7 @@ export function assertProviderPage(
       article.id !== identity.id ||
       article.mpId !== expectedMpId ||
       identity.mpId !== expectedMpId ||
+      article.url !== identity.url ||
       ids.has(identity.id)
     )
       throw new Error('PROVIDER_ARTICLE_IDENTITY_INVALID');

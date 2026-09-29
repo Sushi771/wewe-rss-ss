@@ -55,4 +55,17 @@ describe('subscription provider write boundary', () => {
       'PROVIDER_PAGE_INVALID',
     );
   });
+
+  it('requires the provider boundary to receive a canonical HTTPS article URL', () => {
+    for (const rawUrl of [
+      page().articles[0].url.replace('https:', 'http:'),
+      `${page().articles[0].url}&tracking=extra`,
+    ]) {
+      const input = page();
+      input.articles[0].url = rawUrl;
+      expect(() => assertProviderPage(input, mpId)).toThrow(
+        'PROVIDER_ARTICLE_IDENTITY_INVALID',
+      );
+    }
+  });
 });

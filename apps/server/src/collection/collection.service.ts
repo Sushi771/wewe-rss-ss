@@ -91,11 +91,28 @@ export class CollectionService {
         const result = await provider.refreshSubscription(input.mpId);
         accepted = result.accepted;
       }
+      const fetched = await provider.fetchArticles(input.mpId, input.mpName);
+      if (
+        !fetched ||
+        !Array.isArray(fetched.articles) ||
+        fetched.articles.length > 1000
+      )
+        throw new Error('PROVIDER_PAGE_INVALID');
+      // The storage contract accepts only canonical HTTPS URLs. Normalize
+      // upstream parameter order before validating IDs and saving any article.
+      const normalized = {
+        ...fetched,
+        articles: fetched.articles.map((item) => {
+          try {
+            if (new URL(item.url).protocol !== 'https:') throw new Error();
+            return { ...item, url: canonicalArticleUrl(item.url).url };
+          } catch {
+            throw new Error('PROVIDER_ARTICLE_IDENTITY_INVALID');
+          }
+        }),
+      };
       const page = await archiveProviderImages(
-        assertProviderPage(
-          await provider.fetchArticles(input.mpId, input.mpName),
-          input.mpId,
-        ),
+        assertProviderPage(normalized, input.mpId),
       );
       if (!page.articles.length) {
         return {
@@ -125,20 +142,28 @@ export class CollectionService {
         async (tx) => {
           for (const item of page.articles) {
             // Title and time only detect a possible legacy collision; never merge by them.
+            // Normalize the new URL before matching old short-ID rows. The sn
+            // signature may change while biz/mid/idx still name the same article.
+            const identity = canonicalArticleUrl(item.url);
+            const sourceWithoutSn = new URL(identity.url);
+            sourceWithoutSn.searchParams.delete('sn');
+            const sourceBase = sourceWithoutSn.toString();
+            const sourceWithSn = `${sourceBase}&sn=`;
             const matches = await tx.article.findMany({
               where: {
-                mpId: input.mpId,
                 OR: [
                   { id: item.id },
-                  { sourceUrl: item.url },
-                  { verifiedSourceUrl: item.url },
+                  { sourceUrl: sourceBase },
+                  { sourceUrl: { startsWith: sourceWithSn } },
+                  { verifiedSourceUrl: sourceBase },
+                  { verifiedSourceUrl: { startsWith: sourceWithSn } },
                 ],
               },
             });
             if (matches.length > 1)
               throw new Error('原文身份对应多条旧记录，本批未写入');
             const existing = matches[0];
-            if (existing) assertSavedArticleIdentity(existing, item);
+            if (existing) assertSavedArticleIdentity(existing, identity);
             if (!existing) {
               const possibleLegacy = await tx.article.findFirst({
                 where: {
@@ -155,8 +180,8 @@ export class CollectionService {
                   mpId: input.mpId,
                   title: item.title,
                   publishTime: item.publishTime,
-                  sourceUrl: item.url,
-                  verifiedSourceUrl: item.url,
+                  sourceUrl: identity.url,
+                  verifiedSourceUrl: identity.url,
                   contentHtml: item.contentHtml,
                   picUrl: item.picUrl,
                   lastBodyStatus: item.contentHtml
@@ -167,9 +192,9 @@ export class CollectionService {
               created++;
             } else {
               const data = {
-                ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
+                ...(!existing.sourceUrl ? { sourceUrl: identity.url } : {}),
                 ...(!existing.verifiedSourceUrl
-                  ? { verifiedSourceUrl: item.url }
+                  ? { verifiedSourceUrl: identity.url }
                   : {}),
                 ...(!existing.contentHtml && item.contentHtml
                   ? { contentHtml: item.contentHtml }
@@ -177,7 +202,7 @@ export class CollectionService {
                 ...(!existing.picUrl && item.picUrl
                   ? { picUrl: item.picUrl }
                   : {}),
-                ...(!existing.lastBodyStatus && item.contentHtml
+                ...(!existing.contentHtml && item.contentHtml
                   ? { lastBodyStatus: 'available' }
                   : {}),
               };
