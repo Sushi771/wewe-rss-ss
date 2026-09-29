@@ -15,11 +15,11 @@
 
 ## 第一批执行 Agent
 
-| Agent | Worktree / branch | 当前任务 | 状态 | 重要结论 | 输出 commit | 阻塞 | 下一依赖 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| A 来源研究 | `C:/Users/ss/.codex/worktrees/weread-research/wewe-rss-ss` / `codex/research-weread` | 核实官方 skill、`/book/articles`、当前开源取文实现，写 `RESEARCH_WEREAD.md` | 运行中（子 Agent） | 待报 | 待报 | 无 | 给 B 明确的新实验条件 |
-| B 隔离探针 | `C:/Users/ss/.codex/worktrees/weread-probe/wewe-rss-ss` / `codex/probe-runtime` | 审查探针诊断并仅执行有独立依据的最小实验，写 `PROBE_RESULTS.md` | 运行中（子 Agent） | 待报 | 待报 | 等待 A 的实验条件 | A 的认证与请求证据 |
-| C 工程准备 | `C:/Users/ss/.codex/worktrees/provider-ready/wewe-rss-ss` / `codex/provider-integration` | 审查 Provider、身份、增量、保护及副本验收，写 `INTEGRATION_READY.md` | 运行中（子 Agent） | 待报 | 待报 | 无 | 真实来源字段与验收结果 |
+| Agent      | Worktree / branch                                                                        | 当前任务                                                                    | 状态               | 重要结论 | 输出 commit | 阻塞              | 下一依赖               |
+| ---------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------ | -------- | ----------- | ----------------- | ---------------------- |
+| A 来源研究 | `C:/Users/ss/.codex/worktrees/weread-research/wewe-rss-ss` / `codex/research-weread`     | 核实官方 skill、`/book/articles`、当前开源取文实现，写 `RESEARCH_WEREAD.md` | 运行中（子 Agent） | 待报     | 待报        | 无                | 给 B 明确的新实验条件  |
+| B 隔离探针 | `C:/Users/ss/.codex/worktrees/weread-probe/wewe-rss-ss` / `codex/probe-runtime`          | 审查探针诊断并仅执行有独立依据的最小实验，写 `PROBE_RESULTS.md`             | 运行中（子 Agent） | 待报     | 待报        | 等待 A 的实验条件 | A 的认证与请求证据     |
+| C 工程准备 | `C:/Users/ss/.codex/worktrees/provider-ready/wewe-rss-ss` / `codex/provider-integration` | 审查 Provider、身份、增量、保护及副本验收，写 `INTEGRATION_READY.md`        | 运行中（子 Agent） | 待报     | 待报        | 无                | 真实来源字段与验收结果 |
 
 ## 总控下一步
 
