@@ -86,7 +86,7 @@ function environmentGate(env) {
     throw Error('environment_gate');
 }
 
-function recoveryGate(dbPath, inputRunDir) {
+function recoveryGate(dbPath, inputRunDir, healthMarkerPolicy = 'absent') {
   const runDir = fs.realpathSync(inputRunDir);
   if (
     !fs.statSync(runDir).isDirectory() ||
@@ -94,8 +94,21 @@ function recoveryGate(dbPath, inputRunDir) {
   )
     throw Error('run_dir_gate');
   safePrivateRoot(path.dirname(runDir));
-  if (fs.existsSync(path.join(runDir, HEALTH_MARKER)))
+  if (!['absent', 'present'].includes(healthMarkerPolicy))
+    throw Error('health_marker_policy_gate');
+  const healthMarkerPath = path.join(runDir, HEALTH_MARKER);
+  if (healthMarkerPolicy === 'absent' && fs.existsSync(healthMarkerPath))
     throw Error('already_attempted');
+  if (healthMarkerPolicy === 'present') {
+    const healthMarker = JSON.parse(fs.readFileSync(healthMarkerPath, 'utf8'));
+    if (
+      healthMarker.kind !== 'refreshed-mobile-web-health' ||
+      !Number.isFinite(Date.parse(healthMarker.attemptedAt)) ||
+      JSON.stringify(healthMarker.endpoints) !==
+        JSON.stringify(['/web/login/session/init', '/web/shelf/sync'])
+    )
+      throw Error('health_marker_gate');
+  }
   const marker = JSON.parse(
     fs.readFileSync(path.join(runDir, REFRESH_MARKER), 'utf8'),
   );
@@ -760,3 +773,15 @@ async function main() {
 }
 
 if (require.main === module) main();
+
+module.exports = {
+  environmentGate,
+  recoveryGate,
+  runtime,
+  readPayload,
+  numericCode,
+  hint,
+  statusStop,
+  cookieGate,
+  setCookieNames,
+};
