@@ -1,6 +1,12 @@
 # 自建微信公众号订阅：当前精简交接（2026-09-30）
 
-## 2026-09-30 总控续记
+## 2026-09-30 当前续研
+
+- [总控状态](coordination/STATUS.md)已撤回“只剩外部条件”和“目标无合集 ID”两项错误判断。[2026-09-27 真实核查](CHANNEL_INVESTIGATION.md#公开合集的真实多篇列表验证)早已从目标原文发现两个官方合集，四页共 32 个不同文章键；本轮又从八份保存的目标原文 HTML 和生产 feed 的 `public_album_ids` 只读交叉核对。两个合集只是局部来源，不能证明全号覆盖。
+- [当前目标首屏 Probe](coordination/TARGET_ALBUM_PROBE.md)对已核验的“复旦数学营”合集匿名直连一次，HTTP 200 JSON 返回 10 个不同文章键，10/10 个 URL 的 `__biz` 与目标匹配，声明合集总数 19 且有下一页。业务码与原文发布时间仍未可靠核对，五篇接入门槛和持续新增均未完成；正在按审查后的有界步骤复核首屏、分页和原文时间。生产库仍只读，未接 Provider。
+- A [认证来源研究](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md)追到 Mac 客户端同主机 `vid/skey` 来源和移动 token 到 Web Cookie 的桥接，但未证明当前 Windows 有可用于 `/book/articles` 的独立凭据；B [全局候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)追到真实腾讯请求行并按能力缩限，C 继续研究公开文章到合集/主页发现链。以下前轮记录保留当时状态，遇矛盾以上述当前证据为准。
+
+## 2026-09-30 前轮总控续记（历史状态）
 
 - 本轮总控创建 [协调状态](coordination/STATUS.md)，由 A/B/C 三位子 Agent 在独立 worktree/branch 并行执行，总控独占 main 做 review、测试、cherry-pick 和推送。Codex 独立 task 曾延迟注册并与子 Agent 重复，已停止；托管 worktree 工具因扫描大量忽略目录失败，当前三条执行分支为实际独立 Git worktree。生产 SQLite 一直只读，仍是 12 个订阅、1447 篇文章；未切换线上服务。
 - [微信读书研究](coordination/RESEARCH_WEREAD.md)确认旧 WeBook 的 /book/articles 与已失败的 /mp/chapters 确是不同腾讯路径，但前者需要的 skey/vid 没有可审查、合法正常登录且能续期的来源；2025 登录示例是占位资料。B [探针与离线核查](coordination/PROBE_RESULTS.md)只见既有 wrk- Key/旧 accessToken 等字段名，未证明有同一认证体系的 skey/vid，因此没有发目标真实请求。
