@@ -10,6 +10,8 @@
 - [搜狗微信索引专项](coordination/SOGOU_PUBLIC_INDEX.md)用固定开源代码验证本目标四次有界首屏；最近一次 9 条卡片中 8 条作者昵称匹配，同会话 `/link` 给出签名腾讯 `/s` 形状。唯一一次腾讯签名页 HTTP 200 但缺 `#js_content`，**没有目标 `biz/mid/idx/ct`、正文和图片证据**，已停止该候选。移动入口仍是未验候选。当前不能接入全号 Provider；继续追合法认证和独立取文来源。
 - 最近远端 CI 的 `Format check` 曾因三份研究文档失败，`6d4de92` 修复后 [运行 36613922766](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36613922766) 两个 job 成功。新合入的研究提交仍须按最新远端运行复核。
 - B 又找到有当前源码与一手响应记录的[微信读书 Web 搜索代理](coordination/SOURCE_CANDIDATE_MATRIX.md)：同源页面直连腾讯 `POST /web/wx_search_broker_proxy`，与旧失败列表及 Gateway 搜索不同。[一次性隔离探针](coordination/WEB_SEARCH_BROKER_PROBE.md)已准备并通过八项离线自检，当前未确认本人有效 Web 登录页面，目标 POST 仍为 **0 次**；本人正常登录后才验证首屏。B 继续查其分页、作者过滤和持续更新依据；此候选尚不能充当完整订阅目录。主分支 `128bf88` 的 [CI 运行 36618790436](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36618790436) 两个 job 均成功。
+- B 又核到[官方搜索页自然滚动的独立实现](coordination/SOURCE_CANDIDATE_MATRIX.md)：2026-07 四个其他号三跑 35/35/33 条及原文链接，和直接 POST 搜索代理重复约 15 条首屏的流程不同。独立[单滚动探针](coordination/WEREAD_NATURAL_SCROLL_PROBE.md)已通过 17 项离线断言，目标页在线导航/滚动为零；须本人正常登录并确认官方目标搜索首屏后才可实测。搜索卡片相对时间不能替代原文 `ct`，单次滚动也不证明全号历史或持续更新。
+- C 对有限合集的另一篇目标原文只发一次匿名请求，HTTP 200 HTML 有正文节点，但解析身份与合集记录至少一项不符；该次未保留差异字段，不能判断原因或认作真实新文章，不重试同一 URL。四页旧列表与八份旧原文的四字段离线对照 8/8 一致；见[公开页面记录](coordination/PUBLIC_PAGE_DISCOVERY.md)。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 
