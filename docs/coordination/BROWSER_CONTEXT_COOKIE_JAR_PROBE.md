@@ -26,4 +26,16 @@
 
 本机依赖检查：项目及全局 Node/Python 环境此前未装 Playwright；仅从本机 npm 缓存**离线**安装 `playwright-core@1.58.2` 到 Git 外的私有临时目录，未改项目依赖或生产配置。`--runtime-check` 在本机 Edge 上启动无页面的非持久 Context，设为离线后关闭；结果 `passed`，SQLite 读取 0、目标请求 0、页面导航 0。`--plan` 及 7 个纯模拟 `--self-test` 场景通过，SQLite 读取 0、网络请求 0、生产写入 0；覆盖完整五 Cookie、init 形状、书架有效与未知、书架限流、`-2010/-2012` 停止、双账号阻断及输出不含模拟凭据。
 
-**当前仅交方案、代码和离线检查供总控复审；没有执行 init、书架或目标搜索。**在线执行前需确认此“完整 jar、无页面”的独立对照范围，并由总控明确放行。结果无论成功或受限，本脚本都不自动进入页面内 fetch 实验。
+## 2026-09-30 总控复审后的一次在线结果
+
+总控复审上述“完整 jar、无页面”的独立范围后，先只读检查生产 SQLite：`quick_check=ok`、账号数 **1**；再运行脚本的 `--execute` **一次**。脱敏结果如下（只列受控字段，不含原始响应或 Cookie 值）：
+
+```json
+{"decision":"stop_auth_expired_candidate","requestCount":2,"initRequests":1,"shelfRequests":1,"searchRequests":0,"pageNavigations":0,"initHttp":200,"initType":"json","initSetCookieNames":["wr_pf","wr_ql","wr_rt","wr_skey","wr_vid"],"shelfCookieCount":5,"searchCookieCount":5,"wrVidMatchesMobile":true,"wrSkeyApplicable":true,"shelfHttp":200,"shelfType":"json","shelfCode":-2012}
+```
+
+init 无异常业务码，服务器下发的五个 Cookie 名均在同一非持久 Context 的书架和搜索路径作用域内；`wr_vid` 与所用 `mobile.vid` 在内存中精确一致，`wr_skey` 非空。Playwright 官方 Cookie jar 语义使后续 `context.request` 自动携带适用 Cookie，脚本没有手工裁剪或构造 Cookie 头；由于禁止请求监听/抓包，本轮只证明 jar 中五个 Cookie 对两路径**可用**，没有另行观察线上请求头。
+
+随后书架健康请求得到 HTTP 200 JSON，顶层 `errCode=-2012`，因此立即停止，**目标搜索 0 次**，没有打开页面、刷新、重试或追加页面内 fetch。`-2012` 在此只标“会话失效候选”停止分类；没有腾讯官方业务定义可以据此断定哪个 Cookie、会话生命周期或权限环节造成它。完整 jar 在本次书架健康门禁中仍未获明确有效状态，故不能把先前搜索的 `-2012` 单独归因为少送两个 Cookie；两个探针测试的端点不同，**尚未实测完整 jar 对目标搜索的结果**，也未检验正常官网页面上下文。下一阶段若要研究页面内请求，应另列来源与门禁，不在本次流程续发。
+
+本次没有把凭据、Cookie 值、账号 ID、目标查询结果、文章标题或 URL、响应正文、私有 DB 和浏览器会话文件输出或落盘，也没有写生产库。
