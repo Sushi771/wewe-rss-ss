@@ -32,6 +32,7 @@
 - [新移动凭据 Web 对照](coordination/REFRESHED_MOBILE_WEB_HEALTH_PROBE.md)一次 init 加一次书架均 HTTP 200，完整 Cookie jar 账号吻合、书架有 `books/synckey`；旧凭据同形书架 `-2012`。目标搜索仍为 0，A 正按腾讯第一方静态 JS 准备准确号名首屏一次请求；有效书架并不证明取到公众号文章。
 - C 的一条正文互链候选长 `/s?__biz...` 一次匿名 GET 得 HTTP 302 后即停，无正文验收；只缩限该 URL/时点/形状。生产库另外 13 条未尝试且已核验的旧文章具有官方短 `/s/<token>` 来源路径，C 正审其与长链请求的真实差异；不猜 `chksm`，不重发已停的长链。
 - [另一篇目标旧文双图验证](coordination/TARGET_TWO_IMAGE_PROBE_PLAN.md)各一次 CDN GET 得完整 PNG 92,237 字节和 JPEG 130,633 字节；SQLite 副本归档后禁网 Obsidian/限定单篇 ZIP 两附件字节一致，其他旧字段及 12/1447 基数不变。生产库未写，此结果不能扩大成整号图片完整或新增订阅。
+- [新凭据目标准确号名首屏](coordination/REFRESHED_MOBILE_TARGET_SEARCH_PROBE.md)一次 Web init 加一次官方搜索均 HTTP 200；15 条中 11 条来源名精确匹配，具有不同 `docID` 和原文链接，响应给出官方续页游标及 `continueFlag=true`。原文链接未显式给出目标 `biz`，尚未核实文章身份、发表时间或正文，不能计入五篇验收。A 正按腾讯静态 JS 审查一次有界续页；C 独立准备一条已有旧目标文章的公开短 `/s/<token>` 验证。生产库未写。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 

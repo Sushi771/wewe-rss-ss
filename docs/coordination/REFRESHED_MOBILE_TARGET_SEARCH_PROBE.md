@@ -1,6 +1,6 @@
 # 新移动凭据：目标准确号名首屏搜索
 
-2026-09-30。总控按[新 token Web 书架健康对照](REFRESHED_MOBILE_WEB_HEALTH_PROBE.md)做过**一次**线上运行：init HTTP 200、五个 Web Cookie、`wr_vid` 与恢复 `vid` 一致；同一隔离上下文的 Web shelf HTTP 200，存在 `books/synckey`，`decision=web_shelf_accepted`。搜索 0 次、生产写入 0、健康 marker 保留。该结果只证明书架会话有效，尚未证明目标准确号名搜索。本文件只准备下一次探针；**本线未在线执行**。
+2026-09-30。总控按[新 token Web 书架健康对照](REFRESHED_MOBILE_WEB_HEALTH_PROBE.md)做过**一次**线上运行：init HTTP 200、五个 Web Cookie、`wr_vid` 与恢复 `vid` 一致；同一隔离上下文的 Web shelf HTTP 200，存在 `books/synckey`，`decision=web_shelf_accepted`。随后本探针对目标准确号名做一次隔离首屏搜索，结果见下文。生产 SQLite 始终只读。
 
 ## 一手请求形状
 
@@ -21,8 +21,14 @@
 ```powershell
 node scripts/research/probe-refreshed-mobile-target-search.cjs --plan
 node scripts/research/probe-refreshed-mobile-target-search.cjs --self-test
-# 总控复审后才可使用私有路径执行；本线未执行。
+# 以下占位路径不可直接运行；本次私有目录已有搜索 marker，禁止同形重发。
 node scripts/research/probe-refreshed-mobile-target-search.cjs --execute --db <ABSOLUTE_DB_PATH> --run-dir <ABSOLUTE_REFRESH_RUN_DIRECTORY> --playwright-core <ABSOLUTE_PLAYWRIGHT_CORE_DIR> --browser <ABSOLUTE_EDGE_OR_CHROME_EXE> --approved-online
 ```
 
 离线 `node --check`、`--plan`、`--self-test` 已通过：假 SQLite/私有恢复与健康 marker 测账号门禁；假 Context 测新 accessToken、首屏请求体、完整 jar、目标 `biz`、键摘要及脱敏；验证码、Cookie 身份不符和 `-2012` 最多分别发一次 init 或一次 init 加一次搜索，缺 `content.data` 停止。线上请求 0、生产库读写 0。
+
+## 2026-09-30 总控唯一首屏结果
+
+新隔离 Web init 与目标搜索各一次，均 HTTP 200；完整五 Cookie 的 `wr_vid` 与恢复账号匹配。搜索顶层 `ret=-1`、`content.ret=0`，返回 `content.data` **15 桶/15 条**；其中 **11 条** `source.title` 精确匹配目标准确号名，11 条都有 `docID`、`doc_url`、`timestamp` 和 `source.dateTime` 字段，文章键摘要各不相同。显式 `doc_url.__biz` 与目标 `biz` 匹配数为 **0**，所以本轮没有把这 11 条当作目标号已核验文章。响应含 `offset/searchID/cookies/continueFlag`，`continueFlag=true`；本次没有使用它们续页。总请求 **2**，分页、原文、页面导航与生产库写入均 **0**；私有搜索 marker 保留，未输出原始 URL、标题、游标、Cookie 或 token。
+
+这个结果证明**当前本人会话的腾讯官方搜索首屏确实返回目标准确来源名卡片**，与旧凭据 `-2012` 的失败有实质差异。索引时间不是已核发表时间，来源名也不能替代 `biz`；下一轮分别核一次官方游标续页是否真新增，以及某条官方原文链接的账号身份、原文 `ct`、正文和图片。首屏 11 条不是五篇真实文章验收，更不是全号订阅恢复。
