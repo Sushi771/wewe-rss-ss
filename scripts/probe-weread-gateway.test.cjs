@@ -205,6 +205,7 @@ test('search mode sends one scoped request and prints bounded, cautious evidence
   });
   assert.equal(lines.length, 1);
   assert.equal(lines[0].groupCount, 1);
+  assert.equal(lines[0].printedGroupCount, 1);
   assert.equal(lines[0].returnedItemCount, 23);
   assert.equal(lines[0].hasMore, true);
   assert.equal(lines[0].printedCount, 20);
@@ -221,6 +222,36 @@ test('search mode sends one scoped request and prints bounded, cautious evidence
     JSON.stringify(lines),
     /private\.example|key=secret|wrk-hidden|MP_TEST_/,
   );
+});
+
+test('search keeps aggregate counts but bounds printed group labels', async () => {
+  const lines = [];
+  const code = await run({
+    mode: 'search',
+    env: { WEREAD_API_KEY: key },
+    fetchImpl: async () =>
+      json({
+        results: Array.from({ length: 100 }, (_, index) => ({
+          title: `Group ${index}`,
+          books: [
+            {
+              bookInfo: {
+                bookId: `MP_TEST_${index}`,
+                title: `Article ${index}`,
+              },
+            },
+          ],
+        })),
+      }),
+    log: (line) => lines.push(JSON.parse(line)),
+  });
+  assert.equal(code, 0);
+  assert.equal(lines[0].groupCount, 100);
+  assert.equal(lines[0].printedGroupCount, 20);
+  assert.equal(lines[0].groups.length, 20);
+  assert.equal(lines[0].returnedItemCount, 100);
+  assert.equal(lines[0].printedCount, 20);
+  assert.doesNotMatch(JSON.stringify(lines), /Group 99|Article 99/);
 });
 
 test('search mode accepts a zero-result page without calling another endpoint', async () => {
