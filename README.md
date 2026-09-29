@@ -9,9 +9,15 @@
 
 </div>
 
-## 公众号订阅恢复实施状态（2026-09-29）
+## 当前方向（2026-09-29）
 
-当前按[正式实施任务书](docs/SUBSCRIPTION_IMPLEMENTATION_TASK.md)推进，工作状态以[精简交接](docs/DEVELOPMENT_HANDOFF.md)为准。Wechat2RSS 私有实例是第一候选，已有的 RSS、Markdown、Obsidian、SQLite 与按号批量导出继续由本项目负责。旧微信读书直连、中转复刻和电脑微信采集已停止。
+本 fork 的最高优先级是研究并实现可自行维护的微信读书公众号订阅模块，暂停 Wechat2RSS 采购和部署。已有 Provider、私人登录、数据库保护、正文图片和离线导出保留；目前尚未从新来源取得目标号五篇真实文章，未接入生产订阅。现行要求见 [AGENTS.md](AGENTS.md)、[交付任务](docs/PRIVATE_ONLINE_DELIVERY_TASK.md)和[精简交接](docs/DEVELOPMENT_HANDOFF.md)。
+
+## 历史方案：公众号订阅恢复实施状态
+
+> 以下 Wechat2RSS 配置、授权与部署说明是前轮记录，现已暂停，不作为当前操作步骤。
+
+前轮曾按[当时的实施任务书](docs/SUBSCRIPTION_IMPLEMENTATION_TASK.md)推进，Wechat2RSS 私有实例当时是第一候选；已有的 RSS、Markdown、Obsidian、SQLite 与按号批量导出继续由本项目负责。
 
 代码已增加显式 Provider 路由和默认关闭的 Wechat2RSS 接线；本机尚无授权实例，目标公众号五篇、正文、图片、持续新文和订阅前历史均未真实验证。生产库仍是只读核对的 12 号、1447 篇，本轮不修改生产数据。模拟测试或构建通过不表示订阅已恢复。
 
@@ -228,8 +234,6 @@ pnpm run start:server
 ## ⚠️ 风险声明
 
 为了确保本项目的持久运行，某些接口请求将通过 `weread.111965.xyz` 进行转发。请放心，该转发服务不会保存任何数据。
-
-
 
 ## 📄 License
 
