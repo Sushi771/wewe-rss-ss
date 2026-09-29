@@ -35,6 +35,7 @@
 - [新凭据目标准确号名首屏](coordination/REFRESHED_MOBILE_TARGET_SEARCH_PROBE.md)一次 Web init 加一次官方搜索均 HTTP 200；15 条中 11 条来源名精确匹配，具有不同 `docID` 和原文链接，响应给出官方续页游标及 `continueFlag=true`。当时仅 HTTPS 分类器记录目标 `biz` 匹配 0，可能漏掉 HTTP 原文；尚未核实文章身份、发表时间或正文，不能计入五篇验收。A 已完成一次官方游标续页，C 已完成另一条已知官方短路径原文验证。生产库未写。
 - [短路径一次实测](coordination/PUBLIC_PAGE_DISCOVERY.md)对两合集外一篇已有目标旧文的已存 `/s/<token>` 发一次匿名 GET，HTTP 200，四字段、短 canonical、字面发表时间及正文均闭环，见 1 张 `data-src` 图片。页面明示第三个同号官方合集 ID，但该次只记录计数、未保存值；C 正从既存证据离线寻找精确 ID，绝不重发该 URL。此结果只证明选中旧文当前可读，未取得新增文章或账号全史。
 - [官方游标续页一次实测](coordination/REFRESHED_MOBILE_SEARCH_CURSOR_PROBE.md)在新隔离 Web 会话中取首屏和一页续页，均 HTTP 200；目标号名称匹配数 11→15、两页候选键交集 0、次页新增 15、游标 offset 前进，未读第三页。当前 HTTPS 严格分类器把所有 `doc_url` 记为 `malformed`、目标 `biz` 记 0；腾讯页面允许 HTTP 原文，因此两项可能是假阴性，尚未解释实际 URL 结构。仍没有可核目标 `biz/ct` 或正文。A 正离线审官方卡片 URL 处理及一次最小身份验证，不计五篇验收。
+- C [离线恢复审计](coordination/PUBLIC_PAGE_DISCOVERY.md)无法从既存文件/数据库找回首次短链响应中未保存的第三合集精确 ID，且整页计数不能证明该旧文属于该合集。不能猜 ID 或重发同链。C 正对另一篇尚未尝试的已核旧文准备一次有界短链验证，若页面明确给出同号合集身份，只保存到私有文件再审官方合集首屏。B 新增 `/web/mp/cover` 真发送行，但只有每号当前一篇的证据；多篇仍走旧端点，不充当订阅目录。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 
