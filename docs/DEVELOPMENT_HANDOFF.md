@@ -18,6 +18,8 @@
 - 下一轮 A/B/C 的[认证证据](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md)、[候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)和[公开页面代码链](coordination/PUBLIC_PAGE_DISCOVERY.md)已整合：移动 token 到 Web 初始化有源码映射，旧 `/book/articles` 自定义头仍未证；移动原生桥无公开底层 HTTP 认证；公开 `publictag` 需要目标页尚未给出的 `tagId`，已有合集 JS 只翻单一合集。已据此转入一次官方搜索首屏的隔离验证准备，再依响应决定真实续页/正文验证。`26152c0` 的 [CI 36627037368](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36627037368) 已通过。
 - A 已只读核实本机独立 `mobile` 凭据确来自本人旧正常登录；[一次官方 Web 会话桥接](coordination/WEREAD_MOBILE_TO_WEB_PROBE.md)返回 `POST /web/login/session/init` HTTP 200，服务器下发 `wr_vid/wr_skey/wr_rt` 且账号身份匹配。随后在新隔离进程内，[一次 init 加一次目标准确号名搜索](coordination/MOBILE_WEB_SEARCH_PROBE.md)得到同样的 Cookie 下发，但 `POST /web/wx_search_broker_proxy` 为 HTTP 200、`errCode=-2012`，无文章内容，立即停止；两轮均未保存 Cookie 或写生产库。该结果仅排除目前的 Node 直连请求形状，不代表浏览器同源搜索或旧 `/book/articles` 不可用。A/B/C 继续追认证语义、不同腾讯来源和公开发现机制，暂不重复同形状请求；五篇新来源验收、分页、原文时间和持续更新仍未完成。
 - 公开合集采集补上受约束的旧短链 `verifiedSourceUrl` 绑定：必须短链原文有可信发表时间，且其完整带 `sn` 链接与官方合集项相同；旧非空绑定、正文和指标保留。隔离 SQLite 的匹配与 `sn` 冲突测试通过，后续需在真实可核验原文及图片字节上做副本导出与重启验收。生产库未执行这次采集或绑定，六篇旧文章的既有正文状态未变。
+- A 的[认证复核](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md#2026-09-30-web-搜索--2012-的认证边界)指出先前 Node 搜索只发了服务器五个 Cookie 中的三个；`-2012` 的确切原因仍未知。下一项有源码支持的对照是在非持久浏览器上下文保留完整 Cookie jar，先用同源只读接口验会话，再只发一次页面内准确号名搜索；遇验证或异常立即停。B [矩阵增量](coordination/SOURCE_CANDIDATE_MATRIX.md)未找到能替代的独立新列表协议，旧 `/web/mp/articles` 临时票据实现依赖项目禁止的流量监听，不作为产品运行路线。
+- C [公开种子](coordination/PUBLIC_PAGE_DISCOVERY.md#生产库已核验长链提供的不同文章种子只读待独立-probe)从旧库只读找到 14 条不在已保存两合集列表中的目标文章身份；[独立单次探针](coordination/VERIFIED_ARTICLE_SEED_PROBE.md)选其中一条未见本轮请求记录的旧文章匿名 GET，HTTP 302，未跟随或重试，没有可解析 HTML、原文时间、图片或新合集。私有哨兵已记该 URL，不能重发；结果不外推其他页面。旧文章不算新来源五篇。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 
