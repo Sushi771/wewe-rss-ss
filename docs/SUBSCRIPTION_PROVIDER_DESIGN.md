@@ -2,6 +2,8 @@
 
 > 当前实施要求见 [订阅恢复实施任务书](SUBSCRIPTION_IMPLEMENTATION_TASK.md)，当前状态见 [精简交接](DEVELOPMENT_HANDOFF.md)。本设计中的“本轮只提交设计”“不部署”和 `/api/query` 首选、历史查询门槛等阶段结论已由新任务书覆盖；保留此文作为设计出处，不作为执行入口。
 
+> 2026-09-29 再次转向 [可自行维护的微信读书订阅主线](PRIVATE_ONLINE_DELIVERY_TASK.md)。本文件中“停止微信读书/自建中转研究”和 Wechat2RSS 采购/接入路线均为历史判断，不再是现行限制或计划；现行实验约束和证据边界见 [自建路线研究](WEREAD_SELF_HOSTED_RESEARCH.md)。
+
 ## 决策与范围
 
 目标产品流程保持为“添加公众号 → 后台订阅 → 手动/定时更新 → 保存文章 → 本地 RSS、Markdown、Obsidian 和图片导出”。本轮只提交设计，不接入真实账号，不购买或部署 Wechat2RSS，不修改生产数据库或运行来源探针。现有 12 个 feed、1447 篇文章、全部旧 ID/正文/图片及导出路径必须保留。

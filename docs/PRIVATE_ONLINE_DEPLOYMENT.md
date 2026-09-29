@@ -1,5 +1,7 @@
 # 私人线上部署操作卡（尚未执行上线）
 
+> **已暂停的历史方案。** 2026-09-29 用户将主线改为可自行维护的微信读书订阅模块，暂停 Wechat2RSS 采购及部署。下文服务器选择、授权和扫码步骤仅保留前轮设计证据，**不是当前待办或购买建议**；当前执行入口见 [自主管理订阅任务](PRIVATE_ONLINE_DELIVERY_TASK.md)。待真实取文能力通过首轮验收后重新确定部署方案。
+
 本配置选择 **DigitalOcean Basic Droplet 2 GiB / 1 vCPU / 50 GiB，Ubuntu 24.04，Singapore**。主应用和 Wechat2RSS 在同一台机器的 Docker Compose 中运行，两个持久化目录分别为 `private-data/sqlite` 与 `private-data/wechat2rss`。应用的正文图片作为 data URI 存在 SQLite 中；按号 ZIP 下载包含相对路径附件。只有主应用的本机 4000 与上游的本机 18080 映射到 `127.0.0.1`，数据库没有网络端口。
 
 访问采用 Tailscale Personal 私人 tailnet 的 HTTPS Serve，不需要另购域名，也不开放 80/443 公网端口。本人及配偶在自己的设备上加入 tailnet，浏览器打开 `https://<服务器名>.<tailnet>.ts.net/dash/` 后输入应用登录码。`tailscale serve --bg 4000` 会在重启后恢复。**不要使用 Funnel**；上游管理页只在服务器本机，首次扫码可用 SSH `-L 18080:127.0.0.1:18080` 临时打开。Tailscale 登录不替代应用会话：RSS、正文 API、图片和 ZIP 同样需要应用会话 cookie。

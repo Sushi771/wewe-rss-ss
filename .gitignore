@@ -79,6 +79,7 @@ web_modules/
 .env.production.local
 .env.local
 .env.wechat2rss
+.env.weread-gateway
 .env.private-online
 private-data/
 .wechat2rss-data/
