@@ -20,12 +20,17 @@ const page = (): ProviderPage => ({
   imageBlocked: 0,
 });
 
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+  'base64',
+);
+
 describe('provider image archive', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it('embeds image bytes so the saved body needs no network after restart', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(Buffer.from([137, 80, 78, 71]), {
+      new Response(png, {
         status: 200,
         headers: { 'Content-Type': 'image/png' },
       }),
@@ -38,6 +43,30 @@ describe('provider image archive', () => {
 
   it('keeps incomplete remote images out of the cached body for later retry', async () => {
     jest.spyOn(global, 'fetch').mockRejectedValue(new Error('offline'));
+    const result = await archiveProviderImages(page());
+    expect(result.articles[0].contentHtml).toBeNull();
+    expect(result.bodyMissing).toBe(1);
+    expect(result.imageBlocked).toBe(1);
+  });
+
+  it('keeps valid cached bytes and drops stale remote lazy-load URLs', async () => {
+    const input = page();
+    input.articles[0].contentHtml = `<div class="rich_media_content"><p>正文</p><img data-src="https://mmbiz.qpic.cn/stale" src="data:image/png;base64,${png.toString('base64')}"></div>`;
+    const fetchMock = jest.spyOn(global, 'fetch');
+    const result = await archiveProviderImages(input);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.articles[0].contentHtml).toContain('data:image/png;base64,');
+    expect(result.articles[0].contentHtml).not.toContain('data-src');
+    expect(result.bodyMissing).toBe(0);
+  });
+
+  it('does not cache a partial image as an offline body', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(png, {
+        status: 206,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
     const result = await archiveProviderImages(page());
     expect(result.articles[0].contentHtml).toBeNull();
     expect(result.bodyMissing).toBe(1);

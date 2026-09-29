@@ -1,5 +1,5 @@
 import { load } from 'cheerio';
-import { fetchAllowedImage } from './image-fetch';
+import { decodeInlineImage, fetchAllowedImage } from './image-fetch';
 import { ProviderPage } from './subscription-provider';
 
 /** Store provider body images inside SQLite so restart and ZIP export do not depend on the CDN. */
@@ -30,7 +30,9 @@ export async function archiveProviderImages(
       try {
         let inline = cached.get(source);
         if (!inline) {
-          const result = await fetchAllowedImage(source);
+          const result = source.startsWith('data:')
+            ? decodeInlineImage(source)
+            : await fetchAllowedImage(source);
           totalBytes += result.bytes.length;
           if (totalBytes > 20_000_000)
             throw new Error('ARTICLE_IMAGES_TOO_LARGE');
@@ -38,6 +40,7 @@ export async function archiveProviderImages(
           cached.set(source, inline);
         }
         $(image).attr('src', inline);
+        $(image).removeAttr('data-src');
       } catch {
         failed = true;
         imageBlocked++;
