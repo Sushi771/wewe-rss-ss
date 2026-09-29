@@ -56,6 +56,14 @@
 
 其他元数据并非可靠替代：八份旧 HTML 的 `og:url` 与 `var msg_link` 都存在，但均为不含完整 `__biz/mid/idx` 的短链；`var appuin` 和 `var itemidx` 均为空。`window.cgiData` 也出现，但其对象未包含上述身份键；`appmsgext` 字符串出现却没有可用的对象赋值证据。故不能仅凭这些字段或 9 月 30 日探针的三个 `false` 声称新页身份冲突。若以后有**另一篇**合法公开原文，首个验证只记录各候选字段“存在/格式/与 URL 及合集相符”的脱敏布尔值，并把无法闭环的结果留为未知。
 
+## 相关文章与页面导航：新的腾讯端点，尚未请求
+
+八份旧目标原文均引用腾讯官方版本化脚本 [`appmsg.muihhh087c466445.js`](https://res.wx.qq.com/mmbizappmsg/zh_CN/htmledition/js/assets/appmsg.muihhh087c466445.js)。2026-09-30 只读取这份**公开静态 JS**，SHA-256 为 `97ef18b57ed7a313da9be9857f401514f8f73adff05fa92c5f6f161dc0905cd1`；未再次请求目标文章或下述数据接口。脚本偏移约 149700–152800 的 `mp-related-article` 组件先在显示条件、`extRes` 完成、无本地缓存时，向同源 `/mp/relatedarticle?action=precheck` 发 GET；仅当 `base_resp.ret=0` 且 `empty_scene=0`，才向同一路径 `action=directgetlist` 发第二个 GET。两个请求的明文参数均为 URL 编码的当前 `article_url`、`__biz/mid/idx`、`has_related_article_info`、`is_pay`、`scene/subscene`、`is_open_comment`，订阅场景可加 `is_from_subscribe=1`。成功响应读取 `list[]`、`more_url`、`show_rec_reason` 等；UI 使用每项 `url/mid/idx/nickname/username/send_time`，并从各条 URL 解析 `__biz` 作上报。源码未见公众号筛选、`begin/count` 或游标；`more_url` 由响应提供，静态页面未提供它，不能预设为分页接口或同号文章。
+
+认证仍待实测确认。该脚本调用腾讯 [`page_utils.muihhh089d3b1886.js`](https://res.wx.qq.com/mmbizappmsg/zh_CN/htmledition/js/assets/page_utils.muihhh089d3b1886.js) 的 `ajax`（2026-09-30 读取的 SHA-256 `8263dec0b6cdd8373e65d5ddefd8802a0f54a1bb13dee91bb2967fe86165c41e`）：偏移约 13558–14500 的 `joinUrl` 会在变量存在时附加页面的 `uin/key/pass_ticket/wxtoken/appmsg_token` 及客户端版本、`__biz`、`x5/f=json`，`joinUserArticleRole` 再加作者身份标志；偏移约 20400–26200 的 Ajax 包装器可走普通同源 XHR 或受支持微信客户端的转发。代码**没有证明**匿名直接请求可得到列表，也没有证明必须有有效私有会话。若独立审查认为值得低频验证，应先只读请求一次 `precheck`，记录 HTTP、腾讯 `base_resp/empty_scene` 与账号身份的脱敏结果；仅在其返回可用且用户授权范围明确时，另行考虑 `directgetlist`。不得复用旧目标页中看似非空的 `uin/key` 作为可用凭据证据，也不得把微信客户端转发作为产品运行方式。
+
+已保存的八份目标 HTML 离线核对：`related_article_info.has_related_article_info` 与页面 `hasRelatedArticleInfo` 均为 **8/8 等于零**，`relatedArticleFlag` 的字面赋值均为空；`related_article_info` 仅有标志和付费/红包信息，未内嵌 `list`，`related_tag` 八份均为空，出现的 `at_biz_list.list` 五份也均为空。每页 `album_info_list` 仍只指向自己的已知目标合集，未由这些字段发现第三个目标合集。零标志不等于该端点永远返回空推荐，尤其未保存的 9 月 30 日文章只知道出现了字段名，**不知道值**。即使 `directgetlist` 可用，它也是与当前文章相关的推荐结果，可能跨号、数量有限且无已证分页；只有逐项核对 `__biz/mid/idx/send_time` 并证明稳定覆盖后，才能讨论作为目标号增量发现来源。
+
 ## 当前验证顺序与停止条件
 
 1. 独立 Probe Agent 正用**旧官方 HTML 确认的目标 `biz+复旦数学营 album_id`**只请求一次 2026-09-30 匿名首屏；C 线不重复该请求。先看 HTTP/业务状态、账号身份、条目数和字段名。若遇验证码、限流、身份不符立即停止相应网络请求。
