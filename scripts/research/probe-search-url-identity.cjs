@@ -460,7 +460,7 @@ async function persistUntilDurable(runDir, record, options = {}) {
         error.message === 'candidate_file_limit'
       )
         throw error;
-      if (attempts === 1 || attempts % 12 === 0) {
+      if (attempts === 1) {
         try {
           notify({
             decision: 'local_candidate_persistence_retry',
@@ -471,7 +471,8 @@ async function persistUntilDurable(runDir, record, options = {}) {
           /* Keep the candidate in memory. */
         }
       }
-      await wait(5_000);
+      if (attempts >= 3) throw Error('candidate_persistence_stop');
+      await wait(1_000);
     }
   }
 }
@@ -1016,6 +1017,20 @@ async function selfTest() {
       notify: () => {},
     });
     assert.equal(localAttempts, 2);
+    assert.equal(calls, 2);
+    let failedWrites = 0;
+    await assert.rejects(
+      persistUntilDurable(runDir, record, {
+        writer: () => {
+          failedWrites++;
+          throw Error('fixture_io');
+        },
+        wait: async () => {},
+        notify: () => {},
+      }),
+      /candidate_persistence_stop/,
+    );
+    assert.equal(failedWrites, 3);
     assert.equal(calls, 2);
     calls = 0;
     const stopped = await probe(mobile, fakeLaunch({ errMsg: '请完成验证码' }));

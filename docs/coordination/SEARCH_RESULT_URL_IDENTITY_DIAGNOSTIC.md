@@ -16,7 +16,7 @@
 
 从号名精确匹配项中最多择一**公开摘要**：优先 URL `__biz` 与 `bizUin` 都匹配目标，其次单一字段匹配，再次可解析腾讯域链接，最后第一个号名匹配项。公开输出只含该项 `docID/doc_url` 派生短哈希、结构分类、字段存在/匹配布尔、时间字段存在布尔及 `originalBizAndCtVerified:false`；不含标题、原始链接、目标 biz、mid/idx、索引时间、Cookie/token、游标或原始响应。
 
-合格候选另存于同一私有 runDir 的 `search-url-identity-candidates.json`，最多 15 条，解析保护上限仍为 100 条。每条必须同时满足：`source.title` 精确等于目标号名；**原存、未解码** `doc_url` 是无用户信息/端口/控制字符/反斜杠的绝对 HTTP(S) `mp.weixin.qq.com` `/s?__biz=...&mid=...&idx=...` 或 `/s/<token>`；URL `__biz` 或索引 `bizUin` 至少一个与本地已知目标身份一致，另一字段如存在不得冲突。查询形还必须由 URL `__biz` 匹配并含数字 `mid/idx`；重复身份参数、HTML/百分号/斜线转义形式均排除。只存原存 `doc_url`、`docID`、索引时间、`bizUin` 对照和验证状态，不存完整响应、Cookie、游标。`wx` 权限私有临时文件先写入并 `fsync`，同目录原子独占发布，冲突不覆盖；失败仅做本地持久化重试，不再发送网络请求。文件写入后按 runDir、marker、格式、链接及身份规则回读核验。每条均标记 `originalBizAndCtVerified:false`：这是**索引主张**，不能当作已核目标文章。
+合格候选另存于同一私有 runDir 的 `search-url-identity-candidates.json`，最多 15 条，解析保护上限仍为 100 条。每条必须同时满足：`source.title` 精确等于目标号名；**原存、未解码** `doc_url` 是无用户信息/端口/控制字符/反斜杠的绝对 HTTP(S) `mp.weixin.qq.com` `/s?__biz=...&mid=...&idx=...` 或 `/s/<token>`；URL `__biz` 或索引 `bizUin` 至少一个与本地已知目标身份一致，另一字段如存在不得冲突。查询形还必须由 URL `__biz` 匹配并含数字 `mid/idx`；重复身份参数、HTML/百分号/斜线转义形式均排除。只存原存 `doc_url`、`docID`、索引时间、`bizUin` 对照和验证状态，不存完整响应、Cookie、游标。`wx` 权限私有临时文件先写入并 `fsync`，同目录原子独占发布，冲突不覆盖；一般本地写入错误最多尝试三次，仍失败则停止，不再发送网络请求。文件写入后按 runDir、marker、格式、链接及身份规则回读核验。每条均标记 `originalBizAndCtVerified:false`：这是**索引主张**，不能当作已核目标文章。
 
 后续单篇原文 GET 应是**另一份经复审的脚本**：先用恢复文件核账号/vid 与生产只读备份，再读取这次 marker 和上述私有文件，逐条重验文件不越出私有 runDir、候选原存 URL 的 authority/路径/身份主张及摘要；只从某个候选原存链接构造 HTTPS 请求，原为 HTTP 时仅改协议，不用诊断解码值，不允许跳转/重试或 HTTP 明文发送。取回原文后才核原文 `__biz`、稳定键、`ct` 与正文图片；不能只凭索引号名或时间入库。当前脚本不做 GET。没有 URL `__biz` 或 `bizUin` 对照时，名称匹配仍不能核号；即便两项都匹配，也需原文核验。
 

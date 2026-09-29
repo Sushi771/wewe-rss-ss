@@ -36,6 +36,8 @@
 - [短路径一次实测](coordination/PUBLIC_PAGE_DISCOVERY.md)对两合集外一篇已有目标旧文的已存 `/s/<token>` 发一次匿名 GET，HTTP 200，四字段、短 canonical、字面发表时间及正文均闭环，见 1 张 `data-src` 图片。页面明示第三个同号官方合集 ID，但该次只记录计数、未保存值；C 正从既存证据离线寻找精确 ID，绝不重发该 URL。此结果只证明选中旧文当前可读，未取得新增文章或账号全史。
 - [官方游标续页一次实测](coordination/REFRESHED_MOBILE_SEARCH_CURSOR_PROBE.md)在新隔离 Web 会话中取首屏和一页续页，均 HTTP 200；目标号名称匹配数 11→15、两页候选键交集 0、次页新增 15、游标 offset 前进，未读第三页。当前 HTTPS 严格分类器把所有 `doc_url` 记为 `malformed`、目标 `biz` 记 0；腾讯页面允许 HTTP 原文，因此两项可能是假阴性，尚未解释实际 URL 结构。仍没有可核目标 `biz/ct` 或正文。A 正离线审官方卡片 URL 处理及一次最小身份验证，不计五篇验收。
 - C [离线恢复审计](coordination/PUBLIC_PAGE_DISCOVERY.md)无法从既存文件/数据库找回首次短链响应中未保存的第三合集精确 ID，且整页计数不能证明该旧文属于该合集。不能猜 ID 或重发同链。C 正对另一篇尚未尝试的已核旧文准备一次有界短链验证，若页面明确给出同号合集身份，只保存到私有文件再审官方合集首屏。B 新增 `/web/mp/cover` 真发送行，但只有每号当前一篇的证据；多篇仍走旧端点，不充当订阅目录。
+- [第二篇短链验证](coordination/PUBLIC_PAGE_DISCOVERY.md)对另一篇两合集外的目标旧文一次匿名 GET 得 HTTP 200，四字段、短 canonical、字面 `ct`、正文闭环，见 18 张 `data-src` 图片；内联 `album_info_list` 给出同号新合集精确 ID，已私有原子保存。C 正准备第三合集首屏，尚未请求；文章是旧文，不能算新增。
+- [官方搜索 URL 诊断](coordination/SEARCH_RESULT_URL_IDENTITY_DIAGNOSTIC.md)一次新会话首屏确认 15/15 为原存 HTTP 腾讯 `/s?...` 链接，其中 11 条来源名和 URL `__biz` 均与目标号匹配，`mid/idx` 为数字；旧 HTTPS 分类器的 30/30 `malformed` 和 biz 0 是假阴性。11 条 URL 已写私有候选文件，未发送明文 HTTP、未请求原文。A 正准备对不同候选逐篇只读 HTTPS 原文核验，索引字段尚不能充当五篇真文章。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 

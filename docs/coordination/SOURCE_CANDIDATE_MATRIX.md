@@ -2,7 +2,7 @@
 
 目标号：`妈妈部落畅聊阁 / MP_WXS_3895431412`。本表只把**向腾讯域名发送列表请求的代码或腾讯一手文档**算作来源证据；README 中的功能声称和其他账号的成功不算目标验收。`未知` 表示源码或实测尚未证明，不等于不支持。B 线源码研究未接触私有凭据；总控的隔离请求结果由下方续记单独记录，始终未写生产 SQLite。
 
-**2026-09-30 续记：**表内 Web 搜索代理的“目标未实测”和下方旧 token `-2012` 是历史阶段记录；[新移动凭据首屏](REFRESHED_MOBILE_TARGET_SEARCH_PROBE.md)与[一次官方游标续页](REFRESHED_MOBILE_SEARCH_CURSOR_PROBE.md)均已隔离实测：两页各 15 条、目标准确来源名分别 11 与 15 条，目标候选键交集 0、次页新增 15、offset 前进。旧探针仅接受 HTTPS，可能把 HTTP 原文误标 `malformed` 且漏算目标 `biz`；实际 URL 结构、原文身份、`ct` 和正文待核，不计五篇真实文章，也不证明持续更新。未写生产 SQLite。
+**2026-09-30 续记：**表内 Web 搜索代理的“目标未实测”和下方旧 token `-2012` 是历史阶段记录；[新移动凭据首屏](REFRESHED_MOBILE_TARGET_SEARCH_PROBE.md)与[一次官方游标续页](REFRESHED_MOBILE_SEARCH_CURSOR_PROBE.md)均已隔离实测：两页各 15 条、目标准确来源名分别 11 与 15 条，目标候选键交集 0、次页新增 15、offset 前进。[后续一次 URL 结构诊断](SEARCH_RESULT_URL_IDENTITY_DIAGNOSTIC.md)证明该次首屏 15/15 链接均为 HTTP 腾讯 `/s?...`，11 条号名及 URL `__biz` 同为目标，数字 `mid/idx`；旧 HTTPS 分类的 `malformed` 和 biz 0 是假阴性。11 条原存候选已私有保存，原文身份、`ct` 和正文待核，不计五篇真实文章，也不证明持续更新。未写生产 SQLite。
 
 ## 候选矩阵
 
