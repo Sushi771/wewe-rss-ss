@@ -22,6 +22,8 @@
 - C [公开种子](coordination/PUBLIC_PAGE_DISCOVERY.md#生产库已核验长链提供的不同文章种子只读待独立-probe)从旧库只读找到 14 条不在已保存两合集列表中的目标文章身份；[独立单次探针](coordination/VERIFIED_ARTICLE_SEED_PROBE.md)选其中一条未见本轮请求记录的旧文章匿名 GET，HTTP 302，未跟随或重试，没有可解析 HTML、原文时间、图片或新合集。私有哨兵已记该 URL，不能重发；结果不外推其他页面。旧文章不算新来源五篇。
 - [完整 Cookie jar 探针](coordination/BROWSER_CONTEXT_COOKIE_JAR_PROBE.md)只向腾讯发送 init 与书架健康两次请求：init HTTP 200 下发五个适用 Cookie，书架 HTTP 200 却给 `errCode=-2012`；搜索未发送。故前次搜索失败尚不能单独归因于手工少送两项 Cookie，Web 会话本身的有效性仍未证实。A 正核对一手报告中“init 接受失效 token 但后续业务失败”的机制与移动 token Refresh；下一步先复审刷新/轮换安全，再设计新的单次隔离验证，不在旧会话上盲测。
 - C 将八份旧文章的 15 条前后篇链接离线核到 11 个不同文章键，均属于已保存两合集范围；14 条列表外已核验长链没有被这些邻接链覆盖。另开的图片字节与离线导出 Codex task 已生成独立 Git worktree，但截至本次续记尚未返回正式 task ID，避免重复派发同题 Agent；继续等待注册并复核状态。
+- A 找到旧浏览器扩展直接 `GET /book/articles`、无显式 `skey/vid` 的首屏源码；[本机一次匿名直连](coordination/ANONYMOUS_BOOK_ARTICLES_PROBE.md)得 HTTP 401 后停止，未取列表，不重发该形状。带合法自定义头的旧 WeBook 路线仍待正常认证来源，不能把匿名 401 当作它的结果。A 另核到 [WeRead-Kit 一手 issue](https://github.com/27Aaron/WeRead-Kit/issues/48)：Web init 的 HTTP 200/Cookie 可为死会话，与当前完整 jar 书架 `-2012` 相容但未证本机移动 token 已过期；正在准备一次只读移动书架健康检查，刷新前须解决可能轮换的凭据私有持久化。
+- B [候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)新增腾讯公开搜索页原生桥适配层证据：`/wxsearch/broker` 是传给原生宿主的相对 path，公开 JS 不提供真实 HTTP 域名或登录续期链；`/weixinwap?type=2` 的已查代码只生成导航 URL，尚无可核文章解析与近期回包。二者本轮不凭猜测发 Probe，继续寻找真实发送实现。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 

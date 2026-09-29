@@ -37,6 +37,8 @@
 - C 从生产库只读找到 14 条不在**已保存**两合集 32 键内的已核验长链种子。[独立 Probe](VERIFIED_ARTICLE_SEED_PROBE.md)选一条无本轮已请求记录的旧文章，仅匿名 GET 官方 `/s` **一次**，得到 HTTP 302 后未跟随；页面、身份、原文时间、图片和所属合集均未取得，私有尝试哨兵禁止同 URL 重试。该结果只覆盖此精确 URL 此时的匿名直连，不证明其他公开页没有合集或全号目录；旧库种子不算新增文章。
 - [完整浏览器 Cookie jar 对照](BROWSER_CONTEXT_COOKIE_JAR_PROBE.md)在非持久 Context 中只做一次 Web init 和一次书架健康检查：init HTTP 200、五个 Cookie 均适用且 `wr_vid` 与 mobile 账号匹配；书架 HTTP 200、`errCode=-2012`，因此目标搜索 **0 次**。这说明本次桥接会话未通过书架门禁，尚不能确定 `-2012` 的官方含义、移动 token 是否已失效，也不能把直接搜索或官网页面路径一并排除。A 线正在核对移动 Refresh 的合法来源与轮换语义；无审查结论前不重试旧形状。
 - C 线再对八份旧目标原文做离线邻接核查：15 条非空前后篇链接解码后为 11 个不同 `(mid,idx)`，全部落在已保存两合集 32 键中，与 14 个列表外已核验种子零匹配。它只限制这八页的邻接扩展，不证明其他文章不能发现合集。图片字节与离线导出仍需单独真实验证。
+- A 找到旧浏览器扩展对 `/book/articles` 的**无显式认证头**首屏发送行；[本机按该形状的匿名 Node 单次只读 Probe](ANONYMOUS_BOOK_ARTICLES_PROBE.md)得 HTTP 401 后停止，未取 `reviews`。它只排除本次匿名直连，不排除合法 `skey/vid`；另有[开源作者一手报告](https://github.com/27Aaron/WeRead-Kit/issues/48)证实 Web init 可对无效移动 token 返回 HTTP 200 与 Cookie，故当前优先用受控移动书架健康检查判别旧 token，刷新前须准备私有轮换凭据恢复，不因 init 200 就宣布认证成功。
+- B 追到腾讯搜索页 `_tencent_jsbridge` 的真实 JS 适配层：非 PC `/wxsearch/broker` 只交原生宿主桥，公开代码未给 HTTP 域名、认证或续期，不能把相对 path 猜作自建端点。`/weixinwap?type=2` 的本轮公开代码只找到导航 URL，没有同时给文章解析、分页和近期回包的实现；这是所查索引边界，不是移动公开索引整体失效。
 
 ## 前轮判断（已由上节更新）
 
