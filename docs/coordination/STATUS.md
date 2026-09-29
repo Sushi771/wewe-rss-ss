@@ -22,6 +22,8 @@
 - 最近主分支 `128bf88` 的 [CI 运行 36618790436](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36618790436) 已完成，`lint-test` 与 `private-image` 均成功。此后提交仍分别核验。
 - C 对官方合集中的另一篇 2026-09-14 原文仅发一次匿名 GET：HTTP 200 且进入有正文的页面解析，但解析身份与合集 `biz/mid/idx/sn` 至少一项不符，未保存可追溯的差异字段；该篇身份、原文时间和图片均**未验收**，同 URL 不重试。[离线诊断](PUBLIC_PAGE_DISCOVERY.md)在四页 32 条旧合集记录与八份已保存原文上四字段 8/8 相同，只排除了旧样本的普遍比较错误，不能推断这次具体原因。
 - B 另找到[官方微信读书搜索页自然滚动](SOURCE_CANDIDATE_MATRIX.md)的开源实证：2026-07 四个其他公众号按页面号名筛选，三次取得 35/35/33 条及原文直链；较 2026-09 直接搜索代理 POST 重复首屏的结果有实质差异，但目标号、当前滚动增量及全史覆盖仍未证。[单滚动隔离探针](WEREAD_NATURAL_SCROLL_PROBE.md)17 项离线断言通过，当前目标页导航/滚动均 0；只在本人正常登录且确认官方目标搜索页后作一次自然滚动，不监听网络或批量点击文章。
+- A 进一步从[腾讯搜索页公开静态 JS](RESEARCH_BOOK_ARTICLES_AUTH.md#新专项正常-web-登录到搜一搜的会话链)核到 PC 页面直接 `POST weread.qq.com/web/wx_search_broker_proxy`，显式带浏览器凭据，请求体为 `query/offset/searchid/searchcookies`；响应 `offset/searchID/cookies/continueFlag` 驱动后续滚动。此为实际客户端请求代码，解释页面续页与此前手写参数重放的差异；源码没有按目标 `biz` 过滤，`source.dateTime` 仍只是展示时间，本账号结果与会话有效性尚未在线核验。B 另核实腾讯元宝 Web 的 7/7 仅为**已有标题补原文链接**，不能按号发现新文章，不为订阅列表探测。
+- 主分支 `3e79dcf` 的 [CI 运行 36621435420](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36621435420) 两个 job 均成功；后续提交仍逐次核远端。
 
 ## 前轮判断（已由上节更新）
 
