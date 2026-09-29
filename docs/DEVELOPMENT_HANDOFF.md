@@ -49,6 +49,7 @@
 
 ## 接手事实
 
+- **2026-09-30 最新：**第三个目标号官方合集的精确 ID 已从本人保存且核验过的旧原文提取并私存；官方首屏只读请求一次得到 HTTP 200、`ret=0`，10/10 条有目标 `biz`、文章键与发布时间，种子旧文在首屏，服务声明 54 篇且可续页。C 正准备按真实游标核下一页；A 的微信读书官方搜索两页已返回同号候选，11 条带 URL 身份的首屏候选私存，正准备单篇原文身份、时间、正文及图片验证。上述尚不证明全号订阅恢复，但都是当前可执行的工程研究。生产库保持只读。以[总控状态](coordination/STATUS.md)、[候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)的近期记录为准；下方旧 `542bc70` 等是历史接手快照。
 - 当前执行入口是 [私人线上自主管理订阅任务](PRIVATE_ONLINE_DELIVERY_TASK.md)与 [自建路线证据](WEREAD_SELF_HOSTED_RESEARCH.md)；[完整客户端审计](WEREAD_CLIENT_FLOW_AUDIT.md)是旧实验事实来源。用户已暂停 Wechat2RSS 采购、授权与部署，改以可审查、可自行构建部署、无第三方开发者闭源中转的微信读书订阅核心为主线；旧付费部署卡和 [Provider 设计](SUBSCRIPTION_PROVIDER_DESIGN.md)仅作历史参考。本轮接手时本地 `main` 为 `542bc70`，与 `origin/main` 一致且工作区干净；下次接手重新核对 Git。
 - 本机实际生产库 `apps/server/data/wewe-rss.db` 只读核对 `quick_check=ok`，12 个订阅、1447 篇文章、44 篇缓存正文；目标 `MP_WXS_3895431412` 原库有 194 篇不同 ID、194 个非空发布时间、20 个 `verified_source_url`，仅可用作比对基线，**不是新来源取到五篇**。`provider_refresh_attempt_time` 列尚未进生产。没有生产写库或服务切换；前轮两次官方 Gateway 只读实验之外，本轮只新增一次 `/_list` 能力发现。
 - 用现有在线备份脚本生成一致性备份，报告 `integrityCheck=ok`、12/1447、SHA-256 已核对；备份仅在 Git 忽略的 `output/subscription-implementation/backups/`。又从生产 SQLite 在线复制隔离库，应用新增迁移后比较 `feeds` 和 `articles` 所有旧列逐行摘要，完全一致、`quick_check=ok`。隔离库额外加入一篇测试文章用于 ZIP 验收，绝非真实上游文章。
