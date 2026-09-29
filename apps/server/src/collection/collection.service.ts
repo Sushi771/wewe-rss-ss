@@ -16,6 +16,7 @@ import { archiveProviderImages } from './archive-provider-images';
 import { fetchMp2RssRecent20 } from './mp2rss';
 import { wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
+import { assertProviderPage } from './subscription-provider';
 import {
   assertSavedArticleIdentity,
   bodyRetryTarget,
@@ -91,7 +92,10 @@ export class CollectionService {
         accepted = result.accepted;
       }
       const page = await archiveProviderImages(
-        await provider.fetchArticles(input.mpId, input.mpName),
+        assertProviderPage(
+          await provider.fetchArticles(input.mpId, input.mpName),
+          input.mpId,
+        ),
       );
       if (!page.articles.length) {
         return {
