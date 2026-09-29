@@ -2,7 +2,7 @@
 
 2026-09-30。本人现有移动凭据按一次[只读书架健康检查](MOBILE_SHELF_HEALTH_PROBE.md)请求 `GET https://i.weread.qq.com/shelf/sync`，得到 **HTTP 401、无业务正文**。这说明该次移动书架请求没有接受当前 `vid/accessToken`；它没有测试 `refreshToken`，也不等于列表权限、Web 搜索或旧 `/book/articles` 的结论。
 
-本阶段仅提供 [离线预检脚本](../../scripts/research/probe-mobile-refresh-preflight.cjs) 的 `--plan`、`--self-test`、`--preflight`。**脚本没有 `--execute` 模式，不会发送 `/login` 或其他腾讯请求。**本线未对生产 SQLite 运行 `--preflight`；总控复审后可单独决定是否用生产库只读预检。在线 Refresh 及后续 Web 检查需要下一阶段明确实现和复审。
+本阶段仅提供 [离线预检脚本](../../scripts/research/probe-mobile-refresh-preflight.cjs) 的 `--plan`、`--self-test`、`--preflight`。**脚本没有 `--execute` 模式，不会发送 `/login` 或其他腾讯请求。**总控复审后，已对生产 SQLite 只读运行一次 `--preflight`，结果见下文。在线 Refresh 及后续 Web 检查需要下一阶段明确实现和复审。
 
 ## 固定请求来源
 
@@ -38,4 +38,6 @@ node scripts/research/probe-mobile-refresh-preflight.cjs --preflight --db <ABSOL
 
 ## 已完成的离线验证
 
-`node --check`、`--plan`、`--self-test` 成功。`--self-test` 在系统临时目录建**伪造 SQLite**，实际调用 `node:sqlite.backup`，演练独立副本写入与恢复文件原子落盘、确认原始备份仍是旧伪造 token；网络请求 0、生产库读写 0。当前未运行生产 `--preflight`，更未发在线 Refresh。
+`node --check`、`--plan`、`--self-test` 成功。`--self-test` 在系统临时目录建**伪造 SQLite**，实际调用 `node:sqlite.backup`，演练独立副本写入与恢复文件原子落盘、确认原始备份仍是旧伪造 token；网络请求 0、生产库读写 0。
+
+总控随后用生产 SQLite 的绝对路径和被 Git 忽略的 `private-data/` 运行一次 `--preflight`：返回 `preflight_ready`、`backupIntegrity=true`、`copyRehearsal=true`、`atomicRecoveryRehearsal=true`、`productionWrites=0`、`networkRequests=0`。私有运行目录保留一致性原件与演练副本，未输出其凭据。**在线 Refresh 仍为 0 次**。

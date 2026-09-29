@@ -25,47 +25,73 @@ function args(argv) {
   if (argv.length === 1 && ['--plan', '--self-test'].includes(argv[0]))
     return { mode: argv[0] };
   if (
-    argv.length === 5 && argv[0] === '--preflight' && argv[1] === '--db' &&
-    argv[3] === '--private-root' && path.isAbsolute(argv[2]) &&
+    argv.length === 5 &&
+    argv[0] === '--preflight' &&
+    argv[1] === '--db' &&
+    argv[3] === '--private-root' &&
+    path.isAbsolute(argv[2]) &&
     path.isAbsolute(argv[4])
-  ) return { mode: '--preflight', dbPath: argv[2], privateRoot: argv[4] };
+  )
+    return { mode: '--preflight', dbPath: argv[2], privateRoot: argv[4] };
   throw Error('usage_gate');
 }
 
 function within(parent, child) {
   const relative = path.relative(parent, child).toLowerCase();
-  return relative === '' || (relative !== '..' &&
-    !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
 }
 
 function safePrivateRoot(input) {
   const root = fs.realpathSync(PROJECT_ROOT);
   const privateRoot = fs.realpathSync(input);
   if (!fs.statSync(privateRoot).isDirectory()) throw Error('private_root_gate');
-  if (within(root, privateRoot) &&
-      !within(path.join(root, 'private-data'), privateRoot))
+  if (
+    within(root, privateRoot) &&
+    !within(path.join(root, 'private-data'), privateRoot)
+  )
     throw Error('private_root_gate');
   return privateRoot;
 }
 
 function validMobile(tokenText) {
   let token;
-  try { token = JSON.parse(tokenText); } catch { throw Error('account_gate'); }
+  try {
+    token = JSON.parse(tokenText);
+  } catch {
+    throw Error('account_gate');
+  }
   const mobile = token?.mobile;
   if (!mobile || typeof mobile !== 'object' || Array.isArray(mobile))
     throw Error('mobile_gate');
-  const vid = typeof mobile.vid === 'string' ? mobile.vid :
-    Number.isSafeInteger(mobile.vid) && mobile.vid > 0 ? String(mobile.vid) : '';
-  if (!vid.trim() || !['accessToken', 'refreshToken', 'deviceId']
-    .every((key) => typeof mobile[key] === 'string' && mobile[key].trim()))
+  const vid =
+    typeof mobile.vid === 'string'
+      ? mobile.vid
+      : Number.isSafeInteger(mobile.vid) && mobile.vid > 0
+        ? String(mobile.vid)
+        : '';
+  if (
+    !vid.trim() ||
+    !['accessToken', 'refreshToken', 'deviceId'].every(
+      (key) => typeof mobile[key] === 'string' && mobile[key].trim(),
+    )
+  )
     throw Error('mobile_gate');
   return { token, mobile: { ...mobile, vid } };
 }
 
 function oneAccount(db) {
   const rows = db.prepare('SELECT id, token FROM accounts LIMIT 2').all();
-  if (rows.length !== 1 || typeof rows[0].id !== 'string' ||
-      typeof rows[0].token !== 'string') throw Error('account_gate');
+  if (
+    rows.length !== 1 ||
+    typeof rows[0].id !== 'string' ||
+    typeof rows[0].token !== 'string'
+  )
+    throw Error('account_gate');
   return { row: rows[0], ...validMobile(rows[0].token) };
 }
 
@@ -81,9 +107,15 @@ function integrity(db) {
 
 function sqliteApi() {
   let api;
-  try { api = require('node:sqlite'); }
-  catch { throw Error('sqlite_runtime_gate'); }
-  if (typeof api.DatabaseSync !== 'function' || typeof api.backup !== 'function')
+  try {
+    api = require('node:sqlite');
+  } catch {
+    throw Error('sqlite_runtime_gate');
+  }
+  if (
+    typeof api.DatabaseSync !== 'function' ||
+    typeof api.backup !== 'function'
+  )
     throw Error('sqlite_runtime_gate');
   return api;
 }
@@ -94,7 +126,10 @@ function refreshShape(mobile, timestamp, random) {
   return {
     url: `https://i.weread.qq.com${LOGIN_PATH}`,
     method: 'POST',
-    headers: { ...VERSION_HEADERS, 'content-type': 'application/json; charset=UTF-8' },
+    headers: {
+      ...VERSION_HEADERS,
+      'content-type': 'application/json; charset=UTF-8',
+    },
     body: {
       deviceId: mobile.deviceId,
       deviceName: 'BOOX',
@@ -104,7 +139,8 @@ function refreshShape(mobile, timestamp, random) {
       refCgi: '',
       refreshToken: mobile.refreshToken,
       signature: createHash('sha256')
-        .update(`${timestamp}${mobile.deviceId}${random}`).digest('hex'),
+        .update(`${timestamp}${mobile.deviceId}${random}`)
+        .digest('hex'),
       timestamp,
       trackId: '',
       deviceType: 3,
@@ -116,7 +152,9 @@ function responseHint(value) {
   if (typeof value !== 'string') return null;
   if (/captcha|验证码|安全验证|verifycenter|请完成验证/i.test(value))
     return 'verification';
-  if (/访问过于频繁|请求频繁|限流|限频|rate.?limit|too many|throttl/i.test(value))
+  if (
+    /访问过于频繁|请求频繁|限流|限频|rate.?limit|too many|throttl/i.test(value)
+  )
     return 'rate_limit';
   return null;
 }
@@ -124,22 +162,36 @@ function responseHint(value) {
 function classifyRefreshResponse(previous, status, body) {
   if (typeof body === 'string') {
     const hint = responseHint(body);
-    return { decision: hint ? `stop_${hint}` : 'stop_unexpected_shape',
-      candidate: null };
+    return {
+      decision: hint ? `stop_${hint}` : 'stop_unexpected_shape',
+      candidate: null,
+    };
   }
   if (!body || typeof body !== 'object' || Array.isArray(body))
     return { decision: 'stop_unexpected_shape', candidate: null };
-  const hint = [body.errMsg, body.msg, body.message]
-    .map(responseHint).find(Boolean) ?? (status === 429 ? 'rate_limit' : null);
+  const hint =
+    [body.errMsg, body.msg, body.message].map(responseHint).find(Boolean) ??
+    (status === 429 ? 'rate_limit' : null);
   const access = body.accessToken;
   if (typeof access !== 'string' || !access.trim())
-    return { decision: hint ? `stop_${hint}` :
-      status === 200 ? 'stop_no_new_access' : 'stop_http', candidate: null };
-  const providedVid = body.vid === undefined ? null :
-    typeof body.vid === 'string' ? body.vid :
-      Number.isSafeInteger(body.vid) && body.vid > 0 ? String(body.vid) : null;
-  const refresh = body.refreshToken === undefined ?
-    previous.refreshToken : body.refreshToken;
+    return {
+      decision: hint
+        ? `stop_${hint}`
+        : status === 200
+          ? 'stop_no_new_access'
+          : 'stop_http',
+      candidate: null,
+    };
+  const providedVid =
+    body.vid === undefined
+      ? null
+      : typeof body.vid === 'string'
+        ? body.vid
+        : Number.isSafeInteger(body.vid) && body.vid > 0
+          ? String(body.vid)
+          : null;
+  const refresh =
+    body.refreshToken === undefined ? previous.refreshToken : body.refreshToken;
   const candidate = {
     ...previous,
     vid: providedVid ?? previous.vid,
@@ -148,8 +200,7 @@ function classifyRefreshResponse(previous, status, body) {
   };
   // The candidate is for private recovery first, not for immediate use.
   if (hint) return { decision: `quarantine_${hint}`, candidate };
-  if (status !== 200)
-    return { decision: 'quarantine_http', candidate };
+  if (status !== 200) return { decision: 'quarantine_http', candidate };
   if (providedVid !== null && providedVid !== previous.vid)
     return { decision: 'quarantine_identity_mismatch', candidate };
   if (body.vid !== undefined && providedVid === null)
@@ -159,8 +210,10 @@ function classifyRefreshResponse(previous, status, body) {
   if (body.errCode !== undefined && Number(body.errCode) !== 0)
     return { decision: 'quarantine_business_code', candidate };
   return {
-    decision: providedVid === null ? 'candidate_identity_implicit' :
-      'candidate_identity_matched',
+    decision:
+      providedVid === null
+        ? 'candidate_identity_implicit'
+        : 'candidate_identity_matched',
     candidate,
   };
 }
@@ -168,10 +221,16 @@ function classifyRefreshResponse(previous, status, body) {
 function atomicRecovery(runDir, accountId, mobile) {
   const finalPath = path.join(runDir, 'mobile-refresh-recovery.json');
   if (fs.existsSync(finalPath)) throw Error('recovery_exists');
-  const tempPath = path.join(runDir, `.recovery-${randomBytes(8).toString('hex')}.tmp`);
+  const tempPath = path.join(
+    runDir,
+    `.recovery-${randomBytes(8).toString('hex')}.tmp`,
+  );
   const fd = fs.openSync(tempPath, 'wx', 0o600);
   try {
-    fs.writeSync(fd, JSON.stringify({ formatVersion: 1, accountId, mobile }) + '\n');
+    fs.writeSync(
+      fd,
+      JSON.stringify({ formatVersion: 1, accountId, mobile }) + '\n',
+    );
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
@@ -179,8 +238,10 @@ function atomicRecovery(runDir, accountId, mobile) {
   // On any failure, keep the fsynced temporary file for recovery.
   fs.renameSync(tempPath, finalPath);
   const written = JSON.parse(fs.readFileSync(finalPath, 'utf8'));
-  if (written.accountId !== accountId ||
-      JSON.stringify(written.mobile) !== JSON.stringify(mobile))
+  if (
+    written.accountId !== accountId ||
+    JSON.stringify(written.mobile) !== JSON.stringify(mobile)
+  )
     throw Error('recovery_verify_gate');
   return finalPath;
 }
@@ -201,7 +262,8 @@ function rehearse(backupPath, rehearsalPath) {
     };
     db.exec('BEGIN IMMEDIATE');
     try {
-      const result = db.prepare('UPDATE accounts SET token = ? WHERE id = ? AND token = ?')
+      const result = db
+        .prepare('UPDATE accounts SET token = ? WHERE id = ? AND token = ?')
         .run(JSON.stringify(next), current.row.id, current.row.token);
       if (result.changes !== 1) throw Error('rehearsal_update_gate');
       db.exec('COMMIT');
@@ -210,14 +272,18 @@ function rehearse(backupPath, rehearsalPath) {
       throw error;
     }
     const after = oneAccount(db);
-    if (after.mobile.accessToken !== next.mobile.accessToken ||
-        after.mobile.refreshToken !== next.mobile.refreshToken ||
-        after.mobile.deviceId !== current.mobile.deviceId ||
-        after.mobile.vid !== current.mobile.vid)
+    if (
+      after.mobile.accessToken !== next.mobile.accessToken ||
+      after.mobile.refreshToken !== next.mobile.refreshToken ||
+      after.mobile.deviceId !== current.mobile.deviceId ||
+      after.mobile.vid !== current.mobile.vid
+    )
       throw Error('rehearsal_verify_gate');
     const afterCounts = integrity(db);
-    if (afterCounts.feeds !== beforeCounts.feeds ||
-        afterCounts.articles !== beforeCounts.articles)
+    if (
+      afterCounts.feeds !== beforeCounts.feeds ||
+      afterCounts.articles !== beforeCounts.articles
+    )
       throw Error('preservation_gate');
   } finally {
     db.close();
@@ -243,8 +309,10 @@ async function preflight(dbPath, privateRootInput) {
       original.exec('PRAGMA query_only=ON');
       integrity(original);
       const copied = oneAccount(original);
-      if (copied.row.id !== initial.row.id ||
-          copied.row.token !== initial.row.token)
+      if (
+        copied.row.id !== initial.row.id ||
+        copied.row.token !== initial.row.token
+      )
         throw Error('concurrent_token_change_gate');
     } finally {
       original.close();
@@ -256,9 +324,15 @@ async function preflight(dbPath, privateRootInput) {
       refreshToken: 'offline-fixture-rotated-refresh',
     });
     fs.unlinkSync(fixturePath);
-    return { decision: 'preflight_ready', privateRunDir: runDir,
-      backupIntegrity: true, copyRehearsal: true, atomicRecoveryRehearsal: true,
-      productionWrites: 0, networkRequests: 0 };
+    return {
+      decision: 'preflight_ready',
+      privateRunDir: runDir,
+      backupIntegrity: true,
+      copyRehearsal: true,
+      atomicRecoveryRehearsal: true,
+      productionWrites: 0,
+      networkRequests: 0,
+    };
   } catch (error) {
     if (runDir) error.privateRunDir = runDir;
     throw error;
@@ -271,39 +345,80 @@ async function preflight(dbPath, privateRootInput) {
 async function selfTest() {
   assert.equal(args(['--plan']).mode, '--plan');
   assert.throws(() => args(['--execute']), /usage_gate/);
-  const mobile = { vid: 'fixture-vid', accessToken: 'old',
-    refreshToken: 'fixture-refresh', deviceId: 'fixture-device' };
+  const mobile = {
+    vid: 'fixture-vid',
+    accessToken: 'old',
+    refreshToken: 'fixture-refresh',
+    deviceId: 'fixture-device',
+  };
   const shape = refreshShape(mobile, 123456, 7);
   assert.equal(shape.url, 'https://i.weread.qq.com/login');
-  assert.equal(shape.body.signature,
-    createHash('sha256').update('123456fixture-device7').digest('hex'));
+  assert.equal(
+    shape.body.signature,
+    createHash('sha256').update('123456fixture-device7').digest('hex'),
+  );
   assert.deepEqual(Object.keys(shape.body).sort(), [
-    'deviceId', 'deviceName', 'deviceType', 'inBackground', 'kickType', 'random',
-    'refCgi', 'refreshToken', 'signature', 'timestamp', 'trackId',
+    'deviceId',
+    'deviceName',
+    'deviceType',
+    'inBackground',
+    'kickType',
+    'random',
+    'refCgi',
+    'refreshToken',
+    'signature',
+    'timestamp',
+    'trackId',
   ]);
-  const rotated = classifyRefreshResponse(mobile, 200,
-    { vid: 'fixture-vid', accessToken: 'new', refreshToken: 'new-refresh' });
+  const rotated = classifyRefreshResponse(mobile, 200, {
+    vid: 'fixture-vid',
+    accessToken: 'new',
+    refreshToken: 'new-refresh',
+  });
   assert.equal(rotated.decision, 'candidate_identity_matched');
   assert.equal(rotated.candidate.refreshToken, 'new-refresh');
-  assert.equal(classifyRefreshResponse(mobile, 200,
-    { accessToken: 'new' }).candidate.refreshToken, mobile.refreshToken);
-  assert.equal(classifyRefreshResponse(mobile, 200,
-    { vid: 'other-account', accessToken: 'new' }).decision,
-  'quarantine_identity_mismatch');
-  assert.equal(classifyRefreshResponse(mobile, 401,
-    { accessToken: 'new' }).decision, 'quarantine_http');
-  assert.equal(classifyRefreshResponse(mobile, 200,
-    { accessToken: 'new', refreshToken: null }).decision,
-  'quarantine_invalid_refresh');
-  assert.equal(classifyRefreshResponse(mobile, 429,
-    { errMsg: '请求频繁' }).decision, 'stop_rate_limit');
-  assert.equal(classifyRefreshResponse(mobile, 200,
-    '<h1>验证码</h1>').decision, 'stop_verification');
-  assert.equal(classifyRefreshResponse(mobile, 200,
-    { accessToken: 'new', errMsg: '安全验证' }).decision,
-  'quarantine_verification');
+  assert.equal(
+    classifyRefreshResponse(mobile, 200, { accessToken: 'new' }).candidate
+      .refreshToken,
+    mobile.refreshToken,
+  );
+  assert.equal(
+    classifyRefreshResponse(mobile, 200, {
+      vid: 'other-account',
+      accessToken: 'new',
+    }).decision,
+    'quarantine_identity_mismatch',
+  );
+  assert.equal(
+    classifyRefreshResponse(mobile, 401, { accessToken: 'new' }).decision,
+    'quarantine_http',
+  );
+  assert.equal(
+    classifyRefreshResponse(mobile, 200, {
+      accessToken: 'new',
+      refreshToken: null,
+    }).decision,
+    'quarantine_invalid_refresh',
+  );
+  assert.equal(
+    classifyRefreshResponse(mobile, 429, { errMsg: '请求频繁' }).decision,
+    'stop_rate_limit',
+  );
+  assert.equal(
+    classifyRefreshResponse(mobile, 200, '<h1>验证码</h1>').decision,
+    'stop_verification',
+  );
+  assert.equal(
+    classifyRefreshResponse(mobile, 200, {
+      accessToken: 'new',
+      errMsg: '安全验证',
+    }).decision,
+    'quarantine_verification',
+  );
 
-  const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-refresh-self-test-'));
+  const testRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'mobile-refresh-self-test-'),
+  );
   try {
     const dbPath = path.join(testRoot, 'fixture.sqlite');
     const privateRoot = path.join(testRoot, 'private');
@@ -311,61 +426,104 @@ async function selfTest() {
     const { DatabaseSync } = sqliteApi();
     const db = new DatabaseSync(dbPath);
     try {
-      db.exec('CREATE TABLE accounts (id TEXT PRIMARY KEY, token TEXT NOT NULL)');
+      db.exec(
+        'CREATE TABLE accounts (id TEXT PRIMARY KEY, token TEXT NOT NULL)',
+      );
       db.exec('CREATE TABLE feeds (id TEXT PRIMARY KEY)');
       db.exec('CREATE TABLE articles (id TEXT PRIMARY KEY)');
-      db.prepare('INSERT INTO accounts (id, token) VALUES (?, ?)')
-        .run('fixture-account', JSON.stringify({ mobile, unrelated: 'preserve' }));
+      db.prepare('INSERT INTO accounts (id, token) VALUES (?, ?)').run(
+        'fixture-account',
+        JSON.stringify({ mobile, unrelated: 'preserve' }),
+      );
       db.prepare('INSERT INTO feeds (id) VALUES (?)').run('fixture-feed');
       db.prepare('INSERT INTO articles (id) VALUES (?)').run('fixture-article');
-    } finally { db.close(); }
+    } finally {
+      db.close();
+    }
     const result = await preflight(dbPath, privateRoot);
     assert.equal(result.decision, 'preflight_ready');
-    const original = new DatabaseSync(path.join(result.privateRunDir, 'original.sqlite'),
-      { readOnly: true });
+    const original = new DatabaseSync(
+      path.join(result.privateRunDir, 'original.sqlite'),
+      { readOnly: true },
+    );
     try {
       assert.equal(oneAccount(original).mobile.accessToken, 'old');
-    } finally { original.close(); }
+    } finally {
+      original.close();
+    }
   } finally {
     const tempBase = fs.realpathSync(os.tmpdir());
     const resolved = fs.realpathSync(testRoot);
-    if (!within(tempBase, resolved) ||
-        !path.basename(resolved).startsWith('mobile-refresh-self-test-'))
+    if (
+      !within(tempBase, resolved) ||
+      !path.basename(resolved).startsWith('mobile-refresh-self-test-')
+    )
       throw Error('self_test_cleanup_gate');
     fs.rmSync(resolved, { recursive: true });
   }
-  return { decision: 'self_test_passed', networkRequests: 0,
-    productionReads: 0, productionWrites: 0 };
+  return {
+    decision: 'self_test_passed',
+    networkRequests: 0,
+    productionReads: 0,
+    productionWrites: 0,
+  };
 }
 
 async function main() {
   let options;
-  try { options = args(process.argv.slice(2)); }
-  catch {
+  try {
+    options = args(process.argv.slice(2));
+  } catch {
     console.log(JSON.stringify({ decision: 'usage_gate', networkRequests: 0 }));
     process.exitCode = 2;
     return;
   }
   if (options.mode === '--plan') {
-    console.log(JSON.stringify({ decision: 'plan_only', endpoint: LOGIN_PATH,
-      method: 'POST', onlineModeAvailable: false, maxOnlineRequests: 0,
-      backup: 'consistent SQLite backup in private directory',
-      rehearsal: 'separate SQLite copy and atomic recovery fixture',
-      productionReads: 0, productionWrites: 0, networkRequests: 0 }));
+    console.log(
+      JSON.stringify({
+        decision: 'plan_only',
+        endpoint: LOGIN_PATH,
+        method: 'POST',
+        onlineModeAvailable: false,
+        maxOnlineRequests: 0,
+        backup: 'consistent SQLite backup in private directory',
+        rehearsal: 'separate SQLite copy and atomic recovery fixture',
+        productionReads: 0,
+        productionWrites: 0,
+        networkRequests: 0,
+      }),
+    );
     return;
   }
   try {
-    const result = options.mode === '--self-test' ? await selfTest() :
-      await preflight(options.dbPath, options.privateRoot);
+    const result =
+      options.mode === '--self-test'
+        ? await selfTest()
+        : await preflight(options.dbPath, options.privateRoot);
     console.log(JSON.stringify(result));
   } catch (error) {
-    const safe = new Set(['db_gate', 'private_root_gate', 'sqlite_runtime_gate', 'account_gate',
-      'mobile_gate', 'integrity_gate', 'concurrent_token_change_gate',
-      'rehearsal_update_gate', 'rehearsal_verify_gate', 'preservation_gate']);
-    console.log(JSON.stringify({ decision: safe.has(error.message) ? error.message :
-      'preflight_failed', ...(options.mode === '--preflight' && error.privateRunDir ?
-        { privateRunDir: error.privateRunDir } : {}),
-      productionWrites: 0, networkRequests: 0 }));
+    const safe = new Set([
+      'db_gate',
+      'private_root_gate',
+      'sqlite_runtime_gate',
+      'account_gate',
+      'mobile_gate',
+      'integrity_gate',
+      'concurrent_token_change_gate',
+      'rehearsal_update_gate',
+      'rehearsal_verify_gate',
+      'preservation_gate',
+    ]);
+    console.log(
+      JSON.stringify({
+        decision: safe.has(error.message) ? error.message : 'preflight_failed',
+        ...(options.mode === '--preflight' && error.privateRunDir
+          ? { privateRunDir: error.privateRunDir }
+          : {}),
+        productionWrites: 0,
+        networkRequests: 0,
+      }),
+    );
     process.exitCode = 1;
   }
 }
