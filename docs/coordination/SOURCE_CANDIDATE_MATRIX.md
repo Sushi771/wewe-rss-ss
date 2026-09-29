@@ -52,6 +52,9 @@
 - `getreviewid` 检索到的材料未给出一个独立的“按公众号列文章”的腾讯 HTTP 调用；`reviewId` 更多是列表结果里的稳定文章标识或单篇详情输入。`/review/single` 可补已知文章，不能从无到有列出目标多篇。历史 `/mp/getmasssendmsg` 出现在 [PadChat SDK 示例 URL](https://github.com/AvengersWeChat/PadChat-SDK/blob/master/docs/index.md)，缺真实 HTTP 客户端和近期可用性，不纳入可探针候选。
 - 原 WeWe-RSS 的 `/api/v2/platform/mps/.../articles` 指向作者闭源 `weread.111965.xyz` 中转，[作者说明](https://github.com/cooderl/wewe-rss/issues/11#issuecomment-1973151621)证实 token/请求经过其服务；任何仅套这个 API 的 fork 不符运行时自主条件。[Wechat2RSS 等商业授权服务器](../COMPLETE_SOURCE_RESEARCH.md)同理排除。这只排除这些运行依赖，不排除腾讯直接来源。
 
+- 腾讯同份[搜索页静态 JS](https://search.wxqcloud.qq.com/t/searchweb/search/weixin-search-outlinks/26090701/js/read_search.fc739bbf.js)（SHA-256 `E5E090EE6B6180DE2ED72EE3EEEBDCDAB9A10C5C0F5C95F442FD7940730F7089`）的**非 PC 分支**在字符偏移约 65700–66815 调 `_tencent_jsbridge` 的 `postCGI({path:"/wxsearch/broker",params:{query,offset,searchid,searchcookies}})`，没有浏览器 `fetch`。这是给原生桥的相对 CGI 路径；JS **没有给出实际 HTTP 域名、传输认证或续期**，不得擅自补成 `i.weread.qq.com/wxsearch/broker` 或复用 Web Cookie。两分支共用 `handleApiRes`，把 `content.searchID/cookies/offset/continueFlag` 存为下页状态；同份 JS 在字符偏移约 47700–48850 检查卡片 `doc_url` 是否含 `mp.weixin.qq.com`，非 PC 端调用 `launchApplication("weread://mp?url=...")` 打开单篇，PC 则 `window.open(doc_url)`。源码只证明客户端卡片与分页意图，未给目标号真实回包、稳定发表时间或可在自建后台用本人正常登录凭据请求的明确 URL。该桥分支与 PC Web 代理共用搜索页数据模型，但传输边界不同；保留公开客户端实现研究，当前不单独发 Probe。
+- `/weixinwap` 的补充历史代码显示了**账号搜索**而非文章目录：[旧教程的 2024 年转载代码](https://blog.51cto.com/u_16213650/11760069)用 Vue JSONP 向 `http://weixin.sogou.com/weixinwap?_rtype=json&ie=utf8` 发送 `page,type:1,query`，并读取 `totalPages`；`type:1` 明注“公众号”，结果存 `mpList`/`encGzhUrl`，抓文章仍列在 TODO。转载日期不等于 2024 年接口成功回包，也没有 `type:2` 文章结果解析或 2026 年移动端实证；因此不能拿“有分页账号搜索”填补目标号文章列表。它与已测桌面 `/weixin?type=2` 的 URL/响应形状不同，继续保留移动文章搜索源码调查，不凭旧 JSONP 代码直接 Probe。
+
 ## 下一轮可执行问题
 
 1. 与 A 线合并证据：`/book/articles` 的 `skey/vid` 若能从本人正常登录和可续期生命周期明确取得，交 Probe 做**一次**只读首屏。先记录 HTTP/业务状态、`reviews` 数量和字段存在性；取到条目后再验五篇、身份、发布时间、分页、正文、图。
