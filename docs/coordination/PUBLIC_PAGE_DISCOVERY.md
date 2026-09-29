@@ -36,6 +36,14 @@
 
 该 fork 的 [`album discover <article-url>` CLI](https://github.com/vmxmy/wechat-article-exporter/blob/4317a0b76c53a5c75074df9dd837732eb02dfcd1/cli/internal/app/commands_accounts.go#L512-L536)只解析**一篇**文章；`album traverse` 是另一命令，没有看到自动递归调度代码。[issue #20](https://github.com/vmxmy/wechat-article-exporter/issues/20)称可重复“文章→合集→文章”向外扩散、曾匿名得到 `ret=0`，但未提供目标号覆盖结果；仓库的[单元测试](https://github.com/vmxmy/wechat-article-exporter/blob/4317a0b76c53a5c75074df9dd837732eb02dfcd1/cli/internal/wechat/discovery_test.go#L202-L298)使用合成 HTML 与 `httptest`，不能算 2026-09-30 真实请求。其裸 `album_id` 回退匹配范围较宽；接入本项目时仍须以实际腾讯合集链接和账号 `biz` 交叉核验。该 fork 其他个人微信凭据/MITM 路径不在 C 线候选中。
 
+## 2026-09-30 一篇未缓存目标原文的有界请求
+
+独立合集 Probe 当日确认 `复旦数学营` 当前 19 个 `(msgid,itemidx)` 与 2026-09-27 旧 19 个完全相同（排序集合 SHA-256 `22fd9c1653c5f4eb2c41b7482f9ac6e82d42e649f20e70dbebf2d9570952625d`）。从旧腾讯 JSON 中排除八份已保存 HTML 的身份后，尚有 13 个未保存原文候选；选第一页第一条，列表 `create_time` 日期为 2026-09-19。旧列表给出腾讯 `http://` 长链，按[近期开源实现的文章 URL 升级流程](https://github.com/vmxmy/wechat-article-exporter/blob/4317a0b76c53a5c75074df9dd837732eb02dfcd1/cli/internal/wechat/discovery.go#L434-L442)只把协议升级为 HTTPS，保留 `__biz/mid/idx/sn/chksm`，删除 fragment。该 URL 属 `mp.weixin.qq.com/s` 且列表 `__biz` 与目标一致。未打印完整 URL、文章标题或文章身份值。
+
+只进行**一次**匿名 GET：禁用代理与重定向、不带 Cookie、无重试，使用上述开源客户端的公开浏览器 User-Agent 及腾讯同源 `Referer/Origin`。返回 HTTP **200**、`text/html`、3,493,321 字节、无跳转；发现 `#js_content`，并可解析十位原文 `ct`（UTC 日期同为 2026-09-19）。简化 HTML 解析在正文节点开始后发现 3 个 `img`，均有 `data-src`；其节点结束界未做严格 DOM 验证，故**不能**据此验收完整正文图片。页面 `appmsgalbuminfo` 和 `tag_name/tag_content_num/album_id` 各匹配一个合集 ID，均属于已知两 ID；未见第三 ID。实际 `<a href>` 中没有腾讯 `/mp/profile_ext` 或 `/mp/homepage` 入口。`has_related_article_info` 字符串存在，但本次没有解析其值或相关文章身份，不能称已取到相关文章列表。
+
+本次旧 `var biz/mid/idx` 提取正则未得到与请求 URL 一致的三元组；采集脚本只报告三个布尔比较为 false，未区分字段缺失和字段异值。响应未保存，按一次请求上限**不重新请求**，因此这篇仍缺原文身份闭环，不能算“新取到一篇目标真文章”，也不能作为五篇门槛的一部分。`album_info_list` 这次没有单独提取，`appmsgalbuminfo/tags` 的无新 ID 结论仅覆盖这两个字段，不排除前者单独列出其他合集。后续若有独立新文章或正常访问机会，解析器须同时记录身份字段的**存在性及是否匹配**、`album_info_list` 的官方链接与账号归属、严格 DOM 内图片计数，只保存脱敏摘要；遇验证码则停止该 URL，不为补本次缺项重发。
+
 ## 当前验证顺序与停止条件
 
 1. 独立 Probe Agent 正用**旧官方 HTML 确认的目标 `biz+复旦数学营 album_id`**只请求一次 2026-09-30 匿名首屏；C 线不重复该请求。先看 HTTP/业务状态、账号身份、条目数和字段名。若遇验证码、限流、身份不符立即停止相应网络请求。
