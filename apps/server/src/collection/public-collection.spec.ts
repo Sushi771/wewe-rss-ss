@@ -5,6 +5,7 @@ import { PrismaClient } from '@prisma/client';
 import { CollectionService } from './collection.service';
 import { TrpcService } from '../trpc/trpc.service';
 import { canonicalArticleUrl } from './collection-format';
+import { bodyRetryAvailability } from './article-body-retry';
 import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
 
 jest.mock('./public-album', () => ({
@@ -121,8 +122,16 @@ describe('public album integration in isolated SQLite', () => {
       contentHtml: '<div id="js_content">保留正文</div>',
       picUrl: 'https://mmbiz.qpic.cn/old.png',
       sourceUrl: articles[0].url,
+      verifiedSourceUrl: articles[0].url,
       publishTime: time,
     });
+    expect(
+      bodyRetryAvailability(
+        await prisma.article.findUniqueOrThrow({
+          where: { id: 'legacy-short' },
+        }),
+      ).allowed,
+    ).toBe(true);
     expect(
       await prisma.article.findUniqueOrThrow({ where: { id: articles[1].id } }),
     ).toMatchObject({ readCount: null, likeCount: null });
@@ -133,6 +142,24 @@ describe('public album integration in isolated SQLite', () => {
       localDirectory: null,
       hasHistory: -1,
     });
+  });
+  it('does not bind a legacy body retry to a different signed article URL', async () => {
+    await prisma.article.update({
+      where: { id: 'legacy-short' },
+      data: { sourceUrl: null, verifiedSourceUrl: null },
+    });
+    (resolvePublicArticle as jest.Mock).mockResolvedValueOnce({
+      ...articles[0],
+      url: articles[0].url.replace('sn=abc', 'sn=different'),
+      publishTime: time,
+    });
+    await service.collectPublicAlbums({ mpId, albumIds });
+    const legacy = await prisma.article.findUniqueOrThrow({
+      where: { id: 'legacy-short' },
+    });
+    expect(legacy.verifiedSourceUrl).toBeNull();
+    expect(bodyRetryAvailability(legacy).allowed).toBe(false);
+    expect(legacy.contentHtml).toBe('<div id="js_content">保留正文</div>');
   });
   it('refresh and history fetch the bound online album and create no duplicates', async () => {
     const files = jest.spyOn(service, 'importDirectory');
@@ -177,7 +204,13 @@ describe('public album integration in isolated SQLite', () => {
         publishTime: time - 39,
         picUrl: '',
         sourceUrl: articles[0].url,
+        verifiedSourceUrl: articles[0].url,
       },
+    });
+    (resolvePublicArticle as jest.Mock).mockResolvedValueOnce({
+      ...articles[0],
+      url: articles[0].url.split('&sn=')[0],
+      publishTime: time,
     });
     (fetchPublicAlbums as jest.Mock).mockResolvedValueOnce({
       articles: articles.map((article) => ({
@@ -198,6 +231,7 @@ describe('public album integration in isolated SQLite', () => {
     ).toMatchObject({
       publishTime: time,
       sourceUrl: articles[0].url,
+      verifiedSourceUrl: articles[0].url,
       readCount: 5,
       likeCount: 0,
       contentHtml: '<div id="js_content">保留正文</div>',

@@ -488,7 +488,11 @@ export class CollectionService {
       });
       const legacy = new Map<
         string,
-        { id: string; publishTime: number | null }
+        {
+          id: string;
+          publishTime: number | null;
+          verifiedSourceUrl: string | null;
+        }
       >();
       for (const candidate of candidates) {
         const identity = await resolvePublicArticle(candidate.id, input.mpId);
@@ -500,6 +504,15 @@ export class CollectionService {
         legacy.set(identity.id, {
           id: candidate.id,
           publishTime: identity.publishTime,
+          // Both the short-link page and official album must name the same
+          // signed original before a legacy ID may retry its body later.
+          verifiedSourceUrl:
+            identity.publishTime &&
+            identity.url ===
+              result.articles.find((item) => item.id === identity.id)?.url &&
+            identity.url.includes('&sn=')
+              ? identity.url
+              : null,
         });
       }
       let created = 0,
@@ -522,12 +535,14 @@ export class CollectionService {
             });
             const original = legacy.get(item.id);
             const knownSourceUrl = existing?.sourceUrl;
+            let mergedVerifiedSourceUrl: string | null = null;
             let mergedFields = {};
             if (original) {
               const old = await tx.article.findUniqueOrThrow({
                 where: { id: original.id },
               });
               if (existing && existing.id !== old.id) {
+                mergedVerifiedSourceUrl = existing.verifiedSourceUrl;
                 const metrics = mergeMetrics(
                   JSON.parse(existing.metrics || '{}'),
                   JSON.parse(old.metrics || '{}'),
@@ -556,6 +571,11 @@ export class CollectionService {
               sourceUrl: item.url.includes('&sn=')
                 ? item.url
                 : existing?.sourceUrl || knownSourceUrl || item.url,
+              verifiedSourceUrl:
+                existing?.verifiedSourceUrl ||
+                mergedVerifiedSourceUrl ||
+                original?.verifiedSourceUrl ||
+                null,
               // An empty album cover must not erase a saved original cover.
               picUrl: item.picUrl || existing?.picUrl || '',
             };

@@ -32,6 +32,7 @@
 - `b62d757` 的远端 `Format check` 因新表格排版失败，已由 `be8750a` 修正；[CI 36626605290](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36626605290) 两个 job 成功。B 增量主分支 `26152c0` 的 [CI 36627037368](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36627037368) 亦成功。所有这些提交仍只有研究/探针准备，不能称真实订阅恢复。
 - [移动凭据→官方 Web 会话桥接](WEREAD_MOBILE_TO_WEB_PROBE.md)已按公开 Go/Python 实现从生产 SQLite **只读**取唯一账号独立 `mobile` 对象，向腾讯 `/web/login/session/init` 只发一次请求：HTTP 200 JSON，下发 `wr_vid/wr_skey/wr_rt`，`wr_vid` 与移动账号一致。Cookie/凭据/响应正文均未输出或保存；生产库事后 `quick_check=ok`、12/1447 未变。此为**候选 Web Cookie 下发**，并未单独证明其能访问搜索或其他 Web 接口。
 - [同进程首次 Web 搜索](MOBILE_WEB_SEARCH_PROBE.md)按固定开源请求形状只做一次 init 和一次目标准确号名 `POST /web/wx_search_broker_proxy`：init HTTP 200 JSON，再次下发 `wr_vid/wr_skey/wr_rt` 且身份一致；搜索 HTTP 200 JSON、`errCode=-2012`，未返回 `content` 或目标文章，随即停止，未翻页/重试/写库。该结果只排除这组新 Cookie 从 Node 直连搜索的具体请求上下文；不能推成整个 Web 搜索、浏览器同源上下文或旧 `/book/articles` 均不可用。A 正追查 `-2012` 与 Cookie 生命周期，B/C 继续独立来源研究；没有新源码依据前不重发同形状请求。
+- 已修复公开合集采集的旧短链正文绑定：只有旧短链原文解析出可信时间、它与官方合集的**完整带 `sn` 原文链接相同**时，才在采集事务中填入此前为空的 `verifiedSourceUrl`；现有可信绑定、旧正文和指标保留。隔离 SQLite 测试证实匹配后正文重试门禁开放，`sn` 不同仍拒绝。尚未在生产库执行该采集，不能称六篇旧文已补正文或图片；后续仍须单篇在线与副本导出验收。
 
 ## 前轮判断（已由上节更新）
 
