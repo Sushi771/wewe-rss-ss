@@ -33,6 +33,7 @@
 - C 的一条正文互链候选长 `/s?__biz...` 一次匿名 GET 得 HTTP 302 后即停，无正文验收；只缩限该 URL/时点/形状。生产库另外 13 条未尝试且已核验的旧文章具有官方短 `/s/<token>` 来源路径，C 正审其与长链请求的真实差异；不猜 `chksm`，不重发已停的长链。
 - [另一篇目标旧文双图验证](coordination/TARGET_TWO_IMAGE_PROBE_PLAN.md)各一次 CDN GET 得完整 PNG 92,237 字节和 JPEG 130,633 字节；SQLite 副本归档后禁网 Obsidian/限定单篇 ZIP 两附件字节一致，其他旧字段及 12/1447 基数不变。生产库未写，此结果不能扩大成整号图片完整或新增订阅。
 - [新凭据目标准确号名首屏](coordination/REFRESHED_MOBILE_TARGET_SEARCH_PROBE.md)一次 Web init 加一次官方搜索均 HTTP 200；15 条中 11 条来源名精确匹配，具有不同 `docID` 和原文链接，响应给出官方续页游标及 `continueFlag=true`。原文链接未显式给出目标 `biz`，尚未核实文章身份、发表时间或正文，不能计入五篇验收。A 正按腾讯静态 JS 审查一次有界续页；C 独立准备一条已有旧目标文章的公开短 `/s/<token>` 验证。生产库未写。
+- [短路径一次实测](coordination/PUBLIC_PAGE_DISCOVERY.md)对两合集外一篇已有目标旧文的已存 `/s/<token>` 发一次匿名 GET，HTTP 200，四字段、短 canonical、字面发表时间及正文均闭环，见 1 张 `data-src` 图片。页面明示第三个同号官方合集 ID，但该次只记录计数、未保存值；C 正从既存证据离线寻找精确 ID，绝不重发该 URL。此结果只证明选中旧文当前可读，未取得新增文章或账号全史。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 
