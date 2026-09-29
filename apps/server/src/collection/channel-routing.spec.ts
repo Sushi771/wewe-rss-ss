@@ -357,6 +357,32 @@ describe('backend collection routing', () => {
     });
   });
 
+  it('does not save an article or advance sync time when a provider returns another feed identity', async () => {
+    const mismatched = article(ids[0]);
+    mismatched.mpId = ids[1];
+    (wechat2RssProvider as jest.Mock).mockReturnValue({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      refreshSubscription: async () => ({ accepted: true, pending: true }),
+      fetchArticles: async () => ({
+        articles: [mismatched],
+        coverage: 'recent-window',
+        upstreamCount: 1,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      }),
+    });
+    await expect(
+      service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).rejects.toThrow('PROVIDER_ARTICLE_IDENTITY_INVALID');
+    expect(await prisma.article.count()).toBe(0);
+    const feed = await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } });
+    expect(feed.syncTime).toBe(0);
+    expect(JSON.parse(feed.lastCollectionResult || '{}')).toMatchObject({
+      status: 'failed',
+      coverage: 'none',
+    });
+  });
+
   it('scheduled updates use the same backend path for enabled feeds', async () => {
     const previous = process.env.DISABLE_SCHEDULED_UPDATES;
     delete process.env.DISABLE_SCHEDULED_UPDATES;

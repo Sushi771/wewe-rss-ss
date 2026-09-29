@@ -33,23 +33,42 @@ class PreservationTests(unittest.TestCase):
                 "PRAGMA journal_mode=WAL;"
                 "CREATE TABLE accounts (id TEXT, token TEXT);"
                 "INSERT INTO accounts VALUES ('private', 'never-read-this');"
-                "CREATE TABLE feeds (id TEXT PRIMARY KEY);"
+                "CREATE TABLE feeds (id TEXT PRIMARY KEY, mp_name TEXT, mp_cover TEXT, "
+                "mp_intro TEXT, status INTEGER, created_at TEXT, \"order\" INTEGER, "
+                "local_directory TEXT, public_album_ids TEXT);"
                 "CREATE TABLE articles (id TEXT PRIMARY KEY, mp_id TEXT, title TEXT, "
                 "publish_time INTEGER, pic_url TEXT, source_url TEXT, content_html TEXT, "
-                "metrics TEXT, read_count INTEGER, like_count INTEGER);"
+                "metrics TEXT, read_count INTEGER, like_count INTEGER, "
+                "verified_source_url TEXT, created_at TEXT);"
             )
-            connection.execute("INSERT INTO feeds VALUES (?)", (self.mp_id,))
             connection.execute(
-                "INSERT INTO articles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                'INSERT INTO feeds (id, mp_name, mp_cover, mp_intro, status, created_at, '
+                '"order", local_directory, public_album_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (self.mp_id, "Private feed", "https://cover.example/feed.jpg", "An intro",
+                 1, "2026-09-01T00:00:00Z", 0, "C:/private/archive", '["album-id"]'),
+            )
+            connection.execute(
+                "INSERT INTO articles (id, mp_id, title, publish_time, pic_url, "
+                "source_url, content_html, metrics, read_count, like_count, "
+                "verified_source_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (self.article_id, self.mp_id, "An existing article", 1000,
                  "https://cover.example/old.jpg", "https://mp.weixin.qq.com/s/" + self.short_id,
-                 "<p>preserve this body</p>", '{"read":{"value":0,"display":"0"}}', 0, None),
+                 "<p>preserve this body</p>", '{"read":{"value":0,"display":"0"}}', 0, None,
+                 "https://mp.weixin.qq.com/s?__biz=private&mid=1&idx=1",
+                 "2026-09-01T00:00:00Z"),
             )
 
     def update(self, **fields):
         with contextlib.closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "UPDATE articles SET " + ", ".join(key + "=?" for key in fields),
+                tuple(fields.values()),
+            )
+
+    def update_feed(self, **fields):
+        with contextlib.closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE feeds SET " + ", ".join('"' + key + '"=?' for key in fields),
                 tuple(fields.values()),
             )
 
@@ -112,9 +131,61 @@ class PreservationTests(unittest.TestCase):
         snapshot = self.state()
         serialized = json.dumps(snapshot)
         for text in ("preserve this body", "cover.example", self.short_id,
-                     "An existing article", "never-read-this"):
+                     "An existing article", "never-read-this", "Private feed",
+                     "C:/private/archive", "__biz=private"):
             self.assertNotIn(text, serialized)
+        self.assertEqual(snapshot["schemaVersion"], 3)
         self.assertEqual(snapshot["records"][self.article_id]["publishTime"], 1000)
+
+    def test_verified_source_and_creation_time_are_protected(self):
+        for column, replacement, field in (
+                ("verified_source_url", None, "verifiedSourceUrl"),
+                ("verified_source_url", "", "verifiedSourceUrl"),
+                ("verified_source_url", "https://mp.weixin.qq.com/s?mid=other", "verifiedSourceUrl"),
+                ("created_at", "2026-09-02T00:00:00Z", "createdAt")):
+            with self.subTest(column=column, replacement=replacement):
+                before = self.state()
+                with contextlib.closing(sqlite3.connect(self.database)) as connection:
+                    original = connection.execute("SELECT " + column + " FROM articles").fetchone()[0]
+                self.update(**{column: replacement})
+                self.assertIn({"id": self.article_id, "field": field},
+                              self.compare(before)["violations"])
+                self.update(**{column: original})
+        self.update(verified_source_url=None)
+        before = self.state()
+        self.update(verified_source_url="https://mp.weixin.qq.com/s?mid=verified")
+        self.assertIn({"id": self.article_id, "field": "verifiedSourceUrl"},
+                      self.compare(before)["allowedBackfills"])
+
+    def test_subscription_configuration_is_protected(self):
+        for column, replacement, field in (
+                ("mp_name", "New name", "mpName"),
+                ("mp_cover", None, "mpCover"),
+                ("status", 0, "status"),
+                ("created_at", "different", "createdAt"),
+                ("order", 3, "order"),
+                ("local_directory", None, "localDirectory"),
+                ("public_album_ids", None, "publicAlbumIds")):
+            with self.subTest(column=column):
+                before = self.state()
+                with contextlib.closing(sqlite3.connect(self.database)) as connection:
+                    original = connection.execute('SELECT "' + column + '" FROM feeds').fetchone()[0]
+                self.update_feed(**{column: replacement})
+                self.assertIn({"id": self.mp_id, "field": "feed." + field},
+                              self.compare(before)["violations"])
+                self.update_feed(**{column: original})
+
+    def test_version_two_baseline_reports_coverage_limit(self):
+        before = self.state()
+        before["schemaVersion"] = 2
+        del before["feedRecords"]
+        del before["records"][self.article_id]["verifiedSourceUrl"]
+        del before["records"][self.article_id]["createdAtSha256"]
+        self.update(verified_source_url=None)
+        self.update_feed(mp_name="New name")
+        report = self.compare(before)
+        self.assertTrue(report["passed"])
+        self.assertIn("verified_source_url", report["unprotectedFields"])
 
     def test_null_and_empty_fields_can_be_filled_and_rows_added(self):
         for blank in (None, ""):
@@ -231,7 +302,10 @@ class PreservationTests(unittest.TestCase):
         self.update(title="changed", publish_time=2000)
         report = preservation.compare_states(before, self.state(include_legacy=True))
         self.assertTrue(report["passed"])
-        self.assertEqual(report["unprotectedFields"], ["title", "publish_time"])
+        self.assertEqual(report["unprotectedFields"], [
+            "title", "publish_time", "verified_source_url", "article.created_at",
+            "feed configuration",
+        ])
         self.assertTrue(report["warnings"])
 
     def test_legacy_allows_only_empty_backfills_and_protects_existing_metrics(self):

@@ -1,9 +1,11 @@
 """Snapshot and verify article preservation without reading account credentials.
 
-Version 2 snapshots protect titles and publication times as well as old nonempty
-bodies, covers, sources and all metric values (including zero and missing/null).
-Only null/empty bodies, covers and sources may be filled without extra evidence.
-Legacy snapshots remain readable, but cannot verify titles/publication times.
+Version 3 snapshots also protect existing verified source URLs, article creation
+times, and subscription configuration. Titles, publication times, old nonempty
+bodies, covers, sources and all metric values (including zero and missing/null)
+remain protected. Only null/empty bodies, covers and sources may be filled
+without extra evidence. Older snapshots remain readable, but cannot verify
+fields absent from their schema.
 
 An optional --date-corrections JSON has a corrections array. Each entry contains
 articleId, previousPublishTime, publishTime, verifiedId, evidencePath and
@@ -58,11 +60,28 @@ def database_state(database, *, include_legacy=False):
         connection.execute("BEGIN")
         if [row[0] for row in connection.execute("PRAGMA integrity_check")] != ["ok"]:
             raise ValueError("SQLite integrity_check failed")
-        feeds = [row[0] for row in connection.execute("SELECT id FROM feeds ORDER BY id")]
+        feeds = connection.execute(
+            'SELECT id, mp_name, mp_cover, mp_intro, status, created_at, "order", '
+            'local_directory, public_album_ids FROM feeds ORDER BY id'
+        ).fetchall()
         rows = connection.execute(
             "SELECT id, mp_id, title, publish_time, pic_url, source_url, "
-            "content_html, metrics, read_count, like_count FROM articles ORDER BY id"
+            "content_html, metrics, read_count, like_count, verified_source_url, "
+            "created_at FROM articles ORDER BY id"
         ).fetchall()
+        feed_records = {
+            row["id"]: {
+                field: fingerprint(row[column])
+                for field, column in (
+                    ("mpName", "mp_name"), ("mpCover", "mp_cover"),
+                    ("mpIntro", "mp_intro"), ("status", "status"),
+                    ("createdAt", "created_at"), ("order", "order"),
+                    ("localDirectory", "local_directory"),
+                    ("publicAlbumIds", "public_album_ids"),
+                )
+            }
+            for row in feeds
+        }
         records, legacy = {}, {}
         for row in rows:
             records[row["id"]] = {
@@ -71,7 +90,9 @@ def database_state(database, *, include_legacy=False):
                 "publishTime": row["publish_time"],
                 "picUrl": text_state(row["pic_url"]),
                 "sourceUrl": text_state(row["source_url"]),
+                "verifiedSourceUrl": text_state(row["verified_source_url"]),
                 "contentHtml": text_state(row["content_html"]),
+                "createdAtSha256": fingerprint(row["created_at"]),
                 "metrics": metrics_state(row["metrics"]),
                 "readCount": row["read_count"],
                 "likeCount": row["like_count"],
@@ -89,9 +110,10 @@ def database_state(database, *, include_legacy=False):
                     for cover, body in itertools.product(covers, bodies)
                 }
     state = {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "createdAtUtc": datetime.now(timezone.utc).isoformat(),
-        "feedIds": feeds,
+        "feedIds": [row["id"] for row in feeds],
+        "feedRecords": feed_records,
         "records": records,
     }
     if include_legacy:
@@ -151,9 +173,9 @@ def load_date_corrections(path):
 def compare_states(old, current, date_corrections=None):
     date_corrections = date_corrections or {}
     version = old.get("schemaVersion", 1)
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         raise ValueError("Unsupported preservation snapshot schema")
-    old_rows = old["records"] if version == 2 else old["protectedArticles"]
+    old_rows = old["records"] if version >= 2 else old["protectedArticles"]
     new_rows = current["records"]
     report = {
         "baselineSchemaVersion": version,
@@ -164,9 +186,19 @@ def compare_states(old, current, date_corrections=None):
         "addedArticles": sorted(new_rows.keys() - old_rows.keys()),
         "changedProtectedArticles": [], "changedExistingSourceUrls": [],
         "violations": [], "allowedBackfills": [], "dateCorrectionsApplied": [],
-        "unprotectedFields": ["title", "publish_time"] if version == 1 else [],
-        "warnings": (["Legacy baseline cannot verify title or publication-time preservation; "
-                      "create a version 2 snapshot before the next write."] if version == 1 else []),
+        "unprotectedFields": (
+            ["title", "publish_time", "verified_source_url", "article.created_at",
+             "feed configuration"] if version == 1 else
+            ["verified_source_url", "article.created_at", "feed configuration"]
+            if version == 2 else []
+        ),
+        "warnings": (
+            ["Legacy baseline cannot verify title or publication-time preservation; "
+             "create a version 3 snapshot before the next write."] if version == 1 else
+            ["Version 2 baseline cannot verify verified source URLs, creation times "
+             "or feed configuration; create a version 3 snapshot before the next write."]
+            if version == 2 else []
+        ),
     }
 
     def violation(article_id, field):
@@ -174,6 +206,12 @@ def compare_states(old, current, date_corrections=None):
         key = "changedExistingSourceUrls" if field == "sourceUrl" else "changedProtectedArticles"
         if article_id not in report[key]:
             report[key].append(article_id)
+
+    if version == 3:
+        for feed_id in sorted(set(old["feedIds"]) & set(current["feedIds"])):
+            for field, previous in old["feedRecords"][feed_id].items():
+                if current["feedRecords"][feed_id].get(field) != previous:
+                    report["violations"].append({"id": feed_id, "field": f"feed.{field}"})
 
     for article_id in sorted(old_rows.keys() & new_rows.keys()):
         previous, actual = old_rows[article_id], new_rows[article_id]
@@ -195,6 +233,15 @@ def compare_states(old, current, date_corrections=None):
             if previous[field] != actual[field]:
                 violation(article_id, field)
         for field in ("picUrl", "sourceUrl", "contentHtml"):
+            if previous[field]["hasValue"]:
+                if previous[field]["sha256"] != actual[field]["sha256"]:
+                    violation(article_id, field)
+            elif actual[field]["hasValue"]:
+                report["allowedBackfills"].append({"id": article_id, "field": field})
+        if version == 3:
+            if previous["createdAtSha256"] != actual["createdAtSha256"]:
+                violation(article_id, "createdAt")
+            field = "verifiedSourceUrl"
             if previous[field]["hasValue"]:
                 if previous[field]["sha256"] != actual[field]["sha256"]:
                     violation(article_id, field)
@@ -230,7 +277,7 @@ def main():
         with args.snapshot.open("x", encoding="utf-8") as stream:
             json.dump(current, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
-        print(json.dumps({"schemaVersion": 2, "feeds": len(current["feedIds"]), "articles": len(current["records"])}))
+        print(json.dumps({"schemaVersion": 3, "feeds": len(current["feedIds"]), "articles": len(current["records"])}))
         return
     old = json.loads(args.snapshot.read_text(encoding="utf-8-sig"))
     corrections = load_date_corrections(args.date_corrections)
