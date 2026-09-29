@@ -14,7 +14,8 @@
 - 工程核对发现：合集 `create_time` 与原文 `ct` 相差数十秒时，已有正文补取会错误拒绝；现仅对未绑定原文且规范身份一致、时间差不超过 60 秒的文章接受原文时间并校正。公开合集请求严格检查 `verify_status`、不跟随验证跳转、页间隔 2 秒；空合集封面不覆盖旧封面。相关隔离 SQLite/Jest 62 项与服务端构建通过，仍未在生产库启用该通道。
 - [生产 SQLite 副本演练](TARGET_ALBUM_REHEARSAL.md)用旧保存的真实目标两页 JSON 离线回放当前代码，两次均解析 19 篇；副本 12 个订阅、1447 篇不变，旧文章 ID/时间/正文/指标和非空封面保护检查均为 0 异常。旧 JSON 键集合与今日在线结果相同，但演练不能代替自然新增或全部导出验收。生产库只读。
 - C 对一篇此前未保存 HTML 的当前列表文章作一次匿名原文 GET，返回正文页并见到两个已知合集之一；[报告](PUBLIC_PAGE_DISCOVERY.md)明确旧 `var biz/mid/idx` 解析未形成身份闭环，未将其计入真实文章验收，也未为补证据重发。B 对 [`profile_ext` 凭据链](SOURCE_CANDIDATE_MATRIX.md)追到个人微信短期会话来源；已核实现依赖项目禁止的客户端缓存或抓包，尚无合法独立续期链，不据此探针。
-- 新发现 [2026-08 的公开索引十篇案例](https://lovstudio.ai/blog/wechat-cross-account-index-ret-200013-2026)，另起独立搜狗微信移动索引专项核查真实请求代码和运行依赖；在审查前不把案例成功外推至本目标。
+- 新发现 [2026-08 的公开索引十篇案例](https://lovstudio.ai/blog/wechat-cross-account-index-ret-200013-2026)，另起独立[搜狗微信索引专项](SOGOU_PUBLIC_INDEX.md)追到可审查的桌面 `/weixin` 及 `/link` 请求。**本目标一次首屏 Probe** HTTP 200、未见验证码，9 个候选中 8 个作者昵称精确匹配；还未解析签名链接或核对腾讯 `biz/mid/idx/ct`，不能算真实目标文章。移动 `/weixinwap` 的作者案例尚缺公开解析代码。
+- C 线在八份旧目标原文中追到 `window.cgiDataNew` 的 `bizuin/mid/idx/sn` 和原始时间均 8/8 与已核验来源相符；[当前解析器](../../apps/server/src/collection/article-page.ts)已加入单脚本、平衡对象、有界唯一标量读取，拒绝与旧 `var` 字段冲突。不执行页面 JS；移除旧字段后的八份离线回归仍 8/8 精确匹配。一次性未保存的 9 月 30 日新页不能因此被追认。
 
 ## 前轮判断（已由上节更新）
 
