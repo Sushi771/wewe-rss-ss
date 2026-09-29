@@ -34,7 +34,7 @@ jobs:
       - name: Type check Web
         run: pnpm --filter web build
       - name: Test Server
-        run: pnpm --filter server test --runInBand
+        run: pnpm --filter server exec jest --runInBand
       - name: Build Server
         run: pnpm --filter server build
 
