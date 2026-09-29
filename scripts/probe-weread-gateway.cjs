@@ -13,6 +13,7 @@ const TIMEOUT_MS = 8000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
 const MAX_PRINTED_CHAPTERS = 20;
+const MAX_PRINTED_SEARCH_GROUPS = 20;
 const MAX_PRINTED_SEARCH_RESULTS = 20;
 // Only these reviewed interface names can be echoed from an untrusted list.
 // /book/articles is included solely to detect if the gateway ever lists it.
@@ -474,14 +475,17 @@ function summarizeSearch(payload) {
     if (!group || typeof group !== 'object' || Array.isArray(group))
       throw new ProbeError('unexpected-shape');
     const books = Array.isArray(group.books) ? group.books : [];
-    groups.push({
-      title: safeSearchLabel(group.title),
-      responseScope: safeCount(group.scope),
-      reportedScopeCount: safeCount(group.scopeCount),
-      reportedCurrentCount: safeCount(group.currentCount),
-      booksArrayPresent: Array.isArray(group.books),
-      returnedItemCount: books.length,
-    });
+    // A bounded response can still contain thousands of small groups. Keep
+    // aggregate counts while limiting untrusted labels written to logs.
+    if (groups.length < MAX_PRINTED_SEARCH_GROUPS)
+      groups.push({
+        title: safeSearchLabel(group.title),
+        responseScope: safeCount(group.scope),
+        reportedScopeCount: safeCount(group.scopeCount),
+        reportedCurrentCount: safeCount(group.currentCount),
+        booksArrayPresent: Array.isArray(group.books),
+        returnedItemCount: books.length,
+      });
     returnedItemCount += books.length;
     for (const book of books) {
       if (results.length >= MAX_PRINTED_SEARCH_RESULTS) break;
@@ -515,7 +519,8 @@ function summarizeSearch(payload) {
     kind: 'keyword-search-sample',
     requestedScope: 4,
     keyword: EXPECTED_TITLE,
-    groupCount: groups.length,
+    groupCount: payload.results.length,
+    printedGroupCount: groups.length,
     returnedItemCount,
     hasMore:
       payload.hasMore === 1 || payload.hasMore === true
