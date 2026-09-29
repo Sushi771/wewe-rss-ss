@@ -35,7 +35,7 @@ export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
     let albumPages = 0;
     let expectedCount: number | undefined;
     for (let page = 0; page < 50; page++) {
-      if (pages) await new Promise((resolve) => setTimeout(resolve, 350));
+      if (pages) await new Promise((resolve) => setTimeout(resolve, 2000));
       let data: any;
       try {
         ({ data } = await axios.get('https://mp.weixin.qq.com/mp/appmsgalbum', {
@@ -49,6 +49,7 @@ export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
           },
           proxy,
           timeout: 15000,
+          maxRedirects: 0,
           maxContentLength: 5 * 1024 * 1024,
           headers: {
             'User-Agent':
@@ -64,6 +65,7 @@ export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
       if (
         ![0, '0'].includes(data?.base_resp?.ret) ||
         !response ||
+        ![0, '0'].includes(response.verify_status) ||
         !Array.isArray(response.article_list)
       )
         throw new Error('公开合集返回验证页或无效列表，本次未写入');
@@ -163,6 +165,7 @@ export async function resolvePublicArticle(shortId: string, mpId: string) {
     const { data } = await axios.get(`https://mp.weixin.qq.com/s/${shortId}`, {
       proxy: publicProxy(),
       timeout: 15000,
+      maxRedirects: 0,
       maxContentLength: 10 * 1024 * 1024,
       headers: {
         'User-Agent':

@@ -68,7 +68,7 @@ describe('public album integration in isolated SQLite', () => {
         mpId,
         title: '主条',
         publishTime: time,
-        picUrl: '',
+        picUrl: 'https://mmbiz.qpic.cn/old.png',
         contentHtml: '<div id="js_content">保留正文</div>',
         readCount: 5,
         likeCount: 0,
@@ -119,6 +119,7 @@ describe('public album integration in isolated SQLite', () => {
       readCount: 5,
       likeCount: 0,
       contentHtml: '<div id="js_content">保留正文</div>',
+      picUrl: 'https://mmbiz.qpic.cn/old.png',
       sourceUrl: articles[0].url,
       publishTime: time,
     });

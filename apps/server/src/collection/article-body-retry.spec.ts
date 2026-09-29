@@ -353,6 +353,46 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     );
   });
 
+  it('合集列表时间与原文 ct 相差 34 秒时，以同身份原文核验并校正时间', async () => {
+    await prisma.article.update({
+      where: { id },
+      data: {
+        id: original.id,
+        sourceUrl: original.url,
+        verifiedSourceUrl: null,
+        publishTime: time - 34,
+      },
+    });
+    expect(await caller().article.retryBody(original.id)).toMatchObject({
+      status: 'available',
+      filled: true,
+    });
+    const saved = await read(original.id);
+    expect(saved.publishTime).toBe(time);
+    expect(saved.verifiedSourceUrl).toBe(original.url);
+    expect(saved.contentHtml).toContain('补入正文');
+  });
+
+  it('合集时间偏差超过一分钟时拒绝原文绑定且保留旧值', async () => {
+    await prisma.article.update({
+      where: { id },
+      data: {
+        id: original.id,
+        sourceUrl: original.url,
+        verifiedSourceUrl: null,
+        publishTime: time - 61,
+      },
+    });
+    expect(await caller().article.retryBody(original.id)).toMatchObject({
+      status: 'failed',
+      code: 'identity_mismatch',
+    });
+    const saved = await read(original.id);
+    expect(saved.publishTime).toBe(time - 61);
+    expect(saved.verifiedSourceUrl).toBeNull();
+    expect(saved.contentHtml).toBeNull();
+  });
+
   it('恰好22字符的规范ID不误当旧短链ID', async () => {
     const canonical = canonicalArticleUrl(
       original.url.replace('mid=100', 'mid=123456'),

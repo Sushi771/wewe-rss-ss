@@ -34,6 +34,7 @@ function page(
       base_resp: { ret: 0 },
       getalbum_resp: {
         article_list: articles,
+        verify_status: '0',
         continue_flag: more,
         base_info: total
           ? { title: '测试合集', article_count: total, read_count: '28586' }
@@ -84,6 +85,7 @@ describe('public album collection (synthetic pagination regression)', () => {
         f: 'json',
       },
       proxy: false,
+      maxRedirects: 0,
     });
     expect(get.mock.calls[1][1]?.params).toMatchObject({
       begin_msgid: '2247483929',
@@ -147,6 +149,18 @@ describe('public album collection (synthetic pagination regression)', () => {
       data: { ...response.data, base_resp: { ret: null } },
     });
     await expect(fetchPublicAlbums(mpId, [albumA])).rejects.toThrow();
+  });
+
+  it('rejects a business verification state before using article rows', async () => {
+    const response = page([article('2247483929')], '0', '1');
+    get.mockResolvedValue({
+      data: {
+        ...response.data,
+        getalbum_resp: { ...response.data.getalbum_resp, verify_status: '1' },
+      },
+    });
+    await expect(fetchPublicAlbums(mpId, [albumA])).rejects.toThrow('验证页');
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it('rejects an empty page claiming more data', async () => {

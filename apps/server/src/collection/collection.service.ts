@@ -307,6 +307,12 @@ export class CollectionService {
             where: { id },
             data: {
               lastBodyStatus: status,
+              // Only the identity-checked original ct may replace an
+              // unverified album list timestamp.
+              ...(!current.verifiedSourceUrl &&
+              current.publishTime !== fetched.originalPublishTime
+                ? { publishTime: fetched.originalPublishTime }
+                : {}),
               verifiedSourceUrl:
                 current.verifiedSourceUrl || fetched.verifiedSourceUrl,
               lastBodyRetry: JSON.stringify(result),
@@ -550,7 +556,8 @@ export class CollectionService {
               sourceUrl: item.url.includes('&sn=')
                 ? item.url
                 : existing?.sourceUrl || knownSourceUrl || item.url,
-              picUrl: item.picUrl,
+              // An empty album cover must not erase a saved original cover.
+              picUrl: item.picUrl || existing?.picUrl || '',
             };
             if (existing) {
               await tx.article.update({ where: { id: existing.id }, data });

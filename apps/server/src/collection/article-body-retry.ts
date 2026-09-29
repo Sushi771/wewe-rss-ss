@@ -200,7 +200,14 @@ export async function fetchArticleBody(article: SavedArticle) {
   if (
     identity.id !== target.id ||
     identity.mpId !== article.mpId ||
-    publishTime !== article.publishTime ||
+    (publishTime !== article.publishTime &&
+      // Album create_time is a list timestamp; a verified original ct can
+      // differ by seconds. Never relax a previously verified article date.
+      !(
+        CANONICAL_ID.test(article.id) &&
+        !article.verifiedSourceUrl &&
+        Math.abs(publishTime - article.publishTime) <= 60
+      )) ||
     normalizedTitle(title) !== normalizedTitle(article.title)
   )
     throw new BodyRetryError('identity_mismatch');
@@ -220,6 +227,7 @@ export async function fetchArticleBody(article: SavedArticle) {
   }
   return {
     verifiedSourceUrl: target.url,
+    originalPublishTime: publishTime,
     contentHtml: articleContentHtml(html),
   };
 }
