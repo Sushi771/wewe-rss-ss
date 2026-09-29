@@ -58,6 +58,14 @@
 
 总控随后已在本项目原文解析器加入 **`cgiDataNew` 的单脚本、平衡对象、唯一标量提取**，保留旧 `var` 解析并拒绝两者冲突；上文所述“仅接受旧 `var`”是改动前状态。当前构建在八份保存的真实目标 HTML 上移除旧 `var` 字段后，仍有 **8/8** 身份与原文时间精确等于旧解析结果。它没有运行页面 JS，也不能追认本次未保存的在线响应。
 
+## 相关文章与页面导航：新的腾讯端点，尚未请求
+
+八份旧目标原文均引用腾讯官方版本化脚本 [`appmsg.muihhh087c466445.js`](https://res.wx.qq.com/mmbizappmsg/zh_CN/htmledition/js/assets/appmsg.muihhh087c466445.js)。2026-09-30 只读取这份**公开静态 JS**，SHA-256 为 `97ef18b57ed7a313da9be9857f401514f8f73adff05fa92c5f6f161dc0905cd1`；未再次请求目标文章或下述数据接口。脚本偏移约 149700–152800 的 `mp-related-article` 组件先在显示条件、`extRes` 完成、无本地缓存时，向同源 `/mp/relatedarticle?action=precheck` 发 GET；仅当 `base_resp.ret=0` 且 `empty_scene=0`，才向同一路径 `action=directgetlist` 发第二个 GET。两个请求的明文参数均为 URL 编码的当前 `article_url`、`__biz/mid/idx`、`has_related_article_info`、`is_pay`、`scene/subscene`、`is_open_comment`，订阅场景可加 `is_from_subscribe=1`。成功响应读取 `list[]`、`more_url`、`show_rec_reason` 等；UI 使用每项 `url/mid/idx/nickname/username/send_time`，并从各条 URL 解析 `__biz` 作上报。源码未见公众号筛选、`begin/count` 或游标；`more_url` 由响应提供，静态页面未提供它，不能预设为分页接口或同号文章。
+
+认证仍待实测确认。该脚本调用腾讯 [`page_utils.muihhh089d3b1886.js`](https://res.wx.qq.com/mmbizappmsg/zh_CN/htmledition/js/assets/page_utils.muihhh089d3b1886.js) 的 `ajax`（2026-09-30 读取的 SHA-256 `8263dec0b6cdd8373e65d5ddefd8802a0f54a1bb13dee91bb2967fe86165c41e`）：偏移约 13558–14500 的 `joinUrl` 会在变量存在时附加页面的 `uin/key/pass_ticket/wxtoken/appmsg_token` 及客户端版本、`__biz`、`x5/f=json`，`joinUserArticleRole` 再加作者身份标志；偏移约 20400–26200 的 Ajax 包装器可走普通同源 XHR 或受支持微信客户端的转发。代码**没有证明**匿名直接请求可得到列表，也没有证明必须有有效私有会话。若独立审查认为值得低频验证，应先只读请求一次 `precheck`，记录 HTTP、腾讯 `base_resp/empty_scene` 与账号身份的脱敏结果；仅在其返回可用且用户授权范围明确时，另行考虑 `directgetlist`。不得复用旧目标页中看似非空的 `uin/key` 作为可用凭据证据，也不得把微信客户端转发作为产品运行方式。
+
+已保存的八份目标 HTML 离线核对：`related_article_info.has_related_article_info` 与页面 `hasRelatedArticleInfo` 均为 **8/8 等于零**，`relatedArticleFlag` 的字面赋值均为空；`related_article_info` 仅有标志和付费/红包信息，未内嵌 `list`，`related_tag` 八份均为空，出现的 `at_biz_list.list` 五份也均为空。每页 `album_info_list` 仍只指向自己的已知目标合集，未由这些字段发现第三个目标合集。零标志不等于该端点永远返回空推荐，尤其未保存的 9 月 30 日文章只知道出现了字段名，**不知道值**。即使 `directgetlist` 可用，它也是与当前文章相关的推荐结果，可能跨号、数量有限且无已证分页；只有逐项核对 `__biz/mid/idx/send_time` 并证明稳定覆盖后，才能讨论作为目标号增量发现来源。
+
 ## 后续验证与停止条件
 
 1. 已知目标合集的当日两页、19 个键与 6 篇原文身份/发布时间已在[合集 Probe](TARGET_ALBUM_PROBE.md)核验。下一次自然更新须与当前键集合比较，区分所选合集的新增与全号覆盖。
