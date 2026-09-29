@@ -6,7 +6,7 @@
 - [微信读书研究](coordination/RESEARCH_WEREAD.md)确认旧 WeBook 的 /book/articles 与已失败的 /mp/chapters 确是不同腾讯路径，但前者需要的 skey/vid 没有可审查、合法正常登录且能续期的来源；2025 登录示例是占位资料。B [探针与离线核查](coordination/PROBE_RESULTS.md)只见既有 wrk- Key/旧 accessToken 等字段名，未证明有同一认证体系的 skey/vid，因此没有发目标真实请求。
 - [公开微信来源研究](coordination/RESEARCH_WECHAT_PUBLIC.md)找到 MIT 许可、直接请求腾讯公开合集列表的实际源码；非目标号匿名读到两页 20+10 个不同 key。该入口要求该号自己发布的 **biz+album_id 合集链接，单个合集也不等于全号。目标旧库 194 行有 46 行含 **biz，却无 album_id/hid；非目标公开原文页单次请求遇腾讯验证 302 后停止，未证明可反查合集。目标号尚无五篇新来源文章。
 - [工程准备](coordination/INTEGRATION_READY.md)合入 Provider 页和规范 URL 校验、旧短 ID 跨 sn 去重、只补空正文/图片/来源、SQLite 保护快照 v3；在一致性副本上旧订阅/文章 12/1447、0 保护违反。探针 Mock 24/24、保护 Python 16/16、服务端全量 Jest 19 套/156 项和构建通过；总控主线针对性 Jest 15/15。远端 [CI c908337](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36596331010) 与 [CI 874ac44](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36596723918) 的 lint-test、private-image 均成功。
-- **决策：真实订阅仍未恢复。**没有目标号官方公开合集链接或新的正常认证来源时，不猜 album_id/凭据、不重复旧 -2041/499 请求、不接 Provider/生产库。若外部条件变化，先在隔离环境核对目标五篇不同文章的号身份、稳定 ID、原文链接、标题和真实发布时间，再验分页/正文/图片/持续新增；最后按副本验收门槛接入。当前仅剩外部来源条件，不创建空转后继任务；当前实际模型设置仍无可查询值，记未核实。
+- **2026-09-30 纠偏：真实订阅仍未恢复，研究继续。**旧“仅剩外部来源条件”的判断已撤回。新一轮 A/B/C 独立研究分别追 `/book/articles` 的 `skey/vid` 合法来源、其他有公开取文代码的腾讯列表入口、从已有原文发现公开主页/合集的机制；见 [总控状态](coordination/STATUS.md)。不猜 album_id/凭据、不重复旧 -2041/499 请求、不接 Provider/生产库。有源码、明确认证和实质差异的候选可先做一次低频隔离只读验证；五篇目标文章是接入前验收门槛。当前实际模型设置仍无可查询值，记未核实。
 
 ## 接手事实
 
