@@ -28,6 +28,8 @@
 - C 另用一篇已保存、四字段及原文时间离线核验过的目标旧文章作唯一一次当前页面对照：HTTP 200、`#js_content` 存在，但当时探针把身份解析/规范化/时间异常合成 `parser_stop`，不能断言具体失败层，也不能验收当前正文。与前次“解析后四字段至少一项不符”是不同检查点；两个 URL 均不重试。[报告](PUBLIC_PAGE_DISCOVERY.md)及改进的分阶段离线探针已合入，并把三个已请求摘要永久列入禁止重复集合。
 - B 将[腾讯第一方搜索页 JS 的续页字段](SOURCE_CANDIDATE_MATRIX.md)核进候选矩阵：实际 POST 用小写 `searchid` 和由上次 `content.cookies` 得来的 `searchcookies`；此前开源直连实现的 `searchID/conversationID` 重复 15 条只排除那个请求形状。目标号当前是否真有下一页仍未验证。对 `/weixinwap` 的多语言公开代码检索未命中可审查的近期文章 HTTP/解析实现，只限定本轮检索覆盖。A/B/C 已开始下一轮有区别的源码研究。
 - [独立可见 Edge 登录窗口预案](WEREAD_LOGIN_WINDOW_PLAN.md)已做空会话启动/清理冒烟验证：随机私有 profile、本机回环且进程归属可核的动态 CDP 端口成功；普通关闭未在 10 秒内完成，经核对只终止本次 profile 进程后清理，端口与 profile 均消失。本人扫码、有效 Web 会话、目标 POST 和搜索页滚动仍为 **0**，需要本人正常登录时再做一次低频只读验证；其他源码研究继续。
+- A 的[独立 Python 登录实现](RESEARCH_BOOK_ARTICLES_AUTH.md#第三轮旧-skey-映射的独立复核2026-09-30)确认移动 `accessToken` 曾作为 Web `/web/login/session/init` 请求体中的 `skey`，但没有证明它等于旧 `/book/articles` 自定义头；正在核对本机旧凭据的来源与有效期元数据，尚未读取原值或发送认证请求。B 的[非 PC 腾讯静态 JS](SOURCE_CANDIDATE_MATRIX.md)只给原生桥 `/wxsearch/broker` 相对路径，未给可自建直连的 HTTP 域名/认证；找到的 `/weixinwap` 历史 JSONP 仅分页搜**公众号账号**，不是文章目录。C [公开文章静态链](PUBLIC_PAGE_DISCOVERY.md#公开页面静态-js-的实际发现链与全号边界离线补核)显示 `/mp/publictag` 仅在有 `tagId` 且无合集 `link` 时回退；八份目标页没有该种子，已检查的合集、主页、相关文章 JS 均未给全号目录。上述只排除各自已查源码形状，继续保留其他有依据来源。
+- `b62d757` 的远端 `Format check` 因新表格排版失败，已由 `be8750a` 修正；[CI 36626605290](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36626605290) 两个 job 成功。B 增量主分支 `26152c0` 的 [CI 36627037368](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36627037368) 亦成功。所有这些提交仍只有研究/探针准备，不能称真实订阅恢复。
 
 ## 前轮判断（已由上节更新）
 
