@@ -79,6 +79,8 @@
 
 同一 `appmsg` 脚本的 `/mp/getmpext` 在偏移约 9900–10400 以当前 `bizuin/msgid/idx/token` POST，读取的是 `nominate_status` 等当前文章提名状态；`/mp/getrecreason?appmsg_list=...` 在偏移约 160900 只对已取得的推荐条目补充理由。另有 `render_utils` 中 `/mp/relatedsearchword?action=getcontentsearchword&__biz=...&mid=...&idx=...`，名称和参数指向当前文章搜索词，未见其返回文章列表的代码依据。这些请求均不能补足“按公众号完整发现新增文章”的缺口。
 
+本轮再筛该版文章脚本的其他相似入口：`/mp/homepage` 仅出现在偏移约 127072 的“阅读原文/外链” URL 分类与加 `scene` 的导航代码，不会由当前文章 `biz` 自动生成栏目 `hid/sn`；`/mp/profileblock?__biz=...` 在偏移约 670090 的公众号点击处理器中，仅 `isprofileblock=1` 时导航，八份旧目标 HTML 的该开关均为 **0**，且这段代码没有文章列表请求；`/mp/recommendtag?action=act_report/report_feedback` 在偏移约 213304/218879 上报推荐卡片行为，而非拉取同号目录。这只排除**所审脚本版本的这些调用点**作为自动枚举依据；没有实测 `/mp/profileblock` 页面本身的内容，也不把其页面能力推为不存在。
+
 **有条件的新最小探针**：今后若在另一篇已核验目标官方原文中看到 `album_info_list` 条目 `link` 为空、`tagId` 非空，且源码所渲染的 `data-url` 确为腾讯 `/mp/publictag?action=get&tag_id=<该页值>&start=0`，才设计一次匿名、无代理/跳转/重试的只读 GET；先看 HTTP/验证码/页面身份与是否存在列表、分页，再逐篇核 `__biz/mid/idx/ct`。目前八份目标样本均不满足触发条件，**现在不发请求**。对于 `relatedarticle`，既有报告已给出独立的 `precheck` 一次探针设计；这次静态复核没有新增认证依据或同号全集能力，不扩大该设计。
 
 ## 生产库已核验长链提供的不同文章种子（只读，待独立 Probe）
@@ -101,7 +103,19 @@
 
 离线以 `mid+sn` 核对本机先前审计的 19 份保存 HTML（临时目录 14 份、`output/playwright` 5 份），14 个列表外种子均无匹配原文快照。只读检查 `pc-wechat-pilot` 已保存的四份结构化元数据 JSON 与相关 `article-metrics` 缓存：所检文件没有可用于将这 14 篇映射到新合集的 `appmsgalbum/album_id/publictag/relatedarticle` 字段。生产 SQLite 的目标 `articles` 表只含旧文章身份、导出正文、指标等列，未存原始页面脚本；14 篇 `content_html` 有正文但不含这些合集标记，`metrics/source_url/pic_url` 对目标行的合集及相关文章标记只读计数亦为零。上述结果限定于这些现存缓存与字段，不能证明历史上从未访问文章，也不能证明腾讯页面不会返回新的合集。
 
-腾讯文章静态 JS 的已审代码只从当前页面内嵌 `cgiData.album_info_list` 生成合集卡片，已知 `getalbum` 接口则要求一个先得出的 `album_id`；`album_keep_read_info` 只给前后篇，`profile_ext?action=home` 是导航而非已证的全号列表请求，`relatedarticle` 是当前文章推荐且有预检与场景条件。现有静态代码没有提供“只用 `biz/mid/idx` 枚举该号全部合集或新增文章”的可复核请求。下一次网络探针须有**另一条未尝试且身份可核的文章种子**，或实质不同的腾讯官方入口与明确认证依据；先确认其相对旧实验的判别力，并沿用一次、匿名、禁代理/跳转/重试、3xx 或限制即停的门禁。当前离线材料没有给出比已停 302 长链更强的同形请求条件，C 线不自行再发。
+腾讯文章静态 JS 的已审代码只从当前页面内嵌 `cgiData.album_info_list` 生成合集卡片，已知 `getalbum` 接口则要求一个先得出的 `album_id`；`album_keep_read_info` 只给前后篇，`profile_ext?action=home` 是导航而非已证的全号列表请求，`relatedarticle` 是当前文章推荐且有预检与场景条件。现有静态代码没有提供“只用 `biz/mid/idx` 枚举该号全部合集或新增文章”的可复核请求。下一次网络探针须有**另一条未尝试且身份可核的文章种子**，或实质不同的腾讯官方入口与明确认证依据；先确认其相对旧实验的判别力，并沿用一次、匿名、禁代理/跳转/重试、3xx 或限制即停的门禁。此轮先不自行发同形请求；下文继续检查正文互链，找到来源更明确的另一条种子。
+
+## 正文同号互链：旧目标原文中发现两合集之外的身份种子（仅离线）
+
+[近期单提交开源项目 `huanxi007/gzh-export`，固定 commit `ff6832d`](https://github.com/huanxi007/gzh-export/tree/ff6832d4fa50abd12dbe231b6cd1ac98f5675205) 提出了合集、正文互链与 Wayback CDX 的收敛组合。其[真实 HTTP 发送函数第 46–54 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L46-L54)用 `urllib.request.urlopen`；[第 100–116 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L100-L116)对腾讯 `/mp/appmsgalbum?action=getalbum&__biz=<biz>&album_id=<id>&count=30&f=json` 请求单合集列表并用 `begin_msgid/begin_itemidx` 翻页，**并非**新的账号级合集枚举端点。[第 353–379、420–455 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L353-L455)先 GET 种子原文，按 `album_id` 正则与腾讯 `/s` 链接正则扩展池，再 GET 每篇发现的原文；其来源是**发布者在正文里放出的链接**，没有账号全集请求。其[第 119–136 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L119-L136)另向 `web.archive.org/cdx/search/cdx` 查询历史 URL，这是第三方公共存档索引，不是腾讯实时订阅端点。[README 的孤篇边界](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/README.md#L177-L192)明确：未入合集、未被互链、未存档的文章无法由这三路发现；[实现笔记](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/docs/NOTES.md)自述一次 300 多篇导出，但仓库未附目标号可复核原始日志或连续更新证据。
+
+对本项目八份已核验目标官方原文，用 DOM **只读解析 `#js_content` 的 `a[href]`**，要求腾讯 `https://mp.weixin.qq.com/s`、`__biz` 等于目标号且 `mid/idx/sn` 各恰好一个：共 **172** 个同号长链引用，按 `(mid,idx)` 去重 **63** 个，均有唯一一致的 `sn`。仅 **3** 个在已保存两合集 32 键内，另外 **60** 个不在这两份旧列表。把该项目的正文 URL 正则离线用于同一八份 HTML，也抓到这 172 条同号长链、63 个唯一四字段，证明其互链提取机制在**目标旧页面**上确有可用输入。这 60 条与库内 20 条 `verified_source_url` 的 `(mid,idx)` 零交集，也不等于八份旧 HTML 本身的文章身份；库内另有大量只有短链或不透明 ID 的旧文章，不能凭零交集断言它们是“新文章”或数据库缺失。19 份其他保存 HTML 中只有这八份可由旧 `var` 解析目标文章身份；全文中出现 `mid/sn` 往往只是引用，不能误当已保存该篇原文。八页的 `album_keep_read_info` 邻接链此前仅覆盖两合集，正文互链则是**不同的扩散来源**，但仍不是官方生成的全号目录。
+
+选一条 60 个列表外种子中**五份**已核目标原文均在正文 `<a href>` 指向的相同长链：`SHA256(__biz\0mid\0idx\0sn)` 前 16 位 `1c9ac9e993100643`。五个来源的原文 `ct` UTC 日期分别为 2026-01-03、01-12、04-21、04-26、06-30，来源自身的 `biz` 与链接 `__biz` 一致；该链接的 `sn` 在五处一致，URL 仅含公开 `__biz/mid/idx/sn/scene`，原始 `#wechat_redirect` 片段不参与身份和 HTTP 请求。它不在两合集旧 32 键、库内 20 条已核长链、38 条可辨识数字 mid 的旧文章 ID，也不是八份旧原文自身的身份；剩余旧库 ID 不透明，**不能证明旧库完全没有这篇**。在当前本机 `.attempted` 哨兵与两工作区 87 份 Markdown 脱敏记录中没有该摘要或该四字段组合，但这只界定本轮审计范围，不证明所有历史环境均未访问。该链接本身是旧文章引用，不能用作 2026-09-30 新增文章或五篇验收。
+
+为总控复审准备 [`public-interlink-one-shot.cjs`](../../scripts/collection-source-probe/public-interlink-one-shot.cjs)：`preflight` 从八份旧原文与四页已保存官方合集 JSON **离线唯一恢复**该 URL，并以当前已构建解析器逐页核旧文章四字段、原文 `ct`、正文和已知合集；实测 `8/8` 通过、五处候选链接完全一致、`requests=0`。`probe` 必须显式携带与摘要一致的复审标志，先以排他创建在私有临时目录写“已尝试”哨兵；其后才允许**一次**无代理、无 Cookie、无跳转、无重试、12 秒、6 MiB 上限的 HTTPS GET。3xx、验证码、频控、非 HTML 或超限即停；200 页面按 `#js_content`、`articleIdentity` 四字段逐项布尔、原文 `ct`、正文及 `data-src` 图片、页面明示且同号的官方合集链接分阶段记录，只输出脱敏布尔和数量。未带复审标志的离线拒绝路径也实测 `requests=0` 且未创建哨兵。**本轮未在线运行 `probe`。**
+
+原项目脚本不能直接当本项目的安全探针：[第 405–418 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L405-L418)在某些失败后追加无依据 `chksm=1` 变体，[第 480–507 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L480-L507)会对验证/限流重试与冷却；`urlopen` 默认跟随跳转，且第 441–445 行先扩散页面链接再核 `var biz`。这些行为不符合本轮单次停止门禁。它的 [`page_key` 第 89–93 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L89-L93)也只解析旧 `var mid/idx`，不能替代目标四字段、发布时间和正文图片验收。上述 60 条只说明**有真实可复核的历史互链候选**；能否匿名取得候选原文、由其发现第三合集或形成持续新增文章来源仍待独立一次探针与后续增量验证。
 
 ## 2026-09-30 另一篇目标原文的单请求结果与离线差异诊断
 
@@ -127,4 +141,4 @@
 2. 新原文若身份闭环，再严格解析 `album_info_list` 与 `appmsgalbuminfo`；只接受腾讯官方 `/mp/appmsgalbum`、账号 `biz` 一致且页面明示的 `album_id`。没有字段就不猜 ID，也不重发上述身份未闭环的同一 URL。
 3. 对 `profile_ext`、`homepage` 继续查公开源码与合法认证来源；只有与旧空列表/频控实测有实质差异的一手依据，才设计隔离只读探针。遇腾讯验证、限流、身份不符立即停止对应 URL。另一篇**非目标**官方文章的单次匿名 GET 曾返回腾讯验证 302，已停止该 URL 请求。
 
-本报告只排除“旧目标分享 URL 参数自身含合集 ID”和“已发现两合集足以代表全号”两项推断；公开原文发现其他目标合集、合集持续更新、公众号全部列表仍可继续研究和逐项验证。
+本报告排除“旧目标分享 URL 参数自身含合集 ID”和“已发现两合集足以代表全号”两项推断，并新增 **60 个**来自旧目标正文的列表外同号长链种子。这些种子尚无当前页面身份与时间闭环；公开原文发现其他目标合集、合集持续更新、公众号全部列表仍需分别研究和验证。
