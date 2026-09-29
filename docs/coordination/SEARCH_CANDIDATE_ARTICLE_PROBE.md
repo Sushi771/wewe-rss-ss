@@ -23,3 +23,7 @@ node scripts/research/probe-search-candidate-article.cjs --execute --db <ABSOLUT
 ```
 
 本轮 `node --check`、`--plan`、假网络 `--self-test` 和**真实私有候选的离线 `--preflight`**通过。在线原文请求 **0**，生产 SQLite 写入 **0**。首次真实原文验证及后续每篇选择均待总控复审；尚无五篇真实不同目标文章，不能接入 Provider 或宣称订阅恢复。
+
+## 总控唯一一次在线执行
+
+总控合入脚本后复跑 `--plan`、假网络 `--self-test` 与真实私有材料的 `--preflight --index 3`，后者仍为 11 个候选、10 个无已知尝试标记，index 3 摘要仍为 `30db5616c99296a2`，不在已保存两合集及旧库可辨认键内。随后按审查标志仅对这一个原存 URL 作一次匿名 HTTPS GET，返回 HTTP 200，`#js_content` 存在；当前解析器取得的 `biz/mid/idx` 与候选一致，但 `sn` **不一致**，因此脚本在身份门禁处返回 `stop_identity_mismatch`。此次没有进一步解析原文 `ct`、正文或图片，也没有保存页面 HTML；私有单 URL 哨兵已落盘，同 URL 不重发。这个结果只排除**该候选 URL 按四字段精确匹配的本次验证**，不能说明搜索索引所有候选错误，更不能把该页计为目标真实文章。其余未请求候选须先审查差异和下一次门禁。生产 SQLite 写入仍为零。
