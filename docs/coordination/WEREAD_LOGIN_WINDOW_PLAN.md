@@ -6,7 +6,9 @@
 
 [Chrome 官方说明](https://developer.chrome.com/blog/remote-debugging-port)指出 Chrome 136 起默认用户数据目录不再接受远程调试开关，须使用不同的 `--user-data-dir`。[Microsoft Edge 开发文档](https://learn.microsoft.com/en-us/microsoft-edge/web-platform/devtools-mcp-server)说明 Edge 支持远程调试与 `DevToolsActivePort` 发现；[Edge 策略文档](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies/userdatadir)提示策略可覆盖命令行的用户数据目录。因此[启动脚本](../../scripts/research/weread-login-window.ps1)先拒绝相关策略覆盖、无有效浏览器签名、可共享的本地资料目录，再为**单次研究会话**创建用户 `%LOCALAPPDATA%` 下的独立私有 profile；不打开或复制用户原 Edge/Chrome profile。
 
-本轮只执行脚本 `Plan`（Edge 和 Chrome）、`SelfTest` 及 `Status` 的无会话失败分支：两种浏览器均返回可准备，离线门禁通过 **8** 项检查，无会话时状态查询安全停止；**浏览器启动 0、登录页打开 0、profile 写入 0、目标请求 0**。本轮没有运行 `Start/Stop` 或 `Status` 的真实会话路径，没有扫码、读取 Cookie/本地存储、保存会话或访问目标搜索接口。`Plan` 不创建目录，且预检后研究 profile 根目录仍不存在。离线结果只证明启动条件与部分脚本逻辑，不证明实际浏览器会话和官方登录可用。
+专项初稿只执行脚本 `Plan`（Edge 和 Chrome）、`SelfTest` 及 `Status` 的无会话失败分支：两种浏览器均返回可准备，离线门禁通过 **8** 项检查，无会话时状态查询安全停止；当时浏览器启动、登录页打开、profile 写入、目标请求均为 0。`Plan` 不创建目录，且预检后研究 profile 根目录仍不存在。
+
+总控随后做一次**空会话启动/清理冒烟验证**：`Start -Browser Edge` 成功启动专用可见窗口，动态 CDP 端口为本机 IPv4 回环监听且归属该 Edge 进程；没有扫码、读取 Cookie/本地存储、保存登录态或发送目标号搜索请求。首次 `Stop` 尝试正常关闭窗口后返回 `close_visible_window_manually_then_retry_stop`。总控核对会话记录的绝对路径仍是脚本创建的随机子目录，只终止可执行路径与命令行 profile 均匹配的本次 Edge 进程，再运行 `Stop`，确认 `profileRemoved=true`、`cdpClosed=true`。这验证了空会话启动和清理，不验证扫码登录、会话续期、搜索页结果或目标文章。正常关闭未在 10 秒内完成，实际实验结束时需在可见窗口手动关闭后重跑 `Stop`；不要遗留该短时调试会话。
 
 ## 本人操作时的最小流程
 
@@ -18,7 +20,7 @@ pwsh -NoProfile -File scripts/research/weread-login-window.ps1 -Action SelfTest
 pwsh -NoProfile -File scripts/research/weread-login-window.ps1 -Action Start -Browser Edge
 ```
 
-`Start` 仅打开固定官方首页 `https://weread.qq.com/` 的**可见**浏览器窗口，采用新随机 profile、`--remote-debugging-address=127.0.0.1`、`--remote-debugging-port=0`，不使用默认浏览器 profile，也不自动扫码。本人在该窗口按官方流程完成登录；会话失效时由本人在同一窗口正常重新登录。脚本只读 `DevToolsActivePort` 的**第一行端口号**，核对监听均为 IPv4 `127.0.0.1` 后才输出 `http://127.0.0.1:<动态端口>/`；它不读取文件中的 WebSocket 标识、标签页内容或任何 Cookie/Key。若 Edge 不可用，可把 `-Browser` 改为 `Chrome`，但同一时刻只允许一个被脚本记录的研究会话。
+`Start` 仅打开固定官方首页 `https://weread.qq.com/` 的**可见**浏览器窗口，采用新随机 profile、`--remote-debugging-address=127.0.0.1`、`--remote-debugging-port=0`，不使用默认浏览器 profile，也不自动扫码。本人在该窗口按官方流程完成登录；会话失效时由本人在同一窗口正常重新登录。脚本只读 `DevToolsActivePort` 的**第一行端口号**，核对监听均为 IPv4 `127.0.0.1`、监听进程属于本次浏览器后才输出 `http://127.0.0.1:<动态端口>/`；它不读取文件中的 WebSocket 标识、标签页内容或任何 Cookie/Key。若 Edge 不可用，可把 `-Browser` 改为 `Chrome`，但同一时刻只允许一个被脚本记录的研究会话。
 
 登录后的 `-Action Status` 只核对本机进程与回环监听，显示 CDP 地址，**不能证明已登录**。操作者需在可见官方页面确认登录。随后总控按各探针原有门禁分别决定是否执行：直接代理探针最多一次目标准确号名 POST；自然滚动探针要求已打开并确认官方目标搜索首屏，只做一次浏览器 wheel。启动脚本自身不打开搜索页、不发送查询、不运行这两个探针。官方验证、限频或异常出现即按各探针的停止规则结束，不换 profile 规避限制。
 

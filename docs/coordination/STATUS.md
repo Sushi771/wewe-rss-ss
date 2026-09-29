@@ -26,6 +26,8 @@
 - 主分支 `3e79dcf` 的 [CI 运行 36621435420](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36621435420) 两个 job 均成功；后续提交仍逐次核远端。
 - [六篇真实旧原文的 SQLite 副本导出演练](TARGET_ALBUM_EXPORT_REHEARSAL.md)再次证明两页 19 条回放不改 12/1447 基数或旧 ID、正文、可信时间、指标。限定六篇 RSS 和浏览器 Markdown 均 6/6 含正文、28 个图片引用；在完全禁网时 Obsidian 仅无图 1 篇完成，限定 19 篇的 ZIP 仅 1 篇完整、18 篇明确未完整，说明图片**字节**和其他正文仍欠在线验收。六篇旧短 ID 的 `verified_source_url` 为空，显式正文重试门禁 6/6 拒绝；未放宽保护或用旧 HTML 伪作今天采集。
 - C 另用一篇已保存、四字段及原文时间离线核验过的目标旧文章作唯一一次当前页面对照：HTTP 200、`#js_content` 存在，但当时探针把身份解析/规范化/时间异常合成 `parser_stop`，不能断言具体失败层，也不能验收当前正文。与前次“解析后四字段至少一项不符”是不同检查点；两个 URL 均不重试。[报告](PUBLIC_PAGE_DISCOVERY.md)及改进的分阶段离线探针已合入，并把三个已请求摘要永久列入禁止重复集合。
+- B 将[腾讯第一方搜索页 JS 的续页字段](SOURCE_CANDIDATE_MATRIX.md)核进候选矩阵：实际 POST 用小写 `searchid` 和由上次 `content.cookies` 得来的 `searchcookies`；此前开源直连实现的 `searchID/conversationID` 重复 15 条只排除那个请求形状。目标号当前是否真有下一页仍未验证。对 `/weixinwap` 的多语言公开代码检索未命中可审查的近期文章 HTTP/解析实现，只限定本轮检索覆盖。A/B/C 已开始下一轮有区别的源码研究。
+- [独立可见 Edge 登录窗口预案](WEREAD_LOGIN_WINDOW_PLAN.md)已做空会话启动/清理冒烟验证：随机私有 profile、本机回环且进程归属可核的动态 CDP 端口成功；普通关闭未在 10 秒内完成，经核对只终止本次 profile 进程后清理，端口与 profile 均消失。本人扫码、有效 Web 会话、目标 POST 和搜索页滚动仍为 **0**，需要本人正常登录时再做一次低频只读验证；其他源码研究继续。
 
 ## 前轮判断（已由上节更新）
 

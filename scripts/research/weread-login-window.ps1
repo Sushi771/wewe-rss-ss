@@ -159,6 +159,16 @@ function VerifiedPort($state) {
   if (-not $port) { return $null }
   $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
   if (-not (IsLoopbackOnly $listeners)) { throw 'CDP_NOT_IPV4_LOOPBACK_ONLY' }
+  foreach ($listener in $listeners) {
+    $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)" -ErrorAction SilentlyContinue
+    if (-not $owner -or
+      -not [string]::Equals($owner.ExecutablePath, $state.executable,
+        [StringComparison]::OrdinalIgnoreCase) -or
+      ($owner.ProcessId -ne $state.pid -and
+        (-not $owner.CommandLine -or -not $owner.CommandLine.Contains($state.profile)))) {
+      throw 'CDP_PORT_OWNER_UNVERIFIED'
+    }
+  }
   return $port
 }
 
