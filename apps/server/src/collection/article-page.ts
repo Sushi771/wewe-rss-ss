@@ -25,6 +25,64 @@ export const articlePageRequest = got.extend({
   },
 });
 
+/** Read simple scalar fields from the public page's CGI object without executing page JS. */
+function cgiDataNewField(
+  html: string,
+  name: string,
+  valuePattern: string,
+): string | undefined {
+  const marker = /\bwindow\.cgiDataNew\s*=\s*\{/.exec(html);
+  if (!marker || marker.index === undefined) return undefined;
+  const start = marker.index + marker[0].lastIndexOf('{');
+  const scriptEnd = html.indexOf('</script>', start);
+  const limit = Math.min(
+    scriptEnd < 0 ? html.length : scriptEnd,
+    start + 1_000_000,
+  );
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  let end = -1;
+  for (let i = start; i < limit; i++) {
+    const char = html[i];
+    const next = html[i + 1];
+    if (lineComment) {
+      if (char === '\n' || char === '\r') lineComment = false;
+    } else if (blockComment) {
+      if (char === '*' && next === '/') {
+        blockComment = false;
+        i++;
+      }
+    } else if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = '';
+    } else if (char === '/' && next === '/') {
+      lineComment = true;
+      i++;
+    } else if (char === '/' && next === '*') {
+      blockComment = true;
+      i++;
+    } else if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+    } else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) {
+      end = i + 1;
+      break;
+    }
+  }
+  if (end < 0) return undefined;
+  const script = html.slice(start, end);
+  const expression = new RegExp(
+    `(?:^|[,{])\\s*(?:["']${name}["']|${name})\\s*:\\s*(["'])(${valuePattern})\\1`,
+    'g',
+  );
+  const matches = [...script.matchAll(expression)];
+  return matches.length === 1 ? matches[0][2] : undefined;
+}
+
 /** 只读取原文结构中的发布时间；正文是否可缓存由独立检查判断。 */
 export function articlePublishTime(html: string): number | null {
   const $ = load(html);
@@ -32,8 +90,12 @@ export function articlePublishTime(html: string): number | null {
   const match = html.match(
     /\b(?:create_time|ct|CreateTime)\b["']?\s*[:=]\s*['"]?(\d{10})(?!\d)['"]?/i,
   );
-  if (!match) return null;
-  const timestamp = Number(match[1]);
+  const cgiTime =
+    cgiDataNewField(html, 'ori_create_time', '\\d{10}') ||
+    cgiDataNewField(html, 'ori_send_time', '\\d{10}') ||
+    cgiDataNewField(html, 'create_timestamp', '\\d{10}');
+  if (match && cgiTime && match[1] !== cgiTime) return null;
+  const timestamp = Number(match?.[1] || cgiTime);
   return timestamp >= 946684800 && timestamp <= Date.now() / 1000 + 300
     ? timestamp
     : null;
@@ -46,10 +108,27 @@ export function articleIdentity(html: string) {
     html.match(
       new RegExp(`\\bvar\\s+${name}\\s*=\\s*["'](${pattern})["']`),
     )?.[1];
-  const biz = value('biz', '[A-Za-z0-9+/=]+');
-  const mid = value('mid', '\\d+');
-  const idx = value('idx', '\\d+');
-  const sn = value('sn', '[a-fA-F0-9]+');
+  const choose = (legacy: string | undefined, modern: string | undefined) => {
+    if (legacy && modern && legacy !== modern)
+      throw new Error('原文身份字段冲突');
+    return legacy || modern;
+  };
+  const biz = choose(
+    value('biz', '[A-Za-z0-9+/=]+'),
+    cgiDataNewField(html, 'bizuin', '[A-Za-z0-9+/=]+'),
+  );
+  const mid = choose(
+    value('mid', '\\d+'),
+    cgiDataNewField(html, 'mid', '\\d+'),
+  );
+  const idx = choose(
+    value('idx', '\\d+'),
+    cgiDataNewField(html, 'idx', '\\d+'),
+  );
+  const sn = choose(
+    value('sn', '[a-fA-F0-9]+'),
+    cgiDataNewField(html, 'sn', '[a-fA-F0-9]+'),
+  );
   if (!biz || !mid || !idx) throw new Error('未取得原文 biz/mid/idx 身份');
   const url = new URL('https://mp.weixin.qq.com/s');
   for (const [key, val] of [

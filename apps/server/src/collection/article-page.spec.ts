@@ -21,6 +21,34 @@ describe('article publication evidence', () => {
       articleIdentity(html.replace('var mid="2247493540";', '')),
     ).toThrow();
   });
+  it('reads CGI object scalar identity and original time without executing page script', () => {
+    const cgi =
+      "window.cgiDataNew={bizuin:'Mzg5NTQzMTQxMg==',mid:'2247493540',idx:'2',sn:'abcdef',ori_create_time:'1790400091',nested:{caption:'safe'}};";
+    const html = `<meta property="og:url" content="https://mp.weixin.qq.com/s/short"><div id="js_content">正文</div><script>${cgi}</script>`;
+    expect(articleIdentity(html)).toMatchObject({
+      id: 'WX_3895431412_2247493540_2',
+      mpId: 'MP_WXS_3895431412',
+      publishTime: 1790400091,
+    });
+    expect(articlePublishTime(html)).toBe(1790400091);
+    expect(() =>
+      articleIdentity(
+        html.replace("mid:'2247493540',", "mid:'2247493540',mid:'9',"),
+      ),
+    ).toThrow();
+    expect(() =>
+      articleIdentity(html.replace(cgi, `var mid="9";${cgi}`)),
+    ).toThrow('身份字段冲突');
+    expect(() =>
+      articleIdentity(
+        html.replace("mid:'2247493540',", '') +
+          "<script>window.unrelated={mid:'2247493540'}</script>",
+      ),
+    ).toThrow('未取得原文 biz/mid/idx');
+    expect(
+      articlePublishTime(html.replace(cgi, `var ct=1790400092;${cgi}`)),
+    ).toBeNull();
+  });
   it('requires an article body rather than a timestamp in a verification page', () => {
     expect(
       articlePublishTime('<script>var ct = 1787013185;</script><p>请验证</p>'),
