@@ -529,3 +529,15 @@ async function main() {
 }
 
 if (require.main === module) main();
+
+// The online runner reuses the exact reviewed request shape and preflight gates.
+module.exports = {
+  within,
+  safePrivateRoot,
+  oneAccount,
+  integrity,
+  sqliteApi,
+  refreshShape,
+  classifyRefreshResponse,
+  preflight,
+};
