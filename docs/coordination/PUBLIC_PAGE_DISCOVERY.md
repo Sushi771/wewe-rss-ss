@@ -44,6 +44,20 @@
 
 本次旧 `var biz/mid/idx` 提取正则未得到与请求 URL 一致的三元组；采集脚本只报告三个布尔比较为 false，未区分字段缺失和字段异值。响应未保存，按一次请求上限**不重新请求**，因此这篇仍缺原文身份闭环，不能算“新取到一篇目标真文章”，也不能作为五篇门槛的一部分。`album_info_list` 这次没有单独提取，`appmsgalbuminfo/tags` 的无新 ID 结论仅覆盖这两个字段，不排除前者单独列出其他合集。后续若有独立新文章或正常访问机会，解析器须同时记录身份字段的**存在性及是否匹配**、`album_info_list` 的官方链接与账号归属、严格 DOM 内图片计数，只保存脱敏摘要；遇验证码则停止该 URL，不为补本次缺项重发。
 
+## 原文身份解析的离线复核（未再次请求腾讯）
+
+一次性探针使用 `\bvar\s+<name>\s*=\s*["']([^"']*)["']`，仅接受带引号的 `biz/mid/idx`；三个结果只输出“等于请求 URL 吗”，没有输出“字段存在吗”。把**完全相同**的正则离线应用于八份 2026-09-27 目标原文，`biz/mid/idx` 均逐项匹配（各 8/8），所以正则本身没有普遍的语法错误，但不证明 2026-09-30 那份未保存响应的字段内容或格式。较新的 [Python 原文解析器 commit `060fb3d` 第 27–33 行](https://github.com/jj-cheng25/weixin-articles-mcp/blob/060fb3dd7e41d1c0950a19bc1367d66a6881f915/src/weixin_articles_mcp/parser.py#L27-L33)允许 `mid/idx` 为**无引号数字**，其[第 147–211 行](https://github.com/jj-cheng25/weixin-articles-mcp/blob/060fb3dd7e41d1c0950a19bc1367d66a6881f915/src/weixin_articles_mcp/parser.py#L147-L211)从 `#js_content`、`var ct/biz/mid/idx` 填文章模型。它仍依赖 `var biz`，不能单独解决该变量缺失的页面。现有本项目 TypeScript [`articleIdentity` 第 42–65 行](../../apps/server/src/collection/article-page.ts#L42-L65)也仅接受引号包裹的四个 `var` 字段；2026-09-30 的单篇探针没有调用其他身份解析器。
+
+与此不同，[Go 开源实现 commit `4317a0b` 的 `extractPayload` 第 26–75 行](https://github.com/vmxmy/wechat-article-exporter/blob/4317a0b76c53a5c75074df9dd837732eb02dfcd1/cli/internal/processor/extract.go#L26-L75)优先读取 `window.cgiDataNew`，再试嵌入 JSON 与旧 `window.cgiData`；[第 157–198 行](https://github.com/vmxmy/wechat-article-exporter/blob/4317a0b76c53a5c75074df9dd837732eb02dfcd1/cli/internal/processor/extract.go#L157-L198)限定在 `<script>` 中找赋值、要求右侧为 `{`、找平衡对象；[`normalizeArticle` 第 17–53 行](https://github.com/vmxmy/wechat-article-exporter/blob/4317a0b76c53a5c75074df9dd837732eb02dfcd1/cli/internal/processor/normalize.go#L17-L53)把 `bizuin/mid/idx/sn` 映射为身份，把 `ori_create_time/ori_send_time/create_timestamp` 映射为原始发布时间，并把显示用 `create_time` 另存。此代码**没有执行页面 JS**，对象字面量由[受限解析器第 26–96、99–153 行](https://github.com/vmxmy/wechat-article-exporter/blob/4317a0b76c53a5c75074df9dd837732eb02dfcd1/cli/internal/processor/object_parser.go#L26-L153)读入；它拒绝不支持的表达式与重复键，并限制体积和嵌套深度。
+
+八份已保存目标 HTML 均有 `window.cgiDataNew = {…}`。离线只在该赋值所在 `<script>` 内找标量键，`bizuin/mid/idx/sn` 与已核验目标长链各 **8/8 一致**；`bizuin` 已是与 URL `__biz` 相同的 Base64 字符串，无需转换或把 `user_name` 当 `biz`。`ori_create_time/ori_send_time/create_timestamp` 各 8/8 等于同页 `var ct`，显示字段 `create_time` 不应直接当 Unix `ct`。这仅复核旧八篇，不能追认未保存的 2026-09-30 响应。
+
+对象**不是严格 JSON**：对八份 `window.cgiDataNew` 直接用标准 JSON 解码均因无引号键失败；按字符串转义状态进行只读平衡括号扫描，八份都有嵌套对象、单引号字符串和转义字节，深度最高为 5，单对象约 40–292 KB。实现时须限定腾讯原文页、状态与正文节点，扫描 `<script>` 后用有大小/深度界限的 JS **字面量**解析器读取对象，拒绝函数调用和表达式；不可用 `eval`/`Function`，也不能对整个 HTML 用一个跨脚本正则。再以请求 URL 和腾讯合集列表的 `__biz/mid/idx/sn` 独立对照对象字段，以原文 `ct`/原始时间和正文节点复核。当前没有在这八份 HTML 上运行该 Go 程序；上述四字段核对使用受限于同一个 `<script>` 的离线标量提取，完整 Go 解析兼容性仍需回归。
+
+其他元数据并非可靠替代：八份旧 HTML 的 `og:url` 与 `var msg_link` 都存在，但均为不含完整 `__biz/mid/idx` 的短链；`var appuin` 和 `var itemidx` 均为空。`window.cgiData` 也出现，但其对象未包含上述身份键；`appmsgext` 字符串出现却没有可用的对象赋值证据。故不能仅凭这些字段或 9 月 30 日探针的三个 `false` 声称新页身份冲突。若以后有**另一篇**合法公开原文，首个验证只记录各候选字段“存在/格式/与 URL 及合集相符”的脱敏布尔值，并把无法闭环的结果留为未知。
+
+总控随后已在本项目原文解析器加入 **`cgiDataNew` 的单脚本、平衡对象、唯一标量提取**，保留旧 `var` 解析并拒绝两者冲突；上文所述“仅接受旧 `var`”是改动前状态。当前构建在八份保存的真实目标 HTML 上移除旧 `var` 字段后，仍有 **8/8** 身份与原文时间精确等于旧解析结果。它没有运行页面 JS，也不能追认本次未保存的在线响应。
+
 ## 后续验证与停止条件
 
 1. 已知目标合集的当日两页、19 个键与 6 篇原文身份/发布时间已在[合集 Probe](TARGET_ALBUM_PROBE.md)核验。下一次自然更新须与当前键集合比较，区分所选合集的新增与全号覆盖。
