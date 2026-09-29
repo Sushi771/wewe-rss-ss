@@ -20,6 +20,8 @@
 - 公开合集采集补上受约束的旧短链 `verifiedSourceUrl` 绑定：必须短链原文有可信发表时间，且其完整带 `sn` 链接与官方合集项相同；旧非空绑定、正文和指标保留。隔离 SQLite 的匹配与 `sn` 冲突测试通过，后续需在真实可核验原文及图片字节上做副本导出与重启验收。生产库未执行这次采集或绑定，六篇旧文章的既有正文状态未变。
 - A 的[认证复核](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md#2026-09-30-web-搜索--2012-的认证边界)指出先前 Node 搜索只发了服务器五个 Cookie 中的三个；`-2012` 的确切原因仍未知。下一项有源码支持的对照是在非持久浏览器上下文保留完整 Cookie jar，先用同源只读接口验会话，再只发一次页面内准确号名搜索；遇验证或异常立即停。B [矩阵增量](coordination/SOURCE_CANDIDATE_MATRIX.md)未找到能替代的独立新列表协议，旧 `/web/mp/articles` 临时票据实现依赖项目禁止的流量监听，不作为产品运行路线。
 - C [公开种子](coordination/PUBLIC_PAGE_DISCOVERY.md#生产库已核验长链提供的不同文章种子只读待独立-probe)从旧库只读找到 14 条不在已保存两合集列表中的目标文章身份；[独立单次探针](coordination/VERIFIED_ARTICLE_SEED_PROBE.md)选其中一条未见本轮请求记录的旧文章匿名 GET，HTTP 302，未跟随或重试，没有可解析 HTML、原文时间、图片或新合集。私有哨兵已记该 URL，不能重发；结果不外推其他页面。旧文章不算新来源五篇。
+- [完整 Cookie jar 探针](coordination/BROWSER_CONTEXT_COOKIE_JAR_PROBE.md)只向腾讯发送 init 与书架健康两次请求：init HTTP 200 下发五个适用 Cookie，书架 HTTP 200 却给 `errCode=-2012`；搜索未发送。故前次搜索失败尚不能单独归因于手工少送两项 Cookie，Web 会话本身的有效性仍未证实。A 正核对一手报告中“init 接受失效 token 但后续业务失败”的机制与移动 token Refresh；下一步先复审刷新/轮换安全，再设计新的单次隔离验证，不在旧会话上盲测。
+- C 将八份旧文章的 15 条前后篇链接离线核到 11 个不同文章键，均属于已保存两合集范围；14 条列表外已核验长链没有被这些邻接链覆盖。另开的图片字节与离线导出 Codex task 已生成独立 Git worktree，但截至本次续记尚未返回正式 task ID，避免重复派发同题 Agent；继续等待注册并复核状态。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 

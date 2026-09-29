@@ -16,11 +16,11 @@
 
 请求顺序和硬上限为：
 
-| 阶段 | 最多请求 | 发起条件 | 停止门禁 |
-| --- | ---: | --- | --- |
-| `/web/login/session/init` | 1 次 POST | 唯一合法 mobile 对象，空 jar | 非 200、跳转、验证、限流、异常码、Cookie 缺失/作用域不符或 `wr_vid` 与 `mobile.vid` 不符 |
-| `/web/shelf/sync` | 1 次 GET | init 成功且浏览器 jar 对书架及搜索路径有匹配的 `wr_vid/wr_skey` | 非 200、跳转、验证、限流、异常码、缺少 `books` 数组及 `synckey` |
-| `/web/wx_search_broker_proxy` | 1 次 POST | 书架明确有效且 Cookie 仍匹配 | 非 200、跳转、验证、限流、异常码或响应形状不可判读即停 |
+| 阶段                          |  最多请求 | 发起条件                                                        | 停止门禁                                                                                 |
+| ----------------------------- | --------: | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `/web/login/session/init`     | 1 次 POST | 唯一合法 mobile 对象，空 jar                                    | 非 200、跳转、验证、限流、异常码、Cookie 缺失/作用域不符或 `wr_vid` 与 `mobile.vid` 不符 |
+| `/web/shelf/sync`             |  1 次 GET | init 成功且浏览器 jar 对书架及搜索路径有匹配的 `wr_vid/wr_skey` | 非 200、跳转、验证、限流、异常码、缺少 `books` 数组及 `synckey`                          |
+| `/web/wx_search_broker_proxy` | 1 次 POST | 书架明确有效且 Cookie 仍匹配                                    | 非 200、跳转、验证、限流、异常码或响应形状不可判读即停                                   |
 
 最多 **3 个第一方请求**；0 页面导航、0 刷新、0 重试、0 分页、0 原文请求。Playwright 的 `maxRedirects:0/maxRetries:0` 用于每步；超时分别为 10/10/20 秒。JSON 解析前检查正文 64/128/512 KiB 上限；Playwright APIResponse 会先在内存接收响应，所以这些是**解析上限**，不是传输流硬截断。进程只输出请求数、HTTP 状态、受控业务码、Set-Cookie **名称**、适用于两路径的 Cookie 名称/数量、`wr_vid` 身份匹配及轮换布尔、书架有效/未知分类、搜索响应字段存在性与脱敏计数；不输出账号 ID、Cookie/token 值、完整 URL、标题、正文、原始响应或游标值。搜索卡片号名精确匹配数与显式目标 `biz` 匹配数分开计，不能以卡片时间替代原文 `ct`。
 
@@ -31,7 +31,24 @@
 总控复审上述“完整 jar、无页面”的独立范围后，先只读检查生产 SQLite：`quick_check=ok`、账号数 **1**；再运行脚本的 `--execute` **一次**。脱敏结果如下（只列受控字段，不含原始响应或 Cookie 值）：
 
 ```json
-{"decision":"stop_auth_expired_candidate","requestCount":2,"initRequests":1,"shelfRequests":1,"searchRequests":0,"pageNavigations":0,"initHttp":200,"initType":"json","initSetCookieNames":["wr_pf","wr_ql","wr_rt","wr_skey","wr_vid"],"shelfCookieCount":5,"searchCookieCount":5,"wrVidMatchesMobile":true,"wrSkeyApplicable":true,"shelfHttp":200,"shelfType":"json","shelfCode":-2012}
+{
+  "decision": "stop_auth_expired_candidate",
+  "requestCount": 2,
+  "initRequests": 1,
+  "shelfRequests": 1,
+  "searchRequests": 0,
+  "pageNavigations": 0,
+  "initHttp": 200,
+  "initType": "json",
+  "initSetCookieNames": ["wr_pf", "wr_ql", "wr_rt", "wr_skey", "wr_vid"],
+  "shelfCookieCount": 5,
+  "searchCookieCount": 5,
+  "wrVidMatchesMobile": true,
+  "wrSkeyApplicable": true,
+  "shelfHttp": 200,
+  "shelfType": "json",
+  "shelfCode": -2012
+}
 ```
 
 init 无异常业务码，服务器下发的五个 Cookie 名均在同一非持久 Context 的书架和搜索路径作用域内；`wr_vid` 与所用 `mobile.vid` 在内存中精确一致，`wr_skey` 非空。Playwright 官方 Cookie jar 语义使后续 `context.request` 自动携带适用 Cookie，脚本没有手工裁剪或构造 Cookie 头；由于禁止请求监听/抓包，本轮只证明 jar 中五个 Cookie 对两路径**可用**，没有另行观察线上请求头。
