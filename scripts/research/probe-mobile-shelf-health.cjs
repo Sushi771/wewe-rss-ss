@@ -36,7 +36,12 @@ function parseArgs(argv) {
 
 function isWithin(parent, child) {
   const relative = path.relative(parent, child).toLowerCase();
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
 }
 
 function markerGate(markerPath) {
@@ -44,7 +49,10 @@ function markerGate(markerPath) {
   const parent = fs.realpathSync(path.dirname(markerPath));
   if (!fs.statSync(parent).isDirectory()) throw Error('marker_gate');
   const root = fs.realpathSync(PROJECT_ROOT);
-  if (isWithin(root, parent) && !isWithin(path.join(root, 'private-data'), parent))
+  if (
+    isWithin(root, parent) &&
+    !isWithin(path.join(root, 'private-data'), parent)
+  )
     throw Error('marker_gate');
 }
 
@@ -114,7 +122,9 @@ function readMobile(dbPath) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     db.exec('PRAGMA query_only=ON');
-    return mobileFromRows(db.prepare('SELECT token FROM accounts LIMIT 2').all());
+    return mobileFromRows(
+      db.prepare('SELECT token FROM accounts LIMIT 2').all(),
+    );
   } finally {
     db.close();
   }
@@ -157,23 +167,27 @@ function requestOptions(mobile) {
 // Direct HTTPS with agent:false has no proxy, Cookie jar, cache, or redirect logic.
 function directGet(url, options) {
   return new Promise((resolve, reject) => {
-    const request = https.request(url, {
-      method: options.method,
-      headers: options.headers,
-      signal: options.signal,
-      agent: false,
-    }, (incoming) => {
-      resolve({
-        status: incoming.statusCode ?? 0,
-        headers: {
-          get(name) {
-            const value = incoming.headers[name.toLowerCase()];
-            return Array.isArray(value) ? value.join(', ') : value ?? null;
+    const request = https.request(
+      url,
+      {
+        method: options.method,
+        headers: options.headers,
+        signal: options.signal,
+        agent: false,
+      },
+      (incoming) => {
+        resolve({
+          status: incoming.statusCode ?? 0,
+          headers: {
+            get(name) {
+              const value = incoming.headers[name.toLowerCase()];
+              return Array.isArray(value) ? value.join(', ') : (value ?? null);
+            },
           },
-        },
-        body: Readable.toWeb(incoming),
-      });
-    });
+          body: Readable.toWeb(incoming),
+        });
+      },
+    );
     request.on('error', reject);
     request.end();
   });
@@ -202,7 +216,8 @@ async function boundedText(response) {
 
 function numericCode(value) {
   if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
-  if (typeof value === 'string' && /^-?\d{1,9}$/.test(value)) return Number(value);
+  if (typeof value === 'string' && /^-?\d{1,9}$/.test(value))
+    return Number(value);
   return null;
 }
 
@@ -210,14 +225,22 @@ function responseHint(value) {
   if (typeof value !== 'string') return null;
   if (/captcha|验证码|安全验证|verifycenter|请完成验证/i.test(value))
     return 'stop_verification';
-  if (/访问过于频繁|请求频繁|限流|限频|rate.?limit|too many|throttl/i.test(value))
+  if (
+    /访问过于频繁|请求频繁|限流|限频|rate.?limit|too many|throttl/i.test(value)
+  )
     return 'stop_rate_limit';
   return null;
 }
 
 function classify(status, contentType, text) {
-  const base = { http: status, businessCode: null, hasBooks: false, hasSynckey: false };
-  if (status >= 300 && status < 400) return { ...base, decision: 'stop_redirect' };
+  const base = {
+    http: status,
+    businessCode: null,
+    hasBooks: false,
+    hasSynckey: false,
+  };
+  if (status >= 300 && status < 400)
+    return { ...base, decision: 'stop_redirect' };
   if (status === 429) return { ...base, decision: 'stop_rate_limit' };
   if (status === 401 || status === 403)
     return { ...base, decision: 'stop_auth_or_access' };
@@ -243,14 +266,14 @@ function classify(status, contentType, text) {
   if (rawCode !== undefined && businessCode === null)
     return { ...result, decision: 'stop_unexpected_shape' };
   const hint = [body.msg, body.message, body.errMsg, body.err_message]
-    .map(responseHint).find(Boolean);
+    .map(responseHint)
+    .find(Boolean);
   if (hint) return { ...result, decision: hint };
   if (businessCode === -2012)
     return { ...result, decision: 'stop_mobile_session_rejected_candidate' };
   if (businessCode !== null && businessCode !== 0)
     return { ...result, decision: 'stop_business_code' };
-  if (!result.hasBooks)
-    return { ...result, decision: 'stop_unexpected_shape' };
+  if (!result.hasBooks) return { ...result, decision: 'stop_unexpected_shape' };
   return { ...result, decision: 'mobile_shelf_accepted' };
 }
 
@@ -276,7 +299,11 @@ async function probe(mobile, fetchImpl) {
     return { requestCount: 1, http: status, decision: 'stop_oversize' };
   return {
     requestCount: 1,
-    ...classify(status, response.headers.get('content-type') ?? '', bounded.text),
+    ...classify(
+      status,
+      response.headers.get('content-type') ?? '',
+      bounded.text,
+    ),
   };
 }
 
@@ -284,12 +311,23 @@ async function selfTest() {
   assert.equal(parseArgs(['--plan']).mode, '--plan');
   assert.throws(() => parseArgs(['--execute']), /usage_gate/);
   assert.throws(() => mobileFromRows([]), /account_gate/);
-  const fakeRows = [{ token: JSON.stringify({ mobile: {
-    vid: 'fixture-vid', accessToken: 'fixture-access',
-    refreshToken: 'fixture-refresh', deviceId: 'fixture-device',
-  } }) }];
+  const fakeRows = [
+    {
+      token: JSON.stringify({
+        mobile: {
+          vid: 'fixture-vid',
+          accessToken: 'fixture-access',
+          refreshToken: 'fixture-refresh',
+          deviceId: 'fixture-device',
+        },
+      }),
+    },
+  ];
   const mobile = mobileFromRows(fakeRows);
-  assert.deepEqual(mobile, { vid: 'fixture-vid', accessToken: 'fixture-access' });
+  assert.deepEqual(mobile, {
+    vid: 'fixture-vid',
+    accessToken: 'fixture-access',
+  });
   const options = requestOptions(mobile);
   assert.equal(options.method, 'GET');
   assert.equal(options.headers.vid, 'fixture-vid');
@@ -302,26 +340,61 @@ async function selfTest() {
     assert.equal(url, ENDPOINT);
     assert.equal(init.method, 'GET');
     return new Response(JSON.stringify({ books: [], synckey: 5 }), {
-      status: 200, headers: { 'content-type': 'application/json' },
+      status: 200,
+      headers: { 'content-type': 'application/json' },
     });
   };
-  assert.equal((await probe(mobile, fakeFetch)).decision, 'mobile_shelf_accepted');
+  assert.equal(
+    (await probe(mobile, fakeFetch)).decision,
+    'mobile_shelf_accepted',
+  );
   assert.equal(calls, 1);
-  assert.equal(classify(200, 'application/json', '{"errCode":-2012}').decision,
-    'stop_mobile_session_rejected_candidate');
-  assert.equal(classify(200, 'text/html', '<h1>验证码</h1>').decision,
-    'stop_verification');
-  assert.equal(classify(200, 'application/json', '{"errCode":0,"books":[{"title":"验证码"}]}').decision,
-    'mobile_shelf_accepted');
-  assert.equal(classify(200, 'application/json', '{"errCode":0,"msg":"访问过于频繁"}').decision,
-    'stop_rate_limit');
+  assert.equal(
+    classify(200, 'application/json', '{"errCode":-2012}').decision,
+    'stop_mobile_session_rejected_candidate',
+  );
+  assert.equal(
+    classify(200, 'text/html', '<h1>验证码</h1>').decision,
+    'stop_verification',
+  );
+  assert.equal(
+    classify(
+      200,
+      'application/json',
+      '{"errCode":0,"books":[{"title":"验证码"}]}',
+    ).decision,
+    'mobile_shelf_accepted',
+  );
+  assert.equal(
+    classify(200, 'application/json', '{"errCode":0,"msg":"访问过于频繁"}')
+      .decision,
+    'stop_rate_limit',
+  );
   assert.equal(classify(429, '', '').decision, 'stop_rate_limit');
   assert.equal(classify(302, '', '').decision, 'stop_redirect');
-  assert.equal(classify(200, 'application/json', '{"books":[]}').hasBooks, true);
-  assert.equal((await probe(mobile, async () => { throw Error('private detail'); })).decision,
-    'stop_transport');
-  assert.throws(() => proxyGate({ HTTPS_PROXY: 'http://proxy.invalid' }), /proxy_gate/);
-  for (const key of ['DEBUG', 'NODE_DEBUG', 'PWDEBUG', 'NODE_OPTIONS', 'SSLKEYLOGFILE']) {
+  assert.equal(
+    classify(200, 'application/json', '{"books":[]}').hasBooks,
+    true,
+  );
+  assert.equal(
+    (
+      await probe(mobile, async () => {
+        throw Error('private detail');
+      })
+    ).decision,
+    'stop_transport',
+  );
+  assert.throws(
+    () => proxyGate({ HTTPS_PROXY: 'http://proxy.invalid' }),
+    /proxy_gate/,
+  );
+  for (const key of [
+    'DEBUG',
+    'NODE_DEBUG',
+    'PWDEBUG',
+    'NODE_OPTIONS',
+    'SSLKEYLOGFILE',
+  ]) {
     assert.throws(() => debugGate({ [key]: 'enabled' }), /debug_gate/);
   }
   assert.doesNotThrow(() => debugGate({ DEBUG: '' }));
@@ -331,13 +404,20 @@ async function selfTest() {
     markerGate(marker);
     markAttempt(marker);
     assert.throws(() => markerGate(marker), /already_tried/);
-    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(marker, 'utf8'))).sort(),
-      ['attemptedAt', 'endpoint', 'kind']);
+    assert.deepEqual(
+      Object.keys(JSON.parse(fs.readFileSync(marker, 'utf8'))).sort(),
+      ['attemptedAt', 'endpoint', 'kind'],
+    );
   } finally {
     if (fs.existsSync(marker)) fs.unlinkSync(marker);
     fs.rmdirSync(tempDir);
   }
-  return { decision: 'self_test_passed', scenarios: 'offline_gates_and_response_classes', dbReads: 0, networkRequests: 0 };
+  return {
+    decision: 'self_test_passed',
+    scenarios: 'offline_gates_and_response_classes',
+    dbReads: 0,
+    networkRequests: 0,
+  };
 }
 
 async function main() {
@@ -350,20 +430,35 @@ async function main() {
     return;
   }
   if (options.mode === '--plan') {
-    console.log(JSON.stringify({
-      decision: 'plan_only', endpoint: '/shelf/sync', method: 'GET',
-      maxRequests: 1, timeoutMs: TIMEOUT_MS, maxResponseBytes: MAX_RESPONSE_BYTES,
-      credentialSource: 'one read-only SQLite mobile object',
-      marker: 'private, exclusive-create before request', refreshRequests: 0,
-      articleRequests: 0, dbReads: 0, networkRequests: 0,
-    }));
+    console.log(
+      JSON.stringify({
+        decision: 'plan_only',
+        endpoint: '/shelf/sync',
+        method: 'GET',
+        maxRequests: 1,
+        timeoutMs: TIMEOUT_MS,
+        maxResponseBytes: MAX_RESPONSE_BYTES,
+        credentialSource: 'one read-only SQLite mobile object',
+        marker: 'private, exclusive-create before request',
+        refreshRequests: 0,
+        articleRequests: 0,
+        dbReads: 0,
+        networkRequests: 0,
+      }),
+    );
     return;
   }
   if (options.mode === '--self-test') {
     try {
       console.log(JSON.stringify(await selfTest()));
     } catch {
-      console.log(JSON.stringify({ decision: 'self_test_failed', dbReads: 0, networkRequests: 0 }));
+      console.log(
+        JSON.stringify({
+          decision: 'self_test_failed',
+          dbReads: 0,
+          networkRequests: 0,
+        }),
+      );
       process.exitCode = 1;
     }
     return;
@@ -376,7 +471,15 @@ async function main() {
     markAttempt(options.markerPath);
     console.log(JSON.stringify(await probe(mobile, directGet)));
   } catch (error) {
-    const safe = new Set(['already_tried', 'proxy_gate', 'debug_gate', 'marker_gate', 'account_gate', 'mobile_gate', 'db_gate']);
+    const safe = new Set([
+      'already_tried',
+      'proxy_gate',
+      'debug_gate',
+      'marker_gate',
+      'account_gate',
+      'mobile_gate',
+      'db_gate',
+    ]);
     const decision = safe.has(error.message) ? error.message : 'preflight_gate';
     console.log(JSON.stringify({ decision, requestCount: 0 }));
     process.exitCode = 1;

@@ -24,6 +24,9 @@
 - C 将八份旧文章的 15 条前后篇链接离线核到 11 个不同文章键，均属于已保存两合集范围；14 条列表外已核验长链没有被这些邻接链覆盖。另开的图片字节与离线导出 Codex task 已生成独立 Git worktree，但截至本次续记尚未返回正式 task ID，避免重复派发同题 Agent；继续等待注册并复核状态。
 - A 找到旧浏览器扩展直接 `GET /book/articles`、无显式 `skey/vid` 的首屏源码；[本机一次匿名直连](coordination/ANONYMOUS_BOOK_ARTICLES_PROBE.md)得 HTTP 401 后停止，未取列表，不重发该形状。带合法自定义头的旧 WeBook 路线仍待正常认证来源，不能把匿名 401 当作它的结果。A 另核到 [WeRead-Kit 一手 issue](https://github.com/27Aaron/WeRead-Kit/issues/48)：Web init 的 HTTP 200/Cookie 可为死会话，与当前完整 jar 书架 `-2012` 相容但未证本机移动 token 已过期；正在准备一次只读移动书架健康检查，刷新前须解决可能轮换的凭据私有持久化。
 - B [候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)新增腾讯公开搜索页原生桥适配层证据：`/wxsearch/broker` 是传给原生宿主的相对 path，公开 JS 不提供真实 HTTP 域名或登录续期链；`/weixinwap?type=2` 的已查代码只生成导航 URL，尚无可核文章解析与近期回包。二者本轮不凭猜测发 Probe，继续寻找真实发送实现。
+- [移动书架健康检查](coordination/MOBILE_SHELF_HEALTH_PROBE.md)单次 GET 得 HTTP 401 后停，未刷新或写库；现有移动 token 对该请求不被接受，但未确定原因。下一个可执行单元是先准备一致性备份、私有恢复文件与轮换副本演练，再根据固定正常登录代码审查一次 Refresh；若官方要求本人扫码或验证，届时只停该路线。
+- 图片 Codex task 后来取得正式 ID 并完成：[单篇单图真实字节与副本导出](coordination/TARGET_IMAGE_BYTE_EXPORT_PROBE.md)收到 HTTP 200、530,349 字节完整 JPEG，SQLite 副本归档后禁网 Obsidian 与限定 ZIP 附件字节匹配，生产 12/1447 与旧字段不变。图片归档还修复了伪/截断图片校验及导出优先缓存 `data:` 字节的缺陷；main 上相关四组测试 31/31 与服务端构建已通过，单图验收仍不等于整号离线完整。
+- B 的[候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)新核到另一个腾讯 `/review/list` 真请求，但官方字段文档定义为读者点评列表，目前没有 MP 书返回公众号发文目录的一手样本，不凭 `reviews[]` 同名字段对目标号发无依据 Probe。2026-09-29 更新的开源客户端仍用本机已测 `/web/mp/articles`，不构成新路径。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 
