@@ -22,7 +22,7 @@ node scripts/research/probe-mobile-shelf-health.cjs --execute --db <ABSOLUTE_DB_
 
 `--execute` 打开 `DatabaseSync(dbPath, { readOnly: true })`，立即执行 `PRAGMA query_only=ON`，仅 `SELECT token FROM accounts LIMIT 2`；必须恰好一条账号且有非空的同一 `mobile` 对象四项字段。脚本在内存只取 `mobile.vid/accessToken` 用于请求，不输出、哈希、缓存或记录凭据。`refreshToken` 只作为结构存在性门禁，不参加请求；生产库无写入。
 
-marker 必须位于本仓库忽略的 `private-data/` 目录或仓库外的私有目录，父目录预先存在，脚本不新建目录。网络前以独占 `wx`、权限 `0600` 写入接口名与时间；**marker 已存在即零请求**。marker 不保存账号、凭据或响应。即便网络故障，marker 也保留，杜绝意外重试；任何后续在线动作由总控单独复审。执行时拒绝常见代理环境变量及 `NODE_USE_ENV_PROXY`；用 Node 内建 `https.request` 且 `agent:false` 直连腾讯固定 URL，不使用代理或 Cookie jar。请求仅一次 GET、无自动重定向、无缓存、10 秒超时、512 KiB 响应上限；没有跳转跟随、重试、Refresh 或文章请求。
+marker 必须位于本仓库忽略的 `private-data/` 目录或仓库外的私有目录，父目录预先存在，脚本不新建目录。网络前以独占 `wx`、权限 `0600` 写入接口名与时间；**marker 已存在即零请求**。marker 不保存账号、凭据或响应。即便网络故障，marker 也保留，杜绝意外重试；任何后续在线动作由总控单独复审。读取 SQLite 前拒绝常见代理环境变量及 `NODE_USE_ENV_PROXY`，并拒绝非空 `DEBUG`、`NODE_DEBUG`、`NODE_DEBUG_NATIVE`、`PWDEBUG`、`UNDICI_DEBUG`、`DEBUG_HTTP`、`DEBUG_FETCH`、`NODE_OPTIONS`、`SSLKEYLOGFILE`，防止调试输出记录认证头或 TLS 会话。用 Node 内建 `https.request` 且 `agent:false` 直连腾讯固定 URL，不使用代理或 Cookie jar。请求仅一次 GET、无自动重定向、无缓存、10 秒超时、512 KiB 响应上限；没有跳转跟随、重试、Refresh 或文章请求。
 
 ## 仅脱敏输出与判读
 
@@ -39,4 +39,4 @@ marker 必须位于本仓库忽略的 `private-data/` 目录或仓库外的私�
 
 ## 离线验证
 
-`node --check`、`--plan`、`--self-test`、`git diff --check` 的结果在提交前核对。`--self-test` 只用伪造内存凭据与伪造 `fetch`，验证一次请求、固定头、失败分类与代理门禁，不触及生产 SQLite 或腾讯服务。最终在线结果由总控另记。
+`node --check`、`--plan`、`--self-test`、`git diff --check` 的结果在提交前核对。`--self-test` 只用伪造内存凭据与伪造网络传输，验证一次请求、固定头、失败分类、私有 marker、代理与调试环境门禁，不触及生产 SQLite 或腾讯服务。最终在线结果由总控另记。
