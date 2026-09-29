@@ -18,6 +18,8 @@
 - B [后台候选复核](SOURCE_CANDIDATE_MATRIX.md)确认近期 `free_publish` 兜底 PR 只证明接线和构建，没有当前跨号成功回包；另一新包装仍调用本机已测 `200013` 的 `appmsg/list_ex`，不重发。C [腾讯相关文章脚本](PUBLIC_PAGE_DISCOVERY.md#相关文章与页面导航新的腾讯端点尚未请求)发现 `/mp/relatedarticle` 的真实两阶段请求，但八份目标旧页相关标志全为 0，匿名认证与同号覆盖未证，不以推荐列表冒充订阅目录。
 - 2026-09-30 最近几次远端 CI 因三份研究文档未格式化而在 `Format check` 失败；提交 `6d4de92` 修复后，[运行 36613922766](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36613922766) 的 `lint-test` 与 `private-image` 均成功。此前将这些失败运行口头称为成功的判断已纠正。
 - C 线在八份旧目标原文中追到 `window.cgiDataNew` 的 `bizuin/mid/idx/sn` 和原始时间均 8/8 与已核验来源相符；[当前解析器](../../apps/server/src/collection/article-page.ts)已加入单脚本、平衡对象、有界唯一标量读取，拒绝与旧 `var` 字段冲突。不执行页面 JS；移除旧字段后的八份离线回归仍 8/8 精确匹配。一次性未保存的 9 月 30 日新页不能因此被追认。
+- B 找到不同于旧列表和 Gateway 搜索的[微信读书 Web 搜索代理](SOURCE_CANDIDATE_MATRIX.md)：固定开源实现从已登录的 `weread.qq.com` 页面直连腾讯 `POST /web/wx_search_broker_proxy`，作者 2026-09 的一手响应记录含文章 URL、来源名与时间字段。它是相关性搜索，尚无目标号回包，也没有全号分页/持续更新证明。[隔离探针](WEB_SEARCH_BROKER_PROBE.md)已完成八项离线自检；因当前没有可确认的本人有效 Web 登录页面，目标准确号名 POST **0 次**。本人正常登录后只拟发一次首屏请求；当前继续离线追同源实现与分页能力，不把这一个待登录实验扩展成项目外部阻塞。
+- 最近主分支 `128bf88` 的 [CI 运行 36618790436](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36618790436) 已完成，`lint-test` 与 `private-image` 均成功。此后提交仍分别核验。
 
 ## 前轮判断（已由上节更新）
 

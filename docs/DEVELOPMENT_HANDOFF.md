@@ -9,6 +9,7 @@
 - [真实字段副本演练](coordination/TARGET_ALBUM_REHEARSAL.md)把旧目标合集两页 JSON 注入当前采集代码，在生产库的只读一致性副本连续导入两次，均得 19 篇且 12/1447 基数、旧 ID、可信时间、正文、指标和非空封面保持。C 对一篇未缓存目标原文做一次有界只读请求，但 `biz/mid/idx` 未解析闭环，未计入验收；当前解析器已安全支持公开页 `window.cgiDataNew`，八份旧目标 HTML 离线回归 8/8。B 已缩限 `profile_ext` 短期会话来源及未证实的后台 `free_publish` 兜底。C 另从腾讯静态 JS 定位 `/mp/relatedarticle`，八份目标旧页相关标志均为零，尚未请求该数据端点。
 - [搜狗微信索引专项](coordination/SOGOU_PUBLIC_INDEX.md)用固定开源代码验证本目标四次有界首屏；最近一次 9 条卡片中 8 条作者昵称匹配，同会话 `/link` 给出签名腾讯 `/s` 形状。唯一一次腾讯签名页 HTTP 200 但缺 `#js_content`，**没有目标 `biz/mid/idx/ct`、正文和图片证据**，已停止该候选。移动入口仍是未验候选。当前不能接入全号 Provider；继续追合法认证和独立取文来源。
 - 最近远端 CI 的 `Format check` 曾因三份研究文档失败，`6d4de92` 修复后 [运行 36613922766](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36613922766) 两个 job 成功。新合入的研究提交仍须按最新远端运行复核。
+- B 又找到有当前源码与一手响应记录的[微信读书 Web 搜索代理](coordination/SOURCE_CANDIDATE_MATRIX.md)：同源页面直连腾讯 `POST /web/wx_search_broker_proxy`，与旧失败列表及 Gateway 搜索不同。[一次性隔离探针](coordination/WEB_SEARCH_BROKER_PROBE.md)已准备并通过八项离线自检，当前未确认本人有效 Web 登录页面，目标 POST 仍为 **0 次**；本人正常登录后才验证首屏。B 继续查其分页、作者过滤和持续更新依据；此候选尚不能充当完整订阅目录。主分支 `128bf88` 的 [CI 运行 36618790436](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36618790436) 两个 job 均成功。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 
