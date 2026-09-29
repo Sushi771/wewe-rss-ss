@@ -27,7 +27,11 @@ import {
 } from '../collection/article-page';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { resolveCollectionRoute } from '../collection/collection-channel';
-import { allowedImageUrl, fetchAllowedImage } from '../collection/image-fetch';
+import {
+  allowedImageUrl,
+  decodeInlineImage,
+  fetchAllowedImage,
+} from '../collection/image-fetch';
 import { hasPrivateSession, privateOnlineMode } from '../private-access';
 import {
   bodyRetryAvailability,
@@ -745,12 +749,8 @@ export class TrpcRouter {
   });
 
   private async downloadImage(url: string, destPath: string) {
-    const inline = url.match(
-      /^data:image\/(png|jpeg|gif|webp);base64,([A-Za-z0-9+/=]+)$/,
-    );
-    if (inline) {
-      const bytes = Buffer.from(inline[2], 'base64');
-      if (bytes.length > 10_000_000) throw new Error('IMAGE_TOO_LARGE');
+    if (url.startsWith('data:')) {
+      const { bytes } = decodeInlineImage(url);
       await fs.promises.writeFile(destPath, bytes);
       return;
     }
@@ -820,7 +820,11 @@ export class TrpcRouter {
         imgs,
         async (img) => {
           const $img = $(img);
-          const dataSrc = $img.attr('data-src') || $img.attr('src');
+          const src = $img.attr('src') || '';
+          // An archived data URI takes precedence over an old remote lazy-load URL.
+          const dataSrc = src.startsWith('data:')
+            ? src
+            : $img.attr('data-src') || src;
           if (dataSrc) {
             let ext = 'jpg';
             if (dataSrc.startsWith('data:image/'))
@@ -857,11 +861,16 @@ export class TrpcRouter {
       // For browser export, we use proxy URLs
       contentEl.find('img').each((_, img) => {
         const $img = $(img);
-        const dataSrc = $img.attr('data-src') || $img.attr('src');
+        const src = $img.attr('src') || '';
+        const dataSrc = src.startsWith('data:')
+          ? src
+          : $img.attr('data-src') || src;
         if (dataSrc) {
           try {
-            if (dataSrc.startsWith('data:image/')) $img.attr('src', dataSrc);
-            else {
+            if (dataSrc.startsWith('data:')) {
+              decodeInlineImage(dataSrc);
+              $img.attr('src', dataSrc);
+            } else {
               allowedImageUrl(dataSrc);
               $img.attr(
                 'src',

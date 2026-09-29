@@ -26,6 +26,7 @@ describe('local collection with real SQLite migrations', () => {
     prisma: PrismaClient,
     service: CollectionService;
   let router: TrpcRouter, trpc: TrpcService, feeds: FeedsService;
+  let config: any;
   const mpId = 'MP_WXS_3286016687';
   const url = (idx: number) =>
     `https://mp.weixin.qq.com/s?__biz=MzI4NjAxNjY4Nw==&mid=100&idx=${idx}&sn=abc`;
@@ -59,7 +60,7 @@ describe('local collection with real SQLite migrations', () => {
       ...canonicalArticleUrl(url(1)),
       publishTime: parsePublishTime('2024-12-06 08:35:06'),
     });
-    const config = {
+    config = {
       get: (key: string) =>
         ({
           platform: { url: '' },
@@ -233,6 +234,82 @@ describe('local collection with real SQLite migrations', () => {
         .createCaller({ errorMsg: null, isLocal: false } as any)
         .collection.preview({ directory }),
     ).rejects.toThrow('本地采集只能');
+  });
+  it('uses persisted image bytes after a router restart even when a stale data-src remains', async () => {
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const inline = `data:image/png;base64,${png.toString('base64')}`;
+    const contentHtml = `<div class="rich_media_content"><p>正文内容</p><img data-src="https://mmbiz.qpic.cn/stale" src="${inline}"></div>`;
+    await prisma.article.update({
+      where: { id: 'legacy-short-link' },
+      data: { contentHtml },
+    });
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValue(new Error('Network disabled in test'));
+    try {
+      const restarted = new TrpcRouter(
+        trpc,
+        prisma as any,
+        config,
+        {} as any,
+        service,
+      );
+      const caller = restarted.appRouter.createCaller({
+        errorMsg: null,
+        isLocal: true,
+      } as any);
+      const browser = await caller.article.exportMarkdown('legacy-short-link');
+      expect(browser.markdown).toContain('data:image/png;base64,');
+      expect(browser.markdown).not.toContain('mmbiz.qpic.cn/stale');
+      const exported = await caller.article.saveToObsidian('legacy-short-link');
+      const markdown = await fs.readFile(exported.path, 'utf8');
+      const attachment = markdown.match(
+        /attachments\/image_[a-f0-9]+\.png/,
+      )?.[0];
+      expect(attachment).toBeTruthy();
+      expect(
+        await fs.readFile(path.join(path.dirname(exported.path), attachment!)),
+      ).toEqual(png);
+      const offlineDirectory = path.join(root, 'offline-after-restart');
+      const offline = await restarted.buildOfflineFeedDirectory(
+        mpId,
+        offlineDirectory,
+      );
+      expect(offline?.complete).toBe(1);
+      const cutOff = `data:image/png;base64,${png
+        .subarray(0, -12)
+        .toString('base64')}`;
+      await prisma.article.update({
+        where: { id: 'legacy-short-link' },
+        data: { contentHtml: contentHtml.replace(inline, cutOff) },
+      });
+      try {
+        const incomplete = await restarted.buildOfflineFeedDirectory(
+          mpId,
+          path.join(root, 'offline-corrupt-image'),
+        );
+        expect(incomplete?.complete).toBe(0);
+        expect(incomplete?.incomplete).toHaveLength(2);
+      } finally {
+        await prisma.article.update({
+          where: { id: 'legacy-short-link' },
+          data: { contentHtml },
+        });
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(
+        (
+          await prisma.article.findUniqueOrThrow({
+            where: { id: 'legacy-short-link' },
+          })
+        ).contentHtml,
+      ).toBe(contentHtml);
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
   it('updates metrics without duplicates and keeps body when HTML is absent', async () => {
     await fs.writeFile(
