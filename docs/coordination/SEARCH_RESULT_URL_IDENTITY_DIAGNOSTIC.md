@@ -10,11 +10,15 @@
 
 ## 下一次只诊断结构
 
-新增 [probe-search-url-identity.cjs](../../scripts/research/probe-search-url-identity.cjs)只在总控复审后可显式 `--execute`。它从同一私有 Refresh 恢复文件提新 token；生产 SQLite/备份/副本只读核账号 ID、原 token、vid 和计数；要求已有健康与首屏尝试 marker 格式正确，另以 `wx + fsync` 先写本次 marker。新的隔离 BrowserContext 最多一次固定 Web init 和**一次首屏搜索**，无游标续页、原文 GET、页面导航或 Cookie/结果落盘。已有首屏重发只能回答旧探针未观察的 URL 结构，**不是新增文章取回，也不得高频重复**。遇验证码、限流、HTTP/业务错误即停。与先前一样禁代理、调试、跳转、重试，init 10 秒、搜索 20 秒、JSON 解析上限 64/512 KiB；Playwright 响应缓存意味着并非硬网络截断。最多解析 100 个条目，超限整体停止，不截断后假装样本完整。
+新增 [probe-search-url-identity.cjs](../../scripts/research/probe-search-url-identity.cjs)只在总控复审后可显式 `--execute`。它从同一私有 Refresh 恢复文件提新 token；生产 SQLite/备份/副本只读核账号 ID、原 token、vid 和计数；要求已有健康与首屏尝试 marker 格式正确，另以 `wx + fsync` 先写本次 marker。新的隔离 BrowserContext 最多一次固定 Web init 和**一次首屏搜索**，无游标续页、原文 GET、页面导航或 Cookie/完整响应落盘。已有首屏重发只能回答旧探针未观察的 URL 结构，**不是新增文章取回，也不得高频重复**。遇验证码、限流、HTTP/业务错误即停。与先前一样禁代理、调试、跳转、重试，init 10 秒、搜索 20 秒、JSON 解析上限 64/512 KiB；Playwright 响应缓存意味着并非硬网络截断。最多解析 100 个条目，超限整体停止，不截断后假装样本完整。
 
 只在内存中分类每条 `doc_url`：原始绝对 HTTPS/HTTP、协议相对、相对路径、整 URL 百分号编码、HTML `&amp;`、保留的反斜杠斜线、其他协议、真正解析失败、过长、缺失/非字符串；分别统计 scheme、`mp.weixin.qq.com`/搜索页/其他 host、`/s/<token>` 短形或 `/s?...` 查询形，并单列带 URL 用户信息或非默认端口的异常 authority。HTML/百分号/斜线最多做一次**诊断性**解码并保留转义标记，不发请求、也不把解码后的地址当真实官方原文。对腾讯域且 authority 正常的查询形仅本地检查 `__biz/mid/idx` 是否存在、`mid/idx` 是否数字、`__biz` 是否等于已核目标 biz；若索引还给 `bizUin`，可与已知目标数字 ID 作另一布尔对照。`bizUin` 及 URL 参数仍是**搜索索引的主张**，不是原文证明。
 
-从号名精确匹配项中最多择一候选：优先 URL `__biz` 与 `bizUin` 都匹配目标，其次单一字段匹配，再次可解析腾讯域链接，最后第一个号名匹配项。只输出所选条目的 `docID/doc_url` 派生短哈希、结构分类、字段存在/匹配布尔、时间字段存在布尔及 `originalBizAndCtVerified:false`。不输出标题、原始链接、目标 biz、mid/idx、索引时间、Cookie/token、游标或原始响应。没有至少一个原文 URL 声称的目标 `__biz`（或独立 `bizUin` 对照）时，名称匹配仍不能核号；即便两项都匹配，后续仍要**另设单篇原文 GET**，仅从严格允许的 `mp.weixin.qq.com` 原存链接把 HTTP 协议离线改为 HTTPS，核原文 `__biz/ct`。本脚本不做这个 GET，也不发送明文 HTTP。
+从号名精确匹配项中最多择一**公开摘要**：优先 URL `__biz` 与 `bizUin` 都匹配目标，其次单一字段匹配，再次可解析腾讯域链接，最后第一个号名匹配项。公开输出只含该项 `docID/doc_url` 派生短哈希、结构分类、字段存在/匹配布尔、时间字段存在布尔及 `originalBizAndCtVerified:false`；不含标题、原始链接、目标 biz、mid/idx、索引时间、Cookie/token、游标或原始响应。
+
+合格候选另存于同一私有 runDir 的 `search-url-identity-candidates.json`，最多 15 条，解析保护上限仍为 100 条。每条必须同时满足：`source.title` 精确等于目标号名；**原存、未解码** `doc_url` 是无用户信息/端口/控制字符/反斜杠的绝对 HTTP(S) `mp.weixin.qq.com` `/s?__biz=...&mid=...&idx=...` 或 `/s/<token>`；URL `__biz` 或索引 `bizUin` 至少一个与本地已知目标身份一致，另一字段如存在不得冲突。查询形还必须由 URL `__biz` 匹配并含数字 `mid/idx`；重复身份参数、HTML/百分号/斜线转义形式均排除。只存原存 `doc_url`、`docID`、索引时间、`bizUin` 对照和验证状态，不存完整响应、Cookie、游标。`wx` 权限私有临时文件先写入并 `fsync`，同目录原子独占发布，冲突不覆盖；失败仅做本地持久化重试，不再发送网络请求。文件写入后按 runDir、marker、格式、链接及身份规则回读核验。每条均标记 `originalBizAndCtVerified:false`：这是**索引主张**，不能当作已核目标文章。
+
+后续单篇原文 GET 应是**另一份经复审的脚本**：先用恢复文件核账号/vid 与生产只读备份，再读取这次 marker 和上述私有文件，逐条重验文件不越出私有 runDir、候选原存 URL 的 authority/路径/身份主张及摘要；只从某个候选原存链接构造 HTTPS 请求，原为 HTTP 时仅改协议，不用诊断解码值，不允许跳转/重试或 HTTP 明文发送。取回原文后才核原文 `__biz`、稳定键、`ct` 与正文图片；不能只凭索引号名或时间入库。当前脚本不做 GET。没有 URL `__biz` 或 `bizUin` 对照时，名称匹配仍不能核号；即便两项都匹配，也需原文核验。
 
 ```powershell
 node scripts/research/probe-search-url-identity.cjs --plan
@@ -23,4 +27,4 @@ node scripts/research/probe-search-url-identity.cjs --self-test
 node scripts/research/probe-search-url-identity.cjs --execute --db <ABSOLUTE_DB_PATH> --run-dir <ABSOLUTE_REFRESH_RUN_DIRECTORY> --playwright-core <ABSOLUTE_PLAYWRIGHT_CORE_DIR> --browser <ABSOLUTE_EDGE_OR_CHROME_EXE> --approved-online
 ```
 
-离线 `node --check`、`--plan`、`--self-test` 已通过。自测分别覆盖 HTTP 腾讯长链、HTML 转义、整 URL 百分号编码、残留斜线转义、协议相对、相对路径、危险协议、文本错误，以及假 SQLite/私有恢复/marker 和假网络的两请求门禁。真实网络 0、生产库读写 0。
+离线 `node --check`、`--plan`、`--self-test` 已通过。自测分别覆盖 HTTP 腾讯长链、HTTPS 腾讯短链、HTML 转义、整 URL 百分号编码、残留斜线转义、协议相对、相对路径、危险协议、文本错误，以及假 SQLite/私有恢复/marker 和假网络的两请求门禁；还验证仅合格候选落私有文件、冲突不覆盖、回读格式和本地写失败重试时不增网络请求。真实网络 0、生产库读写 0。
