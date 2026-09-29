@@ -64,6 +64,21 @@
 
 已保存的八份目标 HTML 离线核对：`related_article_info.has_related_article_info` 与页面 `hasRelatedArticleInfo` 均为 **8/8 等于零**，`relatedArticleFlag` 的字面赋值均为空；`related_article_info` 仅有标志和付费/红包信息，未内嵌 `list`，`related_tag` 八份均为空，出现的 `at_biz_list.list` 五份也均为空。每页 `album_info_list` 仍只指向自己的已知目标合集，未由这些字段发现第三个目标合集。零标志不等于该端点永远返回空推荐，尤其未保存的 9 月 30 日文章只知道出现了字段名，**不知道值**。即使 `directgetlist` 可用，它也是与当前文章相关的推荐结果，可能跨号、数量有限且无已证分页；只有逐项核对 `__biz/mid/idx/send_time` 并证明稳定覆盖后，才能讨论作为目标号增量发现来源。
 
+## 公开页面静态 JS 的实际发现链与全号边界（离线补核）
+
+本节只检查 2026-09-27/30 已保存的腾讯官方页面与其公开静态 JS，不再 GET 本轮已尝试的三篇文章，也没有请求下表的数据端点。复核版本为 [`appmsg.muihhh087c466445.js`](https://res.wx.qq.com/mmbizappmsg/zh_CN/htmledition/js/assets/appmsg.muihhh087c466445.js)（SHA-256 `97ef18b57ed7a313da9be9857f401514f8f73adff05fa92c5f6f161dc0905cd1`）、[`page_utils.muihhh089d3b1886.js`](https://res.wx.qq.com/mmbizappmsg/zh_CN/htmledition/js/assets/page_utils.muihhh089d3b1886.js)（`8263dec0b6cdd8373e65d5ddefd8802a0f54a1bb13dee91bb2967fe86165c41e`）和[合集客户端 `album80ec10.js`](https://res.wx.qq.com/mmbizwap/zh_CN/htmledition/js/album/appmsg/album80ec10.js)（`e030ebc65a902d3f010c6466ada9bc8c3d520eefa5b42d960eb93471bd395fbd`）。以下偏移是本机已保存文件按 UTF-8 解码后的**字符位置附近**，方便定位压缩后的单行代码。
+
+| 从文章出发的路径 | 真正导航或请求代码 | 当前目标样本与能力边界 |
+| --- | --- | --- |
+| 文章 → 所属合集卡片 | `appmsg` 偏移约 68800 的 `ka.init` 读卡片 `data-url` 并经 `ht.goUrl` 导航；偏移约 69900–70700 的 `mp-album` 组件把 `cgiData.album_info_list` 逐项渲染为 `i.link.htmlDecode() || "/mp/publictag?action=get&tag_id="+i.tagId+"&start=0"`。`store.muihhh084bc1a202.js` 偏移约 45300 将全局 `window` 交给 `cgiData`。 | 八份已保存目标 HTML 的 `album_info_list` 均只有一个条目，`link` 均指向目标官方 `/mp/appmsgalbum`，`tagId` **8/8 为空**；因此 `/mp/publictag` 是有源码的一条**条件回退导航**，目前没有目标号的有效 `tag_id` 种子，不得用 `album_id` 冒充。它即使可用也按一个 Tag 导航，不是已证的全号合集枚举。 |
+| 已知合集 → 文章列表 | `album80ec10.js` 偏移约 14700–15600 对 `/mp/appmsgalbum?action=getalbum&__biz=<window.biz>&album_id=<cgiData.albumId>&count=<pageCount>` 发 GET，继续时带 `begin_msgid/begin_itemidx`，消费 `getalbum_resp.article_list/continue_flag`。 | 合集 ID 必须先由文章页面或其他合法来源取得。该脚本在这个版本中没有“以 `biz` 枚举该号全部合集”的请求；它只翻当前合集。两份已保存目标合集 HTML 的 `window.cgiData` 只预载本合集 `articleList`，均无 `mp_msgs` 列表，`recomm_tag_page_url` 均为空。 |
+| 文章 → 公众号主页 | `page_utils` 偏移约 74000–74700 以 `biz` 构造 `/mp/profile_ext?action=home&__biz=...`，根据客户端走原生 `profile`、额外 WebView、`getprofiletransferpage` 或浏览器跳转；偏移约 76500 的 `real_type=43` 为视频页导航。 | 这是主页**导航**，该代码没有发文章列表 AJAX。`profile_ext?action=home/getmsg` 的已有无会话 `no session` 与目标会话空列表实测仍单独成立；静态导航没有提供新的认证来源或覆盖证明，不据此重发旧失败请求。 |
+| 文章 → 相关文章 | `appmsg` 偏移约 150100–152900 的 `precheck` 成功且非空后才 GET `directgetlist`；响应 `list[]` 和 `more_url` 进入卡片，偏移约 157200 的 `goKuaixunFeed` 仅打开**响应提供**的 `more_url`。 | 请求以当前文章 `article_url/__biz/mid/idx` 和场景字段为键，没有账号全集筛选、`begin/count` 或游标；`more_url` 未在当前八份目标 HTML 中提供。推荐结果必须逐条验证账号，不能按源码推为同号分页或持续订阅。 |
+
+同一 `appmsg` 脚本的 `/mp/getmpext` 在偏移约 9900–10400 以当前 `bizuin/msgid/idx/token` POST，读取的是 `nominate_status` 等当前文章提名状态；`/mp/getrecreason?appmsg_list=...` 在偏移约 160900 只对已取得的推荐条目补充理由。另有 `render_utils` 中 `/mp/relatedsearchword?action=getcontentsearchword&__biz=...&mid=...&idx=...`，名称和参数指向当前文章搜索词，未见其返回文章列表的代码依据。这些请求均不能补足“按公众号完整发现新增文章”的缺口。
+
+**有条件的新最小探针**：今后若在另一篇已核验目标官方原文中看到 `album_info_list` 条目 `link` 为空、`tagId` 非空，且源码所渲染的 `data-url` 确为腾讯 `/mp/publictag?action=get&tag_id=<该页值>&start=0`，才设计一次匿名、无代理/跳转/重试的只读 GET；先看 HTTP/验证码/页面身份与是否存在列表、分页，再逐篇核 `__biz/mid/idx/ct`。目前八份目标样本均不满足触发条件，**现在不发请求**。对于 `relatedarticle`，既有报告已给出独立的 `precheck` 一次探针设计；这次静态复核没有新增认证依据或同号全集能力，不扩大该设计。
+
 ## 2026-09-30 另一篇目标原文的单请求结果与离线差异诊断
 
 从 2026-09-27 保存的 `复旦数学营` 官方首屏 JSON 选第 2 条，与上节已请求的第 1 条不同。其列表 `create_time` 的 UTC 日期为 **2026-09-14**，`SHA256(__biz\0mid\0idx\0sn)` 前 16 位为 `792e0623ba3ee739`。URL 位于腾讯 `/s`，四个身份参数齐全，URL `mid/idx` 分别等于列表 `msgid/itemidx`，`__biz` 等于目标号；这条身份不在八份旧目标原文 HTML 中。按原有 URL 只升级 HTTPS 协议，未改变参数。请求前用当前 main **已构建**的 `articleIdentity/articlePublishTime/articleContentHtml` 在八份旧 HTML 上做离线预检，八份均可解析身份、原文 `ct` 与正文，预检网络请求为零。
