@@ -612,7 +612,9 @@ async function main() {
         decision: safe.has(error.message)
           ? error.message
           : 'preflight_or_request_failed',
-        networkRequests: 0,
+        networkRequests: safe.has(error.message) ? 0 : null,
+        maxNetworkRequests: 1,
+        productionWrites: 0,
       }),
     );
     process.exitCode = 1;

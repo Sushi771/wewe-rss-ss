@@ -27,7 +27,8 @@
 - [移动书架健康检查](coordination/MOBILE_SHELF_HEALTH_PROBE.md)单次 GET 得 HTTP 401 后停，未刷新或写库；现有移动 token 对该请求不被接受，但未确定原因。下一个可执行单元是先准备一致性备份、私有恢复文件与轮换副本演练，再根据固定正常登录代码审查一次 Refresh；若官方要求本人扫码或验证，届时只停该路线。
 - 图片 Codex task 后来取得正式 ID 并完成：[单篇单图真实字节与副本导出](coordination/TARGET_IMAGE_BYTE_EXPORT_PROBE.md)收到 HTTP 200、530,349 字节完整 JPEG，SQLite 副本归档后禁网 Obsidian 与限定 ZIP 附件字节匹配，生产 12/1447 与旧字段不变。图片归档还修复了伪/截断图片校验及导出优先缓存 `data:` 字节的缺陷；main 上相关四组测试 31/31 与服务端构建已通过，单图验收仍不等于整号离线完整。
 - B 的[候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)新核到另一个腾讯 `/review/list` 真请求，但官方字段文档定义为读者点评列表，目前没有 MP 书返回公众号发文目录的一手样本，不凭 `reviews[]` 同名字段对目标号发无依据 Probe。2026-09-29 更新的开源客户端仍用本机已测 `/web/mp/articles`，不构成新路径。
-- A 的[移动 Refresh 离线恢复门禁](coordination/MOBILE_REFRESH_RECOVERY.md)已在生产库只读完成一致性备份、SQLite 副本假 token 更新和私有原子恢复演练；源库写入 0、线上请求 0。下一步复审并运行有一次请求上限的正常 Refresh，先保存可能轮换的真实 token 到私有恢复文件，再根据结果安排 Web 会话健康检查；账号验证或限频即停该路线。
+- A 的[移动 Refresh 恢复](coordination/MOBILE_REFRESH_RECOVERY.md)先在生产库只读完成一致性备份、SQLite 副本假 token 更新和私有原子恢复演练，随后总控唯一一次正常 `/login` 得 HTTP 200、同账号候选新 `accessToken`，私有恢复文件已落盘，生产库写入 0。下一项是**从该私有文件**另做有界 Web 会话健康检查，未发搜索或文章请求；Refresh 本身不证明订阅恢复。
+- B 的[矩阵增量](coordination/SOURCE_CANDIDATE_MATRIX.md)将搜狗 `/gzhjs` 限定为缺当前 `openid` 获取链和近期回包的历史候选，不猜值 Probe。C 在八份已存目标官方原文的正文中离线发现 60 个两合集外同号完整文章键，五份独立旧页同指其中一条未请求种子，正准备一次公开原文只读探针；这些旧链接尚无当前原文身份、时间和正文证据，不能当新增订阅结果。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 

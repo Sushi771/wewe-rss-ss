@@ -2,7 +2,7 @@
 
 2026-09-30。本人现有移动凭据按一次[只读书架健康检查](MOBILE_SHELF_HEALTH_PROBE.md)请求 `GET https://i.weread.qq.com/shelf/sync`，得到 **HTTP 401、无业务正文**。这说明该次移动书架请求没有接受当前 `vid/accessToken`；它没有测试 `refreshToken`，也不等于列表权限、Web 搜索或旧 `/book/articles` 的结论。
 
-[离线预检脚本](../../scripts/research/probe-mobile-refresh-preflight.cjs)仅提供 `--plan`、`--self-test`、`--preflight`，本身没有联网入口。总控已在生产 SQLite 上**只读**运行 `--preflight` 并确认备份、演练通过。本轮另新增[单次在线 runner](../../scripts/research/probe-mobile-refresh-once.cjs)的实现及假响应自检；**尚未运行 runner 的 `--execute`，腾讯 Refresh 请求仍为零**。在线执行须总控先审查，后续 Web 检查另行设计。
+[离线预检脚本](../../scripts/research/probe-mobile-refresh-preflight.cjs)仅提供 `--plan`、`--self-test`、`--preflight`，本身没有联网入口。总控已在生产 SQLite 上**只读**运行 `--preflight` 并确认备份、演练通过。随后复审[单次在线 runner](../../scripts/research/probe-mobile-refresh-once.cjs)，执行一次正常 Refresh；脱敏结果见下文。后续 Web 会话检查另行设计。
 
 ## 固定请求来源
 
@@ -29,7 +29,7 @@ node scripts/research/probe-mobile-refresh-preflight.cjs --preflight --db <ABSOL
 
 `--preflight` 返回私有运行目录、备份完整性和演练布尔结果，不输出账号 ID、token、token 哈希/长度、原始请求或响应。私有目录含**完整数据库备份与旧凭据**，不能提交 Git、分享或当作普通日志。失败时保留已创建的私有文件供人工检查；脚本不自动重跑在线接口，也不写生产库。
 
-## 单次在线 runner：已实现，未执行
+## 单次在线 runner：已执行一次
 
 runner 仅在 `--execute --db <绝对路径> --run-dir <预检私有运行目录> --approved-online` 明确齐备时进入在线流程；`--plan`、`--self-test` 不读生产库、不联网。它先拒绝代理、`NODE_TLS_REJECT_UNAUTHORIZED` 和可能输出认证头的 `DEBUG/NODE_DEBUG/PWDEBUG/NODE_OPTIONS/SSLKEYLOGFILE` 等变量，再以 `readOnly + query_only` 打开生产库、`original.sqlite` 和 `rehearsal.sqlite`。三者均为恰一账号，生产账号 token 必须与预检原件逐字相同，原件与演练库 `integrity_check=ok`，订阅/文章计数一致，演练库仅含预期的伪造移动 token。任一门禁失败，**零请求**。
 
@@ -40,7 +40,7 @@ runner 仅在 `--execute --db <绝对路径> --run-dir <预检私有运行目录
 ```powershell
 node scripts/research/probe-mobile-refresh-once.cjs --plan
 node scripts/research/probe-mobile-refresh-once.cjs --self-test
-# 总控审查并明确决定后才可执行。一次使用一个未尝试的私有预检目录。
+# 以下占位路径不能直接运行；本次已使用私有预检目录且 marker 阻止重复执行。
 node scripts/research/probe-mobile-refresh-once.cjs --execute --db <ABSOLUTE_DB_PATH> --run-dir <ABSOLUTE_PREFLIGHT_RUN_DIRECTORY> --approved-online
 ```
 
@@ -55,6 +55,12 @@ node scripts/research/probe-mobile-refresh-once.cjs --execute --db <ABSOLUTE_DB_
 
 ## 已完成的离线验证
 
-预检脚本的 `node --check`、`--plan`、`--self-test` 成功；总控另在生产 SQLite 上只读 `--preflight` 成功。runner 的 `node --check`、`--plan`、`--self-test` 成功：系统临时目录中的**伪造 SQLite**实际调用 `node:sqlite.backup`，假传输只收到一次请求；假响应返回 429 且只含新 `refreshToken`，第一次私有落盘故意失败、第二次仅重试本地保存成功，原数据库仍保留旧 token；另覆盖错误 `vid` 与验证码分支。真实在线 Refresh 仍未发送。
+预检脚本的 `node --check`、`--plan`、`--self-test` 成功；总控另在生产 SQLite 上只读 `--preflight` 成功。runner 的 `node --check`、`--plan`、`--self-test` 成功：系统临时目录中的**伪造 SQLite**实际调用 `node:sqlite.backup`，假传输只收到一次请求；假响应返回 429 且只含新 `refreshToken`，第一次私有落盘故意失败、第二次仅重试本地保存成功，原数据库仍保留旧 token；另覆盖错误 `vid` 与验证码分支。
 
 生产只读预检返回 `preflight_ready`、`backupIntegrity=true`、`copyRehearsal=true`、`atomicRecoveryRehearsal=true`、`productionWrites=0`、`networkRequests=0`。完整备份和演练副本留在 Git 忽略的私有目录，未输出凭据。
+
+## 2026-09-30 总控唯一在线结果
+
+在预检目录中执行一次固定请求，得到 `http=200`、`decision=candidate_identity_matched`；响应有新 `accessToken`，无新 `refreshToken`，按固定源码沿用原 refreshToken。私有恢复文件一次原子落盘并复读成功，marker、原始备份和演练副本均仍在。`networkRequests=1`、`productionWrites=0`。未打印或提交 token、Cookie、请求体、原始响应及账号 ID；未接着发 Web、搜索或文章请求。
+
+这个结果证明当前账号的正常移动 Refresh 可取得并保管候选新 accessToken；**它不证明 Web 会话、`/book/articles` 或跨号文章列表可用**。下一步从已保存的私有恢复文件做另一项有界 Web 会话健康检查，生产 SQLite 继续只读；若遇验证码、限流或业务失败即停该路线。
