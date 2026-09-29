@@ -92,6 +92,8 @@ async function pageProbe(query, targetBiz) {
   output.hasOffset = Object.hasOwn(content, 'offset');
   output.hasSearchID =
     typeof content.searchID === 'string' && content.searchID.length > 0;
+  output.hasSearchCookies =
+    Object.hasOwn(content, 'cookies') && content.cookies != null;
   output.hasConversationID =
     typeof content.conversationID === 'string' &&
     content.conversationID.length > 0;
@@ -100,8 +102,10 @@ async function pageProbe(query, targetBiz) {
   let sourceTitleExactMatches = 0;
   let docUrlPresent = 0;
   let timestampPresent = 0;
+  let sourceDateTimePresent = 0;
   let matchingDocUrlPresent = 0;
   let matchingTimestampPresent = 0;
+  let matchingSourceDateTimePresent = 0;
   let explicitTargetBizUrlMatches = 0;
   for (const bucket of content.data) {
     if (!bucket || !Array.isArray(bucket.items)) {
@@ -120,10 +124,14 @@ async function pageProbe(query, targetBiz) {
         typeof item.doc_url === 'string' && item.doc_url.length > 0;
       const hasTimestamp =
         typeof item.timestamp === 'number' && Number.isFinite(item.timestamp);
+      const hasSourceDateTime =
+        item.source && Object.hasOwn(item.source, 'dateTime');
       if (hasUrl) docUrlPresent += 1;
       if (hasTimestamp) timestampPresent += 1;
+      if (hasSourceDateTime) sourceDateTimePresent += 1;
       if (match && hasUrl) matchingDocUrlPresent += 1;
       if (match && hasTimestamp) matchingTimestampPresent += 1;
+      if (match && hasSourceDateTime) matchingSourceDateTimePresent += 1;
       if (match && hasUrl) {
         try {
           const articleUrl = new URL(item.doc_url);
@@ -145,8 +153,10 @@ async function pageProbe(query, targetBiz) {
     sourceTitleExactMatches,
     docUrlPresent,
     timestampPresent,
+    sourceDateTimePresent,
     matchingDocUrlPresent,
     matchingTimestampPresent,
+    matchingSourceDateTimePresent,
     explicitTargetBizUrlMatches,
     decision:
       sourceTitleExactMatches > 0
@@ -284,13 +294,16 @@ function sanitizedSummary(value) {
     'continueFlag',
     'hasOffset',
     'hasSearchID',
+    'hasSearchCookies',
     'hasConversationID',
     'totalItems',
     'sourceTitleExactMatches',
     'docUrlPresent',
     'timestampPresent',
+    'sourceDateTimePresent',
     'matchingDocUrlPresent',
     'matchingTimestampPresent',
+    'matchingSourceDateTimePresent',
     'explicitTargetBizUrlMatches',
   ];
   const out = {};
@@ -352,7 +365,7 @@ async function selfTest() {
     return { result, calls };
   };
   const item = {
-    source: { title: QUERY },
+    source: { title: QUERY, dateTime: '2026-09-30' },
     doc_url: `https://mp.weixin.qq.com/s?__biz=${encodeURIComponent(TARGET_BIZ)}&mid=1&idx=1`,
     timestamp: 1790000000,
   };
@@ -364,6 +377,7 @@ async function selfTest() {
       continueFlag: 1,
       offset: 18,
       searchID: 'test',
+      cookies: 'test-cursor',
       conversationID: 'test',
     },
   };
@@ -373,6 +387,8 @@ async function selfTest() {
   assert.equal(test.result.outerRet, -1);
   assert.equal(test.result.sourceTitleExactMatches, 1);
   assert.equal(test.result.explicitTargetBizUrlMatches, 1);
+  assert.equal(test.result.hasSearchCookies, true);
+  assert.equal(test.result.matchingSourceDateTimePresent, 1);
   const cleaned = sanitizedSummary({
     ...test.result,
     rawHtml: '<private>',

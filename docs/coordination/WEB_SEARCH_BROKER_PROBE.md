@@ -16,7 +16,7 @@
 
 ## 脱敏输出与停止条件
 
-脚本只输出：请求次数、HTTP 状态、数值 `errCode`、外层及 `content.ret`、桶数与总条目数、`source.title` 精确匹配数、匹配项 `doc_url/timestamp` 字段存在数、显式目标 `__biz` URL 数、分页字段的存在性及停止分类。它不会输出标题、摘要、原文 URL、搜索标识、Cookie、原始响应或页面 HTML，也不落盘结果。`continueFlag` 只记录本页形状，**不会触发第二页**。
+脚本只输出：请求次数、HTTP 状态、数值 `errCode`、外层及 `content.ret`、桶数与总条目数、`source.title` 精确匹配数、匹配项 `doc_url/timestamp/source.dateTime` 字段存在数、显式目标 `__biz` URL 数、分页字段的存在性及停止分类。腾讯第一方页面已证明响应 `content.cookies` 会成为下一页业务游标，探针只输出 `hasSearchCookies` 布尔值，不读取或输出其内容。它不会输出标题、摘要、原文 URL、搜索标识、Cookie、原始响应或页面 HTML，也不落盘结果。`continueFlag` 只记录本页形状，**不会触发第二页**。
 
 以下任一情况立即停止：缺可确认登录页面或页面源不符；登录页；HTTP 非 200/跳转；非 JSON 或验证页；数值 `errCode` 非 0（包括 `-2010/-2012`）；缺 `content.data`、桶形状异常；目标准确号名零匹配。若只是 `source.title` 匹配，仍须后续核对 `doc_url` 的目标公众号身份及原文发表时间，不算五篇验收。请求只执行一次，无自动重试。脚本要求操作者显式传 `--execute --confirmed-authenticated --cdp=http://127.0.0.1:<port>/`；本轮未使用该执行模式。
 
