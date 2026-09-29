@@ -13,6 +13,11 @@ const [mode, albumPath, indexRaw, parserPath, ...savedHtmlPaths] =
 const MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
 const TARGET_BIZ = 'Mzg5NTQzMTQxMg=='; // Public account identity, not a credential.
 const KNOWN_ALBUM_IDS = new Set(['2527940920407949313', '3588220544052641807']);
+const ALREADY_ATTEMPTED_DIGESTS = new Set([
+  'e28e53cb45b7c1eb',
+  '792e0623ba3ee739',
+  '8c460d508c0aae1b',
+]);
 
 function fail(reason) {
   console.log(JSON.stringify({ result: 'stopped', reason }));
@@ -317,6 +322,10 @@ async function main() {
     } catch (error) {
       fail(`preflight_${error.message}`);
     }
+    return;
+  }
+  if (ALREADY_ATTEMPTED_DIGESTS.has(seed.digest)) {
+    fail('already_attempted');
     return;
   }
   try {

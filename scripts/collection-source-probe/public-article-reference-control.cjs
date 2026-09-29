@@ -17,7 +17,11 @@ const ALBUM_FILES = [
   'wewe-target-album2-page1-20260927.json',
   'wewe-target-album2-page2-20260927.json',
 ];
-const PREVIOUS_LIVE_DIGESTS = new Set(['e28e53cb45b7c1eb', '792e0623ba3ee739']);
+const PREVIOUS_LIVE_DIGESTS = new Set([
+  'e28e53cb45b7c1eb',
+  '792e0623ba3ee739',
+  '8c460d508c0aae1b',
+]);
 const KEYS = ['__biz', 'mid', 'idx', 'sn'];
 
 function digest(query) {

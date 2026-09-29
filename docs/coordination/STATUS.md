@@ -24,6 +24,8 @@
 - B 另找到[官方微信读书搜索页自然滚动](SOURCE_CANDIDATE_MATRIX.md)的开源实证：2026-07 四个其他公众号按页面号名筛选，三次取得 35/35/33 条及原文直链；较 2026-09 直接搜索代理 POST 重复首屏的结果有实质差异，但目标号、当前滚动增量及全史覆盖仍未证。[单滚动隔离探针](WEREAD_NATURAL_SCROLL_PROBE.md)17 项离线断言通过，当前目标页导航/滚动均 0；只在本人正常登录且确认官方目标搜索页后作一次自然滚动，不监听网络或批量点击文章。
 - A 进一步从[腾讯搜索页公开静态 JS](RESEARCH_BOOK_ARTICLES_AUTH.md#新专项正常-web-登录到搜一搜的会话链)核到 PC 页面直接 `POST weread.qq.com/web/wx_search_broker_proxy`，显式带浏览器凭据，请求体为 `query/offset/searchid/searchcookies`；响应 `offset/searchID/cookies/continueFlag` 驱动后续滚动。此为实际客户端请求代码，解释页面续页与此前手写参数重放的差异；源码没有按目标 `biz` 过滤，`source.dateTime` 仍只是展示时间，本账号结果与会话有效性尚未在线核验。B 另核实腾讯元宝 Web 的 7/7 仅为**已有标题补原文链接**，不能按号发现新文章，不为订阅列表探测。
 - 主分支 `3e79dcf` 的 [CI 运行 36621435420](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36621435420) 两个 job 均成功；后续提交仍逐次核远端。
+- [六篇真实旧原文的 SQLite 副本导出演练](TARGET_ALBUM_EXPORT_REHEARSAL.md)再次证明两页 19 条回放不改 12/1447 基数或旧 ID、正文、可信时间、指标。限定六篇 RSS 和浏览器 Markdown 均 6/6 含正文、28 个图片引用；在完全禁网时 Obsidian 仅无图 1 篇完成，限定 19 篇的 ZIP 仅 1 篇完整、18 篇明确未完整，说明图片**字节**和其他正文仍欠在线验收。六篇旧短 ID 的 `verified_source_url` 为空，显式正文重试门禁 6/6 拒绝；未放宽保护或用旧 HTML 伪作今天采集。
+- C 另用一篇已保存、四字段及原文时间离线核验过的目标旧文章作唯一一次当前页面对照：HTTP 200、`#js_content` 存在，但当时探针把身份解析/规范化/时间异常合成 `parser_stop`，不能断言具体失败层，也不能验收当前正文。与前次“解析后四字段至少一项不符”是不同检查点；两个 URL 均不重试。[报告](PUBLIC_PAGE_DISCOVERY.md)及改进的分阶段离线探针已合入，并把三个已请求摘要永久列入禁止重复集合。
 
 ## 前轮判断（已由上节更新）
 

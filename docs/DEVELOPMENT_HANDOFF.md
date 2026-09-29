@@ -13,6 +13,7 @@
 - B 又核到[官方搜索页自然滚动的独立实现](coordination/SOURCE_CANDIDATE_MATRIX.md)：2026-07 四个其他号三跑 35/35/33 条及原文链接，和直接 POST 搜索代理重复约 15 条首屏的流程不同。独立[单滚动探针](coordination/WEREAD_NATURAL_SCROLL_PROBE.md)已通过 17 项离线断言，目标页在线导航/滚动为零；须本人正常登录并确认官方目标搜索首屏后才可实测。搜索卡片相对时间不能替代原文 `ct`，单次滚动也不证明全号历史或持续更新。
 - C 对有限合集的另一篇目标原文只发一次匿名请求，HTTP 200 HTML 有正文节点，但解析身份与合集记录至少一项不符；该次未保留差异字段，不能判断原因或认作真实新文章，不重试同一 URL。四页旧列表与八份旧原文的四字段离线对照 8/8 一致；见[公开页面记录](coordination/PUBLIC_PAGE_DISCOVERY.md)。
 - A 从[腾讯公开搜索页 JS](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md#新专项正常-web-登录到搜一搜的会话链)确认真实 `withCredentials` 请求发向 `weread.qq.com/web/wx_search_broker_proxy`，首屏和续页 body 用 `query/offset/searchid/searchcookies`，`continueFlag` 控制继续加载；不是把 `wr_vid` Cookie 发给 `search.weixin.qq.com`。页面只按关键词搜索，卡片的来源名和时间仍须用原文 `biz/ct` 核验，且登录态会过期。B 同时把腾讯元宝“7/7”缩限为已有标题的单篇补链，不能充当订阅目录。`3e79dcf` 的 [CI 运行 36621435420](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36621435420) 已成功。
+- [真实旧原文副本导出](coordination/TARGET_ALBUM_EXPORT_REHEARSAL.md)已把六篇已保存目标 HTML 接到当前采集和 RSS/Markdown/Obsidian/ZIP 路径：RSS/浏览器 Markdown 6/6 有正文、28 个图片引用；禁网下 Obsidian 仅无图 1 篇完成，限定 19 篇 ZIP 仅 1 篇完整。旧 ID、正文、时间和指标未覆盖；图片字节及其余 13 篇正文未取得。C 对另一个已保存真文章做唯一当前页 GET，HTTP 200 且见 `#js_content`，但探针在合并解析异常处停止，具体字段未留；与前一篇的四字段不符不能合并推理，两个 URL 都不重试，详见[页面报告](coordination/PUBLIC_PAGE_DISCOVERY.md)。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 
