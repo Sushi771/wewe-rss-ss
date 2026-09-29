@@ -6,8 +6,13 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const https = require('node:https');
+const { createRequire } = require('node:module');
+const path = require('node:path');
 const zlib = require('node:zlib');
-const { load } = require('cheerio');
+const requireServer = createRequire(
+  path.resolve(__dirname, '../../apps/server/package.json'),
+);
+const { load } = requireServer('cheerio');
 
 const TARGET_NAME = '妈妈部落畅聊阁';
 const TARGET_BIZ = 'Mzg5NTQzMTQxMg==';

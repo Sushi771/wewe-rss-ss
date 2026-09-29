@@ -6,7 +6,9 @@
 - [目标合集 Probe](coordination/TARGET_ALBUM_PROBE.md)对已核验的“复旦数学营”合集取得当日两页，HTTP 200、业务码与验证状态均为 0，10+9 个不同文章键，19/19 个链接身份匹配。当前集合与 2026-09-27 相同；六篇与当日保存原文逐项匹配并核对原文 `ct`，相差 0–34 秒，因此单一合集的五篇身份和发布时间样本及分页已过。**没有观察到自然新增，也没有证明全号覆盖。**六篇旧原文均有正文，五篇有 28 张 `data-src` 图片，今天仅部分读取其中一张。生产库只读，未切换订阅。
 - A [认证来源研究](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md)追到 Mac 客户端同主机 `vid/skey`、移动/Web/Rust 登录链，但未证明当前 Windows 有可用于 `/book/articles` 的独立凭据；B [全局候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)追到真实腾讯请求行并按能力缩限；C [公开页面发现](coordination/PUBLIC_PAGE_DISCOVERY.md)核验了原文到合集的代码与八份目标 HTML，尚未发现全号目录。以下前轮记录保留当时状态，遇矛盾以上述当前证据为准。
 - 修复了现有公开合集通道的两个数据断点：原文补取可在严格身份核验下校正不超过 60 秒的合集列表时间偏差；空封面不覆盖旧值。列表请求还检查 `verify_status`、不跟随验证跳转、每页间隔 2 秒。隔离 SQLite/Jest 三套 62 项及服务端构建通过；尚未生产写库、完成完整文章图片导出或自然更新验收。
-- [真实字段副本演练](coordination/TARGET_ALBUM_REHEARSAL.md)把旧目标合集两页 JSON 注入当前采集代码，在生产库的只读一致性副本连续导入两次，均得 19 篇且 12/1447 基数、旧 ID、可信时间、正文、指标和非空封面保持。C 又对一篇未缓存目标原文做一次有界只读请求，但 `biz/mid/idx` 未解析闭环，未计入验收；静态研究发现公开页 `window.cgiDataNew`，当前解析器已安全支持该对象的身份和原始时间字段，八份旧目标 HTML 离线回归 8/8。B 已将 `profile_ext` 个人微信短期会话来源缩限。[搜狗微信索引专项](coordination/SOGOU_PUBLIC_INDEX.md)追到可审查桌面代码，本目标一次首屏得 9 个搜索候选、8 个作者名匹配；签名链接和腾讯原文身份仍未核验。
+- [真实字段副本演练](coordination/TARGET_ALBUM_REHEARSAL.md)把旧目标合集两页 JSON 注入当前采集代码，在生产库的只读一致性副本连续导入两次，均得 19 篇且 12/1447 基数、旧 ID、可信时间、正文、指标和非空封面保持。C 对一篇未缓存目标原文做一次有界只读请求，但 `biz/mid/idx` 未解析闭环，未计入验收；当前解析器已安全支持公开页 `window.cgiDataNew`，八份旧目标 HTML 离线回归 8/8。B 已缩限 `profile_ext` 短期会话来源及未证实的后台 `free_publish` 兜底。C 另从腾讯静态 JS 定位 `/mp/relatedarticle`，八份目标旧页相关标志均为零，尚未请求该数据端点。
+- [搜狗微信索引专项](coordination/SOGOU_PUBLIC_INDEX.md)用固定开源代码验证本目标四次有界首屏；最近一次 9 条卡片中 8 条作者昵称匹配，同会话 `/link` 给出签名腾讯 `/s` 形状。唯一一次腾讯签名页 HTTP 200 但缺 `#js_content`，**没有目标 `biz/mid/idx/ct`、正文和图片证据**，已停止该候选。移动入口仍是未验候选。当前不能接入全号 Provider；继续追合法认证和独立取文来源。
+- 最近远端 CI 的 `Format check` 曾因三份研究文档失败，`6d4de92` 修复后 [运行 36613922766](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36613922766) 两个 job 成功。新合入的研究提交仍须按最新远端运行复核。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 
