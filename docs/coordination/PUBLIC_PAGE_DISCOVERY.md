@@ -117,6 +117,25 @@
 
 原项目脚本不能直接当本项目的安全探针：[第 405–418 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L405-L418)在某些失败后追加无依据 `chksm=1` 变体，[第 480–507 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L480-L507)会对验证/限流重试与冷却；`urlopen` 默认跟随跳转，且第 441–445 行先扩散页面链接再核 `var biz`。这些行为不符合本轮单次停止门禁。它的 [`page_key` 第 89–93 行](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L89-L93)也只解析旧 `var mid/idx`，不能替代目标四字段、发布时间和正文图片验收。上述 60 条只说明**有真实可复核的历史互链候选**；能否匿名取得候选原文、由其发现第三合集或形成持续新增文章来源仍待独立一次探针与后续增量验证。
 
+## 长链 302 后的请求形状对照与已存短链入口（仅离线）
+
+总控已按上述探针门禁对摘要 `1c9ac9e993100643` 发 **1 次**匿名官方长 `/s?` GET：HTTP **302**、`redirect_stop`、`requests=1`，未跟随、未保存 `Location` 或 HTML，私有已尝试哨兵保留。本 C 线不读取跳转目的，也不重发该 URL。该结果只排除**该文章、该时点、原正文给出的四字段加 `scene` 长链接、此次匿名直连形状**可直接得到可核验页面；没有进入身份、时间、正文或合集步骤，不证明是验证码，也不排除余下 59 个互链种子、两条已知合集或其他官方公开入口。
+
+| 已发生请求 | 来源与请求形状 | 实际止步层 | 严格结论 |
+| --- | --- | --- | --- |
+| `5e44e0d46c308fe2` | 库内旧 `verified_source_url`；腾讯长 `/s?__biz,mid,idx,sn`，无 `chksm` | 单次 302，未留 `Location` | 该条匿名长链未读到原文；未判验证码或账号身份 |
+| `1c9ac9e993100643` | 五份目标旧正文共同引用；腾讯长 `/s?__biz,mid,idx,sn,scene`，原 `#wechat_redirect` 片段在 HTTP 前移除；无 `chksm` | 单次 302，未留 `Location` | 该条匿名长链未读到原文；同号引用仍只是来源线索 |
+| `792e0623ba3ee739` | 2026-09-27 保存的**腾讯官方合集条目 URL**，原有 `chksm`；仅把 HTTP 升为 HTTPS | 200 且有 `#js_content`，四字段比较至少一项不合，未留分项 | 无法确认新原文身份，不能指认为错号或可用文章 |
+| `8c460d508c0aae1b` | 已核旧目标原文的官方合集条目 URL，同样自带 `chksm` | 200 且有 `#js_content`，合并的解析/规范化/时间步骤报 `parser_stop` | 无法确定失败字段或当前 `ct`；旧 HTML 的通过不能追认当前页 |
+
+上述四次实验的文章、日期、来源与页面状态都不同；两次 200 URL 中的 `chksm` 是腾讯**已返回条目的原值**，两次 302 URL 没有它。这是请求上下文的相关性，**不是** `chksm` 决定 302 的因果证据；不得合成、猜测或把别篇签名移植到 302 URL。[近期 `gzh-export` 的 `&chksm=1` 失败变体](https://github.com/huanxi007/gzh-export/blob/ff6832d4fa50abd12dbe231b6cd1ac98f5675205/scripts/gzh_export.py#L405-L418)也不能作为本项目请求依据。没有保存两次 302 的跳转目的，不能对当前跳转机制做更细归因。
+
+有一条**不同的、已由本项目一手历史证据支持的单篇公开入口**：官方 `/s/<22 字符短 token>`。八份 2026-09-27 已保存目标原文的 `og:url/msg_link` 为这种短链；本项目 [`resolvePublicArticle`](../../apps/server/src/collection/public-album.ts) 实际向 `https://mp.weixin.qq.com/s/<shortId>` 发 GET，随后核公众号身份及 `og:url` 短链一致；[当时调查记录](../CHANNEL_INVESTIGATION.md)记载一篇目标旧短链在线调用成功并返回原文四字段与 `ct`。但旧调用使用 Axios，可能按默认行为跟随跳转；它不证明今天短路径能独立返回 200，也不证明它可生成公众号列表。生产 SQLite 只读核对：两合集旧 32 键之外的 **14** 条已核长链所在行，各有唯一、无 query 的官方 HTTPS `/s/<22 token>` 原 `source_url`；它与同一行的 `verified_source_url` 共同提供待复核的旧身份关系。除已试长链摘要 `5e44e0d46c308fe2` 外，其余 **13** 条在本机按四字段摘要没有 `.attempted` 哨兵。不能以这种旧库配对本身代替当前原文认证。
+
+从这 13 条中按旧库发布时间选一条 **2026-09-24** 的记录，四字段摘要 `175910fb92f9e063`；短路径无凭据参数，已存长链四字段齐全，规范旧文章 ID 与长链 `mid/idx` 一致，旧正文缓存非空，但均不是本轮新抓取。为总控复审准备 [`public-shortpath-one-shot.cjs`](../../scripts/collection-source-probe/public-shortpath-one-shot.cjs)：使用 Node 24 的 [`DatabaseSync(..., { readOnly: true })`](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html) 只读定位**唯一**该行，要求短链、长链、旧 ID、旧时间、两合集旧键和已尝试哨兵均过门禁；再用已保存八份真实目标 HTML 离线核当前构建解析器的四字段、`og:url`、`ct`、正文和已知合集。`preflight` 实测 `8/8` 通过、`requests=0`、短路径哨兵不存在；无复审标志的 `probe` 实测停止且 `requests=0`、无哨兵。该脚本**未在线执行**。
+
+若总控后续批准独立验证，脚本先排他创建私有哨兵，再仅对**已存短路径原样**发一次无代理、无 Cookie、无自动跳转/重试的腾讯 HTTPS GET（12 秒、6 MiB）；3xx、验证/频控、非 HTML 或超限立即停，不读取或保存 `Location`。若得 200，先逐项对照旧 `verified_source_url` 的 `__biz/mid/idx/sn` 与当前原文、`og:url` 与短 token，再核字面原文 `ct` 是否与库内旧 `publish_time` 相符、严格 `#js_content`、清洗后正文及图片 `data-src`，最后只记录页面明示的同号官方合集 ID 的已知/新数量；输出仅含摘要、状态、布尔与计数，不写生产库。旧库 `publish_time` 是对照值，不能先验地当成当前原文 `ct`。此入口最多验证**一篇**旧文章是否当前可读及能否发现所属合集；即使成功也不能代表账号级目录或持续订阅。
+
 ## 2026-09-30 另一篇目标原文的单请求结果与离线差异诊断
 
 从 2026-09-27 保存的 `复旦数学营` 官方首屏 JSON 选第 2 条，与上节已请求的第 1 条不同。其列表 `create_time` 的 UTC 日期为 **2026-09-14**，`SHA256(__biz\0mid\0idx\0sn)` 前 16 位为 `792e0623ba3ee739`。URL 位于腾讯 `/s`，四个身份参数齐全，URL `mid/idx` 分别等于列表 `msgid/itemidx`，`__biz` 等于目标号；这条身份不在八份旧目标原文 HTML 中。按原有 URL 只升级 HTTPS 协议，未改变参数。请求前用当前 main **已构建**的 `articleIdentity/articlePublishTime/articleContentHtml` 在八份旧 HTML 上做离线预检，八份均可解析身份、原文 `ct` 与正文，预检网络请求为零。
