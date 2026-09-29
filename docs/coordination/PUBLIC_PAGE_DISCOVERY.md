@@ -146,6 +146,14 @@
 
 因此现阶段**没有精确、可复核的新 `album_id` 请求种子**，不能构造第三合集的 `getalbum` 首屏探针，不能猜 ID、借用别篇 ID 或重取已请求短链。下一次若由**另一篇未请求且已核身份**的官方页面或其他合法公开一手材料取得精确同号 ID，应先在私有临时文件保存仅该数值及其来源摘要，再只发一次匿名、无代理/跳转/重试的官方 `getalbum` 首屏；先核 `base_resp.ret`、`__biz/album_id`、文章键和 `continue_flag`，如目标旧文章确在其中再核所属关系与分页。此条件尚未满足，故本轮不发该请求；找到第三合集也仍不能推出全号目录或持续新增。
 
+### 第二篇旧目标短链：提取归属字段的单次门禁（只做离线准备）
+
+从上述合集旧 32 键外的 14 条已核行排除首次短链摘要 `175910fb92f9e063` 和已有长链哨兵的 `5e44e0d46c308fe2`，余下 **12** 条旧文章的原存 `/s/<22 token>` 在本机无 `.attempted` 哨兵。选择与首次不同、旧库 UTC 日期同为 2026-09-24 的四字段摘要 `9beb4db841a9c11c`；只读核对该行 `mp_id`、唯一四字段长链、无 query 的官方 HTTPS 短链、规范文章 ID 与 `mid/idx`、非空旧正文和不在旧 32 键。日期接近**不**证明同属一个合集，也不把该旧文章算新文。
+
+[`public-shortpath-album-one-shot.cjs`](../../scripts/collection-source-probe/public-shortpath-album-one-shot.cjs)沿用一次匿名直连、12 秒/6 MiB、禁代理/跳转/重试、先排他私有哨兵及 3xx/验证/限流即停；复审标志缺失时不会发请求。HTTP 200 后先分层核当前 `__biz/mid/idx/sn`、短 canonical、字面 `ct` 与旧 `publish_time`、`#js_content`、清洗正文和图片 `data-src`。只有这些都通过，才从**内联 `<script>` 的唯一 `var album_info_list = [...]`** 有界解析静态字符串；不运行页面 JS、不 `eval`。每个条目必须同时满足 `albumId=albumIdStr=link.album_id`、官方 HTTPS `/mp/appmsgalbum?action=getalbum`、链接 `__biz` 为目标号且不含凭据参数，才能分类为页面声明的文章合集标签。整页其他同号合集链接只记数量，不能据此保存“所属” ID；字段缺失、歧义或不符只记 `absent/ambiguous/malformed`。
+
+若出现新且严格匹配的文章合集标签，脚本仅将数值 ID、目标 `biz`、文章摘要、字段来源和时间写到用户私有 `%TEMP%/wewe-public-album-source-9beb4db841a9c11c.json`；先写随机临时文件并同步，再以硬链接原子创建目的文件，目的已存在则拒绝覆盖。日志和 Git 仅留分类、数量、摘要及私有文件是否成功写入，不留 ID、标题、原文 URL、HTML 或正文。八份 2026-09-27 已存目标官方 HTML 的内联 `album_info_list` 均通过解析并与各自已知合集链接一致（8/8）；另用合成静态字面量验证非腾讯链接与 JS 表达式拒绝，私有文件原子写与拒绝覆盖自测通过。当前候选 `preflight` 为 `requests=0`、无已尝试哨兵和私有 ID 文件；无复审标志的 `probe` 在门禁停止，`requests=0`。**本 C 线尚未在线运行该脚本**。即使它保存新 ID，仍须总控另行复审单次官方 `getalbum` 首屏并用列表键核归属。
+
 ## 2026-09-30 另一篇目标原文的单请求结果与离线差异诊断
 
 从 2026-09-27 保存的 `复旦数学营` 官方首屏 JSON 选第 2 条，与上节已请求的第 1 条不同。其列表 `create_time` 的 UTC 日期为 **2026-09-14**，`SHA256(__biz\0mid\0idx\0sn)` 前 16 位为 `792e0623ba3ee739`。URL 位于腾讯 `/s`，四个身份参数齐全，URL `mid/idx` 分别等于列表 `msgid/itemidx`，`__biz` 等于目标号；这条身份不在八份旧目标原文 HTML 中。按原有 URL 只升级 HTTPS 协议，未改变参数。请求前用当前 main **已构建**的 `articleIdentity/articlePublishTime/articleContentHtml` 在八份旧 HTML 上做离线预检，八份均可解析身份、原文 `ct` 与正文，预检网络请求为零。
