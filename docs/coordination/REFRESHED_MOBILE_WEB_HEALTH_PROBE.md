@@ -1,6 +1,6 @@
 # 新移动凭据到 Web 书架：一次隔离健康对照
 
-2026-09-30。总控已按[移动 Refresh 恢复门禁](MOBILE_REFRESH_RECOVERY.md)执行**唯一一次**正常移动 `/login`：HTTP 200、`candidate_identity_matched`，返回新 `accessToken`、未返回新 `refreshToken`，完整候选 `mobile` 一次写入私有恢复文件；生产 SQLite 写入 0，Refresh marker 保留。该结果只证明 Refresh 请求取得并保存候选凭据，**未证明新移动 token 可桥接有效 Web 会话**。本脚本实现下一次有界对照，当前**仅离线自检，未发送 Web init 或 shelf 请求**。
+2026-09-30。总控已按[移动 Refresh 恢复门禁](MOBILE_REFRESH_RECOVERY.md)执行**唯一一次**正常移动 `/login`：HTTP 200、`candidate_identity_matched`，返回新 `accessToken`、未返回新 `refreshToken`，完整候选 `mobile` 一次写入私有恢复文件；生产 SQLite 写入 0，Refresh marker 保留。本脚本随后对新凭据执行一次有界 Web 会话对照；结果见下文。
 
 ## 固定来源与这次的唯一变量
 
@@ -16,20 +16,26 @@
 
 门禁通过后，在同一私有目录以独占 `wx` 和 `fsync` 先写 `refreshed-mobile-web-health-attempt.json`；已存在即零请求。网络顺序：
 
-| 阶段 | 最多 | 继续条件 |
-| --- | ---: | --- |
-| Web `/web/login/session/init` | 一次 POST | HTTP 200、无验证码/限流/失败业务码，响应若有 `success` 则必须为 1；隔离 Context 的完整 Cookie jar 对书架路径有唯一 `wr_vid` 且与恢复 `vid` 精确一致，以及非空 `wr_skey`。 |
-| Web `/web/shelf/sync?userVid=&synckey=0&lectureSynckey=0` | 一次 GET | 仅上一步通过才发；无非 200、跳转、验证码、限流和失败业务码，`books` 为数组或存在 `synckey` 才列为书架接受。 |
+| 阶段                                                      |      最多 | 继续条件                                                                                                                                                                  |
+| --------------------------------------------------------- | --------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Web `/web/login/session/init`                             | 一次 POST | HTTP 200、无验证码/限流/失败业务码，响应若有 `success` 则必须为 1；隔离 Context 的完整 Cookie jar 对书架路径有唯一 `wr_vid` 且与恢复 `vid` 精确一致，以及非空 `wr_skey`。 |
+| Web `/web/shelf/sync?userVid=&synckey=0&lectureSynckey=0` |  一次 GET | 仅上一步通过才发；无非 200、跳转、验证码、限流和失败业务码，`books` 为数组或存在 `synckey` 才列为书架接受。                                                               |
 
 每步 `maxRedirects:0/maxRetries:0`、10 秒超时；init JSON 解析上限 64 KiB、书架 128 KiB。Playwright 的 APIResponse 在 `.body()` 前已由库接收，因此此上限是**解析上限**，不能称传输硬截断。总请求最多 2、页面导航 0、搜索 0、`/book/articles` 0、Refresh 0、分页 0。Cookie 由同一 BrowserContext jar 自动维护，脚本不手工拼 Cookie 或保存其值。输出仅 HTTP 状态、有限业务码、Set-Cookie 名称、适用 Cookie 名称/数量、`wr_vid` 匹配布尔、`books/synckey` 存在布尔和停止类别；不输出 token、Cookie、正文、原始响应或账号 ID。即使书架接受，也只证明该书架会话，不证明目标号搜索或真实订阅。
 
 ```powershell
 node scripts/research/probe-refreshed-mobile-web-health.cjs --plan
 node scripts/research/probe-refreshed-mobile-web-health.cjs --self-test
-# 总控 review 后才可使用私有路径执行；本线没有执行下面的命令。
+# 以下占位路径不可直接运行；本次私有运行目录已有 marker，不得重发。
 node scripts/research/probe-refreshed-mobile-web-health.cjs --execute --db <ABSOLUTE_DB_PATH> --run-dir <ABSOLUTE_REFRESH_RUN_DIRECTORY> --playwright-core <ABSOLUTE_PLAYWRIGHT_CORE_DIR> --browser <ABSOLUTE_EDGE_OR_CHROME_EXE> --approved-online
 ```
 
 ## 离线验证与未决项
 
-`node --check`、`--plan`、`--self-test` 成功。自检在系统临时目录生成**假 SQLite 和假私有恢复记录**，实际调用 SQLite backup/副本门禁；账号 ID 或 `vid` 错误时在请求前拒绝。假 BrowserContext 验证只把**新** accessToken 送入 init，Cookie 由 jar 管理，init 成功最多追加一次 shelf；验证码、`success:0` 和 Cookie 身份错误只发一次 init，书架 `-2012` 发两次即停，搜索始终零请求；脱敏结果不含假凭据。生产库读写 0，真实网络 0。下一步由总控复审后决定是否运行一次在线对照；当前没有 Web 健康结果，也没有订阅恢复结果。
+`node --check`、`--plan`、`--self-test` 成功。自检在系统临时目录生成**假 SQLite 和假私有恢复记录**，实际调用 SQLite backup/副本门禁；账号 ID 或 `vid` 错误时在请求前拒绝。假 BrowserContext 验证只把**新** accessToken 送入 init，Cookie 由 jar 管理，init 成功最多追加一次 shelf；验证码、`success:0` 和 Cookie 身份错误只发一次 init，书架 `-2012` 发两次即停，搜索始终零请求；脱敏结果不含假凭据。离线自检生产库读写 0，真实网络 0。
+
+## 2026-09-30 总控唯一在线对照
+
+只从私有恢复文件读取新 `mobile`，先发一次 Web init：HTTP 200，服务器下发 `wr_pf/wr_ql/wr_rt/wr_skey/wr_vid`，隔离 BrowserContext 的五项适用 Cookie 中 `wr_vid` 与恢复账号身份匹配。随后只发一次 Web shelf：HTTP 200，无失败业务码，`books` 为数组且有 `synckey`，决策 `web_shelf_accepted`。总请求 **2**、目标搜索 **0**、页面导航 **0**、生产 SQLite 写入 **0**；私有健康 marker 已保留。没有输出或提交 Cookie、token、原始响应或账号 ID。
+
+这证明**本次正常 Refresh 后的凭据可以建立被书架接受的 Web 会话**，与旧凭据完整 Cookie jar 书架 `-2012` 的结果有实质差异。它尚不证明目标准确号名搜索、翻页、正文图片或自然新增。下一项是依据腾讯第一方搜索页真实首屏请求，在新的隔离上下文仅发一次目标号搜索；遇验证码或限制即停。

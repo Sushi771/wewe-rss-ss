@@ -29,6 +29,9 @@
 - B 的[候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)新核到另一个腾讯 `/review/list` 真请求，但官方字段文档定义为读者点评列表，目前没有 MP 书返回公众号发文目录的一手样本，不凭 `reviews[]` 同名字段对目标号发无依据 Probe。2026-09-29 更新的开源客户端仍用本机已测 `/web/mp/articles`，不构成新路径。
 - A 的[移动 Refresh 恢复](coordination/MOBILE_REFRESH_RECOVERY.md)先在生产库只读完成一致性备份、SQLite 副本假 token 更新和私有原子恢复演练，随后总控唯一一次正常 `/login` 得 HTTP 200、同账号候选新 `accessToken`，私有恢复文件已落盘，生产库写入 0。下一项是**从该私有文件**另做有界 Web 会话健康检查，未发搜索或文章请求；Refresh 本身不证明订阅恢复。
 - B 的[矩阵增量](coordination/SOURCE_CANDIDATE_MATRIX.md)将搜狗 `/gzhjs` 限定为缺当前 `openid` 获取链和近期回包的历史候选，不猜值 Probe。C 在八份已存目标官方原文的正文中离线发现 60 个两合集外同号完整文章键，五份独立旧页同指其中一条未请求种子，正准备一次公开原文只读探针；这些旧链接尚无当前原文身份、时间和正文证据，不能当新增订阅结果。
+- [新移动凭据 Web 对照](coordination/REFRESHED_MOBILE_WEB_HEALTH_PROBE.md)一次 init 加一次书架均 HTTP 200，完整 Cookie jar 账号吻合、书架有 `books/synckey`；旧凭据同形书架 `-2012`。目标搜索仍为 0，A 正按腾讯第一方静态 JS 准备准确号名首屏一次请求；有效书架并不证明取到公众号文章。
+- C 的一条正文互链候选长 `/s?__biz...` 一次匿名 GET 得 HTTP 302 后即停，无正文验收；只缩限该 URL/时点/形状。生产库另外 13 条未尝试且已核验的旧文章具有官方短 `/s/<token>` 来源路径，C 正审其与长链请求的真实差异；不猜 `chksm`，不重发已停的长链。
+- [另一篇目标旧文双图验证](coordination/TARGET_TWO_IMAGE_PROBE_PLAN.md)各一次 CDN GET 得完整 PNG 92,237 字节和 JPEG 130,633 字节；SQLite 副本归档后禁网 Obsidian/限定单篇 ZIP 两附件字节一致，其他旧字段及 12/1447 基数不变。生产库未写，此结果不能扩大成整号图片完整或新增订阅。
 
 ## 2026-09-30 前轮总控续记（历史状态）
 

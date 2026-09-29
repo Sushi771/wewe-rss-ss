@@ -21,6 +21,27 @@ const server = path.resolve(__dirname, '../../apps/server');
 const serverRequire = createRequire(path.join(server, 'package.json'));
 const built = path.join(server, 'dist/apps/server/src');
 
+function onlineEnvironmentGate() {
+  const blocked = [
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'all_proxy',
+    'NODE_OPTIONS',
+    'NODE_DEBUG',
+    'NODE_TLS_REJECT_UNAUTHORIZED',
+    'SSLKEYLOGFILE',
+  ];
+  if (
+    blocked.some(
+      (key) => typeof process.env[key] === 'string' && process.env[key].trim(),
+    )
+  )
+    throw new Error('environment_gate');
+}
+
 function sha16(value) {
   return crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
 }
@@ -607,19 +628,25 @@ async function main() {
     );
     return;
   }
+  onlineEnvironmentGate();
   const fetched = [];
   for (const [index, raw] of candidate.imageUrls.entries()) {
     // The private marker is created atomically immediately before this one URL.
     try {
-      fs.writeFileSync(
-        candidate.sentinels[index],
-        JSON.stringify({
-          attemptedAtUtc: new Date().toISOString(),
-          articleDigest: ARTICLE_DIGEST,
-          imageDigest: IMAGE_DIGESTS[index],
-        }) + '\n',
-        { flag: 'wx', mode: 0o600 },
-      );
+      const fd = fs.openSync(candidate.sentinels[index], 'wx', 0o600);
+      try {
+        fs.writeFileSync(
+          fd,
+          JSON.stringify({
+            attemptedAtUtc: new Date().toISOString(),
+            articleDigest: ARTICLE_DIGEST,
+            imageDigest: IMAGE_DIGESTS[index],
+          }) + '\n',
+        );
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch {
       console.log(
         JSON.stringify({
