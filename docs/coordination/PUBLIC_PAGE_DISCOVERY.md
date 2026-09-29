@@ -154,6 +154,14 @@
 
 若出现新且严格匹配的文章合集标签，脚本仅将数值 ID、目标 `biz`、文章摘要、字段来源和时间写到用户私有 `%TEMP%/wewe-public-album-source-9beb4db841a9c11c.json`；先写随机临时文件并同步，再以硬链接原子创建目的文件，目的已存在则拒绝覆盖。日志和 Git 仅留分类、数量、摘要及私有文件是否成功写入，不留 ID、标题、原文 URL、HTML 或正文。八份 2026-09-27 已存目标官方 HTML 的内联 `album_info_list` 均通过解析并与各自已知合集链接一致（8/8）；另用合成静态字面量验证非腾讯链接与 JS 表达式拒绝，私有文件原子写与拒绝覆盖自测通过。当前候选 `preflight` 为 `requests=0`、无已尝试哨兵和私有 ID 文件；无复审标志的 `probe` 在门禁停止，`requests=0`。**本 C 线尚未在线运行该脚本**。即使它保存新 ID，仍须总控另行复审单次官方 `getalbum` 首屏并用列表键核归属。
 
+### 第二篇短链 200 后的第三合集首屏探针（仅离线准备）
+
+总控随后仅对 `9beb4db841a9c11c` 执行上述一次短路径 GET：HTTP 200；目标号、`mid/idx/sn`、短 canonical、字面 `ct` 与旧库、正文均闭环，`data-src` 图片 **18** 张；内联 `var album_info_list` 的同号官方 `getalbum` 链接与 `albumId/albumIdStr` 三者相同，出现 **1 个**已知两合集之外的精确 ID，私有文件写入成功。这里比前篇的“整页出现一个链接”强：来源是该旧文章页面声明的合集标签；但仍须官方合集列表确认它实际收录该文。该文章也是**旧文当前可读**，没有形成新增文章或持续更新验收。精确 ID 没有出现在日志或 Git，仍仅位于上述用户私有文件；已尝试短路径不可重发。
+
+[`public-third-album-page1-one-shot.cjs`](../../scripts/collection-source-probe/public-third-album-page1-one-shot.cjs)只读且一次性地读取该私有文件：要求字段集合精确、文章摘要与目标 `biz` 一致、`sourceField=inline_var_album_info_list`、恰一项 10–24 位数值 ID 且不在旧两 ID 内，并检查对应短链已尝试哨兵。生产库只读重核该旧文章长/短身份与发布时间；四份 2026-09-27 官方 `getalbum` 原始 JSON 仅作离线格式回归，共 **32** 个旧文章键，候选不在其中。请求的 `action=getalbum/__biz/album_id/count=10` 与[腾讯合集客户端实际发送代码](https://res.wx.qq.com/mmbizwap/zh_CN/htmledition/js/album/appmsg/album80ec10.js)一致；`f=json` 采用[2026-09-27 本项目成功保存原始 JSON 的请求形状](../CHANNEL_INVESTIGATION.md)；完整首屏形状为 `GET /mp/appmsgalbum?action=getalbum&__biz=<目标>&album_id=<私有原值>&count=10&f=json`，**不带游标**，没有推算、猜测或输出 ID。执行门禁为总控复审标志、先排他私有哨兵、匿名直连、禁代理/跳转/重试、12 秒与 2 MiB 上限，3xx/验证/限流即停；不保存响应 JSON，因为其中可能有不应落盘的字段。
+
+若首屏为 JSON，只输出 `base_resp.ret`、文章条数、`key/create_time/msgid/itemidx` 与各条原文 URL 的目标 `__biz`/键存在或匹配计数、`continue_flag` 是否有后页，以及候选旧文章 `mid/idx` 是否在首屏且 URL 身份是否匹配。**只有**同键及原文 URL 目标号/消息/次条身份同时闭环才记“首屏确认收录”；首屏未出现、且有后页时结论为待定，不自动续页；即使单页缺席，也只有响应明示总篇数**恰等于**本页不重复的条数且所有条目身份闭环时才记“完整单页未收录”。`create_time` 只核字段是否为有效时间，不拿它代替原文 `ct`。旧四页格式预检和旧条目阳性成员判定均通过；当前私有来源与旧文身份闭环，`preflight` 为 `requests=0`、新哨兵不存在，无复审标志的 `probe` 为 `requests=0`。**本 C 线没有发第三合集网络请求、没有续页或取正文。**
+
 ## 2026-09-30 另一篇目标原文的单请求结果与离线差异诊断
 
 从 2026-09-27 保存的 `复旦数学营` 官方首屏 JSON 选第 2 条，与上节已请求的第 1 条不同。其列表 `create_time` 的 UTC 日期为 **2026-09-14**，`SHA256(__biz\0mid\0idx\0sn)` 前 16 位为 `792e0623ba3ee739`。URL 位于腾讯 `/s`，四个身份参数齐全，URL `mid/idx` 分别等于列表 `msgid/itemidx`，`__biz` 等于目标号；这条身份不在八份旧目标原文 HTML 中。按原有 URL 只升级 HTTPS 协议，未改变参数。请求前用当前 main **已构建**的 `articleIdentity/articlePublishTime/articleContentHtml` 在八份旧 HTML 上做离线预检，八份均可解析身份、原文 `ct` 与正文，预检网络请求为零。
