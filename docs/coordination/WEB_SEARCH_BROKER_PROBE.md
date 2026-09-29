@@ -1,5 +1,7 @@
 # 微信读书 Web 搜索代理：一次首屏探针准备（2026-09-30）
 
+**进展更新：**[独立移动凭据桥接](WEREAD_MOBILE_TO_WEB_PROBE.md)已一次取得与本人移动账号匹配的候选 `wr_vid/wr_skey/wr_rt`，但该 Cookie 未保存或放入浏览器。本文件下述“没有可确认的 Web 浏览器会话”仍适用于本脚本；现另准备在短时进程中桥接并直接查一次目标准确号名的隔离路径。两种路径不混用旧应用 Cookie。
+
 ## 来源与请求边界
 
 [固定提交 `dailyoozoo/weread-mp-fetch@2b4fd61`](https://github.com/dailyoozoo/weread-mp-fetch/tree/2b4fd61d921b029075ecad3963a8fbc9568d0fc0)的[真实请求代码](https://github.com/dailyoozoo/weread-mp-fetch/blob/2b4fd61d921b029075ecad3963a8fbc9568d0fc0/src/weread.js#L358-L456)在 `weread.qq.com` 页面上下文中执行 `fetch`：`POST /web/wx_search_broker_proxy`、`credentials: include`、JSON 首屏 `{query}`。本机只读克隆核对的 `HEAD` 与固定提交完整 SHA 一致。这是腾讯 Web 搜索请求，与旧失败的 `/mp/chapters`、`/web/mp/articles` 或运营后台接口不同；没有第三方开发者中转。[项目候选矩阵](SOURCE_CANDIDATE_MATRIX.md)已限定它是搜索索引，不是按公众号完整目录。
