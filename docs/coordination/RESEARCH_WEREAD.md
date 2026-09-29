@@ -41,3 +41,10 @@
 **认证前提满足后**，由 B 在隔离进程对目标只发一次有来源的 /book/articles 首屏：使用 WeBook 固定源码给出的 GET 主机/路径与 bookId=MP_WXS_3895431412、count=20、offset=0、秒级 synckey；凭据头须与已证明的同一客户端体系一致，不补猜 header 或轮换参数。10–15 秒超时、无自动重试、响应上限 64 KiB；只记录 HTTP/业务码、错误类别、reviews 是否存在、条目数及可用字段名。若认证拒绝、-2041/验证码、限频或升级提示，立即停止该假设。若拿到真实 reviews，再单独核对目标号身份、五个不同稳定文章身份、原文链接与发表时间；之后才设计分页和正文实验。所有步骤不写生产库。
 
 **当前状态：认证前提尚未证明，因此没有可立即执行的 /book/articles 网络实验。**B 可以先完成离线字段来源核对与既有 Gateway 探针诊断；总控按其结果决定是否授权首屏。
+
+## 认证来源复核（2026-09-30）
+
+- **证据修正：**前表所引 2025 Android [登录示例](https://yumi1.top/weread-security-analysis-4/)使用 `your_refresh_token` 占位值并从响应顶层解构 `vid/skey`；同作者的[登录接口文档](https://yumi1.top/weread-security-analysis-2/)却把 `skey` 和 `accessToken` 同列在 `data` 内，使用占位值和 2022 年示例时间戳。这只能证明作者描述过一种协议设想，**不能证明 2025/2026 实际返回 skey**，更不能充当可复用的登录实现。文档标为 CC BY-NC-SA 4.0，本轮未找到其维护中的配套客户端源码。
+- **源码链断开：**旧 [WeBook 请求代码](https://github.com/wnma3mz/wechat_articles_spider/blob/f8b31196e88045d079901812ea064ad4953d62a6/wechatarticles/ArticlesUrls.py#L458-L490)只消费外部提供的 `skey/vid`；现行 [weread-omni 登录 HTTP 与解析代码](https://github.com/teng-lin/weread-omni/blob/88bd2e095d7d7ee423eaadf8f40653e72c5be6d4/src/auth/token.ts#L913-L994)取得并续期的是 `accessToken/refreshToken/vid`，其[请求头](https://github.com/teng-lin/weread-omni/blob/88bd2e095d7d7ee423eaadf8f40653e72c5be6d4/src/profile.ts#L294-L307)使用 accessToken。这是两条不同认证链，不能重命名字段拼接。
+- **候选排除：**[EinkSync 说明](https://github.com/xiaokun567/EinkSync/blob/main/README.md)要求从手机 App 抓取 `login` 请求体；2026-09-30 GitHub 仓库树仅有 README 和两张图片，GitHub license 字段为空，无可审查的登录 HTTP 实现，且其初始化方式不符合本任务限制。[2026 年另一位一手作者](https://whchen.dev/notes/weread-reading-page-01)也说明历史 `vid/skey` 来自抓包，后改用官方 Skill；这不提供正常官方登录获取 skey 的代码。
+- **决策：**本轮没有发现许可证明确、现今可构建、通过本人正常官方登录取得 i.weread `skey/vid` 且可持续更新的完整开源链。B 仍只做既定的离线字段来源核对；若只见 Web Cookie 或 Eink accessToken，则不得请求 `/book/articles`。下一次真实实验须有新的正常授权产物字段证据，或上游官方能力/独立实现发生可核验变化；本轮不要求用户扫码，也不重放旧失败路径。
