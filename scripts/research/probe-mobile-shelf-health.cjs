@@ -63,6 +63,22 @@ function proxyGate(env) {
     throw Error('proxy_gate');
 }
 
+function debugGate(env) {
+  const keys = [
+    'DEBUG',
+    'NODE_DEBUG',
+    'NODE_DEBUG_NATIVE',
+    'PWDEBUG',
+    'UNDICI_DEBUG',
+    'DEBUG_HTTP',
+    'DEBUG_FETCH',
+    'NODE_OPTIONS',
+    'SSLKEYLOGFILE',
+  ];
+  if (keys.some((key) => typeof env[key] === 'string' && env[key].trim()))
+    throw Error('debug_gate');
+}
+
 function mobileFromRows(rows) {
   if (!Array.isArray(rows) || rows.length !== 1) throw Error('account_gate');
   let token;
@@ -305,6 +321,10 @@ async function selfTest() {
   assert.equal((await probe(mobile, async () => { throw Error('private detail'); })).decision,
     'stop_transport');
   assert.throws(() => proxyGate({ HTTPS_PROXY: 'http://proxy.invalid' }), /proxy_gate/);
+  for (const key of ['DEBUG', 'NODE_DEBUG', 'PWDEBUG', 'NODE_OPTIONS', 'SSLKEYLOGFILE']) {
+    assert.throws(() => debugGate({ [key]: 'enabled' }), /debug_gate/);
+  }
+  assert.doesNotThrow(() => debugGate({ DEBUG: '' }));
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-shelf-probe-'));
   const marker = path.join(tempDir, 'attempt.json');
   try {
@@ -350,12 +370,13 @@ async function main() {
   }
   try {
     proxyGate(process.env);
+    debugGate(process.env);
     markerGate(options.markerPath);
     const mobile = readMobile(options.dbPath);
     markAttempt(options.markerPath);
     console.log(JSON.stringify(await probe(mobile, directGet)));
   } catch (error) {
-    const safe = new Set(['already_tried', 'proxy_gate', 'marker_gate', 'account_gate', 'mobile_gate', 'db_gate']);
+    const safe = new Set(['already_tried', 'proxy_gate', 'debug_gate', 'marker_gate', 'account_gate', 'mobile_gate', 'db_gate']);
     const decision = safe.has(error.message) ? error.message : 'preflight_gate';
     console.log(JSON.stringify({ decision, requestCount: 0 }));
     process.exitCode = 1;
