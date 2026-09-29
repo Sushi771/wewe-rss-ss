@@ -136,6 +136,16 @@
 
 若总控后续批准独立验证，脚本先排他创建私有哨兵，再仅对**已存短路径原样**发一次无代理、无 Cookie、无自动跳转/重试的腾讯 HTTPS GET（12 秒、6 MiB）；3xx、验证/频控、非 HTML 或超限立即停，不读取或保存 `Location`。若得 200，先逐项对照旧 `verified_source_url` 的 `__biz/mid/idx/sn` 与当前原文、`og:url` 与短 token，再核字面原文 `ct` 是否与库内旧 `publish_time` 相符、严格 `#js_content`、清洗后正文及图片 `data-src`，最后只记录页面明示的同号官方合集 ID 的已知/新数量；输出仅含摘要、状态、布尔与计数，不写生产库。旧库 `publish_time` 是对照值，不能先验地当成当前原文 `ct`。此入口最多验证**一篇**旧文章是否当前可读及能否发现所属合集；即使成功也不能代表账号级目录或持续订阅。
 
+## 已核短链 200 与第三个合集 ID 的离线恢复边界（2026-09-30）
+
+总控按上述门禁对摘要 `175910fb92f9e063` 的**原存短路径**执行一次：HTTP 200；当前原文与旧库 `__biz/mid/idx/sn`、短链 canonical、字面 `ct`、正文均匹配，`data-src` 图片 1 张；脚本在页面中数出 **1 个**不属于已知两合集、且链接 `__biz` 等于目标号的新 `album_id`。私有 `.attempted` 哨兵已写。本次取得的是**旧文章的当前可读性**，不是新增文章。脚本 [`albumCounts`](../../scripts/collection-source-probe/public-shortpath-one-shot.cjs)在整份 HTML 中扫描明示的 `/mp/appmsgalbum` 链接；这个计数只证明页面出现同号合集链接，未定位到 `album_info_list` 中哪张卡，也不能独立证明这篇文章属于该合集。响应仅在当次进程内存里解析，**没有**保存原 HTML、完整 URL、新 `album_id` 或其摘要；不能从输出的“1”反推精确 ID，不得重发该短 URL。
+
+离线找回审计仅访问本机旧材料，按完整目标 `biz` 加数值型 `album_id/albumId` 或官方 `/mp/appmsgalbum` 链接匹配并与已知两 ID 去重；只输出计数。`%TEMP%` 顶层 37 个小型 HTML/JSON/TXT/BODY 中 15 个含目标身份、10 个有可解析合集 ID，均为旧两合集；其中 `wewe-*` 子集 23/15/10 结果相同。主 checkout 的 `output/playwright` 1333 个不超过 10 MiB 的文本候选中 26 个含目标身份，没有新的可解析合集 ID；其 77 个 SQLite 快照共 13752 条重复目标文章行亦没有。生产 SQLite 以 `mode=ro` 读目标 194 行，及两份 2026-09-27 备份各 156 行，检查 `content_html/metrics/source_url/verified_source_url/pic_url`，均无合集 ID。该扫描范围不含已退出进程的 200 响应，也不能声称网络或其他未检查资料不存在该 ID。
+
+已保存的腾讯文章脚本 `wewe-appmsg-muihhh087c466445-20260930.js` 在偏移约 142727 让 `albumTags()` 直接返回 `this.cgiData.album_info_list`，偏移约 69–71k 用每条内嵌 `link/tagId/albumId` 渲染合集卡，没有见到按 `biz` 拉全号合集的请求；[腾讯公开合集客户端脚本](https://res.wx.qq.com/mmbizwap/zh_CN/htmledition/js/album/appmsg/album80ec10.js)及本地对应脚本偏移约 14729 的真实 GET 使用 `window.biz` **加预先存在的** `L.albumId` 请求 `/mp/appmsgalbum?action=getalbum`。`window.cgiDataNew.appmsgalbuminfo.album_id_str` 也是单篇页面携带的值，不是由旧库 `biz/mid/idx` 算出的 ID。这些具体发送/渲染点不提供本次丢失 ID 的离线逆推方法。
+
+因此现阶段**没有精确、可复核的新 `album_id` 请求种子**，不能构造第三合集的 `getalbum` 首屏探针，不能猜 ID、借用别篇 ID 或重取已请求短链。下一次若由**另一篇未请求且已核身份**的官方页面或其他合法公开一手材料取得精确同号 ID，应先在私有临时文件保存仅该数值及其来源摘要，再只发一次匿名、无代理/跳转/重试的官方 `getalbum` 首屏；先核 `base_resp.ret`、`__biz/album_id`、文章键和 `continue_flag`，如目标旧文章确在其中再核所属关系与分页。此条件尚未满足，故本轮不发该请求；找到第三合集也仍不能推出全号目录或持续新增。
+
 ## 2026-09-30 另一篇目标原文的单请求结果与离线差异诊断
 
 从 2026-09-27 保存的 `复旦数学营` 官方首屏 JSON 选第 2 条，与上节已请求的第 1 条不同。其列表 `create_time` 的 UTC 日期为 **2026-09-14**，`SHA256(__biz\0mid\0idx\0sn)` 前 16 位为 `792e0623ba3ee739`。URL 位于腾讯 `/s`，四个身份参数齐全，URL `mid/idx` 分别等于列表 `msgid/itemidx`，`__biz` 等于目标号；这条身份不在八份旧目标原文 HTML 中。按原有 URL 只升级 HTTPS 协议，未改变参数。请求前用当前 main **已构建**的 `articleIdentity/articlePublishTime/articleContentHtml` 在八份旧 HTML 上做离线预检，八份均可解析身份、原文 `ct` 与正文，预检网络请求为零。
