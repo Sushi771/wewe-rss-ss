@@ -98,6 +98,24 @@ function classifyErrorMessage(value) {
   return 'unclassified-error-message';
 }
 
+const ERROR_MESSAGE_PRIORITY = {
+  'unclassified-error-message': 0,
+  'resource-not-found': 1,
+  'request-parameter-rejected': 2,
+  'authentication-or-permission-rejected': 3,
+  'rate-limited': 4,
+  'verification-required': 5,
+  'version-update-requested': 6,
+};
+
+function preferredErrorMessage(current, candidate) {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  return ERROR_MESSAGE_PRIORITY[candidate] > ERROR_MESSAGE_PRIORITY[current]
+    ? candidate
+    : current;
+}
+
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -119,8 +137,9 @@ function gatewayErrorDetails(json) {
       businessError = true;
       errorCode ??= code;
     }
-    errorMessage ??= classifyErrorMessage(
-      object.errmsg ?? object.errMsg ?? object.message,
+    errorMessage = preferredErrorMessage(
+      errorMessage,
+      classifyErrorMessage(object.errmsg ?? object.errMsg ?? object.message),
     );
     if (Object.hasOwn(object, 'upgrade_info')) {
       upgradeRequired = true;
@@ -129,11 +148,18 @@ function gatewayErrorDetails(json) {
         suggestedSkillVersion ??= safeVersion(
           upgrade.latest_version ?? upgrade.new_version ?? upgrade.version,
         );
-        errorMessage ??= classifyErrorMessage(upgrade.message);
+        errorMessage = preferredErrorMessage(
+          errorMessage,
+          classifyErrorMessage(upgrade.message),
+        );
       }
     }
   }
-  if (upgradeRequired) errorMessage ??= 'version-update-requested';
+  if (upgradeRequired)
+    errorMessage = preferredErrorMessage(
+      errorMessage,
+      'version-update-requested',
+    );
   return {
     errorCode,
     errorMessage,
@@ -164,6 +190,13 @@ function safeSearchLabel(value) {
   if (!label) return null;
   // Search labels are untrusted response text. Never print an embedded URL or
   // a token-shaped string, even when it appears in a title or author field.
+  if (
+    /\b(?:authorization|cookie|set-cookie|bearer|api[_-]?key|key|token|skey|secret|password)\b/i.test(
+      label,
+    ) ||
+    /[a-z0-9_-]{24,}/i.test(label)
+  )
+    return '[redacted-label]';
   return label
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '[redacted-url]')
     .replace(/\bwww\.\S+/gi, '[redacted-url]')
@@ -371,11 +404,11 @@ function summarizeList(json) {
       topLevelKeyCount: topLevelKeyCount(json),
     });
   const names = new Set();
+  let unrecognizedEntryCount = 0;
   for (const entry of entries) {
-    if (!isRecord(entry)) continue;
-    const name = entry.api_name;
-    if (SAFE_GATEWAY_API_NAMES.has(name))
-      names.add(name);
+    const name = isRecord(entry) ? entry.api_name : null;
+    if (SAFE_GATEWAY_API_NAMES.has(name)) names.add(name);
+    else unrecognizedEntryCount++;
   }
   if (entries.length > 0 && names.size === 0)
     throw new ProbeError('unknown-list-shape', {
@@ -385,7 +418,14 @@ function summarizeList(json) {
       topLevelKeyCount: topLevelKeyCount(json),
     });
   const apiNames = [...names].sort();
-  return { kind: 'gateway-capabilities', count: apiNames.length, apiNames };
+  return {
+    kind: 'gateway-capabilities',
+    count: apiNames.length,
+    sourceEntryCount: entries.length,
+    unrecognizedEntryCount,
+    complete: unrecognizedEntryCount === 0,
+    apiNames,
+  };
 }
 
 function safeCount(value) {

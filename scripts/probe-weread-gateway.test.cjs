@@ -148,8 +148,8 @@ test('chapter and book identity labels redact embedded URLs and token-shaped tex
     log: (line) => lines.push(JSON.parse(line)),
   });
   assert.equal(code, 0);
-  assert.equal(lines[0].chapters[0].title.includes('[redacted-token]'), true);
-  assert.equal(lines[1].author.includes('[redacted-token]'), true);
+  assert.equal(lines[0].chapters[0].title, '[redacted-label]');
+  assert.equal(lines[1].author, '[redacted-label]');
   assert.doesNotMatch(
     JSON.stringify(lines),
     /private\.example|key=secret|wrk-hidden-secret/,
@@ -347,6 +347,58 @@ test('a 200 business error is distinct from HTTP and transport errors', async ()
   assert.equal(lines[0].errorMessage, 'rate-limited');
 });
 
+test('nested verification warning outranks a generic outer message', async () => {
+  const lines = [];
+  const code = await run({
+    mode: 'search',
+    env: { WEREAD_API_KEY: key },
+    fetchImpl: async () =>
+      json({
+        message: 'request failed',
+        data: { errcode: 403, errmsg: 'captcha required' },
+      }),
+    log: (line) => lines.push(JSON.parse(line)),
+  });
+  assert.equal(code, 1);
+  assert.equal(lines[0].reason, 'business-error');
+  assert.equal(lines[0].errorCode, 403);
+  assert.equal(lines[0].errorMessage, 'verification-required');
+});
+
+test('search labels suppress credential-like header text', async () => {
+  const lines = [];
+  const code = await run({
+    mode: 'search',
+    env: { WEREAD_API_KEY: key },
+    fetchImpl: async () =>
+      json({
+        results: [
+          {
+            title: 'Authorization: Bearer DEMO Cookie: sid=demo Key: demo',
+            books: [
+              {
+                bookInfo: {
+                  bookId: 'MP_TEST',
+                  title: 'Cookie: sid=demo',
+                  author: 'Bearer DEMO',
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    log: (line) => lines.push(JSON.parse(line)),
+  });
+  assert.equal(code, 0);
+  assert.equal(lines[0].groups[0].title, '[redacted-label]');
+  assert.equal(lines[0].results[0].title, '[redacted-label]');
+  assert.equal(lines[0].results[0].authorLabel, '[redacted-label]');
+  assert.doesNotMatch(
+    JSON.stringify(lines),
+    /Authorization|Cookie|Bearer|sid=demo|DEMO/,
+  );
+});
+
 test('empty or zero business codes do not turn successful JSON into errors', async () => {
   for (const errcode of [null, '', '00', 0]) {
     const lines = [];
@@ -458,12 +510,33 @@ test('list mode calls only the documented discovery operation and prints distinc
   assert.deepEqual(lines[0], {
     kind: 'gateway-capabilities',
     count: 2,
+    sourceEntryCount: 5,
+    unrecognizedEntryCount: 2,
+    complete: false,
     apiNames: ['/book/info', '/store/search'],
   });
   assert.doesNotMatch(
     JSON.stringify(lines),
     /token|wrk-hidden|example\.test|key=secret/,
   );
+});
+
+test('mixed discovery entries never appear to be a complete capability list', async () => {
+  const lines = [];
+  const code = await run({
+    mode: 'list',
+    env: { WEREAD_API_KEY: key },
+    fetchImpl: async () =>
+      json({
+        apis: [{ api_name: '/store/search' }, { name: '/book/articles' }],
+      }),
+    log: (line) => lines.push(JSON.parse(line)),
+  });
+  assert.equal(code, 0);
+  assert.equal(lines[0].count, 1);
+  assert.equal(lines[0].sourceEntryCount, 2);
+  assert.equal(lines[0].unrecognizedEntryCount, 1);
+  assert.equal(lines[0].complete, false);
 });
 
 test('unknown discovery response shape reports only a key count', async () => {
