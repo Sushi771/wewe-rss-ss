@@ -14,6 +14,8 @@
 
 第二次更新应报告实际 `新增 0`，已有文章不生成第二个 ID。重启后再次更新沿用库内绑定。阅读/点赞/收藏不由该列表提供，旧有效指标保留。自然出现新文章后，另验新稳定身份、原文发布时间及正文图片真正入库。
 
+Windows 固定产物的 `runtime.cjs` 只监听本机 `127.0.0.1:4000`。当 SQLite 有有效、启用的 `public-album` 绑定时，显式设置 `ENABLE_SCHEDULED_UPDATES=1` 可以启用定时更新，无需其他来源的 Key；默认仍关闭。旧桌面产物保持禁用采集。容器入口使用下述 `DISABLE_SCHEDULED_UPDATES` 开关，两种入口不要混用。
+
 ## 独立部署入口
 
 本轮提供 `docker-compose.public-album.yml` 和 `scripts/private-online/deploy-public-album.sh`。配置只有主应用，无第三方开发者中转、商业授权或上游容器；旧部署文件保留作历史入口。当前未在目标 Linux 主机运行，也没有完成线上切换。

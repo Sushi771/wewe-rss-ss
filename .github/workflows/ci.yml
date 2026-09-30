@@ -37,6 +37,8 @@ jobs:
         run: pnpm --filter server exec jest --runInBand
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
+      - name: Test official album runtime scheduling policy
+        run: node --test scripts/local-release/runtime-policy.test.cjs
       - name: Build Server
         run: pnpm --filter server build
 
