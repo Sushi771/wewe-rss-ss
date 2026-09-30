@@ -590,4 +590,68 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     expect(axios.get).not.toHaveBeenCalled();
     expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
   });
+  it('accepts a current official long canonical for a canonical-ID row without changing old time', async () => {
+    await prisma.article.update({
+      where: { id },
+      data: { id: original.id, sourceUrl: original.url },
+    });
+    (axios.get as jest.Mock).mockResolvedValue({
+      status: 200,
+      data: page({ canonical: `${original.url}&chksm=0123456789abcdef` }),
+    });
+    expect(await caller().article.retryBody(original.id)).toMatchObject({
+      status: 'available',
+      filled: true,
+    });
+    expect(await read(original.id)).toMatchObject({
+      id: original.id,
+      publishTime: time,
+      verifiedSourceUrl: original.url,
+    });
+  });
+
+  it.each([
+    ['mid', original.url.replace('mid=100', 'mid=101'), 'identity_mismatch'],
+    ['sn', original.url.replace('sn=abcd', 'sn=dcba'), 'identity_mismatch'],
+    [
+      'host',
+      original.url.replace('mp.weixin.qq.com', 'evil.example'),
+      'invalid_page',
+    ],
+    ['path', original.url.replace('/s?', '/redirect?'), 'invalid_page'],
+    ['protocol', original.url.replace('https:', 'http:'), 'invalid_page'],
+  ])(
+    'rejects a long canonical with different %s for a canonical-ID row',
+    async (_name, canonical, code) => {
+      await prisma.article.update({
+        where: { id },
+        data: { id: original.id, sourceUrl: original.url },
+      });
+      const before = await read(original.id);
+      (axios.get as jest.Mock).mockResolvedValue({
+        status: 200,
+        data: page({ canonical }),
+      });
+      expect(await caller().article.retryBody(original.id)).toMatchObject({
+        status: 'failed',
+        code,
+      });
+      expect(protectedFields(await read(original.id))).toEqual(
+        protectedFields(before),
+      );
+      expect((await read(original.id)).contentHtml).toBe(before.contentHtml);
+    },
+  );
+
+  it('still requires the exact short canonical when the stored article uses a legacy short ID', async () => {
+    (axios.get as jest.Mock).mockResolvedValue({
+      status: 200,
+      data: page({ canonical: original.url }),
+    });
+    expect(await caller().article.retryBody(id)).toMatchObject({
+      status: 'failed',
+      code: 'invalid_page',
+    });
+    expect((await read()).contentHtml).toBeNull();
+  });
 });

@@ -215,6 +215,103 @@ describe('public album integration in isolated SQLite', () => {
     await service.collectPublicAlbums({ mpId, albumIds });
   });
 
+  it('corrects only unverified canonical list times to the current original ct, once', async () => {
+    await prisma.article.update({
+      where: { id: articles[1].id },
+      data: {
+        contentHtml: null,
+        verifiedSourceUrl: null,
+        publishTime: articles[1].publishTime,
+      },
+    });
+    expect(await service.collectPublicAlbums({ mpId, albumIds })).toMatchObject(
+      { correctedPublishTimes: 1 },
+    );
+    const verified = await prisma.article.findUniqueOrThrow({
+      where: { id: articles[1].id },
+    });
+    expect(verified).toMatchObject({
+      publishTime: time,
+      verifiedSourceUrl: articles[1].url,
+    });
+    expect(await service.collectPublicAlbums({ mpId, albumIds })).toMatchObject(
+      { created: 0, updated: 0, correctedPublishTimes: 0 },
+    );
+    expect(
+      await prisma.article.findUniqueOrThrow({ where: { id: articles[1].id } }),
+    ).toEqual(verified);
+  });
+
+  it('does not correct a cached or verified publication time', async () => {
+    const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
+    expect(await service.collectPublicAlbums({ mpId, albumIds })).toMatchObject(
+      { correctedPublishTimes: 0 },
+    );
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      before,
+    );
+  });
+
+  it('rejects a changed unverified time that cannot be proven to be the current list time', async () => {
+    await prisma.article.update({
+      where: { id: articles[1].id },
+      data: {
+        contentHtml: null,
+        verifiedSourceUrl: null,
+        publishTime: articles[1].publishTime + 3,
+      },
+    });
+    const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
+    await expect(
+      service.collectPublicAlbums({ mpId, albumIds }),
+    ).rejects.toThrow('无法证明');
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      before,
+    );
+    await prisma.article.update({
+      where: { id: articles[1].id },
+      data: { publishTime: articles[1].publishTime },
+    });
+    await service.collectPublicAlbums({ mpId, albumIds });
+  });
+
+  it('rechecks unverified list-time correction conditions inside the transaction', async () => {
+    await prisma.article.update({
+      where: { id: articles[1].id },
+      data: {
+        contentHtml: null,
+        verifiedSourceUrl: null,
+        publishTime: articles[1].publishTime,
+      },
+    });
+    (fetchArticleBody as jest.Mock).mockImplementationOnce(async (article) => {
+      await prisma.article.update({
+        where: { id: articles[1].id },
+        data: { verifiedSourceUrl: articles[1].url },
+      });
+      return {
+        contentHtml: '<div class="rich_media_content"><p>正文</p></div>',
+        originalPublishTime: article.publishTime + 39,
+        verifiedSourceUrl: article.sourceUrl,
+      };
+    });
+    await expect(
+      service.collectPublicAlbums({ mpId, albumIds }),
+    ).rejects.toThrow('校正条件已变化');
+    expect(
+      (
+        await prisma.article.findUniqueOrThrow({
+          where: { id: articles[1].id },
+        })
+      ).publishTime,
+    ).toBe(articles[1].publishTime);
+    await prisma.article.update({
+      where: { id: articles[1].id },
+      data: { verifiedSourceUrl: null },
+    });
+    await service.collectPublicAlbums({ mpId, albumIds });
+  });
+
   it('uses persisted binding after service restart for manual and scheduled updates with zero additions', async () => {
     const bodyCalls = (fetchArticleBody as jest.Mock).mock.calls.length;
     const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });

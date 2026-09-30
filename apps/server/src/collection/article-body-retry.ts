@@ -200,13 +200,26 @@ export async function fetchArticleBody(
   const title = $('#activity-name').text().trim();
   const normalizedTitle = (text: string) =>
     text.normalize('NFKC').replace(/\s+/gu, '');
-  if (
-    !publishTime ||
-    !title ||
-    !identity.canonical ||
-    !SHORT_URL.test(identity.canonical)
-  )
+  if (!publishTime || !title || !identity.canonical)
     throw new BodyRetryError('invalid_page');
+  const shortCanonical = SHORT_URL.test(identity.canonical);
+  if (!shortCanonical) {
+    // Current official originals also expose /s?... as og:url. This is valid
+    // only for a canonical-ID row and the exact signed target identity. Legacy
+    // short IDs still require their own 22-character canonical short URL.
+    if (!CANONICAL_ID.test(article.id))
+      throw new BodyRetryError('invalid_page');
+    let canonical: Identity;
+    try {
+      const url = new URL(identity.canonical);
+      if (url.protocol !== 'https:' || url.pathname !== '/s') throw new Error();
+      canonical = canonicalArticleUrl(identity.canonical);
+    } catch {
+      throw new BodyRetryError('invalid_page');
+    }
+    if (canonical.url !== target.url)
+      throw new BodyRetryError('identity_mismatch');
+  }
   if (
     identity.id !== target.id ||
     new URL(identity.url).searchParams.get('sn') !==
@@ -226,7 +239,7 @@ export async function fetchArticleBody(
   try {
     assertSavedArticleIdentity(article, {
       ...identity,
-      shortUrl: identity.canonical,
+      ...(shortCanonical ? { shortUrl: identity.canonical } : {}),
     });
     if (
       !CANONICAL_ID.test(article.id) &&
