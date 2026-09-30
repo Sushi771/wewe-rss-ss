@@ -4,6 +4,8 @@
 
 **最新证据边界：**[第一方 Web 票据链](WEREAD_WEB_TICKET_LIFECYCLE.md)把请求时 `x-wrpa-0` 与人工验证码回调的 `x-wr-ticket` 区分开。[续期一次实测](WEREAD_RENEWAL_TICKET_PROBE.md)在本合法恢复会话得到 `-2013` 且未获两头，仅排除本次直接签发；[官方 MP 页自然导航](WEREAD_MP_PAGE_MEMORY_PROBE.md)顶层 200 却未见目录组、当前 Vuex 读取入口不可见，**没有观察 `/web/mp/articles` 实际回包**。[近期 MP 样例来源](WEREAD_MP_SAMPLE_PROVENANCE.md)是无可复核成功输出的编辑文档，文档 `offset` 与真实客户端 `maxIdx/count` 不同。[移动搜狗链接源码](SOGOU_MOBILE_LINK_SOURCE.md)显示文章卡正常导航 `/link`，但[旧文标题单次校准](SOGOU_MOBILE_LINK_CALIBRATION.md)无精确卡片，故 `/link` 仍未在线验证。这些结果不扩大成微信读书、搜狗或自建订阅整体失败，仍需有来源支持的新认证与列表路径。
 
+**搜狗账号分组新线索：**[离线桥接审计](SOGOU_GZHJS_OPENID_BRIDGE.md)确认已存移动页 8 张目标同名卡共用 `data-openid`，与旧 `/gzhjs` 源码的 `openid` 名称和形状一致；但当前页面及七份第一方 JS 均无 `/gzhjs` 发送行，公开资料尚无近期 HTTPS 成功回包。故仅保留账号级索引的可调查假设，不把历史 HTTP 模板视为现行可部署接口，不对目标发猜测请求。
+
 **2026-09-30 续记：**表内 Web 搜索代理的“目标未实测”和下方旧 token `-2012` 是历史阶段记录；[新移动凭据首屏](REFRESHED_MOBILE_TARGET_SEARCH_PROBE.md)与[一次官方游标续页](REFRESHED_MOBILE_SEARCH_CURSOR_PROBE.md)均已隔离实测：两页各 15 条、目标准确来源名分别 11 与 15 条，目标候选键交集 0、次页新增 15、offset 前进。[URL 结构诊断](SEARCH_RESULT_URL_IDENTITY_DIAGNOSTIC.md)证明该次首屏 15/15 链接均为 HTTP 腾讯 `/s?...`，其中 11 条号名及 URL `__biz` 同为目标，数字 `mid/idx`；旧 HTTPS 分类的 `malformed` 和 biz 0 是假阴性。11 条原存候选私有保存。[单篇原文对照](SEARCH_CANDIDATE_ARTICLE_PROBE.md)中 index 3 HTTP 200 但 `sn` 不符，另一个已知旧文 index 1 HTTP 302 到腾讯验证/登录页且未跟随，故暂停该匿名原文请求路线；没有通过原文 `ct`/正文验收，不计五篇。另一目标旧原文导出的**第三个官方合集**按真实游标取得六页 **54 个不重复目标身份键**，末页无后续，均有列表时间字段；它与旧两合集 32 键零重合，但单个合集仍不代表全号，列表时间不能代原文 `ct`。生产 SQLite 未写入。
 
 **`/book/articles` 认证新证据：**本人既有合法移动会话经正常 `/login` 一次取得顶层非空 `skey` 且 `vid` 匹配，响应私有保存，见[字段探针](MOBILE_LOGIN_SKEY_FIELD_PROBE.md)。旧 WeBook 当年的自定义 `skey/vid` 头由调用方提供；目前已有合法签发候选；后续旧固定代码形状首屏已得到认证拒绝，详见下段，**尚无该端点接受它或返回文章的证据**。下方“缺 `skey` 正常来源”的历史描述以此更新；不把它扩写成已恢复列表或把 Web Cookie 改名试错。
