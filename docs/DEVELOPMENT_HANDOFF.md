@@ -2,6 +2,7 @@
 
 ## 2026-09-30 当前续研
 
+- **最新独立端点结果：**[Web 封面一次隔离验证](coordination/WEB_MP_COVER_FIRST_PAGE_PROBE.md)使用本人合法恢复会话，Web init HTTP 200、五 Cookie 同账号，但目标 `/web/mp/cover` HTTP 200、业务 `-2012`，没有 `reviewId`；不重发同形请求，生产 SQLite 12/1447 未写。A 正离线审不同客户端上下文与 `/api/mp/cover` 证据。B 的 [`profile_ext` 认证来源审计](coordination/PROFILE_EXT_LEGIT_AUTH_RESEARCH.md)未找到所审正常网页登录可续期签发个人 `uin/key/pass_ticket` 的链；C 的[合集私有证据审计](coordination/PUBLIC_PAGE_DISCOVERY.md)确认第三合集 54 键的临时文件已失，后续候选不得声称与其排重成功。项目继续研究，未恢复全号订阅。
 - [总控状态](coordination/STATUS.md)已撤回“只剩外部条件”和“目标无合集 ID”两项错误判断。[2026-09-27 真实核查](CHANNEL_INVESTIGATION.md#公开合集的真实多篇列表验证)早已从目标原文发现两个官方合集，四页共 32 个不同文章键；本轮又从八份保存的目标原文 HTML 和生产 feed 的 `public_album_ids` 只读交叉核对。两个合集只是局部来源，不能证明全号覆盖。
 - [目标合集 Probe](coordination/TARGET_ALBUM_PROBE.md)对已核验的“复旦数学营”合集取得当日两页，HTTP 200、业务码与验证状态均为 0，10+9 个不同文章键，19/19 个链接身份匹配。当前集合与 2026-09-27 相同；六篇与当日保存原文逐项匹配并核对原文 `ct`，相差 0–34 秒，因此单一合集的五篇身份和发布时间样本及分页已过。**没有观察到自然新增，也没有证明全号覆盖。**六篇旧原文均有正文，五篇有 28 张 `data-src` 图片，今天仅部分读取其中一张。生产库只读，未切换订阅。
 - A [认证来源研究](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md)追到 Mac 客户端同主机 `vid/skey`、移动/Web/Rust 登录链，但未证明当前 Windows 有可用于 `/book/articles` 的独立凭据；B [全局候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)追到真实腾讯请求行并按能力缩限；C [公开页面发现](coordination/PUBLIC_PAGE_DISCOVERY.md)核验了原文到合集的代码与八份目标 HTML，尚未发现全号目录。以下前轮记录保留当时状态，遇矛盾以上述当前证据为准。
