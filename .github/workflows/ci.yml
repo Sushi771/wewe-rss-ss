@@ -44,5 +44,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate standalone public album deployment
+        env:
+          AUTH_CODE: ci-public-album-config-validation
+          SERVER_ORIGIN_URL: https://private.example.invalid
+        run: |
+          bash -n scripts/private-online/deploy-public-album.sh
+          docker compose --env-file .env.public-album.example -f docker-compose.public-album.yml config --quiet
       - name: Build private online image
         run: docker build -f Dockerfile.private-online -t wewe-rss-private:ci .

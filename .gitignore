@@ -81,6 +81,7 @@ web_modules/
 .env.wechat2rss
 .env.weread-gateway
 .env.private-online
+.env.public-album
 private-data/
 .wechat2rss-data/
 

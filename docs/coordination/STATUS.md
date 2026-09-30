@@ -6,6 +6,15 @@
 
 ## 2026-09-30 续研与当前状态
 
+### 当前唯一主线：官方合集订阅闭环（本轮覆盖下方研究待办）
+
+- 用户明确冻结微信读书新 endpoint、搜狗、Mac/iOS skey 及已排除接口的横向研究。先闭环当前可追溯的目标官方合集，不以全号历史覆盖为接入前置条件。
+- 本轮起点 `main / 37ac12b2e7665af73f5702ce6d8508def86763c2`，工作区干净。第三合集六页 54 键是历史成功事实，但精确入口和私有账本已丢；不猜 ID，也不将缺失输入冒充当前已导入。已有精确绑定的“复旦数学营”合集是当前可执行输入。
+- A `codex/album-body-loop` / `C:/Users/ss/.codex/worktrees/album-body-loop/wewe-rss-ss`：真实正文、发布时间和图片本地化验证，证据持久私存。
+- B `codex/album-provider-loop` / `C:/Users/ss/.codex/worktrees/album-provider-loop/wewe-rss-ss`：正式 public-album Provider、正文图片链、手动/定时及合集范围提示。
+- C `codex/album-qa-loop` / `C:/Users/ss/.codex/worktrees/album-qa-loop/wewe-rss-ss`：一致性副本、旧字段保护、重复更新、重启及四类导出。总控统一合入 main；生产写入尚未放行，真实持续订阅尚未验收。
+- 下一工程单元：持久取得当前合集及原文样本 → Provider 正式接入 → 在一致性副本执行真实导入、第二次 0 新增、重启及导出；自然新文章单独等待验收。
+
 - **新一轮认证及来源审计的准确边界：**[Mac/iOS skey 来源](MAC_IOS_SKEY_LOGIN_SOURCE_AUDIT.md)中，近期 Mac 项目从官方客户端本地日志复制 `vid/skey` 并只核本人书架，未公开正常签发/续期或文章成功回包；不把日志复制当可审查认证链。[微信 `profile_ext/getmsg` 来源](MP_PROFILE_EXT_AUTH_2026_AUDIT.md)虽有分页/文章链接代码，所审调用者都先接收个人微信会话；PadChat 授权 SDK 落到未交付源码的服务，Ipad860 依赖无源码动态库，故这些固定实现不符合自建运行约束。[第三合集会话恢复审计](THIRD_ALBUM_SESSION_RECOVERY.md)定位当时成功请求但精确 ID 只存已丢的私有临时文件；本机旧聊天/Git 对象中的长数字是自测常量，不猜 ID、不重发。这些阴性结果只限已查材料。下一轮 A 查腾讯 Gateway 新能力，B 查搜狗现行账号列表发送链，C 查公开索引里的官方合集链接。
 - **近期列表项目已按真实发送行排重：**[B 的固定 fork 与 Web 脚本审计](SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)证明 `CyrusNee/weread` 的公众号列表和传输文件与已审 `weread-omni` 上游相同，仍用 BOOX/EInk `vid/accessToken` 请求腾讯 `/mp/chapters`；本账号同形首屏及续期后已有 `-2041`，不重发。`steptian/weread-mp` 仅用浏览器 Cookie 调已受限的 `/web/mp/articles`，没有当前第一方请求票据/续期链或可核真实成功回包，也不把它当作新认证形状。两项只排除这些固定实现带来新协议的假设，不外推腾讯所有列表来源。下一轮 C 正尝试从旧 Codex 记录恢复第三合集原始入口，A 继续查 Mac/iOS 正常认证源码；均离线。
 - **`/book/articles` 新 query 形状已一次验证：**[2026 年开源真实发送代码、探针和唯一回包](BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)把 `bookId/version=2/vid/skey/offset=0/count=1/synckey` 放在 URL query，与旧 WeBook 自定义头形状有实质差异。现有本人合法 BOOX/Eink `/login` 顶层 `skey/vid` 与同账号备份经只读预检后，仅发一次直连腾讯 GET，HTTP **401**、业务 `-2012`、无 `reviews`；全局私有标记阻止重试，生产写入 0。此结果只限该客户端来源、query 形状和时点，**不证明 Mac 客户端合法票据的权限或接口永久不可用**。[A 的跨客户端源码复核](BOOK_ARTICLES_CLIENT_AUTH_FOLLOWUP.md)进一步确认 syfun 的 Mac `skey` 可能只复制现有请求头，且未核请求成功；没有公开当前成功回包。其他合法登录来源与新列表代码仍继续研究。

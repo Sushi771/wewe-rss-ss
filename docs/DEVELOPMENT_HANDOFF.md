@@ -2,6 +2,8 @@
 
 ## 2026-09-30 当前续研
 
+**当前执行覆盖下方研究待办：**用户要求先闭环“妈妈部落畅聊阁”的官方合集订阅，暂停微信读书新端点、搜狗、Mac/iOS 凭据等横向研究。起点 `main / 37ac12b`、工作区干净；A/B/C 各用独立 worktree 验正文图片、接 Provider、审 SQLite 副本与导出，总控合入 main。已验证的“复旦数学营”单一合集有可追溯绑定；第三合集六页 54 键的成功记录保留，但其精确入口和私有账本已丢，不可直接据此导入。当前先补列表到正文图片链，再验副本重复更新、重启、手动/定时及 RSS/Markdown/Obsidian/ZIP；自然新增仍待观察。覆盖始终表述为所选合集，不是全号历史。生产写库尚未放行，真实订阅仍未恢复。
+
 - **认证与丢失来源的新增边界：**[Mac/iOS 日志凭据审计](coordination/MAC_IOS_SKEY_LOGIN_SOURCE_AUDIT.md)找到 2026 Mac 项目从官方 App 日志复制 `skey/vid`，但无可审查签发/续期及文章端点成功回包；[微信 `getmsg`/PadChat 审计](coordination/MP_PROFILE_EXT_AUTH_2026_AUDIT.md)确认所审列表代码均需预有个人微信会话，PadChat 授权在未开源服务侧，Ipad860 依赖无源码库。[第三合集会话恢复](coordination/THIRD_ALBUM_SESSION_RECOVERY.md)从首次请求时间、20 份相关 JSONL 和 Git 对象证实精确 ID 未留存，候选长数字是 fakeRequester 常量；不猜参或重发。A/B/C 转查 Gateway 近期能力、搜狗账号列表真发送链、公开索引中的官方合集链接，其他可执行研究继续。
 - **B 近期实现排重：**[固定源码、发送行和本机旧结果对照](coordination/SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)显示 `CyrusNee/weread` 的 MP 列表仍是与上游同文件的 EInk `/mp/chapters`，本账号同形请求和续期后均曾 `-2041`；`steptian/weread-mp` 仅带 Cookie 调已受限 Web `/web/mp/articles`，没有第一方新票据/续期或可核成功回包。两者不作为同形重试理由。A 正查 Mac/iOS 正常认证开源链，C 正从旧 Codex 记录离线寻找第三合集精确入口；真实订阅仍未恢复。
 - **`/book/articles` 2026 query 形状一次结果：**[真实开源发送行、一次性脚本和总控回包](coordination/BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)与旧 WeBook 头认证不同；同账号合法 BOOX/Eink `/login` 顶层 `skey/vid` 通过备份、身份及新鲜性只读预检后，单次 GET 得 HTTP **401**、业务 **`-2012`**、无 `reviews`，全局私有标记禁止重试。只缩限该凭据来源和该请求形状；[A 源码复核](coordination/BOOK_ARTICLES_CLIENT_AUTH_FOLLOWUP.md)确认 syfun 也可能只复制 Mac 客户端现有请求头，未证明新签发或成功；继续查合法认证与独立一手成功证据，不翻参重发。生产 SQLite 未写，真实订阅未恢复。
