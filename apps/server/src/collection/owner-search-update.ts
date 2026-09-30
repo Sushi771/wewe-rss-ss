@@ -70,7 +70,7 @@ export async function fetchLiveOwnerArticles(
       const stop = JSON.parse(await fs.readFile(file, 'utf8'));
       if (stop.stopFurtherOriginalRequests !== false)
         throw new OwnerUpdateStopped(
-          '正文获取已停止：腾讯原文曾返回验证或访问限制；本次未发联网请求、未新增文章，旧正文保留。微信读书登录只适用于搜索，不能替代公众号原文授权。',
+          '正文获取已停止：腾讯原文曾返回验证或访问限制；本次未发联网请求、未新增文章，旧正文保留。微信读书会话与公众号原文访问分属不同来源，登录成功不代表原文可访问。',
         );
     } catch (error: any) {
       if (error.code === 'ENOENT') continue;

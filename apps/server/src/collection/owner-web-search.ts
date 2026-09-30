@@ -8,7 +8,9 @@ export const OWNER_SEARCH_ENDPOINT =
   'https://weread.qq.com/web/wx_search_broker_proxy';
 const COOKIE_NAMES = new Set(['wr_pf', 'wr_ql', 'wr_rt', 'wr_skey', 'wr_vid']);
 export type OwnerWebSession = {
-  source: 'owner-confirmed-dedicated-web-login';
+  source:
+    | 'owner-confirmed-dedicated-web-login'
+    | 'owner-confirmed-native-web-login';
   capturedAt: string;
   ownerVid: string;
   cookies: Array<{
@@ -26,7 +28,10 @@ export function ownerSessionCookie(
   now = Date.now(),
 ) {
   if (
-    session?.source !== 'owner-confirmed-dedicated-web-login' ||
+    ![
+      'owner-confirmed-dedicated-web-login',
+      'owner-confirmed-native-web-login',
+    ].includes(session?.source) ||
     session.ownerVid !== ownerVid ||
     !Number.isFinite(Date.parse(session.capturedAt)) ||
     Date.parse(session.capturedAt) > now + 300000 ||

@@ -104,7 +104,7 @@ const Nav = () => {
         </NavbarContent>
 
         <NavbarContent justify="end" style={{ gap: '12px' }}>
-          {!privateOnlineMode && (
+          {pathname !== '/login' && (
             <NavbarItem>
               <Tooltip content="账号管理">
                 <Link

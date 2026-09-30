@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { NativeWebLogin, NativeLoginResult } from './native-web-login';
 import { PrismaService } from '@server/prisma/prisma.service';
 import got, { Got } from 'got';
 import axios from 'axios';
@@ -41,169 +42,14 @@ export class WereadService {
     });
   }
 
-  /**
-   * 生成微信读书官方扫码登录凭证与链接
-   */
-  async createLoginUrl(): Promise<{ uuid: string; scanUrl: string }> {
-    this.logger.log('Fetching WeRead native login UID...');
-    try {
-      const resp = await axios.get<{ uid?: string }>(
-        'https://weread.qq.com/api/auth/getLoginUid',
-        {
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-            Referer: 'https://weread.qq.com/',
-          },
-          timeout: 10 * 1e3,
-        },
-      );
+  private readonly nativeLogin = new NativeWebLogin();
 
-      const uuid = resp.data?.uid;
-      if (!uuid) {
-        throw new Error('未获取到微信读书登录 UID');
-      }
-
-      const scanUrl = `https://weread.qq.com/web/confirm?uid=${uuid}`;
-      this.logger.log(`Created WeRead Login UID: ${uuid}`);
-
-      return { uuid, scanUrl };
-    } catch (err: any) {
-      this.logger.error(`createLoginUrl error: ${err.message}`);
-      throw new Error(`获取微信登录二维码失败: ${err.message}`);
-    }
+  createLoginUrl(): Promise<{ uuid: string; scanUrl: string }> {
+    return this.nativeLogin.create();
   }
 
-  /**
-   * 轮询微信读书官方登录确认状态
-   */
-  async getLoginResult(uuid: string): Promise<{
-    message: string;
-    vid?: number;
-    token?: string;
-    username?: string;
-  }> {
-    if (!uuid) {
-      return { message: '' };
-    }
-
-    const pollUrl = `https://weread.qq.com/api/auth/getLoginInfo?uid=${encodeURIComponent(uuid)}&otp=`;
-
-    try {
-      const resp = await axios.get<{
-        succeed?: number | boolean;
-        accessToken?: string;
-        refreshToken?: string;
-        webLoginVid?: number;
-        logicCode?: string;
-        message?: string;
-      }>(pollUrl, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-          Referer: 'https://weread.qq.com/',
-        },
-        timeout: 45 * 1e3,
-      });
-
-      const data = resp.data || {};
-
-      // 登录成功
-      if (data.succeed && (data.webLoginVid || data.accessToken)) {
-        const vid = data.webLoginVid;
-        this.logger.log(`WeRead native scan confirmed! VID: ${vid}`);
-
-        const setCookies = resp.headers['set-cookie'] || [];
-        const cookieMap: Record<string, string> = {};
-        for (const sc of setCookies) {
-          const parts = sc.split(';')[0].split('=');
-          if (parts.length >= 2) {
-            cookieMap[parts[0].trim()] = parts.slice(1).join('=').trim();
-          }
-        }
-
-        if (vid) {
-          cookieMap['wr_vid'] = String(vid);
-        }
-        if (data.accessToken) {
-          cookieMap['wr_skey'] = data.accessToken;
-        }
-        if (data.refreshToken) {
-          cookieMap['wr_rt'] = encodeURIComponent(data.refreshToken);
-        }
-
-        // 尝试自动续期以获取最完整 cookies
-        try {
-          const renewed = await this.renewCookie(cookieMap);
-          if (renewed) {
-            Object.assign(cookieMap, renewed);
-          }
-        } catch (e: any) {
-          this.logger.warn(`Initial renewal ignored: ${e.message}`);
-        }
-
-        // 获取用户昵称
-        let username = '微信读书用户';
-        if (vid) {
-          try {
-            const userResp = await axios.get<{ name?: string }>(
-              `https://weread.qq.com/api/userInfo?userVid=${vid}`,
-              {
-                headers: {
-                  Cookie: this.stringifyCookies(cookieMap),
-                  'User-Agent':
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-                  Referer: 'https://weread.qq.com/',
-                },
-                timeout: 5 * 1e3,
-              },
-            );
-            if (userResp.data?.name) {
-              username = userResp.data.name;
-            }
-          } catch (e: any) {
-            this.logger.warn(`Fetch userInfo failed: ${e.message}`);
-          }
-        }
-
-        const tokenJson = JSON.stringify({
-          ...cookieMap,
-          accessToken: data.accessToken,
-          refreshToken: data.refreshToken,
-          updateTime: Date.now(),
-        });
-
-        this.logger.log(
-          `WeRead native login success: VID ${vid} (${username})`,
-        );
-        return {
-          message: '',
-          vid,
-          token: tokenJson,
-          username,
-        };
-      }
-
-      if (data.logicCode === 'LOGIN_TIMEOUT') {
-        return { message: '二维码已失效，请刷新' };
-      }
-
-      if (data.logicCode === 'WAITING_SCAN') {
-        return { message: '' };
-      }
-
-      if (data.logicCode === 'WAITING_CONFIRM') {
-        return { message: '已扫码，请在微信中点击确认' };
-      }
-
-      return { message: '' };
-    } catch (err: any) {
-      if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
-        return { message: '' };
-      }
-      this.logger.warn(`Polling getLoginInfo error: ${err.message}`);
-      return { message: '' };
-    }
+  getLoginResult(uuid: string): Promise<NativeLoginResult> {
+    return this.nativeLogin.poll(uuid);
   }
 
   /**

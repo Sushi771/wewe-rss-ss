@@ -21,24 +21,29 @@ const AccountPage = () => {
   const { isOpen, onOpen, onClose, onOpenChange } = useDisclosure();
   const [count, setCount] = useState(0);
   const [reloginAccountId, setReloginAccountId] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState('');
 
   const { refetch, data, isFetching } = trpc.account.list.useQuery({});
   const queryUtils = trpc.useUtils();
   const { mutateAsync: updateAccount } = trpc.account.edit.useMutation({});
   const { mutateAsync: deleteAccount } = trpc.account.delete.useMutation({});
-  const { mutateAsync: addAccount } = trpc.account.add.useMutation({});
 
-  const { mutateAsync, data: loginData } =
-    trpc.platform.createLoginUrl.useMutation({
-      onError(err) {
-        toast.error(err.message || '获取登录二维码失败');
-      },
-      onSuccess(data) {
-        if (data.uuid) {
-          setCount(60);
-        }
-      },
-    });
+  const {
+    mutateAsync,
+    data: loginData,
+    reset: resetLogin,
+  } = trpc.platform.createLoginUrl.useMutation({
+    onError(err) {
+      toast.error(err.message || '获取登录二维码失败');
+      setLoginError(err.message || '获取登录二维码失败');
+      setCount(0);
+    },
+    onSuccess(data) {
+      if (data.uuid) {
+        setCount(60);
+      }
+    },
+  });
 
   const { data: loginResult } = trpc.platform.getLoginResult.useQuery(
     {
@@ -46,39 +51,41 @@ const AccountPage = () => {
     },
     {
       refetchInterval: (data) => {
-        if (data?.vid) return false;
+        if (data?.terminal) return false;
         if (
           data?.message &&
           (data.message.includes('过期') || data.message.includes('取消'))
         ) {
           return false;
         }
-        return 1500;
+        return 3000;
       },
       refetchIntervalInBackground: false,
-      enabled: !!loginData?.uuid && isOpen,
+      enabled: !!loginData?.uuid && isOpen && count > 0,
+      retry: false,
+      onError(err) {
+        toast.error(err.message || '登录状态查询失败，已停止本次轮询');
+        setCount(0);
+      },
       async onSuccess(data) {
-        if (data.vid && data.token) {
+        if (data.saved && data.vid) {
           const name = data.username || `WeRead_${data.vid}`;
           if (reloginAccountId && `${data.vid}` !== reloginAccountId) {
             toast.warning(
               `扫码账号 (${name}) 与原账号 (${reloginAccountId}) 不一致，已作为新账号保存`,
             );
-            await addAccount({ id: `${data.vid}`, name, token: data.token });
-          } else if (reloginAccountId) {
-            await updateAccount({
-              id: reloginAccountId,
-              data: { token: data.token, status: 1 },
-            });
-            toast.success('重新登录成功');
-            setReloginAccountId(null);
           } else {
-            await addAccount({ id: `${data.vid}`, name, token: data.token });
-            toast.success('添加成功');
+            toast.success(
+              data.searchSessionUpdated
+                ? '账号已保存，腾讯搜索会话已连接'
+                : '账号已保存；此账号尚未绑定腾讯搜索来源',
+            );
           }
+          setReloginAccountId(null);
           onClose();
           refetch();
         } else if (
+          data.terminal &&
           data.message &&
           !data.message.includes('扫码') &&
           !data.message.includes('确认')
@@ -102,15 +109,21 @@ const AccountPage = () => {
   const invalidAccounts = data?.items.filter((item) => item.status === 0) ?? [];
 
   const openRelogin = (accountId: string) => {
+    resetLogin();
+    setLoginError('');
+    setCount(0);
     setReloginAccountId(accountId);
     onOpen();
-    mutateAsync();
+    void mutateAsync().catch(() => undefined);
   };
 
   const openAdd = () => {
+    resetLogin();
+    setLoginError('');
+    setCount(0);
     setReloginAccountId(null);
     onOpen();
-    mutateAsync();
+    void mutateAsync().catch(() => undefined);
   };
 
   return (
@@ -143,7 +156,7 @@ const AccountPage = () => {
           <div className="mac-alert-danger mx-4 mt-4">
             <span className="text-[14px]">
               <strong>{invalidAccounts.length}</strong> 个账号 Token
-              已失效，订阅无法更新。请重新登录扫码恢复。
+              已标记失效。重新登录只恢复读书会话；文章更新结果以公众号页面为准。
             </span>
           </div>
         )}
@@ -280,7 +293,9 @@ const AccountPage = () => {
                       请使用账号 <strong>{reloginAccountId}</strong> 扫码
                     </div>
                   )}
-                  {loginData ? (
+                  {loginError ? (
+                    <div className="text-[14px] text-red-500">{loginError}</div>
+                  ) : loginData ? (
                     <div className="relative rounded-xl border border-neutral-100 bg-white p-3 shadow-sm">
                       {loginResult?.message && (
                         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-white/90 p-4 text-center">

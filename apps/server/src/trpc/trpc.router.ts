@@ -249,16 +249,9 @@ export class TrpcRouter {
       }),
   });
 
-  private legacyAccountProcedure = this.trpcService.protectedProcedure.use(
-    ({ next }) => {
-      if (privateOnlineMode())
-        throw new TRPCError({
-          code: 'FORBIDDEN',
-          message: '线上私人站点不提供旧账号管理',
-        });
-      return next();
-    },
-  );
+  // Private mode uses the existing signed site session. It must not disable
+  // the owner's account management along with anonymous access.
+  private legacyAccountProcedure = this.trpcService.protectedProcedure;
 
   accountRouter = this.trpcService.router({
     list: this.legacyAccountProcedure
@@ -308,6 +301,13 @@ export class TrpcRouter {
       .query(async ({ input: id }) => {
         const account = await this.prismaService.account.findUnique({
           where: { id },
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+          },
         });
         if (!account) {
           throw new TRPCError({
@@ -321,12 +321,20 @@ export class TrpcRouter {
       .input(AccountSchemas.add)
       .mutation(async ({ input }) => {
         const { id, ...data } = input;
+        await createVerifiedSqliteBackup({ allowMysqlSkip: true });
         const account = await this.prismaService.account.upsert({
           where: {
             id,
           },
           update: data,
           create: input,
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+          },
         });
         this.trpcService.removeBlockedAccount(id);
 
@@ -336,9 +344,17 @@ export class TrpcRouter {
       .input(AccountSchemas.edit)
       .mutation(async ({ input }) => {
         const { id, data } = input;
+        await createVerifiedSqliteBackup({ allowMysqlSkip: true });
         const account = await this.prismaService.account.update({
           where: { id },
           data,
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+          },
         });
         this.trpcService.removeBlockedAccount(id);
         return account;
@@ -346,6 +362,7 @@ export class TrpcRouter {
     delete: this.legacyAccountProcedure
       .input(z.string())
       .mutation(async ({ input: id }) => {
+        await createVerifiedSqliteBackup({ allowMysqlSkip: true });
         await this.prismaService.account.delete({ where: { id } });
         this.trpcService.removeBlockedAccount(id);
 

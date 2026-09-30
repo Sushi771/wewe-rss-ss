@@ -13,6 +13,10 @@ import { wechat2RssProvider } from '../collection/provider-registry';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { BodyRetryBlockedError } from '../collection/article-body-retry';
 import { Feed } from '@prisma/client';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+import { ownerSessionCookie } from '../collection/owner-web-search';
 import {
   CollectionRoute,
   parseBoundAlbumIds,
@@ -542,15 +546,127 @@ export class TrpcService {
   async createLoginUrl(): Promise<
     Awaited<ReturnType<WereadService['createLoginUrl']>>
   > {
-    throw new Error('旧微信读书登录入口已停用；请在 Wechat2RSS 私有实例登录。');
+    return this.wereadService.createLoginUrl();
   }
 
-  async getLoginResult(
-    id: string,
-  ): Promise<Awaited<ReturnType<WereadService['getLoginResult']>>> {
-    void id;
-    throw new Error(
-      '旧微信读书登录入口已停用；请在 Wechat2RSS 私有实例查看状态。',
-    );
+  private savedLogins = new Map<
+    string,
+    Promise<{
+      message: string;
+      terminal: boolean;
+      vid: number;
+      username: string;
+      saved: boolean;
+      searchSessionUpdated: boolean;
+    }>
+  >();
+
+  async getLoginResult(id: string): Promise<{
+    message: string;
+    terminal: boolean;
+    saved: boolean;
+    searchSessionUpdated: boolean;
+    vid?: number;
+    username?: string;
+  }> {
+    if (this.savedLogins.has(id)) return this.savedLogins.get(id)!;
+    const result = await this.wereadService.getLoginResult(id);
+    if (!result.vid || !result.token)
+      return {
+        message: result.message,
+        terminal: result.terminal,
+        saved: false,
+        searchSessionUpdated: false,
+      };
+    if (this.savedLogins.has(id)) return this.savedLogins.get(id)!;
+    const save = (async () => {
+      await createVerifiedSqliteBackup({ allowMysqlSkip: true });
+      const accountId = String(result.vid);
+      const old = await this.prismaService.account.findUnique({
+        where: { id: accountId },
+      });
+      let prior: any = {};
+      try {
+        prior = JSON.parse(old?.token || '{}');
+      } catch {
+        /* Backups retain legacy raw token. */
+      }
+      const token = JSON.stringify({ ...prior, ...JSON.parse(result.token!) });
+      const username = old?.name || result.username || `WeRead_${result.vid}`;
+      await this.prismaService.account.upsert({
+        where: { id: accountId },
+        create: { id: accountId, name: username, token, status: 1 },
+        update: { token, status: 1 },
+      });
+      let searchSessionUpdated = false;
+      // Only the explicitly bound owner can replace this account's search
+      // session. Old sessions, states and all original-access stops remain.
+      const configFile = process.env.OWNER_SEARCH_CONFIG_FILE;
+      if (configFile && result.webSession) {
+        ownerSessionCookie(result.webSession, accountId);
+        const lockFile = configFile + '.native-login.lock';
+        const lock = await fs.open(lockFile, 'wx', 0o600);
+        try {
+          const raw = await fs.readFile(configFile, 'utf8');
+          const config = JSON.parse(raw);
+          const bindings = Object.values(config.feeds || {}).filter(
+            (v: any) => v.ownerVid === accountId,
+          ) as any[];
+          if (bindings.length) {
+            const key = createHash('sha256')
+              .update(JSON.stringify(result.webSession))
+              .digest('hex')
+              .slice(0, 24);
+            const sessionFile = path.join(
+              path.dirname(configFile),
+              `native-session-${key}.json`,
+            );
+            try {
+              await fs.writeFile(
+                sessionFile,
+                JSON.stringify(result.webSession),
+                { flag: 'wx', mode: 0o600 },
+              );
+            } catch (e: any) {
+              if (e.code !== 'EEXIST') throw e;
+            }
+            for (const binding of bindings) binding.sessionFile = sessionFile;
+            const history = configFile + `.before-native-${key}`;
+            try {
+              await fs.writeFile(history, raw, { flag: 'wx', mode: 0o600 });
+            } catch (e: any) {
+              if (e.code !== 'EEXIST') throw e;
+            }
+            const pending = configFile + '.native-login.pending';
+            await fs.writeFile(pending, JSON.stringify(config), {
+              flag: 'wx',
+              mode: 0o600,
+            });
+            await fs.rename(pending, configFile);
+            searchSessionUpdated = true;
+          }
+        } finally {
+          await lock.close();
+          await fs.unlink(lockFile);
+        }
+      }
+      return {
+        message: '',
+        terminal: true,
+        vid: result.vid!,
+        username,
+        saved: true,
+        searchSessionUpdated,
+      };
+    })();
+    this.savedLogins.set(id, save);
+    try {
+      return await save;
+    } catch {
+      this.savedLogins.delete(id);
+      throw new Error(
+        '读书登录已确认，但账号或搜索会话保存未完成；未发取文请求，请检查本地保存错误。',
+      );
+    }
   }
 }
