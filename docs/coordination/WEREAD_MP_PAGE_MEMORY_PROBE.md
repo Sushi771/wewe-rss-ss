@@ -2,7 +2,7 @@
 
 ## 本轮状态与问题
 
-已实现 [`probe-weread-mp-page-memory.cjs`](../../scripts/research/probe-weread-mp-page-memory.cjs) 的路由构造、`--plan`、`--self-test`、`--preflight` 和有明确授权门禁的 `--execute`。支持独立的合法 Web 会话副本，或从已核验的本人移动端恢复记录在临时浏览器上下文内做**至多一次**腾讯官方 `/web/login/session/init`。两种模式共用同一个目标页 one-shot 标记。**本轮仅运行离线命令和只读预检；没有导航目标号或发送目标列表请求。** 在线执行仍由总控复核后安排，避免合法会话并发。此 Probe 首次只回答：正常官方页面是否自然显示目录，以及页面内存的 `articles` 是否有可用于后续核查的字段；它不验证五篇文章，也不接入 Provider。
+已实现 [`probe-weread-mp-page-memory.cjs`](../../scripts/research/probe-weread-mp-page-memory.cjs) 的路由构造、`--plan`、`--self-test`、`--preflight` 和有明确授权门禁的 `--execute`。支持独立的合法 Web 会话副本，或从已核验的本人移动端恢复记录在临时浏览器上下文内做**至多一次**腾讯官方 `/web/login/session/init`。两种模式共用同一个目标页 one-shot 标记。总控复核、合法会话独占确认后，**恢复模式已在线执行唯一一次**；没有直接发送目标文章列表请求，官方页面自然加载的请求不受脚本控制。此 Probe 首次只回答：正常官方页面是否自然显示目录，以及页面内存的 `articles` 是否有可用于后续核查的字段；它不验证五篇文章，也不接入 Provider。
 
 ## 路由依据
 
@@ -38,7 +38,18 @@ node scripts/research/probe-weread-mp-page-memory.cjs --preflight --recovery --d
 
 本机恢复模式的只读预检已返回 `ready: true`、`markerAbsent: true`、`recoveryAndBackupValidated: true`；`sessionCopyPresent: false` 符合当前缺少独立 Web 副本的事实。该预检通过既有门禁读取了私有恢复记录和只读 SQLite，未调用 Web init 或目标页面，也未创建尝试标记。沿用项目既有 Playwright `1.58.2` 固定门禁；本机 Codex bundled `1.62.1` 不满足该门禁，不能直接替换为本次在线执行运行时。
 
-总控复核、会话独占和本人合法登录状态确认后，才可把对应模式的 `--preflight` 换成 `--execute`，并在末尾**显式**添加 `--approved-online`。本文不把该命令作为当前步骤自动执行。若恢复记录失效或需要本人扫码，停在该路线，其他研究可继续。
+执行前需总控复核、会话独占和本人合法登录状态确认，再把对应模式的 `--preflight` 换成 `--execute`，并在末尾**显式**添加 `--approved-online`。本次恢复模式已执行，不能因空目录或入口读取失败移除哨兵重试。若后续需要本人扫码，停在该路线，其他研究可继续。
+
+## 唯一在线运行的脱敏结果
+
+2026-09-30，恢复模式运行一次后，私有全局尝试标记与脱敏结果文件均存在。脚本状态为 `initial_catalog_not_observed`：
+
+1. 官方 Web init `initRequests: 1`、`initHttp: 200`，Web Cookie 齐全且与恢复账号匹配（两个布尔量均为 `true`）；未保存或输出 Cookie 值。
+2. 官方 MP 阅读器顶层导航 `pageNavigations: 1`、`navigationStatus: 200`，页面种类为 `mp_reader`。`captchaVisible: false`，`catalogPresent: true`。
+3. 首屏可见 DOM 的目录组、标题和组时间数量均为 `0`；原文链接及身份属性存在性均为 `false`。
+4. 脚本预设的 `#app.__vue__.$store` 入口未找到 MP state（`vueStoreFound: false`）；记录的组、子文章、`reviewId`、逐篇时间、原始 ID、封面等存在数量均为 `0`。`loadFail` 与 `loading` 都为 `false`，但这两个值依赖同一未找到的 Vuex 入口，**不能据此判断页面请求是否成功或失败**。
+
+这次结果只证明该账号、会话、时点下的**本次自然页面首屏**没有显示目标文章，且当前脚本未取得页面内存中的 MP 列表。它没有观察或保存 `/web/mp/articles` 的响应，不证明服务端返回空列表、`-2041`、验证码、跨号限制或目标号不存在，也不排除页面内部状态读取入口有误。离线复核的第一方 [`app.88f998b2.js`](https://cdn.weread.qq.com/web/wrwebnjlogic/js/app.88f998b2.js) 约 2876349 调用 `$mount('#app')`，约 1804199 的根节点仍带 `id: app`；[`19.42e251bc.js`](https://cdn.weread.qq.com/web/wrwebnjlogic/js/19.42e251bc.js) 约 373000 把 MP state 注册为 `mp`，页面组件约 376000 从 `state.mp` 读取数据。静态代码不能解释本次 `vueStoreFound: false` 的实际原因。由于 one-shot 哨兵已落盘，**不再重试本目标页 Probe**；可继续离线核查页面挂载及其他独立、有公开依据的取文路线。
 
 ## 执行边界和输出
 
