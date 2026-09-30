@@ -150,11 +150,18 @@ function inspectPage() {
   const count = (getter) =>
     reviews.filter((item) => present(getter(item))).length;
   const pathname = location.pathname;
-  const captchaVisible = Boolean(
-    document.querySelector(
+  const captchaVisible = Array.from(
+    document.querySelectorAll(
       'iframe[src*="captcha" i], [id*="captcha" i], [class*="captcha" i]',
     ),
-  );
+  ).some((element) => {
+    const style = getComputedStyle(element);
+    return (
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      element.getClientRects().length > 0
+    );
+  });
   return {
     pageKind: pathname.startsWith('/web/mp/reader/')
       ? 'mp_reader'
@@ -230,6 +237,7 @@ function selfTest() {
     ];
     const catalog = { querySelectorAll: () => [1], querySelector: () => null };
     global.document = {
+      querySelectorAll: () => [],
       querySelector: (selector) =>
         selector === '#app'
           ? {
