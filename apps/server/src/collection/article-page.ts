@@ -80,6 +80,7 @@ function cgiDataNewField(
     'g',
   );
   const matches = [...script.matchAll(expression)];
+  if (matches.length > 1) throw new Error('原文 CGI 字段重复或冲突');
   return matches.length === 1 ? matches[0][2] : undefined;
 }
 
@@ -87,15 +88,29 @@ function cgiDataNewField(
 export function articlePublishTime(html: string): number | null {
   const $ = load(html);
   if (!$('#js_content, .rich_media_content').length) return null;
-  const match = html.match(
-    /\b(?:create_time|ct|CreateTime)\b["']?\s*[:=]\s*['"]?(\d{10})(?!\d)['"]?/i,
-  );
-  const cgiTime =
-    cgiDataNewField(html, 'ori_create_time', '\\d{10}') ||
-    cgiDataNewField(html, 'ori_send_time', '\\d{10}') ||
-    cgiDataNewField(html, 'create_timestamp', '\\d{10}');
-  if (match && cgiTime && match[1] !== cgiTime) return null;
-  const timestamp = Number(match?.[1] || cgiTime);
+  // Body prose/index metadata cannot supply ct. All reviewed page fields must
+  // agree; a first regex match must not hide a conflicting original timestamp.
+  const script = $('script')
+    .toArray()
+    .map((node) => $(node).html() || '')
+    .join('\n');
+  let values: string[];
+  try {
+    values = [
+      ...[
+        ...script.matchAll(
+          /\b(?:create_time|ct|CreateTime)\b["']?\s*[:=]\s*['"]?(\d{10})(?!\d)['"]?/gi,
+        ),
+      ].map((m) => m[1]),
+      ...['ori_create_time', 'ori_send_time', 'create_timestamp']
+        .map((name) => cgiDataNewField(script, name, '\\d{10}'))
+        .filter((v): v is string => Boolean(v)),
+    ];
+  } catch {
+    return null;
+  }
+  if (new Set(values).size !== 1) return null;
+  const timestamp = Number(values[0]);
   return timestamp >= 946684800 && timestamp <= Date.now() / 1000 + 300
     ? timestamp
     : null;

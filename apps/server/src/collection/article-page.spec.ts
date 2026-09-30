@@ -94,6 +94,27 @@ describe('article publication evidence', () => {
     ).toBe(1787013185);
   });
 
+  it('rejects conflicting original times and ignores timestamp-like body text', () => {
+    expect(
+      articlePublishTime('<div id="js_content">ct=1700000000</div>'),
+    ).toBeNull();
+    expect(
+      articlePublishTime(
+        '<div id="js_content">ct=1700000001</div><script>var ct=1700000000;</script>',
+      ),
+    ).toBe(1700000000);
+    expect(
+      articlePublishTime(
+        '<div id="js_content">正文</div><script>var ct=1700000000;var ct=1700000001;</script>',
+      ),
+    ).toBeNull();
+    expect(
+      articlePublishTime(
+        "<div id=\"js_content\">正文</div><script>var ct=1700000000;window.cgiDataNew={ori_create_time:'1700000000',ori_create_time:'1700000001'};</script>",
+      ),
+    ).toBeNull();
+  });
+
   it('does not accept milliseconds, future dates, or cover updateTime', () => {
     for (const field of [
       'ct=1787013185000',

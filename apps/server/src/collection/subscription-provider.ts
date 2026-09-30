@@ -15,7 +15,11 @@ export type ProviderArticle = {
 
 export type ProviderPage = {
   articles: ProviderArticle[];
-  coverage: 'recent-window' | 'stored-history-window' | 'selected-albums';
+  coverage:
+    | 'recent-window'
+    | 'stored-history-window'
+    | 'selected-albums'
+    | 'search-results';
   upstreamCount: number;
   bodyMissing: number;
   imageBlocked: number;
@@ -37,9 +41,12 @@ export function assertProviderPage(
     !page ||
     !Array.isArray(page.articles) ||
     page.articles.length > 1000 ||
-    !['recent-window', 'stored-history-window', 'selected-albums'].includes(
-      page.coverage,
-    ) ||
+    ![
+      'recent-window',
+      'stored-history-window',
+      'selected-albums',
+      'search-results',
+    ].includes(page.coverage) ||
     ![page.upstreamCount, page.bodyMissing, page.imageBlocked].every(
       (value) => Number.isSafeInteger(value) && value >= 0,
     ) ||

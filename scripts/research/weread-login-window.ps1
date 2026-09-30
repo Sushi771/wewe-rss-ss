@@ -4,7 +4,10 @@ param(
   [ValidateSet('Plan', 'SelfTest', 'Start', 'Status', 'Stop')]
   [string]$Action = 'Plan',
   [ValidateSet('Edge', 'Chrome')]
-  [string]$Browser = 'Edge'
+  [string]$Browser = 'Edge',
+  # An independently discovered original may be opened by the owner solely
+  # for normal official validation. This does not clear any request stop.
+  [string]$EntryUrl = 'https://weread.qq.com/'
 )
 
 Set-StrictMode -Version Latest
@@ -90,6 +93,15 @@ function IsDirectChild([string]$root, [string]$candidate) {
 
 function LaunchArguments([string]$profile) {
   if ($profile.Contains('"')) { throw 'PROFILE_PATH_INVALID' }
+  $entry = [Uri]$EntryUrl
+  if ($entry.Scheme -ne 'https' -or $entry.UserInfo -or -not $entry.IsDefaultPort -or
+      $EntryUrl -match '[\s"\\]' -or
+      -not (($entry.Host -eq 'weread.qq.com' -and $entry.AbsolutePath -eq '/') -or
+        ($entry.Host -eq 'mp.weixin.qq.com' -and $entry.AbsolutePath -eq '/s' -and
+          $entry.Query -match '(^\?|&)__biz=' -and $entry.Query -match '&mid=\d+' -and
+          $entry.Query -match '&idx=[1-9]\d*' -and $entry.Query -match '&sn=[a-fA-F0-9]+'))) {
+    throw 'OFFICIAL_ENTRY_URL_INVALID'
+  }
   return @(
     "--user-data-dir=`"$profile`""
     '--remote-debugging-address=127.0.0.1'
@@ -97,7 +109,7 @@ function LaunchArguments([string]$profile) {
     '--no-first-run'
     '--no-default-browser-check'
     '--new-window'
-    'https://weread.qq.com/'
+    $EntryUrl
   )
 }
 

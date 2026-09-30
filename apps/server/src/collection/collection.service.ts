@@ -18,6 +18,7 @@ import { fetchMp2RssRecent20 } from './mp2rss';
 import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { assertProviderPage } from './subscription-provider';
+import { prepareSearchReplay } from './search-replay';
 import {
   assertSavedArticleIdentity,
   bodyRetryTarget,
@@ -41,6 +42,155 @@ export class CollectionService {
   constructor(private readonly prisma: PrismaService) {}
 
   private readonly publicCollections = new Set<string>();
+
+  /** Offline rehearsal only. No production source binding or feed success time.
+   * The normal update route stays gated until five originals and backend auth
+   * have real evidence. Reuse this persistence boundary when that gate passes.
+   */
+  async replayVerifiedSearch(
+    mpId: string,
+    replay: Awaited<ReturnType<typeof prepareSearchReplay>>,
+  ) {
+    const raw = process.env.DATABASE_URL || '';
+    if (!raw.startsWith('file:') || !path.isAbsolute(raw.slice(5)))
+      throw new Error('SEARCH_REPLAY_REQUIRES_ISOLATED_SQLITE');
+    const database = await fs.realpath(raw.slice(5));
+    const marker = JSON.parse(
+      await fs.readFile(database + '.search-replay.json', 'utf8'),
+    );
+    if (
+      marker.mode !== 'real-response-replay' ||
+      (await fs.realpath(marker.sourceDatabase)).toLowerCase() ===
+        database.toLowerCase()
+    )
+      throw new Error('SEARCH_REPLAY_REQUIRES_ISOLATED_SQLITE');
+    if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
+    this.publicCollections.add(mpId);
+    try {
+      const page = assertProviderPage(replay.page, mpId);
+      if (
+        replay.discovery !== 'real-response-replay' ||
+        replay.originalNetworkRequests !== 0 ||
+        replay.imageNetworkRequests !== 0 ||
+        replay.verified.length !== page.articles.length ||
+        page.articles.some(
+          (item, index) =>
+            JSON.stringify(item) !==
+            JSON.stringify(replay.verified[index].article),
+        )
+      )
+        throw new Error('SEARCH_REPLAY_PROVENANCE_INVALID');
+      await createVerifiedSqliteBackup();
+      let created = 0,
+        updated = 0;
+      await this.prisma.$transaction(
+        async (tx) => {
+          await tx.feed.findUniqueOrThrow({ where: { id: mpId } });
+          for (const item of page.articles) {
+            const identity = canonicalArticleUrl(item.url);
+            const base = new URL(identity.url);
+            base.searchParams.delete('sn');
+            const matches = await tx.article.findMany({
+              where: {
+                mpId,
+                OR: [
+                  { id: item.id },
+                  { sourceUrl: base.toString() },
+                  { sourceUrl: { startsWith: base.toString() + '&sn=' } },
+                  { verifiedSourceUrl: base.toString() },
+                  {
+                    verifiedSourceUrl: { startsWith: base.toString() + '&sn=' },
+                  },
+                ],
+              },
+            });
+            if (matches.length > 1)
+              throw new Error('SEARCH_REPLAY_AMBIGUOUS_OLD_ID');
+            const existing = matches[0];
+            if (existing) {
+              assertSavedArticleIdentity(existing, identity);
+              // Search gets no album-specific 60-second relaxation. Every old
+              // title, trusted time and known signature must remain consistent.
+              if (
+                existing.publishTime !== item.publishTime ||
+                existing.title.normalize('NFKC').replace(/\s+/gu, '') !==
+                  item.title.normalize('NFKC').replace(/\s+/gu, '')
+              )
+                throw new Error('SEARCH_REPLAY_SAVED_METADATA_CONFLICT');
+              for (const url of [
+                existing.sourceUrl,
+                existing.verifiedSourceUrl,
+              ]) {
+                if (
+                  url &&
+                  new URL(url).pathname === '/s' &&
+                  canonicalArticleUrl(url).url !== item.url
+                )
+                  throw new Error('SEARCH_REPLAY_SAVED_SIGNATURE_CONFLICT');
+              }
+              const data = {
+                ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
+                ...(!existing.verifiedSourceUrl
+                  ? { verifiedSourceUrl: item.url }
+                  : {}),
+                ...(!existing.contentHtml && item.contentHtml
+                  ? {
+                      contentHtml: item.contentHtml,
+                      lastBodyStatus: 'available',
+                    }
+                  : {}),
+              };
+              if (Object.keys(data).length) {
+                await tx.article.update({ where: { id: existing.id }, data });
+                updated++;
+              }
+            } else {
+              // A title collision with an opaque legacy ID cannot be merged or
+              // duplicated without independent identity evidence.
+              if (
+                await tx.article.findFirst({
+                  where: {
+                    mpId,
+                    title: item.title,
+                    sourceUrl: null,
+                    verifiedSourceUrl: null,
+                  },
+                })
+              )
+                throw new Error('SEARCH_REPLAY_UNRESOLVED_LEGACY_ID');
+              await tx.article.create({
+                data: {
+                  id: item.id,
+                  mpId,
+                  title: item.title,
+                  publishTime: item.publishTime,
+                  sourceUrl: item.url,
+                  verifiedSourceUrl: item.url,
+                  contentHtml: item.contentHtml,
+                  picUrl: '',
+                  lastBodyStatus: 'available',
+                },
+              });
+              created++;
+            }
+          }
+        },
+        { timeout: 60000 },
+      );
+      return {
+        mode: 'real-response-replay' as const,
+        created,
+        updated,
+        articles: page.articles.length,
+        unverifiedCandidates: replay.unverified.length,
+        coverage: 'search-results' as const,
+        complete: false as const,
+        productionSourceEnabled: false as const,
+      };
+    } finally {
+      this.publicCollections.delete(mpId);
+    }
+  }
 
   async collectWechat2RssRecent(input: {
     mpId: string;
