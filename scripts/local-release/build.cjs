@@ -1,7 +1,6 @@
 // 只创建新版本，不停服务、不改已安装的依赖、旧 dist/client 或数据库。
 const fs = require('node:fs');
 const path = require('node:path');
-const { isBuiltin } = require('node:module');
 const { parseArgs } = require('node:util');
 const { verifySourceSnapshot } = require('./verify-source.cjs');
 const {
@@ -23,6 +22,9 @@ const server = path.join(root, 'apps/server');
 function copyPackages(destination, generatedClient, packageSource = server) {
   const seen = new Map();
   const versions = [];
+  // resolve.paths('buffer') returns null for Node core names. A trailing slash
+  // explicitly asks for the installed npm package and retains the real pnpm tree.
+  const installedPackage = (name, base) => packageDir(name + '/', base);
   function link(name, target, parent) {
     const at = path.join(parent, 'node_modules', name);
     fs.mkdirSync(path.dirname(at), { recursive: true });
@@ -34,7 +36,7 @@ function copyPackages(destination, generatedClient, packageSource = server) {
   }
   function copy(name, base) {
     if (name === '@prisma/client') return generatedClient;
-    const source = packageDir(name, base);
+    const source = installedPackage(name, base);
     if (seen.has(source)) return seen.get(source);
     const pkg = readJson(path.join(source, 'package.json'));
     const target = path.join(
@@ -57,9 +59,12 @@ function copyPackages(destination, generatedClient, packageSource = server) {
       ...pkg.optionalDependencies,
     };
     for (const dependency of Object.keys(dependencies).sort()) {
-      if (isBuiltin(dependency)) continue;
+      // A package.json dependency names an installed npm package, even when
+      // its name also matches a Node core module. Shims such as process,
+      // buffer and string_decoder are required through trailing-slash paths
+      // by readable-stream; skipping them breaks the isolated release.
       try {
-        packageDir(dependency, source);
+        installedPackage(dependency, source);
       } catch (error) {
         if (
           pkg.optionalDependencies?.[dependency] ||
