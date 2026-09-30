@@ -12,8 +12,13 @@
 - 本轮起点 `main / 37ac12b2e7665af73f5702ce6d8508def86763c2`，工作区干净。第三合集六页 54 键是历史成功事实，但精确入口和私有账本已丢；不猜 ID，也不将缺失输入冒充当前已导入。已有精确绑定的“复旦数学营”合集是当前可执行输入。
 - A `codex/album-body-loop` / `C:/Users/ss/.codex/worktrees/album-body-loop/wewe-rss-ss`：真实正文、发布时间和图片本地化验证，证据持久私存。
 - B `codex/album-provider-loop` / `C:/Users/ss/.codex/worktrees/album-provider-loop/wewe-rss-ss`：正式 public-album Provider、正文图片链、手动/定时及合集范围提示。
-- C `codex/album-qa-loop` / `C:/Users/ss/.codex/worktrees/album-qa-loop/wewe-rss-ss`：一致性副本、旧字段保护、重复更新、重启及四类导出。总控统一合入 main；生产写入尚未放行，真实持续订阅尚未验收。
-- 下一工程单元：持久取得当前合集及原文样本 → Provider 正式接入 → 在一致性副本执行真实导入、第二次 0 新增、重启及导出；自然新文章单独等待验收。
+- C `codex/album-qa-loop` / `C:/Users/ss/.codex/worktrees/album-qa-loop/wewe-rss-ss`：一致性副本、旧字段保护、重复更新、重启及四类导出，结果已合入 main。
+- **15:35 检查点，当前代码 `main / dc2dd4c`：**正式 Provider 真实联网副本 16 次 HTTP 200，19 篇 / 2 页，补 8 篇正文、精确校正 5 条未可信列表时间，重复及 scheduled 入口新增/更新均 0。11 篇当前原文和 11 张图片、7 篇旧正文的 27 张不同远程图片有持久原始证据；19 篇 RSS / Markdown / Obsidian / ZIP 全通过，44 附件字节及 ZIP CRC 核验通过。真正 Nest 服务启停重启、授权更新及下载已在限定副本通过，上游回放边界明确。
+- 一致性新副本和精确 live 原响应逐文章字段比对通过后，已受控应用生产：12 个订阅 / 1447 篇保留，绑定唯一已验合集 `3588220544052641807`，补 8 正文 / 校正 5 未可信时间，第二次新增 0；已有正文、图片、可信时间、指标和账号不变。该写库使用已真实取得的响应，不能称再次联网。生产前备份及报告在 `private-data/album-production-20260930/33157d71-ce73-49a8-8210-6530dac7f132/`，备份 SHA256 `9454d8287d4e4128c1d632bec1a1beec268e55335711e7061c4ebd54ac24d7c0`；原始证据及私有 env 均忽略，不提交。
+- 当前本机服务停止：新固定产物 `2026-09-30T07-24-55-290Z-6cfe3bc3ceff` 真实启动暴露依赖闭包遗漏 npm `process/` shim，退出前仅只读核验库；B 正修 `scripts/local-release/build.cjs`。启动缺陷不构成官方合集来源阻塞，不恢复横向研究。定时白名单和私人登录 readiness 已实现，暂未证明生产服务在线手动更新或实际 timer 运行。
+- **下一具体单元：**合入 B 打包修复 → `node scripts/local-release/build.cjs` → 用新绝对产物执行 `node scripts/local-release/restart.cjs --mode start --release <新产物> --database <主仓>/apps/server/data/wewe-rss.db --production` → 私存 `online-smoke.cjs http` 和 `online-smoke.cjs scheduled <新产物>` → 受控重启再 HTTP 更新。自然新文尚未出现，全号覆盖与私人 HTTPS 线上部署未验。实际模型未核实。
+
+### 历史研究记录（本轮冻结，以下“下一轮”不是当前待办）
 
 - **新一轮认证及来源审计的准确边界：**[Mac/iOS skey 来源](MAC_IOS_SKEY_LOGIN_SOURCE_AUDIT.md)中，近期 Mac 项目从官方客户端本地日志复制 `vid/skey` 并只核本人书架，未公开正常签发/续期或文章成功回包；不把日志复制当可审查认证链。[微信 `profile_ext/getmsg` 来源](MP_PROFILE_EXT_AUTH_2026_AUDIT.md)虽有分页/文章链接代码，所审调用者都先接收个人微信会话；PadChat 授权 SDK 落到未交付源码的服务，Ipad860 依赖无源码动态库，故这些固定实现不符合自建运行约束。[第三合集会话恢复审计](THIRD_ALBUM_SESSION_RECOVERY.md)定位当时成功请求但精确 ID 只存已丢的私有临时文件；本机旧聊天/Git 对象中的长数字是自测常量，不猜 ID、不重发。这些阴性结果只限已查材料。下一轮 A 查腾讯 Gateway 新能力，B 查搜狗现行账号列表发送链，C 查公开索引里的官方合集链接。
 - **近期列表项目已按真实发送行排重：**[B 的固定 fork 与 Web 脚本审计](SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)证明 `CyrusNee/weread` 的公众号列表和传输文件与已审 `weread-omni` 上游相同，仍用 BOOX/EInk `vid/accessToken` 请求腾讯 `/mp/chapters`；本账号同形首屏及续期后已有 `-2041`，不重发。`steptian/weread-mp` 仅用浏览器 Cookie 调已受限的 `/web/mp/articles`，没有当前第一方请求票据/续期链或可核真实成功回包，也不把它当作新认证形状。两项只排除这些固定实现带来新协议的假设，不外推腾讯所有列表来源。下一轮 C 正尝试从旧 Codex 记录恢复第三合集原始入口，A 继续查 Mac/iOS 正常认证源码；均离线。

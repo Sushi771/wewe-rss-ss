@@ -2,7 +2,13 @@
 
 ## 2026-09-30 当前续研
 
-**当前执行覆盖下方研究待办：**用户要求先闭环“妈妈部落畅聊阁”的官方合集订阅，暂停微信读书新端点、搜狗、Mac/iOS 凭据等横向研究。起点 `main / 37ac12b`、工作区干净；A/B/C 各用独立 worktree 验正文图片、接 Provider、审 SQLite 副本与导出，总控合入 main。已验证的“复旦数学营”单一合集有可追溯绑定；第三合集六页 54 键的成功记录保留，但其精确入口和私有账本已丢，不可直接据此导入。当前先补列表到正文图片链，再验副本重复更新、重启、手动/定时及 RSS/Markdown/Obsidian/ZIP；自然新增仍待观察。覆盖始终表述为所选合集，不是全号历史。生产写库尚未放行，真实订阅仍未恢复。
+**当前执行覆盖下方研究待办（15:35）：**代码 `main / dc2dd4c`，用户冻结微信读书新端点、搜狗、Mac/iOS 横向研究。A/B/C 独立 worktree 的正文图片、Provider、QA 已统一合入；单一可追溯“复旦数学营”官方合集 `3588220544052641807` 为 19 篇 / 2 页。第三合集六页 54 键是真实历史结果，但精确入口和账本已丢，不猜 ID，也不将 19 或 54 称全号历史。
+
+真实联网正式 Provider 副本：16 请求 HTTP 200，补 8 正文、校正 5 条未可信列表时间，重复 / scheduled 新增与更新 0。19 篇 RSS / Markdown / Obsidian / ZIP 全通过，44 附件真实字节及 CRC 通过；限定副本的实际 HTTP 启动、重启、匿名 401 / 授权更新 200 / ZIP 下载 200 通过，上游回放有明确记录。精确生产应用流程另在 fresh 一致性副本复验后，已备份、迁移并受控导入生产：12 个订阅 / 1447 篇未丢，唯一合集绑定、补 8 / 校正 5 / 重复 0；旧正文、图片、可信时间、指标和账号保持。生产导入用持久真实响应，尚未在生产服务证明在线更新。私有备份、报告和精确原响应见 [总控状态](coordination/STATUS.md)，不入 Git。
+
+**未完成与下一条命令：**本机固定产物真实启动因依赖闭包漏装 npm `process/` 退出，生产服务停止，B 在独立 worktree 修 `scripts/local-release/build.cjs`。合入修复后执行 `node scripts/local-release/build.cjs`，用新产物 `scripts/local-release/restart.cjs --mode start --release <新绝对产物> --database <主仓绝对路径>/apps/server/data/wewe-rss.db --production`，再运行私存 `private-data/album-production-20260930/online-smoke.cjs http` 和 `scheduled <产物>`，受控重启再在线更新。私人 env 已安全保存登录码、目标唯一白名单和正常每日 05:35 / 17:35 定时配置；须新产物启动验收后才称实际运行。自然新文增量、全号覆盖及私人 HTTPS 部署仍未验，不宣布订阅全面恢复。实际模型未核实。
+
+## 历史研究记录（冻结，以下行动描述已被本轮主线覆盖）
 
 - **认证与丢失来源的新增边界：**[Mac/iOS 日志凭据审计](coordination/MAC_IOS_SKEY_LOGIN_SOURCE_AUDIT.md)找到 2026 Mac 项目从官方 App 日志复制 `skey/vid`，但无可审查签发/续期及文章端点成功回包；[微信 `getmsg`/PadChat 审计](coordination/MP_PROFILE_EXT_AUTH_2026_AUDIT.md)确认所审列表代码均需预有个人微信会话，PadChat 授权在未开源服务侧，Ipad860 依赖无源码库。[第三合集会话恢复](coordination/THIRD_ALBUM_SESSION_RECOVERY.md)从首次请求时间、20 份相关 JSONL 和 Git 对象证实精确 ID 未留存，候选长数字是 fakeRequester 常量；不猜参或重发。A/B/C 转查 Gateway 近期能力、搜狗账号列表真发送链、公开索引中的官方合集链接，其他可执行研究继续。
 - **B 近期实现排重：**[固定源码、发送行和本机旧结果对照](coordination/SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)显示 `CyrusNee/weread` 的 MP 列表仍是与上游同文件的 EInk `/mp/chapters`，本账号同形请求和续期后均曾 `-2041`；`steptian/weread-mp` 仅带 Cookie 调已受限 Web `/web/mp/articles`，没有第一方新票据/续期或可核成功回包。两者不作为同形重试理由。A 正查 Mac/iOS 正常认证开源链，C 正从旧 Codex 记录离线寻找第三合集精确入口；真实订阅仍未恢复。
