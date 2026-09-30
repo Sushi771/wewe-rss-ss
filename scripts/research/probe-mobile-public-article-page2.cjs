@@ -229,9 +229,9 @@ function redirectShape(location, base) {
 }
 
 function classify(response, body, truncated, redirect) {
-  if (VERIFICATION.test(body + (redirect?.path || '')))
+  if (VERIFICATION.test(redirect?.path || ''))
     return { state: 'verification-stop' };
-  if ([403, 429, 503].includes(response.status) || RATE_LIMIT.test(body))
+  if ([403, 429, 503].includes(response.status))
     return { state: 'rate-limit-stop' };
   if (response.status >= 300 && response.status < 400)
     return { state: 'redirect-stop' };
@@ -241,7 +241,13 @@ function classify(response, body, truncated, redirect) {
   try {
     json = JSON.parse(body);
   } catch {
+    if (VERIFICATION.test(body)) return { state: 'verification-stop' };
+    if (RATE_LIMIT.test(body)) return { state: 'rate-limit-stop' };
     return { state: 'invalid-json-stop' };
+  }
+  if (typeof json === 'string') {
+    if (VERIFICATION.test(json)) return { state: 'verification-stop' };
+    if (RATE_LIMIT.test(json)) return { state: 'rate-limit-stop' };
   }
   if (
     !json ||
@@ -249,8 +255,24 @@ function classify(response, body, truncated, redirect) {
     Array.isArray(json) ||
     !Array.isArray(json.items)
   ) {
+    if (json && typeof json === 'object') {
+      const messages = ['message', 'msg', 'error', 'errmsg', 'description']
+        .map((field) => json[field])
+        .filter((value) => typeof value === 'string');
+      if (messages.some((message) => VERIFICATION.test(message)) || json.anti)
+        return { state: 'verification-stop' };
+      if (messages.some((message) => RATE_LIMIT.test(message)))
+        return { state: 'rate-limit-stop' };
+    }
     return { state: 'schema-stop' };
   }
+  const messages = ['message', 'msg', 'error', 'errmsg', 'description']
+    .map((field) => json[field])
+    .filter((value) => typeof value === 'string');
+  if (messages.some((message) => VERIFICATION.test(message)))
+    return { state: 'verification-stop' };
+  if (messages.some((message) => RATE_LIMIT.test(message)))
+    return { state: 'rate-limit-stop' };
   if (json.anti) return { state: 'verification-stop' };
   const items = json.items.slice(0, 100);
   return {
@@ -385,6 +407,20 @@ async function selfTest() {
       raw: true,
     },
     {
+      label: 'article-mentions-captcha',
+      response: () =>
+        new Response(
+          JSON.stringify({
+            items: [
+              '<docid>x</docid><title>验证码的使用指南</title><content>操作频繁只是本文示例</content>',
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      state: 'completed',
+      raw: true,
+    },
+    {
       label: '302',
       response: () =>
         new Response(null, {
@@ -397,6 +433,24 @@ async function selfTest() {
       label: 'captcha',
       response: () =>
         new Response('<html>请输入验证码</html>', { status: 200 }),
+      state: 'verification-stop',
+    },
+    {
+      label: 'json-captcha',
+      response: () =>
+        new Response(JSON.stringify({ message: '请输入验证码' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      state: 'verification-stop',
+    },
+    {
+      label: 'json-anti',
+      response: () =>
+        new Response(
+          JSON.stringify({ items: [], anti: { account: '/captcha' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
       state: 'verification-stop',
     },
     {
