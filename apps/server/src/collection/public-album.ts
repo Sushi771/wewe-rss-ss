@@ -64,11 +64,25 @@ export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
         );
       }
       const response = data?.getalbum_resp;
+      // Tencent serializes a one-article terminal page as an object instead of
+      // an array. Normalize only a real article shape, then apply every normal
+      // identity/title/time check below; arbitrary objects remain invalid.
+      const singleton = response?.article_list;
+      const articleList = Array.isArray(singleton)
+        ? singleton
+        : singleton &&
+            typeof singleton === 'object' &&
+            ['url', 'title', 'msgid', 'itemidx', 'create_time'].every(
+              (key) =>
+                typeof singleton[key] === 'string' && singleton[key].length > 0,
+            )
+          ? [singleton]
+          : undefined;
       if (
         ![0, '0'].includes(data?.base_resp?.ret) ||
         !response ||
         ![0, '0'].includes(response.verify_status) ||
-        !Array.isArray(response.article_list)
+        !articleList
       )
         throw new Error('公开合集返回验证页或无效列表，本次未写入');
       if (page === 0 && response.base_info?.article_count != null) {
@@ -80,7 +94,7 @@ export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
       pages++;
       albumPages++;
       title ||= String(response.base_info?.title || albumId);
-      for (const item of response.article_list) {
+      for (const item of articleList) {
         const identity = canonicalArticleUrl(item.url);
         const publishTime = Number(item.create_time);
         if (
@@ -109,12 +123,9 @@ export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
         complete = true;
         break;
       }
-      if (
-        String(response.continue_flag) !== '1' ||
-        !response.article_list.length
-      )
+      if (String(response.continue_flag) !== '1' || !articleList.length)
         throw new Error('公开合集分页状态异常，本次未写入');
-      const last = response.article_list.at(-1);
+      const last = articleList.at(-1);
       const next = `${last.msgid}_${last.itemidx}`;
       if (cursors.has(next)) throw new Error('公开合集重复分页，本次未写入');
       cursors.add(next);

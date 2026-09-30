@@ -79,6 +79,44 @@ describe('public album collection (synthetic pagination regression)', () => {
     );
     expect(get).toHaveBeenCalledTimes(1);
   });
+  it('accepts the observed singleton terminal-page shape without losing the last article', async () => {
+    get.mockResolvedValueOnce(page([article('2247483929')], '1', '2'));
+    const last = page([], '0');
+    get.mockResolvedValueOnce({
+      data: {
+        ...last.data,
+        getalbum_resp: {
+          ...last.data.getalbum_resp,
+          article_list: article('2247483923'),
+        },
+      },
+    });
+    const result = await fetchPublicAlbums(mpId, [albumA]);
+    expect(result.pages).toBe(2);
+    expect(result.articles.map((row) => row.id)).toEqual([
+      'WX_3895431412_2247483929_1',
+      'WX_3895431412_2247483923_1',
+    ]);
+  });
+  it.each([{}, { title: 'invalid' }, { ...article('2247483923'), msgid: 123 }])(
+    'rejects malformed singleton article objects',
+    async (articleList) => {
+      const invalid = page([], '0');
+      get.mockResolvedValueOnce({
+        data: {
+          ...invalid.data,
+          getalbum_resp: {
+            ...invalid.data.getalbum_resp,
+            article_list: articleList,
+          },
+        },
+      });
+      await expect(fetchPublicAlbums(mpId, [albumA])).rejects.toThrow(
+        '无效列表',
+      );
+      expect(get).toHaveBeenCalledTimes(1);
+    },
+  );
   it('retains the real chksm signature while discarding session or tracking parameters', () => {
     const raw = article('2247483929').url.replace(
       '#rd',
