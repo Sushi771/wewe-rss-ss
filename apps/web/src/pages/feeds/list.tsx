@@ -347,6 +347,7 @@ const ArticleList: FC<ArticleListProps> = ({
         onClose={() => setReadingId(null)}
         size="4xl"
         scrollBehavior="inside"
+        classNames={{ wrapper: 'z-[200]', backdrop: 'z-[190]' }}
       >
         <ModalContent>
           <ModalHeader>{reading.data?.title || '读取已保存正文'}</ModalHeader>
