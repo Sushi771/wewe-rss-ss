@@ -2,6 +2,16 @@
 
 ## 2026-09-30 当前续研
 
+**当前执行覆盖下方研究待办（15:55）：**工程代码 `main / d60144b`（后续只补交接），用户冻结微信读书新端点、搜狗、Mac/iOS 横向研究。A/B/C 独立 worktree 的正文图片、Provider、QA 已统一合入；单一可追溯“复旦数学营”官方合集 `3588220544052641807` 为 19 篇 / 2 页。第三合集六页 54 键是真实历史结果，但精确入口和账本已丢，不猜 ID，也不将 19 或 54 称全号历史。
+
+真实联网正式 Provider 副本：16 请求 HTTP 200，补 8 正文、校正 5 条未可信列表时间，重复 / scheduled 新增与更新 0。19 篇 RSS / Markdown / Obsidian / ZIP 全通过，44 附件真实字节及 CRC 通过；限定副本的实际 HTTP 启动、重启、匿名 401 / 授权更新 200 / ZIP 下载 200 通过，上游回放有明确记录。精确生产应用流程另在 fresh 一致性副本复验后，已备份、迁移并受控导入生产：12 个订阅 / 1447 篇未丢，唯一合集绑定、补 8 / 校正 5 / 重复 0；旧正文、图片、可信时间、指标和账号保持。生产初次导入用持久真实响应；随后生产服务已实际联网完成 scheduled 单号、授权手动及受控重启后的再次更新，每次 2 页 / 19 篇 / 新增与更新 0 / 原文图片请求 0。匿名更新、RSS、ZIP 均 401，私人登录 204、授权更新与 RSS 200。私有备份、报告和精确原响应见 [总控状态](coordination/STATUS.md)，不入 Git。
+
+**运行及未完成：**npm core 同名 shim 打包缺陷已修，三个独立闭包回归与 [CI](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36684972774) 通过。新固定产物 `.local-releases/2026-09-30T07-39-36-397Z-85f473d2bc1c`（264 依赖 / 13277 文件）已生产启动、受控重启并更新开机指针。当前服务 PID 45504，只监听 [本机入口](http://127.0.0.1:4000/dash)，登录码安全保存在忽略的 `apps/server/.env.local`，每日 05:35 / 17:35 定时只选目标号，其余 11 旧号状态未改。scope19 的完整 ZIP 已验，未将目标旧库全部 194 篇的完整导出冒充通过；旧 7 篇远程图片引用为保护正文而保持原样，其离线附件已真实取得。整体任务未完成：自然新文增量、全号覆盖及私人 HTTPS 部署仍未验，实际模型未核实。
+
+**下一具体单元：**已创建并核实本聊天每日 18:05 的首次自然增量验收自动任务 `automation`（ACTIVE），先只读 `private-data/album-production-20260930/natural-baseline.json` 与生产库；无自然新增不再请求上游或写报告。出现真实新稳定 ID 后验号身份、原文时间、正文与本地图片、旧字段保护、再次更新排重和限定副本离线导出，再通知并提交证据。若仅人工操作检查，可执行私存 `node private-data/album-production-20260930/online-smoke.cjs http` 验当前“新增 0”，它不是自然新增证明；不要每日重复手动请求代替等待。暂停横向研究与付费采购。
+
+## 历史研究记录（冻结，以下行动描述已被本轮主线覆盖）
+
 - **认证与丢失来源的新增边界：**[Mac/iOS 日志凭据审计](coordination/MAC_IOS_SKEY_LOGIN_SOURCE_AUDIT.md)找到 2026 Mac 项目从官方 App 日志复制 `skey/vid`，但无可审查签发/续期及文章端点成功回包；[微信 `getmsg`/PadChat 审计](coordination/MP_PROFILE_EXT_AUTH_2026_AUDIT.md)确认所审列表代码均需预有个人微信会话，PadChat 授权在未开源服务侧，Ipad860 依赖无源码库。[第三合集会话恢复](coordination/THIRD_ALBUM_SESSION_RECOVERY.md)从首次请求时间、20 份相关 JSONL 和 Git 对象证实精确 ID 未留存，候选长数字是 fakeRequester 常量；不猜参或重发。A/B/C 转查 Gateway 近期能力、搜狗账号列表真发送链、公开索引中的官方合集链接，其他可执行研究继续。
 - **B 近期实现排重：**[固定源码、发送行和本机旧结果对照](coordination/SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)显示 `CyrusNee/weread` 的 MP 列表仍是与上游同文件的 EInk `/mp/chapters`，本账号同形请求和续期后均曾 `-2041`；`steptian/weread-mp` 仅带 Cookie 调已受限 Web `/web/mp/articles`，没有第一方新票据/续期或可核成功回包。两者不作为同形重试理由。A 正查 Mac/iOS 正常认证开源链，C 正从旧 Codex 记录离线寻找第三合集精确入口；真实订阅仍未恢复。
 - **`/book/articles` 2026 query 形状一次结果：**[真实开源发送行、一次性脚本和总控回包](coordination/BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)与旧 WeBook 头认证不同；同账号合法 BOOX/Eink `/login` 顶层 `skey/vid` 通过备份、身份及新鲜性只读预检后，单次 GET 得 HTTP **401**、业务 **`-2012`**、无 `reviews`，全局私有标记禁止重试。只缩限该凭据来源和该请求形状；[A 源码复核](coordination/BOOK_ARTICLES_CLIENT_AUTH_FOLLOWUP.md)确认 syfun 也可能只复制 Mac 客户端现有请求头，未证明新签发或成功；继续查合法认证与独立一手成功证据，不翻参重发。生产 SQLite 未写，真实订阅未恢复。

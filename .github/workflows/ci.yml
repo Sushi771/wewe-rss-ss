@@ -37,6 +37,10 @@ jobs:
         run: pnpm --filter server exec jest --runInBand
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
+      - name: Test official album runtime scheduling policy
+        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs
+      - name: Test standalone dependency closure
+        run: node --test scripts/local-release/dependency-closure.test.cjs
       - name: Build Server
         run: pnpm --filter server build
 
@@ -44,5 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate standalone public album deployment
+        env:
+          AUTH_CODE: ci-public-album-config-validation
+          SERVER_ORIGIN_URL: https://private.example.invalid
+        run: |
+          bash -n scripts/private-online/deploy-public-album.sh
+          docker compose --env-file .env.public-album.example -f docker-compose.public-album.yml config --quiet
       - name: Build private online image
         run: docker build -f Dockerfile.private-online -t wewe-rss-private:ci .

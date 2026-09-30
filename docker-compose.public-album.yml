@@ -1,0 +1,22 @@
+# Self-hosted official album source: no commercial upstream or license service.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.private-online
+    environment:
+      NODE_ENV: production
+      PRIVATE_ONLINE_MODE: '1'
+      AUTH_CODE: ${AUTH_CODE:?set a private login code of at least 24 characters}
+      SERVER_ORIGIN_URL: ${SERVER_ORIGIN_URL:?set private HTTPS origin}
+      WECHAT2RSS_ENABLED: '0'
+      DATABASE_URL: file:../data/wewe-rss.db
+      DATABASE_TYPE: sqlite
+      CRON_EXPRESSION: ${CRON_EXPRESSION:-35 5,17 * * *}
+      DISABLE_SCHEDULED_UPDATES: ${DISABLE_SCHEDULED_UPDATES:-1}
+      SCHEDULED_MP_IDS: ${SCHEDULED_MP_IDS:?set the accepted subscription allowlist}
+    volumes:
+      - ./private-data/sqlite:/app/data
+    ports:
+      - '127.0.0.1:4000:4000'
+    restart: unless-stopped

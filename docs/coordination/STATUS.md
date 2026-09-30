@@ -6,6 +6,21 @@
 
 ## 2026-09-30 续研与当前状态
 
+### 当前唯一主线：官方合集订阅闭环（本轮覆盖下方研究待办）
+
+- 用户明确冻结微信读书新 endpoint、搜狗、Mac/iOS skey 及已排除接口的横向研究。先闭环当前可追溯的目标官方合集，不以全号历史覆盖为接入前置条件。
+- 本轮起点 `main / 37ac12b2e7665af73f5702ce6d8508def86763c2`，工作区干净。第三合集六页 54 键是历史成功事实，但精确入口和私有账本已丢；不猜 ID，也不将缺失输入冒充当前已导入。已有精确绑定的“复旦数学营”合集是当前可执行输入。
+- A `codex/album-body-loop` / `C:/Users/ss/.codex/worktrees/album-body-loop/wewe-rss-ss`：真实正文、发布时间和图片本地化验证，证据持久私存。
+- B `codex/album-provider-loop` / `C:/Users/ss/.codex/worktrees/album-provider-loop/wewe-rss-ss`：正式 public-album Provider、正文图片链、手动/定时及合集范围提示。
+- C `codex/album-qa-loop` / `C:/Users/ss/.codex/worktrees/album-qa-loop/wewe-rss-ss`：一致性副本、旧字段保护、重复更新、重启及四类导出，结果已合入 main。
+- **15:55 检查点，工程代码 `main / d60144b`，后续只更新交接：**正式 Provider 真实联网副本 16 次 HTTP 200，19 篇 / 2 页，补 8 篇正文、精确校正 5 条未可信列表时间，重复及 scheduled 入口新增/更新均 0。11 篇当前原文和 11 张图片、7 篇旧正文的 27 张不同远程图片有持久原始证据；19 篇 RSS / Markdown / Obsidian / ZIP 全通过，44 附件字节及 ZIP CRC 核验通过。真正 Nest 服务启停重启、授权更新及下载已在限定副本通过，上游回放边界明确。
+- 一致性新副本和精确 live 原响应逐文章字段比对通过后，已受控应用生产：12 个订阅 / 1447 篇保留，绑定唯一已验合集 `3588220544052641807`，补 8 正文 / 校正 5 未可信时间，第二次新增 0；已有正文、图片、可信时间、指标和账号不变。该写库使用已真实取得的响应，不能称再次联网。生产前备份及报告在 `private-data/album-production-20260930/33157d71-ce73-49a8-8210-6530dac7f132/`，备份 SHA256 `9454d8287d4e4128c1d632bec1a1beec268e55335711e7061c4ebd54ac24d7c0`；原始证据及私有 env 均忽略，不提交。
+- 已修固定产物的 core 同名 npm shim 依赖闭包；脱离源 node_modules 的真实 `readable-stream 4` 加载及三个保护测试通过，并加入 CI。正确新产物 `2026-09-30T07-39-36-397Z-85f473d2bc1c`（264 依赖 / 13277 文件，Node 24.11.1 / Prisma 5.10.1）完整性核验、生产启动、精确进程身份受控重启及开机指针更新全部通过。生产服务当前 PID 45504，仅 `127.0.0.1:4000`，私人登录码在忽略的 `apps/server/.env.local`，不输出。旧电脑微信采集仍禁用。
+- **生产真实在线闭环：**scheduled handler 从库只查询目标一个 feed，真实 2 次列表 HTTP 200 / ret=0，19 篇 / 新增 0 / 更新 0 / 原文与图片请求 0，全部旧字段保护通过。授权 HTTP“更新本号”及受控重启后的再次更新均真实读取 2 页 / 19 篇 / 新增与更新 0 / 旧字段无损；匿名更新、RSS、ZIP 均 401，登录 204、授权更新及 RSS 均 200。报告在 `private-data/album-production-20260930/online-{9b17cef5-fb5e-4222-ba6a-659274931c0d,ae373160-13b9-44c6-97b0-dcae3464b9cf,ba917d73-cbbe-4745-86c3-b897d30c3d4f}/`；启动/重启审计为 `output/playwright/local-release-audit/controlled-restart-{1790754310083-32328,1790754497740-26384}/`。当前 12 / 1447、目标旧文共 194；19 只是所选合集范围。旧 7 篇远程图片引用保持原样，离线完整 19 的 ZIP 附件已另验；未将全号 194 的完整导出冒充通过。
+- **下一具体单元：**应用已启用每日北京时间 05:35 / 17:35 定时，仅 `SCHEDULED_MP_IDS=MP_WXS_3895431412`；实际 scheduled 代码路径已真联网通过，按墙钟自然触发待观察。自动验收 `automation` 已创建并核对 ACTIVE、本聊天、每日 18:05：先只读 `private-data/album-production-20260930/natural-baseline.json` 与生产库，无自然新增保持安静且不请求上游；出现新增后核原文身份、可信时间、正文图片、重复与限定副本导出，再提交证据。自然新文尚未出现，全号覆盖与私人 HTTPS 线上部署未验，整体任务未完成。实际模型未核实。[工程 CI 36684972774](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36684972774) 成功。
+
+### 历史研究记录（本轮冻结，以下“下一轮”不是当前待办）
+
 - **新一轮认证及来源审计的准确边界：**[Mac/iOS skey 来源](MAC_IOS_SKEY_LOGIN_SOURCE_AUDIT.md)中，近期 Mac 项目从官方客户端本地日志复制 `vid/skey` 并只核本人书架，未公开正常签发/续期或文章成功回包；不把日志复制当可审查认证链。[微信 `profile_ext/getmsg` 来源](MP_PROFILE_EXT_AUTH_2026_AUDIT.md)虽有分页/文章链接代码，所审调用者都先接收个人微信会话；PadChat 授权 SDK 落到未交付源码的服务，Ipad860 依赖无源码动态库，故这些固定实现不符合自建运行约束。[第三合集会话恢复审计](THIRD_ALBUM_SESSION_RECOVERY.md)定位当时成功请求但精确 ID 只存已丢的私有临时文件；本机旧聊天/Git 对象中的长数字是自测常量，不猜 ID、不重发。这些阴性结果只限已查材料。下一轮 A 查腾讯 Gateway 新能力，B 查搜狗现行账号列表发送链，C 查公开索引里的官方合集链接。
 - **近期列表项目已按真实发送行排重：**[B 的固定 fork 与 Web 脚本审计](SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)证明 `CyrusNee/weread` 的公众号列表和传输文件与已审 `weread-omni` 上游相同，仍用 BOOX/EInk `vid/accessToken` 请求腾讯 `/mp/chapters`；本账号同形首屏及续期后已有 `-2041`，不重发。`steptian/weread-mp` 仅用浏览器 Cookie 调已受限的 `/web/mp/articles`，没有当前第一方请求票据/续期链或可核真实成功回包，也不把它当作新认证形状。两项只排除这些固定实现带来新协议的假设，不外推腾讯所有列表来源。下一轮 C 正尝试从旧 Codex 记录恢复第三合集原始入口，A 继续查 Mac/iOS 正常认证源码；均离线。
 - **`/book/articles` 新 query 形状已一次验证：**[2026 年开源真实发送代码、探针和唯一回包](BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)把 `bookId/version=2/vid/skey/offset=0/count=1/synckey` 放在 URL query，与旧 WeBook 自定义头形状有实质差异。现有本人合法 BOOX/Eink `/login` 顶层 `skey/vid` 与同账号备份经只读预检后，仅发一次直连腾讯 GET，HTTP **401**、业务 `-2012`、无 `reviews`；全局私有标记阻止重试，生产写入 0。此结果只限该客户端来源、query 形状和时点，**不证明 Mac 客户端合法票据的权限或接口永久不可用**。[A 的跨客户端源码复核](BOOK_ARTICLES_CLIENT_AUTH_FOLLOWUP.md)进一步确认 syfun 的 Mac `skey` 可能只复制现有请求头，且未核请求成功；没有公开当前成功回包。其他合法登录来源与新列表代码仍继续研究。

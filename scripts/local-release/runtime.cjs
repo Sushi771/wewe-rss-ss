@@ -11,6 +11,37 @@ const {
   run,
 } = require('./lib.cjs');
 
+// Scheduling is an explicit opt-in. A valid persisted official-album binding
+// is sufficient; the anonymous source must not require a different provider's key.
+function scheduledUpdatesEnabled(manifest, settings) {
+  if (
+    manifest.schemaCompatibility !== 'current' ||
+    manifest.desktopHelperIncluded !== false ||
+    settings.enabled !== '1'
+  )
+    return false;
+  if (settings.mp2RssFeedKey?.trim()) return true;
+  return (settings.publicAlbumFeeds || []).some((feed) => {
+    if (
+      feed.status !== 1 ||
+      feed.collectionChannel !== 'public-album' ||
+      !/^MP_WXS_\d{5,15}$/.test(feed.id)
+    )
+      return false;
+    try {
+      const ids = JSON.parse(feed.publicAlbumIds);
+      return (
+        Array.isArray(ids) &&
+        ids.length > 0 &&
+        ids.length <= 10 &&
+        ids.every((id) => typeof id === 'string' && /^\d{10,30}$/.test(id))
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
 async function runtime() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -84,6 +115,7 @@ async function runtime() {
     throw new Error('运行时 Client 版本不一致');
   const client = new PrismaClient();
   let counts;
+  let publicAlbumFeeds = [];
   try {
     // raw 查询用于暴露曾出现过的 5.22 engine / 5.10 client 协议不兼容。
     const [{ version }] = await client.$queryRawUnsafe(
@@ -107,6 +139,15 @@ async function runtime() {
         },
       });
       await client.feed.findFirst({ select: { collectionChannel: true } });
+      publicAlbumFeeds = await client.feed.findMany({
+        where: { status: 1, collectionChannel: 'public-album' },
+        select: {
+          id: true,
+          status: true,
+          collectionChannel: true,
+          publicAlbumIds: true,
+        },
+      });
     }
   } finally {
     await client.$disconnect();
@@ -151,14 +192,13 @@ async function runtime() {
       throw new Error('生产模式固定 4000 端口，禁止演练参数');
     if (process.env.LOCAL_RELEASE_CONTROLLED_START !== manifest.id)
       throw new Error('生产模式必须由受控切换器启动');
-    // Enable only after a real provider key and an explicit production switch.
-    const scheduled =
-      !legacy &&
-      manifest.desktopHelperIncluded === false &&
-      Boolean(process.env.MP2RSS_FEED_KEY) &&
-      process.env.ENABLE_SCHEDULED_UPDATES === '1';
+    const scheduled = scheduledUpdatesEnabled(manifest, {
+      enabled: process.env.ENABLE_SCHEDULED_UPDATES,
+      mp2RssFeedKey: process.env.MP2RSS_FEED_KEY,
+      publicAlbumFeeds,
+    });
     Object.assign(process.env, {
-      HOST: '0.0.0.0',
+      HOST: '127.0.0.1',
       PORT: '4000',
       DISABLE_SCHEDULED_UPDATES: scheduled ? '0' : '1',
       WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
@@ -207,4 +247,4 @@ if (require.main === module)
     console.error(error.message);
     process.exitCode = 1;
   });
-module.exports = { runtime };
+module.exports = { runtime, scheduledUpdatesEnabled };
