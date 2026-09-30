@@ -196,14 +196,18 @@ export class TrpcService {
       (feed) => this.refreshArticles(feed, page, route, trigger),
       (feed) => {
         route = resolveCollectionRoute(feed);
-        return route.channel === 'wechat2rss';
+        return (
+          route.channel === 'wechat2rss' || route.channel === 'public-album'
+        );
       },
     );
   }
 
   async collectPublicAlbums(input: { mpId: string; albumIds: string[] }) {
-    return this.recordCollectionResult(input.mpId, () =>
-      this.collectionService.collectPublicAlbums(input),
+    return this.recordCollectionResult(
+      input.mpId,
+      () => this.collectionService.collectPublicAlbums(input),
+      true,
     );
   }
 
@@ -241,6 +245,13 @@ export class TrpcService {
       accepted?: boolean;
       bodyMissing?: number;
       imageBlocked?: number;
+      pages?: number;
+      albums?: Array<{
+        id: string;
+        title: string;
+        pages: number;
+        articles: number;
+      }>;
     },
   >(
     mpId: string,
@@ -323,6 +334,8 @@ export class TrpcService {
             accepted: result.accepted,
             bodyMissing: result.bodyMissing,
             imageBlocked: result.imageBlocked,
+            pages: result.pages,
+            albums: result.albums,
             attemptedAt: Math.floor(Date.now() / 1000),
           }),
         },
@@ -387,8 +400,10 @@ export class TrpcService {
   };
 
   async getHistoryMpArticles(mpId: string) {
-    return this.recordCollectionResult(mpId, (feed) =>
-      this.collectHistory(feed),
+    return this.recordCollectionResult(
+      mpId,
+      (feed) => this.collectHistory(feed),
+      (feed) => resolveCollectionRoute(feed).channel === 'public-album',
     );
   }
 

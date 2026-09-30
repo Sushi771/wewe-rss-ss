@@ -274,7 +274,7 @@ const Feeds = () => {
   const collectionChannelLabel = collectionChannel
     ? {
         wechat2rss: 'Wechat2RSS 私有实例',
-        'public-album': '公开合集补采',
+        'public-album': '所选官方合集订阅',
         unavailable: '暂无可用通道',
       }[collectionChannel]
     : '等待获取通道状态';
@@ -290,7 +290,7 @@ const Feeds = () => {
     collectionChannel === 'wechat2rss'
       ? '“更新”提交一次上游任务并读取当前缓存；任务受理不等于新文章已取得。定时读取缓存并保存本地。订阅前历史及非群发文章不保证覆盖。'
       : collectionChannel === 'public-album'
-        ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个公开合集；合集外文章和同次推送的次条完整性未验证。该通道不提供阅读、点赞或收藏。`
+        ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个官方合集，核验原文并本地缓存正文图片；覆盖这些合集，不代表公众号全部历史。该通道不提供阅读、点赞或收藏。`
         : collectionChannel === 'unavailable'
           ? collectionRoute?.selectedBy === 'invalid'
             ? '采集通道配置无效；“更新”和定时任务会记录阻塞。可在专用采集成功后重新保存通道。已有数据和导出仍可使用。'
@@ -812,7 +812,7 @@ const Feeds = () => {
                             ? '更新中'
                             : refreshedMpIds.includes(currentMpInfo.id)
                               ? '更新完成'
-                              : '更新'}
+                              : '更新本号'}
                         </span>
                       </Button>
                     </Tooltip>

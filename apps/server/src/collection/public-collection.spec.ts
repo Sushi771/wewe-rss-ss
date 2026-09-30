@@ -5,8 +5,14 @@ import { PrismaClient } from '@prisma/client';
 import { CollectionService } from './collection.service';
 import { TrpcService } from '../trpc/trpc.service';
 import { canonicalArticleUrl } from './collection-format';
-import { bodyRetryAvailability } from './article-body-retry';
+import { bodyRetryAvailability, fetchArticleBody } from './article-body-retry';
+import { FeedsService } from '../feeds/feeds.service';
 import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
+
+jest.mock('./article-body-retry', () => ({
+  ...jest.requireActual('./article-body-retry'),
+  fetchArticleBody: jest.fn(),
+}));
 
 jest.mock('./public-album', () => ({
   fetchPublicAlbums: jest.fn(),
@@ -90,6 +96,12 @@ describe('public album integration in isolated SQLite', () => {
       } as any,
       service,
     );
+    (fetchArticleBody as jest.Mock).mockImplementation(async (article) => ({
+      contentHtml: '<div class="rich_media_content"><p>新核验正文</p></div>',
+      originalPublishTime:
+        article.publishTime + (article.verifiedSourceUrl ? 0 : 39),
+      verifiedSourceUrl: article.sourceUrl,
+    }));
     (fetchPublicAlbums as jest.Mock).mockResolvedValue({
       articles,
       pages: 2,
@@ -166,17 +178,87 @@ describe('public album integration in isolated SQLite', () => {
     expect(await trpc.refreshMpArticlesAndUpdateFeed(mpId)).toMatchObject({
       source: 'public-album',
       created: 0,
-      updated: 2,
+      updated: 0,
     });
     expect(await trpc.getHistoryMpArticles(mpId)).toMatchObject({
       source: 'public-album',
       created: 0,
-      updated: 2,
+      updated: 0,
     });
     expect(files).not.toHaveBeenCalled();
     expect(fetchPublicAlbums).toHaveBeenLastCalledWith(mpId, albumIds);
     expect(await prisma.article.count()).toBe(2);
   });
+  it('stops a blocked original before any article writes or later body requests', async () => {
+    await prisma.article.update({
+      where: { id: articles[1].id },
+      data: { contentHtml: null },
+    });
+    const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
+    const beforeFeed = await prisma.feed.findUniqueOrThrow({
+      where: { id: mpId },
+    });
+    const calls = (fetchArticleBody as jest.Mock).mock.calls.length;
+    (fetchArticleBody as jest.Mock).mockRejectedValueOnce(
+      new Error('challenge'),
+    );
+    await expect(
+      service.collectPublicAlbums({ mpId, albumIds }),
+    ).rejects.toThrow('已停止后续请求');
+    expect((fetchArticleBody as jest.Mock).mock.calls.length).toBe(calls + 1);
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      before,
+    );
+    expect(
+      await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
+    ).toEqual(beforeFeed);
+    await service.collectPublicAlbums({ mpId, albumIds });
+  });
+
+  it('uses persisted binding after service restart for manual and scheduled updates with zero additions', async () => {
+    const bodyCalls = (fetchArticleBody as jest.Mock).mock.calls.length;
+    const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
+    const restartedCollection = new CollectionService(prisma as any);
+    const config = { get: () => ({ updateDelayTime: 0 }) };
+    const restartedTrpc = new TrpcService(
+      prisma as any,
+      config as any,
+      {} as any,
+      restartedCollection,
+    );
+    expect(
+      await restartedTrpc.refreshMpArticlesAndUpdateFeed(
+        mpId,
+        1,
+        'local-manual',
+      ),
+    ).toMatchObject({
+      source: 'public-album',
+      coverage: 'selected-albums',
+      created: 0,
+      updated: 0,
+      bodyFetch: { succeeded: 0, unavailable: 0 },
+      bodyCache: { available: 2, retained: 2, missing: 0 },
+    });
+    const cron = new FeedsService(prisma as any, restartedTrpc, config as any);
+    await cron.handleUpdateFeedsCron();
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      before,
+    );
+    expect((fetchArticleBody as jest.Mock).mock.calls.length).toBe(bodyCalls);
+    expect(
+      JSON.parse(
+        (await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }))
+          .lastCollectionResult!,
+      ),
+    ).toMatchObject({
+      source: 'public-album',
+      created: 0,
+      pages: 2,
+      coverage: 'selected-albums',
+    });
+  });
+
   it('upstream failure changes neither article records nor source binding', async () => {
     const before = await prisma.feed.findUniqueOrThrow({ where: { id: mpId } });
     (fetchPublicAlbums as jest.Mock).mockRejectedValueOnce(
@@ -191,7 +273,7 @@ describe('public album integration in isolated SQLite', () => {
     expect(await prisma.article.count()).toBe(2);
   });
 
-  it('merges only identity-proven duplicates into the legacy ID and retains original publication time', async () => {
+  it('rejects ambiguous duplicate identities without deleting any old IDs', async () => {
     await prisma.article.update({
       where: { id: 'legacy-short' },
       data: { sourceUrl: null },
@@ -207,42 +289,20 @@ describe('public album integration in isolated SQLite', () => {
         verifiedSourceUrl: articles[0].url,
       },
     });
-    (resolvePublicArticle as jest.Mock).mockResolvedValueOnce({
-      ...articles[0],
-      url: articles[0].url.split('&sn=')[0],
-      publishTime: time,
-    });
-    (fetchPublicAlbums as jest.Mock).mockResolvedValueOnce({
-      articles: articles.map((article) => ({
-        ...article,
-        url: article.url.split('&sn=')[0],
-      })),
-      pages: 2,
-      albums: [{ id: albumIds[0], title: '测试合集', pages: 2, articles: 2 }],
-    });
-    expect(await service.collectPublicAlbums({ mpId, albumIds })).toMatchObject(
-      { created: 0, updated: 2, merged: 1 },
+    const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
+    await expect(
+      service.collectPublicAlbums({ mpId, albumIds }),
+    ).rejects.toThrow('多条旧记录');
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      before,
     );
-    expect(
-      await prisma.article.findUnique({ where: { id: articles[0].id } }),
-    ).toBeNull();
-    expect(
-      await prisma.article.findUniqueOrThrow({ where: { id: 'legacy-short' } }),
-    ).toMatchObject({
-      publishTime: time,
-      sourceUrl: articles[0].url,
-      verifiedSourceUrl: articles[0].url,
-      readCount: 5,
-      likeCount: 0,
-      contentHtml: '<div id="js_content">保留正文</div>',
-    });
-    expect(await prisma.article.count()).toBe(2);
+    await prisma.article.delete({ where: { id: articles[0].id } });
   });
 
   it('leaves all records and binding unchanged when a legacy identity cannot be verified', async () => {
     await prisma.article.update({
       where: { id: 'legacy-short' },
-      data: { sourceUrl: null },
+      data: { sourceUrl: null, verifiedSourceUrl: null },
     });
     const beforeFeed = await prisma.feed.findUniqueOrThrow({
       where: { id: mpId },
@@ -282,6 +342,10 @@ describe('public album integration in isolated SQLite', () => {
       source: 'public-album',
       status: 'partial',
       complete: false,
+      pages: 2,
+      albums: [{ id: albumIds[0], title: '测试合集', pages: 2, articles: 2 }],
+      created: 0,
+      bodyCache: { available: 2, retained: 2, missing: 0 },
     });
     (fetchPublicAlbums as jest.Mock).mockRejectedValueOnce(
       new Error('公开合集返回验证页或无效列表，本次未写入'),

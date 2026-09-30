@@ -9,14 +9,23 @@ export type ProviderArticle = {
   publishTime: number;
   contentHtml: string | null;
   picUrl: string;
+  /** Verified first-party URL retaining the album's original signed request parameters. */
+  requestUrl?: string;
 };
 
 export type ProviderPage = {
   articles: ProviderArticle[];
-  coverage: 'recent-window' | 'stored-history-window';
+  coverage: 'recent-window' | 'stored-history-window' | 'selected-albums';
   upstreamCount: number;
   bodyMissing: number;
   imageBlocked: number;
+  pages?: number;
+  albums?: Array<{
+    id: string;
+    title: string;
+    pages: number;
+    articles: number;
+  }>;
 };
 
 /** Reject an adapter's malformed page before image requests or article writes. */
@@ -28,7 +37,9 @@ export function assertProviderPage(
     !page ||
     !Array.isArray(page.articles) ||
     page.articles.length > 1000 ||
-    !['recent-window', 'stored-history-window'].includes(page.coverage) ||
+    !['recent-window', 'stored-history-window', 'selected-albums'].includes(
+      page.coverage,
+    ) ||
     ![page.upstreamCount, page.bodyMissing, page.imageBlocked].every(
       (value) => Number.isSafeInteger(value) && value >= 0,
     ) ||
@@ -53,6 +64,15 @@ export function assertProviderPage(
     )
       throw new Error('PROVIDER_ARTICLE_IDENTITY_INVALID');
     ids.add(identity.id);
+    if (article.requestUrl) {
+      const request = new URL(article.requestUrl);
+      if (
+        request.protocol !== 'https:' ||
+        request.pathname !== '/s' ||
+        canonicalArticleUrl(article.requestUrl).url !== article.url
+      )
+        throw new Error('PROVIDER_ARTICLE_IDENTITY_INVALID');
+    }
     if (
       typeof article.title !== 'string' ||
       !article.title.trim() ||
@@ -71,7 +91,7 @@ export function assertProviderPage(
 }
 
 export interface SubscriptionProvider {
-  readonly id: 'wechat2rss';
+  readonly id: 'wechat2rss' | 'public-album';
   addSubscription(articleUrl: string): Promise<{
     feedId: string;
     name: string;

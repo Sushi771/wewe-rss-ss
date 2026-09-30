@@ -11,10 +11,11 @@ import {
   mergeMetrics,
   Metrics,
 } from './collection-format';
-import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
+import { resolvePublicArticle } from './public-album';
 import { archiveProviderImages } from './archive-provider-images';
+import { decodeInlineImage } from './image-fetch';
 import { fetchMp2RssRecent20 } from './mp2rss';
-import { wechat2RssProvider } from './provider-registry';
+import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { assertProviderPage } from './subscription-provider';
 import {
@@ -475,116 +476,192 @@ export class CollectionService {
     this.publicCollections.add(input.mpId);
     try {
       await this.prisma.feed.findUniqueOrThrow({ where: { id: input.mpId } });
-      const result = await fetchPublicAlbums(input.mpId, input.albumIds);
-      // Album create_time and original ct differ by seconds. Titles only select candidates;
-      // an original page's biz/mid/idx must prove identity before a legacy ID is reused.
-      const candidates = await this.prisma.article.findMany({
-        where: {
-          mpId: input.mpId,
-          sourceUrl: null,
-          title: { in: result.articles.map((a) => a.title) },
-        },
-        select: { id: true, title: true },
+      const result = await publicAlbumProvider(
+        input.mpId,
+        input.albumIds,
+      ).fetchArticles(input.mpId);
+      const saved = await this.prisma.article.findMany({
+        where: { mpId: input.mpId },
       });
-      const legacy = new Map<
-        string,
-        {
-          id: string;
-          publishTime: number | null;
-          verifiedSourceUrl: string | null;
-        }
-      >();
-      for (const candidate of candidates) {
+      const legacy = new Map<string, (typeof saved)[number]>();
+      const verifiedLegacy = new Set<string>();
+      // Titles only identify candidates; resolve a real original before reusing an old ID.
+      for (const candidate of saved.filter(
+        (old) =>
+          !old.sourceUrl &&
+          !old.verifiedSourceUrl &&
+          result.articles.some((item) => item.title === old.title),
+      )) {
         const identity = await resolvePublicArticle(candidate.id, input.mpId);
         if (!result.articles.some((item) => item.id === identity.id)) continue;
         if (legacy.has(identity.id))
-          throw new Error(
-            '多条旧记录指向同一原文，需要先核对重复身份；本次未写入',
-          );
-        legacy.set(identity.id, {
-          id: candidate.id,
-          publishTime: identity.publishTime,
-          // Both the short-link page and official album must name the same
-          // signed original before a legacy ID may retry its body later.
-          verifiedSourceUrl:
-            identity.publishTime &&
-            identity.url ===
-              result.articles.find((item) => item.id === identity.id)?.url &&
-            identity.url.includes('&sn=')
-              ? identity.url
-              : null,
+          throw new Error('多条旧记录指向同一原文，本批未写入');
+        legacy.set(identity.id, candidate);
+        if (
+          identity.publishTime &&
+          identity.url ===
+            result.articles.find((item) => item.id === identity.id)?.url
+        )
+          verifiedLegacy.add(identity.id);
+      }
+      const matchesFor = (item: (typeof result.articles)[number]) =>
+        saved.filter((old) => {
+          if (old.id === item.id || old.id === legacy.get(item.id)?.id)
+            return true;
+          return [old.sourceUrl, old.verifiedSourceUrl].some((url) => {
+            if (!url) return false;
+            try {
+              return canonicalArticleUrl(url).id === item.id;
+            } catch {
+              return false;
+            }
+          });
         });
+      let succeeded = 0,
+        retained = 0,
+        available = 0,
+        bodyBytes = 0;
+      const prepared: Array<{
+        item: (typeof result.articles)[number];
+        existingId?: string;
+        verified: boolean;
+      }> = [];
+      for (const article of result.articles) {
+        const matches = matchesFor(article);
+        if (matches.length > 1)
+          throw new Error('原文身份对应多条旧记录，需先核对；本批未写入');
+        const existing = matches[0];
+        const identity = canonicalArticleUrl(article.url);
+        if (existing) assertSavedArticleIdentity(existing, identity);
+        // Any cached body is protected. Repeated updates never re-fetch it or overwrite it.
+        let item = article;
+        let verified = Boolean(existing?.verifiedSourceUrl);
+        if (existing?.contentHtml) {
+          retained++;
+          const $ = load(existing.contentHtml);
+          if (
+            !$('img')
+              .toArray()
+              .some((img) => {
+                try {
+                  decodeInlineImage($(img).attr('src') || '');
+                  return false;
+                } catch {
+                  return true;
+                }
+              })
+          )
+            available++;
+          verified ||= verifiedLegacy.has(article.id);
+        } else {
+          if (
+            !existing &&
+            saved.some(
+              (old) =>
+                old.title === article.title &&
+                old.publishTime === article.publishTime,
+            )
+          )
+            throw new Error('疑似旧短链身份未核实，本批未写入');
+          // ct is read from the original; list create_time is never promoted to a verified date.
+          let body: Awaited<ReturnType<typeof fetchArticleBody>>;
+          try {
+            body = await fetchArticleBody(
+              {
+                id: existing?.id || article.id,
+                mpId: input.mpId,
+                title: existing?.title || article.title,
+                publishTime: existing?.publishTime || article.publishTime,
+                sourceUrl: article.url,
+                verifiedSourceUrl: existing?.verifiedSourceUrl || null,
+              },
+              article.requestUrl,
+            );
+          } catch {
+            throw new Error(
+              '公开合集原文受限或身份、发布时间不一致，已停止后续请求；本批未写入',
+            );
+          }
+          if (!body.contentHtml)
+            throw new Error(
+              '公开合集原文没有可缓存正文，已停止后续请求；本批未写入',
+            );
+          const archived = await archiveProviderImages(
+            {
+              ...result,
+              articles: [{ ...article, contentHtml: body.contentHtml }],
+              bodyMissing: 0,
+              imageBlocked: 0,
+            },
+            { stopOnFailure: true },
+          );
+          item = {
+            ...archived.articles[0],
+            publishTime: existing?.publishTime || body.originalPublishTime,
+          };
+          if (!item.contentHtml)
+            throw new Error('公开合集正文图片未完整取得，本批未写入');
+          bodyBytes += Buffer.byteLength(item.contentHtml);
+          if (bodyBytes > 200 * 1024 * 1024)
+            throw new Error('公开合集正文图片超过 200 MB，本批未写入');
+          succeeded++;
+          available++;
+          verified = true;
+          // Bound traffic: each next original waits after the preceding original and its images.
+          if (article !== result.articles.at(-1))
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        prepared.push({ item, existingId: existing?.id, verified });
       }
       let created = 0,
-        updated = 0,
-        merged = 0;
-      // Fetch every selected album page before writing. Partial or challenged responses never mark a successful import.
+        updated = 0;
+      // All network and identity validation finishes before any article or binding write.
       await this.prisma.$transaction(
         async (tx) => {
-          for (const item of result.articles) {
-            const baseUrl = item.url.split('&sn=')[0];
-            let existing = await tx.article.findFirst({
-              where: {
-                mpId: input.mpId,
-                OR: [
-                  { id: item.id },
-                  { sourceUrl: baseUrl },
-                  { sourceUrl: { startsWith: `${baseUrl}&sn=` } },
-                ],
-              },
-            });
-            const original = legacy.get(item.id);
-            const knownSourceUrl = existing?.sourceUrl;
-            let mergedVerifiedSourceUrl: string | null = null;
-            let mergedFields = {};
-            if (original) {
-              const old = await tx.article.findUniqueOrThrow({
-                where: { id: original.id },
-              });
-              if (existing && existing.id !== old.id) {
-                mergedVerifiedSourceUrl = existing.verifiedSourceUrl;
-                const metrics = mergeMetrics(
-                  JSON.parse(existing.metrics || '{}'),
-                  JSON.parse(old.metrics || '{}'),
-                );
-                mergedFields = {
-                  contentHtml: old.contentHtml || existing.contentHtml,
-                  metrics: JSON.stringify(metrics),
-                  readCount:
-                    metrics.read?.value ?? old.readCount ?? existing.readCount,
-                  likeCount:
-                    metrics.like?.value ?? old.likeCount ?? existing.likeCount,
-                };
-                await tx.article.delete({ where: { id: existing.id } });
-                merged++;
-              }
-              existing = old;
-            }
-            const data = {
-              title: item.title,
-              // Retain a verified original publication date after canonical identity is bound.
-              publishTime:
-                original?.publishTime ??
-                existing?.publishTime ??
-                item.publishTime,
-              ...mergedFields,
-              sourceUrl: item.url.includes('&sn=')
-                ? item.url
-                : existing?.sourceUrl || knownSourceUrl || item.url,
-              verifiedSourceUrl:
-                existing?.verifiedSourceUrl ||
-                mergedVerifiedSourceUrl ||
-                original?.verifiedSourceUrl ||
-                null,
-              // An empty album cover must not erase a saved original cover.
-              picUrl: item.picUrl || existing?.picUrl || '',
-            };
+          for (const entry of prepared) {
+            const { item, verified } = entry;
+            const existing = entry.existingId
+              ? await tx.article.findUniqueOrThrow({
+                  where: { id: entry.existingId },
+                })
+              : null;
             if (existing) {
-              await tx.article.update({ where: { id: existing.id }, data });
-              updated++;
+              assertSavedArticleIdentity(
+                existing,
+                canonicalArticleUrl(item.url),
+              );
+              const data = {
+                ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
+                ...(!existing.verifiedSourceUrl && verified
+                  ? { verifiedSourceUrl: item.url }
+                  : {}),
+                ...(!existing.contentHtml && item.contentHtml
+                  ? {
+                      contentHtml: item.contentHtml,
+                      lastBodyStatus: 'available',
+                    }
+                  : {}),
+                ...(!existing.picUrl && item.picUrl
+                  ? { picUrl: item.picUrl }
+                  : {}),
+              };
+              if (Object.keys(data).length) {
+                await tx.article.update({ where: { id: existing.id }, data });
+                updated++;
+              }
             } else {
               await tx.article.create({
-                data: { ...data, id: item.id, mpId: input.mpId },
+                data: {
+                  id: item.id,
+                  mpId: input.mpId,
+                  title: item.title,
+                  publishTime: item.publishTime,
+                  picUrl: item.picUrl,
+                  sourceUrl: item.url,
+                  verifiedSourceUrl: verified ? item.url : null,
+                  contentHtml: item.contentHtml,
+                  lastBodyStatus: 'available',
+                },
               });
               created++;
             }
@@ -616,16 +693,18 @@ export class CollectionService {
         articles: result.articles.length,
         created,
         updated,
-        merged,
+        merged: 0,
         pages: result.pages,
         albums: result.albums,
-        oldestPublishTime: Math.min(
-          ...result.articles.map((a) => a.publishTime),
-        ),
-        newestPublishTime: Math.max(
-          ...result.articles.map((a) => a.publishTime),
-        ),
-        message: `公开合集在线取得 ${result.articles.length} 篇（新增 ${created}，更新 ${updated}，合并已核验重复 ${merged}），共 ${result.pages} 页。仅覆盖所选合集；合集外文章与次条完整性未验证，阅读、点赞、收藏未获取。`,
+        bodyFetch: { succeeded, unavailable: 0 },
+        bodyCache: {
+          available,
+          retained,
+          missing: result.articles.length - available,
+        },
+        oldestPublishTime: Math.min(...prepared.map((a) => a.item.publishTime)),
+        newestPublishTime: Math.max(...prepared.map((a) => a.item.publishTime)),
+        message: `所选官方合集订阅读取 ${result.articles.length} 篇（新增 ${created}，补充 ${updated}），共 ${result.pages} 页；新取正文及本地图片 ${succeeded} 篇，保留旧正文 ${retained} 篇。仅覆盖所选合集，不代表公众号全部历史；阅读、点赞、收藏未获取。`,
       };
     } finally {
       this.publicCollections.delete(input.mpId);

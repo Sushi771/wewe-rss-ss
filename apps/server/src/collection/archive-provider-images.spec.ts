@@ -72,4 +72,19 @@ describe('provider image archive', () => {
     expect(result.bodyMissing).toBe(1);
     expect(result.imageBlocked).toBe(1);
   });
+  it('stops strict album image traffic immediately on a redirect or rate limit', async () => {
+    for (const status of [302, 429]) {
+      const fetchMock = jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('', { status }));
+      const input = page();
+      input.articles[0].contentHtml =
+        '<div class="rich_media_content"><img src="https://mmbiz.qpic.cn/a.jpg"><img src="https://mmbiz.qpic.cn/b.jpg"></div>';
+      await expect(
+        archiveProviderImages(input, { stopOnFailure: true }),
+      ).rejects.toThrow('已停止后续请求');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      fetchMock.mockRestore();
+    }
+  });
 });

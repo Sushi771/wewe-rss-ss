@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { load } from 'cheerio';
 import { canonicalArticleUrl } from './collection-format';
 import { articleIdentity } from './article-page';
 
@@ -6,6 +7,7 @@ export type PublicArticle = ReturnType<typeof canonicalArticleUrl> & {
   title: string;
   publishTime: number;
   picUrl: string;
+  requestUrl: string;
 };
 
 export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
@@ -99,6 +101,7 @@ export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
           title: String(item.title),
           publishTime,
           picUrl: String(item.cover_img_1_1 || ''),
+          requestUrl: publicArticleRequestUrl(item.url),
         });
         albumArticles.add(identity.id);
       }
@@ -135,6 +138,23 @@ export async function fetchPublicAlbums(mpId: string, albumIds: string[]) {
   }
   if (!articles.size) throw new Error('公开合集没有返回文章，本次未写入');
   return { articles: [...articles.values()], pages, albums };
+}
+
+/** Retain signed chksm from a real album URL, but never transport session credentials. */
+export function publicArticleRequestUrl(raw: string) {
+  const decoded = load('<span></span>')('span').html(raw).text();
+  const original = new URL(decoded);
+  const identity = canonicalArticleUrl(raw);
+  if (original.pathname !== '/s') throw new Error('公开合集原文路径无效');
+  const request = new URL(identity.url);
+  // Identity parameters are canonical; chksm is the official link's content signature.
+  const chksm = original.searchParams.get('chksm');
+  if (chksm) {
+    if (!/^[a-fA-F0-9]{16,128}$/.test(chksm))
+      throw new Error('公开合集签名无效');
+    request.searchParams.set('chksm', chksm);
+  }
+  return request.toString();
 }
 
 function publicProxy() {

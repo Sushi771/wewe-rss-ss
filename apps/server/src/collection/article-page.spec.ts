@@ -61,6 +61,28 @@ describe('article publication evidence', () => {
       articleIdentity(`${html}<script>var sn="fedcba";</script>`),
     ).toThrow('原文身份字段冲突');
   });
+  it('reads empty literal OR fallback signatures and rejects conflicts or executable expressions', () => {
+    const base =
+      '<div id="js_content">正文</div><script>var biz="Mzg5NTQzMTQxMg==";var mid="2247493540";var idx="2";';
+    const result = articleIdentity(
+      `${base}var sn = "" || "abcdef" || "";</script>`,
+    );
+    expect(new URL(result.url).searchParams.get('sn')).toBe('abcdef');
+    for (const expression of [
+      '"abcdef" || "fedcba"',
+      '"abcdef" || getSignature()',
+      '"" || window.sn',
+      '"invalid"',
+    ])
+      expect(() =>
+        articleIdentity(`${base}var sn = ${expression};</script>`),
+      ).toThrow();
+    expect(() =>
+      articleIdentity(
+        `${base}var sn="" || "abcdef";<\/script><script>var sn="fedcba";</script>`,
+      ),
+    ).toThrow('身份字段冲突');
+  });
   it('requires an article body rather than a timestamp in a verification page', () => {
     expect(
       articlePublishTime('<script>var ct = 1787013185;</script><p>请验证</p>'),
