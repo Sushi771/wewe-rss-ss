@@ -36,3 +36,19 @@
 缺少精确复审标志、旧 JSON 哈希不符、来源字段变形、私有 ID 缺失或哨兵已存在时请求数为零。通过后先原子排他建立哨兵，再**至多一次** Node 原生 HTTPS 直连 GET：不带 Cookie、代理或页面凭据，不跟随 3xx、不重试，12 秒/2 MiB；遇验证/限流、非 HTML、超限立即停且不读取跳转位置。HTTP 200 HTML 仅在内存中移除 `<script>/<style>/注释` 后检查静态 `href/data-url`：页面结构类型、可辨长链目标/其他账号计数、无法判号的短链数、同一 Tag 的静态分页与显式账号筛选链接、指向目标号的官方合集链接及**已知三个之外**的 ID 数量；不执行脚本、不抓后续页、不输出 Tag ID、URL、标题、正文或原 HTML。`false/0` 只表示这份静态 HTML **未见**该迹象，不能据此判定动态 JS 没有相应功能，也不能把静态短链自动算成不同文章。
 
 离线 `preflight` 已核旧 JSON SHA、原链接形状、已保存**另一种**官方合集 HTML 不会误归类为 `publictag`，并用假网络 200 页验证跨号链接/同号链接、静态分页、账号筛选、目标其他合集计数及假 302 停止；结果 `requests=0`、新哨兵不存在。无复审标志的 `probe` 也以 `requests=0` 停止。**C 线没有在线执行。**
+
+## `publictag` 唯一一次 200 的实际判别范围
+
+总控随后对上述**精确旧官方 Tag 链接**只发一次匿名直连 GET：HTTP **200**，通过了 `text/html` 与 `<html>/<body>` 门禁，也未命中该探针的验证码/限流文本规则；静态分类为 `unclassified_html`。移除页面 `<script>/<style>/注释` 后，探针认可的 `href/data-url` 中可辨文章长链/短链、同 Tag 分页、显式目标账号过滤与其他目标官方合集链接均为 **0**。私有 `.attempted` 哨兵已建立；原始 HTML、完整 URL、响应头中的静态资源名和页面 JS **没有保存**，此 URL 不重发。`unclassified_html` 的含义是未命中探针预先定义的文章/合集/Tag 容器标记，**不能**据此断定返回的是空页、错误页或正常 Tag 页，也不能推断脚本动态加载的列表不存在。此次只排除“此 URL、此时点、匿名形状的响应中，静态 `href/data-url` 已直接暴露目标号列表/分页/其他合集”这一狭义假设；未排除 JS 渲染、其他公开页面或由更多目标文章发现合集。
+
+为追客户端发送点，离线复核本机 2026-09-30 前保存的 **67 份**腾讯第一方 `mpres` 静态 JS 与其 `firstparty-manifest.json`：没有任何一份含字面公开页面路径 `/mp/publictag`；此前保存的文章脚本只把它作为卡片**导航**，合集脚本连此路径都未引用。本轮 200 响应又未留 `<script src>`，所以无法把该页绑定到一个固定 CDN bundle、核它实际是否发 JSON、用什么分页或认证；不以源码空缺猜接口。已保存的编辑器脚本中出现的 `/cgi-bin/publictag` **不是**公开 `/mp/publictag`：见下段。不同旧合集的另一个 Tag ID 虽可从既存 JSON 取得，但在没有新客户端代码或响应结构依据前只是**同形再请求**，本轮不探。
+
+## 另一条真正存在的腾讯合集目录请求：仅发布者后台
+
+缓存 manifest 中的腾讯[后台共享模块 `modules.6f91f80b.js`](https://res.wx.qq.com/mpres/zh_CN/htmledition/pages/modules~editor/editor_for_web1~home/index/index_gray~mallactivity/list/list~media/publish_history/pu~modules.6f91f80b.js)，SHA-256 `76e6451cc5b70ead4a96c5639389089a9c6270e17e4656a524dc7dc57d78632e`，字符偏移约 **5252**：`_.get({url:"/cgi-bin/appmsgalbummgr?action=list", data:{begin,count,sub_title,type,latest:1,need_pay:0,...}})` 真正请求合集列表；成功时读 `list_resp.items/total`，以已取得条目数推进 `begin`，直至累计数达到 `total`。腾讯[后台编辑器 `editor_for_web1.2bb8d327.js`](https://res.wx.qq.com/mpres/zh_CN/htmledition/pages/editor/editor_for_web1.2bb8d327.js)，SHA-256 `342ee9fee800a5465e0bf0ca5f798835e90fcea4d2826114ca99169e1d731bb6`，偏移约 **1079049**，也以 `E.get` 请求 `/cgi-bin/appmsgalbummgr?action=list&count=<perPage>&begin=<nextBegin>&type=<albumType>`，读取 `list_resp.total/items[].id`；偏移约 **1093331** 的编辑标签流程请求同一路径并读历史/推荐合集。这里确有**账号级合集枚举与分页代码**，区别于公开 `/mp/appmsgalbum` 的单合集列表。
+
+但这三处都在 `mpres` 的**公众号发布者后台/编辑器**脚本里，通过后台 AJAX 包装器请求 `/cgi-bin`；请求形状没有“选择任意目标 `__biz`”参数。**根据代码所在后台上下文推断**账号范围由该后台登录会话决定，本轮没有接口回包复核此点。当前只有本人合法的读者登录及目标号公开文章种子，没有目标号的发布者管理权限或相应会话成功响应。因此该实现不能作为跨号订阅 Provider 或当前目标号探针，不用读者 Cookie 去试、不猜后台 token。它证明腾讯发布者后台**实现了**合集目录调用，不证明匿名目标号访问能力。
+
+Tag ID 的一手来源也须区分：旧公开 `getalbum` 首屏 `base_info.public_tag_link` 直接给特定 `tag_id`；文章脚本的回退导航从该**篇** `album_info_list[].tagId` 读值；腾讯[后台模块 `modules.b986823a.js`](https://res.wx.qq.com/mpres/zh_CN/htmledition/pages/modules~advanced/menusetting/menusetting~advanced/menusetting4Web1~album/edit/edit~comment/comment_l~modules.b986823a.js)（SHA-256 `4eaf9dcfc01260c5df4d51bc8a3b2e4176d6c5eb02daf750ff88f473267465f7`）偏移约 **239671** 从发布者的 `public_tag_info.public_tag_list[].tag_id` 取公共 Tag，同时从 `appmsg_album_info.appmsg_album_infos[].id` 取**另一类**合集 ID。这是后台已有资料的消费，不是从 `biz` 计算 ID。编辑器偏移约 **1091949** 的 `o.get({url:"/cgi-bin/publictag?action=check_and_get_info&tagname=<输入文本>&article_type=<类型>"})` 用于编辑时校验 Tag 名称；它不是公开 Tag 页文章列表。以上均未给出可用于本次匿名 `publictag` 200 页的真实列表发送行。
+
+下一步只有在**另一份正常取得并可保留静态资源 URL 的官方 Tag 页面**或公开第一方可固定版本脚本中，找到其实际列表 endpoint、认证来源和分页参数后，才值得设计不同于这次静态 HTML 分类的一次低频验证。当前不重发已试 URL，也不把发布者后台接口冒充读者可用能力。
