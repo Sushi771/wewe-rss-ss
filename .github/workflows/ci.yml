@@ -39,6 +39,8 @@ jobs:
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test official album runtime scheduling policy
         run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs
+      - name: Test standalone dependency closure
+        run: node --test scripts/local-release/dependency-closure.test.cjs
       - name: Build Server
         run: pnpm --filter server build
 
