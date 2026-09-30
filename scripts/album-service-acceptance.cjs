@@ -180,6 +180,11 @@ async function main() {
       await closed;
       fs.closeSync(log);
     }
+    const networkPath = path.join(root, `${stage}-network.json`);
+    assert(fs.existsSync(networkPath), 'NETWORK_REPORT_MISSING_UNVERIFIED');
+    const network = JSON.parse(fs.readFileSync(networkPath, 'utf8'));
+    assert.equal(network.externalNetworkDisabled, true);
+    stages.at(-1).network = network;
   }
   const report = {
     boundary:

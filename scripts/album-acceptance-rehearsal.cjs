@@ -85,14 +85,33 @@ function summary(s) {
     ]),
   );
 }
-function preservation(before, after, strict = false) {
+function preservation(before, after, strict = false, provenTimes = {}) {
   assert.deepEqual(after.accounts, before.accounts, 'ACCOUNT_CHANGED');
+  let correctedUnverifiedListTimes = 0;
   const articles = new Map(after.articles.map((r) => [r.id, r]));
   for (const old of before.articles) {
     const row = articles.get(old.id);
     assert(row, 'OLD_ARTICLE_ID_LOST');
     for (const key of Object.keys(old)) {
       if (key === 'updated_at') continue;
+      const proven = provenTimes[old.id];
+      if (
+        !strict &&
+        key === 'publish_time' &&
+        row[key] !== old[key] &&
+        /^WX_\d{5,15}_\d+_[1-9]\d*$/.test(old.id) &&
+        !old.content_html &&
+        !old.verified_source_url &&
+        row.content_html &&
+        row.verified_source_url &&
+        proven &&
+        old[key] === proven.albumCreateTime &&
+        row[key] === proven.ct &&
+        Math.abs(proven.ct - old[key]) <= 60
+      ) {
+        correctedUnverifiedListTimes++;
+        continue;
+      }
       if (
         !strict &&
         key === 'last_body_status' &&
@@ -149,7 +168,38 @@ function preservation(before, after, strict = false) {
     oldArticleIds: before.articles.length,
     lost: 0,
     protectedChanges: 0,
+    correctedUnverifiedListTimes,
   };
+}
+function verifiedTimesFromCassette(manifestPath) {
+  const manifest = json(manifestPath),
+    root = path.dirname(manifestPath);
+  const { canonicalArticleUrl } = require(
+    path.join(built, 'collection/collection-format'),
+  );
+  const { articleIdentity, articlePublishTime } = require(
+    path.join(built, 'collection/article-page'),
+  );
+  const listed = new Map(),
+    proven = {};
+  for (const entry of manifest.responses.filter((r) => r.kind === 'json')) {
+    const bytes = fs.readFileSync(path.resolve(root, entry.file));
+    assert.equal(hash(bytes), entry.sha256);
+    for (const item of JSON.parse(bytes.toString('utf8')).getalbum_resp
+      ?.article_list || [])
+      listed.set(canonicalArticleUrl(item.url).id, item);
+  }
+  for (const entry of manifest.responses.filter((r) => r.kind === 'html')) {
+    const bytes = fs.readFileSync(path.resolve(root, entry.file));
+    assert.equal(hash(bytes), entry.sha256);
+    const identity = articleIdentity(bytes.toString('utf8'));
+    const ct = articlePublishTime(bytes.toString('utf8'));
+    const item = listed.get(identity.id);
+    assert(item && ct && identity.mpId === TARGET);
+    assert.equal(identity.url, canonicalArticleUrl(item.url).url);
+    proven[identity.id] = { ct, albumCreateTime: Number(item.create_time) };
+  }
+  return proven;
 }
 function cassette(manifestPath) {
   const manifest = json(manifestPath);
@@ -279,11 +329,63 @@ async function worker() {
   checkPrivate(options.output);
   process.env.DATABASE_URL = `file:${options.copy.replace(/\\/g, '/')}`;
   delete process.env.PRIVATE_ONLINE_MODE;
+  const liveRequests = [];
+  if (options.live && options.worker === 'first') {
+    const folder = path.join(path.dirname(options.output), 'live-inputs');
+    fs.mkdirSync(folder);
+    const saveLive = (url, kind, bytes, status, contentType) => {
+      const sha256 = hash(bytes),
+        file = `${sha256}.${kind === 'image' ? 'bin' : kind}`;
+      fs.writeFileSync(path.join(folder, file), bytes);
+      liveRequests.push({ url, kind, file, sha256, status, contentType });
+      write(path.join(folder, 'manifest.json'), {
+        mpId: TARGET,
+        albumIds: json(options.manifest).albumIds,
+        capturedAt: new Date().toISOString(),
+        responses: liveRequests,
+      });
+    };
+    const axios = serverRequire('axios'),
+      originalGet = axios.get;
+    axios.get = async (url, config = {}) => {
+      const response = await originalGet(url, config);
+      const full = new URL(url);
+      for (const [k, v] of Object.entries(config.params || {}))
+        full.searchParams.set(k, String(v));
+      const isHtml = typeof response.data === 'string';
+      saveLive(
+        full.toString(),
+        isHtml ? 'html' : 'json',
+        Buffer.from(isHtml ? response.data : JSON.stringify(response.data)),
+        response.status,
+      );
+      return response;
+    };
+    const originalFetch = global.fetch;
+    global.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      const bytes = Buffer.from(await response.clone().arrayBuffer());
+      saveLive(
+        String(args[0]),
+        'image',
+        bytes,
+        response.status,
+        response.headers.get('content-type'),
+      );
+      return response;
+    };
+  }
   const replay =
     options.live && options.worker === 'first'
       ? {
           manifest: json(options.manifest),
-          counts: () => ({ mode: 'actual online provider' }),
+          counts: () => ({
+            mode: 'actual online provider',
+            requests: liveRequests.length,
+            statuses: liveRequests.map((r) => r.status),
+            originals: liveRequests.filter((r) => r.kind === 'html').length,
+            images: liveRequests.filter((r) => r.kind === 'image').length,
+          }),
         }
       : cassette(options.manifest);
   const { PrismaClient } = serverRequire('@prisma/client');
@@ -321,8 +423,10 @@ async function worker() {
         pages: result.pages,
         bodyFetch: result.bodyFetch,
         bodyCache: result.bodyCache,
+        correctedPublishTimes: result.correctedPublishTimes,
         network: replay.counts(),
         capturedAt: replay.manifest.capturedAt,
+        ...(options.live ? { observedAt: new Date().toISOString() } : {}),
         boundary: options.live
           ? 'actual online provider on isolated SQLite; no production write'
           : 'offline real-response replay; no live subscription proof',
@@ -347,7 +451,8 @@ async function worker() {
     );
     let markdownBodies = 0,
       obsidianComplete = 0,
-      verifiedAttachments = 0;
+      verifiedAttachments = 0,
+      verifiedAttachmentFiles = 0;
     const failures = [];
     for (const row of articles) {
       if (!row.contentHtml) {
@@ -364,6 +469,25 @@ async function worker() {
         .map((n) => $(n).attr('src'))
         .filter((src) => src.startsWith('data:'))
         .map((src) => hash(decodeInlineImage(src).bytes));
+      const normalizedUrl = (raw) => {
+        const u = new URL(raw);
+        u.searchParams.sort();
+        return u.href;
+      };
+      const sourceHashes = $('img')
+        .toArray()
+        .map((n) => {
+          const src = $(n).attr('src') || '';
+          if (src.startsWith('data:'))
+            return hash(decodeInlineImage(src).bytes);
+          const remote = $(n).attr('data-src') || src;
+          const entry = replay.manifest.responses.find(
+            (r) =>
+              r.kind === 'image' &&
+              normalizedUrl(r.url) === normalizedUrl(remote),
+          );
+          return entry?.sha256;
+        });
       try {
         const saved = await caller.article.saveToObsidian(row.id);
         const markdown = fs.readFileSync(saved.path, 'utf8');
@@ -379,7 +503,13 @@ async function worker() {
         );
         for (const digest of inlineHashes)
           assert(hashes.includes(digest), 'ATTACHMENT_BYTES_CHANGED');
+        for (const digest of sourceHashes)
+          assert(
+            digest && hashes.includes(digest),
+            'REMOTE_ATTACHMENT_BYTES_CHANGED',
+          );
         verifiedAttachments += inlineHashes.length;
+        verifiedAttachmentFiles += refs.length;
         obsidianComplete++;
       } catch {
         failures.push('obsidian_incomplete');
@@ -428,6 +558,7 @@ async function worker() {
       markdownBodies,
       obsidianComplete,
       verifiedInlineAttachments: verifiedAttachments,
+      verifiedAttachmentFiles,
       offlineComplete: staged.complete,
       offlineIncomplete: staged.incomplete.length,
       zip: zipResult,
@@ -495,6 +626,9 @@ async function parent() {
     { cwd: server, env },
   );
   const migrated = snapshot(copy);
+  const provenTimes = verifiedTimesFromCassette(
+    fs.realpathSync(options.manifest),
+  );
   // Migration must preserve all pre-existing columns before any provider input.
   preservation(before, migrated);
   const stages = [];
@@ -582,6 +716,7 @@ async function parent() {
       stage === 'first' ? migrated : previous,
       current,
       stage !== 'first',
+      provenTimes,
     );
     stages.push({ stage, ...json(output), protection: protectedFields });
     previous = current;
@@ -655,10 +790,11 @@ async function parent() {
   );
   assert.equal(exported.status, 0, 'EXPORT_FAILED:CHECK_PRIVATE_LOG');
   assert.deepEqual(snapshot(source), before, 'PRODUCTION_CHANGED');
-  preservation(migrated, snapshot(copy));
+  preservation(migrated, snapshot(copy), false, provenTimes);
   const report = {
-    boundary:
-      'real saved responses replayed offline; not natural new publication proof',
+    boundary: options.live
+      ? 'first actual online provider update on isolated SQLite; repeats/exports replay saved inputs; no natural new publication proof'
+      : 'real saved responses replayed offline; not natural new publication proof',
     restart:
       'separate Node process persistence only; HTTP service restart remains unverified',
     baseline,
@@ -722,6 +858,41 @@ function selfTest() {
   dup.articles.push({ ...dup.articles[0], id: 'duplicate' });
   assert.throws(() => preservation(before, dup, true));
   cases++;
+  const unverified = cloned();
+  Object.assign(unverified.articles[0], {
+    id: 'WX_3895431412_2247499999_1',
+    content_html: null,
+    verified_source_url: null,
+    publish_time: 1790000000,
+  });
+  const corrected = structuredClone(unverified);
+  Object.assign(corrected.articles[0], {
+    content_html: '<p>actual</p>',
+    verified_source_url: 'proven',
+    publish_time: 1790000039,
+  });
+  const proof = {
+    WX_3895431412_2247499999_1: { ct: 1790000039, albumCreateTime: 1790000000 },
+  };
+  assert.equal(
+    preservation(unverified, corrected, false, proof)
+      .correctedUnverifiedListTimes,
+    1,
+  );
+  assert.throws(() => preservation(unverified, corrected, true, proof));
+  cases++;
+  const wrongCt = structuredClone(corrected);
+  wrongCt.articles[0].publish_time++;
+  assert.throws(() => preservation(unverified, wrongCt, false, proof));
+  cases++;
+  const trusted = structuredClone(unverified);
+  trusted.articles[0].verified_source_url = 'old-proof';
+  assert.throws(() => preservation(trusted, corrected, false, proof));
+  cases++;
+  const cached = structuredClone(unverified);
+  cached.articles[0].content_html = '<p>old</p>';
+  assert.throws(() => preservation(cached, corrected, false, proof));
+  cases++;
   console.log(
     JSON.stringify({
       selfTest: 'protection assertions only',
@@ -730,7 +901,14 @@ function selfTest() {
     }),
   );
 }
-module.exports = { cassette, snapshot, preservation, summary, inside };
+module.exports = {
+  cassette,
+  snapshot,
+  preservation,
+  summary,
+  inside,
+  verifiedTimesFromCassette,
+};
 if (require.main === module)
   Promise.resolve()
     .then(() =>

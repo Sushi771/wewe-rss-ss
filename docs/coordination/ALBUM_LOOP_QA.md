@@ -13,9 +13,35 @@ A 当日真实输入已经私存：2 页官方 JSON、11 篇当前原样 HTML、
 ## Review 与当前验收状态
 
 - 已推动 Provider 缓存可用数逐图调用 `decodeInlineImage`。仅 `data:` 前缀会将坏 MIME 或截断字节误报完整；现在坏缓存不改旧正文，只如实报告缺口。
-- 当前真实回放触发实际正文门禁：真实原文的 canonical 为 HTTPS `/s?…` 完整身份链接，而 `fetchArticleBody` 无条件要求 `/s/<22位短链>`，导致 8 个缺正文输入 `invalid_page`。这些原样 HTML 的正式身份/标题/ct 可解析，验证码 DOM 均无；已交 B 修复，必须仍精确核 biz/mid/idx/sn/ct/title，旧短 ID 仍检查短 canonical 与 ID 一致。此处不需要新的来源研究或重复腾讯请求。
-- 失败批次的演练副本仍持久保留；尚未声称成功导入、重复 0 新增、HTTP 服务重启或全部导出通过。
-- QA 保护断言 self-test 共 11 个破坏案例通过：旧 ID 消失、ct 改变、正文清空、封面清空、0 阅读被 null 覆盖、点赞/metrics/创建时间变化、账号改变、重复新增等均被阻止。ZIP 校验器另以独立合成文件验证 CRC 与文件字节一致；这两项是测试器测试，不是订阅验收。
+- 真实原文的 canonical 为 HTTPS `/s?…` 完整身份链接，已定位并推动修复原先只接受短 canonical 的门禁。现在 canonical-ID 行可精确核完整 biz/mid/idx/sn；旧短 ID 继续核短 canonical 与旧 ID 一致，没有放宽身份、标题或已有可信 ct。先前失败副本的 1447 个旧 ID、正文、图片引用、全部指标与合集绑定全部不变，failed 状态正确记录，见 `97286508-de1f-468c-854d-7d77f8f58499/failure-protection.json`。
+- 仅对无正文/无 verified 来源的 canonical-ID 行，当旧时间恰等当前合集列表时间、当前原文核验成功、ct 偏差不超过 60 秒，才将未可信列表时间校正为真实 ct。QA 从保存的原样 HTML 独立解析 literal ct 与官方列表对照，仅接受该白名单；已有正文或已有 verified 的可信时间保持逐字段相等。
+- QA 保护断言 self-test 共 15 个破坏案例通过，包含错误 ct 白名单、改已有可信 ct、改已有缓存 ct、重复校正等；其余旧 ID、正文、封面、0 阅读、metrics 与账号保护亦通过。这是测试器测试，独立于以下真实订阅输入验收。
+
+## 正式 Provider 与服务实测结果
+
+`private-data/album-loop-qa/ffbaf16d-2d9f-411d-974c-9d71aecf2ee5/result.json` 是当前真实输入的禁网回放：正式 Provider 2 页/19 条，首次新增 0、补正文 8、内联完整图片 6 张，校正未可信列表时间 5 条；第二次手动与 scheduled 入口各新增 0/更新 0/正文请求 0。1447 个旧 ID 无丢失，旧正文/封面/指标/账号与可信时间没有损坏，生产源全表基线完全不变。
+
+同 run 的 `http-5ad18e90-21b5-4cf7-b351-e99609848771/result.json` 是**实际 Nest HTTP 服务**两次启动/退出重启验收，仅使用另建的 19 篇 scope 副本。两次匿名 POST 均 401、私人登录成功、授权 `feed.refreshArticles` 均 200/新增 0、RSS 200、真实 ZIP 下载 200；服务更新后旧文章字段严格相等。上游只回放真实输入，禁外网报告定期落盘、关停后确认存在，不依赖 Windows 强杀时不可靠的 exit hook。
+
+`private-data/album-loop-qa/031ae03c-6db2-4e0a-b9a3-8fc7d59e7a01/result.json` 则是一次**真实联网正式 Provider**完整 SQLite 副本采集：2 次列表、8 次缺正文原文、6 次图片，共 16 请求全部 HTTP 200；新增 0、补正文 8、有限 ct 校正 5，原 1447 篇与所有旧可信字段保护通过，生产未写。当前真实列表/HTML/图片字节与逐请求清单在同目录 `live-inputs/` 持久保存。没有重发 cached 11 篇原文或历史失败原文。后续第二次与 scheduled 检查是离线回放，不混称为多次真实联网更新。
+
+初轮 19 篇 scope 导出有 7 篇缺旧远程图片字节；已由原样旧正文提取 33 个引用、27 个不同精确腾讯 CDN URL，并留 bodyHash 到 `legacy-image-input.json`。A 仅对这 27 图各真实 GET 一次，5,106,897 字节全部完整签名通过，没有重复原文，没有改旧正文。图片原字节清单持久在 `private-data/album-acceptance-20260930/legacy-images/manifest.json`。
+
+最终完整输入 cassette 为 `private-data/album-loop-qa/cassette-ae20c65a-6a7a-4124-8b33-f18b1350738f/manifest.json`（2 页、11 当前原样 HTML、38 不同实际图片字节）。以真正在线成功副本另建的 scope19 做完整禁网验收，结果在 `031ae03c-6db2-4e0a-b9a3-8fc7d59e7a01/complete-exports/exports.json`：
+
+| 检查                                    | 结果                             |
+| --------------------------------------- | -------------------------------- |
+| RSS / 浏览器 Markdown 有正文            | 19 / 19                          |
+| Obsidian 完整                           | 19 / 19                          |
+| ZIP 正文与图片完整 / 未完整             | 19 / 0                           |
+| 附件实际字节对 inline 或当前 CDN SHA256 | 44 / 44                          |
+| 实际 ZIP                                | 64 文件、44 附件、9,493,715 字节 |
+| ZIP CRC / staged 逐文件字节             | 通过 / 全部相等                  |
+| 缺 cassette 请求 / 实际外网             | 0 / 禁用                         |
+
+同 run 的 `http-c7555846-512e-448e-bc02-0951654dbb97/result.json` 再次验证真正 Nest HTTP 服务启动与退出重启：两次匿名手动更新 401、授权更新 200/新增 0、RSS 200、完整 ZIP 下载 200（均 9,493,715 字节），19 篇旧文章字段严格无变化。每次 2 页及 38 图均为保存的真实输入回放，缺请求 0，禁外网报告已落盘；不能据此声称两次均向腾讯联网。
+
+这些结果证明正式 Provider 在一致性副本上可工作，尚未在生产库启用合集、实际持续运行或等待到自然新文章，不能宣布真实订阅恢复完成。
 
 ## 可执行验收命令
 
@@ -23,7 +49,7 @@ A 当日真实输入已经私存：2 页官方 JSON、11 篇当前原样 HTML、
 
 ```powershell
 $repo = 'C:/Users/ss/.gemini/antigravity/playground/sparse-comet/wewe-rss-ss'
-$cassette = "$repo/private-data/album-loop-qa/cassette-a524252e-a9d4-4e8a-94b4-9018feeab87e/manifest.json"
+$cassette = "$repo/private-data/album-loop-qa/cassette-ae20c65a-6a7a-4124-8b33-f18b1350738f/manifest.json"
 node scripts/album-acceptance-rehearsal.cjs --database "$repo/apps/server/data/wewe-rss.db" --manifest $cassette --runtime-root $repo
 ```
 
@@ -39,3 +65,5 @@ node scripts/album-acceptance-rehearsal.cjs --database "$repo/apps/server/data/w
 ```
 
 HTTP 服务仅监听随机 `127.0.0.1` 端口，使用随机授权码与不含 `.env` 的新 launch 目录，定时采集关闭。认证后的实际接口是 `POST /trpc/feed.refreshArticles`。HTTP 启动/重启是真实服务工程验收，上游仍为当前真实响应离线回放。`--live` 仅首次 Provider 副本采集接通真实网络，后续重复和导出继续回放；触发限制立即停止且不写任何文章/合集绑定。自然新文章尚未出现时不得称真实增量通过。
+
+`require('scripts/album-acceptance-rehearsal.cjs')` 导出 `snapshot(database)`、`summary(snapshot)`、`preservation(before, after, strict=false, provenTimes={})` 和 `verifiedTimesFromCassette(manifestPath)`。导入前设置 `ALBUM_QA_RUNTIME_ROOT` 为 main 根目录；模块导入不运行采集或 HTTP 服务器。snapshot 含账号与原记录，仅内部比较，禁止打印或提交；summary 仅计数与摘要。首次有限 ct 校正必须传 exact 原文白名单，第二次与重启使用 strict=true。

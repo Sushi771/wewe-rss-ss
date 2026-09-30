@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
-const [sourcePath, runtimeRoot] = process.argv.slice(2);
+const [sourcePath, runtimeRoot, ...extraManifests] = process.argv.slice(2);
 const runtime = fs.realpathSync(runtimeRoot);
 const source = fs.realpathSync(sourcePath);
 const root = path.dirname(source);
@@ -94,6 +94,25 @@ for (const directory of fs.readdirSync(root)) {
   for (let i = 0; i < local.length; i++) {
     const { bytes, type } = decodeInlineImage(local[i]);
     save(remote[i], 'image', bytes, type);
+    images++;
+  }
+}
+for (const extraPath of extraManifests) {
+  const extraRoot = path.dirname(fs.realpathSync(extraPath));
+  const extra = JSON.parse(fs.readFileSync(extraPath, 'utf8'));
+  assert.equal(extra.mpId, manifest.mpId);
+  for (const entry of extra.responses) {
+    assert.equal(entry.kind, 'image', 'EXTRA_ONLY_VERIFIED_IMAGE_BYTES');
+    if (entry.status != null) assert.equal(entry.status, 200);
+    const bytes = fs.readFileSync(path.resolve(extraRoot, entry.file));
+    assert.equal(
+      crypto.createHash('sha256').update(bytes).digest('hex'),
+      entry.sha256,
+    );
+    const validated = decodeInlineImage(
+      `data:${entry.contentType};base64,${bytes.toString('base64')}`,
+    );
+    save(entry.url, 'image', validated.bytes, validated.type);
     images++;
   }
 }
