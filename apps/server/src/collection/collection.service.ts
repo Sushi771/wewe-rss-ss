@@ -753,7 +753,7 @@ export class CollectionService {
         },
         oldestPublishTime: Math.min(...prepared.map((a) => a.item.publishTime)),
         newestPublishTime: Math.max(...prepared.map((a) => a.item.publishTime)),
-        message: `所选官方合集订阅读取 ${result.articles.length} 篇（新增 ${created}，补充 ${updated}），共 ${result.pages} 页；新取正文及本地图片 ${succeeded} 篇，保留旧正文 ${retained} 篇，核实并校正未验证列表时间 ${correctedPublishTimes} 篇。仅覆盖所选合集，不代表公众号全部历史；阅读、点赞、收藏未获取。`,
+        message: `所选官方合集订阅读取 ${result.articles.length} 篇（新增 ${created}，补充 ${updated}），共 ${result.pages} 页；新取正文及本地图片 ${succeeded} 篇，保留旧正文 ${retained} 篇，核实并校正未验证列表时间 ${correctedPublishTimes} 篇。仅覆盖所选合集，未覆盖合集外近期文章，公众号级近期发现尚未恢复；不代表公众号全部历史；阅读、点赞、收藏未获取。`,
       };
     } finally {
       this.publicCollections.delete(input.mpId);

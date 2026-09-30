@@ -540,4 +540,133 @@ describe('backend collection routing', () => {
       else process.env.DISABLE_SCHEDULED_UPDATES = previous;
     }
   });
+
+  // These checks certify result semantics only. Synthetic fixtures do not prove
+  // a real account list can discover any user-provided regression article.
+  it('keeps a successful selected-album refresh incomplete in single and batch results', async () => {
+    await prisma.feed.update({
+      where: { id: ids[0] },
+      data: {
+        collectionChannel: 'public-album',
+        publicAlbumIds: '["1234567890123456789"]',
+      },
+    });
+    const album = jest
+      .spyOn(CollectionService.prototype, 'collectPublicAlbums')
+      .mockResolvedValue({
+        source: 'public-album',
+        status: 'partial',
+        complete: false,
+        coverage: 'selected-albums',
+        articles: 19,
+        created: 0,
+        updated: 0,
+        message: '仅所选合集刷新完成，公众号近期发现未恢复。',
+      } as any);
+    try {
+      const single = await service.refreshMpArticlesAndUpdateFeed(
+        ids[0],
+        1,
+        'local-manual',
+      );
+      expect(single).toMatchObject({
+        source: 'public-album',
+        status: 'partial',
+        complete: false,
+        coverage: 'selected-albums',
+      });
+      const results =
+        await service.refreshAllMpArticlesAndUpdateFeed('local-manual');
+      expect(results.find((item) => item.id === ids[0])).toMatchObject({
+        complete: false,
+        coverage: 'selected-albums',
+      });
+      expect(results.every((item) => item.complete)).toBe(false);
+      expect(album).toHaveBeenCalledWith({
+        mpId: ids[0],
+        albumIds: ['1234567890123456789'],
+      });
+    } finally {
+      album.mockRestore();
+    }
+  });
+
+  it('blocks a feed without a source instead of reporting zero new articles as success', async () => {
+    (enabledWechat2RssFeedIds as jest.Mock).mockReturnValue(new Set());
+    await prisma.feed.update({
+      where: { id: ids[0] },
+      data: { syncTime: 1700000000 },
+    });
+    const result = await service.refreshMpArticlesAndUpdateFeed(
+      ids[0],
+      1,
+      'local-manual',
+    );
+    expect(result).toMatchObject({
+      source: 'unavailable',
+      status: 'blocked',
+      complete: false,
+      coverage: 'none',
+    });
+    expect(wechat2RssProvider).not.toHaveBeenCalled();
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).syncTime,
+    ).toBe(1700000000);
+    expect(await prisma.article.count()).toBe(0);
+  });
+
+  it.each([false, true])(
+    'preserves success time when authentication is unavailable (challenged=%s)',
+    async (challenged) => {
+      const fetchArticles = jest.fn();
+      (wechat2RssProvider as jest.Mock).mockReturnValue({
+        checkAccountStatus: async () => ({ available: false, challenged }),
+        fetchArticles,
+      });
+      await prisma.feed.update({
+        where: { id: ids[0] },
+        data: { syncTime: 1700000000 },
+      });
+      const result = await service.refreshMpArticlesAndUpdateFeed(
+        ids[0],
+        1,
+        'scheduled',
+      );
+      expect(result).toMatchObject({
+        status: 'blocked',
+        complete: false,
+        coverage: 'none',
+      });
+      expect(fetchArticles).not.toHaveBeenCalled();
+      expect(
+        (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } }))
+          .syncTime,
+      ).toBe(1700000000);
+      expect(await prisma.article.count()).toBe(0);
+    },
+  );
+
+  it('keeps upstream list errors failed and leaves the previous success time unchanged', async () => {
+    (wechat2RssProvider as jest.Mock).mockReturnValue({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      fetchArticles: async () => {
+        throw new Error('list service unavailable');
+      },
+    });
+    await prisma.feed.update({
+      where: { id: ids[0] },
+      data: { syncTime: 1700000000 },
+    });
+    await expect(
+      service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'scheduled'),
+    ).rejects.toThrow('list service unavailable');
+    const feed = await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } });
+    expect(feed.syncTime).toBe(1700000000);
+    expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject({
+      status: 'failed',
+      complete: false,
+      coverage: 'none',
+    });
+    expect(await prisma.article.count()).toBe(0);
+  });
 });
