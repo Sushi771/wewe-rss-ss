@@ -242,6 +242,7 @@ export class TrpcService {
       bodyUnavailable?: { id: string; cached: boolean }[];
       created?: number;
       updated?: number;
+      correctedPublishTimes?: number;
       accepted?: boolean;
       bodyMissing?: number;
       imageBlocked?: number;
@@ -331,6 +332,7 @@ export class TrpcService {
             bodyUnavailable: result.bodyUnavailable,
             created: result.created,
             updated: result.updated,
+            correctedPublishTimes: result.correctedPublishTimes,
             accepted: result.accepted,
             bodyMissing: result.bodyMissing,
             imageBlocked: result.imageBlocked,

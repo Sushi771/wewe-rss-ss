@@ -525,6 +525,9 @@ export class CollectionService {
         item: (typeof result.articles)[number];
         existingId?: string;
         verified: boolean;
+        originalPublishTime?: number;
+        listPublishTime: number;
+        correctPublishTime: boolean;
       }> = [];
       for (const article of result.articles) {
         const matches = matchesFor(article);
@@ -536,6 +539,8 @@ export class CollectionService {
         // Any cached body is protected. Repeated updates never re-fetch it or overwrite it.
         let item = article;
         let verified = Boolean(existing?.verifiedSourceUrl);
+        let originalPublishTime: number | undefined;
+        let correctPublishTime = false;
         if (existing?.contentHtml) {
           retained++;
           const $ = load(existing.contentHtml);
@@ -586,6 +591,24 @@ export class CollectionService {
             throw new Error(
               '公开合集原文没有可缓存正文，已停止后续请求；本批未写入',
             );
+          originalPublishTime = body.originalPublishTime;
+          correctPublishTime = Boolean(
+            existing &&
+            /^WX_\d{5,15}_\d+_[1-9]\d*$/.test(existing.id) &&
+            !existing.contentHtml &&
+            !existing.verifiedSourceUrl &&
+            existing.publishTime === article.publishTime &&
+            existing.publishTime !== originalPublishTime &&
+            Math.abs(existing.publishTime - originalPublishTime) <= 60,
+          );
+          if (
+            existing &&
+            existing.publishTime !== originalPublishTime &&
+            !correctPublishTime
+          )
+            throw new Error(
+              '已存发布时间无法证明为未经核验的合集列表时间，本批未写入',
+            );
           const archived = await archiveProviderImages(
             {
               ...result,
@@ -597,7 +620,9 @@ export class CollectionService {
           );
           item = {
             ...archived.articles[0],
-            publishTime: existing?.publishTime || body.originalPublishTime,
+            publishTime: correctPublishTime
+              ? body.originalPublishTime
+              : existing?.publishTime || body.originalPublishTime,
           };
           if (!item.contentHtml)
             throw new Error('公开合集正文图片未完整取得，本批未写入');
@@ -611,10 +636,18 @@ export class CollectionService {
           if (article !== result.articles.at(-1))
             await new Promise((resolve) => setTimeout(resolve, 2000));
         }
-        prepared.push({ item, existingId: existing?.id, verified });
+        prepared.push({
+          item,
+          existingId: existing?.id,
+          verified,
+          originalPublishTime,
+          listPublishTime: article.publishTime,
+          correctPublishTime,
+        });
       }
       let created = 0,
-        updated = 0;
+        updated = 0,
+        correctedPublishTimes = 0;
       // All network and identity validation finishes before any article or binding write.
       await this.prisma.$transaction(
         async (tx) => {
@@ -630,7 +663,21 @@ export class CollectionService {
                 existing,
                 canonicalArticleUrl(item.url),
               );
+              if (
+                entry.correctPublishTime &&
+                (!/^WX_\d{5,15}_\d+_[1-9]\d*$/.test(existing.id) ||
+                  existing.contentHtml ||
+                  existing.verifiedSourceUrl ||
+                  existing.publishTime !== entry.listPublishTime ||
+                  !entry.originalPublishTime ||
+                  Math.abs(existing.publishTime - entry.originalPublishTime) >
+                    60)
+              )
+                throw new Error('原文时间校正条件已变化，本批未写入');
               const data = {
+                ...(entry.correctPublishTime
+                  ? { publishTime: entry.originalPublishTime }
+                  : {}),
                 ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
                 ...(!existing.verifiedSourceUrl && verified
                   ? { verifiedSourceUrl: item.url }
@@ -648,6 +695,7 @@ export class CollectionService {
               if (Object.keys(data).length) {
                 await tx.article.update({ where: { id: existing.id }, data });
                 updated++;
+                if (entry.correctPublishTime) correctedPublishTimes++;
               }
             } else {
               await tx.article.create({
@@ -693,6 +741,7 @@ export class CollectionService {
         articles: result.articles.length,
         created,
         updated,
+        correctedPublishTimes,
         merged: 0,
         pages: result.pages,
         albums: result.albums,
@@ -704,7 +753,7 @@ export class CollectionService {
         },
         oldestPublishTime: Math.min(...prepared.map((a) => a.item.publishTime)),
         newestPublishTime: Math.max(...prepared.map((a) => a.item.publishTime)),
-        message: `所选官方合集订阅读取 ${result.articles.length} 篇（新增 ${created}，补充 ${updated}），共 ${result.pages} 页；新取正文及本地图片 ${succeeded} 篇，保留旧正文 ${retained} 篇。仅覆盖所选合集，不代表公众号全部历史；阅读、点赞、收藏未获取。`,
+        message: `所选官方合集订阅读取 ${result.articles.length} 篇（新增 ${created}，补充 ${updated}），共 ${result.pages} 页；新取正文及本地图片 ${succeeded} 篇，保留旧正文 ${retained} 篇，核实并校正未验证列表时间 ${correctedPublishTimes} 篇。仅覆盖所选合集，不代表公众号全部历史；阅读、点赞、收藏未获取。`,
       };
     } finally {
       this.publicCollections.delete(input.mpId);
