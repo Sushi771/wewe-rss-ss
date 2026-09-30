@@ -38,9 +38,16 @@
 
 第一方 `$fetch` wrapper 显式加入页面 SSR `X-SSR-Request-Id`，而该隔离探针没有正常页面的 SSR state，故**不编造此值**；也不伪称其请求头与页面运行时完全一致。它只验证已知正常 mobile→Web init 会话对另一条 `/api` 路径的响应，失败不证明真实 QR 浏览器会话也失败。服务端如要求页面态，须另有一手证据和独立复审，不能在这个探针后变更头再试。
 
-离线 `node --check`、`--plan`、`--self-test` 均通过；假网络覆盖至多一次 init/一次 cover、init 401、封面 `-2012`、未知结构先私存、原始 JSON 首次落盘失败仅本地重试、独立哨兵防重与输出不泄密。以现有生产库和合法恢复目录运行只读 `--preflight` 得 `preflight_ready`、`sourceAndBackupMatched=true`、`targetFeedMatched=true`、`existingApiCoverHistory=false`、`networkRequests=0`、`productionWrites=0`。**在线模式未执行**。总控复审时使用绝对路径：
+离线 `node --check`、`--plan`、`--self-test` 均通过；假网络覆盖至多一次 init/一次 cover、init 401、封面 `-2012`、未知结构先私存、原始 JSON 首次落盘失败仅本地重试、独立哨兵防重与输出不泄密。执行前，以现有生产库和合法恢复目录运行只读 `--preflight` 得 `preflight_ready`、`sourceAndBackupMatched=true`、`targetFeedMatched=true`、`existingApiCoverHistory=false`、`networkRequests=0`、`productionWrites=0`。
 
-```powershell
-node scripts/research/probe-weread-api-mp-cover.cjs --preflight --db <生产 SQLite> --run-dir <既有 private-data/mobile-refresh-* 目录>
-node scripts/research/probe-weread-api-mp-cover.cjs --execute --db <生产 SQLite> --run-dir <同一私有目录> --playwright-core <已审 playwright-core 路径> --browser <Edge/Chrome 可执行文件路径> --approved-online
-```
+## 本账号一次在线结果与停止边界
+
+总控随后按上述已审脚本**仅执行一次**：`/web/login/session/init` HTTP 200，隔离 Cookie jar 有 `wr_vid/wr_skey/wr_rt/wr_pf/wr_ql`，`wr_vid` 与同账号一致；目标 `/api/mp/cover` HTTP **401**。没有文章、列表、页面导航、跳转或重试请求；独立 `/api` 哨兵已在仓库忽略的固定 `private-data` 持久化，生产库写入 0。401 没有可接受的封面 JSON，因而没有本账号的 `reviewId` 或原文证据。**同一条件下不得再请求 `/api/mp/cover`**，也不得通过随意添加 SSR ID、Referer、Cookie 或 ticket 把 401 当成可碰运气的参数题。
+
+这次结果只排除“现有合法移动刷新凭据 → `/web/login/session/init` → 五 Cookie → 无页面 SSR `X-SSR-Request-Id` 的隔离 `context.request.get('/api/mp/cover?bookId=<目标>')`”这一请求形态在此次账号、目标号和时点成功。它没有实测正常 QR 登录后的浏览器页面请求，也没有证明 401 必由缺少 SSR ID、缺少页面导航、移动与 QR token 不等价、目标跨号权限或其他某一原因导致。旧 `/web/mp/cover` 的 HTTP 200/业务 `-2012` 是另一条路径和另一层响应，不能互相替代解释。
+
+## QR 浏览器会话的剩余证据与缺口
+
+针对固定首页 bundle 再核：`BVQc4ULa.js` 的 `getLoginInfo → accessToken/webLoginVid → wr_skey/wr_vid → /api/userInfo` 是可审查的**正常 QR 登录客户端链**；其 `BookCover` 后续可能在有 MP book 卡片时用同源 `$fetch` 调 `/api/mp/cover`。这构成与本机 mobile→Web init 不同的认证来源和页面上下文，但源码没有显示 QR 响应在服务器上为目标封面授予什么权限，没有 `/api/mp/cover` 的成功回包，也没有证明 `X-SSR-Request-Id` 是访问控制凭据。`BookCover` wrapper 没有显式 ticket 或 `x-vid/x-skey`；不能从另一个 wrapper 的头名推给它。当前匿名首页 HTML 未含 `MP_WXS_*` 书籍对象，故静态组件存在也不等于本次匿名页面实际发过封面请求。
+
+本次定向检查固定首页的 38 个已列 JS、其 QR 处理和 `$fetch` 包装，并搜索公开 GitHub 中 `/api/mp/cover` 同时涉及 QR Cookie/2026 真实响应的组合；没有定位到腾讯服务端 401 判据、`/api/mp/cover` 的固定成功回包，或可将本机移动 Web init `wr_skey` 明确转换为 QR `getLoginInfo.accessToken` 的一手代码。下一次若研究 QR 路线，先要本人正常扫码产生真实浏览器会话，再单独审查一次与本次实质不同、可记录页面 SSR ID/请求上下文且不抓包作为产品运行方式的最小只读验证；缺乏该条件时只继续源码研究，不自动登录、不复用本次 401 路径。扫码后的服务端有效期和无人值守续期仍无一手证据，不能把封面探针成功等同可持续订阅。
