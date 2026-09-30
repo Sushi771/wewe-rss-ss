@@ -1,5 +1,5 @@
 // Bounded real official-album acceptance. Raw inputs and outputs stay Git-ignored.
-// node scripts/album-acceptance-body.cjs <list|verify|inspect|body|images> <main-root> <server-root> [index]
+// node scripts/album-acceptance-body.cjs <list|verify|inspect|body|images|legacy-images|legacy-images-preflight> <main-root> <server-root> [index]
 const fs = require('node:fs');
 const path = require('node:path');
 const https = require('node:https');
@@ -91,7 +91,15 @@ async function get(url, maxBytes, expectedType) {
 async function main() {
   const [mode, mainRootRaw, serverRootRaw, indexRaw] = process.argv.slice(2);
   if (
-    !['list', 'verify', 'inspect', 'body', 'images'].includes(mode) ||
+    ![
+      'list',
+      'verify',
+      'inspect',
+      'body',
+      'images',
+      'legacy-images',
+      'legacy-images-preflight',
+    ].includes(mode) ||
     !mainRootRaw ||
     !serverRootRaw
   )
@@ -116,6 +124,185 @@ async function main() {
     path.join(path.resolve(serverRootRaw), 'package.json'),
   );
   const { load } = requireServer('cheerio');
+  if (mode === 'legacy-images' || mode === 'legacy-images-preflight') {
+    const { DatabaseSync } = require('node:sqlite');
+    const { allowedImageUrl, fetchAllowedImage, decodeInlineImage } = require(
+      path.join(built, 'image-fetch.js'),
+    );
+    const qaDir = path.join(mainRoot, 'private-data', 'album-loop-qa');
+    const inputPath = path.join(qaDir, 'legacy-image-input.json');
+    const inputRaw = fs.readFileSync(inputPath, 'utf8');
+    const input = JSON.parse(inputRaw);
+    const current = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (
+      input.mpId !== MP ||
+      String(input.albumId) !== ALBUM ||
+      !Array.isArray(input.items) ||
+      input.items.length > 1140
+    )
+      throw new Error('legacy_scope_gate');
+    const scopeKeys = new Set(
+      current.items.map((item) => {
+        const q = official(item.url).searchParams;
+        return ['__biz', 'mid', 'idx'].map((key) => q.get(key)).join('\0');
+      }),
+    );
+    const copyPath = fs.realpathSync(path.resolve(qaDir, input.sourceCopy));
+    if (!copyPath.startsWith(fs.realpathSync(qaDir) + path.sep))
+      throw new Error('legacy_copy_path_gate');
+    const db = new DatabaseSync(copyPath, { readOnly: true });
+    const images = new Map();
+    try {
+      db.exec('PRAGMA query_only=ON');
+      if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok')
+        throw new Error('legacy_copy_integrity_gate');
+      for (const item of input.items) {
+        const row = db
+          .prepare(
+            'SELECT mp_id,verified_source_url,source_url,content_html FROM articles WHERE id=?',
+          )
+          .get(item.articleId);
+        if (
+          !row ||
+          row.mp_id !== MP ||
+          !row.content_html ||
+          hash(row.content_html) !== item.bodyHash
+        )
+          throw new Error('legacy_body_hash_gate');
+        const source = new URL(row.verified_source_url || row.source_url);
+        const key = ['__biz', 'mid', 'idx']
+          .map((field) => source.searchParams.get(field))
+          .join('\0');
+        if (source.hostname !== 'mp.weixin.qq.com' || !scopeKeys.has(key))
+          throw new Error('legacy_article_scope_gate');
+        const $ = load(row.content_html);
+        const srcs = $('img')
+          .toArray()
+          .map((node) => {
+            const src = $(node).attr('src');
+            return src?.startsWith('data:image/')
+              ? src
+              : $(node).attr('data-src') || src;
+          });
+        if (!srcs.includes(item.url)) throw new Error('legacy_exact_src_gate');
+        const url = allowedImageUrl(item.url);
+        if (url.hostname !== 'mmbiz.qpic.cn')
+          throw new Error('legacy_image_host_gate');
+        const ids = images.get(item.url) || new Set();
+        ids.add(item.articleId);
+        images.set(item.url, ids);
+      }
+    } finally {
+      db.close();
+    }
+    if (mode === 'legacy-images-preflight') {
+      console.log(
+        JSON.stringify({
+          result: 'legacy_images_preflight_pass',
+          requests: 0,
+          scopeArticles: scopeKeys.size,
+          articles: new Set(input.items.map((item) => item.articleId)).size,
+          imageReferences: input.items.length,
+          distinctImageURLs: images.size,
+        }),
+      );
+      return;
+    }
+    const imageDir = path.join(dir, 'legacy-images');
+    fs.mkdirSync(imageDir, { recursive: true });
+    const stopPath = path.join(imageDir, 'network-blocked.json');
+    if (fs.existsSync(stopPath) || fs.existsSync(blocked))
+      throw new Error('legacy_prior_failure_stop');
+    const outputPath = path.join(imageDir, 'manifest.json');
+    const savedManifest = fs.existsSync(outputPath)
+      ? JSON.parse(fs.readFileSync(outputPath, 'utf8'))
+      : null;
+    const saved = savedManifest?.responses || [];
+    const responses = [];
+    let requests = 0;
+    const persist = () =>
+      fs.writeFileSync(
+        outputPath,
+        JSON.stringify(
+          {
+            mpId: MP,
+            albumId: ALBUM,
+            inputSha256: hash(inputRaw),
+            capturedAt: savedManifest?.capturedAt || new Date().toISOString(),
+            verifiedAt: new Date().toISOString(),
+            responses,
+          },
+          null,
+          2,
+        ),
+      );
+    for (const [url, articleIds] of images) {
+      const existing = saved.find((entry) => entry.url === url);
+      try {
+        if (existing) {
+          const bytes = fs.readFileSync(existing.file);
+          if (hash(bytes) !== existing.sha256)
+            throw new Error('legacy_cache_hash_gate');
+          decodeInlineImage(
+            `data:${existing.contentType};base64,${bytes.toString('base64')}`,
+          );
+          responses.push({ ...existing, articleIds: [...articleIds] });
+          persist();
+          continue;
+        }
+        if (requests) await delay();
+        requests++;
+        const result = await fetchAllowedImage(url);
+        decodeInlineImage(
+          `data:${result.type};base64,${result.bytes.toString('base64')}`,
+        );
+        const file = path.join(imageDir, hash(url) + '.image');
+        fs.writeFileSync(file, result.bytes);
+        responses.push({
+          url,
+          kind: 'image',
+          file,
+          sha256: hash(result.bytes),
+          contentType: result.type,
+          status: 200,
+          bytes: result.bytes.length,
+          articleIds: [...articleIds],
+        });
+        persist();
+        console.log(
+          JSON.stringify({
+            result: 'legacy_image_pass',
+            completed: responses.length,
+            total: images.size,
+            bytes: result.bytes.length,
+          }),
+        );
+      } catch (error) {
+        fs.writeFileSync(
+          stopPath,
+          JSON.stringify({
+            time: new Date().toISOString(),
+            urlSha256: hash(url),
+            reason: /^[A-Z_]+$/.test(error.message)
+              ? error.message
+              : 'legacy_image_gate_failed',
+          }),
+        );
+        persist();
+        throw error;
+      }
+    }
+    console.log(
+      JSON.stringify({
+        result: 'legacy_images_pass',
+        requests,
+        images: responses.length,
+        totalBytes: responses.reduce((sum, entry) => sum + entry.bytes, 0),
+        persistent: true,
+      }),
+    );
+    return;
+  }
   if (mode === 'list') {
     if (fs.existsSync(blocked)) throw new Error('prior_limit_stop');
     const run = path.join(dir, `list-${Date.now()}`);
@@ -483,11 +670,13 @@ async function main() {
   }
 }
 
-main().catch(() => {
+main().catch((error) => {
   console.error(
     JSON.stringify({
       result: 'stopped',
-      reason: 'acceptance_gate_failed_check_private_evidence',
+      reason: /^[A-Za-z_]{3,80}$/.test(error.message)
+        ? error.message
+        : 'acceptance_gate_failed_check_private_evidence',
     }),
   );
   process.exitCode = 1;
