@@ -525,6 +525,42 @@ describe('backend collection routing', () => {
     });
   });
 
+  it('manual and scheduled owner search share the same normal update route and retain blocked status', async () => {
+    await prisma.feed.update({
+      where: { id: ids[0] },
+      data: { collectionChannel: 'owner-web-search' },
+    });
+    const owner = jest
+      .spyOn(CollectionService.prototype, 'collectOwnerSearch')
+      .mockResolvedValue({
+        source: 'owner-web-search',
+        status: 'blocked',
+        coverage: 'search-results',
+        complete: false,
+        articles: 0,
+        message: '腾讯原文验证限制',
+      } as any);
+    try {
+      for (const trigger of ['local-manual', 'scheduled'] as const) {
+        expect(
+          await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, trigger),
+        ).toMatchObject({ status: 'blocked', source: 'owner-web-search' });
+      }
+      expect(owner).toHaveBeenCalledTimes(2);
+      expect(wechat2RssProvider).not.toHaveBeenCalled();
+      const feed = await prisma.feed.findUniqueOrThrow({
+        where: { id: ids[0] },
+      });
+      expect(feed.syncTime).toBe(0);
+      expect(JSON.parse(feed.lastCollectionResult || '{}')).toMatchObject({
+        status: 'blocked',
+        source: 'owner-web-search',
+      });
+    } finally {
+      owner.mockRestore();
+    }
+  });
+
   it('scheduled updates use the same backend path for enabled feeds', async () => {
     const previous = process.env.DISABLE_SCHEDULED_UPDATES;
     delete process.env.DISABLE_SCHEDULED_UPDATES;

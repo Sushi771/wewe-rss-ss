@@ -10,6 +10,8 @@ import { ProviderArticle } from './subscription-provider';
 
 /** An index date is kept for selection/diagnosis, never for persistence as publishTime. */
 export type ArticleCandidate = ReturnType<typeof canonicalArticleUrl> & {
+  /** Keep the source-provided request parameters; canonical URL is for identity only. */
+  requestUrl?: string;
   title: string;
   indexTimestamp: number | null;
   discovery: { source: 'owner-web-search'; capturedAt: string; page: number };
@@ -76,6 +78,7 @@ export function searchArticleCandidates(
       throw new Error('SEARCH_CANDIDATE_TITLE_INVALID');
     const candidate: ArticleCandidate = {
       ...identity,
+      requestUrl: item.doc_url,
       title: item.title,
       indexTimestamp:
         Number.isSafeInteger(item.timestamp) && item.timestamp > 0

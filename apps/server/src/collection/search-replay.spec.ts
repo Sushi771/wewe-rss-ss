@@ -12,6 +12,16 @@ jest.mock('./sqlite-backup', () => ({
     .fn()
     .mockResolvedValue({ integrityCheck: 'ok' }),
 }));
+import {
+  fetchLiveOwnerArticles,
+  readOwnerSearchConfig,
+  OwnerUpdateStopped,
+} from './owner-search-update';
+jest.mock('./owner-search-update', () => ({
+  ...jest.requireActual('./owner-search-update'),
+  fetchLiveOwnerArticles: jest.fn(),
+  readOwnerSearchConfig: jest.fn(),
+}));
 const mpId = 'MP_WXS_1234567890',
   biz = 'MTIzNDU2Nzg5MA==';
 const url = `https://mp.weixin.qq.com/s?__biz=${encodeURIComponent(biz)}&mid=100&idx=1&sn=abcd`;
@@ -108,6 +118,38 @@ describe('verified search SQLite rehearsal protection (no HTTP)', () => {
       await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
     ).toEqual(feed);
     expect(createVerifiedSqliteBackup).toHaveBeenCalled();
+  });
+  it('normal update persists live verified results through the same protected transaction and deduplicates', async () => {
+    const prepared = await replay();
+    (readOwnerSearchConfig as jest.Mock).mockResolvedValue({ mpId });
+    (fetchLiveOwnerArticles as jest.Mock).mockResolvedValue(prepared.page);
+    expect(await collection.collectOwnerSearch(mpId)).toMatchObject({
+      source: 'owner-web-search',
+      created: 1,
+      status: 'partial',
+    });
+    expect(await collection.collectOwnerSearch(mpId)).toMatchObject({
+      created: 0,
+      updated: 0,
+    });
+    expect((await prisma.article.findFirstOrThrow()).publishTime).toBe(
+      1700000000,
+    );
+  });
+  it('a stopped live update writes no articles or success time and never invokes replay', async () => {
+    const feed = await prisma.feed.findUniqueOrThrow({ where: { id: mpId } });
+    (readOwnerSearchConfig as jest.Mock).mockResolvedValue({ mpId });
+    (fetchLiveOwnerArticles as jest.Mock).mockRejectedValue(
+      new OwnerUpdateStopped('正文验证限制'),
+    );
+    expect(await collection.collectOwnerSearch(mpId)).toMatchObject({
+      status: 'blocked',
+      articles: 0,
+    });
+    expect(await prisma.article.count()).toBe(0);
+    expect(
+      await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
+    ).toEqual(feed);
   });
   it('preserves a proven legacy ID, nonempty body, zero metrics and null metrics', async () => {
     await prisma.article.create({

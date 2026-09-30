@@ -80,3 +80,23 @@ test('legacy desktop bundles stay disabled and the existing explicit key path is
     false,
   );
 });
+
+test('enabled owner search scheduling uses the normal route without a relay key', () => {
+  const settings = {
+    enabled: '1',
+    ownerSearchConfigFile: 'private-config.json',
+    ownerSearchFeeds: [{ ...feed, collectionChannel: 'owner-web-search' }],
+  };
+  assert.equal(scheduledUpdatesEnabled(manifest, settings), true);
+  assert.equal(
+    scheduledUpdatesEnabled(manifest, {
+      ...settings,
+      ownerSearchConfigFile: undefined,
+    }),
+    false,
+  );
+  assert.equal(
+    scheduledUpdatesEnabled(manifest, { ...settings, enabled: '0' }),
+    false,
+  );
+});

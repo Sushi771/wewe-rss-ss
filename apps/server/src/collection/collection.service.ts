@@ -17,7 +17,12 @@ import { decodeInlineImage } from './image-fetch';
 import { fetchMp2RssRecent20 } from './mp2rss';
 import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
-import { assertProviderPage } from './subscription-provider';
+import { assertProviderPage, ProviderPage } from './subscription-provider';
+import {
+  readOwnerSearchConfig,
+  fetchLiveOwnerArticles,
+  OwnerUpdateStopped,
+} from './owner-search-update';
 import { prepareSearchReplay } from './search-replay';
 import {
   assertSavedArticleIdentity,
@@ -44,8 +49,7 @@ export class CollectionService {
   private readonly publicCollections = new Set<string>();
 
   /** Offline rehearsal only. No production source binding or feed success time.
-   * The normal update route stays gated until five originals and backend auth
-   * have real evidence. Reuse this persistence boundary when that gate passes.
+   * Live updates use a separate network adapter and the same protected persistence.
    */
   async replayVerifiedSearch(
     mpId: string,
@@ -81,101 +85,9 @@ export class CollectionService {
       )
         throw new Error('SEARCH_REPLAY_PROVENANCE_INVALID');
       await createVerifiedSqliteBackup();
-      let created = 0,
-        updated = 0;
-      await this.prisma.$transaction(
-        async (tx) => {
-          await tx.feed.findUniqueOrThrow({ where: { id: mpId } });
-          for (const item of page.articles) {
-            const identity = canonicalArticleUrl(item.url);
-            const base = new URL(identity.url);
-            base.searchParams.delete('sn');
-            const matches = await tx.article.findMany({
-              where: {
-                mpId,
-                OR: [
-                  { id: item.id },
-                  { sourceUrl: base.toString() },
-                  { sourceUrl: { startsWith: base.toString() + '&sn=' } },
-                  { verifiedSourceUrl: base.toString() },
-                  {
-                    verifiedSourceUrl: { startsWith: base.toString() + '&sn=' },
-                  },
-                ],
-              },
-            });
-            if (matches.length > 1)
-              throw new Error('SEARCH_REPLAY_AMBIGUOUS_OLD_ID');
-            const existing = matches[0];
-            if (existing) {
-              assertSavedArticleIdentity(existing, identity);
-              // Search gets no album-specific 60-second relaxation. Every old
-              // title, trusted time and known signature must remain consistent.
-              if (
-                existing.publishTime !== item.publishTime ||
-                existing.title.normalize('NFKC').replace(/\s+/gu, '') !==
-                  item.title.normalize('NFKC').replace(/\s+/gu, '')
-              )
-                throw new Error('SEARCH_REPLAY_SAVED_METADATA_CONFLICT');
-              for (const url of [
-                existing.sourceUrl,
-                existing.verifiedSourceUrl,
-              ]) {
-                if (
-                  url &&
-                  new URL(url).pathname === '/s' &&
-                  canonicalArticleUrl(url).url !== item.url
-                )
-                  throw new Error('SEARCH_REPLAY_SAVED_SIGNATURE_CONFLICT');
-              }
-              const data = {
-                ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
-                ...(!existing.verifiedSourceUrl
-                  ? { verifiedSourceUrl: item.url }
-                  : {}),
-                ...(!existing.contentHtml && item.contentHtml
-                  ? {
-                      contentHtml: item.contentHtml,
-                      lastBodyStatus: 'available',
-                    }
-                  : {}),
-              };
-              if (Object.keys(data).length) {
-                await tx.article.update({ where: { id: existing.id }, data });
-                updated++;
-              }
-            } else {
-              // A title collision with an opaque legacy ID cannot be merged or
-              // duplicated without independent identity evidence.
-              if (
-                await tx.article.findFirst({
-                  where: {
-                    mpId,
-                    title: item.title,
-                    sourceUrl: null,
-                    verifiedSourceUrl: null,
-                  },
-                })
-              )
-                throw new Error('SEARCH_REPLAY_UNRESOLVED_LEGACY_ID');
-              await tx.article.create({
-                data: {
-                  id: item.id,
-                  mpId,
-                  title: item.title,
-                  publishTime: item.publishTime,
-                  sourceUrl: item.url,
-                  verifiedSourceUrl: item.url,
-                  contentHtml: item.contentHtml,
-                  picUrl: '',
-                  lastBodyStatus: 'available',
-                },
-              });
-              created++;
-            }
-          }
-        },
-        { timeout: 60000 },
+      const { created, updated } = await this.saveVerifiedSearchPage(
+        mpId,
+        page,
       );
       return {
         mode: 'real-response-replay' as const,
@@ -186,6 +98,159 @@ export class CollectionService {
         coverage: 'search-results' as const,
         complete: false as const,
         productionSourceEnabled: false as const,
+      };
+    } finally {
+      this.publicCollections.delete(mpId);
+    }
+  }
+
+  /** Shared identity-preserving persistence; callers prove live or offline provenance. */
+  private async saveVerifiedSearchPage(
+    mpId: string,
+    page: ProviderPage,
+    advanceSync = false,
+  ) {
+    let created = 0,
+      updated = 0;
+    await this.prisma.$transaction(
+      async (tx) => {
+        const currentFeed = await tx.feed.findUniqueOrThrow({
+          where: { id: mpId },
+        });
+        for (const item of page.articles) {
+          const identity = canonicalArticleUrl(item.url);
+          const base = new URL(identity.url);
+          base.searchParams.delete('sn');
+          const matches = await tx.article.findMany({
+            where: {
+              mpId,
+              OR: [
+                { id: item.id },
+                { sourceUrl: base.toString() },
+                { sourceUrl: { startsWith: base.toString() + '&sn=' } },
+                { verifiedSourceUrl: base.toString() },
+                {
+                  verifiedSourceUrl: { startsWith: base.toString() + '&sn=' },
+                },
+              ],
+            },
+          });
+          if (matches.length > 1)
+            throw new Error('SEARCH_REPLAY_AMBIGUOUS_OLD_ID');
+          const existing = matches[0];
+          if (existing) {
+            assertSavedArticleIdentity(existing, identity);
+            // Search gets no album-specific 60-second relaxation. Every old
+            // title, trusted time and known signature must remain consistent.
+            if (
+              existing.publishTime !== item.publishTime ||
+              existing.title.normalize('NFKC').replace(/\s+/gu, '') !==
+                item.title.normalize('NFKC').replace(/\s+/gu, '')
+            )
+              throw new Error('SEARCH_REPLAY_SAVED_METADATA_CONFLICT');
+            for (const url of [
+              existing.sourceUrl,
+              existing.verifiedSourceUrl,
+            ]) {
+              if (
+                url &&
+                new URL(url).pathname === '/s' &&
+                canonicalArticleUrl(url).url !== item.url
+              )
+                throw new Error('SEARCH_REPLAY_SAVED_SIGNATURE_CONFLICT');
+            }
+            const data = {
+              ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
+              ...(!existing.verifiedSourceUrl
+                ? { verifiedSourceUrl: item.url }
+                : {}),
+              ...(!existing.contentHtml && item.contentHtml
+                ? {
+                    contentHtml: item.contentHtml,
+                    lastBodyStatus: 'available',
+                  }
+                : {}),
+            };
+            if (Object.keys(data).length) {
+              await tx.article.update({ where: { id: existing.id }, data });
+              updated++;
+            }
+          } else {
+            // A title collision with an opaque legacy ID cannot be merged or
+            // duplicated without independent identity evidence.
+            if (
+              await tx.article.findFirst({
+                where: {
+                  mpId,
+                  title: item.title,
+                  sourceUrl: null,
+                  verifiedSourceUrl: null,
+                },
+              })
+            )
+              throw new Error('SEARCH_REPLAY_UNRESOLVED_LEGACY_ID');
+            await tx.article.create({
+              data: {
+                id: item.id,
+                mpId,
+                title: item.title,
+                publishTime: item.publishTime,
+                sourceUrl: item.url,
+                verifiedSourceUrl: item.url,
+                contentHtml: item.contentHtml,
+                picUrl: '',
+                lastBodyStatus: 'available',
+              },
+            });
+            created++;
+          }
+        }
+        if (advanceSync && page.articles.length) {
+          await tx.feed.update({
+            where: { id: mpId },
+            data: {
+              syncTime: Math.floor(Date.now() / 1000),
+              updateTime: Math.max(
+                currentFeed.updateTime,
+                ...page.articles.map((item) => item.publishTime),
+              ),
+            },
+          });
+        }
+      },
+      { timeout: 60000 },
+    );
+    return { created, updated };
+  }
+
+  async collectOwnerSearch(mpId: string) {
+    if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
+    this.publicCollections.add(mpId);
+    try {
+      const config = await readOwnerSearchConfig(mpId);
+      // Preflight retains the existing platform stop before even searching.
+      const page = await fetchLiveOwnerArticles(config);
+      await createVerifiedSqliteBackup();
+      const saved = await this.saveVerifiedSearchPage(mpId, page, true);
+      return {
+        source: 'owner-web-search' as const,
+        status: 'partial' as const,
+        complete: false as const,
+        coverage: 'search-results' as const,
+        articles: page.articles.length,
+        ...saved,
+        pages: page.pages,
+        message: `腾讯号名搜索：取得正文 ${page.articles.length} 篇，新增 ${saved.created}、补全 ${saved.updated}。搜索结果可能漏文；本轮未发现不代表公众号没有更新。`,
+      };
+    } catch (error) {
+      if (!(error instanceof OwnerUpdateStopped)) throw error;
+      return {
+        source: 'owner-web-search' as const,
+        status: 'blocked' as const,
+        complete: false as const,
+        coverage: 'search-results' as const,
+        articles: 0,
+        message: error.message,
       };
     } finally {
       this.publicCollections.delete(mpId);

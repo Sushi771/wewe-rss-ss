@@ -209,7 +209,9 @@ export class TrpcService {
       (feed) => {
         route = resolveCollectionRoute(feed);
         return (
-          route.channel === 'wechat2rss' || route.channel === 'public-album'
+          route.channel === 'wechat2rss' ||
+          route.channel === 'public-album' ||
+          route.channel === 'owner-web-search'
         );
       },
     );
@@ -367,6 +369,10 @@ export class TrpcService {
     trigger: 'local-manual' | 'scheduled' | 'public',
   ) {
     const mpId = feed.id;
+    if (route.channel === 'owner-web-search') {
+      if (page !== 1) return this.unavailableCollection();
+      return this.collectionService.collectOwnerSearch(mpId);
+    }
     if (route.channel === 'wechat2rss') {
       if (page !== 1) return this.unavailableCollection();
       return this.collectionService.collectWechat2RssRecent({

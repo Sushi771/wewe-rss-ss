@@ -21,6 +21,16 @@ function scheduledUpdatesEnabled(manifest, settings) {
   )
     return false;
   if (settings.mp2RssFeedKey?.trim()) return true;
+  if (
+    settings.ownerSearchConfigFile &&
+    (settings.ownerSearchFeeds || []).some(
+      (feed) =>
+        feed.status === 1 &&
+        feed.collectionChannel === 'owner-web-search' &&
+        /^MP_WXS_\d{5,15}$/.test(feed.id),
+    )
+  )
+    return true;
   return (settings.publicAlbumFeeds || []).some((feed) => {
     if (
       feed.status !== 1 ||
@@ -116,6 +126,7 @@ async function runtime() {
   const client = new PrismaClient();
   let counts;
   let publicAlbumFeeds = [];
+  let ownerSearchFeeds = [];
   try {
     // raw 查询用于暴露曾出现过的 5.22 engine / 5.10 client 协议不兼容。
     const [{ version }] = await client.$queryRawUnsafe(
@@ -147,6 +158,10 @@ async function runtime() {
           collectionChannel: true,
           publicAlbumIds: true,
         },
+      });
+      ownerSearchFeeds = await client.feed.findMany({
+        where: { status: 1, collectionChannel: 'owner-web-search' },
+        select: { id: true, status: true, collectionChannel: true },
       });
     }
   } finally {
@@ -196,6 +211,8 @@ async function runtime() {
       enabled: process.env.ENABLE_SCHEDULED_UPDATES,
       mp2RssFeedKey: process.env.MP2RSS_FEED_KEY,
       publicAlbumFeeds,
+      ownerSearchFeeds,
+      ownerSearchConfigFile: process.env.OWNER_SEARCH_CONFIG_FILE,
     });
     Object.assign(process.env, {
       HOST: '127.0.0.1',
