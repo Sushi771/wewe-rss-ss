@@ -47,3 +47,18 @@ node scripts/album-acceptance-body.cjs legacy-images $projectRoot "$projectRoot/
 ```
 
 预检输出 `requests=0 / scopeArticles=19 / articles=7 / imageReferences=33 / distinctImageURLs=27`。下载完成后第二次执行全部读取持久缓存，重新校验 SHA-256 与图片容器，输出 `requests=0 / images=27 / totalBytes=5106897`。后续 19 篇范围的 ZIP/Obsidian 完整性由 C 继续验收，尚未出现自然新文，不能把此项图片补全称为真实增量完成。
+
+## 用户指定的两篇近期新文
+
+复用 `private-data/user-recent-articles/` 中已经取得的两份原样 HTML 与成功结果，不重复原文或列表请求。当前正式解析器离线核实两篇 `biz/mid/idx/sn`、原文 `ct`、正文与对应新合集 120 键结果完全一致；原文发布时间为上海 **2026-09-30 08:32:01**、**2026-09-29 10:46:01**，比合集列表时间分别晚 25、33 秒。新合集列表为 51+69 篇、13 页，不代表全号覆盖。旧停止记录保留，与本次只读验收结果分开。
+
+第一篇正文 1 张图片，仅对此图匿名完整 GET 一次并经现有 `fetchAllowedImage/decodeInlineImage` 校验后持久保存；第二篇正文无图。本轮没有请求旧原文、扫描其他文章、写生产库或改缓存 schema。`scripts/album-acceptance-body-recent.cjs` 提供 `prepare/verify` 两种模式，图片尝试哨兵防止失败重试，已有缓存通过 SHA-256 与容器校验后复用。
+
+```powershell
+node scripts/album-acceptance-body-recent.cjs prepare $projectRoot "$projectRoot/apps/server"
+node scripts/album-acceptance-body-recent.cjs verify $projectRoot "$projectRoot/apps/server"
+```
+
+私有产物位于 `private-data/user-recent-articles/body-image-acceptance/`：`articles.json` 含两篇核验后身份、原文时间、合集时间和图片内联正文；`cassette.json` 含两份真实原文输入与一份真实图片字节引用。HTML 回放条目的 `url` 保留原始实际 GET 的用户链接；`aliases` 只在与列表/原文 `biz/mid/idx/sn` 完全一致的依据下提供 canonical 和 Provider 请求 URL，不能宣称原始请求使用了这些别名。每篇子目录保存 `localized.html`，有图一篇另有 `image.bytes/image.json`。所有原文、标题、URL、字节与私有输出都没有提交。
+
+`prepare` 实测原文请求 0、图片请求 1、2 篇/1 图通过；`verify` 实测原文请求 0、图片请求 0，身份、可信时间、正文与内联图完整性通过。两篇恢复入库、旧字段保护和导出验收仍由正式副本/生产工程单元完成，不以本次准备结果替代生产恢复证明。
