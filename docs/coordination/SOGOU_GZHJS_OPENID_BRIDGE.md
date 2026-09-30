@@ -1,0 +1,26 @@
+# 搜狗移动 `data-openid` 与历史 `/gzhjs` 桥接审计（2026-09-30）
+
+## 已确认的账号字段
+
+本轮只读分析此前保存在仓库外的移动 `/weixinwap?type=2` 首屏（HTML SHA-256 `169880e6c825d70cc7c0258150414426265af5d0eaab745055ceee1152dbd13b`），复查同页已保存的七份第一方 JS，并核对公开源码和一手历史回包。**没有**请求目标搜索、`/link`、`/gzh`、`/gzhjs` 或微信原文，也没有读取私有凭据。本文不记录目标号名、`openid` 值、文章标题或带私有参数的 URL。
+
+九张真实文章卡的来源行都是 `span.s2[data-openid][data-sourcename]`。八张同名目标卡的 `data-openid` **逐字相同**，另一张其他来源卡为另一个值；九个值都是 28 字符、符合旧 `oIWsFt` 加 22 个 URL 安全字符的形状，没有百分号编码。移动页的内联后续页模板也把 `articleItem.openid` 放回 `span.s2[data-openid]`；当前已缓存的 [`event.min.js?v=20200407`](https://weixin.sogou.com/new/wap/js/event.min.js?v=20200407)从该属性读取 `openid` 放进文章分享浮层。故这是**当前搜狗页面用于文章来源分组的账号字段**，不是凭文章标题推出来的值，也不需要解密。不过来源显示名与这个字段仍不是微信官方 `__biz` 证明。
+
+## 与旧列表接口的相同点和断点
+
+| 证据 | 可确认的行为 | 不能推出的行为 |
+| --- | --- | --- |
+| [旧开源发送与解析行，固定提交 `b81df52`](https://github.com/forecho/WeChatRSS/blob/b81df5231a97cb9f249651cad9a1e746c0210aa8/index2.py#L22-L43) | Python 2 直接 `GET http://weixin.sogou.com/gzhjs?cb=sogou.weixin.gzhcb&openid=<账号值>&page=1&t=<秒>`；取 JSONP `items[]`，XML `display` 的 `title/url/docid/content168/sourcename/lastModified`，然后另取原文。示例值也是相同的 28 字符形状。 | 代码没有从当前移动卡读取该值，只发 HTTP 与第一页；没有 2026 年 HTTPS、Cookie、分页或目标号回包。 |
+| [2015 年问答中的实际 JSONP 回包](https://stackoverflow.com/questions/28103517/geting-data-using-python-and-urllib-from-url) | 回答者展示的 `gzh({...})` 含 `totalItems/totalPages/page/items`；每条 XML 的 `<openid>` 与当次请求的账号值相同，另有微信文章 `url`、`lastModified` 与 `imglink`。提问者同日曾得到设置 Cookie 后重定向的反爬 HTML。 | 这是 2015 年不同账号、HTTP、不同会话的一手记录；不能当成近期可用回包，更不能照搬它的 Cookie 或自动重定向。 |
+| [2015 年原始接口记录](https://blog.phpgao.com/wechat_public_user_api.html)及[历史保存的账号页链接](https://github.com/zhengxiaopeng/android-dev-bookmarks/blob/master/android-dev-bookmarks.html) | 前者把 `openid` 说成账号索引值、`page` 说成可选页码；后者曾保存 `/gzh?openid=` 形态的搜狗账号页。 | 原文已提示 ID 形式变化；书签只证明旧导航形态，不能证明当前可从本页进入、HTTPS `/gzh` 或 `/gzhjs` 仍服务。 |
+| 当前私有首屏及其所引七份第一方 JS | 卡片里有可直接读取的账号分组值；`event.min.js` 还在使用它做分享数据。 | HTML 中 `.gzh-box` DOM 为 **0**、带 `openid` 的账号锚点为 **0**、`/gzhjs` 字面为 **0**；27 个文章锚点均指 `/link`。七份 JS 中 `/gzhjs` 字面亦为 **0**。`event.min.js` 对 `.gzh-box` 的账号点击处理在本次文章搜索页没有对应元素，不能拼出目标账号主页。 |
+
+两端字段名相同、形状相同，且都表示搜狗索引的账号分组，构成**值得继续查的桥接假设**；尚未有一条当前第一方发送链证明移动 `data-openid` 可直接作 `/gzhjs` 参数。它也不是微信 OAuth 中用户对某公众号的 `openid`，不能替代官方 `biz`。检索 2025–2026 GitHub/公开网页的 `gzhjs`、`sogou.weixin.gzhcb`、`data-openid` 及 HTTPS 组合，命中主要是旧代码与旧文转载；本轮**未找到**近期可审的 HTTPS 请求行、成功 JSONP 回包或当前账号页发往 `/gzhjs` 的 JS。搜索覆盖有限，不据此宣布接口已关闭。
+
+## 请求链与产品能力边界
+
+当前能够复原的链只有“**移动文章搜索结果 → `span.s2[data-openid]`**”；旧链则是“**调用者已有 `openid` → HTTP `/gzhjs` 第一页 → JSONP/XML → 另取微信文章正文**”。中间缺当前浏览器正常进入账号主页、HTTPS `/gzhjs` 的请求、同会话 Cookie 要求和真实回包。把旧 HTTP 模板改成 HTTPS 并填入当前字段，是**尚未验证的方案**，不能写成现行页面行为，也不能执行旧文中的反爬 Cookie 脚本。
+
+若将来找到当前第一方 JS、可审近期客户端代码或真实回包，足以确认 HTTPS 地址、参数及合法会话来源，才设计**单次、隔离、只读的第一页 GET**：使用页面提供的账号值，固定旧源码给出的 `cb/page/t` 含义，不猜其他参数；请求前私有持久哨兵，无重试/自动跳转，限定响应体与超时。先只报告状态码、挑战标记、JSONP 回调是否严格匹配、`totalItems/totalPages/page/items` 结构及首条 XML 的字段形状；403、429、验证码、Cookie 重定向、异常 HTML 立即停，不跟随也不请求微信正文。目标 `openid`、原始 JSONP、完整原文 URL 与 Cookie 只留私有脱敏证据，公开报告只给结构计数。当前证据**尚不足以把这次 HTTPS Probe 视为有现行发送链支持的请求**；下一步是继续查现行账号页资源或近期源码，不发目标请求。
+
+即便第一页得到 JSONP，也只说明账号级**索引列表**在该时点可读。`totalPages` 是历史回包的分页字段，不证明现今页 2 成功或可取全史；`lastModified` 是搜狗索引时间，须以腾讯原文 `ct` 核发表时间；`docid` 是搜狗索引身份，须从每条官方 URL 核 `__biz/mid/idx/sn` 与目标号；`imglink` 只是索引封面，不等于正文图片。正文和内图要在后续、另经授权的官方原文只读验证中取得。五篇真实不同目标文章、分页和持续增量仍是接 Provider 前的验收项，不是研究该历史接口的前置条件。
