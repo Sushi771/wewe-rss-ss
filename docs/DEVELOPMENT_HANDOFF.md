@@ -49,6 +49,7 @@
 
 ## 接手事实
 
+- **最新两个隔离结果：**新 `skey/vid` 按旧 WeBook 自定义头请求目标 `/book/articles` 一次得到 HTTP 401、业务 `-2012`、无 `reviews`；这只排除本次旧形状，已停止该端点在线尝试。旧官方合集原样 `public_tag_link` 匿名 GET 一次 HTTP 200，但静态 HTML 无可分类文章/分页/账号过滤/其他合集链接；C 正离线追其 JS，不能据此称全号可枚举。两线均有私有尝试哨兵、无自动重试，生产库只读。见[文章端点探针](coordination/BOOK_ARTICLES_SKEY_FIRST_PAGE_PROBE.md)与[合集枚举研究](coordination/ALBUM_ENUMERATION_RESEARCH.md)。
 - **`/book/articles` 认证进展：**本人既有合法移动恢复凭据按已成功的固定 `/login` 请求形状再次只读续期，HTTP 200、`vid` 匹配，顶层返回非空 `skey`（公开只记录粗长度区间）；完整响应及可能轮换 token 私有保存，生产库未写。旧 runner 曾丢弃 `skey` 字段，这次才明确它存在。A 正准备只用此新私有 `skey/vid`、按旧 WeBook 真正 GET 行设计一次 `/book/articles` 首屏；当前**没有该端点认证成功或文章回包**，详见[字段探针](coordination/MOBILE_LOGIN_SKEY_FIELD_PROBE.md)。
 - **第三合集完整列表进展：**官方 `getalbum` 已按真实游标逐页取完 6 页，10+10+10+10+10+4 共 54 个不重复文章键，终页 `continue_flag=false`，与首屏声明数一致；每项目标 `biz`、URL 键和列表时间字段通过，跨页顺序正常。54 键与旧两合集 32 键不重合，旧库可辨键相交 8、其余 46 仅可称不在**可辨键集合**；列表日期 2024-10-07 至 2026-09-24。原文 `ct`、正文、图片、自然新增及全号覆盖仍未验收；别把 54 列表项写成已完整订阅文章。六页最小身份元数据只在私有临时目录，生产 SQLite 只读。参见[公开页调查](coordination/PUBLIC_PAGE_DISCOVERY.md)。
 - **第三合集游标进展：**2026-09-30 复取首屏和按末条真实游标取得第二页，两个响应均 HTTP 200、`ret=0`，共 20 个不重复目标文章键，时间字段及 URL 身份均闭环，第二页继续标记有后页；私有第二页有下一游标。20 键与旧两合集 32 键零重合，8 键落旧库可辨认集合，12 键不在可辨认集合；这不是新发表证明，也不是全号覆盖。C 正准备从第二页私有游标继续。A 搜索候选原文一次四字段 `sn` 不符、另一次旧文对照遇腾讯验证 302，已停止该匿名原文请求路线，详见[单篇探针](coordination/SEARCH_CANDIDATE_ARTICLE_PROBE.md)和[离线差异分析](coordination/SEARCH_SN_MISMATCH_ANALYSIS.md)。

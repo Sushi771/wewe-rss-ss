@@ -26,3 +26,9 @@
 node scripts/research/probe-book-articles-skey-first-page.cjs --preflight --db <生产 SQLite 绝对路径> --run-dir <已有私有 runDir 绝对路径>
 node scripts/research/probe-book-articles-skey-first-page.cjs --execute --db <生产 SQLite 绝对路径> --run-dir <同一私有 runDir 绝对路径> --approved-online
 ```
+
+## 总控唯一一次在线结果
+
+总控复审脚本后重跑 `--plan`、假网络 `--self-test` 和真实私有恢复材料的 `--preflight`，均通过；随后仅按上述固定形状对目标 `MP_WXS_3895431412` 发 **1 次** GET。腾讯返回 HTTP **401**、业务码 **`-2012`**，没有 `reviews` 字段，也没有可解析文章项。脚本先写独立私有尝试哨兵，私有最小结构一次落盘成功；没有重定向、重试、换凭据或第二种参数形状，生产 SQLite 写入 0。
+
+这个结果只排除**本账号这次由正常 `/login` 签发的顶层 `skey/vid`，按 2021 WeBook 自定义头、固定 iPhone UA、`Cookies` 头、`count=20/offset=0` 的首屏请求**。它与更早的匿名 HTTP 401 实验不同，但仍不能证明端点永久关闭、其他合法客户端形状都失败或目标号没有文章。因已收到认证拒绝，本轮停止该端点在线请求；A 只离线对照近期开源的另一种 `skey/vid` query 形状及其成功证据，不自动重发。

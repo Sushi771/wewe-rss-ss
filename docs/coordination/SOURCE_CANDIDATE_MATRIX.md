@@ -4,7 +4,9 @@
 
 **2026-09-30 续记：**表内 Web 搜索代理的“目标未实测”和下方旧 token `-2012` 是历史阶段记录；[新移动凭据首屏](REFRESHED_MOBILE_TARGET_SEARCH_PROBE.md)与[一次官方游标续页](REFRESHED_MOBILE_SEARCH_CURSOR_PROBE.md)均已隔离实测：两页各 15 条、目标准确来源名分别 11 与 15 条，目标候选键交集 0、次页新增 15、offset 前进。[URL 结构诊断](SEARCH_RESULT_URL_IDENTITY_DIAGNOSTIC.md)证明该次首屏 15/15 链接均为 HTTP 腾讯 `/s?...`，其中 11 条号名及 URL `__biz` 同为目标，数字 `mid/idx`；旧 HTTPS 分类的 `malformed` 和 biz 0 是假阴性。11 条原存候选私有保存。[单篇原文对照](SEARCH_CANDIDATE_ARTICLE_PROBE.md)中 index 3 HTTP 200 但 `sn` 不符，另一个已知旧文 index 1 HTTP 302 到腾讯验证/登录页且未跟随，故暂停该匿名原文请求路线；没有通过原文 `ct`/正文验收，不计五篇。另一目标旧原文导出的**第三个官方合集**按真实游标取得六页 **54 个不重复目标身份键**，末页无后续，均有列表时间字段；它与旧两合集 32 键零重合，但单个合集仍不代表全号，列表时间不能代原文 `ct`。生产 SQLite 未写入。
 
-**`/book/articles` 认证新证据：**本人既有合法移动会话经正常 `/login` 一次取得顶层非空 `skey` 且 `vid` 匹配，响应私有保存，见[字段探针](MOBILE_LOGIN_SKEY_FIELD_PROBE.md)。旧 WeBook 当年的自定义 `skey/vid` 头由调用方提供；目前已有合法签发候选，但**还没有该端点接受它的真实回包**。A 正另备按旧固定代码形状的单次首屏请求。下方“缺 `skey` 正常来源”的历史描述以此更新；不把它扩写成已恢复列表或把 Web Cookie 改名试错。
+**`/book/articles` 认证新证据：**本人既有合法移动会话经正常 `/login` 一次取得顶层非空 `skey` 且 `vid` 匹配，响应私有保存，见[字段探针](MOBILE_LOGIN_SKEY_FIELD_PROBE.md)。旧 WeBook 当年的自定义 `skey/vid` 头由调用方提供；目前已有合法签发候选；后续旧固定代码形状首屏已得到认证拒绝，详见下段，**尚无该端点接受它或返回文章的证据**。下方“缺 `skey` 正常来源”的历史描述以此更新；不把它扩写成已恢复列表或把 Web Cookie 改名试错。
+
+**一次认证首屏结果：**[旧 WeBook 形状](BOOK_ARTICLES_SKEY_FIRST_PAGE_PROBE.md)以这份合法新 `skey/vid` 自定义头请求目标 `/book/articles`，HTTP **401**、业务 **`-2012`**、无 `reviews`；只排除本次账号与固定请求形状。另一个官方 Tag 导航种子[一次静态页面分类](ALBUM_ENUMERATION_RESEARCH.md) HTTP **200**，没有静态文章/分页/账号过滤/其他合集链接；其 JS 路线还在离线追。两者均未恢复全号订阅，且遇认证拒绝的文章端点本轮不重发。
 
 ## 候选矩阵
 

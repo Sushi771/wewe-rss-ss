@@ -69,7 +69,12 @@ function numericCode(value) {
 
 function businessCode(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-  const values = [body.errCode, body.errcode, body.data?.errCode, body.data?.errcode]
+  const values = [
+    body.errCode,
+    body.errcode,
+    body.data?.errCode,
+    body.data?.errcode,
+  ]
     .map(numericCode)
     .filter((value) => value !== null);
   return values.find((value) => value !== 0) ?? values[0] ?? null;
@@ -272,7 +277,11 @@ async function boundedBody(response) {
   } catch {
     readError = true;
   }
-  return { text: Buffer.concat(parts, total).toString('utf8'), truncated, readError };
+  return {
+    text: Buffer.concat(parts, total).toString('utf8'),
+    truncated,
+    readError,
+  };
 }
 
 function redirectKind(location) {
@@ -297,9 +306,24 @@ function redirectKind(location) {
 }
 
 const ARTICLE_KEYS = [
-  'reviewId', 'bookId', 'belongBookId', 'originalId', 'title', 'url',
-  'articleUrl', 'contentUrl', 'publishTime', 'publishedAt', 'pubTime',
-  'createTime', 'time', 'biz', 'mid', 'idx', 'mp_name', 'author',
+  'reviewId',
+  'bookId',
+  'belongBookId',
+  'originalId',
+  'title',
+  'url',
+  'articleUrl',
+  'contentUrl',
+  'publishTime',
+  'publishedAt',
+  'pubTime',
+  'createTime',
+  'time',
+  'biz',
+  'mid',
+  'idx',
+  'mp_name',
+  'author',
 ];
 
 function pickArticleFields(value) {
@@ -352,7 +376,8 @@ function structure(body) {
       keys.some((key) => Object.hasOwn(source, key)),
     );
   return {
-    reviewsKeyPresent: !!body && typeof body === 'object' && Object.hasOwn(body, 'reviews'),
+    reviewsKeyPresent:
+      !!body && typeof body === 'object' && Object.hasOwn(body, 'reviews'),
     reviewsArray: reviews !== null,
     reviewsCount: reviews?.length ?? null,
     sampledEntryCount: entries.length,
@@ -363,7 +388,13 @@ function structure(body) {
       hasAny(entry, ['bookId', 'belongBookId', 'biz']),
     ).length,
     timeFieldEntries: entries.filter((entry) =>
-      hasAny(entry, ['time', 'pubTime', 'publishTime', 'publishedAt', 'createTime']),
+      hasAny(entry, [
+        'time',
+        'pubTime',
+        'publishTime',
+        'publishedAt',
+        'createTime',
+      ]),
     ).length,
     urlFieldEntries: entries.filter((entry) =>
       hasAny(entry, ['url', 'articleUrl', 'contentUrl']),
@@ -382,10 +413,12 @@ function classify(status, body, read, headers) {
     decision = 'stop_verification';
   else if (status >= 300 && status < 400) decision = 'stop_redirect';
   else if (status !== 200) decision = 'stop_http';
-  else if (read.truncated || read.readError) decision = 'stop_response_limit_or_transport';
+  else if (read.truncated || read.readError)
+    decision = 'stop_response_limit_or_transport';
   else if (!body || typeof body !== 'object' || Array.isArray(body))
     decision = 'stop_non_json';
-  else if (invalidBusinessCodeShape(body)) decision = 'stop_business_code_shape';
+  else if (invalidBusinessCodeShape(body))
+    decision = 'stop_business_code_shape';
   else if (code !== null && code !== 0) decision = 'stop_business_code';
   else if (body.success === false || body.succeed === false)
     decision = 'stop_business_flag';
@@ -396,9 +429,8 @@ function classify(status, body, read, headers) {
     decision,
     http: status,
     businessCode: code,
-    redirect: status >= 300 && status < 400
-      ? redirectKind(headers?.location)
-      : null,
+    redirect:
+      status >= 300 && status < 400 ? redirectKind(headers?.location) : null,
     ...fields,
     networkRequests: 1,
     productionWrites: 0,
@@ -444,7 +476,11 @@ async function persistUntilDurable(runDir, record, options = {}) {
     } catch {
       if (attempts === 1 || attempts % 12 === 0) {
         try {
-          notify({ decision: 'local_persistence_retry_required', localAttempts: attempts, networkRequests: 1 });
+          notify({
+            decision: 'local_persistence_retry_required',
+            localAttempts: attempts,
+            networkRequests: 1,
+          });
         } catch {
           /* Retain the private projection in memory. */
         }
@@ -462,7 +498,12 @@ async function runOnce(dbPath, runDir, options = {}) {
   try {
     response = await (options.transport ?? requestOnce)(shape);
   } catch {
-    return { decision: 'stop_transport', http: null, networkRequests: 1, productionWrites: 0 };
+    return {
+      decision: 'stop_transport',
+      http: null,
+      networkRequests: 1,
+      productionWrites: 0,
+    };
   }
   const read = await boundedBody(response);
   let body = null;
@@ -489,14 +530,25 @@ async function runOnce(dbPath, runDir, options = {}) {
     structure: structure(body),
     projectedArticles: projection(body),
   };
-  const attempts = await persistUntilDurable(context.runDir, record, options.persistence);
-  return { ...result, privateStructureSaved: true, localPersistenceAttempts: attempts };
+  const attempts = await persistUntilDurable(
+    context.runDir,
+    record,
+    options.persistence,
+  );
+  return {
+    ...result,
+    privateStructureSaved: true,
+    localPersistenceAttempts: attempts,
+  };
 }
 
 async function selfTest() {
   assert.equal(args(['--plan']).mode, '--plan');
   assert.throws(() => args(['--execute']), /usage_gate/);
-  assert.throws(() => environmentGate({ NODE_DEBUG: 'http' }), /environment_gate/);
+  assert.throws(
+    () => environmentGate({ NODE_DEBUG: 'http' }),
+    /environment_gate/,
+  );
   const source = { vid: '123', skey: 'fixture-private-skey' };
   const shape = requestShape(source, 1790000000);
   assert.equal(shape.url.hostname, 'i.weread.qq.com');
@@ -513,9 +565,24 @@ async function selfTest() {
   assert.equal(Object.hasOwn(shape.headers, 'Cookie'), false);
   assert.equal(shape.url.searchParams.has('skey'), false);
   const body = {
-    reviews: [{ review: { reviewId: 'private-id', belongBookId: TARGET_BOOK_ID, mpInfo: { originalId: 'private-article-id', time: 1790000000, title: 'private-title' }, content: 'private-body' } }],
+    reviews: [
+      {
+        review: {
+          reviewId: 'private-id',
+          belongBookId: TARGET_BOOK_ID,
+          mpInfo: {
+            originalId: 'private-article-id',
+            time: 1790000000,
+            title: 'private-title',
+          },
+          content: 'private-body',
+        },
+      },
+    ],
   };
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'book-articles-skey-test-'));
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'book-articles-skey-test-'),
+  );
   let requests = 0;
   let writes = 0;
   try {
@@ -523,7 +590,11 @@ async function selfTest() {
       contextGate: () => ({ runDir: root, ...source }),
       transport: async () => {
         requests++;
-        return { status: 200, headers: {}, body: Readable.from([JSON.stringify(body)]) };
+        return {
+          status: 200,
+          headers: {},
+          body: Readable.from([JSON.stringify(body)]),
+        };
       },
       persistence: {
         writer: (dir, record) => {
@@ -544,12 +615,51 @@ async function selfTest() {
     assert.equal(saved.projectedArticles[0].review.reviewId, 'private-id');
     assert.equal(JSON.stringify(saved).includes('private-body'), false);
     assert.throws(() => markAttempt(root), /EEXIST/);
-    assert.equal(classify(200, { reviews: [] }, { truncated: false, readError: false }, {}).decision, 'empty_reviews_unverified');
-    assert.equal(classify(200, {}, { truncated: false, readError: false }, {}).decision, 'no_reviews_array_unverified');
-    assert.equal(classify(200, { errCode: -2041 }, { truncated: false, readError: false }, {}).decision, 'stop_verification');
-    assert.equal(classify(200, { errCode: 'bad' }, { truncated: false, readError: false }, {}).decision, 'stop_business_code_shape');
-    assert.equal(classify(200, { message: '请完成验证码' }, { truncated: false, readError: false }, {}).decision, 'stop_verification');
-    assert.equal(classify(302, null, { truncated: false, readError: false }, { location: 'https://i.weread.qq.com/verify?a=private' }).redirect.pathClass, 'verification_or_login');
+    assert.equal(
+      classify(200, { reviews: [] }, { truncated: false, readError: false }, {})
+        .decision,
+      'empty_reviews_unverified',
+    );
+    assert.equal(
+      classify(200, {}, { truncated: false, readError: false }, {}).decision,
+      'no_reviews_array_unverified',
+    );
+    assert.equal(
+      classify(
+        200,
+        { errCode: -2041 },
+        { truncated: false, readError: false },
+        {},
+      ).decision,
+      'stop_verification',
+    );
+    assert.equal(
+      classify(
+        200,
+        { errCode: 'bad' },
+        { truncated: false, readError: false },
+        {},
+      ).decision,
+      'stop_business_code_shape',
+    );
+    assert.equal(
+      classify(
+        200,
+        { message: '请完成验证码' },
+        { truncated: false, readError: false },
+        {},
+      ).decision,
+      'stop_verification',
+    );
+    assert.equal(
+      classify(
+        302,
+        null,
+        { truncated: false, readError: false },
+        { location: 'https://i.weread.qq.com/verify?a=private' },
+      ).redirect.pathClass,
+      'verification_or_login',
+    );
   } finally {
     const resolved = fs.realpathSync(root);
     if (
@@ -563,7 +673,11 @@ async function selfTest() {
     }
     fs.rmdirSync(resolved);
   }
-  return { decision: 'self_test_passed', fakeNetworkRequests: requests, productionWrites: 0 };
+  return {
+    decision: 'self_test_passed',
+    fakeNetworkRequests: requests,
+    productionWrites: 0,
+  };
 }
 
 async function main() {
@@ -576,7 +690,17 @@ async function main() {
     return;
   }
   if (options.mode === '--plan') {
-    console.log(JSON.stringify({ decision: 'plan_only', endpoint: ARTICLE_PATH, bookId: TARGET_BOOK_ID, maxRequests: 1, responseLimit: RESPONSE_LIMIT, productionWrites: 0, approvedOnlineFlagRequired: true }));
+    console.log(
+      JSON.stringify({
+        decision: 'plan_only',
+        endpoint: ARTICLE_PATH,
+        bookId: TARGET_BOOK_ID,
+        maxRequests: 1,
+        responseLimit: RESPONSE_LIMIT,
+        productionWrites: 0,
+        approvedOnlineFlagRequired: true,
+      }),
+    );
     return;
   }
   if (options.mode === '--self-test') {
@@ -587,13 +711,42 @@ async function main() {
     environmentGate(process.env);
     contextGate(options.dbPath, options.runDir);
   } catch (error) {
-    const safe = new Set(['already_attempted', 'run_dir_gate', 'refresh_marker_gate', 'health_marker_gate', 'recovery_gate', 'source_backup_gate', 'recovery_identity_gate', 'login_record_gate', 'login_response_gate', 'private_record_gate', 'db_gate', 'private_root_gate', 'account_gate', 'mobile_gate', 'integrity_gate', 'sqlite_runtime_gate', 'environment_gate']);
-    console.log(JSON.stringify({ decision: safe.has(error.message) ? error.message : 'preflight_gate', networkRequests: 0 }));
+    const safe = new Set([
+      'already_attempted',
+      'run_dir_gate',
+      'refresh_marker_gate',
+      'health_marker_gate',
+      'recovery_gate',
+      'source_backup_gate',
+      'recovery_identity_gate',
+      'login_record_gate',
+      'login_response_gate',
+      'private_record_gate',
+      'db_gate',
+      'private_root_gate',
+      'account_gate',
+      'mobile_gate',
+      'integrity_gate',
+      'sqlite_runtime_gate',
+      'environment_gate',
+    ]);
+    console.log(
+      JSON.stringify({
+        decision: safe.has(error.message) ? error.message : 'preflight_gate',
+        networkRequests: 0,
+      }),
+    );
     process.exitCode = 1;
     return;
   }
   if (options.mode === '--preflight') {
-    console.log(JSON.stringify({ decision: 'preflight_ready', networkRequests: 0, productionWrites: 0 }));
+    console.log(
+      JSON.stringify({
+        decision: 'preflight_ready',
+        networkRequests: 0,
+        productionWrites: 0,
+      }),
+    );
     return;
   }
   const result = await runOnce(options.dbPath, options.runDir, {
@@ -605,4 +758,13 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { args, contextGate, requestShape, structure, projection, classify, runOnce, selfTest };
+module.exports = {
+  args,
+  contextGate,
+  requestShape,
+  structure,
+  projection,
+  classify,
+  runOnce,
+  selfTest,
+};
