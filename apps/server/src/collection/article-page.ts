@@ -104,10 +104,16 @@ export function articlePublishTime(html: string): number | null {
 export function articleIdentity(html: string) {
   const $ = load(html);
   if (!$('#js_content').length) throw new Error('没有可核验的原文结构');
-  const value = (name: string, pattern: string) =>
-    html.match(
-      new RegExp(`\\bvar\\s+${name}\\s*=\\s*["'](${pattern})["']`),
-    )?.[1];
+  const value = (name: string, pattern: string) => {
+    // Repeated page variables must agree before they can identify an article.
+    const values = [
+      ...html.matchAll(
+        new RegExp(`\\bvar\\s+${name}\\s*=\\s*["'](${pattern})["']`, 'g'),
+      ),
+    ].map((match) => match[1]);
+    if (new Set(values).size > 1) throw new Error('原文身份字段冲突');
+    return values[0];
+  };
   const choose = (legacy: string | undefined, modern: string | undefined) => {
     if (legacy && modern && legacy !== modern)
       throw new Error('原文身份字段冲突');

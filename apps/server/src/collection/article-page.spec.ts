@@ -49,6 +49,18 @@ describe('article publication evidence', () => {
       articlePublishTime(html.replace(cgi, `var ct=1790400092;${cgi}`)),
     ).toBeNull();
   });
+  it('rejects conflicting repeated page identity variables', () => {
+    const html =
+      '<div id="js_content">正文</div><script>var biz="Mzg5NTQzMTQxMg==";var mid="2247493540";var idx="2";var sn="abcdef";</script>';
+    expect(
+      articleIdentity(`${html}<script>var sn="abcdef";</script>`),
+    ).toMatchObject({
+      id: 'WX_3895431412_2247493540_2',
+    });
+    expect(() =>
+      articleIdentity(`${html}<script>var sn="fedcba";</script>`),
+    ).toThrow('原文身份字段冲突');
+  });
   it('requires an article body rather than a timestamp in a verification page', () => {
     expect(
       articlePublishTime('<script>var ct = 1787013185;</script><p>请验证</p>'),
