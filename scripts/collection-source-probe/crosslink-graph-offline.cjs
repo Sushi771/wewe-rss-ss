@@ -60,7 +60,7 @@ function summarize(dbPath) {
       throw new Error('SQLite quick_check failed');
     const rows = db
       .prepare(
-      'SELECT id, verified_source_url, content_html FROM articles WHERE mp_id = ?',
+        'SELECT id, verified_source_url, content_html FROM articles WHERE mp_id = ?',
       )
       .all(TARGET_MP_ID);
     const allKnownPairs = new Set();
