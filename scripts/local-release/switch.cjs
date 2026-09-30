@@ -75,6 +75,14 @@ async function unusedPort() {
 
 async function waitReady(port, child, seconds = 240) {
   const base = `http://127.0.0.1:${port}`;
+  const rssUrl = base + '/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary';
+  const privateMode = process.env.PRIVATE_ONLINE_MODE === '1';
+  // Login material stays in memory and never enters errors, audit logs or redirects.
+  const code = privateMode ? process.env.AUTH_CODE : undefined;
+  if (privateMode && (!code || code.length < 24))
+    throw new Error('私人模式就绪检查缺少有效 AUTH_CODE');
+  class PrivateReadinessError extends Error {}
+  let cookie;
   const deadline = Date.now() + seconds * 1000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null)
@@ -84,19 +92,50 @@ async function waitReady(port, child, seconds = 240) {
         signal: AbortSignal.timeout(1500),
       });
       if (response.ok) {
-        const rss = await fetch(
-          base + '/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary',
-          {
+        if (privateMode) {
+          const anonymous = await fetch(rssUrl, {
+            redirect: 'manual',
             signal: AbortSignal.timeout(10000),
-          },
-        );
+          });
+          if (anonymous.status !== 401)
+            throw new PrivateReadinessError(
+              '私人模式匿名 RSS 未被拒绝，服务未通过就绪检查',
+            );
+          if (!cookie) {
+            const login = await fetch(base + '/auth/login', {
+              method: 'POST',
+              redirect: 'manual',
+              signal: AbortSignal.timeout(1500),
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ code }),
+            });
+            if (login.status !== 204)
+              throw new PrivateReadinessError('私人模式就绪检查登录失败');
+            cookie = (login.headers.get('set-cookie') || '').split(';')[0];
+            if (
+              !/^wewe_private_session=\d{10}\.[a-f0-9]{32}\.[a-f0-9]{64}$/.test(
+                cookie,
+              )
+            )
+              throw new PrivateReadinessError('私人模式就绪检查未取得有效会话');
+          }
+        }
+        const result = await fetch(rssUrl, {
+          signal: AbortSignal.timeout(10000),
+          ...(privateMode
+            ? { redirect: 'manual', headers: { Cookie: cookie } }
+            : {}),
+        });
+        if (privateMode && result.status === 401)
+          throw new PrivateReadinessError('私人模式就绪检查会话未获授权');
         if (
-          rss.status === 200 &&
-          ((await rss.text()).match(/<item>/g) || []).length === 20
+          result.status === 200 &&
+          ((await result.text()).match(/<item>/g) || []).length === 20
         )
           return;
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof PrivateReadinessError) throw error;
       /* 等待校验、数据库连接和 HTTP 监听 */
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
