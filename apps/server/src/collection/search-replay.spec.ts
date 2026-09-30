@@ -54,16 +54,13 @@ describe('verified search SQLite rehearsal protection (no HTTP)', () => {
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
     for (const name of (await fs.readdir(migrations)).sort()) {
+      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
       const file = path.join(migrations, name, 'migration.sql');
-      try {
-        for (const sql of (await fs.readFile(file, 'utf8'))
-          .split(';')
-          .map((s) => s.trim())
-          .filter(Boolean))
-          await prisma.$executeRawUnsafe(sql);
-      } catch (e: any) {
-        if (e.code !== 'ENOENT') throw e;
-      }
+      for (const sql of (await fs.readFile(file, 'utf8'))
+        .split(';')
+        .map((s) => s.trim())
+        .filter(Boolean))
+        await prisma.$executeRawUnsafe(sql);
     }
     const source = path.join(dir, 'source.db');
     await fs.writeFile(source, 'isolated test source marker');
