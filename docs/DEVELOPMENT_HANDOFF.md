@@ -2,7 +2,9 @@
 
 ## 2026-09-30 当前续研
 
-主线 `9435699` 已与远端一致，[CI 36668337424](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36668337424) 两项通过；后续提交需另核。
+- **`/book/articles` 2026 query 形状一次结果：**[真实开源发送行、一次性脚本和总控回包](coordination/BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)与旧 WeBook 头认证不同；同账号合法 BOOX/Eink `/login` 顶层 `skey/vid` 通过备份、身份及新鲜性只读预检后，单次 GET 得 HTTP **401**、业务 **`-2012`**、无 `reviews`，全局私有标记禁止重试。只缩限该凭据来源和该请求形状；A 继续核 macOS 官方客户端正常签发/续期及现行成功证据，不翻参重发。生产 SQLite 未写，真实订阅未恢复。
+- **第三合集 54 项原文入口：**[历史成功采集代码](coordination/THIRD_ALBUM_ARTICLE_LINK_SHAPE.md)证明列表 `item.url` 54/54 为带 `__biz/mid/idx/sn/chksm` 的腾讯 `/s` 长查询，直接短链接 0。[旧请求形状对照](coordination/THIRD_ALBUM_LONG_URL_COMPARISON.md)发现其他旧合集 3 条此形状 HTTP 200 但解析未闭环，**第三合集 54 项没有原文 GET**，不能用搜索的 302 宣称第三合集原文失败。六页最小账本及精确入口已丢，不能恢复原样 URL、今天状态或旧库外即新文；只有 1 篇旧成员短/长身份、`ct` 和正文闭环。C 正审另一旧短分享页能否独立发现合集入口，先恢复并持久保存精确列表响应，排重后再决定单篇只读原文请求。
+  主线 `9564d43` 已与远端一致，[CI 36669244506](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36669244506) 两项通过；后续提交需另核。
 
 - **正常 Web 登录后的独立观察已准备：**[只读 MP 页 DOM/内存探针](coordination/WEREAD_LOGGED_MP_DOM_PROBE.md)复用专用可见 Edge，待本人在腾讯官方页面登录后最多自然导航目标页一次，只报告目录和已知 `state.mp` 的身份/时间字段数量，不读 Cookie、不监听/重放 API。`--plan`、假页自测与语法检查通过；尚未启动在线窗口或请求目标页。本人扫码后再做一次预检与现场观察，若目录为零也不能自动解释为服务端拒绝。
 - **Web 续期已有明确第一方流程差异：**[腾讯静态客户端审计](coordination/WEREAD_RENEWAL_2013_SOURCE.md)显示普通请求因 `-2012/-2010` 才自然触发续期，`rq` 取原请求路径、`ql` 取 `wr_ql`，快速微信登录组件初始化 `ql=1`，另一 Web 登录分支 `ql=0`。此前移动恢复 init 省略 `ql`，后直接固定参数续期得到的 `-2013` 只限制该形状，官方未定义此码。后续若须新合法快速登录，扫码由本人完成；旧会话不翻参重试。即使续期成功，目标列表与五篇验收仍独立。
