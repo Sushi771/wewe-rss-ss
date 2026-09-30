@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-// One target cover observation. The cover's raw reviewId stays in private-data;
-// this runner never fetches an article body or retries a Tencent request.
+// One target cover observation. Successful bounded cover JSON and any
+// reviewId stay in private-data; no body fetch or Tencent request retry.
 const assert = require('node:assert/strict');
 const { randomBytes } = require('node:crypto');
 const fs = require('node:fs');
@@ -20,8 +20,10 @@ const COVER = `${ORIGIN}/web/mp/cover`;
 const BOOK_ID = 'MP_WXS_3895431412';
 const TARGET_NAME = '妈妈部落畅聊阁';
 const MARKER = 'weread-web-mp-cover-target.attempted.json';
+const RAW_COVER = 'weread-web-mp-cover-target-response.json';
 const CANDIDATE = 'weread-web-mp-cover-target-candidate.json';
 const PRIVATE_LIMIT = 8 * 1024;
+const COVER_LIMIT = 64 * 1024;
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -68,14 +70,14 @@ function privateRootGate(dbPath, runDir) {
 function historyGate(privateRoot) {
   // The fixed root-level marker also prevents a new recovery runDir from
   // silently repeating a previous target cover request.
-  for (const name of [MARKER, CANDIDATE]) {
+  for (const name of [MARKER, RAW_COVER, CANDIDATE]) {
     if (fs.existsSync(path.join(privateRoot, name)))
       throw Error('cover_already_attempted');
   }
   for (const entry of fs.readdirSync(privateRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith('mobile-refresh-'))
       continue;
-    for (const name of [MARKER, CANDIDATE]) {
+    for (const name of [MARKER, RAW_COVER, CANDIDATE]) {
       if (fs.existsSync(path.join(privateRoot, entry.name, name)))
         throw Error('cover_already_attempted');
     }
@@ -164,24 +166,85 @@ function candidateRecord(marker, data, accountVid) {
   };
 }
 
-function writeCandidate(privateRoot, record) {
-  const finalPath = path.join(privateRoot, CANDIDATE);
-  const body = JSON.stringify(record) + '\n';
-  if (Buffer.byteLength(body) > PRIVATE_LIMIT) throw Error('cover_candidate_limit');
+function writePrivate(privateRoot, name, body, limit) {
+  const finalPath = path.join(privateRoot, name);
+  if (Buffer.byteLength(body) > limit) throw Error('cover_private_limit');
   if (fs.existsSync(finalPath)) {
-    if (fs.readFileSync(finalPath, 'utf8') === body) return;
-    throw Error('cover_candidate_exists');
+    if (fs.readFileSync(finalPath).equals(Buffer.from(body))) return;
+    throw Error('cover_private_exists');
   }
   const tempPath = path.join(privateRoot,
     `.weread-cover-${randomBytes(8).toString('hex')}.tmp`);
   const fd = fs.openSync(tempPath, 'wx', 0o600);
-  try { fs.writeFileSync(fd, body, 'utf8'); fs.fsyncSync(fd); }
+  try { fs.writeFileSync(fd, body); fs.fsyncSync(fd); }
   finally { fs.closeSync(fd); }
   // Hard link publishes the already-fsynced file without replacing history.
   fs.linkSync(tempPath, finalPath);
-  if (fs.readFileSync(finalPath, 'utf8') !== body)
-    throw Error('cover_candidate_verify_gate');
+  if (!fs.readFileSync(finalPath).equals(Buffer.from(body)))
+    throw Error('cover_private_verify_gate');
   fs.unlinkSync(tempPath);
+}
+
+function writeCandidate(privateRoot, record) {
+  writePrivate(privateRoot, CANDIDATE,
+    JSON.stringify(record) + '\n', PRIVATE_LIMIT);
+}
+
+function writeRawCover(privateRoot, raw) {
+  if (!Buffer.isBuffer(raw)) throw Error('cover_raw_gate');
+  writePrivate(privateRoot, RAW_COVER, raw, COVER_LIMIT);
+}
+
+function coverRisk(text) {
+  if (/验证码|captcha|人机验证|安全验证|请完成验证|环境异常|verification|challenge|verifyurl|\/verify|"(?:verify|riskUrl)"\s*:/i.test(text))
+    return 'stop_verification';
+  if (/请求频繁|访问频繁|限流|限频|rate.?limit|too many|throttl/i.test(text))
+    return 'stop_rate_limit';
+  return null;
+}
+
+async function readCoverJson(response) {
+  const length = Number(response.headers()['content-length']);
+  if (Number.isFinite(length) && length > COVER_LIMIT)
+    return { stop: 'stop_body_limit' };
+  const raw = await response.body();
+  if (raw.length > COVER_LIMIT) return { stop: 'stop_body_limit' };
+  const text = raw.toString('utf8');
+  let data;
+  try { data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)); }
+  catch { return { stop: coverRisk(text) ?? 'stop_non_json' }; }
+  // Exclude JSON verification/error responses before preserving any payload.
+  // Unknown successful shapes are retained so the sole request stays useful.
+  const errCode = numericCode(data?.errCode);
+  const ret = numericCode(data?.ret);
+  const risk = coverRisk(text);
+  if (risk) return { stop: risk, errCode, ret };
+  // Some Tencent envelopes put a business code one level below the root.
+  // Treat a nested restriction as a stop before saving raw JSON as well.
+  const inner = data && typeof data === 'object' && !Array.isArray(data) ?
+    [data.data, data.content] : [];
+  const innerCodes = inner.flatMap((part) => part && typeof part === 'object' ?
+    [numericCode(part.errCode), numericCode(part.ret)] : []);
+  const codes = [errCode, ret, ...innerCodes];
+  if (codes.includes(-2014))
+    return { stop: 'stop_rate_limit', errCode, ret };
+  if (codes.includes(-2041))
+    return { stop: 'stop_access_restricted', errCode, ret };
+  if (codes.includes(-2012))
+    return { stop: 'stop_auth_expired_candidate', errCode, ret };
+  if (data && typeof data === 'object' &&
+      Object.hasOwn(data, 'success') &&
+      numericCode(data.success) !== 1)
+    return { stop: 'stop_business_error', errCode, ret };
+  if ((data && typeof data === 'object' &&
+      ((Object.hasOwn(data, 'errCode') && errCode === null) ||
+       (Object.hasOwn(data, 'ret') && ret === null))) ||
+      inner.some((part) => part && typeof part === 'object' &&
+        ((Object.hasOwn(part, 'errCode') && numericCode(part.errCode) === null) ||
+         (Object.hasOwn(part, 'ret') && numericCode(part.ret) === null))) ||
+      codes.some((code) => code !== null && code !== 0))
+    return { stop: 'stop_business_error', errCode, ret };
+  return { raw, data, errCode, ret };
 }
 
 async function persistUntilDurable(privateRoot, record, options = {}) {
@@ -201,7 +264,7 @@ async function persistUntilDurable(privateRoot, record, options = {}) {
   }
 }
 
-async function probe(mobile, launch, marker, save) {
+async function probe(mobile, launch, marker, saveRaw, save) {
   const out = {
     decision: 'stop_browser_or_context', requestCount: 0,
     initRequests: 0, coverRequests: 0, articleRequests: 0,
@@ -264,18 +327,16 @@ async function probe(mobile, launch, marker, save) {
       await cover.dispose(); return out;
     }
     let found;
-    try { found = await readPayload(cover, 64 * 1024); }
+    try { found = await readCoverJson(cover); }
     catch { out.decision = 'stop_cover_body_read'; return out; }
     finally { await cover.dispose(); }
     out.coverCode = found.errCode ?? null;
     out.coverRet = found.ret ?? null;
-    if (out.coverCode === -2014 || out.coverRet === -2014) {
-      out.decision = 'stop_rate_limit'; return out;
-    }
-    if (out.coverCode === -2041 || out.coverRet === -2041) {
-      out.decision = 'stop_access_restricted'; return out;
-    }
     if (found.stop) { out.decision = found.stop; return out; }
+    // Preserve the exact bounded JSON before any cover shape or identity gate.
+    // Persistence failure retries locally with the only response still in RAM.
+    out.privateRawPersistAttempts = await saveRaw(found.raw);
+    out.privateRawSaved = true;
     const shaped = coverShape(found.data);
     if (shaped.stop) { out.decision = shaped.stop; return out; }
     out.sourceNameMatched = true;
@@ -307,6 +368,15 @@ async function selfTest() {
     reviewId: `${BOOK_ID}_abc` }).stop, 'stop_source_identity');
   assert.equal(coverShape({ name: TARGET_NAME, title: 'x',
     reviewId: 'MP_WXS_1_abc' }).stop, 'stop_review_identity');
+  const fakeRaw = (value) => ({
+    headers: () => ({}), body: async () => Buffer.from(value),
+  });
+  assert.equal((await readCoverJson(fakeRaw('<html>验证码</html>'))).stop,
+    'stop_verification');
+  assert.equal((await readCoverJson(fakeRaw('<html>other</html>'))).stop,
+    'stop_non_json');
+  assert.equal((await readCoverJson(fakeRaw('{"data":{"ret":-2041}}'))).stop,
+    'stop_access_restricted');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'cover-fixture-'));
   try {
     const marker = { kind: 'weread-web-mp-cover-target',
@@ -321,8 +391,14 @@ async function selfTest() {
     assert.throws(() => historyGate(scratch), /cover_already_attempted/);
     assert.doesNotThrow(() => writeCandidate(scratch, record));
     assert.throws(() => writeCandidate(scratch,
-      { ...record, reviewId: `${BOOK_ID}_other` }), /cover_candidate_exists/);
+      { ...record, reviewId: `${BOOK_ID}_other` }), /cover_private_exists/);
     fs.unlinkSync(path.join(scratch, CANDIDATE));
+    const rawFixture = Buffer.from('{"unexpected":{"field":"fixture-private-raw"}}');
+    writeRawCover(scratch, rawFixture);
+    assert.deepEqual(fs.readFileSync(path.join(scratch, RAW_COVER)), rawFixture);
+    assert.throws(() => writeRawCover(scratch,
+      Buffer.from('{"different":true}')), /cover_private_exists/);
+    fs.unlinkSync(path.join(scratch, RAW_COVER));
     markAttempt(scratch);
     assert.throws(() => markAttempt(scratch), /EEXIST/);
     assert.throws(() => historyGate(scratch), /cover_already_attempted/);
@@ -374,26 +450,58 @@ async function selfTest() {
         }, close: async () => {} };
       }, close: async () => {},
     });
-    const result = await probe(mobile, fakeLaunch(), marker, async (candidate) => {
+    const result = await probe(mobile, fakeLaunch(), marker,
+      async (raw) => { assert.equal(JSON.parse(raw).reviewId, data.reviewId);
+        return 1; }, async (candidate) => {
       assert.equal(candidate.reviewId, data.reviewId); return 1;
     });
     assert.equal(calls, 2);
     assert.equal(result.decision, 'cover_candidate_private_saved');
     assert.equal(result.articleRequests, 0);
     assert.equal(result.listRequests, 0);
+    assert.equal(result.privateRawSaved, true);
     assert.doesNotMatch(JSON.stringify(result), /fixture-private|fixture-secret/);
     calls = 0;
     const initRejected = await probe(mobile,
       fakeLaunch({ initStatus: 401 }), marker,
+      async () => { throw Error('raw_save_must_not_run'); },
       async () => { throw Error('save_must_not_run'); });
     assert.equal(calls, 1);
     assert.equal(initRejected.decision, 'stop_authentication_rejected');
     calls = 0;
     const rateLimited = await probe(mobile,
       fakeLaunch({ coverBody: { errCode: -2014 } }), marker,
+      async () => { throw Error('raw_save_must_not_run'); },
       async () => { throw Error('save_must_not_run'); });
     assert.equal(calls, 2);
     assert.equal(rateLimited.decision, 'stop_rate_limit');
+    calls = 0;
+    const unknown = await probe(mobile,
+      fakeLaunch({ coverBody: { unexpected: { field: 'fixture-private-raw' } } }),
+      marker, async (raw) => { writeRawCover(scratch, raw); return 1; },
+      async () => { throw Error('candidate_save_must_not_run'); });
+    assert.equal(calls, 2);
+    assert.equal(unknown.decision, 'stop_source_identity');
+    assert.equal(unknown.privateRawSaved, true);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(scratch, RAW_COVER),
+      'utf8')).unexpected.field, 'fixture-private-raw');
+    assert.doesNotMatch(JSON.stringify(unknown), /fixture-private-raw/);
+    fs.unlinkSync(path.join(scratch, RAW_COVER));
+    calls = 0;
+    let rawWrites = 0;
+    const rawRetry = await probe(mobile,
+      fakeLaunch({ coverBody: { unexpected: 'fixture-private-raw' } }),
+      marker, (raw) => persistUntilDurable(scratch, raw, {
+        writer: (root, value) => {
+          if (++rawWrites === 1) throw Error('disk_fixture');
+          writeRawCover(root, value);
+        }, pause: async () => {}, notify: () => {},
+      }), async () => { throw Error('candidate_save_must_not_run'); });
+    assert.equal(calls, 2);
+    assert.equal(rawWrites, 2);
+    assert.equal(rawRetry.privateRawPersistAttempts, 2);
+    assert.equal(rawRetry.decision, 'stop_source_identity');
+    assert.doesNotMatch(JSON.stringify(rawRetry), /fixture-private-raw/);
   } finally {
     for (const name of fs.readdirSync(scratch))
       fs.unlinkSync(path.join(scratch, name));
@@ -415,6 +523,7 @@ async function main() {
       initRequestMax: 1, coverRequestMax: 1, articleRequests: 0,
       listRequests: 0, redirects: false, retries: false,
       privateOutput: 'repo_ignored_private_data', productionWrites: 0,
+      boundedJsonSavedBeforeIdentityGate: true,
       requestCount: 0 })); return;
   }
   if (options.mode === '--self-test') {
@@ -459,6 +568,8 @@ async function main() {
       '--no-first-run', '--no-default-browser-check'],
   });
   const result = await probe(ready.mobile, launch, marker,
+    (raw) => persistUntilDurable(ready.privateRoot, raw,
+      { writer: writeRawCover }),
     (record) => persistUntilDurable(ready.privateRoot, record));
   console.log(JSON.stringify(result));
   if (result.decision !== 'cover_candidate_private_saved') process.exitCode = 1;
@@ -467,5 +578,6 @@ async function main() {
 if (require.main === module) main();
 
 module.exports = { args, privateRootGate, historyGate, targetGate,
-  coverShape, candidateRecord, writeCandidate, persistUntilDurable,
+  coverShape, candidateRecord, writeCandidate, writeRawCover, readCoverJson,
+  persistUntilDurable,
   probe, selfTest };
