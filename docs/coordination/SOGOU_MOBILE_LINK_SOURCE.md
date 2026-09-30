@@ -1,0 +1,34 @@
+# 搜狗移动搜索 `/link` 请求链审计（2026-09-30）
+
+## 范围与结论
+
+本轮只读审查[已保存的移动首屏](SOGOU_MOBILE_LINK_OFFLINE.md)、该页实际引用的腾讯搜狗静态 JS、固定版本开源源码与近期作者记录。没有请求目标号搜索页、页 2、任一目标 `/link` 或微信原文，也没有读取私有凭据。**移动首屏的九张卡中八张显示目标号名，但目前没有一张经移动 `/link` 证实为腾讯原文。** 移动入口值得做一次有哨兵的单条跳转验证；现有数据不能直接接 Provider。
+
+## 移动页自身怎样打开文章
+
+原始首屏的九个真实 `li[id^=sogou_vr_]` 均有 `h4 a[href]`；它们没有行内 `onclick`、`data-share` 或 `target=_blank`。页面引用的第一方 [`event.min.js?v=20200407`](https://weixin.sogou.com/new/wap/js/event.min.js?v=20200407)（本轮 GET 200，3,674 字节，SHA-256 `e3af70377c69aae94d2e47e9ebaa409c316b6db203beea89d514cec3b0396e15`）对文章 `a.s4` 只弹分享浮层；对账号 `.gzh-box` 才 `preventDefault()` 并显示账号转接页。普通文章标题锚点没有被该脚本拦截。移动页面将不透明的 `/link?url=...&query=...&token=...&type=...` 原样交给浏览器导航；客户端脚本没有先解出微信 URL。
+
+本轮另外读取页面实际引用的 [`https_util.min.js?v=20180607`](https://weixin.sogou.com/new/wap/js/https_util.min.js?v=20180607)、[`common.min.js?v=20200325`](https://weixin.sogou.com/new/wap/js/common.min.js?v=20200325)、`weixin_share.min.js` 及三个 `/new/weixin/js/` 公共文件。七个文件均 HTTP 200；其中移动 `common.min.js` 的 `/link` 字面仅属于 `img01.sogoucdn.com/net/a/04/link` **图片代理**，不能误判为文章 `/link` 逆映射。所查脚本没有将移动文章 `url` 参数解为 `mp.weixin.qq.com` 的路径。此结论只覆盖七个文件与当前页面，不证明服务端 `/link` 无法解析。静态文件留在工作区外研究缓存，没有加入 Git。
+
+普通同源浏览器导航会使用浏览器为搜狗域名保存的正常 Cookie；但**本项目第一次匿名移动首屏只保存 HTML，没有保存 Set-Cookie**，不能声称现有九个旧 href 在当前离线环境具备有效会话。`token`、`url` 均应作为该页面给出的不透明链接字段使用，不能凭 Base64URL 外形自行还原、猜值或伪造。页面显示日期和 `data-openid` 也不是官方发表时间和 `biz`。
+
+## 开源解析器能证明到哪里
+
+| 固定版本代码 | 真正的请求与 Cookie | 对本次移动九卡的意义 |
+| --- | --- | --- |
+| [`wx-search-cli` `70b75b7`](https://github.com/tjx666/wx-search-cli/blob/70b75b71384b4bcfce86be744b685f02f9440c16/src/search.ts#L42-L99) | 先 GET **桌面** `/weixin?type=2`；[从该响应 Set-Cookie 建会话](https://github.com/tjx666/wx-search-cli/blob/70b75b71384b4bcfce86be744b685f02f9440c16/src/parsers.ts#L21-L34)，再 GET 同源 `/link`，从 `url +=` HTML 片段拼出微信 URL。2026-08-10 [live workflow 成功](https://github.com/tjx666/wx-search-cli/actions/runs/31355535906)。 | 可复用“先检查单跳响应，再检查 HTTP 200 的分段 JS”的**解析思路**；实际成功是桌面入口与通用词，不能证明移动 `token` 或目标号。 |
+| [MIT `wechat-article-search` `7e1be9a`](https://github.com/zjp1997720/wechat-article-search/blob/7e1be9a0d5b5a9e6835c83cddb2d79bb9c9fe6b6/skills/wechat-article-search/scripts/search_wechat.js#L141-L219)（2026-07-17） | 从 `v.sogou.com/v` 的公开响应提取 Cookie；[其 `/link` 函数](https://github.com/zjp1997720/wechat-article-search/blob/7e1be9a0d5b5a9e6835c83cddb2d79bb9c9fe6b6/skills/wechat-article-search/scripts/search_wechat.js#L249-L349)接受 302 或 HTTP 200 的 HTML/JS 跳转。真实搜索仍是[桌面 `/weixin`](https://github.com/zjp1997720/wechat-article-search/blob/7e1be9a0d5b5a9e6835c83cddb2d79bb9c9fe6b6/skills/wechat-article-search/scripts/search_wechat.js#L625-L665)，解析器要求 `h3 a`。 | 是另一条合法 Cookie 来源代码，但混有固定旧 Cookie、随机 UA、最多三次重试且没有移动真实回包；`h3 a` 也读不到本页 `h4 a`。不能原样作为低频探针或可持续凭据方案。其测试使用合成 HTML。 |
+| [Rust `tarzi` 解析器](https://docs.rs/tarzi/latest/src/tarzi/search/parser/sogou_weixin.rs.html#179-225) | 只对 `/link?url=` 做 URL 解码，没有发送 `/link` 请求；[测试](https://docs.rs/tarzi/latest/src/tarzi/search/parser/sogou_weixin.rs.html#293-312)人工把完整 `mp.weixin.qq.com` URL 百分号编码进参数。 | 本项目九卡 `url` 是 280 字符不透明值，普通 URL/Base64URL 解码均不含微信域名；这些合成测试不覆盖当前移动格式。 |
+| [岱宗盒子 Android `76ec234d`](https://github.com/yeliqin666/xjtu-toolbox-android/blob/76ec234d10e9997cd017754274a5d5e5a6860955/app/src/main/java/com/xjtu/toolbox/agent/AgentTool.kt#L1669-L1679) | 确实 GET 移动 `/weixinwap?type=2`，却只把相对 href 补为搜狗绝对 URL。 | 提供移动请求的一手发送行，没有移动 `/link` 解析、原文身份或分页实现。 |
+
+[2026-08-01 移动索引作者实测](https://lovstudio.ai/blog/wechat-cross-account-index-ret-200013-2026#main-analysis)称另一公众号曾通过移动搜狗索引取得十篇正文，并强调签名 URL 的 `&timestamp` 不可做宽泛 HTML 反转义；作者没有公开移动 `/link` 发送代码或目标号回包。这是继续验证的线索，不可挪作本项目通过验收的证据。本轮公开源码检索没有找到同时给出**移动页请求、同会话 `/link` 解析、官方四字段核对、近期成功回包**的可审实现；仅限本轮检索覆盖。
+
+移动页自身的[`next_page.min.js?v=20200326`](MOBILE_PUBLIC_ARTICLE_SEARCH_SOURCE.md#第一方分页脚本与一次性页-2-设计)按当前 URL 生成 `page=2&_rtype=json`，预期读取 `items[]`；它不负责 `/link` 解析。既有匿名页 2 只留下 HTTP 200、51,307 字节和保守 `verification-stop` 摘要，响应正文未保存，因此不能判定实际条目或分页成功。首屏九卡的展示日期均在 2026-03，而请求日为 2026-09-30，也没有当期新文与增量时效证据。
+
+## 与已测失败的差异和下一次隔离验证
+
+旧[桌面搜狗阶段四](SOGOU_PUBLIC_INDEX.md#第四阶段一条签名腾讯原文未取得正文结构)在桌面 `/weixin` 同会话解析一条 `/link` 后，微信签名 `/s` 得 HTTP 200 却缺 `#js_content`；只排除**那条桌面候选当时可取正文**。移动 `/weixinwap` 的入口、`h4` DOM 和 `url/token/query/type` 链接形状不同，当前还没有访问过它的 `/link`。匿名页 2 的保守 `verification-stop` 没有保存响应，既不能当作真正验证码，也不能推断单篇 `/link` 失败；相同页 2 不重发。
+
+建议先对**已确认旧目标文章标题作一次独立移动搜索校准**，以新搜狗同会话取得一张匹配卡后，只选一条合法页面给出的 `/link`。此搜索条件不是已执行的“目标号名页 1”或匿名页 2；旧文章仅作可对照身份种子，绝不充作新订阅样本。探针应请求前持久写同条件哨兵、无代理、无自动跳转/重试、间隔与大小上限；只从该搜索响应的正常 Set-Cookie 建立本进程会话。**只有搜索 HTTP 200、没有验证或限流、确有标题和来源匹配的卡片，且响应 Cookie 按正常 domain/path 规则可用于同域 `/link` 时**，才发一次 `/link`。单跳 302 只读 `Location`；HTTP 200 只静态提取完整 `url +=` 或明确 meta refresh，不执行响应脚本。遇 302 到验证页、403/429、挑战文本或异常跳转立即停止，不能调用 `/approve` 或自动继续。
+
+若 `/link` 得到**完整 HTTPS `mp.weixin.qq.com/s` URL**，另行复审是否准许一次原文 GET；只允许腾讯域名，保留签名查询串原样，不对完整 URL 调通用 HTML 实体解码。原文必须有 `#js_content`，且原文 `__biz/mid/idx/sn` 与已知旧文章四字段逐项一致，`ct`/可信时间可解析，图片 `data-src` 是腾讯源；否则只报告实际页面形态并停步。该校准即使成功，也只证明单篇移动跳转可解析。随后才用**新文章**按号名检索、核官方四字段与发布时间，并单独验分页、图片字节和持续更新；移动搜索索引可能不完整或滞后。
