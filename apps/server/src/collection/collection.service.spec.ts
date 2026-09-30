@@ -194,11 +194,19 @@ describe('local collection with real SQLite migrations', () => {
     expect(readme).toContain('未完整 1 篇');
     process.env.PRIVATE_ONLINE_MODE = '1';
     try {
-      await expect(caller.account.byId('legacy-account')).rejects.toThrow(
-        '线上私人站点',
+      // Restored owner management stays behind the existing private login.
+      await prisma.account.create({
+        data: { id: 'legacy-account', name: 'owner', token: 'private-fixture' },
+      });
+      const account = await caller.account.byId('legacy-account');
+      expect(account.name).toBe('owner');
+      expect(account).not.toHaveProperty('token');
+      const anonymous = router.appRouter.createCaller({ errorMsg: '请先登录' });
+      await expect(anonymous.account.byId('legacy-account')).rejects.toThrow(
+        '请先登录',
       );
-      await expect(caller.platform.createLoginUrl()).rejects.toThrow(
-        '线上私人站点',
+      await expect(anonymous.platform.createLoginUrl()).rejects.toThrow(
+        '请先登录',
       );
     } finally {
       delete process.env.PRIVATE_ONLINE_MODE;
