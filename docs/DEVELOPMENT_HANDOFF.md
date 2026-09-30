@@ -2,6 +2,7 @@
 
 ## 2026-09-30 当前续研
 
+- **第一方 Web 票据新证据：**[腾讯当前静态客户端](coordination/WEREAD_WEB_TICKET_LIFECYCLE.md)的 MP 模块真实调用 `/web/mp/articles`；浏览器请求时调用 `window.__WRPA__.sr` 生成 `x-wrpa-0`，`x-wr-ticket` 来自 `-2041` 后本人完成腾讯验证码的回调，均不是普通登录 Cookie。现有证据未证明捕获一次票据可供无人值守分页/定时更新，也未证明 Web 续期接口实际签发票据。独立专项正分别查可见 DOM 列表/分页和续期的一手响应，不重发已受限目标请求。图片导出集成测试的 CI 偶发 5 秒超时已局部放宽，[CI 36661342351](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36661342351) 成功；真实订阅仍未恢复。
 - **A 定向源码结论：**[微信读书搜索卡到正文链路](coordination/WEREAD_SEARCH_TO_CONTENT_SOURCE.md)核了固定腾讯搜索 JS 和近期真实发送实现：搜索 `docID` 只用于卡片/上报，`doc_url` 打开微信原文；未见 `docID/doc_url → reviewId → /web/mp/content` 桥。已有 WeRead 正文链从书架账号 `bookId` 的封面或列表取得 `reviewId`，本账号当前封面形状未成功且封面只有一篇。此阴性结果限所审源码，不能猜 ID 调正文接口。
 - **C 旧正文互链：**[只读离线图审计](coordination/PUBLIC_ARTICLE_CROSSLINK_GRAPH.md)在目标 194 条旧库行的 27 条正文缓存中，找到 13 条正文引用 75 个唯一同号四字段身份（187 次链接）；没有目标原文 `ct`、合集 ID、固定前后篇顺序或游标，不构成全号目录、75 篇已核文章或自然更新。八份旧原始 HTML 已丢，不能与此前 172/63 统计混算；本轮未据此发新请求。
 - **公开短链后续实测：**摘要 `5e44e0d46c308fe2` 的目标旧文章原存官方 `/s/<22 token>` 单次 HTTP 200，四字段身份、canonical、原文 `ct`、正文闭环，16 张 `data-src` 图片；私有 HTML/最小证据及禁止重发哨兵持久保存。C 已离线确认此页 `album_info_list=[]`、相关文章标志 0、DOM 无可用链接，未得到可验证的其他目标文章/合集入口；仅排除此页。这是旧文可读，不是账号级列表、新文章或更新验收。
