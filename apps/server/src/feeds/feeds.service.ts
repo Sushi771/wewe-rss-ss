@@ -75,10 +75,24 @@ export class FeedsService {
   async handleUpdateFeedsCron() {
     // 隔离演练和受控切换时，不读账号、不触发任何采集或状态写入。
     if (process.env.DISABLE_SCHEDULED_UPDATES === '1') return;
+    // A limited rollout can schedule one proven subscription without changing
+    // the status or attempting the old channels of other saved feeds.
+    const rawSelection = process.env.SCHEDULED_MP_IDS;
+    const selected = rawSelection?.trim();
+    const mpIds = selected
+      ? [...new Set(selected.split(',').map((id) => id.trim()))]
+      : [];
+    if (
+      (rawSelection !== undefined && !selected) ||
+      mpIds.some((id) => !/^MP_WXS_\d{5,15}$/.test(id))
+    ) {
+      this.logger.error('SCHEDULED_MP_IDS 无效，本轮定时更新未执行');
+      return;
+    }
     this.logger.debug('Called handleUpdateFeedsCron');
 
     const feeds = await this.prismaService.feed.findMany({
-      where: { status: 1 },
+      where: { status: 1, ...(mpIds.length ? { id: { in: mpIds } } : {}) },
       orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],
     });
     this.logger.debug('feeds length:' + feeds.length);
