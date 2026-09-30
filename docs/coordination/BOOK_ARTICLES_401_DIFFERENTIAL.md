@@ -1,0 +1,26 @@
+# `/book/articles` 两次 401 的离线差异分析
+
+日期：2026-09-30。范围：仅比较已保存的脱敏实验结果和固定版本公开源码；本轮网络请求 **0**。本文不修改既有探针结果，也不把认证失败解释成公众号没有文章。
+
+## 已观察到什么
+
+| 条件 | 请求形状与证据 | 本账号实测 | 可得结论 |
+| --- | --- | --- | --- |
+| 匿名扩展式首屏 | [旧扩展固定发送行](https://github.com/Higurashi-kagome/wereader/blob/a27b604dd7753734a27a47f341dbebbc6aef8917/src/worker/worker-popup.ts#L331-L348)对应 `GET /book/articles?bookId=MP_WXS_3895431412&count=10&offset=0`；本机 [匿名探针](../../scripts/research/probe-anonymous-book-articles.cjs)用普通浏览器 UA、`Accept: */*`，不带身份信息。 | [一次 HTTP 401](ANONYMOUS_BOOK_ARTICLES_PROBE.md)；脚本没有读取 401 正文，所以业务码未知。 | 本机 Node 匿名请求没有取得列表；不能由此判断合法认证请求。 |
+| 旧 WeBook 自定义头首屏 | [WeBook 固定发送行](https://github.com/wnma3mz/wechat_articles_spider/blob/f8b31196e88045d079901812ea064ad4953d62a6/wechatarticles/ArticlesUrls.py#L650-L673)对应 `bookId=MP_WXS_3895431412&count=20&offset=0&synckey=<Unix 秒>`；iPhone UA，字面 `Cookies: wr_logined=1`（复数），自定义 `skey`、`vid` 头。本机[实现](../../scripts/research/probe-book-articles-skey-first-page.cjs)只用同账号正常 `/login` 新响应的顶层 `skey` 和匹配 `vid`，不混入 Web Cookie、`accessToken` 头或 query 凭据。 | 总控审查后仅执行一次：HTTP 401、业务码 `-2012`、无 `reviews` 数组。私有最小结构落盘、独立 marker 保留、生产写入 0。 | 这组账号、凭据来源、旧头和参数在该时点被拒绝；`reviews` 缺席不表示目标号无文章。 |
+| 2026 `syfun` query 形状 | [`syfun/weread-mp-pull@7319d99` 实际构造](https://github.com/syfun/weread-mp-pull/blob/7319d9976d7390f60edca28a073082c82c10f2f3/main.py#L36-L69)：`/book/articles` 的 `bookId`、`version=2`、`vid`、`skey`、`offset=0`、`count=1`、`synckey` 在查询参数中；[读取顶层 `/login.skey` 的代码](https://github.com/syfun/weread-mp-pull/blob/7319d9976d7390f60edca28a073082c82c10f2f3/weread_skey.py#L44-L71)针对 Mac 客户端回包。 | 本账号 **未测此形状**；现有固定源码没有可核查的近期成功响应。其 README 所述每次运行以 mitmproxy 从 Mac 客户端获取值，不能作为本产品最终运行路径。 | 相对 WeBook 确有参数与认证位置差异，但源码存在不等于这组合法凭据能通过当前认证。 |
+| 2026 `qianh` 捕获头形状 | [`qianh/weread-collect-agent@c68be20` 请求代码](https://github.com/qianh/weread-collect-agent/blob/c68be20cd32645198d42f7309d1d327799e1863b/weread_collector/client.py#L163-L190)以用户提供的 Proxyman 原始文章 cURL 为底稿，续期从解包后的 `data.skey` 重写自定义头；[相关测试](https://github.com/qianh/weread-collect-agent/blob/c68be20cd32645198d42f7309d1d327799e1863b/tests/test_client.py#L103-L170)使用 `MockTransport`。 | 本账号 **未测其捕获请求**。本次正常 `/login` 观察到顶层 `skey`，没有 `data.skey`；原始抓取头和成功回包均无可复核证据。 | 它说明另一个作者尝试自定义头，但不能证明某个额外头会修复本次 `-2012`，且其认证读取层级与本机正常响应不一致。 |
+
+本次最小结构只包含 HTTP、业务码、`reviews` 结构和停止判据；没有保存原始响应或凭据。脚本先按 HTTP 401 分类为 `stop_http`，但其独立字段仍记录 `businessCode=-2012`。这一分类顺序不应误读为“未见业务错误”。既有[正常 `/login` 字段核查](MOBILE_LOGIN_SKEY_FIELD_PROBE.md)证明当时获得非空顶层 `skey`、同账号 `vid`；近期[恢复后的 Web 会话和搜索实验](REFRESHED_MOBILE_SEARCH_CURSOR_PROBE.md)证明移动令牌曾可换取可用 Web 会话。这些成功不能证明 i 域 ArticleService 接受这次 `skey`，也不能将 `-2012` 单独归因为整个移动账号过期。
+
+## 差异的证据强度
+
+两个 401 的认证条件不同，因此匿名失败不能解释第二次失败。第二次的业务码表明该请求未取得认证列表，但现有响应投影不能区分 `skey` 与该服务不兼容、账号权限、客户端/版本校验、旧字面 `Cookies` 头、目标资源限制，或其他条件；不能凭字段名推断原因。`-2012` 在其他 i 域实现中被作者用作登录或会话错误提示，尚无此端点的腾讯一手错误定义。这里按“认证/访问拒绝”处理，不称其为验证码或已证实限流。
+
+`syfun` 的 query `vid/skey`、`version=2`、`count=1` 和不同 `synckey` 时间是**真实发送代码层面**的差异；尚无同账号、当前日期、可核响应证明这些差异会改变 401。`qianh` 的自定义头与旧 WeBook 同属头认证，额外上下文来自不可在本产品运行时依赖的捕获 cURL，测试成功是模拟响应。2026 年源码的发布日期与作者功能说明不等于该接口的当前成功证据。正常 `/login` 响应的顶层 `skey` 也只证明字段可合法获得，不证明任何一个取文请求形状具备服务端授权。
+
+## 停止决定与可重新审查的条件
+
+**现在停止所有 `/book/articles` 在线请求，包括换成 `syfun` query 形状、补头或再试另一账号。**总控已要求该端点停测；项目亦要求遇访问限制立即停止。这里已有匿名与带合法新 `skey/vid` 的两次 401，继续只凭参数差异碰运气会成为对受限接口无依据重复请求。不得改用旧 marker 重新发送，也不得把现有 `reviews` 缺席计作“五篇门槛”失败。
+
+离线研究仍可继续。将来只有出现**新的强一手依据**时才交总控重新审查是否存在独立、低频、合法实验空间，例如：固定版本公开客户端/可审查实现展示正常登录签发并续期当前 ArticleService 所需认证，且附当前真实成功回包；给出精确请求形状、账号授权范围，并能解释本次 `-2012` 与新条件的实质差别。作者 README 宣称、模拟测试、仅同名 `skey` 字段或抓包模板均不足以单独重开。即使找到这些依据，仍须先核腾讯限制和项目门禁，另设计新 marker 与一次请求上限；本文不授权后续请求。此结果只排除上表中**已经实测**的请求条件，不排除其他腾讯公开取文路线或整个自建订阅目标。
