@@ -234,3 +234,11 @@
 先前脚本仅在身份、时间和正文全部通过后才保存原始 HTML；若单次 HTTP 200 的当前页面使解析器止步，响应退出后便无法离线辨别字段差异。本次把有界保存移到解析之前：仍先排他、同步写入 Git 忽略的持久私有哨兵，再发送至多一次 GET；仅当响应是完整、`text/html`、未超 **6 MiB**、且未命中验证码/限流标志的 HTTP **200** 时，先将原始 HTML 以临时文件同步和硬链接不可覆盖方式保存于 `<主仓>/private-data/public-page-probes/`，随后才尝试身份、字面 `ct`、正文和合集解析。解析失败时只输出停止层、安全布尔及私有 HTML 文件路径，保留哨兵与 HTML 供离线诊断；解析成功才另存最小身份/合集 ID JSON，并输出其私有路径。原文或字段值仍不进入公开日志和 Git。3xx 不看 `Location`；验证码/限流、非 HTML、超限或网络错误不保存响应页，也不重试。保存原文失败时立即返回 `private_html_save_stop`，保留已尝试哨兵，不继续解析。
 
 离线回归：`preflight` 仍为 `requests=0`，备份/旧身份核对通过；无复审标志的 `probe` 为 `review_or_attempt_gate_stop`、`requests=0`，没有建立真实私有目录。假网络新增 HTTP 200 四字段冲突及无 `#js_content` 两例，均证实**先写原文再停止解析**、只存 HTML 不存合集 JSON，模拟 HTML 字节与私存文件相同；302、验证码、非 HTML/超限、网络失败均只留 marker；成功例保存 HTML 与最小 JSON；私有 HTML 写失败仅请求一次并停。所有模拟请求在回调开始前已见哨兵，二次调用均被挡住。本轮仍无真实在线请求；私有文件只会由总控未来复审后的实际运行产生。
+
+### 摘要 5e44… 当前官方原文的离线发现能力复核（零新请求）
+
+总控按上一节唯一一次请求旧文的**官方短路径**：HTTP **200**；`__biz/mid/idx/sn`、短 canonical、字面原文 `ct` 和正文均与已核旧库闭环，正文中 **16** 张图均有 `data-src`。这一结果仅确认**该篇旧文章在该时点可读**。C 线没有再请求原文；只读复核主仓忽略目录 `private-data/public-page-probes/short-5e44e0d46c308fe2.html` 与相邻最小 evidence，HTML 为 **4,065,290** 字节，文件 SHA-256 与 evidence 的 `htmlSha256` 相同。未向 Git 或日志输出原始 HTML、完整 URL、文章标题、正文、合集 ID 或私有字段值。
+
+以 DOM 和静态赋值分开审计这份 HTML：正文 `#js_content` 有图与文字，但**没有可点击文章/合集链接**；整页虽有 9 个 `<a>` 元素，却无一个带 `href`。页面实际赋值 `var album_info_list=[]`；`appmsgalbuminfo` 只在通用脚本代码中出现，没有该篇的有效赋值，也没有明示同号 `/mp/appmsgalbum?action=getalbum` 链接或数值 `album_id`。`window.cgiDataNew.related_article_info.has_related_article_info` 是字符串 **`"0"`**，另一个 `related_article` 赋值为空字符串，`related_tag=[]`；这份响应没有可逐条验证的相关原文身份或分页。`public_tag`、`appmsgalbum` 等词在内联客户端代码中出现，与实际页面数据不可混同；本页也没有明示的 `tag_id/public_tag_link`。`/mp/profile_ext` 在内联通用 JS 中有静态路径引用，但无 DOM 主页链接或该页已返回的账号文章列表；账号级主页/历史端点的认证与行为仍归 B 线的独立证据审查。
+
+原始 HTML 的 URL 形态扫描发现，除当前文章自身短 canonical/msg_link 的重复出现外，另有一条不同的腾讯短 `/s/<token>` 字面量，位于通用内联 JS 的 `href` 赋值处。它不在当前旧库的目标号 `source_url` 行中，也没有伴随可核目标 `biz/mid/idx/sn`；**不能**认定为该号另一篇文章或作为低频 Probe 种子。没有发现可核同号长文章链接、合集 ID 或直接由此篇自动扩展的候选。这个阴性结论仅限于**本次这篇页面及这些已审字段/DOM**：不排除该号其他文章声明合集、第三合集既有列表、需要认证的主页能力，亦不证明账号级自建订阅不可行。下一次公开页面验证须有另一篇已核身份种子或新的第一方发送代码，不能重发本短 URL。
