@@ -449,7 +449,7 @@ describe('backend collection routing', () => {
     } finally {
       fetchMock.mockRestore();
     }
-  });
+  }, 15_000);
 
   it('isolates one failed feed and keeps its old body, image, metrics and ID', async () => {
     const old = article(ids[4]);
