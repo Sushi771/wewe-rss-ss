@@ -1,5 +1,13 @@
 import { FC, useEffect, useMemo, useState } from 'react';
-import { Button, Spinner, Checkbox } from '@nextui-org/react';
+import {
+  Button,
+  Spinner,
+  Checkbox,
+  Modal,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+} from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import dayjs from 'dayjs';
 import { useParams } from 'react-router-dom';
@@ -28,6 +36,10 @@ const ArticleList: FC<ArticleListProps> = ({
   const { id } = useParams();
 
   const mpId = id || '';
+  const [readingId, setReadingId] = useState<string | null>(null);
+  const reading = trpc.article.byId.useQuery(readingId || '', {
+    enabled: Boolean(readingId),
+  });
   const queryUtils = trpc.useUtils();
   const bodyRetry = trpc.article.retryBody.useMutation();
   const retryBody = async (articleId: string, title: string) => {
@@ -210,6 +222,12 @@ const ArticleList: FC<ArticleListProps> = ({
                 className="compact-title text-[15px] hover:text-[#007AFF] dark:hover:text-[#0A84FF]"
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={(event) => {
+                  if (item.bodyCached) {
+                    event.preventDefault();
+                    setReadingId(item.id);
+                  }
+                }}
                 href={item.sourceUrl || `https://mp.weixin.qq.com/s/${item.id}`}
               >
                 {item.title}
@@ -219,7 +237,17 @@ const ArticleList: FC<ArticleListProps> = ({
                   className="flex items-center gap-2 text-xs"
                   aria-live="polite"
                 >
-                  <span>{item.bodyCached ? '正文已缓存' : '正文未缓存'}</span>
+                  {item.bodyCached ? (
+                    <Button
+                      size="sm"
+                      variant="light"
+                      onPress={() => setReadingId(item.id)}
+                    >
+                      阅读已缓存正文
+                    </Button>
+                  ) : (
+                    <span>正文未缓存</span>
+                  )}
                   {(!item.bodyCached ||
                     item.lastBodyStatus === 'unavailable' ||
                     item.bodyRetryResult?.status === 'failed') && (
@@ -314,6 +342,35 @@ const ArticleList: FC<ArticleListProps> = ({
           )}
         </div>
       </div>
+      <Modal
+        isOpen={Boolean(readingId)}
+        onClose={() => setReadingId(null)}
+        size="4xl"
+        scrollBehavior="inside"
+      >
+        <ModalContent>
+          <ModalHeader>{reading.data?.title || '读取已保存正文'}</ModalHeader>
+          <ModalBody>
+            <p className="text-sm text-neutral-500">
+              读取本地已保存正文与图片；本次没有联网取文。
+            </p>
+            {reading.isLoading ? (
+              <Spinner />
+            ) : reading.error ? (
+              <p role="alert">正文读取失败：{reading.error.message}</p>
+            ) : reading.data?.contentHtml ? (
+              <iframe
+                title="已保存文章正文"
+                sandbox=""
+                className="h-[65vh] w-full rounded border bg-white"
+                srcDoc={`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>body{font:17px/1.8 sans-serif;padding:16px;color:#222;overflow-wrap:anywhere}img{max-width:100%;height:auto}p{margin:1em 0}</style></head><body>${reading.data.contentHtml}</body></html>`}
+              />
+            ) : (
+              <p role="alert">尚无已保存正文；没有自动请求腾讯原文。</p>
+            )}
+          </ModalBody>
+        </ModalContent>
+      </Modal>
     </div>
   );
 };

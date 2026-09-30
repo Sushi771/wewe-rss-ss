@@ -28,6 +28,7 @@ const Nav = () => {
   const [releaseVersion, setReleaseVersion] = useState(appVersion);
 
   useEffect(() => {
+    if (window.__WEWE_RSS_ACCEPTANCE_MODE__ === 'true') return;
     fetch('https://api.github.com/repos/cooderl/wewe-rss/releases/latest')
       .then((res) => res.json())
       .then((data) => {

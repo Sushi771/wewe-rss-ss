@@ -36,11 +36,23 @@ import {
 export class TrpcService {
   trpc = initTRPC.create();
   publicProcedure = this.trpc.procedure;
-  protectedProcedure = this.trpc.procedure.use(({ ctx, next }) => {
+  protectedProcedure = this.trpc.procedure.use(({ ctx, next, type, path }) => {
     const errorMsg = (ctx as any).errorMsg;
     if (errorMsg) {
       throw new TRPCError({ code: 'UNAUTHORIZED', message: errorMsg });
     }
+    // Read/export trial uses the original UI but never replays cached discovery
+    // under an update button or sends other subscriptions' live requests.
+    if (
+      process.env.WEWE_ACCEPTANCE_MODE === '1' &&
+      type === 'mutation' &&
+      !['article.exportMarkdown', 'article.saveToObsidian'].includes(path)
+    )
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message:
+          '隔离测试：普通更新尚未接通，未发联网请求。已核验原文缓存2篇，近期待核验3篇；原文来源受腾讯官方验证限制，已有正文保持。',
+      });
     return next({ ctx });
   });
   router = this.trpc.router;

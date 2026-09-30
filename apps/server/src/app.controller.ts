@@ -54,6 +54,9 @@ export class AppController {
       weweRssServerOriginUrl,
       enabledAuthCode: !!code,
       privateOnlineMode: privateOnlineMode(),
+      acceptanceMode: process.env.WEWE_ACCEPTANCE_MODE === '1',
+      acceptanceVersion: process.env.WEWE_ACCEPTANCE_VERSION || '',
+      acceptanceSearchNote: process.env.WEWE_ACCEPTANCE_SEARCH_NOTE || '',
       iconUrl: weweRssServerOriginUrl
         ? `${weweRssServerOriginUrl}/favicon.ico`
         : 'https://r2-assets.111965.xyz/wewe-rss.png',

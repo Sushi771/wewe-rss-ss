@@ -1,0 +1,162 @@
+# 历史交接快照（2026-09-30，非当前执行入口）
+
+仅用于追溯。本文件的“下一步”及探针要求已被当前 `DEVELOPMENT_HANDOFF.md` 和用户最新指令覆盖，不得据此重试。
+
+## 本轮单号衔接实施
+
+- 实施入口与边界见 [单号搜索运行说明](SINGLE_ACCOUNT_SEARCH_RUNTIME.md)。已拆候选索引时间/原文可信时间，新增真实缓存核验和 CollectionService 隔离回放，保留已保存文章保护；`getreviewid` 未作为必经步骤。
+- 专用 Edge/CDP 已关闭并移除专用 profile；私有保存的正常 Web 会话由新 Node 进程直接 HTTP 搜索一次，200 / 11 个目标候选、预算截断、无浏览器与自动续期。本轮26条发现材料未重做或被替换。
+- 本轮26候选按前七天及索引时间降序选5篇：仅2篇有可核原文缓存，另3篇未核验。真实缓存副本首次新增2篇，新进程排重新增/修改均0；RSS/Markdown/Obsidian/ZIP及1张图片字节核验通过，所有旧列与生产哈希保持。私有结果、会话、备份位于 `private-data/single-account-update-20260930/`；生产来源未启用、运行产物未切换。
+- 匿名原文的腾讯验证停止仍有效；正常官方原文验证入口已离线准备，见运行说明。没有请求另3篇，没有把本地解析停机扩大为腾讯永久拒绝，也没有要求移动认证作为全任务唯一条件。
+
+## 2026-09-30 本人正常 Web 登录后的近期发现突破
+
+- 本人完成专用 Edge 官方登录并确认书架后，[隔离搜索探针](../scripts/research/probe-owner-web-account-search.cjs)核账号与生产旧账号一致，在现有 `weread.qq.com` 页用原生同源 fetch 发号名首屏一次；首屏混合新旧索引日期且返回有效实际游标，再按真实 `offset/searchID/cookies` 只取一页。两次均 200，来源名与 URL 目标 biz 匹配分别 11 / 15，合计 26 个不同 `biz/mid/idx` 候选；未发第三页、init、续期、SDK 重试或原文请求。正常发现输入仅号名、稳定 biz、来源配置。
+- 两篇漏文均由本次**首屏自主返回**，不靠标题或逐篇链接搜索。请求结束后独立读取既存原文证据并校验 HTML 哈希，两篇搜索 URL 的 `biz/mid/idx/sn` 与真实原文一致：清华新领军 `WX_3895431412_2247493551_1`，中考 PK `WX_3895431412_2247493556_1`。搜索索引时间分别比原文发布时间早 33 / 25 秒；不能直接映射成发表时间。
+- 首屏目标索引日期 2026-01-29 至 09-30，其中最近七天 5 条；次页目标索引日期 2024-05-19 至 2026-09-20，没有最近七天项。这是一次相关度搜索的真实覆盖，未证明完整公众号目录、五篇当前原文时间、持续更新或无人值守会话续期。**近期自主发现两篇漏文已做到，真实订阅更新仍未恢复。**
+- 从首屏按服务器顺序选择一篇近期目标 URL（非验收样本指定）完成 `getreviewid` 的离线认证预检。固定 CyrusNee `cab52f3` 源码的 `POST i.weread.qq.com/mp/getreviewid {urls:[URL]}` 后续接 `GET /review/single`；两者用 EInk 移动 `vid/accessToken`，SDK 默认可在认证失败后续期重放，不能原样运行。已查仓库没有这条完整实测；当前 Web 登录不证明移动认证已恢复，后续正常移动凭据最近一次 `/store/search` 401 / `-2012`，故本次 resolver/detail 请求均 0。返回时还须核单项 URL 对应关系及实际详情号身份；不把 docID 当 reviewId、不混用 Web Cookie、不触碰付费绕过。旧匿名原文验证停止标记继续有效。
+- 原项、来源日期、两页摘要、独立验收对照、所选 URL 解析门禁及前后生产哈希持久保存在 Git 忽略的 `private-data/owner-web-search-20260930/`，没有保存 Cookie/storageState/HAR。生产 12 订阅 / 1447 文章 / 1 账号的全列哈希前后相同，原未提交前端修改保留。下一具体缺口是解析接口所需、正常签发且实际被接受的移动认证，或有真实发送代码支持的同体系 Web URL 解析入口；具备后只验证所选自主发现文章一篇，再决定五篇扩验，不重放旧失败请求或自动扫码。
+
+## 2026-09-30 当前号名搜索的两项新增验证
+
+- 本轮正常发现输入仅公众号名、稳定 biz 与私有来源配置；两篇漏文只在网络结束后的独立离线对照中使用。原生产库始终只读，12 订阅 / 1447 文章 / 1 账号的全列哈希前后相等；保留原有未提交前端修改。
+- 复核持久的旧 `search-url-identity-candidates.json`：11 条目标 URL 身份主张，索引日期 2026-01-29 至 09-29。清华新领军样本的 `biz/mid/idx/sn` 与已存真实原文相同，索引时间比原文发布时间早 33 秒；中考 PK 不在这批候选，但原文发布时间晚于该次搜索约一小时。旧游标实验仅留摘要、未留次页原项，不能判断次页日期或漏文覆盖。旧结果不是本轮成功。
+- [当前 Web 搜索探针](../scripts/research/probe-recent-account-discovery.cjs)使用早期正常恢复 token：init 200、首屏 200 / `-2012`，候选 0、续页 0，停止。此后离线确认后续正常 `/login` 已轮换 accessToken；未因此重发 Web 搜索。排除的是早期恢复记录可直接复用于当前搜索这一条件，未判定当前索引覆盖。
+- 第二假设由 [CyrusNee 固定搜索资源](https://github.com/CyrusNee/weread/blob/cab52f3035008f2df8ce6cce6e821cfb819e2bca/src/api/resources/search.ts)支持：[移动直连首屏探针](../scripts/research/probe-mobile-account-article-search.cjs)持后续正常 `/login` 的同账号 accessToken，唯一 `GET i.weread.qq.com/store/search?keyword=<号名>&scope=4&count=20&maxIdx=0` 得 401 / `-2012`。它与旧 Agent Gateway 的 Bearer Key 请求不同；没有 SDK 自动续期、重放或推算翻页。仅排除此凭据记录及该次直连形状当前可用，不能外推平台永久关闭。
+- 两假设均未取得当前候选，未自主发现两篇漏文，未进入 getreviewid、正文、Provider、生产写入或部署。仓库已查实验没有完整的“搜索 URL → getreviewid → 合法内容”实测；固定源码的 URL 解析步骤仍保留，不以它不是列表为由否定。已有匿名原文验证停止标记继续有效。
+- 本轮 marker、结果、固定源码、独立验收对照与数据库哈希在 Git 忽略的持久 `private-data/recent-search-breakthrough-20260930/`；只落私有文件，不提交原始证据或凭据。下一项明确缺口是本人正常登录后、被官方搜索实际接受的当前会话；用途仅一次号名首屏、必要时一次真实游标续页核当前覆盖。本人处理登录/官方验证，先核新会话与既有停止边界，再单独复审实验，不循环旧 token、改参数或自动扫码。本轮两假设到此结束。
+
+## 2026-09-30 公众号近期发现纠偏（当前执行入口）
+
+**单个官方合集的归档与刷新已实现；公众号级近期文章发现与订阅更新尚未恢复，并存在已知漏文。**撤下“仅等待旧合集自然新增”的下一步；暂停扩大合集、重复旧合集验收、HTTPS 部署及无关界面。保留全部既有工程，在有效代码继续。
+
+- 接手根目录为本仓库，`main / 03b7d94c1e35020584a2f073389c66ae64c03e28`。接手时未提交的 `public-album.ts/.spec.ts` 和 `probe-user-recent-articles.cjs` 由其他窗口继续提交，主分支推进至 `63094a4`（含 `890a1cc/73789da`）；本轮沿最新 HEAD 继续，未覆盖或执行其探针。
+- 生产进程 PID 45504，仅 `127.0.0.1:4000`；已用现有精确进程校验确认固定产物 `2026-09-30T07-39-36-397Z-85f473d2bc1c` 与数据库命令匹配。manifest `sourceCommit=null`，只能按 `sourceHash=85f473d2bc1c…` 追溯，不能把当前 HEAD 说成运行版本。数据库 `apps/server/data/wewe-rss.db` 只读一致性检查通过：12 订阅 / 1447 文章 / 1 旧账号，两篇漏文均未入库。本轮生产写入及上游请求均 0。
+- 实际链路：正常更新 → `resolveCollectionRoute` → `collectPublicAlbums` → `PublicAlbumProvider` → `mp.weixin.qq.com/mp/appmsgalbum?action=getalbum`，固定绑定 `3588220544052641807` → 两游标分页 → 身份/时间验证 → 旧字段保护事务。保存的两页 19 篇响应中没有两篇漏文，代码没有按 `syncTime/updateTime` 静默截断；断点是选定合集没有返回它们，非已证本地漏存。该路径只支持 `selected-albums`，没有公众号目录发现。其他 11 号没有启用的可用来源。
+- 原文哈希、身份和 `ct` 已离线重验：清华文对应用户的 `99h7uIqK…`，`WX_3895431412_2247493551_1`，北京时间 9/29 10:46:01；中考文对应 `BZFB-5Ny…`，`WX_3895431412_2247493556_1`，9/30 08:32:01。私存原文来自用户链接，仅诊断；从它们提取的其他合集结果也不算自主发现。详细证据私存 `private-data/recent-discovery-correction-20260930/audit-verified.json`；可复跑 `scripts/audit-recent-discovery.cjs`，无网络、数据库 readOnly、输出仅允许 private-data。
+- 18:05 心跳 `automation` / “妈妈部落合集自然增量验收”已用管理工具 PAUSED，其他任务未动。原应用 05:35/17:35 合集维护定时仍保留；它不是公众号增量验收。
+- 第一检查点未通过；未接新 Provider、未生产切换。失败语义回归新增五项，覆盖合集不算公众号完整成功、无来源、两类认证不可用、列表异常不推进成功时间；既有批量部分失败测试保留。三个相关 Jest suites（channel-routing/public-album/collection.service）51/51 通过，包含其他窗口的合集 singleton 测试；不能当真实订阅证明。来源结果文案补“合集外近期文章未覆盖”，未发布到运行产物。只读诊断脚本使用 Node 24 的 node:sqlite。
+- 私人模式隐藏账号导航/路由，后端 `legacyAccountProcedure` 拒绝旧账号管理；旧 `createLoginUrl/getLoginResult/getMpArticles` 也已停用。当前公开合集不使用库内旧微信读书账号；恢复按钮或账号数量不能补出列表。
+
+**下一具体条件：**须先取得有正常认证来源、可审查发送/翻页代码和近期成功依据的公众号目录来源，再单一路径最小隔离验证（至少五篇近期、含两篇漏文、合集外文章）。来源矩阵的旧 WeRead `/book/articles`、Web/移动端点及后台列表没有本目标可用的新依据；Mac/iOS、搜狗及旧协议实验冻结不自动解除。本轮停止重复请求与横向循环，不要求用户重新提供链接或盲目扫码。逐号状态和源代码测试/提交见 [STATUS](coordination/STATUS.md)。自然增量、全号近期、订阅前历史和私人 HTTPS 分别待验。
+
+## 历史合集交付（保留成果；下述旧下一步已撤下）
+
+**历史原文与合集诊断（上方公众号纠偏优先）：**用户提供两条官方短链接，均唯一一次 HTTP 200 取得真实原文：今日 08:32:01《市重率不相上下，华育世外中考成绩大PK！》与昨日 10:46:01《不适合的不要来！说一下清华新领军2027年招生简章》。同号稳定键分别为 `WX_3895431412_2247493556_1`、`WX_3895431412_2247493551_1`；不在原 19 篇复旦数学营合集。原文实际指向另外两个合集：`3518752461580222465` 高考 51 篇 / 6 页，`3588220778061250564` 初升高 69 篇 / 7 页，共 120 个不同键，两篇均在真实列表内。不能把原合集“新增 0”解释为该公众号没有新发文。末页单篇 `article_list` 为对象，已修正式解析并通过 24 项回归与服务端构建；原响应私存 `private-data/user-recent-articles/`，已取得页面不重复请求。
+
+**历史补录待办（本轮暂停，不作为公众号恢复验收）：**两篇正文、今日一张图的归档；新合集固定近期订阅边界与正式绑定；fresh SQLite 副本保护及重复更新验收；通过后生产部署和手动/定时、重启、离线导出验收。此刻生产仍为旧 19 篇合集绑定，未导入两篇，不能宣布恢复。A/B/C 在原独立 worktree 分别处理正文图、Provider 边界、数据 QA。下一具体单元：从上述私存原文及列表准备两篇真实正文图片，再在一致性副本调用正式采集路径；不要盲补全部历史或恢复横向研究。
+
+**当前执行覆盖下方研究待办（15:55）：**工程代码 `main / d60144b`（后续只补交接），用户冻结微信读书新端点、搜狗、Mac/iOS 横向研究。A/B/C 独立 worktree 的正文图片、Provider、QA 已统一合入；单一可追溯“复旦数学营”官方合集 `3588220544052641807` 为 19 篇 / 2 页。第三合集六页 54 键是真实历史结果，但精确入口和账本已丢，不猜 ID，也不将 19 或 54 称全号历史。
+
+真实联网正式 Provider 副本：16 请求 HTTP 200，补 8 正文、校正 5 条未可信列表时间，重复 / scheduled 新增与更新 0。19 篇 RSS / Markdown / Obsidian / ZIP 全通过，44 附件真实字节及 CRC 通过；限定副本的实际 HTTP 启动、重启、匿名 401 / 授权更新 200 / ZIP 下载 200 通过，上游回放有明确记录。精确生产应用流程另在 fresh 一致性副本复验后，已备份、迁移并受控导入生产：12 个订阅 / 1447 篇未丢，唯一合集绑定、补 8 / 校正 5 / 重复 0；旧正文、图片、可信时间、指标和账号保持。生产初次导入用持久真实响应；随后生产服务已实际联网完成 scheduled 单号、授权手动及受控重启后的再次更新，每次 2 页 / 19 篇 / 新增与更新 0 / 原文图片请求 0。匿名更新、RSS、ZIP 均 401，私人登录 204、授权更新与 RSS 200。私有备份、报告和精确原响应见 [总控状态](coordination/STATUS.md)，不入 Git。
+
+**运行及未完成：**npm core 同名 shim 打包缺陷已修，三个独立闭包回归与 [CI](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36684972774) 通过。新固定产物 `.local-releases/2026-09-30T07-39-36-397Z-85f473d2bc1c`（264 依赖 / 13277 文件）已生产启动、受控重启并更新开机指针。当前服务 PID 45504，只监听 [本机入口](http://127.0.0.1:4000/dash)，登录码安全保存在忽略的 `apps/server/.env.local`，每日 05:35 / 17:35 定时只选目标号，其余 11 旧号状态未改。scope19 的完整 ZIP 已验，未将目标旧库全部 194 篇的完整导出冒充通过；旧 7 篇远程图片引用为保护正文而保持原样，其离线附件已真实取得。整体任务未完成：自然新文增量、全号覆盖及私人 HTTPS 部署仍未验，实际模型未核实。
+
+**已撤下的旧下一步：**18:05 只观察该合集自然新增，不能推进公众号近期发现验收，`automation` 已 PAUSED。保留旧基线和探针作追溯，不继续反复在线验“新增 0”，也不作为当前待办。付费采购继续暂停。
+
+## 历史研究记录（冻结，以下行动描述已被本轮主线覆盖）
+
+- **认证与丢失来源的新增边界：**[Mac/iOS 日志凭据审计](coordination/MAC_IOS_SKEY_LOGIN_SOURCE_AUDIT.md)找到 2026 Mac 项目从官方 App 日志复制 `skey/vid`，但无可审查签发/续期及文章端点成功回包；[微信 `getmsg`/PadChat 审计](coordination/MP_PROFILE_EXT_AUTH_2026_AUDIT.md)确认所审列表代码均需预有个人微信会话，PadChat 授权在未开源服务侧，Ipad860 依赖无源码库。[第三合集会话恢复](coordination/THIRD_ALBUM_SESSION_RECOVERY.md)从首次请求时间、20 份相关 JSONL 和 Git 对象证实精确 ID 未留存，候选长数字是 fakeRequester 常量；不猜参或重发。A/B/C 转查 Gateway 近期能力、搜狗账号列表真发送链、公开索引中的官方合集链接，其他可执行研究继续。
+- **B 近期实现排重：**[固定源码、发送行和本机旧结果对照](coordination/SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)显示 `CyrusNee/weread` 的 MP 列表仍是与上游同文件的 EInk `/mp/chapters`，本账号同形请求和续期后均曾 `-2041`；`steptian/weread-mp` 仅带 Cookie 调已受限 Web `/web/mp/articles`，没有第一方新票据/续期或可核成功回包。两者不作为同形重试理由。A 正查 Mac/iOS 正常认证开源链，C 正从旧 Codex 记录离线寻找第三合集精确入口；真实订阅仍未恢复。
+- **`/book/articles` 2026 query 形状一次结果：**[真实开源发送行、一次性脚本和总控回包](coordination/BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)与旧 WeBook 头认证不同；同账号合法 BOOX/Eink `/login` 顶层 `skey/vid` 通过备份、身份及新鲜性只读预检后，单次 GET 得 HTTP **401**、业务 **`-2012`**、无 `reviews`，全局私有标记禁止重试。只缩限该凭据来源和该请求形状；[A 源码复核](coordination/BOOK_ARTICLES_CLIENT_AUTH_FOLLOWUP.md)确认 syfun 也可能只复制 Mac 客户端现有请求头，未证明新签发或成功；继续查合法认证与独立一手成功证据，不翻参重发。生产 SQLite 未写，真实订阅未恢复。
+- **C 的不同旧文发现探针：**[严格旧库/备份/搜索身份门禁及唯一回包](coordination/OLD_SHORTPATH_ALBUM_DISCOVERY.md)只用原存官方短链匿名 GET 一次，HTTP 200 是发布者删除页，`#js_content=0`；有界 HTML 与尝试哨兵私存，没有当前原文身份、`ct`、正文或合集标签。早期临时账本已丢，历史状态仍是 `historical_attempt_unknown`；同一身份不重试。现有离线证据暂未给出另一个精确第三合集入口，继续源码与其他来源研究，不逐篇盲试旧短链。
+- **第三合集 54 项原文入口：**[历史成功采集代码](coordination/THIRD_ALBUM_ARTICLE_LINK_SHAPE.md)证明列表 `item.url` 54/54 为带 `__biz/mid/idx/sn/chksm` 的腾讯 `/s` 长查询，直接短链接 0。[旧请求形状对照](coordination/THIRD_ALBUM_LONG_URL_COMPARISON.md)发现其他旧合集 3 条此形状 HTTP 200 但解析未闭环，**第三合集 54 项没有原文 GET**，不能用搜索的 302 宣称第三合集原文失败。六页最小账本及精确入口已丢，不能恢复原样 URL、今天状态或旧库外即新文；只有 1 篇旧成员短/长身份、`ct` 和正文闭环。另一旧短分享页已返回删除提示；暂缺可追溯第三合集入口，不能猜 ID 或逐篇盲试，其他来源继续审。
+  `a85601c` 已与远端一致，[CI 36672414919](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36672414919) 两项成功；前次格式失败已修复。
+
+- **正常 Web 登录后的独立观察已准备：**[只读 MP 页 DOM/内存探针](coordination/WEREAD_LOGGED_MP_DOM_PROBE.md)复用专用可见 Edge，待本人在腾讯官方页面登录后最多自然导航目标页一次，只报告目录和已知 `state.mp` 的身份/时间字段数量，不读 Cookie、不监听/重放 API。`--plan`、假页自测与语法检查通过；尚未启动在线窗口或请求目标页。本人扫码后再做一次预检与现场观察，若目录为零也不能自动解释为服务端拒绝。
+- **Web 续期已有明确第一方流程差异：**[腾讯静态客户端审计](coordination/WEREAD_RENEWAL_2013_SOURCE.md)显示普通请求因 `-2012/-2010` 才自然触发续期，`rq` 取原请求路径、`ql` 取 `wr_ql`，快速微信登录组件初始化 `ql=1`，另一 Web 登录分支 `ql=0`。此前移动恢复 init 省略 `ql`，后直接固定参数续期得到的 `-2013` 只限制该形状，官方未定义此码。后续若须新合法快速登录，扫码由本人完成；旧会话不翻参重试。即使续期成功，目标列表与五篇验收仍独立。
+- **搜狗账号主页新来源与一次实测：**[当前移动页第一方模板/JS](coordination/SOGOU_ACCOUNT_PAGE_CHAIN.md)在 `type=1` 账号卡定义了 `openid/encGzhUrl`，可与已存 `type=2` 文章卡的同号 `data-openid` 严格对应。[一次性首屏探针及离线源码复核](coordination/SOGOU_MOBILE_ACCOUNT_SEARCH_PROBE.md)在假网络自测和只读预检后仅发一次匿名 GET，HTTP 200；13,825 字节原文无账号卡与模板，有可见“没有找到”块。额外账号脚本和已存共享函数只给已有卡片补阅读数，本页没有卡片及计数请求地址；它不能解释成正常浏览器会补出列表。完整 HTML 与禁止重发哨兵私存，未访问主页；仍不能区分索引覆盖或服务端软限制。旧 `/gzhjs` 仍只有历史 HTTP 证据。
+- **官方搜索时间离线校准：**[六篇旧文对照](coordination/WEREAD_SEARCH_TIME_CROSSCHECK.md)把已存目标号搜索卡与旧库四字段身份、历史原文核验清单的同一 ID 和短链逐项对应，6 篇的搜索时间比原文核验时间早 0–53 秒。原始 HTML 已失，不能重新看字面 `ct`；其他卡片不因此获得可信发布时间，也没有新增文章验收。`d7ea492` 远端及 [CI 36666626727](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36666626727) 均已核成功，后续提交还需复核。
+- **搜狗账号列表新假设：**[离线 `data-openid` 桥接审计](coordination/SOGOU_GZHJS_OPENID_BRIDGE.md)确认已存移动搜索首屏 8 张目标同名卡共享一个搜狗账号值，名称和形状与旧 `/gzhjs` 参数一致。但本页及所引七份脚本没有当前发送行，近期 HTTPS 回包也未找到；未请求目标。继续找现行账号页或开源客户端的真实发送链，旧 HTTP 示例不能直接部署。
+- **最新三条隔离线与源码审计：**[Web 续期一次实验](coordination/WEREAD_RENEWAL_TICKET_PROBE.md)中 init 200、同号五 Cookie，续期 HTTP 200 但业务 `-2013`、没有两种票据头或新 Cookie；只排除该会话本次 `ql=false` 签发假设。[官方 MP 阅读页一次自然导航](coordination/WEREAD_MP_PAGE_MEMORY_PROBE.md)顶层 200、无验证码，目录组/标题 0 且预设 Vuex 入口不可见；未监听列表响应，不能判服务端空、拒绝或跨号失效。[搜狗移动一次旧文标题校准](coordination/SOGOU_MOBILE_LINK_CALIBRATION.md)得到 10 卡但标题+目标名精确匹配 0，故 `/link` 与原文均未请求；已保存号名首页 8 卡与 20 篇已核旧文离线标题交集 0，只限这些样本。[KOReader 样例来源审计](coordination/WEREAD_MP_SAMPLE_PROVENANCE.md)显示编辑文档无可复核成功回包，文档 `offset` 与客户端 `maxIdx/count` 不同。所有在线实验有私有 one-shot 哨兵、生产写入 0；继续找明确源码和一手认证/列表证据，不把当前状态写成只剩外部条件。此前提交的 [CI 36664577883](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36664577883) 已通过，最新提交仍需核对。
+- **可见 DOM 与续期票据源码边界：**[官方 MP 目录](coordination/WEREAD_MP_DOM_RENDER_PATH.md)把 `reviews` 原样存入页面 Vuex，可见节点仍缺逐篇稳定 ID、原文链接和时间，滚动翻页没有可靠末页标志；页面内存的唯一实测见上条。[续期源码](coordination/WEREAD_RENEWAL_TICKET_EVIDENCE.md)仅在响应头存在时保存票据，实际本机会话结果见上条。原文解析器拒绝同页冲突的重复身份变量，针对性 11 项和 [CI 36662155989](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36662155989) 通过；研究文档的 [CI 36662562963](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36662562963) 亦通过。这些都未恢复真实订阅。
+- **第一方 Web 票据新证据：**[腾讯当前静态客户端](coordination/WEREAD_WEB_TICKET_LIFECYCLE.md)的 MP 模块真实调用 `/web/mp/articles`；浏览器请求时调用 `window.__WRPA__.sr` 生成 `x-wrpa-0`，`x-wr-ticket` 来自 `-2041` 后本人完成腾讯验证码的回调，均不是普通登录 Cookie。现有证据未证明捕获一次票据可供无人值守分页/定时更新，也未证明 Web 续期接口实际签发票据。DOM 与续期的后续源码结论见上条，不重发已受限目标请求。图片导出集成测试的 CI 偶发 5 秒超时已局部放宽，[CI 36661342351](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36661342351) 成功；真实订阅仍未恢复。
+- **A 定向源码结论：**[微信读书搜索卡到正文链路](coordination/WEREAD_SEARCH_TO_CONTENT_SOURCE.md)核了固定腾讯搜索 JS 和近期真实发送实现：搜索 `docID` 只用于卡片/上报，`doc_url` 打开微信原文；未见 `docID/doc_url → reviewId → /web/mp/content` 桥。已有 WeRead 正文链从书架账号 `bookId` 的封面或列表取得 `reviewId`，本账号当前封面形状未成功且封面只有一篇。此阴性结果限所审源码，不能猜 ID 调正文接口。
+- **C 旧正文互链：**[只读离线图审计](coordination/PUBLIC_ARTICLE_CROSSLINK_GRAPH.md)在目标 194 条旧库行的 27 条正文缓存中，找到 13 条正文引用 75 个唯一同号四字段身份（187 次链接）；没有目标原文 `ct`、合集 ID、固定前后篇顺序或游标，不构成全号目录、75 篇已核文章或自然更新。八份旧原始 HTML 已丢，不能与此前 172/63 统计混算；本轮未据此发新请求。
+- **公开短链后续实测：**摘要 `5e44e0d46c308fe2` 的目标旧文章原存官方 `/s/<22 token>` 单次 HTTP 200，四字段身份、canonical、原文 `ct`、正文闭环，16 张 `data-src` 图片；私有 HTML/最小证据及禁止重发哨兵持久保存。C 已离线确认此页 `album_info_list=[]`、相关文章标志 0、DOM 无可用链接，未得到可验证的其他目标文章/合集入口；仅排除此页。这是旧文可读，不是账号级列表、新文章或更新验收。
+- **本轮新结果：**第一方 `/api/mp/cover` 在合法移动会话经 Web init 得到五 Cookie 后单次 HTTP 401，未得 `reviewId`，只排除该具体认证上下文；独立的公开搜狗移动 `/weixinwap?type=2` 单次 HTTP 200，完整 HTML 私有保存，精确卡片数见下条。旧目标文章短链亦仅请求一次并持久保存 HTML，结果见上条。这些均未恢复全号订阅。
+- **移动搜索复核与第二页停止：**上述 11 个正则形状命中实为 9 张 DOM 卡，其中 8 张目标号名精确匹配，展示日期在 2026-03；没有官方原文身份或可信 `ct`。实际标题是 `h4 a`，与 2026 年开源 Android 解析器的 `h3 a` 等选择器不符。固定同源分页 JS 明确发 `page=2&_rtype=json` AJAX；一次匿名第二页 GET 得 HTTP 200、JSON Content-Type、51,307 字节，本地保守验证码关键词门禁触发 `verification-stop`，未保存原始 JSON，故无法确认实际验证码或 `items[]`。哨兵持久保存，同形请求不重发；未访问搜狗 `/link` 或原文。分类误判边界与修复见下条，这不证明分页不可用或订阅恢复。
+- **后续离线修复与链接边界：**第二页分类器已改为先解析 JSON，只按顶层挑战/错误字段停止，并以假响应回归文章正文含“验证码”的情况；原目标回包已丢且哨兵保留，不重发。[移动首屏 `/link` 审计](coordination/SOGOU_MOBILE_LINK_OFFLINE.md)的 9 个不同值在本机已审范围内不能离线逆解出官方文章身份；8 张同名卡仍只是搜索索引候选。A 正独立追微信读书搜索卡 `docID/doc_url` 到腾讯正文接口的真实发送链。
+- **最新独立端点结果：**[Web 封面一次隔离验证](coordination/WEB_MP_COVER_FIRST_PAGE_PROBE.md)使用本人合法恢复会话，Web init HTTP 200、五 Cookie 同账号，但目标 `/web/mp/cover` HTTP 200、业务 `-2012`，没有 `reviewId`；不重发同形请求，生产 SQLite 12/1447 未写。A 正离线审不同客户端上下文与 `/api/mp/cover` 证据。B 的 [`profile_ext` 认证来源审计](coordination/PROFILE_EXT_LEGIT_AUTH_RESEARCH.md)未找到所审正常网页登录可续期签发个人 `uin/key/pass_ticket` 的链；C 的[合集私有证据审计](coordination/PUBLIC_PAGE_DISCOVERY.md)确认第三合集 54 键的临时文件已失，后续候选不得声称与其排重成功。项目继续研究，未恢复全号订阅。
+- [总控状态](coordination/STATUS.md)已撤回“只剩外部条件”和“目标无合集 ID”两项错误判断。[2026-09-27 真实核查](CHANNEL_INVESTIGATION.md#公开合集的真实多篇列表验证)早已从目标原文发现两个官方合集，四页共 32 个不同文章键；本轮又从八份保存的目标原文 HTML 和生产 feed 的 `public_album_ids` 只读交叉核对。两个合集只是局部来源，不能证明全号覆盖。
+- [目标合集 Probe](coordination/TARGET_ALBUM_PROBE.md)对已核验的“复旦数学营”合集取得当日两页，HTTP 200、业务码与验证状态均为 0，10+9 个不同文章键，19/19 个链接身份匹配。当前集合与 2026-09-27 相同；六篇与当日保存原文逐项匹配并核对原文 `ct`，相差 0–34 秒，因此单一合集的五篇身份和发布时间样本及分页已过。**没有观察到自然新增，也没有证明全号覆盖。**六篇旧原文均有正文，五篇有 28 张 `data-src` 图片，今天仅部分读取其中一张。生产库只读，未切换订阅。
+- A [认证来源研究](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md)追到 Mac 客户端同主机 `vid/skey`、移动/Web/Rust 登录链，但未证明当前 Windows 有可用于 `/book/articles` 的独立凭据；B [全局候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)追到真实腾讯请求行并按能力缩限；C [公开页面发现](coordination/PUBLIC_PAGE_DISCOVERY.md)核验了原文到合集的代码与八份目标 HTML，尚未发现全号目录。以下前轮记录保留当时状态，遇矛盾以上述当前证据为准。
+- 修复了现有公开合集通道的两个数据断点：原文补取可在严格身份核验下校正不超过 60 秒的合集列表时间偏差；空封面不覆盖旧值。列表请求还检查 `verify_status`、不跟随验证跳转、每页间隔 2 秒。隔离 SQLite/Jest 三套 62 项及服务端构建通过；尚未生产写库、完成完整文章图片导出或自然更新验收。
+- [真实字段副本演练](coordination/TARGET_ALBUM_REHEARSAL.md)把旧目标合集两页 JSON 注入当前采集代码，在生产库的只读一致性副本连续导入两次，均得 19 篇且 12/1447 基数、旧 ID、可信时间、正文、指标和非空封面保持。C 对一篇未缓存目标原文做一次有界只读请求，但 `biz/mid/idx` 未解析闭环，未计入验收；当前解析器已安全支持公开页 `window.cgiDataNew`，八份旧目标 HTML 离线回归 8/8。B 已缩限 `profile_ext` 短期会话来源及未证实的后台 `free_publish` 兜底。C 另从腾讯静态 JS 定位 `/mp/relatedarticle`，八份目标旧页相关标志均为零，尚未请求该数据端点。
+- [搜狗微信索引专项](coordination/SOGOU_PUBLIC_INDEX.md)用固定开源代码验证本目标四次有界首屏；最近一次 9 条卡片中 8 条作者昵称匹配，同会话 `/link` 给出签名腾讯 `/s` 形状。唯一一次腾讯签名页 HTTP 200 但缺 `#js_content`，**没有目标 `biz/mid/idx/ct`、正文和图片证据**，已停止该候选。移动入口仍是未验候选。当前不能接入全号 Provider；继续追合法认证和独立取文来源。
+- 最近远端 CI 的 `Format check` 曾因三份研究文档失败，`6d4de92` 修复后 [运行 36613922766](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36613922766) 两个 job 成功。新合入的研究提交仍须按最新远端运行复核。
+- B 又找到有当前源码与一手响应记录的[微信读书 Web 搜索代理](coordination/SOURCE_CANDIDATE_MATRIX.md)：同源页面直连腾讯 `POST /web/wx_search_broker_proxy`，与旧失败列表及 Gateway 搜索不同。[一次性隔离探针](coordination/WEB_SEARCH_BROKER_PROBE.md)已准备并通过八项离线自检，当前未确认本人有效 Web 登录页面，目标 POST 仍为 **0 次**；本人正常登录后才验证首屏。B 继续查其分页、作者过滤和持续更新依据；此候选尚不能充当完整订阅目录。主分支 `128bf88` 的 [CI 运行 36618790436](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36618790436) 两个 job 均成功。
+- B 又核到[官方搜索页自然滚动的独立实现](coordination/SOURCE_CANDIDATE_MATRIX.md)：2026-07 四个其他号三跑 35/35/33 条及原文链接，和直接 POST 搜索代理重复约 15 条首屏的流程不同。独立[单滚动探针](coordination/WEREAD_NATURAL_SCROLL_PROBE.md)已通过 17 项离线断言，目标页在线导航/滚动为零；须本人正常登录并确认官方目标搜索首屏后才可实测。搜索卡片相对时间不能替代原文 `ct`，单次滚动也不证明全号历史或持续更新。
+- C 对有限合集的另一篇目标原文只发一次匿名请求，HTTP 200 HTML 有正文节点，但解析身份与合集记录至少一项不符；该次未保留差异字段，不能判断原因或认作真实新文章，不重试同一 URL。四页旧列表与八份旧原文的四字段离线对照 8/8 一致；见[公开页面记录](coordination/PUBLIC_PAGE_DISCOVERY.md)。
+- A 从[腾讯公开搜索页 JS](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md#新专项正常-web-登录到搜一搜的会话链)确认真实 `withCredentials` 请求发向 `weread.qq.com/web/wx_search_broker_proxy`，首屏和续页 body 用 `query/offset/searchid/searchcookies`，`continueFlag` 控制继续加载；不是把 `wr_vid` Cookie 发给 `search.weixin.qq.com`。页面只按关键词搜索，卡片的来源名和时间仍须用原文 `biz/ct` 核验，且登录态会过期。B 同时把腾讯元宝“7/7”缩限为已有标题的单篇补链，不能充当订阅目录。`3e79dcf` 的 [CI 运行 36621435420](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36621435420) 已成功。
+- [真实旧原文副本导出](coordination/TARGET_ALBUM_EXPORT_REHEARSAL.md)已把六篇已保存目标 HTML 接到当前采集和 RSS/Markdown/Obsidian/ZIP 路径：RSS/浏览器 Markdown 6/6 有正文、28 个图片引用；禁网下 Obsidian 仅无图 1 篇完成，限定 19 篇 ZIP 仅 1 篇完整。旧 ID、正文、时间和指标未覆盖；图片字节及其余 13 篇正文未取得。C 对另一个已保存真文章做唯一当前页 GET，HTTP 200 且见 `#js_content`，但探针在合并解析异常处停止，具体字段未留；与前一篇的四字段不符不能合并推理，两个 URL 都不重试，详见[页面报告](coordination/PUBLIC_PAGE_DISCOVERY.md)。
+- B 已用腾讯第一方搜索页 JS 核对真实续页 `searchid/searchcookies`，旧开源直连项目重复首屏的参数并非该形状；本目标实际首屏与续页均未请求。[独立可见 Edge 登录窗口](coordination/WEREAD_LOGIN_WINDOW_PLAN.md)已在空会话成功启动并清理，CDP 仅监听本机回环且归属该进程；普通关闭超时，需关闭可见窗口后清理。尚未扫码或取得有效 Web 会话，目标 POST/滚动为零；A/B/C 同时继续独立源码研究。
+- 下一轮 A/B/C 的[认证证据](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md)、[候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)和[公开页面代码链](coordination/PUBLIC_PAGE_DISCOVERY.md)已整合：移动 token 到 Web 初始化有源码映射，旧 `/book/articles` 自定义头仍未证；移动原生桥无公开底层 HTTP 认证；公开 `publictag` 需要目标页尚未给出的 `tagId`，已有合集 JS 只翻单一合集。已据此转入一次官方搜索首屏的隔离验证准备，再依响应决定真实续页/正文验证。`26152c0` 的 [CI 36627037368](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36627037368) 已通过。
+- A 已只读核实本机独立 `mobile` 凭据确来自本人旧正常登录；[一次官方 Web 会话桥接](coordination/WEREAD_MOBILE_TO_WEB_PROBE.md)返回 `POST /web/login/session/init` HTTP 200，服务器下发 `wr_vid/wr_skey/wr_rt` 且账号身份匹配。随后在新隔离进程内，[一次 init 加一次目标准确号名搜索](coordination/MOBILE_WEB_SEARCH_PROBE.md)得到同样的 Cookie 下发，但 `POST /web/wx_search_broker_proxy` 为 HTTP 200、`errCode=-2012`，无文章内容，立即停止；两轮均未保存 Cookie 或写生产库。该结果仅排除目前的 Node 直连请求形状，不代表浏览器同源搜索或旧 `/book/articles` 不可用。A/B/C 继续追认证语义、不同腾讯来源和公开发现机制，暂不重复同形状请求；五篇新来源验收、分页、原文时间和持续更新仍未完成。
+- 公开合集采集补上受约束的旧短链 `verifiedSourceUrl` 绑定：必须短链原文有可信发表时间，且其完整带 `sn` 链接与官方合集项相同；旧非空绑定、正文和指标保留。隔离 SQLite 的匹配与 `sn` 冲突测试通过，后续需在真实可核验原文及图片字节上做副本导出与重启验收。生产库未执行这次采集或绑定，六篇旧文章的既有正文状态未变。
+- A 的[认证复核](coordination/RESEARCH_BOOK_ARTICLES_AUTH.md#2026-09-30-web-搜索--2012-的认证边界)指出先前 Node 搜索只发了服务器五个 Cookie 中的三个；`-2012` 的确切原因仍未知。下一项有源码支持的对照是在非持久浏览器上下文保留完整 Cookie jar，先用同源只读接口验会话，再只发一次页面内准确号名搜索；遇验证或异常立即停。B [矩阵增量](coordination/SOURCE_CANDIDATE_MATRIX.md)未找到能替代的独立新列表协议，旧 `/web/mp/articles` 临时票据实现依赖项目禁止的流量监听，不作为产品运行路线。
+- C [公开种子](coordination/PUBLIC_PAGE_DISCOVERY.md#生产库已核验长链提供的不同文章种子只读待独立-probe)从旧库只读找到 14 条不在已保存两合集列表中的目标文章身份；[独立单次探针](coordination/VERIFIED_ARTICLE_SEED_PROBE.md)选其中一条未见本轮请求记录的旧文章匿名 GET，HTTP 302，未跟随或重试，没有可解析 HTML、原文时间、图片或新合集。私有哨兵已记该 URL，不能重发；结果不外推其他页面。旧文章不算新来源五篇。
+- [完整 Cookie jar 探针](coordination/BROWSER_CONTEXT_COOKIE_JAR_PROBE.md)只向腾讯发送 init 与书架健康两次请求：init HTTP 200 下发五个适用 Cookie，书架 HTTP 200 却给 `errCode=-2012`；搜索未发送。故前次搜索失败尚不能单独归因于手工少送两项 Cookie，Web 会话本身的有效性仍未证实。A 正核对一手报告中“init 接受失效 token 但后续业务失败”的机制与移动 token Refresh；下一步先复审刷新/轮换安全，再设计新的单次隔离验证，不在旧会话上盲测。
+- C 将八份旧文章的 15 条前后篇链接离线核到 11 个不同文章键，均属于已保存两合集范围；14 条列表外已核验长链没有被这些邻接链覆盖。另开的图片字节与离线导出 Codex task 已生成独立 Git worktree，但截至本次续记尚未返回正式 task ID，避免重复派发同题 Agent；继续等待注册并复核状态。
+- A 找到旧浏览器扩展直接 `GET /book/articles`、无显式 `skey/vid` 的首屏源码；[本机一次匿名直连](coordination/ANONYMOUS_BOOK_ARTICLES_PROBE.md)得 HTTP 401 后停止，未取列表，不重发该形状。带合法自定义头的旧 WeBook 路线仍待正常认证来源，不能把匿名 401 当作它的结果。A 另核到 [WeRead-Kit 一手 issue](https://github.com/27Aaron/WeRead-Kit/issues/48)：Web init 的 HTTP 200/Cookie 可为死会话，与当前完整 jar 书架 `-2012` 相容但未证本机移动 token 已过期；正在准备一次只读移动书架健康检查，刷新前须解决可能轮换的凭据私有持久化。
+- B [候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)新增腾讯公开搜索页原生桥适配层证据：`/wxsearch/broker` 是传给原生宿主的相对 path，公开 JS 不提供真实 HTTP 域名或登录续期链；`/weixinwap?type=2` 的已查代码只生成导航 URL，尚无可核文章解析与近期回包。二者本轮不凭猜测发 Probe，继续寻找真实发送实现。
+- [移动书架健康检查](coordination/MOBILE_SHELF_HEALTH_PROBE.md)单次 GET 得 HTTP 401 后停，未刷新或写库；现有移动 token 对该请求不被接受，但未确定原因。下一个可执行单元是先准备一致性备份、私有恢复文件与轮换副本演练，再根据固定正常登录代码审查一次 Refresh；若官方要求本人扫码或验证，届时只停该路线。
+- 图片 Codex task 后来取得正式 ID 并完成：[单篇单图真实字节与副本导出](coordination/TARGET_IMAGE_BYTE_EXPORT_PROBE.md)收到 HTTP 200、530,349 字节完整 JPEG，SQLite 副本归档后禁网 Obsidian 与限定 ZIP 附件字节匹配，生产 12/1447 与旧字段不变。图片归档还修复了伪/截断图片校验及导出优先缓存 `data:` 字节的缺陷；main 上相关四组测试 31/31 与服务端构建已通过，单图验收仍不等于整号离线完整。
+- B 的[候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)新核到另一个腾讯 `/review/list` 真请求，但官方字段文档定义为读者点评列表，目前没有 MP 书返回公众号发文目录的一手样本，不凭 `reviews[]` 同名字段对目标号发无依据 Probe。2026-09-29 更新的开源客户端仍用本机已测 `/web/mp/articles`，不构成新路径。
+- A 的[移动 Refresh 恢复](coordination/MOBILE_REFRESH_RECOVERY.md)先在生产库只读完成一致性备份、SQLite 副本假 token 更新和私有原子恢复演练，随后总控唯一一次正常 `/login` 得 HTTP 200、同账号候选新 `accessToken`，私有恢复文件已落盘，生产库写入 0。下一项是**从该私有文件**另做有界 Web 会话健康检查，未发搜索或文章请求；Refresh 本身不证明订阅恢复。
+- B 的[矩阵增量](coordination/SOURCE_CANDIDATE_MATRIX.md)将搜狗 `/gzhjs` 限定为缺当前 `openid` 获取链和近期回包的历史候选，不猜值 Probe。C 在八份已存目标官方原文的正文中离线发现 60 个两合集外同号完整文章键，五份独立旧页同指其中一条未请求种子，正准备一次公开原文只读探针；这些旧链接尚无当前原文身份、时间和正文证据，不能当新增订阅结果。
+- [新移动凭据 Web 对照](coordination/REFRESHED_MOBILE_WEB_HEALTH_PROBE.md)一次 init 加一次书架均 HTTP 200，完整 Cookie jar 账号吻合、书架有 `books/synckey`；旧凭据同形书架 `-2012`。目标搜索仍为 0，A 正按腾讯第一方静态 JS 准备准确号名首屏一次请求；有效书架并不证明取到公众号文章。
+- C 的一条正文互链候选长 `/s?__biz...` 一次匿名 GET 得 HTTP 302 后即停，无正文验收；只缩限该 URL/时点/形状。生产库另外 13 条未尝试且已核验的旧文章具有官方短 `/s/<token>` 来源路径，C 正审其与长链请求的真实差异；不猜 `chksm`，不重发已停的长链。
+- [另一篇目标旧文双图验证](coordination/TARGET_TWO_IMAGE_PROBE_PLAN.md)各一次 CDN GET 得完整 PNG 92,237 字节和 JPEG 130,633 字节；SQLite 副本归档后禁网 Obsidian/限定单篇 ZIP 两附件字节一致，其他旧字段及 12/1447 基数不变。生产库未写，此结果不能扩大成整号图片完整或新增订阅。
+- [新凭据目标准确号名首屏](coordination/REFRESHED_MOBILE_TARGET_SEARCH_PROBE.md)一次 Web init 加一次官方搜索均 HTTP 200；15 条中 11 条来源名精确匹配，具有不同 `docID` 和原文链接，响应给出官方续页游标及 `continueFlag=true`。当时仅 HTTPS 分类器记录目标 `biz` 匹配 0，可能漏掉 HTTP 原文；尚未核实文章身份、发表时间或正文，不能计入五篇验收。A 已完成一次官方游标续页，C 已完成另一条已知官方短路径原文验证。生产库未写。
+- [短路径一次实测](coordination/PUBLIC_PAGE_DISCOVERY.md)对两合集外一篇已有目标旧文的已存 `/s/<token>` 发一次匿名 GET，HTTP 200，四字段、短 canonical、字面发表时间及正文均闭环，见 1 张 `data-src` 图片。页面明示第三个同号官方合集 ID，但该次只记录计数、未保存值；C 正从既存证据离线寻找精确 ID，绝不重发该 URL。此结果只证明选中旧文当前可读，未取得新增文章或账号全史。
+- [官方游标续页一次实测](coordination/REFRESHED_MOBILE_SEARCH_CURSOR_PROBE.md)在新隔离 Web 会话中取首屏和一页续页，均 HTTP 200；目标号名称匹配数 11→15、两页候选键交集 0、次页新增 15、游标 offset 前进，未读第三页。当前 HTTPS 严格分类器把所有 `doc_url` 记为 `malformed`、目标 `biz` 记 0；腾讯页面允许 HTTP 原文，因此两项可能是假阴性，尚未解释实际 URL 结构。仍没有可核目标 `biz/ct` 或正文。A 正离线审官方卡片 URL 处理及一次最小身份验证，不计五篇验收。
+- C [离线恢复审计](coordination/PUBLIC_PAGE_DISCOVERY.md)无法从既存文件/数据库找回首次短链响应中未保存的第三合集精确 ID，且整页计数不能证明该旧文属于该合集。不能猜 ID 或重发同链。C 正对另一篇尚未尝试的已核旧文准备一次有界短链验证，若页面明确给出同号合集身份，只保存到私有文件再审官方合集首屏。B 新增 `/web/mp/cover` 真发送行，但只有每号当前一篇的证据；多篇仍走旧端点，不充当订阅目录。
+- [第二篇短链验证](coordination/PUBLIC_PAGE_DISCOVERY.md)对另一篇两合集外的目标旧文一次匿名 GET 得 HTTP 200，四字段、短 canonical、字面 `ct`、正文闭环，见 18 张 `data-src` 图片；内联 `album_info_list` 给出同号新合集精确 ID，已私有原子保存。C 正准备第三合集首屏，尚未请求；文章是旧文，不能算新增。
+- [官方搜索 URL 诊断](coordination/SEARCH_RESULT_URL_IDENTITY_DIAGNOSTIC.md)一次新会话首屏确认 15/15 为原存 HTTP 腾讯 `/s?...` 链接，其中 11 条来源名和 URL `__biz` 均与目标号匹配，`mid/idx` 为数字；旧 HTTPS 分类器的 30/30 `malformed` 和 biz 0 是假阴性。11 条 URL 已写私有候选文件，未发送明文 HTTP、未请求原文。A 正准备对不同候选逐篇只读 HTTPS 原文核验，索引字段尚不能充当五篇真文章。
+
+## 2026-09-30 前轮总控续记（历史状态）
+
+- 本轮总控创建 [协调状态](coordination/STATUS.md)，由 A/B/C 三位子 Agent 在独立 worktree/branch 并行执行，总控独占 main 做 review、测试、cherry-pick 和推送。Codex 独立 task 曾延迟注册并与子 Agent 重复，已停止；托管 worktree 工具因扫描大量忽略目录失败，当前三条执行分支为实际独立 Git worktree。生产 SQLite 一直只读，仍是 12 个订阅、1447 篇文章；未切换线上服务。
+- [微信读书研究](coordination/RESEARCH_WEREAD.md)确认旧 WeBook 的 /book/articles 与已失败的 /mp/chapters 确是不同腾讯路径，但前者需要的 skey/vid 没有可审查、合法正常登录且能续期的来源；2025 登录示例是占位资料。B [探针与离线核查](coordination/PROBE_RESULTS.md)只见既有 wrk- Key/旧 accessToken 等字段名，未证明有同一认证体系的 skey/vid，因此没有发目标真实请求。
+- [公开微信来源研究](coordination/RESEARCH_WECHAT_PUBLIC.md)找到 MIT 许可、直接请求腾讯公开合集列表的实际源码；非目标号匿名读到两页 20+10 个不同 key。该入口要求该号自己发布的 **biz+album_id 合集链接，单个合集也不等于全号。目标旧库 194 行有 46 行含 **biz，却无 album_id/hid；非目标公开原文页单次请求遇腾讯验证 302 后停止，未证明可反查合集。目标号尚无五篇新来源文章。
+- [工程准备](coordination/INTEGRATION_READY.md)合入 Provider 页和规范 URL 校验、旧短 ID 跨 sn 去重、只补空正文/图片/来源、SQLite 保护快照 v3；在一致性副本上旧订阅/文章 12/1447、0 保护违反。探针 Mock 24/24、保护 Python 16/16、服务端全量 Jest 19 套/156 项和构建通过；总控主线针对性 Jest 15/15。远端 [CI c908337](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36596331010) 与 [CI 874ac44](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36596723918) 的 lint-test、private-image 均成功。
+- **2026-09-30 纠偏：真实订阅仍未恢复，研究继续。**旧“仅剩外部来源条件”的判断已撤回。新一轮 A/B/C 独立研究分别追 `/book/articles` 的 `skey/vid` 合法来源、其他有公开取文代码的腾讯列表入口、从已有原文发现公开主页/合集的机制；见 [总控状态](coordination/STATUS.md)。不猜 album_id/凭据、不重复旧 -2041/499 请求、不接 Provider/生产库。有源码、明确认证和实质差异的候选可先做一次低频隔离只读验证；五篇目标文章是接入前验收门槛。当前实际模型设置仍无可查询值，记未核实。
+
+## 接手事实
+
+- **最新两个隔离结果：**新 `skey/vid` 按旧 WeBook 自定义头请求目标 `/book/articles` 一次得到 HTTP 401、业务 `-2012`、无 `reviews`；这只排除本次旧形状，已停止该端点在线尝试。旧官方合集原样 `public_tag_link` 匿名 GET 一次 HTTP 200，但静态 HTML 无可分类文章/分页/账号过滤/其他合集链接；C 正离线追其 JS，不能据此称全号可枚举。两线均有私有尝试哨兵、无自动重试，生产库只读。见[文章端点探针](coordination/BOOK_ARTICLES_SKEY_FIRST_PAGE_PROBE.md)与[合集枚举研究](coordination/ALBUM_ENUMERATION_RESEARCH.md)。
+- **`/book/articles` 认证进展：**本人既有合法移动恢复凭据按已成功的固定 `/login` 请求形状再次只读续期，HTTP 200、`vid` 匹配，顶层返回非空 `skey`（公开只记录粗长度区间）；完整响应及可能轮换 token 私有保存，生产库未写。旧 runner 曾丢弃 `skey` 字段，这次才明确它存在。A 正准备只用此新私有 `skey/vid`、按旧 WeBook 真正 GET 行设计一次 `/book/articles` 首屏；当前**没有该端点认证成功或文章回包**，详见[字段探针](coordination/MOBILE_LOGIN_SKEY_FIELD_PROBE.md)。
+- **第三合集完整列表进展：**官方 `getalbum` 已按真实游标逐页取完 6 页，10+10+10+10+10+4 共 54 个不重复文章键，终页 `continue_flag=false`，与首屏声明数一致；每项目标 `biz`、URL 键和列表时间字段通过，跨页顺序正常。54 键与旧两合集 32 键不重合，旧库可辨键相交 8、其余 46 仅可称不在**可辨键集合**；列表日期 2024-10-07 至 2026-09-24。原文 `ct`、正文、图片、自然新增及全号覆盖仍未验收；别把 54 列表项写成已完整订阅文章。六页最小身份元数据只在私有临时目录，生产 SQLite 只读。参见[公开页调查](coordination/PUBLIC_PAGE_DISCOVERY.md)。
+- **第三合集游标进展：**2026-09-30 复取首屏和按末条真实游标取得第二页，两个响应均 HTTP 200、`ret=0`，共 20 个不重复目标文章键，时间字段及 URL 身份均闭环，第二页继续标记有后页；私有第二页有下一游标。20 键与旧两合集 32 键零重合，8 键落旧库可辨认集合，12 键不在可辨认集合；这不是新发表证明，也不是全号覆盖。C 正准备从第二页私有游标继续。A 搜索候选原文一次四字段 `sn` 不符、另一次旧文对照遇腾讯验证 302，已停止该匿名原文请求路线，详见[单篇探针](coordination/SEARCH_CANDIDATE_ARTICLE_PROBE.md)和[离线差异分析](coordination/SEARCH_SN_MISMATCH_ANALYSIS.md)。
+- **2026-09-30 最新：**第三个目标号官方合集的精确 ID 已从本人保存且核验过的旧原文提取并私存；官方首屏只读请求一次得到 HTTP 200、`ret=0`，10/10 条有目标 `biz`、文章键与发布时间，种子旧文在首屏，服务声明 54 篇且可续页。C 正准备按真实游标核下一页；A 的微信读书官方搜索两页已返回同号候选，11 条带 URL 身份的首屏候选私存，正准备单篇原文身份、时间、正文及图片验证。上述尚不证明全号订阅恢复，但都是当前可执行的工程研究。生产库保持只读。以[总控状态](coordination/STATUS.md)、[候选矩阵](coordination/SOURCE_CANDIDATE_MATRIX.md)的近期记录为准；下方旧 `542bc70` 等是历史接手快照。
+- 当前执行入口是 [私人线上自主管理订阅任务](PRIVATE_ONLINE_DELIVERY_TASK.md)与 [自建路线证据](WEREAD_SELF_HOSTED_RESEARCH.md)；[完整客户端审计](WEREAD_CLIENT_FLOW_AUDIT.md)是旧实验事实来源。用户已暂停 Wechat2RSS 采购、授权与部署，改以可审查、可自行构建部署、无第三方开发者闭源中转的微信读书订阅核心为主线；旧付费部署卡和 [Provider 设计](SUBSCRIPTION_PROVIDER_DESIGN.md)仅作历史参考。本轮接手时本地 `main` 为 `542bc70`，与 `origin/main` 一致且工作区干净；下次接手重新核对 Git。
+- 本机实际生产库 `apps/server/data/wewe-rss.db` 只读核对 `quick_check=ok`，12 个订阅、1447 篇文章、44 篇缓存正文；目标 `MP_WXS_3895431412` 原库有 194 篇不同 ID、194 个非空发布时间、20 个 `verified_source_url`，仅可用作比对基线，**不是新来源取到五篇**。`provider_refresh_attempt_time` 列尚未进生产。没有生产写库或服务切换；前轮两次官方 Gateway 只读实验之外，本轮只新增一次 `/_list` 能力发现。
+- 用现有在线备份脚本生成一致性备份，报告 `integrityCheck=ok`、12/1447、SHA-256 已核对；备份仅在 Git 忽略的 `output/subscription-implementation/backups/`。又从生产 SQLite 在线复制隔离库，应用新增迁移后比较 `feeds` 和 `articles` 所有旧列逐行摘要，完全一致、`quick_check=ok`。隔离库额外加入一篇测试文章用于 ZIP 验收，绝非真实上游文章。
+- 用户此前明确没有现成服务器或域名，现不以租服务器或取得 Wechat2RSS 授权为研究前提；其私有实例未启动。已新建 Git 忽略的 `.env.weread-gateway`，本人已填腾讯官方 Agent API Key；代理不得读取或输出 Key 原值。Windows 旧配置保留，WSL/Docker 不是研究前置。当前窗口实际模型/思考设置无可查询的已应用值，记为未核实。
+
+## 已有证据的缺口与本轮研究
+
+- 真正实测的旧流程：本人墨水屏同类客户端扫码、`/login`、书架与续期成功，目标 `MP_WXS_3895431412` 的 `/mp/chapters` 首屏仍 HTTP 499 / `-2041`；Node Web 人工验证后 `/web/mp/articles` 仍 `-2041`；本人官方 Edge 书架成功、Reader 自发同一 Web 列表首屏为 HTTP 200 / 业务 `-2041`，后续验证码没有成功响应记录。旧 `weread-omni` 只做源码对照，未运行。失败仅覆盖本人账号、目标号、当时时点与已测流程，不能推永久关闭、所有账号/号或所有自建路线。旧脱敏摘要没有保留官方 Reader 请求头，`x-wr-ticket` 是否存在或有效未知。
+- 逐项读公开取文源码：`wechrss` 仍走旧 `/mp/chapters`；`weread-mp` 和 `we-mp-rss` 的新模式仍走旧 `/web/mp/articles`，后者近月另一用户取得真实 reviewId，反证“全球永久关闭”，却不是本目标成功。`we-mp-rss` 的 `/api/mp/cover` 只取最新一篇，入库时间是抓取时刻，不能满足五篇及可信发布时间门槛。KOReader 票据说法仅是未附成功输出的假设。PC 微信加 MITM 路线排除；WeWe/Wechat2RSS 的闭源中转或授权依赖不符合新目标。来源与边界见 [研究记录](WEREAD_SELF_HOSTED_RESEARCH.md)。
+- **官方 Gateway 两个假设已实测并停止**：其服务端未开源，本项目自建调用侧可直连腾讯而无第三方开发者中转。本人私有 Key 下，目标 `/book/chapterinfo` 请求一次得到成功但 `chapters=[]`，故没有第二个 `/book/info` 请求；准确号名 `scope=4` 搜索一次得 HTTP 499，未见文章结果，也没有重试。首次受限网络尝试仅是传输失败，无 HTTP/业务响应，随后允许联网才有上述两项结果。这些结果不说明其他账号、目标或关键词的情况，更不是 `-2041` 的通用解释。下一条最有依据的源码线索是旧 `/book/articles`：2021 年加入的开源实现确实以 `MP_WXS_*` 请求该路径，2026 客户端端点目录仍列出不同服务类，但没有本目标真实文章证据；无生产写库。
+- **本轮排除“缺 skill 导致失败”**：按腾讯官方方式全局安装 `weread-skills`，当前会话可直接读取 `SKILL.md`、`book.md`、`search.md`；三文件与腾讯仓库 HEAD `315698a8` 的 Git blob 一致，实际版本 `1.0.4`。旧探针认证、参数层级、版本号符合官方规范。修复非 200 丢正文的诊断后，本地模拟测试 19/19 通过；旧 HTTP 499 正文当时未保存，不能恢复，未重放旧搜索。
+- **本轮新增一次官方能力实测**：用已有私有 `wrk-` Key 对文档列出的 `/_list` 发一次只读请求，成功得到 17 个 Gateway 操作，含 `/book/chapterinfo` 和 `/store/search`，**不含 `/book/articles`**；没有把客户端路径猜成 Gateway 操作。生产 SQLite 重新只读核对 `quick_check=ok`，12 个订阅、1447 篇文章、1 个账户，未写库。
+- **`/book/articles` 的具体差异与当前缺口**：固定旧版 `WeBook.get_urls` 确实以 GET、`bookId/count/offset/synckey` 请求 `i.weread.qq.com/book/articles`，预期 `reviews[].review`；2026 Eink 端点目录将其列于 ArticleService，区别于旧失败的 MPListService `/mp/chapters`，但标记 SDK 未使用。WeBook 要求自定义 `skey/vid`，源码没给凭据获取链；官方 Gateway `wrk-`、Web Cookie 与移动 `accessToken` 不能凭名字互换。本机生产账户中的 `wr_skey` 与 `accessToken` 值相同，来自旧 Web 登录赋值，不能证明为 WeBook `skey`。目前没有发 `/book/articles` 请求，也没有取得新文章。旧文档所写“必须先找近期成功五篇回包才能实验”已被用户明确取消；真正待满足的是来源可核验且适用于该端点的本人认证条件。
+
+## 保留的实现与验证（前轮）
+
+- 新增 `PRIVATE_ONLINE_MODE=1`：至少 24 字符登录码换取 HttpOnly、Secure、SameSite 严格会话 cookie，匿名 RSS、文章 API、图片代理、ZIP 下载和私有页面被挡住；登录页/静态资源可加载。线上禁用旧微信读书账号管理/登录接口，不把上游凭据交给普通站点使用者。
+- 新增 `GET /download/feed/:id.zip` 与“下载本号 ZIP”：浏览器得到附件响应，Markdown 引用相对路径 `attachments/` 图片；每号 `README.md` 明示完整/未完整数。只有有缓存正文且附件成功落地的篇目计为完整；旧库很多正文缺失，不能宣称全部可离线阅读。线上隐藏旧服务器目录导出入口。
+- Wechat2RSS Provider 在保存正文前受限下载并内嵌允许的图片，图片失败则保留旧正文、新正文标为缺失以便重试；容器网络的固定服务名 `wechat2rss` 纳入私有地址校验。真实上游字段、图片和目标号仍待实测。
+- 新增单机 Docker Compose 线上配置：主应用与固定 digest 上游分别持久化，只绑定 `127.0.0.1`；Tailscale Serve 提供私人 HTTPS。部署脚本在迁移前备份并停应用；备份脚本对 SQLite 在线备份、上游数据短暂停机归档。本机无 Docker；GitHub Actions 的 `private-image` 已成功构建 `Dockerfile.private-online`，尚未做容器运行验收。
+- 前轮曾形成 DigitalOcean + Tailscale + Wechat2RSS 的 [部署操作卡](PRIVATE_ONLINE_DEPLOYMENT.md)；该方案现已暂停，仅作历史工程资料，尚未购买或部署。
+- 本机 HTTP 验收使用迁移后的隔离库和测试文章：匿名内容路由 401、私有页 302 登录、错误登录 401、成功登录后 RSS 200、ZIP 200；下载的 47 MB ZIP 经过解压检查，570 个条目中 157 个 Markdown 图片引用对应 ZIP 内相对路径文件。所选旧号 195 篇中 28 篇离线完整、167 篇明确标未完整（含一篇测试夹具）。这仅证明副本上的下载与保护链路。
+- 服务端完整 Jest **18 套 / 148 项通过**，服务端与网页构建、两端 lint、格式与 Git diff 检查通过。隔离库上的本机 HTTP 验收在服务重启后复测，六类匿名入口被拒、旧账号接口 403、RSS 200、ZIP 200。远端 [CI 运行 36521304651](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36521304651) 的 `lint-test` 和 `private-image` 均成功；Docker 镜像已构建，尚未在目标服务器运行。
+
+## 下一步与门槛
+
+1. 继续核实 `/book/articles` 当前版本的合法 `skey/vid` 来源，或找另一条有公开取文代码、与旧失败流程真正不同的路径。若能核对本人已有凭据与该接口认证条件，按固定源码请求形状做一次低频隔离只读首屏，首先记录有无真实条目和字段名；遇认证拒绝、验证码或频控即停。近期成功案例可增强证据，但不是实验前置条件；不把 `wrk-`、Web Cookie 或 `accessToken` 猜成旧 `skey`。
+2. 单一目标合集已通过五篇身份/原文发布时间与两页分页样本；继续按 canonical URL 低频核验未保存原文的正文、图片和完整下载，验证该合集自然新文章及多次更新，同时查其他合集或全号目录。不得用这 19 篇推断目标全史。近期订阅与订阅前全史独立记录。
+3. 现有 `public-album` Provider 仅表达所选合集的局部订阅；在生产启用前，先在 SQLite 一致性副本用真实字段演练重复更新、旧字段保护、正文图片、RSS/Markdown/Obsidian/ZIP 与重启，再核验备份。最终还需干净环境构建部署、私有凭据、依赖版本追溯、故障诊断、回归测试及全部旧文章/导出保留；当前无线上可用入口。
+4. 每个实质单元跑相关测试、查敏感文件、提交推送并核远端 CI。有可执行研究就继续；仅余用户正常登录/官方验证或其他外部条件时保存检查点、列明缺口，不再反复修改报告或自动转回付费方案，也不创建空转后继任务。

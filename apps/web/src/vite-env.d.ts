@@ -9,6 +9,7 @@ interface Window {
   __WEWE_RSS_SERVER_ORIGIN_URL__?: string;
   __WEWE_RSS_ENABLED_AUTH_CODE__?: boolean | string;
   __WEWE_RSS_PRIVATE_ONLINE_MODE__?: boolean | string;
+  __WEWE_RSS_ACCEPTANCE_MODE__?: boolean | string;
 }
 
 declare const __APP_VERSION__: string;

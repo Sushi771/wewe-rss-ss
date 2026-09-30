@@ -14,11 +14,28 @@
     />
   </head>
   <body>
+    {{#if acceptanceMode}}
+    <aside
+      role="status"
+      style="
+        padding: 12px 20px;
+        background: #fff3cd;
+        color: #533f03;
+        border-bottom: 1px solid #e8cf84;
+      "
+    >
+      <strong>隔离测试，尚未恢复正式订阅</strong> · 运行版本 {{
+      acceptanceVersion }}<br />
+      妈妈部落畅聊阁：自主发现26条，已保存已核验原文缓存2篇，近期3篇尚未完成后台原文验收。另1篇浏览器正常显示，独立后台请求返回腾讯验证302，已停止；普通更新尚未接通。正文图片来自缓存，搜索覆盖不保证完整。<br />
+      {{ acceptanceSearchNote }}
+    </aside>
+    {{/if}}
     <div id="root"></div>
     <script>
       window.__WEWE_RSS_SERVER_ORIGIN_URL__ = '{{ weweRssServerOriginUrl }}';
       window.__WEWE_RSS_ENABLED_AUTH_CODE__ = '{{ enabledAuthCode }}';
       window.__WEWE_RSS_PRIVATE_ONLINE_MODE__ = '{{ privateOnlineMode }}';
+      window.__WEWE_RSS_ACCEPTANCE_MODE__ = '{{ acceptanceMode }}';
     </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

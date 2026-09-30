@@ -6,6 +6,10 @@ export const serverOriginUrl = isProd
 
 export const appVersion = __APP_VERSION__;
 
+export const acceptanceMode =
+  window.__WEWE_RSS_ACCEPTANCE_MODE__ === true ||
+  window.__WEWE_RSS_ACCEPTANCE_MODE__ === 'true';
+
 export const privateOnlineMode =
   window.__WEWE_RSS_PRIVATE_ONLINE_MODE__ === true ||
   window.__WEWE_RSS_PRIVATE_ONLINE_MODE__ === 'true';

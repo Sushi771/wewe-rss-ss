@@ -33,6 +33,16 @@ async function bootstrap() {
     configService.get<ConfigurationType['server']>('server')!;
 
   app.use(privateAccessGuard);
+  if (process.env.WEWE_ACCEPTANCE_MODE === '1')
+    app.use((req, res, next) => {
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'",
+      );
+      if (req.path === '/proxy/image' || req.query.update)
+        return res.status(409).send('隔离测试：在线取文图片及普通更新尚未接通');
+      next();
+    });
   app.use(json({ limit: '10mb' }));
   app.use(urlencoded({ extended: true, limit: '10mb' }));
 

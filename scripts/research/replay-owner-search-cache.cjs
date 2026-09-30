@@ -400,15 +400,18 @@ async function parent() {
   write(path.join(dir, 'result.json'), summary);
   console.log(JSON.stringify(summary));
 }
-const a = process.argv.slice(2);
-(a[0] === '--worker'
-  ? worker(a[1], a[2], a[3])
-  : a[0] === '--exports'
-    ? exportsWorker(a[1], a[2])
-    : a.length === 0
-      ? parent()
-      : Promise.reject(Error('usage_gate'))
-).catch((e) => {
-  console.error(e.message);
-  process.exitCode = 1;
-});
+module.exports = { inputs };
+if (require.main === module) {
+  const a = process.argv.slice(2);
+  (a[0] === '--worker'
+    ? worker(a[1], a[2], a[3])
+    : a[0] === '--exports'
+      ? exportsWorker(a[1], a[2])
+      : a.length === 0
+        ? parent()
+        : Promise.reject(Error('usage_gate'))
+  ).catch((e) => {
+    console.error(e.message);
+    process.exitCode = 1;
+  });
+}
