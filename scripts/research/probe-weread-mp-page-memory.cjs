@@ -2,14 +2,34 @@
 'use strict';
 
 // One natural, first-party MP reader navigation using an owner's copied Web
-// session. No request listener, interception, replay, scrolling, or clicking.
+// session or gated mobile recovery. No target request listener, interception,
+// replay, scrolling, or clicking.
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const {
+  environmentGate,
+  recoveryGate,
+  runtime,
+  readPayload,
+  numericCode,
+  statusStop,
+  cookieGate,
+} = require('./probe-refreshed-mobile-web-health.cjs');
+const {
+  privateRootGate,
+  targetGate,
+} = require('./probe-weread-web-mp-cover.cjs');
 
 const BOOK_ID = 'MP_WXS_3895431412';
+const INIT = 'https://weread.qq.com/web/login/session/init';
+const INIT_LIMIT = 64 * 1024;
+const REQUIRED_WEB_COOKIES = ['wr_vid', 'wr_skey', 'wr_rt', 'wr_pf', 'wr_ql'];
+const VALIDATED_INIT_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const PRIVATE_ROOT = path.join(os.homedir(), '.wewe-rss-private');
 const SESSION_COPY = path.join(
   PRIVATE_ROOT,
@@ -62,6 +82,7 @@ function parseArgs(argv) {
     return { mode: argv[0] };
   }
   if (
+    argv.length >= 5 &&
     ['--preflight', '--execute'].includes(argv[0]) &&
     argv[1] === '--playwright-core' &&
     path.isAbsolute(argv[2]) &&
@@ -70,7 +91,36 @@ function parseArgs(argv) {
     ((argv[0] === '--preflight' && argv.length === 5) ||
       (argv.length === 6 && argv[5] === '--approved-online'))
   ) {
-    return { mode: argv[0], modulePath: argv[2], browserPath: argv[4] };
+    return {
+      mode: argv[0],
+      credentialMode: 'session_copy',
+      modulePath: argv[2],
+      browserPath: argv[4],
+    };
+  }
+  if (
+    argv.length >= 10 &&
+    ['--preflight', '--execute'].includes(argv[0]) &&
+    argv[1] === '--recovery' &&
+    argv[2] === '--db' &&
+    path.isAbsolute(argv[3]) &&
+    argv[4] === '--run-dir' &&
+    path.isAbsolute(argv[5]) &&
+    argv[6] === '--playwright-core' &&
+    path.isAbsolute(argv[7]) &&
+    argv[8] === '--browser' &&
+    path.isAbsolute(argv[9]) &&
+    ((argv[0] === '--preflight' && argv.length === 10) ||
+      (argv.length === 11 && argv[10] === '--approved-online'))
+  ) {
+    return {
+      mode: argv[0],
+      credentialMode: 'recovery',
+      dbPath: argv[3],
+      runDir: argv[5],
+      modulePath: argv[7],
+      browserPath: argv[9],
+    };
   }
   throw Error('usage_gate');
 }
@@ -80,34 +130,35 @@ function realFile(file) {
   return fs.realpathSync(file);
 }
 
-function preflight(modulePath, browserPath) {
+function preflight(args) {
+  environmentGate(process.env);
   const privateRoot = fs.realpathSync(PRIVATE_ROOT);
   if (privateRoot.toLowerCase() !== path.resolve(PRIVATE_ROOT).toLowerCase()) {
     throw Error('private_root_symlink');
   }
-  const sessionCopy = realFile(SESSION_COPY);
-  const relative = path.relative(privateRoot, sessionCopy);
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
-    throw Error('session_copy_outside_private_root');
-  }
-  if (fs.statSync(sessionCopy).size === 0) throw Error('empty_session_copy');
-  const moduleDir = fs.realpathSync(modulePath);
-  if (!fs.statSync(moduleDir).isDirectory()) throw Error('module_dir_required');
-  const moduleInfo = JSON.parse(
-    fs.readFileSync(path.join(moduleDir, 'package.json'), 'utf8'),
-  );
-  if (moduleInfo.name !== 'playwright-core')
-    throw Error('playwright_core_required');
-  const browser = realFile(browserPath);
-  if (
-    !['msedge.exe', 'chrome.exe'].includes(path.basename(browser).toLowerCase())
-  ) {
-    throw Error('edge_or_chrome_required');
-  }
   if (fs.existsSync(MARKER) || fs.existsSync(RESULT)) {
     throw Error('page_memory_already_attempted');
   }
-  return { sessionCopy, moduleDir, browser };
+  const moduleDir = fs.realpathSync(args.modulePath);
+  const browser = realFile(args.browserPath);
+  const launch = runtime(moduleDir, browser);
+  if (args.credentialMode === 'session_copy') {
+    const sessionCopy = realFile(SESSION_COPY);
+    const relative = path.relative(privateRoot, sessionCopy);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw Error('session_copy_outside_private_root');
+    }
+    if (fs.statSync(sessionCopy).size === 0) throw Error('empty_session_copy');
+    return { credentialMode: 'session_copy', sessionCopy, launch };
+  }
+  const credentials = recoveryGate(args.dbPath, args.runDir, 'present');
+  privateRootGate(args.dbPath, credentials.runDir);
+  targetGate(args.dbPath, credentials.runDir);
+  return {
+    credentialMode: 'recovery',
+    mobile: credentials.mobile,
+    launch,
+  };
 }
 
 function writeOnce(file, value) {
@@ -205,7 +256,79 @@ function inspectPage() {
   };
 }
 
-function selfTest() {
+async function initRecoveryContext(context, mobile) {
+  const summary = {
+    initRequests: 0,
+    initHttp: null,
+    initCode: null,
+    cookieIdentityMatched: false,
+    webCookiesReady: false,
+  };
+  if ((await context.cookies()).length) {
+    return { ready: false, outcome: 'stop_nonempty_context', summary };
+  }
+  let response;
+  try {
+    summary.initRequests = 1;
+    response = await context.request.post(INIT, {
+      data: {
+        vid: mobile.vid,
+        pf: 0,
+        skey: mobile.accessToken,
+        rt: mobile.refreshToken,
+      },
+      headers: { 'content-type': 'application/json; charset=UTF-8' },
+      timeout: 10_000,
+      maxRedirects: 0,
+      maxRetries: 0,
+    });
+  } catch {
+    return { ready: false, outcome: 'stop_init_transport_or_timeout', summary };
+  }
+  try {
+    summary.initHttp = response.status();
+    if (summary.initHttp !== 200) {
+      return {
+        ready: false,
+        outcome: statusStop(summary.initHttp),
+        summary,
+      };
+    }
+    let payload;
+    try {
+      payload = await readPayload(response, INIT_LIMIT);
+    } catch {
+      return { ready: false, outcome: 'stop_init_body_read', summary };
+    }
+    summary.initCode = payload.errCode ?? payload.ret ?? null;
+    if (payload.stop) {
+      return { ready: false, outcome: payload.stop, summary };
+    }
+    if (
+      (Object.hasOwn(payload.data, 'success') &&
+        numericCode(payload.data.success) !== 1) ||
+      (Object.hasOwn(payload.data, 'succ') &&
+        numericCode(payload.data.succ) !== 1)
+    ) {
+      return { ready: false, outcome: 'stop_init_not_success', summary };
+    }
+  } finally {
+    await response.dispose();
+  }
+  const cookies = cookieGate(
+    await context.cookies(navigationUrl()),
+    mobile.vid,
+  );
+  summary.cookieIdentityMatched = cookies.identityMatch;
+  summary.webCookiesReady =
+    cookies.ready &&
+    REQUIRED_WEB_COOKIES.every((name) => cookies.names.includes(name));
+  return summary.webCookiesReady
+    ? { ready: true, summary }
+    : { ready: false, outcome: 'stop_cookie_scope_or_identity', summary };
+}
+
+async function selfTest() {
   assert.equal(encodeWereadId('43208843'), 'c9c321c07293508bc9c79df');
   assert.match(
     navigationUrl(),
@@ -216,6 +339,28 @@ function selfTest() {
   assert.throws(
     () => parseArgs(['--execute', '--playwright-core', 'x', '--browser', 'y']),
     /usage_gate/,
+  );
+  const recoveryArgs = [
+    '--preflight',
+    '--recovery',
+    '--db',
+    path.resolve('fixture.sqlite'),
+    '--run-dir',
+    path.resolve('mobile-refresh-fixture'),
+    '--playwright-core',
+    path.resolve('playwright-core'),
+    '--browser',
+    path.resolve('msedge.exe'),
+  ];
+  assert.equal(parseArgs(recoveryArgs).credentialMode, 'recovery');
+  assert.throws(
+    () => parseArgs(['--execute', ...recoveryArgs.slice(1)]),
+    /usage_gate/,
+  );
+  assert.equal(
+    parseArgs(['--execute', ...recoveryArgs.slice(1), '--approved-online'])
+      .credentialMode,
+    'recovery',
   );
   const savedDocument = global.document;
   const savedLocation = global.location;
@@ -274,6 +419,54 @@ function selfTest() {
     fs.unlinkSync(marker);
     fs.rmdirSync(tempDir);
   }
+  let initCalls = 0;
+  const mobile = {
+    vid: 'fixture-vid',
+    accessToken: 'fixture-access',
+    refreshToken: 'fixture-refresh',
+  };
+  const fakeContext = {
+    cookies: async (url) =>
+      url
+        ? REQUIRED_WEB_COOKIES.map((name) => ({
+            name,
+            value: name === 'wr_vid' ? mobile.vid : 'fixture-value',
+          }))
+        : [],
+    request: {
+      post: async (endpoint, options) => {
+        initCalls++;
+        assert.equal(endpoint, INIT);
+        assert.equal(options.data.skey, mobile.accessToken);
+        assert.equal(options.maxRetries, 0);
+        return {
+          status: () => 200,
+          headers: () => ({ 'content-length': '10' }),
+          body: async () => Buffer.from('{"succ":1}'),
+          dispose: async () => {},
+        };
+      },
+    },
+  };
+  const initialized = await initRecoveryContext(fakeContext, mobile);
+  assert.equal(initCalls, 1);
+  assert.equal(initialized.ready, true);
+  assert.equal(initialized.summary.cookieIdentityMatched, true);
+  assert.equal(initialized.summary.webCookiesReady, true);
+  assert.equal(JSON.stringify(initialized).includes(mobile.accessToken), false);
+  const stopped = await initRecoveryContext(
+    {
+      cookies: async () => [{ name: 'unexpected', value: 'fixture' }],
+      request: {
+        post: async () => {
+          throw Error('init_must_not_run');
+        },
+      },
+    },
+    mobile,
+  );
+  assert.equal(stopped.ready, false);
+  assert.equal(stopped.summary.initRequests, 0);
   return {
     ok: true,
     checks: [
@@ -281,54 +474,91 @@ function selfTest() {
       'argument_gate',
       'field_summary',
       'one_shot_marker',
+      'recovery_gate_args',
+      'single_init_and_cookie_scope',
     ],
   };
 }
 
 async function execute(gate) {
-  const { chromium } = require(gate.moduleDir);
   writeOnce(MARKER, {
     kind: 'weread-mp-page-memory-target',
     bookId: BOOK_ID,
+    credentialMode: gate.credentialMode,
     attemptedAt: new Date().toISOString(),
   });
   let result = {
     kind: 'weread-mp-page-memory-target',
+    credentialMode: gate.credentialMode,
     outcome: 'browser_error',
+    initRequests: 0,
+    pageNavigations: 0,
   };
-  let browser;
+  let browser, context;
   try {
-    browser = await chromium.launch({
-      executablePath: gate.browser,
+    browser = await gate.launch.chromium.launch({
+      executablePath: gate.launch.browserPath,
       headless: true,
+      args: [
+        '--disable-background-networking',
+        '--no-proxy-server',
+        '--no-first-run',
+        '--no-default-browser-check',
+      ],
     });
-    const context = await browser.newContext({
-      storageState: gate.sessionCopy,
+    context = await browser.newContext({
+      ...(gate.credentialMode === 'session_copy'
+        ? { storageState: gate.sessionCopy }
+        : { userAgent: VALIDATED_INIT_USER_AGENT }),
       acceptDownloads: false,
     });
-    const page = await context.newPage();
-    const response = await page.goto(navigationUrl(), {
-      waitUntil: 'domcontentloaded',
-      timeout: 20000,
-    });
-    await page.waitForTimeout(5000);
-    const summary = await page.evaluate(inspectPage);
-    result = {
-      kind: 'weread-mp-page-memory-target',
-      outcome:
-        summary.captchaVisible || summary.pageKind !== 'mp_reader'
-          ? 'redirect_or_verification_observed'
-          : summary.domGroupCount > 0 || summary.groupCount > 0
-            ? 'initial_catalog_observed'
-            : 'initial_catalog_not_observed',
-      navigationStatus: response?.status() || null,
-      summary,
-    };
-    await context.close();
+    let ready = true;
+    if (gate.credentialMode === 'recovery') {
+      const initialized = await initRecoveryContext(context, gate.mobile);
+      result = { ...result, ...initialized.summary };
+      ready = initialized.ready;
+      if (!ready) result.outcome = initialized.outcome;
+    }
+    if (ready) {
+      const page = await context.newPage();
+      result.pageNavigations = 1;
+      const response = await page.goto(navigationUrl(), {
+        waitUntil: 'domcontentloaded',
+        timeout: 20000,
+      });
+      let summary;
+      for (let observation = 0; observation < 10; observation++) {
+        summary = await page.evaluate(inspectPage);
+        if (
+          summary.captchaVisible ||
+          summary.pageKind !== 'mp_reader' ||
+          summary.domGroupCount > 0 ||
+          summary.groupCount > 0 ||
+          summary.loadFail
+        ) {
+          break;
+        }
+        if (observation < 9) await page.waitForTimeout(500);
+      }
+      result = {
+        ...result,
+        outcome:
+          summary.captchaVisible || summary.pageKind !== 'mp_reader'
+            ? 'redirect_or_verification_observed'
+            : summary.domGroupCount > 0 || summary.groupCount > 0
+              ? 'initial_catalog_observed'
+              : summary.loadFail
+                ? 'initial_catalog_load_failed'
+                : 'initial_catalog_not_observed',
+        navigationStatus: response?.status() || null,
+        summary,
+      };
+    }
   } catch {
     // Raw browser errors can contain URLs or session details. Keep only this
     // bounded classification; a failed attempt still consumes the one-shot gate.
   } finally {
+    if (context) await context.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
   }
   writeOnce(RESULT, result);
@@ -342,6 +572,8 @@ async function main(argv) {
       mode: 'offline_plan',
       bookId: BOOK_ID,
       navigationUrl: navigationUrl(),
+      credentialModes: ['session_copy', 'recovery'],
+      recoveryInit: INIT,
       sessionCopyPath: SESSION_COPY,
       markerPath: MARKER,
       resultPath: RESULT,
@@ -350,13 +582,15 @@ async function main(argv) {
     };
   }
   if (args.mode === '--self-test') return selfTest();
-  const gate = preflight(args.modulePath, args.browserPath);
+  const gate = preflight(args);
   if (args.mode === '--preflight') {
     return {
       mode: 'offline_preflight',
+      credentialMode: gate.credentialMode,
       ready: true,
       markerAbsent: true,
-      sessionCopyPresent: true,
+      sessionCopyPresent: fs.existsSync(SESSION_COPY),
+      recoveryAndBackupValidated: gate.credentialMode === 'recovery',
     };
   }
   return execute(gate);
@@ -372,4 +606,10 @@ if (require.main === module) {
   );
 }
 
-module.exports = { encodeWereadId, inspectPage, parseArgs, selfTest };
+module.exports = {
+  encodeWereadId,
+  inspectPage,
+  initRecoveryContext,
+  parseArgs,
+  selfTest,
+};
