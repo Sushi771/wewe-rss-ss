@@ -139,7 +139,11 @@ async function boundedBody(response) {
   } catch {
     readError = true;
   }
-  return { text: Buffer.concat(parts, total).toString('utf8'), truncated, readError };
+  return {
+    text: Buffer.concat(parts, total).toString('utf8'),
+    truncated,
+    readError,
+  };
 }
 
 function code(value) {
@@ -204,8 +208,7 @@ function summary(body, status, expectedVid) {
   const skeyConflict =
     top.nonempty && data.nonempty && body.skey !== body.data.skey;
   let decision = 'stop_unexpected_shape';
-  if (status === 429 || businessCode === -2014)
-    decision = 'stop_rate_limit';
+  if (status === 429 || businessCode === -2014) decision = 'stop_rate_limit';
   else if (businessCode === -2041 || businessCode === -2063)
     decision = 'stop_verification';
   else if (status >= 300 && status < 400) decision = 'stop_redirect';
@@ -217,7 +220,10 @@ function summary(body, status, expectedVid) {
   else if (vidMatched === false) decision = 'quarantine_identity_mismatch';
   else if (skeyConflict) decision = 'quarantine_skey_conflict';
   else if (top.nonempty || data.nonempty)
-    decision = vidMatched === true ? 'skey_candidate_identity_matched' : 'skey_candidate_identity_unproven';
+    decision =
+      vidMatched === true
+        ? 'skey_candidate_identity_matched'
+        : 'skey_candidate_identity_unproven';
   else decision = 'no_skey_field';
   return {
     decision,
@@ -270,7 +276,11 @@ async function persistUntilDurable(runDir, record, options = {}) {
     } catch {
       if (attempts === 1 || attempts % 12 === 0) {
         try {
-          notify({ decision: 'local_persistence_retry_required', localAttempts: attempts, networkRequests: 1 });
+          notify({
+            decision: 'local_persistence_retry_required',
+            localAttempts: attempts,
+            networkRequests: 1,
+          });
         } catch {
           /* Preserve the only in-memory response. */
         }
@@ -290,7 +300,12 @@ async function runOnce(dbPath, runDir, options = {}) {
   try {
     response = await (options.transport ?? requestOnce)(shape);
   } catch {
-    return { decision: 'stop_transport', http: null, networkRequests: 1, productionWrites: 0 };
+    return {
+      decision: 'stop_transport',
+      http: null,
+      networkRequests: 1,
+      productionWrites: 0,
+    };
   }
   const received = await boundedBody(response);
   const rawBody = received.text;
@@ -315,39 +330,98 @@ async function runOnce(dbPath, runDir, options = {}) {
     bodyReadError: received.readError,
     decision: result.decision,
   };
-  const attempts = await persistUntilDurable(context.runDir, record, options.persistence);
-  return { ...result, privateResponseSaved: true, localPersistenceAttempts: attempts };
+  const attempts = await persistUntilDurable(
+    context.runDir,
+    record,
+    options.persistence,
+  );
+  return {
+    ...result,
+    privateResponseSaved: true,
+    localPersistenceAttempts: attempts,
+  };
 }
 
 async function selfTest() {
   assert.equal(args(['--plan']).mode, '--plan');
   assert.throws(() => args(['--execute']), /usage_gate/);
-  assert.throws(() => environmentGate({ NODE_DEBUG: 'http' }), /environment_gate/);
-  assert.throws(() => environmentGate({ HTTPS_PROXY: 'proxy' }), /environment_gate/);
+  assert.throws(
+    () => environmentGate({ NODE_DEBUG: 'http' }),
+    /environment_gate/,
+  );
+  assert.throws(
+    () => environmentGate({ HTTPS_PROXY: 'proxy' }),
+    /environment_gate/,
+  );
   const secret = 'fixture-do-not-log-rotated-token';
-  const body = { vid: '123', accessToken: secret, refreshToken: 'new-rt', data: { skey: 'new-skey' } };
-  assert.equal(summary(body, 200, '123').decision, 'skey_candidate_identity_matched');
-  assert.equal(summary({ vid: '999', data: { skey: 's' } }, 200, '123').decision, 'quarantine_identity_mismatch');
-  assert.equal(summary({ vid: '123', data: { skey: 's' } }, 200, '123').skeyData.lengthBand, '1-8');
-  assert.equal(summary({ vid: '123', skey: 's' }, 200, '123').skeyTop.exists, true);
+  const body = {
+    vid: '123',
+    accessToken: secret,
+    refreshToken: 'new-rt',
+    data: { skey: 'new-skey' },
+  };
+  assert.equal(
+    summary(body, 200, '123').decision,
+    'skey_candidate_identity_matched',
+  );
+  assert.equal(
+    summary({ vid: '999', data: { skey: 's' } }, 200, '123').decision,
+    'quarantine_identity_mismatch',
+  );
+  assert.equal(
+    summary({ vid: '123', data: { skey: 's' } }, 200, '123').skeyData
+      .lengthBand,
+    '1-8',
+  );
+  assert.equal(
+    summary({ vid: '123', skey: 's' }, 200, '123').skeyTop.exists,
+    true,
+  );
   assert.equal(summary({ data: { skey: 's' } }, 200, '123').vidMatched, null);
-  assert.equal(summary({ data: { skey: 's' } }, 429, '123').decision, 'stop_rate_limit');
-  assert.equal(summary({ data: { errCode: -2041, skey: 's' } }, 200, '123').decision, 'stop_verification');
-  assert.equal(summary({ vid: '123', skey: 'a', data: { skey: 'b' } }, 200, '123').decision, 'quarantine_skey_conflict');
-  const bounded = await boundedBody({ headers: {}, body: Readable.from([Buffer.alloc(RESPONSE_LIMIT + 1, 65)]) });
+  assert.equal(
+    summary({ data: { skey: 's' } }, 429, '123').decision,
+    'stop_rate_limit',
+  );
+  assert.equal(
+    summary({ data: { errCode: -2041, skey: 's' } }, 200, '123').decision,
+    'stop_verification',
+  );
+  assert.equal(
+    summary({ vid: '123', skey: 'a', data: { skey: 'b' } }, 200, '123')
+      .decision,
+    'quarantine_skey_conflict',
+  );
+  const bounded = await boundedBody({
+    headers: {},
+    body: Readable.from([Buffer.alloc(RESPONSE_LIMIT + 1, 65)]),
+  });
   assert.equal(bounded.truncated, true);
   assert.equal(bounded.text.length, RESPONSE_LIMIT);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-skey-field-test-'));
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'mobile-skey-field-test-'),
+  );
   let transportCalls = 0;
   let localCalls = 0;
   const notices = [];
   try {
     const result = await runOnce('', root, {
-      contextGate: () => ({ runDir: root, mobile: { vid: '123', deviceId: 'device', refreshToken: 'old-rt', accessToken: 'old' } }),
+      contextGate: () => ({
+        runDir: root,
+        mobile: {
+          vid: '123',
+          deviceId: 'device',
+          refreshToken: 'old-rt',
+          accessToken: 'old',
+        },
+      }),
       transport: async (shape) => {
         transportCalls++;
         assert.equal(shape.url, 'https://i.weread.qq.com/login');
-        return { status: 200, headers: {}, body: Readable.from([JSON.stringify(body)]) };
+        return {
+          status: 200,
+          headers: {},
+          body: Readable.from([JSON.stringify(body)]),
+        };
       },
       persistence: {
         writer: (dir, record) => {
@@ -364,25 +438,49 @@ async function selfTest() {
     assert.equal(notices[0].decision, 'local_persistence_retry_required');
     assert.equal(result.privateResponseSaved, true);
     assert.equal(JSON.stringify(result).includes(secret), false);
-    const record = JSON.parse(fs.readFileSync(path.join(root, RESPONSE_RECORD), 'utf8'));
+    const record = JSON.parse(
+      fs.readFileSync(path.join(root, RESPONSE_RECORD), 'utf8'),
+    );
     assert.equal(JSON.parse(record.responseBody).accessToken, secret);
     assert.equal(JSON.parse(record.responseBody).refreshToken, 'new-rt');
     assert.equal(fs.existsSync(path.join(root, MARKER)), true);
-    assert.throws(() => writePrivate(root, { other: secret }), /recovery_conflict/);
+    assert.throws(
+      () => writePrivate(root, { other: secret }),
+      /recovery_conflict/,
+    );
     assert.throws(() => markAttempt(root), /EEXIST/);
     const errorDir = path.join(root, 'error-case');
     fs.mkdirSync(errorDir);
     const errorResult = await runOnce('', errorDir, {
-      contextGate: () => ({ runDir: errorDir, mobile: { vid: '123', deviceId: 'device', refreshToken: 'old-rt', accessToken: 'old' } }),
+      contextGate: () => ({
+        runDir: errorDir,
+        mobile: {
+          vid: '123',
+          deviceId: 'device',
+          refreshToken: 'old-rt',
+          accessToken: 'old',
+        },
+      }),
       transport: async () => {
         transportCalls++;
-        return { status: 401, headers: {}, body: Readable.from([JSON.stringify({ refreshToken: 'rotated-despite-error' })]) };
+        return {
+          status: 401,
+          headers: {},
+          body: Readable.from([
+            JSON.stringify({ refreshToken: 'rotated-despite-error' }),
+          ]),
+        };
       },
     });
     assert.equal(errorResult.decision, 'stop_http');
     assert.equal(transportCalls, 2);
-    const errorRecord = JSON.parse(fs.readFileSync(path.join(errorDir, RESPONSE_RECORD), 'utf8'));
-    assert.equal(JSON.parse(errorRecord.responseBody).refreshToken, 'rotated-despite-error');
+    const errorRecord = JSON.parse(
+      fs.readFileSync(path.join(errorDir, RESPONSE_RECORD), 'utf8'),
+    );
+    assert.equal(
+      JSON.parse(errorRecord.responseBody).refreshToken,
+      'rotated-despite-error',
+    );
   } finally {
     const resolved = fs.realpathSync(root);
     if (
@@ -404,7 +502,11 @@ async function selfTest() {
     }
     fs.rmdirSync(resolved);
   }
-  return { decision: 'self_test_passed', fakeNetworkRequests: transportCalls, productionWrites: 0 };
+  return {
+    decision: 'self_test_passed',
+    fakeNetworkRequests: transportCalls,
+    productionWrites: 0,
+  };
 }
 
 async function main() {
@@ -417,7 +519,16 @@ async function main() {
     return;
   }
   if (options.mode === '--plan') {
-    console.log(JSON.stringify({ decision: 'plan_only', endpoint: '/login', maxRequests: 1, responseLimit: RESPONSE_LIMIT, productionWrites: 0, approvedOnlineFlagRequired: true }));
+    console.log(
+      JSON.stringify({
+        decision: 'plan_only',
+        endpoint: '/login',
+        maxRequests: 1,
+        responseLimit: RESPONSE_LIMIT,
+        productionWrites: 0,
+        approvedOnlineFlagRequired: true,
+      }),
+    );
     return;
   }
   if (options.mode === '--self-test') {
@@ -428,22 +539,58 @@ async function main() {
     environmentGate(process.env);
     contextGate(options.dbPath, options.runDir);
   } catch (error) {
-    const safe = new Set(['already_attempted', 'run_dir_gate', 'refresh_marker_gate', 'health_marker_gate', 'recovery_gate', 'source_backup_gate', 'recovery_identity_gate', 'recovery_device_gate', 'db_gate', 'private_root_gate', 'account_gate', 'mobile_gate', 'integrity_gate', 'sqlite_runtime_gate', 'environment_gate']);
-    console.log(JSON.stringify({ decision: safe.has(error.message) ? error.message : 'preflight_gate', networkRequests: 0 }));
+    const safe = new Set([
+      'already_attempted',
+      'run_dir_gate',
+      'refresh_marker_gate',
+      'health_marker_gate',
+      'recovery_gate',
+      'source_backup_gate',
+      'recovery_identity_gate',
+      'recovery_device_gate',
+      'db_gate',
+      'private_root_gate',
+      'account_gate',
+      'mobile_gate',
+      'integrity_gate',
+      'sqlite_runtime_gate',
+      'environment_gate',
+    ]);
+    console.log(
+      JSON.stringify({
+        decision: safe.has(error.message) ? error.message : 'preflight_gate',
+        networkRequests: 0,
+      }),
+    );
     process.exitCode = 1;
     return;
   }
   if (options.mode === '--preflight') {
-    console.log(JSON.stringify({ decision: 'preflight_ready', networkRequests: 0, productionWrites: 0 }));
+    console.log(
+      JSON.stringify({
+        decision: 'preflight_ready',
+        networkRequests: 0,
+        productionWrites: 0,
+      }),
+    );
     return;
   }
   const result = await runOnce(options.dbPath, options.runDir, {
     persistence: { notify: (notice) => console.log(JSON.stringify(notice)) },
   });
   console.log(JSON.stringify(result));
-  if (result.decision !== 'skey_candidate_identity_matched') process.exitCode = 1;
+  if (result.decision !== 'skey_candidate_identity_matched')
+    process.exitCode = 1;
 }
 
 if (require.main === module) main();
 
-module.exports = { args, contextGate, summary, fieldShape, identityMatch, runOnce, selfTest };
+module.exports = {
+  args,
+  contextGate,
+  summary,
+  fieldShape,
+  identityMatch,
+  runOnce,
+  selfTest,
+};

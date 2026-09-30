@@ -29,3 +29,9 @@ node scripts/research/probe-mobile-login-skey-once.cjs --execute --db <生产 SQ
 ```
 
 若 `skey` 存在且身份吻合，**再单独设计和复审**一次 `/book/articles` 首屏：只从已落盘私有响应取新 `skey`；先确认返回层级和账号身份、验证码/限流均无异常，再在旧 WeBook 自定义头形状与 `syfun` 查询参数形状之间依固定源码选择一种，不混用，更不能直接拿 Web `wr_skey` 或旧 `accessToken` 改名代替。文章请求必须新 marker、最多一次、无代理/跳转/重试、只输出脱敏 HTTP/业务码和 `reviews` 结构；取得文章才继续目标身份及五篇验收。若没有 `skey`，只排除**本次同设备 `/login` 回包包含该字段**，不能据此说所有客户端/接口永久不提供。
+
+## 总控一次在线字段核验
+
+总控在合入后重跑 `--plan`、假网络 `--self-test` 和真实私有备份的 `--preflight`，分别得到请求上限 1、假网络自测通过、线上请求 0 的就绪结果。随后仅运行一次正常 `/login`：HTTP **200**，返回 `vid` 与本人现有合法移动账号匹配；顶层 `skey` 为**非空字符串**（粗长度区间 1–8），`data.skey` 不存在。原始有界响应、响应头和可能轮换字段已一次原子落入私有文件；公开日志不含凭据值，`networkRequests=1`、`productionWrites=0`。私有响应的脱敏结构另核：有顶层 `accessToken` 与 `vid`，未见顶层 `refreshToken`；不能据此丢弃旧私有 `refreshToken`。生产 SQLite 事后 `quick_check=ok`，仍为 12 个订阅、1447 篇文章。
+
+这次结果证明**本账号按现有正常 `/login` 请求确实获得一个移动 `skey` 候选**，补上“凭据从哪里来”的可执行链；仍未证明该短字符串在当前 `/book/articles` 被接受。A 线按旧 WeBook 的明确自定义头请求形状另建最多一次的只读首屏探针，独立复审后才可发请求，不在此字段脚本中连发，也不把刷新成功称为订阅恢复。
