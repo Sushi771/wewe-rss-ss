@@ -105,12 +105,32 @@ export function articleIdentity(html: string) {
   const $ = load(html);
   if (!$('#js_content').length) throw new Error('没有可核验的原文结构');
   const value = (name: string, pattern: string) => {
-    // Repeated page variables must agree before they can identify an article.
-    const values = [
-      ...html.matchAll(
-        new RegExp(`\\bvar\\s+${name}\\s*=\\s*["'](${pattern})["']`, 'g'),
-      ),
-    ].map((match) => match[1]);
+    // Tencent also emits empty-literal fallbacks: var sn = "" || "hex" || "".
+    // Read complete literal-only assignments, never evaluate JavaScript or accept a partial expression.
+    const values: string[] = [];
+    const assignment = new RegExp(
+      `\\bvar\\s+${name}\\s*=\\s*([^;\\r\\n]+)(?=;|[\\r\\n]|$)`,
+      'g',
+    );
+    for (const match of html.matchAll(assignment)) {
+      const expression = match[1].trim();
+      // Bundled functions reuse names such as mid for local calculations. They
+      // are not page identity literals; do not evaluate or collect them.
+      if (!/^["']/.test(expression)) continue;
+      const literal = `(?:"[^"\\\\]*"|'[^'\\\\]*')`;
+      if (
+        !new RegExp(`^${literal}(?:\\s*\\|\\|\\s*${literal})*$`).test(
+          expression,
+        )
+      )
+        throw new Error('原文身份表达式无法静态核验');
+      for (const candidate of expression.matchAll(/["']([^"']*)["']/g)) {
+        if (!candidate[1]) continue;
+        if (!new RegExp(`^(?:${pattern})$`).test(candidate[1]))
+          throw new Error('原文身份字段无效');
+        values.push(candidate[1]);
+      }
+    }
     if (new Set(values).size > 1) throw new Error('原文身份字段冲突');
     return values[0];
   };

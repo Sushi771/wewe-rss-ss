@@ -137,8 +137,18 @@ export function bodyRetryFailure(error: unknown) {
 }
 
 /** 一次显式请求，只访问保存且可证明身份的第一方原文，不启动桌面或读取会话。 */
-export async function fetchArticleBody(article: SavedArticle) {
+export async function fetchArticleBody(
+  article: SavedArticle,
+  requestUrl?: string,
+) {
   const target = bodyRetryTarget(article);
+  if (
+    requestUrl &&
+    (new URL(requestUrl).protocol !== 'https:' ||
+      new URL(requestUrl).pathname !== '/s' ||
+      canonicalArticleUrl(requestUrl).url !== target.url)
+  )
+    throw new BodyRetryBlockedError('原文请求链接与已核验身份不一致');
   let html: string;
   try {
     let proxy: false | { protocol: string; host: string; port: number } = false;
@@ -157,7 +167,7 @@ export async function fetchArticleBody(article: SavedArticle) {
         port: Number(url.port || 80),
       };
     }
-    const response = await axios.get<string>(target.url, {
+    const response = await axios.get<string>(requestUrl || target.url, {
       proxy,
       timeout: 15000,
       maxContentLength: 10 * 1024 * 1024,
@@ -199,6 +209,8 @@ export async function fetchArticleBody(article: SavedArticle) {
     throw new BodyRetryError('invalid_page');
   if (
     identity.id !== target.id ||
+    new URL(identity.url).searchParams.get('sn') !==
+      new URL(target.url).searchParams.get('sn') ||
     identity.mpId !== article.mpId ||
     (publishTime !== article.publishTime &&
       // Album create_time is a list timestamp; a verified original ct can

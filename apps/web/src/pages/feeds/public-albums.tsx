@@ -48,7 +48,7 @@ export default function PublicAlbums({
           setOpen(true);
         }}
       >
-        公开合集补采
+        官方合集订阅
       </Button>
       <Modal
         isOpen={open}
@@ -58,12 +58,12 @@ export default function PublicAlbums({
         hideCloseButton={busy}
       >
         <ModalContent>
-          <ModalHeader>公开合集补采 · {name}</ModalHeader>
+          <ModalHeader>官方合集订阅 · {name}</ModalHeader>
           <ModalBody>
             <p className="text-sm">
               输入当前公众号的公开合集 ID，多个 ID 用逗号分隔。可从合集链接的
               album_id 参数取得
-              ID。采集会读取所选合集的所有可返回页面，成功后绑定这些合集，之后点击“更新”将在线刷新它们。
+              ID。采集会读取所选合集的所有可返回页面，成功后绑定这些合集，之后点击“更新本号”和定时更新将在线刷新它们。
             </p>
             <Input
               label="公开合集 ID"
@@ -77,7 +77,7 @@ export default function PublicAlbums({
               }
             />
             <p className="rounded-lg bg-orange-50 p-3 text-sm text-orange-800 dark:bg-orange-950 dark:text-orange-200">
-              只补采所选公开合集。合集外文章和同次推送的次条是否完整，尚未验证；该通道不提供阅读、点赞或收藏数据。
+              仅订阅所选官方合集，核验原文并缓存正文图片。不代表公众号全部历史或合集外文章；该通道不提供阅读、点赞或收藏数据。
             </p>
             {hasLocalDirectory && (
               <p className="text-sm text-orange-700 dark:text-orange-300">

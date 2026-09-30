@@ -1,5 +1,10 @@
 import axios from 'axios';
-import { fetchPublicAlbums, resolvePublicArticle } from './public-album';
+import {
+  fetchPublicAlbums,
+  resolvePublicArticle,
+  publicArticleRequestUrl,
+} from './public-album';
+import { PublicAlbumProvider } from './providers/public-album';
 
 jest.mock('axios');
 
@@ -57,6 +62,35 @@ describe('public album collection (synthetic pagination regression)', () => {
     jest.useRealTimers();
     if (originalProxy === undefined) delete process.env.WECHAT_PUBLIC_PROXY_URL;
     else process.env.WECHAT_PUBLIC_PROXY_URL = originalProxy;
+  });
+  it('maps official album fields through the selected-albums Provider contract', async () => {
+    get.mockResolvedValueOnce(page([article('2247483929')], '0', '1'));
+    const provider = new PublicAlbumProvider(mpId, [albumA]);
+    expect(provider.id).toBe('public-album');
+    expect(await provider.fetchArticles(mpId)).toMatchObject({
+      coverage: 'selected-albums',
+      pages: 1,
+      upstreamCount: 1,
+      bodyMissing: 1,
+      articles: [{ contentHtml: null, mpId }],
+    });
+    await expect(provider.fetchArticles('MP_WXS_12345')).rejects.toThrow(
+      '绑定不一致',
+    );
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+  it('retains the real chksm signature while discarding session or tracking parameters', () => {
+    const raw = article('2247483929').url.replace(
+      '#rd',
+      '&amp;chksm=0123456789abcdef#rd',
+    );
+    const url = new URL(publicArticleRequestUrl(raw));
+    expect(url.protocol).toBe('https:');
+    expect(url.searchParams.get('chksm')).toBe('0123456789abcdef');
+    expect(url.searchParams.has('key')).toBe(false);
+    expect(() =>
+      publicArticleRequestUrl(raw.replace('0123456789abcdef', 'invalid')),
+    ).toThrow('签名无效');
   });
 
   it('follows both cursor fields and keeps a secondary item separate from its primary', async () => {

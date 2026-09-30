@@ -5,6 +5,7 @@ import { ProviderPage } from './subscription-provider';
 /** Store provider body images inside SQLite so restart and ZIP export do not depend on the CDN. */
 export async function archiveProviderImages(
   page: ProviderPage,
+  options: { stopOnFailure?: boolean } = {},
 ): Promise<ProviderPage> {
   let imageBlocked = page.imageBlocked;
   let bodyMissing = page.bodyMissing;
@@ -17,6 +18,8 @@ export async function archiveProviderImages(
     const $ = load(article.contentHtml);
     const images = $('img[src]').toArray();
     if (images.length > 60) {
+      if (options.stopOnFailure)
+        throw new Error('公开合集正文图片超过上限，本批未写入');
       imageBlocked += images.length;
       bodyMissing++;
       articles.push({ ...article, contentHtml: null });
@@ -42,6 +45,10 @@ export async function archiveProviderImages(
         $(image).attr('src', inline);
         $(image).removeAttr('data-src');
       } catch {
+        if (options.stopOnFailure)
+          throw new Error(
+            '公开合集图片请求受限或内容无效，已停止后续请求；本批未写入',
+          );
         failed = true;
         imageBlocked++;
       }

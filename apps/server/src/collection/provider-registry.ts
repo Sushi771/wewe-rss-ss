@@ -1,5 +1,13 @@
 import { SubscriptionProvider } from './subscription-provider';
 import { Wechat2RssProvider } from './providers/wechat2rss';
+import { PublicAlbumProvider } from './providers/public-album';
+
+export function publicAlbumProvider(
+  mpId: string,
+  albumIds: string[],
+): SubscriptionProvider {
+  return new PublicAlbumProvider(mpId, albumIds);
+}
 
 /** Explicit environment gate and feed allowlist. Missing settings never select a legacy source. */
 export function enabledWechat2RssFeedIds(): Set<string> {
