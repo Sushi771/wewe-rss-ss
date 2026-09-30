@@ -6,6 +6,8 @@
 
 ## 2026-09-30 续研与当前状态
 
+- **另一篇目标旧文章的官方短路径已一次闭环：**对摘要 `5e44e0d46c308fe2` 的原存 `/s/<22 token>` 只发一次匿名 GET，HTTP **200**；当前页面 `__biz/mid/idx/sn`、短链 canonical、字面 `ct`、正文均与旧库核验记录一致，16 张 `data-src` 图片。完整响应及最小身份结果先保存在 Git 忽略的 `private-data/public-page-probes/`，持久哨兵禁止重发；该页静态 `album_info_list` 为空，**未发现新合集**。这是旧文当前可读与正文图片引用证据，不能充作新发表、全号列表或持续更新。C 正只在已存 HTML 中分析其他公开发现字段；生产库只读。
+- **新增两次独立只读实测，继续研究：**腾讯微信读书当前第一方客户端实际调用的 `/api/mp/cover` 在本人合法移动凭据经一次 Web init 得到五项 Cookie 后，对目标 `bookId` 一次 GET 返回 HTTP **401**；无文章或列表请求，私有持久哨兵在 `private-data`，不重复此形态。它只排除该凭据桥接与这次请求上下文，不证明正常 QR 浏览器会话或所有客户端认证不可用。另一条有 2026 年开源 Android 真实发送代码的公开搜狗移动 `/weixinwap?type=2` 对目标名称一次匿名 GET 返回 HTTP **200**、完整 43,612 字节 HTML，11 个结果卡片形状、27 个搜狗跳转链接及分页标记；原始页与哨兵保存在仓库外私有目录，B 正离线核号名、文章身份、时间和分页，不点跳转。两次均未写生产 SQLite，也未达到真实订阅验收。
 - [目标 Web 封面一次验证](WEB_MP_COVER_FIRST_PAGE_PROBE.md)：正常 Web init HTTP 200、五 Cookie 且 `wr_vid` 同账号，独立 `/web/mp/cover` HTTP 200 却返回业务 `-2012`，未取得 `reviewId`；私有持久哨兵已落盘，不重发同形请求。此结果只限本账号、目标号、凭据和请求上下文，不否定其他账号或另一个 `/api/mp/cover`。生产库 `quick_check=ok`、12/1447、写入 0。A 继续离线核书架导航和认证差异；B 已将 `profile_ext` 的正常签发链缩限到[所审实现](PROFILE_EXT_LEGIT_AUTH_RESEARCH.md)，C 记录了临时合集键文件丢失的[证据边界](PUBLIC_PAGE_DISCOVERY.md)。
 - [旧 WeBook `/book/articles` 首屏对照](BOOK_ARTICLES_SKEY_FIRST_PAGE_PROBE.md)在合法新 `skey/vid` 与固定源码自定义头形状下仅发一次 GET：HTTP **401**、业务 `-2012`、无 `reviews`，私有最小结构和请求哨兵已保存，未重试或换形状。它只排除这组具体请求，不否定其他认证/客户端来源；本轮遇认证拒绝后停止该端点在线请求，A 继续离线辨别近期 query 形状是否真有独立成功证据。
 - C 对旧官方合集原样给出的 [`public_tag_link`](ALBUM_ENUMERATION_RESEARCH.md)仅发一次匿名 HTTPS GET：HTTP **200**，静态 HTML 分类为 `unclassified_html`，未见静态文章链接、分页、账号过滤或其他目标合集链接。该结果只覆盖静态标记；同 URL 不重发，C 继续查页面 JS 的真实请求和范围，未将它当全号目录。
