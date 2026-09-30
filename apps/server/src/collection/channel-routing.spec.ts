@@ -147,6 +147,41 @@ describe('backend collection routing', () => {
       await fs.rm(root, { recursive: true, force: true });
   });
 
+  it('uses the same confirmed latest-body adapter for manual and scheduled updates', async () => {
+    await prisma.feed.update({
+      where: { id: ids[0] },
+      data: { collectionChannel: 'owner-weread-latest' },
+    });
+    const latest = jest
+      .spyOn((service as any).collectionService, 'collectOwnerWereadLatest')
+      .mockResolvedValue({
+        source: 'owner-weread-latest',
+        status: 'partial',
+        complete: false,
+        coverage: 'recent-window',
+        articles: 1,
+        created: 1,
+        updated: 0,
+        message: '读书来源只提供一篇',
+      });
+    for (const trigger of ['local-manual', 'scheduled'] as const) {
+      expect(
+        await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, trigger),
+      ).toMatchObject({
+        source: 'owner-weread-latest',
+        status: 'partial',
+        articles: 1,
+      });
+    }
+    expect(latest).toHaveBeenCalledTimes(2);
+    const feed = await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } });
+    expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject({
+      source: 'owner-weread-latest',
+      status: 'partial',
+    });
+    expect(wechat2RssProvider).not.toHaveBeenCalled();
+  });
+
   it('visits all 12 feeds, persists unique articles, and repeats with zero new rows', async () => {
     const first =
       await service.refreshAllMpArticlesAndUpdateFeed('local-manual');

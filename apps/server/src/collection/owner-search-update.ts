@@ -11,7 +11,7 @@ import { archiveProviderImages } from './archive-provider-images';
 import { assertProviderPage, ProviderPage } from './subscription-provider';
 import { canonicalArticleUrl } from './collection-format';
 
-type SearchConfig = {
+export type SearchConfig = {
   mpId: string;
   name: string;
   biz: string;
@@ -20,6 +20,7 @@ type SearchConfig = {
   stateFile: string;
   originalStopFiles: string[];
   runtimeStopFile: string;
+  wereadLatestStateFile?: string;
 };
 export class OwnerUpdateStopped extends Error {}
 
@@ -45,6 +46,8 @@ export async function readOwnerSearchConfig(
     !/^\d+$/.test(c.ownerVid) ||
     !Array.isArray(c.originalStopFiles) ||
     !c.originalStopFiles.length ||
+    (c.wereadLatestStateFile !== undefined &&
+      !path.isAbsolute(c.wereadLatestStateFile)) ||
     ![
       c.sessionFile,
       c.stateFile,

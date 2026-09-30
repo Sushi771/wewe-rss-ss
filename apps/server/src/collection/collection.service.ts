@@ -24,6 +24,7 @@ import {
   OwnerUpdateStopped,
 } from './owner-search-update';
 import { prepareSearchReplay } from './search-replay';
+import { fetchOwnerWereadLatest } from './owner-weread-latest';
 import {
   assertSavedArticleIdentity,
   bodyRetryTarget,
@@ -198,7 +199,7 @@ export class CollectionService {
                 sourceUrl: item.url,
                 verifiedSourceUrl: item.url,
                 contentHtml: item.contentHtml,
-                picUrl: '',
+                picUrl: item.picUrl,
                 lastBodyStatus: 'available',
               },
             });
@@ -251,6 +252,38 @@ export class CollectionService {
         coverage: 'search-results' as const,
         articles: 0,
         message: error.message,
+      };
+    } finally {
+      this.publicCollections.delete(mpId);
+    }
+  }
+
+  async collectOwnerWereadLatest(mpId: string) {
+    if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
+    this.publicCollections.add(mpId);
+    try {
+      const config = await readOwnerSearchConfig(mpId);
+      const page = await fetchOwnerWereadLatest(config);
+      await createVerifiedSqliteBackup();
+      const saved = await this.saveVerifiedSearchPage(mpId, page, true);
+      return {
+        source: 'owner-weread-latest' as const,
+        status: 'partial' as const,
+        complete: false as const,
+        coverage: 'recent-window' as const,
+        articles: page.articles.length,
+        ...saved,
+        message: `腾讯读书当前提供的1篇：取得正文，新增 ${saved.created}、补全 ${saved.updated}。文章列表接口受限；此来源只返回读书提供的一篇，不代表微信最新文章齐全。`,
+      };
+    } catch (e) {
+      if (!(e instanceof OwnerUpdateStopped)) throw e;
+      return {
+        source: 'owner-weread-latest' as const,
+        status: 'blocked' as const,
+        complete: false as const,
+        coverage: 'recent-window' as const,
+        articles: 0,
+        message: e.message,
       };
     } finally {
       this.publicCollections.delete(mpId);

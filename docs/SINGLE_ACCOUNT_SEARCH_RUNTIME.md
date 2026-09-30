@@ -48,6 +48,8 @@ pwsh -NoProfile -File scripts/research/weread-login-window.ps1 -Action SelfTest
 
 `NativeWebLogin` 按腾讯公开首页 `BVQc4ULa.js` 的 `/api/auth/getLoginUid`、`getLoginInfo`、`accessToken → wr_skey` **Web QR** 赋值实现，不把旧移动 accessToken 当成 Web QR 凭据。正常扫码由本人处理。后台无中转、无自动续期、无重试、无跳转；未知 UID 不请求，轮询去重、有次数和时间上限；失败或验证拒绝停止，平台拒绝保存在私有配置目录。界面不会把轮询失败吞成等待扫码，不在过期后继续后台轮询。
 
-本轮只验证账号页和二维码显示，不把尚未由本人完成的扫码保存称为真实登录成功，也不把恢复登录界面称为文章更新恢复。
+恢复后本人已完成新正常扫码；私有会话 `capturedAt=2026-09-30T17:10:31.915Z`、来源 `owner-confirmed-native-web-login` 与数据库备份证明真实保存，不把恢复登录称为公众号目录恢复。
 
 同账号正常 Web 会话的独立正文诊断：一次 `/api/mp/cover` 返回 HTTP 200 和真实 `reviewId`，与旧 mobile→Web init 的 401 条件不同；随后只请求一次该真实 ID 的 `/web/mp/content`，HTTP 200，但诊断只确认未含 `js_content`，完整响应未留存。不能据此判具体业务码、验证、认证或 HTML 格式，也没有为补材料重发。已有公众号原文 302 停止和本次正文路径停止都保留，暂不接生产正文来源。单篇封面不是完整公众号目录，不推进原按钮的成功时间、不新增元数据空正文记录。
+
+新正常扫码形成不同认证条件：一次对应 `/web/mp/content` HTTP200、text/plain中含真实原文HTML，稳定身份、号名、正文和发布时间均由现有解析器核实，原始响应先私存。不同接口 `/web/mp/articles` 一次业务 `-2041` 后停止，目录仍不足。实现 `owner-weread-latest` 有界联网读取 cover当前提供的一篇及正文，复用正文图片与保护保存代码；不使用缓存回放，不重发已停止的公众号原文，不宣称最新篇覆盖完整。手动/定时同一流程，15分钟冷却及持久停止，最终4000运行与生产写入以受控部署、原页面和私有数据保护结果为准。

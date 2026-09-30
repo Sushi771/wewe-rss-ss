@@ -8,7 +8,12 @@ type ChannelFeed = {
 };
 
 export type CollectionRoute = {
-  channel: 'wechat2rss' | 'public-album' | 'owner-web-search' | 'unavailable';
+  channel:
+    | 'wechat2rss'
+    | 'public-album'
+    | 'owner-web-search'
+    | 'owner-weread-latest'
+    | 'unavailable';
   selectedBy: 'saved' | 'environment' | 'legacy' | 'invalid';
 };
 
@@ -34,6 +39,8 @@ export function parseBoundAlbumIds(
 export function resolveCollectionRoute(feed: ChannelFeed): CollectionRoute {
   const enabled = enabledWechat2RssFeedIds().has(feed.id);
   if (feed.collectionChannel != null) {
+    if (feed.collectionChannel === 'owner-weread-latest')
+      return { channel: 'owner-weread-latest', selectedBy: 'saved' };
     if (feed.collectionChannel === 'owner-web-search')
       return { channel: 'owner-web-search', selectedBy: 'saved' };
     if (feed.collectionChannel === 'wechat2rss')
