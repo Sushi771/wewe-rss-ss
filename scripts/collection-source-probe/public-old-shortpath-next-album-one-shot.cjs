@@ -329,14 +329,18 @@ async function runOnce(seed, fetcher, store) {
   if (response.formatStop || response.sizeStop || typeof response.html !== 'string' ||
       Buffer.byteLength(response.html) > MAX_BYTES)
     return { ...base, result: 'response_format_or_limit_stop' };
-  if (/wappoc_appmsgcaptcha|appmsgcaptcha|请输入验证码|为了你的帐号安全|访问过于频繁|环境异常/.test(response.html))
+  if (/wappoc_appmsgcaptcha|appmsgcaptcha|请输入验证码|为了你的帐号安全|访问过于频繁|环境异常|安全验证|操作频繁/.test(response.html))
     return { ...base, result: 'verification_or_limit_stop' };
+  const htmlBytes = Buffer.from(response.html);
+  try { atomicNoReplace(store.htmlFile, htmlBytes); }
+  catch { return { ...base, result: 'private_html_save_stop' }; }
+  const stored = { ...base, privateHtmlSaved: true, privateHtmlPath: store.htmlFile };
   let finding;
   try { finding = analyze(response.html, seed); }
-  catch { return { ...base, result: 'page_parse_stop' }; }
+  catch { return { ...stored, result: 'page_parse_stop' }; }
   const { result, albumIds = [], ...details } = finding;
-  if (result !== 'identity_ct_body_pass') return { ...base, result, ...details };
-  const publicFinding = { ...base, result, ...details,
+  if (result !== 'identity_ct_body_pass') return { ...stored, result, ...details };
+  const publicFinding = { ...stored, result, ...details,
     declaredAlbumCount: albumIds.length,
     knownOldTwoCount: albumIds.filter((id) => OLD_TWO_ALBUMS.has(id)).length,
     otherAlbumCount: albumIds.filter((id) => !OLD_TWO_ALBUMS.has(id)).length };
@@ -345,12 +349,11 @@ async function runOnce(seed, fetcher, store) {
     fieldsMatch: details.fieldMatch, originalCtMatch: details.originalCtMatch,
     imageCount: details.imageCount, imageDataSrcCount: details.imageDataSrcCount,
     albumTagState: details.albumTagState, albumIds,
-    htmlSha256: sha256(Buffer.from(response.html)) };
+    htmlSha256: sha256(htmlBytes) };
   try {
-    atomicNoReplace(store.htmlFile, Buffer.from(response.html));
     atomicNoReplace(store.evidence, Buffer.from(`${JSON.stringify(privateFinding)}\n`));
   } catch { return { ...publicFinding, result: 'private_save_stop' }; }
-  return { ...publicFinding, privateEvidenceSaved: true };
+  return { ...publicFinding, privateEvidenceSaved: true, privateEvidencePath: store.evidence };
 }
 function fakePage(seed, { mismatch = false, captcha = false } = {}) {
   const q = seed.live.verified.searchParams;
@@ -376,6 +379,7 @@ async function selftest(seed) {
       ['format', { status: 200, formatStop: true }, 'response_format_or_limit_stop'],
       ['captcha', { status: 200, html: fakePage(seed, { captcha: true }) }, 'verification_or_limit_stop'],
       ['mismatch', { status: 200, html: fakePage(seed, { mismatch: true }) }, 'identity_mismatch_stop'],
+      ['parser_stop', { status: 200, html: '<html><body>plain page</body></html>' }, 'body_node_stop'],
       ['success', { status: 200, html: fakePage(seed) }, 'identity_ct_body_pass'],
     ]) {
       const store = makeStore(); let calls = 0;
@@ -383,9 +387,13 @@ async function selftest(seed) {
         if (!fs.existsSync(store.marker)) fail('fake_marker_order');
         calls++; return reply;
       }, store);
+      const shouldSaveHtml = ['mismatch', 'parser_stop', 'success'].includes(label);
       if (calls !== 1 || result.requests !== 1 || result.result !== expected ||
-          !fs.existsSync(store.marker) ||
-          (label === 'success') !== (fs.existsSync(store.evidence) && fs.existsSync(store.htmlFile)))
+          !fs.existsSync(store.marker) || fs.existsSync(store.htmlFile) !== shouldSaveHtml ||
+          fs.existsSync(store.evidence) !== (label === 'success') ||
+          (shouldSaveHtml && (result.privateHtmlSaved !== true ||
+            result.privateHtmlPath !== store.htmlFile ||
+            fs.readFileSync(store.htmlFile, 'utf8') !== reply.html)))
         fail('fake_network_case');
       const repeated = await runOnce({ ...seed, attempted: false }, async () => { calls++; return reply; }, store);
       if (repeated.requests !== 0 || calls !== 1) fail('fake_repeat_gate');
@@ -401,6 +409,17 @@ async function selftest(seed) {
     const blocked = makeStore(); atomicNoReplace(blocked.evidence, Buffer.from('{}'));
     const result = await runOnce({ ...seed, attempted: false }, async () => { fail('fake_unexpected_request'); }, blocked);
     if (result.requests !== 0 || fs.existsSync(blocked.marker)) fail('fake_existing_evidence_gate');
+    const saveFailure = makeStore();
+    saveFailure.htmlFile = path.join(os.tmpdir(),
+      `wewe-short-fake-missing-${crypto.randomBytes(8).toString('hex')}`, 'page.html');
+    let saveFailureCalls = 0;
+    const failedSave = await runOnce({ ...seed, attempted: false }, async () => {
+      saveFailureCalls++; return { status: 200, html: fakePage(seed) };
+    }, saveFailure);
+    if (failedSave.result !== 'private_html_save_stop' || failedSave.requests !== 1 ||
+        saveFailureCalls !== 1 || !fs.existsSync(saveFailure.marker) ||
+        fs.existsSync(saveFailure.evidence)) fail('fake_private_save_failure');
+    outcomes.push('private_save_failure');
     const invalid = articleAlbumTags('<script>var album_info_list=[{albumId:process.exit()}]</script>');
     const dynamic = articleAlbumTags('<script>var album_info_list=[{albumId:"123456789012"+evil}]</script>');
     const duplicate = articleAlbumTags('<script>var album_info_list=[{albumId:"123456789012",albumId:"123456789012"}]</script>');
