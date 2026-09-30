@@ -2,6 +2,8 @@
 
 目标号：`妈妈部落畅聊阁 / MP_WXS_3895431412`。本表只把**向腾讯域名发送列表请求的代码或腾讯一手文档**算作来源证据；README 中的功能声称和其他账号的成功不算目标验收。`未知` 表示源码或实测尚未证明，不等于不支持。B 线源码研究未接触私有凭据；总控的隔离请求结果由下方续记单独记录，始终未写生产 SQLite。
 
+**`profile_ext/getmsg` 与旧 `getmasssendmsg` 认证增量：**[2026 固定实现与实际边界](MP_PROFILE_EXT_AUTH_2026_AUDIT.md)确认腾讯 `mp.weixin.qq.com/mp/profile_ext?action=getmsg` 的已审代码具有 `next_offset/can_msg_continue` 分页、`content_url` 和列表时间字段，但三份实现都先接受外部 `uin/key/pass_ticket`；`appmsg_token` 只从有效会话文章 HTML 衍生，未解决初始合法签发。PadChat 的 `getRequestToken/requestUrl` 仅向未交付源码的本地协议服务发送 SDK 命令，文档中的 `getmasssendmsg` 只是联系人入口，无现行分页成功回包；Ipad860 虽直接构造腾讯 `mp-geta8key`，却依赖无源码动态库且未证明取得 `getmsg` 字段。现不对目标探针，仅排除这些实现满足运行时自建约束，不断言端点永久失效。
+
 **2026 近期项目排重：**[固定 `CyrusNee/weread` 与 `steptian/weread-mp` 真实发送行](SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)分别是腾讯 EInk `GET i.weread.qq.com/mp/chapters`（本人扫码后 `vid/accessToken`，首屏 `bookId/count/synckey=0`，后页 `offset`）和 Web `GET weread.qq.com/web/mp/articles`（浏览器 Cookie，按 `reviews[].createTime` 游标）。前者的两个核心文件与已审上游同 SHA，本账号同形首屏及续期后曾 `-2041`；后者是已受限同端点，脚本不生成第一方 `x-wrpa-0`/临时验证票据且不能自动续期。两者有列表和时间字段映射、单篇正文路径，均无本目标当前真实成功回包或图片字节离线链，不能因近期 commit/README 重发；此判断只限固定项目版本与既测形状。
 
 **`/book/articles` 2026 query 候选结果：**[固定 `syfun` 发送源码及一次性验证](BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)明确腾讯 `GET https://i.weread.qq.com/book/articles` 的 `bookId/version=2/vid/skey/offset=0/count=1/synckey` query 形状，`skey` 在其代码中可来自 macOS 官方客户端 `/login` 顶层响应，也可来自其他同域请求的 `skey` 头（未核 HTTP 成功）；实际命中分支未记录，且请求头分支不核 HTTP 成功（见[A 源码复核](BOOK_ARTICLES_CLIENT_AUTH_FOLLOWUP.md)）；需要该客户端合法登录，是否支持跨号和持续分页没有可复核成功回包。与旧 WeBook 自定义头、`count=20`、当前秒 `synckey` 401 构成实质对照；本机以合法 BOOX/Eink `/login` 同账号顶层 `skey/vid` 一次隔离 GET 仍得 HTTP **401**、业务 **`-2012`**、无列表，故该样本无法回答发布时间、正文与图片。停止该凭据和形状的线上尝试；继续查 macOS 票据权限、正常续期和独立成功证据，不外推整个腾讯来源失效。
