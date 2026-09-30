@@ -2,7 +2,7 @@
 
 目标号：`妈妈部落畅聊阁 / MP_WXS_3895431412`。本表只把**向腾讯域名发送列表请求的代码或腾讯一手文档**算作来源证据；README 中的功能声称和其他账号的成功不算目标验收。`未知` 表示源码或实测尚未证明，不等于不支持。B 线源码研究未接触私有凭据；总控的隔离请求结果由下方续记单独记录，始终未写生产 SQLite。
 
-**`/book/articles` 2026 query 候选结果：**[固定 `syfun` 发送源码及一次性验证](BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)明确腾讯 `GET https://i.weread.qq.com/book/articles` 的 `bookId/version=2/vid/skey/offset=0/count=1/synckey` query 形状，`skey` 在其代码中可来自 macOS 官方客户端 `/login` 顶层响应，也可来自其他成功请求的 `skey` 头；实际命中分支未记录；需要该客户端合法登录，是否支持跨号和持续分页没有可复核成功回包。与旧 WeBook 自定义头、`count=20`、当前秒 `synckey` 401 构成实质对照；本机以合法 BOOX/Eink `/login` 同账号顶层 `skey/vid` 一次隔离 GET 仍得 HTTP **401**、业务 **`-2012`**、无列表，故该样本无法回答发布时间、正文与图片。停止该凭据和形状的线上尝试；继续查 macOS 票据权限、正常续期和独立成功证据，不外推整个腾讯来源失效。
+**`/book/articles` 2026 query 候选结果：**[固定 `syfun` 发送源码及一次性验证](BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)明确腾讯 `GET https://i.weread.qq.com/book/articles` 的 `bookId/version=2/vid/skey/offset=0/count=1/synckey` query 形状，`skey` 在其代码中可来自 macOS 官方客户端 `/login` 顶层响应，也可来自其他同域请求的 `skey` 头（未核 HTTP 成功）；实际命中分支未记录；需要该客户端合法登录，是否支持跨号和持续分页没有可复核成功回包。与旧 WeBook 自定义头、`count=20`、当前秒 `synckey` 401 构成实质对照；本机以合法 BOOX/Eink `/login` 同账号顶层 `skey/vid` 一次隔离 GET 仍得 HTTP **401**、业务 **`-2012`**、无列表，故该样本无法回答发布时间、正文与图片。停止该凭据和形状的线上尝试；继续查 macOS 票据权限、正常续期和独立成功证据，不外推整个腾讯来源失效。
 
 **最新证据边界：**[第一方 Web 票据链](WEREAD_WEB_TICKET_LIFECYCLE.md)把请求时 `x-wrpa-0` 与人工验证码回调的 `x-wr-ticket` 区分开。[续期一次实测](WEREAD_RENEWAL_TICKET_PROBE.md)在本合法恢复会话得到 `-2013` 且未获两头，仅排除本次直接签发；[官方 MP 页自然导航](WEREAD_MP_PAGE_MEMORY_PROBE.md)顶层 200 却未见目录组、当前 Vuex 读取入口不可见，**没有观察 `/web/mp/articles` 实际回包**。[近期 MP 样例来源](WEREAD_MP_SAMPLE_PROVENANCE.md)是无可复核成功输出的编辑文档，文档 `offset` 与真实客户端 `maxIdx/count` 不同。[移动搜狗链接源码](SOGOU_MOBILE_LINK_SOURCE.md)显示文章卡正常导航 `/link`，但[旧文标题单次校准](SOGOU_MOBILE_LINK_CALIBRATION.md)无精确卡片，故 `/link` 仍未在线验证。这些结果不扩大成微信读书、搜狗或自建订阅整体失败，仍需有来源支持的新认证与列表路径。
 
@@ -13,6 +13,8 @@
 **账号首屏实际响应：**[独立一次性探针与原文/第一方 JS 离线复核](SOGOU_MOBILE_ACCOUNT_SEARCH_PROBE.md)在六组假网络自测后发送唯一匿名 `GET /weixinwap?type=1`，HTTP 200；私存 HTML 无账号卡或模板节点，却有可见“没有找到”块，非已存在静态卡的选择器漏判。额外 `account.min.js` 只调用两个共享函数为**已有账号卡**填阅读数，且本页计数请求地址为空，不会动态补卡。没有显式验证码标记；未访问 `encGzhUrl`、`/gzhjs` 或微信原文，持久哨兵禁止重发。仍不能区分目标索引覆盖与软限制；只限制本次响应，不推断账号列表能力整体不存在。
 
 **第三合集原文 URL 字段与旧请求差异：**[离线源码与旧采集记录](THIRD_ALBUM_ARTICLE_LINK_SHAPE.md)证明成功六页 54 项 `item.url` 均为腾讯 `/s` 长查询 `__biz/mid/idx/sn/chksm`，列表短路径 0；六页最小账本已丢，无法重建每条原样 URL，也不能据列表计数宣称 46 篇新文。[七次历史长链 GET 对照](THIRD_ALBUM_LONG_URL_COMPARISON.md)中 3 次其他旧合集带 `chksm` 的列表链 HTTP 200 但原文身份/解析未闭环，2 次搜索的签名链结果各异；**第三合集 54 项原文 GET 为 0**，不能把其他来源的 302 扩大成其失败。只有 1 篇旧成员短链 `ct`/正文闭环；需新的合法精确官方合集入口、持久保存原样响应及历史排重，才对其中一条不同文章考虑一次只读原文验证。
+
+**不同旧文的公开页面发现停止点：**[严格短/长身份门禁与一次结果](OLD_SHORTPATH_ALBUM_DISCOVERY.md)从旧库及备份确定不同文章，近期搜索卡亦匹配同一四字段；仅一次原存短链 GET 得 HTTP 200 的发布者删除页，正文节点、当前原文身份/时间、合集标签均缺失，故没有第三合集入口。同 URL 留私有哨兵不重试；只排除此篇今天的公开发现价值。旧临时请求账本失落明确记为 `historical_attempt_unknown`，不能把本机未见旧 marker 说成绝对首次访问；当前不逐篇盲试其他旧短链。
 
 **搜索时间交叉校准：**[离线对照](WEREAD_SEARCH_TIME_CROSSCHECK.md)在 11 张已存目标搜索卡里严格匹配 6 篇旧库及历史原文核验清单，搜索 `timestamp` 比原文核验 `publishTime` 早 0–53 秒。它说明这六篇旧文的索引时间接近原文时间，不能给其余搜索候选、未核新文或任何原文 `ct` 直接背书；六篇原始 HTML 已失，不再请求这些旧 URL 以补报告。
 
