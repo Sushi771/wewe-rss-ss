@@ -45,4 +45,13 @@ B 线固定的[当前移动页静态审计](SOGOU_ACCOUNT_PAGE_CHAIN.md)指出�
 
 从已保存的 `type=1` HTML 精确读取引用 URL [`/new/wap/js/account.min.js?v=20170117`](https://weixin.sogou.com/new/wap/js/account.min.js?v=20170117)，对这一**公开静态 JS** 无 Cookie、无代理、无跳转只读一次：HTTP **200**、**81 字节**，SHA-256 `abce8382e8d60190f8f5dcd4b5cb34ce6cf25b6091035279d3f352adfb453152`；副本仅存用户私有目录，不提交。该文件的全部内容位于字节偏移 **0–80**，行为只有把 `window.pageType` 设为 `account`，再调用 `getAccountReadNum(buildAccountReadNum)`。字面上没有 HTTP 端点、`fetch`/XHR/`$.get`、账号卡选择器、`accountItem`/`encGzhUrl`、模板填充、验证码或异常处理。本次私存 HTML 的内联脚本也没有这两个函数的定义。
 
-因此，**这个脚本本身**没有提供可继续正常请求的账号列表端点，也没有解释为何这次结果为零；`getAccountReadNum` 和 `buildAccountReadNum` 的实现可能来自同页其他共享脚本，但本次未取得其定义，不能凭函数名推断它们会补账号卡、发列表请求或处理挑战。空页的原始 DOM 和探针结论不变；本专项没有重发 `type=1`、没有运行页面 JS，也不把缺失的函数定义当作拼接新接口的依据。
+因此，**这个脚本本身**没有提供可继续正常请求的账号列表端点，也没有解释为何这次结果为零。随后已在同页共享脚本中定位两个函数，见下节。空页的原始 DOM 和探针结论不变；本专项没有重发 `type=1`，也没有运行页面 JS。
+
+## 共享函数的实际作用与剩余边界
+
+离线复查本机既存的七份同页共享第一方 JS，并只按当前 HTML 的精确 `script[src]` 补取尚未保存的公开静态资源。共 **14** 个外部脚本引用：七份原缓存、一份上述 `account.min.js`、五份本轮单次 HTTP 200 静态副本；最后一份 CDN 无障碍脚本触及 **256 KiB** 读取上限即停止，未保存或审其内容。新增请求都是当前页面明确引用的静态 JS，**没有**目标搜索、账号主页、`/gzhjs`、文章或其他列表请求。对已得到的 **13** 份文件按函数名、`account_anti_url`、账号模板字段和列表标识做定向检索；两个定义如下。
+
+1. [第一方桌面共享 `common.min.js?v=20200414`](https://weixin.sogou.com/new/weixin/js/common.min.js?v=20200414)，本机原缓存 SHA-256 `d332e4942dda5f5cb322c2816bc28030c188573f52c353a35f956bed4baf4ee9`，字节偏移约 **2,858–3,059** 的 `getAccountReadNum(callback, data)`：仅当 `window.account_anti_url` 非空时，才 `$.ajax({ url: window.account_anti_url, dataType: "json" })`；成功且有 `msg` 则把计数交给回调，错误或无地址都直接调用回调。当前私存 `type=1` HTML 对 `account_anti_url` 有且仅有一次**空字符串赋值**，因此这份页面不会由该函数发阅读数请求，更没有从这里发账号列表请求。
+2. [第一方移动共享 `common.min.js?v=20200325`](https://weixin.sogou.com/new/wap/js/common.min.js?v=20200325)，本机原缓存 SHA-256 `eb76cd3389decc4f372312d06732299f3b99f3ccdb92d00b34c329d4ddeba1ab`，字节偏移约 **4,355–4,632** 的 `buildAccountReadNum`：遍历**已有** `#mainBody ul.wx-news-list2 li`，按其 `d` 取计数，仅在有值时于 `.txt-box` 后插入 `p.gzh-num`“月发文”展示；函数不创建 `li` 或账号 href。当前空页的 `ul.wx-news-list2` 与其中 `li` 均为 **0**，该回调不会变出账号卡。
+
+`account.min.js` 的唯一调用正是 `getAccountReadNum(buildAccountReadNum)`；这条完整调用链在当前响应条件下只会遍历空列表，不会补账号搜索结果。其异常分支也是跳过阅读数装饰，不是验证码、挑战或账号列表恢复。已审的 13 份静态文件中没有另一个 `getAccountReadNum`/`buildAccountReadNum` 定义，也未发现可归于**这条调用链**的新账号列表发送行。大于上限的无障碍脚本未审，且这些静态核查不证明搜狗全部前端或服务端永不通过其他请求提供账号列表；它只排除“当前空页会由 `account.min.js` 补出卡片”这一具体解释。持久哨兵仍禁止重发这次 `type=1`。
