@@ -2,6 +2,7 @@
 
 ## 2026-09-30 当前续研
 
+- **B 近期实现排重：**[固定源码、发送行和本机旧结果对照](coordination/SOURCE_LIST_CYRUSNEE_FORK_AUDIT.md)显示 `CyrusNee/weread` 的 MP 列表仍是与上游同文件的 EInk `/mp/chapters`，本账号同形请求和续期后均曾 `-2041`；`steptian/weread-mp` 仅带 Cookie 调已受限 Web `/web/mp/articles`，没有第一方新票据/续期或可核成功回包。两者不作为同形重试理由。A 正查 Mac/iOS 正常认证开源链，C 正从旧 Codex 记录离线寻找第三合集精确入口；真实订阅仍未恢复。
 - **`/book/articles` 2026 query 形状一次结果：**[真实开源发送行、一次性脚本和总控回包](coordination/BOOK_ARTICLES_QUERY_SHAPE_PROBE.md)与旧 WeBook 头认证不同；同账号合法 BOOX/Eink `/login` 顶层 `skey/vid` 通过备份、身份及新鲜性只读预检后，单次 GET 得 HTTP **401**、业务 **`-2012`**、无 `reviews`，全局私有标记禁止重试。只缩限该凭据来源和该请求形状；[A 源码复核](coordination/BOOK_ARTICLES_CLIENT_AUTH_FOLLOWUP.md)确认 syfun 也可能只复制 Mac 客户端现有请求头，未证明新签发或成功；继续查合法认证与独立一手成功证据，不翻参重发。生产 SQLite 未写，真实订阅未恢复。
 - **C 的不同旧文发现探针：**[严格旧库/备份/搜索身份门禁及唯一回包](coordination/OLD_SHORTPATH_ALBUM_DISCOVERY.md)只用原存官方短链匿名 GET 一次，HTTP 200 是发布者删除页，`#js_content=0`；有界 HTML 与尝试哨兵私存，没有当前原文身份、`ct`、正文或合集标签。早期临时账本已丢，历史状态仍是 `historical_attempt_unknown`；同一身份不重试。现有离线证据暂未给出另一个精确第三合集入口，继续源码与其他来源研究，不逐篇盲试旧短链。
 - **第三合集 54 项原文入口：**[历史成功采集代码](coordination/THIRD_ALBUM_ARTICLE_LINK_SHAPE.md)证明列表 `item.url` 54/54 为带 `__biz/mid/idx/sn/chksm` 的腾讯 `/s` 长查询，直接短链接 0。[旧请求形状对照](coordination/THIRD_ALBUM_LONG_URL_COMPARISON.md)发现其他旧合集 3 条此形状 HTTP 200 但解析未闭环，**第三合集 54 项没有原文 GET**，不能用搜索的 302 宣称第三合集原文失败。六页最小账本及精确入口已丢，不能恢复原样 URL、今天状态或旧库外即新文；只有 1 篇旧成员短/长身份、`ct` 和正文闭环。另一旧短分享页已返回删除提示；暂缺可追溯第三合集入口，不能猜 ID 或逐篇盲试，其他来源继续审。
