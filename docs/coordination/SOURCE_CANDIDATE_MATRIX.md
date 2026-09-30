@@ -10,7 +10,11 @@
 
 **另一独立单篇端点结果：**[公开 ShelfSignal 源码支持的 `/web/mp/cover`](WEB_MP_COVER_FIRST_PAGE_PROBE.md)在本人现有合法移动会话正常 Web init 后单次请求目标号，init HTTP 200 且五 Cookie 同账号，cover HTTP 200、业务 `-2012`，没有真实 `reviewId`；不重发同形请求。它只排除当前独立 BrowserContext 封面请求上下文，不能外推另一个 `/api/mp/cover`、其他账号、`/web/mp/content` 或账号文章列表。单篇封面即使成功也不满足多篇/分页/持续更新。
 
-**2026-09-30 两条新候选的实际回包：**[微信读书第一方封面发送链](WEREAD_COVER_FIRSTPARTY_CLIENT.md)的 `/api/mp/cover` 已按本人合法移动恢复凭据经 Web init 一次低频验证：初始化 HTTP 200、五 Cookie，目标封面 HTTP **401**，无 `reviewId`；只排除这个凭据桥接及请求上下文，不把单篇封面当列表，也不再试同形态。[公开移动搜索源码](MOBILE_PUBLIC_ARTICLE_SEARCH_SOURCE.md)的腾讯搜狗 `/weixinwap?type=2` 单次匿名 GET HTTP **200**，保存 43,612 字节完整 HTML，静态形状有 11 个结果卡片、27 个搜狗跳转链接和分页标记；尚待离线逐卡核号名/文章身份/可信时间，未解析跳转或读原文，不能据此称目标号订阅可用。此端点与已测桌面 `/weixin?type=2` 确属不同入口。
+**2026-09-30 两条新候选的实际回包：**[微信读书第一方封面发送链](WEREAD_COVER_FIRSTPARTY_CLIENT.md)的 `/api/mp/cover` 已按本人合法移动恢复凭据经 Web init 一次低频验证：初始化 HTTP 200、五 Cookie，目标封面 HTTP **401**，无 `reviewId`；只排除这个凭据桥接及请求上下文，不把单篇封面当列表，也不再试同形态。[公开移动搜索源码](MOBILE_PUBLIC_ARTICLE_SEARCH_SOURCE.md)的腾讯搜狗 `/weixinwap?type=2` 单次匿名 GET HTTP **200**，保存 43,612 字节完整 HTML；初始正则有 11 次条目形状命中、27 次搜狗跳转链接命中及分页标记，精确 DOM 卡片数见下段。未解析跳转或读原文，不能据此称目标号订阅可用。此端点与已测桌面 `/weixin?type=2` 确属不同入口。
+
+**移动搜索离线结果与精确分页候选：**已保存 HTML 的 DOM 实际有 9 张文章卡，8 张来源名等于目标号；9 张的搜狗展示日期均在 2026-03，未核官方 `ct`，标题在 `h4 a`，当前 Android 开源解析器的标题选择器在此页命中 0/9。主链接仍是搜狗 `/link` 不透明参数，未得原文身份。首页引用的固定同源 `next_page.min.js?v=20200326` 静态源码明确用 `window.moreResultUrl || location.href` 和 `curPageNum+1` 生成 `page=2&_rtype=json` AJAX，并预期结果 `items[]`；本页没有覆写前两项，也没有静态 `#next_page` 元素，浏览器是否会展示分页按钮未知。B 正设计**匿名、无首屏 Cookie**的独立 page2 一次性 Probe；不能由 `totalPages=4` 推断目标全量或持续更新。近期 `/link` 实现需要首屏 Cookie 且跟随跳转/执行 JS，不能原样拿来做本项目探针。
+
+**匿名第二页一次响应：**按固定脚本和保存首屏构造的同源 `/weixinwap?page=2&_rtype=json&type=2&query=...` 只发一次 GET，得到 HTTP **200**、JSON Content-Type、完整 51,307 字节；本地宽泛验证码关键词门禁触发 `verification-stop`，出于停止策略未保存原始 JSON，实际是否含验证要求及 `items[]` 结构均**未知**。私有持久哨兵禁止同形重发；无跳转、批准页、搜狗 `/link`、原文或第三页请求。这只能说明此次匿名请求进入了保守停止分支，不能把它当成分页成功或分页能力不存在。
 
 **公开旧文短路径单篇对照：**[一次性探针](PUBLIC_PAGE_DISCOVERY.md#同摘要的官方短路径只读复审与一次性脚本仍未联网)对另一篇已核目标旧文的 `/s/<22 token>` 得 HTTP **200**，四字段、canonical、字面 `ct` 与正文一致，有 16 张 `data-src` 图片，静态 `album_info_list` 为空。此入口可读**这一篇旧文**，未发现更多合集或文章列表；与该篇之前长 `/s?...` 的 302 请求形状不同，不能据此推断短路径普遍可读或跨文章/跨号稳定。
 
