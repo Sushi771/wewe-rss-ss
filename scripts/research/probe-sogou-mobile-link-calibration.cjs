@@ -25,7 +25,8 @@ const TIMEOUT_MS = 8000;
 const SEARCH_LIMIT = 128 * 1024;
 const LINK_LIMIT = 64 * 1024;
 const CHALLENGE_PATH = /antispider|captcha|verify|seccode|approve/i;
-const CHALLENGE_TEXT = /验证码|安全验证|人机验证|访问过于频繁|操作频繁|captcha|antispider/i;
+const CHALLENGE_TEXT =
+  /验证码|安全验证|人机验证|访问过于频繁|操作频繁|captcha|antispider/i;
 
 function hash(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -51,7 +52,10 @@ function cheerioFromRoot(root) {
 }
 
 function normalize(value) {
-  return String(value || '').normalize('NFC').replace(/\s+/gu, ' ').trim();
+  return String(value || '')
+    .normalize('NFC')
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
 function officialIdentity(raw) {
@@ -125,9 +129,7 @@ function loadSeed(root) {
     accountName: row.mp_name,
     identity,
     queryHash: hash(row.title).slice(0, 20),
-    publishedMonth: new Date(row.publish_time * 1000)
-      .toISOString()
-      .slice(0, 7),
+    publishedMonth: new Date(row.publish_time * 1000).toISOString().slice(0, 7),
   };
 }
 
@@ -169,9 +171,11 @@ function isChallenge($, html, redirect) {
       .length
   )
     return true;
-  return CHALLENGE_TEXT.test($('title').text()) ||
+  return (
+    CHALLENGE_TEXT.test($('title').text()) ||
     ($('li[id^="sogou_vr_"]').length === 0 &&
-      CHALLENGE_TEXT.test(html.slice(0, 12000)));
+      CHALLENGE_TEXT.test(html.slice(0, 12000)))
+  );
 }
 
 function cookiesForLink(setCookie, now = Date.now()) {
@@ -197,7 +201,8 @@ function cookiesForLink(setCookie, now = Date.now()) {
       const [key, ...rest] = part.split('=');
       const attribute = key.toLowerCase();
       const attrValue = rest.join('=').trim();
-      if (attribute === 'domain') domain = attrValue.replace(/^\./, '').toLowerCase();
+      if (attribute === 'domain')
+        domain = attrValue.replace(/^\./, '').toLowerCase();
       if (attribute === 'path') cookiePath = attrValue;
       if (attribute === 'max-age' && /^-?\d+$/.test(attrValue))
         expired = Number(attrValue) <= 0;
@@ -208,7 +213,8 @@ function cookiesForLink(setCookie, now = Date.now()) {
       !expired &&
       (domain === 'weixin.sogou.com' || domain === 'sogou.com') &&
       cookiePath.startsWith('/') &&
-      ('/link' === cookiePath || '/link'.startsWith(`${cookiePath.replace(/\/$/, '')}/`))
+      ('/link' === cookiePath ||
+        '/link'.startsWith(`${cookiePath.replace(/\/$/, '')}/`))
     )
       jar.set(name, value);
   }
@@ -219,16 +225,14 @@ function matchingLink(html, seed, cheerio) {
   const $ = cheerio.load(html);
   const cards = $('li[id^="sogou_vr_"]');
   if (isChallenge($, html, null)) return { state: 'verification-stop' };
-  const matches = cards
-    .toArray()
-    .filter((card) => {
-      const item = $(card);
-      return (
-        normalize(item.find('h4 a').first().text()) === normalize(seed.title) &&
-        normalize(item.find('span.s2').first().text()) ===
-          normalize(seed.accountName)
-      );
-    });
+  const matches = cards.toArray().filter((card) => {
+    const item = $(card);
+    return (
+      normalize(item.find('h4 a').first().text()) === normalize(seed.title) &&
+      normalize(item.find('span.s2').first().text()) ===
+        normalize(seed.accountName)
+    );
+  });
   if (matches.length !== 1)
     return {
       state: 'card-mismatch-stop',
@@ -278,7 +282,12 @@ function officialUrlShape(raw) {
   )
     return { complete: false };
   if (/^\/s\/[A-Za-z0-9_-]{22}$/.test(url.pathname) && !url.search)
-    return { complete: true, form: 'short', host: url.hostname, path: '/s/<token>' };
+    return {
+      complete: true,
+      form: 'short',
+      host: url.hostname,
+      path: '/s/<token>',
+    };
   if (url.pathname !== '/s') return { complete: false };
   const q = url.searchParams;
   if (
@@ -286,13 +295,23 @@ function officialUrlShape(raw) {
       Boolean(q.get(key) && q.getAll(key).length === 1),
     )
   )
-    return { complete: true, form: 'four-field', host: url.hostname, path: url.pathname };
+    return {
+      complete: true,
+      form: 'four-field',
+      host: url.hostname,
+      path: url.pathname,
+    };
   if (
     ['src', 'timestamp', 'signature'].every((key) =>
       Boolean(q.get(key) && q.getAll(key).length === 1),
     )
   )
-    return { complete: true, form: 'signed', host: url.hostname, path: url.pathname };
+    return {
+      complete: true,
+      form: 'signed',
+      host: url.hostname,
+      path: url.pathname,
+    };
   return { complete: false, host: url.hostname, path: pathShape(url.pathname) };
 }
 
@@ -314,7 +333,8 @@ function linkDestination(status, headers, html, cheerio) {
   let candidate = '';
   if (fragments.length) {
     candidate = fragments.join('').replaceAll('@', '');
-    if (candidate && !candidate.startsWith('http')) candidate = `https://mp.${candidate}`;
+    if (candidate && !candidate.startsWith('http'))
+      candidate = `https://mp.${candidate}`;
   } else {
     const refresh = $('meta[http-equiv="refresh"]').attr('content') || '';
     const match = /^\d+\s*;\s*url=(.+)$/i.exec(refresh);
@@ -394,7 +414,10 @@ async function syncedNew(file, data) {
 
 async function ensurePrivateDirectory(directory) {
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  for (const candidate of [path.join(os.homedir(), '.wewe-rss-private'), directory]) {
+  for (const candidate of [
+    path.join(os.homedir(), '.wewe-rss-private'),
+    directory,
+  ]) {
     const stat = await fs.lstat(candidate);
     if (!stat.isDirectory() || stat.isSymbolicLink())
       throw new Error('private-directory-gate');
@@ -432,7 +455,8 @@ async function runProbe(seed, cheerio, { directory, request = requestOnce }) {
   try {
     await syncedNew(marker, JSON.stringify(summary, null, 2));
   } catch (error) {
-    if (error.code === 'EEXIST') throw new Error('duplicate-sentinel-no-request');
+    if (error.code === 'EEXIST')
+      throw new Error('duplicate-sentinel-no-request');
     throw error;
   }
   const search = searchUrl(seed.title);
@@ -469,7 +493,11 @@ async function runProbe(seed, cheerio, { directory, request = requestOnce }) {
       summary.state = 'search-verification-stop';
     else if (first.status !== 200 || first.truncated)
       summary.state = 'search-http-or-size-stop';
-    else if (!/^text\/html|^application\/xhtml\+xml/i.test(first.headers['content-type'] || ''))
+    else if (
+      !/^text\/html|^application\/xhtml\+xml/i.test(
+        first.headers['content-type'] || '',
+      )
+    )
       summary.state = 'search-content-type-stop';
     else {
       const match = matchingLink(firstHtml, seed, cheerio);
@@ -478,7 +506,9 @@ async function runProbe(seed, cheerio, { directory, request = requestOnce }) {
       if (match.state !== 'matched') summary.state = match.state;
       else {
         const cookie = cookiesForLink(first.headers['set-cookie']);
-        summary.search.usableCookieCount = cookie ? cookie.split('; ').length : 0;
+        summary.search.usableCookieCount = cookie
+          ? cookie.split('; ').length
+          : 0;
         if (!cookie) summary.state = 'cookie-unavailable-stop';
         else {
           summary.state = 'link-started';
@@ -495,15 +525,13 @@ async function runProbe(seed, cheerio, { directory, request = requestOnce }) {
             },
             LINK_LIMIT,
           );
-          const linkHtml = contentText(second.body, second.headers['content-type']);
+          const linkHtml = contentText(
+            second.body,
+            second.headers['content-type'],
+          );
           const outcome = second.truncated
             ? { state: 'link-size-stop' }
-            : linkDestination(
-                second.status,
-                second.headers,
-                linkHtml,
-                cheerio,
-              );
+            : linkDestination(second.status, second.headers, linkHtml, cheerio);
           summary.link = {
             status: second.status,
             bytes: second.body.length,
@@ -546,14 +574,34 @@ async function selfTest(cheerio) {
   const cases = [
     {
       name: 'link-200',
-      first: response(200, card, { 'set-cookie': ['SNUID=fresh; Domain=.sogou.com; Path=/; HttpOnly'] }),
-      second: response(200, "var url='';url += 'https://mp.weixin.qq.com/s?src=11&time';url += 'stamp=123&signature=abc';"),
+      first: response(200, card, {
+        'set-cookie': ['SNUID=fresh; Domain=.sogou.com; Path=/; HttpOnly'],
+      }),
+      second: response(
+        200,
+        "var url='';url += 'https://mp.weixin.qq.com/s?src=11&time';url += 'stamp=123&signature=abc';",
+      ),
       state: 'official-url-found',
       requests: 2,
     },
-    { name: 'no-cookie', first: response(200, card), state: 'cookie-unavailable-stop', requests: 1 },
-    { name: 'challenge', first: response(200, '<title>安全验证</title><input id="seccodeInput">'), state: 'search-verification-stop', requests: 1 },
-    { name: 'mismatch', first: response(200, card.replace('Sample account', 'Other account')), state: 'card-mismatch-stop', requests: 1 },
+    {
+      name: 'no-cookie',
+      first: response(200, card),
+      state: 'cookie-unavailable-stop',
+      requests: 1,
+    },
+    {
+      name: 'challenge',
+      first: response(200, '<title>安全验证</title><input id="seccodeInput">'),
+      state: 'search-verification-stop',
+      requests: 1,
+    },
+    {
+      name: 'mismatch',
+      first: response(200, card.replace('Sample account', 'Other account')),
+      state: 'card-mismatch-stop',
+      requests: 1,
+    },
     {
       name: 'link-redirect-challenge',
       first: response(200, card, { 'set-cookie': ['SNUID=fresh; Path=/'] }),
@@ -562,7 +610,10 @@ async function selfTest(cheerio) {
       requests: 2,
     },
   ];
-  const directory = path.join(PRIVATE_DIR, `self-test-${process.pid}-${Date.now()}`);
+  const directory = path.join(
+    PRIVATE_DIR,
+    `self-test-${process.pid}-${Date.now()}`,
+  );
   await ensurePrivateDirectory(PRIVATE_DIR);
   await fs.mkdir(directory, { recursive: false, mode: 0o700 });
   try {
@@ -573,7 +624,10 @@ async function selfTest(cheerio) {
         called++;
         return called === 1 ? item.first : item.second;
       };
-      const result = await runProbe(seed, cheerio, { directory: caseDir, request });
+      const result = await runProbe(seed, cheerio, {
+        directory: caseDir,
+        request,
+      });
       assert.equal(result.state, item.state, item.name);
       assert.equal(called, item.requests, item.name);
       assert.equal(result.requests, item.requests, item.name);
@@ -586,11 +640,17 @@ async function selfTest(cheerio) {
     assert.equal(cookiesForLink(['SNUID=x; Domain=evil.example; Path=/']), '');
     assert.equal(cookiesForLink(['SNUID=x; Path=/weixinwap']), '');
     assert.equal(cookiesForLink(['SNUID=x; Path=/']), 'SNUID=x');
-    assert.equal(officialUrlShape('https://evil.example/s?src=11').complete, false);
+    assert.equal(
+      officialUrlShape('https://evil.example/s?src=11').complete,
+      false,
+    );
     return { selfTest: 'pass', cases: cases.length, networkRequests: 0 };
   } finally {
     for (const item of cases)
-      await fs.rm(path.join(directory, item.name), { recursive: true, force: true });
+      await fs.rm(path.join(directory, item.name), {
+        recursive: true,
+        force: true,
+      });
     await fs.rmdir(directory);
   }
 }
