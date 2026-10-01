@@ -1,5 +1,7 @@
 # 公众号级列表发现主线（2026-10-02）
 
+最新执行点：正常SDK授权准备阶段 `fc718876317c1da5d922a81a5ee7ee07e7b24aef` 已提交推送，远端一致、[CI 36909655152](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36909655152) 成功。本机手工入口已打开、本人按钮前 idle/上游0请求，127.0.0.1独占监听；原4000 PID27668及全部生产表不变。本人正常 SDK 扫码尚未完成，resolver仍0请求。单次 resolver 探针和4项离线测试已准备，待新正常会话后总控执行；不重复旧目录/刷新，不解除旧停止，完整近期来源仍缺证。端口和存活状态以私有 listener.json/实际状态为准，不自动重启过期入口。后续精确HEAD仍以Git/远端核对。
+
 当前接续：已准备复用固定 MIT SDK 的隔离正常扫码入口及私有缓存（不改原生产登录），9 项离线测试通过、上游请求0、生产全部字段不变。独立无工具审查 agy-d516f0dc 已完成并审核；独占文件写入不称为原子事务，长轮询有45秒单请求上限，不能将40次轮询说成总共80秒。原可运行 helper 未找到，故只复用公开 QR 原语，不安装 CLI/TokenManager。旧 mobile VID 与新 Web 来源一致，设备 ID 沿用；须本人正常 SDK 授权后才允许对新搜索候选作一次未实测 resolver 验证，不能混用 Web Cookie、重复旧目录或自动续期。新说明见 [OWNER_SDK_RESOLVER_VALIDATION.md](OWNER_SDK_RESOLVER_VALIDATION.md)。本阶段代码、CI及开发/产品文档一同提交推送，精确最新 commit 用 git log -1 与远端 main 核对。完整近期覆盖和正文链路批量验证均未完成。
 
 上一代码阶段：`9c8c1ef52695164fdc93c290bd094619c30a6d02`，push 后远端 main 与本地一致，[CI 36903374288](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36903374288) 成功；服务端构建、28 套 291 项全量测试及 lint 通过，上一交接补记 c08f59d 已推送。本轮5e78d49e/262be155/d516f0dc均已完成并审核，固定 Gemini 3.8 Flash (High)。生产账号扫码后的全部表字段哈希保持一致。总目标仍在执行，未完成验收。

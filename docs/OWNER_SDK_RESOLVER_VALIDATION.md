@@ -33,6 +33,8 @@ node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_
 
 ## 下一次真实验证
 
+单次传输已准备为 `scripts/research/probe-owner-review-once.cjs`；`--plan` 零请求，只有 `--execute <ABS_SUCCESSFUL_SDK_RUN_DIR>` 才执行。正常扫码结果须成功、生产未变、同账号/VID/旧设备且30分钟内；加载哈希核验的原 SDK profile，不导入 mobile transport/TokenManager。自主选本轮五页搜索第一项，不传验收种子。发送原始 requestUrl，不将规范化存储 URL 替代请求 URL。全局私有 resolver-attempt.json 在请求前独占写入并 fsync，任何进程重复执行都被阻止，不删除；单次 HTTPS POST、20秒超时、64KiB流读取、不跳转、不续期、不重放。原始响应先私存，再作严格身份解析；解析失败也不重发。所有生产表和原配置/Web会话/旧停止/SDK新会话/发现证据哈希再次核对。后续本地I/O异常只输出请求数未知，不虚报零请求。4项纯 Mock测试通过，涵盖真实请求形状、原URL、先落标记/重复拒绝、认证/挑战/格式/身份失败、过大回包及生产变动。
+
 先等本人完成不同于原 Web 登录的正常 SDK 扫码并核私有结果；新会话不能删除旧401/-2041/302停止。仅对本轮真实搜索自行选出的一个候选，用固定 SDK mobile 头单次请求 /mp/getreviewid，私存回包，核 URL 对应/基数/reviewId 号前缀，再决定是否请求既有 Web 正文端点并核真实文章身份/时间。没有合法新 mobile 会话时，不发 resolver 请求。严格 URL 回显等假设以实际响应为准，离线解析器成功不是线上成功。
 
 完整近期覆盖仍独立缺证；搜索本地排序、关键词补搜、旧目录或 SDK 登录都不能抵消该缺口。后续批量/增量与生产接入须经真实列表、正文及副本保护验证。
