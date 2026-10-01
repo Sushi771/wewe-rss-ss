@@ -72,3 +72,15 @@
 该文档第 115–136 行记载其尝试响应自报筛选字段仍无效；本轮真实响应也含 advanceSearch.filters，但这不是字段会在 Web 请求生效的证明。总控重取腾讯固定 read_search.fc739bbf.js，SHA256 仍为 `e5e090ee6b6180de2ed72ee3eeebdcdab9a10c5c0f5c95f442fd7940730f7089`，未见 advanceSearch/extReqParams/排序字段或 reviewId；不盲猜五种变体重复别人的实验。Agent 的“服务端全球不支持筛选”和若干行号/因果过强结论未照搬。关键词标题/日期补搜只能拓展索引供给，没有全号完整证明，当前不作为完成替代的方案。
 
 下一轮转为固定 CyrusNee/weread `cab52f3` 的 resolver 认证/响应身份核验及既有正常移动登录入口的无工具源码审查；实际 resolver 请求仍为 0，当前正常 Web 登录不能假定移动认证已恢复。
+
+`agy-503fbd66` 无工具审查 78 秒完成。已核 `resolveArticle` 真实 POST 为 `i.weread.qq.com/mp/getreviewid`，body `urls:[docUrl]`，期待 `reviewIds:[{url,reviewId}]`；移动 transport 由 `profile.authHeaders(token)` 和 `versionHeaders` 提供认证，提供的 mobile.ts 本身不足以验证所有具体版本常量，Agent 列举的头值未当作新增一手依据。源码没有以 Web wr_skey 代替 mobile accessToken 的逻辑。原 SDK `idempotent:true` 允许认证失败续期重放，且首次 tokenManager.get 也可能续期；真实探针不得直接运行此 SDK 自动认证流程。单项解析成功还要核 URL 完全对应、返回基数为 1、reviewId 目标号前缀和字符界限；最后仍须用真实正文核文章稳定身份与时间，不把映射成功当原文核验。
+
+同批审查确认 synckey 首屏不是新路径：已有完整审计明确请求 bookId/count20/synckey0 无 offset 并得到 -2041，不重复。resolver 只解已知候选链接，不能补齐全号目录；当前实际移动认证仍受旧 401 停止，新 Web 扫码不能代替。下一轮仅准备纯离线响应校验器及回归建议，不实现新登录/自动续期、不启用未实测传输。只有本人正常移动认证恢复且完成单次真实 resolver/正文核验后，才讨论运行接入。
+
+## 纯离线 resolver 身份门禁准备
+
+`agy-30152744` 60 秒返回两文件建议补丁，总控审核后实现 `owner-review-resolution.ts` 与测试。与建议相比修正了上游业务码插入错误字符串的泄露风险、null/undefined 错误码被跳过、正则 `$` 可接受末尾换行，以及重复身份参数。输入候选须与现有 canonicalArticleUrl 的完整链接、稳定 ID、公众号一致；单 URL 响应只允许一个项且原存请求 URL 完全对应；reviewId 必须由上游返回、以目标号前缀开头且后缀字符/长度符合既有最新篇边界。输出恒为 originalVerified=false，不复制索引时间为发布时间。
+
+这只是内存解析函数，没有网络、认证、续期、缓存推算或生产绑定，没有解除旧停止记录。严格 URL 回显及字段结构仍待一份新正常移动认证下的真实响应验证，不能称 resolver 已可用。新增门禁与搜索/最新篇相关 3 套 52 项测试先通过；末次补充原始 URL 错误保护测试时首次全量遇 catch unknown 类型检查失败，补 Error 类型收窄后最终服务端构建、28 套 291 项全量回归及新文件 ESLint 通过。独立无工具审查 `agy-b66bb9eb` 99 秒完成，未提出具体缺陷；总控另补 URL 异常受控包装与对应测试。无新生产文章/订阅写入，4000 仍为原冻结版本 PID27668，仅回环监听。
+
+本阶段代码与上述开发文档必须同一提交推送；提交 SHA 由 `git log -1 --oneline`、`git ls-remote origin refs/heads/main` 或 GitHub 文件最近提交核对，文档不尝试嵌入自身提交 SHA。此前最新已推送文档阶段为 `05a0d04`。下一步先复核既有正常移动登录入口是否仍可复用，不让本人因旧目录重复失败而反复扫码；只有为未实测 resolver 获得合法新条件时才准备单次验证。公众号近期完整来源仍未验证通过，不能由此次离线解析器抵消。
