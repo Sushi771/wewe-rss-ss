@@ -6,6 +6,11 @@ import { ArticleCandidate, searchArticleCandidates } from './article-candidate';
 
 export const OWNER_SEARCH_ENDPOINT =
   'https://weread.qq.com/web/wx_search_broker_proxy';
+export const OWNER_SEARCH_MAX_PAGES = 5;
+export type OwnerSearchTermination =
+  | 'upstream_exhausted'
+  | 'page_budget'
+  | 'repeated_page';
 const COOKIE_NAMES = new Set(['wr_pf', 'wr_ql', 'wr_rt', 'wr_skey', 'wr_vid']);
 export type OwnerWebSession = {
   source:
@@ -109,7 +114,12 @@ function responseContent(text: string) {
       throw new OwnerSearchStopped('business_rejected');
   }
   const content = data.content;
-  if (!content || !Array.isArray(content.data) || content.data.length > 100)
+  if (
+    !content ||
+    !Array.isArray(content.data) ||
+    content.data.length > 100 ||
+    ![true, false, 1, 0].includes(content.continueFlag)
+  )
     throw new OwnerSearchStopped('invalid_response');
   const items: unknown[] = [];
   for (const bucket of content.data) {
@@ -123,6 +133,23 @@ function responseContent(text: string) {
   return { content, items };
 }
 
+/** Compare the full mixed-source page, not just articles matching this account.
+ * A page with no target matches may still contain a genuine advancing cursor.
+ */
+function searchPageSignature(items: unknown[]) {
+  const keys = items.map((raw) => {
+    const item = raw as any;
+    if (typeof item?.docID === 'string' && item.docID)
+      return `id:${item.docID}`;
+    if (typeof item?.doc_url === 'string' && item.doc_url)
+      return `url:${item.doc_url}`;
+    return `item:${JSON.stringify(raw)}`;
+  });
+  return createHash('sha256')
+    .update(JSON.stringify([...new Set(keys)].sort()))
+    .digest('hex');
+}
+
 /** Only the normal login Cookie jar; no CDP, navigation, mobile init or automatic renewal. */
 export async function fetchOwnerSearchPage(input: {
   sessionFile: string;
@@ -133,13 +160,16 @@ export async function fetchOwnerSearchPage(input: {
   // A continuation exists only within this call; never persist/reuse it next update.
   maxPages?: number;
 }) {
+  const maxPages = input.maxPages ?? 1;
   if (
     !path.isAbsolute(input.sessionFile) ||
     !path.isAbsolute(input.stateFile) ||
     !input.name.trim() ||
     input.name.length > 100 ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(input.biz) ||
-    ![1, 2].includes(input.maxPages || 1)
+    !Number.isSafeInteger(maxPages) ||
+    maxPages < 1 ||
+    maxPages > OWNER_SEARCH_MAX_PAGES
   )
     throw new Error('OWNER_SEARCH_CONFIG_INVALID');
   const session: OwnerWebSession = JSON.parse(
@@ -171,8 +201,12 @@ export async function fetchOwnerSearchPage(input: {
     }
     if (
       !state ||
-      (state.stops &&
-        (typeof state.stops !== 'object' || Array.isArray(state.stops))) ||
+      typeof state !== 'object' ||
+      Array.isArray(state) ||
+      (state.stops !== undefined &&
+        (!state.stops ||
+          typeof state.stops !== 'object' ||
+          Array.isArray(state.stops))) ||
       (state.lastAttemptAt !== undefined &&
         !Number.isSafeInteger(state.lastAttemptAt))
     )
@@ -195,7 +229,10 @@ export async function fetchOwnerSearchPage(input: {
     let body: any = { query: input.name, offset: 0, searchcookies: '' };
     let truncated = false;
     let pages = 0;
-    for (let n = 1; n <= (input.maxPages || 1); n++) {
+    let termination: OwnerSearchTermination = 'page_budget';
+    const seenPages = new Set<string>();
+    for (let n = 1; n <= maxPages; n++) {
+      if (n > 1) await new Promise((resolve) => setTimeout(resolve, 1000));
       ownerSessionCookie(session, input.ownerVid);
       requests++;
       const response = await axios.post<string>(OWNER_SEARCH_ENDPOINT, body, {
@@ -233,14 +270,24 @@ export async function fetchOwnerSearchPage(input: {
         { source: 'owner-web-search', capturedAt, page: n },
       )) {
         const old = candidates.get(candidate.id);
-        if (old && old.url !== candidate.url)
+        if (old && (old.url !== candidate.url || old.title !== candidate.title))
           throw new OwnerSearchStopped('identity_conflict');
         candidates.set(candidate.id, candidate);
       }
       pages++;
       const more = [true, 1].includes(content.continueFlag);
       truncated = more;
-      if (!more || n === (input.maxPages || 1)) break;
+      const signature = searchPageSignature(items);
+      if (!more) {
+        termination = 'upstream_exhausted';
+        break;
+      }
+      if (seenPages.has(signature)) {
+        termination = 'repeated_page';
+        break;
+      }
+      seenPages.add(signature);
+      if (n === maxPages) break;
       if (
         !Number.isSafeInteger(content.offset) ||
         content.offset <= body.offset ||
@@ -270,6 +317,7 @@ export async function fetchOwnerSearchPage(input: {
       requests,
       capturedAt,
       truncated,
+      termination,
       coverage: 'search-results' as const,
       complete: false as const,
     };

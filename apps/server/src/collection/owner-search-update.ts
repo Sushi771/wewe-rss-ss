@@ -2,7 +2,11 @@ import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { fetchOwnerSearchPage, OwnerSearchStopped } from './owner-web-search';
+import {
+  fetchOwnerSearchPage,
+  OwnerSearchStopped,
+  OWNER_SEARCH_MAX_PAGES,
+} from './owner-web-search';
 import {
   verifyCandidateOriginal,
   CandidateVerificationError,
@@ -21,6 +25,8 @@ export type SearchConfig = {
   originalStopFiles: string[];
   runtimeStopFile: string;
   wereadLatestStateFile?: string;
+  /** Explicit bounded discovery budget; existing bindings default to two pages. */
+  searchMaxPages?: number;
 };
 export class OwnerUpdateStopped extends Error {}
 
@@ -48,6 +54,10 @@ export async function readOwnerSearchConfig(
     !c.originalStopFiles.length ||
     (c.wereadLatestStateFile !== undefined &&
       !path.isAbsolute(c.wereadLatestStateFile)) ||
+    (c.searchMaxPages !== undefined &&
+      (!Number.isSafeInteger(c.searchMaxPages) ||
+        c.searchMaxPages < 1 ||
+        c.searchMaxPages > OWNER_SEARCH_MAX_PAGES)) ||
     ![
       c.sessionFile,
       c.stateFile,
@@ -89,7 +99,10 @@ export async function fetchLiveOwnerArticles(
   }
   let stage = 'search';
   try {
-    const search = await fetchOwnerSearchPage({ ...c, maxPages: 2 });
+    const search = await fetchOwnerSearchPage({
+      ...c,
+      maxPages: c.searchMaxPages ?? 2,
+    });
     stage = 'original';
     const articles: ProviderPage['articles'] = [];
     // Selection is a bounded search window, never a claim of complete account history.
