@@ -89,6 +89,8 @@
 
 ## 正常 SDK 手工交接准备
 
+本轮单次探针已提交推送 `be4b8c2e9f17ef9e8f3deb8dcb0ac24041b22331`，远端一致，[CI 36911098491](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36911098491) 两job全部成功，13项离线测试通过。03:03 +08 SDK入口按15分钟空闲生命周期关闭：本人按钮未点、attempt和mobile-session不存在、resolver全局marker不存在，未发SDK/解析请求，不属于上游认证拒绝。没有静默运行的Antigravity作业；需本人回复实际方便正常SDK扫码后才开启新隔离实例，不自动生成/续期/重播二维码。源码及产品/交接均已同步，此补记记录最终事实，完整近期列表与批量订阅尚未验收。
+
 正常授权准备已同步 fc718876317c1da5d922a81a5ee7ee07e7b24aef，远端main一致、工作树干净，[CI 36909655152](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36909655152) 成功。本机入口已实际打开、核 idle/腾讯请求0；尚无本人正常 SDK 完成结果。原4000 PID27668仍只回环，生产全部表快照等于扫码后基线。总控派 agy-3504aa72，无工具固定模型30秒完成；确认单项POST urls/mobile头，纠正其将canonical URL替代实际requestUrl及“原子读写全局标记”表述。准备单次传输探针，先fsync全局独占标记，只用新正常SDK会话、原搜索首个候选原始URL；保留回包、核生产及文件哈希、不刷新/重试。4项纯Mock回归及语法/零请求plan通过，agy-85849698正在独立审核。此阶段仍无真实resolver/正文调用，不宣称全号近期列表齐全。
 
 独立审核85849698启动3秒即失败，已收取错误，重派3a1fae2a，153秒完成。后者四项建议经总控逐项核验均未采纳：实际sessionFile/wereadLatestStateFile位于feed且存在；SDK成功result确实保存after；resolver输出目录禁止覆盖是有意一次性门禁，不改recursive；实际只读SQL accounts查询成功，不能按默认Prisma名称改Account。没有让错误建议进入代码。最终13项离线测试通过（含原SDK纯Mock2项），传输只剩本人正常SDK授权的外部条件；此时真实resolver仍0请求。四份交接/开发/产品文档、脚本和CI同提交同步，禁止把准备阶段称为全号订阅成功。
