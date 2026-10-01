@@ -60,3 +60,15 @@
 继续审核下一轮子 Agent 的具体源码依据，解决完整近期覆盖与正文映射。被拒绝的目录、Gateway 和后台路径不因新会话开发任务而重新轮试。若新来源仍缺正常认证签发或目标真实列表，准确记录外部条件，不能把本轮搜索分页或 cover 单篇标为完整替代。
 
 下一轮只读研究 `agy-a95d76f7` 已派发（同一固定模型），仅核公开源码中账户限定/近期排序字段和搜索结果到腾讯正文身份的实际映射；总控独占真实请求，子 Agent 不读凭据、不重试停止路径。
+
+## Antigravity 等待纠偏及公开源码复核
+
+`agy-a95d76f7` 并非持续开发中：其 Cascade `905174d0-bafb-46d0-b830-c95f003d7dac` 实际停在 `CORTEX_STEP_STATUS_WAITING`，等待 `github/get_file_contents` 读取公开 weread.js 的 IDE 权限。总控通过只读 trajectory 查明，不替子 Agent 放宽权限；要求收束无效后取消该 MCP 作业，改由总控取固定公开源码，作为上下文派发明确禁用工具的 `agy-263ca2df`。后者 43 秒完成，已收取审核。取消后台作业不能等同于 IDE 中所有待授权弹窗已消失。
+
+今后作业启动后用 check_agent_job 跟踪；长期仅“运行中”须核实 trajectory 是否工具授权等待，不能把静默等待当作进展。若公共读取卡住，由总控读取并给上下文，改派无工具审核；不猜权限 RPC、不自动批准未知工具，不读凭据。模型始终 Gemini 3.8 Flash (High)。任务粒度以可直接审核的具体源码/补丁为单位，不能等待数十分钟才排查。
+
+总控取得 dailyoozoo/weread-mp-fetch `2b4fd61` 的 weread.js（SHA256 `94c212b05dc9117ccb1cbbaff32237cbb6f0af0986b7b08d78c02293e97bddd1`）与 INTERFACE.md：`search` 第 518 行续页发 `searchID/conversationID`，账户过滤在第 534–536 行本地执行，时间排序在第 636 行本地执行。其“翻页无效/15 条上限”只来自那个实现的观测，与本轮真实五页不同；字段差异是明确事实，但未经单变量实验，不把它断言为唯一失败原因，也不修改第三方源码冒充本项目新成果。
+
+该文档第 115–136 行记载其尝试响应自报筛选字段仍无效；本轮真实响应也含 advanceSearch.filters，但这不是字段会在 Web 请求生效的证明。总控重取腾讯固定 read_search.fc739bbf.js，SHA256 仍为 `e5e090ee6b6180de2ed72ee3eeebdcdab9a10c5c0f5c95f442fd7940730f7089`，未见 advanceSearch/extReqParams/排序字段或 reviewId；不盲猜五种变体重复别人的实验。Agent 的“服务端全球不支持筛选”和若干行号/因果过强结论未照搬。关键词标题/日期补搜只能拓展索引供给，没有全号完整证明，当前不作为完成替代的方案。
+
+下一轮转为固定 CyrusNee/weread `cab52f3` 的 resolver 认证/响应身份核验及既有正常移动登录入口的无工具源码审查；实际 resolver 请求仍为 0，当前正常 Web 登录不能假定移动认证已恢复。
