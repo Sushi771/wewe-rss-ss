@@ -1,5 +1,34 @@
 # 文章来源复核（2026-09-27）
 
+## 2026-10-02 有限近期源码复核：没有新增可执行的完整列表条件
+
+本轮只读公开 GitHub 源码/元数据，不登录新服务、不提交凭据、不请求已停止的微信端点。原始请求与历史范围不变，不能将此有限检索扩大为全网或永久无解。
+
+四个已有上游再次核对：we-mp-rss仍126993c，Pengyf04/weread-mp-fetcher仍3944db5，weread-omni仍88bd2e0；wechat-article-exporter新增[152f238与a7bffa6的公开对比](https://github.com/wechat-article/wechat-article-exporter/compare/a7bffa6e481a188510a701d30b399b76573434e5...152f23832c7f3664b86148e84bd3f75e513e4dd2)，只有README改3增6删，外链取阅，没有采集代码修复。README声称实时推送群发，不能据此证明可自建、任意目标完整近期覆盖或批量历史。网页工具无法打开取阅，本轮未注册或运行服务，不断言其后端绝对闭源。
+
+一次GitHub仓库查询 `wechat rss in:name,description pushed:>=2026-09-27`，按更新时间取最多15项，返回10项、incomplete_results=false。只检查此次匹配集合，不声称穷尽所有语言、名称或项目。README取8份、2份不可用；进一步读公开树、实际采集/工作流文件如下：
+
+| 项目 | 已核的实际来源/结论 |
+| --- | --- |
+| [imoyao/WeChatRSS 固定355a299](https://github.com/imoyao/WeChatRSS/blob/355a2994c7a3f57384cefa4f16a98b85c2a8b988/src/gen_rss.py) | 仍调用profile_ext?action=getmsg；声称后台Cookie的data_ticket/slave_sid及可选MP_TOKEN即可，未提供可信新认证来源/转换。无MP_COOKIE只生成空RSS且没有非零退出；失败也会覆盖RSS。代码SHA256=6b24a52eb1ed6c6f3610cd4cde2616d235f0bccbe0ce5ee669f6656d82c6e648。不能移植其覆盖旧有效数据的行为。 |
+| [Sunnie666/wechat-rss 固定8e921e9](https://github.com/Sunnie666/wechat-rss/blob/8e921e9538ff96ca4aa887452b19e5633878192c/main.py) | getmsg只带User-Agent，不发Cookie/token；只有offset0/count10，无分页循环，把general_msg_list当对象并捕获失败返回空数组。没有解除本机no session/空列表停止的新条件。 |
+| [zorba123456/wechat-rss 固定dc4e071](https://github.com/zorba123456/wechat-rss/blob/dc4e0711bdd858949de819b8bcde4eee8ddc0692/test_feed.py) | 测试生成test_article_123等假链接，不能作为真实发现证明。 |
+| [sl00p/wechatrss](https://github.com/sl00p/wechatrss) | 树只显示README与XML，未提供可自建采集核心；完整7124字README精确目标妈妈部落畅聊阁/苏洵书院均未匹配，不能推成全网未收录。 |
+| [Alex-Xu192/wechat-rss-monitor](https://github.com/Alex-Xu192/wechat-rss-monitor) | README不可用，树含归档/通知工作流；未取得足以验证独立账号级列表的证据，保持未知而非宣称不可用。 |
+| [yonglee1979-ai/wechat-rss-workbuddy-ima](https://github.com/yonglee1979-ai/wechat-rss-workbuddy-ima) | 消费WeChatRSS token，要求微信客户端同步，是下游入库教程；没有新增独立采集核心。 |
+| [osnsyc/Wechat-Scholar](https://github.com/osnsyc/Wechat-Scholar) | 提供特定学术目录的公开RSS，README未提供任意目标的可自建采集核心或本项目目标验收。 |
+| [X-skyy/my-wechat-rss](https://github.com/X-skyy/my-wechat-rss/blob/main/.github/workflows/main.yml) | 工作流写三条RSSHub链接到Markdown，没有实现采集。 |
+| [zhuangjunhong21-blip/wechat-rss-feeds](https://github.com/zhuangjunhong21-blip/wechat-rss-feeds) | README自述仅消费总线和既有结构化数据，不含采集实现。 |
+| [ouroboros771/wechat-daily](https://github.com/ouroboros771/wechat-daily/blob/main/.github/workflows/update-feed.yml) | curl下载Secrets.WECHAT_RSS_URL并检RSS文本；真正上游未知，没有提供独立采集代码。 |
+
+imoyao固定树含206个XML，271–321字节；[二鸟说样本](https://github.com/imoyao/WeChatRSS/blob/355a2994c7a3f57384cefa4f16a98b85c2a8b988/feeds/%E4%BA%8C%E9%B8%9F%E8%AF%B4.xml)277字节，lastBuildDate为2026-10-01，但XPath `/rss/channel/item`计数0。最初PowerShell属性`.item`误得到方法适配值，改用XML SelectNodes复核为0；不把文件更新日或错误属性计数当文章数。没有逐个拉取206份，因此不声称所有条目均实测为空。仅这一样本与代码无凭据/失败也发空RSS，已足以拒绝以仓库近期更新/CI绿灯为完整列表成功证据。
+
+getmsg不是尚未测过的新路径：本项目[历史通道核验](CHANNEL_INVESTIGATION.md)已记录无会话ret=-3、正常既有候选会话下ret0但空列表，且第一方脚本转原生profile。上述源码不提供解除停止的新合法条件，不拿后台Cookie、Web读书Cookie或SDKtoken混用，不重发、不复制其失败时覆盖旧文章的逻辑。
+
+Antigravity agy-75f05b6e（固定Gemini 3.8 Flash High、无工具）28秒完成。其对现有文档的“尚无独立已证列表路径”经总控审核；其声称自己核了实时仓库、断言新SDK必定不能改变列表结果、遗漏book/articles已有401的表述未采纳。实时元数据和源码判断来自总控实际读取；SDK授权仅是未实测resolver的前置条件，不保证目录恢复。
+
+下一步仍分别缺本人合法新mobile会话与独立完整近期列表来源。不要再写包装器、扩UI或重复同一来源研究来冒充替代完成；已提交的单次resolver探针必须待本人正常SDK授权才能执行，列表完整性另行验证。现有生产、原4000登录正文图片链路不变。
+
 ## 2026-09-28 最新：客户端登录差异已追溯旧实验
 
 生产 Web 登录与 weread-omni 客户端登录确有代码差别，但旧独立实验已经测试后者同类完整链路，不能据生产代码误判它从未试过。[完整客户端审计](WEREAD_CLIENT_FLOW_AUDIT.md)记录源码校验、原命令证据及逐项比较；续期后首屏 -2041，未发现实质新条件，本轮不重试。用户明确停止电脑微信 UI/剪贴板/滚动/抓包；当前先验 5 篇、分页和正文后接入，不部署中转。
