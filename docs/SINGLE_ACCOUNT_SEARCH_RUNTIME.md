@@ -14,6 +14,8 @@
 
 ## 离线原文衔接与副本演练
 
+2026-10-02 本人新正常扫码后，总控用新源码实际请求五页；严格候选共 71 条，包含两篇已知漏文样本。预算终止且末页 continueFlag=1，时间不单调，覆盖仍不完整；本批没有可用 reviewId。仅做搜索和私有证据保存，未请求已停原文/目录/cover，生产所有字段与旧 cover 停止文件不变。详细页数和审核见本轮推进记录；不能把这批真实搜索当作批量正文入库成功。
+
 `searchArticleCandidates` 只读独立搜索返回项及号配置，缓存不参与候选生成。`verifyCandidateOriginal` 核真实原文来源、请求链接/短 canonical、SHA-256、公众号与文章身份、签名、标题及原文时间。`prepareSearchReplay` 在候选生成后按稳定身份读取缓存，逐张核图片响应来源与字节哈希，再复用现有归档组件；缺原文的候选仍未核验。缓存命中不是本轮联网正文请求，也不证明未缓存文章可读。
 
 `node scripts/research/replay-owner-search-cache.cjs` 读取本轮持久的两页26条返回项，按采集时刻前七天和索引时间降序选5篇；新建一致性 SQLite 副本，调用 `CollectionService.replayVerifiedSearch` 保存核验文章，并在新进程排重。方法仅允许带明确副本标记的 SQLite，不改生产来源绑定或最后成功时间。旧 ID、非空正文/图片、可信时间、封面、有效零值与 null 指标受保护。RSS/Markdown/Obsidian/ZIP 在进一步缩小的导出副本验证，旧生产和保存副本逐列比较。所有输出、备份及原始证据仅在 `private-data/`。
