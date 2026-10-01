@@ -37,6 +37,8 @@ jobs:
         run: pnpm --filter server exec jest --runInBand
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
+      - name: Test isolated owner SDK handoff (no real HTTP)
+        run: node --test scripts/research/owner-sdk-login-once.spec.cjs
       - name: Test official album runtime scheduling policy
         run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs
       - name: Test standalone dependency closure

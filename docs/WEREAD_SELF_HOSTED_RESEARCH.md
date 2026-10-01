@@ -2,6 +2,8 @@
 
 ## 2026-10-02 研究续接结论
 
+已完成原 SDK QR 原语的固定版本/哈希复用及隔离手工交接准备（9项纯 Mock 测试、独立审查通过），没有腾讯真实请求或生产写入。原 Web扫码已经完成，但不能代替 mobile accessToken；仅本人正常 SDK 授权后，才对本轮自主发现的一个 URL 做尚未实测的 /mp/getreviewid 验证。它不返回账号文章目录、不解除旧目录停止；完整近期覆盖仍须另证。具体正常认证条件、限额及下一项单次核验见 [OWNER_SDK_RESOLVER_VALIDATION.md](OWNER_SDK_RESOLVER_VALIDATION.md)。
+
 最新状态以 [DEVELOPMENT_HANDOFF.md](DEVELOPMENT_HANDOFF.md) 和 [本轮推进记录](ACCOUNT_DISCOVERY_PROGRESS_20261002.md) 为准。下文候选与下一步均有日期，不代表可重新请求：`/book/articles` 已有 401/-2012，目录已 -2041，Gateway、公众号后台及匿名原文也已有停止记录。此次有限公开源码核查未找到解除这些停止项的新具体依据，不能推导全球或永久不可用。
 
 Antigravity 提出的旧短链 reviewId 拼接和多固定合集未解决自主全号发现，不采纳为替代方案。已实现受控 1–5 页号名搜索与回归，但搜索索引覆盖不完整，索引时间不是发布时间，不能据此完成全号验收。现会话 cover 最新 401，需本人正常重新扫码后单独核对新条件；旧停止证据保留，不通过换端点或加猜测认证头重试。
