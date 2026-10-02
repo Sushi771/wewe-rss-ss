@@ -4,7 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { runLogin, boundedFetch, page } = require('./owner-sdk-login-once.cjs');
+const {
+  runLogin,
+  boundedFetch,
+  page,
+  renderQrSvg,
+} = require('./owner-sdk-login-once.cjs');
 const REQUEST = { redirect: 'error' };
 const URLs = [
   'https://i.weread.qq.com/wxticket?nonceStr=weread',
@@ -521,3 +526,46 @@ test(
       assert(!fs.existsSync(path.join(root, 'mobile-session.json')));
     }),
 );
+
+test('externally served QR SVG renders valid standalone XML with explicit svg namespace', () => {
+  const sampleUrl =
+    'https://open.weixin.qq.com/connect/confirm?uuid=mock_uuid_123';
+  const svg = renderQrSvg(sampleUrl, 260);
+
+  assert(typeof svg === 'string' && svg.length > 0);
+  assert(svg.startsWith('<svg'));
+  assert(svg.endsWith('</svg>'));
+
+  // Root SVG element must declare xmlns="http://www.w3.org/2000/svg" for standalone XML rendering in <img>
+  const rootTagMatch = svg.match(/^<svg\b([^>]*)>/);
+  assert(rootTagMatch, 'must have opening svg tag');
+  const rootAttrs = rootTagMatch[1];
+  assert(
+    rootAttrs.includes('xmlns="http://www.w3.org/2000/svg"'),
+    'opening svg element must declare xmlns namespace attribute',
+  );
+  assert(rootAttrs.includes('height="260"'), 'must include specified height');
+  assert(rootAttrs.includes('width="260"'), 'must include specified width');
+  assert(rootAttrs.includes('viewBox='), 'must include viewBox attribute');
+
+  // Payload semantics check: path elements represent encoded QR code modules
+  assert(svg.includes('<path fill="#FFFFFF"'), 'must contain background path');
+  assert(
+    svg.includes('<path fill="#000000"'),
+    'must contain foreground modules path',
+  );
+
+  // Different payload produces distinct QR matrix data without altering namespace attributes
+  const otherUrl =
+    'https://open.weixin.qq.com/connect/confirm?uuid=different_uuid_456';
+  const otherSvg = renderQrSvg(otherUrl, 260);
+  assert.notEqual(
+    svg,
+    otherSvg,
+    'distinct payloads must yield distinct QR matrices',
+  );
+  assert(
+    otherSvg.includes('xmlns="http://www.w3.org/2000/svg"'),
+    'alternate payload must retain xmlns namespace',
+  );
+});

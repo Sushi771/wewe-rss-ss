@@ -32,9 +32,26 @@ node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_
 
 服务启动仅提供 idle 页面，上游请求为 0；本机本人明确点击才开始扫码。空闲服务最多 15 分钟，结束后页面短暂保留结果；过期需重新审核新尝试，不能自动重启。CLI 不接收 token 参数，不要求本人发送 Cookie 或 token。
 
-已验证：带私有缓存的登录/resolver联合离线测试18项全部通过；总控另核无私有cache时15项通过、3项原SDK Mock明确跳过。包括原 SDK 源码编译原语的纯 Mock 正常路径、取消零请求、QR 阶段 >64KiB 接受与 >16MiB 停止、其余阶段保持 64KiB 限额；模拟账号错配、拒绝、过期、DB变化、重复/越界请求和挑战页。CI 在无私有 cache 时跳过需真实缓存项，不下载 SDK、不接触腾讯。准备/测试期间生产快照与全部表哈希完全不变。
+已验证：带私有缓存的登录/resolver联合离线测试19项全部通过。渲染修复后的登录套件无cache为12项通过、3项原SDK Mock明确跳过，另有4项resolver回归。包括实际QR渲染器命名空间、原 SDK 源码编译原语的纯 Mock 正常路径、取消零请求、QR 阶段 >64KiB 接受与 >16MiB 停止、其余阶段保持 64KiB 限额；模拟账号错配、拒绝、过期、DB变化、重复/越界请求和挑战页。CI 在无私有 cache 时跳过需真实缓存项，不下载 SDK、不接触腾讯。准备/测试期间生产快照与全部表哈希完全不变。
 
 ## 下一次真实验证
+
+### 二维码图片渲染根因与独立 SVG 命名空间修复
+
+修复后总控独立验证：带固定SDK私有缓存的登录/resolver联合回归19项全通过；纯本机Mock HTTP图片使用同一个renderQrSvg、image/svg+xml和img-src self，CUA核实际自然宽高260×260并查看截图确认完整二维码。没有腾讯请求/真实凭据/手机授权，此测试页检查完关闭，不作为本人扫码页。CI无cache时3项原SDK Mock仍明确跳过。owner-05旧进程的结果为poll阶段停止、ticket/qr各1和poll17（全部wx_errcode408），无exchange/mobile/resolver，生产保护通过；新代码须启动新目录/进程后才能用于本人授权。
+
+2026-10-02 真实 owner-05 运行中，虽然 `/status` 报告 `hasQr: true` 且 `/qr.svg` 返回 HTTP 200 `image/svg+xml`，但页面实际显示为破损图片占位图（浏览器中 `img.complete = true` 但 `naturalWidth = 0, naturalHeight = 0`）。先前仅校验 DOM 节点存在性或 `/status` 的 `hasQr` 字段，无法证明图片已被浏览器 XML 解析器正确识别并渲染。
+
+**根因诊断**：前端 `qrcode.react` v3.2.0 的 `QRCodeSVG` 在 `renderToStaticMarkup` 下默认生成内联 `<svg>` 片段，根标签 `<svg>` 未声明 XML 命名空间属性 `xmlns="http://www.w3.org/2000/svg"`。当该 SVG 作为独立静态资源通过 `<img src="/qr.svg">` 以外部图像形式加载时，浏览器 XML 图像解析器因缺失命名空间而无法识别其为合法 SVG 矢量图，导致图像解析失败与尺寸为 0。
+
+**精准最小修复**：
+
+1. `QRCodeSVG` 源码将未消耗的 props 直接透传展开到根 `<svg>` 元素上。
+2. 在 `scripts/research/owner-sdk-login-once.cjs` 中抽取并导出通用渲染辅助函数 `renderQrSvg(value, size = 260)`，在创建 `QRCodeSVG` 元素时显式传入 `xmlns: 'http://www.w3.org/2000/svg'`。
+3. 研究服务运行中的 `onQr` 回调完全复用该经过测试的 `renderQrSvg` 函数生成 `qrSvg`，确保实际运行与测试使用同一渲染实现，且不改变 QR 载荷格式与认证流程语义；该服务不替换生产账号登录。
+4. 在 `scripts/research/owner-sdk-login-once.spec.cjs` 中补充离线回归测试，基于项目既有安装的 React 与 `qrcode.react` 3.2.0，严格检验生成的 SVG 根节点具备合规的 `xmlns="http://www.w3.org/2000/svg"` 命名空间声明、指定宽高、viewBox 与路径，并验证不同载荷矩阵独立性与命名空间完整性。全部离线运行，不接触任何外部网络与生产服务。
+
+本人澄清没有收到手机内容、需要扫码时应明确告诉。SDK无主动手机任务推送：电脑生成二维码→手机微信扫一扫→手机确认。已澄清说明并由Gemini任务agy-ea6e51b8准备新空owner-05，不覆盖已停止owner-04或自动生成。只读审核agy-d310958d已完成：qrcode对象有qrcodebase64（长度62,388）及qrcodelength，原SDK忽略图片字段而构造confirmUrl，包装器遵循其URL生成SVG；未解码图片，不能断言两码不同或等待截止的具体原因。未安装/联网/改代码，先完成本人正常扫码。
 
 owner-04最终结果覆盖下文waiting：04:36:21Z开始、04:41:21Z停止stage=poll，productionUnchanged=true。ticket/qr各1次200（95/69,035字节），正常poll17次200/32字节，wx_errcode全部408；没有404已扫码、405已确认、授权码交换或新mobile，resolver0。原SDK5分钟截止保持；实际手机过程仍未知，不将等待截止当二维码错误或本人未操作的证明。总控已请求本人简述扫码到哪步，由Antigravity/Gemini的只读离线审核agy-d310958d核原SDK confirmUrl/CLI与真实qrcode字段；不输出任何QR值、不联网/安装/修改/重开。二维码大小修复已有真实验证，认证仍未完成，下文waiting属当时观察。
 

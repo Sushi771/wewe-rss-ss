@@ -238,6 +238,22 @@ async function check(){try{const r=await(await fetch('/status',{cache:'no-store'
 </script>`;
 }
 
+function renderQrSvg(value, size = 260) {
+  const req = createRequire(
+    path.resolve(__dirname, '../../apps/web/package.json'),
+  );
+  const React = req('react');
+  const { renderToStaticMarkup } = req('react-dom/server');
+  const { QRCodeSVG } = req('qrcode.react');
+  return renderToStaticMarkup(
+    React.createElement(QRCodeSVG, {
+      value,
+      size,
+      xmlns: 'http://www.w3.org/2000/svg',
+    }),
+  );
+}
+
 async function serve({ sdkRoot, root, configFile, recoveryFile, dbFile }) {
   environmentGate(process.env);
   root = safePrivateRoot(root);
@@ -269,13 +285,6 @@ async function serve({ sdkRoot, root, configFile, recoveryFile, dbFile }) {
     db.close();
   }
   const sdk = require(path.join(cache, 'src/auth/qrlogin.js'));
-  // Existing local frontend QR implementation; no third-party image service.
-  const req = createRequire(
-    path.resolve(__dirname, '../../apps/web/package.json'),
-  );
-  const React = req('react');
-  const { renderToStaticMarkup } = req('react-dom/server');
-  const { QRCodeSVG } = req('qrcode.react');
   const nonce = randomBytes(24).toString('hex');
   const controller = new AbortController();
   let state = { state: 'idle' },
@@ -325,9 +334,7 @@ async function serve({ sdkRoot, root, configFile, recoveryFile, dbFile }) {
         takeSnapshot: () => snapshot(dbFile),
         signal: controller.signal,
         onQr: (url) => {
-          qrSvg = renderToStaticMarkup(
-            React.createElement(QRCodeSVG, { value: url, size: 260 }),
-          );
+          qrSvg = renderQrSvg(url, 260);
           state = { state: 'waiting' };
         },
         onStatus: (next) => {
@@ -410,4 +417,4 @@ if (require.main === module) {
     process.exitCode = 1;
   }
 }
-module.exports = { boundedFetch, runLogin, page };
+module.exports = { boundedFetch, runLogin, page, renderQrSvg };

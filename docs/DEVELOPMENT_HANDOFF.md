@@ -1,5 +1,15 @@
 # 公众号级列表发现主线（2026-10-02）
 
+**SVG修复已实际通过：**Antigravity任务agy-985194a2已完成代码，抽取`renderQrSvg`并显式xmlns，真实研究服务onQr复用同一函数，授权URL/门禁不变。总控已审核diff，带固定SDK缓存登录/resolver联合19项回归全通过（CI无cache时3项SDK Mock跳过）。使用该实际函数的纯本机Mock HTTP页、相同SVG MIME及img-src self限制，通过CUA核浏览器img complete=true、naturalWidth/Height=260×260，并亲自检查截图中的完整黑白二维码；没有发腾讯请求。该阶段验证了独立SVG渲染，未宣称真实手机扫码授权完成。本人旧9346/owner-05仍运行旧代码，该次最终poll停止：ticket/qr各1、poll17，全408，无exchange/mobile/resolver，生产全部字段仍等于Web登录后基线。下一步先提交push修复，再由Agent启动新空owner-06，明确交本人生成/扫一扫；实际授权后的页面和尺寸再核，不能使用旧进程验证新源码。
+
+**二维码显示核验纠错（当前最高执行点）：**本人提供owner-05截图，img是破图占位；总控之前依据hasQr=true和DOM图片节点称“二维码显示成功”，检查不完整，该表述撤回。真实QR接口69,035字节/errcode0和SDK requestQr通过仍成立，但不能代表浏览器渲染。实际浏览器img complete=true、naturalWidth/naturalHeight均0；本机/qr.svg返回200、image/svg+xml、3,971字节、根svg缺少SVG xmlns。现有qrcode.react3.2内联SVG渲染器转独立图片时未补XML命名空间，这是当前明确渲染故障。尚不能把手机没有提示归因于本人；owner-04的显示成功同样未经图像尺寸验证，不作为渲染验收。
+
+Antigravity/Gemini High实际修复任务agy-985194a2已派发并收到上述证据，要求最小命名空间修复、真实渲染器离线回归、只更新OWNER_SDK_RESOLVER_VALIDATION，总控审核及纯本机Mock图片浏览器naturalWidth>0/可见二维码确认后同步文档/Git。不改变QR授权URL语义、不请求腾讯或重启生产；修好前不再要求本人扫码。owner-05最终poll/是否停止以私有result核对，不覆盖目录、不自动重放；SDK mobile与resolver仍缺。先解决可见二维码，再继续公众号完整近期发现主线。
+
+**本人操作说明与当前派发：**本人反馈“手机没有接收到任何东西，需要扫码可以告诉我”。正常SDK不会向手机自动推送任务，需要电脑入口点击生成，再用同一微信“扫一扫”扫描电脑二维码并在手机确认。总控此前“手机端反馈”的表述不够直接，已澄清；不把owner-04等待截止归因于二维码协议错误。本人现已准备，Antigravity/Gemini High新入口任务agy-ea6e51b8正在准备新的空owner-05目录；不覆盖owner-04，不自动点击或请求腾讯。入口是否ready须核listener、HTML及idle零请求，打开后直接明确本人扫码步骤，避免等待研究/文档使本人误以为手机会自动收到内容。
+
+只读审核agy-d310958d已完成：真实qrcode是对象，含qrcodebase64（长度62,388）和qrcodelength；原SDK requestQr仅取uuid并返回正常源码构造的confirmUrl，包装器按该confirmUrl生成SVG。未执行原生二维码离线解码，内容等价性未证明，也没有确定扫码失败原因；不称“无解码库”或“原二维码错误”。总控核系统Python cv2/pyzbar缺失，PIL/numpy可用，此核对不代表所有环境都无解码能力。未安装或请求网络，未修改SDK/二维码语义。当前优先本人实际正常扫码，再推进主线。最新文档阶段cd9a370已push且[CI 36966055078](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36966055078)全成功，源码阶段f5815b1不变。
+
 **最新终态覆盖下文waiting：**owner-04于2026-10-02 04:36:21Z开始，04:41:21Z写入失败result，stage=poll、productionUnchanged=true。实际ticket/qr各1次HTTP200（95/69,035字节），正常poll17次HTTP200，每项仅32字节且业务状态均wx_errcode=408；未出现404已扫码/405已确认，没有exchange、新mobile或resolver。与原SDK5分钟截止一致；不能断言本人未扫码或二维码内容错误，手机端过程尚待本人反馈。二维码生成/真实大小门禁修复已验证，正常移动认证仍未完成；入口已停止，不自动重启或覆盖owner-04。原始证据、完整计数留私有目录，旧生产全字段保护通过。
 
 总控已问本人实际手机扫码到哪一步，同时派Antigravity/Gemini High只读离线审核agy-d310958d，对照原SDK/CLI正常confirmUrl用法与真实qrcode字段，不输出二维码内容、UUID或URL值，不请求腾讯、不安装库、不改代码。收到本人过程及具体源码证据后再定新正常验证；没有mobile之前不发resolver、不清旧停止。下文waiting为结果写入前的观察，已过期，不代表现在仍能扫码。

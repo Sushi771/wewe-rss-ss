@@ -4,6 +4,10 @@
 
 ## 本人准备 SDK 扫码后的实际失败与诊断修正
 
+SVG缺命名空间已由Antigravity修复：服务与测试共用renderQrSvg并显式xmlns，19项带SDK缓存联合回归全通过。总控在纯本机Mock页用该实际函数验证image/svg+xml外部图片、相同img-src self，实际自然宽高260×260并看截图确认完整QR，零腾讯请求。旧owner-05最终ticket/qr各1、poll17均408、无交换/mobile/resolver，全部生产字段不变；旧9346服务不含新修复，不再让本人使用它。修复与交接同阶段commit/push后才准备新本人入口，正常手机确认与完整近期主线尚待实测。
+
+显示验收纠错：owner-05本人截图是破图，当前DOM img加载结束但naturalWidth/Height=0；/qr.svg为200/image/svg+xml/3,971字节却缺SVG命名空间。此前hasQr和DOM image节点只能证明生成状态，不能证明二维码显示；owner-04“渲染通过”表述撤回。真实上游QR69,035字节解析通过仍有效。Antigravity实际修复agy-985194a2只补有据SVG命名空间与回归，总控须在纯本机Mock页实际核图像尺寸/可见码后再交本人，禁止新腾讯/生产写入或改变授权语义。本人已经明确愿意扫码，不能再用手机等待作为渲染问题的解释。
+
 owner-04最终停在poll：开始04:36:21Z、结果04:41:21Z（5分钟）；ticket/qr各1次200，qr69,035字节有效且页面二维码已展示；17次正常poll均200/32字节/wx_errcode408，没有404/405/exchange、新mobile或resolver。生产全部字段不变。手机端是否扫码/确认尚待本人反馈，不能推断人为遗漏或二维码内容错误；下文waiting为历史观察，入口已停，不自动重开。Gemini只读离线审核agy-d310958d检查原SDK confirmUrl显示用法与qrcode字段，禁止联网/安装/修改或公开二维码内容；此审核尚无结论。
 
 实际QR验证已通过：修复f5815b1成功push，远端SHA一致，CI36964883974全成功。Antigravity任务agy-0d8d4f06完成owner-04/PID15932/127.0.0.1:2504准备，总控idle零请求检查后将页面交本人。随后真实qr69,035字节私存，JSON errcode=0且非空uuid，SDK requestQr与本机二维码渲染通过，state=waiting/hasQr=true；正常poll已开始。仅列字段名，不公开uuid/qrcode等值。SDK最终结果/new mobile尚待本人手机确认与私有result核对，resolver尚未请求。此新回包证明本次旧64KiB门禁过小，不推定旧owner-02/03回包内容。入口短期有效，下一会话先核私有result而非重新派发扫码。
