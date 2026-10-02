@@ -1,10 +1,14 @@
-# 自建订阅当前断点（2026-10-02）
+# 自建订阅当前断点（2026-10-03）
 
-**本轮收敛：**第一方阅读器源码在 `-2041` 时由本人完成腾讯验证码，并将回调的 `ticket`、`randstr` 分别放入 `x-wr-ticket`、`x-wr-randstr` 后重发；现有两次 direct Web 续期均无 ticket，因此不再仅为取票重复扫码，下面已准备的同会话 QR 实验暂缓。Antigravity 对公开登录脚本的离线比对补齐了可选 OTP 查询参数，最小修正后定向测试 7/7；这没有取得新票据或文章。`/mp/list` 仍只有端点清单，尚无实际 APK 调用与回包证据；`/mp/chapters` 是此前目标号已测 `-2041` 的路径，不重试。持续订阅未恢复。
+**本轮收敛（2026-10-03）：**第一方阅读器在 `-2041` 时由本人完成腾讯验证码，将回调 `ticket`、`randstr` 用于当次请求重试；KOReader 验证脚本的“有新 ticket 则成功”是预期分支，未附成功实测输出。本次本人第三次正常扫码走公开 Skill 脚本同序、同内存 Cookie 会话：`userInfo`、`apikeyGet`、续期均通过，续期仍无 `x-wr-ticket`，以 `FRESH_TICKET_MISSING` 停止；没有请求文章列表/正文或写生产库。持续订阅未恢复。
+
+**下一执行入口：**官方墨水屏 2.1.2 APK 的 `classes10.dex` 明确 `MpService.syncMpList(update)` 调用 `syncArticles()`，继而 `MpRemoteService.getArticles` 发 `GET /storyfeed/getCardArticles?channel=901301&type=0&count=50`；首屏不带 `kkOffset/kkSearchId`，后续由回包提供这两个游标。`MpCardArticles` 包含 `articles/hasMore/kkOffset/kkSearchId`，文章项有 `bookId/reviewId/createTime`。`createTime` 暂不作为已核发布时间；是否覆盖目标号、是否能持续更新尚待真实回包。`/mp/list?listType=0` 实际为收藏列表，`listType=1` 为浮窗列表；此前仅凭 enum ordinal 将 0 当更新流的推断撤回，未据此发请求。`/mp/chapters` 是此前目标号已测 `-2041` 的路径，不重试。Antigravity 负责最小只读首屏探针，Codex 审查后仅一次请求，筛目标号前 5 篇，无生产写入。
+
+**首屏实测：**Antigravity 通过 MCP 返回并修正 `scripts/research/discovery-eink-storyfeed.cjs`，4 项定向离线测试及真实配置零网络预检通过。复用固定 SDK 的 `vid/accessToken` 与 EInk versionHeaders（未静态证实该官方 Ktor 客户端的完整认证 interceptor）作一次新端点实验，HTTP 401、60 字节，私有 JSON 明确 `errCode=-2012`（登录过期），没有文章。随后本人手动完成 owner-07 正常 SDK 授权：账号/设备与 owner-06 相同、token 不同、capturedAt 更新，授权器报告生产不变。总控以这些条件、旧认证停止结果及旧标记为门禁，复用同一 Antigravity 探针并指定固定 owner-07 私有路径，仅一次 GET 返回 HTTP 200、56 字节，`articles=[]/hasMore=false`，总文章 0/目标号 0；不能算订阅恢复。`storyfeed-attempt.json`、`storyfeed-owner07-attempt.json` 及两处原包/摘要均保留，不清除或重发。探针无 SQLite 访问或生产写入。下一步仅离线核该流的关注/收藏条件与目标号覆盖依据。只通过 MCP 指导 Antigravity，不操作本人电脑界面；当前 Codex 窗口继续承接。
 
 本人本轮已完成两次正常 direct Web 二维码确认，均为目标 owner VID。首次 `/web/login/renewal` 返回成功但未给 `x-wr-ticket`，旧一次性脚本依其票据门禁停在 `RENEWAL_TICKET_MISSING`，未发列表请求。固定公开客户端将 ticket 写成可选请求头，故以独立标记与新扫码做第二次低频实验：续期后无 ticket 仍带更新 Cookie 只请求一次 `GET /web/mp/articles?bookId=MP_WXS_3895431412&maxIdx=0&count=5`，真实返回 `errCode=-2041`、无 reviews，状态 `LIST_VERIFICATION_REQUIRED`，0 篇、0 正文、0 生产写入。维护版公开验证脚本恰好预期无 ticket 的列表返回 `-2041`；因此当前核心缺口是**如何在本人正常登录后取得有效票据**，不能靠改 `offset` 或无票据重发。两次私有运行目录和全局标记均保留；不清标记、不重放同一路径。此结果仅限本账号、本目标号和此时的 Web 流程，持续订阅仍未恢复。
 
-公开登录脚本还先访问 `/r/weread-skills`，并用同一 Cookie 会话完成扫码、`userInfo`、`apikeyGet` 和续期；本项目此前的独立 Axios 请求丢掉各阶段 Set-Cookie。按固定源码同序的隔离研究入口 `scripts/research/probe-owner-skills-session-five.cjs` 已完成，凭据及 API key 仅留内存；新票据缺席即停，存在才单次取首屏 5 条，并留最多 5 分钟供显式单篇正文验证。离线 6/6 与零网络本机预检通过，真实扫码与票据结果未执行。这是待测条件，不保证票据一定签发。
+公开登录脚本先访问 `/r/weread-skills`，用同一 Cookie 会话完成扫码、`userInfo`、`apikeyGet` 和续期；本项目此前的独立 Axios 请求丢掉各阶段 Set-Cookie。按固定源码同序的隔离入口 `scripts/research/probe-owner-skills-session-five.cjs` 已完成本次实测：Cookie 名称从登录后的四种变为续期后的 `wr_pf/wr_ql/wr_rt/wr_skey/wr_vid`，但响应没有 ticket；私有一次性标记和脱敏停止结果保留，不重跑同一条件。此前离线 6/6 与零网络预检通过。
 
 目标号已补录两篇真实漏文，生产现为 1 账号、12 订阅、1450 文章，RSS 可读第二篇正文及 39 张内嵌图片；这仍是单篇补录，不是持续更新。按本人最新要求，接下来只取首屏前几篇核对订阅链路，不再重复整包和全库演练。固定公开源码的移动 `/review/single` 返回详情及原文地址，不能把 `review.content` 当完整正文；现有 owner-06 授权下已严格单次请求该端点，HTTP 401，私有防重放标记已保留，生产数据不变，不重发。另一条来源明确的条件是正常 direct Web 登录保存 `wr_rt`，随后显式 `/web/login/renewal` 取得 `x-wr-ticket`/`x-wrpa-0` 再读 `/web/mp/articles`；本轮只完成代码和离线门禁，新条件尚无目标账号成功回包。旧 mobile→Web renewal 曾返回 -2013 且无票据，不与新路径混称。
 
