@@ -24,7 +24,7 @@ function publish(root, name, value) {
   });
 }
 
-function boundedFetch(fetchImpl, deviceId, audit) {
+function boundedFetch(fetchImpl, deviceId, audit, onResponse = () => {}) {
   const counts = { ticket: 0, qr: 0, poll: 0, exchange: 0 };
   const addresses = {
     'https://i.weread.qq.com/wxticket': 'ticket',
@@ -64,8 +64,13 @@ function boundedFetch(fetchImpl, deviceId, audit) {
     } else if (init.method && init.method !== 'GET') throw Error('method_gate');
     const response = await fetchImpl(input, init);
     // Audit only categories/counts: no UUID, wx_code, request headers or tokens.
-    audit.push({ phase, httpStatus: response.status, attempt: counts[phase] });
-    if (response.status !== 200) throw Error('upstream_rejected');
+    const entry = {
+      phase,
+      httpStatus: response.status,
+      attempt: counts[phase],
+      outcome: 'reading',
+    };
+    audit.push(entry);
     const reader = response.body?.getReader();
     const chunks = [];
     let bytes = 0;
@@ -76,6 +81,7 @@ function boundedFetch(fetchImpl, deviceId, audit) {
         if (next.done) break;
         bytes += next.value.length;
         if (bytes > 65536) {
+          entry.outcome = 'body_too_large';
           void reader.cancel().catch(() => {});
           throw Error('response_size_gate');
         }
@@ -85,7 +91,20 @@ function boundedFetch(fetchImpl, deviceId, audit) {
       reader?.releaseLock();
     }
     const raw = Buffer.concat(chunks);
+    entry.bytes = raw.length;
+    entry.outcome = 'saving_evidence';
+    // Private bytes only, before interpretation; never replay to recover evidence.
+    await onResponse(phase, counts[phase], raw);
+    if (response.status !== 200) {
+      entry.outcome = 'http_rejected';
+      throw Error('upstream_rejected');
+    }
+    entry.outcome = 'parsing_json';
     const data = JSON.parse(raw.toString('utf8'));
+    entry.outcome = 'checking_business';
+    for (const key of ['errCode', 'errcode'])
+      if (Number.isSafeInteger(data?.[key]))
+        (entry.businessCodes ??= {})[key] = data[key];
     if (
       !data ||
       typeof data !== 'object' ||
@@ -96,8 +115,11 @@ function boundedFetch(fetchImpl, deviceId, audit) {
           typeof v === 'string' &&
           /captcha|验证码|频繁|安全验证|环境异常/i.test(v),
       )
-    )
+    ) {
+      entry.outcome = 'business_rejected';
       throw Error('upstream_business_rejected');
+    }
+    entry.outcome = 'accepted_by_guard';
     return new Response(raw, {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -129,7 +151,17 @@ async function runLogin({
   const audit = [];
   let stage = 'ticket';
   try {
-    const guarded = boundedFetch(fetchImpl, deviceId, audit);
+    const guarded = boundedFetch(
+      fetchImpl,
+      deviceId,
+      audit,
+      (phase, n, raw) => {
+        fs.writeFileSync(path.join(root, `response-${phase}-${n}.bin`), raw, {
+          flag: 'wx',
+          mode: 0o600,
+        });
+      },
+    );
     const options = {
       signal,
       timeoutMs: 20000,
@@ -179,6 +211,8 @@ async function runLogin({
     });
     return { state: 'completed' };
   } catch {
+    // requestQr performs both ticket and qr requests; don't mislabel qr as ticket.
+    if (stage === 'ticket' && audit.length) stage = audit.at(-1).phase;
     const after = takeSnapshot();
     publish(root, 'result.json', {
       success: false,
@@ -192,7 +226,7 @@ async function runLogin({
 
 function page(nonce) {
   return `<!doctype html><meta charset="utf-8"><title>文章解析验证：正常微信授权</title>
-<style>body{font-family:system-ui;max-width:620px;margin:70px auto;padding:24px;line-height:1.7}button{padding:12px 22px}img{display:block;margin:24px 0}</style>
+<style>body{font-family:system-ui;max-width:620px;margin:70px auto;padding:24px;line-height:1.7}button{padding:12px 22px}img{display:block;margin:24px 0}img[hidden]{display:none}</style>
 <h2>文章解析验证：正常微信授权</h2><p>这次扫码提供文章链接解析所需的移动会话。刚才原账号页取得的是 Web 会话。此研究入口只保存本机私有凭据，不写项目账号或文章。</p>
 <p>使用刚才同一个微信读书账号。在手机微信中查看并确认官方授权。</p>
 <button id="start">生成本次二维码</button><p id="status">尚未向腾讯发起请求</p><img id="qr" width="260" height="260" hidden>

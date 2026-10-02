@@ -213,6 +213,68 @@ test('the local status page starts only on an explicit click and contains no cre
   assert(!html.includes('refreshToken'));
 });
 
+test('a QR business rejection retains private bytes without regeneration or public secrets', async () =>
+  fixture(async (root) => {
+    let requests = 0;
+    const raw = JSON.stringify({
+      errcode: -99,
+      errmsg: 'mock private signature, not a public diagnostic',
+    });
+    const result = await runLogin(
+      options(root, {
+        fetchImpl: async () => {
+          requests++;
+          return new Response(requests === 2 ? raw : '{}');
+        },
+      }),
+    );
+    assert.deepEqual(result, { state: 'stopped', stage: 'qr' });
+    assert.equal(requests, 2);
+    assert.equal(
+      fs.readFileSync(path.join(root, 'response-qr-1.bin'), 'utf8'),
+      raw,
+    );
+    const saved = JSON.parse(fs.readFileSync(path.join(root, 'result.json')));
+    assert.equal(saved.audit[1].outcome, 'business_rejected');
+    assert.deepEqual(saved.audit[1].businessCodes, { errcode: -99 });
+    assert(saved.productionUnchanged);
+    assert(!JSON.stringify(saved).includes('mock private signature'));
+    assert(!fs.existsSync(path.join(root, 'mobile-session.json')));
+  }));
+
+test('non-JSON evidence is saved once and a failed evidence write prevents SDK progression', async () =>
+  fixture(async (root) => {
+    let requests = 0;
+    const raw = '<html>mock private challenge</html>';
+    const result = await runLogin(
+      options(root, {
+        fetchImpl: async () => {
+          requests++;
+          return new Response(raw);
+        },
+      }),
+    );
+    assert.equal(result.state, 'stopped');
+    assert.equal(requests, 1);
+    assert.equal(
+      fs.readFileSync(path.join(root, 'response-ticket-1.bin'), 'utf8'),
+      raw,
+    );
+    const saved = JSON.parse(fs.readFileSync(path.join(root, 'result.json')));
+    assert.equal(saved.audit[0].outcome, 'parsing_json');
+    assert(!JSON.stringify(saved).includes('mock private challenge'));
+    const guarded = boundedFetch(
+      async () => response(),
+      identity.deviceId,
+      [],
+      () => {
+        throw Error('mock disk full containing private context');
+      },
+    );
+    await assert.rejects(guarded(URLs[0], REQUEST));
+    await assert.rejects(guarded(URLs[0], REQUEST), /request_budget_gate/);
+  }));
+
 test(
   'hash-pinned real SDK primitives obey the wrapper with all transport mocked',
   { skip: !process.env.OWNER_SDK_CACHE },

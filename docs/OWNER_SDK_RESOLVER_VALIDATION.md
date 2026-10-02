@@ -16,6 +16,8 @@
 
 ## 可复现准备与测试
 
+运行目录必须先创建为新的空目录（safePrivateRoot 使用 realpath 核验现有目录）；不能覆盖旧运行。2026-10-02 总控首次遗漏建目录，启动 setup_stopped、上游0请求；创建新空目录后成功 idle。此为启动用法错误，不是微信认证拒绝。
+
 需本项目已安装依赖、Node24（SQLite 只读核对）、既有 TypeScript 5.9.3、qrcode.react 3.2.0 与 React18。SDK 原源码可从上述固定提交获取；仅准备脚本列出的六个 TS 文件及 MIT LICENSE 参与编译，无 npm 安装或包生命周期脚本。
 
 ```powershell
@@ -24,6 +26,7 @@ node scripts/research/prepare-owner-sdk-cache.cjs <ABS_FIXED_SDK_SOURCE_ROOT> <A
 node --test scripts/research/owner-sdk-login-once.spec.cjs
 # 设置 OWNER_SDK_CACHE 为准备好的私有缓存后，再验原 SDK 原语的纯 Mock 流程与取消。
 node scripts/research/owner-sdk-login-once.cjs --plan
+New-Item -ItemType Directory -Path <ABS_EMPTY_PRIVATE_RUN_DIR> -ErrorAction Stop
 node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_EMPTY_PRIVATE_RUN_DIR> <ABS_SOURCE_CONFIG> <ABS_OLD_RECOVERY_JSON> <ABS_PRODUCTION_DB>
 ```
 
@@ -32,6 +35,10 @@ node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_
 已验证：9 项离线测试通过，包括原 SDK 源码编译原语的纯 Mock 正常路径及取消零请求；模拟账号错配、拒绝、过期、DB变化、重复/越界请求、回包上限和挑战页。CI 在无私有 cache 时只运行 7 项包装器测试，2 项原 SDK 集成 Mock 明确跳过，不下载 SDK、不接触腾讯。一次复合门禁测试原先因重用已拒绝计数器而断言错误；改为独立正常前序后测试 refresh 禁止，门禁未放宽。准备/测试期间生产全部表哈希不变。
 
 ## 下一次真实验证
+
+2026-10-02 本人准备并点击 owner-02 入口后，实际 ticket/qr 各一次HTTP200，但未显示二维码；无 poll/exchange、新mobile或resolver请求。旧 result.stage=ticket 为 requestQr 两步共用粗阶段，不能视为确切失败端点；当时未留原回包，无法判定业务码、字段格式或URL门禁原因，不重复请求补证。生产不变。
+
+已补私有取证：完整且不超过64KiB的响应先独占保存 response-阶段-次数.bin（包括非200/非JSON/业务拒绝），再解释。流读取或过大响应可能无法完整保存；不为留证突破限额。原始内容可含签名、UUID、授权码或新token，全部只能留Git忽略的本机私有目录，不通过HTTP暴露，不写日志。脱敏audit记录固定outcome、字节数和整数errCode/errcode；stage在requestQr失败时采用最后真实请求类别。不能把accepted_by_guard视作SDK requestQr通过。证据落盘失败也停止，不续期、不重发；15项离线回归通过，CI无cache时2项原SDK测试仍明确跳过。本次诊断修改没有解除旧限制或提供新认证依据；没有自动重开owner-03。
 
 单次传输已准备为 `scripts/research/probe-owner-review-once.cjs`；`--plan` 零请求，只有 `--execute <ABS_SUCCESSFUL_SDK_RUN_DIR>` 才执行。正常扫码结果须成功、生产未变、同账号/VID/旧设备且30分钟内；加载哈希核验的原 SDK profile，不导入 mobile transport/TokenManager。自主选本轮五页搜索第一项，不传验收种子。发送原始 requestUrl，不将规范化存储 URL 替代请求 URL。全局私有 resolver-attempt.json 在请求前独占写入并 fsync，任何进程重复执行都被阻止，不删除；单次 HTTPS POST、20秒超时、64KiB流读取、不跳转、不续期、不重放。原始响应先私存，再作严格身份解析；解析失败也不重发。所有生产表和原配置/Web会话/旧停止/SDK新会话/发现证据哈希再次核对。后续本地I/O异常只输出请求数未知，不虚报零请求。4项纯 Mock测试通过，涵盖真实请求形状、原URL、先落标记/重复拒绝、认证/挑战/格式/身份失败、过大回包及生产变动。
 

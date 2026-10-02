@@ -1,5 +1,11 @@
 # 公众号级列表发现主线（2026-10-02）
 
+最新接续起点为已推送 `429e9f3a28ec24cd0de482440f66d7b3008e58d3`，其 [CI 36914671344](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36914671344) 全部成功。本人明确回复可 SDK 扫码后，开新隔离 owner-02 入口；本人点击生成后实际 wxticket/qrconnect 各一次 HTTP200，但 requestQr 未完成，无二维码、无轮询、无 login 交换、无新 mobile、resolver 仍0请求。旧日志 stage=ticket 是覆盖两步的粗阶段，不能据此说只请求了 ticket；业务回包当时未保存，具体拒绝/格式/URL校验原因未知，不能补发来补证。本轮未自动生成第二码、续期或重试旧目录。
+
+已修正诊断：每次受限回包先独占保存到本机私有 response-阶段-次数.bin，再解析；脱敏审计仅记录 HTTP/字节/固定校验阶段/整数业务码，不输出 UUID、授权码、token 或业务原文。requestQr 失败按最后真实请求区分 ticket/qr，保存失败也停止，页面隐藏无效二维码占位框。15项纯离线 SDK/单次resolver回归通过（含固定原SDK Mock），不是线上认证成功。生产所有表字段与扫码前/既有基线相同，账号1、订阅12、文章1448保持；原停止文件未改。SDK缓存和凭据保持私有。
+
+本轮 Antigravity 两次固定 Gemini 3.8 Flash (High) 派发 agy-4e9aba4b / agy-64f38892 均在 SendUserCascadeMessage HTTP400失败，不是正在开发；list_available_models 仍成功，IDE连接及模型标签可见，但任务执行不可据此称正常。总控完成修正、测试与同步，不将失败任务输出当审核结果。下一步需要取得具体SDK业务响应或其他新的合法认证依据，再判断是否允许一次新的正常尝试；本轮仅补诊断，不解除已有停止、不因诊断增强自动重发相同请求。完整近期覆盖仍独立缺证。阶段最新精确SHA及CI用当前Git/GitHub核对。
+
 公开来源审计已推送e968016，首次CI 36913798292在Format check失败，其他代码检查/测试因此未运行；不能称该次CI成功。已修正研究表格格式，本地完整 `pnpm fmt.check` 最终通过；首次本地检查另提示WEREAD研究文档，格式化后该文件无Git差异。此修复的实际内容差异只有文档排版与失败记录，不改采集代码或生产。修复提交及最新CI以GitHub/当前HEAD核对，其他外部阻塞保持。
 
 最新审计：main=19b5eb0起点干净，远端一致，[该提交CI 36911718057](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36911718057)全部成功。再次只读核生产所有字段不变，SDK attempt/mobile-session/resolver marker仍不存在，SDK入口监听已关闭、原4000 PID27668正常。四个既有上游及一次近期GitHub查询的10个匹配仓库已有限复核；新exporter提交只改README，两个新getmsg实现没有新合法认证条件，其中当前公开RSS样本为空，不重试旧停止。详细固定版本、源码证据和Agent纠偏见 [COMPLETE_SOURCE_RESEARCH.md最新段](COMPLETE_SOURCE_RESEARCH.md)。

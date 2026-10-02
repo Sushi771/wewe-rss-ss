@@ -2,6 +2,14 @@
 
 用户本轮要求完整替代 `weread.111965.xyz / Wechat2RSS`，先解决多篇近期发现、批量增量和分页。所有有效阶段同步代码、开发和产品文档、测试及 GitHub；保留登录、正文图片、SQLite 旧数据和停止记录。
 
+## 本人准备 SDK 扫码后的实际失败与诊断修正
+
+起点429e9f3，工作树干净。首次启动因总控未创建新空运行目录setup_stopped，上游0请求；创建owner-02空目录后入口idle、0请求并打开。本人点击按钮后wxticket/SDK qrconnect各HTTP200一次，但未得到可显示二维码，随后停止；poll/login/resolver均0，无新mobile。旧stage=ticket共用了requestQr两步，不是确切端点；原业务回包缺失，无法追溯具体失败门禁，不重发补证。原result/audit/attempt留在Git忽略私有目录，生产所有字段不变。
+
+总控修正受限原回包私存后再解析、固定校验阶段/整数业务码审计及requestQr阶段区分；私存失败/超限/HTTP拒绝/业务拒绝均不继续。隐藏二维码占位框，正常本人按钮及原生产登录不改。新增业务拒绝、非JSON与落盘失败回归，合并固定原SDK纯Mock及resolver共15项通过，上游0请求；不是实际认证通过，不自动重开入口。新事实同步开发交接、研究授权说明与产品任务。后续先找具体业务证据/新合法条件，完整近期来源仍独立缺证。
+
+固定Gemini 3.8 Flash (High) 两任务agy-4e9aba4b、agy-64f38892分别3个和1个上下文，均在SendUserCascadeMessage HTTP400失败。随后list_available_models成功，14个模型含指定High标签；可读连接不证明派发执行正常。未切其他模型、未自动批准IDE未知权限、未提交本机MCP包改动；没有可供采纳的Agent结论，也没有后台任务在开发。最新阶段SHA用Git及远端核对，不内嵌文档自身提交号。
+
 ## 已核对的起点
 
 - 仓库 `Sushi771/wewe-rss-ss`，分支 `main`，起点 `d6eb25f`。恢复会话新增交接与历史分支同步已经在 GitHub，不能重复当作本轮功能成果。

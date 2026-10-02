@@ -2,6 +2,8 @@
 
 ## 2026-10-02 研究续接结论
 
+最新真实 SDK 尝试：本人点击生成后 wxticket/qrconnect 各HTTP200一次，但requestQr未完成，无二维码、poll/login/mobile和resolver。旧回包缺失，不能区分具体业务拒绝与格式/URL校验失败；已补私有原回包取证及准确阶段诊断，15项纯离线回归通过，没有自动重试或解除旧停止。原“腾讯0请求”是本次尝试前历史状态；具体接续以 [DEVELOPMENT_HANDOFF.md](DEVELOPMENT_HANDOFF.md) 入口和 [正常授权验证说明](OWNER_SDK_RESOLVER_VALIDATION.md) 为准。完整近期来源仍缺证。
+
 已完成原 SDK QR 原语的固定版本/哈希复用及隔离手工交接准备（9项纯 Mock 测试、独立审查通过），没有腾讯真实请求或生产写入。原 Web扫码已经完成，但不能代替 mobile accessToken；仅本人正常 SDK 授权后，才对本轮自主发现的一个 URL 做尚未实测的 /mp/getreviewid 验证。它不返回账号文章目录、不解除旧目录停止；完整近期覆盖仍须另证。具体正常认证条件、限额及下一项单次核验见 [OWNER_SDK_RESOLVER_VALIDATION.md](OWNER_SDK_RESOLVER_VALIDATION.md)。
 
 最新状态以 [DEVELOPMENT_HANDOFF.md](DEVELOPMENT_HANDOFF.md) 和 [本轮推进记录](ACCOUNT_DISCOVERY_PROGRESS_20261002.md) 为准。下文候选与下一步均有日期，不代表可重新请求：`/book/articles` 已有 401/-2012，目录已 -2041，Gateway、公众号后台及匿名原文也已有停止记录。此次有限公开源码核查未找到解除这些停止项的新具体依据，不能推导全球或永久不可用。
