@@ -237,12 +237,14 @@ class SkillsSession {
     this.startedAt = Date.now();
     return `${ORIGIN}/web/confirm?uid=${encodeURIComponent(data.uid)}`;
   }
-  async poll() {
+  async poll(otp = '') {
     if (!this.uid || Date.now() - this.startedAt > 120000 || this.polls >= 20)
       reject('LOGIN_TIMEOUT');
     this.polls++;
+    const otpSuffix = `=${encodeURIComponent(otp)}`;
+    const query = `uid=${encodeURIComponent(this.uid)}&otp${otpSuffix}`;
     const { data } = await this.json(
-      `${ORIGIN}/api/auth/getLoginInfo?uid=${encodeURIComponent(this.uid)}&otp`,
+      `${ORIGIN}/api/auth/getLoginInfo?${query}`,
       { stage: 'loginInfo' },
     );
     if (data.succeed === true) {

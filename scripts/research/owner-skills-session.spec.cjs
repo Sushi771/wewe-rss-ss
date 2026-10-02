@@ -76,6 +76,10 @@ test('one temporary jar carries all same-origin cookies through source order and
     ],
   );
   assert.match(calls[1].options.headers.Cookie, /ptcz=page/);
+  assert.equal(
+    calls[2].url,
+    'https://weread.qq.com/api/auth/getLoginInfo?uid=offline-uid-123&otp=',
+  );
   assert.match(calls[2].options.headers.Cookie, /RK=uid/);
   assert.match(calls[3].options.headers.Cookie, /pgv_pvid=poll/);
   assert.equal(calls[3].options.headers['X-Vid'], '123');
@@ -155,5 +159,25 @@ test('cookie jar rejects alien domains and never exports values in names', () =>
     () =>
       jar.merge(new Headers([['Set-Cookie', 'x=1; Domain=evil.test; Path=/']])),
     /SET_COOKIE_DOMAIN_INVALID/,
+  );
+});
+
+test('qr login poll serializes explicit empty or provided otp matching weread.koplugin spec', async () => {
+  const calls = [];
+  const session = new SkillsSession(async (url, options) => {
+    calls.push({ url, options });
+    return response(JSON.stringify({ succeed: false, logicCode: 'WAITING_SCAN' }));
+  });
+  session.uid = 'offline-uid';
+  session.startedAt = Date.now();
+  await session.poll();
+  assert.equal(
+    calls[0].url,
+    'https://weread.qq.com/api/auth/getLoginInfo?uid=offline-uid&otp=',
+  );
+  await session.poll('1234');
+  assert.equal(
+    calls[1].url,
+    'https://weread.qq.com/api/auth/getLoginInfo?uid=offline-uid&otp=1234',
   );
 });

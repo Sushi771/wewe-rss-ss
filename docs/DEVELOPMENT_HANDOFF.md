@@ -1,5 +1,7 @@
 # 自建订阅当前断点（2026-10-02）
 
+**本轮收敛：**第一方阅读器源码在 `-2041` 时由本人完成腾讯验证码，并将回调的 `ticket`、`randstr` 分别放入 `x-wr-ticket`、`x-wr-randstr` 后重发；现有两次 direct Web 续期均无 ticket，因此不再仅为取票重复扫码，下面已准备的同会话 QR 实验暂缓。Antigravity 对公开登录脚本的离线比对补齐了可选 OTP 查询参数，最小修正后定向测试 7/7；这没有取得新票据或文章。`/mp/list` 仍只有端点清单，尚无实际 APK 调用与回包证据；`/mp/chapters` 是此前目标号已测 `-2041` 的路径，不重试。持续订阅未恢复。
+
 本人本轮已完成两次正常 direct Web 二维码确认，均为目标 owner VID。首次 `/web/login/renewal` 返回成功但未给 `x-wr-ticket`，旧一次性脚本依其票据门禁停在 `RENEWAL_TICKET_MISSING`，未发列表请求。固定公开客户端将 ticket 写成可选请求头，故以独立标记与新扫码做第二次低频实验：续期后无 ticket 仍带更新 Cookie 只请求一次 `GET /web/mp/articles?bookId=MP_WXS_3895431412&maxIdx=0&count=5`，真实返回 `errCode=-2041`、无 reviews，状态 `LIST_VERIFICATION_REQUIRED`，0 篇、0 正文、0 生产写入。维护版公开验证脚本恰好预期无 ticket 的列表返回 `-2041`；因此当前核心缺口是**如何在本人正常登录后取得有效票据**，不能靠改 `offset` 或无票据重发。两次私有运行目录和全局标记均保留；不清标记、不重放同一路径。此结果仅限本账号、本目标号和此时的 Web 流程，持续订阅仍未恢复。
 
 公开登录脚本还先访问 `/r/weread-skills`，并用同一 Cookie 会话完成扫码、`userInfo`、`apikeyGet` 和续期；本项目此前的独立 Axios 请求丢掉各阶段 Set-Cookie。按固定源码同序的隔离研究入口 `scripts/research/probe-owner-skills-session-five.cjs` 已完成，凭据及 API key 仅留内存；新票据缺席即停，存在才单次取首屏 5 条，并留最多 5 分钟供显式单篇正文验证。离线 6/6 与零网络本机预检通过，真实扫码与票据结果未执行。这是待测条件，不保证票据一定签发。
