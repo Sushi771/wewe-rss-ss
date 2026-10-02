@@ -1,6 +1,7 @@
 # 离线浏览器辅助订阅更新切片（2026-10-02）
 
 **优先级变更与执行切片：**用户明确调整最高优先级，要求“先让订阅更新跑通，证据后续再核验”，且明确本次更新优先于首轮证明 5 篇。本项目已在零腾讯请求、零 CDP/浏览器启动、零生产库写入且不清除旧停止的前提下，实现最小离线浏览器辅助更新切片：
+
 1. **证据与适配隔离：**独立创建 `browser-dom-adapter.ts`，定义专门的证据类型 `BrowserDomEvidence`（`source: 'owner-confirmed-browser-dom'`），严禁混淆为后台 HTTP 或复用 `official-public-original`。输入仅复用私有 `private-data/single-account-update-20260930/official-browser-dom.html` 及其哈希（`cdd899b8...`）与 `official-original-selection.json` 中的自主搜索候选 `WX_3895431412_2247493594_1`。
 2. **严格门禁与发布时间保真：**通过现有 `articleIdentity`、`articlePublishTime` 和 `articleContentHtml` 提取文章元数据与正文。发布时间严格提取自 DOM 内 `ct`（1790749883），严禁从搜索候选索引时间（1790749882）编造；清洗后的正文 HTML 达到 13,084 字符。
 3. **安全持久化与幂等验证：**在 `CollectionService` 中扩展离线演练接口 `replayBrowserDomUpdate`，通过现有 `saveVerifiedSearchPage` 保护逻辑，仅在带标记且隔离的 SQLite COPY 副本演练。隔离 CLI `scripts/research/replay-browser-dom-update.cjs` 首轮成功写入 1 篇目标文章（`created: 1, updated: 0`），次轮重复演练严格幂等（`created: 0, updated: 0`）；演练前后 `feeds`、`accounts` 及旧 1448 篇 `articles` 全字段哈希完全一致；生产数据库哈希字节级无变更；全局网络守卫拦截 0 次异常外联。

@@ -177,7 +177,9 @@ async function worker(stage, dir, copy) {
     const priorArticles = await prisma.article.findMany({
       where: { id: { in: replay.verified.map((v) => v.article.id) } },
     });
-    const priorById = new Map(priorArticles.map((article) => [article.id, article]));
+    const priorById = new Map(
+      priorArticles.map((article) => [article.id, article]),
+    );
     const missingBefore = replay.verified.filter(
       (entry) => !priorById.has(entry.article.id),
     ).length;

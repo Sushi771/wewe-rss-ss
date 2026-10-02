@@ -51,7 +51,9 @@ function guardNetwork() {
 function sameOld(before, after) {
   assert.deepEqual(after.feeds, before.feeds);
   assert.deepEqual(after.accounts, before.accounts);
-  const current = new Map(after.articles.map((article) => [article.id, article]));
+  const current = new Map(
+    after.articles.map((article) => [article.id, article]),
+  );
   for (const old of before.articles) assert.deepEqual(current.get(old.id), old);
 }
 
@@ -159,9 +161,13 @@ async function main() {
     rehearsal: args[1],
     backup,
   };
-  fs.writeFileSync(path.join(runDir, 'result.json'), JSON.stringify(summary, null, 2), {
-    flag: 'wx',
-  });
+  fs.writeFileSync(
+    path.join(runDir, 'result.json'),
+    JSON.stringify(summary, null, 2),
+    {
+      flag: 'wx',
+    },
+  );
   console.log(
     JSON.stringify({
       mode: summary.mode,
