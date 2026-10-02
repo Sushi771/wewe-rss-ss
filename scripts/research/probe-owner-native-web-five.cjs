@@ -17,7 +17,11 @@ const PRIVATE_ROOT = path.join(ROOT, 'private-data');
 const BOOK_ID = 'MP_WXS_3895431412';
 const NAME = '妈妈部落畅聊阁';
 const LIST_URL = `https://weread.qq.com/web/mp/articles?bookId=${BOOK_ID}&maxIdx=0&count=5`;
-const GLOBAL_MARKER = 'owner-native-web-five-attempt.json';
+// A fresh QR experiment for a successful renewal without a ticket. Preserve
+// the earlier ticket-required attempt and its private evidence unchanged.
+const GLOBAL_MARKER = 'owner-native-web-five-optional-ticket-attempt.json';
+const BODY_GLOBAL_MARKER =
+  'owner-native-web-five-optional-ticket-body-attempt.json';
 const MAX_LIST_BYTES = 2 * 1024 * 1024;
 const MAX_BODY_BYTES = 12 * 1024 * 1024;
 const sha = (value) => createHash('sha256').update(value).digest('hex');
@@ -198,7 +202,7 @@ function redactedSample(items) {
   }));
 }
 
-/** One fixed first-page GET. Caller must have marked renewal before invoking. */
+/** One fixed first-page GET, only after the caller's successful fresh renewal. */
 async function firstPageOnce({
   runDir,
   session,
@@ -208,7 +212,6 @@ async function firstPageOnce({
   ownerSessionCookie,
   fetchImpl = fetch,
 }) {
-  if (!ticket) throw new ProbeStop('RENEWAL_TICKET_MISSING');
   const cookie = ownerSessionCookie(session, ownerVid);
   writeOnce(path.join(runDir, 'list-attempt.json'), {
     endpoint: '/web/mp/articles',
@@ -224,7 +227,7 @@ async function firstPageOnce({
     signal: AbortSignal.timeout(20000),
     headers: {
       Cookie: cookie,
-      'x-wr-ticket': ticket,
+      ...(ticket ? { 'x-wr-ticket': ticket } : {}),
       ...(wrpa ? { 'x-wrpa-0': wrpa } : {}),
       Accept: 'application/json, text/plain, */*',
       Referer: 'https://weread.qq.com/',
@@ -273,7 +276,6 @@ async function fetchOneBodyOnce({
   if (
     !Array.isArray(allowedReviewIds) ||
     !allowedReviewIds.includes(reviewId) ||
-    !ticket ||
     !/^MP_WXS_3895431412_[A-Za-z0-9_~-]+$/.test(reviewId)
   )
     throw new ProbeStop('BODY_NOT_APPROVED_FROM_FIRST_PAGE');
@@ -287,7 +289,7 @@ async function fetchOneBodyOnce({
   }
   const cookie = ownerSessionCookie(session, ownerVid);
   writeOnce(
-    path.join(PRIVATE_ROOT, 'owner-native-web-five-body-attempt.json'),
+    path.join(PRIVATE_ROOT, BODY_GLOBAL_MARKER),
     {
       endpoint: '/web/mp/content',
       reviewIdSha256: sha(reviewId),
@@ -302,7 +304,7 @@ async function fetchOneBodyOnce({
     signal: AbortSignal.timeout(20000),
     headers: {
       Cookie: cookie,
-      'x-wr-ticket': ticket,
+      ...(ticket ? { 'x-wr-ticket': ticket } : {}),
       ...(wrpa ? { 'x-wrpa-0': wrpa } : {}),
       Accept: 'text/html,application/xhtml+xml,*/*',
       Referer: 'https://weread.qq.com/',
@@ -430,7 +432,7 @@ async function serveOnce(runDir) {
   privateDirectory(runDir, true);
   const ownerVid = ownerVidFromPrivateConfig();
   writeOnce(path.join(PRIVATE_ROOT, GLOBAL_MARKER), {
-    kind: 'owner-native-web-five',
+    kind: 'owner-native-web-five-optional-ticket',
     at: new Date().toISOString(),
     endpoints: [
       '/api/auth/getLoginUid',
@@ -554,7 +556,6 @@ async function serveOnce(runDir) {
           loginResult.webSession,
           ownerVid,
         );
-        if (!renewal.ticket) throw new ProbeStop('RENEWAL_TICKET_MISSING');
         held = {
           session: renewal.session,
           ticket: renewal.ticket,

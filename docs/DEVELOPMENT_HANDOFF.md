@@ -1,5 +1,7 @@
 # 自建订阅当前断点（2026-10-02）
 
+本人本轮已完成两次正常 direct Web 二维码确认，均为目标 owner VID。首次 `/web/login/renewal` 返回成功但未给 `x-wr-ticket`，旧一次性脚本依其过严门禁停在 `RENEWAL_TICKET_MISSING`，未发列表请求。固定公开客户端将 ticket 作为可选头，故以独立标记与新扫码做第二次低频实验：续期后无 ticket 仍带更新 Cookie 只请求一次 `GET /web/mp/articles?bookId=MP_WXS_3895431412&maxIdx=0&count=5`，真实返回 `errCode=-2041`、无 reviews，状态 `LIST_VERIFICATION_REQUIRED`，0 篇、0 正文、0 生产写入。两次私有运行目录和全局标记均保留；不清标记、不重放同一路径、不要求继续扫码。此结果仅限本账号、本目标号和此时的 Web 流程。下一步寻找有准确参数与鉴权时序公开依据的另一条列表路径，持续订阅仍未恢复。
+
 目标号已补录两篇真实漏文，生产现为 1 账号、12 订阅、1450 文章，RSS 可读第二篇正文及 39 张内嵌图片；这仍是单篇补录，不是持续更新。按本人最新要求，接下来只取首屏前几篇核对订阅链路，不再重复整包和全库演练。固定公开源码的移动 `/review/single` 返回详情及原文地址，不能把 `review.content` 当完整正文；现有 owner-06 授权下已严格单次请求该端点，HTTP 401，私有防重放标记已保留，生产数据不变，不重发。另一条来源明确的条件是正常 direct Web 登录保存 `wr_rt`，随后显式 `/web/login/renewal` 取得 `x-wr-ticket`/`x-wrpa-0` 再读 `/web/mp/articles`；本轮只完成代码和离线门禁，新条件尚无目标账号成功回包。旧 mobile→Web renewal 曾返回 -2013 且无票据，不与新路径混称。
 
 独立本机入口 `scripts/research/probe-owner-native-web-five.cjs` 已准备：本人正常扫码后，显式一次续期并只取目标号首屏 5 条；无新 ticket、认证拒绝或验证即停，原包仅存忽略目录，正文另需审过列表后显式单次请求。`--preflight` 实际加载依赖、渲染 QR 和试绑 loopback，零腾讯请求、未建运行目录或标记；定向离线测试 4/4。真实扫码、票据、列表和正文均尚未执行。

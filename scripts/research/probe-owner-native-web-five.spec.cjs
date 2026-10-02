@@ -10,6 +10,7 @@ const {
   LIST_URL,
   firstFive,
   firstPageOnce,
+  fetchOneBodyOnce,
 } = require('./probe-owner-native-web-five.cjs');
 
 const article = (n) => ({
@@ -129,7 +130,7 @@ test('one list GET uses fixed five-item query and fresh ticket, writes only priv
   }
 });
 
-test('missing renewal ticket prevents list network and marker', async () => {
+test('owner cookie failure prevents list network and marker', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-web-five-offline-'));
   try {
     let requests = 0;
@@ -140,16 +141,73 @@ test('missing renewal ticket prevents list network and marker', async () => {
         ownerVid: '123',
         ticket: '',
         wrpa: 'new-wrpa',
-        ownerSessionCookie: () => 'wr_vid=123',
+        ownerSessionCookie: () => {
+          throw Error('OWNER_COOKIE_INVALID');
+        },
         fetchImpl: async () => {
           requests++;
           throw Error('should not call');
         },
       }),
-      /RENEWAL_TICKET_MISSING/,
+      /OWNER_COOKIE_INVALID/,
     );
     assert.equal(requests, 0);
     assert(!fs.existsSync(path.join(dir, 'list-attempt.json')));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('successful renewal without ticket uses renewed cookie for one five-item list GET', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-web-five-offline-'));
+  try {
+    let requests = 0;
+    const renewedSession = { freshRenewal: true };
+    const input = {
+      runDir: dir,
+      session: renewedSession,
+      ownerVid: '123',
+      ticket: undefined,
+      wrpa: undefined,
+      ownerSessionCookie: (session, ownerVid) => {
+        assert.equal(session, renewedSession);
+        assert.equal(ownerVid, '123');
+        return 'wr_vid=123; wr_skey=renewed';
+      },
+    };
+    const answer = await firstPageOnce({
+      ...input,
+      fetchImpl: async (url, options) => {
+        requests++;
+        assert.equal(url, LIST_URL);
+        assert.equal(options.method, 'GET');
+        assert.equal(options.headers.Cookie, 'wr_vid=123; wr_skey=renewed');
+        assert(!Object.hasOwn(options.headers, 'x-wr-ticket'));
+        assert(!Object.hasOwn(options.headers, 'x-wrpa-0'));
+        assert(fs.existsSync(path.join(dir, 'list-attempt.json')));
+        return new Response(
+          JSON.stringify({
+            errCode: 0,
+            bookId: BOOK_ID,
+            reviews: [article(1)],
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    assert.equal(requests, 1);
+    assert.equal(answer.result.articleCount, 1);
+    assert.equal(answer.result.subscriptionRestored, false);
+    await assert.rejects(
+      firstPageOnce({
+        ...input,
+        fetchImpl: async () => {
+          requests++;
+          throw Error('should not call');
+        },
+      }),
+    );
+    assert.equal(requests, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -185,6 +243,76 @@ test('a fresh ticket without optional wrpa still performs one fixed list request
     assert.equal(answer.result.articleCount, 1);
     assert.equal(answer.result.state, 'partial_first_page');
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ticketless body allows only a listed review ID and its private marker prevents a second GET', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-web-body-offline-'));
+  const realMarker = path.join(
+    path.resolve(__dirname, '../..'),
+    'private-data',
+    'owner-native-web-five-optional-ticket-body-attempt.json',
+  );
+  const isolatedMarker = path.join(dir, 'body-attempt-marker.json');
+  const originalOpenSync = fs.openSync.bind(fs);
+  const originalExistsSync = fs.existsSync.bind(fs);
+  const realMarkerAlreadyExisted = originalExistsSync(realMarker);
+  t.mock.method(fs, 'openSync', (file, flags, mode) =>
+    originalOpenSync(file === realMarker ? isolatedMarker : file, flags, mode),
+  );
+  try {
+    let requests = 0;
+    const listedReviewId = `${BOOK_ID}_synthetic_listed`;
+    const input = {
+      runDir: dir,
+      session: { freshRenewal: true },
+      ownerVid: '123',
+      ticket: undefined,
+      wrpa: undefined,
+      allowedReviewIds: [listedReviewId],
+      ownerSessionCookie: () => 'wr_vid=123; wr_skey=renewed',
+      fetchImpl: async (url, options) => {
+        requests++;
+        assert.equal(
+          url,
+          `https://weread.qq.com/web/mp/content?reviewId=${encodeURIComponent(listedReviewId)}`,
+        );
+        assert.equal(options.method, 'GET');
+        assert.equal(options.headers.Cookie, 'wr_vid=123; wr_skey=renewed');
+        assert(!Object.hasOwn(options.headers, 'x-wr-ticket'));
+        assert(!Object.hasOwn(options.headers, 'x-wrpa-0'));
+        assert(originalExistsSync(isolatedMarker));
+        return new Response('<html>offline body</html>', { status: 200 });
+      },
+    };
+    await assert.rejects(
+      fetchOneBodyOnce({
+        ...input,
+        reviewId: `${BOOK_ID}_synthetic_unlisted`,
+      }),
+      /BODY_NOT_APPROVED_FROM_FIRST_PAGE/,
+    );
+    assert.equal(requests, 0);
+    assert(!originalExistsSync(isolatedMarker));
+    const answer = await fetchOneBodyOnce({
+      ...input,
+      reviewId: listedReviewId,
+    });
+    assert.equal(answer.httpStatus, 200);
+    assert.equal(requests, 1);
+    assert(originalExistsSync(isolatedMarker));
+    await assert.rejects(
+      fetchOneBodyOnce({
+        ...input,
+        reviewId: listedReviewId,
+      }),
+      /EEXIST/,
+    );
+    assert.equal(requests, 1);
+    assert.equal(originalExistsSync(realMarker), realMarkerAlreadyExisted);
+  } finally {
+    t.mock.restoreAll();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
