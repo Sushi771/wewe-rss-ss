@@ -1,5 +1,15 @@
 # 公众号级列表发现主线（2026-10-02）
 
+**当前真实断点：SDK 与单项 URL 解析均已成功。**本人完成 owner-06 正常 SDK 授权后，Antigravity 在恢复的 e1e3e027-0037-41f1-9cdb-8573c8431a0a 会话中执行既有单次 resolver。总控核私有 `sdk-login-owner-06/resolver/result.json`：success=true、stage=parsed、HTTP200、requests=1、productionUnchanged=true；自主搜索候选 `WX_3895431412_2247493594_1` 的原始 URL 已通过返回 URL、稳定身份和 `MP_WXS_3895431412_` reviewId 前缀校验。不是 cover、种子或 Mock；originalVerified=false，正文与可信发布时间仍未验证。全局 resolver-attempt.json 已存在，永久保留，不能重跑。MCP 作业 agy-d162d4ea 仍登记 FAILED；真实恢复轨迹及私有结果证明已执行，不能伪报该登记变为 completed。以下“结果待核”“尚无 mobile”均为历史状态。
+
+下一实际任务 `agy-873d74ca` 已派给 Antigravity/Gemini 3.8 Flash (High)：先实现并离线测试最小正文单次研究探针，复用既有正文传输、Web Cookie 和身份/时间解析，读取上述实际 resolution；总控审核后才允许执行正文请求。不得运行 cover、重做登录/resolver、清旧停止、抓图片或写生产。同时只读核完整公众号列表的新源码依据，严格区分 skey 与 accessToken；完整近期覆盖、连续多篇、分页增量、五篇真实发布时间及 12 订阅实测仍缺证。主体仍为列表发现，不因单项解析宣布闭源中转已替代。
+
+**解析子任务实际执行状态：**agy-d162d4ea首次SendUserCascadeMessage返回HTTP400，匹配IDE会话e1e3e027-0037-41f1-9cdb-8573c8431a0a当时IDLE/0步/无生成模型/无模型错误，marker不存在，不能称探针已执行或地区错误复发。总控用同一已创建会话的短英文任务恢复，提交已接受，实际轨迹RUNNING、生成仅M318、无错误；MCP作业登记仍FAILED不会随恢复更新，后续以该匹配实际轨迹及私有marker/result核对，不能伪报check_agent_job完成。任务约束仍单次、无重试/续期/其他端点/生产写入。首次400具体原因未知，不修改MCP包或自动换模型。
+
+**最新认证成功，开始真实解析：**显示修复源码`3d84ea5a989f5a010c4c8a6b546a3cfebd3dd433`已push且[CI36967953673](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36967953673)全成功。Antigravity任务agy-3850c939准备新owner-06（127.0.0.1:5290/PID50872），本人已明确回复SDK登录完成。私有result success=true、productionUnchanged=true；实际ticket/qr各1、poll2、exchange1，全部HTTP200（97/70,302/32与64/574字节），新mobile capturedAt=2026-10-02T05:16:40.546Z、source=owner-confirmed-eink-sdk-login，账号/VID/旧设备匹配门禁通过。总控再次独立比对所有生产字段，完全等于Web登录后基线（1账号/12订阅/1448文章）；新凭据与原始证据不进Git或对话。总控没有在真实新QR清空前测其自然尺寸，不能补称已做该测量；真实授权成功与先前纯Mock浏览器260×260核验分别成立。
+
+正常mobile条件现已具备，全局resolver marker在派发前不存在。已让Antigravity/Gemini High执行真实单项任务agy-d162d4ea：现有`probe-owner-review-once.cjs --execute <ABS_OWNER06_RUN_DIR>`仅一次，无重试/续期/其他端点/生产写入，自动选择本轮71候选中的首项原始requestUrl，不传验收种子。真实结果及响应身份/结构仍待核；任务受理不是resolver成功。下一步审核真实回包，必要时只离线适配已有回包，确认reviewId后沿既有正文链路核身份/发布时间，再继续完整近期覆盖/分页增量，而非重新开发登录。
+
 **SVG修复已实际通过：**Antigravity任务agy-985194a2已完成代码，抽取`renderQrSvg`并显式xmlns，真实研究服务onQr复用同一函数，授权URL/门禁不变。总控已审核diff，带固定SDK缓存登录/resolver联合19项回归全通过（CI无cache时3项SDK Mock跳过）。使用该实际函数的纯本机Mock HTTP页、相同SVG MIME及img-src self限制，通过CUA核浏览器img complete=true、naturalWidth/Height=260×260，并亲自检查截图中的完整黑白二维码；没有发腾讯请求。该阶段验证了独立SVG渲染，未宣称真实手机扫码授权完成。本人旧9346/owner-05仍运行旧代码，该次最终poll停止：ticket/qr各1、poll17，全408，无exchange/mobile/resolver，生产全部字段仍等于Web登录后基线。下一步先提交push修复，再由Agent启动新空owner-06，明确交本人生成/扫一扫；实际授权后的页面和尺寸再核，不能使用旧进程验证新源码。
 
 **二维码显示核验纠错（当前最高执行点）：**本人提供owner-05截图，img是破图占位；总控之前依据hasQr=true和DOM图片节点称“二维码显示成功”，检查不完整，该表述撤回。真实QR接口69,035字节/errcode0和SDK requestQr通过仍成立，但不能代表浏览器渲染。实际浏览器img complete=true、naturalWidth/naturalHeight均0；本机/qr.svg返回200、image/svg+xml、3,971字节、根svg缺少SVG xmlns。现有qrcode.react3.2内联SVG渲染器转独立图片时未补XML命名空间，这是当前明确渲染故障。尚不能把手机没有提示归因于本人；owner-04的显示成功同样未经图像尺寸验证，不作为渲染验收。

@@ -2,7 +2,11 @@
 
 用户本轮要求完整替代 `weread.111965.xyz / Wechat2RSS`，先解决多篇近期发现、批量增量和分页。所有有效阶段同步代码、开发和产品文档、测试及 GitHub；保留登录、正文图片、SQLite 旧数据和停止记录。
 
+最新真实结果：owner-06 正常 SDK 成功后，单次 resolver 已返回 HTTP200，私有 result success=true/stage=parsed/requests=1/productionUnchanged=true，自主候选 `WX_3895431412_2247493594_1` 通过 URL、身份及 reviewId 前缀核验；originalVerified=false，尚无正文或可信发布时间结论。agy-d162d4ea 首次 MCP 提交失败后在同一实际 IDE 会话恢复，登记仍 FAILED，不把登记受理当成功；成功依据为真实私有回包与结果。全局 resolver marker 永久保留，不重试。下一 agy-873d74ca 仅准备正文单次探针/离线测试及列表源码审核，审核后才执行，禁止 cover、旧停止删除和生产写入。完整近期、连续多篇与增量分页仍未验收。
+
 ## 本人准备 SDK 扫码后的实际失败与诊断修正
+
+正常SDK认证已成功：显示修复3d84ea5已push、CI36967953673全成功，新owner-06由Antigravity准备，本人回复SDK已登录；私有success/productionUnchanged均true，ticket/qr各1、poll2、exchange1全部200，mobile捕获05:16:40.546Z、同账号/VID/旧设备。总控全生产字段比对不变。新单项resolver任务agy-d162d4ea由Gemini实际执行已审探针一次，仅自主71候选的首项原URL，不重试、不写生产，结果待审核。登录成功解除该合法认证前置缺口，不解除旧端点停止，不证明完整近期覆盖；先真实解析再正文/时间及全号连续多篇主线。
 
 SVG缺命名空间已由Antigravity修复：服务与测试共用renderQrSvg并显式xmlns，19项带SDK缓存联合回归全通过。总控在纯本机Mock页用该实际函数验证image/svg+xml外部图片、相同img-src self，实际自然宽高260×260并看截图确认完整QR，零腾讯请求。旧owner-05最终ticket/qr各1、poll17均408、无交换/mobile/resolver，全部生产字段不变；旧9346服务不含新修复，不再让本人使用它。修复与交接同阶段commit/push后才准备新本人入口，正常手机确认与完整近期主线尚待实测。
 

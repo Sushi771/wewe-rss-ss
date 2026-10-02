@@ -1,6 +1,6 @@
 # 正常 SDK 授权到文章解析的隔离验证
 
-2026-10-02。当前目标仍是公众号级完整近期发现。真实 Web 搜索五页已得 71 条候选，但完整覆盖、可信发布时间和批量正文仍未验证。`/mp/getreviewid` 仅解析已有 URL，不是公众号列表；它在本项目实际请求数仍为 0，旧 mobile `/store/search` 401/-2012 不能由新 Web Cookie 解除。
+2026-10-02。当前目标仍是公众号级完整近期发现。真实 Web 搜索五页已得 71 条候选，但完整覆盖、可信发布时间和批量正文仍未验证。`/mp/getreviewid` 仅解析已有 URL，不是公众号列表；owner-06 本人正常 SDK 授权后实际请求一次，HTTP200、success=true，候选 `WX_3895431412_2247493594_1` 的原始 URL、稳定身份及 `MP_WXS_3895431412_` reviewId 前缀门禁均通过。私有 result stage=parsed、requests=1、productionUnchanged=true、originalVerified=false；正文与真实时间仍待核。全局 resolver-attempt.json 已存在，不能删除或重放。MCP agy-d162d4ea 首次提交失败，恢复匹配 IDE 会话后实际执行成功，登记仍 FAILED。旧 mobile `/store/search` 401/-2012 不因新认证自动解除；下一 agy-873d74ca 仅准备正文单次研究探针/离线测试及列表源码审核，未获总控代码审核前不发新腾讯请求。
 
 ## 正常认证复用与边界
 
@@ -35,6 +35,10 @@ node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_
 已验证：带私有缓存的登录/resolver联合离线测试19项全部通过。渲染修复后的登录套件无cache为12项通过、3项原SDK Mock明确跳过，另有4项resolver回归。包括实际QR渲染器命名空间、原 SDK 源码编译原语的纯 Mock 正常路径、取消零请求、QR 阶段 >64KiB 接受与 >16MiB 停止、其余阶段保持 64KiB 限额；模拟账号错配、拒绝、过期、DB变化、重复/越界请求和挑战页。CI 在无私有 cache 时跳过需真实缓存项，不下载 SDK、不接触腾讯。准备/测试期间生产快照与全部表哈希完全不变。
 
 ## 下一次真实验证
+
+真实resolver派发agy-d162d4ea首次提交HTTP400，实际会话空轨迹、无模型错误、无marker；同一会话e1e3e027-0037-41f1-9cdb-8573c8431a0a经短英文恢复后真实M318运行，无错误。MCP登记仍FAILED，真实是否请求/响应以私有marker/result及匹配轨迹核对，不伪称登记完成。没有重放任何上游调用，首次失败原因未知。
+
+正常SDK已实际完成：3d84ea5显示修复已push且CI36967953673全成功；新owner-06由Antigravity任务agy-3850c939准备，本人回复SDK登录完成，result success=true/productionUnchanged=true。ticket/qr各1、poll2、exchange1全部HTTP200；QR70,302字节通过16MiB门禁，mobile于05:16:40.546Z保存、同VID/设备/账号门禁通过。总控再次独立核全部生产字段一致。本人授权成功不等同于总控测过真实二维码图像尺寸；260×260为前述独立Mock渲染核验。所有凭据/原回包保持私有。Gemini真实单项resolver任务agy-d162d4ea已派发，执行既有探针一次，派发前全局marker不存在；未知实际响应结构/身份时不预先宣称解析成功，也不自动重试。
 
 ### 二维码图片渲染根因与独立 SVG 命名空间修复
 
