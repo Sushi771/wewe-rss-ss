@@ -6,6 +6,8 @@
 
 **代表文章详情：**按官方 `MpRemoteService.getReviewMpInfo` 的精确形状，仅带 `reviewId` 请求 `/review/single` 一次，owner-07 返回 HTTP 200（2715 字节）。稳定身份与原 resolver/候选及原文选取一致：`WX_3895431412_2247493594_1`，`type=16`，`bookId` 空、`belongBookId` 为目标号，真实 `mpInfo.inner=0`。APK BooleanCodec 将 0 转 false，该篇是外部原文分支；不尝试只适用于 `inner=true` 的 `/book/chapterread`。`mpInfo.content` 仅 33 字节，不是完整正文；其原文 URL 与旧 HTTP 302 验证停止条件一致，未重发原文。正常 native 认证头明确是 `vid/accessToken`，未发现 `skey` 映射到 Web Cookie 的依据。新增探针均无 SQLite 调用或生产写入；当前生产仍保留旧 1450 篇，持续自动更新未恢复。
 
+**当前实际授权缺口：**按官方 `forceSyncWeChatAuth(true) → FollowService.getWechatAuthStatus(1)` 的精确形状，只用当前 owner-07 VID 发一次 `GET /wx/scope?vid=<本人VID>&refresh=1`，HTTP 200（58 字节）：`mps=0/fris=1`，即公众号授权未开启、好友授权已开启。SDK 正常登录原包没有这两个 flag，也没有 `mpBookGranted`；不能把扫码登录成功当公众号授权完整。该阶段复用原探针的私有存包/防重放/认证停止，不调用任何 grant 或 `updateConfigs`，无生产写入。已向本人询问官方“微信订阅／订阅的公众号”授权入口，待本人正常完成公众号授权；不清 scope/feed 标记，不按相同条件重发。独立持久配置 `mpBookGranted` 仍未知，静态源码已核读取为 `GET /config?synckey=0`，尚未在线请求。
+
 以下是此前 Web 票据与固定参数流的过程记录，以上方实际断点为准。
 
 **本轮收敛（2026-10-03）：**第一方阅读器在 `-2041` 时由本人完成腾讯验证码，将回调 `ticket`、`randstr` 用于当次请求重试；KOReader 验证脚本的“有新 ticket 则成功”是预期分支，未附成功实测输出。本次本人第三次正常扫码走公开 Skill 脚本同序、同内存 Cookie 会话：`userInfo`、`apikeyGet`、续期均通过，续期仍无 `x-wr-ticket`，以 `FRESH_TICKET_MISSING` 停止；没有请求文章列表/正文或写生产库。持续订阅未恢复。

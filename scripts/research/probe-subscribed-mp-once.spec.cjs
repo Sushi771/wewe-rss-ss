@@ -11,6 +11,7 @@ const {
   deriveFeedParameters,
   parseTags,
   parseFeed,
+  parseScope,
   runPreflight,
   runStage,
 } = require('./probe-subscribed-mp-once.cjs');
@@ -298,4 +299,31 @@ test('saved numeric hasMore wire values normalize only exact 0 and 1', () => {
     () => parseFeed({ articles: [], hasMore: '0' }),
     /invalid_feed_shape/,
   );
+});
+
+test('official scope reads the same account with refresh=1 once and never infers mpBookGranted', async (t) => {
+  const options = fixture(t);
+  let calls = 0;
+  options.fetchFn = async (url) => {
+    calls++;
+    const u = new URL(url);
+    assert.equal(u.origin, 'https://i.weread.qq.com');
+    assert.equal(u.pathname, '/wx/scope');
+    assert.deepEqual(
+      [...u.searchParams],
+      [
+        ['vid', '1001'],
+        ['refresh', '1'],
+      ],
+    );
+    return response({ mps: 1, fris: 0 });
+  };
+  const result = await runStage('scope', options);
+  assert.equal(result.weChatMpGranted, true);
+  assert.equal(result.mpBookGranted, null);
+  assert.equal(result.subscriptionRecovered, false);
+  assert.equal((await runStage('scope', options)).requests, 0);
+  assert.equal(calls, 1);
+  assert.equal(parseScope({ mps: 0, fris: 1 }).weChatMpGranted, false);
+  assert.throws(() => parseScope({ mps: '1', fris: 0 }), /invalid_scope_shape/);
 });
