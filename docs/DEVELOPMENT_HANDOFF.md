@@ -1,5 +1,9 @@
 # 公众号级列表发现主线（2026-10-02）
 
+**最新执行状态（覆盖下文pending）：**988c4a23055afbd51654f3710ee004f85c056f21已推送，[CI 36960099588](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36960099588)全成功。Opus授权后，首个MCP任务agy-b8cce8ba仍首次提交HTTP400；总控在同一IDE会话恢复请求，实际模型元数据全为M26/Opus，完成SDK/四文档/失败记录读取。短英文无上下文MCP诊断agy-b168e665成功11.1秒返回READY；新实际入口任务agy-d16c4dc0也进入RUNNING，说明并非连接永久失效。旧首次HTTP400的具体原因仍未证明，不能直接称为启动竞态或大上下文故障。
+
+随后两条实际任务均遇 `RESOURCE_EXHAUSTED (429): Individual quota reached`；2026-10-02约11:33 +08提示4小时30分后恢复（约16:04，只是当次上游提示）。Agent在整理报告/准备入口前停止，没有完整最终诊断、代码修改或owner-03入口；不能将读取源码和READY当SDK/订阅成果。总控已CancelCascadeInvocation并确认两会话CASCADE_RUN_STATUS_IDLE，不让引擎继续自动重试。SDK新mobile与全局resolver marker仍不存在，实际新腾讯请求0；原owner-02累计ticket/qr各1仍为本轮全部SDK请求。当前已问本人是否授权Sonnet4.6或等Opus恢复，未收到授权前仍用本人指定Opus，不自动换模型或创建等待轮询任务。下一会话须先确认此选择，再派短任务由Agent实际推进SDK手工验证及完整近期主线。
+
 **最新模型授权覆盖旧规则：**本人明确“我刚设置了opus4.6先用，antigravity可以直接使用这个模型”。当前任务改用 `Claude Opus 4.6 (Thinking)`，不再受下文历史固定Gemini约束，也不自动切回；总控已派发agy-b8cce8ba，让Antigravity实际核SDK二维码生成/准备正常本人扫码，随后沿weread-omni推进列表/解析/正文主线。任务是否执行、权限等待及结果以check_agent_job和真实轨迹核对，pending不称成果。总控保留审核、验证、文档与commit/push责任。
 
 当前指挥约束再次确认：用户要求 Antigravity 承担实际开发/研究和正常 SDK 扫码验证，总控负责派发、审核、数据保护、必要测试、文档及GitHub同步，不继续以本地包装器开发替代子Agent工作。最新代码 `f1a0c35e948126357fe88b31111d00b9eb41e3c9` 已推送、[CI 36958435082](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36958435082) 全部成功、工作树干净。SDK仍未生成可用二维码，resolver0请求，完整近期发现未完成。
