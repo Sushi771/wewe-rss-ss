@@ -288,14 +288,11 @@ async function fetchOneBodyOnce({
       throw new ProbeStop('BODY_PREVIOUS_ZERO_BYTE_ID');
   }
   const cookie = ownerSessionCookie(session, ownerVid);
-  writeOnce(
-    path.join(PRIVATE_ROOT, BODY_GLOBAL_MARKER),
-    {
-      endpoint: '/web/mp/content',
-      reviewIdSha256: sha(reviewId),
-      at: new Date().toISOString(),
-    },
-  );
+  writeOnce(path.join(PRIVATE_ROOT, BODY_GLOBAL_MARKER), {
+    endpoint: '/web/mp/content',
+    reviewIdSha256: sha(reviewId),
+    at: new Date().toISOString(),
+  });
   const url = `https://weread.qq.com/web/mp/content?reviewId=${encodeURIComponent(reviewId)}`;
   const response = await fetchImpl(url, {
     method: 'GET',
