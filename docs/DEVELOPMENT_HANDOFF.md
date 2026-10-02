@@ -5,7 +5,7 @@
 1. **证据与适配隔离：**独立创建 `browser-dom-adapter.ts`，定义专门的证据类型 `BrowserDomEvidence`（`source: 'owner-confirmed-browser-dom'`），严禁混淆为后台 HTTP 或复用 `official-public-original`。输入仅复用私有 `private-data/single-account-update-20260930/official-browser-dom.html` 及其哈希（`cdd899b8...`）与 `official-original-selection.json` 中的自主搜索候选 `WX_3895431412_2247493594_1`。
 2. **严格门禁与发布时间保真：**通过现有 `articleIdentity`、`articlePublishTime` 和 `articleContentHtml` 提取文章元数据与正文。发布时间严格提取自 DOM 内 `ct`（1790749883），严禁从搜索候选索引时间（1790749882）编造；清洗后的正文 HTML 达到 13,084 字符。
 3. **安全持久化与幂等验证：**在 `CollectionService` 中扩展离线演练接口 `replayBrowserDomUpdate`，通过现有 `saveVerifiedSearchPage` 保护逻辑，仅在带标记且隔离的 SQLite COPY 副本演练。隔离 CLI `scripts/research/replay-browser-dom-update.cjs` 首轮成功写入 1 篇目标文章（`created: 1, updated: 0`），次轮重复演练严格幂等（`created: 0, updated: 0`）；演练前后 `feeds`、`accounts` 及旧 1448 篇 `articles` 全字段哈希完全一致；生产数据库哈希字节级无变更；全局网络守卫拦截 0 次异常外联。
-4. **测试与边界限制：**单元测试 `browser-dom-adapter.spec.ts`（12 项回归）全量通过。本切片明确不宣称公众号连续/完整订阅恢复；正文包含 39 张未经离线归档的腾讯图片链接，后续实际实时抓取仍作为独立步骤需要号主官方交互完成。
+4. **测试与边界限制：**`browser-dom-adapter.spec.ts` 42 项回归通过，包含清洗后丢失图片来源时拒绝宣称图片完整的回归。本切片明确不宣称公众号连续/完整订阅恢复；正文原有 39 次远程图片引用，图片已单独私存，尚未内嵌正文或写库。
 
 # 公众号级列表发现主线（2026-10-02）
 
@@ -13,7 +13,7 @@
 
 受保护的 `feed.searchCandidates` 和独立 `feed.scanCandidates` 已实现，原订阅页新增待核候选折叠区与扫描按钮；搜索索引时间不冒充发表时间，候选不写文章/RSS。45 项定向测试与前后端构建通过，源码尚待受控部署。用本人既有正常 Web 会话作 **一次** 至多两页扫描时，首请求返回 `auth_expired`；搜索停止记录已持久化，生产库不变，原 71 条/5 页历史候选快照及其独立展示副本字节保持一致。不得自动续期、清停止或重发；后续新实时候选需要本人按正常流程重新登录并核验状态。
 
-Antigravity/Gemini 3.8 Flash (High) 的浏览器 DOM 独立适配在 SQLite 副本把 `WX_3895431412_2247493594_1` 新增 1 次、重跑新增 0，真实页面 `ct=1790749883`、正文约 13 KiB；生产未写。副本正文仍有 39 张远程图片，现已明确记为未归档，不能当作完整离线正文入生产。后续单次图片归档代码研究正在进行，完成并核验前不启用该来源。此前 backend 原文 HTTP302 停止记录仍有效。
+Antigravity/Gemini 3.8 Flash (High) 的浏览器 DOM 独立适配在 SQLite 副本把 `WX_3895431412_2247493594_1` 新增 1 次、重跑新增 0，真实页面 `ct=1790749883`、正文约 13 KiB；生产未写。正文原有 39 次远程图片引用（36 个唯一 URL）。一次性图片归档器已完成代码与离线校验：固定 DOM 哈希及身份、顺序低频、首个失败即停、私有缓存、只输出脱敏摘要；标准 17 项离线测试通过，真实 39/36 只读验收通过。随后仅运行一次受控归档，36 个不同图片资源均通过格式及哈希校验，私有 manifest 和一次性标记已持久化；**尚未内嵌正文或生产导入**。单篇图片完整和公众号列表完整分别标记；此前 backend 原文 HTTP302 停止记录仍有效。
 
 **首项搜索候选与旧原文停止记录已排重：**五页搜索的首项 `WX_3895431412_2247493594_1` 与 2026-09-30 `single-account-update` 私有账本是同一篇，原始 URL 的 `__biz/mid/idx/sn/chksm` 全相同；旧选取仅将 `http` 升为 `https`。当时本人正常官方浏览器页面观察核实了该篇身份和页面发表时间，但独立后台对相同文章签名 URL 的唯一 GET 返回 HTTP 302、验证跳转，并已持久标记停止后续原文请求。这些证据不能算后台取文成功，也不能拿浏览器已见的单篇替代五篇与全号新文验收。本轮取消重复的原文探针准备，未发该 URL、未清停止；后续只接受实质不同且可核的来源证据。
 
