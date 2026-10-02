@@ -70,13 +70,14 @@ function samePath(left, right) {
 function assertPrivateTrialDir(trialDir, sourceDb, testMode) {
   if (!path.isAbsolute(trialDir)) fail('TRIAL_DIR_MUST_BE_ABSOLUTE');
   const real = fs.realpathSync(trialDir);
-  const privateRoot = fs.realpathSync(PRIVATE_BASE);
-  if (
-    !testMode &&
-    (!real.toLowerCase().startsWith((privateRoot + path.sep).toLowerCase()) ||
-      !/^image-replay-trial-[^\\/]+$/.test(path.basename(real)))
-  )
-    fail('TRIAL_DIR_OUTSIDE_PRIVATE_BASE');
+  if (!testMode) {
+    const privateRoot = fs.realpathSync(PRIVATE_BASE);
+    if (
+      !real.toLowerCase().startsWith((privateRoot + path.sep).toLowerCase()) ||
+      !/^image-replay-trial-[^\\/]+$/.test(path.basename(real))
+    )
+      fail('TRIAL_DIR_OUTSIDE_PRIVATE_BASE');
+  }
   if (samePath(real, path.dirname(sourceDb))) fail('TRIAL_DIR_IS_SOURCE_DIR');
   for (const name of [
     'result.json',
