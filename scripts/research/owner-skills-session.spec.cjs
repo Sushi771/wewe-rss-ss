@@ -166,7 +166,9 @@ test('qr login poll serializes explicit empty or provided otp matching weread.ko
   const calls = [];
   const session = new SkillsSession(async (url, options) => {
     calls.push({ url, options });
-    return response(JSON.stringify({ succeed: false, logicCode: 'WAITING_SCAN' }));
+    return response(
+      JSON.stringify({ succeed: false, logicCode: 'WAITING_SCAN' }),
+    );
   });
   session.uid = 'offline-uid';
   session.startedAt = Date.now();
