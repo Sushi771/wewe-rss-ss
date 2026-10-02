@@ -53,6 +53,15 @@ describe('native Web QR login (no real HTTP)', () => {
       'https://weread.qq.com/api/auth/getLoginUid',
       expect.objectContaining({ maxRedirects: 0, proxy: false }),
     );
+    expect(axios.get).toHaveBeenNthCalledWith(
+      2,
+      'https://weread.qq.com/api/auth/getLoginInfo?uid=uid-example&otp',
+      expect.objectContaining({
+        maxRedirects: 0,
+        proxy: false,
+        timeout: 70000,
+      }),
+    );
     expect(axios.post).not.toHaveBeenCalled();
   });
   it('does not save malformed Web refresh credentials', async () => {

@@ -40,23 +40,25 @@ export class NativeWebLogin {
       '微信读书登录曾返回验证或拒绝，已停止请求；请先处理官方验证。',
     );
   }
-  private async get(endpoint: string, params?: Record<string, string>) {
+  private async get(endpoint: 'getLoginUid' | 'getLoginInfo', uid?: string) {
     await this.checkStop();
-    const response = await axios.get(
-      `https://weread.qq.com/api/auth/${endpoint}`,
-      {
-        params,
-        timeout: endpoint === 'getLoginInfo' ? 45000 : 10000,
-        maxRedirects: 0,
-        proxy: false,
-        maxContentLength: 65536,
-        validateStatus: () => true,
-        headers: {
-          Referer: 'https://weread.qq.com/',
-          'User-Agent': 'Mozilla/5.0',
-        },
+    // The direct Web QR flow sends a bare `&otp` while waiting for scan.
+    // Axios's params serializer would change it to `&otp=`.
+    const url =
+      endpoint === 'getLoginInfo'
+        ? `https://weread.qq.com/api/auth/getLoginInfo?uid=${encodeURIComponent(uid || '')}&otp`
+        : 'https://weread.qq.com/api/auth/getLoginUid';
+    const response = await axios.get(url, {
+      timeout: endpoint === 'getLoginInfo' ? 70000 : 10000,
+      maxRedirects: 0,
+      proxy: false,
+      maxContentLength: 65536,
+      validateStatus: () => true,
+      headers: {
+        Referer: 'https://weread.qq.com/',
+        'User-Agent': 'Mozilla/5.0',
       },
-    );
+    });
     const d = response.data;
     // Keep status/structure before interpretation; omit credentials, UID,
     // raw messages and any verification HTML.
@@ -169,7 +171,7 @@ export class NativeWebLogin {
   ): Promise<NativeLoginResult> {
     login.polls++;
     try {
-      const d = await this.get('getLoginInfo', { uid, otp: '' });
+      const d = await this.get('getLoginInfo', uid);
       if (d.accessToken && d.webLoginVid) {
         const vid = Number(d.webLoginVid);
         if (
