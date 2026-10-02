@@ -73,7 +73,9 @@ async function unusedPort() {
   return port;
 }
 
-async function waitReady(port, child, seconds = 240) {
+// Bundled startup re-hashes thousands of release files before HTTP binds.
+// Allow that verification to finish before treating a healthy start as failed.
+async function waitReady(port, child, seconds = 480) {
   const base = `http://127.0.0.1:${port}`;
   const rssUrl = base + '/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary';
   const privateMode = process.env.PRIVATE_ONLINE_MODE === '1';
