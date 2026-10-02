@@ -596,7 +596,13 @@ export class TrpcService {
       } catch {
         /* Backups retain legacy raw token. */
       }
-      const token = JSON.stringify({ ...prior, ...JSON.parse(result.token!) });
+      const freshWebToken = JSON.parse(result.token!);
+      const mergedToken = { ...prior, ...freshWebToken };
+      // A new Web login must not inherit a stale refresh token from a prior
+      // session when the new login response did not issue one.
+      if (!Object.prototype.hasOwnProperty.call(freshWebToken, 'wr_rt'))
+        delete mergedToken.wr_rt;
+      const token = JSON.stringify(mergedToken);
       const username = old?.name || result.username || `WeRead_${result.vid}`;
       await this.prismaService.account.upsert({
         where: { id: accountId },

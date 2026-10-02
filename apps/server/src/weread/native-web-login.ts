@@ -179,11 +179,31 @@ export class NativeWebLogin {
           /[;\s\x00-\x1f\x7f]/.test(d.accessToken)
         )
           throw new Error('腾讯登录身份字段无效，未保存账号。');
+        // The direct Web QR response may also include a refresh token. Keep
+        // that credential with this Web session; it is not a mobile token.
+        const refreshToken = d.refreshToken;
+        if (
+          refreshToken !== undefined &&
+          (typeof refreshToken !== 'string' ||
+            !refreshToken ||
+            /[;\s\x00-\x1f\x7f]/.test(refreshToken))
+        )
+          throw new Error('腾讯登录续期字段无效，未保存账号。');
+        const webCookies = [
+          { name: 'wr_vid', value: String(vid) },
+          { name: 'wr_skey', value: d.accessToken },
+          { name: 'wr_ql', value: '0' },
+          ...(refreshToken
+            ? [{ name: 'wr_rt', value: encodeURIComponent(refreshToken) }]
+            : []),
+        ];
         // First-party BVQc4ULa.js writes this QR response's accessToken to
         // wr_skey. This is not a conversion of mobile login credentials.
         const token = JSON.stringify({
           wr_vid: String(vid),
           wr_skey: d.accessToken,
+          wr_ql: '0',
+          ...(refreshToken ? { wr_rt: encodeURIComponent(refreshToken) } : {}),
           accessToken: d.accessToken,
           updateTime: Date.now(),
         });
@@ -191,10 +211,7 @@ export class NativeWebLogin {
           source: 'owner-confirmed-native-web-login',
           ownerVid: String(vid),
           capturedAt: new Date().toISOString(),
-          cookies: [
-            { name: 'wr_vid', value: String(vid) },
-            { name: 'wr_skey', value: d.accessToken },
-          ].map((c) => ({
+          cookies: webCookies.map((c) => ({
             ...c,
             domain: '.weread.qq.com',
             path: '/',

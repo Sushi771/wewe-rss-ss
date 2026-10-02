@@ -28,7 +28,11 @@ describe('native Web QR login (no real HTTP)', () => {
       .mockResolvedValueOnce({ status: 200, data: { uid: 'uid-example' } })
       .mockResolvedValueOnce({
         status: 200,
-        data: { webLoginVid: 123, accessToken: 'normal-qr-token' },
+        data: {
+          webLoginVid: 123,
+          accessToken: 'normal-qr-token',
+          refreshToken: 'renew/+?',
+        },
       });
     const login = new NativeWebLogin();
     const qr = await login.create();
@@ -37,6 +41,11 @@ describe('native Web QR login (no real HTTP)', () => {
     expect(ownerSessionCookie(result.webSession!, '123')).toContain(
       'wr_skey=normal-qr-token',
     );
+    expect(ownerSessionCookie(result.webSession!, '123')).toContain(
+      'wr_rt=renew%2F%2B%3F',
+    );
+    expect(ownerSessionCookie(result.webSession!, '123')).toContain('wr_ql=0');
+    expect(JSON.parse(result.token!).wr_rt).toBe('renew%2F%2B%3F');
     expect(await login.poll(qr.uuid)).toBe(result);
     expect(axios.get).toHaveBeenCalledTimes(2);
     expect(axios.get).toHaveBeenNthCalledWith(
@@ -44,6 +53,25 @@ describe('native Web QR login (no real HTTP)', () => {
       'https://weread.qq.com/api/auth/getLoginUid',
       expect.objectContaining({ maxRedirects: 0, proxy: false }),
     );
+    expect(axios.post).not.toHaveBeenCalled();
+  });
+  it('does not save malformed Web refresh credentials', async () => {
+    (axios.get as jest.Mock)
+      .mockResolvedValueOnce({ status: 200, data: { uid: 'uid-example' } })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: {
+          webLoginVid: 123,
+          accessToken: 'normal-qr-token',
+          refreshToken: 'bad;cookie',
+        },
+      });
+    const login = new NativeWebLogin();
+    const qr = await login.create();
+    const result = await login.poll(qr.uuid);
+    expect(result.terminal).toBe(true);
+    expect(result.token).toBeUndefined();
+    expect(result.webSession).toBeUndefined();
     expect(axios.post).not.toHaveBeenCalled();
   });
   it('persists a refusal and stops all further login requests', async () => {

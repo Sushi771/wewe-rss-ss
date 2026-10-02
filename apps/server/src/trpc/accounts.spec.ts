@@ -72,7 +72,10 @@ describe('private owner accounts', () => {
       account: {
         findUnique: jest.fn(async () => ({
           name: 'owner',
-          token: JSON.stringify({ mobile: { accessToken: 'old-mobile' } }),
+          token: JSON.stringify({
+            mobile: { accessToken: 'old-mobile' },
+            wr_rt: 'stale-web-refresh',
+          }),
         })),
         upsert,
       },
@@ -113,6 +116,9 @@ describe('private owner accounts', () => {
     expect(
       JSON.parse(upsert.mock.calls[0][0].update.token).mobile.accessToken,
     ).toBe('old-mobile');
+    expect(
+      JSON.parse(upsert.mock.calls[0][0].update.token).wr_rt,
+    ).toBeUndefined();
     const binding = JSON.parse(
       await fs.readFile(process.env.OWNER_SEARCH_CONFIG_FILE!, 'utf8'),
     ).feeds.test;
