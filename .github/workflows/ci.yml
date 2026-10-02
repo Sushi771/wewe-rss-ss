@@ -49,6 +49,24 @@ jobs:
       - name: Test browser DOM image collector offline
         run: node --test scripts/research/collect-browser-dom-images-once.spec.cjs
 
+  image-import-offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install
+      - name: Build Server
+        run: pnpm --filter server build
+      - name: Test image replay and one-article import offline
+        run: node --test scripts/research/replay-browser-dom-images-copy.spec.cjs scripts/research/commit-browser-dom-images-once.spec.cjs
+
   private-image:
     runs-on: ubuntu-latest
     steps:
