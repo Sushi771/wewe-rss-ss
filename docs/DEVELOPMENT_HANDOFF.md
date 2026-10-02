@@ -1,5 +1,7 @@
 # 公众号级列表发现主线（2026-10-02）
 
+**最新恢复条件：**本人切换地区后要求实测Gemini3.8High。MCP作业agy-d32960f2在12.84秒完成并返回GEMINI_READY；读取匹配本次输入的实际IDE轨迹，生成模型仅MODEL_PLACEHOLDER_M318、无错误、状态IDLE，确认并非其他模型代答。此前地区错误是旧请求观测，不再代表当前最小调用仍失败；这次成功不证明所有研究工具/长任务或微信SDK认证可用。已据原主线要求恢复指定 `Gemini 3.8 Flash (High)` 派发agy-8f8900f5，由Antigravity实际准备既有正常SDK本人入口（owner-03），不重写包装器，不点生成、不请求腾讯、不写生产。入口及后续实际状态需check_agent_job核实，尚不能称扫码完成。下文Opus额度等待为恢复前历史阶段。
+
 **最新执行状态（覆盖下文pending）：**988c4a23055afbd51654f3710ee004f85c056f21已推送，[CI 36960099588](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36960099588)全成功。Opus授权后，首个MCP任务agy-b8cce8ba仍首次提交HTTP400；总控在同一IDE会话恢复请求，实际模型元数据全为M26/Opus，完成SDK/四文档/失败记录读取。短英文无上下文MCP诊断agy-b168e665成功11.1秒返回READY；新实际入口任务agy-d16c4dc0也进入RUNNING，说明并非连接永久失效。旧首次HTTP400的具体原因仍未证明，不能直接称为启动竞态或大上下文故障。
 
 随后两条实际任务均遇 `RESOURCE_EXHAUSTED (429): Individual quota reached`；2026-10-02约11:33 +08提示4小时30分后恢复（约16:04，只是当次上游提示）。Agent在整理报告/准备入口前停止，没有完整最终诊断、代码修改或owner-03入口；不能将读取源码和READY当SDK/订阅成果。总控已CancelCascadeInvocation并确认两会话CASCADE_RUN_STATUS_IDLE，不让引擎继续自动重试。SDK新mobile与全局resolver marker仍不存在，实际新腾讯请求0；原owner-02累计ticket/qr各1仍为本轮全部SDK请求。当前已问本人是否授权Sonnet4.6或等Opus恢复，未收到授权前仍用本人指定Opus，不自动换模型或创建等待轮询任务。下一会话须先确认此选择，再派短任务由Agent实际推进SDK手工验证及完整近期主线。
