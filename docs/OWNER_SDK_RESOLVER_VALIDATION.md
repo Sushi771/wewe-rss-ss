@@ -36,6 +36,10 @@ node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_
 
 ## 下一次真实验证
 
+owner-04最终结果覆盖下文waiting：04:36:21Z开始、04:41:21Z停止stage=poll，productionUnchanged=true。ticket/qr各1次200（95/69,035字节），正常poll17次200/32字节，wx_errcode全部408；没有404已扫码、405已确认、授权码交换或新mobile，resolver0。原SDK5分钟截止保持；实际手机过程仍未知，不将等待截止当二维码错误或本人未操作的证明。总控已请求本人简述扫码到哪步，由Antigravity/Gemini的只读离线审核agy-d310958d核原SDK confirmUrl/CLI与真实qrcode字段；不输出任何QR值、不联网/安装/修改/重开。二维码大小修复已有真实验证，认证仍未完成，下文waiting属当时观察。
+
+修复f5815b1已push且CI36964883974全成功。新 owner-04 由Antigravity任务agy-0d8d4f06实际准备，初始idle/零请求；总控打开后发生正常生成。真实qr回包69,035字节（超过旧64KiB），JSON对象errcode=0、非空uuid，字段名errcode/uuid/appname/qrcode；原SDK requestQr通过，本机页面确认有二维码并进入waiting/正常poll。本次有完整私有证据，才可说该回包有效；不能据此推断旧owner-03被截断响应或owner-02同因。尚待本人手机确认，没有新mobile或resolver请求；最终结果/计数以owner-04/result.json为准，后继先核文件和进程、不自动重开。短期入口PID15932/127.0.0.1:2504，原10678已过期。所有UUID/qrcode/签名/授权码/token值保持私有，不进Git或对话。
+
 2026-10-02 本人准备并点击 owner-02 入口后，实际 ticket/qr 各一次HTTP200，但未显示二维码；无 poll/exchange、新mobile或resolver请求。旧 result.stage=ticket 为 requestQr 两步共用粗阶段，不能视为确切失败端点；当时未留原回包，无法判定业务码、字段格式或URL门禁原因，不重复请求补证。生产不变。
 
 owner-03 真实结果与实际失败：入口随后发生一次生成流程，sdk-login-owner-03/result.json 停在 stage=qr；ticket HTTP200 接收 97 字节，qr HTTP200 结果为 body_too_large（受此前统一 65536 字节限额切断），productionUnchanged 为 true。实际触发者尚未独立核实；没有生成二维码或进入本人扫码/轮询。由于流式读取在超过 64 KiB 时即触发 response_size_gate 取消 reader，未保存 qr 原始回包，因此上游回包的具体格式、内容及有效性未知，不能将观测到的超限视为上游回包合法有效的证据，也不能倒推 owner-02 同因。

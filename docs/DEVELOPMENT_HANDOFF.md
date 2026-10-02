@@ -1,5 +1,13 @@
 # 公众号级列表发现主线（2026-10-02）
 
+**最新终态覆盖下文waiting：**owner-04于2026-10-02 04:36:21Z开始，04:41:21Z写入失败result，stage=poll、productionUnchanged=true。实际ticket/qr各1次HTTP200（95/69,035字节），正常poll17次HTTP200，每项仅32字节且业务状态均wx_errcode=408；未出现404已扫码/405已确认，没有exchange、新mobile或resolver。与原SDK5分钟截止一致；不能断言本人未扫码或二维码内容错误，手机端过程尚待本人反馈。二维码生成/真实大小门禁修复已验证，正常移动认证仍未完成；入口已停止，不自动重启或覆盖owner-04。原始证据、完整计数留私有目录，旧生产全字段保护通过。
+
+总控已问本人实际手机扫码到哪一步，同时派Antigravity/Gemini High只读离线审核agy-d310958d，对照原SDK/CLI正常confirmUrl用法与真实qrcode字段，不输出二维码内容、UUID或URL值，不请求腾讯、不安装库、不改代码。收到本人过程及具体源码证据后再定新正常验证；没有mobile之前不发resolver、不清旧停止。下文waiting为结果写入前的观察，已过期，不代表现在仍能扫码。
+
+**最新真实扫码断点：**修复提交 `f5815b16e3398f472e4c57a2cecde022fa920ef6` 已成功push，远端main与本地精确一致，[CI 36964883974](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36964883974) 全成功。Antigravity/Gemini High 的 agy-0d8d4f06 已完成新 owner-04 入口准备，PID15932、127.0.0.1:2504；总控核HTML200、idle/hasQr=false、attempt未创建后打开本人页面。随后实际生成回包：ticket95字节、qr69,035字节；私有qr响应为JSON对象，errcode=0、非空uuid，字段名errcode/uuid/appname/qrcode。原SDK requestQr已通过，页面实际有二维码、state=waiting并开始正常有界poll；无须公开任何字段值。此证据只说明本次正常QR数据超过旧64KiB且修复有效，不能证明owner-03同一响应内容或owner-02原因。当前未保存新mobile，待本人手机确认；resolver仍0请求。最终成功/停止与完整请求计数须读本机私有owner-04/result.json，不能把waiting当登录成功。
+
+入口是短期研究服务而非生产登录替换，空闲15分钟/轮询5分钟及结束后短暂关闭规则保持。旧10678页已经过期，不继续使用；新入口是否仍活跃须查owner-04/listener.json及进程，不复用已停止目录、不自动生成新码。正常授权成功且账号/设备/生产保护通过后，下一任务由Antigravity实际执行已审的单次 `probe-owner-review-once.cjs --execute <ABS_OWNER04_RUN_DIR>`，仅现有自主发现候选的原始URL，不猜参数、不续期、不重放；总控审核真实响应并同步GitHub，再推进正文/真实时间与完整近期覆盖。
+
 **本轮代码审核与验证：**Antigravity 已实际修改 `owner-sdk-login-once.cjs`，只将 qr 阶段改为固定 SDK 的16MiB上限，其他阶段仍65,536字节；新增大回包通过/越界停止、ticket/poll/exchange旧上限保持、私有证据及原SDK纯Mock回归。总控读取实际diff并独立运行登录/resolver联合测试，18项全通过、无跳过（带私有哈希核验SDK缓存）；无缓存CI会明确跳过3项原SDK Mock。所有生产字段仍与本人Web登录后的基线一致。本次没有新腾讯请求或生产接入；真实二维码内容和扫码成功仍待本人正常验证。以下运行段记录修复任务的过程，不能覆盖本段代码已落地的事实。文档同阶段提交推送，精确新SHA与CI以Git/GitHub核对。
 
 **当前执行入口（覆盖下文历史状态）：**实际开发仓库始终是 `C:\Users\ss\.gemini\antigravity\playground\sparse-comet\wewe-rss-ss`，GitHub 为 Sushi771/wewe-rss-ss；当前 Codex 对话最初用于 MCP 连接检查，仍处在项目外临时目录，不能把对话目录误认作代码目录。本人已授权上下文不足时在已登记的 wewe-rss-ss 项目创建后继主任务；先同步文档、commit/push及远端核对，再交接最新断点和活动 Agent，由旧窗口停止写入，避免双主执行者。

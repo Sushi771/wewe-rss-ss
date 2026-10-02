@@ -4,6 +4,10 @@
 
 ## 本人准备 SDK 扫码后的实际失败与诊断修正
 
+owner-04最终停在poll：开始04:36:21Z、结果04:41:21Z（5分钟）；ticket/qr各1次200，qr69,035字节有效且页面二维码已展示；17次正常poll均200/32字节/wx_errcode408，没有404/405/exchange、新mobile或resolver。生产全部字段不变。手机端是否扫码/确认尚待本人反馈，不能推断人为遗漏或二维码内容错误；下文waiting为历史观察，入口已停，不自动重开。Gemini只读离线审核agy-d310958d检查原SDK confirmUrl显示用法与qrcode字段，禁止联网/安装/修改或公开二维码内容；此审核尚无结论。
+
+实际QR验证已通过：修复f5815b1成功push，远端SHA一致，CI36964883974全成功。Antigravity任务agy-0d8d4f06完成owner-04/PID15932/127.0.0.1:2504准备，总控idle零请求检查后将页面交本人。随后真实qr69,035字节私存，JSON errcode=0且非空uuid，SDK requestQr与本机二维码渲染通过，state=waiting/hasQr=true；正常poll已开始。仅列字段名，不公开uuid/qrcode等值。SDK最终结果/new mobile尚待本人手机确认与私有result核对，resolver尚未请求。此新回包证明本次旧64KiB门禁过小，不推定旧owner-02/03回包内容。入口短期有效，下一会话先核私有result而非重新派发扫码。
+
 本轮修复已由Antigravity落代码：qr专用16MiB，其余ticket/poll/exchange仍64KiB。总控实际diff审核和带固定SDK缓存的18项登录/resolver离线回归全部通过；生产全部字段不变，没有新腾讯请求。CI无私有缓存时3项SDK Mock明确跳过。实际QRCode是否有效、扫码和resolver仍未实测；文档与代码同阶段同步GitHub后再准备新入口，不能把离线通过当完整近期订阅已恢复。
 
 当前实际失败已经收窄：恢复后的 Gemini/M318 完成 owner-03 准备（agy-785653ad），随后 ticket200/97字节通过、qr200超过65,536字节停止；没有保存完整qr响应，不能假定内容有效，也不能倒推owner-02原因。没有轮询/授权交换/mobile/resolver，所有生产字段仍与本人Web登录后基线一致。已由本人授权的 Antigravity/Gemini 3.8 Flash (High) 修复任务 agy-92d4c82c 处理 QR 专用上限和离线测试：原 SDK 固定88bd2e0的JSON上限16MiB，其余阶段仍64KiB。修复任务不发腾讯请求、不重开扫码；运行状态不是成果，审核/测试/文档/Git同步后才准备新本人入口。
