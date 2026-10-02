@@ -119,6 +119,26 @@ describe('verified search SQLite rehearsal protection (no HTTP)', () => {
     ).toEqual(feed);
     expect(createVerifiedSqliteBackup).toHaveBeenCalled();
   });
+  it('commits one explicit verified-cache backfill and rolls back an unexpected rerun', async () => {
+    const feed = await prisma.feed.findUniqueOrThrow({ where: { id: mpId } });
+    expect(
+      await collection.importVerifiedSearchBackfill(mpId, await replay()),
+    ).toMatchObject({
+      mode: 'verified-cache-backfill',
+      created: 1,
+      updated: 0,
+      complete: false,
+      productionSourceEnabled: false,
+    });
+    const saved = await prisma.article.findFirstOrThrow();
+    await expect(
+      collection.importVerifiedSearchBackfill(mpId, await replay()),
+    ).rejects.toThrow('SEARCH_BACKFILL_UNEXPECTED_WRITE_SET');
+    expect(await prisma.article.findFirstOrThrow()).toEqual(saved);
+    expect(
+      await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
+    ).toEqual(feed);
+  });
   it('normal update persists live verified results through the same protected transaction and deduplicates', async () => {
     const prepared = await replay();
     (readOwnerSearchConfig as jest.Mock).mockResolvedValue({ mpId });

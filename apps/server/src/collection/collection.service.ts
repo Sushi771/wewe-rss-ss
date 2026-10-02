@@ -24,6 +24,7 @@ import {
   OwnerUpdateStopped,
 } from './owner-search-update';
 import { prepareSearchReplay } from './search-replay';
+import { prepareBrowserDomReplay } from './browser-dom-adapter';
 import { fetchOwnerWereadLatest } from './owner-weread-latest';
 import {
   assertSavedArticleIdentity,
@@ -105,11 +106,116 @@ export class CollectionService {
     }
   }
 
+  /** Offline browser-assisted update slice. No production writes, no Tencent requests.
+   * Inserts genuine owner-confirmed browser-DOM evidence into an isolated SQLite copy.
+   */
+  async replayBrowserDomUpdate(
+    mpId: string,
+    replay: ReturnType<typeof prepareBrowserDomReplay>,
+  ) {
+    const raw = process.env.DATABASE_URL || '';
+    if (!raw.startsWith('file:') || !path.isAbsolute(raw.slice(5)))
+      throw new Error('BROWSER_DOM_REPLAY_REQUIRES_ISOLATED_SQLITE');
+    const database = await fs.realpath(raw.slice(5));
+    let marker: { mode: string; sourceDatabase: string } | null = null;
+    for (const suffix of ['.browser-dom-replay.json', '.search-replay.json']) {
+      try {
+        marker = JSON.parse(await fs.readFile(database + suffix, 'utf8'));
+        break;
+      } catch {}
+    }
+    if (
+      !marker ||
+      !['owner-confirmed-browser-dom', 'real-response-replay'].includes(
+        marker.mode,
+      ) ||
+      (await fs.realpath(marker.sourceDatabase)).toLowerCase() ===
+        database.toLowerCase()
+    )
+      throw new Error('BROWSER_DOM_REPLAY_REQUIRES_ISOLATED_SQLITE');
+    if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
+    this.publicCollections.add(mpId);
+    try {
+      const page = assertProviderPage(replay.page, mpId);
+      if (
+        replay.discovery !== 'owner-confirmed-browser-dom' ||
+        replay.networkRequests !== 0 ||
+        replay.verified.article.id !== page.articles[0]?.id
+      )
+        throw new Error('BROWSER_DOM_REPLAY_PROVENANCE_INVALID');
+      await createVerifiedSqliteBackup();
+      const { created, updated } = await this.saveVerifiedSearchPage(
+        mpId,
+        page,
+        false, // Keep syncTime and updateTime untouched in offline rehearsal
+      );
+      return {
+        mode: 'owner-confirmed-browser-dom' as const,
+        created,
+        updated,
+        articles: page.articles.length,
+        unarchivedImages: replay.unarchivedImages,
+        offlineImagesReady: replay.unarchivedImages === 0,
+        coverage: page.coverage,
+        complete: false as const,
+        productionSourceEnabled: false as const,
+      };
+    } finally {
+      this.publicCollections.delete(mpId);
+    }
+  }
+
+  /** One-time, explicitly invoked backfill of independently verified cached
+   * originals. It does not change feed sync time or enable a live source.
+   * The expected one-row insert is enforced inside the save transaction.
+   */
+  async importVerifiedSearchBackfill(
+    mpId: string,
+    replay: Awaited<ReturnType<typeof prepareSearchReplay>>,
+  ) {
+    const page = assertProviderPage(replay.page, mpId);
+    if (
+      replay.discovery !== 'real-response-replay' ||
+      replay.originalNetworkRequests !== 0 ||
+      replay.imageNetworkRequests !== 0 ||
+      replay.verified.length !== page.articles.length ||
+      page.articles.some(
+        (item, index) =>
+          JSON.stringify(item) !==
+          JSON.stringify(replay.verified[index].article),
+      )
+    )
+      throw new Error('SEARCH_BACKFILL_PROVENANCE_INVALID');
+    if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
+    this.publicCollections.add(mpId);
+    try {
+      await createVerifiedSqliteBackup();
+      const { created, updated } = await this.saveVerifiedSearchPage(
+        mpId,
+        page,
+        false,
+        { created: 1, updated: 0 },
+      );
+      return {
+        mode: 'verified-cache-backfill' as const,
+        created,
+        updated,
+        articles: page.articles.length,
+        coverage: 'search-results' as const,
+        complete: false as const,
+        productionSourceEnabled: false as const,
+      };
+    } finally {
+      this.publicCollections.delete(mpId);
+    }
+  }
+
   /** Shared identity-preserving persistence; callers prove live or offline provenance. */
   private async saveVerifiedSearchPage(
     mpId: string,
     page: ProviderPage,
     advanceSync = false,
+    expected?: { created: number; updated: number },
   ) {
     let created = 0,
       updated = 0;
@@ -206,6 +312,11 @@ export class CollectionService {
             created++;
           }
         }
+        if (
+          expected &&
+          (created !== expected.created || updated !== expected.updated)
+        )
+          throw new Error('SEARCH_BACKFILL_UNEXPECTED_WRITE_SET');
         if (advanceSync && page.articles.length) {
           await tx.feed.update({
             where: { id: mpId },

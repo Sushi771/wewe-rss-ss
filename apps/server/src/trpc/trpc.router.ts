@@ -39,11 +39,45 @@ import {
   readBodyRetryResult,
 } from '../collection/article-body-retry';
 import {
+  canonicalArticleUrl,
   csvCell,
   metricLabels,
   Metrics,
   metricsMarkdown,
 } from '../collection/collection-format';
+import { scanOwnerCandidates } from '../collection/owner-candidate-scan';
+
+const searchCandidateSnapshotSchema = z.object({
+  mpId: z
+    .string()
+    .regex(/^MP_WXS_\d{5,15}$/)
+    .optional(),
+  result: z.object({
+    candidates: z
+      .array(
+        z.object({
+          id: z.string().regex(/^WX_\d{5,15}_\d{1,20}_[1-9]\d{0,3}$/),
+          mpId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+          url: z.string().max(2000),
+          title: z.string().trim().min(1).max(1000),
+          indexTimestamp: z
+            .number()
+            .int()
+            .positive()
+            .max(4102444800)
+            .nullable(),
+        }),
+      )
+      .max(500),
+    pages: z.number().int().min(0).max(5),
+    requests: z.number().int().min(0).max(5),
+    capturedAt: z.string().datetime({ offset: true }),
+    truncated: z.boolean(),
+    termination: z.enum(['upstream_exhausted', 'page_budget', 'repeated_page']),
+    coverage: z.literal('search-results'),
+    complete: z.boolean(),
+  }),
+});
 
 @Injectable()
 export class TrpcRouter {
@@ -56,6 +90,80 @@ export class TrpcRouter {
   ) {}
 
   private readonly logger = new Logger(this.constructor.name);
+
+  /** Read only an explicitly bound private snapshot; never return its request parameters or paths. */
+  private async readSearchCandidateSnapshot(mpId: string) {
+    const boundFeedId = process.env.OWNER_SEARCH_CANDIDATE_FEED_ID;
+    const snapshotFile = process.env.OWNER_SEARCH_CANDIDATE_SNAPSHOT_FILE;
+    if (mpId !== boundFeedId || !snapshotFile) return null;
+    try {
+      if (!path.isAbsolute(snapshotFile)) throw new Error();
+      const stat = await fs.promises.lstat(snapshotFile);
+      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new Error();
+      const raw = await fs.promises.readFile(snapshotFile);
+      if (raw.length > 2 * 1024 * 1024) throw new Error();
+      const snapshot = searchCandidateSnapshotSchema.parse(
+        JSON.parse(raw.toString('utf8')),
+      );
+      const { result } = snapshot;
+      if (
+        (snapshot.mpId && snapshot.mpId !== mpId) ||
+        (!result.candidates.length && snapshot.mpId !== mpId)
+      )
+        throw new Error();
+      const identities = new Set<string>();
+      const expectedBiz = Buffer.from(mpId.slice('MP_WXS_'.length)).toString(
+        'base64',
+      );
+      const candidates = result.candidates.map((candidate) => {
+        const url = new URL(candidate.url);
+        if (
+          candidate.mpId !== mpId ||
+          url.protocol !== 'https:' ||
+          /[\s\\\x00-\x1f\x7f]/.test(candidate.url) ||
+          url.hash ||
+          ['__biz', 'mid', 'idx', 'sn'].some(
+            (key) => url.searchParams.getAll(key).length !== 1,
+          ) ||
+          url.searchParams.get('__biz') !== expectedBiz ||
+          !/^[a-fA-F0-9]{4,64}$/.test(url.searchParams.get('sn') || '')
+        )
+          throw new Error();
+        const identity = canonicalArticleUrl(candidate.url);
+        if (
+          identity.id !== candidate.id ||
+          identity.mpId !== mpId ||
+          identities.has(candidate.id)
+        )
+          throw new Error();
+        identities.add(candidate.id);
+        return {
+          id: candidate.id,
+          mpId,
+          title: candidate.title,
+          url: identity.url,
+          indexTimestamp: candidate.indexTimestamp,
+        };
+      });
+      return {
+        mpId,
+        candidates,
+        capturedAt: result.capturedAt,
+        pages: result.pages,
+        requests: result.requests,
+        truncated: result.truncated,
+        termination: result.termination,
+        coverage: 'search-results' as const,
+        // Exhausting a search cursor does not prove a complete account list.
+        complete: false as const,
+      };
+    } catch {
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: '搜索候选快照不可用，请检查服务器私有配置或重新核验快照。',
+      });
+    }
+  }
 
   /** Stage one feed for an authenticated browser ZIP download. Never write to OBSIDIAN_PATH. */
   async buildOfflineFeedDirectory(feedId: string, directory: string) {
@@ -371,6 +479,32 @@ export class TrpcRouter {
   });
 
   feedRouter = this.trpcService.router({
+    searchCandidates: this.trpcService.protectedProcedure
+      .input(z.object({ mpId: z.string().regex(/^MP_WXS_\d{5,15}$/) }))
+      .query(({ input }) => this.readSearchCandidateSnapshot(input.mpId)),
+    scanCandidates: this.trpcService.protectedProcedure
+      .input(z.object({ mpId: z.string().regex(/^MP_WXS_\d{5,15}$/) }))
+      .mutation(async ({ input }) => {
+        if (
+          input.mpId !== process.env.OWNER_SEARCH_CANDIDATE_FEED_ID ||
+          !process.env.OWNER_SEARCH_CANDIDATE_SNAPSHOT_FILE
+        )
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: '该公众号未配置候选扫描。',
+          });
+        try {
+          return await scanOwnerCandidates(input.mpId);
+        } catch {
+          // Search keeps its own durable cooldown and access-stop reason.
+          // Do not leak session/config paths or upstream response details.
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message:
+              '候选扫描未完成；请检查私人搜索会话、冷却或停止记录。旧候选快照已保留。',
+          });
+        }
+      }),
     addFromArticle: this.trpcService.protectedProcedure
       .input(z.object({ articleUrl: z.string().url() }))
       .mutation(async ({ input }) =>

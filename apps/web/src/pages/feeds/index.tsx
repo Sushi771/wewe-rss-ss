@@ -233,6 +233,25 @@ const Feeds = () => {
   const currentMpInfo = useMemo(() => {
     return feedData?.items.find((item) => item.id === currentMpId);
   }, [currentMpId, feedData?.items]);
+  const {
+    data: searchCandidates,
+    error: searchCandidatesError,
+    isFetching: isReadingSearchCandidates,
+    refetch: refetchSearchCandidates,
+  } = trpc.feed.searchCandidates.useQuery(
+    { mpId: currentMpId },
+    {
+      enabled: Boolean(currentMpInfo) && /^MP_WXS_\d{5,15}$/.test(currentMpId),
+      refetchOnWindowFocus: false,
+      retry: false,
+    },
+  );
+  const {
+    mutateAsync: scanCandidates,
+    isLoading: isScanningCandidates,
+    data: candidateScanResult,
+    error: candidateScanError,
+  } = trpc.feed.scanCandidates.useMutation();
   const persistedUpdate = useMemo(() => {
     try {
       const result = JSON.parse(currentMpInfo?.lastCollectionResult || 'null');
@@ -1032,6 +1051,103 @@ const Feeds = () => {
                 }
               />
             </div>
+          )}
+          {currentMpInfo && (searchCandidates || searchCandidatesError) && (
+            <details
+              key={currentMpId}
+              className="border-b border-neutral-200 bg-amber-50/50 text-sm dark:border-neutral-700 dark:bg-neutral-900"
+            >
+              <summary className="cursor-pointer px-4 py-3 font-medium">
+                待核验搜索候选
+                {searchCandidates
+                  ? ` · ${searchCandidates.candidates.length} 条 · 列表不完整`
+                  : ' · 快照不可用'}
+              </summary>
+              <div className="px-4 pb-3">
+                {searchCandidatesError ? (
+                  <p role="alert" className="text-red-600">
+                    {searchCandidatesError.message}
+                  </p>
+                ) : searchCandidates ? (
+                  <>
+                    <p className="text-neutral-600 dark:text-neutral-400">
+                      搜索快照 · 采集于{' '}
+                      {dayjs(searchCandidates.capturedAt).format(
+                        'YYYY-MM-DD HH:mm:ss',
+                      )}
+                      {' · '}
+                      {searchCandidates.pages} 页
+                      {searchCandidates.truncated ? ' · 已截断' : ''}
+                    </p>
+                    <p className="mt-1 text-amber-800 dark:text-amber-300">
+                      搜索索引时间不是发表时间。正文与真实发表时间待核验，本快照未作为文章入库；搜索结果不能保证本号文章齐全。
+                    </p>
+                    <ul className="mt-2 max-h-72 divide-y divide-neutral-200 overflow-auto dark:divide-neutral-700">
+                      {searchCandidates.candidates.map((candidate) => (
+                        <li key={candidate.id} className="py-2">
+                          <a
+                            href={candidate.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="break-words text-blue-700 hover:underline dark:text-blue-300"
+                          >
+                            {candidate.title}
+                          </a>
+                          <p className="mt-1 text-xs text-neutral-500">
+                            搜索索引时间：
+                            {candidate.indexTimestamp
+                              ? dayjs(candidate.indexTimestamp * 1000).format(
+                                  'YYYY-MM-DD HH:mm:ss',
+                                )
+                              : '未提供'}
+                            {' · '}待核验
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                    {!searchCandidates.candidates.length && (
+                      <p className="mt-2 text-neutral-500">快照中没有候选。</p>
+                    )}
+                  </>
+                ) : null}
+                <Button
+                  size="sm"
+                  variant="light"
+                  className="mt-2"
+                  isLoading={isReadingSearchCandidates}
+                  onPress={() => refetchSearchCandidates()}
+                >
+                  重新读取快照
+                </Button>
+                <Button
+                  size="sm"
+                  variant="light"
+                  className="ml-2 mt-2"
+                  isLoading={isScanningCandidates}
+                  onPress={async () => {
+                    try {
+                      await scanCandidates({ mpId: currentMpId });
+                      await refetchSearchCandidates();
+                    } catch {
+                      // The protected mutation shows a safe error below.
+                    }
+                  }}
+                >
+                  扫描新候选
+                </Button>
+                {candidateScanResult && (
+                  <p className="mt-2 text-neutral-600 dark:text-neutral-400">
+                    扫描完成：{candidateScanResult.candidates}{' '}
+                    条候选。文章正文和发表时间仍需核验。
+                  </p>
+                )}
+                {candidateScanError && (
+                  <p role="alert" className="mt-2 text-red-600">
+                    {candidateScanError.message}
+                  </p>
+                )}
+              </div>
+            </details>
           )}
           <div className="flex-1 overflow-auto">
             <ArticleList

@@ -174,8 +174,16 @@ async function worker(stage, dir, copy) {
       path.join(built, 'collection/collection.service'),
     );
     const collection = new CollectionService(prisma);
+    const priorArticles = await prisma.article.findMany({
+      where: { id: { in: replay.verified.map((v) => v.article.id) } },
+    });
+    const priorById = new Map(priorArticles.map((article) => [article.id, article]));
+    const missingBefore = replay.verified.filter(
+      (entry) => !priorById.has(entry.article.id),
+    ).length;
     const result = await collection.replayVerifiedSearch(input.mpId, replay);
-    assert.equal(result.created, stage === 'first' ? 2 : 0);
+    assert.equal(result.created, missingBefore);
+    if (stage === 'restart') assert.equal(result.created, 0);
     assert.equal(result.updated, 0);
     const articles = await prisma.article.findMany({
       where: { id: { in: replay.verified.map((v) => v.article.id) } },
@@ -183,8 +191,12 @@ async function worker(stage, dir, copy) {
     for (const verified of replay.verified) {
       const saved = articles.find((a) => a.id === verified.article.id);
       assert(saved);
-      assert.equal(saved.publishTime, verified.article.publishTime);
-      assert.equal(saved.contentHtml, verified.article.contentHtml);
+      const prior = priorById.get(verified.article.id);
+      if (prior) assert.deepEqual(saved, prior);
+      else {
+        assert.equal(saved.publishTime, verified.article.publishTime);
+        assert.equal(saved.contentHtml, verified.article.contentHtml);
+      }
     }
     write(path.join(dir, stage + '.json'), {
       ...result,
@@ -350,7 +362,10 @@ async function parent() {
     fs.writeFileSync(path.join(dir, stage + '.log'), output);
     const current = rows(copy);
     sameOld(old, current);
-    assert.equal(current.articles.length, 1449);
+    assert.equal(
+      current.articles.length,
+      old.articles.length + json(path.join(dir, 'first.json')).created,
+    );
     if (afterFirst) assert.deepEqual(current, afterFirst);
     else afterFirst = current;
   }
