@@ -16,6 +16,27 @@ const { environmentGate } = require('./probe-refreshed-mobile-web-health.cjs');
 const { snapshot } = require('./probe-recent-account-discovery.cjs');
 const { verifyCache, COMMIT } = require('./prepare-owner-sdk-cache.cjs');
 const hash = (v) => createHash('sha256').update(v).digest('hex');
+const SDK_SCOPE = 'snsapi_userinfo,snsapi_timeline,snsapi_friend';
+// Official EInk 2.1.2 QRAuthDialogFragment's exact IDiffDevOAuth.auth scope.
+// This changes the consent requested in a normal owner-triggered QR login,
+// without changing the pinned SDK, nonce/signature, exchange or device identity.
+const READER_SCOPE = 'snsapi_userinfo,snsapi_friend,snsapi_favorites';
+
+function readerScopeUrl(url) {
+  assert.equal(
+    url.origin + url.pathname,
+    'https://open.weixin.qq.com/connect/sdk/qrconnect',
+  );
+  assert.equal(url.searchParams.get('appid'), 'wxab9b71ad2b90ff34');
+  assert.equal(url.searchParams.get('scope'), SDK_SCOPE);
+  assert.equal(url.searchParams.get('noncestr'), 'weread');
+  assert(
+    url.searchParams.get('signature') && url.searchParams.get('timestamp'),
+  );
+  const adapted = new URL(url);
+  adapted.searchParams.set('scope', READER_SCOPE);
+  return adapted;
+}
 
 function publish(root, name, value) {
   fs.writeFileSync(path.join(root, name), JSON.stringify(value), {
@@ -24,7 +45,13 @@ function publish(root, name, value) {
   });
 }
 
-function boundedFetch(fetchImpl, deviceId, audit, onResponse = () => {}) {
+function boundedFetch(
+  fetchImpl,
+  deviceId,
+  audit,
+  onResponse = () => {},
+  nativeReaderScope = false,
+) {
   const counts = { ticket: 0, qr: 0, poll: 0, exchange: 0 };
   const addresses = {
     'https://i.weread.qq.com/wxticket': 'ticket',
@@ -62,7 +89,11 @@ function boundedFetch(fetchImpl, deviceId, audit, onResponse = () => {}) {
       )
         throw Error('exchange_gate');
     } else if (init.method && init.method !== 'GET') throw Error('method_gate');
-    const response = await fetchImpl(input, init);
+    const outbound =
+      phase === 'qr' && nativeReaderScope
+        ? readerScopeUrl(url).toString()
+        : input;
+    const response = await fetchImpl(outbound, init);
     // Audit only categories/counts: no UUID, wx_code, request headers or tokens.
     const entry = {
       phase,
@@ -140,6 +171,7 @@ async function runLogin({
   onQr,
   onStatus,
   signal,
+  nativeReaderScope = false,
 }) {
   const before = takeSnapshot();
   publish(root, 'attempt.json', {
@@ -148,6 +180,12 @@ async function runLogin({
     startedAt: new Date().toISOString(),
     ownerHash: hash(expectedVid),
     deviceHash: hash(deviceId),
+    ...(nativeReaderScope
+      ? {
+          requestedScope: READER_SCOPE,
+          scopeSource: 'official-eink-2.1.2-QRAuthDialogFragment',
+        }
+      : {}),
     before,
   });
   const audit = [];
@@ -163,6 +201,7 @@ async function runLogin({
           mode: 0o600,
         });
       },
+      nativeReaderScope,
     );
     const options = {
       signal,
@@ -204,6 +243,7 @@ async function runLogin({
       capturedAt: new Date().toISOString(),
       accountId,
       mobile,
+      ...(nativeReaderScope ? { requestedScope: READER_SCOPE } : {}),
     });
     publish(root, 'result.json', {
       success: true,
@@ -226,10 +266,16 @@ async function runLogin({
   }
 }
 
-function page(nonce) {
-  return `<!doctype html><meta charset="utf-8"><title>文章解析验证：正常微信授权</title>
+function page(nonce, nativeReaderScope = false) {
+  const title = nativeReaderScope
+    ? '官方阅读器权限：扫码授权'
+    : '文章解析验证：正常微信授权';
+  const purpose = nativeReaderScope
+    ? '官方状态显示公众号授权尚未开启。本次普通扫码采用官方阅读器订阅页的权限范围，包含头像、好友与收藏；请在手机查看并决定是否授权。完成后会核授权状态，尚不能保证订阅恢复。'
+    : '这次扫码提供文章链接解析所需的移动会话。刚才原账号页取得的是 Web 会话。此研究入口只保存本机私有凭据，不写项目账号或文章。';
+  return `<!doctype html><meta charset="utf-8"><title>${title}</title>
 <style>body{font-family:system-ui;max-width:620px;margin:70px auto;padding:24px;line-height:1.7}button{padding:12px 22px}img{display:block;margin:24px 0}img[hidden]{display:none}</style>
-<h2>文章解析验证：正常微信授权</h2><p>这次扫码提供文章链接解析所需的移动会话。刚才原账号页取得的是 Web 会话。此研究入口只保存本机私有凭据，不写项目账号或文章。</p>
+<h2>${title}</h2><p>${purpose}</p>
 <p>使用刚才同一个微信读书账号。在手机微信中查看并确认官方授权。</p>
 <button id="start">生成本次二维码</button><p id="status">尚未向腾讯发起请求</p><img id="qr" width="260" height="260" hidden>
 <script nonce="${nonce}">const b=document.getElementById('start'),s=document.getElementById('status'),q=document.getElementById('qr');
@@ -254,7 +300,14 @@ function renderQrSvg(value, size = 260) {
   );
 }
 
-async function serve({ sdkRoot, root, configFile, recoveryFile, dbFile }) {
+async function serve({
+  sdkRoot,
+  root,
+  configFile,
+  recoveryFile,
+  dbFile,
+  nativeReaderScope = false,
+}) {
   environmentGate(process.env);
   root = safePrivateRoot(root);
   if (
@@ -307,7 +360,7 @@ async function serve({ sdkRoot, root, configFile, recoveryFile, dbFile }) {
     );
     if (request.method === 'GET' && request.url === '/') {
       response.setHeader('Content-Type', 'text/html; charset=utf-8');
-      response.end(page(nonce));
+      response.end(page(nonce, nativeReaderScope));
     } else if (request.method === 'GET' && request.url === '/status') {
       response.setHeader('Content-Type', 'application/json');
       response.end(JSON.stringify({ ...state, hasQr: !!qrSvg }));
@@ -333,6 +386,7 @@ async function serve({ sdkRoot, root, configFile, recoveryFile, dbFile }) {
         accountId,
         takeSnapshot: () => snapshot(dbFile),
         signal: controller.signal,
+        nativeReaderScope,
         onQr: (url) => {
           qrSvg = renderQrSvg(url, 260);
           state = { state: 'waiting' };
@@ -399,7 +453,7 @@ if (require.main === module) {
     );
   else if (
     argv.length === 6 &&
-    argv[0] === '--serve' &&
+    ['--serve', '--serve-native-reader'].includes(argv[0]) &&
     argv.slice(1).every(path.isAbsolute)
   )
     serve({
@@ -408,6 +462,7 @@ if (require.main === module) {
       configFile: argv[3],
       recoveryFile: argv[4],
       dbFile: argv[5],
+      nativeReaderScope: argv[0] === '--serve-native-reader',
     }).catch(() => {
       console.log(JSON.stringify({ state: 'setup_stopped' }));
       process.exitCode = 1;
@@ -417,4 +472,12 @@ if (require.main === module) {
     process.exitCode = 1;
   }
 }
-module.exports = { boundedFetch, runLogin, page, renderQrSvg };
+module.exports = {
+  boundedFetch,
+  runLogin,
+  page,
+  renderQrSvg,
+  readerScopeUrl,
+  SDK_SCOPE,
+  READER_SCOPE,
+};

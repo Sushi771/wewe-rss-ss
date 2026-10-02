@@ -9,8 +9,30 @@ const {
   boundedFetch,
   page,
   renderQrSvg,
+  readerScopeUrl,
+  SDK_SCOPE,
+  READER_SCOPE,
 } = require('./owner-sdk-login-once.cjs');
 const REQUEST = { redirect: 'error' };
+test('official reader consent changes only the exact QR scope from the pinned SDK', () => {
+  const url = new URL('https://open.weixin.qq.com/connect/sdk/qrconnect');
+  for (const [key, value] of Object.entries({
+    appid: 'wxab9b71ad2b90ff34',
+    scope: SDK_SCOPE,
+    noncestr: 'weread',
+    signature: 'mock-signature',
+    timestamp: '1',
+  }))
+    url.searchParams.set(key, value);
+  const result = readerScopeUrl(url);
+  assert.equal(result.searchParams.get('scope'), READER_SCOPE);
+  assert.equal(url.searchParams.get('scope'), SDK_SCOPE);
+  for (const key of ['appid', 'noncestr', 'signature', 'timestamp'])
+    assert.equal(result.searchParams.get(key), url.searchParams.get(key));
+  url.searchParams.set('appid', 'other');
+  assert.throws(() => readerScopeUrl(url));
+  assert.match(page('nonce', true), /包含头像、好友与收藏/);
+});
 const URLs = [
   'https://i.weread.qq.com/wxticket?nonceStr=weread',
   'https://open.weixin.qq.com/connect/sdk/qrconnect?appid=test',
@@ -459,41 +481,51 @@ test(
 test(
   'hash-pinned real SDK primitives obey the wrapper with all transport mocked',
   { skip: !process.env.OWNER_SDK_CACHE },
-  async () =>
-    fixture(async (root) => {
-      const { verifyCache } = require('./prepare-owner-sdk-cache.cjs');
-      const cache = verifyCache(process.env.OWNER_SDK_CACHE);
-      const sdk = require(path.join(cache, 'src/auth/qrlogin.js'));
-      let requests = 0;
-      const fetchImpl = async (input, init) => {
-        requests++;
-        const url = new URL(input);
-        let data;
-        if (url.pathname === '/wxticket')
-          data = { signature: 'mock_signature', timeStamp: 1700000000 };
-        else if (url.pathname === '/connect/sdk/qrconnect')
-          data = { errcode: 0, uuid: 'mock_uuid' };
-        else if (url.pathname === '/connect/l/qrconnect')
-          data = { wx_errcode: 405, wx_code: 'mock_wx_code' };
-        else if (url.pathname === '/login') {
-          const body = JSON.parse(init.body);
-          assert.equal(body.deviceId, identity.deviceId);
-          assert.equal(body.isAutoLogout, 0);
-          assert(!('refreshToken' in body));
-          assert(!('accessToken' in body));
-          assert.equal(body.code, 'mock_wx_code');
-          data = identity;
-        } else throw Error('unexpected mock route');
-        return new Response(JSON.stringify(data));
-      };
-      const result = await runLogin(options(root, { sdk, fetchImpl }));
-      assert.equal(result.state, 'completed');
-      assert.equal(requests, 4);
-      const stored = JSON.parse(
-        fs.readFileSync(path.join(root, 'mobile-session.json')),
-      );
-      assert.deepEqual(stored.mobile, identity);
-    }),
+  async () => {
+    for (const nativeReaderScope of [false, true])
+      await fixture(async (root) => {
+        const { verifyCache } = require('./prepare-owner-sdk-cache.cjs');
+        const cache = verifyCache(process.env.OWNER_SDK_CACHE);
+        const sdk = require(path.join(cache, 'src/auth/qrlogin.js'));
+        let requests = 0;
+        const fetchImpl = async (input, init) => {
+          requests++;
+          const url = new URL(input);
+          let data;
+          if (url.pathname === '/wxticket')
+            data = { signature: 'mock_signature', timeStamp: 1700000000 };
+          else if (url.pathname === '/connect/sdk/qrconnect') {
+            assert.equal(
+              url.searchParams.get('scope'),
+              nativeReaderScope ? READER_SCOPE : SDK_SCOPE,
+            );
+            data = { errcode: 0, uuid: 'mock_uuid' };
+          } else if (url.pathname === '/connect/l/qrconnect')
+            data = { wx_errcode: 405, wx_code: 'mock_wx_code' };
+          else if (url.pathname === '/login') {
+            const body = JSON.parse(init.body);
+            assert.equal(body.deviceId, identity.deviceId);
+            assert.equal(body.isAutoLogout, 0);
+            assert(!('refreshToken' in body));
+            assert(!('accessToken' in body));
+            assert.equal(body.code, 'mock_wx_code');
+            data = identity;
+          } else throw Error('unexpected mock route');
+          return new Response(JSON.stringify(data));
+        };
+        const result = await runLogin(
+          options(root, { sdk, fetchImpl, nativeReaderScope }),
+        );
+        assert.equal(result.state, 'completed');
+        assert.equal(requests, 4);
+        const stored = JSON.parse(
+          fs.readFileSync(path.join(root, 'mobile-session.json')),
+        );
+        assert.deepEqual(stored.mobile, identity);
+        if (nativeReaderScope)
+          assert.equal(stored.requestedScope, READER_SCOPE);
+      });
+  },
 );
 
 test(

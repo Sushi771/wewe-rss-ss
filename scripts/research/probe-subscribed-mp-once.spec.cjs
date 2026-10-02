@@ -12,6 +12,7 @@ const {
   parseTags,
   parseFeed,
   parseScope,
+  parseConfig,
   runPreflight,
   runStage,
 } = require('./probe-subscribed-mp-once.cjs');
@@ -326,4 +327,22 @@ test('official scope reads the same account with refresh=1 once and never infers
   assert.equal(calls, 1);
   assert.equal(parseScope({ mps: 0, fris: 1 }).weChatMpGranted, false);
   assert.throws(() => parseScope({ mps: '1', fris: 0 }), /invalid_scope_shape/);
+});
+
+test('official config only reads synckey=0 and preserves a missing setting as unknown', async (t) => {
+  const options = fixture(t);
+  let calls = 0;
+  options.fetchFn = async (url) => {
+    calls++;
+    assert.equal(url, 'https://i.weread.qq.com/config?synckey=0');
+    return response({ accountsets: { mpBookGranted: 0 } });
+  };
+  assert.equal((await runStage('config', options)).mpBookGranted, false);
+  assert.equal((await runStage('config', options)).requests, 0);
+  assert.equal(calls, 1);
+  assert.equal(parseConfig({ accountsets: {} }).mpBookGranted, null);
+  assert.equal(
+    parseConfig({ accountsets: { mpBookGranted: true } }).mpBookGranted,
+    true,
+  );
 });

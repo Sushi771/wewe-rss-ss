@@ -32,6 +32,9 @@ const FEED_ENDPOINT = 'https://i.weread.qq.com/storyfeed/getCardArticles';
 // BaseFollowService.WechatAuthScope: GET /wx/scope with vid and refresh=1.
 // This reads the official status; it does not invoke updateConfigs or grant.
 const SCOPE_ENDPOINT = 'https://i.weread.qq.com/wx/scope';
+// AccountService.syncConfig() calls GET /config?synckey=0. This is independent
+// of the POST /updateConfig used to change the account settings.
+const CONFIG_URL = 'https://i.weread.qq.com/config?synckey=0';
 const MAX_BYTES = 2 * 1024 * 1024;
 const PATHS = {
   session: path.join(OWNER_ROOT, 'mobile-session.json'),
@@ -49,6 +52,8 @@ const PATHS = {
   feedOutput: path.join(OWNER_ROOT, 'subscribed-mp-feed'),
   scopeMarker: path.join(DISCOVERY_ROOT, 'mp-scope-owner07-attempt.json'),
   scopeOutput: path.join(OWNER_ROOT, 'mp-scope'),
+  configMarker: path.join(DISCOVERY_ROOT, 'mp-config-owner07-attempt.json'),
+  configOutput: path.join(OWNER_ROOT, 'mp-config'),
 };
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -144,6 +149,24 @@ function parseScope(data) {
     weChatFriendsGranted: data.fris === 1,
     mpBookGranted: null,
   };
+}
+function parseConfig(data) {
+  if (
+    !data.accountsets ||
+    typeof data.accountsets !== 'object' ||
+    Array.isArray(data.accountsets)
+  )
+    throw Error('missing_accountsets');
+  const value = data.accountsets.mpBookGranted;
+  const mpBookGranted =
+    typeof value === 'boolean'
+      ? value
+      : value === 0
+        ? false
+        : value === 1
+          ? true
+          : null;
+  return { mpBookGranted };
 }
 function classifyUpstream(status, data) {
   if (status === 401 || status === 403) return ['auth_stop', `HTTP_${status}`];
@@ -293,6 +316,9 @@ async function runPreflight(options = {}) {
     scopeReady:
       !fs.existsSync(ctx.paths.scopeMarker) &&
       !fs.existsSync(ctx.paths.scopeOutput),
+    configReady:
+      !fs.existsSync(ctx.paths.configMarker) &&
+      !fs.existsSync(ctx.paths.configOutput),
     tagsReady:
       !fs.existsSync(ctx.paths.tagsMarker) &&
       !fs.existsSync(ctx.paths.tagsOutput),
@@ -305,7 +331,7 @@ async function runPreflight(options = {}) {
 }
 async function runStage(phase, options = {}) {
   if (
-    !['tags', 'feed', 'scope'].includes(phase) ||
+    !['tags', 'feed', 'scope', 'config'].includes(phase) ||
     options.approvedOnline !== true
   ) {
     return stop(phase, 'local_gate_stop', 'EXPLICIT_STAGE_APPROVAL_REQUIRED');
@@ -325,9 +351,11 @@ async function runStage(phase, options = {}) {
     params =
       phase === 'tags'
         ? { type: 1 }
-        : phase === 'scope'
-          ? { vid: String(ctx.session.mobile.vid), refresh: 1 }
-          : savedTagParameters(ctx);
+        : phase === 'config'
+          ? { synckey: 0 }
+          : phase === 'scope'
+            ? { vid: String(ctx.session.mobile.vid), refresh: 1 }
+            : savedTagParameters(ctx);
   } catch {
     return stop(
       phase,
@@ -338,9 +366,11 @@ async function runStage(phase, options = {}) {
   const url =
     phase === 'tags'
       ? TAGS_URL
-      : phase === 'scope'
-        ? buildScopeUrl(params.vid)
-        : buildFeedUrl(params);
+      : phase === 'config'
+        ? CONFIG_URL
+        : phase === 'scope'
+          ? buildScopeUrl(params.vid)
+          : buildFeedUrl(params);
   try {
     publish(marker, {
       kind: 'official-eink-subscribed-mp-once',
@@ -348,9 +378,11 @@ async function runStage(phase, options = {}) {
       endpoint:
         phase === 'tags'
           ? TAGS_URL
-          : phase === 'scope'
-            ? SCOPE_ENDPOINT
-            : FEED_ENDPOINT,
+          : phase === 'config'
+            ? CONFIG_URL
+            : phase === 'scope'
+              ? SCOPE_ENDPOINT
+              : FEED_ENDPOINT,
       attemptedAt: new Date().toISOString(),
       sessionBinding: ctx.binding,
     });
@@ -422,6 +454,11 @@ async function runStage(phase, options = {}) {
             tagCount: parsed.tagCount,
             tag103Found: Boolean(parsed.tag103),
           };
+        } else if (phase === 'config') {
+          result = {
+            ...stop(phase, 'success', 'OFFICIAL_ACCOUNT_CONFIG', 1),
+            ...parseConfig(data),
+          };
         } else if (phase === 'scope') {
           result = {
             ...stop(phase, 'success', 'OFFICIAL_SCOPE_STATUS', 1),
@@ -454,7 +491,7 @@ async function main() {
   const phase =
     args.length === 2 &&
     args[1] === '--approved-online' &&
-    ['--tags', '--feed', '--scope'].includes(args[0])
+    ['--tags', '--feed', '--scope', '--config'].includes(args[0])
       ? args[0].slice(2)
       : null;
   if (!preflight && !phase) throw Error('usage');
@@ -478,6 +515,7 @@ module.exports = {
   TAGS_URL,
   FEED_ENDPOINT,
   SCOPE_ENDPOINT,
+  CONFIG_URL,
   MAX_BYTES,
   rawQuery,
   deriveFeedParameters,
@@ -485,6 +523,7 @@ module.exports = {
   buildFeedUrl,
   buildScopeUrl,
   parseScope,
+  parseConfig,
   classifyUpstream,
   parseFeed,
   runPreflight,
