@@ -1,5 +1,7 @@
 # 正常 SDK 授权到文章解析的隔离验证
 
+**Axios 对齐单次真实结果（2026-10-02）：**总控审核、10 项联合离线测试、远端与 CI 成功后，使用新的独占标记 `body-axios-attempt.json` 恰好发出一次与历史成功链路对齐的 Axios `GET /web/mp/content`。私有 `sdk-login-owner-06/body-axios/response-metadata.json` 记录 HTTP 200、`Content-Type: text/plain; charset=utf-8`、`Content-Length: 0`、实际保存 0 字节；`result.json` 为 `success=false, stage=parsing, requests=1, productionUnchanged=true`。无文章或可信发布时间；新旧正文标记、旧 resolver 标记和原始证据均保留，不能重发。生产 SQLite `quick_check=ok`，1 账号/12 订阅/1448 文章逐表全字段哈希仍与基线一致。由此可排除单纯由 Node fetch 读取方式造成的正文丢失，但不能确定空回包的服务端原因，也不能把历史另一篇文章的成功推广到本篇。
+
 **正文单次真实结果与离线对比（2026-10-02）：**
 经代码审核及 9 项联合离线测试后，仅一次 `GET https://weread.qq.com/web/mp/content` 返回 HTTP 200、响应体 0 字节。私有 `sdk-login-owner-06/body/result.json` 记录 `success=false, stage=parsing, requests=1, productionUnchanged=true`；没有文章身份、可信发布时间或正文成果。原始空响应与元数据已私存，全局 `body-attempt.json` 已独占写入并永久保留，不重放。旧 resolver、cover 停止和生产全部字段均未改。
 
@@ -69,7 +71,7 @@ node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_
 - **隔离输出目录**：隔离写入私有 `body-axios/` 目录（包含私存 `response-body.html`、`response-metadata.json` 与 `result.json`），完全不触碰、不覆盖原 `body/` 目录。
 - **严格边界控制不变**：无 cover 请求（不触碰 401 风险端点）、无第三方中转、无微信原文直连、无图片抓取、生产 SQLite 零写入、不删除旧停止文件、强制环境门禁（阻断代理变量）。
 - **离线测试保障**：`probe-owner-body-once.spec.cjs` 包含 6 项针对性离线回归测试（前置门禁、单次请求与 Axios 参数/脱敏头校验、HTTP 401/500/验证码容错、身份/时间/标题冲突终止、超限与生产变动拦截、127.0.0.1 纯本地 Axios chunked/gzip 3 MiB 回包读取），测试结果以本轮复核为准。
-- **执行纪律**：`node scripts/research/probe-owner-body-once.cjs --plan` 确认 `requests: 0`、`productionWrites: 0`、`transport: "axios"`、`exclusiveMarker: "body-axios-attempt.json"`。**零联网，未获总控明确批准前严禁 `--execute`**。
+- **执行纪律与结果**：`node scripts/research/probe-owner-body-once.cjs --plan` 确认 `requests: 0`、`productionWrites: 0`、`transport: "axios"`、`exclusiveMarker: "body-axios-attempt.json"`。离线准备阶段零联网；总控审核后实际执行一次，结果见文首，标记保留且不得重试。
 
 ### 3. 公开来源审计：新鲜 SDK 认证下的公众号全量列表可能与 skey / accessToken 辨析
 
