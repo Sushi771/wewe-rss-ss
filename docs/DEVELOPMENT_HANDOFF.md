@@ -1,5 +1,13 @@
 # 公众号级列表发现主线（2026-10-02）
 
+**最新模型授权覆盖旧规则：**本人明确“我刚设置了opus4.6先用，antigravity可以直接使用这个模型”。当前任务改用 `Claude Opus 4.6 (Thinking)`，不再受下文历史固定Gemini约束，也不自动切回；总控已派发agy-b8cce8ba，让Antigravity实际核SDK二维码生成/准备正常本人扫码，随后沿weread-omni推进列表/解析/正文主线。任务是否执行、权限等待及结果以check_agent_job和真实轨迹核对，pending不称成果。总控保留审核、验证、文档与commit/push责任。
+
+当前指挥约束再次确认：用户要求 Antigravity 承担实际开发/研究和正常 SDK 扫码验证，总控负责派发、审核、数据保护、必要测试、文档及GitHub同步，不继续以本地包装器开发替代子Agent工作。最新代码 `f1a0c35e948126357fe88b31111d00b9eb41e3c9` 已推送、[CI 36958435082](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36958435082) 全部成功、工作树干净。SDK仍未生成可用二维码，resolver0请求，完整近期发现未完成。
+
+Antigravity实际执行阻塞已进一步核实：新主线任务agy-43122752（指定Gemini 3.8 Flash High，四份入口上下文）也在SendUserCascadeMessage HTTP400失败；读取旧失败会话轨迹发现指定MODEL_PLACEHOLDER_M318返回 `FAILED_PRECONDITION (code 400): User location is not supported for the API use.`。该会话的恢复请求可被接受，但后续实际生成元数据为MODEL_PLACEHOLDER_M26/claude-opus-4-6-thinking，不符合用户固定模型要求；总控已CancelCascadeInvocation并确认CASCADE_RUN_STATUS_IDLE，没有将其结果作为指定模型成果。不能推断MCP连接断开、认证token问题、永久限制或确定是自动回退；具体模型切换机制尚未确认。已向本人说明并请求选择恢复指定模型在IDE正常使用，或明确授权其他可用模型；默认仍固定Gemini，不自动改变网络/账号/模型设置，不反复派发相同失败。没有活动开发子任务。
+
+运行核对：历史PID27668已不存在，原4000无监听且账号页不可达，停止原因未查明，不归因于SDK请求。已用现有受控启动器完整核13,283个冻结文件、确认无桌面采集助手，SQLite一致性备份与schema核对后恢复同一 `2026-09-30T18-00-04-775Z-0919cff9984b`，新PID26284，仅127.0.0.1:4000。受控审计为本机忽略的controlled-restart-1790910770699-26864；恢复后所有生产字段仍与本人Web登录后的基线完全相同，账号1/订阅12/文章1448。新研究代码没有部署为生产订阅功能。本文档补记的最新精确提交用git log -1/GitHub核对。
+
 最新接续起点为已推送 `429e9f3a28ec24cd0de482440f66d7b3008e58d3`，其 [CI 36914671344](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36914671344) 全部成功。本人明确回复可 SDK 扫码后，开新隔离 owner-02 入口；本人点击生成后实际 wxticket/qrconnect 各一次 HTTP200，但 requestQr 未完成，无二维码、无轮询、无 login 交换、无新 mobile、resolver 仍0请求。旧日志 stage=ticket 是覆盖两步的粗阶段，不能据此说只请求了 ticket；业务回包当时未保存，具体拒绝/格式/URL校验原因未知，不能补发来补证。本轮未自动生成第二码、续期或重试旧目录。
 
 已修正诊断：每次受限回包先独占保存到本机私有 response-阶段-次数.bin，再解析；脱敏审计仅记录 HTTP/字节/固定校验阶段/整数业务码，不输出 UUID、授权码、token 或业务原文。requestQr 失败按最后真实请求区分 ticket/qr，保存失败也停止，页面隐藏无效二维码占位框。15项纯离线 SDK/单次resolver回归通过（含固定原SDK Mock），不是线上认证成功。生产所有表字段与扫码前/既有基线相同，账号1、订阅12、文章1448保持；原停止文件未改。SDK缓存和凭据保持私有。
