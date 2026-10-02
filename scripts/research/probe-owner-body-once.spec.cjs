@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { createHash } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
+const { createRequire } = require('node:module');
 const {
   ENDPOINT,
   DEFAULT_BODY_LIMIT,
@@ -13,6 +14,9 @@ const {
   parseBodyHtml,
   probe,
 } = require('./probe-owner-body-once.cjs');
+const serverRequire = createRequire(
+  path.join(__dirname, '../../apps/server/package.json'),
+);
 
 const hash = (v) => createHash('sha256').update(v).digest('hex');
 
@@ -79,9 +83,20 @@ function options(root, changed = {}) {
     feed,
     reviewId,
     cookieHeader,
-    marker: path.join(root, 'body-attempt.json'),
+    marker: path.join(root, 'body-axios-attempt.json'),
     output: root,
-    fetchImpl: async () => new Response(sampleHtml, { status: 200 }),
+    axiosImpl: {
+      get: async (url, config) => ({
+        status: 200,
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'content-length': String(Buffer.byteLength(sampleHtml, 'utf8')),
+          server: 'test-upstream',
+        },
+        data: sampleHtml,
+        config,
+      }),
+    },
     takeSnapshot: () => ({ db: 'mock_unchanged' }),
     protectedHashes: ['mock_hash_1'],
     bodyLimit: DEFAULT_BODY_LIMIT,
@@ -208,26 +223,43 @@ test('validatePrerequisites requires valid resolution, matching candidate, feed 
   }
 });
 
-test('one exact body request writes marker first, retains raw HTML, and extracts article with true publishTime', async () =>
+test('one exact body request writes marker first, retains raw HTML, saves sanitized headers, and extracts article with true publishTime', async () =>
   fixture(async (root) => {
     let calls = 0;
     const opts = options(root, {
-      fetchImpl: async (url, init) => {
-        calls++;
-        // Exclusive pre-fetch marker MUST exist before network call.
-        assert(fs.existsSync(path.join(root, 'body-attempt.json')));
-        const parsedUrl = new URL(url);
-        assert.equal(
-          `${parsedUrl.origin}${parsedUrl.pathname}`,
-          'https://weread.qq.com/web/mp/content',
-        );
-        assert.equal(parsedUrl.searchParams.get('reviewId'), reviewId);
-        assert.equal(init.method, 'GET');
-        assert.equal(init.redirect, 'error');
-        assert.equal(init.headers.Cookie, cookieHeader);
-        assert.equal(init.headers.Referer, 'https://weread.qq.com/');
-        assert.equal(init.headers.Origin, 'https://weread.qq.com');
-        return new Response(sampleHtml, { status: 200 });
+      axiosImpl: {
+        get: async (url, init) => {
+          calls++;
+          // Exclusive pre-fetch marker MUST exist before network call.
+          assert(fs.existsSync(path.join(root, 'body-axios-attempt.json')));
+          const parsedUrl = new URL(url);
+          assert.equal(
+            `${parsedUrl.origin}${parsedUrl.pathname}`,
+            'https://weread.qq.com/web/mp/content',
+          );
+          assert.equal(parsedUrl.searchParams.get('reviewId'), reviewId);
+          assert.equal(init.proxy, false);
+          assert.equal(init.maxRedirects, 0);
+          assert.equal(init.responseType, 'text');
+          assert.equal(init.headers.Cookie, cookieHeader);
+          assert.equal(init.headers.Referer, 'https://weread.qq.com/');
+          assert.equal(init.headers.Origin, 'https://weread.qq.com');
+          assert.equal(init.headers['User-Agent'], 'Mozilla/5.0');
+          assert.equal(
+            init.headers.Accept,
+            'text/html,application/xhtml+xml,*/*',
+          );
+          return {
+            status: 200,
+            headers: {
+              'content-type': 'text/html; charset=utf-8',
+              'content-length': String(Buffer.byteLength(sampleHtml, 'utf8')),
+              server: 'test-upstream',
+              'set-cookie': 'secret_cookie=leak_forbidden',
+            },
+            data: sampleHtml,
+          };
+        },
       },
     });
 
@@ -243,7 +275,7 @@ test('one exact body request writes marker first, retains raw HTML, and extracts
 
     // Marker file was written and contains hash, not plain cookie
     const markerContent = fs.readFileSync(
-      path.join(root, 'body-attempt.json'),
+      path.join(root, 'body-axios-attempt.json'),
       'utf8',
     );
     assert(markerContent.includes(hash(cookieHeader)));
@@ -257,12 +289,15 @@ test('one exact body request writes marker first, retains raw HTML, and extracts
     );
     assert.equal(rawSaved, sampleHtml);
 
-    // Metadata saved
+    // Metadata saved with sanitized headers (set-cookie omitted)
     const meta = JSON.parse(
       fs.readFileSync(path.join(root, 'response-metadata.json'), 'utf8'),
     );
     assert.equal(meta.status, 200);
     assert.equal(meta.bytes, Buffer.byteLength(sampleHtml, 'utf8'));
+    assert.equal(meta.headers['content-type'], 'text/html; charset=utf-8');
+    assert.equal(meta.headers.server, 'test-upstream');
+    assert.equal(meta.headers['set-cookie'], undefined);
 
     // Article published
     assert(fs.existsSync(path.join(root, 'article.json')));
@@ -294,9 +329,18 @@ test('HTTP 401, 500, and captcha pages abort and retain raw body without publish
     await fixture(async (root) => {
       let calls = 0;
       const opts = options(root, {
-        fetchImpl: async () => {
-          calls++;
-          return new Response(bodyText, { status });
+        axiosImpl: {
+          get: async () => {
+            calls++;
+            return {
+              status,
+              headers: {
+                'content-type':
+                  status === 401 ? 'application/json' : 'text/html',
+              },
+              data: bodyText,
+            };
+          },
         },
       });
 
@@ -339,9 +383,15 @@ test('identity, title, account name, publishTime or content mismatch stops witho
     await fixture(async (root) => {
       let calls = 0;
       const opts = options(root, {
-        fetchImpl: async () => {
-          calls++;
-          return new Response(html, { status: 200 });
+        axiosImpl: {
+          get: async () => {
+            calls++;
+            return {
+              status: 200,
+              headers: { 'content-type': 'text/html' },
+              data: html,
+            };
+          },
         },
       });
 
@@ -361,9 +411,15 @@ test('oversize response and changed production snapshot block article publicatio
     let calls = 0;
     const opts = options(root, {
       bodyLimit: 100, // Small limit for test
-      fetchImpl: async () => {
-        calls++;
-        return new Response('x'.repeat(150), { status: 200 });
+      axiosImpl: {
+        get: async () => {
+          calls++;
+          return {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+            data: 'x'.repeat(150),
+          };
+        },
       },
     });
 
@@ -386,4 +442,58 @@ test('oversize response and changed production snapshot block article publicatio
     assert.equal(result.productionUnchanged, false);
     assert(!fs.existsSync(path.join(root, 'article.json')));
   });
+});
+
+test('Axios reads a localhost-only chunked/gzip multi-megabyte text response', async () => {
+  const http = require('node:http');
+  const zlib = require('node:zlib');
+
+  const uncompressedBuffer = Buffer.from(
+    randomBytes(2304 * 1024).toString('base64'),
+    'utf8',
+  );
+  const payloadSize = uncompressedBuffer.length; // 3 MiB of UTF-8 ASCII
+  const compressedGzip = zlib.gzipSync(uncompressedBuffer);
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Encoding': 'gzip',
+      'Transfer-Encoding': 'chunked',
+    });
+    const chunkSize = 64 * 1024;
+    let offset = 0;
+    const timer = setInterval(() => {
+      if (offset >= compressedGzip.length) {
+        clearInterval(timer);
+        res.end();
+        return;
+      }
+      res.write(compressedGzip.subarray(offset, offset + chunkSize));
+      offset += chunkSize;
+    }, 1);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const response = await serverRequire('axios').get(
+      `http://127.0.0.1:${port}`,
+      {
+        proxy: false,
+        maxRedirects: 0,
+        timeout: 20000,
+        maxContentLength: 8 * 1024 * 1024,
+        responseType: 'text',
+        transformResponse: [(v) => v],
+        validateStatus: () => true,
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers['content-type'], 'text/plain; charset=utf-8');
+    assert.equal(Buffer.byteLength(response.data, 'utf8'), payloadSize);
+    assert.equal(response.data, uncompressedBuffer.toString('utf8'));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

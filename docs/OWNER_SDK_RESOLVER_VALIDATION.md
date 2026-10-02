@@ -1,8 +1,20 @@
 # 正常 SDK 授权到文章解析的隔离验证
 
-**正文单次真实结果（2026-10-02）：**经代码审核及 9 项联合离线测试后，仅一次 `GET https://weread.qq.com/web/mp/content` 返回 HTTP 200、响应体 0 字节。私有 `sdk-login-owner-06/body/result.json` 记录 `success=false, stage=parsing, requests=1, productionUnchanged=true`；没有文章身份、可信发布时间或正文成果。原始空响应与元数据已私存，全局 `body-attempt.json` 已独占写入并永久保留，不重放。旧 resolver、cover 停止和生产全部字段均未改。先离线分析旧成功正文传输与本次差异；完整公众号近期列表仍无可用来源。本节下方执行计划为请求前的准备记录。
+**正文单次真实结果与离线对比（2026-10-02）：**
+经代码审核及 9 项联合离线测试后，仅一次 `GET https://weread.qq.com/web/mp/content` 返回 HTTP 200、响应体 0 字节。私有 `sdk-login-owner-06/body/result.json` 记录 `success=false, stage=parsing, requests=1, productionUnchanged=true`；没有文章身份、可信发布时间或正文成果。原始空响应与元数据已私存，全局 `body-attempt.json` 已独占写入并永久保留，不重放。旧 resolver、cover 停止和生产全部字段均未改。
 
-2026-10-02。当前目标仍是公众号级完整近期发现。真实 Web 搜索五页已得 71 条候选，但完整覆盖、可信发布时间和批量正文仍未验证。`/mp/getreviewid` 仅解析已有 URL，不是公众号列表；owner-06 本人正常 SDK 授权后实际请求一次，HTTP200、success=true，候选 `WX_3895431412_2247493594_1` 的原始 URL、稳定身份及 `MP_WXS_3895431412_` reviewId 前缀门禁均通过。私有 result stage=parsed、requests=1、productionUnchanged=true、originalVerified=false；正文与真实时间仍待核。全局 resolver-attempt.json 已存在，不能删除或重放。MCP agy-d162d4ea 首次提交失败，恢复匹配 IDE 会话后实际执行成功，登记仍 FAILED。旧 mobile `/store/search` 401/-2012 不因新认证自动解除；下一 agy-873d74ca 仅准备正文单次研究探针/离线测试及列表源码审核，未获总控代码审核前不发新腾讯请求。
+通过对历史成功正文请求（`owner-weread-latest.ts`，HTTP 200 且约 3.48 MB 非空回包）与本次 owner-06 单次 fetch 探针的离线比对：
+
+1. **端点与查询参数编码**：总控离线比对已解析 reviewId，`axios.getUri({url: '/web/mp/content', params:{reviewId}})` 与 `new URL().searchParams.set(...)` 产出的完整请求 URL 逐字节完全一致，往返精确，排除了 URL 编码差异。
+2. **Cookie 构造与会话时序**：均调用 `ownerSessionCookie(webSession, ownerVid)` 产出 `wr_skey=...; wr_vid=...`（按名称排序）。历史成功使用 2026-09-30 会话；owner-06 探针使用 2026-10-01 正常会话（`expires: -1, secure: true`）。历史成功紧随当次 `/api/mp/cover` 成功后同一进程发出；owner-06 探针为单次隔离探针（跳过 cover 以防 401 停止触发），其 `reviewId` 来自移动 Eink SDK 会话。
+3. **显式与隐式请求头**：显式头（`Cookie`、`Referer: https://weread.qq.com/`、`Origin: https://weread.qq.com`、`User-Agent: Mozilla/5.0`、`Accept: text/html,application/xhtml+xml,*/*`）完全对齐。但隐式传输头存在差异：Axios 走 Node https adapter 默认头与连接管理，而 Node fetch (undici) 采用不同的默认连接/头策略。
+4. **传输层（Transport）更正**：此前文档与脚本注释称“复用既有正文传输”，此表述不准确，现已纠正——实为“复用请求形状、Cookie 与解析逻辑，但底层传输由 Axios GET 变更为 Node fetch (undici)”。
+5. **回包处理与诊断信息**：历史成功由 Axios 读取完整 `responseType: 'text'` 非空回包（私有 `native-content-attempt.json` 记录 3,475,514 字节）；本次 fetch 探针通过 `boundedBody(response.body.getReader())` 接收到 0 字节，解析器未吞没非空 Buffer。但本次探针未保存响应头（如 `Content-Length`, `Content-Encoding`, `Transfer-Encoding`），无法证明腾讯线路上游响应体本身为空。
+6. **本地环境大流验证**：总控在 127.0.0.1 纯本地验证，Node fetch + `boundedBody` 完整逐字节读取 5.4 MiB 的 gzip chunked 流，排除了当前 Node 24 运行环境存在通用的压缩流读取丢失 Bug，但无法排除针对腾讯特定端点的连接/传输/会话差异。
+
+基于上述确凿代码级传输差异（Axios Node https adapter vs Node fetch），已准备 Axios 对齐的最小研究探针与离线测试，且保持零联网。
+
+2026-10-02。当前目标仍是公众号级完整近期发现。真实 Web 搜索五页已得 71 条候选，但完整覆盖、可信发布时间和批量正文仍未验证。`/mp/getreviewid` 仅解析已有 URL，不是公众号列表；owner-06 本人正常 SDK 授权后实际请求一次，HTTP200、success=true，候选 `WX_3895431412_2247493594_1` 的原始 URL、稳定身份及 `MP_WXS_3895431412_` reviewId 前缀门禁均通过。私有 result stage=parsed、requests=1、productionUnchanged=true、originalVerified=false；正文与真实时间仍待核。全局 resolver-attempt.json 已存在，不能删除或重放。MCP agy-d162d4ea 首次提交失败，恢复匹配 IDE 会话后实际执行成功，登记仍 FAILED。旧 mobile `/store/search` 401/-2012 不因新认证自动解除；下一任务严守零联网，未获总控代码审核前不发新腾讯请求。
 
 ## 正常认证复用与边界
 
@@ -47,23 +59,17 @@ node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_
 - 解析成果记录：`resolution.json` 针对自主发现候选 `WX_3895431412_2247493594_1`，成功解析出具备合规 `MP_WXS_3895431412_` 前缀的真实 `reviewId`（完整 ID 值按保护规则保留于私有目录，不写入文档与代码），`originalVerified: false`。
 - 全局防重放门禁：全局私有标记 `private-data/list-discovery-20261002/resolver-attempt.json` 已永久落盘并持久保留。**严禁重跑 resolver 或重新登录；全局标记不可删除、不可覆盖**。生产数据库与各表字段哈希完全未变。
 
-### 2. 纯正文单次探针实现（BODY-ONLY One-Shot Probe）
+### 2. Axios 对齐的正文单次探针实现（AXIOS-ALIGNED BODY One-Shot Probe）
 
-基于已解析得到的真实 `reviewId`，新增隔离研究探针 `scripts/research/probe-owner-body-once.cjs` 及其纯离线测试套件 `scripts/research/probe-owner-body-once.spec.cjs`：
+基于代码级差异比对与传输层事实纠偏，在 `scripts/research/probe-owner-body-once.cjs` 与 `scripts/research/probe-owner-body-once.spec.cjs` 中完成 Axios 对齐与脱敏头采集改造：
 
-- **核心逻辑与复用**：复用 `owner-weread-latest.ts` 正文传输、`ownerSessionCookie`（Web 会话 Cookie 构造，需 `wr_skey` 与 `wr_vid`）以及 `articleIdentity` / `articleContentHtml`。
-- **严格边界控制**：
-  - **无 cover 请求**：完全跳过 `/api/mp/cover`，直接使用 `owner-06/resolver/resolution.json` 的 `reviewId`。
-  - **无闭源中转 / 无微信原文直连**：不走任何第三方代理，不请求 `mp.weixin.qq.com` 原文。
-  - **无图片归档**：纯正文读取，不发起正文内联图片网络抓取。
-  - **无生产写库**：只写私有探针目录，生产 SQLite 零写入。
-  - **无历史停止删除**：保留所有既有 `originalStopFiles` 记录。
-  - **独占预检标记**：请求前以 `wx` 独占写入 `body-attempt.json` 并 `fsync`，存在即拒，杜绝并发与重试。
-  - **有界 HTTPS / 禁止重定向**：`redirect: 'error'`，超时 20 秒，回包限制 8 MiB。
-  - **私存原始回包**：解析前先以 `wx` 独占保存 `response-body.html` 及元数据。
-  - **严格身份与时间核验**：严格校验 `mpId`、稳定文章 ID、标题一致性、账号名称一致性、大于 0 的真实 `publishTime` 以及非空正文 HTML。
-- **离线测试保障**：`probe-owner-body-once.spec.cjs` 包含 5 项针对性回归测试（前置门禁、单次请求与标记优先、HTTP/挑战页容错、字段与时间冲突终止、超限与生产变动拦截），全部使用纯合成 Mock 数据（无真实 reviewId、标题或凭据），5 项测试全部通过。
-- **执行纪律与结果**：`--plan` 确认零请求；总控审核后 `--execute` 实际发出一次正文 GET。HTTP 200 空响应使解析失败，原始 0 字节响应及结果已私存，防重放标记保留；不得重复执行。
+- **传输层真实对齐**：完全对齐 `owner-weread-latest.ts` 的 Axios GET 传输实现，显式配置 `proxy: false`、`maxRedirects: 0`、`timeout: 20000`、`maxContentLength: 8 * 1024 * 1024`、`responseType: 'text'`、`transformResponse: [(v) => v]` 及 `validateStatus: () => true`。彻底纠正此前使用 Node fetch (undici) 的传输差异。
+- **脱敏响应头与大小记录**：回包后即时在私有 `response-metadata.json` 中保存响应状态、字节大小及脱敏诊断头（`content-type`, `content-length`, `content-encoding`, `transfer-encoding`, `connection`, `date`, `server`），严格过滤 `set-cookie` 与鉴权字段，解决此前 0 字节无法追溯线路上游头的问题。
+- **全新独立防重放标记**：采用全新的独立预检标记 `body-axios-attempt.json`（存在即拒，wx 独占落盘并 fsync），**严禁清空或修改既有 `body-attempt.json`**，历史证据完整保留。
+- **隔离输出目录**：隔离写入私有 `body-axios/` 目录（包含私存 `response-body.html`、`response-metadata.json` 与 `result.json`），完全不触碰、不覆盖原 `body/` 目录。
+- **严格边界控制不变**：无 cover 请求（不触碰 401 风险端点）、无第三方中转、无微信原文直连、无图片抓取、生产 SQLite 零写入、不删除旧停止文件、强制环境门禁（阻断代理变量）。
+- **离线测试保障**：`probe-owner-body-once.spec.cjs` 包含 6 项针对性离线回归测试（前置门禁、单次请求与 Axios 参数/脱敏头校验、HTTP 401/500/验证码容错、身份/时间/标题冲突终止、超限与生产变动拦截、127.0.0.1 纯本地 Axios chunked/gzip 3 MiB 回包读取），测试结果以本轮复核为准。
+- **执行纪律**：`node scripts/research/probe-owner-body-once.cjs --plan` 确认 `requests: 0`、`productionWrites: 0`、`transport: "axios"`、`exclusiveMarker: "body-axios-attempt.json"`。**零联网，未获总控明确批准前严禁 `--execute`**。
 
 ### 3. 公开来源审计：新鲜 SDK 认证下的公众号全量列表可能与 skey / accessToken 辨析
 

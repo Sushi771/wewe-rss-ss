@@ -1,8 +1,13 @@
 'use strict';
 
 // One root-run body-only probe for the resolved reviewId from owner-06.
-// Uses existing owner-weread-latest body transport, articleIdentity /
-// articleContentHtml, and Web session Cookie helper.
+// Reuses request shape, query parameters, articleIdentity /
+// articleContentHtml, and Web session Cookie helper. Aligned with
+// owner-weread-latest Axios GET transport (with proxy:false, maxRedirects:0,
+// and responseType:'text'), and captures sanitized response headers for
+// diagnostic traceability.
+// Uses exclusive marker body-axios-attempt.json; existing body-attempt.json
+// remains intact.
 // No cover, closed relay, original WeChat requests, images,
 // production writes or old-stop deletion.
 const fs = require('node:fs');
@@ -33,28 +38,6 @@ function publish(file, value) {
   } finally {
     fs.closeSync(fd);
   }
-}
-
-async function boundedBody(response, limit = DEFAULT_BODY_LIMIT) {
-  const reader = response.body?.getReader();
-  if (!reader) throw Error('response_body_missing');
-  const chunks = [];
-  let length = 0;
-  try {
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      length += next.value.length;
-      if (length > limit) {
-        void reader.cancel().catch(() => {});
-        throw Error('response_body_limit');
-      }
-      chunks.push(next.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks);
 }
 
 function parseBodyHtml(html, { candidate, feed }) {
@@ -209,7 +192,7 @@ async function probe({
   cookieHeader,
   marker,
   output,
-  fetchImpl,
+  axiosImpl,
   takeSnapshot,
   protectedHashes,
   bodyLimit = DEFAULT_BODY_LIMIT,
@@ -227,15 +210,15 @@ async function probe({
 
   let status = null,
     stage = 'transport',
-    article = null;
+    article = null,
+    raw = Buffer.alloc(0),
+    responseHeaders = {};
   try {
     const url = new URL(ENDPOINT);
     url.searchParams.set('reviewId', reviewId);
 
-    const response = await fetchImpl(url.toString(), {
-      method: 'GET',
-      redirect: 'error',
-      signal: AbortSignal.timeout(20000),
+    const client = axiosImpl || serverRequire('axios');
+    const response = await client.get(url.toString(), {
       headers: {
         Cookie: cookieHeader,
         Referer: 'https://weread.qq.com/',
@@ -243,20 +226,59 @@ async function probe({
         'User-Agent': 'Mozilla/5.0',
         Accept: 'text/html,application/xhtml+xml,*/*',
       },
+      proxy: false,
+      maxRedirects: 0,
+      timeout: 20000,
+      maxContentLength: bodyLimit,
+      responseType: 'text',
+      transformResponse: [(v) => v],
+      validateStatus: () => true,
     });
 
     status = response.status;
+    responseHeaders = response.headers || {};
     stage = 'response';
-    const raw = await boundedBody(response, bodyLimit);
+
+    const data =
+      typeof response.data === 'string'
+        ? response.data
+        : Buffer.isBuffer(response.data)
+          ? response.data.toString('utf8')
+          : String(response.data || '');
+    raw = Buffer.from(data, 'utf8');
+
+    if (raw.length > bodyLimit) {
+      throw Error('response_body_limit');
+    }
 
     // Save raw response body privately before parsing.
     fs.writeFileSync(path.join(output, 'response-body.html'), raw, {
       flag: 'wx',
       mode: 0o600,
     });
+
+    const sanitizedHeaders = {};
+    for (const [k, v] of Object.entries(responseHeaders)) {
+      const lk = k.toLowerCase();
+      if (
+        [
+          'content-type',
+          'content-length',
+          'content-encoding',
+          'transfer-encoding',
+          'connection',
+          'date',
+          'server',
+        ].includes(lk)
+      ) {
+        sanitizedHeaders[lk] = Array.isArray(v) ? v.join(', ') : String(v);
+      }
+    }
+
     publish(path.join(output, 'response-metadata.json'), {
       status,
       bytes: raw.length,
+      headers: sanitizedHeaders,
     });
 
     if (status !== 200) throw Error('http_rejected');
@@ -379,12 +401,12 @@ async function execute(sessionDirectory) {
   const protectedHashes = () =>
     protectedFiles.map((file) => hash(fs.readFileSync(file)));
 
-  const output = path.join(source, 'body');
+  const output = path.join(source, 'body-axios');
   fs.mkdirSync(output, { mode: 0o700 });
 
   const marker = path.join(
     ROOT,
-    'private-data/list-discovery-20261002/body-attempt.json',
+    'private-data/list-discovery-20261002/body-axios-attempt.json',
   );
 
   return probe({
@@ -394,7 +416,7 @@ async function execute(sessionDirectory) {
     cookieHeader,
     marker,
     output,
-    fetchImpl: fetch,
+    axiosImpl: serverRequire('axios'),
     protectedHashes: protectedHashes(),
     takeSnapshot: () => ({ db: snapshot(db), files: protectedHashes() }),
   });
@@ -413,6 +435,8 @@ if (require.main === module) {
         imagesArchived: 0,
         requiresResolvedReviewId: true,
         requiresWebSession: true,
+        transport: 'axios',
+        exclusiveMarker: 'body-axios-attempt.json',
       }),
     );
   } else if (
@@ -440,7 +464,6 @@ module.exports = {
   ENDPOINT,
   DEFAULT_BODY_LIMIT,
   publish,
-  boundedBody,
   parseBodyHtml,
   validatePrerequisites,
   probe,
