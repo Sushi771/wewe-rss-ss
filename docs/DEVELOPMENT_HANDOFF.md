@@ -1,5 +1,13 @@
 # 自建订阅当前断点（2026-10-03）
 
+**当前主线：**Antigravity 额度耗尽，本人只授权 Codex 临时代做至北京时间 **2026-10-03 03:10**；之后剩余开发/研究交回 Antigravity `Gemini 3.8 Flash (High)`，核实际 `MODEL_PLACEHOLDER_M318`。若额度仍不足，报告外部条件，不自动延长代做。优先 MCP，必要时本人已授权操作电脑辅助；当前上下文够用，未新建 Codex 窗口。全部资源仍只攻关自建中转的新文列表与正文。
+
+**订阅列表的新依据与实测：**官方 EInk 2.1.2 的 `StoryFeedService.syncSubscribedMP` 先 `GET /storyfeed/tags?type=1`，从 `items` 取 `id=103`，按官方 schema 的嵌套 `url` 提取 `id/type/channel`，再 `GET /storyfeed/getCardArticles`，首屏 `count=20`、不带游标。标签缺失时客户端不请求 feed。owner-07 正常会话下标签单次 HTTP 200（489 字节），真实 tag 103 存在，参数为 `id=0/type=0/channel=901301`；按回包参数单次 feed HTTP 200（56 字节），`articles=[]`、数字 `hasMore=0`。初次摘要因只接受 boolean 标为 `shape_stop`，随后仅离线修正数字 0/1 映射，未重发；实际仍是空列表。原包、两个全局防重放标记均保留。下一项是核官方双授权条件 `isWeChatMpGranted() && getMpBookGranted()` 的实际状态，不能把空列表当持续订阅恢复。
+
+**代表文章详情：**按官方 `MpRemoteService.getReviewMpInfo` 的精确形状，仅带 `reviewId` 请求 `/review/single` 一次，owner-07 返回 HTTP 200（2715 字节）。稳定身份与原 resolver/候选及原文选取一致：`WX_3895431412_2247493594_1`，`type=16`，`bookId` 空、`belongBookId` 为目标号，真实 `mpInfo.inner=0`。APK BooleanCodec 将 0 转 false，该篇是外部原文分支；不尝试只适用于 `inner=true` 的 `/book/chapterread`。`mpInfo.content` 仅 33 字节，不是完整正文；其原文 URL 与旧 HTTP 302 验证停止条件一致，未重发原文。正常 native 认证头明确是 `vid/accessToken`，未发现 `skey` 映射到 Web Cookie 的依据。新增探针均无 SQLite 调用或生产写入；当前生产仍保留旧 1450 篇，持续自动更新未恢复。
+
+以下是此前 Web 票据与固定参数流的过程记录，以上方实际断点为准。
+
 **本轮收敛（2026-10-03）：**第一方阅读器在 `-2041` 时由本人完成腾讯验证码，将回调 `ticket`、`randstr` 用于当次请求重试；KOReader 验证脚本的“有新 ticket 则成功”是预期分支，未附成功实测输出。本次本人第三次正常扫码走公开 Skill 脚本同序、同内存 Cookie 会话：`userInfo`、`apikeyGet`、续期均通过，续期仍无 `x-wr-ticket`，以 `FRESH_TICKET_MISSING` 停止；没有请求文章列表/正文或写生产库。持续订阅未恢复。
 
 **下一执行入口：**官方墨水屏 2.1.2 APK 的 `classes10.dex` 明确 `MpService.syncMpList(update)` 调用 `syncArticles()`，继而 `MpRemoteService.getArticles` 发 `GET /storyfeed/getCardArticles?channel=901301&type=0&count=50`；首屏不带 `kkOffset/kkSearchId`，后续由回包提供这两个游标。`MpCardArticles` 包含 `articles/hasMore/kkOffset/kkSearchId`，文章项有 `bookId/reviewId/createTime`。`createTime` 暂不作为已核发布时间；是否覆盖目标号、是否能持续更新尚待真实回包。`/mp/list?listType=0` 实际为收藏列表，`listType=1` 为浮窗列表；此前仅凭 enum ordinal 将 0 当更新流的推断撤回，未据此发请求。`/mp/chapters` 是此前目标号已测 `-2041` 的路径，不重试。Antigravity 负责最小只读首屏探针，Codex 审查后仅一次请求，筛目标号前 5 篇，无生产写入。

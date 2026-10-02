@@ -41,6 +41,8 @@ jobs:
         run: node --test scripts/research/owner-sdk-login-once.spec.cjs scripts/research/probe-owner-review-once.spec.cjs
       - name: Test storyfeed discovery probe offline
         run: node --test scripts/research/discovery-eink-storyfeed.test.cjs
+      - name: Test native subscribed MP and review probes offline
+        run: node --test scripts/research/probe-subscribed-mp-once.spec.cjs scripts/research/probe-native-review-owner07.spec.cjs
       - name: Test official album runtime scheduling policy
         run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs
       - name: Test standalone dependency closure
