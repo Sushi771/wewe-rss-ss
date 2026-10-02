@@ -74,8 +74,9 @@ async function unusedPort() {
 }
 
 // Bundled startup re-hashes thousands of release files before HTTP binds.
-// Allow that verification to finish before treating a healthy start as failed.
-async function waitReady(port, child, seconds = 480) {
+// On this host the new bundle spent 7.5 minutes verifying before app startup;
+// leave time for module loading and HTTP readiness after that point.
+async function waitReady(port, child, seconds = 900) {
   const base = `http://127.0.0.1:${port}`;
   const rssUrl = base + '/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary';
   const privateMode = process.env.PRIVATE_ONLINE_MODE === '1';
