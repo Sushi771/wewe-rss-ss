@@ -1,5 +1,7 @@
 # 微信读书自建订阅：证据缺口与首个验证（2026-09-29）
 
+**2026-10-02 真实新增证据：**owner-06 正常 SDK 会话已一次成功解析自主搜索候选 URL 为 reviewId；随后旧 Web Cookie 按现有正文传输形状做单次 BODY-ONLY GET，HTTP 200、响应体 0 字节，原文身份与真实发布时间均无法核验。原始空回包、结果及防重放标记只存私有目录，生产全字段不变；不能用 HTTP 200 推断正文可用，也不能据此推断接口永久关闭。已核公开 SDK 源码没有把 `accessToken` 转为另一个可用 `skey` 或提供新账号列表的证据，旧失败请求不重放。仍以完整近期列表和五篇真实文章为第一检查点。
+
 ## 2026-10-02 研究续接结论
 
 最新真实 SDK 尝试：本人点击生成后 wxticket/qrconnect 各HTTP200一次，但requestQr未完成，无二维码、poll/login/mobile和resolver。旧回包缺失，不能区分具体业务拒绝与格式/URL校验失败；已补私有原回包取证及准确阶段诊断，15项纯离线回归通过，没有自动重试或解除旧停止。原“腾讯0请求”是本次尝试前历史状态；具体接续以 [DEVELOPMENT_HANDOFF.md](DEVELOPMENT_HANDOFF.md) 入口和 [正常授权验证说明](OWNER_SDK_RESOLVER_VALIDATION.md) 为准。完整近期来源仍缺证。

@@ -1,5 +1,7 @@
 # 正常 SDK 授权到文章解析的隔离验证
 
+**正文单次真实结果（2026-10-02）：**经代码审核及 9 项联合离线测试后，仅一次 `GET https://weread.qq.com/web/mp/content` 返回 HTTP 200、响应体 0 字节。私有 `sdk-login-owner-06/body/result.json` 记录 `success=false, stage=parsing, requests=1, productionUnchanged=true`；没有文章身份、可信发布时间或正文成果。原始空响应与元数据已私存，全局 `body-attempt.json` 已独占写入并永久保留，不重放。旧 resolver、cover 停止和生产全部字段均未改。先离线分析旧成功正文传输与本次差异；完整公众号近期列表仍无可用来源。本节下方执行计划为请求前的准备记录。
+
 2026-10-02。当前目标仍是公众号级完整近期发现。真实 Web 搜索五页已得 71 条候选，但完整覆盖、可信发布时间和批量正文仍未验证。`/mp/getreviewid` 仅解析已有 URL，不是公众号列表；owner-06 本人正常 SDK 授权后实际请求一次，HTTP200、success=true，候选 `WX_3895431412_2247493594_1` 的原始 URL、稳定身份及 `MP_WXS_3895431412_` reviewId 前缀门禁均通过。私有 result stage=parsed、requests=1、productionUnchanged=true、originalVerified=false；正文与真实时间仍待核。全局 resolver-attempt.json 已存在，不能删除或重放。MCP agy-d162d4ea 首次提交失败，恢复匹配 IDE 会话后实际执行成功，登记仍 FAILED。旧 mobile `/store/search` 401/-2012 不因新认证自动解除；下一 agy-873d74ca 仅准备正文单次研究探针/离线测试及列表源码审核，未获总控代码审核前不发新腾讯请求。
 
 ## 正常认证复用与边界
@@ -34,11 +36,55 @@ node scripts/research/owner-sdk-login-once.cjs --serve <ABS_PRIVATE_CACHE> <ABS_
 
 已验证：带私有缓存的登录/resolver联合离线测试19项全部通过。渲染修复后的登录套件无cache为12项通过、3项原SDK Mock明确跳过，另有4项resolver回归。包括实际QR渲染器命名空间、原 SDK 源码编译原语的纯 Mock 正常路径、取消零请求、QR 阶段 >64KiB 接受与 >16MiB 停止、其余阶段保持 64KiB 限额；模拟账号错配、拒绝、过期、DB变化、重复/越界请求和挑战页。CI 在无私有 cache 时跳过需真实缓存项，不下载 SDK、不接触腾讯。准备/测试期间生产快照与全部表哈希完全不变。
 
-## 下一次真实验证
+## 真实验证进展与正文探针（2026-10-02）
 
-真实resolver派发agy-d162d4ea首次提交HTTP400，实际会话空轨迹、无模型错误、无marker；同一会话e1e3e027-0037-41f1-9cdb-8573c8431a0a经短英文恢复后真实M318运行，无错误。MCP登记仍FAILED，真实是否请求/响应以私有marker/result及匹配轨迹核对，不伪称登记完成。没有重放任何上游调用，首次失败原因未知。
+### 1. 真实 Resolver 首次实测成功
 
-正常SDK已实际完成：3d84ea5显示修复已push且CI36967953673全成功；新owner-06由Antigravity任务agy-3850c939准备，本人回复SDK登录完成，result success=true/productionUnchanged=true。ticket/qr各1、poll2、exchange1全部HTTP200；QR70,302字节通过16MiB门禁，mobile于05:16:40.546Z保存、同VID/设备/账号门禁通过。总控再次独立核全部生产字段一致。本人授权成功不等同于总控测过真实二维码图像尺寸；260×260为前述独立Mock渲染核验。所有凭据/原回包保持私有。Gemini真实单项resolver任务agy-d162d4ea已派发，执行既有探针一次，派发前全局marker不存在；未知实际响应结构/身份时不预先宣称解析成功，也不自动重试。
+`owner-06` 正常 SDK 授权与单项解析探针已真实执行并确认成功：
+
+- 私有执行目录：`private-data/list-discovery-20261002/sdk-login-owner-06/resolver/`
+- 解析状态记录：`result.json` 显示 `success: true, stage: "parsed", status: 200, requests: 1, productionUnchanged: true`。
+- 解析成果记录：`resolution.json` 针对自主发现候选 `WX_3895431412_2247493594_1`，成功解析出具备合规 `MP_WXS_3895431412_` 前缀的真实 `reviewId`（完整 ID 值按保护规则保留于私有目录，不写入文档与代码），`originalVerified: false`。
+- 全局防重放门禁：全局私有标记 `private-data/list-discovery-20261002/resolver-attempt.json` 已永久落盘并持久保留。**严禁重跑 resolver 或重新登录；全局标记不可删除、不可覆盖**。生产数据库与各表字段哈希完全未变。
+
+### 2. 纯正文单次探针实现（BODY-ONLY One-Shot Probe）
+
+基于已解析得到的真实 `reviewId`，新增隔离研究探针 `scripts/research/probe-owner-body-once.cjs` 及其纯离线测试套件 `scripts/research/probe-owner-body-once.spec.cjs`：
+
+- **核心逻辑与复用**：复用 `owner-weread-latest.ts` 正文传输、`ownerSessionCookie`（Web 会话 Cookie 构造，需 `wr_skey` 与 `wr_vid`）以及 `articleIdentity` / `articleContentHtml`。
+- **严格边界控制**：
+  - **无 cover 请求**：完全跳过 `/api/mp/cover`，直接使用 `owner-06/resolver/resolution.json` 的 `reviewId`。
+  - **无闭源中转 / 无微信原文直连**：不走任何第三方代理，不请求 `mp.weixin.qq.com` 原文。
+  - **无图片归档**：纯正文读取，不发起正文内联图片网络抓取。
+  - **无生产写库**：只写私有探针目录，生产 SQLite 零写入。
+  - **无历史停止删除**：保留所有既有 `originalStopFiles` 记录。
+  - **独占预检标记**：请求前以 `wx` 独占写入 `body-attempt.json` 并 `fsync`，存在即拒，杜绝并发与重试。
+  - **有界 HTTPS / 禁止重定向**：`redirect: 'error'`，超时 20 秒，回包限制 8 MiB。
+  - **私存原始回包**：解析前先以 `wx` 独占保存 `response-body.html` 及元数据。
+  - **严格身份与时间核验**：严格校验 `mpId`、稳定文章 ID、标题一致性、账号名称一致性、大于 0 的真实 `publishTime` 以及非空正文 HTML。
+- **离线测试保障**：`probe-owner-body-once.spec.cjs` 包含 5 项针对性回归测试（前置门禁、单次请求与标记优先、HTTP/挑战页容错、字段与时间冲突终止、超限与生产变动拦截），全部使用纯合成 Mock 数据（无真实 reviewId、标题或凭据），5 项测试全部通过。
+- **执行纪律与结果**：`--plan` 确认零请求；总控审核后 `--execute` 实际发出一次正文 GET。HTTP 200 空响应使解析失败，原始 0 字节响应及结果已私存，防重放标记保留；不得重复执行。
+
+### 3. 公开来源审计：新鲜 SDK 认证下的公众号全量列表可能与 skey / accessToken 辨析
+
+基于新鲜 SDK 凭据与公开源码对公众号完整文章列表来源进行只读审计：
+
+1. **凭据体系严格辨析（skey vs accessToken）**：
+   - **移动 Eink SDK 凭据域 (`i.weread.qq.com`)**：`owner-06` 授权产出 `mobile.accessToken` 与 `mobile.vid`。请求头使用 `profile.authHeaders: { vid, accessToken }`。在 `owner-06` 运行中仅发起并成功完成了一次 `/mp/getreviewid` 解析（HTTP 200，1 次请求），SDK 会话本身不包含亦不产生独立的 `skey`（历史 `/shelf/sync` 成功属于此前旧移动会话实测记录，不混淆归入本次 `owner-06`）。
+   - **Web 端凭据域 (`weread.qq.com`)**：Web 正常登录产出 Cookie `wr_skey` 与 `wr_vid`。它仅适用于 Web 端接口（如搜索代理 `/web/wx_search_broker_proxy` 与正文 `/web/mp/content`），不能作为移动接口的身份头。
+   - **历史第三方 / WeBook skey**：2021 年公开的 WeBook 爬虫对 `GET i.weread.qq.com/book/articles` 发送自定义 `skey` 与 `vid` 请求头。本项目此前实测表明，移动 `/login` 响应中返回的 `skey` 与 `accessToken` 字符串完全相同，但携带其请求 `/book/articles` 时返回 HTTP 401 (`-2012`, `stop_http`)。因此，不能假设存在能解锁旧接口的独立“神秘 skey”，更不能混淆两套认证体系。
+
+2. **公开列表端点核查与排查依据**：
+   - **`/book/articles`**：Eink 2.1.2 源码中归入 `ArticleService`，但在固定 `weread-omni` SDK 中标记为未使用，且无成功示例。此前实测仅证明在当时所测凭据、请求参数形状与测试时点下返回 HTTP 401（-2012，`stop_http`）；不能推断为全局或永久关闭，但在缺少新结构证据时不盲目重复。
+   - **`/mp/chapters`**：Eink 2.1.2 公众号章节端点，携带移动 `accessToken` 历史实测返回 HTTP 499 / `-2041`。在没有新底层依据前不盲目重试。
+   - **`/web/mp/articles`**：Web 阅读器端点，历史在官方页面及 Node 端均返回 `-2041`，暂未恢复。
+   - **`/web/wx_search_broker_proxy`**：目前唯一保持真实可用的发现来源（已自主返回 71 条候选），但受限于搜索索引截断与非单调时间戳，尚未达成公众号全量发现。
+
+3. **有依据的下一阶段推进建议**：
+   - **第一步（正文链路单篇闭环）**：本轮已执行一次，但 HTTP 200 空响应未取得 `contentHtml` 或真实 `publishTime`；只离线分析现有私有回包和旧成功链路，不重放该请求。
+   - **第二步（全量/近期文章发现）**：主目标始终是公众号完整近期文章发现，而非单纯解析器；在达成公众号完整近期列表来源前，不搭建批量生产管道。在不猜参、不重复旧失败的前提下，优先研究：
+     - Web 搜索端点参数与关键词拓宽（探索是否可稳定发现漏网近期文章）。
+     - 移动端书架同步机制 (`/shelf/sync`，使用新鲜 `accessToken`) 在当前账号下是否能通过订阅关系获取账号最新章节列表。
 
 ### 二维码图片渲染根因与独立 SVG 命名空间修复
 

@@ -1,5 +1,7 @@
 # 公众号级列表发现主线（2026-10-02）
 
+**最新实测覆盖下文待执行状态：**Antigravity 在匹配 IDE 会话 `d4249827-e5ab-405e-8c05-f7de1beff13d`（生成仅 M318、无模型错误）实现 BODY-ONLY 单次探针；总控审核后，解析器与正文探针联合 9 项离线测试通过，真实配置只读门禁和生产基线核对通过。第一次 CLI 因本地环境门禁停止，尚无 `body-attempt.json`、无联网。清理进程环境中的代理变量后，**恰好一次** `GET /web/mp/content` 返回 HTTP 200，但响应体 **0 字节**；私有 `sdk-login-owner-06/body/result.json` 为 `success=false, stage=parsing, requests=1, productionUnchanged=true`，没有 `article.json`、可信发布时间或正文。完整原始回包（空文件）与元数据已私存；全局 `body-attempt.json` 已存在，不能删除或重发。旧 resolver 标记、旧停止及生产 1 账号/12 订阅/1448 文章全字段均保留。MCP 作业 `agy-873d74ca` 登记 FAILED（会话结束），实际 IDE 轨迹已 IDLE；以实际私有结果为准。此结果既不是认证成功取文，也不证明端点永久无内容。继续仅离线比对旧成功正文传输/公开源码，并寻找可核实的公众号完整近期列表来源；五篇真实身份/发布时间、连续多篇、分页增量及订阅验收仍缺。
+
 **当前真实断点：SDK 与单项 URL 解析均已成功。**本人完成 owner-06 正常 SDK 授权后，Antigravity 在恢复的 e1e3e027-0037-41f1-9cdb-8573c8431a0a 会话中执行既有单次 resolver。总控核私有 `sdk-login-owner-06/resolver/result.json`：success=true、stage=parsed、HTTP200、requests=1、productionUnchanged=true；自主搜索候选 `WX_3895431412_2247493594_1` 的原始 URL 已通过返回 URL、稳定身份和 `MP_WXS_3895431412_` reviewId 前缀校验。不是 cover、种子或 Mock；originalVerified=false，正文与可信发布时间仍未验证。全局 resolver-attempt.json 已存在，永久保留，不能重跑。MCP 作业 agy-d162d4ea 仍登记 FAILED；真实恢复轨迹及私有结果证明已执行，不能伪报该登记变为 completed。以下“结果待核”“尚无 mobile”均为历史状态。
 
 下一实际任务 `agy-873d74ca` 已派给 Antigravity/Gemini 3.8 Flash (High)：先实现并离线测试最小正文单次研究探针，复用既有正文传输、Web Cookie 和身份/时间解析，读取上述实际 resolution；总控审核后才允许执行正文请求。不得运行 cover、重做登录/resolver、清旧停止、抓图片或写生产。同时只读核完整公众号列表的新源码依据，严格区分 skey 与 accessToken；完整近期覆盖、连续多篇、分页增量、五篇真实发布时间及 12 订阅实测仍缺证。主体仍为列表发现，不因单项解析宣布闭源中转已替代。
