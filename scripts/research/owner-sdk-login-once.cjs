@@ -74,13 +74,15 @@ function boundedFetch(fetchImpl, deviceId, audit, onResponse = () => {}) {
     const reader = response.body?.getReader();
     const chunks = [];
     let bytes = 0;
+    // Grounded in weread-omni src/api/response-body.js (MAX_JSON_RESPONSE_BYTES = 16 MiB).
+    const maxBytes = phase === 'qr' ? 16 * 1024 * 1024 : 65536;
     try {
       if (!reader) throw Error('response_gate');
       for (;;) {
         const next = await reader.read();
         if (next.done) break;
         bytes += next.value.length;
-        if (bytes > 65536) {
+        if (bytes > maxBytes) {
           entry.outcome = 'body_too_large';
           void reader.cancel().catch(() => {});
           throw Error('response_size_gate');

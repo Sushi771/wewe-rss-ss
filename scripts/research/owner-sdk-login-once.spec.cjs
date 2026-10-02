@@ -275,6 +275,182 @@ test('non-JSON evidence is saved once and a failed evidence write prevents SDK p
     await assert.rejects(guarded(URLs[0], REQUEST), /request_budget_gate/);
   }));
 
+test('QR response budget allows bounded payload >64KiB up to 16MiB, stops above 16MiB, while other phases remain capped at 64KiB', async () => {
+  // 1. QR payload >64KiB accepted
+  {
+    const audit = [];
+    const largeQrJson = JSON.stringify({
+      errcode: 0,
+      uuid: 'mock_uuid',
+      extra: 'x'.repeat(70000), // > 64 KiB
+    });
+    const guarded = boundedFetch(
+      async (url) => {
+        if (url.includes('wxticket')) return response();
+        return new Response(largeQrJson);
+      },
+      identity.deviceId,
+      audit,
+    );
+    await guarded(URLs[0], REQUEST);
+    const qrRes = await guarded(URLs[1], REQUEST);
+    assert.equal(qrRes.status, 200);
+    assert.equal(audit[1].outcome, 'accepted_by_guard');
+    assert(audit[1].bytes > 65536);
+  }
+
+  // 2. QR payload above 16 MiB stopped
+  {
+    const audit = [];
+    const oversizedChunk = new Uint8Array(16 * 1024 * 1024 + 1);
+    const guarded = boundedFetch(
+      async (url) => {
+        if (url.includes('wxticket')) return response();
+        return new Response(oversizedChunk);
+      },
+      identity.deviceId,
+      audit,
+    );
+    await guarded(URLs[0], REQUEST);
+    await assert.rejects(guarded(URLs[1], REQUEST), /response_size_gate/);
+    assert.equal(audit[1].outcome, 'body_too_large');
+  }
+
+  // 3. Other phases remain capped at 64 KiB
+  // 3a. Ticket phase capped at 65536
+  {
+    const audit = [];
+    const guarded = boundedFetch(
+      async () => new Response('x'.repeat(65537)),
+      identity.deviceId,
+      audit,
+    );
+    await assert.rejects(guarded(URLs[0], REQUEST), /response_size_gate/);
+    assert.equal(audit[0].outcome, 'body_too_large');
+  }
+
+  // 3b. Poll phase capped at 65536
+  {
+    const audit = [];
+    let call = 0;
+    const guarded = boundedFetch(
+      async () => {
+        call++;
+        if (call === 1) return response();
+        if (call === 2) return response();
+        return new Response('x'.repeat(65537));
+      },
+      identity.deviceId,
+      audit,
+    );
+    await guarded(URLs[0], REQUEST);
+    await guarded(URLs[1], REQUEST);
+    await assert.rejects(guarded(URLs[2], REQUEST), /response_size_gate/);
+    assert.equal(audit[2].outcome, 'body_too_large');
+  }
+
+  // 3c. Exchange phase capped at 65536
+  {
+    const audit = [];
+    let call = 0;
+    const guarded = boundedFetch(
+      async () => {
+        call++;
+        if (call <= 3) return response();
+        return new Response('x'.repeat(65537));
+      },
+      identity.deviceId,
+      audit,
+    );
+    await guarded(URLs[0], REQUEST);
+    await guarded(URLs[1], REQUEST);
+    await guarded(URLs[2], REQUEST);
+    await assert.rejects(
+      guarded(URLs[3], {
+        ...REQUEST,
+        method: 'POST',
+        body: JSON.stringify({
+          deviceId: identity.deviceId,
+          isAutoLogout: 0,
+          code: 'mock_code',
+        }),
+      }),
+      /response_size_gate/,
+    );
+    assert.equal(audit[3].outcome, 'body_too_large');
+  }
+});
+
+test('runLogin accepts QR response >64KiB and preserves private evidence', async () =>
+  fixture(async (root) => {
+    let requests = 0;
+    const largeQr = JSON.stringify({
+      errcode: 0,
+      uuid: 'mock_uuid',
+      padding: 'y'.repeat(70000),
+    });
+    const result = await runLogin(
+      options(root, {
+        fetchImpl: async (input) => {
+          requests++;
+          if (input.includes('qrconnect?appid=')) return new Response(largeQr);
+          return response();
+        },
+      }),
+    );
+    assert.equal(result.state, 'completed');
+    assert.equal(requests, 4);
+    assert.equal(
+      fs.readFileSync(path.join(root, 'response-qr-1.bin'), 'utf8'),
+      largeQr,
+    );
+    const saved = JSON.parse(fs.readFileSync(path.join(root, 'result.json')));
+    assert.equal(saved.audit[1].outcome, 'accepted_by_guard');
+    assert(saved.audit[1].bytes > 65536);
+  }));
+
+test(
+  'hash-pinned real SDK accepts QR payload >64KiB under the 16MiB ceiling',
+  { skip: !process.env.OWNER_SDK_CACHE },
+  async () =>
+    fixture(async (root) => {
+      const { verifyCache } = require('./prepare-owner-sdk-cache.cjs');
+      const cache = verifyCache(process.env.OWNER_SDK_CACHE);
+      const sdk = require(path.join(cache, 'src/auth/qrlogin.js'));
+      let requests = 0;
+      const largeQr = JSON.stringify({
+        errcode: 0,
+        uuid: 'mock_uuid',
+        payload: 'z'.repeat(70000),
+      });
+      const fetchImpl = async (input, init) => {
+        requests++;
+        const url = new URL(input);
+        let data;
+        if (url.pathname === '/wxticket')
+          data = { signature: 'mock_signature', timeStamp: 1700000000 };
+        else if (url.pathname === '/connect/sdk/qrconnect')
+          return new Response(largeQr);
+        else if (url.pathname === '/connect/l/qrconnect')
+          data = { wx_errcode: 405, wx_code: 'mock_wx_code' };
+        else if (url.pathname === '/login') data = identity;
+        else throw Error('unexpected mock route');
+        return new Response(JSON.stringify(data));
+      };
+      const result = await runLogin(options(root, { sdk, fetchImpl }));
+      assert.equal(result.state, 'completed');
+      assert.equal(requests, 4);
+      assert.equal(
+        fs.readFileSync(path.join(root, 'response-qr-1.bin'), 'utf8'),
+        largeQr,
+      );
+      const stored = JSON.parse(
+        fs.readFileSync(path.join(root, 'mobile-session.json')),
+      );
+      assert.deepEqual(stored.mobile, identity);
+    }),
+);
+
 test(
   'hash-pinned real SDK primitives obey the wrapper with all transport mocked',
   { skip: !process.env.OWNER_SDK_CACHE },

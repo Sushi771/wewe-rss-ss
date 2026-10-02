@@ -1,5 +1,15 @@
 # 公众号级列表发现主线（2026-10-02）
 
+**本轮代码审核与验证：**Antigravity 已实际修改 `owner-sdk-login-once.cjs`，只将 qr 阶段改为固定 SDK 的16MiB上限，其他阶段仍65,536字节；新增大回包通过/越界停止、ticket/poll/exchange旧上限保持、私有证据及原SDK纯Mock回归。总控读取实际diff并独立运行登录/resolver联合测试，18项全通过、无跳过（带私有哈希核验SDK缓存）；无缓存CI会明确跳过3项原SDK Mock。所有生产字段仍与本人Web登录后的基线一致。本次没有新腾讯请求或生产接入；真实二维码内容和扫码成功仍待本人正常验证。以下运行段记录修复任务的过程，不能覆盖本段代码已落地的事实。文档同阶段提交推送，精确新SHA与CI以Git/GitHub核对。
+
+**当前执行入口（覆盖下文历史状态）：**实际开发仓库始终是 `C:\Users\ss\.gemini\antigravity\playground\sparse-comet\wewe-rss-ss`，GitHub 为 Sushi771/wewe-rss-ss；当前 Codex 对话最初用于 MCP 连接检查，仍处在项目外临时目录，不能把对话目录误认作代码目录。本人已授权上下文不足时在已登记的 wewe-rss-ss 项目创建后继主任务；先同步文档、commit/push及远端核对，再交接最新断点和活动 Agent，由旧窗口停止写入，避免双主执行者。
+
+Gemini 3.8 Flash (High) 最小实测已恢复且真实生成仅 M318。首个恢复任务 agy-8f8900f5 在发现本机后端时失败（No available backend，具体原因未知）；重新核连接后 agy-785653ad 实际完成既有 owner-03 入口准备，轨迹仅 M318。随后 owner-03 发生一次生成流程，ticket HTTP200/97字节通过门禁，qr HTTP200 但超过包装器 65,536 字节上限，停止阶段准确为 qr；无完整 qr 原回包，内容/业务格式未知，不能断言正常二维码数据或推定 owner-02 同因。没有 poll/exchange、新 mobile 或 resolver；累计 owner-02/03 各 ticket、qr 一次。所有生产字段仍等于本人 Web 登录后基线（1账号/12订阅/1448文章）。
+
+本人明确要求 Antigravity 修复并继续重建。实际修复任务 agy-92d4c82c 使用 M318，范围仅二维码阶段的源码有据上限与离线回归，不启动认证或请求腾讯。固定 weread-omni 88bd2e0 的 `src/auth/qrlogin.js` 使用 `src/api/response-body.js` 的 16 MiB 有界 JSON 上限；包装器当前统一64KiB造成已观测的提前中断。总控已纠正任务内错误缓存路径及过度历史读取，要求立即落代码或报告具体阻塞；任务运行不等于修复完成。其他阶段保持64KiB、超时/禁止跳转/不自动重试、私有取证及生产保护不变。审核通过后同阶段测试、更新文档、commit/push，再由 Agent 准备新空运行目录让本人扫码，不重用已停止 owner-03。正常SDK只是 resolver 的前置条件，完整近期发现/可信时间/持续增量仍未验收。
+
+最近已推送文档阶段 `be5ae4a318e794448613dc5bacfc2a4b40cd09f6`，[CI 36962444894](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36962444894) 全成功；最新精确提交以 `git log -1` 及 GitHub main 为准。
+
 **最新恢复条件：**本人切换地区后要求实测Gemini3.8High。MCP作业agy-d32960f2在12.84秒完成并返回GEMINI_READY；读取匹配本次输入的实际IDE轨迹，生成模型仅MODEL_PLACEHOLDER_M318、无错误、状态IDLE，确认并非其他模型代答。此前地区错误是旧请求观测，不再代表当前最小调用仍失败；这次成功不证明所有研究工具/长任务或微信SDK认证可用。已据原主线要求恢复指定 `Gemini 3.8 Flash (High)` 派发agy-8f8900f5，由Antigravity实际准备既有正常SDK本人入口（owner-03），不重写包装器，不点生成、不请求腾讯、不写生产。入口及后续实际状态需check_agent_job核实，尚不能称扫码完成。下文Opus额度等待为恢复前历史阶段。
 
 **最新执行状态（覆盖下文pending）：**988c4a23055afbd51654f3710ee004f85c056f21已推送，[CI 36960099588](https://github.com/Sushi771/wewe-rss-ss/actions/runs/36960099588)全成功。Opus授权后，首个MCP任务agy-b8cce8ba仍首次提交HTTP400；总控在同一IDE会话恢复请求，实际模型元数据全为M26/Opus，完成SDK/四文档/失败记录读取。短英文无上下文MCP诊断agy-b168e665成功11.1秒返回READY；新实际入口任务agy-d16c4dc0也进入RUNNING，说明并非连接永久失效。旧首次HTTP400的具体原因仍未证明，不能直接称为启动竞态或大上下文故障。
