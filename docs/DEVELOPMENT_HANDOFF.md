@@ -1,6 +1,12 @@
 # 自建订阅当前断点（2026-10-03）
 
-**当前主线：**Antigravity 额度耗尽，本人只授权 Codex 临时代做至北京时间 **2026-10-03 03:10**；之后剩余开发/研究交回 Antigravity `Gemini 3.8 Flash (High)`，核实际 `MODEL_PLACEHOLDER_M318`。若额度仍不足，报告外部条件，不自动延长代做。优先 MCP，必要时本人已授权操作电脑辅助；当前上下文够用，未新建 Codex 窗口。全部资源仍只攻关自建中转的新文列表与正文。
+**当前主线与执行阻塞（北京时间 2026-10-03 17:24）：**Codex 两小时临时接管已在 03:10 到期，余下开发/研究已通过 MCP 交回 Antigravity，固定 `Gemini 3.8 Flash (High)`。本轮任务 `agy-ad179be5` 失败；实际轨迹模型为 `MODEL_PLACEHOLDER_M318`，引擎明确返回 `FAILED_PRECONDITION (400): User location is not supported for the API use.`，当前不能归因为额度耗尽。已告知本人检查该固定模型的服务可用性；不自动换模型、不延长 Codex 开发接管。此前交回的代码草稿尚未集成，不能算订阅恢复。当前窗口够用，未新建 Codex 窗口。全部资源仍只攻关自建中转的新文列表与正文。
+
+**本次正常扫码已完成：**本人在新的 owner-09-reader-scope 入口确认授权；会话与旧 owner-07 同账号同设备、token 已更换、capturedAt 更新，attempt/session 均记录官方阅读器范围 `snsapi_userinfo,snsapi_friend,snsapi_favorites`。授权器报告生产不变。按既有受控探针只请求一次 `/wx/scope`，HTTP 200（75 字节），真实 `mps=1/fris=1`。公众号授权缺口已解决，无需再次扫码；这还不是自动更新恢复。
+
+**列表入口纠偏：**owner-09 单次 tags HTTP 200（489 字节）、单次旧 feed HTTP 200（56 字节），仍为 0 篇。离线复核实际标签：101 为“朋友的想法”/`weread://timeline`，102 为“今日更新”/`weread://browse`，带嵌套 `weread.qq.com/misc/tl-landing` URL；103 为“朋友赞过”/`weread://kkFriendOp`，没有嵌套 URL。旧 APK 固定取 103 后缺省成 `id=0/type=0/channel=901301` 的探针不能证明当前公众号订阅列表为空。此前派发内“所有标签均无嵌套 URL”的表述撤回。未请求 102 嵌套入口，不依据标签名称猜参数，不重复旧空 feed。
+
+**恢复执行后的具体任务：**Antigravity 先按固定官方源码确认当前指定公众号列表（含 `/mp/chapters` 的真实请求及此前停止条件）或正确订阅入口，再判断新 `mps=1` 条件是否支持一次目标号首屏验证；只核前 5 篇真实不同文章及一篇代表正文。现有授权、原包和防重放标记全部复用，不清停止，不重复扫码，不写生产库，不扩大全库检验。正文外部原文分支的旧验证停止仍保留。新文持续发现与完整正文均未验收，以下 owner-07 授权缺口及 owner-08 等待状态为历史记录。
 
 **订阅列表的新依据与实测：**官方 EInk 2.1.2 的 `StoryFeedService.syncSubscribedMP` 先 `GET /storyfeed/tags?type=1`，从 `items` 取 `id=103`，按官方 schema 的嵌套 `url` 提取 `id/type/channel`，再 `GET /storyfeed/getCardArticles`，首屏 `count=20`、不带游标。标签缺失时客户端不请求 feed。owner-07 正常会话下标签单次 HTTP 200（489 字节），真实 tag 103 存在，参数为 `id=0/type=0/channel=901301`；按回包参数单次 feed HTTP 200（56 字节），`articles=[]`、数字 `hasMore=0`。初次摘要因只接受 boolean 标为 `shape_stop`，随后仅离线修正数字 0/1 映射，未重发；实际仍是空列表。原包、两个全局防重放标记均保留。下一项是核官方双授权条件 `isWeChatMpGranted() && getMpBookGranted()` 的实际状态，不能把空列表当持续订阅恢复。
 
