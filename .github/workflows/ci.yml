@@ -52,6 +52,8 @@ jobs:
 
       - name: Test browser DOM image collector offline
         run: node --test scripts/research/collect-browser-dom-images-once.spec.cjs
+      - name: Test official MP chapters list and manual verification offline
+        run: node --test scripts/research/serve-owner-manual-verify.spec.cjs scripts/research/probe-mp-chapters-once.spec.cjs scripts/research/probe-mp-chapters-verified-once.spec.cjs
 
   image-import-offline:
     runs-on: ubuntu-latest

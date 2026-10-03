@@ -21,10 +21,45 @@
 4. **请求头注入：**`classes13.dex` 中 `VerifyAccountInterceptor.intercept` 在后续请求中检测到两者存在时，自动在 OkHttp 请求头中注入 `wr_ticket: <ticket>` 与 `wr_randstr: <randstr>`，然后重放被阻断的请求。
 5. **关键限制与断点：**服务端返回的 HTTP 499 响应体仅有 53 字节，**不包含任何挑战 URL、二维码、验证网页链接或验证提示指令**。在无交互式 Android/WebView 上下文的独立脚本/命令行环境下，无法直接从回包中获取或生成验证凭据。
 
-**下一步具体验证方向：**
+**官方 -2041 人工验证适配器实现与离线/预检验证（北京时间 2026-10-03 18:55）：**
+
+- **验证适配器实现：**根据腾讯验证码 Web SDK 官方文档（2026-09-15 规范端点 `https://turing.captcha.qcloud.com/TCaptcha.js`）与官方 APK 原生 AppID `2044038556`，构建最小化仅本地环回人工验证服务 `scripts/research/serve-owner-manual-verify.cjs`。
+- **全链路严密门禁与强绑定：**
+  1. 严格绑定 `owner-09-reader-scope` 会话、目标号 `MP_WXS_3895431412`、已停列表请求标记（`mp-chapters-owner09-attempt.json`）及其实际回包 SHA-256（核验其 SHA-256 与不可变记录完全一致，解析确保业务码 `errcode: -2041`）。
+  2. 复用 `discovery-eink-storyfeed.cjs` 的共享安全路径检查 `assertSafePath` 与凭据校验 `validateCredentials`（强验证 `loginResult.productionUnchanged: true`）。
+  3. 一次性持久化账本与防重放机制：服务启动时以 `flag: 'wx'`, `mode: 0o600` 写入启动账本 `manual-verify-start.json`，若已存在账本或产物则拒绝启动；回调处理后写入产物 `manual-verification-artifact.json`（`0o600`，`wx`），一旦写入后续回调全部返回 409 `LEDGER_ALREADY_CONSUMED`。
+  4. 绝不伪造成功、严防降级/灾备票据穿透：腾讯 SDK 在配置错误/域名不匹配时可能返回 `ret: 0` 附带 `trerror_` 灾备票据与非零 `errorCode`（如 1006）。适配器在浏览器端与服务端双重严格校验：凡带有 `trerror_` 前缀或 `errorCode !== 0`，一律视作失败/拒绝，绝不生成或持久化有效票据产物，仅落盘拒绝元数据（`consumed: true`），严禁静默旁路；严格限制 payload 为非空非数组对象，非法或非整数类型的 `errorCode`/`ret` 严格返回 400 且绝不默认转为 0。
+  5. 安全传输与防注入：严格校验 Origin 与 Host 必须等于本地环回基地址；限制 Content-Type 为 application/json；限制请求体不超过 16KB；严禁 ticket/randstr 中包含 `\r\n` 或控制字符；`/status` 接口绝不暴露 nonce。
+  6. 极简 UI：仅展示验证目标、状态与“开始安全验证”按钮，不包含实现细节；点击前外部网络 0 请求；成功后明确提示“验证凭据已保存，公众号文章列表仍待验证（未验证文章列表或恢复订阅）”。
+  7. 兼容性定位：原生 AppID 在 Web 浏览器环回环境下的兼容性明确标记为 `UNVERIFIED`，直至运行时 SDK 真实反馈；拒绝或出错时立即停止，绝不自动重试或绕过。
+- **测试与真实预检通过：**
+  - 12 项纯离线单元测试（包含 null/array payload 阻断、非法 errorCode/ret 类型阻断、`trerror_1006` 灾备票据拒绝回归、解析 -2041 回包校验、CSP/Origin/Host 阻断、一次性账本防重放）全部通过。
+  - 真实零网络预检 `--preflight` 验证通过：`status: preflight_ok`，正确绑定 attemptMarkerSha256、sessionBinding、chaptersRawSha256 与 `chaptersErrCode: -2041`，0 上游网络请求，0 生产写入。
+  - 未启动真实服务，未发起任何后续微信读书接口请求。
+
+**后置受保护单次重放消费适配器实现与离线/预检验证（北京时间 2026-10-03 19:05）：**
+
+- **闭环门禁准备：**设置本地保守 5 分钟年龄门禁，在向用户请求人工操作前准备好且审查完毕后置消费探针，严防出现人工验证成功后因等待开发调试导致有效票据超时失效。
+- **复用既有安全组件：**构建轻量受控消费适配器 `scripts/research/probe-mp-chapters-verified-once.cjs`，强制核验完整 `startLedger` 与非空 `nonceHash`，复用 `probe-mp-chapters-once.cjs` 的 `runChaptersProbe`/`buildHeaders`/`profile` 及共享辅助函数。
+- **严密产物鉴权与防旁路门禁：**
+  1. 产物必须为真凭据：强校验 `success: true, ret: 0, errorCode: 0`，票据不包含 `trerror_` 前缀，无 CRLF/控制字符注入；强匹配 AppID `2044038556`、`owner-09-reader-scope`、目标号 `MP_WXS_3895431412` 与会话绑定；强匹配启动账本 `startLedger` 的 AppID/target/session/binding/时间与非空 `nonceHash`。
+  2. 强校验原始阻断标记与 -2041 回包 SHA：产物内记录的 `attemptMarkerSha256` 与 `chaptersRawSha256` 必须与本地留存的真实阻断请求标记和 HTTP 499 响应体完全一致。
+  3. 保守短生命周期校验：本地强制门禁要求产物生成时间在 5 分钟以内（`now - verifiedAt <= 300,000ms`），超时自动阻断为 `ARTIFACT_EXPIRED`。
+  4. 一次性消费账本：执行前以 `wx` 模式原子写入消费账本 `manual-verification-consumed.json`；若已消费则彻底阻断后续任何请求（`CONSUME_LEDGER_ALREADY_EXISTS`）。
+  5. 证据与脱敏：摘要、消费账本与尝试标记绝不记录明文 ticket 或 randstr，且已删除 randstr 前缀（仅保存 SHA-256）；原始阻断标记与回包原样保留不被修改。
+  6. 源码头精准注入：严格包装固定 profile `authHeaders` 并通过原 `buildHeaders` 组合，仅且仅注入官方源码实证的 `wr_ticket` 与 `wr_randstr` 请求头，保留既有认证头与版本头。
+  7. 限制至多 1 次 `count=5` 请求：无 offset/synckey，上限 2 MiB，禁止重定向，无重试，零生产 SQLite 写入。
+  8. 显式核准门禁：必须附带 `--approved-online`。未提供或产物缺失时，执行端立即安全停在本地门禁（0 请求、0 写入）。
+- **测试与真实预检通过：**
+  - 9 项定向单元测试全数通过（涵盖 CLI 参数、Token 校验、产物来源核验、过期与灾备票据拒绝、头注入完整性、预检状态转换、Mock 真实请求、一次性防重放及 producer→consumer 端到端 Mock 回调与重放）。
+  - 真实零网络预检 `--preflight` 验证通过：在人工未执行前正确报告 `artifactPending: true, requests: 0, verifiedChaptersReady: false`；无假产物生成，未污染真实目录。
+  - 三套研究测试集共 30 项测试全部通过（base 9 项 + manual 12 项 + consumer 9 项）。
+
+**当前验证状态与入口就绪：**
 
 - 保持当前已验证的 `mps=1` 登录会话，严禁盲发网络重放或编造验证 URL。
-- 下一步探索官方客户端或正规入口下使本账号在该目标号上解除限制的合法操作（例如在墨水屏/Android 官方客户端触发一次合法验证并核实凭据注入机制），或评估是否可在合法交互环境下完成该人机核验。
+- 人工验证服务与后置消费适配器均已就绪且通过离线预检与定向测试，等待入口代码审查与启动。
+- 产物成功保存后，可在其本地保守 5 分钟门禁窗口内使用 `probe-mp-chapters-verified-once.cjs` 执行受控请求。
 
 **本次正常扫码已完成（历史记录）：**本人在新的 owner-09-reader-scope 入口确认授权；会话与旧 owner-07 同账号同设备、token 已更换、capturedAt 更新，attempt/session 均记录官方阅读器范围 `snsapi_userinfo,snsapi_friend,snsapi_favorites`。授权器报告生产不变。按既有受控探针只请求一次 `/wx/scope`，HTTP 200（75 字节），真实 `mps=1/fris=1`。公众号授权缺口已解决，无需再次扫码；这还不是自动更新恢复。
 
