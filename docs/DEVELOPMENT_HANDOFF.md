@@ -33,9 +33,9 @@
   6. 极简 UI：仅展示验证目标、状态与“开始安全验证”按钮，不包含实现细节；点击前外部网络 0 请求；成功后明确提示“验证凭据已保存，公众号文章列表仍待验证（未验证文章列表或恢复订阅）”。
   7. 兼容性定位：原生 AppID 在 Web 浏览器环回环境下的兼容性明确标记为 `UNVERIFIED`，直至运行时 SDK 真实反馈；拒绝或出错时立即停止，绝不自动重试或绕过。
 - **测试与真实预检通过：**
-  - 13 项纯离线单元测试（包含 null/array payload 阻断、非法 errorCode/ret 类型阻断、`trerror_1006` 灾备票据拒绝回归、解析 -2041 回包校验、CSP/Origin/Host 阻断、一次性账本防重放，以及 POST /diagnostics 脱敏路由与 clientScript VM 编译隔离）全部通过。
+  - 14 项纯离线单元测试（包含 null/array payload 阻断、非法 errorCode/ret 类型阻断、`trerror_1006` 灾备票据拒绝回归、解析 -2041 回包校验、CSP/Origin/Host 阻断、一次性账本防重放、POST /diagnostics 脱敏路由与 clientScript VM 编译隔离，以及官方 frame JS 实证的 script-src/worker-src CSP 修正与 SDK 终止清理）全部通过。
   - 真实零网络预检 `--preflight` 验证通过：`status: preflight_ok`，正确绑定 attemptMarkerSha256、sessionBinding、chaptersRawSha256 与 `chaptersErrCode: -2041`，0 上游网络请求，0 生产写入。
-  - 本地人工验证服务曾于 127.0.0.1:4355 启动（PID 18324），已交本人操作；收到 1006 拒绝后服务已按机制停止，没有验证后列表请求。
+  - 本地人工验证服务曾于 127.0.0.1:4355（attempt-01）与 127.0.0.1:4356（attempt-02）启动；attempt-02 私有 diagnostics 真实记录 CSP 拦截证据（`script-src-elem` 拦截 `https://turing.captcha.gtimg.com/1/tcaptcha-frame.ba387dd1.js`，`worker-src` 拦截 `isWebWorkerSupport` 的 `Blob` worker 实例化），SDK 返回 `errorCode: 1006`（`get_captcha_config_request_error`）后服务门禁安全拒绝，未发后续列表请求。
 
 **后置受保护单次重放消费适配器实现与离线/预检验证（北京时间 2026-10-03 19:05）：**
 
@@ -53,12 +53,12 @@
 - **测试与真实预检通过：**
   - 9 项定向单元测试全数通过（涵盖 CLI 参数、Token 校验、产物来源核验、过期与灾备票据拒绝、头注入完整性、预检状态转换、Mock 真实请求、一次性防重放及 producer→consumer 端到端 Mock 回调与重放）。
   - 真实零网络预检 `--preflight` 验证通过：在人工未执行前正确报告 `artifactPending: true, requests: 0, verifiedChaptersReady: false`；无假产物生成，未污染真实目录。
-  - 三套研究测试集共 31 项测试全部通过（base 9 项 + manual 13 项 + consumer 9 项）。
+  - 三套研究测试集共 32 项测试全部通过（base 9 项 + manual 14 项 + consumer 9 项）。
 
 **当前验证状态与入口就绪：**
 
 - 保持当前已验证的 `mps=1` 登录会话，严禁盲发网络重放或编造验证 URL。
-- 本次 4355 入口已停止；私有产物记录 ret=0/errorCode=1006 容灾票据，门禁已安全拒绝（0 列表请求，SDK 路径停止）；脱敏诊断机制已实现（捕获 CSP 违规与脚本/SDK 错误信息并脱敏保存，保留原 1006 证据），新入口 4356 待点击；当前保持 0 篇文章、0 次正文请求、0 生产 SQLite 写入。
+- attempt-01 与 attempt-02 历史文件与防重放标记均完整保留；已根据官方文档与 frame JS 源码完成最小 CSP 修正（补齐 `script-src https://turing.captcha.gtimg.com` 与 `worker-src blob:;`）及客户端 `terminateSdk()` 实例与 iframe 销毁机制（附 `callbackConsumed` 防重复执行），离线验证回调后调用SDK销毁与iframe清理，真实SDK终止效果待本次人工验证，1006全部原因仍待验证；当前保持 0 篇文章、0 次正文请求、0 生产 SQLite 写入。新入口 attempt-03（4357）已就绪启动。
 - 产物成功保存后，可在其本地保守 5 分钟门禁窗口内使用 `probe-mp-chapters-verified-once.cjs` 执行受控请求。
 
 **本次正常扫码已完成（历史记录）：**本人在新的 owner-09-reader-scope 入口确认授权；会话与旧 owner-07 同账号同设备、token 已更换、capturedAt 更新，attempt/session 均记录官方阅读器范围 `snsapi_userinfo,snsapi_friend,snsapi_favorites`。授权器报告生产不变。按既有受控探针只请求一次 `/wx/scope`，HTTP 200（75 字节），真实 `mps=1/fris=1`。公众号授权缺口已解决，无需再次扫码；这还不是自动更新恢复。

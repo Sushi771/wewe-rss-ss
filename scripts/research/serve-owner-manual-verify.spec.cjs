@@ -1207,3 +1207,214 @@ test('createVerificationServer POST /diagnostics and renderHtml clientScript com
     fixture.cleanup();
   }
 });
+
+test('createVerificationServer CSP headers include turing.captcha.gtimg.com and worker-src blob:, and client terminates SDK on completion', async () => {
+  const fixture = makeTempFixtureDir();
+  const attemptDir = path.join(fixture.sessionDir, 'manual-verify-attempt-03');
+  fs.mkdirSync(attemptDir, { recursive: true });
+  const customPaths = {
+    ...fixture.paths,
+    startLedgerFile: path.join(attemptDir, 'manual-verify-start.json'),
+    artifactFile: path.join(attemptDir, 'manual-verification-artifact.json'),
+  };
+
+  const { start, getNonce } = createVerificationServer({
+    port: 0,
+    customPaths,
+    rootDir: fixture.rootDir,
+    env: CLEAN_ENV,
+  });
+
+  const { base, close } = await start();
+  const nonce = getNonce();
+
+  try {
+    // 1. Verify actual HTTP response CSP header
+    const cspResponse = await new Promise((resolve, reject) => {
+      http
+        .get(base, (res) => {
+          let body = '';
+          res.on('data', (c) => (body += c));
+          res.on('end', () =>
+            resolve({
+              statusCode: res.statusCode,
+              headers: res.headers,
+              body,
+            }),
+          );
+        })
+        .on('error', reject);
+    });
+
+    assert.equal(cspResponse.statusCode, 200);
+    const csp = cspResponse.headers['content-security-policy'] || '';
+    assert(
+      csp.includes('https://turing.captcha.gtimg.com'),
+      'script-src must include https://turing.captcha.gtimg.com',
+    );
+    assert(
+      csp.includes('https://turing.captcha.qcloud.com'),
+      'script-src must include https://turing.captcha.qcloud.com',
+    );
+    assert(
+      csp.includes('https://ssl.captcha.qq.com'),
+      'script-src must include https://ssl.captcha.qq.com',
+    );
+    assert(
+      csp.includes('worker-src blob:;'),
+      'worker-src must allow blob: for worker instantiation',
+    );
+    assert(!csp.includes('*'), 'CSP must not contain wildcard *');
+    assert(
+      !csp.includes('unsafe-eval'),
+      'CSP must not contain unsafe-eval script execution',
+    );
+
+    // 2. Verify rendered script compilation and sandbox execution with SDK destruction
+    const html = renderHtml(nonce, base);
+    const scriptMatch = html.match(
+      /<script nonce="[^"]+">([\s\S]*?)<\/script>/,
+    );
+    assert(scriptMatch, 'Must find script tag in renderHtml');
+    const scriptSource = scriptMatch[1];
+    const script = new vm.Script(scriptSource);
+
+    let btnClickHandler = null;
+    let createdScript = null;
+    let captchaDestroyed = false;
+    let captchaCallback = null;
+    let callbackCount = 0;
+    let diagnosticsCount = 0;
+
+    const mockIframeParent = {
+      removeChild: (child) => {
+        child.parentElement = null;
+      },
+    };
+    const mockIframe = {
+      parentElement: mockIframeParent,
+      parentNode: mockIframeParent,
+    };
+    const mockTransform = {
+      parentElement: mockIframeParent,
+      parentNode: mockIframeParent,
+    };
+
+    const mockElements = {
+      'btn-start': {
+        addEventListener: (event, handler) => {
+          if (event === 'click') btnClickHandler = handler;
+        },
+        disabled: false,
+      },
+      status: { textContent: '', className: '' },
+      'diag-box': { style: { display: 'none' }, appendChild: () => {} },
+      tcaptcha_iframe_dy: mockIframe,
+      tcaptcha_transform_dy: mockTransform,
+    };
+
+    const mockDoc = {
+      getElementById: (id) =>
+        mockElements[id] || { addEventListener: () => {}, style: {} },
+      addEventListener: () => {},
+      createElement: () => {
+        createdScript = { style: {} };
+        return createdScript;
+      },
+      head: { appendChild: () => {} },
+    };
+
+    const mockWin = {
+      addEventListener: () => {},
+    };
+
+    const mockClientFetch = async (url, opts) => {
+      if (url === '/callback') {
+        callbackCount++;
+      } else if (url === '/diagnostics') {
+        diagnosticsCount++;
+      }
+      return { json: async () => ({ success: true }) };
+    };
+
+    const mockTencentCaptcha = function (appId, cb) {
+      captchaCallback = cb;
+      return {
+        show: () => {},
+        destroy: () => {
+          captchaDestroyed = true;
+        },
+      };
+    };
+
+    const sandbox = {
+      document: mockDoc,
+      window: mockWin,
+      fetch: mockClientFetch,
+      TencentCaptcha: mockTencentCaptcha,
+      URL,
+      Date,
+      JSON,
+      String,
+      Number,
+      parseInt,
+    };
+
+    const context = vm.createContext(sandbox);
+    script.runInContext(context);
+
+    // Simulate clicking start button and script load
+    assert(typeof btnClickHandler === 'function');
+    btnClickHandler();
+    assert.equal(mockElements['btn-start'].disabled, true);
+    assert(createdScript && typeof createdScript.onload === 'function');
+    createdScript.onload();
+    assert(typeof captchaCallback === 'function');
+
+    // Simulate SDK returning 1006 get_captcha_config_request_error
+    await captchaCallback({
+      ret: 0,
+      errorCode: 1006,
+      ticket: 'trerror_1006',
+      randstr: '@rand_test',
+      errorMessage: 'get_captcha_config_request_error',
+    });
+
+    // Verify official destroy() was called on captcha instance
+    assert.equal(captchaDestroyed, true, 'SDK destroy() must be called');
+    assert.equal(
+      mockIframe.parentElement,
+      null,
+      'Iframe must be removed from parent',
+    );
+    assert.equal(
+      mockTransform.parentElement,
+      null,
+      'Transform wrap must be removed from parent',
+    );
+    assert.equal(callbackCount, 1, 'Exactly one callback sent');
+    assert(
+      mockElements.status.textContent.includes('errorCode=1006'),
+      'Status must retain error message for user',
+    );
+
+    // Simulate delayed second callback (e.g. 20s delayed retry or event)
+    await captchaCallback({
+      ret: 0,
+      errorCode: 1006,
+      ticket: 'trerror_1006',
+      randstr: '@rand_test',
+      errorMessage: 'get_captcha_config_request_error',
+    });
+
+    // Verify second callback is strictly ignored (no duplicate callback, no continued execution)
+    assert.equal(
+      callbackCount,
+      1,
+      'Duplicate callback must be ignored after conclusion',
+    );
+  } finally {
+    await close();
+    fixture.cleanup();
+  }
+});

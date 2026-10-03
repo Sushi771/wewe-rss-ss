@@ -626,6 +626,33 @@ function clientScript(nonce, base, canonicalSdkUrl, sourceAppId) {
     btn.disabled = true;
     updateStatus('正在调起安全验证...', 'status-running');
 
+    let captchaInstance = null;
+    let callbackConsumed = false;
+
+    function terminateSdk() {
+      if (captchaInstance && typeof captchaInstance.destroy === 'function') {
+        try {
+          captchaInstance.destroy();
+        } catch (_) {}
+      }
+      try {
+        const ids = [
+          'tcaptcha_transform_dy',
+          'tcaptcha_iframe_dy',
+          'tcaptcha_transform_drag',
+          'tcaptcha_iframe_drag',
+          'tcaptcha_transform',
+          'tcaptcha_iframe',
+        ];
+        for (let k = 0; k < ids.length; k++) {
+          const el = document.getElementById(ids[k]);
+          if (el && el.parentNode) {
+            el.parentNode.removeChild(el);
+          }
+        }
+      } catch (_) {}
+    }
+
     const script = document.createElement('script');
     script.type = 'text/javascript';
     script.src = canonicalSdkUrl;
@@ -635,9 +662,12 @@ function clientScript(nonce, base, canonicalSdkUrl, sourceAppId) {
         if (typeof TencentCaptcha !== 'function') {
           throw new Error('TencentCaptcha 构造器未定义');
         }
-        const captcha = new TencentCaptcha(
+        captchaInstance = new TencentCaptcha(
           sourceAppId,
           async function (res) {
+            if (callbackConsumed) return;
+            callbackConsumed = true;
+
             const ret = res && Number.isInteger(res.ret) ? res.ret : -1;
             const rawErr = res ? (res.errorCode ?? res.errCode) : undefined;
             let errorCode;
@@ -672,94 +702,100 @@ function clientScript(nonce, base, canonicalSdkUrl, sourceAppId) {
                 ? sanitizeText(rawSdkMsg, [ticket, randstr])
                 : '';
 
-            if (ret === 0 && !isFallback && ticket && randstr) {
-              updateStatus('正在保存验证凭据...', 'status-running');
-              const cbRes = await sendCallback({
-                ret: 0,
-                errorCode: 0,
-                ticket,
-                randstr,
-                appid: returnedAppId,
-              });
-              if (cbRes && cbRes.success) {
+            try {
+              if (ret === 0 && !isFallback && ticket && randstr) {
+                updateStatus('正在保存验证凭据...', 'status-running');
+                const cbRes = await sendCallback({
+                  ret: 0,
+                  errorCode: 0,
+                  ticket,
+                  randstr,
+                  appid: returnedAppId,
+                });
+                if (cbRes && cbRes.success) {
+                  updateStatus(
+                    '✅ 验证凭据已保存，公众号文章列表仍待验证（未验证文章列表或恢复订阅）。请关闭此页面。',
+                    'status-success',
+                  );
+                } else {
+                  updateStatus(
+                    '❌ 凭据保存失败：' +
+                      (cbRes?.reason || '未知错误') +
+                      '。流程停止。',
+                    'status-error',
+                  );
+                  addDiagEntry('凭据保存失败', cbRes?.reason || '未知错误');
+                }
+              } else if (ret === 2) {
                 updateStatus(
-                  '✅ 验证凭据已保存，公众号文章列表仍待验证（未验证文章列表或恢复订阅）。请关闭此页面。',
-                  'status-success',
+                  '⚠️ 用户主动关闭了验证码。流程停止。',
+                  'status-idle',
                 );
+                addDiagEntry('SDK 状态', '用户主动关闭验证码 (ret=2)');
+                sendDiagnostics({
+                  type: 'sdk_callback',
+                  ret: 2,
+                  errorCode: errorCode,
+                  errorMessage: sanitizedSdkMsg || 'USER_CANCELLED',
+                  timestamp: new Date().toISOString(),
+                });
+                await sendCallback({
+                  ret: 2,
+                  errorCode,
+                  message: 'USER_CANCELLED',
+                  errorMessage: sanitizedSdkMsg || undefined,
+                  appid: returnedAppId,
+                });
               } else {
+                const fallbackReason = isFallback
+                  ? 'FALLBACK_TICKET_REJECTED'
+                  : 'SDK_REFUSAL_OR_ERROR';
+                const displayDesc = sanitizedSdkMsg
+                  ? fallbackReason + ': ' + sanitizedSdkMsg
+                  : fallbackReason;
                 updateStatus(
-                  '❌ 凭据保存失败：' +
-                    (cbRes?.reason || '未知错误') +
-                    '。流程停止。',
+                  '❌ 验证码服务被拒绝或返回错误（errorCode=' +
+                    errorCode +
+                    '）。流程停止。',
                   'status-error',
                 );
-                addDiagEntry('凭据保存失败', cbRes?.reason || '未知错误');
+                addDiagEntry(
+                  'SDK 拒绝或返回错误',
+                  'ret=' +
+                    ret +
+                    ', errorCode=' +
+                    errorCode +
+                    ' (' +
+                    displayDesc +
+                    ')',
+                );
+                sendDiagnostics({
+                  type: 'sdk_callback',
+                  ret: ret,
+                  errorCode: errorCode,
+                  errorMessage: sanitizedSdkMsg || fallbackReason,
+                  timestamp: new Date().toISOString(),
+                });
+                await sendCallback({
+                  ret,
+                  errorCode,
+                  ticket,
+                  randstr,
+                  appid: returnedAppId,
+                  message: fallbackReason,
+                  errorMessage: sanitizedSdkMsg || undefined,
+                });
               }
-            } else if (ret === 2) {
-              updateStatus(
-                '⚠️ 用户主动关闭了验证码。流程停止。',
-                'status-idle',
-              );
-              addDiagEntry('SDK 状态', '用户主动关闭验证码 (ret=2)');
-              sendDiagnostics({
-                type: 'sdk_callback',
-                ret: 2,
-                errorCode: errorCode,
-                errorMessage: sanitizedSdkMsg || 'USER_CANCELLED',
-                timestamp: new Date().toISOString(),
-              });
-              await sendCallback({
-                ret: 2,
-                errorCode,
-                message: 'USER_CANCELLED',
-                errorMessage: sanitizedSdkMsg || undefined,
-                appid: returnedAppId,
-              });
-            } else {
-              const fallbackReason = isFallback
-                ? 'FALLBACK_TICKET_REJECTED'
-                : 'SDK_REFUSAL_OR_ERROR';
-              const displayDesc = sanitizedSdkMsg
-                ? fallbackReason + ': ' + sanitizedSdkMsg
-                : fallbackReason;
-              updateStatus(
-                '❌ 验证码服务被拒绝或返回错误（errorCode=' +
-                  errorCode +
-                  '）。流程停止。',
-                'status-error',
-              );
-              addDiagEntry(
-                'SDK 拒绝或返回错误',
-                'ret=' +
-                  ret +
-                  ', errorCode=' +
-                  errorCode +
-                  ' (' +
-                  displayDesc +
-                  ')',
-              );
-              sendDiagnostics({
-                type: 'sdk_callback',
-                ret: ret,
-                errorCode: errorCode,
-                errorMessage: sanitizedSdkMsg || fallbackReason,
-                timestamp: new Date().toISOString(),
-              });
-              await sendCallback({
-                ret,
-                errorCode,
-                ticket,
-                randstr,
-                appid: returnedAppId,
-                message: fallbackReason,
-                errorMessage: sanitizedSdkMsg || undefined,
-              });
+            } finally {
+              terminateSdk();
             }
           },
           {},
         );
-        captcha.show();
+        captchaInstance.show();
       } catch (err) {
+        callbackConsumed = true;
+        terminateSdk();
         const cleanErrMsg = sanitizeText(err.message || '');
         updateStatus('❌ 验证码初始化异常。流程停止。', 'status-error');
         addDiagEntry('SDK 初始化异常', cleanErrMsg);
@@ -778,6 +814,8 @@ function clientScript(nonce, base, canonicalSdkUrl, sourceAppId) {
     };
 
     script.onerror = function () {
+      callbackConsumed = true;
+      terminateSdk();
       updateStatus('❌ 加载官方 TCaptcha.js 失败。流程停止。', 'status-error');
       addDiagEntry('SDK 脚本加载失败', canonicalSdkUrl);
       sendDiagnostics({
@@ -911,7 +949,7 @@ function createVerificationServer({
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader(
       'Content-Security-Policy',
-      `default-src 'none'; script-src 'nonce-${nonce}' https://turing.captcha.qcloud.com https://ssl.captcha.qq.com; frame-src https://turing.captcha.qcloud.com https://ssl.captcha.qq.com https://captcha.gtimg.com; connect-src 'self' https://turing.captcha.qcloud.com https://ssl.captcha.qq.com; img-src 'self' https://turing.captcha.qcloud.com https://ssl.captcha.qq.com https://captcha.gtimg.com data:; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
+      `default-src 'none'; script-src 'nonce-${nonce}' https://turing.captcha.qcloud.com https://ssl.captcha.qq.com https://turing.captcha.gtimg.com; frame-src https://turing.captcha.qcloud.com https://ssl.captcha.qq.com https://captcha.gtimg.com; connect-src 'self' https://turing.captcha.qcloud.com https://ssl.captcha.qq.com; img-src 'self' https://turing.captcha.qcloud.com https://ssl.captcha.qq.com https://captcha.gtimg.com data:; style-src 'unsafe-inline'; worker-src blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
     );
 
     if (req.method === 'GET' && req.url === '/') {
