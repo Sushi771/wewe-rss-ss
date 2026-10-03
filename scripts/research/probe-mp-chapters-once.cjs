@@ -1,12 +1,17 @@
 'use strict';
 
-// Official EInk 2.1.2 MpService.syncChapters -> MpRemoteService.syncChapters
-// URL: GET https://i.weread.qq.com/mp/chapters?bookId={bookId}&count={count}
+// Official EInk 2.1.2 ds MpService.syncChapters -> MpRemoteService.syncChapters
+// EInk StoryDetail UI still uses the separate legacy MPListService path.
+// URLBuilder: GET https://i.weread.qq.com/mp/chapters?bookId={bookId}&count={count}
 // Source parameter chain:
 //   MpService.syncChapters(bookId: String) calls
 //   MpRemoteService.INSTANCE.syncChapters(bookId, count=50) [classes10.dex: const/16 v3, 50].
 //   Ktor URLBuilder: /mp/chapters, addParam("bookId", bookId), addParam("count", count).
-//   NO synckey or offset is passed on initial syncChapters (prior audit's synckey=0 was from BaseMPListService).
+//   This method does not explicitly add synckey or offset. The official sync-client
+//   GET pipeline can append synckey from local SyncKeyService state, including 0.
+//   The existing probe below does not reproduce that pipeline; it is not a complete
+//   wire-contract replica and has no account-local sync-state store.
+//   This correction does not authorize changing parameters or retrying stopped calls.
 // Response DTO: MpChapterList { data: List<MpChapterItem>, synckey: Long, clearAll: Boolean }
 // MpChapterItem { reviewId: String, createTime: Long, mpInfo: SimpleMpInfo { title, picUrl, payType } }
 // Strictly bound to owner-09-reader-scope session with verified raw mps=1.

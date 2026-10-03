@@ -14,11 +14,15 @@
  * 2. Conservative short age window (default 5 minutes).
  * 3. Enforces one-use consumption ledger (flag: 'wx') before issuing network call.
  * 4. Injects ONLY source-proven wr_ticket and wr_randstr into OkHttp-equivalent headers.
- * 5. Single count=5 source-exact list fetch; no offset/synckey, bounded body (2 MiB),
+ * 5. Single count=5 probe using the existing URLBuilder parameters, bounded body (2 MiB),
  *    redirect: 'error', no retries, zero production SQLite writes.
  * 6. Explicit coordinator approval required (--approved-online).
  * 7. Never leaks ticket or randstr into summary, attempt marker, or Git.
  * 8. Zero upstream requests during preflight.
+ *
+ * Contract limit: the official sync-client GET pipeline can append a locally stored
+ * synckey. This adapter does not reproduce it and is not a complete wire replica.
+ * This source correction does not authorize a new verification or list attempt.
  */
 
 const fs = require('node:fs');
