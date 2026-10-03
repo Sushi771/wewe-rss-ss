@@ -2,7 +2,10 @@ import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fetchOwnerWereadLatest } from './owner-weread-latest';
+import { ownerSessionCookie } from './owner-web-search';
+import { ownerLatestAuthHash } from './owner-weread-session-state';
 jest.mock('axios');
 
 describe('normal owner Tencent latest body (no HTTP)', () => {
@@ -213,7 +216,12 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
     const state = JSON.parse(
       await fs.readFile(c().wereadLatestStateFile!, 'utf8'),
     );
-    expect(state.stop).toMatchObject({ stage: 'cover', requests: 1 });
+    const session = JSON.parse(await fs.readFile(c().sessionFile, 'utf8'));
+    expect(state.stop).toMatchObject({
+      stage: 'cover',
+      requests: 1,
+      sessionAuthHash: ownerLatestAuthHash(session, c().ownerVid),
+    });
     expect(
       await fs.readFile(
         `${c().wereadLatestStateFile}.${state.lastAttemptAt}.cover.response`,
@@ -232,5 +240,101 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
     });
     await expect(fetchOwnerWereadLatest(c())).rejects.toThrow('未完成');
     expect(axios.get).toHaveBeenCalledTimes(1);
+  });
+  it('does not attribute a historical 401 to a different unverified authentication session', async () => {
+    (axios.get as jest.Mock).mockResolvedValueOnce({
+      status: 401,
+      data: '{"errCode":-2012}',
+    });
+    await expect(fetchOwnerWereadLatest(c())).rejects.toThrow('未完成');
+    const originalState = await fs.readFile(c().wereadLatestStateFile, 'utf8');
+    const session = JSON.parse(await fs.readFile(c().sessionFile, 'utf8'));
+    session.cookies.find((v) => v.name === 'wr_skey').value = 'new-login-token';
+    await fs.writeFile(c().sessionFile, JSON.stringify(session));
+    await expect(fetchOwnerWereadLatest(c())).rejects.toThrow(
+      '当前会话尚未核实',
+    );
+    expect(axios.get).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(c().wereadLatestStateFile, 'utf8')).toBe(
+      originalState,
+    );
+  });
+  it('validates the current owner before reading a historical stop as its failure', async () => {
+    await fs.writeFile(
+      c().wereadLatestStateFile,
+      JSON.stringify({
+        stop: { stage: 'cover', reason: 'HTTP 401' },
+      }),
+    );
+    const session = JSON.parse(await fs.readFile(c().sessionFile, 'utf8'));
+    session.ownerVid = '999';
+    session.cookies.find((v) => v.name === 'wr_vid').value = '999';
+    await fs.writeFile(c().sessionFile, JSON.stringify(session));
+    await expect(fetchOwnerWereadLatest(c())).rejects.toThrow(
+      '会话账号或凭据无法核验',
+    );
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+  it('keeps the same failed authentication stopped across auxiliary changes and session file relocation', async () => {
+    (axios.get as jest.Mock).mockResolvedValueOnce({
+      status: 401,
+      data: '{"errCode":-2012}',
+    });
+    await expect(fetchOwnerWereadLatest(c())).rejects.toThrow('未完成');
+    const originalState = await fs.readFile(c().wereadLatestStateFile, 'utf8');
+    const session = JSON.parse(await fs.readFile(c().sessionFile, 'utf8'));
+    session.capturedAt = '2025-01-01T00:00:00Z';
+    session.cookies.push({
+      name: 'wr_pf',
+      value: 'aux-changed',
+      domain: '.weread.qq.com',
+      path: '/',
+      secure: true,
+      expires: -1,
+    });
+    const relocated = path.join(dir, 'relocated-session');
+    await fs.writeFile(relocated, JSON.stringify(session));
+    await expect(
+      fetchOwnerWereadLatest({ ...c(), sessionFile: relocated }),
+    ).rejects.toThrow('当前读书会话最新篇已停止：HTTP 401');
+    expect(axios.get).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(c().wereadLatestStateFile, 'utf8')).toBe(
+      originalState,
+    );
+  });
+  it('keeps a legacy stop blocked when an auxiliary change makes full-cookie ownership inconclusive', async () => {
+    const session = JSON.parse(await fs.readFile(c().sessionFile, 'utf8'));
+    const stateText = JSON.stringify({
+      sessionHash: createHash('sha256')
+        .update(ownerSessionCookie(session, c().ownerVid))
+        .digest('hex'),
+      stop: { stage: 'cover', reason: 'HTTP 401' },
+    });
+    await fs.writeFile(c().wereadLatestStateFile, stateText);
+    session.cookies.push({
+      name: 'wr_pf',
+      value: 'aux-changed',
+      domain: '.weread.qq.com',
+      path: '/',
+      secure: true,
+      expires: -1,
+    });
+    await fs.writeFile(c().sessionFile, JSON.stringify(session));
+    await expect(fetchOwnerWereadLatest(c())).rejects.toThrow(
+      '当前会话尚未核实',
+    );
+    expect(axios.get).not.toHaveBeenCalled();
+    expect(await fs.readFile(c().wereadLatestStateFile, 'utf8')).toBe(
+      stateText,
+    );
+  });
+  it('preserves an existing concurrency or interruption lock without sending requests', async () => {
+    const lockFile = c().wereadLatestStateFile + '.lock';
+    await fs.writeFile(lockFile, 'existing-operation');
+    await expect(fetchOwnerWereadLatest(c())).rejects.toThrow(
+      '更新正在进行或上次中断',
+    );
+    expect(axios.get).not.toHaveBeenCalled();
+    expect(await fs.readFile(lockFile, 'utf8')).toBe('existing-operation');
   });
 });

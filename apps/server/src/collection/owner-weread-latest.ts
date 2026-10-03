@@ -8,6 +8,10 @@ import { SearchConfig, OwnerUpdateStopped } from './owner-search-update';
 import { articleIdentity, articleContentHtml } from './article-page';
 import { assertProviderPage } from './subscription-provider';
 import { archiveProviderImages } from './archive-provider-images';
+import {
+  ownerLatestAuthHash,
+  ownerLatestStopMessage,
+} from './owner-weread-session-state';
 
 /** Normal owner Web session; only the single item supplied by Tencent's cover.
  * Does not call the rejected directory or the stopped mp.weixin original route.
@@ -26,7 +30,8 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
   let state: any = {},
     stage = 'session',
     requests = 0,
-    reserved = false;
+    reserved = false,
+    sessionAuthHash = '';
   const write = async () => {
     const pending = await fs.open(stateFile + '.pending', 'w', 0o600);
     try {
@@ -43,21 +48,26 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
     } catch (e: any) {
       if (e.code !== 'ENOENT') throw e;
     }
-    if (state.stop)
+    let session: OwnerWebSession, Cookie: string;
+    try {
+      session = JSON.parse(await fs.readFile(c.sessionFile, 'utf8'));
+      Cookie = ownerSessionCookie(session, c.ownerVid);
+      sessionAuthHash = ownerLatestAuthHash(session, c.ownerVid);
+    } catch {
       throw new OwnerUpdateStopped(
-        `读书${state.stop.stage === 'cover' ? '最新篇' : '正文'}来源已停止：${state.stop.reason}；本次未发联网请求，旧正文保留。`,
+        '当前读书会话账号或凭据无法核验，本次未发联网请求；历史停止记录及旧正文保留。',
       );
+    }
+    const stopped = ownerLatestStopMessage(state, session, c.ownerVid, c.mpId);
+    if (stopped) throw new OwnerUpdateStopped(stopped);
     if (Date.now() - (state.lastAttemptAt || 0) < 15 * 60 * 1000)
       throw new OwnerUpdateStopped(
         '读书更新处于15分钟冷却期，本次未发联网请求；已有正文保留。',
       );
-    const session: OwnerWebSession = JSON.parse(
-      await fs.readFile(c.sessionFile, 'utf8'),
-    );
-    const Cookie = ownerSessionCookie(session, c.ownerVid);
     const cookies = new OwnerWebCookieLifecycle(session, c.ownerVid);
     state.lastAttemptAt = Date.now();
     state.sessionHash = createHash('sha256').update(Cookie).digest('hex');
+    state.sessionAuthHash = sessionAuthHash;
     await write();
     reserved = true;
     const get = async (
@@ -183,6 +193,7 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
         at: new Date().toISOString(),
         stage,
         requests,
+        sessionAuthHash,
         reason:
           e instanceof Error &&
           /^(HTTP \d+|业务码 -?\d+|腾讯验证或访问限制|最新篇身份或字段无效|正文身份、真实发布时间或内容无效)$/.test(
