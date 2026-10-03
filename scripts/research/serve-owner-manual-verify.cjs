@@ -110,6 +110,150 @@ const DEFAULT_PATHS = {
   ),
 };
 
+function sanitizeDirectiveName(str) {
+  if (typeof str !== 'string') return '';
+  const first = str.trim().split(/[\s;]/)[0] || '';
+  return first.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+}
+
+function sanitizeDiagnosticUrl(str) {
+  if (typeof str !== 'string' || !str) return '';
+  const trimmed = str.trim();
+  if (/^(data|javascript|blob):/i.test(trimmed)) {
+    const m = trimmed.match(/^([a-zA-Z]+):/);
+    return m ? m[1].toLowerCase() + ':' : '';
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    }
+    return parsed.protocol;
+  } catch {
+    if (trimmed.startsWith('/')) {
+      return trimmed.split('?')[0].split('#')[0].slice(0, 256);
+    }
+    return '';
+  }
+}
+
+function sanitizeDiagnosticText(str, context = {}, maxLen = 256) {
+  if (typeof str !== 'string') return '';
+  let text = str;
+
+  // 1. Redact known context secrets if present
+  if (context.nonce && typeof context.nonce === 'string') {
+    text = text.replaceAll(context.nonce, '[REDACTED_NONCE]');
+  }
+  if (context.ticket && typeof context.ticket === 'string' && context.ticket) {
+    text = text.replaceAll(context.ticket, '[REDACTED_TICKET]');
+  }
+  if (
+    context.randstr &&
+    typeof context.randstr === 'string' &&
+    context.randstr
+  ) {
+    text = text.replaceAll(context.randstr, '[REDACTED_RANDSTR]');
+  }
+
+  // 2. Redact patterns like trerror_* or generic tickets
+  text = text.replace(/trerror_[a-zA-Z0-9_-]+/gi, '[REDACTED_TICKET]');
+
+  // 3. Redact URLs embedded in the message: strip query/hash, userinfo
+  text = text.replace(/https?:\/\/[^\s"'<>]+/gi, (urlMatch) => {
+    return sanitizeDiagnosticUrl(urlMatch);
+  });
+
+  // 4. Remove control characters and limit length
+  return text
+    .replace(/[\r\n\x00-\x1f\x7f]/g, ' ')
+    .slice(0, maxLen)
+    .trim();
+}
+
+function sanitizeDiagnosticEvent(raw, context = {}) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const event = {};
+
+  const rawType =
+    typeof (raw.type || raw.eventType) === 'string'
+      ? raw.type || raw.eventType
+      : 'unknown';
+  event.type = sanitizeDiagnosticText(rawType, context, 64);
+
+  event.timestamp =
+    typeof raw.timestamp === 'string' && raw.timestamp.length <= 64
+      ? raw.timestamp
+      : new Date().toISOString();
+
+  if (
+    raw.blockedURI !== undefined ||
+    raw.violatedDirective !== undefined ||
+    raw.effectiveDirective !== undefined ||
+    event.type === 'securitypolicyviolation'
+  ) {
+    if (raw.blockedURI !== undefined) {
+      event.blockedURI = sanitizeDiagnosticUrl(String(raw.blockedURI));
+    }
+    if (raw.effectiveDirective !== undefined) {
+      event.effectiveDirective = sanitizeDirectiveName(
+        String(raw.effectiveDirective),
+      );
+    }
+    if (raw.violatedDirective !== undefined) {
+      event.violatedDirective = sanitizeDirectiveName(
+        String(raw.violatedDirective),
+      );
+    }
+    if (raw.sourceFile !== undefined) {
+      event.sourceFile = sanitizeDiagnosticUrl(String(raw.sourceFile));
+    }
+    if (Number.isInteger(raw.lineNumber)) event.lineNumber = raw.lineNumber;
+    if (Number.isInteger(raw.columnNumber))
+      event.columnNumber = raw.columnNumber;
+    if (Number.isInteger(raw.statusCode)) event.statusCode = raw.statusCode;
+  }
+
+  if (
+    raw.message !== undefined ||
+    raw.filename !== undefined ||
+    event.type === 'error' ||
+    event.type === 'script_error'
+  ) {
+    if (raw.message !== undefined) {
+      event.message = sanitizeDiagnosticText(String(raw.message), context, 256);
+    }
+    if (raw.filename !== undefined) {
+      event.filename = sanitizeDiagnosticUrl(String(raw.filename));
+    }
+    if (Number.isInteger(raw.lineno)) event.lineno = raw.lineno;
+    if (Number.isInteger(raw.colno)) event.colno = raw.colno;
+  }
+
+  if (
+    raw.errorCode !== undefined ||
+    raw.errCode !== undefined ||
+    raw.ret !== undefined
+  ) {
+    if (Number.isInteger(raw.ret)) event.ret = raw.ret;
+    const ec = raw.errorCode !== undefined ? raw.errorCode : raw.errCode;
+    if (Number.isInteger(ec)) {
+      event.errorCode = ec;
+    } else if (typeof ec === 'string' && /^-?\d+$/.test(ec)) {
+      event.errorCode = parseInt(ec, 10);
+    }
+    if (raw.errorMessage !== undefined) {
+      event.errorMessage = sanitizeDiagnosticText(
+        String(raw.errorMessage),
+        context,
+        256,
+      );
+    }
+  }
+
+  return event;
+}
+
 function digest(content) {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
@@ -273,6 +417,12 @@ function validatePreflight(customPaths = {}, options = {}) {
   environmentGate(env);
 
   const paths = { ...DEFAULT_PATHS, ...customPaths };
+  if (!paths.diagnosticsFile && paths.artifactFile) {
+    paths.diagnosticsFile = path.resolve(
+      path.dirname(paths.artifactFile),
+      'manual-verification-diagnostics.json',
+    );
+  }
   const rootDir = options.rootDir || path.resolve(ROOT, 'private-data');
 
   // Assert paths within allowed roots using shared assertSafePath
@@ -334,10 +484,326 @@ function validatePreflight(customPaths = {}, options = {}) {
   };
 }
 
+function clientScript(nonce, base, canonicalSdkUrl, sourceAppId) {
+  const btn = document.getElementById('btn-start');
+  const statusDiv = document.getElementById('status');
+  const diagBox = document.getElementById('diag-box');
+  let requested = false;
+
+  function sanitizeDirective(d) {
+    if (!d) return '';
+    try {
+      return String(d)
+        .trim()
+        .split(/[\s;]/)[0]
+        .replace(/[^a-zA-Z0-9_-]/g, '')
+        .slice(0, 64);
+    } catch {
+      return '';
+    }
+  }
+
+  function sanitizeUrl(u) {
+    if (!u) return '';
+    const s = String(u).trim();
+    if (/^(data|javascript|blob):/i.test(s)) {
+      const m = s.match(/^([a-zA-Z]+):/);
+      return m ? m[1].toLowerCase() + ':' : '';
+    }
+    try {
+      const parsed = new URL(s);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return parsed.protocol + '//' + parsed.host + parsed.pathname;
+      }
+      return parsed.protocol;
+    } catch {
+      if (s.startsWith('/')) {
+        return s.split('?')[0].split('#')[0].slice(0, 256);
+      }
+      return '';
+    }
+  }
+
+  function sanitizeText(str, extraTokens = []) {
+    if (typeof str !== 'string') return '';
+    let text = str;
+    if (nonce) text = text.split(nonce).join('[REDACTED_NONCE]');
+    for (const tok of extraTokens) {
+      if (tok && typeof tok === 'string') {
+        text = text.split(tok).join('[REDACTED_SECRET]');
+      }
+    }
+    text = text.replace(/trerror_[a-zA-Z0-9_-]+/gi, '[REDACTED_TICKET]');
+    text = text.replace(/https?:\/\/[^\s"'<>]+/gi, function (u) {
+      return sanitizeUrl(u);
+    });
+    return text
+      .replace(/[\r\n\x00-\x1f\x7f]/g, ' ')
+      .slice(0, 256)
+      .trim();
+  }
+
+  function addDiagEntry(title, details) {
+    if (!diagBox) return;
+    diagBox.style.display = 'block';
+    const item = document.createElement('div');
+    item.className = 'diag-item';
+    item.textContent = title + (details ? ': ' + details : '');
+    diagBox.appendChild(item);
+  }
+
+  async function sendDiagnostics(eventData) {
+    try {
+      await fetch('/diagnostics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nonce, event: eventData }),
+      });
+    } catch {
+      // Local silent fallback
+    }
+  }
+
+  // 1. Registered BEFORE SDK load: securitypolicyviolation
+  document.addEventListener('securitypolicyviolation', function (e) {
+    const cleanUri = sanitizeUrl(e.blockedURI);
+    const effDir = sanitizeDirective(e.effectiveDirective);
+    const violDir = sanitizeDirective(e.violatedDirective);
+    const detail = (effDir || violDir) + (cleanUri ? ' ' + cleanUri : '');
+    addDiagEntry('CSP 策略拦截', detail);
+    sendDiagnostics({
+      type: 'securitypolicyviolation',
+      blockedURI: cleanUri,
+      violatedDirective: violDir,
+      effectiveDirective: effDir,
+      sourceFile: sanitizeUrl(e.sourceFile),
+      lineNumber: e.lineNumber,
+      columnNumber: e.columnNumber,
+      statusCode: e.statusCode,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // 2. Registered BEFORE SDK load: unhandled script error
+  window.addEventListener('error', function (e) {
+    const cleanFile = sanitizeUrl(e.filename);
+    const msg = sanitizeText(String(e.message || ''));
+    addDiagEntry(
+      '脚本异常',
+      msg + (cleanFile ? ' (' + cleanFile + ':' + e.lineno + ')' : ''),
+    );
+    sendDiagnostics({
+      type: 'error',
+      message: msg,
+      filename: cleanFile,
+      lineno: e.lineno,
+      colno: e.colno,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  function updateStatus(text, className) {
+    statusDiv.textContent = text;
+    statusDiv.className = 'status-box ' + className;
+  }
+
+  async function sendCallback(payload) {
+    try {
+      const res = await fetch('/callback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nonce, ...payload }),
+      });
+      return await res.json();
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  btn.addEventListener('click', function () {
+    if (requested) return;
+    requested = true;
+    btn.disabled = true;
+    updateStatus('正在调起安全验证...', 'status-running');
+
+    const script = document.createElement('script');
+    script.type = 'text/javascript';
+    script.src = canonicalSdkUrl;
+
+    script.onload = function () {
+      try {
+        if (typeof TencentCaptcha !== 'function') {
+          throw new Error('TencentCaptcha 构造器未定义');
+        }
+        const captcha = new TencentCaptcha(
+          sourceAppId,
+          async function (res) {
+            const ret = res && Number.isInteger(res.ret) ? res.ret : -1;
+            const rawErr = res ? (res.errorCode ?? res.errCode) : undefined;
+            let errorCode;
+            if (rawErr !== undefined) {
+              if (Number.isInteger(rawErr)) {
+                errorCode = rawErr;
+              } else if (typeof rawErr === 'string' && /^-?\d+$/.test(rawErr)) {
+                errorCode = parseInt(rawErr, 10);
+              } else {
+                errorCode = -1; // Explicit invalid type: strictly fail-closed!
+              }
+            } else {
+              errorCode = res && res.ret === 0 ? 0 : -1;
+            }
+
+            const ticket =
+              res && typeof res.ticket === 'string' ? res.ticket : '';
+            const randstr =
+              res && typeof res.randstr === 'string' ? res.randstr : '';
+            const returnedAppId =
+              res && res.appid !== undefined ? String(res.appid) : undefined;
+            const isFallback = ticket.startsWith('trerror_') || errorCode !== 0;
+
+            const rawSdkMsg = res
+              ? (res.errorMessage ??
+                res.errMessage ??
+                res.errMsg ??
+                res.message)
+              : undefined;
+            const sanitizedSdkMsg =
+              typeof rawSdkMsg === 'string'
+                ? sanitizeText(rawSdkMsg, [ticket, randstr])
+                : '';
+
+            if (ret === 0 && !isFallback && ticket && randstr) {
+              updateStatus('正在保存验证凭据...', 'status-running');
+              const cbRes = await sendCallback({
+                ret: 0,
+                errorCode: 0,
+                ticket,
+                randstr,
+                appid: returnedAppId,
+              });
+              if (cbRes && cbRes.success) {
+                updateStatus(
+                  '✅ 验证凭据已保存，公众号文章列表仍待验证（未验证文章列表或恢复订阅）。请关闭此页面。',
+                  'status-success',
+                );
+              } else {
+                updateStatus(
+                  '❌ 凭据保存失败：' +
+                    (cbRes?.reason || '未知错误') +
+                    '。流程停止。',
+                  'status-error',
+                );
+                addDiagEntry('凭据保存失败', cbRes?.reason || '未知错误');
+              }
+            } else if (ret === 2) {
+              updateStatus(
+                '⚠️ 用户主动关闭了验证码。流程停止。',
+                'status-idle',
+              );
+              addDiagEntry('SDK 状态', '用户主动关闭验证码 (ret=2)');
+              sendDiagnostics({
+                type: 'sdk_callback',
+                ret: 2,
+                errorCode: errorCode,
+                errorMessage: sanitizedSdkMsg || 'USER_CANCELLED',
+                timestamp: new Date().toISOString(),
+              });
+              await sendCallback({
+                ret: 2,
+                errorCode,
+                message: 'USER_CANCELLED',
+                errorMessage: sanitizedSdkMsg || undefined,
+                appid: returnedAppId,
+              });
+            } else {
+              const fallbackReason = isFallback
+                ? 'FALLBACK_TICKET_REJECTED'
+                : 'SDK_REFUSAL_OR_ERROR';
+              const displayDesc = sanitizedSdkMsg
+                ? fallbackReason + ': ' + sanitizedSdkMsg
+                : fallbackReason;
+              updateStatus(
+                '❌ 验证码服务被拒绝或返回错误（errorCode=' +
+                  errorCode +
+                  '）。流程停止。',
+                'status-error',
+              );
+              addDiagEntry(
+                'SDK 拒绝或返回错误',
+                'ret=' +
+                  ret +
+                  ', errorCode=' +
+                  errorCode +
+                  ' (' +
+                  displayDesc +
+                  ')',
+              );
+              sendDiagnostics({
+                type: 'sdk_callback',
+                ret: ret,
+                errorCode: errorCode,
+                errorMessage: sanitizedSdkMsg || fallbackReason,
+                timestamp: new Date().toISOString(),
+              });
+              await sendCallback({
+                ret,
+                errorCode,
+                ticket,
+                randstr,
+                appid: returnedAppId,
+                message: fallbackReason,
+                errorMessage: sanitizedSdkMsg || undefined,
+              });
+            }
+          },
+          {},
+        );
+        captcha.show();
+      } catch (err) {
+        const cleanErrMsg = sanitizeText(err.message || '');
+        updateStatus('❌ 验证码初始化异常。流程停止。', 'status-error');
+        addDiagEntry('SDK 初始化异常', cleanErrMsg);
+        sendDiagnostics({
+          type: 'error',
+          message: cleanErrMsg,
+          timestamp: new Date().toISOString(),
+        });
+        sendCallback({
+          ret: -99,
+          errorCode: -99,
+          error: cleanErrMsg,
+          message: 'SDK_INIT_EXCEPTION',
+        });
+      }
+    };
+
+    script.onerror = function () {
+      updateStatus('❌ 加载官方 TCaptcha.js 失败。流程停止。', 'status-error');
+      addDiagEntry('SDK 脚本加载失败', canonicalSdkUrl);
+      sendDiagnostics({
+        type: 'script_error',
+        message: 'SCRIPT_LOAD_FAILED',
+        filename: canonicalSdkUrl,
+        timestamp: new Date().toISOString(),
+      });
+      sendCallback({
+        ret: -98,
+        errorCode: -98,
+        error: 'SCRIPT_LOAD_FAILED',
+        message: 'SCRIPT_LOAD_FAILED',
+      });
+    };
+
+    document.head.appendChild(script);
+  });
+}
+
 function renderHtml(nonce, base) {
   // NOTE: Initial page contains NO external scripts or remote images.
   // Canonical v1.0 TCaptcha.js is injected dynamically ONLY upon owner explicit button click.
   // UI describes only user goal, status, and button, avoiding internal implementation details.
+  const scriptContent = `(${clientScript.toString()})(${JSON.stringify(nonce)}, ${JSON.stringify(base)}, ${JSON.stringify(CANONICAL_SDK_URL)}, ${JSON.stringify(SOURCE_APP_ID)});`;
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -354,6 +820,9 @@ function renderHtml(nonce, base) {
     .status-running { background: #eff6ff; border: 1px solid #93c5fd; color: #1d4ed8; }
     .status-success { background: #f0fdf4; border: 1px solid #86efac; color: #15803d; }
     .status-error { background: #fef2f2; border: 1px solid #fca5a5; color: #b91c1c; }
+    .diag-box { margin-top: 20px; padding: 14px; background: #fff1f2; border: 1px solid #fecdd3; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #9f1239; word-break: break-all; text-align: left; }
+    .diag-title { font-weight: 600; margin-bottom: 6px; }
+    .diag-item { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #fecdd3; }
     button { background: #0284c7; color: white; border: none; border-radius: 6px; padding: 12px 24px; font-size: 15px; font-weight: 600; cursor: pointer; width: 100%; transition: background 0.2s; }
     button:hover { background: #0369a1; }
     button:disabled { background: #94a3b8; cursor: not-allowed; }
@@ -369,107 +838,13 @@ function renderHtml(nonce, base) {
     </div>
 
     <button id="btn-start" type="button">开始安全验证</button>
+
+    <div id="diag-box" class="diag-box" style="display: none;">
+      <div class="diag-title">诊断信息</div>
+    </div>
   </div>
 
-  <script nonce="${nonce}">
-    (function() {
-      const btn = document.getElementById('btn-start');
-      const statusDiv = document.getElementById('status');
-      const nonce = "${nonce}";
-      let requested = false;
-
-      function updateStatus(text, className) {
-        statusDiv.textContent = text;
-        statusDiv.className = 'status-box ' + className;
-      }
-
-      async function sendCallback(payload) {
-        try {
-          const res = await fetch('/callback', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ nonce, ...payload })
-          });
-          return await res.json();
-        } catch (e) {
-          return { success: false, error: e.message };
-        }
-      }
-
-      btn.addEventListener('click', function() {
-        if (requested) return;
-        requested = true;
-        btn.disabled = true;
-        updateStatus('正在调起安全验证...', 'status-running');
-
-        const script = document.createElement('script');
-        script.type = 'text/javascript';
-        script.src = '${CANONICAL_SDK_URL}';
-
-        script.onload = function() {
-          try {
-            if (typeof TencentCaptcha !== 'function') {
-              throw new Error('TencentCaptcha 构造器未定义');
-            }
-            const captcha = new TencentCaptcha('${SOURCE_APP_ID}', async function(res) {
-              const ret = (res && Number.isInteger(res.ret)) ? res.ret : -1;
-              const rawErr = res ? (res.errorCode ?? res.errCode) : undefined;
-              const errorCode = (rawErr !== undefined && Number.isInteger(rawErr))
-                ? rawErr
-                : (typeof rawErr === 'string' && /^-?\d+$/.test(rawErr))
-                  ? parseInt(rawErr, 10)
-                  : (res && res.ret === 0 ? 0 : -1);
-              const ticket = res && typeof res.ticket === 'string' ? res.ticket : '';
-              const randstr = res && typeof res.randstr === 'string' ? res.randstr : '';
-              const returnedAppId = res && res.appid !== undefined ? String(res.appid) : undefined;
-              const isFallback = ticket.startsWith('trerror_') || errorCode !== 0;
-
-              if (ret === 0 && !isFallback && ticket && randstr) {
-                updateStatus('正在保存验证凭据...', 'status-running');
-                const cbRes = await sendCallback({
-                  ret: 0,
-                  errorCode: 0,
-                  ticket,
-                  randstr,
-                  appid: returnedAppId,
-                });
-                if (cbRes && cbRes.success) {
-                  updateStatus('✅ 验证凭据已保存，公众号文章列表仍待验证（未验证文章列表或恢复订阅）。请关闭此页面。', 'status-success');
-                } else {
-                  updateStatus('❌ 凭据保存失败：' + (cbRes?.reason || '未知错误') + '。流程停止。', 'status-error');
-                }
-              } else if (ret === 2) {
-                updateStatus('⚠️ 用户主动关闭了验证码。流程停止。', 'status-idle');
-                await sendCallback({ ret: 2, errorCode, message: 'USER_CANCELLED', appid: returnedAppId });
-              } else {
-                const failureMsg = isFallback ? 'FALLBACK_TICKET_REJECTED' : 'SDK_REFUSAL_OR_ERROR';
-                updateStatus('❌ 验证码服务被拒绝或返回错误（errorCode=' + errorCode + '）。流程停止。', 'status-error');
-                await sendCallback({
-                  ret,
-                  errorCode,
-                  ticket,
-                  randstr,
-                  appid: returnedAppId,
-                  message: failureMsg,
-                });
-              }
-            }, {});
-            captcha.show();
-          } catch (err) {
-            updateStatus('❌ 验证码初始化异常。流程停止。', 'status-error');
-            sendCallback({ ret: -99, errorCode: -99, error: err.message, message: 'SDK_INIT_EXCEPTION' });
-          }
-        };
-
-        script.onerror = function() {
-          updateStatus('❌ 加载官方 TCaptcha.js 失败。流程停止。', 'status-error');
-          sendCallback({ ret: -98, errorCode: -98, error: 'SCRIPT_LOAD_FAILED', message: 'SCRIPT_LOAD_FAILED' });
-        };
-
-        document.head.appendChild(script);
-      });
-    })();
-  </script>
+  <script nonce="${nonce}">${scriptContent}</script>
 </body>
 </html>`;
 }
@@ -484,6 +859,12 @@ function createVerificationServer({
 } = {}) {
   const preflight = validatePreflight(customPaths, { env, rootDir });
   const paths = { ...DEFAULT_PATHS, ...customPaths };
+  if (!paths.diagnosticsFile && paths.artifactFile) {
+    paths.diagnosticsFile = path.resolve(
+      path.dirname(paths.artifactFile),
+      'manual-verification-diagnostics.json',
+    );
+  }
 
   const nonce = crypto.randomBytes(24).toString('hex');
   const createdAt = Date.now();
@@ -775,6 +1156,12 @@ function createVerificationServer({
                   ? `SDK_ERROR_CODE_${errorCode}`
                   : payload.message || payload.error || `RET_${ret}`;
 
+          const rawSdkMsg = payload.errorMessage || payload.errMsg;
+          const sanitizedSdkMsg =
+            typeof rawSdkMsg === 'string'
+              ? sanitizeDiagnosticText(rawSdkMsg, { nonce, ticket, randstr })
+              : undefined;
+
           const failureArtifact = {
             kind: 'owner-manual-verification-artifact',
             sessionName: SESSION_NAME,
@@ -783,6 +1170,7 @@ function createVerificationServer({
             success: false,
             ret,
             errorCode,
+            errorMessage: sanitizedSdkMsg,
             nonceHash: digest(nonce),
             sessionBinding: preflight.sessionBinding,
             verifiedAt: new Date().toISOString(),
@@ -823,11 +1211,138 @@ function createVerificationServer({
               reason: failureReason,
             }),
           );
-
-          setTimeout(() => {
-            if (server) server.close();
-          }, 5000).unref();
         }
+      });
+    } else if (req.method === 'POST' && req.url === '/diagnostics') {
+      const origin = req.headers.origin;
+      if (!origin || origin !== base) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, reason: 'ORIGIN_MISMATCH' }));
+        return;
+      }
+
+      const ct = req.headers['content-type'] || '';
+      if (!ct.toLowerCase().startsWith('application/json')) {
+        res.writeHead(415, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            success: false,
+            reason: 'CONTENT_TYPE_INVALID',
+          }),
+        );
+        return;
+      }
+
+      let body = '';
+      let destroyed = false;
+      req.on('data', (chunk) => {
+        body += chunk;
+        if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+          destroyed = true;
+          req.destroy();
+        }
+      });
+
+      req.on('end', () => {
+        if (destroyed) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, reason: 'BODY_OVERSIZED' }));
+          return;
+        }
+
+        let payload;
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, reason: 'INVALID_JSON' }));
+          return;
+        }
+
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({ success: false, reason: 'INVALID_JSON_OBJECT' }),
+          );
+          return;
+        }
+
+        if (payload.nonce !== nonce) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, reason: 'NONCE_INVALID' }));
+          return;
+        }
+
+        if (Date.now() > expiresAt) {
+          res.writeHead(410, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({ success: false, reason: 'SESSION_EXPIRED' }),
+          );
+          return;
+        }
+
+        const sanitizedEvent = sanitizeDiagnosticEvent(
+          payload.event || payload,
+          { nonce },
+        );
+        if (!sanitizedEvent) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              success: false,
+              reason: 'INVALID_DIAGNOSTIC_EVENT',
+            }),
+          );
+          return;
+        }
+
+        try {
+          fs.mkdirSync(path.dirname(paths.diagnosticsFile), {
+            recursive: true,
+          });
+          let diagRecord;
+          if (fs.existsSync(paths.diagnosticsFile)) {
+            try {
+              diagRecord = JSON.parse(
+                fs.readFileSync(paths.diagnosticsFile, 'utf8'),
+              );
+            } catch {
+              diagRecord = {
+                kind: 'owner-manual-verification-diagnostics',
+                sessionName: SESSION_NAME,
+                targetBookId: TARGET_BOOK_ID,
+                appId: SOURCE_APP_ID,
+                events: [],
+              };
+            }
+          } else {
+            diagRecord = {
+              kind: 'owner-manual-verification-diagnostics',
+              sessionName: SESSION_NAME,
+              targetBookId: TARGET_BOOK_ID,
+              appId: SOURCE_APP_ID,
+              events: [],
+            };
+          }
+          diagRecord.events.push(sanitizedEvent);
+          fs.writeFileSync(
+            paths.diagnosticsFile,
+            JSON.stringify(diagRecord, null, 2),
+            { mode: 0o600 },
+          );
+        } catch {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              success: false,
+              reason: 'DIAGNOSTICS_PERSISTENCE_FAILED',
+            }),
+          );
+          return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
       });
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -1015,4 +1530,8 @@ module.exports = {
   assertSafePath,
   validateCredentials,
   OFFICIAL_READER_SCOPE,
+  sanitizeDiagnosticEvent,
+  sanitizeDirectiveName,
+  sanitizeDiagnosticUrl,
+  sanitizeDiagnosticText,
 };

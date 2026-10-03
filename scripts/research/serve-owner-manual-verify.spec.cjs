@@ -7,6 +7,7 @@ const path = require('node:path');
 const http = require('node:http');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const vm = require('node:vm');
 
 const {
   SOURCE_APP_ID,
@@ -20,6 +21,7 @@ const {
   renderHtml,
   createVerificationServer,
   parseCliArgs,
+  sanitizeDiagnosticEvent,
 } = require('./serve-owner-manual-verify.cjs');
 
 function digest(content) {
@@ -826,6 +828,380 @@ test('createVerificationServer regression: strictly rejects ret0 with trerror_ f
     assert.equal(secondCall.status, 409);
     const secondJson = await secondCall.json();
     assert.equal(secondJson.reason, 'LEDGER_ALREADY_CONSUMED');
+  } finally {
+    await close();
+    fixture.cleanup();
+  }
+});
+
+test('createVerificationServer POST /diagnostics and renderHtml clientScript compile, redact, and isolate attempt-02', async () => {
+  const fixture = makeTempFixtureDir();
+  const attempt02Dir = path.join(
+    fixture.sessionDir,
+    'manual-verify-attempt-02',
+  );
+  fs.mkdirSync(attempt02Dir, { recursive: true });
+
+  const customPaths = {
+    ...fixture.paths,
+    startLedgerFile: path.join(attempt02Dir, 'manual-verify-start.json'),
+    artifactFile: path.join(attempt02Dir, 'manual-verification-artifact.json'),
+  };
+
+  const server = createVerificationServer({
+    port: 0,
+    customPaths,
+    rootDir: fixture.rootDir,
+    env: CLEAN_ENV,
+  });
+
+  const { base, close } = await server.start();
+  const nonce = server.getNonce();
+
+  try {
+    // 1. Guard check: Reject origin mismatch
+    const badOriginRes = await fetch(`${base}/diagnostics`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'http://evil.com',
+      },
+      body: JSON.stringify({ nonce, event: { type: 'test' } }),
+    });
+    assert.equal(badOriginRes.status, 403);
+    const badOriginJson = await badOriginRes.json();
+    assert.equal(badOriginJson.reason, 'ORIGIN_MISMATCH');
+
+    // 2. Guard check: Reject invalid Content-Type
+    const badCtRes = await fetch(`${base}/diagnostics`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+        Origin: base,
+      },
+      body: JSON.stringify({ nonce, event: { type: 'test' } }),
+    });
+    assert.equal(badCtRes.status, 415);
+
+    // 3. Guard check: Reject invalid nonce
+    const badNonceRes = await fetch(`${base}/diagnostics`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: base,
+      },
+      body: JSON.stringify({ nonce: 'wrong-nonce', event: { type: 'test' } }),
+    });
+    assert.equal(badNonceRes.status, 403);
+    const badNonceJson = await badNonceRes.json();
+    assert.equal(badNonceJson.reason, 'NONCE_INVALID');
+
+    // 4. Send synthetic CSP event with query parameters, hash, userinfo, and full policy containing nonce
+    const cspRes = await fetch(`${base}/diagnostics`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: base,
+      },
+      body: JSON.stringify({
+        nonce,
+        event: {
+          type: 'securitypolicyviolation',
+          blockedURI:
+            'https://user:pass@turing.captcha.qcloud.com/config?appid=2044038556&ticket=xyz#hash',
+          violatedDirective: `script-src 'nonce-${nonce}' 'self' https://turing.captcha.qcloud.com; connect-src 'self'`,
+          effectiveDirective: `script-src-elem 'nonce-${nonce}'`,
+          sourceFile: 'https://example.com/bundle.js?v=123#frag',
+          lineNumber: 42,
+          columnNumber: 10,
+          statusCode: 200,
+        },
+      }),
+    });
+    assert.equal(cspRes.status, 200);
+    const cspJson = await cspRes.json();
+    assert.equal(cspJson.success, true);
+
+    // 5. Send script error event with embedded URL query, raw nonce, and ticket in message
+    const errRes = await fetch(`${base}/diagnostics`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: base,
+      },
+      body: JSON.stringify({
+        nonce,
+        event: {
+          type: 'error',
+          message: `Uncaught Error at https://turing.captcha.qcloud.com/api?secret=999 with nonce ${nonce} and ticket trerror_1006_domain_mismatch`,
+          filename: 'https://turing.captcha.qcloud.com/sdk.js?version=1.0#line',
+          lineno: 100,
+          colno: 5,
+        },
+      }),
+    });
+    assert.equal(errRes.status, 200);
+
+    // 6. Inspect saved diagnostics file on disk
+    const expectedDiagnosticsFile = path.join(
+      attempt02Dir,
+      'manual-verification-diagnostics.json',
+    );
+    assert(fs.existsSync(expectedDiagnosticsFile));
+    const rawContent = fs.readFileSync(expectedDiagnosticsFile, 'utf8');
+
+    // Assert NO leak of secrets or query/hash params
+    assert.equal(
+      rawContent.includes(nonce),
+      false,
+      'Nonce must NEVER be saved in diagnostics',
+    );
+    assert.equal(
+      rawContent.includes('appid=2044038556'),
+      false,
+      'URL query params must be stripped',
+    );
+    assert.equal(
+      rawContent.includes('secret=999'),
+      false,
+      'Embedded URL query params must be stripped',
+    );
+    assert.equal(
+      rawContent.includes('user:pass'),
+      false,
+      'Userinfo must be stripped from URLs',
+    );
+    assert.equal(
+      rawContent.includes('trerror_1006_domain_mismatch'),
+      false,
+      'Ticket tokens must be redacted',
+    );
+    assert.equal(rawContent.includes('#hash'), false, 'Hash must be stripped');
+    assert.equal(rawContent.includes('#frag'), false, 'Frag must be stripped');
+
+    // Verify structured payload
+    const parsed = JSON.parse(rawContent);
+    assert.equal(parsed.kind, 'owner-manual-verification-diagnostics');
+    assert.equal(parsed.events.length, 2);
+
+    // Verify event 1 (CSP): directive names only, origin+pathname only
+    assert.equal(parsed.events[0].violatedDirective, 'script-src');
+    assert.equal(parsed.events[0].effectiveDirective, 'script-src-elem');
+    assert.equal(
+      parsed.events[0].blockedURI,
+      'https://turing.captcha.qcloud.com/config',
+    );
+    assert.equal(parsed.events[0].sourceFile, 'https://example.com/bundle.js');
+
+    // Verify event 2 (Error): message redacted, filename stripped
+    assert.equal(
+      parsed.events[1].filename,
+      'https://turing.captcha.qcloud.com/sdk.js',
+    );
+    assert(parsed.events[1].message.includes('[REDACTED_NONCE]'));
+    assert(parsed.events[1].message.includes('[REDACTED_TICKET]'));
+    assert(
+      parsed.events[1].message.includes(
+        'https://turing.captcha.qcloud.com/api',
+      ),
+    );
+    assert(!parsed.events[1].message.includes('secret=999'));
+
+    // 7. Verify UI HTML markup contains #diag-box and no secret leakage
+    const html = renderHtml(nonce, base);
+    assert(html.includes('id="diag-box"'));
+    const visibleBody = html.substring(
+      html.indexOf('<body>'),
+      html.indexOf('<script'),
+    );
+    assert(!visibleBody.includes(nonce));
+    assert(!visibleBody.includes('trerror_'));
+
+    // 8. Compile and run rendered <script> in real vm.Script to verify client script syntax and behavior
+    const scriptMatch = html.match(
+      /<script nonce="[^"]+">([\s\S]*?)<\/script>/,
+    );
+    assert(scriptMatch, 'Must find script tag in renderHtml');
+    const scriptSource = scriptMatch[1];
+
+    // Compile script with vm.Script - must compile without syntax errors
+    const script = new vm.Script(scriptSource);
+
+    // Execute in a simulated DOM sandbox to verify securitypolicyviolation handler dispatch
+    let sentFromClient = null;
+    let sentCallbackFromClient = null;
+    const clientListeners = {};
+    let btnClickHandler = null;
+    let createdScript = null;
+
+    const mockElements = {
+      'btn-start': {
+        addEventListener: (event, handler) => {
+          if (event === 'click') btnClickHandler = handler;
+        },
+        disabled: false,
+      },
+      status: { textContent: '', className: '' },
+      'diag-box': { style: { display: 'none' }, appendChild: () => {} },
+    };
+
+    const mockDoc = {
+      getElementById: (id) =>
+        mockElements[id] || { addEventListener: () => {}, style: {} },
+      addEventListener: (event, handler) => {
+        clientListeners[event] = handler;
+      },
+      createElement: () => {
+        createdScript = { style: {} };
+        return createdScript;
+      },
+      head: { appendChild: () => {} },
+    };
+
+    const mockWin = {
+      addEventListener: (event, handler) => {
+        clientListeners[event] = handler;
+      },
+    };
+
+    const mockClientFetch = async (url, opts) => {
+      if (url === '/diagnostics') {
+        sentFromClient = JSON.parse(opts.body);
+      } else if (url === '/callback') {
+        sentCallbackFromClient = JSON.parse(opts.body);
+      }
+      return { json: async () => ({ success: true }) };
+    };
+
+    let captchaCallback = null;
+    const mockTencentCaptcha = function (appId, cb) {
+      captchaCallback = cb;
+      return { show: () => {} };
+    };
+
+    const sandbox = {
+      document: mockDoc,
+      window: mockWin,
+      fetch: mockClientFetch,
+      TencentCaptcha: mockTencentCaptcha,
+      URL,
+      Date,
+      JSON,
+      String,
+      Number,
+      parseInt,
+    };
+
+    const context = vm.createContext(sandbox);
+    script.runInContext(context);
+
+    // Verify securitypolicyviolation listener registered before SDK load
+    assert(typeof clientListeners['securitypolicyviolation'] === 'function');
+
+    // Trigger synthetic securitypolicyviolation event
+    clientListeners['securitypolicyviolation']({
+      blockedURI:
+        'https://user:secret@turing.captcha.qcloud.com/api?param=sensitive#sec',
+      violatedDirective: `script-src 'nonce-${nonce}' 'self' https://turing.captcha.qcloud.com; report-uri /csp`,
+      effectiveDirective: `script-src-elem 'nonce-${nonce}'`,
+      sourceFile: 'https://example.com/client.js?v=2#debug',
+      lineNumber: 15,
+      columnNumber: 30,
+      statusCode: 200,
+    });
+
+    assert(sentFromClient, 'client sendDiagnostics must have been called');
+    assert.equal(sentFromClient.nonce, nonce);
+    assert.equal(sentFromClient.event.type, 'securitypolicyviolation');
+    assert.equal(
+      sentFromClient.event.blockedURI,
+      'https://turing.captcha.qcloud.com/api',
+    );
+    assert.equal(sentFromClient.event.violatedDirective, 'script-src');
+    assert.equal(sentFromClient.event.effectiveDirective, 'script-src-elem');
+    assert.equal(
+      sentFromClient.event.sourceFile,
+      'https://example.com/client.js',
+    );
+    assert.equal(sentFromClient.event.lineNumber, 15);
+    assert.equal(sentFromClient.event.columnNumber, 30);
+
+    // Verify button click initializes SDK dynamically
+    assert(typeof btnClickHandler === 'function');
+    btnClickHandler();
+    assert(createdScript, 'Must create script tag on button click');
+    assert(typeof createdScript.onload === 'function');
+    createdScript.onload();
+    assert(typeof captchaCallback === 'function', 'Must create TencentCaptcha');
+
+    // Test explicit invalid rawErr type: MUST fail-closed to errorCode = -1, never 0
+    // Also test embedding ordinary ticket and randstr in errorMessage: MUST be redacted!
+    await captchaCallback({
+      ret: 0,
+      errorCode: 'explicit_corrupt_type',
+      ticket: 'regular_ticket_abc123',
+      randstr: '@regular_rand_xyz',
+      errorMessage:
+        'Simulated failure with ticket regular_ticket_abc123 and randstr @regular_rand_xyz and nonce ' +
+        nonce,
+    });
+
+    assert(sentCallbackFromClient);
+    assert.equal(sentCallbackFromClient.ret, 0);
+    assert.equal(
+      sentCallbackFromClient.errorCode,
+      -1,
+      'Explicit invalid rawErr type must resolve to -1, never fallback to 0',
+    );
+    assert.equal(
+      sentCallbackFromClient.message,
+      'FALLBACK_TICKET_REJECTED',
+      'Nonzero errorCode must strictly reject even if ret is 0',
+    );
+    assert(
+      !sentCallbackFromClient.errorMessage.includes('regular_ticket_abc123'),
+    );
+    assert(!sentCallbackFromClient.errorMessage.includes('@regular_rand_xyz'));
+    assert(!sentCallbackFromClient.errorMessage.includes(nonce));
+    assert(sentCallbackFromClient.errorMessage.includes('[REDACTED_SECRET]'));
+    assert(sentCallbackFromClient.errorMessage.includes('[REDACTED_NONCE]'));
+
+    // 9. Verify callback failure branch preserves SDK errorMessage in failureArtifact while redacting ordinary ticket/randstr/nonce
+    const failCallbackRes = await fetch(`${base}/callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: base },
+      body: JSON.stringify({
+        nonce,
+        ret: 0,
+        errorCode: 1006,
+        ticket: 'regular_ticket_server_123',
+        randstr: '@server_rand_456',
+        errorMessage: `SDK failure at https://turing.captcha.qcloud.com/err?code=1006 with ticket regular_ticket_server_123 and randstr @server_rand_456 and nonce ${nonce}`,
+      }),
+    });
+    assert.equal(failCallbackRes.status, 200);
+
+    const savedArtifact = JSON.parse(
+      fs.readFileSync(customPaths.artifactFile, 'utf8'),
+    );
+    assert.equal(savedArtifact.errorCode, 1006);
+    assert.equal(savedArtifact.refusalReason, 'SDK_ERROR_CODE_1006');
+    assert(
+      savedArtifact.errorMessage.includes(
+        'SDK failure at https://turing.captcha.qcloud.com/err',
+      ),
+    );
+    assert(savedArtifact.errorMessage.includes('[REDACTED_NONCE]'));
+    assert(savedArtifact.errorMessage.includes('[REDACTED_TICKET]'));
+    assert(savedArtifact.errorMessage.includes('[REDACTED_RANDSTR]'));
+    assert(!savedArtifact.errorMessage.includes('regular_ticket_server_123'));
+    assert(!savedArtifact.errorMessage.includes('@server_rand_456'));
+    assert(!savedArtifact.errorMessage.includes(nonce));
+    assert(!savedArtifact.errorMessage.includes('code=1006'));
+
+    // 10. Verify attempt isolation: root attempt-1 files were never touched
+    assert(!fs.existsSync(fixture.paths.startLedgerFile));
+    assert(!fs.existsSync(fixture.paths.artifactFile));
   } finally {
     await close();
     fixture.cleanup();
