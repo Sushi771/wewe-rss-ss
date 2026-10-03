@@ -107,6 +107,43 @@ describe('backend normal Web session (all HTTP mocked)', () => {
       expect(axios.post).toHaveBeenCalledTimes(1);
     },
   );
+  it('does not treat a same-account mobile mps1 credential as an OwnerWebSession', async () => {
+    const mobile = {
+      source: 'owner-confirmed-mobile-login',
+      capturedAt: session.capturedAt,
+      ownerVid: session.ownerVid,
+      vid: session.ownerVid,
+      skey: 'mps1-offline-fixture',
+    };
+    expect(() =>
+      ownerSessionCookie(mobile as unknown as OwnerWebSession, '123'),
+    ).toThrow('OWNER_WEB_SESSION_INVALID');
+    await fs.writeFile(config().sessionFile, JSON.stringify(mobile));
+    await expect(fetchOwnerSearchPage(config())).rejects.toThrow(
+      'OWNER_WEB_SESSION_INVALID',
+    );
+    expect(axios.post).not.toHaveBeenCalled();
+  });
+
+  it('accepts an old capturedAt structurally but still stops on mock upstream auth rejection', async () => {
+    const web = {
+      ...session,
+      capturedAt: '2020-01-01T00:00:00.000Z',
+    };
+    expect(ownerSessionCookie(web, '123')).toContain('wr_skey=fixture-only');
+    await fs.writeFile(config().sessionFile, JSON.stringify(web));
+    (axios.post as jest.Mock).mockResolvedValueOnce({
+      status: 401,
+      data: '{}',
+    });
+    await expect(fetchOwnerSearchPage(config())).rejects.toThrow(
+      'auth_or_access_rejected',
+    );
+    await expect(fetchOwnerSearchPage(config())).rejects.toThrow(
+      'auth_or_access_rejected',
+    );
+    expect(axios.post).toHaveBeenCalledTimes(1);
+  });
   it('rejects wrong owner, expiry and non-authentication signatures before HTTP', () => {
     expect(() => ownerSessionCookie(session, 'other')).toThrow();
     expect(() =>

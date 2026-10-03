@@ -41,6 +41,47 @@ describe('provider image archive', () => {
     expect(result.bodyMissing).toBe(0);
   });
 
+  it('archives repeated references once and keeps the stable article identity', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(png, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
+    const input = page();
+    const article = input.articles[0];
+    article.contentHtml =
+      '<div class="rich_media_content"><p>正文</p><img src="https://mmbiz.qpic.cn/a.jpg"><img src="https://mmbiz.qpic.cn/a.jpg"></div>';
+    const result = await archiveProviderImages(input);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.articles).toHaveLength(1);
+    expect(result.articles[0]).toMatchObject({
+      id: article.id,
+      mpId: article.mpId,
+      url: article.url,
+      publishTime: article.publishTime,
+    });
+    expect(
+      result.articles[0].contentHtml?.match(/data:image\/png;base64,/g),
+    ).toHaveLength(2);
+    expect(result.articles[0].contentHtml).not.toContain('qpic.cn');
+    expect(result.bodyMissing).toBe(0);
+    expect(result.imageBlocked).toBe(0);
+  });
+
+  it('rejects a successful image response with zero bytes', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(Buffer.alloc(0), {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
+    const result = await archiveProviderImages(page());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.articles[0].contentHtml).toBeNull();
+    expect(result.bodyMissing).toBe(1);
+    expect(result.imageBlocked).toBe(1);
+  });
   it('keeps incomplete remote images out of the cached body for later retry', async () => {
     jest.spyOn(global, 'fetch').mockRejectedValue(new Error('offline'));
     const result = await archiveProviderImages(page());

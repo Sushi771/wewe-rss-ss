@@ -233,6 +233,30 @@ describe('browser-DOM evidence adapter and isolated replay', () => {
       ).toThrow('identity_conflict');
     });
 
+    it('rejects a mismatched publisher even when the stable article ID matches', () => {
+      expect(() =>
+        verifyBrowserDomArticle(
+          { ...candidate, mpId: 'MP_WXS_123' },
+          validHtml,
+          createEvidence(validHtml),
+        ),
+      ).toThrow('identity_conflict');
+    });
+
+    it.each([
+      ['zero-byte page', ''],
+      [
+        'summary-only page',
+        validHtml.replace(
+          '<div id="js_content">真实正文内容</div>',
+          '<meta name="description" content="只有摘要"><div id="js_content"></div>',
+        ),
+      ],
+    ])('rejects a %s despite matching captured evidence', (_label, html) => {
+      expect(() =>
+        verifyBrowserDomArticle(candidate, html, createEvidence(html)),
+      ).toThrow(BrowserDomVerificationError);
+    });
     it('rejects title conflict when DOM title deviates from discovered candidate title', () => {
       const alteredHtml = validHtml.replace(title, '篡改的标题');
       const evidence = createEvidence(alteredHtml);

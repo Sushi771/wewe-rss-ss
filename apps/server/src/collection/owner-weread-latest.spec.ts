@@ -54,6 +54,7 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
     );
   });
   afterEach(async () => {
+    jest.restoreAllMocks();
     await fs.rm(dir, { recursive: true, force: true });
   });
   it('fetches bounded cover/content, validates real identity/time, keeps original stop and cooldown', async () => {
@@ -88,6 +89,118 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
     expect(await fs.readFile(c().originalStopFiles[0], 'utf8')).toBe(
       'retained prior original stop',
     );
+  });
+  it('uses a same-owner cookie rotated by cover for the content request only', async () => {
+    const writes = jest.spyOn(fs, 'writeFile');
+    (axios.get as jest.Mock)
+      .mockResolvedValueOnce({
+        status: 200,
+        headers: {
+          'set-cookie': [
+            'wr_vid=123; Domain=weread.qq.com; Path=/; Secure; HttpOnly',
+            'wr_skey=rotated-fixture; Domain=weread.qq.com; Path=/; Secure; HttpOnly',
+          ],
+        },
+        data: JSON.stringify({
+          name: c().name,
+          title: '测试文章',
+          reviewId: c().mpId + '_abc',
+        }),
+      })
+      .mockResolvedValueOnce({ status: 200, data: html });
+    await fetchOwnerWereadLatest(c());
+    expect((axios.get as jest.Mock).mock.calls[0][1].headers.Cookie).toContain(
+      'wr_skey=private-token',
+    );
+    expect((axios.get as jest.Mock).mock.calls[1][1].headers.Cookie).toContain(
+      'wr_skey=rotated-fixture',
+    );
+    expect(
+      (axios.get as jest.Mock).mock.calls[1][1].headers.Cookie,
+    ).not.toContain('wr_skey=private-token');
+    expect(writes.mock.calls.some(([file]) => file === c().sessionFile)).toBe(
+      false,
+    );
+  });
+  it.each([
+    'wr_skey=api-fixture; Path=/api; Secure',
+    'wr_skey=api-fixture; Secure',
+  ])(
+    'does not leak a cover cookie outside its path (%s)',
+    async (setCookie) => {
+      (axios.get as jest.Mock)
+        .mockResolvedValueOnce({
+          status: 200,
+          headers: { 'set-cookie': [setCookie] },
+          data: JSON.stringify({
+            name: c().name,
+            title: '测试文章',
+            reviewId: c().mpId + '_abc',
+          }),
+        })
+        .mockResolvedValueOnce({ status: 200, data: html });
+      await fetchOwnerWereadLatest(c());
+      expect((axios.get as jest.Mock).mock.calls[1][1].headers.Cookie).toBe(
+        'wr_skey=private-token; wr_vid=123',
+      );
+      expect(axios.get).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    'wr_vid=999; Path=/; Secure',
+    'wr_vid=123; Path=/; Secure; Max-Age=0',
+    'wr_skey=deleted; Path=/; Secure; Max-Age=0',
+    'wr_skey=bad; Domain=qq.com; Path=/; Secure',
+  ])(
+    'stops before content on unsafe or deleted response credentials (%s)',
+    async (setCookie) => {
+      (axios.get as jest.Mock).mockResolvedValueOnce({
+        status: 200,
+        headers: { 'set-cookie': [setCookie] },
+        data: JSON.stringify({
+          name: c().name,
+          title: '测试文章',
+          reviewId: c().mpId + '_abc',
+        }),
+      });
+      await expect(fetchOwnerWereadLatest(c())).rejects.toThrow();
+      await expect(fetchOwnerWereadLatest(c())).rejects.toThrow();
+      expect(axios.get).toHaveBeenCalledTimes(1);
+      const state = JSON.parse(
+        await fs.readFile(c().wereadLatestStateFile!, 'utf8'),
+      );
+      expect(state.stop.requests).toBe(1);
+      expect(state.response).toMatchObject({
+        stage: 'cover',
+        httpStatus: 200,
+        requests: 1,
+      });
+    },
+  );
+
+  it('does not mistake structurally valid Web cookies for usable body access', async () => {
+    (axios.get as jest.Mock)
+      .mockResolvedValueOnce({
+        status: 200,
+        data: JSON.stringify({
+          name: c().name,
+          title: '测试文章',
+          reviewId: c().mpId + '_abc',
+        }),
+      })
+      .mockResolvedValueOnce({ status: 401, data: '{"errCode":-2012}' });
+    await expect(fetchOwnerWereadLatest(c())).rejects.toThrow();
+    await expect(fetchOwnerWereadLatest(c())).rejects.toThrow('HTTP 401');
+    expect(axios.get).toHaveBeenCalledTimes(2);
+    const state = JSON.parse(
+      await fs.readFile(c().wereadLatestStateFile!, 'utf8'),
+    );
+    expect(state.stop).toMatchObject({
+      stage: 'content',
+      requests: 2,
+      reason: 'HTTP 401',
+    });
   });
   it('retains refused response and stops before any repeated online request', async () => {
     (axios.get as jest.Mock).mockResolvedValueOnce({

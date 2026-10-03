@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { load } from 'cheerio';
 import { ownerSessionCookie, OwnerWebSession } from './owner-web-search';
+import { OwnerWebCookieLifecycle } from './owner-web-cookie-lifecycle';
 import { SearchConfig, OwnerUpdateStopped } from './owner-search-update';
 import { articleIdentity, articleContentHtml } from './article-page';
 import { assertProviderPage } from './subscription-provider';
@@ -54,6 +55,7 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
       await fs.readFile(c.sessionFile, 'utf8'),
     );
     const Cookie = ownerSessionCookie(session, c.ownerVid);
+    const cookies = new OwnerWebCookieLifecycle(session, c.ownerVid);
     state.lastAttemptAt = Date.now();
     state.sessionHash = createHash('sha256').update(Cookie).digest('hex');
     await write();
@@ -63,11 +65,12 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
       params: Record<string, string>,
       html = false,
     ) => {
+      const requestCookie = cookies.header(url);
       requests++;
       const r = await axios.get<string>(url, {
         params,
         headers: {
-          Cookie,
+          Cookie: requestCookie,
           Referer: 'https://weread.qq.com/',
           Origin: 'https://weread.qq.com',
           'User-Agent': 'Mozilla/5.0',
@@ -97,6 +100,7 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
       };
       await write();
       if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
+      cookies.absorb(url, r.headers?.['set-cookie']);
       return r.data;
     };
     stage = 'cover';
