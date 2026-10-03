@@ -1,5 +1,14 @@
 # 私人线上自主管理公众号订阅交付任务（2026-09-29）
 
+**2026-10-03 当前产品状态与最新验证断点：**
+
+- **模型服务与执行基线：**本人明确确认 Antigravity 实际模型服务已恢复，固定使用 `Gemini 3.8 Flash (High)`（实际模型标识 `MODEL_PLACEHOLDER_M318`），不再重复检查模型可用性或地域支持前提。
+- **官方列表调用链与实现：**依据官方墨水屏 2.1.2 APK `classes10.dex` 中 `MpService.syncChapters` -> `MpRemoteService.syncChapters(bookId, count=50)`，实现首屏只读探针 `scripts/research/probe-mp-chapters-once.cjs`，参数化条数至 5（首屏无 offset/synckey）。9 项单元测试通过，实现严格基线对比与防重放单次标记。
+- **实测结果与阻断记录：**经总控审查核准，在已核 `mps=1` 的 `owner-09-reader-scope` 会话下执行**恰好一次**线上调用：上游返回 **HTTP 499**（53 字节），响应体为业务码 `errcode: -2041`。当次不可变记录保留 `upstream_stop: HTTP_499`（未被篡改）；随后离线分类器逻辑已更新为对齐识别为 `limit_stop: ERRCODE_-2041`。
+- **生产保护：**获取 0 篇文章，0 次正文请求，0 生产 SQLite 写入；`publicationVerified: false`，`subscriptionRecovered: false`。单次防重放标记已持久化，私有证据已保存至忽略目录。
+- **历史记录纠偏：**此前 9 月历史实验记录了 `/mp/chapters` 的 `-2041`；owner-07 探针记录的是 `storyfeed/getCardArticles` 空回包（0 篇），此前将 owner-07 误写为已测 chapters 属笔误，已纠正。
+- **官方客户端处理与下一步：**官方 APK 源码确认 `-2041` 由 `ReadHttpErrorHandler` 捕获后调用 `LoginService.verifyAccount()`，在 Android 客户端唤起 `TCaptchaDialog(appId="2044038556")` 弹窗；验证成功后由 `VerifyAccountInterceptor` 在后续请求头中注入 `wr_ticket` 与 `wr_randstr`。上游 HTTP 499 回包不包含任何验证链接或指令，命令行环境无法直接凭回包解封。下一步继续探索官方客户端合法验证入口，严禁盲发请求或伪造参数。
+
 **2026-10-02 本人再次明确先解决更新、随后亲自审查覆盖：**已将一篇自主搜索命中且有独立原文、真实发布时间和正文缓存的漏文，在备份与 SQLite 副本演练后安全补入生产；现在 1 账号/12 订阅/1449 文章、目标号 196 篇，旧行全字段保留，同步成功时间未推进。订阅页的独立搜索候选显示与手动候选扫描已完成源码、45 项定向测试和前后端构建，尚待受控部署。首次新扫描的正常 Web 会话返回 `auth_expired` 并持久停止，未写文章，71 条历史候选快照原样保留；本人正常重新登录前不重发。浏览器已见另一篇可在 SQLite 副本保存身份/时间/正文，但 39 张图片尚未归档，暂不入生产。补录与候选展示都不能称为完整持续订阅恢复；具体证据及剩余条件见[精简交接](DEVELOPMENT_HANDOFF.md)。
 
 **2026-10-02 最新验证：**本人正常 SDK 授权及一条自主搜索候选的 URL→reviewId 解析均成功；随后受控正文 GET 首次用 Node fetch、第二次在确认历史成功传输差异后用 Axios 对齐实现，各仅发一次，均 HTTP 200、响应体 0 字节。第二次响应头明确 `Content-Length: 0`，严格解析失败，未取得该篇真实发布时间或正文。两个私有防重放标记与原始空响应均保留，生产 1 账号/12 订阅/1448 文章全字段不变；不重试或删除旧停止。公开源码只读审计仍未核出新的完整公众号列表路径；`/mp/list` 只见固定 APK 接口清单，尚缺实际调用、回包与目标号覆盖证据。五篇真实样本、近期完整覆盖、连续多篇、分页增量和实际订阅更新仍未通过，不能宣称闭源中转已替代。下一步见[精简交接](DEVELOPMENT_HANDOFF.md)与[单项验证](OWNER_SDK_RESOLVER_VALIDATION.md)。

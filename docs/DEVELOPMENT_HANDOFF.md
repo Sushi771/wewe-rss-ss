@@ -1,8 +1,32 @@
 # 自建订阅当前断点（2026-10-03）
 
-**当前主线与执行阻塞（北京时间 2026-10-03 17:24）：**Codex 两小时临时接管已在 03:10 到期，余下开发/研究已通过 MCP 交回 Antigravity，固定 `Gemini 3.8 Flash (High)`。本轮任务 `agy-ad179be5` 失败；实际轨迹模型为 `MODEL_PLACEHOLDER_M318`，引擎明确返回 `FAILED_PRECONDITION (400): User location is not supported for the API use.`，当前不能归因为额度耗尽。已告知本人检查该固定模型的服务可用性；不自动换模型、不延长 Codex 开发接管。此前交回的代码草稿尚未集成，不能算订阅恢复。当前窗口够用，未新建 Codex 窗口。全部资源仍只攻关自建中转的新文列表与正文。
+**当前模型与执行基线（本人明确确认）：**
 
-**本次正常扫码已完成：**本人在新的 owner-09-reader-scope 入口确认授权；会话与旧 owner-07 同账号同设备、token 已更换、capturedAt 更新，attempt/session 均记录官方阅读器范围 `snsapi_userinfo,snsapi_friend,snsapi_favorites`。授权器报告生产不变。按既有受控探针只请求一次 `/wx/scope`，HTTP 200（75 字节），真实 `mps=1/fris=1`。公众号授权缺口已解决，无需再次扫码；这还不是自动更新恢复。
+- 本人确认 Antigravity 实际模型服务已恢复，当前固定使用 `Gemini 3.8 Flash (High)`（实际模型标识 `MODEL_PLACEHOLDER_M318`），不再重复检查模型可用性或地域支持前提，按规定直接执行。
+
+**当前主线与实测断点（北京时间 2026-10-03 18:05）：**
+
+- **官方列表调用链与防重放门禁：**依据 APK 2.1.2 `classes10.dex` 中 `MpService.syncChapters` -> `MpRemoteService.syncChapters(bookId, count=50)` 源码构建首屏参数化只读探针 `scripts/research/probe-mp-chapters-once.cjs`，9 项纯离线测试与强制基线核验通过。
+- **线上单次验证执行：**经总控审查核准，在已核 `mps=1/fris=1` 的 `owner-09-reader-scope` 会话下，严格执行**恰好一次**线上验证（1 request）：`--chapters --approved-online --count 5`，请求 `https://i.weread.qq.com/mp/chapters?bookId=MP_WXS_3895431412&count=5`。
+- **实测回包与分类：**上游返回 **HTTP 499**（53 字节），响应体解析为业务码 `errcode: -2041`。当次执行不可变记录的私有摘要（`summary.json`）真实保留初始 `upstream_stop: HTTP_499`（未被修改）；随后离线更新探针分类器代码，使后续离线判定统一对齐识别为 `limit_stop: ERRCODE_-2041`。
+- **门禁处置与证据隔离：**命中 `-2041` 立即停止该端点路径，不重发失败请求、不盲猜参数。单次防重放标记 `mp-chapters-owner09-attempt.json` 已写入；脱敏摘要与原包仅存私有忽略目录 `sdk-login-owner-09-reader-scope/mp-chapters/`，不写入 Git。
+- **当前状态：**获取 0 篇文章，0 次正文请求，0 生产 SQLite 写入；`publicationVerified: false`，`subscriptionRecovered: false`。即便满足客户端 reader scope 且 `mps=1`，上游服务端对 `/mp/chapters` 仍阻断并返回 `-2041`。
+- **历史记录纠偏：**此前 9 月历史实验记录了 `/mp/chapters` 的 `-2041`；owner-07 探针记录的是 `storyfeed/getCardArticles` 空回包（0 篇），此前将 owner-07 误写为已测 chapters 属笔误，已纠正。本轮 owner-09 则是首次在该 `mps=1` 条件下对 `/mp/chapters` 发起严格单次验证。
+
+**官方墨水屏客户端对 -2041 的验证处理机制（源码审计）：**
+
+1. **拦截入口：**官方 2.1.2 APK `classes10.dex` 中，`ReadHttpErrorHandler.handle` 捕获到错误码 `-2041` 时调用 `handleNeedVerify`，继而调用 `LoginService.INSTANCE.verifyAccount()`。
+2. **弹窗与验证码 SDK：**`classes12.dex` 中 `LoginService.verifyAccount()` 调用腾讯验证码 SDK，在安卓当前 Activity 弹出 `new TCaptchaDialog(context, appId="2044038556", listener, null)` 弹窗让用户在客户端交互完成腾讯滑动验证码。
+3. **验证凭据回传：**用户在弹窗验证成功（`ret=0`）后，回调 `onVerifyCallback(JSONObject)` 提取 `ticket` 与 `randstr`，并存入 `LoginService.setCaptchaTicket` 与 `LoginService.setCaptchaRandStr`。
+4. **请求头注入：**`classes13.dex` 中 `VerifyAccountInterceptor.intercept` 在后续请求中检测到两者存在时，自动在 OkHttp 请求头中注入 `wr_ticket: <ticket>` 与 `wr_randstr: <randstr>`，然后重放被阻断的请求。
+5. **关键限制与断点：**服务端返回的 HTTP 499 响应体仅有 53 字节，**不包含任何挑战 URL、二维码、验证网页链接或验证提示指令**。在无交互式 Android/WebView 上下文的独立脚本/命令行环境下，无法直接从回包中获取或生成验证凭据。
+
+**下一步具体验证方向：**
+
+- 保持当前已验证的 `mps=1` 登录会话，严禁盲发网络重放或编造验证 URL。
+- 下一步探索官方客户端或正规入口下使本账号在该目标号上解除限制的合法操作（例如在墨水屏/Android 官方客户端触发一次合法验证并核实凭据注入机制），或评估是否可在合法交互环境下完成该人机核验。
+
+**本次正常扫码已完成（历史记录）：**本人在新的 owner-09-reader-scope 入口确认授权；会话与旧 owner-07 同账号同设备、token 已更换、capturedAt 更新，attempt/session 均记录官方阅读器范围 `snsapi_userinfo,snsapi_friend,snsapi_favorites`。授权器报告生产不变。按既有受控探针只请求一次 `/wx/scope`，HTTP 200（75 字节），真实 `mps=1/fris=1`。公众号授权缺口已解决，无需再次扫码；这还不是自动更新恢复。
 
 **列表入口纠偏：**owner-09 单次 tags HTTP 200（489 字节）、单次旧 feed HTTP 200（56 字节），仍为 0 篇。离线复核实际标签：101 为“朋友的想法”/`weread://timeline`，102 为“今日更新”/`weread://browse`，带嵌套 `weread.qq.com/misc/tl-landing` URL；103 为“朋友赞过”/`weread://kkFriendOp`，没有嵌套 URL。旧 APK 固定取 103 后缺省成 `id=0/type=0/channel=901301` 的探针不能证明当前公众号订阅列表为空。此前派发内“所有标签均无嵌套 URL”的表述撤回。未请求 102 嵌套入口，不依据标签名称猜参数，不重复旧空 feed。
 
