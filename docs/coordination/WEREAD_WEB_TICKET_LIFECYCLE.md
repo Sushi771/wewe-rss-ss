@@ -2,6 +2,50 @@
 
 ## 范围与结论
 
+### 2026-10-03 Reader 调用链复核与 1006 路径对照
+
+本次从官方公开首页链接的普通图书 Reader 页面取得真实脚本清单，再只读下载其公开静态资源。未携带 Cookie，未执行 Reader、WRPA 或验证码 SDK，未请求公众号目录、正文、验证码配置或验证接口。只有字符串表及轮转函数在禁止动态代码生成、带超时的离线 VM 中解码。原始资源保存在忽略目录 `private-data/reader-public-audit-20261003/`，不提交。
+
+`app.88f998b2.js`、`wpa-1.0.5.js` 与 `19.42e251bc.js` 的字节 SHA-256 均与下文 9 月 30 日固定证据相同，**没有客户端版本变化**。新增定位如下；偏移为 UTF-8 解码后的字符位置，不是字节偏移：
+
+| 资源与位置                         | 本次确认的合同                                                                                                                                                                                                  | 与已有失败请求的关系                                                                                                                                   |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `app.88f998b2.js` 约 4102944       | `/web/mp/reader/:infoId` 路由加载 `common.6f9af10c.js`、`utils.9951d3a1.js`、`17.237e2b08.js`、`19.42e251bc.js`。此前本地 `BVQc4ULa.js/DIOuE9ph.js` 属新版首页/搜索资源，不能用其未命中关键词排除 Reader 合同。 | 已定位实际目录模块，未打开目标 Reader 或自动触发目录请求。                                                                                             |
+| `19.42e251bc.js` 约 439000、445705 | 初始化并行请求图书信息与文章目录；书架状态与配置也是并行旁支。目录首屏仅 `bookId` 与 `offset=0`，后续 offset 为已缓存 `reviews` 的数量。没有先完成图书信息或阅读进度上报的顺序鉴权步骤，也没有 `maxIdx/count`。 | 已保存 `native-list-diagnostic.cjs` 的 `bookId/offset=0` 符合此合同，实测仍为 -2041；其他历史探针的参数差异不是再试一次的依据。                        |
+| `19.42e251bc.js` 约 457437、462570 | 首章取第一组的第一条 `subReviews`，目录按群发组展开子文章；批次显示时间取 `row.createTime`。                                                                                                                    | offset 计群发组，不能把十组称为十篇；逐篇发表时间仍须核正文的 `publish_time`。静态调用顺序不证明服务器最新覆盖。                                       |
+| `app.88f998b2.js` 约 751097–756800 | 浏览器相对 URL 的 GET 将各参数值转为字符串对象，送入 `__WRPA__.sr({query: ...})`。`-2012/-2010` 才走 Cookie 续期；`-2041` 独立进入验证码回调，成功后同时附 `x-wr-ticket/x-wr-randstr` 请求原路径。              | `FRESH_TICKET_MISSING` 是本地研究门禁，不能解释为腾讯续期必须签发验证票据。没有证据证明 WRPA 缺失或 randstr 缺失就是旧失败根因；没有有效票据时不重放。 |
+
+**官方 Web 验证与本地 1006 不是同一运行路径。**Reader GET/POST 包装器约 637800、755100 引用 [`https://captcha.gtimg.com/TCaptcha.js`](https://captcha.gtimg.com/TCaptcha.js)，使用 AppID `2044038556`，选项 `needFeedBack=true`，在官方页面处理 -2041 后弹出。当前公开入口返回 HTTP200、104564 字节，SHA-256 `5f48a646f85a18bea600db7a3a2a9663f617c72fcee3e231dcb247dd79ffd168`；其字符偏移约 94994、95381、102369 指定配置服务 `https://t.captcha.qq.com`、CDN `https://captcha.gtimg.com/static`、加载块 `tcaptcha-frame.6f66fc16.js`，配置路径为 `/cap_union_prehandle`。这里只读取入口静态文件，没有请求加载块或配置接口。
+
+本地 `serve-owner-manual-verify.cjs:44,665,951` 则在 `127.0.0.1:4357` 加载新版 [`https://turing.captcha.qcloud.com/TCaptcha.js`](https://turing.captcha.qcloud.com/TCaptcha.js)，同一 AppID，构造选项为空对象（SDK 默认 `needFeedBack=true`）。已保存该 SDK 为 136901 字节，SHA-256 `aa3897ed0ff7e57a2dbfe6fb34f5e4587bb891db0e1c44dc4aa178cfa3cf2ec5`；字符偏移约 10745、129832 指定 `turing.captcha.qcloud.com`、`turing.captcha.gtimg.com/1` 与 `tcaptcha-frame.ba387dd1.js`。本地消费者还绑定移动 owner-09 会话，按 APK 合同使用 `wr_ticket/wr_randstr`，与 Web Cookie 的 `x-wr-ticket/x-wr-randstr` 分开。原 attempt-03 的已保存结果确为 `success=false/ret=0/errorCode=1006/get_captcha_config_request_error`，诊断仅 SDK 回调，无新 CSP 事件；不补发请求补证。
+
+上述差异证明 SDK 入口、配置服务、加载块、页面 Origin 与消费者认证上下文不同，**不能把本地 1006 升级为官方页面也不能验证的事实**；同样不能证明换 SDK、Origin 或 AppID 就能解决故障。官方代码只看 `ret=0`，本地严格拒绝 `trerror_` 与非零 errorCode 的保护保持。没有配置回包，1006 具体成因仍未知，不改 SDK、不新增验证入口或尝试。
+
+本人随后已明确手机端与PC网页版均能看到多篇，并确认官方端可读取和更新；接受该事实，停止重复证明可见性。程序仍未取得成功列表，下一步只取一条官方成功请求对照，不把EInk/Web研究请求失败泛化为所有官方客户端失败，也不因此直接宣布自建最新10篇、持续订阅或票据可长期复用已完成。
+
+### 2026-10-03 本人确认官方成功后的普通客户端对照
+
+根据本人新的官方端成功反馈，仅针对客户端差异继续离线核查。新旧官方网页JS都明确给出下载入口 [`https://weread.qq.com/download?p=102&c=0`](https://weread.qq.com/download?p=102&c=0)；当前取得普通Android包 `com.tencent.weread`，versionName10.2.2、versionCode10167650、136587848字节，APK SHA-256 `db8dbcac653514a6c063d541275797f22748897b7fccc7cbd12e59e6d15ef98f`。这只是本次官方分发的可核源码样本，不等于已确认本人手机的安装版本。未安装、执行APK或提取已安装客户端凭据。
+
+以下位置是各DEX内对应方法的指令偏移，不能与上文JS字符偏移混用：
+
+| 普通APK位置                                                                                           | 真实调用与差异                                                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `classes2.dex`，`account/model/LoginService.getDeviceType(context)`，0000/000c/0010                   | 检测平板或大屏，true返回deviceType2，false返回1；`getLoginInfoObservable`在0054取得该值、0130交给登录服务。现有EInk2.1.2与固定SDK则硬传3，UA/包名也不同。                                                       |
+| `classes4.dex`，`StoryDetailViewModel$loadMpChapters$1$1.init`，0018                                  | 真实目录UI调用 `review/mp/model/MPListService.syncMpChapterList`。不是只有未使用的接口声明。                                                                                                                    |
+| `classes5.dex`，`MPListService$syncMpChapterList$$inlined$createByLoginScope$1$1.invokeSuspend`，0076 | 在登录作用域中桥接到 `ds/mp/MpService.syncChapters`，00d6读取保存目录。不是EInk残留的synckey实现。                                                                                                              |
+| `classes3.dex`，`MpService$syncChapters$2$1.invokeSuspend`，0042/0046                                 | 固定count50并调用远端。                                                                                                                                                                                         |
+| `classes3.dex`，`MpRemoteService$syncChapters$2.invokeSuspend`，0062/0078/0084/0090–009c/00b8         | 路径构造为 `/mp/chapters`，参数count/bookId/**pf=android**；从协程上下文取getSyncClient。此构造处没有offset/synckey，最终请求仍须核客户端feature注入。已测EInk首屏没有pf这一字段，但该差异仍不是-2041根因证明。 |
+| `classes4.dex`，`LoginStateInterceptor`，00be/00cc                                                    | 使用登录上下文的accessToken加认证头，与vid配对；同名字段不能证明普通手机1/平板2/EInk3/Web Cookie来源可互换。                                                                                                    |
+
+固定DEX SHA-256：classes2 `461bd1ece32c1d0e8b2c8daf3439e89c66edfd8ff6323016ce53c47f8794f7ed`，classes3 `e96e3848113acdf79621fe2549b7b04f24d7fa72ce3e66825806407200dccf8d`，classes4 `48fc8de86ac7a94fcfcc2d9cc5d7710d1cfe95a52052b07d72649f51b0fd79e1`，classes5 `8b862d5815b74fdb675ad65adc1ddf401f58e9687afefa349280b7854dbbed29`。APK及下载来源清单仅在私有忽略目录。
+
+**同步客户端构造补充，不能将接口构造参数当作最终URL。**普通 `classes3` 的 `DataSourceScopeKt.getSyncClient` 在000c–0020取 `CoroutineLoginStatus.Key` 的同步客户端，缺少登录作用域则抛 `NeedLoginException`。`ReadOkHttpHelperKt.parseSyncKtorClient` 在001c/0026实际构造HttpClient，构造lambda在002c调用 `installReadSyncFeature`，该函数在0036–0044安装 `SyncKeyRequestFeature`；插件GET管线在00dc调用 `SyncKeyService.syncKey(URLBuilder)`。该方法先移除既有synckey，007c–00a8按路径参数读取 `CgiRespDomainService.getSyncKey` 的本地值，010c–0118追加synckey（包括0）。EInk `classes10` 同功能在0080–00b0读取、011a–012a追加，插件调用偏移0112；不是普通客户端独有变化，也没有针对 `/mp/chapters` 的排除。
+
+实际使用哪一实例仍有边界：`LoginStatusScope`构造在0050先取 `status.getSyncClient`，为空时005c退到 `status.getClient`，再0068退到globalClient。因此已证明官方同步客户端构造会安装上述管线，但未动态确认本人成功请求的实例选择或synckey值，不能断言每次目录请求都一定追加。既有SDK探针未复刻这条管线是具体合同缺口，不能把它直接认定为-2041根因、任意填0或自动重试；Web目录的bookId/offset合同不受此移动管线结论影响。
+
+本人授权两账号作为独立正常访问样本，不能在一个拒绝后自动换另一个规避限制。优先对照已成功PC网页；本执行环境没有Browser Use、node_repl或原生桌面控制工具，已核正在运行的Edge/Chrome没有现成调试端口/pipe，不修改设置或反复枚举。最小人工材料是已正常页面的一条成功 `/web/mp/articles` URL及前1–2条reviews脱敏响应，不含Cookie/Authorization/token/ticket/randstr，不用cURL/HAR；若尚无Network记录，本人可只刷新正常页一次，遇验证即停。仅有源码pf差异不允许换UA、改登录设备类型、重扫或重放旧停止。若PC证据仍待取得，可继续离线沿普通APK的getSyncClient、LoginStatusHttpClientBuilder与作用域安装链核正常认证，不能把工程成功预先写成真实目录验收。
+
 本轮只读取腾讯公开网页和固定版本前端资源，以及近期公开实现；没有读取本机账号凭据、发送目标号列表请求、计算或重放签名。`/web/mp/articles` 是当前腾讯旧 Web 客户端**真实使用**的路径，但 `x-wrpa-0` 和 `x-wr-ticket` 是两个不同来源的请求头。普通登录所得 Cookie 与它们不能互换。现有一手源码没有证明可把一次浏览器请求中的票据保存下来，供无人值守的分页和定时更新重复使用。
 
 可核查的腾讯资源如下。2026-09-30 匿名读取的 `https://weread.qq.com/web/shelf` HTML 直接加载 [`wpa-1.0.5.js`](https://cdn.weread.qq.com/web/wpa-1.0.5.js) 和 [`app.88f998b2.js`](https://cdn.weread.qq.com/web/wrwebnjlogic/js/app.88f998b2.js)；MP 阅读器路由会延迟加载 [`19.42e251bc.js`](https://cdn.weread.qq.com/web/wrwebnjlogic/js/19.42e251bc.js)。这三个文件的 SHA-256 分别为 `ffc8cc275dd79bc9a047052015050970842a883dee1f1281e9987a72b89e82d2`、`996a561d9fb7f79bf4289a91e2b6f77dc617eb2bb9352c0320b33c87b9f3bf51`、`85bea05005a543894c346a39cae5a234b9d77de322316b3a80e87de809af3a3e`；以下偏移指下载文件中的字符位置，压缩文件基本没有可用行号。

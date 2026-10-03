@@ -1,5 +1,17 @@
 # 自建订阅当前断点（2026-10-03）
 
+## 最新：本人确认官方端可更新，下一步取成功请求对照
+
+- **当前执行者与状态**：Codex 唯一写入者，三个指定 `gpt-6.1-sol/high` 子任务已完成只读 Cookie/列表/正文图片核对。起点 `e130ca73eb47eca42809bb6affabe0c209c11ea4`，冻结后台 PID50084 仍存活，本轮未部署或重启。SQLite 只读核对为 2 账号、12 订阅、1450 文章、quick_check=ok；没有生产写入或会话/停止记录改动。
+- **目录合同已定位**：公开普通图书 Reader 加载旧 `wrwebnjlogic`，不是已存的新版首页两包。`19.42e251bc.js` 首屏仅 `bookId/offset=0`，图书信息与目录并行，无漏掉的顺序鉴权前置；offset 按 `reviews` 群发组计，展示再展开 `subReviews`。已测 `native-list-diagnostic.cjs` 参数符合官方形状；没有新依据支持重发。app/wpa/19 的 SHA 与 9 月固定证据完全相同。
+- **票据与 1006 对照**：官方 -2041 后由验证码回调生成配对 `x-wr-ticket/x-wr-randstr`；WRPA 来自每次请求的 `__WRPA__.sr(query)`，续期只处理 -2012/-2010，不签发上述验证票据。官方 Web 使用旧 `captcha.gtimg.com/TCaptcha.js`（配置 `t.captcha.qq.com`、frame `6f66fc16`）；本地 attempt-03 用新版 `turing.captcha.qcloud.com/TCaptcha.js`（frame `ba387dd1`）、环回 Origin 与移动消费者。AppID 相同但路径不同，本地1006不能证明官方同样失败，也不能证明换入口就能恢复。未执行SDK、请求验证码配置、调整入口或新增尝试。
+- **正文图片复核**：当前源码离线解析已存 3469382 字节响应，身份 `WX_3895431412_2247493556_1`、时间 `1790728321`；内嵌PNG与保存的241288字节文件逐字节相同，1080×749。现有原刷新路径仍固定 cover 单篇、partial/complete=false；没有正文图片代码修复依据，不能把单篇改称最新10篇。
+- **本人最新事实与授权**：本人于 17:46 UTC 明确手机端和 PC 网页均可看到目标号多篇目录，并授权两账号交叉查看；随后再次确认官方端可读取和更新。接受此事实，不再检测窗口证明可用，不将 EInk/程序失败泛化为账号完全无目录权限。两账号是独立诊断样本，不轮换规避限制；已消耗的 cover/body/image 脚本仍不重跑。
+- **普通客户端新源码**：从官方网页明示入口只读下载 `com.tencent.weread` 10.2.2/code10167650（APK136587848字节，SHA `db8dbcac653514a6c063d541275797f22748897b7fccc7cbd12e59e6d15ef98f`），未安装/执行。它实际目录首屏为 `/mp/chapters` 的 bookId/count/pf=android，手机登录 deviceType=1、平板/大屏=2；现有 `com.tencent.weread.eink` 2.1.2与SDK固定3。目录UI→MPListService→ds/MpService→MpRemoteService已追到实际调用，token头仍vid/accessToken，但同字段不证明不同客户端授权可互换。pf差异不是已证实拒绝根因，不改旧token参数重试。
+- **执行环境实际缺口**：本窗口的可用工具目录没有 Browser Use、node_repl 或原生桌面截图/鼠标键盘/窗口读取工具。两次只读进程检查仅核现有Edge/Chrome均无调试端口或pipe，已停止窗口探测，未重启浏览器或更改设置。电脑使用技能要求 node_repl，未用自建PowerShell UI助手绕过。截图 Library read 返回文件元数据及提取描述，下载助手在Windows `os.setxattr` 不存在处失败，尚未看到截图像素；这不是自动审批拒绝，不能据描述推断页面账号或成功请求。
+- **同步认证有限核查**：官方普通与EInk的同步client构造均安装GET插件，按路径读取本地同步状态并追加synckey（含0）；目录URLBuilder没写synckey不代表最终URL没有。登录scope仍可能回退普通client/globalClient，本人成功请求的实际实例和值未核。已测SDK没有复刻此管线，是明确合同缺口而非已证实-2041根因，不任意填0或自动重试；Web的bookId/offset合同另行成立。
+- **具体下一步与交接**：已一次提出最小人工取证：在本人已正常的PC页Network筛选mp/articles，给成功URL及前1–2条reviews脱敏响应，排除Cookie/Authorization/token/ticket/randstr，不要cURL/HAR；没有记录时本人可在正常页面刷新一次，遇验证即停。优先以成功请求与既有失败比较账号归属、请求形状、响应及认证前置，不再要求本人证明目录可用。源码偏移和固定哈希见[调用链复核](coordination/WEREAD_WEB_TICKET_LIFECYCLE.md#2026-10-03-reader-调用链复核与-1006-路径对照)及[普通APK对照](coordination/WEREAD_WEB_TICKET_LIFECYCLE.md#2026-10-03-本人确认官方成功后的普通客户端对照)。生产列表、最新10篇及持续刷新尚未取得，总目标保持进行中；现阶段交回父会话接收成功请求材料。
+
 ## 最新：停止记录按认证会话归属，单篇成功与目录受阻分开记录
 
 - **当前分工与边界**：Codex 直接开发；三个指定子任务核 Cookie、只读列表合同和正文图片。没有新增腾讯请求、扫码、验证码尝试、服务端口或生产绑定修改；生产 SQLite 只读核对为 12 个订阅、1450 篇文章，本轮未写库，后台 PID51460 未重启。
