@@ -35,7 +35,7 @@
 - **测试与真实预检通过：**
   - 12 项纯离线单元测试（包含 null/array payload 阻断、非法 errorCode/ret 类型阻断、`trerror_1006` 灾备票据拒绝回归、解析 -2041 回包校验、CSP/Origin/Host 阻断、一次性账本防重放）全部通过。
   - 真实零网络预检 `--preflight` 验证通过：`status: preflight_ok`，正确绑定 attemptMarkerSha256、sessionBinding、chaptersRawSha256 与 `chaptersErrCode: -2041`，0 上游网络请求，0 生产写入。
-  - 未启动真实服务，未发起任何后续微信读书接口请求。
+  - 本地人工验证服务已在 127.0.0.1:4355 启动（PID 18324），19:44 到期，GET 200 idle / hasArtifact=false，已交本人操作，没有验证后列表请求。
 
 **后置受保护单次重放消费适配器实现与离线/预检验证（北京时间 2026-10-03 19:05）：**
 
@@ -58,7 +58,7 @@
 **当前验证状态与入口就绪：**
 
 - 保持当前已验证的 `mps=1` 登录会话，严禁盲发网络重放或编造验证 URL。
-- 人工验证服务与后置消费适配器均已就绪且通过离线预检与定向测试，等待入口代码审查与启动。
+- 本地人工验证服务已在 127.0.0.1:4355 启动（PID 18324，有效期至 19:44，GET 200 idle / hasArtifact=false），已交本人操作，后置消费适配器就绪，没有验证后列表请求。
 - 产物成功保存后，可在其本地保守 5 分钟门禁窗口内使用 `probe-mp-chapters-verified-once.cjs` 执行受控请求。
 
 **本次正常扫码已完成（历史记录）：**本人在新的 owner-09-reader-scope 入口确认授权；会话与旧 owner-07 同账号同设备、token 已更换、capturedAt 更新，attempt/session 均记录官方阅读器范围 `snsapi_userinfo,snsapi_friend,snsapi_favorites`。授权器报告生产不变。按既有受控探针只请求一次 `/wx/scope`，HTTP 200（75 字节），真实 `mps=1/fris=1`。公众号授权缺口已解决，无需再次扫码；这还不是自动更新恢复。
