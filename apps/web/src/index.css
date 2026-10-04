@@ -202,11 +202,12 @@ select {
   padding-bottom: 8px;
 }
 
-/* Account metadata grows naturally; article-list row dimensions stay separate. */
+/* A shared action-column width keeps headers and rows with fewer actions aligned.
+   Account metadata grows naturally; article-list row dimensions stay separate. */
 .account-header,
 .compact-row.account-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1.2fr) 80px minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(140px, 1.2fr) 80px minmax(180px, 1fr) 240px;
   gap: 16px;
 }
 
