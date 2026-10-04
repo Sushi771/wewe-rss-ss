@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { ArticleDownloadController } from './article-download.controller';
 import * as download from './article-download';
 import * as picker from './article-folder-picker';
+import { LocalArticleStore } from './article-local-save';
 
 const url = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
 describe('local article HTTP save and native directory selection, no upstream or database', () => {
@@ -145,6 +146,64 @@ describe('local article HTTP save and native directory selection, no upstream or
     await post('', { url, pickToken: selection.body.pickToken }).expect(200);
     await post('', { url, pickToken: selection.body.pickToken }).expect(409);
     expect(download.buildArticleDownload).toHaveBeenCalledTimes(1);
+  });
+  it('serializes a pending preference write with picking, downloading and other preference writes', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const block = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const original = LocalArticleStore.prototype.setAskEveryTime;
+    jest
+      .spyOn(LocalArticleStore.prototype, 'setAskEveryTime')
+      .mockImplementationOnce(async function (this: LocalArticleStore, value) {
+        entered();
+        await block;
+        return original.call(this, value);
+      });
+    const pending = post('/settings', { askEveryTime: true }).then(
+      (response) => response,
+    );
+    try {
+      await started;
+      await post('/directory').expect(409);
+      await post('', { url }).expect(409);
+      await post('/settings', { askEveryTime: false }).expect(409);
+      expect(picker.pickArticleDirectory).not.toHaveBeenCalled();
+      expect(download.buildArticleDownload).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await pending;
+    }
+    expect((await pending).status).toBe(200);
+    expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual({
+      directory: destination,
+      askEveryTime: true,
+    });
+    // A completed settings write releases the lock and its new policy takes effect.
+    await post('', { url }).expect(409);
+    const selection = await post('/directory').expect(200);
+    await post('', { url, pickToken: selection.body.pickToken }).expect(200);
+  });
+  it('releases the preference lock after a disk failure so a later selection can recover', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    jest
+      .spyOn(LocalArticleStore.prototype, 'setAskEveryTime')
+      .mockRejectedValueOnce(
+        new download.ArticleDownloadError('settings write failed', 422, {
+          code: 'SAVE_SETTINGS_UNAVAILABLE',
+        }),
+      );
+    await post('/settings', { askEveryTime: true }).expect(422);
+    await post('/directory').expect(200);
+    await post('/settings', { askEveryTime: false }).expect(200);
+    expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual({
+      directory: destination,
+      askEveryTime: false,
+    });
   });
   it('returns safe failure provenance without URL, credential or raw exception leaks', async () => {
     const warn = jest

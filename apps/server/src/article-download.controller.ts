@@ -115,6 +115,9 @@ export class ArticleDownloadController {
     if (!this.authorized(req, res, true)) return;
     if (this.running || this.pickerRunning)
       return res.status(409).json({ message: '请等待当前操作完成。' });
+    // Preference persistence shares the same lock as picking and saving. Otherwise
+    // a second tab can pick a directory or start a save before this policy commits.
+    this.running = true;
     try {
       if (
         Object.keys(body || {}).some((key) => key !== 'askEveryTime') ||
@@ -126,6 +129,8 @@ export class ArticleDownloadController {
       );
     } catch (error) {
       return this.failure(error, res);
+    } finally {
+      this.running = false;
     }
   }
 
