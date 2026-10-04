@@ -7,6 +7,9 @@ import { fetchOwnerWereadLatest } from './owner-weread-latest';
 import { ownerSessionCookie } from './owner-web-search';
 import { ownerLatestAuthHash } from './owner-weread-session-state';
 jest.mock('axios');
+jest.mock('node:timers/promises', () => ({
+  setTimeout: jest.fn().mockResolvedValue(undefined),
+}));
 
 describe('normal owner Tencent latest body (no HTTP)', () => {
   let dir: string;
@@ -59,6 +62,175 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
   afterEach(async () => {
     jest.restoreAllMocks();
     await fs.rm(dir, { recursive: true, force: true });
+  });
+  const directoryGroup = (n: number) => {
+    const originalId = String(n).padStart(22, 'a');
+    const reviewId = `${c().mpId}_${originalId}`;
+    return {
+      subReviews: [
+        {
+          reviewId,
+          review: {
+            reviewId,
+            type: 16,
+            bookId: '',
+            belongBookId: c().mpId,
+            mpInfo: {
+              originalId,
+              title: `directory-${n}`,
+              mp_name: c().name,
+              time: 1700000100 - n,
+            },
+          },
+        },
+      ],
+    };
+  };
+  const directoryHtml = (n: number) =>
+    `<meta property="og:url" content="https://mp.weixin.qq.com/s/${String(n).padStart(22, 'a')}"><h1 id="activity-name">directory-${n}</h1><span id="js_name">${c().name}</span><div id="js_content">body-${n}</div><script>var biz="${c().biz}";var mid="${100 + n}";var idx="1";var sn="abcd";var ct=${1700000100 - n};</script>`;
+  it('directory mode fetches the selected ten through the original body/image pipeline without requesting cover', async () => {
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const imageFetch = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(png, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
+    (axios.get as jest.Mock).mockImplementation(async (url, options) => {
+      if (url.endsWith('/articles'))
+        return {
+          status: 200,
+          data: JSON.stringify({
+            reviews: Array.from({ length: 20 }, (_, i) =>
+              directoryGroup(i + 1),
+            ),
+            clearAll: 1,
+            synckey: 1790000000,
+          }),
+        };
+      const n = Number(
+        options.params.reviewId.split('_').at(-1).replace(/^a+/, ''),
+      );
+      return {
+        status: 200,
+        data:
+          n === 1
+            ? directoryHtml(n).replace(
+                'body-1</div>',
+                'body-1<img data-src="https://mmbiz.qpic.cn/fixture.png"></div>',
+              )
+            : directoryHtml(n),
+      };
+    });
+    const config = { ...c(), wereadDirectoryEnabled: true };
+    const page = await fetchOwnerWereadLatest(config);
+    expect(page.articles).toHaveLength(10);
+    expect(page.articles[0].id).toBe('WX_1234567890_101_1');
+    expect(page.articles[9].id).toBe('WX_1234567890_110_1');
+    expect(page.upstreamCount).toBe(20);
+    expect(imageFetch).toHaveBeenCalledTimes(1);
+    expect(page.articles[0].contentHtml).toContain(
+      `data:image/png;base64,${png.toString('base64')}`,
+    );
+    expect(axios.get).toHaveBeenCalledTimes(11);
+    expect((axios.get as jest.Mock).mock.calls[0][1].params).toEqual({
+      bookId: c().mpId,
+      offset: '0',
+    });
+    expect(
+      (axios.get as jest.Mock).mock.calls.every(
+        ([url]) => !url.includes('/cover'),
+      ),
+    ).toBe(true);
+    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow();
+    expect(axios.get).toHaveBeenCalledTimes(11);
+  });
+  it('directory pagination counts groups, never articles or response synckey', async () => {
+    const first = directoryGroup(1);
+    first.subReviews.push(
+      directoryGroup(2).subReviews[0],
+      directoryGroup(3).subReviews[0],
+    );
+    (axios.get as jest.Mock).mockImplementation(async (url, options) => {
+      if (url.endsWith('/articles'))
+        return {
+          status: 200,
+          data: JSON.stringify({
+            reviews:
+              options.params.offset === '0'
+                ? [first]
+                : Array.from({ length: 7 }, (_, i) => directoryGroup(i + 4)),
+            clearAll: 1,
+            synckey: 987654321,
+          }),
+        };
+      const n = Number(
+        options.params.reviewId.split('_').at(-1).replace(/^a+/, ''),
+      );
+      return { status: 200, data: directoryHtml(n) };
+    });
+    const page = await fetchOwnerWereadLatest({
+      ...c(),
+      wereadDirectoryEnabled: true,
+    });
+    expect(page.pages).toBe(2);
+    expect(page.articles).toHaveLength(10);
+    expect((axios.get as jest.Mock).mock.calls[1][1].params).toEqual({
+      bookId: c().mpId,
+      offset: '1',
+    });
+  });
+  it('stops a directory verification response without reading bodies or retrying', async () => {
+    (axios.get as jest.Mock).mockResolvedValue({
+      status: 200,
+      data: JSON.stringify({ errCode: -2041 }),
+    });
+    const config = { ...c(), wereadDirectoryEnabled: true };
+    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow();
+    const state = JSON.parse(
+      await fs.readFile(c().wereadLatestStateFile, 'utf8'),
+    );
+    expect(state.stop).toMatchObject({ stage: 'directory-0', requests: 1 });
+    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow();
+    expect(axios.get).toHaveBeenCalledTimes(1);
+  });
+  it('a conflicting tenth body rejects the batch and never reaches image fetching', async () => {
+    const fetch = jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValue(new Error('NO_IMAGE_REQUEST_ALLOWED'));
+    (axios.get as jest.Mock).mockImplementation(async (url, options) => {
+      if (url.endsWith('/articles'))
+        return {
+          status: 200,
+          data: JSON.stringify({
+            reviews: Array.from({ length: 10 }, (_, i) =>
+              directoryGroup(i + 1),
+            ),
+            clearAll: 1,
+          }),
+        };
+      const n = Number(
+        options.params.reviewId.split('_').at(-1).replace(/^a+/, ''),
+      );
+      return {
+        status: 200,
+        data:
+          n === 10
+            ? directoryHtml(n).replace('ct=1700000090', 'ct=1700000000')
+            : directoryHtml(n),
+      };
+    });
+    await expect(
+      fetchOwnerWereadLatest({ ...c(), wereadDirectoryEnabled: true }),
+    ).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(await fs.readFile(c().wereadLatestStateFile, 'utf8')).stop
+        .stage,
+    ).toBe('content-10');
   });
   it('fetches bounded cover/content, validates real identity/time, keeps original stop and cooldown', async () => {
     (axios.get as jest.Mock)

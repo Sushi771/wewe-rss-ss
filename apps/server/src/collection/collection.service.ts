@@ -26,6 +26,7 @@ import {
 import { prepareSearchReplay } from './search-replay';
 import { prepareBrowserDomReplay } from './browser-dom-adapter';
 import { fetchOwnerWereadLatest } from './owner-weread-latest';
+import { prepareWereadDirectoryReplay } from './weread-directory';
 import {
   assertSavedArticleIdentity,
   bodyRetryTarget,
@@ -49,6 +50,71 @@ export class CollectionService {
   constructor(private readonly prisma: PrismaService) {}
 
   private readonly publicCollections = new Set<string>();
+
+  /** Saved official directory/body samples, isolated SQLite rehearsal only.
+   * No live source binding, deletions, or advancement of refresh success time.
+   */
+  async replayWereadDirectory(
+    mpId: string,
+    replay: ReturnType<typeof prepareWereadDirectoryReplay>,
+  ) {
+    const raw = process.env.DATABASE_URL || '';
+    if (!raw.startsWith('file:') || !path.isAbsolute(raw.slice(5)))
+      throw new Error('WEREAD_REPLAY_REQUIRES_ISOLATED_SQLITE');
+    const database = await fs.realpath(raw.slice(5));
+    const marker = JSON.parse(
+      await fs.readFile(database + '.weread-directory-replay.json', 'utf8'),
+    );
+    if (
+      marker.mode !== 'saved-weread-directory' ||
+      (await fs.realpath(marker.sourceDatabase)).toLowerCase() ===
+        database.toLowerCase()
+    )
+      throw new Error('WEREAD_REPLAY_REQUIRES_ISOLATED_SQLITE');
+    const page = assertProviderPage(replay.page, mpId);
+    if (
+      replay.discovery !== 'saved-weread-directory' ||
+      replay.networkRequests !== 0 ||
+      !page.articles.length ||
+      page.bodyMissing !== 0 ||
+      page.imageBlocked !== 0 ||
+      replay.verified.length !== page.articles.length ||
+      page.articles.some(
+        (article, index) =>
+          JSON.stringify(article) !==
+          JSON.stringify(replay.verified[index].article),
+      )
+    )
+      throw new Error('WEREAD_REPLAY_PROVENANCE_INVALID');
+    if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
+    this.publicCollections.add(mpId);
+    try {
+      // Offline cache binding already supplied inline bytes; reuse the original
+      // image archive/limits before persistence, without permitting cache misses.
+      if (
+        page.articles.some((article) =>
+          load(article.contentHtml || '')('img')
+            .toArray()
+            .some((image) => !(image.attribs.src || '').startsWith('data:')),
+        )
+      )
+        throw new Error('WEREAD_REPLAY_IMAGE_CACHE_MISSING');
+      await archiveProviderImages(page, { stopOnFailure: true });
+      await createVerifiedSqliteBackup();
+      const saved = await this.saveVerifiedSearchPage(mpId, page, false);
+      return {
+        mode: 'saved-weread-directory' as const,
+        ...saved,
+        articles: page.articles.length,
+        unverifiedCandidates: replay.unverified.length,
+        latestWindowReady: replay.latestWindowReady,
+        complete: false as const,
+        productionSourceEnabled: false as const,
+      };
+    } finally {
+      this.publicCollections.delete(mpId);
+    }
+  }
 
   /** Offline rehearsal only. No production source binding or feed success time.
    * Live updates use a separate network adapter and the same protected persistence.
@@ -233,6 +299,13 @@ export class CollectionService {
               mpId,
               OR: [
                 { id: item.id },
+                ...(item.shortUrl
+                  ? [
+                      { id: item.shortUrl.split('/').at(-1)! },
+                      { sourceUrl: item.shortUrl },
+                      { verifiedSourceUrl: item.shortUrl },
+                    ]
+                  : []),
                 { sourceUrl: base.toString() },
                 { sourceUrl: { startsWith: base.toString() + '&sn=' } },
                 { verifiedSourceUrl: base.toString() },
@@ -246,7 +319,10 @@ export class CollectionService {
             throw new Error('SEARCH_REPLAY_AMBIGUOUS_OLD_ID');
           const existing = matches[0];
           if (existing) {
-            assertSavedArticleIdentity(existing, identity);
+            assertSavedArticleIdentity(existing, {
+              ...identity,
+              ...(item.shortUrl ? { shortUrl: item.shortUrl } : {}),
+            });
             // Search gets no album-specific 60-second relaxation. Every old
             // title, trusted time and known signature must remain consistent.
             if (
@@ -384,7 +460,10 @@ export class CollectionService {
         coverage: 'recent-window' as const,
         articles: page.articles.length,
         ...saved,
-        message: `腾讯读书当前提供的1篇：取得正文，新增 ${saved.created}、补全 ${saved.updated}。文章列表接口受限；此来源只返回读书提供的一篇，不代表微信最新文章齐全。`,
+        message:
+          config.wereadDirectoryEnabled === true
+            ? `最近10篇正文及图片已保存：新增 ${saved.created}、补全 ${saved.updated}；旧文章与正文保留。`
+            : `腾讯读书当前提供的1篇：取得正文，新增 ${saved.created}、补全 ${saved.updated}。文章列表接口受限；此来源只返回读书提供的一篇，不代表微信最新文章齐全。`,
       };
     } catch (e) {
       if (!(e instanceof OwnerUpdateStopped)) throw e;

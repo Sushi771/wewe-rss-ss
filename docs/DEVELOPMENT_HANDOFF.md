@@ -1,5 +1,26 @@
 # 自建订阅当前断点（2026-10-03）
 
+## 2026-10-04：原刷新函数目录模式已接线，保存下载复用原实现
+
+- 用户要求先读清源码后尽快修订阅；实际链路为前端 `feed.refreshArticles` → `TrpcService.refreshMpArticlesAndUpdateFeed/refreshArticles` → `CollectionService.collectOwnerWereadLatest` → `fetchOwnerWereadLatest`。原阻点确实是最后一步的cover单篇，`WereadService.getMpArticles`是停用旧链，不能改它冒充原按钮修复。
+- 在原 `fetchOwnerWereadLatest` 增加受私有绑定 `wereadDirectoryEnabled=true` 控制的目录模式：仅使用已有官方成功形状 `/web/mp/articles?bookId&offset=0`，不足10篇才取第二页，offset按群发组数，不用synckey。先选最近10篇，再以实际reviewId顺序获取 `/web/mp/content`，严格匹配号、标题、ct、canonical与WX稳定身份；一处冲突整批停止。复用原操作内Cookie生命周期、不可变私有响应、认证归属/停止/冷却，未生成WRPA、重放认证头或扩大验证码工具。
+- 运行时图片归档仍只调用原 `archiveProviderImages`；新增目录模块已将正文核验与离线缓存证明分开，并移除自己重复的图片数量/总字节预算实现，副本也复用原归档检查。持久化仍用 `saveVerifiedSearchPage`。`getArticleMarkdown/downloadImage/buildOfflineFeedDirectory/OfflineExportController`、RSS与前端阅读/下载入口未修改，没有新建保存下载管线。
+- 离线回归在原collector及SQLite中演练：第一轮10篇新增10，第二次手动刷新新增0/更新0，后续出现1篇新文只新增1，旧文章逐行不变；另验证组数分页、-2041首停、末篇ct冲突拒绝整批，以及原图片归档实际调用并生成内嵌图片。合成回归不是线上验收。原真实保存样本仍为40目录/最近10选择/1篇正文图片，其余9篇未验收，副本无重复/生产无写入。
+- 最终本地检查：7 suites/123 tests通过，server构建通过，全部变更TS的ESLint及11个变更文件的Prettier检查通过。真实样本离线副本报告再次确认accounts=2、feeds=12、articles=1450，旧行及生产库不变、网络请求0；不把这些检查记作线上恢复。
+- 当前生产配置没有打开目录模式，也没有更改账号凭据、绑定或历史停止；已明确用户选择当前官方Edge账号，出处为本窗口账号选择问题的明确回复“使用当前官方网页的账号”，不再重复询问。开关必须在该账号正常目录传输已核实且符合既有停止/预算边界后启用；不能用开关当授权或根据Mock解除停机。
+- 4000再次只读查无监听，未启动/重启/部署；数据库仍2账号/12订阅/1450文章、quick_check=ok，不因服务未监听推断数据丢失。源码`.env`缺少定时禁用项且HOST=0.0.0.0，私有`.env.local`读取被权限拒绝，当前运行环境设置未核实，不直接按源码`.env`启动。定时关闭要求维持，最终由单一集成者按已核私有运行配置部署。
+- 实时阻点仍需受支持正常来源。本窗口无浏览器/CDP/node_repl工具，不重现受阻电脑工具或自建绕过；用户完成已弹出的官方验证后，插件仅确认该次首篇是否真正取得HTTP200正文和图片，不另开10篇采集、不交凭据。不能把历史单篇映射当本次成功或把代码接线当订阅恢复。
+
+## 2026-10-04：手动最近10篇目录适配已编码，真实副本演练通过
+
+- **当前授权**：用户要求按需手动点原刷新按钮，自动刷新保持关闭；已明确选择当前 Edge 官方网页能正常读文的账号，覆盖下文旧的“等待账号选择”。尚未读取或保存新账号凭据，不混用旧绑定。独立单篇收藏工具在另一隔离 worktree，由后续单一集成者合并；本任务不改前端导航、下载页面或工具模块。
+- **源码**：新增 `weread-directory.ts` 与测试，解析既有真实两页 `reviews/subReviews/mpInfo`；公众号归属使用 `belongBookId`，保留实际 reviewId/originalId/time，不把22字符短身份直接当WX入库身份。展开群发组再去重，首选最近10篇，缺正文独立保留，clearAll不删本地、synckey不作为Web分页参数。正文实际响应身份、canonical（短链或完整参数链接）、biz/mid/idx/sn、号名、标题、ct严格核对后才生成ProviderPage；只使用已有且通过格式/哈希的图片缓存，不发HTTP。
+- **原持久化复用**：新增 `CollectionService.replayWereadDirectory`，仅带标记的SQLite副本可运行，执行真实一致性备份后复用原事务；补充独立正文已证短链关联，旧ID/正文/封面/指标保持，不推进订阅成功时间。原线上来源、刷新路由、会话与停止记录未改，不把离线适配部署成已恢复的来源。
+- **真实演练**：`scripts/research/replay-weread-directory-copy.cjs` 只消费现存私有样本。两页各20组，40不同篇，选10篇；独立保存的cover reviewId与目录首篇一致，正文3469382字节映射 `WX_3895431412_2247493556_1`、ct1790728321；241288字节PNG与历史保存清单哈希及归档页面内嵌字节完全一致。该正文的og:url实际为完整参数链接，不因缺直接短href拒绝；原正文图片为data-src，使用既有图片缓存，没有重跑已耗预算脚本。副本首轮/第二轮均created=0/updated=0；全部旧行、accounts/feeds、生产逻辑内容不变，网络0，生产写入0。报告：私有 `weread-directory-copy-*/result.json`。9篇正文仍缺；latestWindowReady=false，不是最新10篇或实时刷新通过。
+- **回归**：6 suites/109 tests通过（新目录、搜索重放、Provider、旧单篇、正文重试、图片归档），后端构建、4个源码文件定向ESLint、格式与diff检查通过。Windows本机pnpm exec shim未找到prettier/jest，复用已安装包直接node运行验证，没有重新安装。测试进程均已结束。
+- **实时边界**：接受用户可翻到1月并点开文章的事实，仍只做最近10篇。插件本次正常点首篇遇验证，用户处理；历史正文映射不当本次读取成功。当前窗口可调用工具目录没有浏览器/CDP/node_repl接口，不用自建CDP、认证头重放或改签名替代受阻工具；待父会话核验受支持的正常实时通路。账号选择已解决，正文传输才是剩余条件，不再索要目录或要求用户手采10篇。
+- **运行核对**：实时SQLite只读核对2账号/12订阅/1450文章、quick_check=ok；本窗口 `Get-NetTCPConnection` 和 `netstat` 未发现4000监听，不沿用旧运行进程当当前事实，未重启或部署。最终验收仍需在单一集成后原按钮取得10篇正文图片、再次去重、后续发现新文。开发/产品说明见[手动更新说明](WEREAD_MANUAL_REFRESH.md)。提交后按新SHA核对远端和CI，旧CI成功不代替本轮。
+
 ## 2026-10-04：Edge CDP 恢复，官方首屏与分页真实成功
 
 - **工具恢复已实测**：本人开启完整 CDP 后，本地配置为 `full_cdp_access_enabled=true`，旧浏览器工具运行时仍不提供 `cdp`。仅重置 `cua_repl` 并绑定原 Edge 标签页后，正式 CDP 能力出现，`Page.getFrameTree` 成功核验 Reader URL 与 `https://weread.qq.com` 来源。未重启 Edge、改安全设置或重复登录。原生 Windows 电脑控制的 URL 安全停止未被修复或绕过，后续使用正式浏览器 CDP 接口。

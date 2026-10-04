@@ -11,6 +11,8 @@ export type ProviderArticle = {
   picUrl: string;
   /** Verified first-party URL retaining the album's original signed request parameters. */
   requestUrl?: string;
+  /** Short link bound to the same verified body that supplies biz/mid/idx. */
+  shortUrl?: string;
 };
 
 export type ProviderPage = {
@@ -71,6 +73,14 @@ export function assertProviderPage(
     )
       throw new Error('PROVIDER_ARTICLE_IDENTITY_INVALID');
     ids.add(identity.id);
+    if (
+      article.shortUrl !== undefined &&
+      (typeof article.shortUrl !== 'string' ||
+        !/^https:\/\/mp\.weixin\.qq\.com\/s\/[A-Za-z0-9_-]{22}$/.test(
+          article.shortUrl,
+        ))
+    )
+      throw new Error('PROVIDER_ARTICLE_IDENTITY_INVALID');
     if (article.requestUrl) {
       const request = new URL(article.requestUrl);
       if (

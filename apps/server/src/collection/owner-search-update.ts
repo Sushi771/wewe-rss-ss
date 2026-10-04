@@ -25,6 +25,8 @@ export type SearchConfig = {
   originalStopFiles: string[];
   runtimeStopFile: string;
   wereadLatestStateFile?: string;
+  /** Enable only after the selected account's normal directory transport is verified. */
+  wereadDirectoryEnabled?: boolean;
   /** Explicit bounded discovery budget; existing bindings default to two pages. */
   searchMaxPages?: number;
 };
@@ -54,6 +56,8 @@ export async function readOwnerSearchConfig(
     !c.originalStopFiles.length ||
     (c.wereadLatestStateFile !== undefined &&
       !path.isAbsolute(c.wereadLatestStateFile)) ||
+    (c.wereadDirectoryEnabled !== undefined &&
+      typeof c.wereadDirectoryEnabled !== 'boolean') ||
     (c.searchMaxPages !== undefined &&
       (!Number.isSafeInteger(c.searchMaxPages) ||
         c.searchMaxPages < 1 ||

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { setTimeout as pause } from 'node:timers/promises';
 import { load } from 'cheerio';
 import { ownerSessionCookie, OwnerWebSession } from './owner-web-search';
 import { OwnerWebCookieLifecycle } from './owner-web-cookie-lifecycle';
@@ -9,13 +10,18 @@ import { articleIdentity, articleContentHtml } from './article-page';
 import { assertProviderPage } from './subscription-provider';
 import { archiveProviderImages } from './archive-provider-images';
 import {
+  parseWereadDirectory,
+  selectWereadLatest,
+  verifyWereadArticleBody,
+} from './weread-directory';
+import {
   ownerLatestAuthHash,
   ownerLatestStopMessage,
 } from './owner-weread-session-state';
 
-/** Normal owner Web session; only the single item supplied by Tencent's cover.
- * Does not call the rejected directory or the stopped mp.weixin original route.
- * This is a limited live source, never a complete WeChat account directory.
+/** Normal owner Web session. The directory mode requires an explicit verified
+ * private binding; old bindings retain their cover-only mode and access stops.
+ * Both modes reuse the same cookie lifecycle, body/images and protected save.
  */
 export async function fetchOwnerWereadLatest(c: SearchConfig) {
   if (!c.wereadLatestStateFile)
@@ -113,6 +119,67 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
       cookies.absorb(url, r.headers?.['set-cookie']);
       return r.data;
     };
+    if (c.wereadDirectoryEnabled === true) {
+      stage = 'directory-0';
+      const rawPages = [
+        JSON.parse(
+          await get('https://weread.qq.com/web/mp/articles', {
+            bookId: c.mpId,
+            offset: '0',
+          }),
+        ),
+      ];
+      let selection = selectWereadLatest(rawPages, c);
+      if (selection.selected.length < 10) {
+        const offset = parseWereadDirectory(rawPages[0], c).groupCount;
+        if (offset === 0) throw new Error('目录未返回最近10篇');
+        stage = 'directory-next';
+        rawPages.push(
+          JSON.parse(
+            await get('https://weread.qq.com/web/mp/articles', {
+              bookId: c.mpId,
+              offset: String(offset),
+            }),
+          ),
+        );
+        selection = selectWereadLatest(rawPages, c);
+      }
+      if (selection.selected.length !== 10)
+        throw new Error('目录未返回最近10篇');
+      const articles: Array<ReturnType<typeof verifyWereadArticleBody>> = [];
+      for (const [index, candidate] of selection.selected.entries()) {
+        if (index) await pause(1000);
+        stage = `content-${index + 1}`;
+        const html = await get(
+          'https://weread.qq.com/web/mp/content',
+          { reviewId: candidate.reviewId },
+          true,
+        );
+        const article = verifyWereadArticleBody(candidate, html);
+        if (articles.some((old) => old.id === article.id))
+          throw new Error('正文身份重复');
+        articles.push(article);
+      }
+      stage = 'images';
+      const page = await archiveProviderImages(
+        assertProviderPage(
+          {
+            articles,
+            coverage: 'recent-window',
+            upstreamCount: selection.directory.length,
+            bodyMissing: 0,
+            imageBlocked: 0,
+            pages: rawPages.length,
+          },
+          c.mpId,
+        ),
+        { stopOnFailure: true },
+      );
+      state.lastSuccessAt = Date.now();
+      state.articleIds = page.articles.map((article) => article.id);
+      await write();
+      return page;
+    }
     stage = 'cover';
     const cover = JSON.parse(
       await get('https://weread.qq.com/api/mp/cover', { bookId: c.mpId }),
