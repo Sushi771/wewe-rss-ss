@@ -6,7 +6,6 @@ import {
   Button,
   useDisclosure,
   Spinner,
-  Tooltip,
 } from '@nextui-org/react';
 import { QRCodeSVG } from 'qrcode.react';
 import { toast } from 'sonner';
@@ -84,14 +83,13 @@ const AccountPage = () => {
       },
       async onSuccess(data) {
         if (data.saved && data.vid) {
-          const accountSuffix = String(data.vid).slice(-4);
           if (reloginAccountId && `${data.vid}` !== reloginAccountId) {
             toast.warning(
-              `扫码账号（末四位 ${accountSuffix}）与原账号（末四位 ${reloginAccountId.slice(-4)}）不一致，已作为新账号保存`,
+              '此次扫码账号与原账号不同，已单独保存；请按昵称核对。',
             );
           } else {
             toast.success(
-              `账号已保存，编号末四位 ${accountSuffix}；请按“最近扫码登录”识别后连接手动更新。`,
+              '账号已保存；请按昵称和最近扫码记录选择账号，连接手动更新。',
             );
           }
           setReloginAccountId(null);
@@ -169,9 +167,6 @@ const AccountPage = () => {
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        <p className="mx-4 mt-4 text-sm text-neutral-500">
-          优先显示已核验的微信读书昵称。扫码时间和编号末四位帮助区分账号；昵称未读取时会明确标注，保存名称不冒充平台昵称。
-        </p>
         {/* 失效账号警告横幅 */}
         {invalidAccounts.length > 0 && (
           <div className="mac-alert-danger mx-4 mt-4">
@@ -184,11 +179,11 @@ const AccountPage = () => {
 
         {/* 紧凑列表 */}
         <div className="compact-list mt-4">
-          <div className="compact-list-header">
-            <div className="w-[180px] px-4">账号标识</div>
-            <div className="w-[120px]">状态</div>
-            <div className="flex-1">最近扫码登录（北京时间）</div>
-            <div className="w-[280px] px-4 text-right">操作</div>
+          <div className="compact-list-header account-header">
+            <div>账号昵称</div>
+            <div>状态</div>
+            <div>最近扫码登录（北京时间）</div>
+            <div className="text-right">操作</div>
           </div>
 
           {!isFetching && data?.items.length === 0 && (
@@ -207,79 +202,39 @@ const AccountPage = () => {
               Date.parse(item.nativeLoginAt) === latestLoginAt;
 
             return (
-              <div key={item.id} className="compact-row group">
+              <div key={item.id} className="compact-row account-row group">
                 {/* Verified platform nickname; stored labels remain separate. */}
-                <div className="w-[180px] px-4">
-                  <Tooltip
-                    content={`读书账号编号末四位：${item.id.slice(-4)}`}
-                    placement="right"
-                    closeDelay={0}
-                  >
-                    <div className="flex cursor-default flex-col overflow-hidden">
-                      <span className="truncate text-[15px] font-medium text-neutral-800 dark:text-neutral-200">
-                        {item.platformName ||
-                          (generatedName
-                            ? '昵称未读取'
-                            : `保存名称：${item.name}`)}
-                      </span>
-                      {item.platformName && (
-                        <span className="text-[11px] text-neutral-400">
-                          微信读书昵称
-                        </span>
-                      )}
-                      {item.platformAvatar && (
-                        <img
-                          src={item.platformAvatar}
-                          alt="微信读书头像"
-                          className="h-7 w-7 rounded-full"
-                          referrerPolicy="no-referrer"
-                        />
-                      )}
+                <div className="flex min-w-0 items-center gap-3">
+                  {item.platformAvatar && (
+                    <img
+                      src={item.platformAvatar}
+                      alt="微信读书头像"
+                      className="h-8 w-8 shrink-0 rounded-full"
+                      referrerPolicy="no-referrer"
+                    />
+                  )}
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <span className="break-words text-[15px] font-medium leading-6 text-neutral-800 dark:text-neutral-200">
+                      {item.platformName ||
+                        (generatedName
+                          ? '昵称未读取'
+                          : `保存名称：${item.name}`)}
+                    </span>
+                    {item.platformName && (
                       <span className="text-[11px] text-neutral-400">
-                        编号末四位 {item.id.slice(-4)}
+                        微信读书昵称
                       </span>
-                      {latestScan && (
-                        <span className="text-primary text-xs font-medium">
-                          最近扫码登录
-                        </span>
-                      )}
-                    </div>
-                  </Tooltip>
+                    )}
+                  </div>
                 </div>
 
                 {/* 状态 */}
-                <div className="w-[120px]">
+                <div className="flex shrink-0 items-center">
                   {isBlocked ? (
                     <span className="mac-badge mac-badge-warning">小黑屋</span>
                   ) : item.status === 0 ? (
                     <span className="mac-badge mac-badge-danger">
                       {statusMap[item.status].label}
-                    </span>
-                  ) : (
-                    <span className="mac-badge mac-badge-success">
-                      {statusMap[item.status].label}
-                    </span>
-                  )}
-                </div>
-
-                {/* 时间 */}
-                <div className="flex-1 text-[13px] text-neutral-400">
-                  {item.nativeLoginAt
-                    ? new Date(item.nativeLoginAt).toLocaleString('zh-CN', {
-                        timeZone: 'Asia/Shanghai',
-                        hour12: false,
-                      })
-                    : '暂无正常扫码记录'}
-                </div>
-
-                {/* 操作 */}
-                <div className="flex w-[280px] items-center justify-end gap-3 px-4">
-                  {isInvalid ? (
-                    <span
-                      className="mac-action-link"
-                      onClick={() => openRelogin(item.id)}
-                    >
-                      重新登录
                     </span>
                   ) : (
                     <StatusDropdown
@@ -293,8 +248,37 @@ const AccountPage = () => {
                           refetch();
                         });
                       }}
-                    ></StatusDropdown>
+                    />
                   )}
+                </div>
+
+                {/* 时间 */}
+                <div className="account-login flex min-w-0 flex-col gap-1 text-[13px] leading-5 text-neutral-400">
+                  <span>
+                    {item.nativeLoginAt
+                      ? new Date(item.nativeLoginAt).toLocaleString('zh-CN', {
+                          timeZone: 'Asia/Shanghai',
+                          hour12: false,
+                        })
+                      : '暂无正常扫码记录'}
+                  </span>
+                  {latestScan && (
+                    <span className="text-primary whitespace-nowrap text-xs font-medium">
+                      最近扫码登录
+                    </span>
+                  )}
+                </div>
+
+                {/* 操作 */}
+                <div className="account-actions flex items-center justify-end gap-2">
+                  {isInvalid ? (
+                    <span
+                      className="mac-action-link"
+                      onClick={() => openRelogin(item.id)}
+                    >
+                      重新登录
+                    </span>
+                  ) : null}
                   {!isInvalid && (
                     <button
                       className="mac-action-link"
@@ -418,9 +402,7 @@ const AccountPage = () => {
                 <div className="flex flex-col items-center">
                   {reloginAccountId && (
                     <div className="mb-6 rounded-lg bg-orange-50 px-3 py-2 text-center text-[13px] text-orange-500 dark:bg-orange-900/20">
-                      请使用编号末四位{' '}
-                      <strong>{reloginAccountId.slice(-4)}</strong>{' '}
-                      对应的账号扫码
+                      请使用所选账号的微信扫码
                     </div>
                   )}
                   {loginError ? (

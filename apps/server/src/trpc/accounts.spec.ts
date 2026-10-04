@@ -4,7 +4,10 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
-import { saveNativeAccountSession } from '../collection/owner-weread-binding';
+import {
+  saveNativeAccountSession,
+  saveNativeAccountProfile,
+} from '../collection/owner-weread-binding';
 jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest.fn(),
 }));
@@ -92,6 +95,54 @@ describe('private owner accounts', () => {
     expect(JSON.stringify(result)).not.toContain('private-fixture');
     expect(JSON.stringify(result)).not.toContain(dir);
     expect(findMany.mock.calls[0][0].select.token).toBe(false);
+  });
+
+  it('uses the verified nickname in connection preview without displaying an account number or replacing its identity', async () => {
+    const session = {
+      source: 'owner-confirmed-native-web-login' as const,
+      ownerVid: '123',
+      capturedAt: new Date().toISOString(),
+      cookies: ['wr_vid', 'wr_skey'].map((name) => ({
+        name,
+        value: name === 'wr_vid' ? '123' : 'private-fixture',
+        domain: '.weread.qq.com',
+        path: '/',
+        secure: true,
+        expires: -1,
+      })),
+    };
+    await fs.writeFile(
+      process.env.OWNER_SEARCH_CONFIG_FILE!,
+      JSON.stringify({ feeds: {} }),
+    );
+    await saveNativeAccountSession(
+      process.env.OWNER_SEARCH_CONFIG_FILE!,
+      session,
+    );
+    await saveNativeAccountProfile(
+      process.env.OWNER_SEARCH_CONFIG_FILE!,
+      {
+        source: 'owner-confirmed-native-profile',
+        ownerVid: '123',
+        name: '真实昵称',
+        capturedAt: new Date().toISOString(),
+        nativeLoginAt: session.capturedAt,
+      },
+      session,
+    );
+    const findUniqueOrThrow = jest
+      .fn()
+      .mockResolvedValue({ id: '123', name: 'WeRead_123', status: 1 });
+    const { router } = setup({
+      account: { findUniqueOrThrow },
+      feed: { findMany: jest.fn().mockResolvedValue([]) },
+    });
+    const result = await router.appRouter
+      .createCaller({ errorMsg: null, isLocal: true })
+      .account.manualRefreshOptions({ accountId: '123' });
+    expect(result.accountLabel).toBe('真实昵称');
+    expect(JSON.stringify(result)).not.toContain('123');
+    expect(findUniqueOrThrow).toHaveBeenCalledWith({ where: { id: '123' } });
   });
 
   it('requires both authentication and a local caller for manual binding preview and confirmation', async () => {

@@ -388,7 +388,11 @@ export class TrpcRouter {
             await nativeAccountLoginAt(account.id),
           );
           return {
-            accountLabel: `${profile?.name || (!account.name || account.name === `WeRead_${account.id}` ? '昵称未读取' : `保存名称：${account.name}`)}（编号末四位 ${account.id.slice(-4)}）`,
+            accountLabel:
+              profile?.name ||
+              (!account.name || account.name === `WeRead_${account.id}`
+                ? '昵称未读取'
+                : `保存名称：${account.name}`),
             options,
           };
         } catch {

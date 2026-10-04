@@ -12,6 +12,8 @@
 
 ## 开发与交接
 
+现有正文整理、图片处理和保存继续复用本项目已验证的实现。已核GitHub候选[wechat-article-exporter](https://github.com/wechat-article/wechat-article-exporter)：其普通单篇请求没有正常登录会话或验证后的取文衔接，不能据此解决当前验证跳转；其Markdown分支也不等于完整的本地图片保存。未导入它的解析、图片或保存代码，不新增导出模块。后续GitHub研究仅围绕实际缺口：正常授权及验证后可重复使用的取文通路。
+
 - 页面：`apps/web/src/pages/tools/article-download.tsx`；路由 `/dash/tools` 和 `/dash/tools/article-download`。
 - 接口：`POST /download/article`，JSON`{ "url": "..." }`；成功返回保存路径JSON，错误返回中文`message`和脱敏诊断。开启每次询问时另需本次原生选择产生的一次性`pickToken`，不能通过浏览器JSON指定任意写入路径。设置读写及目录选择为`/download/article/settings`和`/download/article/directory`，沿用访问密码，限制回环Host/连接与同源操作，远程/私人线上模式拒绝本地保存。
 - `article-export.ts` 是从 `TrpcRouter.getArticleMarkdown` / `downloadImage` 抽出的既有正文与图片导出代码。原 Markdown、Obsidian 和公众号 ZIP 仍调用相同方法；默认图片下载逻辑不变。

@@ -202,6 +202,61 @@ select {
   padding-bottom: 8px;
 }
 
+/* Account metadata grows naturally; article-list row dimensions stay separate. */
+.account-header,
+.compact-row.account-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.2fr) 80px minmax(180px, 1fr) auto;
+  gap: 16px;
+}
+
+.compact-row.account-row {
+  height: auto;
+  min-height: 76px;
+  padding: 12px 16px;
+}
+
+.account-actions > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 1000px) {
+  .account-header,
+  .compact-row.account-row {
+    grid-template-columns: minmax(140px, 1fr) 80px minmax(180px, 1fr);
+  }
+
+  .account-header > :last-child {
+    display: none;
+  }
+
+  .account-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .account-header {
+    display: none;
+  }
+
+  .compact-row.account-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+  }
+
+  .account-login,
+  .account-actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}
+
 .compact-row:nth-child(even) {
   background: rgba(0, 0, 0, 0.015);
 }
