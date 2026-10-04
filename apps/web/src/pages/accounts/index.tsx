@@ -22,11 +22,27 @@ const AccountPage = () => {
   const [count, setCount] = useState(0);
   const [reloginAccountId, setReloginAccountId] = useState<string | null>(null);
   const [loginError, setLoginError] = useState('');
+  const [connectionAccountId, setConnectionAccountId] = useState<string | null>(
+    null,
+  );
 
   const { refetch, data, isFetching } = trpc.account.list.useQuery({});
   const queryUtils = trpc.useUtils();
   const { mutateAsync: updateAccount } = trpc.account.edit.useMutation({});
   const { mutateAsync: deleteAccount } = trpc.account.delete.useMutation({});
+  const connection = trpc.account.manualRefreshOptions.useQuery(
+    { accountId: connectionAccountId || '0' },
+    { enabled: !!connectionAccountId, retry: false },
+  );
+  const connectManualRefresh = trpc.account.connectManualRefresh.useMutation({
+    onSuccess(result) {
+      toast.success(result.message);
+      setConnectionAccountId(null);
+    },
+    onError(error) {
+      toast.error(error.message);
+    },
+  });
 
   const {
     mutateAsync,
@@ -76,9 +92,7 @@ const AccountPage = () => {
             );
           } else {
             toast.success(
-              data.searchSessionUpdated
-                ? '账号已保存，腾讯搜索会话已连接'
-                : '账号已保存；此账号尚未绑定腾讯搜索来源',
+              '账号已保存；请在此页连接手动更新，取文结果以公众号刷新为准。',
             );
           }
           setReloginAccountId(null);
@@ -167,7 +181,7 @@ const AccountPage = () => {
             <div className="w-[180px] px-4">用户名</div>
             <div className="w-[120px]">状态</div>
             <div className="flex-1">上次活跃</div>
-            <div className="w-[160px] px-4 text-right">操作</div>
+            <div className="w-[280px] px-4 text-right">操作</div>
           </div>
 
           {!isFetching && data?.items.length === 0 && (
@@ -221,7 +235,7 @@ const AccountPage = () => {
                 </div>
 
                 {/* 操作 */}
-                <div className="flex w-[160px] items-center justify-end gap-4 px-4">
+                <div className="flex w-[280px] items-center justify-end gap-3 px-4">
                   {isInvalid ? (
                     <span
                       className="mac-action-link"
@@ -243,6 +257,22 @@ const AccountPage = () => {
                       }}
                     ></StatusDropdown>
                   )}
+                  {!isInvalid && (
+                    <button
+                      className="mac-action-link"
+                      onClick={() => openRelogin(item.id)}
+                    >
+                      重新登录
+                    </button>
+                  )}
+                  {!isInvalid && (
+                    <button
+                      className="mac-action-link"
+                      onClick={() => setConnectionAccountId(item.id)}
+                    >
+                      连接手动更新
+                    </button>
+                  )}
                   <span
                     className="mac-action-link danger"
                     onClick={() => {
@@ -262,6 +292,66 @@ const AccountPage = () => {
           })}
         </div>
       </div>
+
+      <Modal
+        isOpen={!!connectionAccountId}
+        onClose={() => setConnectionAccountId(null)}
+        size="md"
+      >
+        <ModalContent>
+          <ModalHeader>连接手动更新</ModalHeader>
+          <ModalBody className="pb-6">
+            {connection.isFetching ? (
+              <Spinner />
+            ) : connection.error ? (
+              <p>{connection.error.message}</p>
+            ) : (
+              <>
+                <p>{connection.data?.accountLabel}</p>
+                <p className="text-sm text-neutral-500">
+                  请选择使用此账号更新的公众号。连接后请在公众号页点击原刷新按钮；自动刷新保持关闭。
+                </p>
+                {!connection.data?.options.length && (
+                  <p>当前没有可连接的手动更新公众号。</p>
+                )}
+                {connection.data?.options.map((option) => (
+                  <div
+                    key={option.mpId}
+                    className="rounded-lg border border-neutral-200 p-3 dark:border-neutral-700"
+                  >
+                    <p className="mb-2 font-medium">{option.name}</p>
+                    <p className="mb-3 text-sm text-neutral-500">
+                      {option.message}
+                    </p>
+                    <Button
+                      size="sm"
+                      color="primary"
+                      isDisabled={!option.ready}
+                      isLoading={connectManualRefresh.isLoading}
+                      onPress={() => {
+                        if (
+                          window.confirm(
+                            `确认使用 ${connection.data?.accountLabel} 连接“${option.name}”？以后点击刷新将读取最新10篇正文及图片，遇限制即停止，旧文章保留。此次连接不会发取文请求。`,
+                          )
+                        ) {
+                          connectManualRefresh.mutate({
+                            accountId: connectionAccountId!,
+                            mpId: option.mpId,
+                            revision: option.revision,
+                            confirm: true,
+                          });
+                        }
+                      }}
+                    >
+                      确认连接
+                    </Button>
+                  </div>
+                ))}
+              </>
+            )}
+          </ModalBody>
+        </ModalContent>
+      </Modal>
 
       {/* 登录弹窗 */}
       <Modal

@@ -53,8 +53,9 @@ export function ownerLatestStageLabel(stage: unknown) {
 export function ownerLatestAuthHash(
   session: OwnerWebSession,
   ownerVid: string,
+  now = Date.now(),
 ) {
-  ownerSessionCookie(session, ownerVid);
+  ownerSessionCookie(session, ownerVid, now);
   return sha(
     JSON.stringify([
       ownerVid,
@@ -63,8 +64,37 @@ export function ownerLatestAuthHash(
   );
 }
 
-/** Stops always prevent requests. A changed login is a review condition, never
- * permission to retry; legacy full-cookie hashes cannot establish changed auth. */
+/** A local owner's explicit binding of a normal native Web login can authorize
+ * a different authentication context. It never releases the same failed login,
+ * and any new stop invalidates this authorization. Historical stops stay intact.
+ */
+function manualSessionAuthorized(
+  state: any,
+  session: OwnerWebSession,
+  authHash: string,
+  mpId: string,
+) {
+  const a = state.manualRefreshAuthorization;
+  return (
+    a?.source === 'owner-confirmed-native-web-login' &&
+    session.source === a.source &&
+    a.target === mpId &&
+    a.authHash === authHash &&
+    a.sessionCapturedAt === session.capturedAt &&
+    Number.isFinite(Date.parse(a.approvedAt)) &&
+    Date.parse(a.approvedAt) >= Date.parse(session.capturedAt) &&
+    Date.parse(a.approvedAt) <= Date.now() + 300000 &&
+    a.stopHash === sha(JSON.stringify(state.stop ?? null)) &&
+    (!state.stop ||
+      (/^[a-f0-9]{64}$/.test(a.priorAuthHash || '') &&
+        Date.parse(session.capturedAt) > Date.parse(state.stop.at) &&
+        a.priorAuthHash !== authHash &&
+        state.stop.sessionAuthHash !== authHash))
+  );
+}
+
+/** The failed login always stays stopped. A changed login remains a review
+ * condition until explicitly bound locally; cookie changes alone grant nothing. */
 export function ownerLatestStopMessage(
   state: any,
   session: OwnerWebSession,
@@ -73,6 +103,7 @@ export function ownerLatestStopMessage(
 ) {
   const authHash = ownerLatestAuthHash(session, ownerVid);
   const cookieHash = sha(ownerSessionCookie(session, ownerVid));
+  if (manualSessionAuthorized(state, session, authHash, mpId)) return null;
   if (!state.stop) {
     if (
       (state.sessionAuthHash && state.sessionAuthHash !== authHash) ||
