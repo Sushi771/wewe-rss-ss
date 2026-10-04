@@ -11,8 +11,8 @@ export type ProviderArticle = {
   picUrl: string;
   /** Verified first-party URL retaining the album's original signed request parameters. */
   requestUrl?: string;
-  /** Short link bound to the same verified body that supplies biz/mid/idx. */
-  shortUrl?: string;
+  /** Body-proved short link; legacy adapters may represent its absence as null. */
+  shortUrl?: string | null;
 };
 
 export type ProviderPage = {
@@ -75,6 +75,7 @@ export function assertProviderPage(
     ids.add(identity.id);
     if (
       article.shortUrl !== undefined &&
+      article.shortUrl !== null &&
       (typeof article.shortUrl !== 'string' ||
         !/^https:\/\/mp\.weixin\.qq\.com\/s\/[A-Za-z0-9_-]{22}$/.test(
           article.shortUrl,

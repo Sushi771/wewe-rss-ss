@@ -25,6 +25,28 @@ describe('subscription provider write boundary', () => {
     expect(assertProviderPage(input, mpId)).toBe(input);
   });
 
+  it('preserves the legacy null representation of an absent short link', () => {
+    const input = page();
+    input.articles[0].shortUrl = null;
+    expect(assertProviderPage(input, mpId)).toBe(input);
+  });
+
+  it('rejects a malformed supplied short link while accepting a validated one', () => {
+    const input = page();
+    input.articles[0].shortUrl = `https://mp.weixin.qq.com/s/${'a'.repeat(22)}`;
+    expect(assertProviderPage(input, mpId)).toBe(input);
+    for (const url of [
+      `http://mp.weixin.qq.com/s/${'a'.repeat(22)}`,
+      `https://example.com/s/${'a'.repeat(22)}`,
+      'https://mp.weixin.qq.com/s/invalid',
+    ]) {
+      input.articles[0].shortUrl = url;
+      expect(() => assertProviderPage(input, mpId)).toThrow(
+        'PROVIDER_ARTICLE_IDENTITY_INVALID',
+      );
+    }
+  });
+
   it('rejects a cross-feed or conflicting identity before article writes', () => {
     const wrongFeed = page();
     wrongFeed.articles[1].mpId = 'MP_WXS_1000000000';
