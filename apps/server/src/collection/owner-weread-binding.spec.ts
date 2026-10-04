@@ -360,6 +360,28 @@ describe('normal native login to explicitly confirmed manual Provider binding (o
     ).toBe(false);
     expect(axios.get).not.toHaveBeenCalled();
   });
+  it('restores the prior state when committing the selected-account config fails', async () => {
+    await saveNativeAccountSession(configFile, session);
+    const preview = await previewManualWereadBinding(account(), mpId);
+    const configBefore = await text(configFile),
+      stateBefore = await text(stateFile);
+    const rename = fs.rename.bind(fs);
+    jest.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (to === configFile) throw new Error('CONFIG_COMMIT_FAILED');
+      return rename(from, to);
+    });
+    await expect(
+      confirmManualWereadBinding(account(), mpId, preview.revision),
+    ).rejects.toThrow('CONFIG_COMMIT_FAILED');
+    expect(await text(configFile)).toBe(configBefore);
+    expect(await text(stateFile)).toBe(stateBefore);
+    expect(
+      (await fs.readdir(dir)).some(
+        (name) => name.endsWith('.pending') || name.endsWith('.lock'),
+      ),
+    ).toBe(false);
+    expect(axios.get).not.toHaveBeenCalled();
+  });
   it('requires genuine indexed native-login provenance and matching current account credentials', async () => {
     await expect(
       saveNativeAccountSession(configFile, {

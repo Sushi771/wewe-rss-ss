@@ -32,7 +32,14 @@ async function immutable(file: string, text: string) {
 async function replace(file: string, text: string) {
   const pending = file + '.pending';
   await fs.writeFile(pending, text, { flag: 'wx', mode: 0o600 });
-  await fs.rename(pending, file);
+  try {
+    await fs.rename(pending, file);
+  } catch (error) {
+    // This invocation created the pending file exclusively. A prior pending
+    // file is never removed: its write fails above before this cleanup runs.
+    await fs.unlink(pending);
+    throw error;
+  }
 }
 
 /** Called only while the existing native-login/config lock is held. Persist the
@@ -242,7 +249,15 @@ export async function confirmManualWereadBinding(
     binding.ownerVid = account.id;
     binding.sessionFile = i.sessionFile;
     binding.wereadDirectoryEnabled = true;
-    await replace(configFile, JSON.stringify(i.config));
+    try {
+      await replace(configFile, JSON.stringify(i.config));
+    } catch (error) {
+      // Preserve the old live authorization if the config commit failed. Both
+      // locks remain held; only roll back while the config is provably unchanged.
+      if ((await fs.readFile(configFile, 'utf8')) === i.configText)
+        await replace(stateFile, i.stateText);
+      throw error;
+    }
     return {
       connected: true,
       mpId,
