@@ -1,5 +1,11 @@
 # 自建订阅当前断点（2026-10-03）
 
+## 2026-10-04：集成本机已受控启动，Windows归属查询修补
+
+- 复现自有回环监听：CIM/原生TCP行状态异常，netstat缺失；改为Windows原生 `TCP_TABLE_OWNER_PID_LISTENER` 专用表核监听归属，不推断ALL表未知状态。保留Process句柄、启动时间、程序路径、命令行与预期身份停止门禁；原生错误不降级HTTP或空列表。2项Windows回归和16项运行回归通过，新增Windows CI。
+- 固定包`.local-releases/2026-10-04T10-18-17-755Z-213913c1bd74`通过`restart.cjs --mode start --production`，启动审计`controlled-restart-1791111748983-19472`，活动指针已推进。应用源码仍为`68aa31f`对应包，只改包外启动器，无需重构包。固定回环4000、定时关闭；2账号/12订阅/1450文章全部字段与启动前一致性备份相同，quick_check=ok。
+- 当前没有新的平台取文、来源切换或登录尝试；`wereadDirectoryEnabled`仍false。真实单篇链接和最新10篇正文图片/原刷新去重仍未验收。步骤、诊断依据与实际状态见[集成说明](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md)；原始证据/备份/截图仅保留本机忽略目录。
+
 ## 2026-10-04：手动订阅与独立下载组合集成
 
 - 唯一集成者在`codex/manual-refresh-download-integration`合并`185ea7f`与`b7c0895`，无冲突；保留下载源分支/worktree。最小diff核对原导出为代码抽取，工具无数据库依赖且不改订阅模块，补齐内嵌/远程图片总预算回归。
