@@ -313,7 +313,10 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
         status: 200,
         data:
           n === 10
-            ? directoryHtml(n).replace('ct=1700000090', 'ct=1700000000')
+            ? directoryHtml(n).replace(
+                'ct=1700000090',
+                'ct=1700000090;var create_time="1700000000"',
+              )
             : directoryHtml(n),
       };
     });
