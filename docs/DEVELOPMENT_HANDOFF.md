@@ -1,5 +1,11 @@
 # 自建订阅当前断点（2026-10-03）
 
+## 2026-10-04：手动订阅与独立下载组合集成
+
+- 唯一集成者在`codex/manual-refresh-download-integration`合并`185ea7f`与`b7c0895`，无冲突；保留下载源分支/worktree。最小diff核对原导出为代码抽取，工具无数据库依赖且不改订阅模块，补齐内嵌/远程图片总预算回归。
+- 组合37 suites/503 tests、前后端构建和前端ESLint通过；运行策略/就绪/依赖闭包16项通过。固定包`.local-releases/2026-10-04T10-18-17-755Z-213913c1bd74`已生成（264依赖/13294文件/无桌面helper）。准确运行步骤及真实缺口见[集成交付说明](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md)。未生产启动、改凭据、开启实时目录或请求平台；生产仍2/12/1450、4000无监听。
+- 固定包`verify`完整性ok，独立Node/Prisma的SQLite副本`probe`返回runtime-verified、12/1450、pending=[]及清单匹配的引擎哈希。后续只按受控冷启动器部署，明确ENABLE_SCHEDULED_UPDATES=0、DISABLE_SCHEDULED_UPDATES=1；当前不执行部署或真实链接验证。
+
 ## 2026-10-04：原刷新函数目录模式已接线，保存下载复用原实现
 
 - 用户要求先读清源码后尽快修订阅；实际链路为前端 `feed.refreshArticles` → `TrpcService.refreshMpArticlesAndUpdateFeed/refreshArticles` → `CollectionService.collectOwnerWereadLatest` → `fetchOwnerWereadLatest`。原阻点确实是最后一步的cover单篇，`WereadService.getMpArticles`是停用旧链，不能改它冒充原按钮修复。
