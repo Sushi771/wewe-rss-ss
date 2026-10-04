@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   Logger,
+  Optional,
   Post,
   Request,
   Response,
@@ -20,10 +21,18 @@ import {
 import { LocalArticleStore } from './article-local-save';
 import { pickArticleDirectory } from './article-folder-picker';
 import { privateOnlineMode } from './private-access';
+import { PrismaService } from './prisma/prisma.service';
+import {
+  buildCachedArticleDownload,
+  findCachedDownloadArticle,
+} from './article-download-cache';
 
 @Controller('download')
 export class ArticleDownloadController {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    @Optional() private readonly prisma?: PrismaService,
+  ) {}
   private running = false;
   private pickerRunning = false;
   private store?: LocalArticleStore;
@@ -196,14 +205,23 @@ export class ArticleDownloadController {
       )
         return res.status(409).json({ message: '请先选择本次保存路径。' });
       this.pickerGrant = undefined;
+      const cached = this.prisma
+        ? await findCachedDownloadArticle(this.prisma, url)
+        : null;
       const result = await store.save((directory) =>
-        buildArticleDownload(url, directory, undefined, {
-          imageDirectory: 'image',
-          markdownOnly: true,
-        }),
+        cached
+          ? buildCachedArticleDownload(cached, directory)
+          : buildArticleDownload(url, directory, undefined, {
+              imageDirectory: 'image',
+              markdownOnly: true,
+            }),
       );
       res.setHeader('Cache-Control', 'private, no-store');
-      return res.json({ saved: true, ...result });
+      return res.json({
+        saved: true,
+        ...result,
+        contentSource: cached ? 'saved-article' : 'remote',
+      });
     } catch (error) {
       return this.failure(error, res);
     } finally {

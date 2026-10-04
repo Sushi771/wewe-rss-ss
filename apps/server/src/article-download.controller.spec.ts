@@ -9,6 +9,7 @@ import { ArticleDownloadController } from './article-download.controller';
 import * as download from './article-download';
 import * as picker from './article-folder-picker';
 import { LocalArticleStore } from './article-local-save';
+import { PrismaService } from './prisma/prisma.service';
 
 const url = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
 describe('local article HTTP save and native directory selection, no upstream or database', () => {
@@ -16,6 +17,7 @@ describe('local article HTTP save and native directory selection, no upstream or
   let temporary: string;
   let destination: string;
   let settingsFile: string;
+  const findMany = jest.fn();
   const originalEnv = { ...process.env };
   const post = (endpoint = '', body: Record<string, unknown> = {}) =>
     request(app.getHttpServer())
@@ -25,6 +27,7 @@ describe('local article HTTP save and native directory selection, no upstream or
       .set('authorization', 'fixture-access')
       .send(body);
   beforeEach(async () => {
+    findMany.mockReset().mockResolvedValue([]);
     delete process.env.PRIVATE_ONLINE_MODE;
     delete process.env.WEWE_ACCEPTANCE_MODE;
     temporary = await mkdtemp(join(tmpdir(), 'wewe-save-http-'));
@@ -39,6 +42,7 @@ describe('local article HTTP save and native directory selection, no upstream or
     const module = await Test.createTestingModule({
       controllers: [ArticleDownloadController],
       providers: [
+        { provide: PrismaService, useValue: { article: { findMany } } },
         {
           provide: ConfigService,
           useValue: new ConfigService({ auth: { code: 'fixture-access' } }),
@@ -112,6 +116,40 @@ describe('local article HTTP save and native directory selection, no upstream or
     expect(JSON.parse(await readFile(settingsFile, 'utf8')).directory).toBe(
       destination,
     );
+  });
+
+  it('saves a verified complete local article through the existing HTTP route without remote download', async () => {
+    const canonical =
+      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef';
+    findMany.mockResolvedValueOnce([
+      {
+        id: 'WX_1234567890_2247000001_1',
+        mpId: 'MP_WXS_1234567890',
+        title: '缓存完整正文',
+        publishTime: 1720000000,
+        sourceUrl: canonical,
+        verifiedSourceUrl: canonical,
+        contentHtml: '<div id="js_content"><p>已经授权保存的全文。</p></div>',
+        lastBodyStatus: 'available',
+        metrics: null,
+      },
+    ]);
+    const response = await post('', { url: canonical }).expect(200);
+    expect(response.body.contentSource).toBe('saved-article');
+    expect(await readFile(response.body.markdownPath, 'utf8')).toContain(
+      '已经授权保存的全文。',
+    );
+    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+    expect(response.body.saved).toBe(true);
+  });
+
+  it('keeps an identified incomplete cache from falling back to a remote request', async () => {
+    findMany.mockResolvedValueOnce([
+      { id: 'legacy', sourceUrl: url, verifiedSourceUrl: null },
+    ]);
+    const response = await post('', { url }).expect(422);
+    expect(response.body.code).toBe('CACHED_ARTICLE_UNAVAILABLE');
+    expect(download.buildArticleDownload).not.toHaveBeenCalled();
   });
   it('cancels directory selection without changing settings or starting a download', async () => {
     jest.mocked(picker.pickArticleDirectory).mockResolvedValueOnce(null);

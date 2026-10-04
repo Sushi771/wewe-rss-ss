@@ -9,6 +9,7 @@ type SavedArticle = {
   markdownPath: string;
   alreadySaved: boolean;
   imageCount: number;
+  contentSource?: 'saved-article' | 'remote';
 };
 
 export default function ArticleDownload() {
@@ -238,6 +239,11 @@ export default function ArticleDownload() {
               <p className="text-default-600 mt-2 break-all text-sm">
                 {saved.markdownPath}
               </p>
+              {saved.contentSource === 'saved-article' && (
+                <p className="text-default-600 mt-2 text-sm">
+                  使用本机已保存的正文和图片，未访问原文服务器。
+                </p>
+              )}
               <p className="text-default-600 mt-2 text-sm">
                 图片保存在同篇文章的 image 子目录，可直接用 Obsidian 打开正文。
               </p>

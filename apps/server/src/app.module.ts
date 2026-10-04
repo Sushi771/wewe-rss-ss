@@ -10,9 +10,11 @@ import { FeedsModule } from './feeds/feeds.module';
 import { PrivateAccessController } from './private-access.controller';
 import { OfflineExportController } from './offline-export.controller';
 import { ArticleDownloadController } from './article-download.controller';
+import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
   imports: [
+    PrismaModule,
     TrpcModule,
     FeedsModule,
     ScheduleModule.forRoot(),

@@ -282,6 +282,33 @@ export const requestDownloadResource: DownloadRequest = async (
 };
 
 /** Connect a public link to the existing Markdown + local attachments exporter. */
+/** Same inert body policy for remote articles and already verified local bodies. */
+export function inertDownloadBody(content: string) {
+  const $ = load(content);
+  const body = $('#js_content, .rich_media_content').first();
+  if (!body.length)
+    throw new ArticleDownloadError('未取得有效文章正文，未生成下载文件。');
+  const tags = new Set(
+    'div section p span br h1 h2 h3 h4 h5 h6 strong b em i u s del blockquote ul ol li table thead tbody tfoot tr th td hr a img pre code figure figcaption'.split(
+      ' ',
+    ),
+  );
+  for (const element of body.find('*').toArray().reverse()) {
+    const node = $(element);
+    if (!tags.has(element['tagName'])) {
+      node.remove();
+      continue;
+    }
+    node.removeAttr('href');
+    for (const attr of Object.keys(element['attribs'] || {}))
+      if (!['src', 'alt', 'title'].includes(attr)) node.removeAttr(attr);
+  }
+  for (const attr of Object.keys(body.get(0)?.attribs || {}))
+    body.removeAttr(attr);
+  body.attr('id', 'js_content');
+  return $.html(body);
+}
+
 export async function buildArticleDownload(
   raw: unknown,
   directory: string,
@@ -351,23 +378,8 @@ export async function buildArticleDownload(
       page('meta[property="og:title"]').attr('content')?.trim();
     if (!title || title.length > 1000)
       throw new ArticleDownloadError('未取得有效文章标题，未生成下载文件。');
-    const $ = load(content);
-    // Markdown converters can retain raw HTML for unsupported tags. Keep only inert article elements.
-    const tags = new Set(
-      'div section p span br h1 h2 h3 h4 h5 h6 strong b em i u s del blockquote ul ol li table thead tbody tfoot tr th td hr a img pre code figure figcaption'.split(
-        ' ',
-      ),
-    );
-    for (const element of $('#js_content *').toArray().reverse()) {
-      const node = $(element);
-      if (!tags.has(element['tagName'])) {
-        node.remove();
-        continue;
-      }
-      node.removeAttr('href'); // Only the canonical source is exported as an outgoing link.
-      for (const attr of Object.keys(element['attribs'] || {}))
-        if (!['src', 'alt', 'title'].includes(attr)) node.removeAttr(attr);
-    }
+    // Markdown can retain raw HTML; share the same inert policy with cached saves.
+    const $ = load(inertDownloadBody(content));
     const images = $('#js_content img').toArray();
     if (images.length > 60 || images.some((image) => !$(image).attr('src')))
       throw new ArticleDownloadError(
