@@ -11,7 +11,7 @@ ZIP 同时包含 `index.md` 和 `attachments/` 图片文件，保留原文来源
 ## 开发与交接
 
 - 页面：`apps/web/src/pages/tools/article-download.tsx`；路由 `/dash/tools` 和 `/dash/tools/article-download`。
-- 接口：`POST /download/article`，JSON `{ "url": "..." }`；成功返回 ZIP，错误返回中文 JSON `message`。接口复用现有访问密码或私人站点会话。
+- 接口：`POST /download/article`，JSON `{ "url": "..." }`；成功返回 ZIP，错误返回中文 JSON `message`，并附不含链接和凭据的`code`、阶段及可用的上游HTTP状态。接口复用现有访问密码或私人站点会话。
 - `article-export.ts` 是从 `TrpcRouter.getArticleMarkdown` / `downloadImage` 抽出的既有正文与图片导出代码。原 Markdown、Obsidian 和公众号 ZIP 仍调用相同方法；默认图片下载逻辑不变。
 - `offline-archive.ts` 抽出原 `OfflineExportController` 的 ZIP 打包代码，公众号 ZIP 与工具共用。
 - `article-download.ts` 只连接单篇 URL 与上述导出方法，复用 `articleIdentity`、`articleContentHtml`、`publicArticleRequestUrl`、`allowedImageUrl`、`decodeInlineImage`。离线 HTML 使用导出方法已本地化的同一正文。
@@ -43,6 +43,10 @@ node scripts/acceptance-article-download.cjs
 该脚本启动仅含工具控制器的临时本地服务和无账号浏览器，正文/图片资源由内存合成 fixture 提供，阻止真实上游与浏览器外网请求，不启动生产应用、不加载生产配置或数据库。验证独立导航、非法链接、连续点击、成功保存 ZIP、真实解压、断网打开 HTML 和图片、验证失败与图片失败提示、移动端入口。合成截图及结果写入已忽略的 `output/playwright/article-download/`，不提交原始证据或下载文件。
 
 ## 本轮结果（2026-10-04）
+
+- 用户指定链接在2026-10-04 14:19 UTC的一次受控复测返回HTTP302，跳转类别为微信验证页；仅请求原文一次，未跟随跳转、未取图片、未生成ZIP。旧提示合并了非200、非HTML和大小异常，无法从用户先前的提示恢复当时的具体状态；本次证据只证明该链接在当前环境和时点的验证要求。
+- 本次修补区分验证/登录/其他跳转、限流、其他HTTP错误、非HTML、网络超时/DNS及文件生成失败；图片阶段保留相同的错误来源。日志只记录错误代码、阶段、HTTP状态和跳转类别，不保存原文URL、Location、响应正文、Cookie或原始异常文本。继续禁用自动跳转和重试，复用原正文图片导出器。服务端全量回归37 suites/519 tests通过。
+- 真实下载仍未验收通过。验证要求是当前外部阻碍，错误提示修补不能替代合法的公开正文响应，也不能声称订阅更新恢复。下述真实请求0为原合成验收阶段记录，本次受控复测为1次。
 
 - 服务端全量回归：36 个测试套件、466 项测试全部通过，其中相关导出／图片／工具测试 58 项通过。
 - 前后端构建通过；改动文件格式检查、服务端和前端 ESLint 检查通过。

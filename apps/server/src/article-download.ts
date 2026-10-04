@@ -10,10 +10,19 @@ import { canonicalArticleUrl } from './collection/collection-format';
 import { publicArticleRequestUrl } from './collection/public-album';
 import { allowedImageUrl, decodeInlineImage } from './collection/image-fetch';
 
+type RedirectKind = 'verification' | 'login' | 'article' | 'other' | 'missing';
+export type DownloadDiagnostic = {
+  code: string;
+  stage?: 'article' | 'image';
+  upstreamStatus?: number;
+  redirectKind?: RedirectKind;
+};
+
 export class ArticleDownloadError extends Error {
   constructor(
     message: string,
     readonly status = 422,
+    readonly diagnostic: DownloadDiagnostic = { code: 'DOWNLOAD_FAILED' },
   ) {
     super(message);
   }
@@ -51,6 +60,7 @@ export function downloadArticleUrl(raw: unknown): string {
     throw new ArticleDownloadError(
       '请粘贴有效的 HTTPS 微信公众号文章链接（mp.weixin.qq.com/s）。',
       400,
+      { code: 'INVALID_ARTICLE_URL', stage: 'article' },
     );
   }
 }
@@ -90,11 +100,125 @@ export async function resolveDownloadAddress(hostname: string) {
   return addresses[0];
 }
 
-type DownloadResponse = { bytes: Buffer; type: string; status: number };
+type DownloadResponse = {
+  bytes: Buffer;
+  type: string;
+  status: number;
+  redirectKind?: RedirectKind;
+};
 type DownloadRequest = (
   url: string,
   maxBytes: number,
 ) => Promise<DownloadResponse>;
+
+/** Classify Location without exposing it, following it, or carrying its credentials. */
+export function downloadRedirectKind(
+  raw: unknown,
+  source: string,
+): RedirectKind {
+  if (typeof raw !== 'string' || !raw) return 'missing';
+  try {
+    const target = new URL(raw, source);
+    if (target.username || target.password) return 'other';
+    if (
+      target.hostname === 'mp.weixin.qq.com' &&
+      /(?:captcha|verify)/i.test(target.pathname)
+    )
+      return 'verification';
+    if (
+      ['mp.weixin.qq.com', 'open.weixin.qq.com'].includes(target.hostname) &&
+      /(?:login|oauth|connect)/i.test(target.pathname)
+    )
+      return 'login';
+    downloadArticleUrl(target.toString());
+    return 'article';
+  } catch {
+    return 'other';
+  }
+}
+
+function responseFailure(
+  response: DownloadResponse,
+  stage: 'article' | 'image',
+) {
+  const subject = stage === 'article' ? '原文' : '图片';
+  const upstreamStatus = response.status;
+  const failure = (
+    message: string,
+    code: string,
+    redirectKind?: RedirectKind,
+  ) =>
+    new ArticleDownloadError(message, 422, {
+      code,
+      stage,
+      upstreamStatus,
+      ...(redirectKind ? { redirectKind } : {}),
+    });
+  if (upstreamStatus >= 300 && upstreamStatus < 400) {
+    const kind = response.redirectKind || 'missing';
+    const reason = {
+      verification: '跳转到验证页面，请先在微信官方页面处理验证',
+      login: '跳转到登录页面，本工具不使用微信登录凭据',
+      article: '跳转到文章链接，请复制官方页面最终显示的文章链接',
+      other: '发生未支持的跳转，请先在官方页面检查链接',
+      missing: '返回跳转状态但没有可确认的目标，请先在官方页面检查链接',
+    }[kind];
+    return failure(
+      `${subject}${reason}（HTTP ${upstreamStatus}）；请求已停止，未生成下载文件。`,
+      kind === 'verification'
+        ? 'VERIFICATION_REDIRECT'
+        : kind === 'login'
+          ? 'LOGIN_REDIRECT'
+          : 'UNSUPPORTED_REDIRECT',
+      kind,
+    );
+  }
+  if (upstreamStatus !== 200) {
+    const reason =
+      upstreamStatus === 429
+        ? '访问被限流，请暂勿重复点击'
+        : upstreamStatus === 401
+          ? '要求登录，本工具不使用微信登录凭据'
+          : upstreamStatus === 403
+            ? '服务器拒绝访问，请先在官方页面确认文章是否公开可读'
+            : upstreamStatus === 404 || upstreamStatus === 410
+              ? '链接不可用或文章已移除，请在官方页面核对链接'
+              : '服务器返回异常状态，请先查看官方页面';
+    return failure(
+      `${subject}${reason}（HTTP ${upstreamStatus}），未生成下载文件。`,
+      upstreamStatus === 429 ? 'RATE_LIMITED' : 'UPSTREAM_HTTP_ERROR',
+    );
+  }
+}
+
+function transportFailure(error: unknown, stage: 'article' | 'image') {
+  if (error instanceof ArticleDownloadError) return error;
+  const code = (error as { code?: string })?.code;
+  const subject = stage === 'article' ? '原文' : '图片';
+  if (
+    code === 'ERR_BAD_RESPONSE' &&
+    /maxContentLength/.test((error as Error)?.message || '')
+  )
+    return new ArticleDownloadError(
+      `${subject}超过单次下载的安全大小限制，未生成下载文件。`,
+      422,
+      { code: 'RESOURCE_TOO_LARGE', stage },
+    );
+  const timeout = ['ECONNABORTED', 'ETIMEDOUT'].includes(code || '');
+  const dns = ['ENOTFOUND', 'EAI_AGAIN'].includes(code || '');
+  return new ArticleDownloadError(
+    `${subject}${timeout ? '连接超时' : dns ? '域名解析失败' : '网络连接失败'}，未收到有效响应，未生成下载文件。`,
+    422,
+    {
+      code: timeout
+        ? 'NETWORK_TIMEOUT'
+        : dns
+          ? 'DNS_FAILURE'
+          : 'NETWORK_FAILURE',
+      stage,
+    },
+  );
+}
 
 /** No proxy, cookies, redirects or retries. DNS validation pins the actual socket lookup. */
 export const requestDownloadResource: DownloadRequest = async (
@@ -143,7 +267,15 @@ export const requestDownloadResource: DownloadRequest = async (
       type: String(response.headers['content-type'] || '')
         .split(';')[0]
         .toLowerCase(),
+      ...(response.status >= 300 && response.status < 400
+        ? { redirectKind: downloadRedirectKind(response.headers.location, raw) }
+        : {}),
     };
+  } catch (error) {
+    throw transportFailure(
+      error,
+      url.hostname === 'mp.weixin.qq.com' ? 'article' : 'image',
+    );
   } finally {
     agent.destroy();
   }
@@ -157,14 +289,22 @@ export async function buildArticleDownload(
 ) {
   const url = downloadArticleUrl(raw);
   try {
-    const response = await request(url, 5_000_000);
-    if (
-      response.status !== 200 ||
-      response.type !== 'text/html' ||
-      response.bytes.length > 5_000_000
-    )
+    const response = await request(url, 5_000_000).catch((error) => {
+      throw transportFailure(error, 'article');
+    });
+    const failure = responseFailure(response, 'article');
+    if (failure) throw failure;
+    if (response.type !== 'text/html')
       throw new ArticleDownloadError(
-        '原文访问失败或发生跳转，未生成下载文件。',
+        '原文返回的不是 HTML 文章页面（HTTP 200），请检查原文链接；未生成下载文件。',
+        422,
+        { code: 'NON_HTML_RESPONSE', stage: 'article', upstreamStatus: 200 },
+      );
+    if (response.bytes.length > 5_000_000)
+      throw new ArticleDownloadError(
+        '原文超过 5 MB 安全大小限制，未生成下载文件。',
+        422,
+        { code: 'ARTICLE_TOO_LARGE', stage: 'article', upstreamStatus: 200 },
       );
     const html = response.bytes.toString('utf8');
     const page = load(html);
@@ -173,7 +313,15 @@ export async function buildArticleDownload(
         '#js_verify, #verify, .weui_msg, iframe[src*="captcha."], form[action*="/mp/verify"], form[action*="login"], input[type="password"]',
       ).length
     )
-      throw new ArticleDownloadError('原文需要登录或验证，未生成下载文件。');
+      throw new ArticleDownloadError(
+        '原文页面要求登录或验证，请先在微信官方页面处理；未生成下载文件。',
+        422,
+        {
+          code: 'AUTH_OR_VERIFICATION_PAGE',
+          stage: 'article',
+          upstreamStatus: 200,
+        },
+      );
     let identity: ReturnType<typeof articleIdentity>;
     let content: string | undefined;
     try {
@@ -234,6 +382,9 @@ export async function buildArticleDownload(
           : 0)
       );
     }, 0);
+    // The shared exporter deliberately replaces image errors with its generic message.
+    // Preserve this tool's safe diagnostic without changing subscription export behavior.
+    let imageFailure: ArticleDownloadError | undefined;
     const { markdown, contentHtml } = await buildArticleMarkdown(
       {
         id: identity.id,
@@ -249,21 +400,34 @@ export async function buildArticleDownload(
       async (source) => {
         try {
           allowedImageUrl(source);
-          const result = await request(source, 10_000_000);
-          if (result.status !== 200) throw new Error();
+          const result = await request(source, 10_000_000).catch((error) => {
+            throw transportFailure(error, 'image');
+          });
+          const failure = responseFailure(result, 'image');
+          if (failure) throw failure;
           const image = decodeInlineImage(
             `data:${result.type};base64,${result.bytes.toString('base64')}`,
           );
           totalBytes += image.bytes.length;
           if (totalBytes > 20_000_000) throw new Error();
           return image;
-        } catch {
-          throw new ArticleDownloadError(
-            '图片下载失败或超出安全限制，未生成下载文件；请稍后重试。',
-          );
+        } catch (error) {
+          const failure =
+            error instanceof ArticleDownloadError &&
+            error.diagnostic.stage === 'image'
+              ? error
+              : new ArticleDownloadError(
+                  '图片下载失败或超出安全限制，未生成下载文件。',
+                  422,
+                  { code: 'IMAGE_DOWNLOAD_FAILED', stage: 'image' },
+                );
+          imageFailure ??= failure;
+          throw failure;
         }
       },
-    );
+    ).catch((error) => {
+      throw imageFailure || error;
+    });
     const { writeFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const escapeHtml = (value: string) =>
@@ -301,8 +465,8 @@ export async function buildArticleDownload(
     };
   } catch (error) {
     if (error instanceof ArticleDownloadError) throw error;
-    throw new ArticleDownloadError(
-      '文章或图片下载失败，请检查链接或稍后重试；未生成下载文件。',
-    );
+    throw new ArticleDownloadError('下载文件生成失败，未生成下载文件。', 500, {
+      code: 'FILE_GENERATION_FAILED',
+    });
   }
 }

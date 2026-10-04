@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import {
   buildArticleDownload,
   downloadArticleUrl,
+  downloadRedirectKind,
   publicDownloadAddress,
   requestDownloadResource,
   resolveDownloadAddress,
@@ -129,6 +130,146 @@ describe('single article download, synthetic fixtures and no network', () => {
       '未生成',
     );
     expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [401, 'UPSTREAM_HTTP_ERROR', '要求登录'],
+    [403, 'UPSTREAM_HTTP_ERROR', '拒绝访问'],
+    [404, 'UPSTREAM_HTTP_ERROR', '链接不可用'],
+    [429, 'RATE_LIMITED', '暂勿重复点击'],
+    [500, 'UPSTREAM_HTTP_ERROR', '异常状态'],
+  ])(
+    'keeps HTTP %s provenance and does not retry or fetch images',
+    async (status, code, reason) => {
+      const request = jest.fn().mockResolvedValue({
+        bytes: Buffer.from(fixture()),
+        type: 'text/html',
+        status,
+      });
+      const failure = await buildArticleDownload(url, directory, request).catch(
+        (error) => error,
+      );
+      expect(failure.message).toContain(reason);
+      expect(failure.message).toContain(`HTTP ${status}`);
+      expect(failure.diagnostic).toEqual({
+        code,
+        stage: 'article',
+        upstreamStatus: status,
+      });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(await readdir(directory)).toEqual([]);
+    },
+  );
+
+  it.each([
+    [
+      '/mp/wappoc_appmsgcaptcha?key=secret',
+      'verification',
+      'VERIFICATION_REDIRECT',
+    ],
+    [
+      'https://open.weixin.qq.com/connect/oauth2?code=secret',
+      'login',
+      'LOGIN_REDIRECT',
+    ],
+    [shortUrl + '?pass_ticket=secret', 'article', 'UNSUPPORTED_REDIRECT'],
+    [
+      'https://evil.invalid/private?token=secret',
+      'other',
+      'UNSUPPORTED_REDIRECT',
+    ],
+    ['', 'missing', 'UNSUPPORTED_REDIRECT'],
+  ])(
+    'classifies redirect %s without following or exposing its destination',
+    async (location, kind, code) => {
+      const redirectKind = downloadRedirectKind(location, url);
+      expect(redirectKind).toBe(kind);
+      const request = jest.fn().mockResolvedValue({
+        bytes: Buffer.alloc(0),
+        type: 'text/html',
+        status: 302,
+        redirectKind,
+      });
+      const failure = await buildArticleDownload(url, directory, request).catch(
+        (error) => error,
+      );
+      expect(failure.diagnostic).toEqual({
+        code,
+        stage: 'article',
+        upstreamStatus: 302,
+        redirectKind: kind,
+      });
+      expect(
+        JSON.stringify({ message: failure.message, ...failure.diagnostic }),
+      ).not.toMatch(/secret|token|pass_ticket|evil\.invalid/);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(await readdir(directory)).toEqual([]);
+    },
+  );
+
+  it('distinguishes an HTTP 200 non-HTML response from a redirect', async () => {
+    const request = jest.fn().mockResolvedValue({
+      bytes: Buffer.from('{"token":"secret"}'),
+      type: 'application/json',
+      status: 200,
+    });
+    const failure = await buildArticleDownload(url, directory, request).catch(
+      (error) => error,
+    );
+    expect(failure.diagnostic.code).toBe('NON_HTML_RESPONSE');
+    expect(failure.message).not.toMatch(/secret|跳转|登录/);
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it.each([
+    ['ETIMEDOUT', 'connect secret timeout', 'NETWORK_TIMEOUT'],
+    ['ENOTFOUND', 'secret hostname', 'DNS_FAILURE'],
+    [
+      'ERR_BAD_RESPONSE',
+      'maxContentLength size secret exceeded',
+      'RESOURCE_TOO_LARGE',
+    ],
+  ])(
+    'keeps transport reason %s without exposing raw exception text',
+    async (code, message, expected) => {
+      const request = jest
+        .fn()
+        .mockRejectedValue(Object.assign(new Error(message), { code }));
+      const failure = await buildArticleDownload(url, directory, request).catch(
+        (error) => error,
+      );
+      expect(failure.diagnostic).toEqual({ code: expected, stage: 'article' });
+      expect(failure.message).not.toContain('secret');
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(await readdir(directory)).toEqual([]);
+    },
+  );
+
+  it('preserves image HTTP provenance and never returns a partial final file', async () => {
+    const request = jest.fn(async (target: string) =>
+      target.startsWith('https://mp.weixin.qq.com/')
+        ? {
+            bytes: Buffer.from(
+              fixture(
+                '<p>正文</p><img data-src="https://mmbiz.qpic.cn/one?wx_fmt=png">',
+              ),
+            ),
+            type: 'text/html',
+            status: 200,
+          }
+        : { bytes: Buffer.alloc(0), type: 'text/html', status: 429 },
+    );
+    const failure = await buildArticleDownload(url, directory, request).catch(
+      (error) => error,
+    );
+    expect(failure.diagnostic).toEqual({
+      code: 'RATE_LIMITED',
+      stage: 'image',
+      upstreamStatus: 429,
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(await readdir(directory)).not.toContain('index.html');
+    expect(await readdir(directory)).not.toContain('index.md');
   });
 
   it('strips executable HTML and escapes a title before export', async () => {

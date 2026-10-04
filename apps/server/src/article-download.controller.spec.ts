@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { INestApplication } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import request from 'supertest';
 import { writeFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -93,6 +94,45 @@ describe('article download HTTP, isolated controller and no database', () => {
     // Real ZIP contents and extraction are checked by the browser acceptance script.
     // Response completion and finally cleanup can settle in adjacent event-loop turns.
     await expectCleaned(folder);
+  });
+
+  it('returns and logs only safe failure provenance, never the raw URL or exception secrets', async () => {
+    const warning = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => {});
+    jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+      new download.ArticleDownloadError(
+        '原文跳转到验证页面（HTTP 302），未生成下载文件。',
+        422,
+        {
+          code: 'VERIFICATION_REDIRECT',
+          stage: 'article',
+          upstreamStatus: 302,
+          redirectKind: 'verification',
+        },
+      ),
+    );
+    const response = await request(app.getHttpServer())
+      .post('/download/article')
+      .set('authorization', 'fixture-access')
+      .send({ url: url + '?pass_ticket=request-secret' })
+      .expect(422);
+    expect(response.body.code).toBe('VERIFICATION_REDIRECT');
+    expect(response.body.upstreamStatus).toBe(302);
+    expect(response.body.redirectKind).toBe('verification');
+    expect(JSON.stringify(response.body)).not.toContain('request-secret');
+    expect(warning).toHaveBeenCalledWith(
+      JSON.stringify({
+        event: 'article-download-failed',
+        code: 'VERIFICATION_REDIRECT',
+        stage: 'article',
+        upstreamStatus: 302,
+        redirectKind: 'verification',
+      }),
+    );
+    expect(JSON.stringify(warning.mock.calls)).not.toMatch(
+      /fixture-access|request-secret|mp\.weixin/,
+    );
   });
 
   it('returns invalid-link and verification errors without returning a ZIP', async () => {

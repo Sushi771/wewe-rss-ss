@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   HttpCode,
+  Logger,
   Post,
   Request,
   Response,
@@ -24,6 +25,7 @@ export class ArticleDownloadController {
   constructor(private readonly config: ConfigService) {}
 
   private running = false;
+  private readonly logger = new Logger(ArticleDownloadController.name);
 
   @Post('article')
   @HttpCode(200)
@@ -84,10 +86,19 @@ export class ArticleDownloadController {
         );
       });
     } catch (error) {
+      // Keep response provenance, never URLs, Location, cookies, body or raw exception objects.
+      const diagnostic =
+        error instanceof ArticleDownloadError
+          ? error.diagnostic
+          : { code: 'FILE_GENERATION_FAILED' };
+      this.logger.warn(
+        JSON.stringify({ event: 'article-download-failed', ...diagnostic }),
+      );
       if (!res.headersSent)
         res
           .status(error instanceof ArticleDownloadError ? error.status : 500)
           .json({
+            ...diagnostic,
             message:
               error instanceof ArticleDownloadError
                 ? error.message
