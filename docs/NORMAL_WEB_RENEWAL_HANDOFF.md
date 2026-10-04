@@ -1,5 +1,7 @@
 # Normal Web renewal and reviewed continuation
 
+Day-two boundary was checked without HTTP or private-file writes: the reviewed authorization rejects time after the actual22:31:41 UTC expiry. The production manual-refresh provider does not call normal renewal; maintenance utilities are integration helpers, not an automatic renewal service. After actual expiry the owner must use normal account login and explicit preview/connection through existing UI. Do not extend expiry, repeat the successful renewal now, remove old stops or mix credentials. The current b3161eb deployment only adds verified saved-article export, which does not need platform authentication; see [real cached save](VERIFIED_CACHE_SAVE_ACCEPTANCE.md).
+
 Current integration status (2026-10-04): one authorized ordinary renewal at21:01:41 UTC succeeded for the same account, with real conservative expiry22:31:41 UTC. No repeat renewal or artificial extension occurred. PR9 time semantics and the existing-body image supplement are deployed as application802a7b5; the latest10 real bodies/images and original-route repeated deduplication passed. See the [actual acceptance](LATEST_TEN_IMAGE_ACCEPTANCE.md). The source-worker fixture report below is historical and does not replace these real integration results; all old stops and original scan evidence remain preserved.
 
 The integration owner's ordinary Web renewal returned HTTP 200 / `succ=1`, an

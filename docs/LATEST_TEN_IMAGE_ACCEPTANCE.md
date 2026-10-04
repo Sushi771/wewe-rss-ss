@@ -4,6 +4,8 @@
 
 ## 运行版本与部署保护
 
+以下`802a7b5`为本次真实图片刷新验收时的应用。随后仅补原工具的只读缓存保存，当前4000运行`b3161eb`，数据库正文、图片和全部字段保留；精确部署与实际Obsidian保存见[缓存验收](VERIFIED_CACHE_SAVE_ACCEPTANCE.md)，没有重复本页已通过的联网刷新。
+
 实际运行应用为 `802a7b5b2b00a68189845acef86d77b5dac1a8e9`，安装包 `2026-10-04T21-23-32-908Z-b0c6b75662b4`，源码哈希 `b0c6b75662b4540fcf0167b41d4f934bc19bdab4ca578e41e1e14537afdff55e`。182个输入逐字节对应应用提交；264个依赖、13301个清单文件的安装包完整性检查通过。后续文档提交不改变此运行应用。
 
 [应用CI 37235424240](https://github.com/Sushi771/wewe-rss-ss/actions/runs/37235424240)四个作业全部成功，43套/652项测试及TypeScript检查通过。安装包由 `node scripts/local-release/build.cjs` 隔离构建，经该包 `runtime.cjs verify`、SQLite副本启动演练，再用既有受控重启流程部署。服务仅监听 `127.0.0.1:4000`，定时刷新关闭。
