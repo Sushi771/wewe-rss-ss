@@ -372,16 +372,64 @@ export class TrpcRouter {
             await fs.promises.readFile(ownerConfigFile(), 'utf8'),
           );
           const feeds = await this.prismaService.feed.findMany({
-            where: {
-              id: { in: Object.keys(config.feeds || {}) },
-              collectionChannel: 'owner-weread-latest',
-            },
+            orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
           });
           const options = await Promise.all(
-            feeds.map(async (feed) => ({
-              ...(await previewManualWereadBinding(account, feed.id)),
-              name: feed.mpName,
-            })),
+            feeds.map(async (feed) => {
+              // Show every saved subscription. An absent private source or an
+              // existing different channel must remain an explicit disabled
+              // choice, never an automatic account/channel switch.
+              const configured = !!config.feeds?.[feed.id];
+              if (
+                !configured ||
+                feed.collectionChannel !== 'owner-weread-latest'
+              )
+                return {
+                  mpId: feed.id,
+                  name: feed.mpName,
+                  revision: '',
+                  ready: false,
+                  connected: false,
+                  connectedAt: null,
+                  refreshRequired: false,
+                  configured,
+                  reason: configured
+                    ? 'different-channel'
+                    : 'source-unconfigured',
+                  message: configured
+                    ? '该订阅使用其他更新通道；需先明确选择手动读书来源，当前通道保持不变。'
+                    : '该订阅尚未配置手动读书来源；账号登录不会自动绑定，也不会批量取文。',
+                };
+              const preview = await previewManualWereadBinding(
+                account,
+                feed.id,
+              );
+              let refreshAfterConnection = false;
+              try {
+                const result = JSON.parse(feed.lastCollectionResult || 'null');
+                refreshAfterConnection =
+                  preview.connected &&
+                  result?.source === 'owner-weread-latest' &&
+                  Number.isSafeInteger(result.attemptedAt) &&
+                  result.attemptedAt >=
+                    Math.floor(Date.parse(preview.connectedAt!) / 1000);
+              } catch {
+                // A malformed/old receipt cannot claim the new login refreshed.
+              }
+              return {
+                ...preview,
+                name: feed.mpName,
+                configured,
+                reason: preview.ready ? null : 'session-unavailable',
+                refreshRequired: preview.connected && !refreshAfterConnection,
+                ...(preview.connected && !refreshAfterConnection
+                  ? {
+                      message:
+                        '已连接此账号，尚无连接后的取文结果。请在该公众号页使用“更新本号”；连接确认仅保存授权。',
+                    }
+                  : {}),
+              };
+            }),
           );
           const profile = await nativeAccountProfile(
             account.id,

@@ -3,7 +3,10 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { OwnerWebSession, ownerSessionCookie } from './owner-web-search';
 import { readOwnerSearchConfig } from './owner-search-update';
-import { ownerLatestAuthHash } from './owner-weread-session-state';
+import {
+  ownerLatestAuthHash,
+  ownerLatestManualSessionAuthorized,
+} from './owner-weread-session-state';
 import { NativeAccountProfile } from '../weread/native-account-profile';
 
 type Account = { id: string; name: string; status: number; token: string };
@@ -351,11 +354,21 @@ export async function previewManualWereadBinding(
 ) {
   try {
     const i = await inputs(account, mpId);
+    const authorization = i.state.manualRefreshAuthorization;
+    const connected =
+      i.binding.ownerVid === account.id &&
+      i.binding.sessionFile === i.sessionFile &&
+      i.binding.wereadDirectoryEnabled === true &&
+      authorization?.authHash === i.authHash &&
+      authorization?.target === mpId &&
+      ownerLatestManualSessionAuthorized(i.state, i.session, account.id, mpId);
     return {
       mpId,
       name: i.binding.name,
       revision: i.revision,
       ready: true,
+      connected,
+      connectedAt: connected ? authorization.approvedAt : null,
       message: '连接后，点击原刷新按钮读取最近10篇正文和图片；遇限制即停止。',
     };
   } catch {
@@ -364,6 +377,8 @@ export async function previewManualWereadBinding(
       name: '',
       revision: '',
       ready: false,
+      connected: false,
+      connectedAt: null,
       message:
         '需要本软件保存的正常Web登录，且不能使用已失败的同一凭据。请用选定微信账号在账号页登录；旧停止保持。',
     };
