@@ -16,7 +16,10 @@ import { Feed } from '@prisma/client';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { ownerSessionCookie } from '../collection/owner-web-search';
-import { saveNativeAccountSession } from '../collection/owner-weread-binding';
+import {
+  saveNativeAccountSession,
+  saveNativeAccountProfile,
+} from '../collection/owner-weread-binding';
 import {
   CollectionRoute,
   parseBoundAlbumIds,
@@ -629,6 +632,15 @@ export class TrpcService {
             configFile,
             result.webSession,
           );
+          if (result.profile) {
+            // Failure to cache optional profile metadata must not discard a
+            // confirmed login; UI then explicitly reports nickname unavailable.
+            await saveNativeAccountProfile(
+              configFile,
+              result.profile,
+              result.webSession,
+            ).catch(() => undefined);
+          }
           if (bindings.length) {
             const key = createHash('sha256')
               .update(JSON.stringify(result.webSession))

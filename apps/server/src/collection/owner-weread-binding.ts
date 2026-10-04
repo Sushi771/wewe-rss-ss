@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { OwnerWebSession, ownerSessionCookie } from './owner-web-search';
 import { readOwnerSearchConfig } from './owner-search-update';
 import { ownerLatestAuthHash } from './owner-weread-session-state';
+import { NativeAccountProfile } from '../weread/native-account-profile';
 
 type Account = { id: string; name: string; status: number; token: string };
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -69,6 +70,114 @@ export async function saveNativeAccountSession(
   return file;
 }
 
+/** Read existing immutable normal-login evidence, never infer a scan from the
+ * account update timestamp. Only its time is returned; no credentials or paths.
+ */
+export async function nativeAccountLoginAt(accountId: string) {
+  try {
+    const configFile = ownerConfigFile();
+    const index = JSON.parse(
+      await fs.readFile(indexFile(configFile, accountId), 'utf8'),
+    );
+    const file = index.sessionFile;
+    if (
+      typeof file !== 'string' ||
+      path.resolve(path.dirname(file)) !==
+        path.resolve(path.dirname(configFile)) ||
+      !/^native-session-[a-f0-9]{24}\.json$/.test(path.basename(file))
+    )
+      return null;
+    const text = await fs.readFile(file, 'utf8');
+    if (
+      path.basename(file) !== `native-session-${hash(text).slice(0, 24)}.json`
+    )
+      return null;
+    const session: OwnerWebSession = JSON.parse(text);
+    if (
+      session.source !== 'owner-confirmed-native-web-login' ||
+      session.ownerVid !== accountId ||
+      !Number.isFinite(Date.parse(session.capturedAt)) ||
+      Date.parse(session.capturedAt) > Date.now() + 300000
+    )
+      return null;
+    return new Date(session.capturedAt).toISOString();
+  } catch {
+    // Legacy accounts need no scan record; damaged records confer no label.
+    return null;
+  }
+}
+
+const profileFile = (configFile: string, accountId: string) =>
+  path.join(
+    path.dirname(configFile),
+    `native-profile-${hash(accountId).slice(0, 24)}.json`,
+  );
+
+/** Metadata cache tied to the exact normal Web login, never a nickname-to-ID map. */
+export async function saveNativeAccountProfile(
+  configFile: string,
+  profile: NativeAccountProfile,
+  session: OwnerWebSession,
+) {
+  if (
+    profile.source !== 'owner-confirmed-native-profile' ||
+    profile.ownerVid !== session.ownerVid ||
+    profile.nativeLoginAt !== session.capturedAt ||
+    typeof profile.name !== 'string' ||
+    !profile.name.trim() ||
+    profile.name.length > 200 ||
+    /[\x00-\x1f\x7f]/.test(profile.name)
+  )
+    throw new Error('本人资料与正常登录不符。');
+  await replace(
+    profileFile(configFile, session.ownerVid),
+    JSON.stringify(profile),
+  );
+}
+
+export async function nativeAccountProfile(
+  accountId: string,
+  nativeLoginAt: string | null,
+) {
+  try {
+    if (!nativeLoginAt) return null;
+    const profile: NativeAccountProfile = JSON.parse(
+      await fs.readFile(profileFile(ownerConfigFile(), accountId), 'utf8'),
+    );
+    if (
+      profile.source !== 'owner-confirmed-native-profile' ||
+      profile.ownerVid !== accountId ||
+      profile.nativeLoginAt !== nativeLoginAt ||
+      !Number.isFinite(Date.parse(profile.capturedAt)) ||
+      typeof profile.name !== 'string' ||
+      !profile.name.trim() ||
+      profile.name.length > 200 ||
+      /[\x00-\x1f\x7f]/.test(profile.name)
+    )
+      return null;
+    // Only public image URLs from supported Tencent image hosts reach the UI.
+    let avatar: string | undefined;
+    try {
+      const url = new URL(profile.avatar || '');
+      if (
+        url.protocol === 'https:' &&
+        !url.username &&
+        !url.password &&
+        !url.port &&
+        ['qpic.cn', 'qlogo.cn', 'rescdn.qq.com'].some(
+          (host) => url.hostname === host || url.hostname.endsWith('.' + host),
+        )
+      )
+        avatar = url.href;
+    } catch {
+      /* A real name is useful even without an avatar. */
+    }
+    return { name: profile.name, ...(avatar ? { avatar } : {}) };
+  } catch {
+    return null;
+  }
+}
+
 async function inputs(account: Account, mpId: string) {
   if (account.status !== 1 || !/^\d+$/.test(account.id))
     throw new Error('请选择已启用的正常Web登录账号。');
@@ -84,7 +193,8 @@ async function inputs(account: Account, mpId: string) {
   const sessionFile = index.sessionFile;
   if (
     typeof sessionFile !== 'string' ||
-    path.dirname(sessionFile) !== path.dirname(configFile) ||
+    path.resolve(path.dirname(sessionFile)) !==
+      path.resolve(path.dirname(configFile)) ||
     !/^native-session-[a-f0-9]{24}\.json$/.test(path.basename(sessionFile))
   )
     throw new Error('正常Web登录记录无效，请在账号页重新登录。');

@@ -1,6 +1,20 @@
 # 手动刷新与文章下载集成（2026-10-04）
 
-## 单篇下载错误诊断修补（2026-10-04后续）
+## 当前组合部署（2026-10-04 15:49 UTC）
+
+正常Web登录连接和单篇直接保存已合并并受控部署。活动包为`.local-releases/2026-10-04T15-37-00-899Z-7d879ab21c42`，源码输入哈希`7d879ab21c4211df7ca524936f748af4846291ae982ab553f1b27f087b5b757e`，173项输入与应用提交`e2c05561d05f0c1b5aca7762f9a5b43b1096c4bc`逐字节一致；264项依赖、13297个清单文件，完整性检查通过。运行包没有包含后续提交`2c88f51a7be326944c6dd32a3326e06b302aadc0`，该提交仅修正文档格式，无运行逻辑差异，因此不重构包。
+
+CI按准确SHA区分：[e2c0556的CI 37213669671](https://github.com/Sushi771/wewe-rss-ss/actions/runs/37213669671)只有交接文档格式检查失败，其余三项作业成功；格式修补后，[2c88f51的CI 37214003397](https://github.com/Sushi771/wewe-rss-ss/actions/runs/37214003397)四项作业全部成功。不能将后者说成e2c0556的成功CI。组合本机完整回归39 suites/557 tests通过，前后端构建通过；最终文档回填提交的准确远端SHA及CI另记于本机忽略的`output/subscription-implementation/manual-refresh-download/delivery.json`。
+
+SQLite一致性副本受控启动演练通过，审计`controlled-restart-1791128560118-36256`；随后生产受控重启通过，审计`controlled-restart-1791128949898-12104`。原PID23860经完整实时身份匹配后停止，新PID32856，创建时间`2026-10-04T15:49:29.5846006Z`，只监听`127.0.0.1:4000`，活动指针已推进，无回滚。PID仅为当次证据，后续操作必须重新取实时身份，禁止复用此PID停止。Process句柄、启动时间、程序路径、命令行及原生监听归属保护均保留。
+
+部署后、用户新登录前的只读核对：2账号、12订阅、1450文章全部字段与停旧进程后的一致性备份相同，`quick_check=ok`；历史全文RSS为HTTP200、20篇、10,857,019字节。独立Edge加载真实本机资源，账号页两处“重新登录”和两处“连接手动更新”均可见；下载页默认保存路径、目录选择按钮可见，“每次下载询问路径”未勾选；工具导航及订阅仪表盘正常，无页面脚本错误。检查禁止取文、登录和绑定请求，未代用户扫码、确认连接或访问腾讯。自动更新仍持久关闭；部署未改变私有来源凭据、绑定、目录开关或旧停止。
+
+组合运行包的离线浏览器验收实际生成并打开Markdown相对图片，路径记忆、取消不取文、重复点击和已有用户笔记保护、失败不留下完整文章目录均通过；平台请求和生产数据库使用为0。Windows目录对话框在该自动回归中被模拟，尚未人工点击验收。证据在`output/playwright/article-local-save/summary.json`，源码映射在`output/subscription-implementation/manual-refresh-download/combined-package-source.json`；备份、截图、私有配置及原始证据不提交。
+
+用户已收到本机Edge/Chrome入口`http://127.0.0.1:4000/dash/accounts`，等待本人用已选账号正常扫码登录、核对昵称及脱敏VID后明确连接“妈妈部落畅聊阁”；详见[手动更新说明](WEREAD_MANUAL_REFRESH.md#正常web登录连接原手动刷新)。入口可见不代表腾讯允许目录或正文。最新10篇完整正文图片、原刷新去重及后续新文章仍待真实验收；已被验证阻挡的单篇链接未重试，真实链接保存未验收。此段为当前状态，下文旧包、旧PID和ZIP结果仅是历史记录。
+
+## 历史：单篇下载错误诊断修补（2026-10-04）
 
 应用修补提交`c122d27913cd766723dec3295dcda93ac765ba56`仅改工具请求的错误分类、脱敏日志和回归测试；原共享正文图片导出器继续复用，订阅Provider和凭据未改。全量37 suites/519 tests、格式/ESLint及[对应CI](https://github.com/Sushi771/wewe-rss-ss/actions/runs/37209313133)均通过，CI四项作业全部成功。
 
@@ -26,7 +40,7 @@ http://127.0.0.1:4000/dash/tools/article-download
 
 开发者可执行`cmd.exe /d /c "启动WeWe-RSS.bat --check"`验证启动链而不打开浏览器；该参数只省略打开页面，仍执行相同的版本、端口和进程身份检查。已有生产服务的实测返回`already-running`及原PID18288，未并起服务；失败身份拒绝回归通过。
 
-## 当前本机部署（2026-10-04）
+## 历史：首次本机部署（2026-10-04）
 
 集成包已通过受控冷启动，固定监听 `127.0.0.1:4000`，活动指针已切到下述包。启动审计为本机忽略目录 `output/playwright/local-release-audit/controlled-restart-1791111748983-19472`，包含一致性备份、完整进程身份及检查结果。2账号/12订阅/1450文章与启动前备份逐字段一致，SQLite quick_check=ok。定时更新继续关闭，来源凭据、绑定、目录开关和旧停止记录不变；未点击取文或刷新。
 
@@ -42,12 +56,12 @@ http://127.0.0.1:4000/dash/tools/article-download
 - 生产库只读核对2账号/12订阅/1450文章、quick_check=ok；启动后全部账号、订阅和文章字段与启动前备份一致，未改变来源凭据或绑定。
 - 下载分支原先已通过合成浏览器ZIP下载、解压后断网HTML/PNG验收。本轮组合重新执行上述全量测试与构建；真实微信链接、当前官方账号的实时最新10篇尚未验收。不能把合成结果、已有40篇目录或1篇历史正文图片称为订阅恢复。
 
-## 部署步骤（已完成一次受控冷启动）
+## 部署步骤
 
 在项目根目录执行包完整性检查，不读取账号或启动服务：
 
 ```powershell
-& '.\.local-releases\2026-10-04T10-18-17-755Z-213913c1bd74\runtime\node.exe' '.\.local-releases\2026-10-04T10-18-17-755Z-213913c1bd74\runtime.cjs' verify
+& '.\.local-releases\2026-10-04T15-37-00-899Z-7d879ab21c42\runtime\node.exe' '.\.local-releases\2026-10-04T15-37-00-899Z-7d879ab21c42\runtime.cjs' verify
 ```
 
 实际部署前，单一集成者须确认私有运行配置可正常读取，保持现有登录设置和来源停止；不要直接按缺少定时禁用项的源码`.env`启动。当前schema沿用受控冷启动器，它实时检查端口、schema、一致性备份和数据基线；不调用旧schema的`switch.cjs`。4000仍空闲时，部署命令如下：
@@ -55,12 +69,12 @@ http://127.0.0.1:4000/dash/tools/article-download
 ```powershell
 $env:ENABLE_SCHEDULED_UPDATES='0'
 $env:DISABLE_SCHEDULED_UPDATES='1'
-node scripts/local-release/restart.cjs --mode start --production --release .local-releases/2026-10-04T10-18-17-755Z-213913c1bd74 --database apps/server/data/wewe-rss.db
+node scripts/local-release/restart.cjs --mode start --production --release .local-releases/2026-10-04T15-37-00-899Z-7d879ab21c42 --database apps/server/data/wewe-rss.db
 ```
 
 受控运行固定监听 `127.0.0.1:4000`，上述环境值优先于配置文件，定时更新保持关闭。如果届时4000已有监听，冷启动器拒绝启动；需要重启时必须先取得该进程的实时身份，再用`--mode restart`及对应`--expected-*`参数，不能复用旧PID。此包不包含账号凭据，不能独立拷走就获得现有账号。
 
-构建、完整性检查和本轮离线测试均不执行微信平台抓取。按上述手动模式启动不主动取文；用户之后点击文章下载会发起一篇公开文章及其图片请求，限制/验证/跳转或图片失败则停止。原刷新仍受既有账号归属、停止和私有来源配置保护；`wereadDirectoryEnabled`生产未启用，只有选定当前官方网页账号的受支持可重复读取通路核实后才能启用。不得靠开关、重放认证头或绕过浏览器停止来补这个缺口。
+构建、完整性检查和本轮离线测试均不执行微信平台抓取。按上述手动模式启动不主动取文；用户之后点击文章下载会发起一篇公开文章及其图片请求，限制/验证/跳转或图片失败则停止。原刷新仍受既有账号归属、停止和私有来源配置保护；部署时`wereadDirectoryEnabled`未启用。本人完成正常登录并通过账号页明确连接时才启用首次有界目录验证；已有停止、冷却和同一失败凭据禁止重复授权的门禁保留，不能手工改开关绕过。
 
 ## 后续验收
 

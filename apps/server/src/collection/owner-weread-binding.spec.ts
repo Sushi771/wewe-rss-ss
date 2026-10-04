@@ -5,6 +5,9 @@ import * as os from 'node:os';
 import { createHash } from 'node:crypto';
 import {
   saveNativeAccountSession,
+  nativeAccountLoginAt,
+  nativeAccountProfile,
+  saveNativeAccountProfile,
   previewManualWereadBinding,
   confirmManualWereadBinding,
 } from './owner-weread-binding';
@@ -105,6 +108,47 @@ describe('normal native login to explicitly confirmed manual Provider binding (o
     await fs.rm(dir, { recursive: true, force: true });
   });
   const text = (file: string) => fs.readFile(file, 'utf8');
+  it('reads persisted scan time across service restarts and rejects tampered or mismatched evidence', async () => {
+    expect(await nativeAccountLoginAt('123')).toBeNull();
+    const file = await saveNativeAccountSession(configFile, session);
+    expect(await nativeAccountLoginAt('123')).toBe(session.capturedAt);
+    expect(await nativeAccountLoginAt('456')).toBeNull();
+    await fs.writeFile(
+      file,
+      JSON.stringify({ ...session, capturedAt: '2025-01-01T00:00:00Z' }),
+    );
+    expect(await nativeAccountLoginAt('123')).toBeNull();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
+  it('normalizes Windows slash styles and keeps a real profile bound to the exact account and scan', async () => {
+    await saveNativeAccountSession(configFile, session);
+    process.env.OWNER_SEARCH_CONFIG_FILE = configFile.split(path.sep).join('/');
+    expect(await nativeAccountLoginAt('123')).toBe(session.capturedAt);
+    expect((await previewManualWereadBinding(account(), mpId)).ready).toBe(
+      true,
+    );
+    await saveNativeAccountProfile(
+      configFile,
+      {
+        source: 'owner-confirmed-native-profile',
+        ownerVid: '123',
+        name: '真实昵称',
+        nativeLoginAt: session.capturedAt,
+        capturedAt: new Date().toISOString(),
+      },
+      session,
+    );
+    expect(await nativeAccountProfile('123', session.capturedAt)).toEqual({
+      name: '真实昵称',
+    });
+    expect(
+      await nativeAccountProfile('123', '2025-01-01T00:00:00Z'),
+    ).toBeNull();
+    expect(await nativeAccountProfile('456', session.capturedAt)).toBeNull();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
   it('persists an unbound server-issued login and previews without changing bindings, stops or sending requests', async () => {
     const configBefore = await text(configFile),
       stateBefore = await text(stateFile);

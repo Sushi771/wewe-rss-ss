@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
+import { saveNativeAccountSession } from '../collection/owner-weread-binding';
 jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest.fn(),
 }));
@@ -51,6 +52,48 @@ describe('private owner accounts', () => {
     ).toHaveLength(1);
     expect(findMany.mock.calls[0][0].select.token).toBe(false);
   });
+  it('returns only immutable native scan time, without treating account edits as logins', async () => {
+    const capturedAt = '2026-01-02T03:04:05.000Z';
+    await saveNativeAccountSession(process.env.OWNER_SEARCH_CONFIG_FILE!, {
+      source: 'owner-confirmed-native-web-login',
+      ownerVid: '123',
+      capturedAt,
+      cookies: [
+        {
+          name: 'wr_vid',
+          value: '123',
+          domain: '.weread.qq.com',
+          path: '/',
+          secure: true,
+          expires: -1,
+        },
+        {
+          name: 'wr_skey',
+          value: 'private-fixture',
+          domain: '.weread.qq.com',
+          path: '/',
+          secure: true,
+          expires: -1,
+        },
+      ],
+    });
+    const findMany = jest.fn().mockResolvedValue([
+      { id: '123', name: 'WeRead_123', updatedAt: new Date() },
+      { id: '456', name: 'old-label', updatedAt: new Date() },
+    ]);
+    const { router } = setup({ account: { findMany } });
+    const result = await router.appRouter
+      .createCaller({ errorMsg: null })
+      .account.list({});
+    expect(result.items.map((item) => item.nativeLoginAt)).toEqual([
+      capturedAt,
+      null,
+    ]);
+    expect(JSON.stringify(result)).not.toContain('private-fixture');
+    expect(JSON.stringify(result)).not.toContain(dir);
+    expect(findMany.mock.calls[0][0].select.token).toBe(false);
+  });
+
   it('requires both authentication and a local caller for manual binding preview and confirmation', async () => {
     const findUniqueOrThrow = jest.fn();
     const { router } = setup({ account: { findUniqueOrThrow } });

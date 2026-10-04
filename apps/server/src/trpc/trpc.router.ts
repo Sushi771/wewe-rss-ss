@@ -37,6 +37,8 @@ import {
   ownerConfigFile,
   previewManualWereadBinding,
   confirmManualWereadBinding,
+  nativeAccountLoginAt,
+  nativeAccountProfile,
 } from '../collection/owner-weread-binding';
 
 const searchCandidateSnapshotSchema = z.object({
@@ -381,8 +383,12 @@ export class TrpcRouter {
               name: feed.mpName,
             })),
           );
+          const profile = await nativeAccountProfile(
+            account.id,
+            await nativeAccountLoginAt(account.id),
+          );
           return {
-            accountLabel: `${account.name}（VID …${account.id.slice(-4)}）`,
+            accountLabel: `${profile?.name || (!account.name || account.name === `WeRead_${account.id}` ? '昵称未读取' : `保存名称：${account.name}`)}（编号末四位 ${account.id.slice(-4)}）`,
             options,
           };
         } catch {
@@ -465,9 +471,21 @@ export class TrpcRouter {
         }
 
         const disabledAccounts = this.trpcService.getBlockedAccountIds();
+        const identifiedItems = await Promise.all(
+          items.map(async (item) => {
+            const nativeLoginAt = await nativeAccountLoginAt(item.id);
+            const profile = await nativeAccountProfile(item.id, nativeLoginAt);
+            return {
+              ...item,
+              nativeLoginAt,
+              platformName: profile?.name || null,
+              platformAvatar: profile?.avatar || null,
+            };
+          }),
+        );
         return {
           blocks: disabledAccounts,
-          items,
+          items: identifiedItems,
           nextCursor,
         };
       }),
