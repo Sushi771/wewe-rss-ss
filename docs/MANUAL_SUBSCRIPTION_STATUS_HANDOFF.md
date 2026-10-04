@@ -2,6 +2,13 @@
 
 ## Integration follow-up
 
+Offline follow-up identified the saved `-2012` response message as login timeout
+and verified that the stop belongs to the current bound normal Web login.
+See [directory authentication diagnosis](WEREAD_DIRECTORY_LOGIN_TIMEOUT.md) for
+the official homepage/reader distinction, existing renewal implementation,
+remaining uncertainty and bounded integration decision. No platform request,
+renewal or stop clearance was performed by this follow-up.
+
 The integration owner used the existing authorized local application authentication and the saved target binding to execute the original refresh exactly once at 2026-10-04T17:53:06Z. The first directory response was HTTP200 with business code -2012 (70 bytes). The provider persisted a new stop after one request; no body/image request or account rotation followed. Account/article fields and other subscriptions stayed unchanged; only the target's authorized receipt fields changed. These are current results, distinct from the historical cover401 below. The integrated deployment retains this stop and all user login/binding changes. No rescan or automatic retry is prescribed. See [integrated status](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md).
 
 This change makes the existing account connection preview show every saved

@@ -7,6 +7,9 @@ const sha = (value: string | Buffer) =>
   createHash('sha256').update(value).digest('hex');
 
 const failureReasons: Record<string, string> = {
+  // Observed /web/mp/articles response and the first-party reader's -0x7dc
+  // branch identify login timeout. This description grants no retry/renewal.
+  '业务码 -2012': '微信读书登录超时（业务码 -2012）',
   WEREAD_DIRECTORY_INVALID: '目录响应格式或业务字段无效',
   WEREAD_DIRECTORY_GROUP_INVALID: '目录群发组无效',
   WEREAD_DIRECTORY_ARTICLE_INVALID: '目录文章身份或发布时间无效',
