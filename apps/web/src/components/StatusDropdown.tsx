@@ -17,7 +17,10 @@ export function StatusDropdown({
   return (
     <Dropdown>
       <DropdownTrigger>
-        <div className="hover:text-primary flex cursor-pointer items-center gap-1 text-[14px] text-neutral-600 transition-colors dark:text-neutral-400">
+        <button
+          type="button"
+          className="hover:text-primary inline-flex min-w-[56px] shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap py-1 text-[14px] text-neutral-600 transition-colors dark:text-neutral-400"
+        >
           {statusMap[value].label}
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -32,7 +35,7 @@ export function StatusDropdown({
           >
             <path d="m6 9 6 6 6-6" />
           </svg>
-        </div>
+        </button>
       </DropdownTrigger>
       <DropdownMenu
         disabledKeys={['0']}

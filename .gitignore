@@ -83,6 +83,7 @@ web_modules/
 .env.private-online
 .env.public-album
 private-data/
+apps/server/data/.article-download-settings.json*
 .wechat2rss-data/
 
 # parcel-bundler cache (https://parceljs.org/)

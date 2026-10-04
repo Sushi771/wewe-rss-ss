@@ -193,10 +193,70 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
     const state = JSON.parse(
       await fs.readFile(c().wereadLatestStateFile, 'utf8'),
     );
-    expect(state.stop).toMatchObject({ stage: 'directory-0', requests: 1 });
-    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow();
+    expect(state.stop).toMatchObject({
+      stage: 'directory-0',
+      requests: 1,
+      reason: '业务码 -2041',
+    });
+    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow(
+      '目录已停止：业务码 -2041',
+    );
     expect(axios.get).toHaveBeenCalledTimes(1);
   });
+  it('reports a content business refusal at HTTP 200 and keeps its private text out of the stop', async () => {
+    (axios.get as jest.Mock)
+      .mockResolvedValueOnce({
+        status: 200,
+        data: JSON.stringify({
+          reviews: Array.from({ length: 10 }, (_, i) => directoryGroup(i + 1)),
+        }),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: JSON.stringify({
+          errcode: '-2041',
+          message: 'private-upstream-token',
+        }),
+      });
+    const config = { ...c(), wereadDirectoryEnabled: true };
+    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow(
+      '正文（业务码 -2041）',
+    );
+    const text = await fs.readFile(c().wereadLatestStateFile, 'utf8');
+    expect(JSON.parse(text).stop).toMatchObject({
+      stage: 'content-1',
+      requests: 2,
+      reason: '业务码 -2041',
+    });
+    expect(text).not.toContain('private-upstream-token');
+    expect(JSON.parse(text).lastSuccessAt).toBeUndefined();
+    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow(
+      '正文已停止：业务码 -2041',
+    );
+    expect(axios.get).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    ['<html>unexpected directory</html>', '读书响应格式无效'],
+    [JSON.stringify({ reviews: [] }), '目录未返回最近10篇'],
+    [JSON.stringify({ errCode: 'secret-token' }), '读书响应格式无效'],
+    [JSON.stringify({ errCode: 0, code: -2041 }), '业务码 -2041'],
+  ])(
+    'reports an invalid directory without reading any bodies (%s)',
+    async (data, reason) => {
+      (axios.get as jest.Mock).mockResolvedValue({ status: 200, data });
+      const config = { ...c(), wereadDirectoryEnabled: true };
+      await expect(fetchOwnerWereadLatest(config)).rejects.toThrow(
+        `目录（${reason}）`,
+      );
+      expect(
+        JSON.parse(await fs.readFile(c().wereadLatestStateFile, 'utf8')).stop,
+      ).toMatchObject({ stage: 'directory-0', reason, requests: 1 });
+      await expect(fetchOwnerWereadLatest(config)).rejects.toThrow(
+        `目录已停止：${reason}`,
+      );
+      expect(axios.get).toHaveBeenCalledTimes(1);
+    },
+  );
   it('a conflicting tenth body rejects the batch and never reaches image fetching', async () => {
     const fetch = jest
       .spyOn(global, 'fetch')
@@ -228,9 +288,11 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
     ).rejects.toThrow();
     expect(fetch).not.toHaveBeenCalled();
     expect(
-      JSON.parse(await fs.readFile(c().wereadLatestStateFile, 'utf8')).stop
-        .stage,
-    ).toBe('content-10');
+      JSON.parse(await fs.readFile(c().wereadLatestStateFile, 'utf8')).stop,
+    ).toMatchObject({
+      stage: 'content-10',
+      reason: '正文与目录的身份、标题或发布时间冲突',
+    });
   });
   it('fetches bounded cover/content, validates real identity/time, keeps original stop and cooldown', async () => {
     (axios.get as jest.Mock)
