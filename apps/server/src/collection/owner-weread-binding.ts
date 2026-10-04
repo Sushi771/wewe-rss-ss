@@ -178,6 +178,59 @@ export async function nativeAccountProfile(
   }
 }
 
+/** Legacy cover-401 records had only a cookie hash. Normal logins retained
+ * exact pre-change configs, so follow only that bounded, immutable chain.
+ * Every step must change solely the session pointer and ultimately match the
+ * recorded stopped cookie. Unknown/challenge stops never use this recovery.
+ */
+async function legacyStoppedAuthHash(
+  configFile: string,
+  binding: any,
+  state: any,
+) {
+  const refused = () => new Error('历史停止的会话归属无法核验，未解除门禁。');
+  if (
+    state.stop?.stage !== 'cover' ||
+    state.stop?.reason !== 'HTTP 401' ||
+    state.stop?.requests !== 1 ||
+    !/^[a-f0-9]{64}$/.test(state.sessionHash || '')
+  )
+    throw refused();
+  let previous = binding;
+  const visited = new Set<string>();
+  for (let depth = 0; depth < 8; depth++) {
+    const text = await fs.readFile(previous.sessionFile, 'utf8');
+    if (visited.has(hash(text))) throw refused();
+    visited.add(hash(text));
+    const oldSession: OwnerWebSession = JSON.parse(text);
+    const captured = Date.parse(oldSession.capturedAt);
+    const cookie = ownerSessionCookie(oldSession, previous.ownerVid, captured);
+    if (hash(cookie) === state.sessionHash) {
+      if (captured > Date.parse(state.stop.at)) throw refused();
+      return ownerLatestAuthHash(oldSession, previous.ownerVid, captured);
+    }
+    if (oldSession.source !== 'owner-confirmed-native-web-login')
+      throw refused();
+    const snapshot = JSON.parse(
+      await fs.readFile(
+        configFile + `.before-native-${hash(text).slice(0, 24)}`,
+        'utf8',
+      ),
+    );
+    const prior = snapshot.feeds?.[binding.mpId];
+    if (
+      !prior ||
+      typeof prior.sessionFile !== 'string' ||
+      !path.isAbsolute(prior.sessionFile) ||
+      JSON.stringify({ ...prior, sessionFile: previous.sessionFile }) !==
+        JSON.stringify(previous)
+    )
+      throw refused();
+    previous = prior;
+  }
+  throw refused();
+}
+
 async function inputs(account: Account, mpId: string) {
   if (account.status !== 1 || !/^\d+$/.test(account.id))
     throw new Error('请选择已启用的正常Web登录账号。');
@@ -251,9 +304,10 @@ async function inputs(account: Account, mpId: string) {
       binding.ownerVid,
       captured,
     );
-    if (hash(oldCookie) !== state.sessionHash)
-      throw new Error('历史停止的会话归属无法核验，未解除门禁。');
-    priorAuthHash = ownerLatestAuthHash(oldSession, binding.ownerVid, captured);
+    priorAuthHash =
+      hash(oldCookie) === state.sessionHash
+        ? ownerLatestAuthHash(oldSession, binding.ownerVid, captured)
+        : await legacyStoppedAuthHash(configFile, binding, state);
   }
   if (state.stop && (!priorAuthHash || priorAuthHash === authHash))
     throw new Error(

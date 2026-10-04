@@ -149,6 +149,77 @@ describe('normal native login to explicitly confirmed manual Provider binding (o
     expect(axios.get).not.toHaveBeenCalled();
   });
 
+  async function legacySnapshotChain() {
+    const original = {
+      ...priorSession,
+      capturedAt: '2024-01-01T00:00:00.000Z',
+    };
+    await fs.writeFile(
+      path.join(dir, 'old-session.json'),
+      JSON.stringify(original),
+    );
+    const state = JSON.parse(await text(stateFile));
+    delete state.sessionAuthHash;
+    delete state.stop.sessionAuthHash;
+    state.sessionHash = createHash('sha256')
+      .update(
+        ownerSessionCookie(original, '123', Date.parse(original.capturedAt)),
+      )
+      .digest('hex');
+    await fs.writeFile(stateFile, JSON.stringify(state));
+    let snapshot = '';
+    for (const current of [makeSession('intermediate-native'), session]) {
+      const raw = await text(configFile);
+      const file = await saveNativeAccountSession(configFile, current);
+      snapshot =
+        configFile +
+        `.before-native-${createHash('sha256').update(JSON.stringify(current)).digest('hex').slice(0, 24)}`;
+      await fs.writeFile(snapshot, raw, { flag: 'wx' });
+      const config = JSON.parse(raw);
+      config.feeds[mpId].sessionFile = file;
+      await fs.writeFile(configFile, JSON.stringify(config));
+    }
+    return snapshot;
+  }
+
+  it('proves the exact two-snapshot legacy cover-401 chain without writing or clearing any stop', async () => {
+    await legacySnapshotChain();
+    const beforeConfig = await text(configFile),
+      beforeState = await text(stateFile);
+    const preview = await previewManualWereadBinding(account(), mpId);
+    expect(preview.ready).toBe(true);
+    expect(await text(configFile)).toBe(beforeConfig);
+    expect(await text(stateFile)).toBe(beforeState);
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'missing snapshot',
+    'changed identity',
+    'challenge stop',
+    'unknown stop',
+    'wrong hash',
+  ])('rejects unsafe legacy recovery: %s', async (kind) => {
+    const snapshot = await legacySnapshotChain();
+    if (kind === 'missing snapshot') await fs.unlink(snapshot);
+    if (kind === 'changed identity') {
+      const old = JSON.parse(await text(snapshot));
+      old.feeds[mpId].ownerVid = '456';
+      await fs.writeFile(snapshot, JSON.stringify(old));
+    }
+    const state = JSON.parse(await text(stateFile));
+    if (kind === 'challenge stop') state.stop.reason = 'captcha';
+    if (kind === 'unknown stop') state.stop.stage = 'unknown';
+    if (kind === 'wrong hash') state.sessionHash = 'f'.repeat(64);
+    await fs.writeFile(stateFile, JSON.stringify(state));
+    const before = await text(stateFile);
+    expect((await previewManualWereadBinding(account(), mpId)).ready).toBe(
+      false,
+    );
+    expect(await text(stateFile)).toBe(before);
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
   it('persists an unbound server-issued login and previews without changing bindings, stops or sending requests', async () => {
     const configBefore = await text(configFile),
       stateBefore = await text(stateFile);
