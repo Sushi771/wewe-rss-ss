@@ -77,12 +77,17 @@ export function ownerLatestManualSessionAuthorized(
   session: OwnerWebSession,
   ownerVid: string,
   mpId: string,
+  now = Date.now(),
 ) {
-  if (ownerLatestReviewedBatchAuthorized(state, session, ownerVid, mpId))
+  if (ownerLatestDailyRenewalAuthorized(state, session, ownerVid, mpId, now))
     return true;
-  if (ownerLatestNormalMaintenanceAuthorized(state, session, ownerVid, mpId))
+  if (ownerLatestReviewedBatchAuthorized(state, session, ownerVid, mpId, now))
     return true;
-  const authHash = ownerLatestAuthHash(session, ownerVid);
+  if (
+    ownerLatestNormalMaintenanceAuthorized(state, session, ownerVid, mpId, now)
+  )
+    return true;
+  const authHash = ownerLatestAuthHash(session, ownerVid, now);
   const a = state.manualRefreshAuthorization;
   return (
     a?.source === 'owner-confirmed-native-web-login' &&
@@ -92,13 +97,70 @@ export function ownerLatestManualSessionAuthorized(
     a.sessionCapturedAt === session.capturedAt &&
     Number.isFinite(Date.parse(a.approvedAt)) &&
     Date.parse(a.approvedAt) >= Date.parse(session.capturedAt) &&
-    Date.parse(a.approvedAt) <= Date.now() + 300000 &&
+    Date.parse(a.approvedAt) <= now + 300000 &&
     a.stopHash === sha(JSON.stringify(state.stop ?? null)) &&
     (!state.stop ||
       (/^[a-f0-9]{64}$/.test(a.priorAuthHash || '') &&
         Date.parse(session.capturedAt) > Date.parse(state.stop.at) &&
         a.priorAuthHash !== authHash &&
         state.stop.sessionAuthHash !== authHash))
+  );
+}
+
+/** One normal renewal following an already successful local manual collection.
+ * A pending validation gets one reservation; new collection/renewal failures
+ * invalidate it. The exact old stop and original human login remain evidence. */
+export function ownerLatestDailyRenewalAuthorized(
+  state: any,
+  session: OwnerWebSession,
+  ownerVid: string,
+  mpId: string,
+  now = Date.now(),
+) {
+  const a = state.normalManualRenewalAuthorization;
+  if (
+    !a ||
+    state.normalManualRenewalStop?.bindingSessionSha256 ===
+      a.bindingSessionSha256
+  )
+    return false;
+  const auth = ownerLatestAuthHash(session, ownerVid, now);
+  const complete =
+    Number.isSafeInteger(state.lastSuccessAt) &&
+    state.lastSuccessAt <= now + 300000 &&
+    state.response?.stage === 'content-10' &&
+    state.response?.httpStatus === 200 &&
+    Array.isArray(state.articleIds) &&
+    state.articleIds.length === 10 &&
+    new Set(state.articleIds).size === 10;
+  return (
+    a.source === 'successful-local-manual-normal-renewal' &&
+    a.policy === 'one-validation-then-local-manual-no-retry' &&
+    a.ownerVid === ownerVid &&
+    a.target === mpId &&
+    session.source === 'owner-confirmed-native-web-login' &&
+    a.normalLoginAt === session.capturedAt &&
+    a.renewedAt === session.renewedAt &&
+    a.resultingSessionSha256 === sha(JSON.stringify(session)) &&
+    a.resultingAuthHash === auth &&
+    a.parentAuthHash !== auth &&
+    [a.bindingSessionSha256, a.parentSessionSha256, a.responseSha256].every(
+      (v) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v),
+    ) &&
+    a.retainedStopSha256 === sha(JSON.stringify(state.stop ?? null)) &&
+    Number.isFinite(Date.parse(a.renewedAt)) &&
+    Date.parse(a.renewedAt) <= now + 300000 &&
+    Number.isFinite(Date.parse(a.validUntil)) &&
+    now < Date.parse(a.validUntil) &&
+    complete &&
+    (!a.consumedAt
+      ? state.sessionAuthHash === a.parentAuthHash &&
+        state.lastSuccessAt === a.previousSuccessAt &&
+        state.lastAttemptAt <= state.lastSuccessAt
+      : Number.isFinite(Date.parse(a.consumedAt)) &&
+        Date.parse(a.consumedAt) >= Date.parse(a.renewedAt) &&
+        state.lastSuccessAt >= Date.parse(a.consumedAt) &&
+        state.sessionAuthHash === auth)
   );
 }
 

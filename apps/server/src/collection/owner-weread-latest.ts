@@ -21,8 +21,10 @@ import {
   ownerLatestStopMessage,
   ownerLatestNormalMaintenanceAuthorized,
   ownerLatestReviewedBatchAuthorized,
+  ownerLatestDailyRenewalAuthorized,
 } from './owner-weread-session-state';
 import { readReviewedWereadBatchCache } from './owner-weread-batch-resume';
+import { manualWebSession } from '../weread/manual-web-renewal';
 
 /** Normal owner Web session. The directory mode requires an explicit verified
  * private binding; old bindings retain their cover-only mode and access stops.
@@ -64,10 +66,11 @@ export async function fetchOwnerWereadLatest(
     }
     let session: OwnerWebSession, Cookie: string;
     try {
-      session = JSON.parse(await fs.readFile(c.sessionFile, 'utf8'));
+      session = await manualWebSession(c, state, trigger, write);
       Cookie = ownerSessionCookie(session, c.ownerVid);
       sessionAuthHash = ownerLatestAuthHash(session, c.ownerVid);
-    } catch {
+    } catch (error) {
+      if (error instanceof OwnerUpdateStopped) throw error;
       throw new OwnerUpdateStopped(
         '当前读书会话账号或凭据无法核验，本次未发联网请求；历史停止记录及旧正文保留。',
       );
@@ -84,7 +87,16 @@ export async function fetchOwnerWereadLatest(
       c.ownerVid,
       c.mpId,
     );
-    if ((maintenance || repairedBatch) && trigger !== 'local-manual')
+    const dailyRenewal = ownerLatestDailyRenewalAuthorized(
+      state,
+      session,
+      c.ownerVid,
+      c.mpId,
+    );
+    if (
+      (maintenance || repairedBatch || dailyRenewal) &&
+      trigger !== 'local-manual'
+    )
       throw new OwnerUpdateStopped(
         '正常续期仅供本机原手动刷新验证，未发送平台请求，旧文章保留。',
       );
@@ -110,6 +122,10 @@ export async function fetchOwnerWereadLatest(
       throw new Error('WEREAD_BATCH_CACHE_INVALID');
     const cookies = new OwnerWebCookieLifecycle(session, c.ownerVid);
     state.lastAttemptAt = Date.now();
+    if (dailyRenewal && !state.normalManualRenewalAuthorization.consumedAt)
+      state.normalManualRenewalAuthorization.consumedAt = new Date(
+        state.lastAttemptAt,
+      ).toISOString();
     state.sessionHash = createHash('sha256').update(Cookie).digest('hex');
     state.sessionAuthHash = sessionAuthHash;
     const responseAttemptAt = resumed

@@ -27,6 +27,7 @@ function credentialHeader(value: unknown): string | undefined {
 export async function renewDirectWebTicket(
   session: OwnerWebSession,
   ownerVid: string,
+  parentSessionText = JSON.stringify(session),
 ): Promise<
   NormalWebRenewal & {
     ticket?: string;
@@ -83,6 +84,7 @@ export async function renewDirectWebTicket(
       setCookies: response.headers['set-cookie'],
     },
     new Date().toISOString(),
+    parentSessionText,
   );
   return {
     ...updated,
