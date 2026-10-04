@@ -245,13 +245,25 @@ describe('private owner accounts', () => {
       expect(JSON.stringify(connected)).not.toContain('private-fixture');
       expect(JSON.stringify(connected)).not.toContain(dir);
       const boundText = await fs.readFile(configFile, 'utf8');
+      const connectionSecond = Math.floor(
+        Date.parse(connected.options[0].connectedAt) / 1000,
+      );
+      feeds[0].lastCollectionResult = JSON.stringify({
+        source: 'unavailable',
+        status: 'blocked',
+        attemptedAt: connectionSecond + 1,
+      });
+      expect(
+        (await caller.account.manualRefreshOptions({ accountId: account.id }))
+          .options[0].refreshRequired,
+      ).toBe(true);
       for (const status of ['blocked', 'partial']) {
         feeds[0].lastCollectionResult = JSON.stringify({
           source: 'owner-weread-latest',
           status,
           articles: status === 'partial' ? 10 : 0,
           created: 0,
-          attemptedAt: Math.floor(Date.now() / 1000),
+          attemptedAt: connectionSecond + 1,
         });
         const refreshed = await caller.account.manualRefreshOptions({
           accountId: account.id,

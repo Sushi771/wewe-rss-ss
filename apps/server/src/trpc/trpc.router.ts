@@ -411,8 +411,9 @@ export class TrpcRouter {
                   preview.connected &&
                   result?.source === 'owner-weread-latest' &&
                   Number.isSafeInteger(result.attemptedAt) &&
-                  result.attemptedAt >=
-                    Math.floor(Date.parse(preview.connectedAt!) / 1000);
+                  // Whole-second legacy receipts cannot prove ordering inside
+                  // the connection's fractional second. Keep that case pending.
+                  result.attemptedAt * 1000 >= Date.parse(preview.connectedAt!);
               } catch {
                 // A malformed/old receipt cannot claim the new login refreshed.
               }
