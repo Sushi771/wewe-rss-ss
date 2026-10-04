@@ -1,5 +1,13 @@
 # 自建订阅当前断点（2026-10-03）
 
+## 2026-10-04：Edge CDP 恢复，官方首屏与分页真实成功
+
+- **工具恢复已实测**：本人开启完整 CDP 后，本地配置为 `full_cdp_access_enabled=true`，旧浏览器工具运行时仍不提供 `cdp`。仅重置 `cua_repl` 并绑定原 Edge 标签页后，正式 CDP 能力出现，`Page.getFrameTree` 成功核验 Reader URL 与 `https://weread.qq.com` 来源。未重启 Edge、改安全设置或重复登录。原生 Windows 电脑控制的 URL 安全停止未被修复或绕过，后续使用正式浏览器 CDP 接口。
+- **真实目录**：官方页面自然发出 `GET /web/mp/articles?bookId=MP_WXS_3895431412&offset=0`，HTTP200、20组20篇；正常目录滚动的 `offset=20` 也为HTTP200、20组。首屏顶层为 `reviews/clearAll/synckey`，`clearAll=1`。最新10篇的 `reviewId/review.mpInfo.originalId/title/mp_name/time` 已取得，没有生产写入。不能将响应 `synckey` 当作 Web 分页请求参数。
+- **实际差异**：官方成功请求有当次 `x-wrpa-0`，无 `x-wr-ticket/x-wr-randstr`。旧 `private-data/account-fix-20261001/native-list-diagnostic.cjs` 同为 `bookId/offset=0`，但没有 WRPA 调用或头，保存响应为 `errCode=-2041`、0篇。当前成功 Edge 账号与私有来源配置绑定账号及保存会话不同；只输出匹配布尔，未输出账号值或 Cookie。因此不能断言 WRPA 是唯一根因，也不能把当前凭据混入旧账号绑定。已询问本人后续使用哪个账号，等待选择后再做依赖该选择的接入。
+- **缓冲纠正**：最初分段读取的网络事件 `truncated=true`，未见首屏不能推断目录随 HTML 返回。连续读取缓冲后首屏请求、HTTP200响应与完成事件完整取得，`truncated=false`。没有修改网页代码、复刻签名或重放认证头。
+- **证据与剩余工作**：`private-data/edge-success-20261004/` 私有保存两页文章响应及脱敏摘要，不保存请求认证头、HAR/cURL，目录继续被 Git 忽略。浏览器取证通路与真实列表检查点已通过；自建可重复运行中转、最新10篇完整正文图片、原刷新入口去重和旧数据保护仍未验收。未运行 `wewe_cookie_live_once.cjs`、删除旧停止、切换账号或新增验证码尝试。
+
 ## 最新：本人确认官方端可更新，下一步取成功请求对照
 
 - **当前执行者与状态**：Codex 唯一写入者，三个指定 `gpt-6.1-sol/high` 子任务已完成只读 Cookie/列表/正文图片核对。起点 `e130ca73eb47eca42809bb6affabe0c209c11ea4`，冻结后台 PID50084 仍存活，本轮未部署或重启。SQLite 只读核对为 2 账号、12 订阅、1450 文章、quick_check=ok；没有生产写入或会话/停止记录改动。

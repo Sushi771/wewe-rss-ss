@@ -2,6 +2,16 @@
 
 ## 范围与结论
 
+### 2026-10-04 现有 Edge 的真实成功合同
+
+本人开启完整 CDP 后，旧浏览器工具运行时未更新能力列表；重置运行时并绑定原 Edge 标签页后，正式 `cdp` 能力及 `Page.getFrameTree` 实测可用。无需重启 Edge 或登录；这不证明原生 Windows 工具的 URL 识别故障已修复。
+
+官方首屏为 `GET /web/mp/articles`，参数仅 `bookId=MP_WXS_3895431412/offset=0`，HTTP200、20组20篇。自然滚动分页为同路径 `offset=20`，HTTP200、20组。响应顶层为 `reviews/clearAll/synckey`，首屏 `clearAll=1`；组内字段为 `createTime/subCount/subReviews`，子项为 `reviewId/review`，文章元数据 `review.mpInfo` 含 `originalId/title/mp_name/time`。最新10篇已从真实首屏取得，未用搜索时间或补录冒充发现。
+
+成功请求携带当次 `x-wrpa-0`，没有 `x-wr-ticket/x-wr-randstr`。旧 `native-list-diagnostic.cjs` 使用相同 `bookId/offset=0`，没有 WRPA 调用或头，保存响应为 `-2041`。当前成功 Edge 账号与项目来源绑定及保存会话不同，这不是控制变量实验，不能认定 WRPA 缺失为唯一根因，也不能把当前签名重放到旧 Cookie。接入账号待本人明确，旧停止与失败证据保留。
+
+网络事件必须检查 `truncated`：最初观察的缓冲被截断，不能据未见列表请求推断服务器渲染目录；连续读取后首屏请求和成功响应完整捕获，`truncated=false`。两页文章响应及脱敏摘要只在忽略目录 `private-data/edge-success-20261004/`，没有保存认证头、HAR/cURL。此次没有修改网页、复刻或重放签名、验证码操作或生产写库。真实列表成功不等于自建中转及持续刷新已完成。
+
 ### 2026-10-03 Reader 调用链复核与 1006 路径对照
 
 本次从官方公开首页链接的普通图书 Reader 页面取得真实脚本清单，再只读下载其公开静态资源。未携带 Cookie，未执行 Reader、WRPA 或验证码 SDK，未请求公众号目录、正文、验证码配置或验证接口。只有字符串表及轮转函数在禁止动态代码生成、带超时的离线 VM 中解码。原始资源保存在忽略目录 `private-data/reader-public-audit-20261003/`，不提交。
