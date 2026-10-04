@@ -1,5 +1,10 @@
 # 自建订阅当前断点（2026-10-03）
 
+## 2026-10-04：下载工具空白反馈核查
+
+- 用户确认在ChatGPT内打开本机链接。原4000仍归属已核进程18288，HTML/JS/CSS正常；独立本机Edge直接打开、刷新及尾斜杠路由实际显示URL输入框和下载按钮。未发现本机路由或部署包空白故障，未改应用代码、启动进程或凭据。
+- [打开方式](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md#打开本机工具)改为在运行软件的Windows本机Edge/Chrome地址栏输入地址。当前执行器没有可调用的Computer Use node_repl，不能宣称检查了用户现有浏览器窗口；使用独立Edge验证，不碰已停腾讯URL。外部字体和版本检查被隔离阻止，原始截图和资源响应保留在本机忽略目录`output/playwright/local-release-audit/blank-page-*`，无平台取文或数据库改动。
+
 ## 2026-10-04：集成本机已受控启动，Windows归属查询修补
 
 - 复现自有回环监听：CIM/原生TCP行状态异常，netstat缺失；改为Windows原生 `TCP_TABLE_OWNER_PID_LISTENER` 专用表核监听归属，不推断ALL表未知状态。保留Process句柄、启动时间、程序路径、命令行与预期身份停止门禁；原生错误不降级HTTP或空列表。2项Windows回归和16项运行回归通过，新增Windows CI。
