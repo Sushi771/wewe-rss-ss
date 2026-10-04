@@ -319,6 +319,7 @@ const AccountPage = () => {
         isOpen={!!connectionAccountId}
         onClose={() => setConnectionAccountId(null)}
         size="md"
+        scrollBehavior="inside"
       >
         <ModalContent>
           <ModalHeader>连接手动更新</ModalHeader>
