@@ -6,6 +6,48 @@ import { assertProviderPage, ProviderPage } from './subscription-provider';
 const sha = (value: string | Buffer) =>
   createHash('sha256').update(value).digest('hex');
 
+const failureReasons: Record<string, string> = {
+  WEREAD_DIRECTORY_INVALID: '目录响应格式或业务字段无效',
+  WEREAD_DIRECTORY_GROUP_INVALID: '目录群发组无效',
+  WEREAD_DIRECTORY_ARTICLE_INVALID: '目录文章身份或发布时间无效',
+  WEREAD_DIRECTORY_DUPLICATE_CONFLICT: '目录重复文章字段冲突',
+  WEREAD_DIRECTORY_TOO_LARGE: '目录超出本次读取范围',
+  WEREAD_DIRECTORY_WINDOW_INVALID: '目录最近篇数配置无效',
+  WEREAD_DIRECTORY_ORDER_UNVERIFIED: '目录发布时间顺序无法核验',
+  WEREAD_BODY_INVALID: '正文响应格式或大小无效',
+  WEREAD_BODY_ACCESS_CHALLENGE: '腾讯验证或访问限制',
+  WEREAD_BODY_IDENTITY_CONFLICT: '正文与目录的身份、标题或发布时间冲突',
+  WEREAD_BODY_MISSING: '正文内容缺失',
+  WEREAD_BODY_IMAGE_INVALID: '正文图片字段无效',
+};
+
+/** Only known local reasons or numeric status codes may reach the saved stop/UI.
+ * Transport error messages and upstream error text can contain private values.
+ */
+export function ownerLatestFailureReason(error: unknown) {
+  const message = error instanceof Error ? error.message : error;
+  if (typeof message !== 'string') return '请求、响应或本地保存失败';
+  if (Object.prototype.hasOwnProperty.call(failureReasons, message))
+    return failureReasons[message];
+  if (
+    Object.values(failureReasons).includes(message) ||
+    /^(HTTP [1-5]\d{2}|业务码 -?\d{1,10}|腾讯验证或访问限制|最新篇身份或字段无效|正文身份、真实发布时间或内容无效|目录未返回最近10篇|正文身份重复|读书响应格式无效)$/.test(
+      message,
+    )
+  )
+    return message;
+  return '请求、响应或本地保存失败';
+}
+
+export function ownerLatestStageLabel(stage: unknown) {
+  if (stage === 'cover') return '最新篇';
+  if (stage === 'directory-0' || stage === 'directory-next') return '目录';
+  if (stage === 'images') return '图片归档';
+  if (stage === 'content' || /^content-(?:[1-9]|10)$/.test(String(stage)))
+    return '正文';
+  return '更新';
+}
+
 /** Initial login credentials identify the operation. Auxiliary cookies, capture
  * timestamps and file locations do not establish a new authenticated login. */
 export function ownerLatestAuthHash(
@@ -46,7 +88,7 @@ export function ownerLatestStopMessage(
     stoppedAuthHash === authHash ||
     (!stoppedAuthHash && state.sessionHash === cookieHash)
   )
-    return `当前读书会话${state.stop.stage === 'cover' ? '最新篇' : '正文'}已停止：${state.stop.reason}；本次未发联网请求，旧正文保留。`;
+    return `当前读书会话${ownerLatestStageLabel(state.stop.stage)}已停止：${ownerLatestFailureReason(state.stop.reason)}；本次未发联网请求，旧正文保留。`;
   const verified = state.offlineSessionVerification;
   if (
     verified?.status === 'single-article-verified-refresh-not-authorized' &&
