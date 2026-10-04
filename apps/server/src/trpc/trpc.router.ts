@@ -1,3 +1,4 @@
+import { buildArticleMarkdown } from '../article-export';
 import { INestApplication, Injectable, Logger } from '@nestjs/common';
 import { z } from 'zod';
 import {
@@ -12,26 +13,13 @@ import { TRPCError } from '@trpc/server';
 import { PrismaService } from '@server/prisma/prisma.service';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
-import TurndownService from 'turndown';
 import dayjs from 'dayjs';
-import { load } from 'cheerio';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as crypto from 'node:crypto';
-import pMap from '@cjs-exporter/p-map';
 import { WereadService } from '@server/weread/weread.service';
 import { CollectionService } from '../collection/collection.service';
-import {
-  articlePageRequest,
-  BODY_UNAVAILABLE_MESSAGE,
-} from '../collection/article-page';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { resolveCollectionRoute } from '../collection/collection-channel';
-import {
-  allowedImageUrl,
-  decodeInlineImage,
-  fetchAllowedImage,
-} from '../collection/image-fetch';
 import { hasPrivateSession, privateOnlineMode } from '../private-access';
 import {
   bodyRetryAvailability,
@@ -43,9 +31,13 @@ import {
   csvCell,
   metricLabels,
   Metrics,
-  metricsMarkdown,
 } from '../collection/collection-format';
 import { scanOwnerCandidates } from '../collection/owner-candidate-scan';
+import {
+  ownerConfigFile,
+  previewManualWereadBinding,
+  confirmManualWereadBinding,
+} from '../collection/owner-weread-binding';
 
 const searchCandidateSnapshotSchema = z.object({
   mpId: z
@@ -362,6 +354,81 @@ export class TrpcRouter {
   private legacyAccountProcedure = this.trpcService.protectedProcedure;
 
   accountRouter = this.trpcService.router({
+    manualRefreshOptions: this.legacyAccountProcedure
+      .input(z.object({ accountId: z.string().regex(/^\d+$/) }))
+      .query(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '手动更新账号连接只能在服务器本机操作。',
+          });
+        try {
+          const account = await this.prismaService.account.findUniqueOrThrow({
+            where: { id: input.accountId },
+          });
+          const config = JSON.parse(
+            await fs.promises.readFile(ownerConfigFile(), 'utf8'),
+          );
+          const feeds = await this.prismaService.feed.findMany({
+            where: {
+              id: { in: Object.keys(config.feeds || {}) },
+              collectionChannel: 'owner-weread-latest',
+            },
+          });
+          const options = await Promise.all(
+            feeds.map(async (feed) => ({
+              ...(await previewManualWereadBinding(account, feed.id)),
+              name: feed.mpName,
+            })),
+          );
+          return {
+            accountLabel: `${account.name}（VID …${account.id.slice(-4)}）`,
+            options,
+          };
+        } catch {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: '无法预览手动更新连接，请检查私有配置和正常Web登录。',
+          });
+        }
+      }),
+    connectManualRefresh: this.legacyAccountProcedure
+      .input(
+        z.object({
+          accountId: z.string().regex(/^\d+$/),
+          mpId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+          revision: z.string().regex(/^[a-f0-9]{64}$/),
+          confirm: z.literal(true),
+        }),
+      )
+      .mutation(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '手动更新账号连接只能在服务器本机操作。',
+          });
+        try {
+          const account = await this.prismaService.account.findUniqueOrThrow({
+            where: { id: input.accountId },
+          });
+          const feed = await this.prismaService.feed.findUniqueOrThrow({
+            where: { id: input.mpId },
+          });
+          if (feed.collectionChannel !== 'owner-weread-latest')
+            throw new Error('INVALID_CHANNEL');
+          return await confirmManualWereadBinding(
+            account,
+            input.mpId,
+            input.revision,
+          );
+        } catch {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message:
+              '连接未完成：请重新预览并核对正常Web登录、停止或正在更新状态；未发取文请求。',
+          });
+        }
+      }),
     list: this.legacyAccountProcedure
       .input(AccountSchemas.list)
       .query(async ({ input }) => {
@@ -899,151 +966,17 @@ export class TrpcRouter {
       }),
   });
 
-  private async downloadImage(url: string, destPath: string) {
-    if (url.startsWith('data:')) {
-      const { bytes } = decodeInlineImage(url);
-      await fs.promises.writeFile(destPath, bytes);
-      return;
-    }
-    const image = await fetchAllowedImage(url);
-    await fs.promises.writeFile(destPath, image.bytes);
-  }
-
   private async getArticleMarkdown(id: string, downloadPath?: string) {
     const article = await this.prismaService.article.findUnique({
       where: { id },
     });
-    if (!article) {
-      throw new Error(`No article with id '${id}'`);
-    }
-
-    const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
-
-    let html = article.contentHtml || '';
-    if (!html && article.lastBodyStatus === 'unavailable')
-      throw new TRPCError({
-        code: 'PRECONDITION_FAILED',
-        message: BODY_UNAVAILABLE_MESSAGE,
-      });
-    if (!html) {
-      const source = new URL(url);
-      if (
-        source.protocol !== 'https:' ||
-        source.hostname !== 'mp.weixin.qq.com' ||
-        source.username ||
-        source.password ||
-        source.port
-      )
-        throw new Error('文章来源未核验，不能远程读取');
-      html = await articlePageRequest(url)
-        .text()
-        .catch(() => '');
-    }
-
-    if (!html) {
-      throw new Error(`Failed to load article content for ${id}`);
-    }
-
-    const $ = load(html, { decodeEntities: false });
+    if (!article) throw new Error(`No article with id '${id}'`);
     const { originUrl } = this.configService.get('feed');
-    const serverHost = originUrl || 'http://localhost:4000';
-
-    const contentEl = $('.rich_media_content').length
-      ? $('.rich_media_content')
-      : $('#js_content');
-    if (
-      !contentEl.length ||
-      (!contentEl.text().trim() && !contentEl.find('img').length)
-    ) {
-      throw new Error(
-        '未获取到正文，请在 WeChatDownload 下载对应 HTML 后重新导入',
-      );
-    }
-
-    if (downloadPath) {
-      const attachmentsDir = path.join(downloadPath, 'attachments');
-      if (!fs.existsSync(attachmentsDir)) {
-        await fs.promises.mkdir(attachmentsDir, { recursive: true });
-      }
-
-      const imgs = contentEl.find('img').get();
-      await pMap(
-        imgs,
-        async (img) => {
-          const $img = $(img);
-          const src = $img.attr('src') || '';
-          // An archived data URI takes precedence over an old remote lazy-load URL.
-          const dataSrc = src.startsWith('data:')
-            ? src
-            : $img.attr('data-src') || src;
-          if (dataSrc) {
-            let ext = 'jpg';
-            if (dataSrc.startsWith('data:image/'))
-              ext = dataSrc.slice(11).split(';')[0];
-            else {
-              try {
-                const imageUrl = new URL(dataSrc);
-                ext =
-                  imageUrl.searchParams.get('wx_fmt') ||
-                  path.extname(imageUrl.pathname).slice(1) ||
-                  'jpg';
-              } catch {
-                // The download validator reports an invalid URL below.
-              }
-            }
-            const hash = crypto.createHash('md5').update(dataSrc).digest('hex');
-            const safeExt = /^(png|jpe?g|gif|webp)$/.test(ext) ? ext : 'jpg';
-            const fileName = `image_${hash}.${safeExt}`;
-            const localPath = path.join(attachmentsDir, fileName);
-
-            try {
-              if (!fs.existsSync(localPath)) {
-                await this.downloadImage(dataSrc, localPath);
-              }
-              $img.attr('src', `attachments/${fileName}`);
-            } catch {
-              throw new Error('图片未能安全下载，离线导出未完成');
-            }
-          }
-        },
-        { concurrency: 5 },
-      );
-    } else {
-      // For browser export, we use proxy URLs
-      contentEl.find('img').each((_, img) => {
-        const $img = $(img);
-        const src = $img.attr('src') || '';
-        const dataSrc = src.startsWith('data:')
-          ? src
-          : $img.attr('data-src') || src;
-        if (dataSrc) {
-          try {
-            if (dataSrc.startsWith('data:')) {
-              decodeInlineImage(dataSrc);
-              $img.attr('src', dataSrc);
-            } else {
-              allowedImageUrl(dataSrc);
-              $img.attr(
-                'src',
-                `${serverHost}/proxy/image?url=${encodeURIComponent(dataSrc)}`,
-              );
-            }
-          } catch {
-            $img.remove();
-          }
-        }
-      });
-    }
-
-    const contentHtml = $.html(contentEl);
-
-    const turndownService = new TurndownService();
-    const markdown = turndownService.turndown(contentHtml);
-
-    return {
-      title: article.title,
-      markdown: (article.sourceUrl ? metricsMarkdown(article) : '') + markdown,
-    };
+    return buildArticleMarkdown(
+      article,
+      originUrl || 'http://localhost:4000',
+      downloadPath,
+    );
   }
 
   platformRouter = this.trpcService.router({
