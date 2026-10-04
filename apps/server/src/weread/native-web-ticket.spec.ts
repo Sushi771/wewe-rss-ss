@@ -43,7 +43,10 @@ describe('direct Web renewal ticket gate (offline)', () => {
       status: 200,
       data: { succ: 1 },
       headers: {
-        'set-cookie': ['wr_skey=renewed-web-token; Path=/; Secure'],
+        'set-cookie': [
+          'wr_vid=123; Path=/; Secure',
+          'wr_skey=renewed-web-token; Path=/; Secure',
+        ],
         'x-wr-ticket': 'ticket-value',
         'x-wrpa-0': 'wrpa-value',
       },
