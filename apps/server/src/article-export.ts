@@ -32,6 +32,7 @@ export async function buildArticleMarkdown(
   serverHost: string,
   downloadPath?: string,
   imageFetcher = fetchAllowedImage,
+  imageDirectory: 'attachments' | 'image' = 'attachments',
 ) {
   const id = article.id;
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
@@ -76,7 +77,7 @@ export async function buildArticleMarkdown(
   }
 
   if (downloadPath) {
-    const attachmentsDir = path.join(downloadPath, 'attachments');
+    const attachmentsDir = path.join(downloadPath, imageDirectory);
     if (!fs.existsSync(attachmentsDir)) {
       await fs.promises.mkdir(attachmentsDir, { recursive: true });
     }
@@ -118,7 +119,7 @@ export async function buildArticleMarkdown(
                 : await imageFetcher(dataSrc);
               await fs.promises.writeFile(localPath, image.bytes);
             }
-            $img.attr('src', `attachments/${fileName}`);
+            $img.attr('src', `${imageDirectory}/${fileName}`);
           } catch {
             throw new Error('图片未能安全下载，离线导出未完成');
           }

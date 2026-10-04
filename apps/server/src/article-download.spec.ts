@@ -51,7 +51,10 @@ describe('single article download, synthetic fixtures and no network', () => {
       directory,
       request,
     );
-    expect(result).toEqual({ filename: '离线收藏测试.zip', imageCount: 2 });
+    expect(result).toMatchObject({
+      filename: '离线收藏测试.zip',
+      imageCount: 2,
+    });
     const html = await readFile(join(directory, 'index.html'), 'utf8');
     const markdown = await readFile(join(directory, 'index.md'), 'utf8');
     expect(html).toContain('离线正文测试');

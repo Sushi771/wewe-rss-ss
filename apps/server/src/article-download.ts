@@ -286,6 +286,10 @@ export async function buildArticleDownload(
   raw: unknown,
   directory: string,
   request: DownloadRequest = requestDownloadResource,
+  options: {
+    imageDirectory?: 'attachments' | 'image';
+    markdownOnly?: boolean;
+  } = {},
 ) {
   const url = downloadArticleUrl(raw);
   try {
@@ -425,6 +429,7 @@ export async function buildArticleDownload(
           throw failure;
         }
       },
+      options.imageDirectory,
     ).catch((error) => {
       throw imageFailure || error;
     });
@@ -447,10 +452,11 @@ export async function buildArticleDownload(
       `# ${escapeHtml(title.replace(/[\r\n]/g, ' '))}\n\n原文来源：${identity.url}\n\n${markdown}\n`,
     );
     // Same sanitized/localized body as the existing Markdown exporter, with a small offline reading shell.
-    await writeFile(
-      join(directory, 'index.html'),
-      `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>${escapeHtml(title)}</title><style>body{max-width:760px;margin:40px auto;padding:0 20px;font:17px/1.8 sans-serif;overflow-wrap:anywhere;color:#222}img{max-width:100%;height:auto}pre{white-space:pre-wrap}footer{margin-top:32px;font-size:14px}</style></head><body><h1>${escapeHtml(title)}</h1>${contentHtml}<footer>原文来源：<a href="${escapeHtml(identity.url)}" rel="noreferrer noopener">${escapeHtml(identity.url)}</a></footer></body></html>`,
-    );
+    if (!options.markdownOnly)
+      await writeFile(
+        join(directory, 'index.html'),
+        `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>${escapeHtml(title)}</title><style>body{max-width:760px;margin:40px auto;padding:0 20px;font:17px/1.8 sans-serif;overflow-wrap:anywhere;color:#222}img{max-width:100%;height:auto}pre{white-space:pre-wrap}footer{margin-top:32px;font-size:14px}</style></head><body><h1>${escapeHtml(title)}</h1>${contentHtml}<footer>原文来源：<a href="${escapeHtml(identity.url)}" rel="noreferrer noopener">${escapeHtml(identity.url)}</a></footer></body></html>`,
+      );
     return {
       filename: `${
         Array.from(
@@ -462,6 +468,8 @@ export async function buildArticleDownload(
           .join('') || '文章'
       }.zip`,
       imageCount: images.length,
+      articleId: identity.id,
+      title,
     };
   } catch (error) {
     if (error instanceof ArticleDownloadError) throw error;
