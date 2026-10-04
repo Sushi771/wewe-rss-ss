@@ -39,6 +39,53 @@ export function normalWebJson(text: string) {
   }
 }
 
+/** Validate the immutable login/maintenance snapshot at its real capture time.
+ * This is evidence validation only: expiry is never changed and expired cookies
+ * must be omitted from the actual fixed-endpoint maintenance request below. */
+export function normalWebRenewalParentTime(
+  session: OwnerWebSession,
+  ownerVid: string,
+  now = Date.now(),
+) {
+  const captured = Date.parse(session?.capturedAt);
+  const at = Date.parse(session?.renewedAt || session?.capturedAt);
+  if (
+    session?.source !== 'owner-confirmed-native-web-login' ||
+    !Number.isFinite(captured) ||
+    !Number.isFinite(at) ||
+    at < captured ||
+    at > now + 300000
+  )
+    throw new Error('WEB_RENEWAL_CONTEXT_INVALID');
+  ownerSessionCookie(session, ownerVid, at);
+  return at;
+}
+
+/** Browser-equivalent normal renewal: only unexpired cookies are transmitted.
+ * A live same-owner VID and refresh cookie are required even when SKEY expired.
+ * This header is only consumed by the fixed HTTPS normal renewal endpoint. */
+export function normalWebRenewalCookie(
+  session: OwnerWebSession,
+  ownerVid: string,
+  now = Date.now(),
+) {
+  normalWebRenewalParentTime(session, ownerVid, now);
+  const live = session.cookies.filter(
+    (cookie) => cookie.expires === -1 || cookie.expires * 1000 > now,
+  );
+  if (
+    !live.some(
+      (cookie) => cookie.name === 'wr_vid' && cookie.value === ownerVid,
+    ) ||
+    !live.some((cookie) => cookie.name === 'wr_rt' && cookie.value)
+  )
+    throw new Error('WEB_RENEWAL_REFRESH_TOKEN_MISSING');
+  return live
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join('; ');
+}
+
 /** Pure adaptor for the already obtained successful response. The optional
  * original text binds the evidence to exact saved bytes, not JSON formatting.
  * No writes, login-index changes, renewal requests or collection permission. */
@@ -59,8 +106,14 @@ export function applyNormalWebRenewal(
     JSON.stringify(normalWebJson(parentSessionText)) !== JSON.stringify(session)
   )
     throw new Error('WEB_RENEWAL_CONTEXT_INVALID');
-  ownerSessionCookie(session, ownerVid, now);
-  const jar = new OwnerWebCookieLifecycle(session, ownerVid, now);
+  const parentTime = normalWebRenewalParentTime(session, ownerVid, now);
+  // For an expired key the live refresh credential, not the expired key,
+  // establishes eligibility for normal maintenance. Scope seeds stay historical.
+  const oldKey = session.cookies.find((cookie) => cookie.name === 'wr_skey')!;
+  if (oldKey.expires !== -1 && oldKey.expires * 1000 <= now)
+    normalWebRenewalCookie(session, ownerVid, now);
+  else ownerSessionCookie(session, ownerVid, now);
+  const jar = new OwnerWebCookieLifecycle(session, ownerVid, parentTime);
   const receivedCookieMetadata = jar.absorbNormalRenewal(response, now);
   const updated: OwnerWebSession = {
     ...session,
@@ -70,7 +123,7 @@ export function applyNormalWebRenewal(
   ownerSessionCookie(updated, ownerVid, now);
   // This operation must actually rotate the failed authentication credential;
   // auxiliary changes cannot masquerade as renewed authentication.
-  const parentAuthHash = ownerLatestAuthHash(session, ownerVid, now);
+  const parentAuthHash = ownerLatestAuthHash(session, ownerVid, parentTime);
   const resultingAuthHash = ownerLatestAuthHash(updated, ownerVid, now);
   if (parentAuthHash === resultingAuthHash)
     throw new Error('WEB_RENEWAL_KEY_UNCHANGED');

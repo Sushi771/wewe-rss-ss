@@ -8,6 +8,7 @@ import {
 import {
   ownerLatestAuthHash,
   ownerLatestNormalMaintenanceAuthorized,
+  ownerLatestReviewedBatchAuthorized,
 } from '../collection/owner-weread-session-state';
 import {
   applyNormalWebRenewal,
@@ -110,7 +111,7 @@ export function prepareNormalWebMaintenance(input: {
   );
 }
 
-async function publishPrivate(file: string, text: string) {
+export async function publishPrivate(file: string, text: string) {
   const pending = `${file}.${randomUUID()}.pending`;
   const handle = await fs.open(pending, 'wx', 0o600);
   try {
@@ -132,7 +133,7 @@ async function publishPrivate(file: string, text: string) {
   }
 }
 
-async function replacePrivate(file: string, text: string) {
+export async function replacePrivate(file: string, text: string) {
   const pending = file + '.pending';
   const handle = await fs.open(pending, 'wx', 0o600);
   try {
@@ -363,6 +364,12 @@ export async function previewNormalWebMaintenanceBinding(
     const sessionText = await fs.readFile(binding.sessionFile, 'utf8');
     const session = normalWebJson(sessionText);
     const a = state.normalWebMaintenanceAuthorization;
+    const batch = ownerLatestReviewedBatchAuthorized(
+      state,
+      session,
+      account.id,
+      mpId,
+    );
     const token = normalWebJson(account.token);
     if (
       !a ||
@@ -370,13 +377,19 @@ export async function previewNormalWebMaintenanceBinding(
       path.basename(originalFile) !==
         `native-session-${sha(originalText).slice(0, 24)}.json` ||
       path.basename(binding.sessionFile) !==
-        `normal-maintenance-session-${sha(sessionText)}.json` ||
+        `${batch ? 'normal-batch-session' : 'normal-maintenance-session'}-${sha(sessionText)}.json` ||
       original.source !== 'owner-confirmed-native-web-login' ||
       original.ownerVid !== account.id ||
       token.wr_vid !== account.id ||
       token.wr_skey !==
         original.cookies.find((c) => c.name === 'wr_skey')?.value ||
-      !ownerLatestNormalMaintenanceAuthorized(state, session, account.id, mpId)
+      (!batch &&
+        !ownerLatestNormalMaintenanceAuthorized(
+          state,
+          session,
+          account.id,
+          mpId,
+        ))
     )
       return null;
     return {
@@ -394,9 +407,12 @@ export async function previewNormalWebMaintenanceBinding(
       ),
       ready: true,
       connected: true,
-      connectedAt: a.approvedAt,
-      message:
-        '正常会话已续期，扫码时间保留；请在公众号页面使用原手动更新按钮验证，遇拒绝即停止。',
+      connectedAt: batch
+        ? state.reviewedBatchContinuationAuthorization.approvedAt
+        : a.approvedAt,
+      message: batch
+        ? '原手动更新已衔接，扫码时间保留；请在公众号页面继续，遇拒绝即停止。'
+        : '正常会话已续期，扫码时间保留；请在公众号页面使用原手动更新按钮验证，遇拒绝即停止。',
     };
   } catch {
     return null;

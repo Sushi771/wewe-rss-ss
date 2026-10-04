@@ -76,4 +76,44 @@ describe('direct Web renewal ticket gate (offline)', () => {
     );
     expect(axios.post).toHaveBeenCalledTimes(1);
   });
+
+  it('renews with a live same-owner refresh cookie while omitting an expired key', async () => {
+    const input = session();
+    input.capturedAt = new Date(Date.now() - 60000).toISOString();
+    input.cookies.find((c) => c.name === 'wr_skey')!.expires =
+      Date.now() / 1000 - 1;
+    const original = JSON.stringify(input);
+    (axios.post as jest.Mock).mockResolvedValue({
+      status: 200,
+      data: { succ: 1 },
+      headers: {
+        'set-cookie': [
+          'wr_vid=123; Path=/; Secure; Max-Age=5400',
+          'wr_skey=fresh-after-expiry; Path=/; Secure; Max-Age=5400',
+        ],
+      },
+    });
+    const result = await renewDirectWebTicket(input, '123');
+    const header = (axios.post as jest.Mock).mock.calls[0][2].headers.Cookie;
+    expect(header).toContain('wr_vid=123');
+    expect(header).toContain('wr_rt=fresh-web-refresh');
+    expect(header).not.toContain('wr_skey=');
+    expect(axios.post).toHaveBeenCalledTimes(1);
+    expect(result.session.capturedAt).toBe(input.capturedAt);
+    expect(ownerSessionCookie(result.session, '123')).toContain(
+      'wr_skey=fresh-after-expiry',
+    );
+    expect(JSON.stringify(input)).toBe(original);
+  });
+
+  it('does not request normal renewal with an expired refresh credential', async () => {
+    const input = session();
+    input.capturedAt = new Date(Date.now() - 60000).toISOString();
+    input.cookies.find((c) => c.name === 'wr_rt')!.expires =
+      Date.now() / 1000 - 1;
+    await expect(renewDirectWebTicket(input, '123')).rejects.toThrow(
+      'WEB_RENEWAL_REFRESH_TOKEN_MISSING',
+    );
+    expect(axios.post).not.toHaveBeenCalled();
+  });
 });

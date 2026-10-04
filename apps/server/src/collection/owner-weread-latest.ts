@@ -20,7 +20,9 @@ import {
   ownerLatestStageLabel,
   ownerLatestStopMessage,
   ownerLatestNormalMaintenanceAuthorized,
+  ownerLatestReviewedBatchAuthorized,
 } from './owner-weread-session-state';
+import { readReviewedWereadBatchCache } from './owner-weread-batch-resume';
 
 /** Normal owner Web session. The directory mode requires an explicit verified
  * private binding; old bindings retain their cover-only mode and access stops.
@@ -76,7 +78,13 @@ export async function fetchOwnerWereadLatest(
       c.ownerVid,
       c.mpId,
     );
-    if (maintenance && trigger !== 'local-manual')
+    const repairedBatch = ownerLatestReviewedBatchAuthorized(
+      state,
+      session,
+      c.ownerVid,
+      c.mpId,
+    );
+    if ((maintenance || repairedBatch) && trigger !== 'local-manual')
       throw new OwnerUpdateStopped(
         '正常续期仅供本机原手动刷新验证，未发送平台请求，旧文章保留。',
       );
@@ -86,10 +94,47 @@ export async function fetchOwnerWereadLatest(
       throw new OwnerUpdateStopped(
         '读书更新处于15分钟冷却期，本次未发联网请求；已有正文保留。',
       );
+    const resumed =
+      repairedBatch && !state.reviewedBatchContinuationAuthorization.consumedAt
+        ? await readReviewedWereadBatchCache(
+            c,
+            state.reviewedBatchContinuationAuthorization.cacheManifestFile,
+            state.reviewedBatchContinuationAuthorization.cacheManifestSha256,
+          )
+        : null;
+    if (
+      resumed &&
+      resumed.manifest.attemptedAt !==
+        state.reviewedBatchContinuationAuthorization.originalAttemptAt
+    )
+      throw new Error('WEREAD_BATCH_CACHE_INVALID');
     const cookies = new OwnerWebCookieLifecycle(session, c.ownerVid);
     state.lastAttemptAt = Date.now();
     state.sessionHash = createHash('sha256').update(Cookie).digest('hex');
     state.sessionAuthHash = sessionAuthHash;
+    const responseAttemptAt = resumed
+      ? resumed.manifest.attemptedAt
+      : state.lastAttemptAt;
+    if (resumed) {
+      requests = resumed.manifest.requests;
+      state.reviewedBatchContinuationAuthorization.consumedAt = new Date(
+        state.lastAttemptAt,
+      ).toISOString();
+      state.batchProgress = {
+        originalAttemptAt: responseAttemptAt,
+        resumedAt: state.lastAttemptAt,
+        cachedDirectory: true,
+        cachedBodies: 3,
+        newBodyRequests: 0,
+      };
+    } else if (repairedBatch) {
+      state.batchProgress = {
+        originalAttemptAt: responseAttemptAt,
+        cachedDirectory: false,
+        cachedBodies: 0,
+        newBodyRequests: 0,
+      };
+    }
     if (maintenance && !state.normalWebMaintenanceAuthorization.consumedAt)
       state.normalWebMaintenanceAuthorization.consumedAt = new Date(
         state.lastAttemptAt,
@@ -124,7 +169,7 @@ export async function fetchOwnerWereadLatest(
       });
       // Persist an immutable private response before parsing, including failures.
       await fs.writeFile(
-        `${stateFile}.${state.lastAttemptAt}.${stage}.response`,
+        `${stateFile}.${responseAttemptAt}.${stage}.response`,
         r.data,
         { flag: 'wx', mode: 0o600 },
       );
@@ -134,6 +179,11 @@ export async function fetchOwnerWereadLatest(
         bytes: Buffer.byteLength(r.data),
         requests,
       };
+      if (
+        state.batchProgress?.originalAttemptAt === responseAttemptAt &&
+        /^content-/.test(stage)
+      )
+        state.batchProgress.newBodyRequests++;
       await write();
       if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
       cookies.absorb(url, r.headers?.['set-cookie']);
@@ -168,15 +218,19 @@ export async function fetchOwnerWereadLatest(
     };
     if (c.wereadDirectoryEnabled === true) {
       stage = 'directory-0';
-      const rawPages = [
-        JSON.parse(
-          await get('https://weread.qq.com/web/mp/articles', {
-            bookId: c.mpId,
-            offset: '0',
-          }),
-        ),
-      ];
-      let selection = selectWereadLatest(rawPages, c);
+      const rawPages = resumed
+        ? []
+        : [
+            JSON.parse(
+              await get('https://weread.qq.com/web/mp/articles', {
+                bookId: c.mpId,
+                offset: '0',
+              }),
+            ),
+          ];
+      let selection = resumed
+        ? resumed.selection
+        : selectWereadLatest(rawPages, c);
       if (selection.selected.length < 10) {
         const offset = parseWereadDirectory(rawPages[0], c).groupCount;
         if (offset === 0) throw new Error('目录未返回最近10篇');
@@ -193,8 +247,10 @@ export async function fetchOwnerWereadLatest(
       }
       if (selection.selected.length !== 10)
         throw new Error('目录未返回最近10篇');
-      const articles: Array<ReturnType<typeof verifyWereadArticleBody>> = [];
+      const articles: Array<ReturnType<typeof verifyWereadArticleBody>> =
+        resumed ? [...resumed.articles] : [];
       for (const [index, candidate] of selection.selected.entries()) {
+        if (resumed && index < resumed.articles.length) continue;
         if (index) await pause(1000);
         stage = `content-${index + 1}`;
         const html = await get(
@@ -216,7 +272,7 @@ export async function fetchOwnerWereadLatest(
             upstreamCount: selection.directory.length,
             bodyMissing: 0,
             imageBlocked: 0,
-            pages: rawPages.length,
+            pages: resumed ? 1 : rawPages.length,
           },
           c.mpId,
         ),

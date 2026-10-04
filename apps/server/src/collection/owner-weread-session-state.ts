@@ -22,6 +22,7 @@ const failureReasons: Record<string, string> = {
   WEREAD_BODY_IDENTITY_CONFLICT: '正文与目录的身份、标题或发布时间冲突',
   WEREAD_BODY_MISSING: '正文内容缺失',
   WEREAD_BODY_IMAGE_INVALID: '正文图片字段无效',
+  WEREAD_BATCH_CACHE_INVALID: '本批次已保存目录或正文证据核验失败',
 };
 
 /** Only known local reasons or numeric status codes may reach the saved stop/UI.
@@ -77,6 +78,8 @@ export function ownerLatestManualSessionAuthorized(
   ownerVid: string,
   mpId: string,
 ) {
+  if (ownerLatestReviewedBatchAuthorized(state, session, ownerVid, mpId))
+    return true;
   if (ownerLatestNormalMaintenanceAuthorized(state, session, ownerVid, mpId))
     return true;
   const authHash = ownerLatestAuthHash(session, ownerVid);
@@ -96,6 +99,78 @@ export function ownerLatestManualSessionAuthorized(
         Date.parse(session.capturedAt) > Date.parse(state.stop.at) &&
         a.priorAuthHash !== authHash &&
         state.stop.sessionAuthHash !== authHash))
+  );
+}
+
+/** Explicit same-batch repair of a proven local body-time contract failure.
+ * This never releases an upstream refusal. Cache bytes are reverified under the
+ * provider lock before reservation; a consumed incomplete batch stays stopped. */
+export function ownerLatestReviewedBatchAuthorized(
+  state: any,
+  session: OwnerWebSession,
+  ownerVid: string,
+  mpId: string,
+  now = Date.now(),
+) {
+  const a = state.reviewedBatchContinuationAuthorization;
+  if (!a) return false;
+  const auth = ownerLatestAuthHash(session, ownerVid, now);
+  const success =
+    Number.isFinite(Date.parse(a.consumedAt)) &&
+    Date.parse(a.consumedAt) >= Date.parse(a.approvedAt) &&
+    Number.isSafeInteger(state.lastSuccessAt) &&
+    state.lastSuccessAt >= Date.parse(a.consumedAt) &&
+    state.lastSuccessAt <= now + 300000 &&
+    state.sessionAuthHash === auth &&
+    state.response?.stage === 'content-10' &&
+    state.response?.httpStatus === 200 &&
+    Array.isArray(state.articleIds) &&
+    state.articleIds.length === 10 &&
+    new Set(state.articleIds).size === 10;
+  return (
+    a.source === 'same-owner-reviewed-body-time-repair' &&
+    a.policy === 'one-cache-resume-then-local-manual' &&
+    a.target === mpId &&
+    session.source === 'owner-confirmed-native-web-login' &&
+    session.ownerVid === ownerVid &&
+    a.resultingAuthHash === auth &&
+    a.resultingSessionSha256 === sha(JSON.stringify(session)) &&
+    a.parentSessionSha256 ===
+      state.normalWebMaintenanceAuthorization?.resultingSessionSha256 &&
+    a.parentAuthHash ===
+      state.normalWebMaintenanceAuthorization?.resultingAuthHash &&
+    a.originalAttemptAt ===
+      Date.parse(state.normalWebMaintenanceAuthorization?.consumedAt) &&
+    a.normalLoginAt === session.capturedAt &&
+    a.renewedAt === session.renewedAt &&
+    Number.isFinite(Date.parse(a.approvedAt)) &&
+    Date.parse(a.approvedAt) >= Date.parse(a.renewedAt) &&
+    Date.parse(a.approvedAt) <= now + 300000 &&
+    Number.isFinite(Date.parse(a.validUntil)) &&
+    now < Date.parse(a.validUntil) &&
+    Number.isSafeInteger(a.originalAttemptAt) &&
+    a.originalAttemptAt > 0 &&
+    [
+      a.parentAuthHash,
+      a.cacheManifestSha256,
+      a.parentSessionSha256,
+      a.failedStopSha256,
+      a.failedResponseSha256,
+    ].every(
+      (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value),
+    ) &&
+    state.stop?.stage === 'content-3' &&
+    state.stop.reason === '正文与目录的身份、标题或发布时间冲突' &&
+    state.stop.requests === 4 &&
+    state.stop.sessionAuthHash === a.parentAuthHash &&
+    Number.isFinite(Date.parse(state.stop.at)) &&
+    Date.parse(state.stop.at) >= a.originalAttemptAt &&
+    Date.parse(a.renewedAt) >= Date.parse(state.stop.at) &&
+    a.failedStopSha256 === sha(JSON.stringify(state.stop)) &&
+    (!a.consumedAt
+      ? a.failedResponseSha256 === sha(JSON.stringify(state.response)) &&
+        state.sessionAuthHash === a.parentAuthHash
+      : success)
   );
 }
 

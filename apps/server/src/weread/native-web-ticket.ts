@@ -1,12 +1,10 @@
 import axios from 'axios';
-import {
-  OwnerWebSession,
-  ownerSessionCookie,
-} from '../collection/owner-web-search';
+import { OwnerWebSession } from '../collection/owner-web-search';
 import {
   applyNormalWebRenewal,
   NORMAL_WEB_RENEWAL_URL,
   NormalWebRenewal,
+  normalWebRenewalCookie,
 } from './normal-web-renewal';
 
 function credentialHeader(value: unknown): string | undefined {
@@ -35,9 +33,7 @@ export async function renewDirectWebTicket(
     wrpa?: string;
   }
 > {
-  const cookie = ownerSessionCookie(session, ownerVid);
-  if (!session.cookies.some((entry) => entry.name === 'wr_rt'))
-    throw new Error('WEB_RENEWAL_REFRESH_TOKEN_MISSING');
+  const cookie = normalWebRenewalCookie(session, ownerVid);
 
   let response;
   try {
