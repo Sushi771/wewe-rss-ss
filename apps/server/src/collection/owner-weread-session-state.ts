@@ -68,12 +68,13 @@ export function ownerLatestAuthHash(
  * a different authentication context. It never releases the same failed login,
  * and any new stop invalidates this authorization. Historical stops stay intact.
  */
-function manualSessionAuthorized(
+export function ownerLatestManualSessionAuthorized(
   state: any,
   session: OwnerWebSession,
-  authHash: string,
+  ownerVid: string,
   mpId: string,
 ) {
+  const authHash = ownerLatestAuthHash(session, ownerVid);
   const a = state.manualRefreshAuthorization;
   return (
     a?.source === 'owner-confirmed-native-web-login' &&
@@ -103,7 +104,8 @@ export function ownerLatestStopMessage(
 ) {
   const authHash = ownerLatestAuthHash(session, ownerVid);
   const cookieHash = sha(ownerSessionCookie(session, ownerVid));
-  if (manualSessionAuthorized(state, session, authHash, mpId)) return null;
+  if (ownerLatestManualSessionAuthorized(state, session, ownerVid, mpId))
+    return null;
   if (!state.stop) {
     if (
       (state.sessionAuthHash && state.sessionAuthHash !== authHash) ||

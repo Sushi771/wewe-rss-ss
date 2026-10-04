@@ -7,7 +7,10 @@ import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import {
   saveNativeAccountSession,
   saveNativeAccountProfile,
+  previewManualWereadBinding,
+  confirmManualWereadBinding,
 } from '../collection/owner-weread-binding';
+import axios from 'axios';
 jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest.fn(),
 }));
@@ -143,6 +146,146 @@ describe('private owner accounts', () => {
     expect(result.accountLabel).toBe('真实昵称');
     expect(JSON.stringify(result)).not.toContain('123');
     expect(findUniqueOrThrow).toHaveBeenCalledWith({ where: { id: '123' } });
+  });
+
+  it('lists all twelve saved subscriptions, preserves unconfigured channels, and distinguishes connection from a later refresh receipt', async () => {
+    const get = jest
+      .spyOn(axios, 'get')
+      .mockRejectedValue(new Error('no HTTP'));
+    try {
+      const mpId = 'MP_WXS_1234567890';
+      const account = {
+        id: '123',
+        name: 'owner',
+        status: 1,
+        token: JSON.stringify({ wr_vid: '123', wr_skey: 'private-fixture' }),
+      };
+      const session = {
+        source: 'owner-confirmed-native-web-login' as const,
+        ownerVid: account.id,
+        capturedAt: new Date().toISOString(),
+        cookies: ['wr_vid', 'wr_skey'].map((name) => ({
+          name,
+          value: name === 'wr_vid' ? account.id : 'private-fixture',
+          domain: '.weread.qq.com',
+          path: '/',
+          secure: true,
+          expires: -1,
+        })),
+      };
+      const configFile = process.env.OWNER_SEARCH_CONFIG_FILE!;
+      const sessionFile = await saveNativeAccountSession(configFile, session);
+      const configText = JSON.stringify({
+        feeds: {
+          [mpId]: {
+            mpId,
+            name: 'fixture target',
+            biz: 'MTIzNDU2Nzg5MA==',
+            ownerVid: account.id,
+            sessionFile,
+            stateFile: path.join(dir, 'search.json'),
+            runtimeStopFile: path.join(dir, 'original-runtime.json'),
+            originalStopFiles: [path.join(dir, 'original-stop.json')],
+            wereadLatestStateFile: path.join(dir, 'latest.json'),
+          },
+        },
+      });
+      await fs.writeFile(configFile, configText);
+      const feeds = Array.from({ length: 12 }, (_, i) => ({
+        id: `MP_WXS_${1234567890 + i}`,
+        mpName: `fixture ${i}`,
+        collectionChannel: i === 0 ? 'owner-weread-latest' : null,
+        lastCollectionResult: null as string | null,
+      }));
+      const findMany = jest.fn().mockResolvedValue(feeds);
+      const { router } = setup({
+        account: { findUniqueOrThrow: jest.fn().mockResolvedValue(account) },
+        feed: { findMany },
+      });
+      const caller = router.appRouter.createCaller({
+        errorMsg: null,
+        isLocal: true,
+      });
+      const before = await caller.account.manualRefreshOptions({
+        accountId: account.id,
+      });
+      expect(before.options).toHaveLength(12);
+      expect(before.options[0]).toMatchObject({
+        ready: true,
+        connected: false,
+        refreshRequired: false,
+      });
+      expect(
+        before.options
+          .slice(1)
+          .every((o) => !o.ready && o.reason === 'source-unconfigured'),
+      ).toBe(true);
+      expect(findMany).toHaveBeenCalledWith({
+        orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
+      });
+      expect(await fs.readFile(configFile, 'utf8')).toBe(configText);
+      const preview = await previewManualWereadBinding(account, mpId);
+      await confirmManualWereadBinding(account, mpId, preview.revision);
+      // Old failure receipts and zero article growth confer no new result.
+      feeds[0].lastCollectionResult = JSON.stringify({
+        source: 'owner-weread-latest',
+        status: 'blocked',
+        articles: 0,
+        attemptedAt: 1,
+      });
+      const connected = await caller.account.manualRefreshOptions({
+        accountId: account.id,
+      });
+      expect(connected.options[0]).toMatchObject({
+        ready: true,
+        connected: true,
+        refreshRequired: true,
+      });
+      expect(connected.options[0].message).toContain('尚无连接后的取文结果');
+      expect(JSON.stringify(connected)).not.toContain('private-fixture');
+      expect(JSON.stringify(connected)).not.toContain(dir);
+      const boundText = await fs.readFile(configFile, 'utf8');
+      for (const status of ['blocked', 'partial']) {
+        feeds[0].lastCollectionResult = JSON.stringify({
+          source: 'owner-weread-latest',
+          status,
+          articles: status === 'partial' ? 10 : 0,
+          created: 0,
+          attemptedAt: Math.floor(Date.now() / 1000),
+        });
+        const refreshed = await caller.account.manualRefreshOptions({
+          accountId: account.id,
+        });
+        expect(refreshed.options[0]).toMatchObject({
+          connected: true,
+          refreshRequired: false,
+        });
+      }
+      feeds[0].lastCollectionResult = '{bad';
+      expect(
+        (await caller.account.manualRefreshOptions({ accountId: account.id }))
+          .options[0].refreshRequired,
+      ).toBe(true);
+      const stateFile = path.join(dir, 'latest.json');
+      const stateText = await fs.readFile(stateFile, 'utf8');
+      const changed = JSON.parse(stateText);
+      changed.manualRefreshAuthorization.source = 'unconfirmed-fixture';
+      await fs.writeFile(stateFile, JSON.stringify(changed));
+      expect(
+        (await caller.account.manualRefreshOptions({ accountId: account.id }))
+          .options[0].connected,
+      ).toBe(false);
+      await fs.writeFile(stateFile, stateText);
+      feeds[0].collectionChannel = 'public-album';
+      expect(
+        (await caller.account.manualRefreshOptions({ accountId: account.id }))
+          .options[0],
+      ).toMatchObject({ ready: false, reason: 'different-channel' });
+      expect(await fs.readFile(configFile, 'utf8')).toBe(boundText);
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+    }
   });
 
   it('requires both authentication and a local caller for manual binding preview and confirmation', async () => {
