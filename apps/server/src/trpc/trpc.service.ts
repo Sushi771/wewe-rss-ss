@@ -379,7 +379,7 @@ export class TrpcService {
     const mpId = feed.id;
     if (route.channel === 'owner-weread-latest') {
       if (page !== 1) throw new Error('读书最新篇来源不提供分页');
-      return this.collectionService.collectOwnerWereadLatest(mpId);
+      return this.collectionService.collectOwnerWereadLatest(mpId, trigger);
     }
     if (route.channel === 'owner-web-search') {
       if (page !== 1) return this.unavailableCollection();

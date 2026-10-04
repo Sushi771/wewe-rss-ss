@@ -19,13 +19,17 @@ import {
   ownerLatestFailureReason,
   ownerLatestStageLabel,
   ownerLatestStopMessage,
+  ownerLatestNormalMaintenanceAuthorized,
 } from './owner-weread-session-state';
 
 /** Normal owner Web session. The directory mode requires an explicit verified
  * private binding; old bindings retain their cover-only mode and access stops.
  * Both modes reuse the same cookie lifecycle, body/images and protected save.
  */
-export async function fetchOwnerWereadLatest(c: SearchConfig) {
+export async function fetchOwnerWereadLatest(
+  c: SearchConfig,
+  trigger: 'local-manual' | 'scheduled' | 'public' = 'public',
+) {
   if (!c.wereadLatestStateFile)
     throw new OwnerUpdateStopped('读书最新篇来源未配置，本次未更新。');
   const stateFile = c.wereadLatestStateFile;
@@ -66,6 +70,16 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
         '当前读书会话账号或凭据无法核验，本次未发联网请求；历史停止记录及旧正文保留。',
       );
     }
+    const maintenance = ownerLatestNormalMaintenanceAuthorized(
+      state,
+      session,
+      c.ownerVid,
+      c.mpId,
+    );
+    if (maintenance && trigger !== 'local-manual')
+      throw new OwnerUpdateStopped(
+        '正常续期仅供本机原手动刷新验证，未发送平台请求，旧文章保留。',
+      );
     const stopped = ownerLatestStopMessage(state, session, c.ownerVid, c.mpId);
     if (stopped) throw new OwnerUpdateStopped(stopped);
     if (Date.now() - (state.lastAttemptAt || 0) < 15 * 60 * 1000)
@@ -76,6 +90,10 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
     state.lastAttemptAt = Date.now();
     state.sessionHash = createHash('sha256').update(Cookie).digest('hex');
     state.sessionAuthHash = sessionAuthHash;
+    if (maintenance && !state.normalWebMaintenanceAuthorization.consumedAt)
+      state.normalWebMaintenanceAuthorization.consumedAt = new Date(
+        state.lastAttemptAt,
+      ).toISOString();
     await write();
     reserved = true;
     const get = async (
