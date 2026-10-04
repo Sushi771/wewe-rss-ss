@@ -9,9 +9,9 @@
 
 </div>
 
-## 当前方向（2026-09-29）
+## 当前方向与验收（2026-10-04）
 
-本 fork 的最高优先级是研究并实现可自行维护的微信读书公众号订阅模块，暂停 Wechat2RSS 采购和部署。已有 Provider、私人登录、数据库保护、正文图片和离线导出保留；目前尚未从新来源取得目标号五篇真实文章，未接入生产订阅。现行要求见 [AGENTS.md](AGENTS.md)、[交付任务](docs/PRIVATE_ONLINE_DELIVERY_TASK.md)和[精简交接](docs/DEVELOPMENT_HANDOFF.md)。
+微信读书自建模块已接回原手动刷新。妈妈部落畅聊阁最新10篇真实正文及图片已保存，原入口重复刷新新增0；八篇补齐媒体后1450篇文章、账号、旧ID、时间、文字和指标保留。离线导出保存89个图片附件，真实Edge打开10篇及97处图片引用通过。仅本机回环4000，自动刷新关闭；其他11订阅、未来自然新文及用户单篇短链直接保存Obsidian仍分别待验收。暂停 Wechat2RSS 采购，运行时不依赖闭源中转。准确版本与验收边界见[验收记录](docs/LATEST_TEN_IMAGE_ACCEPTANCE.md)、[交付任务](docs/PRIVATE_ONLINE_DELIVERY_TASK.md)和[精简交接](docs/DEVELOPMENT_HANDOFF.md)。
 
 ## 历史方案：公众号订阅恢复实施状态
 

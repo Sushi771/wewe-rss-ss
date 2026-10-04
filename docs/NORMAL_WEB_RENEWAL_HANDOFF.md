@@ -1,5 +1,7 @@
 # Normal Web renewal and reviewed continuation
 
+Current integration status (2026-10-04): one authorized ordinary renewal at21:01:41 UTC succeeded for the same account, with real conservative expiry22:31:41 UTC. No repeat renewal or artificial extension occurred. PR9 time semantics and the existing-body image supplement are deployed as application802a7b5; the latest10 real bodies/images and original-route repeated deduplication passed. See the [actual acceptance](LATEST_TEN_IMAGE_ACCEPTANCE.md). The source-worker fixture report below is historical and does not replace these real integration results; all old stops and original scan evidence remain preserved.
+
 The integration owner's ordinary Web renewal returned HTTP 200 / `succ=1`, an
 explicitly matching account and new authentication cookies. Its response omitted
 Secure, added the existing allowlisted `wr_pf` and supplied finite server expiry.

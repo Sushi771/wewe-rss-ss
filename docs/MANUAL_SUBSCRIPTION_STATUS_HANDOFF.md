@@ -1,6 +1,10 @@
 # Manual subscription status handoff (2026-10-04)
 
-## Integration follow-up
+## Current integrated acceptance (2026-10-04 21:39 UTC)
+
+Application `802a7b5` is deployed on loopback4000 with scheduled updates disabled. The original manual refresh verified a fresh20-item directory and all latest10 bodies, created0 and supplemented images in8 existing rows; all1450 article identities, trusted times, text, styles and metrics remain protected. The existing exporter saved89 image attachments and real Edge decoded all97 image references across the10 articles offline. Actual persisted bytes saved twice on an isolated SQLite copy produce created0/updated0; this is distinct from the repeated real original-route refresh and from synthetic fixtures. The exact [acceptance record](LATEST_TEN_IMAGE_ACCEPTANCE.md) and [integration status](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md) supersede the earlier timeout stop below. Other11 subscriptions, natural future publication and the user's single URL/direct Obsidian acceptance remain separate.
+
+## Historical integration follow-up
 
 Offline follow-up identified the saved `-2012` response message as login timeout
 and verified that the stop belongs to the current bound normal Web login.
