@@ -17,6 +17,8 @@ export type OwnerWebSession = {
     | 'owner-confirmed-dedicated-web-login'
     | 'owner-confirmed-native-web-login';
   capturedAt: string;
+  /** Ordinary maintenance time, never a new owner scan or authorization. */
+  renewedAt?: string;
   ownerVid: string;
   cookies: Array<{
     name: string;

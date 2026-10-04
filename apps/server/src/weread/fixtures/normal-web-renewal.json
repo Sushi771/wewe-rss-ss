@@ -1,0 +1,57 @@
+{
+  "syntheticCredentialsOnly": true,
+  "basedOnActualNormalRenewalAttributes": true,
+  "now": "2026-10-04T18:49:07.789Z",
+  "initialSession": {
+    "source": "owner-confirmed-native-web-login",
+    "capturedAt": "2026-10-04T15:59:27.219Z",
+    "ownerVid": "123",
+    "cookies": [
+      {
+        "name": "wr_vid",
+        "value": "123",
+        "domain": ".weread.qq.com",
+        "path": "/",
+        "secure": true,
+        "expires": -1
+      },
+      {
+        "name": "wr_skey",
+        "value": "old-web-skey",
+        "domain": ".weread.qq.com",
+        "path": "/",
+        "secure": true,
+        "expires": -1
+      },
+      {
+        "name": "wr_ql",
+        "value": "0",
+        "domain": ".weread.qq.com",
+        "path": "/",
+        "secure": true,
+        "expires": -1
+      },
+      {
+        "name": "wr_rt",
+        "value": "old-web-refresh",
+        "domain": ".weread.qq.com",
+        "path": "/",
+        "secure": true,
+        "expires": -1
+      }
+    ]
+  },
+  "httpStatus": 200,
+  "data": {
+    "succ": 1
+  },
+  "setCookies": [
+    "wr_vid=123; Max-Age=31104000; Domain=.weread.qq.com; Path=/; Expires=Wed, 29 Sep 2027 18:49:06 GMT; HttpOnly",
+    "wr_skey=renewed-web-skey; Max-Age=5400; Domain=.weread.qq.com; Path=/; Expires=Sun, 04 Oct 2026 20:19:06 GMT; HttpOnly",
+    "wr_pf=normal-platform-fingerprint; Max-Age=31104000; Domain=.weread.qq.com; Path=/; Expires=Wed, 29 Sep 2027 18:49:06 GMT; HttpOnly",
+    "wr_rt=renewed-web-refresh; Max-Age=31104000; Domain=.weread.qq.com; Path=/; Expires=Wed, 29 Sep 2027 18:49:06 GMT; HttpOnly"
+  ],
+  "realServerVidMatchedOriginal": true,
+  "ticketPresent": false,
+  "wrpaPresent": false
+}

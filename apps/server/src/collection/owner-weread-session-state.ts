@@ -77,6 +77,8 @@ export function ownerLatestManualSessionAuthorized(
   ownerVid: string,
   mpId: string,
 ) {
+  if (ownerLatestNormalMaintenanceAuthorized(state, session, ownerVid, mpId))
+    return true;
   const authHash = ownerLatestAuthHash(session, ownerVid);
   const a = state.manualRefreshAuthorization;
   return (
@@ -94,6 +96,68 @@ export function ownerLatestManualSessionAuthorized(
         Date.parse(session.capturedAt) > Date.parse(state.stop.at) &&
         a.priorAuthHash !== authHash &&
         state.stop.sessionAuthHash !== authHash))
+  );
+}
+
+/** Explicitly reviewed same-owner maintenance for exactly the failed directory
+ * login timeout. A first validation consumes its budget under the provider lock.
+ * Only verified ten-body/image success permits later local manual refreshes;
+ * every subsequent refusal changes stopHash and invalidates this continuation. */
+export function ownerLatestNormalMaintenanceAuthorized(
+  state: any,
+  session: OwnerWebSession,
+  ownerVid: string,
+  mpId: string,
+  now = Date.now(),
+) {
+  const a = state.normalWebMaintenanceAuthorization;
+  if (!a) return false;
+  const authHash = ownerLatestAuthHash(session, ownerVid, now);
+  const successAfterConsumption =
+    Number.isFinite(Date.parse(a.consumedAt)) &&
+    Date.parse(a.consumedAt) >= Date.parse(a.approvedAt) &&
+    Date.parse(a.consumedAt) <= now + 300000 &&
+    Number.isSafeInteger(state.lastSuccessAt) &&
+    state.lastSuccessAt >= Date.parse(a.consumedAt) &&
+    state.lastSuccessAt <= now + 300000 &&
+    state.sessionAuthHash === authHash &&
+    Array.isArray(state.articleIds) &&
+    state.articleIds.length === 10 &&
+    new Set(state.articleIds).size === 10 &&
+    state.response?.stage === 'content-10' &&
+    state.response?.httpStatus === 200;
+  return (
+    a.source === 'same-owner-normal-web-maintenance' &&
+    a.policy === 'one-validation-then-local-manual' &&
+    a.target === mpId &&
+    session.source === 'owner-confirmed-native-web-login' &&
+    a.resultingAuthHash === authHash &&
+    a.parentAuthHash !== authHash &&
+    a.resultingSessionSha256 === sha(JSON.stringify(session)) &&
+    /^[a-f0-9]{64}$/.test(a.parentSessionSha256 || '') &&
+    /^[a-f0-9]{64}$/.test(a.maintenanceSha256 || '') &&
+    a.normalLoginAt === session.capturedAt &&
+    a.renewedAt === session.renewedAt &&
+    Number.isFinite(Date.parse(a.renewedAt)) &&
+    Number.isFinite(Date.parse(a.approvedAt)) &&
+    Date.parse(a.approvedAt) >= Date.parse(a.renewedAt) &&
+    Date.parse(a.approvedAt) <= now + 300000 &&
+    Number.isFinite(Date.parse(a.validUntil)) &&
+    now < Date.parse(a.validUntil) &&
+    state.stop?.sessionAuthHash === a.parentAuthHash &&
+    state.stop.stage === 'directory-0' &&
+    state.stop.requests === 1 &&
+    ['业务码 -2012', '微信读书登录超时（业务码 -2012）'].includes(
+      state.stop.reason,
+    ) &&
+    Number.isFinite(Date.parse(state.stop.at)) &&
+    Date.parse(session.capturedAt) <= Date.parse(state.stop.at) &&
+    Date.parse(a.renewedAt) >= Date.parse(state.stop.at) &&
+    a.failedStopSha256 === sha(JSON.stringify(state.stop)) &&
+    (!a.consumedAt
+      ? a.failedResponseSha256 === sha(JSON.stringify(state.response)) &&
+        state.sessionAuthHash === a.parentAuthHash
+      : successAfterConsumption)
   );
 }
 

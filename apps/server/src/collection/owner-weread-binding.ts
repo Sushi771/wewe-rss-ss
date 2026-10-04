@@ -8,6 +8,7 @@ import {
   ownerLatestManualSessionAuthorized,
 } from './owner-weread-session-state';
 import { NativeAccountProfile } from '../weread/native-account-profile';
+import { previewNormalWebMaintenanceBinding } from '../weread/normal-web-maintenance';
 
 type Account = { id: string; name: string; status: number; token: string };
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -353,6 +354,12 @@ export async function previewManualWereadBinding(
   mpId: string,
 ) {
   try {
+    const maintained = await previewNormalWebMaintenanceBinding(
+      ownerConfigFile(),
+      account,
+      mpId,
+    );
+    if (maintained) return maintained;
     const i = await inputs(account, mpId);
     const authorization = i.state.manualRefreshAuthorization;
     const connected =
@@ -403,6 +410,33 @@ export async function confirmManualWereadBinding(
   let stateLock: Awaited<ReturnType<typeof fs.open>> | undefined;
   let stateFile: string | undefined;
   try {
+    const maintained = await previewNormalWebMaintenanceBinding(
+      configFile,
+      account,
+      mpId,
+    );
+    if (maintained) {
+      const binding = JSON.parse(await fs.readFile(configFile, 'utf8')).feeds[
+        mpId
+      ];
+      stateFile = binding.wereadLatestStateFile;
+      stateLock = await fs.open(stateFile! + '.lock', 'wx', 0o600);
+      const current = await previewNormalWebMaintenanceBinding(
+        configFile,
+        account,
+        mpId,
+      );
+      if (!current || current.revision !== revision)
+        throw new Error('正常续期状态已变化，请重新查看。');
+      // Already explicitly adopted by the integration utility. Re-confirming
+      // cannot manufacture another operation budget or rewrite a QR login.
+      return {
+        connected: true,
+        mpId,
+        accountLabel: account.name,
+        message: current.message,
+      };
+    }
     const first = await inputs(account, mpId);
     stateFile = first.binding.wereadLatestStateFile!;
     stateLock = await fs.open(stateFile + '.lock', 'wx', 0o600);
