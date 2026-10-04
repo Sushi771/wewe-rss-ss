@@ -28,6 +28,8 @@ name is hardcoded by this selection logic.
 A receipt is evidence of backend collection handling, including a refusal; it
 is not proof of successful body/image collection. An older receipt, malformed
 JSON, or a different provider does not establish a refresh after connection.
+Legacy receipts have whole-second timestamps; a receipt in the fractional
+second containing the connection is conservatively treated as unproven.
 The article count or `created=0` is not used to infer failure. A latest-ten
 refresh can legitimately add zero rows when those articles already exist or
 the publisher has not published anything new. Future new-article discovery
@@ -92,7 +94,8 @@ They also exercise retained historical stops, cooldowns, the latest-ten
 body/image pipeline and channel routing. No real HTTP is used in these suites.
 
 Local verification: all 40 server suites / 575 tests passed; server build,
-frontend TypeScript check, changed-source ESLint and Prettier passed. GitHub
+frontend TypeScript check, changed-source ESLint and Prettier passed. The final
+receipt-ordering adjustment also passed 3 focused suites / 60 tests. GitHub
 CI must be checked against the final branch SHA after opening the draft PR;
 the workflow only triggers PRs targeting `main`, so the draft targets `main`
 and states that the integration owner should cherry-pick this worker's commit.
