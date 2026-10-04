@@ -203,6 +203,40 @@ describe('normal owner Tencent latest body (no HTTP)', () => {
     );
     expect(axios.get).toHaveBeenCalledTimes(1);
   });
+  it('keeps a directory login timeout stopped without renewing, reading bodies or images', async () => {
+    const imageFetch = jest.spyOn(global, 'fetch');
+    const raw = JSON.stringify({
+      errCode: -2012,
+      errMsg: '登录超时',
+      errLog: 'private-trace-fixture',
+      info: '',
+    });
+    (axios.get as jest.Mock).mockResolvedValue({ status: 200, data: raw });
+    const config = { ...c(), wereadDirectoryEnabled: true };
+    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow(
+      '微信读书登录超时',
+    );
+    const saved = await fs.readFile(c().wereadLatestStateFile, 'utf8');
+    const state = JSON.parse(saved);
+    expect(state.stop).toMatchObject({
+      stage: 'directory-0',
+      requests: 1,
+      reason: '微信读书登录超时（业务码 -2012）',
+    });
+    expect(state.lastSuccessAt).toBeUndefined();
+    expect(saved).not.toContain('private-trace-fixture');
+    expect(
+      await fs.readFile(
+        `${c().wereadLatestStateFile}.${state.lastAttemptAt}.directory-0.response`,
+        'utf8',
+      ),
+    ).toBe(raw);
+    await expect(fetchOwnerWereadLatest(config)).rejects.toThrow('目录已停止');
+    expect(await fs.readFile(c().wereadLatestStateFile, 'utf8')).toBe(saved);
+    expect(axios.get).toHaveBeenCalledTimes(1);
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(imageFetch).not.toHaveBeenCalled();
+  });
   it('reports a content business refusal at HTTP 200 and keeps its private text out of the stop', async () => {
     (axios.get as jest.Mock)
       .mockResolvedValueOnce({

@@ -125,6 +125,30 @@ function evidence() {
 }
 
 describe('owner latest session stop ownership (offline only)', () => {
+  it('describes the observed login timeout without changing or releasing a saved stop', () => {
+    const reason = '微信读书登录超时（业务码 -2012）';
+    expect(ownerLatestFailureReason(new Error('业务码 -2012'))).toBe(reason);
+    expect(ownerLatestFailureReason(reason)).toBe(reason);
+    const state = {
+      stop: {
+        sessionAuthHash: ownerLatestAuthHash(session(), '123'),
+        stage: 'directory-0',
+        reason: '业务码 -2012',
+        requests: 1,
+      },
+    };
+    const before = JSON.stringify(state);
+    expect(ownerLatestStopMessage(state, session(), '123', mpId)).toContain(
+      reason,
+    );
+    expect(JSON.stringify(state)).toBe(before);
+    expect(ownerLatestFailureReason(new Error('业务码 -2041'))).toBe(
+      '业务码 -2041',
+    );
+    expect(
+      ownerLatestFailureReason(new Error('登录超时 token=private-fixture')),
+    ).not.toContain('private-fixture');
+  });
   it.each([
     ['directory-0', '目录'],
     ['directory-next', '目录'],
