@@ -2,6 +2,7 @@
 
 ## 2026-10-04：下载工具空白反馈核查
 
+- 用户原`启动WeWe-RSS.bat`只调用已停用prepare-local并退出1，不能启动。现接回受控`logon-start.cjs start`，显式定时关闭、跟随active.json、已运行完整身份匹配才复用，成功后本机Edge打开工具页；不停止/迁移现有进程。Git固定bat CRLF，`--check`只省略浏览器，实际入口验证复用PID18288。应用包无需重构，身份拒绝回归和生产逐字段保护复核通过。
 - 用户确认在ChatGPT内打开本机链接。原4000仍归属已核进程18288，HTML/JS/CSS正常；独立本机Edge直接打开、刷新及尾斜杠路由实际显示URL输入框和下载按钮。未发现本机路由或部署包空白故障，未改应用代码、启动进程或凭据。
 - [打开方式](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md#打开本机工具)改为在运行软件的Windows本机Edge/Chrome地址栏输入地址。当前执行器没有可调用的Computer Use node_repl，不能宣称检查了用户现有浏览器窗口；使用独立Edge验证，不碰已停腾讯URL。外部字体和版本检查被隔离阻止，原始截图和资源响应保留在本机忽略目录`output/playwright/local-release-audit/blank-page-*`，无平台取文或数据库改动。
 
