@@ -445,12 +445,15 @@ export class CollectionService {
     }
   }
 
-  async collectOwnerWereadLatest(mpId: string) {
+  async collectOwnerWereadLatest(
+    mpId: string,
+    trigger: 'local-manual' | 'scheduled' | 'public' = 'public',
+  ) {
     if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
     this.publicCollections.add(mpId);
     try {
       const config = await readOwnerSearchConfig(mpId);
-      const page = await fetchOwnerWereadLatest(config);
+      const page = await fetchOwnerWereadLatest(config, trigger);
       await createVerifiedSqliteBackup();
       const saved = await this.saveVerifiedSearchPage(mpId, page, true);
       return {

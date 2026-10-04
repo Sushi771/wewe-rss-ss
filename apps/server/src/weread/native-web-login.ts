@@ -2,6 +2,10 @@ import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { OwnerWebSession } from '../collection/owner-web-search';
+import {
+  fetchNativeAccountProfile,
+  NativeAccountProfile,
+} from './native-account-profile';
 
 export type NativeLoginResult = {
   message: string;
@@ -10,6 +14,7 @@ export type NativeLoginResult = {
   token?: string;
   username?: string;
   webSession?: OwnerWebSession;
+  profile?: NativeAccountProfile;
 };
 type Login = {
   deadline: number;
@@ -221,13 +226,17 @@ export class NativeWebLogin {
             expires: -1,
           })),
         };
+        const profile = await fetchNativeAccountProfile(webSession).catch(
+          () => undefined,
+        );
         return (login.result = {
           message: '',
           terminal: true,
           vid,
           token,
-          username: `WeRead_${vid}`,
+          username: profile?.name || `WeRead_${vid}`,
           webSession,
+          profile,
         });
       }
       if (d.logicCode === 'LOGIN_TIMEOUT' || d.logicCode === 'LOGIN_CANCEL')
