@@ -33,6 +33,11 @@ import {
   Metrics,
 } from '../collection/collection-format';
 import { scanOwnerCandidates } from '../collection/owner-candidate-scan';
+import {
+  ownerConfigFile,
+  previewManualWereadBinding,
+  confirmManualWereadBinding,
+} from '../collection/owner-weread-binding';
 
 const searchCandidateSnapshotSchema = z.object({
   mpId: z
@@ -349,6 +354,81 @@ export class TrpcRouter {
   private legacyAccountProcedure = this.trpcService.protectedProcedure;
 
   accountRouter = this.trpcService.router({
+    manualRefreshOptions: this.legacyAccountProcedure
+      .input(z.object({ accountId: z.string().regex(/^\d+$/) }))
+      .query(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '手动更新账号连接只能在服务器本机操作。',
+          });
+        try {
+          const account = await this.prismaService.account.findUniqueOrThrow({
+            where: { id: input.accountId },
+          });
+          const config = JSON.parse(
+            await fs.promises.readFile(ownerConfigFile(), 'utf8'),
+          );
+          const feeds = await this.prismaService.feed.findMany({
+            where: {
+              id: { in: Object.keys(config.feeds || {}) },
+              collectionChannel: 'owner-weread-latest',
+            },
+          });
+          const options = await Promise.all(
+            feeds.map(async (feed) => ({
+              ...(await previewManualWereadBinding(account, feed.id)),
+              name: feed.mpName,
+            })),
+          );
+          return {
+            accountLabel: `${account.name}（VID …${account.id.slice(-4)}）`,
+            options,
+          };
+        } catch {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: '无法预览手动更新连接，请检查私有配置和正常Web登录。',
+          });
+        }
+      }),
+    connectManualRefresh: this.legacyAccountProcedure
+      .input(
+        z.object({
+          accountId: z.string().regex(/^\d+$/),
+          mpId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+          revision: z.string().regex(/^[a-f0-9]{64}$/),
+          confirm: z.literal(true),
+        }),
+      )
+      .mutation(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '手动更新账号连接只能在服务器本机操作。',
+          });
+        try {
+          const account = await this.prismaService.account.findUniqueOrThrow({
+            where: { id: input.accountId },
+          });
+          const feed = await this.prismaService.feed.findUniqueOrThrow({
+            where: { id: input.mpId },
+          });
+          if (feed.collectionChannel !== 'owner-weread-latest')
+            throw new Error('INVALID_CHANNEL');
+          return await confirmManualWereadBinding(
+            account,
+            input.mpId,
+            input.revision,
+          );
+        } catch {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message:
+              '连接未完成：请重新预览并核对正常Web登录、停止或正在更新状态；未发取文请求。',
+          });
+        }
+      }),
     list: this.legacyAccountProcedure
       .input(AccountSchemas.list)
       .query(async ({ input }) => {
