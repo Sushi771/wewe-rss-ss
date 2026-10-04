@@ -12,7 +12,10 @@ import {
   Metrics,
 } from './collection-format';
 import { resolvePublicArticle } from './public-album';
-import { archiveProviderImages } from './archive-provider-images';
+import {
+  archiveProviderImages,
+  supplementSavedBodyImages,
+} from './archive-provider-images';
 import { decodeInlineImage } from './image-fetch';
 import { fetchMp2RssRecent20 } from './mp2rss';
 import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
@@ -342,6 +345,9 @@ export class CollectionService {
               )
                 throw new Error('SEARCH_REPLAY_SAVED_SIGNATURE_CONFLICT');
             }
+            const supplemented = existing.contentHtml
+              ? supplementSavedBodyImages(existing.contentHtml, item)
+              : undefined;
             const data = {
               ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
               ...(!existing.verifiedSourceUrl
@@ -353,6 +359,7 @@ export class CollectionService {
                     lastBodyStatus: 'available',
                   }
                 : {}),
+              ...(supplemented ? { contentHtml: supplemented } : {}),
             };
             if (Object.keys(data).length) {
               await tx.article.update({ where: { id: existing.id }, data });

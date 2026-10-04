@@ -50,3 +50,22 @@ normal renewal tests verify omission of expired keys and denial of expired
 refresh credentials. All tests use synthetic cookies and temporary files.
 Actual network success, saved/openable images, production preservation and
 duplicate-safe original refresh must be recorded separately by integration.
+
+The first real resumed refresh verified all ten original bodies and their true
+publication times. It reused three responses and fetched only the remaining
+seven; all ten matched existing articles, including a legacy short-link ID.
+All old article/account fields stayed unchanged. A subsequent read-only check
+found that retaining an existing body also retained its remote image links:
+downloaded fresh images had been discarded by the duplicate save path. This
+exposed a persistence defect despite the successful collection receipt.
+
+The existing shared image archive now retains its validated source-to-byte map
+in memory for that exact article object. Protected save may supplement only
+matching remote image references in an existing body with these already fetched
+bytes. It preserves the saved text, styles, IDs, metadata, timestamps and metrics,
+keeps existing inline bytes and performs no extra requests. Unknown old image
+sources reject the transaction; adapter-supplied fields or cloned objects cannot
+supply this provenance. A repeat with fully archived images makes no article
+update. SQLite regression checks cover legacy IDs, preserved annotations and
+metrics, duplicate saves and unchanged rejection of conflicting trusted times.
+Real deployment and image opening acceptance must still be recorded separately.
