@@ -43,6 +43,8 @@ jobs:
 
       - name: Type check Web
         run: pnpm --filter web build
+      - name: Test account modal eligibility and viewport CSS contract (no UI or HTTP)
+        run: node --test scripts/check-account-modal-logic.test.cjs
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
       - name: Test isolated WeRead gateway probe
