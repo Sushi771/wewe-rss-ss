@@ -202,6 +202,112 @@ select {
   padding-bottom: 8px;
 }
 
+/* A shared action-column width keeps headers and rows with fewer actions aligned.
+   Account metadata grows naturally; article-list row dimensions stay separate. */
+.account-header,
+.compact-row.account-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.2fr) 80px minmax(180px, 1fr) 240px;
+  gap: 16px;
+}
+
+.compact-row.account-row {
+  height: auto;
+  min-height: 76px;
+  padding: 12px 16px;
+}
+
+.account-actions > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* NextUI's default overlay is z-50; the account toolbar is z-100.
+   Keep the entire connection dialog above it and scroll only its body. */
+.account-connection-backdrop {
+  z-index: 200;
+}
+
+.account-connection-overlay {
+  z-index: 201;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  padding: 16px;
+}
+
+.account-connection-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(32rem, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: 0;
+  overflow: hidden;
+}
+
+.account-connection-header,
+.account-connection-footer {
+  flex-shrink: 0;
+}
+
+.account-connection-header {
+  padding-right: 48px;
+}
+
+.account-connection-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.account-connection-footer {
+  flex-wrap: wrap;
+  border-top: 1px solid var(--mac-separator);
+}
+
+.account-connection-close {
+  z-index: 1;
+}
+
+@media (max-width: 1000px) {
+  .account-header,
+  .compact-row.account-row {
+    grid-template-columns: minmax(140px, 1fr) 80px minmax(180px, 1fr);
+  }
+
+  .account-header > :last-child {
+    display: none;
+  }
+
+  .account-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .account-header {
+    display: none;
+  }
+
+  .compact-row.account-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+  }
+
+  .account-login,
+  .account-actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}
+
 .compact-row:nth-child(even) {
   background: rgba(0, 0, 0, 0.015);
 }
