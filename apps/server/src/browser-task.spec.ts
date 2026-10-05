@@ -84,7 +84,7 @@ describe('short-lived official article task', () => {
     const task = b.issue({ url: short });
     b.claim(task.taskId, binding);
     jest.advanceTimersByTime(300001);
-    await expect(task.result).rejects.toThrow('TASK_CANCELLED');
+    await expect(task.result).rejects.toThrow('TASK_EXPIRED');
     expect(() => b.claim(task.taskId, binding)).toThrow('TASK_GONE');
     expect(() => broker().claim(task.taskId, binding)).toThrow('TASK_GONE');
   });

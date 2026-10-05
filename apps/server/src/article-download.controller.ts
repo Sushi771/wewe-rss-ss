@@ -5,6 +5,8 @@ import {
   HttpCode,
   Logger,
   Optional,
+  OnModuleDestroy,
+  Param,
   Post,
   Request,
   Response,
@@ -12,7 +14,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Request as Req, Response as Res } from 'express';
 import { dirname, isAbsolute, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   ArticleDownloadError,
   buildArticleDownload,
@@ -28,17 +30,29 @@ import {
 } from './article-download-cache';
 import { ProviderArticle } from './collection/subscription-provider';
 import { prepareVerifiedProviderDownload } from './article-verified-download';
+import { BrowserTaskBroker, BrowserTaskError } from './browser-task';
+import { BrowserArticleTasks } from './browser-article-tasks';
 import {
   ARTICLE_VERIFICATION_TTL_MS,
   articleVerificationLocation,
 } from '../../../packages/shared/src/article-verification';
 
 @Controller('download')
-export class ArticleDownloadController {
+export class ArticleDownloadController implements OnModuleDestroy {
+  private readonly browserTasks: BrowserArticleTasks;
   constructor(
     private readonly config: ConfigService,
     @Optional() private readonly prisma?: PrismaService,
-  ) {}
+    @Optional() browserBroker?: BrowserTaskBroker,
+  ) {
+    // No AppModule registration or environment auto-enable. Production stays disabled.
+    this.browserTasks = new BrowserArticleTasks(
+      browserBroker || new BrowserTaskBroker(),
+    );
+  }
+  onModuleDestroy() {
+    this.browserTasks.close();
+  }
   private running = false;
   private pickerRunning = false;
   private store?: LocalArticleStore;
@@ -223,6 +237,144 @@ export class ArticleDownloadController {
     @Response() res: Res,
   ) {
     return this.saveArticle(body, req, res);
+  }
+
+  private taskOwner(req: Req) {
+    return createHash('sha256')
+      .update(String(req.headers.authorization || ''))
+      .digest('hex');
+  }
+  private taskFailure(error: unknown, res: Res) {
+    const code =
+      error instanceof BrowserTaskError
+        ? error.code
+        : error instanceof ArticleDownloadError
+          ? 'TARGET_INVALID'
+          : 'BROWSER_TASK_FAILED';
+    return res
+      .status(
+        error instanceof BrowserTaskError ||
+          error instanceof ArticleDownloadError
+          ? error.status
+          : 500,
+      )
+      .json({
+        code,
+        message: '官方文章接收任务未完成；未请求原文，也未改变订阅停止状态。',
+      });
+  }
+  @Get('article/browser-task')
+  browserTaskCapability(@Request() req: Req, @Response() res: Res) {
+    if (!this.authorized(req, res, false)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.json(this.browserTasks.capability());
+  }
+  @Post('article/browser-task')
+  browserTaskIssue(
+    @Body() body: { url?: unknown },
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    if (this.running || this.pickerRunning)
+      return res.status(409).json({
+        code: 'LOCAL_OPERATION_BUSY',
+        message: '请等待当前本机操作完成。',
+      });
+    try {
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).some((k) => k !== 'url')
+      )
+        throw new BrowserTaskError('INPUT_SCHEMA', 400);
+      return res
+        .status(200)
+        .json(
+          this.browserTasks.issue(
+            downloadArticleUrl(body.url),
+            this.taskOwner(req),
+          ),
+        );
+    } catch (error) {
+      return this.taskFailure(error, res);
+    }
+  }
+  @Get('article/browser-task/:taskId')
+  browserTaskStatus(
+    @Param('taskId') taskId: string,
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, false)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    try {
+      return res.json(this.browserTasks.status(taskId, this.taskOwner(req)));
+    } catch (error) {
+      return this.taskFailure(error, res);
+    }
+  }
+  @Post('article/browser-task/:taskId/cancel')
+  browserTaskCancel(
+    @Param('taskId') taskId: string,
+    @Body() body: unknown,
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    try {
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).length
+      )
+        throw new BrowserTaskError('INPUT_SCHEMA', 400);
+      return res
+        .status(200)
+        .json(this.browserTasks.cancel(taskId, this.taskOwner(req)));
+    } catch (error) {
+      return this.taskFailure(error, res);
+    }
+  }
+  @Post('article/browser-task/:taskId/save')
+  async browserTaskSave(
+    @Param('taskId') taskId: string,
+    @Body() body: { pickToken?: unknown },
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    const owner = this.taskOwner(req);
+    let began = false;
+    try {
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).some((k) => k !== 'pickToken')
+      )
+        throw new BrowserTaskError('INPUT_SCHEMA', 400);
+      const verified = this.browserTasks.beginSave(taskId, owner);
+      began = true;
+      // Current request rechecks auth, Origin, local save lock and directory grant.
+      // The app cannot submit HTML/Provider/URL or spoof the extension's completion.
+      await this.saveVerifiedArticle(
+        verified.article,
+        { url: verified.url, pickToken: body.pickToken },
+        req,
+        res,
+      );
+      if (res.statusCode === 200) this.browserTasks.saved(taskId, owner);
+      else this.browserTasks.saveFailed(taskId, owner);
+    } catch (error) {
+      if (began) this.browserTasks.saveFailed(taskId, owner);
+      if (!res.headersSent) return this.taskFailure(error, res);
+    }
   }
 
   /** Internal completion for the normal verification/collection owner.

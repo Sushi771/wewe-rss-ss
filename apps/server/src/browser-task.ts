@@ -199,7 +199,8 @@ export type BrowserTaskConfiguration = {
 
 /** In-memory, one-shot tasks; restart revokes every task/nonce. No production
  * database, global subscription state or remote image/network fetcher here.
- * Task creation is an internal function; there is no browser body-upload/issue API.
+ * Extension transport cannot issue tasks. The original authenticated local
+ * application may issue a validated target; it cannot upload a Provider/body.
  */
 export class BrowserTaskBroker {
   private tasks = new Map<string, Pending>();
@@ -219,6 +220,19 @@ export class BrowserTaskBroker {
       !/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(this.config.localOrigin || '')
     )
       fail('PAIRING_NOT_CONFIGURED', 409);
+  }
+  /** Read-only application capability; never exposes pairing configuration. */
+  capability() {
+    try {
+      this.available();
+      return { available: true as const };
+    } catch (error) {
+      if (!(error instanceof BrowserTaskError)) throw error;
+      return { available: false as const, code: error.code };
+    }
+  }
+  phase(taskId: string): 'waiting' | 'claimed' {
+    return this.pending(taskId).binding ? 'claimed' : 'waiting';
   }
   preflight(req: {
     socket: { remoteAddress?: string };
@@ -285,7 +299,7 @@ export class BrowserTaskBroker {
     });
     // Keep an abandoned HTTP owner from producing an unhandled rejection.
     void result.catch(() => {});
-    const timer = setTimeout(() => this.cancel(taskId), BROWSER_TASK_TTL);
+    const timer = setTimeout(() => this.expire(taskId), BROWSER_TASK_TTL);
     timer.unref?.();
     this.tasks.set(taskId, {
       target: { ...target, url },
@@ -302,7 +316,7 @@ export class BrowserTaskBroker {
     const task = this.tasks.get(taskId);
     if (!task) fail('TASK_GONE', 410);
     if (Date.now() >= task.expires) {
-      this.cancel(taskId);
+      this.expire(taskId);
       fail('TASK_EXPIRED', 410);
     }
     return task;
@@ -377,6 +391,13 @@ export class BrowserTaskBroker {
     clearTimeout(task.timer);
     this.tasks.delete(String(taskId));
     task.reject(new BrowserTaskError('TASK_CANCELLED', 410));
+  }
+  private expire(taskId: string) {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+    clearTimeout(task.timer);
+    this.tasks.delete(taskId);
+    task.reject(new BrowserTaskError('TASK_EXPIRED', 410));
   }
   close() {
     for (const key of this.tasks.keys()) this.cancel(key);

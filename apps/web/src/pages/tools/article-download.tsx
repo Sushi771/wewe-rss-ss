@@ -1,8 +1,13 @@
 import { Button, Checkbox, Input } from '@nextui-org/react';
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
-import type { TimedArticleVerification } from '@wewe-rss/shared';
+import {
+  browserArticleTaskStatus,
+  mergeBrowserArticleTaskStatus,
+  type BrowserArticleTaskStatus,
+  type TimedArticleVerification,
+} from '@wewe-rss/shared';
 import {
   ArticleDownloadRequestError,
   verificationFromDownloadError,
@@ -15,7 +20,7 @@ type SavedArticle = {
   markdownPath: string;
   alreadySaved: boolean;
   imageCount: number;
-  contentSource?: 'saved-article' | 'remote';
+  contentSource?: 'saved-article' | 'remote' | 'verified-provider';
 };
 
 export default function ArticleDownload() {
@@ -27,40 +32,48 @@ export default function ArticleDownload() {
     useState<TimedArticleVerification | null>(null);
   const [notice, setNotice] = useState('');
   const [saved, setSaved] = useState<SavedArticle | null>(null);
+  const [browserAvailable, setBrowserAvailable] = useState(false);
+  const [browserTask, setBrowserTask] =
+    useState<BrowserArticleTaskStatus | null>(null);
+  const browserActive =
+    !!browserTask &&
+    ['waiting', 'claimed', 'ready', 'saving'].includes(browserTask.state);
+  const locked = busy || browserActive;
   const request = useRef<AbortController | null>(null);
 
-  const api = async (
-    endpoint: string,
-    body?: unknown,
-    signal?: AbortSignal,
-  ) => {
-    const authCode = getAuthCode();
-    const response = await fetch(
-      `${serverOriginUrl || ''}/download/article${endpoint}`,
-      {
-        method: body === undefined ? 'GET' : 'POST',
-        credentials: 'include',
-        signal,
-        headers: {
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-          ...(authCode ? { authorization: authCode } : {}),
+  const api = useCallback(
+    async (endpoint: string, body?: unknown, signal?: AbortSignal) => {
+      const authCode = getAuthCode();
+      const response = await fetch(
+        `${serverOriginUrl || ''}/download/article${endpoint}`,
+        {
+          method: body === undefined ? 'GET' : 'POST',
+          credentials: 'include',
+          signal,
+          headers: {
+            ...(body === undefined
+              ? {}
+              : { 'Content-Type': 'application/json' }),
+            ...(authCode ? { authorization: authCode } : {}),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      },
-    );
-    const result = await response.json().catch(() => null);
-    if (!response.ok || !result)
-      throw new ArticleDownloadRequestError(
-        result?.message || '本机保存操作失败，请检查服务或登录状态。',
-        verificationFromDownloadError(
-          result,
-          body && typeof body === 'object'
-            ? (body as { url?: unknown }).url
-            : undefined,
-        ),
       );
-    return result;
-  };
+      const result = await response.json().catch(() => null);
+      if (!response.ok || !result)
+        throw new ArticleDownloadRequestError(
+          result?.message || '本机保存操作失败，请检查服务或登录状态。',
+          verificationFromDownloadError(
+            result,
+            body && typeof body === 'object'
+              ? (body as { url?: unknown }).url
+              : undefined,
+          ),
+        );
+      return result;
+    },
+    [],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -72,11 +85,68 @@ export default function ArticleDownload() {
             cause instanceof Error ? cause.message : '无法读取保存设置。',
           );
       });
+    void api('/browser-task', undefined, controller.signal)
+      .then((value) => setBrowserAvailable(value.available === true))
+      .catch(() => {}); // Older/disabled deployments simply have no task action.
     return () => {
       controller.abort();
       request.current?.abort();
     };
-  }, []);
+  }, [api]);
+
+  const browserTaskId = browserTask?.taskId;
+  useEffect(() => {
+    if (!browserTaskId) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const status = browserArticleTaskStatus(
+          await api(
+            '/browser-task/' + browserTaskId,
+            undefined,
+            controller.signal,
+          ),
+        );
+        if (!status || status.taskId !== browserTaskId)
+          throw new Error('未收到有效的官方文章任务状态。');
+        if (controller.signal.aborted) return;
+        setBrowserTask((current) =>
+          mergeBrowserArticleTaskStatus(current, status),
+        );
+        if (['waiting', 'claimed', 'saving'].includes(status.state))
+          timer = setTimeout(() => void poll(), 1000);
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        setBrowserTask(null);
+        setError(cause instanceof Error ? cause.message : '任务状态读取失败。');
+      }
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+      void api('/browser-task/' + browserTaskId + '/cancel', {}).catch(
+        () => {},
+      );
+    };
+  }, [api, browserTaskId]);
+
+  const browserTaskDeadline = browserTask?.expiresAt;
+  useEffect(() => {
+    if (!browserTaskId || !browserTaskDeadline) return;
+    const timer = setTimeout(
+      () =>
+        setBrowserTask((current) =>
+          current?.taskId === browserTaskId &&
+          ['waiting', 'claimed', 'ready'].includes(current.state)
+            ? { ...current, state: 'expired', code: 'TASK_EXPIRED' }
+            : current,
+        ),
+      Math.max(0, Date.parse(browserTaskDeadline) - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [browserTaskId, browserTaskDeadline]);
 
   useEffect(() => {
     if (verification?.status !== 'available') return;
@@ -129,8 +199,53 @@ export default function ArticleDownload() {
     return result.pickToken as string;
   };
 
+  const startBrowserTask = () =>
+    void operate(async (signal) => {
+      setBrowserTask(null);
+      const task = browserArticleTaskStatus(
+        await api('/browser-task', { url: url.trim() }, signal),
+      );
+      if (!task) throw new Error('未收到有效的官方文章接收任务。');
+      setBrowserTask(task);
+    });
+  const saveBrowserTask = () =>
+    void operate(async (signal) => {
+      if (!browserTaskId) return;
+      try {
+        let pickToken: string | undefined;
+        if (settings?.askEveryTime) {
+          const selected = await choose(signal);
+          if (!selected) return;
+          pickToken = selected;
+        }
+        setBrowserTask((current) =>
+          current ? { ...current, state: 'saving', code: undefined } : current,
+        );
+        const result = await api(
+          '/browser-task/' + browserTaskId + '/save',
+          pickToken ? { pickToken } : {},
+          signal,
+        );
+        if (!result.saved || typeof result.markdownPath !== 'string')
+          throw new Error('未收到有效的本机保存结果。');
+        setSaved(result);
+      } finally {
+        if (!signal.aborted) {
+          const status = browserArticleTaskStatus(
+            await api(
+              '/browser-task/' + browserTaskId,
+              undefined,
+              signal,
+            ).catch(() => null),
+          );
+          setBrowserTask(status);
+        }
+      }
+    });
+
   const download = (event: FormEvent) => {
     event.preventDefault();
+    setBrowserTask(null);
     void operate(async (signal) => {
       let input: URL;
       try {
@@ -185,10 +300,11 @@ export default function ArticleDownload() {
               setUrl(value);
               setError('');
               setVerification(null);
+              setBrowserTask(null);
               setSaved(null);
               setNotice('');
             }}
-            isDisabled={busy}
+            isDisabled={locked}
             isRequired
             autoComplete="off"
             description="支持公众号文章长链接和短链接。"
@@ -202,7 +318,7 @@ export default function ArticleDownload() {
               className="mt-3"
               size="sm"
               type="button"
-              isDisabled={busy || !settings}
+              isDisabled={locked || !settings}
               onPress={() =>
                 void operate(async (signal) => {
                   await choose(signal);
@@ -214,7 +330,7 @@ export default function ArticleDownload() {
             <div className="mt-4">
               <Checkbox
                 isSelected={settings?.askEveryTime || false}
-                isDisabled={busy || !settings}
+                isDisabled={locked || !settings}
                 onValueChange={(value) => {
                   const previous = settings;
                   if (previous)
@@ -239,11 +355,83 @@ export default function ArticleDownload() {
             color="primary"
             type="submit"
             isLoading={busy}
-            isDisabled={busy || !settings || !url.trim()}
+            isDisabled={locked || !settings || !url.trim()}
           >
             {busy ? '正在处理…' : '下载正文和图片'}
           </Button>
+          {browserAvailable && (
+            <Button
+              type="button"
+              isDisabled={locked || !settings || !url.trim()}
+              onPress={startBrowserTask}
+            >
+              通过已打开的官方文章接收
+            </Button>
+          )}
         </form>
+        {browserTask && (
+          <div className="bg-default-50 mt-5 rounded-xl p-4" aria-live="polite">
+            <p role="status">
+              {
+                {
+                  waiting: '等待您主动从官方文章页回送',
+                  claimed: '正在接收当前官方文章',
+                  ready: '正文和图片已通过接收校验，等待保存',
+                  saving: '正在保存到本机',
+                  saved: '本机保存已完成',
+                  cancelled: '任务已取消，未继续接收',
+                  expired: '任务已过期，未继续接收',
+                  failed: '文章接收校验未通过，未保存',
+                }[browserTask.state]
+              }
+            </p>
+            {['waiting', 'claimed'].includes(browserTask.state) && (
+              <>
+                <p className="mt-2 break-all text-xs">
+                  任务编号：{browserTask.taskId}
+                </p>
+                <p className="text-default-500 mt-2 text-sm">
+                  此任务不会访问原文或恢复订阅；请仅在已经打开的对应官方文章页操作。
+                </p>
+              </>
+            )}
+            {browserTask.code === 'SAVE_RETRY_REQUIRED' && (
+              <p className="mt-2 text-sm">
+                上次本机保存未完成，可重新选择路径后保存；不会重新取文。
+              </p>
+            )}
+            {browserTask.state === 'ready' && (
+              <Button
+                className="mt-3"
+                isDisabled={busy}
+                onPress={saveBrowserTask}
+              >
+                保存已接收的正文和图片
+              </Button>
+            )}
+            {browserActive && (
+              <Button
+                className="ml-2 mt-3"
+                isDisabled={busy || browserTask.state === 'saving'}
+                onPress={() =>
+                  void operate(async (signal) => {
+                    const status = browserArticleTaskStatus(
+                      await api(
+                        '/browser-task/' + browserTask.taskId + '/cancel',
+                        {},
+                        signal,
+                      ),
+                    );
+                    if (!status) throw new Error('未收到有效的取消结果。');
+                    setBrowserTask(status);
+                  })
+                }
+              >
+                取消接收任务
+              </Button>
+            )}
+          </div>
+        )}
         <div className="mt-6" aria-live="polite">
           {busy && (
             <p role="status" className="text-default-500 text-sm">
@@ -279,6 +467,11 @@ export default function ArticleDownload() {
               {saved.contentSource === 'saved-article' && (
                 <p className="text-default-600 mt-2 text-sm">
                   使用本机已保存的正文和图片，未访问原文服务器。
+                </p>
+              )}
+              {saved.contentSource === 'verified-provider' && (
+                <p className="text-default-600 mt-2 text-sm">
+                  使用本次接收并通过校验的正文和本地图片。
                 </p>
               )}
               <p className="text-default-600 mt-2 text-sm">
