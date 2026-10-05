@@ -88,4 +88,4 @@ pnpm --filter server build
 
 `dom-harness.test.mjs` 运行序列化采集函数和窄投影，敏感属性 getter 设为抛错；`offline.test.mjs` 测传输/权限/切文/精确CDN/内部 URL 拒绝，HTTP test 只启动临时测试服务器。Nest 新路由不在生产 AppModule。另有默认disabled、nonce/来源跨任务、过期/重启、schema/正文截短/时间/身份/缺图/原保存旧笔记保护测试。所有公开 fixture 为合成，不提交私人文章全文或原始证据。
 
-本轮本机证据：SQLite只读 quick_check=ok，2账号/12订阅/1450文章；仅检查私有资源存在性，不读取认证秘密。相关服务器回归和server构建通过，最终测试数量见准确PR；扩展DOM/传输离线回归另行在准确提交运行，CI以PR准确SHA为准，不能拿主区CI替代。
+相关服务端回归与 server 构建已通过。最终本地测试数量与远端 CI 以草稿 PR 的准确提交记录为准，不引用其他 owner 的 CI 代替。
