@@ -64,7 +64,8 @@ textarea,
 select {
   font-family:
     -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Icons',
-    'Helvetica Neue', 'PingFang SC', 'Noto Sans SC', sans-serif !important;
+    'Helvetica Neue', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+    'Noto Sans SC', sans-serif !important;
   font-feature-settings:
     'kern' 1,
     'liga' 1;
