@@ -7,6 +7,16 @@ on:
     branches: [main]
 
 jobs:
+  windows-process-identity:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test native loopback listener ownership and guarded stop
+        run: node --test scripts/local-release/process-identity.test.cjs
+
   lint-test:
     runs-on: ubuntu-latest
     steps:

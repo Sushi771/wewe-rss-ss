@@ -1,4 +1,7 @@
-import { archiveProviderImages } from './archive-provider-images';
+import {
+  archiveProviderImages,
+  supplementSavedBodyImages,
+} from './archive-provider-images';
 import { ProviderPage } from './subscription-provider';
 
 const page = (): ProviderPage => ({
@@ -27,6 +30,57 @@ const png = Buffer.from(
 
 describe('provider image archive', () => {
   afterEach(() => jest.restoreAllMocks());
+
+  it('supplements exact saved image URLs without replacing saved text or styles', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(png, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
+    const archived = (await archiveProviderImages(page())).articles[0];
+    const saved =
+      '<div class="rich_media_content" style="color:red"><p>saved annotation</p><img alt="original" data-src="https://mmbiz.qpic.cn/a.jpg" src="https://mmbiz.qpic.cn/a.jpg"></div>';
+    const supplemented = supplementSavedBodyImages(saved, archived)!;
+    expect(supplemented).toContain('saved annotation');
+    expect(supplemented).toContain('color:red');
+    expect(supplemented).toContain('alt="original"');
+    expect(supplemented).toContain('data:image/png;base64,');
+    expect(supplemented).not.toContain('data-src');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(supplementSavedBodyImages(supplemented, archived)).toBeUndefined();
+  });
+
+  it('rejects an unmatched saved URL and does not use adapter-provided provenance', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(png, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
+    const archived = (await archiveProviderImages(page())).articles[0];
+    const saved =
+      '<div class="rich_media_content"><p>saved</p><img src="https://mmbiz.qpic.cn/different.jpg"></div>';
+    expect(() => supplementSavedBodyImages(saved, archived)).toThrow(
+      'SAVED_BODY_IMAGE_SOURCE_CONFLICT',
+    );
+    expect(supplementSavedBodyImages(saved, { ...archived })).toBeUndefined();
+  });
+
+  it('leaves existing inline images and text-only bodies byte-for-byte unchanged', async () => {
+    const input = page();
+    input.articles[0].contentHtml =
+      '<div class="rich_media_content"><p>fresh</p></div>';
+    const archived = (await archiveProviderImages(input)).articles[0];
+    const cached = `<div class="rich_media_content"><img src="data:image/png;base64,${png.toString('base64')}"></div>`;
+    expect(supplementSavedBodyImages(cached, archived)).toBeUndefined();
+    expect(
+      supplementSavedBodyImages(
+        '<div class="rich_media_content">saved</div>',
+        archived,
+      ),
+    ).toBeUndefined();
+  });
 
   it('embeds image bytes so the saved body needs no network after restart', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue(
