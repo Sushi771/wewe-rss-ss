@@ -52,6 +52,16 @@ function scheduledUpdatesEnabled(manifest, settings) {
   });
 }
 
+function guardModulePath(release, resolved) {
+  // Native realpath retains the canonical path boundary check without a JS
+  // ancestor walk repeated for every dependency in the immutable package.
+  if (
+    !Module.isBuiltin(resolved) &&
+    !inside(release, fs.realpathSync.native(resolved))
+  )
+    throw new Error('Runtime dependency escaped the fixed release');
+}
+
 async function runtime() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -100,6 +110,7 @@ async function runtime() {
         ? path.join(release, 'known-migrations')
         : path.join(server, 'prisma/migrations'),
       ...(!legacy ? ['--require-current'] : []),
+      ...(command === 'start' && !legacy ? ['--schema-only'] : []),
     ]),
   );
   const env = cleanEnvironment({
@@ -115,11 +126,7 @@ async function runtime() {
   const resolveModule = Module._resolveFilename;
   Module._resolveFilename = function (request, ...args) {
     const resolved = resolveModule.call(this, request, ...args);
-    if (
-      !Module.isBuiltin(resolved) &&
-      !inside(release, fs.realpathSync(resolved))
-    )
-      throw new Error('运行依赖逃逸到产物目录之外');
+    guardModulePath(release, resolved);
     return resolved;
   };
   const clientPath = require.resolve('@prisma/client', { paths: [server] });
@@ -267,4 +274,4 @@ if (require.main === module)
     console.error(error.message);
     process.exitCode = 1;
   });
-module.exports = { runtime, scheduledUpdatesEnabled };
+module.exports = { runtime, scheduledUpdatesEnabled, guardModulePath };

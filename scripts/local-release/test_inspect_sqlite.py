@@ -80,6 +80,28 @@ class InspectTests(unittest.TestCase):
             audit.inspect(missing, self.migrations)
         self.assertFalse(missing.exists())
 
+    def test_schema_only_keeps_integrity_and_migration_checks(self):
+        with self.assertRaises(ValueError):
+            audit.inspect(self.database, self.migrations, require_current=True, schema_only=True)
+        self.migrate()
+        full = audit.inspect(self.database, self.migrations, require_current=True)
+        quick = audit.inspect(self.database, self.migrations, require_current=True, schema_only=True)
+        self.assertEqual(quick["pending"], [])
+        self.assertEqual(quick["tables"]["articles"], {"columns": full["tables"]["articles"]["columns"]})
+        with self.assertRaises(ValueError):
+            audit.inspect(self.database, self.migrations, full, True, True)
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("UPDATE _prisma_migrations SET checksum='changed'")
+        with self.assertRaises(ValueError):
+            audit.inspect(self.database, self.migrations, require_current=True, schema_only=True)
+
+    def test_schema_only_rejects_missing_current_columns(self):
+        self.migrate()
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("ALTER TABLE articles DROP COLUMN last_body_retry")
+        with self.assertRaises(ValueError):
+            audit.inspect(self.database, self.migrations, require_current=True, schema_only=True)
+
 
 if __name__ == "__main__":
     unittest.main()
