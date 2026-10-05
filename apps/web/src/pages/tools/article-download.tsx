@@ -2,6 +2,12 @@ import { Button, Checkbox, Input } from '@nextui-org/react';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
+import type { TimedArticleVerification } from '@wewe-rss/shared';
+import {
+  ArticleDownloadRequestError,
+  verificationFromDownloadError,
+} from '@web/utils/article-download-error';
+import ArticleVerificationNotice from './article-verification-notice';
 
 type Settings = { directory: string; askEveryTime: boolean };
 type SavedArticle = {
@@ -17,6 +23,8 @@ export default function ArticleDownload() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [verification, setVerification] =
+    useState<TimedArticleVerification | null>(null);
   const [notice, setNotice] = useState('');
   const [saved, setSaved] = useState<SavedArticle | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -42,8 +50,14 @@ export default function ArticleDownload() {
     );
     const result = await response.json().catch(() => null);
     if (!response.ok || !result)
-      throw new Error(
+      throw new ArticleDownloadRequestError(
         result?.message || '本机保存操作失败，请检查服务或登录状态。',
+        verificationFromDownloadError(
+          result,
+          body && typeof body === 'object'
+            ? (body as { url?: unknown }).url
+            : undefined,
+        ),
       );
     return result;
   };
@@ -64,19 +78,38 @@ export default function ArticleDownload() {
     };
   }, []);
 
+  useEffect(() => {
+    if (verification?.status !== 'available') return;
+    const timer = setTimeout(
+      () => {
+        setVerification({
+          status: 'unavailable',
+          articleUrl: verification.articleUrl,
+          reason: 'expired',
+        });
+      },
+      Math.max(0, Date.parse(verification.expiresAt) - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [verification]);
+
   const operate = async (action: (signal: AbortSignal) => Promise<void>) => {
     if (request.current) return;
     const controller = new AbortController();
     request.current = controller;
     setBusy(true);
     setError('');
+    setVerification(null);
     setNotice('');
     setSaved(null);
     try {
       await action(controller.signal);
     } catch (cause) {
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted) {
         setError(cause instanceof Error ? cause.message : '保存失败。');
+        if (cause instanceof ArticleDownloadRequestError)
+          setVerification(cause.verification);
+      }
     } finally {
       request.current = null;
       setBusy(false);
@@ -151,6 +184,7 @@ export default function ArticleDownload() {
             onValueChange={(value) => {
               setUrl(value);
               setError('');
+              setVerification(null);
               setSaved(null);
               setNotice('');
             }}
@@ -228,6 +262,9 @@ export default function ArticleDownload() {
             >
               {error}
             </p>
+          )}
+          {error && verification && (
+            <ArticleVerificationNotice verification={verification} />
           )}
           {saved && (
             <div className="border-success-200 bg-success-50 rounded-xl border p-5">

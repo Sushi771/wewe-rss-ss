@@ -9,6 +9,10 @@ import { articleContentHtml, articleIdentity } from './collection/article-page';
 import { canonicalArticleUrl } from './collection/collection-format';
 import { publicArticleRequestUrl } from './collection/public-album';
 import { allowedImageUrl, decodeInlineImage } from './collection/image-fetch';
+import {
+  ArticleVerification,
+  articleVerificationLocation,
+} from '../../../packages/shared/src/article-verification';
 
 type RedirectKind = 'verification' | 'login' | 'article' | 'other' | 'missing';
 export type DownloadDiagnostic = {
@@ -19,12 +23,20 @@ export type DownloadDiagnostic = {
 };
 
 export class ArticleDownloadError extends Error {
+  readonly officialVerification?: ArticleVerification;
   constructor(
     message: string,
     readonly status = 422,
     readonly diagnostic: DownloadDiagnostic = { code: 'DOWNLOAD_FAILED' },
+    officialVerification?: ArticleVerification,
   ) {
     super(message);
+    // Full Location belongs only to this local request, never diagnostic logs.
+    if (officialVerification)
+      Object.defineProperty(this, 'officialVerification', {
+        value: officialVerification,
+        enumerable: false,
+      });
   }
 }
 
@@ -105,6 +117,7 @@ type DownloadResponse = {
   type: string;
   status: number;
   redirectKind?: RedirectKind;
+  officialVerification?: ArticleVerification;
 };
 type DownloadRequest = (
   url: string,
@@ -147,13 +160,19 @@ function responseFailure(
     message: string,
     code: string,
     redirectKind?: RedirectKind,
+    officialVerification?: ArticleVerification,
   ) =>
-    new ArticleDownloadError(message, 422, {
-      code,
-      stage,
-      upstreamStatus,
-      ...(redirectKind ? { redirectKind } : {}),
-    });
+    new ArticleDownloadError(
+      message,
+      422,
+      {
+        code,
+        stage,
+        upstreamStatus,
+        ...(redirectKind ? { redirectKind } : {}),
+      },
+      officialVerification,
+    );
   if (upstreamStatus >= 300 && upstreamStatus < 400) {
     const kind = response.redirectKind || 'missing';
     const reason = {
@@ -171,6 +190,9 @@ function responseFailure(
           ? 'LOGIN_REDIRECT'
           : 'UNSUPPORTED_REDIRECT',
       kind,
+      kind === 'verification' && stage === 'article'
+        ? response.officialVerification
+        : undefined,
     );
   }
   if (upstreamStatus !== 200) {
@@ -261,7 +283,7 @@ export const requestDownloadResource: DownloadRequest = async (
         referer: 'https://mp.weixin.qq.com/',
       },
     });
-    return {
+    const result: DownloadResponse = {
       bytes: Buffer.from(response.data),
       status: response.status,
       type: String(response.headers['content-type'] || '')
@@ -271,6 +293,15 @@ export const requestDownloadResource: DownloadRequest = async (
         ? { redirectKind: downloadRedirectKind(response.headers.location, raw) }
         : {}),
     };
+    if (
+      result.redirectKind === 'verification' &&
+      url.hostname === 'mp.weixin.qq.com'
+    )
+      Object.defineProperty(result, 'officialVerification', {
+        value: articleVerificationLocation(response.headers.location, raw),
+        enumerable: false,
+      });
+    return result;
   } catch (error) {
     throw transportFailure(
       error,
