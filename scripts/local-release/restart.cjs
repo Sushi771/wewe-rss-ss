@@ -16,6 +16,7 @@ const {
 const { accepted, recordAcceptance } = require('./startup-acceptance.cjs');
 const {
   processIdentity,
+  portOwnersAsync,
   sameIdentity,
   unusedPort,
   waitReady,
@@ -295,7 +296,8 @@ async function controlledRestart(options) {
       stopped = true;
       finalBackup = backup(database, 'after-stop');
     } else {
-      requireFreePort(port);
+      if (manifest.startupPreparation !== 'node-pinned-backup-v1')
+        requireFreePort(port);
       if (pinnedPreparation) {
         const pythonPrepare = () =>
           JSON.parse(
@@ -319,12 +321,25 @@ async function controlledRestart(options) {
         if (manifest.startupPreparation === 'node-pinned-backup-v1') {
           const native = require(path.join(release, 'startup-sqlite.cjs'));
           try {
-            prepared = await native.prepareStart(
-              database,
-              path.join(release, 'server/prisma/migrations'),
-              path.join(audit, 'before-start'),
-              baseline,
+            // Both checks remain mandatory. Await both even on failure so a
+            // rejected port check cannot leave preparation running in the background.
+            const [portCheck, preparation] = await Promise.allSettled([
+              portOwnersAsync(port),
+              native.prepareStart(
+                database,
+                path.join(release, 'server/prisma/migrations'),
+                path.join(audit, 'before-start'),
+                baseline,
+              ),
+            ]);
+            if (portCheck.status === 'rejected') throw portCheck.reason;
+            assert.deepEqual(
+              portCheck.value,
+              [],
+              'Port already has a listener',
             );
+            if (preparation.status === 'rejected') throw preparation.reason;
+            prepared = preparation.value;
           } catch (error) {
             if (!(error instanceof native.UnsupportedBaselineValue))
               throw error;
