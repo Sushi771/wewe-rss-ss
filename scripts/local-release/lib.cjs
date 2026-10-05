@@ -59,7 +59,74 @@ function fingerprint(directory) {
   return { files, links };
 }
 
-function verifyRelease(directory) {
+// A launch receipt reuses a successful byte audit only while every file/link and
+// directory identity is unchanged. Deployment verification remains a full audit.
+function releaseMetadata(directory) {
+  const entries = {};
+  function visit(relative) {
+    const target = path.join(directory, relative);
+    const stat = fs.lstatSync(target, { bigint: true });
+    entries[slash(relative)] = [
+      stat.dev,
+      stat.ino,
+      stat.mode,
+      stat.size,
+      stat.mtimeNs,
+      stat.ctimeNs,
+    ].map(String);
+    if (stat.isSymbolicLink()) {
+      const resolved = fs.realpathSync(target);
+      if (!inside(directory, resolved))
+        throw new Error('Release link escapes directory');
+      entries[slash(relative)].push(slash(path.relative(directory, resolved)));
+    } else if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(target).sort())
+        visit(path.join(relative, name));
+    } else if (!stat.isFile()) throw new Error('Unsupported release entry');
+  }
+  visit('');
+  return entries;
+}
+
+function verifyRunningRelease(directory) {
+  directory = fs.realpathSync(directory);
+  const manifest = readJson(path.join(directory, 'release.json'));
+  if (
+    manifest.format !== 1 ||
+    manifest.platform !== process.platform ||
+    manifest.arch !== process.arch
+  )
+    throw new Error('Running release platform/format mismatch');
+  for (const file of ['runtime.cjs', 'lib.cjs', 'runtime/node.exe']) {
+    const target = path.join(directory, file);
+    if (
+      !inside(directory, fs.realpathSync(target)) ||
+      fileHash(target) !== manifest.files[file]
+    )
+      throw new Error('Running release boot file integrity mismatch');
+  }
+  // Already loaded dependencies need no re-execution. The app and served assets
+  // are small and must still match before the browser opens them.
+  for (const folder of ['server/dist', 'server/client']) {
+    const actual = fingerprint(path.join(directory, folder));
+    for (const field of ['files', 'links']) {
+      const expected = Object.fromEntries(
+        Object.entries(manifest[field])
+          .filter(([file]) => file.startsWith(folder + '/'))
+          .map(([file, value]) => [file.slice(folder.length + 1), value]),
+      );
+      const sorted = (object) =>
+        JSON.stringify(
+          Object.entries(object).sort(([a], [b]) => a.localeCompare(b)),
+        );
+      if (sorted(actual[field]) !== sorted(expected))
+        throw new Error('Running release app integrity mismatch');
+    }
+  }
+  return manifest;
+}
+
+function verifyRelease(directory, { reuseVerified = false } = {}) {
   directory = fs.realpathSync(directory);
   const manifest = readJson(path.join(directory, 'release.json'));
   if (
@@ -68,10 +135,52 @@ function verifyRelease(directory) {
     manifest.arch !== process.arch
   )
     throw new Error('产物平台或清单版本不匹配');
+  const receipt = path.join(
+    path.dirname(directory),
+    '.verification-cache',
+    hash(directory) + '.json',
+  );
+  const key = hash(
+    fileHash(__filename) +
+      fileHash(path.join(directory, 'release.json')) +
+      directory,
+  );
+  let metadata;
+  if (reuseVerified) {
+    metadata = releaseMetadata(directory);
+    try {
+      const cached = readJson(receipt);
+      if (
+        cached.format === 1 &&
+        cached.key === key &&
+        JSON.stringify(cached.metadata) === JSON.stringify(metadata)
+      )
+        return manifest;
+    } catch {
+      /* A missing or damaged receipt requires a full byte audit. */
+    }
+  }
   const current = fingerprint(directory);
   for (const field of ['files', 'links']) {
     if (JSON.stringify(current[field]) !== JSON.stringify(manifest[field]))
       throw new Error(`产物完整性核验失败: ${field}`);
+  }
+  if (reuseVerified) {
+    const after = releaseMetadata(directory);
+    if (JSON.stringify(metadata) !== JSON.stringify(after))
+      throw new Error('Release changed during verification');
+    fs.mkdirSync(path.dirname(receipt), { recursive: true });
+    const temporary = receipt + '.' + crypto.randomUUID() + '.tmp';
+    try {
+      fs.writeFileSync(
+        temporary,
+        JSON.stringify({ format: 1, key, metadata: after }),
+        { flag: 'wx' },
+      );
+      fs.renameSync(temporary, receipt);
+    } finally {
+      if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    }
   }
   return manifest;
 }
@@ -113,6 +222,8 @@ module.exports = {
   walk,
   fingerprint,
   verifyRelease,
+  verifyRunningRelease,
+  releaseMetadata,
   cleanEnvironment,
   run,
 };

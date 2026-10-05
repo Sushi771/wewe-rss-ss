@@ -14,11 +14,21 @@ const root = path.resolve(__dirname, '../..');
 const database = path.join(root, 'apps/server/data/wewe-rss.db');
 const reportDir = path.join(root, 'output/playwright/local-release-audit');
 
-function classifyListener(owners, release, snapshot = processIdentity) {
+function classifyListener(
+  owners,
+  release,
+  snapshot = processIdentity,
+  manifest,
+) {
   if (owners.length === 0) return { status: 'free' };
   if (owners.length !== 1) throw new Error('4000 端口存在多个监听进程');
   const identity = snapshot('Snapshot', owners[0].OwningProcess, 4000);
-  const expected = commandLine(release, fs.realpathSync(database), 4000);
+  const expected = commandLine(
+    release,
+    fs.realpathSync(database),
+    4000,
+    manifest,
+  );
   if (
     identity.commandLine !== expected ||
     identity.executable.toLowerCase() !==
@@ -31,21 +41,36 @@ function classifyListener(owners, release, snapshot = processIdentity) {
 async function startAtLogon() {
   if (process.platform !== 'win32') throw new Error('登录任务仅支持 Windows');
   // Login starts only the verified web server package.
-  const { release, manifest } = readActiveRelease();
-  const owners = processIdentity('Port', undefined, 4000);
-  const listener = classifyListener(owners, release);
-  if (listener.status === 'already-running')
+  const identity = processIdentity('Discover', undefined, 4000);
+  // Bootstrap/app preflight is enough here. A new child receives the complete
+  // dependency audit in controlledRestart before any package code executes.
+  const { release, manifest } = readActiveRelease({ runningOnly: true });
+  const owners = identity ? [{ OwningProcess: identity.pid }] : [];
+  const listener = classifyListener(owners, release, () => identity, manifest);
+  if (listener.status === 'already-running') {
+    const response = await fetch(
+      'http://127.0.0.1:4000/dash/tools/article-download',
+      {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(1500),
+      },
+    );
+    if (!response.ok && response.status !== 302)
+      throw new Error('Running dashboard is not ready');
+    await response.body?.cancel();
     return {
       status: 'already-running',
       releaseId: manifest.id,
       pid: listener.identity.pid,
     };
+  }
   const summary = await controlledRestart({
     release,
     database,
     mode: 'start',
     production: true,
     rehearsal: false,
+    reuseVerified: true,
   });
   return {
     status: 'started',

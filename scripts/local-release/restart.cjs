@@ -34,9 +34,9 @@ function requireFreePort(port) {
   assert.deepEqual(owners, [], `端口 ${port} 已有监听进程，拒绝启动`);
 }
 
-function commandLine(release, database, port) {
+function commandLine(release, database, port, verifiedManifest) {
   const node = path.join(release, 'runtime/node.exe');
-  const manifest = verifyRelease(release);
+  const manifest = verifiedManifest || verifyRelease(release);
   const args = [
     path.join(release, 'runtime.cjs'),
     'start',
@@ -76,9 +76,15 @@ async function controlledRestart(options) {
   const release = fs.realpathSync(options.release);
   const previous = fs.realpathSync(options.previous || options.release);
   const source = fs.realpathSync(options.database);
-  const manifest = verifyRelease(release);
+  const manifest = verifyRelease(release, {
+    reuseVerified: options.reuseVerified === true,
+  });
   const previousManifest =
-    previous === release ? manifest : verifyRelease(previous);
+    previous === release
+      ? manifest
+      : verifyRelease(previous, {
+          reuseVerified: options.reuseVerified === true,
+        });
   for (const item of [manifest, previousManifest]) {
     assert.equal(item.schemaCompatibility, 'current', '只允许当前 schema 产物');
     assert.equal(typeof item.desktopHelperIncluded, 'boolean');
@@ -190,7 +196,11 @@ async function controlledRestart(options) {
     else args.push('--production');
     const child = spawn(path.join(bundlePath, 'runtime/node.exe'), args, {
       cwd: audit,
-      env: { ...env, LOCAL_RELEASE_CONTROLLED_START: bundle.id },
+      env: {
+        ...env,
+        LOCAL_RELEASE_CONTROLLED_START: bundle.id,
+        LOCAL_RELEASE_REUSE_VERIFIED: options.reuseVerified ? '1' : '0',
+      },
       windowsHide: true,
       shell: false,
       detached: options.production,
@@ -246,7 +256,10 @@ async function controlledRestart(options) {
     assert.equal(newIdentity.pid, newChild.pid);
     // Advance the ignored local pointer only after the new production process is ready.
     // The logon task has a stable action and follows this pointer after future deployments.
-    if (options.production) writeActiveRelease(release);
+    if (options.production)
+      writeActiveRelease(release, {
+        reuseVerified: options.reuseVerified === true,
+      });
     const summary = {
       passed: true,
       mode: options.production ? 'production' : 'rehearsal',

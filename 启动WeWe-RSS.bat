@@ -6,14 +6,10 @@ set "ENABLE_SCHEDULED_UPDATES=0"
 set "DISABLE_SCHEDULED_UPDATES=1"
 set "WEWE_NODE=%ProgramFiles%\nodejs\node.exe"
 if not exist "%WEWE_NODE%" goto missing_node
-"%WEWE_NODE%" scripts\local-release\logon-start.cjs start
+set "WEWE_CHECK="
+if /i "%~1"=="--check" set "WEWE_CHECK=--check"
+"%WEWE_NODE%" scripts\local-release\desktop-start.cjs %WEWE_CHECK%
 if errorlevel 1 goto failed
-if /i "%~1"=="--check" exit /b 0
-if exist "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" (
-    start "" "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" "http://127.0.0.1:4000/dash/tools/article-download"
-) else (
-    start "" "http://127.0.0.1:4000/dash/tools/article-download"
-)
 exit /b 0
 
 :missing_node
