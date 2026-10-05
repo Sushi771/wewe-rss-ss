@@ -2,25 +2,38 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { verifyRelease, verifyRunningRelease } = require('./lib.cjs');
+const {
+  verifyRelease,
+  verifyReleaseAsync,
+  verifyRunningRelease,
+} = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const releases = path.join(root, '.local-releases');
 const pointer = path.join(releases, 'active.json');
 
-function checkedRelease(candidate, options) {
+function checkedDirectory(candidate) {
   const release = fs.realpathSync(candidate);
   if (
     path.dirname(release).toLowerCase() !==
     fs.realpathSync(releases).toLowerCase()
   )
     throw new Error('当前产物必须位于本项目 .local-releases 的直接子目录');
+  return release;
+}
+
+function checkedRelease(candidate, options) {
+  const release = checkedDirectory(candidate);
   // Reusing a live, exactly matched runtime does not execute package code.
   // Its immutable boot files still must match the manifest; cold starts audit
   // the entire dependency closure before executing anything.
   const manifest = options?.runningOnly
     ? verifyRunningRelease(release)
     : verifyRelease(release, options);
+  return checkedManifest(release, manifest);
+}
+
+function checkedManifest(release, manifest) {
   if (
     manifest.schemaCompatibility !== 'current' ||
     typeof manifest.desktopHelperIncluded !== 'boolean'
@@ -43,11 +56,25 @@ function readActiveRelease(options) {
 
 function writeActiveRelease(candidate, options) {
   // Seed a validated receipt during activation, before the user's next launch.
-  const { release, manifest } = checkedRelease(candidate, {
+  return storePointer(
+    checkedRelease(candidate, {
+      ...options,
+      reuseVerified: true,
+      runningOnly: false,
+    }),
+  );
+}
+
+async function writeActiveReleaseAsync(candidate, options) {
+  const release = checkedDirectory(candidate);
+  const manifest = await verifyReleaseAsync(release, {
     ...options,
     reuseVerified: true,
-    runningOnly: false,
   });
+  return storePointer(checkedManifest(release, manifest));
+}
+
+function storePointer({ release, manifest }) {
   const temporary = path.join(releases, `active-${randomUUID()}.tmp`);
   try {
     fs.writeFileSync(
@@ -68,5 +95,6 @@ module.exports = {
   checkedRelease,
   readActiveRelease,
   writeActiveRelease,
+  writeActiveReleaseAsync,
   pointer,
 };

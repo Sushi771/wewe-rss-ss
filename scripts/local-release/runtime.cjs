@@ -3,7 +3,7 @@ const path = require('node:path');
 const { parseArgs } = require('node:util');
 const Module = require('node:module');
 const {
-  verifyRelease,
+  verifyReleaseAsync,
   fileHash,
   readJson,
   inside,
@@ -62,6 +62,18 @@ function guardModulePath(release, resolved) {
     throw new Error('Runtime dependency escaped the fixed release');
 }
 
+function guardNativePath(release, manifest, file) {
+  const canonical = fs.realpathSync.native(file);
+  const relative = path.relative(release, canonical).replace(/\\/g, '/');
+  if (
+    !inside(release, canonical) ||
+    !relative.endsWith('.node') ||
+    !manifest.files[relative] ||
+    fileHash(canonical) !== manifest.files[relative]
+  )
+    throw new Error('Native runtime dependency escaped or changed');
+}
+
 async function runtime() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -81,7 +93,7 @@ async function runtime() {
       '用法: runtime.cjs verify|probe|start [--database 绝对路径]',
     );
   const release = __dirname;
-  const manifest = verifyRelease(release, {
+  const manifest = await verifyReleaseAsync(release, {
     reuseVerified:
       command === 'start' && process.env.LOCAL_RELEASE_REUSE_VERIFIED === '1',
   });
@@ -99,20 +111,48 @@ async function runtime() {
   const database = fs.realpathSync(values.database);
   if (!fs.statSync(database).isFile()) throw new Error('数据库不是文件');
   const server = path.join(release, 'server');
+  const compact = manifest.executionLayout === 'compact-cjs-v1';
+  if (manifest.executionLayout && !compact)
+    throw new Error('Unknown release execution layout');
+  const entry = compact
+    ? path.join(server, 'main.cjs')
+    : path.join(server, 'dist/apps/server/src/main.js');
+  const resolveModule = Module._resolveFilename;
+  Module._resolveFilename = function (request, ...args) {
+    const resolved =
+      compact && request === 'hbs'
+        ? path.join(server, 'hbs.cjs')
+        : resolveModule.call(this, request, ...args);
+    guardModulePath(release, resolved);
+    return resolved;
+  };
+  const dlopen = process.dlopen;
+  process.dlopen = function (module, file, ...args) {
+    guardNativePath(release, manifest, file);
+    return dlopen.call(this, module, file, ...args);
+  };
   const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
-  const inspected = JSON.parse(
-    run(python, [
-      path.join(release, 'inspect-sqlite.py'),
-      '--database',
-      database,
-      '--migrations',
-      legacy
-        ? path.join(release, 'known-migrations')
-        : path.join(server, 'prisma/migrations'),
-      ...(!legacy ? ['--require-current'] : []),
-      ...(command === 'start' && !legacy ? ['--schema-only'] : []),
-    ]),
-  );
+  const inspected =
+    command === 'start' &&
+    manifest.startupPreparation === 'node-pinned-backup-v1'
+      ? require('./startup-sqlite.cjs').inspectDatabase(
+          database,
+          path.join(server, 'prisma/migrations'),
+          { schemaOnly: true },
+        )
+      : JSON.parse(
+          run(python, [
+            path.join(release, 'inspect-sqlite.py'),
+            '--database',
+            database,
+            '--migrations',
+            legacy
+              ? path.join(release, 'known-migrations')
+              : path.join(server, 'prisma/migrations'),
+            ...(!legacy ? ['--require-current'] : []),
+            ...(command === 'start' && !legacy ? ['--schema-only'] : []),
+          ]),
+        );
   const env = cleanEnvironment({
     DATABASE_URL: 'file:' + database.replace(/\\/g, '/'),
     NODE_ENV: 'production',
@@ -123,12 +163,6 @@ async function runtime() {
       delete process.env[key];
   Object.assign(process.env, env);
   process.chdir(server);
-  const resolveModule = Module._resolveFilename;
-  Module._resolveFilename = function (request, ...args) {
-    const resolved = resolveModule.call(this, request, ...args);
-    guardModulePath(release, resolved);
-    return resolved;
-  };
   const clientPath = require.resolve('@prisma/client', { paths: [server] });
   const { PrismaClient, Prisma } = require(clientPath);
   if (Prisma.prismaVersion.client !== manifest.prisma.clientVersion)
@@ -232,7 +266,7 @@ async function runtime() {
       WECHAT_DESKTOP_MP_IDS: '',
       ...(legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),
     });
-    require(path.join(server, 'dist/apps/server/src/main.js'));
+    require(entry);
     return;
   }
   if (!values['obsidian-root'] || !values['guard-report'])
@@ -254,7 +288,10 @@ async function runtime() {
   Object.assign(process.env, {
     HOST: '127.0.0.1',
     PORT: String(port),
-    AUTH_CODE: '',
+    AUTH_CODE:
+      process.env.PRIVATE_ONLINE_MODE === '1'
+        ? process.env.AUTH_CODE || ''
+        : '',
     FEED_MODE: '',
     SERVER_ORIGIN_URL: `http://127.0.0.1:${port}`,
     OBSIDIAN_PATH: values['obsidian-root'],
@@ -266,7 +303,7 @@ async function runtime() {
     REHEARSAL_GUARD_REPORT: values['guard-report'],
   });
   require('./offline-guard.cjs');
-  require(path.join(server, 'dist/apps/server/src/main.js'));
+  require(entry);
 }
 
 if (require.main === module)
@@ -274,4 +311,9 @@ if (require.main === module)
     console.error(error.message);
     process.exitCode = 1;
   });
-module.exports = { runtime, scheduledUpdatesEnabled, guardModulePath };
+module.exports = {
+  runtime,
+  scheduledUpdatesEnabled,
+  guardModulePath,
+  guardNativePath,
+};

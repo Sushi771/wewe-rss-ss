@@ -6,11 +6,14 @@ const { spawn } = require('node:child_process');
 const { parseArgs } = require('node:util');
 const {
   verifyRelease,
+  verifyReleaseAsync,
   writeJson,
   fileHash,
   cleanEnvironment,
   run,
+  inside,
 } = require('./lib.cjs');
+const { accepted, recordAcceptance } = require('./startup-acceptance.cjs');
 const {
   processIdentity,
   sameIdentity,
@@ -19,7 +22,7 @@ const {
   stopOwned,
   loadProductionEnvironment,
 } = require('./switch.cjs');
-const { writeActiveRelease } = require('./active-release.cjs');
+const { writeActiveReleaseAsync } = require('./active-release.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const pauseFile = path.join(root, 'tools/wechat-desktop-collector/.paused');
@@ -55,6 +58,16 @@ function commandLine(release, database, port, verifiedManifest) {
 }
 
 async function controlledRestart(options) {
+  if (
+    (options.preparedRehearsal || options.coldLaunchRehearsal) &&
+    !options.rehearsal
+  )
+    throw new Error('Prepared/cold fixture flags require rehearsal mode');
+  if (
+    (options.preparedRehearsal || options.coldLaunchRehearsal) &&
+    options.mode !== 'start'
+  )
+    throw new Error('Prepared/cold fixture flags only measure a cold start');
   if (process.platform !== 'win32') throw new Error('仅支持 Windows 本机');
   if (options.production === options.rehearsal)
     throw new Error('须且只能选择 --production 或 --rehearsal');
@@ -76,13 +89,13 @@ async function controlledRestart(options) {
   const release = fs.realpathSync(options.release);
   const previous = fs.realpathSync(options.previous || options.release);
   const source = fs.realpathSync(options.database);
-  const manifest = verifyRelease(release, {
+  const manifest = await verifyReleaseAsync(release, {
     reuseVerified: options.reuseVerified === true,
   });
   const previousManifest =
     previous === release
       ? manifest
-      : verifyRelease(previous, {
+      : await verifyReleaseAsync(previous, {
           reuseVerified: options.reuseVerified === true,
         });
   for (const item of [manifest, previousManifest]) {
@@ -109,7 +122,10 @@ async function controlledRestart(options) {
   });
   if (options.rehearsal)
     Object.assign(env, {
-      AUTH_CODE: '',
+      // Offline private rehearsals may use an ephemeral in-memory code. It is
+      // never written to the audit or sent outside the isolated loopback port.
+      AUTH_CODE:
+        env.PRIVATE_ONLINE_MODE === '1' ? process.env.AUTH_CODE || '' : '',
       FEED_MODE: '',
       WECHAT_DESKTOP_MP_IDS: '',
       WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
@@ -150,21 +166,52 @@ async function controlledRestart(options) {
     assert.equal(fileHash(result.backup), result.sha256);
     return result;
   };
-  const sourceBefore = inspect(source, [
-    ...(options.mode === 'start' &&
-    manifest.startupInspection === 'schema-only-v1'
-      ? ['--schema-only']
-      : []),
-    '--output',
-    path.join(audit, 'source-before.json'),
-  ]);
-  assert.deepEqual(sourceBefore.pending, [], '数据库仍有待应用迁移');
+  const pinnedPreparation =
+    options.mode === 'start' &&
+    ['pinned-backup-v1', 'node-pinned-backup-v1'].includes(
+      manifest.startupPreparation,
+    );
+  const sourceBefore = pinnedPreparation
+    ? null
+    : inspect(source, [
+        ...(options.mode === 'start' &&
+        manifest.startupInspection === 'schema-only-v1'
+          ? ['--schema-only']
+          : []),
+        '--output',
+        path.join(audit, 'source-before.json'),
+      ]);
+  if (sourceBefore)
+    assert.deepEqual(sourceBefore.pending, [], '数据库仍有待应用迁移');
   let database = source;
   let port = 4000;
   if (options.rehearsal) {
-    const copy = backup(source, 'source-backup');
-    database = path.join(audit, 'rehearsal.db');
-    fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
+    if (options.preparedRehearsal) {
+      assert(
+        inside(
+          fs.realpathSync(
+            path.join(root, 'output/playwright/local-release-audit'),
+          ),
+          source,
+        ),
+        'Prepared database must be an isolated audit fixture',
+      );
+      const prepared = JSON.parse(
+        fs.readFileSync(source + '.rehearsal.json', 'utf8'),
+      );
+      assert.equal(prepared.prepared, true);
+      assert.equal(prepared.releaseId, manifest.id);
+      assert.equal(fs.realpathSync(prepared.database), source);
+      assert.equal(prepared.sha256, fileHash(source));
+      assert(
+        !fs.existsSync(source + '-wal'),
+        'Prepare a consistent standalone fixture first',
+      );
+    } else {
+      const copy = backup(source, 'source-backup');
+      database = path.join(audit, 'rehearsal.db');
+      fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
+    }
     port = options.port || (await unusedPort());
   } else if (options.mode === 'restart') backup(source, 'before-stop');
 
@@ -218,6 +265,8 @@ async function controlledRestart(options) {
   let fallbackChild;
   let stopped = false;
   let finalBackup;
+  const baseline = path.join(audit, 'final-baseline.json');
+  let preparedBaseline = false;
   try {
     let identity;
     if (options.mode === 'restart') {
@@ -247,21 +296,75 @@ async function controlledRestart(options) {
       finalBackup = backup(database, 'after-stop');
     } else {
       requireFreePort(port);
-      finalBackup = backup(database, 'before-start');
+      if (pinnedPreparation) {
+        const pythonPrepare = () =>
+          JSON.parse(
+            run(
+              python,
+              [
+                path.join(release, 'prepare-start.py'),
+                '--database',
+                database,
+                '--migrations',
+                path.join(release, 'server/prisma/migrations'),
+                '--backup-root',
+                path.join(audit, 'before-start'),
+                '--baseline',
+                baseline,
+              ],
+              { env },
+            ),
+          );
+        let prepared;
+        if (manifest.startupPreparation === 'node-pinned-backup-v1') {
+          const native = require(path.join(release, 'startup-sqlite.cjs'));
+          try {
+            prepared = await native.prepareStart(
+              database,
+              path.join(release, 'server/prisma/migrations'),
+              path.join(audit, 'before-start'),
+              baseline,
+            );
+          } catch (error) {
+            if (!(error instanceof native.UnsupportedBaselineValue))
+              throw error;
+            prepared = pythonPrepare();
+          }
+        } else prepared = pythonPrepare();
+        finalBackup = prepared.backup;
+        assert.equal(finalBackup.integrityCheck, 'ok');
+        assert.equal(fileHash(finalBackup.backup), finalBackup.sha256);
+        assert.deepEqual(prepared.inspection.pending, []);
+        preparedBaseline = true;
+      } else finalBackup = backup(database, 'before-start');
     }
-    const baseline = path.join(audit, 'final-baseline.json');
-    const finalBefore = inspect(database, ['--output', baseline]);
-    assert.deepEqual(finalBefore.pending, []);
-    inspect(finalBackup.backup, ['--baseline', baseline]);
+    if (!preparedBaseline) {
+      const finalBefore = inspect(database, ['--output', baseline]);
+      assert.deepEqual(finalBefore.pending, []);
+      inspect(finalBackup.backup, ['--baseline', baseline]);
+    }
     if (options.injectFailure) throw new Error('INJECTED_NEW_START_FAILURE');
     newChild = start(release, manifest, 'new');
-    await waitReady(port, newChild);
+    const compactCold =
+      options.mode === 'start' &&
+      manifest.executionLayout === 'compact-cjs-v1' &&
+      (options.production || options.coldLaunchRehearsal);
+    const rssItems = compactCold && accepted(release) ? 1 : 20;
+    await waitReady(
+      port,
+      newChild,
+      900,
+      manifest.executionLayout === 'compact-cjs-v1' ? 50 : 300,
+      rssItems,
+    );
     const newIdentity = processIdentity('Snapshot', newChild.pid, port);
     assert.equal(newIdentity.pid, newChild.pid);
+    if (rssItems === 20 && manifest.executionLayout === 'compact-cjs-v1')
+      recordAcceptance(release);
     // Advance the ignored local pointer only after the new production process is ready.
     // The logon task has a stable action and follows this pointer after future deployments.
     if (options.production)
-      writeActiveRelease(release, {
+      await writeActiveReleaseAsync(release, {
         reuseVerified: options.reuseVerified === true,
       });
     const summary = {
@@ -274,6 +377,7 @@ async function controlledRestart(options) {
       oldStopped: stopped,
       newIdentity,
       rollbackUsed: false,
+      rssReadinessItems: rssItems,
     };
     writeJson(path.join(audit, 'summary.json'), summary);
     if (options.production) newChild.unref();
@@ -289,7 +393,7 @@ async function controlledRestart(options) {
           fallbackChild.pid,
           port,
         );
-        if (options.production) writeActiveRelease(previous);
+        if (options.production) await writeActiveReleaseAsync(previous);
         const summary = {
           passed: options.rehearsal && options.injectFailure === true,
           mode: options.production ? 'production' : 'rehearsal',
@@ -345,6 +449,8 @@ async function main() {
       'expected-start-utc': { type: 'string' },
       'expected-executable': { type: 'string' },
       'expected-command-line': { type: 'string' },
+      'prepared-rehearsal': { type: 'boolean', default: false },
+      'cold-launch-rehearsal': { type: 'boolean', default: false },
     },
   });
   if (!values.release || !values.database)
@@ -358,6 +464,8 @@ async function main() {
     production: values.production,
     port: values.port === undefined ? undefined : Number(values.port),
     injectFailure: values['inject-new-start-failure'],
+    preparedRehearsal: values['prepared-rehearsal'],
+    coldLaunchRehearsal: values['cold-launch-rehearsal'],
     expected:
       values.production && values.mode === 'restart'
         ? {
