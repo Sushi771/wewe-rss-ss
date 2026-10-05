@@ -4,7 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, codex/manual-refresh-download-integration]
+    branches:
+      [
+        main,
+        codex/manual-refresh-download-integration,
+        codex/cold-launch-profile,
+      ]
 
 jobs:
   windows-process-identity:
@@ -58,11 +63,15 @@ jobs:
       - name: Test native subscribed MP and review probes offline
         run: node --test scripts/research/probe-subscribed-mp-once.spec.cjs scripts/research/probe-native-review-owner07.spec.cjs
       - name: Test official album runtime scheduling policy
-        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs
+        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs scripts/local-release/startup-acceptance.test.cjs
       - name: Test startup schema checks and exact database preservation
-        run: python3 scripts/local-release/test_inspect_sqlite.py
+        run: |
+          python3 scripts/local-release/test_inspect_sqlite.py
+          python3 scripts/local-release/test_prepare_start.py
       - name: Test standalone dependency closure
         run: node --test scripts/local-release/dependency-closure.test.cjs
+      - name: Test compact dependency bundle and native boundary offline
+        run: node --test scripts/local-release/compact.test.cjs
       - name: Build Server
         run: pnpm --filter server build
 
@@ -84,6 +93,8 @@ jobs:
           cache: 'pnpm'
       - name: Install dependencies
         run: pnpm install
+      - name: Test fixed Node SQLite startup checks against Python offline
+        run: node --test scripts/local-release/startup-sqlite.test.cjs
       - name: Build Server
         run: pnpm --filter server build
       - name: Test image replay and one-article import offline

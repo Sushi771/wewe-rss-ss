@@ -5,9 +5,10 @@ const { waitReady } = require('./switch.cjs');
 
 const code = 'test-only-private-code-24-characters';
 const cookie = `wewe_private_session=1999999999.${'a'.repeat(32)}.${'b'.repeat(64)}`;
-const rss = `<rss><channel>${'<item></item>'.repeat(20)}</channel></rss>`;
 
 async function fixture(options, verify) {
+  const count = options.rssItems || 20;
+  const responseRss = `<rss><channel>${'<item></item>'.repeat(count)}</channel></rss>`;
   const previous = {
     PRIVATE_ONLINE_MODE: process.env.PRIVATE_ONLINE_MODE,
     AUTH_CODE: process.env.AUTH_CODE,
@@ -51,7 +52,10 @@ async function fixture(options, verify) {
       );
       return res.end();
     }
-    assert.equal(req.url, '/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary');
+    assert.equal(
+      req.url,
+      `/feeds/MP_WXS_3895431412.rss?limit=${count}&mode=summary`,
+    );
     if (req.headers.cookie) {
       calls.authenticated++;
       assert.equal(req.headers.cookie, cookie);
@@ -60,7 +64,9 @@ async function fixture(options, verify) {
         return res.end(cookie);
       }
       return res.end(
-        options.fewerItems ? rss.replace('<item></item>', '') : rss,
+        options.fewerItems
+          ? responseRss.replace('<item></item>', '')
+          : responseRss,
       );
     }
     calls.anonymous++;
@@ -68,7 +74,7 @@ async function fixture(options, verify) {
       res.writeHead(401);
       return res.end('Login required');
     }
-    return res.end(rss);
+    return res.end(responseRss);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
@@ -93,6 +99,31 @@ test('ordinary readiness keeps the original unauthenticated RSS check', async ()
     await waitReady(port, { exitCode: null }, 3);
     assert.deepEqual(calls, { login: 0, anonymous: 1, authenticated: 0 });
   });
+});
+
+test('accepted-package cold readiness still requires private denial, login and one real RSS item', async () => {
+  await fixture({ privateMode: true, rssItems: 1 }, async (port, calls) => {
+    await waitReady(port, { exitCode: null }, 3, 50, 1);
+    assert.deepEqual(calls, { login: 1, anonymous: 1, authenticated: 1 });
+  });
+});
+
+test('one-item cold readiness cannot weaken private denial', async () => {
+  await fixture(
+    { privateMode: true, rssItems: 1, publicLeak: true },
+    async (port) => {
+      await assert.rejects(waitReady(port, { exitCode: null }, 3, 50, 1));
+    },
+  );
+});
+
+test('one-item cold readiness rejects missing data', async () => {
+  await fixture(
+    { privateMode: true, rssItems: 1, fewerItems: true },
+    async (port) => {
+      await assert.rejects(waitReady(port, { exitCode: null }, 0.2, 50, 1));
+    },
+  );
 });
 
 for (const [option, message] of [

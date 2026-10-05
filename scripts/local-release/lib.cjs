@@ -97,6 +97,11 @@ function verifyRunningRelease(directory) {
     manifest.arch !== process.arch
   )
     throw new Error('Running release platform/format mismatch');
+  // Use the established full-package receipt for the compact layout. Every
+  // entry's identity, timestamps and canonical link still match before reuse;
+  // a missing, changed or invalid receipt falls back to the strict byte audit.
+  if (manifest.executionLayout === 'compact-cjs-v1')
+    return verifyRelease(directory, { reuseVerified: true });
   for (const file of ['runtime.cjs', 'lib.cjs', 'runtime/node.exe']) {
     const target = path.join(directory, file);
     if (

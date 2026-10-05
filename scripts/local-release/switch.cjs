@@ -98,9 +98,17 @@ async function unusedPort() {
 // Bundled startup re-hashes thousands of release files before HTTP binds.
 // On this host the new bundle spent 7.5 minutes verifying before app startup;
 // leave time for module loading and HTTP readiness after that point.
-async function waitReady(port, child, seconds = 900) {
+async function waitReady(
+  port,
+  child,
+  seconds = 900,
+  retryMs = 300,
+  rssItems = 20,
+) {
+  assert([1, 20].includes(rssItems), 'Unsupported RSS readiness contract');
   const base = `http://127.0.0.1:${port}`;
-  const rssUrl = base + '/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary';
+  const rssUrl =
+    base + `/feeds/MP_WXS_3895431412.rss?limit=${rssItems}&mode=summary`;
   const privateMode = process.env.PRIVATE_ONLINE_MODE === '1';
   // Login material stays in memory and never enters errors, audit logs or redirects.
   const code = privateMode ? process.env.AUTH_CODE : undefined;
@@ -155,7 +163,7 @@ async function waitReady(port, child, seconds = 900) {
           throw new PrivateReadinessError('私人模式就绪检查会话未获授权');
         if (
           result.status === 200 &&
-          ((await result.text()).match(/<item>/g) || []).length === 20
+          ((await result.text()).match(/<item>/g) || []).length === rssItems
         )
           return;
       }
@@ -163,7 +171,7 @@ async function waitReady(port, child, seconds = 900) {
       if (error instanceof PrivateReadinessError) throw error;
       /* 等待校验、数据库连接和 HTTP 监听 */
     }
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, retryMs));
   }
   throw new Error(`服务 ${port} 启动或 RSS 冒烟超时`);
 }
