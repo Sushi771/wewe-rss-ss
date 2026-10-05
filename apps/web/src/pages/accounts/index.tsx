@@ -3,6 +3,7 @@ import {
   ModalContent,
   ModalHeader,
   ModalBody,
+  ModalFooter,
   Button,
   useDisclosure,
   Spinner,
@@ -13,7 +14,7 @@ import { PlusIcon } from '@web/components/PlusIcon';
 import { StatusDropdown } from '@web/components/StatusDropdown';
 import { trpc } from '@web/utils/trpc';
 import { statusMap } from '@web/constants';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 
 const AccountPage = () => {
   const { isOpen, onOpen, onClose, onOpenChange } = useDisclosure();
@@ -23,6 +24,7 @@ const AccountPage = () => {
   const [connectionAccountId, setConnectionAccountId] = useState<string | null>(
     null,
   );
+  const connectionNoticeId = useId();
 
   const { refetch, data, isFetching } = trpc.account.list.useQuery({});
   const queryUtils = trpc.useUtils();
@@ -319,11 +321,22 @@ const AccountPage = () => {
         isOpen={!!connectionAccountId}
         onClose={() => setConnectionAccountId(null)}
         size="md"
+        placement="center"
         scrollBehavior="inside"
+        aria-describedby={connectionNoticeId}
+        classNames={{
+          wrapper: 'account-connection-overlay',
+          backdrop: 'account-connection-backdrop',
+          base: 'account-connection-dialog',
+          header: 'account-connection-header',
+          body: 'account-connection-body',
+          footer: 'account-connection-footer',
+          closeButton: 'account-connection-close',
+        }}
       >
         <ModalContent>
           <ModalHeader>连接手动更新</ModalHeader>
-          <ModalBody className="pb-6">
+          <ModalBody>
             {connection.isFetching ? (
               <Spinner />
             ) : connection.error ? (
@@ -331,27 +344,47 @@ const AccountPage = () => {
             ) : (
               <>
                 <p>{connection.data?.accountLabel}</p>
-                <p className="text-sm text-neutral-500">
-                  请选择使用此账号更新的公众号。连接后请在公众号页点击原刷新按钮；自动刷新保持关闭。
+                <p id={connectionNoticeId} className="text-sm text-neutral-500">
+                  仅“可连接”的公众号可以确认。灰色按钮表示暂不可连接，原因见各项说明。连接只保存授权，自动刷新保持关闭。
                 </p>
                 {!connection.data?.options.length && (
                   <p>当前没有可连接的手动更新公众号。</p>
                 )}
-                {connection.data?.options.map((option) => (
+                {connection.data?.options.map((option, index) => (
                   <div
                     key={option.mpId}
                     className="rounded-lg border border-neutral-200 p-3 dark:border-neutral-700"
                   >
-                    <p className="mb-2 font-medium">{option.name}</p>
-                    <p className="mb-3 text-sm text-neutral-500">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <p className="min-w-0 break-words font-medium">
+                        {option.name}
+                      </p>
+                      <span className="rounded bg-neutral-100 px-2 py-1 text-xs text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+                        {option.ready
+                          ? '可连接'
+                          : option.reason === 'source-unconfigured'
+                            ? '未配置来源'
+                            : option.reason === 'different-channel'
+                              ? '其他更新通道'
+                              : '会话暂不可用'}
+                      </span>
+                    </div>
+                    <p
+                      id={`${connectionNoticeId}-${index}`}
+                      className="mb-3 break-words text-sm text-neutral-500"
+                    >
                       {option.message}
                     </p>
                     <Button
                       size="sm"
-                      color="primary"
+                      color={option.ready ? 'primary' : 'default'}
+                      variant={option.ready ? 'solid' : 'flat'}
+                      aria-describedby={`${connectionNoticeId}-${index}`}
                       isDisabled={!option.ready}
                       isLoading={connectManualRefresh.isLoading}
                       onPress={() => {
+                        if (!option.ready || connectManualRefresh.isLoading)
+                          return;
                         if (
                           window.confirm(
                             `确认使用 ${connection.data?.accountLabel} 连接“${option.name}”？以后点击刷新将读取最新10篇正文及图片，遇限制即停止，旧文章保留。此次连接不会发取文请求。`,
@@ -366,13 +399,18 @@ const AccountPage = () => {
                         }
                       }}
                     >
-                      确认连接
+                      {option.ready ? '确认连接' : '暂不可连接'}
                     </Button>
                   </div>
                 ))}
               </>
             )}
           </ModalBody>
+          <ModalFooter>
+            <Button variant="flat" onPress={() => setConnectionAccountId(null)}>
+              返回账号管理
+            </Button>
+          </ModalFooter>
         </ModalContent>
       </Modal>
 
