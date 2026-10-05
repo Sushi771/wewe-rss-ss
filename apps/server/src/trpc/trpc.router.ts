@@ -33,6 +33,7 @@ import {
   Metrics,
 } from '../collection/collection-format';
 import { scanOwnerCandidates } from '../collection/owner-candidate-scan';
+import { readOwnerVerificationStatus } from '../collection/owner-verification-status';
 import {
   ownerConfigFile,
   previewManualWereadBinding,
@@ -217,6 +218,24 @@ export class TrpcRouter {
   }
 
   collectionRouter = this.trpcService.router({
+    verificationStatus: this.trpcService.protectedProcedure.query(
+      async ({ ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '官方验证状态只能在服务器本机查看。',
+          });
+        const feeds = await this.prismaService.feed.findMany({
+          select: { id: true, mpName: true, collectionChannel: true },
+        });
+        return readOwnerVerificationStatus(
+          process.env.OWNER_SEARCH_CONFIG_FILE,
+          feeds,
+          async (id) =>
+            nativeAccountProfile(id, await nativeAccountLoginAt(id)),
+        );
+      },
+    ),
     collectPublicAlbums: this.trpcService.protectedProcedure
       .input(
         z.object({
