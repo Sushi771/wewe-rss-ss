@@ -225,6 +225,13 @@ test('popup feedback is selectable plain text, with no HTML rendering or clipboa
   assert.match(html, /max-height: 560px; overflow-y: auto/);
   assert.match(html, /<details>\s+<summary>/);
   assert.ok(!html.includes('<details open'));
+  assert.ok(
+    html.includes(
+      '本次只读核验可在已打开的官方文章页直接执行，无需任务配置。回送未启用；后台停止状态保留。',
+    ),
+  );
+  assert.ok(!html.includes('发起指定任务'));
+  assert.ok(!html.includes('完成正常验证'));
   assert.ok(!script.includes('innerHTML'));
   assert.ok(!script.includes('clipboard'));
   assert.equal(manifest.version, '0.1.1');
