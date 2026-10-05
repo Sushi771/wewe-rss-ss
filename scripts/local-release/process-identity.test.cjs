@@ -3,9 +3,18 @@ const assert = require('node:assert/strict');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { processIdentity, stopOwned } = require('./switch.cjs');
+const { processIdentity, portOwnersAsync, stopOwned } = require('./switch.cjs');
 
 const windows = { skip: process.platform !== 'win32', timeout: 90000 };
+
+test(
+  'asynchronous port check rejects invalid ports rather than treating failure as free',
+  windows,
+  async () => {
+    await assert.rejects(portOwnersAsync(0));
+    await assert.rejects(portOwnersAsync(65536));
+  },
+);
 
 test(
   'native Windows table verifies IPv4 and IPv6 listener ownership and closed ports',
@@ -20,6 +29,10 @@ test(
         assert.deepEqual(processIdentity('Port', undefined, port), [
           { LocalAddress: address, OwningProcess: process.pid },
         ]);
+        assert.deepEqual(
+          await portOwnersAsync(port),
+          processIdentity('Port', undefined, port),
+        );
         const identity = processIdentity('Snapshot', process.pid, port);
         assert.equal(identity.pid, process.pid);
         assert.equal(identity.port, port);
@@ -32,6 +45,10 @@ test(
         const prior = process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
         try {
           process.env.LOCAL_RELEASE_FORCE_POWERSHELL = '1';
+          assert.deepEqual(
+            await portOwnersAsync(port),
+            processIdentity('Port', undefined, port),
+          );
           assert.deepEqual(
             processIdentity('Snapshot', process.pid, port),
             identity,
@@ -76,6 +93,7 @@ test(
         await new Promise((resolve) => listener.close(resolve));
       }
       assert.deepEqual(processIdentity('Port', undefined, port), []);
+      assert.deepEqual(await portOwnersAsync(port), []);
       assert.throws(() => processIdentity('Snapshot', process.pid, port));
     }
   },
