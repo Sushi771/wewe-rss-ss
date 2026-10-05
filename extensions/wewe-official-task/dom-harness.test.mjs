@@ -1,0 +1,201 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createRequire } from 'node:module';
+import { captureOfficialArticle } from './capture.mjs';
+import { projectOfficialArticle } from './projection.mjs';
+
+// Synthetic DOM facade exercises the serialized functions, with no browser
+// install/CDP/platform call. This does not claim Edge permission/UI acceptance.
+const require = createRequire(
+  new URL('../../apps/server/package.json', import.meta.url),
+);
+const { load } = require('cheerio');
+const png =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
+class Document {
+  constructor(html) {
+    this.$ = load(html);
+  }
+  querySelectorAll(selector) {
+    return this.$(selector)
+      .toArray()
+      .map((node) => new Element(this, node));
+  }
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+}
+class Element {
+  constructor(document, node) {
+    this.document = document;
+    this.node = node;
+    this.complete = true;
+    this.naturalWidth = 1;
+    this.naturalHeight = 1;
+  }
+  get textContent() {
+    return this.document.$(this.node).text();
+  }
+  get outerHTML() {
+    return this.document.$.html(this.node);
+  }
+  get tagName() {
+    return this.node.tagName.toUpperCase();
+  }
+  get attributes() {
+    return Object.entries(this.node.attribs).map(([name, value]) => ({
+      name,
+      value,
+    }));
+  }
+  get currentSrc() {
+    return this.getAttribute('src');
+  }
+  getAttribute(name) {
+    return this.document.$(this.node).attr(name);
+  }
+  setAttribute(name, value) {
+    this.document.$(this.node).attr(name, value);
+  }
+  removeAttribute(name) {
+    this.document.$(this.node).removeAttr(name);
+  }
+  querySelectorAll(selector) {
+    return this.document
+      .$(this.node)
+      .find(selector)
+      .toArray()
+      .map((node) => new Element(this.document, node));
+  }
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+  cloneNode() {
+    return new Document(this.outerHTML).querySelector('#js_content');
+  }
+  remove() {
+    this.document.$(this.node).remove();
+  }
+}
+const html = `<meta property="og:url" content="https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv"><h1 id="activity-name">离线新文章</h1><span id="js_name">测试公众号</span><script>var biz="MTIzNDU2Nzg5MA==";var mid="2247000001";var idx="1";var sn="abcd";var ct="1700000000";var token="NEVER_RETURN";</script><div id="js_content" onclick="NEVER_RETURN"><p>完整正文开头</p><p>末尾完整内容</p><img src="data:image/png;base64,${png}" data-src="https://mmbiz.qpic.cn/fixture"></div>`;
+function setup(raw = html) {
+  const doc = new Document(raw);
+  const frame = { srcdoc: raw, contentDocument: doc };
+  globalThis.location = {
+    origin: 'https://weread.qq.com',
+    pathname: '/web/mp/reader/fixture',
+  };
+  const current = {
+    reviewId: 'MP_WXS_1234567890_abcdefghijklmnopqrstuv',
+    review: {
+      reviewId: 'MP_WXS_1234567890_abcdefghijklmnopqrstuv',
+      belongBookId: 'MP_WXS_1234567890',
+      bookId: '',
+      type: 16,
+      mpInfo: {
+        originalId: 'abcdefghijklmnopqrstuv',
+        title: '离线新文章',
+        mp_name: '测试公众号',
+        time: 1700000008,
+        pic_url: '',
+      },
+    },
+  };
+  const reader = {
+    $options: { name: 'MpReader' },
+    bookInfo: { bookId: 'MP_WXS_1234567890' },
+    currentChapter: current,
+    showLoading: false,
+    showError: false,
+    isBookForbidden: false,
+    isBookInfoError: false,
+    mpRawData: raw,
+  };
+  for (const field of ['$store', 'user', 'token', 'envConfig'])
+    Object.defineProperty(reader, field, {
+      get() {
+        throw new Error('FORBIDDEN_SECRET_READ');
+      },
+    });
+  globalThis.document = {
+    querySelector: () => null,
+    querySelectorAll: (selector) =>
+      selector === '.wr_mp_reader' ? [{ __vue__: reader }] : [frame],
+  };
+  globalThis.DOMParser = class {
+    parseFromString(value) {
+      return new Document(value);
+    }
+  };
+  return { doc, frame, reader };
+}
+test('real serialized collector strips scripts/secrets/events and preserves image bytes', async () => {
+  setup();
+  const result = await captureOfficialArticle();
+  assert.ok(!result.html.includes('NEVER_RETURN'));
+  assert.ok(!result.html.includes('onclick'));
+  assert.ok(result.html.includes('var ct="1700000000";'));
+  assert.ok(result.html.includes('src="wewe-image:0"'));
+  assert.equal(result.images[0].inline, 'data:image/png;base64,' + png);
+  const projection = await projectOfficialArticle();
+  assert.equal(projection.bookId, 'MP_WXS_1234567890');
+  assert.equal(
+    projection.current.review.reviewId,
+    'MP_WXS_1234567890_abcdefghijklmnopqrstuv',
+  );
+  assert.match(projection.bodyFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(Object.keys(projection).length, 3);
+});
+test('readiness / conflicting static identity / challenge refuse before return', async () => {
+  const h = setup();
+  h.reader.showError = true;
+  await assert.rejects(projectOfficialArticle(), /READER_NOT_READY/);
+  setup(
+    html.replace(
+      'var ct="1700000000";',
+      'var ct="1700000000";var ct="1700000001";',
+    ),
+  );
+  await assert.rejects(captureOfficialArticle(), /SCALAR_CONFLICT/);
+  setup(html + '<div id="js_verify"></div>');
+  await assert.rejects(captureOfficialArticle(), /UNSUPPORTED_OR_CHALLENGE/);
+});
+
+test('same-origin existing Blob is read as bounded original bytes', async () => {
+  setup(
+    html.replace(
+      'data:image/png;base64,' + png,
+      'blob:https://weread.qq.com/offline',
+    ),
+  );
+  const originalFetch = globalThis.fetch;
+  const originalReader = globalThis.FileReader;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'blob:https://weread.qq.com/offline');
+    assert.equal(options.credentials, 'omit');
+    return new Response(Buffer.from(png, 'base64'), {
+      headers: { 'Content-Type': 'image/png' },
+    });
+  };
+  globalThis.FileReader = class {
+    readAsDataURL(blob) {
+      blob.arrayBuffer().then((bytes) => {
+        this.result =
+          'data:' +
+          blob.type +
+          ';base64,' +
+          Buffer.from(bytes).toString('base64');
+        this.onload();
+      });
+    }
+  };
+  try {
+    assert.equal(
+      (await captureOfficialArticle()).images[0].inline,
+      'data:image/png;base64,' + png,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.FileReader = originalReader;
+  }
+});
