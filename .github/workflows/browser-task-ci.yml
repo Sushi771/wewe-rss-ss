@@ -1,0 +1,24 @@
+name: Official browser task offline
+on:
+  pull_request:
+    branches: [main, codex/manual-refresh-download-integration]
+    paths:
+      - 'extensions/wewe-official-task/**'
+      - 'apps/server/src/browser-task*'
+      - 'apps/server/test/browser-task-fixture.ts'
+      - '.github/workflows/browser-task-ci.yml'
+jobs:
+  extension-offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Test click-scoped extension transport and synthetic official DOM (no browser or platform)
+        run: node --test extensions/wewe-official-task/*.test.mjs
