@@ -32,7 +32,8 @@ function processIdentity(action, pid, port, expected) {
     '-Port',
     String(port),
   ];
-  if (action !== 'Port') args.push('-TargetPid', String(pid));
+  if (action !== 'Port' && action !== 'Discover')
+    args.push('-TargetPid', String(pid));
   if (expected)
     args.push(
       '-ExpectedStartUtc',
