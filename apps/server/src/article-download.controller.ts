@@ -26,6 +26,8 @@ import {
   buildCachedArticleDownload,
   findCachedDownloadArticle,
 } from './article-download-cache';
+import { ProviderArticle } from './collection/subscription-provider';
+import { prepareVerifiedProviderDownload } from './article-verified-download';
 
 @Controller('download')
 export class ArticleDownloadController {
@@ -178,6 +180,28 @@ export class ArticleDownloadController {
     @Request() req: Req,
     @Response() res: Res,
   ) {
+    return this.saveArticle(body, req, res);
+  }
+
+  /** Internal completion for the normal verification/collection owner.
+   * Deliberately has no HTTP decorator: page JSON cannot submit provider bodies.
+   * The caller supplies a verified, archived result and the original local request.
+   */
+  async saveVerifiedArticle(
+    article: ProviderArticle,
+    body: { url?: unknown; pickToken?: unknown },
+    req: Req,
+    res: Res,
+  ) {
+    return this.saveArticle(body, req, res, { article });
+  }
+
+  private async saveArticle(
+    body: { url?: unknown; pickToken?: unknown },
+    req: Req,
+    res: Res,
+    verified?: { article: ProviderArticle },
+  ) {
     if (!this.authorized(req, res, true)) return;
     if (process.env.WEWE_ACCEPTANCE_MODE === '1')
       return res
@@ -198,6 +222,9 @@ export class ArticleDownloadController {
       const url = downloadArticleUrl(body?.url);
       this.running = true;
       locked = true;
+      const prepare = verified
+        ? prepareVerifiedProviderDownload(url, verified.article)
+        : undefined;
       const store = this.localStore();
       if (
         (await store.read()).askEveryTime &&
@@ -205,22 +232,29 @@ export class ArticleDownloadController {
       )
         return res.status(409).json({ message: '请先选择本次保存路径。' });
       this.pickerGrant = undefined;
-      const cached = this.prisma
-        ? await findCachedDownloadArticle(this.prisma, url)
-        : null;
+      const cached =
+        !prepare && this.prisma
+          ? await findCachedDownloadArticle(this.prisma, url)
+          : null;
       const result = await store.save((directory) =>
-        cached
-          ? buildCachedArticleDownload(cached, directory)
-          : buildArticleDownload(url, directory, undefined, {
-              imageDirectory: 'image',
-              markdownOnly: true,
-            }),
+        prepare
+          ? prepare(directory)
+          : cached
+            ? buildCachedArticleDownload(cached, directory)
+            : buildArticleDownload(url, directory, undefined, {
+                imageDirectory: 'image',
+                markdownOnly: true,
+              }),
       );
       res.setHeader('Cache-Control', 'private, no-store');
-      return res.json({
+      return res.status(200).json({
         saved: true,
         ...result,
-        contentSource: cached ? 'saved-article' : 'remote',
+        contentSource: prepare
+          ? 'verified-provider'
+          : cached
+            ? 'saved-article'
+            : 'remote',
       });
     } catch (error) {
       return this.failure(error, res);

@@ -1,16 +1,11 @@
 import { Article, PrismaClient } from '@prisma/client';
-import { load } from 'cheerio';
-import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { bodyRetryTarget } from './collection/article-body-retry';
 import { canonicalArticleUrl } from './collection/collection-format';
-import { decodeInlineImage } from './collection/image-fetch';
+import { ArticleDownloadError, downloadArticleUrl } from './article-download';
 import {
-  ArticleDownloadError,
-  downloadArticleUrl,
-  inertDownloadBody,
-} from './article-download';
-import { buildArticleMarkdown } from './article-export';
+  buildCompleteArticleDownload,
+  verifiedDownloadBody,
+} from './article-verified-download';
 
 const unavailable = () =>
   new ArticleDownloadError(
@@ -53,63 +48,26 @@ export async function findCachedDownloadArticle(
       throw unavailable();
     if (!row.contentHtml || row.lastBodyStatus === 'unavailable')
       throw unavailable();
-    const $ = load(row.contentHtml);
-    const body = $('#js_content, .rich_media_content').first();
-    const images = body.find('img').toArray();
-    if (
-      !body.length ||
-      (!body.text().trim() && !images.length) ||
-      images.length > 60
-    )
-      throw unavailable();
-    let bytes = 0;
-    for (const image of images)
-      bytes += decodeInlineImage($(image).attr('src') || '').bytes.length;
-    if (bytes > 20_000_000) throw unavailable();
+    verifiedDownloadBody(row.contentHtml);
     return row;
   } catch {
     throw unavailable();
   }
 }
 
-/** Reuse existing conversion and file publication, using persisted bytes only. */
+/** Reuse the same verified-content exporter as a normal provider completion. */
 export async function buildCachedArticleDownload(
   article: Article,
   directory: string,
 ) {
-  const { markdown } = await buildArticleMarkdown(
-    {
-      ...article,
-      contentHtml: inertDownloadBody(article.contentHtml!),
-      sourceUrl: null,
-    },
-    '',
-    directory,
-    async () => {
-      throw unavailable();
-    },
-    'image',
-  );
-  const titleLine = article.title.replace(/[\r\n]/g, ' ');
-  const title = titleLine.replace(
-    /[&<>"']/g,
-    (c) =>
-      ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;',
-      })[c]!,
-  );
-  const source = bodyRetryTarget(article).url;
-  await writeFile(
-    join(directory, 'index.md'),
-    `# ${title}\n\n原文来源：${source}\n\n${markdown}\n`,
-  );
-  return {
-    articleId: article.id,
-    title: article.title,
-    imageCount: load(article.contentHtml!)('img').length,
-  };
+  try {
+    return await buildCompleteArticleDownload(
+      article,
+      bodyRetryTarget(article).url,
+      directory,
+    );
+  } catch (error) {
+    if (error instanceof ArticleDownloadError) throw unavailable();
+    throw error;
+  }
 }
