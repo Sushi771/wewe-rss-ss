@@ -318,7 +318,11 @@ export default function ArticleDownload() {
               className="mt-3"
               size="sm"
               type="button"
-              isDisabled={locked || !settings}
+              isDisabled={
+                busy ||
+                (browserActive && browserTask?.state !== 'ready') ||
+                !settings
+              }
               onPress={() =>
                 void operate(async (signal) => {
                   await choose(signal);

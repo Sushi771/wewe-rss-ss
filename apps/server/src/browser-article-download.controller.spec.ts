@@ -10,7 +10,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ArticleDownloadController } from './article-download.controller';
 import { BrowserTaskBroker } from './browser-task';
@@ -47,10 +47,10 @@ describe('original download application task HTTP handoff; synthetic content onl
   const originalEnv = { ...process.env };
   const issue = async () =>
     (await post('/browser-task', { url: short }).expect(200)).body;
-  const ready = async () => {
+  const ready = async (captured = observation()) => {
     const task = await issue(),
       claim = broker.claim(task.taskId, binding);
-    broker.complete(task.taskId, claim.nonce, binding, observation());
+    broker.complete(task.taskId, claim.nonce, binding, captured);
     await Promise.resolve();
     return task;
   };
@@ -234,6 +234,94 @@ describe('original download application task HTTP handoff; synthetic content onl
     expect(await readFile(result.body.markdownPath, 'utf8')).toContain(
       '末尾完整内容',
     );
+    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+  });
+  it('default-false path failure can choose a new directory and save retained bytes without another completion, preserving user content', async () => {
+    const previous = join(
+      temporary,
+      'x'.repeat(Math.max(1, 165 - temporary.length - 1)),
+    );
+    await mkdir(previous);
+    const oldNote = join(previous, '用户笔记.md');
+    await writeFile(oldNote, '# 原目录的用户内容');
+    await writeFile(
+      settingsFile,
+      JSON.stringify({ directory: previous, askEveryTime: false }),
+    );
+    const captured = observation(),
+      title = '合'.repeat(60);
+    captured.html = captured.html.replace('离线新文章', title);
+    captured.projection.current.review.mpInfo.title = title;
+    const complete = jest.spyOn(broker, 'complete');
+    const task = await ready(captured);
+    expect(
+      (await post('/browser-task/' + task.taskId + '/save').expect(422)).body
+        .code,
+    ).toBe('SAVE_PATH_TOO_LONG');
+    expect((await get('/browser-task/' + task.taskId)).body).toMatchObject({
+      state: 'ready',
+      code: 'SAVE_RETRY_REQUIRED',
+    });
+    const chosen = await post('/directory').expect(200);
+    expect(chosen.body).toMatchObject({
+      directory: destination,
+      askEveryTime: false,
+      cancelled: false,
+    });
+    const saved = await post('/browser-task/' + task.taskId + '/save').expect(
+      200,
+    );
+    expect(saved.body.markdownPath.startsWith(destination + sep)).toBe(true);
+    expect(await readFile(saved.body.markdownPath, 'utf8')).toContain(
+      '末尾完整内容',
+    );
+    const images = await readdir(
+      join(dirname(saved.body.markdownPath), 'image'),
+    );
+    expect(
+      await readFile(
+        join(dirname(saved.body.markdownPath), 'image', images[0]),
+      ),
+    ).toEqual(Buffer.from(png, 'base64'));
+    expect(await readFile(oldNote, 'utf8')).toBe('# 原目录的用户内容');
+    await writeFile(saved.body.markdownPath, '# 新目录的用户编辑');
+    await post('/browser-task/' + task.taskId + '/save').expect(409);
+    expect(await readFile(saved.body.markdownPath, 'utf8')).toBe(
+      '# 新目录的用户编辑',
+    );
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(picker.pickArticleDirectory).toHaveBeenCalledTimes(1);
+    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+  });
+  it('cancellation during directory selection drops the retained body and blocks a late save', async () => {
+    const task = await ready();
+    let picked!: (value: string) => void, opened!: () => void;
+    const pickerOpened = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    jest.mocked(picker.pickArticleDirectory).mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          picked = resolve;
+          opened();
+        }),
+    );
+    const selection = post('/directory').then((response) => response);
+    await pickerOpened;
+    try {
+      expect(
+        (await post('/browser-task/' + task.taskId + '/cancel').expect(200))
+          .body.state,
+      ).toBe('cancelled');
+    } finally {
+      picked(destination);
+    }
+    expect((await selection).status).toBe(200);
+    await post('/browser-task/' + task.taskId + '/save').expect(409);
+    expect((await get('/browser-task/' + task.taskId)).body.state).toBe(
+      'cancelled',
+    );
+    expect(await readdir(destination)).toEqual([]);
     expect(download.buildArticleDownload).not.toHaveBeenCalled();
   });
   it('cancel revokes claimed transport and terminal status does not perform a save or mutate settings', async () => {

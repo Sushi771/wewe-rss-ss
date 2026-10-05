@@ -26,6 +26,8 @@
 
 内存最多四个活跃或待保存正文，终态只保留有界元数据并清理。重启不持久化任务。页面离开会中止状态轮询并尽力取消；后端期限仍独立生效。迟到的状态响应不能把取消、过期或已完成任务改回接收中，也不能替换较新的任务。状态与权限查询失败不会落到原文网络下载。
 
+待保存阶段允许单独更换目录，包括默认不逐次询问路径时的失败恢复；文章目标及其他下载动作继续锁定。接收中、忙碌或保存中仍禁用目录选择。取消目录选择保留原设置和已接收内容；目录选择与其他操作共用原操作锁。其他页面在选择期间取消任务后，迟到保存会被服务端拒绝，不因目录响应返回而恢复正文。
+
 ## 未通过的来源条件
 
 本次没有证明 MAIN 实站定位、真实 canonical、上游全篇正文、原图字节或未知短链映射；`routeVerified=false` 仍是门禁。官方验证成功不构成本机回调或内容回送，不解除原平台停止。
@@ -38,9 +40,12 @@
 
 HTTP 测试使用真实 Nest 控制器、合成官方页面数据和临时目录。只有测试注入的 Broker 配置可用；原文下载器被设为失败并确认未调用。保存器实际写出可读 Markdown 与精确 PNG 字节。这证明应用接线与本机保存合同，不证明实站取文或订阅恢复。未进行新 UI 的真实浏览器视觉验收。
 
+路径恢复补丁另有实际 TSX 编译后的四项离线交互回归：默认不逐次询问时失败后换路径、目标保持锁定、忙碌/接收/保存门禁、选择取消及迟到响应保护。该 hooks/JSX/fetch facade 不运行页面 effects，也不称为浏览器视觉测试。两套相关服务端回归核对真实 `SAVE_PATH_TOO_LONG` 后选择新目录、原 Markdown/PNG 保存器的结果与旧内容保护，以及选择期间并发取消；只有一次合成正文完成，无新取文。
+
 ```powershell
 pnpm --filter server exec jest browser-task browser-article article-download.controller --runInBand
 node --test extensions/wewe-official-task/*.test.mjs
+node --test scripts/browser-article-path-recovery.test.cjs
 pnpm --filter server build
 pnpm --filter web build
 ```
