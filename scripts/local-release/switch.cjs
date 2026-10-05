@@ -22,6 +22,27 @@ const expectedPending = [
 ];
 
 function processIdentity(action, pid, port, expected) {
+  if (
+    process.platform === 'win32' &&
+    process.env.LOCAL_RELEASE_FORCE_POWERSHELL !== '1'
+  ) {
+    const tool = require('./identity-tool.cjs').identityTool();
+    if (tool)
+      return JSON.parse(
+        run(
+          tool,
+          [
+            action,
+            String(pid || 0),
+            String(port),
+            expected?.startUtc || '',
+            expected?.executable || '',
+            expected?.commandLine || '',
+          ],
+          { env: cleanEnvironment() },
+        ),
+      );
+  }
   const args = [
     '-NoProfile',
     '-NonInteractive',

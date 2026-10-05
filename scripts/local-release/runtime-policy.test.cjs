@@ -1,6 +1,43 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { scheduledUpdatesEnabled } = require('./runtime.cjs');
+const { scheduledUpdatesEnabled, guardModulePath } = require('./runtime.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+test('native canonical module checks preserve release boundaries including junctions', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-module-boundary-'));
+  try {
+    const release = path.join(root, 'release');
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(release);
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(release, 'safe.cjs'), '');
+    fs.writeFileSync(path.join(outside, 'escape.cjs'), '');
+    fs.symlinkSync(
+      outside,
+      path.join(release, 'linked'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    guardModulePath(release, 'node:fs');
+    guardModulePath(release, 'fs');
+    guardModulePath(release, path.join(release, 'safe.cjs'));
+    assert.throws(
+      () => guardModulePath(release, path.join(release, 'linked/escape.cjs')),
+      /escaped/,
+    );
+    assert.throws(
+      () => guardModulePath(release, path.join(outside, 'escape.cjs')),
+      /escaped/,
+    );
+    assert.throws(
+      () => guardModulePath(release, path.join(release, 'missing.cjs')),
+      /ENOENT/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const manifest = {
   schemaCompatibility: 'current',

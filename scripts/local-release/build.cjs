@@ -353,6 +353,7 @@ function build(options = {}) {
     sourceHash,
     sourceCommit: legacy ? options.sourceCommit : null,
     schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+    startupInspection: legacy ? 'full' : 'schema-only-v1',
     inputs,
     prisma: {
       clientVersion: readJson(path.join(installed, 'package.json')).version,
