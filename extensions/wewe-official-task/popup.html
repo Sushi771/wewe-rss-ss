@@ -1,27 +1,43 @@
 <!doctype html>
 <html lang="zh-CN">
   <meta charset="utf-8" /><title>本次官方文章任务</title>
-  <body>
+  <body style="width: 380px; max-height: 560px; overflow-y: auto; margin: 12px">
     <h1>本次官方文章任务</h1>
     <button id="probe" type="button">只读核验当前文章关联（不回送）</button>
+    <pre
+      id="probe-summary"
+      aria-live="polite"
+      style="
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        max-height: 300px;
+        overflow: auto;
+        font-family: inherit;
+        line-height: 1.5;
+      "
+    >
+尚未执行本次只读核验。</pre
+    >
     <p>
-      实站取文未验证。请先在 WeWe
-      发起指定任务，并在当前官方页面亲自完成正常验证。不会解除后台停止。
+      本次只读核验可在已打开的官方文章页直接执行，无需任务配置。回送未启用；后台停止状态保留。
     </p>
-    <form id="task">
-      <label
-        >本机地址
-        <input id="base" value="http://127.0.0.1:4000/" required /></label
-      ><br />
-      <label
-        >本次配对密钥
-        <input id="key" type="password" autocomplete="off" required /></label
-      ><br />
-      <label
-        >本次任务编号 <input id="taskId" autocomplete="off" required /></label
-      ><br />
-      <button type="submit">读取当前文章并回送本次任务</button>
-    </form>
+    <details>
+      <summary>回送任务配置（未启用；只读核验不需要）</summary>
+      <form id="task">
+        <label
+          >本机地址
+          <input id="base" value="http://127.0.0.1:4000/" required /></label
+        ><br />
+        <label
+          >本次配对密钥
+          <input id="key" type="password" autocomplete="off" required /></label
+        ><br />
+        <label
+          >本次任务编号 <input id="taskId" autocomplete="off" required /></label
+        ><br />
+        <button type="submit">读取当前文章并回送本次任务</button>
+      </form>
+    </details>
     <p id="status" role="status">
       未配置、未启用。不保存密钥；关闭此窗口即清除。
     </p>
