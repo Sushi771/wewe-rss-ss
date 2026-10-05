@@ -94,16 +94,15 @@ namespace WeWe.LocalRelease {
           var handle = process.Handle;
           DateTime start = process.StartTime.ToUniversalTime();
           string executable = null, command = null;
-          using (var query = new ManagementObjectSearcher("SELECT CreationDate, ExecutablePath, CommandLine FROM Win32_Process WHERE ProcessId=" + pid))
-          using (var rows = query.Get()) {
-            foreach (ManagementObject row in rows) {
-              using (row) {
-                DateTime created = ManagementDateTimeConverter.ToDateTime((string)row["CreationDate"]).ToUniversalTime();
-                Require(Math.Abs((created - start).TotalSeconds) <= 1, "Process handle/WMI creation time mismatch");
-                executable = (string)row["ExecutablePath"];
-                command = (string)row["CommandLine"];
-              }
-            }
+          // Win32_Process.Handle is its PID key, distinct from the retained OS
+          // process handle above. Read that exact instance without a query/enumerator.
+          using (var row = new ManagementObject("Win32_Process.Handle=\"" + pid.ToString(CultureInfo.InvariantCulture) + "\"")) {
+            row.Get();
+            Require((string)row["Handle"] == pid.ToString(CultureInfo.InvariantCulture), "WMI process key mismatch");
+            DateTime created = ManagementDateTimeConverter.ToDateTime((string)row["CreationDate"]).ToUniversalTime();
+            Require(Math.Abs((created - start).TotalSeconds) <= 1, "Process handle/WMI creation time mismatch");
+            executable = (string)row["ExecutablePath"];
+            command = (string)row["CommandLine"];
           }
           Require(!String.IsNullOrEmpty(executable) && !String.IsNullOrEmpty(command), "Process identity is unavailable");
           owners = TcpTable.Read(port, true);

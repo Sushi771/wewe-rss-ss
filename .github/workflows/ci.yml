@@ -9,6 +9,7 @@ on:
         main,
         codex/manual-refresh-download-integration,
         codex/cold-launch-profile,
+        codex/compact-cold-launch,
       ]
 
 jobs:
