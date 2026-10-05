@@ -3,7 +3,7 @@ const path = require('node:path');
 const { parseArgs } = require('node:util');
 const Module = require('node:module');
 const {
-  verifyRelease,
+  verifyReleaseAsync,
   fileHash,
   readJson,
   inside,
@@ -81,7 +81,7 @@ async function runtime() {
       '用法: runtime.cjs verify|probe|start [--database 绝对路径]',
     );
   const release = __dirname;
-  const manifest = verifyRelease(release, {
+  const manifest = await verifyReleaseAsync(release, {
     reuseVerified:
       command === 'start' && process.env.LOCAL_RELEASE_REUSE_VERIFIED === '1',
   });

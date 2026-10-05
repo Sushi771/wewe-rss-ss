@@ -6,6 +6,7 @@ const { spawn } = require('node:child_process');
 const { parseArgs } = require('node:util');
 const {
   verifyRelease,
+  verifyReleaseAsync,
   writeJson,
   fileHash,
   cleanEnvironment,
@@ -19,7 +20,7 @@ const {
   stopOwned,
   loadProductionEnvironment,
 } = require('./switch.cjs');
-const { writeActiveRelease } = require('./active-release.cjs');
+const { writeActiveReleaseAsync } = require('./active-release.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const pauseFile = path.join(root, 'tools/wechat-desktop-collector/.paused');
@@ -76,13 +77,13 @@ async function controlledRestart(options) {
   const release = fs.realpathSync(options.release);
   const previous = fs.realpathSync(options.previous || options.release);
   const source = fs.realpathSync(options.database);
-  const manifest = verifyRelease(release, {
+  const manifest = await verifyReleaseAsync(release, {
     reuseVerified: options.reuseVerified === true,
   });
   const previousManifest =
     previous === release
       ? manifest
-      : verifyRelease(previous, {
+      : await verifyReleaseAsync(previous, {
           reuseVerified: options.reuseVerified === true,
         });
   for (const item of [manifest, previousManifest]) {
@@ -261,7 +262,7 @@ async function controlledRestart(options) {
     // Advance the ignored local pointer only after the new production process is ready.
     // The logon task has a stable action and follows this pointer after future deployments.
     if (options.production)
-      writeActiveRelease(release, {
+      await writeActiveReleaseAsync(release, {
         reuseVerified: options.reuseVerified === true,
       });
     const summary = {
@@ -289,7 +290,7 @@ async function controlledRestart(options) {
           fallbackChild.pid,
           port,
         );
-        if (options.production) writeActiveRelease(previous);
+        if (options.production) await writeActiveReleaseAsync(previous);
         const summary = {
           passed: options.rehearsal && options.injectFailure === true,
           mode: options.production ? 'production' : 'rehearsal',

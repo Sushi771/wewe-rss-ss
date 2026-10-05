@@ -6,6 +6,9 @@ const path = require('node:path');
 const {
   fingerprint,
   verifyRelease,
+  verifyReleaseAsync,
+  releaseMetadata,
+  releaseMetadataAsync,
   verifyRunningRelease,
   run,
 } = require('./lib.cjs');
@@ -75,6 +78,165 @@ test(
   },
 );
 const cached = { reuseVerified: true };
+test('asynchronous pointer activation preserves location, ID, schema and byte checks before atomic write', async () => {
+  const {
+    writeActiveReleaseAsync,
+    readActiveRelease,
+    pointer,
+  } = require('./active-release.cjs');
+  const previous = fs.existsSync(pointer)
+    ? fs.readFileSync(pointer)
+    : undefined;
+  const { parent, release: source } = fixture();
+  const release = path.join(
+    path.dirname(pointer),
+    `activation-test-${require('node:crypto').randomUUID()}`,
+  );
+  fs.mkdirSync(path.dirname(pointer), { recursive: true });
+  fs.cpSync(source, release, { recursive: true });
+  const file = path.join(release, 'release.json');
+  const good = {
+    ...JSON.parse(fs.readFileSync(file)),
+    id: path.basename(release),
+    schemaCompatibility: 'current',
+    desktopHelperIncluded: false,
+  };
+  try {
+    await assert.rejects(writeActiveReleaseAsync(source));
+    fs.writeFileSync(file, JSON.stringify(good));
+    await writeActiveReleaseAsync(release, { runningOnly: true });
+    assert.equal(readActiveRelease().release, fs.realpathSync(release));
+    const saved = fs.readFileSync(pointer);
+    for (const change of [
+      { id: 'mismatch' },
+      { schemaCompatibility: 'legacy-additive' },
+      { desktopHelperIncluded: undefined },
+    ]) {
+      fs.writeFileSync(file, JSON.stringify({ ...good, ...change }));
+      await assert.rejects(writeActiveReleaseAsync(release));
+      assert.deepEqual(fs.readFileSync(pointer), saved);
+    }
+    fs.writeFileSync(file, JSON.stringify(good));
+    fs.writeFileSync(path.join(release, 'runtime.cjs'), 'altered');
+    await assert.rejects(
+      writeActiveReleaseAsync(release, { runningOnly: true }),
+    );
+    assert.deepEqual(fs.readFileSync(pointer), saved);
+  } finally {
+    if (previous) fs.writeFileSync(pointer, previous);
+    else if (fs.existsSync(pointer)) fs.unlinkSync(pointer);
+    fs.rmSync(release, { recursive: true });
+    fs.rmSync(parent, { recursive: true });
+  }
+});
+
+test('parallel metadata keeps exact ordered identities and bounds outstanding lstat requests', async () => {
+  const { parent, release } = fixture();
+  const original = fs.promises.lstat;
+  let active = 0,
+    peak = 0;
+  try {
+    for (let index = 0; index < 32; index++)
+      fs.writeFileSync(path.join(release, `entry-${index}`), 'fixture');
+    const expected = JSON.stringify(releaseMetadata(release));
+    fs.promises.lstat = async (...args) => {
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        await new Promise((resolve) => setImmediate(resolve));
+        return await original(...args);
+      } finally {
+        active--;
+      }
+    };
+    assert.equal(JSON.stringify(await releaseMetadataAsync(release)), expected);
+    assert.ok(peak > 1 && peak <= 8);
+  } finally {
+    fs.promises.lstat = original;
+    fs.rmSync(parent, { recursive: true });
+  }
+});
+
+test('parallel traversal checks directory identity before following a stale Dirent', async () => {
+  const { parent, release } = fixture();
+  const original = fs.readdirSync;
+  const switched = path.join(release, 'switch-dir');
+  const outside = path.join(parent, 'outside');
+  fs.mkdirSync(switched);
+  fs.mkdirSync(outside);
+  let followed = false,
+    changed = false;
+  try {
+    fs.readdirSync = (directory, options) => {
+      if (directory === switched) {
+        followed = true;
+        throw new Error('Unexpected junction traversal');
+      }
+      const result = original(directory, options);
+      if (directory === release && !changed) {
+        changed = true;
+        fs.rmdirSync(switched);
+        fs.symlinkSync(outside, switched, 'junction');
+      }
+      return result;
+    };
+    await assert.rejects(releaseMetadataAsync(release), /entry changed/);
+    assert.equal(followed, false);
+  } finally {
+    fs.readdirSync = original;
+    fs.rmSync(parent, { recursive: true });
+  }
+});
+
+for (const change of ['same-size', 'extra', 'missing', 'manifest', 'escape']) {
+  test(`asynchronous cached release refuses ${change} just like the full audit`, async () => {
+    const { parent, release } = fixture();
+    try {
+      verifyRelease(release, cached);
+      assert.deepEqual(
+        await verifyReleaseAsync(release, cached),
+        verifyRelease(release),
+      );
+      if (change === 'same-size') {
+        const file = path.join(release, 'runtime.cjs');
+        const stat = fs.statSync(file);
+        fs.writeFileSync(file, 'altered');
+        fs.utimesSync(file, stat.atime, stat.mtime);
+      } else if (change === 'extra')
+        fs.writeFileSync(path.join(release, 'unexpected.cjs'), 'extra');
+      else if (change === 'missing')
+        fs.unlinkSync(path.join(release, 'runtime.cjs'));
+      else if (change === 'manifest') {
+        const file = path.join(release, 'release.json');
+        const manifest = JSON.parse(fs.readFileSync(file));
+        manifest.files['runtime.cjs'] = 'changed';
+        fs.writeFileSync(file, JSON.stringify(manifest));
+      } else fs.symlinkSync(parent, path.join(release, 'escape'), 'junction');
+      await assert.rejects(verifyReleaseAsync(release, cached));
+    } finally {
+      fs.rmSync(parent, { recursive: true });
+    }
+  });
+}
+
+test('asynchronous cache miss retains strict byte auditing and primes the normal receipt', async () => {
+  const { parent, release } = fixture();
+  try {
+    assert.deepEqual(
+      await verifyReleaseAsync(release, cached),
+      verifyRelease(release),
+    );
+    const folder = path.join(parent, '.verification-cache');
+    const receipt = path.join(folder, fs.readdirSync(folder)[0]);
+    fs.writeFileSync(receipt, 'broken');
+    await verifyReleaseAsync(release, cached);
+    assert.equal(JSON.parse(fs.readFileSync(receipt)).format, 1);
+    fs.writeFileSync(path.join(release, 'runtime.cjs'), 'altered');
+    await assert.rejects(verifyReleaseAsync(release));
+  } finally {
+    fs.rmSync(parent, { recursive: true });
+  }
+});
 for (const change of ['boot', 'app', 'asset', 'extra-asset']) {
   test(`live reuse refuses ${change} modification`, () => {
     const { parent, release } = fixture();
