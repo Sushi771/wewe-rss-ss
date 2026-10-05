@@ -71,7 +71,10 @@ async function runtime() {
       '用法: runtime.cjs verify|probe|start [--database 绝对路径]',
     );
   const release = __dirname;
-  const manifest = verifyRelease(release);
+  const manifest = verifyRelease(release, {
+    reuseVerified:
+      command === 'start' && process.env.LOCAL_RELEASE_REUSE_VERIFIED === '1',
+  });
   const legacy = manifest.schemaCompatibility === 'legacy-additive';
   if (!legacy && manifest.schemaCompatibility !== 'current')
     throw new Error('未知应用 schema 兼容模式');
