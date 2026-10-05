@@ -364,6 +364,19 @@ describe('original download application task HTTP handoff; synthetic content onl
     await post('/browser-task/' + task.taskId + '/save').expect(403);
     expect(await readdir(destination)).toEqual([]);
   });
+  it('pruned terminal metadata returns the exact missing-task HTTP contract without restarting collection or saving', async () => {
+    const task = await ready();
+    await post('/browser-task/' + task.taskId + '/cancel').expect(200);
+    const originalSettings = await readFile(settingsFile, 'utf8');
+    jest
+      .spyOn(Date, 'now')
+      .mockReturnValue(Date.parse(task.expiresAt) + 60_001);
+    const result = await get('/browser-task/' + task.taskId).expect(410);
+    expect(result.body.code).toBe('TASK_GONE');
+    expect(await readFile(settingsFile, 'utf8')).toBe(originalSettings);
+    expect(await readdir(destination)).toEqual([]);
+    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+  });
   it('absent broker injection leaves production-style controller disabled without file or network writes', async () => {
     const m = await Test.createTestingModule({
       controllers: [ArticleDownloadController],

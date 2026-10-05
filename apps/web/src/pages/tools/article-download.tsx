@@ -23,6 +23,14 @@ type SavedArticle = {
   contentSource?: 'saved-article' | 'remote' | 'verified-provider';
 };
 
+class GoneBrowserArticleTask extends Error {
+  constructor() {
+    super(
+      '本机任务状态已清理；若未收到保存结果，请检查保存目录后再开始新操作。',
+    );
+  }
+}
+
 export default function ArticleDownload() {
   const [url, setUrl] = useState('');
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -63,7 +71,14 @@ export default function ArticleDownload() {
         },
       );
       const result = await response.json().catch(() => null);
-      if (!response.ok || !result)
+      if (!response.ok || !result) {
+        if (
+          body === undefined &&
+          /^\/browser-task\/[a-f0-9-]{36}$/.test(endpoint) &&
+          response.status === 410 &&
+          result?.code === 'TASK_GONE'
+        )
+          throw new GoneBrowserArticleTask();
         throw new ArticleDownloadRequestError(
           result?.message || '本机保存操作失败，请检查服务或登录状态。',
           verificationFromDownloadError(
@@ -73,10 +88,21 @@ export default function ArticleDownload() {
               : undefined,
           ),
         );
+      }
       return result;
     },
     [],
   );
+
+  const forgetGoneTask = useCallback((taskId: string, cause: unknown) => {
+    if (!(cause instanceof GoneBrowserArticleTask)) return false;
+    // A definitive missing record differs from a transient failed read. It does
+    // not establish whether an earlier atomic save committed; never resave it.
+    setBrowserTask((current) => (current?.taskId === taskId ? null : current));
+    setBrowserStatusUnreadable(false);
+    setError(cause.message);
+    return true;
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -123,6 +149,7 @@ export default function ArticleDownload() {
           timer = setTimeout(() => void poll(), 1000);
       } catch (cause) {
         if (controller.signal.aborted) return;
+        if (forgetGoneTask(browserTaskId, cause)) return;
         // A failed local status read does not cancel capture or discard its body.
         // Keep the task locked until an explicit read establishes its state.
         setBrowserStatusUnreadable(true);
@@ -136,7 +163,7 @@ export default function ArticleDownload() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [api, browserTaskId, statusReadAttempt]);
+  }, [api, browserTaskId, statusReadAttempt, forgetGoneTask]);
 
   useEffect(() => {
     if (!browserTaskId) return;
@@ -228,6 +255,8 @@ export default function ArticleDownload() {
   const saveBrowserTask = () =>
     void operate(async (signal) => {
       if (!browserTaskId) return;
+      let gone = false;
+      let saveError: Error | undefined;
       try {
         let pickToken: string | undefined;
         if (settings?.askEveryTime) {
@@ -246,6 +275,9 @@ export default function ArticleDownload() {
         if (!result.saved || typeof result.markdownPath !== 'string')
           throw new Error('未收到有效的本机保存结果。');
         setSaved(result);
+      } catch (cause) {
+        saveError =
+          cause instanceof Error ? cause : new Error('本机保存未完成。');
       } finally {
         if (!signal.aborted) {
           const status = browserArticleTaskStatus(
@@ -253,26 +285,32 @@ export default function ArticleDownload() {
               '/browser-task/' + browserTaskId,
               undefined,
               signal,
-            ).catch(() => null),
+            ).catch((cause) => {
+              gone = forgetGoneTask(browserTaskId, cause);
+              return null;
+            }),
           );
           if (status?.taskId === browserTaskId) {
             setBrowserTask((current) =>
               mergeBrowserArticleTaskStatus(current, status),
             );
             setBrowserStatusUnreadable(false);
-          } else {
+          } else if (!gone) {
             // Save may already have committed. Read the same task before retrying
             // a save instead of inferring failure or starting another capture.
             setBrowserStatusUnreadable(true);
           }
         }
       }
+      if (gone) throw new GoneBrowserArticleTask();
+      if (saveError) throw saveError;
     });
 
   const download = (event: FormEvent) => {
     event.preventDefault();
-    setBrowserTask(null);
+    if (locked) return;
     void operate(async (signal) => {
+      setBrowserTask(null);
       let input: URL;
       try {
         input = new URL(url.trim());
@@ -323,6 +361,7 @@ export default function ArticleDownload() {
             placeholder="https://mp.weixin.qq.com/s/…"
             value={url}
             onValueChange={(value) => {
+              if (locked || request.current) return;
               setUrl(value);
               setError('');
               setVerification(null);
@@ -377,10 +416,11 @@ export default function ArticleDownload() {
                 isSelected={settings?.askEveryTime || false}
                 isDisabled={locked || !settings}
                 onValueChange={(value) => {
-                  const previous = settings;
-                  if (previous)
-                    setSettings({ ...previous, askEveryTime: value });
+                  if (locked) return;
                   void operate(async (signal) => {
+                    const previous = settings;
+                    if (previous)
+                      setSettings({ ...previous, askEveryTime: value });
                     try {
                       setSettings(
                         await api('/settings', { askEveryTime: value }, signal),

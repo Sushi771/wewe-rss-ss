@@ -38,6 +38,7 @@ function page({
   settings = { directory: 'synthetic-old-path', askEveryTime: false },
   effects = false,
   fetchReply,
+  taskPresent = true,
 } = {}) {
   const task = {
     taskId: '12345678-1234-1234-1234-123456789012',
@@ -54,7 +55,7 @@ function page({
     '',
     null,
     true,
-    { ...task },
+    taskPresent ? { ...task } : null,
   ];
   const refs = [],
     calls = [],
@@ -532,4 +533,189 @@ test('local task expiry wins over a late successful status response', async () =
   assert.equal(h.button('保存已接收的正文和图片'), undefined);
   assert.equal(h.calls.filter((c) => c.url.endsWith('/save')).length, 0);
   h.unmount();
+});
+
+test('a definitive pruned task response unlocks the page without claiming that a save failed or succeeded', async () => {
+  const h = page({
+    phase: 'saving',
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/12345678-1234-1234-1234-123456789012'))
+        return {
+          ok: false,
+          status: 410,
+          json: async () => ({ code: 'TASK_GONE', message: 'synthetic gone' }),
+        };
+    },
+  });
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[8], null);
+  assert.equal(
+    h.render().find((n) => n.type === 'Input').props.isDisabled,
+    false,
+  );
+  assert.ok(h.state[3].includes('若未收到保存结果'));
+  assert.equal(h.state[6], null);
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/save')).length, 0);
+  h.unmount();
+});
+
+test('a form submission rejected during directory selection does not clear or cancel the retained task', async () => {
+  let release;
+  const h = page({
+    effects: true,
+    directoryReply: () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  });
+  h.runEffects();
+  await flush();
+  const form = h.render().find((n) => n.type === 'form');
+  h.button('选择下载路径').props.onPress();
+  form.props.onSubmit({ preventDefault() {} });
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[8].state, 'ready');
+  assert.equal(
+    h.calls.some((c) => c.url.endsWith('/cancel')),
+    false,
+  );
+  release({ cancelled: true });
+  await flush();
+  h.unmount();
+});
+
+test('a second asking-policy event rejected by the operation lock cannot mutate the visible preference', async () => {
+  let release;
+  const h = page({
+    phase: 'cancelled',
+    fetchReply: async (url, options) => {
+      if (url.endsWith('/settings') && options.method === 'POST')
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+    },
+  });
+  const change = h.render().find((n) => n.type === 'Checkbox')
+    .props.onValueChange;
+  change(true);
+  change(false);
+  assert.equal(h.state[1].askEveryTime, true);
+  assert.equal(h.calls.length, 1);
+  release({
+    ok: true,
+    json: async () => ({ directory: 'synthetic-old-path', askEveryTime: true }),
+  });
+  await flush();
+  assert.equal(h.state[1].askEveryTime, true);
+});
+
+test('authorization or incomplete errors cannot masquerade as a definitive missing task', async () => {
+  for (const reply of [
+    { status: 401, code: 'TASK_GONE' },
+    { status: 410, code: 'OTHER_ERROR' },
+  ]) {
+    const h = page({
+      phase: 'saving',
+      effects: true,
+      fetchReply: async (url) => {
+        if (url.endsWith('/12345678-1234-1234-1234-123456789012'))
+          return {
+            ok: false,
+            status: reply.status,
+            json: async () => ({
+              code: reply.code,
+              message: 'synthetic error',
+            }),
+          };
+      },
+    });
+    h.runEffects();
+    await flush();
+    assert.equal(h.state[8].state, 'saving');
+    assert.ok(h.button('重新读取本机任务状态'));
+    assert.equal(
+      h.calls.some((c) => c.url.endsWith('/save')),
+      false,
+    );
+    h.unmount();
+  }
+});
+
+test('a pruned final save status unlocks the page and preserves the acknowledged saved file result', async () => {
+  const h = page({
+    fetchReply: async (url) => {
+      if (url.endsWith('/12345678-1234-1234-1234-123456789012'))
+        return {
+          ok: false,
+          status: 410,
+          json: async () => ({ code: 'TASK_GONE' }),
+        };
+    },
+  });
+  h.button('选择下载路径').props.onPress();
+  await flush();
+  h.button('保存已接收的正文和图片').props.onPress();
+  await flush();
+  assert.equal(h.state[8], null);
+  assert.equal(h.state[2], false);
+  assert.equal(h.state[6].markdownPath, 'synthetic-new-path/正文.md');
+  assert.ok(h.state[3].includes('若未收到保存结果'));
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/save')).length, 1);
+});
+
+test('late target-input events cannot replace an active retained article', () => {
+  const h = page();
+  const before = { ...h.state[8] };
+  h.render()
+    .find((n) => n.type === 'Input')
+    .props.onValueChange('https://mp.weixin.qq.com/s/another');
+  assert.equal(h.state[0], 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv');
+  assert.deepEqual(h.state[8], before);
+  assert.equal(h.calls.length, 0);
+});
+
+test('leaving cancels capture and ignores late reads; returning loads preferences without silently issuing a task', async () => {
+  let release;
+  const left = page({
+    phase: 'waiting',
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/12345678-1234-1234-1234-123456789012'))
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+    },
+  });
+  left.runEffects();
+  await flush();
+  left.unmount();
+  release({
+    ok: true,
+    json: async () => ({ ...left.state[8], state: 'ready' }),
+  });
+  await flush();
+  assert.equal(left.calls.filter((c) => c.url.endsWith('/cancel')).length, 1);
+  assert.equal(
+    left.state[8].state,
+    'waiting',
+    'unmounted effect ignored the late read',
+  );
+  const remembered = {
+    directory: 'synthetic-returned-path',
+    askEveryTime: true,
+  };
+  const returned = page({
+    taskPresent: false,
+    settings: remembered,
+    effects: true,
+  });
+  returned.runEffects();
+  await flush();
+  assert.equal(returned.state[8], null);
+  assert.deepEqual(returned.state[1], remembered);
+  assert.ok(returned.calls.every((c) => c.method === 'GET'));
+  returned.unmount();
 });
