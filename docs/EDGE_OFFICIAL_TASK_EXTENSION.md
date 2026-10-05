@@ -6,6 +6,8 @@
 
 0.1.1 后续授权与改进：用户已确认安装与一次 MAIN 只读核验，实际手动安装仍待实施；扩展管理内部页的 CUA URL 安全拒绝已停止，没有绕过。本次改进只做离线开发，不安装、不运行新的实站 probe、不扩大权限。popup 以可选中的纯文本展示白名单布尔和有界计数；明确区分 false 与 missing/早退“未核实”，不输出原值或指纹。标题/来源匹配须两侧正规化文本均非空；DOM 与已返回正文一致仍不证明上游全篇完整性，图片显示加载不证明原始字节或完整保存。0.1.1 审查 ZIP 仍为 9 个根文件，测试不打包，0.1.0 ZIP 原样保留。
 
+此前 0.1.0 主区已审查并集成候选源码，复跑相关服务端 6 套／127 项、扩展 14 项离线测试及服务端构建通过。原候选提交 `3e7945336d06cef0aaa1315e245a409757b2064e` 的 CI `37268390039` 四项及扩展 CI `37268390186` 均成功。主应用入口和模块未注册候选路由，已运行产物未改变。0.1.1 本地扩展 23 项离线测试通过；主区新版本集成与准确提交的 CI 仍须单独核对。
+
 ## 成熟模式、许可与依赖
 
 先核 [GoogleChrome 官方 page-redder 样例](https://github.com/GoogleChrome/chrome-extensions-samples/tree/main/functional-samples/sample.page-redder) 的 MV3 `activeTab+scripting` 和点击注入模式；上游 [LICENSE](https://github.com/GoogleChrome/chrome-extensions-samples/blob/main/LICENSE) 为 Apache-2.0。扩展按该标准 API 模式独立实现，没有复制样例源码或新增运行依赖。Chrome 的 [activeTab](https://developer.chrome.com/docs/extensions/develop/concepts/activeTab) 与 [scripting](https://developer.chrome.com/docs/extensions/reference/api/scripting) 文档支持临时访问当前页面，以及 MAIN/ISOLATED 执行世界。
@@ -90,4 +92,4 @@ pnpm --filter server build
 
 `dom-harness.test.mjs` 运行序列化采集函数和窄投影，敏感属性 getter 设为抛错；`offline.test.mjs` 测传输/权限/切文/精确CDN/内部 URL 拒绝，HTTP test 只启动临时测试服务器。Nest 新路由不在生产 AppModule。另有默认disabled、nonce/来源跨任务、过期/重启、schema/正文截短/时间/身份/缺图/原保存旧笔记保护测试。所有公开 fixture 为合成，不提交私人文章全文或原始证据。
 
-相关服务端回归与 server 构建已通过。最终本地测试数量与远端 CI 以草稿 PR 的准确提交记录为准，不引用其他 owner 的 CI 代替。
+相关服务端回归与 server 构建已通过。最终本地测试数量与远端 CI 以草稿 PR 的准确提交记录为准，不引用其他 owner 的 CI 代替。本公开说明不包含私人运行数据。

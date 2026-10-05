@@ -147,6 +147,7 @@ output/playwright/
 output/subscription-implementation/
 tools/wechat-desktop-collector/.paused
 .local-releases/
+.local-extensions/
 .playwright-cli/
 __pycache__/
 *.pyc
