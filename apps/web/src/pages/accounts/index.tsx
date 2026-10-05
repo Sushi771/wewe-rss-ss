@@ -336,7 +336,7 @@ const AccountPage = () => {
       >
         <ModalContent>
           <ModalHeader>连接手动更新</ModalHeader>
-          <ModalBody>
+          <ModalBody role="region" aria-label="公众号连接状态列表" tabIndex={0}>
             {connection.isFetching ? (
               <Spinner />
             ) : connection.error ? (

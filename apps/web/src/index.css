@@ -263,6 +263,11 @@ select {
   scrollbar-gutter: stable;
 }
 
+.account-connection-body:focus-visible {
+  outline: 2px solid var(--mac-blue);
+  outline-offset: -2px;
+}
+
 .account-connection-footer {
   flex-wrap: wrap;
   border-top: 1px solid var(--mac-separator);
