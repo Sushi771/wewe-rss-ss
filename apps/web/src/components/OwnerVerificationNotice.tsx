@@ -7,6 +7,7 @@ import { trpc } from '../utils/trpc';
  */
 export default function OwnerVerificationNotice() {
   const [expanded, setExpanded] = useState(false);
+  const [checked, setChecked] = useState(false);
   const location = useLocation();
   const status = trpc.collection.verificationStatus.useQuery(undefined, {
     enabled:
@@ -21,11 +22,11 @@ export default function OwnerVerificationNotice() {
   return (
     <aside
       role="status"
-      aria-label="腾讯官方验证待处理"
+      aria-label="微信读书订阅验证状态"
       className="border-warning-300 bg-background fixed bottom-3 left-3 right-3 z-40 mx-auto max-w-xl rounded-xl border p-3 text-sm shadow-lg"
     >
       <div className="flex items-center justify-between gap-3">
-        <strong>腾讯官方验证待处理 · 更新已停止</strong>
+        <strong>微信读书订阅验证待处理 · 更新已停止</strong>
         <button
           type="button"
           className="text-primary shrink-0 underline"
@@ -46,10 +47,16 @@ export default function OwnerVerificationNotice() {
                 ）。
               </p>
               <p>
-                请在官方页面人工处理。本应用尚未取得可用于恢复更新的验证结果；
-                打开页面或完成网页验证后，后台仍须实际取文成功才能确认恢复。
+                此入口只打开微信读书官网。官网中的验证由官网完成，目前不会
+                自动传回本应用；官方网页可以继续阅读，本机更新仍已停止。
                 旧文章和图片已保留。
               </p>
+              {checked && (
+                <p className="text-warning-600">
+                  检查结果：本机仍未接通同一会话的验证接续，暂不能继续更新。
+                  本次检查只读取本机状态，没有重新取文或验证。
+                </p>
+              )}
               <div className="flex flex-wrap gap-3">
                 <a
                   href={notice.officialUrl}
@@ -57,7 +64,7 @@ export default function OwnerVerificationNotice() {
                   rel="noopener noreferrer"
                   className="text-primary underline"
                 >
-                  打开官方微信读书
+                  打开微信读书官网（不会回传）
                 </a>
                 <Link to="/accounts" className="text-primary underline">
                   查看已绑定账号
@@ -66,9 +73,12 @@ export default function OwnerVerificationNotice() {
                   type="button"
                   className="text-primary underline"
                   disabled={status.isFetching}
-                  onClick={() => void status.refetch()}
+                  onClick={async () => {
+                    await status.refetch();
+                    setChecked(true);
+                  }}
                 >
-                  查看本应用状态
+                  检查能否继续（只读）
                 </button>
               </div>
             </div>
