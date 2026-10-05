@@ -151,6 +151,10 @@ async function controlledRestart(options) {
     return result;
   };
   const sourceBefore = inspect(source, [
+    ...(options.mode === 'start' &&
+    manifest.startupInspection === 'schema-only-v1'
+      ? ['--schema-only']
+      : []),
     '--output',
     path.join(audit, 'source-before.json'),
   ]);
@@ -162,7 +166,7 @@ async function controlledRestart(options) {
     database = path.join(audit, 'rehearsal.db');
     fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
     port = options.port || (await unusedPort());
-  } else backup(source, 'before-stop');
+  } else if (options.mode === 'restart') backup(source, 'before-stop');
 
   const marker = (bundle) => {
     if (options.rehearsal)

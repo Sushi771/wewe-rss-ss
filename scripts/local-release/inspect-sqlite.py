@@ -17,7 +17,9 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def inspect(database, migrations, baseline=None, require_current=False):
+def inspect(database, migrations, baseline=None, require_current=False, schema_only=False):
+    if schema_only and baseline is not None:
+        raise ValueError('schema-only cannot replace a preservation baseline')
     database = database.resolve(strict=True)
     with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=10)) as connection:
         connection.execute("PRAGMA query_only=ON")
@@ -53,9 +55,12 @@ def inspect(database, migrations, baseline=None, require_current=False):
             if not set(protected).issubset(columns):
                 raise ValueError("已有列缺失: " + table)
             # 列名只允许来自 PRAGMA 或已确认存在的基线，不执行基线内任意 SQL。
-            selected = ",".join('"' + column.replace('"', '""') + '"' for column in protected)
-            rows = connection.execute(f'SELECT {selected} FROM "{table}" ORDER BY id').fetchall()
-            tables[table] = {"columns": protected, "rows": len(rows), "sha256": digest(rows)}
+            if schema_only:
+                tables[table] = {"columns": protected}
+            else:
+                selected = ",".join('"' + column.replace('"', '""') + '"' for column in protected)
+                rows = connection.execute(f'SELECT {selected} FROM "{table}" ORDER BY id').fetchall()
+                tables[table] = {"columns": protected, "rows": len(rows), "sha256": digest(rows)}
             if baseline and tables[table] != baseline["tables"][table]:
                 raise ValueError("迁移改变了已有字段: " + table)
             for column in NEW_COLUMNS[table]:
@@ -75,9 +80,10 @@ def main():
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--require-current", action="store_true")
+    parser.add_argument("--schema-only", action="store_true")
     args = parser.parse_args()
     baseline = json.loads(args.baseline.read_text(encoding="utf-8")) if args.baseline else None
-    result = inspect(args.database, args.migrations, baseline, args.require_current)
+    result = inspect(args.database, args.migrations, baseline, args.require_current, args.schema_only)
     if args.output:
         with args.output.open("x", encoding="utf-8") as stream:
             json.dump(result, stream, ensure_ascii=False, indent=2)

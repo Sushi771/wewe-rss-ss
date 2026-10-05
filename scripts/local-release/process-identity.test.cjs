@@ -29,6 +29,18 @@ test(
           process.execPath.toLowerCase(),
         );
         assert.ok(identity.startUtc && identity.commandLine);
+        const prior = process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
+        try {
+          process.env.LOCAL_RELEASE_FORCE_POWERSHELL = '1';
+          assert.deepEqual(
+            processIdentity('Snapshot', process.pid, port),
+            identity,
+          );
+        } finally {
+          if (prior === undefined)
+            delete process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
+          else process.env.LOCAL_RELEASE_FORCE_POWERSHELL = prior;
+        }
         const accepted = once(listener, 'connection');
         const client = net.connect(port, address);
         await once(client, 'connect');

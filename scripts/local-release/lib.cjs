@@ -50,7 +50,7 @@ function fingerprint(directory) {
     const target = path.join(directory, relative);
     if (kind === 'file') files[slash(relative)] = fileHash(target);
     else {
-      const resolved = fs.realpathSync(target);
+      const resolved = fs.realpathSync.native(target);
       if (!inside(directory, resolved))
         throw new Error(`产物链接指向目录外: ${relative}`);
       links[slash(relative)] = slash(path.relative(directory, resolved));
@@ -75,7 +75,7 @@ function releaseMetadata(directory) {
       stat.ctimeNs,
     ].map(String);
     if (stat.isSymbolicLink()) {
-      const resolved = fs.realpathSync(target);
+      const resolved = fs.realpathSync.native(target);
       if (!inside(directory, resolved))
         throw new Error('Release link escapes directory');
       entries[slash(relative)].push(slash(path.relative(directory, resolved)));

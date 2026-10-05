@@ -174,11 +174,13 @@ async function benchmark({
       'junction',
     );
   }
-  for (const file of ['lib.cjs', 'runtime.cjs']) {
+  for (const file of ['lib.cjs', 'runtime.cjs', 'inspect-sqlite.py']) {
     fs.copyFileSync(path.join(__dirname, file), path.join(target, file));
     old.files[file] = fileHash(path.join(target, file));
   }
   old.id = path.basename(target);
+  old.startupInspection =
+    old.schemaCompatibility === 'current' ? 'schema-only-v1' : 'full';
   fs.writeFileSync(
     path.join(target, 'release.json'),
     JSON.stringify(old, null, 2) + '\n',

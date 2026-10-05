@@ -22,6 +22,7 @@ function installDesktop({
   const icon = path.join(root, 'assets/wewe-rss.ico');
   for (const file of [entry, icon])
     if (!fs.statSync(file).isFile()) throw new Error('Missing launcher asset');
+  require('./identity-tool.cjs').identityTool();
   const data = Buffer.from(
     JSON.stringify({ root, entry, icon, testDesktop }),
   ).toString('base64');
