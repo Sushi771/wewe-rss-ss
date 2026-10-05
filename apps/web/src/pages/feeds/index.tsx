@@ -14,6 +14,7 @@ import {
   Input,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
+import { refreshFeedViews } from '@web/utils/refresh-feed-view';
 import { useMemo, useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -777,9 +778,11 @@ const Feeds = () => {
                           const mpId = currentMpInfo.id;
                           try {
                             const results = await refreshMpArticles({ mpId });
-                            await refetchFeedList();
-                            await queryUtils.article.list.reset();
-                            await queryUtils.article.summary.invalidate();
+                            await refreshFeedViews(
+                              refetchFeedList,
+                              () => queryUtils.article.list.reset(),
+                              () => queryUtils.article.summary.invalidate(),
+                            );
                             if (
                               results.length > 0 &&
                               results.every((r) => r.complete)
@@ -880,9 +883,11 @@ const Feeds = () => {
                       onPress={async () => {
                         try {
                           const results = await refreshMpArticles({});
-                          await refetchFeedList();
-                          await queryUtils.article.list.reset();
-                          await queryUtils.article.summary.invalidate();
+                          await refreshFeedViews(
+                            refetchFeedList,
+                            () => queryUtils.article.list.reset(),
+                            () => queryUtils.article.summary.invalidate(),
+                          );
                           for (const result of results) {
                             if ('id' in result && typeof result.id === 'string')
                               rememberUpdate(

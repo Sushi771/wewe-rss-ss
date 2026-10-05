@@ -1,4 +1,5 @@
 import { buildArticleMarkdown } from '../article-export';
+import { findArticleListRows } from '../article-list-page';
 import { INestApplication, Injectable, Logger } from '@nestjs/common';
 import { z } from 'zod';
 import {
@@ -873,7 +874,7 @@ export class TrpcRouter {
           ];
         }
 
-        const items = await this.prismaService.article.findMany({
+        const items = await findArticleListRows(this.prismaService, {
           orderBy: [
             {
               [input.sort || 'publishTime']: 'desc',
@@ -887,22 +888,6 @@ export class TrpcRouter {
                 id: cursor,
               }
             : undefined,
-          select: {
-            id: true,
-            mpId: true,
-            title: true,
-            picUrl: true,
-            publishTime: true,
-            sourceUrl: true,
-            lastBodyStatus: true,
-            verifiedSourceUrl: true,
-            lastBodyRetry: true,
-            contentHtml: true,
-            metrics: true,
-            readCount: true,
-            likeCount: true,
-            feed: true,
-          },
         });
         let nextCursor: typeof cursor | undefined = undefined;
         if (items.length > limit) {
@@ -914,9 +899,8 @@ export class TrpcRouter {
         }
 
         return {
-          items: items.map(({ contentHtml, ...item }) => ({
+          items: items.map((item) => ({
             ...item,
-            bodyCached: Boolean(contentHtml),
             bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
             bodyRetryResult: readBodyRetryResult(item.lastBodyRetry),
           })),

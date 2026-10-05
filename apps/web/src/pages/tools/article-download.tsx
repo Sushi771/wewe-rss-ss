@@ -540,7 +540,7 @@ export default function ArticleDownload() {
         <div className="mt-6" aria-live="polite">
           {busy && (
             <p role="status" className="text-default-500 text-sm">
-              请完成可能弹出的目录选择；正在准备本机保存。
+              请完成可能弹出的目录选择；正在处理本机操作。
             </p>
           )}
           {notice && (
