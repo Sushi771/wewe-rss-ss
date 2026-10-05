@@ -35,6 +35,9 @@ export default function ArticleDownload() {
   const [browserAvailable, setBrowserAvailable] = useState(false);
   const [browserTask, setBrowserTask] =
     useState<BrowserArticleTaskStatus | null>(null);
+  const [browserStatusUnreadable, setBrowserStatusUnreadable] = useState(false);
+  const [statusReadAttempt, setStatusReadAttempt] = useState(0);
+  const [statusReading, setStatusReading] = useState(false);
   const browserActive =
     !!browserTask &&
     ['waiting', 'claimed', 'ready', 'saving'].includes(browserTask.state);
@@ -100,6 +103,7 @@ export default function ArticleDownload() {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
+      setStatusReading(true);
       try {
         const status = browserArticleTaskStatus(
           await api(
@@ -114,18 +118,30 @@ export default function ArticleDownload() {
         setBrowserTask((current) =>
           mergeBrowserArticleTaskStatus(current, status),
         );
+        setBrowserStatusUnreadable(false);
         if (['waiting', 'claimed', 'saving'].includes(status.state))
           timer = setTimeout(() => void poll(), 1000);
       } catch (cause) {
         if (controller.signal.aborted) return;
-        setBrowserTask(null);
+        // A failed local status read does not cancel capture or discard its body.
+        // Keep the task locked until an explicit read establishes its state.
+        setBrowserStatusUnreadable(true);
         setError(cause instanceof Error ? cause.message : '任务状态读取失败。');
+      } finally {
+        if (!controller.signal.aborted) setStatusReading(false);
       }
     };
     void poll();
     return () => {
       controller.abort();
       clearTimeout(timer);
+    };
+  }, [api, browserTaskId, statusReadAttempt]);
+
+  useEffect(() => {
+    if (!browserTaskId) return;
+    return () => {
+      // Cancel only when leaving/replacing the task, never when retrying a read.
       void api('/browser-task/' + browserTaskId + '/cancel', {}).catch(
         () => {},
       );
@@ -202,6 +218,7 @@ export default function ArticleDownload() {
   const startBrowserTask = () =>
     void operate(async (signal) => {
       setBrowserTask(null);
+      setBrowserStatusUnreadable(false);
       const task = browserArticleTaskStatus(
         await api('/browser-task', { url: url.trim() }, signal),
       );
@@ -238,7 +255,16 @@ export default function ArticleDownload() {
               signal,
             ).catch(() => null),
           );
-          setBrowserTask(status);
+          if (status?.taskId === browserTaskId) {
+            setBrowserTask((current) =>
+              mergeBrowserArticleTaskStatus(current, status),
+            );
+            setBrowserStatusUnreadable(false);
+          } else {
+            // Save may already have committed. Read the same task before retrying
+            // a save instead of inferring failure or starting another capture.
+            setBrowserStatusUnreadable(true);
+          }
         }
       }
     });
@@ -331,6 +357,21 @@ export default function ArticleDownload() {
             >
               选择下载路径
             </Button>
+            {!settings && (
+              <Button
+                className="ml-2 mt-3"
+                size="sm"
+                type="button"
+                isDisabled={busy}
+                onPress={() =>
+                  void operate(async (signal) => {
+                    setSettings(await api('/settings', undefined, signal));
+                  })
+                }
+              >
+                重新读取保存设置
+              </Button>
+            )}
             <div className="mt-4">
               <Checkbox
                 isSelected={settings?.askEveryTime || false}
@@ -407,11 +448,31 @@ export default function ArticleDownload() {
             {browserTask.state === 'ready' && (
               <Button
                 className="mt-3"
-                isDisabled={busy}
+                isDisabled={busy || browserStatusUnreadable || statusReading}
                 onPress={saveBrowserTask}
               >
                 保存已接收的正文和图片
               </Button>
+            )}
+            {browserStatusUnreadable && browserActive && (
+              <div className="mt-3">
+                <p className="text-default-500 text-sm">
+                  本机任务状态暂未读到；任务仍保留，请先重新读取再保存。
+                </p>
+                <Button
+                  className="mt-2"
+                  type="button"
+                  isDisabled={busy || statusReading}
+                  onPress={() => {
+                    if (statusReading) return;
+                    setError('');
+                    setStatusReading(true);
+                    setStatusReadAttempt((attempt) => attempt + 1);
+                  }}
+                >
+                  重新读取本机任务状态
+                </Button>
+              </div>
             )}
             {browserActive && (
               <Button

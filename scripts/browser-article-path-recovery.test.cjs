@@ -1,6 +1,7 @@
 'use strict';
 // Compile the actual page with offline hooks/JSX/fetch facades. Effects do not
-// execute; this is application-handler regression, not real browser acceptance.
+// execute only when explicitly requested below, with controlled local timers;
+// this is application regression, not real browser acceptance.
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const fs = require('node:fs');
@@ -30,7 +31,14 @@ function compile(file, require, globals = {}) {
   );
   return exports;
 }
-function page({ phase = 'ready', busy = false, directoryReply } = {}) {
+function page({
+  phase = 'ready',
+  busy = false,
+  directoryReply,
+  settings = { directory: 'synthetic-old-path', askEveryTime: false },
+  effects = false,
+  fetchReply,
+} = {}) {
   const task = {
     taskId: '12345678-1234-1234-1234-123456789012',
     expiresAt: new Date(Date.now() + 300000).toISOString(),
@@ -39,7 +47,7 @@ function page({ phase = 'ready', busy = false, directoryReply } = {}) {
   };
   const state = [
     'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv',
-    { directory: 'synthetic-old-path', askEveryTime: false },
+    settings,
     busy,
     '',
     null,
@@ -49,14 +57,22 @@ function page({ phase = 'ready', busy = false, directoryReply } = {}) {
     { ...task },
   ];
   const refs = [],
-    calls = [];
+    calls = [],
+    callbacks = [],
+    effectSlots = [],
+    pendingEffects = new Map(),
+    timers = new Map();
   let cursor = 0,
     refCursor = 0,
+    callbackCursor = 0,
+    effectCursor = 0,
+    timerId = 0,
     backendPath = 'synthetic-old-path',
     backendTask = { ...task };
   const hooks = {
-    useState: () => {
+    useState: (initial) => {
       const i = cursor++;
+      if (i >= state.length) state[i] = initial;
       return [
         state[i],
         (next) => {
@@ -68,9 +84,25 @@ function page({ phase = 'ready', busy = false, directoryReply } = {}) {
       const i = refCursor++;
       return refs[i] || (refs[i] = { current: value });
     },
-    useCallback: (fn) => fn,
-    useEffect: () => {},
+    useCallback: (fn, deps) => {
+      const i = callbackCursor++;
+      if (!callbacks[i] || !sameDeps(callbacks[i].deps, deps))
+        callbacks[i] = { fn, deps };
+      return callbacks[i].fn;
+    },
+    useEffect: (fn, deps) => {
+      if (!effects) return;
+      const i = effectCursor++;
+      if (!effectSlots[i] || !sameDeps(effectSlots[i].deps, deps))
+        pendingEffects.set(i, () => {
+          effectSlots[i]?.cleanup?.();
+          effectSlots[i] = { deps, cleanup: fn() };
+        });
+    },
   };
+  function sameDeps(a, b) {
+    return a?.length === b?.length && a.every((v, i) => Object.is(v, b[i]));
+  }
   const shared = compile('packages/shared/src/browser-article-task.ts', () => {
     throw Error('unexpected shared dependency');
   });
@@ -94,6 +126,25 @@ function page({ phase = 'ready', busy = false, directoryReply } = {}) {
   };
   const fetch = async (url, options) => {
     calls.push({ url, method: options.method, body: options.body });
+    if (fetchReply) {
+      const reply = await fetchReply(url, options);
+      if (reply !== undefined) return reply;
+    }
+    if (url.endsWith('/settings'))
+      return {
+        ok: true,
+        json: async () => ({ ...settings }),
+      };
+    if (url.endsWith('/browser-task'))
+      return { ok: true, json: async () => ({ available: false }) };
+    if (url.endsWith('/cancel')) {
+      backendTask = {
+        ...backendTask,
+        state: 'cancelled',
+        code: 'TASK_CANCELLED',
+      };
+      return { ok: true, json: async () => ({ ...backendTask }) };
+    }
     if (url.endsWith('/directory')) {
       const selected = directoryReply
         ? await directoryReply()
@@ -139,10 +190,18 @@ function page({ phase = 'ready', busy = false, directoryReply } = {}) {
       if (!(name in modules)) throw Error('unexpected page dependency');
       return modules[name];
     },
-    { fetch, AbortController, setTimeout, clearTimeout },
+    {
+      fetch,
+      AbortController,
+      setTimeout: (fn, delay) => {
+        timers.set(++timerId, { fn, delay });
+        return timerId;
+      },
+      clearTimeout: (id) => timers.delete(id),
+    },
   ).default;
   const render = () => {
-    cursor = refCursor = 0;
+    cursor = refCursor = callbackCursor = effectCursor = 0;
     const nodes = [];
     const visit = (node) => {
       if (Array.isArray(node)) return node.forEach(visit);
@@ -162,6 +221,14 @@ function page({ phase = 'ready', busy = false, directoryReply } = {}) {
     calls,
     render,
     button,
+    runEffects: () => {
+      render();
+      const pending = [...pendingEffects.values()];
+      pendingEffects.clear();
+      pending.forEach((run) => run());
+    },
+    unmount: () => effectSlots.forEach((slot) => slot.cleanup?.()),
+    timers,
     cancel: () => {
       backendTask = {
         ...backendTask,
@@ -248,4 +315,221 @@ test('directory selection excludes concurrent actions and its late completion ca
   assert.equal(h.state[6], null);
   assert.equal(h.button('保存已接收的正文和图片'), undefined);
   assert.equal(h.calls.filter((c) => c.url.endsWith('/save')).length, 0);
+});
+
+test('a local poll failure retains the same task; explicit read recovery never cancels or reissues it', async () => {
+  let failRead = true;
+  let release;
+  const h = page({
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/12345678-1234-1234-1234-123456789012')) {
+        if (failRead) throw Error('synthetic local connection loss');
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      }
+    },
+  });
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[8].state, 'ready');
+  assert.equal(h.button('保存已接收的正文和图片').props.isDisabled, true);
+  assert.equal(
+    h.calls.some((c) => c.url.endsWith('/cancel')),
+    false,
+  );
+  failRead = false;
+  h.button('重新读取本机任务状态').props.onPress();
+  h.runEffects();
+  await flush();
+  assert.equal(h.button('保存已接收的正文和图片').props.isDisabled, true);
+  assert.equal(h.button('重新读取本机任务状态').props.isDisabled, true);
+  release({ ok: true, json: async () => ({ ...h.state[8] }) });
+  await flush();
+  assert.equal(h.button('保存已接收的正文和图片').props.isDisabled, false);
+  assert.equal(h.button('重新读取本机任务状态'), undefined);
+  assert.equal(
+    h.calls.some((c) => c.url.endsWith('/cancel')),
+    false,
+  );
+  assert.ok(h.calls.every((c) => c.method === 'GET'));
+  h.unmount();
+  await flush();
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/cancel')).length, 1);
+});
+
+test('a late recovered local poll cannot revive a cancelled task', async () => {
+  let release;
+  const h = page({
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/12345678-1234-1234-1234-123456789012'))
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+    },
+  });
+  h.runEffects();
+  await flush();
+  const ready = { ...h.state[8] };
+  h.button('取消接收任务').props.onPress();
+  await flush();
+  assert.equal(h.state[8].state, 'cancelled');
+  release({ ok: true, json: async () => ready });
+  await flush();
+  assert.equal(h.state[8].state, 'cancelled');
+  assert.equal(h.button('保存已接收的正文和图片'), undefined);
+  h.unmount();
+});
+
+test('a save with unreadable final status requires same-task read before another save', async () => {
+  let unreadable = true;
+  const h = page({
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/12345678-1234-1234-1234-123456789012') && unreadable)
+        throw Error('synthetic status loss after save');
+    },
+  });
+  h.button('保存已接收的正文和图片').props.onPress();
+  await flush();
+  assert.equal(h.state[8].state, 'saving');
+  assert.ok(h.button('重新读取本机任务状态'));
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/save')).length, 1);
+  assert.equal(
+    h.calls.some((c) => c.url.endsWith('/cancel')),
+    false,
+  );
+  unreadable = false;
+  h.button('重新读取本机任务状态').props.onPress();
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[8].state, 'ready');
+  h.button('选择下载路径').props.onPress();
+  await flush();
+  h.button('保存已接收的正文和图片').props.onPress();
+  await flush();
+  assert.equal(h.state[8].state, 'saved');
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/save')).length, 2);
+  assert.equal(
+    h.calls.some((c) => c.url.endsWith('/cancel')),
+    false,
+  );
+  h.unmount();
+});
+
+test('successful save followed by status loss is recovered as saved without another save or capture', async () => {
+  let unreadable = true;
+  const h = page({
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/12345678-1234-1234-1234-123456789012') && unreadable)
+        throw Error('synthetic status loss after committed save');
+    },
+  });
+  h.button('选择下载路径').props.onPress();
+  await flush();
+  h.button('保存已接收的正文和图片').props.onPress();
+  await flush();
+  assert.ok(h.state[6].markdownPath.endsWith('/正文.md'));
+  assert.equal(h.state[8].state, 'saving');
+  assert.equal(h.button('保存已接收的正文和图片'), undefined);
+  unreadable = false;
+  h.button('重新读取本机任务状态').props.onPress();
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[8].state, 'saved');
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/save')).length, 1);
+  assert.equal(
+    h.calls.some((c) => c.url.endsWith('/cancel')),
+    false,
+  );
+  h.unmount();
+});
+
+test('failed initial preferences read can recover locally without changing its remembered path or asking policy', async () => {
+  let failRead = true;
+  const remembered = {
+    directory: 'synthetic-remembered-path',
+    askEveryTime: true,
+  };
+  const h = page({
+    settings: null,
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/settings')) {
+        if (failRead) throw Error('synthetic settings connection loss');
+        return { ok: true, json: async () => ({ ...remembered }) };
+      }
+    },
+  });
+  h.runEffects();
+  await flush();
+  assert.equal(h.button('选择下载路径').props.isDisabled, true);
+  failRead = false;
+  h.button('重新读取保存设置').props.onPress();
+  await flush();
+  assert.deepEqual(h.state[1], remembered);
+  assert.equal(h.button('重新读取保存设置'), undefined);
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/settings')).length, 2);
+  assert.equal(
+    h.calls.some(
+      (c) => c.url.endsWith('/directory') || c.url.endsWith('/save'),
+    ),
+    false,
+  );
+  h.unmount();
+});
+
+test('failed asking-policy update rolls back the selection without losing the remembered directory', async () => {
+  const remembered = {
+    directory: 'synthetic-remembered-path',
+    askEveryTime: true,
+  };
+  const h = page({
+    phase: 'cancelled',
+    settings: remembered,
+    fetchReply: async (url) => {
+      if (url.endsWith('/settings'))
+        throw Error('synthetic persistence failure');
+    },
+  });
+  h.render()
+    .find((n) => n.type === 'Checkbox')
+    .props.onValueChange(false);
+  await flush();
+  assert.deepEqual(h.state[1], remembered);
+  assert.equal(h.state[2], false);
+  assert.equal(h.calls.length, 1);
+  assert.ok(h.calls[0].url.endsWith('/settings'));
+});
+
+test('local task expiry wins over a late successful status response', async () => {
+  let release;
+  const h = page({
+    phase: 'waiting',
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/12345678-1234-1234-1234-123456789012'))
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+    },
+  });
+  h.runEffects();
+  await flush();
+  const expiry = [...h.timers.values()].find((timer) => timer.delay > 10000);
+  assert.ok(expiry);
+  expiry.fn();
+  assert.equal(h.state[8].state, 'expired');
+  release({
+    ok: true,
+    json: async () => ({ ...h.state[8], state: 'ready', code: undefined }),
+  });
+  await flush();
+  assert.equal(h.state[8].state, 'expired');
+  assert.equal(h.button('保存已接收的正文和图片'), undefined);
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/save')).length, 0);
+  h.unmount();
 });
