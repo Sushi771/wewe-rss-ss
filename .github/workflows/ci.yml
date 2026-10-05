@@ -4,9 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, codex/manual-refresh-download-integration]
 
 jobs:
+  windows-process-identity:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test native loopback listener ownership and guarded stop
+        run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/launch.test.cjs
+
   lint-test:
     runs-on: ubuntu-latest
     steps:
@@ -33,8 +43,12 @@ jobs:
 
       - name: Type check Web
         run: pnpm --filter web build
+      - name: Test account modal eligibility and viewport CSS contract (no UI or HTTP)
+        run: node --test scripts/check-account-modal-logic.test.cjs
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
+      - name: Test single-article official verification UI offline
+        run: node --test scripts/acceptance-article-verification.test.cjs
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)
@@ -44,7 +58,7 @@ jobs:
       - name: Test native subscribed MP and review probes offline
         run: node --test scripts/research/probe-subscribed-mp-once.spec.cjs scripts/research/probe-native-review-owner07.spec.cjs
       - name: Test official album runtime scheduling policy
-        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs
+        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs
       - name: Test standalone dependency closure
         run: node --test scripts/local-release/dependency-closure.test.cjs
       - name: Build Server

@@ -8,6 +8,7 @@ import { resolvePublicArticle } from './public-album';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { FeedsService } from '../feeds/feeds.service';
+import { archiveProviderImages } from './archive-provider-images';
 
 jest.mock('./public-album', () => ({
   fetchPublicAlbums: jest.fn(),
@@ -533,5 +534,99 @@ describe('local collection with real SQLite migrations', () => {
         })
       ).sourceUrl,
     ).toBe(identity.url);
+  });
+  it('saves newly archived images into an existing body and remains duplicate-safe', async () => {
+    const identity = canonicalArticleUrl(url(99));
+    const original = await prisma.article.create({
+      data: {
+        id: 'legacy-image-save',
+        mpId,
+        title: 'saved-image',
+        picUrl: '',
+        publishTime: 1700000000,
+        sourceUrl: identity.url,
+        verifiedSourceUrl: identity.url,
+        contentHtml:
+          '<div class="rich_media_content"><p>saved annotation</p><img src="https://mmbiz.qpic.cn/a.jpg" alt="keep"></div>',
+        metrics: '{"read":{"value":20}}',
+        readCount: 20,
+        likeCount: 4,
+      },
+    });
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(png, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
+    try {
+      const page = await archiveProviderImages({
+        articles: [
+          {
+            ...identity,
+            url: identity.url,
+            mpId,
+            title: original.title,
+            publishTime: original.publishTime,
+            picUrl: '',
+            contentHtml:
+              '<div class="rich_media_content"><p>incoming text</p><img src="https://mmbiz.qpic.cn/a.jpg"></div>',
+          },
+        ],
+        coverage: 'recent-window',
+        upstreamCount: 1,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      });
+      expect(await (service as any).saveVerifiedSearchPage(mpId, page)).toEqual(
+        { created: 0, updated: 1 },
+      );
+      const saved = await prisma.article.findUniqueOrThrow({
+        where: { id: original.id },
+      });
+      expect(saved.contentHtml).toContain('saved annotation');
+      expect(saved.contentHtml).not.toContain('incoming text');
+      expect(saved.contentHtml).toContain('data:image/png;base64,');
+      expect(saved.contentHtml).toContain('alt="keep"');
+      for (const field of [
+        'id',
+        'mpId',
+        'title',
+        'publishTime',
+        'sourceUrl',
+        'verifiedSourceUrl',
+        'metrics',
+        'readCount',
+        'likeCount',
+        'createdAt',
+      ] as const)
+        expect(saved[field]).toEqual(original[field]);
+      expect(await (service as any).saveVerifiedSearchPage(mpId, page)).toEqual(
+        { created: 0, updated: 0 },
+      );
+      expect(
+        await prisma.article.findUniqueOrThrow({ where: { id: original.id } }),
+      ).toEqual(saved);
+      const conflicting = {
+        ...page,
+        articles: page.articles.map((a) => ({
+          ...a,
+          publishTime: a.publishTime + 38,
+        })),
+      };
+      await expect(
+        (service as any).saveVerifiedSearchPage(mpId, conflicting),
+      ).rejects.toThrow('SEARCH_REPLAY_SAVED_METADATA_CONFLICT');
+      expect(
+        await prisma.article.findUniqueOrThrow({ where: { id: original.id } }),
+      ).toEqual(saved);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 });

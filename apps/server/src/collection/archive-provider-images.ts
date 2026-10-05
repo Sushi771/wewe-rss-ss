@@ -1,6 +1,37 @@
 import { load } from 'cheerio';
 import { decodeInlineImage, fetchAllowedImage } from './image-fetch';
-import { ProviderPage } from './subscription-provider';
+import { ProviderArticle, ProviderPage } from './subscription-provider';
+
+// Only this successful archive may supply bytes for supplementing an existing
+// body. Keep provenance in memory rather than trusting adapter-supplied fields.
+const archivedSources = new WeakMap<ProviderArticle, Map<string, string>>();
+
+/** Preserve the saved body and replace only its exact matching remote images
+ * with bytes already fetched by the shared archive. No additional requests. */
+export function supplementSavedBodyImages(
+  savedHtml: string,
+  article: ProviderArticle,
+): string | undefined {
+  const sources = archivedSources.get(article);
+  if (!sources) return undefined;
+  const $ = load(savedHtml);
+  const body = $('.rich_media_content').first();
+  if (!body.length) return undefined;
+  let changed = false;
+  for (const image of body.find('img').toArray()) {
+    const el = $(image);
+    const src = el.attr('src') || '';
+    if (src.startsWith('data:image/')) continue;
+    const original = el.attr('data-src') || src;
+    const inline = sources.get(original);
+    if (!inline) throw new Error('SAVED_BODY_IMAGE_SOURCE_CONFLICT');
+    decodeInlineImage(inline);
+    el.attr('src', inline);
+    el.removeAttr('data-src');
+    changed = true;
+  }
+  return changed ? $.html(body) : undefined;
+}
 
 /** Store provider body images inside SQLite so restart and ZIP export do not depend on the CDN. */
 export async function archiveProviderImages(
@@ -58,10 +89,12 @@ export async function archiveProviderImages(
       bodyMissing++;
       articles.push({ ...article, contentHtml: null });
     } else {
-      articles.push({
+      const archived = {
         ...article,
         contentHtml: $.html($('.rich_media_content').first()),
-      });
+      };
+      archivedSources.set(archived, cached);
+      articles.push(archived);
     }
   }
   return { ...page, articles, imageBlocked, bodyMissing };
