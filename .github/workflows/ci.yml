@@ -47,6 +47,8 @@ jobs:
         run: node --test scripts/check-account-modal-logic.test.cjs
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
+      - name: Test single-article official verification UI offline
+        run: node --test scripts/acceptance-article-verification.test.cjs
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)

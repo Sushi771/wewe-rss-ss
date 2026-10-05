@@ -14,6 +14,8 @@
 
 ## 开发与交接
 
+2026-10-05 补充：[本次官方验证地址](SINGLE_ARTICLE_OFFICIAL_VERIFICATION.md)。原文验证重定向中，只有实际返回且通过检查的地址才提供用户点击入口；历史记录缺失地址时不补造、不重放。此入口不代表浏览器会话已接回后台取文。
+
 现有正文整理、图片处理和保存继续复用本项目已验证的实现。已核GitHub候选[wechat-article-exporter](https://github.com/wechat-article/wechat-article-exporter)：其普通单篇请求没有正常登录会话或验证后的取文衔接，不能据此解决当前验证跳转；其Markdown分支也不等于完整的本地图片保存。未导入它的解析、图片或保存代码，不新增导出模块。后续GitHub研究仅围绕实际缺口：正常授权及验证后可重复使用的取文通路。
 
 - 页面：`apps/web/src/pages/tools/article-download.tsx`；路由 `/dash/tools` 和 `/dash/tools/article-download`。

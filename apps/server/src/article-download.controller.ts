@@ -28,6 +28,10 @@ import {
 } from './article-download-cache';
 import { ProviderArticle } from './collection/subscription-provider';
 import { prepareVerifiedProviderDownload } from './article-verified-download';
+import {
+  ARTICLE_VERIFICATION_TTL_MS,
+  articleVerificationLocation,
+} from '../../../packages/shared/src/article-verification';
 
 @Controller('download')
 export class ArticleDownloadController {
@@ -86,7 +90,7 @@ export class ArticleDownloadController {
     return this.store;
   }
 
-  private failure(error: unknown, res: Res) {
+  private failure(error: unknown, res: Res, articleUrl?: unknown) {
     const diagnostic =
       error instanceof ArticleDownloadError
         ? error.diagnostic
@@ -94,10 +98,48 @@ export class ArticleDownloadController {
     this.logger.warn(
       JSON.stringify({ event: 'article-download-failed', ...diagnostic }),
     );
+    let verification;
+    if (
+      error instanceof ArticleDownloadError &&
+      diagnostic.code === 'VERIFICATION_REDIRECT' &&
+      diagnostic.stage === 'article'
+    ) {
+      try {
+        const requested = downloadArticleUrl(articleUrl);
+        const observed = error.officialVerification;
+        const checked = articleVerificationLocation(
+          observed?.status === 'available' && observed.articleUrl === requested
+            ? observed.url
+            : undefined,
+          requested,
+        );
+        verification =
+          observed?.status === 'unavailable' &&
+          observed.articleUrl === requested
+            ? {
+                status: observed.status,
+                articleUrl: requested,
+                reason: observed.reason,
+              }
+            : checked.status === 'available'
+              ? {
+                  ...checked,
+                  expiresAt: new Date(
+                    Date.now() + ARTICLE_VERIFICATION_TTL_MS,
+                  ).toISOString(),
+                }
+              : checked;
+      } catch {
+        // Never attach an unrelated verification URL to an invalid request.
+      }
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     return res
       .status(error instanceof ArticleDownloadError ? error.status : 500)
       .json({
         ...diagnostic,
+        ...(verification ? { verification } : {}),
         message:
           error instanceof ArticleDownloadError
             ? error.message
@@ -257,7 +299,7 @@ export class ArticleDownloadController {
             : 'remote',
       });
     } catch (error) {
-      return this.failure(error, res);
+      return this.failure(error, res, body?.url);
     } finally {
       if (locked) this.running = false;
     }

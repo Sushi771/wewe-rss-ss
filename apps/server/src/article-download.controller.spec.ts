@@ -10,6 +10,10 @@ import * as download from './article-download';
 import * as picker from './article-folder-picker';
 import { LocalArticleStore } from './article-local-save';
 import { PrismaService } from './prisma/prisma.service';
+import {
+  ARTICLE_VERIFICATION_TTL_MS,
+  articleVerificationLocation,
+} from '../../../packages/shared/src/article-verification';
 
 const url = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
 describe('local article HTTP save and native directory selection, no upstream or database', () => {
@@ -151,6 +155,116 @@ describe('local article HTTP save and native directory selection, no upstream or
     expect(response.body.code).toBe('CACHED_ARTICLE_UNAVAILABLE');
     expect(download.buildArticleDownload).not.toHaveBeenCalled();
   });
+  it('returns the actual safe verification Location only in the authenticated local error response, not logs or settings', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => {});
+    const location =
+      '/mp/wappoc_appmsgcaptcha?action=verify&r=12345&url=' +
+      encodeURIComponent(url);
+    const observed = articleVerificationLocation(location, url);
+    jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+      new download.ArticleDownloadError(
+        'official verification required',
+        422,
+        {
+          code: 'VERIFICATION_REDIRECT',
+          stage: 'article',
+          upstreamStatus: 302,
+          redirectKind: 'verification',
+        },
+        observed,
+      ),
+    );
+    const before = await readFile(settingsFile, 'utf8');
+    const response = await post('', { url }).expect(422);
+    expect(response.headers['cache-control']).toBe('private, no-store');
+    expect(response.headers['referrer-policy']).toBe('no-referrer');
+    expect(response.body.verification).toMatchObject({
+      status: 'available',
+      articleUrl: url,
+      url: 'https://mp.weixin.qq.com' + location,
+    });
+    const remaining =
+      Date.parse(response.body.verification.expiresAt) - Date.now();
+    expect(remaining).toBeGreaterThan(0);
+    expect(remaining).toBeLessThanOrEqual(ARTICLE_VERIFICATION_TTL_MS);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(
+      /wappoc_appmsgcaptcha|12345|https/,
+    );
+    expect(await readFile(settingsFile, 'utf8')).toBe(before);
+    expect(download.buildArticleDownload).toHaveBeenCalledTimes(1);
+    expect(picker.pickArticleDirectory).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    undefined,
+    '/mp/verify?ticket=fixture-sensitive',
+    'https://evil.invalid/mp/verify',
+  ])(
+    'withholds a missing, sensitive or unsafe Location and never substitutes a homepage: %s',
+    async (location) => {
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+      jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+        new download.ArticleDownloadError(
+          'verification required',
+          422,
+          {
+            code: 'VERIFICATION_REDIRECT',
+            stage: 'article',
+            upstreamStatus: 302,
+            redirectKind: 'verification',
+          },
+          articleVerificationLocation(location, url),
+        ),
+      );
+      const response = await post('', { url }).expect(422);
+      expect(response.body.verification.status).toBe('unavailable');
+      expect(response.body.verification.articleUrl).toBe(url);
+      expect(response.body.verification.url).toBeUndefined();
+      expect(JSON.stringify(response.body)).not.toMatch(
+        /fixture-sensitive|evil\.invalid|weread\.qq\.com/,
+      );
+      expect(download.buildArticleDownload).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not return another article verification context or an image redirect link', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    const other = url.replace('abcdef', 'zzzzzz');
+    jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+      new download.ArticleDownloadError(
+        'verification required',
+        422,
+        {
+          code: 'VERIFICATION_REDIRECT',
+          stage: 'article',
+          upstreamStatus: 302,
+          redirectKind: 'verification',
+        },
+        articleVerificationLocation('/mp/verify', other),
+      ),
+    );
+    const first = await post('', { url }).expect(422);
+    expect(first.body.verification.reason).toBe('missing-location');
+    expect(first.body.verification.url).toBeUndefined();
+    jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+      new download.ArticleDownloadError(
+        'image verification required',
+        422,
+        {
+          code: 'VERIFICATION_REDIRECT',
+          stage: 'image',
+          upstreamStatus: 302,
+          redirectKind: 'verification',
+        },
+        articleVerificationLocation('/mp/verify', url),
+      ),
+    );
+    const second = await post('', { url }).expect(422);
+    expect(second.body.verification).toBeUndefined();
+  });
+
   it('cancels directory selection without changing settings or starting a download', async () => {
     jest.mocked(picker.pickArticleDirectory).mockResolvedValueOnce(null);
     expect((await post('/directory').expect(200)).body).toEqual({
@@ -264,9 +378,17 @@ describe('local article HTTP save and native directory selection, no upstream or
     }).expect(422);
     expect(response.body.code).toBe('VERIFICATION_REDIRECT');
     expect(response.body.upstreamStatus).toBe(302);
-    expect(
-      JSON.stringify(warn.mock.calls) + JSON.stringify(response.body),
-    ).not.toMatch(/request-secret|fixture-access|mp\.weixin/);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(
+      /request-secret|fixture-access|mp\.weixin/,
+    );
+    expect(JSON.stringify(response.body)).not.toMatch(
+      /request-secret|fixture-access/,
+    );
+    expect(response.body.verification).toMatchObject({
+      status: 'unavailable',
+      articleUrl: url,
+      reason: 'missing-location',
+    });
     expect(response.body.saved).toBeUndefined();
   });
   it('does not unlock an in-flight valid save when a second request arrives', async () => {
