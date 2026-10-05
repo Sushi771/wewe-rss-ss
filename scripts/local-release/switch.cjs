@@ -3,9 +3,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const { once } = require('node:events');
-const { parseArgs } = require('node:util');
+const { parseArgs, promisify } = require('node:util');
 const {
   verifyRelease,
   writeJson,
@@ -70,6 +70,26 @@ function processIdentity(action, pid, port, expected) {
     'System32/WindowsPowerShell/v1.0/powershell.exe',
   );
   return JSON.parse(run(powershell, args, { env: cleanEnvironment() }));
+}
+
+function portOwnersAsync(port) {
+  // Only this read-only action overlaps database preparation. Identity/Stop
+  // keep their existing complete contract and the original PS fallback.
+  if (
+    process.platform !== 'win32' ||
+    process.env.LOCAL_RELEASE_FORCE_POWERSHELL === '1'
+  )
+    return Promise.resolve(processIdentity('Port', undefined, port));
+  const tool = require('./identity-tool.cjs').identityTool();
+  if (!tool) return Promise.resolve(processIdentity('Port', undefined, port));
+  // Fallback or helper-integrity failures throw before preparation is invoked.
+  return promisify(execFile)(tool, ['Port', '0', String(port), '', '', ''], {
+    windowsHide: true,
+    shell: false,
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    env: cleanEnvironment(),
+  }).then(({ stdout }) => JSON.parse(stdout));
 }
 
 function sameIdentity(actual, expected) {
@@ -550,6 +570,7 @@ if (require.main === module)
 module.exports = {
   controlledSwitch,
   processIdentity,
+  portOwnersAsync,
   sameIdentity,
   unusedPort,
   waitReady,
