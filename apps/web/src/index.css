@@ -222,6 +222,56 @@ select {
   white-space: nowrap;
 }
 
+/* NextUI's default overlay is z-50; the account toolbar is z-100.
+   Keep the entire connection dialog above it and scroll only its body. */
+.account-connection-backdrop {
+  z-index: 200;
+}
+
+.account-connection-overlay {
+  z-index: 201;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  padding: 16px;
+}
+
+.account-connection-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(32rem, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: 0;
+  overflow: hidden;
+}
+
+.account-connection-header,
+.account-connection-footer {
+  flex-shrink: 0;
+}
+
+.account-connection-header {
+  padding-right: 48px;
+}
+
+.account-connection-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.account-connection-footer {
+  flex-wrap: wrap;
+  border-top: 1px solid var(--mac-separator);
+}
+
+.account-connection-close {
+  z-index: 1;
+}
+
 @media (max-width: 1000px) {
   .account-header,
   .compact-row.account-row {
