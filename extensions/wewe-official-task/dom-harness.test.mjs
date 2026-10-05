@@ -3,6 +3,7 @@ import test from 'node:test';
 import { createRequire } from 'node:module';
 import { captureOfficialArticle } from './capture.mjs';
 import { projectOfficialArticle } from './projection.mjs';
+import { probeOfficialArticle } from './probe.mjs';
 
 // Synthetic DOM facade exercises the serialized functions, with no browser
 // install/CDP/platform call. This does not claim Edge permission/UI acceptance.
@@ -120,7 +121,9 @@ function setup(raw = html) {
   globalThis.document = {
     querySelector: () => null,
     querySelectorAll: (selector) =>
-      selector === '.wr_mp_reader' ? [{ __vue__: reader }] : [frame],
+      selector === '.wr_mp_reader'
+        ? [{ __vue__: reader, querySelectorAll: () => [frame] }]
+        : [frame],
   };
   globalThis.DOMParser = class {
     parseFromString(value) {
@@ -145,6 +148,32 @@ test('real serialized collector strips scripts/secrets/events and preserves imag
   );
   assert.match(projection.bodyFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(Object.keys(projection).length, 3);
+});
+
+test('probe title/source matches require nonempty business and DOM values', async () => {
+  setup();
+  const success = await probeOfficialArticle();
+  assert.equal(success.titleMatched, true);
+  assert.equal(success.publisherMatched, true);
+  assert.equal(success.bodyProjectionMatched, true);
+  assert.equal(success.canonicalPresent, true);
+  for (const htmlValue of [
+    html,
+    html.replace(/<h1[^>]*>.*?<\/h1>|<span[^>]*>.*?<\/span>/g, ''),
+  ]) {
+    const partial = setup(htmlValue);
+    partial.reader.currentChapter.review.mpInfo.title = '';
+    partial.reader.currentChapter.review.mpInfo.mp_name = undefined;
+    const result = await probeOfficialArticle();
+    assert.equal(result.titleMatched, false);
+    assert.equal(result.publisherMatched, false);
+    assert.equal(Object.hasOwn(result, 'title'), false);
+    assert.equal(Object.hasOwn(result, 'bookId'), false);
+  }
+  setup(html.replace(/<h1[^>]*>.*?<\/h1>|<span[^>]*>.*?<\/span>/g, ''));
+  const domMissing = await probeOfficialArticle();
+  assert.equal(domMissing.titleMatched, false);
+  assert.equal(domMissing.publisherMatched, false);
 });
 test('readiness / conflicting static identity / challenge refuse before return', async () => {
   const h = setup();

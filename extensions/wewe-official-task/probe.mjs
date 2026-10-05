@@ -32,6 +32,10 @@ export async function probeOfficialArticle() {
     typeof value === 'string'
       ? value.normalize('NFKC').replace(/\s+/gu, '')
       : '';
+  const title = normalize(info?.title);
+  const domTitle = normalize(doc.querySelector('#activity-name')?.textContent);
+  const publisher = normalize(info?.mp_name);
+  const domPublisher = normalize(doc.querySelector('#js_name')?.textContent);
   const fingerprint = async (source) => {
     const bodies = source.querySelectorAll('#js_content');
     if (bodies.length !== 1) return null;
@@ -112,12 +116,9 @@ export async function probeOfficialArticle() {
       chapter?.reviewId === bookId + '_' + info?.originalId,
     publisherBindingMatched:
       review?.belongBookId === bookId && bookId === 'MP_WXS_' + decodedBiz,
-    titleMatched:
-      normalize(info?.title) ===
-      normalize(doc.querySelector('#activity-name')?.textContent),
+    titleMatched: !!title && !!domTitle && title === domTitle,
     publisherMatched:
-      normalize(info?.mp_name) ===
-      normalize(doc.querySelector('#js_name')?.textContent),
+      !!publisher && !!domPublisher && publisher === domPublisher,
     creationTimePresent: /^\d{10}$/.test(
       scalar('ct') || scalar('create_time') || '',
     ),

@@ -4,7 +4,11 @@
 
 独立分支 `codex/edge-official-task` 基于已提交 `770025c`，原主区所有权及未提交代码不改。唯一运行 owner 另行管理组合部署，本文不把其产物或账号数据算作扩展验收。
 
-主区已审查并集成候选源码，复跑相关服务端 6 套／127 项测试、扩展 14 项离线测试及服务端构建通过。原候选提交 `3e7945336d06cef0aaa1315e245a409757b2064e` 的 CI `37268390039` 四项及扩展 CI `37268390186` 均成功。主应用入口和模块未注册候选路由，已运行产物未改变；主区准确提交的远端 CI 仍须单独核对。
+先前 0.1.0 候选集成复跑相关服务端 6 套／127 项测试、扩展 14 项离线测试及服务端构建通过；准确主区提交 `78ca3fddc8d233bf083072d5fcb415c1c4349db4` 的 CI `37268786106` 四项及扩展 CI `37268786117` 均成功。主应用入口和模块未注册候选路由，已运行产物未改变。0.1.1 的相关离线测试与远端 CI 分别核对，不沿用此前结果。
+
+0.1.1 后续授权与改进：用户已确认安装与一次 MAIN 只读核验，实际手动安装仍待实施；扩展管理内部页的 CUA URL 安全拒绝已停止，没有绕过。本次改进只做离线开发，不安装、不运行新的实站 probe、不扩大权限。popup 以可选中的纯文本展示白名单布尔和有界计数；明确区分 false 与 missing/早退“未核实”，不输出原值或指纹。标题/来源匹配须两侧正规化文本均非空；DOM 与已返回正文一致仍不证明上游全篇完整性，图片显示加载不证明原始字节或完整保存。0.1.1 审查 ZIP 仍为 9 个根文件，测试不打包，0.1.0 ZIP 原样保留。
+
+主区复跑 0.1.1 的 23 项扩展离线测试全部通过，覆盖一次 MAIN 调用、零网络和权限动作、早退未知字段、空标题/来源，以及摘要不输出原值或哈希。安装后的真实 Edge 弹窗视觉、实站组件关联及全文/图片能力仍未验收。
 
 ## 成熟模式、许可与依赖
 
@@ -66,9 +70,9 @@ MAIN 世界由页面控制，业务投影不能作为认证签名。服务端仍
 
 ## 安装与集成步骤（本轮未执行）
 
-用户另行同意安装/开发者模式后，按 [Microsoft Edge 官方本地加载说明](https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading) 在扩展管理页开启 Developer mode，Load unpacked 选择 `extensions/wewe-official-task`，不需要安装浏览器或发布商店。此候选仍未配置，popup 不请求 optional 权限。
+按用户已确认的安装与一次只读核验范围，用户方便时可按 [Microsoft Edge 官方本地加载说明](https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading) 在扩展管理页开启 Developer mode，Load unpacked 选择经过核验的 0.1.1 解包目录，不需要安装浏览器或发布商店。本次开发未执行安装或实站核验，此候选仍未配置，popup 不请求 optional 权限。
 
-配对/持久访问须再确认：用户审核实际 extension ID 和权限；owner 使用私有配置生成32字节随机本机 pairing key，锁定 `chrome-extension://实际ID` 和精确回环端口，不能提交密钥。先点击 popup 的“只读核验当前文章关联（不回送）”按钮验证 MAIN-world 的只读 probe；该按钮不需 loopback/CDN 权限，只显示是否全部核实，不返回内容/凭据。工具或平台拒绝立即停；没有理由重新登录/验证码或重复失败请求。optional host 权限需受审的显式用户操作，当前候选没有此权限申请入口。
+配对/持久访问须再确认：用户审核实际 extension ID 和权限；owner 使用私有配置生成32字节随机本机 pairing key，锁定 `chrome-extension://实际ID` 和精确回环端口，不能提交密钥。按单次授权点击 popup 的“只读核验当前文章关联（不回送）”按钮验证 MAIN-world 的只读 probe；该按钮不需 loopback/CDN 权限。0.1.1 摘要列出组件/iframe、身份字段与业务关联、标题/来源匹配、静态身份/发布时间/canonical 存在性、DOM/raw 指纹存在与一致性，以及图片类别/显示加载计数；不显示 ID/URL/标题原值/HTML/正文/hash/认证信息。所有未返回或非法类型均保留“未核实”，无自动重试；可选中摘要由用户反馈。canonical 仅显示字段存在，不称有效；全篇完整性固定未证明，原始图片字节/完整保存本轮未验证。工具或平台拒绝立即停；不重新登录/验证码或重复失败请求。optional host 权限需受审的显式用户操作，当前候选没有此权限申请入口。
 
 通过真实验收后，owner 可将 `BrowserTaskController` 注册到 AppModule，并以 `BrowserTaskBroker` 私有 `useFactory` 提供配置；保留 `privateAccessGuard`、独立 strict CORS、原请求授权及限流。现有 main.ts 全局 JSON10MB 比适配上限小。新增 `browserTaskBodyParser` 必须仅挂到 `/browser-task` 且在原全局parser之前，先loopback/Host/Origin/配对鉴权再缓冲：complete35,000,000字节，claim/cancel4KB，不能全应用放大。Nest 的自动解析也须排在这个门禁之后。当前 app.module.ts/main.ts 未修改。
 
