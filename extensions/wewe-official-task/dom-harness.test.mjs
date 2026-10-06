@@ -175,6 +175,57 @@ test('probe title/source matches require nonempty business and DOM values', asyn
   assert.equal(domMissing.titleMatched, false);
   assert.equal(domMissing.publisherMatched, false);
 });
+
+test('probe first gate separates absent Vue/name from mismatch without business values or tree reads', async () => {
+  setup();
+  const root = {};
+  globalThis.document.querySelectorAll = () => [root];
+  const absent = await probeOfficialArticle();
+  assert.equal(absent.vuePropertyPresent, false);
+  assert.equal(absent.vueValuePresent, false);
+  assert.equal(absent.namePresent, false);
+  assert.equal(Object.hasOwn(absent, 'componentMatched'), false);
+  root.__vue__ = null;
+  const emptyInstance = await probeOfficialArticle();
+  assert.equal(emptyInstance.vuePropertyPresent, true);
+  assert.equal(emptyInstance.vueValuePresent, false);
+  const reader = {};
+  root.__vue__ = reader;
+  for (const field of [
+    'bookInfo',
+    'currentChapter',
+    'mpRawData',
+    '$store',
+    'user',
+    'token',
+    'envConfig',
+    '$children',
+    '$parent',
+  ])
+    Object.defineProperty(reader, field, {
+      get() {
+        throw new Error('NO_VALUE_OR_TREE_READ');
+      },
+    });
+  const anonymous = await probeOfficialArticle();
+  assert.equal(anonymous.vueValuePresent, true);
+  assert.equal(anonymous.optionsPresent, false);
+  assert.equal(Object.hasOwn(anonymous, 'componentMatched'), false);
+  assert.equal(anonymous.displayedBookFieldDefined, true);
+  assert.equal(anonymous.displayedChapterFieldDefined, true);
+  assert.equal(anonymous.displayedBodyFieldDefined, true);
+  reader.$options = {};
+  const nameless = await probeOfficialArticle();
+  assert.equal(nameless.optionsPresent, true);
+  assert.equal(nameless.namePresent, false);
+  assert.equal(Object.hasOwn(nameless, 'componentMatched'), false);
+  reader.$options = { name: 'SyntheticOtherComponent' };
+  const mismatch = await probeOfficialArticle();
+  assert.equal(mismatch.namePresent, true);
+  assert.equal(mismatch.componentMatched, false);
+  assert.ok(!JSON.stringify(mismatch).includes('SyntheticOtherComponent'));
+  assert.equal(Object.hasOwn(mismatch, 'rawBody'), false);
+});
 test('readiness / conflicting static identity / challenge refuse before return', async () => {
   const h = setup();
   h.reader.showError = true;

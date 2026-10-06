@@ -12,18 +12,50 @@ export async function probeOfficialArticle() {
   )
     return { supported: false, rootCount: roots.length };
   const reader = roots[0].__vue__;
-  if (reader?.$options?.name !== 'MpReader')
-    return { supported: false, componentMatched: false };
+  const instancePresent =
+    !!reader && ['object', 'function'].includes(typeof reader);
+  const options = instancePresent ? reader.$options : undefined;
+  const namePresent =
+    typeof options?.name === 'string' && options.name.length > 0;
+  // The old single false conflated a missing expando/options/name with a real
+  // name mismatch. Do not enumerate component/state or read business values
+  // here: these three property-existence checks use only the audited keys.
+  const componentDiagnostics = {
+    vuePropertyPresent: '__vue__' in roots[0],
+    vueValuePresent: instancePresent,
+    optionsPresent: !!options && typeof options === 'object',
+    namePresent,
+    ...(instancePresent
+      ? {
+          displayedBookFieldDefined: 'bookInfo' in reader,
+          displayedChapterFieldDefined: 'currentChapter' in reader,
+          displayedBodyFieldDefined: 'mpRawData' in reader,
+        }
+      : {}),
+  };
+  if (!namePresent || options.name !== 'MpReader')
+    return {
+      supported: false,
+      ...componentDiagnostics,
+      ...(namePresent ? { componentMatched: false } : {}),
+    };
   const frames = roots[0].querySelectorAll('iframe.mp_i_frame[srcdoc]');
   if (frames.length !== 1)
     return {
       supported: false,
+      ...componentDiagnostics,
       componentMatched: true,
       frameCount: frames.length,
     };
   const frame = frames[0];
   const doc = frame.contentDocument;
-  if (!doc) return { supported: false, frameReadable: false };
+  if (!doc)
+    return {
+      supported: false,
+      ...componentDiagnostics,
+      componentMatched: true,
+      frameReadable: false,
+    };
   const bookId = reader.bookInfo?.bookId;
   const chapter = reader.currentChapter;
   const review = chapter?.review;
@@ -106,6 +138,7 @@ export async function probeOfficialArticle() {
   }
   return {
     supported: true,
+    ...componentDiagnostics,
     componentMatched: true,
     frameReadable: true,
     bookIdPresent: /^MP_WXS_\d{5,15}$/.test(bookId || ''),

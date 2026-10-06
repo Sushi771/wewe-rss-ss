@@ -52,8 +52,11 @@ export function formatProbeSummary(result) {
       ? `DOM与已返回正文${value.bodyProjectionMatched ? '一致' : '不一致'}`
       : 'DOM与已返回正文：未核实';
   return [
-    '只读核验摘要（0.1.1；不回送）',
+    '只读核验摘要（0.1.2；不回送）',
     `当前上下文契约：${flag('supported', '满足', '尚未满足')}`,
+    `根Vue属性：${flag('vuePropertyPresent', '存在', '不存在')}；实例值：${flag('vueValuePresent', '存在', '不存在')}`,
+    `组件选项：${flag('optionsPresent', '存在', '不存在')}；名称字段：${flag('namePresent', '存在', '不存在')}`,
+    `显示业务字段定义（号/章/正文）：${flag('displayedBookFieldDefined')}/${flag('displayedChapterFieldDefined')}/${flag('displayedBodyFieldDefined')}（只查属性是否定义，不读值）`,
     `组件匹配：${flag('componentMatched', '匹配', '未匹配')}；iframe可读：${flag('frameReadable')}`,
     ...(countValue(value, 'rootCount') !== undefined ||
     countValue(value, 'frameCount') !== undefined
