@@ -50,7 +50,7 @@ describe('short-lived official article task', () => {
     });
     brokers.push(b);
     expect(() => b.issue({ url: short })).toThrow('TARGET_MISMATCH');
-    const task = b.issue({ url });
+    const task = b.issue({ url }, process.cwd());
     const claim = b.claim(task.taskId, binding);
     expect(claim).toMatchObject({
       contentMode: 'confirmed-dom',

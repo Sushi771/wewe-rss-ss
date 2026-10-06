@@ -7,6 +7,7 @@ type Record = {
   owner: string;
   url: string;
   article?: ProviderArticle;
+  destination?: string;
   timer: ReturnType<typeof setTimeout>;
 };
 
@@ -24,7 +25,10 @@ export class BrowserArticleTasks {
       refreshCode: 'DIRECTORY_ROUTE_UNVERIFIED' as const,
     };
   }
-  issue(url: string, owner: string) {
+  requiresDisclosure() {
+    return this.broker.requiresDisclosure();
+  }
+  issue(url: string, owner: string, destination?: string) {
     this.prune();
     if (
       this.records.size >= 32 ||
@@ -33,7 +37,7 @@ export class BrowserArticleTasks {
       ).length >= 4
     )
       throw new BrowserTaskError('TASK_CAPACITY', 409);
-    const issued = this.broker.issue({ url });
+    const issued = this.broker.issue({ url }, destination);
     const record: Record = {
       status: {
         taskId: issued.taskId,
@@ -42,6 +46,7 @@ export class BrowserArticleTasks {
       },
       owner,
       url,
+      ...(destination ? { destination } : {}),
       timer: setTimeout(
         () => this.expire(record),
         Date.parse(issued.expiresAt) - Date.now(),
@@ -126,7 +131,11 @@ export class BrowserArticleTasks {
     record.status.state = 'saving';
     delete record.status.code;
     clearTimeout(record.timer);
-    return { url: record.url, article: record.article };
+    return {
+      url: record.url,
+      article: record.article,
+      ...(record.destination ? { destination: record.destination } : {}),
+    };
   }
   saved(taskId: unknown, owner: string) {
     this.finish(this.get(taskId, owner), 'saved');

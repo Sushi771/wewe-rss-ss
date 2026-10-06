@@ -1,4 +1,44 @@
 import { browserBodyFingerprint } from '../src/browser-task';
+import { randomBytes } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
+
+/** Actual valid PNG with incompressible synthetic RGB bytes, under 10MB;
+ * its JSON data URI crosses the original application's 10MiB parser limit. */
+export function largeSyntheticPng() {
+  const width = 2100,
+    height = 1300,
+    row = width * 3 + 1;
+  const pixels = randomBytes(row * height);
+  for (let y = 0; y < height; y++) pixels[y * row] = 0;
+  const crc = (bytes: Buffer) => {
+    let value = 0xffffffff;
+    for (const byte of bytes) {
+      value ^= byte;
+      for (let i = 0; i < 8; i++)
+        value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
+    }
+    return (value ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (name: string, data: Buffer) => {
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(data.length);
+    const content = Buffer.concat([Buffer.from(name), data]);
+    const checksum = Buffer.alloc(4);
+    checksum.writeUInt32BE(crc(content));
+    return Buffer.concat([header, content, checksum]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  return Buffer.concat([
+    Buffer.from('89504e470d0a1a0a', 'hex'),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(pixels)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
 export const short = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
 export const png =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';

@@ -82,8 +82,21 @@ function harness({
         url.endsWith('claim')
           ? {
               nonce: 'n'.repeat(43),
+              expiresAt: new Date(Date.now() + 300000).toISOString(),
               ...(manual
-                ? { contentMode: 'confirmed-dom', confirmedImageCount: 1 }
+                ? {
+                    contentMode: 'confirmed-dom',
+                    confirmedImageCount: 1,
+                    disclosure: {
+                      title: 'Synthetic article',
+                      publisher: 'Synthetic publisher',
+                      originalUrl:
+                        'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcd',
+                      publishTime: 1700000000,
+                      imageCount: 1,
+                      destination: '/tmp/fixture-notes',
+                    },
+                  }
                 : {}),
             }
           : { accepted: true },
@@ -95,7 +108,7 @@ function harness({
     calls,
     chrome,
     fetch,
-    base: 'http://127.0.0.1:11207/',
+    base: 'http://127.0.0.1:4000/',
     key: 'k'.repeat(43),
     taskId,
   };
@@ -117,7 +130,7 @@ test('manifest grants only click-scoped reads; host permissions remain optional'
 test('one clicked task claims before reads and returns actual inline bytes', async () => {
   const h = harness();
   assert.deepEqual(await runTask(h), { accepted: true });
-  assert.equal(h.calls[0].url, 'http://127.0.0.1:11207/browser-task/claim');
+  assert.equal(h.calls[0].url, 'http://127.0.0.1:4000/browser-task/claim');
   assert.deepEqual(
     h.calls.filter((c) => c.kind === 'script').map((c) => c.world),
     ['MAIN', 'ISOLATED', 'MAIN', 'MAIN'],

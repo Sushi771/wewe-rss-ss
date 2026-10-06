@@ -45,7 +45,8 @@ export class ArticleDownloadController implements OnModuleDestroy {
     @Optional() private readonly prisma?: PrismaService,
     @Optional() browserBroker?: BrowserTaskBroker,
   ) {
-    // No AppModule registration or environment auto-enable. Production stays disabled.
+    // Default AppModule supplies no broker. An explicitly approved short-lived
+    // opt-in root supplies the same configured broker to both controllers.
     this.browserTasks = new BrowserArticleTasks(
       browserBroker || new BrowserTaskBroker(),
     );
@@ -270,7 +271,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
     return res.json(this.browserTasks.capability());
   }
   @Post('article/browser-task')
-  browserTaskIssue(
+  async browserTaskIssue(
     @Body() body: { url?: unknown },
     @Request() req: Req,
     @Response() res: Res,
@@ -296,6 +297,9 @@ export class ArticleDownloadController implements OnModuleDestroy {
           this.browserTasks.issue(
             downloadArticleUrl(body.url),
             this.taskOwner(req),
+            this.browserTasks.requiresDisclosure()
+              ? (await this.localStore().read()).directory
+              : undefined,
           ),
         );
     } catch (error) {
@@ -361,6 +365,11 @@ export class ArticleDownloadController implements OnModuleDestroy {
         throw new BrowserTaskError('INPUT_SCHEMA', 400);
       const verified = this.browserTasks.beginSave(taskId, owner);
       began = true;
+      if (
+        verified.destination &&
+        (await this.localStore().read()).directory !== verified.destination
+      )
+        throw new BrowserTaskError('SAVE_DIRECTORY_CHANGED', 409);
       // Current request rechecks auth, Origin, local save lock and directory grant.
       // The app cannot submit HTML/Provider/URL or spoof the extension's completion.
       await this.saveVerifiedArticle(

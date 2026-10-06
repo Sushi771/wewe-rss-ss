@@ -19,6 +19,7 @@ import {
 } from './collection/subscription-provider';
 import { canonicalArticleUrl } from './collection/collection-format';
 import { privateOnlineMode } from './private-access';
+import { isAbsolute } from 'node:path';
 import {
   ConfirmedDomArticle,
   verifyConfirmedDomArticle,
@@ -188,6 +189,7 @@ type Pending = {
   expires: number;
   binding?: BrowserBinding;
   nonce?: string;
+  destination?: string;
   resolve: (article: ProviderArticle) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -201,6 +203,10 @@ export type BrowserTaskConfiguration = {
   localOrigin?: string;
   /** Internal owner confirmation, scoped to ONE task. No automatic directory. */
   confirmedDomArticle?: Omit<ConfirmedDomArticle, 'pageUrl'>;
+  /** Explicit short-lived opt-in lease; not renewed by task activity. */
+  expiresAt?: number;
+  /** Internal opt-in file consumption; never accepted from HTTP input. */
+  consumeScope?: () => void;
 };
 
 /** In-memory, one-shot tasks; restart revokes every task/nonce. No production
@@ -228,6 +234,11 @@ export class BrowserTaskBroker {
     if (privateOnlineMode()) fail('LOCAL_ONLY', 403);
     if (!this.config.enabled) fail('BROWSER_TASK_DISABLED', 409);
     if (!this.config.routeVerified) fail('LIVE_ROUTE_UNVERIFIED', 409);
+    if (
+      this.config.expiresAt !== undefined &&
+      Date.now() >= this.config.expiresAt
+    )
+      fail('OPT_IN_EXPIRED', 410);
     if (
       !/^[A-Za-z0-9_-]{43}$/.test(this.config.pairingKey || '') ||
       !/^chrome-extension:\/\/[a-p]{32}$/.test(
@@ -289,7 +300,10 @@ export class BrowserTaskBroker {
    * Use result only with original request/res in saveVerifiedArticle, or with
    * the existing refresh transaction after all selected article tasks succeed.
    */
-  issue(target: BrowserTaskTarget) {
+  requiresDisclosure() {
+    return !!this.config.confirmedDomArticle;
+  }
+  issue(target: BrowserTaskTarget, destination?: string) {
     this.available();
     if (
       !target ||
@@ -323,8 +337,20 @@ export class BrowserTaskBroker {
     )
       fail('TARGET_INVALID');
     if (this.tasks.size >= 4) fail('TASK_CAPACITY', 409);
+    if (
+      this.config.confirmedDomArticle &&
+      (!destination ||
+        !isAbsolute(destination) ||
+        destination.length > 4096 ||
+        /[\x00-\x1f\x7f]/.test(destination))
+    )
+      fail('SAVE_DESTINATION_REQUIRED');
+    this.config.consumeScope?.();
     const taskId = randomUUID();
-    const expires = Date.now() + BROWSER_TASK_TTL;
+    const expires = Math.min(
+      Date.now() + BROWSER_TASK_TTL,
+      this.config.expiresAt ?? Infinity,
+    );
     let resolve!: (article: ProviderArticle) => void;
     let reject!: (error: Error) => void;
     const result = new Promise<ProviderArticle>((yes, no) => {
@@ -338,6 +364,7 @@ export class BrowserTaskBroker {
     this.tasks.set(taskId, {
       target: { ...target, url },
       expires,
+      ...(destination ? { destination } : {}),
       resolve,
       reject,
       timer,
@@ -384,6 +411,14 @@ export class BrowserTaskBroker {
         ? {
             contentMode: 'confirmed-dom',
             confirmedImageCount: this.config.confirmedDomArticle.imageCount,
+            disclosure: {
+              title: this.config.confirmedDomArticle.title,
+              publisher: this.config.confirmedDomArticle.publisher,
+              originalUrl: this.config.confirmedDomArticle.originalUrl,
+              publishTime: this.config.confirmedDomArticle.publishTime,
+              imageCount: this.config.confirmedDomArticle.imageCount,
+              destination: task.destination,
+            },
           }
         : {}),
     };

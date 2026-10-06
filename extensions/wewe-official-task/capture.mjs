@@ -5,6 +5,7 @@
 export async function captureOfficialArticle({
   candidateOnly = false,
   confirmedImageCount,
+  expectedArticle,
 } = {}) {
   const fail = (code) => {
     throw new Error(code);
@@ -195,6 +196,7 @@ export async function captureOfficialArticle({
     for (const key of ['__biz', 'mid', 'idx', 'sn'])
       if (url.searchParams.has(key))
         comparison.searchParams.set(key, url.searchParams.get(key));
+    comparison.searchParams.sort();
     return {
       provided: url.toString(),
       comparison: comparison.toString(),
@@ -214,6 +216,23 @@ export async function captureOfficialArticle({
       !(scalars.ct || scalars.create_time))
   )
     fail('IDENTITY_UNAVAILABLE');
+  if (expectedArticle) {
+    const expected = new URL(expectedArticle.originalUrl);
+    expected.searchParams.delete('chksm');
+    expected.hash = '';
+    expected.searchParams.sort();
+    const normalize = (value) =>
+      value.normalize('NFKC').replace(/\s+/g, ' ').trim();
+    if (
+      !links[0]?.matched ||
+      links[0].comparison !== expected.toString() ||
+      normalize(title || '') !== normalize(expectedArticle.title) ||
+      normalize(publisher || '') !== normalize(expectedArticle.publisher) ||
+      (scalars.ct || scalars.create_time) !==
+        String(expectedArticle.publishTime)
+    )
+      fail('ARTICLE_CHANGED');
+  }
   const copy = body.cloneNode(true);
   copy
     .querySelectorAll(

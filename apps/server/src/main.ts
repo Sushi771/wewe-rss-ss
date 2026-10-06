@@ -1,5 +1,4 @@
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
 import { TrpcRouter } from '@server/trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
@@ -8,6 +7,11 @@ import { ConfigurationType } from './configuration';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import { assertPrivateConfig, privateAccessGuard } from './private-access';
+import {
+  readBrowserTaskOptIn,
+  browserTaskApplication,
+  mountBrowserTaskTransport,
+} from './browser-task.opt-in';
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -26,13 +30,18 @@ console.log('appVersion: v' + appVersion);
 
 async function bootstrap() {
   assertPrivateConfig();
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const browserOptIn = readBrowserTaskOptIn();
+  const app = await NestFactory.create<NestExpressApplication>(
+    browserTaskApplication(browserOptIn),
+    browserOptIn ? { bodyParser: false } : {},
+  );
   const configService = app.get(ConfigService);
 
   const { host, isProd, port } =
     configService.get<ConfigurationType['server']>('server')!;
 
   app.use(privateAccessGuard);
+  mountBrowserTaskTransport(app, { host, port }, browserOptIn);
   if (process.env.WEWE_ACCEPTANCE_MODE === '1')
     app.use((req, res, next) => {
       res.setHeader(

@@ -464,3 +464,50 @@ test('only explicit one-article image confirmation omits sourceless nodes; lazy 
     /MANUAL_IMAGE_COVERAGE/,
   );
 });
+
+test('server disclosure binds actual serialized collector before image bytes, independent of URL parameter order', async () => {
+  const originalUrl =
+    'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=2247000001&idx=1&sn=abcd';
+  const raw = html.replace(
+    /<meta[^>]*>/,
+    '<meta property="og:url" content="' + originalUrl + '&amp;chksm=abcd#rd">',
+  );
+  const h = setup(raw);
+  const expectedArticle = {
+    originalUrl: originalUrl.replace(
+      'mid=2247000001&idx=1',
+      'idx=1&mid=2247000001',
+    ),
+    title: h.doc.querySelector('#activity-name').textContent,
+    publisher: h.doc.querySelector('#js_name').textContent,
+    publishTime: 1700000000,
+  };
+  assert.equal(
+    (await captureOfficialArticle({ confirmedImageCount: 1, expectedArticle }))
+      .images[0].inline,
+    'data:image/png;base64,' + png,
+  );
+  for (const patch of [
+    { title: 'changed' },
+    { publisher: 'changed' },
+    { publishTime: 1700000001 },
+    { originalUrl: originalUrl.replace('2247000001', '2247000002') },
+  ]) {
+    setup(raw);
+    const clone = Element.prototype.cloneNode;
+    Element.prototype.cloneNode = () => {
+      throw new Error('BODY_MUST_NOT_BE_COPIED');
+    };
+    try {
+      await assert.rejects(
+        captureOfficialArticle({
+          confirmedImageCount: 1,
+          expectedArticle: { ...expectedArticle, ...patch },
+        }),
+        /ARTICLE_CHANGED/,
+      );
+    } finally {
+      Element.prototype.cloneNode = clone;
+    }
+  }
+});
