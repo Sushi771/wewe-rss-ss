@@ -279,3 +279,122 @@ test('same-origin existing Blob is read as bounded original bytes', async () => 
     globalThis.FileReader = originalReader;
   }
 });
+
+test('DOM-only candidate reads the evidenced class/srcdoc frame with no Vue or network', async () => {
+  const h = setup(
+    html.replace(
+      'data:image/png;base64,' + png,
+      'blob:https://weread.qq.com/offline',
+    ),
+  );
+  h.frame.id = '';
+  h.frame.className = 'mp_i_frame fontLevel2';
+  const selectors = [];
+  globalThis.document.querySelectorAll = (selector) => {
+    selectors.push(selector);
+    assert.equal(selector, 'iframe.mp_i_frame[srcdoc]');
+    return [h.frame];
+  };
+  Object.defineProperty(h.frame, '__vue__', {
+    get() {
+      throw new Error('NO_VUE_READ');
+    },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => {
+    throw new Error('NO_NETWORK_OR_BLOB_READ');
+  };
+  try {
+    const result = await captureOfficialArticle({ candidateOnly: true });
+    assert.equal(result.candidateOnly, true);
+    assert.equal(result.verification.articleIdentity, 'unverified');
+    assert.equal(result.verification.reviewBinding, 'unavailable');
+    assert.equal(result.verification.upstreamCompleteness, 'unproved');
+    assert.equal(result.verification.imageBytes, 'unverified');
+    assert.deepEqual(result.images, [{ index: 0, kind: 'blob', loaded: true }]);
+    assert.ok(!result.html.includes('NEVER_RETURN'));
+    assert.ok(!result.html.includes('blob:'));
+    assert.ok(result.html.includes('src="wewe-image:0"'));
+    assert.deepEqual(selectors, ['iframe.mp_i_frame[srcdoc]']);
+    assert.equal(Object.hasOwn(result, 'projection'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('DOM candidate preserves missing canonical/identity as missing, never synthesizes values', async () => {
+  setup(html.replace(/<meta[^>]*>|<script>.*?<\/script>/g, ''));
+  const result = await captureOfficialArticle({ candidateOnly: true });
+  assert.equal(result.fieldsPresent.canonical, false);
+  assert.equal(result.fieldsPresent.biz, false);
+  assert.equal(result.fieldsPresent.mid, false);
+  assert.equal(result.fieldsPresent.idx, false);
+  assert.equal(result.fieldsPresent.publishTime, false);
+  assert.equal(result.fieldsPresent.title, true);
+  assert.equal(result.fieldsPresent.publisher, true);
+  assert.ok(!result.html.includes('og:url'));
+  assert.ok(!result.html.includes('var biz'));
+  assert.equal(result.images[0].kind, 'data');
+  assert.equal(Object.hasOwn(result.images[0], 'inline'), false);
+  await assert.rejects(captureOfficialArticle(), /IDENTITY_UNAVAILABLE/);
+});
+
+test('DOM candidate retains challenge, ambiguity, conflict, and size refusal', async () => {
+  for (const [raw, error] of [
+    [html + '<div id="js_verify"></div>', /UNSUPPORTED_OR_CHALLENGE/],
+    [
+      html.replace(
+        'var ct="1700000000";',
+        'var ct="1700000000";var ct="1700000001";',
+      ),
+      /SCALAR_CONFLICT/,
+    ],
+    [html + '<div id="js_content">ambiguous</div>', /BODY_MISSING/],
+  ]) {
+    setup(raw);
+    await assert.rejects(
+      captureOfficialArticle({ candidateOnly: true }),
+      error,
+    );
+  }
+  const h = setup();
+  globalThis.document.querySelectorAll = () => [h.frame, h.frame];
+  await assert.rejects(
+    captureOfficialArticle({ candidateOnly: true }),
+    /ARTICLE_FRAME_AMBIGUOUS/,
+  );
+  const tooLarge = setup();
+  tooLarge.frame.srcdoc = 'x'.repeat(15_000_001);
+  await assert.rejects(
+    captureOfficialArticle({ candidateOnly: true }),
+    /FRAME_UNREADABLE/,
+  );
+});
+
+test('DOM candidate describes unloaded remote images without requesting or returning source URLs', async () => {
+  const h = setup(
+    html.replace(
+      'data:image/png;base64,' + png,
+      'https://mmbiz.qpic.cn/fixture',
+    ),
+  );
+  const originalAll = h.doc.querySelectorAll.bind(h.doc);
+  h.doc.querySelectorAll = (selector) =>
+    originalAll(selector).map((node) => {
+      const originalChildren = node.querySelectorAll.bind(node);
+      node.querySelectorAll = (childSelector) =>
+        originalChildren(childSelector).map((child) => {
+          if (child.tagName === 'IMG') {
+            child.complete = false;
+            child.naturalWidth = 0;
+          }
+          return child;
+        });
+      return node;
+    });
+  const result = await captureOfficialArticle({ candidateOnly: true });
+  assert.deepEqual(result.images, [
+    { index: 0, kind: 'exactCdn', loaded: false },
+  ]);
+  assert.ok(!JSON.stringify(result).includes('https://mmbiz.qpic.cn'));
+});
