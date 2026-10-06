@@ -2,7 +2,7 @@
  * credentials, navigation, clicking, captcha handlers or network interception.
  * Returns a reduced observation, never a verified ProviderArticle.
  */
-export async function captureOfficialArticle() {
+export async function captureOfficialArticle({ candidateOnly = false } = {}) {
   const fail = (code) => {
     throw new Error(code);
   };
@@ -56,12 +56,13 @@ export async function captureOfficialArticle() {
   const canonical =
     doc.querySelector('meta[property="og:url"]')?.getAttribute('content') || '';
   if (
-    !title ||
-    !publisher ||
-    !scalars.biz ||
-    !scalars.mid ||
-    !scalars.idx ||
-    !(scalars.ct || scalars.create_time)
+    !candidateOnly &&
+    (!title ||
+      !publisher ||
+      !scalars.biz ||
+      !scalars.mid ||
+      !scalars.idx ||
+      !(scalars.ct || scalars.create_time))
   )
     fail('IDENTITY_UNAVAILABLE');
   const copy = body.cloneNode(true);
@@ -75,9 +76,35 @@ export async function captureOfficialArticle() {
   if (clonedImages.length !== images.length) fail('IMAGE_STRUCTURE');
   for (let index = 0; index < images.length; index++) {
     const image = images[index];
+    const source = image.currentSrc || image.getAttribute('src') || '';
+    if (candidateOnly) {
+      // DOM candidate mode never fetches even an existing Blob, copies inline
+      // bytes, or requires Vue. References remain placeholders, not saved media.
+      let kind = 'other';
+      if (source.startsWith('data:image/')) kind = 'data';
+      else if (source.startsWith('blob:https://weread.qq.com/')) kind = 'blob';
+      else {
+        try {
+          const url = new URL(source);
+          if (
+            url.origin === 'https://mmbiz.qpic.cn' &&
+            !url.username &&
+            !url.password
+          )
+            kind = 'exactCdn';
+        } catch {}
+      }
+      references.push({
+        index,
+        kind,
+        loaded:
+          !!image.complete && image.naturalWidth > 0 && image.naturalHeight > 0,
+      });
+      clonedImages[index].setAttribute('src', 'wewe-image:' + index);
+      continue;
+    }
     if (!image.complete || image.naturalWidth < 1 || image.naturalHeight < 1)
       fail('IMAGE_NOT_LOADED');
-    const source = image.currentSrc || image.getAttribute('src') || '';
     let inline = null;
     if (source.startsWith('data:')) inline = source;
     else if (source.startsWith('blob:https://weread.qq.com/')) {
@@ -166,17 +193,35 @@ export async function captureOfficialArticle() {
       .join('') +
     '</script>';
   const html =
-    '<meta property="og:url" content="' +
-    escape(canonical) +
-    '"><h1 id="activity-name">' +
-    escape(title) +
-    '</h1><span id="js_name">' +
-    escape(publisher) +
-    '</span>' +
+    (canonical
+      ? '<meta property="og:url" content="' + escape(canonical) + '">'
+      : '') +
+    (title ? '<h1 id="activity-name">' + escape(title) + '</h1>' : '') +
+    (publisher ? '<span id="js_name">' + escape(publisher) + '</span>' : '') +
     metadata +
     copy.outerHTML;
   if (new TextEncoder().encode(html).length > 5_000_000) fail('BODY_SIZE');
   return {
+    ...(candidateOnly
+      ? {
+          candidateOnly: true,
+          verification: {
+            articleIdentity: 'unverified',
+            reviewBinding: 'unavailable',
+            upstreamCompleteness: 'unproved',
+            imageBytes: 'unverified',
+          },
+          fieldsPresent: {
+            title: !!title,
+            publisher: !!publisher,
+            biz: !!scalars.biz,
+            mid: !!scalars.mid,
+            idx: !!scalars.idx,
+            publishTime: !!(scalars.ct || scalars.create_time),
+            canonical: !!canonical,
+          },
+        }
+      : {}),
     pageUrl: location.origin + location.pathname,
     html,
     images: references,
