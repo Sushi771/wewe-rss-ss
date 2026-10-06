@@ -181,6 +181,10 @@ export function articleOriginalLink(html: string): string | undefined {
   return links[0]?.provided;
 }
 
+/** Preserve callers' identity-conflict status when the supplied original
+ * disagrees with the independently parsed business identity. */
+export class ArticleIdentityConflictError extends Error {}
+
 export function articleIdentity(html: string) {
   const $ = load(html);
   if (!$('#js_content').length) throw new Error('没有可核验的原文结构');
@@ -257,7 +261,7 @@ export function articleIdentity(html: string) {
       supplied.mpId !== identity.mpId ||
       (sn && new URL(supplied.url).searchParams.get('sn') !== sn)
     )
-      throw new Error('原文链接与静态身份冲突');
+      throw new ArticleIdentityConflictError('原文链接与静态身份冲突');
     // Keep the genuine supplied link, normalized by the existing URL policy.
     // A page-provided sn need not be invented as a separate body scalar.
     identity.url = supplied.url;

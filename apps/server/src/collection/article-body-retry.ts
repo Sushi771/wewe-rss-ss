@@ -3,6 +3,7 @@ import { load } from 'cheerio';
 import {
   articleContentHtml,
   articleIdentity,
+  ArticleIdentityConflictError,
   articlePublishTime,
 } from './article-page';
 import { canonicalArticleUrl } from './collection-format';
@@ -193,7 +194,9 @@ export async function fetchArticleBody(
   let identity: ReturnType<typeof articleIdentity>;
   try {
     identity = articleIdentity(html);
-  } catch {
+  } catch (error) {
+    if (error instanceof ArticleIdentityConflictError)
+      throw new BodyRetryError('identity_mismatch');
     throw new BodyRetryError('invalid_page');
   }
   const publishTime = articlePublishTime(html);
