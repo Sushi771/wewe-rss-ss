@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WeWe 本次官方文章任务（未启用）",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "仅在用户点击时读取当前官方文章；实站关联尚待验证。",
   "permissions": ["activeTab", "scripting"],
   "optional_host_permissions": ["http://127.0.0.1/*", "https://mmbiz.qpic.cn/*"],

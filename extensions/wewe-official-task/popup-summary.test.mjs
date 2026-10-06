@@ -77,6 +77,16 @@ test('early-return missing fields stay unknown and explicit false stays negative
   });
   assert.ok(negative.includes('组件匹配：未匹配'));
   assert.ok(negative.includes('标题匹配：未核实'));
+  const detailed = formatProbeSummary({
+    supported: false,
+    vuePropertyPresent: false,
+    vueValuePresent: false,
+    optionsPresent: false,
+    namePresent: false,
+  });
+  assert.ok(detailed.includes('根Vue属性：不存在；实例值：不存在'));
+  assert.ok(detailed.includes('组件选项：不存在；名称字段：不存在'));
+  assert.ok(detailed.includes('组件匹配：未核实'));
 });
 
 test('missing raw body is not truncation evidence; valid unequal projections show only inconsistency', () => {
@@ -234,6 +244,6 @@ test('popup feedback is selectable plain text, with no HTML rendering or clipboa
   assert.ok(!html.includes('完成正常验证'));
   assert.ok(!script.includes('innerHTML'));
   assert.ok(!script.includes('clipboard'));
-  assert.equal(manifest.version, '0.1.1');
+  assert.equal(manifest.version, '0.1.2');
   assert.deepEqual(manifest.permissions, ['activeTab', 'scripting']);
 });
