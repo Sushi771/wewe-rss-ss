@@ -218,7 +218,17 @@ export function bindTaskControls(document, chrome, fetch) {
         return;
       }
       const d = taskDisclosure(prepared);
-      review.textContent = `本次文章：${d.title}\n公众号：${d.publisher}\n实际原图：${d.imageCount}张\n本机接收：http://127.0.0.1:4000\n原保存目录：${d.destination}\n传输：清理正文、公开身份和原图字节；不含网站凭据。\n截止：${prepared.claim.expiresAt}\n接收不等于保存成功，请在原 WeWe 查看保存结果。`;
+      const publishedAt = new Intl.DateTimeFormat('sv-SE', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      }).format(new Date(d.publishTime * 1000));
+      review.textContent = `本次文章：${d.title}\n公众号：${d.publisher}\n原文链接：${d.originalUrl}\n发布时间（北京时间）：${publishedAt}\n实际原图：${d.imageCount}张\n本机接收：http://127.0.0.1:4000\n原保存目录：${d.destination}\n传输：清理正文、公开身份和原图字节；不含网站凭据。\n截止：${prepared.claim.expiresAt}\n接收不等于保存成功，请在原 WeWe 查看保存结果。`;
       status.textContent =
         '已领取本次任务说明，尚未读取正文。请核对后勾选回送。';
     } catch {

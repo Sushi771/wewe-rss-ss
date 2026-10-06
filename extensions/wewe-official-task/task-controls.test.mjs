@@ -203,6 +203,8 @@ test('claim disclosure precedes body confirmation and received acknowledgement n
     d.title,
     d.publisher,
     d.destination,
+    '原文链接：' + d.originalUrl,
+    '发布时间（北京时间）：2023-11-15 06:13:20',
     '1张',
     '127.0.0.1:4000',
     '接收不等于保存成功',
