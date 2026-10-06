@@ -4,6 +4,8 @@
 
 ## Implemented interface
 
+Later source update: page-supplied og:url/msg_link now use bounded static extraction and strict URL/identity agreement, including numeric mid/idx and internally consistent timestamps. An internal per-article owner-confirmed adapter and one-shot broker mode are described in [CONFIRMED_DOM_ARTICLE_ADAPTER.md](CONFIRMED_DOM_ARTICLE_ADAPTER.md). Empty image-node counts and a page-level loading message are not universal completeness rules. No production activation, installation or live capture followed this source update.
+
 `captureOfficialArticle({ candidateOnly: true })` reuses the existing bounded srcdoc/body/static-scalar sanitizer. Selection is the unique `iframe.mp_i_frame[srcdoc]`; no id or Vue dependency. This serialized ISOLATED-world function has no imported runtime dependency.
 
 Candidate mode returns local untrusted sanitized `html`, presence flags and image descriptors `{index, kind, loaded}`. It omits absent title/source/canonical metadata rather than manufacturing it. Static scalar whitelist remains biz/mid/idx/sn/ct/create_time; conflicting assignments stop. Body images use `wewe-image:<index>` placeholders. It neither copies inline bytes nor fetches remote/Blob bytes. Original page scripts, handlers and body URL attributes are excluded. The page-supplied `og:url` value is retained after HTML escaping; its presence does not validate its host, query or article mapping. It must pass the existing independent URL and identity checks before any downstream use. Origin/path, frame/body uniqueness, challenge/unsupported media, 15M-character srcdoc, 60-image and 5MB sanitized-body limits remain enforced.

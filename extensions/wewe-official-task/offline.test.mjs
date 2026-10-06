@@ -23,9 +23,12 @@ function harness({
   remote,
   changed = false,
   changedAfterMedia = false,
+  manual = false,
+  manualChanged = false,
 } = {}) {
   const calls = [];
   let projections = 0;
+  let captures = 0;
   const chrome = {
     permissions: {
       contains: async ({ origins }) =>
@@ -39,6 +42,7 @@ function harness({
       executeScript: async (options) => {
         calls.push({ kind: 'script', world: options.world });
         if (options.world === 'MAIN') {
+          if (manual) throw new Error('NO_VUE_FOR_CONFIRMED_DOM');
           projections++;
           return [
             {
@@ -52,6 +56,14 @@ function harness({
           ];
         }
         const observation = fixture();
+        captures++;
+        if (manual) {
+          assert.equal(options.args[0].confirmedImageCount, 1);
+          observation.omittedEmptyImageNodes = 2;
+          observation.assetFingerprint = (
+            manualChanged && captures > 1 ? 'b' : 'a'
+          ).repeat(64);
+        }
         if (remote)
           observation.images = [{ index: 0, source: remote, inline: null }];
         return [{ frameId: 0, result: observation }];
@@ -67,7 +79,14 @@ function harness({
       });
     return new Response(
       JSON.stringify(
-        url.endsWith('claim') ? { nonce: 'n'.repeat(43) } : { accepted: true },
+        url.endsWith('claim')
+          ? {
+              nonce: 'n'.repeat(43),
+              ...(manual
+                ? { contentMode: 'confirmed-dom', confirmedImageCount: 1 }
+                : {}),
+            }
+          : { accepted: true },
       ),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
@@ -117,6 +136,31 @@ test('one clicked task claims before reads and returns actual inline bytes', asy
           c.options.credentials === 'omit' && c.options.redirect === 'error',
       ),
   );
+});
+
+test('server-bound manual DOM task avoids Vue and rechecks body/assets before returning only bound original bytes', async () => {
+  const h = harness({
+    manual: true,
+    mediaPermission: true,
+    remote: 'https://mmbiz.qpic.cn/synthetic.png',
+  });
+  assert.deepEqual(await runTask(h), { accepted: true });
+  assert.deepEqual(
+    h.calls.filter((call) => call.kind === 'script').map((call) => call.world),
+    ['ISOLATED', 'ISOLATED'],
+  );
+  const observation = JSON.parse(h.calls.at(-1).options.body).observation;
+  assert.equal(observation.omittedEmptyImageNodes, 2);
+  assert.equal(observation.images.length, 1);
+  assert.equal(Object.hasOwn(observation, 'projection'), false);
+  assert.equal(Object.hasOwn(observation, 'assetFingerprint'), false);
+  assert.equal(
+    h.calls.filter((call) => call.url?.startsWith('https:')).length,
+    1,
+  );
+  const changed = harness({ manual: true, manualChanged: true });
+  await assert.rejects(runTask(changed), /ARTICLE_CHANGED/);
+  assert(!changed.calls.some((call) => call.url?.endsWith('complete')));
 });
 test('remote bytes use only optional exact observed CDN and preserve bytes', async () => {
   const h = harness({

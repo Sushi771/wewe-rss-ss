@@ -129,7 +129,12 @@ export function verifyWereadArticleBody(
     )
   )
     throw new Error('WEREAD_BODY_ACCESS_CHALLENGE');
-  const identity = articleIdentity(html);
+  let identity: ReturnType<typeof articleIdentity>;
+  try {
+    identity = articleIdentity(html);
+  } catch {
+    throw new Error('WEREAD_BODY_IDENTITY_CONFLICT');
+  }
   const originalUrl = `https://mp.weixin.qq.com/s/${candidate.originalId.replace(/~/g, '_')}`;
   const title = $('#activity-name').text().trim();
   // Tencent may expose a signed /s?biz/mid/idx canonical while the directory

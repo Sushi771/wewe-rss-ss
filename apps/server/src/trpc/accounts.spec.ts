@@ -43,6 +43,31 @@ describe('private owner accounts', () => {
     );
     return { service, router };
   }
+  it('reports disabled new-subscription source before provider, backup, or writes and protects the read-only capability', async () => {
+    process.env.WECHAT2RSS_ENABLED = '0';
+    const create = jest.fn();
+    const { router, service } = setup({ feed: { create } });
+    const caller = router.appRouter.createCaller({
+      errorMsg: null,
+      isLocal: true,
+    });
+    expect(await caller.feed.addCapability()).toMatchObject({
+      available: false,
+      code: 'SUBSCRIPTION_SOURCE_UNAVAILABLE',
+    });
+    await expect(
+      service.addSubscriptionFromArticle(
+        'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv',
+      ),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    await expect(
+      router.appRouter
+        .createCaller({ errorMsg: '请先登录' })
+        .feed.addCapability(),
+    ).rejects.toThrow('请先登录');
+  });
   it('allows authenticated account metadata but rejects anonymous access', async () => {
     const findMany = jest
       .fn()

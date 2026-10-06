@@ -33,6 +33,50 @@ describe('short-lived official article task', () => {
       }),
     ).toThrow('LIVE_ROUTE_UNVERIFIED');
   });
+  it('binds one manually confirmed long article without inventing review/short identity and consumes scope once', async () => {
+    const sample = observation();
+    const url =
+      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcd';
+    const b = new BrowserTaskBroker({
+      ...config,
+      confirmedDomArticle: {
+        originalUrl: url,
+        title: '离线新文章',
+        publisher: '测试公众号',
+        publishTime: 1700000000,
+        imageCount: 1,
+        confirmedComplete: true,
+      },
+    });
+    brokers.push(b);
+    expect(() => b.issue({ url: short })).toThrow('TARGET_MISMATCH');
+    const task = b.issue({ url });
+    const claim = b.claim(task.taskId, binding);
+    expect(claim).toMatchObject({
+      contentMode: 'confirmed-dom',
+      confirmedImageCount: 1,
+    });
+    expect(() => b.issue({ url })).toThrow('MANUAL_SCOPE_CONSUMED');
+    const raw = {
+      pageUrl: sample.pageUrl,
+      html: sample.html.replace(short, url),
+      images: sample.images,
+      omittedEmptyImageNodes: 2,
+    };
+    expect(b.complete(task.taskId, claim.nonce, binding, raw)).toEqual({
+      accepted: true,
+    });
+    const article = await task.result;
+    expect(article).toMatchObject({
+      id: 'WX_1234567890_2247000001_1',
+      shortUrl: null,
+    });
+    expect(article.contentHtml).toContain('data:image/png;base64,');
+    expect(b.capability()).toMatchObject({
+      available: false,
+      code: 'MANUAL_SCOPE_CONSUMED',
+    });
+  });
   it('new unknown short link maps through current official chapter, without DB/cache/hash prerequisite', async () => {
     const b = broker();
     const task = b.issue({ url: short });

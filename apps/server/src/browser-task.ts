@@ -19,6 +19,10 @@ import {
 } from './collection/subscription-provider';
 import { canonicalArticleUrl } from './collection/collection-format';
 import { privateOnlineMode } from './private-access';
+import {
+  ConfirmedDomArticle,
+  verifyConfirmedDomArticle,
+} from './article-manual-dom';
 
 export type BrowserBinding = {
   tabId: number;
@@ -195,6 +199,8 @@ export type BrowserTaskConfiguration = {
   pairingKey?: string;
   extensionOrigin?: string;
   localOrigin?: string;
+  /** Internal owner confirmation, scoped to ONE task. No automatic directory. */
+  confirmedDomArticle?: Omit<ConfirmedDomArticle, 'pageUrl'>;
 };
 
 /** In-memory, one-shot tasks; restart revokes every task/nonce. No production
@@ -203,10 +209,20 @@ export type BrowserTaskConfiguration = {
  * application may issue a validated target; it cannot upload a Provider/body.
  */
 export class BrowserTaskBroker {
+  private manualScopeConsumed = false;
   private tasks = new Map<string, Pending>();
   private readonly config: BrowserTaskConfiguration;
   constructor(config: BrowserTaskConfiguration = {}) {
-    this.config = Object.freeze({ ...config });
+    this.config = Object.freeze({
+      ...config,
+      ...(config.confirmedDomArticle
+        ? {
+            confirmedDomArticle: Object.freeze({
+              ...config.confirmedDomArticle,
+            }),
+          }
+        : {}),
+    });
   }
   private available() {
     if (privateOnlineMode()) fail('LOCAL_ONLY', 403);
@@ -225,6 +241,8 @@ export class BrowserTaskBroker {
   capability() {
     try {
       this.available();
+      if (this.config.confirmedDomArticle && this.manualScopeConsumed)
+        return { available: false as const, code: 'MANUAL_SCOPE_CONSUMED' };
       return { available: true as const };
     } catch (error) {
       if (!(error instanceof BrowserTaskError)) throw error;
@@ -279,6 +297,22 @@ export class BrowserTaskBroker {
     )
       fail('TARGET_INVALID');
     const url = downloadArticleUrl(target.url);
+    if (this.config.confirmedDomArticle) {
+      if (this.manualScopeConsumed) fail('MANUAL_SCOPE_CONSUMED', 409);
+      if (
+        new URL(url).pathname !== '/s' ||
+        canonicalArticleUrl(url).url !==
+          canonicalArticleUrl(this.config.confirmedDomArticle.originalUrl).url
+      )
+        fail('TARGET_MISMATCH');
+      if (
+        (target.mpId !== undefined &&
+          target.mpId !== canonicalArticleUrl(url).mpId) ||
+        (target.name !== undefined &&
+          target.name !== this.config.confirmedDomArticle.publisher)
+      )
+        fail('TARGET_MISMATCH');
+    }
     if (target.mpId !== undefined && !/^MP_WXS_\d{5,15}$/.test(target.mpId))
       fail('TARGET_INVALID');
     if (
@@ -308,6 +342,7 @@ export class BrowserTaskBroker {
       reject,
       timer,
     });
+    if (this.config.confirmedDomArticle) this.manualScopeConsumed = true;
     return { taskId, expiresAt: new Date(expires).toISOString(), result };
   }
   private pending(taskId: unknown) {
@@ -345,6 +380,12 @@ export class BrowserTaskBroker {
     return {
       nonce: task.nonce,
       expiresAt: new Date(task.expires).toISOString(),
+      ...(this.config.confirmedDomArticle
+        ? {
+            contentMode: 'confirmed-dom',
+            confirmedImageCount: this.config.confirmedDomArticle.imageCount,
+          }
+        : {}),
     };
   }
   complete(
@@ -371,7 +412,15 @@ export class BrowserTaskBroker {
         fail('PAYLOAD_SIZE', 413);
       if ((observation as BrowserObservation)?.pageUrl !== task.binding.pageUrl)
         fail('SOURCE_BINDING');
-      const article = verifyBrowserTaskObservation(task.target, observation);
+      const article = this.config.confirmedDomArticle
+        ? verifyConfirmedDomArticle(
+            {
+              ...this.config.confirmedDomArticle,
+              pageUrl: task.binding.pageUrl,
+            },
+            observation,
+          )
+        : verifyBrowserTaskObservation(task.target, observation);
       task.resolve(article);
       return { accepted: true };
     } catch (error) {

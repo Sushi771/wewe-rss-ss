@@ -683,6 +683,9 @@ export class TrpcRouter {
           });
         }
       }),
+    addCapability: this.trpcService.protectedProcedure.query(() =>
+      this.trpcService.subscriptionAddCapability(),
+    ),
     addFromArticle: this.trpcService.protectedProcedure
       .input(z.object({ articleUrl: z.string().url() }))
       .mutation(async ({ input }) =>

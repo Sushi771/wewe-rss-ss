@@ -55,6 +55,16 @@ export async function runTask({ chrome, fetch, base, key, taskId }) {
   // Claim first: no page read without a matching server-created short-lived task.
   const claim = await send('claim', { binding });
   try {
+    const manual = claim.contentMode === 'confirmed-dom';
+    if (claim.contentMode !== undefined && !manual)
+      throw new Error('CONTENT_MODE');
+    if (
+      manual &&
+      (!Number.isSafeInteger(claim.confirmedImageCount) ||
+        claim.confirmedImageCount < 0 ||
+        claim.confirmedImageCount > 60)
+    )
+      throw new Error('MANUAL_SCOPE');
     const project = async () => {
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -69,11 +79,14 @@ export async function runTask({ chrome, fetch, base, key, taskId }) {
         throw new Error('PROJECTION_UNAVAILABLE');
       return results[0].result;
     };
-    const projection = await project();
+    const projection = manual ? null : await project();
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       world: 'ISOLATED',
       func: captureOfficialArticle,
+      ...(manual
+        ? { args: [{ confirmedImageCount: claim.confirmedImageCount }] }
+        : {}),
     });
     const observation =
       results.length === 1 && results[0].frameId === 0
@@ -88,10 +101,10 @@ export async function runTask({ chrome, fetch, base, key, taskId }) {
         binding.pageUrl
     )
       throw new Error('SOURCE_NAVIGATED');
-    const after = await project();
-    if (JSON.stringify(after) !== JSON.stringify(projection))
+    const after = manual ? null : await project();
+    if (!manual && JSON.stringify(after) !== JSON.stringify(projection))
       throw new Error('ARTICLE_CHANGED');
-    observation.projection = projection;
+    if (!manual) observation.projection = projection;
     let total = 0;
     for (const image of observation.images) {
       if (!image.inline) {
@@ -164,7 +177,31 @@ export async function runTask({ chrome, fetch, base, key, taskId }) {
         binding.pageUrl
     )
       throw new Error('SOURCE_NAVIGATED');
-    if (JSON.stringify(await project()) !== JSON.stringify(projection))
+    if (manual) {
+      const check = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'ISOLATED',
+        func: captureOfficialArticle,
+        args: [
+          {
+            candidateOnly: true,
+            confirmedImageCount: claim.confirmedImageCount,
+          },
+        ],
+      });
+      const final =
+        check.length === 1 && check[0].frameId === 0 ? check[0].result : null;
+      if (
+        !final ||
+        final.pageUrl !== observation.pageUrl ||
+        final.html !== observation.html ||
+        final.omittedEmptyImageNodes !== observation.omittedEmptyImageNodes ||
+        !/^[a-f0-9]{64}$/.test(observation.assetFingerprint || '') ||
+        final.assetFingerprint !== observation.assetFingerprint
+      )
+        throw new Error('ARTICLE_CHANGED');
+      delete observation.assetFingerprint;
+    } else if (JSON.stringify(await project()) !== JSON.stringify(projection))
       throw new Error('ARTICLE_CHANGED');
     const payload = { binding, nonce: claim.nonce, observation };
     if (new TextEncoder().encode(JSON.stringify(payload)).length > 35_000_000)

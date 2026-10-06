@@ -2,14 +2,20 @@
  * credentials, navigation, clicking, captcha handlers or network interception.
  * Returns a reduced observation, never a verified ProviderArticle.
  */
-export async function captureOfficialArticle({ candidateOnly = false } = {}) {
+export async function captureOfficialArticle({
+  candidateOnly = false,
+  confirmedImageCount,
+} = {}) {
   const fail = (code) => {
     throw new Error(code);
   };
   if (location.origin !== 'https://weread.qq.com') fail('SOURCE_ORIGIN');
   if (!/^\/web\/mp\/reader\/[A-Za-z0-9_-]{1,256}$/.test(location.pathname))
     fail('SOURCE_PATH');
-  if (document.querySelector('.mpContentLoading, .mpContentError'))
+  if (
+    confirmedImageCount === undefined &&
+    document.querySelector('.mpContentLoading, .mpContentError')
+  )
     fail('PAGE_NOT_READY');
   const frames = [...document.querySelectorAll('iframe.mp_i_frame[srcdoc]')];
   if (frames.length !== 1) fail('ARTICLE_FRAME_AMBIGUOUS');
@@ -28,8 +34,35 @@ export async function captureOfficialArticle({ candidateOnly = false } = {}) {
   const body = bodies[0];
   if (!body.textContent.trim() && !body.querySelector('img'))
     fail('BODY_MISSING');
-  const images = [...body.querySelectorAll('img')];
-  if (images.length > 60) fail('IMAGE_COUNT');
+  const allImages = [...body.querySelectorAll('img')];
+  if (allImages.length > 60) fail('IMAGE_COUNT');
+  if (
+    confirmedImageCount !== undefined &&
+    (!Number.isSafeInteger(confirmedImageCount) ||
+      confirmedImageCount < 0 ||
+      confirmedImageCount > 60)
+  )
+    fail('MANUAL_CONFIRMATION_INVALID');
+  // Only a server-bound manual confirmation can opt into ignoring nodes that
+  // have no current/src/data-src asset at all. Hidden/lazy sourced images stay.
+  const omitted =
+    confirmedImageCount === undefined
+      ? []
+      : allImages
+          .map((image, index) => ({ image, index }))
+          .filter(
+            ({ image }) =>
+              !image.currentSrc &&
+              !image.getAttribute('src') &&
+              !image.getAttribute('data-src'),
+          )
+          .map(({ index }) => index);
+  const images = allImages.filter((_image, index) => !omitted.includes(index));
+  if (
+    confirmedImageCount !== undefined &&
+    images.length !== confirmedImageCount
+  )
+    fail('MANUAL_IMAGE_COVERAGE');
   // Read only reviewed static scalar assignments from srcdoc, never read/eval
   // the official app's Vue store, tokens, ticket, window globals or script code.
   const scalars = {};
@@ -43,18 +76,134 @@ export async function captureOfficialArticle({ candidateOnly = false } = {}) {
   })) {
     const values = [];
     const expression = new RegExp(
-      '\\bvar\\s+' + name + '\\s*=\\s*(["\'])((' + pattern + '))\\1\\s*;',
+      '\\bvar\\s+' +
+        name +
+        '\\s*=\\s*(?:(["\'])(' +
+        pattern +
+        ')\\1' +
+        (['mid', 'idx', 'ct', 'create_time'].includes(name)
+          ? '|(' + pattern + ')'
+          : '') +
+        ')\\s*;',
       'g',
     );
     for (const match of frame.srcdoc.matchAll(expression))
-      values.push(match[2]);
+      values.push(match[2] || match[3]);
     if (new Set(values).size > 1) fail('SCALAR_CONFLICT');
     if (values.length) scalars[name] = values[0];
   }
+  if (scalars.ct && scalars.create_time && scalars.ct !== scalars.create_time)
+    fail('SCALAR_CONFLICT');
   const title = doc.querySelector('#activity-name')?.textContent.trim();
   const publisher = doc.querySelector('#js_name')?.textContent.trim();
-  const canonical =
-    doc.querySelector('meta[property="og:url"]')?.getAttribute('content') || '';
+  const suppliedLinks = [...doc.querySelectorAll('meta[property="og:url"]')]
+    .map((node) => node.getAttribute('content') || '')
+    .filter(Boolean);
+  const linkAssignments = [
+    ...frame.srcdoc.matchAll(
+      /\bvar\s+msg_link\s*=\s*(["'])([^"'\\\r\n]{0,4096})\1\s*;/g,
+    ),
+  ];
+  if (
+    (frame.srcdoc.match(/\bvar\s+msg_link\s*=/g) || []).length !==
+    linkAssignments.length
+  )
+    fail('SOURCE_LINK_EXPRESSION');
+  suppliedLinks.push(
+    ...linkAssignments.map((match) => match[2]).filter(Boolean),
+  );
+  const linkSources = [];
+  if (doc.querySelector('meta[property="og:url"]')?.getAttribute('content'))
+    linkSources.push('og:url');
+  if (linkAssignments.some((match) => match[2])) linkSources.push('msg_link');
+  const decode = (value) =>
+    new DOMParser()
+      .parseFromString(
+        '<span>' + value.replace(/</g, '&lt;') + '</span>',
+        'text/html',
+      )
+      .querySelector('span')
+      .textContent.trim();
+  const links = suppliedLinks.map((raw) => {
+    if (raw.length > 4096) fail('SOURCE_LINK_INVALID');
+    let url;
+    try {
+      url = new URL(decode(raw));
+    } catch {
+      fail('SOURCE_LINK_INVALID');
+    }
+    if (
+      url.protocol !== 'https:' ||
+      url.hostname !== 'mp.weixin.qq.com' ||
+      url.port ||
+      url.username ||
+      url.password
+    )
+      fail('SOURCE_LINK_INVALID');
+    if (url.pathname !== '/s') {
+      if (
+        !/^\/s\/[A-Za-z0-9_-]{1,256}$/.test(url.pathname) ||
+        url.search ||
+        url.hash
+      )
+        fail('SOURCE_LINK_INVALID');
+      return {
+        provided: url.toString(),
+        comparison: url.toString(),
+        matched: false,
+      };
+    }
+    for (const key of url.searchParams.keys())
+      if (
+        !['__biz', 'mid', 'idx', 'sn', 'chksm'].includes(key) ||
+        url.searchParams.getAll(key).length !== 1
+      )
+        fail('SOURCE_LINK_INVALID');
+    if (url.hash && url.hash !== '#rd') fail('SOURCE_LINK_INVALID');
+    if (
+      url.searchParams.has('sn') &&
+      !/^[a-fA-F0-9]+$/.test(url.searchParams.get('sn'))
+    )
+      fail('SOURCE_LINK_INVALID');
+    if (
+      url.searchParams.has('chksm') &&
+      !/^[A-Za-z0-9_-]{1,256}$/.test(url.searchParams.get('chksm'))
+    )
+      fail('SOURCE_LINK_INVALID');
+    let number;
+    try {
+      number = atob(url.searchParams.get('__biz') || '');
+    } catch {
+      fail('SOURCE_LINK_INVALID');
+    }
+    if (
+      !/^\d{5,15}$/.test(number) ||
+      !/^\d+$/.test(url.searchParams.get('mid') || '') ||
+      !/^[1-9]\d*$/.test(url.searchParams.get('idx') || '')
+    )
+      fail('SOURCE_LINK_INVALID');
+    for (const [scalar, key] of [
+      ['biz', '__biz'],
+      ['mid', 'mid'],
+      ['idx', 'idx'],
+      ['sn', 'sn'],
+    ])
+      if (scalars[scalar] && scalars[scalar] !== url.searchParams.get(key))
+        fail('SOURCE_LINK_CONFLICT');
+    // Comparison normalization only; the returned source remains page-supplied.
+    const comparison = new URL('https://mp.weixin.qq.com/s');
+    for (const key of ['__biz', 'mid', 'idx', 'sn'])
+      if (url.searchParams.has(key))
+        comparison.searchParams.set(key, url.searchParams.get(key));
+    return {
+      provided: url.toString(),
+      comparison: comparison.toString(),
+      matched: !!(scalars.biz && scalars.mid && scalars.idx),
+    };
+  });
+  if (new Set(links.map((link) => link.comparison)).size > 1)
+    fail('SOURCE_LINK_CONFLICT');
+  const canonical = links[0]?.provided || '';
   if (
     !candidateOnly &&
     (!title ||
@@ -72,8 +221,12 @@ export async function captureOfficialArticle({ candidateOnly = false } = {}) {
     )
     .forEach((node) => node.remove());
   const references = [];
-  const clonedImages = [...copy.querySelectorAll('img')];
-  if (clonedImages.length !== images.length) fail('IMAGE_STRUCTURE');
+  const allClonedImages = [...copy.querySelectorAll('img')];
+  if (allClonedImages.length !== allImages.length) fail('IMAGE_STRUCTURE');
+  for (const index of omitted) allClonedImages[index].remove();
+  const clonedImages = allClonedImages.filter(
+    (_image, index) => !omitted.includes(index),
+  );
   for (let index = 0; index < images.length; index++) {
     const image = images[index];
     const source = image.currentSrc || image.getAttribute('src') || '';
@@ -201,6 +354,25 @@ export async function captureOfficialArticle({ candidateOnly = false } = {}) {
     metadata +
     copy.outerHTML;
   if (new TextEncoder().encode(html).length > 5_000_000) fail('BODY_SIZE');
+  let assetFingerprint;
+  if (confirmedImageCount !== undefined) {
+    const bytes = new TextEncoder().encode(
+      JSON.stringify(
+        images.map(
+          (image) =>
+            image.currentSrc ||
+            image.getAttribute('src') ||
+            image.getAttribute('data-src') ||
+            '',
+        ),
+      ),
+    );
+    assetFingerprint = [
+      ...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+    ]
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
+  }
   return {
     ...(candidateOnly
       ? {
@@ -220,10 +392,22 @@ export async function captureOfficialArticle({ candidateOnly = false } = {}) {
             publishTime: !!(scalars.ct || scalars.create_time),
             canonical: !!canonical,
           },
+          sourceLink: {
+            status: links[0]?.matched
+              ? 'static_identity_matched'
+              : canonical
+                ? 'unverified'
+                : 'missing',
+            sources: linkSources,
+          },
+          completeness: { status: 'unproved', imageRoles: 'unclassified' },
         }
       : {}),
     pageUrl: location.origin + location.pathname,
     html,
     images: references,
+    ...(confirmedImageCount !== undefined
+      ? { omittedEmptyImageNodes: omitted.length, assetFingerprint }
+      : {}),
   };
 }

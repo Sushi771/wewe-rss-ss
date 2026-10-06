@@ -48,6 +48,11 @@ const Feeds = () => {
   const { mutateAsync: updateMpInfo } = trpc.feed.edit.useMutation({});
 
   const isAddFeedLoading = isGetMpInfoLoading;
+  const { data: addCapability, error: addCapabilityError } =
+    trpc.feed.addCapability.useQuery(undefined, {
+      refetchOnWindowFocus: false,
+      retry: false,
+    });
   const { mutateAsync: refreshMpArticles, isLoading: isGetArticlesLoading } =
     trpc.feed.refreshArticles.useMutation();
   const {
@@ -180,6 +185,13 @@ const Feeds = () => {
   }, [id]);
 
   const handleConfirm = async () => {
+    if (!addCapability?.available) {
+      toast.error('暂不能新增订阅', {
+        description:
+          addCapability?.message || '新增来源状态尚未确认，输入链接已保留。',
+      });
+      return;
+    }
     const wxsLinks = wxsLink.split('\n').filter((link) => link.trim() !== '');
     const failedLinks: string[] = [];
     for (const link of wxsLinks) {
@@ -1171,6 +1183,12 @@ const Feeds = () => {
                 添加公众号源
               </ModalHeader>
               <ModalBody>
+                <p className="text-default-600 text-sm" role="status">
+                  {addCapability?.message ||
+                    (addCapabilityError
+                      ? '新增来源状态读取失败，输入链接已保留；稍后重新打开此页面核对。'
+                      : '正在只读核对新增来源状态。')}
+                </p>
                 <Textarea
                   value={wxsLink}
                   onValueChange={setWxsLink}
@@ -1187,6 +1205,7 @@ const Feeds = () => {
                 <Button
                   color="primary"
                   isDisabled={
+                    !addCapability?.available ||
                     !wxsLink.trim().startsWith('https://mp.weixin.qq.com/s')
                   }
                   onPress={handleConfirm}

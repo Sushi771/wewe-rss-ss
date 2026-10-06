@@ -398,3 +398,69 @@ test('DOM candidate describes unloaded remote images without requesting or retur
   ]);
   assert.ok(!JSON.stringify(result).includes('https://mmbiz.qpic.cn'));
 });
+
+test('page-supplied og/msg long links agree with numeric static identity without rel canonical', async () => {
+  const link =
+    'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&amp;mid=2247000001&amp;idx=1&amp;sn=abcd&amp;chksm=abcd#rd';
+  const raw = html
+    .replace(/<meta[^>]*>/, '<meta property="og:url" content="' + link + '">')
+    .replace('var mid="2247000001";', 'var mid=2247000001;')
+    .replace(
+      'var ct="1700000000";',
+      'var ct=1700000000;var create_time="1700000000";',
+    )
+    .replace('</script>', 'var msg_link="' + link + '";</script>');
+  setup(raw);
+  const result = await captureOfficialArticle({ candidateOnly: true });
+  assert.equal(result.sourceLink.status, 'static_identity_matched');
+  assert.deepEqual(result.sourceLink.sources, ['og:url', 'msg_link']);
+  assert.equal(result.completeness.status, 'unproved');
+  setup(raw.replace(/<meta[^>]*>/, ''));
+  assert.equal(
+    (await captureOfficialArticle({ candidateOnly: true })).sourceLink.status,
+    'static_identity_matched',
+  );
+  for (const bad of [
+    raw.replace(
+      'var msg_link="' + link + '"',
+      'var msg_link="' + link.replace('2247000001', '2247000002') + '"',
+    ),
+    raw.replace(
+      'var create_time="1700000000";',
+      'var create_time="1700000001";',
+    ),
+    raw.replace('var msg_link="' + link + '"', 'var msg_link=getLink()'),
+  ]) {
+    setup(bad);
+    await assert.rejects(
+      captureOfficialArticle({ candidateOnly: true }),
+      /CONFLICT|EXPRESSION/,
+    );
+  }
+});
+
+test('only explicit one-article image confirmation omits sourceless nodes; lazy assets remain required', async () => {
+  const raw =
+    html.replace('</div>', '<img><img></div>') +
+    '<div>因网络连接问题，剩余内容暂无法加载。</div>';
+  setup(raw);
+  assert.equal(
+    (await captureOfficialArticle({ candidateOnly: true })).images.length,
+    3,
+  );
+  setup(raw);
+  const confirmed = await captureOfficialArticle({ confirmedImageCount: 1 });
+  assert.equal(confirmed.images.length, 1);
+  assert.equal(confirmed.omittedEmptyImageNodes, 2);
+  assert.equal((confirmed.html.match(/<img/g) || []).length, 1);
+  setup(
+    raw.replace(
+      '<img><img>',
+      '<img data-src="https://mmbiz.qpic.cn/lazy"><img>',
+    ),
+  );
+  await assert.rejects(
+    captureOfficialArticle({ confirmedImageCount: 1 }),
+    /MANUAL_IMAGE_COVERAGE/,
+  );
+});

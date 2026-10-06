@@ -526,7 +526,28 @@ export class TrpcService {
     throw new Error('旧微信读书订阅入口已停用；请使用私有实例添加订阅。');
   }
 
+  subscriptionAddCapability() {
+    if (process.env.WECHAT2RSS_ENABLED !== '1')
+      return {
+        available: false as const,
+        code: 'SUBSCRIPTION_SOURCE_UNAVAILABLE' as const,
+        message:
+          '当前新增入口依赖的 Wechat2RSS 已停用，自建新公众号发现与持续更新尚未接通。暂不能自动新增；输入链接已保留，请勿重复提交。现有订阅和已保存文章仍可查看。',
+      };
+    return {
+      available: true as const,
+      code: 'SOURCE_CONFIGURED' as const,
+      message: '新增将提交到已显式配置的来源；任务受理不代表文章已取得。',
+    };
+  }
+
   async addSubscriptionFromArticle(articleUrl: string) {
+    const capability = this.subscriptionAddCapability();
+    if (!capability.available)
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: capability.message,
+      });
     const provider = wechat2RssProvider();
     await createVerifiedSqliteBackup();
     const accepted = await provider.addSubscription(articleUrl);
