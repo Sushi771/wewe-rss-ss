@@ -325,6 +325,60 @@ describe('private owner accounts', () => {
     ).rejects.toThrow('请先登录');
     expect(findUniqueOrThrow).not.toHaveBeenCalled();
   });
+  it('synchronizes saved expiry to local account metadata without network, writes or tail-based association', async () => {
+    const stateFile = path.join(dir, 'ux-state.json');
+    const stateText = JSON.stringify({
+      stop: {
+        reason: '业务码 -2012',
+        stage: 'directory-0',
+        at: '2026-01-02T00:00:00Z',
+      },
+    });
+    await fs.writeFile(stateFile, stateText);
+    await fs.writeFile(
+      process.env.OWNER_SEARCH_CONFIG_FILE!,
+      JSON.stringify({
+        feeds: {
+          MP_WXS_12345: {
+            mpId: 'MP_WXS_12345',
+            ownerVid: '123',
+            wereadLatestStateFile: stateFile,
+          },
+        },
+      }),
+    );
+    const findMany = jest.fn().mockResolvedValue([
+      { id: '123', name: 'fixture', status: 1 },
+      { id: '456', name: 'other fixture', status: 2 },
+    ]);
+    const feeds = jest.fn().mockResolvedValue([
+      {
+        id: 'MP_WXS_12345',
+        mpName: 'fixture',
+        collectionChannel: 'owner-weread-latest',
+      },
+    ]);
+    const { router } = setup({
+      account: { findMany },
+      feed: { findMany: feeds },
+    });
+    const caller = router.appRouter.createCaller({
+      errorMsg: null,
+      isLocal: true,
+    });
+    const result = await caller.account.list({});
+    expect(result.items.map((item) => item.loginState)).toEqual([
+      'expired',
+      'unverified',
+    ]);
+    expect(result.items.every((item) => !item.verificationRequired)).toBe(true);
+    expect(findMany.mock.calls[0][0].select.token).toBe(false);
+    expect(feeds).toHaveBeenCalledWith({
+      select: { id: true, mpName: true, collectionChannel: true },
+    });
+    expect(JSON.stringify(result)).not.toContain(dir);
+    expect(await fs.readFile(stateFile, 'utf8')).toBe(stateText);
+  });
   it('saves an unbound normal login server-side for explicit selection without changing the old owner', async () => {
     const configText = JSON.stringify({
       feeds: {
@@ -434,6 +488,8 @@ describe('private owner accounts', () => {
     expect(JSON.stringify(result)).not.toContain('old-mobile');
     expect(result).toEqual(duplicate);
     expect(upsert).toHaveBeenCalledTimes(1);
+    expect(upsert.mock.calls[0][0].where).toEqual({ id: '123' });
+    expect(upsert.mock.calls[0][0].update).toMatchObject({ status: 1 });
     expect(createVerifiedSqliteBackup).toHaveBeenCalledTimes(1);
     expect(
       JSON.parse(upsert.mock.calls[0][0].update.token).mobile.accessToken,

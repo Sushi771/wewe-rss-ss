@@ -34,7 +34,10 @@ import {
   Metrics,
 } from '../collection/collection-format';
 import { scanOwnerCandidates } from '../collection/owner-candidate-scan';
-import { readOwnerVerificationStatus } from '../collection/owner-verification-status';
+import {
+  readOwnerVerificationStatus,
+  readOwnerAccountAccess,
+} from '../collection/owner-verification-status';
 import {
   ownerConfigFile,
   previewManualWereadBinding,
@@ -232,8 +235,11 @@ export class TrpcRouter {
         return readOwnerVerificationStatus(
           process.env.OWNER_SEARCH_CONFIG_FILE,
           feeds,
-          async (id) =>
-            nativeAccountProfile(id, await nativeAccountLoginAt(id)),
+          async (id) => {
+            const nativeLoginAt = await nativeAccountLoginAt(id);
+            const profile = await nativeAccountProfile(id, nativeLoginAt);
+            return { name: profile?.name || null, nativeLoginAt };
+          },
         );
       },
     ),
@@ -510,7 +516,7 @@ export class TrpcRouter {
       }),
     list: this.legacyAccountProcedure
       .input(AccountSchemas.list)
-      .query(async ({ input }) => {
+      .query(async ({ input, ctx }) => {
         const limit = input.limit ?? 1000;
         const { cursor } = input;
 
@@ -556,9 +562,23 @@ export class TrpcRouter {
             };
           }),
         );
+        const access = await readOwnerAccountAccess(
+          (ctx as any).isLocal
+            ? process.env.OWNER_SEARCH_CONFIG_FILE
+            : undefined,
+          (ctx as any).isLocal && process.env.OWNER_SEARCH_CONFIG_FILE
+            ? await this.prismaService.feed.findMany({
+                select: { id: true, mpName: true, collectionChannel: true },
+              })
+            : [],
+          identifiedItems,
+        );
         return {
           blocks: disabledAccounts,
-          items: identifiedItems,
+          items: identifiedItems.map((item) => ({
+            ...item,
+            ...access.get(item.id),
+          })),
           nextCursor,
         };
       }),

@@ -1,7 +1,10 @@
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { readOwnerVerificationStatus } from './owner-verification-status';
+import {
+  readOwnerVerificationStatus,
+  readOwnerAccountAccess,
+} from './owner-verification-status';
 import { ownerLatestFailureReason } from './owner-weread-session-state';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { TrpcService } from '../trpc/trpc.service';
@@ -68,18 +71,20 @@ describe('saved official verification status', () => {
         accountName: 'Fixture nickname',
         accountTail: '6789',
         kind: 'weread-verification',
+        state: 'verification_required',
         stage: '目录',
         stoppedAt: at,
         backendStatus: 'stopped',
         canResume: false,
         officialUrl: 'https://weread.qq.com/',
+        verificationUrlAvailable: false,
       },
     ]);
     expect(profile).toHaveBeenCalledWith('123456789');
     expect(JSON.stringify(result)).not.toMatch(/secret|123456789|untrusted/);
     expect(await fs.readFile(stateFile)).toEqual(before);
   });
-  it.each(['业务码 -2012', 'HTTP 429', 'HTTP 401', 'unknown'])(
+  it.each(['HTTP 429', 'HTTP 401', 'unknown'])(
     'does not misclassify %s as a manual captcha',
     async (reason) => {
       await state(reason);
@@ -90,6 +95,73 @@ describe('saved official verification status', () => {
       expect(profile).not.toHaveBeenCalled();
     },
   );
+  it('projects a saved login timeout without making it a challenge or reading login secrets', async () => {
+    await state('微信读书登录超时（业务码 -2012）');
+    const before = await fs.readFile(stateFile);
+    const result = await readOwnerVerificationStatus(
+      configFile,
+      [feed],
+      profile,
+    );
+    expect(result.notices[0]).toMatchObject({
+      state: 'expired',
+      kind: 'weread-login-expired',
+      canResume: false,
+      verificationUrlAvailable: false,
+    });
+    const account = { id: '123456789', status: 1, nativeLoginAt: null };
+    const access = await readOwnerAccountAccess(
+      configFile,
+      [feed],
+      [
+        account,
+        { ...account, id: '999996789' }, // Same tail must not associate another account.
+        { ...account, id: '456', status: 2 },
+        { ...account, id: '789', status: 0 },
+      ],
+    );
+    expect(access.get(account.id)).toMatchObject({
+      loginState: 'expired',
+      verificationRequired: false,
+    });
+    expect(access.get('999996789')?.loginState).toBe('unverified');
+    expect(access.get('456')?.loginState).toBe('unverified');
+    expect(access.get('789')?.loginState).toBe('expired');
+    expect(await fs.readFile(stateFile)).toEqual(before);
+    expect(JSON.stringify(result)).not.toMatch(
+      /secret|123456789|must-not-be-read|untrusted/,
+    );
+  });
+  it('new confirmed login supersedes only the expiry label and never removes an official challenge', async () => {
+    const nativeLoginAt = new Date(Date.parse(at) + 1000).toISOString();
+    const account = { id: '123456789', status: 1, nativeLoginAt };
+    const loggedIn = async () => ({ name: 'Fixture nickname', nativeLoginAt });
+    await state('业务码 -2012');
+    expect(
+      (await readOwnerVerificationStatus(configFile, [feed], loggedIn)).notices,
+    ).toEqual([]);
+    expect(
+      (await readOwnerAccountAccess(configFile, [feed], [account])).get(
+        account.id,
+      ),
+    ).toMatchObject({ loginState: 'unverified', verificationRequired: false });
+    await state('业务码 -2041', { humanCompleted: true });
+    const before = await fs.readFile(stateFile);
+    expect(
+      (await readOwnerVerificationStatus(configFile, [feed], loggedIn))
+        .notices[0],
+    ).toMatchObject({
+      state: 'verification_required',
+      canResume: false,
+      verificationUrlAvailable: false,
+    });
+    expect(
+      (await readOwnerAccountAccess(configFile, [feed], [account])).get(
+        account.id,
+      ),
+    ).toMatchObject({ loginState: 'unverified', verificationRequired: true });
+    expect(await fs.readFile(stateFile)).toEqual(before);
+  });
   it('keeps the stop contract and recognizes the verified business code', async () => {
     const reason = ownerLatestFailureReason(new Error('业务码 -2041'));
     expect(reason).toBe('业务码 -2041');

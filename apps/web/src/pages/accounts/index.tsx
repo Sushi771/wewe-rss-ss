@@ -13,14 +13,14 @@ import { toast } from 'sonner';
 import { PlusIcon } from '@web/components/PlusIcon';
 import { StatusDropdown } from '@web/components/StatusDropdown';
 import { trpc } from '@web/utils/trpc';
-import { statusMap } from '@web/constants';
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 
 const AccountPage = () => {
   const { isOpen, onOpen, onClose, onOpenChange } = useDisclosure();
   const [count, setCount] = useState(0);
   const [reloginAccountId, setReloginAccountId] = useState<string | null>(null);
   const [loginError, setLoginError] = useState('');
+  const loginStarting = useRef(false);
   const [connectionAccountId, setConnectionAccountId] = useState<string | null>(
     null,
   );
@@ -48,6 +48,7 @@ const AccountPage = () => {
     mutateAsync,
     data: loginData,
     reset: resetLogin,
+    isLoading: creatingLogin,
   } = trpc.platform.createLoginUrl.useMutation({
     onError(err) {
       toast.error(err.message || '获取登录二维码失败');
@@ -81,6 +82,7 @@ const AccountPage = () => {
       retry: false,
       onError(err) {
         toast.error(err.message || '登录状态查询失败，已停止本次轮询');
+        setLoginError(err.message || '登录状态查询失败，已停止本次轮询');
         setCount(0);
       },
       async onSuccess(data) {
@@ -91,12 +93,17 @@ const AccountPage = () => {
             );
           } else {
             toast.success(
-              '账号已保存；请按昵称和最近扫码记录选择账号，连接手动更新。',
+              '账号登录已保存；官方验证和公众号更新状态未自动解除。',
             );
           }
           setReloginAccountId(null);
           onClose();
-          refetch();
+          setCount(0);
+          await Promise.all([
+            refetch(),
+            queryUtils.collection.verificationStatus.invalidate(),
+            queryUtils.account.manualRefreshOptions.invalidate(),
+          ]);
         } else if (
           data.terminal &&
           data.message &&
@@ -119,30 +126,38 @@ const AccountPage = () => {
     return () => timerId && clearTimeout(timerId);
   }, [count, isOpen]);
 
-  const invalidAccounts = data?.items.filter((item) => item.status === 0) ?? [];
+  const invalidAccounts =
+    data?.items.filter(
+      (item) => item.loginState === 'expired' || item.status === 0,
+    ) ?? [];
   const latestLoginAt = data?.items.reduce(
     (latest, item) =>
       Math.max(latest, Date.parse(item.nativeLoginAt || '') || 0),
     0,
   );
 
-  const openRelogin = (accountId: string) => {
-    resetLogin();
-    setLoginError('');
-    setCount(0);
-    setReloginAccountId(accountId);
-    onOpen();
-    void mutateAsync().catch(() => undefined);
+  const startLogin = async (accountId: string | null) => {
+    if (loginStarting.current) return;
+    loginStarting.current = true;
+    let requested = false;
+    try {
+      setCount(0);
+      setLoginError('');
+      setReloginAccountId(accountId);
+      onOpen();
+      await queryUtils.platform.getLoginResult.cancel();
+      resetLogin();
+      requested = true;
+      await mutateAsync();
+    } catch {
+      // Cancellation may fail before mutation onError runs. Keep retry explicit.
+      if (!requested) setLoginError('本次二维码未准备完成，请手动重试。');
+    } finally {
+      loginStarting.current = false;
+    }
   };
-
-  const openAdd = () => {
-    resetLogin();
-    setLoginError('');
-    setCount(0);
-    setReloginAccountId(null);
-    onOpen();
-    void mutateAsync().catch(() => undefined);
-  };
+  const openRelogin = (accountId: string) => void startLogin(accountId);
+  const openAdd = () => void startLogin(null);
 
   return (
     <div className="flex h-full flex-col">
@@ -173,8 +188,8 @@ const AccountPage = () => {
         {invalidAccounts.length > 0 && (
           <div className="mac-alert-danger mx-4 mt-4">
             <span className="text-[14px]">
-              <strong>{invalidAccounts.length}</strong> 个账号 Token
-              已标记失效。重新登录只恢复读书会话；文章更新结果以公众号页面为准。
+              <strong>{invalidAccounts.length}</strong> 个账号登录已过期。
+              请对原账号重新扫码；重新登录不自动解除官方验证或恢复取文。
             </span>
           </div>
         )}
@@ -196,7 +211,8 @@ const AccountPage = () => {
 
           {data?.items.map((item) => {
             const isBlocked = data?.blocks.includes(item.id);
-            const isInvalid = item.status === 0;
+            const isInvalid =
+              item.loginState === 'expired' || item.status === 0;
             const generatedName =
               !item.name || item.name === `WeRead_${item.id}`;
             const latestScan =
@@ -231,13 +247,13 @@ const AccountPage = () => {
                 </div>
 
                 {/* 状态 */}
-                <div className="flex shrink-0 items-center">
-                  {isBlocked ? (
-                    <span className="mac-badge mac-badge-warning">小黑屋</span>
-                  ) : item.status === 0 ? (
+                <div className="flex shrink-0 flex-col items-start gap-1">
+                  {isInvalid ? (
                     <span className="mac-badge mac-badge-danger">
-                      {statusMap[item.status].label}
+                      登录已过期
                     </span>
+                  ) : isBlocked ? (
+                    <span className="mac-badge mac-badge-warning">小黑屋</span>
                   ) : (
                     <StatusDropdown
                       value={item.status}
@@ -251,6 +267,16 @@ const AccountPage = () => {
                         });
                       }}
                     />
+                  )}
+                  {item.verificationRequired && (
+                    <span className="mac-badge mac-badge-warning">
+                      需官方验证
+                    </span>
+                  )}
+                  {item.accessStateUnavailable && (
+                    <span className="text-xs text-neutral-500">
+                      本机验证状态暂不可读
+                    </span>
                   )}
                 </div>
 
@@ -273,22 +299,14 @@ const AccountPage = () => {
 
                 {/* 操作 */}
                 <div className="account-actions flex items-center justify-end gap-2">
-                  {isInvalid ? (
-                    <span
-                      className="mac-action-link"
-                      onClick={() => openRelogin(item.id)}
-                    >
-                      重新登录
-                    </span>
-                  ) : null}
-                  {!isInvalid && (
-                    <button
-                      className="mac-action-link"
-                      onClick={() => openRelogin(item.id)}
-                    >
-                      重新登录
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    className="mac-action-link"
+                    disabled={creatingLogin}
+                    onClick={() => openRelogin(item.id)}
+                  >
+                    重新扫码登录
+                  </button>
                   {!isInvalid && (
                     <button
                       className="mac-action-link"
@@ -420,6 +438,7 @@ const AccountPage = () => {
         onOpenChange={async () => {
           onOpenChange();
           setReloginAccountId(null);
+          setCount(0);
           await queryUtils.platform.getLoginResult.cancel();
         }}
         size="xs"
@@ -448,10 +467,11 @@ const AccountPage = () => {
                     <div className="text-[14px] text-red-500">{loginError}</div>
                   ) : loginData ? (
                     <div className="relative rounded-xl border border-neutral-100 bg-white p-3 shadow-sm">
-                      {loginResult?.message && (
+                      {(loginResult?.message || count === 0) && (
                         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-white/90 p-4 text-center">
                           <span className="text-[15px] font-medium text-neutral-800">
-                            {loginResult.message}
+                            {loginResult?.message ||
+                              '二维码已过期，请重新生成后扫码。'}
                           </span>
                         </div>
                       )}
@@ -471,6 +491,17 @@ const AccountPage = () => {
                       <span className="text-red-500">({count}s)</span>
                     )}
                   </div>
+                  {(loginError ||
+                    (loginData && (count === 0 || loginResult?.terminal))) && (
+                    <Button
+                      size="sm"
+                      isDisabled={creatingLogin}
+                      isLoading={creatingLogin}
+                      onPress={() => void startLogin(reloginAccountId)}
+                    >
+                      重新生成二维码
+                    </Button>
+                  )}
                 </div>
               </ModalBody>
             </>
