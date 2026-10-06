@@ -244,6 +244,6 @@ test('popup feedback is selectable plain text, with no HTML rendering or clipboa
   assert.ok(!html.includes('完成正常验证'));
   assert.ok(!script.includes('innerHTML'));
   assert.ok(!script.includes('clipboard'));
-  assert.equal(manifest.version, '0.1.2');
+  assert.equal(manifest.version, '0.2.0');
   assert.deepEqual(manifest.permissions, ['activeTab', 'scripting']);
 });
