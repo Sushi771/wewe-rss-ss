@@ -21,6 +21,7 @@ import { CollectionService } from './collection/collection.service';
 import { WereadService } from './weread/weread.service';
 import { FeedsService } from './feeds/feeds.service';
 import * as picker from './article-folder-picker';
+import { LocalArticleStore } from './article-local-save';
 import { BrowserTaskBroker } from './browser-task';
 import {
   readBrowserTaskOptIn,
@@ -395,7 +396,102 @@ describe('explicit one-article opt-in integration, synthetic offline only', () =
     );
     expect(saved.status).toBe(409);
     expect(saved.body.code).toBe('SAVE_DIRECTORY_CHANGED');
+    expect(saved.body.message).toContain('取消任务');
+    const status = await request(app!.getHttpServer())
+      .get('/download/article/browser-task/' + taskId)
+      .set('host', '127.0.0.1:4000')
+      .set('Authorization', 'offline-auth');
+    expect(status.body).toMatchObject({
+      state: 'ready',
+      code: 'SAVE_DIRECTORY_CHANGED',
+      destinationBound: true,
+    });
+    expect(status.body.directoryPickConfirmed).toBeUndefined();
+    jest
+      .spyOn(picker, 'pickArticleDirectory')
+      .mockResolvedValueOnce(destination);
+    await post('/download/article/directory', {});
+    expect(
+      (await post('/download/article/browser-task/' + taskId + '/save', {}))
+        .body.code,
+    ).toBe('SAVE_DIRECTORY_CHANGED'); // Even restoring A cannot replay a conflicted task.
     expect(await readdir(destination)).toEqual([]);
     expect(await readdir(other)).toEqual([]);
+  });
+
+  it('selects an asking-policy directory before issue and scopes its grant to this fixed task', async () => {
+    await application();
+    await post('/download/article/settings', { askEveryTime: true });
+    for (const body of [
+      { url: originalUrl },
+      { url: originalUrl, pickToken: 'invalid' },
+    ]) {
+      const denied = await post('/download/article/browser-task', body);
+      expect(denied.status).toBe(409);
+      expect(denied.body.code).toBe('DIRECTORY_PICK_REQUIRED');
+      expect(existsSync(file + '.consumed')).toBe(false);
+    }
+    const chosen = join(directory, 'chosen-before-issue');
+    await mkdir(chosen);
+    jest.spyOn(picker, 'pickArticleDirectory').mockResolvedValueOnce(chosen);
+    const selection = await post('/download/article/directory', {});
+    const issued = await post('/download/article/browser-task', {
+      url: originalUrl,
+      pickToken: selection.body.pickToken,
+    });
+    expect(issued.status).toBe(200);
+    expect(issued.body.destinationBound).toBe(true);
+    const taskId = issued.body.taskId;
+    const claim = await post('/browser-task/claim', { taskId, binding });
+    expect(claim.body.disclosure.destination).toBe(chosen);
+    expect(
+      (
+        await post('/download/article', {
+          url: originalUrl,
+          pickToken: selection.body.pickToken,
+        })
+      ).status,
+    ).toBe(409); // The grant cannot authorize an unrelated ordinary save.
+    await post('/browser-task/complete', {
+      taskId,
+      binding,
+      nonce: claim.body.nonce,
+      observation: {
+        pageUrl: binding.pageUrl,
+        html: sample.html.replace(short, originalUrl),
+        images: sample.images,
+        omittedEmptyImageNodes: 0,
+      },
+    });
+    expect(
+      (
+        await post('/download/article/browser-task/' + taskId + '/save', {
+          directoryPickConfirmed: true,
+        })
+      ).status,
+    ).toBe(400);
+    jest
+      .spyOn(LocalArticleStore.prototype, 'save')
+      .mockRejectedValueOnce(new Error('synthetic first-write failure'));
+    expect(
+      (await post('/download/article/browser-task/' + taskId + '/save', {}))
+        .status,
+    ).toBe(500);
+    const saved = await post(
+      '/download/article/browser-task/' + taskId + '/save',
+      {},
+    );
+    expect(saved.status).toBe(200);
+    expect(saved.body.markdownPath.startsWith(chosen)).toBe(true);
+    expect(await readFile(saved.body.markdownPath, 'utf8')).toContain(
+      approval().article.title,
+    );
+    const images = await readdir(join(saved.body.directory, 'image'));
+    expect(images).toHaveLength(1);
+    expect(
+      await readFile(join(saved.body.directory, 'image', images[0])),
+    ).toEqual(Buffer.from(png, 'base64'));
+    expect(await readdir(destination)).toEqual([]);
+    expect(picker.pickArticleDirectory).toHaveBeenCalledTimes(1);
   });
 });

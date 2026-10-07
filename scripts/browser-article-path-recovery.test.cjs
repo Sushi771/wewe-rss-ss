@@ -39,12 +39,14 @@ function page({
   effects = false,
   fetchReply,
   taskPresent = true,
+  destinationBound = false,
 } = {}) {
   const task = {
     taskId: '12345678-1234-1234-1234-123456789012',
     expiresAt: new Date(Date.now() + 300000).toISOString(),
     state: phase,
     code: 'SAVE_RETRY_REQUIRED',
+    ...(destinationBound ? { destinationBound: true } : {}),
   };
   const state = [
     'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv',
@@ -56,6 +58,10 @@ function page({
     null,
     true,
     taskPresent ? { ...task } : null,
+    false,
+    0,
+    false,
+    destinationBound,
   ];
   const refs = [],
     calls = [],
@@ -675,6 +681,112 @@ test('late target-input events cannot replace an active retained article', () =>
   assert.equal(h.state[0], 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv');
   assert.deepEqual(h.state[8], before);
   assert.equal(h.calls.length, 0);
+});
+
+test('a fixed ready task locks its directory and explains that a new destination needs renewed confirmation', () => {
+  const h = page({ destinationBound: true });
+  assert.equal(h.button('选择下载路径').props.isDisabled, true);
+  const text = JSON.stringify(h.render());
+  assert.ok(text.includes('取得新的接收许可'));
+  assert.equal(text.includes('可重新选择路径后保存'), false);
+  h.button('选择下载路径').props.onPress();
+  assert.equal(h.calls.length, 0);
+});
+
+test('asking-policy selection precedes fixed task issue; save never opens a second picker', async () => {
+  let issued;
+  const h = page({
+    taskPresent: false,
+    destinationBound: true,
+    settings: { directory: 'synthetic-old-path', askEveryTime: true },
+    fetchReply: async (url, options) => {
+      if (url.endsWith('/browser-task') && options.method === 'POST') {
+        issued = {
+          taskId: '12345678-1234-1234-1234-123456789012',
+          expiresAt: new Date(Date.now() + 300000).toISOString(),
+          state: 'waiting',
+          destinationBound: true,
+        };
+        return { ok: true, json: async () => issued };
+      }
+      if (issued && url.endsWith(issued.taskId))
+        return { ok: true, json: async () => ({ ...issued, state: 'saved' }) };
+    },
+  });
+  h.button('通过已打开的官方文章接收').props.onPress();
+  await flush();
+  assert.deepEqual(
+    h.calls.map((c) => c.url.split('/').at(-1)),
+    ['directory', 'browser-task'],
+  );
+  assert.equal(JSON.parse(h.calls[1].body).pickToken, 'synthetic-grant');
+  assert.equal(h.state[8].destinationBound, true);
+  h.state[8] = { ...h.state[8], state: 'ready' };
+  h.button('保存已接收的正文和图片').props.onPress();
+  await flush();
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/directory')).length, 1);
+  assert.equal(
+    JSON.parse(h.calls.find((c) => c.url.endsWith('/save')).body).pickToken,
+    undefined,
+  );
+  assert.equal(h.state[6].saved, true);
+});
+
+test('cancelling pre-task native selection issues no fixed task', async () => {
+  const h = page({
+    taskPresent: false,
+    destinationBound: true,
+    settings: { directory: 'synthetic-old-path', askEveryTime: true },
+    directoryReply: async () => ({ cancelled: true }),
+  });
+  h.button('通过已打开的官方文章接收').props.onPress();
+  await flush();
+  assert.equal(h.calls.length, 1);
+  assert.ok(h.calls[0].url.endsWith('/directory'));
+  assert.equal(h.state[8], null);
+});
+
+test('a fixed directory conflict disables further save and retains explicit cancel', async () => {
+  const h = page({
+    destinationBound: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/save'))
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            code: 'SAVE_DIRECTORY_CHANGED',
+            message: '取消任务并重新确认目录',
+          }),
+        };
+      if (url.endsWith('12345678-1234-1234-1234-123456789012'))
+        return {
+          ok: true,
+          json: async () => ({
+            ...h.state[8],
+            state: 'ready',
+            code: 'SAVE_DIRECTORY_CHANGED',
+          }),
+        };
+    },
+  });
+  h.button('保存已接收的正文和图片').props.onPress();
+  await flush();
+  assert.equal(h.state[8].code, 'SAVE_DIRECTORY_CHANGED');
+  assert.equal(h.button('保存已接收的正文和图片').props.isDisabled, true);
+  assert.equal(h.button('选择下载路径').props.isDisabled, true);
+  assert.ok(
+    h
+      .render()
+      .some(
+        (n) => n.type === 'Button' && String(n.props.children).includes('取消'),
+      ),
+  );
+  assert.equal(h.state[6], null);
+  const calls = h.calls.length;
+  h.button('保存已接收的正文和图片').props.onPress();
+  await flush();
+  assert.equal(h.calls.length, calls);
 });
 
 test('leaving cancels capture and ignores late reads; returning loads preferences without silently issuing a task', async () => {

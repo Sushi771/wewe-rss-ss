@@ -13,10 +13,12 @@ export type BrowserArticleTaskStatus = {
   expiresAt: string;
   state: BrowserArticleTaskState;
   code?: string;
+  destinationBound?: boolean;
 };
 export type BrowserArticleTaskCapability = {
   available: boolean;
   code?: string;
+  destinationBound?: boolean;
   refreshAvailable: false;
   refreshCode: 'DIRECTORY_ROUTE_UNVERIFIED';
 };
@@ -28,6 +30,11 @@ export function mergeBrowserArticleTaskStatus(
 ) {
   if (!current || current.taskId !== next.taskId) return current;
   if (['saved', 'cancelled', 'expired', 'failed'].includes(current.state))
+    return current;
+  if (
+    current.code === 'SAVE_DIRECTORY_CHANGED' &&
+    ['waiting', 'claimed', 'ready', 'saving'].includes(next.state)
+  )
     return current;
   if (
     ['ready', 'saving'].includes(current.state) &&
@@ -44,12 +51,17 @@ export function browserArticleTaskStatus(
   const value = raw as BrowserArticleTaskStatus;
   if (
     Object.keys(value).some(
-      (k) => !['taskId', 'expiresAt', 'state', 'code'].includes(k),
+      (k) =>
+        !['taskId', 'expiresAt', 'state', 'code', 'destinationBound'].includes(
+          k,
+        ),
     ) ||
     typeof value.taskId !== 'string' ||
     !/^[a-f0-9-]{36}$/.test(value.taskId) ||
     typeof value.expiresAt !== 'string' ||
     !Number.isFinite(Date.parse(value.expiresAt)) ||
+    (value.destinationBound !== undefined &&
+      typeof value.destinationBound !== 'boolean') ||
     ![
       'waiting',
       'claimed',
@@ -66,6 +78,7 @@ export function browserArticleTaskStatus(
         'TASK_EXPIRED',
         'OBSERVATION_REJECTED',
         'SAVE_RETRY_REQUIRED',
+        'SAVE_DIRECTORY_CHANGED',
       ].includes(value.code))
   )
     return null;
@@ -74,5 +87,8 @@ export function browserArticleTaskStatus(
     expiresAt: value.expiresAt,
     state: value.state,
     ...(value.code ? { code: value.code } : {}),
+    ...(value.destinationBound === undefined
+      ? {}
+      : { destinationBound: value.destinationBound }),
   };
 }

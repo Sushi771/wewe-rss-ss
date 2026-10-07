@@ -36,12 +36,14 @@ describe('application article handoff lifecycle, no network or persistent data',
     expect(disabled.capability()).toEqual({
       available: false,
       code: 'BROWSER_TASK_DISABLED',
+      destinationBound: false,
       refreshAvailable: false,
       refreshCode: 'DIRECTORY_ROUTE_UNVERIFIED',
     });
     expect(() => disabled.issue(short, owner)).toThrow('BROWSER_TASK_DISABLED');
     expect(tasks.capability()).toEqual({
       available: true,
+      destinationBound: false,
       refreshAvailable: false,
       refreshCode: 'DIRECTORY_ROUTE_UNVERIFIED',
     });
@@ -159,11 +161,25 @@ describe('application article handoff lifecycle, no network or persistent data',
       { ...task, taskId: 'bad' },
       { ...task, expiresAt: 'bad' },
       { ...task, code: 'raw-cookie' },
+      { ...task, destinationBound: 'true' },
+      { ...task, directoryPickConfirmed: true },
     ])
       expect(browserArticleTaskStatus(value)).toBeNull();
   });
   it('a late client poll cannot revive completed capture or replace a newer task', () => {
     const next = tasks.issue(short, owner);
+    const conflict = {
+      ...next,
+      state: 'ready' as const,
+      code: 'SAVE_DIRECTORY_CHANGED',
+    };
+    expect(
+      mergeBrowserArticleTaskStatus(conflict, { ...next, state: 'ready' }),
+    ).toBe(conflict);
+    expect(
+      mergeBrowserArticleTaskStatus(conflict, { ...next, state: 'cancelled' })
+        ?.state,
+    ).toBe('cancelled');
     for (const state of [
       'saved',
       'cancelled',

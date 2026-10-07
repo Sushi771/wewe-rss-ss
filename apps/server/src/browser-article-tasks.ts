@@ -8,6 +8,7 @@ type Record = {
   url: string;
   article?: ProviderArticle;
   destination?: string;
+  directoryPickConfirmed?: boolean;
   timer: ReturnType<typeof setTimeout>;
 };
 
@@ -21,6 +22,7 @@ export class BrowserArticleTasks {
   capability() {
     return {
       ...this.broker.capability(),
+      destinationBound: this.broker.requiresDisclosure(),
       refreshAvailable: false as const,
       refreshCode: 'DIRECTORY_ROUTE_UNVERIFIED' as const,
     };
@@ -28,7 +30,12 @@ export class BrowserArticleTasks {
   requiresDisclosure() {
     return this.broker.requiresDisclosure();
   }
-  issue(url: string, owner: string, destination?: string) {
+  issue(
+    url: string,
+    owner: string,
+    destination?: string,
+    directoryPickConfirmed = false,
+  ) {
     this.prune();
     if (
       this.records.size >= 32 ||
@@ -43,10 +50,14 @@ export class BrowserArticleTasks {
         taskId: issued.taskId,
         expiresAt: issued.expiresAt,
         state: 'waiting',
+        ...(destination ? { destinationBound: true } : {}),
       },
       owner,
       url,
       ...(destination ? { destination } : {}),
+      ...(destination && directoryPickConfirmed
+        ? { directoryPickConfirmed: true }
+        : {}),
       timer: setTimeout(
         () => this.expire(record),
         Date.parse(issued.expiresAt) - Date.now(),
@@ -126,6 +137,8 @@ export class BrowserArticleTasks {
   }
   beginSave(taskId: unknown, owner: string) {
     const record = this.get(taskId, owner);
+    if (record.status.code === 'SAVE_DIRECTORY_CHANGED')
+      throw new BrowserTaskError('SAVE_DIRECTORY_CHANGED', 409);
     if (record.status.state !== 'ready' || !record.article)
       throw new BrowserTaskError('TASK_NOT_READY', 409);
     record.status.state = 'saving';
@@ -135,18 +148,27 @@ export class BrowserArticleTasks {
       url: record.url,
       article: record.article,
       ...(record.destination ? { destination: record.destination } : {}),
+      ...(record.directoryPickConfirmed
+        ? { directoryPickConfirmed: true }
+        : {}),
     };
   }
   saved(taskId: unknown, owner: string) {
     this.finish(this.get(taskId, owner), 'saved');
   }
-  saveFailed(taskId: unknown, owner: string) {
+  saveFailed(
+    taskId: unknown,
+    owner: string,
+    code:
+      | 'SAVE_RETRY_REQUIRED'
+      | 'SAVE_DIRECTORY_CHANGED' = 'SAVE_RETRY_REQUIRED',
+  ) {
     const record = this.get(taskId, owner);
     if (Date.now() >= Date.parse(record.status.expiresAt)) {
       this.finish(record, 'expired', 'TASK_EXPIRED');
     } else {
       record.status.state = 'ready';
-      record.status.code = 'SAVE_RETRY_REQUIRED';
+      record.status.code = code;
       record.timer = setTimeout(
         () => this.expire(record),
         Date.parse(record.status.expiresAt) - Date.now(),

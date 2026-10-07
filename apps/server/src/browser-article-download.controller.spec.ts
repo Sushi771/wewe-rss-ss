@@ -120,6 +120,7 @@ describe('original download application task HTTP handoff; synthetic content onl
     const response = await get('/browser-task').expect(200);
     expect(response.body).toEqual({
       available: true,
+      destinationBound: false,
       refreshAvailable: false,
       refreshCode: 'DIRECTORY_ROUTE_UNVERIFIED',
     });

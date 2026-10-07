@@ -261,7 +261,12 @@ export class ArticleDownloadController implements OnModuleDestroy {
       )
       .json({
         code,
-        message: '官方文章接收任务未完成；未请求原文，也未改变订阅停止状态。',
+        message:
+          code === 'SAVE_DIRECTORY_CHANGED'
+            ? '保存目录已改变，本次任务不能写入新目录。请取消任务，重新确认目录并取得新的接收许可后创建任务。'
+            : code === 'DIRECTORY_PICK_REQUIRED'
+              ? '请先选择本次保存目录，再创建官方文章接收任务。'
+              : '官方文章接收任务未完成；未请求原文，也未改变订阅停止状态。',
       });
   }
   @Get('article/browser-task')
@@ -272,7 +277,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
   }
   @Post('article/browser-task')
   async browserTaskIssue(
-    @Body() body: { url?: unknown },
+    @Body() body: { url?: unknown; pickToken?: unknown },
     @Request() req: Req,
     @Response() res: Res,
   ) {
@@ -288,20 +293,24 @@ export class ArticleDownloadController implements OnModuleDestroy {
         !body ||
         typeof body !== 'object' ||
         Array.isArray(body) ||
-        Object.keys(body).some((k) => k !== 'url')
+        Object.keys(body).some((k) => !['url', 'pickToken'].includes(k))
       )
         throw new BrowserTaskError('INPUT_SCHEMA', 400);
-      return res
-        .status(200)
-        .json(
-          this.browserTasks.issue(
-            downloadArticleUrl(body.url),
-            this.taskOwner(req),
-            this.browserTasks.requiresDisclosure()
-              ? (await this.localStore().read()).directory
-              : undefined,
-          ),
-        );
+      const fixed = this.browserTasks.requiresDisclosure();
+      const settings = fixed ? await this.localStore().read() : undefined;
+      const picked = !!settings?.askEveryTime;
+      if (picked && (!this.pickerGrant || body.pickToken !== this.pickerGrant))
+        throw new BrowserTaskError('DIRECTORY_PICK_REQUIRED', 409);
+      const issued = this.browserTasks.issue(
+        downloadArticleUrl(body.url),
+        this.taskOwner(req),
+        settings?.directory,
+        picked,
+      );
+      // Native selection is consumed by this fixed task, not reusable by an
+      // ordinary save. The task retains the scoped proof for same-directory retries.
+      if (picked) this.pickerGrant = undefined;
+      return res.status(200).json(issued);
     } catch (error) {
       return this.taskFailure(error, res);
     }
@@ -377,11 +386,20 @@ export class ArticleDownloadController implements OnModuleDestroy {
         { url: verified.url, pickToken: body.pickToken },
         req,
         res,
+        !!verified.destination && verified.directoryPickConfirmed === true,
       );
       if (res.statusCode === 200) this.browserTasks.saved(taskId, owner);
       else this.browserTasks.saveFailed(taskId, owner);
     } catch (error) {
-      if (began) this.browserTasks.saveFailed(taskId, owner);
+      if (began)
+        this.browserTasks.saveFailed(
+          taskId,
+          owner,
+          error instanceof BrowserTaskError &&
+            error.code === 'SAVE_DIRECTORY_CHANGED'
+            ? 'SAVE_DIRECTORY_CHANGED'
+            : 'SAVE_RETRY_REQUIRED',
+        );
       if (!res.headersSent) return this.taskFailure(error, res);
     }
   }
@@ -395,15 +413,19 @@ export class ArticleDownloadController implements OnModuleDestroy {
     body: { url?: unknown; pickToken?: unknown },
     req: Req,
     res: Res,
+    directoryPickConfirmed = false,
   ) {
-    return this.saveArticle(body, req, res, { article });
+    return this.saveArticle(body, req, res, {
+      article,
+      directoryPickConfirmed,
+    });
   }
 
   private async saveArticle(
     body: { url?: unknown; pickToken?: unknown },
     req: Req,
     res: Res,
-    verified?: { article: ProviderArticle },
+    verified?: { article: ProviderArticle; directoryPickConfirmed?: boolean },
   ) {
     if (!this.authorized(req, res, true)) return;
     if (process.env.WEWE_ACCEPTANCE_MODE === '1')
@@ -431,6 +453,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
       const store = this.localStore();
       if (
         (await store.read()).askEveryTime &&
+        !verified?.directoryPickConfirmed &&
         (!this.pickerGrant || body.pickToken !== this.pickerGrant)
       )
         return res.status(409).json({ message: '请先选择本次保存路径。' });

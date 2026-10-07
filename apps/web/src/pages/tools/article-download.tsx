@@ -46,6 +46,7 @@ export default function ArticleDownload() {
   const [browserStatusUnreadable, setBrowserStatusUnreadable] = useState(false);
   const [statusReadAttempt, setStatusReadAttempt] = useState(0);
   const [statusReading, setStatusReading] = useState(false);
+  const [browserDestinationBound, setBrowserDestinationBound] = useState(false);
   const browserActive =
     !!browserTask &&
     ['waiting', 'claimed', 'ready', 'saving'].includes(browserTask.state);
@@ -115,7 +116,10 @@ export default function ArticleDownload() {
           );
       });
     void api('/browser-task', undefined, controller.signal)
-      .then((value) => setBrowserAvailable(value.available === true))
+      .then((value) => {
+        setBrowserAvailable(value.available === true);
+        setBrowserDestinationBound(value.destinationBound === true);
+      })
       .catch(() => {}); // Older/disabled deployments simply have no task action.
     return () => {
       controller.abort();
@@ -246,8 +250,19 @@ export default function ArticleDownload() {
     void operate(async (signal) => {
       setBrowserTask(null);
       setBrowserStatusUnreadable(false);
+      let pickToken: string | undefined;
+      // Fixed-directory disclosure is issued only after the user's native choice.
+      if (browserDestinationBound && settings?.askEveryTime) {
+        const selected = await choose(signal);
+        if (!selected) return;
+        pickToken = selected;
+      }
       const task = browserArticleTaskStatus(
-        await api('/browser-task', { url: url.trim() }, signal),
+        await api(
+          '/browser-task',
+          { url: url.trim(), ...(pickToken ? { pickToken } : {}) },
+          signal,
+        ),
       );
       if (!task) throw new Error('未收到有效的官方文章接收任务。');
       setBrowserTask(task);
@@ -255,11 +270,12 @@ export default function ArticleDownload() {
   const saveBrowserTask = () =>
     void operate(async (signal) => {
       if (!browserTaskId) return;
+      if (browserTask?.code === 'SAVE_DIRECTORY_CHANGED') return;
       let gone = false;
       let saveError: Error | undefined;
       try {
         let pickToken: string | undefined;
-        if (settings?.askEveryTime) {
+        if (!browserTask?.destinationBound && settings?.askEveryTime) {
           const selected = await choose(signal);
           if (!selected) return;
           pickToken = selected;
@@ -385,17 +401,25 @@ export default function ArticleDownload() {
               type="button"
               isDisabled={
                 busy ||
-                (browserActive && browserTask?.state !== 'ready') ||
+                (browserActive &&
+                  (browserTask?.destinationBound ||
+                    browserTask?.state !== 'ready')) ||
                 !settings
               }
-              onPress={() =>
+              onPress={() => {
+                if (browserActive && browserTask?.destinationBound) return;
                 void operate(async (signal) => {
                   await choose(signal);
-                })
-              }
+                });
+              }}
             >
               选择下载路径
             </Button>
+            {browserActive && browserTask?.destinationBound && (
+              <p className="mt-2 text-sm">
+                本次任务的保存目录已固定。若需更改，请取消任务，重新确认目录并取得新的接收许可后创建任务。
+              </p>
+            )}
             {!settings && (
               <Button
                 className="ml-2 mt-3"
@@ -482,13 +506,25 @@ export default function ArticleDownload() {
             )}
             {browserTask.code === 'SAVE_RETRY_REQUIRED' && (
               <p className="mt-2 text-sm">
-                上次本机保存未完成，可重新选择路径后保存；不会重新取文。
+                {browserTask.destinationBound
+                  ? '上次本机保存未完成，请核对本次固定目录后重试。若需更改目录，请取消本次任务，重新确认目录并取得新的接收许可后创建任务。'
+                  : '上次本机保存未完成，可重新选择路径后保存；不会重新取文。'}
+              </p>
+            )}
+            {browserTask.code === 'SAVE_DIRECTORY_CHANGED' && (
+              <p className="mt-2 text-sm">
+                保存目录已改变，本次任务不能写入新目录。请取消任务，重新确认目录并取得新的接收许可后创建任务。
               </p>
             )}
             {browserTask.state === 'ready' && (
               <Button
                 className="mt-3"
-                isDisabled={busy || browserStatusUnreadable || statusReading}
+                isDisabled={
+                  busy ||
+                  browserStatusUnreadable ||
+                  statusReading ||
+                  browserTask.code === 'SAVE_DIRECTORY_CHANGED'
+                }
                 onPress={saveBrowserTask}
               >
                 保存已接收的正文和图片
