@@ -1,6 +1,6 @@
 # Native publisher candidate validation
 
-This server entry validates a new publisher before a private Provider binding exists. The original authenticated local `feed.addFromArticle` route now consumes it through the native adapter registered in `TrpcModule`. Current implementation and tests are local; the running production package has not been replaced. No external publication or live platform request is part of this change.
+This server entry validates a new publisher before a private Provider binding exists. The original authenticated local `feed.addFromArticle` route now consumes it through the native adapter registered in `TrpcModule`. Functional commit `3e56770` is deployed in an immutable package on local loopback4000 after complete offline regression and fresh production-copy cold-start/rollback checks. Actual served assets and registered add capability match that package, while protected data and private configuration remain intact. Scheduling and browser receiving remain disabled. No live platform request was performed; current repair publication/remote CI and live new-publisher acceptance remain outstanding.
 
 ## Consumer contract
 
