@@ -15,6 +15,14 @@ import {
 } from '../../../packages/shared/src/article-verification';
 
 type RedirectKind = 'verification' | 'login' | 'article' | 'other' | 'missing';
+export type PublicRedirectDiagnostic = {
+  hostKind: 'official-article' | 'official-login' | 'other' | 'missing';
+  pathKind: RedirectKind;
+  verificationReason?: Extract<
+    ArticleVerification,
+    { status: 'unavailable' }
+  >['reason'];
+};
 export type DownloadDiagnostic = {
   code: string;
   stage?: 'article' | 'image';
@@ -118,6 +126,10 @@ type DownloadResponse = {
   status: number;
   redirectKind?: RedirectKind;
   officialVerification?: ArticleVerification;
+  verificationObservedAt?: string;
+  redirectDiagnostic?: PublicRedirectDiagnostic;
+  /** Validated public article destination; never serialize raw Location. */
+  readonly officialArticleRedirect?: string;
 };
 type DownloadRequest = (
   url: string,
@@ -148,6 +160,85 @@ export function downloadRedirectKind(
   } catch {
     return 'other';
   }
+}
+
+/** One ordinary short-to-long article hop. No credentials, nested destinations,
+ * unknown query parameters, cross-host navigation or challenge following.
+ * The caller still uses the DNS-pinned public transport for the second request.
+ */
+export function publicArticleRedirect(
+  raw: unknown,
+  source: string,
+): string | undefined {
+  try {
+    if (
+      typeof raw !== 'string' ||
+      raw.length > 2000 ||
+      /[\\\s\x00-\x1f\x7f]/.test(raw)
+    )
+      return;
+    if (
+      !/^\/s\/[A-Za-z0-9_-]{22}$/.test(
+        new URL(downloadArticleUrl(source)).pathname,
+      )
+    )
+      return;
+    const target = new URL(raw, source);
+    if (target.pathname !== '/s' || (target.hash && target.hash !== '#rd'))
+      return;
+    const allowed = new Set([
+      '__biz',
+      'mid',
+      'idx',
+      'sn',
+      'chksm',
+      'appmsgid',
+      'itemidx',
+      'scene',
+      'from',
+      'isappinstalled',
+      'subscene',
+      'ascene',
+      'lang',
+    ]);
+    for (const key of target.searchParams.keys())
+      if (!allowed.has(key) || target.searchParams.getAll(key).length !== 1)
+        return;
+    return downloadArticleUrl(target.href);
+  } catch {
+    return;
+  }
+}
+
+/** Bounded labels only: no raw path, query, URL, ticket or authentication data. */
+export function publicRedirectDiagnostic(
+  raw: unknown,
+  source: string,
+): PublicRedirectDiagnostic {
+  const pathKind = downloadRedirectKind(raw, source);
+  let hostKind: PublicRedirectDiagnostic['hostKind'] = 'missing';
+  if (typeof raw === 'string' && raw) {
+    hostKind = 'other';
+    try {
+      const target = new URL(raw, source);
+      if (target.hostname === 'mp.weixin.qq.com') hostKind = 'official-article';
+      else if (target.hostname === 'open.weixin.qq.com')
+        hostKind = 'official-login';
+    } catch {
+      /* Invalid URL remains other. */
+    }
+  }
+  const checked =
+    pathKind === 'verification'
+      ? articleVerificationLocation(raw, source)
+      : undefined;
+  return {
+    hostKind,
+    pathKind,
+    ...(checked?.status === 'unavailable'
+      ? { verificationReason: checked.reason }
+      : {}),
+  };
 }
 
 function responseFailure(
@@ -290,17 +381,33 @@ export const requestDownloadResource: DownloadRequest = async (
         .split(';')[0]
         .toLowerCase(),
       ...(response.status >= 300 && response.status < 400
-        ? { redirectKind: downloadRedirectKind(response.headers.location, raw) }
+        ? {
+            redirectKind: downloadRedirectKind(response.headers.location, raw),
+            redirectDiagnostic: publicRedirectDiagnostic(
+              response.headers.location,
+              raw,
+            ),
+          }
         : {}),
     };
     if (
       result.redirectKind === 'verification' &&
       url.hostname === 'mp.weixin.qq.com'
-    )
+    ) {
+      result.verificationObservedAt = new Date().toISOString();
       Object.defineProperty(result, 'officialVerification', {
         value: articleVerificationLocation(response.headers.location, raw),
         enumerable: false,
       });
+    }
+    if (result.redirectKind === 'article') {
+      const target = publicArticleRedirect(response.headers.location, raw);
+      if (target)
+        Object.defineProperty(result, 'officialArticleRedirect', {
+          value: target,
+          enumerable: false,
+        });
+    }
     return result;
   } catch (error) {
     throw transportFailure(

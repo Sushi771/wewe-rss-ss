@@ -9,7 +9,6 @@ import { resolveNativeWereadAccount } from './owner-weread-account';
 import { downloadArticleUrl } from '../article-download';
 import { WereadPublicOriginalResult } from './weread-public-original';
 import { NativeWereadAccount } from './owner-weread-account';
-import { ARTICLE_VERIFICATION_TTL_MS } from '../../../../packages/shared/src/article-verification';
 import {
   validateWereadPublisherCandidate,
   withVerifiedWereadCandidateBinding,
@@ -147,19 +146,17 @@ export function createNativeSubscriptionDiscovery(options: {
             code:
               original.status === 'verification-required'
                 ? 'PUBLIC_ORIGINAL_VERIFICATION_REQUIRED'
-                : 'PUBLIC_ORIGINAL_REFUSED',
+                : original.redirectKind === 'login'
+                  ? 'PUBLIC_ORIGINAL_LOGIN_REDIRECT'
+                  : original.redirectKind === 'article'
+                    ? 'PUBLIC_ORIGINAL_ARTICLE_REDIRECT'
+                    : ['other', 'missing'].includes(original.redirectKind || '')
+                      ? 'PUBLIC_ORIGINAL_UNSUPPORTED_REDIRECT'
+                      : 'PUBLIC_ORIGINAL_REFUSED',
             httpStatus: original.upstreamStatus,
             ...(original.officialVerification
               ? {
-                  officialVerification:
-                    original.officialVerification.status === 'available'
-                      ? {
-                          ...original.officialVerification,
-                          expiresAt: new Date(
-                            Date.now() + ARTICLE_VERIFICATION_TTL_MS,
-                          ).toISOString(),
-                        }
-                      : original.officialVerification,
+                  officialVerification: original.officialVerification,
                 }
               : {}),
           };

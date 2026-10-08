@@ -6,6 +6,59 @@ import {
 
 describe('subscription request / public response boundary', () => {
   it.each([
+    'PUBLIC_ORIGINAL_LOGIN_REDIRECT',
+    'PUBLIC_ORIGINAL_ARTICLE_REDIRECT',
+    'PUBLIC_ORIGINAL_UNSUPPORTED_REDIRECT',
+  ])('keeps %s distinct from a verification challenge', async (code) => {
+    const result = await addNativeSubscription(
+      {} as any,
+      {
+        discover: async () => ({
+          status: 'blocked',
+          stage: 'identity',
+          code,
+          httpStatus: 302,
+        }),
+      },
+      {
+        articleUrl: 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv',
+        accountId: '123',
+        trigger: 'local-manual-add',
+      },
+      jest.fn(),
+    );
+    expect(result).toMatchObject({ accepted: false, code, httpStatus: 302 });
+    expect(result.message).not.toContain('要求验证');
+    expect(result.officialVerification).toBeUndefined();
+  });
+  it('expires a safe verification URL at the response boundary instead of renewing it', async () => {
+    const url = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
+    const result = await addNativeSubscription(
+      {} as any,
+      {
+        discover: async () => ({
+          status: 'needs-verification',
+          stage: 'identity',
+          code: 'PUBLIC_ORIGINAL_VERIFICATION_REQUIRED',
+          officialVerification: {
+            status: 'available',
+            articleUrl: url,
+            url: 'https://mp.weixin.qq.com/mp/verify',
+            expiresAt: new Date(Date.now() - 1).toISOString(),
+          },
+        }),
+      },
+      { articleUrl: url, accountId: '123', trigger: 'local-manual-add' },
+      jest.fn(),
+    );
+    expect(result.officialVerification).toEqual({
+      status: 'unavailable',
+      articleUrl: url,
+      reason: 'expired',
+    });
+    expect(result.message).toContain('不会自动恢复请求');
+  });
+  it.each([
     'http://mp.weixin.qq.com/s/abc',
     'https://mp.weixin.qq.com.evil.test/s/abc',
     'https://user:secret@mp.weixin.qq.com/s/abc',

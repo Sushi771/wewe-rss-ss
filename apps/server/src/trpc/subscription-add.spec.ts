@@ -673,6 +673,76 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
     expect(externalGet).toHaveBeenCalledTimes(1);
   });
 
+  it('resolves one ordinary short-to-long hop through actual transport then reuses the native ten-body saver', async () => {
+    const n = await actualNative('success', { usePublicResolver: true });
+    const short = 'https://mp.weixin.qq.com/s/' + 'a'.repeat(22);
+    externalGet.mockResolvedValueOnce({
+      status: 302,
+      data: Buffer.alloc(0),
+      headers: { location: url(), 'content-type': 'text/html' },
+    });
+    const response = await request(n.app)
+      .post('/trpc/feed.addFromArticle')
+      .set('authorization', 'synthetic-local-access')
+      .set('origin', 'http://127.0.0.1')
+      .send({ articleUrl: short, accountId: '123' })
+      .expect(200);
+    expect(response.body.result.data).toMatchObject({
+      accepted: true,
+      status: 'updated',
+      update: { articles: 10, created: 10, saved: true },
+    });
+    expect(
+      externalGet.mock.calls.filter(([target]) =>
+        String(target).startsWith('https://mp.weixin.qq.com/'),
+      ),
+    ).toHaveLength(2);
+    expect(
+      externalGet.mock.calls.filter(([target]) =>
+        String(target).endsWith('/web/mp/articles'),
+      ),
+    ).toHaveLength(1);
+    expect(await prisma.article.count({ where: { mpId } })).toBe(10);
+  });
+  it.each([
+    [
+      'https://open.weixin.qq.com/connect/oauth2/authorize',
+      'PUBLIC_ORIGINAL_LOGIN_REDIRECT',
+    ],
+    [
+      'https://evil.invalid/mp/verify?ticket=synthetic-private',
+      'PUBLIC_ORIGINAL_UNSUPPORTED_REDIRECT',
+    ],
+    [undefined, 'PUBLIC_ORIGINAL_UNSUPPORTED_REDIRECT'],
+    [url(), 'PUBLIC_ORIGINAL_ARTICLE_REDIRECT'],
+  ])(
+    'preserves HTTP redirect type %s through the real local route without directory or DB changes',
+    async (location, code) => {
+      const n = await actualNative('success', { usePublicResolver: true });
+      externalGet.mockResolvedValue({
+        status: 302,
+        data: Buffer.alloc(0),
+        headers: {
+          ...(location ? { location } : {}),
+          'content-type': 'text/html',
+        },
+      });
+      const response = await n.httpAdd().expect(200);
+      expect(response.body.result.data).toMatchObject({
+        accepted: false,
+        status: 'blocked',
+        code,
+        httpStatus: 302,
+      });
+      expect(response.body.result.data.officialVerification).toBeUndefined();
+      expect(JSON.stringify(response.body)).not.toContain('synthetic-private');
+      expect(await prisma.feed.count()).toBe(0);
+      expect(await prisma.article.count()).toBe(0);
+      await n.httpAdd().expect(200);
+      expect(externalGet).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('integrates owner native validator, complete private binding and original ten-body saver through local HTTP', async () => {
     const n = await actualNative();
     await request(n.app)

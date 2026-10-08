@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { requestDownloadResource } from '../article-download';
+import {
+  requestDownloadResource,
+  publicArticleRedirect,
+  publicRedirectDiagnostic,
+} from '../article-download';
 import {
   nativeAccountIndexFile,
   NativeWereadAccount,
@@ -166,7 +170,8 @@ describe('publisher URL to reviewed public original (offline)', () => {
     });
     if (result.status === 'reviewed-original')
       throw new Error('unexpected success');
-    expect(result.officialVerification).toEqual(observed);
+    expect(result.officialVerification).toMatchObject(observed);
+    expect(result.officialVerification).toHaveProperty('expiresAt');
     expect(JSON.stringify(result)).not.toContain('/mp/verify');
     expect(await fs.readFile(stateFile(), 'utf8')).not.toContain('/mp/verify');
     expect(await run()).toMatchObject({
@@ -225,4 +230,219 @@ describe('publisher URL to reviewed public original (offline)', () => {
     });
     expect(requestDownloadResource).toHaveBeenCalledTimes(1);
   });
+
+  it('follows only one safe same-host short-to-long article hop, rechecks identity and reuses the final cache', async () => {
+    (requestDownloadResource as jest.Mock)
+      .mockResolvedValueOnce({
+        status: 302,
+        type: 'text/html',
+        bytes: Buffer.from('redirect'),
+        redirectKind: 'article',
+        officialArticleRedirect: url,
+        redirectDiagnostic: publicRedirectDiagnostic(url, short),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        type: 'text/html',
+        bytes: Buffer.from(html),
+      });
+    const result = await run(short);
+    expect(result).toMatchObject({
+      status: 'reviewed-original',
+      requestedUrl: short,
+      candidate: { mpId: 'MP_WXS_1234567890' },
+    });
+    expect(requestDownloadResource).toHaveBeenNthCalledWith(
+      2,
+      url,
+      10 * 1024 * 1024,
+    );
+    expect((await run(short)).status).toBe('reviewed-original');
+    expect(requestDownloadResource).toHaveBeenCalledTimes(2);
+  });
+  it('retains a second article redirect without a third request or a verification label', async () => {
+    (requestDownloadResource as jest.Mock).mockResolvedValue({
+      status: 302,
+      type: 'text/html',
+      bytes: Buffer.from('redirect'),
+      redirectKind: 'article',
+      officialArticleRedirect: url,
+    });
+    expect(await run(short)).toMatchObject({
+      status: 'blocked',
+      code: 'PUBLIC_ORIGINAL_ARTICLE_REDIRECT',
+    });
+    expect(await run(short)).toMatchObject({
+      status: 'blocked',
+      code: 'RETAINED_PUBLIC_STOP',
+      redirectKind: 'article',
+    });
+    expect(requestDownloadResource).toHaveBeenCalledTimes(2);
+  });
+  it('corrects only the returned category of an old article stop, without rewriting state or requesting again', async () => {
+    const prior = JSON.stringify({
+      status: 'verification-required',
+      requestedUrl: url,
+      upstreamStatus: 302,
+      redirectKind: 'article',
+    });
+    await fs.writeFile(stateFile(), prior);
+    expect(await run()).toMatchObject({
+      status: 'blocked',
+      code: 'RETAINED_PUBLIC_STOP',
+      redirectKind: 'article',
+    });
+    expect(await fs.readFile(stateFile(), 'utf8')).toBe(prior);
+    expect(requestDownloadResource).not.toHaveBeenCalled();
+  });
+  it.each(['login', 'other', 'missing'])(
+    'stops %s redirects without labelling them as verification or replaying',
+    async (kind) => {
+      (requestDownloadResource as jest.Mock).mockResolvedValue({
+        status: 302,
+        type: 'text/html',
+        bytes: Buffer.from('redirect'),
+        redirectKind: kind,
+      });
+      expect(await run()).toMatchObject({
+        status: 'blocked',
+        redirectKind: kind,
+        code:
+          kind === 'login'
+            ? 'PUBLIC_ORIGINAL_LOGIN_REDIRECT'
+            : 'PUBLIC_ORIGINAL_UNSUPPORTED_REDIRECT',
+      });
+      expect((await run()).status).toBe('blocked');
+      expect(requestDownloadResource).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([
+    'http://mp.weixin.qq.com/s?__biz=' + biz + '&mid=101&idx=1&sn=abcdef1234',
+    url.replace('mp.weixin.qq.com', 'evil.invalid'),
+    url.replace('mp.weixin.qq.com', 'mp.weixin.qq.com.evil.invalid'),
+    url.replace('mp.weixin.qq.com', 'user:pass@mp.weixin.qq.com'),
+    url + '&pass_ticket=synthetic-private',
+    url + '&redirect_url=https://evil.invalid',
+    url + '&mid=102',
+    'https://mp.weixin.qq.com/mp/verify',
+    short,
+  ])(
+    'refuses unsafe/non-long ordinary redirect before another request: %s',
+    async (target) => {
+      expect(publicArticleRedirect(target, short)).toBeUndefined();
+      (requestDownloadResource as jest.Mock).mockResolvedValue({
+        status: 302,
+        type: 'text/html',
+        bytes: Buffer.alloc(0),
+        redirectKind: 'article',
+        officialArticleRedirect: target,
+      });
+      expect((await run(short)).status).toBe('blocked');
+      expect(requestDownloadResource).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('checks stops again if one appears after the original response, before the bounded hop', async () => {
+    const stop = path.join(dir, 'retained-stop.json');
+    (requestDownloadResource as jest.Mock).mockImplementation(async () => {
+      await fs.writeFile(
+        stop,
+        JSON.stringify({
+          stop: { stage: 'directory-0', reason: '业务码 -2041' },
+        }),
+      );
+      await fs.writeFile(
+        configFile,
+        JSON.stringify({
+          feeds: {
+            MP_WXS_1234567890: { ownerVid: '123', wereadLatestStateFile: stop },
+          },
+        }),
+      );
+      return {
+        status: 302,
+        type: 'text/html',
+        bytes: Buffer.alloc(0),
+        redirectKind: 'article',
+        officialArticleRedirect: url,
+      };
+    });
+    expect((await run(short)).status).toBe('blocked');
+    expect(requestDownloadResource).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(await fs.readFile(stop, 'utf8')).stop).toBeDefined();
+  });
+  it('rejects conflicting identity after the one ordinary hop', async () => {
+    (requestDownloadResource as jest.Mock)
+      .mockResolvedValueOnce({
+        status: 302,
+        type: 'text/html',
+        bytes: Buffer.alloc(0),
+        redirectKind: 'article',
+        officialArticleRedirect: url,
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        type: 'text/html',
+        bytes: Buffer.from(html.replaceAll('101', '102')),
+      });
+    expect(await run(short)).toMatchObject({
+      status: 'blocked',
+      code: 'PUBLIC_IDENTITY_CONFLICT',
+    });
+    expect(requestDownloadResource).toHaveBeenCalledTimes(2);
+  });
+  it('uses the observed timestamp without renewing an expired verification URL', async () => {
+    (requestDownloadResource as jest.Mock).mockResolvedValue({
+      status: 302,
+      type: 'text/html',
+      bytes: Buffer.alloc(0),
+      redirectKind: 'verification',
+      officialVerification: {
+        status: 'available',
+        articleUrl: url,
+        url: 'https://mp.weixin.qq.com/mp/verify?action=check',
+      },
+      verificationObservedAt: new Date(Date.now() - 300001).toISOString(),
+    });
+    const result = await run();
+    expect(result).toHaveProperty('officialVerification', {
+      status: 'unavailable',
+      articleUrl: url,
+      reason: 'expired',
+    });
+    const saved = await fs.readFile(stateFile(), 'utf8');
+    expect(saved).toContain('expired');
+    expect(saved).not.toContain('/mp/verify');
+    await run();
+    expect(requestDownloadResource).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    ['/mp/verify?pass_ticket=synthetic-private', 'sensitive-location'],
+    ['http://mp.weixin.qq.com/mp/verify', 'unsafe-location'],
+    ['https://mp.weixin.qq.com.evil.invalid/mp/verify', 'unsafe-location'],
+    [undefined, 'missing-location'],
+  ])(
+    'records bounded labels and unavailability without storing raw redirect %s',
+    async (raw, reason) => {
+      const { articleVerificationLocation } = jest.requireActual(
+        '../../../../packages/shared/src/article-verification',
+      );
+      (requestDownloadResource as jest.Mock).mockResolvedValue({
+        status: 302,
+        type: 'text/html',
+        bytes: Buffer.alloc(0),
+        redirectKind: 'verification',
+        officialVerification: articleVerificationLocation(raw, url),
+        redirectDiagnostic: publicRedirectDiagnostic(raw, url),
+      });
+      const result = await run();
+      expect(result).toHaveProperty(
+        'officialVerification',
+        expect.objectContaining({ status: 'unavailable', reason }),
+      );
+      const saved = await fs.readFile(stateFile(), 'utf8');
+      expect(saved).toContain(reason);
+      expect(saved).not.toContain('synthetic-private');
+      expect(saved).not.toContain('/mp/verify');
+    },
+  );
 });

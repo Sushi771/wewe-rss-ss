@@ -147,6 +147,9 @@ const codes = new Set([
   'ALREADY_SUBSCRIBED',
   'PUBLIC_ORIGINAL_VERIFICATION_REQUIRED',
   'PUBLIC_ORIGINAL_REFUSED',
+  'PUBLIC_ORIGINAL_LOGIN_REDIRECT',
+  'PUBLIC_ORIGINAL_ARTICLE_REDIRECT',
+  'PUBLIC_ORIGINAL_UNSUPPORTED_REDIRECT',
 ]);
 
 /** Never forward raw errors, response objects, paths, or unrecognized fields. */
@@ -190,6 +193,12 @@ function publicOutcome(raw: DiscoveryOutcome): DiscoveryOutcome {
           result.officialVerification = { ...checked, expiresAt: v.expiresAt };
         else if (checked.status !== 'available')
           result.officialVerification = checked;
+        else
+          result.officialVerification = {
+            status: 'unavailable',
+            articleUrl,
+            reason: 'expired',
+          };
       } else if (
         [
           'missing-location',
@@ -228,7 +237,13 @@ function publicOutcome(raw: DiscoveryOutcome): DiscoveryOutcome {
 function outcomeMessage(outcome: DiscoveryOutcome, subscribed: boolean) {
   if (!subscribed) {
     if (outcome.code === 'PUBLIC_ORIGINAL_VERIFICATION_REQUIRED')
-      return '本次公开原文要求验证或返回跳转，未添加订阅；已停止请求，未自动重试。';
+      return '本次公开原文返回验证页面，未添加订阅；已停止请求，验证完成不会自动恢复请求。';
+    if (outcome.code === 'PUBLIC_ORIGINAL_LOGIN_REDIRECT')
+      return '本次公开原文返回登录跳转，未添加订阅；未使用浏览器登录凭据，链接和所选账号保留。';
+    if (outcome.code === 'PUBLIC_ORIGINAL_ARTICLE_REDIRECT')
+      return '本次文章跳转超出一次安全短链解析范围，未添加订阅；已停止请求，链接和所选账号保留。';
+    if (outcome.code === 'PUBLIC_ORIGINAL_UNSUPPORTED_REDIRECT')
+      return '本次返回其他跳转或缺少可确认目标，未添加订阅；已停止请求，链接和所选账号保留。';
     if (outcome.code === 'PUBLIC_ORIGINAL_REFUSED')
       return '本次未取得可核验的公开原文，未添加订阅；拒绝记录保留，不自动重试。';
     if (outcome.code === 'IDENTITY_UNRESOLVED')

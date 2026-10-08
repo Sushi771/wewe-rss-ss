@@ -84,6 +84,31 @@ const added = {
 };
 
 describe('original subscription UI action (actual handler, offline)', () => {
+  it.each([
+    'PUBLIC_ORIGINAL_LOGIN_REDIRECT',
+    'PUBLIC_ORIGINAL_ARTICLE_REDIRECT',
+    'PUBLIC_ORIGINAL_UNSUPPORTED_REDIRECT',
+    'PUBLIC_ORIGINAL_VERIFICATION_REQUIRED',
+  ])(
+    'preserves URL and selected account on %s and sends no automatic followup',
+    async (code) => {
+      const h = harness([url('one'), url('next')], '123');
+      h.mutate.mockResolvedValue({
+        ...added,
+        status: 'blocked',
+        accepted: false,
+        pending: true,
+        feed: null,
+        code,
+        httpStatus: 302,
+      });
+      await h.run();
+      expect(h.state.links).toBe([url('one'), url('next')].join('\n'));
+      expect(h.scope.addAccountId).toBe('123');
+      expect(h.scope.onClose).not.toHaveBeenCalled();
+      expect(h.mutate).toHaveBeenCalledTimes(1);
+    },
+  );
   it('requires selected normal account before issuing discovery', async () => {
     const h = harness([url('one')], '');
     await h.run();
