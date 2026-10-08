@@ -33,7 +33,7 @@ import type { TimedArticleVerification } from '@wewe-rss/shared';
 const Feeds = () => {
   const { id } = useParams();
 
-  const { isOpen, onOpen, onOpenChange, onClose } = useDisclosure();
+  const { isOpen, onOpen, onClose } = useDisclosure();
   const { refetch: refetchFeedList, data: feedData } = trpc.feed.list.useQuery(
     {},
     {
@@ -49,7 +49,8 @@ const Feeds = () => {
     trpc.feed.addFromArticle.useMutation({});
   const { mutateAsync: updateMpInfo } = trpc.feed.edit.useMutation({});
 
-  const isAddFeedLoading = isGetMpInfoLoading;
+  const [isAddingSubscriptions, setIsAddingSubscriptions] = useState(false);
+  const isAddFeedLoading = isGetMpInfoLoading || isAddingSubscriptions;
   const { data: addCapability, error: addCapabilityError } =
     trpc.feed.addCapability.useQuery(undefined, {
       refetchOnWindowFocus: false,
@@ -60,6 +61,14 @@ const Feeds = () => {
   const [addVerification, setAddVerification] =
     useState<TimedArticleVerification | null>(null);
   const addingSubscriptions = useRef(false);
+  const cancelSubscriptions = useRef(false);
+  useEffect(
+    () => () => {
+      // 离开本页后不继续发送旧批次，已发出的请求仍由服务端完成。
+      cancelSubscriptions.current = true;
+    },
+    [],
+  );
   const { data: addAccounts, error: addAccountsError } =
     trpc.account.list.useQuery(
       {},
@@ -91,6 +100,19 @@ const Feeds = () => {
     trpc.feed.delete.useMutation({});
 
   const [wxsLink, setWxsLink] = useState('');
+  const handleOpenAdd = () => {
+    if (!addingSubscriptions.current) onOpen();
+  };
+  const handleCancelAdd = () => {
+    if (addingSubscriptions.current && !cancelSubscriptions.current) {
+      cancelSubscriptions.current = true;
+      const message =
+        '已停止后续公众号；已发送的请求无法撤回，结束后保留未处理链接。';
+      setAddMessages((previous) => [...previous, message]);
+      toast.warning(message);
+    }
+    onClose();
+  };
   const [isManageMode, setIsManageMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [draggedItem, setDraggedItem] = useState<number | null>(null);
@@ -228,10 +250,16 @@ const Feeds = () => {
     const failedLinks: string[] = [];
     let pending = false;
     addingSubscriptions.current = true;
+    cancelSubscriptions.current = false;
+    setIsAddingSubscriptions(true);
     setAddMessages([]);
     setAddVerification(null);
     try {
       for (const [index, link] of wxsLinks.entries()) {
+        if (cancelSubscriptions.current) {
+          failedLinks.push(...wxsLinks.slice(index));
+          break;
+        }
         try {
           const result = await addFromArticle({
             articleUrl: link,
@@ -291,11 +319,16 @@ const Feeds = () => {
         }
       }
     } finally {
+      refetchFeedList();
+      // 禁用输入之外，再防止旧批次覆盖已经变化的输入。
+      setWxsLink((current) =>
+        current === wxsLink ? failedLinks.join('\n') : current,
+      );
+      if (!failedLinks.length && !pending && !cancelSubscriptions.current)
+        onClose();
       addingSubscriptions.current = false;
+      setIsAddingSubscriptions(false);
     }
-    refetchFeedList();
-    setWxsLink(failedLinks.join('\n'));
-    if (!failedLinks.length && !pending) onClose();
   };
 
   const { mutateAsync: batchDeleteFeeds, isLoading: isBatchDeleteLoading } =
@@ -398,7 +431,7 @@ const Feeds = () => {
           wechat2rss: 'Wechat2RSS 私有实例',
           'public-album': '所选官方合集订阅',
           'owner-web-search': '腾讯号名搜索',
-          'owner-weread-latest': '腾讯读书当前篇',
+          'owner-weread-latest': '腾讯读书订阅更新',
           unavailable: '暂无可用通道',
         }[collectionChannel]
       : '等待获取通道状态';
@@ -415,7 +448,7 @@ const Feeds = () => {
   const collectionDescription = acceptanceMode
     ? '自主发现26条；已核验原文缓存2篇，近期待核验3篇。普通更新未发请求；正文来源受限，已有缓存和下载可检查。搜索覆盖不保证完整。'
     : collectionChannel === 'owner-weread-latest'
-      ? '更新与定时任务直接读取腾讯读书当前提供的一篇及正文。列表接口受限，此来源不代表微信最新文章齐全；失败会停止请求并保留旧正文。'
+      ? '更新与定时任务使用本号已绑定的腾讯读书通道：已连接目录模式按最近10篇更新正文和图片，旧当前篇模式读取一篇。实际返回数量和完成情况以最近操作结果为准，不保证全部历史或最新文章齐全；遇限制即停止并保留旧正文。'
       : collectionChannel === 'owner-web-search'
         ? '更新和定时任务直接请求腾讯搜索与原文，保存取得的正文。搜索可能漏文；认证、验证或频控限制会停止请求并显示原因。'
         : collectionChannel === 'wechat2rss'
@@ -502,7 +535,8 @@ const Feeds = () => {
                   isIconOnly
                   size="sm"
                   variant="light"
-                  onPress={onOpen}
+                  onPress={handleOpenAdd}
+                  isDisabled={isAddFeedLoading}
                   className="h-7 w-7 min-w-0"
                 >
                   <svg
@@ -1258,9 +1292,12 @@ const Feeds = () => {
           </div>
         </div>
       </div>
-      <Modal isOpen={isOpen} onOpenChange={onOpenChange}>
+      <Modal
+        isOpen={isOpen}
+        onOpenChange={(open) => (open ? handleOpenAdd() : handleCancelAdd())}
+      >
         <ModalContent>
-          {(onClose) => (
+          {() => (
             <>
               <ModalHeader className="flex flex-col gap-1">
                 添加公众号源
@@ -1278,7 +1315,10 @@ const Feeds = () => {
                     <select
                       aria-label="用于本次公众号目录验证的账号"
                       value={addAccountId}
-                      onChange={(event) => setAddAccountId(event.target.value)}
+                      onChange={(event) => {
+                        if (!addingSubscriptions.current)
+                          setAddAccountId(event.target.value);
+                      }}
                       disabled={isAddFeedLoading}
                       className="bg-content1 rounded-md border p-2"
                     >
@@ -1321,7 +1361,10 @@ const Feeds = () => {
                 )}
                 <Textarea
                   value={wxsLink}
-                  onValueChange={setWxsLink}
+                  onValueChange={(value) => {
+                    if (!addingSubscriptions.current) setWxsLink(value);
+                  }}
+                  isDisabled={isAddFeedLoading}
                   autoFocus
                   label="分享链接"
                   placeholder="输入公众号文章分享链接，一行一条，如 https://mp.weixin.qq.com/s/xxxxxx https://mp.weixin.qq.com/s/xxxxxx"
@@ -1332,14 +1375,20 @@ const Feeds = () => {
                     一行一个公众号的文章链接，每次最多20个；按本次提交顺序验证，失败即停，余下链接保留。
                   </p>
                 )}
+                {isAddingSubscriptions && (
+                  <p className="text-default-500 text-xs" role="status">
+                    本批处理中；取消只停止尚未发送的公众号，不能撤回在途请求。
+                  </p>
+                )}
               </ModalBody>
               <ModalFooter>
-                <Button color="danger" variant="flat" onPress={onClose}>
-                  取消
+                <Button color="danger" variant="flat" onPress={handleCancelAdd}>
+                  {isAddingSubscriptions ? '停止后续并关闭' : '取消'}
                 </Button>
                 <Button
                   color="primary"
                   isDisabled={
+                    isAddFeedLoading ||
                     !addCapability?.available ||
                     (addCapability.requiresAccount && !addAccountId) ||
                     !wxsLink.trim().startsWith('https://mp.weixin.qq.com/s')

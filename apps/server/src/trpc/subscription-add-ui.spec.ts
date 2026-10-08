@@ -40,6 +40,8 @@ function harness(links: string[], accountId = '123') {
   const scope = {
     module: { exports: null as unknown },
     addingSubscriptions: { current: false },
+    cancelSubscriptions: { current: false },
+    setIsAddingSubscriptions: jest.fn(),
     addCapability: { available: true, requiresAccount: true },
     addAccountId: accountId,
     wxsLink: state.links,
@@ -49,8 +51,8 @@ function harness(links: string[], accountId = '123') {
       state.messages =
         typeof update === 'function' ? update(state.messages) : update;
     },
-    setWxsLink: (value: string) => {
-      state.links = value;
+    setWxsLink: (value: string | ((previous: string) => string)) => {
+      state.links = typeof value === 'function' ? value(state.links) : value;
     },
     toast: { error: jest.fn(), success: jest.fn(), warning: jest.fn() },
     queryUtils: {
