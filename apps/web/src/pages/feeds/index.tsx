@@ -15,7 +15,7 @@ import {
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import { refreshFeedViews } from '@web/utils/refresh-feed-view';
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import dayjs from 'dayjs';
@@ -27,6 +27,8 @@ import {
 import ArticleList from './list';
 import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
+import ArticleVerificationNotice from '../tools/article-verification-notice';
+import type { TimedArticleVerification } from '@wewe-rss/shared';
 
 const Feeds = () => {
   const { id } = useParams();
@@ -53,6 +55,20 @@ const Feeds = () => {
       refetchOnWindowFocus: false,
       retry: false,
     });
+  const [addAccountId, setAddAccountId] = useState('');
+  const [addMessages, setAddMessages] = useState<string[]>([]);
+  const [addVerification, setAddVerification] =
+    useState<TimedArticleVerification | null>(null);
+  const addingSubscriptions = useRef(false);
+  const { data: addAccounts, error: addAccountsError } =
+    trpc.account.list.useQuery(
+      {},
+      {
+        enabled: isOpen && !!addCapability?.requiresAccount,
+        retry: false,
+        refetchOnWindowFocus: false,
+      },
+    );
   const { mutateAsync: refreshMpArticles, isLoading: isGetArticlesLoading } =
     trpc.feed.refreshArticles.useMutation();
   const {
@@ -185,6 +201,7 @@ const Feeds = () => {
   }, [id]);
 
   const handleConfirm = async () => {
+    if (addingSubscriptions.current) return;
     if (!addCapability?.available) {
       toast.error('暂不能新增订阅', {
         description:
@@ -192,27 +209,93 @@ const Feeds = () => {
       });
       return;
     }
-    const wxsLinks = wxsLink.split('\n').filter((link) => link.trim() !== '');
+    if (addCapability.requiresAccount && !addAccountId) {
+      toast.error('请先选择正常Web登录账号');
+      return;
+    }
+    const wxsLinks = [
+      ...new Set(
+        wxsLink
+          .split('\n')
+          .map((link) => link.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (wxsLinks.length > 20) {
+      toast.error('每次最多添加20个公众号，输入链接已保留');
+      return;
+    }
     const failedLinks: string[] = [];
-    for (const link of wxsLinks) {
-      try {
-        const result = await addFromArticle({ articleUrl: link.trim() });
-        toast.success('订阅已受理，文章更新中', {
-          description: `公众号 ${result.feed.mpName}`,
-        });
-        await queryUtils.article.list.reset();
-        await queryUtils.article.summary.invalidate();
-      } catch (error) {
-        failedLinks.push(link);
-        toast.error('添加失败或待核对', {
-          description:
-            error instanceof Error ? error.message : '请检查私有实例和文章链接',
-        });
+    let pending = false;
+    addingSubscriptions.current = true;
+    setAddMessages([]);
+    setAddVerification(null);
+    try {
+      for (const [index, link] of wxsLinks.entries()) {
+        try {
+          const result = await addFromArticle({
+            articleUrl: link,
+            accountId: addAccountId || undefined,
+          });
+          if ('source' in result) {
+            if (result.officialVerification)
+              setAddVerification(result.officialVerification);
+            const details = [
+              result.message,
+              result.httpStatus === undefined
+                ? ''
+                : `HTTP ${result.httpStatus}`,
+              result.businessCode === undefined
+                ? ''
+                : `业务码 ${result.businessCode}`,
+            ]
+              .filter(Boolean)
+              .join('；');
+            setAddMessages((previous) => [...previous, details]);
+            if (!result.accepted || !result.feed) {
+              failedLinks.push(...wxsLinks.slice(index));
+              toast.warning('未添加订阅', { description: details });
+              pending = true;
+              break;
+            }
+            if (result.pending) {
+              toast.warning('目录已确认，正文图片待完成', {
+                description: details,
+              });
+              failedLinks.push(...wxsLinks.slice(index + 1));
+              pending = true;
+              break;
+            }
+            toast.success(
+              result.created ? '公众号已添加并更新' : '已订阅，未重复添加',
+              {
+                description: result.feed.mpName,
+              },
+            );
+          } else
+            toast.success('订阅已受理，文章尚未核验', {
+              description: result.feed.mpName,
+            });
+          await queryUtils.article.list.reset();
+          await queryUtils.article.summary.invalidate();
+        } catch (error) {
+          failedLinks.push(...wxsLinks.slice(index));
+          pending = true;
+          const message =
+            error instanceof Error ? error.message : '添加未完成，链接保留。';
+          setAddMessages((previous) => [...previous, message]);
+          toast.error('添加失败或待核对', {
+            description: message,
+          });
+          break;
+        }
       }
+    } finally {
+      addingSubscriptions.current = false;
     }
     refetchFeedList();
     setWxsLink(failedLinks.join('\n'));
-    if (!failedLinks.length) onClose();
+    if (!failedLinks.length && !pending) onClose();
   };
 
   const { mutateAsync: batchDeleteFeeds, isLoading: isBatchDeleteLoading } =
@@ -1189,6 +1272,53 @@ const Feeds = () => {
                       ? '新增来源状态读取失败，输入链接已保留；稍后重新打开此页面核对。'
                       : '正在只读核对新增来源状态。')}
                 </p>
+                {addCapability?.requiresAccount && (
+                  <label className="flex flex-col gap-2 text-sm">
+                    用于本次公众号目录验证的账号
+                    <select
+                      aria-label="用于本次公众号目录验证的账号"
+                      value={addAccountId}
+                      onChange={(event) => setAddAccountId(event.target.value)}
+                      disabled={isAddFeedLoading}
+                      className="bg-content1 rounded-md border p-2"
+                    >
+                      <option value="">请选择正常Web登录账号</option>
+                      {addAccounts?.items.map((account) => (
+                        <option
+                          key={account.id}
+                          value={account.id}
+                          disabled={
+                            account.status !== 1 || !account.nativeLoginAt
+                          }
+                        >
+                          {account.platformName || account.name}
+                          {!account.nativeLoginAt ? '（需正常Web登录）' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {addAccountsError && (
+                      <span role="alert">
+                        账号列表读取失败，请在账号页核对正常登录。
+                      </span>
+                    )}
+                  </label>
+                )}
+                {addMessages.length > 0 && (
+                  <ul
+                    role="status"
+                    className="text-default-600 space-y-2 text-sm"
+                  >
+                    {addMessages.map((message, index) => (
+                      <li key={index}>{message}</li>
+                    ))}
+                  </ul>
+                )}
+                {addVerification && (
+                  <ArticleVerificationNotice
+                    verification={addVerification}
+                    operation="subscription"
+                  />
+                )}
                 <Textarea
                   value={wxsLink}
                   onValueChange={setWxsLink}
@@ -1197,6 +1327,11 @@ const Feeds = () => {
                   placeholder="输入公众号文章分享链接，一行一条，如 https://mp.weixin.qq.com/s/xxxxxx https://mp.weixin.qq.com/s/xxxxxx"
                   variant="bordered"
                 />
+                {addCapability?.requiresAccount && (
+                  <p className="text-default-500 text-xs">
+                    一行一个公众号的文章链接，每次最多20个；按本次提交顺序验证，失败即停，余下链接保留。
+                  </p>
+                )}
               </ModalBody>
               <ModalFooter>
                 <Button color="danger" variant="flat" onPress={onClose}>
@@ -1206,6 +1341,7 @@ const Feeds = () => {
                   color="primary"
                   isDisabled={
                     !addCapability?.available ||
+                    (addCapability.requiresAccount && !addAccountId) ||
                     !wxsLink.trim().startsWith('https://mp.weixin.qq.com/s')
                   }
                   onPress={handleConfirm}
@@ -1215,7 +1351,7 @@ const Feeds = () => {
                     isGetArticlesLoading
                   }
                 >
-                  确定
+                  {addCapability?.requiresAccount ? '验证目录并添加' : '确定'}
                 </Button>
               </ModalFooter>
             </>

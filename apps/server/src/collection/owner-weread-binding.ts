@@ -9,14 +9,14 @@ import {
 } from './owner-weread-session-state';
 import { NativeAccountProfile } from '../weread/native-account-profile';
 import { previewNormalWebMaintenanceBinding } from '../weread/normal-web-maintenance';
+import {
+  nativeAccountIndexFile,
+  resolveNativeWereadAccount,
+} from './owner-weread-account';
 
 type Account = { id: string; name: string; status: number; token: string };
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
-const indexFile = (configFile: string, accountId: string) =>
-  path.join(
-    path.dirname(configFile),
-    `native-account-${hash(accountId).slice(0, 24)}.json`,
-  );
+const indexFile = nativeAccountIndexFile;
 
 export function ownerConfigFile() {
   const file = process.env.OWNER_SEARCH_CONFIG_FILE;
@@ -244,33 +244,8 @@ async function inputs(account: Account, mpId: string) {
   const binding = await readOwnerSearchConfig(mpId);
   if (!binding.wereadLatestStateFile)
     throw new Error('该公众号未配置手动读书更新。');
-  const index = JSON.parse(
-    await fs.readFile(indexFile(configFile, account.id), 'utf8'),
-  );
-  const sessionFile = index.sessionFile;
-  if (
-    typeof sessionFile !== 'string' ||
-    path.resolve(path.dirname(sessionFile)) !==
-      path.resolve(path.dirname(configFile)) ||
-    !/^native-session-[a-f0-9]{24}\.json$/.test(path.basename(sessionFile))
-  )
-    throw new Error('正常Web登录记录无效，请在账号页重新登录。');
-  const sessionText = await fs.readFile(sessionFile, 'utf8');
-  if (
-    path.basename(sessionFile) !==
-    `native-session-${hash(sessionText).slice(0, 24)}.json`
-  )
-    throw new Error('正常Web登录记录已变化，请重新登录。');
-  const session: OwnerWebSession = JSON.parse(sessionText);
-  ownerSessionCookie(session, account.id);
-  const token = JSON.parse(account.token);
-  if (
-    session.source !== 'owner-confirmed-native-web-login' ||
-    token.wr_skey !==
-      session.cookies.find((c) => c.name === 'wr_skey')?.value ||
-    token.wr_vid !== account.id
-  )
-    throw new Error('请用选定账号完成一次本软件的正常Web登录。');
+  const { sessionFile, sessionText, session } =
+    await resolveNativeWereadAccount(account, configFile);
   let stateText = '{}';
   try {
     stateText = await fs.readFile(binding.wereadLatestStateFile, 'utf8');

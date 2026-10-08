@@ -6,8 +6,10 @@ import {
 
 export default function ArticleVerificationNotice({
   verification,
+  operation = 'download',
 }: {
   verification: TimedArticleVerification;
+  operation?: 'download' | 'subscription';
 }) {
   let current = verification;
   try {
@@ -50,7 +52,9 @@ export default function ArticleVerificationNotice({
             打开本次官方验证
           </a>
           <p className="text-default-600 mt-3">
-            这是本次响应返回的微信官方验证页，请亲自完成验证。地址仅短期保留；浏览器验证成功不代表后台下载已恢复，本工具不会自动重试。
+            {operation === 'subscription'
+              ? '这是本次响应返回的微信官方验证页，请亲自完成验证。地址仅短期保留；浏览器验证成功不代表公众号目录或订阅已恢复，本次不会自动重试。'
+              : '这是本次响应返回的微信官方验证页，请亲自完成验证。地址仅短期保留；浏览器验证成功不代表后台下载已恢复，本工具不会自动重试。'}
           </p>
         </>
       ) : (

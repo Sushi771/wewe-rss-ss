@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
 import { statusMap } from '@server/constants';
@@ -11,6 +11,13 @@ import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
 import { wechat2RssProvider } from '../collection/provider-registry';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
+import {
+  addNativeSubscription,
+  SUBSCRIPTION_DISCOVERY,
+  subscriptionArticleUrl,
+  subscriptionDiscoveryUnavailable,
+  SubscriptionDiscoveryValidator,
+} from '../collection/subscription-add';
 import { BodyRetryBlockedError } from '../collection/article-body-retry';
 import { Feed } from '@prisma/client';
 import { promises as fs } from 'node:fs';
@@ -74,6 +81,9 @@ export class TrpcService {
     private readonly configService: ConfigService,
     private readonly wereadService: WereadService,
     private readonly collectionService: CollectionService,
+    @Optional()
+    @Inject(SUBSCRIPTION_DISCOVERY)
+    private readonly subscriptionDiscovery?: SubscriptionDiscoveryValidator,
   ) {
     const { url } =
       this.configService.get<ConfigurationType['platform']>('platform')!;
@@ -527,21 +537,78 @@ export class TrpcService {
   }
 
   subscriptionAddCapability() {
+    if (this.subscriptionDiscovery)
+      return {
+        available: true as const,
+        requiresAccount: true,
+        code: 'NATIVE_DIRECTORY_VALIDATION' as const,
+        message:
+          '选择正常Web登录账号并提交公众号文章链接；本次点击验证候选目录，通过后添加并读取最近10篇。遇限制停止，不自动切换账号或重试。',
+      };
     if (process.env.WECHAT2RSS_ENABLED !== '1')
       return {
         available: false as const,
+        requiresAccount: false,
         code: 'SUBSCRIPTION_SOURCE_UNAVAILABLE' as const,
         message:
           '当前新增入口依赖的 Wechat2RSS 已停用，自建新公众号发现与持续更新尚未接通。暂不能自动新增；输入链接已保留，请勿重复提交。现有订阅和已保存文章仍可查看。',
       };
     return {
       available: true as const,
+      requiresAccount: false,
       code: 'SOURCE_CONFIGURED' as const,
       message: '新增将提交到已显式配置的来源；任务受理不代表文章已取得。',
     };
   }
 
-  async addSubscriptionFromArticle(articleUrl: string) {
+  private readonly activeSubscriptionAdds = new Set<string>();
+
+  async addSubscriptionFromArticle(
+    articleUrl: string,
+    accountId?: string,
+    isLocal = false,
+  ) {
+    if (this.subscriptionDiscovery) {
+      if (!isLocal)
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: '公众号目录验证只能在服务器本机操作。',
+        });
+      let url: string;
+      try {
+        url = subscriptionArticleUrl(articleUrl);
+      } catch {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message:
+            '请输入有效的公开 HTTPS 微信公众号文章链接，不包含认证参数。',
+        });
+      }
+      if (!accountId || !/^\d{1,20}$/.test(accountId))
+        return subscriptionDiscoveryUnavailable('ACCOUNT_UNAVAILABLE');
+      const account = await this.prismaService.account.findUnique({
+        where: { id: accountId },
+        select: { id: true, status: true },
+      });
+      if (!account || account.status !== 1)
+        return subscriptionDiscoveryUnavailable('ACCOUNT_UNAVAILABLE');
+      if (this.activeSubscriptionAdds.has(accountId))
+        throw new TRPCError({
+          code: 'CONFLICT',
+          message: '所选账号已有公众号添加进行中，本次未发送目录请求。',
+        });
+      this.activeSubscriptionAdds.add(accountId);
+      try {
+        return await addNativeSubscription(
+          this.prismaService,
+          this.subscriptionDiscovery,
+          { articleUrl: url, accountId, trigger: 'local-manual-add' },
+          () => createVerifiedSqliteBackup({ allowMysqlSkip: true }),
+        );
+      } finally {
+        this.activeSubscriptionAdds.delete(accountId);
+      }
+    }
     const capability = this.subscriptionAddCapability();
     if (!capability.available)
       throw new TRPCError({
@@ -569,7 +636,12 @@ export class TrpcService {
           collectionChannel: 'wechat2rss',
         },
       }));
-    return { feed, accepted: true as const, pending: true as const };
+    return {
+      status: 'accepted' as const,
+      feed,
+      accepted: true as const,
+      pending: true as const,
+    };
   }
 
   async createLoginUrl(): Promise<

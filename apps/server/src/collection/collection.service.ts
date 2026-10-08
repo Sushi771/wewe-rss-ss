@@ -29,6 +29,10 @@ import {
 import { prepareSearchReplay } from './search-replay';
 import { prepareBrowserDomReplay } from './browser-dom-adapter';
 import { fetchOwnerWereadLatest } from './owner-weread-latest';
+import {
+  continueVerifiedWereadCandidate,
+  VerifiedWereadPublisherCandidate,
+} from './weread-publisher-validation';
 import { prepareWereadDirectoryReplay } from './weread-directory';
 import {
   assertSavedArticleIdentity,
@@ -446,6 +450,43 @@ export class CollectionService {
         coverage: 'search-results' as const,
         articles: 0,
         message: error.message,
+      };
+    } finally {
+      this.publicCollections.delete(mpId);
+    }
+  }
+
+  /** Server-only continuation of a success-bound new publisher. Reuses its
+   * actual first directory and the original backup/identity-preserving saver.
+   * An opaque result is required; raw client ProviderPages cannot enter here.
+   */
+  async collectVerifiedWereadCandidate(
+    result: VerifiedWereadPublisherCandidate,
+  ) {
+    const mpId = result.candidate.mpId;
+    if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
+    this.publicCollections.add(mpId);
+    try {
+      const feed = await this.prisma.feed.findUniqueOrThrow({
+        where: { id: mpId },
+      });
+      if (
+        feed.collectionChannel !== 'owner-weread-latest' ||
+        feed.mpName.normalize('NFKC').replace(/\s+/gu, '') !==
+          result.candidate.name.normalize('NFKC').replace(/\s+/gu, '')
+      )
+        throw new Error('候选公众号尚未成功绑定或订阅身份已变化。');
+      const page = await continueVerifiedWereadCandidate(result);
+      await createVerifiedSqliteBackup();
+      const saved = await this.saveVerifiedSearchPage(mpId, page, true);
+      return {
+        source: 'owner-weread-latest' as const,
+        status: 'partial' as const,
+        complete: false as const,
+        coverage: 'recent-window' as const,
+        articles: page.articles.length,
+        ...saved,
+        message: `最近10篇正文及图片已保存：新增 ${saved.created}、补全 ${saved.updated}；旧文章与正文保留。`,
       };
     } finally {
       this.publicCollections.delete(mpId);

@@ -1,19 +1,11 @@
-import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { setTimeout as pause } from 'node:timers/promises';
 import { load } from 'cheerio';
 import { ownerSessionCookie, OwnerWebSession } from './owner-web-search';
-import { OwnerWebCookieLifecycle } from './owner-web-cookie-lifecycle';
 import { SearchConfig, OwnerUpdateStopped } from './owner-search-update';
 import { articleIdentity, articleContentHtml } from './article-page';
 import { assertProviderPage } from './subscription-provider';
 import { archiveProviderImages } from './archive-provider-images';
-import {
-  parseWereadDirectory,
-  selectWereadLatest,
-  verifyWereadArticleBody,
-} from './weread-directory';
 import {
   ownerLatestAuthHash,
   ownerLatestFailureReason,
@@ -25,6 +17,8 @@ import {
 } from './owner-weread-session-state';
 import { readReviewedWereadBatchCache } from './owner-weread-batch-resume';
 import { manualWebSession } from '../weread/manual-web-renewal';
+import { createWereadNativeRequester } from './weread-native-request';
+import { collectWereadLatestDirectory } from './weread-latest-collection';
 
 /** Normal owner Web session. The directory mode requires an explicit verified
  * private binding; old bindings retain their cover-only mode and access stops.
@@ -120,7 +114,6 @@ export async function fetchOwnerWereadLatest(
         state.reviewedBatchContinuationAuthorization.originalAttemptAt
     )
       throw new Error('WEREAD_BATCH_CACHE_INVALID');
-    const cookies = new OwnerWebCookieLifecycle(session, c.ownerVid);
     state.lastAttemptAt = Date.now();
     if (dailyRenewal && !state.normalManualRenewalAuthorization.consumedAt)
       state.normalManualRenewalAuthorization.consumedAt = new Date(
@@ -157,142 +150,48 @@ export async function fetchOwnerWereadLatest(
       ).toISOString();
     await write();
     reserved = true;
-    const get = async (
-      url: string,
-      params: Record<string, string>,
-      html = false,
-    ) => {
-      const requestCookie = cookies.header(url);
-      requests++;
-      const r = await axios.get<string>(url, {
-        params,
-        headers: {
-          Cookie: requestCookie,
-          Referer: 'https://weread.qq.com/',
-          Origin: 'https://weread.qq.com',
-          'User-Agent': 'Mozilla/5.0',
-          Accept: html
-            ? 'text/html,application/xhtml+xml,*/*'
-            : 'application/json, text/plain, */*',
-        },
-        proxy: false,
-        maxRedirects: 0,
-        timeout: 20000,
-        maxContentLength: 8 * 1024 * 1024,
-        responseType: 'text',
-        transformResponse: [(v) => v],
-        validateStatus: () => true,
-      });
-      // Persist an immutable private response before parsing, including failures.
-      await fs.writeFile(
-        `${stateFile}.${responseAttemptAt}.${stage}.response`,
-        r.data,
-        { flag: 'wx', mode: 0o600 },
-      );
-      state.response = {
-        stage,
-        httpStatus: r.status,
-        bytes: Buffer.byteLength(r.data),
-        requests,
-      };
-      if (
-        state.batchProgress?.originalAttemptAt === responseAttemptAt &&
-        /^content-/.test(stage)
-      )
-        state.batchProgress.newBodyRequests++;
-      await write();
-      if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
-      cookies.absorb(url, r.headers?.['set-cookie']);
-      // HTTP 200 can still carry a business refusal in directory or content.
-      // Keep its numeric code, never its arbitrary upstream message, and stop
-      // before parsing article metadata or making a subsequent request.
-      if (!html || /^\s*[\[{]/.test(r.data)) {
-        let data: any;
-        try {
-          data = JSON.parse(r.data);
-        } catch {
-          throw new Error('读书响应格式无效');
-        }
-        for (const key of ['errCode', 'errcode', 'code']) {
-          const value = data?.[key];
-          if (
-            value === undefined ||
-            value === null ||
-            value === 0 ||
-            value === '0'
-          )
-            continue;
-          if (
-            (typeof value !== 'number' && typeof value !== 'string') ||
-            !/^-?\d{1,10}$/.test(String(value))
-          )
-            throw new Error('读书响应格式无效');
-          throw new Error(`业务码 ${Number(value)}`);
-        }
-      }
-      return r.data;
-    };
+    const request = createWereadNativeRequester(
+      session,
+      c.ownerVid,
+      async (r) => {
+        await fs.writeFile(
+          `${stateFile}.${responseAttemptAt}.${stage}.response`,
+          r.data,
+          { flag: 'wx', mode: 0o600 },
+        );
+        state.response = {
+          stage,
+          httpStatus: r.status,
+          bytes: Buffer.byteLength(r.data),
+          requests,
+        };
+        if (
+          state.batchProgress?.originalAttemptAt === responseAttemptAt &&
+          /^content-/.test(stage)
+        )
+          state.batchProgress.newBodyRequests++;
+        await write();
+      },
+      () => {
+        requests++;
+      },
+    );
+    const get = request;
     if (c.wereadDirectoryEnabled === true) {
-      stage = 'directory-0';
-      const rawPages = resumed
-        ? []
-        : [
-            JSON.parse(
-              await get('https://weread.qq.com/web/mp/articles', {
-                bookId: c.mpId,
-                offset: '0',
-              }),
-            ),
-          ];
-      let selection = resumed
-        ? resumed.selection
-        : selectWereadLatest(rawPages, c);
-      if (selection.selected.length < 10) {
-        const offset = parseWereadDirectory(rawPages[0], c).groupCount;
-        if (offset === 0) throw new Error('目录未返回最近10篇');
-        stage = 'directory-next';
-        rawPages.push(
-          JSON.parse(
-            await get('https://weread.qq.com/web/mp/articles', {
-              bookId: c.mpId,
-              offset: String(offset),
-            }),
-          ),
-        );
-        selection = selectWereadLatest(rawPages, c);
-      }
-      if (selection.selected.length !== 10)
-        throw new Error('目录未返回最近10篇');
-      const articles: Array<ReturnType<typeof verifyWereadArticleBody>> =
-        resumed ? [...resumed.articles] : [];
-      for (const [index, candidate] of selection.selected.entries()) {
-        if (resumed && index < resumed.articles.length) continue;
-        if (index) await pause(1000);
-        stage = `content-${index + 1}`;
-        const html = await get(
-          'https://weread.qq.com/web/mp/content',
-          { reviewId: candidate.reviewId },
-          true,
-        );
-        const article = verifyWereadArticleBody(candidate, html);
-        if (articles.some((old) => old.id === article.id))
-          throw new Error('正文身份重复');
-        articles.push(article);
-      }
-      stage = 'images';
-      const page = await archiveProviderImages(
-        assertProviderPage(
-          {
-            articles,
-            coverage: 'recent-window',
-            upstreamCount: selection.directory.length,
-            bodyMissing: 0,
-            imageBlocked: 0,
-            pages: resumed ? 1 : rawPages.length,
-          },
-          c.mpId,
-        ),
-        { stopOnFailure: true },
+      const page = await collectWereadLatestDirectory(
+        c,
+        get,
+        (value) => {
+          stage = value;
+        },
+        resumed
+          ? {
+              pages: [],
+              selection: resumed.selection,
+              articles: resumed.articles,
+              pageCount: 1,
+            }
+          : undefined,
       );
       state.lastSuccessAt = Date.now();
       state.articleIds = page.articles.map((article) => article.id);

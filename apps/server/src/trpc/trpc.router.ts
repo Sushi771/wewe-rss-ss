@@ -687,9 +687,21 @@ export class TrpcRouter {
       this.trpcService.subscriptionAddCapability(),
     ),
     addFromArticle: this.trpcService.protectedProcedure
-      .input(z.object({ articleUrl: z.string().url() }))
-      .mutation(async ({ input }) =>
-        this.trpcService.addSubscriptionFromArticle(input.articleUrl),
+      .input(
+        z.object({
+          articleUrl: z.string().url().max(4096),
+          accountId: z
+            .string()
+            .regex(/^\d{1,20}$/)
+            .optional(),
+        }),
+      )
+      .mutation(async ({ input, ctx }) =>
+        this.trpcService.addSubscriptionFromArticle(
+          input.articleUrl,
+          input.accountId,
+          !!(ctx as any).isLocal,
+        ),
       ),
     list: this.trpcService.protectedProcedure
       .input(FeedSchemas.list)
