@@ -23,6 +23,11 @@ function render(capability) {
         },
       ];
     },
+    useRef(value) {
+      const i = index++;
+      if (!(i in state)) state[i] = { current: value };
+      return state[i];
+    },
     useMemo: (fn) => fn(),
     useEffect() {},
   };
@@ -152,12 +157,18 @@ function render(capability) {
       predicate,
     );
   }
-  mount();
-  state[0] = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
+  // Drive the actual input instead of assuming a useState position; account
+  // selection, feedback and the persistent submit guard also use hooks.
+  const initial = mount();
+  walk(initial, (node) => node.type === 'Textarea').props.onValueChange(
+    'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv',
+  );
   const tree = mount();
   return {
     events,
     state,
+    articleValue: () =>
+      walk(mount(), (node) => node.type === 'Textarea').props.value,
     button: walk(
       tree,
       (node) => node.type === 'Button' && node.props.children === '确定',
@@ -173,7 +184,7 @@ test('disabled or unknown source preserves input without invoking legacy add or 
     const h = render(capability);
     assert.equal(h.button.props.isDisabled, true);
     await h.button.props.onPress();
-    assert.equal(h.state[0], h.input.props.value);
+    assert.equal(h.articleValue(), h.input.props.value);
     assert(
       !h.events.some(
         (event) => event.mutation || event.closed || event.success,
@@ -186,7 +197,7 @@ test('a later backend failure preserves the entered link and does not claim succ
   const h = render({ available: true, message: '已显式配置来源' });
   assert.equal(h.button.props.isDisabled, false);
   await h.button.props.onPress();
-  assert.equal(h.state[0], h.input.props.value);
+  assert.equal(h.articleValue(), h.input.props.value);
   assert.equal(
     h.events.filter((event) => event.mutation === 'addFromArticle').length,
     1,
