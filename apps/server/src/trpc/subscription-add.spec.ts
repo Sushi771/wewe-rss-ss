@@ -386,10 +386,17 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
   ) => caller.feed.addFromArticle({ articleUrl, accountId: '123' });
 
   async function actualNative(
-    mode: 'success' | 'challenge' | 'empty' | 'public302' = 'success',
+    mode:
+      | 'success'
+      | 'challenge'
+      | 'empty'
+      | 'public302'
+      | 'http401' = 'success',
     options: {
       db?: any;
       usePublicResolver?: boolean;
+      publisher?: { mpId: string; name: string; biz: string };
+      configFile?: string;
       resolveOriginal?: (articleUrl: string) => Promise<{
         requestedUrl: string;
         html: string;
@@ -397,8 +404,27 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
     } = {},
   ) {
     let windowEnd = 10;
-    const configFile = path.join(attemptDir, 'native-config.json');
-    await fs.writeFile(configFile, JSON.stringify({ feeds: {} }));
+    const publisher = options.publisher || { mpId, name, biz };
+    const targetHtml = (n: number) =>
+      html(n)
+        .replaceAll(encodeURIComponent(biz), encodeURIComponent(publisher.biz))
+        .replaceAll(biz, publisher.biz)
+        .replaceAll(name, publisher.name);
+    const targetUrl = (n = 10) =>
+      url(n).replace(
+        encodeURIComponent(biz),
+        encodeURIComponent(publisher.biz),
+      );
+    const targetPage = (n: number) =>
+      JSON.parse(
+        JSON.stringify(page(n))
+          .replaceAll(mpId, publisher.mpId)
+          .replaceAll(name, publisher.name),
+      );
+    const configFile =
+      options.configFile || path.join(attemptDir, 'native-config.json');
+    if (!options.configFile)
+      await fs.writeFile(configFile, JSON.stringify({ feeds: {} }));
     const session = {
       source: 'owner-confirmed-native-web-login' as const,
       ownerVid: '123',
@@ -412,16 +438,18 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
         expires: -1,
       })),
     };
-    await saveNativeAccountSession(configFile, session);
-    await prisma.account.update({
-      where: { id: '123' },
-      data: {
-        token: JSON.stringify({
-          wr_vid: '123',
-          wr_skey: 'synthetic-normal-key',
-        }),
-      },
-    });
+    if (!options.configFile) {
+      await saveNativeAccountSession(configFile, session);
+      await prisma.account.update({
+        where: { id: '123' },
+        data: {
+          token: JSON.stringify({
+            wr_vid: '123',
+            wr_skey: 'synthetic-normal-key',
+          }),
+        },
+      });
+    }
     externalGet.mockImplementation(async (target: string, options: any) => {
       if (target.startsWith('https://mp.weixin.qq.com/'))
         return mode === 'public302'
@@ -435,19 +463,19 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
             }
           : {
               status: 200,
-              data: Buffer.from(html(10)),
+              data: Buffer.from(targetHtml(10)),
               headers: { 'content-type': 'text/html' },
             };
       if (target === 'https://weread.qq.com/web/mp/articles') {
-        expect(options.params).toEqual({ bookId: mpId, offset: '0' });
+        expect(options.params).toEqual({ bookId: publisher.mpId, offset: '0' });
         return {
-          status: 200,
+          status: mode === 'http401' ? 401 : 200,
           data: JSON.stringify(
             mode === 'challenge'
               ? { errCode: -2041 }
               : mode === 'empty'
                 ? { reviews: [] }
-                : page(windowEnd),
+                : targetPage(windowEnd),
           ),
           headers: {},
         };
@@ -456,13 +484,13 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
       const n = Number(
         options.params.reviewId.split('_').at(-1).replace(/^a+/, ''),
       );
-      return { status: 200, data: html(n), headers: {} };
+      return { status: 200, data: targetHtml(n), headers: {} };
     });
     const resolver = jest.fn(
       options.resolveOriginal ||
         (async (articleUrl: string) => ({
           requestedUrl: articleUrl,
-          html: html(10),
+          html: targetHtml(10),
         })),
     );
     const validator = createNativeSubscriptionDiscovery({
@@ -488,7 +516,7 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
         .post('/trpc/feed.addFromArticle')
         .set('authorization', 'synthetic-local-access')
         .set('origin', 'http://127.0.0.1')
-        .send({ articleUrl: url(), accountId: '123' });
+        .send({ articleUrl: targetUrl(), accountId: '123' });
     return {
       caller,
       app,
@@ -528,6 +556,102 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
       /synthetic-normal-key|native-session|<script>|sessionFile/,
     );
     expect(await prisma.article.count({ where: { mpId } })).toBe(10);
+  });
+
+  it('keeps two successful publishers isolated and repeating either one does not republish or refetch', async () => {
+    const first = await actualNative('success', { usePublicResolver: true });
+    expect((await first.httpAdd().expect(200)).body.result.data).toMatchObject({
+      accepted: true,
+      created: true,
+      status: 'updated',
+    });
+    const oldBinding = JSON.parse(await fs.readFile(first.configFile, 'utf8'))
+      .feeds[mpId];
+    const oldRows = await prisma.article.findMany({
+      where: { mpId },
+      orderBy: { id: 'asc' },
+    });
+    const other = {
+      mpId: 'MP_WXS_4567890123',
+      name: '合成另一个新公众号',
+      biz: Buffer.from('4567890123').toString('base64'),
+    };
+    const second = await actualNative('success', {
+      usePublicResolver: true,
+      publisher: other,
+      configFile: first.configFile,
+    });
+    expect((await second.httpAdd().expect(200)).body.result.data).toMatchObject(
+      {
+        accepted: true,
+        created: true,
+        status: 'updated',
+        feed: { id: other.mpId },
+      },
+    );
+    const after = await fs.readFile(first.configFile, 'utf8');
+    const bindings = JSON.parse(after).feeds;
+    expect(bindings[mpId]).toEqual(oldBinding);
+    expect(bindings[other.mpId]).toMatchObject({
+      mpId: other.mpId,
+      name: other.name,
+      biz: other.biz,
+      sourcePolicy: 'native-directory-only',
+    });
+    expect(bindings[other.mpId].wereadLatestStateFile).not.toBe(
+      bindings[mpId].wereadLatestStateFile,
+    );
+    expect(await prisma.feed.count()).toBe(2);
+    expect(await prisma.article.count()).toBe(20);
+    expect(
+      await prisma.article.findMany({
+        where: { mpId },
+        orderBy: { id: 'asc' },
+      }),
+    ).toEqual(oldRows);
+    const calls = externalGet.mock.calls.length;
+    for (const target of [first, second])
+      expect(
+        (await target.httpAdd().expect(200)).body.result.data,
+      ).toMatchObject({
+        accepted: true,
+        created: false,
+        status: 'already-subscribed',
+      });
+    expect(externalGet).toHaveBeenCalledTimes(calls);
+    expect(await fs.readFile(first.configFile, 'utf8')).toBe(after);
+  });
+
+  it('a refused directory cannot be retried through a different new publisher', async () => {
+    const first = await actualNative('challenge', { usePublicResolver: true });
+    expect((await first.httpAdd().expect(200)).body.result.data).toMatchObject({
+      accepted: false,
+      status: 'blocked',
+      businessCode: -2041,
+    });
+    const calls = externalGet.mock.calls.length;
+    const second = await actualNative('success', {
+      usePublicResolver: true,
+      publisher: {
+        mpId: 'MP_WXS_4567890123',
+        name: '合成另一个新公众号',
+        biz: Buffer.from('4567890123').toString('base64'),
+      },
+      configFile: first.configFile,
+    });
+    expect((await second.httpAdd().expect(200)).body.result.data).toMatchObject(
+      {
+        accepted: false,
+        status: 'blocked',
+        code: 'ATTEMPT_STOPPED',
+      },
+    );
+    expect(externalGet).toHaveBeenCalledTimes(calls);
+    expect(await prisma.feed.count()).toBe(0);
+    expect(await prisma.article.count()).toBe(0);
+    expect(
+      JSON.parse(await fs.readFile(first.configFile, 'utf8')).feeds,
+    ).toEqual({});
   });
 
   it('keeps an observed public302 pending with a safe official verification link and zero directory/body/database writes', async () => {
@@ -644,7 +768,7 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
       ).toEqual(oldRow);
     expect(externalGet).toHaveBeenCalledTimes(22);
   });
-  it.each(['challenge', 'empty'] as const)(
+  it.each(['challenge', 'empty', 'http401'] as const)(
     'integrates actual native %s without Feed/config publication or replay',
     async (mode) => {
       const n = await actualNative(mode);
@@ -653,10 +777,12 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
       expect(first.body.result.data).toMatchObject({
         accepted: false,
         feed: null,
-        code: mode === 'challenge' ? 'DIRECTORY_REFUSED' : 'DIRECTORY_EMPTY',
+        code: mode === 'empty' ? 'DIRECTORY_EMPTY' : 'DIRECTORY_REFUSED',
       });
       if (mode === 'challenge')
         expect(first.body.result.data.businessCode).toBe(-2041);
+      if (mode === 'http401')
+        expect(first.body.result.data.httpStatus).toBe(401);
       const second = await n.httpAdd().expect(200);
       expect(second.body.result.data).toMatchObject({
         accepted: false,
@@ -756,6 +882,64 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
       expect(await prisma.feed.count()).toBe(0);
     },
   );
+
+  it('retains the inactive recovery row when published binding compensation also fails', async () => {
+    const db = {
+      account: prisma.account,
+      feed: prisma.feed,
+      article: prisma.article,
+      $transaction: (action: any) =>
+        prisma.$transaction((tx) =>
+          action({
+            ...tx,
+            feed: {
+              findUnique: tx.feed.findUnique.bind(tx.feed),
+              create: tx.feed.create.bind(tx.feed),
+              delete: tx.feed.delete.bind(tx.feed),
+              update: () => {
+                throw new Error('synthetic activation failure');
+              },
+            },
+          }),
+        ),
+    };
+    const n = await actualNative('success', { db });
+    const rename = fs.rename.bind(fs);
+    const compensation = jest
+      .spyOn(fs, 'rename')
+      .mockImplementation(async (from, to) => {
+        if (
+          String(to) === n.configFile &&
+          String(from).endsWith('-rollback.pending')
+        )
+          throw new Error('synthetic compensation failure');
+        return rename(from, to);
+      });
+    try {
+      const response = await n.httpAdd().expect(200);
+      expect(response.body.result.data).toMatchObject({
+        accepted: false,
+        status: 'failed',
+        code: 'FEED_CHANGED',
+      });
+    } finally {
+      compensation.mockRestore();
+    }
+    const binding = JSON.parse(await fs.readFile(n.configFile, 'utf8')).feeds[
+      mpId
+    ];
+    expect(binding.bindingEvidence.source).toBe(
+      'normal-native-candidate-directory',
+    );
+    expect(await prisma.feed.findUnique({ where: { id: mpId } })).toMatchObject(
+      {
+        status: 0,
+        collectionChannel: 'unavailable',
+      },
+    );
+    expect(await prisma.article.count()).toBe(0);
+    expect(externalGet).toHaveBeenCalledTimes(1);
+  });
 
   it('adds a completely new publisher after real fixture parsing, saves ten bodies/image bytes, and never duplicates directory or old data', async () => {
     expect(process.env.OWNER_SEARCH_CONFIG_FILE).toBeUndefined();

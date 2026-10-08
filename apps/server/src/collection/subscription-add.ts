@@ -19,6 +19,8 @@ export type VerifiedPublisher = {
   evidenceRevision: string;
   /** Server-only account revision check executed inside Feed transactions. */
   assertAccount?: (tx: Prisma.TransactionClient) => Promise<void>;
+  /** A published binding must be withdrawn before deleting a staged row. */
+  assertRollback?: () => Promise<void>;
 };
 export type StagedSubscription = {
   feedId: string;
@@ -367,6 +369,7 @@ export async function addNativeSubscription(
       },
       rollback: async () => {
         if (active || !created) return;
+        await target.assertRollback?.();
         await db.$transaction(async (tx) => {
           const before = await tx.feed.findUnique({
             where: { id: target.mpId },

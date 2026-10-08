@@ -264,6 +264,10 @@ export function createNativeSubscriptionDiscovery(options: {
               name: candidate.name,
               evidenceRevision: revision,
               assertAccount,
+              assertRollback: async () => {
+                if (published)
+                  throw new SubscriptionRegistrationError('FEED_CHANGED');
+              },
             });
             await replace(configFile, after, revision);
             published = true;
@@ -274,6 +278,7 @@ export function createNativeSubscriptionDiscovery(options: {
               if ((await fs.readFile(configFile, 'utf8')) !== after)
                 throw error;
               await replace(configFile, before, revision + '-rollback');
+              published = false;
             }
             await receipt?.rollback();
             throw error;
