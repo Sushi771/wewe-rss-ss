@@ -17,7 +17,16 @@ const source = ts.createSourceFile(
   ts.ScriptKind.TSX,
 );
 let expression = '';
+const repairHandlers: Record<string, string> = {};
 function visit(node: ts.Node) {
+  if (
+    ts.isVariableDeclaration(node) &&
+    ['handleRepairConfirm', 'handleOpenRepair', 'handleCancelRepair'].includes(
+      node.name.getText(source),
+    )
+  )
+    repairHandlers[node.name.getText(source)] =
+      node.initializer!.getText(source);
   if (
     ts.isVariableDeclaration(node) &&
     node.name.getText(source) === 'handleConfirm'
@@ -84,6 +93,123 @@ const added = {
 };
 
 describe('original subscription UI action (actual handler, offline)', () => {
+  function repairHarness() {
+    const state = {
+      target: { id: 'MP_WXS_3456789012', mpName: '合成公众号' } as {
+        id: string;
+        mpName: string;
+      } | null,
+      messages: [] as string[],
+    };
+    const mutate = jest.fn();
+    const scope = {
+      module: { exports: null as any },
+      addingSubscriptions: { current: false },
+      cancelSubscriptions: { current: false },
+      isOpen: false,
+      repairTarget: state.target,
+      addCapability: { existingRepairAvailable: true },
+      addAccountId: '123',
+      repairNativeSource: mutate,
+      setIsAddingSubscriptions: jest.fn(),
+      setRepairMessages: (messages: string[]) => {
+        state.messages = messages;
+      },
+      setRepairTarget: (target: typeof state.target) => {
+        state.target = target;
+      },
+      refreshFeedViews: jest.fn().mockResolvedValue(undefined),
+      refetchFeedList: jest.fn(),
+      queryUtils: {
+        article: {
+          list: { reset: jest.fn() },
+          summary: { invalidate: jest.fn() },
+        },
+      },
+      toast: { error: jest.fn(), success: jest.fn(), warning: jest.fn() },
+    };
+    vm.runInNewContext(
+      ts.transpileModule(
+        `module.exports={run:${repairHandlers.handleRepairConfirm},open:${repairHandlers.handleOpenRepair},cancel:${repairHandlers.handleCancelRepair}};`,
+        {
+          compilerOptions: {
+            target: ts.ScriptTarget.ES2021,
+            module: ts.ModuleKind.CommonJS,
+          },
+        },
+      ).outputText,
+      scope,
+      { timeout: 1000 },
+    );
+    return {
+      state,
+      scope,
+      mutate,
+      ...(scope.module.exports as {
+        run: () => Promise<void>;
+        open: (feed: { id: string; mpName: string }) => void;
+        cancel: () => void;
+      }),
+    };
+  }
+  it('repair opening/cancellation sends no request; confirming sends only selected existing feed/account/confirmation', async () => {
+    const h = repairHarness();
+    h.open({ id: 'MP_WXS_3456789012', mpName: '合成公众号' });
+    expect(h.mutate).not.toHaveBeenCalled();
+    h.mutate.mockResolvedValue({ ...added, created: false });
+    await h.run();
+    expect(h.mutate).toHaveBeenCalledWith({
+      feedId: 'MP_WXS_3456789012',
+      accountId: '123',
+      confirmed: true,
+    });
+    expect(h.scope.refreshFeedViews).toHaveBeenCalledTimes(1);
+    expect(h.state.target).toBeNull();
+    expect(h.scope.toast.success).toHaveBeenCalledTimes(1);
+    const cancel = repairHarness();
+    cancel.cancel();
+    expect(cancel.mutate).not.toHaveBeenCalled();
+  });
+  it('a failed repair preserves selected subscription/account and displays the actual refusal once', async () => {
+    const h = repairHarness();
+    h.mutate.mockResolvedValue({
+      ...added,
+      accepted: false,
+      pending: true,
+      feed: null,
+      businessCode: -2041,
+      message: '停止记录保留',
+    });
+    await h.run();
+    expect(h.state.target?.id).toBe('MP_WXS_3456789012');
+    expect(h.scope.addAccountId).toBe('123');
+    expect(h.state.messages.join('')).toContain('业务码 -2041');
+    expect(h.mutate).toHaveBeenCalledTimes(1);
+    expect(h.scope.toast.success).not.toHaveBeenCalled();
+  });
+  it('repair requires an explicit normal account, guards double clicks and ignores a late result after closing', async () => {
+    const missing = repairHarness();
+    missing.scope.addAccountId = '';
+    await missing.run();
+    expect(missing.mutate).not.toHaveBeenCalled();
+    const h = repairHarness();
+    let finish: (result: unknown) => void = () => {};
+    h.mutate.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = h.run();
+    await h.run();
+    expect(h.mutate).toHaveBeenCalledTimes(1);
+    h.cancel();
+    finish({ ...added, created: false });
+    await pending;
+    expect(h.state.target).toBeNull();
+    expect(h.scope.toast.success).not.toHaveBeenCalled();
+    expect(h.scope.addingSubscriptions.current).toBe(false);
+  });
   it.each([
     'PUBLIC_ORIGINAL_LOGIN_REDIRECT',
     'PUBLIC_ORIGINAL_ARTICLE_REDIRECT',

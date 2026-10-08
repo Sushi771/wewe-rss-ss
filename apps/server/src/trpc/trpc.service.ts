@@ -13,6 +13,7 @@ import { wechat2RssProvider } from '../collection/provider-registry';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import {
   addNativeSubscription,
+  repairNativeSubscription,
   SUBSCRIPTION_DISCOVERY,
   subscriptionArticleUrl,
   subscriptionDiscoveryUnavailable,
@@ -541,6 +542,7 @@ export class TrpcService {
       return {
         available: true as const,
         requiresAccount: true,
+        existingRepairAvailable: !!this.subscriptionDiscovery.repairExisting,
         code: 'NATIVE_DIRECTORY_VALIDATION' as const,
         message:
           '选择正常Web登录账号并提交公众号文章链接；本次点击验证候选目录，通过后添加并读取最近10篇。遇限制停止，不自动切换账号或重试。',
@@ -549,6 +551,7 @@ export class TrpcService {
       return {
         available: false as const,
         requiresAccount: false,
+        existingRepairAvailable: false,
         code: 'SUBSCRIPTION_SOURCE_UNAVAILABLE' as const,
         message:
           '当前新增入口依赖的 Wechat2RSS 已停用，自建新公众号发现与持续更新尚未接通。暂不能自动新增；输入链接已保留，请勿重复提交。现有订阅和已保存文章仍可查看。',
@@ -556,12 +559,49 @@ export class TrpcService {
     return {
       available: true as const,
       requiresAccount: false,
+      existingRepairAvailable: false,
       code: 'SOURCE_CONFIGURED' as const,
       message: '新增将提交到已显式配置的来源；任务受理不代表文章已取得。',
     };
   }
 
   private readonly activeSubscriptionAdds = new Set<string>();
+
+  async repairExistingSubscription(
+    feedId: string,
+    accountId: string,
+    isLocal = false,
+  ) {
+    if (!isLocal)
+      throw new TRPCError({
+        code: 'FORBIDDEN',
+        message: '订阅来源修复只能在服务器本机操作。',
+      });
+    if (!this.subscriptionDiscovery?.repairExisting)
+      return subscriptionDiscoveryUnavailable('SOURCE_UNAVAILABLE');
+    const account = await this.prismaService.account.findUnique({
+      where: { id: accountId },
+      select: { id: true, status: true },
+    });
+    if (!account || account.status !== 1)
+      return subscriptionDiscoveryUnavailable('ACCOUNT_UNAVAILABLE');
+    if (this.activeSubscriptionAdds.has(accountId))
+      throw new TRPCError({
+        code: 'CONFLICT',
+        message: '所选账号已有订阅验证进行中，本次未发送目录请求。',
+      });
+    this.activeSubscriptionAdds.add(accountId);
+    try {
+      return await repairNativeSubscription(
+        this.prismaService,
+        this.subscriptionDiscovery,
+        { feedId, accountId, trigger: 'local-manual-repair' },
+        () => createVerifiedSqliteBackup({ allowMysqlSkip: true }),
+      );
+    } finally {
+      this.activeSubscriptionAdds.delete(accountId);
+    }
+  }
 
   async addSubscriptionFromArticle(
     articleUrl: string,

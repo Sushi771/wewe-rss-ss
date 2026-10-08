@@ -11,12 +11,17 @@ import { WereadPublicOriginalResult } from './weread-public-original';
 import { NativeWereadAccount } from './owner-weread-account';
 import {
   validateWereadPublisherCandidate,
+  validateWereadExistingFeedCandidate,
+  wereadPublisherCandidateFromExistingFeed,
   withVerifiedWereadCandidateBinding,
   wereadPublisherCandidateFromOriginal,
   WereadCandidateValidationError,
 } from './weread-publisher-validation';
 import {
   DiscoveryOutcome,
+  ExistingSubscriptionRepairInput,
+  SubscriptionDiscoveryInput,
+  VerifiedPublisher,
   DiscoveryStage,
   SubscriptionDiscoveryValidator,
   SubscriptionRegistrationError,
@@ -63,31 +68,35 @@ function failure(error: unknown, stage: DiscoveryStage): DiscoveryOutcome {
   const mapped =
     error instanceof SubscriptionRegistrationError
       ? error.code
-      : code === 'PUBLIC_IDENTITY_INVALID'
-        ? 'IDENTITY_UNRESOLVED'
-        : code === 'ACCOUNT_NOT_READY'
-          ? 'ACCOUNT_LOGIN_REQUIRED'
-          : ['RETAINED_STOP', 'ATTEMPT_CONSUMED'].includes(code || '')
-            ? 'ATTEMPT_STOPPED'
-            : code === 'IN_PROGRESS'
-              ? 'ATTEMPT_BUSY'
-              : code === 'EMPTY_DIRECTORY'
-                ? 'DIRECTORY_EMPTY'
-                : code === 'DIRECTORY_INVALID'
-                  ? 'IDENTITY_CONFLICT'
-                  : ['UPSTREAM_HTTP', 'UPSTREAM_BUSINESS'].includes(code || '')
-                    ? stage === 'directory'
-                      ? 'DIRECTORY_REFUSED'
-                      : 'BODY_FAILED'
-                    : stage === 'session'
-                      ? 'ACCOUNT_LOGIN_REQUIRED'
-                      : stage === 'identity'
-                        ? 'IDENTITY_UNRESOLVED'
-                        : stage === 'binding'
-                          ? 'BINDING_FAILED'
-                          : stage === 'save'
-                            ? 'SAVE_FAILED'
-                            : 'BODY_FAILED';
+      : code === 'STATE_CHANGED'
+        ? 'FEED_CHANGED'
+        : code === 'PUBLIC_IDENTITY_INVALID'
+          ? 'IDENTITY_UNRESOLVED'
+          : code === 'ACCOUNT_NOT_READY'
+            ? 'ACCOUNT_LOGIN_REQUIRED'
+            : ['RETAINED_STOP', 'ATTEMPT_CONSUMED'].includes(code || '')
+              ? 'ATTEMPT_STOPPED'
+              : code === 'IN_PROGRESS'
+                ? 'ATTEMPT_BUSY'
+                : code === 'EMPTY_DIRECTORY'
+                  ? 'DIRECTORY_EMPTY'
+                  : code === 'DIRECTORY_INVALID'
+                    ? 'IDENTITY_CONFLICT'
+                    : ['UPSTREAM_HTTP', 'UPSTREAM_BUSINESS'].includes(
+                          code || '',
+                        )
+                      ? stage === 'directory'
+                        ? 'DIRECTORY_REFUSED'
+                        : 'BODY_FAILED'
+                      : stage === 'session'
+                        ? 'ACCOUNT_LOGIN_REQUIRED'
+                        : stage === 'identity'
+                          ? 'IDENTITY_UNRESOLVED'
+                          : stage === 'binding'
+                            ? 'BINDING_FAILED'
+                            : stage === 'save'
+                              ? 'SAVE_FAILED'
+                              : 'BODY_FAILED';
   return {
     status: [
       'IDENTITY_UNRESOLVED',
@@ -117,25 +126,75 @@ export function createNativeSubscriptionDiscovery(options: {
   resolveOriginal: PublicOriginalResolver;
   configFile?: string;
 }): SubscriptionDiscoveryValidator {
-  return {
-    discover: async (input, stageFeed) => {
-      let stage: DiscoveryStage = 'session';
-      try {
-        const configFile = options.configFile || ownerConfigFile();
-        if (!path.isAbsolute(configFile))
-          return { status: 'failed', stage, code: 'SOURCE_UNAVAILABLE' };
-        const account = await options.prisma.account.findUniqueOrThrow({
-          where: { id: input.accountId },
+  const discover = async (
+    input: SubscriptionDiscoveryInput | ExistingSubscriptionRepairInput,
+    stageFeed: (target: VerifiedPublisher) => Promise<StagedSubscription>,
+  ): Promise<DiscoveryOutcome> => {
+    let stage: DiscoveryStage = 'session';
+    try {
+      const configFile = options.configFile || ownerConfigFile();
+      if (!path.isAbsolute(configFile))
+        return { status: 'failed', stage, code: 'SOURCE_UNAVAILABLE' };
+      const account = await options.prisma.account.findUniqueOrThrow({
+        where: { id: input.accountId },
+      });
+      const accountContext = await resolveNativeWereadAccount(
+        account,
+        configFile,
+      );
+      stage = 'identity';
+      const existingFeed =
+        'feedId' in input
+          ? await options.prisma.feed.findUnique({
+              where: { id: input.feedId },
+            })
+          : undefined;
+      if (
+        'feedId' in input &&
+        (!existingFeed ||
+          existingFeed.status !== 1 ||
+          ![null, 'unavailable'].includes(existingFeed.collectionChannel))
+      )
+        throw new SubscriptionRegistrationError('FEED_CHANGED');
+      const assertExisting = async () => {
+        if (!existingFeed) return;
+        const fresh = await options.prisma.feed.findUnique({
+          where: { id: existingFeed.id },
         });
-        const accountContext = await resolveNativeWereadAccount(
-          account,
-          configFile,
-        );
-        stage = 'identity';
-        const original = await options.resolveOriginal(
-          input.articleUrl,
-          account,
-        );
+        if (!fresh || JSON.stringify(fresh) !== JSON.stringify(existingFeed))
+          throw new WereadCandidateValidationError('STATE_CHANGED');
+        // Trusted old canonical identities may contradict a damaged legacy ID.
+        // Missing legacy URLs are allowed; short IDs and recommendations are not provenance.
+        const known = await options.prisma.article.findMany({
+          where: { mpId: existingFeed.id, verifiedSourceUrl: { not: null } },
+          select: { verifiedSourceUrl: true },
+          take: 20,
+          orderBy: { publishTime: 'desc' },
+        });
+        for (const row of known) {
+          try {
+            if (
+              canonicalArticleUrl(downloadArticleUrl(row.verifiedSourceUrl))
+                .mpId !== existingFeed.id
+            )
+              throw new Error();
+          } catch {
+            throw new WereadCandidateValidationError('DIRECTORY_INVALID');
+          }
+        }
+      };
+      await assertExisting();
+      let original: Awaited<ReturnType<PublicOriginalResolver>> | undefined;
+      let originalHtml: string | undefined;
+      let candidate:
+        | ReturnType<typeof wereadPublisherCandidateFromOriginal>
+        | ReturnType<typeof wereadPublisherCandidateFromExistingFeed>;
+      if (existingFeed) {
+        candidate = wereadPublisherCandidateFromExistingFeed(existingFeed);
+      } else {
+        if (!('articleUrl' in input))
+          throw new SubscriptionRegistrationError('FEED_CHANGED');
+        original = await options.resolveOriginal(input.articleUrl, account);
         if ('status' in original && original.status !== 'reviewed-original')
           return {
             status:
@@ -165,142 +224,161 @@ export function createNativeSubscriptionDiscovery(options: {
           downloadArticleUrl(input.articleUrl)
         )
           throw new Error('ORIGINAL_REQUEST_MISMATCH');
-        const candidate = wereadPublisherCandidateFromOriginal(original.html);
+        candidate = wereadPublisherCandidateFromOriginal(original.html);
+        originalHtml = original.html;
         if (
           new URL(input.articleUrl).pathname === '/s' &&
           canonicalArticleUrl(input.articleUrl).id !==
             articleIdentity(original.html).id
         )
           throw new SubscriptionRegistrationError('FEED_IDENTITY_CONFLICT');
-        const old = await options.prisma.feed.findUnique({
-          where: { id: candidate.mpId },
+      }
+      const old = await options.prisma.feed.findUnique({
+        where: { id: candidate.mpId },
+      });
+      if (old && normalize(old.mpName) !== normalize(candidate.name))
+        throw new SubscriptionRegistrationError('FEED_IDENTITY_CONFLICT');
+      const assertAccount = async (tx: Prisma.TransactionClient) => {
+        const fresh = await tx.account.findUniqueOrThrow({
+          where: { id: input.accountId },
         });
-        if (old && normalize(old.mpName) !== normalize(candidate.name))
-          throw new SubscriptionRegistrationError('FEED_IDENTITY_CONFLICT');
-        const assertAccount = async (tx: Prisma.TransactionClient) => {
-          const fresh = await tx.account.findUniqueOrThrow({
-            where: { id: input.accountId },
+        const checked = await resolveNativeWereadAccount(fresh, configFile);
+        if (checked.accountRevision !== accountContext.accountRevision)
+          throw new SubscriptionRegistrationError('FEED_CHANGED');
+        if (existingFeed) {
+          const freshFeed = await tx.feed.findUnique({
+            where: { id: existingFeed.id },
           });
-          const checked = await resolveNativeWereadAccount(fresh, configFile);
-          if (checked.accountRevision !== accountContext.accountRevision)
+          if (
+            !freshFeed ||
+            JSON.stringify(freshFeed) !== JSON.stringify(existingFeed)
+          )
             throw new SubscriptionRegistrationError('FEED_CHANGED');
-        };
-        const config = JSON.parse(await fs.readFile(configFile, 'utf8'));
-        const existing = config.feeds?.[candidate.mpId];
-        if (
-          old?.collectionChannel === 'owner-weread-latest' &&
-          existing?.ownerVid === account.id &&
-          existing.biz === candidate.biz &&
-          existing.wereadDirectoryEnabled === true &&
-          existing.bindingEvidence?.source ===
-            'normal-native-candidate-directory' &&
-          /^[a-f0-9]{64}$/.test(existing.bindingEvidence?.revision || '')
-        ) {
-          const receipt = await stageFeed({
-            mpId: candidate.mpId,
-            name: candidate.name,
-            evidenceRevision: existing.bindingEvidence.revision,
-            assertAccount,
-          });
-          await receipt.activate();
-          return {
-            status: 'already-subscribed',
-            stage: 'binding',
-            code: 'ALREADY_SUBSCRIBED',
-          };
         }
-        stage = 'directory';
-        const verified = await validateWereadPublisherCandidate({
-          account,
-          publicArticleHtml: original.html,
-          trigger: 'local-manual',
-          configFile,
+      };
+      const config = JSON.parse(await fs.readFile(configFile, 'utf8'));
+      const existing = config.feeds?.[candidate.mpId];
+      if (
+        old?.collectionChannel === 'owner-weread-latest' &&
+        existing?.ownerVid === account.id &&
+        existing.biz === candidate.biz &&
+        existing.wereadDirectoryEnabled === true &&
+        existing.bindingEvidence?.source ===
+          'normal-native-candidate-directory' &&
+        /^[a-f0-9]{64}$/.test(existing.bindingEvidence?.revision || '')
+      ) {
+        const receipt = await stageFeed({
+          mpId: candidate.mpId,
+          name: candidate.name,
+          evidenceRevision: existing.bindingEvidence.revision,
+          assertAccount,
         });
-        stage = 'binding';
-        await withVerifiedWereadCandidateBinding(verified, async (context) => {
-          if (context.accountRevision !== accountContext.accountRevision)
-            throw new SubscriptionRegistrationError('FEED_CHANGED');
-          const before = await fs.readFile(configFile, 'utf8');
-          const current = JSON.parse(before);
-          if (
-            !current.feeds ||
-            Array.isArray(current.feeds) ||
-            typeof current.feeds !== 'object'
-          )
-            throw new Error('BINDING_SCHEMA_INVALID');
-          const previous = current.feeds[candidate.mpId];
-          if (
-            previous &&
-            (previous.mpId !== candidate.mpId ||
-              previous.biz !== candidate.biz ||
-              normalize(previous.name) !== normalize(candidate.name))
-          )
-            throw new SubscriptionRegistrationError('FEED_IDENTITY_CONFLICT');
-          const revision = context.evidence.revision;
-          await immutable(
-            configFile + `.before-subscription-${revision}`,
-            before,
-          );
-          let receipt: StagedSubscription | undefined;
-          const next = {
-            ...current,
-            feeds: {
-              ...current.feeds,
-              [candidate.mpId]: {
-                ...previous,
-                ...context.binding,
-                bindingEvidence: context.evidence,
-              },
-            },
-          };
-          const after = JSON.stringify(next);
-          let published = false;
-          try {
-            receipt = await stageFeed({
-              mpId: candidate.mpId,
-              name: candidate.name,
-              evidenceRevision: revision,
-              assertAccount,
-              assertRollback: async () => {
-                if (published)
-                  throw new SubscriptionRegistrationError('FEED_CHANGED');
-              },
-            });
-            await replace(configFile, after, revision);
-            published = true;
-            await receipt.activate();
-          } catch (error) {
-            if (published) {
-              // Locks are still held; compensation cannot overwrite a newer config.
-              if ((await fs.readFile(configFile, 'utf8')) !== after)
-                throw error;
-              await replace(configFile, before, revision + '-rollback');
-              published = false;
-            }
-            await receipt?.rollback();
-            throw error;
-          }
-        });
-        stage = 'bodies';
-        const saved =
-          await options.collection.collectVerifiedWereadCandidate(verified);
-        stage = 'save';
+        await receipt.activate();
         return {
-          status: 'updated',
-          stage,
-          code: 'UPDATED',
-          update: {
-            articles: saved.articles,
-            created: saved.created,
-            updated: saved.updated,
-            bodyMissing: 0,
-            imageBlocked: 0,
-            saved: true,
+          status: 'already-subscribed',
+          stage: 'binding',
+          code: 'ALREADY_SUBSCRIBED',
+        };
+      }
+      stage = 'directory';
+      const verified = existingFeed
+        ? await validateWereadExistingFeedCandidate({
+            account,
+            existingFeed,
+            assertExisting,
+            trigger: 'local-manual',
+            configFile,
+          })
+        : await validateWereadPublisherCandidate({
+            account,
+            publicArticleHtml: originalHtml!,
+            trigger: 'local-manual',
+            configFile,
+          });
+      stage = 'binding';
+      await withVerifiedWereadCandidateBinding(verified, async (context) => {
+        if (context.accountRevision !== accountContext.accountRevision)
+          throw new SubscriptionRegistrationError('FEED_CHANGED');
+        const before = await fs.readFile(configFile, 'utf8');
+        const current = JSON.parse(before);
+        if (
+          !current.feeds ||
+          Array.isArray(current.feeds) ||
+          typeof current.feeds !== 'object'
+        )
+          throw new Error('BINDING_SCHEMA_INVALID');
+        const previous = current.feeds[candidate.mpId];
+        if (
+          previous &&
+          (previous.mpId !== candidate.mpId ||
+            previous.biz !== candidate.biz ||
+            normalize(previous.name) !== normalize(candidate.name))
+        )
+          throw new SubscriptionRegistrationError('FEED_IDENTITY_CONFLICT');
+        const revision = context.evidence.revision;
+        await immutable(
+          configFile + `.before-subscription-${revision}`,
+          before,
+        );
+        let receipt: StagedSubscription | undefined;
+        const next = {
+          ...current,
+          feeds: {
+            ...current.feeds,
+            [candidate.mpId]: {
+              ...previous,
+              ...context.binding,
+              bindingEvidence: context.evidence,
+            },
           },
         };
-      } catch (error) {
-        return failure(error, stage);
-      }
-    },
+        const after = JSON.stringify(next);
+        let published = false;
+        try {
+          receipt = await stageFeed({
+            mpId: candidate.mpId,
+            name: candidate.name,
+            evidenceRevision: revision,
+            assertAccount,
+            assertRollback: async () => {
+              if (published)
+                throw new SubscriptionRegistrationError('FEED_CHANGED');
+            },
+          });
+          await replace(configFile, after, revision);
+          published = true;
+          await receipt.activate();
+        } catch (error) {
+          if (published) {
+            // Locks are still held; compensation cannot overwrite a newer config.
+            if ((await fs.readFile(configFile, 'utf8')) !== after) throw error;
+            await replace(configFile, before, revision + '-rollback');
+            published = false;
+          }
+          await receipt?.rollback();
+          throw error;
+        }
+      });
+      stage = 'bodies';
+      const saved =
+        await options.collection.collectVerifiedWereadCandidate(verified);
+      stage = 'save';
+      return {
+        status: 'updated',
+        stage,
+        code: 'UPDATED',
+        update: {
+          articles: saved.articles,
+          created: saved.created,
+          updated: saved.updated,
+          bodyMissing: 0,
+          imageBlocked: 0,
+          saved: true,
+        },
+      };
+    } catch (error) {
+      return failure(error, stage);
+    }
   };
+  return { discover, repairExisting: discover };
 }

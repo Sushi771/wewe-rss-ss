@@ -21,6 +21,44 @@ import {
 import { collectWereadLatestDirectory } from './weread-latest-collection';
 import { SearchConfig } from './owner-search-update';
 
+type ExistingFeedCandidate = {
+  mpId: string;
+  name: string;
+  biz: string;
+  bookIdStatus: 'candidate';
+  identitySource: 'existing-feed-candidate';
+  existingFeedSha256: string;
+};
+type PublisherCandidate =
+  | ReturnType<typeof wereadPublisherCandidateFromOriginal>
+  | ExistingFeedCandidate;
+
+/** Internal adapter input from a freshly read existing DB row, never HTTP identity
+ * fields. Encoding the legacy number supplies only an expected candidate biz;
+ * the actual native directory must still prove publisher and article ownership.
+ */
+export function wereadPublisherCandidateFromExistingFeed(feed: {
+  id: string;
+  mpName: string;
+}): ExistingFeedCandidate {
+  if (
+    !/^MP_WXS_\d{5,15}$/.test(feed.id) ||
+    typeof feed.mpName !== 'string' ||
+    !feed.mpName.trim() ||
+    feed.mpName.length > 200 ||
+    /[\x00-\x1f\x7f]/.test(feed.mpName)
+  )
+    throw fail('PUBLIC_IDENTITY_INVALID');
+  return {
+    mpId: feed.id,
+    name: feed.mpName,
+    biz: Buffer.from(feed.id.slice('MP_WXS_'.length)).toString('base64'),
+    bookIdStatus: 'candidate',
+    identitySource: 'existing-feed-candidate',
+    existingFeedSha256: sha(JSON.stringify([feed.id, feed.mpName])),
+  };
+}
+
 export type WereadCandidateErrorCode =
   | 'MANUAL_ONLY'
   | 'PUBLIC_IDENTITY_INVALID'
@@ -84,6 +122,7 @@ export function wereadPublisherCandidateFromOriginal(html: string) {
       publicArticleUrl: identity.canonical,
       publicArticleSha256: sha(html),
       bookIdStatus: 'candidate' as const,
+      identitySource: 'reviewed-public-original' as const,
     };
   } catch {
     throw fail('PUBLIC_IDENTITY_INVALID');
@@ -92,7 +131,7 @@ export function wereadPublisherCandidateFromOriginal(html: string) {
 
 export type VerifiedWereadPublisherCandidate = {
   status: 'directory-verified';
-  candidate: ReturnType<typeof wereadPublisherCandidateFromOriginal>;
+  candidate: PublisherCandidate;
   directory: ReturnType<typeof parseWereadDirectory>;
   selection: ReturnType<typeof selectWereadLatest>;
   bindingEvidence: {
@@ -100,7 +139,9 @@ export type VerifiedWereadPublisherCandidate = {
     accountId: string;
     mpId: string;
     name: string;
-    publicArticleSha256: string;
+    identitySource: 'reviewed-public-original' | 'existing-feed-candidate';
+    publicArticleSha256?: string;
+    existingFeedSha256?: string;
     directorySha256: string;
     verifiedAt: string;
     revision: string;
@@ -312,6 +353,33 @@ export async function validateWereadPublisherCandidate(input: {
   const candidate = wereadPublisherCandidateFromOriginal(
     input.publicArticleHtml,
   );
+  return validateCandidate({ ...input, candidate });
+}
+
+/** A local explicit existing-feed repair may validate its legacy candidate
+ * directly. Missing public HTML is not a prebinding prerequisite here.
+ */
+export async function validateWereadExistingFeedCandidate(input: {
+  account: NativeWereadAccount;
+  existingFeed: { id: string; mpName: string };
+  assertExisting: () => Promise<void>;
+  trigger: 'local-manual';
+  configFile?: string;
+}) {
+  if (input.trigger !== 'local-manual') throw fail('MANUAL_ONLY');
+  const candidate = wereadPublisherCandidateFromExistingFeed(
+    input.existingFeed,
+  );
+  return validateCandidate({ ...input, candidate });
+}
+
+async function validateCandidate(input: {
+  account: NativeWereadAccount;
+  candidate: PublisherCandidate;
+  assertExisting?: () => Promise<void>;
+  configFile?: string;
+}): Promise<VerifiedWereadPublisherCandidate> {
+  const { candidate } = input;
   let configFile: string;
   try {
     configFile = input.configFile || ownerConfigFile();
@@ -328,6 +396,7 @@ export async function validateWereadPublisherCandidate(input: {
     input.account,
     attemptFile,
     async (accountContext) => {
+      await input.assertExisting?.();
       try {
         await fs.access(attemptFile);
         throw fail('ATTEMPT_CONSUMED');
@@ -396,6 +465,13 @@ export async function validateWereadPublisherCandidate(input: {
           },
         );
         const raw = JSON.parse(text);
+        if (
+          candidate.identitySource === 'existing-feed-candidate' &&
+          [raw.bookId, raw.bookInfo?.bookId].some(
+            (id) => id !== undefined && id !== '' && id !== candidate.mpId,
+          )
+        )
+          throw fail('DIRECTORY_INVALID');
         let directory: ReturnType<typeof parseWereadDirectory>;
         let selection: ReturnType<typeof selectWereadLatest>;
         try {
@@ -405,6 +481,7 @@ export async function validateWereadPublisherCandidate(input: {
           throw fail('DIRECTORY_INVALID');
         }
         if (!directory.articles.length) throw fail('EMPTY_DIRECTORY');
+        await input.assertExisting?.();
         // Explicit distinction: public-derived bookId was only a candidate until
         // this actual nonempty directory verified belongBookId/name/review IDs.
         const bindingEvidence: VerifiedWereadPublisherCandidate['bindingEvidence'] =
@@ -413,7 +490,10 @@ export async function validateWereadPublisherCandidate(input: {
             accountId: input.account.id,
             mpId: candidate.mpId,
             name: candidate.name,
-            publicArticleSha256: candidate.publicArticleSha256,
+            identitySource: candidate.identitySource,
+            ...('publicArticleSha256' in candidate
+              ? { publicArticleSha256: candidate.publicArticleSha256 }
+              : { existingFeedSha256: candidate.existingFeedSha256 }),
             directorySha256: sha(text),
             verifiedAt: new Date().toISOString(),
             revision: sha(

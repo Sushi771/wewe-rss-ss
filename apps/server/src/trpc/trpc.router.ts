@@ -686,6 +686,23 @@ export class TrpcRouter {
     addCapability: this.trpcService.protectedProcedure.query(() =>
       this.trpcService.subscriptionAddCapability(),
     ),
+    repairNativeSource: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            feedId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+            accountId: z.string().regex(/^\d{1,20}$/),
+            confirmed: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) =>
+        this.trpcService.repairExistingSubscription(
+          input.feedId,
+          input.accountId,
+          !!(ctx as any).isLocal,
+        ),
+      ),
     addFromArticle: this.trpcService.protectedProcedure
       .input(
         z.object({

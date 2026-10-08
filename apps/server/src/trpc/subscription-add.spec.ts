@@ -558,6 +558,338 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
     expect(await prisma.article.count({ where: { mpId } })).toBe(10);
   });
 
+  const legacyFixture = async (publisherName = name) => {
+    const feed = await prisma.feed.create({
+      data: {
+        id: mpId,
+        mpName: publisherName,
+        mpCover: '旧封面',
+        mpIntro: '旧简介',
+        updateTime: 12,
+        syncTime: 34,
+        status: 1,
+        collectionChannel: null,
+      },
+    });
+    const old = await prisma.article.create({
+      data: {
+        id: shortId(10),
+        mpId,
+        title: '合成文章10',
+        picUrl: '旧封面',
+        publishTime: 1700000010,
+        contentHtml: '<div id="js_content">旧缓存正文</div>',
+        metrics: '{"read":77,"like":12}',
+        readCount: 77,
+        likeCount: 12,
+      },
+    });
+    const ancient = await prisma.article.create({
+      data: {
+        id: 'retained-ancient',
+        mpId,
+        title: '保留旧文章',
+        picUrl: '保留旧封面',
+        publishTime: 1600000000,
+        contentHtml: '保留旧正文',
+        metrics: '{"read":99}',
+        readCount: 99,
+      },
+    });
+    return { feed, old, ancient };
+  };
+  const repairHttp = (
+    n: Awaited<ReturnType<typeof actualNative>>,
+    extra: Record<string, unknown> = {},
+  ) =>
+    request(n.app)
+      .post('/trpc/feed.repairNativeSource')
+      .set('authorization', 'synthetic-local-access')
+      .set('origin', 'http://127.0.0.1')
+      .send({ feedId: mpId, accountId: '123', confirmed: true, ...extra });
+  it('repairs a selected existing legacy feed without public HTML, reuses ten-body/image persistence and preserves old IDs/data', async () => {
+    const old = await legacyFixture();
+    const n = await actualNative('success', { usePublicResolver: true });
+    const publicStop = path.join(
+      path.dirname(n.configFile),
+      'candidate-public-original-' +
+        createHash('sha256')
+          .update('https://mp.weixin.qq.com/s/' + 'a'.repeat(22))
+          .digest('hex')
+          .slice(0, 24) +
+        '.json',
+    );
+    const stopped = JSON.stringify({
+      status: 'verification-required',
+      upstreamStatus: 302,
+      redirectKind: 'verification',
+    });
+    await fs.writeFile(publicStop, stopped);
+    const response = await repairHttp(n).expect(200);
+    expect(response.body.result.data).toMatchObject({
+      accepted: true,
+      created: false,
+      status: 'updated',
+      update: { articles: 10, created: 9, updated: 1, saved: true },
+      feed: { id: mpId },
+    });
+    expect(n.resolver).not.toHaveBeenCalled();
+    expect(
+      externalGet.mock.calls.filter(([target]) =>
+        String(target).startsWith('https://mp.weixin.qq.com/'),
+      ),
+    ).toHaveLength(0);
+    expect(
+      externalGet.mock.calls.filter(([target]) =>
+        String(target).endsWith('/web/mp/articles'),
+      ),
+    ).toHaveLength(1);
+    expect(
+      externalGet.mock.calls.filter(([target]) =>
+        String(target).endsWith('/web/mp/content'),
+      ),
+    ).toHaveLength(10);
+    expect(await prisma.feed.findUnique({ where: { id: mpId } })).toMatchObject(
+      {
+        mpCover: old.feed.mpCover,
+        mpIntro: old.feed.mpIntro,
+        status: 1,
+        collectionChannel: 'owner-weread-latest',
+      },
+    );
+    expect(
+      await prisma.article.findUnique({ where: { id: old.old.id } }),
+    ).toMatchObject({
+      id: old.old.id,
+      publishTime: old.old.publishTime,
+      metrics: old.old.metrics,
+      readCount: 77,
+      likeCount: 12,
+    });
+    expect(
+      await prisma.article.findUnique({ where: { id: old.ancient.id } }),
+    ).toEqual(old.ancient);
+    const binding = JSON.parse(await fs.readFile(n.configFile, 'utf8')).feeds[
+      mpId
+    ];
+    expect(binding.bindingEvidence).toMatchObject({
+      source: 'normal-native-candidate-directory',
+      identitySource: 'existing-feed-candidate',
+      mpId,
+    });
+    expect(binding.bindingEvidence).not.toHaveProperty('publicArticleSha256');
+    expect(binding.bindingEvidence.existingFeedSha256).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+    expect(await fs.readFile(publicStop, 'utf8')).toBe(stopped);
+    const calls = externalGet.mock.calls.length;
+    expect((await repairHttp(n).expect(200)).body.result.data.accepted).toBe(
+      false,
+    );
+    expect(externalGet).toHaveBeenCalledTimes(calls);
+  });
+  it.each(['challenge', 'empty', 'http401'] as const)(
+    'a selected legacy %s directory never changes historical feed/articles or publishes binding, and cannot retry',
+    async (mode) => {
+      await legacyFixture();
+      const feeds = await prisma.feed.findMany();
+      const articles = await prisma.article.findMany({
+        orderBy: { id: 'asc' },
+      });
+      const n = await actualNative(mode, { usePublicResolver: true });
+      const result = (await repairHttp(n).expect(200)).body.result.data;
+      expect(result).toMatchObject({
+        accepted: false,
+        directoryValidated: false,
+      });
+      if (mode === 'challenge') expect(result.businessCode).toBe(-2041);
+      if (mode === 'http401') expect(result.httpStatus).toBe(401);
+      expect(await prisma.feed.findMany()).toEqual(feeds);
+      expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+        articles,
+      );
+      expect(JSON.parse(await fs.readFile(n.configFile, 'utf8')).feeds).toEqual(
+        {},
+      );
+      await repairHttp(n).expect(200);
+      expect(externalGet).toHaveBeenCalledTimes(1);
+      expect(n.resolver).not.toHaveBeenCalled();
+      expect(backup).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['publisher', 'root-book', 'ownership', 'review-pair'] as const)(
+    'refuses mismatching %s identity before changing the selected legacy feed',
+    async (mismatch) => {
+      const old = await legacyFixture(
+        mismatch === 'publisher' ? '错号名' : name,
+      );
+      const n = await actualNative('success', { usePublicResolver: true });
+      const raw = page();
+      if (mismatch === 'root-book') (raw as any).bookId = 'MP_WXS_9999999999';
+      if (mismatch === 'ownership')
+        raw.reviews[0].subReviews[0].review.belongBookId = 'MP_WXS_9999999999';
+      if (mismatch === 'review-pair')
+        raw.reviews[0].subReviews[0].review.reviewId = 'wrong';
+      externalGet.mockResolvedValue({
+        status: 200,
+        data: JSON.stringify(raw),
+        headers: {},
+      });
+      expect((await repairHttp(n).expect(200)).body.result.data).toMatchObject({
+        accepted: false,
+        code: 'IDENTITY_CONFLICT',
+      });
+      expect(await prisma.feed.findUnique({ where: { id: mpId } })).toEqual(
+        old.feed,
+      );
+      expect(await prisma.article.count()).toBe(2);
+      expect(externalGet).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(await fs.readFile(n.configFile, 'utf8')).feeds).toEqual(
+        {},
+      );
+    },
+  );
+  it('requires local authorization, explicit confirmation, an existing enabled legacy feed and server-owned identity fields', async () => {
+    const n = await actualNative('success', { usePublicResolver: true });
+    await request(n.app)
+      .post('/trpc/feed.repairNativeSource')
+      .send({ feedId: mpId, accountId: '123', confirmed: true })
+      .expect(401);
+    await request(n.app)
+      .post('/trpc/feed.repairNativeSource')
+      .set('authorization', 'synthetic-local-access')
+      .set('origin', 'https://untrusted.invalid')
+      .send({ feedId: mpId, accountId: '123', confirmed: true })
+      .expect(403);
+    await repairHttp(n, { confirmed: false }).expect(400);
+    await repairHttp(n, {
+      name: '伪造',
+      biz: '伪造',
+      publicArticleHtml: '<div>伪造</div>',
+    }).expect(400);
+    expect((await repairHttp(n).expect(200)).body.result.data.accepted).toBe(
+      false,
+    );
+    await legacyFixture();
+    await prisma.feed.update({ where: { id: mpId }, data: { status: 0 } });
+    expect((await repairHttp(n).expect(200)).body.result.data.accepted).toBe(
+      false,
+    );
+    await prisma.feed.update({
+      where: { id: mpId },
+      data: { status: 1, collectionChannel: 'public-albums' },
+    });
+    expect((await repairHttp(n).expect(200)).body.result.data.accepted).toBe(
+      false,
+    );
+    expect(externalGet).not.toHaveBeenCalled();
+    expect(backup).not.toHaveBeenCalled();
+  });
+  it('rejects a contradictory trusted old article identity before directory transport', async () => {
+    await legacyFixture();
+    const n = await actualNative('success', { usePublicResolver: true });
+    await prisma.article.update({
+      where: { id: shortId(10) },
+      data: {
+        verifiedSourceUrl: url().replace(
+          encodeURIComponent(biz),
+          encodeURIComponent(Buffer.from('9999999999').toString('base64')),
+        ),
+      },
+    });
+    expect((await repairHttp(n).expect(200)).body.result.data).toMatchObject({
+      accepted: false,
+      code: 'IDENTITY_CONFLICT',
+    });
+    expect(externalGet).not.toHaveBeenCalled();
+    expect(JSON.parse(await fs.readFile(n.configFile, 'utf8')).feeds).toEqual(
+      {},
+    );
+  });
+  it('keeps all historical bodies when the directory succeeds but the first new body is refused', async () => {
+    await legacyFixture();
+    const before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
+    const n = await actualNative('success', { usePublicResolver: true });
+    externalGet
+      .mockResolvedValue({ status: 401, data: 'denied', headers: {} })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: JSON.stringify(page()),
+        headers: {},
+      });
+    const result = (await repairHttp(n).expect(200)).body.result.data;
+    expect(result).toMatchObject({
+      accepted: true,
+      directoryValidated: true,
+      pending: true,
+      stage: 'bodies',
+      httpStatus: 401,
+    });
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      before,
+    );
+    expect(await prisma.feed.findUnique({ where: { id: mpId } })).toMatchObject(
+      { collectionChannel: 'owner-weread-latest' },
+    );
+    const calls = externalGet.mock.calls.length;
+    await repairHttp(n).expect(200);
+    expect(externalGet).toHaveBeenCalledTimes(calls);
+  });
+  it('rolls back binding publication if an existing feed activation fails, without changing its history', async () => {
+    const before = await legacyFixture();
+    let txCalls = 0;
+    const db = {
+      feed: prisma.feed,
+      article: prisma.article,
+      account: prisma.account,
+      $transaction: async (fn: any) => {
+        txCalls++;
+        if (txCalls === 2) throw new Error('synthetic activation failure');
+        return prisma.$transaction(fn);
+      },
+    };
+    const n = await actualNative('success', { usePublicResolver: true, db });
+    expect((await repairHttp(n).expect(200)).body.result.data.accepted).toBe(
+      false,
+    );
+    expect(await prisma.feed.findUnique({ where: { id: mpId } })).toEqual(
+      before.feed,
+    );
+    expect(
+      await prisma.article.findUnique({ where: { id: before.old.id } }),
+    ).toEqual(before.old);
+    expect(
+      await prisma.article.findUnique({ where: { id: before.ancient.id } }),
+    ).toEqual(before.ancient);
+    expect(JSON.parse(await fs.readFile(n.configFile, 'utf8')).feeds).toEqual(
+      {},
+    );
+    expect(externalGet).toHaveBeenCalledTimes(1);
+    expect(backup).toHaveBeenCalledTimes(1);
+  });
+  it('retains a concurrent user edit and refuses binding after the directory response', async () => {
+    await legacyFixture();
+    const n = await actualNative('success', { usePublicResolver: true });
+    externalGet.mockImplementation(async () => {
+      await prisma.feed.update({
+        where: { id: mpId },
+        data: { mpIntro: '用户并发修改' },
+      });
+      return { status: 200, data: JSON.stringify(page()), headers: {} };
+    });
+    expect((await repairHttp(n).expect(200)).body.result.data).toMatchObject({
+      accepted: false,
+      code: 'FEED_CHANGED',
+    });
+    expect(await prisma.feed.findUnique({ where: { id: mpId } })).toMatchObject(
+      { mpIntro: '用户并发修改', collectionChannel: null },
+    );
+    expect(JSON.parse(await fs.readFile(n.configFile, 'utf8')).feeds).toEqual(
+      {},
+    );
+    expect(externalGet).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps two successful publishers isolated and repeating either one does not republish or refetch', async () => {
     const first = await actualNative('success', { usePublicResolver: true });
     expect((await first.httpAdd().expect(200)).body.result.data).toMatchObject({

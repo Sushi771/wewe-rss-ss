@@ -12,6 +12,11 @@ export type SubscriptionDiscoveryInput = {
   accountId: string;
   trigger: 'local-manual-add';
 };
+export type ExistingSubscriptionRepairInput = {
+  feedId: string;
+  accountId: string;
+  trigger: 'local-manual-repair';
+};
 /** Only a server-side directory validator can supply this; never an HTTP input. */
 export type VerifiedPublisher = {
   mpId: string;
@@ -70,6 +75,10 @@ export interface SubscriptionDiscoveryValidator {
    */
   discover(
     input: SubscriptionDiscoveryInput,
+    stageFeed: (target: VerifiedPublisher) => Promise<StagedSubscription>,
+  ): Promise<DiscoveryOutcome>;
+  repairExisting?(
+    input: ExistingSubscriptionRepairInput,
     stageFeed: (target: VerifiedPublisher) => Promise<StagedSubscription>,
   ): Promise<DiscoveryOutcome>;
 }
@@ -298,6 +307,62 @@ export async function addNativeSubscription(
   input: SubscriptionDiscoveryInput,
   backup: () => Promise<unknown>,
 ) {
+  return runNativeSubscription(
+    db,
+    (stageFeed) => validator.discover(input, stageFeed),
+    backup,
+  );
+}
+
+export async function repairNativeSubscription(
+  db: Pick<PrismaClient, 'feed' | 'article' | '$transaction'>,
+  validator: SubscriptionDiscoveryValidator,
+  input: ExistingSubscriptionRepairInput,
+  backup: () => Promise<unknown>,
+) {
+  if (
+    input.trigger !== 'local-manual-repair' ||
+    !/^MP_WXS_\d{5,15}$/.test(input.feedId) ||
+    !/^\d{1,20}$/.test(input.accountId)
+  )
+    return subscriptionDiscoveryUnavailable('SOURCE_UNAVAILABLE');
+  if (!validator.repairExisting)
+    return subscriptionDiscoveryUnavailable('SOURCE_UNAVAILABLE');
+  const before = await db.feed.findUnique({ where: { id: input.feedId } });
+  if (
+    !before ||
+    before.status !== 1 ||
+    ![null, 'unavailable'].includes(before.collectionChannel)
+  )
+    return {
+      ...subscriptionDiscoveryUnavailable('SOURCE_UNAVAILABLE'),
+      message: '所选订阅不存在、已停用或已有其他来源；本次未发目录请求。',
+    };
+  const result = await runNativeSubscription(
+    db,
+    (stageFeed) => validator.repairExisting!(input, stageFeed),
+    backup,
+    before,
+  );
+  return {
+    ...result,
+    message:
+      result.status === 'updated'
+        ? '本号来源已修复，本次最近10篇正文和图片由原保存流程处理；后续使用原更新本号入口。'
+        : result.accepted
+          ? '本号目录已核验，正文或图片尚未完成；停止记录保留，不自动重试。'
+          : '本号来源未修复；旧订阅、文章和停止记录保留，不自动重试或切换账号。',
+  };
+}
+
+async function runNativeSubscription(
+  db: Pick<PrismaClient, 'feed' | 'article' | '$transaction'>,
+  discover: (
+    stageFeed: (target: VerifiedPublisher) => Promise<StagedSubscription>,
+  ) => Promise<DiscoveryOutcome>,
+  backup: () => Promise<unknown>,
+  requiredExisting?: Feed,
+) {
   let staged: StagedSubscription | undefined;
   let current: Feed | undefined;
   let active = false;
@@ -318,18 +383,38 @@ export async function addNativeSubscription(
     )
       throw new SubscriptionRegistrationError('FEED_IDENTITY_CONFLICT');
     const old = await db.feed.findUnique({ where: { id: target.mpId } });
+    if (
+      requiredExisting &&
+      (!old ||
+        target.mpId !== requiredExisting.id ||
+        fingerprint(old) !== fingerprint(requiredExisting))
+    )
+      throw new SubscriptionRegistrationError('FEED_CHANGED');
     if (old && normalize(old.mpName) !== normalize(target.name))
       throw new SubscriptionRegistrationError('FEED_IDENTITY_CONFLICT');
-    if (!old) await backup();
+    // Before any private binding publication or SQLite activation, not afterward.
+    if (
+      !old ||
+      old.collectionChannel !== 'owner-weread-latest' ||
+      old.status !== 1
+    )
+      await backup();
     let created = false;
     current = await db.$transaction(async (tx) => {
       await target.assertAccount?.(tx);
       const existing = await tx.feed.findUnique({ where: { id: target.mpId } });
       if (existing) {
+        if (
+          requiredExisting &&
+          fingerprint(existing) !== fingerprint(requiredExisting)
+        )
+          throw new SubscriptionRegistrationError('FEED_CHANGED');
         if (normalize(existing.mpName) !== normalize(target.name))
           throw new SubscriptionRegistrationError('FEED_IDENTITY_CONFLICT');
         return existing;
       }
+      if (requiredExisting)
+        throw new SubscriptionRegistrationError('FEED_CHANGED');
       created = true;
       return tx.feed.create({
         data: {
@@ -364,7 +449,6 @@ export async function addNativeSubscription(
           active = true;
           return;
         }
-        if (!created) await backup();
         current = await db.$transaction(async (tx) => {
           await target.assertAccount?.(tx);
           const before = await tx.feed.findUnique({
@@ -404,7 +488,7 @@ export async function addNativeSubscription(
   };
   let result: DiscoveryOutcome;
   try {
-    result = publicOutcome(await validator.discover(input, stageFeed));
+    result = publicOutcome(await discover(stageFeed));
   } catch (error) {
     result = {
       status: 'failed',

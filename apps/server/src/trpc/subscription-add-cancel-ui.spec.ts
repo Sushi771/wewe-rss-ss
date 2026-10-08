@@ -56,6 +56,7 @@ function harness(links: string[], accountId = '123') {
     setIsAddingSubscriptions: jest.fn(),
     addCapability: { available: true, requiresAccount: true },
     addAccountId: accountId,
+    repairTarget: null,
     wxsLink: state.links,
     addFromArticle: mutate,
     setAddVerification: jest.fn(),

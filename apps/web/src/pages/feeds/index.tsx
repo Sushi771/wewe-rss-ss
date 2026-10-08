@@ -47,6 +47,13 @@ const Feeds = () => {
 
   const { mutateAsync: addFromArticle, isLoading: isGetMpInfoLoading } =
     trpc.feed.addFromArticle.useMutation({});
+  const { mutateAsync: repairNativeSource } =
+    trpc.feed.repairNativeSource.useMutation({});
+  const [repairTarget, setRepairTarget] = useState<{
+    id: string;
+    mpName: string;
+  } | null>(null);
+  const [repairMessages, setRepairMessages] = useState<string[]>([]);
   const { mutateAsync: updateMpInfo } = trpc.feed.edit.useMutation({});
 
   const [isAddingSubscriptions, setIsAddingSubscriptions] = useState(false);
@@ -73,7 +80,7 @@ const Feeds = () => {
     trpc.account.list.useQuery(
       {},
       {
-        enabled: isOpen && !!addCapability?.requiresAccount,
+        enabled: (isOpen || !!repairTarget) && !!addCapability?.requiresAccount,
         retry: false,
         refetchOnWindowFocus: false,
       },
@@ -101,7 +108,74 @@ const Feeds = () => {
 
   const [wxsLink, setWxsLink] = useState('');
   const handleOpenAdd = () => {
-    if (!addingSubscriptions.current) onOpen();
+    if (!addingSubscriptions.current && !repairTarget) onOpen();
+  };
+  const handleOpenRepair = (feed: { id: string; mpName: string }) => {
+    if (addingSubscriptions.current || isOpen) return;
+    setRepairMessages([]);
+    setRepairTarget({ id: feed.id, mpName: feed.mpName });
+  };
+  const handleCancelRepair = () => {
+    if (addingSubscriptions.current) {
+      cancelSubscriptions.current = true;
+      toast.warning('已关闭修复窗口；已发送的请求无法撤回，不会自动重试。');
+    }
+    setRepairTarget(null);
+  };
+  const handleRepairConfirm = async () => {
+    if (addingSubscriptions.current || !repairTarget) return;
+    if (!addCapability?.existingRepairAvailable) {
+      toast.error('当前来源修复不可用，未发目录请求。');
+      return;
+    }
+    if (!addAccountId) {
+      toast.error('请先选择正常Web登录账号');
+      return;
+    }
+    const target = repairTarget;
+    addingSubscriptions.current = true;
+    cancelSubscriptions.current = false;
+    setIsAddingSubscriptions(true);
+    setRepairMessages([]);
+    try {
+      const result = await repairNativeSource({
+        feedId: target.id,
+        accountId: addAccountId,
+        confirmed: true,
+      });
+      await refreshFeedViews(
+        refetchFeedList,
+        () => queryUtils.article.list.reset(),
+        () => queryUtils.article.summary.invalidate(),
+      );
+      if (cancelSubscriptions.current) return;
+      const details = [
+        result.message,
+        result.httpStatus === undefined ? '' : `HTTP ${result.httpStatus}`,
+        result.businessCode === undefined
+          ? ''
+          : `业务码 ${result.businessCode}`,
+      ]
+        .filter(Boolean)
+        .join('；');
+      setRepairMessages([details]);
+      if (result.accepted && !result.pending && result.feed?.id === target.id) {
+        toast.success('本号来源已修复', { description: details });
+        setRepairTarget(null);
+      } else toast.warning('本号来源修复未完成', { description: details });
+    } catch (error) {
+      if (!cancelSubscriptions.current) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : '来源修复未完成，旧数据保留。';
+        setRepairMessages([message]);
+        toast.error('来源修复未完成', { description: message });
+      }
+    } finally {
+      addingSubscriptions.current = false;
+      setIsAddingSubscriptions(false);
+    }
   };
   const handleCancelAdd = () => {
     if (addingSubscriptions.current && !cancelSubscriptions.current) {
@@ -898,11 +972,32 @@ const Feeds = () => {
 
                 {currentMpInfo ? (
                   <>
+                    {currentMpInfo.status === 1 &&
+                      (!currentMpInfo.collectionChannel ||
+                        currentMpInfo.collectionChannel === 'unavailable') && (
+                        <Button
+                          size="sm"
+                          className="mac-btn-outline"
+                          isDisabled={
+                            isAddFeedLoading ||
+                            isGetArticlesLoading ||
+                            !!isRefreshAllMpArticlesRunning ||
+                            isCollectingAlbums
+                          }
+                          onPress={() => handleOpenRepair(currentMpInfo)}
+                        >
+                          修复本号来源
+                        </Button>
+                      )}
                     <Tooltip content={collectionDescription}>
                       <Button
                         size="sm"
                         className="mac-btn-outline"
-                        isDisabled={isGetArticlesLoading || isCollectingAlbums}
+                        isDisabled={
+                          isAddFeedLoading ||
+                          isGetArticlesLoading ||
+                          isCollectingAlbums
+                        }
                         onPress={async () => {
                           const mpId = currentMpInfo.id;
                           try {
@@ -1005,6 +1100,7 @@ const Feeds = () => {
                       size="sm"
                       className="mac-btn-outline h-8"
                       isDisabled={
+                        isAddFeedLoading ||
                         isRefreshAllMpArticlesRunning ||
                         isGetArticlesLoading ||
                         isCollectingAlbums
@@ -1292,6 +1388,79 @@ const Feeds = () => {
           </div>
         </div>
       </div>
+      <Modal
+        isOpen={!!repairTarget}
+        onOpenChange={(open) => {
+          if (!open) handleCancelRepair();
+        }}
+      >
+        <ModalContent>
+          <ModalHeader>修复已有订阅来源</ModalHeader>
+          <ModalBody>
+            <p>本次公众号：{repairTarget?.mpName}</p>
+            <p className="text-default-600 text-sm">
+              使用已有订阅身份验证目录，无需重新提供单篇原文。所选账号验证成功后更新最近10篇正文和图片，后续使用原更新本号入口；失败保留历史数据和停止记录，不自动重试或切换账号。
+            </p>
+            {!addCapability?.existingRepairAvailable && (
+              <p role="status">
+                {addCapabilityError
+                  ? '来源状态读取失败，本次未发目录请求。'
+                  : '正在核对来源；不可用时不能开始修复。'}
+              </p>
+            )}
+            <label className="flex flex-col gap-2 text-sm">
+              用于本号来源修复的正常Web账号
+              <select
+                aria-label="用于本号来源修复的正常Web账号"
+                value={addAccountId}
+                onChange={(event) => {
+                  if (!addingSubscriptions.current)
+                    setAddAccountId(event.target.value);
+                }}
+                disabled={isAddFeedLoading}
+                className="bg-content1 rounded-md border p-2"
+              >
+                <option value="">请选择正常Web登录账号</option>
+                {addAccounts?.items.map((account) => (
+                  <option
+                    key={account.id}
+                    value={account.id}
+                    disabled={account.status !== 1 || !account.nativeLoginAt}
+                  >
+                    {account.platformName || account.name}
+                    {!account.nativeLoginAt ? '（需正常Web登录）' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {addAccountsError && (
+              <p role="alert">账号列表读取失败，请在账号页核对正常登录。</p>
+            )}
+            {repairMessages.map((message, index) => (
+              <p key={index} role="status">
+                {message}
+              </p>
+            ))}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="flat" onPress={handleCancelRepair}>
+              {isAddingSubscriptions ? '关闭（请求已发送）' : '取消'}
+            </Button>
+            <Button
+              color="primary"
+              isDisabled={
+                isAddFeedLoading ||
+                !addCapability?.existingRepairAvailable ||
+                !addAccountId
+              }
+              isLoading={isAddingSubscriptions}
+              onPress={handleRepairConfirm}
+            >
+              确认修复并更新最近10篇
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
       <Modal
         isOpen={isOpen}
         onOpenChange={(open) => (open ? handleOpenAdd() : handleCancelAdd())}
