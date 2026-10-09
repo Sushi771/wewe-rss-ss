@@ -34,6 +34,6 @@ import { XiaohongshuService } from '../collection/xiaohongshu.service';
         }),
     },
   ],
-  exports: [TrpcService, TrpcRouter],
+  exports: [TrpcService, TrpcRouter, XiaohongshuService],
 })
 export class TrpcModule {}

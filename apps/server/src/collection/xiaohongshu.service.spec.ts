@@ -9,6 +9,10 @@ import { XiaohongshuService, XhsSource } from './xiaohongshu.service';
 import { XhsNormalizedCandidate } from './xiaohongshu-contract';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
+import { Test } from '@nestjs/testing';
+import request from 'supertest';
+import { ArticleDownloadController } from '../article-download.controller';
+import * as picker from '../article-folder-picker';
 
 // Existing archiver v8 is ESM and Jest runs CJS. Execute the actual unchanged
 // offline-archive source in a normal Node child; do not fake archive output.
@@ -312,6 +316,121 @@ describe('production XHS router/service → additive SQLite and original export 
       ).xiaohongshu.refresh({ id: creatorId }),
     ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
     expect(await prisma.xhsNote.findMany()).toEqual(old);
+  });
+  it('saves actual cached bytes through the original protected local saver, with date folders and no ZIP', async () => {
+    const service = new XiaohongshuService(prisma as any, source());
+    await service.refresh(creatorId);
+    const note = await prisma.xhsNote.findFirstOrThrow();
+    const destination = path.join(root, 'direct-save');
+    await fs.mkdir(destination, { recursive: true });
+    await fs.writeFile(
+      path.join(root, '.article-download-settings.json'),
+      JSON.stringify({ directory: destination, askEveryTime: false }),
+    );
+    const module = await Test.createTestingModule({
+      controllers: [ArticleDownloadController],
+      providers: [
+        { provide: XiaohongshuService, useValue: service },
+        {
+          provide: ConfigService,
+          useValue: new ConfigService({ auth: { code: 'fixture-access' } }),
+        },
+      ],
+    }).compile();
+    const app = module.createNestApplication();
+    await app.init();
+    const post = (
+      endpoint = '/download/article/xiaohongshu/' +
+        encodeURIComponent(note.id) +
+        '/save',
+      payload: object = { creatorId },
+    ) =>
+      request(app.getHttpServer())
+        .post(endpoint)
+        .set('host', '127.0.0.1')
+        .set('origin', 'http://127.0.0.1')
+        .set('authorization', 'fixture-access')
+        .send(payload);
+    try {
+      expect((await post().unset('authorization')).status).toBe(401);
+      expect(
+        (await post().set('origin', 'https://www.xiaohongshu.com')).status,
+      ).toBe(403);
+      expect(
+        (
+          await post(undefined, {
+            creatorId,
+            directory: destination,
+            contentHtml: note.contentHtml,
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (await post(undefined, { creatorId: 'wrong-creator' })).status,
+      ).toBe(422);
+      expect(await fs.readdir(destination)).toEqual([]);
+      const first = await post();
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({
+        saved: true,
+        contentSource: 'saved-xiaohongshu',
+        imageCount: 1,
+        alreadySaved: false,
+      });
+      expect(path.basename(first.body.markdownPath)).toBe('正文.md');
+      expect(path.relative(destination, first.body.directory)).toMatch(
+        /^\d{4}-\d{2}-\d{2}[\\/]/,
+      );
+      const md = await fs.readFile(first.body.markdownPath, 'utf8');
+      expect(md).toContain('完整合成正文');
+      expect(md).toContain('image/image_');
+      const images = await fs.readdir(path.join(first.body.directory, 'image'));
+      expect(
+        await fs.readFile(path.join(first.body.directory, 'image', images[0])),
+      ).toEqual(Buffer.from(png, 'base64'));
+      await fs.writeFile(first.body.markdownPath, md + '\n用户本地笔记');
+      expect((await post()).body).toMatchObject({
+        saved: true,
+        alreadySaved: true,
+        markdownPath: first.body.markdownPath,
+      });
+      expect(await fs.readFile(first.body.markdownPath, 'utf8')).toContain(
+        '用户本地笔记',
+      );
+      await post('/download/article/settings', { askEveryTime: true });
+      expect((await post()).status).toBe(409);
+      jest.spyOn(picker, 'pickArticleDirectory').mockResolvedValue(null);
+      expect(
+        (await post('/download/article/directory', {})).body.cancelled,
+      ).toBe(true);
+      expect((await post()).status).toBe(409);
+      jest.mocked(picker.pickArticleDirectory).mockResolvedValue(destination);
+      const picked = await post('/download/article/directory', {});
+      expect(
+        (await post(undefined, { creatorId, pickToken: picked.body.pickToken }))
+          .status,
+      ).toBe(200);
+      expect(
+        (await post(undefined, { creatorId, pickToken: picked.body.pickToken }))
+          .status,
+      ).toBe(409);
+      await post('/download/article/settings', { askEveryTime: false });
+      process.env.WEWE_ACCEPTANCE_MODE = '1';
+      expect((await post()).status).toBe(409);
+      delete process.env.WEWE_ACCEPTANCE_MODE;
+      const before = await fs.readdir(destination);
+      await prisma.xhsNote.update({
+        where: { id: note.id },
+        data: {
+          contentHtml:
+            '<div id="js_content"><img src="https://example.com/remote.png"></div>',
+        },
+      });
+      expect((await post()).status).toBe(422);
+      expect(await fs.readdir(destination)).toEqual(before);
+    } finally {
+      await app.close();
+    }
   });
   it('serializes one creator while source is in flight and releases lock after failure', async () => {
     let reject!: (e: Error) => void;

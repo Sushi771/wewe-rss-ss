@@ -1,6 +1,27 @@
 import { Button, Input, Switch } from '@nextui-org/react';
 import { useEffect, useRef, useState } from 'react';
 import { trpc } from '@web/utils/trpc';
+import { getAuthCode } from '@web/utils/auth';
+import { serverOriginUrl } from '@web/utils/env';
+
+const localApi = async (endpoint: string, payload?: object) => {
+  const auth = getAuthCode();
+  const response = await fetch(
+    `${serverOriginUrl || ''}/download/article${endpoint}`,
+    {
+      method: payload ? 'POST' : 'GET',
+      credentials: 'include',
+      headers: {
+        ...(auth ? { authorization: auth } : {}),
+        ...(payload ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(payload ? { body: JSON.stringify(payload) } : {}),
+    },
+  );
+  const result = await response.json();
+  if (!response.ok) throw new Error('本机保存未完成，已有文件保留。');
+  return result;
+};
 
 /** Production page uses only authenticated server records, never demo fixtures. */
 export default function Xiaohongshu() {
@@ -18,6 +39,21 @@ export default function Xiaohongshu() {
     [busy, setBusy] = useState(false);
   const active = useRef(false);
   const receipts = useRef<Record<string, string>>({});
+  const [saveSettings, setSaveSettings] = useState<{
+    directory: string;
+    askEveryTime: boolean;
+  } | null>(null);
+  useEffect(() => {
+    let current = true;
+    void localApi('/settings')
+      .then((settings) => {
+        if (current) setSaveSettings(settings);
+      })
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, []);
   const current = creators.data?.items.find((c) => c.id === creatorId);
   const notes = trpc.xiaohongshu.notes.useQuery(
     { creatorId },
@@ -56,7 +92,10 @@ export default function Xiaohongshu() {
   };
   const updateCreator = async (id: string) => {
     const result = await refresh.mutateAsync({ id });
-    receipts.current[id] = result.message + ' 新增完整图文：' + result.added;
+    const name =
+      creators.data?.items.find((c) => c.id === id)?.displayName || '所选博主';
+    receipts.current[id] =
+      name + '：' + result.message + ' 新增完整图文：' + result.added;
     await Promise.all([
       utils.xiaohongshu.list.invalidate(),
       utils.xiaohongshu.notes.invalidate(),
@@ -104,6 +143,39 @@ export default function Xiaohongshu() {
         URL.revokeObjectURL(url);
       }
       setMessage(`已生成 ${result.notes} 篇缓存完整图文的离线包。`);
+    });
+  const handleLocalSave = () =>
+    run(async () => {
+      if (!current || !saveSettings) return;
+      const complete =
+        notes.data?.items.filter((note) => note.status === 'complete') || [];
+      let saved = 0;
+      for (const note of complete) {
+        let pickToken: string | undefined;
+        if (saveSettings.askEveryTime) {
+          const chosen = await localApi('/directory', {});
+          if (chosen.cancelled) {
+            setMessage(
+              `已取消路径选择；${current.displayName} 已处理 ${saved} 篇，后续未保存。`,
+            );
+            return;
+          }
+          pickToken = chosen.pickToken;
+          setSaveSettings({
+            directory: chosen.directory,
+            askEveryTime: chosen.askEveryTime,
+          });
+        }
+        const result = await localApi(
+          '/xiaohongshu/' + encodeURIComponent(note.id) + '/save',
+          { creatorId: current.id, ...(pickToken ? { pickToken } : {}) },
+        );
+        if (result.saved !== true) throw new Error('LOCAL_SAVE_NOT_CONFIRMED');
+        saved++;
+      }
+      setMessage(
+        `${current.displayName}：${saved} 篇已保存或确认已有保存，正文及 image 图片位于配置目录的下载日期文件夹。`,
+      );
     });
   return (
     <main className="mx-auto w-full max-w-7xl space-y-4 p-4">
@@ -172,10 +244,12 @@ export default function Xiaohongshu() {
               className="border-default-200 space-y-2 rounded-lg border p-3"
             >
               <button
+                disabled={busy}
                 type="button"
                 className="w-full break-words text-left"
                 aria-pressed={creatorId === c.id}
                 onClick={() => {
+                  if (active.current) return;
                   setCreatorId(c.id);
                   setNoteId('');
                   setMessage(receipts.current[c.id] || '');
@@ -248,13 +322,28 @@ export default function Xiaohongshu() {
                 <Button
                   isDisabled={
                     busy ||
+                    !saveSettings ||
+                    !notes.data?.items.some((n) => n.status === 'complete')
+                  }
+                  onPress={handleLocalSave}
+                >
+                  保存缓存图文到本机
+                </Button>
+                <Button
+                  isDisabled={
+                    busy ||
                     !notes.data?.items.some((n) => n.status === 'complete')
                   }
                   onPress={handleDownload}
                 >
-                  下载缓存完整图文
+                  导出 ZIP（可选）
                 </Button>
               </div>
+              <p className="text-default-500 text-sm">
+                {saveSettings
+                  ? `本机目录：${saveSettings.directory}；按下载日期建目录，每篇正文.md 和 image/，无需解压。`
+                  : '本机保存仅在桌面本地访问时可用；保存目录沿用文章下载工具的设置。'}
+              </p>
               {notes.error && (
                 <p role="alert">内容列表读取失败，已有归档未改动。</p>
               )}

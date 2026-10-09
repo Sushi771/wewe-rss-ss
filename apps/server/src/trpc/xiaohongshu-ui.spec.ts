@@ -125,6 +125,88 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     expect(state.busy).toBe(false);
     expect(scope.active.current).toBe(false);
   });
+  it('labels late and batch update receipts with their actual creator and disables selection during operations', async () => {
+    const { scope, state } = harness();
+    let finish!: (result: unknown) => void;
+    scope.creators.data.items[0].displayName = '博主A';
+    scope.refresh = {
+      mutateAsync: jest.fn(
+        () =>
+          new Promise((r) => {
+            finish = r;
+          }),
+      ),
+    };
+    scope.receipts = { current: {} };
+    scope.utils.xiaohongshu.notes = {
+      invalidate: jest.fn().mockResolvedValue(undefined),
+    };
+    const update = evaluate('updateCreator', scope)('a');
+    state.creator = 'b';
+    finish({ message: '窗口已完成', added: 1, status: 'complete' });
+    await update;
+    expect(state.message).toBe('博主A：窗口已完成 新增完整图文：1');
+    expect(scope.receipts.current.a).toBe(state.message);
+    expect(text).toMatch(
+      /disabled=\{busy\}[\s\S]*?aria-pressed=\{creatorId === c.id\}/,
+    );
+    expect(text).toContain('if (active.current) return;');
+  });
+  it('uses cached-note ID local save as the primary flow, skips videos and creates no browser ZIP', async () => {
+    const { scope, state } = harness();
+    scope.current = { id: 'a', displayName: '博主A' };
+    scope.saveSettings = {
+      directory: 'synthetic-configured-directory',
+      askEveryTime: false,
+    };
+    scope.notes = {
+      data: {
+        items: [
+          { id: 'note-a', status: 'complete' },
+          { id: 'video', status: 'video-skipped' },
+        ],
+      },
+    };
+    scope.localApi = jest
+      .fn()
+      .mockResolvedValue({ saved: true, alreadySaved: false });
+    scope.exportNotes = { mutateAsync: jest.fn() };
+    await evaluate('handleLocalSave', scope)();
+    expect(scope.localApi.mock.calls).toEqual([
+      ['/xiaohongshu/note-a/save', { creatorId: 'a' }],
+    ]);
+    expect(scope.exportNotes.mutateAsync).not.toHaveBeenCalled();
+    expect(state.message).toContain('1 篇已保存');
+    expect(text.indexOf('onPress={handleLocalSave}')).toBeLessThan(
+      text.indexOf('onPress={handleDownload}'),
+    );
+  });
+  it('stops a local-save batch on native picker cancellation or a failed save without retrying', async () => {
+    const { scope, state } = harness();
+    scope.current = { id: 'a', displayName: '博主A' };
+    scope.saveSettings = {
+      directory: 'synthetic-configured-directory',
+      askEveryTime: true,
+    };
+    scope.notes = {
+      data: {
+        items: [
+          { id: 'one', status: 'complete' },
+          { id: 'two', status: 'complete' },
+        ],
+      },
+    };
+    scope.localApi = jest.fn().mockResolvedValue({ cancelled: true });
+    scope.setSaveSettings = jest.fn();
+    await evaluate('handleLocalSave', scope)();
+    expect(scope.localApi.mock.calls).toEqual([['/directory', {}]]);
+    expect(state.message).toContain('已取消');
+    scope.saveSettings.askEveryTime = false;
+    scope.localApi.mockReset().mockRejectedValue(new Error('SYNTHETIC_FAILED'));
+    await evaluate('handleLocalSave', scope)();
+    expect(scope.localApi).toHaveBeenCalledTimes(1);
+    expect(state.message).toContain('未完成');
+  });
   it('is wired into the real application/navigation and uses no prototype fixture or remote body HTML', () => {
     expect(
       fs.readFileSync(

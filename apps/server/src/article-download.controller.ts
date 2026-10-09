@@ -32,6 +32,7 @@ import { ProviderArticle } from './collection/subscription-provider';
 import { prepareVerifiedProviderDownload } from './article-verified-download';
 import { BrowserTaskBroker, BrowserTaskError } from './browser-task';
 import { BrowserArticleTasks } from './browser-article-tasks';
+import { XiaohongshuService } from './collection/xiaohongshu.service';
 import {
   ARTICLE_VERIFICATION_TTL_MS,
   articleVerificationLocation,
@@ -44,6 +45,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
     private readonly config: ConfigService,
     @Optional() private readonly prisma?: PrismaService,
     @Optional() browserBroker?: BrowserTaskBroker,
+    @Optional() private readonly xiaohongshu?: XiaohongshuService,
   ) {
     // Default AppModule supplies no broker. An explicitly approved short-lived
     // opt-in root supplies the same configured broker to both controllers.
@@ -421,11 +423,59 @@ export class ArticleDownloadController implements OnModuleDestroy {
     });
   }
 
+  @Post('article/xiaohongshu/:noteId/save')
+  @HttpCode(200)
+  async saveXhsNote(
+    @Param('noteId') noteId: string,
+    @Body() body: { creatorId?: unknown; pickToken?: unknown },
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    if (!this.xiaohongshu)
+      return res.status(409).json({ message: '小红书缓存保存服务尚未接线。' });
+    try {
+      if (
+        !body ||
+        Array.isArray(body) ||
+        Object.keys(body).some(
+          (key) => !['creatorId', 'pickToken'].includes(key),
+        ) ||
+        typeof body.creatorId !== 'string' ||
+        !body.creatorId ||
+        body.creatorId.length > 128 ||
+        !noteId ||
+        noteId.length > 300 ||
+        (body.pickToken !== undefined && typeof body.pickToken !== 'string')
+      )
+        throw new ArticleDownloadError(
+          '保存参数无效；仅支持已有笔记身份，不接受路径或正文。',
+          400,
+        );
+      const prepare = await this.xiaohongshu.prepareLocalDownload(
+        body.creatorId,
+        noteId,
+      );
+      return this.saveArticle(
+        { pickToken: body.pickToken },
+        req,
+        res,
+        undefined,
+        prepare,
+      );
+    } catch (error) {
+      return this.failure(error, res);
+    }
+  }
+
   private async saveArticle(
     body: { url?: unknown; pickToken?: unknown },
     req: Req,
     res: Res,
     verified?: { article: ProviderArticle; directoryPickConfirmed?: boolean },
+    cachedPrepare?: (
+      directory: string,
+    ) => Promise<{ articleId: string; title: string; imageCount: number }>,
   ) {
     if (!this.authorized(req, res, true)) return;
     if (process.env.WEWE_ACCEPTANCE_MODE === '1')
@@ -444,12 +494,14 @@ export class ArticleDownloadController implements OnModuleDestroy {
         )
       )
         throw new ArticleDownloadError('保存参数无效，请使用本机工具页。', 400);
-      const url = downloadArticleUrl(body?.url);
+      const url = cachedPrepare ? undefined : downloadArticleUrl(body?.url);
       this.running = true;
       locked = true;
-      const prepare = verified
-        ? prepareVerifiedProviderDownload(url, verified.article)
-        : undefined;
+      const prepare =
+        cachedPrepare ||
+        (verified
+          ? prepareVerifiedProviderDownload(url!, verified.article)
+          : undefined);
       const store = this.localStore();
       if (
         (await store.read()).askEveryTime &&
@@ -460,14 +512,14 @@ export class ArticleDownloadController implements OnModuleDestroy {
       this.pickerGrant = undefined;
       const cached =
         !prepare && this.prisma
-          ? await findCachedDownloadArticle(this.prisma, url)
+          ? await findCachedDownloadArticle(this.prisma, url!)
           : null;
       const result = await store.save((directory) =>
         prepare
           ? prepare(directory)
           : cached
             ? buildCachedArticleDownload(cached, directory)
-            : buildArticleDownload(url, directory, undefined, {
+            : buildArticleDownload(url!, directory, undefined, {
                 imageDirectory: 'image',
                 markdownOnly: true,
               }),
@@ -476,11 +528,13 @@ export class ArticleDownloadController implements OnModuleDestroy {
       return res.status(200).json({
         saved: true,
         ...result,
-        contentSource: prepare
-          ? 'verified-provider'
-          : cached
-            ? 'saved-article'
-            : 'remote',
+        contentSource: cachedPrepare
+          ? 'saved-xiaohongshu'
+          : prepare
+            ? 'verified-provider'
+            : cached
+              ? 'saved-article'
+              : 'remote',
       });
     } catch (error) {
       return this.failure(error, res, body?.url);

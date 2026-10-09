@@ -16,6 +16,11 @@ import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { load } from 'cheerio';
 import { decodeInlineImage } from './image-fetch';
+import {
+  buildCompleteArticleDownload,
+  verifiedDownloadBody,
+} from '../article-verified-download';
+import { ArticleDownloadError } from '../article-download';
 
 export const XHS_SOURCE = Symbol('XHS_SOURCE');
 /** Internal normalized seam only. No vendor URL/auth/schema or production adapter.
@@ -367,5 +372,31 @@ export class XiaohongshuService {
       )
         await fs.rm(root, { recursive: true, force: true });
     }
+  }
+  /** Snapshot only this creator's complete cached note, never accept page content
+   * or a path from the caller. Original local saver grants the destination.
+   */
+  async prepareLocalDownload(creatorId: string, noteId: string) {
+    const note = await this.prisma.xhsNote.findFirst({
+      where: { id: noteId, creatorId, status: 'complete' },
+    });
+    if (!note?.contentHtml)
+      throw new ArticleDownloadError(
+        '此笔记没有已核验完整正文和图片，未保存。',
+        422,
+        { code: 'XHS_CACHED_ARTICLE_UNAVAILABLE' },
+      );
+    const article = {
+      ...note,
+      contentHtml: verifiedDownloadBody(note.contentHtml),
+      lastBodyStatus: 'available',
+      metrics: null,
+    };
+    return (directory: string) =>
+      buildCompleteArticleDownload(
+        article,
+        '小红书本地缓存（笔记身份：' + note.id + '）',
+        directory,
+      );
   }
 }
