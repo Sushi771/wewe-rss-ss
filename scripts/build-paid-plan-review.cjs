@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const repo = path.resolve(__dirname, '..');
 const folder = path.join(
   repo,
@@ -74,13 +75,27 @@ html = html.replace(
   /<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/g,
   "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'\" />",
 );
-html = html.replace('</head>', `<style>${styles.join('\n')}</style></head>`);
+html = html.replace(
+  '</head>',
+  () => `<style>${styles.join('\n')}</style></head>`,
+);
 html = html.replace(
   '</body>',
-  `${embedded}<script type="module">${scripts[0]}</script></body>`,
+  () => `${embedded}<script type="module">${scripts[0]}</script></body>`,
 );
 if (/<script\b[^>]*src=|<link\b[^>]*(?:href|rel)=|<iframe\b/i.test(html))
   throw new Error('EXTERNAL_ASSET_OR_FRAME');
+const packagedScripts = [
+  ...html.matchAll(/<script type="module">([\s\S]*?)<\/script>/g),
+];
+if (packagedScripts.length !== 1)
+  throw new Error('INLINE_SCRIPT_COUNT_INVALID');
+const syntax = spawnSync(process.execPath, ['--check', '--input-type=module'], {
+  input: packagedScripts[0][1],
+  encoding: 'utf8',
+});
+if (syntax.error || syntax.status !== 0)
+  throw new Error('INLINE_SCRIPT_SYNTAX_INVALID');
 const filename = path.join(folder, 'WeWe订阅开发计划.html');
 fs.writeFileSync(filename, html);
 const bytes = fs.readFileSync(filename);
