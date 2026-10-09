@@ -7,7 +7,35 @@ import { ArticleDownloadError } from './article-download';
 export const DEFAULT_ARTICLE_DIRECTORY =
   'C:\\Users\\ss\\Documents\\Obsidian Vault\\公众号的文章（待分类）';
 type Preferences = { directory: string; askEveryTime: boolean };
-type PreparedArticle = { articleId: string; title: string; imageCount: number };
+type PreparedArticle = {
+  articleId: string;
+  title: string;
+  imageCount: number;
+  videoCount?: number;
+};
+export const MAX_SAVED_VIDEO_BYTES = 100_000_000;
+const videoFilename = /^video_([a-f0-9]{64})\.mp4$/;
+type VideoManifest = { filename: string; bytes: number; sha256: string };
+
+/** Internal prepared files only; the HTTP API never accepts paths or bytes. */
+async function checkedVideo(directory: string, filename: string) {
+  const match = videoFilename.exec(filename);
+  if (!match) throw fail('视频缓存文件名无效。', 'INVALID_PREPARED_VIDEO');
+  const target = path.join(directory, filename);
+  const stat = await fs.lstat(target);
+  if (
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.size < 1 ||
+    stat.size > MAX_SAVED_VIDEO_BYTES
+  )
+    throw fail('视频缓存大小或文件类型无效。', 'INVALID_PREPARED_VIDEO');
+  const bytes = await fs.readFile(target);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  if (bytes.length !== stat.size || sha256 !== match[1])
+    throw fail('视频缓存字节与校验值不一致。', 'INVALID_PREPARED_VIDEO');
+  return { filename, bytes: bytes.length, sha256 };
+}
 
 const fail = (message: string, code: string) =>
   new ArticleDownloadError(message, 422, { code });
@@ -138,6 +166,7 @@ export class LocalArticleStore {
     let final: string | undefined;
     const publishedFiles: string[] = [];
     let imageDirectoryCreated = false;
+    let videoDirectoryCreated = false;
     let committed = false;
     try {
       const root = await validateLocalDirectory((await this.read()).directory);
@@ -152,7 +181,11 @@ export class LocalArticleStore {
         !article.articleId ||
         !article.title ||
         !Number.isInteger(article.imageCount) ||
-        article.imageCount < 0
+        article.imageCount < 0 ||
+        (article.videoCount !== undefined &&
+          (!Number.isInteger(article.videoCount) ||
+            article.videoCount < 0 ||
+            article.videoCount > 1))
       )
         throw fail('正文保存结果无效。', 'INVALID_PREPARED_ARTICLE');
       const shortId = createHash('sha256')
@@ -184,6 +217,30 @@ export class LocalArticleStore {
       const markdown = await fs.readFile(path.join(stage, 'index.md'), 'utf8');
       if (!markdown.trim() || markdown.includes('attachments/'))
         throw fail('正文或图片引用无效。', 'INVALID_PREPARED_ARTICLE');
+      const stagedVideoDirectory = path.join(stage, 'video');
+      let videoFiles: string[] = [];
+      try {
+        await validateLocalDirectory(stagedVideoDirectory);
+        videoFiles = await fs.readdir(stagedVideoDirectory);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      if (videoFiles.length !== (article.videoCount || 0))
+        throw fail(
+          '视频缓存数量与内部保存合同不一致。',
+          'INVALID_PREPARED_VIDEO',
+        );
+      const videos: VideoManifest[] = [];
+      for (const name of videoFiles) {
+        if (path.join(dateDirectory, stem, 'video', name).length > 255)
+          throw fail(
+            '视频保存路径过长，请选择较短目录。',
+            'SAVE_PATH_TOO_LONG',
+          );
+        if (!markdown.includes('video/' + name))
+          throw fail('正文缺少本地视频关联。', 'INVALID_PREPARED_VIDEO');
+        videos.push(await checkedVideo(stagedVideoDirectory, name));
+      }
       // mkdir is the exclusive reservation. No rename or copy may replace an existing note.
       for (let suffix = 1; suffix <= 100; suffix++) {
         const candidate = path.join(
@@ -213,6 +270,34 @@ export class LocalArticleStore {
               )
             ) {
               await fs.access(path.join(candidate, '正文.md'));
+              const retainedVideos =
+                marker.videos === undefined ? [] : marker.videos;
+              if (
+                !Array.isArray(retainedVideos) ||
+                retainedVideos.length > 1 ||
+                (videos.length > 0 && retainedVideos.length !== videos.length)
+              )
+                throw new Error();
+              if (retainedVideos.length) {
+                const retainedDirectory = path.join(candidate, 'video');
+                await validateLocalDirectory(retainedDirectory);
+                const retainedNames = await fs.readdir(retainedDirectory);
+                if (retainedNames.length !== retainedVideos.length)
+                  throw new Error();
+                for (const retained of retainedVideos) {
+                  if (!retained || typeof retained.filename !== 'string')
+                    throw new Error();
+                  const actual = await checkedVideo(
+                    retainedDirectory,
+                    retained.filename,
+                  );
+                  if (
+                    actual.bytes !== retained.bytes ||
+                    actual.sha256 !== retained.sha256
+                  )
+                    throw new Error();
+                }
+              }
               await validateLocalDirectory(path.join(candidate, 'image'));
               for (const name of marker.images) {
                 const stat = await fs.lstat(
@@ -225,6 +310,9 @@ export class LocalArticleStore {
                 markdownPath: path.join(candidate, '正文.md'),
                 alreadySaved: true,
                 imageCount: marker.images.length,
+                ...(retainedVideos.length
+                  ? { videoCount: retainedVideos.length }
+                  : {}),
               };
             }
           } catch {
@@ -249,6 +337,30 @@ export class LocalArticleStore {
       const markdownPath = path.join(final, '正文.md');
       await fs.writeFile(markdownPath, markdown, { flag: 'wx' });
       publishedFiles.push(markdownPath);
+      if (videos.length) {
+        const videoDir = path.join(final, 'video');
+        await fs.mkdir(videoDir);
+        videoDirectoryCreated = true;
+        for (const video of videos) {
+          const source = path.join(stagedVideoDirectory, video.filename);
+          const bytes = await fs.readFile(source);
+          if (
+            bytes.length !== video.bytes ||
+            createHash('sha256').update(bytes).digest('hex') !== video.sha256
+          )
+            throw fail('视频缓存已改变，未发布。', 'INVALID_PREPARED_VIDEO');
+          const destination = path.join(videoDir, video.filename);
+          // Reserve ownership before writing so a partial disk write is rolled
+          // back without deleting a pre-existing user's file on EEXIST.
+          const output = await fs.open(destination, 'wx');
+          publishedFiles.push(destination);
+          try {
+            await output.writeFile(bytes);
+          } finally {
+            await output.close();
+          }
+        }
+      }
       const marker = path.join(final, '.wewe-article.json');
       await fs.writeFile(
         marker,
@@ -256,6 +368,7 @@ export class LocalArticleStore {
           articleId: article.articleId,
           complete: true,
           images,
+          ...(videos.length ? { videos } : {}),
         }),
         { flag: 'wx' },
       );
@@ -266,6 +379,7 @@ export class LocalArticleStore {
         markdownPath,
         alreadySaved: false,
         imageCount: images.length,
+        ...(videos.length ? { videoCount: videos.length } : {}),
       };
     } catch (error) {
       if (error instanceof ArticleDownloadError) throw error;
@@ -280,6 +394,8 @@ export class LocalArticleStore {
           await fs.unlink(file).catch(() => {});
         if (imageDirectoryCreated)
           await fs.rmdir(path.join(final, 'image')).catch(() => {});
+        if (videoDirectoryCreated)
+          await fs.rmdir(path.join(final, 'video')).catch(() => {});
         await fs.rmdir(final).catch(() => {});
       }
       if (stage)
