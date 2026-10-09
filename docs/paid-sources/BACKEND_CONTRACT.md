@@ -4,17 +4,17 @@
 
 ## 当前真实存在的接缝
 
-| 接口/函数                                           | 当前合同                                                                                 | 复用及边界                                                     |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `feed.list` / `feed.byId`                           | 已有 tRPC；返回微信 Feed 与 `collectionRoute`                                            | 薄 facade 映射为通用作者；不把全部 Feed 行原样送到 Sites       |
-| `feed.addCapability` / `feed.addFromArticle`        | 已有来源能力和公开文章 URL 添加；本轮本地增加可选 source                                 | 未传 source 保留旧默认；明确选择不回退；原 UI 已接线，尚未部署 |
-| `feed.repairNativeSource`                           | 已有本机正常账号下的 native 修复，明确确认                                               | 本轮不调用、不解除停止；不是付费来源切换接口                   |
-| `feed.refreshArticles({mpId?})`                     | 单微信号或全部；逐号回执数组，当前同步请求                                               | 可复用单号 service；不把它说成已有异步 job API                 |
-| `feed.isRefreshAllMpArticlesRunning`                | 已有进程内布尔查询                                                                       | 不能替代持久 taskId 或崩溃恢复                                 |
-| `article.list` / `article.byId`                     | 元数据分页/完整缓存正文                                                                  | 页面 DTO 不包含 token、路径和原始上游响应                      |
-| `article.exportMarkdown` / `article.saveToObsidian` | 浏览器 Markdown 与本机保存分离                                                           | 小红书缓存需独立适配；Sites 不能用本机路径当下载               |
-| `GET /download/feed/:id.zip`                        | 微信 ID 校验、正文/图片 ZIP                                                              | 现有只接 `MP_WXS_…`，小红书不能直接传进去                      |
-| `Wechat2RssProvider`                                | `checkAccountStatus/listSubscriptions/addSubscription/refreshSubscription/fetchArticles` | 保留 private-host、手动重定向、限时限体积、秘密不外泄          |
+| 接口/函数                                           | 当前合同                                                                                 | 复用及边界                                                      |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `feed.list` / `feed.byId`                           | 已有 tRPC；返回微信 Feed 与 `collectionRoute`                                            | 薄 facade 映射为通用作者；不把全部 Feed 行原样送到 Sites        |
+| `feed.addCapability` / `feed.addFromArticle`        | 已有来源能力和公开文章 URL 添加；本轮本地增加可选 source                                 | 未传 source 保留旧默认；明确选择不回退；原 UI 已接线，尚未部署  |
+| `feed.repairNativeSource`                           | 已有本机正常账号下的 native 修复，明确确认                                               | 本轮不调用、不解除停止；不是付费来源切换接口                    |
+| `feed.refreshArticles({mpId?})`                     | 单微信号或全部；逐号回执数组，当前同步请求                                               | 可复用单号 service；不把它说成已有异步 job API                  |
+| `feed.isRefreshAllMpArticlesRunning`                | 已有进程内布尔查询                                                                       | 不能替代持久 taskId 或崩溃恢复                                  |
+| `article.list` / `article.byId`                     | 元数据分页/完整缓存正文                                                                  | 页面 DTO 不包含 token、路径和原始上游响应                       |
+| `article.exportMarkdown` / `article.saveToObsidian` | 浏览器 Markdown 与本机保存分离                                                           | 小红书缓存直存已接线；Sites文图下载尚未实现，本机路径不能当下载 |
+| `GET /download/feed/:id.zip`                        | 微信 ID 校验、正文/图片 ZIP                                                              | 现有只接 `MP_WXS_…`，小红书不能直接传进去                       |
+| `Wechat2RssProvider`                                | `checkAccountStatus/listSubscriptions/addSubscription/refreshSubscription/fetchArticles` | 保留 private-host、手动重定向、限时限体积、秘密不外泄           |
 
 代码入口：[`trpc.router.ts`](../../apps/server/src/trpc/trpc.router.ts)、[`trpc.service.ts`](../../apps/server/src/trpc/trpc.service.ts)、[`wechat2rss.ts`](../../apps/server/src/collection/providers/wechat2rss.ts)、[`collection.service.ts`](../../apps/server/src/collection/collection.service.ts)。
 

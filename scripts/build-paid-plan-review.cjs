@@ -53,6 +53,11 @@ const documents = [
     'docs/paid-sources/DEVELOPMENT_PLAN.md',
     '开发任务与排期',
   ],
+  [
+    'CURRENT_UPDATES.md',
+    'docs/paid-sources/CURRENT_UPDATES.md',
+    '本轮更新与剩余事项',
+  ],
 ];
 let embedded =
   '<section id="full-documents" style="max-width:1100px;margin:30px auto;padding:20px"><h2>完整文档 · 展开阅读</h2>';

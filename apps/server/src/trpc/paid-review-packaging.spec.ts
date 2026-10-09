@@ -54,7 +54,8 @@ describe('actual final HTML packager (offline fixture)', () => {
     expect(html).toContain('/* $& */');
     expect(html).toContain('&lt;script&gt;untrusted&lt;/script&gt;');
     expect(html).toContain("connect-src 'none'");
-    expect(html.match(/id="full-document-/g)).toHaveLength(6);
+    expect(html.match(/id="full-document-/g)).toHaveLength(7);
+    expect(html).toContain('本轮更新与剩余事项');
   });
   it('rejects invalid bundled code before producing a deliverable', () => {
     expect(() =>
