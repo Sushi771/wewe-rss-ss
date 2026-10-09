@@ -18,7 +18,9 @@ async function listenForFetch(server, probe = fetch) {
     try {
       const response = await probe(`http://127.0.0.1:${port}/dash/login`, {
         redirect: 'manual',
-        signal: AbortSignal.timeout(1500),
+        // This test-only probe includes the first Fetch initialization on cold
+        // Windows runners. Production readiness deadlines stay unchanged.
+        signal: AbortSignal.timeout(10000),
       });
       await response.arrayBuffer();
       return port;
@@ -51,22 +53,28 @@ test('synthetic readiness rebinds an OS-assigned Fetch-forbidden port', async ()
   }
 });
 
-test('synthetic readiness preserves other failures without retrying', async () => {
-  let probes = 0;
-  const denied = Object.assign(new Error('synthetic permission failure'), {
-    code: 'EACCES',
-  });
-  const server = http.createServer((_req, res) => res.end('synthetic shell'));
-  await assert.rejects(
-    listenForFetch(server, () => {
-      probes++;
-      throw denied;
+for (const [name, denied] of [
+  [
+    'permission',
+    Object.assign(new Error('synthetic permission failure'), {
+      code: 'EACCES',
     }),
-    (error) => error === denied,
-  );
-  assert.equal(probes, 1);
-  assert.equal(server.listening, false);
-});
+  ],
+  ['timeout', new DOMException('synthetic timeout', 'TimeoutError')],
+])
+  test(`synthetic readiness preserves ${name} failures without retrying`, async () => {
+    let probes = 0;
+    const server = http.createServer((_req, res) => res.end('synthetic shell'));
+    await assert.rejects(
+      listenForFetch(server, () => {
+        probes++;
+        throw denied;
+      }),
+      (error) => error === denied,
+    );
+    assert.equal(probes, 1);
+    assert.equal(server.listening, false);
+  });
 
 test('synthetic readiness limits forbidden-port rebinds and closes each listener', async () => {
   let probes = 0;
