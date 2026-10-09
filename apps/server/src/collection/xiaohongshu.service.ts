@@ -1,7 +1,7 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { TRPCError } from '@trpc/server';
 import { PrismaService } from '../prisma/prisma.service';
-import { Prisma, XhsCreator } from '@prisma/client';
+import { Prisma, XhsCreator, XhsNote } from '@prisma/client';
 import {
   appendXhsPage,
   xhsArchiveDraft,
@@ -21,8 +21,17 @@ import {
   verifiedDownloadBody,
 } from '../article-verified-download';
 import { ArticleDownloadError } from '../article-download';
+import {
+  inspectCachedMp4,
+  prepareXhsVideoDownload,
+  XhsVerifiedVideoCache,
+} from '../xhs-video-download';
 
 export const XHS_SOURCE = Symbol('XHS_SOURCE');
+/** Optional acquired bytes at the internal normalized seam, never browser input. */
+export type XhsSubscriptionCandidate = XhsNormalizedCandidate & {
+  video?: XhsVerifiedVideoCache['video'];
+};
 /** Internal normalized seam only. No vendor URL/auth/schema or production adapter.
  * A future adapter must establish identities and whole-body/media evidence before
  * setting evidenceVerified. Client requests cannot supply this object.
@@ -34,7 +43,7 @@ export interface XhsSource {
     pages: {
       requestCursor: string | null;
       nextCursor: string | null;
-      items: XhsNormalizedCandidate[];
+      items: XhsSubscriptionCandidate[];
     }[];
   }>;
 }
@@ -54,6 +63,39 @@ const escape = (s: string) =>
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+
+function cachedVideoMetadata(
+  note: Pick<
+    XhsNote,
+    'kind' | 'status' | 'videoMimeType' | 'videoExpectedBytes' | 'videoSha256'
+  >,
+) {
+  return note.kind === 'video' &&
+    note.status === 'complete' &&
+    note.videoMimeType === 'video/mp4' &&
+    Number.isSafeInteger(note.videoExpectedBytes) &&
+    note.videoExpectedBytes! > 0 &&
+    note.videoExpectedBytes! <= 100_000_000 &&
+    /^[a-f0-9]{64}$/.test(note.videoSha256 || '')
+    ? {
+        mimeType: 'video/mp4' as const,
+        bytes: note.videoExpectedBytes!,
+        sha256: note.videoSha256!,
+        containerVerified: true as const,
+        decoded: false as const,
+      }
+    : null;
+}
+const cachedNoteMetadataSelect = {
+  id: true,
+  title: true,
+  publishTime: true,
+  status: true,
+  kind: true,
+  videoMimeType: true,
+  videoExpectedBytes: true,
+  videoSha256: true,
+} satisfies Prisma.XhsNoteSelect;
 
 type ManagementPlatform = 'wechat' | 'xiaohongshu';
 // Shared process lock protects both platform namespaces while checking membership.
@@ -316,13 +358,22 @@ export class XiaohongshuService {
   }
   async notes(creatorId: string) {
     await this.getCreator(creatorId);
+    const notes = await this.prisma.xhsNote.findMany({
+      where: { creatorId },
+      orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
+      select: cachedNoteMetadataSelect,
+    });
     return {
       platform: 'xiaohongshu' as const,
-      items: await this.prisma.xhsNote.findMany({
-        where: { creatorId },
-        orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-        select: { id: true, title: true, publishTime: true, status: true },
-      }),
+      items: notes.map((note) => ({
+        id: note.id,
+        title: note.title,
+        publishTime: note.publishTime,
+        status: note.status,
+        kind:
+          note.kind === 'video' ? ('video' as const) : ('image-text' as const),
+        video: cachedVideoMetadata(note),
+      })),
     };
   }
   async refresh(id: string) {
@@ -351,7 +402,14 @@ export class XiaohongshuService {
       )
         return fail('来源身份或完整图文证据未通过，旧归档保留。');
       let ledger = xhsPageLedger(result.authorId);
-      const drafts = new Map<string, ReturnType<typeof xhsArchiveDraft>>();
+      const drafts = new Map<
+        string,
+        {
+          draft: ReturnType<typeof xhsArchiveDraft>;
+          video: XhsVerifiedVideoCache['video'] | null;
+          kind: 'image-text' | 'video';
+        }
+      >();
       const timestamps = new Map<string, number>();
       for (const page of result.pages) {
         ledger = appendXhsPage(
@@ -360,10 +418,34 @@ export class XiaohongshuService {
           3,
         ).ledger;
         for (const item of page.items) {
-          const draft = xhsArchiveDraft(result.authorId, item);
-          if (draft.status === 'candidate' && !draft.readyForEvidenceCheck)
-            return fail('全文或图片数量未通过核验，旧归档保留。');
-          if (!drafts.has(draft.noteKey)) drafts.set(draft.noteKey, draft);
+          if (item.video && !Buffer.isBuffer(item.video.bytes))
+            return fail('视频缓存须为已取得的完整字节，旧缓存保持不变。');
+          const video =
+            item.kind === 'video' && item.video
+              ? { ...item.video, bytes: Buffer.from(item.video.bytes) }
+              : null;
+          const draft = xhsArchiveDraft(
+            result.authorId,
+            video ? { ...item, kind: 'image-text' } : item,
+          );
+          if (video) {
+            // Reuse the single-note byte/identity/text/cover/hash/container gate.
+            prepareXhsVideoDownload({
+              evidenceVerified: result.evidenceVerified,
+              note: item,
+              video,
+            });
+          } else if (item.video)
+            return fail('视频缓存与笔记类型不一致，旧缓存保持不变。');
+          if (
+            draft.status === 'candidate' &&
+            !draft.readyForEvidenceCheck &&
+            !video
+          )
+            return fail('全文或图片缓存未通过核查，旧归档保持不变。');
+          const previous = drafts.get(draft.noteKey);
+          if (!previous || (previous.draft.status === 'video-skipped' && video))
+            drafts.set(draft.noteKey, { draft, video, kind: item.kind });
           if (!timestamps.has(draft.noteKey))
             timestamps.set(draft.noteKey, item.publishedAt);
         }
@@ -372,12 +454,12 @@ export class XiaohongshuService {
       await createVerifiedSqliteBackup();
       const added = await this.prisma.$transaction(async (tx) => {
         let count = 0;
-        for (const d of drafts.values()) {
+        for (const { draft: d, video, kind } of drafts.values()) {
           const old = await tx.xhsNote.findUnique({ where: { id: d.noteKey } });
           if (old) {
             if (old.creatorId !== id)
               return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
-            continue;
+            if (old.status !== 'video-skipped' || !video) continue;
           }
           const contentHtml =
             d.status === 'candidate'
@@ -396,19 +478,39 @@ export class XiaohongshuService {
                       '">',
                   )
                   .join('') +
+                // The shared video contract allows a real complete video with
+                // no caption/cover. Mark this local-only structural placeholder;
+                // title survives the unchanged sanitizer's attribute allowlist.
+                (video && !d.text.trim() && !d.images.length
+                  ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
+                  : '') +
                 '</div>'
               : null;
-          await tx.xhsNote.create({
-            data: {
-              id: d.noteKey,
-              creatorId: id,
-              title:
-                d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
-              publishTime: timestamps.get(d.noteKey)!,
-              status: d.status === 'candidate' ? 'complete' : 'video-skipped',
-              contentHtml,
-            },
-          });
+          const data = {
+            title:
+              d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
+            status: d.status === 'candidate' ? 'complete' : 'video-skipped',
+            contentHtml,
+            kind,
+            videoBytes: video?.bytes ?? null,
+            videoMimeType: video?.mimeType ?? null,
+            videoExpectedBytes: video?.expectedBytes ?? null,
+            videoSha256: video?.sha256 ?? null,
+          };
+          if (old) {
+            // Only a skipped video's missing archive may be filled. Keep its
+            // stable ID, creator relation, and previously trusted publication time.
+            await tx.xhsNote.update({ where: { id: old.id }, data });
+          } else {
+            await tx.xhsNote.create({
+              data: {
+                id: d.noteKey,
+                creatorId: id,
+                publishTime: timestamps.get(d.noteKey)!,
+                ...data,
+              },
+            });
+          }
           if (d.status === 'candidate') count++;
         }
         await tx.xhsCreator.update({
@@ -439,8 +541,9 @@ export class XiaohongshuService {
   async body(creatorId: string, noteId: string) {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
+      select: { ...cachedNoteMetadataSelect, contentHtml: true },
     });
-    if (!note?.contentHtml) return fail('此笔记没有已核验完整图文。');
+    if (!note?.contentHtml) return fail('此笔记没有已核验的完整缓存。');
     const $ = load(note.contentHtml),
       content = $('#js_content');
     const images = content
@@ -456,10 +559,16 @@ export class XiaohongshuService {
       publishTime: note.publishTime,
       text: content
         .find('p')
+        .not(
+          '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
+        )
         .toArray()
         .map((p) => $(p).text())
         .join('\n'),
       images,
+      kind:
+        note.kind === 'video' ? ('video' as const) : ('image-text' as const),
+      video: cachedVideoMetadata(note),
     };
   }
   async export(creatorId: string, noteIds?: string[]) {
@@ -473,17 +582,21 @@ export class XiaohongshuService {
         ...(selected ? { id: { in: selected } } : {}),
       },
       orderBy: [{ publishTime: 'asc' }, { id: 'asc' }],
+      select: { ...cachedNoteMetadataSelect, contentHtml: true },
     });
     if (selected && notes.length !== selected.length)
       return fail('选中笔记必须完整且属于该博主，未导出。', 'BAD_REQUEST');
     if (!notes.length) return fail('没有已核验完整图文，尚不能下载。');
-    if (
-      notes.reduce(
-        (sum, n) => sum + Buffer.byteLength(n.contentHtml || ''),
-        0,
-      ) > 25_000_000
-    )
-      return fail('归档超过本次浏览器下载的大小限制，未生成截断内容。');
+    let archiveBytes = 0;
+    for (const note of notes) {
+      const video = cachedVideoMetadata(note);
+      if (note.kind === 'video' && !video)
+        return fail('视频缓存元数据不完整，未导出。');
+      archiveBytes +=
+        Buffer.byteLength(note.contentHtml || '') + (video?.bytes || 0);
+      if (archiveBytes > 25_000_000)
+        return fail('归档超过浏览器下载的大小限制，未生成截断数据。');
+    }
     // Reuse cached-only original Markdown/image export and ZIP packaging. Never
     // request a signed CDN URL or pass an XHS ID to the WeChat download route.
     const root = await fs.mkdtemp(path.join(tmpdir(), 'wewe-xhs-export-'));
@@ -492,6 +605,20 @@ export class XiaohongshuService {
       await fs.mkdir(folder);
       for (const note of notes) {
         if (!note.contentHtml) return fail('归档正文缺失，下载未完成。');
+        if (note.kind === 'video') {
+          const directory = path.join(
+            folder,
+            createHash('sha256').update(note.id).digest('hex').slice(0, 24),
+          );
+          const prepare = await this.prepareLocalDownload(creatorId, note.id);
+          await fs.mkdir(directory);
+          await prepare(directory);
+          await fs.rename(
+            path.join(directory, 'index.md'),
+            path.join(directory, '正文.md'),
+          );
+          continue;
+        }
         const result = await buildArticleMarkdown(
           { ...note, sourceUrl: null, lastBodyStatus: null, metrics: null },
           '',
@@ -537,6 +664,93 @@ export class XiaohongshuService {
         '此笔记没有已核验完整正文和图片，未保存。',
         422,
         { code: 'XHS_CACHED_ARTICLE_UNAVAILABLE' },
+      );
+    if (note.kind === 'video') {
+      const creator = await this.getCreator(creatorId);
+      const metadata = cachedVideoMetadata(note);
+      let tuple: unknown;
+      try {
+        tuple = JSON.parse(note.id);
+      } catch {
+        /* Fail the identity gate below. */
+      }
+      if (
+        !creator.externalAuthorId ||
+        !metadata ||
+        !note.videoBytes ||
+        !Array.isArray(tuple) ||
+        tuple.length !== 3 ||
+        tuple[0] !== 'xiaohongshu' ||
+        tuple[1] !== 'note' ||
+        typeof tuple[2] !== 'string' ||
+        JSON.stringify(tuple) !== note.id
+      )
+        throw new ArticleDownloadError(
+          '视频缓存身份或元数据不完整，未保存。',
+          422,
+          { code: 'XHS_CACHED_VIDEO_UNAVAILABLE' },
+        );
+      // Parse only verified cached text/cover HTML, then rerun the shared video
+      // contract gate. Neither raw platform responses nor remote URLs enter it.
+      const $ = load(verifiedDownloadBody(note.contentHtml)),
+        content = $('#js_content');
+      const images = content
+        .find('img')
+        .toArray()
+        .map((img, index) => ({
+          ordinal: index + 1,
+          inlineData: $(img).attr('src') || '',
+        }));
+      const bytes = Buffer.from(note.videoBytes);
+      const inspected = inspectCachedMp4(bytes);
+      if (
+        inspected.sha256 !== metadata.sha256 ||
+        inspected.bytes !== metadata.bytes
+      )
+        throw new ArticleDownloadError(
+          '视频缓存字节与校验值不一致，未保存。',
+          422,
+          { code: 'XHS_CACHED_VIDEO_INVALID' },
+        );
+      return prepareXhsVideoDownload({
+        evidenceVerified: true,
+        note: {
+          authorId: creator.externalAuthorId,
+          noteId: tuple[2],
+          kind: 'video',
+          publishedAt: note.publishTime,
+          title: note.title,
+          text: content
+            .find('p')
+            .not(
+              '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
+            )
+            .toArray()
+            .map((p) => $(p).text())
+            .join('\n'),
+          textStatus: 'full',
+          expectedImageCount: images.length,
+          images,
+        },
+        video: {
+          complete: true,
+          mimeType: metadata.mimeType,
+          bytes,
+          expectedBytes: metadata.bytes,
+          sha256: metadata.sha256,
+        },
+      });
+    }
+    if (
+      note.videoBytes !== null ||
+      note.videoMimeType !== null ||
+      note.videoExpectedBytes !== null ||
+      note.videoSha256 !== null
+    )
+      throw new ArticleDownloadError(
+        '笔记类型与视频缓存不一致，未保存。',
+        422,
+        { code: 'XHS_CACHED_VIDEO_INVALID' },
       );
     const article = {
       ...note,

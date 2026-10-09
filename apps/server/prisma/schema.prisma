@@ -108,6 +108,11 @@ model XhsNote {
   publishTime Int        @map("publish_time")
   status      String
   contentHtml String?    @map("content_html")
+  kind        String?
+  videoBytes  Bytes?     @map("video_bytes")
+  videoMimeType String?  @map("video_mime_type")
+  videoExpectedBytes Int? @map("video_expected_bytes")
+  videoSha256 String?   @map("video_sha256")
   creator     XhsCreator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
 
   @@index([creatorId, publishTime])
