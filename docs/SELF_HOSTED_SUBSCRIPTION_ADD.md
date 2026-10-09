@@ -50,7 +50,7 @@ pnpm --filter web exec tsc --noEmit
 
 绑定与SQLite分属两个存储：目录核验后先一致性备份并暂存停用Feed，保存私有配置不可变快照，原子发布绑定后才激活。激活失败则在锁内核对当前配置字节并恢复旧指针；新增行的 `assertRollback` 再次确认本次绑定已撤回后才允许删除。若恢复指针失败或配置已变化，保留停用恢复行与私有快照，返回失败，不继续正文请求；持久候选、失败记录和停止不删除。新绑定使用完整底层配置及 `sourcePolicy:'native-directory-only'`；该明确策略允许新号没有旧 `originalStopFiles`，并在旧搜索/公开原文采集入口发HTTP前拒绝执行。已有真实来源停止引用保留，不制造平台拒绝文件。此屏障已由离线回归验证。
 
-UI 测试执行实际事件处理器，验证所选账号、逐目标串行、失败保留链接、正文待完成与双击保护；没有安装扩展或真实浏览器视觉验收。工程全量 `tsc` 包含旧 `test/app.e2e-spec.ts` 的 supertest 导入类型错误，本变更使用应用构建配置检查，并未修改该旧测试。
+UI 测试执行实际事件处理器，验证所选账号、逐目标串行、失败保留链接、正文待完成与双击保护；没有安装扩展或真实浏览器视觉验收。后续采购前复核已最小修正 `test/app.e2e-spec.ts` 的 supertest 导入，完整及应用构建类型检查通过；实际导入的合成 HTTP 检查不代表 AppModule 的 e2e 业务验收。
 
 ## Public original redirects and publisher identity candidates
 

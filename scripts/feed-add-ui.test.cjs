@@ -7,6 +7,16 @@ const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
 );
 function render(capability) {
+  // Use the current paid capability shape; this fixture never contacts a source.
+  if (capability)
+    capability = {
+      source: 'wechat2rss',
+      requiresAccount: false,
+      sources: [
+        { source: 'wechat2rss', requiresAccount: false, ...capability },
+      ],
+      ...capability,
+    };
   const state = [],
     events = [];
   let index = 0;
@@ -171,7 +181,8 @@ function render(capability) {
       walk(mount(), (node) => node.type === 'Textarea').props.value,
     button: walk(
       tree,
-      (node) => node.type === 'Button' && node.props.children === '确定',
+      (node) =>
+        node.type === 'Button' && node.props.children === '提交所选来源',
     ),
     input: walk(tree, (node) => node.type === 'Textarea'),
   };
