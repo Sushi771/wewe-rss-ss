@@ -39,13 +39,42 @@ node scripts/prepare-xhs-self-hosted.cjs --check-config
 
 ## 测试就绪边界
 
-**目前不能只填 Key 就触发小红书真实取文。** 上述检查器仅处理 WeWe 候选配置，没有供应商网络执行模式；本地地址门禁只接受 loopback HTTP(S)，不能把官方试用远端地址随意填成已审查本机实例。
+**目前不能只填 Key 就启用小红书生产刷新。** 纯配置检查器仅处理 WeWe 本机候选配置，其 loopback 门禁不会因公开客户端而放宽。另已实现下面的公开契约 HTTP 候选客户端和单请求脚本；两者用途不同。
 
 运行时 `XiaohongshuService.capability()` 的 `canRefresh` 取决于是否注入 `XHS_SOURCE`；当前 `TrpcModule` 未注册该来源，单篇 `XHS_SINGLE_SOURCE` 也未注册。候选解析器自身固定返回 `canRefresh:false`，并未被应用加载来创建 Provider。这不是待用户勾选的开关，也不能改布尔值就变成可执行适配器。
 
-仍缺实际 Web＋蒲公英实例或同产品试用 API 的可执行合同：服务地址、鉴权、作者列表/分页、完整详情及媒体响应；还缺按该合同实现的供应商薄适配与注册。源码自部署分支还需要实际交付包、Dockerfile/Compose、版本/构建审查和正常账号条件。现有项目没有可执行的 Rnote Compose 或供应商 Provider，因此本说明不提供猜测的启动/请求命令。
+仍需确认实际 Web＋蒲公英实例或同产品试用服务的地址、路由与鉴权是否采用公开契约。源码自部署分支还需要实际交付包、Dockerfile/Compose、版本/构建审查和正常账号条件；现有项目没有实际 Rnote Compose，不提供猜测的容器启动命令。普通笔记接口不能全局要求蒲公英登录 Cookie；只有实际 PGY 自部署接口确有该依赖时才单独处理。
 
-明天第一步可正常核对同产品试用说明及 Key 的用途；WeWe 第一条安全检查仍是 `--check-config`，它不会消耗试用额度。实际合同可用且薄适配完成后，第一条真实测试应只读取一个已确认博主前三篇，经当前内部合同核验身份/时间、完整图文和媒体。当前尚无可以直接执行这一供应商请求的脚本。试用、源码部署以及 WeWe 正式接入分别记录，不能把官网试用可用当成已接回原刷新。
+明天先正常核对同产品试用说明及 Key 的用途。确认其路由合同后，可用下面的单请求脚本少量核真实响应，再补准确归一化字段；不会临时重写 HTTP 层。试用、源码部署以及 WeWe 正式接入分别记录，不能把官网试用可用当成已接回原刷新。
+
+## 已实现的公开契约请求与候选校验
+
+依据[官方指南](https://rnote.dev/docs/guide)和[实时 OpenAPI](https://rnote.dev/openapi.json)，已实现 `RnotePublicClient` 与 `RnotePublicCandidate`。这是明确标为 `rnote-public-v2` 的候选客户端，**不是把公开托管服务认作 Web 源码试用**：官方指南明确本页接口属于托管服务，源码页描述另一套容器交付，未公开承诺路径等价。
+
+| 方法 | 路径                                        | 已处理的契约                                          |
+| ---- | ------------------------------------------- | ----------------------------------------------------- |
+| GET  | `/api/v2/crawler/user/posted`               | `user_id`、opaque `cursor`、`num` 1–20；默认仅请求3条 |
+| GET  | `/api/v2/crawler/note/image`、`/note/video` | 明确的 `note_id`，只执行所选一种，不自动切类型        |
+| POST | `/api/v2/pgy/blogger/notes`、`/notes_v2`    | 独立 JSON body、页码和每页1–8；不自动换端点           |
+| POST | `/api/v2/pgy/note/detail`                   | 明确的 `note_id`，候选详情严格比较返回 `noteId`       |
+
+地址必须显式提供，没有默认托管地址。只允许明确的官方 HTTPS 主机或 literal loopback 根地址，Key 只放 `X-API-Key` Header。请求限定时、响应大小，拒绝302等重定向，不把 Key 转发到另一地址。HTTP401/402/403/429分别报告认证/余额/权限/限流固定码；同时核 `success` 与 HTTP，保留数值 `retry_after`，不自动重试。错误文案、URL、Key、诊断字段和正文不输出。
+
+已根据 OpenAPI **description** 校验 `data.data.notes/has_more`、图文视频详情数组，以及 PGY `list` 与 `noteList[].noteInfo` 的不同结构；未知业务字段在内存中原样保留。不能因响应 schema 为 `{}` 忽略这些可实现字段。仍待核的是 crawler 真实作者/笔记身份与类型字段、cursor 的准确字段路径、详情时间单位、全部媒体地址/顺序及原字节；PGY 已知 `noteId/userId/title/content/createTime`，但时间单位、图片子项和视频结构仍未完整定义。不会猜发布时间秒/毫秒、把URL数量当完整字节或设置 `evidenceVerified:true`。
+
+无参数执行不读私有配置、不发请求：
+
+```powershell
+node scripts/acceptance-rnote-public.cjs
+```
+
+明天确认选定试用的公开契约兼容性后，在已有 `.xhs-self-hosted/.env.local` 填明确根地址与 Key、构建后端，再显式执行一次：
+
+```powershell
+node scripts/acceptance-rnote-public.cjs --execute --operation posted --id <已确认24位作者ID>
+```
+
+`image/video/pgy-notes/pgy-notes-v2/pgy-detail` 也是明确操作选项；没有自动遍历、切源或后续详情请求。脚本最多一次请求，只输出候选数量/字段名及未核状态，不写库、保存媒体或注册生产来源。成功或失败均保留 `productCompatibilityVerified/evidenceVerified/canRefresh:false`。如果试用是不同路由，不把它悄悄替换为托管 App 接口；先据其实际契约调整。
 
 此阶段不创建或填写持久密钥，不执行供应商代码、不启动实例或注册真实来源。收到实际包和文档后，先按包内合同核对配置及受支持启动方式，再由 owner 安排必要授权、薄适配及离线请求/字段回归；没有完整响应证据时保持未接入。复用已有[内部后端合同](BACKEND_CONTRACT.md)和[本机归档接缝](../XIAOHONGSHU_INTEGRATION.md)，不重写已经完成的保存器。
 

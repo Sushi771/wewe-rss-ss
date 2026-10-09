@@ -23,6 +23,8 @@ jobs:
         run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
       - name: Test synthetic readiness with Fetch-compatible Windows ports
         run: node --test scripts/local-release/readiness.test.cjs
+      - name: Test explicit Wechat2RSS binding on owned SQLite copies
+        run: node --test scripts/prepare-wechat2rss-test.test.cjs
 
   lint-test:
     runs-on: ubuntu-latest

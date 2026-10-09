@@ -68,6 +68,25 @@ node scripts/acceptance-wechat2rss.cjs --deployment-config
 
 应用侧 `WECHAT2RSS_ENABLED=1` 仅打开来源资格。新增一个真实新号时，选择 Wechat2RSS 会将新 Feed 的 `collectionChannel` 保存为 `wechat2rss`；重新添加已有号会保留原绑定。已有号只有 `collectionChannel` 为空且未绑定合集时，才可被明确的 `WECHAT2RSS_FEED_IDS=MP_WXS_<已核数字ID>` allowlist 选择。其他已绑定来源不会被覆盖，当前没有通用的旧号一键改绑入口；旧号迁移仍须 owner 在备份与副本演练后受控处理，不能靠填 allowlist 或重复添加偷偷改绑。
 
+## 可执行的隔离绑定与启动演练
+
+已补 `prepare-wechat2rss-test.cjs`，将既有 SQLite **只读在线备份**到新的自有测试路径，再仅修改一个明确匹配的 Feed 的 `collection_channel`。必须提供真实核过的 ID、名称与预期旧来源；名称、状态或旧来源不一致即停止，不迁移、不联网、不写源库、不改环境或生产指针。遇未审查的 feeds 触发器也停止。包括 WAL 在内的一致性、旧正文/图片字节与其他订阅保护用真实合成 SQLite 回归。
+
+由 owner 先使用现有构建和完整离线演练工具核包，不执行供应商请求：
+
+```powershell
+node scripts/local-release/build.cjs
+node scripts/local-release/rehearse.cjs --release <新包绝对目录> --source <已核SQLite绝对路径>
+```
+
+演练在独立副本完成迁移、启动、旧内容/导出及回滚检查，出站被拦截，结束只清理自己的进程。当前包与输入哈希核对后，准备显式来源绑定的另一份隔离副本：
+
+```powershell
+node scripts/prepare-wechat2rss-test.cjs --source-db <当前schema的已核SQLite副本> --release <已核当前包> --feed-id <已核MP_WXS_ID> --expect-channel <已核旧来源或unbound> --expect-name <已核公众号名>
+```
+
+工具验证包与 schema，输出新的相对数据库路径并生成该包专用演练 marker。可用既有 `runtime.cjs start --rehearsal` 与明确的非4000端口、隔离导出目录和网络审计文件启动它；离线 guard 仍保持，不借此放行真实平台或实例请求。真实只读实例测试先走 `--account-only/--execute`，不依赖替换生产。生产绑定和受控切换仍是另外的步骤，本工具绝不把副本改绑冒充生产已接通。
+
 ## 仍待真实验收
 
 发布运行器已补齐 Wechat2RSS 的定时门禁：必须同时显式设置 `ENABLE_SCHEDULED_UPDATES=1`、`WECHAT2RSS_ENABLED=1`，具备有效私有地址和服务密码，以及启用的来源绑定，才允许该来源参加定时更新。已有其他来源的绑定不会被环境 allowlist 覆盖。今天保持定时关闭；完成真实验收后再单独处理启用和受控部署。
