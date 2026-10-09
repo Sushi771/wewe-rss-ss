@@ -1,20 +1,32 @@
 # 后端与接口契约
 
+## 本轮增量：文件夹、统一管理与独立工具
+
+本轮代码已接入两平台共用的单层命名文件夹：桌面可拖动作者到文件夹，两端可勾选后批量移动。文件夹是应用自有元数据，引用原本地 Feed/博主 ID，平台隔离；切换来源不重建分组，移动分组不搬动旧下载文件。两平台复用管理外壳、紧凑工具栏和可勾选列表，小红书添加入口收进“+”窗口。手机侧栏默认收起，使用顶部选择器及展开管理按钮；新布局尚未做真实浏览器视觉验收。
+
+工具页并列“公众号单篇下载”和“小红书单篇下载”，后者无需订阅。小红书单篇内部来源 XHS_SINGLE_SOURCE 默认未注册；没有可信解析结果时拒绝保存，不把 URL 推导为已核笔记。订阅缓存勾选保存和单篇入口复用原目录选择、记住目录与每次询问设置，每篇独立保存正文.md 和 image/，重复回执区分新增保存与已有。先核整批身份与内容，再逐篇保存；失败停止，已完成文件保留。视频当前没有已核字节或落盘合同，明确未归档；用户要求的视频能力仍待实现和实测。
+
+追加 management_groups 表及 Feed/XhsCreator 的可空 group_id，不修改旧 ID、旧正文或来源绑定。写入前备份；跨平台移动、非空文件夹删除、重复提交拒绝。启动与副本核验同步保护分组表及成员关系；原单篇导入兼容四表、六表、七表完整结构，未知/不完整结构和演练后任何缓存或分组漂移均停止。
+
+Sites 本地合同已扩展缓存正文/图片、单篇离线 HTML Blob、受限手动刷新与状态查询，36项离线测试通过。图片只接受已有缓存的合法 data URI 字节，无网络回退；公众号解析须绑定原 verifiedDownloadBody 与 Cheerio。刷新仅执行已保存的同一来源，operationId 在当前进程内不重放；已提交后结果不确定不重试。默认身份、PC传输、缓存解析绑定及账号/预算策略均未配置，未挂载服务。HTML Blob 保存到浏览器设备，不替代本机正文/图片/视频文件夹归档。
+
+已合入原草稿 PR2 的工作分支，生产库未迁移、生产服务未更新。本轮离线测试及候选构建不能证明真实来源或订阅恢复。此前隔离 Edge 的核心流程与合成文图保存结果属于旧页面版本；新统一界面、文件夹及独立工具真实视觉仍待验。确认移除仍待原生审批，未重复触发。真实供应商适配、视频保存及 Sites 实际身份/传输/页面仍有代码与授权缺口。
+
 2026-10-09 · 已有接口与拟新增契约分开 · [返回总览](../PAID_MULTIPLATFORM_PLAN.md)
 
 ## 当前真实存在的接缝
 
-| 接口/函数                                           | 当前合同                                                                                 | 复用及边界                                                      |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `feed.list` / `feed.byId`                           | 已有 tRPC；返回微信 Feed 与 `collectionRoute`                                            | 薄 facade 映射为通用作者；不把全部 Feed 行原样送到 Sites        |
-| `feed.addCapability` / `feed.addFromArticle`        | 已有来源能力和公开文章 URL 添加；本轮本地增加可选 source                                 | 未传 source 保留旧默认；明确选择不回退；原 UI 已接线，尚未部署  |
-| `feed.repairNativeSource`                           | 已有本机正常账号下的 native 修复，明确确认                                               | 本轮不调用、不解除停止；不是付费来源切换接口                    |
-| `feed.refreshArticles({mpId?})`                     | 单微信号或全部；逐号回执数组，当前同步请求                                               | 可复用单号 service；不把它说成已有异步 job API                  |
-| `feed.isRefreshAllMpArticlesRunning`                | 已有进程内布尔查询                                                                       | 不能替代持久 taskId 或崩溃恢复                                  |
-| `article.list` / `article.byId`                     | 元数据分页/完整缓存正文                                                                  | 页面 DTO 不包含 token、路径和原始上游响应                       |
-| `article.exportMarkdown` / `article.saveToObsidian` | 浏览器 Markdown 与本机保存分离                                                           | 小红书缓存直存已接线；Sites文图下载尚未实现，本机路径不能当下载 |
-| `GET /download/feed/:id.zip`                        | 微信 ID 校验、正文/图片 ZIP                                                              | 现有只接 `MP_WXS_…`，小红书不能直接传进去                       |
-| `Wechat2RssProvider`                                | `checkAccountStatus/listSubscriptions/addSubscription/refreshSubscription/fetchArticles` | 保留 private-host、手动重定向、限时限体积、秘密不外泄           |
+| 接口/函数                                           | 当前合同                                                                                 | 复用及边界                                                                          |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `feed.list` / `feed.byId`                           | 已有 tRPC；返回微信 Feed 与 `collectionRoute`                                            | 薄 facade 映射为通用作者；不把全部 Feed 行原样送到 Sites                            |
+| `feed.addCapability` / `feed.addFromArticle`        | 已有来源能力和公开文章 URL 添加；本轮本地增加可选 source                                 | 未传 source 保留旧默认；明确选择不回退；原 UI 已接线，尚未部署                      |
+| `feed.repairNativeSource`                           | 已有本机正常账号下的 native 修复，明确确认                                               | 本轮不调用、不解除停止；不是付费来源切换接口                                        |
+| `feed.refreshArticles({mpId?})`                     | 单微信号或全部；逐号回执数组，当前同步请求                                               | 可复用单号 service；不把它说成已有异步 job API                                      |
+| `feed.isRefreshAllMpArticlesRunning`                | 已有进程内布尔查询                                                                       | 不能替代持久 taskId 或崩溃恢复                                                      |
+| `article.list` / `article.byId`                     | 元数据分页/完整缓存正文                                                                  | 页面 DTO 不包含 token、路径和原始上游响应                                           |
+| `article.exportMarkdown` / `article.saveToObsidian` | 浏览器 Markdown 与本机保存分离                                                           | 小红书缓存直存已接线；Sites文图下载仅有本地合同，真实绑定未实现，本机路径不能当下载 |
+| `GET /download/feed/:id.zip`                        | 微信 ID 校验、正文/图片 ZIP                                                              | 现有只接 `MP_WXS_…`，小红书不能直接传进去                                           |
+| `Wechat2RssProvider`                                | `checkAccountStatus/listSubscriptions/addSubscription/refreshSubscription/fetchArticles` | 保留 private-host、手动重定向、限时限体积、秘密不外泄                               |
 
 代码入口：[`trpc.router.ts`](../../apps/server/src/trpc/trpc.router.ts)、[`trpc.service.ts`](../../apps/server/src/trpc/trpc.service.ts)、[`wechat2rss.ts`](../../apps/server/src/collection/providers/wechat2rss.ts)、[`collection.service.ts`](../../apps/server/src/collection/collection.service.ts)。
 
@@ -92,3 +104,11 @@ Sites 同步采用最小展示 DTO，不同步生产数据库、账号表、toke
 图片数组逐位检查，稀疏空位也拒绝；数组长度与期望数量相等不能代替每张实际字节。该缺口已有先失败再修复的合成回归。
 
 真实首轮只验一个博主前三篇，遇非图文如实跳过；后续确有需要再明确扩样。
+
+## 已实现分组与保存路由
+
+feed.groups/saveGroup/removeGroup/moveFeeds 与 xiaohongshu.groups/saveGroup/removeGroup/moveCreators 复用原受保护 router。saveGroup 接收 id（重命名时）和 name；moveFeeds/moveCreators 接收 ids 与 groupId（null 为未分组），仅使用本平台已存在本地主键，最多100项，去重后原子移动。列表可按 groupId 过滤，不传为全部、null 为未分组。非空文件夹拒绝删除，不增加父级字段。
+
+POST /download/article/xiaohongshu/save 接收 creatorId、noteIds（1–100）与可选 pickToken，不接受本机路径或正文上传；返回 savedCount、alreadySavedCount。选中 ZIP 使用原 export 的 noteIds 参数。独立单篇 GET/POST /download/article/xiaohongshu/single 使用服务器可选 XHS_SINGLE_SOURCE，默认拒绝；来源必须核绑定、真实身份时间和完整正文/图片字节，无订阅写库。视频返回未归档。工具 route 为 /dash/tools/xiaohongshu-download，与公众号工具共用页内导航。
+
+Sites 分组展示仍待绑定上述应用路由，不能把来源返回字段当文件夹主键。当前 operationId 去重是进程内保证，跨重启持久去重未实现；不得在实际计费连接中宣称永久幂等。

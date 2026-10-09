@@ -10,6 +10,7 @@ const required = {
   articles: ['last_body_status', 'verified_source_url', 'last_body_retry'],
 };
 const xhsMigration = '20261009050000_add_xhs_local_archive';
+const groupsMigration = '20261009063000_add_management_groups';
 const xhsRequired = {
   xhs_creators: [
     'id',
@@ -126,6 +127,11 @@ function inspectConnection(
   const requiredTables = expected.has(xhsMigration)
     ? { ...required, ...xhsRequired }
     : required;
+  if (expected.has(groupsMigration)) {
+    requiredTables.management_groups = ['id', 'name', 'platform'];
+    requiredTables.feeds = [...requiredTables.feeds, 'group_id'];
+    requiredTables.xhs_creators = [...requiredTables.xhs_creators, 'group_id'];
+  }
   for (const [table, requiredColumns] of Object.entries(requiredTables)) {
     const columns = connection
       .prepare(`PRAGMA table_info(${quote(table)})`)

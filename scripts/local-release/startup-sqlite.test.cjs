@@ -249,3 +249,25 @@ for (const damage of ['both tables', 'notes table', 'content column']) {
     );
   });
 }
+
+for (const damage of ['group table', 'feed membership', 'creator membership']) {
+  test(`complete migration records cannot hide missing management ${damage}`, (t) => {
+    const f = fixture(t, { current: true });
+    const db = new sqlite.DatabaseSync(f.database);
+    if (damage === 'group table') db.exec('DROP TABLE management_groups');
+    else {
+      const table = damage === 'feed membership' ? 'feeds' : 'xhs_creators';
+      db.exec(`DROP INDEX ${table}_group_id_idx`);
+      db.exec(`ALTER TABLE ${table} DROP COLUMN group_id`);
+    }
+    db.close();
+    assert.throws(
+      () => inspectDatabase(f.database, f.migrations, { schemaOnly: true }),
+      /Required column missing/,
+    );
+    assert.throws(
+      () => pythonInspect(f.database, f.migrations),
+      /Required (table|management group column) missing/,
+    );
+  });
+}

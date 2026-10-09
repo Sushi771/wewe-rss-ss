@@ -16,6 +16,8 @@ XHS_COLUMNS = {
     "xhs_creators": ["id", "profile_url", "display_name", "external_author_id", "enabled", "last_status", "last_checked_at", "created_at"],
     "xhs_notes": ["id", "creator_id", "title", "publish_time", "status", "content_html"],
 }
+GROUPS_MIGRATION = "20261009063000_add_management_groups"
+GROUP_COLUMNS = ["id", "name", "platform"]
 
 
 def digest(value):
@@ -64,12 +66,19 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
     required_tables = ["feeds", "articles"]
     if XHS_MIGRATION in applied or (baseline and any(table in baseline["tables"] for table in XHS_COLUMNS)):
         required_tables.extend(XHS_COLUMNS)
+    groups_applied = GROUPS_MIGRATION in applied
+    if groups_applied or (baseline and "management_groups" in baseline["tables"]):
+        required_tables.append("management_groups")
     for table in required_tables:
         columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
         if not columns:
             raise ValueError("Required table missing: " + table)
         if table in XHS_COLUMNS and not set(XHS_COLUMNS[table]).issubset(columns):
             raise ValueError("Required XHS columns missing: " + table)
+        if table == "management_groups" and not set(GROUP_COLUMNS).issubset(columns):
+            raise ValueError("Required management group columns missing")
+        if groups_applied and table in ("feeds", "xhs_creators") and "group_id" not in columns:
+            raise ValueError("Required management group column missing: " + table)
         previous = baseline["tables"].get(table) if baseline else None
         protected = previous["columns"] if previous else columns
         if not set(protected).issubset(columns):
@@ -85,7 +94,10 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
             raise ValueError("迁移改变了已有字段: " + table)
         if baseline and not previous and tables[table]["rows"] != 0:
             raise ValueError("New archive table must be empty after migration: " + table)
-        for column in NEW_COLUMNS.get(table, []):
+        new_columns = list(NEW_COLUMNS.get(table, []))
+        if groups_applied and table in ("feeds", "xhs_creators"):
+            new_columns.append("group_id")
+        for column in new_columns:
             if require_current and column not in columns:
                 raise ValueError("缺少新列: " + column)
             if baseline and column not in protected and column in columns:

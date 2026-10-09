@@ -58,11 +58,12 @@ test.after(() => {
   https.request = originalRequest;
 });
 
-function makeSourceDb(file) {
+function makeSourceDb(file, { groups = true } = {}) {
   const db = new DatabaseSync(file);
   try {
     const migrations = path.join(ROOT, 'apps/server/prisma/migrations');
     for (const name of fs.readdirSync(migrations).sort()) {
+      if (!groups && name === '20261009063000_add_management_groups') continue;
       const sqlFile = path.join(migrations, name, 'migration.sql');
       if (fs.existsSync(sqlFile)) db.exec(fs.readFileSync(sqlFile, 'utf8'));
     }
@@ -108,6 +109,17 @@ function makeSourceDb(file) {
       'available',
       '<p>Unchanged XHS body</p>',
     );
+    if (groups) {
+      db.prepare(
+        'INSERT INTO management_groups(id,name,platform) VALUES(?,?,?)',
+      ).run('synthetic-wechat-folder', 'Synthetic Wechat', 'wechat');
+      db.prepare(
+        'INSERT INTO management_groups(id,name,platform) VALUES(?,?,?)',
+      ).run('synthetic-xhs-folder', 'Synthetic XHS', 'xiaohongshu');
+      db.exec(
+        "UPDATE feeds SET group_id='synthetic-wechat-folder'; UPDATE xhs_creators SET group_id='synthetic-xhs-folder'",
+      );
+    }
   } finally {
     db.close();
   }
@@ -173,6 +185,11 @@ async function withRehearsal(fn) {
 test('commits exactly one inlined article after a named fresh copy rehearsal and preserves all old tables', async () => {
   await withRehearsal(async (options) => {
     const before = readSnapshot(options.sourceDb);
+    assert.equal(before.tables.management_groups.rows.length, 2);
+    assert.equal(
+      before.tables.feeds.rows[0].group_id,
+      'synthetic-wechat-folder',
+    );
     assert.equal(before.tables.xhs_creators.rows.length, 1);
     assert.equal(
       before.tables.xhs_notes.rows[0].content_html,
@@ -229,7 +246,8 @@ test('snapshots the legacy schema and rejects unknown or incomplete additive tab
   const file = path.join(dir, 'source.db');
   let db;
   try {
-    makeSourceDb(file);
+    makeSourceDb(file, { groups: false });
+    assert.equal(Object.keys(readSnapshot(file).tables).length, 6);
     db = new DatabaseSync(file);
     db.exec('DROP TABLE xhs_notes; DROP TABLE xhs_creators');
     assert.deepEqual(Object.keys(readSnapshot(file).tables), [
@@ -241,6 +259,8 @@ test('snapshots the legacy schema and rejects unknown or incomplete additive tab
     db.exec('CREATE TABLE unknown_table (id TEXT)');
     assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
     db.exec('DROP TABLE unknown_table; CREATE TABLE xhs_creators (id TEXT)');
+    assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+    db.exec('DROP TABLE xhs_creators; CREATE TABLE management_groups(id TEXT)');
     assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
   } finally {
     if (db) db.close();
@@ -256,6 +276,27 @@ test('rejects XHS cache drift since rehearsal without importing the article', as
       db.prepare('UPDATE xhs_notes SET content_html=? WHERE id=?').run(
         '<p>Changed cached note</p>',
         'synthetic-note',
+      );
+    } finally {
+      db.close();
+    }
+    options.expectedSourceSha256 = sha256(fs.readFileSync(options.sourceDb));
+    const before = readSnapshot(options.sourceDb);
+    await assert.rejects(
+      runOneArticleImport(options),
+      /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+    );
+    assert.deepEqual(readSnapshot(options.sourceDb), before);
+  });
+});
+
+test('rejects local folder drift since rehearsal without importing the article', async () => {
+  await withRehearsal(async (options) => {
+    const db = new DatabaseSync(options.sourceDb);
+    try {
+      db.prepare('UPDATE management_groups SET name=? WHERE id=?').run(
+        'Changed folder',
+        'synthetic-xhs-folder',
       );
     } finally {
       db.close();
