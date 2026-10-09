@@ -91,6 +91,23 @@ function makeSourceDb(file) {
       '<p>Old body stays intact</p>',
       'available',
     );
+    db.prepare(
+      'INSERT INTO xhs_creators (id, profile_url, display_name) VALUES (?, ?, ?)',
+    ).run(
+      'synthetic-creator',
+      'https://www.xiaohongshu.com/synthetic-profile',
+      'Synthetic creator',
+    );
+    db.prepare(
+      'INSERT INTO xhs_notes (id, creator_id, title, publish_time, status, content_html) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(
+      'synthetic-note',
+      'synthetic-creator',
+      'Synthetic cached note',
+      1700000000,
+      'available',
+      '<p>Unchanged XHS body</p>',
+    );
   } finally {
     db.close();
   }
@@ -156,6 +173,11 @@ async function withRehearsal(fn) {
 test('commits exactly one inlined article after a named fresh copy rehearsal and preserves all old tables', async () => {
   await withRehearsal(async (options) => {
     const before = readSnapshot(options.sourceDb);
+    assert.equal(before.tables.xhs_creators.rows.length, 1);
+    assert.equal(
+      before.tables.xhs_notes.rows[0].content_html,
+      '<p>Unchanged XHS body</p>',
+    );
     const result = await runOneArticleImport(options);
     assert.equal(result.created, 1);
     assert.equal(result.updated, 0);
@@ -199,6 +221,52 @@ test('commits exactly one inlined article after a named fresh copy rehearsal and
       }),
       /SOURCE_DRIFTED_SINCE_REHEARSAL|SOURCE_IDENTITY_PREFLIGHT_FAILED/,
     );
+  });
+});
+
+test('snapshots the legacy schema and rejects unknown or incomplete additive tables', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-image-schema-test-'));
+  const file = path.join(dir, 'source.db');
+  let db;
+  try {
+    makeSourceDb(file);
+    db = new DatabaseSync(file);
+    db.exec('DROP TABLE xhs_notes; DROP TABLE xhs_creators');
+    assert.deepEqual(Object.keys(readSnapshot(file).tables), [
+      '_prisma_migrations',
+      'accounts',
+      'articles',
+      'feeds',
+    ]);
+    db.exec('CREATE TABLE unknown_table (id TEXT)');
+    assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+    db.exec('DROP TABLE unknown_table; CREATE TABLE xhs_creators (id TEXT)');
+    assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+  } finally {
+    if (db) db.close();
+    assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects XHS cache drift since rehearsal without importing the article', async () => {
+  await withRehearsal(async (options) => {
+    const db = new DatabaseSync(options.sourceDb);
+    try {
+      db.prepare('UPDATE xhs_notes SET content_html=? WHERE id=?').run(
+        '<p>Changed cached note</p>',
+        'synthetic-note',
+      );
+    } finally {
+      db.close();
+    }
+    options.expectedSourceSha256 = sha256(fs.readFileSync(options.sourceDb));
+    const before = readSnapshot(options.sourceDb);
+    await assert.rejects(
+      runOneArticleImport(options),
+      /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+    );
+    assert.deepEqual(readSnapshot(options.sourceDb), before);
   });
 });
 
