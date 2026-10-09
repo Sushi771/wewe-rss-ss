@@ -137,3 +137,135 @@ test('enabled owner search scheduling uses the normal route without a relay key'
     false,
   );
 });
+
+const wechat2Rss = {
+  enabled: '1',
+  wechat2RssEnabled: '1',
+  wechat2RssBaseUrl: 'http://127.0.0.1:18080/',
+  wechat2RssToken: 'synthetic-only',
+  wechat2RssFeeds: [{ ...feed, collectionChannel: 'wechat2rss' }],
+};
+
+test('Wechat2RSS scheduling requires explicit flags, private config and an enabled binding', () => {
+  assert.equal(scheduledUpdatesEnabled(manifest, wechat2Rss), true);
+  for (const change of [
+    { enabled: undefined },
+    { enabled: '0' },
+    { wechat2RssEnabled: undefined },
+    { wechat2RssEnabled: '0' },
+    { wechat2RssBaseUrl: undefined },
+    { wechat2RssToken: '' },
+    { wechat2RssToken: 'x'.repeat(513) },
+    { wechat2RssFeeds: [] },
+    {
+      wechat2RssFeeds: [
+        { ...feed, status: 0, collectionChannel: 'wechat2rss' },
+      ],
+    },
+    {
+      wechat2RssFeeds: [
+        { ...feed, id: 'invalid', collectionChannel: 'wechat2rss' },
+      ],
+    },
+    {
+      wechat2RssFeeds: [{ ...feed, collectionChannel: 'owner-weread-latest' }],
+    },
+    { wechat2RssFeeds: [{ ...feed, collectionChannel: 'unavailable' }] },
+  ])
+    assert.equal(
+      scheduledUpdatesEnabled(manifest, { ...wechat2Rss, ...change }),
+      false,
+    );
+  for (const change of [
+    { schemaCompatibility: 'legacy-additive' },
+    { desktopHelperIncluded: true },
+  ])
+    assert.equal(
+      scheduledUpdatesEnabled({ ...manifest, ...change }, wechat2Rss),
+      false,
+    );
+});
+
+test('Wechat2RSS runtime config uses the existing private Provider URL contract', () => {
+  for (const address of [
+    'http://localhost:18080/',
+    'http://wechat2rss/',
+    'http://[::1]:18080/',
+    'https://10.0.0.2/',
+    'http://192.168.1.2/',
+    'http://172.16.1.2/',
+    'http://172.31.1.2/',
+  ])
+    assert.equal(
+      scheduledUpdatesEnabled(manifest, {
+        ...wechat2Rss,
+        wechat2RssBaseUrl: address,
+      }),
+      true,
+    );
+  for (const address of [
+    'invalid',
+    'https://example.invalid/',
+    'http://8.8.8.8/',
+    'file:///private',
+    'http://172.15.1.2/',
+    'http://172.32.1.2/',
+    'http://user:pass@localhost/',
+    'http://localhost/private',
+    'http://localhost/?k=synthetic',
+    'http://localhost/#fragment',
+  ])
+    assert.equal(
+      scheduledUpdatesEnabled(manifest, {
+        ...wechat2Rss,
+        wechat2RssBaseUrl: address,
+      }),
+      false,
+    );
+});
+
+test('environment allowlist selects only unbound feeds and never overrides a saved source', () => {
+  const unbound = { ...feed, collectionChannel: null, publicAlbumIds: null };
+  const settings = { ...wechat2Rss, wechat2RssFeeds: [unbound] };
+  assert.equal(scheduledUpdatesEnabled(manifest, settings), false);
+  assert.equal(
+    scheduledUpdatesEnabled(manifest, {
+      ...settings,
+      wechat2RssFeedIds: `invalid, ${feed.id}`,
+    }),
+    true,
+  );
+  for (const publicAlbumIds of [feed.publicAlbumIds, 'invalid'])
+    assert.equal(
+      scheduledUpdatesEnabled(manifest, {
+        ...settings,
+        wechat2RssFeedIds: feed.id,
+        wechat2RssFeeds: [{ ...unbound, publicAlbumIds }],
+      }),
+      false,
+    );
+  for (const collectionChannel of [
+    'public-album',
+    'owner-web-search',
+    'unavailable',
+  ])
+    assert.equal(
+      scheduledUpdatesEnabled(manifest, {
+        ...settings,
+        wechat2RssFeedIds: feed.id,
+        wechat2RssFeeds: [{ ...unbound, collectionChannel }],
+      }),
+      false,
+    );
+});
+
+test('invalid Wechat2RSS settings do not suppress a separately enabled native source', () => {
+  assert.equal(
+    scheduledUpdatesEnabled(manifest, {
+      ...wechat2Rss,
+      wechat2RssEnabled: '0',
+      publicAlbumFeeds: [feed],
+    }),
+    true,
+  );
+});
