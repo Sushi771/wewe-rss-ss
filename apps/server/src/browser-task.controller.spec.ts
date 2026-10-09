@@ -276,7 +276,7 @@ describe('offline browser completion → existing authorized save and image expo
       }
     });
     const completed = await post('complete', payload);
-    expect(completionError).toBeUndefined();
+    if (completionError) throw completionError;
     expect(completed.body).toEqual({ accepted: true });
     expect((await task.result).contentHtml).toContain(large.images[0].inline);
   }, 60000);
