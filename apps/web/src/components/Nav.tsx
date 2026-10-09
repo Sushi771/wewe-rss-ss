@@ -22,6 +22,10 @@ const navbarItemLink = [
     name: '公众号源',
   },
   {
+    href: '/xiaohongshu',
+    name: '小红书',
+  },
+  {
     href: '/tools',
     name: '工具',
   },

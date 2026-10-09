@@ -1,6 +1,7 @@
 import { buildArticleMarkdown } from '../article-export';
 import { findArticleListRows } from '../article-list-page';
-import { INestApplication, Injectable, Logger } from '@nestjs/common';
+import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
+import { XiaohongshuService } from '../collection/xiaohongshu.service';
 import { z } from 'zod';
 import {
   AccountSchemas,
@@ -86,7 +87,14 @@ export class TrpcRouter {
     private readonly configService: ConfigService,
     private readonly wereadService: WereadService,
     private readonly collectionService: CollectionService,
+    @Optional() private readonly xiaohongshuService?: XiaohongshuService,
   ) {}
+
+  private get xhs() {
+    return (
+      this.xiaohongshuService ?? new XiaohongshuService(this.prismaService)
+    );
+  }
 
   private readonly logger = new Logger(this.constructor.name);
 
@@ -1172,12 +1180,61 @@ export class TrpcRouter {
       }),
   });
 
+  xiaohongshuRouter = this.trpcService.router({
+    capability: this.trpcService.protectedProcedure.query(() =>
+      this.xhs.capability(),
+    ),
+    list: this.trpcService.protectedProcedure.query(() => this.xhs.list()),
+    add: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            displayName: z.string().trim().min(1).max(120),
+            profileUrl: z.string().max(2000),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) =>
+        this.xhs.add(input.displayName, input.profileUrl),
+      ),
+    edit: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ id: z.string().min(1).max(128), enabled: z.boolean() })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhs.edit(input.id, input.enabled)),
+    remove: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.remove(input.id)),
+    notes: this.trpcService.protectedProcedure
+      .input(z.object({ creatorId: z.string().min(1).max(128) }).strict())
+      .query(({ input }) => this.xhs.notes(input.creatorId)),
+    body: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteId: z.string().min(1).max(300),
+          })
+          .strict(),
+      )
+      .query(({ input }) => this.xhs.body(input.creatorId, input.noteId)),
+    refresh: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.refresh(input.id)),
+    export: this.trpcService.protectedProcedure
+      .input(z.object({ creatorId: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.export(input.creatorId)),
+  });
+
   appRouter = this.trpcService.router({
     feed: this.feedRouter,
     account: this.accountRouter,
     article: this.articleRouter,
     platform: this.platformRouter,
     collection: this.collectionRouter,
+    xiaohongshu: this.xiaohongshuRouter,
   });
 
   async applyMiddleware(app: INestApplication) {

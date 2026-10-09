@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SUBSCRIPTION_DISCOVERY } from '../collection/subscription-add';
 import { createNativeSubscriptionDiscovery } from '../collection/subscription-native-adapter';
 import { resolveWereadPublisherOriginal } from '../collection/weread-public-original';
+import { XiaohongshuService } from '../collection/xiaohongshu.service';
 
 @Module({
   imports: [PrismaModule, WereadModule],
@@ -16,6 +17,7 @@ import { resolveWereadPublisherOriginal } from '../collection/weread-public-orig
     TrpcService,
     TrpcRouter,
     CollectionService,
+    XiaohongshuService,
     {
       provide: SUBSCRIPTION_DISCOVERY,
       inject: [PrismaService, CollectionService],

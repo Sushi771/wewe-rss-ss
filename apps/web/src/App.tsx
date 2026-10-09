@@ -6,6 +6,7 @@ import { BaseLayout } from './layouts/base';
 import { TrpcProvider } from './provider/trpc';
 import ThemeProvider from './provider/theme';
 import ArticleDownload from './pages/tools/article-download';
+import Xiaohongshu from './pages/feeds/xiaohongshu';
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
             <Route path="/" element={<BaseLayout />}>
               <Route index element={<Feeds />} />
               <Route path="/feeds/:id?" element={<Feeds />} />
+              <Route path="/xiaohongshu" element={<Xiaohongshu />} />
               <Route path="/accounts" element={<Accounts />} />
               <Route path="/tools" element={<ArticleDownload />} />
               <Route

@@ -65,3 +65,32 @@ model Article {
 
   @@map("articles")
 }
+
+// Local pending creators are separate from trusted upstream author identities.
+// No WeChat Feed/Article ID or relation is changed by these additive tables.
+model XhsCreator {
+  id               String    @id @default(cuid())
+  profileUrl       String    @unique @map("profile_url")
+  displayName      String    @map("display_name")
+  externalAuthorId String?   @unique @map("external_author_id")
+  enabled          Boolean   @default(true)
+  lastStatus       String    @default("pending") @map("last_status")
+  lastCheckedAt    Int       @default(0) @map("last_checked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  notes            XhsNote[]
+
+  @@map("xhs_creators")
+}
+
+model XhsNote {
+  id          String     @id
+  creatorId   String     @map("creator_id")
+  title       String
+  publishTime Int        @map("publish_time")
+  status      String
+  contentHtml String?    @map("content_html")
+  creator     XhsCreator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@index([creatorId, publishTime])
+  @@map("xhs_notes")
+}
