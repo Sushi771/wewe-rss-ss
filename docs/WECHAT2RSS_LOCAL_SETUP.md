@@ -41,6 +41,29 @@ node scripts/acceptance-wechat2rss.cjs --deployment-config
 
 模板使用此前核对的固定镜像 digest，不能把它称为当前最新版本。获得私有实例启动及持久连接批准后，再核镜像、启动、由用户完成登录。今天推迟密钥输入时，不执行启动或激活命令。
 
+## 填写后实际开测的顺序
+
+**填授权信息后可开始配置核对，不能直接认定原刷新已就绪。** 现有 Compose 和 Provider 已提供具体启动、读取路径；仍须 Docker 引擎可用、固定镜像可取得、私有实例首次激活及用户正常登录。授权码不会替代账号登录，也不会自动给旧订阅绑定新来源。
+
+1. 先运行上面的 `--deployment-config`；不启动 Docker、不联网。
+2. 在正常 Docker Desktop 会话确认引擎可用，并在实例启动/持久连接已获授权后，由 owner 核既有数据目录及固定镜像。项目根目录的启动入口为下面命令；它可能拉取镜像并执行供应商激活，本轮只列入口，没有运行：
+
+   ```powershell
+   docker compose -f docker-compose.wechat2rss.yml up -d wechat2rss
+   ```
+
+3. 本机打开 `http://127.0.0.1:18080/`，使用已有本地 `RSS_TOKEN` 登录服务，由用户在实例的正常账号入口完成登录。不要从旧 WeWe 或浏览器复制认证秘密；官方[部署说明](https://wechat2rss.xlab.app/deploy/deploy)和[使用说明](https://wechat2rss.xlab.app/deploy/guide)分别说明启动及账号登录。
+4. 第一条最小联网验收不需要公众号 ID，也不需要启用 WeWe 来源：
+
+   ```powershell
+   node scripts/acceptance-wechat2rss.cjs --account-only
+   ```
+
+   它仅经已有 Provider 查询本机私有实例 `/login/list`，输出可用/受限布尔值，不读订阅列表、正文、query/RSS，不提交新增/刷新任务或写库。不可用、认证错误或受限即停止，不能与 `--execute` 或 `--deployment-config` 混用。账号可用仍不证明取文成功。
+
+5. 用户按正常实例入口添加一个已确认公众号后，取返回的真实稳定 ID，再运行 `node scripts/acceptance-wechat2rss.cjs --execute MP_WXS_<真实数字ID>`。该阶段只读缓存，不提交 `/add`；ID 未知时不猜。首次真实更新可能尚在实例异步任务中，读取到空缓存不能当作订阅完成。
+6. 通过真实正文/图片检查后，才在隔离副本核对目标绑定和 `WECHAT2RSS_ENABLED=1`，通过原手动刷新入口验收去重与旧数据保护。旧订阅须按已核 ID 显式绑定或 allowlist；候选源码的这些能力不会凭填写配置自动进入旧生产包。生产切换另做备份及副本演练，定时开关保持关闭。
+
 ## 仍待真实验收
 
 发布运行器已补齐 Wechat2RSS 的定时门禁：必须同时显式设置 `ENABLE_SCHEDULED_UPDATES=1`、`WECHAT2RSS_ENABLED=1`，具备有效私有地址和服务密码，以及启用的来源绑定，才允许该来源参加定时更新。已有其他来源的绑定不会被环境 allowlist 覆盖。今天保持定时关闭；完成真实验收后再单独处理启用和受控部署。

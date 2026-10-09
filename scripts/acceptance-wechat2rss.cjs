@@ -35,6 +35,7 @@ try {
 
 const feedId = process.argv.find((value) => /^MP_WXS_\d{5,15}$/.test(value));
 const execute = process.argv.includes('--execute');
+const accountOnly = process.argv.includes('--account-only');
 const deploymentConfigOnly = process.argv.includes('--deployment-config');
 const configured = {
   baseUrl: Boolean(process.env.WECHAT2RSS_BASE_URL),
@@ -72,6 +73,7 @@ const boundedJson = async (url, token) =>
 const safeErrorCodes = new Set([
   'PRIVATE_CONFIG_READ_FAILED',
   'CONFIG_CHECK_ONLY_ARGUMENT_CONFLICT',
+  'PREFLIGHT_MODE_ARGUMENT_CONFLICT',
   'PRIVATE_INSTANCE_CONFIG_INCOMPLETE',
   'SERVER_BUILD_REQUIRED',
   'ACCOUNT_UNAVAILABLE',
@@ -161,8 +163,10 @@ function deploymentConfig(configCheck) {
 
 async function main() {
   if (privateConfigReadFailed) throw new Error('PRIVATE_CONFIG_READ_FAILED');
-  if (deploymentConfigOnly && execute)
+  if (deploymentConfigOnly && (execute || accountOnly))
     throw new Error('CONFIG_CHECK_ONLY_ARGUMENT_CONFLICT');
+  if (accountOnly && execute)
+    throw new Error('PREFLIGHT_MODE_ARGUMENT_CONFLICT');
   let provider;
   let configCode = 'PRIVATE_INSTANCE_CONFIG_INCOMPLETE';
   if (configured.baseUrl && configured.token) {
@@ -203,7 +207,7 @@ async function main() {
     if (!deployment.consistent) process.exitCode = 1;
     return;
   }
-  if (!execute) {
+  if (!execute && !accountOnly) {
     console.log(
       JSON.stringify({
         mode: 'preflight-only',
@@ -211,7 +215,7 @@ async function main() {
         configCheck,
         appEnabled: process.env.WECHAT2RSS_ENABLED === '1',
         next: configCheck.valid
-          ? '私有实例完成授权、扫码并添加目标号后，使用 --execute MP_WXS_<数字ID> 执行只读联调；无需启用应用采集。'
+          ? '私有实例完成授权、扫码后先使用 --account-only 只查登录状态；添加已确认目标号后，再使用 --execute MP_WXS_<数字ID> 读取缓存；无需启用应用采集。'
           : configCode === 'SERVER_BUILD_REQUIRED'
             ? '先构建后端，再重新执行默认配置预检；本次没有联网。'
             : '先修正本机私有配置，再重新执行默认配置预检；本次没有联网。',
@@ -221,12 +225,24 @@ async function main() {
     return;
   }
   if (!configCheck.valid) throw new Error(configCode);
-  if (!feedId) throw new Error('PRIVATE_INSTANCE_CONFIG_INCOMPLETE');
+  if (!feedId && !accountOnly)
+    throw new Error('PRIVATE_INSTANCE_CONFIG_INCOMPLETE');
   const account = await provider.checkAccountStatus();
   if (!account.available)
     throw new Error(
       account.challenged ? 'ACCOUNT_CHALLENGED' : 'ACCOUNT_UNAVAILABLE',
     );
+  if (accountOnly) {
+    console.log(
+      JSON.stringify({
+        mode: 'account-only',
+        available: account.available === true,
+        challenged: account.challenged === true,
+        note: '仅查询私有实例登录状态；未添加订阅、请求目录/正文或写库，不启用应用来源。',
+      }),
+    );
+    return;
+  }
   const listed = (await provider.listSubscriptions()).filter(
     (item) => item.feedId === feedId,
   );

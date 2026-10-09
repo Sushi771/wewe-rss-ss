@@ -37,6 +37,16 @@ node scripts/prepare-xhs-self-hosted.cjs --check-config
 
 输出只含是否配置和固定错误码，不输出地址或 Key。缺少构建返回 `SERVER_BUILD_REQUIRED`，私有文件不可读返回 `XHS_PREPARATION_CONFIG_READ_FAILED`。本轮只用合成配置回归，没有读取实际私有配置。即使格式有效，`sourceReviewed/verifiedBodySource/canRefresh` 始终为 `false`；它尚未接线到实际 Provider，填 Key 不会自行恢复订阅。
 
+## 测试就绪边界
+
+**目前不能只填 Key 就触发小红书真实取文。** 上述检查器仅处理 WeWe 候选配置，没有供应商网络执行模式；本地地址门禁只接受 loopback HTTP(S)，不能把官方试用远端地址随意填成已审查本机实例。
+
+运行时 `XiaohongshuService.capability()` 的 `canRefresh` 取决于是否注入 `XHS_SOURCE`；当前 `TrpcModule` 未注册该来源，单篇 `XHS_SINGLE_SOURCE` 也未注册。候选解析器自身固定返回 `canRefresh:false`，并未被应用加载来创建 Provider。这不是待用户勾选的开关，也不能改布尔值就变成可执行适配器。
+
+仍缺实际 Web＋蒲公英实例或同产品试用 API 的可执行合同：服务地址、鉴权、作者列表/分页、完整详情及媒体响应；还缺按该合同实现的供应商薄适配与注册。源码自部署分支还需要实际交付包、Dockerfile/Compose、版本/构建审查和正常账号条件。现有项目没有可执行的 Rnote Compose 或供应商 Provider，因此本说明不提供猜测的启动/请求命令。
+
+明天第一步可正常核对同产品试用说明及 Key 的用途；WeWe 第一条安全检查仍是 `--check-config`，它不会消耗试用额度。实际合同可用且薄适配完成后，第一条真实测试应只读取一个已确认博主前三篇，经当前内部合同核验身份/时间、完整图文和媒体。当前尚无可以直接执行这一供应商请求的脚本。试用、源码部署以及 WeWe 正式接入分别记录，不能把官网试用可用当成已接回原刷新。
+
 此阶段不创建或填写持久密钥，不执行供应商代码、不启动实例或注册真实来源。收到实际包和文档后，先按包内合同核对配置及受支持启动方式，再由 owner 安排必要授权、薄适配及离线请求/字段回归；没有完整响应证据时保持未接入。复用已有[内部后端合同](BACKEND_CONTRACT.md)和[本机归档接缝](../XIAOHONGSHU_INTEGRATION.md)，不重写已经完成的保存器。
 
 ## 收包后的最小真实验收

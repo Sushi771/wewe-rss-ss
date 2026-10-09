@@ -97,6 +97,7 @@ describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
   it.each([
     { args: [] },
     { args: ['--deployment-config'] },
+    { args: ['--account-only'] },
     { args: ['--execute', 'MP_WXS_1234567890'] },
   ])(
     'stops safely when application config cannot be read (args=%j)',
@@ -189,6 +190,93 @@ describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
     );
     expect(result.processState.env.WECHAT2RSS_ENABLED).toBe('0');
   });
+
+  it.each([false, true])(
+    'reads only account availability without a target (challenged=%s)',
+    async (challenged) => {
+      const account = jest
+        .spyOn(Wechat2RssProvider.prototype, 'checkAccountStatus')
+        .mockResolvedValue({
+          available: true,
+          challenged,
+          retryAfter: 'synthetic-private-upstream-value',
+        });
+      const list = jest.spyOn(
+        Wechat2RssProvider.prototype,
+        'listSubscriptions',
+      );
+      const articles = jest.spyOn(
+        Wechat2RssProvider.prototype,
+        'fetchArticles',
+      );
+      const add = jest.spyOn(Wechat2RssProvider.prototype, 'addSubscription');
+      const refresh = jest.spyOn(
+        Wechat2RssProvider.prototype,
+        'refreshSubscription',
+      );
+      const result = await preflight({}, ['--account-only']);
+      expect(result.errors).toEqual([]);
+      expect(result.logs[0]).toMatchObject({
+        mode: 'account-only',
+        available: true,
+        challenged,
+      });
+      expect(account).toHaveBeenCalledTimes(1);
+      for (const operation of [list, articles, add, refresh])
+        expect(operation).not.toHaveBeenCalled();
+      expect(result.processState.env.WECHAT2RSS_ENABLED).toBe('0');
+      expect(JSON.stringify(result.logs)).not.toMatch(
+        /synthetic-private|127\.0\.0\.1/,
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'stops unavailable account-only reads without a second call (challenged=%s)',
+    async (challenged) => {
+      const account = jest
+        .spyOn(Wechat2RssProvider.prototype, 'checkAccountStatus')
+        .mockResolvedValue({
+          available: false,
+          challenged,
+          retryAfter: undefined,
+        });
+      const list = jest.spyOn(
+        Wechat2RssProvider.prototype,
+        'listSubscriptions',
+      );
+      const result = await preflight({}, ['--account-only']);
+      expect(result.errors).toEqual([
+        challenged ? 'ACCOUNT_CHALLENGED' : 'ACCOUNT_UNAVAILABLE',
+      ]);
+      expect(result.processState.exitCode).toBe(1);
+      expect(account).toHaveBeenCalledTimes(1);
+      expect(list).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    {
+      args: ['--account-only', '--execute'],
+      code: 'PREFLIGHT_MODE_ARGUMENT_CONFLICT',
+    },
+    {
+      args: ['--account-only', '--deployment-config'],
+      code: 'CONFIG_CHECK_ONLY_ARGUMENT_CONFLICT',
+    },
+  ])(
+    'rejects mixed account-only modes without an upstream read: %j',
+    async ({ args, code }) => {
+      const account = jest.spyOn(
+        Wechat2RssProvider.prototype,
+        'checkAccountStatus',
+      );
+      const result = await preflight({}, args);
+      expect(result.errors).toEqual([code]);
+      expect(result.processState.exitCode).toBe(1);
+      expect(account).not.toHaveBeenCalled();
+    },
+  );
 
   const instance = (overrides: Record<string, string> = {}) =>
     Object.entries({
