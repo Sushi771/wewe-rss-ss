@@ -7,13 +7,16 @@ const fs = require('node:fs');
 // the same ignored file without starting the server or enabling collection.
 const serverRoot = path.resolve(__dirname, '../apps/server');
 const privateEnv = path.join(serverRoot, '.env.local');
-if (fs.existsSync(privateEnv)) {
+function readEnvFile(file) {
   const { createRequire } = require('node:module');
   const serverRequire = createRequire(path.join(serverRoot, 'package.json'));
   const parseEnv = createRequire(serverRequire.resolve('@nestjs/config'))(
     'dotenv',
   ).parse;
-  const values = parseEnv(fs.readFileSync(privateEnv));
+  return parseEnv(fs.readFileSync(file));
+}
+if (fs.existsSync(privateEnv)) {
+  const values = readEnvFile(privateEnv);
   for (const key of [
     'WECHAT2RSS_BASE_URL',
     'WECHAT2RSS_TOKEN',
@@ -26,6 +29,7 @@ if (fs.existsSync(privateEnv)) {
 
 const feedId = process.argv.find((value) => /^MP_WXS_\d{5,15}$/.test(value));
 const execute = process.argv.includes('--execute');
+const deploymentConfigOnly = process.argv.includes('--deployment-config');
 const configured = {
   baseUrl: Boolean(process.env.WECHAT2RSS_BASE_URL),
   token: Boolean(process.env.WECHAT2RSS_TOKEN),
@@ -60,6 +64,7 @@ const boundedJson = async (url, token) =>
   JSON.parse(await boundedText(url, token));
 // 只输出本项目已定义的固定安全码，不透传未知上游消息或凭据。
 const safeErrorCodes = new Set([
+  'CONFIG_CHECK_ONLY_ARGUMENT_CONFLICT',
   'PRIVATE_INSTANCE_CONFIG_INCOMPLETE',
   'SERVER_BUILD_REQUIRED',
   'ACCOUNT_UNAVAILABLE',
@@ -93,7 +98,63 @@ const errorCode = (error, fallback = 'UPSTREAM_FORMAT_UNVERIFIED') =>
     ? error.message
     : fallback;
 
+function deploymentConfig(configCheck) {
+  const file = path.resolve(serverRoot, '../../.env.wechat2rss');
+  const filePresent = fs.existsSync(file);
+  const values = filePresent ? readEnvFile(file) : {};
+  const fields = ['LIC_EMAIL', 'LIC_CODE', 'RSS_TOKEN', 'RSS_HOST'].map(
+    (name) => ({ name, present: Boolean(values[name]?.trim()) }),
+  );
+  const tokenMatches =
+    Boolean(values.RSS_TOKEN) &&
+    values.RSS_TOKEN === process.env.WECHAT2RSS_TOKEN;
+  const tokenIsLicenseCode =
+    Boolean(values.RSS_TOKEN) && values.RSS_TOKEN === values.LIC_CODE;
+  const emailLowercase =
+    Boolean(values.LIC_EMAIL) &&
+    values.LIC_EMAIL === values.LIC_EMAIL.toLowerCase();
+  let addressMatches = false;
+  try {
+    const expected = new URL(
+      `${values.RSS_HTTPS === '1' ? 'https' : 'http'}://${values.RSS_HOST}/`,
+    );
+    addressMatches =
+      expected.pathname === '/' &&
+      !expected.username &&
+      !expected.password &&
+      !expected.search &&
+      !expected.hash &&
+      expected.origin === new URL(process.env.WECHAT2RSS_BASE_URL).origin;
+  } catch {
+    // Configuration values and parse errors must never enter the output.
+  }
+  const code = !configCheck.valid
+    ? configCheck.code
+    : fields.some((field) => !field.present)
+      ? 'DEPLOYMENT_CONFIG_INCOMPLETE'
+      : !emailLowercase
+        ? 'DEPLOYMENT_EMAIL_CASE_INVALID'
+        : tokenIsLicenseCode
+          ? 'DEPLOYMENT_TOKEN_IS_LICENSE_CODE'
+          : !tokenMatches
+            ? 'DEPLOYMENT_TOKEN_MISMATCH'
+            : !addressMatches
+              ? 'DEPLOYMENT_ADDRESS_MISMATCH'
+              : 'DEPLOYMENT_CONFIG_CONSISTENT';
+  return {
+    consistent: code === 'DEPLOYMENT_CONFIG_CONSISTENT',
+    code,
+    filePresent,
+    fields,
+    tokenMatches,
+    addressMatches,
+    emailLowercase,
+  };
+}
+
 async function main() {
+  if (deploymentConfigOnly && execute)
+    throw new Error('CONFIG_CHECK_ONLY_ARGUMENT_CONFLICT');
   let provider;
   let configCode = 'PRIVATE_INSTANCE_CONFIG_INCOMPLETE';
   if (configured.baseUrl && configured.token) {
@@ -119,6 +180,21 @@ async function main() {
     }
   }
   const configCheck = { valid: Boolean(provider), code: configCode };
+  if (deploymentConfigOnly) {
+    const deployment = deploymentConfig(configCheck);
+    console.log(
+      JSON.stringify({
+        mode: 'deployment-config-only',
+        configured,
+        configCheck,
+        appEnabled: process.env.WECHAT2RSS_ENABLED === '1',
+        deploymentConfig: deployment,
+        note: '仅核本机两端配置一致性；未验证授权、账号、额度或图文，不启用采集。',
+      }),
+    );
+    if (!deployment.consistent) process.exitCode = 1;
+    return;
+  }
   if (!execute) {
     console.log(
       JSON.stringify({

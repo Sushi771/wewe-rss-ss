@@ -17,9 +17,12 @@ async function preflight(
   args: string[] = [],
   buildMissing = false,
   readFetch: typeof fetch = global.fetch,
+  instanceEnv?: string,
 ) {
   const logs: string[] = [];
   const errors: string[] = [];
+  const instancePath = path.resolve(__dirname, '../../../../.env.wechat2rss');
+  const filesRead: string[] = [];
   const processState = {
     env: { ...env, ...overrides },
     argv: ['node', 'synthetic-preflight', ...args],
@@ -40,7 +43,17 @@ async function preflight(
       AbortSignal,
       fetch: readFetch,
       require: (name: string) => {
-        if (name === 'node:fs') return { existsSync: () => false };
+        if (name === 'node:fs')
+          return {
+            existsSync: (file: string) =>
+              file === instancePath && instanceEnv !== undefined,
+            readFileSync: (file: string) => {
+              if (file !== instancePath || instanceEnv === undefined)
+                throw new Error('UNEXPECTED_PRIVATE_FILE_READ');
+              filesRead.push(file);
+              return Buffer.from(instanceEnv);
+            },
+          };
         if (name.endsWith('wechat2rss.js')) {
           if (buildMissing) throw new Error('synthetic-build-missing');
           return { Wechat2RssProvider };
@@ -50,7 +63,12 @@ async function preflight(
     },
     { timeout: 1000 },
   );
-  return { logs: logs.map((value) => JSON.parse(value)), errors, processState };
+  return {
+    logs: logs.map((value) => JSON.parse(value)),
+    errors,
+    processState,
+    filesRead,
+  };
 }
 
 describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
@@ -80,6 +98,126 @@ describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
       /127\.0\.0\.1|synthetic-private-token/,
     );
     expect(result.processState.env.WECHAT2RSS_ENABLED).toBe('0');
+  });
+
+  const instance = (overrides: Record<string, string> = {}) =>
+    Object.entries({
+      LIC_EMAIL: 'synthetic-owner@example.test',
+      LIC_CODE: 'synthetic-license-code',
+      RSS_TOKEN: 'synthetic-private-token',
+      RSS_HOST: '127.0.0.1:18080',
+      ...overrides,
+    })
+      .map(([key, value]) => `${key}=${value}`)
+      .join('\n');
+
+  it('checks the two local configs without contacting or enabling the instance', async () => {
+    const account = jest.spyOn(
+      Wechat2RssProvider.prototype,
+      'checkAccountStatus',
+    );
+    const result = await preflight(
+      {},
+      ['--deployment-config'],
+      false,
+      global.fetch,
+      instance(),
+    );
+    expect(result.logs[0]).toMatchObject({
+      mode: 'deployment-config-only',
+      appEnabled: false,
+      deploymentConfig: {
+        consistent: true,
+        code: 'DEPLOYMENT_CONFIG_CONSISTENT',
+        filePresent: true,
+        tokenMatches: true,
+        addressMatches: true,
+      },
+    });
+    expect(result.filesRead).toHaveLength(1);
+    expect(account).not.toHaveBeenCalled();
+    expect(result.processState.env.WECHAT2RSS_ENABLED).toBe('0');
+    expect(JSON.stringify(result.logs)).not.toMatch(
+      /synthetic-owner|example\.test|synthetic-license-code|synthetic-private-token|127\.0\.0\.1/,
+    );
+  });
+
+  it.each([
+    [{ RSS_TOKEN: 'synthetic-other-token' }, 'DEPLOYMENT_TOKEN_MISMATCH'],
+    [{ RSS_HOST: '127.0.0.1:18081' }, 'DEPLOYMENT_ADDRESS_MISMATCH'],
+    [{ RSS_HTTPS: '1' }, 'DEPLOYMENT_ADDRESS_MISMATCH'],
+    [{ LIC_EMAIL: 'Synthetic@example.test' }, 'DEPLOYMENT_EMAIL_CASE_INVALID'],
+    [{ LIC_CODE: '' }, 'DEPLOYMENT_CONFIG_INCOMPLETE'],
+  ] as const)(
+    'detects a local config mismatch without exposing values: %s',
+    async (bad, code) => {
+      const result = await preflight(
+        {},
+        ['--deployment-config'],
+        false,
+        global.fetch,
+        instance(bad),
+      );
+      expect(result.logs[0].deploymentConfig).toMatchObject({
+        consistent: false,
+        code,
+      });
+      expect(result.processState.exitCode).toBe(1);
+      expect(JSON.stringify(result.logs)).not.toMatch(
+        /synthetic-other-token|Synthetic@|synthetic-license-code|synthetic-private-token|127\.0\.0\.1/,
+      );
+    },
+  );
+
+  it('reports an absent instance file and rejects copying a license as the service password', async () => {
+    const absent = await preflight({}, ['--deployment-config']);
+    expect(absent.logs[0].deploymentConfig).toMatchObject({
+      consistent: false,
+      code: 'DEPLOYMENT_CONFIG_INCOMPLETE',
+      filePresent: false,
+    });
+    const reused = await preflight(
+      { WECHAT2RSS_TOKEN: 'synthetic-license-code' },
+      ['--deployment-config'],
+      false,
+      global.fetch,
+      instance({ RSS_TOKEN: 'synthetic-license-code' }),
+    );
+    expect(reused.logs[0].deploymentConfig.code).toBe(
+      'DEPLOYMENT_TOKEN_IS_LICENSE_CODE',
+    );
+  });
+
+  it('requires the existing Provider format/build check for config consistency', async () => {
+    const result = await preflight(
+      {},
+      ['--deployment-config'],
+      true,
+      global.fetch,
+      instance(),
+    );
+    expect(result.logs[0].deploymentConfig).toMatchObject({
+      consistent: false,
+      code: 'SERVER_BUILD_REQUIRED',
+    });
+  });
+
+  it('rejects execute mixed with local deployment checking before any platform call', async () => {
+    const result = await preflight(
+      {},
+      ['--deployment-config', '--execute', 'MP_WXS_1234567890'],
+      false,
+      global.fetch,
+      instance(),
+    );
+    expect(result.errors).toEqual(['CONFIG_CHECK_ONLY_ARGUMENT_CONFLICT']);
+    expect(result.processState.exitCode).toBe(1);
+  });
+
+  it('retains default preflight scope without reading the instance license file', async () => {
+    const result = await preflight({}, [], false, global.fetch, instance());
+    expect(result.logs[0].mode).toBe('preflight-only');
+    expect(result.filesRead).toEqual([]);
   });
 
   it.each<Record<string, string>>([
