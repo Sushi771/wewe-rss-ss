@@ -64,6 +64,10 @@ node scripts/acceptance-wechat2rss.cjs --deployment-config
 5. 用户按正常实例入口添加一个已确认公众号后，取返回的真实稳定 ID，再运行 `node scripts/acceptance-wechat2rss.cjs --execute MP_WXS_<真实数字ID>`。该阶段只读缓存，不提交 `/add`；ID 未知时不猜。首次真实更新可能尚在实例异步任务中，读取到空缓存不能当作订阅完成。
 6. 通过真实正文/图片检查后，才在隔离副本核对目标绑定和 `WECHAT2RSS_ENABLED=1`，通过原手动刷新入口验收去重与旧数据保护。旧订阅须按已核 ID 显式绑定或 allowlist；候选源码的这些能力不会凭填写配置自动进入旧生产包。生产切换另做备份及副本演练，定时开关保持关闭。
 
+**正确版本与绑定另核：** 上述 Node 检查直接执行当前 checkout 的脚本及对应后台构建，无需先替换生产。桌面启动指针、生产包和 Git HEAD 是三个不同对象；本轮没有打包或改指针。原刷新验收前，由 owner 核待测包的 `release.json`、输入哈希与已审查提交一致，在隔离 SQLite 副本启动并核实际进程/监听身份；`sourceCommit:null` 本身不能证明包对应当前 HEAD。
+
+应用侧 `WECHAT2RSS_ENABLED=1` 仅打开来源资格。新增一个真实新号时，选择 Wechat2RSS 会将新 Feed 的 `collectionChannel` 保存为 `wechat2rss`；重新添加已有号会保留原绑定。已有号只有 `collectionChannel` 为空且未绑定合集时，才可被明确的 `WECHAT2RSS_FEED_IDS=MP_WXS_<已核数字ID>` allowlist 选择。其他已绑定来源不会被覆盖，当前没有通用的旧号一键改绑入口；旧号迁移仍须 owner 在备份与副本演练后受控处理，不能靠填 allowlist 或重复添加偷偷改绑。
+
 ## 仍待真实验收
 
 发布运行器已补齐 Wechat2RSS 的定时门禁：必须同时显式设置 `ENABLE_SCHEDULED_UPDATES=1`、`WECHAT2RSS_ENABLED=1`，具备有效私有地址和服务密码，以及启用的来源绑定，才允许该来源参加定时更新。已有其他来源的绑定不会被环境 allowlist 覆盖。今天保持定时关闭；完成真实验收后再单独处理启用和受控部署。
