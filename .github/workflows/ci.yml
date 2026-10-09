@@ -21,6 +21,8 @@ jobs:
           node-version: 24
       - name: Test native loopback listener ownership and guarded stop
         run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
+      - name: Test synthetic readiness with Fetch-compatible Windows ports
+        run: node --test scripts/local-release/readiness.test.cjs
 
   lint-test:
     runs-on: ubuntu-latest

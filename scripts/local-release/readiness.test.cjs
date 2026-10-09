@@ -1,10 +1,89 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const { once } = require('node:events');
 const { waitReady } = require('./switch.cjs');
 
 const code = 'test-only-private-code-24-characters';
 const cookie = `wewe_private_session=1999999999.${'a'.repeat(32)}.${'b'.repeat(64)}`;
+
+// A free OS-assigned port may still be forbidden by Node's Fetch port policy.
+// Probe only this synthetic server; rebind only on that exact policy rejection.
+async function listenForFetch(server, probe = fetch) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const listening = once(server, 'listening');
+    server.listen(0, '127.0.0.1');
+    await listening;
+    const port = server.address().port;
+    try {
+      const response = await probe(`http://127.0.0.1:${port}/dash/login`, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(1500),
+      });
+      await response.arrayBuffer();
+      return port;
+    } catch (error) {
+      await new Promise((resolve) => server.close(resolve));
+      if (error.cause?.message !== 'bad port') throw error;
+    }
+  }
+  throw new Error('No Fetch-compatible synthetic readiness port after 8 binds');
+}
+
+test('synthetic readiness rebinds an OS-assigned Fetch-forbidden port', async () => {
+  let probes = 0;
+  let closes = 0;
+  const server = http.createServer((_req, res) => res.end('synthetic shell'));
+  server.on('close', () => closes++);
+  try {
+    const port = await listenForFetch(server, (url, options) => {
+      probes++;
+      if (probes === 1)
+        throw new TypeError('fetch failed', { cause: new Error('bad port') });
+      return fetch(url, options);
+    });
+    assert.equal(server.address().address, '127.0.0.1');
+    assert.equal(server.address().port, port);
+    assert.ok(probes >= 2);
+    assert.equal(closes, probes - 1);
+  } finally {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('synthetic readiness preserves other failures without retrying', async () => {
+  let probes = 0;
+  const denied = Object.assign(new Error('synthetic permission failure'), {
+    code: 'EACCES',
+  });
+  const server = http.createServer((_req, res) => res.end('synthetic shell'));
+  await assert.rejects(
+    listenForFetch(server, () => {
+      probes++;
+      throw denied;
+    }),
+    (error) => error === denied,
+  );
+  assert.equal(probes, 1);
+  assert.equal(server.listening, false);
+});
+
+test('synthetic readiness limits forbidden-port rebinds and closes each listener', async () => {
+  let probes = 0;
+  let closes = 0;
+  const server = http.createServer((_req, res) => res.end('synthetic shell'));
+  server.on('close', () => closes++);
+  await assert.rejects(
+    listenForFetch(server, () => {
+      probes++;
+      throw new TypeError('fetch failed', { cause: new Error('bad port') });
+    }),
+    /after 8 binds/,
+  );
+  assert.equal(probes, 8);
+  assert.equal(closes, 8);
+  assert.equal(server.listening, false);
+});
 
 async function fixture(options, verify) {
   const count = options.rssItems || 20;
@@ -76,11 +155,11 @@ async function fixture(options, verify) {
     }
     return res.end(responseRss);
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    await verify(server.address().port, calls);
+    const port = await listenForFetch(server);
+    await verify(port, calls);
   } finally {
-    await new Promise((resolve) => server.close(resolve));
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
     for (const [key, value] of Object.entries(previous))
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
