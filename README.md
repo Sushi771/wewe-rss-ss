@@ -9,6 +9,12 @@
 
 </div>
 
+## 本机 Wechat2RSS 配置准备（2026-10-09）
+
+本轮继续准备现有 Wechat2RSS Provider 的本机接入，密钥由用户随后在本机填写。准确文件入口、字段及检查命令见[本机填写与接入检查](docs/WECHAT2RSS_LOCAL_SETUP.md)：实例配置使用已有 `.env.wechat2rss`，WeWe 配置使用已有 `apps/server/.env.local`，保留其他设置，不用模板覆盖私有文件。
+
+填写后可在项目根目录执行 `node scripts/acceptance-wechat2rss.cjs --deployment-config`，仅核两端配置一致性，不启动、联网、启用来源或写库。需要与源码对应的后台构建；不能与 `--execute` 混用。来源启用、目标绑定和受控部署另行处理，授权、正常登录、最新十篇完整正文与实际图片、原刷新去重仍待真实验收。下面的历史方向与配置说明保留供追溯，当前填写操作以新指南为准。
+
 ## 当前方向与验收（2026-10-04）
 
 微信读书自建模块已接回原手动刷新。妈妈部落畅聊阁最新10篇真实正文及图片已保存，原入口重复刷新新增0；八篇补齐媒体后1450篇文章、账号、旧ID、时间、文字和指标保留。离线导出保存89个图片附件，真实Edge打开10篇及97处图片引用通过。仅本机回环4000，自动刷新关闭；其他11订阅、未来自然新文及用户单篇短链直接保存Obsidian仍分别待验收。暂停 Wechat2RSS 采购，运行时不依赖闭源中转。准确版本与验收边界见[验收记录](docs/LATEST_TEN_IMAGE_ACCEPTANCE.md)、[交付任务](docs/PRIVATE_ONLINE_DELIVERY_TASK.md)和[精简交接](docs/DEVELOPMENT_HANDOFF.md)。
