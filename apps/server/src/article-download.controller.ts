@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   HttpCode,
+  Inject,
   Logger,
   Optional,
   OnModuleDestroy,
@@ -34,6 +35,12 @@ import { BrowserTaskBroker, BrowserTaskError } from './browser-task';
 import { BrowserArticleTasks } from './browser-article-tasks';
 import { XiaohongshuService } from './collection/xiaohongshu.service';
 import {
+  XHS_SINGLE_SOURCE,
+  XhsSingleSource,
+  xhsSingleNoteUrl,
+  prepareXhsSingleDownload,
+} from './xhs-single-download';
+import {
   ARTICLE_VERIFICATION_TTL_MS,
   articleVerificationLocation,
 } from '../../../packages/shared/src/article-verification';
@@ -46,6 +53,9 @@ export class ArticleDownloadController implements OnModuleDestroy {
     @Optional() private readonly prisma?: PrismaService,
     @Optional() browserBroker?: BrowserTaskBroker,
     @Optional() private readonly xiaohongshu?: XiaohongshuService,
+    @Optional()
+    @Inject(XHS_SINGLE_SOURCE)
+    private readonly xhsSingleSource?: XhsSingleSource,
   ) {
     // Default AppModule supplies no broker. An explicitly approved short-lived
     // opt-in root supplies the same configured broker to both controllers.
@@ -432,6 +442,8 @@ export class ArticleDownloadController implements OnModuleDestroy {
     @Response() res: Res,
   ) {
     if (!this.authorized(req, res, true)) return;
+    if (process.env.WEWE_ACCEPTANCE_MODE === '1')
+      return res.status(409).json({ message: '此验收模式未启用本机保存。' });
     if (!this.xiaohongshu)
       return res.status(409).json({ message: '小红书缓存保存服务尚未接线。' });
     try {
@@ -465,6 +477,165 @@ export class ArticleDownloadController implements OnModuleDestroy {
       );
     } catch (error) {
       return this.failure(error, res);
+    }
+  }
+
+  @Post('article/xiaohongshu/save')
+  @HttpCode(200)
+  async saveXhsNotes(
+    @Body()
+    body: { creatorId?: unknown; noteIds?: unknown; pickToken?: unknown },
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    if (process.env.WEWE_ACCEPTANCE_MODE === '1')
+      return res.status(409).json({ message: '验收模式未启用本地保存。' });
+    if (!this.xiaohongshu)
+      return res.status(409).json({ message: '小红书缓存保存服务尚未接线。' });
+    if (this.running || this.pickerRunning)
+      return res.status(409).json({ message: '请等待当前本机操作完成。' });
+    let savedCount = 0;
+    let alreadySavedCount = 0;
+    this.running = true;
+    try {
+      if (
+        !body ||
+        Array.isArray(body) ||
+        Object.keys(body).some(
+          (key) => !['creatorId', 'noteIds', 'pickToken'].includes(key),
+        ) ||
+        typeof body.creatorId !== 'string' ||
+        !body.creatorId ||
+        body.creatorId.length > 128 ||
+        !Array.isArray(body.noteIds) ||
+        body.noteIds.length < 1 ||
+        body.noteIds.length > 100 ||
+        Array.from(body.noteIds).some(
+          (id) => typeof id !== 'string' || !id || id.length > 300,
+        ) ||
+        (body.pickToken !== undefined && typeof body.pickToken !== 'string')
+      )
+        throw new ArticleDownloadError('请选择1至100篇完整缓存笔记。', 400);
+      const store = this.localStore();
+      if (
+        (await store.read()).askEveryTime &&
+        (!this.pickerGrant || body.pickToken !== this.pickerGrant)
+      )
+        throw new ArticleDownloadError('请先选择本次保存路径。', 409);
+      // Validate every selected identity and cached body before creating files.
+      // A caller cannot submit a path, body, media URL or another creator's note.
+      const prepared: Awaited<
+        ReturnType<XiaohongshuService['prepareLocalDownload']>
+      >[] = [];
+      for (const noteId of new Set(body.noteIds as string[]))
+        prepared.push(
+          await this.xiaohongshu.prepareLocalDownload(body.creatorId, noteId),
+        );
+      // One native selection grants this bounded batch in the remembered folder.
+      // The same global lock also excludes picker and preference changes.
+      this.pickerGrant = undefined;
+      for (const prepare of prepared) {
+        const result = await store.save(prepare);
+        if (result.alreadySaved) alreadySavedCount++;
+        else savedCount++;
+      }
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.status(200).json({
+        saved: true,
+        savedCount,
+        alreadySavedCount,
+        contentSource: 'saved-xiaohongshu',
+      });
+    } catch (error) {
+      if (savedCount || alreadySavedCount) {
+        res.setHeader('Cache-Control', 'private, no-store');
+        return res.status(422).json({
+          saved: false,
+          code: 'XHS_BATCH_SAVE_INCOMPLETE',
+          savedCount,
+          alreadySavedCount,
+          message: `本次保存未全部完成；已保存${savedCount}篇，已存在${alreadySavedCount}篇。已完成文件保留，请检查目录权限或磁盘空间后再选择未完成笔记。`,
+        });
+      }
+      return this.failure(error, res);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  @Get('article/xiaohongshu/single')
+  xhsSingleCapability(@Request() req: Req, @Response() res: Res) {
+    if (!this.authorized(req, res, false)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.json({
+      platform: 'xiaohongshu',
+      available:
+        !!this.xhsSingleSource && process.env.WEWE_ACCEPTANCE_MODE !== '1',
+      videoAvailable: false,
+      message: this.xhsSingleSource
+        ? '可核验单篇图文并保存；视频尚未接入。'
+        : '单篇取文能力未接入，尚不能保存真实笔记。',
+    });
+  }
+
+  @Post('article/xiaohongshu/single')
+  @HttpCode(200)
+  async saveXhsSingle(
+    @Body() body: { url?: unknown; pickToken?: unknown },
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    if (process.env.WEWE_ACCEPTANCE_MODE === '1')
+      return res.status(409).json({ message: '验收模式未启用本地保存。' });
+    if (this.running || this.pickerRunning)
+      return res.status(409).json({ message: '请等待当前本地操作完成。' });
+    this.running = true;
+    try {
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).some((key) => !['url', 'pickToken'].includes(key)) ||
+        (body.pickToken !== undefined && typeof body.pickToken !== 'string')
+      )
+        throw new ArticleDownloadError(
+          '请求仅支持笔记链接与目录选择凭证。',
+          400,
+        );
+      const url = xhsSingleNoteUrl(body.url);
+      if (!this.xhsSingleSource)
+        throw new ArticleDownloadError(
+          '单篇取文能力未接入，未发起平台请求。',
+          409,
+          {
+            code: 'XHS_SINGLE_SOURCE_UNCONFIGURED',
+          },
+        );
+      const store = this.localStore();
+      if (
+        (await store.read()).askEveryTime &&
+        (!this.pickerGrant || body.pickToken !== this.pickerGrant)
+      )
+        throw new ArticleDownloadError('请先选择本次保存路径。', 409);
+      this.pickerGrant = undefined;
+      const prepare = prepareXhsSingleDownload(
+        url,
+        await this.xhsSingleSource.read(url),
+      );
+      const result = await store.save(prepare);
+      return res.status(200).json({
+        saved: true,
+        ...result,
+        contentSource: 'verified-xiaohongshu-single',
+        videoArchived: false,
+      });
+    } catch (error) {
+      return this.failure(error, res);
+    } finally {
+      this.running = false;
     }
   }
 
