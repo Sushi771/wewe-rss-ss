@@ -16,6 +16,7 @@ import ManagementFolders from '@web/components/ManagementFolders';
 import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
+import { refreshCreatorBatch } from '@web/utils/xiaohongshu-refresh';
 
 type SaveSettings = { directory: string; askEveryTime: boolean };
 type DirectoryChoice = SaveSettings & {
@@ -232,10 +233,18 @@ export default function Xiaohongshu() {
   const handleRefreshAll = () =>
     run(async () => {
       if (!capability.data?.canRefresh) return;
-      for (const creator of creators.data?.items || []) {
-        if (!creator.enabled) continue;
-        if ((await updateCreator(creator.id)) !== 'complete') break;
-      }
+      const items = creators.data?.items || [];
+      const enabled = items.filter((creator) => creator.enabled);
+      const result = await refreshCreatorBatch(
+        enabled.map((creator) => creator.id),
+        updateCreator,
+      );
+      const detail = result.failedId
+        ? result.error || receipts.current[result.failedId] || '更新未完成。'
+        : '';
+      setMessage(
+        `批量更新：完成 ${result.completed} 位，未完成 ${result.failedId ? 1 : 0} 位，未执行 ${result.remaining} 位；已停用跳过 ${items.length - enabled.length} 位。${detail}`,
+      );
     });
   const handleDownload = () =>
     run(async () => {
@@ -646,7 +655,7 @@ export default function Xiaohongshu() {
             </p>
           )}
           <details>
-            <summary className="cursor-pointer text-neutral-500">
+            <summary className="cursor-pointer break-all text-neutral-500">
               本机保存设置 · {saveSettings?.directory || '尚未读取'}
             </summary>
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -742,7 +751,10 @@ export default function Xiaohongshu() {
               <div className="hidden text-xs md:block">发布时间 · 归档状态</div>
             </div>
             {visibleNotes.map((note) => (
-              <div key={note.id} className="compact-row article-row !flex-wrap">
+              <div
+                key={note.id}
+                className="compact-row article-row !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center"
+              >
                 <div className="compact-col-check">
                   <Checkbox
                     size="sm"
@@ -755,14 +767,14 @@ export default function Xiaohongshu() {
                 <button
                   type="button"
                   disabled={busy || note.status !== 'complete'}
-                  className="compact-title min-w-0 break-words text-left text-[15px] hover:text-[#007AFF] disabled:text-neutral-500"
+                  className="compact-title min-w-0 !whitespace-normal break-words text-left text-[15px] hover:text-[#007AFF] disabled:text-neutral-500 md:!whitespace-nowrap"
                   onClick={() => {
                     if (!active.current) setNoteId(note.id);
                   }}
                 >
                   {note.title}
                 </button>
-                <div className="ml-auto flex shrink-0 flex-col items-end gap-1 py-1 text-xs text-neutral-500">
+                <div className="col-start-2 flex min-w-0 shrink-0 flex-col items-start gap-1 py-1 text-xs text-neutral-500 md:ml-auto md:items-end">
                   <span>
                     {note.publishTime > 0
                       ? dayjs(note.publishTime * 1000).format(
@@ -770,7 +782,7 @@ export default function Xiaohongshu() {
                         )
                       : '发布时间未知'}
                   </span>
-                  <span className="max-w-[150px] whitespace-normal text-right">
+                  <span className="whitespace-normal text-left md:max-w-[150px] md:text-right">
                     {noteStatus(note)}
                   </span>
                 </div>
@@ -849,7 +861,9 @@ export default function Xiaohongshu() {
         classNames={{ wrapper: 'z-[200]', backdrop: 'z-[190]' }}
       >
         <ModalContent>
-          <ModalHeader>{body.data?.title || '读取已保存正文'}</ModalHeader>
+          <ModalHeader className="min-w-0 break-words pr-10">
+            {body.data?.title || '读取已保存正文'}
+          </ModalHeader>
           <ModalBody>
             <p className="text-sm text-neutral-500">
               读取已归档正文与图片；视频笔记仅显示正文和封面，本次没有联网取文或加载视频。

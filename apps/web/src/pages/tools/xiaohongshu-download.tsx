@@ -21,6 +21,7 @@ export default function XiaohongshuDownload() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [capability, setCapability] = useState<Capability | null>(null);
   const [busy, setBusy] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [saved, setSaved] = useState<Saved | null>(null);
@@ -68,6 +69,9 @@ export default function XiaohongshuDownload() {
           setError(
             cause instanceof Error ? cause.message : '无法读取本地能力与设置。',
           );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setInitialLoading(false);
       });
     return () => {
       controller.abort();
@@ -154,7 +158,10 @@ export default function XiaohongshuDownload() {
           className="bg-default-50 mt-5 rounded-xl p-4 text-sm"
           role="status"
         >
-          {capability?.message || '正在读取单篇取文能力。'}
+          {capability?.message ||
+            (initialLoading
+              ? '正在读取单篇取文能力。'
+              : '单篇取文能力未能读取，请重新读取。')}
           <p className="text-default-500 mt-2">
             {capability?.videoAvailable
               ? '视频缓存另核字节和容器结构；真实完整性与可播放性仍须来源验收。'
@@ -183,7 +190,10 @@ export default function XiaohongshuDownload() {
           <div className="bg-default-50 rounded-xl p-4">
             <p className="mb-2 text-sm font-medium">保存路径</p>
             <p className="text-default-600 break-all text-sm">
-              {settings?.directory || '正在读取本地保存设置。'}
+              {settings?.directory ||
+                (initialLoading
+                  ? '正在读取本地保存设置。'
+                  : '本地保存设置未能读取，请重新读取。')}
             </p>
             <Button
               className="mt-3"
@@ -225,10 +235,10 @@ export default function XiaohongshuDownload() {
           >
             {capability?.videoAvailable ? '保存正文和媒体' : '保存正文和图片'}
           </Button>
-          {!settings && (
+          {(!settings || !capability) && !initialLoading && (
             <Button
               type="button"
-              isDisabled={busy}
+              isDisabled={busy || initialLoading}
               onPress={() =>
                 void operate(async (signal) => {
                   const [preferences, available] = await Promise.all([

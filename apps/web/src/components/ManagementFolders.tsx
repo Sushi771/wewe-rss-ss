@@ -84,6 +84,9 @@ export default function ManagementFolders({
           新建
         </Button>
       </div>
+      <p className="text-xs leading-5 text-neutral-500">
+        将订阅拖到文件夹可分组；手机或批量移动请先点“管理”，勾选后选择目标文件夹。
+      </p>
       {[
         { id: 'all', name: '全部' },
         { id: 'ungrouped', name: '未分组' },

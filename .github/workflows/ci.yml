@@ -58,6 +58,8 @@ jobs:
         run: node --test scripts/account-login-ui.test.cjs
       - name: Test unavailable new-subscription source and retained input offline
         run: node --test scripts/feed-add-ui.test.cjs
+      - name: Test Xiaohongshu batch completion and download failure states offline
+        run: node --test scripts/xiaohongshu-refresh-ui.test.cjs
       - name: Test closed Sites metadata contract offline
         run: node --test scripts/sites-local-contract.test.mjs
       - name: Test Server
