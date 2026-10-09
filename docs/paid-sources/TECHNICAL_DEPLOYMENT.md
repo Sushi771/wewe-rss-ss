@@ -21,7 +21,7 @@
 | 归档/旧数据    | [`collection.service.ts`](../../apps/server/src/collection/collection.service.ts)：`collectWechat2RssRecent`；`TrpcService.recordCollectionResult`                                                                                                                     | 原刷新先备份，再写尝试/回执；异步受理＋15 分钟请求保留；仅 recent-window，不支持分页全史                        |
 | 正文图片       | [`archive-provider-images.ts`](../../apps/server/src/collection/archive-provider-images.ts)；[`image-fetch.ts`](../../apps/server/src/collection/image-fetch.ts)                                                                                                       | 当前白名单是微信 CDN；每图 10MB、每篇 60 图/20MB，格式/结尾检查并非完整图像解码。不能全局放开任意域名来接小红书 |
 | 保存/ZIP       | [`article-export.ts`](../../apps/server/src/article-export.ts)：`buildArticleMarkdown`；[`offline-export.controller.ts`](../../apps/server/src/offline-export.controller.ts)；[`article-download.controller.ts`](../../apps/server/src/article-download.controller.ts) | 微信正文选择器和 URL 限制、原本机保存器、按号 ZIP；缓存缺失有路径会请求原文，跨端缓存导出必须加不联网门禁       |
-| 数据模型       | [`schema.prisma`](../../apps/server/prisma/schema.prisma)                                                                                                                                                                                                              | Feed/Article 是公众号语义；建议追加独立小红书表，不迁移或重命名旧表                                             |
+| 数据模型       | [`schema.prisma`](../../apps/server/prisma/schema.prisma)                                                                                                                                                                                                              | 独立 XhsCreator/XhsNote 已追加；旧 Feed/Article 不迁移或重命名，生产尚未执行迁移                                |
 | 私人访问       | [`private-access.ts`](../../apps/server/src/private-access.ts)；[`trpc.router.ts`](../../apps/server/src/trpc/trpc.router.ts)：`createContext`                                                                                                                         | 应用 cookie/Origin 与 socket 本机检查；仅转发到 loopback 不能证明远端调用获得本机人工权限                       |
 | 部署/探针      | [`docker-compose.wechat2rss.yml`](../../docker-compose.wechat2rss.yml)；[预检脚本](../../scripts/acceptance-wechat2rss.cjs)                                                                                                                                            | Compose 绑定本机 18080；镜像固定值是历史版本，采购后重核。脚本默认不联网，`--execute` 才真实读实例，本轮未执行  |
 
@@ -64,7 +64,7 @@ B 的公开条款限定学习研究用途，这是具体适用范围缺口，应
 
 Wechat2RSS 本机容器与主应用分离，18080 仅 loopback，不对公网暴露管理接口；token 注入服务器私有配置。用现有 Windows 本机运行包作为业务主服务，不为付费来源整体搬到 Linux/VPS。Docker/WSL 的安装和正常账号授权安排在预算及部署同意后，不是本轮自动动作。
 
-小红书先新增平台身份和内容模型，再做薄 adapter。媒体实际域名/签名失效方式需供应商样例；保留平台域名白名单、禁跳内网、限响应、校验实际图片字节。缓存成功后复用 Markdown 转换、附件相对路径、受保护 ZIP；微信 `saveVerifiedArticle` 的 ProviderArticle/URL 校验不能直接接任意小红书数据。已有本机目录及保存设置不改，另加适配而非重做保存器。
+小红书独立平台身份和内容模型、正式受保护路由与缓存保存已接线，内部 XHS_SOURCE 默认未注册，下一步只做有真实合同的薄 adapter。媒体实际域名/签名失效方式需供应商样例；保留平台域名白名单、禁跳内网、限响应、校验实际图片字节。缓存直存复用原 LocalArticleStore 和完整正文/图片导出器，保持目录与选择授权，按下载日期保存 `正文.md` 和 `image/`；ZIP 为可选导出。微信 `saveVerifiedArticle` 的 ProviderArticle/URL 校验不能直接接任意小红书数据，新 HTTP 入口仅接博主/笔记 ID，不接受路径、HTML 或图片 URL。迁移保护、字节及保存回归见[正式接线](../XIAOHONGSHU_INTEGRATION.md)，生产迁移和真实来源验证仍待完成。
 
 Sites Worker 是托管 HTTP 服务，不是 Windows/Nest/Prisma SQLite 的直接运行环境；原库、迁移及磁盘保持本机。不能把当前仓库直接上传 Sites 并宣称部署完成。
 
