@@ -66,8 +66,10 @@ export function xhsArchiveDraft(
   if (!Array.isArray(input.images) || input.images.length > 60)
     throw new Error('XHS_IMAGE_COUNT_INVALID');
   let totalImageBytes = 0;
-  const images = input.images.map((image, index) => {
-    if (image.ordinal !== index + 1) throw new Error('XHS_IMAGE_ORDER_INVALID');
+  // 逐位校验，包括稀疏数组空位；长度相等不能替代实际图片字节。
+  const images = Array.from(input.images, (image, index) => {
+    if (!image || image.ordinal !== index + 1)
+      throw new Error('XHS_IMAGE_ORDER_INVALID');
     const decoded = decodeInlineImage(image.inlineData);
     totalImageBytes += decoded.bytes.length;
     if (totalImageBytes > 20_000_000)

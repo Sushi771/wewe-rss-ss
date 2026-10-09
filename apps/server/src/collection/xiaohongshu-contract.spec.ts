@@ -214,6 +214,16 @@ describe('XHS internal identity/pagination/archive contract (synthetic offline)'
       allowedImageUrl('https://synthetic-xhs-cdn.example/photo.png'),
     ).toThrow('IMAGE_SOURCE_NOT_ALLOWED');
   });
+  it('rejects missing image slots instead of treating array length as cached image bytes', () => {
+    const images = new Array<XhsNormalizedCandidate['images'][number]>(2);
+    images[0] = { ordinal: 1, inlineData: png };
+    expect(() =>
+      xhsArchiveDraft(
+        'synthetic-author',
+        fixture({ expectedImageCount: 2, images }),
+      ),
+    ).toThrow('XHS_IMAGE_ORDER_INVALID');
+  });
   it('text-only is valid with an explicitly known zero images, while video remains skipped', () => {
     const text = xhsArchiveDraft(
       'synthetic-author',

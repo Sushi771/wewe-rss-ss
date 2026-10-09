@@ -678,35 +678,48 @@ export class TrpcService {
         this.activeSubscriptionAdds.delete(accountId);
       }
     }
-    const provider = wechat2RssProvider();
-    await createVerifiedSqliteBackup();
-    const accepted = await provider.addSubscription(url);
-    const old = await this.prismaService.feed.findUnique({
-      where: { id: accepted.feedId },
-    });
-    if (old && old.mpName !== accepted.name)
-      throw new Error('私有实例与现有订阅名称不一致，请先核对身份。');
-    const feed =
-      old ||
-      (await this.prismaService.feed.create({
-        data: {
-          id: accepted.feedId,
-          mpName: accepted.name,
-          mpCover: '',
-          mpIntro: '',
-          updateTime: 0,
-          syncTime: 0,
-          collectionChannel: 'wechat2rss',
-        },
-      }));
-    return {
-      requestedSource: 'wechat2rss' as const,
-      sourceBindingChanged: !old,
-      status: 'accepted' as const,
-      feed,
-      accepted: true as const,
-      pending: true as const,
-    };
+    // 上游受理前未知公众号 ID；不同文章链接也可能竞争同一 Feed。
+    // 复用进程内锁串行付费添加，在备份及可能收费的请求前拒绝并发。
+    const addKey = 'wechat2rss:add';
+    if (this.activeSubscriptionAdds.has(addKey))
+      throw new TRPCError({
+        code: 'CONFLICT',
+        message: '已有 Wechat2RSS 公众号添加进行中，本次未发送上游请求。',
+      });
+    this.activeSubscriptionAdds.add(addKey);
+    try {
+      const provider = wechat2RssProvider();
+      await createVerifiedSqliteBackup();
+      const accepted = await provider.addSubscription(url);
+      const old = await this.prismaService.feed.findUnique({
+        where: { id: accepted.feedId },
+      });
+      if (old && old.mpName !== accepted.name)
+        throw new Error('私有实例与现有订阅名称不一致，请先核对身份。');
+      const feed =
+        old ||
+        (await this.prismaService.feed.create({
+          data: {
+            id: accepted.feedId,
+            mpName: accepted.name,
+            mpCover: '',
+            mpIntro: '',
+            updateTime: 0,
+            syncTime: 0,
+            collectionChannel: 'wechat2rss',
+          },
+        }));
+      return {
+        requestedSource: 'wechat2rss' as const,
+        sourceBindingChanged: !old,
+        status: 'accepted' as const,
+        feed,
+        accepted: true as const,
+        pending: true as const,
+      };
+    } finally {
+      this.activeSubscriptionAdds.delete(addKey);
+    }
   }
 
   async createLoginUrl(): Promise<

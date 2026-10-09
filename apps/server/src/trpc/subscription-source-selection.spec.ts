@@ -364,6 +364,74 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(native.discover).not.toHaveBeenCalled();
   });
 
+  it('rejects a concurrent paid add before backup or upstream and releases its lock on completion', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const { caller } = setup();
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const started = new Promise<void>((resolve) => (entered = resolve));
+    backup.mockImplementationOnce(async (options) => {
+      entered();
+      await gate;
+      return realBackup(options);
+    });
+    const first = caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    await started;
+    try {
+      await expect(
+        caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
+      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      // 不同文章可能属于同一公众号；上游响应之前不能按链接区分 Feed。
+      await expect(
+        caller.feed.addFromArticle({
+          articleUrl: 'https://mp.weixin.qq.com/s/synthetic-other-article',
+          source: 'wechat2rss',
+        }),
+      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      expect(backup).toHaveBeenCalledTimes(1);
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await first;
+    }
+    expect(await prisma.feed.count()).toBe(1);
+    const later = await caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(later).toMatchObject({ sourceBindingChanged: false });
+    expect(native.discover).not.toHaveBeenCalled();
+  });
+
+  it('releases the paid add lock after backup or upstream failure without automatic replay', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const { caller } = setup();
+    backup.mockRejectedValueOnce(new Error('synthetic-backup-failure'));
+    await expect(
+      caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
+    ).rejects.toThrow('synthetic-backup-failure');
+    expect(request).not.toHaveBeenCalled();
+    request.mockRejectedValueOnce(
+      new Error('synthetic-private-request-failure'),
+    );
+    await expect(
+      caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
+    ).rejects.toThrow('WECHAT2RSS_REQUEST_FAILED');
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(await prisma.feed.count()).toBe(0);
+    const later = await caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(later).toMatchObject({ sourceBindingChanged: true });
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(native.discover).not.toHaveBeenCalled();
+  });
+
   it('paid rejection is a paid failure, never a native attempt or local successful binding', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     request.mockResolvedValueOnce(
