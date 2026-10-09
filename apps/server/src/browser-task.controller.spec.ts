@@ -263,7 +263,21 @@ describe('offline browser completion → existing authorized save and image expo
           .send('{')
       ).status,
     ).toBe(401);
-    expect((await post('complete', payload)).body).toEqual({ accepted: true });
+    // The HTTP boundary deliberately hides internal failures. Keep the actual
+    // synthetic completion error visible here for cross-runtime CI diagnosis.
+    const complete = broker.complete.bind(broker);
+    let completionError: unknown;
+    jest.spyOn(broker, 'complete').mockImplementation((...args) => {
+      try {
+        return complete(...args);
+      } catch (error) {
+        completionError = error;
+        throw error;
+      }
+    });
+    const completed = await post('complete', payload);
+    expect(completionError).toBeUndefined();
+    expect(completed.body).toEqual({ accepted: true });
     expect((await task.result).contentHtml).toContain(large.images[0].inline);
   }, 60000);
 });
