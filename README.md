@@ -13,6 +13,8 @@
 
 本轮继续准备现有 Wechat2RSS Provider 的本机接入，密钥由用户随后在本机填写。准确文件入口、字段及检查命令见[本机填写与接入检查](docs/WECHAT2RSS_LOCAL_SETUP.md)：实例配置使用已有 `.env.wechat2rss`，WeWe 配置使用已有 `apps/server/.env.local`，保留其他设置，不用模板覆盖私有文件。
 
+小红书按用户选择准备 Rnote Web＋蒲公英源码包及同产品免费测试 Key。独立空目录、私有候选配置和离线检查命令见[本机接入准备](docs/paid-sources/XHS_SOURCE_PREPARATION.md)；真实来源尚未注册，配置格式通过不会启用刷新。
+
 填写后可在项目根目录执行 `node scripts/acceptance-wechat2rss.cjs --deployment-config`，仅核两端配置一致性，不启动、联网、启用来源或写库。需要与源码对应的后台构建；不能与 `--execute` 混用。来源启用、目标绑定和受控部署另行处理，授权、正常登录、最新十篇完整正文与实际图片、原刷新去重仍待真实验收。下面的历史方向与配置说明保留供追溯，当前填写操作以新指南为准。
 
 ## 当前方向与验收（2026-10-04）

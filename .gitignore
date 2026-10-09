@@ -85,6 +85,7 @@ web_modules/
 private-data/
 apps/server/data/.article-download-settings.json*
 .wechat2rss-data/
+.xhs-self-hosted/
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
