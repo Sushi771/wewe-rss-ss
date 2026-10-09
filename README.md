@@ -31,7 +31,7 @@
 
 Wechat2RSS 官方文档说明只抓当时最新 20 篇、只收录群发消息；本地旧文章不会因此删除。订阅前未被上游抓到的历史和非群发内容是独立能力缺口，不以近期订阅通过代替全历史完成。
 
-独立部署模板使用 [官方部署指南](https://wechat2rss.xlab.app/deploy/deploy)中的 `ttttmr/wechat2rss` 镜像，固定到 2026-09-29 从 [Docker Hub 标签接口](https://hub.docker.com/v2/repositories/ttttmr/wechat2rss/tags/latest)核对的 digest `sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f`。模板仅绑定本机 `127.0.0.1:18080`，使用独立的忽略目录持久化；`RSS_KEEP_OLD_COUNT=-1` 只保留以后已抓到的文章，不补订阅前缺口。用户完成授权与本人登录后，可用 `node --env-file=apps/server/.env.local scripts/acceptance-wechat2rss.cjs --execute MP_WXS_<数字ID>` 做只读字段探测；不加 `--execute` 仅检查配置存在性。
+独立部署模板使用 [官方部署指南](https://wechat2rss.xlab.app/deploy/deploy)中的 `ttttmr/wechat2rss` 镜像，固定到 2026-09-29 从 [Docker Hub 标签接口](https://hub.docker.com/v2/repositories/ttttmr/wechat2rss/tags/latest)核对的 digest `sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f`。模板仅绑定本机 `127.0.0.1:18080`，使用独立的忽略目录持久化；`RSS_KEEP_OLD_COUNT=-1` 只保留以后已抓到的文章，不补订阅前缺口。用户完成授权与本人登录后，可用 `node --env-file=apps/server/.env.local scripts/acceptance-wechat2rss.cjs --execute MP_WXS_<数字ID>` 做获准后的受控只读字段探测；默认无参数模式只核 WeWe 配置格式，`--deployment-config` 则离线核对实例与 WeWe 两端配置一致性，不能与 `--execute` 混用。
 
 ## ✨ 功能
 
