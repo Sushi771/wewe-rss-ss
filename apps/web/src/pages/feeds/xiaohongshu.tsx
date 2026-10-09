@@ -66,6 +66,7 @@ export default function Xiaohongshu() {
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [managing, setManaging] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [folderFilter, setFolderFilter] = useState('all');
   const [selectedCreators, setSelectedCreators] = useState<string[]>([]);
   const [search, setSearch] = useState('');
@@ -174,6 +175,7 @@ export default function Xiaohongshu() {
     setSearch('');
     setSelectedIds(new Set());
     setMessage(receipts.current[id] || '');
+    setMobileSidebarOpen(false);
   };
   const handleSearch = (value: string) => {
     if (active.current) return;
@@ -277,10 +279,17 @@ export default function Xiaohongshu() {
         noteIds: selectedNotes.map((note) => note.id),
         ...(pickToken ? { pickToken } : {}),
       });
-      if (result.saved !== true || result.savedCount !== selectedNotes.length)
+      if (
+        result.saved !== true ||
+        !Number.isInteger(result.savedCount) ||
+        result.savedCount < 0 ||
+        !Number.isInteger(result.alreadySavedCount) ||
+        result.alreadySavedCount < 0 ||
+        result.savedCount + result.alreadySavedCount !== selectedNotes.length
+      )
         throw new Error('本机保存数量未确认，请核对已保存内容。');
       setMessage(
-        `${current.displayName}：${result.savedCount} 篇已保存（其中 ${result.alreadySavedCount} 篇已有保存）；每篇正文和 image 图片位于独立目录。`,
+        `${current.displayName}：本次新增保存 ${result.savedCount} 篇，已有保存 ${result.alreadySavedCount} 篇；每篇正文和 image 图片位于独立目录。`,
       );
     });
   const handleChooseDirectory = () =>
@@ -319,8 +328,40 @@ export default function Xiaohongshu() {
       className="flex h-full min-h-0 min-w-0 flex-col md:flex-row"
       aria-label="小红书博主与笔记管理"
     >
+      <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
+        <label className="min-w-0 flex-1 text-xs text-neutral-500">
+          当前博主
+          <select
+            aria-label="手机选择小红书博主"
+            className="bg-background mt-1 w-full min-w-0 rounded border p-2 text-sm"
+            value={creatorId}
+            disabled={busy}
+            onChange={(event) => selectCreator(event.target.value)}
+          >
+            <option value="">选择博主</option>
+            {creators.data?.items.map((creator) => (
+              <option key={creator.id} value={creator.id}>
+                {creator.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <Button
+          size="sm"
+          variant="flat"
+          isDisabled={busy}
+          aria-expanded={mobileSidebarOpen}
+          aria-controls="xiaohongshu-management-sidebar"
+          onPress={() => {
+            if (!active.current) setMobileSidebarOpen(!mobileSidebarOpen);
+          }}
+        >
+          {mobileSidebarOpen ? '收起管理' : '管理博主'}
+        </Button>
+      </div>
       <aside
-        className="mac-sidebar max-h-[45vh] !w-full !min-w-0 overflow-y-auto md:max-h-none md:!w-[260px]"
+        id="xiaohongshu-management-sidebar"
+        className={`mac-sidebar max-h-[45vh] !w-full !min-w-0 overflow-y-auto md:!flex md:max-h-none md:!w-[260px] ${mobileSidebarOpen ? '!flex' : '!hidden'}`}
         aria-label="小红书博主列表"
       >
         <div className="flex items-center justify-between px-4 py-3">

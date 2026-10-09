@@ -66,6 +66,7 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
       setFolderFilter: jest.fn(),
       setAdding: jest.fn(),
       setSearch: jest.fn(),
+      setMobileSidebarOpen: jest.fn(),
       add: { mutateAsync: jest.fn() },
       utils: { xiaohongshu: { list: { invalidate: invalidated } } },
       capability: { data: { canRefresh: false } },
@@ -182,7 +183,7 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
       ['/xiaohongshu/save', { creatorId: 'a', noteIds: ['note-a'] }],
     ]);
     expect(scope.exportNotes.mutateAsync).not.toHaveBeenCalled();
-    expect(state.message).toContain('1 篇已保存');
+    expect(state.message).toContain('新增保存 1 篇');
     expect(text.indexOf('onPress={handleLocalSave}')).toBeLessThan(
       text.indexOf('onPress={handleDownload}'),
     );
@@ -247,6 +248,19 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     expect(scope.setSelectedIds).not.toHaveBeenCalled();
     expect(state.creator).toBe('');
   });
+  it('closes mobile management after selecting a creator and keeps it unchanged while busy', () => {
+    const { scope, state } = harness();
+    scope.receipts = { current: { a: '博主A：旧回执' } };
+    evaluate('selectCreator', scope)('a');
+    expect(state.creator).toBe('a');
+    expect(state.message).toBe('博主A：旧回执');
+    expect(scope.setMobileSidebarOpen).toHaveBeenCalledWith(false);
+    scope.setMobileSidebarOpen.mockClear();
+    scope.active.current = true;
+    evaluate('selectCreator', scope)('b');
+    expect(state.creator).toBe('a');
+    expect(scope.setMobileSidebarOpen).not.toHaveBeenCalled();
+  });
   it('selects only matching complete notes and excludes hidden selection and unarchived video', () => {
     const scope = {
       notes: {
@@ -284,7 +298,7 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
       })
       .mockResolvedValueOnce({
         saved: true,
-        savedCount: 2,
+        savedCount: 1,
         alreadySavedCount: 1,
       });
     await evaluate('handleLocalSave', scope)();
@@ -299,8 +313,59 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
         },
       ],
     ]);
-    expect(state.message).toContain('2 篇已保存');
+    expect(state.message).toContain('新增保存 1 篇，已有保存 1 篇');
   });
+  it.each([
+    [0, 2],
+    [1, 1],
+  ])(
+    'confirms an existing or mixed batch with %i newly saved and %i already saved notes',
+    async (savedCount, alreadySavedCount) => {
+      const { scope, state } = harness();
+      scope.current = { id: 'a', displayName: '博主A' };
+      scope.saveSettings = { directory: 'old', askEveryTime: false };
+      scope.selectedNotes = [{ id: 'one' }, { id: 'two' }];
+      scope.localApi = jest
+        .fn()
+        .mockResolvedValue({ saved: true, savedCount, alreadySavedCount });
+      await evaluate('handleLocalSave', scope)();
+      expect(scope.localApi).toHaveBeenCalledTimes(1);
+      expect(state.message).toContain(
+        `博主A：本次新增保存 ${savedCount} 篇，已有保存 ${alreadySavedCount} 篇`,
+      );
+      expect(state.message).not.toContain('未完成');
+      expect(state.message).not.toContain('其中');
+    },
+  );
+  it.each([
+    [-1, 3],
+    [3, -1],
+    [0.5, 1.5],
+    [1.5, 0.5],
+    ['1', 1],
+    [1, '1'],
+    [0, undefined],
+    [undefined, 0],
+    [0, null],
+    [0, Infinity],
+    [NaN, 2],
+    [1, 2],
+  ])(
+    'rejects malformed or mismatched save counters %s and %s',
+    async (savedCount, alreadySavedCount) => {
+      const { scope, state } = harness();
+      scope.current = { id: 'a', displayName: '博主A' };
+      scope.saveSettings = { directory: 'old', askEveryTime: false };
+      scope.selectedNotes = [{ id: 'one' }, { id: 'two' }];
+      scope.localApi = jest
+        .fn()
+        .mockResolvedValue({ saved: true, savedCount, alreadySavedCount });
+      await evaluate('handleLocalSave', scope)();
+      expect(state.message).toContain('未完成');
+      expect(state.message).not.toContain('本次新增保存');
+      expect(scope.localApi).toHaveBeenCalledTimes(1);
+    },
+  );
   it('does not label an unconfirmed count as successful and keeps server partial-save evidence', async () => {
     const { scope, state } = harness();
     scope.current = { id: 'a', displayName: '博主A' };
@@ -468,6 +533,24 @@ describe('shared single-level management folder actual handlers (offline)', () =
     expect(text).toContain('moveCreators.mutateAsync({ ids, groupId })');
     expect(source).toContain('移动已选');
     expect(source).not.toMatch(/parentId|粉丝|follower/i);
+  });
+  it('defaults both mobile management sidebars to hidden with selectors and keeps desktop sidebars', () => {
+    const feeds = fs.readFileSync(
+      path.resolve(__dirname, '../../../web/src/pages/feeds/index.tsx'),
+      'utf8',
+    );
+    for (const contents of [feeds, text]) {
+      expect(contents).toMatch(
+        /\[mobileSidebarOpen, setMobileSidebarOpen\] = useState\(false\)/,
+      );
+      // Important utilities override the existing .mac-sidebar display:flex rule.
+      expect(contents).toContain("mobileSidebarOpen ? '!flex' : '!hidden'");
+      expect(contents).toContain('md:!flex');
+      expect(contents).toContain('!min-w-0');
+      expect(contents).toContain('aria-expanded={mobileSidebarOpen}');
+    }
+    expect(feeds).toContain('aria-label="手机选择公众号"');
+    expect(text).toContain('aria-label="手机选择小红书博主"');
   });
   it('does not send a sorting update when a WeChat drag was consumed by folder assignment', async () => {
     const file = path.resolve(

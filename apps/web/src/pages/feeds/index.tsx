@@ -41,6 +41,7 @@ const Feeds = () => {
   const moveFeeds = trpc.feed.moveFeeds.useMutation();
   const [folderFilter, setFolderFilter] = useState('all');
   const [folderBusy, setFolderBusy] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const folderOperation = useRef(false);
   const movedIntoFolder = useRef(false);
   const { refetch: refetchFeedList, data: feedData } = trpc.feed.list.useQuery(
@@ -630,8 +631,49 @@ const Feeds = () => {
 
   return (
     <>
-      <div className="flex h-full">
-        <div className="mac-sidebar">
+      <div className="flex h-full min-w-0 flex-col md:flex-row">
+        <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
+          <label className="min-w-0 flex-1 text-xs text-neutral-500">
+            当前公众号
+            <select
+              aria-label="手机选择公众号"
+              className="bg-background mt-1 w-full min-w-0 rounded border p-2 text-sm"
+              value={currentMpId}
+              disabled={folderBusy}
+              onChange={(event) => {
+                if (folderOperation.current) return;
+                const selected = event.target.value;
+                setCurrentMpId(selected);
+                navigate(selected ? `/feeds/${selected}` : '/feeds');
+                setMobileSidebarOpen(false);
+              }}
+            >
+              <option value="">全部文章</option>
+              {feedData?.items.map((feed) => (
+                <option key={feed.id} value={feed.id}>
+                  {feed.mpName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button
+            size="sm"
+            variant="flat"
+            isDisabled={folderBusy}
+            aria-expanded={mobileSidebarOpen}
+            aria-controls="wechat-management-sidebar"
+            onPress={() => {
+              if (!folderOperation.current)
+                setMobileSidebarOpen(!mobileSidebarOpen);
+            }}
+          >
+            {mobileSidebarOpen ? '收起管理' : '管理公众号'}
+          </Button>
+        </div>
+        <div
+          id="wechat-management-sidebar"
+          className={`mac-sidebar max-h-[45vh] !w-full !min-w-0 md:!flex md:max-h-none md:!w-[260px] ${mobileSidebarOpen ? '!flex' : '!hidden'}`}
+        >
           <div className="flex items-center justify-between px-4 py-3">
             <span className="text-[13px] font-bold uppercase tracking-widest text-neutral-400/80">
               订阅源 · {feedData?.items?.length || 0}
@@ -795,6 +837,7 @@ const Feeds = () => {
                   if (folderOperation.current) return;
                   setCurrentMpId('');
                   navigate('/feeds');
+                  setMobileSidebarOpen(false);
                 }}
               >
                 <div className="flex h-6 w-6 items-center justify-center rounded-full bg-neutral-200/50 text-neutral-500 transition-colors group-[.active]:bg-white/20 group-[.active]:text-white dark:bg-neutral-800/50 dark:text-neutral-400">
@@ -873,6 +916,7 @@ const Feeds = () => {
                           } else {
                             setCurrentMpId(item.id);
                             navigate(`/feeds/${item.id}`);
+                            setMobileSidebarOpen(false);
                           }
                         }}
                       >
@@ -899,7 +943,7 @@ const Feeds = () => {
             </div>
           ) : null}
         </div>
-        <div className="mac-content">
+        <div className="mac-content !min-w-0">
           <div className="mac-toolbar !h-auto shrink-0 !flex-wrap !py-2">
             <div className="flex min-w-0 basis-full items-center gap-2 overflow-hidden">
               <span className="truncate text-[15px] font-semibold">
