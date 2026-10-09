@@ -25,6 +25,7 @@ import {
   serverOriginUrl,
 } from '@web/utils/env';
 import ArticleList from './list';
+import ManagementFolders from '@web/components/ManagementFolders';
 import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
 import ArticleVerificationNotice from '../tools/article-verification-notice';
@@ -34,6 +35,14 @@ const Feeds = () => {
   const { id } = useParams();
 
   const { isOpen, onOpen, onClose } = useDisclosure();
+  const folders = trpc.feed.groups.useQuery(undefined, { retry: false });
+  const saveFolder = trpc.feed.saveGroup.useMutation();
+  const removeFolder = trpc.feed.removeGroup.useMutation();
+  const moveFeeds = trpc.feed.moveFeeds.useMutation();
+  const [folderFilter, setFolderFilter] = useState('all');
+  const [folderBusy, setFolderBusy] = useState(false);
+  const folderOperation = useRef(false);
+  const movedIntoFolder = useRef(false);
   const { refetch: refetchFeedList, data: feedData } = trpc.feed.list.useQuery(
     {},
     {
@@ -282,9 +291,15 @@ const Feeds = () => {
   }, [feedData?.items]);
 
   const handleDragStart = (e: React.DragEvent, index: number) => {
+    if (folderOperation.current) {
+      e.preventDefault();
+      return;
+    }
+    movedIntoFolder.current = false;
     setDraggedItem(index);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', index.toString());
+    e.dataTransfer.setData('application/x-wewe-wechat', orderedFeeds[index].id);
   };
 
   const handleDragEnter = (e: React.DragEvent, index: number) => {
@@ -300,6 +315,10 @@ const Feeds = () => {
 
   const handleDragEnd = async () => {
     setDraggedItem(null);
+    if (movedIntoFolder.current || folderOperation.current) {
+      movedIntoFolder.current = false;
+      return;
+    }
     try {
       await updateOrder(
         orderedFeeds.map((item, idx) => ({ id: item.id, order: idx })),
@@ -624,7 +643,9 @@ const Feeds = () => {
                   size="sm"
                   variant="light"
                   color={isManageMode ? 'primary' : 'default'}
+                  isDisabled={folderBusy}
                   onPress={() => {
+                    if (folderOperation.current) return;
                     setIsManageMode(!isManageMode);
                     setSelectedIds([]);
                   }}
@@ -652,7 +673,7 @@ const Feeds = () => {
                   size="sm"
                   variant="light"
                   onPress={handleOpenAdd}
-                  isDisabled={isAddFeedLoading}
+                  isDisabled={isAddFeedLoading || folderBusy}
                   className="h-7 w-7 min-w-0"
                 >
                   <svg
@@ -677,12 +698,31 @@ const Feeds = () => {
           {isManageMode && (feedData?.items?.length || 0) > 0 && (
             <div className="flex items-center justify-between px-4 pb-2">
               <Checkbox
-                isSelected={selectedIds.length === feedData?.items?.length}
+                isDisabled={folderBusy}
+                isSelected={
+                  selectedIds.length > 0 &&
+                  selectedIds.length ===
+                    orderedFeeds.filter(
+                      (item) =>
+                        folderFilter === 'all' ||
+                        (folderFilter === 'ungrouped'
+                          ? !item.groupId
+                          : item.groupId === folderFilter),
+                    ).length
+                }
                 onChange={() => {
-                  if (selectedIds.length === feedData?.items?.length) {
+                  if (folderOperation.current) return;
+                  const visible = orderedFeeds.filter(
+                    (item) =>
+                      folderFilter === 'all' ||
+                      (folderFilter === 'ungrouped'
+                        ? !item.groupId
+                        : item.groupId === folderFilter),
+                  );
+                  if (selectedIds.length === visible.length) {
                     setSelectedIds([]);
                   } else {
-                    setSelectedIds(feedData?.items?.map((i) => i.id) || []);
+                    setSelectedIds(visible.map((item) => item.id));
                   }
                 }}
                 size="sm"
@@ -693,7 +733,9 @@ const Feeds = () => {
                 color="danger"
                 size="sm"
                 variant="flat"
-                isDisabled={selectedIds.length === 0 || isBatchDeleteLoading}
+                isDisabled={
+                  selectedIds.length === 0 || isBatchDeleteLoading || folderBusy
+                }
                 onPress={handleBatchDelete}
                 isLoading={isBatchDeleteLoading}
               >
@@ -702,11 +744,55 @@ const Feeds = () => {
             </div>
           )}
 
+          <ManagementFolders
+            folders={folders.data?.items || []}
+            filter={folderFilter}
+            selectedIds={isManageMode ? selectedIds : []}
+            dragType="application/x-wewe-wechat"
+            disabled={
+              folderBusy ||
+              isBatchDeleteLoading ||
+              isAddFeedLoading ||
+              !folders.data
+            }
+            onFilter={(filter) => {
+              if (folderOperation.current) return;
+              setFolderFilter(filter);
+              setSelectedIds([]);
+            }}
+            onBusyChange={(value) => {
+              folderOperation.current = value;
+              setFolderBusy(value);
+            }}
+            onSave={async (input) => {
+              await saveFolder.mutateAsync(input);
+              await folders.refetch();
+            }}
+            onRemove={async (id) => {
+              await removeFolder.mutateAsync({ id });
+              if (folderFilter === id) setFolderFilter('all');
+              await folders.refetch();
+            }}
+            onMove={async (ids, groupId) => {
+              movedIntoFolder.current = true;
+              setDraggedItem(null);
+              await moveFeeds.mutateAsync({ ids, groupId });
+              setSelectedIds([]);
+              await refetchFeedList();
+            }}
+          />
+          {folders.error && (
+            <p role="alert" className="px-4 text-xs text-red-600">
+              文件夹读取失败，请重新读取页面。
+            </p>
+          )}
+
           {feedData?.items ? (
             <ul className="px-0 pb-0 pt-1">
               <li
                 className={`mac-sidebar-item ${isActive('') && !isManageMode ? 'active' : ''}`}
                 onClick={() => {
+                  if (folderOperation.current) return;
                   setCurrentMpId('');
                   navigate('/feeds');
                 }}
@@ -738,54 +824,77 @@ const Feeds = () => {
           {feedData?.items ? (
             <div className="flex-1 overflow-hidden px-0">
               <ul className="flex h-[calc(100vh-148px)] w-full flex-col overflow-y-auto pb-4">
-                {orderedFeeds.map((item, index) => {
-                  const isSelected = selectedIds.includes(item.id);
-                  return (
-                    <li
-                      key={item.id}
-                      draggable={isManageMode}
-                      onDragStart={(e) =>
-                        isManageMode && handleDragStart(e, index)
-                      }
-                      onDragEnter={(e) =>
-                        isManageMode && handleDragEnter(e, index)
-                      }
-                      onDragEnd={isManageMode ? handleDragEnd : undefined}
-                      onDragOver={(e) => e.preventDefault()}
-                      className={`mac-sidebar-item ${
-                        isActive(item.id) && !isManageMode
-                          ? 'active'
-                          : isSelected && isManageMode
-                            ? 'selected-manage'
-                            : ''
-                      } ${isManageMode ? 'drag-handle' : ''}`}
-                      onClick={() => {
-                        if (isManageMode) {
-                          toggleSelect(item.id);
-                        } else {
-                          setCurrentMpId(item.id);
-                          navigate(`/feeds/${item.id}`);
+                {orderedFeeds
+                  .filter(
+                    (item) =>
+                      folderFilter === 'all' ||
+                      (folderFilter === 'ungrouped'
+                        ? !item.groupId
+                        : item.groupId === folderFilter),
+                  )
+                  .map((item) => {
+                    const index = orderedFeeds.findIndex(
+                      (feed) => feed.id === item.id,
+                    );
+                    const isSelected = selectedIds.includes(item.id);
+                    return (
+                      <li
+                        key={item.id}
+                        draggable={!folderBusy}
+                        onDragStart={(e) => {
+                          if (folderOperation.current) {
+                            e.preventDefault();
+                            return;
+                          }
+                          movedIntoFolder.current = false;
+                          e.dataTransfer.setData(
+                            'application/x-wewe-wechat',
+                            item.id,
+                          );
+                          e.dataTransfer.effectAllowed = 'move';
+                          if (isManageMode) handleDragStart(e, index);
+                        }}
+                        onDragEnter={(e) =>
+                          isManageMode && handleDragEnter(e, index)
                         }
-                      }}
-                    >
-                      {isManageMode && (
-                        <div onClick={(e) => e.stopPropagation()}>
-                          <Checkbox
-                            isSelected={isSelected}
-                            onValueChange={() => toggleSelect(item.id)}
-                          />
-                        </div>
-                      )}
-                      <Avatar
-                        src={item.mpCover}
-                        className="sidebar-avatar h-6 min-h-6 w-6 min-w-6"
-                      ></Avatar>
-                      <span className="flex-1 truncate text-sm">
-                        {item.mpName}
-                      </span>
-                    </li>
-                  );
-                })}
+                        onDragEnd={isManageMode ? handleDragEnd : undefined}
+                        onDragOver={(e) => e.preventDefault()}
+                        className={`mac-sidebar-item ${
+                          isActive(item.id) && !isManageMode
+                            ? 'active'
+                            : isSelected && isManageMode
+                              ? 'selected-manage'
+                              : ''
+                        } ${isManageMode ? 'drag-handle' : ''}`}
+                        onClick={() => {
+                          if (folderOperation.current) return;
+                          if (isManageMode) {
+                            toggleSelect(item.id);
+                          } else {
+                            setCurrentMpId(item.id);
+                            navigate(`/feeds/${item.id}`);
+                          }
+                        }}
+                      >
+                        {isManageMode && (
+                          <div onClick={(e) => e.stopPropagation()}>
+                            <Checkbox
+                              isDisabled={folderBusy}
+                              isSelected={isSelected}
+                              onValueChange={() => toggleSelect(item.id)}
+                            />
+                          </div>
+                        )}
+                        <Avatar
+                          src={item.mpCover}
+                          className="sidebar-avatar h-6 min-h-6 w-6 min-w-6"
+                        ></Avatar>
+                        <span className="flex-1 truncate text-sm">
+                          {item.mpName}
+                        </span>
+                      </li>
+                    );
+                  })}
               </ul>
             </div>
           ) : null}

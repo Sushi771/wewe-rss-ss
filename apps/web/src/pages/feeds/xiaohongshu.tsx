@@ -1,10 +1,28 @@
-import { Button, Input, Switch } from '@nextui-org/react';
-import { useEffect, useRef, useState } from 'react';
+import {
+  Button,
+  Checkbox,
+  Input,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  Spinner,
+  Switch,
+} from '@nextui-org/react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import dayjs from 'dayjs';
+import ManagementFolders from '@web/components/ManagementFolders';
 import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
 
-const localApi = async (endpoint: string, payload?: object) => {
+type SaveSettings = { directory: string; askEveryTime: boolean };
+type DirectoryChoice = SaveSettings & {
+  cancelled?: boolean;
+  pickToken?: string;
+};
+const localApi = async <T,>(endpoint: string, payload?: object): Promise<T> => {
   const auth = getAuthCode();
   const response = await fetch(
     `${serverOriginUrl || ''}/download/article${endpoint}`,
@@ -18,12 +36,20 @@ const localApi = async (endpoint: string, payload?: object) => {
       ...(payload ? { body: JSON.stringify(payload) } : {}),
     },
   );
-  const result = await response.json();
-  if (!response.ok) throw new Error('本机保存未完成，已有文件保留。');
-  return result;
+  const result: unknown = await response.json();
+  if (!response.ok)
+    throw new Error(
+      typeof result === 'object' &&
+        result !== null &&
+        'message' in result &&
+        typeof result.message === 'string'
+        ? result.message
+        : '本机操作未完成，请核对本地保存服务与目录。',
+    );
+  return result as T;
 };
 
-/** Production page uses only authenticated server records, never demo fixtures. */
+/** Production page reads authenticated archives; incomplete videos stay unavailable. */
 export default function Xiaohongshu() {
   const utils = trpc.useUtils();
   const capability = trpc.xiaohongshu.capability.useQuery(undefined, {
@@ -31,30 +57,52 @@ export default function Xiaohongshu() {
     refetchOnWindowFocus: false,
   });
   const creators = trpc.xiaohongshu.list.useQuery(undefined, { retry: false });
-  const [creatorId, setCreatorId] = useState(''),
-    [noteId, setNoteId] = useState('');
-  const [displayName, setDisplayName] = useState(''),
-    [profileUrl, setProfileUrl] = useState('');
-  const [message, setMessage] = useState(''),
-    [busy, setBusy] = useState(false);
+  const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
+  const [creatorId, setCreatorId] = useState('');
+  const [noteId, setNoteId] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [profileUrl, setProfileUrl] = useState('');
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [managing, setManaging] = useState(false);
+  const [folderFilter, setFolderFilter] = useState('all');
+  const [selectedCreators, setSelectedCreators] = useState<string[]>([]);
+  const [search, setSearch] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [saveSettings, setSaveSettings] = useState<SaveSettings | null>(null);
+  const [directory, setDirectory] = useState('');
   const active = useRef(false);
   const receipts = useRef<Record<string, string>>({});
-  const [saveSettings, setSaveSettings] = useState<{
-    directory: string;
-    askEveryTime: boolean;
-  } | null>(null);
   useEffect(() => {
     let current = true;
-    void localApi('/settings')
+    void localApi<SaveSettings>('/settings')
       .then((settings) => {
-        if (current) setSaveSettings(settings);
+        if (current) {
+          setSaveSettings(settings);
+          setDirectory(settings.directory);
+        }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (current)
+          setMessage('本机保存设置读取失败，可重新读取；ZIP 导出仍可用。');
+      });
     return () => {
       current = false;
     };
   }, []);
-  const current = creators.data?.items.find((c) => c.id === creatorId);
+  const current = creators.data?.items.find(
+    (creator) => creator.id === creatorId,
+  );
+  const visibleCreators =
+    creators.data?.items.filter(
+      (creator) =>
+        folderFilter === 'all' ||
+        (folderFilter === 'ungrouped'
+          ? !creator.groupId
+          : creator.groupId === folderFilter),
+    ) || [];
   const notes = trpc.xiaohongshu.notes.useQuery(
     { creatorId },
     { enabled: !!current, retry: false },
@@ -63,15 +111,41 @@ export default function Xiaohongshu() {
     { creatorId, noteId },
     { enabled: !!current && !!noteId, retry: false },
   );
+  const visibleNotes = useMemo(
+    () =>
+      (notes.data?.items || []).filter((note) =>
+        note.title
+          .toLocaleLowerCase()
+          .includes(search.trim().toLocaleLowerCase()),
+      ),
+    [notes.data, search],
+  );
+  const selectableNotes = visibleNotes.filter(
+    (note) => note.status === 'complete',
+  );
+  const selectedNotes = visibleNotes.filter(
+    (note) => note.status === 'complete' && selectedIds.has(note.id),
+  );
+  const allSelected =
+    selectableNotes.length > 0 &&
+    selectableNotes.every((note) => selectedIds.has(note.id));
   const add = trpc.xiaohongshu.add.useMutation();
   const edit = trpc.xiaohongshu.edit.useMutation();
   const remove = trpc.xiaohongshu.remove.useMutation();
   const refresh = trpc.xiaohongshu.refresh.useMutation();
   const exportNotes = trpc.xiaohongshu.export.useMutation();
+  const saveGroup = trpc.xiaohongshu.saveGroup.useMutation();
+  const removeGroup = trpc.xiaohongshu.removeGroup.useMutation();
+  const moveCreators = trpc.xiaohongshu.moveCreators.useMutation();
   useEffect(() => {
-    if (creators.data && !creators.data.items.some((c) => c.id === creatorId)) {
+    if (
+      !active.current &&
+      creators.data &&
+      !creators.data.items.some((creator) => creator.id === creatorId)
+    ) {
       setCreatorId(creators.data.items[0]?.id || '');
       setNoteId('');
+      setSelectedIds(new Set());
     }
   }, [creators.data, creatorId]);
   const run = async (operation: () => Promise<void>) => {
@@ -81,19 +155,45 @@ export default function Xiaohongshu() {
     setMessage('');
     try {
       await operation();
-    } catch {
+    } catch (cause) {
       setMessage(
-        '操作未完成，请核对数据源及本地归档状态；输入和已有内容保留。',
+        '操作未完成；既有归档保留。' +
+          (cause instanceof Error
+            ? cause.message
+            : '请核对数据源或本地保存状态。'),
       );
     } finally {
       active.current = false;
       setBusy(false);
     }
   };
+  const selectCreator = (id: string) => {
+    if (active.current) return;
+    setCreatorId(id);
+    setNoteId('');
+    setSearch('');
+    setSelectedIds(new Set());
+    setMessage(receipts.current[id] || '');
+  };
+  const handleSearch = (value: string) => {
+    if (active.current) return;
+    setSearch(value);
+    setSelectedIds(new Set());
+  };
+  const selectNote = (id: string, selected: boolean) => {
+    if (active.current) return;
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      if (selected) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
   const updateCreator = async (id: string) => {
     const result = await refresh.mutateAsync({ id });
     const name =
-      creators.data?.items.find((c) => c.id === id)?.displayName || '所选博主';
+      creators.data?.items.find((creator) => creator.id === id)?.displayName ||
+      '已选博主';
     receipts.current[id] =
       name + '：' + result.message + ' 新增完整图文：' + result.added;
     await Promise.all([
@@ -110,22 +210,27 @@ export default function Xiaohongshu() {
       await utils.xiaohongshu.list.invalidate();
       setCreatorId(result.creator.id);
       setNoteId('');
+      setSelectedIds(new Set());
+      setFolderFilter('all');
       setDisplayName('');
       setProfileUrl('');
+      setAdding(false);
     });
   const handleRefreshAll = () =>
     run(async () => {
       if (!capability.data?.canRefresh) return;
-      for (const c of creators.data?.items || []) {
-        if (!c.enabled) continue;
-        const status = await updateCreator(c.id);
-        if (status !== 'complete') break; // Partial/blocked state stops later creators.
+      for (const creator of creators.data?.items || []) {
+        if (!creator.enabled) continue;
+        if ((await updateCreator(creator.id)) !== 'complete') break;
       }
     });
   const handleDownload = () =>
     run(async () => {
-      if (!current) return;
-      const result = await exportNotes.mutateAsync({ creatorId: current.id });
+      if (!current || !selectedNotes.length) return;
+      const result = await exportNotes.mutateAsync({
+        creatorId: current.id,
+        noteIds: selectedNotes.map((note) => note.id),
+      });
       const bytes = Uint8Array.from(atob(result.base64), (char) =>
         char.charCodeAt(0),
       );
@@ -142,239 +247,549 @@ export default function Xiaohongshu() {
         link.remove();
         URL.revokeObjectURL(url);
       }
-      setMessage(`已生成 ${result.notes} 篇缓存完整图文的离线包。`);
+      setMessage(
+        `${current.displayName}：已导出选中的 ${result.notes} 篇完整图文 ZIP。`,
+      );
     });
   const handleLocalSave = () =>
     run(async () => {
-      if (!current || !saveSettings) return;
-      const complete =
-        notes.data?.items.filter((note) => note.status === 'complete') || [];
-      let saved = 0;
-      for (const note of complete) {
-        let pickToken: string | undefined;
-        if (saveSettings.askEveryTime) {
-          const chosen = await localApi('/directory', {});
-          if (chosen.cancelled) {
-            setMessage(
-              `已取消路径选择；${current.displayName} 已处理 ${saved} 篇，后续未保存。`,
-            );
-            return;
-          }
-          pickToken = chosen.pickToken;
-          setSaveSettings({
-            directory: chosen.directory,
-            askEveryTime: chosen.askEveryTime,
-          });
+      if (!current || !saveSettings || !selectedNotes.length) return;
+      let pickToken: string | undefined;
+      if (saveSettings.askEveryTime) {
+        const chosen = await localApi<DirectoryChoice>('/directory', {});
+        if (chosen.cancelled) {
+          setMessage(`已取消路径选择，${current.displayName} 本次未保存。`);
+          return;
         }
-        const result = await localApi(
-          '/xiaohongshu/' + encodeURIComponent(note.id) + '/save',
-          { creatorId: current.id, ...(pickToken ? { pickToken } : {}) },
-        );
-        if (result.saved !== true) throw new Error('LOCAL_SAVE_NOT_CONFIRMED');
-        saved++;
+        pickToken = chosen.pickToken;
+        setSaveSettings({
+          directory: chosen.directory,
+          askEveryTime: chosen.askEveryTime,
+        });
+        setDirectory(chosen.directory);
       }
+      const result = await localApi<{
+        saved: boolean;
+        savedCount: number;
+        alreadySavedCount: number;
+      }>('/xiaohongshu/save', {
+        creatorId: current.id,
+        noteIds: selectedNotes.map((note) => note.id),
+        ...(pickToken ? { pickToken } : {}),
+      });
+      if (result.saved !== true || result.savedCount !== selectedNotes.length)
+        throw new Error('本机保存数量未确认，请核对已保存内容。');
       setMessage(
-        `${current.displayName}：${saved} 篇已保存或确认已有保存，正文及 image 图片位于配置目录的下载日期文件夹。`,
+        `${current.displayName}：${result.savedCount} 篇已保存（其中 ${result.alreadySavedCount} 篇已有保存）；每篇正文和 image 图片位于独立目录。`,
       );
     });
+  const handleChooseDirectory = () =>
+    run(async () => {
+      const chosen = await localApi<DirectoryChoice>('/directory', {});
+      if (chosen.cancelled) {
+        setMessage('已取消目录选择，原设置保留。');
+        return;
+      }
+      setSaveSettings({
+        directory: chosen.directory,
+        askEveryTime: chosen.askEveryTime,
+      });
+      setDirectory(chosen.directory);
+      setMessage('已记住保存目录。');
+    });
+  const handleSaveSettings = (
+    askEveryTime = saveSettings?.askEveryTime || false,
+  ) =>
+    run(async () => {
+      const settings = await localApi<SaveSettings>('/settings', {
+        askEveryTime,
+      });
+      setSaveSettings(settings);
+      setDirectory(settings.directory);
+      setMessage('已记住保存设置。');
+    });
+  const invalidateFolders = async () => {
+    await Promise.all([
+      utils.xiaohongshu.groups.invalidate(),
+      utils.xiaohongshu.list.invalidate(),
+    ]);
+  };
   return (
-    <main className="mx-auto w-full max-w-7xl space-y-4 p-4">
-      <header className="space-y-2">
-        <h1 className="text-xl font-semibold">小红书博主</h1>
-        <p role="status">
-          {capability.error
-            ? '来源状态查询失败；不会自动更新。'
-            : capability.data?.message || '正在确认来源状态…'}
-        </p>
-        <p className="text-default-500 text-sm">
-          保存主页仅加入待接入名单，不代表上游订阅成功。视频不归档；已有完整图文可离线下载。
-        </p>
-      </header>
-      <form
-        className="flex flex-col gap-2 sm:flex-row"
-        onSubmit={(event) => {
-          event.preventDefault();
-          handleAdd();
-        }}
+    <main
+      className="flex h-full min-h-0 min-w-0 flex-col md:flex-row"
+      aria-label="小红书博主与笔记管理"
+    >
+      <aside
+        className="mac-sidebar max-h-[45vh] !w-full !min-w-0 overflow-y-auto md:max-h-none md:!w-[260px]"
+        aria-label="小红书博主列表"
       >
-        <Input
-          aria-label="博主备注名称"
-          className="min-w-0 sm:flex-1"
-          value={displayName}
-          onValueChange={setDisplayName}
-          isDisabled={busy}
-          maxLength={120}
-        />
-        <Input
-          aria-label="小红书公开主页链接"
-          className="min-w-0 sm:flex-1"
-          value={profileUrl}
-          onValueChange={setProfileUrl}
-          isDisabled={busy}
-          maxLength={2000}
-          placeholder="不含登录参数的公开主页链接"
-        />
-        <Button
-          type="submit"
-          className="shrink-0 whitespace-nowrap"
-          isDisabled={busy || !displayName.trim() || !profileUrl.trim()}
-        >
-          保存待接入博主
-        </Button>
-      </form>
-      <Button
-        onPress={handleRefreshAll}
-        isDisabled={
-          busy ||
-          !capability.data?.canRefresh ||
-          !creators.data?.items.some((c) => c.enabled)
-        }
-      >
-        更新全部已启用博主
-      </Button>
-      {creators.error && (
-        <p role="alert">
-          博主列表读取失败；首次启用前需完成数据库迁移。未显示示例数据。
-        </p>
-      )}
-      {message && <p role="status">{message}</p>}
-      <div className="grid min-w-0 gap-4 md:grid-cols-[260px_minmax(0,1fr)]">
-        <aside className="space-y-2" aria-label="小红书博主列表">
-          {creators.data?.items.length === 0 && <p>尚未保存待接入博主。</p>}
-          {creators.data?.items.map((c) => (
-            <section
-              key={c.id}
-              className="border-default-200 space-y-2 rounded-lg border p-3"
+        <div className="flex items-center justify-between px-4 py-3">
+          <span className="text-[13px] font-bold text-neutral-400">
+            小红书 · {creators.data?.items.length || 0}
+          </span>
+          <div className="flex gap-1">
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={busy}
+              onPress={() => {
+                setManaging(!managing);
+                setSelectedCreators([]);
+              }}
             >
+              管理
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={busy}
+              onPress={() => setAdding(true)}
+            >
+              添加
+            </Button>
+          </div>
+        </div>
+        <ManagementFolders
+          folders={groups.data?.items || []}
+          filter={folderFilter}
+          selectedIds={selectedCreators}
+          dragType="application/x-wewe-xiaohongshu"
+          disabled={busy || !groups.data}
+          onFilter={(filter) => {
+            if (active.current) return;
+            setFolderFilter(filter);
+            setSelectedCreators([]);
+          }}
+          onBusyChange={(value) => {
+            active.current = value;
+            setBusy(value);
+          }}
+          onSave={async (input) => {
+            await saveGroup.mutateAsync(input);
+            await invalidateFolders();
+          }}
+          onRemove={async (id) => {
+            await removeGroup.mutateAsync({ id });
+            if (folderFilter === id) setFolderFilter('all');
+            await invalidateFolders();
+          }}
+          onMove={async (ids, groupId) => {
+            await moveCreators.mutateAsync({ ids, groupId });
+            setSelectedCreators([]);
+            await invalidateFolders();
+          }}
+        />
+        {groups.error && (
+          <p role="alert" className="px-4 text-sm">
+            文件夹读取失败，请重新读取页面。
+          </p>
+        )}
+        {creators.error && (
+          <p role="alert" className="px-4 text-sm">
+            博主列表读取失败，既有归档保留。
+          </p>
+        )}
+        {managing && visibleCreators.length > 0 && (
+          <Checkbox
+            size="sm"
+            className="px-4 py-2"
+            aria-label="选择当前文件夹全部博主"
+            isDisabled={busy}
+            isSelected={visibleCreators.every((creator) =>
+              selectedCreators.includes(creator.id),
+            )}
+            onValueChange={(value) =>
+              setSelectedCreators(
+                value ? visibleCreators.map((creator) => creator.id) : [],
+              )
+            }
+          >
+            全选博主
+          </Checkbox>
+        )}
+        <ul>
+          {visibleCreators.map((creator) => (
+            <li
+              key={creator.id}
+              className={`mac-sidebar-item ${creatorId === creator.id && !managing ? 'active' : ''}`}
+              draggable={!busy}
+              onDragStart={(event) => {
+                if (active.current) {
+                  event.preventDefault();
+                  return;
+                }
+                event.dataTransfer.setData(
+                  'application/x-wewe-xiaohongshu',
+                  creator.id,
+                );
+                event.dataTransfer.effectAllowed = 'move';
+              }}
+            >
+              {managing && (
+                <Checkbox
+                  size="sm"
+                  aria-label={`选择博主 ${creator.displayName}`}
+                  isDisabled={busy}
+                  isSelected={selectedCreators.includes(creator.id)}
+                  onValueChange={(value) =>
+                    setSelectedCreators((previous) =>
+                      value
+                        ? [...previous, creator.id]
+                        : previous.filter((id) => id !== creator.id),
+                    )
+                  }
+                />
+              )}
               <button
-                disabled={busy}
                 type="button"
-                className="w-full break-words text-left"
-                aria-pressed={creatorId === c.id}
-                onClick={() => {
-                  if (active.current) return;
-                  setCreatorId(c.id);
-                  setNoteId('');
-                  setMessage(receipts.current[c.id] || '');
-                }}
+                disabled={busy}
+                aria-pressed={creatorId === creator.id}
+                className="min-w-0 flex-1 truncate text-left text-sm"
+                onClick={() => selectCreator(creator.id)}
               >
-                {c.displayName}
+                {creator.displayName}
               </button>
-              <p className="text-xs">
-                小红书 · {c.externalAuthorId ? '身份已核验' : '待接入'} ·{' '}
-                {c.lastStatus === 'partial'
-                  ? '窗口未完成'
-                  : c.lastStatus === 'complete'
-                    ? '最近窗口已完成'
-                    : '尚未更新'}
-              </p>
+              <span className="shrink-0 text-xs opacity-60">
+                {creator._count.notes}
+              </span>
+            </li>
+          ))}
+        </ul>
+        {!creators.isLoading && !creators.error && !visibleCreators.length && (
+          <p className="p-4 text-sm text-neutral-500">
+            {folderFilter === 'all' ? '尚未添加博主。' : '此文件夹暂无博主。'}
+          </p>
+        )}
+      </aside>
+      <section
+        className="mac-content !min-w-0 flex-1"
+        aria-label="小红书笔记列表"
+      >
+        <div className="mac-toolbar !h-auto !flex-wrap !py-2">
+          <div className="flex w-full min-w-0 items-center gap-3">
+            <h1 className="truncate text-[15px] font-semibold">
+              {current?.displayName || '小红书笔记'}
+            </h1>
+            {current && (
               <Switch
-                aria-label={`启用 ${c.displayName}`}
-                isSelected={c.enabled}
+                size="sm"
+                isSelected={current.enabled}
                 isDisabled={busy}
+                aria-label={`启用 ${current.displayName}`}
                 onValueChange={(enabled) =>
                   run(async () => {
-                    await edit.mutateAsync({ id: c.id, enabled });
+                    await edit.mutateAsync({ id: current.id, enabled });
                     await utils.xiaohongshu.list.invalidate();
                   })
                 }
               >
-                启用
+                启用更新
               </Switch>
+            )}
+          </div>
+          <div className="flex w-full flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              className="mac-btn-outline"
+              isDisabled={
+                busy || !current?.enabled || !capability.data?.canRefresh
+              }
+              onPress={() =>
+                run(async () => {
+                  if (current) await updateCreator(current.id);
+                })
+              }
+            >
+              刷新此博主
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={
+                busy ||
+                !capability.data?.canRefresh ||
+                !creators.data?.items.some((creator) => creator.enabled)
+              }
+              onPress={handleRefreshAll}
+            >
+              刷新全部
+            </Button>
+            <Button
+              size="sm"
+              color="primary"
+              variant="flat"
+              isDisabled={busy || !saveSettings || !selectedNotes.length}
+              onPress={handleLocalSave}
+            >
+              保存到本机 ({selectedNotes.length})
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={busy || !selectedNotes.length}
+              onPress={handleDownload}
+            >
+              导出 ZIP（可选）
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={busy || !current}
+              onPress={() => setSearchOpen(!searchOpen)}
+            >
+              搜索笔记
+            </Button>
+            {current && managing && (
               <Button
                 size="sm"
                 color="danger"
                 variant="light"
-                isDisabled={busy || c._count.notes > 0}
+                isDisabled={busy || current._count.notes > 0}
                 onPress={() => {
                   if (
                     window.confirm(
-                      '移除此待接入博主？已有归档的博主请使用暂停。',
+                      '移除此待接入博主？已有归档的博主请使用停用。',
                     )
                   )
-                    run(async () => {
-                      await remove.mutateAsync({ id: c.id });
+                    void run(async () => {
+                      await remove.mutateAsync({ id: current.id });
                       await utils.xiaohongshu.list.invalidate();
                     });
                 }}
               >
-                移除
+                移除待接入博主
               </Button>
-            </section>
-          ))}
-        </aside>
-        <section className="min-w-0 space-y-4" aria-label="小红书内容列表">
-          {current ? (
-            <>
-              <h2 className="break-words font-semibold">
-                {current.displayName}
-              </h2>
-              <div className="flex flex-wrap gap-2">
+            )}
+          </div>
+        </div>
+        <div className="space-y-2 border-b border-neutral-200 px-4 py-3 text-sm dark:border-neutral-700">
+          <p role="status">
+            {capability.error
+              ? '来源状态查询失败，未自动更新。'
+              : capability.data?.message || '正在确认来源状态…'}
+          </p>
+          <p className="text-xs text-neutral-500">
+            添加博主只保存待接入记录。未取得视频时显示“视频未归档”，不会将其标成完整或保存成功。
+          </p>
+          {message && (
+            <p role="status" className="break-words">
+              {message}
+            </p>
+          )}
+          <details>
+            <summary className="cursor-pointer text-neutral-500">
+              本机保存设置 · {saveSettings?.directory || '尚未读取'}
+            </summary>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Input
+                aria-label="本机保存目录"
+                className="min-w-0 flex-1 basis-64"
+                value={directory}
+                isReadOnly
+              />
+              <Button
+                size="sm"
+                variant="flat"
+                isDisabled={busy}
+                onPress={handleChooseDirectory}
+              >
+                选择目录
+              </Button>
+              <Switch
+                size="sm"
+                aria-label="每次保存选择目录"
+                isSelected={saveSettings?.askEveryTime || false}
+                isDisabled={busy || !saveSettings}
+                onValueChange={(value) => handleSaveSettings(value)}
+              >
+                每次保存选择目录
+              </Switch>
+              {!saveSettings && (
                 <Button
-                  isDisabled={
-                    busy || !current.enabled || !capability.data?.canRefresh
-                  }
+                  size="sm"
+                  isDisabled={busy}
                   onPress={() =>
                     run(async () => {
-                      await updateCreator(current.id);
+                      const settings =
+                        await localApi<SaveSettings>('/settings');
+                      setSaveSettings(settings);
+                      setDirectory(settings.directory);
                     })
                   }
                 >
-                  更新此博主
+                  重新读取
                 </Button>
-                <Button
-                  isDisabled={
-                    busy ||
-                    !saveSettings ||
-                    !notes.data?.items.some((n) => n.status === 'complete')
-                  }
-                  onPress={handleLocalSave}
-                >
-                  保存缓存图文到本机
-                </Button>
-                <Button
-                  isDisabled={
-                    busy ||
-                    !notes.data?.items.some((n) => n.status === 'complete')
-                  }
-                  onPress={handleDownload}
-                >
-                  导出 ZIP（可选）
-                </Button>
+              )}
+            </div>
+            <p className="mt-2 text-xs text-neutral-500">
+              选中笔记逐篇保存正文和 image 图片，ZIP
+              可单独导出。文件夹只管理订阅，不改变保存目录。
+            </p>
+          </details>
+        </div>
+        {searchOpen && (
+          <div className="px-4 py-2">
+            <Input
+              aria-label="搜索笔记标题"
+              placeholder="搜索笔记标题…"
+              value={search}
+              onValueChange={handleSearch}
+              isDisabled={busy}
+            />
+          </div>
+        )}
+        <div className="px-4 py-2 text-xs text-neutral-500">
+          当前{search ? '筛选' : '博主'} {visibleNotes.length} 篇；已选择{' '}
+          {selectedNotes.length} 篇完整图文。{search && '修改搜索会清空选择。'}
+        </div>
+        {notes.error && (
+          <p role="alert" className="px-4 py-2 text-sm">
+            笔记列表读取失败，既有归档未改动。
+          </p>
+        )}
+        <div className="flex-1 overflow-y-auto">
+          <div className="compact-list">
+            <div className="compact-list-header !flex-wrap">
+              <div className="compact-col-check">
+                <Checkbox
+                  size="sm"
+                  aria-label="选择筛选结果全部完整笔记"
+                  isDisabled={busy || !selectableNotes.length}
+                  isSelected={allSelected}
+                  isIndeterminate={!allSelected && selectedNotes.length > 0}
+                  onValueChange={(value) => {
+                    if (!active.current)
+                      setSelectedIds(
+                        value
+                          ? new Set(selectableNotes.map((note) => note.id))
+                          : new Set(),
+                      );
+                  }}
+                />
               </div>
-              <p className="text-default-500 text-sm">
-                {saveSettings
-                  ? `本机目录：${saveSettings.directory}；按下载日期建目录，每篇正文.md 和 image/，无需解压。`
-                  : '本机保存仅在桌面本地访问时可用；保存目录沿用文章下载工具的设置。'}
+              <div className="compact-col-title">笔记标题</div>
+              <div className="hidden text-xs md:block">发布时间 · 归档状态</div>
+            </div>
+            {visibleNotes.map((note) => (
+              <div key={note.id} className="compact-row article-row !flex-wrap">
+                <div className="compact-col-check">
+                  <Checkbox
+                    size="sm"
+                    aria-label={`选择笔记 ${note.title}`}
+                    isDisabled={busy || note.status !== 'complete'}
+                    isSelected={selectedIds.has(note.id)}
+                    onValueChange={(value) => selectNote(note.id, value)}
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={busy || note.status !== 'complete'}
+                  className="compact-title min-w-0 break-words text-left text-[15px] hover:text-[#007AFF] disabled:text-neutral-500"
+                  onClick={() => {
+                    if (!active.current) setNoteId(note.id);
+                  }}
+                >
+                  {note.title}
+                </button>
+                <div className="ml-auto flex shrink-0 flex-col items-end gap-1 py-1 text-xs text-neutral-500">
+                  <span>
+                    {note.publishTime > 0
+                      ? dayjs(note.publishTime * 1000).format(
+                          'YYYY-MM-DD HH:mm',
+                        )
+                      : '发布时间未知'}
+                  </span>
+                  <span>
+                    {note.status === 'complete' ? '完整图文' : '视频未归档'}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {notes.isLoading && current && (
+              <div className="flex justify-center p-4">
+                <Spinner size="sm" />
+              </div>
+            )}
+            {!notes.isLoading && !notes.error && !visibleNotes.length && (
+              <p className="p-10 text-center text-sm text-neutral-400">
+                {!current
+                  ? '选择一个博主查看笔记。'
+                  : search
+                    ? '没有匹配的笔记。'
+                    : '暂无已归档笔记，接入真实数据源后才能更新。'}
               </p>
-              {notes.error && (
-                <p role="alert">内容列表读取失败，已有归档未改动。</p>
-              )}
-              {notes.data?.items.length === 0 && (
-                <p>尚无已归档笔记；接入真实数据源后才能更新。</p>
-              )}
-              <ul className="space-y-2">
-                {notes.data?.items.map((n) => (
-                  <li key={n.id}>
-                    <button
-                      type="button"
-                      disabled={n.status !== 'complete'}
-                      className="w-full break-words text-left"
-                      onClick={() => setNoteId(n.id)}
-                    >
-                      {n.title} ·{' '}
-                      {new Date(n.publishTime * 1000).toLocaleDateString()} ·{' '}
-                      {n.status === 'complete' ? '完整图文' : '视频未归档'}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              {body.error && (
-                <p role="alert">正文未能读取；未向远端请求图片。</p>
-              )}
-              {body.data && (
+            )}
+          </div>
+        </div>
+      </section>
+      <Modal
+        isOpen={adding}
+        onClose={() => {
+          if (!active.current) setAdding(false);
+        }}
+      >
+        <ModalContent>
+          <ModalHeader>添加小红书博主</ModalHeader>
+          <ModalBody>
+            <p className="text-sm text-neutral-500">
+              保存公开主页待接入记录，不会自动登录或读取笔记。
+            </p>
+            <Input
+              label="博主备注名称"
+              value={displayName}
+              onValueChange={setDisplayName}
+              isDisabled={busy}
+              maxLength={120}
+            />
+            <Input
+              label="小红书公开主页链接"
+              value={profileUrl}
+              onValueChange={setProfileUrl}
+              isDisabled={busy}
+              maxLength={2000}
+            />
+            {message && <p role="status">{message}</p>}
+          </ModalBody>
+          <ModalFooter>
+            <Button
+              variant="flat"
+              isDisabled={busy}
+              onPress={() => setAdding(false)}
+            >
+              取消
+            </Button>
+            <Button
+              color="primary"
+              isDisabled={busy || !displayName.trim() || !profileUrl.trim()}
+              onPress={handleAdd}
+            >
+              保存待接入博主
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+      <Modal
+        isOpen={!!noteId}
+        onClose={() => {
+          if (!active.current) setNoteId('');
+        }}
+        size="4xl"
+        scrollBehavior="inside"
+        classNames={{ wrapper: 'z-[200]', backdrop: 'z-[190]' }}
+      >
+        <ModalContent>
+          <ModalHeader>{body.data?.title || '读取已保存正文'}</ModalHeader>
+          <ModalBody>
+            <p className="text-sm text-neutral-500">
+              读取已归档正文与图片，本次没有联网取文。
+            </p>
+            {body.isLoading ? (
+              <Spinner />
+            ) : body.error ? (
+              <p role="alert">正文未能读取，未向远端请求图片。</p>
+            ) : (
+              body.data && (
                 <article className="space-y-3">
-                  <h3>{body.data.title}</h3>
                   <p className="whitespace-pre-wrap break-words">
                     {body.data.text}
                   </p>
@@ -387,13 +802,11 @@ export default function Xiaohongshu() {
                     />
                   ))}
                 </article>
-              )}
-            </>
-          ) : (
-            <p>选择一个待接入博主。</p>
-          )}
-        </section>
-      </div>
+              )
+            )}
+          </ModalBody>
+        </ModalContent>
+      </Modal>
     </main>
   );
 }
