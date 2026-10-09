@@ -54,6 +54,8 @@ jobs:
         run: node --test scripts/account-login-ui.test.cjs
       - name: Test unavailable new-subscription source and retained input offline
         run: node --test scripts/feed-add-ui.test.cjs
+      - name: Test closed Sites metadata contract offline
+        run: node --test scripts/sites-local-contract.test.mjs
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
       - name: Test single-article official verification UI offline
