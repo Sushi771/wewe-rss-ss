@@ -7,6 +7,10 @@ import {
   buildCompleteArticleDownload,
   verifiedDownloadBody,
 } from './article-verified-download';
+import {
+  prepareXhsVideoDownload,
+  XhsVerifiedVideoCache,
+} from './xhs-video-download';
 
 export const XHS_SINGLE_SOURCE = Symbol('XHS_SINGLE_SOURCE');
 
@@ -15,10 +19,13 @@ export const XHS_SINGLE_SOURCE = Symbol('XHS_SINGLE_SOURCE');
  * No production adapter or short-link resolver is registered by default.
  */
 export interface XhsSingleSource {
+  /** Declared only by a verified adapter; default registration remains absent. */
+  videoEvidenceSupported?: boolean;
   read(url: string): Promise<{
     requestedUrl: string;
     evidenceVerified: boolean;
     note: XhsNormalizedCandidate;
+    video?: XhsVerifiedVideoCache['video'];
   }>;
 }
 
@@ -65,6 +72,12 @@ export function prepareXhsSingleDownload(
   try {
     if (result.requestedUrl !== url || result.evidenceVerified !== true)
       throw new Error();
+    if (result.note.kind === 'video' && result.video)
+      return prepareXhsVideoDownload({
+        evidenceVerified: result.evidenceVerified,
+        note: result.note,
+        video: result.video,
+      });
     const draft = xhsArchiveDraft(result.note.authorId, result.note);
     if (draft.status === 'video-skipped')
       throw new ArticleDownloadError(

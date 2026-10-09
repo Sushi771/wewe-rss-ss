@@ -14,6 +14,14 @@ import * as picker from './article-folder-picker';
 import { LocalArticleStore } from './article-local-save';
 import { XHS_SINGLE_SOURCE, XhsSingleSource } from './xhs-single-download';
 import { XhsNormalizedCandidate } from './collection/xiaohongshu-contract';
+import { createHash } from 'node:crypto';
+
+// Synthetic AVC-labelled sample container shared in meaning with the video
+// contract fixture; it verifies HTTP/file transport, never successful decoding.
+const mp4 = Buffer.from(
+  'AAAAGGZ0eXBpc29tAAAAAGlzb21hdmMxAAACC21vb3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAPoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGXdHJhawAAAFx0a2hkAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAPoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAEAAAAAABM21kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAA+gAAAPoAAAAAAAAACBoZGxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAAAAA621pbmYAAADjc3RibAAAAHtzdHNkAAAAAAAAAAEAAABrYXZjMQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAQABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABVhdmNDAUIACv/hAAFnAQABaAAAABhzdHRzAAAAAAAAAAEAAAABAAAD6AAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAYc3RzegAAAAAAAAAAAAAAAQAAAAgAAAAUc3RjbwAAAAAAAAABAAACKwAAABBtZGF0AAAABGWIhCE=',
+  'base64',
+);
 
 const url =
   'https://www.xiaohongshu.com/explore/note-a?xsec_token=private-fixture';
@@ -83,7 +91,7 @@ describe('XHS single tool and bounded cache batch use original local publication
       )
     ).flat();
   };
-  const boot = async (withSource = true) => {
+  const boot = async (withSource = true, videoEvidenceSupported = false) => {
     const module = await Test.createTestingModule({
       controllers: [ArticleDownloadController],
       providers: [
@@ -94,7 +102,12 @@ describe('XHS single tool and bounded cache batch use original local publication
         },
         { provide: PrismaService, useValue: { xhsNote: { findFirst } } },
         ...(withSource
-          ? [{ provide: XHS_SINGLE_SOURCE, useValue: { read: sourceRead } }]
+          ? [
+              {
+                provide: XHS_SINGLE_SOURCE,
+                useValue: { read: sourceRead, videoEvidenceSupported },
+              },
+            ]
           : []),
       ],
     }).compile();
@@ -143,6 +156,68 @@ describe('XHS single tool and bounded cache batch use original local publication
     )
       throw new Error('UNSAFE_FIXTURE_CLEANUP');
     await fs.rm(temporary, { recursive: true, force: true });
+  });
+
+  it('saves internal video bytes through authenticated HTTP and reports container evidence without decoding', async () => {
+    await app.close();
+    await boot(true, true);
+    sourceResult.note.kind = 'video';
+    const sha256 = createHash('sha256').update(mp4).digest('hex');
+    sourceResult.video = {
+      bytes: mp4,
+      expectedBytes: mp4.length,
+      sha256,
+      mimeType: 'video/mp4',
+      complete: true,
+    };
+    expect((await get(singlePath)).body.videoAvailable).toBe(true);
+    const saved = await post(singlePath, { url });
+    expect(saved.status).toBe(200);
+    expect(saved.body).toMatchObject({
+      saved: true,
+      videoCount: 1,
+      videoArchived: true,
+      videoDecoded: false,
+      videoVerification: 'container-and-bytes',
+    });
+    const folder = dirname(saved.body.markdownPath);
+    const filename = 'video_' + sha256 + '.mp4';
+    expect(await fs.readFile(join(folder, 'video', filename))).toEqual(mp4);
+    const markdown = await fs.readFile(saved.body.markdownPath, 'utf8');
+    expect(markdown).toContain('(video/' + filename + ')');
+    expect(markdown).not.toContain('private-fixture');
+    const marker = JSON.parse(
+      await fs.readFile(join(folder, '.wewe-article.json'), 'utf8'),
+    );
+    expect(marker.videos).toEqual([{ filename, bytes: mp4.length, sha256 }]);
+    await fs.appendFile(saved.body.markdownPath, '\nuser note kept\n');
+    const repeated = await post(singlePath, { url });
+    expect(repeated.body).toMatchObject({
+      alreadySaved: true,
+      videoCount: 1,
+      videoDecoded: false,
+    });
+    expect(repeated.body.markdownPath).toBe(saved.body.markdownPath);
+    expect(await fs.readFile(saved.body.markdownPath, 'utf8')).toContain(
+      'user note kept',
+    );
+  });
+
+  it('refuses mismatched declared video bytes without publishing a note or accepting uploaded media', async () => {
+    sourceResult.note.kind = 'video';
+    sourceResult.video = {
+      bytes: mp4,
+      expectedBytes: mp4.length + 1,
+      sha256: createHash('sha256').update(mp4).digest('hex'),
+      mimeType: 'video/mp4',
+      complete: true,
+    };
+    expect((await post(singlePath, { url })).status).toBe(422);
+    expect(await files()).toEqual([]);
+    expect(
+      (await post(singlePath, { url, video: mp4.toString('base64') })).status,
+    ).toBe(400);
+    expect(await files()).toEqual([]);
   });
 
   it('prevalidates every creator-bound cached identity before any batch files', async () => {

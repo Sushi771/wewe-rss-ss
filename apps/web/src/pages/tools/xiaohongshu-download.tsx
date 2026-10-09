@@ -4,11 +4,16 @@ import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
 
 type Settings = { directory: string; askEveryTime: boolean };
-type Capability = { available: boolean; message: string };
+type Capability = {
+  available: boolean;
+  videoAvailable?: boolean;
+  message: string;
+};
 type Saved = {
   markdownPath: string;
   alreadySaved: boolean;
   imageCount: number;
+  videoCount?: number;
 };
 
 export default function XiaohongshuDownload() {
@@ -151,7 +156,9 @@ export default function XiaohongshuDownload() {
         >
           {capability?.message || '正在读取单篇取文能力。'}
           <p className="text-default-500 mt-2">
-            视频暂未归档；短链接解析尚未接入。
+            {capability?.videoAvailable
+              ? '视频缓存另核字节和容器结构；真实完整性与可播放性仍须来源验收。'
+              : '真实视频来源未接入；短链接解析尚未接入。'}
           </p>
         </div>
         <form onSubmit={download} className="mt-8 space-y-5" aria-busy={busy}>
@@ -216,7 +223,7 @@ export default function XiaohongshuDownload() {
               busy || !settings || !url.trim() || !capability?.available
             }
           >
-            保存正文和图片
+            {capability?.videoAvailable ? '保存正文和媒体' : '保存正文和图片'}
           </Button>
           {!settings && (
             <Button
@@ -261,7 +268,9 @@ export default function XiaohongshuDownload() {
               <p role="status" className="font-medium">
                 {saved.alreadySaved
                   ? '已保存，保留现有笔记'
-                  : '正文和图片已保存到本地'}
+                  : saved.videoCount
+                    ? '正文和媒体缓存已保存到本地'
+                    : '正文和图片已保存到本地'}
               </p>
               <p className="text-default-600 mt-2 break-all text-sm">
                 {saved.markdownPath}
@@ -270,6 +279,12 @@ export default function XiaohongshuDownload() {
                 {saved.imageCount} 张图片位于同篇目录的
                 image/，可直接打开正文.md。
               </p>
+              {!!saved.videoCount && (
+                <p className="text-default-600 mt-2 text-sm">
+                  {saved.videoCount} 个视频文件位于同篇 video/，正文含相对链接。
+                  本次已核字节与容器结构，未核解码可播放性。
+                </p>
+              )}
             </div>
           )}
         </div>

@@ -4,13 +4,13 @@
 
 本轮代码已接入两平台共用的单层命名文件夹：桌面可拖动作者到文件夹，两端可勾选后批量移动。文件夹是应用自有元数据，引用原本地 Feed/博主 ID，平台隔离；切换来源不重建分组，移动分组不搬动旧下载文件。两平台复用管理外壳、紧凑工具栏和可勾选列表，小红书添加入口收进“+”窗口。手机侧栏默认收起，使用顶部选择器及展开管理按钮；新布局尚未做真实浏览器视觉验收。
 
-工具页并列“公众号单篇下载”和“小红书单篇下载”，后者无需订阅。小红书单篇内部来源 XHS_SINGLE_SOURCE 默认未注册；没有可信解析结果时拒绝保存，不把 URL 推导为已核笔记。订阅缓存勾选保存和单篇入口复用原目录选择、记住目录与每次询问设置，每篇独立保存正文.md 和 image/，重复回执区分新增保存与已有。先核整批身份与内容，再逐篇保存；失败停止，已完成文件保留。视频当前没有已核字节或落盘合同，明确未归档；用户要求的视频能力仍待实现和实测。
+工具页并列“公众号单篇下载”和“小红书单篇下载”，后者无需订阅。小红书单篇内部来源 XHS_SINGLE_SOURCE 默认未注册；没有可信解析结果时拒绝保存，不把 URL 推导为已核笔记。订阅缓存勾选保存和单篇入口复用原目录选择、记住目录与每次询问设置，每篇独立保存正文.md 和 image/，重复回执区分新增保存与已有。先核整批身份与内容，再逐篇保存；失败停止，已完成文件保留。内部视频缓存保存合同已补：服务器已取得的 MP4 字节可经身份、正文/封面、长度/hash及容器/样本检查后，复用原保存器存入同篇 video/，正文含相对链接。最多一个视频、100MB，清单记录字节长度与SHA256，重复与失败保护沿用原保存器。默认真实来源未注册；订阅视频缓存模型及真实适配尚未接入。容器结构通过不等于解码可播放或真实上游完整，返回 decoded:false。
 
 追加 management_groups 表及 Feed/XhsCreator 的可空 group_id，不修改旧 ID、旧正文或来源绑定。写入前备份；跨平台移动、非空文件夹删除、重复提交拒绝。启动与副本核验同步保护分组表及成员关系；原单篇导入兼容四表、六表、七表完整结构，未知/不完整结构和演练后任何缓存或分组漂移均停止。
 
 Sites 本地合同已扩展缓存正文/图片、单篇离线 HTML Blob、受限手动刷新与状态查询，36项离线测试通过。图片只接受已有缓存的合法 data URI 字节，无网络回退；公众号解析须绑定原 verifiedDownloadBody 与 Cheerio。刷新仅执行已保存的同一来源，operationId 在当前进程内不重放；已提交后结果不确定不重试。默认身份、PC传输、缓存解析绑定及账号/预算策略均未配置，未挂载服务。HTML Blob 保存到浏览器设备，不替代本机正文/图片/视频文件夹归档。
 
-已合入原草稿 PR2 的工作分支，生产库未迁移、生产服务未更新。本轮离线测试及候选构建不能证明真实来源或订阅恢复。此前隔离 Edge 的核心流程与合成文图保存结果属于旧页面版本；新统一界面、文件夹及独立工具真实视觉仍待验。确认移除仍待原生审批，未重复触发。真实供应商适配、视频保存及 Sites 实际身份/传输/页面仍有代码与授权缺口。
+已合入原草稿 PR2 的工作分支，生产库未迁移、生产服务未更新。本轮离线测试及候选构建不能证明真实来源或订阅恢复。此前隔离 Edge 的核心流程与合成文图保存结果属于旧页面版本；新统一界面、文件夹及独立工具真实视觉仍待验。确认移除仍待原生审批，未重复触发。真实供应商适配、订阅视频缓存接线、视频解码/上游完整性及 Sites 实际身份/传输/页面仍有代码与授权缺口。
 
 2026-10-09 · 已有接口与拟新增契约分开 · [返回总览](../PAID_MULTIPLATFORM_PLAN.md)
 
@@ -109,6 +109,12 @@ Sites 同步采用最小展示 DTO，不同步生产数据库、账号表、toke
 
 feed.groups/saveGroup/removeGroup/moveFeeds 与 xiaohongshu.groups/saveGroup/removeGroup/moveCreators 复用原受保护 router。saveGroup 接收 id（重命名时）和 name；moveFeeds/moveCreators 接收 ids 与 groupId（null 为未分组），仅使用本平台已存在本地主键，最多100项，去重后原子移动。列表可按 groupId 过滤，不传为全部、null 为未分组。非空文件夹拒绝删除，不增加父级字段。
 
-POST /download/article/xiaohongshu/save 接收 creatorId、noteIds（1–100）与可选 pickToken，不接受本机路径或正文上传；返回 savedCount、alreadySavedCount。选中 ZIP 使用原 export 的 noteIds 参数。独立单篇 GET/POST /download/article/xiaohongshu/single 使用服务器可选 XHS_SINGLE_SOURCE，默认拒绝；来源必须核绑定、真实身份时间和完整正文/图片字节，无订阅写库。视频返回未归档。工具 route 为 /dash/tools/xiaohongshu-download，与公众号工具共用页内导航。
+POST /download/article/xiaohongshu/save 接收 creatorId、noteIds（1–100）与可选 pickToken，不接受本机路径或正文上传；返回 savedCount、alreadySavedCount。选中 ZIP 使用原 export 的 noteIds 参数。独立单篇 GET/POST /download/article/xiaohongshu/single 使用服务器可选 XHS_SINGLE_SOURCE，默认拒绝；来源必须核绑定、真实身份时间和完整正文/图片字节，无订阅写库。未交付视频字节时返回未归档；已有服务器内部 MP4 缓存可走有界保存合同，不接受浏览器上传视频。工具 route 为 /dash/tools/xiaohongshu-download，与公众号工具共用页内导航。
 
 Sites 分组展示仍待绑定上述应用路由，不能把来源返回字段当文件夹主键。当前 operationId 去重是进程内保证，跨重启持久去重未实现；不得在实际计费连接中宣称永久幂等。
+
+## 视频内部单篇缓存保存
+
+XhsSingleSource.read 的可选 video 只由服务器内部适配提供：complete、mimeType=video/mp4、bytes（Buffer）、expectedBytes、sha256，仍须 requestedUrl 严格匹配、真实身份/时间及 evidenceVerified。prepareXhsVideoDownload 要求 full 正文及全部封面图片，最多100MB、1个非分片 AVC MP4；拒绝缺轨道、空样本、样本/mdat映射不符、加密或不支持的格式。容器与样本边界检查不是视频解码器。
+
+LocalArticleStore 保持旧图文 callback/marker 兼容，可选 videoCount=1，哈希文件名 video\_<SHA256>.mp4；只接受普通文件，不接受链接或浏览器路径，校对实际字节和正文相对引用。清单 videos 保存 filename/bytes/sha256，重复前核旧文件；损坏旧文件保留另存副本，部分写入回滚本请求文件。HTTP 保存结果有 videoArchived、videoCount，且 videoDecoded:false/videoVerification=container-and-bytes。来源须单独声明 videoEvidenceSupported 才展示视频能力；产品默认源仍为空。订阅模型仍不归档视频，未取得真实可播放/全视频证据。

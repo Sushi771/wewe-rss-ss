@@ -572,9 +572,13 @@ export class ArticleDownloadController implements OnModuleDestroy {
       platform: 'xiaohongshu',
       available:
         !!this.xhsSingleSource && process.env.WEWE_ACCEPTANCE_MODE !== '1',
-      videoAvailable: false,
+      videoAvailable:
+        this.xhsSingleSource?.videoEvidenceSupported === true &&
+        process.env.WEWE_ACCEPTANCE_MODE !== '1',
       message: this.xhsSingleSource
-        ? '可核验单篇图文并保存；视频尚未接入。'
+        ? this.xhsSingleSource.videoEvidenceSupported === true
+          ? '可保存已核完整缓存；视频另核字节与容器结构，不代表解码验收。'
+          : '可核验单篇图文并保存；真实视频来源尚未接入。'
         : '单篇取文能力未接入，尚不能保存真实笔记。',
     });
   }
@@ -630,7 +634,10 @@ export class ArticleDownloadController implements OnModuleDestroy {
         saved: true,
         ...result,
         contentSource: 'verified-xiaohongshu-single',
-        videoArchived: false,
+        videoArchived: (result.videoCount || 0) > 0,
+        ...((result.videoCount || 0) > 0
+          ? { videoDecoded: false, videoVerification: 'container-and-bytes' }
+          : {}),
       });
     } catch (error) {
       return this.failure(error, res);

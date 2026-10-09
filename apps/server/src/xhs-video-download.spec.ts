@@ -225,6 +225,14 @@ describe('server-only MP4 cache contract and original local saver, zero network'
         value.video.complete = false;
       },
       (value) => {
+        (value.video as { mimeType: string }).mimeType = 'image/png';
+      },
+      (value) => {
+        (value.video as { bytes: unknown }).bytes = new Uint8Array(
+          value.video.bytes,
+        );
+      },
+      (value) => {
         value.video.expectedBytes++;
       },
       (value) => {
@@ -241,6 +249,15 @@ describe('server-only MP4 cache contract and original local saver, zero network'
       mutate(value);
       expect(() => prepareXhsVideoDownload(value)).toThrow();
     }
+  });
+
+  it('rejects a real oversized in-memory video before publishing any files', async () => {
+    const value = input();
+    value.video.bytes = Buffer.alloc(100_000_001);
+    value.video.expectedBytes = value.video.bytes.length;
+    value.video.sha256 = hash(value.video.bytes);
+    expect(() => prepareXhsVideoDownload(value)).toThrow();
+    await expect(fs.access(root)).rejects.toThrow();
   });
 
   it('writes real Markdown/PNG/MP4 files and a matching manifest, preserves repeats and snapshots producer buffers', async () => {
