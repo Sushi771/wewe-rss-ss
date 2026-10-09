@@ -155,7 +155,7 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     state.creator = 'b';
     finish({ message: '窗口已完成', added: 1, status: 'complete' });
     await update;
-    expect(state.message).toBe('博主A：窗口已完成 新增完整图文：1');
+    expect(state.message).toBe('博主A：窗口已完成 新增完整缓存笔记：1');
     expect(scope.receipts.current.a).toBe(state.message);
     expect(text).toMatch(
       /disabled=\{busy\}[\s\S]*?aria-pressed=\{creatorId === creator.id\}/,
@@ -166,7 +166,7 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     expect(state.creator).toBe('a');
     expect(text).toContain('if (active.current) return;');
   });
-  it('uses cached-note ID local save as the primary flow, skips videos and creates no browser ZIP', async () => {
+  it('uses selected complete cached-note IDs for local save and creates no browser ZIP', async () => {
     const { scope, state } = harness();
     scope.current = { id: 'a', displayName: '博主A' };
     scope.saveSettings = {
@@ -433,7 +433,122 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     expect(link.click).toHaveBeenCalledTimes(1);
     expect(link.remove).toHaveBeenCalledTimes(1);
     expect(scope.URL.revokeObjectURL).toHaveBeenCalledWith('blob:synthetic');
-    expect(state.message).toContain('2 篇完整图文 ZIP');
+    expect(state.message).toContain('2 篇完整缓存笔记 ZIP');
+  });
+  it('includes complete cached video in selection and excludes video without a complete archive', () => {
+    const selectedNotes = evaluate('selectedNotes', {
+      visibleNotes: [
+        { id: 'image', kind: 'image-text', status: 'complete' },
+        { id: 'video', kind: 'video', status: 'complete' },
+        { id: 'pending-video', kind: 'video', status: 'video-skipped' },
+      ],
+      selectedIds: new Set(['image', 'video', 'pending-video']),
+    });
+    expect(selectedNotes.map((note: { id: string }) => note.id)).toEqual([
+      'image',
+      'video',
+    ]);
+  });
+  it.each([
+    ['image-text', 0],
+    ['video', 1],
+  ])(
+    'sends complete %s IDs through the original batch save and displays confirmed video count %i',
+    async (kind, videoCount) => {
+      const { scope, state } = harness();
+      scope.current = { id: 'a', displayName: '博主A' };
+      scope.saveSettings = { directory: 'old', askEveryTime: false };
+      scope.selectedNotes = [{ id: 'one', status: 'complete', kind }];
+      scope.localApi = jest.fn().mockResolvedValue({
+        saved: true,
+        savedCount: 1,
+        alreadySavedCount: 0,
+        videoCount,
+        ...(videoCount
+          ? { videoDecoded: false, videoVerification: 'container-and-bytes' }
+          : {}),
+      });
+      await evaluate('handleLocalSave', scope)();
+      expect(scope.localApi.mock.calls).toEqual([
+        ['/xiaohongshu/save', { creatorId: 'a', noteIds: ['one'] }],
+      ]);
+      expect(state.message).toContain('新增保存 1 篇');
+      if (videoCount) {
+        expect(state.message).toContain('1 篇含已归档 video 文件');
+        expect(state.message).toContain('尚未解码或播放');
+      } else {
+        expect(state.message).toContain('本批次不含已归档视频');
+        expect(state.message).not.toContain('含已归档 video 文件');
+      }
+    },
+  );
+  it('confirms existing video without treating it as newly saved or decoded', async () => {
+    const { scope, state } = harness();
+    scope.current = { id: 'a', displayName: '博主A' };
+    scope.saveSettings = { directory: 'old', askEveryTime: false };
+    scope.selectedNotes = [{ id: 'one', status: 'complete', kind: 'video' }];
+    scope.localApi = jest.fn().mockResolvedValue({
+      saved: true,
+      savedCount: 0,
+      alreadySavedCount: 1,
+      videoCount: 1,
+      videoDecoded: false,
+      videoVerification: 'container-and-bytes',
+    });
+    await evaluate('handleLocalSave', scope)();
+    expect(state.message).toContain('新增保存 0 篇，已有保存 1 篇');
+    expect(state.message).toContain('1 篇含已归档 video 文件（含已有保存）');
+    expect(state.message).toContain('尚未解码或播放');
+  });
+  it.each([
+    {},
+    { videoCount: 0 },
+    { videoCount: -1 },
+    { videoCount: 0.5 },
+    { videoCount: 2 },
+    { videoCount: null },
+    { videoCount: 1 },
+    {
+      videoCount: 1,
+      videoDecoded: true,
+      videoVerification: 'container-and-bytes',
+    },
+    { videoCount: 1, videoDecoded: false, videoVerification: 'unknown' },
+  ])(
+    'keeps unconfirmed or mismatched video evidence out of the success receipt (%j)',
+    async (evidence) => {
+      const { scope, state } = harness();
+      scope.current = { id: 'a', displayName: '博主A' };
+      scope.saveSettings = { directory: 'old', askEveryTime: false };
+      scope.selectedNotes = [{ id: 'one', status: 'complete', kind: 'video' }];
+      scope.localApi = jest.fn().mockResolvedValue({
+        saved: true,
+        savedCount: 1,
+        alreadySavedCount: 0,
+        ...evidence,
+      });
+      await evaluate('handleLocalSave', scope)();
+      expect(state.message).toContain('未完成');
+      expect(state.message).not.toContain('新增保存');
+      expect(scope.localApi).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('labels cached video honestly and renders metadata and cover only without requesting media', () => {
+    const status = evaluate('noteStatus', {});
+    expect(status({ status: 'complete', kind: 'video' })).toBe(
+      '视频缓存（结构字节已核，未解码/播放）',
+    );
+    expect(status({ status: 'complete', kind: 'image-text' })).toBe('图文缓存');
+    expect(status({ status: 'video-skipped', kind: 'video' })).toBe(
+      '视频未归档',
+    );
+    expect(text).not.toContain('完整图文');
+    expect(text).toContain('body.data.video.bytes');
+    expect(text).toContain('本页不加载视频字节');
+    expect(text).not.toMatch(
+      /<video\b|video\/mp4;base64|video\.bytes\.toString|video\.url|createElement\(['"]video/,
+    );
+    expect(text).toContain('body.data.images.map');
   });
 });
 

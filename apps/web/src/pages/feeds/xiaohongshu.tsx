@@ -127,6 +127,17 @@ export default function Xiaohongshu() {
   const selectedNotes = visibleNotes.filter(
     (note) => note.status === 'complete' && selectedIds.has(note.id),
   );
+  const noteStatus = (note: {
+    status: string;
+    kind: 'image-text' | 'video';
+  }) =>
+    note.status === 'complete'
+      ? note.kind === 'video'
+        ? '视频缓存（结构字节已核，未解码/播放）'
+        : '图文缓存'
+      : note.kind === 'video' || note.status === 'video-skipped'
+        ? '视频未归档'
+        : '正文或图片未归档';
   const allSelected =
     selectableNotes.length > 0 &&
     selectableNotes.every((note) => selectedIds.has(note.id));
@@ -197,7 +208,7 @@ export default function Xiaohongshu() {
       creators.data?.items.find((creator) => creator.id === id)?.displayName ||
       '已选博主';
     receipts.current[id] =
-      name + '：' + result.message + ' 新增完整图文：' + result.added;
+      name + '：' + result.message + ' 新增完整缓存笔记：' + result.added;
     await Promise.all([
       utils.xiaohongshu.list.invalidate(),
       utils.xiaohongshu.notes.invalidate(),
@@ -250,7 +261,7 @@ export default function Xiaohongshu() {
         URL.revokeObjectURL(url);
       }
       setMessage(
-        `${current.displayName}：已导出选中的 ${result.notes} 篇完整图文 ZIP。`,
+        `${current.displayName}：已导出选中的 ${result.notes} 篇完整缓存笔记 ZIP。`,
       );
     });
   const handleLocalSave = () =>
@@ -274,6 +285,9 @@ export default function Xiaohongshu() {
         saved: boolean;
         savedCount: number;
         alreadySavedCount: number;
+        videoCount?: number;
+        videoDecoded?: boolean;
+        videoVerification?: string;
       }>('/xiaohongshu/save', {
         creatorId: current.id,
         noteIds: selectedNotes.map((note) => note.id),
@@ -288,8 +302,22 @@ export default function Xiaohongshu() {
         result.savedCount + result.alreadySavedCount !== selectedNotes.length
       )
         throw new Error('本机保存数量未确认，请核对已保存内容。');
+      const videoCount =
+        result.videoCount === undefined ? 0 : result.videoCount;
+      const selectedVideoCount = selectedNotes.filter(
+        (note) => note.kind === 'video',
+      ).length;
+      if (
+        !Number.isInteger(videoCount) ||
+        videoCount < 0 ||
+        videoCount !== selectedVideoCount ||
+        (videoCount > 0 &&
+          (result.videoDecoded !== false ||
+            result.videoVerification !== 'container-and-bytes'))
+      )
+        throw new Error('本机视频保存数量或核验状态未确认，请核对已保存内容。');
       setMessage(
-        `${current.displayName}：本次新增保存 ${result.savedCount} 篇，已有保存 ${result.alreadySavedCount} 篇；每篇正文和 image 图片位于独立目录。`,
+        `${current.displayName}：本次新增保存 ${result.savedCount} 篇，已有保存 ${result.alreadySavedCount} 篇；每篇独立目录保存正文与 image 图片（有图时）。${videoCount > 0 ? `其中 ${videoCount} 篇含已归档 video 文件（含已有保存）；视频结构字节已核，尚未解码或播放。` : '本批次不含已归档视频。'}`,
       );
     });
   const handleChooseDirectory = () =>
@@ -610,7 +638,7 @@ export default function Xiaohongshu() {
               : capability.data?.message || '正在确认来源状态…'}
           </p>
           <p className="text-xs text-neutral-500">
-            添加博主只保存待接入记录。未取得视频时显示“视频未归档”，不会将其标成完整或保存成功。
+            添加博主只保存待接入记录。完整视频缓存仅核验结构与字节，尚未解码或播放；未取得视频仍显示“视频未归档”。
           </p>
           {message && (
             <p role="status" className="break-words">
@@ -663,7 +691,8 @@ export default function Xiaohongshu() {
               )}
             </div>
             <p className="mt-2 text-xs text-neutral-500">
-              选中笔记逐篇保存正文和 image 图片，ZIP
+              选中笔记逐篇保存正文、image 图片（有图时）及 video
+              文件（有视频时），ZIP
               可单独导出。文件夹只管理订阅，不改变保存目录。
             </p>
           </details>
@@ -681,7 +710,8 @@ export default function Xiaohongshu() {
         )}
         <div className="px-4 py-2 text-xs text-neutral-500">
           当前{search ? '筛选' : '博主'} {visibleNotes.length} 篇；已选择{' '}
-          {selectedNotes.length} 篇完整图文。{search && '修改搜索会清空选择。'}
+          {selectedNotes.length} 篇完整缓存笔记。
+          {search && '修改搜索会清空选择。'}
         </div>
         {notes.error && (
           <p role="alert" className="px-4 py-2 text-sm">
@@ -740,8 +770,8 @@ export default function Xiaohongshu() {
                         )
                       : '发布时间未知'}
                   </span>
-                  <span>
-                    {note.status === 'complete' ? '完整图文' : '视频未归档'}
+                  <span className="max-w-[150px] whitespace-normal text-right">
+                    {noteStatus(note)}
                   </span>
                 </div>
               </div>
@@ -822,7 +852,7 @@ export default function Xiaohongshu() {
           <ModalHeader>{body.data?.title || '读取已保存正文'}</ModalHeader>
           <ModalBody>
             <p className="text-sm text-neutral-500">
-              读取已归档正文与图片，本次没有联网取文。
+              读取已归档正文与图片；视频笔记仅显示正文和封面，本次没有联网取文或加载视频。
             </p>
             {body.isLoading ? (
               <Spinner />
@@ -831,6 +861,13 @@ export default function Xiaohongshu() {
             ) : (
               body.data && (
                 <article className="space-y-3">
+                  {body.data.kind === 'video' && body.data.video && (
+                    <p className="text-sm text-neutral-500">
+                      已缓存视频 {body.data.video.bytes.toLocaleString()}{' '}
+                      字节，结构字节已核，尚未解码或播放。保存到本机会包含
+                      video/ 文件；本页不加载视频字节。
+                    </p>
+                  )}
                   <p className="whitespace-pre-wrap break-words">
                     {body.data.text}
                   </p>
@@ -838,7 +875,7 @@ export default function Xiaohongshu() {
                     <img
                       key={index}
                       src={src}
-                      alt={`第 ${index + 1} 张归档图片`}
+                      alt={`第 ${index + 1} 张归档${body.data?.kind === 'video' ? '封面' : '图片'}`}
                       className="h-auto max-w-full"
                     />
                   ))}
