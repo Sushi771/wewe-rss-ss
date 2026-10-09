@@ -15,16 +15,22 @@ function readEnvFile(file) {
   ).parse;
   return parseEnv(fs.readFileSync(file));
 }
-if (fs.existsSync(privateEnv)) {
-  const values = readEnvFile(privateEnv);
-  for (const key of [
-    'WECHAT2RSS_BASE_URL',
-    'WECHAT2RSS_TOKEN',
-    'WECHAT2RSS_ENABLED',
-  ]) {
-    if (process.env[key] === undefined && values[key] !== undefined)
-      process.env[key] = values[key];
+let privateConfigReadFailed = false;
+try {
+  if (fs.existsSync(privateEnv)) {
+    const values = readEnvFile(privateEnv);
+    for (const key of [
+      'WECHAT2RSS_BASE_URL',
+      'WECHAT2RSS_TOKEN',
+      'WECHAT2RSS_ENABLED',
+    ]) {
+      if (process.env[key] === undefined && values[key] !== undefined)
+        process.env[key] = values[key];
+    }
   }
+} catch {
+  // Do not print filesystem paths or parser errors, and never retry a failed read.
+  privateConfigReadFailed = true;
 }
 
 const feedId = process.argv.find((value) => /^MP_WXS_\d{5,15}$/.test(value));
@@ -64,6 +70,7 @@ const boundedJson = async (url, token) =>
   JSON.parse(await boundedText(url, token));
 // 只输出本项目已定义的固定安全码，不透传未知上游消息或凭据。
 const safeErrorCodes = new Set([
+  'PRIVATE_CONFIG_READ_FAILED',
   'CONFIG_CHECK_ONLY_ARGUMENT_CONFLICT',
   'PRIVATE_INSTANCE_CONFIG_INCOMPLETE',
   'SERVER_BUILD_REQUIRED',
@@ -153,6 +160,7 @@ function deploymentConfig(configCheck) {
 }
 
 async function main() {
+  if (privateConfigReadFailed) throw new Error('PRIVATE_CONFIG_READ_FAILED');
   if (deploymentConfigOnly && execute)
     throw new Error('CONFIG_CHECK_ONLY_ARGUMENT_CONFLICT');
   let provider;

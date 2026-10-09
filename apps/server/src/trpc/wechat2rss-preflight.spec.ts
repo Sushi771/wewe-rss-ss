@@ -13,15 +13,17 @@ const env = {
   WECHAT2RSS_ENABLED: '0',
 };
 async function preflight(
-  overrides: Record<string, string> = {},
+  overrides: Record<string, string | undefined> = {},
   args: string[] = [],
   buildMissing = false,
   readFetch: typeof fetch = global.fetch,
   instanceEnv?: string,
+  applicationEnv?: string | Error,
 ) {
   const logs: string[] = [];
   const errors: string[] = [];
   const instancePath = path.resolve(__dirname, '../../../../.env.wechat2rss');
+  const applicationPath = path.resolve(__dirname, '../../.env.local');
   const filesRead: string[] = [];
   const processState = {
     env: { ...env, ...overrides },
@@ -46,8 +48,14 @@ async function preflight(
         if (name === 'node:fs')
           return {
             existsSync: (file: string) =>
-              file === instancePath && instanceEnv !== undefined,
+              (file === instancePath && instanceEnv !== undefined) ||
+              (file === applicationPath && applicationEnv !== undefined),
             readFileSync: (file: string) => {
+              if (file === applicationPath && applicationEnv !== undefined) {
+                filesRead.push(file);
+                if (applicationEnv instanceof Error) throw applicationEnv;
+                return Buffer.from(applicationEnv);
+              }
               if (file !== instancePath || instanceEnv === undefined)
                 throw new Error('UNEXPECTED_PRIVATE_FILE_READ');
               filesRead.push(file);
@@ -84,6 +92,88 @@ describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
     } finally {
       jest.restoreAllMocks();
     }
+  });
+
+  it.each([
+    { args: [] },
+    { args: ['--deployment-config'] },
+    { args: ['--execute', 'MP_WXS_1234567890'] },
+  ])(
+    'stops safely when application config cannot be read (args=%j)',
+    async ({ args }) => {
+      const account = jest.spyOn(
+        Wechat2RssProvider.prototype,
+        'checkAccountStatus',
+      );
+      const failure = new Error(
+        'EACCES C:/synthetic-private-path/.env.local synthetic-private-value',
+      );
+      const result = await preflight(
+        {},
+        args,
+        false,
+        global.fetch,
+        'LIC_CODE=synthetic-instance-license',
+        failure,
+      );
+      expect(result.errors).toEqual(['PRIVATE_CONFIG_READ_FAILED']);
+      expect(result.processState.exitCode).toBe(1);
+      expect(result.logs).toEqual([]);
+      expect(result.filesRead).toEqual([
+        path.resolve(__dirname, '../../.env.local'),
+      ]);
+      expect(account).not.toHaveBeenCalled();
+      expect(JSON.stringify([...result.logs, ...result.errors])).not.toMatch(
+        /EACCES|synthetic-private|synthetic-instance|\.env\.local/,
+      );
+    },
+  );
+
+  it('uses successfully loaded application config before checking existence and format', async () => {
+    const application =
+      'WECHAT2RSS_BASE_URL=http://127.0.0.1:18081/\nWECHAT2RSS_TOKEN=synthetic-file-token\nWECHAT2RSS_ENABLED=1';
+    const result = await preflight(
+      {
+        WECHAT2RSS_BASE_URL: undefined,
+        WECHAT2RSS_TOKEN: undefined,
+        WECHAT2RSS_ENABLED: undefined,
+      },
+      [],
+      false,
+      global.fetch,
+      undefined,
+      application,
+    );
+    expect(result.logs[0]).toMatchObject({
+      configured: { baseUrl: true, token: true },
+      configCheck: { valid: true },
+      appEnabled: true,
+    });
+    expect(result.processState.env.WECHAT2RSS_BASE_URL).toBe(
+      'http://127.0.0.1:18081/',
+    );
+    expect(result.processState.env.WECHAT2RSS_TOKEN).toBe(
+      'synthetic-file-token',
+    );
+    expect(JSON.stringify(result.logs)).not.toMatch(
+      /18081|synthetic-file-token/,
+    );
+  });
+
+  it('preserves existing process environment over successfully loaded application config', async () => {
+    const result = await preflight(
+      {},
+      [],
+      false,
+      global.fetch,
+      undefined,
+      'WECHAT2RSS_BASE_URL=http://127.0.0.1:18081/\nWECHAT2RSS_TOKEN=synthetic-file-token\nWECHAT2RSS_ENABLED=1',
+    );
+    expect(result.processState.env).toEqual(env);
+    expect(result.logs[0]).toMatchObject({
+      configCheck: { valid: true },
+      appEnabled: false,
+    });
   });
 
   it('checks private config format without HTTP, target or enabling collection', async () => {
