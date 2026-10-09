@@ -29,6 +29,10 @@ node scripts/acceptance-wechat2rss.cjs --deployment-config
 
 `DEPLOYMENT_CONFIG_CONSISTENT` 只表示这些本机配置互相一致。缺字段、密码不同、地址/协议不同或邮箱大小写错误会返回对应固定安全码和退出码1；缺少与当前源码对应的后台构建会返回 `SERVER_BUILD_REQUIRED`。这不验证激活码真伪、许可、账号、额度或图文。原无参数预检仍只检查 WeWe 配置，不读取实例授权文件。
 
+## 检查失败时
+
+检查失败后按固定码处理，不把未经筛选的错误栈或配置内容发到聊天。`PRIVATE_CONFIG_READ_FAILED` 表示 WeWe 私有配置读取失败，先核已有 `apps/server/.env.local` 在正常本机会话中可读；工具停止，不重试或访问上游。`SERVER_BUILD_REQUIRED` 需先完成对应源码的后台构建；`WECHAT2RSS_PRIVATE_CONFIG_INVALID` 需核地址及密码格式；`DEPLOYMENT_*` 错误则按输出的缺字段或不一致布尔项核两端文件。修改本机配置后可重跑纯配置检查；真实读取遇账号、认证、读取或限流错误会停止，不自动换来源、换端点或重试。
+
 ## 实例、数据与媒体边界
 
 现有 `docker-compose.wechat2rss.yml` 只有一个 `wechat2rss` 服务，固定监听 `127.0.0.1:18080:8080`，持久绑定 `./.wechat2rss-data:/wechat2rss`。Docker 程序和虚拟磁盘在 E 盘，不会使这个相对绑定目录自动迁移到 E 盘；若要把实例数据也放到 E 盘，先核已有目录，在批准后明确设置新路径，保留原数据。
