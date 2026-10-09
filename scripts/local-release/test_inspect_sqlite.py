@@ -102,6 +102,38 @@ class InspectTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit.inspect(self.database, self.migrations, require_current=True, schema_only=True)
 
+    def apply_xhs(self):
+        name = audit.XHS_MIGRATION
+        sql = (Path(__file__).resolve().parents[2] / "apps/server/prisma/migrations" / name / "migration.sql").read_bytes()
+        folder = self.migrations / name
+        folder.mkdir()
+        (folder / "migration.sql").write_bytes(sql)
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.executescript(sql.decode("utf-8"))
+            conn.execute("INSERT INTO _prisma_migrations VALUES(?,?,1,NULL)", (name, hashlib.sha256(sql).hexdigest()))
+
+    def test_additive_xhs_tables_are_empty_and_old_fields_protected(self):
+        self.migrate()
+        before = audit.inspect(self.database, self.migrations)
+        self.apply_xhs()
+        after = audit.inspect(self.database, self.migrations, before, True)
+        for table in before["tables"]:
+            self.assertEqual(after["tables"][table], before["tables"][table])
+        self.assertEqual(after["tables"]["xhs_creators"]["rows"], 0)
+        self.assertEqual(after["tables"]["xhs_notes"]["rows"], 0)
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("INSERT INTO xhs_creators(id,profile_url,display_name) VALUES('synthetic','https://www.xiaohongshu.com/synthetic','Synthetic')")
+        with self.assertRaisesRegex(ValueError, "New archive table must be empty"):
+            audit.inspect(self.database, self.migrations, before, True)
+
+    def test_schema_only_rejects_missing_xhs_despite_complete_records(self):
+        self.migrate()
+        self.apply_xhs()
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.executescript("DROP TABLE xhs_notes; DROP TABLE xhs_creators;")
+        with self.assertRaisesRegex(ValueError, "Required table missing: xhs_creators"):
+            audit.inspect(self.database, self.migrations, require_current=True, schema_only=True)
+
 
 if __name__ == "__main__":
     unittest.main()

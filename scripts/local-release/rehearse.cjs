@@ -112,11 +112,7 @@ async function rehearse() {
     sourceBefore.tables,
     '源库在备份期间变化；保留副本，重新取基线后再演练',
   );
-  assert.deepEqual(before.pending, [
-    '20260927110000_collection_channel',
-    '20260928020000_article_body_status',
-    '20260928030000_article_body_retry',
-  ]);
+  assert(before.pending.length > 0, 'Rehearsal requires a pending migration');
   async function smokeLegacy(stage) {
     const port = await unusedPort();
     const guardReport = path.join(audit, `legacy-${stage}-guard.json`);
@@ -224,7 +220,12 @@ async function rehearse() {
     '--output',
     path.join(audit, 'copy-migrated.json'),
   ]);
-  assert.equal(migrated.applied.length - before.applied.length, 3);
+  assert.deepEqual(migrated.pending, []);
+  assert.deepEqual(
+    migrated.applied,
+    [...before.applied, ...before.pending].sort(),
+    'Rehearsal must apply exactly the packaged pending migrations',
+  );
   const migratedBaseline = path.join(audit, 'migrated-baseline.json');
   inspect(database, ['--output', migratedBaseline]);
   fs.writeFileSync(path.join(audit, 'migrate-repeat.log'), migrate());
@@ -441,7 +442,8 @@ async function rehearse() {
     sourceReadOnly: true,
     feeds: before.tables.feeds.rows,
     articles: before.tables.articles.rows,
-    migrationsApplied: 3,
+    migrationsApplied: before.pending.length,
+    migrationNames: before.pending,
     repeatedMigrationNoChange: true,
     oldColumnsExactlyPreserved: true,
     newColumnsNull: true,

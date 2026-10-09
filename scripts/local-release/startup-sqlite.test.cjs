@@ -11,7 +11,7 @@ const {
 } = require('./startup-sqlite.cjs');
 const sqlite = require('node:sqlite');
 
-function fixture(t) {
+function fixture(t, { current = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-startup-sqlite-'));
   t.after(() => {
     assert.equal(path.dirname(root), os.tmpdir());
@@ -20,6 +20,52 @@ function fixture(t) {
   });
   const database = path.join(root, 'fixture.db'),
     migrations = path.join(root, 'migrations');
+  if (current) {
+    fs.cpSync(
+      path.resolve(__dirname, '../../apps/server/prisma/migrations'),
+      migrations,
+      {
+        recursive: true,
+      },
+    );
+    const db = new sqlite.DatabaseSync(database);
+    db.exec(
+      'CREATE TABLE _prisma_migrations(migration_name TEXT,checksum TEXT,finished_at INT,rolled_back_at INT)',
+    );
+    for (const entry of fs
+      .readdirSync(migrations, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      const sql = fs.readFileSync(
+        path.join(migrations, entry.name, 'migration.sql'),
+        'utf8',
+      );
+      db.exec(sql);
+      db.prepare('INSERT INTO _prisma_migrations VALUES(?,?,1,NULL)').run(
+        entry.name,
+        hash(sql),
+      );
+    }
+    db.prepare(
+      'INSERT INTO xhs_creators(id,profile_url,display_name) VALUES(?,?,?)',
+    ).run(
+      'synthetic-author',
+      'https://www.xiaohongshu.com/synthetic-startup',
+      'Synthetic',
+    );
+    db.prepare(
+      'INSERT INTO xhs_notes(id,creator_id,title,publish_time,status,content_html) VALUES(?,?,?,?,?,?)',
+    ).run(
+      'synthetic-note',
+      'synthetic-author',
+      'Synthetic',
+      1,
+      'complete',
+      '<p>synthetic cached body</p>',
+    );
+    db.close();
+    return { root, database, migrations };
+  }
   const schema =
     'CREATE TABLE feeds(id TEXT PRIMARY KEY,name TEXT,collection_channel TEXT); CREATE TABLE articles(id TEXT PRIMARY KEY,body TEXT,metric,last_body_status TEXT,verified_source_url TEXT,last_body_retry TEXT);';
   fs.mkdirSync(path.join(migrations, '001'), { recursive: true });
@@ -154,3 +200,52 @@ test('a concurrent WAL write cannot publish a stale native startup baseline', as
     writer.close();
   }
 });
+
+test('all packaged migrations protect XHS cached rows in native and Python startup backups', async (t) => {
+  const f = fixture(t, { current: true });
+  const before = fs.readFileSync(f.database);
+  const native = inspectDatabase(f.database, f.migrations);
+  assert.deepEqual(native, pythonInspect(f.database, f.migrations));
+  assert.equal(native.tables.xhs_notes.rows, 1);
+  const baseline = path.join(f.root, 'baseline.json');
+  const prepared = await prepareStart(
+    f.database,
+    f.migrations,
+    path.join(f.root, 'backups'),
+    baseline,
+  );
+  assert.deepEqual(
+    pythonInspect(prepared.backup.backup, f.migrations, baseline).tables,
+    native.tables,
+  );
+  const db = new sqlite.DatabaseSync(prepared.backup.backup);
+  db.exec("UPDATE xhs_notes SET content_html='<p>truncated</p>'");
+  db.close();
+  assert.throws(
+    () => pythonInspect(prepared.backup.backup, f.migrations, baseline),
+    /xhs_notes/,
+  );
+  assert.deepEqual(fs.readFileSync(f.database), before);
+});
+
+for (const damage of ['both tables', 'notes table', 'content column']) {
+  test(`complete migration records cannot hide missing XHS ${damage}`, (t) => {
+    const f = fixture(t, { current: true });
+    const db = new sqlite.DatabaseSync(f.database);
+    if (damage === 'content column')
+      db.exec('ALTER TABLE xhs_notes DROP COLUMN content_html');
+    else {
+      db.exec('DROP TABLE xhs_notes');
+      if (damage === 'both tables') db.exec('DROP TABLE xhs_creators');
+    }
+    db.close();
+    assert.throws(
+      () => inspectDatabase(f.database, f.migrations, { schemaOnly: true }),
+      /Required column missing: xhs_/,
+    );
+    assert.throws(
+      () => pythonInspect(f.database, f.migrations),
+      /Required (table|XHS columns) missing/,
+    );
+  });
+}

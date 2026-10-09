@@ -11,6 +11,11 @@ NEW_COLUMNS = {
     "feeds": ["collection_channel"],
     "articles": ["last_body_status", "verified_source_url", "last_body_retry"],
 }
+XHS_MIGRATION = "20261009050000_add_xhs_local_archive"
+XHS_COLUMNS = {
+    "xhs_creators": ["id", "profile_url", "display_name", "external_author_id", "enabled", "last_status", "last_checked_at", "created_at"],
+    "xhs_notes": ["id", "creator_id", "title", "publish_time", "status", "content_html"],
+}
 
 
 def digest(value):
@@ -56,9 +61,17 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
     if require_current and pending:
         raise ValueError("数据库尚未迁移: " + ", ".join(pending))
     tables = {}
-    for table in ("feeds", "articles"):
+    required_tables = ["feeds", "articles"]
+    if XHS_MIGRATION in applied or (baseline and any(table in baseline["tables"] for table in XHS_COLUMNS)):
+        required_tables.extend(XHS_COLUMNS)
+    for table in required_tables:
         columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
-        protected = baseline["tables"][table]["columns"] if baseline else columns
+        if not columns:
+            raise ValueError("Required table missing: " + table)
+        if table in XHS_COLUMNS and not set(XHS_COLUMNS[table]).issubset(columns):
+            raise ValueError("Required XHS columns missing: " + table)
+        previous = baseline["tables"].get(table) if baseline else None
+        protected = previous["columns"] if previous else columns
         if not set(protected).issubset(columns):
             raise ValueError("已有列缺失: " + table)
         # 列名只允许来自 PRAGMA 或已确认存在的基线，不执行基线内任意 SQL。
@@ -68,9 +81,11 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
             selected = ",".join('"' + column.replace('"', '""') + '"' for column in protected)
             rows = connection.execute(f'SELECT {selected} FROM "{table}" ORDER BY id').fetchall()
             tables[table] = {"columns": protected, "rows": len(rows), "sha256": digest(rows)}
-        if baseline and tables[table] != baseline["tables"][table]:
+        if previous and tables[table] != previous:
             raise ValueError("迁移改变了已有字段: " + table)
-        for column in NEW_COLUMNS[table]:
+        if baseline and not previous and tables[table]["rows"] != 0:
+            raise ValueError("New archive table must be empty after migration: " + table)
+        for column in NEW_COLUMNS.get(table, []):
             if require_current and column not in columns:
                 raise ValueError("缺少新列: " + column)
             if baseline and column not in protected and column in columns:

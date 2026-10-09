@@ -9,6 +9,27 @@ const required = {
   feeds: ['collection_channel'],
   articles: ['last_body_status', 'verified_source_url', 'last_body_retry'],
 };
+const xhsMigration = '20261009050000_add_xhs_local_archive';
+const xhsRequired = {
+  xhs_creators: [
+    'id',
+    'profile_url',
+    'display_name',
+    'external_author_id',
+    'enabled',
+    'last_status',
+    'last_checked_at',
+    'created_at',
+  ],
+  xhs_notes: [
+    'id',
+    'creator_id',
+    'title',
+    'publish_time',
+    'status',
+    'content_html',
+  ],
+};
 const quote = (value) => '"' + value.replace(/"/g, '""') + '"';
 function sqlite() {
   return require('node:sqlite');
@@ -101,13 +122,20 @@ function inspectConnection(
     .sort();
   assert.deepEqual(pending, [], 'Pending migrations are forbidden at startup');
   const tables = {};
-  for (const [table, requiredColumns] of Object.entries(required)) {
+  // Applied migration records alone do not prove their tables still exist.
+  const requiredTables = expected.has(xhsMigration)
+    ? { ...required, ...xhsRequired }
+    : required;
+  for (const [table, requiredColumns] of Object.entries(requiredTables)) {
     const columns = connection
       .prepare(`PRAGMA table_info(${quote(table)})`)
       .all()
       .map((row) => row.name);
     for (const column of requiredColumns)
-      assert(columns.includes(column), 'Required column missing: ' + column);
+      assert(
+        columns.includes(column),
+        'Required column missing: ' + table + '.' + column,
+      );
     tables[table] = { columns };
     if (!schemaOnly) {
       const statement = connection.prepare(
