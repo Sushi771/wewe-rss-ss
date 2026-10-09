@@ -297,7 +297,6 @@ test('snapshots actual SQLite video BLOBs as typed bounded hashes and detects by
   try {
     makeSourceDb(file);
     db = new DatabaseSync(file);
-    db.exec('ALTER TABLE xhs_notes ADD COLUMN video_bytes BLOB');
     const bytes = Buffer.from([0, 255, 17, 0, 128]);
     db.prepare('UPDATE xhs_notes SET video_bytes=? WHERE id=?').run(
       bytes,
