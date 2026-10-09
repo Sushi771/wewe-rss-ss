@@ -199,6 +199,7 @@ export default function Xiaohongshu() {
       >
         <Input
           aria-label="博主备注名称"
+          className="min-w-0 sm:flex-1"
           value={displayName}
           onValueChange={setDisplayName}
           isDisabled={busy}
@@ -206,6 +207,7 @@ export default function Xiaohongshu() {
         />
         <Input
           aria-label="小红书公开主页链接"
+          className="min-w-0 sm:flex-1"
           value={profileUrl}
           onValueChange={setProfileUrl}
           isDisabled={busy}
@@ -214,6 +216,7 @@ export default function Xiaohongshu() {
         />
         <Button
           type="submit"
+          className="shrink-0 whitespace-nowrap"
           isDisabled={busy || !displayName.trim() || !profileUrl.trim()}
         >
           保存待接入博主
