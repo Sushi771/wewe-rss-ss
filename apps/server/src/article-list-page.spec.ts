@@ -25,7 +25,7 @@ describe('article list metadata with real isolated SQLite, no body transfer', ()
       status INTEGER NOT NULL DEFAULT 1, sync_time INTEGER NOT NULL DEFAULT 0, update_time INTEGER NOT NULL,
       created_at DATETIME NOT NULL, updated_at DATETIME, has_history INTEGER DEFAULT 1, "order" INTEGER DEFAULT 0,
       local_directory TEXT, public_album_ids TEXT, last_collection_result TEXT, collection_channel TEXT,
-      provider_refresh_attempt_time INTEGER NOT NULL DEFAULT 0)`);
+      provider_refresh_attempt_time INTEGER NOT NULL DEFAULT 0, group_id TEXT)`);
     await prisma.$executeRawUnsafe(`CREATE TABLE articles (
       id TEXT PRIMARY KEY, mp_id TEXT NOT NULL, title TEXT NOT NULL, pic_url TEXT NOT NULL, publish_time INTEGER NOT NULL,
       source_url TEXT UNIQUE, content_html TEXT, last_body_status TEXT, verified_source_url TEXT, last_body_retry TEXT,
