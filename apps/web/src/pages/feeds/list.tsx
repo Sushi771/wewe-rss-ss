@@ -200,12 +200,17 @@ const ArticleList: FC<ArticleListProps> = ({
                 onValueChange={handleSelectAll}
               />
             </div>
-            <div className="compact-col-title">文章标题</div>
-            <div className="compact-col-metadata">信息</div>
+            <div className="compact-col-title min-w-0 whitespace-nowrap">
+              文章标题
+            </div>
+            <div className="compact-col-metadata !hidden md:!flex">信息</div>
           </div>
 
           {items?.map((item) => (
-            <div key={item.id} className="compact-row article-row">
+            <div
+              key={item.id}
+              className="compact-row article-row !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center"
+            >
               <div className="compact-col-check">
                 <Checkbox
                   size="sm"
@@ -219,7 +224,7 @@ const ArticleList: FC<ArticleListProps> = ({
                 />
               </div>
               <a
-                className="compact-title text-[15px] hover:text-[#007AFF] dark:hover:text-[#0A84FF]"
+                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] md:!whitespace-nowrap dark:hover:text-[#0A84FF]"
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={(event) => {
@@ -232,9 +237,9 @@ const ArticleList: FC<ArticleListProps> = ({
               >
                 {item.title}
               </a>
-              <div className="flex w-[300px] shrink-0 flex-col items-end gap-0.5 text-neutral-500">
+              <div className="col-start-2 flex w-auto min-w-0 shrink-0 flex-col items-start gap-0.5 text-neutral-500 md:w-[300px] md:items-end">
                 <div
-                  className="flex items-center gap-2 text-xs"
+                  className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
                   {item.bodyCached ? (
@@ -273,13 +278,13 @@ const ArticleList: FC<ArticleListProps> = ({
                   )}
                 </div>
                 {!item.bodyCached && !item.bodyRetry.allowed && (
-                  <span className="text-right text-xs">
+                  <span className="text-left text-xs md:text-right">
                     {item.bodyRetry.reason}
                   </span>
                 )}
                 {item.bodyRetryResult && (
                   <span
-                    className="text-right text-xs"
+                    className="text-left text-xs md:text-right"
                     title={`${dayjs(item.bodyRetryResult.attemptedAt * 1e3).format('YYYY-MM-DD HH:mm:ss')} ${item.bodyRetryResult.message}`}
                   >
                     最近重试：
@@ -296,14 +301,14 @@ const ArticleList: FC<ArticleListProps> = ({
                   </span>
                 )}
                 <span
-                  className="whitespace-nowrap text-xs"
+                  className="whitespace-normal break-words text-xs md:whitespace-nowrap"
                   title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
                 >
                   阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
                   {metricDisplay(item.metrics, 'like')} · 收藏{' '}
                   {metricDisplay(item.metrics, 'favorite')}
                 </span>
-                <div className="flex w-full items-center justify-end gap-2 text-xs">
+                <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs md:flex-nowrap md:justify-end">
                   <span className="truncate">
                     {item.feed?.mpName || '未知'}
                   </span>
