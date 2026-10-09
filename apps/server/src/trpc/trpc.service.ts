@@ -10,6 +10,7 @@ import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
 import { wechat2RssProvider } from '../collection/provider-registry';
+import { Wechat2RssProvider } from '../collection/providers/wechat2rss';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import {
   addNativeSubscription,
@@ -36,6 +37,8 @@ import {
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+type SubscriptionAddSource = 'native' | 'wechat2rss';
 
 /**
  * 读书账号每日小黑屋
@@ -537,31 +540,51 @@ export class TrpcService {
     throw new Error('旧微信读书订阅入口已停用；请使用私有实例添加订阅。');
   }
 
-  subscriptionAddCapability() {
-    if (this.subscriptionDiscovery)
-      return {
-        available: true as const,
-        requiresAccount: true,
-        existingRepairAvailable: !!this.subscriptionDiscovery.repairExisting,
-        code: 'NATIVE_DIRECTORY_VALIDATION' as const,
-        message:
-          '选择正常Web登录账号并提交公众号文章链接；本次点击验证候选目录，通过后添加并读取最近10篇。遇限制停止，不自动切换账号或重试。',
-      };
-    if (process.env.WECHAT2RSS_ENABLED !== '1')
-      return {
-        available: false as const,
-        requiresAccount: false,
-        existingRepairAvailable: false,
-        code: 'SUBSCRIPTION_SOURCE_UNAVAILABLE' as const,
-        message:
-          '当前新增入口依赖的 Wechat2RSS 已停用，自建新公众号发现与持续更新尚未接通。暂不能自动新增；输入链接已保留，请勿重复提交。现有订阅和已保存文章仍可查看。',
-      };
-    return {
-      available: true as const,
+  /** Read-only source selection. Configuration is not evidence of live coverage. */
+  subscriptionAddCapability(source?: SubscriptionAddSource) {
+    if (source !== undefined && !['native', 'wechat2rss'].includes(source))
+      throw new TRPCError({ code: 'BAD_REQUEST', message: '新增来源无效。' });
+    const native = {
+      source: 'native' as const,
+      available: !!this.subscriptionDiscovery,
+      requiresAccount: true,
+      code: this.subscriptionDiscovery
+        ? 'NATIVE_DIRECTORY_VALIDATION'
+        : 'NATIVE_SOURCE_UNAVAILABLE',
+      message: this.subscriptionDiscovery
+        ? '选择正常Web登录账号并提交公众号文章链接；本次点击验证候选目录，通过后添加并读取最近10篇。遇限制停止，不自动切换账号或重试。'
+        : '本机目录验证来源未注册；本次不会切换到其他来源。',
+    };
+    const paid = {
+      source: 'wechat2rss' as const,
+      available: false,
       requiresAccount: false,
-      existingRepairAvailable: false,
-      code: 'SOURCE_CONFIGURED' as const,
-      message: '新增将提交到已显式配置的来源；任务受理不代表文章已取得。',
+      code: 'SUBSCRIPTION_SOURCE_UNAVAILABLE',
+      message:
+        'Wechat2RSS 未启用，暂不能通过此来源新增；输入链接已保留，本次不会切换到其他来源。',
+    };
+    if (process.env.WECHAT2RSS_ENABLED === '1') {
+      try {
+        // Constructor validates only private configuration, with no HTTP call.
+        new Wechat2RssProvider(
+          process.env.WECHAT2RSS_BASE_URL || '',
+          process.env.WECHAT2RSS_TOKEN || '',
+        );
+        paid.available = true;
+        paid.code = 'SOURCE_CONFIGURED';
+        paid.message =
+          '新增将提交到已显式配置的 Wechat2RSS；任务受理不代表文章已取得，已有订阅的来源不会自动切换。';
+      } catch {
+        paid.code = 'SOURCE_CONFIG_INVALID';
+        paid.message = 'Wechat2RSS 私有配置无效；本次未请求来源或切换配置。';
+      }
+    }
+    const selected = source || (native.available ? 'native' : 'wechat2rss');
+    return {
+      ...(selected === 'native' ? native : paid),
+      // Repair remains a separate native operation, independent of add selection.
+      existingRepairAvailable: !!this.subscriptionDiscovery?.repairExisting,
+      sources: [native, paid],
     };
   }
 
@@ -607,23 +630,29 @@ export class TrpcService {
     articleUrl: string,
     accountId?: string,
     isLocal = false,
+    source?: SubscriptionAddSource,
   ) {
-    if (this.subscriptionDiscovery) {
+    const capability = this.subscriptionAddCapability(source);
+    if (!capability.available)
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: capability.message,
+      });
+    let url: string;
+    try {
+      url = subscriptionArticleUrl(articleUrl);
+    } catch {
+      throw new TRPCError({
+        code: 'BAD_REQUEST',
+        message: '请输入有效的公开 HTTPS 微信公众号文章链接，不包含认证参数。',
+      });
+    }
+    if (capability.source === 'native' && this.subscriptionDiscovery) {
       if (!isLocal)
         throw new TRPCError({
           code: 'FORBIDDEN',
           message: '公众号目录验证只能在服务器本机操作。',
         });
-      let url: string;
-      try {
-        url = subscriptionArticleUrl(articleUrl);
-      } catch {
-        throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message:
-            '请输入有效的公开 HTTPS 微信公众号文章链接，不包含认证参数。',
-        });
-      }
       if (!accountId || !/^\d{1,20}$/.test(accountId))
         return subscriptionDiscoveryUnavailable('ACCOUNT_UNAVAILABLE');
       const account = await this.prismaService.account.findUnique({
@@ -649,15 +678,9 @@ export class TrpcService {
         this.activeSubscriptionAdds.delete(accountId);
       }
     }
-    const capability = this.subscriptionAddCapability();
-    if (!capability.available)
-      throw new TRPCError({
-        code: 'PRECONDITION_FAILED',
-        message: capability.message,
-      });
     const provider = wechat2RssProvider();
     await createVerifiedSqliteBackup();
-    const accepted = await provider.addSubscription(articleUrl);
+    const accepted = await provider.addSubscription(url);
     const old = await this.prismaService.feed.findUnique({
       where: { id: accepted.feedId },
     });
@@ -677,6 +700,8 @@ export class TrpcService {
         },
       }));
     return {
+      requestedSource: 'wechat2rss' as const,
+      sourceBindingChanged: !old,
       status: 'accepted' as const,
       feed,
       accepted: true as const,

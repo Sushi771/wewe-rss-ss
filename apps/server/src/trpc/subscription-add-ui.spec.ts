@@ -52,6 +52,7 @@ function harness(links: string[], accountId = '123') {
     cancelSubscriptions: { current: false },
     setIsAddingSubscriptions: jest.fn(),
     addCapability: { available: true, requiresAccount: true },
+    addSourceSelection: '',
     addAccountId: accountId,
     wxsLink: state.links,
     addFromArticle: mutate,

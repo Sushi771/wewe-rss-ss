@@ -683,9 +683,16 @@ export class TrpcRouter {
           });
         }
       }),
-    addCapability: this.trpcService.protectedProcedure.query(() =>
-      this.trpcService.subscriptionAddCapability(),
-    ),
+    addCapability: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ source: z.enum(['native', 'wechat2rss']).optional() })
+          .strict()
+          .optional(),
+      )
+      .query(({ input }) =>
+        this.trpcService.subscriptionAddCapability(input?.source),
+      ),
     repairNativeSource: this.trpcService.protectedProcedure
       .input(
         z
@@ -707,6 +714,7 @@ export class TrpcRouter {
       .input(
         z.object({
           articleUrl: z.string().url().max(4096),
+          source: z.enum(['native', 'wechat2rss']).optional(),
           accountId: z
             .string()
             .regex(/^\d{1,20}$/)
@@ -718,6 +726,7 @@ export class TrpcRouter {
           input.articleUrl,
           input.accountId,
           !!(ctx as any).isLocal,
+          input.source,
         ),
       ),
     list: this.trpcService.protectedProcedure

@@ -58,11 +58,23 @@ const Feeds = () => {
 
   const [isAddingSubscriptions, setIsAddingSubscriptions] = useState(false);
   const isAddFeedLoading = isGetMpInfoLoading || isAddingSubscriptions;
-  const { data: addCapability, error: addCapabilityError } =
+  const [addSourceSelection, setAddSourceSelection] = useState<
+    '' | 'native' | 'wechat2rss'
+  >('');
+  const { data: defaultAddCapability, error: addCapabilityError } =
     trpc.feed.addCapability.useQuery(undefined, {
       refetchOnWindowFocus: false,
       retry: false,
     });
+  const selectedAddSource = defaultAddCapability?.sources.find(
+    (source) => source.source === addSourceSelection,
+  );
+  const addCapability = addSourceSelection
+    ? selectedAddSource && {
+        ...selectedAddSource,
+        existingRepairAvailable: defaultAddCapability?.existingRepairAvailable,
+      }
+    : defaultAddCapability;
   const [addAccountId, setAddAccountId] = useState('');
   const [addMessages, setAddMessages] = useState<string[]>([]);
   const [addVerification, setAddVerification] =
@@ -80,7 +92,9 @@ const Feeds = () => {
     trpc.account.list.useQuery(
       {},
       {
-        enabled: (isOpen || !!repairTarget) && !!addCapability?.requiresAccount,
+        enabled:
+          (isOpen && !!addCapability?.requiresAccount) ||
+          (!!repairTarget && !!defaultAddCapability?.existingRepairAvailable),
         retry: false,
         refetchOnWindowFocus: false,
       },
@@ -107,6 +121,13 @@ const Feeds = () => {
     trpc.feed.delete.useMutation({});
 
   const [wxsLink, setWxsLink] = useState('');
+  const handleSelectAddSource = (value: string) => {
+    if (addingSubscriptions.current) return;
+    if (value !== '' && value !== 'native' && value !== 'wechat2rss') return;
+    setAddSourceSelection(value);
+    setAddMessages([]);
+    setAddVerification(null);
+  };
   const handleOpenAdd = () => {
     if (!addingSubscriptions.current && !repairTarget) onOpen();
   };
@@ -321,6 +342,7 @@ const Feeds = () => {
       toast.error('每次最多添加20个公众号，输入链接已保留');
       return;
     }
+    const selectedSource = addSourceSelection;
     const failedLinks: string[] = [];
     let pending = false;
     addingSubscriptions.current = true;
@@ -337,8 +359,17 @@ const Feeds = () => {
         try {
           const result = await addFromArticle({
             articleUrl: link,
-            accountId: addAccountId || undefined,
+            accountId: addCapability.requiresAccount
+              ? addAccountId || undefined
+              : undefined,
+            ...(selectedSource ? { source: selectedSource } : {}),
           });
+          if (cancelSubscriptions.current) {
+            if (!result.accepted || !result.feed) failedLinks.push(link);
+            await queryUtils.article.list.reset();
+            await queryUtils.article.summary.invalidate();
+            continue;
+          }
           if ('source' in result) {
             if (result.officialVerification)
               setAddVerification(result.officialVerification);
@@ -374,7 +405,12 @@ const Feeds = () => {
                 description: result.feed.mpName,
               },
             );
-          } else
+          } else if (result.sourceBindingChanged === false)
+            toast.warning('现有订阅来源保持', {
+              description:
+                '添加请求已受理；本号仍使用原来源，文章尚未核验。来源切换需另行核对。',
+            });
+          else
             toast.success('订阅已受理，文章尚未核验', {
               description: result.feed.mpName,
             });
@@ -383,12 +419,18 @@ const Feeds = () => {
         } catch (error) {
           failedLinks.push(...wxsLinks.slice(index));
           pending = true;
+          const rawMessage = error instanceof Error ? error.message : '';
           const message =
-            error instanceof Error ? error.message : '添加未完成，链接保留。';
+            rawMessage &&
+            /[\u3400-\u9fff]/u.test(rawMessage) &&
+            !/\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/.test(rawMessage)
+              ? rawMessage
+              : selectedSource === 'wechat2rss'
+                ? 'Wechat2RSS 添加未完成，请核对实例授权和配置；链接已保留，本次未切换到其他来源。'
+                : '本次添加未完成，请核对所选来源状态；链接已保留，不会自动切换来源或重试。';
           setAddMessages((previous) => [...previous, message]);
-          toast.error('添加失败或待核对', {
-            description: message,
-          });
+          if (!cancelSubscriptions.current)
+            toast.error('添加失败或待核对', { description: message });
           break;
         }
       }
@@ -1472,6 +1514,54 @@ const Feeds = () => {
                 添加公众号源
               </ModalHeader>
               <ModalBody>
+                <label className="flex flex-col gap-2 text-sm">
+                  本次新增来源
+                  <select
+                    aria-label="本次新增来源"
+                    value={addSourceSelection}
+                    onChange={(event) =>
+                      handleSelectAddSource(event.target.value)
+                    }
+                    disabled={isAddFeedLoading}
+                    className="bg-content1 rounded-md border p-2"
+                  >
+                    <option value="">
+                      使用当前默认来源
+                      {defaultAddCapability
+                        ? defaultAddCapability.source === 'native'
+                          ? '（微信读书）'
+                          : '（Wechat2RSS）'
+                        : '（正在核对）'}
+                    </option>
+                    <option value="native">
+                      微信读书（
+                      {!defaultAddCapability
+                        ? '正在核对'
+                        : defaultAddCapability.sources.find(
+                              (s) => s.source === 'native',
+                            )?.available
+                          ? '可提交目录验证'
+                          : '未配置'}
+                      ）
+                    </option>
+                    <option value="wechat2rss">
+                      Wechat2RSS（
+                      {!defaultAddCapability
+                        ? '正在核对'
+                        : defaultAddCapability.sources.find(
+                              (s) => s.source === 'wechat2rss',
+                            )?.available
+                          ? '已配置，实际取文待核验'
+                          : '未就绪'}
+                      ）
+                    </option>
+                  </select>
+                </label>
+                {addSourceSelection === 'wechat2rss' && (
+                  <p className="text-default-600 text-sm">
+                    此来源需要软件授权及本机私有实例。尚未采购时先完成采购与部署；已采购时核对启用和配置。受理不代表取得正文图片，已有订阅不会自动切换来源。
+                  </p>
+                )}
                 <p className="text-default-600 text-sm" role="status">
                   {addCapability?.message ||
                     (addCapabilityError
@@ -1569,7 +1659,9 @@ const Feeds = () => {
                     isGetArticlesLoading
                   }
                 >
-                  {addCapability?.requiresAccount ? '验证目录并添加' : '确定'}
+                  {addCapability?.requiresAccount
+                    ? '验证目录并添加'
+                    : '提交所选来源'}
                 </Button>
               </ModalFooter>
             </>
