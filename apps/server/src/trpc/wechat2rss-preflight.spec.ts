@@ -325,68 +325,77 @@ describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
     },
   );
 
-  it('retains the existing cache-only read flow with synthetic responses and no writes', async () => {
-    jest
-      .spyOn(Wechat2RssProvider.prototype, 'checkAccountStatus')
-      .mockResolvedValue({
-        available: true,
-        challenged: false,
-        retryAfter: undefined,
+  it.each([200, 302, 429])(
+    'reports the cache-only RSS read outcome without writes (HTTP %s)',
+    async (rssStatus) => {
+      jest
+        .spyOn(Wechat2RssProvider.prototype, 'checkAccountStatus')
+        .mockResolvedValue({
+          available: true,
+          challenged: false,
+          retryAfter: undefined,
+        });
+      const list = jest
+        .spyOn(Wechat2RssProvider.prototype, 'listSubscriptions')
+        .mockResolvedValue([
+          {
+            feedId: 'MP_WXS_1234567890',
+            name: '合成公众号',
+            feedUrl: '/feed/1234567890.xml',
+          },
+        ]);
+      jest
+        .spyOn(Wechat2RssProvider.prototype, 'fetchArticles')
+        .mockResolvedValue({
+          articles: [],
+          coverage: 'recent-window',
+          upstreamCount: 0,
+          bodyMissing: 0,
+          imageBlocked: 0,
+        });
+      const add = jest.spyOn(Wechat2RssProvider.prototype, 'addSubscription');
+      const refresh = jest.spyOn(
+        Wechat2RssProvider.prototype,
+        'refreshSubscription',
+      );
+      const read = jest.fn().mockImplementation(async (url) => {
+        const pathname = new URL(String(url)).pathname;
+        if (pathname === '/api/query')
+          return new Response(JSON.stringify({ err: '', data: [] }));
+        if (pathname === '/feed/1234567890.xml')
+          return new Response('<rss><channel></channel></rss>', {
+            status: rssStatus,
+          });
+        throw new Error('UNEXPECTED_SYNTHETIC_ENDPOINT');
       });
-    const list = jest
-      .spyOn(Wechat2RssProvider.prototype, 'listSubscriptions')
-      .mockResolvedValue([
-        {
-          feedId: 'MP_WXS_1234567890',
-          name: '合成公众号',
-          feedUrl: '/feed/1234567890.xml',
-        },
-      ]);
-    jest
-      .spyOn(Wechat2RssProvider.prototype, 'fetchArticles')
-      .mockResolvedValue({
-        articles: [],
-        coverage: 'recent-window',
-        upstreamCount: 0,
-        bodyMissing: 0,
-        imageBlocked: 0,
+      const result = await preflight(
+        {},
+        ['--execute', 'MP_WXS_1234567890'],
+        false,
+        read,
+      );
+      expect(result.errors).toEqual([]);
+      expect(result.logs[0]).toMatchObject({
+        mode: 'read-only',
+        account: { available: true },
+        jsonFeed: { count: 0 },
+        query: { count: 0 },
+        rss:
+          rssStatus === 200
+            ? { items: 0, entries: 0 }
+            : { error: 'UPSTREAM_READ_FAILED' },
       });
-    const add = jest.spyOn(Wechat2RssProvider.prototype, 'addSubscription');
-    const refresh = jest.spyOn(
-      Wechat2RssProvider.prototype,
-      'refreshSubscription',
-    );
-    const read = jest.fn().mockImplementation(async (url) => {
-      const pathname = new URL(String(url)).pathname;
-      if (pathname === '/api/query')
-        return new Response(JSON.stringify({ err: '', data: [] }));
-      if (pathname === '/feed/1234567890.xml')
-        return new Response('<rss><channel></channel></rss>');
-      throw new Error('UNEXPECTED_SYNTHETIC_ENDPOINT');
-    });
-    const result = await preflight(
-      {},
-      ['--execute', 'MP_WXS_1234567890'],
-      false,
-      read,
-    );
-    expect(result.errors).toEqual([]);
-    expect(result.logs[0]).toMatchObject({
-      mode: 'read-only',
-      account: { available: true },
-      jsonFeed: { count: 0 },
-      query: { count: 0 },
-      rss: { items: 0, entries: 0 },
-    });
-    expect(list).toHaveBeenCalledTimes(1);
-    expect(read).toHaveBeenCalledTimes(2);
-    expect(add).not.toHaveBeenCalled();
-    expect(refresh).not.toHaveBeenCalled();
-    expect(JSON.stringify(result.logs)).not.toContain(
-      'synthetic-private-token',
-    );
-    expect(result.processState.env.WECHAT2RSS_ENABLED).toBe('0');
-  });
+      expect(result.processState.exitCode ?? 0).toBe(rssStatus === 200 ? 0 : 1);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(add).not.toHaveBeenCalled();
+      expect(refresh).not.toHaveBeenCalled();
+      expect(JSON.stringify(result.logs)).not.toContain(
+        'synthetic-private-token',
+      );
+      expect(result.processState.env.WECHAT2RSS_ENABLED).toBe('0');
+    },
+  );
 
   it.each([200, 429])(
     'stops after a rejected query without reading RSS or guessing a billing code (HTTP %s)',

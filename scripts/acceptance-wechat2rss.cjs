@@ -250,7 +250,10 @@ async function main() {
       items: (xml.match(/<item\b/g) || []).length,
       entries: (xml.match(/<entry\b/g) || []).length,
     }))
-    .catch((error) => ({ error: errorCode(error) }));
+    .catch((error) => {
+      process.exitCode = 1;
+      return { error: errorCode(error) };
+    });
   console.log(
     JSON.stringify(
       {
