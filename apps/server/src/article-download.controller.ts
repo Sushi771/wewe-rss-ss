@@ -497,6 +497,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
       return res.status(409).json({ message: '请等待当前本机操作完成。' });
     let savedCount = 0;
     let alreadySavedCount = 0;
+    let videoCount = 0;
     this.running = true;
     try {
       if (
@@ -539,12 +540,17 @@ export class ArticleDownloadController implements OnModuleDestroy {
         const result = await store.save(prepare);
         if (result.alreadySaved) alreadySavedCount++;
         else savedCount++;
+        videoCount += result.videoCount || 0;
       }
       res.setHeader('Cache-Control', 'private, no-store');
       return res.status(200).json({
         saved: true,
         savedCount,
         alreadySavedCount,
+        videoCount,
+        ...(videoCount
+          ? { videoDecoded: false, videoVerification: 'container-and-bytes' }
+          : {}),
         contentSource: 'saved-xiaohongshu',
       });
     } catch (error) {
@@ -555,6 +561,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
           code: 'XHS_BATCH_SAVE_INCOMPLETE',
           savedCount,
           alreadySavedCount,
+          videoCount,
           message: `本次保存未全部完成；已保存${savedCount}篇，已存在${alreadySavedCount}篇。已完成文件保留，请检查目录权限或磁盘空间后再选择未完成笔记。`,
         });
       }
@@ -651,9 +658,12 @@ export class ArticleDownloadController implements OnModuleDestroy {
     req: Req,
     res: Res,
     verified?: { article: ProviderArticle; directoryPickConfirmed?: boolean },
-    cachedPrepare?: (
-      directory: string,
-    ) => Promise<{ articleId: string; title: string; imageCount: number }>,
+    cachedPrepare?: (directory: string) => Promise<{
+      articleId: string;
+      title: string;
+      imageCount: number;
+      videoCount?: number;
+    }>,
   ) {
     if (!this.authorized(req, res, true)) return;
     if (process.env.WEWE_ACCEPTANCE_MODE === '1')
@@ -706,6 +716,13 @@ export class ArticleDownloadController implements OnModuleDestroy {
       return res.status(200).json({
         saved: true,
         ...result,
+        ...(result.videoCount
+          ? {
+              videoArchived: true,
+              videoDecoded: false,
+              videoVerification: 'container-and-bytes',
+            }
+          : {}),
         contentSource: cachedPrepare
           ? 'saved-xiaohongshu'
           : prepare

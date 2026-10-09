@@ -143,7 +143,9 @@ function encodeRows(rows) {
     Object.fromEntries(
       Object.entries(row).map(([key, value]) => [
         key,
-        Buffer.isBuffer(value) ? ['blob', sha256(value)] : value,
+        value instanceof Uint8Array
+          ? ['blob', value.byteLength, sha256(value)]
+          : value,
       ]),
     ),
   );

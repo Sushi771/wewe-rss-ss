@@ -290,6 +290,37 @@ test('rejects XHS cache drift since rehearsal without importing the article', as
   });
 });
 
+test('snapshots actual SQLite video BLOBs as typed bounded hashes and detects byte drift', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-image-blob-test-'));
+  const file = path.join(dir, 'source.db');
+  let db;
+  try {
+    makeSourceDb(file);
+    db = new DatabaseSync(file);
+    db.exec('ALTER TABLE xhs_notes ADD COLUMN video_bytes BLOB');
+    const bytes = Buffer.from([0, 255, 17, 0, 128]);
+    db.prepare('UPDATE xhs_notes SET video_bytes=? WHERE id=?').run(
+      bytes,
+      'synthetic-note',
+    );
+    const before = readSnapshot(file);
+    assert.deepEqual(before.tables.xhs_notes.rows[0].video_bytes, [
+      'blob',
+      bytes.length,
+      sha256(bytes),
+    ]);
+    db.prepare('UPDATE xhs_notes SET video_bytes=? WHERE id=?').run(
+      Buffer.from([0, 254, 17, 0, 128]),
+      'synthetic-note',
+    );
+    assert.notEqual(readSnapshot(file).digest, before.digest);
+  } finally {
+    if (db) db.close();
+    assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('rejects local folder drift since rehearsal without importing the article', async () => {
   await withRehearsal(async (options) => {
     const db = new DatabaseSync(options.sourceDb);

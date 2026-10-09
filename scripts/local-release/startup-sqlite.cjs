@@ -11,6 +11,14 @@ const required = {
 };
 const xhsMigration = '20261009050000_add_xhs_local_archive';
 const groupsMigration = '20261009063000_add_management_groups';
+const videoMigration = '20261009080000_add_xhs_video_cache';
+const videoColumns = [
+  'kind',
+  'video_bytes',
+  'video_mime_type',
+  'video_expected_bytes',
+  'video_sha256',
+];
 const xhsRequired = {
   xhs_creators: [
     'id',
@@ -50,16 +58,30 @@ function digestRows(rows) {
       if (
         value !== null &&
         typeof value !== 'string' &&
-        typeof value !== 'bigint'
+        typeof value !== 'bigint' &&
+        !(value instanceof Uint8Array)
       )
         throw new UnsupportedBaselineValue(
-          'Use the established Python baseline for REAL/BLOB values',
+          'Use the established Python baseline for REAL values',
         );
   // Preserve every SQLite INTEGER, including those outside Number's safe range.
   // This produces the same compact UTF-8 JSON as Python for NULL/TEXT/INTEGER.
   return hash(
-    JSON.stringify(rows, (_, value) =>
-      typeof value === 'bigint' ? JSON.rawJSON(value.toString()) : value,
+    JSON.stringify(
+      rows.map((row) =>
+        row.map((value) =>
+          value instanceof Uint8Array
+            ? {
+                __wewe_sqlite_blob__: {
+                  length: value.byteLength,
+                  sha256: hash(value),
+                },
+              }
+            : value,
+        ),
+      ),
+      (_, value) =>
+        typeof value === 'bigint' ? JSON.rawJSON(value.toString()) : value,
     ),
   );
 }
@@ -132,6 +154,8 @@ function inspectConnection(
     requiredTables.feeds = [...requiredTables.feeds, 'group_id'];
     requiredTables.xhs_creators = [...requiredTables.xhs_creators, 'group_id'];
   }
+  if (expected.has(videoMigration))
+    requiredTables.xhs_notes = [...requiredTables.xhs_notes, ...videoColumns];
   for (const [table, requiredColumns] of Object.entries(requiredTables)) {
     const columns = connection
       .prepare(`PRAGMA table_info(${quote(table)})`)

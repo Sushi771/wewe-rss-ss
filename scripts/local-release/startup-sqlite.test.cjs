@@ -175,6 +175,46 @@ test('REAL values select the established Python fallback instead of losing basel
   assert.equal(fs.existsSync(path.join(f.root, 'baseline.json')), false);
   assert.equal(pythonInspect(f.database, f.migrations).tables.articles.rows, 2);
 });
+
+test('typed BLOB cache baselines match Python and startup backups preserve exact bytes', async (t) => {
+  const f = fixture(t),
+    db = new sqlite.DatabaseSync(f.database);
+  const bytes = Buffer.from([0, 255, 17, 0, 128]);
+  db.prepare('UPDATE articles SET metric=? WHERE id=?').run(bytes, 'a');
+  db.prepare('UPDATE articles SET metric=? WHERE id=?').run(
+    Buffer.alloc(0),
+    'b',
+  );
+  db.close();
+  const native = inspectDatabase(f.database, f.migrations);
+  assert.deepEqual(native, pythonInspect(f.database, f.migrations));
+  const baseline = path.join(f.root, 'blob-baseline.json');
+  const prepared = await prepareStart(
+    f.database,
+    f.migrations,
+    path.join(f.root, 'backups'),
+    baseline,
+  );
+  assert.deepEqual(
+    pythonInspect(prepared.backup.backup, f.migrations, baseline).tables,
+    native.tables,
+  );
+  const copied = new sqlite.DatabaseSync(prepared.backup.backup);
+  assert.deepEqual(
+    Buffer.from(
+      copied.prepare("SELECT metric FROM articles WHERE id='a'").get().metric,
+    ),
+    bytes,
+  );
+  copied
+    .prepare('UPDATE articles SET metric=? WHERE id=?')
+    .run(Buffer.from([0, 254, 17, 0, 128]), 'a');
+  copied.close();
+  assert.throws(
+    () => pythonInspect(prepared.backup.backup, f.migrations, baseline),
+    /articles/,
+  );
+});
 test('a concurrent WAL write cannot publish a stale native startup baseline', async (t) => {
   const f = fixture(t),
     writer = new sqlite.DatabaseSync(f.database);
@@ -268,6 +308,29 @@ for (const damage of ['group table', 'feed membership', 'creator membership']) {
     assert.throws(
       () => pythonInspect(f.database, f.migrations),
       /Required (table|management group column) missing/,
+    );
+  });
+}
+
+for (const column of [
+  'kind',
+  'video_bytes',
+  'video_mime_type',
+  'video_expected_bytes',
+  'video_sha256',
+]) {
+  test(`complete migration records cannot hide missing XHS video ${column}`, (t) => {
+    const f = fixture(t, { current: true });
+    const db = new sqlite.DatabaseSync(f.database);
+    db.exec(`ALTER TABLE xhs_notes DROP COLUMN ${column}`);
+    db.close();
+    assert.throws(
+      () => inspectDatabase(f.database, f.migrations, { schemaOnly: true }),
+      /Required column missing/,
+    );
+    assert.throws(
+      () => pythonInspect(f.database, f.migrations),
+      /Required XHS video columns missing/,
     );
   });
 }

@@ -18,10 +18,16 @@ XHS_COLUMNS = {
 }
 GROUPS_MIGRATION = "20261009063000_add_management_groups"
 GROUP_COLUMNS = ["id", "name", "platform"]
+VIDEO_MIGRATION = "20261009080000_add_xhs_video_cache"
+VIDEO_COLUMNS = ["kind", "video_bytes", "video_mime_type", "video_expected_bytes", "video_sha256"]
 
 
 def digest(value):
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    def sqlite_blob(item):
+        if isinstance(item, bytes):
+            return {"__wewe_sqlite_blob__": {"length": len(item), "sha256": hashlib.sha256(item).hexdigest()}}
+        raise TypeError("Unsupported SQLite baseline value")
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=sqlite_blob).encode()).hexdigest()
 
 
 def inspect(database, migrations, baseline=None, require_current=False, schema_only=False):
@@ -67,6 +73,7 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
     if XHS_MIGRATION in applied or (baseline and any(table in baseline["tables"] for table in XHS_COLUMNS)):
         required_tables.extend(XHS_COLUMNS)
     groups_applied = GROUPS_MIGRATION in applied
+    video_applied = VIDEO_MIGRATION in applied
     if groups_applied or (baseline and "management_groups" in baseline["tables"]):
         required_tables.append("management_groups")
     for table in required_tables:
@@ -79,6 +86,8 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
             raise ValueError("Required management group columns missing")
         if groups_applied and table in ("feeds", "xhs_creators") and "group_id" not in columns:
             raise ValueError("Required management group column missing: " + table)
+        if video_applied and table == "xhs_notes" and not set(VIDEO_COLUMNS).issubset(columns):
+            raise ValueError("Required XHS video columns missing")
         previous = baseline["tables"].get(table) if baseline else None
         protected = previous["columns"] if previous else columns
         if not set(protected).issubset(columns):
@@ -95,6 +104,8 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
         if baseline and not previous and tables[table]["rows"] != 0:
             raise ValueError("New archive table must be empty after migration: " + table)
         new_columns = list(NEW_COLUMNS.get(table, []))
+        if video_applied and table == "xhs_notes":
+            new_columns.extend(VIDEO_COLUMNS)
         if groups_applied and table in ("feeds", "xhs_creators"):
             new_columns.append("group_id")
         for column in new_columns:

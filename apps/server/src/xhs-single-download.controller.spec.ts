@@ -44,6 +44,11 @@ const cached = (id: string, creatorId = 'creator-a') => ({
   title: id,
   publishTime: 1700000000,
   status: 'complete',
+  kind: null,
+  videoBytes: null,
+  videoMimeType: null,
+  videoExpectedBytes: null,
+  videoSha256: null,
   contentHtml:
     '<div id="js_content"><p>缓存完整正文</p><img src="data:image/png;base64,' +
     png +
@@ -100,7 +105,18 @@ describe('XHS single tool and bounded cache batch use original local publication
           provide: ConfigService,
           useValue: new ConfigService({ auth: { code: 'fixture-access' } }),
         },
-        { provide: PrismaService, useValue: { xhsNote: { findFirst } } },
+        {
+          provide: PrismaService,
+          useValue: {
+            xhsNote: { findFirst },
+            xhsCreator: {
+              findUnique: async ({ where }: { where: { id: string } }) =>
+                where.id === 'creator-a'
+                  ? { id: 'creator-a', externalAuthorId: 'verified-author' }
+                  : null,
+            },
+          },
+        },
         ...(withSource
           ? [
               {
@@ -201,6 +217,106 @@ describe('XHS single tool and bounded cache batch use original local publication
     expect(await fs.readFile(saved.body.markdownPath, 'utf8')).toContain(
       'user note kept',
     );
+  });
+
+  it('saves selected subscribed video cache through the original batch route and preserves repeated files', async () => {
+    const id = JSON.stringify(['xiaohongshu', 'note', 'cached-video']);
+    const sha256 = createHash('sha256').update(mp4).digest('hex');
+    findFirst.mockImplementation(async ({ where }) =>
+      where.id === id && where.creatorId === 'creator-a'
+        ? {
+            ...cached(id),
+            kind: 'video',
+            videoBytes: mp4,
+            videoExpectedBytes: mp4.length,
+            videoMimeType: 'video/mp4',
+            videoSha256: sha256,
+          }
+        : null,
+    );
+    const first = await batch([id]);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({
+      saved: true,
+      savedCount: 1,
+      alreadySavedCount: 0,
+      videoCount: 1,
+      videoDecoded: false,
+      videoVerification: 'container-and-bytes',
+    });
+    const [folder] = await files();
+    const markdownPath = join(folder, '正文.md');
+    const filename = 'video_' + sha256 + '.mp4';
+    expect(await fs.readFile(join(folder, 'video', filename))).toEqual(mp4);
+    expect(await fs.readFile(markdownPath, 'utf8')).toContain(
+      '(video/' + filename + ')',
+    );
+    const marker = JSON.parse(
+      await fs.readFile(join(folder, '.wewe-article.json'), 'utf8'),
+    );
+    expect(marker.videos).toEqual([{ filename, bytes: mp4.length, sha256 }]);
+    expect(marker.images).toHaveLength(1);
+    await fs.appendFile(markdownPath, '\nuser subscribed video note kept\n');
+    const repeated = await batch([id]);
+    expect(repeated.status).toBe(200);
+    expect(repeated.body).toMatchObject({
+      savedCount: 0,
+      alreadySavedCount: 1,
+      videoCount: 1,
+      videoDecoded: false,
+    });
+    expect(await files()).toEqual([folder]);
+    expect(await fs.readFile(markdownPath, 'utf8')).toContain(
+      'user subscribed video note kept',
+    );
+    expect(sourceRead).not.toHaveBeenCalled();
+    const oneCached = await post(
+      '/download/article/xiaohongshu/' + encodeURIComponent(id) + '/save',
+      { creatorId: 'creator-a' },
+    );
+    expect(oneCached.status).toBe(200);
+    expect(oneCached.body).toMatchObject({
+      alreadySaved: true,
+      videoCount: 1,
+      videoDecoded: false,
+      videoVerification: 'container-and-bytes',
+      contentSource: 'saved-xiaohongshu',
+    });
+    expect(await files()).toEqual([folder]);
+  });
+
+  it('rejects damaged subscribed video bytes or mixed creator selections before any batch publication', async () => {
+    const id = JSON.stringify(['xiaohongshu', 'note', 'cached-video']);
+    const sha256 = createHash('sha256').update(mp4).digest('hex');
+    findFirst.mockImplementation(async ({ where }) =>
+      where.id === id && where.creatorId === 'creator-a'
+        ? {
+            ...cached(id),
+            kind: 'video',
+            videoBytes: mp4,
+            videoExpectedBytes: mp4.length,
+            videoMimeType: 'video/mp4',
+            videoSha256: '0'.repeat(64),
+          }
+        : null,
+    );
+    expect((await batch([id])).status).toBe(422);
+    expect(await files()).toEqual([]);
+    findFirst.mockImplementation(async ({ where }) =>
+      where.id === id && where.creatorId === 'creator-a'
+        ? {
+            ...cached(id),
+            kind: 'video',
+            videoBytes: mp4,
+            videoExpectedBytes: mp4.length,
+            videoMimeType: 'video/mp4',
+            videoSha256: sha256,
+          }
+        : null,
+    );
+    expect((await batch([id, 'other-creator-note'])).status).toBe(422);
+    expect(await files()).toEqual([]);
+    expect(sourceRead).not.toHaveBeenCalled();
   });
 
   it('refuses mismatched declared video bytes without publishing a note or accepting uploaded media', async () => {

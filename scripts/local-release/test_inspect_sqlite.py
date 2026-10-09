@@ -134,6 +134,21 @@ class InspectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Required table missing: xhs_creators"):
             audit.inspect(self.database, self.migrations, require_current=True, schema_only=True)
 
+    def test_binary_cache_baseline_detects_byte_changes_and_type_changes(self):
+        self.migrate()
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("UPDATE articles SET metric=? WHERE id='a'", (b'\x00\xff\x80',))
+        before = audit.inspect(self.database, self.migrations, require_current=True)
+        self.assertEqual(audit.inspect(self.database, self.migrations, before, True)["tables"], before["tables"])
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("UPDATE articles SET metric=? WHERE id='a'", (b'\x00\xfe\x80',))
+        with self.assertRaises(ValueError):
+            audit.inspect(self.database, self.migrations, before, True)
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("UPDATE articles SET metric=? WHERE id='a'", ("blob",))
+        with self.assertRaises(ValueError):
+            audit.inspect(self.database, self.migrations, before, True)
+
 
 if __name__ == "__main__":
     unittest.main()
