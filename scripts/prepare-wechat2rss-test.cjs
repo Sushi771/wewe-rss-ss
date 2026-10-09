@@ -73,6 +73,19 @@ async function prepareWechat2RssTest(settings, root = workspace) {
   } finally {
     original.close();
   }
+  if (manifest) {
+    try {
+      const checked =
+        require('./local-release/startup-sqlite.cjs').inspectDatabase(
+          copy,
+          path.join(release, 'server/prisma/migrations'),
+          { schemaOnly: true },
+        );
+      if (checked.pending.length) fail('WECHAT2RSS_TEST_SCHEMA_UNVERIFIED');
+    } catch {
+      fail('WECHAT2RSS_TEST_SCHEMA_UNVERIFIED');
+    }
+  }
   const db = new DatabaseSync(copy);
   try {
     const bad = db
