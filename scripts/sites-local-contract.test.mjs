@@ -5,6 +5,8 @@ import worker, {
   createSitesClient,
   createSitesWorker,
   parseSitesCommand,
+  sitesDownloadBlob,
+  createWechatCacheProjector,
 } from './sites-local-contract.mjs';
 
 const originalFetch = globalThis.fetch;
@@ -156,7 +158,7 @@ test('missing visitor and non-owner fail before transport or local routes', asyn
     assert.equal(touched, false);
   }
 });
-test('only three read operations are accepted; arbitrary URLs, paths, source credentials and owner IDs are rejected', () => {
+test('invalid operations and extra URLs, paths, credentials and owner IDs are rejected', () => {
   for (const action of [
     'refresh',
     'add',
@@ -507,4 +509,498 @@ test('oversized transport results retain truncation even when the sender claims 
   const result = await reply.json();
   assert.equal(result.data.items.length, 1);
   assert.equal(result.data.truncated, true);
+});
+
+const png =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
+const bodyCommand = {
+  action: 'body',
+  platform: 'xiaohongshu',
+  authorId: 'creator-1',
+  itemId: 'XHS_synthetic-note',
+};
+const refreshCommand = {
+  action: 'refresh',
+  platform: 'xiaohongshu',
+  authorId: 'creator-1',
+  operationId: 'synthetic-operation',
+  confirmed: true,
+};
+function cacheFixture(options = {}) {
+  const { caller, calls } = fixture();
+  const cached = {
+    title: '合成 <script>标题</script>',
+    publishTime: 1700000000,
+    text: '完整合成正文\n<img src="https://private.invalid">',
+    images: [png],
+  };
+  const track = (name, value) => async (input) => {
+    calls.push([name, input]);
+    return value;
+  };
+  caller.xiaohongshu.body = track('xiaohongshu.body', cached);
+  caller.xiaohongshu.capability = track('xiaohongshu.capability', {
+    sourceConfigured: true,
+    canRefresh: true,
+  });
+  caller.xiaohongshu.list = track('xiaohongshu.list', {
+    items: [{ id: 'creator-1', enabled: true, displayName: '合成博主' }],
+  });
+  caller.xiaohongshu.refresh = track('xiaohongshu.refresh', {
+    status: 'complete',
+    added: 1,
+    message: 'private receipt',
+  });
+  caller.article.byId = track('article.byId', {
+    id: 'old-short-id',
+    mpId: 'MP_WXS_12345',
+    title: cached.title,
+    publishTime: cached.publishTime,
+    contentHtml: '<div id="js_content">cached synthetic body</div>',
+    lastBodyStatus: 'available',
+    sourceUrl: 'private',
+  });
+  caller.feed.byId = track('feed.byId', {
+    id: 'MP_WXS_12345',
+    collectionRoute: { channel: 'wechat2rss' },
+  });
+  caller.feed.addCapability = track('feed.addCapability', {
+    source: 'wechat2rss',
+    available: true,
+  });
+  caller.feed.refreshArticles = track('feed.refreshArticles', [
+    {
+      source: 'wechat2rss',
+      status: 'pending',
+      complete: false,
+      accepted: true,
+      created: 0,
+      message: 'private',
+    },
+  ]);
+  const settings = {
+    authorize: owner,
+    caller,
+    projectWechatCachedBody: async () => ({
+      text: cached.text,
+      images: cached.images,
+    }),
+    refreshAccess: async () => ({
+      sourceAvailable: true,
+      accountAvailable: true,
+      manualAccessConfirmed: true,
+      budgetApproved: true,
+    }),
+    ...options,
+  };
+  return { caller, calls, cached, gateway: createLocalSitesGateway(settings) };
+}
+const clientFor = (gateway) =>
+  createSitesClient(async (_, options) =>
+    createSitesWorker({
+      authorize: owner,
+      transport: { send: (c) => gateway.execute(c) },
+    }).fetch(req(JSON.parse(options.body))),
+  );
+
+test('new commands require explicit IDs and confirmation and still reject paths, URLs, budgets and tRPC selectors', () => {
+  assert.deepEqual(parseSitesCommand(bodyCommand), bodyCommand);
+  assert.deepEqual(parseSitesCommand(refreshCommand), refreshCommand);
+  for (const command of [
+    { ...refreshCommand, confirmed: false },
+    { ...refreshCommand, operationId: '' },
+    { ...bodyCommand, itemId: '' },
+    { ...bodyCommand, limit: 1 },
+    { ...refreshCommand, method: 'account.list' },
+    { ...refreshCommand, budgetApproved: true },
+    { ...refreshCommand, accountToken: 'private' },
+    { ...bodyCommand, url: 'https://private.invalid' },
+    { ...bodyCommand, directory: '../vault' },
+    {
+      action: 'refresh',
+      platform: 'wechat',
+      authorId: 'f',
+      operationId: 'o',
+      confirmed: true,
+    },
+  ])
+    assert.throws(() => parseSitesCommand(command), { code: 'BAD_REQUEST' });
+});
+test('XHS cached body travels through the actual contract chain with ordered actual PNG bytes and no private fields', async () => {
+  const { gateway, calls, cached } = cacheFixture();
+  cached.images = [png, png];
+  const result = await clientFor(gateway)(bodyCommand);
+  assert.deepEqual(result.images, [png, png]);
+  assert.equal(result.text, cached.text);
+  assert.deepEqual(calls, [
+    [
+      'xiaohongshu.body',
+      { creatorId: 'creator-1', noteId: 'XHS_synthetic-note' },
+    ],
+  ]);
+  assert.equal(result.itemId, bodyCommand.itemId);
+  assert.equal('sourceUrl' in result, false);
+});
+test('cached-only browser download is self-contained escaped HTML with a real Blob, never a PC path or remote export call', async () => {
+  const { gateway, calls } = cacheFixture();
+  const download = await clientFor(gateway)({
+    ...bodyCommand,
+    action: 'download',
+  });
+  const result = sitesDownloadBlob(download);
+  assert.equal(result.filename, '缓存图文.html');
+  assert.equal(result.blob.type, 'text/html');
+  const html = await result.blob.text();
+  assert.match(html, /&lt;script&gt;标题&lt;\/script&gt;/);
+  assert.match(html, /&lt;img src=/);
+  assert.match(html, /default-src &#39;none&#39;/);
+  assert.ok(html.includes(png));
+  assert.doesNotMatch(
+    html,
+    /<script>|src="https?:|Obsidian|markdownPath|file:\/\//,
+  );
+  assert.deepEqual(
+    calls.map((c) => c[0]),
+    ['xiaohongshu.body'],
+  );
+});
+test('remote images, MIME mismatches, truncated/fake bytes, sparse media and empty cached bodies fail without fallback', async () => {
+  const { gateway, cached, calls } = cacheFixture();
+  for (const images of [
+    ['https://private.invalid/image.png'],
+    [png.replace('image/png', 'image/jpeg')],
+    ['data:image/png;base64,SGVsbG8='],
+    [png.slice(0, -4)],
+    Array(1),
+  ]) {
+    cached.images = images;
+    await rejects(gateway.execute(bodyCommand), 'CACHE_UNAVAILABLE');
+  }
+  cached.images = [];
+  cached.text = '';
+  await rejects(gateway.execute(bodyCommand), 'CACHE_UNAVAILABLE');
+  assert.ok(calls.every((c) => c[0] === 'xiaohongshu.body'));
+});
+test('text-only cached body works, but oversized text, media count and aggregate bytes are refused without truncation', async () => {
+  const { gateway, cached } = cacheFixture();
+  cached.images = [];
+  assert.equal((await gateway.execute(bodyCommand)).text, cached.text);
+  cached.text = 'x'.repeat(250001);
+  await rejects(gateway.execute(bodyCommand), 'CACHE_UNAVAILABLE');
+  cached.text = '合成正文';
+  cached.images = Array(61).fill(png);
+  await rejects(gateway.execute(bodyCommand), 'CACHE_UNAVAILABLE');
+  const image = Buffer.alloc(850000);
+  const bytes = Buffer.from(png.split(',')[1], 'base64');
+  bytes.copy(image, 0, 0, 16);
+  bytes.copy(image, image.length - 12, bytes.length - 12);
+  cached.images = Array(5).fill(
+    'data:image/png;base64,' + image.toString('base64'),
+  );
+  await rejects(gateway.execute(bodyCommand), 'CACHE_UNAVAILABLE');
+});
+test('Wechat body uses original cache lookup and server projector only, rejects foreign parent and unavailable cache', async () => {
+  const { gateway, calls, caller } = cacheFixture();
+  const command = {
+    ...bodyCommand,
+    platform: 'wechat',
+    authorId: 'MP_WXS_12345',
+    itemId: 'old-short-id',
+  };
+  assert.deepEqual((await gateway.execute(command)).images, [png]);
+  assert.deepEqual(calls, [['article.byId', 'old-short-id']]);
+  await rejects(
+    gateway.execute({ ...command, authorId: 'wrong' }),
+    'NOT_FOUND',
+  );
+  caller.article.byId = async () => ({
+    id: command.itemId,
+    mpId: command.authorId,
+    contentHtml: '',
+  });
+  await rejects(gateway.execute(command), 'CACHE_UNAVAILABLE');
+  const missing = cacheFixture({ projectWechatCachedBody: undefined });
+  await rejects(missing.gateway.execute(command), 'CACHE_ADAPTER_UNCONFIGURED');
+});
+test('Wechat projector validates before parsing, refuses missing dependencies and extracts text/media using the supplied original parser', () => {
+  assert.throws(() => createWechatCacheProjector()('cached'), {
+    code: 'CACHE_ADAPTER_UNCONFIGURED',
+  });
+  let parsed = false;
+  assert.throws(
+    () =>
+      createWechatCacheProjector({
+        verifiedDownloadBody: () => {
+          throw new Error('invalid');
+        },
+        load: () => {
+          parsed = true;
+        },
+      })('remote body'),
+    { code: 'CACHE_UNAVAILABLE' },
+  );
+  assert.equal(parsed, false);
+  const body = {
+    length: 1,
+    find: (selector) =>
+      selector === 'img'
+        ? { toArray: () => ['synthetic-image-node'] }
+        : { replaceWith: () => {}, append: () => {} },
+    text: () => '合成正文\n',
+  };
+  const project = createWechatCacheProjector({
+    verifiedDownloadBody: (html) => {
+      assert.equal(html, 'cached-html');
+      return 'validated-html';
+    },
+    load: (html) => {
+      assert.equal(html, 'validated-html');
+      return (node) => (node === '#js_content' ? body : { attr: () => png });
+    },
+  });
+  assert.deepEqual(project('cached-html'), {
+    text: '合成正文\n',
+    images: [png],
+  });
+});
+test('body, download, refresh and status remain closed with missing identity or missing PC transport', async () => {
+  for (const command of [
+    bodyCommand,
+    { ...bodyCommand, action: 'download' },
+    refreshCommand,
+    {
+      action: 'status',
+      platform: 'xiaohongshu',
+      authorId: 'creator-1',
+      operationId: 'synthetic-operation',
+    },
+  ]) {
+    assert.equal((await worker.fetch(req(command))).status, 503);
+    assert.equal(
+      (await createSitesWorker({ authorize: owner }).fetch(req(command)))
+        .status,
+      503,
+    );
+    await rejects(
+      createLocalSitesGateway().execute(command),
+      'IDENTITY_UNCONFIGURED',
+    );
+  }
+});
+test('refresh needs a server-only policy adapter and returns source/account/policy unavailable without submission', async () => {
+  for (const [options, expected] of [
+    [{ refreshAccess: undefined }, 'REFRESH_UNCONFIGURED'],
+    [
+      { refreshAccess: async () => ({ sourceAvailable: false }) },
+      'SOURCE_UNAVAILABLE',
+    ],
+    [
+      { refreshAccess: async () => ({ accountAvailable: false }) },
+      'ACCOUNT_UNAVAILABLE',
+    ],
+    [
+      {
+        refreshAccess: async () => ({
+          sourceAvailable: true,
+          accountAvailable: true,
+        }),
+      },
+      'POLICY_UNCONFIRMED',
+    ],
+  ]) {
+    const { gateway, calls } = cacheFixture(options);
+    const result = await gateway.execute(refreshCommand);
+    assert.equal(result.state, 'blocked');
+    assert.equal(result.code, expected);
+    assert.ok(calls.every((c) => !c[0].endsWith('.refresh')));
+  }
+});
+test('unconfigured or paused XHS source blocks refresh and does not call policy or source', async () => {
+  let policyCalls = 0;
+  const { gateway, caller, calls } = cacheFixture({
+    refreshAccess: async () => {
+      policyCalls++;
+    },
+  });
+  caller.xiaohongshu.capability = async () => ({ sourceConfigured: false });
+  assert.equal(
+    (await gateway.execute(refreshCommand)).code,
+    'SOURCE_UNAVAILABLE',
+  );
+  caller.xiaohongshu.capability = async () => ({ sourceConfigured: true });
+  caller.xiaohongshu.list = async () => ({
+    items: [{ id: 'creator-1', enabled: false }],
+  });
+  assert.equal(
+    (await gateway.execute({ ...refreshCommand, operationId: 'paused' })).code,
+    'SOURCE_UNAVAILABLE',
+  );
+  assert.equal(policyCalls, 0);
+  assert.ok(calls.every((c) => c[0] !== 'xiaohongshu.refresh'));
+});
+test('paid WX refresh follows existing saved binding and projects pending as pending; native never falls back or rebinds', async () => {
+  const { gateway, caller, calls } = cacheFixture();
+  const command = {
+    ...refreshCommand,
+    platform: 'wechat',
+    authorId: 'MP_WXS_12345',
+    source: 'wechat2rss',
+  };
+  const result = await gateway.execute(command);
+  assert.equal(result.state, 'pending');
+  assert.equal(result.code, 'UPSTREAM_PENDING');
+  assert.deepEqual(calls.at(-1), [
+    'feed.refreshArticles',
+    { mpId: 'MP_WXS_12345' },
+  ]);
+  caller.feed.addCapability = async () => ({
+    source: 'native',
+    available: true,
+  });
+  const blocked = await gateway.execute({
+    ...command,
+    source: 'native',
+    operationId: 'native',
+  });
+  assert.equal(blocked.code, 'SOURCE_MISMATCH');
+  assert.equal(calls.filter((c) => c[0] === 'feed.refreshArticles').length, 1);
+});
+test('same operation is never replayed and cannot be rebound to another author/source', async () => {
+  const { gateway, calls } = cacheFixture();
+  const result = await gateway.execute(refreshCommand);
+  assert.equal(result.state, 'complete');
+  assert.equal(result.added, 1);
+  assert.deepEqual(await gateway.execute(refreshCommand), result);
+  await rejects(
+    gateway.execute({ ...refreshCommand, authorId: 'different' }),
+    'CONFLICT',
+  );
+  assert.equal(calls.filter((c) => c[0] === 'xiaohongshu.refresh').length, 1);
+});
+test('known original source-unavailable and failed receipts stay explicit and cannot become completed', async () => {
+  const { gateway, caller } = cacheFixture();
+  caller.xiaohongshu.refresh = async () => ({
+    status: 'failed',
+    added: 0,
+    message: 'private',
+  });
+  assert.equal((await gateway.execute(refreshCommand)).state, 'failed');
+  const command = {
+    ...refreshCommand,
+    platform: 'wechat',
+    authorId: 'MP_WXS_12345',
+    source: 'wechat2rss',
+  };
+  for (const [source, state, code] of [
+    ['unavailable', 'blocked', 'SOURCE_UNAVAILABLE'],
+    ['error', 'failed', 'UPDATE_FAILED'],
+  ]) {
+    caller.feed.refreshArticles = async () => [
+      { source, status: state, complete: false, message: 'private' },
+    ];
+    const result = await gateway.execute({ ...command, operationId: source });
+    assert.equal(result.state, state);
+    assert.equal(result.code, code);
+  }
+});
+test('in-flight author rejects a different operation, same operation/status queries are read-only and lock releases after completion', async () => {
+  const { gateway, caller, calls } = cacheFixture();
+  let finish;
+  caller.xiaohongshu.refresh = async () => {
+    calls.push(['source-call']);
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  };
+  const pending = gateway.execute(refreshCommand);
+  while (!finish) await new Promise((resolve) => setImmediate(resolve));
+  const statusCommand = {
+    action: 'status',
+    platform: 'xiaohongshu',
+    authorId: 'creator-1',
+    operationId: refreshCommand.operationId,
+  };
+  assert.equal((await gateway.execute(statusCommand)).state, 'running');
+  assert.equal((await gateway.execute(refreshCommand)).state, 'running');
+  await rejects(
+    gateway.execute({ ...refreshCommand, operationId: 'another' }),
+    'CONFLICT',
+  );
+  await rejects(
+    gateway.execute({ ...statusCommand, authorId: 'other' }),
+    'NOT_FOUND',
+  );
+  finish({ status: 'partial', added: 1 });
+  await pending;
+  assert.equal((await gateway.execute(statusCommand)).state, 'partial');
+  assert.equal(calls.filter((c) => c[0] === 'source-call').length, 1);
+});
+test('service failure retains an unknown fixed-code receipt, releases guard and never retries the same operation', async () => {
+  const { gateway, caller } = cacheFixture();
+  let count = 0;
+  caller.xiaohongshu.refresh = async () => {
+    count++;
+    throw new Error('private URL/key/path');
+  };
+  const result = await gateway.execute(refreshCommand);
+  assert.equal(result.state, 'unknown');
+  assert.equal(result.code, 'RESULT_UNKNOWN');
+  assert.deepEqual(await gateway.execute(refreshCommand), result);
+  assert.equal(count, 1);
+  assert.doesNotMatch(JSON.stringify(result), /private|URL|key|path/);
+  const later = await gateway.execute({
+    ...refreshCommand,
+    operationId: 'explicit-new-operation',
+  });
+  assert.equal(later.state, 'unknown');
+  assert.equal(count, 2);
+});
+test('bounded receipt storage rejects more operations instead of evicting uncertain IDs for replay', async () => {
+  const { gateway } = cacheFixture({ refreshAccess: undefined });
+  for (let i = 0; i < 128; i++)
+    await gateway.execute({ ...refreshCommand, operationId: 'fixture-' + i });
+  await rejects(
+    gateway.execute({ ...refreshCommand, operationId: 'overflow' }),
+    'OPERATION_LIMIT',
+  );
+  assert.equal(
+    (await gateway.execute({ ...refreshCommand, operationId: 'fixture-0' }))
+      .code,
+    'REFRESH_UNCONFIGURED',
+  );
+});
+test('refresh transport timeout reports unknown without replay; later status resolves the original local receipt', async () => {
+  const { gateway, caller } = cacheFixture();
+  let finish,
+    count = 0;
+  caller.xiaohongshu.refresh = async () => {
+    count++;
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  };
+  const site = createSitesWorker({
+    authorize: owner,
+    transport: { send: (c) => gateway.execute(c) },
+  });
+  const reply = await site.fetch(req(refreshCommand));
+  assert.deepEqual(await reply.json(), { ok: false, code: 'RESULT_UNKNOWN' });
+  assert.equal(count, 1);
+  const statusCommand = {
+    action: 'status',
+    platform: 'xiaohongshu',
+    authorId: 'creator-1',
+    operationId: refreshCommand.operationId,
+  };
+  assert.equal(
+    (await (await site.fetch(req(statusCommand))).json()).data.state,
+    'running',
+  );
+  finish({ status: 'complete', added: 1 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    (await (await site.fetch(req(statusCommand))).json()).data.state,
+    'complete',
+  );
+  assert.equal(count, 1);
 });
