@@ -321,6 +321,7 @@ export class FeedsService {
         hasHistory: -1,
         order: 0,
         localDirectory: null,
+        groupId: null,
         publicAlbumIds: null,
         lastCollectionResult: null,
         collectionChannel: null,

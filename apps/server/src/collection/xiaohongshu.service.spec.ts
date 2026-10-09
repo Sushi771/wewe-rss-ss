@@ -51,11 +51,20 @@ describe('production XHS router/service → additive SQLite and original export 
   let root: string, prisma: PrismaClient, creatorId: string;
   const originalEnv = { ...process.env };
   let snapshot: unknown;
-  const oldRows = async () => ({
-    feeds: await prisma.feed.findMany(),
-    articles: await prisma.article.findMany(),
-    accounts: await prisma.account.findMany(),
-  });
+  const oldRows = async () => {
+    const columns = (
+      await prisma.$queryRawUnsafe<any[]>('PRAGMA table_info(feeds)')
+    )
+      .map((column) => column.name)
+      .filter((name) => name !== 'group_id');
+    return {
+      feeds: await prisma.$queryRawUnsafe(
+        `SELECT ${columns.map((name) => '"' + name + '"').join(',')} FROM feeds`,
+      ),
+      articles: await prisma.article.findMany(),
+      accounts: await prisma.account.findMany(),
+    };
+  };
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(tmpdir(), 'wewe-xhs-integration-'));
     const url = 'file:' + path.join(root, 'fixture.sqlite').replace(/\\/g, '/');
@@ -78,7 +87,9 @@ describe('production XHS router/service → additive SQLite and original export 
         await prisma.$executeRawUnsafe(statement);
     };
     for (const name of all.filter(
-      (n) => n !== '20261009050000_add_xhs_local_archive',
+      (n) =>
+        n !== '20261009050000_add_xhs_local_archive' &&
+        n !== '20261009063000_add_management_groups',
     ))
       await apply(name);
     await prisma.account.create({
@@ -89,15 +100,14 @@ describe('production XHS router/service → additive SQLite and original export 
         status: 1,
       },
     });
-    await prisma.feed.create({
-      data: {
-        id: 'MP_WXS_3456789012',
-        mpName: '合成旧公众号',
-        mpCover: '',
-        mpIntro: '',
-        updateTime: 1,
-      },
-    });
+    await prisma.$executeRawUnsafe(
+      'INSERT INTO feeds (id,mp_name,mp_cover,mp_intro,update_time) VALUES (?,?,?,?,?)',
+      'MP_WXS_3456789012',
+      '合成旧公众号',
+      '',
+      '',
+      1,
+    );
     await prisma.article.create({
       data: {
         id: 'old-short-identity',
@@ -111,6 +121,7 @@ describe('production XHS router/service → additive SQLite and original export 
     });
     snapshot = await oldRows();
     await apply('20261009050000_add_xhs_local_archive');
+    await apply('20261009063000_add_management_groups');
     expect(await oldRows()).toEqual(snapshot);
     expect(await prisma.$queryRawUnsafe('PRAGMA integrity_check')).toEqual([
       { integrity_check: 'ok' },

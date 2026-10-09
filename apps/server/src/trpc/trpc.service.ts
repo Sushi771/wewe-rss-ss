@@ -13,6 +13,13 @@ import { wechat2RssProvider } from '../collection/provider-registry';
 import { Wechat2RssProvider } from '../collection/providers/wechat2rss';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import {
+  managementGroups,
+  saveManagementGroup,
+  removeManagementGroup,
+  moveManagementMembers,
+  managementMemberIds,
+} from '../collection/xiaohongshu.service';
+import {
   addNativeSubscription,
   repairNativeSubscription,
   SUBSCRIPTION_DISCOVERY,
@@ -52,6 +59,34 @@ import {
 
 @Injectable()
 export class TrpcService {
+  groups() {
+    return managementGroups(this.prismaService, 'wechat');
+  }
+  saveGroup(input: { id?: string; name: string }) {
+    return saveManagementGroup(this.prismaService, 'wechat', input);
+  }
+  removeGroup(id: string) {
+    return removeManagementGroup(this.prismaService, 'wechat', id);
+  }
+  async moveFeeds(ids: string[], groupId: string | null) {
+    const unique = managementMemberIds(ids);
+    if (unique.some((id) => this.activeCollections.has(id)))
+      throw new TRPCError({
+        code: 'CONFLICT',
+        message: '公众号正在处理，请等待完成后移动。',
+      });
+    unique.forEach((id) => this.activeCollections.add(id));
+    try {
+      return await moveManagementMembers(
+        this.prismaService,
+        'wechat',
+        unique,
+        groupId,
+      );
+    } finally {
+      unique.forEach((id) => this.activeCollections.delete(id));
+    }
+  }
   trpc = initTRPC.create();
   publicProcedure = this.trpc.procedure;
   protectedProcedure = this.trpc.procedure.use(({ ctx, next, type, path }) => {

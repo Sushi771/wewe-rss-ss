@@ -1,7 +1,7 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { TRPCError } from '@trpc/server';
 import { PrismaService } from '../prisma/prisma.service';
-import { XhsCreator } from '@prisma/client';
+import { Prisma, XhsCreator } from '@prisma/client';
 import {
   appendXhsPage,
   xhsArchiveDraft,
@@ -55,6 +55,122 @@ const escape = (s: string) =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
+type ManagementPlatform = 'wechat' | 'xiaohongshu';
+// Shared process lock protects both platform namespaces while checking membership.
+// SQLite transactions and restrictive foreign keys protect committed state.
+let managementMutationActive = false;
+async function mutateManagement<T>(action: () => Promise<T>) {
+  if (managementMutationActive)
+    return fail('分组正在修改，请等待完成。', 'CONFLICT');
+  managementMutationActive = true;
+  try {
+    return await action();
+  } finally {
+    managementMutationActive = false;
+  }
+}
+export function managementMemberIds(ids: string[], maxIdLength = 128) {
+  if (
+    !ids.length ||
+    ids.length > 100 ||
+    ids.some((id) => !id || id.length > maxIdLength)
+  )
+    return fail('每次请选择 1–100 个有效条目。', 'BAD_REQUEST');
+  return [...new Set(ids)];
+}
+async function getManagementGroup(
+  db: Prisma.TransactionClient,
+  platform: ManagementPlatform,
+  id: string,
+) {
+  const group = await db.managementGroup.findFirst({ where: { id, platform } });
+  if (!group) return fail('找不到该平台的分组。', 'NOT_FOUND');
+  return group;
+}
+export async function managementGroups(
+  db: PrismaService,
+  platform: ManagementPlatform,
+) {
+  return {
+    platform,
+    items: await db.managementGroup.findMany({
+      where: { platform },
+      orderBy: { id: 'asc' },
+    }),
+  };
+}
+export async function saveManagementGroup(
+  db: PrismaService,
+  platform: ManagementPlatform,
+  input: { id?: string; name: string },
+) {
+  const name = input.name.trim();
+  if (!name || name.length > 80 || /[\x00-\x1f\x7f]/.test(name))
+    return fail('分组名称须为 1–80 个字符，不能含控制字符。', 'BAD_REQUEST');
+  return mutateManagement(async () => {
+    await createVerifiedSqliteBackup();
+    return db.$transaction(async (tx) => {
+      if (input.id) {
+        await getManagementGroup(tx, platform, input.id);
+        return tx.managementGroup.update({
+          where: { id: input.id },
+          data: { name },
+        });
+      }
+      return tx.managementGroup.create({
+        data: { id: randomUUID(), name, platform },
+      });
+    });
+  });
+}
+export async function removeManagementGroup(
+  db: PrismaService,
+  platform: ManagementPlatform,
+  id: string,
+) {
+  return mutateManagement(async () => {
+    await createVerifiedSqliteBackup();
+    return db.$transaction(async (tx) => {
+      await getManagementGroup(tx, platform, id);
+      if (
+        (await tx.feed.count({ where: { groupId: id } })) ||
+        (await tx.xhsCreator.count({ where: { groupId: id } }))
+      )
+        return fail('分组仍有条目，请先移动后再删除。', 'CONFLICT');
+      await tx.managementGroup.delete({ where: { id } });
+      return { removed: true as const };
+    });
+  });
+}
+export async function moveManagementMembers(
+  db: PrismaService,
+  platform: ManagementPlatform,
+  ids: string[],
+  groupId: string | null,
+) {
+  const unique = managementMemberIds(ids);
+  return mutateManagement(async () => {
+    await createVerifiedSqliteBackup();
+    return db.$transaction(async (tx) => {
+      if (groupId !== null) await getManagementGroup(tx, platform, groupId);
+      const where = { id: { in: unique } };
+      const count =
+        platform === 'wechat'
+          ? await tx.feed.count({ where })
+          : await tx.xhsCreator.count({ where });
+      if (count !== unique.length)
+        return fail('选中条目不存在或不属于该平台，未移动。', 'NOT_FOUND');
+      if (platform === 'wechat')
+        // Folder changes must not rewrite upstream metadata or its updated_at.
+        await tx.$executeRaw(
+          Prisma.sql`UPDATE feeds SET group_id = ${groupId} WHERE id IN (${Prisma.join(unique)})`,
+        );
+      else await tx.xhsCreator.updateMany({ where, data: { groupId } });
+      return { moved: unique.length, ids: unique, groupId };
+    });
+  });
+}
+
 /** Store the supplied public page as a pending link, never derive a trusted ID. */
 export function xhsProfileLink(raw: string) {
   try {
@@ -97,14 +213,42 @@ export class XiaohongshuService {
         : '待接入数据源；可以管理待接入博主，尚不能读取新笔记。',
     };
   }
-  async list() {
+  async list(input?: { groupId?: string | null }) {
+    if (typeof input?.groupId === 'string')
+      await getManagementGroup(this.prisma, 'xiaohongshu', input.groupId);
     return {
       platform: 'xiaohongshu' as const,
       items: await this.prisma.xhsCreator.findMany({
+        where: input?.groupId === undefined ? {} : { groupId: input.groupId },
         orderBy: { createdAt: 'asc' },
         include: { _count: { select: { notes: true } } },
       }),
     };
+  }
+  groups() {
+    return managementGroups(this.prisma, 'xiaohongshu');
+  }
+  saveGroup(input: { id?: string; name: string }) {
+    return saveManagementGroup(this.prisma, 'xiaohongshu', input);
+  }
+  removeGroup(id: string) {
+    return removeManagementGroup(this.prisma, 'xiaohongshu', id);
+  }
+  async moveCreators(ids: string[], groupId: string | null) {
+    const unique = managementMemberIds(ids);
+    if (unique.some((id) => this.active.has(id)))
+      return fail('博主正在处理，请等待完成后移动。', 'CONFLICT');
+    unique.forEach((id) => this.active.add(id));
+    try {
+      return await moveManagementMembers(
+        this.prisma,
+        'xiaohongshu',
+        unique,
+        groupId,
+      );
+    } finally {
+      unique.forEach((id) => this.active.delete(id));
+    }
   }
   async add(displayName: string, raw: string) {
     const profileUrl = xhsProfileLink(raw),
@@ -318,12 +462,20 @@ export class XiaohongshuService {
       images,
     };
   }
-  async export(creatorId: string) {
+  async export(creatorId: string, noteIds?: string[]) {
     await this.getCreator(creatorId);
+    const selected =
+      noteIds === undefined ? undefined : managementMemberIds(noteIds, 300);
     const notes = await this.prisma.xhsNote.findMany({
-      where: { creatorId, status: 'complete' },
+      where: {
+        creatorId,
+        status: 'complete',
+        ...(selected ? { id: { in: selected } } : {}),
+      },
       orderBy: [{ publishTime: 'asc' }, { id: 'asc' }],
     });
+    if (selected && notes.length !== selected.length)
+      return fail('选中笔记必须完整且属于该博主，未导出。', 'BAD_REQUEST');
     if (!notes.length) return fail('没有已核验完整图文，尚不能下载。');
     if (
       notes.reduce(

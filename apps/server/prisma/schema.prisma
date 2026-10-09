@@ -37,7 +37,11 @@ model Feed {
   collectionChannel String? @map("collection_channel")
   /// Unix seconds when a manual Wechat2RSS /add attempt was reserved, including failed requests.
   providerRefreshAttemptTime Int @default(0) @map("provider_refresh_attempt_time")
+  groupId    String? @map("group_id")
+  group      ManagementGroup? @relation(fields: [groupId], references: [id], onDelete: Restrict)
   articles   Article[]
+
+  @@index([groupId])
 
   @@map("feeds")
 }
@@ -77,9 +81,24 @@ model XhsCreator {
   lastStatus       String    @default("pending") @map("last_status")
   lastCheckedAt    Int       @default(0) @map("last_checked_at")
   createdAt        DateTime  @default(now()) @map("created_at")
+  groupId          String?   @map("group_id")
+  group            ManagementGroup? @relation(fields: [groupId], references: [id], onDelete: Restrict)
   notes            XhsNote[]
 
+  @@index([groupId])
   @@map("xhs_creators")
+}
+
+// Local organization labels are independent of upstream source bindings and paths.
+model ManagementGroup {
+  id       String       @id @default(cuid())
+  name     String
+  platform String
+  feeds    Feed[]
+  creators XhsCreator[]
+
+  @@index([platform])
+  @@map("management_groups")
 }
 
 model XhsNote {

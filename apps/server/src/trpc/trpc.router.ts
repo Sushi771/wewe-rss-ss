@@ -665,6 +665,34 @@ export class TrpcRouter {
   });
 
   feedRouter = this.trpcService.router({
+    groups: this.trpcService.protectedProcedure.query(() =>
+      this.trpcService.groups(),
+    ),
+    saveGroup: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            id: z.string().min(1).max(128).optional(),
+            name: z.string().trim().min(1).max(80),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.trpcService.saveGroup(input)),
+    removeGroup: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.trpcService.removeGroup(input.id)),
+    moveFeeds: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            ids: z.array(z.string().min(1).max(128)).min(1).max(100),
+            groupId: z.string().min(1).max(128).nullable(),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) =>
+        this.trpcService.moveFeeds(input.ids, input.groupId),
+      ),
     searchCandidates: this.trpcService.protectedProcedure
       .input(z.object({ mpId: z.string().regex(/^MP_WXS_\d{5,15}$/) }))
       .query(({ input }) => this.readSearchCandidateSnapshot(input.mpId)),
@@ -1184,7 +1212,38 @@ export class TrpcRouter {
     capability: this.trpcService.protectedProcedure.query(() =>
       this.xhs.capability(),
     ),
-    list: this.trpcService.protectedProcedure.query(() => this.xhs.list()),
+    list: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ groupId: z.string().min(1).max(128).nullable().optional() })
+          .strict()
+          .optional(),
+      )
+      .query(({ input }) => this.xhs.list(input)),
+    groups: this.trpcService.protectedProcedure.query(() => this.xhs.groups()),
+    saveGroup: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            id: z.string().min(1).max(128).optional(),
+            name: z.string().trim().min(1).max(80),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhs.saveGroup(input)),
+    removeGroup: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.removeGroup(input.id)),
+    moveCreators: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            ids: z.array(z.string().min(1).max(128)).min(1).max(100),
+            groupId: z.string().min(1).max(128).nullable(),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhs.moveCreators(input.ids, input.groupId)),
     add: this.trpcService.protectedProcedure
       .input(
         z
@@ -1224,8 +1283,19 @@ export class TrpcRouter {
       .input(z.object({ id: z.string().min(1).max(128) }).strict())
       .mutation(({ input }) => this.xhs.refresh(input.id)),
     export: this.trpcService.protectedProcedure
-      .input(z.object({ creatorId: z.string().min(1).max(128) }).strict())
-      .mutation(({ input }) => this.xhs.export(input.creatorId)),
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteIds: z
+              .array(z.string().min(1).max(300))
+              .min(1)
+              .max(100)
+              .optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhs.export(input.creatorId, input.noteIds)),
   });
 
   appRouter = this.trpcService.router({
