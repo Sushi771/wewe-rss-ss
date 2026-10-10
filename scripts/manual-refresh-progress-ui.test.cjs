@@ -113,8 +113,9 @@ test('actual progress component distinguishes queued, upstream accepted and sync
   assert(
     f.progress.props.label.includes('排队 1 · 上游已受理 2 · 缓存已同步 1'),
   );
-  assert(f.text.includes('上游受理不代表最新文章已生成'));
-  assert(f.text.includes('关闭页面后后台继续'));
+  assert(f.text.includes('等待缓存'));
+  assert(f.text.includes('缓存已同步'));
+  assert(!f.text.includes('全部正文已完成'));
   assert.equal(f.requests.length, 0);
 });
 test('stop handler has a synchronous repeated-click guard and only invokes the existing stop RPC', async () => {
@@ -148,7 +149,7 @@ test('unknown /add receipts offer no resume, whereas confirmed accepted cache fa
     ],
   });
   assert.equal(unknown.buttons.length, 1);
-  assert(unknown.text.includes('回执未知，不能重发'));
+  assert(unknown.text.includes('检查未完成'));
   const cache = fixture({
     batchId: 'synthetic-batch',
     state: 'paused',
@@ -165,12 +166,14 @@ test('cancelled and completed batches never advertise full-history or newest-art
     items: [{ ...item, state: 'cancelled', accepted: false }],
   });
   assert.equal(stopped.buttons.length, 0);
-  assert(stopped.progress.props.label.includes('剩余未发请求已取消'));
+  assert.equal(stopped.progress, undefined);
+  assert.equal(stopped.text, '');
   const complete = fixture({
     batchId: 'synthetic-batch',
     state: 'completed',
     items: [{ ...item, state: 'succeeded' }],
   });
-  assert(complete.progress.props.label.includes('本轮处理已结束'));
+  assert.equal(complete.progress, undefined);
+  assert.equal(complete.text, '');
   assert.equal(complete.buttons.length, 0);
 });

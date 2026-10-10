@@ -352,7 +352,7 @@ test('new add modal has no native source/account chooser and uses the real capab
   await stale.button.props.onPress();
   assert(!stale.events.some((e) => e.mutation));
 });
-test('the progress observer cancels stale reads, awaits the saved list, and reveals the new row outside the selected group', async () => {
+test('concurrent progress observers share the saved list read and reveal the new row outside the selected group', async () => {
   let release;
   const wait = new Promise((r) => (release = r));
   const saved = {
@@ -371,15 +371,13 @@ test('the progress observer cancels stale reads, awaits the saved list, and reve
   const panel = h.find((n) => typeof n.props.onSaved === 'function');
   assert(panel);
   const run = panel.props.onSaved(true);
+  const concurrent = panel.props.onSaved(false);
   await Promise.resolve();
-  assert.deepEqual(h.refreshed.slice(0, 1), ['list.cancel']);
+  assert.deepEqual(h.refreshed, []);
+  assert.equal(h.events.filter((e) => e.localRead === 'feed.list').length, 1);
   release();
-  await run;
-  assert.deepEqual(h.refreshed, [
-    'list.cancel',
-    'list.reset',
-    'summary.invalidate',
-  ]);
+  await Promise.all([run, concurrent]);
+  assert.deepEqual(h.refreshed, ['list.reset', 'summary.invalidate']);
   assert(h.events.some((e) => e.localRead === 'feed.list'));
   assert.equal(
     h.find((node) => typeof node.props.onFilter === 'function').props.filter,

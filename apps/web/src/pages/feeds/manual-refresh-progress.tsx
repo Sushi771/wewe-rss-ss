@@ -31,7 +31,8 @@ export default function ManualRefreshProgress({
   const busy = useRef(false);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState('');
-  if (!batch) return null;
+  if (!batch || !['queued', 'running', 'paused'].includes(batch.state))
+    return null;
   const accepted = batch.items.filter((item) => item.accepted).length;
   const synced = batch.items.filter(
     (item) => item.state === 'succeeded',
@@ -55,20 +56,13 @@ export default function ManualRefreshProgress({
       });
       await onChange();
     } catch {
-      setError('任务状态操作未确认，请重新查询；不会重发上游请求。');
+      setError('状态读取失败，请重新读取。');
     } finally {
       busy.current = false;
       setActing(false);
     }
   };
-  const status =
-    batch.state === 'paused'
-      ? '已暂停，请查看原因'
-      : batch.state === 'stopped'
-        ? '剩余未发请求已取消'
-        : batch.state === 'completed'
-          ? '本轮处理已结束'
-          : '后台运行中';
+  const status = batch.state === 'paused' ? '已暂停' : '更新中';
   return (
     <section
       aria-label="全部更新进度"
@@ -82,9 +76,6 @@ export default function ManualRefreshProgress({
         aria-label="上游更新受理数量"
         label={`共 ${batch.items.length} 个 · 排队 ${queued} · 上游已受理 ${accepted} · 缓存已同步 ${synced} · ${status}`}
       />
-      <p className="text-xs">
-        关闭页面后后台继续；上游受理不代表最新文章已生成。停止仅取消尚未发出的请求。
-      </p>
       {['queued', 'running', 'paused'].includes(batch.state) && (
         <Button
           size="sm"
@@ -120,7 +111,11 @@ export default function ManualRefreshProgress({
                   ? '正在提交，回执待确认'
                   : item.state === 'cancelled'
                     ? '已取消，未发送'
-                    : item.message}
+                    : item.state === 'succeeded'
+                      ? '缓存已同步'
+                      : item.state === 'waiting'
+                        ? '等待缓存'
+                        : '检查未完成'}
             </li>
           ))}
         </ul>

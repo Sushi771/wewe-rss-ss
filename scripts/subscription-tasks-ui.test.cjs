@@ -218,6 +218,61 @@ function fixture(
   };
 }
 
+test('historical completed batches seed a baseline without refresh, polling or notifications after reentry', async () => {
+  const saved = {
+    ...batch,
+    state: 'completed',
+    items: [
+      {
+        index: 0,
+        state: 'succeeded',
+        feedId: 'MP_WXS_1234567890',
+        listReady: true,
+      },
+    ],
+  };
+  for (let entry = 0; entry < 3; entry++) {
+    const f = fixture([saved]);
+    await f.deliver([saved]);
+    await f.deliver([saved]);
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(f.notifications, []);
+    assert(!f.render().nodes.some((n) => n.type === 'Progress'));
+    assert(!f.render().text.includes('列表读取失败'));
+    assert.equal(
+      f.options.refetchInterval(
+        { items: [saved] },
+        { state: { status: 'success' } },
+      ),
+      false,
+    );
+  }
+});
+
+test('new fast terminal batches and distinct batch identities refresh once without re-enqueueing', async () => {
+  const f = fixture([]);
+  await f.deliver([]);
+  const saved = {
+    ...batch,
+    state: 'completed',
+    items: [
+      {
+        index: 0,
+        state: 'succeeded',
+        feedId: 'MP_WXS_1234567890',
+        listReady: true,
+      },
+    ],
+  };
+  await f.deliver([saved]);
+  await f.deliver([saved]);
+  const other = { ...saved, batchId: '22222222-2222-4222-8222-222222222222' };
+  await f.deliver([other, saved]);
+  await f.deliver([other, saved]);
+  assert.equal(f.calls.length, 2);
+  assert(f.calls.every((c) => c[0] === 'local-view-refresh'));
+});
+
 test('main shows only real progress and waits without inventing cache percentage', () => {
   const f = fixture();
   const view = f.render();
@@ -240,6 +295,45 @@ test('main shows only real progress and waits without inventing cache percentage
     3000,
   );
   assert.deepEqual(f.calls, []);
+});
+
+test('a historical failed single task keeps a collapsed recovery action without polling or automatic retries', async () => {
+  const task = {
+    taskId: 'd'.repeat(64),
+    state: 'failed',
+    feedId: 'MP_WXS_1234567890',
+  };
+  const f = fixture([task], false, true);
+  await f.deliver([task]);
+  assert.deepEqual(f.calls, []);
+  assert(!f.render().nodes.some((n) => n.type === 'Progress'));
+  assert.match(f.render().text, /查看未完成任务/);
+  assert.equal(
+    f.options.refetchInterval(
+      { items: [task] },
+      { state: { status: 'success' } },
+    ),
+    false,
+  );
+  const action = f
+    .render()
+    .nodes.find(
+      (n) =>
+        n.type === 'Button' && n.props.children?.includes('· 继续检查缓存'),
+    );
+  assert(action);
+  let finish;
+  f.setResumeWait(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const first = action.props.onPress();
+  await action.props.onPress();
+  assert.equal(f.calls.filter((c) => c[0] === 'resume').length, 1);
+  assert.equal(f.calls[0][1].taskId, task.taskId);
+  finish();
+  await first;
 });
 test('new failures aggregate in body portal; closing never cancels and unchanged polling does not reopen', async () => {
   const f = fixture();
@@ -326,6 +420,7 @@ test('historical failure at mount is quiet and failed or cancelled work never co
 });
 test('automatic sequential progress advances locally without any new submit mutation', async () => {
   const f = fixture();
+  await f.deliver([batch]);
   const saved = {
     ...batch.items[0],
     state: 'succeeded',
@@ -416,16 +511,13 @@ test('stop is explicit and uses saved batch identity, never a pasted URL', async
       items: [batch.items[0], { ...batch.items[1], state: 'cancelled' }],
     },
   ]);
-  assert.match(
-    f.render().nodes.find((n) => n.type === 'Progress').props.label,
-    /共 2/,
-  );
+  assert(!f.render().nodes.some((n) => n.type === 'Progress'));
   assert.equal(
     f.options.refetchInterval(
       { items: [{ ...batch, state: 'stopped' }] },
       { state: { status: 'success' } },
     ),
-    3000,
+    false,
   );
 });
 test('connection errors stop polling and only offer a local read', async () => {
@@ -444,14 +536,19 @@ test('connection errors stop polling and only offer a local read', async () => {
 test('local view failure retries only local views, without submitting again', async () => {
   const persisted = {
     ...batch,
-    items: [{ ...batch.items[0], feedId: 'MP_WXS_1234567890' }, batch.items[1]],
+    items: [{ ...batch.items[0], feedId: 'MP_WXS_9876543210' }, batch.items[1]],
   };
-  const f = fixture([persisted]);
+  const f = fixture([batch]);
+  await f.deliver([batch]);
   f.setSavingFails(true);
   await f.deliver([persisted]);
-  assert.match(f.render().text, /列表尚未显示/);
+  assert.match(f.render().text, /列表读取失败/);
+  await f.deliver([persisted]);
+  assert.equal(f.calls.length, 1);
   f.setSavingFails(false);
   await f.deliver([persisted]);
+  assert.equal(f.calls.length, 1);
+  await f.button('重新读取进度').props.onPress();
   assert.equal(f.calls.length, 2);
   assert(f.calls.every((c) => c[0] === 'local-view-refresh'));
 });
@@ -459,6 +556,7 @@ test('local view failure retries only local views, without submitting again', as
 test('older accepted single tasks remain visible and finish using local reads only', async () => {
   const task = { taskId: 'a'.repeat(64), state: 'pending', phase: 'identity' };
   const f = fixture([task], false, true);
+  await f.deliver([task]);
   assert.match(
     f.render().nodes.find((n) => n.type === 'Progress').props.label,
     /处理中/,
@@ -517,7 +615,7 @@ test('completed batch metadata continues local polling and refreshes the real pu
   );
   await f.deliver([task]);
   await f.deliver([{ ...task, state: 'succeeded' }]);
-  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls.length, 1);
   assert(f.calls.every((c) => c[0] === 'local-view-refresh'));
   assert.equal(
     f.options.refetchInterval(
@@ -555,7 +653,7 @@ test('identity isolation and a locally disabled feed never accuse the collection
   }
 });
 
-test('a stopped batch stays stopped while its saved feed metadata is projected and refreshed', async () => {
+test('a stopped batch does not poll; an explicit local read may update its projected metadata', async () => {
   const saved = {
     ...batch,
     state: 'stopped',
@@ -579,14 +677,14 @@ test('a stopped batch stays stopped while its saved feed metadata is projected a
       { items: [saved] },
       { state: { status: 'success' } },
     ),
-    3000,
+    false,
   );
   const ready = {
     ...saved,
     items: [{ ...saved.items[0], metadataPending: false }, saved.items[1]],
   };
   await f.deliver([ready]);
-  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls.length, 1);
   assert(f.calls.every((call) => call[0] === 'local-view-refresh'));
   assert.equal(
     f.options.refetchInterval(

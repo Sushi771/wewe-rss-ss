@@ -26,6 +26,7 @@ type Exception = {
   code?: string;
 };
 const notificationKey = 'wewe-subscription-notifications-v1';
+const emptyBatches: never[] = [];
 function readNotifications(): Record<string, string> {
   try {
     const saved = JSON.parse(localStorage.getItem(notificationKey) || '{}');
@@ -51,6 +52,7 @@ function reason(state: string, code?: string) {
 /** Durable local progress only; the backend owns submission and sequencing. */
 const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
   const seen = useRef(new Map<string, string>());
+  const observed = useRef(false);
   const busy = useRef(false);
   const [refreshError, setRefreshError] = useState(false);
   const [acting, setActing] = useState<string>();
@@ -63,14 +65,8 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
       query.state.status === 'error'
         ? false
         : adding ||
-            data?.items.some(
-              (batch) =>
-                ['queued', 'running'].includes(batch.state) ||
-                batch.items.some(
-                  (item) =>
-                    ['submitting', 'waiting'].includes(item.state) ||
-                    item.metadataPending,
-                ),
+            data?.items.some((batch) =>
+              ['queued', 'running'].includes(batch.state),
             )
           ? 3000
           : false,
@@ -79,31 +75,30 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
         .flatMap((batch) =>
           batch.items.map((item) => ({
             ...item,
+            batchState: batch.state,
             key: `${batch.batchId}:${item.index}`,
           })),
         )
         .filter(
           (item) =>
-            item.feedId &&
             seen.current.get(item.key) !==
-              `${item.state}:${item.feedId}:${item.listReady}:${item.bodyReady}:${item.metadataPending}:${item.code}`,
+            `${item.batchState}:${item.state}:${item.feedId}:${item.listReady}:${item.bodyReady}:${item.metadataPending}:${item.code}`,
         );
-      if (!changes.length) return;
+      const firstRead = !observed.current;
+      observed.current = true;
+      // Seed persisted history before any asynchronous read. A failed view read
+      // must not turn every subsequent status response into another retry.
+      const fresh = changes.filter(
+        (item) => item.feedId && (!firstRead || adding),
+      );
+      for (const item of changes)
+        seen.current.set(
+          item.key,
+          `${item.batchState}:${item.state}:${item.feedId}:${item.listReady}:${item.bodyReady}:${item.metadataPending}:${item.code}`,
+        );
+      if (!fresh.length) return;
       try {
-        await onSaved(
-          adding ||
-            changes.some(
-              (item) =>
-                seen.current.has(item.key) ||
-                item.state === 'waiting' ||
-                item.state === 'succeeded',
-            ),
-        );
-        for (const item of changes)
-          seen.current.set(
-            item.key,
-            `${item.state}:${item.feedId}:${item.listReady}:${item.bodyReady}:${item.metadataPending}:${item.code}`,
-          );
+        await onSaved(true);
         setRefreshError(false);
       } catch {
         setRefreshError(true);
@@ -130,7 +125,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
     }
   };
   const [exceptions, setExceptions] = useState<Exception[]>([]);
-  const items = batches.data?.items || [];
+  const items = batches.data?.items || emptyBatches;
   const legacy = useLegacySubscriptionTasks({
     feeds,
     adding,
@@ -139,15 +134,22 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
       batch.items.flatMap((item) => (item.taskId ? [item.taskId] : [])),
     ),
   });
+  useEffect(() => {
+    if (!refreshError) return;
+    const expected = items.flatMap((batch) =>
+      batch.items.flatMap((item) => (item.feedId ? [item.feedId] : [])),
+    );
+    if (
+      expected.length &&
+      expected.every((id) => feeds.some((feed) => feed.id === id))
+    )
+      setRefreshError(false);
+  }, [feeds, items, refreshError]);
   const notified = useRef(readNotifications());
   const initialized = useRef(false);
   const activeBefore = useRef(new Set<string>());
-  const active = items.filter(
-    (batch) =>
-      ['queued', 'running', 'paused'].includes(batch.state) ||
-      batch.items.some((item) =>
-        ['submitting', 'waiting'].includes(item.state),
-      ),
+  const active = items.filter((batch) =>
+    ['queued', 'running', 'paused'].includes(batch.state),
   );
   useEffect(() => {
     if (!batches.data) return;
@@ -229,12 +231,8 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
     }
     activeBefore.current = new Set(
       batches.data.items
-        .filter(
-          (batch) =>
-            ['queued', 'running', 'paused'].includes(batch.state) ||
-            batch.items.some((item) =>
-              ['submitting', 'waiting'].includes(item.state),
-            ),
+        .filter((batch) =>
+          ['queued', 'running', 'paused'].includes(batch.state),
         )
         .map((batch) => batch.batchId),
     );
@@ -336,7 +334,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
         legacy.error) && (
         <p role="status" className="px-3 text-xs">
           {refreshError || legacy.error
-            ? '订阅已保存，列表尚未显示。'
+            ? '列表读取失败，请重新读取。'
             : '进度暂时无法读取。'}
           <Button
             size="sm"
@@ -361,6 +359,34 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
         </p>
       )}
       {actionError && <p role="alert">{actionError}</p>}
+      {legacy.recoverable.length > 0 && (
+        <details className="px-3 text-xs">
+          <summary>查看未完成任务（{legacy.recoverable.length}）</summary>
+          {legacy.recoverable.map((task) => (
+            <Button
+              key={task.taskId}
+              size="sm"
+              variant="light"
+              onPress={async () => {
+                if (legacy.busy.current) return;
+                legacy.busy.current = true;
+                try {
+                  await legacy.resume.mutateAsync({ taskId: task.taskId });
+                  await legacy.tasks.refetch({ throwOnError: true });
+                } catch {
+                  setActionError('状态读取失败，请重新读取。');
+                } finally {
+                  legacy.busy.current = false;
+                }
+              }}
+            >
+              {feeds.find((feed) => feed.id === task.feedId)?.mpName ||
+                '未完成任务'}
+              · 继续检查缓存
+            </Button>
+          ))}
+        </details>
+      )}
       <Modal
         isOpen={exceptions.length > 0}
         onOpenChange={(open) => {
@@ -459,10 +485,12 @@ export default SubscriptionTasks;
 
 /** Accepted tasks from before batch support remain recoverable after reload. */
 const useLegacySubscriptionTasks = ({
+  adding,
   onSaved,
   excluded = [],
 }: Props & { excluded?: string[] }) => {
   const seen = useRef(new Map<string, string>());
+  const observed = useRef(false);
   const busy = useRef(false);
   const [error, setError] = useState(false);
   const tasks = trpc.feed.subscriptionTasks.useQuery(undefined, {
@@ -481,21 +509,26 @@ const useLegacySubscriptionTasks = ({
           ? 3000
           : false,
     async onSuccess(data) {
+      const firstRead = !observed.current;
+      observed.current = true;
+      let changed = false;
       for (const task of data.items) {
         const key = `${task.state}:${task.feedId}:${task.phase}`;
+        if (seen.current.get(task.taskId) === key) continue;
+        seen.current.set(task.taskId, key);
         if (
-          (excluded.includes(task.taskId) && task.phase !== 'metadata') ||
-          !task.feedId ||
-          seen.current.get(task.taskId) === key
+          task.feedId &&
+          (!excluded.includes(task.taskId) || task.phase === 'metadata') &&
+          (!firstRead || adding)
         )
-          continue;
-        try {
-          await onSaved(true);
-          seen.current.set(task.taskId, key);
-          setError(false);
-        } catch {
-          setError(true);
-        }
+          changed = true;
+      }
+      if (!changed) return;
+      try {
+        await onSaved(true);
+        setError(false);
+      } catch {
+        setError(true);
       }
     },
   });
@@ -504,8 +537,12 @@ const useLegacySubscriptionTasks = ({
     tasks.data?.items.filter(
       (task) =>
         !!task.taskId &&
-        !excluded.includes(task.taskId) &&
-        task.state !== 'succeeded',
+        (!excluded.includes(task.taskId) || task.phase === 'metadata') &&
+        ['pending', 'running'].includes(task.state),
     ) || [];
-  return { pending, tasks, error, setError, resume, busy };
+  const recoverable =
+    tasks.data?.items.filter(
+      (task) => !excluded.includes(task.taskId) && task.state === 'failed',
+    ) || [];
+  return { pending, recoverable, tasks, error, setError, resume, busy };
 };

@@ -115,47 +115,62 @@ const Feeds = () => {
     trpc.feed.refreshArticles.useMutation();
   const { mutateAsync: beginRefreshAll } =
     trpc.feed.beginRefreshAll.useMutation({ retry: false });
-  const manualViewSignature = useRef('');
+  // History is a baseline, not a new update. Only a batch observed running on
+  // this page may trigger its final cache reread, and claim that transition
+  // before awaiting so concurrent query callbacks cannot repeat it.
+  const manualObservedStates = useRef(new Map<string, string>());
+  const manualObserved = useRef(false);
   const manualBatches = trpc.feed.manualRefreshBatches.useQuery(undefined, {
     retry: false,
-    refetchOnWindowFocus: true,
-    refetchInterval: (data) =>
-      data?.items.some(
-        (batch) =>
-          ['queued', 'running'].includes(batch.state) ||
-          batch.items.some((item) =>
-            ['submitting', 'waiting'].includes(item.state),
-          ),
-      )
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: (data, query) =>
+      query.state.status !== 'error' &&
+      data?.items.some((batch) => ['queued', 'running'].includes(batch.state))
         ? 3000
         : false,
     async onSuccess(data) {
-      const signature = JSON.stringify(
-        data.items.map((batch) => [
-          batch.batchId,
-          batch.items.map((item) => [
-            item.state,
-            item.listReady,
-            item.bodyReady,
-            item.imagePendingCount,
-          ]),
-        ]),
-      );
-      if (data.items.length && signature !== manualViewSignature.current) {
+      const firstRead = !manualObserved.current;
+      manualObserved.current = true;
+      const finished = data.items.filter((batch) => {
+        const previous = manualObservedStates.current.get(batch.batchId);
+        manualObservedStates.current.set(batch.batchId, batch.state);
+        return (
+          (previous ? ['queued', 'running'].includes(previous) : !firstRead) &&
+          !['queued', 'running'].includes(batch.state)
+        );
+      });
+      if (finished.length) {
+        if (
+          finished.some(
+            (batch) =>
+              batch.state === 'paused' ||
+              batch.items.some((item) =>
+                ['blocked', 'failed'].includes(item.state),
+              ),
+          )
+        ) {
+          toast.warning('更新需要处理，请查看暂停状态');
+        } else if (
+          finished.some((batch) =>
+            batch.items.some(
+              (item) => item.state === 'succeeded' && !item.bodyReady,
+            ),
+          )
+        ) {
+          toast.warning('缓存已同步，部分正文或图片仍待核');
+        }
         try {
-          await refreshFeedViews(
-            refetchFeedList,
-            () => queryUtils.article.list.reset(),
-            () => queryUtils.article.summary.invalidate(),
-          );
-          manualViewSignature.current = signature;
+          await refreshSavedSubscriptions(false);
         } catch {
-          /* The durable task remains visible; a later successful read refreshes the view. */
+          toast.warning('更新已结束，列表读取失败，请手动刷新');
         }
       }
     },
   });
-  const manualBatch = manualBatches.data?.items[0];
+  const manualBatch = manualBatches.data?.items.find((batch) =>
+    ['queued', 'running', 'paused'].includes(batch.state),
+  );
   const {
     mutateAsync: getHistoryArticles,
     isLoading: isGetHistoryArticlesLoading,
@@ -163,15 +178,17 @@ const Feeds = () => {
 
   const { data: inProgressHistoryMp, refetch: refetchInProgressHistoryMp } =
     trpc.feed.getInProgressHistoryMp.useQuery(undefined, {
-      refetchOnWindowFocus: true,
-      refetchInterval: 10 * 1e3,
+      refetchOnWindowFocus: false,
+      refetchInterval: (data) => (data ? 10 * 1e3 : false),
       refetchOnMount: true,
-      refetchOnReconnect: true,
+      refetchOnReconnect: false,
     });
 
   const { data: legacyBatchRunning } =
     trpc.feed.isRefreshAllMpArticlesRunning.useQuery(undefined, {
-      refetchInterval: 3000,
+      refetchInterval: (data) => (data === true ? 3000 : false),
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
       retry: false,
     });
   const isRefreshAllMpArticlesRunning =
@@ -477,20 +494,30 @@ const Feeds = () => {
     setCurrentMpId(id || '');
   }, [id]);
 
+  const savedViewRefresh = useRef<Promise<void> | null>(null);
   const refreshSavedSubscriptions = async (reveal: boolean) => {
-    await queryUtils.feed.list.cancel();
-    const snapshot = await refetchFeedList({ throwOnError: true });
-    if (snapshot?.data?.items) setOrderedFeeds(snapshot.data.items);
     if (reveal)
       setFolderFilter((current) =>
         current === folderFilter ? 'all' : current,
       );
-    // A secondary article query failure must not discard the already loaded
-    // subscription list or misreport a saved subscription as absent.
-    await Promise.allSettled([
-      queryUtils.article.list.reset(),
-      queryUtils.article.summary.invalidate(),
-    ]);
+    if (savedViewRefresh.current) return savedViewRefresh.current;
+    const refresh = async () => {
+      const snapshot = await refetchFeedList({ throwOnError: true });
+      if (snapshot?.data?.items) setOrderedFeeds(snapshot.data.items);
+      // A secondary article query failure must not discard the already loaded
+      // subscription list or misreport a saved subscription as absent.
+      await Promise.allSettled([
+        queryUtils.article.list.reset(),
+        queryUtils.article.summary.invalidate(),
+      ]);
+    };
+    const pending = refresh();
+    savedViewRefresh.current = pending;
+    try {
+      await pending;
+    } finally {
+      if (savedViewRefresh.current === pending) savedViewRefresh.current = null;
+    }
   };
 
   const handleConfirm = async () => {
