@@ -163,7 +163,9 @@ describe('local collection with real SQLite migrations', () => {
     const markdown = await fs.readFile(result.path, 'utf8');
     expect(markdown).toContain('正文内容');
     expect(markdown).toContain('| 收藏 | 未提供 |');
-    const image = markdown.match(/image\/image_[a-f0-9]+\.png/)?.[0];
+    const image = markdown.match(
+      /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
+    )?.[0];
     expect(image).toBeTruthy();
     expect(
       (await fs.stat(path.join(path.dirname(result.path), image!))).size,
@@ -175,19 +177,32 @@ describe('local collection with real SQLite migrations', () => {
     );
     expect(offline).toMatchObject({ articles: 2, complete: 1 });
     const exported = await fs.readFile(
-      path.join(offlineDirectory, offline!.incomplete[0], '正文.md'),
+      path.join(offlineDirectory, offline!.incomplete[0]),
       'utf8',
     );
-    expect(exported).toContain('无法离线阅读');
-    const completedFolder = (
-      await fs.readdir(path.join(offlineDirectory, 'articles'))
-    ).find((name) => !offline!.incomplete.some((item) => item.endsWith(name)));
-    expect(completedFolder).toBeTruthy();
+    expect(exported).toContain('无法完整离线阅读');
+    const publisherDirectory = path.dirname(
+      path.join(offlineDirectory, offline!.incomplete[0]),
+    );
+    expect(path.dirname(publisherDirectory)).toBe(
+      path.join(offlineDirectory, '未分组'),
+    );
+    const notes = (await fs.readdir(publisherDirectory)).filter((name) =>
+      name.endsWith('.md'),
+    );
+    expect(notes).toHaveLength(2);
+    const completedNote = notes.find(
+      (name) =>
+        !offline!.incomplete.some((item) => path.basename(item) === name),
+    );
+    expect(completedNote).toBeTruthy();
     const completeMarkdown = await fs.readFile(
-      path.join(offlineDirectory, 'articles', completedFolder!, '正文.md'),
+      path.join(publisherDirectory, completedNote!),
       'utf8',
     );
-    expect(completeMarkdown).toMatch(/image\/image_[a-f0-9]+\.png/);
+    expect(completeMarkdown).toMatch(
+      /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
+    );
     const readme = await fs.readFile(
       path.join(offlineDirectory, 'README.md'),
       'utf8',
@@ -275,7 +290,9 @@ describe('local collection with real SQLite migrations', () => {
       expect(browser.markdown).not.toContain('mmbiz.qpic.cn/stale');
       const exported = await caller.article.saveToObsidian('legacy-short-link');
       const markdown = await fs.readFile(exported.path, 'utf8');
-      const attachment = markdown.match(/image\/image_[a-f0-9]+\.png/)?.[0];
+      const attachment = markdown.match(
+        /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
+      )?.[0];
       expect(attachment).toBeTruthy();
       expect(
         await fs.readFile(path.join(path.dirname(exported.path), attachment!)),
