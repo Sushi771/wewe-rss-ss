@@ -624,6 +624,8 @@ describe('explicit add source through original router (offline SQLite)', () => {
       status: 'pending',
       feed: null,
       code: 'SUBSCRIPTION_ID_PENDING',
+      message:
+        '上游已返回订阅地址，但本次列表核对未获得完整公众号身份（含名称），本地订阅尚未建立；稍后提交同一链接仅核对状态，不重复新增。',
     });
     expect(await prisma.feed.count()).toBe(0);
     expect(
@@ -635,6 +637,8 @@ describe('explicit add source through original router (offline SQLite)', () => {
       status: 'pending',
       feed: null,
       code: 'SUBSCRIPTION_ID_PENDING',
+      message:
+        '上游已返回订阅地址，但本次列表核对未获得完整公众号身份（含名称），本地订阅尚未建立；稍后提交同一链接仅核对状态，不重复新增。',
       upstreamSubmitted: false,
     });
     expect(await prisma.feed.count()).toBe(0);

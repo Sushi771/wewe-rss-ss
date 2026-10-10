@@ -812,7 +812,7 @@ export class TrpcService {
           sync: null,
           code: 'SUBSCRIPTION_ID_PENDING',
           message:
-            '上游已受理，订阅身份尚未出现在列表；稍后提交同一链接仅核对状态，不重复新增。',
+            '上游已返回订阅地址，但本次列表核对未获得完整公众号身份（含名称），本地订阅尚未建立；稍后提交同一链接仅核对状态，不重复新增。',
         };
       const old = await this.prismaService.feed.findUnique({
         where: { id: accepted.feedId },
