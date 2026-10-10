@@ -11,7 +11,9 @@ const png = Buffer.from(
   'base64',
 );
 async function fixture(t) {
-  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-layout-'));
+  const base = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), 'wewe-layout-'),
+  );
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   const vault = path.join(base, 'vault'),
     root = path.join(vault, '2026-10-10'),
