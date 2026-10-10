@@ -631,9 +631,7 @@ describe('backend collection routing', () => {
       const exported = await caller.article.saveToObsidian(identity.id);
       const markdown = await fs.readFile(exported.path, 'utf8');
       expect(markdown).toContain('可离线阅读');
-      const attachment = markdown.match(
-        /attachments\/image_[a-f0-9]+\.png/,
-      )?.[0];
+      const attachment = markdown.match(/image\/image_[a-f0-9]+\.png/)?.[0];
       expect(attachment).toBeTruthy();
       expect(markdown).not.toContain(imageUrl);
       expect(
