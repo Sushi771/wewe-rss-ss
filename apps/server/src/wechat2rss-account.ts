@@ -133,6 +133,29 @@ export class Wechat2RssAccounts {
         )
           throw new Error('REJECTED');
         const split = pair.indexOf('=');
+        const cleared =
+          split === pair.length - 1 ||
+          cookie
+            .split(';')
+            .slice(1)
+            .some((attribute) => {
+              const [name, ...parts] = attribute.trim().split('=');
+              const value = parts.join('=');
+              return (
+                (name.toLowerCase() === 'max-age' &&
+                  /^-?\d+$/.test(value) &&
+                  Number(value) <= 0) ||
+                (name.toLowerCase() === 'expires' &&
+                  Date.parse(value) <= this.now())
+              );
+            });
+        if (cleared) {
+          session.cookies.delete(pair.slice(0, split));
+          // A waiting request without its cookie may create a fresh login.
+          // Confirmed success may legitimately clear the completed session.
+          if (raw.data?.isLogin !== true) throw new Error('REJECTED');
+          continue;
+        }
         session.cookies.set(pair.slice(0, split), pair.slice(split + 1));
       }
       if (

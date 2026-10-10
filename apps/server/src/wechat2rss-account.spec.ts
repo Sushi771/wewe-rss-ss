@@ -43,6 +43,29 @@ function fixture() {
 }
 
 describe('Wechat2RSS official cookie login proxy (offline)', () => {
+  it.each([
+    'login=; HttpOnly',
+    'login=expired; Max-Age=0',
+    'login=expired; Max-Age=-1',
+    'login=expired; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+  ])(
+    'stops a waiting login after an upstream cookie is cleared: %s',
+    async (cookie) => {
+      const f = fixture();
+      f.queue.push(reply({ isLogin: false, qrcode }, cookie));
+      const initial = await f.manager.start();
+      expect(initial.state).toBe('failed');
+      f.advance();
+      await f.manager.poll(initial.sessionId || 'already-closed');
+      expect(f.requests).toHaveLength(1);
+    },
+  );
+  it('accepts confirmed success when upstream clears its login cookie', async () => {
+    const f = fixture();
+    f.queue.push(reply({ isLogin: true, qrcode: '' }, 'login=; Max-Age=0'));
+    expect((await f.manager.start()).state).toBe('succeeded');
+    expect(f.requests).toHaveLength(1);
+  });
   it('does no request on construction; invalid public configuration fails closed', async () => {
     const f = fixture();
     expect(f.requests).toHaveLength(0);
