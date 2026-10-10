@@ -23,6 +23,7 @@ type Exception = {
   taskId?: string;
   name: string;
   state: string;
+  code?: string;
 };
 const notificationKey = 'wewe-subscription-notifications-v1';
 function readNotifications(): Record<string, string> {
@@ -35,10 +36,14 @@ function readNotifications(): Record<string, string> {
     return {};
   }
 }
-function reason(state: string) {
+function reason(state: string, code?: string) {
+  if (code === 'SUBSCRIPTION_PAUSED') return '本地订阅已停用，已有内容保留。';
+  if (code === 'LEGACY_IDENTITY_UNVERIFIED')
+    return '部分旧文章身份待核实，已隔离并保留旧正文。';
+  if (code === 'CACHE_READ_FAILED') return '缓存读取未完成，请继续检查原请求。';
   return state === 'blocked'
-    ? '需要检查账号或完成官方验证。'
-    : '暂未完成，请检查账号和服务后重试。';
+    ? '本条处理已暂停，请核对原请求状态。'
+    : '本条读取或处理未完成，请继续检查原请求。';
 }
 
 /** Durable local progress only; the backend owns submission and sequencing. */
@@ -59,8 +64,10 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
             data?.items.some(
               (batch) =>
                 ['queued', 'running'].includes(batch.state) ||
-                batch.items.some((item) =>
-                  ['submitting', 'waiting'].includes(item.state),
+                batch.items.some(
+                  (item) =>
+                    ['submitting', 'waiting'].includes(item.state) ||
+                    item.metadataPending,
                 ),
             )
           ? 3000
@@ -77,7 +84,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
           (item) =>
             item.feedId &&
             seen.current.get(item.key) !==
-              `${item.state}:${item.feedId}:${item.bodyReady}`,
+              `${item.state}:${item.feedId}:${item.listReady}:${item.bodyReady}:${item.metadataPending}:${item.code}`,
         );
       if (!changes.length) return;
       try {
@@ -93,7 +100,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
         for (const item of changes)
           seen.current.set(
             item.key,
-            `${item.state}:${item.feedId}:${item.bodyReady}`,
+            `${item.state}:${item.feedId}:${item.listReady}:${item.bodyReady}:${item.metadataPending}:${item.code}`,
           );
         setRefreshError(false);
       } catch {
@@ -162,6 +169,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
             feeds.find((feed) => feed.id === item.feedId)?.mpName ||
             `第 ${item.index + 1} 条`,
           state: item.state,
+          code: item.code,
         });
       if (
         activeBefore.current.has(batch.batchId) &&
@@ -192,6 +200,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
           feeds.find((feed) => feed.id === task.feedId)?.mpName ||
           '先前添加任务',
         state: task.state,
+        code: task.code,
       });
     }
     activeBefore.current = new Set(
@@ -222,7 +231,15 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
   const closeExceptions = () => setExceptions([]);
   const completed = active
     .flatMap((batch) => batch.items)
-    .filter((item) => item.state === 'succeeded').length;
+    .filter(
+      (item) => item.bodyReady === true && item.state === 'succeeded',
+    ).length;
+  const accepted =
+    active
+      .flatMap((batch) => batch.items)
+      .filter((item) => item.accepted ?? !!item.taskId).length +
+    legacy.pending.filter((task) => ['pending', 'running'].includes(task.state))
+      .length;
   const total =
     active.reduce((sum, batch) => sum + batch.items.length, 0) +
     legacy.pending.filter((task) => ['pending', 'running'].includes(task.state))
@@ -255,10 +272,10 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
         >
           <Progress
             aria-label="已完成的订阅数量"
-            value={completed}
+            value={accepted}
             maxValue={total}
             showValueLabel={false}
-            label={`已完成 ${completed} / 共 ${total}${paused ? ' · 已暂停' : waiting ? ' · 等待缓存' : ' · 处理中'}`}
+            label={`上游已受理 ${accepted} / 共 ${total} · 内容同步 ${completed}${paused ? ' · 提交已暂停' : waiting ? ' · 等待缓存' : ' · 处理中'}`}
             size="sm"
           />
           {active.map((batch) => (
@@ -284,7 +301,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                 isLoading={acting === batch.batchId}
                 onPress={() => act(batch.batchId, 'resume')}
               >
-                检查账号后继续
+                继续检查原请求
               </Button>
             ))}
         </section>
@@ -349,7 +366,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
               <summary>查看需要处理的订阅</summary>
               {exceptions.map((item) => (
                 <p key={item.key}>
-                  {item.name}：{reason(item.state)}
+                  {item.name}：{reason(item.state, item.code)}
                 </p>
               ))}
             </details>
@@ -373,7 +390,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                 isLoading={acting === batchId}
                 onPress={() => act(batchId, 'resume')}
               >
-                检查账号后继续
+                继续检查原请求
               </Button>
             ))}
             {exceptions
@@ -394,7 +411,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                     }
                   }}
                 >
-                  检查账号后继续检查
+                  继续检查原请求
                 </Button>
               ))}
           </ModalBody>

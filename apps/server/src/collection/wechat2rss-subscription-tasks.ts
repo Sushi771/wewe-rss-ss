@@ -4,6 +4,12 @@ import * as path from 'node:path';
 import { subscriptionArticleUrl } from './subscription-add';
 
 type TaskState = 'pending' | 'running' | 'succeeded' | 'blocked' | 'failed';
+export type SubscriptionTaskCode =
+  | 'SUBSCRIPTION_PAUSED'
+  | 'CACHE_PENDING'
+  | 'CACHE_READ_FAILED'
+  | 'LEGACY_IDENTITY_UNVERIFIED'
+  | 'SOURCE_CHANGED';
 export type SubscriptionTaskResult = {
   state: TaskState;
   phase: 'identity' | 'cache' | 'metadata';
@@ -11,6 +17,7 @@ export type SubscriptionTaskResult = {
   feedId?: string;
   listReady?: boolean;
   bodyReady?: boolean;
+  code?: SubscriptionTaskCode;
 };
 export type SubscriptionTask = SubscriptionTaskResult & {
   version: 1;
@@ -33,6 +40,7 @@ const publicView = (task: SubscriptionTask) => ({
   feedId: task.feedId,
   listReady: task.listReady,
   bodyReady: task.bodyReady,
+  code: task.code,
   startedAt: task.startedAt,
   deadline: task.deadline,
 });
@@ -116,6 +124,14 @@ export class Wechat2RssSubscriptionTasks {
         !['identity', 'cache', 'metadata'].includes(task.phase) ||
         (task.listReady !== undefined && typeof task.listReady !== 'boolean') ||
         (task.bodyReady !== undefined && typeof task.bodyReady !== 'boolean') ||
+        (task.code !== undefined &&
+          ![
+            'SUBSCRIPTION_PAUSED',
+            'CACHE_PENDING',
+            'CACHE_READ_FAILED',
+            'LEGACY_IDENTITY_UNVERIFIED',
+            'SOURCE_CHANGED',
+          ].includes(task.code)) ||
         typeof task.message !== 'string' ||
         task.message.length > 300 ||
         (task.feedId !== undefined && !/^MP_WXS_\d{5,15}$/.test(task.feedId)) ||

@@ -224,7 +224,10 @@ test('main shows only real progress and waits without inventing cache percentage
   const progress = view.nodes.find((n) => n.type === 'Progress');
   assert.equal(progress.props.value, 0);
   assert.equal(progress.props.maxValue, 2);
-  assert.match(progress.props.label, /已完成 0 \/ 共 2.*等待缓存/);
+  assert.match(
+    progress.props.label,
+    /上游已受理 0 \/ 共 2.*内容同步 0.*等待缓存/,
+  );
   assert(!view.text.includes('添加进度与记录'));
   assert(!view.text.includes('历史记录'));
   assert(!view.text.includes('第 1 条'));
@@ -303,7 +306,7 @@ test('refresh and changed technical messages do not repeat an acknowledged failu
     reopened.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
     false,
   );
-  assert(reopened.button('检查账号后继续'));
+  assert(reopened.button('继续检查原请求'));
 });
 test('historical failure at mount is quiet and failed or cancelled work never counts as success', () => {
   const f = fixture([
@@ -389,7 +392,7 @@ test('blocked batch pauses automatic actions; explicit resume guards duplicate c
   assert.deepEqual(f.calls, []);
   let done;
   f.setResumeWait(new Promise((r) => (done = r)));
-  const press = f.button('检查账号后继续').props.onPress;
+  const press = f.button('继续检查原请求').props.onPress;
   const first = press();
   await press();
   assert.equal(
@@ -528,4 +531,97 @@ test('completed batch metadata continues local polling and refreshes the real pu
     f.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
     false,
   );
+});
+
+test('identity isolation and a locally disabled feed never accuse the collection account', async () => {
+  for (const [code, explanation] of [
+    ['LEGACY_IDENTITY_UNVERIFIED', '部分旧文章身份待核实'],
+    ['SUBSCRIPTION_PAUSED', '本地订阅已停用'],
+  ]) {
+    const f = fixture();
+    f.render();
+    await f.deliver([
+      {
+        ...batch,
+        state: 'paused',
+        items: [{ index: 0, state: 'blocked', code }],
+      },
+    ]);
+    const view = f.render();
+    assert(view.text.includes(explanation));
+    assert(!view.text.includes('检查账号后继续'));
+    assert(!view.text.includes('账号不可用'));
+    assert.deepEqual(f.calls, []);
+  }
+});
+
+test('a stopped batch stays stopped while its saved feed metadata is projected and refreshed', async () => {
+  const saved = {
+    ...batch,
+    state: 'stopped',
+    items: [
+      {
+        index: 0,
+        state: 'succeeded',
+        feedId: 'MP_WXS_1234567890',
+        listReady: true,
+        bodyReady: false,
+        metadataPending: true,
+        code: 'LEGACY_IDENTITY_UNVERIFIED',
+      },
+      { index: 1, state: 'cancelled' },
+    ],
+  };
+  const f = fixture([saved]);
+  await f.deliver([saved]);
+  assert.equal(
+    f.options.refetchInterval(
+      { items: [saved] },
+      { state: { status: 'success' } },
+    ),
+    3000,
+  );
+  const ready = {
+    ...saved,
+    items: [{ ...saved.items[0], metadataPending: false }, saved.items[1]],
+  };
+  await f.deliver([ready]);
+  assert.equal(f.calls.length, 2);
+  assert(f.calls.every((call) => call[0] === 'local-view-refresh'));
+  assert.equal(
+    f.options.refetchInterval(
+      { items: [ready] },
+      { state: { status: 'success' } },
+    ),
+    false,
+  );
+  assert.deepEqual(f.notifications, []);
+});
+
+test('six-link paused progress reports the accepted first feed separately from unsynchronized content', () => {
+  const f = fixture([
+    {
+      ...batch,
+      state: 'paused',
+      items: Array.from({ length: 6 }, (_, index) =>
+        index === 0
+          ? {
+              index,
+              state: 'failed',
+              accepted: true,
+              taskId: 'c'.repeat(64),
+              feedId: 'MP_WXS_1234567890',
+              bodyReady: false,
+            }
+          : { index, state: 'queued', accepted: false },
+      ),
+    },
+  ]);
+  const progress = f.render().nodes.find((node) => node.type === 'Progress');
+  assert.equal(progress.props.value, 1);
+  assert.match(
+    progress.props.label,
+    /上游已受理 1 \/ 共 6.*内容同步 0.*提交已暂停/,
+  );
+  assert.deepEqual(f.calls, []);
 });

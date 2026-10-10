@@ -249,7 +249,6 @@ describe('explicit add source through original router (offline SQLite)', () => {
       '/addurl',
       '/list',
       'backup',
-      '/login/list',
       `/feed/${number}.xml`,
       '/list',
       `/feed/${number}.json`,
@@ -609,7 +608,6 @@ describe('explicit add source through original router (offline SQLite)', () => {
       '/addurl',
       '/list',
       'backup',
-      '/login/list',
       `/feed/${number}.xml`,
       '/list',
       `/feed/${number}.json`,
@@ -807,7 +805,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
       source: 'wechat2rss',
     });
     expect(result).toMatchObject({
-      status: 'blocked',
+      status: 'pending',
       code: 'LEGACY_IDENTITY_UNVERIFIED',
       upstreamSubmitted: false,
       sync: { articles: 0, identitySkipped: 1, bodyReady: false },
@@ -1233,10 +1231,10 @@ describe('explicit add source through original router (offline SQLite)', () => {
       collectionChannel: 'wechat2rss',
       syncTime: 0,
     });
-    expect(await prisma.article.findFirst()).toMatchObject({
-      contentHtml: null,
-      lastBodyStatus: 'unavailable',
-    });
+    expect(await prisma.article.findFirst()).toBeNull();
+    expect(events.some((event) => /\/feed\/\d+\.json$/.test(event))).toBe(
+      false,
+    );
     expect(events.filter((e) => e === '/list')).toHaveLength(0);
     expect(events.filter((e) => e === '/addurl')).toHaveLength(1);
     expect(
@@ -1249,15 +1247,21 @@ describe('explicit add source through original router (offline SQLite)', () => {
     const next = setup();
     const tasks = (next.service as any).subscriptionTasks;
     const queue = (next.service as any).subscriptionBatches;
+    clock += 5000;
+    await queue.runDue();
+    expect(events.filter((event) => event === '/addurl')).toHaveLength(2);
+    expect(await prisma.article.count()).toBe(0);
     clock += 30000;
     await tasks.runDue();
     await queue.runDue();
     expect(await prisma.article.findFirst()).toMatchObject({
       lastBodyStatus: 'available',
     });
-    expect((await next.caller.feed.subscriptionTasks()).items[0]).toMatchObject(
-      { phase: 'metadata', bodyReady: true },
-    );
+    expect(
+      (await next.caller.feed.subscriptionTasks()).items.find(
+        (task) => task.feedId === feedId,
+      ),
+    ).toMatchObject({ phase: 'metadata', bodyReady: true });
     // A pending display name does not hold up a different authorized URL.
     await queue.runDue();
     expect(events.filter((e) => e === '/addurl')).toHaveLength(2);
@@ -1415,6 +1419,137 @@ describe('explicit add source through original router (offline SQLite)', () => {
     });
     expect(adds).toBe(1);
     expect(await prisma.feed.count()).toBe(0);
+  });
+
+  it('accepted cache continuation isolates one legacy identity without pausing proved articles or checking login', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    await prisma.feed.create({
+      data: {
+        id: feedId,
+        mpName: '合成公众号',
+        mpCover: '',
+        mpIntro: '',
+        collectionChannel: 'wechat2rss',
+        updateTime: 0,
+      },
+    });
+    const old = await prisma.article.create({
+      data: {
+        id: 'unproved-old-short-id',
+        mpId: feedId,
+        title: '旧正文标题',
+        publishTime: 1700000000,
+        sourceUrl: articleUrl,
+        contentHtml: '<p>保留用户修改</p>',
+        picUrl: '',
+        metrics: '{"readCount":42}',
+      },
+    });
+    const journal = await wechat2RssAddReceipt(database, articleUrl);
+    await journal.claim();
+    await journal.accepted(`/feed/${number}.xml`);
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (input, ...rest) => {
+      const route = new URL(String(input)).pathname;
+      if (route === '/login/list')
+        throw Error('LOGIN_MUST_NOT_GATE_ACCEPTED_CACHE');
+      if (route === `/feed/${number}.json`) {
+        events.push(route);
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                url: `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=100&idx=1`,
+                title: '旧正文标题',
+                date_published: new Date(1700000000000).toISOString(),
+                content_html: '<p>供应商旧正文</p>',
+              },
+              {
+                url: `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=101&idx=1`,
+                title: '已核新正文',
+                date_published: new Date(1700001000000).toISOString(),
+                content_html: '<p>供应商新正文</p>',
+              },
+            ],
+          }),
+        );
+      }
+      return original(input, ...rest);
+    });
+    const { service } = setup();
+    const saved = await (service as any).subscriptionTasks.enqueue({
+      articleUrl,
+      feedPath: `/feed/${number}.xml`,
+      feedId,
+      phase: 'cache',
+    });
+    const task = JSON.parse(
+      await fs.readFile(
+        path.join(
+          root,
+          '.wechat2rss-subscription-tasks',
+          saved.taskId + '.json',
+        ),
+        'utf8',
+      ),
+    );
+    const result = await (service as any).continueAcceptedSubscription(task);
+    expect(result).toMatchObject({
+      state: 'succeeded',
+      code: 'LEGACY_IDENTITY_UNVERIFIED',
+      feedId,
+      listReady: true,
+      bodyReady: false,
+    });
+    expect(await prisma.article.findUnique({ where: { id: old.id } })).toEqual(
+      old,
+    );
+    expect(
+      await prisma.article.findUnique({ where: { id: `WX_${number}_101_1` } }),
+    ).toMatchObject({ contentHtml: expect.stringContaining('供应商新正文') });
+    expect(events).not.toContain('/login/list');
+    expect(events).not.toContain('/addurl');
+    service.onModuleDestroy();
+  });
+
+  it('a disabled local subscription remains blocked for its own reason with no cache or login reads', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    await prisma.feed.create({
+      data: {
+        id: feedId,
+        mpName: '合成公众号',
+        mpCover: '',
+        mpIntro: '',
+        collectionChannel: 'wechat2rss',
+        updateTime: 0,
+        status: 0,
+      },
+    });
+    const journal = await wechat2RssAddReceipt(database, articleUrl);
+    await journal.claim();
+    await journal.accepted(`/feed/${number}.xml`);
+    const { service } = setup();
+    const saved = await (service as any).subscriptionTasks.enqueue({
+      articleUrl,
+      feedPath: `/feed/${number}.xml`,
+      feedId,
+      phase: 'cache',
+    });
+    const task = JSON.parse(
+      await fs.readFile(
+        path.join(
+          root,
+          '.wechat2rss-subscription-tasks',
+          saved.taskId + '.json',
+        ),
+        'utf8',
+      ),
+    );
+    expect(
+      await (service as any).continueAcceptedSubscription(task),
+    ).toMatchObject({ state: 'blocked', code: 'SUBSCRIPTION_PAUSED' });
+    expect(events).toEqual(['backup']);
+    service.onModuleDestroy();
   });
 
   it('account challenge stops before backup, /addurl, list or new feed', async () => {

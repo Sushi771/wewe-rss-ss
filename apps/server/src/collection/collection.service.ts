@@ -586,21 +586,9 @@ export class CollectionService {
       if (feed.mpName !== input.mpName)
         throw new Error('订阅名称已变化，本次未写入');
       const provider = wechat2RssProvider();
-      const account = await provider.checkAccountStatus();
-      if (!account.available) {
-        return {
-          source: 'wechat2rss' as const,
-          status: 'blocked' as const,
-          complete: false as const,
-          coverage: 'none' as const,
-          articles: 0,
-          created: 0,
-          updated: 0,
-          message: account.challenged
-            ? '上游账号受限，等待本人在私有实例处理；本次未读取文章。'
-            : '私有实例没有可用登录账号；本次未读取文章。',
-        };
-      }
+      // Cache reads do not submit upstream work. A collection-account state
+      // cannot invalidate already cached identities/body bytes; the cache
+      // endpoint still enforces its own access and response validation.
       // All ordinary refreshes only consume cache. /addurl is reserved for an
       // explicit new-subscription action; /add also updates already subscribed feeds.
       const feedAvatar = await this.readWechat2RssAvatar(feed, provider);

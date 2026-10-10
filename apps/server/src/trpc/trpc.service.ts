@@ -331,6 +331,7 @@ export class TrpcService {
           message: result.message,
           taskId: 'taskId' in result ? result.taskId : undefined,
           feedId: 'feed' in result ? result.feed?.id : undefined,
+          accepted: result.accepted,
         };
       },
       async (id) => {
@@ -1287,71 +1288,32 @@ export class TrpcService {
         phase: 'cache',
         feedId,
         message: result.message,
+        code:
+          result.status === 'source-preserved'
+            ? undefined
+            : 'SUBSCRIPTION_PAUSED',
       });
       return { ...result, taskId, task };
     }
-    await this.subscriptionTasks.setResult(taskId, {
+    const task = await this.subscriptionTasks.setResult(taskId, {
       state: 'pending',
       phase: 'cache',
       feedId,
-      message: '订阅已保存，正在读取列表；正文与图片随后自动归档。',
-    });
-    let sync: Awaited<ReturnType<CollectionService['collectWechat2RssRecent']>>;
-    try {
-      sync = await this.collectionService.collectWechat2RssRecent({
-        mpId: feedId,
-        mpName: feed.mpName,
-        trigger: 'local-manual',
-        acceptedFeedPath: feedPath,
-        listOnly: true,
-      });
-    } catch {
-      const task = await this.subscriptionTasks.setResult(taskId, {
-        state: 'failed',
-        phase: 'cache',
-        feedId,
-        message: '订阅已保存，列表读取失败；后续队列暂停，旧内容保留。',
-      });
-      return {
-        requestedSource: 'wechat2rss' as const,
-        status: 'failed' as const,
-        accepted: true,
-        pending: false,
-        created: !old,
-        sourceBindingChanged,
-        feed,
-        upstreamSubmitted,
-        sync: null,
-        taskId,
-        task,
-        code: 'CACHE_READ_FAILED',
-        message: task.message,
-      };
-    }
-    const task = await this.subscriptionTasks.setResult(taskId, {
-      state: sync.status === 'blocked' ? 'blocked' : 'pending',
-      phase: 'cache',
-      feedId,
-      listReady: sync.articles > 0,
+      listReady: false,
       bodyReady: false,
-      message:
-        sync.status === 'blocked'
-          ? '账号不可用，队列已暂停。'
-          : sync.articles > 0
-            ? '真实文章列表已入库，正文和图片正在自动归档；公众号信息可能仍待补全。'
-            : '订阅已保存，正在自动等待文章缓存；公众号信息待补全。',
+      code: 'CACHE_PENDING',
+      message: '上游已受理，订阅已保存；正文与图片在后台独立同步。',
     });
     return {
       requestedSource: 'wechat2rss' as const,
-      status:
-        sync.status === 'blocked' ? ('blocked' as const) : ('pending' as const),
+      status: 'pending' as const,
       accepted: true,
       pending: true,
       created: !old,
       sourceBindingChanged,
       feed,
       upstreamSubmitted,
-      sync,
+      sync: null,
       taskId,
       task,
       code: 'CACHE_PENDING',
@@ -1382,15 +1344,6 @@ export class TrpcService {
       if (original.receipt?.feedPath !== task.feedPath)
         throw new Error('RECEIPT_CHANGED');
       if (task.phase === 'metadata' && task.feedId) {
-        const account = await provider.checkAccountStatus();
-        if (!account.available)
-          return {
-            ...base,
-            bodyReady: task.bodyReady,
-            listReady: task.listReady,
-            state: 'blocked',
-            message: '文章已保留，账号当前不可用；信息核对停止。',
-          };
         const metadata = await provider.resolveAcceptedSubscription(
           task.feedPath,
           {
@@ -1401,10 +1354,13 @@ export class TrpcService {
         if (!metadata)
           return {
             ...base,
-            bodyReady: true,
+            bodyReady: task.bodyReady === true,
             listReady: true,
+            code: task.code,
             state: 'pending',
-            message: '文章正文与图片已入库，公众号名称仍待实例补全。',
+            message: task.bodyReady
+              ? '文章正文与图片已入库，公众号名称仍待实例补全。'
+              : '可核验文章已保留，公众号名称仍待实例补全；旧文章身份隔离状态保留。',
           };
         const backup = await createVerifiedSqliteBackup();
         if (!('source' in backup) || !backup.source)
@@ -1430,10 +1386,13 @@ export class TrpcService {
           });
         return {
           ...base,
-          bodyReady: true,
+          bodyReady: task.bodyReady === true,
           listReady: true,
+          code: task.code,
           state: 'succeeded',
-          message: '订阅信息已补全，文章正文和图片已入库。',
+          message: task.bodyReady
+            ? '订阅信息已补全，文章正文和图片已入库。'
+            : '订阅信息已补全，可核验文章已保留；旧文章身份隔离状态保留。',
         };
       }
       let accepted: { feedId: string; name: string } | null;
@@ -1449,14 +1408,6 @@ export class TrpcService {
           };
         accepted = { feedId: feed.id, name: feed.mpName };
       } else {
-        const account = await provider.checkAccountStatus();
-        if (!account.available)
-          return {
-            ...base,
-            state: 'blocked',
-            message:
-              '账号不可用或待官方验证，自动接续已停止；请到账号页处理后继续检查。',
-          };
         accepted = await provider.resolveAcceptedSubscription(task.feedPath, {
           deadline: Math.min(Date.now() + 15000, task.deadline),
           remainingListRequests: 6,
@@ -1509,11 +1460,32 @@ export class TrpcService {
           state: 'succeeded',
           message: '已有订阅保留原来源和文章，本次未切换。',
         };
+      if (
+        result.code === 'LEGACY_IDENTITY_UNVERIFIED' &&
+        result.sync &&
+        'articles' in result.sync &&
+        result.sync.articles > 0 &&
+        'bodyMissing' in result.sync &&
+        result.sync.bodyMissing === 0 &&
+        'imageBlocked' in result.sync &&
+        result.sync.imageBlocked === 0
+      )
+        return {
+          ...next,
+          phase: !result.feed.mpName ? 'metadata' : 'cache',
+          state: !result.feed.mpName ? 'pending' : 'succeeded',
+          code: 'LEGACY_IDENTITY_UNVERIFIED',
+          listReady: true,
+          bodyReady: false,
+          message:
+            '可核验文章已同步；与旧记录身份无法核对的文章已隔离，旧正文保留。',
+        };
       if (result.status === 'blocked')
         return {
           ...next,
           state: 'blocked',
-          message: '订阅已保存，账号或订阅当前不可用；自动接续已停止。',
+          code: 'SUBSCRIPTION_PAUSED',
+          message: '本地订阅已停用，自动接续已停止；已有内容保留。',
         };
       if (
         result.code === 'CACHE_READ_FAILED' ||
@@ -1522,11 +1494,16 @@ export class TrpcService {
         return {
           ...next,
           state: 'failed',
+          code: 'CACHE_READ_FAILED',
           message: '文章或图片读取未完成，自动接续已停止；旧内容保留。',
         };
       return {
         ...next,
         state: 'pending',
+        code:
+          result.code === 'LEGACY_IDENTITY_UNVERIFIED'
+            ? 'LEGACY_IDENTITY_UNVERIFIED'
+            : 'CACHE_PENDING',
         message: '订阅已保存，正在自动等待文章缓存。',
       };
     } finally {
@@ -1591,8 +1568,7 @@ export class TrpcService {
         }),
         status: complete
           ? ('updated' as const)
-          : sync.status === 'blocked' ||
-              ('identitySkipped' in sync && sync.identitySkipped)
+          : sync.status === 'blocked'
             ? ('blocked' as const)
             : ('pending' as const),
         pending: !complete,

@@ -51,7 +51,83 @@ describe('durable authorized batch (offline)', () => {
     )
       await fs.rm(directory, { recursive: true, force: true });
   });
-  it('saves all inputs before any call, submits serially with 30s spacing, and reads status locally', async () => {
+  it('projects latest accepted task status while preserving stopped state and unsent cancellation', async () => {
+    const { manager, submit, task, resume } = make(
+      jest.fn().mockResolvedValue(waiting),
+    );
+    const batch = await manager.enqueue(urls);
+    await manager.runDue();
+    await manager.stop(batch.batchId);
+    const before = await fs.readFile(
+      path.join(
+        directory,
+        '.wechat2rss-subscription-batches',
+        batch.batchId + '.json',
+      ),
+      'utf8',
+    );
+    task.mockResolvedValue({
+      ...waiting,
+      state: 'succeeded',
+      listReady: true,
+      bodyReady: false,
+      code: 'LEGACY_IDENTITY_UNVERIFIED',
+    });
+    expect((await manager.list())[0]).toMatchObject({
+      state: 'stopped',
+      items: [
+        {
+          state: 'succeeded',
+          listReady: true,
+          bodyReady: false,
+          code: 'LEGACY_IDENTITY_UNVERIFIED',
+        },
+        { state: 'cancelled' },
+        { state: 'cancelled' },
+      ],
+    });
+    expect(
+      await fs.readFile(
+        path.join(
+          directory,
+          '.wechat2rss-subscription-batches',
+          batch.batchId + '.json',
+        ),
+        'utf8',
+      ),
+    ).toBe(before);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(resume).not.toHaveBeenCalled();
+  });
+  it('projects pending metadata after body completion, then reports its completion without writing a new batch', async () => {
+    const { manager, task } = make(
+      jest.fn().mockResolvedValue({ ...waiting, bodyReady: true }),
+    );
+    await manager.enqueue([urls[0]]);
+    await manager.runDue();
+    task.mockResolvedValue({
+      ...waiting,
+      phase: 'metadata',
+      bodyReady: true,
+      listReady: true,
+    });
+    expect((await manager.list())[0]).toMatchObject({
+      state: 'completed',
+      items: [{ state: 'succeeded', metadataPending: true }],
+    });
+    task.mockResolvedValue({
+      ...waiting,
+      state: 'succeeded',
+      phase: 'metadata',
+      bodyReady: true,
+      listReady: true,
+    });
+    expect((await manager.list())[0]).toMatchObject({
+      state: 'completed',
+      items: [{ state: 'succeeded', metadataPending: false }],
+    });
+  });
+  it('saves all inputs before any call, submits serially with bounded spacing, and reads status locally', async () => {
     const { manager, submit } = make();
     const batch = await manager.enqueue(urls);
     expect(submit).not.toHaveBeenCalled();
@@ -77,7 +153,7 @@ describe('durable authorized batch (offline)', () => {
     expect(submit.mock.calls.map((a) => a[0])).toEqual(urls);
     expect((await manager.list())[0].state).toBe('completed');
   });
-  it('waits for actual cache completion before the next URL and recovers all unsent inputs on restart', async () => {
+  it('continues unsent submissions after acceptance while the first cache waits across restart', async () => {
     const submit = jest
       .fn()
       .mockResolvedValueOnce(waiting)
@@ -90,10 +166,6 @@ describe('durable authorized batch (offline)', () => {
     const second = make(submit, task).manager;
     await second.init();
     clock += 30000;
-    await second.runDue();
-    expect(submit).toHaveBeenCalledTimes(1);
-    task.mockResolvedValue(success);
-    await second.runDue();
     await second.runDue();
     expect(submit).toHaveBeenCalledTimes(2);
     clock += 30000;
@@ -110,9 +182,66 @@ describe('durable authorized batch (offline)', () => {
     }
     expect(submit).toHaveBeenCalledTimes(1);
   });
-  it('pauses the whole batch on account restrictions, never advances behind a ready body with blocked state', async () => {
+  it('resumes the five unsent items of a six-link batch without resubmitting the accepted cache failure', async () => {
+    const six = ['a', 'b', 'c', 'd', 'e', 'f'].map(
+      (letter) => 'https://mp.weixin.qq.com/s/' + letter.repeat(22),
+    );
+    const submit = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ...waiting,
+        state: 'failed',
+        accepted: true,
+        message: 'Cache read failed after acceptance',
+      })
+      .mockImplementation(async () => ({
+        ...waiting,
+        taskId: 'b'.repeat(64),
+        accepted: true,
+      }));
+    const { manager, resume } = make(submit);
+    const batch = await manager.enqueue(six);
+    await manager.runDue();
+    const file = path.join(
+      directory,
+      '.wechat2rss-subscription-batches',
+      batch.batchId + '.json',
+    );
+    const record = JSON.parse(await fs.readFile(file, 'utf8'));
+    record.state = 'paused'; // Existing published queue paused on its first cache error.
+    await fs.writeFile(file, JSON.stringify(record));
+    await manager.resume(batch.batchId);
+    for (let i = 0; i < 5; i++) {
+      clock += 5000;
+      await manager.runDue();
+    }
+    expect(submit.mock.calls.map((call) => call[0])).toEqual(six);
+    const view = (await manager.list())[0];
+    expect(resume).toHaveBeenCalledWith(id);
+    expect(view.items.every((item) => item.accepted)).toBe(true);
+  });
+  it('an uncertain submission without a receipt pauses instead of submitting the following URL', async () => {
+    const { manager, submit } = make(
+      jest.fn().mockResolvedValue({
+        state: 'waiting',
+        accepted: false,
+        message: 'Submission result unconfirmed',
+      }),
+    );
+    await manager.enqueue(urls);
+    await manager.runDue();
+    clock += 30000;
+    await manager.runDue();
+    expect((await manager.list())[0].state).toBe('paused');
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+  it('continues past accepted cache failures but stops at a genuine new-submit account restriction', async () => {
     const { manager, submit, task } = make(
-      jest.fn().mockResolvedValue(waiting),
+      jest.fn().mockResolvedValueOnce(waiting).mockResolvedValue({
+        state: 'blocked',
+        message: 'Account unavailable before submission',
+        accepted: false,
+      }),
     );
     const batch = await manager.enqueue(urls);
     await manager.runDue();
@@ -122,13 +251,13 @@ describe('durable authorized batch (offline)', () => {
     await manager.runDue();
     expect((await manager.list())[0]).toMatchObject({
       state: 'paused',
-      items: [{ state: 'blocked' }, { state: 'queued' }, { state: 'queued' }],
+      items: [{ state: 'blocked' }, { state: 'blocked' }, { state: 'queued' }],
     });
-    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(2);
     await expect(manager.enqueue([urls[1]])).rejects.toThrow('BATCH_BUSY');
     expect(
       (await manager.stop(batch.batchId))?.items
-        .slice(1)
+        .slice(2)
         .every((i) => i.state === 'cancelled'),
     ).toBe(true);
   });

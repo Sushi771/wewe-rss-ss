@@ -378,16 +378,18 @@ const Feeds = () => {
 
   const refreshSavedSubscriptions = async (reveal: boolean) => {
     await queryUtils.feed.list.cancel();
-    const [snapshot] = await Promise.all([
-      refetchFeedList({ throwOnError: true }),
-      queryUtils.article.list.reset(),
-      queryUtils.article.summary.invalidate(),
-    ]);
+    const snapshot = await refetchFeedList({ throwOnError: true });
     if (snapshot?.data?.items) setOrderedFeeds(snapshot.data.items);
     if (reveal)
       setFolderFilter((current) =>
         current === folderFilter ? 'all' : current,
       );
+    // A secondary article query failure must not discard the already loaded
+    // subscription list or misreport a saved subscription as absent.
+    await Promise.allSettled([
+      queryUtils.article.list.reset(),
+      queryUtils.article.summary.invalidate(),
+    ]);
   };
 
   const handleConfirm = async () => {

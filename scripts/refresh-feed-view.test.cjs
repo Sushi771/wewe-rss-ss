@@ -12,6 +12,81 @@ const code = req('typescript').transpileModule(
 const exportsObject = {};
 vm.runInNewContext(code, { exports: exportsObject });
 const { refreshFeedViews } = exportsObject;
+function savedSubscriptionsFixture({
+  listFailure = false,
+  articleFailure = false,
+} = {}) {
+  const ts = req('typescript');
+  const source = ts.createSourceFile(
+    'feeds.tsx',
+    fs.readFileSync('apps/web/src/pages/feeds/index.tsx', 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let callback;
+  const visit = (node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(source) === 'refreshSavedSubscriptions'
+    )
+      callback = node.initializer;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert(callback);
+  const events = [],
+    saved = [{ id: 'MP_WXS_1234567890', mpName: '' }];
+  const code = ts.transpileModule(`(${callback.getText(source)})`, {
+    compilerOptions: { target: 9 },
+  }).outputText;
+  const fn = vm.runInNewContext(code, {
+    queryUtils: {
+      feed: { list: { cancel: async () => events.push('cancel') } },
+      article: {
+        list: {
+          reset: async () => {
+            events.push('article');
+            if (articleFailure) throw Error('synthetic article read failure');
+          },
+        },
+        summary: { invalidate: async () => events.push('summary') },
+      },
+    },
+    refetchFeedList: async () => {
+      events.push('feed');
+      if (listFailure) throw Error('synthetic feed read failure');
+      return { data: { items: saved } };
+    },
+    setOrderedFeeds: (items) => {
+      assert.equal(items, saved);
+      events.push('visible');
+    },
+    setFolderFilter: (fn) => {
+      assert.equal(fn('fixture-group'), 'all');
+      events.push('reveal');
+    },
+    folderFilter: 'fixture-group',
+  });
+  return { fn, events };
+}
+test('actual saved-subscription callback reveals the acknowledged list before secondary article failures', async () => {
+  const { fn, events } = savedSubscriptionsFixture({ articleFailure: true });
+  await fn(true);
+  assert.deepEqual(events, [
+    'cancel',
+    'feed',
+    'visible',
+    'reveal',
+    'article',
+    'summary',
+  ]);
+});
+test('actual saved-subscription callback keeps a primary list failure visible instead of claiming it was loaded', async () => {
+  const { fn, events } = savedSubscriptionsFixture({ listFailure: true });
+  await assert.rejects(fn(true), /synthetic feed read failure/);
+  assert.deepEqual(events, ['cancel', 'feed']);
+});
 test('starts all existing cache operations before awaiting any and reports a failure without skipping the others', async () => {
   const started = [],
     finish = [];

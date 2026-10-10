@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { subscriptionArticleUrl } from './subscription-add';
+import type { SubscriptionTaskCode } from './wechat2rss-subscription-tasks';
 
 type ItemState =
   | 'queued'
@@ -18,6 +19,10 @@ export type BatchOutcome = {
   taskId?: string;
   feedId?: string;
   bodyReady?: boolean;
+  listReady?: boolean;
+  code?: SubscriptionTaskCode;
+  phase?: 'identity' | 'cache' | 'metadata';
+  accepted?: boolean;
 };
 type Item = Omit<BatchOutcome, 'state'> & {
   index: number;
@@ -51,6 +56,10 @@ const view = (b: Batch) => ({
     taskId: item.taskId,
     feedId: item.feedId,
     bodyReady: item.bodyReady,
+    accepted: item.accepted ?? !!item.taskId,
+    listReady: item.listReady,
+    code: item.code,
+    metadataPending: false,
     // Bind internal consumers to the original intent without publishing URLs.
     articleUrlHash: item.articleUrl ? hash(item.articleUrl) : undefined,
   })),
@@ -160,6 +169,7 @@ export class Wechat2RssSubscriptionBatches {
             !/^MP_WXS_\d{5,15}$/.test(item.feedId)) ||
           (item.bodyReady !== undefined &&
             typeof item.bodyReady !== 'boolean') ||
+          (item.accepted !== undefined && typeof item.accepted !== 'boolean') ||
           (item.articleUrl !== undefined &&
             subscriptionArticleUrl(item.articleUrl) !== item.articleUrl) ||
           (['queued', 'submitting', 'waiting'].includes(item.state) &&
@@ -207,13 +217,41 @@ export class Wechat2RssSubscriptionBatches {
     return result.sort((a, b) => a.createdAt - b.createdAt);
   }
   async list() {
-    return (await this.records())
+    const batches = (await this.records())
       .sort(
         (a, b) =>
           Number(live(b)) - Number(live(a)) || b.createdAt - a.createdAt,
       )
       .slice(0, 100)
       .map(view);
+    // Read the latest durable continuation, including metadata after a batch
+    // completed. This projection never resumes a stopped batch or submits work.
+    for (const batch of batches) {
+      for (const item of batch.items) {
+        if (!item.taskId || ['cancelled', 'skipped'].includes(item.state))
+          continue;
+        const latest = await this.task(item.taskId);
+        if (!latest || (item.feedId && latest.feedId !== item.feedId)) continue;
+        item.feedId = latest.feedId;
+        item.bodyReady = latest.bodyReady;
+        item.listReady = latest.listReady;
+        item.code = latest.code;
+        item.message = latest.message;
+        item.metadataPending =
+          latest.phase === 'metadata' && latest.state === 'waiting';
+        item.state =
+          latest.bodyReady && latest.state === 'waiting'
+            ? 'succeeded'
+            : latest.state;
+      }
+      if (
+        batch.state !== 'stopped' &&
+        batch.items.length &&
+        batch.items.every((item) => item.state === 'succeeded')
+      )
+        batch.state = 'completed';
+    }
+    return batches;
   }
   async enqueue(
     urls: string[],
@@ -359,23 +397,30 @@ export class Wechat2RssSubscriptionBatches {
         await this.write(b);
         return;
       }
-      // A completed body's metadata task can still detect a later restriction.
-      // Pause unsent requests rather than advancing behind that failed check.
+      // Accepted cache work is independent of later serial submissions. Each
+      // new submission still checks the account and keeps its one-shot receipt.
       for (const prior of b.items)
-        if (prior.taskId && prior.state === 'succeeded') {
+        if (prior.taskId && prior.state !== 'cancelled') {
           const status = await this.task(prior.taskId);
-          if (status?.state === 'blocked') {
+          if (status) {
             Object.assign(prior, status);
-            b.state = 'paused';
-            await this.write(b);
-            return;
+            prior.accepted = true;
+            if (status.bodyReady && status.state === 'waiting')
+              prior.state = 'succeeded';
           }
         }
       const item = b.items.find((i) =>
-        ['submitting', 'waiting', 'queued'].includes(i.state),
+        ['submitting', 'queued'].includes(i.state),
       );
+      if (b.items.some((prior) => prior.state === 'waiting' && !prior.taskId)) {
+        b.state = 'paused';
+        await this.write(b);
+        return;
+      }
       if (!item) {
-        b.state = 'completed';
+        b.state = b.items.some((item) => item.state === 'waiting')
+          ? 'running'
+          : 'completed';
         await this.write(b);
         return;
       }
@@ -391,7 +436,7 @@ export class Wechat2RssSubscriptionBatches {
         if (item.state === 'queued' && b.nextSubmissionAt > this.now()) return;
         item.state = 'submitting';
         b.state = 'running';
-        b.nextSubmissionAt = this.now() + 30000;
+        b.nextSubmissionAt = this.now() + 5000;
         await this.write(b); // Includes all unsent URLs before the first upstream call.
         try {
           result = await this.submit(item.articleUrl!, b.purpose);
@@ -409,7 +454,9 @@ export class Wechat2RssSubscriptionBatches {
       if (result.bodyReady && ['waiting', 'succeeded'].includes(result.state))
         current.items[item.index].state = 'succeeded';
       if (
-        ['failed', 'blocked'].includes(current.items[item.index].state) &&
+        (['failed', 'blocked'].includes(current.items[item.index].state) ||
+          (result.state === 'waiting' && !result.taskId)) &&
+        !result.taskId &&
         current.state !== 'stopped'
       )
         current.state = 'paused';

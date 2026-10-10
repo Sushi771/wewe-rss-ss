@@ -631,7 +631,7 @@ describe('backend collection routing', () => {
       const exported = await caller.article.saveToObsidian(identity.id);
       const markdown = await fs.readFile(exported.path, 'utf8');
       expect(markdown).toContain('可离线阅读');
-      const attachment = markdown.match(/image\/image_[a-f0-9]+\.png/)?.[0];
+      const attachment = markdown.match(/image\/[A-Za-z0-9_-]+\.png/)?.[0];
       expect(attachment).toBeTruthy();
       expect(markdown).not.toContain(imageUrl);
       expect(
@@ -845,11 +845,20 @@ describe('backend collection routing', () => {
   });
 
   it.each([false, true])(
-    'preserves success time when authentication is unavailable (challenged=%s)',
+    'reads existing cache despite collection-account availability and keeps empty cache from advancing success time (challenged=%s)',
     async (challenged) => {
-      const fetchArticles = jest.fn();
+      const fetchArticles = jest.fn().mockResolvedValue({
+        coverage: 'recent-window',
+        upstreamCount: 0,
+        articles: [],
+        bodyMissing: 0,
+        imageBlocked: 0,
+      });
+      const checkAccountStatus = jest
+        .fn()
+        .mockResolvedValue({ available: false, challenged });
       (wechat2RssProvider as jest.Mock).mockReturnValue({
-        checkAccountStatus: async () => ({ available: false, challenged }),
+        checkAccountStatus,
         fetchArticles,
       });
       await prisma.feed.update({
@@ -862,11 +871,12 @@ describe('backend collection routing', () => {
         'scheduled',
       );
       expect(result).toMatchObject({
-        status: 'blocked',
+        status: 'pending',
         complete: false,
         coverage: 'none',
       });
-      expect(fetchArticles).not.toHaveBeenCalled();
+      expect(fetchArticles).toHaveBeenCalledTimes(1);
+      expect(checkAccountStatus).not.toHaveBeenCalled();
       expect(
         (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } }))
           .syncTime,
