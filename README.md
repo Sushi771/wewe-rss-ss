@@ -233,7 +233,9 @@ pnpm run start:server
 
 ## ⚠️ 风险声明
 
-为了确保本项目的持久运行，某些接口请求将通过 `weread.111965.xyz` 进行转发。请放心，该转发服务不会保存任何数据。
+原作者的 `weread.111965.xyz` 已经停止维护，需要的话可以登录wechat2rss进行购买部署。
+
+## 如果你觉得对你有帮助可以给我来杯可乐~https://wise.com/pay/me/jinn175
 
 ## 📄 License
 
