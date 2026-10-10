@@ -144,14 +144,42 @@ describe('accepted subscription task persistence (offline)', () => {
     expect(JSON.stringify(await q.list())).not.toContain('private-token-url');
   });
   it('expires after the bounded window without starting another check', async () => {
-    const run = jest.fn(),
+    const run = jest.fn().mockResolvedValue({ ...done, state: 'pending' }),
       q = make(run);
     await q.init();
     const a = await q.enqueue(input);
+    now += 30000;
+    await q.runDue();
     now += 300000;
     await q.runDue();
-    expect(run).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1);
     expect((await q.get(a.taskId))?.state).toBe('failed');
+  });
+  it('gives a queued first read its own bounded window and preserves it across restart', async () => {
+    const run = jest
+      .fn()
+      .mockResolvedValue({ ...done, state: 'pending', code: 'CACHE_PENDING' });
+    const q = make(run);
+    await q.init();
+    const first = await q.enqueue(input);
+    now += 360000; // Earlier serialized body imports occupied the worker.
+    await q.runDue();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0][0]).toMatchObject({
+      startedAt: first.startedAt,
+      firstCheckAt: now,
+      deadline: now + 300000,
+    });
+    q.close();
+    const complete = jest.fn().mockResolvedValue(done),
+      recovered = make(complete);
+    await recovered.init();
+    now += 30000;
+    await recovered.runDue();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete.mock.calls[0][0].firstCheckAt).toBe(now - 30000);
+    expect((await recovered.get(first.taskId))?.state).toBe('succeeded');
+    expect((await recovered.get(first.taskId))?.code).toBeUndefined();
   });
   it('stops if private instance configuration changed without reading another instance', async () => {
     const run = jest.fn(),
@@ -163,6 +191,32 @@ describe('accepted subscription task persistence (offline)', () => {
     await q.runDue();
     expect(run).not.toHaveBeenCalled();
     expect((await q.get(a.taskId))?.state).toBe('failed');
+  });
+  it('does not expire the sixth queued task while five slow cache reads are serialized', async () => {
+    const run = jest.fn().mockImplementation(async () => {
+      now += 70000;
+      return done;
+    });
+    const q = make(run);
+    await q.init();
+    const ids: string[] = [];
+    for (const letter of ['a', 'b', 'c', 'd', 'e', 'f']) {
+      ids.push(
+        (
+          await q.enqueue({
+            ...input,
+            articleUrl: 'https://mp.weixin.qq.com/s/' + letter.repeat(22),
+          })
+        ).taskId,
+      );
+      now++;
+    }
+    now += 30000;
+    for (let index = 0; index < 6; index++) await q.runDue();
+    expect(run.mock.calls.map(([task]) => task.taskId)).toEqual(ids);
+    expect((await q.list()).every((task) => task.state === 'succeeded')).toBe(
+      true,
+    );
   });
   it('serializes due tasks and does not let an older pending task starve the next one', async () => {
     const run = jest.fn().mockResolvedValue({ ...done, state: 'pending' }),

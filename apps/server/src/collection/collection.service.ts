@@ -773,7 +773,10 @@ export class CollectionService {
             where: { id: input.mpId },
             data: {
               collectionChannel: 'wechat2rss',
-              ...(input.listOnly || identitySkippedArticles.length
+              ...(input.listOnly ||
+              identitySkippedArticles.length ||
+              page.bodyMissing ||
+              page.imageBlocked
                 ? {}
                 : { syncTime: Math.floor(Date.now() / 1000) }),
               updateTime: latest._max.publishTime || feed.updateTime,

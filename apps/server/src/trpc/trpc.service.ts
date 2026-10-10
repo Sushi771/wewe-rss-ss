@@ -9,6 +9,7 @@ import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
+import { cacheFailureReason } from '../collection/cache-failure';
 import { wechat2RssProvider } from '../collection/provider-registry';
 import { Wechat2RssProvider } from '../collection/providers/wechat2rss';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
@@ -1495,7 +1496,17 @@ export class TrpcService {
           ...next,
           state: 'failed',
           code: 'CACHE_READ_FAILED',
-          message: '文章或图片读取未完成，自动接续已停止；旧内容保留。',
+          ...('failureReason' in result
+            ? { failureReason: result.failureReason }
+            : {}),
+          ...('imageBlocked' in (result.sync || {}) &&
+          result.sync?.['imageBlocked']
+            ? { failureReason: 'CACHE_IMAGES_UNVERIFIED' as const }
+            : {}),
+          message:
+            result.sync && 'imageBlocked' in result.sync
+              ? `缓存已读取；图片未通过 ${result.sync.imageBlocked} 项，正文缺失 ${'bodyMissing' in result.sync ? result.sync.bodyMissing : 0} 篇，旧身份隔离 ${'identitySkipped' in result.sync ? result.sync.identitySkipped : 0} 篇。已核内容和旧数据保留。`
+              : '缓存读取未完成；原订阅与旧数据保留。',
         };
       return {
         ...next,
@@ -1582,13 +1593,16 @@ export class TrpcService {
           ? `公众号已${created ? '添加并' : '订阅并'}读取缓存。${sync.message}`
           : `公众号已保留，缓存尚未完整就绪。${sync.message}稍后使用原更新按钮只读缓存，无需重新新增。`,
       };
-    } catch {
+    } catch (error) {
+      const failureReason = cacheFailureReason(error);
+      this.logger.warn(`[WECHAT2RSS_CACHE_READ_FAILED] ${failureReason}`);
       return {
         ...base,
         status: 'pending' as const,
         pending: true,
         sync: null,
         code: 'CACHE_READ_FAILED',
+        failureReason,
         message:
           '公众号已保留，首次缓存读取未完成；稍后使用原更新按钮只读缓存，不重新提交新增。',
       };

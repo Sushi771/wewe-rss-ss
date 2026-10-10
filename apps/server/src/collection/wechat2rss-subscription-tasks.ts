@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { subscriptionArticleUrl } from './subscription-add';
+import { CacheFailureReason, cacheFailureReasons } from './cache-failure';
 
 type TaskState = 'pending' | 'running' | 'succeeded' | 'blocked' | 'failed';
 export type SubscriptionTaskCode =
@@ -18,6 +19,7 @@ export type SubscriptionTaskResult = {
   listReady?: boolean;
   bodyReady?: boolean;
   code?: SubscriptionTaskCode;
+  failureReason?: CacheFailureReason;
 };
 export type SubscriptionTask = SubscriptionTaskResult & {
   version: 1;
@@ -26,6 +28,8 @@ export type SubscriptionTask = SubscriptionTaskResult & {
   feedPath: string;
   instance: string;
   startedAt: number;
+  /** The bounded read window starts when this serialized task first runs. */
+  firstCheckAt?: number;
   deadline: number;
   nextCheckAt: number;
   attempts: number;
@@ -41,6 +45,7 @@ const publicView = (task: SubscriptionTask) => ({
   listReady: task.listReady,
   bodyReady: task.bodyReady,
   code: task.code,
+  failureReason: task.failureReason,
   startedAt: task.startedAt,
   deadline: task.deadline,
 });
@@ -133,6 +138,8 @@ export class Wechat2RssSubscriptionTasks {
             'SOURCE_CHANGED',
           ].includes(task.code)) ||
         typeof task.message !== 'string' ||
+        (task.failureReason !== undefined &&
+          !cacheFailureReasons.includes(task.failureReason)) ||
         task.message.length > 300 ||
         (task.feedId !== undefined && !/^MP_WXS_\d{5,15}$/.test(task.feedId)) ||
         ![task.startedAt, task.deadline, task.nextCheckAt, task.attempts].every(
@@ -140,7 +147,10 @@ export class Wechat2RssSubscriptionTasks {
         ) ||
         task.attempts < 0 ||
         task.attempts > 10 ||
-        task.deadline - task.startedAt !== 300000
+        (task.firstCheckAt !== undefined &&
+          (!Number.isSafeInteger(task.firstCheckAt) ||
+            task.firstCheckAt < task.startedAt)) ||
+        task.deadline - (task.firstCheckAt ?? task.startedAt) !== 300000
       )
         throw new Error('SUBSCRIPTION_TASK_INVALID');
       return task;
@@ -200,6 +210,8 @@ export class Wechat2RssSubscriptionTasks {
     return this.mutate(async () => {
       const task = await this.read(id);
       if (!task) throw new Error('SUBSCRIPTION_TASK_INVALID');
+      delete task.code;
+      delete task.failureReason;
       Object.assign(task, result);
       await this.write(task);
       return publicView(task);
@@ -247,6 +259,9 @@ export class Wechat2RssSubscriptionTasks {
       instance: key(this.instance()),
       state: 'pending',
       startedAt,
+      firstCheckAt: undefined,
+      code: undefined,
+      failureReason: undefined,
       deadline: startedAt + 300000,
       nextCheckAt: startedAt + 30000,
       attempts: 0,
@@ -295,7 +310,10 @@ export class Wechat2RssSubscriptionTasks {
         }
       }
       for (const task of tasks.sort((a, b) => a.nextCheckAt - b.nextCheckAt)) {
-        if (this.now() >= task.deadline || task.attempts >= 10) {
+        if (
+          (task.attempts > 0 && this.now() >= task.deadline) ||
+          task.attempts >= 10
+        ) {
           task.state = 'failed';
           task.message = task.bodyReady
             ? '文章正文与图片已入库，公众号信息等待已结束；可继续核对名称，不会重新添加。'
@@ -319,6 +337,10 @@ export class Wechat2RssSubscriptionTasks {
           )
             return false;
           current.state = 'running';
+          if (current.attempts === 0) {
+            current.firstCheckAt = this.now();
+            current.deadline = current.firstCheckAt + 300000;
+          }
           current.attempts++;
           current.nextCheckAt = this.now() + 30000;
           await this.write(current);
@@ -349,6 +371,8 @@ export class Wechat2RssSubscriptionTasks {
             current.feedId !== task.feedId
           )
             return;
+          delete current.code;
+          delete current.failureReason;
           Object.assign(current, result);
           await this.write(current);
         });

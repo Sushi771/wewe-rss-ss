@@ -1421,6 +1421,79 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(await prisma.feed.count()).toBe(0);
   });
 
+  it('reports missing image sources without claiming a complete body sync or checking login', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    await prisma.feed.create({
+      data: {
+        id: feedId,
+        mpName: '合成公众号',
+        mpCover: '',
+        mpIntro: '',
+        collectionChannel: 'wechat2rss',
+        updateTime: 0,
+        syncTime: 1700000000,
+      },
+    });
+    const journal = await wechat2RssAddReceipt(database, articleUrl);
+    await journal.claim();
+    await journal.accepted(`/feed/${number}.xml`);
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (input, ...rest) => {
+      const route = new URL(String(input)).pathname;
+      if (route === '/login/list') throw Error('LOGIN_MUST_NOT_GATE_CACHE');
+      if (route === `/feed/${number}.json`)
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                url: `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=101&idx=1`,
+                title: '已核正文',
+                date_published: new Date(1700001000000).toISOString(),
+                content_html: '<p>已核正文</p><img class="rich_pages wxw-img">',
+              },
+            ],
+          }),
+        );
+      return original(input, ...rest);
+    });
+    const { service } = setup();
+    const saved = await (service as any).subscriptionTasks.enqueue({
+      articleUrl,
+      feedPath: `/feed/${number}.xml`,
+      feedId,
+      phase: 'cache',
+    });
+    const task = JSON.parse(
+      await fs.readFile(
+        path.join(
+          root,
+          '.wechat2rss-subscription-tasks',
+          saved.taskId + '.json',
+        ),
+        'utf8',
+      ),
+    );
+    const result = await (service as any).continueAcceptedSubscription(task);
+    expect(result).toMatchObject({
+      state: 'failed',
+      failureReason: 'CACHE_IMAGES_UNVERIFIED',
+      feedId,
+    });
+    expect(result.message).toContain('图片未通过 1 项');
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: feedId } })).syncTime,
+    ).toBe(1700000000);
+    expect(
+      (
+        await prisma.article.findUniqueOrThrow({
+          where: { id: `WX_${number}_101_1` },
+        })
+      ).contentHtml,
+    ).toContain('已核正文');
+    expect(events).not.toContain('/addurl');
+    service.onModuleDestroy();
+  });
+
   it('accepted cache continuation isolates one legacy identity without pausing proved articles or checking login', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     await prisma.feed.create({
