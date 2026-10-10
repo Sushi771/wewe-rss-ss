@@ -42,7 +42,7 @@ function reason(state: string, code?: string) {
     return '部分旧文章身份待核实，已隔离并保留旧正文。';
   if (code === 'CACHE_READ_FAILED') return '缓存读取未完成，请继续检查原请求。';
   if (code === 'CACHE_IMAGES_PENDING')
-    return '订阅已保留，正文已同步，图片待补；完整离线保存尚未就绪。';
+    return '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。';
   return state === 'blocked'
     ? '本条处理已暂停，请核对原请求状态。'
     : '本条读取或处理未完成，请继续检查原请求。';
@@ -190,7 +190,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
       )
         toast.success(
           batch.items.some((item) => item.code === 'CACHE_IMAGES_PENDING')
-            ? `订阅已保留 ${batch.items.length} / 共 ${batch.items.length}；正文已同步，部分图片待补。`
+            ? `订阅已保留 ${batch.items.length} / 共 ${batch.items.length}；正文已同步；媒体完整性未确认，正文和有效图片可保存。`
             : `添加完成 ${batch.items.length} / 共 ${batch.items.length}`,
           { duration: 3000 },
         );
@@ -207,7 +207,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
       )
         toast.success(
           task.code === 'CACHE_IMAGES_PENDING'
-            ? '订阅已保留，正文已同步，图片待补。'
+            ? '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。'
             : '添加完成 1 / 共 1',
           { duration: 3000 },
         );
@@ -387,7 +387,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
           <ModalBody tabIndex={0} aria-label="添加异常">
             <p role="alert">
               {exceptions.every((item) => item.code === 'CACHE_IMAGES_PENDING')
-                ? '订阅已保留，正文已同步，部分图片待补。'
+                ? '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。'
                 : '部分内容需要处理，已保存的订阅与正文保留。'}
             </p>
             <details className="subscription-task-reason">

@@ -24,7 +24,10 @@ const unavailable = () =>
   );
 
 /** An internal content boundary, never a browser upload or a network fallback. */
-export function verifiedDownloadBody(html: unknown): string {
+export function verifiedDownloadBody(
+  html: unknown,
+  allowUnconfirmedMedia = false,
+): string {
   // Includes up to 20 MB of base64 image bytes plus the bounded article body.
   if (typeof html !== 'string' || Buffer.byteLength(html) > 35_000_000)
     throw unavailable();
@@ -40,13 +43,24 @@ export function verifiedDownloadBody(html: unknown): string {
   if (
     !body.length ||
     (!body.text().trim() && !images.length) ||
-    images.length > 60
+    (allowUnconfirmedMedia
+      ? images.filter((image) => $(image).attr('src')).length
+      : images.length) > 60
   )
     throw unavailable();
   try {
     let totalBytes = 0;
     let encodedBytes = 0;
     for (const image of images) {
+      if (
+        allowUnconfirmedMedia &&
+        $(image).attr('data-wewe-image-unconfirmed') === 'true' &&
+        !$(image).attr('src') &&
+        !$(image).attr('data-src')
+      ) {
+        $(image).remove();
+        continue;
+      }
       // A visible image or CDN URL is not proof that its bytes are available.
       const source = $(image).attr('src') || '';
       totalBytes += decodeInlineImage(source).bytes.length;
@@ -74,11 +88,23 @@ export async function buildCompleteArticleDownload(
   article: DownloadArticle,
   source: string,
   directory: string,
+  allowUnconfirmedMedia = false,
 ): Promise<PreparedArticle> {
   if (article.lastBodyStatus === 'unavailable') throw unavailable();
-  const contentHtml = verifiedDownloadBody(article.contentHtml);
+  const mediaComplete =
+    article.lastBodyStatus !== 'images-pending' &&
+    !article.contentHtml?.includes('data-wewe-image-pending=');
+  const contentHtml = verifiedDownloadBody(
+    article.contentHtml,
+    allowUnconfirmedMedia,
+  );
   const { markdown } = await buildArticleMarkdown(
-    { ...article, contentHtml, sourceUrl: null },
+    {
+      ...article,
+      contentHtml,
+      sourceUrl: null,
+      lastBodyStatus: mediaComplete ? article.lastBodyStatus : 'images-pending',
+    },
     '',
     directory,
     async () => {
@@ -105,7 +131,8 @@ export async function buildCompleteArticleDownload(
     articleId: article.id,
     title: article.title,
     sourceUrl: source,
-    imageCount: load(contentHtml)('img').length,
+    imageCount: load(contentHtml)('img[src]').length,
+    ...(mediaComplete ? {} : { mediaComplete: false }),
   };
 }
 
@@ -116,6 +143,7 @@ export async function buildCompleteArticleDownload(
 export function prepareVerifiedProviderDownload(
   raw: unknown,
   result: ProviderArticle,
+  allowUnconfirmedMedia = false,
 ) {
   const requested = downloadArticleUrl(raw);
   try {
@@ -145,11 +173,21 @@ export function prepareVerifiedProviderDownload(
     id: result.id,
     title: result.title,
     publishTime: result.publishTime,
-    contentHtml: verifiedDownloadBody(result.contentHtml),
-    lastBodyStatus: 'available',
+    contentHtml: verifiedDownloadBody(
+      result.contentHtml,
+      allowUnconfirmedMedia,
+    ),
+    lastBodyStatus: result.contentHtml?.includes('data-wewe-image-pending=')
+      ? 'images-pending'
+      : 'available',
     metrics: null,
   };
   const source = result.url;
   return (directory: string) =>
-    buildCompleteArticleDownload(article, source, directory);
+    buildCompleteArticleDownload(
+      article,
+      source,
+      directory,
+      allowUnconfirmedMedia,
+    );
 }

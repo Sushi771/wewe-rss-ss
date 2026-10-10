@@ -68,7 +68,10 @@ function cleanBody(raw: unknown): {
         node.attr('src', image);
         if (!cover) cover = image;
       } else {
-        node.remove();
+        // Unknown no-source tags remain inert and explicitly unconfirmed.
+        // Unsafe nonempty addresses are removed, never requested.
+        if (!source) node.attr('data-wewe-image-unconfirmed', 'true');
+        else node.remove();
         imageBlocked++;
       }
     } else if (element['tagName'] === 'a') {

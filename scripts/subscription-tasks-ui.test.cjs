@@ -645,11 +645,12 @@ test('image-pending completion preserves the subscription and warns without clai
   };
   await f.deliver([partial]);
   let view = f.render();
-  assert(view.text.includes('正文已同步，图片待补'));
-  assert(view.text.includes('完整离线保存尚未就绪'));
+  assert(view.text.includes('正文已同步；媒体完整性未确认'));
+  assert(view.text.includes('正文和有效图片可保存'));
+  assert(!view.text.includes('完整离线保存尚未就绪'));
   assert(!view.text.includes('部分订阅暂未完成'));
   assert(!view.nodes.some((node) => node.type === 'Progress'));
-  assert.match(f.notifications[0][0], /订阅已保留.*图片待补/);
+  assert.match(f.notifications[0][0], /订阅已保留.*媒体完整性未确认/);
   await f.button('知道了').props.onPress();
   await f.deliver([{ ...partial, updatedAt: Date.now() }]);
   view = f.render();

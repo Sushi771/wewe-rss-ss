@@ -45,12 +45,23 @@ export function selectWechat2RssSingleCache(raw: unknown, requested: string) {
     parseWechat2RssJsonFeed({ items: [selected] }, original.mpId),
     original.mpId,
   );
-  if (page.imageBlocked)
+  const originalImages = load(
+    typeof selected.content_html === 'string' ? selected.content_html : '',
+  )('img').toArray();
+  const unknownSources = originalImages.filter(
+    (image) => !image.attribs['data-src'] && !image.attribs.src,
+  ).length;
+  if (page.imageBlocked > unknownSources)
     throw new Error('WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE');
   // An original article URL disguised as an image must not reopen page fetching.
   for (const image of load(page.articles[0].contentHtml || '')(
     'img',
   ).toArray()) {
+    if (
+      !image.attribs.src &&
+      image.attribs['data-wewe-image-unconfirmed'] === 'true'
+    )
+      continue;
     const source = new URL(image.attribs.src);
     if (
       source.hostname === 'mp.weixin.qq.com' &&

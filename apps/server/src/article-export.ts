@@ -38,14 +38,9 @@ export async function buildArticleMarkdown(
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
   let html = article.contentHtml || '';
-  if (
-    article.lastBodyStatus === 'images-pending' ||
-    html.includes('data-wewe-image-pending=')
-  )
-    throw new TRPCError({
-      code: 'PRECONDITION_FAILED',
-      message: '正文已同步，图片待补；完整离线导出尚未就绪。',
-    });
+  const mediaComplete =
+    article.lastBodyStatus !== 'images-pending' &&
+    !html.includes('data-wewe-image-pending=');
   if (!html && article.lastBodyStatus === 'unavailable')
     throw new TRPCError({
       code: 'PRECONDITION_FAILED',
@@ -129,9 +124,13 @@ export async function buildArticleMarkdown(
             }
             $img.attr('src', `${imageDirectory}/${fileName}`);
           } catch {
+            if (!mediaComplete) {
+              $img.remove();
+              return;
+            }
             throw new Error('图片未能安全下载，离线导出未完成');
           }
-        }
+        } else $img.remove();
       },
       { concurrency: 5 },
     );
@@ -170,6 +169,12 @@ export async function buildArticleMarkdown(
   return {
     title: article.title,
     contentHtml,
-    markdown: (article.sourceUrl ? metricsMarkdown(article) : '') + markdown,
+    markdown:
+      (article.sourceUrl ? metricsMarkdown(article) : '') +
+      (mediaComplete
+        ? ''
+        : '> 媒体完整性未确认：原缓存含无源或未核图片项。已保存正文和可取得的图片，不代表原篇全部媒体已归档。\n\n') +
+      markdown,
+    mediaComplete,
   };
 }

@@ -100,6 +100,7 @@ export async function prepareWechat2RssSingleDownload(
   const prepare = prepareVerifiedProviderDownload(
     requested,
     archived.articles[0],
+    true,
   );
   return async (directory: string) => ({
     ...(await prepare(directory)),

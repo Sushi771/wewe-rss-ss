@@ -180,6 +180,31 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     );
   });
 
+  it('saves known text and one actual image when raw cache also contains source-less media', async () => {
+    feed = {
+      items: [
+        item({
+          content_html:
+            '<p>可靠正文</p><img class="rich_pages wxw-img"><img src="https://mmbiz.qpic.cn/fixture.png">',
+        }),
+      ],
+    };
+    const prepare = await prepareWechat2RssSingleDownload(url);
+    expect(await prepare(folder)).toMatchObject({
+      imageCount: 1,
+      mediaComplete: false,
+      source: 'wechat2rss',
+    });
+    const markdown = await readFile(join(folder, 'index.md'), 'utf8');
+    expect(markdown).toContain('可靠正文');
+    expect(markdown).toContain('媒体完整性未确认');
+    const saved = await readdir(join(folder, 'image'));
+    expect(saved).toHaveLength(1);
+    expect(await readFile(join(folder, 'image', saved[0]))).toEqual(png);
+    expect(calls).toEqual(['/list', `/feed/${number}.json`]);
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
   it('reports a missing short-link mapping from the aggregate cache without asking for long parameters', async () => {
     await expect(
       prepareWechat2RssSingleDownload(shortUrl),

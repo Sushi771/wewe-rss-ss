@@ -1203,6 +1203,7 @@ export class TrpcRouter {
             success: true,
             path: result.markdownPath,
             alreadySaved: result.alreadySaved,
+            ...(result.mediaComplete === false ? { mediaComplete: false } : {}),
           };
         } catch (err: any) {
           this.logger.error(`Save to Obsidian error for ${id}: ${err.message}`);

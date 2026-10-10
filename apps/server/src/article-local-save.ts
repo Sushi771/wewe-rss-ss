@@ -19,6 +19,7 @@ export type PreparedArticle = {
   title: string;
   imageCount: number;
   videoCount?: number;
+  mediaComplete?: boolean;
   /** Set only by a trusted internal source adapter, never browser JSON. */
   source?: 'wechat2rss';
   exportSource?: ArticleExportSource;
@@ -30,6 +31,7 @@ type SavedArticle = {
   alreadySaved: boolean;
   imageCount: number;
   videoCount?: number;
+  mediaComplete?: boolean;
 };
 export const MAX_SAVED_VIDEO_BYTES = 100_000_000;
 const videoFilename = /^video_([a-f0-9]{64})\.mp4$/;
@@ -206,6 +208,8 @@ export class LocalArticleStore {
         !article.title ||
         !Number.isInteger(article.imageCount) ||
         article.imageCount < 0 ||
+        (article.mediaComplete !== undefined &&
+          typeof article.mediaComplete !== 'boolean') ||
         (article.source !== undefined && article.source !== 'wechat2rss') ||
         (article.videoCount !== undefined &&
           (!Number.isInteger(article.videoCount) ||
@@ -340,6 +344,9 @@ export class LocalArticleStore {
                 markdownPath: path.join(candidate, '正文.md'),
                 alreadySaved: true,
                 imageCount: marker.images.length,
+                ...(marker.mediaComplete === false
+                  ? { mediaComplete: false }
+                  : {}),
                 ...(retainedVideos.length
                   ? { videoCount: retainedVideos.length }
                   : {}),
@@ -398,6 +405,7 @@ export class LocalArticleStore {
           articleId: article.articleId,
           ...(article.source ? { source: article.source } : {}),
           complete: true,
+          ...(article.mediaComplete === false ? { mediaComplete: false } : {}),
           images,
           ...(videos.length ? { videos } : {}),
         }),
@@ -410,6 +418,7 @@ export class LocalArticleStore {
         markdownPath,
         alreadySaved: false,
         imageCount: images.length,
+        ...(article.mediaComplete === false ? { mediaComplete: false } : {}),
         ...(videos.length ? { videoCount: videos.length } : {}),
       };
     } catch (error) {
@@ -521,6 +530,9 @@ export class LocalArticleStore {
             markdownPath,
             alreadySaved: true,
             imageCount: receipt.images.length,
+            ...(receipt.mediaComplete === false
+              ? { mediaComplete: false }
+              : {}),
           };
         }
         throw fail(
@@ -627,6 +639,9 @@ export class LocalArticleStore {
             source: article.source,
             exportSource: article.exportSource,
             complete: true,
+            ...(article.mediaComplete === false
+              ? { mediaComplete: false }
+              : {}),
             markdown: path.basename(markdownPath),
             images: [...publishedImages],
           }),
@@ -640,6 +655,7 @@ export class LocalArticleStore {
         markdownPath,
         alreadySaved: false,
         imageCount: publishedImages.size,
+        ...(article.mediaComplete === false ? { mediaComplete: false } : {}),
       };
     } finally {
       if (!complete)

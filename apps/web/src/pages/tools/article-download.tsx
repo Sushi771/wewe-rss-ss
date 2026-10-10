@@ -20,6 +20,7 @@ type SavedArticle = {
   markdownPath: string;
   alreadySaved: boolean;
   imageCount: number;
+  mediaComplete?: boolean;
   contentSource?: 'wechat2rss-cache';
 };
 type SingleTask = Partial<SavedArticle> & {
@@ -873,8 +874,13 @@ export default function ArticleDownload() {
               <p role="status" className="font-medium">
                 {saved.alreadySaved
                   ? '今天已保存，未覆盖已有笔记'
-                  : '正文和图片已保存到本机'}
+                  : saved.mediaComplete === false
+                    ? '正文和有效图片已保存；媒体完整性未确认'
+                    : '正文和图片已保存到本机'}
               </p>
+              {saved.mediaComplete === false && saved.alreadySaved && (
+                <p>媒体完整性未确认；已有正文和有效图片保留。</p>
+              )}
               <p className="text-default-600 mt-2 break-all text-sm">
                 {saved.markdownPath}
               </p>

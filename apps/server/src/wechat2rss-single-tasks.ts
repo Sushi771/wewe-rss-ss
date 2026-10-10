@@ -628,9 +628,12 @@ export class Wechat2RssSingleTasks {
         await this.update(saving.taskId, (t) => {
           t.state = 'saved';
           t.result = result;
-          t.message = result.alreadySaved
-            ? '已保存，保留已有笔记。'
-            : '正文和图片已保存。';
+          t.message =
+            result.mediaComplete === false
+              ? '正文和有效图片已保存；媒体完整性未确认。'
+              : result.alreadySaved
+                ? '已保存，保留已有笔记。'
+                : '正文和图片已保存。';
         });
       } catch (error) {
         await this.update(saving.taskId, (t) => {

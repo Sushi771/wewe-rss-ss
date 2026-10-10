@@ -1507,7 +1507,7 @@ export class TrpcService {
           listReady: true,
           bodyReady: false,
           imagePendingCount: result.sync.imageBlocked,
-          message: `订阅已保留，已核正文已同步，图片待补 ${result.sync.imageBlocked} 项；完整离线保存尚未就绪。${'identitySkipped' in result.sync && result.sync.identitySkipped ? '旧身份无法核实的文章已隔离。' : ''}`,
+          message: `订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。${'identitySkipped' in result.sync && result.sync.identitySkipped ? '旧身份无法核实的文章已隔离。' : ''}`,
         };
       if (
         result.code === 'CACHE_READ_FAILED' ||
