@@ -136,66 +136,83 @@ const ArticleList: FC<ArticleListProps> = ({
 
   return (
     <div className="flex h-full flex-col">
-      <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
-        排序
-        {readSortingAvailable || likeSortingAvailable ? (
-          <select
-            aria-label="文章排序"
-            className="bg-background rounded border px-2 py-1"
-            value={sort}
-            onChange={(e) => {
-              setSort(e.target.value as typeof sort);
-              onSelectionChange(new Set());
-            }}
-          >
-            <option value="publishTime">发布时间</option>
-            {readSortingAvailable && (
-              <option value="readCount">阅读量从高到低</option>
-            )}
-            {likeSortingAvailable && (
-              <option value="likeCount">点赞量从高到低</option>
-            )}
-          </select>
-        ) : (
-          <span>按发布时间排列</span>
-        )}
-        {!hasWechat2Rss && (readSortingAvailable || likeSortingAvailable) && (
-          <span>带“+”为下限。收藏仅显示源数据，不以分享或在看代替。</span>
-        )}
-      </label>
-      <div className="text-default-500 px-3 pb-2 text-xs" aria-live="polite">
-        {summary.data ? (
-          <>
-            当前{search ? '筛选' : '订阅'}存量 {summary.data.articles} 篇；
-            {!hasWechat2Rss && (
-              <>
-                阅读已获取 {summary.data.readAvailable} 篇，点赞已获取{' '}
-                {summary.data.likeAvailable} 篇，
-              </>
-            )}
-            已缓存正文 {summary.data.cachedBodies} 篇。
-            {summary.data.oldestPublishTime &&
-            summary.data.newestPublishTime ? (
-              <>
+      {(readSortingAvailable || likeSortingAvailable) && (
+        <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
+          排序
+          {readSortingAvailable || likeSortingAvailable ? (
+            <select
+              aria-label="文章排序"
+              className="bg-background rounded border px-2 py-1"
+              value={sort}
+              onChange={(e) => {
+                setSort(e.target.value as typeof sort);
+                onSelectionChange(new Set());
+              }}
+            >
+              <option value="publishTime">发布时间</option>
+              {readSortingAvailable && (
+                <option value="readCount">阅读量从高到低</option>
+              )}
+              {likeSortingAvailable && (
+                <option value="likeCount">点赞量从高到低</option>
+              )}
+            </select>
+          ) : (
+            <span>按发布时间排列</span>
+          )}
+          {!hasWechat2Rss && (readSortingAvailable || likeSortingAvailable) && (
+            <span>带“+”为下限。收藏仅显示源数据，不以分享或在看代替。</span>
+          )}
+        </label>
+      )}
+      <details className="feed-stock-details shrink-0 px-3 py-1 text-xs">
+        <summary className="cursor-pointer text-neutral-500">
+          存量详情
+          {summary.data &&
+            summary.data.cachedBodies < summary.data.articles && (
+              <span
+                role="status"
+                className="text-amber-700 dark:text-amber-300"
+              >
                 {' '}
-                库内记录的发布时间范围：
-                {dayjs(summary.data.oldestPublishTime * 1e3).format(
-                  'YYYY-MM-DD',
-                )}{' '}
-                至{' '}
-                {dayjs(summary.data.newestPublishTime * 1e3).format(
-                  'YYYY-MM-DD',
-                )}
-                ，不代表期间无遗漏；存量日期尚需与原文核对。
-              </>
-            ) : null}
-          </>
-        ) : summary.isError ? (
-          '存量信息读取失败。'
-        ) : (
-          '正在读取存量信息…'
-        )}
-      </div>
+                · 部分正文未缓存
+              </span>
+            )}
+        </summary>
+        <div className="text-default-500 px-3 pb-2 text-xs" aria-live="polite">
+          {summary.data ? (
+            <>
+              当前{search ? '筛选' : '订阅'}存量 {summary.data.articles} 篇；
+              {!hasWechat2Rss && (
+                <>
+                  阅读已获取 {summary.data.readAvailable} 篇，点赞已获取{' '}
+                  {summary.data.likeAvailable} 篇，
+                </>
+              )}
+              已缓存正文 {summary.data.cachedBodies} 篇。
+              {summary.data.oldestPublishTime &&
+              summary.data.newestPublishTime ? (
+                <>
+                  {' '}
+                  库内记录的发布时间范围：
+                  {dayjs(summary.data.oldestPublishTime * 1e3).format(
+                    'YYYY-MM-DD',
+                  )}{' '}
+                  至{' '}
+                  {dayjs(summary.data.newestPublishTime * 1e3).format(
+                    'YYYY-MM-DD',
+                  )}
+                  ，不代表期间无遗漏；存量日期尚需与原文核对。
+                </>
+              ) : null}
+            </>
+          ) : summary.isError ? (
+            '存量信息读取失败。'
+          ) : (
+            '正在读取存量信息…'
+          )}
+        </div>
+      </details>
       {isError && (
         <div role="alert" className="px-3 py-2 text-sm text-red-600">
           文章列表读取失败：{error.message}。

@@ -222,7 +222,9 @@ function page({
   };
   const button = (text) =>
     render().find(
-      (node) => node.type === 'Button' && node.props.children === text,
+      (node) =>
+        node.type === 'Button' &&
+        (node.props.children === text || node.props['aria-label'] === text),
     );
   return {
     state,
@@ -853,7 +855,9 @@ test('ordinary single download shows Wechat2RSS-only cache errors without select
   h.runEffects();
   await flush();
   assert.equal(h.state[7], false);
-  assert.ok(JSON.stringify(h.render()).includes('仅使用 Wechat2RSS'));
+  assert.ok(
+    JSON.stringify(h.render()).includes('仅下载 Wechat2RSS 已缓存的文章'),
+  );
   h.render()
     .find((n) => n.type === 'form')
     .props.onSubmit({ preventDefault() {} });
@@ -891,4 +895,40 @@ test('ordinary single download refuses a successful receipt from an unconfirmed 
   assert.equal(h.state[6], null);
   assert.ok(h.state[3].includes('Wechat2RSS 来源确认'));
   assert.equal(h.calls.filter((c) => c.method === 'POST').length, 1);
+});
+
+test('short links show an actionable error before a native picker or download request', async () => {
+  const settings = { directory: 'synthetic-old-path', askEveryTime: true };
+  const h = page({ taskPresent: false, settings });
+  h.render()
+    .find((n) => n.type === 'form')
+    .props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.ok(h.state[3].includes('短链接暂不能下载'));
+  assert.ok(h.state[3].includes('复制带问号参数的完整原文链接'));
+  assert.equal(h.calls.length, 0);
+  assert.deepEqual(h.state[1], settings);
+  assert.equal(h.state[6], null);
+});
+
+test('path preferences and detailed help remain collapsed without changing remembered settings', () => {
+  const settings = { directory: 'synthetic-old-path', askEveryTime: true };
+  const h = page({ taskPresent: false, settings });
+  const nodes = h.render();
+  const details = nodes.filter((n) => n.type === 'details');
+  assert.equal(details.length, 2);
+  assert.ok(details.every((n) => !n.props.open));
+  const preferences = details.find((n) =>
+    JSON.stringify(n).includes('每次下载询问路径'),
+  );
+  assert.ok(preferences);
+  assert.equal(nodes.find((n) => n.type === 'Checkbox').props.isSelected, true);
+  assert.equal(nodes.filter((n) => n.type === 'h1').length, 1);
+  assert.equal(
+    nodes.find((n) => n.type === 'Input').props.description,
+    undefined,
+  );
+  assert.equal(h.button('选择下载路径').props.children, '更改');
+  assert.equal(h.calls.length, 0);
+  assert.deepEqual(h.state[1], settings);
 });

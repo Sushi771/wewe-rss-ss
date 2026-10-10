@@ -58,6 +58,8 @@ jobs:
         run: node --test scripts/account-login-ui.test.cjs
       - name: Test Wechat2RSS source-specific metric visibility offline
         run: node --test scripts/wechat-source-metrics-ui.test.cjs
+      - name: Test compact reading toolbar and collapsed diagnostics offline
+        run: node --test scripts/feed-reading-ui.test.cjs
       - name: Test feed sidebar scroll and compact navigation layout offline
         run: node --test scripts/feed-sidebar-layout.test.cjs scripts/folder-navigation-ui.test.cjs
       - name: Test unavailable new-subscription source and retained input offline

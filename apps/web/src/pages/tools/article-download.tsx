@@ -344,6 +344,15 @@ export default function ArticleDownload() {
           '请粘贴有效的 HTTPS 微信公众号文章链接（mp.weixin.qq.com/s）。',
         );
       }
+      if (
+        input.pathname !== '/s' ||
+        !['__biz', 'mid', 'idx', 'sn'].every((key) =>
+          input.searchParams.get(key)?.trim(),
+        )
+      )
+        throw new Error(
+          '短链接暂不能下载。请在微信打开文章，复制带问号参数的完整原文链接后重试；若仍是短链接，暂无法处理。',
+        );
       let pickToken: string | undefined;
       if (settings?.askEveryTime) {
         const selected = await choose(signal);
@@ -364,20 +373,18 @@ export default function ArticleDownload() {
   };
 
   return (
-    <div className="h-full overflow-y-auto px-5 py-10 sm:px-8">
+    <div className="px-5 py-5 sm:px-8">
       <div className="mx-auto max-w-2xl">
-        <p className="text-default-500 mb-3 text-sm">工具 / 文章下载</p>
-        <h1 className="text-2xl font-semibold tracking-tight">文章下载</h1>
-        <p className="text-default-500 mt-3 text-sm leading-6">
-          仅使用 Wechat2RSS 已订阅缓存，保存单篇正文和图片到本机 Obsidian
-          文件夹。
+        <h1 className="text-xl font-semibold">公众号文章下载</h1>
+        <p className="text-default-500 mt-1 text-sm">
+          仅下载 Wechat2RSS 已缓存的文章。
         </p>
-        <form onSubmit={download} className="mt-8 space-y-5" aria-busy={busy}>
+        <form onSubmit={download} className="mt-4 space-y-3" aria-busy={busy}>
           <Input
             label="文章链接"
             labelPlacement="outside"
             type="url"
-            placeholder="https://mp.weixin.qq.com/s/…"
+            placeholder="粘贴完整原文链接"
             value={url}
             onValueChange={(value) => {
               if (locked || request.current) return;
@@ -391,33 +398,37 @@ export default function ArticleDownload() {
             isDisabled={locked}
             isRequired
             autoComplete="off"
-            description="请使用含 __biz、mid、idx 的完整原文长链接；短链接暂无法可靠定位缓存。"
           />
-          <div className="bg-default-50 rounded-xl p-4">
-            <p className="mb-2 text-sm font-medium">保存路径</p>
-            <p className="text-default-600 break-all text-sm">
-              {settings?.directory || '正在读取本机保存设置…'}
-            </p>
-            <Button
-              className="mt-3"
-              size="sm"
-              type="button"
-              isDisabled={
-                busy ||
-                (browserActive &&
-                  (browserTask?.destinationBound ||
-                    browserTask?.state !== 'ready')) ||
-                !settings
-              }
-              onPress={() => {
-                if (browserActive && browserTask?.destinationBound) return;
-                void operate(async (signal) => {
-                  await choose(signal);
-                });
-              }}
-            >
-              选择下载路径
-            </Button>
+          <div className="border-divider rounded-lg border px-3 py-2">
+            <div className="flex items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-default-500 text-xs">保存到</p>
+                <p className="text-default-600 break-all text-sm">
+                  {settings?.directory || '正在读取本机保存设置…'}
+                </p>
+              </div>
+              <Button
+                className="shrink-0"
+                aria-label="选择下载路径"
+                size="sm"
+                type="button"
+                isDisabled={
+                  busy ||
+                  (browserActive &&
+                    (browserTask?.destinationBound ||
+                      browserTask?.state !== 'ready')) ||
+                  !settings
+                }
+                onPress={() => {
+                  if (browserActive && browserTask?.destinationBound) return;
+                  void operate(async (signal) => {
+                    await choose(signal);
+                  });
+                }}
+              >
+                更改
+              </Button>
+            </div>
             {browserActive && browserTask?.destinationBound && (
               <p className="mt-2 text-sm">
                 本次任务的保存目录已固定。若需更改，请取消任务，重新确认目录并取得新的接收许可后创建任务。
@@ -438,7 +449,18 @@ export default function ArticleDownload() {
                 重新读取保存设置
               </Button>
             )}
-            <div className="mt-4">
+          </div>
+          <Button
+            color="primary"
+            type="submit"
+            isLoading={busy}
+            isDisabled={locked || !settings || !url.trim()}
+          >
+            {busy ? '正在处理…' : '下载正文和图片'}
+          </Button>
+          <details className="text-default-500 text-sm">
+            <summary className="cursor-pointer">下载设置</summary>
+            <div className="pt-2">
               <Checkbox
                 isSelected={settings?.askEveryTime || false}
                 isDisabled={locked || !settings}
@@ -462,15 +484,7 @@ export default function ArticleDownload() {
                 每次下载询问路径
               </Checkbox>
             </div>
-          </div>
-          <Button
-            color="primary"
-            type="submit"
-            isLoading={busy}
-            isDisabled={locked || !settings || !url.trim()}
-          >
-            {busy ? '正在处理…' : '下载正文和图片'}
-          </Button>
+          </details>
           {browserAvailable && (
             <Button
               type="button"
@@ -576,7 +590,10 @@ export default function ArticleDownload() {
             )}
           </div>
         )}
-        <div className="mt-6" aria-live="polite">
+        <div
+          className={busy || notice || error || saved ? 'mt-3' : ''}
+          aria-live="polite"
+        >
           {busy && (
             <p role="status" className="text-default-500 text-sm">
               请完成可能弹出的目录选择；正在处理本机操作。
@@ -599,7 +616,7 @@ export default function ArticleDownload() {
             <ArticleVerificationNotice verification={verification} />
           )}
           {saved && (
-            <div className="border-success-200 bg-success-50 rounded-xl border p-5">
+            <div className="border-success-200 bg-success-50 rounded-lg border p-3">
               <p role="status" className="font-medium">
                 {saved.alreadySaved
                   ? '今天已保存，未覆盖已有笔记'
@@ -608,22 +625,30 @@ export default function ArticleDownload() {
               <p className="text-default-600 mt-2 break-all text-sm">
                 {saved.markdownPath}
               </p>
-              {saved.contentSource === 'wechat2rss-cache' && (
-                <p className="text-default-600 mt-2 text-sm">
-                  正文来自 Wechat2RSS
-                  缓存；图片资源另经字节校验保存，未抓取微信原文页面。
-                </p>
-              )}
               <p className="text-default-600 mt-2 text-sm">
-                图片保存在同篇文章的 image 子目录，可直接用 Obsidian 打开正文。
+                可直接用 Obsidian 打开；图片保存在文章目录内。
               </p>
             </div>
           )}
         </div>
-        <p className="text-default-500 mt-8 text-xs leading-6">
-          按北京时间当天建立日期目录，每篇文章独立保存，不需要解压。正文仅使用
-          Wechat2RSS，不复用来源不明的旧缓存，不直连原页或切换服务。公众号未订阅、文章不在当前缓存、正文或媒体不完整时明确停止；不会自动添加整个公众号或触发强制更新。
-        </p>
+        <details className="text-default-500 mt-3 text-sm">
+          <summary className="cursor-pointer">使用帮助</summary>
+          <div className="space-y-2 pt-2 text-xs leading-5">
+            <p>
+              需要带问号参数的完整原文链接（含 __biz、mid、idx 和
+              sn）；短链接暂不能下载。
+              请在微信打开文章后复制完整原文链接，若仍是短链接，暂无法处理。
+            </p>
+            <p>
+              正文和图片保存为 Markdown 及本地资源，按下载日期和文章分目录。
+              重复下载保留已有笔记，已编辑内容不会被覆盖。
+            </p>
+            <p>
+              公众号未订阅、文章不在当前缓存或正文和媒体不完整时会显示原因。
+              工具不会自动订阅公众号或强制更新。需先在订阅页完成订阅与正常更新。
+            </p>
+          </div>
+        </details>
       </div>
     </div>
   );
