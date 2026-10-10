@@ -1,4 +1,6 @@
 import { buildArticleMarkdown } from '../article-export';
+import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
+import { LocalArticleStore } from '../article-local-save';
 import { findArticleListRows } from '../article-list-page';
 import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
@@ -16,7 +18,6 @@ import { TRPCError } from '@trpc/server';
 import { PrismaService } from '@server/prisma/prisma.service';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
-import dayjs from 'dayjs';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { WereadService } from '@server/weread/weread.service';
@@ -184,7 +185,15 @@ export class TrpcRouter {
     const articles = await this.prismaService.article.findMany({
       where: { mpId: feedId },
       orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-      select: { id: true, title: true, sourceUrl: true, contentHtml: true },
+      select: {
+        id: true,
+        title: true,
+        sourceUrl: true,
+        contentHtml: true,
+        lastBodyStatus: true,
+        metrics: true,
+        publishTime: true,
+      },
     });
     if (articles.length > 5000) throw new Error('离线导出文章超过上限');
     await fs.promises.mkdir(directory, { recursive: true });
@@ -202,9 +211,12 @@ export class TrpcRouter {
       let markdown: string;
       if (article.contentHtml) {
         try {
-          markdown = (
-            await this.getArticleMarkdown(article.id, articleDirectory)
-          ).markdown;
+          await prepareCachedArticleLocalExport(article)(articleDirectory);
+          markdown = await fs.promises.readFile(
+            path.join(articleDirectory, 'index.md'),
+            'utf8',
+          );
+          await fs.promises.unlink(path.join(articleDirectory, 'index.md'));
           complete++;
         } catch {
           incomplete.push(relative);
@@ -214,15 +226,18 @@ export class TrpcRouter {
         incomplete.push(relative);
         markdown = `# ${article.title}\n\n正文尚未缓存，本篇无法离线阅读。\n\n原文：${article.sourceUrl || '未记录'}\n`;
       }
+      await fs.promises.mkdir(path.join(articleDirectory, 'image'), {
+        recursive: true,
+      });
       await fs.promises.writeFile(
-        path.join(articleDirectory, 'index.md'),
+        path.join(articleDirectory, '正文.md'),
         markdown,
       );
     }
     await fs.promises.writeFile(
       path.join(directory, 'README.md'),
       `# ${feed.mpName}\n\n共 ${articles.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
-        '文章位于 articles/ 下，每篇的图片路径相对其 index.md。未完整篇目在各自文件中明确标注。\n',
+        '文章位于 articles/ 下，每篇包含正文.md 和独享的 image/ 图片目录，正文使用相对图片引用。未完整篇目在各自文件中明确标注。\n',
     );
     return {
       name: feed.mpName,
@@ -1159,23 +1174,22 @@ export class TrpcRouter {
           this.configService.get<ConfigurationType['feed']>('feed')!;
 
         try {
-          const dateFolder = dayjs().format('YYYY-MM-DD');
-          const finalPath = path.join(obsidianPath, dateFolder);
-          const { markdown, title } = await this.getArticleMarkdown(
-            id,
-            finalPath,
+          // Batch export calls this same mutation per ID. Share the tool's
+          // isolated directory, atomic publication and edited-note protection.
+          const store = new LocalArticleStore(
+            path.join(obsidianPath, '.wewe-list-export-settings.json'),
+            obsidianPath,
           );
-
-          if (!fs.existsSync(finalPath)) {
-            await fs.promises.mkdir(finalPath, { recursive: true });
-          }
-
-          const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 100);
-          const filePath = path.join(finalPath, `${safeTitle}-${id}.md`);
-
-          await fs.promises.writeFile(filePath, markdown);
-
-          return { success: true, path: filePath };
+          const result = await store.save(
+            prepareCachedArticleLocalExport(article),
+            new Date(),
+            obsidianPath,
+          );
+          return {
+            success: true,
+            path: result.markdownPath,
+            alreadySaved: result.alreadySaved,
+          };
         } catch (err: any) {
           this.logger.error(`Save to Obsidian error for ${id}: ${err.message}`);
           if (err instanceof TRPCError) throw err;

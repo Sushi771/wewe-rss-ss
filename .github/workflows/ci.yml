@@ -25,6 +25,8 @@ jobs:
         run: node --test scripts/local-release/readiness.test.cjs
       - name: Test explicit Wechat2RSS binding on owned SQLite copies
         run: node --test scripts/prepare-wechat2rss-test.test.cjs
+      - name: Test article layout repair and original-file preservation on Windows
+        run: node --test scripts/repair-article-layout.test.cjs
 
   lint-test:
     runs-on: ubuntu-latest
@@ -74,6 +76,8 @@ jobs:
         run: node --test scripts/acceptance-article-verification.test.cjs
       - name: Test retained article path recovery offline
         run: node --test scripts/browser-article-path-recovery.test.cjs
+      - name: Test article layout repair and original-file preservation offline
+        run: node --test scripts/repair-article-layout.test.cjs
       - name: Test feed view invalidation with installed tRPC batch link offline
         run: node --test scripts/refresh-feed-view.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/feed-avatar-reading-ui.test.cjs
       - name: Test isolated WeRead gateway probe
