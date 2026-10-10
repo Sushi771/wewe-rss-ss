@@ -531,21 +531,41 @@ export class CollectionService {
     }
   }
 
+  private async readWechat2RssAvatar(
+    feed: { id: string; mpCover: string; collectionChannel: string | null },
+    provider: ReturnType<typeof wechat2RssProvider>,
+  ) {
+    return !feed.mpCover &&
+      feed.collectionChannel === 'wechat2rss' &&
+      typeof provider.fetchFeedAvatar === 'function'
+      ? provider.fetchFeedAvatar(feed.id)
+      : undefined;
+  }
+
+  private writeWechat2RssAvatar(
+    tx: Pick<typeof this.prisma, 'feed'>,
+    mpId: string,
+    avatar: string | undefined,
+  ) {
+    return avatar
+      ? tx.feed.updateMany({
+          where: { id: mpId, collectionChannel: 'wechat2rss', mpCover: '' },
+          data: { mpCover: avatar },
+        })
+      : Promise.resolve();
+  }
+
   /** Internal metadata continuation, after the caller's account check and
    * verified backup. A completed body must not skip a still-empty avatar. */
   async supplementWechat2RssAvatar(mpId: string) {
     const feed = await this.prisma.feed.findUniqueOrThrow({
       where: { id: mpId },
     });
-    if (feed.collectionChannel !== 'wechat2rss' || feed.mpCover) return;
-    const avatar = await wechat2RssProvider().fetchFeedAvatar(mpId);
+    const avatar = await this.readWechat2RssAvatar(feed, wechat2RssProvider());
     if (!avatar) return;
-    await this.prisma.$transaction((tx) =>
-      tx.feed.updateMany({
-        where: { id: mpId, collectionChannel: 'wechat2rss', mpCover: '' },
-        data: { mpCover: avatar },
-      }),
-    );
+    await this.prisma.$transaction(async (tx) => {
+      await this.writeWechat2RssAvatar(tx, mpId, avatar);
+    });
   }
 
   async collectWechat2RssRecent(input: {
@@ -583,23 +603,9 @@ export class CollectionService {
       }
       // All ordinary refreshes only consume cache. /addurl is reserved for an
       // explicit new-subscription action; /add also updates already subscribed feeds.
-      const feedAvatar =
-        !feed.mpCover &&
-        feed.collectionChannel === 'wechat2rss' &&
-        typeof provider.fetchFeedAvatar === 'function'
-          ? await provider.fetchFeedAvatar(input.mpId)
-          : undefined;
+      const feedAvatar = await this.readWechat2RssAvatar(feed, provider);
       const supplementAvatar = (tx: Pick<typeof this.prisma, 'feed'>) =>
-        feedAvatar
-          ? tx.feed.updateMany({
-              where: {
-                id: input.mpId,
-                mpCover: '',
-                collectionChannel: 'wechat2rss',
-              },
-              data: { mpCover: feedAvatar },
-            })
-          : Promise.resolve();
+        this.writeWechat2RssAvatar(tx, input.mpId, feedAvatar);
       const accepted = false;
       const fetched = input.acceptedFeedPath
         ? await provider.fetchAcceptedArticles(

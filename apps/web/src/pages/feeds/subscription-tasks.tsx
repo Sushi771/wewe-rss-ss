@@ -1,5 +1,14 @@
-import { Button } from '@nextui-org/react';
-import { useRef, useState } from 'react';
+import {
+  Button,
+  Progress,
+  Modal,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+} from '@nextui-org/react';
+import { useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import { trpc } from '@web/utils/trpc';
 
 type Props = {
@@ -7,6 +16,30 @@ type Props = {
   adding: boolean;
   onSaved: (reveal: boolean) => Promise<void>;
 };
+
+type Exception = {
+  key: string;
+  batchId?: string;
+  taskId?: string;
+  name: string;
+  state: string;
+};
+const notificationKey = 'wewe-subscription-notifications-v1';
+function readNotifications(): Record<string, string> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(notificationKey) || '{}');
+    return saved && typeof saved === 'object' && !Array.isArray(saved)
+      ? saved
+      : {};
+  } catch {
+    return {};
+  }
+}
+function reason(state: string) {
+  return state === 'blocked'
+    ? '需要检查账号或完成官方验证。'
+    : '暂未完成，请检查账号和服务后重试。';
+}
 
 /** Durable local progress only; the backend owns submission and sequencing. */
 const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
@@ -87,145 +120,300 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
       setActing(undefined);
     }
   };
+  const [exceptions, setExceptions] = useState<Exception[]>([]);
   const items = batches.data?.items || [];
-  const active = items.some(
+  const legacy = useLegacySubscriptionTasks({
+    feeds,
+    adding,
+    onSaved,
+    excluded: items.flatMap((batch) =>
+      batch.items.flatMap((item) => (item.taskId ? [item.taskId] : [])),
+    ),
+  });
+  const notified = useRef(readNotifications());
+  const initialized = useRef(false);
+  const activeBefore = useRef(new Set<string>());
+  const active = items.filter(
     (batch) =>
       ['queued', 'running', 'paused'].includes(batch.state) ||
       batch.items.some((item) =>
         ['submitting', 'waiting'].includes(item.state),
       ),
   );
-  if (!items.length && !batches.isError)
-    return (
-      <LegacySubscriptionTasks
-        feeds={feeds}
-        adding={adding}
-        onSaved={onSaved}
-        excluded={items.flatMap((batch) =>
-          batch.items.flatMap((item) => (item.taskId ? [item.taskId] : [])),
-        )}
-      />
+  useEffect(() => {
+    if (!batches.data) return;
+    const fresh: Exception[] = [];
+    const observe = (key: string, signature: string, exception: Exception) => {
+      const previous = notified.current[key];
+      if (
+        ['failed', 'blocked'].includes(exception.state) &&
+        previous !== signature &&
+        (initialized.current || adding || previous !== undefined)
+      )
+        fresh.push(exception);
+      notified.current[key] = signature;
+    };
+    for (const batch of batches.data.items) {
+      for (const item of batch.items)
+        observe(`${batch.batchId}:${item.index}`, item.state, {
+          key: `${batch.batchId}:${item.index}`,
+          batchId: batch.batchId,
+          name:
+            feeds.find((feed) => feed.id === item.feedId)?.mpName ||
+            `第 ${item.index + 1} 条`,
+          state: item.state,
+        });
+      if (
+        activeBefore.current.has(batch.batchId) &&
+        batch.state === 'completed' &&
+        batch.items.length > 0 &&
+        batch.items.every((item) => item.state === 'succeeded')
+      )
+        toast.success(
+          `添加完成 ${batch.items.length} / 共 ${batch.items.length}`,
+          { duration: 3000 },
+        );
+    }
+    const excluded = batches.data.items.flatMap((batch) =>
+      batch.items.flatMap((item) => (item.taskId ? [item.taskId] : [])),
     );
-  const labels = {
-    queued: '等待处理',
-    submitting: '正在提交',
-    waiting: '等待首批缓存，完成后自动处理下一条',
-    succeeded: '处理完成',
-    failed: '未完成',
-    blocked: '已暂停，请检查账号登录或官方验证',
-    cancelled: '已停止，未提交',
-    skipped: '重复链接，已跳过',
-  };
+    for (const task of (legacy.tasks.data?.items || []).filter(
+      (task) => !excluded.includes(task.taskId),
+    )) {
+      if (
+        task.state === 'succeeded' &&
+        ['pending', 'running'].includes(notified.current[task.taskId])
+      )
+        toast.success('添加完成 1 / 共 1', { duration: 3000 });
+      observe(task.taskId, task.state, {
+        key: task.taskId,
+        taskId: task.taskId,
+        name:
+          feeds.find((feed) => feed.id === task.feedId)?.mpName ||
+          '先前添加任务',
+        state: task.state,
+      });
+    }
+    activeBefore.current = new Set(
+      batches.data.items
+        .filter(
+          (batch) =>
+            ['queued', 'running', 'paused'].includes(batch.state) ||
+            batch.items.some((item) =>
+              ['submitting', 'waiting'].includes(item.state),
+            ),
+        )
+        .map((batch) => batch.batchId),
+    );
+    initialized.current = true;
+    try {
+      localStorage.setItem(notificationKey, JSON.stringify(notified.current));
+    } catch {
+      /* In-memory dedup still applies. */
+    }
+    if (fresh.length)
+      setExceptions((previous) => [
+        ...previous.filter(
+          (old) => !fresh.some((item) => item.key === old.key),
+        ),
+        ...fresh,
+      ]);
+  }, [batches.data, legacy.tasks.data, adding, feeds]);
+  const closeExceptions = () => setExceptions([]);
+  const completed = active
+    .flatMap((batch) => batch.items)
+    .filter((item) => item.state === 'succeeded').length;
+  const total =
+    active.reduce((sum, batch) => sum + batch.items.length, 0) +
+    legacy.pending.filter((task) => ['pending', 'running'].includes(task.state))
+      .length;
+  const waiting = active.some((batch) =>
+    batch.items.some((item) => item.state === 'waiting'),
+  );
+  const paused = active.some((batch) => batch.state === 'paused');
   return (
-    <section
-      aria-label="订阅添加任务"
-      className="shrink-0 border-b px-3 py-2 text-sm"
-    >
-      <LegacySubscriptionTasks
-        feeds={feeds}
-        adding={adding}
-        onSaved={onSaved}
-        excluded={items.flatMap((batch) =>
-          batch.items.flatMap((item) => (item.taskId ? [item.taskId] : [])),
-        )}
-      />
-      <details open={active || batches.isError || refreshError || undefined}>
-        <summary className="cursor-pointer">添加进度与记录</summary>
-        {batches.isError && (
-          <p role="alert">
-            添加进度暂时无法读取，已提交的任务不会重新发送。
-            <Button size="sm" variant="light" onPress={() => batches.refetch()}>
-              重新读取进度
-            </Button>
-          </p>
-        )}
-        {refreshError && (
-          <p role="alert">
-            订阅已保存，列表尚未显示。
+    <>
+      {adding && total === 0 && (
+        <section
+          aria-label="订阅添加进度"
+          aria-live="polite"
+          className="subscription-progress-summary"
+        >
+          <Progress
+            aria-label="正在受理添加请求"
+            label="正在受理添加请求"
+            isIndeterminate
+            size="sm"
+          />
+        </section>
+      )}
+      {total > 0 && (
+        <section
+          aria-label="订阅添加进度"
+          aria-live="polite"
+          className="subscription-progress-summary"
+        >
+          <Progress
+            aria-label="已完成的订阅数量"
+            value={completed}
+            maxValue={total}
+            showValueLabel={false}
+            label={`已完成 ${completed} / 共 ${total}${paused ? ' · 已暂停' : waiting ? ' · 等待缓存' : ' · 处理中'}`}
+            size="sm"
+          />
+          {active.map((batch) => (
             <Button
+              key={batch.batchId}
               size="sm"
               variant="light"
-              onPress={async () => {
-                try {
-                  await onSaved(true);
-                  setRefreshError(false);
-                } catch {
-                  setRefreshError(true);
-                }
-              }}
+              isDisabled={!!acting}
+              isLoading={acting === batch.batchId}
+              onPress={() => act(batch.batchId, 'stop')}
             >
-              重新读取列表
+              停止未执行项
             </Button>
-          </p>
-        )}
-        {actionError && <p role="alert">{actionError}</p>}
-        {items.map((batch) => (
-          <div key={batch.batchId} className="mt-2 space-y-2">
-            <p>
-              本批 {batch.items.length} 条
-              {batch.state === 'paused'
-                ? ' · 已暂停'
-                : batch.state === 'stopped'
-                  ? ' · 已停止未执行项'
-                  : batch.state === 'completed'
-                    ? ' · 处理结束'
-                    : ' · 依次处理'}
-            </p>
-            <ul role="status" aria-live="polite" className="space-y-2">
-              {batch.items.map((item) => (
-                <li key={item.index} className="flex flex-wrap gap-2">
-                  <span>
-                    第 {item.index + 1} 条：
-                    {feeds.find((feed) => feed.id === item.feedId)?.mpName ||
-                      '公众号待确认'}
-                  </span>
-                  <span>{labels[item.state]}</span>
-                  {item.state === 'succeeded' && item.bodyReady === true && (
-                    <span>正文已确认完成</span>
-                  )}
-                  {item.feedId && item.state !== 'succeeded' && (
-                    <span>订阅已保存</span>
-                  )}
-                  {item.state === 'succeeded' && item.bodyReady === false && (
-                    <span>正文尚未确认完整</span>
-                  )}
-                  {item.message && <span>{item.message}</span>}
-                </li>
-              ))}
-            </ul>
-            {['queued', 'running', 'paused'].includes(batch.state) && (
+          ))}
+          {active
+            .filter((batch) => batch.state === 'paused')
+            .map((batch) => (
               <Button
+                key={`resume:${batch.batchId}`}
                 size="sm"
                 variant="light"
-                isLoading={acting === batch.batchId}
                 isDisabled={!!acting}
-                onPress={() => act(batch.batchId, 'stop')}
-              >
-                停止未执行项
-              </Button>
-            )}
-            {batch.state === 'paused' && (
-              <Button
-                size="sm"
-                variant="light"
                 isLoading={acting === batch.batchId}
-                isDisabled={!!acting}
                 onPress={() => act(batch.batchId, 'resume')}
               >
                 检查账号后继续
               </Button>
-            )}
-          </div>
-        ))}
-      </details>
-    </section>
+            ))}
+        </section>
+      )}
+      {(batches.isError ||
+        legacy.tasks.isError ||
+        refreshError ||
+        legacy.error) && (
+        <p role="status" className="px-3 text-xs">
+          {refreshError || legacy.error
+            ? '订阅已保存，列表尚未显示。'
+            : '进度暂时无法读取。'}
+          <Button
+            size="sm"
+            variant="light"
+            onPress={async () => {
+              if (refreshError || legacy.error) {
+                try {
+                  await onSaved(true);
+                  setRefreshError(false);
+                  legacy.setError(false);
+                } catch {
+                  setRefreshError(true);
+                }
+              } else {
+                await batches.refetch();
+                await legacy.tasks.refetch();
+              }
+            }}
+          >
+            重新读取进度
+          </Button>
+        </p>
+      )}
+      {actionError && <p role="alert">{actionError}</p>}
+      <Modal
+        isOpen={exceptions.length > 0}
+        onOpenChange={(open) => {
+          if (!open) closeExceptions();
+        }}
+        portalContainer={
+          typeof document === 'undefined' ? undefined : document.body
+        }
+        placement="center"
+        scrollBehavior="inside"
+        isKeyboardDismissDisabled={false}
+        classNames={{
+          backdrop: 'subscription-dialog-backdrop',
+          wrapper: 'subscription-dialog-overlay',
+          base: 'subscription-dialog',
+          header: 'subscription-dialog-header',
+          body: 'subscription-dialog-body',
+          footer: 'subscription-dialog-footer',
+          closeButton: 'subscription-dialog-close',
+        }}
+      >
+        <ModalContent>
+          <ModalHeader>添加需要处理（{exceptions.length} 条）</ModalHeader>
+          <ModalBody tabIndex={0} aria-label="添加异常">
+            <p role="alert">部分订阅暂未完成，其他任务继续在后台处理。</p>
+            <details className="subscription-task-reason">
+              <summary>查看需要处理的订阅</summary>
+              {exceptions.map((item) => (
+                <p key={item.key}>
+                  {item.name}：{reason(item.state)}
+                </p>
+              ))}
+            </details>
+            {[
+              ...new Set(
+                exceptions.flatMap((item) =>
+                  item.batchId &&
+                  items.some(
+                    (batch) =>
+                      batch.batchId === item.batchId &&
+                      batch.state === 'paused',
+                  )
+                    ? [item.batchId]
+                    : [],
+                ),
+              ),
+            ].map((batchId) => (
+              <Button
+                key={batchId}
+                isDisabled={!!acting}
+                isLoading={acting === batchId}
+                onPress={() => act(batchId, 'resume')}
+              >
+                检查账号后继续
+              </Button>
+            ))}
+            {exceptions
+              .filter((item) => item.taskId)
+              .map((item) => (
+                <Button
+                  key={item.key}
+                  onPress={async () => {
+                    if (legacy.busy.current) return;
+                    legacy.busy.current = true;
+                    try {
+                      await legacy.resume.mutateAsync({ taskId: item.taskId! });
+                      await legacy.tasks.refetch({ throwOnError: true });
+                    } catch {
+                      legacy.setError(true);
+                    } finally {
+                      legacy.busy.current = false;
+                    }
+                  }}
+                >
+                  检查账号后继续检查
+                </Button>
+              ))}
+          </ModalBody>
+          <ModalFooter>
+            <span className="text-xs">关闭提示不取消后台任务。</span>
+            <Button variant="flat" onPress={closeExceptions}>
+              知道了
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+    </>
   );
 };
+
 export default SubscriptionTasks;
 
 /** Accepted tasks from before batch support remain recoverable after reload. */
-const LegacySubscriptionTasks = ({
-  feeds,
+const useLegacySubscriptionTasks = ({
   onSaved,
   excluded = [],
 }: Props & { excluded?: string[] }) => {
@@ -269,55 +457,10 @@ const LegacySubscriptionTasks = ({
   const resume = trpc.feed.resumeSubscriptionTask.useMutation({ retry: false });
   const pending =
     tasks.data?.items.filter(
-      (task) => !excluded.includes(task.taskId) && task.state !== 'succeeded',
+      (task) =>
+        !!task.taskId &&
+        !excluded.includes(task.taskId) &&
+        task.state !== 'succeeded',
     ) || [];
-  if (!pending.length && !tasks.isError && !error) return null;
-  return (
-    <details open>
-      <summary>先前添加任务</summary>
-      {(tasks.isError || error) && (
-        <p role="alert">
-          先前任务或本地列表暂时无法读取。
-          <Button size="sm" variant="light" onPress={() => tasks.refetch()}>
-            重新读取
-          </Button>
-        </p>
-      )}
-      <div role="status" aria-live="polite">
-        {pending.map((task) => (
-          <p key={task.taskId}>
-            {feeds.find((feed) => feed.id === task.feedId)?.mpName ||
-              '先前提交的公众号'}
-            ：
-            {task.state === 'blocked'
-              ? '已暂停，请检查账号或官方验证。'
-              : task.state === 'failed'
-                ? '暂未完成。'
-                : '仍在处理，完成后自动更新列表。'}
-            {['blocked', 'failed'].includes(task.state) && (
-              <Button
-                size="sm"
-                variant="light"
-                onPress={async () => {
-                  if (busy.current) return;
-                  busy.current = true;
-                  try {
-                    await resume.mutateAsync({ taskId: task.taskId });
-                    await tasks.refetch({ throwOnError: true });
-                    setError(false);
-                  } catch {
-                    setError(true);
-                  } finally {
-                    busy.current = false;
-                  }
-                }}
-              >
-                检查账号后继续检查
-              </Button>
-            )}
-          </p>
-        ))}
-      </div>
-    </details>
-  );
+  return { pending, tasks, error, setError, resume, busy };
 };

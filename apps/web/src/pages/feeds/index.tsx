@@ -924,33 +924,11 @@ const Feeds = () => {
           ) : null}
         </div>
         <div className="mac-content feed-content !min-w-0 !overflow-y-auto">
-          {!isOpen && (
-            <SubscriptionTasks
-              feeds={feedData?.items || []}
-              adding={isAddingSubscriptions}
-              onSaved={refreshSavedSubscriptions}
-            />
-          )}
-          {isAddingSubscriptions && (
-            <section
-              aria-label="添加订阅进度"
-              className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2 text-sm"
-            >
-              <p role="status" aria-live="polite">
-                {isAddingSubscriptions
-                  ? '正在处理添加请求，完成后会自动更新列表。'
-                  : addMessages[addMessages.length - 1]}
-              </p>
-              <Button
-                size="sm"
-                variant="light"
-                onPress={handleOpenAdd}
-                isDisabled={isAddFeedLoading}
-              >
-                查看添加结果
-              </Button>
-            </section>
-          )}
+          <SubscriptionTasks
+            feeds={feedData?.items || []}
+            adding={isAddingSubscriptions}
+            onSaved={refreshSavedSubscriptions}
+          />
           <div className="mac-toolbar feed-reading-toolbar !h-auto shrink-0 !flex-wrap !gap-2 !px-3 !py-2">
             <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 sm:flex-1 sm:basis-0">
               <span className="min-w-0 truncate text-[15px] font-semibold">
@@ -1779,19 +1757,27 @@ const Feeds = () => {
       <Modal
         isOpen={isOpen}
         onOpenChange={(open) => (open ? handleOpenAdd() : handleCancelAdd())}
+        portalContainer={
+          typeof document === 'undefined' ? undefined : document.body
+        }
+        placement="center"
+        scrollBehavior="inside"
+        isKeyboardDismissDisabled={false}
+        classNames={{
+          backdrop: 'subscription-dialog-backdrop',
+          wrapper: 'subscription-dialog-overlay',
+          base: 'subscription-dialog',
+          header: 'subscription-dialog-header',
+          body: 'subscription-dialog-body',
+          footer: 'subscription-dialog-footer',
+          closeButton: 'subscription-dialog-close',
+        }}
       >
         <ModalContent>
           {() => (
             <>
               <ModalHeader>添加公众号</ModalHeader>
               <ModalBody>
-                {isOpen && (
-                  <SubscriptionTasks
-                    feeds={feedData?.items || []}
-                    adding={isAddingSubscriptions}
-                    onSaved={refreshSavedSubscriptions}
-                  />
-                )}
                 <Textarea
                   value={wxsLink}
                   onValueChange={(value) => {

@@ -151,6 +151,80 @@ select {
   overflow: hidden;
 }
 
+/* Body-portalled dialogs stay above z-100 sticky bars. Only the body scrolls. */
+.subscription-dialog-backdrop {
+  z-index: 300;
+}
+.subscription-dialog-overlay {
+  z-index: 301;
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  height: 100dvh;
+  padding: 12px;
+  overflow: hidden;
+}
+.subscription-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(44rem, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+  margin: 0 !important;
+  overflow: hidden;
+}
+.subscription-dialog-header,
+.subscription-dialog-footer {
+  flex-shrink: 0;
+}
+.subscription-dialog-header {
+  padding-right: 48px;
+}
+.subscription-dialog-footer {
+  flex-wrap: wrap;
+}
+.subscription-dialog-close {
+  z-index: 1;
+}
+.subscription-dialog-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.subscription-dialog-body:focus-visible {
+  outline: 2px solid var(--mac-blue);
+  outline-offset: -2px;
+}
+.subscription-progress-summary {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 4px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--mac-separator);
+}
+.subscription-task-reason {
+  font-size: 12px;
+}
+.subscription-task-reason p {
+  overflow-wrap: anywhere;
+  padding: 4px 0 8px;
+}
+.subscription-task-reason summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+
 .app-shell > :first-child {
   flex-shrink: 0;
 }

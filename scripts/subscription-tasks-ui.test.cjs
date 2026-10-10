@@ -22,6 +22,7 @@ function fixture(
   adding = false,
   legacy = false,
   excluded = [],
+  storage = new Map(),
 ) {
   let data = { items: initial },
     queryError = false,
@@ -30,10 +31,15 @@ function fixture(
     refIndex = 0,
     savingFails = false,
     resumeWait;
+  const effects = [],
+    notifications = [];
   const states = [],
     refs = [],
     calls = [];
   const hooks = {
+    useEffect(effect) {
+      effects.push(effect);
+    },
     useState(value) {
       const i = stateIndex++;
       if (!(i in states)) states[i] = value;
@@ -81,7 +87,7 @@ function fixture(
       fs.readFileSync(
         path.join(root, 'apps/web/src/pages/feeds/subscription-tasks.tsx'),
         'utf8',
-      ) + '\nexport { LegacySubscriptionTasks };',
+      ),
       {
         compilerOptions: {
           target: ts.ScriptTarget.ES2022,
@@ -93,16 +99,40 @@ function fixture(
     {
       module,
       exports: module.exports,
+      document: { body: { syntheticPortalRoot: true } },
+      localStorage: {
+        getItem: (key) => storage.get(key),
+        setItem: (key, value) => storage.set(key, value),
+      },
       require(id) {
         if (id === 'react') return hooks;
+        if (id === 'sonner')
+          return { toast: { success: (...args) => notifications.push(args) } };
         if (id === 'react/jsx-runtime') return { jsx, jsxs: jsx };
-        if (id === '@nextui-org/react') return { Button: 'Button' };
+        if (id === '@nextui-org/react')
+          return new Proxy({}, { get: (_, key) => key });
         if (id === '@web/utils/trpc')
           return {
             trpc: {
               feed: {
-                subscriptionBatches: query,
-                subscriptionTasks: query,
+                subscriptionBatches: legacy
+                  ? {
+                      useQuery: () => ({
+                        data: { items: [] },
+                        isError: false,
+                        refetch: async () => {},
+                      }),
+                    }
+                  : query,
+                subscriptionTasks: legacy
+                  ? query
+                  : {
+                      useQuery: () => ({
+                        data: { items: [] },
+                        isError: false,
+                        refetch: async () => {},
+                      }),
+                    },
                 resumeSubscriptionTask: resume,
                 stopSubscriptionBatch: {
                   useMutation(config) {
@@ -140,9 +170,7 @@ function fixture(
   const render = () => {
     stateIndex = 0;
     refIndex = 0;
-    const tree = (
-      legacy ? module.exports.LegacySubscriptionTasks : module.exports.default
-    )({
+    const tree = module.exports.default({
       adding,
       excluded,
       feeds: [{ id: 'MP_WXS_1234567890', mpName: '合成公众号' }],
@@ -151,10 +179,13 @@ function fixture(
         if (savingFails) throw Error('SYNTHETIC_LOCAL_READ');
       },
     });
+    effects.splice(0).forEach((effect) => effect());
     return { tree, nodes: walk(tree), text: text(tree) };
   };
   return {
     calls,
+    notifications,
+    storage,
     render,
     get options() {
       render();
@@ -187,13 +218,17 @@ function fixture(
   };
 }
 
-test('pending batch polling reads local progress and shows every queued link', () => {
+test('main shows only real progress and waits without inventing cache percentage', () => {
   const f = fixture();
-  assert.match(f.render().text, /第 1 条/);
-  assert.match(f.render().text, /第 2 条/);
-  assert.match(f.render().text, /等待首批缓存/);
+  const view = f.render();
+  const progress = view.nodes.find((n) => n.type === 'Progress');
+  assert.equal(progress.props.value, 0);
+  assert.equal(progress.props.maxValue, 2);
+  assert.match(progress.props.label, /已完成 0 \/ 共 2.*等待缓存/);
+  assert(!view.text.includes('添加进度与记录'));
+  assert(!view.text.includes('历史记录'));
+  assert(!view.text.includes('第 1 条'));
   assert.equal(f.options.retry, false);
-  assert.equal(f.options.refetchOnWindowFocus, false);
   assert.equal(
     f.options.refetchInterval(
       { items: [batch] },
@@ -202,6 +237,89 @@ test('pending batch polling reads local progress and shows every queued link', (
     3000,
   );
   assert.deepEqual(f.calls, []);
+});
+test('new failures aggregate in body portal; closing never cancels and unchanged polling does not reopen', async () => {
+  const f = fixture();
+  f.render();
+  const failed = {
+    ...batch,
+    state: 'paused',
+    items: [
+      { index: 0, state: 'blocked', message: 'SECRET_TECHNICAL_LOG' },
+      { index: 1, state: 'failed', message: 'SECRET_TECHNICAL_LOG' },
+    ],
+  };
+  await f.deliver([failed]);
+  let view = f.render();
+  let modal = view.nodes.find((n) => n.type === 'Modal');
+  assert.equal(modal.props.isOpen, true);
+  assert.equal(modal.props.portalContainer.syntheticPortalRoot, true);
+  assert.equal(modal.props.isKeyboardDismissDisabled, false);
+  assert.equal(modal.props.scrollBehavior, 'inside');
+  assert.match(view.text, /添加需要处理（2 条）/);
+  assert(!view.text.includes('SECRET_TECHNICAL_LOG'));
+  assert.equal(
+    view.nodes.find((n) => n.type === 'details').props.open,
+    undefined,
+  );
+  modal.props.onOpenChange(false);
+  await f.deliver([failed]);
+  assert.equal(
+    f.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
+    false,
+  );
+  assert.deepEqual(f.calls, []);
+  await f.deliver([batch]);
+  await f.deliver([failed]);
+  assert.equal(
+    f.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
+    true,
+  );
+});
+test('refresh and changed technical messages do not repeat an acknowledged failure', async () => {
+  const f = fixture();
+  f.render();
+  const failed = {
+    ...batch,
+    state: 'paused',
+    items: [{ index: 0, state: 'failed', message: 'first log' }],
+  };
+  await f.deliver([failed]);
+  f.button('知道了').props.onPress();
+  await f.deliver([
+    {
+      ...failed,
+      updatedAt: 999,
+      items: [{ ...failed.items[0], message: 'another log' }],
+    },
+  ]);
+  assert.equal(
+    f.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
+    false,
+  );
+  const reopened = fixture([failed], false, false, [], f.storage);
+  reopened.render();
+  assert.equal(
+    reopened.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
+    false,
+  );
+  assert(reopened.button('检查账号后继续'));
+});
+test('historical failure at mount is quiet and failed or cancelled work never counts as success', () => {
+  const f = fixture([
+    {
+      ...batch,
+      state: 'paused',
+      items: [
+        { index: 0, state: 'failed' },
+        { index: 1, state: 'cancelled' },
+      ],
+    },
+  ]);
+  f.render();
+  const view = f.render();
+  assert.equal(view.nodes.find((n) => n.type === 'Modal').props.isOpen, false);
+  assert.equal(view.nodes.find((n) => n.type === 'Progress').props.value, 0);
 });
 test('automatic sequential progress advances locally without any new submit mutation', async () => {
   const f = fixture();
@@ -240,12 +358,16 @@ test('automatic sequential progress advances locally without any new submit muta
     ),
     false,
   );
-  assert.match(f.render().text, /处理结束/);
+  assert.equal(f.notifications.length, 1);
+  assert(!f.render().nodes.some((n) => n.type === 'Progress'));
 });
 test('reopened persisted progress reads all links without re-enqueueing', async () => {
   const f = fixture([batch]);
   await f.deliver([batch]);
-  assert.match(f.render().text, /本批 2 条/);
+  assert.match(
+    f.render().nodes.find((n) => n.type === 'Progress').props.label,
+    /共 2/,
+  );
   assert.deepEqual(f.calls, []);
 });
 test('blocked batch pauses automatic actions; explicit resume guards duplicate clicks', async () => {
@@ -254,7 +376,9 @@ test('blocked batch pauses automatic actions; explicit resume guards duplicate c
     state: 'paused',
     items: [{ ...batch.items[0], state: 'blocked' }, batch.items[1]],
   };
-  const f = fixture([paused]);
+  const f = fixture();
+  f.render();
+  await f.deliver([paused]);
   assert.equal(
     f.options.refetchInterval(
       { items: [paused] },
@@ -289,7 +413,10 @@ test('stop is explicit and uses saved batch identity, never a pasted URL', async
       items: [batch.items[0], { ...batch.items[1], state: 'cancelled' }],
     },
   ]);
-  assert.match(f.render().text, /已停止，未提交/);
+  assert.match(
+    f.render().nodes.find((n) => n.type === 'Progress').props.label,
+    /共 2/,
+  );
   assert.equal(
     f.options.refetchInterval(
       { items: [{ ...batch, state: 'stopped' }] },
@@ -329,7 +456,10 @@ test('local view failure retries only local views, without submitting again', as
 test('older accepted single tasks remain visible and finish using local reads only', async () => {
   const task = { taskId: 'a'.repeat(64), state: 'pending', phase: 'identity' };
   const f = fixture([task], false, true);
-  assert.match(f.render().text, /仍在处理/);
+  assert.match(
+    f.render().nodes.find((n) => n.type === 'Progress').props.label,
+    /处理中/,
+  );
   assert.equal(
     f.options.refetchInterval(
       { items: [task] },
@@ -363,7 +493,7 @@ test('source-preserved completion does not claim newly imported or fully ready c
       ],
     },
   ]);
-  assert.match(f.render().text, /已有订阅/);
+  assert(!f.render().nodes.some((n) => n.type === 'Progress'));
   assert(!f.render().text.includes('正文已确认完成'));
   assert(!f.render().text.includes('文章已同步'));
 });
@@ -393,5 +523,9 @@ test('completed batch metadata continues local polling and refreshes the real pu
     ),
     false,
   );
-  assert.equal(f.render().text, '');
+  assert(!f.render().nodes.some((n) => n.type === 'Progress'));
+  assert.equal(
+    f.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
+    false,
+  );
 });
