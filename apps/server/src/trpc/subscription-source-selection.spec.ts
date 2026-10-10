@@ -587,13 +587,122 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(await prisma.article.count()).toBe(0);
   });
 
+  it('one original submission establishes a delayed identity without a second user submission', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const original = request.getMockImplementation()!;
+    const originalTimeout = global.setTimeout;
+    jest
+      .spyOn(global, 'setTimeout')
+      .mockImplementation(((
+        handler: (...args: unknown[]) => void,
+        delay?: number,
+        ...args: unknown[]
+      ) =>
+        originalTimeout(
+          handler,
+          delay === 3000 || delay === 27000 ? 0 : delay,
+          ...args,
+        )) as typeof setTimeout);
+    let reads = 0;
+    request.mockImplementation(async (...args) => {
+      if (new URL(String(args[0])).pathname === '/list' && reads++ < 2) {
+        events.push('/list');
+        return new Response(
+          JSON.stringify({ err: '', data: [], meta: { total: 0 } }),
+        );
+      }
+      return original(...args);
+    });
+    const result = await setup().caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(result).toMatchObject({
+      accepted: true,
+      created: true,
+      feed: { id: feedId },
+      status: 'pending',
+      upstreamSubmitted: true,
+      sync: { articles: 0 },
+    });
+    expect(await prisma.feed.count()).toBe(1);
+    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+    expect(events.some((x) => x.startsWith('/add/'))).toBe(false);
+  });
+
+  it('stops an accepted identity wait on new account restrictions without another list or add', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const original = request.getMockImplementation()!;
+    const originalTimeout = global.setTimeout;
+    jest
+      .spyOn(global, 'setTimeout')
+      .mockImplementation(((
+        handler: (...args: unknown[]) => void,
+        delay?: number,
+        ...args: unknown[]
+      ) =>
+        originalTimeout(
+          handler,
+          delay === 3000 || delay === 27000 ? 0 : delay,
+          ...args,
+        )) as typeof setTimeout);
+    let accounts = 0;
+    request.mockImplementation(async (...args) => {
+      const path = new URL(String(args[0])).pathname;
+      if (path === '/login/list' && accounts++ > 0) {
+        events.push(path);
+        return new Response(
+          JSON.stringify({
+            err: '',
+            data: [{ available: true, needCheck: true }],
+          }),
+        );
+      }
+      if (path === '/list') {
+        events.push(path);
+        return new Response(
+          JSON.stringify({ err: '', data: [], meta: { total: 0 } }),
+        );
+      }
+      return original(...args);
+    });
+    const result = await setup().caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(result).toMatchObject({
+      status: 'blocked',
+      accepted: true,
+      created: false,
+      feed: null,
+      upstreamSubmitted: true,
+      code: 'ACCOUNT_UNAVAILABLE_DURING_IDENTITY_CHECK',
+    });
+    expect(await prisma.feed.count()).toBe(0);
+    expect(events.filter((x) => x === '/list')).toHaveLength(1);
+    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+  });
+
   it('accepted identity pending resumes /list without replaying /addurl', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     const original = request.getMockImplementation()!;
-    let reads = 0;
+    let phase = 0;
+    const originalTimeout = global.setTimeout;
+    jest
+      .spyOn(global, 'setTimeout')
+      .mockImplementation(((
+        handler: (...args: unknown[]) => void,
+        delay?: number,
+        ...args: unknown[]
+      ) =>
+        originalTimeout(
+          handler,
+          delay === 3000 || delay === 27000 ? 0 : delay,
+          ...args,
+        )) as typeof setTimeout);
     request.mockImplementation(async (...args) => {
       if (new URL(String(args[0])).pathname === '/list') {
-        const current = reads++;
+        const current = phase;
         if (current < 2)
           return new Response(
             JSON.stringify({
@@ -625,9 +734,10 @@ describe('explicit add source through original router (offline SQLite)', () => {
       feed: null,
       code: 'SUBSCRIPTION_ID_PENDING',
       message:
-        '上游已返回订阅地址，但本次列表核对未获得完整公众号身份（含名称），本地订阅尚未建立；稍后提交同一链接仅核对状态，不重复新增。',
+        '上游已返回订阅地址，但本次限时身份核对仍未获得完整公众号记录，本地订阅尚未建立；链接已保留，稍后提交同一链接仅核对状态，不重复新增。',
     });
     expect(await prisma.feed.count()).toBe(0);
+    phase++;
     expect(
       await setup().caller.feed.addFromArticle({
         articleUrl,
@@ -638,10 +748,11 @@ describe('explicit add source through original router (offline SQLite)', () => {
       feed: null,
       code: 'SUBSCRIPTION_ID_PENDING',
       message:
-        '上游已返回订阅地址，但本次列表核对未获得完整公众号身份（含名称），本地订阅尚未建立；稍后提交同一链接仅核对状态，不重复新增。',
+        '上游已返回订阅地址，但本次限时身份核对仍未获得完整公众号记录，本地订阅尚未建立；链接已保留，稍后提交同一链接仅核对状态，不重复新增。',
       upstreamSubmitted: false,
     });
     expect(await prisma.feed.count()).toBe(0);
+    phase++;
     expect(
       await setup().caller.feed.addFromArticle({
         articleUrl,

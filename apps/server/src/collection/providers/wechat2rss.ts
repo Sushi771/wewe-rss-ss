@@ -3,6 +3,8 @@ import { parseWechat2RssJsonFeed } from '../provider-article';
 import { ProviderPage, SubscriptionProvider } from '../subscription-provider';
 
 type ListedFeed = { id: number | string; name: string; link: string };
+type IdentityRead = { deadline: number; remainingListRequests: number };
+const IDENTITY_CHECK_EXPIRED = 'WECHAT2RSS_IDENTITY_CHECK_EXPIRED';
 
 function privateHost(hostname: string): boolean {
   if (
@@ -50,15 +52,19 @@ export class Wechat2RssProvider implements SubscriptionProvider {
   private async get(
     path: string,
     params: Record<string, string> = {},
+    deadline?: number,
   ): Promise<unknown> {
     const url = new URL(path, this.base);
     for (const [key, value] of Object.entries(params))
       url.searchParams.set(key, value);
     url.searchParams.set('k', this.token);
+    const remaining = deadline === undefined ? 10000 : deadline - Date.now();
+    if (remaining <= 0) throw new Error(IDENTITY_CHECK_EXPIRED);
+    const signal = AbortSignal.timeout(Math.min(10000, remaining));
     try {
       const response = await fetch(url, {
         redirect: 'manual',
-        signal: AbortSignal.timeout(10000),
+        signal,
       });
       if (response.status !== 200 || !response.body)
         throw new Error('HTTP_STATUS');
@@ -76,8 +82,12 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         }
         parts.push(bytes);
       }
+      if (deadline !== undefined && Date.now() >= deadline)
+        throw new Error(IDENTITY_CHECK_EXPIRED);
       return JSON.parse(Buffer.concat(parts).toString('utf8'));
     } catch {
+      if (deadline !== undefined && (Date.now() >= deadline || signal.aborted))
+        throw new Error(IDENTITY_CHECK_EXPIRED);
       throw new Error('WECHAT2RSS_REQUEST_FAILED');
     }
   }
@@ -93,12 +103,21 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return raw as Record<string, unknown>;
   }
 
-  async listSubscriptions() {
+  async listSubscriptions(read?: IdentityRead) {
     const feeds: Array<{ feedId: string; name: string; feedUrl: string }> = [];
     let total: number | null = null;
     for (let page = 1; page <= 20; page++) {
+      if (
+        read &&
+        (Date.now() >= read.deadline || read.remainingListRequests-- <= 0)
+      )
+        throw new Error(IDENTITY_CHECK_EXPIRED);
       const raw = this.envelope(
-        await this.get('/list', { page: String(page), size: '50' }),
+        await this.get(
+          '/list',
+          { page: String(page), size: '50' },
+          read?.deadline,
+        ),
       );
       if (
         !Array.isArray(raw.data) ||
@@ -141,8 +160,8 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return feeds;
   }
 
-  async checkAccountStatus() {
-    const raw = this.envelope(await this.get('/login/list'));
+  async checkAccountStatus(deadline?: number) {
+    const raw = this.envelope(await this.get('/login/list', {}, deadline));
     if (!Array.isArray(raw.data))
       throw new Error('WECHAT2RSS_LOGIN_LIST_INVALID');
     const accounts = raw.data as Array<Record<string, unknown>>;
@@ -185,10 +204,10 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return accepted.pathname;
   }
 
-  async resolveAcceptedSubscription(feedPath: string) {
+  async resolveAcceptedSubscription(feedPath: string, read?: IdentityRead) {
     if (!/^\/feed\/[A-Za-z0-9_-]+\.(xml|json)$/.test(feedPath))
       throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
-    const matches = (await this.listSubscriptions()).filter(
+    const matches = (await this.listSubscriptions(read)).filter(
       (v) =>
         v.feedUrl.replace(/\.json$/, '.xml') ===
         feedPath.replace(/\.json$/, '.xml'),
@@ -203,6 +222,41 @@ export class Wechat2RssProvider implements SubscriptionProvider {
       name: matches[0].name,
       accepted: true as const,
     };
+  }
+
+  /** One foreground add: up to three list checks, six paginated GETs and 35s total.
+   * No /addurl replay, detached timer or background polling. */
+  async waitForAcceptedSubscription(feedPath: string) {
+    const read: IdentityRead = {
+      deadline: Date.now() + 35000,
+      remainingListRequests: 6,
+    };
+    try {
+      for (const delay of [0, 3000, 27000]) {
+        if (delay) {
+          if (
+            read.remainingListRequests <= 0 ||
+            Date.now() + delay >= read.deadline
+          )
+            return null;
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+          const account = await this.checkAccountStatus(read.deadline);
+          if (!account.available)
+            throw new Error(
+              account.challenged
+                ? 'WECHAT2RSS_ACCOUNT_CHALLENGED'
+                : 'WECHAT2RSS_ACCOUNT_UNAVAILABLE',
+            );
+        }
+        const accepted = await this.resolveAcceptedSubscription(feedPath, read);
+        if (accepted) return accepted;
+      }
+      return null;
+    } catch (error) {
+      if (error instanceof Error && error.message === IDENTITY_CHECK_EXPIRED)
+        return null;
+      throw error;
+    }
   }
 
   async addSubscription(articleUrl: string) {

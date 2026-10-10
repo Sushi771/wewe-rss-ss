@@ -725,6 +725,7 @@ export class TrpcService {
       });
     this.activeSubscriptionAdds.add(addKey);
     let upstreamSubmitted = false;
+    let upstreamAccepted = false;
     try {
       const provider = wechat2RssProvider();
       let knownId: string | undefined;
@@ -798,7 +799,8 @@ export class TrpcService {
         feedPath = await provider.acceptSubscription(url);
         await journal.accepted(feedPath);
       }
-      const accepted = await provider.resolveAcceptedSubscription(feedPath);
+      upstreamAccepted = true;
+      const accepted = await provider.waitForAcceptedSubscription(feedPath);
       if (!accepted)
         return {
           requestedSource: 'wechat2rss' as const,
@@ -812,7 +814,7 @@ export class TrpcService {
           sync: null,
           code: 'SUBSCRIPTION_ID_PENDING',
           message:
-            '上游已返回订阅地址，但本次列表核对未获得完整公众号身份（含名称），本地订阅尚未建立；稍后提交同一链接仅核对状态，不重复新增。',
+            '上游已返回订阅地址，但本次限时身份核对仍未获得完整公众号记录，本地订阅尚未建立；链接已保留，稍后提交同一链接仅核对状态，不重复新增。',
         };
       const old = await this.prismaService.feed.findUnique({
         where: { id: accepted.feedId },
@@ -840,19 +842,28 @@ export class TrpcService {
       );
     } catch (error) {
       if (error instanceof TRPCError) throw error;
+      const blocked =
+        error instanceof Error &&
+        [
+          'WECHAT2RSS_ACCOUNT_CHALLENGED',
+          'WECHAT2RSS_ACCOUNT_UNAVAILABLE',
+        ].includes(error.message);
       return {
         requestedSource: 'wechat2rss' as const,
         sourceBindingChanged: false,
-        status: 'failed' as const,
-        accepted: false,
+        status: blocked ? ('blocked' as const) : ('failed' as const),
+        accepted: upstreamAccepted,
         pending: true,
         created: false,
         feed: null,
         upstreamSubmitted,
         sync: null,
-        code: 'ADD_FAILED',
-        message:
-          '新增未完成，请核对私有实例状态；链接已保留，不自动切换来源或重发上游请求。',
+        code: blocked
+          ? 'ACCOUNT_UNAVAILABLE_DURING_IDENTITY_CHECK'
+          : 'ADD_FAILED',
+        message: blocked
+          ? '私有实例账号不可用或受限，身份核对已停止；链接及已返回的订阅地址保留，不自动重发新增。'
+          : '新增未完成，请核对私有实例状态；链接已保留，不自动切换来源或重发上游请求。',
       };
     } finally {
       this.activeSubscriptionAdds.delete(addKey);
