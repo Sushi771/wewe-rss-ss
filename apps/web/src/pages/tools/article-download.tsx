@@ -13,6 +13,7 @@ import {
   verificationFromDownloadError,
 } from '@web/utils/article-download-error';
 import ArticleVerificationNotice from './article-verification-notice';
+import { toast } from 'sonner';
 
 type Settings = { directory: string; askEveryTime: boolean };
 type SavedArticle = {
@@ -314,6 +315,7 @@ export default function ArticleDownload() {
     } catch (cause) {
       if (!controller.signal.aborted) {
         setError(cause instanceof Error ? cause.message : '保存失败。');
+        toast.error('操作未完成，请重试或查看任务状态。');
         if (cause instanceof ArticleDownloadRequestError)
           setVerification(cause.verification);
       }
@@ -465,9 +467,6 @@ export default function ArticleDownload() {
     <div className="px-5 py-5 sm:px-8">
       <div className="mx-auto max-w-2xl">
         <h1 className="text-xl font-semibold">公众号文章下载</h1>
-        <p className="text-default-500 mt-1 text-sm">
-          通过 Wechat2RSS 下载；需要时会订阅该公众号。
-        </p>
         <form onSubmit={download} className="mt-4 space-y-3" aria-busy={busy}>
           <Input
             label="文章链接"
@@ -590,7 +589,27 @@ export default function ArticleDownload() {
             className="border-divider mt-3 rounded-lg border p-3 text-sm"
             aria-live="polite"
           >
-            <p role="status">{singleTask.message}</p>
+            <p
+              role={
+                ['blocked', 'failed'].includes(singleTask.state)
+                  ? 'alert'
+                  : 'status'
+              }
+            >
+              {
+                {
+                  waiting: '下载等待中',
+                  saving: '正在保存',
+                  saved:
+                    singleTask.mediaComplete === false
+                      ? '已保存；媒体完整性未确认'
+                      : '已保存',
+                  blocked: '下载已暂停',
+                  failed: '下载未完成',
+                  cancelled: '下载已取消',
+                }[singleTask.state]
+              }
+            </p>
             {singleTask.state === 'waiting' && (
               <>
                 <p className="text-default-500 mt-1 text-xs">
@@ -688,7 +707,7 @@ export default function ArticleDownload() {
                         保存到原任务目录：{candidates.destination}
                       </p>
                       {candidates.articles.length === 0 && (
-                        <p>当前没有可核验的完整缓存；服务不保证历史文章。</p>
+                        <p>暂无可选文章。</p>
                       )}
                       {candidates.articles.map((a) => (
                         <Button
@@ -753,26 +772,16 @@ export default function ArticleDownload() {
                 }[browserTask.state]
               }
             </p>
-            {['waiting', 'claimed'].includes(browserTask.state) && (
-              <>
-                <p className="mt-2 break-all text-xs">
-                  任务编号：{browserTask.taskId}
-                </p>
-                <p className="text-default-500 mt-2 text-sm">
-                  此任务不会访问原文或恢复订阅；请仅在已经打开的对应官方文章页操作。
-                </p>
-              </>
-            )}
             {browserTask.code === 'SAVE_RETRY_REQUIRED' && (
               <p className="mt-2 text-sm">
                 {browserTask.destinationBound
-                  ? '上次本机保存未完成，请核对本次固定目录后重试。若需更改目录，请取消本次任务，重新确认目录并取得新的接收许可后创建任务。'
-                  : '上次本机保存未完成，可重新选择路径后保存；不会重新取文。'}
+                  ? '保存未完成，可重试；更换目录请先取消任务。'
+                  : '保存未完成，可重新选择路径后保存。'}
               </p>
             )}
             {browserTask.code === 'SAVE_DIRECTORY_CHANGED' && (
               <p className="mt-2 text-sm">
-                保存目录已改变，本次任务不能写入新目录。请取消任务，重新确认目录并取得新的接收许可后创建任务。
+                保存目录已改变，请取消后重新创建任务。
               </p>
             )}
             {browserTask.state === 'ready' && (
@@ -838,12 +847,12 @@ export default function ArticleDownload() {
         >
           {busy && (
             <p role="status" className="text-default-500 text-sm">
-              请完成可能弹出的目录选择；正在处理本机操作。
+              正在处理…
             </p>
           )}
           {singleStatusError && (
             <div role="alert" className="mt-3 text-sm">
-              <p>下载状态读取失败，当前显示可能已过期：{singleStatusError}</p>
+              <p>状态读取失败，当前显示可能已过期。</p>
               <Button
                 size="sm"
                 className="mt-2"
@@ -863,7 +872,7 @@ export default function ArticleDownload() {
               role="alert"
               className="bg-danger-50 text-danger rounded-xl p-4 text-sm"
             >
-              {error}
+              操作未完成，请重试或查看任务状态。
             </p>
           )}
           {error && verification && (
@@ -873,7 +882,7 @@ export default function ArticleDownload() {
             <div className="border-success-200 bg-success-50 rounded-lg border p-3">
               <p role="status" className="font-medium">
                 {saved.alreadySaved
-                  ? '今天已保存，未覆盖已有笔记'
+                  ? '已保存，保留已有笔记'
                   : saved.mediaComplete === false
                     ? '正文和有效图片已保存；媒体完整性未确认'
                     : '正文和图片已保存到本机'}
@@ -884,30 +893,9 @@ export default function ArticleDownload() {
               <p className="text-default-600 mt-2 break-all text-sm">
                 {saved.markdownPath}
               </p>
-              <p className="text-default-600 mt-2 text-sm">
-                可直接用 Obsidian 打开；图片保存在文章目录内。
-              </p>
             </div>
           )}
         </div>
-        <details className="text-default-500 mt-3 text-sm">
-          <summary className="cursor-pointer">使用帮助</summary>
-          <div className="space-y-2 pt-2 text-xs leading-5">
-            <p>
-              直接粘贴公众号文章链接，由后台核对 Wechat2RSS 中的文章。
-              若服务没有该链接对应的正文，会显示具体原因。
-            </p>
-            <p>
-              正文和图片保存为 Markdown 及本地资源，按下载日期和文章分目录。
-              重复下载保留已有笔记，已编辑内容不会被覆盖。
-            </p>
-            <p>
-              公众号未订阅、文章不在当前缓存或正文和媒体不完整时会显示原因。
-              必要时会通过 Wechat2RSS 订阅该公众号并等待更新，不需要另点订阅。
-              服务不保证取得所有历史文章；无法精确核验目标时不会保存其他文章。
-            </p>
-          </div>
-        </details>
       </div>
     </div>
   );

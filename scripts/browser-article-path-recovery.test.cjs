@@ -65,6 +65,7 @@ function page({
   ];
   const refs = [],
     calls = [],
+    notifications = [],
     callbacks = [],
     effectSlots = [],
     pendingEffects = new Map(),
@@ -115,6 +116,7 @@ function page({
   });
   const jsx = (type, props) => ({ type, props });
   const modules = {
+    sonner: { toast: { error: (message) => notifications.push(message) } },
     react: hooks,
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@nextui-org/react': {
@@ -229,6 +231,7 @@ function page({
   return {
     state,
     calls,
+    notifications,
     render,
     button,
     runEffects: () => {
@@ -855,12 +858,20 @@ test('ordinary single download shows Wechat2RSS-only cache errors without select
   h.runEffects();
   await flush();
   assert.equal(h.state[7], false);
-  assert.ok(JSON.stringify(h.render()).includes('需要时会订阅该公众号'));
+  assert.ok(!JSON.stringify(h.render()).includes('需要时会订阅该公众号'));
   h.render()
     .find((n) => n.type === 'form')
     .props.onSubmit({ preventDefault() {} });
   await flush();
   assert.ok(h.state[3].includes('Wechat2RSS缓存'));
+  assert.deepEqual(h.notifications, ['操作未完成，请重试或查看任务状态。']);
+  h.runEffects();
+  await flush();
+  assert.equal(
+    h.notifications.length,
+    1,
+    'status reads do not repeat operation popups',
+  );
   assert.equal(h.state[6], null);
   const posted = h.calls.filter((c) => c.method === 'POST');
   assert.equal(posted.length, 1);
@@ -927,12 +938,14 @@ test('ordinary short links reach the single backend without manual long-link ext
   assert.equal(h.state[6].contentSource, 'wechat2rss-cache');
 });
 
-test('path preferences and detailed help remain collapsed without changing remembered settings', () => {
+test('path preferences remain collapsed and long help is absent without changing remembered settings', () => {
   const settings = { directory: 'synthetic-old-path', askEveryTime: true };
   const h = page({ taskPresent: false, settings });
   const nodes = h.render();
   const details = nodes.filter((n) => n.type === 'details');
-  assert.equal(details.length, 2);
+  assert.equal(details.length, 1);
+  assert.ok(!JSON.stringify(nodes).includes('使用帮助'));
+  assert.ok(!JSON.stringify(nodes).includes('按下载日期'));
   assert.ok(details.every((n) => !n.props.open));
   const preferences = details.find((n) =>
     JSON.stringify(n).includes('每次下载询问路径'),

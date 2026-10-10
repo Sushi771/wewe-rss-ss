@@ -182,23 +182,13 @@ test('short reading status preserves failure, paused and partial meanings', () =
   );
   assert(notice);
 });
-test('stock counts and date qualifications are folded while body incompleteness remains in the summary', () => {
-  const stock = list.classNode('feed-stock-details');
-  assert(stock);
-  assert(!list.attr(stock, 'open'));
-  assert.match(stock.getText(list.ast), /oldestPublishTime/);
-  assert.match(stock.getText(list.ast), /cachedBodies/);
-  const summary = list.elements.find(
-    (n) =>
-      list.opening(n).tagName.getText(list.ast) === 'summary' &&
-      within(n, stock),
-  );
-  assert(summary);
-  assert.match(summary.getText(list.ast), /部分正文未缓存/);
+test('stock detail panel is removed while a simple article count and per-article cache status remain', () => {
+  assert(!list.classNode('feed-stock-details'));
   assert.match(
-    summary.getText(list.ast),
-    /cachedBodies < summary.data.articles/,
+    list.classNode('compact-col-title').getText(list.ast),
+    /summary.data.articles/,
   );
+  assert(list.text.includes('正文未缓存'));
 });
 test('Wechat2RSS or mixed view hides metric CSV without removing existing-file import', () => {
   const local = feeds.elements.find(

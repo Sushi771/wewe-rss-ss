@@ -2,6 +2,7 @@ import { Button, Checkbox, Input } from '@nextui-org/react';
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
+import { toast } from 'sonner';
 
 type Settings = { directory: string; askEveryTime: boolean };
 type Capability = {
@@ -90,6 +91,7 @@ export default function XiaohongshuDownload() {
     try {
       await action(controller.signal);
     } catch (cause) {
+      if (!controller.signal.aborted) toast.error('操作未完成，请重试。');
       if (!controller.signal.aborted)
         setError(cause instanceof Error ? cause.message : '操作失败。');
     } finally {
@@ -150,23 +152,17 @@ export default function XiaohongshuDownload() {
         <h1 className="text-2xl font-semibold tracking-tight">
           小红书单篇下载
         </h1>
-        <p className="text-default-500 mt-3 text-sm leading-6">
-          粘贴一篇公开笔记链接，将核验后的完整正文和图片保存到本地 Obsidian
-          文件夹，无需订阅博主。
-        </p>
         <div
           className="bg-default-50 mt-5 rounded-xl p-4 text-sm"
           role="status"
         >
-          {capability?.message ||
-            (initialLoading
-              ? '正在读取单篇取文能力。'
-              : '单篇取文能力未能读取，请重新读取。')}
-          <p className="text-default-500 mt-2">
-            {capability?.videoAvailable
-              ? '视频缓存另核字节和容器结构；真实完整性与可播放性仍须来源验收。'
-              : '真实视频来源未接入；短链接解析尚未接入。'}
-          </p>
+          {capability
+            ? capability.available
+              ? '可以下载'
+              : '暂不可下载'
+            : initialLoading
+              ? '正在读取设置…'
+              : '设置读取失败，请重新读取。'}
         </div>
         <form onSubmit={download} className="mt-8 space-y-5" aria-busy={busy}>
           <Input
@@ -185,7 +181,6 @@ export default function XiaohongshuDownload() {
             isDisabled={busy}
             isRequired
             autoComplete="off"
-            description="支持公开笔记长链接，保存前会核验正文和图片。"
           />
           <div className="bg-default-50 rounded-xl p-4">
             <p className="mb-2 text-sm font-medium">保存路径</p>
@@ -257,7 +252,7 @@ export default function XiaohongshuDownload() {
         <div className="mt-6" aria-live="polite">
           {busy && (
             <p role="status" className="text-default-500 text-sm">
-              请在本机完成可能出现的目录选择窗口。
+              正在处理…
             </p>
           )}
           {notice && (
@@ -270,7 +265,7 @@ export default function XiaohongshuDownload() {
               role="alert"
               className="bg-danger-50 text-danger rounded-xl p-4 text-sm"
             >
-              {error}
+              操作未完成，请重试。
             </p>
           )}
           {saved && (
@@ -285,24 +280,9 @@ export default function XiaohongshuDownload() {
               <p className="text-default-600 mt-2 break-all text-sm">
                 {saved.markdownPath}
               </p>
-              <p className="text-default-600 mt-2 text-sm">
-                {saved.imageCount} 张图片位于同篇目录的
-                image/，可直接打开正文.md。
-              </p>
-              {!!saved.videoCount && (
-                <p className="text-default-600 mt-2 text-sm">
-                  {saved.videoCount} 个视频文件位于同篇 video/，正文含相对链接。
-                  本次已核字节与容器结构，未核解码可播放性。
-                </p>
-              )}
             </div>
           )}
         </div>
-        <p className="text-default-500 mt-8 text-xs leading-6">
-          与公众号单篇工具共用本地目录设置。按下载当天分目录，每篇保存正文.md 与
-          image/；不会新增博主订阅。
-          只有身份、发表时间、全文和全部图片字节通过核验才保存；失败后不会自动重试。
-        </p>
       </div>
     </div>
   );

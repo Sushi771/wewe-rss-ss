@@ -99,7 +99,9 @@ function downloadFixture() {
             ? { getAuthCode: () => '' }
             : name === '@web/utils/env'
               ? { serverOriginUrl: '' }
-              : {};
+              : name === 'sonner'
+                ? { toast: { error() {} } }
+                : {};
   const fetchMock = async (endpoint) => {
     if (!retry) throw Error('local service unavailable');
     return {
@@ -143,9 +145,9 @@ test('download initial failure ends loading text and offers a working local retr
   fixture.start();
   await new Promise((resolve) => setImmediate(resolve));
   let nodes = fixture.all(fixture.render());
-  assert.ok(nodes.includes('单篇取文能力未能读取，请重新读取。'));
+  assert.ok(nodes.includes('设置读取失败，请重新读取。'));
   assert.ok(nodes.includes('本地保存设置未能读取，请重新读取。'));
-  assert.ok(!nodes.includes('正在读取单篇取文能力。'));
+  assert.ok(!nodes.includes('正在读取设置…'));
   const retry = nodes.find(
     (node) =>
       node.type === 'Button' &&
@@ -156,7 +158,7 @@ test('download initial failure ends loading text and offers a working local retr
   retry.props.onPress();
   await new Promise((resolve) => setImmediate(resolve));
   nodes = fixture.all(fixture.render());
-  assert.ok(nodes.includes('来源尚未配置'));
+  assert.ok(nodes.includes('暂不可下载'));
   assert.ok(nodes.includes('fixture-only'));
   assert.ok(!nodes.includes('本地保存设置未能读取，请重新读取。'));
 });

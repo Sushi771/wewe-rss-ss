@@ -47,17 +47,12 @@ const ArticleList: FC<ArticleListProps> = ({
   const retryBody = async (articleId: string, title: string) => {
     try {
       const result = await bodyRetry.mutateAsync(articleId);
-      if (result.status === 'available')
-        toast.success(`${title}：${result.message}`);
+      if (result.status === 'available') toast.success(`${title}：正文可用`);
       else if (result.status === 'failed')
-        toast.error(`${title}：${result.message}`);
-      else toast.warning(`${title}：${result.message}`);
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : '正文重试失败，请重新读取文章状态。',
-      );
+        toast.error(`${title}：正文重试失败`);
+      else toast.warning(`${title}：正文暂不可用`);
+    } catch {
+      toast.error('正文重试失败，请稍后重试。');
     } finally {
       await Promise.all([
         queryUtils.article.list.invalidate(),
@@ -80,25 +75,18 @@ const ArticleList: FC<ArticleListProps> = ({
     onSelectionChange(new Set());
   }, [mpId, search, onSelectionChange]);
 
-  const {
-    data,
-    fetchNextPage,
-    isLoading,
-    hasNextPage,
-    isError,
-    error,
-    refetch,
-  } = trpc.article.list.useInfiniteQuery(
-    {
-      limit: 20,
-      mpId: mpId,
-      search: search || undefined,
-      sort: collectionChannels[mpId] === 'wechat2rss' ? 'publishTime' : sort,
-    },
-    {
-      getNextPageParam: (lastPage) => lastPage.nextCursor,
-    },
-  );
+  const { data, fetchNextPage, isLoading, hasNextPage, isError, refetch } =
+    trpc.article.list.useInfiniteQuery(
+      {
+        limit: 20,
+        mpId: mpId,
+        search: search || undefined,
+        sort: collectionChannels[mpId] === 'wechat2rss' ? 'publishTime' : sort,
+      },
+      {
+        getNextPageParam: (lastPage) => lastPage.nextCursor,
+      },
+    );
 
   const items = useMemo(() => {
     return data?.pages.flatMap((page) => page.items) || [];
@@ -165,57 +153,9 @@ const ArticleList: FC<ArticleListProps> = ({
           )}
         </label>
       )}
-      <details className="feed-stock-details shrink-0 px-3 py-1 text-xs">
-        <summary className="cursor-pointer text-neutral-500">
-          存量详情
-          {summary.data &&
-            summary.data.cachedBodies < summary.data.articles && (
-              <span
-                role="status"
-                className="text-amber-700 dark:text-amber-300"
-              >
-                {' '}
-                · 部分正文未缓存
-              </span>
-            )}
-        </summary>
-        <div className="text-default-500 px-3 pb-2 text-xs" aria-live="polite">
-          {summary.data ? (
-            <>
-              当前{search ? '筛选' : '订阅'}存量 {summary.data.articles} 篇；
-              {!hasWechat2Rss && (
-                <>
-                  阅读已获取 {summary.data.readAvailable} 篇，点赞已获取{' '}
-                  {summary.data.likeAvailable} 篇，
-                </>
-              )}
-              已缓存正文 {summary.data.cachedBodies} 篇。
-              {summary.data.oldestPublishTime &&
-              summary.data.newestPublishTime ? (
-                <>
-                  {' '}
-                  库内记录的发布时间范围：
-                  {dayjs(summary.data.oldestPublishTime * 1e3).format(
-                    'YYYY-MM-DD',
-                  )}{' '}
-                  至{' '}
-                  {dayjs(summary.data.newestPublishTime * 1e3).format(
-                    'YYYY-MM-DD',
-                  )}
-                  ，不代表期间无遗漏；存量日期尚需与原文核对。
-                </>
-              ) : null}
-            </>
-          ) : summary.isError ? (
-            '存量信息读取失败。'
-          ) : (
-            '正在读取存量信息…'
-          )}
-        </div>
-      </details>
       {isError && (
         <div role="alert" className="px-3 py-2 text-sm text-red-600">
-          文章列表读取失败：{error.message}。
+          文章列表读取失败，请重试。
           {items.length ? '下方为此前已读取的存量。' : ''}
           <Button size="sm" variant="light" onPress={() => refetch()}>
             重试
@@ -233,7 +173,7 @@ const ArticleList: FC<ArticleListProps> = ({
               />
             </div>
             <div className="compact-col-title min-w-0 whitespace-nowrap">
-              文章标题
+              文章标题{summary.data && ` · ${summary.data.articles} 篇`}
             </div>
             <div className="compact-col-metadata !hidden md:!flex">信息</div>
           </div>
@@ -307,7 +247,7 @@ const ArticleList: FC<ArticleListProps> = ({
                 </div>
                 {!item.bodyCached && !item.bodyRetry.allowed && (
                   <span className="text-left text-xs md:text-right">
-                    {item.bodyRetry.reason}
+                    正文暂不可重试
                   </span>
                 )}
                 {item.bodyRetryResult && (

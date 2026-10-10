@@ -228,7 +228,10 @@ const png = Buffer.from(
     await offline.close();
     await fs.writeFile(path.join(article, '正文.md'), '用户自己的笔记');
     await action.click();
-    await page.getByRole('status').filter({ hasText: '今天已保存' }).waitFor();
+    await page
+      .getByRole('status')
+      .filter({ hasText: '已保存，保留已有笔记' })
+      .waitFor();
     assert.equal(
       await fs.readFile(path.join(article, '正文.md'), 'utf8'),
       '用户自己的笔记',
