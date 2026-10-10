@@ -105,6 +105,8 @@ describe('durable single download consumer; synthetic queue and real temporary f
       return {
         articleId: 'WX_1234567890_2247000001_1',
         title: '合成正文',
+        sourceUrl:
+          'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef',
         imageCount: 0,
         source: 'wechat2rss' as const,
       };
@@ -377,23 +379,26 @@ describe('durable single download consumer; synthetic queue and real temporary f
     expect(save).not.toHaveBeenCalled();
     expect(await readdir(directory)).toEqual([]);
   });
-  it('risk blocks download and explicit resume checks the same accepted batch', async () => {
+  it('paused collection is separate from existing cache and explicit resume checks the same receipt without resuming collection', async () => {
     const task = await manager.enqueue(url, owner, directory);
     item.state = 'blocked';
     batchState = 'paused';
+    prepare.mockRejectedValueOnce(missing());
     await manager.runDue();
     expect(await manager.get(task.taskId, owner)).toMatchObject({
-      state: 'blocked',
+      state: 'failed',
+      feedId: item.feedId,
+      batchState: 'paused',
     });
-    expect(prepare).not.toHaveBeenCalled();
+    expect(prepare).toHaveBeenCalledTimes(1);
     await manager.resume(task.taskId, owner);
-    expect(queue.resumeSubscriptionBatch).toHaveBeenCalledWith(batchId);
-    item.state = 'succeeded';
+    expect(queue.resumeSubscriptionBatch).not.toHaveBeenCalled();
     await manager.runDue();
     expect(await manager.get(task.taskId, owner)).toMatchObject({
       state: 'saved',
     });
     expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
+    expect(batchState).toBe('paused');
   });
   it('cancel before processing never enqueues a subscription or publishes files', async () => {
     const task = await manager.enqueue(url, owner, directory);
@@ -405,7 +410,7 @@ describe('durable single download consumer; synthetic queue and real temporary f
       state: 'cancelled',
     });
   });
-  it('snapshots private intent and explicit continuation of a stopped batch uses the guarded entry', async () => {
+  it('snapshots private intent and continuing a stopped batch reads cache without re-entering submission', async () => {
     const task = await manager.enqueue(url, owner, directory);
     await manager.runDue();
     const backup = join(root, 'backup', 'database.sqlite');
@@ -434,17 +439,164 @@ describe('durable single download consumer; synthetic queue and real temporary f
         'utf8',
       ),
     );
-    expect(raw.batchId).toBeUndefined();
-    queue.addSingleDownloadBatch.mockImplementationOnce(async () => {
-      batchState = 'running';
-      return { batchId, items: [item], state: batchState };
-    });
+    expect(raw.batchId).toBe(batchId);
     await manager.runDue();
-    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(2);
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
     expect(await manager.get(task.taskId, owner)).toMatchObject({
-      state: 'waiting',
+      state: 'saved',
     });
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(queue.resumeSubscriptionBatch).not.toHaveBeenCalled();
+    expect(batchState).toBe('stopped');
+  });
+
+  it('an old blocked job exposes same-receipt candidates even when the collection batch is stopped, and chosen cache saves after restart', async () => {
+    const task = await manager.enqueue(url, owner, directory);
+    await manager.runDue();
+    const file = join(
+      root,
+      '.wechat2rss-single-downloads',
+      task.taskId + '.json',
+    );
+    const raw = JSON.parse(await readFile(file, 'utf8'));
+    raw.state = 'blocked';
+    await writeFile(file, JSON.stringify(raw));
+    item.state = 'blocked';
+    batchState = 'stopped';
+    const result = await manager.get(task.taskId, owner);
+    expect(result).toMatchObject({
+      state: 'blocked',
+      feedId: item.feedId,
+      batchState: 'stopped',
+    });
+    const options = await manager.candidates(task.taskId, owner);
+    await manager.select(task.taskId, owner, options.articles[0].articleId);
+    manager.close();
+    manager = make();
+    await manager.runDue();
+    expect(await manager.get(task.taskId, owner)).toMatchObject({
+      state: 'saved',
+      destination: directory,
+    });
+    expect(prepare).toHaveBeenCalledWith(
+      (await readCandidates(item.feedId!))[0].url,
+      item.feedId,
+    );
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
+    expect(queue.resumeSubscriptionBatch).not.toHaveBeenCalled();
+    expect(batchState).toBe('stopped');
+  });
+
+  it('failed job resume reads the latest same-batch revision after upstream has already completed, retaining its native directory', async () => {
+    const task = await manager.enqueue(url, owner, directory);
+    item.state = 'blocked';
+    batchState = 'paused';
+    prepare.mockRejectedValueOnce(missing());
+    await manager.runDue();
+    item.state = 'succeeded';
+    item.bodyReady = true;
+    batchState = 'completed';
+    queue.subscriptionBatchList.mockImplementation(async () => [
+      { batchId, items: [item], state: batchState, updatedAt: time + 1000 },
+    ]);
+    await manager.resume(task.taskId, owner);
+    manager.close();
+    manager = make();
+    await manager.runDue();
+    expect(await manager.get(task.taskId, owner)).toMatchObject({
+      state: 'saved',
+      batchState: 'completed',
+      batchUpdatedAt: time + 1000,
+      destination: directory,
+    });
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
+    expect(queue.resumeSubscriptionBatch).not.toHaveBeenCalled();
+  });
+
+  it('stopped receipt with missing exact long-URL body stops after one cache check instead of waiting or resubmitting', async () => {
+    const long = (await readCandidates(item.feedId!))[0].url;
+    item.articleUrlHash = createHash('sha256').update(long).digest('hex');
+    item.state = 'blocked';
+    batchState = 'stopped';
+    prepare.mockRejectedValue(
+      new ArticleDownloadError('未缓存', 409, {
+        code: 'WECHAT2RSS_SINGLE_CACHE_MISS',
+      }),
+    );
+    const task = await manager.enqueue(long, owner, directory);
+    await manager.runDue();
+    expect(await manager.get(task.taskId, owner)).toMatchObject({
+      state: 'blocked',
+      code: 'WECHAT2RSS_SINGLE_CACHE_MISS',
+    });
+    time += 30000;
+    await manager.runDue();
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it('new publisher-level title Markdown results survive restart while unrelated-directory or root-escaping results remain invalid', async () => {
+    item.state = 'succeeded';
+    const target = join(directory, '可信分组', '可信公众号');
+    save.mockImplementationOnce(async () => {
+      await mkdir(target, { recursive: true });
+      const markdownPath = join(target, '合成正文.md');
+      await writeFile(markdownPath, '# 新布局');
+      return {
+        directory: target,
+        markdownPath,
+        alreadySaved: false,
+        imageCount: 0,
+      };
+    });
+    const task = await manager.enqueue(url, owner, directory);
+    await manager.runDue();
+    manager.close();
+    manager = make();
+    const result = await manager.get(task.taskId, owner);
+    expect(result).toMatchObject({
+      state: 'saved',
+      destination: directory,
+      directory: target,
+      markdownPath: join(target, '合成正文.md'),
+    });
+    const file = join(
+      root,
+      '.wechat2rss-single-downloads',
+      task.taskId + '.json',
+    );
+    const raw = JSON.parse(await readFile(file, 'utf8'));
+    raw.result.markdownPath = join(directory, '其他笔记.md');
+    await writeFile(file, JSON.stringify(raw));
+    await expect(manager.get(task.taskId, owner)).rejects.toMatchObject({
+      status: 404,
+    });
+    raw.result.directory = root;
+    raw.result.markdownPath = join(root, '其他笔记.md');
+    await writeFile(file, JSON.stringify(raw));
+    await expect(manager.get(task.taskId, owner)).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
+  it('missing trusted export source remains a source failure rather than a misleading directory error', async () => {
+    item.state = 'succeeded';
+    save.mockRejectedValueOnce(
+      new ArticleDownloadError('来源信息缺失', 409, {
+        code: 'EXPORT_SOURCE_MISSING',
+      }),
+    );
+    const task = await manager.enqueue(url, owner, directory);
+    await manager.runDue();
+    expect(await manager.get(task.taskId, owner)).toMatchObject({
+      state: 'failed',
+      code: 'SINGLE_EXPORT_SOURCE_MISSING',
+      destination: directory,
+      message: expect.stringContaining('可信公众号和分组'),
+    });
+    expect(await readdir(directory)).toEqual([]);
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
   });
   it('cancel during a late precise-body read cannot revive or save the task', async () => {
     let release!: () => void;

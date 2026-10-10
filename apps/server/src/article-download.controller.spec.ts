@@ -47,7 +47,19 @@ describe('local article HTTP save and native directory selection, no upstream or
     const module = await Test.createTestingModule({
       controllers: [ArticleDownloadController],
       providers: [
-        { provide: PrismaService, useValue: { article: { findMany } } },
+        {
+          provide: PrismaService,
+          useValue: {
+            article: { findMany },
+            feed: {
+              findUnique: jest.fn(async () => ({
+                id: 'MP_WXS_1234567890',
+                mpName: '合成公众号',
+                group: null,
+              })),
+            },
+          },
+        },
         {
           provide: ConfigService,
           useValue: new ConfigService({ auth: { code: 'fixture-access' } }),
@@ -62,7 +74,7 @@ describe('local article HTTP save and native directory selection, no upstream or
         await mkdir(join(directory, 'image'));
         await writeFile(join(directory, 'index.md'), '# 合成Wechat2RSS正文');
         return {
-          articleId: 'WX_123_456_1',
+          articleId: 'WX_1234567890_456_1',
           title: '中文测试',
           imageCount: 0,
           source: 'wechat2rss' as const,
@@ -103,7 +115,7 @@ describe('local article HTTP save and native directory selection, no upstream or
       alreadySaved: false,
       imageCount: 0,
     });
-    expect(await readFile(response.body.markdownPath, 'utf8')).toBe(
+    expect(await readFile(response.body.markdownPath, 'utf8')).toContain(
       '# 合成Wechat2RSS正文',
     );
     expect(single.prepareWechat2RssSingleDownload).toHaveBeenCalledWith(url);
@@ -130,7 +142,7 @@ describe('local article HTTP save and native directory selection, no upstream or
     ]);
     const response = await post('', { url }).expect(200);
     expect(response.body.contentSource).toBe('wechat2rss-cache');
-    expect(await readFile(response.body.markdownPath, 'utf8')).toBe(
+    expect(await readFile(response.body.markdownPath, 'utf8')).toContain(
       '# 合成Wechat2RSS正文',
     );
     expect(findMany).not.toHaveBeenCalled();

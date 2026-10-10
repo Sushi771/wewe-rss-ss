@@ -643,7 +643,7 @@ export default function ArticleDownload() {
             {singleTask.selectedArticle && (
               <p className="mt-1">已确认：{singleTask.selectedArticle.title}</p>
             )}
-            {singleTask.state === 'failed' &&
+            {['blocked', 'failed'].includes(singleTask.state) &&
               /^MP_WXS_\d{5,15}$/.test(singleTask.feedId || '') && (
                 <div className="mt-2">
                   <Button

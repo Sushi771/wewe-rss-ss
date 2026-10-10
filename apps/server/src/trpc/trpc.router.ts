@@ -1,6 +1,10 @@
 import { buildArticleMarkdown } from '../article-export';
 import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
 import { LocalArticleStore } from '../article-local-save';
+import {
+  exportSourceFromFeed,
+  exportSourceMarkdown,
+} from '../article-export-source';
 import { findArticleListRows } from '../article-list-page';
 import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
@@ -180,6 +184,7 @@ export class TrpcRouter {
   async buildOfflineFeedDirectory(feedId: string, directory: string) {
     const feed = await this.prismaService.feed.findUnique({
       where: { id: feedId },
+      include: { group: true },
     });
     if (!feed) return null;
     const articles = await this.prismaService.article.findMany({
@@ -199,45 +204,50 @@ export class TrpcRouter {
     await fs.promises.mkdir(directory, { recursive: true });
     let complete = 0;
     const incomplete: string[] = [];
-    for (const [index, article] of articles.entries()) {
-      const safeTitle =
-        article.title
-          .replace(/[\\/:*?"<>|\x00-\x1f]/g, '-')
-          .replace(/[. ]+$/g, '')
-          .slice(0, 75) || '未命名';
-      const relative = `articles/${String(index + 1).padStart(4, '0')}-${safeTitle}`;
-      const articleDirectory = path.join(directory, relative);
-      await fs.promises.mkdir(articleDirectory, { recursive: true });
-      let markdown: string;
-      if (article.contentHtml) {
-        try {
-          await prepareCachedArticleLocalExport(article)(articleDirectory);
-          markdown = await fs.promises.readFile(
-            path.join(articleDirectory, 'index.md'),
-            'utf8',
-          );
-          await fs.promises.unlink(path.join(articleDirectory, 'index.md'));
-          complete++;
-        } catch {
-          incomplete.push(relative);
-          markdown = `# ${article.title}\n\n正文或图片未能完整归档，本篇未通过离线验收。\n\n原文：${article.sourceUrl || '未记录'}\n`;
-        }
-      } else {
-        incomplete.push(relative);
-        markdown = `# ${article.title}\n\n正文尚未缓存，本篇无法离线阅读。\n\n原文：${article.sourceUrl || '未记录'}\n`;
+    const source = exportSourceFromFeed(feed);
+    const store = new LocalArticleStore(
+      path.join(directory, '.unused-settings.json'),
+      directory,
+    );
+    for (const article of articles) {
+      try {
+        await store.save(
+          prepareCachedArticleLocalExport(article, source),
+          new Date(),
+          directory,
+        );
+        complete++;
+      } catch {
+        const result = await store.save(
+          async (stage) => {
+            await fs.promises.mkdir(path.join(stage, 'image'));
+            await fs.promises.writeFile(
+              path.join(stage, 'index.md'),
+              `# ${article.title.replace(/[\r\n]/g, ' ')}\n\n正文或图片尚未完整归档，本篇无法完整离线阅读。\n`,
+            );
+            return {
+              articleId: article.id,
+              title: article.title,
+              imageCount: 0,
+              exportSource: source,
+              sourceUrl: article.sourceUrl,
+            };
+          },
+          new Date(),
+          directory,
+        );
+        incomplete.push(
+          path
+            .relative(directory, result.markdownPath)
+            .split(path.sep)
+            .join('/'),
+        );
       }
-      await fs.promises.mkdir(path.join(articleDirectory, 'image'), {
-        recursive: true,
-      });
-      await fs.promises.writeFile(
-        path.join(articleDirectory, '正文.md'),
-        markdown,
-      );
     }
     await fs.promises.writeFile(
       path.join(directory, 'README.md'),
       `# ${feed.mpName}\n\n共 ${articles.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
-        '文章位于 articles/ 下，每篇包含正文.md 和独享的 image/ 图片目录，正文使用相对图片引用。未完整篇目在各自文件中明确标注。\n',
+        `分组：${source.groupName || '未分组'}\n\n文章位于分组/公众号文件夹中，正常文件名保留文章标题，冲突时加稳定身份后缀；该号共用 image/，图片按文章身份隔离，正文使用相对引用。未完整篇目在各自文件中明确标注。\n`,
     );
     return {
       name: feed.mpName,
@@ -1162,6 +1172,7 @@ export class TrpcRouter {
           });
         const article = await this.prismaService.article.findUnique({
           where: { id },
+          include: { feed: { include: { group: true } } },
         });
         if (!article) {
           throw new TRPCError({
@@ -1181,7 +1192,10 @@ export class TrpcRouter {
             obsidianPath,
           );
           const result = await store.save(
-            prepareCachedArticleLocalExport(article),
+            prepareCachedArticleLocalExport(
+              article,
+              exportSourceFromFeed(article.feed),
+            ),
             new Date(),
             obsidianPath,
           );
@@ -1205,14 +1219,23 @@ export class TrpcRouter {
   private async getArticleMarkdown(id: string, downloadPath?: string) {
     const article = await this.prismaService.article.findUnique({
       where: { id },
+      include: { feed: { include: { group: true } } },
     });
     if (!article) throw new Error(`No article with id '${id}'`);
     const { originUrl } = this.configService.get('feed');
-    return buildArticleMarkdown(
+    const exported = await buildArticleMarkdown(
       article,
       originUrl || 'http://localhost:4000',
       downloadPath,
     );
+    return {
+      ...exported,
+      markdown:
+        exportSourceMarkdown(
+          exportSourceFromFeed(article.feed),
+          article.sourceUrl,
+        ) + exported.markdown,
+    };
   }
 
   platformRouter = this.trpcService.router({

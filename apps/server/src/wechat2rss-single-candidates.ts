@@ -9,12 +9,8 @@ export async function readWechat2RssSingleCandidates(feedId: string) {
   try {
     if (!/^MP_WXS_\d{5,15}$/.test(feedId)) throw new Error();
     const provider = wechat2RssProvider();
-    const account = await provider.checkAccountStatus();
-    if (!account.available)
-      throw new ArticleDownloadError(
-        '账号需要处理，暂不能读取缓存；请先检查账号状态。',
-        409,
-      );
+    // Collection-account availability cannot invalidate existing authorized
+    // cache. This path only reads the same publisher's list/feed and verifies it.
     const page = assertProviderPage(
       await provider.fetchArticles(feedId),
       feedId,

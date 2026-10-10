@@ -135,11 +135,7 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     expect(
       choices.some((a) => a.articleId === 'WX_1234567890_2247000001_1'),
     ).toBe(false);
-    expect(calls).toEqual([
-      '/login/list',
-      '/list',
-      '/feed/' + number + '.json',
-    ]);
+    expect(calls).toEqual(['/list', '/feed/' + number + '.json']);
     expect(images.fetchAllowedImage).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });

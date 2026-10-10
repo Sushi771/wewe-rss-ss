@@ -3,11 +3,19 @@ import { createHash } from 'node:crypto';
 import { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import request from 'supertest';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  rm,
+  stat,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { ArticleDownloadController } from './article-download.controller';
 import { TrpcService } from './trpc/trpc.service';
+import { PrismaService } from './prisma/prisma.service';
 import { ArticleDownloadError } from './article-download';
 import * as single from './wechat2rss-single-download';
 import * as picker from './article-folder-picker';
@@ -46,6 +54,18 @@ describe('single download HTTP task receipts; isolated queue, no network or data
       .get('/download/article' + suffix)
       .set('host', '127.0.0.1')
       .set('authorization', owner);
+  const expectSavedArticle = async (markdownPath: string) => {
+    const markdown = await readFile(markdownPath, 'utf8');
+    expect(markdown.endsWith('# 合成精确正文')).toBe(true);
+    expect(markdown).toContain('公众号：合成公众号');
+    expect(markdown).toContain('分组：合成分组');
+    expect(markdown).toContain('原文链接：https://mp.weixin.qq.com/s?');
+    const segments = relative(directory, markdownPath).split(sep);
+    expect(segments).toEqual(['合成分组', '合成公众号', '合成.md']);
+    expect(
+      (await stat(join(dirname(markdownPath), 'image'))).isDirectory(),
+    ).toBe(true);
+  };
   beforeEach(async () => {
     delete process.env.PRIVATE_ONLINE_MODE;
     delete process.env.WEWE_ACCEPTANCE_MODE;
@@ -91,6 +111,8 @@ describe('single download HTTP task receipts; isolated queue, no network or data
           return {
             articleId: 'WX_1234567890_2247000001_1',
             title: '合成',
+            sourceUrl:
+              'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef',
             imageCount: 0,
             source: 'wechat2rss' as const,
           };
@@ -113,6 +135,19 @@ describe('single download HTTP task receipts; isolated queue, no network or data
           useValue: new ConfigService({ auth: { code: '' } }),
         },
         { provide: TrpcService, useValue: queue },
+        {
+          provide: PrismaService,
+          useValue: {
+            feed: {
+              findUnique: jest.fn(async () => ({
+                id: 'MP_WXS_1234567890',
+                mpName: '合成公众号',
+                groupId: 'synthetic-group',
+                group: { id: 'synthetic-group', name: '合成分组' },
+              })),
+            },
+          },
+        },
       ],
     }).compile();
     app = module.createNestApplication();
@@ -129,7 +164,7 @@ describe('single download HTTP task receipts; isolated queue, no network or data
     const r = await post('', { url }).expect(200);
     expect(r.body.contentSource).toBe('wechat2rss-cache');
     expect(queue.addSingleDownloadBatch).not.toHaveBeenCalled();
-    expect(await readFile(r.body.markdownPath, 'utf8')).toBe('# 合成精确正文');
+    await expectSavedArticle(r.body.markdownPath);
   });
   it('candidate recovery exposes only title/date/identity and rejects URL, feed, directory and foreign-owner selection', async () => {
     const pending = await post('', { url }).expect(202);
@@ -167,9 +202,7 @@ describe('single download HTTP task receipts; isolated queue, no network or data
       destination: directory,
       selectedArticle: { articleId: choices.body.articles[0].articleId },
     });
-    expect(await readFile(saved.body.markdownPath, 'utf8')).toBe(
-      '# 合成精确正文',
-    );
+    await expectSavedArticle(saved.body.markdownPath);
     expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
     expect(queue.resumeSubscriptionBatch).not.toHaveBeenCalled();
   });
@@ -189,9 +222,7 @@ describe('single download HTTP task receipts; isolated queue, no network or data
       contentSource: 'wechat2rss-cache',
     });
     expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
-    expect(await readFile(result.body.markdownPath, 'utf8')).toBe(
-      '# 合成精确正文',
-    );
+    await expectSavedArticle(result.body.markdownPath);
     await get('/single-tasks').expect(200);
     expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
   });
@@ -213,5 +244,62 @@ describe('single download HTTP task receipts; isolated queue, no network or data
       .expect(403);
     process.env.PRIVATE_ONLINE_MODE = '1';
     await get('/single-tasks').expect(403);
+  });
+
+  it('old blocked task with stopped batch reaches candidates; resume and explicit selection keep that receipt and save without restarting collection', async () => {
+    const pending = await post('', { url }).expect(202);
+    const id = pending.body.task.taskId;
+    const batches = await queue.subscriptionBatchList();
+    const stopped = [
+      {
+        ...batches[0],
+        state: 'stopped',
+        items: [{ ...batches[0].items[0], state: 'blocked', bodyReady: false }],
+      },
+    ];
+    queue.subscriptionBatchList.mockResolvedValue(stopped);
+    await consumer.runDue();
+    const file = join(root, '.wechat2rss-single-downloads', id + '.json');
+    const raw = JSON.parse(await readFile(file, 'utf8'));
+    raw.state = 'blocked';
+    delete raw.code;
+    delete raw.feedId;
+    await writeFile(file, JSON.stringify(raw));
+    await get('/single-task/' + id)
+      .expect(200)
+      .expect((r) =>
+        expect(r.body).toMatchObject({
+          state: 'blocked',
+          feedId: 'MP_WXS_1234567890',
+          batchState: 'stopped',
+        }),
+      );
+    const options = await get('/single-task/' + id + '/candidates').expect(200);
+    expect(options.body.destination).toBe(directory);
+    await post('/single-task/' + id + '/resume').expect(200);
+    await consumer.runDue();
+    await get('/single-task/' + id)
+      .expect(200)
+      .expect((r) =>
+        expect(r.body).toMatchObject({
+          state: 'failed',
+          code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+        }),
+      );
+    ready = true;
+    await post('/single-task/' + id + '/select', {
+      articleId: options.body.articles[0].articleId,
+    }).expect(202);
+    await consumer.runDue();
+    const saved = await get('/single-task/' + id).expect(200);
+    expect(saved.body).toMatchObject({
+      state: 'saved',
+      destination: directory,
+    });
+    await expectSavedArticle(saved.body.markdownPath);
+    expect(JSON.parse(await readFile(file, 'utf8')).batchId).toBe(batchId);
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
+    expect(queue.resumeSubscriptionBatch).not.toHaveBeenCalled();
+    expect(stopped[0].state).toBe('stopped');
   });
 });

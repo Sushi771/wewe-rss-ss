@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative } from 'node:path';
 import { ArticleDownloadError, downloadArticleUrl } from './article-download';
 import {
   LocalArticleStore,
@@ -42,6 +42,7 @@ type Task = {
 type Batch = {
   batchId: string;
   state: string;
+  updatedAt?: number;
   items: Array<{
     state: string;
     feedId?: string;
@@ -197,7 +198,8 @@ export class Wechat2RssSingleTasks {
           !relative(t.directory, t.result.directory) ||
           relative(t.directory, t.result.directory).startsWith('..') ||
           isAbsolute(relative(t.directory, t.result.directory)) ||
-          t.result.markdownPath !== join(t.result.directory, '正文.md'))
+          dirname(t.result.markdownPath) !== t.result.directory ||
+          extname(t.result.markdownPath).toLowerCase() !== '.md')
       )
         throw unavailable();
       return t;
@@ -277,20 +279,37 @@ export class Wechat2RssSingleTasks {
   }
   private async display(t: Task) {
     const result = view(t);
-    // Earlier records predate feedId. Read only the existing local receipt to
-    // offer a publisher-list recovery link, without modifying the old intent.
-    if (!t.feedId && t.batchId) {
+    // Derive publisher and current batch revision from the original redacted
+    // receipt. Older records remain usable without rewriting their intent.
+    if (t.batchId) {
       try {
-        const batches = (await this.queue.subscriptionBatchList()) as Batch[];
-        const feedId = Array.isArray(batches)
-          ? batches.find((b) => b.batchId === t.batchId)?.items?.[0]?.feedId
-          : undefined;
+        const receipt = await this.receipt(t);
+        const feedId = receipt?.item.feedId;
         if (feedId && /^MP_WXS_\d{5,15}$/.test(feedId)) result.feedId = feedId;
+        return {
+          ...result,
+          ...(receipt
+            ? {
+                batchState: receipt.batch.state,
+                batchUpdatedAt: receipt.batch.updatedAt,
+              }
+            : {}),
+        };
       } catch {
         /* A missing local receipt does not authorize a new request. */
       }
     }
     return result;
+  }
+  private async receipt(t: Task) {
+    const batches = (await this.queue.subscriptionBatchList()) as Batch[];
+    const batch = Array.isArray(batches)
+      ? batches.find((b) => b.batchId === t.batchId)
+      : undefined;
+    const item = batch?.items?.[0];
+    return item && item.articleUrlHash === hash(t.url)
+      ? { batch: batch!, item }
+      : undefined;
   }
   async get(id: string, owner: string) {
     const t = await this.read(id);
@@ -308,25 +327,15 @@ export class Wechat2RssSingleTasks {
         '来源实例已变化，不能使用原任务选择文章。',
         409,
       );
-    if (!['failed', 'saved'].includes(t.state))
+    if (!['blocked', 'failed', 'saved'].includes(t.state))
       throw new ArticleDownloadError(
         '请先等待下载结果；已取消的任务不能选择文章。',
         409,
       );
-    const batches = (await this.queue.subscriptionBatchList()) as Batch[];
-    const batch = Array.isArray(batches)
-      ? batches.find((b) => b.batchId === t.batchId)
-      : undefined;
-    const item = batch?.items?.[0];
-    if (
-      !item ||
-      item.articleUrlHash !== hash(t.url) ||
-      batch?.state !== 'completed' ||
-      item.state !== 'succeeded' ||
-      !/^MP_WXS_\d{5,15}$/.test(item.feedId || '')
-    )
+    const item = (await this.receipt(t))?.item;
+    if (!item || !/^MP_WXS_\d{5,15}$/.test(item.feedId || ''))
       throw new ArticleDownloadError(
-        '原任务的公众号缓存尚未完成，不能选择其他文章。',
+        '原任务没有可核验的公众号回执，不能选择其他文章。',
         409,
       );
     return { task: t, feedId: item.feedId! };
@@ -370,7 +379,10 @@ export class Wechat2RssSingleTasks {
     return this.mutate(async () => {
       const t = await this.read(id);
       if (!t || t.owner !== owner) throw unavailable();
-      if (t.revision !== context.task.revision || t.state !== 'failed')
+      if (
+        t.revision !== context.task.revision ||
+        !['failed', 'blocked'].includes(t.state)
+      )
         throw new ArticleDownloadError('下载状态已变化，请重新读取。', 409);
       t.selected = selected;
       t.feedId = context.feedId;
@@ -415,25 +427,20 @@ export class Wechat2RssSingleTasks {
     const t = await this.read(id);
     if (!t || t.owner !== owner) throw unavailable();
     if (['blocked', 'failed', 'cancelled'].includes(t.state)) {
-      const batch = t.batchId
-        ? ((await this.queue.resumeSubscriptionBatch(
-            t.batchId,
-          )) as Batch | null)
-        : null;
       return this.mutate(async () => {
         const current = await this.read(id);
         if (!current || current.owner !== owner) throw unavailable();
         if (current.revision !== t.revision) return view(current);
-        // An explicitly restarted stopped batch is handed back to the original
-        // receipt-guarded entry. Accepted /addurl requests remain idempotent.
-        if (batch?.state === 'stopped') delete current.batchId;
+        // Resume the download's cache check, not the collection batch. A user's
+        // stopped queue stays stopped and its original receipt is never lost.
         current.startedAt = this.now();
         current.deadline = current.startedAt + 900000;
         current.nextCheckAt = this.now();
         current.attempts = 0;
         delete current.code;
         current.state = 'waiting';
-        current.message = '已继续检查原请求，不重复订阅。';
+        current.message =
+          '正在检查原请求已有缓存；不会恢复已停止的订阅队列、重复订阅或强制更新。';
         await this.write(current);
         return view(current);
       });
@@ -525,11 +532,9 @@ export class Wechat2RssSingleTasks {
           return;
         }
       }
-      const batches = (await this.queue.subscriptionBatchList()) as Batch[];
-      const batch = Array.isArray(batches)
-        ? batches.find((b) => b.batchId === t!.batchId)
-        : undefined;
-      const item = batch?.items?.[0];
+      const receipt = await this.receipt(t);
+      const batch = receipt?.batch;
+      const item = receipt?.item;
       if (!item) {
         await this.update(t.taskId, (t) => {
           t.state = 'failed';
@@ -537,11 +542,14 @@ export class Wechat2RssSingleTasks {
         });
         return;
       }
-      if (
+      const queueUnavailable =
         ['blocked', 'failed', 'cancelled'].includes(item.state) ||
         batch?.state === 'paused' ||
-        batch?.state === 'stopped'
-      ) {
+        batch?.state === 'stopped';
+      const feedId = /^MP_WXS_\d{5,15}$/.test(item.feedId || '')
+        ? item.feedId
+        : undefined;
+      if (queueUnavailable && !feedId) {
         await this.update(t.taskId, (t) => {
           t.state =
             item.state === 'blocked' || batch?.state === 'paused'
@@ -552,11 +560,16 @@ export class Wechat2RssSingleTasks {
         });
         return;
       }
-      if (item.state !== 'succeeded' && item.bodyReady !== true) return;
+      if (
+        !t.selected &&
+        !queueUnavailable &&
+        item.state !== 'succeeded' &&
+        item.bodyReady !== true
+      )
+        return;
       await this.update(t.taskId, (t) => {
         t.attempts++;
-        if (item.feedId && /^MP_WXS_\d{5,15}$/.test(item.feedId))
-          t.feedId = item.feedId;
+        if (feedId) t.feedId = feedId;
       });
       let prepared: Prepare;
       try {
@@ -571,7 +584,9 @@ export class Wechat2RssSingleTasks {
             t.code = code;
           if (
             code === 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE' &&
-            (item.bodyReady === true || batch?.state === 'completed')
+            (queueUnavailable ||
+              item.bodyReady === true ||
+              batch?.state === 'completed')
           ) {
             // Actual Wechat2RSS feeds may have complete long-URL bodies but no
             // short alias. A completed publisher update cannot prove which one
@@ -580,8 +595,13 @@ export class Wechat2RssSingleTasks {
             t.message =
               '公众号已订阅，但缓存没有该短链接的原文身份映射，无法确定目标，未保存。可在下方明确选择一篇已缓存文章下载。';
           } else if (singleCachePending(error)) {
-            t.message =
-              '订阅已受理，仍在等待该篇可核验正文；不会重复新增或按标题猜文。';
+            if (queueUnavailable) {
+              t.state = 'blocked';
+              t.message =
+                '原订阅队列已停止或暂停，现有缓存尚无这篇完整正文，未保存；不会恢复采集或重复新增。';
+            } else
+              t.message =
+                '订阅已受理，仍在等待该篇可核验正文；不会重复新增或按标题猜文。';
           } else {
             t.state = 'failed';
             t.message =
@@ -612,11 +632,19 @@ export class Wechat2RssSingleTasks {
             ? '已保存，保留已有笔记。'
             : '正文和图片已保存。';
         });
-      } catch {
+      } catch (error) {
         await this.update(saving.taskId, (t) => {
           t.state = 'failed';
-          t.message =
-            '本机保存未完成；已保留原目录和订阅回执，请检查保存路径。';
+          if (
+            error instanceof ArticleDownloadError &&
+            error.diagnostic?.code === 'EXPORT_SOURCE_MISSING'
+          ) {
+            t.code = 'SINGLE_EXPORT_SOURCE_MISSING';
+            t.message =
+              '尚未取得该文章的可信公众号和分组信息，未保存；已保留原确认根和回执。';
+          } else
+            t.message =
+              '本机保存未完成；已保留原目录和订阅回执，请检查保存路径。';
         });
       }
     } finally {

@@ -1051,72 +1051,82 @@ test('terminal missing short mapping replaces waiting with an explicit cached-ar
   h.unmount();
 });
 
-test('in-tool choice sends only a server-provided stable article identity and leaves the original destination fixed', async () => {
-  const task = {
-    taskId: 'f'.repeat(64),
-    revision: 3,
-    state: 'failed',
-    feedId: 'MP_WXS_1234567890',
-    code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
-    message: '无法自动确定短链目标',
-  };
-  const articleId = 'WX_1234567890_2247000001_1';
-  const h = page({
-    taskPresent: false,
-    fetchReply: async (url) => {
-      if (url.endsWith('/candidates'))
-        return {
-          ok: true,
-          json: async () => ({
-            taskId: task.taskId,
-            destination: 'original-confirmed-path',
-            articles: [
-              { articleId, title: '用户确认的目标', publishTime: 1800000000 },
-            ],
-          }),
-        };
-      if (url.endsWith('/select'))
-        return {
-          ok: true,
-          json: async () => ({
-            ...task,
-            revision: 4,
-            state: 'waiting',
-            destination: 'original-confirmed-path',
-            selectedArticle: {
-              articleId,
-              title: '用户确认的目标',
-              publishTime: 1800000000,
-            },
-            message: '正在保存所选文章',
-          }),
-        };
+for (const terminalState of ['failed', 'blocked'])
+  test(
+    'in-tool choice from ' +
+      terminalState +
+      ' sends only a server-provided stable article identity and leaves the original destination fixed',
+    async () => {
+      const task = {
+        taskId: 'f'.repeat(64),
+        revision: 3,
+        state: terminalState,
+        feedId: 'MP_WXS_1234567890',
+        code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+        message: '无法自动确定短链目标',
+      };
+      const articleId = 'WX_1234567890_2247000001_1';
+      const h = page({
+        taskPresent: false,
+        fetchReply: async (url) => {
+          if (url.endsWith('/candidates'))
+            return {
+              ok: true,
+              json: async () => ({
+                taskId: task.taskId,
+                destination: 'original-confirmed-path',
+                articles: [
+                  {
+                    articleId,
+                    title: '用户确认的目标',
+                    publishTime: 1800000000,
+                  },
+                ],
+              }),
+            };
+          if (url.endsWith('/select'))
+            return {
+              ok: true,
+              json: async () => ({
+                ...task,
+                revision: 4,
+                state: 'waiting',
+                destination: 'original-confirmed-path',
+                selectedArticle: {
+                  articleId,
+                  title: '用户确认的目标',
+                  publishTime: 1800000000,
+                },
+                message: '正在保存所选文章',
+              }),
+            };
+        },
+      });
+      h.state[13] = task;
+      h.state[1].directory = 'changed-preference-path';
+      h.button('选择已缓存文章').props.onPress();
+      await flush();
+      assert.equal(h.calls[0].method, 'GET');
+      assert.ok(JSON.stringify(h.render()).includes('original-confirmed-path'));
+      assert.ok(JSON.stringify(h.render()).includes('用户确认的目标'));
+      assert.equal(h.calls.filter((c) => c.method === 'POST').length, 0);
+      const choose = h
+        .render()
+        .find(
+          (n) =>
+            n.type === 'Button' &&
+            JSON.stringify(n.props.children).includes('用户确认的目标'),
+        );
+      choose.props.onPress();
+      await flush();
+      const posted = h.calls.filter((c) => c.method === 'POST');
+      assert.equal(posted.length, 1);
+      assert.deepEqual(JSON.parse(posted[0].body), { articleId });
+      assert.equal(h.state[13].state, 'waiting');
+      assert.equal(h.state[1].directory, 'changed-preference-path');
+      assert.equal(h.state[16], null);
     },
-  });
-  h.state[13] = task;
-  h.state[1].directory = 'changed-preference-path';
-  h.button('选择已缓存文章').props.onPress();
-  await flush();
-  assert.equal(h.calls[0].method, 'GET');
-  assert.ok(JSON.stringify(h.render()).includes('original-confirmed-path'));
-  assert.ok(JSON.stringify(h.render()).includes('用户确认的目标'));
-  assert.equal(h.calls.filter((c) => c.method === 'POST').length, 0);
-  const choose = h
-    .render()
-    .find(
-      (n) =>
-        n.type === 'Button' &&
-        JSON.stringify(n.props.children).includes('用户确认的目标'),
-    );
-  choose.props.onPress();
-  await flush();
-  const posted = h.calls.filter((c) => c.method === 'POST');
-  assert.equal(posted.length, 1);
-  assert.deepEqual(JSON.parse(posted[0].body), { articleId });
-  assert.equal(h.state[13].state, 'waiting');
-  assert.equal(h.state[1].directory, 'changed-preference-path');
-  assert.equal(h.state[16], null);
-});
+  );
 
 test('failed local polling marks waiting as stale and offers a read-only status retry', async () => {
   const task = {

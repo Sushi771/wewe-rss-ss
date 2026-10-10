@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { TRPCError } from '@trpc/server';
 import { buildArticleMarkdown } from './article-export';
 import { fetchAllowedImage } from './collection/image-fetch';
+import { ArticleExportSource } from './article-export-source';
 
 export type CachedExportArticle = Pick<
   Article,
@@ -18,7 +19,10 @@ export type CachedExportArticle = Pick<
 
 /** Existing cached-article export, staged for the same per-article publisher as
  * the tool. Missing body never initiates an original-page request. */
-export function prepareCachedArticleLocalExport(article: CachedExportArticle) {
+export function prepareCachedArticleLocalExport(
+  article: CachedExportArticle,
+  exportSource?: ArticleExportSource,
+) {
   const snapshot = { ...article };
   if (!snapshot.contentHtml || snapshot.lastBodyStatus === 'unavailable')
     throw new TRPCError({
@@ -41,6 +45,8 @@ export function prepareCachedArticleLocalExport(article: CachedExportArticle) {
       articleId: snapshot.id,
       title: snapshot.title,
       imageCount: (await fs.readdir(join(directory, 'image'))).length,
+      exportSource,
+      sourceUrl: snapshot.sourceUrl,
     };
   };
 }

@@ -18,6 +18,8 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { ArticleDownloadError, downloadArticleUrl } from './article-download';
 import { LocalArticleStore } from './article-local-save';
+import { PreparedArticle } from './article-local-save';
+import { exportSourceFromFeed } from './article-export-source';
 import { pickArticleDirectory } from './article-folder-picker';
 import { privateOnlineMode } from './private-access';
 import { PrismaService } from './prisma/prisma.service';
@@ -79,7 +81,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
           this.running = true;
           try {
             return await this.localStore().save(
-              prepare,
+              this.withExportSource(prepare),
               new Date(startedAt),
               directory,
             );
@@ -149,6 +151,29 @@ export class ArticleDownloadController implements OnModuleDestroy {
       );
     }
     return this.store;
+  }
+
+  private withExportSource(
+    prepare: (directory: string) => Promise<PreparedArticle>,
+  ) {
+    return async (directory: string) => {
+      const article = await prepare(directory);
+      const identity = /^WX_(\d{5,15})_\d+_\d+$/.exec(article.articleId);
+      const feed =
+        identity && this.prisma
+          ? await this.prisma.feed.findUnique({
+              where: { id: `MP_WXS_${identity[1]}` },
+              include: { group: true },
+            })
+          : null;
+      if (!feed)
+        throw new ArticleDownloadError(
+          '公众号来源记录缺失，未保存；请核对已受理订阅。',
+          422,
+          { code: 'EXPORT_SOURCE_MISSING' },
+        );
+      return { ...article, exportSource: exportSourceFromFeed(feed) };
+    };
   }
 
   private failure(error: unknown, res: Res, articleUrl?: unknown) {
@@ -800,7 +825,9 @@ export class ArticleDownloadController implements OnModuleDestroy {
           return res.status(202).json({ pending: true, task });
         }
       }
-      const result = await store.save(prepare);
+      const result = await store.save(
+        cachedPrepare ? prepare : this.withExportSource(prepare),
+      );
       res.setHeader('Cache-Control', 'private, no-store');
       return res.status(200).json({
         saved: true,

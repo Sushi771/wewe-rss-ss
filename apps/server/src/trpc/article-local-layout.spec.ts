@@ -5,9 +5,15 @@ import axios from 'axios';
 import { TrpcRouter } from './trpc.router';
 import { TrpcService } from './trpc.service';
 import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
+import { exportSourceFolders } from '../article-export-source';
 
 const png =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
+const feed = {
+  id: 'MP_WXS_1234567890',
+  mpName: '合成号',
+  group: { id: 'group-a', name: '合成组' },
+};
 const article = (id = 'WX_1234567890_2247000001_1') => ({
   id,
   title: '同名文章',
@@ -44,16 +50,14 @@ describe('all cached article local/ZIP export entry points share isolated image 
     };
     const prisma = {
       article: {
-        findUnique: jest.fn(
-          async ({ where }) => items.find((a) => a.id === where.id) || null,
-        ),
+        findUnique: jest.fn(async ({ where }) => {
+          const found = items.find((a) => a.id === where.id);
+          return found ? { ...found, feed } : null;
+        }),
         findMany: jest.fn(async () => items),
       },
       feed: {
-        findUnique: jest.fn(async () => ({
-          id: 'MP_WXS_1234567890',
-          mpName: '合成号',
-        })),
+        findUnique: jest.fn(async () => feed),
       },
     };
     const service = new TrpcService(
@@ -78,7 +82,7 @@ describe('all cached article local/ZIP export entry points share isolated image 
   it('list single and batch mutation saves each title/ID into 正文.md plus image; repeat and retry preserve edited notes', async () => {
     const caller = router.appRouter.createCaller({ errorMsg: null });
     const one = await caller.article.saveToObsidian(items[0].id);
-    expect(basename(one.path)).toBe('正文.md');
+    expect(basename(one.path)).toBe('同名文章.md');
     expect(await fs.readFile(one.path, 'utf8')).toContain('| 阅读 | 17 |');
     const images = await fs.readdir(join(dirname(one.path), 'image'));
     expect(images).toHaveLength(1);
@@ -115,20 +119,21 @@ describe('all cached article local/ZIP export entry points share isolated image 
       complete: 1,
       incomplete: expect.any(Array),
     });
-    const names = await fs.readdir(join(folder, 'articles'));
-    expect(names).toHaveLength(2);
-    for (const name of names) {
-      const dir = join(folder, 'articles', name);
-      expect(await fs.readdir(dir)).toEqual(
-        expect.arrayContaining(['正文.md', 'image']),
-      );
-      expect(await fs.readdir(dir)).not.toContain('attachments');
-      expect(await fs.readdir(dir)).not.toContain('index.md');
-    }
-    const md = await fs.readFile(
-      join(folder, 'articles', names[0], '正文.md'),
-      'utf8',
+    const dir = join(
+      folder,
+      ...exportSourceFolders({
+        feedId: feed.id,
+        feedName: feed.mpName,
+        groupId: feed.group.id,
+        groupName: feed.group.name,
+      }),
     );
+    const names = (await fs.readdir(dir)).filter((n) => n.endsWith('.md'));
+    expect(names).toHaveLength(2);
+    expect(await fs.readdir(dir)).toContain('image');
+    expect(await fs.readdir(dir)).not.toContain('attachments');
+    expect(await fs.readdir(dir)).not.toContain('index.md');
+    const md = await fs.readFile(join(dir, '同名文章.md'), 'utf8');
     expect(md).toContain('](image/');
     expect(md).not.toContain('attachments/');
     expect(fetch).not.toHaveBeenCalled();

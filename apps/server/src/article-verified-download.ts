@@ -2,6 +2,7 @@ import { load } from 'cheerio';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Article } from '@prisma/client';
+import type { PreparedArticle } from './article-local-save';
 import {
   ArticleDownloadError,
   downloadArticleUrl,
@@ -73,7 +74,7 @@ export async function buildCompleteArticleDownload(
   article: DownloadArticle,
   source: string,
   directory: string,
-) {
+): Promise<PreparedArticle> {
   if (article.lastBodyStatus === 'unavailable') throw unavailable();
   const contentHtml = verifiedDownloadBody(article.contentHtml);
   const { markdown } = await buildArticleMarkdown(
@@ -103,6 +104,7 @@ export async function buildCompleteArticleDownload(
   return {
     articleId: article.id,
     title: article.title,
+    sourceUrl: source,
     imageCount: load(contentHtml)('img').length,
   };
 }
