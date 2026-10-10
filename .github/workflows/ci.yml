@@ -63,7 +63,7 @@ jobs:
       - name: Test compact reading toolbar and collapsed diagnostics offline
         run: node --test scripts/feed-reading-ui.test.cjs
       - name: Test feed sidebar scroll and compact navigation layout offline
-        run: node --test scripts/feed-sidebar-layout.test.cjs scripts/folder-navigation-ui.test.cjs
+        run: node --test scripts/feed-sidebar-layout.test.cjs scripts/folder-navigation-ui.test.cjs scripts/feed-group-drag-ui.test.cjs
       - name: Test unavailable new-subscription source and retained input offline
         run: node --test scripts/feed-add-ui.test.cjs scripts/subscription-tasks-ui.test.cjs scripts/subscription-dialog-layout.test.cjs
       - name: Test Xiaohongshu batch completion and download failure states offline
@@ -79,7 +79,7 @@ jobs:
       - name: Test article layout repair and original-file preservation offline
         run: node --test scripts/repair-article-layout.test.cjs
       - name: Test feed view invalidation with installed tRPC batch link offline
-        run: node --test scripts/refresh-feed-view.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/feed-avatar-reading-ui.test.cjs
+        run: node --test scripts/refresh-feed-view.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-avatar-reading-ui.test.cjs
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)

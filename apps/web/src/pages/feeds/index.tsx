@@ -32,6 +32,7 @@ import FeedAvatar from '@web/components/FeedAvatar';
 import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
 import SubscriptionTasks from './subscription-tasks';
+import ManualRefreshProgress from './manual-refresh-progress';
 
 const Feeds = () => {
   const { id } = useParams();
@@ -41,6 +42,7 @@ const Feeds = () => {
   const saveFolder = trpc.feed.saveGroup.useMutation();
   const removeFolder = trpc.feed.removeGroup.useMutation();
   const moveFeeds = trpc.feed.moveFeeds.useMutation();
+  const reorderFolders = trpc.feed.reorderGroups.useMutation({ retry: false });
   const [folderFilter, setFolderFilter] = useState('all');
   const [folderBusy, setFolderBusy] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -111,6 +113,49 @@ const Feeds = () => {
     );
   const { mutateAsync: refreshMpArticles } =
     trpc.feed.refreshArticles.useMutation();
+  const { mutateAsync: beginRefreshAll } =
+    trpc.feed.beginRefreshAll.useMutation({ retry: false });
+  const manualViewSignature = useRef('');
+  const manualBatches = trpc.feed.manualRefreshBatches.useQuery(undefined, {
+    retry: false,
+    refetchOnWindowFocus: true,
+    refetchInterval: (data) =>
+      data?.items.some(
+        (batch) =>
+          ['queued', 'running'].includes(batch.state) ||
+          batch.items.some((item) =>
+            ['submitting', 'waiting'].includes(item.state),
+          ),
+      )
+        ? 3000
+        : false,
+    async onSuccess(data) {
+      const signature = JSON.stringify(
+        data.items.map((batch) => [
+          batch.batchId,
+          batch.items.map((item) => [
+            item.state,
+            item.listReady,
+            item.bodyReady,
+            item.imagePendingCount,
+          ]),
+        ]),
+      );
+      if (data.items.length && signature !== manualViewSignature.current) {
+        try {
+          await refreshFeedViews(
+            refetchFeedList,
+            () => queryUtils.article.list.reset(),
+            () => queryUtils.article.summary.invalidate(),
+          );
+          manualViewSignature.current = signature;
+        } catch {
+          /* The durable task remains visible; a later successful read refreshes the view. */
+        }
+      }
+    },
+  });
+  const manualBatch = manualBatches.data?.items[0];
   const {
     mutateAsync: getHistoryArticles,
     isLoading: isGetHistoryArticlesLoading,
@@ -124,8 +169,16 @@ const Feeds = () => {
       refetchOnReconnect: true,
     });
 
-  const { data: isRefreshAllMpArticlesRunning } =
-    trpc.feed.isRefreshAllMpArticlesRunning.useQuery();
+  const { data: legacyBatchRunning } =
+    trpc.feed.isRefreshAllMpArticlesRunning.useQuery(undefined, {
+      refetchInterval: 3000,
+      retry: false,
+    });
+  const isRefreshAllMpArticlesRunning =
+    legacyBatchRunning ||
+    !!manualBatches.data?.items.some((batch) =>
+      ['queued', 'running', 'paused'].includes(batch.state),
+    );
 
   const { mutateAsync: deleteFeed, isLoading: isDeleteFeedLoading } =
     trpc.feed.delete.useMutation({});
@@ -209,6 +262,9 @@ const Feeds = () => {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [draggedItem, setDraggedItem] = useState<number | null>(null);
   const [orderedFeeds, setOrderedFeeds] = useState(feedData?.items || []);
+  const dragSnapshot = useRef(orderedFeeds);
+  const dragOrder = useRef(orderedFeeds);
+  const acceptedFeedDrop = useRef(false);
 
   const [refreshedMpIds, setRefreshedMpIds] = useState<string[]>([]);
   const [refreshingMpIds, setRefreshingMpIds] = useState<string[]>([]);
@@ -336,6 +392,9 @@ const Feeds = () => {
       return;
     }
     movedIntoFolder.current = false;
+    dragSnapshot.current = orderedFeeds;
+    dragOrder.current = orderedFeeds;
+    acceptedFeedDrop.current = false;
     setDraggedItem(index);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', index.toString());
@@ -345,28 +404,62 @@ const Feeds = () => {
   const handleDragEnter = (e: React.DragEvent, index: number) => {
     e.preventDefault();
     if (draggedItem === null || draggedItem === index) return;
+    if (orderedFeeds[draggedItem].groupId !== orderedFeeds[index].groupId)
+      return;
     const newItems = [...orderedFeeds];
-    const draggedContent = newItems[draggedItem];
-    newItems.splice(draggedItem, 1);
-    newItems.splice(index, 0, draggedContent);
+    const slots = newItems
+      .map((f, i) => (f.groupId === newItems[index].groupId ? i : -1))
+      .filter((i) => i >= 0);
+    const members = slots.map((i) => newItems[i]);
+    const [draggedContent] = members.splice(slots.indexOf(draggedItem), 1);
+    members.splice(slots.indexOf(index), 0, draggedContent);
+    slots.forEach((slot, i) => {
+      newItems[slot] = members[i];
+    });
+    dragOrder.current = newItems;
     setDraggedItem(index);
     setOrderedFeeds(newItems);
   };
 
   const handleDragEnd = async () => {
+    const draggedFeed = dragOrder.current[draggedItem ?? -1];
     setDraggedItem(null);
     if (movedIntoFolder.current || folderOperation.current) {
       movedIntoFolder.current = false;
       return;
     }
+    if (!acceptedFeedDrop.current || !draggedFeed) {
+      setOrderedFeeds(dragSnapshot.current);
+      return;
+    }
+    if (dragOrder.current.every((f, i) => f.id === dragSnapshot.current[i]?.id))
+      return;
+    folderOperation.current = true;
+    setFolderBusy(true);
     try {
+      await queryUtils.feed.list.cancel();
+      const groupId = draggedFeed.groupId;
       await updateOrder(
-        orderedFeeds.map((item, idx) => ({ id: item.id, order: idx })),
+        dragOrder.current
+          .filter((item) => item.groupId === groupId)
+          .map((item, idx) => ({
+            id: item.id,
+            order: idx,
+            expectedOrder: dragSnapshot.current.find(
+              (feed) => feed.id === item.id,
+            )!.order,
+            expectedGroupId: groupId,
+          })),
       );
-      refetchFeedList();
+      await refetchFeedList({ throwOnError: true });
       toast.success('排序已保存');
     } catch (e) {
+      setOrderedFeeds(dragSnapshot.current);
       toast.error('排序保存失败');
+      await refetchFeedList();
+    } finally {
+      folderOperation.current = false;
+      setFolderBusy(false);
     }
   };
 
@@ -822,6 +915,14 @@ const Feeds = () => {
               folderOperation.current = value;
               setFolderBusy(value);
             }}
+            onReorder={async (ids, expectedIds) => {
+              try {
+                await queryUtils.feed.groups.cancel();
+                await reorderFolders.mutateAsync({ ids, expectedIds });
+              } finally {
+                await folders.refetch({ throwOnError: true });
+              }
+            }}
             onSave={async (input) => {
               await saveFolder.mutateAsync(input);
               await folders.refetch();
@@ -834,9 +935,11 @@ const Feeds = () => {
             onMove={async (ids, groupId) => {
               movedIntoFolder.current = true;
               setDraggedItem(null);
+              if (draggedItem !== null) setOrderedFeeds(dragSnapshot.current);
+              await queryUtils.feed.list.cancel();
               await moveFeeds.mutateAsync({ ids, groupId });
               setSelectedIds([]);
-              await refetchFeedList();
+              await refetchFeedList({ throwOnError: true });
             }}
           />
           {folders.error && (
@@ -864,9 +967,14 @@ const Feeds = () => {
                     return (
                       <li
                         key={item.id}
-                        draggable={!folderBusy}
+                        draggable={false}
                         onDragStart={(e) => {
-                          if (folderOperation.current) {
+                          if (
+                            folderOperation.current ||
+                            !(e.target as HTMLElement).closest(
+                              '[data-feed-drag-handle]',
+                            )
+                          ) {
                             e.preventDefault();
                             return;
                           }
@@ -883,6 +991,16 @@ const Feeds = () => {
                         }
                         onDragEnd={isManageMode ? handleDragEnd : undefined}
                         onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          if (
+                            isManageMode &&
+                            draggedItem !== null &&
+                            orderedFeeds[draggedItem].groupId === item.groupId
+                          ) {
+                            e.preventDefault();
+                            acceptedFeedDrop.current = true;
+                          }
+                        }}
                         className={`mac-sidebar-item ${
                           isActive(item.id) && !isManageMode
                             ? 'active'
@@ -901,6 +1019,17 @@ const Feeds = () => {
                           }
                         }}
                       >
+                        <button
+                          type="button"
+                          data-feed-drag-handle
+                          draggable={!folderBusy}
+                          aria-label={`拖动公众号 ${item.mpName} 分组或排序`}
+                          title="拖到分组可移动；管理模式可在组内排序。手机请用管理中的移动菜单"
+                          className="shrink-0 cursor-grab px-1 text-neutral-400"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          ⠿
+                        </button>
                         {isManageMode && (
                           <div onClick={(e) => e.stopPropagation()}>
                             <Checkbox
@@ -931,6 +1060,16 @@ const Feeds = () => {
             adding={isAddingSubscriptions}
             onSaved={refreshSavedSubscriptions}
           />
+          <ManualRefreshProgress
+            batch={manualBatch}
+            feeds={feedData?.items || []}
+            onChange={() => manualBatches.refetch()}
+          />
+          {manualBatches.error && (
+            <p role="alert" className="text-xs">
+              全部更新进度查询失败，请刷新页面核对原批次；不会自动重新提交。
+            </p>
+          )}
           <div className="mac-toolbar feed-reading-toolbar !h-auto shrink-0 !flex-wrap !gap-2 !px-3 !py-2">
             <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 sm:flex-1 sm:basis-0">
               <span className="min-w-0 truncate text-[15px] font-semibold">
@@ -1137,54 +1276,21 @@ const Feeds = () => {
                       const token = beginManualRefresh('');
                       if (!token) return;
                       try {
-                        const results = await refreshMpArticles({});
+                        const batch = await beginRefreshAll();
                         if (!isCurrentRefresh('', token)) return;
-                        await refreshFeedViews(
-                          refetchFeedList,
-                          () => queryUtils.article.list.reset(),
-                          () => queryUtils.article.summary.invalidate(),
+                        toast.info(
+                          `${batch.reused ? '继续查看原批次' : '更新请求已排队'}：共 ${batch.total} 个，待发送 ${batch.queuedCount} 个`,
+                          {
+                            description: `${batch.skippedCount ? `${batch.skippedCount} 个停用或其他来源订阅未提交。` : ''}后台串行提交并查询缓存，关闭页面后仍继续。`,
+                          },
                         );
-                        if (!isCurrentRefresh('', token)) return;
-                        for (const result of results) {
-                          if ('id' in result && typeof result.id === 'string')
-                            rememberUpdate(
-                              result.id,
-                              result.source,
-                              result.message,
-                              result.status,
-                            );
-                        }
-                        setIsRefreshedAll(
-                          results.length > 0 &&
-                            results.every((r) => r.complete),
-                        );
-                        const complete = results.filter(
-                          (r) => r.complete,
-                        ).length;
-                        const incomplete = results.filter((r) => !r.complete);
-                        if (incomplete.length)
-                          toast.warning(
-                            `完整更新 ${complete} 个；${incomplete.length} 个采集受限或阻塞`,
-                            {
-                              description: incomplete
-                                .map((r) => r.message)
-                                .join('；'),
-                              duration: 12000,
-                            },
-                          );
-                        else toast.success(`完整更新 ${complete} 个公众号`);
-                        refreshFeedbackTimers.current.set(
-                          '',
-                          setTimeout(() => {
-                            refreshFeedbackTimers.current.delete('');
-                            if (refreshPageMounted.current)
-                              setIsRefreshedAll(false);
-                          }, 3000),
-                        );
+                        await manualBatches.refetch();
                       } catch (e) {
                         if (!isCurrentRefresh('', token)) return;
                         toast.error(
-                          e instanceof Error ? e.message : '更新失败',
+                          e instanceof Error
+                            ? e.message
+                            : '更新请求未确认，请查询原批次；不要重复点击。',
                         );
                       } finally {
                         finishManualRefresh('', token);
@@ -1209,7 +1315,11 @@ const Feeds = () => {
                     </svg>
                     <span className="text-[14px]">
                       {isRefreshAllMpArticlesRunning || isManualBatchRefreshing
-                        ? '更新中'
+                        ? isManualBatchRefreshing
+                          ? '正在受理'
+                          : manualBatch?.state === 'paused'
+                            ? '更新已暂停'
+                            : '后台更新中'
                         : isRefreshedAll
                           ? '更新完成'
                           : '更新全部'}

@@ -15,6 +15,7 @@ import {
   PopoverContent,
 } from '@nextui-org/react';
 import { useRef, useState } from 'react';
+import FolderDragRow from './FolderDragRow';
 
 type Folder = { id: string; name: string };
 type Props = {
@@ -28,6 +29,7 @@ type Props = {
   onRemove: (id: string) => Promise<unknown>;
   onMove: (ids: string[], groupId: string | null) => Promise<unknown>;
   onBusyChange: (busy: boolean) => void;
+  onReorder?: (ids: string[], expectedIds: string[]) => Promise<unknown>;
 };
 
 /** Application-owned folders never change upstream identities or disk paths. */
@@ -42,6 +44,7 @@ export default function ManagementFolders({
   onRemove,
   onMove,
   onBusyChange,
+  onReorder,
 }: Props) {
   const [editing, setEditing] = useState<Folder | null>();
   const [name, setName] = useState('');
@@ -75,6 +78,17 @@ export default function ManagementFolders({
       onMove(selectedIds.includes(id) ? selectedIds : [id], groupId),
     );
   };
+  const reorder = (id: string, targetId: string) => {
+    if (!onReorder || id === targetId) return;
+    const expectedIds = folders.map((folder) => folder.id);
+    const from = expectedIds.indexOf(id),
+      to = expectedIds.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    const ids = [...expectedIds];
+    ids.splice(from, 1);
+    ids.splice(to, 0, id);
+    void run(() => onReorder(ids, expectedIds));
+  };
   return (
     <div className="folder-navigation" aria-label="管理文件夹">
       <div className="folder-navigation-header">
@@ -90,7 +104,7 @@ export default function ManagementFolders({
             </Button>
           </PopoverTrigger>
           <PopoverContent className="max-w-[240px] p-3 text-xs leading-5">
-            将订阅拖到文件夹可分组；手机或批量移动请先点“管理”，勾选后选择目标文件夹。
+            拖动文件夹手柄可排序，也可在更多菜单上移或下移。将订阅拖到文件夹可分组；手机或批量移动请先点“管理”，勾选后选择目标文件夹。
           </PopoverContent>
         </Popover>
         <Button
@@ -111,77 +125,110 @@ export default function ManagementFolders({
         { id: 'all', name: '全部' },
         { id: 'ungrouped', name: '未分组' },
         ...folders,
-      ].map((folder) => (
-        <div
-          key={folder.id}
-          className="folder-navigation-row"
-          onDragOver={(event) => {
-            if (
-              !disabled &&
-              folder.id !== 'all' &&
-              event.dataTransfer.types.includes(dragType)
-            )
-              event.preventDefault();
-          }}
-          onDrop={(event) => {
-            if (folder.id !== 'all')
-              drop(event, folder.id === 'ungrouped' ? null : folder.id);
-          }}
-        >
-          <button
-            type="button"
-            disabled={disabled}
-            aria-pressed={filter === folder.id}
-            className={`mac-sidebar-item folder-filter text-left ${filter === folder.id ? 'active' : ''}`}
-            title={folder.name}
-            onClick={() => onFilter(folder.id)}
+      ].map((folder) => {
+        const row = (
+          <div
+            key={folder.id}
+            className="folder-navigation-row"
+            onDragOver={(event) => {
+              if (
+                !disabled &&
+                folder.id !== 'all' &&
+                event.dataTransfer.types.includes(dragType)
+              )
+                event.preventDefault();
+            }}
+            onDrop={(event) => {
+              if (folder.id !== 'all')
+                drop(event, folder.id === 'ungrouped' ? null : folder.id);
+            }}
           >
-            <span className="folder-filter-label">{folder.name}</span>
-          </button>
-          {!['all', 'ungrouped'].includes(folder.id) && (
-            <Dropdown>
-              <DropdownTrigger>
-                <Button
-                  isIconOnly
-                  size="sm"
-                  variant="light"
-                  isDisabled={disabled}
-                  className="h-7 w-7 min-w-7"
-                  aria-label={`文件夹 ${folder.name} 更多操作`}
-                >
-                  ⋯
-                </Button>
-              </DropdownTrigger>
-              <DropdownMenu
-                aria-label={`文件夹 ${folder.name} 操作`}
-                onAction={(key) => {
-                  if (disabled || active.current) return;
-                  if (key === 'rename') {
-                    setEditing(folder);
-                    setName(folder.name);
-                  } else if (key === 'delete') {
-                    if (
-                      window.confirm(
-                        `删除空文件夹“${folder.name}”？请先移出其中的订阅。`,
+            <button
+              type="button"
+              disabled={disabled}
+              aria-pressed={filter === folder.id}
+              className={`mac-sidebar-item folder-filter text-left ${filter === folder.id ? 'active' : ''}`}
+              title={folder.name}
+              onClick={() => onFilter(folder.id)}
+            >
+              <span className="folder-filter-label">{folder.name}</span>
+            </button>
+            {!['all', 'ungrouped'].includes(folder.id) && (
+              <Dropdown>
+                <DropdownTrigger>
+                  <Button
+                    isIconOnly
+                    size="sm"
+                    variant="light"
+                    isDisabled={disabled}
+                    className="h-7 w-7 min-w-7"
+                    aria-label={`文件夹 ${folder.name} 更多操作`}
+                  >
+                    ⋯
+                  </Button>
+                </DropdownTrigger>
+                <DropdownMenu
+                  aria-label={`文件夹 ${folder.name} 操作`}
+                  onAction={(key) => {
+                    if (disabled || active.current) return;
+                    if (key === 'rename') {
+                      setEditing(folder);
+                      setName(folder.name);
+                    } else if (key === 'delete') {
+                      if (
+                        window.confirm(
+                          `删除空文件夹“${folder.name}”？请先移出其中的订阅。`,
+                        )
                       )
-                    )
-                      void run(() => onRemove(folder.id));
-                  }
-                }}
-              >
-                <DropdownItem key="rename">重命名</DropdownItem>
-                <DropdownItem
-                  key="delete"
-                  color="danger"
-                  className="text-danger"
+                        void run(() => onRemove(folder.id));
+                    } else if (key === 'up' || key === 'down') {
+                      const index = folders.findIndex(
+                        (item) => item.id === folder.id,
+                      );
+                      const target = folders[index + (key === 'up' ? -1 : 1)];
+                      if (target) reorder(folder.id, target.id);
+                    }
+                  }}
                 >
-                  删除文件夹
-                </DropdownItem>
-              </DropdownMenu>
-            </Dropdown>
-          )}
-        </div>
-      ))}
+                  <DropdownItem key="rename">重命名</DropdownItem>
+                  <DropdownItem
+                    key="up"
+                    isDisabled={!onReorder || folders[0]?.id === folder.id}
+                  >
+                    上移
+                  </DropdownItem>
+                  <DropdownItem
+                    key="down"
+                    isDisabled={!onReorder || folders.at(-1)?.id === folder.id}
+                  >
+                    下移
+                  </DropdownItem>
+                  <DropdownItem
+                    key="delete"
+                    color="danger"
+                    className="text-danger"
+                  >
+                    删除文件夹
+                  </DropdownItem>
+                </DropdownMenu>
+              </Dropdown>
+            )}
+          </div>
+        );
+        return onReorder && !['all', 'ungrouped'].includes(folder.id) ? (
+          <FolderDragRow
+            key={folder.id}
+            id={folder.id}
+            name={folder.name}
+            disabled={disabled}
+            onMove={(targetId) => reorder(folder.id, targetId)}
+          >
+            {row}
+          </FolderDragRow>
+        ) : (
+          row
+        );
+      })}
       {selectedIds.length > 0 && (
         <div className="space-y-2">
           <label className="flex flex-col gap-1 text-xs">

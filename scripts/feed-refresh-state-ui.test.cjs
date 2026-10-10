@@ -9,7 +9,11 @@ const { test } = require('node:test');
 const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
 );
-function fixture({ batchRunning = false, feedReadFails = false } = {}) {
+function fixture({
+  batchRunning = false,
+  feedReadFails = false,
+  manualBatch,
+} = {}) {
   let route = 'A',
     index = 0,
     dirty = false,
@@ -85,17 +89,20 @@ function fixture({ batchRunning = false, feedReadFails = false } = {}) {
                         ? { items: [] }
                         : name === 'isRefreshAllMpArticlesRunning'
                           ? batchRunning
-                          : undefined,
+                          : name === 'manualRefreshBatches'
+                            ? { items: manualBatch ? [manualBatch] : [] }
+                            : undefined,
                   refetch,
                 }),
                 useMutation: () => ({
                   isLoading: name === 'refreshArticles' && sharedLoading,
                   mutateAsync: (input) => {
-                    if (name !== 'refreshArticles')
+                    if (!['refreshArticles', 'beginRefreshAll'].includes(name))
                       throw new Error(`Unexpected mutation ${String(name)}`);
                     sharedLoading = true;
                     return new Promise((resolve, reject) =>
                       requests.push({
+                        name,
                         input,
                         resolve: (value) => {
                           sharedLoading = false;
@@ -121,7 +128,7 @@ function fixture({ batchRunning = false, feedReadFails = false } = {}) {
     { get: (target, key) => (key in target ? target[key] : key) },
   );
   const toast = Object.fromEntries(
-    ['success', 'error', 'warning'].map((name) => [
+    ['success', 'error', 'warning', 'info'].map((name) => [
       name,
       (...args) => events.push([name, ...args]),
     ]),
@@ -220,7 +227,7 @@ function fixture({ batchRunning = false, feedReadFails = false } = {}) {
       (n) =>
         n.type === 'Button' &&
         (batch
-          ? String(n.props.onPress).includes('refreshMpArticles({})')
+          ? String(n.props.onPress).includes('beginRefreshAll()')
           : String(n.props.onPress).includes('const mpId = currentMpInfo.id')),
     );
     assert(node, 'refresh button exists');
@@ -307,16 +314,60 @@ test('single-feed work does not label overview or other feeds as updating; batch
   const pb = batch.props.onPress();
   await batch.props.onPress();
   assert.equal(f.requests.length, 2);
-  assert.deepEqual(JSON.parse(JSON.stringify(f.requests[1].input)), {});
-  assert.equal(f.button(true).text, '更新中');
+  assert.equal(f.requests[1].name, 'beginRefreshAll');
+  assert.equal(f.requests[1].input, undefined);
+  assert.equal(f.button(true).text, '正在受理');
   f.navigate('B');
   assert.equal(f.button().text, '更新本号');
   assert.equal(f.button().props.isDisabled, true);
   await f.button().props.onPress();
   assert.equal(f.requests.length, 2);
-  f.requests[1].resolve(complete);
+  f.requests[1].resolve({
+    total: 2,
+    queuedCount: 2,
+    skippedCount: 0,
+    reused: false,
+  });
   await pb;
+  assert(
+    f.events.some(
+      (event) =>
+        Array.isArray(event) &&
+        event[0] === 'info' &&
+        event[1].includes('共 2 个，待发送 2 个'),
+    ),
+  );
+  assert(
+    !f.events.some(
+      (event) =>
+        Array.isArray(event) &&
+        event[0] === 'success' &&
+        event[1].includes('完整更新'),
+    ),
+  );
   assert.equal(f.button().props.isDisabled, false);
+});
+test('recovered background and paused batches prevent new submissions and remain separate from single-feed feedback', async () => {
+  for (const state of ['running', 'paused']) {
+    const f = fixture({
+      manualBatch: {
+        batchId: 'synthetic-batch',
+        state,
+        items: [{ state: 'waiting', accepted: true }],
+      },
+    });
+    f.navigate('');
+    assert.equal(
+      f.button(true).text,
+      state === 'paused' ? '更新已暂停' : '后台更新中',
+    );
+    assert.equal(f.button(true).props.isDisabled, true);
+    await f.button(true).props.onPress();
+    assert.equal(f.requests.length, 0);
+    f.navigate('A');
+    assert.equal(f.button().text, '更新本号');
+    assert.equal(f.button().props.isDisabled, true);
+  }
 });
 test('failure, abort and local reread failure release single-feed and batch locks', async () => {
   const f = fixture({ feedReadFails: true });
@@ -375,5 +426,5 @@ test('a new refresh cancels the previous completion timer; background batch stay
   await f.button().props.onPress();
   assert.equal(f.requests.length, 2);
   f.navigate('');
-  assert.equal(f.button(true).text, '更新中');
+  assert.equal(f.button(true).text, '后台更新中');
 });

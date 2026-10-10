@@ -137,7 +137,7 @@ export async function managementGroups(
     platform,
     items: await db.managementGroup.findMany({
       where: { platform },
-      orderBy: { id: 'asc' },
+      orderBy: [{ order: 'asc' }, { id: 'asc' }],
     }),
   };
 }
@@ -160,11 +160,119 @@ export async function saveManagementGroup(
         });
       }
       return tx.managementGroup.create({
-        data: { id: randomUUID(), name, platform },
+        data: {
+          id: randomUUID(),
+          name,
+          platform,
+          order:
+            ((
+              await tx.managementGroup.aggregate({
+                where: { platform },
+                _max: { order: true },
+              })
+            )._max.order ?? -1) + 1,
+        },
       });
     });
   });
 }
+/** Compare the saved order inside the transaction; stale clients cannot overwrite it. */
+export async function reorderManagementGroups(
+  db: PrismaService,
+  platform: ManagementPlatform,
+  input: { ids: string[]; expectedIds: string[] },
+) {
+  if (
+    !input.ids.length ||
+    input.ids.length > 1000 ||
+    new Set(input.ids).size !== input.ids.length ||
+    new Set(input.expectedIds).size !== input.expectedIds.length ||
+    input.ids.length !== input.expectedIds.length ||
+    input.ids.some(
+      (id) => !id || id.length > 128 || !input.expectedIds.includes(id),
+    )
+  )
+    return fail('分组排序必须包含完整且不重复的 ID。', 'BAD_REQUEST');
+  return mutateManagement(async () => {
+    await createVerifiedSqliteBackup();
+    return db.$transaction(async (tx) => {
+      const saved = await tx.managementGroup.findMany({
+        where: { platform },
+        orderBy: [{ order: 'asc' }, { id: 'asc' }],
+      });
+      if (
+        saved.length !== input.ids.length ||
+        saved.some((g) => !input.ids.includes(g.id))
+      )
+        return fail('分组集合已变化，请重新读取后排序。', 'CONFLICT');
+      if (saved.some((g, i) => g.id !== input.expectedIds[i]))
+        return fail('分组顺序已变化，请重新读取后排序。', 'CONFLICT');
+      for (const [order, id] of input.ids.entries())
+        await tx.managementGroup.update({ where: { id }, data: { order } });
+      return { ids: input.ids };
+    });
+  });
+}
+
+/** Feed sorting only writes the complete membership of one group, preserving other groups. */
+export async function reorderManagementFeeds(
+  db: PrismaService,
+  input: {
+    id: string;
+    order: number;
+    expectedOrder?: number;
+    expectedGroupId?: string | null;
+  }[],
+) {
+  if (
+    !input.length ||
+    new Set(input.map((f) => f.id)).size !== input.length ||
+    input.some((f) => !Number.isSafeInteger(f.order) || f.order < 0)
+  )
+    return fail('公众号排序 ID 或顺序无效。', 'BAD_REQUEST');
+  return mutateManagement(async () => {
+    await createVerifiedSqliteBackup();
+    return db.$transaction(async (tx) => {
+      const rows = await tx.feed.findMany({
+        where: { id: { in: input.map((f) => f.id) } },
+      });
+      if (rows.length !== input.length)
+        return fail('公众号不存在。', 'NOT_FOUND');
+      const groupId = rows[0].groupId;
+      if (
+        input.some(
+          (item) =>
+            item.expectedGroupId !== undefined &&
+            item.expectedGroupId !== groupId,
+        )
+      )
+        return fail('公众号归属已变化，请重新读取后排序。', 'CONFLICT');
+      if (
+        rows.some((f) => f.groupId !== groupId) ||
+        (await tx.feed.count({ where: { groupId } })) !== rows.length
+      )
+        return fail(
+          '仅可排序同一分组的完整公众号列表，请重新读取。',
+          'CONFLICT',
+        );
+      if (
+        input.some(
+          (item) =>
+            item.expectedOrder !== undefined &&
+            rows.find((row) => row.id === item.id)?.order !==
+              item.expectedOrder,
+        )
+      )
+        return fail('公众号顺序已变化，请重新读取后排序。', 'CONFLICT');
+      for (const { id, order } of input)
+        await tx.$executeRaw(
+          Prisma.sql`UPDATE feeds SET "order" = ${order} WHERE id = ${id}`,
+        );
+      return true;
+    });
+  });
+}
+
 export async function removeManagementGroup(
   db: PrismaService,
   platform: ManagementPlatform,

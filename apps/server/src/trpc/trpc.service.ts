@@ -27,6 +27,8 @@ import {
 import { canonicalArticleUrl } from '../collection/collection-format';
 import {
   managementGroups,
+  reorderManagementGroups,
+  reorderManagementFeeds,
   saveManagementGroup,
   removeManagementGroup,
   moveManagementMembers,
@@ -74,6 +76,30 @@ import {
 export class TrpcService {
   groups() {
     return managementGroups(this.prismaService, 'wechat');
+  }
+  reorderGroups(input: { ids: string[]; expectedIds: string[] }) {
+    return reorderManagementGroups(this.prismaService, 'wechat', input);
+  }
+  async reorderFeeds(
+    input: {
+      id: string;
+      order: number;
+      expectedOrder?: number;
+      expectedGroupId?: string | null;
+    }[],
+  ) {
+    const ids = input.map((f) => f.id);
+    if (ids.some((id) => this.activeCollections.has(id)))
+      throw new TRPCError({
+        code: 'CONFLICT',
+        message: '公众号正在处理，请稍后排序。',
+      });
+    ids.forEach((id) => this.activeCollections.add(id));
+    try {
+      return await reorderManagementFeeds(this.prismaService, input);
+    } finally {
+      ids.forEach((id) => this.activeCollections.delete(id));
+    }
   }
   saveGroup(input: { id?: string; name: string }) {
     return saveManagementGroup(this.prismaService, 'wechat', input);
@@ -219,8 +245,171 @@ export class TrpcService {
   resumeSubscriptionTask(id: string) {
     return this.taskStorage(() => this.subscriptionTasks.resume(id));
   }
-  subscriptionBatchList() {
-    return this.taskStorage(() => this.subscriptionBatches.list());
+  subscriptionBatchList(includeManualRefresh = false) {
+    return this.taskStorage(async () =>
+      (await this.subscriptionBatches.list()).filter(
+        (batch) => includeManualRefresh || batch.purpose !== 'manual-refresh',
+      ),
+    );
+  }
+  async beginManualRefreshAll(originalFeedIds?: string[], intentKey?: string) {
+    if (intentKey) {
+      const original = (
+        await this.taskStorage(() => this.subscriptionBatches.list())
+      ).find(
+        (batch) =>
+          batch.purpose === 'manual-refresh' && batch.intentKey === intentKey,
+      );
+      if (original)
+        return {
+          ...original,
+          reused: true,
+          queuedCount: original.items.filter((item) => item.state === 'queued')
+            .length,
+          total: original.items.length,
+          skippedCount: 0,
+        };
+    }
+    if (this.isRefreshAllMpArticlesRunning)
+      throw new TRPCError({
+        code: 'CONFLICT',
+        message: '原批量缓存同步仍在后台运行，请等待结束；本次未再次提交。',
+      });
+    const feeds = await this.prismaService.feed.findMany({
+      ...(originalFeedIds ? { where: { id: { in: originalFeedIds } } } : {}),
+      orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],
+    });
+    const eligible = feeds.filter(
+      (feed) =>
+        feed.status === 1 &&
+        resolveCollectionRoute(feed).channel === 'wechat2rss',
+    );
+    if (!eligible.length)
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: '没有启用的微信中转订阅可提交更新。',
+      });
+    const batch = await this.taskStorage(() =>
+      this.subscriptionBatches.enqueueRefresh(
+        eligible.map((feed) => feed.id),
+        intentKey,
+      ),
+    );
+    return {
+      ...batch,
+      queuedCount: batch.items.filter((item) => item.state === 'queued').length,
+      total: batch.items.length,
+      skippedCount:
+        (originalFeedIds ? new Set(originalFeedIds).size : feeds.length) -
+        eligible.length,
+    };
+  }
+  /** Explicit overview action only. Scheduled and single-feed cache reads stay unchanged. */
+  private async runManualRefresh(
+    feedId: string,
+    stage: 'submit' | 'cache',
+  ): Promise<BatchOutcome> {
+    if (
+      this.isRefreshAllMpArticlesRunning ||
+      this.activeSubscriptionAdds.has('wechat2rss:add') ||
+      this.activeCollections.has(feedId)
+    )
+      return {
+        state: stage === 'submit' ? 'queued' : 'waiting',
+        accepted: stage === 'cache',
+        message: '已有任务处理中，等待串行处理；不会重复提交。',
+      };
+    const feed = await this.prismaService.feed.findUnique({
+      where: { id: feedId },
+    });
+    if (
+      !feed ||
+      feed.status !== 1 ||
+      resolveCollectionRoute(feed).channel !== 'wechat2rss'
+    )
+      return {
+        state: 'blocked',
+        accepted: stage === 'cache',
+        message: '订阅已停用或来源已变化，本条停止；已有内容保留。',
+      };
+    if (stage === 'cache') {
+      const result = await this.refreshMpArticlesAndUpdateFeed(
+        feedId,
+        1,
+        'local-manual',
+      );
+      const ready =
+        'bodyMissing' in result &&
+        result.articles > 0 &&
+        result.bodyMissing === 0;
+      return {
+        state: ready ? 'succeeded' : 'waiting',
+        accepted: true,
+        feedId,
+        listReady: result.articles > 0,
+        bodyReady:
+          ready &&
+          'imageBlocked' in result &&
+          result.imageBlocked === 0 &&
+          !('identitySkipped' in result && result.identitySkipped),
+        imagePendingCount:
+          'imageBlocked' in result ? result.imageBlocked : undefined,
+        message: ready
+          ? '上游已受理更新，现有缓存正文已同步；最新文章仍取决于上游生成进度。'
+          : '上游已受理，等待可用缓存；已有文章保留，后台继续检查。',
+      };
+    }
+    // A cache task may acquire the lock during the asynchronous feed lookup.
+    if (
+      this.isRefreshAllMpArticlesRunning ||
+      this.activeSubscriptionAdds.has('wechat2rss:add') ||
+      this.activeCollections.has(feedId)
+    )
+      return {
+        state: 'queued',
+        accepted: false,
+        message: '已有任务处理中，等待串行处理；本条尚未发送。',
+      };
+    this.activeSubscriptionAdds.add('wechat2rss:add');
+    this.activeCollections.add(feedId);
+    try {
+      const provider = wechat2RssProvider();
+      const account = await provider.checkAccountStatus();
+      if (account.challenged || !account.available)
+        return {
+          state: 'blocked',
+          accepted: false,
+          message: '上游账号受限或需要官方验证，本次未提交；队列已暂停。',
+        };
+      const now = Math.floor(Date.now() / 1000);
+      await createVerifiedSqliteBackup();
+      // Keep the original 15-minute per-feed reservation, including unknown results.
+      const reserved = await this.prismaService.feed.updateMany({
+        where: {
+          id: feedId,
+          status: 1,
+          collectionChannel: feed.collectionChannel,
+          providerRefreshAttemptTime: { lte: now - 900 },
+        },
+        data: { providerRefreshAttemptTime: now },
+      });
+      if (reserved.count !== 1)
+        return {
+          state: 'blocked',
+          accepted: false,
+          message: '本号更新仍在冷却期或状态已变化，本次未提交；不会自动重发。',
+        };
+      await provider.refreshSubscription(feedId);
+      return {
+        state: 'waiting',
+        accepted: true,
+        feedId,
+        message: '上游已受理更新，等待缓存生成；关闭页面后后台继续。',
+      };
+    } finally {
+      this.activeSubscriptionAdds.delete('wechat2rss:add');
+      this.activeCollections.delete(feedId);
+    }
   }
   registerSubscriptionConsumer(consumer: {
     hasPending(): Promise<boolean>;
@@ -347,6 +536,9 @@ export class TrpcService {
           : null;
       },
       (id) => this.subscriptionTasks.resume(id),
+    );
+    this.subscriptionBatches.attachRefresh((id, stage) =>
+      this.runManualRefresh(id, stage),
     );
     const { url } =
       this.configService.get<ConfigurationType['platform']>('platform')!;
@@ -741,21 +933,22 @@ export class TrpcService {
     if (this.isRefreshAllMpArticlesRunning) {
       throw new Error('批量更新正在进行，请稍后再试');
     }
-    const mps = await this.prismaService.feed.findMany({
-      orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],
-    });
-    const results: {
-      id: string;
-      name: string;
-      source: string;
-      status: 'partial' | 'pending' | 'blocked' | 'failed';
-      complete: false;
-      coverage: string;
-      message: string;
-      articles: number;
-    }[] = [];
+    // Reserve before the first await: simultaneous legacy calls cannot overlap.
     this.isRefreshAllMpArticlesRunning = true;
     try {
+      const mps = await this.prismaService.feed.findMany({
+        orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],
+      });
+      const results: {
+        id: string;
+        name: string;
+        source: string;
+        status: 'partial' | 'pending' | 'blocked' | 'failed';
+        complete: false;
+        coverage: string;
+        message: string;
+        articles: number;
+      }[] = [];
       for (const { id, mpName } of mps) {
         try {
           this.logger.log(
@@ -790,10 +983,10 @@ export class TrpcService {
           setTimeout(resolve, this.updateDelayTime * 1e3),
         );
       }
+      return results;
     } finally {
       this.isRefreshAllMpArticlesRunning = false;
     }
-    return results;
   }
 
   async getMpInfo(

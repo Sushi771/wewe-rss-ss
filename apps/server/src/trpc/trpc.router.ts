@@ -708,6 +708,16 @@ export class TrpcRouter {
   });
 
   feedRouter = this.trpcService.router({
+    reorderGroups: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            ids: z.array(z.string().min(1).max(128)).min(1).max(1000),
+            expectedIds: z.array(z.string().min(1).max(128)).min(1).max(1000),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.trpcService.reorderGroups(input)),
     groups: this.trpcService.protectedProcedure.query(() =>
       this.trpcService.groups(),
     ),
@@ -804,6 +814,40 @@ export class TrpcRouter {
     subscriptionBatches: this.trpcService.protectedProcedure.query(
       async () => ({ items: await this.trpcService.subscriptionBatchList() }),
     ),
+    manualRefreshBatches: this.trpcService.protectedProcedure.query(
+      async () => ({
+        items: (await this.trpcService.subscriptionBatchList(true)).filter(
+          (batch) => batch.purpose === 'manual-refresh',
+        ),
+      }),
+    ),
+    beginRefreshAll: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            feedIds: z
+              .array(z.string().regex(/^MP_WXS_\d{5,15}$/))
+              .min(1)
+              .max(1000)
+              .optional(),
+            intentKey: z
+              .string()
+              .regex(/^[a-f0-9]{64}$/)
+              .optional(),
+          })
+          .optional(),
+      )
+      .mutation(({ ctx, input }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '提交上游更新仅限本机手动入口。',
+          });
+        return this.trpcService.beginManualRefreshAll(
+          input?.feedIds,
+          input?.intentKey,
+        );
+      }),
     stopSubscriptionBatch: this.trpcService.protectedProcedure
       .input(z.object({ batchId: z.string().uuid() }))
       .mutation(({ input }) =>
@@ -919,17 +963,31 @@ export class TrpcRouter {
         return id;
       }),
     updateOrder: this.trpcService.protectedProcedure
-      .input(FeedSchemas.updateOrder)
-      .mutation(async ({ input }) => {
-        const updates = input.map(({ id, order }) =>
-          this.prismaService.feed.update({
-            where: { id },
-            data: { order } as any,
-          }),
-        );
-        await this.prismaService.$transaction(updates);
-        return true;
-      }),
+      .input(
+        z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(128),
+                order: z
+                  .number()
+                  .int()
+                  .nonnegative()
+                  .max(Number.MAX_SAFE_INTEGER),
+                expectedOrder: z.number().int().nonnegative().optional(),
+                expectedGroupId: z
+                  .string()
+                  .min(1)
+                  .max(128)
+                  .nullable()
+                  .optional(),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(1000),
+      )
+      .mutation(({ input }) => this.trpcService.reorderFeeds(input)),
     batchDelete: this.trpcService.protectedProcedure
       .input(z.array(z.string()))
       .mutation(async ({ input: ids }) => {

@@ -94,6 +94,7 @@ model ManagementGroup {
   id       String       @id @default(cuid())
   name     String
   platform String
+  order    Int          @default(0)
   feeds    Feed[]
   creators XhsCreator[]
 

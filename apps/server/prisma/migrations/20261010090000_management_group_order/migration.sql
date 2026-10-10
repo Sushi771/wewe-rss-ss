@@ -1,0 +1,1 @@
+ALTER TABLE "management_groups" ADD COLUMN "order" INTEGER NOT NULL DEFAULT 0;

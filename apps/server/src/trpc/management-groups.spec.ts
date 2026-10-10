@@ -110,7 +110,11 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
     for (const entry of (await fs.readdir(migrations, { withFileTypes: true }))
       .filter((e) => e.isDirectory())
       .sort((a, b) => a.name.localeCompare(b.name)))
-      if (entry.name !== migration) await apply(entry.name);
+      if (
+        entry.name !== migration &&
+        entry.name !== '20261010090000_management_group_order'
+      )
+        await apply(entry.name);
     await prisma.$executeRawUnsafe(
       'INSERT INTO accounts (id,token,name) VALUES (?,?,?)',
       'account',
@@ -176,6 +180,7 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       'PRAGMA table_info(feeds)',
     );
     await apply(migration);
+    await apply('20261010090000_management_group_order');
     expect(await rows()).toEqual(originalRows);
     expect(
       (await prisma.$queryRawUnsafe<any[]>('PRAGMA table_info(feeds)')).slice(
@@ -237,6 +242,8 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
     const { api } = caller('not logged in');
     for (const method of [
       () => api.feed.groups(),
+      () => api.feed.reorderGroups({ ids: ['x'], expectedIds: ['x'] }),
+      () => api.feed.updateOrder([{ id: 'feed-a', order: 0 }]),
       () => api.feed.saveGroup({ name: 'group' }),
       () => api.feed.removeGroup({ id: 'x' }),
       () => api.feed.moveFeeds({ ids: ['feed-a'], groupId: null }),
@@ -263,6 +270,86 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
     expect(await prisma.managementGroup.count()).toBe(0);
+  });
+  it('persists group order, appends new groups and rejects duplicates, stale lists and foreign IDs atomically', async () => {
+    const { api } = caller();
+    const a = await api.feed.saveGroup({ name: 'same' });
+    const b = await api.feed.saveGroup({ name: 'same' });
+    const foreign = await api.xiaohongshu.saveGroup({ name: 'same' });
+    const expectedIds = [a.id, b.id];
+    expect((await api.feed.groups()).items.map((g) => g.id)).toEqual(
+      expectedIds,
+    );
+    for (const ids of [[a.id, a.id], [a.id, foreign.id], [a.id]])
+      await expect(
+        api.feed.reorderGroups({ ids, expectedIds }),
+      ).rejects.toBeDefined();
+    await api.feed.reorderGroups({ ids: [b.id, a.id], expectedIds });
+    expect((await caller().api.feed.groups()).items.map((g) => g.id)).toEqual([
+      b.id,
+      a.id,
+    ]);
+    await expect(
+      api.feed.reorderGroups({ ids: [a.id, b.id], expectedIds }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    const c = await api.feed.saveGroup({ name: 'empty' });
+    expect((await api.feed.groups()).items.map((g) => g.id)).toEqual([
+      b.id,
+      a.id,
+      c.id,
+    ]);
+    expect((await api.xiaohongshu.groups()).items.map((g) => g.id)).toEqual([
+      foreign.id,
+    ]);
+  });
+  it('sorts only complete same-group membership and leaves other groups and all article fields intact', async () => {
+    const { api } = caller();
+    const g = await api.feed.saveGroup({ name: 'g' });
+    await api.feed.moveFeeds({ ids: ['feed-b'], groupId: g.id });
+    await expect(
+      api.feed.updateOrder([{ id: 'feed-b', order: 1, expectedGroupId: null }]),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    for (const input of [
+      [],
+      [{ id: 'feed-a', order: -1 }],
+      [
+        { id: 'feed-a', order: 0 },
+        { id: 'feed-a', order: 1 },
+      ],
+      [
+        { id: 'feed-a', order: 0 },
+        { id: 'feed-b', order: 1 },
+      ],
+    ])
+      await expect(api.feed.updateOrder(input)).rejects.toBeDefined();
+    await api.feed.updateOrder([{ id: 'feed-a', order: 9 }]);
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: 'feed-b' } })).order,
+    ).toBe(0);
+    expect(
+      (await prisma.article.findUniqueOrThrow({ where: { id: 'article' } }))
+        .contentHtml,
+    ).toBe('old-body');
+    await api.feed.moveFeeds({ ids: ['feed-b'], groupId: null });
+    await expect(
+      api.feed.updateOrder([{ id: 'feed-a', order: 1 }]),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await api.feed.updateOrder([
+      { id: 'feed-b', order: 0 },
+      { id: 'feed-a', order: 1 },
+    ]);
+    expect((await api.feed.list({})).items.map((f) => f.id)).toEqual([
+      'feed-b',
+      'feed-a',
+    ]);
+    await expect(
+      api.feed.updateOrder([
+        { id: 'feed-b', order: 1, expectedOrder: 0 },
+        { id: 'feed-a', order: 0, expectedOrder: 0 },
+      ]),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    // This suite's afterEach compares every preexisting non-classification field.
+    await prisma.$executeRawUnsafe('UPDATE feeds SET "order" = 0');
   });
   it('renames and deletes empty groups, rejects nonempty groups, and atomically moves/deduplicates both platforms', async () => {
     const { api } = caller();

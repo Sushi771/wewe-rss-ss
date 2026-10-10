@@ -29,13 +29,16 @@ type Item = Omit<BatchOutcome, 'state'> & {
   index: number;
   articleUrl?: string;
   state: ItemState;
+  refreshChecks?: number;
+  refreshAfter?: number;
 };
 type Batch = {
   version: 1;
   batchId: string;
   instance: string;
   signature: string;
-  purpose?: 'subscription' | 'single-download';
+  purpose?: 'subscription' | 'single-download' | 'manual-refresh';
+  intentKey?: string;
   createdAt: number;
   updatedAt: number;
   nextSubmissionAt: number;
@@ -47,6 +50,8 @@ const hash = (value: string) =>
 const live = (b: Batch) => ['queued', 'running', 'paused'].includes(b.state);
 const view = (b: Batch) => ({
   batchId: b.batchId,
+  purpose: b.purpose || 'subscription',
+  intentKey: b.intentKey,
   state: b.state,
   createdAt: b.createdAt,
   updatedAt: b.updatedAt,
@@ -77,12 +82,27 @@ export class Wechat2RssSubscriptionBatches {
   private stopped = false;
   private busy = false;
   private accepting = false;
+  private refreshAcceptance?: Promise<
+    ReturnType<typeof view> & { reused: boolean }
+  >;
   private timer?: NodeJS.Timeout;
   private consumer?: {
     hasPending(): Promise<boolean>;
     runDue(): Promise<void>;
     snapshot?(backupFile: string): Promise<void>;
   };
+  private refresh?: (
+    feedId: string,
+    stage: 'submit' | 'cache',
+  ) => Promise<BatchOutcome>;
+
+  /** Manual refresh shares the existing serial scheduler and durable records. */
+  attachRefresh(
+    run: (feedId: string, stage: 'submit' | 'cache') => Promise<BatchOutcome>,
+  ) {
+    if (this.refresh) throw new Error('BATCH_REFRESH_EXISTS');
+    this.refresh = run;
+  }
 
   /** A single-download processor may share this scheduler. It owns its private
    * records and file validation, and must never create another polling timer. */
@@ -130,25 +150,31 @@ export class Wechat2RssSubscriptionBatches {
     try {
       const file = path.join(await this.storage(), id + '.json');
       const stat = await fs.lstat(file);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 100000)
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 500000)
         throw new Error('BATCH_INVALID');
       const b = JSON.parse(await fs.readFile(file, 'utf8')) as Batch;
       if (
+        (b.purpose !== 'manual-refresh' && stat.size > 100000) ||
         b.version !== 1 ||
         b.batchId !== id ||
         !/^[a-f0-9]{64}$/.test(b.instance) ||
         !/^[a-f0-9]{64}$/.test(b.signature) ||
         (b.purpose !== undefined &&
-          !['subscription', 'single-download'].includes(b.purpose)) ||
+          !['subscription', 'single-download', 'manual-refresh'].includes(
+            b.purpose,
+          )) ||
         !['queued', 'running', 'paused', 'completed', 'stopped'].includes(
           b.state,
         ) ||
         ![b.createdAt, b.updatedAt, b.nextSubmissionAt].every(
           Number.isSafeInteger,
         ) ||
+        (b.intentKey !== undefined &&
+          (b.purpose !== 'manual-refresh' ||
+            !/^[a-f0-9]{64}$/.test(b.intentKey))) ||
         !Array.isArray(b.items) ||
         !b.items.length ||
-        b.items.length > 20
+        b.items.length > (b.purpose === 'manual-refresh' ? 1000 : 20)
       )
         throw new Error('BATCH_INVALID');
       b.items.forEach((item, index) => {
@@ -178,7 +204,16 @@ export class Wechat2RssSubscriptionBatches {
           (item.accepted !== undefined && typeof item.accepted !== 'boolean') ||
           (item.articleUrl !== undefined &&
             subscriptionArticleUrl(item.articleUrl) !== item.articleUrl) ||
-          (['queued', 'submitting', 'waiting'].includes(item.state) &&
+          (b.purpose === 'manual-refresh' &&
+            (!item.feedId || item.articleUrl || item.taskId)) ||
+          (item.refreshChecks !== undefined &&
+            (!Number.isSafeInteger(item.refreshChecks) ||
+              item.refreshChecks < 0 ||
+              item.refreshChecks > 10)) ||
+          (item.refreshAfter !== undefined &&
+            !Number.isSafeInteger(item.refreshAfter)) ||
+          (b.purpose !== 'manual-refresh' &&
+            ['queued', 'submitting', 'waiting'].includes(item.state) &&
             !item.articleUrl)
         )
           throw new Error('BATCH_INVALID');
@@ -323,6 +358,73 @@ export class Wechat2RssSubscriptionBatches {
       this.accepting = false;
     }
   }
+  async enqueueRefresh(feedIds: string[], intentKey?: string) {
+    if (this.refreshAcceptance)
+      return { ...(await this.refreshAcceptance), reused: true };
+    const pending = this.acceptRefresh(feedIds, intentKey);
+    this.refreshAcceptance = pending;
+    try {
+      return await pending;
+    } finally {
+      this.refreshAcceptance = undefined;
+    }
+  }
+  private async acceptRefresh(feedIds: string[], intentKey?: string) {
+    if (this.accepting) throw new Error('BATCH_BUSY');
+    this.accepting = true;
+    try {
+      if (
+        !this.refresh ||
+        !feedIds.length ||
+        feedIds.length > 1000 ||
+        feedIds.some((id) => !/^MP_WXS_\d{5,15}$/.test(id))
+      )
+        throw new Error('BATCH_INVALID');
+      const records = await this.records();
+      if (intentKey !== undefined && !/^[a-f0-9]{64}$/.test(intentKey))
+        throw new Error('BATCH_INVALID');
+      const original =
+        intentKey &&
+        records.find(
+          (b) => b.purpose === 'manual-refresh' && b.intentKey === intentKey,
+        );
+      if (original) return { ...view(original), reused: true };
+      // A repeated overview click rejoins the existing request even if order changed.
+      const same = records.find(
+        (b) => live(b) && b.purpose === 'manual-refresh',
+      );
+      if (same) return { ...view(same), reused: true };
+      if (records.some(live)) throw new Error('BATCH_BUSY');
+      const ids = [...new Set(feedIds)];
+      const b: Batch = {
+        version: 1,
+        batchId: randomUUID(),
+        instance: hash(this.instance()),
+        signature: hash(JSON.stringify(['manual-refresh', [...ids].sort()])),
+        purpose: 'manual-refresh',
+        intentKey,
+        createdAt: this.now(),
+        updatedAt: this.now(),
+        nextSubmissionAt: Math.max(
+          this.now(),
+          ...records.map((record) => record.nextSubmissionAt),
+        ),
+        state: 'queued',
+        items: ids.map((feedId, index) => ({
+          index,
+          feedId,
+          state: 'queued',
+          accepted: false,
+          message: '等待串行提交上游更新。',
+        })),
+      };
+      await this.write(b);
+      this.schedule();
+      return { ...view(b), reused: false };
+    } finally {
+      this.accepting = false;
+    }
+  }
   async stop(id: string) {
     const b = await this.read(id);
     if (!b) return null;
@@ -341,6 +443,29 @@ export class Wechat2RssSubscriptionBatches {
     if (!b || b.state !== 'paused') return b ? view(b) : null;
     if (b.instance !== hash(this.instance()))
       throw new Error('BATCH_INSTANCE_CHANGED');
+    if (b.purpose === 'manual-refresh') {
+      // Never turn an interrupted/unknown /add into another submission.
+      // Only cache reads of a confirmed accepted request may be resumed.
+      for (const item of b.items)
+        if (['failed', 'blocked'].includes(item.state) && item.accepted) {
+          item.state = 'waiting';
+          item.refreshChecks = 0;
+          item.refreshAfter = this.now();
+          item.message = '已恢复缓存检查；不会再次提交上游更新。';
+        }
+      if (
+        b.items.some(
+          (i) =>
+            ['failed', 'blocked', 'submitting'].includes(i.state) &&
+            !i.accepted,
+        )
+      )
+        return view(b);
+      b.state = 'running';
+      await this.write(b);
+      this.schedule();
+      return view(b);
+    }
     for (const item of b.items)
       if (['failed', 'blocked'].includes(item.state) && item.articleUrl) {
         if (item.taskId) {
@@ -372,8 +497,14 @@ export class Wechat2RssSubscriptionBatches {
     this.stopped = false;
     this.initialized = true;
     if (
-      (await this.records()).some((b) =>
-        ['queued', 'running'].includes(b.state),
+      (await this.records()).some(
+        (b) =>
+          ['queued', 'running'].includes(b.state) ||
+          (b.purpose === 'manual-refresh' &&
+            b.state === 'stopped' &&
+            b.items.some((item) =>
+              ['waiting', 'submitting'].includes(item.state),
+            )),
       ) ||
       (await this.consumer?.hasPending())
     )
@@ -395,13 +526,23 @@ export class Wechat2RssSubscriptionBatches {
     try {
       await this.consumer?.runDue();
       if (this.stopped) return;
-      const b = (await this.records()).find((b) =>
-        ['queued', 'running'].includes(b.state),
+      const b = (await this.records()).find(
+        (b) =>
+          ['queued', 'running'].includes(b.state) ||
+          (b.purpose === 'manual-refresh' &&
+            b.state === 'stopped' &&
+            b.items.some((item) =>
+              ['waiting', 'submitting'].includes(item.state),
+            )),
       );
       if (!b) return;
       if (b.instance !== hash(this.instance())) {
         b.state = 'paused';
         await this.write(b);
+        return;
+      }
+      if (b.purpose === 'manual-refresh') {
+        await this.runRefresh(b);
         return;
       }
       // Accepted cache work is independent of later serial submissions. Each
@@ -478,13 +619,81 @@ export class Wechat2RssSubscriptionBatches {
       this.busy = false;
       if (
         !this.stopped &&
-        ((await this.records()).some((b) =>
-          ['queued', 'running'].includes(b.state),
+        ((await this.records()).some(
+          (b) =>
+            ['queued', 'running'].includes(b.state) ||
+            (b.purpose === 'manual-refresh' &&
+              b.state === 'stopped' &&
+              b.items.some((item) =>
+                ['waiting', 'submitting'].includes(item.state),
+              )),
         ) ||
           (await this.consumer?.hasPending()))
       )
         this.schedule();
     }
+  }
+  private async runRefresh(b: Batch) {
+    const unknown = b.items.find((i) => i.state === 'submitting');
+    if (unknown) {
+      unknown.state = 'blocked';
+      unknown.accepted = false;
+      unknown.message =
+        '上游提交回执未确认，已暂停；不会自动重发，请核对原请求。';
+      if (b.state !== 'stopped') b.state = 'paused';
+      await this.write(b);
+      return;
+    }
+    const item =
+      b.items.find(
+        (i) => i.state === 'queued' && b.nextSubmissionAt <= this.now(),
+      ) ||
+      b.items.find(
+        (i) => i.state === 'waiting' && (i.refreshAfter || 0) <= this.now(),
+      );
+    if (!item || !this.refresh) return;
+    const stage = item.state === 'queued' ? 'submit' : 'cache';
+    if (stage === 'submit') {
+      item.state = 'submitting';
+      b.state = 'running';
+      b.nextSubmissionAt = this.now() + 30000;
+      await this.write(b); // Reserve exactly once before an /add can leave the process.
+    }
+    let result: BatchOutcome;
+    try {
+      result = await this.refresh(item.feedId!, stage);
+    } catch {
+      result = {
+        state: 'blocked',
+        accepted: stage === 'cache',
+        message:
+          stage === 'submit'
+            ? '上游更新回执未确认，已暂停；不会自动重发。'
+            : '缓存检查失败，已暂停；上游请求不会重发。',
+      };
+    }
+    if (this.stopped) return;
+    const current = await this.read(b.batchId);
+    if (!current) return;
+    const target = current.items[item.index];
+    Object.assign(target, result);
+    target.refreshChecks =
+      stage === 'cache' ? (target.refreshChecks || 0) + 1 : 0;
+    target.refreshAfter = this.now() + 30000;
+    if (target.state === 'waiting' && target.refreshChecks >= 10) {
+      target.state = 'blocked';
+      target.message =
+        '上游已受理，缓存同步仍未就绪；已停止检查，已有内容保留。';
+    }
+    if (current.state !== 'stopped')
+      current.state = ['blocked', 'failed'].includes(target.state)
+        ? 'paused'
+        : current.items.some((i) =>
+              ['queued', 'waiting', 'submitting'].includes(i.state),
+            )
+          ? 'running'
+          : 'completed';
+    await this.write(current);
   }
   close() {
     this.stopped = true;
