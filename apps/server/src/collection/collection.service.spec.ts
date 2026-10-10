@@ -185,7 +185,7 @@ describe('local collection with real SQLite migrations', () => {
       path.join(offlineDirectory, offline!.incomplete[0]),
     );
     expect(path.dirname(publisherDirectory)).toBe(
-      path.join(offlineDirectory, '未分组'),
+      path.join(offlineDirectory, '2024-12-06_未分组'),
     );
     const notes = (await fs.readdir(publisherDirectory)).filter((name) =>
       name.endsWith('.md'),
