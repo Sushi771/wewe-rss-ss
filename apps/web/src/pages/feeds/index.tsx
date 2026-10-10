@@ -358,6 +358,18 @@ const Feeds = () => {
           .filter(Boolean),
       ),
     ];
+    if (
+      !wxsLinks.length ||
+      wxsLinks.some(
+        (link) =>
+          !/^https:\/\/mp\.weixin\.qq\.com\/s(?:\/[^?#\s]+|\?[^\s]+)(?:[?#][^\s]*)?$/.test(
+            link,
+          ),
+      )
+    ) {
+      toast.error('请输入公众号文章链接，一行一条；输入已保留');
+      return;
+    }
     if (wxsLinks.length > 20) {
       toast.error('每次最多添加20个公众号，输入链接已保留');
       return;
@@ -365,6 +377,7 @@ const Feeds = () => {
     const selectedSource = addSourceSelection;
     const failedLinks: string[] = [];
     let pending = false;
+    let keepReceipt = false;
     addingSubscriptions.current = true;
     cancelSubscriptions.current = false;
     setIsAddingSubscriptions(true);
@@ -390,7 +403,73 @@ const Feeds = () => {
             await queryUtils.article.summary.invalidate();
             continue;
           }
-          if ('source' in result) {
+          // 新增记录与正文缓存是两个结果。先刷新本地视图，再呈现回执；
+          // 缓存待完成时也可能已有部分正文，不能在刷新前退出本批。
+          if (result.accepted && result.feed) {
+            try {
+              await queryUtils.article.list.reset();
+              await queryUtils.article.summary.invalidate();
+            } catch {
+              setAddMessages((previous) => [
+                ...previous,
+                '本地列表重新读取未完成，请关闭弹窗后重新读取页面；无需重新新增。',
+              ]);
+            }
+          }
+          if (cancelSubscriptions.current) continue;
+          if ('requestedSource' in result) {
+            keepReceipt = true;
+            const identity = result.feed
+              ? `${result.created ? '新增成功' : '已有订阅'}：${result.feed.mpName}`
+              : result.accepted
+                ? '新增请求已受理，等待订阅缓存'
+                : '未新增订阅';
+            const details = `${identity}。${result.message || '订阅请求已受理，文章尚未核验。'}`;
+            setAddMessages((previous) => [...previous, details]);
+            if (!result.accepted || !result.feed) {
+              failedLinks.push(...wxsLinks.slice(index));
+              pending = true;
+              if (result.status === 'failed')
+                toast.error('新增失败', { description: details });
+              else
+                toast.warning(
+                  result.status === 'blocked' ? '新增受限' : '等待首批缓存',
+                  { description: details },
+                );
+              break;
+            }
+            if (result.status === 'source-preserved') {
+              toast.warning('现有订阅来源保持', {
+                description:
+                  '本号仍使用原来源，原有内容保持；本次没有切换来源或读取原来源。',
+              });
+            } else if (
+              result.status === 'blocked' ||
+              result.status === 'pending' ||
+              result.pending
+            ) {
+              toast.warning(
+                result.status === 'blocked'
+                  ? '订阅已保留，缓存读取受限'
+                  : '订阅已保留，等待首批缓存',
+                { description: details },
+              );
+              failedLinks.push(...wxsLinks.slice(index + 1));
+              pending = true;
+              break;
+            } else if (result.status === 'updated') {
+              toast.success(
+                result.created
+                  ? '新增成功，当前缓存已入库'
+                  : '已有订阅，当前缓存已入库',
+                { description: details },
+              );
+            } else {
+              toast.warning('订阅已受理，文章尚未核验', {
+                description: details,
+              });
+            }
+          } else if ('source' in result) {
             if (result.officialVerification)
               setAddVerification(result.officialVerification);
             const details = [
@@ -425,17 +504,7 @@ const Feeds = () => {
                 description: result.feed.mpName,
               },
             );
-          } else if (result.sourceBindingChanged === false)
-            toast.warning('现有订阅来源保持', {
-              description:
-                '添加请求已受理；本号仍使用原来源，文章尚未核验。来源切换需另行核对。',
-            });
-          else
-            toast.success('订阅已受理，文章尚未核验', {
-              description: result.feed.mpName,
-            });
-          await queryUtils.article.list.reset();
-          await queryUtils.article.summary.invalidate();
+          }
         } catch (error) {
           failedLinks.push(...wxsLinks.slice(index));
           pending = true;
@@ -460,7 +529,12 @@ const Feeds = () => {
       setWxsLink((current) =>
         current === wxsLink ? failedLinks.join('\n') : current,
       );
-      if (!failedLinks.length && !pending && !cancelSubscriptions.current)
+      if (
+        !failedLinks.length &&
+        !pending &&
+        !keepReceipt &&
+        !cancelSubscriptions.current
+      )
         onClose();
       addingSubscriptions.current = false;
       setIsAddingSubscriptions(false);
@@ -1712,7 +1786,7 @@ const Feeds = () => {
                 </label>
                 {addSourceSelection === 'wechat2rss' && (
                   <p className="text-default-600 text-sm">
-                    此来源需要软件授权及本机私有实例。尚未采购时先完成采购与部署；已采购时核对启用和配置。受理不代表取得正文图片，已有订阅不会自动切换来源。
+                    此来源需要已授权的私有实例。新增后读取首批缓存；缓存尚未就绪时，从订阅列表使用原“更新”按钮读取，无需再次新增。实际正文和图片以缓存结果为准，已有订阅保留原来源。
                   </p>
                 )}
                 <p className="text-default-600 text-sm" role="status">
@@ -1758,6 +1832,8 @@ const Feeds = () => {
                 {addMessages.length > 0 && (
                   <ul
                     role="status"
+                    aria-live="polite"
+                    aria-label="新增订阅处理结果"
                     className="text-default-600 space-y-2 text-sm"
                   >
                     {addMessages.map((message, index) => (
@@ -1795,7 +1871,11 @@ const Feeds = () => {
               </ModalBody>
               <ModalFooter>
                 <Button color="danger" variant="flat" onPress={handleCancelAdd}>
-                  {isAddingSubscriptions ? '停止后续并关闭' : '取消'}
+                  {isAddingSubscriptions
+                    ? '停止后续并关闭'
+                    : addMessages.length
+                      ? '关闭结果'
+                      : '取消'}
                 </Button>
                 <Button
                   color="primary"

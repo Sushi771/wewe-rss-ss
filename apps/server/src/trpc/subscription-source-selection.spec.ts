@@ -8,6 +8,7 @@ import { TrpcRouter } from './trpc.router';
 import { TrpcService } from './trpc.service';
 import * as backups from '../collection/sqlite-backup';
 import { SubscriptionDiscoveryValidator } from '../collection/subscription-add';
+import { CollectionService } from '../collection/collection.service';
 
 // Actual router, paid Provider, SQLite transactions and consistent backup.
 // Only upstream responses and the native adapter are synthetic; no platform calls.
@@ -62,6 +63,10 @@ describe('explicit add source through original router (offline SQLite)', () => {
     await prisma.article.deleteMany();
     await prisma.feed.deleteMany();
     await prisma.account.deleteMany();
+    await fs.rm(path.join(root, '.wechat2rss-add'), {
+      recursive: true,
+      force: true,
+    });
     await prisma.account.create({
       data: {
         id: '123',
@@ -92,6 +97,15 @@ describe('explicit add source through original router (offline SQLite)', () => {
       events.push(url.pathname);
       if (url.origin !== 'http://127.0.0.1:18080')
         throw new Error('NETWORK_FORBIDDEN');
+      if (url.pathname === '/login/list')
+        return new Response(
+          JSON.stringify({
+            err: '',
+            data: [{ available: true, needCheck: false }],
+          }),
+        );
+      if (url.pathname === `/feed/${number}.json`)
+        return new Response(JSON.stringify({ items: [] }));
       if (url.pathname === '/addurl')
         return new Response(
           JSON.stringify({
@@ -136,7 +150,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
       prisma as any,
       config,
       {} as any,
-      {} as any,
+      new CollectionService(prisma as any),
       discovery || undefined,
     );
     const router = new TrpcRouter(
@@ -219,7 +233,16 @@ describe('explicit add source through original router (offline SQLite)', () => {
       pending: true,
       feed: { id: feedId, collectionChannel: 'wechat2rss' },
     });
-    expect(events).toEqual(['backup', '/addurl', '/list']);
+    expect(events).toEqual([
+      '/login/list',
+      'backup',
+      '/addurl',
+      '/list',
+      'backup',
+      '/login/list',
+      '/list',
+      `/feed/${number}.json`,
+    ]);
     expect(native.discover).not.toHaveBeenCalled();
     expect(native.repairExisting).not.toHaveBeenCalled();
     expect(await prisma.article.count()).toBe(0);
@@ -265,7 +288,8 @@ describe('explicit add source through original router (offline SQLite)', () => {
     });
     expect(result).toMatchObject({
       sourceBindingChanged: false,
-      pending: true,
+      pending: false,
+      status: 'source-preserved',
       feed: { collectionChannel: 'owner-weread-latest' },
     });
     expect(await read()).toEqual(before);
@@ -325,7 +349,16 @@ describe('explicit add source through original router (offline SQLite)', () => {
       accepted: true,
       pending: true,
     });
-    expect(events).toEqual(['backup', '/addurl', '/list']);
+    expect(events).toEqual([
+      '/login/list',
+      'backup',
+      '/addurl',
+      '/list',
+      'backup',
+      '/login/list',
+      '/list',
+      `/feed/${number}.json`,
+    ]);
   });
 
   it.each(['', 'https://example.com/', 'http://user:secret@127.0.0.1:18080/'])(
@@ -353,13 +386,17 @@ describe('explicit add source through original router (offline SQLite)', () => {
     },
   );
 
-  it('backup failure prevents paid requests and preserves the empty database', async () => {
+  it('backup failure prevents /addurl and preserves the empty database', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     backup.mockRejectedValueOnce(new Error('synthetic-backup-failure'));
     await expect(
       setup().caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
-    ).rejects.toThrow('synthetic-backup-failure');
-    expect(request).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({
+      status: 'failed',
+      accepted: false,
+      code: 'ADD_FAILED',
+    });
+    expect(events).toEqual(['/login/list']);
     expect(await prisma.feed.count()).toBe(0);
     expect(native.discover).not.toHaveBeenCalled();
   });
@@ -393,7 +430,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
         }),
       ).rejects.toMatchObject({ code: 'CONFLICT' });
       expect(backup).toHaveBeenCalledTimes(1);
-      expect(request).not.toHaveBeenCalled();
+      expect(events).toEqual(['/login/list']);
     } finally {
       release();
       await first;
@@ -413,22 +450,22 @@ describe('explicit add source through original router (offline SQLite)', () => {
     backup.mockRejectedValueOnce(new Error('synthetic-backup-failure'));
     await expect(
       caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
-    ).rejects.toThrow('synthetic-backup-failure');
-    expect(request).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({ status: 'failed', accepted: false });
+    expect(events).toEqual(['/login/list']);
     request.mockRejectedValueOnce(
       new Error('synthetic-private-request-failure'),
     );
     await expect(
       caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
-    ).rejects.toThrow('WECHAT2RSS_REQUEST_FAILED');
-    expect(request).toHaveBeenCalledTimes(1);
+    ).resolves.toMatchObject({ status: 'failed', accepted: false });
+    expect(request).toHaveBeenCalledTimes(2);
     expect(await prisma.feed.count()).toBe(0);
     const later = await caller.feed.addFromArticle({
       articleUrl,
       source: 'wechat2rss',
     });
     expect(later).toMatchObject({ sourceBindingChanged: true });
-    expect(request).toHaveBeenCalledTimes(3);
+    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
     expect(native.discover).not.toHaveBeenCalled();
   });
 
@@ -441,7 +478,11 @@ describe('explicit add source through original router (offline SQLite)', () => {
     );
     await expect(
       setup().caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
-    ).rejects.toThrow('WECHAT2RSS_UPSTREAM_REJECTED');
+    ).resolves.toMatchObject({
+      status: 'failed',
+      accepted: false,
+      code: 'ADD_FAILED',
+    });
     expect(request).toHaveBeenCalledTimes(1);
     expect(native.discover).not.toHaveBeenCalled();
     expect(await prisma.feed.count()).toBe(0);
@@ -460,6 +501,191 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(request).not.toHaveBeenCalled();
     expect(backup).not.toHaveBeenCalled();
     expect(native.discover).not.toHaveBeenCalled();
+  });
+
+  it('new subscription imports a ready cache then duplicates and restart only read it', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const original = request.getMockImplementation()!;
+    const canonical = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=9&idx=1`;
+    request.mockImplementation(async (...args) =>
+      new URL(String(args[0])).pathname === `/feed/${number}.json`
+        ? new Response(
+            JSON.stringify({
+              items: [
+                {
+                  id: canonical,
+                  title: '合成完整正文',
+                  date_published: '2026-10-01T12:00:00+08:00',
+                  content_html: '<p>合成完整正文与段落</p>',
+                },
+              ],
+            }),
+          )
+        : original(...args),
+    );
+    const first = await setup().caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(first).toMatchObject({
+      status: 'updated',
+      created: true,
+      pending: false,
+      upstreamSubmitted: true,
+      feed: { collectionChannel: 'wechat2rss' },
+      sync: {
+        articles: 1,
+        created: 1,
+        accepted: false,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      },
+    });
+    expect(await prisma.article.count()).toBe(1);
+    const old = await prisma.article.findMany();
+    const second = await setup().caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(second).toMatchObject({
+      status: 'updated',
+      created: false,
+      pending: false,
+      upstreamSubmitted: false,
+      sync: { created: 0, updated: 0 },
+    });
+    expect(await prisma.article.findMany()).toEqual(old);
+    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+    expect(events.some((x) => x.startsWith('/add/'))).toBe(false);
+    const known = await setup().caller.feed.addFromArticle({
+      articleUrl: canonical,
+      source: 'wechat2rss',
+    });
+    expect(known).toMatchObject({
+      status: 'updated',
+      created: false,
+      upstreamSubmitted: false,
+    });
+    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+  });
+
+  it('empty first cache preserves the new subscription without advancing successful sync time', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const result = await setup().caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(result).toMatchObject({
+      status: 'pending',
+      accepted: true,
+      pending: true,
+      created: true,
+      feed: { syncTime: 0 },
+      sync: { articles: 0, accepted: false },
+    });
+    expect(await prisma.feed.count()).toBe(1);
+    expect(await prisma.article.count()).toBe(0);
+  });
+
+  it('accepted identity pending resumes /list without replaying /addurl', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const original = request.getMockImplementation()!;
+    let reads = 0;
+    request.mockImplementation(async (...args) =>
+      new URL(String(args[0])).pathname === '/list' && reads++ === 0
+        ? new Response(
+            JSON.stringify({ err: '', data: [], meta: { total: 0 } }),
+          )
+        : original(...args),
+    );
+    expect(
+      await setup().caller.feed.addFromArticle({
+        articleUrl,
+        source: 'wechat2rss',
+      }),
+    ).toMatchObject({
+      accepted: true,
+      status: 'pending',
+      feed: null,
+      code: 'SUBSCRIPTION_ID_PENDING',
+    });
+    expect(await prisma.feed.count()).toBe(0);
+    expect(
+      await setup().caller.feed.addFromArticle({
+        articleUrl,
+        source: 'wechat2rss',
+      }),
+    ).toMatchObject({
+      accepted: true,
+      status: 'pending',
+      created: true,
+      upstreamSubmitted: false,
+      feed: { id: feedId },
+    });
+    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+  });
+
+  it('uncertain /addurl response stays pending across restart with no replay or raw error', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const original = request.getMockImplementation()!;
+    let adds = 0;
+    request.mockImplementation(async (...args) => {
+      if (new URL(String(args[0])).pathname === '/addurl') {
+        adds++;
+        throw Error('synthetic-token-secret');
+      }
+      return original(...args);
+    });
+    const first = await setup().caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(first).toMatchObject({
+      status: 'failed',
+      accepted: false,
+      upstreamSubmitted: true,
+      feed: null,
+    });
+    expect(JSON.stringify(first)).not.toContain('synthetic-token-secret');
+    expect(
+      await setup().caller.feed.addFromArticle({
+        articleUrl,
+        source: 'wechat2rss',
+      }),
+    ).toMatchObject({
+      status: 'pending',
+      accepted: false,
+      upstreamSubmitted: false,
+      code: 'ADD_RESULT_UNCONFIRMED',
+    });
+    expect(adds).toBe(1);
+    expect(await prisma.feed.count()).toBe(0);
+  });
+
+  it('account challenge stops before backup, /addurl, list or new feed', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    request.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          err: '',
+          data: [{ available: false, needCheck: true }],
+        }),
+      ),
+    );
+    expect(
+      await setup().caller.feed.addFromArticle({
+        articleUrl,
+        source: 'wechat2rss',
+      }),
+    ).toMatchObject({
+      status: 'blocked',
+      code: 'ACCOUNT_CHALLENGED',
+      accepted: false,
+      feed: null,
+    });
+    expect(backup).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(await prisma.feed.count()).toBe(0);
   });
 
   it('rejects unsupported sources and unauthenticated capability/mutation before either source', async () => {

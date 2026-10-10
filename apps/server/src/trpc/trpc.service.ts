@@ -12,6 +12,8 @@ import { CollectionService } from '../collection/collection.service';
 import { wechat2RssProvider } from '../collection/provider-registry';
 import { Wechat2RssProvider } from '../collection/providers/wechat2rss';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
+import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
+import { canonicalArticleUrl } from '../collection/collection-format';
 import {
   managementGroups,
   saveManagementGroup,
@@ -722,10 +724,96 @@ export class TrpcService {
         message: '已有 Wechat2RSS 公众号添加进行中，本次未发送上游请求。',
       });
     this.activeSubscriptionAdds.add(addKey);
+    let upstreamSubmitted = false;
     try {
       const provider = wechat2RssProvider();
-      await createVerifiedSqliteBackup();
-      const accepted = await provider.addSubscription(url);
+      let knownId: string | undefined;
+      try {
+        knownId = canonicalArticleUrl(url).id;
+      } catch {
+        /* Short links need upstream resolution. */
+      }
+      const known = await this.prismaService.article.findFirst({
+        where: {
+          OR: [
+            { sourceUrl: url },
+            { verifiedSourceUrl: url },
+            ...(knownId ? [{ id: knownId }] : []),
+          ],
+        },
+        select: { mpId: true },
+      });
+      if (known) {
+        const feed = await this.prismaService.feed.findUniqueOrThrow({
+          where: { id: known.mpId },
+        });
+        return this.finishWechat2RssSubscription(feed, false, false);
+      }
+      const account = await provider.checkAccountStatus();
+      if (!account.available)
+        return {
+          requestedSource: 'wechat2rss' as const,
+          sourceBindingChanged: false,
+          status: 'blocked' as const,
+          accepted: false,
+          pending: true,
+          created: false,
+          feed: null,
+          upstreamSubmitted: false,
+          sync: null,
+          code: account.challenged
+            ? 'ACCOUNT_CHALLENGED'
+            : 'ACCOUNT_UNAVAILABLE',
+          message: account.challenged
+            ? '私有实例账号受限，本次未新增；请本人在实例处理，链接已保留。'
+            : '私有实例没有正常登录账号，本次未新增，链接已保留。',
+        };
+      const backup = await createVerifiedSqliteBackup();
+      if (!('source' in backup) || typeof backup.source !== 'string')
+        throw new Error('SQLite 一致性备份没有确认源库，本次未新增。');
+      const journal = await wechat2RssAddReceipt(
+        backup.source,
+        url,
+        backup.backup,
+      );
+      let feedPath = journal.receipt?.feedPath;
+      if (journal.receipt && !feedPath)
+        return {
+          requestedSource: 'wechat2rss' as const,
+          sourceBindingChanged: false,
+          status: 'pending' as const,
+          accepted: false,
+          pending: true,
+          created: false,
+          feed: null,
+          upstreamSubmitted: false,
+          sync: null,
+          code: 'ADD_RESULT_UNCONFIRMED',
+          message:
+            '此前新增请求结果尚未确认，本次未重发；请在私有实例核对是否已添加，原链接已保留。',
+        };
+      if (!feedPath) {
+        await journal.claim();
+        upstreamSubmitted = true;
+        feedPath = await provider.acceptSubscription(url);
+        await journal.accepted(feedPath);
+      }
+      const accepted = await provider.resolveAcceptedSubscription(feedPath);
+      if (!accepted)
+        return {
+          requestedSource: 'wechat2rss' as const,
+          sourceBindingChanged: false,
+          status: 'pending' as const,
+          accepted: true,
+          pending: true,
+          created: false,
+          feed: null,
+          upstreamSubmitted,
+          sync: null,
+          code: 'SUBSCRIPTION_ID_PENDING',
+          message:
+            '上游已受理，订阅身份尚未出现在列表；稍后提交同一链接仅核对状态，不重复新增。',
+        };
       const old = await this.prismaService.feed.findUnique({
         where: { id: accepted.feedId },
       });
@@ -741,19 +829,107 @@ export class TrpcService {
             mpIntro: '',
             updateTime: 0,
             syncTime: 0,
+            hasHistory: -1,
             collectionChannel: 'wechat2rss',
           },
         }));
+      return await this.finishWechat2RssSubscription(
+        feed,
+        !old,
+        upstreamSubmitted,
+      );
+    } catch (error) {
+      if (error instanceof TRPCError) throw error;
       return {
         requestedSource: 'wechat2rss' as const,
-        sourceBindingChanged: !old,
-        status: 'accepted' as const,
-        feed,
-        accepted: true as const,
-        pending: true as const,
+        sourceBindingChanged: false,
+        status: 'failed' as const,
+        accepted: false,
+        pending: true,
+        created: false,
+        feed: null,
+        upstreamSubmitted,
+        sync: null,
+        code: 'ADD_FAILED',
+        message:
+          '新增未完成，请核对私有实例状态；链接已保留，不自动切换来源或重发上游请求。',
       };
     } finally {
       this.activeSubscriptionAdds.delete(addKey);
+    }
+  }
+
+  private async finishWechat2RssSubscription(
+    feed: Feed,
+    created: boolean,
+    upstreamSubmitted: boolean,
+  ) {
+    const base = {
+      requestedSource: 'wechat2rss' as const,
+      sourceBindingChanged: created,
+      accepted: true,
+      created,
+      feed,
+      upstreamSubmitted,
+    };
+    if (feed.collectionChannel !== 'wechat2rss')
+      return {
+        ...base,
+        status: 'source-preserved' as const,
+        pending: false,
+        sync: null,
+        code: 'EXISTING_SOURCE_PRESERVED',
+        message:
+          '此公众号已在项目中，原来源及内容保持；本次没有切换来源或读取原来源。',
+      };
+    if (feed.status !== 1)
+      return {
+        ...base,
+        status: 'blocked' as const,
+        pending: true,
+        sync: null,
+        code: 'SUBSCRIPTION_PAUSED',
+        message: '此公众号已存在但处于停用状态，本次没有启用或读取缓存。',
+      };
+    try {
+      const sync = await this.refreshMpArticlesAndUpdateFeed(
+        feed.id,
+        1,
+        'local-manual',
+      );
+      const complete =
+        sync.status === 'partial' &&
+        'bodyMissing' in sync &&
+        sync.bodyMissing === 0 &&
+        'imageBlocked' in sync &&
+        sync.imageBlocked === 0;
+      return {
+        ...base,
+        feed: await this.prismaService.feed.findUniqueOrThrow({
+          where: { id: feed.id },
+        }),
+        status: complete
+          ? ('updated' as const)
+          : sync.status === 'blocked'
+            ? ('blocked' as const)
+            : ('pending' as const),
+        pending: !complete,
+        sync,
+        code: complete ? 'CACHE_IMPORTED' : 'CACHE_PENDING',
+        message: complete
+          ? `公众号已${created ? '添加并' : '订阅并'}读取缓存。${sync.message}`
+          : `公众号已保留，缓存尚未完整就绪。${sync.message}稍后使用原更新按钮只读缓存，无需重新新增。`,
+      };
+    } catch {
+      return {
+        ...base,
+        status: 'pending' as const,
+        pending: true,
+        sync: null,
+        code: 'CACHE_READ_FAILED',
+        message:
+          '公众号已保留，首次缓存读取未完成；稍后使用原更新按钮只读缓存，不重新提交新增。',
+      };
     }
   }
 

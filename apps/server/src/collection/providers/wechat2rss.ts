@@ -157,7 +157,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     };
   }
 
-  async addSubscription(articleUrl: string) {
+  async acceptSubscription(articleUrl: string) {
     const link = new URL(articleUrl);
     if (
       link.protocol !== 'https:' ||
@@ -174,15 +174,39 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     if (typeof raw.data !== 'string')
       throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
     const accepted = new URL(raw.data);
+    if (
+      !['http:', 'https:'].includes(accepted.protocol) ||
+      accepted.username ||
+      accepted.password ||
+      !/^\/feed\/[A-Za-z0-9_-]+\.(xml|json)$/.test(accepted.pathname)
+    )
+      throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
+    // Only a path is retained; host/query may include private configuration.
+    return accepted.pathname;
+  }
+
+  async resolveAcceptedSubscription(feedPath: string) {
+    if (!/^\/feed\/[A-Za-z0-9_-]+\.(xml|json)$/.test(feedPath))
+      throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
     const matches = (await this.listSubscriptions()).filter(
-      (v) => v.feedUrl === accepted.pathname,
+      (v) =>
+        v.feedUrl.replace(/\.json$/, '.xml') ===
+        feedPath.replace(/\.json$/, '.xml'),
     );
-    if (matches.length !== 1) throw new Error('WECHAT2RSS_ACCEPTED_ID_PENDING');
+    if (!matches.length) return null;
+    if (matches.length !== 1) throw new Error('WECHAT2RSS_LIST_CONFLICT');
     return {
       feedId: matches[0].feedId,
       name: matches[0].name,
       accepted: true as const,
     };
+  }
+
+  async addSubscription(articleUrl: string) {
+    const path = await this.acceptSubscription(articleUrl);
+    const accepted = await this.resolveAcceptedSubscription(path);
+    if (!accepted) throw new Error('WECHAT2RSS_ACCEPTED_ID_PENDING');
+    return accepted;
   }
 
   async refreshSubscription(feedId: string) {

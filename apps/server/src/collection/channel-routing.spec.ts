@@ -333,15 +333,15 @@ describe('backend collection routing', () => {
     ).toBe(0);
   });
 
-  it('keeps the refresh cooldown across service restart and retries after it expires', async () => {
+  it('ordinary refresh remains cache-only across restart and expired historical cooldown', async () => {
     await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual');
     const firstProvider = (wechat2RssProvider as jest.Mock).mock.results[0]
       .value;
-    expect(firstProvider.refreshSubscription).toHaveBeenCalledTimes(1);
+    expect(firstProvider.refreshSubscription).not.toHaveBeenCalled();
     const attempted = await prisma.feed.findUniqueOrThrow({
       where: { id: ids[0] },
     });
-    expect(attempted.providerRefreshAttemptTime).toBeGreaterThan(0);
+    expect(attempted.providerRefreshAttemptTime).toBe(0);
 
     const restarted = new TrpcService(
       prisma as any,
@@ -357,7 +357,7 @@ describe('backend collection routing', () => {
     expect(cached).toMatchObject({ accepted: false, created: 0 });
     const secondProvider = (wechat2RssProvider as jest.Mock).mock.results[1]
       .value;
-    expect(secondProvider.refreshSubscription).toHaveBeenCalledTimes(1);
+    expect(secondProvider.refreshSubscription).not.toHaveBeenCalled();
 
     await prisma.feed.update({
       where: { id: ids[0] },
@@ -369,10 +369,10 @@ describe('backend collection routing', () => {
     await restarted.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual');
     const thirdProvider = (wechat2RssProvider as jest.Mock).mock.results[2]
       .value;
-    expect(thirdProvider.refreshSubscription).toHaveBeenCalledTimes(2);
+    expect(thirdProvider.refreshSubscription).not.toHaveBeenCalled();
   });
 
-  it('retains a failed /add attempt and does not advance successful cache time', async () => {
+  it('empty cache stays pending without /add or advancing successful sync time', async () => {
     (wechat2RssProvider as jest.Mock).mockReturnValue({
       checkAccountStatus: async () => ({ available: true, challenged: false }),
       refreshSubscription: jest
@@ -388,11 +388,15 @@ describe('backend collection routing', () => {
     });
     await expect(
       service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
-    ).rejects.toThrow('upstream failed');
+    ).resolves.toMatchObject({
+      status: 'pending',
+      accepted: false,
+      articles: 0,
+    });
     const afterFailure = await prisma.feed.findUniqueOrThrow({
       where: { id: ids[0] },
     });
-    expect(afterFailure.providerRefreshAttemptTime).toBeGreaterThan(0);
+    expect(afterFailure.providerRefreshAttemptTime).toBe(0);
     expect(afterFailure.syncTime).toBe(0);
 
     const restarted = new TrpcService(
@@ -408,7 +412,7 @@ describe('backend collection routing', () => {
     );
     expect(result).toMatchObject({ status: 'pending', accepted: false });
     const provider = (wechat2RssProvider as jest.Mock).mock.results[0].value;
-    expect(provider.refreshSubscription).toHaveBeenCalledTimes(1);
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
     expect(
       (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).syncTime,
     ).toBe(0);

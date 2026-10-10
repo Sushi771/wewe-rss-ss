@@ -561,26 +561,9 @@ export class CollectionService {
             : '私有实例没有可用登录账号；本次未读取文章。',
         };
       }
-      // /add accepts an asynchronous job. Scheduled reads avoid submitting one per feed.
-      const now = Math.floor(Date.now() / 1000);
-      // Reserve before the HTTP call. A crash or uncertain response must not
-      // submit a second asynchronous /add job immediately after restart.
-      const reserved =
-        input.trigger !== 'scheduled' &&
-        (
-          await this.prisma.feed.updateMany({
-            where: {
-              id: input.mpId,
-              providerRefreshAttemptTime: { lte: now - 15 * 60 },
-            },
-            data: { providerRefreshAttemptTime: now },
-          })
-        ).count === 1;
-      let accepted = false;
-      if (reserved) {
-        const result = await provider.refreshSubscription(input.mpId);
-        accepted = result.accepted;
-      }
+      // All ordinary refreshes only consume cache. /addurl is reserved for an
+      // explicit new-subscription action; /add also updates already subscribed feeds.
+      const accepted = false;
       const fetched = await provider.fetchArticles(input.mpId, input.mpName);
       if (
         !fetched ||
@@ -607,23 +590,15 @@ export class CollectionService {
       if (!page.articles.length) {
         return {
           source: 'wechat2rss' as const,
-          status:
-            accepted ||
-            reserved ||
-            feed.providerRefreshAttemptTime > now - 15 * 60
-              ? ('pending' as const)
-              : ('blocked' as const),
+          status: 'pending' as const,
           complete: false as const,
           coverage: 'none' as const,
           articles: 0,
           created: 0,
           updated: 0,
           accepted,
-          message: accepted
-            ? '上游已受理更新任务，当前缓存还没有可核验文章；稍后读取，不代表更新成功。'
-            : reserved || feed.providerRefreshAttemptTime > now - 15 * 60
-              ? '上游更新请求处于冷却期，缓存尚无可核验文章；稍后只读检查。'
-              : '上游缓存没有可核验文章；本次未写入。',
+          message:
+            '订阅已保留，当前缓存尚无可核验文章；稍后使用更新读取缓存，本次未提交上游更新。',
         };
       }
       let created = 0;
@@ -681,6 +656,9 @@ export class CollectionService {
               });
               created++;
             } else {
+              const supplemented = existing.contentHtml
+                ? supplementSavedBodyImages(existing.contentHtml, item)
+                : undefined;
               const data = {
                 ...(!existing.sourceUrl ? { sourceUrl: identity.url } : {}),
                 ...(!existing.verifiedSourceUrl
@@ -689,6 +667,7 @@ export class CollectionService {
                 ...(!existing.contentHtml && item.contentHtml
                   ? { contentHtml: item.contentHtml }
                   : {}),
+                ...(supplemented ? { contentHtml: supplemented } : {}),
                 ...(!existing.picUrl && item.picUrl
                   ? { picUrl: item.picUrl }
                   : {}),

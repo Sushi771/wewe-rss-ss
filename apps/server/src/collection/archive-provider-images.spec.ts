@@ -67,6 +67,26 @@ describe('provider image archive', () => {
     expect(supplementSavedBodyImages(saved, { ...archived })).toBeUndefined();
   });
 
+  it('supplements legacy js_content-only bodies while preserving annotations', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(png, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
+    const archived = (await archiveProviderImages(page())).articles[0];
+    const old =
+      '<div id="js_content" style="color:red"><p>personal annotation</p><img alt="old" src="https://mmbiz.qpic.cn/a.jpg"></div>';
+    const supplied = supplementSavedBodyImages(old, archived)!;
+    expect(supplied).toContain('personal annotation');
+    expect(supplied).toContain('color:red');
+    expect(supplied).toContain('alt="old"');
+    expect(supplied).toContain('data:image/png;base64,');
+    expect(supplied).not.toContain('src="https:');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(supplementSavedBodyImages(supplied, archived)).toBeUndefined();
+  });
+
   it('leaves existing inline images and text-only bodies byte-for-byte unchanged', async () => {
     const input = page();
     input.articles[0].contentHtml =

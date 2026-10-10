@@ -15,7 +15,7 @@ export function supplementSavedBodyImages(
   const sources = archivedSources.get(article);
   if (!sources) return undefined;
   const $ = load(savedHtml);
-  const body = $('.rich_media_content').first();
+  const body = $('.rich_media_content, #js_content').first();
   if (!body.length) return undefined;
   let changed = false;
   for (const image of body.find('img').toArray()) {

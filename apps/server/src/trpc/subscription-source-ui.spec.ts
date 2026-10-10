@@ -61,8 +61,10 @@ const received = {
   requestedSource: 'wechat2rss',
   sourceBindingChanged: true,
   accepted: true,
-  pending: true,
-  status: 'accepted',
+  pending: false,
+  status: 'updated',
+  created: true,
+  message: '首批缓存已读取，正文图片已入库。',
   feed: { id: 'MP_WXS_3456789012', mpName: '合成公众号' },
 };
 
@@ -150,11 +152,16 @@ describe('source selector through original add UI (offline)', () => {
     ]);
     expect(h.state.links).toBe('');
     expect(h.state.selected).toBe('wechat2rss');
-    expect(h.scope.toast.success.mock.calls[0][0]).toContain('文章尚未核验');
+    expect(h.scope.toast.success.mock.calls[0][0]).toContain('缓存已入库');
   });
   it('existing binding receives a clear unchanged-source receipt instead of implying a paid switch', async () => {
     const h = harness('wechat2rss', [url('one')]);
-    h.mutate.mockResolvedValue({ ...received, sourceBindingChanged: false });
+    h.mutate.mockResolvedValue({
+      ...received,
+      sourceBindingChanged: false,
+      status: 'source-preserved',
+      created: false,
+    });
     await h.run();
     expect(h.scope.toast.warning).toHaveBeenCalledWith('现有订阅来源保持', {
       description: expect.stringContaining('本号仍使用原来源'),
@@ -349,8 +356,8 @@ describe('source selector through original add UI (offline)', () => {
     });
     expect(select).toHaveBeenCalledWith('wechat2rss');
     const text = fs.readFileSync(file, 'utf8');
-    expect(text).toContain('尚未采购时先完成采购与部署');
-    expect(text).toContain('已有订阅不会自动切换来源');
+    expect(text).toContain('新增后读取首批缓存');
+    expect(text).toContain('已有订阅保留原来源');
     expect(text).not.toContain('{addCapability?.code}');
   });
 });
