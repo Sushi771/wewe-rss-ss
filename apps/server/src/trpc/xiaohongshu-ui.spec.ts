@@ -15,6 +15,24 @@ const ast = ts.createSourceFile(
   true,
   ts.ScriptKind.TSX,
 );
+// Use the real imported batch helper in the extracted UI handler scope.
+const batchExports: Record<string, unknown> = {};
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync(
+      path.resolve(__dirname, '../../../web/src/utils/xiaohongshu-refresh.ts'),
+      'utf8',
+    ),
+    {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2021,
+        module: ts.ModuleKind.CommonJS,
+      },
+    },
+  ).outputText,
+  { exports: batchExports, Error },
+  { timeout: 1000 },
+);
 const expressions: Record<string, string> = {};
 function visit(node: ts.Node) {
   if (ts.isVariableDeclaration(node) && node.initializer)
@@ -80,6 +98,8 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
         },
       },
       updateCreator: jest.fn(),
+      refreshCreatorBatch: batchExports.refreshCreatorBatch,
+      receipts: { current: {} },
     };
     scope.run = evaluate('run', scope);
     return { scope, state, invalidated };
@@ -116,11 +136,37 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     expect(scope.updateCreator).not.toHaveBeenCalled();
   });
   it('skips paused creators and stops the batch at an incomplete window', async () => {
-    const { scope } = harness();
+    const { scope, state } = harness();
     scope.capability.data.canRefresh = true;
     scope.updateCreator.mockResolvedValue('partial');
     await evaluate('handleRefreshAll', scope)();
     expect(scope.updateCreator.mock.calls).toEqual([['a']]);
+    expect(state.message).toContain(
+      '完成 0 位，未完成 1 位，未执行 1 位；已停用跳过 1 位',
+    );
+  });
+  it('reports all completed creators without counting paused creators as completed', async () => {
+    const { scope, state } = harness();
+    scope.capability.data.canRefresh = true;
+    scope.updateCreator.mockResolvedValue('complete');
+    await evaluate('handleRefreshAll', scope)();
+    expect(scope.updateCreator.mock.calls).toEqual([['a'], ['b']]);
+    expect(state.message).toContain(
+      '完成 2 位，未完成 0 位，未执行 0 位；已停用跳过 1 位',
+    );
+  });
+  it('retains completed count when a later update throws and does not replay', async () => {
+    const { scope, state } = harness();
+    scope.capability.data.canRefresh = true;
+    scope.updateCreator
+      .mockResolvedValueOnce('complete')
+      .mockRejectedValueOnce(new Error('synthetic failure'));
+    await evaluate('handleRefreshAll', scope)();
+    expect(scope.updateCreator.mock.calls).toEqual([['a'], ['b']]);
+    expect(state.message).toContain(
+      '完成 1 位，未完成 1 位，未执行 0 位；已停用跳过 1 位',
+    );
+    expect(state.message).toContain('synthetic failure');
   });
   it('prevents duplicate in-flight UI actions and releases its guard', async () => {
     const { scope, state } = harness();
