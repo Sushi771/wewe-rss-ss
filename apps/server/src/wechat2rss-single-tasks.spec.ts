@@ -14,6 +14,7 @@ import { LocalArticleStore } from './article-local-save';
 import { Wechat2RssSingleTasks } from './wechat2rss-single-tasks';
 import { prepareWechat2RssSingleDownload } from './wechat2rss-single-download';
 import { readWechat2RssSingleCandidates } from './wechat2rss-single-candidates';
+import { Wechat2RssSubscriptionBatches } from './collection/wechat2rss-subscription-batches';
 
 const url = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
 const owner = createHash('sha256').update('synthetic-owner').digest('hex');
@@ -31,6 +32,7 @@ describe('durable single download consumer; synthetic queue and real temporary f
       feedId?: string;
       bodyReady?: boolean;
       articleUrl?: string;
+      articleUrlHash?: string;
     },
     batchState: string;
   let store: LocalArticleStore, manager: Wechat2RssSingleTasks;
@@ -67,7 +69,12 @@ describe('durable single download consumer; synthetic queue and real temporary f
     database = join(root, 'synthetic.sqlite');
     await writeFile(database, '');
     time = 1800000000000;
-    item = { state: 'waiting', feedId: 'MP_WXS_1234567890', articleUrl: url };
+    item = {
+      state: 'waiting',
+      feedId: 'MP_WXS_1234567890',
+      articleUrl: url,
+      articleUrlHash: createHash('sha256').update(url).digest('hex'),
+    };
     batchState = 'running';
     queue = {
       addSingleDownloadBatch: jest.fn(async () => ({
@@ -290,6 +297,53 @@ describe('durable single download consumer; synthetic queue and real temporary f
     expect(await readFile(saved.markdownPath!, 'utf8')).toBe('用户编辑保护');
     expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
     expect(queue.resumeSubscriptionBatch).not.toHaveBeenCalled();
+  });
+  it('uses the real redacted batch view to bind candidates, and rejects another original intent', async () => {
+    const batches = new Wechat2RssSubscriptionBatches(
+      () => database,
+      () => 'synthetic-instance',
+      jest.fn(async () => ({
+        state: 'succeeded' as const,
+        message: 'ready',
+        feedId: 'MP_WXS_1234567890',
+        bodyReady: true,
+      })),
+      jest.fn(),
+      jest.fn(),
+      () => time,
+    );
+    try {
+      queue.addSingleDownloadBatch.mockImplementation((urls: string[]) =>
+        batches.enqueue(urls),
+      );
+      queue.subscriptionBatchList.mockImplementation(() => batches.list());
+      const task = await manager.enqueue(url, owner, directory);
+      await manager.runDue();
+      await batches.runDue();
+      time += 30000;
+      prepare.mockRejectedValueOnce(missing());
+      await manager.runDue();
+      const actual = await batches.list();
+      expect(actual[0].items[0]).not.toHaveProperty('articleUrl');
+      expect(actual[0].items[0].articleUrlHash).toBe(
+        createHash('sha256').update(url).digest('hex'),
+      );
+      expect(
+        (await manager.candidates(task.taskId, owner)).articles,
+      ).toHaveLength(1);
+      queue.subscriptionBatchList.mockResolvedValue([
+        {
+          ...actual[0],
+          items: [{ ...actual[0].items[0], articleUrlHash: '0'.repeat(64) }],
+        },
+      ]);
+      await expect(
+        manager.candidates(task.taskId, owner),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(save).not.toHaveBeenCalled();
+    } finally {
+      batches.close();
+    }
   });
   it('cancellation while rechecking selected cache cannot revive a task or write files', async () => {
     const task = await manager.enqueue(url, owner, directory);

@@ -51,6 +51,8 @@ const view = (b: Batch) => ({
     taskId: item.taskId,
     feedId: item.feedId,
     bodyReady: item.bodyReady,
+    // Bind internal consumers to the original intent without publishing URLs.
+    articleUrlHash: item.articleUrl ? hash(item.articleUrl) : undefined,
   })),
 });
 

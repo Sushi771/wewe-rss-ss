@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { createHash } from 'node:crypto';
 import { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import request from 'supertest';
@@ -69,7 +70,11 @@ describe('single download HTTP task receipts; isolated queue, no network or data
         batchId,
         state: 'completed',
         items: [
-          { state: 'succeeded', feedId: 'MP_WXS_1234567890', articleUrl: url },
+          {
+            state: 'succeeded',
+            feedId: 'MP_WXS_1234567890',
+            articleUrlHash: createHash('sha256').update(url).digest('hex'),
+          },
         ],
       },
     ]);

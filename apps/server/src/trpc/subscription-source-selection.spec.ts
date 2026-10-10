@@ -1164,6 +1164,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
     const ids = [number, '3456789013'];
     const links = [articleUrl, 'https://mp.weixin.qq.com/s/' + 'b'.repeat(22)];
     let namesReady = false;
+    const avatar = 'https://wx.qlogo.cn/mmhead/synthetic-publisher/0';
     const original = request.getMockImplementation()!;
     request.mockImplementation(async (input, ...rest) => {
       const url = new URL(String(input));
@@ -1193,6 +1194,12 @@ describe('explicit add source through original router (offline SQLite)', () => {
         );
       }
       const match = /^\/feed\/(\d+)\.json$/.exec(url.pathname);
+      if (namesReady && /^\/feed\/\d+\.xml$/.test(url.pathname)) {
+        events.push(url.pathname);
+        return new Response(
+          `<rss><channel><image><url>${avatar}</url></image></channel></rss>`,
+        );
+      }
       if (match) {
         events.push(url.pathname);
         const canonical = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(match[1]).toString('base64')}&mid=9&idx=1`;
@@ -1260,6 +1267,11 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(await prisma.feed.count()).toBe(2);
     expect(await prisma.article.count()).toBe(2);
     namesReady = true;
+    const keptAvatar = 'https://wx.qlogo.cn/mmhead/existing-owned-avatar/0';
+    await prisma.feed.update({
+      where: { id: `MP_WXS_${ids[1]}` },
+      data: { mpCover: keptAvatar },
+    });
     clock += 30000;
     await tasks.runDue();
     clock += 30000;
@@ -1270,6 +1282,16 @@ describe('explicit add source through original router (offline SQLite)', () => {
       ),
     ).toBe(true);
     expect(events.filter((e) => e === '/addurl')).toHaveLength(2);
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: feedId } })).mpCover,
+    ).toBe(avatar);
+    expect(
+      (
+        await prisma.feed.findUniqueOrThrow({
+          where: { id: `MP_WXS_${ids[1]}` },
+        })
+      ).mpCover,
+    ).toBe(keptAvatar);
     expect(events.some((e) => e.startsWith('/add/'))).toBe(false);
     next.service.onModuleDestroy();
   });

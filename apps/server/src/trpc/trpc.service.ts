@@ -1422,6 +1422,7 @@ export class TrpcService {
           (feed.mpName && feed.mpName !== metadata.name)
         )
           throw new Error('METADATA_CHANGED');
+        await this.collectionService.supplementWechat2RssAvatar(feed.id);
         if (!feed.mpName)
           await this.prismaService.feed.updateMany({
             where: { id: feed.id, mpName: '', collectionChannel: 'wechat2rss' },

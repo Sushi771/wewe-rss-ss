@@ -47,6 +47,7 @@ type Batch = {
     feedId?: string;
     bodyReady?: boolean;
     articleUrl?: string;
+    articleUrlHash?: string;
   }>;
 };
 export type SingleDownloadQueue = {
@@ -319,7 +320,7 @@ export class Wechat2RssSingleTasks {
     const item = batch?.items?.[0];
     if (
       !item ||
-      item.articleUrl !== t.url ||
+      item.articleUrlHash !== hash(t.url) ||
       batch?.state !== 'completed' ||
       item.state !== 'succeeded' ||
       !/^MP_WXS_\d{5,15}$/.test(item.feedId || '')

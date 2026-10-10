@@ -531,6 +531,23 @@ export class CollectionService {
     }
   }
 
+  /** Internal metadata continuation, after the caller's account check and
+   * verified backup. A completed body must not skip a still-empty avatar. */
+  async supplementWechat2RssAvatar(mpId: string) {
+    const feed = await this.prisma.feed.findUniqueOrThrow({
+      where: { id: mpId },
+    });
+    if (feed.collectionChannel !== 'wechat2rss' || feed.mpCover) return;
+    const avatar = await wechat2RssProvider().fetchFeedAvatar(mpId);
+    if (!avatar) return;
+    await this.prisma.$transaction((tx) =>
+      tx.feed.updateMany({
+        where: { id: mpId, collectionChannel: 'wechat2rss', mpCover: '' },
+        data: { mpCover: avatar },
+      }),
+    );
+  }
+
   async collectWechat2RssRecent(input: {
     mpId: string;
     mpName: string;
