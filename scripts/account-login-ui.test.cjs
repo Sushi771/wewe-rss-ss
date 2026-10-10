@@ -315,7 +315,9 @@ function fixture({
     );
     return exports.default;
   }
-  const accountPage = compile('apps/web/src/pages/accounts/index.tsx');
+  const accountPage = compile(
+    'apps/web/src/pages/accounts/legacy-accounts.tsx',
+  );
   const noticePage = compile(
     'apps/web/src/components/OwnerVerificationNotice.tsx',
   );

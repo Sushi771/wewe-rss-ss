@@ -1,5 +1,6 @@
 import { buildArticleMarkdown } from '../article-export';
 import { findArticleListRows } from '../article-list-page';
+import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
 import { z } from 'zod';
@@ -81,6 +82,8 @@ const searchCandidateSnapshotSchema = z.object({
 
 @Injectable()
 export class TrpcRouter {
+  private readonly wechat2RssAccounts = new Wechat2RssAccounts();
+
   constructor(
     private readonly trpcService: TrpcService,
     private readonly prismaService: PrismaService,
@@ -390,6 +393,18 @@ export class TrpcRouter {
   private legacyAccountProcedure = this.trpcService.protectedProcedure;
 
   accountRouter = this.trpcService.router({
+    wechat2rssAccounts: this.trpcService.protectedProcedure.query(() =>
+      this.wechat2RssAccounts.list(),
+    ),
+    wechat2rssLoginStart: this.trpcService.protectedProcedure.mutation(() =>
+      this.wechat2RssAccounts.start(),
+    ),
+    wechat2rssLoginPoll: this.trpcService.protectedProcedure
+      .input(z.object({ sessionId: z.string().uuid() }))
+      .mutation(({ input }) => this.wechat2RssAccounts.poll(input.sessionId)),
+    wechat2rssLoginClose: this.trpcService.protectedProcedure
+      .input(z.object({ sessionId: z.string().uuid() }))
+      .mutation(({ input }) => this.wechat2RssAccounts.close(input.sessionId)),
     wechat2rssStatus: this.trpcService.protectedProcedure.query(() =>
       this.trpcService.wechat2rssStatus(),
     ),

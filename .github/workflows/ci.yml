@@ -55,7 +55,7 @@ jobs:
       - name: Test account modal eligibility and viewport CSS contract (no UI or HTTP)
         run: node --test scripts/check-account-modal-logic.test.cjs
       - name: Test account expiry and explicit QR recovery offline
-        run: node --test scripts/account-login-ui.test.cjs
+        run: node --test scripts/account-login-ui.test.cjs scripts/wechat2rss-login-ui.test.cjs
       - name: Test Wechat2RSS source-specific metric visibility offline
         run: node --test scripts/wechat-source-metrics-ui.test.cjs
       - name: Test compact reading toolbar and collapsed diagnostics offline

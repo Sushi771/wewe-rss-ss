@@ -10,7 +10,7 @@ const web = path.join(root, 'apps/web');
 const ts = require(require.resolve('typescript', { paths: [web] }));
 const postcss = require(require.resolve('postcss', { paths: [web] }));
 const source = fs.readFileSync(
-  path.join(web, 'src/pages/accounts/index.tsx'),
+  path.join(web, 'src/pages/accounts/legacy-accounts.tsx'),
   'utf8',
 );
 const parsed = ts.createSourceFile(
