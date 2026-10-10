@@ -86,6 +86,8 @@ jobs:
         run: node --test scripts/research/probe-subscribed-mp-once.spec.cjs scripts/research/probe-native-review-owner07.spec.cjs
       - name: Test official album runtime scheduling policy
         run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs scripts/local-release/startup-acceptance.test.cjs
+      - name: Test desktop dependency startup and launch locking offline
+        run: node --test scripts/local-release/desktop-dependencies.test.cjs
       - name: Test startup schema checks and exact database preservation
         run: |
           python3 scripts/local-release/test_inspect_sqlite.py

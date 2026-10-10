@@ -3,6 +3,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { startAtLogon } = require('./logon-start.cjs');
+const {
+  discoverDocker,
+  readPin,
+  realAdapter,
+  ensureDependencies,
+  withLaunchLock,
+  safeFailure,
+  failure,
+} = require('./desktop-dependencies.cjs');
+const report = path.resolve(
+  __dirname,
+  '../../output/playwright/local-release-audit',
+);
 
 const url = 'http://127.0.0.1:4000/dash/tools/article-download';
 function openBrowser() {
@@ -30,16 +43,46 @@ function openBrowser() {
 }
 
 async function main() {
-  process.env.ENABLE_SCHEDULED_UPDATES = '0';
-  process.env.DISABLE_SCHEDULED_UPDATES = '1';
   const start = performance.now();
-  const result = await startAtLogon();
-  const readyMs = Math.round(performance.now() - start);
-  if (!process.argv.includes('--check')) await openBrowser();
-  const report = path.resolve(
-    __dirname,
-    '../../output/playwright/local-release-audit',
+  const result = await withLaunchLock(
+    path.join(report, 'desktop-start.lock'),
+    async () => {
+      const pin = readPin();
+      const installation = await discoverDocker();
+      const dependency = await ensureDependencies(
+        realAdapter(installation),
+        pin,
+        {
+          reuseOnly: process.argv.includes('--reuse-only'),
+        },
+      );
+      if (
+        process.argv.includes('--reuse-only') &&
+        !require('./switch.cjs').processIdentity('Discover', undefined, 4000)
+      )
+        throw failure('WEWE_START_FAILED');
+      let app;
+      try {
+        app = await startAtLogon();
+      } catch {
+        throw failure('WEWE_START_FAILED');
+      }
+      if (!process.argv.includes('--check')) {
+        try {
+          await openBrowser();
+        } catch {
+          throw failure('BROWSER_FAILED');
+        }
+      }
+      return {
+        status: app.status,
+        releaseId: app.releaseId,
+        pid: app.pid,
+        dependency,
+      };
+    },
   );
+  const readyMs = Math.round(performance.now() - start);
   fs.mkdirSync(report, { recursive: true });
   fs.appendFileSync(
     path.join(report, 'desktop-start.jsonl'),
@@ -53,20 +96,22 @@ async function main() {
 }
 if (require.main === module)
   main().catch((error) => {
-    const report = path.resolve(
-      __dirname,
-      '../../output/playwright/local-release-audit',
-    );
+    const safe = safeFailure(error);
     fs.mkdirSync(report, { recursive: true });
     fs.appendFileSync(
       path.join(report, 'desktop-start.jsonl'),
       JSON.stringify({
         at: new Date().toISOString(),
         status: 'failed',
-        error: error.message,
+        ...safe,
       }) + '\n',
     );
-    console.error(error.message);
+    fs.writeFileSync(
+      path.join(report, 'desktop-start-error.txt'),
+      `${safe.code}\r\n${safe.message}\r\n日志：${path.join(report, 'desktop-start.jsonl')}\r\n`,
+      'utf8',
+    );
+    console.error(`${safe.code}: ${safe.message}`);
     process.exitCode = 1;
   });
 module.exports = { openBrowser, url };
