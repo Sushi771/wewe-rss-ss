@@ -20,7 +20,7 @@ export function enabledWechat2RssFeedIds(): Set<string> {
   );
 }
 
-export function wechat2RssProvider(): SubscriptionProvider {
+export function wechat2RssProvider(): Wechat2RssProvider {
   if (process.env.WECHAT2RSS_ENABLED !== '1')
     throw new Error('WECHAT2RSS_DISABLED');
   return new Wechat2RssProvider(

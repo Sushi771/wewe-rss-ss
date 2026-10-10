@@ -1,7 +1,7 @@
 ﻿# Windows 进程身份核验。Stop 操作持有 Process 对象句柄，避免按 PID 二次查找后误杀复用 PID。
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port', 'Discover')][string]$Action,
     [int]$TargetPid,
     [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
     [string]$ExpectedStartUtc,
@@ -10,11 +10,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'tcp-listeners.ps1')
 if ($Action -eq 'Port') {
-    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+    $listeners = @(Get-LocalTcpListener -Port $Port |
         Select-Object LocalAddress, OwningProcess)
     ConvertTo-Json -InputObject $listeners -Compress -Depth 3
     return
+}
+if ($Action -eq 'Discover') {
+    $owners = @(Get-LocalTcpListener -Port $Port)
+    if ($owners.Count -eq 0) { 'null'; return }
+    $pids = @($owners | Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($pids.Count -ne 1) { throw 'Port has multiple listener owners' }
+    $TargetPid = $pids[0]
 }
 if ($TargetPid -le 0) { throw '无效的目标 PID' }
 $process = [System.Diagnostics.Process]::GetProcessById($TargetPid)
@@ -27,7 +35,7 @@ try {
     if ([Math]::Abs(($cim.CreationDate.ToUniversalTime() - $process.StartTime.ToUniversalTime()).TotalSeconds) -gt 1) {
         throw '进程句柄与 CIM 启动时间不一致'
     }
-    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen)
+    $listeners = @(Get-LocalTcpListener -Port $Port)
     if ($listeners.Count -eq 0 -or @($listeners | Where-Object { $_.OwningProcess -ne $TargetPid }).Count -ne 0) {
         throw '监听端口不存在或由其他进程占有'
     }

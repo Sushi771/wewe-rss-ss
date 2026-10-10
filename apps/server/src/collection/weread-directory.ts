@@ -11,7 +11,8 @@ export type WereadDirectoryArticle = {
   mpId: string;
   name: string;
   title: string;
-  publishTime: number;
+  /** Upstream mpInfo.time: directory ordering only; not the body publication source. */
+  directoryTime: number;
   picUrl: string;
 };
 
@@ -68,7 +69,7 @@ export function parseWereadDirectory(
         mpId: expected.mpId,
         name: info.mp_name,
         title: info.title,
-        publishTime: info.time,
+        directoryTime: info.time,
         picUrl: typeof info.pic_url === 'string' ? info.pic_url : '',
       };
       const previous = seen.get(reviewId);
@@ -76,7 +77,7 @@ export function parseWereadDirectory(
         // Optional cover changes must not create another article.
         if (
           previous.originalId !== article.originalId ||
-          previous.publishTime !== article.publishTime ||
+          previous.directoryTime !== article.directoryTime ||
           normalize(previous.title) !== normalize(article.title)
         )
           throw new Error('WEREAD_DIRECTORY_DUPLICATE_CONFLICT');
@@ -128,7 +129,12 @@ export function verifyWereadArticleBody(
     )
   )
     throw new Error('WEREAD_BODY_ACCESS_CHALLENGE');
-  const identity = articleIdentity(html);
+  let identity: ReturnType<typeof articleIdentity>;
+  try {
+    identity = articleIdentity(html);
+  } catch {
+    throw new Error('WEREAD_BODY_IDENTITY_CONFLICT');
+  }
   const originalUrl = `https://mp.weixin.qq.com/s/${candidate.originalId.replace(/~/g, '_')}`;
   const title = $('#activity-name').text().trim();
   // Tencent may expose a signed /s?biz/mid/idx canonical while the directory
@@ -148,7 +154,11 @@ export function verifyWereadArticleBody(
   }
   if (
     identity.mpId !== candidate.mpId ||
-    identity.publishTime !== candidate.publishTime ||
+    // The original body timestamp must be independently present and internally
+    // consistent. mpInfo.time orders the directory; the first-party catalog
+    // does not promise that it equals the original body's CGI creation fields.
+    // No cross-source tolerance, rounding, or replacement timestamp is used.
+    !identity.publishTime ||
     normalize(title) !== normalize(candidate.title) ||
     normalize($('#js_name').text()) !== normalize(candidate.name)
   )
@@ -243,7 +253,7 @@ export function selectWereadLatest(
     const previous = seen.get(article.reviewId);
     if (
       previous &&
-      (previous.publishTime !== article.publishTime ||
+      (previous.directoryTime !== article.directoryTime ||
         normalize(previous.title) !== normalize(article.title))
     )
       throw new Error('WEREAD_DIRECTORY_DUPLICATE_CONFLICT');
@@ -253,7 +263,7 @@ export function selectWereadLatest(
   if (
     directory.some(
       (item, index) =>
-        index > 0 && item.publishTime > directory[index - 1].publishTime,
+        index > 0 && item.directoryTime > directory[index - 1].directoryTime,
     )
   )
     throw new Error('WEREAD_DIRECTORY_ORDER_UNVERIFIED');

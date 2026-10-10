@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { parseArgs } = require('node:util');
 const { verifySourceSnapshot } = require('./verify-source.cjs');
+const { bundleServer } = require('./compact.cjs');
 const {
   slash,
   readJson,
@@ -94,6 +95,12 @@ function build(options = {}) {
     ? fs.realpathSync(options.sourceRoot)
     : root;
   const legacy = sourceRoot !== root;
+  if (legacy && options.compact)
+    throw new Error('Compact packages only support the current schema');
+  if (options.compact && Number(process.versions.node.split('.')[0]) < 24)
+    throw new Error(
+      'Compact startup SQLite checks require the fixed Node 24 runtime',
+    );
   if (legacy && !inside(path.join(root, '.local-releases'), sourceRoot))
     throw new Error('旧版源码快照必须位于本项目忽略的 .local-releases 目录');
   if (
@@ -327,12 +334,19 @@ function build(options = {}) {
     'lib.cjs',
     'runtime.cjs',
     'inspect-sqlite.py',
+    'prepare-start.py',
+    'startup-sqlite.cjs',
     'offline-guard.cjs',
   ])
     fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
   fs.mkdirSync(path.join(release, 'runtime'));
   fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
-  const dependencies = copyPackages(target, client, sourceServer);
+  const compact = options.compact
+    ? bundleServer(target, sourceServer, sourceWeb)
+    : undefined;
+  const dependencies = options.compact
+    ? compact.dependencies
+    : copyPackages(target, client, sourceServer);
   // Historical rollback packages retain their own helper. Current packages
   // contain no desktop collector code or executable.
   if (legacy) {
@@ -353,6 +367,14 @@ function build(options = {}) {
     sourceHash,
     sourceCommit: legacy ? options.sourceCommit : null,
     schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+    startupInspection: legacy ? 'full' : 'schema-only-v1',
+    ...(compact
+      ? {
+          executionLayout: 'compact-cjs-v1',
+          startupPreparation: 'node-pinned-backup-v1',
+          compact,
+        }
+      : {}),
     inputs,
     prisma: {
       clientVersion: readJson(path.join(installed, 'package.json')).version,
@@ -385,11 +407,13 @@ if (require.main === module) {
       options: {
         'source-root': { type: 'string' },
         'source-commit': { type: 'string' },
+        compact: { type: 'boolean', default: false },
       },
     });
     build({
       sourceRoot: values['source-root'],
       sourceCommit: values['source-commit'],
+      compact: values.compact,
     });
   } catch (error) {
     console.error(error.message);

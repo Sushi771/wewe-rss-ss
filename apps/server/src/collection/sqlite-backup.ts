@@ -113,7 +113,12 @@ export async function createVerifiedSqliteBackup(
       }
     });
   });
-  let report: { integrityCheck?: string; backup?: string; sha256?: string };
+  let report: {
+    integrityCheck?: string;
+    source?: string;
+    backup?: string;
+    sha256?: string;
+  };
   try {
     report = JSON.parse(output);
   } catch {

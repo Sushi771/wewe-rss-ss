@@ -31,6 +31,13 @@ const PRIVATE_BASE = path.join(
 const PRODUCTION_DB = path.join(ROOT, 'apps/server/data/wewe-rss.db');
 const HEX_SHA = /^[a-f0-9]{64}$/;
 const EXPECTED_TABLES = ['_prisma_migrations', 'accounts', 'articles', 'feeds'];
+// The additive XHS migration is optional for older, unmigrated databases.
+// Known additive layouts are snapshotted in full; unexpected tables still stop.
+const EXPECTED_XHS_TABLES = [...EXPECTED_TABLES, 'xhs_creators', 'xhs_notes'];
+const EXPECTED_GROUP_TABLES = [
+  ...EXPECTED_XHS_TABLES,
+  'management_groups',
+].sort();
 const MAX_REHEARSAL_AGE_MS = 2 * 60 * 60 * 1000;
 
 function fail(code) {
@@ -136,7 +143,9 @@ function encodeRows(rows) {
     Object.fromEntries(
       Object.entries(row).map(([key, value]) => [
         key,
-        Buffer.isBuffer(value) ? ['blob', sha256(value)] : value,
+        value instanceof Uint8Array
+          ? ['blob', value.byteLength, sha256(value)]
+          : value,
       ]),
     ),
   );
@@ -152,9 +161,11 @@ function snapshot(db, omitTarget = false) {
       "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
     .all();
+  const tableNames = JSON.stringify(definitions.map((row) => row.name));
   if (
-    JSON.stringify(definitions.map((row) => row.name)) !==
-    JSON.stringify(EXPECTED_TABLES)
+    tableNames !== JSON.stringify(EXPECTED_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_XHS_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_GROUP_TABLES)
   )
     fail('SQLITE_SCHEMA_UNEXPECTED');
   const tables = {};

@@ -58,11 +58,19 @@ test.after(() => {
   https.request = originalRequest;
 });
 
-function makeSourceDb(file) {
+function makeSourceDb(file, { groups = true } = {}) {
   const db = new DatabaseSync(file);
   try {
     const migrations = path.join(ROOT, 'apps/server/prisma/migrations');
     for (const name of fs.readdirSync(migrations).sort()) {
+      if (
+        !groups &&
+        [
+          '20261009063000_add_management_groups',
+          '20261010090000_management_group_order',
+        ].includes(name)
+      )
+        continue;
       const sqlFile = path.join(migrations, name, 'migration.sql');
       if (fs.existsSync(sqlFile)) db.exec(fs.readFileSync(sqlFile, 'utf8'));
     }
@@ -91,6 +99,34 @@ function makeSourceDb(file) {
       '<p>Old body stays intact</p>',
       'available',
     );
+    db.prepare(
+      'INSERT INTO xhs_creators (id, profile_url, display_name) VALUES (?, ?, ?)',
+    ).run(
+      'synthetic-creator',
+      'https://www.xiaohongshu.com/synthetic-profile',
+      'Synthetic creator',
+    );
+    db.prepare(
+      'INSERT INTO xhs_notes (id, creator_id, title, publish_time, status, content_html) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(
+      'synthetic-note',
+      'synthetic-creator',
+      'Synthetic cached note',
+      1700000000,
+      'available',
+      '<p>Unchanged XHS body</p>',
+    );
+    if (groups) {
+      db.prepare(
+        'INSERT INTO management_groups(id,name,platform) VALUES(?,?,?)',
+      ).run('synthetic-wechat-folder', 'Synthetic Wechat', 'wechat');
+      db.prepare(
+        'INSERT INTO management_groups(id,name,platform) VALUES(?,?,?)',
+      ).run('synthetic-xhs-folder', 'Synthetic XHS', 'xiaohongshu');
+      db.exec(
+        "UPDATE feeds SET group_id='synthetic-wechat-folder'; UPDATE xhs_creators SET group_id='synthetic-xhs-folder'",
+      );
+    }
   } finally {
     db.close();
   }
@@ -156,6 +192,16 @@ async function withRehearsal(fn) {
 test('commits exactly one inlined article after a named fresh copy rehearsal and preserves all old tables', async () => {
   await withRehearsal(async (options) => {
     const before = readSnapshot(options.sourceDb);
+    assert.equal(before.tables.management_groups.rows.length, 2);
+    assert.equal(
+      before.tables.feeds.rows[0].group_id,
+      'synthetic-wechat-folder',
+    );
+    assert.equal(before.tables.xhs_creators.rows.length, 1);
+    assert.equal(
+      before.tables.xhs_notes.rows[0].content_html,
+      '<p>Unchanged XHS body</p>',
+    );
     const result = await runOneArticleImport(options);
     assert.equal(result.created, 1);
     assert.equal(result.updated, 0);
@@ -199,6 +245,106 @@ test('commits exactly one inlined article after a named fresh copy rehearsal and
       }),
       /SOURCE_DRIFTED_SINCE_REHEARSAL|SOURCE_IDENTITY_PREFLIGHT_FAILED/,
     );
+  });
+});
+
+test('snapshots the legacy schema and rejects unknown or incomplete additive tables', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-image-schema-test-'));
+  const file = path.join(dir, 'source.db');
+  let db;
+  try {
+    makeSourceDb(file, { groups: false });
+    assert.equal(Object.keys(readSnapshot(file).tables).length, 6);
+    db = new DatabaseSync(file);
+    db.exec('DROP TABLE xhs_notes; DROP TABLE xhs_creators');
+    assert.deepEqual(Object.keys(readSnapshot(file).tables), [
+      '_prisma_migrations',
+      'accounts',
+      'articles',
+      'feeds',
+    ]);
+    db.exec('CREATE TABLE unknown_table (id TEXT)');
+    assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+    db.exec('DROP TABLE unknown_table; CREATE TABLE xhs_creators (id TEXT)');
+    assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+    db.exec('DROP TABLE xhs_creators; CREATE TABLE management_groups(id TEXT)');
+    assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+  } finally {
+    if (db) db.close();
+    assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects XHS cache drift since rehearsal without importing the article', async () => {
+  await withRehearsal(async (options) => {
+    const db = new DatabaseSync(options.sourceDb);
+    try {
+      db.prepare('UPDATE xhs_notes SET content_html=? WHERE id=?').run(
+        '<p>Changed cached note</p>',
+        'synthetic-note',
+      );
+    } finally {
+      db.close();
+    }
+    options.expectedSourceSha256 = sha256(fs.readFileSync(options.sourceDb));
+    const before = readSnapshot(options.sourceDb);
+    await assert.rejects(
+      runOneArticleImport(options),
+      /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+    );
+    assert.deepEqual(readSnapshot(options.sourceDb), before);
+  });
+});
+
+test('snapshots actual SQLite video BLOBs as typed bounded hashes and detects byte drift', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-image-blob-test-'));
+  const file = path.join(dir, 'source.db');
+  let db;
+  try {
+    makeSourceDb(file);
+    db = new DatabaseSync(file);
+    const bytes = Buffer.from([0, 255, 17, 0, 128]);
+    db.prepare('UPDATE xhs_notes SET video_bytes=? WHERE id=?').run(
+      bytes,
+      'synthetic-note',
+    );
+    const before = readSnapshot(file);
+    assert.deepEqual(before.tables.xhs_notes.rows[0].video_bytes, [
+      'blob',
+      bytes.length,
+      sha256(bytes),
+    ]);
+    db.prepare('UPDATE xhs_notes SET video_bytes=? WHERE id=?').run(
+      Buffer.from([0, 254, 17, 0, 128]),
+      'synthetic-note',
+    );
+    assert.notEqual(readSnapshot(file).digest, before.digest);
+  } finally {
+    if (db) db.close();
+    assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects local folder drift since rehearsal without importing the article', async () => {
+  await withRehearsal(async (options) => {
+    const db = new DatabaseSync(options.sourceDb);
+    try {
+      db.prepare('UPDATE management_groups SET name=? WHERE id=?').run(
+        'Changed folder',
+        'synthetic-xhs-folder',
+      );
+    } finally {
+      db.close();
+    }
+    options.expectedSourceSha256 = sha256(fs.readFileSync(options.sourceDb));
+    const before = readSnapshot(options.sourceDb);
+    await assert.rejects(
+      runOneArticleImport(options),
+      /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+    );
+    assert.deepEqual(readSnapshot(options.sourceDb), before);
   });
 });
 

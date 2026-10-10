@@ -45,6 +45,7 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
               if (isTRPCClientError(error)) {
                 if (error.data?.httpStatus === 401) {
                   toast.error('无权限', {
+                    id: 'wewe-auth-required',
                     description: error.message,
                   });
 
@@ -63,6 +64,7 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
               if (isTRPCClientError(error)) {
                 if (error.data?.httpStatus === 401) {
                   toast.error('无权限', {
+                    id: 'wewe-auth-required',
                     description: error.message,
                   });
                   handleNoAuth();

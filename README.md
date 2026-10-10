@@ -9,9 +9,17 @@
 
 </div>
 
-## 当前方向（2026-09-29）
+## 本机 Wechat2RSS 配置准备（2026-10-09）
 
-本 fork 的最高优先级是研究并实现可自行维护的微信读书公众号订阅模块，暂停 Wechat2RSS 采购和部署。已有 Provider、私人登录、数据库保护、正文图片和离线导出保留；目前尚未从新来源取得目标号五篇真实文章，未接入生产订阅。现行要求见 [AGENTS.md](AGENTS.md)、[交付任务](docs/PRIVATE_ONLINE_DELIVERY_TASK.md)和[精简交接](docs/DEVELOPMENT_HANDOFF.md)。
+本轮继续准备现有 Wechat2RSS Provider 的本机接入，密钥由用户随后在本机填写。准确文件入口、字段及检查命令见[本机填写与接入检查](docs/WECHAT2RSS_LOCAL_SETUP.md)：实例配置使用已有 `.env.wechat2rss`，WeWe 配置使用已有 `apps/server/.env.local`，保留其他设置，不用模板覆盖私有文件。
+
+小红书按用户选择准备 Rnote Web＋蒲公英源码包及同产品免费测试 Key。独立空目录、私有候选配置和离线检查命令见[本机接入准备](docs/paid-sources/XHS_SOURCE_PREPARATION.md)；真实来源尚未注册，配置格式通过不会启用刷新。
+
+填写后可在项目根目录执行 `node scripts/acceptance-wechat2rss.cjs --deployment-config`，仅核两端配置一致性，不启动、联网、启用来源或写库。需要与源码对应的后台构建；不能与 `--execute` 混用。来源启用、目标绑定和受控部署另行处理，授权、正常登录、最新十篇完整正文与实际图片、原刷新去重仍待真实验收。下面的历史方向与配置说明保留供追溯，当前填写操作以新指南为准。
+
+## 当前方向与验收（2026-10-04）
+
+微信读书自建模块已接回原手动刷新。妈妈部落畅聊阁最新10篇真实正文及图片已保存，原入口重复刷新新增0；八篇补齐媒体后1450篇文章、账号、旧ID、时间、文字和指标保留。离线导出保存89个图片附件，真实Edge打开10篇及97处图片引用通过。仅本机回环4000，自动刷新关闭；其他11订阅、未来自然新文及用户单篇短链直接保存Obsidian仍分别待验收。暂停 Wechat2RSS 采购，运行时不依赖闭源中转。准确版本与验收边界见[验收记录](docs/LATEST_TEN_IMAGE_ACCEPTANCE.md)、[交付任务](docs/PRIVATE_ONLINE_DELIVERY_TASK.md)和[精简交接](docs/DEVELOPMENT_HANDOFF.md)。
 
 ## 历史方案：公众号订阅恢复实施状态
 
@@ -25,7 +33,7 @@
 
 Wechat2RSS 官方文档说明只抓当时最新 20 篇、只收录群发消息；本地旧文章不会因此删除。订阅前未被上游抓到的历史和非群发内容是独立能力缺口，不以近期订阅通过代替全历史完成。
 
-独立部署模板使用 [官方部署指南](https://wechat2rss.xlab.app/deploy/deploy)中的 `ttttmr/wechat2rss` 镜像，固定到 2026-09-29 从 [Docker Hub 标签接口](https://hub.docker.com/v2/repositories/ttttmr/wechat2rss/tags/latest)核对的 digest `sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f`。模板仅绑定本机 `127.0.0.1:18080`，使用独立的忽略目录持久化；`RSS_KEEP_OLD_COUNT=-1` 只保留以后已抓到的文章，不补订阅前缺口。用户完成授权与本人登录后，可用 `node --env-file=apps/server/.env.local scripts/acceptance-wechat2rss.cjs --execute MP_WXS_<数字ID>` 做只读字段探测；不加 `--execute` 仅检查配置存在性。
+独立部署模板使用 [官方部署指南](https://wechat2rss.xlab.app/deploy/deploy)中的 `ttttmr/wechat2rss` 镜像，固定到 2026-09-29 从 [Docker Hub 标签接口](https://hub.docker.com/v2/repositories/ttttmr/wechat2rss/tags/latest)核对的 digest `sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f`。模板仅绑定本机 `127.0.0.1:18080`，使用独立的忽略目录持久化；`RSS_KEEP_OLD_COUNT=-1` 只保留以后已抓到的文章，不补订阅前缺口。用户完成授权与本人登录后，可用 `node --env-file=apps/server/.env.local scripts/acceptance-wechat2rss.cjs --execute MP_WXS_<数字ID>` 做获准后的受控只读字段探测；默认无参数模式只核 WeWe 配置格式，`--deployment-config` 则离线核对实例与 WeWe 两端配置一致性，不能与 `--execute` 混用。
 
 ## ✨ 功能
 

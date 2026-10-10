@@ -1,333 +1,302 @@
 import {
-  Modal,
-  ModalContent,
-  ModalHeader,
-  ModalBody,
   Button,
-  useDisclosure,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
   Spinner,
-  Tooltip,
 } from '@nextui-org/react';
-import { QRCodeSVG } from 'qrcode.react';
-import { toast } from 'sonner';
-import { PlusIcon } from '@web/components/PlusIcon';
-import dayjs from 'dayjs';
-import { StatusDropdown } from '@web/components/StatusDropdown';
+import { useEffect, useRef, useState } from 'react';
 import { trpc } from '@web/utils/trpc';
-import { statusMap } from '@web/constants';
-import { useEffect, useState } from 'react';
+
+type LoginView = ReturnType<
+  typeof trpc.account.wechat2rssLoginStart.useMutation
+>['data'];
 
 const AccountPage = () => {
-  const { isOpen, onOpen, onClose, onOpenChange } = useDisclosure();
-  const [count, setCount] = useState(0);
-  const [reloginAccountId, setReloginAccountId] = useState<string | null>(null);
-  const [loginError, setLoginError] = useState('');
-
-  const { refetch, data, isFetching } = trpc.account.list.useQuery({});
-  const queryUtils = trpc.useUtils();
-  const { mutateAsync: updateAccount } = trpc.account.edit.useMutation({});
-  const { mutateAsync: deleteAccount } = trpc.account.delete.useMutation({});
-
-  const {
-    mutateAsync,
-    data: loginData,
-    reset: resetLogin,
-  } = trpc.platform.createLoginUrl.useMutation({
-    onError(err) {
-      toast.error(err.message || '获取登录二维码失败');
-      setLoginError(err.message || '获取登录二维码失败');
-      setCount(0);
-    },
-    onSuccess(data) {
-      if (data.uuid) {
-        setCount(60);
-      }
-    },
+  const [isOpen, setOpen] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [login, setLogin] = useState<LoginView>();
+  const [error, setError] = useState('');
+  const [showLegacy, setShowLegacy] = useState(false);
+  const active = useRef(false);
+  const generation = useRef(0);
+  const sessionId = useRef<string>();
+  const timer = useRef<ReturnType<typeof setTimeout>>();
+  const checkingRef = useRef(false);
+  const mounted = useRef(true);
+  const accounts = trpc.account.wechat2rssAccounts.useQuery(undefined, {
+    enabled: false,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: false,
   });
-
-  const { data: loginResult } = trpc.platform.getLoginResult.useQuery(
-    {
-      id: loginData?.uuid ?? '',
-    },
-    {
-      refetchInterval: (data) => {
-        if (data?.terminal) return false;
-        if (
-          data?.message &&
-          (data.message.includes('过期') || data.message.includes('取消'))
-        ) {
-          return false;
-        }
-        return 3000;
-      },
-      refetchIntervalInBackground: false,
-      enabled: !!loginData?.uuid && isOpen && count > 0,
-      retry: false,
-      onError(err) {
-        toast.error(err.message || '登录状态查询失败，已停止本次轮询');
-        setCount(0);
-      },
-      async onSuccess(data) {
-        if (data.saved && data.vid) {
-          const name = data.username || `WeRead_${data.vid}`;
-          if (reloginAccountId && `${data.vid}` !== reloginAccountId) {
-            toast.warning(
-              `扫码账号 (${name}) 与原账号 (${reloginAccountId}) 不一致，已作为新账号保存`,
-            );
-          } else {
-            toast.success(
-              data.searchSessionUpdated
-                ? '账号已保存，腾讯搜索会话已连接'
-                : '账号已保存；此账号尚未绑定腾讯搜索来源',
-            );
-          }
-          setReloginAccountId(null);
-          onClose();
-          refetch();
-        } else if (
-          data.terminal &&
-          data.message &&
-          !data.message.includes('扫码') &&
-          !data.message.includes('确认')
-        ) {
-          toast.error(`登录失败: ${data.message}`);
-        }
-      },
-    },
+  const legacy = trpc.account.list.useQuery(
+    {},
+    { enabled: showLegacy, retry: false, refetchOnWindowFocus: false },
   );
+  const start = trpc.account.wechat2rssLoginStart.useMutation({ retry: false });
+  const poll = trpc.account.wechat2rssLoginPoll.useMutation({ retry: false });
+  const close = trpc.account.wechat2rssLoginClose.useMutation({ retry: false });
+  const closeAction = useRef(close.mutateAsync);
+  closeAction.current = close.mutateAsync;
 
-  useEffect(() => {
-    let timerId: NodeJS.Timeout;
-    if (count > 0 && isOpen) {
-      timerId = setTimeout(() => {
-        setCount(count - 1);
-      }, 1000);
+  const stopTimer = () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = undefined;
+  };
+  const release = (id?: string) => {
+    if (id) void closeAction.current({ sessionId: id }).catch(() => {});
+  };
+  const finish = (result: LoginView) => {
+    active.current = false;
+    stopTimer();
+    release(sessionId.current);
+    sessionId.current = undefined;
+    setLogin(result);
+    if (result?.state === 'succeeded') void accounts.refetch();
+  };
+  const schedule = (version: number, expiresAt: number, rounds = 0) => {
+    timer.current = setTimeout(
+      async () => {
+        if (
+          !mounted.current ||
+          !active.current ||
+          generation.current !== version
+        )
+          return;
+        if (Date.now() >= expiresAt || rounds >= 60) {
+          finish({
+            state: 'expired',
+            message: '本次登录已过期，请手动重新获取二维码。',
+          });
+          return;
+        }
+        try {
+          const result = await poll.mutateAsync({
+            sessionId: sessionId.current!,
+          });
+          if (
+            !mounted.current ||
+            !active.current ||
+            generation.current !== version
+          )
+            return;
+          if (result.state !== 'waiting') {
+            finish(result);
+            return;
+          }
+          setLogin(result);
+          schedule(version, expiresAt, rounds + 1);
+        } catch {
+          if (
+            !mounted.current ||
+            !active.current ||
+            generation.current !== version
+          )
+            return;
+          finish({
+            state: 'failed',
+            message: '登录状态读取失败，请手动重试。',
+          });
+        }
+      },
+      Math.min(3000, Math.max(0, expiresAt - Date.now())),
+    );
+  };
+  const begin = async () => {
+    if (active.current) return;
+    active.current = true;
+    const version = ++generation.current;
+    stopTimer();
+    setOpen(true);
+    setStarting(true);
+    setLogin(undefined);
+    setError('');
+    try {
+      const result = await start.mutateAsync();
+      if (
+        !mounted.current ||
+        !active.current ||
+        generation.current !== version
+      ) {
+        release(result.sessionId);
+        return;
+      }
+      setLogin(result);
+      if (result.state === 'waiting' && result.sessionId && result.expiresAt) {
+        sessionId.current = result.sessionId;
+        schedule(version, Math.min(result.expiresAt, Date.now() + 180_000));
+      } else finish(result);
+    } catch {
+      if (!mounted.current || !active.current || generation.current !== version)
+        return;
+      finish({ state: 'failed', message: '二维码获取失败，请手动重试。' });
+    } finally {
+      if (mounted.current && generation.current === version) setStarting(false);
     }
-    return () => timerId && clearTimeout(timerId);
-  }, [count, isOpen]);
-
-  const invalidAccounts = data?.items.filter((item) => item.status === 0) ?? [];
-
-  const openRelogin = (accountId: string) => {
-    resetLogin();
-    setLoginError('');
-    setCount(0);
-    setReloginAccountId(accountId);
-    onOpen();
-    void mutateAsync().catch(() => undefined);
   };
-
-  const openAdd = () => {
-    resetLogin();
-    setLoginError('');
-    setCount(0);
-    setReloginAccountId(null);
-    onOpen();
-    void mutateAsync().catch(() => undefined);
+  const dismiss = () => {
+    generation.current++;
+    active.current = false;
+    stopTimer();
+    release(sessionId.current);
+    sessionId.current = undefined;
+    setOpen(false);
+    setStarting(false);
+    setLogin(undefined);
   };
+  const check = async () => {
+    if (checkingRef.current) return;
+    checkingRef.current = true;
+    setChecking(true);
+    setError('');
+    try {
+      await accounts.refetch({ throwOnError: true });
+    } catch {
+      if (mounted.current) setError('实例账号状态读取失败，请手动重试。');
+    } finally {
+      checkingRef.current = false;
+      if (mounted.current) setChecking(false);
+    }
+  };
+  useEffect(() => {
+    const epoch = generation;
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      active.current = false;
+      epoch.current++;
+      if (timer.current) clearTimeout(timer.current);
+      if (sessionId.current)
+        void closeAction
+          .current({ sessionId: sessionId.current })
+          .catch(() => {});
+      sessionId.current = undefined;
+    };
+  }, []);
 
+  const snapshot = error || accounts.isError ? undefined : accounts.data;
   return (
-    <div className="flex h-full flex-col">
-      {/* 状态栏 */}
-      <div className="mac-toolbar">
-        <div className="flex flex-1 items-center gap-2 overflow-hidden">
-          <span className="truncate text-[15px] font-semibold">
-            账号管理 · {data?.items.length || 0}
-          </span>
-          {isFetching && <Spinner size="sm" color="current" />}
-        </div>
-        <div className="flex items-center gap-2">
+    <div className="space-y-5 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold">Wechat2RSS 账号</h1>
+        <div className="flex gap-2">
+          <Button onPress={check} isLoading={checking}>
+            刷新账号状态
+          </Button>
           <Button
-            onPress={openAdd}
-            size="sm"
             color="primary"
-            variant="flat"
-            className="h-8 font-medium"
-            startContent={<PlusIcon />}
+            onPress={begin}
+            isDisabled={starting || login?.state === 'waiting'}
           >
-            添加账号
+            添加微信账号
           </Button>
         </div>
       </div>
-
-      <div className="flex-1 overflow-y-auto">
-        {/* 失效账号警告横幅 */}
-        {invalidAccounts.length > 0 && (
-          <div className="mac-alert-danger mx-4 mt-4">
-            <span className="text-[14px]">
-              <strong>{invalidAccounts.length}</strong> 个账号 Token
-              已标记失效。重新登录只恢复读书会话；文章更新结果以公众号页面为准。
-            </span>
-          </div>
+      <p className="text-default-500 text-sm">
+        在此扫描二维码登录，微信扫码和官方确认由你完成。账号保存在 Wechat2RSS
+        实例中。
+      </p>
+      <section
+        aria-label="Wechat2RSS 账号状态"
+        className="space-y-3 rounded-lg border p-4"
+      >
+        <p role="status">
+          {error ||
+            (accounts.isError
+              ? '实例账号状态读取失败，请手动重试。'
+              : snapshot?.message || '尚未读取账号状态，请点击刷新账号状态。')}
+        </p>
+        {snapshot?.checkedAt && (
+          <p className="text-default-500 text-xs">
+            检查时间：{snapshot.checkedAt}
+          </p>
         )}
-
-        {/* 紧凑列表 */}
-        <div className="compact-list mt-4">
-          <div className="compact-list-header">
-            <div className="w-[180px] px-4">用户名</div>
-            <div className="w-[120px]">状态</div>
-            <div className="flex-1">上次活跃</div>
-            <div className="w-[160px] px-4 text-right">操作</div>
+        {snapshot?.accounts.map((account, index) => (
+          <div
+            key={index}
+            className="flex flex-wrap justify-between gap-2 border-t pt-3"
+          >
+            <span>{account.name}</span>
+            <span>
+              {account.needCheck
+                ? '待官方验证'
+                : account.available
+                  ? '账号可用'
+                  : '账号暂不可用'}
+            </span>
+            {account.needCheck && account.waitTime && (
+              <span className="text-sm">等待至：{account.waitTime}</span>
+            )}
           </div>
-
-          {!isFetching && data?.items.length === 0 && (
-            <div className="py-20 text-center text-[15px] text-neutral-400">
-              暂无账号信息
-            </div>
-          )}
-
-          {data?.items.map((item) => {
-            const isBlocked = data?.blocks.includes(item.id);
-            const isInvalid = item.status === 0;
-
-            return (
-              <div key={item.id} className="compact-row group">
-                {/* 用户名 + ID (Hover) */}
-                <div className="w-[180px] px-4">
-                  <Tooltip
-                    content={`VID: ${item.id}`}
-                    placement="right"
-                    closeDelay={0}
-                  >
-                    <div className="flex cursor-default flex-col overflow-hidden">
-                      <span className="truncate text-[15px] font-medium text-neutral-800 dark:text-neutral-200">
-                        {item.name}
-                      </span>
-                      <span className="text-[11px] text-neutral-400">
-                        WeRead Account
-                      </span>
-                    </div>
-                  </Tooltip>
-                </div>
-
-                {/* 状态 */}
-                <div className="w-[120px]">
-                  {isBlocked ? (
-                    <span className="mac-badge mac-badge-warning">小黑屋</span>
-                  ) : item.status === 0 ? (
-                    <span className="mac-badge mac-badge-danger">
-                      {statusMap[item.status].label}
-                    </span>
-                  ) : (
-                    <span className="mac-badge mac-badge-success">
-                      {statusMap[item.status].label}
-                    </span>
-                  )}
-                </div>
-
-                {/* 时间 */}
-                <div className="flex-1 text-[13px] text-neutral-400">
-                  {dayjs(item.updatedAt).format('YYYY-MM-DD HH:mm')}
-                </div>
-
-                {/* 操作 */}
-                <div className="flex w-[160px] items-center justify-end gap-4 px-4">
-                  {isInvalid ? (
-                    <span
-                      className="mac-action-link"
-                      onClick={() => openRelogin(item.id)}
-                    >
-                      重新登录
-                    </span>
-                  ) : (
-                    <StatusDropdown
-                      value={item.status}
-                      onChange={(value) => {
-                        updateAccount({
-                          id: item.id,
-                          data: { status: value },
-                        }).then(() => {
-                          toast.success('已更新');
-                          refetch();
-                        });
-                      }}
-                    ></StatusDropdown>
-                  )}
-                  <span
-                    className="mac-action-link danger"
-                    onClick={() => {
-                      if (window.confirm('确定删除吗？')) {
-                        deleteAccount(item.id).then(() => {
-                          toast.success('已删除');
-                          refetch();
-                        });
-                      }
-                    }}
-                  >
-                    删除
-                  </span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* 登录弹窗 */}
+        ))}
+      </section>
+      <details
+        onToggle={(event) => setShowLegacy(event.currentTarget.open)}
+        className="rounded-lg border p-3"
+      >
+        <summary className="cursor-pointer text-sm">
+          旧本地账号记录（只读）
+        </summary>
+        <p className="text-default-500 mt-2 text-xs">
+          保留原有记录；这些记录不表示 Wechat2RSS 已登录。
+        </p>
+        {showLegacy && legacy.isFetching && <Spinner size="sm" />}
+        {showLegacy && legacy.isError && <p>旧记录读取失败。</p>}
+        {showLegacy &&
+          legacy.data?.items.map((account) => (
+            <p key={account.id} className="mt-2 text-sm">
+              {account.name || '旧账号'}
+            </p>
+          ))}
+      </details>
       <Modal
         isOpen={isOpen}
-        onOpenChange={async () => {
-          onOpenChange();
-          setReloginAccountId(null);
-          await queryUtils.platform.getLoginResult.cancel();
+        onOpenChange={(open) => {
+          if (!open) dismiss();
         }}
-        size="xs"
-        backdrop="blur"
-        classNames={{
-          base: 'rounded-2xl',
-          header: 'border-b-[0.5px] border-neutral-100 dark:border-neutral-800',
-        }}
+        onClose={dismiss}
       >
         <ModalContent>
-          {() => (
-            <>
-              <ModalHeader>
-                <span className="text-[17px] font-semibold">
-                  {reloginAccountId ? '重新授权' : '添加读书账号'}
-                </span>
-              </ModalHeader>
-              <ModalBody className="py-8">
-                <div className="flex flex-col items-center">
-                  {reloginAccountId && (
-                    <div className="mb-6 rounded-lg bg-orange-50 px-3 py-2 text-center text-[13px] text-orange-500 dark:bg-orange-900/20">
-                      请使用账号 <strong>{reloginAccountId}</strong> 扫码
-                    </div>
-                  )}
-                  {loginError ? (
-                    <div className="text-[14px] text-red-500">{loginError}</div>
-                  ) : loginData ? (
-                    <div className="relative rounded-xl border border-neutral-100 bg-white p-3 shadow-sm">
-                      {loginResult?.message && (
-                        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-white/90 p-4 text-center">
-                          <span className="text-[15px] font-medium text-neutral-800">
-                            {loginResult.message}
-                          </span>
-                        </div>
-                      )}
-                      <QRCodeSVG size={180} value={loginData.scanUrl} />
-                    </div>
-                  ) : (
-                    <div className="flex h-[200px] flex-col items-center justify-center gap-3">
-                      <Spinner color="primary" />
-                      <span className="text-[14px] text-neutral-400">
-                        生成二维码...
-                      </span>
-                    </div>
-                  )}
-                  <div className="mt-6 text-[14px] font-medium text-neutral-500">
-                    微信扫码登录{' '}
-                    {!loginResult?.message && count > 0 && (
-                      <span className="text-red-500">({count}s)</span>
-                    )}
-                  </div>
-                </div>
-              </ModalBody>
-            </>
-          )}
+          <ModalHeader>登录 Wechat2RSS 微信账号</ModalHeader>
+          <ModalBody
+            tabIndex={0}
+            role="region"
+            aria-label="Wechat2RSS 登录状态与二维码"
+          >
+            {starting && <Spinner label="正在获取二维码…" />}
+            {!starting && login?.state === 'waiting' && !login.qrcode && (
+              <Spinner label="正在等待实例生成二维码…" />
+            )}
+            <p role="status">{login?.message}</p>
+            {login?.state === 'waiting' && login.qrcode && (
+              <img
+                src={login.qrcode}
+                alt="Wechat2RSS 微信登录二维码"
+                className="mx-auto h-64 w-64 max-w-full object-contain"
+              />
+            )}
+            {login?.state === 'waiting' && (
+              <p className="text-default-500 text-xs">
+                二维码最多等待三分钟。关闭窗口会停止本次轮询。
+              </p>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            {login &&
+              login.state !== 'waiting' &&
+              login.state !== 'succeeded' && (
+                <Button onPress={begin}>重新获取二维码</Button>
+              )}
+            <Button onPress={dismiss}>关闭</Button>
+          </ModalFooter>
         </ModalContent>
       </Modal>
     </div>
   );
 };
-
 export default AccountPage;

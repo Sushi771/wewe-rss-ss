@@ -2,8 +2,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { parseArgs } = require('node:util');
 const Module = require('node:module');
+const { isIP } = require('node:net');
 const {
-  verifyRelease,
+  verifyReleaseAsync,
   fileHash,
   readJson,
   inside,
@@ -11,8 +12,42 @@ const {
   run,
 } = require('./lib.cjs');
 
-// Scheduling is an explicit opt-in. A valid persisted official-album binding
-// is sufficient; the anonymous source must not require a different provider's key.
+// Mirror the Provider constructor's private URL/token boundary without loading
+// the application or making requests during the runtime's scheduling decision.
+function validWechat2RssConfig(settings) {
+  if (
+    typeof settings.wechat2RssToken !== 'string' ||
+    !settings.wechat2RssToken ||
+    settings.wechat2RssToken.length > 512
+  )
+    return false;
+  try {
+    const url = new URL(settings.wechat2RssBaseUrl);
+    const host = url.hostname;
+    const parts = host.split('.').map(Number);
+    const privateHost =
+      ['localhost', 'wechat2rss', '127.0.0.1', '[::1]'].includes(host) ||
+      (isIP(host) === 4 &&
+        (parts[0] === 10 ||
+          parts[0] === 127 ||
+          (parts[0] === 192 && parts[1] === 168) ||
+          (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)));
+    return (
+      ['http:', 'https:'].includes(url.protocol) &&
+      privateHost &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      url.pathname === '/'
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Scheduling is an explicit opt-in. Each source uses its own configuration and
+// binding; no source requires a different provider's key.
 function scheduledUpdatesEnabled(manifest, settings) {
   if (
     manifest.schemaCompatibility !== 'current' ||
@@ -21,6 +56,26 @@ function scheduledUpdatesEnabled(manifest, settings) {
   )
     return false;
   if (settings.mp2RssFeedKey?.trim()) return true;
+  if (settings.wechat2RssEnabled === '1' && validWechat2RssConfig(settings)) {
+    const allowed = new Set(
+      (settings.wechat2RssFeedIds || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter((id) => /^MP_WXS_\d{5,15}$/.test(id)),
+    );
+    if (
+      (settings.wechat2RssFeeds || []).some(
+        (feed) =>
+          feed.status === 1 &&
+          /^MP_WXS_\d{5,15}$/.test(feed.id) &&
+          (feed.collectionChannel === 'wechat2rss' ||
+            (feed.collectionChannel == null &&
+              !feed.publicAlbumIds &&
+              allowed.has(feed.id))),
+      )
+    )
+      return true;
+  }
   if (
     settings.ownerSearchConfigFile &&
     (settings.ownerSearchFeeds || []).some(
@@ -52,6 +107,28 @@ function scheduledUpdatesEnabled(manifest, settings) {
   });
 }
 
+function guardModulePath(release, resolved) {
+  // Native realpath retains the canonical path boundary check without a JS
+  // ancestor walk repeated for every dependency in the immutable package.
+  if (
+    !Module.isBuiltin(resolved) &&
+    !inside(release, fs.realpathSync.native(resolved))
+  )
+    throw new Error('Runtime dependency escaped the fixed release');
+}
+
+function guardNativePath(release, manifest, file) {
+  const canonical = fs.realpathSync.native(file);
+  const relative = path.relative(release, canonical).replace(/\\/g, '/');
+  if (
+    !inside(release, canonical) ||
+    !relative.endsWith('.node') ||
+    !manifest.files[relative] ||
+    fileHash(canonical) !== manifest.files[relative]
+  )
+    throw new Error('Native runtime dependency escaped or changed');
+}
+
 async function runtime() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -71,7 +148,10 @@ async function runtime() {
       '用法: runtime.cjs verify|probe|start [--database 绝对路径]',
     );
   const release = __dirname;
-  const manifest = verifyRelease(release);
+  const manifest = await verifyReleaseAsync(release, {
+    reuseVerified:
+      command === 'start' && process.env.LOCAL_RELEASE_REUSE_VERIFIED === '1',
+  });
   const legacy = manifest.schemaCompatibility === 'legacy-additive';
   if (!legacy && manifest.schemaCompatibility !== 'current')
     throw new Error('未知应用 schema 兼容模式');
@@ -86,19 +166,48 @@ async function runtime() {
   const database = fs.realpathSync(values.database);
   if (!fs.statSync(database).isFile()) throw new Error('数据库不是文件');
   const server = path.join(release, 'server');
+  const compact = manifest.executionLayout === 'compact-cjs-v1';
+  if (manifest.executionLayout && !compact)
+    throw new Error('Unknown release execution layout');
+  const entry = compact
+    ? path.join(server, 'main.cjs')
+    : path.join(server, 'dist/apps/server/src/main.js');
+  const resolveModule = Module._resolveFilename;
+  Module._resolveFilename = function (request, ...args) {
+    const resolved =
+      compact && request === 'hbs'
+        ? path.join(server, 'hbs.cjs')
+        : resolveModule.call(this, request, ...args);
+    guardModulePath(release, resolved);
+    return resolved;
+  };
+  const dlopen = process.dlopen;
+  process.dlopen = function (module, file, ...args) {
+    guardNativePath(release, manifest, file);
+    return dlopen.call(this, module, file, ...args);
+  };
   const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
-  const inspected = JSON.parse(
-    run(python, [
-      path.join(release, 'inspect-sqlite.py'),
-      '--database',
-      database,
-      '--migrations',
-      legacy
-        ? path.join(release, 'known-migrations')
-        : path.join(server, 'prisma/migrations'),
-      ...(!legacy ? ['--require-current'] : []),
-    ]),
-  );
+  const inspected =
+    command === 'start' &&
+    manifest.startupPreparation === 'node-pinned-backup-v1'
+      ? require('./startup-sqlite.cjs').inspectDatabase(
+          database,
+          path.join(server, 'prisma/migrations'),
+          { schemaOnly: true },
+        )
+      : JSON.parse(
+          run(python, [
+            path.join(release, 'inspect-sqlite.py'),
+            '--database',
+            database,
+            '--migrations',
+            legacy
+              ? path.join(release, 'known-migrations')
+              : path.join(server, 'prisma/migrations'),
+            ...(!legacy ? ['--require-current'] : []),
+            ...(command === 'start' && !legacy ? ['--schema-only'] : []),
+          ]),
+        );
   const env = cleanEnvironment({
     DATABASE_URL: 'file:' + database.replace(/\\/g, '/'),
     NODE_ENV: 'production',
@@ -109,16 +218,6 @@ async function runtime() {
       delete process.env[key];
   Object.assign(process.env, env);
   process.chdir(server);
-  const resolveModule = Module._resolveFilename;
-  Module._resolveFilename = function (request, ...args) {
-    const resolved = resolveModule.call(this, request, ...args);
-    if (
-      !Module.isBuiltin(resolved) &&
-      !inside(release, fs.realpathSync(resolved))
-    )
-      throw new Error('运行依赖逃逸到产物目录之外');
-    return resolved;
-  };
   const clientPath = require.resolve('@prisma/client', { paths: [server] });
   const { PrismaClient, Prisma } = require(clientPath);
   if (Prisma.prismaVersion.client !== manifest.prisma.clientVersion)
@@ -127,6 +226,7 @@ async function runtime() {
   let counts;
   let publicAlbumFeeds = [];
   let ownerSearchFeeds = [];
+  let wechat2RssFeeds = [];
   try {
     // raw 查询用于暴露曾出现过的 5.22 engine / 5.10 client 协议不兼容。
     const [{ version }] = await client.$queryRawUnsafe(
@@ -163,6 +263,32 @@ async function runtime() {
         where: { status: 1, collectionChannel: 'owner-web-search' },
         select: { id: true, status: true, collectionChannel: true },
       });
+      if (
+        command === 'start' &&
+        values.production &&
+        process.env.ENABLE_SCHEDULED_UPDATES === '1' &&
+        process.env.WECHAT2RSS_ENABLED === '1' &&
+        validWechat2RssConfig({
+          wechat2RssBaseUrl: process.env.WECHAT2RSS_BASE_URL,
+          wechat2RssToken: process.env.WECHAT2RSS_TOKEN,
+        })
+      ) {
+        wechat2RssFeeds = await client.feed.findMany({
+          where: {
+            status: 1,
+            OR: [
+              { collectionChannel: 'wechat2rss' },
+              { collectionChannel: null },
+            ],
+          },
+          select: {
+            id: true,
+            status: true,
+            collectionChannel: true,
+            publicAlbumIds: true,
+          },
+        });
+      }
     }
   } finally {
     await client.$disconnect();
@@ -213,6 +339,11 @@ async function runtime() {
       publicAlbumFeeds,
       ownerSearchFeeds,
       ownerSearchConfigFile: process.env.OWNER_SEARCH_CONFIG_FILE,
+      wechat2RssEnabled: process.env.WECHAT2RSS_ENABLED,
+      wechat2RssBaseUrl: process.env.WECHAT2RSS_BASE_URL,
+      wechat2RssToken: process.env.WECHAT2RSS_TOKEN,
+      wechat2RssFeedIds: process.env.WECHAT2RSS_FEED_IDS,
+      wechat2RssFeeds,
     });
     Object.assign(process.env, {
       HOST: '127.0.0.1',
@@ -222,7 +353,7 @@ async function runtime() {
       WECHAT_DESKTOP_MP_IDS: '',
       ...(legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),
     });
-    require(path.join(server, 'dist/apps/server/src/main.js'));
+    require(entry);
     return;
   }
   if (!values['obsidian-root'] || !values['guard-report'])
@@ -244,7 +375,10 @@ async function runtime() {
   Object.assign(process.env, {
     HOST: '127.0.0.1',
     PORT: String(port),
-    AUTH_CODE: '',
+    AUTH_CODE:
+      process.env.PRIVATE_ONLINE_MODE === '1'
+        ? process.env.AUTH_CODE || ''
+        : '',
     FEED_MODE: '',
     SERVER_ORIGIN_URL: `http://127.0.0.1:${port}`,
     OBSIDIAN_PATH: values['obsidian-root'],
@@ -256,7 +390,7 @@ async function runtime() {
     REHEARSAL_GUARD_REPORT: values['guard-report'],
   });
   require('./offline-guard.cjs');
-  require(path.join(server, 'dist/apps/server/src/main.js'));
+  require(entry);
 }
 
 if (require.main === module)
@@ -264,4 +398,9 @@ if (require.main === module)
     console.error(error.message);
     process.exitCode = 1;
   });
-module.exports = { runtime, scheduledUpdatesEnabled };
+module.exports = {
+  runtime,
+  scheduledUpdatesEnabled,
+  guardModulePath,
+  guardNativePath,
+};

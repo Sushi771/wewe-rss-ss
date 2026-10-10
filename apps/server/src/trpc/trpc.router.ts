@@ -1,4 +1,14 @@
-import { INestApplication, Injectable, Logger } from '@nestjs/common';
+import { buildArticleMarkdown } from '../article-export';
+import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
+import { LocalArticleStore } from '../article-local-save';
+import {
+  exportSourceFromFeed,
+  exportSourceMarkdown,
+} from '../article-export-source';
+import { findArticleListRows } from '../article-list-page';
+import { Wechat2RssAccounts } from '../wechat2rss-account';
+import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
+import { XiaohongshuService } from '../collection/xiaohongshu.service';
 import { z } from 'zod';
 import {
   AccountSchemas,
@@ -12,26 +22,12 @@ import { TRPCError } from '@trpc/server';
 import { PrismaService } from '@server/prisma/prisma.service';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
-import TurndownService from 'turndown';
-import dayjs from 'dayjs';
-import { load } from 'cheerio';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as crypto from 'node:crypto';
-import pMap from '@cjs-exporter/p-map';
 import { WereadService } from '@server/weread/weread.service';
 import { CollectionService } from '../collection/collection.service';
-import {
-  articlePageRequest,
-  BODY_UNAVAILABLE_MESSAGE,
-} from '../collection/article-page';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { resolveCollectionRoute } from '../collection/collection-channel';
-import {
-  allowedImageUrl,
-  decodeInlineImage,
-  fetchAllowedImage,
-} from '../collection/image-fetch';
 import { hasPrivateSession, privateOnlineMode } from '../private-access';
 import {
   bodyRetryAvailability,
@@ -43,9 +39,19 @@ import {
   csvCell,
   metricLabels,
   Metrics,
-  metricsMarkdown,
 } from '../collection/collection-format';
 import { scanOwnerCandidates } from '../collection/owner-candidate-scan';
+import {
+  readOwnerVerificationStatus,
+  readOwnerAccountAccess,
+} from '../collection/owner-verification-status';
+import {
+  ownerConfigFile,
+  previewManualWereadBinding,
+  confirmManualWereadBinding,
+  nativeAccountLoginAt,
+  nativeAccountProfile,
+} from '../collection/owner-weread-binding';
 
 const searchCandidateSnapshotSchema = z.object({
   mpId: z
@@ -81,13 +87,22 @@ const searchCandidateSnapshotSchema = z.object({
 
 @Injectable()
 export class TrpcRouter {
+  private readonly wechat2RssAccounts = new Wechat2RssAccounts();
+
   constructor(
     private readonly trpcService: TrpcService,
     private readonly prismaService: PrismaService,
     private readonly configService: ConfigService,
     private readonly wereadService: WereadService,
     private readonly collectionService: CollectionService,
+    @Optional() private readonly xiaohongshuService?: XiaohongshuService,
   ) {}
+
+  private get xhs() {
+    return (
+      this.xiaohongshuService ?? new XiaohongshuService(this.prismaService)
+    );
+  }
 
   private readonly logger = new Logger(this.constructor.name);
 
@@ -169,50 +184,71 @@ export class TrpcRouter {
   async buildOfflineFeedDirectory(feedId: string, directory: string) {
     const feed = await this.prismaService.feed.findUnique({
       where: { id: feedId },
+      include: { group: true },
     });
     if (!feed) return null;
     const articles = await this.prismaService.article.findMany({
       where: { mpId: feedId },
       orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-      select: { id: true, title: true, sourceUrl: true, contentHtml: true },
+      select: {
+        id: true,
+        title: true,
+        sourceUrl: true,
+        contentHtml: true,
+        lastBodyStatus: true,
+        metrics: true,
+        publishTime: true,
+      },
     });
     if (articles.length > 5000) throw new Error('离线导出文章超过上限');
     await fs.promises.mkdir(directory, { recursive: true });
     let complete = 0;
     const incomplete: string[] = [];
-    for (const [index, article] of articles.entries()) {
-      const safeTitle =
-        article.title
-          .replace(/[\\/:*?"<>|\x00-\x1f]/g, '-')
-          .replace(/[. ]+$/g, '')
-          .slice(0, 75) || '未命名';
-      const relative = `articles/${String(index + 1).padStart(4, '0')}-${safeTitle}`;
-      const articleDirectory = path.join(directory, relative);
-      await fs.promises.mkdir(articleDirectory, { recursive: true });
-      let markdown: string;
-      if (article.contentHtml) {
-        try {
-          markdown = (
-            await this.getArticleMarkdown(article.id, articleDirectory)
-          ).markdown;
-          complete++;
-        } catch {
-          incomplete.push(relative);
-          markdown = `# ${article.title}\n\n正文或图片未能完整归档，本篇未通过离线验收。\n\n原文：${article.sourceUrl || '未记录'}\n`;
-        }
-      } else {
-        incomplete.push(relative);
-        markdown = `# ${article.title}\n\n正文尚未缓存，本篇无法离线阅读。\n\n原文：${article.sourceUrl || '未记录'}\n`;
+    const source = exportSourceFromFeed(feed);
+    const store = new LocalArticleStore(
+      path.join(directory, '.unused-settings.json'),
+      directory,
+    );
+    for (const article of articles) {
+      try {
+        await store.save(
+          prepareCachedArticleLocalExport(article, source),
+          new Date(),
+          directory,
+        );
+        complete++;
+      } catch {
+        const result = await store.save(
+          async (stage) => {
+            await fs.promises.mkdir(path.join(stage, 'image'));
+            await fs.promises.writeFile(
+              path.join(stage, 'index.md'),
+              `# ${article.title.replace(/[\r\n]/g, ' ')}\n\n正文或图片尚未完整归档，本篇无法完整离线阅读。\n`,
+            );
+            return {
+              articleId: article.id,
+              title: article.title,
+              imageCount: 0,
+              exportSource: source,
+              sourceUrl: article.sourceUrl,
+              publishTime: article.publishTime,
+            };
+          },
+          new Date(),
+          directory,
+        );
+        incomplete.push(
+          path
+            .relative(directory, result.markdownPath)
+            .split(path.sep)
+            .join('/'),
+        );
       }
-      await fs.promises.writeFile(
-        path.join(articleDirectory, 'index.md'),
-        markdown,
-      );
     }
     await fs.promises.writeFile(
       path.join(directory, 'README.md'),
       `# ${feed.mpName}\n\n共 ${articles.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
-        '文章位于 articles/ 下，每篇的图片路径相对其 index.md。未完整篇目在各自文件中明确标注。\n',
+        `分组：${source.groupName || '未分组'}\n\n文章位于 YYYY-MM-DD_分组/公众号文件夹中；日期采用原文发布日期（上海时间），不同日期分别保存，缺可信日期为日期待核并写明原因，正常文件名保留文章标题，冲突时加稳定身份后缀；该号共用 image/，图片按文章身份隔离，正文使用相对引用。未完整篇目在各自文件中明确标注。\n`,
     );
     return {
       name: feed.mpName,
@@ -223,6 +259,27 @@ export class TrpcRouter {
   }
 
   collectionRouter = this.trpcService.router({
+    verificationStatus: this.trpcService.protectedProcedure.query(
+      async ({ ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '官方验证状态只能在服务器本机查看。',
+          });
+        const feeds = await this.prismaService.feed.findMany({
+          select: { id: true, mpName: true, collectionChannel: true },
+        });
+        return readOwnerVerificationStatus(
+          process.env.OWNER_SEARCH_CONFIG_FILE,
+          feeds,
+          async (id) => {
+            const nativeLoginAt = await nativeAccountLoginAt(id);
+            const profile = await nativeAccountProfile(id, nativeLoginAt);
+            return { name: profile?.name || null, nativeLoginAt };
+          },
+        );
+      },
+    ),
     collectPublicAlbums: this.trpcService.protectedProcedure
       .input(
         z.object({
@@ -362,9 +419,156 @@ export class TrpcRouter {
   private legacyAccountProcedure = this.trpcService.protectedProcedure;
 
   accountRouter = this.trpcService.router({
+    wechat2rssAccounts: this.trpcService.protectedProcedure.query(() =>
+      this.wechat2RssAccounts.list(),
+    ),
+    wechat2rssLoginStart: this.trpcService.protectedProcedure.mutation(() =>
+      this.wechat2RssAccounts.start(),
+    ),
+    wechat2rssLoginPoll: this.trpcService.protectedProcedure
+      .input(z.object({ sessionId: z.string().uuid() }))
+      .mutation(({ input }) => this.wechat2RssAccounts.poll(input.sessionId)),
+    wechat2rssLoginClose: this.trpcService.protectedProcedure
+      .input(z.object({ sessionId: z.string().uuid() }))
+      .mutation(({ input }) => this.wechat2RssAccounts.close(input.sessionId)),
+    wechat2rssStatus: this.trpcService.protectedProcedure.query(() =>
+      this.trpcService.wechat2rssStatus(),
+    ),
+    manualRefreshOptions: this.legacyAccountProcedure
+      .input(z.object({ accountId: z.string().regex(/^\d+$/) }))
+      .query(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '手动更新账号连接只能在服务器本机操作。',
+          });
+        try {
+          const account = await this.prismaService.account.findUniqueOrThrow({
+            where: { id: input.accountId },
+          });
+          const config = JSON.parse(
+            await fs.promises.readFile(ownerConfigFile(), 'utf8'),
+          );
+          const feeds = await this.prismaService.feed.findMany({
+            orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
+          });
+          const options = await Promise.all(
+            feeds.map(async (feed) => {
+              // Show every saved subscription. An absent private source or an
+              // existing different channel must remain an explicit disabled
+              // choice, never an automatic account/channel switch.
+              const configured = !!config.feeds?.[feed.id];
+              if (
+                !configured ||
+                feed.collectionChannel !== 'owner-weread-latest'
+              )
+                return {
+                  mpId: feed.id,
+                  name: feed.mpName,
+                  revision: '',
+                  ready: false,
+                  connected: false,
+                  connectedAt: null,
+                  refreshRequired: false,
+                  configured,
+                  reason: configured
+                    ? 'different-channel'
+                    : 'source-unconfigured',
+                  message: configured
+                    ? '该订阅使用其他更新通道；需先明确选择手动读书来源，当前通道保持不变。'
+                    : '该订阅尚未配置手动读书来源；账号登录不会自动绑定，也不会批量取文。',
+                };
+              const preview = await previewManualWereadBinding(
+                account,
+                feed.id,
+              );
+              let refreshAfterConnection = false;
+              try {
+                const result = JSON.parse(feed.lastCollectionResult || 'null');
+                refreshAfterConnection =
+                  preview.connected &&
+                  result?.source === 'owner-weread-latest' &&
+                  Number.isSafeInteger(result.attemptedAt) &&
+                  // Whole-second legacy receipts cannot prove ordering inside
+                  // the connection's fractional second. Keep that case pending.
+                  result.attemptedAt * 1000 >= Date.parse(preview.connectedAt!);
+              } catch {
+                // A malformed/old receipt cannot claim the new login refreshed.
+              }
+              return {
+                ...preview,
+                name: feed.mpName,
+                configured,
+                reason: preview.ready ? null : 'session-unavailable',
+                refreshRequired: preview.connected && !refreshAfterConnection,
+                ...(preview.connected && !refreshAfterConnection
+                  ? {
+                      message:
+                        '已连接此账号，尚无连接后的取文结果。请在该公众号页使用“更新本号”；连接确认仅保存授权。',
+                    }
+                  : {}),
+              };
+            }),
+          );
+          const profile = await nativeAccountProfile(
+            account.id,
+            await nativeAccountLoginAt(account.id),
+          );
+          return {
+            accountLabel:
+              profile?.name ||
+              (!account.name || account.name === `WeRead_${account.id}`
+                ? '昵称未读取'
+                : `保存名称：${account.name}`),
+            options,
+          };
+        } catch {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: '无法预览手动更新连接，请检查私有配置和正常Web登录。',
+          });
+        }
+      }),
+    connectManualRefresh: this.legacyAccountProcedure
+      .input(
+        z.object({
+          accountId: z.string().regex(/^\d+$/),
+          mpId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+          revision: z.string().regex(/^[a-f0-9]{64}$/),
+          confirm: z.literal(true),
+        }),
+      )
+      .mutation(async ({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '手动更新账号连接只能在服务器本机操作。',
+          });
+        try {
+          const account = await this.prismaService.account.findUniqueOrThrow({
+            where: { id: input.accountId },
+          });
+          const feed = await this.prismaService.feed.findUniqueOrThrow({
+            where: { id: input.mpId },
+          });
+          if (feed.collectionChannel !== 'owner-weread-latest')
+            throw new Error('INVALID_CHANNEL');
+          return await confirmManualWereadBinding(
+            account,
+            input.mpId,
+            input.revision,
+          );
+        } catch {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message:
+              '连接未完成：请重新预览并核对正常Web登录、停止或正在更新状态；未发取文请求。',
+          });
+        }
+      }),
     list: this.legacyAccountProcedure
       .input(AccountSchemas.list)
-      .query(async ({ input }) => {
+      .query(async ({ input, ctx }) => {
         const limit = input.limit ?? 1000;
         const { cursor } = input;
 
@@ -398,9 +602,35 @@ export class TrpcRouter {
         }
 
         const disabledAccounts = this.trpcService.getBlockedAccountIds();
+        const identifiedItems = await Promise.all(
+          items.map(async (item) => {
+            const nativeLoginAt = await nativeAccountLoginAt(item.id);
+            const profile = await nativeAccountProfile(item.id, nativeLoginAt);
+            return {
+              ...item,
+              nativeLoginAt,
+              platformName: profile?.name || null,
+              platformAvatar: profile?.avatar || null,
+            };
+          }),
+        );
+        const access = await readOwnerAccountAccess(
+          (ctx as any).isLocal
+            ? process.env.OWNER_SEARCH_CONFIG_FILE
+            : undefined,
+          (ctx as any).isLocal && process.env.OWNER_SEARCH_CONFIG_FILE
+            ? await this.prismaService.feed.findMany({
+                select: { id: true, mpName: true, collectionChannel: true },
+              })
+            : [],
+          identifiedItems,
+        );
         return {
           blocks: disabledAccounts,
-          items,
+          items: identifiedItems.map((item) => ({
+            ...item,
+            ...access.get(item.id),
+          })),
           nextCursor,
         };
       }),
@@ -479,6 +709,44 @@ export class TrpcRouter {
   });
 
   feedRouter = this.trpcService.router({
+    reorderGroups: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            ids: z.array(z.string().min(1).max(128)).min(1).max(1000),
+            expectedIds: z.array(z.string().min(1).max(128)).min(1).max(1000),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.trpcService.reorderGroups(input)),
+    groups: this.trpcService.protectedProcedure.query(() =>
+      this.trpcService.groups(),
+    ),
+    saveGroup: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            id: z.string().min(1).max(128).optional(),
+            name: z.string().trim().min(1).max(80),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.trpcService.saveGroup(input)),
+    removeGroup: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.trpcService.removeGroup(input.id)),
+    moveFeeds: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            ids: z.array(z.string().min(1).max(128)).min(1).max(100),
+            groupId: z.string().min(1).max(128).nullable(),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) =>
+        this.trpcService.moveFeeds(input.ids, input.groupId),
+      ),
     searchCandidates: this.trpcService.protectedProcedure
       .input(z.object({ mpId: z.string().regex(/^MP_WXS_\d{5,15}$/) }))
       .query(({ input }) => this.readSearchCandidateSnapshot(input.mpId)),
@@ -505,10 +773,118 @@ export class TrpcRouter {
           });
         }
       }),
+    addCapability: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ source: z.enum(['native', 'wechat2rss']).optional() })
+          .strict()
+          .optional(),
+      )
+      .query(({ input }) =>
+        this.trpcService.subscriptionAddCapability(input?.source),
+      ),
+    repairNativeSource: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            feedId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+            accountId: z.string().regex(/^\d{1,20}$/),
+            confirmed: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) =>
+        this.trpcService.repairExistingSubscription(
+          input.feedId,
+          input.accountId,
+          !!(ctx as any).isLocal,
+        ),
+      ),
+    subscriptionTasks: this.trpcService.protectedProcedure.query(async () => ({
+      items: await this.trpcService.subscriptionTaskList(),
+    })),
+    addSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ articleUrls: z.array(z.string().max(4096)).min(1).max(20) })
+          .strict(),
+      )
+      .mutation(({ input }) =>
+        this.trpcService.addSubscriptionBatch(input.articleUrls),
+      ),
+    subscriptionBatches: this.trpcService.protectedProcedure.query(
+      async () => ({ items: await this.trpcService.subscriptionBatchList() }),
+    ),
+    manualRefreshBatches: this.trpcService.protectedProcedure.query(
+      async () => ({
+        items: (await this.trpcService.subscriptionBatchList(true)).filter(
+          (batch) => batch.purpose === 'manual-refresh',
+        ),
+      }),
+    ),
+    beginRefreshAll: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            feedIds: z
+              .array(z.string().regex(/^MP_WXS_\d{5,15}$/))
+              .min(1)
+              .max(1000)
+              .optional(),
+            intentKey: z
+              .string()
+              .regex(/^[a-f0-9]{64}$/)
+              .optional(),
+          })
+          .optional(),
+      )
+      .mutation(({ ctx, input }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '提交上游更新仅限本机手动入口。',
+          });
+        return this.trpcService.beginManualRefreshAll(
+          input?.feedIds,
+          input?.intentKey,
+        );
+      }),
+    stopSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }))
+      .mutation(({ input }) =>
+        this.trpcService.stopSubscriptionBatch(input.batchId),
+      ),
+    resumeSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }))
+      .mutation(({ input }) =>
+        this.trpcService.resumeSubscriptionBatch(input.batchId),
+      ),
+    subscriptionTask: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().regex(/^[a-f0-9]{64}$/) }))
+      .query(({ input }) => this.trpcService.subscriptionTask(input.taskId)),
+    resumeSubscriptionTask: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().regex(/^[a-f0-9]{64}$/) }))
+      .mutation(({ input }) =>
+        this.trpcService.resumeSubscriptionTask(input.taskId),
+      ),
     addFromArticle: this.trpcService.protectedProcedure
-      .input(z.object({ articleUrl: z.string().url() }))
-      .mutation(async ({ input }) =>
-        this.trpcService.addSubscriptionFromArticle(input.articleUrl),
+      .input(
+        z.object({
+          articleUrl: z.string().url().max(4096),
+          source: z.enum(['native', 'wechat2rss']).optional(),
+          accountId: z
+            .string()
+            .regex(/^\d{1,20}$/)
+            .optional(),
+        }),
+      )
+      .mutation(async ({ input, ctx }) =>
+        this.trpcService.addSubscriptionFromArticle(
+          input.articleUrl,
+          input.accountId,
+          !!(ctx as any).isLocal,
+          input.source,
+        ),
       ),
     list: this.trpcService.protectedProcedure
       .input(FeedSchemas.list)
@@ -588,17 +964,31 @@ export class TrpcRouter {
         return id;
       }),
     updateOrder: this.trpcService.protectedProcedure
-      .input(FeedSchemas.updateOrder)
-      .mutation(async ({ input }) => {
-        const updates = input.map(({ id, order }) =>
-          this.prismaService.feed.update({
-            where: { id },
-            data: { order } as any,
-          }),
-        );
-        await this.prismaService.$transaction(updates);
-        return true;
-      }),
+      .input(
+        z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(128),
+                order: z
+                  .number()
+                  .int()
+                  .nonnegative()
+                  .max(Number.MAX_SAFE_INTEGER),
+                expectedOrder: z.number().int().nonnegative().optional(),
+                expectedGroupId: z
+                  .string()
+                  .min(1)
+                  .max(128)
+                  .nullable()
+                  .optional(),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(1000),
+      )
+      .mutation(({ input }) => this.trpcService.reorderFeeds(input)),
     batchDelete: this.trpcService.protectedProcedure
       .input(z.array(z.string()))
       .mutation(async ({ input: ids }) => {
@@ -716,7 +1106,7 @@ export class TrpcRouter {
           ];
         }
 
-        const items = await this.prismaService.article.findMany({
+        const items = await findArticleListRows(this.prismaService, {
           orderBy: [
             {
               [input.sort || 'publishTime']: 'desc',
@@ -730,22 +1120,6 @@ export class TrpcRouter {
                 id: cursor,
               }
             : undefined,
-          select: {
-            id: true,
-            mpId: true,
-            title: true,
-            picUrl: true,
-            publishTime: true,
-            sourceUrl: true,
-            lastBodyStatus: true,
-            verifiedSourceUrl: true,
-            lastBodyRetry: true,
-            contentHtml: true,
-            metrics: true,
-            readCount: true,
-            likeCount: true,
-            feed: true,
-          },
         });
         let nextCursor: typeof cursor | undefined = undefined;
         if (items.length > limit) {
@@ -757,9 +1131,8 @@ export class TrpcRouter {
         }
 
         return {
-          items: items.map(({ contentHtml, ...item }) => ({
+          items: items.map((item) => ({
             ...item,
-            bodyCached: Boolean(contentHtml),
             bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
             bodyRetryResult: readBodyRetryResult(item.lastBodyRetry),
           })),
@@ -858,6 +1231,7 @@ export class TrpcRouter {
           });
         const article = await this.prismaService.article.findUnique({
           where: { id },
+          include: { feed: { include: { group: true } } },
         });
         if (!article) {
           throw new TRPCError({
@@ -870,23 +1244,33 @@ export class TrpcRouter {
           this.configService.get<ConfigurationType['feed']>('feed')!;
 
         try {
-          const dateFolder = dayjs().format('YYYY-MM-DD');
-          const finalPath = path.join(obsidianPath, dateFolder);
-          const { markdown, title } = await this.getArticleMarkdown(
-            id,
-            finalPath,
+          // Batch export calls this same mutation per ID. Share the tool's
+          // isolated directory, atomic publication and edited-note protection.
+          const store = new LocalArticleStore(
+            path.join(obsidianPath, '.wewe-list-export-settings.json'),
+            obsidianPath,
           );
-
-          if (!fs.existsSync(finalPath)) {
-            await fs.promises.mkdir(finalPath, { recursive: true });
-          }
-
-          const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 100);
-          const filePath = path.join(finalPath, `${safeTitle}-${id}.md`);
-
-          await fs.promises.writeFile(filePath, markdown);
-
-          return { success: true, path: filePath };
+          const result = await store.save(
+            prepareCachedArticleLocalExport(
+              article,
+              exportSourceFromFeed(article.feed),
+            ),
+            new Date(),
+            obsidianPath,
+          );
+          return {
+            success: true,
+            path: result.markdownPath,
+            alreadySaved: result.alreadySaved,
+            publicationDate: result.publicationDate,
+            ...(result.datePendingReason
+              ? { datePendingReason: result.datePendingReason }
+              : {}),
+            ...(result.legacyLayoutRetained
+              ? { legacyLayoutRetained: true }
+              : {}),
+            ...(result.mediaComplete === false ? { mediaComplete: false } : {}),
+          };
         } catch (err: any) {
           this.logger.error(`Save to Obsidian error for ${id}: ${err.message}`);
           if (err instanceof TRPCError) throw err;
@@ -899,150 +1283,26 @@ export class TrpcRouter {
       }),
   });
 
-  private async downloadImage(url: string, destPath: string) {
-    if (url.startsWith('data:')) {
-      const { bytes } = decodeInlineImage(url);
-      await fs.promises.writeFile(destPath, bytes);
-      return;
-    }
-    const image = await fetchAllowedImage(url);
-    await fs.promises.writeFile(destPath, image.bytes);
-  }
-
   private async getArticleMarkdown(id: string, downloadPath?: string) {
     const article = await this.prismaService.article.findUnique({
       where: { id },
+      include: { feed: { include: { group: true } } },
     });
-    if (!article) {
-      throw new Error(`No article with id '${id}'`);
-    }
-
-    const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
-
-    let html = article.contentHtml || '';
-    if (!html && article.lastBodyStatus === 'unavailable')
-      throw new TRPCError({
-        code: 'PRECONDITION_FAILED',
-        message: BODY_UNAVAILABLE_MESSAGE,
-      });
-    if (!html) {
-      const source = new URL(url);
-      if (
-        source.protocol !== 'https:' ||
-        source.hostname !== 'mp.weixin.qq.com' ||
-        source.username ||
-        source.password ||
-        source.port
-      )
-        throw new Error('文章来源未核验，不能远程读取');
-      html = await articlePageRequest(url)
-        .text()
-        .catch(() => '');
-    }
-
-    if (!html) {
-      throw new Error(`Failed to load article content for ${id}`);
-    }
-
-    const $ = load(html, { decodeEntities: false });
+    if (!article) throw new Error(`No article with id '${id}'`);
     const { originUrl } = this.configService.get('feed');
-    const serverHost = originUrl || 'http://localhost:4000';
-
-    const contentEl = $('.rich_media_content').length
-      ? $('.rich_media_content')
-      : $('#js_content');
-    if (
-      !contentEl.length ||
-      (!contentEl.text().trim() && !contentEl.find('img').length)
-    ) {
-      throw new Error(
-        '未获取到正文，请在 WeChatDownload 下载对应 HTML 后重新导入',
-      );
-    }
-
-    if (downloadPath) {
-      const attachmentsDir = path.join(downloadPath, 'attachments');
-      if (!fs.existsSync(attachmentsDir)) {
-        await fs.promises.mkdir(attachmentsDir, { recursive: true });
-      }
-
-      const imgs = contentEl.find('img').get();
-      await pMap(
-        imgs,
-        async (img) => {
-          const $img = $(img);
-          const src = $img.attr('src') || '';
-          // An archived data URI takes precedence over an old remote lazy-load URL.
-          const dataSrc = src.startsWith('data:')
-            ? src
-            : $img.attr('data-src') || src;
-          if (dataSrc) {
-            let ext = 'jpg';
-            if (dataSrc.startsWith('data:image/'))
-              ext = dataSrc.slice(11).split(';')[0];
-            else {
-              try {
-                const imageUrl = new URL(dataSrc);
-                ext =
-                  imageUrl.searchParams.get('wx_fmt') ||
-                  path.extname(imageUrl.pathname).slice(1) ||
-                  'jpg';
-              } catch {
-                // The download validator reports an invalid URL below.
-              }
-            }
-            const hash = crypto.createHash('md5').update(dataSrc).digest('hex');
-            const safeExt = /^(png|jpe?g|gif|webp)$/.test(ext) ? ext : 'jpg';
-            const fileName = `image_${hash}.${safeExt}`;
-            const localPath = path.join(attachmentsDir, fileName);
-
-            try {
-              if (!fs.existsSync(localPath)) {
-                await this.downloadImage(dataSrc, localPath);
-              }
-              $img.attr('src', `attachments/${fileName}`);
-            } catch {
-              throw new Error('图片未能安全下载，离线导出未完成');
-            }
-          }
-        },
-        { concurrency: 5 },
-      );
-    } else {
-      // For browser export, we use proxy URLs
-      contentEl.find('img').each((_, img) => {
-        const $img = $(img);
-        const src = $img.attr('src') || '';
-        const dataSrc = src.startsWith('data:')
-          ? src
-          : $img.attr('data-src') || src;
-        if (dataSrc) {
-          try {
-            if (dataSrc.startsWith('data:')) {
-              decodeInlineImage(dataSrc);
-              $img.attr('src', dataSrc);
-            } else {
-              allowedImageUrl(dataSrc);
-              $img.attr(
-                'src',
-                `${serverHost}/proxy/image?url=${encodeURIComponent(dataSrc)}`,
-              );
-            }
-          } catch {
-            $img.remove();
-          }
-        }
-      });
-    }
-
-    const contentHtml = $.html(contentEl);
-
-    const turndownService = new TurndownService();
-    const markdown = turndownService.turndown(contentHtml);
-
+    const exported = await buildArticleMarkdown(
+      article,
+      originUrl || 'http://localhost:4000',
+      downloadPath,
+    );
     return {
-      title: article.title,
-      markdown: (article.sourceUrl ? metricsMarkdown(article) : '') + markdown,
+      ...exported,
+      markdown:
+        exportSourceMarkdown(
+          exportSourceFromFeed(article.feed),
+          article.sourceUrl,
+          article.publishTime,
+        ) + exported.markdown,
     };
   }
 
@@ -1104,12 +1364,103 @@ export class TrpcRouter {
       }),
   });
 
+  xiaohongshuRouter = this.trpcService.router({
+    capability: this.trpcService.protectedProcedure.query(() =>
+      this.xhs.capability(),
+    ),
+    list: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ groupId: z.string().min(1).max(128).nullable().optional() })
+          .strict()
+          .optional(),
+      )
+      .query(({ input }) => this.xhs.list(input)),
+    groups: this.trpcService.protectedProcedure.query(() => this.xhs.groups()),
+    saveGroup: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            id: z.string().min(1).max(128).optional(),
+            name: z.string().trim().min(1).max(80),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhs.saveGroup(input)),
+    removeGroup: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.removeGroup(input.id)),
+    moveCreators: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            ids: z.array(z.string().min(1).max(128)).min(1).max(100),
+            groupId: z.string().min(1).max(128).nullable(),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhs.moveCreators(input.ids, input.groupId)),
+    add: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            displayName: z.string().trim().min(1).max(120),
+            profileUrl: z.string().max(2000),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) =>
+        this.xhs.add(input.displayName, input.profileUrl),
+      ),
+    edit: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ id: z.string().min(1).max(128), enabled: z.boolean() })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhs.edit(input.id, input.enabled)),
+    remove: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.remove(input.id)),
+    notes: this.trpcService.protectedProcedure
+      .input(z.object({ creatorId: z.string().min(1).max(128) }).strict())
+      .query(({ input }) => this.xhs.notes(input.creatorId)),
+    body: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteId: z.string().min(1).max(300),
+          })
+          .strict(),
+      )
+      .query(({ input }) => this.xhs.body(input.creatorId, input.noteId)),
+    refresh: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.refresh(input.id)),
+    export: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteIds: z
+              .array(z.string().min(1).max(300))
+              .min(1)
+              .max(100)
+              .optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhs.export(input.creatorId, input.noteIds)),
+  });
+
   appRouter = this.trpcService.router({
     feed: this.feedRouter,
     account: this.accountRouter,
     article: this.articleRouter,
     platform: this.platformRouter,
     collection: this.collectionRouter,
+    xiaohongshu: this.xiaohongshuRouter,
   });
 
   async applyMiddleware(app: INestApplication) {

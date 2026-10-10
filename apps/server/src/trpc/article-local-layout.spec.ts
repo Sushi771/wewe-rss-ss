@@ -1,0 +1,175 @@
+import { promises as fs } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
+import { tmpdir } from 'node:os';
+import axios from 'axios';
+import { TrpcRouter } from './trpc.router';
+import { TrpcService } from './trpc.service';
+import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
+import { exportSourceFolders } from '../article-export-source';
+
+const png =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
+const feed = {
+  id: 'MP_WXS_1234567890',
+  mpName: '合成号',
+  group: { id: 'group-a', name: '合成组' },
+};
+const article = (id = 'WX_1234567890_2247000001_1') => ({
+  id,
+  title: '同名文章',
+  sourceUrl:
+    'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=' +
+    id.split('_')[2] +
+    '&idx=1&sn=abcdef',
+  contentHtml:
+    '<div id="js_content"><p>本地缓存正文</p><img src="data:image/png;base64,' +
+    png +
+    '"></div>',
+  lastBodyStatus: 'available',
+  metrics: JSON.stringify({
+    read: { value: 17, display: '17', fileTime: 'synthetic-fixture' },
+  }),
+  publishTime: 1791210060,
+});
+describe('all cached article local/ZIP export entry points share isolated image directories; offline fixtures', () => {
+  let root: string, router: TrpcRouter, items: ReturnType<typeof article>[];
+  const oldEnv = { ...process.env };
+  beforeEach(async () => {
+    delete process.env.PRIVATE_ONLINE_MODE;
+    root = await fs.mkdtemp(join(tmpdir(), 'wewe-layout-router-'));
+    items = [article(), article('WX_1234567890_2247000002_1')];
+    jest.spyOn(axios, 'get').mockRejectedValue(new Error('NO_NETWORK'));
+    jest.spyOn(global, 'fetch').mockRejectedValue(new Error('NO_NETWORK'));
+    const config = {
+      get: (key: string) =>
+        key === 'feed'
+          ? { obsidianPath: join(root, 'vault'), updateDelayTime: 0 }
+          : key === 'platform'
+            ? { url: '' }
+            : {},
+    };
+    const prisma = {
+      article: {
+        findUnique: jest.fn(async ({ where }) => {
+          const found = items.find((a) => a.id === where.id);
+          return found ? { ...found, feed } : null;
+        }),
+        findMany: jest.fn(async () => items),
+      },
+      feed: {
+        findUnique: jest.fn(async () => feed),
+      },
+    };
+    const service = new TrpcService(
+      {} as any,
+      config as any,
+      {} as any,
+      {} as any,
+    );
+    router = new TrpcRouter(
+      service,
+      prisma as any,
+      config as any,
+      {} as any,
+      {} as any,
+    );
+  });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    process.env = { ...oldEnv };
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  it('list single and batch mutation saves original-day/group/publisher/title.md plus image; repeat and retry preserve edited notes', async () => {
+    const caller = router.appRouter.createCaller({ errorMsg: null });
+    const one = await caller.article.saveToObsidian(items[0].id);
+    expect(basename(one.path)).toBe('同名文章.md');
+    expect(await fs.readFile(one.path, 'utf8')).toContain('| 阅读 | 17 |');
+    const images = await fs.readdir(join(dirname(one.path), 'image'));
+    expect(images).toHaveLength(1);
+    expect(
+      await fs.readFile(join(dirname(one.path), 'image', images[0])),
+    ).toEqual(Buffer.from(png, 'base64'));
+    await fs.writeFile(one.path, '用户编辑不能覆盖');
+    expect(await caller.article.saveToObsidian(items[0].id)).toMatchObject({
+      path: one.path,
+      alreadySaved: true,
+    });
+    expect(await fs.readFile(one.path, 'utf8')).toBe('用户编辑不能覆盖');
+    const two = await caller.article.saveToObsidian(items[1].id);
+    expect(two.path).not.toBe(one.path);
+    const day = dirname(dirname(one.path));
+    expect(
+      (await fs.readdir(day)).every(
+        (n) => n !== 'attachments' && !n.endsWith('.md'),
+      ),
+    ).toBe(true);
+    expect(axios.get).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('publisher ZIP staging shares original-day/group/publisher/image beside title.md and marks missing cached body without page fallback', async () => {
+    items[1].contentHtml = '';
+    items[1].lastBodyStatus = 'unavailable';
+    const folder = join(root, 'zip-stage');
+    const result = await router.buildOfflineFeedDirectory(
+      'MP_WXS_1234567890',
+      folder,
+    );
+    expect(result).toMatchObject({
+      articles: 2,
+      complete: 1,
+      incomplete: expect.any(Array),
+    });
+    const dir = join(
+      folder,
+      ...exportSourceFolders(
+        {
+          feedId: feed.id,
+          feedName: feed.mpName,
+          groupId: feed.group.id,
+          groupName: feed.group.name,
+        },
+        items[0].publishTime,
+      ),
+    );
+    const names = (await fs.readdir(dir)).filter((n) => n.endsWith('.md'));
+    expect(names).toHaveLength(2);
+    expect(await fs.readdir(dir)).toContain('image');
+    expect(await fs.readdir(dir)).not.toContain('attachments');
+    expect(await fs.readdir(dir)).not.toContain('index.md');
+    const md = await fs.readFile(join(dir, '同名文章.md'), 'utf8');
+    expect(md).toContain('](image/');
+    expect(md).not.toContain('attachments/');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+  it('missing or explicitly unavailable cache fails before original page or output requests', async () => {
+    expect(() =>
+      prepareCachedArticleLocalExport({ ...items[0], contentHtml: '' }),
+    ).toThrow('正文尚未缓存');
+    const caller = router.appRouter.createCaller({ errorMsg: null });
+    items[0].lastBodyStatus = 'unavailable';
+    await expect(
+      caller.article.saveToObsidian(items[0].id),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+  it('splits a publisher ZIP by each original date and retains unknown-date body and reason', async () => {
+    items[1].publishTime = 1791432900;
+    items.push({ ...article('WX_1234567890_2247000003_1'), publishTime: 0 });
+    const directory = join(root, 'zip-multiday');
+    const result = await router.buildOfflineFeedDirectory(feed.id, directory);
+    expect(result).toMatchObject({ articles: 3, complete: 3 });
+    for (const day of ['2026-10-05', '2026-10-08', '日期待核']) {
+      const note = join(directory, `${day}_合成组`, '合成号', '同名文章.md');
+      const markdown = await fs.readFile(note, 'utf8');
+      expect(markdown).toContain('本地缓存正文');
+      expect(markdown).toContain('](image/');
+      expect(await fs.readdir(join(dirname(note), 'image'))).toHaveLength(1);
+      if (day === '日期待核')
+        expect(markdown).toContain('缺少可信原文发布日期');
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+});

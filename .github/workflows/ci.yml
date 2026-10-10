@@ -4,9 +4,30 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches:
+      [
+        main,
+        codex/manual-refresh-download-integration,
+        codex/cold-launch-profile,
+      ]
 
 jobs:
+  windows-process-identity:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test native loopback listener ownership and guarded stop
+        run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
+      - name: Test synthetic readiness with Fetch-compatible Windows ports
+        run: node --test scripts/local-release/readiness.test.cjs
+      - name: Test explicit Wechat2RSS binding on owned SQLite copies
+        run: node --test scripts/prepare-wechat2rss-test.test.cjs
+      - name: Test article layout repair and original-file preservation on Windows
+        run: node --test scripts/repair-article-layout.test.cjs
+
   lint-test:
     runs-on: ubuntu-latest
     steps:
@@ -33,8 +54,32 @@ jobs:
 
       - name: Type check Web
         run: pnpm --filter web build
+      - name: Test account modal eligibility and viewport CSS contract (no UI or HTTP)
+        run: node --test scripts/check-account-modal-logic.test.cjs
+      - name: Test account expiry and explicit QR recovery offline
+        run: node --test scripts/account-login-ui.test.cjs scripts/wechat2rss-login-ui.test.cjs
+      - name: Test Wechat2RSS source-specific metric visibility offline
+        run: node --test scripts/wechat-source-metrics-ui.test.cjs
+      - name: Test compact reading toolbar and collapsed diagnostics offline
+        run: node --test scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs
+      - name: Test feed sidebar scroll and compact navigation layout offline
+        run: node --test scripts/feed-sidebar-layout.test.cjs scripts/folder-navigation-ui.test.cjs scripts/feed-group-drag-ui.test.cjs
+      - name: Test unavailable new-subscription source and retained input offline
+        run: node --test scripts/feed-add-ui.test.cjs scripts/subscription-tasks-ui.test.cjs scripts/subscription-dialog-layout.test.cjs
+      - name: Test Xiaohongshu batch completion and download failure states offline
+        run: node --test scripts/xiaohongshu-refresh-ui.test.cjs
+      - name: Test closed Sites metadata contract offline
+        run: node --test scripts/sites-local-contract.test.mjs
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
+      - name: Test single-article official verification UI offline
+        run: node --test scripts/acceptance-article-verification.test.cjs
+      - name: Test retained article path recovery offline
+        run: node --test scripts/browser-article-path-recovery.test.cjs
+      - name: Test article layout repair and original-file preservation offline
+        run: node --test scripts/repair-article-layout.test.cjs
+      - name: Test feed view invalidation with installed tRPC batch link offline
+        run: node --test scripts/refresh-feed-view.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-avatar-reading-ui.test.cjs
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)
@@ -44,9 +89,17 @@ jobs:
       - name: Test native subscribed MP and review probes offline
         run: node --test scripts/research/probe-subscribed-mp-once.spec.cjs scripts/research/probe-native-review-owner07.spec.cjs
       - name: Test official album runtime scheduling policy
-        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs
+        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs scripts/local-release/startup-acceptance.test.cjs
+      - name: Test desktop dependency startup and launch locking offline
+        run: node --test scripts/local-release/desktop-dependencies.test.cjs
+      - name: Test startup schema checks and exact database preservation
+        run: |
+          python3 scripts/local-release/test_inspect_sqlite.py
+          python3 scripts/local-release/test_prepare_start.py
       - name: Test standalone dependency closure
         run: node --test scripts/local-release/dependency-closure.test.cjs
+      - name: Test compact dependency bundle and native boundary offline
+        run: node --test scripts/local-release/compact.test.cjs
       - name: Build Server
         run: pnpm --filter server build
 
@@ -68,6 +121,8 @@ jobs:
           cache: 'pnpm'
       - name: Install dependencies
         run: pnpm install
+      - name: Test fixed Node SQLite startup checks against Python offline
+        run: node --test scripts/local-release/startup-sqlite.test.cjs
       - name: Build Server
         run: pnpm --filter server build
       - name: Test image replay and one-article import offline

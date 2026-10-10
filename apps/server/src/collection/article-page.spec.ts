@@ -2,9 +2,54 @@ import {
   articlePublishTime,
   articleContentHtml,
   articleIdentity,
+  articleOriginalLink,
 } from './article-page';
 
 describe('article publication evidence', () => {
+  const supplied =
+    'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=2247000001&idx=1&sn=abcd&chksm=abcd#rd';
+  const staticBody =
+    '<div id="js_content">正文</div><script>var biz="MTIzNDU2Nzg5MA==";var mid=2247000001;var idx=1;var ct=1700000000;var create_time="1700000000";</script>';
+  it('accepts the agreeing page-supplied og/msg link and numeric static identity without rel canonical', () => {
+    const escaped = supplied.replace(/&/g, '&amp;');
+    const html = `<meta property="og:url" content="${escaped}">${staticBody}<script>var msg_link="${escaped}";</script>`;
+    expect(articleOriginalLink(html)).toBe(supplied);
+    expect(articleIdentity(html)).toMatchObject({
+      id: 'WX_1234567890_2247000001_1',
+      mpId: 'MP_WXS_1234567890',
+      publishTime: 1700000000,
+      url: 'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcd',
+    });
+    expect(
+      articleOriginalLink(
+        `${staticBody}<script>var msg_link="${escaped}";</script>`,
+      ),
+    ).toBe(supplied);
+    expect(articleOriginalLink(staticBody)).toBeUndefined();
+  });
+  it('rejects conflicting, duplicated, authenticated or executable supplied links without fallback', () => {
+    for (const value of [
+      supplied.replace('2247000001', '2247000002'),
+      supplied.replace('sn=abcd', 'sn=dcba'),
+      supplied.replace('https:', 'http:'),
+      supplied.replace('mp.weixin.qq.com', 'evil.test'),
+      supplied.replace('#rd', '&ticket=secret'),
+      supplied.replace('#rd', '&mid=2247000001'),
+    ])
+      expect(() =>
+        articleIdentity(
+          `<meta property="og:url" content="${supplied}">${staticBody}<script>var msg_link="${value}";</script>`,
+        ),
+      ).toThrow();
+    expect(() =>
+      articleIdentity(`${staticBody}<script>var msg_link=getLink();</script>`),
+    ).toThrow();
+    expect(() =>
+      articleIdentity(
+        `<meta property="og:url" content="${supplied.replace('2247000001', '2247000002')}">${staticBody}`,
+      ),
+    ).toThrow();
+  });
   it('extracts canonical article identity from a real body and explicit page variables', () => {
     const html =
       '<meta property="og:url" content="https://mp.weixin.qq.com/s/short"><div id="js_content">正文</div><script>var biz="Mzg5NTQzMTQxMg==";var mid="2247493540";var idx="2";var sn="abcdef";var ct=1790400091;</script>';

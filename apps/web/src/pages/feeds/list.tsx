@@ -17,6 +17,7 @@ interface ArticleListProps {
   search: string;
   selectedIds: Set<string>;
   onSelectionChange: (selectedIds: Set<string>) => void;
+  collectionChannels?: Record<string, string>;
 }
 
 function metricDisplay(raw: string | null, key: 'read' | 'like' | 'favorite') {
@@ -32,6 +33,7 @@ const ArticleList: FC<ArticleListProps> = ({
   search,
   selectedIds,
   onSelectionChange,
+  collectionChannels = {},
 }) => {
   const { id } = useParams();
 
@@ -45,17 +47,12 @@ const ArticleList: FC<ArticleListProps> = ({
   const retryBody = async (articleId: string, title: string) => {
     try {
       const result = await bodyRetry.mutateAsync(articleId);
-      if (result.status === 'available')
-        toast.success(`${title}：${result.message}`);
+      if (result.status === 'available') toast.success(`${title}：正文可用`);
       else if (result.status === 'failed')
-        toast.error(`${title}：${result.message}`);
-      else toast.warning(`${title}：${result.message}`);
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : '正文重试失败，请重新读取文章状态。',
-      );
+        toast.error(`${title}：正文重试失败`);
+      else toast.warning(`${title}：正文暂不可用`);
+    } catch {
+      toast.error('正文重试失败，请稍后重试。');
     } finally {
       await Promise.all([
         queryUtils.article.list.invalidate(),
@@ -78,39 +75,40 @@ const ArticleList: FC<ArticleListProps> = ({
     onSelectionChange(new Set());
   }, [mpId, search, onSelectionChange]);
 
-  useEffect(() => {
-    if (
-      summary.data &&
-      ((sort === 'readCount' && !summary.data.readAvailable) ||
-        (sort === 'likeCount' && !summary.data.likeAvailable))
-    ) {
-      setSort('publishTime');
-    }
-  }, [summary.data, sort]);
-
-  const {
-    data,
-    fetchNextPage,
-    isLoading,
-    hasNextPage,
-    isError,
-    error,
-    refetch,
-  } = trpc.article.list.useInfiniteQuery(
-    {
-      limit: 20,
-      mpId: mpId,
-      search: search || undefined,
-      sort,
-    },
-    {
-      getNextPageParam: (lastPage) => lastPage.nextCursor,
-    },
-  );
+  const { data, fetchNextPage, isLoading, hasNextPage, isError, refetch } =
+    trpc.article.list.useInfiniteQuery(
+      {
+        limit: 20,
+        mpId: mpId,
+        search: search || undefined,
+        sort: collectionChannels[mpId] === 'wechat2rss' ? 'publishTime' : sort,
+      },
+      {
+        getNextPageParam: (lastPage) => lastPage.nextCursor,
+      },
+    );
 
   const items = useMemo(() => {
     return data?.pages.flatMap((page) => page.items) || [];
   }, [data]);
+  const hasWechat2Rss =
+    collectionChannels[mpId] === 'wechat2rss' ||
+    (!mpId && Object.values(collectionChannels).includes('wechat2rss')) ||
+    items.some(
+      (item) =>
+        (collectionChannels[item.mpId] || item.feed?.collectionChannel) ===
+        'wechat2rss',
+    );
+  const readSortingAvailable = !hasWechat2Rss && !!summary.data?.readAvailable;
+  const likeSortingAvailable = !hasWechat2Rss && !!summary.data?.likeAvailable;
+
+  useEffect(() => {
+    if (
+      (sort === 'readCount' && !readSortingAvailable) ||
+      (sort === 'likeCount' && !likeSortingAvailable)
+    )
+      setSort('publishTime');
+  }, [readSortingAvailable, likeSortingAvailable, sort]);
 
   const handleSelectAll = (isSelected: boolean) => {
     if (isSelected) {
@@ -126,64 +124,38 @@ const ArticleList: FC<ArticleListProps> = ({
 
   return (
     <div className="flex h-full flex-col">
-      <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
-        排序
-        <select
-          aria-label="文章排序"
-          className="bg-background rounded border px-2 py-1"
-          value={sort}
-          onChange={(e) => {
-            setSort(e.target.value as typeof sort);
-            onSelectionChange(new Set());
-          }}
-        >
-          <option value="publishTime">发布时间</option>
-          <option value="readCount" disabled={!summary.data?.readAvailable}>
-            阅读量从高到低{summary.data?.readAvailable ? '' : '（未获取）'}
-          </option>
-          <option value="likeCount" disabled={!summary.data?.likeAvailable}>
-            点赞量从高到低{summary.data?.likeAvailable ? '' : '（未获取）'}
-          </option>
-        </select>
-        <span>
-          缺失指标不等于 0；带“+”为下限。收藏仅显示源数据，不以分享或在看代替。
-        </span>
-      </label>
-      <div className="text-default-500 px-3 pb-2 text-xs" aria-live="polite">
-        {summary.data ? (
-          <>
-            当前{search ? '筛选' : '订阅'}存量 {summary.data.articles}{' '}
-            篇；阅读已获取 {summary.data.readAvailable} 篇，点赞已获取{' '}
-            {summary.data.likeAvailable} 篇， 已缓存正文{' '}
-            {summary.data.cachedBodies} 篇。
-            {summary.data.oldestPublishTime &&
-            summary.data.newestPublishTime ? (
-              <>
-                {' '}
-                库内记录的发布时间范围：
-                {dayjs(summary.data.oldestPublishTime * 1e3).format(
-                  'YYYY-MM-DD',
-                )}{' '}
-                至{' '}
-                {dayjs(summary.data.newestPublishTime * 1e3).format(
-                  'YYYY-MM-DD',
-                )}
-                ，不代表期间无遗漏；存量日期尚需与原文核对。
-              </>
-            ) : null}
-            {!summary.data.readAvailable &&
-              !summary.data.likeAvailable &&
-              ' 尚未获取阅读和点赞，热度排序已禁用。'}
-          </>
-        ) : summary.isError ? (
-          '指标覆盖情况查询失败，暂不可按热度排序。'
-        ) : (
-          '正在读取存量与指标覆盖情况…'
-        )}
-      </div>
+      {(readSortingAvailable || likeSortingAvailable) && (
+        <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
+          排序
+          {readSortingAvailable || likeSortingAvailable ? (
+            <select
+              aria-label="文章排序"
+              className="bg-background rounded border px-2 py-1"
+              value={sort}
+              onChange={(e) => {
+                setSort(e.target.value as typeof sort);
+                onSelectionChange(new Set());
+              }}
+            >
+              <option value="publishTime">发布时间</option>
+              {readSortingAvailable && (
+                <option value="readCount">阅读量从高到低</option>
+              )}
+              {likeSortingAvailable && (
+                <option value="likeCount">点赞量从高到低</option>
+              )}
+            </select>
+          ) : (
+            <span>按发布时间排列</span>
+          )}
+          {!hasWechat2Rss && (readSortingAvailable || likeSortingAvailable) && (
+            <span>带“+”为下限。收藏仅显示源数据，不以分享或在看代替。</span>
+          )}
+        </label>
+      )}
       {isError && (
         <div role="alert" className="px-3 py-2 text-sm text-red-600">
-          文章列表读取失败：{error.message}。
+          文章列表读取失败，请重试。
           {items.length ? '下方为此前已读取的存量。' : ''}
           <Button size="sm" variant="light" onPress={() => refetch()}>
             重试
@@ -200,12 +172,17 @@ const ArticleList: FC<ArticleListProps> = ({
                 onValueChange={handleSelectAll}
               />
             </div>
-            <div className="compact-col-title">文章标题</div>
-            <div className="compact-col-metadata">信息</div>
+            <div className="compact-col-title min-w-0 whitespace-nowrap">
+              文章标题{summary.data && ` · ${summary.data.articles} 篇`}
+            </div>
+            <div className="compact-col-metadata !hidden md:!flex">信息</div>
           </div>
 
           {items?.map((item) => (
-            <div key={item.id} className="compact-row article-row">
+            <div
+              key={item.id}
+              className="compact-row article-row !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center"
+            >
               <div className="compact-col-check">
                 <Checkbox
                   size="sm"
@@ -219,9 +196,15 @@ const ArticleList: FC<ArticleListProps> = ({
                 />
               </div>
               <a
-                className="compact-title text-[15px] hover:text-[#007AFF] dark:hover:text-[#0A84FF]"
+                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] md:!whitespace-nowrap dark:hover:text-[#0A84FF]"
                 target="_blank"
                 rel="noopener noreferrer"
+                title={
+                  item.bodyCached
+                    ? '点击标题阅读缓存正文'
+                    : '打开原文；本地正文未缓存'
+                }
+                aria-label={`${item.bodyCached ? '阅读缓存正文' : '打开原文'}：${item.title}`}
                 onClick={(event) => {
                   if (item.bodyCached) {
                     event.preventDefault();
@@ -232,22 +215,12 @@ const ArticleList: FC<ArticleListProps> = ({
               >
                 {item.title}
               </a>
-              <div className="flex w-[300px] shrink-0 flex-col items-end gap-0.5 text-neutral-500">
+              <div className="col-start-2 flex w-auto min-w-0 shrink-0 flex-col items-start gap-0.5 text-neutral-500 md:w-[300px] md:items-end">
                 <div
-                  className="flex items-center gap-2 text-xs"
+                  className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
-                  {item.bodyCached ? (
-                    <Button
-                      size="sm"
-                      variant="light"
-                      onPress={() => setReadingId(item.id)}
-                    >
-                      阅读已缓存正文
-                    </Button>
-                  ) : (
-                    <span>正文未缓存</span>
-                  )}
+                  {!item.bodyCached && <span>正文未缓存</span>}
                   {(!item.bodyCached ||
                     item.lastBodyStatus === 'unavailable' ||
                     item.bodyRetryResult?.status === 'failed') && (
@@ -273,13 +246,13 @@ const ArticleList: FC<ArticleListProps> = ({
                   )}
                 </div>
                 {!item.bodyCached && !item.bodyRetry.allowed && (
-                  <span className="text-right text-xs">
-                    {item.bodyRetry.reason}
+                  <span className="text-left text-xs md:text-right">
+                    正文暂不可重试
                   </span>
                 )}
                 {item.bodyRetryResult && (
                   <span
-                    className="text-right text-xs"
+                    className="text-left text-xs md:text-right"
                     title={`${dayjs(item.bodyRetryResult.attemptedAt * 1e3).format('YYYY-MM-DD HH:mm:ss')} ${item.bodyRetryResult.message}`}
                   >
                     最近重试：
@@ -295,15 +268,18 @@ const ArticleList: FC<ArticleListProps> = ({
                         : ''}
                   </span>
                 )}
-                <span
-                  className="whitespace-nowrap text-xs"
-                  title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
-                >
-                  阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
-                  {metricDisplay(item.metrics, 'like')} · 收藏{' '}
-                  {metricDisplay(item.metrics, 'favorite')}
-                </span>
-                <div className="flex w-full items-center justify-end gap-2 text-xs">
+                {(collectionChannels[item.mpId] ||
+                  item.feed?.collectionChannel) !== 'wechat2rss' && (
+                  <span
+                    className="whitespace-normal break-words text-xs md:whitespace-nowrap"
+                    title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
+                  >
+                    阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
+                    {metricDisplay(item.metrics, 'like')} · 收藏{' '}
+                    {metricDisplay(item.metrics, 'favorite')}
+                  </span>
+                )}
+                <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs md:flex-nowrap md:justify-end">
                   <span className="truncate">
                     {item.feed?.mpName || '未知'}
                   </span>

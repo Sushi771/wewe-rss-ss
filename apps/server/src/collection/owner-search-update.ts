@@ -29,6 +29,8 @@ export type SearchConfig = {
   wereadDirectoryEnabled?: boolean;
   /** Explicit bounded discovery budget; existing bindings default to two pages. */
   searchMaxPages?: number;
+  /** Explicit local source policy, not an upstream access-stop event. */
+  sourcePolicy?: 'native-directory-only';
 };
 export class OwnerUpdateStopped extends Error {}
 
@@ -53,7 +55,12 @@ export async function readOwnerSearchConfig(
     typeof c.ownerVid !== 'string' ||
     !/^\d+$/.test(c.ownerVid) ||
     !Array.isArray(c.originalStopFiles) ||
-    !c.originalStopFiles.length ||
+    (!c.originalStopFiles.length &&
+      c.sourcePolicy !== 'native-directory-only') ||
+    (c.sourcePolicy !== undefined &&
+      (c.sourcePolicy !== 'native-directory-only' ||
+        c.wereadDirectoryEnabled !== true ||
+        !c.wereadLatestStateFile)) ||
     (c.wereadLatestStateFile !== undefined &&
       !path.isAbsolute(c.wereadLatestStateFile)) ||
     (c.wereadDirectoryEnabled !== undefined &&
@@ -81,6 +88,10 @@ export async function readOwnerSearchConfig(
 export async function fetchLiveOwnerArticles(
   c: SearchConfig,
 ): Promise<ProviderPage> {
+  if (c.sourcePolicy === 'native-directory-only')
+    throw new OwnerUpdateStopped(
+      '该来源仅启用正常读书目录；公开原文采集与搜索未启用，本次未发请求。',
+    );
   // No search/body request when the original transport already has an access stop.
   for (const file of [...c.originalStopFiles, c.runtimeStopFile]) {
     try {
