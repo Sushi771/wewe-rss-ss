@@ -1,4 +1,11 @@
-import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { PrismaService } from '@server/prisma/prisma.service';
 import { Cron } from '@nestjs/schedule';
 import { TrpcService } from '@server/trpc/trpc.service';
@@ -13,6 +20,7 @@ import { minify } from 'html-minifier';
 import { LRUCache } from 'lru-cache';
 import pMap from '@cjs-exporter/p-map';
 import { BODY_UNAVAILABLE_MESSAGE } from '../collection/article-page';
+import { dailyWechat2RssCatchup } from './daily-cache-catchup';
 
 console.log('CRON_EXPRESSION: ', process.env.CRON_EXPRESSION);
 
@@ -21,8 +29,59 @@ const mpCache = new LRUCache<string, string>({
 });
 
 @Injectable()
-export class FeedsService {
+export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(this.constructor.name);
+  private dailyCatchupJob?: NodeJS.Immediate;
+  private dailyCatchupRunning = false;
+
+  onApplicationBootstrap() {
+    if (!dailyWechat2RssCatchup(process.env)) return;
+    // Do not hold HTTP startup behind a potentially slow cache/image read.
+    this.dailyCatchupJob = setImmediate(() => {
+      this.dailyCatchupJob = undefined;
+      void this.catchUpDailyWechat2Rss();
+    });
+  }
+
+  onModuleDestroy() {
+    if (this.dailyCatchupJob) clearImmediate(this.dailyCatchupJob);
+  }
+
+  async catchUpDailyWechat2Rss(now = Date.now()) {
+    const plan = dailyWechat2RssCatchup(process.env, now);
+    if (!plan || this.dailyCatchupRunning) return;
+    this.dailyCatchupRunning = true;
+    try {
+      const feed = await this.prismaService.feed.findUnique({
+        where: { id: plan.id },
+        select: {
+          id: true,
+          status: true,
+          collectionChannel: true,
+          syncTime: true,
+        },
+      });
+      if (
+        !feed ||
+        feed.status !== 1 ||
+        feed.collectionChannel !== 'wechat2rss' ||
+        feed.syncTime >= plan.dueTime
+      )
+        return;
+      // Reuse account checks, the per-feed lock and transactional safeguards.
+      // The scheduled route reads cache without submitting /add.
+      const result = await this.trpcService.refreshMpArticlesAndUpdateFeed(
+        plan.id,
+        1,
+        'scheduled',
+      );
+      this.logger.log(`Daily cache catch-up: ${result.status}`);
+    } catch {
+      this.logger.error('Daily cache catch-up failed; no automatic retry.');
+    } finally {
+      this.dailyCatchupRunning = false;
+    }
+  }
 
   private request: Got;
   constructor(
