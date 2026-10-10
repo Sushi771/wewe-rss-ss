@@ -22,6 +22,33 @@ type SavedArticle = {
   imageCount: number;
   contentSource?: 'wechat2rss-cache';
 };
+type SingleTask = Partial<SavedArticle> & {
+  taskId: string;
+  revision: number;
+  state: 'waiting' | 'saving' | 'saved' | 'blocked' | 'failed' | 'cancelled';
+  message: string;
+};
+function singleTaskStatus(raw: unknown): SingleTask | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const task = raw as SingleTask;
+  if (
+    !/^[a-f0-9]{64}$/.test(task.taskId) ||
+    !Number.isSafeInteger(task.revision) ||
+    task.revision < 1 ||
+    !['waiting', 'saving', 'saved', 'blocked', 'failed', 'cancelled'].includes(
+      task.state,
+    ) ||
+    typeof task.message !== 'string'
+  )
+    return null;
+  if (
+    task.state === 'saved' &&
+    (task.contentSource !== 'wechat2rss-cache' ||
+      typeof task.markdownPath !== 'string')
+  )
+    return null;
+  return task;
+}
 
 class GoneBrowserArticleTask extends Error {
   constructor() {
@@ -47,10 +74,13 @@ export default function ArticleDownload() {
   const [statusReadAttempt, setStatusReadAttempt] = useState(0);
   const [statusReading, setStatusReading] = useState(false);
   const [browserDestinationBound, setBrowserDestinationBound] = useState(false);
+  const [singleTask, setSingleTask] = useState<SingleTask | null>(null);
   const browserActive =
     !!browserTask &&
     ['waiting', 'claimed', 'ready', 'saving'].includes(browserTask.state);
-  const locked = busy || browserActive;
+  const singleActive =
+    !!singleTask && ['waiting', 'saving'].includes(singleTask.state);
+  const locked = busy || browserActive || singleActive;
   const request = useRef<AbortController | null>(null);
 
   const api = useCallback(
@@ -124,6 +154,48 @@ export default function ArticleDownload() {
     return () => {
       controller.abort();
       request.current?.abort();
+    };
+  }, [api]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const response = await api(
+          '/single-tasks',
+          undefined,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        const tasks: SingleTask[] = Array.isArray(response.tasks)
+          ? response.tasks
+              .map(singleTaskStatus)
+              .filter((t: SingleTask | null): t is SingleTask => !!t)
+          : [];
+        setSingleTask((current) => {
+          const candidate =
+            tasks.find((t) => t.taskId === current?.taskId) ||
+            tasks.find((t) => ['waiting', 'saving'].includes(t.state)) ||
+            tasks[0];
+          if (!candidate) return current;
+          if (
+            candidate.taskId === current?.taskId &&
+            candidate.revision < current.revision
+          )
+            return current;
+          return candidate;
+        });
+      } catch {
+        /* A local status failure never cancels a durable server task. */
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(poll, 5000);
+      }
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
     };
   }, [api]);
 
@@ -344,15 +416,6 @@ export default function ArticleDownload() {
           '请粘贴有效的 HTTPS 微信公众号文章链接（mp.weixin.qq.com/s）。',
         );
       }
-      if (
-        input.pathname !== '/s' ||
-        !['__biz', 'mid', 'idx', 'sn'].every((key) =>
-          input.searchParams.get(key)?.trim(),
-        )
-      )
-        throw new Error(
-          '短链接暂不能下载。请在微信打开文章，复制带问号参数的完整原文链接后重试；若仍是短链接，暂无法处理。',
-        );
       let pickToken: string | undefined;
       if (settings?.askEveryTime) {
         const selected = await choose(signal);
@@ -364,6 +427,12 @@ export default function ArticleDownload() {
         { url: url.trim(), ...(pickToken ? { pickToken } : {}) },
         signal,
       );
+      if (result.pending === true) {
+        const task = singleTaskStatus(result.task);
+        if (!task) throw new Error('未收到有效的下载任务回执。');
+        setSingleTask(task);
+        return;
+      }
       if (!result.saved || typeof result.markdownPath !== 'string')
         throw new Error('未收到有效的本机保存结果。');
       if (result.contentSource !== 'wechat2rss-cache')
@@ -377,14 +446,14 @@ export default function ArticleDownload() {
       <div className="mx-auto max-w-2xl">
         <h1 className="text-xl font-semibold">公众号文章下载</h1>
         <p className="text-default-500 mt-1 text-sm">
-          仅下载 Wechat2RSS 已缓存的文章。
+          通过 Wechat2RSS 下载；需要时会订阅该公众号。
         </p>
         <form onSubmit={download} className="mt-4 space-y-3" aria-busy={busy}>
           <Input
             label="文章链接"
             labelPlacement="outside"
             type="url"
-            placeholder="粘贴完整原文链接"
+            placeholder="粘贴公众号文章链接"
             value={url}
             onValueChange={(value) => {
               if (locked || request.current) return;
@@ -414,6 +483,7 @@ export default function ArticleDownload() {
                 type="button"
                 isDisabled={
                   busy ||
+                  singleActive ||
                   (browserActive &&
                     (browserTask?.destinationBound ||
                       browserTask?.state !== 'ready')) ||
@@ -495,6 +565,68 @@ export default function ArticleDownload() {
             </Button>
           )}
         </form>
+        {singleTask && (
+          <div
+            className="border-divider mt-3 rounded-lg border p-3 text-sm"
+            aria-live="polite"
+          >
+            <p role="status">{singleTask.message}</p>
+            {singleTask.state === 'waiting' && (
+              <>
+                <p className="text-default-500 mt-1 text-xs">
+                  关闭页面后继续；再次打开可查看结果。
+                </p>
+                <Button
+                  size="sm"
+                  className="mt-2"
+                  isDisabled={busy}
+                  onPress={() =>
+                    void operate(async (signal) => {
+                      const task = singleTaskStatus(
+                        await api(
+                          '/single-task/' + singleTask.taskId + '/cancel',
+                          {},
+                          signal,
+                        ),
+                      );
+                      if (!task) throw new Error('未收到有效的取消结果。');
+                      setSingleTask(task);
+                    })
+                  }
+                >
+                  取消下载
+                </Button>
+              </>
+            )}
+            {['blocked', 'failed'].includes(singleTask.state) && (
+              <Button
+                size="sm"
+                className="mt-2"
+                isDisabled={busy}
+                onPress={() =>
+                  void operate(async (signal) => {
+                    const task = singleTaskStatus(
+                      await api(
+                        '/single-task/' + singleTask.taskId + '/resume',
+                        {},
+                        signal,
+                      ),
+                    );
+                    if (!task) throw new Error('未收到有效的接续结果。');
+                    setSingleTask(task);
+                  })
+                }
+              >
+                继续原下载
+              </Button>
+            )}
+            {singleTask.state === 'saved' && (
+              <p className="text-default-600 mt-1 break-all">
+                {singleTask.markdownPath}
+              </p>
+            )}
+          </div>
+        )}
         {browserTask && (
           <div className="bg-default-50 mt-5 rounded-xl p-4" aria-live="polite">
             <p role="status">
@@ -635,9 +767,8 @@ export default function ArticleDownload() {
           <summary className="cursor-pointer">使用帮助</summary>
           <div className="space-y-2 pt-2 text-xs leading-5">
             <p>
-              需要带问号参数的完整原文链接（含 __biz、mid、idx 和
-              sn）；短链接暂不能下载。
-              请在微信打开文章后复制完整原文链接，若仍是短链接，暂无法处理。
+              直接粘贴公众号文章链接，由后台核对 Wechat2RSS 中的文章。
+              若服务没有该链接对应的正文，会显示具体原因。
             </p>
             <p>
               正文和图片保存为 Markdown 及本地资源，按下载日期和文章分目录。
@@ -645,7 +776,8 @@ export default function ArticleDownload() {
             </p>
             <p>
               公众号未订阅、文章不在当前缓存或正文和媒体不完整时会显示原因。
-              工具不会自动订阅公众号或强制更新。需先在订阅页完成订阅与正常更新。
+              必要时会通过 Wechat2RSS 订阅该公众号并等待更新，不需要另点订阅。
+              服务不保证取得所有历史文章；无法精确核验目标时不会保存其他文章。
             </p>
           </div>
         </details>

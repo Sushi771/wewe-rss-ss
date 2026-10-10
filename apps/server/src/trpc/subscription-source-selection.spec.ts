@@ -10,6 +10,7 @@ import * as backups from '../collection/sqlite-backup';
 import { SubscriptionDiscoveryValidator } from '../collection/subscription-add';
 import { CollectionService } from '../collection/collection.service';
 import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
+import { Wechat2RssProvider } from '../collection/providers/wechat2rss';
 
 // Actual router, paid Provider, SQLite transactions and consistent backup.
 // Only upstream responses and the native adapter are synthetic; no platform calls.
@@ -65,6 +66,14 @@ describe('explicit add source through original router (offline SQLite)', () => {
     await prisma.feed.deleteMany();
     await prisma.account.deleteMany();
     await fs.rm(path.join(root, '.wechat2rss-add'), {
+      recursive: true,
+      force: true,
+    });
+    await fs.rm(path.join(root, '.wechat2rss-subscription-tasks'), {
+      recursive: true,
+      force: true,
+    });
+    await fs.rm(path.join(root, '.wechat2rss-subscription-batches'), {
       recursive: true,
       force: true,
     });
@@ -978,7 +987,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
       feed: null,
       code: 'SUBSCRIPTION_ID_PENDING',
       message:
-        '上游已返回订阅地址，但本次限时身份核对仍未获得完整公众号记录，本地订阅尚未建立；链接已保留，稍后提交同一链接仅核对状态，不重复新增。',
+        '请求已受理，正在自动等待订阅和文章；关闭弹窗后仍会继续，完成后列表会自动更新。',
     });
     expect(await prisma.feed.count()).toBe(0);
     phase++;
@@ -992,7 +1001,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
       feed: null,
       code: 'SUBSCRIPTION_ID_PENDING',
       message:
-        '上游已返回订阅地址，但本次限时身份核对仍未获得完整公众号记录，本地订阅尚未建立；链接已保留，稍后提交同一链接仅核对状态，不重复新增。',
+        '请求已受理，正在自动等待订阅和文章；关闭弹窗后仍会继续，完成后列表会自动更新。',
       upstreamSubmitted: false,
     });
     expect(await prisma.feed.count()).toBe(0);
@@ -1010,6 +1019,277 @@ describe('explicit add source through original router (offline SQLite)', () => {
       feed: { id: feedId },
     });
     expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+  });
+
+  it('one accepted request automatically binds and imports cache across restart without another add', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    let clock = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    jest
+      .spyOn(Wechat2RssProvider.prototype, 'waitForAcceptedSubscription')
+      .mockResolvedValue(null);
+    const original = request.getMockImplementation()!;
+    let ready = false;
+    const canonical = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=9&idx=1`;
+    request.mockImplementation(async (...args) => {
+      if (new URL(String(args[0])).pathname === `/feed/${number}.json`)
+        return new Response(
+          JSON.stringify({
+            items: ready
+              ? [
+                  {
+                    id: canonical,
+                    title: '自动接续正文',
+                    date_published: '2026-10-09T12:00:00+08:00',
+                    content_html:
+                      '<div id="js_content"><p>合成完整正文。</p></div>',
+                  },
+                ]
+              : [],
+          }),
+        );
+      return original(...args);
+    });
+    const first = setup();
+    const accepted = await first.caller.feed.addFromArticle({
+      articleUrl,
+      source: 'wechat2rss',
+    });
+    expect(accepted).toMatchObject({
+      accepted: true,
+      feed: null,
+      taskId: expect.any(String),
+    });
+    const taskId = (accepted as any).taskId;
+    first.service.onModuleDestroy(); // A server restart preserves the accepted task.
+    const restarted = setup();
+    const tasks = (restarted.service as any).subscriptionTasks;
+    await tasks.init();
+    try {
+      clock += 30000;
+      await tasks.runDue();
+      expect(
+        await restarted.caller.feed.subscriptionTask({ taskId }),
+      ).toMatchObject({ state: 'pending', phase: 'cache', feedId });
+      expect(await prisma.feed.count()).toBe(1);
+      expect(await prisma.article.count()).toBe(0);
+      ready = true;
+      clock += 30000;
+      await tasks.runDue();
+      expect(
+        await restarted.caller.feed.subscriptionTask({ taskId }),
+      ).toMatchObject({ state: 'succeeded', feedId });
+      expect(await prisma.article.count()).toBe(1);
+      const snapshot = await prisma.article.findMany();
+      clock += 30000;
+      await tasks.runDue();
+      expect(await prisma.article.findMany()).toEqual(snapshot);
+      expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+      expect(events.some((x) => x.startsWith('/add/'))).toBe(false);
+    } finally {
+      restarted.service.onModuleDestroy();
+    }
+  });
+
+  it('persists a complete batch and stages trusted numeric IDs without waiting for names or media', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    let clock = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    const ids = [number, '3456789013'];
+    const links = [articleUrl, 'https://mp.weixin.qq.com/s/' + 'b'.repeat(22)];
+    let namesReady = false;
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (input, ...rest) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/addurl') {
+        events.push('/addurl');
+        const index = links.indexOf(url.searchParams.get('url')!);
+        if (index < 0) throw new Error('UNREQUESTED_LINK');
+        return new Response(
+          JSON.stringify({
+            err: '',
+            data: `http://127.0.0.1:18080/feed/${ids[index]}.xml`,
+          }),
+        );
+      }
+      if (url.pathname === '/list') {
+        events.push('/list');
+        return new Response(
+          JSON.stringify({
+            err: '',
+            data: ids.map((id, i) => ({
+              id,
+              name: namesReady ? `合成号${i}` : '',
+              link: `http://127.0.0.1:18080/feed/${id}.xml`,
+            })),
+            meta: { total: 2 },
+          }),
+        );
+      }
+      const match = /^\/feed\/(\d+)\.json$/.exec(url.pathname);
+      if (match) {
+        events.push(url.pathname);
+        const canonical = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(match[1]).toString('base64')}&mid=9&idx=1`;
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: canonical,
+                title: `合成文章${match[1]}`,
+                date_published: '2026-10-09T12:00:00+08:00',
+                content_html:
+                  '<div id="js_content"><p>真实字段合成完整正文。</p></div>',
+              },
+            ],
+          }),
+        );
+      }
+      return original(input, ...rest);
+    });
+    const first = setup();
+    const batch = await first.caller.feed.addSubscriptionBatch({
+      articleUrls: links,
+    });
+    expect(events).toEqual([]);
+    const batches = (first.service as any).subscriptionBatches;
+    await batches.runDue();
+    expect(
+      await prisma.feed.findUnique({ where: { id: feedId } }),
+    ).toMatchObject({
+      mpName: '',
+      collectionChannel: 'wechat2rss',
+      syncTime: 0,
+    });
+    expect(await prisma.article.findFirst()).toMatchObject({
+      contentHtml: null,
+      lastBodyStatus: 'unavailable',
+    });
+    expect(events.filter((e) => e === '/list')).toHaveLength(0);
+    expect(events.filter((e) => e === '/addurl')).toHaveLength(1);
+    expect(
+      (await first.caller.feed.subscriptionBatches()).items[0],
+    ).toMatchObject({
+      batchId: batch.batchId,
+      items: [{ state: 'waiting', feedId }, { state: 'queued' }],
+    });
+    first.service.onModuleDestroy();
+    const next = setup();
+    const tasks = (next.service as any).subscriptionTasks;
+    const queue = (next.service as any).subscriptionBatches;
+    clock += 30000;
+    await tasks.runDue();
+    await queue.runDue();
+    expect(await prisma.article.findFirst()).toMatchObject({
+      lastBodyStatus: 'available',
+    });
+    expect((await next.caller.feed.subscriptionTasks()).items[0]).toMatchObject(
+      { phase: 'metadata', bodyReady: true },
+    );
+    // A pending display name does not hold up a different authorized URL.
+    await queue.runDue();
+    expect(events.filter((e) => e === '/addurl')).toHaveLength(2);
+    clock += 30000;
+    await tasks.runDue();
+    await queue.runDue();
+    expect(await prisma.feed.count()).toBe(2);
+    expect(await prisma.article.count()).toBe(2);
+    namesReady = true;
+    clock += 30000;
+    await tasks.runDue();
+    clock += 30000;
+    await tasks.runDue();
+    expect(
+      (await prisma.feed.findMany()).every((f) =>
+        f.mpName.startsWith('合成号'),
+      ),
+    ).toBe(true);
+    expect(events.filter((e) => e === '/addurl')).toHaveLength(2);
+    expect(events.some((e) => e.startsWith('/add/'))).toBe(false);
+    next.service.onModuleDestroy();
+  });
+
+  it('an uncertain batch submission pauses remaining links and restart cannot replay addurl', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    let clock = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (input, ...rest) => {
+      if (new URL(String(input)).pathname === '/addurl') {
+        events.push('/addurl');
+        throw Error('private-error');
+      }
+      return original(input, ...rest);
+    });
+    const first = setup();
+    const batch = await first.caller.feed.addSubscriptionBatch({
+      articleUrls: [articleUrl, 'https://mp.weixin.qq.com/s/' + 'b'.repeat(22)],
+    });
+    await (first.service as any).subscriptionBatches.runDue();
+    first.service.onModuleDestroy();
+    const second = setup();
+    await second.caller.feed.resumeSubscriptionBatch({
+      batchId: batch.batchId,
+    });
+    clock += 30000;
+    await (second.service as any).subscriptionBatches.runDue();
+    expect(
+      (await second.caller.feed.subscriptionBatches()).items[0],
+    ).toMatchObject({
+      state: 'paused',
+      items: [{ state: 'failed' }, { state: 'queued' }],
+    });
+    expect(events.filter((e) => e === '/addurl')).toHaveLength(1);
+    second.service.onModuleDestroy();
+  });
+  it('single-download intent may subscribe upstream without changing another saved local source', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    await prisma.feed.create({
+      data: {
+        id: feedId,
+        mpName: '合成公众号',
+        mpCover: '',
+        mpIntro: '',
+        collectionChannel: 'owner-web-search',
+        updateTime: 1700000000,
+      },
+    });
+    await prisma.article.create({
+      data: {
+        id: 'WX_' + number + '_1_1',
+        mpId: feedId,
+        title: '旧笔记',
+        publishTime: 1700000000,
+        sourceUrl: articleUrl,
+        contentHtml: '<p>保留私人编辑</p>',
+        picUrl: '',
+      },
+    });
+    const old = await prisma.article.findMany();
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (input, ...rest) =>
+      new URL(String(input)).pathname === '/list'
+        ? new Response(
+            JSON.stringify({ err: '', data: [], meta: { total: 0 } }),
+          )
+        : original(input, ...rest),
+    );
+    const { service } = setup();
+    const batch = await service.addSingleDownloadBatch([articleUrl]);
+    await (service as any).subscriptionBatches.runDue();
+    expect((await service.subscriptionBatchList())[0]).toMatchObject({
+      batchId: batch.batchId,
+      state: 'completed',
+      items: [{ state: 'succeeded', feedId }],
+    });
+    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+    expect(
+      await prisma.feed.findUnique({ where: { id: feedId } }),
+    ).toMatchObject({
+      collectionChannel: 'owner-web-search',
+      mpName: '合成公众号',
+    });
+    expect(await prisma.article.findMany()).toEqual(old);
+    service.onModuleDestroy();
   });
 
   it('uncertain /addurl response stays pending across restart with no replay or raw error', async () => {

@@ -1,0 +1,454 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { dirname, isAbsolute, join, relative } from 'node:path';
+import { ArticleDownloadError, downloadArticleUrl } from './article-download';
+import {
+  LocalArticleStore,
+  validateLocalDirectory,
+} from './article-local-save';
+import { prepareWechat2RssSingleDownload } from './wechat2rss-single-download';
+
+type State =
+  | 'waiting'
+  | 'saving'
+  | 'saved'
+  | 'blocked'
+  | 'failed'
+  | 'cancelled';
+type Saved = Awaited<ReturnType<LocalArticleStore['save']>>;
+type Prepare = Awaited<ReturnType<typeof prepareWechat2RssSingleDownload>>;
+type Task = {
+  version: 1;
+  revision: number;
+  taskId: string;
+  owner: string;
+  instance: string;
+  url: string;
+  directory: string;
+  state: State;
+  message: string;
+  startedAt: number;
+  deadline: number;
+  nextCheckAt: number;
+  attempts: number;
+  batchId?: string;
+  result?: Saved;
+};
+type Batch = {
+  batchId: string;
+  state: string;
+  items: Array<{ state: string; feedId?: string; bodyReady?: boolean }>;
+};
+export type SingleDownloadQueue = {
+  addSingleDownloadBatch(urls: string[]): Promise<unknown>;
+  subscriptionBatchList(): Promise<unknown>;
+  stopSubscriptionBatch(id: string): Promise<unknown>;
+  resumeSubscriptionBatch(id: string): Promise<unknown>;
+};
+const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+const active = (t: Task) => ['waiting', 'saving'].includes(t.state);
+const unavailable = () =>
+  new ArticleDownloadError('下载任务不可用。', 404, {
+    code: 'SINGLE_TASK_UNAVAILABLE',
+  });
+const view = (t: Task) => ({
+  revision: t.revision,
+  taskId: t.taskId,
+  state: t.state,
+  message: t.message,
+  startedAt: t.startedAt,
+  deadline: t.deadline,
+  ...(t.result
+    ? { saved: true, ...t.result, contentSource: 'wechat2rss-cache' as const }
+    : {}),
+});
+export const singleCachePending = (error: unknown) =>
+  error instanceof ArticleDownloadError &&
+  [
+    'WECHAT2RSS_SINGLE_NOT_SUBSCRIBED',
+    'WECHAT2RSS_SINGLE_CACHE_MISS',
+    'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+    'WECHAT2RSS_SINGLE_BODY_MISSING',
+  ].includes(error.diagnostic?.code || '');
+
+/** Private download continuations, driven ONLY by the existing subscription
+ * queue's consumer hook. No timer, independent /addurl request or page fetch.
+ * The original native directory and owner remain fixed across restarts. */
+export class Wechat2RssSingleTasks {
+  private directory?: string;
+  private busy = false;
+  private stopped = false;
+  private mutations: Promise<unknown> = Promise.resolve();
+  constructor(
+    private readonly database: () => string,
+    private readonly instance: () => string,
+    private readonly queue: SingleDownloadQueue,
+    private readonly save: (
+      prepare: Prepare,
+      directory: string,
+      startedAt: number,
+    ) => Promise<Saved>,
+    private readonly canRun: () => boolean = () => true,
+    private readonly now: () => number = Date.now,
+    private readonly prepare: typeof prepareWechat2RssSingleDownload = prepareWechat2RssSingleDownload,
+  ) {}
+
+  private mutate<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.mutations.then(run, run);
+    this.mutations = result.catch(() => undefined);
+    return result;
+  }
+  private async storage() {
+    if (this.directory) return this.directory;
+    const database = await fs.realpath(this.database());
+    const directory = join(dirname(database), '.wechat2rss-single-downloads');
+    await fs.mkdir(directory, { recursive: true });
+    if ((await fs.realpath(directory)) !== directory) throw unavailable();
+    this.directory = directory;
+    return directory;
+  }
+  private id(url: string, owner: string, directory: string) {
+    return hash(JSON.stringify([url, owner, directory]));
+  }
+  private async read(id: string) {
+    if (!/^[a-f0-9]{64}$/.test(id)) throw unavailable();
+    try {
+      const file = join(await this.storage(), id + '.json');
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16000)
+        throw unavailable();
+      const t = JSON.parse(await fs.readFile(file, 'utf8')) as Task;
+      if (
+        t.version !== 1 ||
+        !Number.isSafeInteger(t.revision) ||
+        t.revision < 1 ||
+        t.taskId !== id ||
+        !/^[a-f0-9]{64}$/.test(t.owner) ||
+        !/^[a-f0-9]{64}$/.test(t.instance) ||
+        downloadArticleUrl(t.url) !== t.url ||
+        this.id(t.url, t.owner, t.directory) !== id ||
+        ![
+          'waiting',
+          'saving',
+          'saved',
+          'blocked',
+          'failed',
+          'cancelled',
+        ].includes(t.state) ||
+        typeof t.message !== 'string' ||
+        t.message.length > 400 ||
+        ![t.startedAt, t.deadline, t.nextCheckAt, t.attempts].every(
+          Number.isSafeInteger,
+        ) ||
+        t.attempts < 0 ||
+        t.attempts > 10 ||
+        t.deadline - t.startedAt !== 900000 ||
+        (t.batchId !== undefined && !/^[a-f0-9-]{36}$/.test(t.batchId))
+      )
+        throw unavailable();
+      await validateLocalDirectory(t.directory);
+      if (
+        t.result &&
+        (t.state !== 'saved' ||
+          typeof t.result.markdownPath !== 'string' ||
+          typeof t.result.directory !== 'string' ||
+          !relative(t.directory, t.result.directory) ||
+          relative(t.directory, t.result.directory).startsWith('..') ||
+          isAbsolute(relative(t.directory, t.result.directory)) ||
+          t.result.markdownPath !== join(t.result.directory, '正文.md'))
+      )
+        throw unavailable();
+      return t;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw unavailable();
+    }
+  }
+  private async write(t: Task) {
+    t.revision++;
+    const file = join(await this.storage(), t.taskId + '.json');
+    const temporary = file + '.' + randomUUID() + '.tmp';
+    try {
+      const handle = await fs.open(temporary, 'wx', 0o600);
+      try {
+        await handle.writeFile(JSON.stringify(t));
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await fs.rename(temporary, file);
+    } finally {
+      await fs.rm(temporary, { force: true });
+    }
+  }
+  private async records() {
+    const names = (await fs.readdir(await this.storage())).filter((n) =>
+      /^[a-f0-9]{64}\.json$/.test(n),
+    );
+    if (names.length > 1000) throw unavailable();
+    const tasks: Task[] = [];
+    for (const name of names) {
+      try {
+        const task = await this.read(name.slice(0, -5));
+        if (task) tasks.push(task);
+      } catch {
+        console.warn('[WECHAT2RSS_SINGLE_TASK_INVALID]');
+      }
+    }
+    return tasks;
+  }
+  async enqueue(raw: unknown, owner: string, directory: string) {
+    return this.mutate(async () => {
+      const url = downloadArticleUrl(raw);
+      if (!/^[a-f0-9]{64}$/.test(owner)) throw unavailable();
+      directory = await validateLocalDirectory(directory);
+      const taskId = this.id(url, owner, directory);
+      const old = await this.read(taskId);
+      if (old && old.state !== 'cancelled') return view(old);
+      const startedAt = this.now();
+      const t: Task = {
+        version: 1,
+        revision: old?.revision || 0,
+        taskId,
+        owner,
+        url,
+        directory,
+        instance: hash(this.instance()),
+        state: 'waiting',
+        message:
+          '正在等待 Wechat2RSS；需要时会订阅该公众号，正文就绪后自动保存。',
+        startedAt,
+        deadline: startedAt + 900000,
+        nextCheckAt: startedAt,
+        attempts: 0,
+      };
+      await this.write(t); // Persist intent before the shared queue accepts it.
+      return view(t);
+    });
+  }
+  async list(owner: string) {
+    return (await this.records())
+      .filter((t) => t.owner === owner)
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .slice(0, 20)
+      .map(view);
+  }
+  async get(id: string, owner: string) {
+    const t = await this.read(id);
+    if (!t || t.owner !== owner) throw unavailable();
+    return view(t);
+  }
+  async hasPending() {
+    return !this.stopped && (await this.records()).some(active);
+  }
+  async snapshot(backupFile: string) {
+    const target = join(dirname(backupFile), '.wechat2rss-single-downloads');
+    await fs.mkdir(target, { recursive: true });
+    for (const task of await this.records())
+      await fs.copyFile(
+        join(await this.storage(), task.taskId + '.json'),
+        join(target, task.taskId + '.json'),
+      );
+  }
+  async cancel(id: string, owner: string) {
+    const t = await this.mutate(async () => {
+      const t = await this.read(id);
+      if (!t || t.owner !== owner) throw unavailable();
+      if (t.state === 'saving')
+        throw new ArticleDownloadError('正在落盘，请等待保存结果。', 409);
+      if (t.state !== 'saved') {
+        t.state = 'cancelled';
+        t.message = '下载已取消。已受理的公众号订阅会保留。';
+        await this.write(t);
+      }
+      return t;
+    });
+    if (t.state === 'cancelled' && t.batchId)
+      await this.queue.stopSubscriptionBatch(t.batchId);
+    return view(t);
+  }
+  async resume(id: string, owner: string) {
+    const t = await this.read(id);
+    if (!t || t.owner !== owner) throw unavailable();
+    if (['blocked', 'failed', 'cancelled'].includes(t.state)) {
+      const batch = t.batchId
+        ? ((await this.queue.resumeSubscriptionBatch(
+            t.batchId,
+          )) as Batch | null)
+        : null;
+      return this.mutate(async () => {
+        const current = await this.read(id);
+        if (!current || current.owner !== owner) throw unavailable();
+        if (current.revision !== t.revision) return view(current);
+        // An explicitly restarted stopped batch is handed back to the original
+        // receipt-guarded entry. Accepted /addurl requests remain idempotent.
+        if (batch?.state === 'stopped') delete current.batchId;
+        current.startedAt = this.now();
+        current.deadline = current.startedAt + 900000;
+        current.nextCheckAt = this.now();
+        current.attempts = 0;
+        current.state = 'waiting';
+        current.message = '已继续检查原请求，不重复订阅。';
+        await this.write(current);
+        return view(current);
+      });
+    }
+    return view(t);
+  }
+  private async update(id: string, update: (t: Task) => void) {
+    return this.mutate(async () => {
+      const current = await this.read(id);
+      if (!current || !active(current)) return;
+      update(current);
+      await this.write(current);
+      return current;
+    });
+  }
+  async runDue() {
+    if (this.busy || this.stopped || !this.canRun()) return;
+    this.busy = true;
+    try {
+      let t = (await this.records())
+        .filter(active)
+        .sort((a, b) => a.nextCheckAt - b.nextCheckAt)
+        .find((t) => t.nextCheckAt <= this.now());
+      if (!t) return;
+      if (
+        t.instance !== hash(this.instance()) ||
+        this.now() >= t.deadline ||
+        t.attempts >= 10
+      ) {
+        await this.update(t.taskId, (t) => {
+          t.state = 'failed';
+          t.message =
+            '自动等待已结束或实例配置已变化；尚未取得该篇可靠正文，未保存。Wechat2RSS 不保证历史文章。';
+        });
+        return;
+      }
+      t = await this.update(t.taskId, (t) => {
+        t.state = 'waiting';
+        t.nextCheckAt = this.now() + 30000;
+      });
+      if (!t) return;
+      if (!t.batchId) {
+        try {
+          const batch = (await this.queue.addSingleDownloadBatch([
+            t.url,
+          ])) as Batch;
+          if (!batch || !/^[a-f0-9-]{36}$/.test(batch.batchId))
+            throw unavailable();
+          const updated = await this.update(t.taskId, (t) => {
+            t.batchId = batch.batchId;
+          });
+          if (!updated) {
+            await this.queue.stopSubscriptionBatch(batch.batchId);
+            return;
+          }
+          t = updated;
+        } catch {
+          // A different durable batch may own the shared queue. Keep this intent
+          // without a separate submitter or an unguarded /addurl replay.
+          let busy = false;
+          try {
+            const batches =
+              (await this.queue.subscriptionBatchList()) as Batch[];
+            busy =
+              Array.isArray(batches) &&
+              batches.some((b) =>
+                ['queued', 'running', 'paused'].includes(b.state),
+              );
+          } catch {
+            /* Unavailable local records cannot authorize a retry. */
+          }
+          await this.update(t.taskId, (t) => {
+            t.state = busy ? 'waiting' : 'blocked';
+            t.message = busy
+              ? '正在等待现有订阅队列；请求已保留。'
+              : '按需订阅未能受理，已停止；请检查来源和任务状态后继续。';
+          });
+          return;
+        }
+      }
+      const batches = (await this.queue.subscriptionBatchList()) as Batch[];
+      const batch = Array.isArray(batches)
+        ? batches.find((b) => b.batchId === t!.batchId)
+        : undefined;
+      const item = batch?.items?.[0];
+      if (!item) {
+        await this.update(t.taskId, (t) => {
+          t.state = 'failed';
+          t.message = '订阅受理记录缺失，已停止；不会重新发送新增。';
+        });
+        return;
+      }
+      if (
+        ['blocked', 'failed', 'cancelled'].includes(item.state) ||
+        batch?.state === 'paused' ||
+        batch?.state === 'stopped'
+      ) {
+        await this.update(t.taskId, (t) => {
+          t.state =
+            item.state === 'blocked' || batch?.state === 'paused'
+              ? 'blocked'
+              : 'failed';
+          t.message =
+            '订阅队列已停止或受限；请处理账号状态后继续原请求，未保存。';
+        });
+        return;
+      }
+      if (item.state !== 'succeeded' && item.bodyReady !== true) return;
+      await this.update(t.taskId, (t) => {
+        t.attempts++;
+      });
+      let prepared: Prepare;
+      try {
+        prepared = await this.prepare(t.url, item.feedId);
+      } catch (error) {
+        await this.update(t.taskId, (t) => {
+          if (singleCachePending(error)) {
+            t.message =
+              '订阅已受理，仍在等待该篇可核验正文；不会重复新增或按标题猜文。';
+          } else {
+            t.state = 'failed';
+            t.message =
+              error instanceof ArticleDownloadError
+                ? error.message
+                : '正文读取失败，已停止，未保存。';
+          }
+        });
+        return;
+      }
+      if (this.stopped || !this.canRun()) return;
+      const saving = await this.update(t.taskId, (t) => {
+        t.state = 'saving';
+        t.message = '正在保存已核验的正文和图片。';
+      });
+      if (!saving) return; // Cancellation during a read cannot publish files.
+      try {
+        const result = await this.save(
+          prepared,
+          saving.directory,
+          saving.startedAt,
+        );
+        await this.update(saving.taskId, (t) => {
+          t.state = 'saved';
+          t.result = result;
+          t.message = result.alreadySaved
+            ? '已保存，保留已有笔记。'
+            : '正文和图片已保存。';
+        });
+      } catch {
+        await this.update(saving.taskId, (t) => {
+          t.state = 'failed';
+          t.message =
+            '本机保存未完成；已保留原目录和订阅回执，请检查保存路径。';
+        });
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+  close() {
+    this.stopped = true;
+  }
+}

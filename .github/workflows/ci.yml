@@ -63,7 +63,7 @@ jobs:
       - name: Test feed sidebar scroll and compact navigation layout offline
         run: node --test scripts/feed-sidebar-layout.test.cjs scripts/folder-navigation-ui.test.cjs
       - name: Test unavailable new-subscription source and retained input offline
-        run: node --test scripts/feed-add-ui.test.cjs
+        run: node --test scripts/feed-add-ui.test.cjs scripts/subscription-tasks-ui.test.cjs
       - name: Test Xiaohongshu batch completion and download failure states offline
         run: node --test scripts/xiaohongshu-refresh-ui.test.cjs
       - name: Test closed Sites metadata contract offline

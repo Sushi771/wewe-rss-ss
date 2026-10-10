@@ -23,6 +23,11 @@ import { privateOnlineMode } from './private-access';
 import { PrismaService } from './prisma/prisma.service';
 import { ProviderArticle } from './collection/subscription-provider';
 import { prepareWechat2RssSingleDownload } from './wechat2rss-single-download';
+import { TrpcService } from './trpc/trpc.service';
+import {
+  singleCachePending,
+  Wechat2RssSingleTasks,
+} from './wechat2rss-single-tasks';
 import { BrowserTaskBroker, BrowserTaskError } from './browser-task';
 import { BrowserArticleTasks } from './browser-article-tasks';
 import { XiaohongshuService } from './collection/xiaohongshu.service';
@@ -40,6 +45,7 @@ import {
 @Controller('download')
 export class ArticleDownloadController implements OnModuleDestroy {
   private readonly browserTasks: BrowserArticleTasks;
+  private readonly singleTasks?: Wechat2RssSingleTasks;
   constructor(
     private readonly config: ConfigService,
     @Optional() private readonly prisma?: PrismaService,
@@ -48,15 +54,51 @@ export class ArticleDownloadController implements OnModuleDestroy {
     @Optional()
     @Inject(XHS_SINGLE_SOURCE)
     private readonly xhsSingleSource?: XhsSingleSource,
+    @Optional() private readonly subscriptionQueue?: TrpcService,
   ) {
     // Default AppModule supplies no broker. An explicitly approved short-lived
     // opt-in root supplies the same configured broker to both controllers.
     this.browserTasks = new BrowserArticleTasks(
       browserBroker || new BrowserTaskBroker(),
     );
+    if (subscriptionQueue) {
+      this.singleTasks = new Wechat2RssSingleTasks(
+        () => {
+          const raw = process.env.DATABASE_URL || '';
+          const database = raw.startsWith('file:') ? raw.slice(5) : '';
+          if (!isAbsolute(database))
+            throw new ArticleDownloadError('需要本机 SQLite 部署。', 409);
+          return database;
+        },
+        () =>
+          `${process.env.WECHAT2RSS_BASE_URL}\0${process.env.WECHAT2RSS_TOKEN}`,
+        subscriptionQueue,
+        async (prepare, directory, startedAt) => {
+          if (this.running || this.pickerRunning)
+            throw new ArticleDownloadError('正在处理其他本机操作。', 409);
+          this.running = true;
+          try {
+            return await this.localStore().save(
+              prepare,
+              new Date(startedAt),
+              directory,
+            );
+          } finally {
+            this.running = false;
+          }
+        },
+        () =>
+          !this.running &&
+          !this.pickerRunning &&
+          !privateOnlineMode() &&
+          process.env.WEWE_ACCEPTANCE_MODE !== '1',
+      );
+      subscriptionQueue.registerSubscriptionConsumer(this.singleTasks);
+    }
   }
   onModuleDestroy() {
     this.browserTasks.close();
+    this.singleTasks?.close();
   }
   private running = false;
   private pickerRunning = false;
@@ -242,6 +284,68 @@ export class ArticleDownloadController implements OnModuleDestroy {
     @Response() res: Res,
   ) {
     return this.saveArticle(body, req, res);
+  }
+
+  @Get('article/single-tasks')
+  async singleTaskList(@Request() req: Req, @Response() res: Res) {
+    if (!this.authorized(req, res, false)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    try {
+      return res.json({
+        tasks: this.singleTasks
+          ? await this.singleTasks.list(this.taskOwner(req))
+          : [],
+      });
+    } catch (error) {
+      return this.failure(error, res);
+    }
+  }
+  @Get('article/single-task/:taskId')
+  async singleTask(
+    @Param('taskId') taskId: string,
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, false)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    try {
+      if (!this.singleTasks)
+        throw new ArticleDownloadError('下载任务未接入。', 409);
+      return res.json(await this.singleTasks.get(taskId, this.taskOwner(req)));
+    } catch (error) {
+      return this.failure(error, res);
+    }
+  }
+  @Post('article/single-task/:taskId/:action')
+  @HttpCode(200)
+  async singleTaskAction(
+    @Param('taskId') taskId: string,
+    @Param('action') action: string,
+    @Body() body: unknown,
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    try {
+      if (
+        !this.singleTasks ||
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).length ||
+        !['cancel', 'resume'].includes(action)
+      )
+        throw new ArticleDownloadError('下载任务操作无效。', 400);
+      const result =
+        action === 'cancel'
+          ? await this.singleTasks.cancel(taskId, this.taskOwner(req))
+          : await this.singleTasks.resume(taskId, this.taskOwner(req));
+      this.subscriptionQueue?.wakeSubscriptionConsumer();
+      return res.json(result);
+    } catch (error) {
+      return this.failure(error, res);
+    }
   }
 
   private taskOwner(req: Req) {
@@ -620,8 +724,22 @@ export class ArticleDownloadController implements OnModuleDestroy {
       )
         return res.status(409).json({ message: '请先选择本次保存路径。' });
       this.pickerGrant = undefined;
-      const prepare =
-        cachedPrepare || (await prepareWechat2RssSingleDownload(url!));
+      let prepare = cachedPrepare;
+      if (!prepare) {
+        try {
+          prepare = await prepareWechat2RssSingleDownload(url!);
+        } catch (error) {
+          if (!singleCachePending(error) || !this.singleTasks) throw error;
+          const task = await this.singleTasks.enqueue(
+            url,
+            this.taskOwner(req),
+            (await store.read()).directory,
+          );
+          this.subscriptionQueue?.wakeSubscriptionConsumer();
+          res.setHeader('Cache-Control', 'private, no-store');
+          return res.status(202).json({ pending: true, task });
+        }
+      }
       const result = await store.save(prepare);
       res.setHeader('Cache-Control', 'private, no-store');
       return res.status(200).json({

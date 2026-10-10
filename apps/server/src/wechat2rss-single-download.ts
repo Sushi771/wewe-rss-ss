@@ -10,18 +10,19 @@ const fail = (code: string, message: string, status = 422) =>
 /** The normal tool's only article source is the configured private Wechat2RSS
  * cache. Media archiving is separate; it never fetches an article's public page.
  */
-export async function prepareWechat2RssSingleDownload(raw: unknown) {
+export async function prepareWechat2RssSingleDownload(
+  raw: unknown,
+  feedId?: string,
+) {
   const requested = downloadArticleUrl(raw);
-  if (new URL(requested).pathname !== '/s')
-    throw fail(
-      'WECHAT2RSS_SINGLE_LONG_URL_REQUIRED',
-      '仅使用 Wechat2RSS 下载；此短链接没有可核验的缓存身份映射，请使用含 __biz、mid、idx 的完整原文链接。不会直连原页或自动新增公众号。',
-      409,
-    );
-  const identity = canonicalArticleUrl(requested);
+  const short = new URL(requested).pathname !== '/s';
+  const identity = short ? null : canonicalArticleUrl(requested);
   let article;
   try {
-    article = await wechat2RssProvider().fetchSingleCachedArticle(requested);
+    article = await wechat2RssProvider().fetchSingleCachedArticle(
+      requested,
+      feedId,
+    );
   } catch (error) {
     if (error instanceof ArticleDownloadError) throw error;
     const code = error instanceof Error ? error.message : '';
@@ -40,6 +41,12 @@ export async function prepareWechat2RssSingleDownload(raw: unknown) {
         'Wechat2RSS 尚未订阅该公众号；本工具不会自动订阅整个号或触发更新，未保存。',
         409,
       );
+    if (code === 'WECHAT2RSS_SINGLE_SHORT_IDENTITY_UNVERIFIED')
+      throw fail(
+        'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+        'Wechat2RSS 缓存中未提供此链接与原文的可靠对应关系。当前服务没有任意文章链接直接取文接口，未保存。',
+        409,
+      );
     if (code === 'WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE')
       throw fail(
         'WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE',
@@ -52,8 +59,12 @@ export async function prepareWechat2RssSingleDownload(raw: unknown) {
   }
   if (!article)
     throw fail(
-      'WECHAT2RSS_SINGLE_CACHE_MISS',
-      '该文章不在 Wechat2RSS 当前订阅缓存中；未保存，不直连原页、自动新增或强制更新。',
+      short
+        ? 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE'
+        : 'WECHAT2RSS_SINGLE_CACHE_MISS',
+      short
+        ? 'Wechat2RSS 缓存中没有此链接的可靠原文映射。当前服务没有任意文章链接直接取文接口，未保存；不会自动订阅公众号或触发更新。'
+        : '该文章不在 Wechat2RSS 当前订阅缓存中；未保存，不直连原页、自动新增或强制更新。',
       409,
     );
   if (!article.contentHtml)
@@ -63,7 +74,7 @@ export async function prepareWechat2RssSingleDownload(raw: unknown) {
       409,
     );
   // Verify selected identity before any media resource request.
-  if (article.url !== identity.url)
+  if (short ? article.shortUrl !== requested : article.url !== identity!.url)
     throw fail(
       'WECHAT2RSS_SINGLE_IDENTITY_MISMATCH',
       'Wechat2RSS 缓存原文与输入链接不一致；未保存，不猜测文章身份。',

@@ -764,6 +764,39 @@ export class TrpcRouter {
           !!(ctx as any).isLocal,
         ),
       ),
+    subscriptionTasks: this.trpcService.protectedProcedure.query(async () => ({
+      items: await this.trpcService.subscriptionTaskList(),
+    })),
+    addSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ articleUrls: z.array(z.string().max(4096)).min(1).max(20) })
+          .strict(),
+      )
+      .mutation(({ input }) =>
+        this.trpcService.addSubscriptionBatch(input.articleUrls),
+      ),
+    subscriptionBatches: this.trpcService.protectedProcedure.query(
+      async () => ({ items: await this.trpcService.subscriptionBatchList() }),
+    ),
+    stopSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }))
+      .mutation(({ input }) =>
+        this.trpcService.stopSubscriptionBatch(input.batchId),
+      ),
+    resumeSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }))
+      .mutation(({ input }) =>
+        this.trpcService.resumeSubscriptionBatch(input.batchId),
+      ),
+    subscriptionTask: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().regex(/^[a-f0-9]{64}$/) }))
+      .query(({ input }) => this.trpcService.subscriptionTask(input.taskId)),
+    resumeSubscriptionTask: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().regex(/^[a-f0-9]{64}$/) }))
+      .mutation(({ input }) =>
+        this.trpcService.resumeSubscriptionTask(input.taskId),
+      ),
     addFromArticle: this.trpcService.protectedProcedure
       .input(
         z.object({

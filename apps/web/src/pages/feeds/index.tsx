@@ -31,8 +31,7 @@ import ArticleList from './list';
 import ManagementFolders from '@web/components/ManagementFolders';
 import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
-import ArticleVerificationNotice from '../tools/article-verification-notice';
-import type { TimedArticleVerification } from '@wewe-rss/shared';
+import SubscriptionTasks from './subscription-tasks';
 
 const Feeds = () => {
   const { id } = useParams();
@@ -58,8 +57,8 @@ const Feeds = () => {
 
   const queryUtils = trpc.useUtils();
 
-  const { mutateAsync: addFromArticle, isLoading: isGetMpInfoLoading } =
-    trpc.feed.addFromArticle.useMutation({});
+  const { mutateAsync: addSubscriptionBatch, isLoading: isGetMpInfoLoading } =
+    trpc.feed.addSubscriptionBatch.useMutation({ retry: false });
   const { mutateAsync: repairNativeSource } =
     trpc.feed.repairNativeSource.useMutation({});
   const [repairTarget, setRepairTarget] = useState<{
@@ -71,9 +70,7 @@ const Feeds = () => {
 
   const [isAddingSubscriptions, setIsAddingSubscriptions] = useState(false);
   const isAddFeedLoading = isGetMpInfoLoading || isAddingSubscriptions;
-  const [addSourceSelection, setAddSourceSelection] = useState<
-    '' | 'native' | 'wechat2rss'
-  >('');
+  const addSourceSelection = 'wechat2rss' as const;
   const { data: defaultAddCapability, error: addCapabilityError } =
     trpc.feed.addCapability.useQuery(undefined, {
       refetchOnWindowFocus: false,
@@ -82,16 +79,16 @@ const Feeds = () => {
   const selectedAddSource = defaultAddCapability?.sources.find(
     (source) => source.source === addSourceSelection,
   );
-  const addCapability = addSourceSelection
-    ? selectedAddSource && {
-        ...selectedAddSource,
-        existingRepairAvailable: defaultAddCapability?.existingRepairAvailable,
-      }
-    : defaultAddCapability;
+  const addCapability =
+    !addCapabilityError && selectedAddSource
+      ? {
+          ...selectedAddSource,
+          existingRepairAvailable:
+            defaultAddCapability?.existingRepairAvailable,
+        }
+      : undefined;
   const [addAccountId, setAddAccountId] = useState('');
   const [addMessages, setAddMessages] = useState<string[]>([]);
-  const [addVerification, setAddVerification] =
-    useState<TimedArticleVerification | null>(null);
   const addingSubscriptions = useRef(false);
   const cancelSubscriptions = useRef(false);
   useEffect(
@@ -134,13 +131,6 @@ const Feeds = () => {
     trpc.feed.delete.useMutation({});
 
   const [wxsLink, setWxsLink] = useState('');
-  const handleSelectAddSource = (value: string) => {
-    if (addingSubscriptions.current) return;
-    if (value !== '' && value !== 'native' && value !== 'wechat2rss') return;
-    setAddSourceSelection(value);
-    setAddMessages([]);
-    setAddVerification(null);
-  };
   const handleOpenAdd = () => {
     if (!addingSubscriptions.current && !repairTarget) onOpen();
   };
@@ -158,7 +148,7 @@ const Feeds = () => {
   };
   const handleRepairConfirm = async () => {
     if (addingSubscriptions.current || !repairTarget) return;
-    if (!addCapability?.existingRepairAvailable) {
+    if (!defaultAddCapability?.existingRepairAvailable) {
       toast.error('当前来源修复不可用，未发目录请求。');
       return;
     }
@@ -212,13 +202,7 @@ const Feeds = () => {
     }
   };
   const handleCancelAdd = () => {
-    if (addingSubscriptions.current && !cancelSubscriptions.current) {
-      cancelSubscriptions.current = true;
-      const message =
-        '已停止后续公众号；已发送的请求无法撤回，结束后保留未处理链接。';
-      setAddMessages((previous) => [...previous, message]);
-      toast.warning(message);
-    }
+    cancelSubscriptions.current = true;
     onClose();
   };
   const [isManageMode, setIsManageMode] = useState(false);
@@ -340,17 +324,28 @@ const Feeds = () => {
     setCurrentMpId(id || '');
   }, [id]);
 
+  const refreshSavedSubscriptions = async (reveal: boolean) => {
+    await queryUtils.feed.list.cancel();
+    const [snapshot] = await Promise.all([
+      refetchFeedList({ throwOnError: true }),
+      queryUtils.article.list.reset(),
+      queryUtils.article.summary.invalidate(),
+    ]);
+    if (snapshot?.data?.items) setOrderedFeeds(snapshot.data.items);
+    if (reveal)
+      setFolderFilter((current) =>
+        current === folderFilter ? 'all' : current,
+      );
+  };
+
   const handleConfirm = async () => {
     if (addingSubscriptions.current) return;
     if (!addCapability?.available) {
       toast.error('暂不能新增订阅', {
-        description:
-          addCapability?.message || '新增来源状态尚未确认，输入链接已保留。',
+        description: addCapabilityError
+          ? '暂时无法检查订阅服务，请稍后刷新页面；链接已保留。'
+          : 'Wechat2RSS 暂不可用，请先检查实例配置与账号登录；链接已保留。',
       });
-      return;
-    }
-    if (addCapability.requiresAccount && !addAccountId) {
-      toast.error('请先选择正常Web登录账号');
       return;
     }
     const wxsLinks = [
@@ -374,171 +369,40 @@ const Feeds = () => {
       return;
     }
     if (wxsLinks.length > 20) {
-      toast.error('每次最多添加20个公众号，输入链接已保留');
+      toast.error('每次最多提交20条链接；输入链接已保留');
       return;
     }
-    const selectedSource = addSourceSelection;
-    const failedLinks: string[] = [];
-    let pending = false;
-    let keepReceipt = false;
     addingSubscriptions.current = true;
     cancelSubscriptions.current = false;
     setIsAddingSubscriptions(true);
     setAddMessages([]);
-    setAddVerification(null);
     try {
-      for (const [index, link] of wxsLinks.entries()) {
-        if (cancelSubscriptions.current) {
-          failedLinks.push(...wxsLinks.slice(index));
-          break;
-        }
-        try {
-          const result = await addFromArticle({
-            articleUrl: link,
-            accountId: addCapability.requiresAccount
-              ? addAccountId || undefined
-              : undefined,
-            ...(selectedSource ? { source: selectedSource } : {}),
-          });
-          if (cancelSubscriptions.current) {
-            if (!result.accepted || !result.feed) failedLinks.push(link);
-            await queryUtils.article.list.reset();
-            await queryUtils.article.summary.invalidate();
-            continue;
-          }
-          // 新增记录与正文缓存是两个结果。先刷新本地视图，再呈现回执；
-          // 缓存待完成时也可能已有部分正文，不能在刷新前退出本批。
-          if (result.accepted && result.feed) {
-            try {
-              await queryUtils.article.list.reset();
-              await queryUtils.article.summary.invalidate();
-            } catch {
-              setAddMessages((previous) => [
-                ...previous,
-                '本地列表重新读取未完成，请关闭弹窗后重新读取页面；无需重新新增。',
-              ]);
-            }
-          }
-          if (cancelSubscriptions.current) continue;
-          if ('requestedSource' in result) {
-            keepReceipt = true;
-            const identity = result.feed
-              ? `${result.created ? '新增成功' : '已有订阅'}：${result.feed.mpName}`
-              : result.accepted
-                ? '新增请求已受理，等待订阅缓存'
-                : '未新增订阅';
-            const details = `${identity}。${result.message || '订阅请求已受理，文章尚未核验。'}`;
-            setAddMessages((previous) => [...previous, details]);
-            if (!result.accepted || !result.feed) {
-              failedLinks.push(...wxsLinks.slice(index));
-              pending = true;
-              if (result.status === 'failed')
-                toast.error('新增失败', { description: details });
-              else
-                toast.warning(
-                  result.status === 'blocked' ? '新增受限' : '等待首批缓存',
-                  { description: details },
-                );
-              break;
-            }
-            if (result.status === 'source-preserved') {
-              toast.warning('现有订阅来源保持', {
-                description:
-                  '本号仍使用原来源，原有内容保持；本次没有切换来源或读取原来源。',
-              });
-            } else if (
-              result.status === 'blocked' ||
-              result.status === 'pending' ||
-              result.pending
-            ) {
-              toast.warning(
-                result.status === 'blocked'
-                  ? '订阅已保留，缓存读取受限'
-                  : '订阅已保留，等待首批缓存',
-                { description: details },
-              );
-              failedLinks.push(...wxsLinks.slice(index + 1));
-              pending = true;
-              break;
-            } else if (result.status === 'updated') {
-              toast.success(
-                result.created
-                  ? '新增成功，当前缓存已入库'
-                  : '已有订阅，当前缓存已入库',
-                { description: details },
-              );
-            } else {
-              toast.warning('订阅已受理，文章尚未核验', {
-                description: details,
-              });
-            }
-          } else if ('source' in result) {
-            if (result.officialVerification)
-              setAddVerification(result.officialVerification);
-            const details = [
-              result.message,
-              result.httpStatus === undefined
-                ? ''
-                : `HTTP ${result.httpStatus}`,
-              result.businessCode === undefined
-                ? ''
-                : `业务码 ${result.businessCode}`,
-            ]
-              .filter(Boolean)
-              .join('；');
-            setAddMessages((previous) => [...previous, details]);
-            if (!result.accepted || !result.feed) {
-              failedLinks.push(...wxsLinks.slice(index));
-              toast.warning('未添加订阅', { description: details });
-              pending = true;
-              break;
-            }
-            if (result.pending) {
-              toast.warning('目录已确认，正文图片待完成', {
-                description: details,
-              });
-              failedLinks.push(...wxsLinks.slice(index + 1));
-              pending = true;
-              break;
-            }
-            toast.success(
-              result.created ? '公众号已添加并更新' : '已订阅，未重复添加',
-              {
-                description: result.feed.mpName,
-              },
-            );
-          }
-        } catch (error) {
-          failedLinks.push(...wxsLinks.slice(index));
-          pending = true;
-          const rawMessage = error instanceof Error ? error.message : '';
-          const message =
-            rawMessage &&
-            /[\u3400-\u9fff]/u.test(rawMessage) &&
-            !/\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/.test(rawMessage)
-              ? rawMessage
-              : selectedSource === 'wechat2rss'
-                ? 'Wechat2RSS 添加未完成，请核对实例授权和配置；链接已保留，本次未切换到其他来源。'
-                : '本次添加未完成，请核对所选来源状态；链接已保留，不会自动切换来源或重试。';
-          setAddMessages((previous) => [...previous, message]);
-          if (!cancelSubscriptions.current)
-            toast.error('添加失败或待核对', { description: message });
-          break;
-        }
+      // Persist the complete input once; the server owns serial execution.
+      const batch = await addSubscriptionBatch({ articleUrls: wxsLinks });
+      setWxsLink((current) => (current === wxsLink ? '' : current));
+      setAddMessages([
+        `已保存 ${batch.items.length} 条链接，后台将依次处理。关闭窗口后仍会继续。`,
+      ]);
+      try {
+        await queryUtils.feed.subscriptionBatches.invalidate();
+      } catch {
+        setAddMessages((previous) => [
+          ...previous,
+          '进度暂未显示，请重新读取进度，不要重复提交。',
+        ]);
       }
+    } catch {
+      setAddMessages([
+        '提交结果暂未确认，链接已保留。请先查看添加进度，不要重复提交。',
+      ]);
+      try {
+        await queryUtils.feed.subscriptionBatches.invalidate();
+      } catch {
+        /* A read failure must never replay the submitted batch. */
+      }
+      if (!cancelSubscriptions.current)
+        toast.warning('请先核对添加进度，避免重复提交');
     } finally {
-      refetchFeedList();
-      // 禁用输入之外，再防止旧批次覆盖已经变化的输入。
-      setWxsLink((current) =>
-        current === wxsLink ? failedLinks.join('\n') : current,
-      );
-      if (
-        !failedLinks.length &&
-        !pending &&
-        !keepReceipt &&
-        !cancelSubscriptions.current
-      )
-        onClose();
       addingSubscriptions.current = false;
       setIsAddingSubscriptions(false);
     }
@@ -741,7 +605,7 @@ const Feeds = () => {
               <option value="">全部文章</option>
               {feedData?.items.map((feed) => (
                 <option key={feed.id} value={feed.id}>
-                  {feed.mpName}
+                  {feed.mpName || '公众号信息待补全'}
                 </option>
               ))}
             </select>
@@ -997,7 +861,7 @@ const Feeds = () => {
                           className="sidebar-avatar h-6 min-h-6 w-6 min-w-6"
                         ></Avatar>
                         <span className="flex-1 truncate text-sm">
-                          {item.mpName}
+                          {item.mpName || '公众号信息待补全'}
                         </span>
                       </li>
                     );
@@ -1007,10 +871,41 @@ const Feeds = () => {
           ) : null}
         </div>
         <div className="mac-content feed-content !min-w-0 !overflow-y-auto">
+          {!isOpen && (
+            <SubscriptionTasks
+              feeds={feedData?.items || []}
+              adding={isAddingSubscriptions}
+              onSaved={refreshSavedSubscriptions}
+            />
+          )}
+          {isAddingSubscriptions && (
+            <section
+              aria-label="添加订阅进度"
+              className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2 text-sm"
+            >
+              <p role="status" aria-live="polite">
+                {isAddingSubscriptions
+                  ? '正在处理添加请求，完成后会自动更新列表。'
+                  : addMessages[addMessages.length - 1]}
+              </p>
+              <Button
+                size="sm"
+                variant="light"
+                onPress={handleOpenAdd}
+                isDisabled={isAddFeedLoading}
+              >
+                查看添加结果
+              </Button>
+            </section>
+          )}
           <div className="mac-toolbar feed-reading-toolbar !h-auto shrink-0 !flex-wrap !gap-2 !px-3 !py-2">
             <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 sm:flex-1 sm:basis-0">
               <span className="min-w-0 truncate text-[15px] font-semibold">
-                {currentMpId ? currentMpInfo?.mpName || '加载中...' : '全部'}
+                {currentMpId
+                  ? currentMpInfo
+                    ? currentMpInfo.mpName || '公众号信息待补全'
+                    : '加载中...'
+                  : '全部'}
               </span>
               {currentMpInfo && (
                 <span
@@ -1719,7 +1614,7 @@ const Feeds = () => {
             <p className="text-default-600 text-sm">
               使用已有订阅身份验证目录，无需重新提供单篇原文。所选账号验证成功后更新最近10篇正文和图片，后续使用原更新本号入口；失败保留历史数据和停止记录，不自动重试或切换账号。
             </p>
-            {!addCapability?.existingRepairAvailable && (
+            {!defaultAddCapability?.existingRepairAvailable && (
               <p role="status">
                 {addCapabilityError
                   ? '来源状态读取失败，本次未发目录请求。'
@@ -1768,7 +1663,7 @@ const Feeds = () => {
               color="primary"
               isDisabled={
                 isAddFeedLoading ||
-                !addCapability?.existingRepairAvailable ||
+                !defaultAddCapability?.existingRepairAvailable ||
                 !addAccountId
               }
               isLoading={isAddingSubscriptions}
@@ -1786,97 +1681,35 @@ const Feeds = () => {
         <ModalContent>
           {() => (
             <>
-              <ModalHeader className="flex flex-col gap-1">
-                添加公众号源
-              </ModalHeader>
+              <ModalHeader>添加公众号</ModalHeader>
               <ModalBody>
-                <label className="flex flex-col gap-2 text-sm">
-                  本次新增来源
-                  <select
-                    aria-label="本次新增来源"
-                    value={addSourceSelection}
-                    onChange={(event) =>
-                      handleSelectAddSource(event.target.value)
-                    }
-                    disabled={isAddFeedLoading}
-                    className="bg-content1 rounded-md border p-2"
-                  >
-                    <option value="">
-                      使用当前默认来源
-                      {defaultAddCapability
-                        ? defaultAddCapability.source === 'native'
-                          ? '（微信读书）'
-                          : '（Wechat2RSS）'
-                        : '（正在核对）'}
-                    </option>
-                    <option value="native">
-                      微信读书（
-                      {!defaultAddCapability
-                        ? '正在核对'
-                        : defaultAddCapability.sources.find(
-                              (s) => s.source === 'native',
-                            )?.available
-                          ? '可提交目录验证'
-                          : '未配置'}
-                      ）
-                    </option>
-                    <option value="wechat2rss">
-                      Wechat2RSS（
-                      {!defaultAddCapability
-                        ? '正在核对'
-                        : defaultAddCapability.sources.find(
-                              (s) => s.source === 'wechat2rss',
-                            )?.available
-                          ? '已配置，实际取文待核验'
-                          : '未就绪'}
-                      ）
-                    </option>
-                  </select>
-                </label>
-                {addSourceSelection === 'wechat2rss' && (
-                  <p className="text-default-600 text-sm">
-                    此来源需要已授权的私有实例。新增后读取首批缓存；缓存尚未就绪时，从订阅列表使用原“更新”按钮读取，无需再次新增。实际正文和图片以缓存结果为准，已有订阅保留原来源。
-                  </p>
+                {isOpen && (
+                  <SubscriptionTasks
+                    feeds={feedData?.items || []}
+                    adding={isAddingSubscriptions}
+                    onSaved={refreshSavedSubscriptions}
+                  />
                 )}
-                <p className="text-default-600 text-sm" role="status">
-                  {addCapability?.message ||
-                    (addCapabilityError
-                      ? '新增来源状态读取失败，输入链接已保留；稍后重新打开此页面核对。'
-                      : '正在只读核对新增来源状态。')}
-                </p>
-                {addCapability?.requiresAccount && (
-                  <label className="flex flex-col gap-2 text-sm">
-                    用于本次公众号目录验证的账号
-                    <select
-                      aria-label="用于本次公众号目录验证的账号"
-                      value={addAccountId}
-                      onChange={(event) => {
-                        if (!addingSubscriptions.current)
-                          setAddAccountId(event.target.value);
-                      }}
-                      disabled={isAddFeedLoading}
-                      className="bg-content1 rounded-md border p-2"
-                    >
-                      <option value="">请选择正常Web登录账号</option>
-                      {addAccounts?.items.map((account) => (
-                        <option
-                          key={account.id}
-                          value={account.id}
-                          disabled={
-                            account.status !== 1 || !account.nativeLoginAt
-                          }
-                        >
-                          {account.platformName || account.name}
-                          {!account.nativeLoginAt ? '（需正常Web登录）' : ''}
-                        </option>
-                      ))}
-                    </select>
-                    {addAccountsError && (
-                      <span role="alert">
-                        账号列表读取失败，请在账号页核对正常登录。
-                      </span>
-                    )}
-                  </label>
+                <Textarea
+                  value={wxsLink}
+                  onValueChange={(value) => {
+                    if (!addingSubscriptions.current) setWxsLink(value);
+                  }}
+                  isDisabled={isAddFeedLoading}
+                  autoFocus
+                  label="文章链接"
+                  placeholder="https://mp.weixin.qq.com/s/…"
+                  description="多个公众号请每行粘贴一个文章链接，每次最多20条。"
+                  variant="bordered"
+                />
+                {!addCapability?.available && (
+                  <p className="text-default-600 text-sm" role="status">
+                    {addCapabilityError
+                      ? '服务状态读取失败，请刷新页面后重试。'
+                      : defaultAddCapability
+                        ? 'Wechat2RSS 暂不可用，请先检查实例配置与账号登录。'
+                        : '正在检查订阅服务…'}
+                  </p>
                 )}
                 {addMessages.length > 0 && (
                   <ul
@@ -1890,60 +1723,27 @@ const Feeds = () => {
                     ))}
                   </ul>
                 )}
-                {addVerification && (
-                  <ArticleVerificationNotice
-                    verification={addVerification}
-                    operation="subscription"
-                  />
-                )}
-                <Textarea
-                  value={wxsLink}
-                  onValueChange={(value) => {
-                    if (!addingSubscriptions.current) setWxsLink(value);
-                  }}
-                  isDisabled={isAddFeedLoading}
-                  autoFocus
-                  label="分享链接"
-                  placeholder="输入公众号文章分享链接，一行一条，如 https://mp.weixin.qq.com/s/xxxxxx https://mp.weixin.qq.com/s/xxxxxx"
-                  variant="bordered"
-                />
-                {addCapability?.requiresAccount && (
-                  <p className="text-default-500 text-xs">
-                    一行一个公众号的文章链接，每次最多20个；按本次提交顺序验证，失败即停，余下链接保留。
-                  </p>
-                )}
                 {isAddingSubscriptions && (
                   <p className="text-default-500 text-xs" role="status">
-                    本批处理中；取消只停止尚未发送的公众号，不能撤回在途请求。
+                    正在保存添加队列。关闭窗口后仍会继续处理。
                   </p>
                 )}
               </ModalBody>
               <ModalFooter>
-                <Button color="danger" variant="flat" onPress={handleCancelAdd}>
-                  {isAddingSubscriptions
-                    ? '停止后续并关闭'
-                    : addMessages.length
-                      ? '关闭结果'
-                      : '取消'}
+                <Button variant="flat" onPress={handleCancelAdd}>
+                  取消
                 </Button>
                 <Button
                   color="primary"
                   isDisabled={
                     isAddFeedLoading ||
                     !addCapability?.available ||
-                    (addCapability.requiresAccount && !addAccountId) ||
                     !wxsLink.trim().startsWith('https://mp.weixin.qq.com/s')
                   }
                   onPress={handleConfirm}
-                  isLoading={
-                    isAddFeedLoading ||
-                    isGetMpInfoLoading ||
-                    isGetArticlesLoading
-                  }
+                  isLoading={isAddFeedLoading}
                 >
-                  {addCapability?.requiresAccount
-                    ? '验证目录并添加'
-                    : '提交所选来源'}
+                  添加订阅
                 </Button>
               </ModalFooter>
             </>

@@ -16,6 +16,8 @@ export type Wechat2RssLoginView = {
   sessionId?: string;
   qrcode?: string;
   expiresAt?: number;
+  code?: string;
+  phase?: 'create' | 'poll';
 };
 type Session = {
   view: Wechat2RssLoginView;
@@ -30,7 +32,7 @@ const messages: Record<State, string> = {
   waiting: '请使用微信扫描二维码，并按官方提示确认登录。',
   succeeded: 'Wechat2RSS 登录成功。',
   expired: '本次登录已过期，请手动重新获取二维码。',
-  failed: '登录未完成，请检查实例或按官方提示处理验证后手动重试。',
+  failed: '本次登录未完成，已停止。',
   busy: '已有登录正在进行，请完成或关闭后再试。',
   unavailable: 'Wechat2RSS 实例尚未配置，无法登录。',
   closed: '已停止本次登录。',
@@ -66,10 +68,55 @@ export class Wechat2RssAccounts {
     return config;
   }
 
-  private terminal(session: Session, state: State) {
+  private terminal(session: Session, state: State, error?: unknown) {
     session.cookies.clear();
     session.view = view(state);
+    if (state === 'failed') {
+      const phase = session.polls ? 'poll' : 'create';
+      const code = this.safeCode(error);
+      const target = phase === 'create' ? '二维码' : '登录状态';
+      const detail =
+        code === 'UPSTREAM_REJECTED'
+          ? '实例拒绝了请求，具体原因尚未确认'
+          : code === 'HTTP_FAILED' || code === 'NETWORK_FAILED'
+            ? '实例请求失败'
+            : code === 'COOKIE_MISSING' || code === 'COOKIE_INVALID'
+              ? '没有可继续使用的登录会话'
+              : code === 'COOKIE_CLEARED'
+                ? '登录会话已结束或过期'
+                : code.startsWith('QR_')
+                  ? '二维码图片响应未能识别'
+                  : '实例响应结构未能识别';
+      session.view = {
+        ...session.view,
+        phase,
+        code,
+        message: `${target}${phase === 'create' ? '获取' : '查询'}停止：${detail}。`,
+      };
+      console.info('[WECHAT2RSS_LOGIN_STOP]', JSON.stringify({ phase, code }));
+    }
     return session.view;
+  }
+
+  private safeCode(error: unknown) {
+    const code = error instanceof Error ? error.message : '';
+    return [
+      'HTTP_FAILED',
+      'NETWORK_FAILED',
+      'BODY_TOO_LARGE',
+      'INVALID_JSON',
+      'ENVELOPE_INVALID',
+      'UPSTREAM_REJECTED',
+      'COOKIE_INVALID',
+      'COOKIE_CLEARED',
+      'COOKIE_MISSING',
+      'LOGIN_REPLY_INVALID',
+      'QR_FORMAT_INVALID',
+      'QR_PNG_INVALID',
+      'CONFIG_CHANGED',
+    ].includes(code)
+      ? code
+      : 'NETWORK_FAILED';
   }
 
   private prune() {
@@ -99,7 +146,28 @@ export class Wechat2RssAccounts {
           }
         : {},
     });
-    if (response.status !== 200 || !response.body) throw new Error('REJECTED');
+    const contentType = response.headers.get('content-type') || '';
+    const category = /json/i.test(contentType)
+      ? 'json'
+      : /html/i.test(contentType)
+        ? 'html'
+        : /^image\//i.test(contentType)
+          ? 'image'
+          : contentType
+            ? 'other'
+            : 'missing';
+    if (session)
+      console.info(
+        '[WECHAT2RSS_LOGIN_HEADERS]',
+        JSON.stringify({
+          phase: session.polls ? 'poll' : 'create',
+          httpStatus: response.status,
+          contentType: category,
+          cookieHeaderPresent: response.headers.has('set-cookie'),
+        }),
+      );
+    if (response.status !== 200 || !response.body)
+      throw new Error('HTTP_FAILED');
     const reader = response.body.getReader();
     const parts: Buffer[] = [];
     let length = 0;
@@ -109,13 +177,69 @@ export class Wechat2RssAccounts {
       length += value.length;
       if (length > 1_000_000) {
         await reader.cancel();
-        throw new Error('REJECTED');
+        throw new Error('BODY_TOO_LARGE');
       }
       parts.push(Buffer.from(value));
     }
-    const raw = JSON.parse(Buffer.concat(parts).toString('utf8'));
-    if (!raw || typeof raw !== 'object' || raw.err !== '' || !('data' in raw))
-      throw new Error('REJECTED');
+    let raw;
+    try {
+      raw = JSON.parse(Buffer.concat(parts).toString('utf8'));
+    } catch {
+      if (session)
+        console.info(
+          '[WECHAT2RSS_LOGIN_RESPONSE]',
+          JSON.stringify({
+            phase: session.polls ? 'poll' : 'create',
+            httpStatus: response.status,
+            contentType: category,
+            json: false,
+          }),
+        );
+      throw new Error('INVALID_JSON');
+    }
+    if (session) {
+      const data = raw && typeof raw === 'object' ? raw.data : undefined;
+      const qr = data && typeof data === 'object' ? data.qrcode : undefined;
+      const flag = data && typeof data === 'object' ? data.isLogin : undefined;
+      console.info(
+        '[WECHAT2RSS_LOGIN_RESPONSE]',
+        JSON.stringify({
+          phase: session.polls ? 'poll' : 'create',
+          httpStatus: response.status,
+          contentType: category,
+          json: true,
+          envelopeType: typeof raw,
+          errType: typeof raw?.err,
+          errNonempty: typeof raw?.err === 'string' && raw.err.length > 0,
+          dataType:
+            data === null
+              ? 'null'
+              : Array.isArray(data)
+                ? 'array'
+                : typeof data,
+          isLoginType: typeof flag,
+          isLogin: typeof flag === 'boolean' ? flag : null,
+          qrType: typeof qr,
+          qrLength: typeof qr === 'string' ? qr.length : null,
+          qrFormat:
+            typeof qr !== 'string' || !qr
+              ? 'empty'
+              : /^data:image\/png;base64,/.test(qr)
+                ? 'png-data-uri'
+                : /^data:image\/(?:jpeg|jpg);base64,/.test(qr)
+                  ? 'jpeg-data-uri'
+                  : /^https?:/.test(qr)
+                    ? 'remote-url'
+                    : 'other',
+          cookieHeaderPresent: response.headers.has('set-cookie'),
+        }),
+      );
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+      throw new Error('ENVELOPE_INVALID');
+    // The installed official client treats omitted/null err as success. Its
+    // initial response may contain only qrcode; polls may omit false isLogin.
+    if (raw.err != null && raw.err !== '') throw new Error('UPSTREAM_REJECTED');
     if (session) {
       const headers = response.headers as Headers & {
         getSetCookie?: () => string[];
@@ -131,7 +255,7 @@ export class Wechat2RssAccounts {
           ) ||
           pair.length > 4096
         )
-          throw new Error('REJECTED');
+          throw new Error('COOKIE_INVALID');
         const split = pair.indexOf('=');
         const cleared =
           split === pair.length - 1 ||
@@ -153,7 +277,7 @@ export class Wechat2RssAccounts {
           session.cookies.delete(pair.slice(0, split));
           // A waiting request without its cookie may create a fresh login.
           // Confirmed success may legitimately clear the completed session.
-          if (raw.data?.isLogin !== true) throw new Error('REJECTED');
+          if (raw.data?.isLogin !== true) throw new Error('COOKIE_CLEARED');
           continue;
         }
         session.cookies.set(pair.slice(0, split), pair.slice(split + 1));
@@ -162,25 +286,31 @@ export class Wechat2RssAccounts {
         session.cookies.size > 16 ||
         [...session.cookies.values()].join('').length > 8192
       )
-        throw new Error('REJECTED');
+        throw new Error('COOKIE_INVALID');
     }
-    return raw.data as unknown;
+    return (raw.data ?? {}) as unknown;
   }
 
   private loginReply(raw: unknown, session: Session): Wechat2RssLoginView {
-    if (!raw || typeof raw !== 'object' || typeof raw['isLogin'] !== 'boolean')
-      throw new Error('REJECTED');
+    if (
+      !raw ||
+      typeof raw !== 'object' ||
+      Array.isArray(raw) ||
+      (raw['isLogin'] != null && typeof raw['isLogin'] !== 'boolean')
+    )
+      throw new Error('LOGIN_REPLY_INVALID');
     if (this.now() >= session.expires) return this.terminal(session, 'expired');
     if (raw['isLogin']) return this.terminal(session, 'succeeded');
     const qr = raw['qrcode'];
-    if (qr !== undefined && typeof qr !== 'string') throw new Error('REJECTED');
+    if (qr != null && typeof qr !== 'string')
+      throw new Error('QR_FORMAT_INVALID');
     if (qr) {
       if (
         typeof qr !== 'string' ||
         qr.length > 700_000 ||
         !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(qr)
       )
-        throw new Error('REJECTED');
+        throw new Error('QR_FORMAT_INVALID');
       const bytes = Buffer.from(
         qr.slice('data:image/png;base64,'.length),
         'base64',
@@ -196,13 +326,13 @@ export class Wechat2RssAccounts {
         bytes.readUInt32BE(20) < 1 ||
         bytes.readUInt32BE(20) > 2048
       )
-        throw new Error('REJECTED');
+        throw new Error('QR_PNG_INVALID');
       session.view.qrcode = qr;
     }
     // Without an upstream cookie polling /login/new could create another login.
-    if (!session.cookies.size) throw new Error('REJECTED');
+    if (!session.cookies.size) throw new Error('COOKIE_MISSING');
     session.view.message = session.view.qrcode
-      ? messages.waiting
+      ? '二维码已就绪，等待微信扫码或确认。'
       : '正在等待实例生成二维码。';
     return session.view;
   }
@@ -246,8 +376,8 @@ export class Wechat2RssAccounts {
         return session.view;
       }
       return this.loginReply(raw, session);
-    } catch {
-      return this.terminal(session, 'failed');
+    } catch (error) {
+      return this.terminal(session, 'failed', error);
     } finally {
       session.pending = false;
       this.starting = false;
@@ -277,8 +407,8 @@ export class Wechat2RssAccounts {
         return session.view;
       }
       return this.loginReply(raw, session);
-    } catch {
-      return this.terminal(session, 'failed');
+    } catch (error) {
+      return this.terminal(session, 'failed', error);
     } finally {
       session.pending = false;
     }

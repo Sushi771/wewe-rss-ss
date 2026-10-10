@@ -855,9 +855,7 @@ test('ordinary single download shows Wechat2RSS-only cache errors without select
   h.runEffects();
   await flush();
   assert.equal(h.state[7], false);
-  assert.ok(
-    JSON.stringify(h.render()).includes('仅下载 Wechat2RSS 已缓存的文章'),
-  );
+  assert.ok(JSON.stringify(h.render()).includes('需要时会订阅该公众号'));
   h.render()
     .find((n) => n.type === 'form')
     .props.onSubmit({ preventDefault() {} });
@@ -897,18 +895,36 @@ test('ordinary single download refuses a successful receipt from an unconfirmed 
   assert.equal(h.calls.filter((c) => c.method === 'POST').length, 1);
 });
 
-test('short links show an actionable error before a native picker or download request', async () => {
-  const settings = { directory: 'synthetic-old-path', askEveryTime: true };
-  const h = page({ taskPresent: false, settings });
+test('ordinary short links reach the single backend without manual long-link extraction', async () => {
+  const settings = { directory: 'synthetic-old-path', askEveryTime: false };
+  const h = page({
+    taskPresent: false,
+    settings,
+    fetchReply: async (url, options) => {
+      if (url.endsWith('/download/article') && options.method === 'POST')
+        return {
+          ok: true,
+          json: async () => ({
+            saved: true,
+            markdownPath: 'synthetic-old-path/正文.md',
+            contentSource: 'wechat2rss-cache',
+          }),
+        };
+    },
+  });
   h.render()
     .find((n) => n.type === 'form')
     .props.onSubmit({ preventDefault() {} });
   await flush();
-  assert.ok(h.state[3].includes('短链接暂不能下载'));
-  assert.ok(h.state[3].includes('复制带问号参数的完整原文链接'));
-  assert.equal(h.calls.length, 0);
+  assert.equal(h.state[3], '');
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].method, 'POST');
+  assert.equal(
+    JSON.parse(h.calls[0].body).url,
+    'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv',
+  );
   assert.deepEqual(h.state[1], settings);
-  assert.equal(h.state[6], null);
+  assert.equal(h.state[6].contentSource, 'wechat2rss-cache');
 });
 
 test('path preferences and detailed help remain collapsed without changing remembered settings', () => {
@@ -931,4 +947,67 @@ test('path preferences and detailed help remain collapsed without changing remem
   assert.equal(h.button('选择下载路径').props.children, '更改');
   assert.equal(h.calls.length, 0);
   assert.deepEqual(h.state[1], settings);
+});
+
+test('a pending single download retains the server receipt and leaving never cancels it', async () => {
+  const task = {
+    taskId: 'a'.repeat(64),
+    revision: 1,
+    state: 'waiting',
+    message: '正在等待精确正文，之后自动保存。',
+  };
+  const h = page({
+    taskPresent: false,
+    effects: true,
+    fetchReply: async (url, options) => {
+      if (url.endsWith('/single-tasks'))
+        return { ok: true, json: async () => ({ tasks: [] }) };
+      if (url.endsWith('/download/article') && options.method === 'POST')
+        return { ok: true, json: async () => ({ pending: true, task }) };
+    },
+  });
+  h.runEffects();
+  await flush();
+  h.render()
+    .find((n) => n.type === 'form')
+    .props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.equal(h.state[13].taskId, task.taskId);
+  assert.equal(h.state[3], '');
+  assert.equal(h.state[6], null);
+  assert.equal(h.button('下载正文和图片').props.isDisabled, true);
+  assert.equal(h.button('选择下载路径').props.isDisabled, true);
+  const calls = h.calls.length;
+  h.unmount();
+  await flush();
+  assert.equal(h.calls.length, calls);
+  assert.equal(h.calls.filter((c) => c.url.endsWith('/cancel')).length, 0);
+});
+
+test('a stale local status cannot revive a cancelled durable download', async () => {
+  const cancelled = {
+    taskId: 'b'.repeat(64),
+    revision: 3,
+    state: 'cancelled',
+    message: '下载已取消。',
+  };
+  const h = page({
+    taskPresent: false,
+    effects: true,
+    fetchReply: async (url) => {
+      if (url.endsWith('/single-tasks'))
+        return {
+          ok: true,
+          json: async () => ({
+            tasks: [{ ...cancelled, revision: 2, state: 'waiting' }],
+          }),
+        };
+    },
+  });
+  h.state[13] = cancelled;
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[13].state, 'cancelled');
+  assert.equal(h.state[13].revision, 3);
+  h.unmount();
 });

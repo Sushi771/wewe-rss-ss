@@ -535,6 +535,9 @@ export class CollectionService {
     mpId: string;
     mpName: string;
     trigger: 'local-manual' | 'scheduled' | 'public';
+    /** Internal, receipt-proved cache path; never accepted from public input. */
+    acceptedFeedPath?: string;
+    listOnly?: boolean;
   }) {
     if (this.publicCollections.has(input.mpId))
       throw new Error('该公众号正在更新，请等待本次结束');
@@ -564,7 +567,12 @@ export class CollectionService {
       // All ordinary refreshes only consume cache. /addurl is reserved for an
       // explicit new-subscription action; /add also updates already subscribed feeds.
       const accepted = false;
-      const fetched = await provider.fetchArticles(input.mpId, input.mpName);
+      const fetched = input.acceptedFeedPath
+        ? await provider.fetchAcceptedArticles(
+            input.acceptedFeedPath,
+            input.mpId,
+          )
+        : await provider.fetchArticles(input.mpId, input.mpName);
       if (
         !fetched ||
         !Array.isArray(fetched.articles) ||
@@ -584,9 +592,20 @@ export class CollectionService {
           }
         }),
       };
-      const page = await archiveProviderImages(
-        assertProviderPage(normalized, input.mpId),
-      );
+      const validated = assertProviderPage(normalized, input.mpId);
+      // The first visible list contains real identities/times, with no false body
+      // readiness. Full body/image archiving follows in the durable task.
+      const page = input.listOnly
+        ? {
+            ...validated,
+            articles: validated.articles.map((item) => ({
+              ...item,
+              contentHtml: null,
+              picUrl: '',
+            })),
+            bodyMissing: validated.articles.length,
+          }
+        : await archiveProviderImages(validated);
       if (!page.articles.length) {
         return {
           source: 'wechat2rss' as const,
@@ -689,7 +708,9 @@ export class CollectionService {
             where: { id: input.mpId },
             data: {
               collectionChannel: 'wechat2rss',
-              syncTime: Math.floor(Date.now() / 1000),
+              ...(input.listOnly
+                ? {}
+                : { syncTime: Math.floor(Date.now() / 1000) }),
               updateTime: latest._max.publishTime || feed.updateTime,
               hasHistory: -1,
             },
@@ -707,6 +728,9 @@ export class CollectionService {
         updated,
         accepted,
         bodyMissing: page.bodyMissing,
+        listReady: page.articles.length > 0,
+        bodyReady:
+          !input.listOnly && page.bodyMissing === 0 && page.imageBlocked === 0,
         imageBlocked: page.imageBlocked,
         message:
           `读取私有实例缓存 ${page.articles.length} 篇，归档新增 ${created}、补全 ${updated}。` +

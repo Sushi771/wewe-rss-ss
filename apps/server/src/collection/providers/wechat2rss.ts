@@ -214,11 +214,17 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         v.feedUrl.replace(/\.json$/, '.xml') ===
         feedPath.replace(/\.json$/, '.xml'),
     );
-    if (!matches.length) return null;
+    if (!matches.length) {
+      console.info('[WECHAT2RSS_IDENTITY_PENDING]', 'record-missing');
+      return null;
+    }
     if (matches.length !== 1) throw new Error('WECHAT2RSS_LIST_CONFLICT');
     // An accepted URL/ID may precede publisher metadata. Keep identity pending
     // rather than creating an unnamed subscription from an incomplete cache.
-    if (!matches[0].name) return null;
+    if (!matches[0].name) {
+      console.info('[WECHAT2RSS_IDENTITY_PENDING]', 'publisher-name-pending');
+      return null;
+    }
     return {
       feedId: matches[0].feedId,
       name: matches[0].name,
@@ -278,15 +284,34 @@ export class Wechat2RssProvider implements SubscriptionProvider {
   }
 
   /** Read one already-subscribed cache only. No /addurl, /add or original-page fetch. */
-  async fetchSingleCachedArticle(articleUrl: string) {
-    const identity = canonicalArticleUrl(articleUrl);
+  async fetchSingleCachedArticle(articleUrl: string, expectedFeedId?: string) {
+    if (new URL(articleUrl).pathname.startsWith('/s/') && !expectedFeedId)
+      // The documented aggregate feed is read-only. It can prove a short-link
+      // alias only when that exact URL and its original identity share an item.
+      // Never pass an undocumented URL filter to /api/query or resolve via /addurl.
+      return selectWechat2RssSingleCache(
+        await this.get('/feed/all.json'),
+        articleUrl,
+      );
+    const identity = new URL(articleUrl).pathname.startsWith('/s/')
+      ? null
+      : canonicalArticleUrl(articleUrl);
+    const feedId = expectedFeedId || identity!.mpId;
+    if (
+      !/^MP_WXS_\d{5,15}$/.test(feedId) ||
+      (identity && identity.mpId !== feedId)
+    )
+      throw new Error('WECHAT2RSS_FEED_ID_INVALID');
     const matches = (await this.listSubscriptions()).filter(
-      (v) => v.feedId === identity.mpId,
+      (v) => v.feedId === feedId,
     );
     if (matches.length !== 1)
       throw new Error('WECHAT2RSS_SUBSCRIPTION_MISSING');
     const raw = await this.get(matches[0].feedUrl.replace(/\.xml$/, '.json'));
-    return selectWechat2RssSingleCache(raw, articleUrl);
+    const selected = selectWechat2RssSingleCache(raw, articleUrl);
+    if (selected && selected.mpId !== feedId)
+      throw new Error('WECHAT2RSS_ARTICLE_IDENTITY_CONFLICT');
+    return selected;
   }
 
   async fetchArticles(
@@ -304,5 +329,20 @@ export class Wechat2RssProvider implements SubscriptionProvider {
       throw new Error('WECHAT2RSS_SUBSCRIPTION_NAME_CHANGED');
     const path = matches[0].feedUrl.replace(/\.xml$/, '.json');
     return parseWechat2RssJsonFeed(await this.get(path), feedId);
+  }
+
+  /** Only a persisted accepted response may supply this path. A missing display
+   * name does not invalidate its numeric publisher identity or exact cache. */
+  async fetchAcceptedArticles(
+    feedPath: string,
+    feedId: string,
+  ): Promise<ProviderPage> {
+    const match = /^\/feed\/(\d{5,15})\.(?:xml|json)$/.exec(feedPath);
+    if (!match || feedId !== `MP_WXS_${match[1]}`)
+      throw new Error('WECHAT2RSS_FEED_ID_INVALID');
+    return parseWechat2RssJsonFeed(
+      await this.get(feedPath.replace(/\.xml$/, '.json')),
+      feedId,
+    );
   }
 }

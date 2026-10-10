@@ -163,6 +163,8 @@ export class LocalArticleStore {
   async save(
     prepare: (temporary: string) => Promise<PreparedArticle>,
     now = new Date(),
+    /** Frozen by an authorized internal job; never taken from an HTTP body. */
+    confirmedDirectory?: string,
   ) {
     let stage: string | undefined;
     let final: string | undefined;
@@ -171,7 +173,9 @@ export class LocalArticleStore {
     let videoDirectoryCreated = false;
     let committed = false;
     try {
-      const root = await validateLocalDirectory((await this.read()).directory);
+      const root = await validateLocalDirectory(
+        confirmedDirectory ?? (await this.read()).directory,
+      );
       await fs.mkdir(root, { recursive: true });
       await validateLocalDirectory(root);
       const dateDirectory = path.join(root, beijingDownloadDay(now));

@@ -10,6 +10,7 @@ import { prepareWechat2RssSingleDownload } from './wechat2rss-single-download';
 const number = '1234567890';
 const url =
   'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef';
+const shortUrl = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
   'base64',
@@ -64,6 +65,7 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
       calls.push(target.pathname);
       if (target.pathname === '/list') return response(listed);
       if (target.pathname === `/feed/${number}.json`) return response(feed);
+      if (target.pathname === '/feed/all.json') return response(feed);
       throw new Error('UNEXPECTED_ENDPOINT');
     });
   });
@@ -104,18 +106,97 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     );
   });
 
-  it('requires a verified long-link identity without resolving short links or scanning publishers', async () => {
+  it('reports a missing short-link mapping from the aggregate cache without asking for long parameters', async () => {
     await expect(
-      prepareWechat2RssSingleDownload(
-        'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv',
-      ),
+      prepareWechat2RssSingleDownload(shortUrl),
     ).rejects.toMatchObject({
-      diagnostic: { code: 'WECHAT2RSS_SINGLE_LONG_URL_REQUIRED' },
+      diagnostic: { code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE' },
     });
-    expect(calls).toEqual([]);
-    expect(registry.wechat2RssProvider).not.toHaveBeenCalled();
+    expect(calls).toEqual(['/feed/all.json']);
     expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
   });
+
+  it.each(['url', 'external_url', 'id'])(
+    'saves a short link only with its exact %s alias and stable original in the same cache item',
+    async (field) => {
+      feed = {
+        items: [
+          item({
+            title: '同名',
+            url: url.replace('2247000001', '2247000002'),
+            id: url.replace('2247000001', '2247000002'),
+          }),
+          item({
+            [field]: shortUrl,
+            ...(field === 'url' ? { external_url: url } : {}),
+          }),
+        ],
+      };
+      const prepare = await prepareWechat2RssSingleDownload(
+        shortUrl + '?scene=1#rd',
+      );
+      expect(await prepare(folder)).toMatchObject({
+        articleId: 'WX_1234567890_2247000001_1',
+        source: 'wechat2rss',
+        imageCount: 1,
+      });
+      expect(await readFile(join(folder, 'index.md'), 'utf8')).toContain(
+        '缓存全文',
+      );
+      const saved = await readdir(join(folder, 'image'));
+      expect(await readFile(join(folder, 'image', saved[0]))).toEqual(png);
+      expect(calls).toEqual(['/feed/all.json']);
+      expect(axios.get).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      'short URL without original identity',
+      { items: [item({ id: shortUrl, url: shortUrl })] },
+      'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+    ],
+    [
+      'duplicate short alias',
+      {
+        items: [
+          item({ external_url: shortUrl }),
+          item({ external_url: shortUrl }),
+        ],
+      },
+      'WECHAT2RSS_SINGLE_CACHE_READ_FAILED',
+    ],
+    [
+      'conflicting original identities',
+      {
+        items: [
+          item({
+            url: shortUrl,
+            external_url: url.replace('2247000001', '2247000002'),
+          }),
+        ],
+      },
+      'WECHAT2RSS_SINGLE_CACHE_READ_FAILED',
+    ],
+    [
+      'short URL only in body text',
+      { items: [item({ content_html: `<p>${shortUrl}</p>` })] },
+      'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+    ],
+  ])(
+    'rejects %s without media requests or subscription writes',
+    async (_name, raw, code) => {
+      feed = raw;
+      await expect(
+        prepareWechat2RssSingleDownload(shortUrl),
+      ).rejects.toMatchObject({ diagnostic: { code } });
+      expect(calls).toEqual(['/feed/all.json']);
+      expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+      expect(axios.get).not.toHaveBeenCalled();
+      expect(await readdir(folder)).toEqual([]);
+    },
+  );
 
   it('never adds a missing subscription or falls back to original-page requests', async () => {
     listed = { err: '', data: [], meta: { total: 0 } };

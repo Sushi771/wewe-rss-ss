@@ -6,6 +6,55 @@ const articleUrl = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toStr
 const response = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status });
 
+describe('receipt-proved cache while publisher name is pending', () => {
+  afterEach(() => jest.restoreAllMocks());
+  it('reads the exact numeric feed without a list, original page, add or image request', async () => {
+    const request = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(async (input) => {
+        expect(new URL(String(input)).pathname).toBe(`/feed/${number}.json`);
+        return response({
+          items: [
+            {
+              id: articleUrl,
+              title: '已核列表',
+              date_published: '2026-10-09T12:00:00+08:00',
+              content_html: '<p>正文</p>',
+            },
+          ],
+        });
+      });
+    const provider = new Wechat2RssProvider(
+      'http://127.0.0.1:18080/',
+      'fixture-token',
+    );
+    expect(
+      (await provider.fetchAcceptedArticles(`/feed/${number}.xml`, feedId))
+        .articles[0].id,
+    ).toBe(`WX_${number}_9_1`);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('rejects mismatched identities and arbitrary paths before any HTTP', async () => {
+    const request = jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValue(Error('NETWORK_FORBIDDEN'));
+    const provider = new Wechat2RssProvider(
+      'http://127.0.0.1:18080/',
+      'fixture-token',
+    );
+    for (const feedPath of [
+      '/feed/all.json',
+      '/feed/hash.xml',
+      '/feed/9999999999.xml',
+      'https://other.invalid/feed/' + number + '.xml',
+    ])
+      await expect(
+        provider.fetchAcceptedArticles(feedPath, feedId),
+      ).rejects.toThrow('WECHAT2RSS_FEED_ID_INVALID');
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
 describe('Wechat2RSS private HTTP client', () => {
   afterEach(() => jest.restoreAllMocks());
 
@@ -118,6 +167,7 @@ describe('foreground accepted-identity checks (synthetic time and HTTP only)', (
   });
 
   it('resolves a delayed blank-name record in one add without replay or further polling', async () => {
+    const log = jest.spyOn(console, 'info').mockImplementation(() => undefined);
     const paths: string[] = [];
     let reads = 0;
     jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
@@ -155,6 +205,13 @@ describe('foreground accepted-identity checks (synthetic time and HTTP only)', (
     await jest.advanceTimersByTimeAsync(60000);
     expect(paths).toHaveLength(6);
     expect(jest.getTimerCount()).toBe(0);
+    expect(log.mock.calls).toEqual([
+      ['[WECHAT2RSS_IDENTITY_PENDING]', 'record-missing'],
+      ['[WECHAT2RSS_IDENTITY_PENDING]', 'publisher-name-pending'],
+    ]);
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(
+      /fixture-token|1234567890|测试号|127\.0\.0\.1/,
+    );
   });
 
   it('returns immediately when metadata is ready without account rechecks or a timer', async () => {

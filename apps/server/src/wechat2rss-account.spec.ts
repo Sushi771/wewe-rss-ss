@@ -43,6 +43,127 @@ function fixture() {
 }
 
 describe('Wechat2RSS official cookie login proxy (offline)', () => {
+  let log: jest.SpyInstance;
+  beforeEach(() => {
+    log = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+  });
+  afterEach(() => log.mockRestore());
+
+  it.each([undefined, null, ''])(
+    'accepts optional success err %s and QR-only initial data',
+    async (err) => {
+      const f = fixture();
+      f.queue.push(
+        new Response(JSON.stringify({ err, data: { qrcode } }), {
+          headers: {
+            'set-cookie': 'login=synthetic-cookie',
+            'content-type': 'application/json',
+          },
+        }),
+      );
+      const first = await f.manager.start();
+      expect(first.state).toBe('waiting');
+      expect(first.qrcode).toBe(qrcode);
+      expect(first.message).toContain('等待微信扫码或确认');
+      for (const data of [{}, { qrcode: '' }, { isLogin: false }]) {
+        f.advance();
+        f.queue.push(new Response(JSON.stringify({ data })));
+        expect((await f.manager.poll(first.sessionId!)).qrcode).toBe(qrcode);
+        expect(f.requests.at(-1)!.options.headers).toEqual({
+          Cookie: 'login=synthetic-cookie',
+        });
+      }
+      f.advance();
+      f.queue.push(new Response(JSON.stringify({ data: { isLogin: true } })));
+      expect((await f.manager.poll(first.sessionId!)).state).toBe('succeeded');
+      expect(f.requests).toHaveLength(5);
+    },
+  );
+  it('keeps the same cookie while an optional data response waits for a QR', async () => {
+    const f = fixture();
+    f.queue.push(
+      new Response('{}', {
+        headers: { 'set-cookie': 'login=synthetic-cookie' },
+      }),
+    );
+    const first = await f.manager.start();
+    expect(first.state).toBe('waiting');
+    expect(first.qrcode).toBeUndefined();
+    f.advance();
+    f.queue.push(new Response(JSON.stringify({ data: { qrcode } })));
+    expect((await f.manager.poll(first.sessionId!)).qrcode).toBe(qrcode);
+    expect(f.requests[1].options.headers).toEqual({
+      Cookie: 'login=synthetic-cookie',
+    });
+  });
+  it('keeps null waiting fields within the same bounded cookie session', async () => {
+    const f = fixture();
+    f.queue.push(reply({ isLogin: null, qrcode: null }));
+    const first = await f.manager.start();
+    expect(first.state).toBe('waiting');
+    expect(first.qrcode).toBeUndefined();
+    f.advance();
+    f.queue.push(reply({ qrcode }));
+    expect((await f.manager.poll(first.sessionId!)).qrcode).toBe(qrcode);
+    expect(f.requests[1].options.headers).toEqual({
+      Cookie: 'login=synthetic-cookie',
+    });
+  });
+  it.each([
+    [
+      new Response('<html>private-url-token</html>', {
+        headers: { 'content-type': 'text/html' },
+      }),
+      'INVALID_JSON',
+    ],
+    [new Response('private-url-token', { status: 503 }), 'HTTP_FAILED'],
+    [
+      new Response(JSON.stringify({ err: 'private-url-token', data: {} })),
+      'UPSTREAM_REJECTED',
+    ],
+    [reply({ isLogin: 'true', qrcode }), 'LOGIN_REPLY_INVALID'],
+  ])(
+    'reports the initial response stage and only fixed safe metadata',
+    async (response, code) => {
+      const f = fixture();
+      f.queue.push(response);
+      const result = await f.manager.start();
+      expect(result).toMatchObject({ state: 'failed', phase: 'create', code });
+      expect(result.message).toContain('二维码获取停止');
+      const logs = JSON.stringify(log.mock.calls);
+      expect(logs).toContain('create');
+      expect(logs).not.toMatch(
+        /private-url-token|synthetic-secret|synthetic-cookie|127\.0\.0\.1/,
+      );
+      expect(logs).not.toContain(qrcode);
+      expect(result.message).not.toContain('风控');
+      expect(f.requests).toHaveLength(1);
+    },
+  );
+  it('distinguishes polling failure from QR creation and stops further polling', async () => {
+    const f = fixture();
+    f.queue.push(reply({ qrcode }));
+    const first = await f.manager.start();
+    f.advance();
+    f.queue.push(new Response(JSON.stringify({ err: 'private-cookie-error' })));
+    const failed = await f.manager.poll(first.sessionId!);
+    expect(failed).toMatchObject({
+      state: 'failed',
+      phase: 'poll',
+      code: 'UPSTREAM_REJECTED',
+    });
+    expect(failed.message).toContain('登录状态查询停止');
+    expect(failed.qrcode).toBeUndefined();
+    f.advance();
+    await f.manager.poll(first.sessionId!);
+    expect(f.requests).toHaveLength(2);
+    const logs = JSON.stringify(log.mock.calls);
+    expect(logs).not.toContain(first.sessionId!);
+    expect(logs).not.toMatch(
+      /private-cookie-error|synthetic-cookie|synthetic-secret/,
+    );
+    expect(logs).not.toContain(qrcode);
+  });
   it.each([
     'login=; HttpOnly',
     'login=expired; Max-Age=0',
@@ -134,7 +255,7 @@ describe('Wechat2RSS official cookie login proxy (offline)', () => {
     [{ isLogin: false, qrcode }, ''],
     [{ isLogin: false, qrcode: 'https://example.com/qr.svg' }, 'login=x'],
     [{ isLogin: false, qrcode: 'data:image/png;base64,YmFk' }, 'login=x'],
-    [{ qrcode }, 'login=x'],
+    [{ isLogin: 1, qrcode }, 'login=x'],
     [{ isLogin: false, qrcode }, 'login=bad,value'],
   ])(
     'rejects invalid QR/envelope/cookie without inventing polling endpoints',
