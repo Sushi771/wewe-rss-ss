@@ -47,6 +47,7 @@ export function prepareCachedArticleLocalExport(
       imageCount: (await fs.readdir(join(directory, 'image'))).length,
       exportSource,
       sourceUrl: snapshot.sourceUrl,
+      publishTime: snapshot.publishTime,
       mediaComplete: exported.mediaComplete,
     };
   };

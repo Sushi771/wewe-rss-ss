@@ -364,12 +364,20 @@ const Feeds = () => {
     setIsBatchExporting(true);
     const ids = Array.from(articleSelectedIds);
     let successCount = 0;
+    const exportNotices = new Set<string>();
     try {
       for (const articleId of ids) {
-        await queryUtils.client.article.saveToObsidian.mutate(articleId);
+        const result =
+          await queryUtils.client.article.saveToObsidian.mutate(articleId);
+        if (result.datePendingReason)
+          exportNotices.add(`日期待核（${result.datePendingReason}）`);
+        if (result.legacyLayoutRetained)
+          exportNotices.add('保留原有位置及编辑');
         successCount++;
       }
-      toast.success(`成功导出 ${successCount} 篇文章`);
+      toast.success(`成功导出 ${successCount} 篇文章`, {
+        description: Array.from(exportNotices).join('；') || undefined,
+      });
       setArticleSelectedIds(new Set());
     } catch (err: unknown) {
       toast.error(`导出中断 (${successCount}/${ids.length} 成功)`, {

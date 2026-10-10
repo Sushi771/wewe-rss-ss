@@ -86,8 +86,14 @@ describe('normal verified provider to original local saver, no network or databa
       join(temporary, 'settings.json'),
       join(temporary, '选择的 目录'),
     );
-    const prepare = prepareVerifiedProviderDownload(short, article);
+    const verifiedPrepare = prepareVerifiedProviderDownload(short, article);
+    const prepare = async (stage: string) => ({
+      ...(await verifiedPrepare(stage)),
+      exportSource: { feedId: 'MP_WXS_1234567890', feedName: '测试号' },
+    });
     const first = await store.save(prepare);
+    expect(first.publicationDate).toBe('2023-11-15');
+    expect(first.directory).toContain('2023-11-15_未分组');
     expect(first.alreadySaved).toBe(false);
     expect(first.imageCount).toBe(1); // Two real references share one byte file.
     const markdown = await readFile(first.markdownPath, 'utf8');
@@ -116,6 +122,7 @@ describe('normal verified provider to original local saver, no network or databa
     article.url = signed.replace('2247000001', '2247000002');
     const result = await prepare(temporary);
     expect(result.title).toBe(title);
+    expect(result.publishTime).toBe(1700000000);
     const markdown = await readFile(join(temporary, 'index.md'), 'utf8');
     expect(markdown).toContain('完整正文');
     expect(markdown).not.toContain('替换');

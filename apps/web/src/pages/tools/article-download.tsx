@@ -22,8 +22,19 @@ type SavedArticle = {
   alreadySaved: boolean;
   imageCount: number;
   mediaComplete?: boolean;
+  publicationDate?: string | null;
+  datePendingReason?: string;
+  legacyLayoutRetained?: boolean;
   contentSource?: 'wechat2rss-cache';
 };
+function exportResultNotice(result: Partial<SavedArticle>) {
+  return [
+    result.datePendingReason ? `日期待核（${result.datePendingReason}）` : '',
+    result.legacyLayoutRetained ? '保留原有位置及编辑' : '',
+  ]
+    .filter(Boolean)
+    .join('；');
+}
 type SingleTask = Partial<SavedArticle> & {
   taskId: string;
   revision: number;
@@ -610,6 +621,11 @@ export default function ArticleDownload() {
                 }[singleTask.state]
               }
             </p>
+            {singleTask.state === 'saved' && exportResultNotice(singleTask) && (
+              <p role="status" className="mt-1 text-sm">
+                {exportResultNotice(singleTask)}
+              </p>
+            )}
             {singleTask.state === 'waiting' && (
               <>
                 <p className="text-default-500 mt-1 text-xs">
@@ -889,6 +905,11 @@ export default function ArticleDownload() {
               </p>
               {saved.mediaComplete === false && saved.alreadySaved && (
                 <p>媒体完整性未确认；已有正文和有效图片保留。</p>
+              )}
+              {exportResultNotice(saved) && (
+                <p role="status" className="mt-1 text-sm">
+                  {exportResultNotice(saved)}
+                </p>
               )}
               <p className="text-default-600 mt-2 break-all text-sm">
                 {saved.markdownPath}

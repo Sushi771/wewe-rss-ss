@@ -131,6 +131,7 @@ export async function buildCompleteArticleDownload(
     articleId: article.id,
     title: article.title,
     sourceUrl: source,
+    publishTime: article.publishTime,
     imageCount: load(contentHtml)('img[src]').length,
     ...(mediaComplete ? {} : { mediaComplete: false }),
   };

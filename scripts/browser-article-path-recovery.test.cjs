@@ -253,6 +253,49 @@ function page({
   };
 }
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+test('publication warnings and retained old layouts appear only on actual save results', () => {
+  const text = (h) => JSON.stringify(h.render());
+  const h = page({ taskPresent: false });
+  h.state[6] = {
+    directory: 'synthetic-path',
+    markdownPath: 'synthetic-path/note.md',
+    alreadySaved: false,
+    imageCount: 1,
+    publicationDate: '2026-10-05',
+  };
+  assert(!text(h).includes('日期待核'));
+  assert(!text(h).includes('保留原有位置及编辑'));
+  h.state[6] = {
+    ...h.state[6],
+    publicationDate: null,
+    datePendingReason: '缺少可信原文发布日期',
+    legacyLayoutRetained: true,
+  };
+  assert(
+    text(h).includes('日期待核（缺少可信原文发布日期）；保留原有位置及编辑'),
+  );
+  assert.equal(
+    h.calls.length,
+    0,
+    'rendering save details must not make new requests',
+  );
+});
+test('recovered saved single tasks retain publication and old-layout notices without new work', () => {
+  const h = page({ taskPresent: false });
+  h.state[13] = {
+    taskId: 'f'.repeat(64),
+    revision: 5,
+    state: 'saved',
+    datePendingReason: '缺少可信原文发布日期',
+    legacyLayoutRetained: true,
+  };
+  assert(
+    JSON.stringify(h.render()).includes(
+      '日期待核（缺少可信原文发布日期）；保留原有位置及编辑',
+    ),
+  );
+  assert.equal(h.calls.length, 0);
+});
 test('ready path recovery chooses a new directory and retries without changing the article or receiving again', async () => {
   const h = page();
   h.button('保存已接收的正文和图片').props.onPress();

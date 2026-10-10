@@ -29,7 +29,7 @@ const article = (id = 'WX_1234567890_2247000001_1') => ({
   metrics: JSON.stringify({
     read: { value: 17, display: '17', fileTime: 'synthetic-fixture' },
   }),
-  publishTime: 1800000000,
+  publishTime: 1791210060,
 });
 describe('all cached article local/ZIP export entry points share isolated image directories; offline fixtures', () => {
   let root: string, router: TrpcRouter, items: ReturnType<typeof article>[];
@@ -79,7 +79,7 @@ describe('all cached article local/ZIP export entry points share isolated image 
     process.env = { ...oldEnv };
     await fs.rm(root, { recursive: true, force: true });
   });
-  it('list single and batch mutation saves each title/ID into 正文.md plus image; repeat and retry preserve edited notes', async () => {
+  it('list single and batch mutation saves original-day/group/publisher/title.md plus image; repeat and retry preserve edited notes', async () => {
     const caller = router.appRouter.createCaller({ errorMsg: null });
     const one = await caller.article.saveToObsidian(items[0].id);
     expect(basename(one.path)).toBe('同名文章.md');
@@ -106,7 +106,7 @@ describe('all cached article local/ZIP export entry points share isolated image 
     expect(axios.get).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });
-  it('publisher ZIP staging puts each article in its own 正文.md/image folder and marks missing cached body without page fallback', async () => {
+  it('publisher ZIP staging shares original-day/group/publisher/image beside title.md and marks missing cached body without page fallback', async () => {
     items[1].contentHtml = '';
     items[1].lastBodyStatus = 'unavailable';
     const folder = join(root, 'zip-stage');
@@ -121,12 +121,15 @@ describe('all cached article local/ZIP export entry points share isolated image 
     });
     const dir = join(
       folder,
-      ...exportSourceFolders({
-        feedId: feed.id,
-        feedName: feed.mpName,
-        groupId: feed.group.id,
-        groupName: feed.group.name,
-      }),
+      ...exportSourceFolders(
+        {
+          feedId: feed.id,
+          feedName: feed.mpName,
+          groupId: feed.group.id,
+          groupName: feed.group.name,
+        },
+        items[0].publishTime,
+      ),
     );
     const names = (await fs.readdir(dir)).filter((n) => n.endsWith('.md'));
     expect(names).toHaveLength(2);
@@ -148,6 +151,24 @@ describe('all cached article local/ZIP export entry points share isolated image 
     await expect(
       caller.article.saveToObsidian(items[0].id),
     ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+  it('splits a publisher ZIP by each original date and retains unknown-date body and reason', async () => {
+    items[1].publishTime = 1791432900;
+    items.push({ ...article('WX_1234567890_2247000003_1'), publishTime: 0 });
+    const directory = join(root, 'zip-multiday');
+    const result = await router.buildOfflineFeedDirectory(feed.id, directory);
+    expect(result).toMatchObject({ articles: 3, complete: 3 });
+    for (const day of ['2026-10-05', '2026-10-08', '日期待核']) {
+      const note = join(directory, `${day}_合成组`, '合成号', '同名文章.md');
+      const markdown = await fs.readFile(note, 'utf8');
+      expect(markdown).toContain('本地缓存正文');
+      expect(markdown).toContain('](image/');
+      expect(await fs.readdir(join(dirname(note), 'image'))).toHaveLength(1);
+      if (day === '日期待核')
+        expect(markdown).toContain('缺少可信原文发布日期');
+    }
     expect(fetch).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });

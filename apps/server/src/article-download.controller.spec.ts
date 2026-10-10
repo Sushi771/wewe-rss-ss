@@ -76,6 +76,7 @@ describe('local article HTTP save and native directory selection, no upstream or
         return {
           articleId: 'WX_1234567890_456_1',
           title: '中文测试',
+          publishTime: 1791210060,
           imageCount: 0,
           source: 'wechat2rss' as const,
         };
@@ -114,6 +115,7 @@ describe('local article HTTP save and native directory selection, no upstream or
       saved: true,
       alreadySaved: false,
       imageCount: 0,
+      publicationDate: '2026-10-05',
     });
     expect(await readFile(response.body.markdownPath, 'utf8')).toContain(
       '# 合成Wechat2RSS正文',

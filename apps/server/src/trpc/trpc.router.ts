@@ -231,6 +231,7 @@ export class TrpcRouter {
               imageCount: 0,
               exportSource: source,
               sourceUrl: article.sourceUrl,
+              publishTime: article.publishTime,
             };
           },
           new Date(),
@@ -247,7 +248,7 @@ export class TrpcRouter {
     await fs.promises.writeFile(
       path.join(directory, 'README.md'),
       `# ${feed.mpName}\n\n共 ${articles.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
-        `分组：${source.groupName || '未分组'}\n\n文章位于分组/公众号文件夹中，正常文件名保留文章标题，冲突时加稳定身份后缀；该号共用 image/，图片按文章身份隔离，正文使用相对引用。未完整篇目在各自文件中明确标注。\n`,
+        `分组：${source.groupName || '未分组'}\n\n文章位于 YYYY-MM-DD_分组/公众号文件夹中；日期采用原文发布日期（上海时间），不同日期分别保存，缺可信日期为日期待核并写明原因，正常文件名保留文章标题，冲突时加稳定身份后缀；该号共用 image/，图片按文章身份隔离，正文使用相对引用。未完整篇目在各自文件中明确标注。\n`,
     );
     return {
       name: feed.mpName,
@@ -1261,6 +1262,13 @@ export class TrpcRouter {
             success: true,
             path: result.markdownPath,
             alreadySaved: result.alreadySaved,
+            publicationDate: result.publicationDate,
+            ...(result.datePendingReason
+              ? { datePendingReason: result.datePendingReason }
+              : {}),
+            ...(result.legacyLayoutRetained
+              ? { legacyLayoutRetained: true }
+              : {}),
             ...(result.mediaComplete === false ? { mediaComplete: false } : {}),
           };
         } catch (err: any) {
@@ -1293,6 +1301,7 @@ export class TrpcRouter {
         exportSourceMarkdown(
           exportSourceFromFeed(article.feed),
           article.sourceUrl,
+          article.publishTime,
         ) + exported.markdown,
     };
   }

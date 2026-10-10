@@ -61,7 +61,7 @@ describe('single download HTTP task receipts; isolated queue, no network or data
     expect(markdown).toContain('分组：合成分组');
     expect(markdown).toContain('原文链接：https://mp.weixin.qq.com/s?');
     const segments = relative(directory, markdownPath).split(sep);
-    expect(segments).toEqual(['合成分组', '合成公众号', '合成.md']);
+    expect(segments).toEqual(['2026-10-05_合成分组', '合成公众号', '合成.md']);
     expect(
       (await stat(join(dirname(markdownPath), 'image'))).isDirectory(),
     ).toBe(true);
@@ -111,6 +111,7 @@ describe('single download HTTP task receipts; isolated queue, no network or data
           return {
             articleId: 'WX_1234567890_2247000001_1',
             title: '合成',
+            publishTime: 1791210060,
             sourceUrl:
               'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef',
             imageCount: 0,
