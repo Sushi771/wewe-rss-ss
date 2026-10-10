@@ -12,6 +12,8 @@ type PreparedArticle = {
   title: string;
   imageCount: number;
   videoCount?: number;
+  /** Set only by a trusted internal source adapter, never browser JSON. */
+  source?: 'wechat2rss';
 };
 export const MAX_SAVED_VIDEO_BYTES = 100_000_000;
 const videoFilename = /^video_([a-f0-9]{64})\.mp4$/;
@@ -182,6 +184,7 @@ export class LocalArticleStore {
         !article.title ||
         !Number.isInteger(article.imageCount) ||
         article.imageCount < 0 ||
+        (article.source !== undefined && article.source !== 'wechat2rss') ||
         (article.videoCount !== undefined &&
           (!Number.isInteger(article.videoCount) ||
             article.videoCount < 0 ||
@@ -263,6 +266,7 @@ export class LocalArticleStore {
             );
             if (
               marker.articleId === article.articleId &&
+              (!article.source || marker.source === article.source) &&
               marker.complete === true &&
               Array.isArray(marker.images) &&
               marker.images.every((name: string) =>
@@ -366,6 +370,7 @@ export class LocalArticleStore {
         marker,
         JSON.stringify({
           articleId: article.articleId,
+          ...(article.source ? { source: article.source } : {}),
           complete: true,
           images,
           ...(videos.length ? { videos } : {}),

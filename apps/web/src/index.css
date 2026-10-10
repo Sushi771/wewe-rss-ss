@@ -142,6 +142,131 @@ select {
   user-select: none;
 }
 
+/* Let navigation take its actual height; routes share the remaining viewport. */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.app-shell > :first-child {
+  flex-shrink: 0;
+}
+
+.app-route {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.feed-workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* One scroll owner includes folders and feeds, so variable controls never
+   clip a second viewport or hide folder drop targets below the fold. */
+.feed-sidebar.mac-sidebar {
+  display: none;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  max-height: 45%;
+  min-height: 0;
+  flex-shrink: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.feed-sidebar.feed-sidebar-open {
+  display: flex;
+}
+
+.feed-sidebar > *,
+.feed-sidebar .mac-sidebar-item {
+  flex-shrink: 0;
+}
+
+.feed-sidebar:focus-visible {
+  outline: 2px solid var(--mac-blue);
+  outline-offset: -2px;
+}
+
+.feed-content,
+.feed-article-scroll {
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Short landscape screens can have more toolbar controls than free space.
+   Keep an article viewport and let the right pane expose those controls. */
+.feed-content {
+  overflow-y: auto;
+}
+
+.feed-article-scroll {
+  min-height: 80px;
+}
+
+.folder-navigation {
+  padding: 0 12px 8px;
+}
+
+.folder-navigation-header,
+.folder-navigation-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.folder-navigation-header {
+  justify-content: space-between;
+  height: 28px;
+  margin-bottom: 4px;
+}
+
+.folder-navigation-row + .folder-navigation-row {
+  margin-top: 2px;
+}
+
+.folder-navigation .folder-filter {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  margin: 0;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.folder-filter-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (min-width: 768px) {
+  .feed-workspace {
+    flex-direction: row;
+  }
+
+  .feed-sidebar.mac-sidebar {
+    display: flex;
+    width: 260px;
+    min-width: 260px;
+    height: 100%;
+    max-height: none;
+  }
+}
+
 .mac-sidebar-item:hover {
   background: var(--mac-fill);
 }

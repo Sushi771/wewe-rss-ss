@@ -704,9 +704,27 @@ describe('shared single-level management folder actual handlers (offline)', () =
       expect(contents).toMatch(
         /\[mobileSidebarOpen, setMobileSidebarOpen\] = useState\(false\)/,
       );
-      // Important utilities override the existing .mac-sidebar display:flex rule.
-      expect(contents).toContain("mobileSidebarOpen ? '!flex' : '!hidden'");
-      expect(contents).toContain('md:!flex');
+      if (contents === feeds) {
+        expect(contents).toContain(
+          "mobileSidebarOpen ? 'feed-sidebar-open' : ''",
+        );
+        expect(contents).toContain('mac-sidebar feed-sidebar');
+        const css = fs.readFileSync(
+          path.resolve(__dirname, '../../../web/src/index.css'),
+          'utf8',
+        );
+        expect(css).toMatch(
+          /\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*none/,
+        );
+        expect(css).toMatch(
+          /@media \(min-width: 768px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
+        );
+      } else {
+        // XHS keeps its existing important utilities; WeChat now owns its
+        // mobile and desktop geometry in the single-scroll sidebar stylesheet.
+        expect(contents).toContain("mobileSidebarOpen ? '!flex' : '!hidden'");
+        expect(contents).toContain('md:!flex');
+      }
       expect(contents).toContain('!min-w-0');
       expect(contents).toContain('aria-expanded={mobileSidebarOpen}');
     }

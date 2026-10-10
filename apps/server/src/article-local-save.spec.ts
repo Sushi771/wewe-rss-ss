@@ -77,6 +77,31 @@ describe('local article save with real files and shared exporter, no network or 
       ).read(),
     ).toEqual({ directory: root, askEveryTime: false });
   });
+  it('keeps old source-unknown notes separate from Wechat2RSS and protects edited same-source replays', async () => {
+    const old = await store.save(prepare(), now);
+    await fs.writeFile(old.markdownPath, '旧来源手写笔记');
+    const w2r = async (directory: string) => ({
+      ...(await prepare()(directory)),
+      source: 'wechat2rss' as const,
+    });
+    const first = await store.save(w2r, now);
+    expect(first.alreadySaved).toBe(false);
+    expect(first.directory).not.toBe(old.directory);
+    expect(await fs.readFile(old.markdownPath, 'utf8')).toBe('旧来源手写笔记');
+    expect(
+      JSON.parse(
+        await fs.readFile(join(first.directory, '.wewe-article.json'), 'utf8'),
+      ).source,
+    ).toBe('wechat2rss');
+    await fs.writeFile(first.markdownPath, 'Wechat2RSS笔记的用户编辑');
+    const again = await store.save(w2r, now);
+    expect(again.alreadySaved).toBe(true);
+    expect(again.directory).toBe(first.directory);
+    expect(await fs.readFile(first.markdownPath, 'utf8')).toBe(
+      'Wechat2RSS笔记的用户编辑',
+    );
+    expect(await fs.readFile(old.markdownPath, 'utf8')).toBe('旧来源手写笔记');
+  });
   it('uses the download day in Beijing, including the UTC day boundary', () => {
     expect(beijingDownloadDay(new Date('2026-10-04T15:59:59Z'))).toBe(
       '2026-10-04',

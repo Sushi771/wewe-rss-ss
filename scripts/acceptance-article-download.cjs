@@ -20,6 +20,9 @@ const built = path.join(server, 'dist/apps/server/src');
 const downloads = require(path.join(built, 'article-download'));
 const picker = require(path.join(built, 'article-folder-picker'));
 const originalBuild = downloads.buildArticleDownload;
+const single = require(path.join(built, 'wechat2rss-single-download'));
+const originalPrepare = single.prepareWechat2RssSingleDownload;
+const { buildArticleMarkdown } = require(path.join(built, 'article-export'));
 const originalPicker = picker.pickArticleDirectory;
 const { ArticleDownloadController } = require(
   path.join(built, 'article-download.controller'),
@@ -63,39 +66,60 @@ const png = Buffer.from(
       pickerCalls++;
       return cancelPicker ? null : destination;
     };
-    downloads.buildArticleDownload = async (
-      input,
-      directory,
-      _request,
-      options,
-    ) => {
+    downloads.buildArticleDownload = async () => {
+      throw new Error('PUBLIC_ARTICLE_FORBIDDEN');
+    };
+    // Simulate only the trusted Wechat2RSS source boundary. The real client and
+    // exact cache/media contracts are tested by wechat2rss-single-download.spec.ts.
+    single.prepareWechat2RssSingleDownload = async (input) => {
+      assert.equal(input, url);
       calls++;
-      return originalBuild(
-        input,
-        directory,
-        async (target) => {
-          resources++;
-          await new Promise((resolve) => setTimeout(resolve, 60));
-          if (target.startsWith('https://mp.weixin.qq.com/')) {
-            if (mode === 'verify')
-              return {
-                status: 302,
-                type: 'text/html',
-                bytes: Buffer.alloc(0),
-                redirectKind: 'verification',
-              };
-            const html =
-              '<h1 id="activity-name">离线保存测试</h1><div id="js_content"><p>这是一篇用于本机保存回归的合成正文。</p><img data-src="https://mmbiz.qpic.cn/fixture?wx_fmt=png"></div><script>var biz="MTIzNDU2Nzg5MA==";var mid="2247000001";var idx="1";var sn="abcdef";</script>';
-            return { status: 200, type: 'text/html', bytes: Buffer.from(html) };
-          }
-          return {
-            status: mode === 'bad-image' ? 429 : 200,
-            type: 'image/png',
-            bytes: png,
-          };
-        },
-        options,
-      );
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      if (mode === 'cache-failure')
+        throw new downloads.ArticleDownloadError(
+          'Wechat2RSS 缓存读取失败，未保存，不使用其他来源。',
+          409,
+          { code: 'WECHAT2RSS_SINGLE_CACHE_READ_FAILED' },
+        );
+      if (mode === 'bad-image')
+        throw new downloads.ArticleDownloadError(
+          'Wechat2RSS 图片资源校验失败，未保存。',
+          422,
+          { code: 'WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE' },
+        );
+      return async (directory) => {
+        resources++;
+        const exported = await buildArticleMarkdown(
+          {
+            id: 'WX_1234567890_2247000001_1',
+            title: '离线保存测试',
+            sourceUrl: null,
+            contentHtml:
+              '<div id="js_content"><p>这是一篇用于本机保存回归的合成正文。</p><img src="data:image/png;base64,' +
+              png.toString('base64') +
+              '"></div>',
+            lastBodyStatus: 'available',
+            metrics: null,
+            publishTime: 1700000000,
+          },
+          '',
+          directory,
+          async () => {
+            throw new Error('REMOTE_MEDIA_FORBIDDEN');
+          },
+          'image',
+        );
+        await fs.writeFile(
+          path.join(directory, 'index.md'),
+          '# 离线保存测试\n\n' + exported.markdown,
+        );
+        return {
+          articleId: 'WX_1234567890_2247000001_1',
+          title: '离线保存测试',
+          imageCount: 1,
+          source: 'wechat2rss',
+        };
+      };
     };
     class FixtureModule {}
     Module({
@@ -237,10 +261,10 @@ const png = Buffer.from(
     await page.reload();
     await page.getByText(destination, { exact: true }).waitFor();
     assert(!(await ask.isChecked()));
-    mode = 'verify';
+    mode = 'cache-failure';
     await input.fill(url);
     await action.click();
-    await page.getByRole('alert').filter({ hasText: 'HTTP 302' }).waitFor();
+    await page.getByRole('alert').filter({ hasText: '缓存读取' }).waitFor();
     mode = 'bad-image';
     await action.click();
     await page.getByRole('alert').filter({ hasText: '图片' }).waitFor();

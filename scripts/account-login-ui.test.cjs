@@ -10,6 +10,93 @@ const root = path.resolve(__dirname, '..');
 const ts = require(
   require.resolve('typescript', { paths: [path.join(root, 'apps/web')] }),
 );
+const syntheticWechatStatus = {
+  configured: true,
+  code: 'AVAILABLE',
+  available: true,
+  challenged: false,
+  checkedAt: '2026-10-10T04:00:00.000Z',
+  message: '合成实例账号状态，仅只读检查。',
+};
+test('Wechat2RSS status is manual-only and does not use local login operations', async () => {
+  const f = fixture();
+  const view = f.render();
+  assert.match(view.text, /本地微信读书账号不控制此来源/);
+  assert.match(view.text, /尚未检查实例账号状态/);
+  assert.equal(f.wechatOptions.enabled, false);
+  assert.equal(f.wechatOptions.retry, false);
+  assert.equal(f.wechatOptions.refetchOnWindowFocus, false);
+  assert.equal(f.wechatOptions.refetchOnReconnect, false);
+  assert.equal(f.wechatOptions.refetchInterval, false);
+  assert.equal(f.calls.length, 0);
+  await f.button('检查实例账号状态').props.onPress();
+  assert.deepEqual(f.calls, ['wechat-status-read']);
+});
+test('Wechat2RSS available and challenged states, wait time and check time remain separate', () => {
+  for (const [available, challenged, label] of [
+    [true, false, '账号可用'],
+    [false, true, '待官方验证'],
+    [false, false, '账号暂不可用'],
+    [true, true, '部分账号待官方验证'],
+  ]) {
+    const f = fixture({
+      wechatStatus: {
+        ...syntheticWechatStatus,
+        available,
+        challenged,
+        retryAfter: '合成等待30秒',
+      },
+    });
+    const view = f.render();
+    assert.match(view.text, new RegExp(label));
+    assert.match(view.text, /合成等待30秒/);
+    assert.match(view.text, /检查时间（北京时间）/);
+    assert.equal(f.calls.length, 0);
+  }
+});
+test('Wechat2RSS status failure hides stale status and does not auto retry or login', () => {
+  const f = fixture({ wechatError: true, wechatStatus: syntheticWechatStatus });
+  const view = f.render();
+  assert.match(view.text, /实例账号状态读取失败/);
+  assert(!view.text.includes('账号可用'));
+  assert.equal(f.calls.length, 0);
+});
+test('unconfigured and failed upstream status do not imply usable accounts or a fake check date', () => {
+  for (const [code, checkedAt, label] of [
+    ['SOURCE_UNAVAILABLE', null, '实例未配置'],
+    ['STATUS_CHECK_FAILED', syntheticWechatStatus.checkedAt, '状态读取失败'],
+  ]) {
+    const f = fixture({
+      wechatStatus: {
+        ...syntheticWechatStatus,
+        available: false,
+        code,
+        checkedAt,
+      },
+    });
+    const view = f.render();
+    assert.match(view.text, new RegExp(label));
+    assert(!/1970|Invalid Date|账号可用/.test(view.text));
+    if (!checkedAt) assert.match(view.text, /尚未检查/);
+  }
+});
+test('Wechat2RSS status button guards rapid double clicks and disables during a read', async () => {
+  const f = fixture();
+  let release;
+  f.wechatWait = new Promise((done) => {
+    release = done;
+  });
+  const button = f.button('检查实例账号状态');
+  const read = button.props.onPress();
+  await button.props.onPress();
+  assert.deepEqual(f.calls, ['wechat-status-read']);
+  release();
+  await read;
+  const busy = fixture({ wechatFetching: true });
+  assert.equal(busy.button('检查实例账号状态').props.isDisabled, true);
+  await busy.button('检查实例账号状态').props.onPress();
+  assert.equal(busy.calls.length, 0);
+});
 function fixture({
   count = 0,
   loginData = null,
@@ -17,6 +104,9 @@ function fixture({
   accounts = [],
   notices = [],
   expanded = false,
+  wechatStatus,
+  wechatError = false,
+  wechatFetching = false,
 } = {}) {
   const state = [count, relogin, '', null],
     refs = [],
@@ -27,7 +117,9 @@ function fixture({
     resultOptions,
     resultInput,
     createFails = false,
-    cancelWait;
+    cancelWait,
+    wechatOptions,
+    wechatWait;
   const hooks = {
     useState(initial) {
       const i = cursor++;
@@ -74,6 +166,20 @@ function fixture({
   const trpc = {
     useUtils: () => utils,
     account: {
+      wechat2rssStatus: {
+        useQuery(_input, options) {
+          wechatOptions = options;
+          return {
+            data: wechatStatus,
+            isError: wechatError,
+            isFetching: wechatFetching,
+            async refetch() {
+              calls.push('wechat-status-read');
+              await wechatWait;
+            },
+          };
+        },
+      },
       list: {
         useQuery: () => ({
           data: { items: accounts, blocks: [] },
@@ -240,6 +346,12 @@ function fixture({
     button,
     calls,
     state,
+    get wechatOptions() {
+      return wechatOptions;
+    },
+    set wechatWait(value) {
+      wechatWait = value;
+    },
     get resultOptions() {
       return resultOptions;
     },

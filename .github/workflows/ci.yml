@@ -56,6 +56,10 @@ jobs:
         run: node --test scripts/check-account-modal-logic.test.cjs
       - name: Test account expiry and explicit QR recovery offline
         run: node --test scripts/account-login-ui.test.cjs
+      - name: Test Wechat2RSS source-specific metric visibility offline
+        run: node --test scripts/wechat-source-metrics-ui.test.cjs
+      - name: Test feed sidebar scroll and compact navigation layout offline
+        run: node --test scripts/feed-sidebar-layout.test.cjs scripts/folder-navigation-ui.test.cjs
       - name: Test unavailable new-subscription source and retained input offline
         run: node --test scripts/feed-add-ui.test.cjs
       - name: Test Xiaohongshu batch completion and download failure states offline

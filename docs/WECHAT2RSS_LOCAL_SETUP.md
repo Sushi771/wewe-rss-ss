@@ -66,7 +66,13 @@ node scripts/acceptance-wechat2rss.cjs --deployment-config
 
 **正确版本与绑定另核：** 上述 Node 检查直接执行当前 checkout 的脚本及对应后台构建，无需先替换生产。桌面启动指针、生产包和 Git HEAD 是三个不同对象；本轮没有打包或改指针。原刷新验收前，由 owner 核待测包的 `release.json`、输入哈希与已审查提交一致，在隔离 SQLite 副本启动并核实际进程/监听身份；`sourceCommit:null` 本身不能证明包对应当前 HEAD。
 
-应用侧 `WECHAT2RSS_ENABLED=1` 仅打开来源资格。新增一个真实新号时，选择 Wechat2RSS 会将新 Feed 的 `collectionChannel` 保存为 `wechat2rss`；重新添加已有号会保留原绑定。已有号只有 `collectionChannel` 为空且未绑定合集时，才可被明确的 `WECHAT2RSS_FEED_IDS=MP_WXS_<已核数字ID>` allowlist 选择。其他已绑定来源不会被覆盖，当前没有通用的旧号一键改绑入口；旧号迁移仍须 owner 在备份与副本演练后受控处理，不能靠填 allowlist 或重复添加偷偷改绑。
+应用侧 `WECHAT2RSS_ENABLED=1` 仅打开来源资格。新增真实新号时，选择 Wechat2RSS 会保存来源绑定。明确选择该来源添加已有号时，只有 `collectionChannel` 为空且无合集绑定的旧记录，才可在一致性备份和私有实例 ID、名称精确匹配后补绑；保留旧 ID、文章和暂停状态，已有供应商订阅不重发新增。有效的其他来源和合集绑定保持，不提供通用覆盖入口。`WECHAT2RSS_FEED_IDS` 仍只对无来源、无合集的记录生效，不能覆盖已保存来源。
+
+## 两套账号的区别
+
+账号页下方的本地微信读书账号是旧来源的本机记录，不同步或控制 Wechat2RSS 账号。Wechat2RSS 使用私有实例自己的登录状态；不从旧账号表复制 Cookie 或令牌。账号页新增独立状态卡，点击“检查实例账号状态”仅查询一次受保护的 `/login/list`，显示可用、待验证、实例提供的安全等待时间及检查时间；没有自动轮询、登录或换号。未配置、读取失败和未检查分别显示，账号可用不代表正文已取得。
+
+Wechat2RSS 缓存没有已核验的阅读、点赞、收藏字段，因此该来源的列表隐藏这些指标及相关热度排序。数据库历史指标保留，其他来源真实指标不变。公众号单篇工具也仅读取已订阅的 Wechat2RSS 缓存；缓存缺失、短链接无可信映射或媒体不完整时停止，不用公开原页或其他渠道兜底，见[单篇工具说明](ARTICLE_DOWNLOAD_TOOL.md)。
 
 ## 可执行的隔离绑定与启动演练
 

@@ -11,14 +11,7 @@ import {
 } from '@nestjs/common';
 import { Request as Req, Response as Res } from 'express';
 import request from 'supertest';
-import {
-  mkdtemp,
-  mkdir,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import axios from 'axios';
@@ -46,7 +39,7 @@ const provider = (): ProviderArticle => ({
   picUrl: '',
 });
 
-describe('internal normal completion uses original download authorization and publication', () => {
+describe('internal Provider completion cannot bypass Wechat2RSS-only saving', () => {
   let app: INestApplication;
   let temporary: string;
   let destination: string;
@@ -118,28 +111,12 @@ describe('internal normal completion uses original download authorization and pu
     await rm(temporary, { recursive: true, force: true });
   });
 
-  it('publishes verified bytes through the current preferences with no database access or anonymous request', async () => {
+  it('refuses even well-formed other-source bytes without database access or file publication', async () => {
     const first = await post();
-    expect(first.status).toBe(200);
-    expect(first.body).toMatchObject({
-      saved: true,
-      contentSource: 'verified-provider',
-      imageCount: 1,
-      alreadySaved: false,
-    });
-    expect(first.body.markdownPath.startsWith(destination)).toBe(true);
-    const markdown = await readFile(first.body.markdownPath, 'utf8');
-    expect(markdown).toContain('完整正文');
-    expect(markdown).toContain('image/image_');
-    const images = await readdir(join(first.body.directory, 'image'));
-    expect(
-      await readFile(join(first.body.directory, 'image', images[0])),
-    ).toEqual(Buffer.from(png, 'base64'));
-    expect((await post()).body).toMatchObject({
-      saved: true,
-      alreadySaved: true,
-      markdownPath: first.body.markdownPath,
-    });
+    expect(first.status).toBe(409);
+    expect(first.body).toMatchObject({ code: 'WECHAT2RSS_ONLY' });
+    expect((await post()).body).toMatchObject({ code: 'WECHAT2RSS_ONLY' });
+    expect(await readdir(destination)).toEqual([]);
   });
 
   it('retains auth, origin, host and acceptance-mode gates before any file publication', async () => {
@@ -165,7 +142,7 @@ describe('internal normal completion uses original download authorization and pu
     expect(await readdir(destination)).toEqual([]);
   });
 
-  it('requires and consumes the current native picker grant when ask-each-time is enabled', async () => {
+  it('a native directory grant never authorizes another-source Provider completion', async () => {
     await post('/download/article/settings', { askEveryTime: true } as any);
     expect((await post()).status).toBe(409);
     const picked = await post('/download/article/directory');
@@ -177,7 +154,7 @@ describe('internal normal completion uses original download authorization and pu
           pickToken: picked.body.pickToken,
         } as any)
       ).status,
-    ).toBe(200);
+    ).toBe(409);
     expect(
       (
         await post('/test-only/normal-completion', {
@@ -186,6 +163,7 @@ describe('internal normal completion uses original download authorization and pu
         } as any)
       ).status,
     ).toBe(409);
+    expect(await readdir(destination)).toEqual([]);
   });
 
   it.each([
@@ -206,7 +184,8 @@ describe('internal normal completion uses original download authorization and pu
           ? (null as unknown as ProviderArticle)
           : { ...provider(), ...patch };
       const failed = await post();
-      expect(failed.status).toBe(422);
+      expect(failed.status).toBe(409);
+      expect(failed.body.code).toBe('WECHAT2RSS_ONLY');
       expect(failed.body.saved).toBeUndefined();
       expect(await readdir(destination)).toEqual([]);
       expect(
@@ -219,34 +198,15 @@ describe('internal normal completion uses original download authorization and pu
     },
   );
 
-  it('shares the settings/directory/save lock with asynchronous normal completion', async () => {
-    let release!: () => void;
-    const pending = new Promise<void>((resolve) => (release = resolve));
-    let entered!: () => void;
-    const started = new Promise<void>((resolve) => (entered = resolve));
-    const save = LocalArticleStore.prototype.save;
-    jest
-      .spyOn(LocalArticleStore.prototype, 'save')
-      .mockImplementation(async function (this: LocalArticleStore, ...args) {
-        entered();
-        await pending;
-        return save.apply(this, args);
-      });
-    const first = post().then((response) => response);
-    await started;
-    try {
-      expect((await post()).status).toBe(409);
-      expect((await post('/download/article/directory')).status).toBe(409);
-      expect(
-        (
-          await post('/download/article/settings', {
-            askEveryTime: true,
-          } as any)
-        ).status,
-      ).toBe(409);
-    } finally {
-      release();
-    }
-    expect((await first).status).toBe(200);
+  it('rejecting a Provider never enters the save lock or blocks later settings operations', async () => {
+    const save = jest.spyOn(LocalArticleStore.prototype, 'save');
+    expect((await post()).status).toBe(409);
+    expect(save).not.toHaveBeenCalled();
+    expect(
+      (await post('/download/article/settings', { askEveryTime: true })).status,
+    ).toBe(200);
+    expect((await post('/download/article/directory')).status).toBe(200);
+    expect((await post()).status).toBe(409);
+    expect(await readdir(destination)).toEqual([]);
   });
 });

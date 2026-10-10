@@ -419,13 +419,31 @@ export const requestDownloadResource: DownloadRequest = async (
   }
 };
 
-/** Connect a public link to the existing Markdown + local attachments exporter. */
+/** Detect media before articleContentHtml removes embedded players or attributes.
+ * This single-article path has no verified audio/video acquisition contract.
+ */
+function assertDownloadMediaSupported(
+  body: ReturnType<ReturnType<typeof load>>,
+) {
+  if (
+    body.find(
+      'video, audio, mp-common-video, mpvoice, qqmusic, .video_iframe, .js_video_channel_container, iframe[data-vid], iframe[src*="video.qq.com"], iframe[data-src*="video.qq.com"]',
+    ).length
+  )
+    throw new ArticleDownloadError(
+      '文章包含音视频，本工具尚不能取得并核验这些资源；未保存正文或图片，请在官方页面查看。',
+      422,
+      { code: 'ARTICLE_MEDIA_UNAVAILABLE', stage: 'article' },
+    );
+}
+
 /** Same inert body policy for remote articles and already verified local bodies. */
 export function inertDownloadBody(content: string) {
   const $ = load(content);
   const body = $('#js_content, .rich_media_content').first();
   if (!body.length)
     throw new ArticleDownloadError('未取得有效文章正文，未生成下载文件。');
+  assertDownloadMediaSupported(body);
   const tags = new Set(
     'div section p span br h1 h2 h3 h4 h5 h6 strong b em i u s del blockquote ul ol li table thead tbody tfoot tr th td hr a img pre code figure figcaption'.split(
       ' ',
@@ -447,6 +465,7 @@ export function inertDownloadBody(content: string) {
   return $.html(body);
 }
 
+/** Connect a public link to the existing Markdown + local attachments exporter. */
 export async function buildArticleDownload(
   raw: unknown,
   directory: string,
@@ -493,6 +512,9 @@ export async function buildArticleDownload(
       );
     let identity: ReturnType<typeof articleIdentity>;
     let content: string | undefined;
+    assertDownloadMediaSupported(
+      page('#js_content, .rich_media_content').first(),
+    );
     try {
       identity = articleIdentity(html);
       content = articleContentHtml(html);

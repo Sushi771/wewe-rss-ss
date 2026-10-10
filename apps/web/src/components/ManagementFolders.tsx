@@ -6,6 +6,13 @@ import {
   ModalContent,
   ModalFooter,
   ModalHeader,
+  Dropdown,
+  DropdownTrigger,
+  DropdownMenu,
+  DropdownItem,
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
 } from '@nextui-org/react';
 import { useRef, useState } from 'react';
 
@@ -69,24 +76,37 @@ export default function ManagementFolders({
     );
   };
   return (
-    <div className="space-y-2 px-3 pb-3" aria-label="管理文件夹">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-neutral-500">文件夹</span>
+    <div className="folder-navigation" aria-label="管理文件夹">
+      <div className="folder-navigation-header">
+        <Popover placement="bottom-start">
+          <PopoverTrigger>
+            <Button
+              size="sm"
+              variant="light"
+              className="h-7 min-w-0 px-1 text-xs text-neutral-500"
+              aria-label="分组帮助"
+            >
+              分组 ⓘ
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="max-w-[240px] p-3 text-xs leading-5">
+            将订阅拖到文件夹可分组；手机或批量移动请先点“管理”，勾选后选择目标文件夹。
+          </PopoverContent>
+        </Popover>
         <Button
           size="sm"
           variant="light"
+          className="h-7 min-w-0 px-2 text-xs"
+          aria-label="新建文件夹"
           isDisabled={disabled}
           onPress={() => {
             setEditing(null);
             setName('');
           }}
         >
-          新建
+          + 新建
         </Button>
       </div>
-      <p className="text-xs leading-5 text-neutral-500">
-        将订阅拖到文件夹可分组；手机或批量移动请先点“管理”，勾选后选择目标文件夹。
-      </p>
       {[
         { id: 'all', name: '全部' },
         { id: 'ungrouped', name: '未分组' },
@@ -94,7 +114,7 @@ export default function ManagementFolders({
       ].map((folder) => (
         <div
           key={folder.id}
-          className="flex min-w-0 items-center gap-1"
+          className="folder-navigation-row"
           onDragOver={(event) => {
             if (
               !disabled &&
@@ -112,44 +132,53 @@ export default function ManagementFolders({
             type="button"
             disabled={disabled}
             aria-pressed={filter === folder.id}
-            className={`mac-sidebar-item !my-0 !min-w-0 flex-1 truncate text-left ${filter === folder.id ? 'active' : ''}`}
+            className={`mac-sidebar-item folder-filter text-left ${filter === folder.id ? 'active' : ''}`}
+            title={folder.name}
             onClick={() => onFilter(folder.id)}
           >
-            {folder.name}
+            <span className="folder-filter-label">{folder.name}</span>
           </button>
           {!['all', 'ungrouped'].includes(folder.id) && (
-            <>
-              <Button
-                size="sm"
-                variant="light"
-                isDisabled={disabled}
-                className="min-w-0 px-2"
-                aria-label={`重命名文件夹 ${folder.name}`}
-                onPress={() => {
-                  setEditing(folder);
-                  setName(folder.name);
-                }}
-              >
-                改名
-              </Button>
-              <Button
-                size="sm"
-                variant="light"
-                isDisabled={disabled}
-                className="min-w-0 px-2"
-                aria-label={`删除文件夹 ${folder.name}`}
-                onPress={() => {
-                  if (
-                    window.confirm(
-                      `删除空文件夹“${folder.name}”？请先移出其中的订阅。`,
+            <Dropdown>
+              <DropdownTrigger>
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="light"
+                  isDisabled={disabled}
+                  className="h-7 w-7 min-w-7"
+                  aria-label={`文件夹 ${folder.name} 更多操作`}
+                >
+                  ⋯
+                </Button>
+              </DropdownTrigger>
+              <DropdownMenu
+                aria-label={`文件夹 ${folder.name} 操作`}
+                onAction={(key) => {
+                  if (disabled || active.current) return;
+                  if (key === 'rename') {
+                    setEditing(folder);
+                    setName(folder.name);
+                  } else if (key === 'delete') {
+                    if (
+                      window.confirm(
+                        `删除空文件夹“${folder.name}”？请先移出其中的订阅。`,
+                      )
                     )
-                  )
-                    void run(() => onRemove(folder.id));
+                      void run(() => onRemove(folder.id));
+                  }
                 }}
               >
-                删除
-              </Button>
-            </>
+                <DropdownItem key="rename">重命名</DropdownItem>
+                <DropdownItem
+                  key="delete"
+                  color="danger"
+                  className="text-danger"
+                >
+                  删除文件夹
+                </DropdownItem>
+              </DropdownMenu>
+            </Dropdown>
           )}
         </div>
       ))}

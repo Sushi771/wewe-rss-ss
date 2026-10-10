@@ -277,7 +277,7 @@ describe('single article download, synthetic fixtures and no network', () => {
 
   it('strips executable HTML and escapes a title before export', async () => {
     const html = fixture(
-      '<p onclick="alert(1)">安全正文</p><script>alert(1)</script><iframe src="http://127.0.0.1"></iframe><a href="javascript:alert(1)">链接文字</a><video><source src="https://evil.invalid/movie"></video>',
+      '<p onclick="alert(1)">安全正文</p><script>alert(1)</script><iframe src="http://127.0.0.1"></iframe><a href="javascript:alert(1)">链接文字</a>',
     ).replace('离线收藏测试', '&lt;img src=x onerror=alert(1)&gt;');
     await buildArticleDownload(
       url,
@@ -297,6 +297,35 @@ describe('single article download, synthetic fixtures and no network', () => {
     expect($('a[href]')).toHaveLength(1);
     expect($('a[href]').attr('href')).toBe(downloadArticleUrl(url));
   });
+
+  it.each([
+    '<video><source src="https://example.invalid/video.mp4"></video>',
+    '<audio src="https://example.invalid/audio.mp3"></audio>',
+    '<iframe class="video_iframe" data-src="https://v.qq.com/player.html"></iframe>',
+    '<iframe src="https://video.qq.com/iframe/player.html"></iframe>',
+    '<mp-common-video data-vid="synthetic-video"></mp-common-video>',
+    '<mpvoice voice_encode_fileid="synthetic-audio"></mpvoice>',
+    '<div class="js_video_channel_container">视频号</div>',
+  ])(
+    'rejects unavailable embedded media before sanitization or image requests: %s',
+    async (media) => {
+      const request = jest.fn().mockResolvedValue({
+        bytes: Buffer.from(fixture('<p>正文</p>' + media)),
+        type: 'text/html',
+        status: 200,
+      });
+      await expect(
+        buildArticleDownload(url, directory, request),
+      ).rejects.toMatchObject({
+        status: 422,
+        diagnostic: { code: 'ARTICLE_MEDIA_UNAVAILABLE', stage: 'article' },
+        message: expect.stringContaining('音视频'),
+      });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(await readdir(directory)).toEqual([]);
+      expect(axios.get).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     { bytes: png, type: 'image/png', status: 302 },

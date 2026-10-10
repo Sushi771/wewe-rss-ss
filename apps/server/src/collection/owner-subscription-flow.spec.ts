@@ -297,7 +297,7 @@ describe('two explicitly bound publishers through original refresh/save (synthet
     expect(backups).not.toHaveBeenCalled();
   });
 
-  it('creates a second publisher window, adds a later publication, deduplicates, and really saves its body/image', async () => {
+  it('retains native refresh and deduplication while the single tool refuses native cached bodies', async () => {
     expect(await refresh(publishers[0])).toMatchObject({
       source: 'owner-weread-latest',
       status: 'partial',
@@ -368,30 +368,25 @@ describe('two explicitly bound publishers through original refresh/save (synthet
         orderBy: { id: 'asc' },
       }),
     ).toEqual(preserved);
-    const response = await save(url(publishers[1], 11)).expect(200);
-    expect(response.body).toMatchObject({
-      saved: true,
-      alreadySaved: false,
-      contentSource: 'saved-article',
-      imageCount: 1,
+    // The old SQLite body belongs to the native source. The normal single tool
+    // must not reinterpret it as Wechat2RSS provenance or fall back to its page.
+    process.env.WECHAT2RSS_ENABLED = '0';
+    const beforeDownload = await prisma.article.findMany({
+      orderBy: { id: 'asc' },
     });
-    const markdown = await fs.readFile(response.body.markdownPath, 'utf8');
-    expect(markdown).toContain(`完整合成正文-${publishers[1].number}-11`);
-    expect(markdown).toContain('image/');
-    const images = await fs.readdir(
-      path.join(path.dirname(response.body.markdownPath), 'image'),
+    const response = await save(url(publishers[1], 11)).expect(409);
+    expect(response.body).toMatchObject({
+      code: 'WECHAT2RSS_SINGLE_UNCONFIGURED',
+    });
+    expect((await save(url(publishers[1], 11)).expect(409)).body).toMatchObject(
+      { code: 'WECHAT2RSS_SINGLE_UNCONFIGURED' },
     );
-    expect(images).toHaveLength(1);
-    expect(
-      await fs.readFile(
-        path.join(path.dirname(response.body.markdownPath), 'image', images[0]),
-      ),
-    ).toEqual(png);
-    const repeated = await save(url(publishers[1], 11)).expect(200);
-    expect(repeated.body).toMatchObject({ alreadySaved: true });
-    expect(await fs.readFile(response.body.markdownPath, 'utf8')).toBe(
-      markdown,
+    expect(await prisma.article.findMany({ orderBy: { id: 'asc' } })).toEqual(
+      beforeDownload,
     );
+    expect(await fs.readdir(path.join(root, 'Obsidian 合成验收'))).toEqual([
+      '旧笔记.md',
+    ]);
     expect(
       await fs.readFile(
         path.join(root, 'Obsidian 合成验收', '旧笔记.md'),

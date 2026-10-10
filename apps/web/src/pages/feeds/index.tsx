@@ -705,7 +705,7 @@ const Feeds = () => {
 
   return (
     <>
-      <div className="flex h-full min-w-0 flex-col md:flex-row">
+      <div className="feed-workspace">
         <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
           <label className="min-w-0 flex-1 text-xs text-neutral-500">
             当前公众号
@@ -746,7 +746,10 @@ const Feeds = () => {
         </div>
         <div
           id="wechat-management-sidebar"
-          className={`mac-sidebar max-h-[45vh] !w-full !min-w-0 md:!flex md:max-h-none md:!w-[260px] ${mobileSidebarOpen ? '!flex' : '!hidden'}`}
+          role="region"
+          aria-label="订阅源与分组"
+          tabIndex={0}
+          className={`mac-sidebar feed-sidebar ${mobileSidebarOpen ? 'feed-sidebar-open' : ''}`}
         >
           <div className="flex items-center justify-between px-4 py-3">
             <span className="text-[13px] font-bold uppercase tracking-widest text-neutral-400/80">
@@ -875,6 +878,11 @@ const Feeds = () => {
               if (folderOperation.current) return;
               setFolderFilter(filter);
               setSelectedIds([]);
+              if (filter === 'all') {
+                setCurrentMpId('');
+                navigate('/feeds');
+                setMobileSidebarOpen(false);
+              }
             }}
             onBusyChange={(value) => {
               folderOperation.current = value;
@@ -904,43 +912,8 @@ const Feeds = () => {
           )}
 
           {feedData?.items ? (
-            <ul className="px-0 pb-0 pt-1">
-              <li
-                className={`mac-sidebar-item ${isActive('') && !isManageMode ? 'active' : ''}`}
-                onClick={() => {
-                  if (folderOperation.current) return;
-                  setCurrentMpId('');
-                  navigate('/feeds');
-                  setMobileSidebarOpen(false);
-                }}
-              >
-                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-neutral-200/50 text-neutral-500 transition-colors group-[.active]:bg-white/20 group-[.active]:text-white dark:bg-neutral-800/50 dark:text-neutral-400">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2.5"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <rect x="3" y="3" width="7" height="7" />
-                    <rect x="14" y="3" width="7" height="7" />
-                    <rect x="14" y="14" width="7" height="7" />
-                    <rect x="3" y="14" width="7" height="7" />
-                  </svg>
-                </div>
-                全部
-              </li>
-            </ul>
-          ) : (
-            ''
-          )}
-          {feedData?.items ? (
-            <div className="flex-1 overflow-hidden px-0">
-              <ul className="flex h-[calc(100vh-148px)] w-full flex-col overflow-y-auto pb-4">
+            <div className="px-0">
+              <ul className="flex w-full flex-col pb-4">
                 {orderedFeeds
                   .filter(
                     (item) =>
@@ -1017,7 +990,7 @@ const Feeds = () => {
             </div>
           ) : null}
         </div>
-        <div className="mac-content !min-w-0">
+        <div className="mac-content feed-content !min-w-0">
           <div className="mac-toolbar !h-auto shrink-0 !flex-wrap !py-2">
             <div className="flex min-w-0 basis-full items-center gap-2 overflow-hidden">
               <span className="truncate text-[15px] font-semibold">
@@ -1648,8 +1621,14 @@ const Feeds = () => {
               </div>
             </details>
           )}
-          <div className="flex-1 overflow-auto">
+          <div className="feed-article-scroll flex-1 overflow-auto">
             <ArticleList
+              collectionChannels={Object.fromEntries(
+                (feedData?.items || []).map((feed) => [
+                  feed.id,
+                  feed.collectionRoute.channel,
+                ]),
+              )}
               search={search}
               selectedIds={articleSelectedIds}
               onSelectionChange={setArticleSelectedIds}

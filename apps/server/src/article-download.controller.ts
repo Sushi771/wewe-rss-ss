@@ -16,21 +16,13 @@ import { ConfigService } from '@nestjs/config';
 import { Request as Req, Response as Res } from 'express';
 import { dirname, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  ArticleDownloadError,
-  buildArticleDownload,
-  downloadArticleUrl,
-} from './article-download';
+import { ArticleDownloadError, downloadArticleUrl } from './article-download';
 import { LocalArticleStore } from './article-local-save';
 import { pickArticleDirectory } from './article-folder-picker';
 import { privateOnlineMode } from './private-access';
 import { PrismaService } from './prisma/prisma.service';
-import {
-  buildCachedArticleDownload,
-  findCachedDownloadArticle,
-} from './article-download-cache';
 import { ProviderArticle } from './collection/subscription-provider';
-import { prepareVerifiedProviderDownload } from './article-verified-download';
+import { prepareWechat2RssSingleDownload } from './wechat2rss-single-download';
 import { BrowserTaskBroker, BrowserTaskError } from './browser-task';
 import { BrowserArticleTasks } from './browser-article-tasks';
 import { XiaohongshuService } from './collection/xiaohongshu.service';
@@ -285,7 +277,11 @@ export class ArticleDownloadController implements OnModuleDestroy {
   browserTaskCapability(@Request() req: Req, @Response() res: Res) {
     if (!this.authorized(req, res, false)) return;
     res.setHeader('Cache-Control', 'private, no-store');
-    return res.json(this.browserTasks.capability());
+    return res.json({
+      ...this.browserTasks.capability(),
+      available: false,
+      code: 'WECHAT2RSS_ONLY',
+    });
   }
   @Post('article/browser-task')
   async browserTaskIssue(
@@ -294,38 +290,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
     @Response() res: Res,
   ) {
     if (!this.authorized(req, res, true)) return;
-    res.setHeader('Cache-Control', 'private, no-store');
-    if (this.running || this.pickerRunning)
-      return res.status(409).json({
-        code: 'LOCAL_OPERATION_BUSY',
-        message: '请等待当前本机操作完成。',
-      });
-    try {
-      if (
-        !body ||
-        typeof body !== 'object' ||
-        Array.isArray(body) ||
-        Object.keys(body).some((k) => !['url', 'pickToken'].includes(k))
-      )
-        throw new BrowserTaskError('INPUT_SCHEMA', 400);
-      const fixed = this.browserTasks.requiresDisclosure();
-      const settings = fixed ? await this.localStore().read() : undefined;
-      const picked = !!settings?.askEveryTime;
-      if (picked && (!this.pickerGrant || body.pickToken !== this.pickerGrant))
-        throw new BrowserTaskError('DIRECTORY_PICK_REQUIRED', 409);
-      const issued = this.browserTasks.issue(
-        downloadArticleUrl(body.url),
-        this.taskOwner(req),
-        settings?.directory,
-        picked,
-      );
-      // Native selection is consumed by this fixed task, not reusable by an
-      // ordinary save. The task retains the scoped proof for same-directory retries.
-      if (picked) this.pickerGrant = undefined;
-      return res.status(200).json(issued);
-    } catch (error) {
-      return this.taskFailure(error, res);
-    }
+    return this.wechat2RssOnly(res);
   }
   @Get('article/browser-task/:taskId')
   browserTaskStatus(
@@ -373,53 +338,10 @@ export class ArticleDownloadController implements OnModuleDestroy {
     @Response() res: Res,
   ) {
     if (!this.authorized(req, res, true)) return;
-    res.setHeader('Cache-Control', 'private, no-store');
-    const owner = this.taskOwner(req);
-    let began = false;
-    try {
-      if (
-        !body ||
-        typeof body !== 'object' ||
-        Array.isArray(body) ||
-        Object.keys(body).some((k) => k !== 'pickToken')
-      )
-        throw new BrowserTaskError('INPUT_SCHEMA', 400);
-      const verified = this.browserTasks.beginSave(taskId, owner);
-      began = true;
-      if (
-        verified.destination &&
-        (await this.localStore().read()).directory !== verified.destination
-      )
-        throw new BrowserTaskError('SAVE_DIRECTORY_CHANGED', 409);
-      // Current request rechecks auth, Origin, local save lock and directory grant.
-      // The app cannot submit HTML/Provider/URL or spoof the extension's completion.
-      await this.saveVerifiedArticle(
-        verified.article,
-        { url: verified.url, pickToken: body.pickToken },
-        req,
-        res,
-        !!verified.destination && verified.directoryPickConfirmed === true,
-      );
-      if (res.statusCode === 200) this.browserTasks.saved(taskId, owner);
-      else this.browserTasks.saveFailed(taskId, owner);
-    } catch (error) {
-      if (began)
-        this.browserTasks.saveFailed(
-          taskId,
-          owner,
-          error instanceof BrowserTaskError &&
-            error.code === 'SAVE_DIRECTORY_CHANGED'
-            ? 'SAVE_DIRECTORY_CHANGED'
-            : 'SAVE_RETRY_REQUIRED',
-        );
-      if (!res.headersSent) return this.taskFailure(error, res);
-    }
+    return this.wechat2RssOnly(res);
   }
 
-  /** Internal completion for the normal verification/collection owner.
-   * Deliberately has no HTTP decorator: page JSON cannot submit provider bodies.
-   * The caller supplies a verified, archived result and the original local request.
-   */
+  /** Retained internal hook explicitly rejects alternate-source completions. */
   async saveVerifiedArticle(
     article: ProviderArticle,
     body: { url?: unknown; pickToken?: unknown },
@@ -427,9 +349,16 @@ export class ArticleDownloadController implements OnModuleDestroy {
     res: Res,
     directoryPickConfirmed = false,
   ) {
-    return this.saveArticle(body, req, res, {
-      article,
-      directoryPickConfirmed,
+    void directoryPickConfirmed;
+    if (!this.authorized(req, res, true)) return;
+    return this.wechat2RssOnly(res);
+  }
+
+  private wechat2RssOnly(res: Res) {
+    return res.status(409).json({
+      code: 'WECHAT2RSS_ONLY',
+      message:
+        '公众号单篇下载仅使用 Wechat2RSS 缓存；不接收其他渠道正文，未保存。',
     });
   }
 
@@ -667,9 +596,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
   ) {
     if (!this.authorized(req, res, true)) return;
     if (process.env.WEWE_ACCEPTANCE_MODE === '1')
-      return res
-        .status(409)
-        .json({ message: '离线验收模式未启用原文网络下载。' });
+      return res.status(409).json({ message: '此验收模式未启用本机保存。' });
     if (this.running || this.pickerRunning)
       return res
         .status(409)
@@ -685,33 +612,17 @@ export class ArticleDownloadController implements OnModuleDestroy {
       const url = cachedPrepare ? undefined : downloadArticleUrl(body?.url);
       this.running = true;
       locked = true;
-      const prepare =
-        cachedPrepare ||
-        (verified
-          ? prepareVerifiedProviderDownload(url!, verified.article)
-          : undefined);
+      if (verified) return this.wechat2RssOnly(res);
       const store = this.localStore();
       if (
         (await store.read()).askEveryTime &&
-        !verified?.directoryPickConfirmed &&
         (!this.pickerGrant || body.pickToken !== this.pickerGrant)
       )
         return res.status(409).json({ message: '请先选择本次保存路径。' });
       this.pickerGrant = undefined;
-      const cached =
-        !prepare && this.prisma
-          ? await findCachedDownloadArticle(this.prisma, url!)
-          : null;
-      const result = await store.save((directory) =>
-        prepare
-          ? prepare(directory)
-          : cached
-            ? buildCachedArticleDownload(cached, directory)
-            : buildArticleDownload(url!, directory, undefined, {
-                imageDirectory: 'image',
-                markdownOnly: true,
-              }),
-      );
+      const prepare =
+        cachedPrepare || (await prepareWechat2RssSingleDownload(url!));
+      const result = await store.save(prepare);
       res.setHeader('Cache-Control', 'private, no-store');
       return res.status(200).json({
         saved: true,
@@ -723,13 +634,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
               videoVerification: 'container-and-bytes',
             }
           : {}),
-        contentSource: cachedPrepare
-          ? 'saved-xiaohongshu'
-          : prepare
-            ? 'verified-provider'
-            : cached
-              ? 'saved-article'
-              : 'remote',
+        contentSource: cachedPrepare ? 'saved-xiaohongshu' : 'wechat2rss-cache',
       });
     } catch (error) {
       return this.failure(error, res, body?.url);

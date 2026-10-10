@@ -9,6 +9,7 @@ import { TrpcService } from './trpc.service';
 import * as backups from '../collection/sqlite-backup';
 import { SubscriptionDiscoveryValidator } from '../collection/subscription-add';
 import { CollectionService } from '../collection/collection.service';
+import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
 
 // Actual router, paid Provider, SQLite transactions and consistent backup.
 // Only upstream responses and the native adapter are synthetic; no platform calls.
@@ -315,6 +316,249 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(request).not.toHaveBeenCalled();
     expect(backup).not.toHaveBeenCalled();
     expect(await prisma.feed.count()).toBe(0);
+  });
+
+  it.each([1, 0])(
+    'repairs an unbound existing publisher through exact vendor identity without another add (status %s)',
+    async (status) => {
+      process.env.WECHAT2RSS_ENABLED = '1';
+      const canonical = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=9&idx=1`;
+      await prisma.feed.create({
+        data: {
+          id: feedId,
+          mpName: '合成公众号',
+          collectionChannel: null,
+          status,
+          syncTime: 1700000001,
+          mpCover: '',
+          mpIntro: '',
+          updateTime: 1700000000,
+        },
+      });
+      await prisma.article.create({
+        data: {
+          id: `WX_${number}_9_1`,
+          mpId: feedId,
+          title: '旧正文',
+          publishTime: 1700000000,
+          sourceUrl: canonical,
+          contentHtml: '<div id="js_content">保留已编辑正文</div>',
+          picUrl: 'old-image',
+          readCount: 12,
+          likeCount: 3,
+        },
+      });
+      const before = await prisma.article.findMany();
+      const result = await setup().caller.feed.addFromArticle({
+        articleUrl: canonical,
+        source: 'wechat2rss',
+      });
+      expect(result).toMatchObject({
+        created: false,
+        sourceBindingChanged: true,
+        upstreamSubmitted: false,
+        feed: { id: feedId, collectionChannel: 'wechat2rss', status },
+        status: status === 1 ? 'pending' : 'blocked',
+      });
+      expect(events).not.toContain('/addurl');
+      expect(events.some((x) => x.startsWith('/add/'))).toBe(false);
+      expect(await prisma.article.findMany()).toEqual(before);
+      expect(await prisma.feed.count()).toBe(1);
+      expect(
+        (await prisma.feed.findUniqueOrThrow({ where: { id: feedId } }))
+          .syncTime,
+      ).toBe(1700000001);
+      if (status === 0) expect(events).not.toContain(`/feed/${number}.json`);
+    },
+  );
+
+  it('preserves an album binding even when its explicit channel field is empty', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const canonical = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=9&idx=1`;
+    await prisma.feed.create({
+      data: {
+        id: feedId,
+        mpName: '合成公众号',
+        collectionChannel: null,
+        publicAlbumIds: '123',
+        mpCover: '',
+        mpIntro: '',
+        updateTime: 1700000000,
+      },
+    });
+    await prisma.article.create({
+      data: {
+        id: `WX_${number}_9_1`,
+        mpId: feedId,
+        title: '旧文',
+        publishTime: 1700000000,
+        sourceUrl: canonical,
+        picUrl: '',
+      },
+    });
+    const old = await prisma.feed.findUniqueOrThrow({ where: { id: feedId } });
+    expect(
+      await setup().caller.feed.addFromArticle({
+        articleUrl: canonical,
+        source: 'wechat2rss',
+      }),
+    ).toMatchObject({
+      status: 'source-preserved',
+      sourceBindingChanged: false,
+    });
+    expect(
+      await prisma.feed.findUniqueOrThrow({ where: { id: feedId } }),
+    ).toEqual(old);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('continues a previously accepted link by binding its existing unbound feed and consuming cache without add replay', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    await prisma.feed.create({
+      data: {
+        id: feedId,
+        mpName: '合成公众号',
+        mpCover: 'old-cover',
+        mpIntro: 'old-intro',
+        updateTime: 1700000000,
+        syncTime: 1700000001,
+        collectionChannel: null,
+      },
+    });
+    await prisma.article.create({
+      data: {
+        id: 'legacy-saved',
+        mpId: feedId,
+        title: '保留正文',
+        picUrl: 'old-image',
+        publishTime: 1700000000,
+        contentHtml: '<div id="js_content">个人正文</div>',
+        readCount: 12,
+        likeCount: 3,
+      },
+    });
+    const journal = await wechat2RssAddReceipt(database, articleUrl);
+    await journal.accepted(`/feed/${number}.xml`);
+    const before = await prisma.article.findUniqueOrThrow({
+      where: { id: 'legacy-saved' },
+    });
+    const original = request.getMockImplementation()!;
+    const canonical = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=99&idx=1`;
+    request.mockImplementation(async (...args) =>
+      new URL(String(args[0])).pathname === `/feed/${number}.json`
+        ? new Response(
+            JSON.stringify({
+              items: [
+                {
+                  id: canonical,
+                  title: '已核缓存',
+                  date_published: '2026-10-01T12:00:00+08:00',
+                  content_html: '<p>现有缓存完整正文</p>',
+                },
+              ],
+            }),
+          )
+        : original(...args),
+    );
+    expect(
+      await setup().caller.feed.addFromArticle({
+        articleUrl,
+        source: 'wechat2rss',
+      }),
+    ).toMatchObject({
+      status: 'updated',
+      created: false,
+      sourceBindingChanged: true,
+      upstreamSubmitted: false,
+      feed: { id: feedId, collectionChannel: 'wechat2rss' },
+      sync: { articles: 1, created: 1, updated: 0, accepted: false },
+    });
+    expect(
+      await prisma.article.findUniqueOrThrow({ where: { id: 'legacy-saved' } }),
+    ).toEqual(before);
+    expect(await prisma.feed.count()).toBe(1);
+    expect(events).not.toContain('/addurl');
+  });
+
+  it('the protected account status reads only supplier account availability and never merges local accounts', async () => {
+    const { caller, router } = setup();
+    expect(await caller.account.wechat2rssStatus()).toMatchObject({
+      configured: false,
+      checkedAt: null,
+      code: 'SOURCE_UNAVAILABLE',
+    });
+    expect(request).not.toHaveBeenCalled();
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const before = await prisma.account.findMany();
+    expect(await caller.account.wechat2rssStatus()).toMatchObject({
+      configured: true,
+      available: true,
+      challenged: false,
+      code: 'AVAILABLE',
+      checkedAt: expect.any(String),
+    });
+    expect(events).toEqual(['/login/list']);
+    expect(await prisma.account.findMany()).toEqual(before);
+    await expect(
+      router.appRouter
+        .createCaller({ errorMsg: '请先登录' })
+        .account.wechat2rssStatus(),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(events).toHaveLength(1);
+  });
+
+  it.each(['12分钟', 'synthetic-secret-token'])(
+    'account status whitelists wait time without echoing supplier values (%s)',
+    async (waitTime) => {
+      process.env.WECHAT2RSS_ENABLED = '1';
+      request.mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              err: '',
+              data: [
+                {
+                  available: false,
+                  needCheck: true,
+                  waitTime,
+                  cookie: 'synthetic-cookie',
+                  name: 'private-name',
+                },
+              ],
+            }),
+          ),
+      );
+      const result = await setup().caller.account.wechat2rssStatus();
+      expect(result).toMatchObject({
+        configured: true,
+        available: false,
+        challenged: true,
+        code: 'ACCOUNT_CHALLENGED',
+        checkedAt: expect.any(String),
+      });
+      expect(result.retryAfter).toBe(
+        waitTime === '12分钟' ? waitTime : undefined,
+      );
+      expect(JSON.stringify(result)).not.toMatch(
+        /synthetic-secret-token|synthetic-cookie|private-name/,
+      );
+      expect(request).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('account status reports a read failure without retrying or returning raw errors', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    request.mockRejectedValue(new Error('synthetic-private-error'));
+    const result = await setup().caller.account.wechat2rssStatus();
+    expect(result).toMatchObject({
+      configured: true,
+      available: false,
+      code: 'STATUS_CHECK_FAILED',
+      checkedAt: expect.any(String),
+    });
+    expect(JSON.stringify(result)).not.toContain('synthetic-private-error');
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(backup).not.toHaveBeenCalled();
   });
 
   it('explicit native without a registered adapter never falls back to configured paid', async () => {

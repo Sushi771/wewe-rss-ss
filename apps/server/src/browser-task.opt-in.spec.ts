@@ -23,6 +23,7 @@ import { FeedsService } from './feeds/feeds.service';
 import * as picker from './article-folder-picker';
 import { LocalArticleStore } from './article-local-save';
 import { BrowserTaskBroker } from './browser-task';
+import { ArticleDownloadController } from './article-download.controller';
 import {
   readBrowserTaskOptIn,
   browserTaskApplication,
@@ -33,7 +34,6 @@ import {
   config,
   observation,
   short,
-  png,
   largeSyntheticPng,
 } from '../test/browser-task-fixture';
 
@@ -41,7 +41,7 @@ import {
 // the unrelated ZIP exporter imports an ESM-only package under Jest CJS.
 jest.mock('./offline-archive', () => ({ archiveDirectory: jest.fn() }));
 
-describe('explicit one-article opt-in integration, synthetic offline only', () => {
+describe('legacy opt-in transport with Wechat2RSS-only save policy, synthetic offline only', () => {
   const previous = { ...process.env };
   let directory: string,
     file: string,
@@ -143,6 +143,16 @@ describe('explicit one-article opt-in integration, synthetic offline only', () =
     app.enableCors();
     await app.init();
   }
+  // Seed an already-issued legacy task internally; the public issue route stays
+  // disabled. This verifies status/cancel and transport retained during upgrades.
+  function legacyTask() {
+    const controller = app!.get(ArticleDownloadController) as any;
+    const owner = controller.taskOwner({
+      headers: { authorization: 'offline-auth' },
+    });
+    return controller.browserTasks.issue(originalUrl, owner, destination)
+      .taskId;
+  }
   it('leaves original module and no receiving route as default, never creates consumption state', async () => {
     expect(
       readBrowserTaskOptIn({ ...env(), WEWE_BROWSER_TASK_OPT_IN: '0' }),
@@ -201,7 +211,8 @@ describe('explicit one-article opt-in integration, synthetic offline only', () =
       .get('/download/article/browser-task')
       .set('host', '127.0.0.1:4000')
       .set('Authorization', 'offline-auth');
-    expect(capability.body.available).toBe(true);
+    expect(capability.body.available).toBe(false);
+    expect(capability.body.code).toBe('WECHAT2RSS_ONLY');
     expect(capability.body.refreshAvailable).toBe(false);
     const preflight = () =>
       request(app!.getHttpServer())
@@ -229,7 +240,7 @@ describe('explicit one-article opt-in integration, synthetic offline only', () =
         .status,
     ).toBe(403);
   });
-  it('requires original auth, discloses actual preferences before body, receives without saving and preserves an old note on original save', async () => {
+  it('even an approved opt-in cannot issue or save another-source article through the public routes', async () => {
     await application();
     expect(
       (
@@ -242,61 +253,43 @@ describe('explicit one-article opt-in integration, synthetic offline only', () =
     const issued = await post('/download/article/browser-task', {
       url: originalUrl,
     });
-    expect(issued.status).toBe(200);
-    const taskId = issued.body.taskId;
+    expect(issued.status).toBe(409);
+    expect(issued.body.code).toBe('WECHAT2RSS_ONLY');
+    expect(existsSync(file + '.consumed')).toBe(false);
+    const taskId = legacyTask();
     const claim = await post('/browser-task/claim', { taskId, binding });
     expect(claim.status).toBe(200);
-    expect(claim.body.disclosure).toMatchObject({
-      title: approval().article.title,
-      publisher: approval().article.publisher,
-      destination,
-      imageCount: 1,
-    });
-    const raw = {
-      pageUrl: binding.pageUrl,
-      html: sample.html.replace(short, originalUrl),
-      images: sample.images,
-      omittedEmptyImageNodes: 2,
-    };
-    const complete = await post('/browser-task/complete', {
-      taskId,
-      binding,
-      nonce: claim.body.nonce,
-      observation: raw,
-    });
-    expect(complete.body).toEqual({ accepted: true });
-    expect(await readdir(destination)).toEqual([]);
-    const status = () =>
-      request(app!.getHttpServer())
-        .get('/download/article/browser-task/' + taskId)
-        .set('host', '127.0.0.1:4000')
-        .set('Authorization', 'offline-auth');
-    expect((await status()).body.state).toBe('ready');
+    expect(
+      (
+        await post('/browser-task/complete', {
+          taskId,
+          binding,
+          nonce: claim.body.nonce,
+          observation: {
+            pageUrl: binding.pageUrl,
+            html: sample.html.replace(short, originalUrl),
+            images: sample.images,
+            omittedEmptyImageNodes: 0,
+          },
+        })
+      ).body,
+    ).toEqual({ accepted: true });
+    const status = await request(app!.getHttpServer())
+      .get('/download/article/browser-task/' + taskId)
+      .set('host', '127.0.0.1:4000')
+      .set('Authorization', 'offline-auth');
+    expect(status.body.state).toBe('ready');
     const saved = await post(
       '/download/article/browser-task/' + taskId + '/save',
       {},
     );
-    expect(saved.status).toBe(200);
-    expect((await status()).body.state).toBe('saved');
-    const note = saved.body.markdownPath;
-    await writeFile(note, 'existing user note');
-    const before = await readFile(note);
-    expect(
-      (await post('/download/article/browser-task/' + taskId + '/save', {}))
-        .status,
-    ).toBe(409);
-    expect(await readFile(note)).toEqual(before);
-    const imageFiles = await readdir(join(saved.body.directory, 'image'));
-    expect(imageFiles.length).toBe(1);
-    expect(
-      await readFile(join(saved.body.directory, 'image', imageFiles[0])),
-    ).toEqual(Buffer.from(png, 'base64'));
+    expect(saved.status).toBe(409);
+    expect(saved.body.code).toBe('WECHAT2RSS_ONLY');
+    expect(await readdir(destination)).toEqual([]);
   });
   it('cancelled original task cannot complete or save and stale lease cannot grant a new claim', async () => {
     await application();
-    const taskId = (
-      await post('/download/article/browser-task', { url: originalUrl })
-    ).body.taskId;
+    const taskId = legacyTask();
     const claim = await post('/browser-task/claim', { taskId, binding });
     expect(
       (await post('/download/article/browser-task/' + taskId + '/cancel', {}))
@@ -329,9 +322,7 @@ describe('explicit one-article opt-in integration, synthetic offline only', () =
 
   it('real opt-in AppModule parser accepts valid >10MiB image transport without enabling global large bodies', async () => {
     await application();
-    const taskId = (
-      await post('/download/article/browser-task', { url: originalUrl })
-    ).body.taskId;
+    const taskId = legacyTask();
     const claim = await post('/browser-task/claim', { taskId, binding });
     const large = {
       pageUrl: binding.pageUrl,
@@ -363,29 +354,14 @@ describe('explicit one-article opt-in integration, synthetic offline only', () =
     expect(await readdir(destination)).toEqual([]);
   }, 60000);
 
-  it('changed original save directory requires renewed review and writes neither destination', async () => {
+  it('legacy tasks cannot write either destination after directory changes', async () => {
     await application();
-    const taskId = (
-      await post('/download/article/browser-task', { url: originalUrl })
-    ).body.taskId;
-    const claim = await post('/browser-task/claim', { taskId, binding });
-    expect(
-      (
-        await post('/browser-task/complete', {
-          taskId,
-          binding,
-          nonce: claim.body.nonce,
-          observation: {
-            pageUrl: binding.pageUrl,
-            html: sample.html.replace(short, originalUrl),
-            images: sample.images,
-            omittedEmptyImageNodes: 0,
-          },
-        })
-      ).body,
-    ).toEqual({ accepted: true });
+    const taskId = legacyTask();
     const other = join(directory, 'other-notes');
     await mkdir(other);
+    const note = join(destination, 'existing.md');
+    await writeFile(note, 'existing user note');
+    const before = await readFile(note);
     jest.spyOn(picker, 'pickArticleDirectory').mockResolvedValueOnce(other);
     expect((await post('/download/article/directory', {})).body.directory).toBe(
       other,
@@ -395,103 +371,32 @@ describe('explicit one-article opt-in integration, synthetic offline only', () =
       {},
     );
     expect(saved.status).toBe(409);
-    expect(saved.body.code).toBe('SAVE_DIRECTORY_CHANGED');
-    expect(saved.body.message).toContain('取消任务');
-    const status = await request(app!.getHttpServer())
-      .get('/download/article/browser-task/' + taskId)
-      .set('host', '127.0.0.1:4000')
-      .set('Authorization', 'offline-auth');
-    expect(status.body).toMatchObject({
-      state: 'ready',
-      code: 'SAVE_DIRECTORY_CHANGED',
-      destinationBound: true,
-    });
-    expect(status.body.directoryPickConfirmed).toBeUndefined();
-    jest
-      .spyOn(picker, 'pickArticleDirectory')
-      .mockResolvedValueOnce(destination);
-    await post('/download/article/directory', {});
-    expect(
-      (await post('/download/article/browser-task/' + taskId + '/save', {}))
-        .body.code,
-    ).toBe('SAVE_DIRECTORY_CHANGED'); // Even restoring A cannot replay a conflicted task.
-    expect(await readdir(destination)).toEqual([]);
+    expect(saved.body.code).toBe('WECHAT2RSS_ONLY');
+    expect(await readFile(note)).toEqual(before);
+    expect(await readdir(destination)).toEqual(['existing.md']);
     expect(await readdir(other)).toEqual([]);
   });
-
-  it('selects an asking-policy directory before issue and scopes its grant to this fixed task', async () => {
+  it('asking-policy preferences and pick tokens never reenable browser-source issue or save', async () => {
     await application();
     await post('/download/article/settings', { askEveryTime: true });
+    const save = jest.spyOn(LocalArticleStore.prototype, 'save');
+    const pick = jest.spyOn(picker, 'pickArticleDirectory');
     for (const body of [
       { url: originalUrl },
       { url: originalUrl, pickToken: 'invalid' },
     ]) {
       const denied = await post('/download/article/browser-task', body);
       expect(denied.status).toBe(409);
-      expect(denied.body.code).toBe('DIRECTORY_PICK_REQUIRED');
+      expect(denied.body.code).toBe('WECHAT2RSS_ONLY');
       expect(existsSync(file + '.consumed')).toBe(false);
     }
-    const chosen = join(directory, 'chosen-before-issue');
-    await mkdir(chosen);
-    jest.spyOn(picker, 'pickArticleDirectory').mockResolvedValueOnce(chosen);
-    const selection = await post('/download/article/directory', {});
-    const issued = await post('/download/article/browser-task', {
-      url: originalUrl,
-      pickToken: selection.body.pickToken,
+    const denied = await post('/download/article/browser-task/legacy/save', {
+      directoryPickConfirmed: true,
     });
-    expect(issued.status).toBe(200);
-    expect(issued.body.destinationBound).toBe(true);
-    const taskId = issued.body.taskId;
-    const claim = await post('/browser-task/claim', { taskId, binding });
-    expect(claim.body.disclosure.destination).toBe(chosen);
-    expect(
-      (
-        await post('/download/article', {
-          url: originalUrl,
-          pickToken: selection.body.pickToken,
-        })
-      ).status,
-    ).toBe(409); // The grant cannot authorize an unrelated ordinary save.
-    await post('/browser-task/complete', {
-      taskId,
-      binding,
-      nonce: claim.body.nonce,
-      observation: {
-        pageUrl: binding.pageUrl,
-        html: sample.html.replace(short, originalUrl),
-        images: sample.images,
-        omittedEmptyImageNodes: 0,
-      },
-    });
-    expect(
-      (
-        await post('/download/article/browser-task/' + taskId + '/save', {
-          directoryPickConfirmed: true,
-        })
-      ).status,
-    ).toBe(400);
-    jest
-      .spyOn(LocalArticleStore.prototype, 'save')
-      .mockRejectedValueOnce(new Error('synthetic first-write failure'));
-    expect(
-      (await post('/download/article/browser-task/' + taskId + '/save', {}))
-        .status,
-    ).toBe(500);
-    const saved = await post(
-      '/download/article/browser-task/' + taskId + '/save',
-      {},
-    );
-    expect(saved.status).toBe(200);
-    expect(saved.body.markdownPath.startsWith(chosen)).toBe(true);
-    expect(await readFile(saved.body.markdownPath, 'utf8')).toContain(
-      approval().article.title,
-    );
-    const images = await readdir(join(saved.body.directory, 'image'));
-    expect(images).toHaveLength(1);
-    expect(
-      await readFile(join(saved.body.directory, 'image', images[0])),
-    ).toEqual(Buffer.from(png, 'base64'));
+    expect(denied.status).toBe(409);
+    expect(denied.body.code).toBe('WECHAT2RSS_ONLY');
+    expect(save).not.toHaveBeenCalled();
+    expect(pick).not.toHaveBeenCalled();
     expect(await readdir(destination)).toEqual([]);
-    expect(picker.pickArticleDirectory).toHaveBeenCalledTimes(1);
   });
 });

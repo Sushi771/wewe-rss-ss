@@ -112,6 +112,62 @@ export class TrpcService {
   });
   router = this.trpc.router;
   mergeRouters = this.trpc.mergeRouters;
+  async wechat2rssStatus() {
+    const base = {
+      configured: false,
+      available: false,
+      challenged: false,
+      retryAfter: undefined as string | undefined,
+      checkedAt: null as string | null,
+    };
+    let provider: Wechat2RssProvider;
+    try {
+      provider = wechat2RssProvider();
+    } catch {
+      return {
+        ...base,
+        code: 'SOURCE_UNAVAILABLE',
+        message: 'Wechat2RSS 未启用或私有配置无效，尚未检查账号。',
+      };
+    }
+    try {
+      const state = await provider.checkAccountStatus();
+      // Only bounded time notation can cross this boundary. Never echo arbitrary
+      // supplier messages or account records, which may contain private values.
+      const retryAfter =
+        typeof state.retryAfter === 'string' &&
+        state.retryAfter.length <= 80 &&
+        /^[\d\s:/.+\-年月日时分秒小时分钟]+$/.test(state.retryAfter)
+          ? state.retryAfter.trim() || undefined
+          : undefined;
+      return {
+        ...base,
+        configured: true,
+        available: state.available,
+        challenged: state.challenged,
+        retryAfter,
+        checkedAt: new Date().toISOString(),
+        code: state.available
+          ? 'AVAILABLE'
+          : state.challenged
+            ? 'ACCOUNT_CHALLENGED'
+            : 'ACCOUNT_UNAVAILABLE',
+        message: state.available
+          ? '私有实例有可用账号；本地旧账号列表不控制 Wechat2RSS。'
+          : state.challenged
+            ? '私有实例账号待验证，请本人在已有私有实例处理。'
+            : '私有实例没有可用账号，请在已有私有实例核对登录状态。',
+      };
+    } catch {
+      return {
+        ...base,
+        configured: true,
+        checkedAt: new Date().toISOString(),
+        code: 'STATUS_CHECK_FAILED',
+        message: '本次只读检查失败，未登录、换号或重试。',
+      };
+    }
+  }
   request: AxiosInstance;
   updateDelayTime = 60;
 
@@ -734,6 +790,7 @@ export class TrpcService {
       } catch {
         /* Short links need upstream resolution. */
       }
+      let knownFeed: Feed | undefined;
       const known = await this.prismaService.article.findFirst({
         where: {
           OR: [
@@ -748,7 +805,9 @@ export class TrpcService {
         const feed = await this.prismaService.feed.findUniqueOrThrow({
           where: { id: known.mpId },
         });
-        return this.finishWechat2RssSubscription(feed, false, false);
+        if (feed.collectionChannel != null || feed.publicAlbumIds)
+          return this.finishWechat2RssSubscription(feed, false, false);
+        knownFeed = feed;
       }
       const account = await provider.checkAccountStatus();
       if (!account.available)
@@ -793,6 +852,16 @@ export class TrpcService {
           message:
             '此前新增请求结果尚未确认，本次未重发；请在私有实例核对是否已添加，原链接已保留。',
         };
+      if (!feedPath && knownFeed) {
+        const knownFeedId = knownFeed.id;
+        const existing = (await provider.listSubscriptions()).find(
+          (item) => item.feedId === knownFeedId,
+        );
+        if (existing) {
+          feedPath = existing.feedUrl;
+          await journal.accepted(feedPath);
+        }
+      }
       if (!feedPath) {
         await journal.claim();
         upstreamSubmitted = true;
@@ -821,7 +890,7 @@ export class TrpcService {
       });
       if (old && old.mpName !== accepted.name)
         throw new Error('私有实例与现有订阅名称不一致，请先核对身份。');
-      const feed =
+      let feed =
         old ||
         (await this.prismaService.feed.create({
           data: {
@@ -835,10 +904,31 @@ export class TrpcService {
             collectionChannel: 'wechat2rss',
           },
         }));
+      let sourceBindingChanged = !old;
+      // Explicit Wechat2RSS selection may repair a legacy record with NO saved
+      // source or album binding. Preserve real saved sources and paused state.
+      if (old && old.collectionChannel == null && !old.publicAlbumIds) {
+        const changed = await this.prismaService.feed.updateMany({
+          where: {
+            id: old.id,
+            mpName: accepted.name,
+            collectionChannel: null,
+            publicAlbumIds: old.publicAlbumIds,
+          },
+          data: { collectionChannel: 'wechat2rss' },
+        });
+        if (changed.count !== 1)
+          throw new Error('Wechat2RSS binding changed during identity check');
+        feed = await this.prismaService.feed.findUniqueOrThrow({
+          where: { id: old.id },
+        });
+        sourceBindingChanged = true;
+      }
       return await this.finishWechat2RssSubscription(
         feed,
         !old,
         upstreamSubmitted,
+        sourceBindingChanged,
       );
     } catch (error) {
       if (error instanceof TRPCError) throw error;
@@ -874,10 +964,11 @@ export class TrpcService {
     feed: Feed,
     created: boolean,
     upstreamSubmitted: boolean,
+    sourceBindingChanged = created,
   ) {
     const base = {
       requestedSource: 'wechat2rss' as const,
-      sourceBindingChanged: created,
+      sourceBindingChanged,
       accepted: true,
       created,
       feed,

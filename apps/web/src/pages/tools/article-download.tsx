@@ -20,7 +20,7 @@ type SavedArticle = {
   markdownPath: string;
   alreadySaved: boolean;
   imageCount: number;
-  contentSource?: 'saved-article' | 'remote' | 'verified-provider';
+  contentSource?: 'wechat2rss-cache';
 };
 
 class GoneBrowserArticleTask extends Error {
@@ -357,6 +357,8 @@ export default function ArticleDownload() {
       );
       if (!result.saved || typeof result.markdownPath !== 'string')
         throw new Error('未收到有效的本机保存结果。');
+      if (result.contentSource !== 'wechat2rss-cache')
+        throw new Error('未收到 Wechat2RSS 来源确认，未认定为本次下载成功。');
       setSaved(result);
     });
   };
@@ -367,7 +369,8 @@ export default function ArticleDownload() {
         <p className="text-default-500 mb-3 text-sm">工具 / 文章下载</p>
         <h1 className="text-2xl font-semibold tracking-tight">文章下载</h1>
         <p className="text-default-500 mt-3 text-sm leading-6">
-          粘贴一篇公众号文章链接，直接保存正文和图片到本机 Obsidian 文件夹。
+          仅使用 Wechat2RSS 已订阅缓存，保存单篇正文和图片到本机 Obsidian
+          文件夹。
         </p>
         <form onSubmit={download} className="mt-8 space-y-5" aria-busy={busy}>
           <Input
@@ -388,7 +391,7 @@ export default function ArticleDownload() {
             isDisabled={locked}
             isRequired
             autoComplete="off"
-            description="支持公众号文章长链接和短链接。"
+            description="请使用含 __biz、mid、idx 的完整原文长链接；短链接暂无法可靠定位缓存。"
           />
           <div className="bg-default-50 rounded-xl p-4">
             <p className="mb-2 text-sm font-medium">保存路径</p>
@@ -605,14 +608,10 @@ export default function ArticleDownload() {
               <p className="text-default-600 mt-2 break-all text-sm">
                 {saved.markdownPath}
               </p>
-              {saved.contentSource === 'saved-article' && (
+              {saved.contentSource === 'wechat2rss-cache' && (
                 <p className="text-default-600 mt-2 text-sm">
-                  使用本机已保存的正文和图片，未访问原文服务器。
-                </p>
-              )}
-              {saved.contentSource === 'verified-provider' && (
-                <p className="text-default-600 mt-2 text-sm">
-                  使用本次接收并通过校验的正文和本地图片。
+                  正文来自 Wechat2RSS
+                  缓存；图片资源另经字节校验保存，未抓取微信原文页面。
                 </p>
               )}
               <p className="text-default-600 mt-2 text-sm">
@@ -622,7 +621,8 @@ export default function ArticleDownload() {
           )}
         </div>
         <p className="text-default-500 mt-8 text-xs leading-6">
-          按北京时间当天建立日期目录，每篇文章独立保存，不需要解压。此工具不改变订阅；原文要求登录、验证或图片失败时停止保存。浏览器验证不会自动传给后台。
+          按北京时间当天建立日期目录，每篇文章独立保存，不需要解压。正文仅使用
+          Wechat2RSS，不复用来源不明的旧缓存，不直连原页或切换服务。公众号未订阅、文章不在当前缓存、正文或媒体不完整时明确停止；不会自动添加整个公众号或触发强制更新。
         </p>
       </div>
     </div>

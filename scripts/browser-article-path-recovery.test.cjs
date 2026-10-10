@@ -26,7 +26,7 @@ function compile(file, require, globals = {}) {
   const exports = {};
   vm.runInNewContext(
     code,
-    { exports, require, ...globals },
+    { exports, require, Error, ...globals },
     { filename: file },
   );
   return exports;
@@ -199,6 +199,7 @@ function page({
     },
     {
       fetch,
+      URL,
       AbortController,
       setTimeout: (fn, delay) => {
         timers.set(++timerId, { fn, delay });
@@ -830,4 +831,64 @@ test('leaving cancels capture and ignores late reads; returning loads preference
   assert.deepEqual(returned.state[1], remembered);
   assert.ok(returned.calls.every((c) => c.method === 'GET'));
   returned.unmount();
+});
+
+test('ordinary single download shows Wechat2RSS-only cache errors without selecting another transport', async () => {
+  const h = page({
+    taskPresent: false,
+    effects: true,
+    fetchReply: async (url, options) => {
+      if (url.endsWith('/download/article') && options.method === 'POST')
+        return {
+          ok: false,
+          json: async () => ({
+            code: 'WECHAT2RSS_SINGLE_CACHE_MISS',
+            message: '文章不在Wechat2RSS缓存中，不使用其他来源。',
+          }),
+        };
+    },
+  });
+  h.state[0] =
+    'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef';
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[7], false);
+  assert.ok(JSON.stringify(h.render()).includes('仅使用 Wechat2RSS'));
+  h.render()
+    .find((n) => n.type === 'form')
+    .props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.ok(h.state[3].includes('Wechat2RSS缓存'));
+  assert.equal(h.state[6], null);
+  const posted = h.calls.filter((c) => c.method === 'POST');
+  assert.equal(posted.length, 1);
+  assert.ok(posted[0].url.endsWith('/download/article'));
+  assert.equal(JSON.parse(posted[0].body).source, undefined);
+  h.unmount();
+});
+
+test('ordinary single download refuses a successful receipt from an unconfirmed article source', async () => {
+  const h = page({
+    taskPresent: false,
+    fetchReply: async (url, options) => {
+      if (url.endsWith('/download/article') && options.method === 'POST')
+        return {
+          ok: true,
+          json: async () => ({
+            saved: true,
+            markdownPath: 'synthetic-path/正文.md',
+            contentSource: 'remote',
+          }),
+        };
+    },
+  });
+  h.state[0] =
+    'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef';
+  h.render()
+    .find((n) => n.type === 'form')
+    .props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.equal(h.state[6], null);
+  assert.ok(h.state[3].includes('Wechat2RSS 来源确认'));
+  assert.equal(h.calls.filter((c) => c.method === 'POST').length, 1);
 });

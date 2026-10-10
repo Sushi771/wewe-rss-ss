@@ -390,6 +390,9 @@ export class TrpcRouter {
   private legacyAccountProcedure = this.trpcService.protectedProcedure;
 
   accountRouter = this.trpcService.router({
+    wechat2rssStatus: this.trpcService.protectedProcedure.query(() =>
+      this.trpcService.wechat2rssStatus(),
+    ),
     manualRefreshOptions: this.legacyAccountProcedure
       .input(z.object({ accountId: z.string().regex(/^\d+$/) }))
       .query(async ({ input, ctx }) => {

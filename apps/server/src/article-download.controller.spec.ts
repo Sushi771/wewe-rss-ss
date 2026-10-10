@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ArticleDownloadController } from './article-download.controller';
 import * as download from './article-download';
+import * as single from './wechat2rss-single-download';
 import * as picker from './article-folder-picker';
 import { LocalArticleStore } from './article-local-save';
 import { PrismaService } from './prisma/prisma.service';
@@ -56,17 +57,20 @@ describe('local article HTTP save and native directory selection, no upstream or
     app = module.createNestApplication();
     await app.init();
     jest
-      .spyOn(download, 'buildArticleDownload')
-      .mockImplementation(async (_url, directory) => {
+      .spyOn(single, 'prepareWechat2RssSingleDownload')
+      .mockImplementation(async () => async (directory) => {
         await mkdir(join(directory, 'image'));
-        await writeFile(join(directory, 'index.md'), '# 合成正文');
+        await writeFile(join(directory, 'index.md'), '# 合成Wechat2RSS正文');
         return {
-          filename: 'unused.zip',
           articleId: 'WX_123_456_1',
           title: '中文测试',
           imageCount: 0,
+          source: 'wechat2rss' as const,
         };
       });
+    jest
+      .spyOn(download, 'buildArticleDownload')
+      .mockRejectedValue(new Error('PUBLIC_ARTICLE_FORBIDDEN'));
     jest.spyOn(picker, 'pickArticleDirectory').mockResolvedValue(destination);
   });
   afterEach(async () => {
@@ -87,7 +91,7 @@ describe('local article HTTP save and native directory selection, no upstream or
       .set('origin', 'http://attacker.invalid')
       .expect(403);
     await post('/directory').unset('origin').expect(403);
-    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+    expect(single.prepareWechat2RssSingleDownload).not.toHaveBeenCalled();
     expect(picker.pickArticleDirectory).not.toHaveBeenCalled();
   });
   it('returns saved paths as JSON with real Markdown, no ZIP or download response', async () => {
@@ -100,14 +104,12 @@ describe('local article HTTP save and native directory selection, no upstream or
       imageCount: 0,
     });
     expect(await readFile(response.body.markdownPath, 'utf8')).toBe(
-      '# 合成正文',
+      '# 合成Wechat2RSS正文',
     );
-    expect(download.buildArticleDownload).toHaveBeenCalledWith(
-      url,
-      expect.any(String),
-      undefined,
-      { imageDirectory: 'image', markdownOnly: true },
-    );
+    expect(single.prepareWechat2RssSingleDownload).toHaveBeenCalledWith(url);
+    expect(response.body.contentSource).toBe('wechat2rss-cache');
+    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+    expect(findMany).not.toHaveBeenCalled();
     expect(picker.pickArticleDirectory).not.toHaveBeenCalled();
   });
   it('cannot use a destination path from browser JSON', async () => {
@@ -116,43 +118,36 @@ describe('local article HTTP save and native directory selection, no upstream or
       askEveryTime: false,
       directory: '/arbitrary',
     }).expect(400);
-    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+    expect(single.prepareWechat2RssSingleDownload).not.toHaveBeenCalled();
     expect(JSON.parse(await readFile(settingsFile, 'utf8')).directory).toBe(
       destination,
     );
   });
 
-  it('saves a verified complete local article through the existing HTTP route without remote download', async () => {
-    const canonical =
-      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef';
-    findMany.mockResolvedValueOnce([
-      {
-        id: 'WX_1234567890_2247000001_1',
-        mpId: 'MP_WXS_1234567890',
-        title: '缓存完整正文',
-        publishTime: 1720000000,
-        sourceUrl: canonical,
-        verifiedSourceUrl: canonical,
-        contentHtml: '<div id="js_content"><p>已经授权保存的全文。</p></div>',
-        lastBodyStatus: 'available',
-        metrics: null,
-      },
+  it('does not use a complete old SQLite body with unproved source', async () => {
+    findMany.mockResolvedValue([
+      { id: 'legacy', sourceUrl: url, contentHtml: '<p>旧渠道正文</p>' },
     ]);
-    const response = await post('', { url: canonical }).expect(200);
-    expect(response.body.contentSource).toBe('saved-article');
-    expect(await readFile(response.body.markdownPath, 'utf8')).toContain(
-      '已经授权保存的全文。',
+    const response = await post('', { url }).expect(200);
+    expect(response.body.contentSource).toBe('wechat2rss-cache');
+    expect(await readFile(response.body.markdownPath, 'utf8')).toBe(
+      '# 合成Wechat2RSS正文',
     );
+    expect(findMany).not.toHaveBeenCalled();
     expect(download.buildArticleDownload).not.toHaveBeenCalled();
-    expect(response.body.saved).toBe(true);
   });
-
-  it('keeps an identified incomplete cache from falling back to a remote request', async () => {
-    findMany.mockResolvedValueOnce([
-      { id: 'legacy', sourceUrl: url, verifiedSourceUrl: null },
+  it('keeps a missing Wechat2RSS cache from falling back to old SQLite or the public original', async () => {
+    findMany.mockResolvedValue([
+      { id: 'legacy', sourceUrl: url, contentHtml: '<p>旧缓存</p>' },
     ]);
-    const response = await post('', { url }).expect(422);
-    expect(response.body.code).toBe('CACHED_ARTICLE_UNAVAILABLE');
+    jest.mocked(single.prepareWechat2RssSingleDownload).mockRejectedValueOnce(
+      new download.ArticleDownloadError('缓存缺失，不使用其他来源。', 409, {
+        code: 'WECHAT2RSS_SINGLE_CACHE_MISS',
+      }),
+    );
+    const response = await post('', { url }).expect(409);
+    expect(response.body.code).toBe('WECHAT2RSS_SINGLE_CACHE_MISS');
+    expect(findMany).not.toHaveBeenCalled();
     expect(download.buildArticleDownload).not.toHaveBeenCalled();
   });
   it('returns the actual safe verification Location only in the authenticated local error response, not logs or settings', async () => {
@@ -163,7 +158,7 @@ describe('local article HTTP save and native directory selection, no upstream or
       '/mp/wappoc_appmsgcaptcha?action=verify&r=12345&url=' +
       encodeURIComponent(url);
     const observed = articleVerificationLocation(location, url);
-    jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+    jest.mocked(single.prepareWechat2RssSingleDownload).mockRejectedValueOnce(
       new download.ArticleDownloadError(
         'official verification required',
         422,
@@ -193,7 +188,7 @@ describe('local article HTTP save and native directory selection, no upstream or
       /wappoc_appmsgcaptcha|12345|https/,
     );
     expect(await readFile(settingsFile, 'utf8')).toBe(before);
-    expect(download.buildArticleDownload).toHaveBeenCalledTimes(1);
+    expect(single.prepareWechat2RssSingleDownload).toHaveBeenCalledTimes(1);
     expect(picker.pickArticleDirectory).not.toHaveBeenCalled();
   });
 
@@ -205,7 +200,7 @@ describe('local article HTTP save and native directory selection, no upstream or
     'withholds a missing, sensitive or unsafe Location and never substitutes a homepage: %s',
     async (location) => {
       jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
-      jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+      jest.mocked(single.prepareWechat2RssSingleDownload).mockRejectedValueOnce(
         new download.ArticleDownloadError(
           'verification required',
           422,
@@ -225,14 +220,14 @@ describe('local article HTTP save and native directory selection, no upstream or
       expect(JSON.stringify(response.body)).not.toMatch(
         /fixture-sensitive|evil\.invalid|weread\.qq\.com/,
       );
-      expect(download.buildArticleDownload).toHaveBeenCalledTimes(1);
+      expect(single.prepareWechat2RssSingleDownload).toHaveBeenCalledTimes(1);
     },
   );
 
   it('does not return another article verification context or an image redirect link', async () => {
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
     const other = url.replace('abcdef', 'zzzzzz');
-    jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+    jest.mocked(single.prepareWechat2RssSingleDownload).mockRejectedValueOnce(
       new download.ArticleDownloadError(
         'verification required',
         422,
@@ -248,7 +243,7 @@ describe('local article HTTP save and native directory selection, no upstream or
     const first = await post('', { url }).expect(422);
     expect(first.body.verification.reason).toBe('missing-location');
     expect(first.body.verification.url).toBeUndefined();
-    jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+    jest.mocked(single.prepareWechat2RssSingleDownload).mockRejectedValueOnce(
       new download.ArticleDownloadError(
         'image verification required',
         422,
@@ -274,7 +269,7 @@ describe('local article HTTP save and native directory selection, no upstream or
       directory: destination,
       askEveryTime: false,
     });
-    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+    expect(single.prepareWechat2RssSingleDownload).not.toHaveBeenCalled();
   });
   it('remembers a chosen path and disabling per-download prompting without resetting it', async () => {
     const other = join(temporary, '另一个 文件夹');
@@ -293,11 +288,11 @@ describe('local article HTTP save and native directory selection, no upstream or
   it('requires and consumes a fresh native selection when asking every time', async () => {
     await post('/settings', { askEveryTime: true }).expect(200);
     await post('', { url }).expect(409);
-    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+    expect(single.prepareWechat2RssSingleDownload).not.toHaveBeenCalled();
     const selection = await post('/directory').expect(200);
     await post('', { url, pickToken: selection.body.pickToken }).expect(200);
     await post('', { url, pickToken: selection.body.pickToken }).expect(409);
-    expect(download.buildArticleDownload).toHaveBeenCalledTimes(1);
+    expect(single.prepareWechat2RssSingleDownload).toHaveBeenCalledTimes(1);
   });
   it('serializes a pending preference write with picking, downloading and other preference writes', async () => {
     let release!: () => void;
@@ -325,7 +320,7 @@ describe('local article HTTP save and native directory selection, no upstream or
       await post('', { url }).expect(409);
       await post('/settings', { askEveryTime: false }).expect(409);
       expect(picker.pickArticleDirectory).not.toHaveBeenCalled();
-      expect(download.buildArticleDownload).not.toHaveBeenCalled();
+      expect(single.prepareWechat2RssSingleDownload).not.toHaveBeenCalled();
     } finally {
       release();
       await pending;
@@ -361,7 +356,7 @@ describe('local article HTTP save and native directory selection, no upstream or
     const warn = jest
       .spyOn(Logger.prototype, 'warn')
       .mockImplementation(() => {});
-    jest.mocked(download.buildArticleDownload).mockRejectedValueOnce(
+    jest.mocked(single.prepareWechat2RssSingleDownload).mockRejectedValueOnce(
       new download.ArticleDownloadError(
         '原文要求验证（HTTP 302），未完成保存。',
         422,
@@ -397,10 +392,10 @@ describe('local article HTTP save and native directory selection, no upstream or
       release = resolve;
     });
     const original = jest
-      .mocked(download.buildArticleDownload)
+      .mocked(single.prepareWechat2RssSingleDownload)
       .getMockImplementation()!;
     jest
-      .mocked(download.buildArticleDownload)
+      .mocked(single.prepareWechat2RssSingleDownload)
       .mockImplementationOnce(async (...args) => {
         await block;
         return original(...args);
@@ -408,7 +403,8 @@ describe('local article HTTP save and native directory selection, no upstream or
     const pending = post('', { url }).then((response) => response);
     for (
       let i = 0;
-      i < 30 && !jest.mocked(download.buildArticleDownload).mock.calls.length;
+      i < 30 &&
+      !jest.mocked(single.prepareWechat2RssSingleDownload).mock.calls.length;
       i++
     )
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -421,6 +417,6 @@ describe('local article HTTP save and native directory selection, no upstream or
     await post('', { url }).expect(409);
     process.env.PRIVATE_ONLINE_MODE = '1';
     await post('', { url }).expect(403);
-    expect(download.buildArticleDownload).not.toHaveBeenCalled();
+    expect(single.prepareWechat2RssSingleDownload).not.toHaveBeenCalled();
   });
 });

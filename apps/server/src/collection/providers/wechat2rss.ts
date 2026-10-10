@@ -1,6 +1,8 @@
 import { isIP } from 'node:net';
 import { parseWechat2RssJsonFeed } from '../provider-article';
 import { ProviderPage, SubscriptionProvider } from '../subscription-provider';
+import { canonicalArticleUrl } from '../collection-format';
+import { selectWechat2RssSingleCache } from '../../wechat2rss-single-cache';
 
 type ListedFeed = { id: number | string; name: string; link: string };
 type IdentityRead = { deadline: number; remainingListRequests: number };
@@ -273,6 +275,18 @@ export class Wechat2RssProvider implements SubscriptionProvider {
       throw new Error('WECHAT2RSS_SUBSCRIPTION_MISSING');
     this.envelope(await this.get(`/add/${feedId.slice(7)}`));
     return { accepted: true as const, pending: true as const };
+  }
+
+  /** Read one already-subscribed cache only. No /addurl, /add or original-page fetch. */
+  async fetchSingleCachedArticle(articleUrl: string) {
+    const identity = canonicalArticleUrl(articleUrl);
+    const matches = (await this.listSubscriptions()).filter(
+      (v) => v.feedId === identity.mpId,
+    );
+    if (matches.length !== 1)
+      throw new Error('WECHAT2RSS_SUBSCRIPTION_MISSING');
+    const raw = await this.get(matches[0].feedUrl.replace(/\.xml$/, '.json'));
+    return selectWechat2RssSingleCache(raw, articleUrl);
   }
 
   async fetchArticles(

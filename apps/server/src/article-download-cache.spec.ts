@@ -87,6 +87,10 @@ describe('verified saved article download, no HTTP or database writes', () => {
       { verifiedSourceUrl: url.replace('2247000001', '2247000002') },
     ],
     ['missing body', { contentHtml: null }],
+    [
+      'embedded video without archived bytes',
+      { contentHtml: '<div id="js_content"><p>正文</p><video></video></div>' },
+    ],
     ['unavailable body', { lastBodyStatus: 'unavailable' }],
     [
       'remote image',

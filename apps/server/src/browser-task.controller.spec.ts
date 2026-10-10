@@ -3,14 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { INestApplication, Logger } from '@nestjs/common';
 import express, { json } from 'express';
 import request from 'supertest';
-import {
-  mkdtemp,
-  mkdir,
-  writeFile,
-  readFile,
-  readdir,
-  rm,
-} from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readFileSync } from 'node:fs';
@@ -27,10 +20,9 @@ import {
   binding,
   observation,
   short,
-  png,
 } from '../test/browser-task-fixture';
 
-describe('offline browser completion → existing authorized save and image exporter', () => {
+describe('isolated browser transport cannot bypass Wechat2RSS-only article saving', () => {
   let app: INestApplication;
   let broker: BrowserTaskBroker;
   let temporary: string;
@@ -94,7 +86,7 @@ describe('offline browser completion → existing authorized save and image expo
     process.env = { ...environment };
     await rm(temporary, { recursive: true, force: true });
   });
-  it('HTTP claim/complete then original internal save preserves note on repeat and writes actual image bytes', async () => {
+  it('HTTP claim/complete may validate transport but internal article saving refuses this source', async () => {
     const task = broker.issue({ url: short });
     const claim = await post('claim', { taskId: task.taskId, binding });
     expect(claim.status).toBe(200);
@@ -138,25 +130,16 @@ describe('offline browser completion → existing authorized save and image expo
     await app
       .get(ArticleDownloadController)
       .saveVerifiedArticle(article, { url: short }, req, first);
-    expect(first.data).toMatchObject({
-      saved: true,
-      contentSource: 'verified-provider',
-      imageCount: 1,
-      alreadySaved: false,
-    });
-    const images = await readdir(join(first.data.directory, 'image'));
-    expect(
-      await readFile(join(first.data.directory, 'image', images[0])),
-    ).toEqual(Buffer.from(png, 'base64'));
-    await writeFile(first.data.markdownPath, '用户旧笔记不得覆盖');
+    expect(first.code).toBe(409);
+    expect(first.data).toMatchObject({ code: 'WECHAT2RSS_ONLY' });
+    expect(await readdir(destination)).toEqual([]);
     const repeat = response();
     await app
       .get(ArticleDownloadController)
       .saveVerifiedArticle(article, { url: short }, req, repeat);
-    expect(repeat.data.alreadySaved).toBe(true);
-    expect(await readFile(first.data.markdownPath, 'utf8')).toBe(
-      '用户旧笔记不得覆盖',
-    );
+    expect(repeat.code).toBe(409);
+    expect(repeat.data).toMatchObject({ code: 'WECHAT2RSS_ONLY' });
+    expect(await readdir(destination)).toEqual([]);
     const unauthenticated = response();
     await app
       .get(ArticleDownloadController)

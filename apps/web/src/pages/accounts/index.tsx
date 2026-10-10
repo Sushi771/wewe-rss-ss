@@ -28,6 +28,23 @@ const AccountPage = () => {
 
   const { refetch, data, isFetching } = trpc.account.list.useQuery({});
   const queryUtils = trpc.useUtils();
+  const checkingWechat2Rss = useRef(false);
+  const wechat2RssStatus = trpc.account.wechat2rssStatus.useQuery(undefined, {
+    enabled: false,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: false,
+  });
+  const checkWechat2RssStatus = async () => {
+    if (checkingWechat2Rss.current || wechat2RssStatus.isFetching) return;
+    checkingWechat2Rss.current = true;
+    try {
+      await wechat2RssStatus.refetch();
+    } finally {
+      checkingWechat2Rss.current = false;
+    }
+  };
   const { mutateAsync: updateAccount } = trpc.account.edit.useMutation({});
   const { mutateAsync: deleteAccount } = trpc.account.delete.useMutation({});
   const connection = trpc.account.manualRefreshOptions.useQuery(
@@ -184,6 +201,66 @@ const AccountPage = () => {
       </div>
 
       <div className="flex-1 overflow-y-auto">
+        <section
+          aria-label="Wechat2RSS 账号状态"
+          className="mx-4 mt-4 space-y-2 rounded-lg border p-4 text-sm"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-medium">Wechat2RSS 账号状态</h2>
+            <Button
+              size="sm"
+              variant="flat"
+              onPress={checkWechat2RssStatus}
+              isLoading={wechat2RssStatus.isFetching}
+              isDisabled={wechat2RssStatus.isFetching}
+            >
+              检查实例账号状态
+            </Button>
+          </div>
+          <p className="text-neutral-500">
+            Wechat2RSS 使用私有实例中的账号。下方本地微信读书账号不控制此来源，
+            不会自动同步或复制登录信息。
+          </p>
+          {wechat2RssStatus.isFetching ? (
+            <p role="status">正在读取实例账号状态…</p>
+          ) : wechat2RssStatus.isError ? (
+            <p role="alert">
+              实例账号状态读取失败，请手动再次检查；本次没有登录或更新订阅。
+            </p>
+          ) : wechat2RssStatus.data ? (
+            <div role="status" aria-live="polite" className="space-y-1">
+              <p>
+                {wechat2RssStatus.data.code === 'SOURCE_UNAVAILABLE'
+                  ? '实例未配置'
+                  : wechat2RssStatus.data.code === 'STATUS_CHECK_FAILED'
+                    ? '状态读取失败'
+                    : wechat2RssStatus.data.available
+                      ? '账号可用'
+                      : wechat2RssStatus.data.challenged
+                        ? '待官方验证'
+                        : '账号暂不可用'}
+                {wechat2RssStatus.data.available &&
+                  wechat2RssStatus.data.challenged &&
+                  '；部分账号待官方验证'}
+              </p>
+              <p>{wechat2RssStatus.data.message}</p>
+              {wechat2RssStatus.data.retryAfter && (
+                <p>实例提示等待时间：{wechat2RssStatus.data.retryAfter}</p>
+              )}
+              <p className="text-neutral-500">
+                检查时间（北京时间）：
+                {wechat2RssStatus.data.checkedAt
+                  ? new Date(wechat2RssStatus.data.checkedAt).toLocaleString(
+                      'zh-CN',
+                      { timeZone: 'Asia/Shanghai', hour12: false },
+                    )
+                  : '尚未检查'}
+              </p>
+            </div>
+          ) : (
+            <p role="status">尚未检查实例账号状态；点击按钮只读取一次。</p>
+          )}
+        </section>
         {/* 失效账号警告横幅 */}
         {invalidAccounts.length > 0 && (
           <div className="mac-alert-danger mx-4 mt-4">

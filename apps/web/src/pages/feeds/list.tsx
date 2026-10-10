@@ -17,6 +17,7 @@ interface ArticleListProps {
   search: string;
   selectedIds: Set<string>;
   onSelectionChange: (selectedIds: Set<string>) => void;
+  collectionChannels?: Record<string, string>;
 }
 
 function metricDisplay(raw: string | null, key: 'read' | 'like' | 'favorite') {
@@ -32,6 +33,7 @@ const ArticleList: FC<ArticleListProps> = ({
   search,
   selectedIds,
   onSelectionChange,
+  collectionChannels = {},
 }) => {
   const { id } = useParams();
 
@@ -78,16 +80,6 @@ const ArticleList: FC<ArticleListProps> = ({
     onSelectionChange(new Set());
   }, [mpId, search, onSelectionChange]);
 
-  useEffect(() => {
-    if (
-      summary.data &&
-      ((sort === 'readCount' && !summary.data.readAvailable) ||
-        (sort === 'likeCount' && !summary.data.likeAvailable))
-    ) {
-      setSort('publishTime');
-    }
-  }, [summary.data, sort]);
-
   const {
     data,
     fetchNextPage,
@@ -101,7 +93,7 @@ const ArticleList: FC<ArticleListProps> = ({
       limit: 20,
       mpId: mpId,
       search: search || undefined,
-      sort,
+      sort: collectionChannels[mpId] === 'wechat2rss' ? 'publishTime' : sort,
     },
     {
       getNextPageParam: (lastPage) => lastPage.nextCursor,
@@ -111,6 +103,24 @@ const ArticleList: FC<ArticleListProps> = ({
   const items = useMemo(() => {
     return data?.pages.flatMap((page) => page.items) || [];
   }, [data]);
+  const hasWechat2Rss =
+    collectionChannels[mpId] === 'wechat2rss' ||
+    (!mpId && Object.values(collectionChannels).includes('wechat2rss')) ||
+    items.some(
+      (item) =>
+        (collectionChannels[item.mpId] || item.feed?.collectionChannel) ===
+        'wechat2rss',
+    );
+  const readSortingAvailable = !hasWechat2Rss && !!summary.data?.readAvailable;
+  const likeSortingAvailable = !hasWechat2Rss && !!summary.data?.likeAvailable;
+
+  useEffect(() => {
+    if (
+      (sort === 'readCount' && !readSortingAvailable) ||
+      (sort === 'likeCount' && !likeSortingAvailable)
+    )
+      setSort('publishTime');
+  }, [readSortingAvailable, likeSortingAvailable, sort]);
 
   const handleSelectAll = (isSelected: boolean) => {
     if (isSelected) {
@@ -128,34 +138,42 @@ const ArticleList: FC<ArticleListProps> = ({
     <div className="flex h-full flex-col">
       <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
         排序
-        <select
-          aria-label="文章排序"
-          className="bg-background rounded border px-2 py-1"
-          value={sort}
-          onChange={(e) => {
-            setSort(e.target.value as typeof sort);
-            onSelectionChange(new Set());
-          }}
-        >
-          <option value="publishTime">发布时间</option>
-          <option value="readCount" disabled={!summary.data?.readAvailable}>
-            阅读量从高到低{summary.data?.readAvailable ? '' : '（未获取）'}
-          </option>
-          <option value="likeCount" disabled={!summary.data?.likeAvailable}>
-            点赞量从高到低{summary.data?.likeAvailable ? '' : '（未获取）'}
-          </option>
-        </select>
-        <span>
-          缺失指标不等于 0；带“+”为下限。收藏仅显示源数据，不以分享或在看代替。
-        </span>
+        {readSortingAvailable || likeSortingAvailable ? (
+          <select
+            aria-label="文章排序"
+            className="bg-background rounded border px-2 py-1"
+            value={sort}
+            onChange={(e) => {
+              setSort(e.target.value as typeof sort);
+              onSelectionChange(new Set());
+            }}
+          >
+            <option value="publishTime">发布时间</option>
+            {readSortingAvailable && (
+              <option value="readCount">阅读量从高到低</option>
+            )}
+            {likeSortingAvailable && (
+              <option value="likeCount">点赞量从高到低</option>
+            )}
+          </select>
+        ) : (
+          <span>按发布时间排列</span>
+        )}
+        {!hasWechat2Rss && (readSortingAvailable || likeSortingAvailable) && (
+          <span>带“+”为下限。收藏仅显示源数据，不以分享或在看代替。</span>
+        )}
       </label>
       <div className="text-default-500 px-3 pb-2 text-xs" aria-live="polite">
         {summary.data ? (
           <>
-            当前{search ? '筛选' : '订阅'}存量 {summary.data.articles}{' '}
-            篇；阅读已获取 {summary.data.readAvailable} 篇，点赞已获取{' '}
-            {summary.data.likeAvailable} 篇， 已缓存正文{' '}
-            {summary.data.cachedBodies} 篇。
+            当前{search ? '筛选' : '订阅'}存量 {summary.data.articles} 篇；
+            {!hasWechat2Rss && (
+              <>
+                阅读已获取 {summary.data.readAvailable} 篇，点赞已获取{' '}
+                {summary.data.likeAvailable} 篇，
+              </>
+            )}
+            已缓存正文 {summary.data.cachedBodies} 篇。
             {summary.data.oldestPublishTime &&
             summary.data.newestPublishTime ? (
               <>
@@ -171,14 +189,11 @@ const ArticleList: FC<ArticleListProps> = ({
                 ，不代表期间无遗漏；存量日期尚需与原文核对。
               </>
             ) : null}
-            {!summary.data.readAvailable &&
-              !summary.data.likeAvailable &&
-              ' 尚未获取阅读和点赞，热度排序已禁用。'}
           </>
         ) : summary.isError ? (
-          '指标覆盖情况查询失败，暂不可按热度排序。'
+          '存量信息读取失败。'
         ) : (
-          '正在读取存量与指标覆盖情况…'
+          '正在读取存量信息…'
         )}
       </div>
       {isError && (
@@ -300,14 +315,17 @@ const ArticleList: FC<ArticleListProps> = ({
                         : ''}
                   </span>
                 )}
-                <span
-                  className="whitespace-normal break-words text-xs md:whitespace-nowrap"
-                  title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
-                >
-                  阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
-                  {metricDisplay(item.metrics, 'like')} · 收藏{' '}
-                  {metricDisplay(item.metrics, 'favorite')}
-                </span>
+                {(collectionChannels[item.mpId] ||
+                  item.feed?.collectionChannel) !== 'wechat2rss' && (
+                  <span
+                    className="whitespace-normal break-words text-xs md:whitespace-nowrap"
+                    title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
+                  >
+                    阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
+                    {metricDisplay(item.metrics, 'like')} · 收藏{' '}
+                    {metricDisplay(item.metrics, 'favorite')}
+                  </span>
+                )}
                 <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs md:flex-nowrap md:justify-end">
                   <span className="truncate">
                     {item.feed?.mpName || '未知'}
