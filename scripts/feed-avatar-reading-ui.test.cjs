@@ -203,7 +203,8 @@ test('missing bodies retain a short warning and original link; no false complete
   const f = readingFixture(false);
   const view = f.render();
   assert.match(text(view), /正文未缓存/);
-  assert.match(text(view), /Synthetic source unavailable/);
+  assert.match(text(view), /正文暂不可重试/);
+  assert(!text(view).includes('Synthetic source unavailable'));
   const link = nodes(view).find(
     (n) => n.type === 'a' && n.props.children === 'Synthetic title',
   );
