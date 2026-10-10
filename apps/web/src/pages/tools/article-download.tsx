@@ -27,6 +27,10 @@ type SingleTask = Partial<SavedArticle> & {
   revision: number;
   state: 'waiting' | 'saving' | 'saved' | 'blocked' | 'failed' | 'cancelled';
   message: string;
+  feedId?: string;
+  code?: string;
+  destination?: string;
+  selectedArticle?: { articleId: string; title: string; publishTime: number };
 };
 function singleTaskStatus(raw: unknown): SingleTask | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -75,6 +79,13 @@ export default function ArticleDownload() {
   const [statusReading, setStatusReading] = useState(false);
   const [browserDestinationBound, setBrowserDestinationBound] = useState(false);
   const [singleTask, setSingleTask] = useState<SingleTask | null>(null);
+  const [singleStatusError, setSingleStatusError] = useState('');
+  const [singleReadAttempt, setSingleReadAttempt] = useState(0);
+  const [candidates, setCandidates] = useState<{
+    taskId: string;
+    destination: string;
+    articles: Array<{ articleId: string; title: string; publishTime: number }>;
+  } | null>(null);
   const browserActive =
     !!browserTask &&
     ['waiting', 'claimed', 'ready', 'saving'].includes(browserTask.state);
@@ -82,6 +93,7 @@ export default function ArticleDownload() {
     !!singleTask && ['waiting', 'saving'].includes(singleTask.state);
   const locked = busy || browserActive || singleActive;
   const request = useRef<AbortController | null>(null);
+  const dismissedSingleTasks = useRef(new Set<string>());
 
   const api = useCallback(
     async (endpoint: string, body?: unknown, signal?: AbortSignal) => {
@@ -168,6 +180,7 @@ export default function ArticleDownload() {
           controller.signal,
         );
         if (controller.signal.aborted) return;
+        setSingleStatusError('');
         const tasks: SingleTask[] = Array.isArray(response.tasks)
           ? response.tasks
               .map(singleTaskStatus)
@@ -177,7 +190,7 @@ export default function ArticleDownload() {
           const candidate =
             tasks.find((t) => t.taskId === current?.taskId) ||
             tasks.find((t) => ['waiting', 'saving'].includes(t.state)) ||
-            tasks[0];
+            tasks.find((t) => !dismissedSingleTasks.current.has(t.taskId));
           if (!candidate) return current;
           if (
             candidate.taskId === current?.taskId &&
@@ -186,8 +199,12 @@ export default function ArticleDownload() {
             return current;
           return candidate;
         });
-      } catch {
-        /* A local status failure never cancels a durable server task. */
+      } catch (cause) {
+        // Retain the task, but never present a stale waiting receipt as current.
+        if (!controller.signal.aborted)
+          setSingleStatusError(
+            cause instanceof Error ? cause.message : '下载状态读取失败。',
+          );
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(poll, 5000);
       }
@@ -197,7 +214,7 @@ export default function ArticleDownload() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [api]);
+  }, [api, singleReadAttempt]);
 
   const browserTaskId = browserTask?.taskId;
   useEffect(() => {
@@ -437,6 +454,8 @@ export default function ArticleDownload() {
         throw new Error('未收到有效的本机保存结果。');
       if (result.contentSource !== 'wechat2rss-cache')
         throw new Error('未收到 Wechat2RSS 来源确认，未认定为本次下载成功。');
+      if (singleTask) dismissedSingleTasks.current.add(singleTask.taskId);
+      setSingleTask(null);
       setSaved(result);
     });
   };
@@ -598,28 +617,118 @@ export default function ArticleDownload() {
                 </Button>
               </>
             )}
-            {['blocked', 'failed'].includes(singleTask.state) && (
-              <Button
-                size="sm"
-                className="mt-2"
-                isDisabled={busy}
-                onPress={() =>
-                  void operate(async (signal) => {
-                    const task = singleTaskStatus(
-                      await api(
-                        '/single-task/' + singleTask.taskId + '/resume',
-                        {},
-                        signal,
-                      ),
-                    );
-                    if (!task) throw new Error('未收到有效的接续结果。');
-                    setSingleTask(task);
-                  })
-                }
-              >
-                继续原下载
-              </Button>
+            {['blocked', 'failed'].includes(singleTask.state) &&
+              singleTask.code !== 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE' && (
+                <Button
+                  size="sm"
+                  className="mt-2"
+                  isDisabled={busy}
+                  onPress={() =>
+                    void operate(async (signal) => {
+                      const task = singleTaskStatus(
+                        await api(
+                          '/single-task/' + singleTask.taskId + '/resume',
+                          {},
+                          signal,
+                        ),
+                      );
+                      if (!task) throw new Error('未收到有效的接续结果。');
+                      setSingleTask(task);
+                    })
+                  }
+                >
+                  继续原下载
+                </Button>
+              )}
+            {singleTask.selectedArticle && (
+              <p className="mt-1">已确认：{singleTask.selectedArticle.title}</p>
             )}
+            {singleTask.state === 'failed' &&
+              /^MP_WXS_\d{5,15}$/.test(singleTask.feedId || '') && (
+                <div className="mt-2">
+                  <Button
+                    size="sm"
+                    isDisabled={busy}
+                    onPress={() =>
+                      void operate(async (signal) => {
+                        const result = await api(
+                          '/single-task/' + singleTask.taskId + '/candidates',
+                          undefined,
+                          signal,
+                        );
+                        if (
+                          result.taskId !== singleTask.taskId ||
+                          typeof result.destination !== 'string' ||
+                          !Array.isArray(result.articles) ||
+                          result.articles.length > 20 ||
+                          result.articles.some(
+                            (a: {
+                              articleId?: unknown;
+                              title?: unknown;
+                              publishTime?: unknown;
+                            }) =>
+                              typeof a.articleId !== 'string' ||
+                              !/^WX_\d{5,15}_\d+_[1-9]\d*$/.test(a.articleId) ||
+                              typeof a.title !== 'string' ||
+                              !Number.isSafeInteger(a.publishTime),
+                          )
+                        )
+                          throw new Error('未收到有效的缓存文章列表。');
+                        setCandidates(result);
+                      })
+                    }
+                  >
+                    选择已缓存文章
+                  </Button>
+                  {candidates?.taskId === singleTask.taskId && (
+                    <div className="mt-3 space-y-2">
+                      <p>无法自动判断短链接目标，请确认后点击要下载的文章。</p>
+                      <p className="text-default-500 break-all">
+                        保存到原任务目录：{candidates.destination}
+                      </p>
+                      {candidates.articles.length === 0 && (
+                        <p>当前没有可核验的完整缓存；服务不保证历史文章。</p>
+                      )}
+                      {candidates.articles.map((a) => (
+                        <Button
+                          key={a.articleId}
+                          className="h-auto w-full justify-start whitespace-normal py-2 text-left"
+                          variant="bordered"
+                          isDisabled={busy}
+                          onPress={() =>
+                            void operate(async (signal) => {
+                              const task = singleTaskStatus(
+                                await api(
+                                  '/single-task/' +
+                                    singleTask.taskId +
+                                    '/select',
+                                  { articleId: a.articleId },
+                                  signal,
+                                ),
+                              );
+                              if (!task)
+                                throw new Error('未收到有效的文章选择回执。');
+                              setCandidates(null);
+                              setSingleTask(task);
+                            })
+                          }
+                        >
+                          <span>
+                            <span className="block">{a.title}</span>
+                            <span className="text-default-500 text-xs">
+                              {new Date(a.publishTime * 1000).toLocaleString(
+                                'zh-CN',
+                                { timeZone: 'Asia/Shanghai', hour12: false },
+                              )}{' '}
+                              · 下载这篇
+                            </span>
+                          </span>
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             {singleTask.state === 'saved' && (
               <p className="text-default-600 mt-1 break-all">
                 {singleTask.markdownPath}
@@ -730,6 +839,18 @@ export default function ArticleDownload() {
             <p role="status" className="text-default-500 text-sm">
               请完成可能弹出的目录选择；正在处理本机操作。
             </p>
+          )}
+          {singleStatusError && (
+            <div role="alert" className="mt-3 text-sm">
+              <p>下载状态读取失败，当前显示可能已过期：{singleStatusError}</p>
+              <Button
+                size="sm"
+                className="mt-2"
+                onPress={() => setSingleReadAttempt((n) => n + 1)}
+              >
+                重新读取下载状态
+              </Button>
+            </div>
           )}
           {notice && (
             <p role="status" className="text-default-500 text-sm">

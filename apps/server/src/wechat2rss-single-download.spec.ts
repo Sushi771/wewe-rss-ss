@@ -6,6 +6,7 @@ import { Wechat2RssProvider } from './collection/providers/wechat2rss';
 import * as registry from './collection/provider-registry';
 import * as images from './collection/image-fetch';
 import { prepareWechat2RssSingleDownload } from './wechat2rss-single-download';
+import { readWechat2RssSingleCandidates } from './wechat2rss-single-candidates';
 
 const number = '1234567890';
 const url =
@@ -63,6 +64,11 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
       expect(target.origin).toBe('http://127.0.0.1:18080');
       expect(options?.redirect).toBe('manual');
       calls.push(target.pathname);
+      if (target.pathname === '/login/list')
+        return response({
+          err: '',
+          data: [{ available: true, needCheck: false }],
+        });
       if (target.pathname === '/list') return response(listed);
       if (target.pathname === `/feed/${number}.json`) return response(feed);
       if (target.pathname === '/feed/all.json') return response(feed);
@@ -74,6 +80,78 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     await rm(folder, { recursive: true, force: true });
   });
 
+  it('actual observed feed shape: empty id and only long url cannot resolve a short input, but the explicitly chosen long url saves', async () => {
+    // Structure observed in the user cache on 2026-10-10. All values below are
+    // synthetic; the real cache had 20 items, no short alias anywhere and no guid.
+    feed = {
+      version: 'https://jsonfeed.org/version/1',
+      items: [
+        item({
+          id: '',
+          summary: '合成摘要',
+          date_modified: '2026-09-28T12:34:56+08:00',
+        }),
+      ],
+    };
+    await expect(
+      prepareWechat2RssSingleDownload(shortUrl, 'MP_WXS_' + number),
+    ).rejects.toMatchObject({
+      diagnostic: { code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE' },
+    });
+    expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+    const prepared = await prepareWechat2RssSingleDownload(
+      url,
+      'MP_WXS_' + number,
+    );
+    expect(await prepared(folder)).toMatchObject({
+      articleId: 'WX_1234567890_2247000001_1',
+      imageCount: 1,
+      source: 'wechat2rss',
+    });
+    expect(calls).toEqual([
+      '/list',
+      '/feed/' + number + '.json',
+      '/list',
+      '/feed/' + number + '.json',
+    ]);
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
+  it('candidate cache is read-only, bounded to 20 stable identities and never matched by duplicate titles', async () => {
+    feed = {
+      items: Array.from({ length: 24 }, (_, i) =>
+        item({
+          id: '',
+          url: url.replace('2247000001', String(2247000001 + i)),
+          title: '相同标题',
+          ...(i === 0 ? { content_html: '' } : {}),
+        }),
+      ),
+    };
+    const choices = await readWechat2RssSingleCandidates('MP_WXS_' + number);
+    expect(choices).toHaveLength(20);
+    expect(new Set(choices.map((a) => a.articleId)).size).toBe(20);
+    expect(choices.every((a) => a.title === '相同标题')).toBe(true);
+    expect(
+      choices.some((a) => a.articleId === 'WX_1234567890_2247000001_1'),
+    ).toBe(false);
+    expect(calls).toEqual([
+      '/login/list',
+      '/list',
+      '/feed/' + number + '.json',
+    ]);
+    expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+  it('unverified cache cannot become selectable candidates', async () => {
+    feed = { items: [item({ url: shortUrl, id: shortUrl })] };
+    await expect(
+      readWechat2RssSingleCandidates('MP_WXS_' + number),
+    ).rejects.toMatchObject({
+      diagnostic: { code: 'SINGLE_CANDIDATES_UNAVAILABLE' },
+    });
+    expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+  });
   it('reads only subscribed cache and saves actual selected Markdown and image bytes', async () => {
     feed = {
       items: [

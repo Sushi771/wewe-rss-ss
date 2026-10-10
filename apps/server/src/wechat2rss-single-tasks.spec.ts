@@ -13,6 +13,7 @@ import { ArticleDownloadError } from './article-download';
 import { LocalArticleStore } from './article-local-save';
 import { Wechat2RssSingleTasks } from './wechat2rss-single-tasks';
 import { prepareWechat2RssSingleDownload } from './wechat2rss-single-download';
+import { readWechat2RssSingleCandidates } from './wechat2rss-single-candidates';
 
 const url = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuv';
 const owner = createHash('sha256').update('synthetic-owner').digest('hex');
@@ -25,10 +26,18 @@ describe('durable single download consumer; synthetic queue and real temporary f
     directory: string,
     database: string,
     time: number,
-    item: { state: string; feedId?: string; bodyReady?: boolean },
+    item: {
+      state: string;
+      feedId?: string;
+      bodyReady?: boolean;
+      articleUrl?: string;
+    },
     batchState: string;
   let store: LocalArticleStore, manager: Wechat2RssSingleTasks;
   let prepare: jest.MockedFunction<typeof prepareWechat2RssSingleDownload>;
+  let readCandidates: jest.MockedFunction<
+    typeof readWechat2RssSingleCandidates
+  >;
   let save: jest.Mock,
     queue: {
       addSingleDownloadBatch: jest.Mock;
@@ -45,6 +54,7 @@ describe('durable single download consumer; synthetic queue and real temporary f
       () => true,
       () => time,
       prepare,
+      readCandidates,
     );
   const missing = () =>
     new ArticleDownloadError('目标缓存未就绪。', 409, {
@@ -57,7 +67,7 @@ describe('durable single download consumer; synthetic queue and real temporary f
     database = join(root, 'synthetic.sqlite');
     await writeFile(database, '');
     time = 1800000000000;
-    item = { state: 'waiting', feedId: 'MP_WXS_1234567890' };
+    item = { state: 'waiting', feedId: 'MP_WXS_1234567890', articleUrl: url };
     batchState = 'running';
     queue = {
       addSingleDownloadBatch: jest.fn(async () => ({
@@ -93,6 +103,17 @@ describe('durable single download consumer; synthetic queue and real temporary f
       };
     });
     store = new LocalArticleStore(join(root, 'settings.json'), directory);
+    readCandidates = jest.fn<
+      ReturnType<typeof readWechat2RssSingleCandidates>,
+      Parameters<typeof readWechat2RssSingleCandidates>
+    >(async () => [
+      {
+        articleId: 'WX_1234567890_2247000001_1',
+        title: '用户明确选择',
+        publishTime: 1800000000,
+        url: 'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef',
+      },
+    ]);
     save = jest.fn((prepared, folder, startedAt) =>
       store.save(prepared, new Date(startedAt), folder),
     );
@@ -167,6 +188,138 @@ describe('durable single download consumer; synthetic queue and real temporary f
     });
     expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
     expect(prepare).toHaveBeenCalledTimes(10);
+    expect(save).not.toHaveBeenCalled();
+    expect(await readdir(directory)).toEqual([]);
+  });
+  it('complete publisher cache without a short alias stops on the first exact read, with a recovery publisher link', async () => {
+    const task = await manager.enqueue(url, owner, directory);
+    item.state = 'succeeded';
+    item.bodyReady = true;
+    batchState = 'completed';
+    prepare.mockRejectedValue(missing());
+    await manager.runDue();
+    expect(await manager.get(task.taskId, owner)).toMatchObject({
+      state: 'failed',
+      code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+      feedId: item.feedId,
+      message: expect.stringContaining('无法确定目标'),
+    });
+    time += 30000;
+    await manager.runDue();
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
+    expect(await readdir(directory)).toEqual([]);
+  });
+  it('old terminal tasks gain only a publisher-list link from the local receipt; original intent stays unchanged', async () => {
+    const task = await manager.enqueue(url, owner, directory);
+    await manager.runDue();
+    const file = join(
+      root,
+      '.wechat2rss-single-downloads',
+      task.taskId + '.json',
+    );
+    const old = JSON.parse(await readFile(file, 'utf8'));
+    old.state = 'failed';
+    old.attempts = 10;
+    await writeFile(file, JSON.stringify(old));
+    const before = await readFile(file, 'utf8');
+    const result = await manager.get(task.taskId, owner);
+    expect(result).toMatchObject({ state: 'failed', feedId: item.feedId });
+    expect(result).not.toHaveProperty('code'); // No inferred failure diagnosis.
+    expect(await manager.list(owner)).toEqual([result]);
+    expect(await readFile(file, 'utf8')).toBe(before);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
+  });
+  it('explicit cached identity selection saves to the frozen task directory after restart, without another subscription', async () => {
+    const task = await manager.enqueue(url, owner, directory);
+    item.state = 'succeeded';
+    item.bodyReady = true;
+    batchState = 'completed';
+    prepare.mockRejectedValueOnce(missing());
+    await manager.runDue();
+    const options = await manager.candidates(task.taskId, owner);
+    expect(options).toMatchObject({
+      destination: directory,
+      articles: [{ articleId: 'WX_1234567890_2247000001_1' }],
+    });
+    expect(options.articles[0]).not.toHaveProperty('url');
+    await expect(
+      manager.select(task.taskId, otherOwner, options.articles[0].articleId),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(
+      manager.select(task.taskId, owner, 'WX_9999999999_2247000001_1'),
+    ).rejects.toMatchObject({ status: 409 });
+    const picked = await manager.select(
+      task.taskId,
+      owner,
+      options.articles[0].articleId,
+    );
+    expect(picked).toMatchObject({
+      selectedArticle: { title: '用户明确选择' },
+      destination: directory,
+    });
+    manager.close();
+    manager = make();
+    const changed = join(root, 'other-directory');
+    await mkdir(changed);
+    await store.rememberPickedDirectory(changed);
+    await manager.runDue();
+    const saved = await manager.get(task.taskId, owner);
+    expect(saved).toMatchObject({
+      state: 'saved',
+      selectedArticle: { articleId: 'WX_1234567890_2247000001_1' },
+    });
+    expect(saved.directory?.startsWith(directory)).toBe(true);
+    expect(await readdir(changed)).toEqual([]);
+    expect(prepare).toHaveBeenLastCalledWith(
+      (await readCandidates(item.feedId!))[0].url,
+      item.feedId,
+    );
+    const file = join(
+      root,
+      '.wechat2rss-single-downloads',
+      task.taskId + '.json',
+    );
+    expect(JSON.parse(await readFile(file, 'utf8')).url).toBe(url);
+    await writeFile(saved.markdownPath!, '用户编辑保护');
+    expect(
+      await manager.select(task.taskId, owner, options.articles[0].articleId),
+    ).toMatchObject({ state: 'saved' });
+    expect(await readFile(saved.markdownPath!, 'utf8')).toBe('用户编辑保护');
+    expect(queue.addSingleDownloadBatch).toHaveBeenCalledTimes(1);
+    expect(queue.resumeSubscriptionBatch).not.toHaveBeenCalled();
+  });
+  it('cancellation while rechecking selected cache cannot revive a task or write files', async () => {
+    const task = await manager.enqueue(url, owner, directory);
+    item.state = 'succeeded';
+    item.bodyReady = true;
+    batchState = 'completed';
+    prepare.mockRejectedValueOnce(missing());
+    await manager.runDue();
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const original = readCandidates.getMockImplementation()!;
+    readCandidates.mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const selecting = manager.select(
+      task.taskId,
+      owner,
+      'WX_1234567890_2247000001_1',
+    );
+    for (let i = 0; i < 100 && !readCandidates.mock.calls.length; i++)
+      await new Promise((r) => setTimeout(r, 2));
+    await manager.cancel(task.taskId, owner);
+    release();
+    await expect(selecting).rejects.toMatchObject({ status: 409 });
+    expect(await manager.get(task.taskId, owner)).toMatchObject({
+      state: 'cancelled',
+    });
     expect(save).not.toHaveBeenCalled();
     expect(await readdir(directory)).toEqual([]);
   });

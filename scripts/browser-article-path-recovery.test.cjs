@@ -1011,3 +1011,185 @@ test('a stale local status cannot revive a cancelled durable download', async ()
   assert.equal(h.state[13].revision, 3);
   h.unmount();
 });
+
+test('terminal missing short mapping replaces waiting with an explicit cached-article chooser', async () => {
+  const waiting = {
+    taskId: 'c'.repeat(64),
+    revision: 2,
+    state: 'waiting',
+    message: '仍在等待该篇可核验正文',
+  };
+  const failed = {
+    ...waiting,
+    revision: 3,
+    state: 'failed',
+    code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+    feedId: 'MP_WXS_1234567890',
+    message: '缓存没有短链接映射，无法确定目标，未保存。',
+  };
+  const h = page({
+    taskPresent: false,
+    effects: true,
+    fetchReply: async (url) =>
+      url.endsWith('/single-tasks')
+        ? { ok: true, json: async () => ({ tasks: [failed] }) }
+        : undefined,
+  });
+  h.state[13] = waiting;
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[13].state, 'failed');
+  const nodes = h.render();
+  assert.ok(h.button('选择已缓存文章'));
+  assert.ok(
+    !nodes.some(
+      (n) => n.type === 'Button' && n.props.children === '继续原下载',
+    ),
+  );
+  assert.equal(h.button('下载正文和图片').props.isDisabled, false);
+  assert.ok(h.calls.every((c) => c.method === 'GET'));
+  h.unmount();
+});
+
+test('in-tool choice sends only a server-provided stable article identity and leaves the original destination fixed', async () => {
+  const task = {
+    taskId: 'f'.repeat(64),
+    revision: 3,
+    state: 'failed',
+    feedId: 'MP_WXS_1234567890',
+    code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+    message: '无法自动确定短链目标',
+  };
+  const articleId = 'WX_1234567890_2247000001_1';
+  const h = page({
+    taskPresent: false,
+    fetchReply: async (url) => {
+      if (url.endsWith('/candidates'))
+        return {
+          ok: true,
+          json: async () => ({
+            taskId: task.taskId,
+            destination: 'original-confirmed-path',
+            articles: [
+              { articleId, title: '用户确认的目标', publishTime: 1800000000 },
+            ],
+          }),
+        };
+      if (url.endsWith('/select'))
+        return {
+          ok: true,
+          json: async () => ({
+            ...task,
+            revision: 4,
+            state: 'waiting',
+            destination: 'original-confirmed-path',
+            selectedArticle: {
+              articleId,
+              title: '用户确认的目标',
+              publishTime: 1800000000,
+            },
+            message: '正在保存所选文章',
+          }),
+        };
+    },
+  });
+  h.state[13] = task;
+  h.state[1].directory = 'changed-preference-path';
+  h.button('选择已缓存文章').props.onPress();
+  await flush();
+  assert.equal(h.calls[0].method, 'GET');
+  assert.ok(JSON.stringify(h.render()).includes('original-confirmed-path'));
+  assert.ok(JSON.stringify(h.render()).includes('用户确认的目标'));
+  assert.equal(h.calls.filter((c) => c.method === 'POST').length, 0);
+  const choose = h
+    .render()
+    .find(
+      (n) =>
+        n.type === 'Button' &&
+        JSON.stringify(n.props.children).includes('用户确认的目标'),
+    );
+  choose.props.onPress();
+  await flush();
+  const posted = h.calls.filter((c) => c.method === 'POST');
+  assert.equal(posted.length, 1);
+  assert.deepEqual(JSON.parse(posted[0].body), { articleId });
+  assert.equal(h.state[13].state, 'waiting');
+  assert.equal(h.state[1].directory, 'changed-preference-path');
+  assert.equal(h.state[16], null);
+});
+
+test('failed local polling marks waiting as stale and offers a read-only status retry', async () => {
+  const task = {
+    taskId: 'd'.repeat(64),
+    revision: 2,
+    state: 'waiting',
+    message: '正在等待',
+  };
+  const h = page({
+    taskPresent: false,
+    effects: true,
+    fetchReply: async (url) =>
+      url.endsWith('/single-tasks')
+        ? { ok: false, json: async () => ({ message: '请先登录' }) }
+        : undefined,
+  });
+  h.state[13] = task;
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[13].state, 'waiting');
+  assert.ok(JSON.stringify(h.render()).includes('当前显示可能已过期'));
+  h.button('重新读取下载状态').props.onPress();
+  h.render();
+  h.runEffects();
+  await flush();
+  assert.equal(
+    h.calls.filter((c) => c.url.endsWith('/single-tasks')).length,
+    2,
+  );
+  assert.ok(h.calls.every((c) => c.method === 'GET'));
+  h.unmount();
+});
+
+test('an explicitly chosen long-link save replaces the old failed short task and preserves path settings', async () => {
+  const failed = {
+    taskId: 'e'.repeat(64),
+    revision: 3,
+    state: 'failed',
+    code: 'WECHAT2RSS_SINGLE_SHORT_UNAVAILABLE',
+    feedId: 'MP_WXS_1234567890',
+    message: '无短链映射',
+  };
+  const h = page({
+    taskPresent: false,
+    effects: true,
+    fetchReply: async (url, options) => {
+      if (url.endsWith('/single-tasks'))
+        return { ok: true, json: async () => ({ tasks: [failed] }) };
+      if (url.endsWith('/download/article') && options.method === 'POST')
+        return {
+          ok: true,
+          json: async () => ({
+            saved: true,
+            contentSource: 'wechat2rss-cache',
+            markdownPath: 'synthetic-old-path/正文.md',
+          }),
+        };
+    },
+  });
+  h.state[13] = failed;
+  h.state[0] =
+    'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef';
+  h.render()
+    .find((n) => n.type === 'form')
+    .props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.equal(h.state[13], null);
+  assert.equal(h.state[6].contentSource, 'wechat2rss-cache');
+  assert.equal(h.state[1].directory, 'synthetic-old-path');
+  h.render();
+  h.runEffects();
+  await flush();
+  assert.equal(h.state[13], null);
+  assert.equal(h.calls.filter((c) => c.method === 'POST').length, 1);
+  h.unmount();
+});

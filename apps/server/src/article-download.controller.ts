@@ -316,6 +316,66 @@ export class ArticleDownloadController implements OnModuleDestroy {
       return this.failure(error, res);
     }
   }
+  @Get('article/single-task/:taskId/candidates')
+  async singleCandidates(
+    @Param('taskId') taskId: string,
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, false)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    try {
+      if (!this.singleTasks || process.env.WEWE_ACCEPTANCE_MODE === '1')
+        throw new ArticleDownloadError('当前模式不能选择缓存文章。', 409);
+      return res.json(
+        await this.singleTasks.candidates(taskId, this.taskOwner(req)),
+      );
+    } catch (error) {
+      return this.failure(error, res);
+    }
+  }
+  @Post('article/single-task/:taskId/select')
+  async singleSelect(
+    @Param('taskId') taskId: string,
+    @Body() body: unknown,
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    res.setHeader('Cache-Control', 'private, no-store');
+    try {
+      if (
+        !this.singleTasks ||
+        process.env.WEWE_ACCEPTANCE_MODE === '1' ||
+        this.running ||
+        this.pickerRunning
+      )
+        throw new ArticleDownloadError(
+          '当前不能选择文章，请等待本机操作完成。',
+          409,
+        );
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).length !== 1 ||
+        Object.keys(body)[0] !== 'articleId'
+      )
+        throw new ArticleDownloadError(
+          '选择请求仅接受缓存文章身份，不接受公众号、链接或路径。',
+          400,
+        );
+      const task = await this.singleTasks.select(
+        taskId,
+        this.taskOwner(req),
+        body['articleId'],
+      );
+      this.subscriptionQueue?.wakeSubscriptionConsumer();
+      return res.status(task.state === 'saved' ? 200 : 202).json(task);
+    } catch (error) {
+      return this.failure(error, res);
+    }
+  }
   @Post('article/single-task/:taskId/:action')
   @HttpCode(200)
   async singleTaskAction(
