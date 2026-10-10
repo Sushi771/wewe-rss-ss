@@ -75,7 +75,7 @@ jobs:
       - name: Test retained article path recovery offline
         run: node --test scripts/browser-article-path-recovery.test.cjs
       - name: Test feed view invalidation with installed tRPC batch link offline
-        run: node --test scripts/refresh-feed-view.test.cjs
+        run: node --test scripts/refresh-feed-view.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/feed-avatar-reading-ui.test.cjs
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)

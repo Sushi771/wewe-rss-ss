@@ -3,6 +3,7 @@ import { parseWechat2RssJsonFeed } from '../provider-article';
 import { ProviderPage, SubscriptionProvider } from '../subscription-provider';
 import { canonicalArticleUrl } from '../collection-format';
 import { selectWechat2RssSingleCache } from '../../wechat2rss-single-cache';
+import { parseWechat2RssFeedAvatar } from '../wechat2rss-feed-avatar';
 
 type ListedFeed = { id: number | string; name: string; link: string };
 type IdentityRead = { deadline: number; remainingListRequests: number };
@@ -55,6 +56,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     path: string,
     params: Record<string, string> = {},
     deadline?: number,
+    format: 'json' | 'text' = 'json',
   ): Promise<unknown> {
     const url = new URL(path, this.base);
     for (const [key, value] of Object.entries(params))
@@ -86,7 +88,8 @@ export class Wechat2RssProvider implements SubscriptionProvider {
       }
       if (deadline !== undefined && Date.now() >= deadline)
         throw new Error(IDENTITY_CHECK_EXPIRED);
-      return JSON.parse(Buffer.concat(parts).toString('utf8'));
+      const text = Buffer.concat(parts).toString('utf8');
+      return format === 'text' ? text : JSON.parse(text);
     } catch {
       if (deadline !== undefined && (Date.now() >= deadline || signal.aborted))
         throw new Error(IDENTITY_CHECK_EXPIRED);
@@ -103,6 +106,21 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     )
       throw new Error('WECHAT2RSS_UPSTREAM_REJECTED');
     return raw as Record<string, unknown>;
+  }
+
+  /** Optional metadata from the same already-subscribed cache. Never refreshes
+   * or registers a subscription, follows redirects or returns a secret URL. */
+  async fetchFeedAvatar(feedId: string): Promise<string | undefined> {
+    const match = /^MP_WXS_(\d{5,15})$/.exec(feedId);
+    if (!match) return undefined;
+    try {
+      return parseWechat2RssFeedAvatar(
+        await this.get(`/feed/${match[1]}.xml`, {}, undefined, 'text'),
+      );
+    } catch {
+      // Avatar failures must not turn successful article imports into failures.
+      return undefined;
+    }
   }
 
   async listSubscriptions(read?: IdentityRead) {

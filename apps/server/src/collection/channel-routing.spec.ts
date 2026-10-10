@@ -333,6 +333,162 @@ describe('backend collection routing', () => {
     ).toBe(0);
   });
 
+  it('imports 19 proved cache items while isolating one unverified legacy short row (observed RSS shape)', async () => {
+    const incoming = Array.from({ length: 20 }, (_, index) => ({
+      ...article(ids[0]),
+      ...canonicalArticleUrl(
+        `https://mp.weixin.qq.com/s?__biz=${Buffer.from(ids[0].slice(7)).toString('base64')}&mid=${2247489528 - index}&idx=1&sn=fixture`,
+      ),
+      title: `Sanitized cached article ${index}`,
+      contentHtml: '<div id="js_content">Cached body</div>',
+      picUrl: '',
+    }));
+    const legacy = await prisma.article.create({
+      data: {
+        id: 'unverified-short-row',
+        mpId: ids[0],
+        title: incoming[8].title,
+        publishTime: incoming[8].publishTime,
+        sourceUrl: null,
+        verifiedSourceUrl: null,
+        contentHtml: '<p>Edited old body retained</p>',
+        picUrl: '',
+        metrics: '{"read":{"value":12}}',
+      },
+    });
+    mockArticlePage(incoming[0]);
+    (wechat2RssProvider as jest.Mock).mockReturnValue({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      fetchArticles: async () => ({
+        articles: incoming,
+        coverage: 'recent-window',
+        upstreamCount: 20,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      }),
+    });
+    const first = await service.refreshMpArticlesAndUpdateFeed(
+      ids[0],
+      1,
+      'local-manual',
+    );
+    expect(first).toMatchObject({
+      articles: 19,
+      created: 19,
+      identitySkipped: 1,
+      bodyReady: false,
+    });
+    expect(
+      await prisma.article.findUniqueOrThrow({ where: { id: legacy.id } }),
+    ).toEqual(legacy);
+    expect(
+      await prisma.article.findUnique({ where: { id: incoming[8].id } }),
+    ).toBeNull();
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).syncTime,
+    ).toBe(0);
+    expect(
+      await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).toMatchObject({
+      articles: 19,
+      created: 0,
+      updated: 0,
+      identitySkipped: 1,
+    });
+    expect(await prisma.article.count({ where: { mpId: ids[0] } })).toBe(20);
+  });
+
+  it('does not invent an article or mark sync successful when every item has an unverified legacy collision', async () => {
+    const incoming = { ...article(ids[0]), picUrl: '' };
+    await prisma.article.create({
+      data: {
+        id: 'unknown-short',
+        mpId: ids[0],
+        title: incoming.title,
+        publishTime: incoming.publishTime,
+        contentHtml: '<p>Keep</p>',
+        picUrl: '',
+      },
+    });
+    mockArticlePage(incoming);
+    expect(
+      await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).toMatchObject({
+      articles: 0,
+      created: 0,
+      identitySkipped: 1,
+      bodyReady: false,
+    });
+    expect(await prisma.article.count()).toBe(1);
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).syncTime,
+    ).toBe(0);
+  });
+
+  it('keeps distinct proved identities even when their titles and publication times coincide', async () => {
+    const incoming = { ...article(ids[0]), picUrl: '' };
+    const other = canonicalArticleUrl(
+      incoming.url.replace('mid=99', 'mid=100'),
+    );
+    await prisma.article.create({
+      data: {
+        id: other.id,
+        mpId: ids[0],
+        title: incoming.title,
+        publishTime: incoming.publishTime,
+        sourceUrl: other.url,
+        contentHtml: '<p>Other article</p>',
+        picUrl: '',
+      },
+    });
+    mockArticlePage(incoming);
+    expect(
+      await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).toMatchObject({ articles: 1, created: 1, identitySkipped: 0 });
+    expect(await prisma.article.count()).toBe(2);
+  });
+
+  it('supplements an empty Wechat2RSS avatar from its exact RSS even before article cache is ready, preserving old covers', async () => {
+    await prisma.feed.update({
+      where: { id: ids[0] },
+      data: { collectionChannel: 'wechat2rss', mpCover: '' },
+    });
+    const avatar = jest
+      .fn()
+      .mockResolvedValue('https://wx.qlogo.cn/mmhead/synthetic/0');
+    (wechat2RssProvider as jest.Mock).mockReturnValue({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      fetchFeedAvatar: avatar,
+      fetchArticles: async () => ({
+        articles: [],
+        coverage: 'recent-window',
+        upstreamCount: 0,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      }),
+    });
+    expect(
+      await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual'),
+    ).toMatchObject({ status: 'pending', articles: 0 });
+    expect(avatar).toHaveBeenCalledWith(ids[0]);
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).mpCover,
+    ).toBe('https://wx.qlogo.cn/mmhead/synthetic/0');
+    await prisma.feed.update({
+      where: { id: ids[0] },
+      data: { mpCover: 'https://wx.qlogo.cn/mmhead/existing/0' },
+    });
+    avatar.mockClear();
+    await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual');
+    expect(avatar).not.toHaveBeenCalled();
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).mpCover,
+    ).toBe('https://wx.qlogo.cn/mmhead/existing/0');
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } })).syncTime,
+    ).toBe(0);
+  });
+
   it('ordinary refresh remains cache-only across restart and expired historical cooldown', async () => {
     await service.refreshMpArticlesAndUpdateFeed(ids[0], 1, 'local-manual');
     const firstProvider = (wechat2RssProvider as jest.Mock).mock.results[0]

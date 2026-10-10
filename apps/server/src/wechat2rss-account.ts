@@ -113,6 +113,7 @@ export class Wechat2RssAccounts {
       'LOGIN_REPLY_INVALID',
       'QR_FORMAT_INVALID',
       'QR_PNG_INVALID',
+      'QR_JPEG_INVALID',
       'CONFIG_CHANGED',
     ].includes(code)
       ? code
@@ -291,6 +292,77 @@ export class Wechat2RssAccounts {
     return (raw.data ?? {}) as unknown;
   }
 
+  private validJpeg(bytes: Buffer) {
+    if (bytes.length < 10 || bytes[0] !== 0xff || bytes[1] !== 0xd8)
+      return false;
+    let offset = 2;
+    let components = 0;
+    let scanning = false;
+    let sawScan = false;
+    // Walk every segment, including progressive scans. Never trust the MIME or
+    // magic alone; a second frame cannot bypass the first frame's size limit.
+    while (offset < bytes.length) {
+      if (scanning) {
+        while (offset < bytes.length) {
+          if (bytes[offset++] !== 0xff) continue;
+          const start = offset - 1;
+          while (bytes[offset] === 0xff) offset++;
+          const marker = bytes[offset++];
+          if (marker === undefined) return false;
+          if (marker === 0 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+          offset = start;
+          scanning = false;
+          break;
+        }
+        if (scanning) return false;
+      }
+      if (bytes[offset++] !== 0xff) return false;
+      while (bytes[offset] === 0xff) offset++;
+      const marker = bytes[offset++];
+      if (marker === 0xd9) return sawScan && offset === bytes.length;
+      if (
+        marker === undefined ||
+        marker === 0 ||
+        marker === 0xd8 ||
+        marker === 1 ||
+        (marker >= 0xd0 && marker <= 0xd7) ||
+        offset + 2 > bytes.length
+      )
+        return false;
+      const length = bytes.readUInt16BE(offset);
+      if (length < 2 || offset + length > bytes.length) return false;
+      if ([0xc0, 0xc1, 0xc2].includes(marker)) {
+        if (components || length < 11 || bytes[offset + 2] !== 8) return false;
+        const height = bytes.readUInt16BE(offset + 3);
+        const width = bytes.readUInt16BE(offset + 5);
+        components = bytes[offset + 7];
+        if (
+          ![1, 3, 4].includes(components) ||
+          length !== 8 + 3 * components ||
+          height < 1 ||
+          height > 2048 ||
+          width < 1 ||
+          width > 2048
+        )
+          return false;
+      }
+      if (marker === 0xda) {
+        const scanComponents = bytes[offset + 2];
+        if (
+          !components ||
+          scanComponents < 1 ||
+          scanComponents > components ||
+          length !== 6 + 2 * scanComponents
+        )
+          return false;
+        sawScan = true;
+        scanning = true;
+      }
+      offset += length;
+    }
+    return false;
+  }
+
   private loginReply(raw: unknown, session: Session): Wechat2RssLoginView {
     if (
       !raw ||
@@ -305,29 +377,35 @@ export class Wechat2RssAccounts {
     if (qr != null && typeof qr !== 'string')
       throw new Error('QR_FORMAT_INVALID');
     if (qr) {
+      // The deployed supplier returns JPEG data URIs (including image/jpg),
+      // while its official client passes qrcode directly to an img element.
+      // Keep inline raster data only; never fetch a returned URL or accept SVG.
+      const match =
+        /^data:image\/(png|jpeg|jpg);base64,([A-Za-z0-9+/]+={0,2})$/.exec(qr);
+      if (qr.length > 700_000 || !match) throw new Error('QR_FORMAT_INVALID');
+      const bytes = Buffer.from(match[2], 'base64');
       if (
-        typeof qr !== 'string' ||
-        qr.length > 700_000 ||
-        !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(qr)
+        bytes.toString('base64').replace(/=+$/, '') !==
+        match[2].replace(/=+$/, '')
       )
         throw new Error('QR_FORMAT_INVALID');
-      const bytes = Buffer.from(
-        qr.slice('data:image/png;base64,'.length),
-        'base64',
-      );
       if (
-        bytes.length < 24 ||
-        !bytes
-          .subarray(0, 8)
-          .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
-        bytes.toString('ascii', 12, 16) !== 'IHDR' ||
-        bytes.readUInt32BE(16) < 1 ||
-        bytes.readUInt32BE(16) > 2048 ||
-        bytes.readUInt32BE(20) < 1 ||
-        bytes.readUInt32BE(20) > 2048
+        match[1] === 'png' &&
+        (bytes.length < 24 ||
+          !bytes
+            .subarray(0, 8)
+            .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+          bytes.toString('ascii', 12, 16) !== 'IHDR' ||
+          bytes.readUInt32BE(16) < 1 ||
+          bytes.readUInt32BE(16) > 2048 ||
+          bytes.readUInt32BE(20) < 1 ||
+          bytes.readUInt32BE(20) > 2048)
       )
         throw new Error('QR_PNG_INVALID');
-      session.view.qrcode = qr;
+      if (match[1] !== 'png' && !this.validJpeg(bytes))
+        throw new Error('QR_JPEG_INVALID');
+      // Normalize jpg to its standard MIME and restore optional base64 padding.
+      session.view.qrcode = `data:image/${match[1] === 'png' ? 'png' : 'jpeg'};base64,${bytes.toString('base64')}`;
     }
     // Without an upstream cookie polling /login/new could create another login.
     if (!session.cookies.size) throw new Error('COOKIE_MISSING');

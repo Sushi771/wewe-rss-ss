@@ -566,6 +566,23 @@ export class CollectionService {
       }
       // All ordinary refreshes only consume cache. /addurl is reserved for an
       // explicit new-subscription action; /add also updates already subscribed feeds.
+      const feedAvatar =
+        !feed.mpCover &&
+        feed.collectionChannel === 'wechat2rss' &&
+        typeof provider.fetchFeedAvatar === 'function'
+          ? await provider.fetchFeedAvatar(input.mpId)
+          : undefined;
+      const supplementAvatar = (tx: Pick<typeof this.prisma, 'feed'>) =>
+        feedAvatar
+          ? tx.feed.updateMany({
+              where: {
+                id: input.mpId,
+                mpCover: '',
+                collectionChannel: 'wechat2rss',
+              },
+              data: { mpCover: feedAvatar },
+            })
+          : Promise.resolve();
       const accepted = false;
       const fetched = input.acceptedFeedPath
         ? await provider.fetchAcceptedArticles(
@@ -607,6 +624,9 @@ export class CollectionService {
           }
         : await archiveProviderImages(validated);
       if (!page.articles.length) {
+        // Publisher metadata can be ready before the first article. The
+        // conditional write preserves a concurrently changed avatar/source.
+        await this.prisma.$transaction(async (tx) => supplementAvatar(tx));
         return {
           source: 'wechat2rss' as const,
           status: 'pending' as const,
@@ -622,8 +642,13 @@ export class CollectionService {
       }
       let created = 0;
       let updated = 0;
+      const identitySkippedArticles: Array<{
+        id: string;
+        code: 'LEGACY_IDENTITY_UNVERIFIED';
+      }> = [];
       await this.prisma.$transaction(
         async (tx) => {
+          await supplementAvatar(tx);
           for (const item of page.articles) {
             // Title and time only detect a possible legacy collision; never merge by them.
             // Normalize the new URL before matching old short-ID rows. The sn
@@ -649,15 +674,44 @@ export class CollectionService {
             const existing = matches[0];
             if (existing) assertSavedArticleIdentity(existing, identity);
             if (!existing) {
-              const possibleLegacy = await tx.article.findFirst({
+              const possibleLegacy = await tx.article.findMany({
                 where: {
                   mpId: input.mpId,
                   title: item.title,
                   publishTime: item.publishTime,
                 },
               });
-              if (possibleLegacy)
-                throw new Error('疑似旧短链身份未核实，本批未写入');
+              const ambiguous = possibleLegacy.some((saved) => {
+                const known = new Set<string>();
+                if (/^WX_\d{5,15}_\d+_[1-9]\d*$/.test(saved.id))
+                  known.add(saved.id);
+                for (const url of [saved.sourceUrl, saved.verifiedSourceUrl]) {
+                  if (!url) continue;
+                  try {
+                    const proved = canonicalArticleUrl(url);
+                    if (proved.mpId !== input.mpId) return true;
+                    known.add(proved.id);
+                  } catch {
+                    // A short link alone cannot disambiguate a title/time match.
+                    if (
+                      !/^https:\/\/mp\.weixin\.qq\.com\/s\/[A-Za-z0-9_-]{22}$/.test(
+                        url,
+                      )
+                    )
+                      return true;
+                  }
+                }
+                return known.size !== 1 || known.has(identity.id);
+              });
+              if (ambiguous) {
+                // Preserve this row and its note. Never merge by title/time or
+                // let one unverifiable legacy identity roll back proved peers.
+                identitySkippedArticles.push({
+                  id: identity.id,
+                  code: 'LEGACY_IDENTITY_UNVERIFIED',
+                });
+                continue;
+              }
               await tx.article.create({
                 data: {
                   id: item.id,
@@ -708,7 +762,7 @@ export class CollectionService {
             where: { id: input.mpId },
             data: {
               collectionChannel: 'wechat2rss',
-              ...(input.listOnly
+              ...(input.listOnly || identitySkippedArticles.length
                 ? {}
                 : { syncTime: Math.floor(Date.now() / 1000) }),
               updateTime: latest._max.publishTime || feed.updateTime,
@@ -723,17 +777,25 @@ export class CollectionService {
         status: 'partial' as const,
         complete: false as const,
         coverage: page.coverage,
-        articles: page.articles.length,
+        articles: page.articles.length - identitySkippedArticles.length,
         created,
         updated,
         accepted,
         bodyMissing: page.bodyMissing,
-        listReady: page.articles.length > 0,
+        identitySkipped: identitySkippedArticles.length,
+        identitySkippedArticles,
+        listReady: page.articles.length > identitySkippedArticles.length,
         bodyReady:
-          !input.listOnly && page.bodyMissing === 0 && page.imageBlocked === 0,
+          !input.listOnly &&
+          identitySkippedArticles.length === 0 &&
+          page.bodyMissing === 0 &&
+          page.imageBlocked === 0,
         imageBlocked: page.imageBlocked,
         message:
           `读取私有实例缓存 ${page.articles.length} 篇，归档新增 ${created}、补全 ${updated}。` +
+          (identitySkippedArticles.length
+            ? ` ${identitySkippedArticles.length} 篇与旧记录身份无法区分，已隔离；旧正文保留，其余可核验文章已同步。`
+            : '') +
           (accepted ? '上游新任务仍可能进行中。' : '') +
           ` 正文缺失 ${page.bodyMissing}，图片受限 ${page.imageBlocked}；订阅前历史与非群发不保证覆盖。`,
       };

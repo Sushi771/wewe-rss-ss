@@ -7,6 +7,12 @@ png.write('IHDR', 12);
 png.writeUInt32BE(256, 16);
 png.writeUInt32BE(256, 20);
 const qrcode = `data:image/png;base64,${png.toString('base64')}`;
+// Locally encoded 8x8 colour gradients, unrelated to login or authorization.
+// Full JPEG files exercise real marker/scan structure instead of PNG-only mocks.
+const jpeg =
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDk9F8Ifd/d/pRRRRTm7FZXmWI+rrU//9k=';
+const progressiveJpeg =
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wgARCAAIAAgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAVAQEBAAAAAAAAAAAAAAAAAAAAAf/aAAwDAQACEAMQAAABkhf/xAAWEAADAAAAAAAAAAAAAAAAAAAAAwT/2gAIAQEAAQUCTIf/xAAXEQADAQAAAAAAAAAAAAAAAAAAAwQT/9oACAEDAQE/AZaWZn//xAAWEQADAAAAAAAAAAAAAAAAAAAAAQL/2gAIAQIBAT8Bln//xAAVEAEBAAAAAAAAAAAAAAAAAAAAMf/aAAgBAQAGPwKP/8QAFRABAQAAAAAAAAAAAAAAAAAAADH/2gAIAQEAAT8hmf/aAAwDAQACAAMAAAAQA//EABYRAAMAAAAAAAAAAAAAAAAAAAARIf/aAAgBAwEBPxBBT//EABYRAAMAAAAAAAAAAAAAAAAAAAABEf/aAAgBAgEBPxBsP//EABUQAQEAAAAAAAAAAAAAAAAAAADx/9oACAEBAAE/EIj/2Q==';
 const config = {
   enabled: true,
   baseUrl: 'http://127.0.0.1:18080/',
@@ -48,6 +54,117 @@ describe('Wechat2RSS official cookie login proxy (offline)', () => {
     log = jest.spyOn(console, 'info').mockImplementation(() => undefined);
   });
   afterEach(() => log.mockRestore());
+
+  it.each([
+    ['jpeg', jpeg],
+    ['jpg', jpeg],
+    ['jpeg', progressiveJpeg],
+    ['jpg', progressiveJpeg],
+    ['jpeg', jpeg.replace(/=+$/, '')],
+  ])(
+    'accepts the observed JPEG response contract (%s) without requesting its image',
+    async (mime, encoded) => {
+      const f = fixture();
+      const image = `data:image/${mime};base64,${encoded}`;
+      f.queue.push(
+        new Response(
+          JSON.stringify({ err: '', data: { isLogin: false, qrcode: image } }),
+          {
+            headers: {
+              'content-type': 'application/json',
+              'set-cookie': 'login=synthetic-cookie; HttpOnly',
+            },
+          },
+        ),
+      );
+      const result = await f.manager.start();
+      expect(result.state).toBe('waiting');
+      expect(result.qrcode).toBe(
+        `data:image/jpeg;base64,${Buffer.from(encoded, 'base64').toString('base64')}`,
+      );
+      expect(f.requests).toHaveLength(1);
+      expect(log.mock.calls.flat().join(' ')).not.toContain(encoded);
+      f.advance();
+      f.queue.push(reply({ isLogin: false, qrcode: '' }));
+      expect((await f.manager.poll(result.sessionId!)).qrcode).toBe(
+        result.qrcode,
+      );
+      f.manager.close(result.sessionId!);
+      expect((await f.manager.poll(result.sessionId!)).state).toBe('expired');
+      expect(f.requests).toHaveLength(2);
+    },
+  );
+
+  it.each([
+    'https://example.com/qr.jpg',
+    '/qr.jpg',
+    'data:image/svg+xml;base64,PHN2Zy8+',
+    `data:image/jpeg;base64,${png.toString('base64')}`,
+    'data:image/jpeg;base64,/9j/AAAA/9k=',
+    `data:image/jpeg;base64,${jpeg.slice(0, -8)}`,
+    `data:image/jpeg;base64,${jpeg}\n`,
+  ])(
+    'rejects unsupported or malformed QR images without leaking them',
+    async (image) => {
+      const f = fixture();
+      f.queue.push(reply({ qrcode: image }));
+      const result = await f.manager.start();
+      expect(result.state).toBe('failed');
+      expect(result.code).toMatch(/^QR_/);
+      expect(result.qrcode).toBeUndefined();
+      expect(log.mock.calls.flat().join(' ')).not.toContain(image);
+      expect(f.requests).toHaveLength(1);
+    },
+  );
+
+  it.each([0, 2049])(
+    'rejects JPEG dimension %s even when the file has valid magic',
+    async (size) => {
+      const bytes = Buffer.from(jpeg, 'base64');
+      const frame = bytes.indexOf(Buffer.from([0xff, 0xc0]));
+      expect(frame).toBeGreaterThan(0);
+      bytes.writeUInt16BE(size, frame + 7);
+      const f = fixture();
+      f.queue.push(
+        reply({ qrcode: `data:image/jpeg;base64,${bytes.toString('base64')}` }),
+      );
+      const result = await f.manager.start();
+      expect(result.state).toBe('failed');
+      expect(result.code).toBe('QR_JPEG_INVALID');
+    },
+  );
+
+  it('rejects malformed JPEG segment length before decoding', async () => {
+    const bytes = Buffer.from(jpeg, 'base64');
+    bytes.writeUInt16BE(65535, 4);
+    const f = fixture();
+    f.queue.push(
+      reply({ qrcode: `data:image/jpeg;base64,${bytes.toString('base64')}` }),
+    );
+    expect((await f.manager.start()).code).toBe('QR_JPEG_INVALID');
+  });
+
+  it('rejects a second frame or trailing bytes after otherwise valid JPEG content', async () => {
+    const bytes = Buffer.from(jpeg, 'base64');
+    const frame = bytes.indexOf(Buffer.from([0xff, 0xc0]));
+    const frameLength = bytes.readUInt16BE(frame + 2) + 2;
+    for (const malformed of [
+      Buffer.concat([
+        bytes.subarray(0, -2),
+        bytes.subarray(frame, frame + frameLength),
+        bytes.subarray(-2),
+      ]),
+      Buffer.concat([bytes, Buffer.from([0])]),
+    ]) {
+      const f = fixture();
+      f.queue.push(
+        reply({
+          qrcode: `data:image/jpeg;base64,${malformed.toString('base64')}`,
+        }),
+      );
+      expect((await f.manager.start()).code).toBe('QR_JPEG_INVALID');
+    }
+  });
 
   it.each([undefined, null, ''])(
     'accepts optional success err %s and QR-only initial data',

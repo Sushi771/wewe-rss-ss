@@ -1,5 +1,4 @@
 import {
-  Avatar,
   Button,
   Modal,
   ModalBody,
@@ -29,6 +28,7 @@ import {
 } from '@web/utils/env';
 import ArticleList from './list';
 import ManagementFolders from '@web/components/ManagementFolders';
+import FeedAvatar from '@web/components/FeedAvatar';
 import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
 import SubscriptionTasks from './subscription-tasks';
@@ -109,7 +109,7 @@ const Feeds = () => {
         refetchOnWindowFocus: false,
       },
     );
-  const { mutateAsync: refreshMpArticles, isLoading: isGetArticlesLoading } =
+  const { mutateAsync: refreshMpArticles } =
     trpc.feed.refreshArticles.useMutation();
   const {
     mutateAsync: getHistoryArticles,
@@ -211,6 +211,58 @@ const Feeds = () => {
   const [orderedFeeds, setOrderedFeeds] = useState(feedData?.items || []);
 
   const [refreshedMpIds, setRefreshedMpIds] = useState<string[]>([]);
+  const [refreshingMpIds, setRefreshingMpIds] = useState<string[]>([]);
+  const [isManualBatchRefreshing, setIsManualBatchRefreshing] = useState(false);
+  // Mutation loading is shared across requests. Own each manual task by feed ID
+  // and lock synchronously so rapid clicks cannot race the next React render.
+  const manualRefreshTasks = useRef(new Map<string, symbol>());
+  const refreshFeedbackTimers = useRef(
+    new Map<string, ReturnType<typeof setTimeout>>(),
+  );
+  const refreshPageMounted = useRef(true);
+  useEffect(() => {
+    refreshPageMounted.current = true;
+    const tasks = manualRefreshTasks.current;
+    const timers = refreshFeedbackTimers.current;
+    return () => {
+      refreshPageMounted.current = false;
+      tasks.clear();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+  // The empty key owns a manual batch only; server batch status stays separate.
+  const beginManualRefresh = (mpId: string) => {
+    if (
+      !refreshPageMounted.current ||
+      manualRefreshTasks.current.has('') ||
+      manualRefreshTasks.current.has(mpId) ||
+      (!mpId && manualRefreshTasks.current.size > 0)
+    )
+      return null;
+    const token = Symbol(mpId);
+    manualRefreshTasks.current.set(mpId, token);
+    clearTimeout(refreshFeedbackTimers.current.get(mpId));
+    refreshFeedbackTimers.current.delete(mpId);
+    if (mpId) {
+      setRefreshingMpIds((previous) => [...previous, mpId]);
+      setRefreshedMpIds((previous) => previous.filter((id) => id !== mpId));
+    } else {
+      setIsManualBatchRefreshing(true);
+      setIsRefreshedAll(false);
+    }
+    return token;
+  };
+  const isCurrentRefresh = (mpId: string, token: symbol) =>
+    refreshPageMounted.current &&
+    manualRefreshTasks.current.get(mpId) === token;
+  const finishManualRefresh = (mpId: string, token: symbol) => {
+    if (!isCurrentRefresh(mpId, token)) return;
+    manualRefreshTasks.current.delete(mpId);
+    if (mpId)
+      setRefreshingMpIds((previous) => previous.filter((id) => id !== mpId));
+    else setIsManualBatchRefreshing(false);
+  };
   const [isRefreshedAll, setIsRefreshedAll] = useState(false);
   const [isCollectingAlbums, setIsCollectingAlbums] = useState(false);
   const [updateStates, setUpdateStates] = useState<
@@ -856,10 +908,11 @@ const Feeds = () => {
                             />
                           </div>
                         )}
-                        <Avatar
+                        <FeedAvatar
                           src={item.mpCover}
+                          name={item.mpName}
                           className="sidebar-avatar h-6 min-h-6 w-6 min-w-6"
-                        ></Avatar>
+                        />
                         <span className="flex-1 truncate text-sm">
                           {item.mpName || '公众号信息待补全'}
                         </span>
@@ -966,23 +1019,39 @@ const Feeds = () => {
                       className="mac-btn-outline"
                       isDisabled={
                         isAddFeedLoading ||
-                        isGetArticlesLoading ||
+                        refreshingMpIds.includes(currentMpInfo.id) ||
+                        isManualBatchRefreshing ||
+                        !!isRefreshAllMpArticlesRunning ||
                         isCollectingAlbums
                       }
                       onPress={async () => {
                         const mpId = currentMpInfo.id;
+                        if (
+                          !mpId ||
+                          isAddFeedLoading ||
+                          isCollectingAlbums ||
+                          isRefreshAllMpArticlesRunning
+                        )
+                          return;
+                        const token = beginManualRefresh(mpId);
+                        if (!token) return;
                         try {
                           const results = await refreshMpArticles({ mpId });
+                          if (!isCurrentRefresh(mpId, token)) return;
                           await refreshFeedViews(
                             refetchFeedList,
                             () => queryUtils.article.list.reset(),
                             () => queryUtils.article.summary.invalidate(),
                           );
+                          if (!isCurrentRefresh(mpId, token)) return;
                           if (
                             results.length > 0 &&
                             results.every((r) => r.complete)
                           )
-                            setRefreshedMpIds((prev) => [...prev, mpId]);
+                            setRefreshedMpIds((prev) => [
+                              ...prev.filter((id) => id !== mpId),
+                              mpId,
+                            ]);
                           for (const result of results) {
                             rememberUpdate(
                               mpId,
@@ -1006,13 +1075,21 @@ const Feeds = () => {
                                 duration: 10000,
                               });
                           }
-                          setTimeout(() => {
-                            setRefreshedMpIds((prev) =>
-                              prev.filter((id) => id !== mpId),
-                            );
-                          }, 3000);
+                          refreshFeedbackTimers.current.set(
+                            mpId,
+                            setTimeout(() => {
+                              refreshFeedbackTimers.current.delete(mpId);
+                              if (refreshPageMounted.current)
+                                setRefreshedMpIds((prev) =>
+                                  prev.filter((id) => id !== mpId),
+                                );
+                            }, 3000),
+                          );
                         } catch (e) {
-                          await refetchFeedList();
+                          if (!isCurrentRefresh(mpId, token)) return;
+                          // A failed local reread must never keep the task locked.
+                          await refetchFeedList().catch(() => undefined);
+                          if (!isCurrentRefresh(mpId, token)) return;
                           rememberUpdate(
                             mpId,
                             'error',
@@ -1021,6 +1098,8 @@ const Feeds = () => {
                           toast.error(
                             e instanceof Error ? e.message : '更新失败',
                           );
+                        } finally {
+                          finishManualRefresh(mpId, token);
                         }
                       }}
                     >
@@ -1041,7 +1120,7 @@ const Feeds = () => {
                         <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
                       </svg>
                       <span className="text-[14px]">
-                        {isGetArticlesLoading
+                        {refreshingMpIds.includes(currentMpInfo.id)
                           ? '更新中'
                           : refreshedMpIds.includes(currentMpInfo.id)
                             ? '更新完成'
@@ -1064,17 +1143,28 @@ const Feeds = () => {
                     isDisabled={
                       isAddFeedLoading ||
                       isRefreshAllMpArticlesRunning ||
-                      isGetArticlesLoading ||
+                      isManualBatchRefreshing ||
+                      refreshingMpIds.length > 0 ||
                       isCollectingAlbums
                     }
                     onPress={async () => {
+                      if (
+                        isAddFeedLoading ||
+                        isCollectingAlbums ||
+                        isRefreshAllMpArticlesRunning
+                      )
+                        return;
+                      const token = beginManualRefresh('');
+                      if (!token) return;
                       try {
                         const results = await refreshMpArticles({});
+                        if (!isCurrentRefresh('', token)) return;
                         await refreshFeedViews(
                           refetchFeedList,
                           () => queryUtils.article.list.reset(),
                           () => queryUtils.article.summary.invalidate(),
                         );
+                        if (!isCurrentRefresh('', token)) return;
                         for (const result of results) {
                           if ('id' in result && typeof result.id === 'string')
                             rememberUpdate(
@@ -1103,11 +1193,21 @@ const Feeds = () => {
                             },
                           );
                         else toast.success(`完整更新 ${complete} 个公众号`);
-                        setTimeout(() => setIsRefreshedAll(false), 3000);
+                        refreshFeedbackTimers.current.set(
+                          '',
+                          setTimeout(() => {
+                            refreshFeedbackTimers.current.delete('');
+                            if (refreshPageMounted.current)
+                              setIsRefreshedAll(false);
+                          }, 3000),
+                        );
                       } catch (e) {
+                        if (!isCurrentRefresh('', token)) return;
                         toast.error(
                           e instanceof Error ? e.message : '更新失败',
                         );
+                      } finally {
+                        finishManualRefresh('', token);
                       }
                     }}
                   >
@@ -1128,7 +1228,7 @@ const Feeds = () => {
                       <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
                     </svg>
                     <span className="text-[14px]">
-                      {isRefreshAllMpArticlesRunning || isGetArticlesLoading
+                      {isRefreshAllMpArticlesRunning || isManualBatchRefreshing
                         ? '更新中'
                         : isRefreshedAll
                           ? '更新完成'
@@ -1302,7 +1402,8 @@ const Feeds = () => {
                           albumIds={currentAlbumIds}
                           hasLocalDirectory={!!currentMpInfo.localDirectory}
                           isDisabled={
-                            isGetArticlesLoading ||
+                            refreshingMpIds.includes(currentMpInfo.id) ||
+                            isManualBatchRefreshing ||
                             !!isRefreshAllMpArticlesRunning ||
                             isCollectingAlbums
                           }
@@ -1346,7 +1447,8 @@ const Feeds = () => {
                             className="mac-btn-outline"
                             isDisabled={
                               isAddFeedLoading ||
-                              isGetArticlesLoading ||
+                              refreshingMpIds.includes(currentMpInfo.id) ||
+                              isManualBatchRefreshing ||
                               !!isRefreshAllMpArticlesRunning ||
                               isCollectingAlbums
                             }

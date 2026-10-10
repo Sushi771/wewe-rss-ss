@@ -250,6 +250,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
       '/list',
       'backup',
       '/login/list',
+      `/feed/${number}.xml`,
       '/list',
       `/feed/${number}.json`,
     ]);
@@ -609,6 +610,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
       '/list',
       'backup',
       '/login/list',
+      `/feed/${number}.xml`,
       '/list',
       `/feed/${number}.json`,
     ]);
@@ -754,6 +756,70 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(request).not.toHaveBeenCalled();
     expect(backup).not.toHaveBeenCalled();
     expect(native.discover).not.toHaveBeenCalled();
+  });
+
+  it('keeps an ambiguous legacy item isolated and never reports full cache readiness or submits another add', async () => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    const canonical = `https://mp.weixin.qq.com/s?__biz=${Buffer.from(number).toString('base64')}&mid=9&idx=1`;
+    await prisma.feed.create({
+      data: {
+        id: feedId,
+        mpName: '合成公众号',
+        mpCover: '',
+        mpIntro: '',
+        updateTime: 0,
+        collectionChannel: 'wechat2rss',
+      },
+    });
+    const old = await prisma.article.create({
+      data: {
+        id: 'legacy-unverified',
+        mpId: feedId,
+        title: 'Sanitized legacy collision',
+        publishTime: 1790827200,
+        picUrl: '',
+        contentHtml: '<p>Keep old note</p>',
+      },
+    });
+    const journal = await wechat2RssAddReceipt(database, canonical);
+    await journal.accepted(`/feed/${number}.xml`);
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (...args) =>
+      new URL(String(args[0])).pathname === `/feed/${number}.json`
+        ? new Response(
+            JSON.stringify({
+              items: [
+                {
+                  id: canonical,
+                  title: old.title,
+                  date_published: new Date(
+                    old.publishTime * 1000,
+                  ).toISOString(),
+                  content_html: '<p>Cache</p>',
+                },
+              ],
+            }),
+          )
+        : original(...args),
+    );
+    const result = await setup().caller.feed.addFromArticle({
+      articleUrl: canonical,
+      source: 'wechat2rss',
+    });
+    expect(result).toMatchObject({
+      status: 'blocked',
+      code: 'LEGACY_IDENTITY_UNVERIFIED',
+      upstreamSubmitted: false,
+      sync: { articles: 0, identitySkipped: 1, bodyReady: false },
+    });
+    expect(
+      events.filter(
+        (event) => event === '/addurl' || event.startsWith('/add/'),
+      ),
+    ).toEqual([]);
+    expect(
+      await prisma.article.findUniqueOrThrow({ where: { id: old.id } }),
+    ).toEqual(old);
   });
 
   it('new subscription imports a ready cache then duplicates and restart only read it', async () => {

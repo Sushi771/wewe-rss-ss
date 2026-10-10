@@ -539,6 +539,8 @@ export class TrpcService {
       accepted?: boolean;
       bodyMissing?: number;
       imageBlocked?: number;
+      identitySkipped?: number;
+      identitySkippedArticles?: Array<{ id: string; code: string }>;
       pages?: number;
       albums?: Array<{
         id: string;
@@ -629,6 +631,8 @@ export class TrpcService {
             accepted: result.accepted,
             bodyMissing: result.bodyMissing,
             imageBlocked: result.imageBlocked,
+            identitySkipped: result.identitySkipped,
+            identitySkippedArticles: result.identitySkippedArticles,
             pages: result.pages,
             albums: result.albums,
             attemptedAt: Math.floor(Date.now() / 1000),
@@ -1574,6 +1578,7 @@ export class TrpcService {
         : await this.refreshMpArticlesAndUpdateFeed(feed.id, 1, 'local-manual');
       const complete =
         sync.status === 'partial' &&
+        !('identitySkipped' in sync && sync.identitySkipped) &&
         'bodyMissing' in sync &&
         sync.bodyMissing === 0 &&
         'imageBlocked' in sync &&
@@ -1585,12 +1590,17 @@ export class TrpcService {
         }),
         status: complete
           ? ('updated' as const)
-          : sync.status === 'blocked'
+          : sync.status === 'blocked' ||
+              ('identitySkipped' in sync && sync.identitySkipped)
             ? ('blocked' as const)
             : ('pending' as const),
         pending: !complete,
         sync,
-        code: complete ? 'CACHE_IMPORTED' : 'CACHE_PENDING',
+        code: complete
+          ? 'CACHE_IMPORTED'
+          : 'identitySkipped' in sync && sync.identitySkipped
+            ? 'LEGACY_IDENTITY_UNVERIFIED'
+            : 'CACHE_PENDING',
         message: complete
           ? `公众号已${created ? '添加并' : '订阅并'}读取缓存。${sync.message}`
           : `公众号已保留，缓存尚未完整就绪。${sync.message}稍后使用原更新按钮只读缓存，无需重新新增。`,

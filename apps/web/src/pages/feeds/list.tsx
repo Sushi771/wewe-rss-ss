@@ -259,6 +259,12 @@ const ArticleList: FC<ArticleListProps> = ({
                 className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] md:!whitespace-nowrap dark:hover:text-[#0A84FF]"
                 target="_blank"
                 rel="noopener noreferrer"
+                title={
+                  item.bodyCached
+                    ? '点击标题阅读缓存正文'
+                    : '打开原文；本地正文未缓存'
+                }
+                aria-label={`${item.bodyCached ? '阅读缓存正文' : '打开原文'}：${item.title}`}
                 onClick={(event) => {
                   if (item.bodyCached) {
                     event.preventDefault();
@@ -274,17 +280,7 @@ const ArticleList: FC<ArticleListProps> = ({
                   className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
-                  {item.bodyCached ? (
-                    <Button
-                      size="sm"
-                      variant="light"
-                      onPress={() => setReadingId(item.id)}
-                    >
-                      阅读已缓存正文
-                    </Button>
-                  ) : (
-                    <span>正文未缓存</span>
-                  )}
+                  {!item.bodyCached && <span>正文未缓存</span>}
                   {(!item.bodyCached ||
                     item.lastBodyStatus === 'unavailable' ||
                     item.bodyRetryResult?.status === 'failed') && (

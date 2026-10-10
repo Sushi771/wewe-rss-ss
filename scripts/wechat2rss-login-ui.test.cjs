@@ -352,3 +352,21 @@ test('poll/start failures stop and never display raw exception or stale status',
   assert.match(f.render().text, /二维码获取失败/);
   assert(!f.render().text.includes('private-cookie'));
 });
+
+test('observed JPEG contract reaches the actual Image src without automatic account-list reads', async () => {
+  // Full locally encoded gradient JPEG, never a login QR or upstream response.
+  const image =
+    'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDk9F8Ifd/d/pRRRRTm7FZXmWI+rrU//9k=';
+  const f = fixture();
+  f.setStart({ ...waiting, qrcode: image });
+  await f.button('添加微信账号').props.onPress();
+  assert.equal(f.render().nodes.find((n) => n.type === 'img').props.src, image);
+  assert.deepEqual(f.calls, ['start']);
+  f.setPoll({ ...waiting, qrcode: image });
+  await f.tick();
+  assert.equal(f.render().nodes.find((n) => n.type === 'img').props.src, image);
+  assert.equal(f.calls.filter((c) => c === 'start').length, 1);
+  assert(!f.calls.includes('list'));
+  f.close();
+  assert.equal(f.timers.size, 0);
+});
