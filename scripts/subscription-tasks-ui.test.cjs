@@ -17,7 +17,12 @@ const batch = {
     { index: 1, state: 'queued', message: '' },
   ],
 };
-function fixture(initial = [batch], adding = false, legacy = false) {
+function fixture(
+  initial = [batch],
+  adding = false,
+  legacy = false,
+  excluded = [],
+) {
   let data = { items: initial },
     queryError = false,
     options,
@@ -139,6 +144,7 @@ function fixture(initial = [batch], adding = false, legacy = false) {
       legacy ? module.exports.LegacySubscriptionTasks : module.exports.default
     )({
       adding,
+      excluded,
       feeds: [{ id: 'MP_WXS_1234567890', mpName: '合成公众号' }],
       onSaved: async (reveal) => {
         calls.push(['local-view-refresh', reveal]);
@@ -360,4 +366,32 @@ test('source-preserved completion does not claim newly imported or fully ready c
   assert.match(f.render().text, /已有订阅/);
   assert(!f.render().text.includes('正文已确认完成'));
   assert(!f.render().text.includes('文章已同步'));
+});
+test('completed batch metadata continues local polling and refreshes the real publisher name', async () => {
+  const task = {
+    taskId: 'b'.repeat(64),
+    feedId: 'MP_WXS_1234567890',
+    state: 'pending',
+    phase: 'metadata',
+  };
+  const f = fixture([task], false, true, [task.taskId]);
+  assert.equal(
+    f.options.refetchInterval(
+      { items: [task] },
+      { state: { status: 'success' } },
+    ),
+    3000,
+  );
+  await f.deliver([task]);
+  await f.deliver([{ ...task, state: 'succeeded' }]);
+  assert.equal(f.calls.length, 2);
+  assert(f.calls.every((c) => c[0] === 'local-view-refresh'));
+  assert.equal(
+    f.options.refetchInterval(
+      { items: [{ ...task, state: 'succeeded' }] },
+      { state: { status: 'success' } },
+    ),
+    false,
+  );
+  assert.equal(f.render().text, '');
 });

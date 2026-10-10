@@ -241,16 +241,17 @@ const LegacySubscriptionTasks = ({
         ? false
         : data?.items.some(
               (task) =>
-                !excluded.includes(task.taskId) &&
+                (!excluded.includes(task.taskId) ||
+                  task.phase === 'metadata') &&
                 ['pending', 'running'].includes(task.state),
             )
           ? 3000
           : false,
     async onSuccess(data) {
       for (const task of data.items) {
-        const key = `${task.state}:${task.feedId}`;
+        const key = `${task.state}:${task.feedId}:${task.phase}`;
         if (
-          excluded.includes(task.taskId) ||
+          (excluded.includes(task.taskId) && task.phase !== 'metadata') ||
           !task.feedId ||
           seen.current.get(task.taskId) === key
         )
