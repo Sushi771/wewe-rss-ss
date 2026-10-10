@@ -1475,11 +1475,13 @@ describe('explicit add source through original router (offline SQLite)', () => {
     );
     const result = await (service as any).continueAcceptedSubscription(task);
     expect(result).toMatchObject({
-      state: 'failed',
-      failureReason: 'CACHE_IMAGES_UNVERIFIED',
+      state: 'succeeded',
+      code: 'CACHE_IMAGES_PENDING',
+      bodyReady: false,
+      imagePendingCount: 1,
       feedId,
     });
-    expect(result.message).toContain('图片未通过 1 项');
+    expect(result.message).toContain('图片待补 1 项');
     expect(
       (await prisma.feed.findUniqueOrThrow({ where: { id: feedId } })).syncTime,
     ).toBe(1700000000);
@@ -1490,6 +1492,13 @@ describe('explicit add source through original router (offline SQLite)', () => {
         })
       ).contentHtml,
     ).toContain('已核正文');
+    expect(
+      (
+        await prisma.article.findUniqueOrThrow({
+          where: { id: `WX_${number}_101_1` },
+        })
+      ).lastBodyStatus,
+    ).toBe('images-pending');
     expect(events).not.toContain('/addurl');
     service.onModuleDestroy();
   });

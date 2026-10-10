@@ -38,6 +38,14 @@ export async function buildArticleMarkdown(
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
   let html = article.contentHtml || '';
+  if (
+    article.lastBodyStatus === 'images-pending' ||
+    html.includes('data-wewe-image-pending=')
+  )
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: '正文已同步，图片待补；完整离线导出尚未就绪。',
+    });
   if (!html && article.lastBodyStatus === 'unavailable')
     throw new TRPCError({
       code: 'PRECONDITION_FAILED',

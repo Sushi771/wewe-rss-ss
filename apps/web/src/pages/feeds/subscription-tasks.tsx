@@ -41,6 +41,8 @@ function reason(state: string, code?: string) {
   if (code === 'LEGACY_IDENTITY_UNVERIFIED')
     return '部分旧文章身份待核实，已隔离并保留旧正文。';
   if (code === 'CACHE_READ_FAILED') return '缓存读取未完成，请继续检查原请求。';
+  if (code === 'CACHE_IMAGES_PENDING')
+    return '订阅已保留，正文已同步，图片待补；完整离线保存尚未就绪。';
   return state === 'blocked'
     ? '本条处理已暂停，请核对原请求状态。'
     : '本条读取或处理未完成，请继续检查原请求。';
@@ -153,7 +155,8 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
     const observe = (key: string, signature: string, exception: Exception) => {
       const previous = notified.current[key];
       if (
-        ['failed', 'blocked'].includes(exception.state) &&
+        (['failed', 'blocked'].includes(exception.state) ||
+          exception.code === 'CACHE_IMAGES_PENDING') &&
         previous !== signature &&
         (initialized.current || adding || previous !== undefined)
       )
@@ -162,15 +165,23 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
     };
     for (const batch of batches.data.items) {
       for (const item of batch.items)
-        observe(`${batch.batchId}:${item.index}`, item.state, {
-          key: `${batch.batchId}:${item.index}`,
-          batchId: batch.batchId,
-          name:
-            feeds.find((feed) => feed.id === item.feedId)?.mpName ||
-            `第 ${item.index + 1} 条`,
-          state: item.state,
-          code: item.code,
-        });
+        observe(
+          `${batch.batchId}:${item.index}`,
+          item.code === 'CACHE_IMAGES_PENDING'
+            ? `${item.state}:${item.code}`
+            : item.state,
+          {
+            key: `${batch.batchId}:${item.index}`,
+            batchId: batch.batchId,
+            taskId:
+              item.code === 'CACHE_IMAGES_PENDING' ? item.taskId : undefined,
+            name:
+              feeds.find((feed) => feed.id === item.feedId)?.mpName ||
+              `第 ${item.index + 1} 条`,
+            state: item.state,
+            code: item.code,
+          },
+        );
       if (
         activeBefore.current.has(batch.batchId) &&
         batch.state === 'completed' &&
@@ -178,7 +189,9 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
         batch.items.every((item) => item.state === 'succeeded')
       )
         toast.success(
-          `添加完成 ${batch.items.length} / 共 ${batch.items.length}`,
+          batch.items.some((item) => item.code === 'CACHE_IMAGES_PENDING')
+            ? `订阅已保留 ${batch.items.length} / 共 ${batch.items.length}；正文已同步，部分图片待补。`
+            : `添加完成 ${batch.items.length} / 共 ${batch.items.length}`,
           { duration: 3000 },
         );
     }
@@ -192,16 +205,27 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
         task.state === 'succeeded' &&
         ['pending', 'running'].includes(notified.current[task.taskId])
       )
-        toast.success('添加完成 1 / 共 1', { duration: 3000 });
-      observe(task.taskId, task.state, {
-        key: task.taskId,
-        taskId: task.taskId,
-        name:
-          feeds.find((feed) => feed.id === task.feedId)?.mpName ||
-          '先前添加任务',
-        state: task.state,
-        code: task.code,
-      });
+        toast.success(
+          task.code === 'CACHE_IMAGES_PENDING'
+            ? '订阅已保留，正文已同步，图片待补。'
+            : '添加完成 1 / 共 1',
+          { duration: 3000 },
+        );
+      observe(
+        task.taskId,
+        task.code === 'CACHE_IMAGES_PENDING'
+          ? `${task.state}:${task.code}`
+          : task.state,
+        {
+          key: task.taskId,
+          taskId: task.taskId,
+          name:
+            feeds.find((feed) => feed.id === task.feedId)?.mpName ||
+            '先前添加任务',
+          state: task.state,
+          code: task.code,
+        },
+      );
     }
     activeBefore.current = new Set(
       batches.data.items
@@ -361,7 +385,11 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
         <ModalContent>
           <ModalHeader>添加需要处理（{exceptions.length} 条）</ModalHeader>
           <ModalBody tabIndex={0} aria-label="添加异常">
-            <p role="alert">部分订阅暂未完成，其他任务继续在后台处理。</p>
+            <p role="alert">
+              {exceptions.every((item) => item.code === 'CACHE_IMAGES_PENDING')
+                ? '订阅已保留，正文已同步，部分图片待补。'
+                : '部分内容需要处理，已保存的订阅与正文保留。'}
+            </p>
             <details className="subscription-task-reason">
               <summary>查看需要处理的订阅</summary>
               {exceptions.map((item) => (

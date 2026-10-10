@@ -111,7 +111,7 @@ describe('provider image archive', () => {
     );
     const result = await archiveProviderImages(page());
     expect(result.articles[0].contentHtml).toContain('data:image/png;base64,');
-    expect(result.articles[0].contentHtml).not.toContain('qpic.cn');
+    expect(result.articles[0].contentHtml).not.toContain('src="https:');
     expect(result.bodyMissing).toBe(0);
   });
 
@@ -162,6 +162,35 @@ describe('provider image archive', () => {
     expect(result.articles[0].contentHtml).toBeNull();
     expect(result.bodyMissing).toBe(1);
     expect(result.imageBlocked).toBe(1);
+  });
+  it('preserves verified text separately when the opt-in cache image archive fails', async () => {
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValue(new Error('offline'));
+    const result = await archiveProviderImages(page(), {
+      preserveTextOnImageFailure: true,
+    });
+    expect(result.articles[0].contentHtml).toContain('正文');
+    expect(result.articles[0].contentHtml).toContain(
+      'data-wewe-image-pending="1"',
+    );
+    expect(result.articles[0].contentHtml).not.toContain(' src="https:');
+    expect(result.articles[0].contentHtml).toContain(
+      'data-src="https://mmbiz.qpic.cn/a.jpg"',
+    );
+    expect(result.bodyMissing).toBe(0);
+    expect(result.imageBlocked).toBe(1);
+    fetchMock.mockResolvedValue(
+      new Response(png, { headers: { 'Content-Type': 'image/png' } }),
+    );
+    const complete = (await archiveProviderImages(page())).articles[0];
+    const supplemented = supplementSavedBodyImages(
+      result.articles[0].contentHtml!,
+      complete,
+    )!;
+    expect(supplemented).toContain('正文');
+    expect(supplemented).toContain('data:image/png;base64,');
+    expect(supplemented).not.toContain('data-wewe-image-pending');
   });
 
   it('keeps valid cached bytes and drops stale remote lazy-load URLs', async () => {

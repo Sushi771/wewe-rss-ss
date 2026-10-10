@@ -9,6 +9,7 @@ export type SubscriptionTaskCode =
   | 'SUBSCRIPTION_PAUSED'
   | 'CACHE_PENDING'
   | 'CACHE_READ_FAILED'
+  | 'CACHE_IMAGES_PENDING'
   | 'LEGACY_IDENTITY_UNVERIFIED'
   | 'SOURCE_CHANGED';
 export type SubscriptionTaskResult = {
@@ -18,6 +19,7 @@ export type SubscriptionTaskResult = {
   feedId?: string;
   listReady?: boolean;
   bodyReady?: boolean;
+  imagePendingCount?: number;
   code?: SubscriptionTaskCode;
   failureReason?: CacheFailureReason;
 };
@@ -44,6 +46,7 @@ const publicView = (task: SubscriptionTask) => ({
   feedId: task.feedId,
   listReady: task.listReady,
   bodyReady: task.bodyReady,
+  imagePendingCount: task.imagePendingCount,
   code: task.code,
   failureReason: task.failureReason,
   startedAt: task.startedAt,
@@ -129,11 +132,16 @@ export class Wechat2RssSubscriptionTasks {
         !['identity', 'cache', 'metadata'].includes(task.phase) ||
         (task.listReady !== undefined && typeof task.listReady !== 'boolean') ||
         (task.bodyReady !== undefined && typeof task.bodyReady !== 'boolean') ||
+        (task.imagePendingCount !== undefined &&
+          (!Number.isSafeInteger(task.imagePendingCount) ||
+            task.imagePendingCount < 0 ||
+            task.imagePendingCount > 1000000)) ||
         (task.code !== undefined &&
           ![
             'SUBSCRIPTION_PAUSED',
             'CACHE_PENDING',
             'CACHE_READ_FAILED',
+            'CACHE_IMAGES_PENDING',
             'LEGACY_IDENTITY_UNVERIFIED',
             'SOURCE_CHANGED',
           ].includes(task.code)) ||
@@ -212,6 +220,7 @@ export class Wechat2RssSubscriptionTasks {
       if (!task) throw new Error('SUBSCRIPTION_TASK_INVALID');
       delete task.code;
       delete task.failureReason;
+      delete task.imagePendingCount;
       Object.assign(task, result);
       await this.write(task);
       return publicView(task);
@@ -262,6 +271,7 @@ export class Wechat2RssSubscriptionTasks {
       firstCheckAt: undefined,
       code: undefined,
       failureReason: undefined,
+      imagePendingCount: undefined,
       deadline: startedAt + 300000,
       nextCheckAt: startedAt + 30000,
       attempts: 0,
@@ -275,7 +285,10 @@ export class Wechat2RssSubscriptionTasks {
   async resume(id: string) {
     const task = await this.read(id);
     if (!task) return null;
-    if (pending(task.state) || task.state === 'succeeded')
+    if (
+      pending(task.state) ||
+      (task.state === 'succeeded' && task.code !== 'CACHE_IMAGES_PENDING')
+    )
       return publicView(task);
     return this.enqueue(task);
   }
@@ -373,6 +386,7 @@ export class Wechat2RssSubscriptionTasks {
             return;
           delete current.code;
           delete current.failureReason;
+          delete current.imagePendingCount;
           Object.assign(current, result);
           await this.write(current);
         });

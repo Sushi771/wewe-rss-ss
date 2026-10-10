@@ -1356,6 +1356,7 @@ export class TrpcService {
           return {
             ...base,
             bodyReady: task.bodyReady === true,
+            imagePendingCount: task.imagePendingCount,
             listReady: true,
             code: task.code,
             state: 'pending',
@@ -1388,6 +1389,7 @@ export class TrpcService {
         return {
           ...base,
           bodyReady: task.bodyReady === true,
+          imagePendingCount: task.imagePendingCount,
           listReady: true,
           code: task.code,
           state: 'succeeded',
@@ -1487,6 +1489,25 @@ export class TrpcService {
           state: 'blocked',
           code: 'SUBSCRIPTION_PAUSED',
           message: '本地订阅已停用，自动接续已停止；已有内容保留。',
+        };
+      if (
+        result.sync &&
+        'articles' in result.sync &&
+        result.sync.articles > 0 &&
+        'bodyMissing' in result.sync &&
+        result.sync.bodyMissing === 0 &&
+        'imageBlocked' in result.sync &&
+        result.sync.imageBlocked > 0
+      )
+        return {
+          ...next,
+          phase: !result.feed.mpName ? 'metadata' : 'cache',
+          state: !result.feed.mpName ? 'pending' : 'succeeded',
+          code: 'CACHE_IMAGES_PENDING',
+          listReady: true,
+          bodyReady: false,
+          imagePendingCount: result.sync.imageBlocked,
+          message: `订阅已保留，已核正文已同步，图片待补 ${result.sync.imageBlocked} 项；完整离线保存尚未就绪。${'identitySkipped' in result.sync && result.sync.identitySkipped ? '旧身份无法核实的文章已隔离。' : ''}`,
         };
       if (
         result.code === 'CACHE_READ_FAILED' ||

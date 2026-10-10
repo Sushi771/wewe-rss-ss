@@ -24,6 +24,14 @@ export function prepareCachedArticleLocalExport(
   exportSource?: ArticleExportSource,
 ) {
   const snapshot = { ...article };
+  if (
+    snapshot.lastBodyStatus === 'images-pending' ||
+    snapshot.contentHtml?.includes('data-wewe-image-pending=')
+  )
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: '正文已同步，图片待补；完整离线导出尚未就绪。',
+    });
   if (!snapshot.contentHtml || snapshot.lastBodyStatus === 'unavailable')
     throw new TRPCError({
       code: 'PRECONDITION_FAILED',

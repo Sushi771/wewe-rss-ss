@@ -72,6 +72,33 @@ describe('accepted subscription task persistence (offline)', () => {
       /synthetic-instance|\/feed\/|https:\/\//,
     );
   });
+  it('persists partial text completion across restart and retries only after explicit resume', async () => {
+    const run = jest.fn();
+    run.mockResolvedValue({
+      ...done,
+      code: 'CACHE_IMAGES_PENDING',
+      bodyReady: false,
+      imagePendingCount: 1,
+    });
+    const q = make(run);
+    const first = await q.enqueue(input);
+    now += 30000;
+    await q.runDue();
+    q.close();
+    const fresh = make(jest.fn().mockResolvedValue(done));
+    await fresh.init();
+    expect(await fresh.get(first.taskId)).toMatchObject({
+      state: 'succeeded',
+      code: 'CACHE_IMAGES_PENDING',
+      imagePendingCount: 1,
+    });
+    await fresh.runDue();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(await fresh.resume(first.taskId)).toMatchObject({
+      state: 'pending',
+    });
+    expect((await fresh.get(first.taskId))?.imagePendingCount).toBeUndefined();
+  });
   it('recovers a crashed running record with the same ID/path and never invents a new add', async () => {
     const q = make(jest.fn());
     const first = await q.enqueue(input);

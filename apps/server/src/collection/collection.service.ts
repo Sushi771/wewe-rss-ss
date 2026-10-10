@@ -633,7 +633,9 @@ export class CollectionService {
             })),
             bodyMissing: validated.articles.length,
           }
-        : await archiveProviderImages(validated);
+        : await archiveProviderImages(validated, {
+            preserveTextOnImageFailure: true,
+          });
       if (!page.articles.length) {
         // Publisher metadata can be ready before the first article. The
         // conditional write preserves a concurrently changed avatar/source.
@@ -734,7 +736,9 @@ export class CollectionService {
                   contentHtml: item.contentHtml,
                   picUrl: item.picUrl,
                   lastBodyStatus: item.contentHtml
-                    ? 'available'
+                    ? item.contentHtml.includes('data-wewe-image-pending=')
+                      ? 'images-pending'
+                      : 'available'
                     : 'unavailable',
                 },
               });
@@ -744,6 +748,9 @@ export class CollectionService {
                 ? supplementSavedBodyImages(existing.contentHtml, item)
                 : undefined;
               const data = {
+                ...(item.contentHtml?.includes('data-wewe-image-pending=')
+                  ? { lastBodyStatus: 'images-pending' }
+                  : {}),
                 ...(!existing.sourceUrl ? { sourceUrl: identity.url } : {}),
                 ...(!existing.verifiedSourceUrl
                   ? { verifiedSourceUrl: identity.url }
@@ -752,6 +759,11 @@ export class CollectionService {
                   ? { contentHtml: item.contentHtml }
                   : {}),
                 ...(supplemented ? { contentHtml: supplemented } : {}),
+                ...(supplemented &&
+                existing.lastBodyStatus === 'images-pending' &&
+                !supplemented.includes('data-wewe-image-pending=')
+                  ? { lastBodyStatus: 'available' }
+                  : {}),
                 ...(!existing.picUrl && item.picUrl
                   ? { picUrl: item.picUrl }
                   : {}),

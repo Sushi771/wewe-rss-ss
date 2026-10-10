@@ -625,3 +625,37 @@ test('six-link paused progress reports the accepted first feed separately from u
   );
   assert.deepEqual(f.calls, []);
 });
+
+test('image-pending completion preserves the subscription and warns without claiming complete offline content', async () => {
+  const f = fixture();
+  f.render();
+  const partial = {
+    ...batch,
+    state: 'completed',
+    items: [
+      {
+        index: 0,
+        state: 'succeeded',
+        feedId: 'MP_WXS_1234567890',
+        bodyReady: false,
+        code: 'CACHE_IMAGES_PENDING',
+        imagePendingCount: 1,
+      },
+    ],
+  };
+  await f.deliver([partial]);
+  let view = f.render();
+  assert(view.text.includes('正文已同步，图片待补'));
+  assert(view.text.includes('完整离线保存尚未就绪'));
+  assert(!view.text.includes('部分订阅暂未完成'));
+  assert(!view.nodes.some((node) => node.type === 'Progress'));
+  assert.match(f.notifications[0][0], /订阅已保留.*图片待补/);
+  await f.button('知道了').props.onPress();
+  await f.deliver([{ ...partial, updatedAt: Date.now() }]);
+  view = f.render();
+  assert.equal(
+    view.nodes.find((node) => node.type === 'Modal').props.isOpen,
+    false,
+  );
+  assert(f.calls.every((call) => call[0] === 'local-view-refresh'));
+});

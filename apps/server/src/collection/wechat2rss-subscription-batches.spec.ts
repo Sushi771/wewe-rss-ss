@@ -99,6 +99,41 @@ describe('durable authorized batch (offline)', () => {
     expect(submit).toHaveBeenCalledTimes(1);
     expect(resume).not.toHaveBeenCalled();
   });
+  it('projects image-pending text completion from the latest task without rewriting the batch', async () => {
+    const { manager, submit, task, resume } = make(
+      jest.fn().mockResolvedValue(waiting),
+    );
+    const batch = await manager.enqueue([urls[0]]);
+    await manager.runDue();
+    const file = path.join(
+      directory,
+      '.wechat2rss-subscription-batches',
+      batch.batchId + '.json',
+    );
+    const before = await fs.readFile(file, 'utf8');
+    task.mockResolvedValue({
+      ...waiting,
+      state: 'succeeded',
+      listReady: true,
+      bodyReady: false,
+      code: 'CACHE_IMAGES_PENDING',
+      imagePendingCount: 4,
+    });
+    expect((await manager.list())[0]).toMatchObject({
+      state: 'completed',
+      items: [
+        {
+          state: 'succeeded',
+          bodyReady: false,
+          code: 'CACHE_IMAGES_PENDING',
+          imagePendingCount: 4,
+        },
+      ],
+    });
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(resume).not.toHaveBeenCalled();
+  });
   it('projects pending metadata after body completion, then reports its completion without writing a new batch', async () => {
     const { manager, task } = make(
       jest.fn().mockResolvedValue({ ...waiting, bodyReady: true }),

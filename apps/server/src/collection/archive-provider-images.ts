@@ -30,18 +30,30 @@ export function supplementSavedBodyImages(
     el.removeAttr('data-src');
     changed = true;
   }
+  if (
+    changed &&
+    body.attr('data-wewe-image-retryable') === 'true' &&
+    !article.contentHtml?.includes('data-wewe-image-pending=')
+  ) {
+    body.removeAttr('data-wewe-image-pending');
+    body.removeAttr('data-wewe-image-retryable');
+  }
   return changed ? $.html(body) : undefined;
 }
 
 /** Store provider body images inside SQLite so restart and ZIP export do not depend on the CDN. */
 export async function archiveProviderImages(
   page: ProviderPage,
-  options: { stopOnFailure?: boolean } = {},
+  options: {
+    stopOnFailure?: boolean;
+    preserveTextOnImageFailure?: boolean;
+  } = {},
 ): Promise<ProviderPage> {
   let imageBlocked = page.imageBlocked;
   let bodyMissing = page.bodyMissing;
   const articles: ProviderPage['articles'] = [];
   for (const article of page.articles) {
+    const blockedBefore = imageBlocked;
     if (!article.contentHtml) {
       articles.push(article);
       continue;
@@ -52,6 +64,16 @@ export async function archiveProviderImages(
       if (options.stopOnFailure)
         throw new Error('公开合集正文图片超过上限，本批未写入');
       imageBlocked += images.length;
+      if (
+        options.preserveTextOnImageFailure &&
+        $('.rich_media_content, #js_content').first().text().trim()
+      ) {
+        const body = $('.rich_media_content, #js_content').first();
+        body.attr('data-wewe-image-pending', String(images.length));
+        body.find('img').remove();
+        articles.push({ ...article, contentHtml: $.html(body) });
+        continue;
+      }
       bodyMissing++;
       articles.push({ ...article, contentHtml: null });
       continue;
@@ -82,9 +104,25 @@ export async function archiveProviderImages(
           );
         failed = true;
         imageBlocked++;
+        if (options.preserveTextOnImageFailure)
+          $(image).removeAttr('src').attr('data-src', source);
       }
     }
     if (failed) {
+      if (
+        options.preserveTextOnImageFailure &&
+        $('.rich_media_content, #js_content').first().text().trim()
+      ) {
+        const body = $('.rich_media_content, #js_content').first();
+        const previous = Number(body.attr('data-wewe-image-pending') || 0);
+        if (!previous) body.attr('data-wewe-image-retryable', 'true');
+        body.attr(
+          'data-wewe-image-pending',
+          String(previous + imageBlocked - blockedBefore),
+        );
+        articles.push({ ...article, contentHtml: $.html(body) });
+        continue;
+      }
       // Keep the old cached body, if any. A later refresh can retry the images.
       bodyMissing++;
       articles.push({ ...article, contentHtml: null });

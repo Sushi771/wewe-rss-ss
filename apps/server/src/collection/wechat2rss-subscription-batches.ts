@@ -19,6 +19,7 @@ export type BatchOutcome = {
   taskId?: string;
   feedId?: string;
   bodyReady?: boolean;
+  imagePendingCount?: number;
   listReady?: boolean;
   code?: SubscriptionTaskCode;
   phase?: 'identity' | 'cache' | 'metadata';
@@ -56,6 +57,7 @@ const view = (b: Batch) => ({
     taskId: item.taskId,
     feedId: item.feedId,
     bodyReady: item.bodyReady,
+    imagePendingCount: item.imagePendingCount,
     accepted: item.accepted ?? !!item.taskId,
     listReady: item.listReady,
     code: item.code,
@@ -169,6 +171,10 @@ export class Wechat2RssSubscriptionBatches {
             !/^MP_WXS_\d{5,15}$/.test(item.feedId)) ||
           (item.bodyReady !== undefined &&
             typeof item.bodyReady !== 'boolean') ||
+          (item.imagePendingCount !== undefined &&
+            (!Number.isSafeInteger(item.imagePendingCount) ||
+              item.imagePendingCount < 0 ||
+              item.imagePendingCount > 1000000)) ||
           (item.accepted !== undefined && typeof item.accepted !== 'boolean') ||
           (item.articleUrl !== undefined &&
             subscriptionArticleUrl(item.articleUrl) !== item.articleUrl) ||
@@ -234,6 +240,7 @@ export class Wechat2RssSubscriptionBatches {
         if (!latest || (item.feedId && latest.feedId !== item.feedId)) continue;
         item.feedId = latest.feedId;
         item.bodyReady = latest.bodyReady;
+        item.imagePendingCount = latest.imagePendingCount;
         item.listReady = latest.listReady;
         item.code = latest.code;
         item.message = latest.message;

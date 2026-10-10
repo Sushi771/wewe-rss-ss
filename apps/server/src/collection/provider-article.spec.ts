@@ -65,5 +65,28 @@ describe('Wechat2RSS JSON Feed candidate parser', () => {
     );
     expect(page.imageBlocked).toBe(1);
     expect(page.articles[0].contentHtml).not.toContain('127.0.0.1');
+    expect(page.articles[0].contentHtml).toContain(
+      'data-wewe-image-pending="1"',
+    );
+  });
+  it('keeps unknown source-less body images pending rather than guessing a placeholder role', () => {
+    const page = parseWechat2RssJsonFeed(
+      {
+        items: [
+          {
+            ...item(1),
+            content_html:
+              '<p>完整文字</p><img class="rich_pages wxw-img" style="width:552px;height:228px">',
+          },
+        ],
+      },
+      feedId,
+    );
+    expect(page.imageBlocked).toBe(1);
+    expect(page.bodyMissing).toBe(0);
+    expect(page.articles[0].contentHtml).toContain('完整文字');
+    expect(page.articles[0].contentHtml).toContain(
+      'data-wewe-image-pending="1"',
+    );
   });
 });
