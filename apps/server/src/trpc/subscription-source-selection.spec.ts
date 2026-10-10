@@ -1481,7 +1481,9 @@ describe('explicit add source through original router (offline SQLite)', () => {
       imagePendingCount: 1,
       feedId,
     });
-    expect(result.message).toContain('图片待补 1 项');
+    expect(result.message).toContain('媒体完整性未确认');
+    expect(result.message).toContain('正文和有效图片可保存');
+    expect(result.message).not.toContain('完整离线保存尚未就绪');
     expect(
       (await prisma.feed.findUniqueOrThrow({ where: { id: feedId } })).syncTime,
     ).toBe(1700000000);
