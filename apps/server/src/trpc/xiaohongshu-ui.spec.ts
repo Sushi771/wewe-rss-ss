@@ -754,7 +754,24 @@ describe('shared single-level management folder actual handlers (offline)', () =
     const scope = {
       movedIntoFolder: { current: true },
       folderOperation: { current: false },
+      dragOrder: {
+        current: [
+          { id: 'a', order: 0, groupId: null },
+          { id: 'b', order: 1, groupId: null },
+        ],
+      },
+      dragSnapshot: {
+        current: [
+          { id: 'b', order: 1, groupId: null },
+          { id: 'a', order: 0, groupId: null },
+        ],
+      },
+      draggedItem: 0,
+      acceptedFeedDrop: { current: true },
       setDraggedItem: jest.fn(),
+      setOrderedFeeds: jest.fn(),
+      setFolderBusy: jest.fn(),
+      queryUtils: { feed: { list: { cancel: jest.fn() } } },
       orderedFeeds: [{ id: 'a' }, { id: 'b' }],
       updateOrder: jest.fn().mockResolvedValue(undefined),
       refetchFeedList: jest.fn(),
@@ -765,8 +782,8 @@ describe('shared single-level management folder actual handlers (offline)', () =
     expect(scope.movedIntoFolder.current).toBe(false);
     await evaluate('handleDragEnd', scope, table)();
     expect(scope.updateOrder).toHaveBeenCalledWith([
-      { id: 'a', order: 0 },
-      { id: 'b', order: 1 },
+      { id: 'a', order: 0, expectedOrder: 0, expectedGroupId: null },
+      { id: 'b', order: 1, expectedOrder: 1, expectedGroupId: null },
     ]);
   });
 });

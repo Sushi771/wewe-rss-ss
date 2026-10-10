@@ -90,6 +90,7 @@ describe('production XHS router/service → additive SQLite and original export 
       (n) =>
         n !== '20261009050000_add_xhs_local_archive' &&
         n !== '20261009063000_add_management_groups' &&
+        n !== '20261010090000_management_group_order' &&
         n !== '20261009080000_add_xhs_video_cache',
     ))
       await apply(name);
@@ -123,6 +124,7 @@ describe('production XHS router/service → additive SQLite and original export 
     snapshot = await oldRows();
     await apply('20261009050000_add_xhs_local_archive');
     await apply('20261009063000_add_management_groups');
+    await apply('20261010090000_management_group_order');
     await apply('20261009080000_add_xhs_video_cache');
     expect(await oldRows()).toEqual(snapshot);
     expect(await prisma.$queryRawUnsafe('PRAGMA integrity_check')).toEqual([
