@@ -63,7 +63,14 @@ function makeSourceDb(file, { groups = true } = {}) {
   try {
     const migrations = path.join(ROOT, 'apps/server/prisma/migrations');
     for (const name of fs.readdirSync(migrations).sort()) {
-      if (!groups && name === '20261009063000_add_management_groups') continue;
+      if (
+        !groups &&
+        [
+          '20261009063000_add_management_groups',
+          '20261010090000_management_group_order',
+        ].includes(name)
+      )
+        continue;
       const sqlFile = path.join(migrations, name, 'migration.sql');
       if (fs.existsSync(sqlFile)) db.exec(fs.readFileSync(sqlFile, 'utf8'));
     }
