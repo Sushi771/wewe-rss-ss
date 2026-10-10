@@ -591,13 +591,29 @@ describe('explicit add source through original router (offline SQLite)', () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     const original = request.getMockImplementation()!;
     let reads = 0;
-    request.mockImplementation(async (...args) =>
-      new URL(String(args[0])).pathname === '/list' && reads++ === 0
-        ? new Response(
-            JSON.stringify({ err: '', data: [], meta: { total: 0 } }),
-          )
-        : original(...args),
-    );
+    request.mockImplementation(async (...args) => {
+      if (new URL(String(args[0])).pathname === '/list') {
+        const current = reads++;
+        if (current < 2)
+          return new Response(
+            JSON.stringify({
+              err: '',
+              data:
+                current === 0
+                  ? []
+                  : [
+                      {
+                        id: feedId.slice(7),
+                        name: ' ',
+                        link: `http://127.0.0.1:18080/feed/${number}.xml`,
+                      },
+                    ],
+              meta: { total: current === 0 ? 0 : 1 },
+            }),
+          );
+      }
+      return original(...args);
+    });
     expect(
       await setup().caller.feed.addFromArticle({
         articleUrl,
@@ -608,6 +624,18 @@ describe('explicit add source through original router (offline SQLite)', () => {
       status: 'pending',
       feed: null,
       code: 'SUBSCRIPTION_ID_PENDING',
+    });
+    expect(await prisma.feed.count()).toBe(0);
+    expect(
+      await setup().caller.feed.addFromArticle({
+        articleUrl,
+        source: 'wechat2rss',
+      }),
+    ).toMatchObject({
+      status: 'pending',
+      feed: null,
+      code: 'SUBSCRIPTION_ID_PENDING',
+      upstreamSubmitted: false,
     });
     expect(await prisma.feed.count()).toBe(0);
     expect(

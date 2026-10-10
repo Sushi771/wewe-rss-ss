@@ -195,6 +195,9 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     );
     if (!matches.length) return null;
     if (matches.length !== 1) throw new Error('WECHAT2RSS_LIST_CONFLICT');
+    // An accepted URL/ID may precede publisher metadata. Keep identity pending
+    // rather than creating an unnamed subscription from an incomplete cache.
+    if (!matches[0].name) return null;
     return {
       feedId: matches[0].feedId,
       name: matches[0].name,
