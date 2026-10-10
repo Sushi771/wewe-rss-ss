@@ -150,7 +150,8 @@ test('Wechat2RSS hides historical metric values, coverage notices and heat sorti
   assert.deepEqual(view.options, []);
   assert.equal(view.metricRows.length, 0);
   assert(!/阅读已获取|点赞已获取|未获取|热度|收藏/.test(view.text));
-  assert.match(view.text, /已缓存正文/);
+  assert.match(view.text, /文章标题 · 1 篇/);
+  assert(!view.text.includes('存量详情'));
   assert.equal(h.query.sort, 'publishTime');
 });
 test('effective route mapping hides metrics even when old stored channel is empty', () => {
