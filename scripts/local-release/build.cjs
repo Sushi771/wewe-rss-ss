@@ -323,6 +323,7 @@ function build(options = {}) {
   fs.mkdirSync(path.join(target, 'scripts'));
   for (const file of [
     'backup-sqlite.py',
+    ...(legacy ? [] : ['sqlite-snapshot-guard.py']),
     'verify-preservation.py',
     'watch-wechat2rss-cache.py',
   ])

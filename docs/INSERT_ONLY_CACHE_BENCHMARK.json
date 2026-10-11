@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "samples": 6,
+  "batchSize": 5,
+  "input": {
+    "databaseBytes": 626597888,
+    "feeds": 14,
+    "articles": 1718,
+    "cached": 289
+  },
+  "scenario": "Existing verified cached metadata, chosen rows absent only in isolated seed. List INSERT only; no body/image readiness claim.",
+  "segments": "totalMs includes preflight, checks, transaction, local status and postcommit dirty; transactionMs includes lease assertions. Guard assertions overlap transactionMs and must not be added twice. Startup full snapshot, copy, schema prep and verification are excluded from save latency.",
+  "modes": {
+    "old": {
+      "totalMs": {
+        "n": 6,
+        "p50": 8465.239099999999,
+        "p95": 10516.353199999983,
+        "max": 10516.353199999983
+      },
+      "transactionMs": {
+        "n": 6,
+        "p50": 1774.9467000000004,
+        "p95": 1917.5032000000065,
+        "max": 1917.5032000000065
+      },
+      "fullBackupMs": {
+        "n": 6,
+        "p50": 6486.293600000001,
+        "p95": 8473.957500000019,
+        "max": 8473.957500000019
+      },
+      "recentVerifiedSqliteSnapshotMs": {
+        "n": 6,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "assertInsertOnlySnapshotPermitMs": {
+        "n": 6,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "notifySqliteSnapshotDirtyMs": {
+        "n": 6,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      }
+    },
+    "fast": {
+      "totalMs": {
+        "n": 6,
+        "p50": 1815.8991000000096,
+        "p95": 2098.741100000014,
+        "max": 2098.741100000014
+      },
+      "transactionMs": {
+        "n": 6,
+        "p50": 1671.6362999999837,
+        "p95": 1968.7124999999942,
+        "max": 1968.7124999999942
+      },
+      "fullBackupMs": {
+        "n": 6,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "recentVerifiedSqliteSnapshotMs": {
+        "n": 6,
+        "p50": 4.124800000005052,
+        "p95": 5.176099999982398,
+        "max": 5.176099999982398
+      },
+      "assertInsertOnlySnapshotPermitMs": {
+        "n": 6,
+        "p50": 18.679300000017975,
+        "p95": 29.952900000003865,
+        "max": 29.952900000003865
+      },
+      "notifySqliteSnapshotDirtyMs": {
+        "n": 6,
+        "p50": 4.3135999999940395,
+        "p95": 5.5693000000028405,
+        "max": 5.5693000000028405
+      }
+    }
+  },
+  "initialSnapshotMs": {
+    "n": 6,
+    "p50": 9218.86540000001,
+    "p95": 10139.236700000009,
+    "max": 10139.236700000009
+  },
+  "oldRowsAndAllOtherTablesPreserved": true,
+  "duplicateDeliveryNoop": true,
+  "fullSnapshotRestorePassed": true,
+  "networkRequests": 0,
+  "records": [
+    {
+      "mode": "old",
+      "index": 0,
+      "totalMs": 8465.239099999999,
+      "transactionMs": 1774.9467000000004,
+      "fullBackupMs": 6486.293600000001,
+      "fullBackupCalls": 1,
+      "recentVerifiedSqliteSnapshotMs": 0,
+      "assertInsertOnlySnapshotPermitMs": 0,
+      "notifySqliteSnapshotDirtyMs": 0
+    },
+    {
+      "mode": "fast",
+      "index": 0,
+      "totalMs": 1896.8126000000047,
+      "transactionMs": 1762.1275999999998,
+      "fullBackupMs": 0,
+      "fullBackupCalls": 0,
+      "recentVerifiedSqliteSnapshotMs": 4.815899999994144,
+      "assertInsertOnlySnapshotPermitMs": 29.952900000003865,
+      "notifySqliteSnapshotDirtyMs": 3.763999999995576
+    },
+    {
+      "mode": "old",
+      "index": 1,
+      "totalMs": 8022.065900000001,
+      "transactionMs": 1581.112500000003,
+      "fullBackupMs": 6171.292300000001,
+      "fullBackupCalls": 1,
+      "recentVerifiedSqliteSnapshotMs": 0,
+      "assertInsertOnlySnapshotPermitMs": 0,
+      "notifySqliteSnapshotDirtyMs": 0
+    },
+    {
+      "mode": "fast",
+      "index": 1,
+      "totalMs": 1696.433200000014,
+      "transactionMs": 1586.374100000001,
+      "fullBackupMs": 0,
+      "fullBackupCalls": 0,
+      "recentVerifiedSqliteSnapshotMs": 4.124800000005052,
+      "assertInsertOnlySnapshotPermitMs": 21.39879999999539,
+      "notifySqliteSnapshotDirtyMs": 2.907500000001164
+    },
+    {
+      "mode": "old",
+      "index": 2,
+      "totalMs": 8083.815599999987,
+      "transactionMs": 1478.7690999999904,
+      "fullBackupMs": 6428.541800000006,
+      "fullBackupCalls": 1,
+      "recentVerifiedSqliteSnapshotMs": 0,
+      "assertInsertOnlySnapshotPermitMs": 0,
+      "notifySqliteSnapshotDirtyMs": 0
+    },
+    {
+      "mode": "fast",
+      "index": 2,
+      "totalMs": 1600.8424000000086,
+      "transactionMs": 1500.3628000000026,
+      "fullBackupMs": 0,
+      "fullBackupCalls": 0,
+      "recentVerifiedSqliteSnapshotMs": 4.117599999997765,
+      "assertInsertOnlySnapshotPermitMs": 17.976299999980256,
+      "notifySqliteSnapshotDirtyMs": 4.752100000012433
+    },
+    {
+      "mode": "old",
+      "index": 3,
+      "totalMs": 9947.108299999993,
+      "transactionMs": 1917.5032000000065,
+      "fullBackupMs": 7869.505700000009,
+      "fullBackupCalls": 1,
+      "recentVerifiedSqliteSnapshotMs": 0,
+      "assertInsertOnlySnapshotPermitMs": 0,
+      "notifySqliteSnapshotDirtyMs": 0
+    },
+    {
+      "mode": "fast",
+      "index": 3,
+      "totalMs": 2098.741100000014,
+      "transactionMs": 1968.7124999999942,
+      "fullBackupMs": 0,
+      "fullBackupCalls": 0,
+      "recentVerifiedSqliteSnapshotMs": 5.176099999982398,
+      "assertInsertOnlySnapshotPermitMs": 21.323300000018207,
+      "notifySqliteSnapshotDirtyMs": 5.5693000000028405
+    },
+    {
+      "mode": "old",
+      "index": 4,
+      "totalMs": 10516.353199999983,
+      "transactionMs": 1856.5782999999938,
+      "fullBackupMs": 8473.957500000019,
+      "fullBackupCalls": 1,
+      "recentVerifiedSqliteSnapshotMs": 0,
+      "assertInsertOnlySnapshotPermitMs": 0,
+      "notifySqliteSnapshotDirtyMs": 0
+    },
+    {
+      "mode": "fast",
+      "index": 4,
+      "totalMs": 1815.8991000000096,
+      "transactionMs": 1671.6362999999837,
+      "fullBackupMs": 0,
+      "fullBackupCalls": 0,
+      "recentVerifiedSqliteSnapshotMs": 4.1243000000249594,
+      "assertInsertOnlySnapshotPermitMs": 17.205700000020443,
+      "notifySqliteSnapshotDirtyMs": 4.651799999992363
+    },
+    {
+      "mode": "old",
+      "index": 5,
+      "totalMs": 10330.854099999997,
+      "transactionMs": 1826.0112999999837,
+      "fullBackupMs": 8302.607599999988,
+      "fullBackupCalls": 1,
+      "recentVerifiedSqliteSnapshotMs": 0,
+      "assertInsertOnlySnapshotPermitMs": 0,
+      "notifySqliteSnapshotDirtyMs": 0
+    },
+    {
+      "mode": "fast",
+      "index": 5,
+      "totalMs": 1858.592399999994,
+      "transactionMs": 1750.0874999999942,
+      "fullBackupMs": 0,
+      "fullBackupCalls": 0,
+      "recentVerifiedSqliteSnapshotMs": 4.333099999988917,
+      "assertInsertOnlySnapshotPermitMs": 18.679300000017975,
+      "notifySqliteSnapshotDirtyMs": 4.3135999999940395
+    }
+  ]
+}

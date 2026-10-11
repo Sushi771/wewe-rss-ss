@@ -17,6 +17,7 @@ import {
   ProviderPage,
 } from '../collection/subscription-provider';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
+import { tryInsertOnlyCachedPage } from '../collection/insert-only-cache';
 import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
 import {
   activeRefreshScheduleEnabled,
@@ -904,6 +905,27 @@ export class TrpcService {
         ),
       ].filter((item) => !item.contentHtml).length,
     };
+    if (
+      process.env.SQLITE_INSERT_ONLY_FAST_PATH === '1' &&
+      !preflightSkipped.length
+    ) {
+      // Hold the same original per-feed lock. The fast saver atomically commits
+      // articles, ledger and final local state, so no running/failed status may
+      // be written outside its transaction without the original full backup.
+      if (this.activeCollections.has(mpId)) throw new Error('CACHE_SYNC_BUSY');
+      this.activeCollections.add(mpId);
+      try {
+        const inserted = await tryInsertOnlyCachedPage(
+          this.prismaService,
+          feed,
+          delta,
+          listOnly,
+        );
+        if (inserted) return inserted;
+      } finally {
+        this.activeCollections.delete(mpId);
+      }
+    }
     return this.recordCollectionResult(
       mpId,
       (current) => {

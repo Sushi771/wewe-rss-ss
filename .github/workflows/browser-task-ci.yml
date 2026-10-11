@@ -7,6 +7,8 @@ on:
       - 'apps/server/src/browser-task*'
       - 'apps/server/test/browser-task-fixture.ts'
       - '.github/workflows/browser-task-ci.yml'
+      - 'apps/server/src/collection/sqlite-snapshot-guard*'
+      - 'apps/server/src/collection/insert-only-cache*'
 jobs:
   extension-offline:
     runs-on: ubuntu-latest

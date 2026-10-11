@@ -19,6 +19,21 @@ model Account {
   @@map("accounts")
 }
 
+// Immutable audit of opt-in pure INSERT batches; no cascading delete/recovery.
+model CacheInsertBatch {
+  id String @id
+  mpId String @map("mp_id")
+  articleManifest String @map("article_manifest")
+  snapshotGeneration String @map("snapshot_generation")
+  guardGeneration String @map("guard_generation")
+  backupStartedAtMs BigInt @map("backup_started_at_ms")
+  coverageAtMs BigInt @map("coverage_at_ms")
+  createdCount Int @map("created_count")
+  committedAtMs BigInt @map("committed_at_ms")
+
+  @@map("cache_insert_batches")
+}
+
 model Feed {
   id         String    @id
   mpName     String    @map("mp_name")

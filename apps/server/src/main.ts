@@ -9,6 +9,10 @@ import { readFileSync } from 'fs';
 import { assertPrivateConfig, privateAccessGuard } from './private-access';
 import { startupAudit, startupAuditHttpGuard } from './startup-audit';
 import {
+  startSqliteSnapshotGuard,
+  stopSqliteSnapshotGuard,
+} from './collection/sqlite-snapshot-guard';
+import {
   readBrowserTaskOptIn,
   browserTaskApplication,
   mountBrowserTaskTransport,
@@ -76,6 +80,10 @@ async function bootstrap() {
 
   await app.listen(port, host);
   startupAudit()?.start();
+  // Local-only optional snapshots never dispatch subscription/media work.
+  await startSqliteSnapshotGuard();
+  app.getHttpServer().once('close', stopSqliteSnapshotGuard);
+  process.once('exit', stopSqliteSnapshotGuard);
 
   console.log(`Server is running at http://${host}:${port}`);
 }
