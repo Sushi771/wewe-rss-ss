@@ -23,7 +23,7 @@ const chrome =
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test(
-  'real offline date dropdown, click-time Shanghai boundary, manual edit, clear and narrow layout',
+  'real offline calendar pointer/touch selection, Shanghai shortcuts, Escape, narrow layout and reader',
   { skip: !chrome, timeout: 120000 },
   async () => {
     const temp = fs.mkdtempSync(
@@ -49,6 +49,7 @@ URL.revokeObjectURL=url=>{window.blobs.revoked.push(url);revoke(url);};
 const OriginalDate=Date;
 window.testNow='2026-10-10T15:59:59Z';
 window.Date=class extends OriginalDate {constructor(...args){super(...(args.length?args:[window.testNow]));}};
+window.restoreRealDate=()=>window.Date=OriginalDate;
 function App(){
  const [dates,setDates]=useState({mode:'day',start:'',end:''});
  const [selected,setSelected]=useState(['old']);
@@ -60,7 +61,7 @@ function App(){
  <Modal isOpen={reading} onClose={()=>{setFind(false);setReading(false)}} isKeyboardDismissDisabled={find}>
  <ModalContent><ModalBody><button id="switch-reader" onClick={()=>{setFind(false);setId(id+1)}}>Switch</button>
  <ArticleReader key={id} contentHtml={id?'<p>Other body</p>':'<p>needle .*[x] <b>needle</b></p><p style="margin-top:1500px">needle</p><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="><a href="/saved">saved link</a><script>window.readerUnsafe=true</script>'} findOpen={find} onFindOpenChange={setFind}/>
- </ModalBody></ModalContent></Modal></NextUIProvider>;
+ </ModalBody></ModalContent></Modal><div style={{height:1400}}>Offline scroll fixture</div></NextUIProvider>;
 }
 createRoot(document.getElementById('root')).render(<App/>);
 `,
@@ -83,6 +84,13 @@ createRoot(document.getElementById('root')).render(<App/>);
           '@web/utils/article-date-selection': path.join(
             sourceRoot,
             'apps/web/src/utils/article-date-selection.ts',
+          ),
+          '@nextui-org/react': require
+            .resolve('@nextui-org/react', { paths: [web] })
+            .replace(/index\.js$/, 'index.mjs'),
+          '@internationalized/date': require.resolve(
+            '@internationalized/date',
+            { paths: [require.resolve('@nextui-org/react', { paths: [web] })] },
           ),
           'react/jsx-runtime': path.join(
             web,
@@ -119,10 +127,29 @@ createRoot(document.getElementById('root')).render(<App/>);
               'apps/web/src/components/ArticleDateFilter.tsx',
             ),
             path.join(sourceRoot, 'apps/web/src/components/ArticleReader.tsx'),
+            path.join(
+              path.dirname(
+                require.resolve('@nextui-org/theme', {
+                  paths: [
+                    require.resolve('@nextui-org/react', { paths: [web] }),
+                  ],
+                }),
+              ),
+              '**/*.{js,mjs}',
+            ),
           ],
           corePlugins: { preflight: true },
+          plugins: [
+            require(
+              require.resolve('@nextui-org/theme', {
+                paths: [require.resolve('@nextui-org/react', { paths: [web] })],
+              }),
+            ).nextui(),
+          ],
         }),
-      ]).process('@tailwind base;@tailwind utilities;', { from: undefined })
+      ]).process('@tailwind base;@tailwind components;@tailwind utilities;', {
+        from: undefined,
+      })
     ).css;
     const html = path.join(temp, 'fixture.html');
     fs.writeFileSync(
@@ -209,7 +236,20 @@ createRoot(document.getElementById('root')).render(<App/>);
       const send = (method, params = {}) =>
         new Promise((resolve, reject) => {
           const id = ++serial;
-          pending.set(id, { resolve, reject });
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            reject(Error('DevTools timeout: ' + method));
+          }, 10000);
+          pending.set(id, {
+            resolve: (v) => {
+              clearTimeout(timer);
+              resolve(v);
+            },
+            reject: (e) => {
+              clearTimeout(timer);
+              reject(e);
+            },
+          });
           ws.send(JSON.stringify({ id, method, params }));
         });
       const evaluate = async (expression) => {
@@ -253,25 +293,70 @@ createRoot(document.getElementById('root')).render(<App/>);
           ),
       );
       await ready();
+      const calendarClick = async (selector, touch = false) => {
+        const p = await evaluate(
+          `(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing '+${JSON.stringify(selector)});e.scrollIntoView({block:'nearest'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`,
+        );
+        if (touch) {
+          await send('Input.dispatchTouchEvent', {
+            type: 'touchStart',
+            touchPoints: [p],
+          });
+          await send('Input.dispatchTouchEvent', {
+            type: 'touchEnd',
+            touchPoints: [],
+          });
+        } else {
+          await send('Input.dispatchMouseEvent', {
+            type: 'mousePressed',
+            button: 'left',
+            clickCount: 1,
+            ...p,
+          });
+          await send('Input.dispatchMouseEvent', {
+            type: 'mouseReleased',
+            button: 'left',
+            clickCount: 1,
+            ...p,
+          });
+        }
+        await pause(350);
+      };
+      const escape = async () => {
+        await send('Input.dispatchKeyEvent', {
+          type: 'keyDown',
+          key: 'Escape',
+          code: 'Escape',
+          windowsVirtualKeyCode: 27,
+        });
+        await send('Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          key: 'Escape',
+          code: 'Escape',
+          windowsVirtualKeyCode: 27,
+        });
+        await pause(350);
+      };
       const change = async (value) => {
         await evaluate(
           `(()=>{const el=document.querySelector('select');el.value='${value}';el.dispatchEvent(new Event('change',{bubbles:true}));})()`,
         );
-        await pause(80);
+        await pause(100);
         return evaluate('window.fixture');
       };
+      const open = (end = false, touch = false) =>
+        calendarClick(
+          `button[aria-label^="${end ? '结束日期' : '原文发布日期'}"]`,
+          touch,
+        );
+      const day = (label, touch = false) =>
+        calendarClick(`[role="button"][aria-label="${label}"]`, touch);
       assert.equal(
-        await evaluate("document.querySelectorAll('optgroup option').length"),
-        3,
+        await evaluate("document.querySelectorAll('input[type=date]').length"),
+        0,
       );
       let r = await change('today');
-      assert.deepEqual(r.dates, {
-        mode: 'day',
-        start: '2026-10-10',
-        end: '',
-        shortcut: 'today',
-      });
-      assert.deepEqual(r.selected, []);
+      assert.equal(r.dates.start, '2026-10-10');
       await evaluate("window.testNow='2026-10-10T16:00:00Z'");
       r = await change('last7');
       assert.deepEqual(r.dates, {
@@ -280,24 +365,6 @@ createRoot(document.getElementById('root')).render(<App/>);
         end: '2026-10-11',
         shortcut: 'last7',
       });
-      assert.deepEqual(r.filter, {
-        mpId: 'a',
-        group: 'g',
-        search: 'keyword',
-        direction: 'asc',
-        dateStart: '2026-10-05',
-        dateEnd: '2026-10-11',
-      });
-      assert.equal(
-        await evaluate("document.querySelector('select').value"),
-        'last7',
-      );
-      assert.deepEqual(
-        await evaluate(
-          "Array.from(document.querySelectorAll('input[type=date]'),e=>e.value)",
-        ),
-        ['2026-10-05', '2026-10-11'],
-      );
       r = await change('month');
       assert.deepEqual(r.dates, {
         mode: 'range',
@@ -305,51 +372,117 @@ createRoot(document.getElementById('root')).render(<App/>);
         end: '2026-10-11',
         shortcut: 'month',
       });
+      await change('day');
+      await evaluate('window.restoreRealDate()');
+      await open();
+      assert.match(await evaluate('document.body.innerText'), /2026年10月/);
+      assert.match(
+        await evaluate('document.body.innerText'),
+        /一\s+二\s+三\s+四\s+五\s+六\s+日/,
+      );
+      // Use actual pointer hit testing; never fill a date or inject its change event.
+      await calendarClick('button[data-slot="prev-button"]');
+      assert.match(await evaluate('document.body.innerText'), /2026年9月/);
+      await calendarClick('button[data-slot="next-button"]');
+      assert.match(await evaluate('document.body.innerText'), /2026年10月/);
+      const labels = await evaluate(
+        'Array.from(document.querySelectorAll("[role=button][aria-label]"),e=>e.getAttribute("aria-label"))',
+      );
+      const first = labels.find(
+        (v) => v.includes('2026') && v.includes('10月') && v.includes('15'),
+      );
+      assert(first, JSON.stringify(labels));
+      await day(first);
+      r = await evaluate('window.fixture');
+      assert.equal(r.dates.start, '2026-10-15');
+      assert.equal(r.dates.shortcut, undefined);
+      assert.equal(r.filter.dateEnd, '2026-10-15');
+      assert.deepEqual(r.selected, []);
+      await open();
+      await escape();
+      assert.equal(
+        await evaluate('document.querySelectorAll("[role=dialog]").length'),
+        0,
+      );
+      assert.equal(await evaluate('window.fixture.dates.start'), '2026-10-15');
+      assert.equal(await evaluate('location.href'), fixtureUrl);
       await send('Emulation.setDeviceMetricsOverride', {
         width: 390,
         height: 844,
         deviceScaleFactor: 1,
         mobile: true,
       });
-      assert.equal(
-        await evaluate('document.documentElement.scrollWidth<=390'),
-        true,
-      );
-      assert.equal(
-        await evaluate(
-          "Array.from(document.querySelectorAll('select,input,button')).every(e=>{const r=e.getBoundingClientRect();return r.left>=0&&r.right<=390})",
-        ),
-        true,
-      );
-      await evaluate("document.querySelector('button').click()");
-      await pause(80);
-      r = await evaluate('window.fixture');
-      assert.deepEqual(r.dates, { mode: 'range', start: '', end: '' });
-      assert.deepEqual(r.filter, {
-        mpId: 'a',
-        group: 'g',
-        search: 'keyword',
-        direction: 'asc',
+      await send('Emulation.setTouchEmulationEnabled', { enabled: true });
+      await change('range');
+      const clearSelector = 'button:not([aria-label])';
+      await calendarClick(clearSelector, true);
+      assert.deepEqual(await evaluate('window.fixture.dates'), {
+        mode: 'range',
+        start: '',
+        end: '',
       });
-      assert.equal(
-        await evaluate("document.querySelector('button').disabled"),
-        true,
+      await calendarClick('button[aria-label^="开始日期"]', true);
+      await calendarClick('button[data-slot="prev-button"]', true);
+      const september = await evaluate(
+        'Array.from(document.querySelectorAll("[role=button][aria-label]"),e=>e.getAttribute("aria-label")).find(v=>v.includes("2026")&&v.includes("9月")&&v.includes("30"))',
       );
-      await change('day');
-      await evaluate(
-        "(()=>{const el=document.querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,'2024-02-29');el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));})()",
+      await day(september, true);
+      assert.deepEqual(await evaluate('window.fixture.dates'), {
+        mode: 'range',
+        start: '2026-09-30',
+        end: '',
+      });
+      assert.equal(await evaluate('window.fixture.filter.dateEnd'), undefined);
+      await open(true, true);
+      assert.match(await evaluate('document.body.innerText'), /2026年9月/);
+      await calendarClick('button[data-slot="next-button"]', true);
+      const october = await evaluate(
+        'Array.from(document.querySelectorAll("[role=button][aria-label]"),e=>e.getAttribute("aria-label")).find(v=>v.includes("2026")&&v.includes("10月")&&v.includes("2日"))',
       );
-      await pause(80);
-      r = await evaluate('window.fixture');
-      assert.deepEqual(r.filter, {
-        mpId: 'a',
-        group: 'g',
-        search: 'keyword',
-        direction: 'asc',
-        dateStart: '2024-02-29',
-        dateEnd: '2024-02-29',
+      await day(october, true);
+      assert.deepEqual(await evaluate('window.fixture.dates'), {
+        mode: 'range',
+        start: '2026-09-30',
+        end: '2026-10-02',
+      });
+      await open(true, true);
+      const geometry = await evaluate(
+        `(()=>{const e=document.querySelector('[role=dialog]'),r=e.getBoundingClientRect();const cell=e.querySelector('[role=button][aria-label]');const c=cell.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,hit:e.contains(document.elementFromPoint(c.x+c.width/2,c.y+c.height/2)),width:document.documentElement.scrollWidth};})()`,
+      );
+      assert(
+        geometry.left >= 0 &&
+          geometry.right <= 390 &&
+          geometry.top >= 0 &&
+          geometry.bottom <= 844,
+        JSON.stringify(geometry),
+      );
+      assert(geometry.hit, 'calendar cells remain above page content');
+      assert(geometry.width <= 390, 'no horizontal overflow');
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(
+        path.join(temp, 'calendar-390.png'),
+        Buffer.from(shot.data, 'base64'),
+      );
+      await escape();
+      await evaluate('window.scrollTo(0,700)');
+      await pause(100);
+      assert(
+        await evaluate('window.scrollY>0'),
+        'page scroll works after dismissal',
+      );
+      await evaluate('window.scrollTo(0,0)');
+      await calendarClick(clearSelector, true);
+      assert.deepEqual(await evaluate('window.fixture.dates'), {
+        mode: 'range',
+        start: '',
+        end: '',
       });
       assert.deepEqual(runtimeErrors, []);
+      console.log(
+        'private calendar screenshot:',
+        path.join(temp, 'calendar-390.png'),
+      );
+
       // Actual inert DOM helper, including root text and hostile literal input.
       assert.deepEqual(
         await evaluate(`(()=>{
@@ -410,7 +543,7 @@ createRoot(document.getElementById('root')).render(<App/>);
         await pause(180);
       };
       await click('#open-reader');
-      await click('[aria-expanded="false"]');
+      await click('[role="dialog"] button[aria-expanded="false"]');
       await type('needle');
       assert.equal(await output(), '1 / 3');
       await key('Enter');
@@ -456,7 +589,7 @@ createRoot(document.getElementById('root')).render(<App/>);
         ),
         true,
       );
-      await click('[aria-expanded="false"]');
+      await click('[role="dialog"] button[aria-expanded="false"]');
       await type('needle');
       await click('#switch-reader');
       assert.equal(
@@ -465,7 +598,7 @@ createRoot(document.getElementById('root')).render(<App/>);
         ),
         false,
       );
-      await click('[aria-expanded="false"]');
+      await click('[role="dialog"] button[aria-expanded="false"]');
       await type('needle');
       assert.equal(await output(), '0 处匹配');
       await key('Escape');

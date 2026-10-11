@@ -326,7 +326,7 @@ export default function ArticleDownload() {
     } catch (cause) {
       if (!controller.signal.aborted) {
         setError(cause instanceof Error ? cause.message : '保存失败。');
-        toast.error('操作未完成，请重试或查看任务状态。');
+        toast.error('公众号操作未完成，请重试或查看任务状态。');
         if (cause instanceof ArticleDownloadRequestError)
           setVerification(cause.verification);
       }
@@ -475,10 +475,10 @@ export default function ArticleDownload() {
   };
 
   return (
-    <div className="px-5 py-5 sm:px-8">
-      <div className="mx-auto max-w-2xl">
-        <h1 className="text-xl font-semibold">公众号文章下载</h1>
-        <form onSubmit={download} className="mt-4 space-y-3" aria-busy={busy}>
+    <div className="min-w-0">
+      <div className="min-w-0">
+        <h2 className="text-lg font-semibold">公众号文章下载</h2>
+        <form onSubmit={download} className="mt-5 space-y-4" aria-busy={busy}>
           <Input
             label="文章链接"
             labelPlacement="outside"
@@ -499,7 +499,7 @@ export default function ArticleDownload() {
             autoComplete="off"
           />
           <div className="border-divider rounded-lg border px-3 py-2">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
               <div className="min-w-0 flex-1">
                 <p className="text-default-500 text-xs">保存到</p>
                 <p className="text-default-600 break-all text-sm">
@@ -551,6 +551,7 @@ export default function ArticleDownload() {
             )}
           </div>
           <Button
+            className="w-full sm:w-auto"
             color="primary"
             type="submit"
             isLoading={busy}

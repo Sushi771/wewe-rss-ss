@@ -4,8 +4,26 @@ import { ProviderPage, SubscriptionProvider } from '../subscription-provider';
 import { canonicalArticleUrl } from '../collection-format';
 import { selectWechat2RssSingleCache } from '../../wechat2rss-single-cache';
 import { parseWechat2RssFeedAvatar } from '../wechat2rss-feed-avatar';
+import {
+  parseWechat2RssListMetadata,
+  Wechat2RssListMetadata,
+} from '../wechat2rss-list-metadata';
+import {
+  activeRefreshScheduleEnabled,
+  automaticSubmissionAllowed,
+} from '../../feeds/active-refresh-schedule';
 
-type ListedFeed = { id: number | string; name: string; link: string };
+type ListedFeed = Record<string, unknown> & {
+  id: number | string;
+  name: string;
+  link: string;
+  paused?: boolean;
+};
+export type Wechat2RssListedFeed = {
+  feedId: string;
+  name: string;
+  feedUrl: string;
+} & Wechat2RssListMetadata;
 type IdentityRead = { deadline: number; remainingListRequests: number };
 const IDENTITY_CHECK_EXPIRED = 'WECHAT2RSS_IDENTITY_CHECK_EXPIRED';
 
@@ -124,7 +142,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
   }
 
   async listSubscriptions(read?: IdentityRead) {
-    const feeds: Array<{ feedId: string; name: string; feedUrl: string }> = [];
+    const feeds: Wechat2RssListedFeed[] = [];
     let total: number | null = null;
     for (let page = 1; page <= 20; page++) {
       if (
@@ -152,7 +170,8 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         if (
           !/^\d{5,15}$/.test(id) ||
           typeof item.name !== 'string' ||
-          typeof item.link !== 'string'
+          typeof item.link !== 'string' ||
+          (item.paused !== undefined && typeof item.paused !== 'boolean')
         )
           throw new Error('WECHAT2RSS_LIST_INVALID');
         const link = new URL(item.link);
@@ -166,6 +185,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
           feedId: `MP_WXS_${id}`,
           name: item.name.trim(),
           feedUrl: link.pathname,
+          ...parseWechat2RssListMetadata(item),
         });
       }
       if (feeds.length >= total) break;
@@ -292,11 +312,21 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return accepted;
   }
 
-  async refreshSubscription(feedId: string) {
+  async refreshSubscription(feedId: string, automatic = false) {
     if (!/^MP_WXS_\d{5,15}$/.test(feedId))
       throw new Error('WECHAT2RSS_FEED_ID_INVALID');
-    if (!(await this.listSubscriptions()).some((v) => v.feedId === feedId))
-      throw new Error('WECHAT2RSS_SUBSCRIPTION_MISSING');
+    const subscription = (await this.listSubscriptions()).find(
+      (v) => v.feedId === feedId,
+    );
+    if (!subscription) throw new Error('WECHAT2RSS_SUBSCRIPTION_MISSING');
+    if (subscription.paused === true)
+      throw new Error('WECHAT2RSS_SUBSCRIPTION_PAUSED');
+    if (
+      automatic &&
+      (!activeRefreshScheduleEnabled(process.env) ||
+        !automaticSubmissionAllowed(Date.now()))
+    )
+      throw new Error('WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED');
     this.envelope(await this.get(`/add/${feedId.slice(7)}`));
     return { accepted: true as const, pending: true as const };
   }
@@ -347,6 +377,20 @@ export class Wechat2RssProvider implements SubscriptionProvider {
       throw new Error('WECHAT2RSS_SUBSCRIPTION_NAME_CHANGED');
     const path = matches[0].feedUrl.replace(/\.xml$/, '.json');
     return parseWechat2RssJsonFeed(await this.get(path), feedId);
+  }
+
+  /** Read one validated cache without replaying /list or submitting work. */
+  async fetchListedArticles(feed: Wechat2RssListedFeed, expectedName: string) {
+    if (
+      !/^MP_WXS_\d{5,15}$/.test(feed.feedId) ||
+      !/^\/feed\/[A-Za-z0-9_-]+\.(?:xml|json)$/.test(feed.feedUrl) ||
+      feed.name !== expectedName
+    )
+      throw new Error('WECHAT2RSS_SUBSCRIPTION_NAME_CHANGED');
+    return parseWechat2RssJsonFeed(
+      await this.get(feed.feedUrl.replace(/\.xml$/, '.json')),
+      feed.feedId,
+    );
   }
 
   /** Only a persisted accepted response may supply this path. A missing display

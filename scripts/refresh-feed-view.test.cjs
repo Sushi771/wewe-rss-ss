@@ -41,12 +41,13 @@ function savedSubscriptionsFixture({
     compilerOptions: { target: 9 },
   }).outputText;
   const fn = vm.runInNewContext(code, {
+    preserveArticlePosition: () => undefined,
     savedViewRefresh: { current: null },
     queryUtils: {
       feed: { list: { cancel: async () => events.push('cancel') } },
       article: {
         list: {
-          reset: async () => {
+          invalidate: async () => {
             events.push('article');
             if (articleFailure) throw Error('synthetic article read failure');
           },

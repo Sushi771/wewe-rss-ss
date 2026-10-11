@@ -1,4 +1,5 @@
 import { buildArticleMarkdown } from '../article-export';
+import { cacheRevision, cacheSyncStatus } from '../feeds/cache-sync-state';
 import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
 import { LocalArticleStore } from '../article-local-save';
 import {
@@ -709,6 +710,12 @@ export class TrpcRouter {
   });
 
   feedRouter = this.trpcService.router({
+    cacheRevision: this.trpcService.protectedProcedure.query(() =>
+      cacheRevision(),
+    ),
+    cacheSyncStatus: this.trpcService.protectedProcedure.query(() =>
+      cacheSyncStatus(),
+    ),
     reorderGroups: this.trpcService.protectedProcedure
       .input(
         z

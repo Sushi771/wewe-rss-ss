@@ -34,10 +34,17 @@ import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
 import SubscriptionTasks from './subscription-tasks';
 import ManualRefreshProgress from './manual-refresh-progress';
+import CacheSyncStatus from './cache-sync-status';
 import ArticleDateFilter from '@web/components/ArticleDateFilter';
 import { dateSelectionFilter } from '@web/utils/article-date-selection';
 import { useFeedBrowseState } from '@web/utils/use-feed-browse-state';
+import { useCacheRevision } from '@web/utils/use-cache-revision';
 import { articleFilterSchema } from '@wewe-rss/shared';
+
+function preserveArticlePosition() {
+  if (typeof window.dispatchEvent === 'function')
+    window.dispatchEvent(new Event('wewe-articles-refresh'));
+}
 
 const Feeds = () => {
   const { id } = useParams();
@@ -88,6 +95,32 @@ const Feeds = () => {
   }, [id, feedData, navigate]);
 
   const queryUtils = trpc.useUtils();
+  const cacheUnavailable = useCacheRevision({
+    read: (signal) =>
+      queryUtils.client.feed.cacheRevision.query(undefined, { signal }),
+    refresh: async () => {
+      preserveArticlePosition();
+      // Invalidate instead of reset: preserve loaded pages, selection and reader.
+      await Promise.all([
+        queryUtils.feed.list.invalidate(
+          undefined,
+          { refetchType: 'active' },
+          { throwOnError: true },
+        ),
+        queryUtils.article.list.invalidate(
+          undefined,
+          { refetchType: 'active' },
+          { throwOnError: true },
+        ),
+        queryUtils.article.summary.invalidate(
+          undefined,
+          { refetchType: 'active' },
+          { throwOnError: true },
+        ),
+        queryUtils.feed.cacheSyncStatus.invalidate(),
+      ]);
+    },
+  });
 
   const { mutateAsync: addSubscriptionBatch, isLoading: isGetMpInfoLoading } =
     trpc.feed.addSubscriptionBatch.useMutation({ retry: false });
@@ -560,12 +593,13 @@ const Feeds = () => {
       );
     if (savedViewRefresh.current) return savedViewRefresh.current;
     const refresh = async () => {
+      preserveArticlePosition();
       const snapshot = await refetchFeedList({ throwOnError: true });
       if (snapshot?.data?.items) setOrderedFeeds(snapshot.data.items);
       // A secondary article query failure must not discard the already loaded
       // subscription list or misreport a saved subscription as absent.
       await Promise.allSettled([
-        queryUtils.article.list.reset(),
+        queryUtils.article.list.invalidate(),
         queryUtils.article.summary.invalidate(),
       ]);
     };
@@ -769,7 +803,7 @@ const Feeds = () => {
       : collectionChannel === 'owner-web-search'
         ? '更新和定时任务直接请求腾讯搜索与原文，保存取得的正文。搜索可能漏文；认证、验证或频控限制会停止请求并显示原因。'
         : collectionChannel === 'wechat2rss'
-          ? '“更新”只读取私有实例当前缓存并保存本地，不提交上游采集任务。缓存及订阅前历史不保证完整；正文和图片以实际保存结果为准。'
+          ? '更新请求提交后，上游检查与现存缓存同步分别确认；缓存有内容不代表本轮采集完成。正文和图片以实际保存结果为准。'
           : collectionChannel === 'public-album'
             ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个官方合集，核验原文并本地缓存正文图片；覆盖这些合集，不代表公众号全部历史。该通道不提供阅读、点赞或收藏。`
             : collectionChannel === 'unavailable'
@@ -1277,9 +1311,11 @@ const Feeds = () => {
                         try {
                           const results = await refreshMpArticles({ mpId });
                           if (!isCurrentRefresh(mpId, token)) return;
+                          void queryUtils.feed.cacheSyncStatus.invalidate();
+                          preserveArticlePosition();
                           await refreshFeedViews(
                             refetchFeedList,
-                            () => queryUtils.article.list.reset(),
+                            () => queryUtils.article.list.invalidate(),
                             () => queryUtils.article.summary.invalidate(),
                           );
                           if (!isCurrentRefresh(mpId, token)) return;
@@ -1362,7 +1398,7 @@ const Feeds = () => {
                         {refreshingMpIds.includes(currentMpInfo.id)
                           ? '更新中'
                           : refreshedMpIds.includes(currentMpInfo.id)
-                            ? '更新完成'
+                            ? '缓存已同步'
                             : '更新本号'}
                       </span>
                     </Button>
@@ -1441,7 +1477,7 @@ const Feeds = () => {
                             ? '更新已暂停'
                             : '后台更新中'
                         : isRefreshedAll
-                          ? '更新完成'
+                          ? '缓存已同步'
                           : '更新全部'}
                     </span>
                   </Button>
@@ -1719,6 +1755,17 @@ const Feeds = () => {
               </Popover>
             </div>
           </div>
+          {cacheUnavailable && (
+            <p
+              role="status"
+              className="shrink-0 px-3 py-1 text-xs text-neutral-500"
+            >
+              暂无法读取最新列表，已有内容保留；恢复连接后自动检查。
+            </p>
+          )}
+          {currentMpInfo && collectionChannel === 'wechat2rss' && (
+            <CacheSyncStatus key={currentMpId} feedId={currentMpId} />
+          )}
           {currentMpInfo && (
             <details
               key={currentMpId}

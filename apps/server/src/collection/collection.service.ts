@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import { Article } from '@prisma/client';
+import { legacyArticleIdentityAmbiguous } from './legacy-article-identity';
 import { PrismaService } from '../prisma/prisma.service';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -21,6 +23,7 @@ import { fetchMp2RssRecent20 } from './mp2rss';
 import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { assertProviderPage, ProviderPage } from './subscription-provider';
+import { cacheDataChanged } from '../feeds/cache-sync-state';
 import {
   readOwnerSearchConfig,
   fetchLiveOwnerArticles,
@@ -575,6 +578,8 @@ export class CollectionService {
     /** Internal, receipt-proved cache path; never accepted from public input. */
     acceptedFeedPath?: string;
     listOnly?: boolean;
+    /** Internal validated existing-cache snapshot; never exposed as public input. */
+    cachedPage?: ProviderPage;
   }) {
     if (this.publicCollections.has(input.mpId))
       throw new Error('该公众号正在更新，请等待本次结束');
@@ -591,16 +596,20 @@ export class CollectionService {
       // endpoint still enforces its own access and response validation.
       // All ordinary refreshes only consume cache. /addurl is reserved for an
       // explicit new-subscription action; /add also updates already subscribed feeds.
-      const feedAvatar = await this.readWechat2RssAvatar(feed, provider);
+      const feedAvatar = input.cachedPage
+        ? undefined
+        : await this.readWechat2RssAvatar(feed, provider);
       const supplementAvatar = (tx: Pick<typeof this.prisma, 'feed'>) =>
         this.writeWechat2RssAvatar(tx, input.mpId, feedAvatar);
       const accepted = false;
-      const fetched = input.acceptedFeedPath
-        ? await provider.fetchAcceptedArticles(
-            input.acceptedFeedPath,
-            input.mpId,
-          )
-        : await provider.fetchArticles(input.mpId, input.mpName);
+      const fetched =
+        input.cachedPage ||
+        (input.acceptedFeedPath
+          ? await provider.fetchAcceptedArticles(
+              input.acceptedFeedPath,
+              input.mpId,
+            )
+          : await provider.fetchArticles(input.mpId, input.mpName));
       if (
         !fetched ||
         !Array.isArray(fetched.articles) ||
@@ -635,11 +644,18 @@ export class CollectionService {
           }
         : await archiveProviderImages(validated, {
             preserveTextOnImageFailure: true,
+            ...(input.cachedPage
+              ? {
+                  canFetchImage: () =>
+                    new Date(Date.now() + 8 * 3600000).getUTCHours() >= 6,
+                }
+              : {}),
           });
       if (!page.articles.length) {
         // Publisher metadata can be ready before the first article. The
         // conditional write preserves a concurrently changed avatar/source.
-        await this.prisma.$transaction(async (tx) => supplementAvatar(tx));
+        if (!input.cachedPage)
+          await this.prisma.$transaction(async (tx) => supplementAvatar(tx));
         return {
           source: 'wechat2rss' as const,
           status: 'pending' as const,
@@ -662,6 +678,68 @@ export class CollectionService {
       await this.prisma.$transaction(
         async (tx) => {
           await supplementAvatar(tx);
+          // Existing-cache batches share candidate reads inside the same write
+          // transaction. Never cache these rows across imports or backups.
+          const identities = page.articles.map((item) => {
+            const identity = canonicalArticleUrl(item.url);
+            const base = new URL(identity.url);
+            base.searchParams.delete('sn');
+            return {
+              item,
+              identity,
+              base: base.toString(),
+              prefix: `${base}&sn=`,
+            };
+          });
+          const cacheCandidates:
+            | Array<
+                Pick<
+                  Article,
+                  | 'id'
+                  | 'mpId'
+                  | 'title'
+                  | 'publishTime'
+                  | 'sourceUrl'
+                  | 'verifiedSourceUrl'
+                  | 'picUrl'
+                  | 'lastBodyStatus'
+                > & { contentHtml?: string | null }
+              >
+            | undefined = input.cachedPage ? [] : undefined;
+          if (cacheCandidates) {
+            // Bound SQLite expression depth for the provider's <=1000 rows.
+            for (let offset = 0; offset < identities.length; offset += 40) {
+              const slice = identities.slice(offset, offset + 40);
+              const rows = await tx.article.findMany({
+                where: {
+                  OR: slice.flatMap(({ item, identity, base, prefix }) => [
+                    { id: identity.id },
+                    { sourceUrl: base },
+                    { sourceUrl: { startsWith: prefix } },
+                    { verifiedSourceUrl: base },
+                    { verifiedSourceUrl: { startsWith: prefix } },
+                    {
+                      mpId: input.mpId,
+                      title: item.title,
+                      publishTime: item.publishTime,
+                    },
+                  ]),
+                },
+                select: {
+                  id: true,
+                  mpId: true,
+                  title: true,
+                  publishTime: true,
+                  sourceUrl: true,
+                  verifiedSourceUrl: true,
+                  contentHtml: !input.listOnly,
+                  picUrl: true,
+                  lastBodyStatus: true,
+                },
+              });
+              cacheCandidates.push(...rows);
+            }
+          }
           for (const item of page.articles) {
             // Title and time only detect a possible legacy collision; never merge by them.
             // Normalize the new URL before matching old short-ID rows. The sn
@@ -671,51 +749,58 @@ export class CollectionService {
             sourceWithoutSn.searchParams.delete('sn');
             const sourceBase = sourceWithoutSn.toString();
             const sourceWithSn = `${sourceBase}&sn=`;
-            const matches = await tx.article.findMany({
-              where: {
-                OR: [
-                  { id: item.id },
-                  { sourceUrl: sourceBase },
-                  { sourceUrl: { startsWith: sourceWithSn } },
-                  { verifiedSourceUrl: sourceBase },
-                  { verifiedSourceUrl: { startsWith: sourceWithSn } },
-                ],
-              },
-            });
+            const matches = cacheCandidates
+              ? [
+                  ...new Map(
+                    cacheCandidates
+                      .filter(
+                        (saved) =>
+                          saved.id === item.id ||
+                          [saved.sourceUrl, saved.verifiedSourceUrl].some(
+                            (url) =>
+                              url === sourceBase ||
+                              (!!url &&
+                                url
+                                  .toLowerCase()
+                                  .startsWith(sourceWithSn.toLowerCase())),
+                          ),
+                      )
+                      .map((row) => [row.id, row]),
+                  ).values(),
+                ]
+              : await tx.article.findMany({
+                  where: {
+                    OR: [
+                      { id: item.id },
+                      { sourceUrl: sourceBase },
+                      { sourceUrl: { startsWith: sourceWithSn } },
+                      { verifiedSourceUrl: sourceBase },
+                      { verifiedSourceUrl: { startsWith: sourceWithSn } },
+                    ],
+                  },
+                });
             if (matches.length > 1)
               throw new Error('原文身份对应多条旧记录，本批未写入');
             const existing = matches[0];
             if (existing) assertSavedArticleIdentity(existing, identity);
             if (!existing) {
-              const possibleLegacy = await tx.article.findMany({
-                where: {
-                  mpId: input.mpId,
-                  title: item.title,
-                  publishTime: item.publishTime,
-                },
-              });
-              const ambiguous = possibleLegacy.some((saved) => {
-                const known = new Set<string>();
-                if (/^WX_\d{5,15}_\d+_[1-9]\d*$/.test(saved.id))
-                  known.add(saved.id);
-                for (const url of [saved.sourceUrl, saved.verifiedSourceUrl]) {
-                  if (!url) continue;
-                  try {
-                    const proved = canonicalArticleUrl(url);
-                    if (proved.mpId !== input.mpId) return true;
-                    known.add(proved.id);
-                  } catch {
-                    // A short link alone cannot disambiguate a title/time match.
-                    if (
-                      !/^https:\/\/mp\.weixin\.qq\.com\/s\/[A-Za-z0-9_-]{22}$/.test(
-                        url,
-                      )
-                    )
-                      return true;
-                  }
-                }
-                return known.size !== 1 || known.has(identity.id);
-              });
+              const possibleLegacy = cacheCandidates
+                ? cacheCandidates.filter(
+                    (saved) =>
+                      saved.mpId === input.mpId &&
+                      saved.title === item.title &&
+                      saved.publishTime === item.publishTime,
+                  )
+                : await tx.article.findMany({
+                    where: {
+                      mpId: input.mpId,
+                      title: item.title,
+                      publishTime: item.publishTime,
+                    },
+                  });
+              const ambiguous = possibleLegacy.some((saved) =>
+                legacyArticleIdentityAmbiguous(saved, identity),
+              );
               if (ambiguous) {
                 // Preserve this row and its note. Never merge by title/time or
                 // let one unverifiable legacy identity roll back proved peers.
@@ -768,11 +853,25 @@ export class CollectionService {
                   ? { picUrl: item.picUrl }
                   : {}),
                 ...(!existing.contentHtml && item.contentHtml
-                  ? { lastBodyStatus: 'available' }
+                  ? {
+                      lastBodyStatus: item.contentHtml.includes(
+                        'data-wewe-image-pending=',
+                      )
+                        ? 'images-pending'
+                        : 'available',
+                    }
                   : {}),
               };
-              if (Object.keys(data).length) {
-                await tx.article.update({ where: { id: existing.id }, data });
+              const changed = Object.fromEntries(
+                Object.entries(data).filter(
+                  ([key, value]) => existing[key] !== value,
+                ),
+              );
+              if (Object.keys(changed).length) {
+                await tx.article.update({
+                  where: { id: existing.id },
+                  data: changed,
+                });
                 updated++;
               }
             }
@@ -798,6 +897,7 @@ export class CollectionService {
         },
         { timeout: 60000 },
       );
+      cacheDataChanged(created + updated);
       return {
         source: 'wechat2rss' as const,
         status: 'partial' as const,

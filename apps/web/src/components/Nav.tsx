@@ -39,7 +39,10 @@ const Nav = () => {
           placement="left"
         >
           <NavbarBrand
-            className="cursor-default"
+            as={RouterLink}
+            to="/feeds"
+            aria-label="返回公众号文章列表"
+            className="focus-visible:outline-primary cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4"
             style={{ flexGrow: 0, marginRight: '16px' }}
           >
             <Image

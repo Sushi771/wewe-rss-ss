@@ -218,6 +218,7 @@ describe('feed task recovery callbacks (actual UI, offline)', () => {
     const cancel = jest.fn(),
       reset = jest.fn().mockRejectedValue(new Error('SYNTHETIC_ARTICLES'));
     const refresh = compile(expression('refreshSavedSubscriptions'), {
+      preserveArticlePosition: jest.fn(),
       savedViewRefresh: { current: null },
       refetchFeedList: refetch,
       setOrderedFeeds: ordered,
@@ -225,7 +226,10 @@ describe('feed task recovery callbacks (actual UI, offline)', () => {
       folderFilter: 'hidden-folder',
       queryUtils: {
         feed: { list: { cancel } },
-        article: { list: { reset }, summary: { invalidate: jest.fn() } },
+        article: {
+          list: { invalidate: reset },
+          summary: { invalidate: jest.fn() },
+        },
       },
     });
     const first = refresh(false),

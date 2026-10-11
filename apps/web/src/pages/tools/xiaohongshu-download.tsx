@@ -91,7 +91,7 @@ export default function XiaohongshuDownload() {
     try {
       await action(controller.signal);
     } catch (cause) {
-      if (!controller.signal.aborted) toast.error('操作未完成，请重试。');
+      if (!controller.signal.aborted) toast.error('小红书操作未完成，请重试。');
       if (!controller.signal.aborted)
         setError(cause instanceof Error ? cause.message : '操作失败。');
     } finally {
@@ -146,12 +146,9 @@ export default function XiaohongshuDownload() {
   };
 
   return (
-    <div className="h-full overflow-y-auto px-5 py-10 sm:px-8">
-      <div className="mx-auto max-w-2xl">
-        <p className="text-default-500 mb-3 text-sm">工具 / 小红书单篇下载</p>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          小红书单篇下载
-        </h1>
+    <div className="min-w-0">
+      <div className="min-w-0">
+        <h2 className="text-lg font-semibold">小红书单篇下载</h2>
         <div
           className="bg-default-50 mt-5 rounded-xl p-4 text-sm"
           role="status"
@@ -164,7 +161,7 @@ export default function XiaohongshuDownload() {
               ? '正在读取设置…'
               : '设置读取失败，请重新读取。'}
         </div>
-        <form onSubmit={download} className="mt-8 space-y-5" aria-busy={busy}>
+        <form onSubmit={download} className="mt-5 space-y-4" aria-busy={busy}>
           <Input
             label="笔记链接"
             labelPlacement="outside"
@@ -182,7 +179,7 @@ export default function XiaohongshuDownload() {
             isRequired
             autoComplete="off"
           />
-          <div className="bg-default-50 rounded-xl p-4">
+          <div className="border-divider rounded-lg border p-3">
             <p className="mb-2 text-sm font-medium">保存路径</p>
             <p className="text-default-600 break-all text-sm">
               {settings?.directory ||
@@ -221,6 +218,7 @@ export default function XiaohongshuDownload() {
             </div>
           </div>
           <Button
+            className="w-full sm:w-auto"
             color="primary"
             type="submit"
             isLoading={busy}
@@ -269,7 +267,7 @@ export default function XiaohongshuDownload() {
             </p>
           )}
           {saved && (
-            <div className="border-success-200 bg-success-50 rounded-xl border p-5">
+            <div className="border-success-200 bg-success-50 rounded-lg border p-3">
               <p role="status" className="font-medium">
                 {saved.alreadySaved
                   ? '已保存，保留现有笔记'

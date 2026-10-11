@@ -20,6 +20,10 @@ import { minify } from 'html-minifier';
 import { LRUCache } from 'lru-cache';
 import pMap from '@cjs-exporter/p-map';
 import { BODY_UNAVAILABLE_MESSAGE } from '../collection/article-page';
+import {
+  ActiveRefreshScheduler,
+  activeRefreshScheduleEnabled,
+} from './active-refresh-schedule';
 import { dailyWechat2RssCatchup } from './daily-cache-catchup';
 import { databaseWritesAllowed, waitForStartupAudit } from '../startup-audit';
 
@@ -34,14 +38,22 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(this.constructor.name);
   private dailyCatchupJob?: NodeJS.Immediate;
   private dailyCatchupRunning = false;
+  private activeRefreshScheduler?: ActiveRefreshScheduler;
 
   onApplicationBootstrap() {
-    if (!dailyWechat2RssCatchup(process.env)) return;
+    if (
+      !activeRefreshScheduleEnabled(process.env) &&
+      !dailyWechat2RssCatchup(process.env)
+    )
+      return;
     // Do not hold HTTP startup behind a potentially slow cache/image read.
     this.dailyCatchupJob = setImmediate(() => {
       this.dailyCatchupJob = undefined;
       void waitForStartupAudit().then((ok) => {
-        if (ok) return this.catchUpDailyWechat2Rss();
+        if (ok)
+          return activeRefreshScheduleEnabled(process.env)
+            ? this.handleActiveRefreshSchedule()
+            : this.catchUpDailyWechat2Rss();
       });
     });
   }
@@ -51,7 +63,11 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   async catchUpDailyWechat2Rss(now = Date.now()) {
-    if (!databaseWritesAllowed()) return;
+    if (
+      process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' ||
+      !databaseWritesAllowed()
+    )
+      return;
     const plan = dailyWechat2RssCatchup(process.env, now);
     if (!plan || this.dailyCatchupRunning) return;
     this.dailyCatchupRunning = true;
@@ -84,6 +100,30 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       this.logger.error('Daily cache catch-up failed; no automatic retry.');
     } finally {
       this.dailyCatchupRunning = false;
+    }
+  }
+
+  @Cron('* * * * *', {
+    name: 'activeWechat2RssRefresh',
+    timeZone: 'Asia/Shanghai',
+  })
+  async handleActiveRefreshSchedule(now = Date.now()) {
+    if (!databaseWritesAllowed() || !activeRefreshScheduleEnabled(process.env))
+      return;
+    this.activeRefreshScheduler ??= new ActiveRefreshScheduler(
+      () => {
+        const raw = process.env.DATABASE_URL || '';
+        if (!raw.startsWith('file:')) throw new Error('SQLITE_REQUIRED');
+        return decodeURIComponent(raw.slice(5).split('?')[0]);
+      },
+      (key) => this.trpcService.beginScheduledRefreshAll(key),
+    );
+    try {
+      await this.activeRefreshScheduler.tick(now);
+    } catch {
+      this.logger.warn(
+        'Active refresh round deferred; durable queue and existing data retained.',
+      );
     }
   }
 
@@ -136,7 +176,11 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
     disabled: process.env.DISABLE_SCHEDULED_UPDATES === '1',
   })
   async handleUpdateFeedsCron() {
-    if (!databaseWritesAllowed()) return;
+    if (
+      process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' ||
+      !databaseWritesAllowed()
+    )
+      return;
     // 隔离演练和受控切换时，不读账号、不触发任何采集或状态写入。
     if (process.env.DISABLE_SCHEDULED_UPDATES === '1') return;
     // A limited rollout can schedule one proven subscription without changing

@@ -110,12 +110,26 @@ export function useArticleListPosition(options: ListPositionOptions) {
     element.addEventListener('touchstart', cancel, { passive: true });
     element.addEventListener('pointerdown', cancel);
     element.addEventListener('keydown', key);
+    const beforeRefresh = () => {
+      capturePosition();
+      if (
+        active.current.done &&
+        !latest.current.loading &&
+        !latest.current.paused &&
+        lastPosition.current
+      ) {
+        active.current.pending = lastPosition.current;
+        active.current.done = false;
+      }
+    };
+    window.addEventListener('wewe-articles-refresh', beforeRefresh);
     window.addEventListener('pagehide', capturePosition);
     return () => {
       element.removeEventListener('wheel', cancel);
       element.removeEventListener('touchstart', cancel);
       element.removeEventListener('pointerdown', cancel);
       element.removeEventListener('keydown', key);
+      window.removeEventListener('wewe-articles-refresh', beforeRefresh);
       window.removeEventListener('pagehide', capturePosition);
     };
   }, [capturePosition, cancelRestore]);

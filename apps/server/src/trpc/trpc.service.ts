@@ -12,8 +12,16 @@ import { CollectionService } from '../collection/collection.service';
 import { cacheFailureReason } from '../collection/cache-failure';
 import { wechat2RssProvider } from '../collection/provider-registry';
 import { Wechat2RssProvider } from '../collection/providers/wechat2rss';
+import {
+  assertProviderPage,
+  ProviderPage,
+} from '../collection/subscription-provider';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
+import {
+  activeRefreshScheduleEnabled,
+  automaticSubmissionAllowed,
+} from '../feeds/active-refresh-schedule';
 import {
   BatchOutcome,
   Wechat2RssSubscriptionBatches,
@@ -25,6 +33,7 @@ import {
   Wechat2RssSubscriptionTasks,
 } from '../collection/wechat2rss-subscription-tasks';
 import { canonicalArticleUrl } from '../collection/collection-format';
+import { legacyArticleIdentityAmbiguous } from '../collection/legacy-article-identity';
 import {
   managementGroups,
   reorderManagementGroups,
@@ -277,7 +286,9 @@ export class TrpcService {
   subscriptionBatchList(includeManualRefresh = false) {
     return this.taskStorage(async () =>
       (await this.subscriptionBatches.list()).filter(
-        (batch) => includeManualRefresh || batch.purpose !== 'manual-refresh',
+        (batch) =>
+          includeManualRefresh ||
+          !['manual-refresh', 'scheduled-refresh'].includes(batch.purpose),
       ),
     );
   }
@@ -333,11 +344,45 @@ export class TrpcService {
         eligible.length,
     };
   }
+  /** Internal timer intent: discover today's eligible subscriptions dynamically. */
+  async beginScheduledRefreshAll(intentKey: string) {
+    const feeds = await this.prismaService.feed.findMany({
+      where: { status: 1 },
+      orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],
+    });
+    const ids = feeds
+      .filter(
+        (feed) =>
+          feed.status === 1 &&
+          resolveCollectionRoute(feed).channel === 'wechat2rss',
+      )
+      .map((feed) => feed.id);
+    if (!ids.length) return;
+    return this.taskStorage(() =>
+      this.subscriptionBatches.enqueueRefresh(
+        ids,
+        intentKey,
+        'scheduled-refresh',
+      ),
+    );
+  }
   /** Explicit overview action only. Scheduled and single-feed cache reads stay unchanged. */
   private async runManualRefresh(
     feedId: string,
     stage: 'submit' | 'cache',
+    automatic = false,
   ): Promise<BatchOutcome> {
+    if (
+      automatic &&
+      stage === 'submit' &&
+      (!activeRefreshScheduleEnabled(process.env) ||
+        !automaticSubmissionAllowed(Date.now()))
+    )
+      return {
+        state: 'queued',
+        accepted: false,
+        message: 'Automatic submission is outside its allowed window.',
+      };
     if (
       this.isRefreshAllMpArticlesRunning ||
       this.activeSubscriptionAdds.has('wechat2rss:add') ||
@@ -357,7 +402,7 @@ export class TrpcService {
       resolveCollectionRoute(feed).channel !== 'wechat2rss'
     )
       return {
-        state: 'blocked',
+        state: automatic && stage === 'submit' ? 'skipped' : 'blocked',
         accepted: stage === 'cache',
         message: '订阅已停用或来源已变化，本条停止；已有内容保留。',
       };
@@ -424,11 +469,38 @@ export class TrpcService {
       });
       if (reserved.count !== 1)
         return {
-          state: 'blocked',
+          state: automatic ? 'skipped' : 'blocked',
           accepted: false,
           message: '本号更新仍在冷却期或状态已变化，本次未提交；不会自动重发。',
         };
-      await provider.refreshSubscription(feedId);
+      try {
+        await provider.refreshSubscription(feedId, automatic);
+      } catch (error) {
+        if (
+          automatic &&
+          (error as Error).message === 'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED'
+        )
+          return {
+            state: 'queued',
+            accepted: false,
+            message:
+              'Automatic submission window closed before /add; no request submitted.',
+          };
+        if (
+          automatic &&
+          [
+            'WECHAT2RSS_SUBSCRIPTION_PAUSED',
+            'WECHAT2RSS_SUBSCRIPTION_MISSING',
+          ].includes((error as Error).message)
+        )
+          return {
+            state: 'skipped',
+            accepted: false,
+            message:
+              'Upstream subscription is paused or removed; no update submitted.',
+          };
+        throw error;
+      }
       return {
         state: 'waiting',
         accepted: true,
@@ -566,8 +638,8 @@ export class TrpcService {
       },
       (id) => this.subscriptionTasks.resume(id),
     );
-    this.subscriptionBatches.attachRefresh((id, stage) =>
-      this.runManualRefresh(id, stage),
+    this.subscriptionBatches.attachRefresh((id, stage, automatic) =>
+      this.runManualRefresh(id, stage, automatic),
     );
     const { url } =
       this.configService.get<ConfigurationType['platform']>('platform')!;
@@ -716,6 +788,139 @@ export class TrpcService {
           route.channel === 'owner-weread-latest'
         );
       },
+    );
+  }
+
+  /** Internal cache watcher only. No add/refresh/original-page request.
+   * A read-only preflight avoids backups and status writes on unchanged caches.
+   * The normal lock, verified backup and protected merge are still used on writes. */
+  async syncCachedWechat2RssPage(
+    mpId: string,
+    page: ProviderPage,
+    listOnly: boolean,
+  ) {
+    if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');
+    assertProviderPage(page, mpId);
+    const feed = await this.prismaService.feed.findUniqueOrThrow({
+      where: { id: mpId },
+    });
+    if (
+      feed.status !== 1 ||
+      resolveCollectionRoute(feed).channel !== 'wechat2rss'
+    )
+      throw new Error('CACHE_SYNC_FEED_DISABLED');
+    if (this.activeCollections.has(mpId)) throw new Error('CACHE_SYNC_BUSY');
+    const saved = await this.prismaService.article.findMany({
+      where: { mpId },
+      select: {
+        id: true,
+        sourceUrl: true,
+        verifiedSourceUrl: true,
+        contentHtml: !listOnly,
+        picUrl: !listOnly,
+        title: true,
+        publishTime: true,
+      },
+    });
+    // Normalize saved identities once per snapshot, rather than once for each
+    // incoming row. Keep the original first-match semantics for legacy IDs.
+    const byIdentity = new Map<string, (typeof saved)[number]>();
+    for (const row of saved) {
+      if (!byIdentity.has(row.id)) byIdentity.set(row.id, row);
+      for (const url of [row.sourceUrl, row.verifiedSourceUrl]) {
+        if (!url) continue;
+        try {
+          const id = canonicalArticleUrl(url).id;
+          if (!byIdentity.has(id)) byIdentity.set(id, row);
+        } catch {} // An opaque legacy URL is still checked by the protected saver.
+      }
+    }
+    const legacyByTitleTime = new Map<string, typeof saved>();
+    for (const row of saved) {
+      const key = JSON.stringify([row.title, row.publishTime]);
+      const matches = legacyByTitleTime.get(key) || [];
+      matches.push(row);
+      legacyByTitleTime.set(key, matches);
+    }
+    const preflightSkipped: Array<{
+      id: string;
+      code: 'LEGACY_IDENTITY_UNVERIFIED';
+    }> = [];
+    const neededArticles = page.articles.filter((item) => {
+      const existing = byIdentity.get(item.id);
+      if (!existing) {
+        const matches =
+          legacyByTitleTime.get(
+            JSON.stringify([item.title, item.publishTime]),
+          ) || [];
+        if (matches.some((row) => legacyArticleIdentityAmbiguous(row, item))) {
+          preflightSkipped.push({
+            id: item.id,
+            code: 'LEGACY_IDENTITY_UNVERIFIED',
+          });
+          return false;
+        }
+        return true;
+      }
+      if (listOnly) return false;
+      return (
+        (!existing.contentHtml && !!item.contentHtml) ||
+        (!existing.picUrl && !!item.picUrl) ||
+        !!(
+          item.contentHtml &&
+          existing.contentHtml &&
+          /<img\b[^>]*(?:src|data-src)=["']https?:\/\//i.test(
+            existing.contentHtml,
+          )
+        ) ||
+        !existing.sourceUrl ||
+        !existing.verifiedSourceUrl
+      );
+    });
+    if (!neededArticles.length)
+      return {
+        created: 0,
+        updated: 0,
+        bodyMissing: page.bodyMissing,
+        imageBlocked: page.imageBlocked,
+        identitySkipped: preflightSkipped.length,
+        identitySkippedArticles: preflightSkipped,
+      };
+    const delta = {
+      ...page,
+      // Mixed batches recheck isolated identities under the original write
+      // transaction, retaining its diagnostic report. Only an all-no-op batch
+      // can avoid the backup and all writes above.
+      articles: [
+        ...neededArticles,
+        ...page.articles.filter((item) =>
+          preflightSkipped.some((row) => row.id === item.id),
+        ),
+      ],
+      bodyMissing: [
+        ...neededArticles,
+        ...page.articles.filter((item) =>
+          preflightSkipped.some((row) => row.id === item.id),
+        ),
+      ].filter((item) => !item.contentHtml).length,
+    };
+    return this.recordCollectionResult(
+      mpId,
+      (current) => {
+        if (
+          current.status !== 1 ||
+          resolveCollectionRoute(current).channel !== 'wechat2rss'
+        )
+          throw new Error('CACHE_SYNC_FEED_DISABLED');
+        return this.collectionService.collectWechat2RssRecent({
+          mpId,
+          mpName: current.mpName,
+          trigger: 'scheduled',
+          cachedPage: delta,
+          listOnly,
+        });
+      },
+      true,
     );
   }
 

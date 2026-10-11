@@ -86,6 +86,10 @@ jobs:
         run: node --test scripts/repair-article-layout.test.cjs
       - name: Test feed view invalidation with installed tRPC batch link offline
         run: node --test scripts/refresh-feed-view.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-avatar-reading-ui.test.cjs
+      - name: Test local cache revision and diagnostic state offline
+        run: node --test scripts/cache-revision-watch.test.cjs scripts/cache-sync-status-ui.test.cjs
+      - name: Test read-only SQLite cache signals on synthetic databases
+        run: python3 apps/server/scripts/test-watch-wechat2rss-cache.py
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)

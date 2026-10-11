@@ -492,6 +492,9 @@ describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
             feedId: 'MP_WXS_1234567890',
             name: '合成公众号',
             feedUrl: '/feed/1234567890.xml',
+            checkTime: null,
+            nextUpdateTime: null,
+            paused: null,
           },
         ]);
       jest
@@ -520,6 +523,9 @@ describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
             feedId: 'MP_WXS_1234567890',
             name: '合成公众号',
             feedUrl: '/feed/1234567890.xml',
+            checkTime: null,
+            nextUpdateTime: null,
+            paused: null,
           },
         ]);
       jest
@@ -592,6 +598,9 @@ describe('actual Wechat2RSS preflight CLI (synthetic offline)', () => {
             feedId: 'MP_WXS_1234567890',
             name: '合成公众号',
             feedUrl: '/feed/1234567890.xml',
+            checkTime: null,
+            nextUpdateTime: null,
+            paused: null,
           },
         ]);
       jest

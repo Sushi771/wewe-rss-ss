@@ -71,8 +71,12 @@ function fixture({
     if (feedReadFails) throw new Error('Synthetic reread failure');
   };
   const utils = {
+    feed: { cacheSyncStatus: { invalidate: async () => undefined } },
     article: {
-      list: { reset: async () => events.push('article-reset') },
+      list: {
+        reset: async () => events.push('article-reset'),
+        invalidate: async () => events.push('article-invalidate'),
+      },
       summary: { invalidate: async () => events.push('summary-invalidate') },
     },
   };
@@ -163,8 +167,12 @@ function fixture({
     clearTimeout: (key) => timers.delete(key),
     window: { addEventListener() {}, removeEventListener() {} },
     require: (name) =>
-      name === '@web/utils/use-feed-browse-state'
+      [
+        '@web/utils/use-feed-browse-state',
+        '@web/utils/use-cache-revision',
+      ].includes(name)
         ? {
+            useCacheRevision: () => false,
             useFeedBrowseState: () => {
               // Refresh lifecycle tests stay isolated; actual persistence is covered by browser tests.
               const [search, setSearch] = react.useState('');
@@ -327,7 +335,7 @@ test('single-feed request remains scoped; switching and concurrent feeds never i
   await pa;
   assert.equal(f.button().text, '更新中');
   f.navigate('A');
-  assert.equal(f.button().text, '更新完成');
+  assert.equal(f.button().text, '缓存已同步');
   f.requests[1].reject(new Error('Synthetic B failure'));
   await pb;
   f.navigate('B');

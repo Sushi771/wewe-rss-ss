@@ -47,6 +47,8 @@ export async function archiveProviderImages(
   options: {
     stopOnFailure?: boolean;
     preserveTextOnImageFailure?: boolean;
+    /** Cache watcher may stop starting CDN downloads at the night boundary. */
+    canFetchImage?: () => boolean;
   } = {},
 ): Promise<ProviderPage> {
   let imageBlocked = page.imageBlocked;
@@ -86,6 +88,11 @@ export async function archiveProviderImages(
       try {
         let inline = cached.get(source);
         if (!inline) {
+          if (
+            !source.startsWith('data:') &&
+            options.canFetchImage?.() === false
+          )
+            throw new Error('CACHE_SYNC_NIGHT_WINDOW');
           const result = source.startsWith('data:')
             ? decodeInlineImage(source)
             : await fetchAllowedImage(source);

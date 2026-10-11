@@ -321,7 +321,11 @@ function build(options = {}) {
       { recursive: true },
     );
   fs.mkdirSync(path.join(target, 'scripts'));
-  for (const file of ['backup-sqlite.py', 'verify-preservation.py'])
+  for (const file of [
+    'backup-sqlite.py',
+    'verify-preservation.py',
+    'watch-wechat2rss-cache.py',
+  ])
     fs.copyFileSync(
       path.join(server, 'scripts', file),
       path.join(target, 'scripts', file),
