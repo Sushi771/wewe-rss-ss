@@ -44,6 +44,9 @@ export function startupAuditHttpGuard(
   // tRPC checks procedure type itself (reads can be batched as POST).
   const independent =
     req.path.startsWith('/trpc/') ||
+    /^\/download\/article\/(?:single-task|browser-task)\/[a-f0-9-]+\/cancel$/i.test(
+      req.path,
+    ) ||
     [
       '/auth/login',
       '/auth/logout',

@@ -42,6 +42,8 @@ describe('startup audit lifecycle', () => {
       '/download/article/settings',
       '/download/article/directory',
       '/trpc/feed.list',
+      '/download/article/single-task/abcdef-1234/cancel',
+      '/download/article/browser-task/abcdef-1234/cancel',
     ])
       expect(request(path, 'POST').next).toHaveBeenCalled();
     for (const req of [
@@ -117,6 +119,7 @@ describe('startup audit lifecycle', () => {
       feed: service.router({
         list: service.protectedProcedure.query(work),
         update: service.protectedProcedure.mutation(work),
+        stopSubscriptionBatch: service.protectedProcedure.mutation(work),
       }),
       platform: service.router({
         getLoginResult: service.protectedProcedure.query(work),
@@ -125,10 +128,62 @@ describe('startup audit lifecycle', () => {
     const caller = router.createCaller({});
     global.__weweStartupAudit = { status: 'verifying' };
     expect(await caller.feed.list()).toBe('done');
+    expect(await caller.feed.stopSubscriptionBatch()).toBe('done');
     await expect(caller.feed.update()).rejects.toThrow('正在检查');
     await expect(caller.platform.getLoginResult()).rejects.toThrow('正在检查');
-    expect(work).toHaveBeenCalledTimes(1);
+    expect(work).toHaveBeenCalledTimes(2);
     global.__weweStartupAudit.status = 'ready';
     expect(await caller.feed.update()).toBe('done');
   });
+
+  it.each([true, false])(
+    'task recovery waits for audit and only resumes on success=%s',
+    async (passed) => {
+      const previousMode = process.env.NODE_ENV;
+      const previousGuard = process.env.REHEARSAL_GUARD_REPORT;
+      process.env.NODE_ENV = 'production';
+      delete process.env.REHEARSAL_GUARD_REPORT;
+      let finish!: (ok: boolean) => void;
+      global.__weweStartupAudit = {
+        status: 'verifying',
+        ready: new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+      };
+      const service = new TrpcService(
+        {} as any,
+        {
+          get: (key: string) =>
+            key === 'platform'
+              ? { url: 'http://127.0.0.1:1' }
+              : { updateDelayTime: 60 },
+        } as any,
+        {} as any,
+        {} as any,
+      );
+      const tasks = jest
+        .spyOn((service as any).subscriptionTasks, 'init')
+        .mockResolvedValue(undefined);
+      const batches = jest
+        .spyOn((service as any).subscriptionBatches, 'init')
+        .mockResolvedValue(undefined);
+      try {
+        await service.onModuleInit();
+        expect(tasks).not.toHaveBeenCalled();
+        expect(batches).not.toHaveBeenCalled();
+        global.__weweStartupAudit.status = passed ? 'ready' : 'failed';
+        finish(passed);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(tasks).toHaveBeenCalledTimes(passed ? 1 : 0);
+        expect(batches).toHaveBeenCalledTimes(passed ? 1 : 0);
+      } finally {
+        if (previousMode === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = previousMode;
+        if (previousGuard === undefined)
+          delete process.env.REHEARSAL_GUARD_REPORT;
+        else process.env.REHEARSAL_GUARD_REPORT = previousGuard;
+        service.onModuleDestroy();
+      }
+    },
+  );
 });

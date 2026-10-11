@@ -146,6 +146,7 @@ export class TrpcService {
           'account.wechat2rssLoginPoll',
           'account.wechat2rssLoginClose',
           'article.exportMarkdown',
+          'feed.stopSubscriptionBatch',
         ].includes(path)) ||
         path === 'platform.getLoginResult')
     )
