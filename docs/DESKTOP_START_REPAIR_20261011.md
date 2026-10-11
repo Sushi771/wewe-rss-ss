@@ -17,7 +17,11 @@
 
 样本使用实际启动函数，包含显示握手、依赖、安全检查、产品健康和浏览器派发；不包含WSH/快捷方式派发之前的时间。Docker/WSL和原订阅容器始终运行，不得称为整体冷启动。原版读取自 `18ed773`；首两个原版样本在补丁前直接执行。3次不能证明长期分布；排队的12.531秒样本、`EPERM`失败、一次并发基准导致进程身份保护拒绝均排除，并留在私有日志。后续测量独占执行。
 
-本机相关81项回归通过（含真实Windows文件占用、进程保护及大SQLite基线）；代码提交 `976b5ccc4485c93c691d32865a80a3792eb40a70` 已推PR #2。私有分阶段脚本与JSON在忽略的 `output/playwright/local-release-audit/perf-profile.cjs`、`perf-*.json`，不提交数据或原始证据。用户 `DEVELOPMENT_HANDOFF.md` 修改保留。最终构建、精确CI及桌面入口复验随后补记。
+本机相关81项回归通过（含真实Windows文件占用、进程保护及大SQLite基线）；代码提交 `976b5ccc4485c93c691d32865a80a3792eb40a70` 已推PR #2，[CI #375](https://github.com/Sushi771/wewe-rss-ss/actions/runs/38124622167) 全部success，[浏览器离线 #97](https://github.com/Sushi771/wewe-rss-ss/actions/runs/38124622171) success。新增Windows CI步骤持续执行本轮真实文件占用回归。私有分阶段脚本与JSON在忽略的 `output/playwright/local-release-audit/perf-profile.cjs`、`perf-*.json`，不提交数据或原始证据。用户 `DEVELOPMENT_HANDOFF.md` 修改保留。
+
+既有 `build.cjs --compact` 构建成功，新包 `2026-10-11T08-25-15-492Z-f9cd63a8c9af` 共79个固定文件。新旧包的产品程序、前端、Node、运行引导及SQLite安全脚本字节相同，差异仅构建元数据和重新生成Prisma的路径/元数据；本轮性能补丁运行于稳定桌面脚本，无须为此切换相同业务程序。运行服务保留原固定包，实测产品冷启动仍走原 `controlledRestart` 全保护流程。
+
+代码CI成功后，实际 `.lnk` 连续两次启动通过：首个2.259秒、排队者3.468秒，同一PID57916；仅首个 `browserRequested=true`，第二个 `joined=true/browserRequested=false`。快捷方式派发至两次回执共6.223秒，与上表函数样本的测量范围不同。只读保护字段最终核验14号/1713篇/3分组与本轮前的原冷启动基线全等，证据为私有 `perf-desktop-final.json`。状态窗显示/聚焦有原生回执，默认Edge双标签视觉仍未验收，未重试CUA203、扫码或取文。
 
 ## 最终工程验收补记（2026-10-11）
 
