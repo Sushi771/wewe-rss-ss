@@ -8,6 +8,7 @@ const { test } = require('node:test');
 const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
 );
+const { loadActualTs } = require('./offline-ts-fixture.cjs');
 const metrics = JSON.stringify({
   read: { display: '123' },
   like: { display: '8' },
@@ -48,6 +49,7 @@ function fixture({
     },
     useMemo: (fn) => fn(),
     useEffect() {},
+    useLayoutEffect() {},
   };
   const trpc = {
     useUtils: () => ({}),
@@ -78,6 +80,12 @@ function fixture({
     },
   };
   const modules = {
+    '@web/utils/feed-selection': loadActualTs(
+      'apps/web/src/utils/feed-selection.ts',
+    ),
+    '@wewe-rss/shared': loadActualTs(
+      'packages/shared/src/article-date-filter.ts',
+    ),
     react,
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@nextui-org/react': new Proxy({}, { get: (_, key) => key }),
@@ -131,7 +139,10 @@ function fixture({
       nodes,
       text: text.join(''),
       options: nodes
-        .filter((n) => n.type === 'option')
+        .filter(
+          (n) =>
+            n.type === 'option' && !['asc', 'desc'].includes(n.props.value),
+        )
         .map((n) => n.props.value),
       metricRows: nodes.filter((n) => n.props.title?.startsWith('指标来自')),
     };
@@ -147,7 +158,7 @@ function fixture({
 test('Wechat2RSS hides historical metric values, coverage notices and heat sorting', () => {
   const h = fixture();
   const view = h.render();
-  assert.deepEqual(view.options, []);
+  assert.deepEqual(view.options, ['publishTime']);
   assert.equal(view.metricRows.length, 0);
   assert(!/阅读已获取|点赞已获取|未获取|热度|收藏/.test(view.text));
   assert.match(view.text, /文章标题 · 1 篇/);
@@ -175,7 +186,7 @@ test('empty metric sorts are absent rather than disabled placeholders', () => {
     readAvailable: 0,
     likeAvailable: 0,
   }).render();
-  assert.deepEqual(view.options, []);
+  assert.deepEqual(view.options, ['publishTime']);
   assert(!/热度排序已禁用|从高到低（未获取）/.test(view.text));
 });
 test('mixed overview keeps supported rows but omits unsupported aggregate coverage and ranking', () => {
@@ -186,7 +197,7 @@ test('mixed overview keeps supported rows but omits unsupported aggregate covera
   const before = JSON.stringify(items);
   const view = fixture({ mpId: '', items }).render();
   assert.equal(view.metricRows.length, 1);
-  assert.deepEqual(view.options, []);
+  assert.deepEqual(view.options, ['publishTime']);
   assert(!/阅读已获取|点赞已获取/.test(view.text));
   assert.equal(JSON.stringify(items), before);
 });
