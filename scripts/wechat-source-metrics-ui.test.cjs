@@ -34,7 +34,9 @@ function fixture({
   const state = [],
     params = { id: mpId };
   let cursor = 0,
-    query;
+    query,
+    sort = 'publishTime',
+    direction = 'desc';
   const jsx = (type, props) => ({ type, props: props || {} });
   const react = {
     useState(initial) {
@@ -91,6 +93,16 @@ function fixture({
     '@nextui-org/react': new Proxy({}, { get: (_, key) => key }),
     '@web/utils/trpc': { trpc },
     '@web/components/ArticleReader': { default: 'ArticleReader' },
+    // Metric visibility is independent of scroll restoration.
+    '@web/utils/use-article-list-position': {
+      useArticleListPosition: () => ({
+        scrollRef: { current: null },
+        capturePosition() {},
+        cancelRestore() {},
+        rememberForReader() {},
+        restoreAfterReader() {},
+      }),
+    },
     'react-router-dom': { useParams: () => params },
     dayjs: { default: () => ({ format: () => '合成日期' }) },
     sonner: { toast: {} },
@@ -131,6 +143,14 @@ function fixture({
     visit(
       module.exports.default({
         search: '',
+        sort,
+        onSortChange(value) {
+          sort = value;
+        },
+        direction,
+        onDirectionChange(value) {
+          direction = value;
+        },
         selectedIds: new Set(),
         onSelectionChange() {},
         collectionChannels: channels,

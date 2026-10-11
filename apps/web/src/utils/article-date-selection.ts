@@ -4,6 +4,8 @@ export interface ArticleDateSelection {
   mode: 'day' | 'range';
   start: string;
   end: string;
+  /** A remembered relative range; manual edits remove this marker. */
+  shortcut?: ArticleDateShortcut;
 }
 
 export function dateSelectionFilter(

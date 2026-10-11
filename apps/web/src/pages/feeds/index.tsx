@@ -35,10 +35,8 @@ import PublicAlbums from './public-albums';
 import SubscriptionTasks from './subscription-tasks';
 import ManualRefreshProgress from './manual-refresh-progress';
 import ArticleDateFilter from '@web/components/ArticleDateFilter';
-import {
-  ArticleDateSelection,
-  dateSelectionFilter,
-} from '@web/utils/article-date-selection';
+import { dateSelectionFilter } from '@web/utils/article-date-selection';
+import { useFeedBrowseState } from '@web/utils/use-feed-browse-state';
 import { articleFilterSchema } from '@wewe-rss/shared';
 
 const Feeds = () => {
@@ -50,7 +48,28 @@ const Feeds = () => {
   const removeFolder = trpc.feed.removeGroup.useMutation();
   const moveFeeds = trpc.feed.moveFeeds.useMutation();
   const reorderFolders = trpc.feed.reorderGroups.useMutation({ retry: false });
-  const [folderFilter, setFolderFilter] = useState('all');
+  const {
+    search,
+    setSearch,
+    folderFilter,
+    setFolderFilter,
+    articleDates,
+    setArticleDates,
+    articleDirection,
+    setArticleDirection,
+    articleSort,
+    setArticleSort,
+    clearBrowseState,
+    browseGeneration,
+  } = useFeedBrowseState(id);
+  useEffect(() => {
+    if (
+      folders.data &&
+      !['all', 'ungrouped'].includes(folderFilter) &&
+      !folders.data.items.some((folder) => folder.id === folderFilter)
+    )
+      setFolderFilter('all');
+  }, [folders.data, folderFilter, setFolderFilter]);
   const [folderBusy, setFolderBusy] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const folderOperation = useRef(false);
@@ -63,6 +82,10 @@ const Feeds = () => {
   );
 
   const navigate = useNavigate();
+  useEffect(() => {
+    if (id && feedData && !feedData.items.some((feed) => feed.id === id))
+      navigate('/feeds', { replace: true });
+  }, [id, feedData, navigate]);
 
   const queryUtils = trpc.useUtils();
 
@@ -366,15 +389,6 @@ const Feeds = () => {
 
   const { mutateAsync: updateOrder } = trpc.feed.updateOrder.useMutation();
 
-  const [search, setSearch] = useState('');
-  const [articleDates, setArticleDates] = useState<ArticleDateSelection>({
-    mode: 'day',
-    start: '',
-    end: '',
-  });
-  const [articleDirection, setArticleDirection] = useState<'asc' | 'desc'>(
-    'desc',
-  );
   const articleDateFilter = dateSelectionFilter(articleDates);
   const dateValidation = articleFilterSchema.safeParse(articleDateFilter);
   const dateError = dateValidation.success
@@ -393,7 +407,15 @@ const Feeds = () => {
   const batchExporting = useRef(false);
   useEffect(() => {
     setArticleSelectedIds(new Set());
-  }, [id, search, folderFilter, articleDates]);
+  }, [
+    id,
+    search,
+    folderFilter,
+    articleDates,
+    articleDirection,
+    articleSort,
+    browseGeneration,
+  ]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1169,6 +1191,9 @@ const Feeds = () => {
                   size="sm"
                   variant="light"
                   color={isSearchOpen ? 'primary' : 'default'}
+                  aria-label={isSearchOpen ? '关闭文章搜索' : '搜索文章'}
+                  aria-expanded={isSearchOpen}
+                  aria-controls="article-search-panel"
                   className="h-8 w-8 min-w-0"
                   onPress={() => setIsSearchOpen(!isSearchOpen)}
                 >
@@ -1188,32 +1213,42 @@ const Feeds = () => {
                   </svg>
                 </Button>
               </Tooltip>
-              <span role="status" aria-live="polite" className="text-xs">
-                已选 {articleSelectedIds.size} 篇
-              </span>
-              <Button
-                size="sm"
-                variant="light"
-                className="h-8"
-                isDisabled={isBatchExporting || articleSelectedIds.size === 0}
-                onPress={() => {
-                  if (!batchExporting.current) setArticleSelectedIds(new Set());
-                }}
-              >
-                清空选择
-              </Button>
-              {!privateOnlineMode && (
-                <Button
-                  size="sm"
-                  color="primary"
-                  variant="flat"
-                  className="mr-2 h-8 font-medium"
-                  isLoading={isBatchExporting}
-                  isDisabled={isBatchExporting || articleSelectedIds.size === 0}
-                  onPress={handleBatchExport}
-                >
-                  批量导出 Obsidian ({articleSelectedIds.size})
-                </Button>
+              {/* Batch actions appear when there is something to act on. */}
+              {articleSelectedIds.size > 0 && (
+                <>
+                  <span role="status" aria-live="polite" className="text-xs">
+                    已选 {articleSelectedIds.size} 篇
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="light"
+                    className="h-8"
+                    isDisabled={
+                      isBatchExporting || articleSelectedIds.size === 0
+                    }
+                    onPress={() => {
+                      if (!batchExporting.current)
+                        setArticleSelectedIds(new Set());
+                    }}
+                  >
+                    清空选择
+                  </Button>
+                  {!privateOnlineMode && (
+                    <Button
+                      size="sm"
+                      color="primary"
+                      variant="flat"
+                      className="mr-2 h-8 font-medium"
+                      isLoading={isBatchExporting}
+                      isDisabled={
+                        isBatchExporting || articleSelectedIds.size === 0
+                      }
+                      onPress={handleBatchExport}
+                    >
+                      批量导出 Obsidian ({articleSelectedIds.size})
+                    </Button>
+                  )}
+                </>
               )}
               {currentMpInfo ? (
                 <>
@@ -1832,7 +1867,10 @@ const Feeds = () => {
             </details>
           )}
           {isSearchOpen && (
-            <div className="animate-in slide-in-from-top border-b-[0.5px] border-neutral-200 bg-neutral-50/80 px-4 py-3 backdrop-blur-md duration-200 dark:border-neutral-700 dark:bg-neutral-900/80">
+            <div
+              id="article-search-panel"
+              className="animate-in slide-in-from-top border-b-[0.5px] border-neutral-200 bg-neutral-50/80 px-4 py-3 backdrop-blur-md duration-200 dark:border-neutral-700 dark:bg-neutral-900/80"
+            >
               <Input
                 autoFocus
                 placeholder="搜索标题或内容..."
@@ -1887,6 +1925,23 @@ const Feeds = () => {
             </div>
           )}
 
+          <div
+            className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs"
+            role="status"
+          >
+            <span>筛选与排序在本次浏览中记住</span>
+            <button
+              type="button"
+              className="hover:bg-default-100 rounded px-2 py-1 text-sm"
+              onClick={() => {
+                void queryUtils.article.list.reset();
+                clearBrowseState();
+                setArticleSelectedIds(new Set());
+              }}
+            >
+              清除筛选与浏览位置
+            </button>
+          </div>
           <ArticleDateFilter
             value={articleDates}
             error={dateError}
@@ -1902,9 +1957,14 @@ const Feeds = () => {
                 search,
                 folderFilter,
                 articleDateFilter,
+                articleDirection,
+                articleSort,
+                browseGeneration,
               ])}
               articleFilter={{ ...articleDateFilter, group: folderFilter }}
               filterInvalid={Boolean(dateError)}
+              sort={articleSort}
+              onSortChange={setArticleSort}
               direction={articleDirection}
               onDirectionChange={setArticleDirection}
               collectionChannels={Object.fromEntries(

@@ -265,7 +265,12 @@ createRoot(document.getElementById('root')).render(<App/>);
         3,
       );
       let r = await change('today');
-      assert.deepEqual(r.dates, { mode: 'day', start: '2026-10-10', end: '' });
+      assert.deepEqual(r.dates, {
+        mode: 'day',
+        start: '2026-10-10',
+        end: '',
+        shortcut: 'today',
+      });
       assert.deepEqual(r.selected, []);
       await evaluate("window.testNow='2026-10-10T16:00:00Z'");
       r = await change('last7');
@@ -273,6 +278,7 @@ createRoot(document.getElementById('root')).render(<App/>);
         mode: 'range',
         start: '2026-10-05',
         end: '2026-10-11',
+        shortcut: 'last7',
       });
       assert.deepEqual(r.filter, {
         mpId: 'a',
@@ -284,7 +290,7 @@ createRoot(document.getElementById('root')).render(<App/>);
       });
       assert.equal(
         await evaluate("document.querySelector('select').value"),
-        'range',
+        'last7',
       );
       assert.deepEqual(
         await evaluate(
@@ -297,6 +303,7 @@ createRoot(document.getElementById('root')).render(<App/>);
         mode: 'range',
         start: '2026-10-01',
         end: '2026-10-11',
+        shortcut: 'month',
       });
       await send('Emulation.setDeviceMetricsOverride', {
         width: 390,

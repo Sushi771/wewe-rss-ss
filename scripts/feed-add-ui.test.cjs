@@ -152,33 +152,63 @@ function render(capability, options = {}) {
   ).outputText;
   const module = { exports: {} };
   const requireMock = (name) =>
-    name === '@web/utils/article-date-selection'
-      ? dateSelection
-      : name === '@wewe-rss/shared'
-        ? articleDates
-        : name === 'react'
-          ? react
-          : name === 'react/jsx-runtime'
-            ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
-            : name === '@nextui-org/react'
-              ? ui
-              : name === '@web/utils/trpc'
-                ? { trpc }
-                : name === '@web/utils/refresh-feed-view'
-                  ? { refreshFeedViews: async () => {} }
-                  : name === 'react-router-dom'
-                    ? { useNavigate: () => () => {}, useParams: () => ({}) }
-                    : name === 'sonner'
-                      ? { toast }
-                      : name === 'dayjs'
-                        ? () => ({ format: () => '' })
-                        : name === '@web/utils/env'
-                          ? {
-                              acceptanceMode: false,
-                              privateOnlineMode: false,
-                              serverOriginUrl: (value) => value,
-                            }
-                          : () => null;
+    name === '@web/utils/use-feed-browse-state'
+      ? {
+          // Add-source tests keep page filters local; persistence is covered separately.
+          useFeedBrowseState: () => {
+            const [search, setSearch] = react.useState('');
+            const [folderFilter, setFolderFilter] = react.useState('all');
+            const [articleDates, setArticleDates] = react.useState({
+              mode: 'day',
+              start: '',
+              end: '',
+            });
+            const [articleDirection, setArticleDirection] =
+              react.useState('desc');
+            const [articleSort, setArticleSort] = react.useState('publishTime');
+            return {
+              search,
+              setSearch,
+              folderFilter,
+              setFolderFilter,
+              articleDates,
+              setArticleDates,
+              articleDirection,
+              setArticleDirection,
+              articleSort,
+              setArticleSort,
+              clearBrowseState() {},
+              browseGeneration: 0,
+            };
+          },
+        }
+      : name === '@web/utils/article-date-selection'
+        ? dateSelection
+        : name === '@wewe-rss/shared'
+          ? articleDates
+          : name === 'react'
+            ? react
+            : name === 'react/jsx-runtime'
+              ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
+              : name === '@nextui-org/react'
+                ? ui
+                : name === '@web/utils/trpc'
+                  ? { trpc }
+                  : name === '@web/utils/refresh-feed-view'
+                    ? { refreshFeedViews: async () => {} }
+                    : name === 'react-router-dom'
+                      ? { useNavigate: () => () => {}, useParams: () => ({}) }
+                      : name === 'sonner'
+                        ? { toast }
+                        : name === 'dayjs'
+                          ? () => ({ format: () => '' })
+                          : name === '@web/utils/env'
+                            ? {
+                                acceptanceMode: false,
+                                privateOnlineMode: false,
+                                serverOriginUrl: (value) => value,
+                              }
+                            : () => null;
   vm.runInNewContext(source, {
     module,
     exports: module.exports,

@@ -183,11 +183,21 @@ function listFixture(initialItems: string[]) {
             ? { trpc }
             : name === '@web/utils/feed-selection'
               ? { getLoadedSelection }
-              : name === 'react-router-dom'
-                ? { useParams: () => params }
-                : name === '@wewe-rss/shared'
-                  ? { formatShanghaiPublicationTime: () => 'fixture-time' }
-                  : {};
+              : name === '@web/utils/use-article-list-position'
+                ? {
+                    useArticleListPosition: () => ({
+                      scrollRef: { current: null },
+                      capturePosition() {},
+                      cancelRestore() {},
+                      rememberForReader() {},
+                      restoreAfterReader() {},
+                    }),
+                  }
+                : name === 'react-router-dom'
+                  ? { useParams: () => params }
+                  : name === '@wewe-rss/shared'
+                    ? { formatShanghaiPublicationTime: () => 'fixture-time' }
+                    : {};
   new Function('require', 'exports', 'module', compiled)(
     requireMock,
     mod.exports,
@@ -323,10 +333,16 @@ describe('feed batch selection actual UI and export handlers, offline', () => {
     expect(f.getSelected()).toEqual([]);
   });
   it('preserves parent clearing for feed/search/folder/date changes and keyed query scope', () => {
-    const reset = index.effects.find(
-      (node) =>
-        node.arguments[1]?.getText(index.ast) ===
-        '[id, search, folderFilter, articleDates]',
+    const reset = index.effects.find((node) =>
+      [
+        'id',
+        'search',
+        'folderFilter',
+        'articleDates',
+        'articleDirection',
+        'articleSort',
+        'browseGeneration',
+      ].every((name) => node.arguments[1]?.getText(index.ast).includes(name)),
     );
     expect(reset).toBeDefined();
     const cleared = jest.fn();
@@ -346,9 +362,16 @@ describe('feed batch selection actual UI and export handlers, offline', () => {
     let nodes = f.render();
     f.checkbox(nodes).props.onValueChange(true);
     nodes = f.render();
-    nodes
-      .find((n) => n.props?.['aria-label'] === '发布时间顺序')
-      .props.onChange({ target: { value: 'asc' } });
+    // Direction is controlled by the parent toolbar. Pass the new query scope
+    // after the actual parent selection reset tested above.
+    const reset = index.effects.find((node) =>
+      node.arguments[1]?.getText(index.ast).includes('articleDirection'),
+    )!;
+    evaluate(reset.arguments[0].getText(index.ast), {
+      setArticleSelectedIds: f.setSelected,
+    })();
+    f.setProps({ direction: 'asc' });
+    f.render();
     expect(f.getSelected()).toEqual([]);
     f.checkbox(f.render()).props.onValueChange(true);
     f.checkbox(f.render()).props.onValueChange(false);

@@ -9,6 +9,8 @@ import {
   ModalBody,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
+import { ArticleSort } from '@web/utils/feed-browse-state';
+import { useArticleListPosition } from '@web/utils/use-article-list-position';
 import { getLoadedSelection } from '@web/utils/feed-selection';
 import dayjs from 'dayjs';
 import ArticleReader from '@web/components/ArticleReader';
@@ -20,6 +22,8 @@ interface ArticleListProps {
   search: string;
   articleFilter?: ArticleFilter;
   filterInvalid?: boolean;
+  sort: ArticleSort;
+  onSortChange: (sort: ArticleSort) => void;
   direction: 'asc' | 'desc';
   onDirectionChange: (direction: 'asc' | 'desc') => void;
   selectedIds: Set<string>;
@@ -41,6 +45,8 @@ const ArticleList: FC<ArticleListProps> = ({
   search,
   articleFilter = {},
   filterInvalid = false,
+  sort,
+  onSortChange: setSort,
   direction,
   onDirectionChange,
   selectedIds,
@@ -76,10 +82,6 @@ const ArticleList: FC<ArticleListProps> = ({
       ]);
     }
   };
-  const [sort, setSort] = useState<'publishTime' | 'readCount' | 'likeCount'>(
-    'publishTime',
-  );
-
   const summary = trpc.article.summary.useQuery(
     {
       ...articleFilter,
@@ -90,27 +92,33 @@ const ArticleList: FC<ArticleListProps> = ({
   );
 
   useEffect(() => {
-    setSort('publishTime');
     onSelectionChange(new Set());
   }, [mpId, search, onSelectionChange]);
 
-  const { data, fetchNextPage, isLoading, hasNextPage, isError, refetch } =
-    trpc.article.list.useInfiniteQuery(
-      {
-        limit: 20,
-        ...articleFilter,
-        mpId: mpId,
-        search: search || undefined,
-        sort: collectionChannels[mpId] === 'wechat2rss' ? 'publishTime' : sort,
-        direction,
-      },
-      {
-        getNextPageParam: (lastPage) => lastPage.nextCursor,
-        enabled: !filterInvalid,
-        cacheTime: 0,
-        keepPreviousData: false,
-      },
-    );
+  const {
+    data,
+    fetchNextPage,
+    isLoading,
+    hasNextPage,
+    isError,
+    refetch,
+    isFetching,
+  } = trpc.article.list.useInfiniteQuery(
+    {
+      limit: 20,
+      ...articleFilter,
+      mpId: mpId,
+      search: search || undefined,
+      sort: collectionChannels[mpId] === 'wechat2rss' ? 'publishTime' : sort,
+      direction,
+    },
+    {
+      getNextPageParam: (lastPage) => lastPage.nextCursor,
+      enabled: !filterInvalid,
+      cacheTime: 0,
+      keepPreviousData: false,
+    },
+  );
 
   const items = useMemo(() => {
     return filterInvalid ? [] : data?.pages.flatMap((page) => page.items) || [];
@@ -127,12 +135,31 @@ const ArticleList: FC<ArticleListProps> = ({
   const likeSortingAvailable = !hasWechat2Rss && !!summary.data?.likeAvailable;
 
   useEffect(() => {
+    if (!summary.isSuccess) return;
     if (
       (sort === 'readCount' && !readSortingAvailable) ||
       (sort === 'likeCount' && !likeSortingAvailable)
     )
       setSort('publishTime');
-  }, [readSortingAvailable, likeSortingAvailable, sort]);
+  }, [
+    readSortingAvailable,
+    likeSortingAvailable,
+    sort,
+    summary.isSuccess,
+    setSort,
+  ]);
+
+  const position = useArticleListPosition({
+    viewKey: JSON.stringify([mpId, search, articleFilter, sort, direction]),
+    pageCount: data?.pages.length || 0,
+    itemCount: items.length,
+    loading: isLoading && !filterInvalid,
+    fetching: isFetching,
+    hasNext: Boolean(hasNextPage),
+    failed: isError || filterInvalid,
+    loadNext: fetchNextPage,
+    paused: Boolean(readingId),
+  });
 
   const handleSelectAll = (isSelected: boolean) => {
     if (isSelectionDisabled) return;
@@ -208,7 +235,11 @@ const ArticleList: FC<ArticleListProps> = ({
           </Button>
         </div>
       )}
-      <div className="mt-2 flex-1 overflow-y-auto">
+      <div
+        ref={position.scrollRef}
+        onScroll={position.capturePosition}
+        className="mt-2 flex-1 overflow-y-auto"
+      >
         <div className="compact-list">
           <div className="compact-list-header">
             <div className="compact-col-check">
@@ -234,7 +265,14 @@ const ArticleList: FC<ArticleListProps> = ({
           {items?.map((item) => (
             <div
               key={item.id}
-              className="compact-row article-row !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center"
+              data-article-id={item.id}
+              className={`compact-row article-row ${
+                item.bodyCached &&
+                !item.bodyRetryResult &&
+                item.lastBodyStatus !== 'unavailable'
+                  ? 'article-row-ready'
+                  : ''
+              } !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center`}
             >
               <div className="compact-col-check">
                 <Checkbox
@@ -262,6 +300,7 @@ const ArticleList: FC<ArticleListProps> = ({
                 }
                 aria-label={`${item.bodyCached ? '阅读缓存正文' : '打开原文'}：${item.title}`}
                 onClick={(event) => {
+                  position.rememberForReader();
                   if (item.bodyCached) {
                     event.preventDefault();
                     setReadingId(item.id);
@@ -377,6 +416,7 @@ const ArticleList: FC<ArticleListProps> = ({
       <Modal
         isOpen={Boolean(readingId)}
         onClose={() => {
+          position.restoreAfterReader();
           setReaderFindOpen(false);
           setReadingId(null);
         }}

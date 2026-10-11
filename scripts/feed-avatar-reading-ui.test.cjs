@@ -165,6 +165,16 @@ function readingFixture(cached) {
     '@nextui-org/react': new Proxy({}, { get: (_, key) => key }),
     '@web/utils/trpc': { trpc },
     '@web/components/ArticleReader': { default: 'ArticleReader' },
+    // This fixture checks row content; scroll restoration has its own browser regression.
+    '@web/utils/use-article-list-position': {
+      useArticleListPosition: () => ({
+        scrollRef: { current: null },
+        capturePosition() {},
+        cancelRestore() {},
+        rememberForReader() {},
+        restoreAfterReader() {},
+      }),
+    },
     'react-router-dom': { useParams: () => ({ id: 'synthetic' }) },
     dayjs: { default: () => ({ format: () => 'Synthetic date' }) },
     sonner: { toast: {} },

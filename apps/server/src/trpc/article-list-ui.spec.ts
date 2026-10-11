@@ -33,6 +33,19 @@ function attribute(node: ts.JsxOpeningLikeElement, name: string) {
 }
 function literal(node: ts.JsxOpeningLikeElement, name: string) {
   const value = attribute(node, name);
+  if (
+    value &&
+    ts.isJsxExpression(value) &&
+    value.expression &&
+    ts.isTemplateExpression(value.expression)
+  ) {
+    // Resolve the actual class expression for a complete cached fixture row.
+    return String(
+      evaluate(value.expression.getText(ast), {
+        item: { bodyCached: true, lastBodyStatus: 'available' },
+      }),
+    );
+  }
   return value && ts.isStringLiteral(value) ? value.text : '';
 }
 function elementWithClass(marker: string) {
@@ -122,6 +135,7 @@ describe('actual WeChat article-list mobile layout contract and handlers (offlin
       evaluate(handler(elementWithClass('compact-title'), 'onClick'), {
         item: { id: 'a', bodyCached },
         setReadingId,
+        position: { rememberForReader: jest.fn() },
       })(event);
       expect(event.preventDefault).toHaveBeenCalledTimes(bodyCached ? 1 : 0);
       expect(setReadingId.mock.calls).toEqual(bodyCached ? [['a']] : []);

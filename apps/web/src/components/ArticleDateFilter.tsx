@@ -20,13 +20,17 @@ export default function ArticleDateFilter({
       <select
         aria-label="日期筛选方式"
         className={fieldClass}
-        value={value.mode}
+        value={value.shortcut || value.mode}
         onChange={(event) => {
           const mode = event.target.value;
           if (isArticleDateShortcut(mode)) {
-            onChange(articleDateShortcut(mode));
+            onChange({ ...articleDateShortcut(mode), shortcut: mode });
           } else {
-            onChange({ ...value, mode: mode as ArticleDateSelection['mode'] });
+            onChange({
+              ...value,
+              mode: mode as ArticleDateSelection['mode'],
+              shortcut: undefined,
+            });
           }
         }}
       >
@@ -50,7 +54,11 @@ export default function ArticleDateFilter({
           aria-invalid={Boolean(error)}
           aria-describedby={error ? 'article-date-error' : undefined}
           onChange={(event) =>
-            onChange({ ...value, start: event.target.value })
+            onChange({
+              ...value,
+              start: event.target.value,
+              shortcut: undefined,
+            })
           }
         />
       </label>
@@ -67,7 +75,11 @@ export default function ArticleDateFilter({
             aria-invalid={Boolean(error)}
             aria-describedby={error ? 'article-date-error' : undefined}
             onChange={(event) =>
-              onChange({ ...value, end: event.target.value })
+              onChange({
+                ...value,
+                end: event.target.value,
+                shortcut: undefined,
+              })
             }
           />
         </label>
