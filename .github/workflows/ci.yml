@@ -21,6 +21,8 @@ jobs:
           node-version: 24
       - name: Test native loopback listener ownership and guarded stop
         run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
+      - name: Test desktop feedback and Windows state-file contention offline
+        run: node --test scripts/local-release/desktop-dependencies.test.cjs scripts/local-release/desktop-progress.test.cjs
       - name: Test synthetic readiness with Fetch-compatible Windows ports
         run: node --test scripts/local-release/readiness.test.cjs
       - name: Test explicit Wechat2RSS binding on owned SQLite copies
