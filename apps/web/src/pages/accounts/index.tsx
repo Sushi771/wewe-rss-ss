@@ -184,7 +184,16 @@ const AccountPage = () => {
     <div className="space-y-5 p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold">Wechat2RSS 账号</h1>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Button
+            as="a"
+            href="http://127.0.0.1:18080/#/"
+            target="_blank"
+            rel="noopener noreferrer"
+            variant="flat"
+          >
+            打开 Wechat2RSS 后台
+          </Button>
           <Button onPress={check} isLoading={checking}>
             刷新账号状态
           </Button>

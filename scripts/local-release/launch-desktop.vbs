@@ -1,5 +1,5 @@
 Option Explicit
-Dim shell, files, root, node, entry, command, result, stream, detail, errorFile, argument
+Dim shell, files, root, node, entry, command, result, stream, detail, errorFile, argument, showWindow
 Set shell = CreateObject("WScript.Shell")
 Set files = CreateObject("Scripting.FileSystemObject")
 root = files.GetParentFolderName(files.GetParentFolderName(files.GetParentFolderName(WScript.ScriptFullName)))
@@ -11,10 +11,12 @@ If Not files.FileExists(node) Then
 End If
 shell.CurrentDirectory = root
 command = """" & node & """ """ & entry & """"
+showWindow = 0
 For Each argument In WScript.Arguments
   If argument = "--check" Or argument = "--reuse-only" Then command = command & " " & argument
+  If argument = "--check" Then showWindow = 0
 Next
-result = shell.Run(command, 0, True)
+result = shell.Run(command, showWindow, True)
 If result <> 0 Then
   detail = "WeWe-RSS could not start. See output\playwright\local-release-audit\desktop-start.jsonl"
   errorFile = root & "\output\playwright\local-release-audit\desktop-start-error.txt"

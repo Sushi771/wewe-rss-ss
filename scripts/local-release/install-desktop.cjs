@@ -52,7 +52,25 @@ function installDesktop({
     $shortcut.Save()
     $check = $shell.CreateShortcut($target)
     if ($check.TargetPath -ine $hostPath -or $check.Arguments -cne $arguments -or $check.IconLocation -ine ($p.icon + ',0')) { throw 'Shortcut verification failed' }
-    @{ shortcut = $target; root = $p.root; verified = $true } | ConvertTo-Json -Compress
+    $backendTarget = Join-Path $desktop 'Wechat2RSS后台.lnk'
+    $backendHost = Join-Path $env:SystemRoot 'explorer.exe'
+    $backendUrl = 'http://127.0.0.1:18080/#/'
+    $backendDescription = 'WeWe-RSS existing local Wechat2RSS backend: ' + $p.root
+    $backend = $shell.CreateShortcut($backendTarget)
+    if (Test-Path -LiteralPath $backendTarget) {
+      if ($backend.TargetPath -ine $backendHost -or $backend.Arguments -cne $backendUrl -or $backend.Description -cne $backendDescription) {
+        throw 'An unrelated Wechat2RSS backend shortcut exists; nothing was replaced'
+      }
+    }
+    $backend.TargetPath = $backendHost
+    $backend.Arguments = $backendUrl
+    $backend.WorkingDirectory = $p.root
+    $backend.IconLocation = $p.icon + ',0'
+    $backend.Description = $backendDescription
+    $backend.Save()
+    $backendCheck = $shell.CreateShortcut($backendTarget)
+    if ($backendCheck.TargetPath -ine $backendHost -or $backendCheck.Arguments -cne $backendUrl) { throw 'Backend shortcut verification failed' }
+    @{ shortcut = $target; backendShortcut = $backendTarget; root = $p.root; verified = $true } | ConvertTo-Json -Compress
   `;
   const powershell = path.join(
     process.env.SystemRoot,

@@ -6,6 +6,8 @@ const root = path.resolve(__dirname, '../..');
 const pinFile = path.join(root, 'private-data/desktop-start/container.json');
 const pipe = 'npipe:////./pipe/dockerDesktopLinuxEngine';
 const messages = {
+  STARTUP_WINDOW_FAILED:
+    '启动状态窗口未能显示。请维护者检查 desktop-progress-errors.log；未改安全策略或原数据。',
   DOCKER_NOT_INSTALLED:
     '未找到已安装的 Docker Desktop。请检查原安装，不要重新安装或迁移数据。',
   DOCKER_NOT_READY:
@@ -59,6 +61,24 @@ function command(executable, args, timeout = 5000) {
   );
 }
 async function discoverDocker() {
+  // Common and relocated PATH installations can be verified without starting PowerShell.
+  // Keep the registry/shortcut fallback for installations absent from this process's PATH.
+  const directories = (process.env.PATH || process.env.Path || '').split(
+    path.delimiter,
+  );
+  const candidates = directories
+    .filter(Boolean)
+    .map((directory) =>
+      path.resolve(directory.replace(/^"|"$/g, ''), '../../Docker Desktop.exe'),
+    );
+  if (process.env.ProgramFiles)
+    candidates.push(
+      path.join(process.env.ProgramFiles, 'Docker/Docker/Docker Desktop.exe'),
+    );
+  for (const desktop of candidates) {
+    const cli = path.join(path.dirname(desktop), 'resources/bin/docker.exe');
+    if (fs.existsSync(desktop) && fs.existsSync(cli)) return { desktop, cli };
+  }
   const script = `$ErrorActionPreference='Stop'; $paths=@(); foreach($key in @('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Docker Desktop','HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Docker Desktop')) { $p=Get-ItemProperty $key -ErrorAction SilentlyContinue; if($p.InstallLocation){$paths+=Join-Path $p.InstallLocation 'Docker Desktop.exe'} }; foreach($desktop in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('CommonDesktopDirectory'))) { $link=Join-Path $desktop 'Docker Desktop.lnk'; if(Test-Path -LiteralPath $link){$paths+=(New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath} }; $c=Get-Command docker.exe -ErrorAction SilentlyContinue; if($c){$paths+=Join-Path (Split-Path (Split-Path (Split-Path $c.Source))) 'Docker Desktop.exe'}; $paths+=Join-Path $env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe'; foreach($exe in $paths){$cli=Join-Path (Split-Path $exe) 'resources\\bin\\docker.exe'; if((Test-Path -LiteralPath $exe -PathType Leaf) -and (Test-Path -LiteralPath $cli -PathType Leaf)){@{desktop=$exe;cli=$cli}|ConvertTo-Json -Compress;exit 0}};exit 1`;
   try {
     return JSON.parse(
@@ -266,10 +286,11 @@ async function waitReady(a, check, limit, code) {
 async function ensureDependencies(
   a,
   pin,
-  { reuseOnly = false, projectRoot = root } = {},
+  { reuseOnly = false, projectRoot = root, onProgress = () => {} } = {},
 ) {
   if (!(await a.engineReady(3000))) {
     if (reuseOnly) throw failure('DOCKER_NOT_READY');
+    onProgress('engine');
     if (!(await a.desktopRunning())) await a.launchDesktop();
     await waitReady(
       a,
@@ -278,6 +299,7 @@ async function ensureDependencies(
       'DOCKER_NOT_READY',
     );
   }
+  onProgress('dependency');
   let c = validateContainer(await a.inspect(pin), pin, projectRoot);
   let started = false;
   if (!c.state.Running) {
@@ -286,6 +308,7 @@ async function ensureDependencies(
     await a.start(pin.id);
     started = true;
   }
+  onProgress('dependencyReady');
   await waitReady(
     a,
     (timeout) => a.healthy(timeout),
@@ -305,16 +328,22 @@ async function withLaunchLock(
     timeout = 210000,
     sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
     now = Date.now,
+    onWait = () => {},
   } = {},
 ) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const end = now() + timeout;
   let fd;
+  let notified = false;
   while (fd === undefined) {
     try {
       fd = fs.openSync(file, 'wx');
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
+      if (!notified) {
+        notified = true;
+        await onWait();
+      }
       if (now() >= end) throw failure('LAUNCH_BUSY');
       await sleep(Math.min(500, end - now()));
     }
