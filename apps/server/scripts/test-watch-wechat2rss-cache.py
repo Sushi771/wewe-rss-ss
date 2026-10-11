@@ -156,8 +156,12 @@ class CacheMonitorTests(unittest.TestCase):
         writer = fixture(replacement)
         writer.execute("UPDATE articles SET content='replacement'")
         writer.commit()
+        self.assertEqual(writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone(), (0, 0, 0))
         writer.close()
-        # Close the fixture writer/checkpoint WAL before replacing the main DB.
+        # The Unix monitor keeps another connection open, so closing this
+        # writer alone does not guarantee a checkpoint. Publish a complete
+        # replacement main DB without a stale, nonempty WAL from the old DB.
+        self.assertEqual(self.writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone(), (0, 0, 0))
         self.writer.close()
         os.replace(replacement, self.database)
         _, second = events.get(timeout=4)
