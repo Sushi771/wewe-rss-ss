@@ -53,8 +53,17 @@ function open(database) {
   return connection;
 }
 function digestRows(rows) {
-  for (const row of rows)
-    for (const value of row)
+  // Stream the same compact JSON bytes as the Python baseline. A whole-table
+  // string can exceed V8's string limit when cached article bodies grow.
+  const digest = crypto.createHash('sha256');
+  digest.update('[');
+  let firstRow = true;
+  for (const row of rows) {
+    if (!firstRow) digest.update(',');
+    firstRow = false;
+    digest.update('[');
+    let firstValue = true;
+    for (const value of row) {
       if (
         value !== null &&
         typeof value !== 'string' &&
@@ -64,26 +73,28 @@ function digestRows(rows) {
         throw new UnsupportedBaselineValue(
           'Use the established Python baseline for REAL values',
         );
-  // Preserve every SQLite INTEGER, including those outside Number's safe range.
-  // This produces the same compact UTF-8 JSON as Python for NULL/TEXT/INTEGER.
-  return hash(
-    JSON.stringify(
-      rows.map((row) =>
-        row.map((value) =>
-          value instanceof Uint8Array
-            ? {
-                __wewe_sqlite_blob__: {
-                  length: value.byteLength,
-                  sha256: hash(value),
-                },
-              }
-            : value,
-        ),
-      ),
-      (_, value) =>
-        typeof value === 'bigint' ? JSON.rawJSON(value.toString()) : value,
-    ),
-  );
+      if (!firstValue) digest.update(',');
+      firstValue = false;
+      // Keep full-width SQLite integers and the established typed BLOB digest.
+      digest.update(
+        typeof value === 'bigint'
+          ? value.toString()
+          : JSON.stringify(
+              value instanceof Uint8Array
+                ? {
+                    __wewe_sqlite_blob__: {
+                      length: value.byteLength,
+                      sha256: hash(value),
+                    },
+                  }
+                : value,
+            ),
+      );
+    }
+    digest.update(']');
+  }
+  digest.update(']');
+  return digest.digest('hex');
 }
 function inspectConnection(
   connection,

@@ -325,9 +325,13 @@ test(
     );
     try {
       const root = path.resolve(__dirname, '../..');
-      assert.equal(
-        installDesktop({ root, testDesktop: desktop }).verified,
-        true,
+      const installed = installDesktop({ root, testDesktop: desktop });
+      assert.equal(installed.verified, true);
+      assert.ok(fs.statSync(installed.backendShortcut).isFile());
+      assert.ok(
+        ['Wechat2RSS后台.lnk', 'Wechat2RSS Backend.lnk'].includes(
+          path.basename(installed.backendShortcut),
+        ),
       );
       assert.equal(
         installDesktop({ root, testDesktop: desktop }).verified,
@@ -339,6 +343,14 @@ test(
       assert.equal(
         fs.readFileSync(path.join(desktop, 'WeWe-RSS.lnk'), 'utf8'),
         'unrelated',
+      );
+      fs.unlinkSync(path.join(desktop, 'WeWe-RSS.lnk'));
+      fs.unlinkSync(installed.backendShortcut);
+      fs.writeFileSync(installed.backendShortcut, 'unrelated backend');
+      assert.throws(() => installDesktop({ root, testDesktop: desktop }));
+      assert.equal(
+        fs.readFileSync(installed.backendShortcut, 'utf8'),
+        'unrelated backend',
       );
     } finally {
       fs.rmSync(desktop, { recursive: true });

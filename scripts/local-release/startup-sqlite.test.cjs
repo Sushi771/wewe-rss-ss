@@ -8,8 +8,29 @@ const {
   inspectDatabase,
   prepareStart,
   UnsupportedBaselineValue,
+  digestRows,
 } = require('./startup-sqlite.cjs');
 const sqlite = require('node:sqlite');
+
+test('cached bodies exceeding the V8 whole-string limit retain the exact baseline digest', () => {
+  const crypto = require('node:crypto');
+  const { MAX_STRING_LENGTH } = require('node:buffer').constants;
+  const body = 'x'.repeat(512 * 1024);
+  const encodedRow = JSON.stringify([body]);
+  const count = Math.floor(MAX_STRING_LENGTH / (encodedRow.length + 1)) + 1;
+  assert(count * (encodedRow.length + 1) > MAX_STRING_LENGTH);
+  const expected = crypto.createHash('sha256');
+  expected.update('[');
+  for (let index = 0; index < count; index++) {
+    if (index) expected.update(',');
+    expected.update(encodedRow);
+  }
+  expected.update(']');
+  function* rows() {
+    for (let index = 0; index < count; index++) yield [body];
+  }
+  assert.equal(digestRows(rows()), expected.digest('hex'));
+});
 
 function fixture(t, { current = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-startup-sqlite-'));

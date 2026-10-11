@@ -28,6 +28,7 @@ function installDesktop({
   ).toString('base64');
   const script = `
     $ErrorActionPreference = 'Stop'
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
     $p = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}')) | ConvertFrom-Json
     $desktop = [Environment]::GetFolderPath('DesktopDirectory')
     if ($p.testDesktop) { $desktop = (Resolve-Path -LiteralPath $p.testDesktop).Path }
@@ -52,7 +53,14 @@ function installDesktop({
     $shortcut.Save()
     $check = $shell.CreateShortcut($target)
     if ($check.TargetPath -ine $hostPath -or $check.Arguments -cne $arguments -or $check.IconLocation -ine ($p.icon + ',0')) { throw 'Shortcut verification failed' }
-    $backendTarget = Join-Path $desktop 'Wechat2RSS后台.lnk'
+    # WScript.Shell shortcut persistence uses the Windows ANSI code page.
+    # English Windows replaces an unrepresentable Chinese name with '?',
+    # which is an invalid filename. Keep the Chinese label where supported.
+    $backendName = 'Wechat2RSS后台.lnk'
+    if ([Text.Encoding]::Default.GetString([Text.Encoding]::Default.GetBytes($backendName)) -cne $backendName) {
+      $backendName = 'Wechat2RSS Backend.lnk'
+    }
+    $backendTarget = Join-Path $desktop $backendName
     $backendHost = Join-Path $env:SystemRoot 'explorer.exe'
     $backendUrl = 'http://127.0.0.1:18080/#/'
     $backendDescription = 'WeWe-RSS existing local Wechat2RSS backend: ' + $p.root
