@@ -907,7 +907,9 @@ test('ordinary single download shows Wechat2RSS-only cache errors without select
     .props.onSubmit({ preventDefault() {} });
   await flush();
   assert.ok(h.state[3].includes('Wechat2RSS缓存'));
-  assert.deepEqual(h.notifications, ['操作未完成，请重试或查看任务状态。']);
+  assert.deepEqual(h.notifications, [
+    '公众号操作未完成，请重试或查看任务状态。',
+  ]);
   h.runEffects();
   await flush();
   assert.equal(
@@ -995,7 +997,14 @@ test('path preferences remain collapsed and long help is absent without changing
   );
   assert.ok(preferences);
   assert.equal(nodes.find((n) => n.type === 'Checkbox').props.isSelected, true);
-  assert.equal(nodes.filter((n) => n.type === 'h1').length, 1);
+  // The shared tools page owns h1; the retained platform panel is subordinate.
+  assert.equal(nodes.filter((n) => n.type === 'h1').length, 0);
+  assert.equal(
+    nodes.filter(
+      (n) => n.type === 'h2' && n.props.children === '公众号文章下载',
+    ).length,
+    1,
+  );
   assert.equal(
     nodes.find((n) => n.type === 'Input').props.description,
     undefined,
