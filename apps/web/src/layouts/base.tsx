@@ -3,6 +3,7 @@ import { Outlet } from 'react-router-dom';
 
 import Nav from '../components/Nav';
 import OwnerVerificationNotice from '../components/OwnerVerificationNotice';
+import StartupAuditNotice from '../components/StartupAuditNotice';
 
 export function BaseLayout() {
   return (
@@ -10,6 +11,7 @@ export function BaseLayout() {
       <main className="app-shell">
         <Nav></Nav>
         <div className="app-route mx-auto max-w-[1280px] pb-0">
+          <StartupAuditNotice />
           <Outlet />
         </div>
       </main>

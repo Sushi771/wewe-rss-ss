@@ -172,16 +172,20 @@ async function controlledRestart(options) {
     ['pinned-backup-v1', 'node-pinned-backup-v1'].includes(
       manifest.startupPreparation,
     );
-  const sourceBefore = pinnedPreparation
-    ? null
-    : inspect(source, [
-        ...(options.mode === 'start' &&
-        manifest.startupInspection === 'schema-only-v1'
-          ? ['--schema-only']
-          : []),
-        '--output',
-        path.join(audit, 'source-before.json'),
-      ]);
+  const backgroundPreparation =
+    options.mode === 'start' &&
+    manifest.startupPreparation === 'node-background-backup-v1';
+  const sourceBefore =
+    pinnedPreparation || backgroundPreparation
+      ? null
+      : inspect(source, [
+          ...(options.mode === 'start' &&
+          manifest.startupInspection === 'schema-only-v1'
+            ? ['--schema-only']
+            : []),
+          '--output',
+          path.join(audit, 'source-before.json'),
+        ]);
   if (sourceBefore)
     assert.deepEqual(sourceBefore.pending, [], '数据库仍有待应用迁移');
   let database = source;
@@ -252,6 +256,7 @@ async function controlledRestart(options) {
         ...env,
         LOCAL_RELEASE_CONTROLLED_START: bundle.id,
         LOCAL_RELEASE_REUSE_VERIFIED: options.reuseVerified ? '1' : '0',
+        LOCAL_RELEASE_STARTUP_AUDIT_ROOT: backgroundPreparation ? audit : '',
       },
       windowsHide: true,
       shell: false,
@@ -296,9 +301,22 @@ async function controlledRestart(options) {
       stopped = true;
       finalBackup = backup(database, 'after-stop');
     } else {
-      if (manifest.startupPreparation !== 'node-pinned-backup-v1')
+      if (backgroundPreparation) {
+        require(path.join(release, 'startup-sqlite.cjs')).inspectDatabase(
+          database,
+          path.join(release, 'server/prisma/migrations'),
+          { startupGate: true },
+        );
+      }
+      if (
+        !backgroundPreparation &&
+        manifest.startupPreparation !== 'node-pinned-backup-v1'
+      )
         requireFreePort(port);
-      if (pinnedPreparation) {
+      if (backgroundPreparation) {
+        // The runtime owns the gate and the transient audit worker. No mutation
+        // or task recovery can run until its pinned backup verifies successfully.
+      } else if (pinnedPreparation) {
         const pythonPrepare = () =>
           JSON.parse(
             run(
@@ -353,7 +371,7 @@ async function controlledRestart(options) {
         preparedBaseline = true;
       } else finalBackup = backup(database, 'before-start');
     }
-    if (!preparedBaseline) {
+    if (!preparedBaseline && !backgroundPreparation) {
       const finalBefore = inspect(database, ['--output', baseline]);
       assert.deepEqual(finalBefore.pending, []);
       inspect(finalBackup.backup, ['--baseline', baseline]);
@@ -388,7 +406,8 @@ async function controlledRestart(options) {
       action: options.mode,
       audit,
       database,
-      finalBackup: finalBackup.backup,
+      finalBackup: finalBackup?.backup ?? null,
+      startupAudit: backgroundPreparation ? 'background' : 'completed',
       oldStopped: stopped,
       newIdentity,
       rollbackUsed: false,

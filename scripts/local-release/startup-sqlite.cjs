@@ -100,21 +100,23 @@ function inspectConnection(
   connection,
   database,
   migrations,
-  { schemaOnly = false, capture } = {},
+  { schemaOnly = false, capture, startupGate = false } = {},
 ) {
-  assert.deepEqual(
-    connection
-      .prepare('PRAGMA integrity_check')
-      .all()
-      .map((row) => row.integrity_check),
-    ['ok'],
-    'SQLite integrity check failed',
-  );
-  assert.deepEqual(
-    connection.prepare('PRAGMA foreign_key_check').all(),
-    [],
-    'SQLite foreign key check failed',
-  );
+  if (!startupGate) {
+    assert.deepEqual(
+      connection
+        .prepare('PRAGMA integrity_check')
+        .all()
+        .map((row) => row.integrity_check),
+      ['ok'],
+      'SQLite integrity check failed',
+    );
+    assert.deepEqual(
+      connection.prepare('PRAGMA foreign_key_check').all(),
+      [],
+      'SQLite foreign key check failed',
+    );
+  }
   const expected = new Map();
   for (const entry of fs
     .readdirSync(migrations, { withFileTypes: true })
@@ -155,6 +157,67 @@ function inspectConnection(
     .filter((name) => !applied.has(name))
     .sort();
   assert.deepEqual(pending, [], 'Pending migrations are forbidden at startup');
+  if (startupGate || capture) {
+    // Reconstruct the packaged schema in memory. Migration receipts alone, or
+    // a few selected columns, cannot establish compatibility with this client.
+    const { DatabaseSync } = sqlite();
+    const reference = new DatabaseSync(':memory:');
+    try {
+      for (const name of expected.keys())
+        reference.exec(
+          fs.readFileSync(path.join(migrations, name, 'migration.sql'), 'utf8'),
+        );
+      for (const { name } of reference
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .all()) {
+        for (const pragma of ['table_info', 'foreign_key_list', 'index_list']) {
+          const actual = connection
+            .prepare(`PRAGMA ${pragma}(${quote(name)})`)
+            .all();
+          const wanted = reference
+            .prepare(`PRAGMA ${pragma}(${quote(name)})`)
+            .all();
+          // Additive history can produce a different physical column/index
+          // order with the same named schema. Prisma selects columns by name.
+          const canonical = (rows) =>
+            rows
+              .map((row) => {
+                const value = { ...row };
+                if (pragma === 'table_info') delete value.cid;
+                if (pragma === 'index_list') delete value.seq;
+                if (pragma === 'foreign_key_list') delete value.id;
+                return value;
+              })
+              .sort((a, b) =>
+                JSON.stringify(a).localeCompare(JSON.stringify(b)),
+              );
+          assert.deepEqual(
+            canonical(actual),
+            canonical(wanted),
+            'Incompatible schema: ' + name + '.' + pragma,
+          );
+          if (pragma === 'index_list')
+            for (const index of wanted)
+              assert.deepEqual(
+                connection
+                  .prepare(`PRAGMA index_info(${quote(index.name)})`)
+                  .all()
+                  .map(({ seqno, name }) => ({ seqno, name })),
+                reference
+                  .prepare(`PRAGMA index_info(${quote(index.name)})`)
+                  .all()
+                  .map(({ seqno, name }) => ({ seqno, name })),
+                'Incompatible index: ' + index.name,
+              );
+        }
+        connection.prepare(`SELECT * FROM ${quote(name)} LIMIT 1`).get();
+      }
+    } finally {
+      reference.close();
+    }
+  }
   const tables = {};
   // Applied migration records alone do not prove their tables still exist.
   const requiredTables = expected.has(xhsMigration)
@@ -178,7 +241,7 @@ function inspectConnection(
         'Required column missing: ' + table + '.' + column,
       );
     tables[table] = { columns };
-    if (!schemaOnly) {
+    if (!schemaOnly && !startupGate) {
       const statement = connection.prepare(
         `SELECT ${columns.map(quote).join(',')} FROM ${quote(table)} ORDER BY id`,
       );
@@ -194,7 +257,7 @@ function inspectConnection(
   }
   return {
     database,
-    integrity: 'ok',
+    integrity: startupGate ? 'pending' : 'ok',
     pending,
     applied: [...applied].sort(),
     tables,

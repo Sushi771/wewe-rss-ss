@@ -44,6 +44,11 @@ import {
 } from '../collection/subscription-add';
 import { BodyRetryBlockedError } from '../collection/article-body-retry';
 import { Feed } from '@prisma/client';
+import {
+  databaseWritesAllowed,
+  startupMessage,
+  waitForStartupAudit,
+} from '../startup-audit';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { ownerSessionCookie } from '../collection/owner-web-search';
@@ -133,6 +138,21 @@ export class TrpcService {
     if (errorMsg) {
       throw new TRPCError({ code: 'UNAUTHORIZED', message: errorMsg });
     }
+    if (
+      !databaseWritesAllowed() &&
+      ((type === 'mutation' &&
+        ![
+          'account.wechat2rssLoginStart',
+          'account.wechat2rssLoginPoll',
+          'account.wechat2rssLoginClose',
+          'article.exportMarkdown',
+        ].includes(path)) ||
+        path === 'platform.getLoginResult')
+    )
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: startupMessage(),
+      });
     // Read/export trial uses the original UI but never replays cached discovery
     // under an update button or sends other subscriptions' live requests.
     if (
@@ -215,6 +235,14 @@ export class TrpcService {
   async onModuleInit() {
     if (process.env.REHEARSAL_GUARD_REPORT || process.env.NODE_ENV === 'test')
       return;
+    if (!databaseWritesAllowed()) {
+      // Recovery may resume saved tasks: defer it until backup verification,
+      // without holding Nest's HTTP bootstrap or replaying on audit failure.
+      void waitForStartupAudit().then((ok) => {
+        if (ok) return this.onModuleInit();
+      });
+      return;
+    }
     try {
       await this.subscriptionTasks.init();
       await this.subscriptionBatches.init();

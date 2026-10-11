@@ -107,7 +107,7 @@ try {
       $state = Read-StartupState
       $label.Text = [string]$state.message
       $backend.Enabled = [bool]$state.backendReady
-      if ($state.status -eq 'ready') {
+      if ($state.status -in @('ready', 'available')) {
         if ($null -eq $script:readyAt) { $script:readyAt = [DateTime]::UtcNow }
         # UI dismissal happens only after real readiness, never as a service delay.
         if (([DateTime]::UtcNow - $script:readyAt).TotalSeconds -ge 2) { $form.Close() }

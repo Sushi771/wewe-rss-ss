@@ -21,6 +21,7 @@ import { LRUCache } from 'lru-cache';
 import pMap from '@cjs-exporter/p-map';
 import { BODY_UNAVAILABLE_MESSAGE } from '../collection/article-page';
 import { dailyWechat2RssCatchup } from './daily-cache-catchup';
+import { databaseWritesAllowed, waitForStartupAudit } from '../startup-audit';
 
 console.log('CRON_EXPRESSION: ', process.env.CRON_EXPRESSION);
 
@@ -39,7 +40,9 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
     // Do not hold HTTP startup behind a potentially slow cache/image read.
     this.dailyCatchupJob = setImmediate(() => {
       this.dailyCatchupJob = undefined;
-      void this.catchUpDailyWechat2Rss();
+      void waitForStartupAudit().then((ok) => {
+        if (ok) return this.catchUpDailyWechat2Rss();
+      });
     });
   }
 
@@ -48,6 +51,7 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   async catchUpDailyWechat2Rss(now = Date.now()) {
+    if (!databaseWritesAllowed()) return;
     const plan = dailyWechat2RssCatchup(process.env, now);
     if (!plan || this.dailyCatchupRunning) return;
     this.dailyCatchupRunning = true;
@@ -132,6 +136,7 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
     disabled: process.env.DISABLE_SCHEDULED_UPDATES === '1',
   })
   async handleUpdateFeedsCron() {
+    if (!databaseWritesAllowed()) return;
     // 隔离演练和受控切换时，不读账号、不触发任何采集或状态写入。
     if (process.env.DISABLE_SCHEDULED_UPDATES === '1') return;
     // A limited rollout can schedule one proven subscription without changing

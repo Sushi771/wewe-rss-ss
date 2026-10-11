@@ -108,7 +108,7 @@ async function main() {
             throw failure('BROWSER_FAILED');
           }
         }
-        phase('ready');
+        phase('available');
         return {
           status: app.status,
           releaseId: app.releaseId,

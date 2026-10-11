@@ -336,6 +336,7 @@ function build(options = {}) {
     'inspect-sqlite.py',
     'prepare-start.py',
     'startup-sqlite.cjs',
+    'startup-audit.cjs',
     'offline-guard.cjs',
   ])
     fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
@@ -371,7 +372,7 @@ function build(options = {}) {
     ...(compact
       ? {
           executionLayout: 'compact-cjs-v1',
-          startupPreparation: 'node-pinned-backup-v1',
+          startupPreparation: 'node-background-backup-v1',
           compact,
         }
       : {}),

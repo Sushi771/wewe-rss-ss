@@ -187,13 +187,19 @@ async function runtime() {
     return dlopen.call(this, module, file, ...args);
   };
   const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
+  const backgroundAudit =
+    command === 'start' &&
+    manifest.startupPreparation === 'node-background-backup-v1' &&
+    process.env.LOCAL_RELEASE_STARTUP_AUDIT_ROOT;
   const inspected =
     command === 'start' &&
-    manifest.startupPreparation === 'node-pinned-backup-v1'
+    ['node-pinned-backup-v1', 'node-background-backup-v1'].includes(
+      manifest.startupPreparation,
+    )
       ? require('./startup-sqlite.cjs').inspectDatabase(
           database,
           path.join(server, 'prisma/migrations'),
-          { schemaOnly: true },
+          { schemaOnly: true, startupGate: Boolean(backgroundAudit) },
         )
       : JSON.parse(
           run(python, [
@@ -306,6 +312,16 @@ async function runtime() {
     }),
   );
   if (command === 'probe') return;
+  if (backgroundAudit) {
+    if (!path.isAbsolute(backgroundAudit))
+      throw new Error('Startup audit path must be absolute');
+    globalThis.__weweStartupAudit =
+      require('./startup-audit.cjs').createStartupAudit({
+        database,
+        migrations: path.join(server, 'prisma/migrations'),
+        auditRoot: backgroundAudit,
+      });
+  }
   // Legacy rollback bundles still carry the shared pause marker. Current
   // backend-only bundles never read it or start the desktop helper.
   if (manifest.desktopHelperIncluded === true) {

@@ -5,6 +5,7 @@ const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { failure } = require('./desktop-dependencies.cjs');
 const stages = {
+  available: '页面已打开，数据检查进度请查看页面提示。',
   waiting: '正在准备启动…',
   docker: '正在检查 Docker…',
   engine: '正在等待 Docker 就绪…',
@@ -20,8 +21,14 @@ function progressState(stage, error) {
     parentPid: process.pid,
     stage,
     message: error ? `${error.code}：${error.message}` : stages[stage],
-    status: error ? 'failed' : stage === 'ready' ? 'ready' : 'starting',
-    backendReady: ['app', 'browser', 'ready'].includes(stage),
+    status: error
+      ? 'failed'
+      : stage === 'available'
+        ? 'available'
+        : stage === 'ready'
+          ? 'ready'
+          : 'starting',
+    backendReady: ['app', 'browser', 'available', 'ready'].includes(stage),
     updatedAt: new Date().toISOString(),
   };
 }

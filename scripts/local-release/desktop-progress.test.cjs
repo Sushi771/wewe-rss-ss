@@ -198,7 +198,7 @@ test('normal entry shows progress, checks dependency, then opens visible browser
   assert.deepEqual(f.calls.slice(0, 2), ['waiting', 'window']);
   assert.equal(f.logs[0].pid, 42);
   assert.equal(f.logs[0].browserRequested, true);
-  assert.equal(f.calls.at(-1), 'ready');
+  assert.equal(f.calls.at(-1), 'available');
 });
 test('check mode has no GUI or browser side effects', async () => {
   const f = fixture({ check: true });

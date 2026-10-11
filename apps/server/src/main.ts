@@ -7,6 +7,7 @@ import { ConfigurationType } from './configuration';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import { assertPrivateConfig, privateAccessGuard } from './private-access';
+import { startupAudit, startupAuditHttpGuard } from './startup-audit';
 import {
   readBrowserTaskOptIn,
   browserTaskApplication,
@@ -41,6 +42,7 @@ async function bootstrap() {
     configService.get<ConfigurationType['server']>('server')!;
 
   app.use(privateAccessGuard);
+  app.use(startupAuditHttpGuard);
   mountBrowserTaskTransport(app, { host, port }, browserOptIn);
   if (process.env.WEWE_ACCEPTANCE_MODE === '1')
     app.use((req, res, next) => {
@@ -73,6 +75,7 @@ async function bootstrap() {
   trpc.applyMiddleware(app);
 
   await app.listen(port, host);
+  startupAudit()?.start();
 
   console.log(`Server is running at http://${host}:${port}`);
 }
