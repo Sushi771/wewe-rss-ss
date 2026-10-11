@@ -64,22 +64,30 @@ async function main() {
     const result = await withLaunchLock(
       path.join(report, 'desktop-start.lock'),
       async () => {
+        let windowReady;
         if (!check && !joined) {
           ownsProgress = true;
           phase('waiting');
-          await showProgress(report);
+          windowReady = showProgress(report);
         }
-        phase('docker');
-        const pin = readPin();
-        const installation = await discoverDocker();
-        const dependency = await ensureDependencies(
-          realAdapter(installation),
-          pin,
-          {
-            reuseOnly: process.argv.includes('--reuse-only'),
-            onProgress: phase,
-          },
-        );
+        // Window initialization and read-only dependency discovery do not depend
+        // on each other. Await both outcomes before starting the application;
+        // a failed window must still fail launch, never silently lose feedback.
+        const [window, dependencies] = await Promise.allSettled([
+          windowReady,
+          (async () => {
+            phase('docker');
+            const pin = readPin();
+            const installation = await discoverDocker();
+            return ensureDependencies(realAdapter(installation), pin, {
+              reuseOnly: process.argv.includes('--reuse-only'),
+              onProgress: phase,
+            });
+          })(),
+        ]);
+        if (window.status === 'rejected') throw window.reason;
+        if (dependencies.status === 'rejected') throw dependencies.reason;
+        const dependency = dependencies.value;
         if (
           process.argv.includes('--reuse-only') &&
           !require('./switch.cjs').processIdentity('Discover', undefined, 4000)

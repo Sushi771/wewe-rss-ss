@@ -8,6 +8,83 @@ const { EventEmitter } = require('node:events');
 const { progressState, writeProgress } = require('./desktop-progress.cjs');
 const { safeFailure, failure } = require('./desktop-dependencies.cjs');
 
+test(
+  'Windows atomic state publication tolerates a short overlapping UI read',
+  { skip: process.platform !== 'win32' },
+  async (t) => {
+    const { spawn } = require('node:child_process');
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wewe-state-sharing-'),
+    );
+    let child;
+    t.after(() => {
+      child?.kill();
+      assert.equal(path.dirname(directory), os.tmpdir());
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+    const state = path.join(directory, 'desktop-start-status.json');
+    const opened = path.join(directory, 'opened'),
+      finish = path.join(directory, 'finish');
+    const quote = (value) => "'" + value.replace(/'/g, "''") + "'";
+    const source = fs.readFileSync(
+      path.join(__dirname, 'desktop-progress.ps1'),
+      'utf8',
+    );
+    const reader = source
+      .slice(
+        source.indexOf('function Read-StartupState'),
+        source.indexOf('$sha ='),
+      )
+      .replace(
+        'return ($reader.ReadToEnd()',
+        `Set-Content -LiteralPath ${quote(opened)} -Value opened; Start-Sleep -Milliseconds 100; return ($reader.ReadToEnd()`,
+      );
+    const command = `$ErrorActionPreference='Stop'; $StateFile=${quote(state)}; ${reader}; (Read-StartupState).stage`;
+    writeProgress(directory, 'app');
+    child = spawn(
+      path.join(
+        process.env.SystemRoot,
+        'System32/WindowsPowerShell/v1.0/powershell.exe',
+      ),
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        Buffer.from(command, 'utf16le').toString('base64'),
+      ],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let output = '',
+      error = '';
+    child.stdout.on('data', (bytes) => (output += bytes));
+    child.stderr.on('data', (bytes) => (error += bytes));
+    const exited = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code) =>
+        code === 0 ? resolve() : reject(Error(error)),
+      );
+    });
+    exited.catch(() => {});
+    const deadline = Date.now() + 8000;
+    while (
+      !fs.existsSync(opened) &&
+      Date.now() < deadline &&
+      child.exitCode === null
+    )
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    assert(fs.existsSync(opened), 'reader failed to hold old state');
+    writeProgress(directory, 'ready');
+    assert.equal(JSON.parse(fs.readFileSync(state, 'utf8')).stage, 'ready');
+    fs.writeFileSync(finish, 'done');
+    await exited;
+    assert.equal(
+      output.trim(),
+      'app',
+      'reader keeps its complete prior snapshot',
+    );
+  },
+);
+
 test('progress state and atomic updates work in a Chinese path with spaces', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'WeWe 中文 启动 '));
   try {

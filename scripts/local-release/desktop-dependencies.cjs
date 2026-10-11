@@ -214,21 +214,23 @@ function realAdapter(installation) {
       } catch {
         throw failure('CONTAINER_MISMATCH');
       }
-      const ids = (
-        await docker([
+      // Both commands only read the pinned local engine. Keep the unique
+      // container check and the complete projection, while overlapping CLI startup.
+      const [listing, inspected] = await Promise.allSettled([
+        docker([
           'ps',
           '-aq',
           '--filter',
           'label=com.docker.compose.service=wechat2rss',
-        ])
-      )
-        .split(/\s+/)
-        .filter(Boolean);
+        ]),
+        docker(['inspect', pin.id, '--format', projection]),
+      ]);
+      if (listing.status === 'rejected') throw listing.reason;
+      const ids = listing.value.split(/\s+/).filter(Boolean);
       if (ids.length !== 1 || !pin.id.startsWith(ids[0]))
         throw failure('CONTAINER_MISMATCH');
-      return JSON.parse(
-        await docker(['inspect', pin.id, '--format', projection]),
-      );
+      if (inspected.status === 'rejected') throw inspected.reason;
+      return JSON.parse(inspected.value);
     },
     portBusy: async () => {
       const ps = path.join(

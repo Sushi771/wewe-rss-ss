@@ -33,7 +33,20 @@ function writeProgress(directory, stage, error) {
     fs.writeFileSync(temporary, JSON.stringify(progressState(stage, error)), {
       flag: 'wx',
     });
-    fs.renameSync(temporary, file);
+    // Windows can reject replacement during the UI's short file read, even
+    // with delete sharing. Retry that observed sharing violation briefly;
+    // preserve atomic publication and surface persistent I/O failures.
+    const deadline = Date.now() + 250;
+    for (;;) {
+      try {
+        fs.renameSync(temporary, file);
+        break;
+      } catch (error) {
+        if (!['EPERM', 'EACCES'].includes(error.code) || Date.now() >= deadline)
+          throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }

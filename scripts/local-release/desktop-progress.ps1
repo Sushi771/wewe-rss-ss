@@ -20,6 +20,20 @@ function Write-UiEvent($kind, $visible, $focused) {
 function Write-Receipt($kind) {
   if ($ReceiptFile) { @{ event=$kind; pid=$PID } | ConvertTo-Json -Compress | Set-Content -LiteralPath $ReceiptFile -Encoding UTF8 }
 }
+function Read-StartupState {
+  # The writer atomically renames its next state over this path. Windows readers
+  # share deletion and dispose promptly. The writer also bounds retries for
+  # Windows versions that reject replacing an open destination regardless.
+  $sharing = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+  $stream = [IO.File]::Open($StateFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, $sharing)
+  $reader = $null
+  try {
+    $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8)
+    return ($reader.ReadToEnd() | ConvertFrom-Json)
+  } finally {
+    if ($reader) { $reader.Dispose() } else { $stream.Dispose() }
+  }
+}
 $sha = [Security.Cryptography.SHA256]::Create()
 $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($StateFile.ToLowerInvariant()))).Replace('-', '')
 $mutex = New-Object Threading.Mutex($false, ('Local\WeWeStartup-' + $key))
@@ -90,7 +104,7 @@ try {
   $timer.Interval = 250
   $timer.Add_Tick({
     try {
-      $state = Get-Content -LiteralPath $StateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+      $state = Read-StartupState
       $label.Text = [string]$state.message
       $backend.Enabled = [bool]$state.backendReady
       if ($state.status -eq 'ready') {

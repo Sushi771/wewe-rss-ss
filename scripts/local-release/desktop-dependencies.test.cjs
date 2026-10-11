@@ -62,6 +62,150 @@ test('desktop entry preserves approved daily schedule before app startup', async
   assert.equal(starts, 1);
   assert.deepEqual(env, original);
 });
+for (const failed of [null, 'window', 'dependencies']) {
+  test(`desktop overlaps window and dependency checks and drains both before ${failed || 'app start'}`, async () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, 'desktop-start.cjs'),
+      'utf8',
+    );
+    const events = [];
+    let finishWindow, finishDependencies;
+    const window = new Promise((resolve, reject) => {
+      finishWindow = () =>
+        failed === 'window'
+          ? reject(failure('STARTUP_WINDOW_FAILED'))
+          : resolve();
+    });
+    const dependency = new Promise((resolve, reject) => {
+      finishDependencies = () =>
+        failed === 'dependencies'
+          ? reject(failure('DEPENDENCY_NOT_READY'))
+          : resolve({ status: 'already-running' });
+    });
+    const module = { exports: {} };
+    const context = vm.createContext({
+      module,
+      __dirname,
+      performance,
+      console,
+      process: { env: {}, argv: ['node', 'fixture'] },
+      require: (name) => {
+        if (name === 'node:fs') return { mkdirSync() {}, appendFileSync() {} };
+        if (name === './desktop-progress.cjs')
+          return {
+            writeProgress() {},
+            showProgress() {
+              events.push('window');
+              return window;
+            },
+          };
+        if (name === './desktop-dependencies.cjs')
+          return {
+            readPin: () => pin,
+            discoverDocker: async () => ({}),
+            realAdapter: () => ({}),
+            ensureDependencies() {
+              events.push('dependencies');
+              return dependency;
+            },
+            withLaunchLock: async (_, action) => action(),
+            safeFailure,
+            failure,
+          };
+        if (name === './logon-start.cjs')
+          return {
+            startAtLogon: async () => {
+              events.push('app');
+              return { status: 'already-running' };
+            },
+          };
+        return require(name);
+      },
+    });
+    vm.runInContext(
+      source + '\nmodule.exports.fixture = main; openBrowser = async () => {};',
+      context,
+    );
+    const run = module.exports.fixture();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(events, ['window', 'dependencies']);
+    finishWindow();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(events.includes('app'), false);
+    finishDependencies();
+    if (failed) {
+      await assert.rejects(run, {
+        code:
+          failed === 'window'
+            ? 'STARTUP_WINDOW_FAILED'
+            : 'DEPENDENCY_NOT_READY',
+      });
+      assert.equal(events.includes('app'), false);
+    } else {
+      await run;
+      assert.deepEqual(events, ['window', 'dependencies', 'app']);
+    }
+  });
+}
+test('container list and pinned identity queries overlap and still reject duplicates or command failure', async () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, 'desktop-dependencies.cjs'),
+    'utf8',
+  );
+  for (const outcome of ['valid', 'duplicate', 'failure']) {
+    const callbacks = [];
+    const module = { exports: {} };
+    vm.runInNewContext(source, {
+      module,
+      __dirname,
+      process,
+      Buffer,
+      setTimeout,
+      clearTimeout,
+      fetch,
+      require(name) {
+        if (name === 'node:fs')
+          return {
+            lstatSync: () => ({
+              isDirectory: () => true,
+              isFile: () => true,
+              isSymbolicLink: () => false,
+              size: 1,
+            }),
+          };
+        if (name === 'node:child_process')
+          return {
+            execFile: (_, args, options, callback) =>
+              callbacks.push({ args, callback }),
+          };
+        return require(name);
+      },
+    });
+    const run = module.exports.realAdapter({ cli: 'fixture' }).inspect(pin);
+    assert.equal(
+      callbacks.length,
+      2,
+      'both CLI reads must start before either completes',
+    );
+    callbacks
+      .find((c) => c.args.includes('inspect'))
+      .callback(
+        outcome === 'failure' ? Error('fixture') : null,
+        JSON.stringify(container()),
+      );
+    callbacks
+      .find((c) => c.args.includes('ps'))
+      .callback(null, outcome === 'duplicate' ? 'aaaa\nbbbb' : pin.id);
+    if (outcome === 'valid') assert.equal((await run).id, pin.id);
+    else
+      await assert.rejects(run, {
+        code:
+          outcome === 'duplicate'
+            ? 'CONTAINER_MISMATCH'
+            : 'CONTAINER_UNAVAILABLE',
+      });
+  }
+});
 function container(running = true) {
   return {
     ...pin,
