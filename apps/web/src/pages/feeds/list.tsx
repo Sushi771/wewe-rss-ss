@@ -11,6 +11,7 @@ import {
 import { trpc } from '@web/utils/trpc';
 import { getLoadedSelection } from '@web/utils/feed-selection';
 import dayjs from 'dayjs';
+import ArticleReader from '@web/components/ArticleReader';
 import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ArticleFilter, formatShanghaiPublicationTime } from '@wewe-rss/shared';
@@ -51,6 +52,8 @@ const ArticleList: FC<ArticleListProps> = ({
 
   const mpId = id || '';
   const [readingId, setReadingId] = useState<string | null>(null);
+  const [readerFindOpen, setReaderFindOpen] = useState(false);
+  useEffect(() => setReaderFindOpen(false), [readingId]);
   const reading = trpc.article.byId.useQuery(readingId || '', {
     enabled: Boolean(readingId),
   });
@@ -373,7 +376,11 @@ const ArticleList: FC<ArticleListProps> = ({
       </div>
       <Modal
         isOpen={Boolean(readingId)}
-        onClose={() => setReadingId(null)}
+        onClose={() => {
+          setReaderFindOpen(false);
+          setReadingId(null);
+        }}
+        isKeyboardDismissDisabled={readerFindOpen}
         size="4xl"
         scrollBehavior="inside"
         classNames={{ wrapper: 'z-[200]', backdrop: 'z-[190]' }}
@@ -389,11 +396,11 @@ const ArticleList: FC<ArticleListProps> = ({
             ) : reading.error ? (
               <p role="alert">正文读取失败：{reading.error.message}</p>
             ) : reading.data?.contentHtml ? (
-              <iframe
-                title="已保存文章正文"
-                sandbox=""
-                className="h-[65vh] w-full rounded border bg-white"
-                srcDoc={`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>body{font:17px/1.8 sans-serif;padding:16px;color:#222;overflow-wrap:anywhere}img{max-width:100%;height:auto}p{margin:1em 0}</style></head><body>${reading.data.contentHtml}</body></html>`}
+              <ArticleReader
+                key={readingId}
+                contentHtml={reading.data.contentHtml}
+                findOpen={readerFindOpen}
+                onFindOpenChange={setReaderFindOpen}
               />
             ) : (
               <p role="alert">尚无已保存正文；没有自动请求腾讯原文。</p>

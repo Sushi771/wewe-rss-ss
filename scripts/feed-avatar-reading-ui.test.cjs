@@ -164,6 +164,7 @@ function readingFixture(cached) {
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@nextui-org/react': new Proxy({}, { get: (_, key) => key }),
     '@web/utils/trpc': { trpc },
+    '@web/components/ArticleReader': { default: 'ArticleReader' },
     'react-router-dom': { useParams: () => ({ id: 'synthetic' }) },
     dayjs: { default: () => ({ format: () => 'Synthetic date' }) },
     sonner: { toast: {} },

@@ -64,6 +64,10 @@ jobs:
         run: node --test scripts/wechat-source-metrics-ui.test.cjs
       - name: Test compact reading toolbar and collapsed diagnostics offline
         run: node --test scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs
+      - name: Test Shanghai date shortcuts and isolated reader find offline
+        env:
+          NODE_OPTIONS: --experimental-websocket
+        run: node --test scripts/article-date-shortcuts.test.cjs scripts/article-date-shortcuts-browser.test.cjs scripts/article-reader-find.test.cjs
       - name: Test feed sidebar scroll and compact navigation layout offline
         run: node --test scripts/feed-sidebar-layout.test.cjs scripts/folder-navigation-ui.test.cjs scripts/feed-group-drag-ui.test.cjs
       - name: Test unavailable new-subscription source and retained input offline

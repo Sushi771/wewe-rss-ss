@@ -90,6 +90,7 @@ function fixture({
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@nextui-org/react': new Proxy({}, { get: (_, key) => key }),
     '@web/utils/trpc': { trpc },
+    '@web/components/ArticleReader': { default: 'ArticleReader' },
     'react-router-dom': { useParams: () => params },
     dayjs: { default: () => ({ format: () => '合成日期' }) },
     sonner: { toast: {} },

@@ -1,4 +1,8 @@
-import { ArticleDateSelection } from '@web/utils/article-date-selection';
+import {
+  ArticleDateSelection,
+  articleDateShortcut,
+  isArticleDateShortcut,
+} from '@web/utils/article-date-selection';
 
 export default function ArticleDateFilter({
   value,
@@ -17,15 +21,22 @@ export default function ArticleDateFilter({
         aria-label="日期筛选方式"
         className={fieldClass}
         value={value.mode}
-        onChange={(event) =>
-          onChange({
-            ...value,
-            mode: event.target.value as ArticleDateSelection['mode'],
-          })
-        }
+        onChange={(event) => {
+          const mode = event.target.value;
+          if (isArticleDateShortcut(mode)) {
+            onChange(articleDateShortcut(mode));
+          } else {
+            onChange({ ...value, mode: mode as ArticleDateSelection['mode'] });
+          }
+        }}
       >
         <option value="day">单日</option>
         <option value="range">起止日期</option>
+        <optgroup label="快捷日期（上海时间）">
+          <option value="today">今天</option>
+          <option value="last7">近7天（含今天）</option>
+          <option value="month">本月（至今天）</option>
+        </optgroup>
       </select>
       <label className="flex min-w-0 items-center gap-1">
         {value.mode === 'day' ? '日期' : '从'}
