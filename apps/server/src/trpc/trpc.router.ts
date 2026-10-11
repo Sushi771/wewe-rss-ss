@@ -6,6 +6,7 @@ import {
   exportSourceMarkdown,
 } from '../article-export-source';
 import { findArticleListRows } from '../article-list-page';
+import { articleListWhere, articleListOrder } from '../article-list-filter';
 import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
@@ -13,6 +14,9 @@ import { z } from 'zod';
 import {
   AccountSchemas,
   ArticleSchemas,
+  articleFilterShape,
+  articleFilterSchema,
+  orderedArticleDates,
   FeedSchemas,
   PlatformSchemas,
 } from '@wewe-rss/shared';
@@ -333,24 +337,20 @@ export class TrpcRouter {
       }),
     exportMetrics: this.trpcService.protectedProcedure
       .input(
-        z.object({
-          mpId: z.string().optional(),
-          search: z.string().optional(),
-          ids: z.array(z.string()).max(5000).optional(),
-        }),
+        z
+          .object({
+            ...articleFilterShape,
+            ids: z.array(z.string()).max(5000).optional(),
+          })
+          .refine(orderedArticleDates, {
+            message: '结束日期不能早于开始日期',
+            path: ['dateEnd'],
+          }),
       )
       .mutation(async ({ input }) => {
         const where = {
-          mpId: input.mpId || undefined,
+          ...articleListWhere(input),
           id: input.ids ? { in: input.ids } : undefined,
-          ...(input.search
-            ? {
-                OR: [
-                  { title: { contains: input.search } },
-                  { feed: { mpName: { contains: input.search } } },
-                ],
-              }
-            : {}),
         };
         const count = await this.prismaService.article.count({ where });
         if (count > 10000)
@@ -1046,24 +1046,9 @@ export class TrpcRouter {
 
   articleRouter = this.trpcService.router({
     summary: this.trpcService.protectedProcedure
-      .input(
-        z.object({
-          mpId: z.string().optional(),
-          search: z.string().optional(),
-        }),
-      )
+      .input(articleFilterSchema)
       .query(async ({ input }) => {
-        const where = {
-          mpId: input.mpId || undefined,
-          ...(input.search
-            ? {
-                OR: [
-                  { title: { contains: input.search } },
-                  { feed: { mpName: { contains: input.search } } },
-                ],
-              }
-            : {}),
-        };
+        const where = articleListWhere(input);
         const [range, readAvailable, likeAvailable, cachedBodies] =
           await this.prismaService.$transaction([
             this.prismaService.article.aggregate({
@@ -1095,24 +1080,11 @@ export class TrpcRouter {
       .input(ArticleSchemas.list)
       .query(async ({ input, ctx }) => {
         const limit = input.limit ?? 1000;
-        const { cursor, mpId, search } = input;
-
-        const where: any = {};
-        if (mpId) where.mpId = mpId;
-        if (search) {
-          where.OR = [
-            { title: { contains: search } },
-            { feed: { mpName: { contains: search } } },
-          ];
-        }
+        const { cursor } = input;
+        const where = articleListWhere(input);
 
         const items = await findArticleListRows(this.prismaService, {
-          orderBy: [
-            {
-              [input.sort || 'publishTime']: 'desc',
-            },
-            { id: 'desc' },
-          ],
+          orderBy: articleListOrder(input),
           take: limit + 1,
           where,
           cursor: cursor

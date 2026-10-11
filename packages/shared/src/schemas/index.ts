@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import { statusMap } from '../constants';
+import {
+  articleFilterShape,
+  orderedArticleDates,
+} from '../article-date-filter';
 
 export const AccountSchemas = {
   list: z.object({
@@ -59,13 +63,18 @@ export const FeedSchemas = {
 };
 
 export const ArticleSchemas = {
-  list: z.object({
-    limit: z.number().min(1).max(1000).nullish(),
-    cursor: z.string().nullish(),
-    mpId: z.string().nullish(),
-    search: z.string().nullish(),
-    sort: z.enum(['publishTime', 'readCount', 'likeCount']).optional(),
-  }),
+  list: z
+    .object({
+      ...articleFilterShape,
+      limit: z.number().min(1).max(1000).nullish(),
+      cursor: z.string().nullish(),
+      sort: z.enum(['publishTime', 'readCount', 'likeCount']).optional(),
+      direction: z.enum(['asc', 'desc']).optional(),
+    })
+    .refine(orderedArticleDates, {
+      message: '结束日期不能早于开始日期',
+      path: ['dateEnd'],
+    }),
   add: z.object({
     id: z.string(),
     mpId: z.string(),

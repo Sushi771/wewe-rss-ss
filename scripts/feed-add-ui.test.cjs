@@ -6,6 +6,11 @@ const assert = require('node:assert/strict'),
 const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
 );
+const { loadActualTs } = require('./offline-ts-fixture.cjs');
+const dateSelection = loadActualTs(
+  'apps/web/src/utils/article-date-selection.ts',
+);
+const articleDates = loadActualTs('packages/shared/src/article-date-filter.ts');
 function render(capability, options = {}) {
   // Use the current paid capability shape; this fixture never contacts a source.
   if (capability)
@@ -147,29 +152,33 @@ function render(capability, options = {}) {
   ).outputText;
   const module = { exports: {} };
   const requireMock = (name) =>
-    name === 'react'
-      ? react
-      : name === 'react/jsx-runtime'
-        ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
-        : name === '@nextui-org/react'
-          ? ui
-          : name === '@web/utils/trpc'
-            ? { trpc }
-            : name === '@web/utils/refresh-feed-view'
-              ? { refreshFeedViews: async () => {} }
-              : name === 'react-router-dom'
-                ? { useNavigate: () => () => {}, useParams: () => ({}) }
-                : name === 'sonner'
-                  ? { toast }
-                  : name === 'dayjs'
-                    ? () => ({ format: () => '' })
-                    : name === '@web/utils/env'
-                      ? {
-                          acceptanceMode: false,
-                          privateOnlineMode: false,
-                          serverOriginUrl: (value) => value,
-                        }
-                      : () => null;
+    name === '@web/utils/article-date-selection'
+      ? dateSelection
+      : name === '@wewe-rss/shared'
+        ? articleDates
+        : name === 'react'
+          ? react
+          : name === 'react/jsx-runtime'
+            ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
+            : name === '@nextui-org/react'
+              ? ui
+              : name === '@web/utils/trpc'
+                ? { trpc }
+                : name === '@web/utils/refresh-feed-view'
+                  ? { refreshFeedViews: async () => {} }
+                  : name === 'react-router-dom'
+                    ? { useNavigate: () => () => {}, useParams: () => ({}) }
+                    : name === 'sonner'
+                      ? { toast }
+                      : name === 'dayjs'
+                        ? () => ({ format: () => '' })
+                        : name === '@web/utils/env'
+                          ? {
+                              acceptanceMode: false,
+                              privateOnlineMode: false,
+                              serverOriginUrl: (value) => value,
+                            }
+                          : () => null;
   vm.runInNewContext(source, {
     module,
     exports: module.exports,

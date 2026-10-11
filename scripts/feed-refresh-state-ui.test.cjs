@@ -9,6 +9,11 @@ const { test } = require('node:test');
 const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
 );
+const { loadActualTs } = require('./offline-ts-fixture.cjs');
+const dateSelection = loadActualTs(
+  'apps/web/src/utils/article-date-selection.ts',
+);
+const articleDates = loadActualTs('packages/shared/src/article-date-filter.ts');
 function fixture({
   batchRunning = false,
   feedReadFails = false,
@@ -158,41 +163,45 @@ function fixture({
     clearTimeout: (key) => timers.delete(key),
     window: { addEventListener() {}, removeEventListener() {} },
     require: (name) =>
-      name === 'react'
-        ? react
-        : name === 'react/jsx-runtime'
-          ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
-          : name === '@nextui-org/react'
-            ? ui
-            : name === '@web/utils/trpc'
-              ? { trpc }
-              : name === '@web/utils/refresh-feed-view'
-                ? {
-                    refreshFeedViews: async (...operations) => {
-                      await Promise.all(operations.map((fn) => fn()));
-                    },
-                  }
-                : name === 'react-router-dom'
-                  ? {
-                      useParams: () => ({ id: route }),
-                      useNavigate: () => (next) => {
-                        route =
-                          next.split('/').at(-1) === 'feeds'
-                            ? ''
-                            : next.split('/').at(-1);
-                      },
-                    }
-                  : name === 'sonner'
-                    ? { toast }
-                    : name === 'dayjs'
-                      ? () => ({ format: () => '' })
-                      : name === '@web/utils/env'
-                        ? {
-                            acceptanceMode: false,
-                            privateOnlineMode: false,
-                            serverOriginUrl: '',
-                          }
-                        : () => null,
+      name === '@web/utils/article-date-selection'
+        ? dateSelection
+        : name === '@wewe-rss/shared'
+          ? articleDates
+          : name === 'react'
+            ? react
+            : name === 'react/jsx-runtime'
+              ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
+              : name === '@nextui-org/react'
+                ? ui
+                : name === '@web/utils/trpc'
+                  ? { trpc }
+                  : name === '@web/utils/refresh-feed-view'
+                    ? {
+                        refreshFeedViews: async (...operations) => {
+                          await Promise.all(operations.map((fn) => fn()));
+                        },
+                      }
+                    : name === 'react-router-dom'
+                      ? {
+                          useParams: () => ({ id: route }),
+                          useNavigate: () => (next) => {
+                            route =
+                              next.split('/').at(-1) === 'feeds'
+                                ? ''
+                                : next.split('/').at(-1);
+                          },
+                        }
+                      : name === 'sonner'
+                        ? { toast }
+                        : name === 'dayjs'
+                          ? () => ({ format: () => '' })
+                          : name === '@web/utils/env'
+                            ? {
+                                acceptanceMode: false,
+                                privateOnlineMode: false,
+                                serverOriginUrl: '',
+                              }
+                            : () => null,
   });
   function render() {
     for (let count = 0; count < 10; count++) {

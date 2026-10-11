@@ -154,3 +154,7 @@ tools/wechat-desktop-collector/.paused
 __pycache__/
 *.pyc
 
+
+# Private local verification and generated fixture artifacts
+/output/
+/apps/output/

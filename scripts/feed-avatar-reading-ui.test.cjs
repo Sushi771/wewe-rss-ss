@@ -7,6 +7,9 @@ const { test } = require('node:test');
 const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
 );
+const { loadActualTs } = require('./offline-ts-fixture.cjs');
+const selection = loadActualTs('apps/web/src/utils/feed-selection.ts');
+const articleDates = loadActualTs('packages/shared/src/article-date-filter.ts');
 const jsx = (type, props) => ({ type, props: props || {} });
 function hooks() {
   const state = [];
@@ -28,6 +31,7 @@ function hooks() {
       },
       useMemo: (fn) => fn(),
       useEffect() {},
+      useLayoutEffect() {},
     },
   };
 }
@@ -44,6 +48,8 @@ function load(file, modules) {
     module,
     exports: module.exports,
     require: (name) => {
+      if (name === '@web/utils/feed-selection') return selection;
+      if (name === '@wewe-rss/shared') return articleDates;
       assert(name in modules, name);
       return modules[name];
     },

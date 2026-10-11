@@ -9,6 +9,7 @@ import {
   ModalHeader,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
+import { ArticleFilter } from '@wewe-rss/shared';
 import { toast } from 'sonner';
 
 export default function LocalCollection({
@@ -16,6 +17,8 @@ export default function LocalCollection({
   directory: initialDirectory,
   name,
   search,
+  articleFilter,
+  filterInvalid = false,
   selectedIds,
   onImported,
   showMetricsExport = true,
@@ -24,6 +27,8 @@ export default function LocalCollection({
   directory?: string | null;
   name?: string;
   search: string;
+  articleFilter?: ArticleFilter;
+  filterInvalid?: boolean;
   selectedIds: Set<string>;
   onImported?: (message: string) => void;
   showMetricsExport?: boolean;
@@ -60,9 +65,11 @@ export default function LocalCollection({
           size="sm"
           className="mac-btn-outline"
           isLoading={exporter.isLoading}
+          isDisabled={filterInvalid}
           onPress={async () => {
             try {
               const result = await exporter.mutateAsync({
+                ...articleFilter,
                 mpId,
                 search: search || undefined,
                 ids: selectedIds.size ? [...selectedIds] : undefined,
@@ -81,7 +88,9 @@ export default function LocalCollection({
             }
           }}
         >
-          {selectedIds.size ? `导出热度 (${selectedIds.size})` : '导出热度 CSV'}
+          {selectedIds.size
+            ? `导出热度 (${selectedIds.size})`
+            : '导出当前筛选热度 CSV'}
         </Button>
       )}
       <Modal

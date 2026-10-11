@@ -11,6 +11,7 @@ import {
   useDisclosure,
   Checkbox,
   Input,
+  Chip,
   Popover,
   PopoverTrigger,
   PopoverContent,
@@ -33,6 +34,12 @@ import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
 import SubscriptionTasks from './subscription-tasks';
 import ManualRefreshProgress from './manual-refresh-progress';
+import ArticleDateFilter from '@web/components/ArticleDateFilter';
+import {
+  ArticleDateSelection,
+  dateSelectionFilter,
+} from '@web/utils/article-date-selection';
+import { articleFilterSchema } from '@wewe-rss/shared';
 
 const Feeds = () => {
   const { id } = useParams();
@@ -360,11 +367,33 @@ const Feeds = () => {
   const { mutateAsync: updateOrder } = trpc.feed.updateOrder.useMutation();
 
   const [search, setSearch] = useState('');
+  const [articleDates, setArticleDates] = useState<ArticleDateSelection>({
+    mode: 'day',
+    start: '',
+    end: '',
+  });
+  const [articleDirection, setArticleDirection] = useState<'asc' | 'desc'>(
+    'desc',
+  );
+  const articleDateFilter = dateSelectionFilter(articleDates);
+  const dateValidation = articleFilterSchema.safeParse(articleDateFilter);
+  const dateError = dateValidation.success
+    ? undefined
+    : dateValidation.error.issues[0].message;
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [articleSelectedIds, setArticleSelectedIds] = useState<Set<string>>(
     new Set(),
   );
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setArticleSelectedIds(new Set());
+  };
+  const handleClearSearch = () => handleSearchChange('');
   const [isBatchExporting, setIsBatchExporting] = useState(false);
+  const batchExporting = useRef(false);
+  useEffect(() => {
+    setArticleSelectedIds(new Set());
+  }, [id, search, folderFilter, articleDates]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -377,8 +406,10 @@ const Feeds = () => {
   }, [isSearchOpen]);
 
   const handleBatchExport = async () => {
-    if (articleSelectedIds.size === 0) return;
+    if (batchExporting.current || articleSelectedIds.size === 0) return;
+    batchExporting.current = true;
     setIsBatchExporting(true);
+    const batchSelection = articleSelectedIds;
     const ids = Array.from(articleSelectedIds);
     let successCount = 0;
     const exportNotices = new Set<string>();
@@ -395,12 +426,17 @@ const Feeds = () => {
       toast.success(`成功导出 ${successCount} 篇文章`, {
         description: Array.from(exportNotices).join('；') || undefined,
       });
-      setArticleSelectedIds(new Set());
+      // A filter change may clear selection while exporting. Do not erase a
+      // newer selection when this earlier snapshot finishes.
+      setArticleSelectedIds((current) =>
+        current === batchSelection ? new Set() : current,
+      );
     } catch (err: unknown) {
       toast.error(`导出中断 (${successCount}/${ids.length} 成功)`, {
         description: err instanceof Error ? err.message : String(err),
       });
     } finally {
+      batchExporting.current = false;
       setIsBatchExporting(false);
     }
   };
@@ -940,11 +976,10 @@ const Feeds = () => {
               if (folderOperation.current) return;
               setFolderFilter(filter);
               setSelectedIds([]);
-              if (filter === 'all') {
-                setCurrentMpId('');
-                navigate('/feeds');
-                setMobileSidebarOpen(false);
-              }
+              setArticleSelectedIds(new Set());
+              setCurrentMpId('');
+              navigate('/feeds');
+              setMobileSidebarOpen(false);
             }}
             onBusyChange={(value) => {
               folderOperation.current = value;
@@ -1153,13 +1188,28 @@ const Feeds = () => {
                   </svg>
                 </Button>
               </Tooltip>
-              {!privateOnlineMode && articleSelectedIds.size > 0 && (
+              <span role="status" aria-live="polite" className="text-xs">
+                已选 {articleSelectedIds.size} 篇
+              </span>
+              <Button
+                size="sm"
+                variant="light"
+                className="h-8"
+                isDisabled={isBatchExporting || articleSelectedIds.size === 0}
+                onPress={() => {
+                  if (!batchExporting.current) setArticleSelectedIds(new Set());
+                }}
+              >
+                清空选择
+              </Button>
+              {!privateOnlineMode && (
                 <Button
                   size="sm"
                   color="primary"
                   variant="flat"
                   className="mr-2 h-8 font-medium"
                   isLoading={isBatchExporting}
+                  isDisabled={isBatchExporting || articleSelectedIds.size === 0}
                   onPress={handleBatchExport}
                 >
                   批量导出 Obsidian ({articleSelectedIds.size})
@@ -1554,6 +1604,11 @@ const Feeds = () => {
                       directory={currentMpInfo?.localDirectory}
                       name={currentMpInfo?.mpName}
                       search={search}
+                      articleFilter={{
+                        ...articleDateFilter,
+                        group: folderFilter,
+                      }}
+                      filterInvalid={Boolean(dateError)}
                       selectedIds={articleSelectedIds}
                       onImported={(message) => {
                         if (currentMpInfo)
@@ -1784,9 +1839,9 @@ const Feeds = () => {
                 size="sm"
                 variant="flat"
                 value={search}
-                onValueChange={setSearch}
+                onValueChange={handleSearchChange}
                 isClearable
-                onClear={() => setSearch('')}
+                onClear={handleClearSearch}
                 classNames={{
                   inputWrapper:
                     'h-8 px-3 bg-white dark:bg-neutral-800 rounded-lg shadow-sm',
@@ -1813,8 +1868,45 @@ const Feeds = () => {
             </div>
           )}
 
+          {!isSearchOpen && search !== '' && (
+            <div className="min-w-0 shrink-0 border-b border-neutral-200 px-4 py-2 dark:border-neutral-700">
+              <Chip
+                size="sm"
+                variant="flat"
+                title={`搜索：${search}`}
+                onClose={handleClearSearch}
+                classNames={{
+                  base: 'max-w-full',
+                  content: 'min-w-0 truncate',
+                  closeButton: 'shrink-0',
+                }}
+                aria-label={`搜索：${search}；清除关键词`}
+              >
+                搜索：{search}
+              </Chip>
+            </div>
+          )}
+
+          <ArticleDateFilter
+            value={articleDates}
+            error={dateError}
+            onChange={(next) => {
+              setArticleDates(next);
+              setArticleSelectedIds(new Set());
+            }}
+          />
           <div className="feed-article-scroll flex-1 overflow-auto">
             <ArticleList
+              key={JSON.stringify([
+                id,
+                search,
+                folderFilter,
+                articleDateFilter,
+              ])}
+              articleFilter={{ ...articleDateFilter, group: folderFilter }}
+              filterInvalid={Boolean(dateError)}
+              direction={articleDirection}
+              onDirectionChange={setArticleDirection}
               collectionChannels={Object.fromEntries(
                 (feedData?.items || []).map((feed) => [
                   feed.id,
@@ -1823,6 +1915,7 @@ const Feeds = () => {
               )}
               search={search}
               selectedIds={articleSelectedIds}
+              isSelectionDisabled={isBatchExporting}
               onSelectionChange={setArticleSelectedIds}
             />
           </div>

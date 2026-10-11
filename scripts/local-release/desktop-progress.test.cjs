@@ -165,10 +165,7 @@ function fixture({
             calls.push('browser');
             assert.equal(options.windowsHide, false);
             assert.equal(options.shell, false);
-            assert.equal(
-              args[0],
-              'http://127.0.0.1:4000/dash/tools/article-download',
-            );
+            assert.equal(args[0], 'http://127.0.0.1:4000/dash/feeds');
             assert.equal(args[1], 'http://127.0.0.1:18080/#/');
             assert(calls.indexOf('start-app') < calls.indexOf('browser'));
             const child = new EventEmitter();

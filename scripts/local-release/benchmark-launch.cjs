@@ -83,10 +83,10 @@ async function benchmark({
         path.join(release, 'runtime/node.exe').toLowerCase(),
       );
       assert.equal(live.startUtc, identity.startUtc);
-      const response = await fetch(
-        'http://127.0.0.1:4000/dash/tools/article-download',
-        { redirect: 'manual', signal: AbortSignal.timeout(1500) },
-      );
+      const response = await fetch('http://127.0.0.1:4000/dash/feeds', {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(1500),
+      });
       assert.ok(response.ok || response.status === 302);
       await response.body?.cancel();
     });

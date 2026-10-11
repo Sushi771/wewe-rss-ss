@@ -48,13 +48,10 @@ async function startAtLogon() {
   const owners = identity ? [{ OwningProcess: identity.pid }] : [];
   const listener = classifyListener(owners, release, () => identity, manifest);
   if (listener.status === 'already-running') {
-    const response = await fetch(
-      'http://127.0.0.1:4000/dash/tools/article-download',
-      {
-        redirect: 'manual',
-        signal: AbortSignal.timeout(1500),
-      },
-    );
+    const response = await fetch('http://127.0.0.1:4000/dash/feeds', {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(1500),
+    });
     if (!response.ok && response.status !== 302)
       throw new Error('Running dashboard is not ready');
     await response.body?.cancel();

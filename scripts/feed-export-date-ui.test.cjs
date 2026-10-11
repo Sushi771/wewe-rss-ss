@@ -32,8 +32,12 @@ async function run(results, rejectAt) {
     selections = [];
   const context = {
     articleSelectedIds: new Set(results.map((_, i) => 'fixture-' + i)),
+    batchExporting: { current: false },
     setIsBatchExporting: (x) => loading.push(x),
-    setArticleSelectedIds: (x) => selections.push(x.size),
+    setArticleSelectedIds: (x) =>
+      selections.push(
+        (typeof x === 'function' ? x(context.articleSelectedIds) : x).size,
+      ),
     queryUtils: {
       client: {
         article: {

@@ -18,9 +18,12 @@ const report = path.resolve(
   '../../output/playwright/local-release-audit',
 );
 
-const url = 'http://127.0.0.1:4000/dash/tools/article-download';
+const url = 'http://127.0.0.1:4000/dash/feeds';
 const backendUrl = 'http://127.0.0.1:18080/#/';
 function openBrowser() {
+  // Always pass the subscription URL, including already-running service reuse.
+  // Opening a URL navigates explicitly even if Edge restores a tools tab;
+  // invoking the browser with no URL would only activate that old page.
   const candidates = [
     process.env['ProgramFiles(x86)'],
     process.env.ProgramFiles,

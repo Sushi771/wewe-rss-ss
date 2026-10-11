@@ -29,7 +29,7 @@ const messages = {
   WEWE_START_FAILED:
     'WeWe-RSS 启动或版本/4000 端口核验失败。未停止其他服务，请维护者核对当前发布包及端口。',
   BROWSER_FAILED:
-    '服务已就绪，但浏览器未能打开。请手动访问 http://127.0.0.1:4000/dash/tools/article-download。',
+    '服务已就绪，但浏览器未能打开。请手动访问 http://127.0.0.1:4000/dash/feeds。',
 };
 function failure(code) {
   const e = new Error(messages[code]);

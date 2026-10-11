@@ -106,6 +106,7 @@ describe('actual WeChat article-list mobile layout contract and handlers (offlin
       evaluate(handler(checkbox!, 'onValueChange'), {
         item: { id: 'a' },
         selectedIds: new Set(['a', 'b']),
+        isSelectionDisabled: false,
         onSelectionChange: changed,
       })(selected);
       expect([...changed.mock.calls[0][0]]).toEqual(
@@ -143,6 +144,7 @@ describe('actual WeChat article-list mobile layout contract and handlers (offlin
     const changed = jest.fn();
     const selectAll = evaluate(expressions.handleSelectAll, {
       items: [{ id: 'a' }, { id: 'b' }],
+      isSelectionDisabled: false,
       onSelectionChange: changed,
     });
     selectAll(true);

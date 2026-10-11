@@ -1,4 +1,4 @@
-import { FC, useEffect, useMemo, useState } from 'react';
+import { FC, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
   Button,
   Spinner,
@@ -9,14 +9,21 @@ import {
   ModalBody,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
+import { getLoadedSelection } from '@web/utils/feed-selection';
 import dayjs from 'dayjs';
 import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
+import { ArticleFilter, formatShanghaiPublicationTime } from '@wewe-rss/shared';
 
 interface ArticleListProps {
   search: string;
+  articleFilter?: ArticleFilter;
+  filterInvalid?: boolean;
+  direction: 'asc' | 'desc';
+  onDirectionChange: (direction: 'asc' | 'desc') => void;
   selectedIds: Set<string>;
   onSelectionChange: (selectedIds: Set<string>) => void;
+  isSelectionDisabled?: boolean;
   collectionChannels?: Record<string, string>;
 }
 
@@ -31,8 +38,13 @@ function metricDisplay(raw: string | null, key: 'read' | 'like' | 'favorite') {
 
 const ArticleList: FC<ArticleListProps> = ({
   search,
+  articleFilter = {},
+  filterInvalid = false,
+  direction,
+  onDirectionChange,
   selectedIds,
   onSelectionChange,
+  isSelectionDisabled = false,
   collectionChannels = {},
 }) => {
   const { id } = useParams();
@@ -65,10 +77,14 @@ const ArticleList: FC<ArticleListProps> = ({
     'publishTime',
   );
 
-  const summary = trpc.article.summary.useQuery({
-    mpId,
-    search: search || undefined,
-  });
+  const summary = trpc.article.summary.useQuery(
+    {
+      ...articleFilter,
+      mpId,
+      search: search || undefined,
+    },
+    { enabled: !filterInvalid, cacheTime: 0 },
+  );
 
   useEffect(() => {
     setSort('publishTime');
@@ -79,18 +95,23 @@ const ArticleList: FC<ArticleListProps> = ({
     trpc.article.list.useInfiniteQuery(
       {
         limit: 20,
+        ...articleFilter,
         mpId: mpId,
         search: search || undefined,
         sort: collectionChannels[mpId] === 'wechat2rss' ? 'publishTime' : sort,
+        direction,
       },
       {
         getNextPageParam: (lastPage) => lastPage.nextCursor,
+        enabled: !filterInvalid,
+        cacheTime: 0,
+        keepPreviousData: false,
       },
     );
 
   const items = useMemo(() => {
-    return data?.pages.flatMap((page) => page.items) || [];
-  }, [data]);
+    return filterInvalid ? [] : data?.pages.flatMap((page) => page.items) || [];
+  }, [data, filterInvalid]);
   const hasWechat2Rss =
     collectionChannels[mpId] === 'wechat2rss' ||
     (!mpId && Object.values(collectionChannels).includes('wechat2rss')) ||
@@ -111,6 +132,7 @@ const ArticleList: FC<ArticleListProps> = ({
   }, [readSortingAvailable, likeSortingAvailable, sort]);
 
   const handleSelectAll = (isSelected: boolean) => {
+    if (isSelectionDisabled) return;
     if (isSelected) {
       onSelectionChange(new Set(items.map((item) => item.id)));
     } else {
@@ -120,14 +142,23 @@ const ArticleList: FC<ArticleListProps> = ({
 
   // Batch export moved to parent component for toolbar integration
 
-  const allSelected = items.length > 0 && selectedIds.size === items.length;
+  const selection = useMemo(
+    () => getLoadedSelection(items, selectedIds),
+    [items, selectedIds],
+  );
+  // Prune disappeared IDs before paint, so toolbar/export cannot imply hidden
+  // rows are selected. Loading another page only adds loaded IDs, never selection.
+  useLayoutEffect(() => {
+    if (selection.visibleSelectedIds.size !== selectedIds.size)
+      onSelectionChange(selection.visibleSelectedIds);
+  }, [selection, selectedIds, onSelectionChange]);
 
   return (
     <div className="flex h-full flex-col">
-      {(readSortingAvailable || likeSortingAvailable) && (
+      {
         <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
           排序
-          {readSortingAvailable || likeSortingAvailable ? (
+          {
             <select
               aria-label="文章排序"
               className="bg-background rounded border px-2 py-1"
@@ -145,14 +176,26 @@ const ArticleList: FC<ArticleListProps> = ({
                 <option value="likeCount">点赞量从高到低</option>
               )}
             </select>
-          ) : (
-            <span>按发布时间排列</span>
+          }
+          {sort === 'publishTime' && (
+            <select
+              aria-label="发布时间顺序"
+              className="bg-background rounded border px-2 py-1"
+              value={direction}
+              onChange={(event) => {
+                onDirectionChange(event.target.value as 'asc' | 'desc');
+                onSelectionChange(new Set());
+              }}
+            >
+              <option value="desc">最新在前</option>
+              <option value="asc">最早在前</option>
+            </select>
           )}
           {!hasWechat2Rss && (readSortingAvailable || likeSortingAvailable) && (
             <span>带“+”为下限。收藏仅显示源数据，不以分享或在看代替。</span>
           )}
         </label>
-      )}
+      }
       {isError && (
         <div role="alert" className="px-3 py-2 text-sm text-red-600">
           文章列表读取失败，请重试。
@@ -167,13 +210,20 @@ const ArticleList: FC<ArticleListProps> = ({
           <div className="compact-list-header">
             <div className="compact-col-check">
               <Checkbox
+                aria-label="全选已加载"
                 size="sm"
-                isSelected={allSelected}
+                isSelected={selection.allSelected}
+                isIndeterminate={selection.isIndeterminate}
+                isDisabled={isSelectionDisabled || items.length === 0}
                 onValueChange={handleSelectAll}
               />
             </div>
             <div className="compact-col-title min-w-0 whitespace-nowrap">
-              文章标题{summary.data && ` · ${summary.data.articles} 篇`}
+              <span className="mr-2 text-xs">全选已加载</span>
+              文章标题
+              {!filterInvalid &&
+                summary.data &&
+                ` · ${summary.data.articles} 篇`}
             </div>
             <div className="compact-col-metadata !hidden md:!flex">信息</div>
           </div>
@@ -185,9 +235,12 @@ const ArticleList: FC<ArticleListProps> = ({
             >
               <div className="compact-col-check">
                 <Checkbox
+                  aria-label={`选择文章：${item.title}`}
                   size="sm"
+                  isDisabled={isSelectionDisabled}
                   isSelected={selectedIds.has(item.id)}
                   onValueChange={(isSelected) => {
+                    if (isSelectionDisabled) return;
                     const next = new Set(selectedIds);
                     if (isSelected) next.add(item.id);
                     else next.delete(item.id);
@@ -289,7 +342,7 @@ const ArticleList: FC<ArticleListProps> = ({
                     title="库内记录的发布时间；存量日期需与原文核对"
                   >
                     {item.publishTime > 0
-                      ? dayjs(item.publishTime * 1e3).format('YYYY-MM-DD HH:mm')
+                      ? formatShanghaiPublicationTime(item.publishTime)
                       : '发布时间未知'}
                   </span>
                 </div>
@@ -297,13 +350,13 @@ const ArticleList: FC<ArticleListProps> = ({
             </div>
           ))}
 
-          {isLoading && (
+          {isLoading && !filterInvalid && (
             <div className="flex justify-center p-4">
               <Spinner size="sm" />
             </div>
           )}
 
-          {hasNextPage && !isLoading && (
+          {hasNextPage && !isLoading && !filterInvalid && (
             <div className="flex justify-center p-4">
               <Button size="sm" variant="light" onPress={() => fetchNextPage()}>
                 加载更多
@@ -313,7 +366,7 @@ const ArticleList: FC<ArticleListProps> = ({
 
           {!isLoading && !isError && items?.length === 0 && (
             <div className="p-10 text-center text-sm text-neutral-400">
-              暂无数据
+              {filterInvalid ? '请修正日期范围' : '当前筛选暂无文章'}
             </div>
           )}
         </div>
