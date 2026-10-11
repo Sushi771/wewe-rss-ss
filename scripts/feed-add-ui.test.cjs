@@ -152,8 +152,14 @@ function render(capability, options = {}) {
   ).outputText;
   const module = { exports: {} };
   const requireMock = (name) =>
-    name === '@web/utils/use-feed-browse-state'
+    [
+      '@web/utils/use-feed-browse-state',
+      '@web/utils/use-cache-revision',
+    ].includes(name)
       ? {
+          // Revision polling has separate watch and browser coverage. This
+          // add-source fixture mounts the page without background reads.
+          useCacheRevision: () => false,
           // Add-source tests keep page filters local; persistence is covered separately.
           useFeedBrowseState: () => {
             const [search, setSearch] = react.useState('');
@@ -214,6 +220,8 @@ function render(capability, options = {}) {
     exports: module.exports,
     require: requireMock,
     console,
+    // Article-position DOM events are covered by the isolated browser suite.
+    window: {},
   });
   const mount = () => {
     index = 0;
@@ -416,7 +424,8 @@ test('concurrent progress observers share the saved list read and reveal the new
   assert.equal(h.events.filter((e) => e.localRead === 'feed.list').length, 1);
   release();
   await Promise.all([run, concurrent]);
-  assert.deepEqual(h.refreshed, ['list.reset', 'summary.invalidate']);
+  // Saved-view refresh keeps loaded article pages instead of resetting them.
+  assert.deepEqual(h.refreshed, ['list.invalidate', 'summary.invalidate']);
   assert(h.events.some((e) => e.localRead === 'feed.list'));
   assert.equal(
     h.find((node) => typeof node.props.onFilter === 'function').props.filter,
