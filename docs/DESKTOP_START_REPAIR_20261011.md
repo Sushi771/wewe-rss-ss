@@ -1,5 +1,21 @@
 # 桌面启动反馈与双页面入口（2026-10-11）
 
+## 最终工程验收补记（2026-10-11）
+
+实际部署为 `2026-10-11T07-55-20-173Z-000d9b87e67f`，当前服务 PID53996、仅监听127.0.0.1:4000。按既有 `build.cjs --compact` 构建，79个固定文件；旧包为13347个文件。未修改旧包、原Docker容器、配置凭据或用户的 `DEVELOPMENT_HANDOFF.md`。部署前GET确认订阅/手动刷新批次均完成或停止，取在线及停止后一致性备份、核验精确旧进程身份后切换，未回滚。生产及副本验收均读取20条原RSS；后续桌面产品冷启动沿用该已通过回执的1条就绪合同。
+
+本轮发现并修复两项具体阻塞：`75e5817` 的Windows CI在英文代码页将中文后台快捷方式路径变成 `Wechat2RSS??.lnk`，保存失败；现按ANSI代码页可表达性选择中文名或 `Wechat2RSS Backend.lnk`，并固定JSON回执为UTF-8。另新包首次副本启动在大正文缓存的整表JSON序列化中报 `RangeError: Invalid string length`；改为逐值计算同一JSON字节序列的SHA-256，保留NULL、Unicode、64位整数、BLOB和Python基线合同。超出V8整串上限的离线回归通过，随后真实副本和生产启动通过。初次沙箱构建junction/进程身份被权限限制拒绝，正常本机权限复测通过。
+
+实际桌面 `.lnk` 启动产品冷路径17.936秒，外部观察含快捷方式派发与核验21.718秒；状态窗约1.335秒完成显示握手。Docker及原订阅容器始终已在运行，这是产品冷启动，不能称为Docker/WSL冷启动。连续热点击首个3.395秒、排队者4.833秒，均复用PID53996，仅首个请求打开双页；第二个 `joined=true/browserRequested=false`。原生窗口本轮收到 `shown/visible=true/focused=true` 及 `focus-existing` 回执，成功后收起且服务继续运行；关闭窗口不取消业务，失败保留重试/日志。回执仍不证明用户亲眼看到窗口。
+
+账号页已实际部署。HTTP获取的 `/dash/assets/index-BxQJYEXo.js`、CSS与固定包哈希相同，新后台入口在JS中存在。隔离 **headful Edge** 实际渲染4000单篇下载入口及账号页，点击后台按钮后第二页URL为 `http://127.0.0.1:18080/#/`、标题为Wechat2RSS；截图已查看，后台显示服务密码入口，未登录。390像素宽账号页按钮换行、入口可见，无横向溢出。此浏览器仅允许4000/18080的GET，实际没有阻止事件；没有新增订阅、扫码或上游取文。验收脚本初次错误假设NextUI锚点角色、资源位于 `/assets`，分别修正为实际锚点及 `/dash/assets` 后通过；不能把脚本断言失败当成部署回滚。
+
+精确修复提交 [`e95243b19dcb7199dc8ddf4860c118b254f20a25`](https://github.com/Sushi771/wewe-rss-ss/commit/e95243b19dcb7199dc8ddf4860c118b254f20a25) 已推原分支；[CI #373](https://github.com/Sushi771/wewe-rss-ss/actions/runs/38123048681) 四项job全部success，[浏览器离线 #95](https://github.com/Sushi771/wewe-rss-ss/actions/runs/38123048638) success。原 `75e5817` 的[CI #372](https://github.com/Sushi771/wewe-rss-ss/actions/runs/38122509874) failure保留，不能改称通过。本机快捷方式23、状态/依赖30、SQLite20项通过，另修改前正常权限身份联合28项通过。生产副本和冷启动后只读核验14号/1713篇/3分组，保护字段与备份基线全等。
+
+私有证据均在忽略的 `output/playwright/local-release-audit/`：`controlled-restart-1791705398305-51808`（副本）、`controlled-restart-1791705575416-56604`（部署）、`controlled-restart-1791705739736-52600`（桌面冷启动），以及 `final-assets.json`、`final-browser.json`、`final-cold-desktop.json`、`final-database.json` 和对应截图/日志。未提交数据库、备份、浏览器配置或截图。
+
+**仍未验收：** CUA重试两次仍报 `CreateProcessInSandbox 203`，因此实际桌面默认Edge由双页启动请求打开后，窗口是否露出、两个标签是否可见，仍没有目视证据。隔离浏览器截图只能证明页面和账号入口渲染/跳转。Docker/WSL整体冷启动、用户实际双击体验、手动提前关闭/失败重试按钮点击未实测；离线故障回归与显示回执分别保留，不宣称全项完成。以下原检查点供追溯，当前部署状态以上段为准。
+
 用户复测后网页实际打开，问题是首次等待很长且隐藏入口没有反馈。原桌面快捷方式路径正确：稳定 `launch-desktop.vbs` 调用 `desktop-start.cjs`，不是过期路径。旧日志首次约118秒，其余点击排队后复用；本轮没有以此宣称服务完全启动失败。
 
 当前脚本显示轻量 PowerShell/WinForms 状态窗口，依次显示 Docker 检查、依赖就绪、WeWe 启动检查及打开页面。没有假百分比，也没有用固定延时替代服务健康。窗口显示成功须有实际 Shown/聚焦回执；失败保留安全原因、重试和日志按钮，成功后自动收起。关闭窗口不取消启动。重复点击聚焦同一个窗口，沿用独占启动锁，排队者复核正常服务后不再打开浏览器。崩溃锁仍不自动删除。
