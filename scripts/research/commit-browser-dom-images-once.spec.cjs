@@ -68,6 +68,7 @@ function makeSourceDb(file, { groups = true } = {}) {
         [
           '20261009063000_add_management_groups',
           '20261010090000_management_group_order',
+          '20261011090000_cache_insert_batches',
         ].includes(name)
       )
         continue;
@@ -117,6 +118,19 @@ function makeSourceDb(file, { groups = true } = {}) {
       '<p>Unchanged XHS body</p>',
     );
     if (groups) {
+      db.prepare(
+        'INSERT INTO cache_insert_batches VALUES (?,?,?,?,?,?,?,?,?)',
+      ).run(
+        'synthetic-batch',
+        'synthetic-feed',
+        'retained-manifest',
+        'synthetic-snapshot',
+        'synthetic-guard',
+        1,
+        2,
+        1,
+        3,
+      );
       db.prepare(
         'INSERT INTO management_groups(id,name,platform) VALUES(?,?,?)',
       ).run('synthetic-wechat-folder', 'Synthetic Wechat', 'wechat');
@@ -396,4 +410,45 @@ test('rejects source drift from the named rehearsal and a damaged private image 
       false,
     );
   });
+});
+
+test('retains the INSERT ledger and rejects its drift since rehearsal', async () => {
+  await withRehearsal(async (options) => {
+    const before = readSnapshot(options.sourceDb);
+    assert.equal(before.tables.cache_insert_batches.rows.length, 1);
+    const db = new DatabaseSync(options.sourceDb);
+    try {
+      db.exec(
+        "UPDATE cache_insert_batches SET article_manifest='changed-manifest'",
+      );
+    } finally {
+      db.close();
+    }
+    options.expectedSourceSha256 = sha256(fs.readFileSync(options.sourceDb));
+    await assert.rejects(
+      runOneArticleImport(options),
+      /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+    );
+  });
+});
+
+test('rejects incomplete or changed INSERT ledger schema', () => {
+  const dir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'wewe-insert-schema-test-'),
+  );
+  const file = path.join(dir, 'source.db');
+  try {
+    makeSourceDb(file);
+    const db = new DatabaseSync(file);
+    try {
+      db.exec(
+        'ALTER TABLE cache_insert_batches RENAME COLUMN article_manifest TO unknown_column',
+      );
+    } finally {
+      db.close();
+    }
+    assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
