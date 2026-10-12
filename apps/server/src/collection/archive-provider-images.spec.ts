@@ -52,6 +52,28 @@ describe('provider image archive', () => {
     expect(supplementSavedBodyImages(supplemented, archived)).toBeUndefined();
   });
 
+  it('preserves unknown source placeholders while saving other successful exact images', async () => {
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(
+        new Response(png, { headers: { 'Content-Type': 'image/png' } }),
+      );
+    const saved =
+      '<div class="rich_media_content" style="color:red" data-wewe-image-pending="1"><p>saved note</p><img data-wewe-image-unconfirmed="true"><img src="https://mmbiz.qpic.cn/a.jpg"></div>';
+    const input = page();
+    input.articles = [savedBodyMediaInput(saved, input.articles[0])];
+    const archived = await archiveProviderImages(input, {
+      preserveTextOnImageFailure: true,
+    });
+    const merged = supplementSavedBodyImages(saved, archived.articles[0])!;
+    expect(merged).toContain('data:image/png;base64,');
+    expect(merged).toContain('data-wewe-image-unconfirmed="true"');
+    expect(merged).toContain('data-wewe-image-pending="1"');
+    expect(merged).toContain('saved note');
+    expect(merged).toContain('color:red');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects an unmatched saved URL and does not use adapter-provided provenance', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue(
       new Response(png, {

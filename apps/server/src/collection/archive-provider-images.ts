@@ -56,6 +56,9 @@ export function supplementSavedBodyImages(
     const src = el.attr('src') || '';
     if (src.startsWith('data:image/')) continue;
     const original = el.attr('data-src') || src;
+    // Unknown placeholders remain untouched and pending. They cannot prevent
+    // saving successful bytes for other exact sources in the same body.
+    if (!original) continue;
     const inline = sources.get(original);
     if (!inline) {
       if (attemptedSources.get(article)?.has(original)) continue;
