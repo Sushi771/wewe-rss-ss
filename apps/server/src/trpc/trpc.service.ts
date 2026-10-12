@@ -456,11 +456,11 @@ export class TrpcService {
         accepted: true,
         feedId,
         listReady: page.articles.length > 0,
-        bodyReady:
-          ready &&
-          'imageBlocked' in result &&
-          result.imageBlocked === 0 &&
-          !('identitySkipped' in result && result.identitySkipped),
+        textReady: ready,
+        mediaReady: ready && result.mediaReady,
+        localMediaPendingArticleCount: result.localMediaPendingArticleCount,
+        upstreamImageBlockedCount: result.upstreamImageBlockedCount,
+        bodyReady: ready && result.mediaReady,
         imagePendingCount:
           'imageBlocked' in result ? result.imageBlocked : undefined,
         message: ready
@@ -874,10 +874,12 @@ export class TrpcService {
             id: string;
             bodyMissing: number;
             remoteImages: number;
+            mediaPending: number;
           }>
         >`SELECT id,
       CASE WHEN content_html IS NULL OR content_html = '' THEN 1 ELSE 0 END AS bodyMissing,
-      CASE WHEN (content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%') THEN 1 ELSE 0 END AS remoteImages
+      CASE WHEN (content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%') THEN 1 ELSE 0 END AS remoteImages,
+      CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%' OR content_html LIKE '%<img%data-src=%') THEN 1 ELSE 0 END AS mediaPending
       FROM articles WHERE mp_id = ${mpId}`;
     const bodyFlags = new Map(flags.map((row) => [row.id, row]));
     // Normalize saved identities once per snapshot, rather than once for each
@@ -952,6 +954,32 @@ export class TrpcService {
         !existing.verifiedSourceUrl
       );
     });
+    // Local media readiness comes from the stored body, not the parser's CDN
+    // availability or a historical queue/status flag. SQLite returns only flags.
+    // After a write reread flags for this feed; the no-op path reuses its preflight.
+    const mediaSummary = async (written = false) => {
+      const rows =
+        written && !listOnly
+          ? await this.prismaService.$queryRaw<
+              Array<{ id: string; mediaPending: number }>
+            >`
+          SELECT id, CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%' OR content_html LIKE '%<img%data-src=%') THEN 1 ELSE 0 END AS mediaPending
+          FROM articles WHERE mp_id = ${mpId}`
+          : flags;
+      const current = new Map(rows.map((row) => [row.id, row.mediaPending]));
+      const localMediaPendingArticleCount = page.articles.filter((item) =>
+        current.get(byIdentity.get(item.id)?.id || item.id),
+      ).length;
+      return {
+        localMediaPendingArticleCount,
+        upstreamImageBlockedCount: page.imageBlocked,
+        mediaReady:
+          !listOnly &&
+          page.articles.length > 0 &&
+          localMediaPendingArticleCount === 0 &&
+          !preflightSkipped.length,
+      };
+    };
     if (!neededArticles.length) {
       this.logger.log(
         `Cache sync preflight: unchanged; ${Date.now() - started}ms; articles=${page.articles.length}`,
@@ -961,6 +989,7 @@ export class TrpcService {
         updated: 0,
         bodyMissing: page.bodyMissing + protectedBodyMissing,
         imageBlocked: page.imageBlocked,
+        ...(await mediaSummary()),
         identitySkipped: preflightSkipped.length,
         identitySkippedArticles: preflightSkipped,
       };
@@ -1021,6 +1050,7 @@ export class TrpcService {
         if (inserted)
           return {
             ...inserted,
+            ...(await mediaSummary(true)),
             bodyMissing: Math.max(
               inserted.bodyMissing ?? 0,
               page.bodyMissing + protectedBodyMissing,
@@ -1048,8 +1078,9 @@ export class TrpcService {
         });
       },
       true,
-    ).then((result) => ({
+    ).then(async (result) => ({
       ...result,
+      ...(await mediaSummary(true)),
       // A written delta cannot hide a preserved gap outside that delta.
       bodyMissing: Math.max(
         result.bodyMissing ?? 0,

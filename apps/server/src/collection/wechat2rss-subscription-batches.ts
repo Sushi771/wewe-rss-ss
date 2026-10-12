@@ -24,6 +24,11 @@ export type BatchOutcome = {
   taskId?: string;
   feedId?: string;
   bodyReady?: boolean;
+  /** Text and local media availability are independent of upstream CDN state. */
+  textReady?: boolean;
+  mediaReady?: boolean;
+  localMediaPendingArticleCount?: number;
+  upstreamImageBlockedCount?: number;
   imagePendingCount?: number;
   listReady?: boolean;
   code?: SubscriptionTaskCode;
@@ -79,6 +84,10 @@ const view = (b: Batch) => ({
     taskId: item.taskId,
     feedId: item.feedId,
     bodyReady: item.bodyReady,
+    textReady: item.textReady,
+    mediaReady: item.mediaReady,
+    localMediaPendingArticleCount: item.localMediaPendingArticleCount,
+    upstreamImageBlockedCount: item.upstreamImageBlockedCount,
     imagePendingCount: item.imagePendingCount,
     accepted: item.accepted ?? !!item.taskId,
     listReady: item.listReady,
@@ -230,6 +239,16 @@ export class Wechat2RssSubscriptionBatches {
             (!Number.isSafeInteger(item.imagePendingCount) ||
               item.imagePendingCount < 0 ||
               item.imagePendingCount > 1000000)) ||
+          ['textReady', 'mediaReady'].some(
+            (key) => item[key] !== undefined && typeof item[key] !== 'boolean',
+          ) ||
+          ['localMediaPendingArticleCount', 'upstreamImageBlockedCount'].some(
+            (key) =>
+              item[key] !== undefined &&
+              (!Number.isSafeInteger(item[key]) ||
+                item[key] < 0 ||
+                item[key] > 1000000),
+          ) ||
           (item.accepted !== undefined && typeof item.accepted !== 'boolean') ||
           (item.submissionUnknown !== undefined &&
             typeof item.submissionUnknown !== 'boolean') ||

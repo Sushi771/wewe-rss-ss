@@ -1,3 +1,4 @@
+import * as registry from './provider-registry';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -102,6 +103,92 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
       new CollectionService(prisma as any),
     );
   });
+  it.each([
+    [
+      'remote-images',
+      '<div id="js_content">saved text<img src="https://mmbiz.qpic.cn/synthetic" /></div>',
+    ],
+    [
+      'removed-image-marker',
+      '<div id="js_content" data-wewe-image-pending="3">saved text</div>',
+    ],
+  ])(
+    'reports saved media pending despite an unblocked upstream (%s), without replay writes',
+    async (_name, savedHtml) => {
+      const page = makePage(
+        1,
+        '<div id="js_content">upstream text<img src="https://mmbiz.qpic.cn/synthetic" /></div>',
+      );
+      const item = page.articles[0];
+      await prisma.article.create({
+        data: {
+          id: item.id,
+          mpId,
+          title: item.title,
+          publishTime: item.publishTime,
+          sourceUrl: item.url,
+          verifiedSourceUrl: item.url,
+          contentHtml: savedHtml,
+          picUrl: item.picUrl,
+          lastBodyStatus: 'images-pending',
+        },
+      });
+      const before = await prisma.article.findMany();
+      const feedBefore = await prisma.feed.findUnique({ where: { id: mpId } });
+      const provider = jest
+        .spyOn(registry, 'wechat2RssProvider')
+        .mockReturnValue({
+          fetchArticles: jest.fn().mockResolvedValue(page),
+        } as any);
+      const network = jest
+        .spyOn(global, 'fetch')
+        .mockRejectedValue(Error('EXTERNAL_IO_FORBIDDEN'));
+      const transaction = jest.spyOn(prisma, '$transaction');
+      try {
+        for (let n = 0; n < 2; n++) {
+          expect(
+            await (trpc as any).runManualRefresh(mpId, 'cache', true),
+          ).toMatchObject({
+            state: 'succeeded',
+            textReady: true,
+            bodyReady: false,
+            mediaReady: false,
+            localMediaPendingArticleCount: 1,
+            upstreamImageBlockedCount: 0,
+          });
+        }
+        expect(await prisma.article.findMany()).toEqual(before);
+        expect(await prisma.feed.findUnique({ where: { id: mpId } })).toEqual(
+          feedBefore,
+        );
+        expect(await ledger()).toEqual([]);
+        expect(transaction).not.toHaveBeenCalled();
+        expect(backup).not.toHaveBeenCalled();
+        expect(network).not.toHaveBeenCalled();
+        // Historical status cannot force pending once bytes are actually embedded.
+        await prisma.article.update({
+          where: { id: item.id },
+          data: {
+            contentHtml:
+              '<div id="js_content">local<img src="data:image/png;base64,aGVsbG8=" /></div>',
+          },
+        });
+        expect(
+          await (trpc as any).runManualRefresh(mpId, 'cache', true),
+        ).toMatchObject({
+          textReady: true,
+          bodyReady: true,
+          mediaReady: true,
+          localMediaPendingArticleCount: 0,
+          upstreamImageBlockedCount: 0,
+        });
+      } finally {
+        transaction.mockRestore();
+        network.mockRestore();
+        provider.mockRestore();
+      }
+    },
+  );
   beforeEach(async () => {
     process.env.SQLITE_INSERT_ONLY_FAST_PATH = '1';
     delete process.env.SQLITE_INSERT_ONLY_MAX_SNAPSHOT_AGE_MS;
@@ -191,7 +278,25 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
       collectionChannel: 'wechat2rss',
       syncTime: 0,
     });
-    expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject(result);
+    const {
+      localMediaPendingArticleCount,
+      mediaReady,
+      upstreamImageBlockedCount,
+      ...persistedResult
+    } = result;
+    expect({
+      localMediaPendingArticleCount,
+      mediaReady,
+      upstreamImageBlockedCount,
+    }).toEqual({
+      localMediaPendingArticleCount: 0,
+      mediaReady: false,
+      upstreamImageBlockedCount: 0,
+    });
+    // Media projection is read after commit; never add status-only database writes.
+    expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject(
+      persistedResult,
+    );
     expect(cacheRevision().revision).not.toBe(version);
     expect(dirty).toHaveBeenCalledTimes(1);
     expect(backup).not.toHaveBeenCalled();

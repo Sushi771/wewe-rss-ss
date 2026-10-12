@@ -71,6 +71,9 @@ describe('explicit manual all-refresh boundary (offline)', () => {
       bodyMissing: 0,
       imageBlocked: 0,
       status: 'partial',
+      mediaReady: true,
+      localMediaPendingArticleCount: 0,
+      upstreamImageBlockedCount: 0,
     });
   });
   it('immediately acknowledges the frozen eligible set without performing a provider update or cache fetch', async () => {
