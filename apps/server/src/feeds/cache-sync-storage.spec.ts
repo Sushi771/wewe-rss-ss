@@ -321,6 +321,31 @@ describe('cache delta through original SQLite merge', () => {
     expect((createVerifiedSqliteBackup as jest.Mock).mock.calls.length).toBe(
       backups,
     );
+    const added = canonicalArticleUrl(
+      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=798&idx=1',
+    );
+    const mixed = {
+      ...incoming,
+      articles: [
+        ...incoming.articles,
+        {
+          ...added,
+          title: 'safe-new-peer',
+          publishTime: 1760000000,
+          contentHtml: '<div class="rich_media_content"><p>new</p></div>',
+          picUrl: '',
+        },
+      ],
+      upstreamCount: 2,
+    } as ProviderPage;
+    expect(
+      await trpc.syncCachedWechat2RssPage(mpId, mixed, false, {
+        fetchMedia: false,
+      }),
+    ).toMatchObject({ created: 1, updated: 0, bodyMissing: 1 });
+    expect(
+      await prisma.article.findUniqueOrThrow({ where: { id: identity.id } }),
+    ).toEqual(before);
   });
   it('runs all 14 through the actual automatic cache entry; unchanged 21 are no-op, local failure isolates, media stays offline and replay is idempotent', async () => {
     const ids = Array.from(

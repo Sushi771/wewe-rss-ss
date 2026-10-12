@@ -1018,7 +1018,14 @@ export class TrpcService {
           delta,
           listOnly,
         );
-        if (inserted) return inserted;
+        if (inserted)
+          return {
+            ...inserted,
+            bodyMissing: Math.max(
+              inserted.bodyMissing ?? 0,
+              page.bodyMissing + protectedBodyMissing,
+            ),
+          };
       } finally {
         this.activeCollections.delete(mpId);
       }
@@ -1041,7 +1048,14 @@ export class TrpcService {
         });
       },
       true,
-    );
+    ).then((result) => ({
+      ...result,
+      // A written delta cannot hide a preserved gap outside that delta.
+      bodyMissing: Math.max(
+        result.bodyMissing ?? 0,
+        page.bodyMissing + protectedBodyMissing,
+      ),
+    }));
   }
 
   async collectPublicAlbums(input: { mpId: string; albumIds: string[] }) {
