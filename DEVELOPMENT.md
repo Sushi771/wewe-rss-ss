@@ -48,3 +48,7 @@ Use `pnpm` to run these common tasks:
 
 - **Pre-commit**: `lint-staged` and `husky` will automatically format your code.
 - **CI**: Every PR to `main` is checked for linting and build success.
+
+## 自动刷新入口维护（2026-10-12）
+
+自动与手动批次缓存阶段统一走差量预检；生产补缺前必须通过副本演练及一致性备份。恢复已受理缓存使用持久 cache-only 模式，不能使用普通 resume 隐含提交未受理队列。实现、原值保护、索引、验收和固定产物本地维护入口见[自动刷新修复说明](docs/AUTO_REFRESH_RECOVERY_20261012.md)。

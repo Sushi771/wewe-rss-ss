@@ -30,6 +30,8 @@ export type BatchOutcome = {
   phase?: 'identity' | 'cache' | 'metadata';
   accepted?: boolean;
   submissionUnknown?: boolean;
+  /** Unclassified failures stop the round; only explicit local failures isolate. */
+  stopBatch?: boolean;
 };
 type Item = Omit<BatchOutcome, 'state'> & {
   index: number;
@@ -49,6 +51,8 @@ type Batch = {
     | 'manual-refresh'
     | 'scheduled-refresh';
   intentKey?: string;
+  /** A durable continuation of accepted cache work, never unsent submissions. */
+  cacheOnly?: boolean;
   createdAt: number;
   updatedAt: number;
   nextSubmissionAt: number;
@@ -64,6 +68,7 @@ const view = (b: Batch) => ({
   batchId: b.batchId,
   purpose: b.purpose || 'subscription',
   intentKey: b.intentKey,
+  cacheOnly: b.cacheOnly === true,
   state: b.state,
   createdAt: b.createdAt,
   updatedAt: b.updatedAt,
@@ -78,6 +83,7 @@ const view = (b: Batch) => ({
     accepted: item.accepted ?? !!item.taskId,
     listReady: item.listReady,
     code: item.code,
+    stopBatch: item.stopBatch,
     metadataPending: false,
     // Bind internal consumers to the original intent without publishing URLs.
     articleUrlHash: item.articleUrl ? hash(item.articleUrl) : undefined,
@@ -107,6 +113,7 @@ export class Wechat2RssSubscriptionBatches {
     feedId: string,
     stage: 'submit' | 'cache',
     automatic?: boolean,
+    options?: { cacheOnly: boolean },
   ) => Promise<BatchOutcome>;
 
   /** Manual refresh shares the existing serial scheduler and durable records. */
@@ -115,6 +122,7 @@ export class Wechat2RssSubscriptionBatches {
       feedId: string,
       stage: 'submit' | 'cache',
       automatic?: boolean,
+      options?: { cacheOnly: boolean },
     ) => Promise<BatchOutcome>,
   ) {
     if (this.refresh) throw new Error('BATCH_REFRESH_EXISTS');
@@ -191,6 +199,8 @@ export class Wechat2RssSubscriptionBatches {
         ) ||
         (b.intentKey !== undefined &&
           (!isRefresh(b) || !/^[a-f0-9]{64}$/.test(b.intentKey))) ||
+        (b.cacheOnly !== undefined &&
+          (!isRefresh(b) || typeof b.cacheOnly !== 'boolean')) ||
         !Array.isArray(b.items) ||
         !b.items.length ||
         b.items.length > (isRefresh(b) ? 1000 : 20)
@@ -223,6 +233,8 @@ export class Wechat2RssSubscriptionBatches {
           (item.accepted !== undefined && typeof item.accepted !== 'boolean') ||
           (item.submissionUnknown !== undefined &&
             typeof item.submissionUnknown !== 'boolean') ||
+          (item.stopBatch !== undefined &&
+            typeof item.stopBatch !== 'boolean') ||
           (item.articleUrl !== undefined &&
             subscriptionArticleUrl(item.articleUrl) !== item.articleUrl) ||
           (isRefresh(b) && (!item.feedId || item.articleUrl || item.taskId)) ||
@@ -533,6 +545,7 @@ export class Wechat2RssSubscriptionBatches {
   }
   async resume(id: string) {
     const b = await this.read(id);
+    if (b?.cacheOnly) throw new Error('BATCH_CACHE_ONLY');
     if (!b || b.state !== 'paused') return b ? view(b) : null;
     if (b.instance !== hash(this.instance()))
       throw new Error('BATCH_INSTANCE_CHANGED');
@@ -572,6 +585,48 @@ export class Wechat2RssSubscriptionBatches {
     await this.write(b);
     this.schedule();
     return view(b);
+  }
+  /** Explicit local recovery: the original unsent queue remains visibly unsent.
+   * The storage mutex prevents converting a batch while a worker is in flight.
+   * Repeated delivery and restart retain this mode and cannot emit /add. */
+  async resumeCacheOnly(id: string) {
+    const release = await batchStorageLock(await this.storage());
+    if (!release) throw new Error('BATCH_BUSY');
+    try {
+      const b = await this.read(id);
+      if (!b) return null;
+      if (!isRefresh(b)) throw new Error('BATCH_INVALID');
+      if (b.instance !== hash(this.instance()))
+        throw new Error('BATCH_INSTANCE_CHANGED');
+      if (b.cacheOnly) return view(b);
+      if (
+        b.items.some(
+          (item) => item.state === 'submitting' || item.submissionUnknown,
+        )
+      )
+        throw new Error('BATCH_UNCONFIRMED');
+      b.cacheOnly = true;
+      for (const item of b.items) {
+        if (
+          item.accepted &&
+          ['waiting', 'failed', 'blocked'].includes(item.state)
+        ) {
+          item.state = 'waiting';
+          item.refreshChecks = 0;
+          item.refreshAfter = this.now();
+          item.stopBatch = undefined;
+          item.message = 'Cache-only continuation; no new upstream request.';
+        }
+      }
+      b.state = b.items.some((item) => item.state === 'waiting')
+        ? 'running'
+        : 'completed';
+      await this.write(b);
+      this.schedule();
+      return view(b);
+    } finally {
+      await release();
+    }
   }
   async snapshot(backupFile: string) {
     const target = path.join(
@@ -617,10 +672,15 @@ export class Wechat2RssSubscriptionBatches {
     if (this.busy || this.stopped) return;
     this.busy = true;
     let release: (() => Promise<void>) | undefined;
+    let cacheOnlyRun = false;
     try {
       release = await batchStorageLock(await this.storage());
       if (!release) return;
-      await this.consumer?.runDue();
+      // A cache-only recovery must not wake the shared download consumer.
+      cacheOnlyRun = (await this.records()).some(
+        (record) => record.cacheOnly && live(record),
+      );
+      if (!cacheOnlyRun) await this.consumer?.runDue();
       if (this.stopped) return;
       const b = (await this.records()).find(
         (b) =>
@@ -730,7 +790,7 @@ export class Wechat2RssSubscriptionBatches {
                 ['waiting', 'submitting'].includes(item.state),
               )),
         ) ||
-          (await this.consumer?.hasPending()))
+          (!cacheOnlyRun && (await this.consumer?.hasPending())))
       )
         this.schedule();
     }
@@ -750,7 +810,7 @@ export class Wechat2RssSubscriptionBatches {
     // Carrying the 17:30 tail through midnight would submit new requests in
     // the user's blackout. Expire only unsent automatic items at midnight;
     // accepted cache work and all manual/subscription intents remain intact.
-    if (b.purpose === 'scheduled-refresh') {
+    if (b.purpose === 'scheduled-refresh' && !b.cacheOnly) {
       const day = (value: number) =>
         Math.floor((value + 8 * 3600000) / 86400000);
       if (day(this.now()) > day(b.createdAt)) {
@@ -769,9 +829,10 @@ export class Wechat2RssSubscriptionBatches {
       }
     }
     const maySubmit =
-      b.purpose !== 'scheduled-refresh' ||
-      (activeRefreshScheduleEnabled(process.env) &&
-        automaticSubmissionAllowed(this.now()));
+      !b.cacheOnly &&
+      (b.purpose !== 'scheduled-refresh' ||
+        (activeRefreshScheduleEnabled(process.env) &&
+          automaticSubmissionAllowed(this.now())));
     const item =
       b.items.find(
         (i) =>
@@ -796,19 +857,26 @@ export class Wechat2RssSubscriptionBatches {
     }
     let result: BatchOutcome;
     try {
-      result =
-        b.purpose === 'scheduled-refresh'
+      result = b.cacheOnly
+        ? await this.refresh(item.feedId!, 'cache', false, { cacheOnly: true })
+        : b.purpose === 'scheduled-refresh'
           ? await this.refresh(item.feedId!, stage, true)
           : await this.refresh(item.feedId!, stage);
-    } catch {
+    } catch (error) {
+      const local =
+        stage === 'cache' &&
+        (error as { stopBatch?: boolean } | null)?.stopBatch === false;
       result = {
-        state: 'blocked',
+        state: local ? 'failed' : 'blocked',
+        stopBatch: !local,
         accepted: stage === 'cache',
         submissionUnknown: stage === 'submit',
         message:
           stage === 'submit'
             ? '上游更新回执未确认，已暂停；不会自动重发。'
-            : '缓存检查失败，已暂停；上游请求不会重发。',
+            : local
+              ? '本地缓存处理失败；其他订阅继续，本次请求不会重发。'
+              : '缓存检查失败，已暂停；上游请求不会重发。',
       };
     }
     if (this.stopped) return;
@@ -816,22 +884,37 @@ export class Wechat2RssSubscriptionBatches {
     if (!current) return;
     const target = current.items[item.index];
     Object.assign(target, result);
+    if (stage === 'submit' && target.state === 'waiting' && !target.accepted) {
+      target.state = 'blocked';
+      target.submissionUnknown = true;
+      target.message = '提交回执未确认，已暂停；不会自动重发。';
+    }
     target.refreshChecks =
       stage === 'cache' ? (target.refreshChecks || 0) + 1 : 0;
     target.refreshAfter = this.now() + 30000;
     if (target.state === 'waiting' && target.refreshChecks >= 10) {
-      target.state = 'blocked';
+      target.state = 'failed';
+      target.stopBatch = false;
       target.message =
         '上游已受理，缓存同步仍未就绪；已停止检查，已有内容保留。';
     }
     if (current.state !== 'stopped')
-      current.state = ['blocked', 'failed'].includes(target.state)
-        ? 'paused'
-        : current.items.some((i) =>
-              ['queued', 'waiting', 'submitting'].includes(i.state),
-            )
-          ? 'running'
-          : 'completed';
+      current.state =
+        target.submissionUnknown ||
+        (['blocked', 'failed'].includes(target.state) &&
+          !(
+            target.stopBatch === false &&
+            (stage === 'cache' || target.accepted)
+          ))
+          ? 'paused'
+          : current.items.some((i) =>
+                (current.cacheOnly
+                  ? ['waiting']
+                  : ['queued', 'waiting', 'submitting']
+                ).includes(i.state),
+              )
+            ? 'running'
+            : 'completed';
     await this.write(current);
   }
   close() {

@@ -246,3 +246,7 @@ pnpm run start:server
 ## 📄 License
 
 [MIT](https://raw.githubusercontent.com/cooderl/wewe-rss/main/LICENSE) @cooderl
+
+### 自动更新与缓存恢复
+
+定时轮次动态覆盖全部启用的中转订阅，已有完整文章跳过，新增走受保护的差量保存。单号本地失败不会拖停其他订阅；鉴权、风控及未知提交仍停止。已受理任务可按[本地缓存恢复说明](docs/AUTO_REFRESH_RECOVERY_20261012.md)零外部请求续接，未受理项保持未发送，媒体补齐单独处理。

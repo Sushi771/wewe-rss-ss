@@ -31,6 +31,11 @@ describe('explicit manual all-refresh boundary (offline)', () => {
         .fn()
         .mockResolvedValue({ available: true, challenged: false }),
       refreshSubscription: jest.fn().mockResolvedValue({ accepted: true }),
+      fetchArticles: jest.fn().mockResolvedValue({
+        articles: Array.from({ length: 10 }, () => ({})),
+        bodyMissing: 0,
+        imageBlocked: 0,
+      }),
     };
     (wechat2RssProvider as jest.Mock).mockReturnValue(provider);
     (createVerifiedSqliteBackup as jest.Mock).mockResolvedValue({
@@ -61,7 +66,7 @@ describe('explicit manual all-refresh boundary (offline)', () => {
           { purpose: 'manual-refresh' },
         ]),
     };
-    service.refreshMpArticlesAndUpdateFeed = jest.fn().mockResolvedValue({
+    service.syncCachedWechat2RssPage = jest.fn().mockResolvedValue({
       articles: 10,
       bodyMissing: 0,
       imageBlocked: 0,
@@ -75,7 +80,7 @@ describe('explicit manual all-refresh boundary (offline)', () => {
       id: { in: [id] },
     });
     expect(provider.refreshSubscription).not.toHaveBeenCalled();
-    expect(service.refreshMpArticlesAndUpdateFeed).not.toHaveBeenCalled();
+    expect(service.syncCachedWechat2RssPage).not.toHaveBeenCalled();
   });
   it('ordinary subscription projections keep all original batches and do not expose manual ones', async () => {
     expect(await service.subscriptionBatchList()).toEqual([
@@ -188,11 +193,13 @@ describe('explicit manual all-refresh boundary (offline)', () => {
       listReady: true,
       bodyReady: true,
     });
-    expect(service.refreshMpArticlesAndUpdateFeed).toHaveBeenCalledWith(
+    expect(service.syncCachedWechat2RssPage).toHaveBeenCalledWith(
       id,
-      1,
-      'local-manual',
+      expect.any(Object),
+      false,
+      { fetchMedia: false },
     );
+    expect(provider.fetchArticles).toHaveBeenCalledWith(id, feed.mpName);
     expect(provider.refreshSubscription).not.toHaveBeenCalled();
     expect(provider.checkAccountStatus).not.toHaveBeenCalled();
   });

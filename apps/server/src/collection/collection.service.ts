@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Article } from '@prisma/client';
 import { legacyArticleIdentityAmbiguous } from './legacy-article-identity';
 import { PrismaService } from '../prisma/prisma.service';
@@ -580,7 +580,10 @@ export class CollectionService {
     listOnly?: boolean;
     /** Internal validated existing-cache snapshot; never exposed as public input. */
     cachedPage?: ProviderPage;
+    /** Hard local-only media fence, including protected-saver fallback. */
+    fetchMedia?: boolean;
   }) {
+    const phaseStarted = Date.now();
     if (this.publicCollections.has(input.mpId))
       throw new Error('该公众号正在更新，请等待本次结束');
     this.publicCollections.add(input.mpId);
@@ -647,6 +650,7 @@ export class CollectionService {
             ...(input.cachedPage
               ? {
                   canFetchImage: () =>
+                    input.fetchMedia !== false &&
                     new Date(Date.now() + 8 * 3600000).getUTCHours() >= 6,
                 }
               : {}),
@@ -675,6 +679,10 @@ export class CollectionService {
         id: string;
         code: 'LEGACY_IDENTITY_UNVERIFIED';
       }> = [];
+      const transactionStarted = Date.now();
+      Logger.log(
+        `Cache prepare: ${transactionStarted - phaseStarted}ms; articles=${page.articles.length}`,
+      );
       await this.prisma.$transaction(
         async (tx) => {
           await supplementAvatar(tx);
@@ -703,6 +711,8 @@ export class CollectionService {
                   | 'verifiedSourceUrl'
                   | 'picUrl'
                   | 'lastBodyStatus'
+                  | 'createdAt'
+                  | 'updatedAt'
                 > & { contentHtml?: string | null }
               >
             | undefined = input.cachedPage ? [] : undefined;
@@ -712,6 +722,7 @@ export class CollectionService {
               const slice = identities.slice(offset, offset + 40);
               const rows = await tx.article.findMany({
                 where: {
+                  mpId: input.mpId,
                   OR: slice.flatMap(({ item, identity, base, prefix }) => [
                     { id: identity.id },
                     { sourceUrl: base },
@@ -732,13 +743,30 @@ export class CollectionService {
                   publishTime: true,
                   sourceUrl: true,
                   verifiedSourceUrl: true,
-                  contentHtml: !input.listOnly,
+                  contentHtml: !input.listOnly && input.fetchMedia !== false,
                   picUrl: true,
                   lastBodyStatus: true,
+                  createdAt: true,
+                  updatedAt: true,
                 },
               });
               cacheCandidates.push(...rows);
             }
+          }
+          Logger.log(
+            `Cache candidates: ${Date.now() - transactionStarted}ms; rows=${cacheCandidates?.length || 0}`,
+          );
+          if (cacheCandidates && input.fetchMedia === false) {
+            const flags = await tx.$queryRaw<
+              Array<{ id: string; missing: number }>
+            >`
+              SELECT id, CASE WHEN content_html IS NULL OR content_html = '' THEN 1 ELSE 0 END AS missing
+              FROM articles WHERE mp_id = ${input.mpId}`;
+            const missing = new Map(flags.map((row) => [row.id, row.missing]));
+            for (const row of cacheCandidates)
+              row.contentHtml = missing.get(row.id)
+                ? null
+                : '__WEWE_EXISTING_BODY__';
           }
           for (const item of page.articles) {
             // Title and time only detect a possible legacy collision; never merge by them.
@@ -829,18 +857,28 @@ export class CollectionService {
               });
               created++;
             } else {
-              const supplemented = existing.contentHtml
-                ? supplementSavedBodyImages(existing.contentHtml, item)
-                : undefined;
+              const supplemented =
+                input.fetchMedia !== false && existing.contentHtml
+                  ? supplementSavedBodyImages(existing.contentHtml, item)
+                  : undefined;
+              const canFillBody =
+                input.fetchMedia !== false ||
+                (existing.lastBodyStatus === 'unavailable' &&
+                  existing.createdAt &&
+                  existing.updatedAt &&
+                  existing.createdAt.getTime() ===
+                    existing.updatedAt.getTime());
               const data = {
-                ...(item.contentHtml?.includes('data-wewe-image-pending=')
+                ...(canFillBody &&
+                !existing.contentHtml &&
+                item.contentHtml?.includes('data-wewe-image-pending=')
                   ? { lastBodyStatus: 'images-pending' }
                   : {}),
                 ...(!existing.sourceUrl ? { sourceUrl: identity.url } : {}),
                 ...(!existing.verifiedSourceUrl
                   ? { verifiedSourceUrl: identity.url }
                   : {}),
-                ...(!existing.contentHtml && item.contentHtml
+                ...(canFillBody && !existing.contentHtml && item.contentHtml
                   ? { contentHtml: item.contentHtml }
                   : {}),
                 ...(supplemented ? { contentHtml: supplemented } : {}),
@@ -852,7 +890,7 @@ export class CollectionService {
                 ...(!existing.picUrl && item.picUrl
                   ? { picUrl: item.picUrl }
                   : {}),
-                ...(!existing.contentHtml && item.contentHtml
+                ...(canFillBody && !existing.contentHtml && item.contentHtml
                   ? {
                       lastBodyStatus: item.contentHtml.includes(
                         'data-wewe-image-pending=',
@@ -868,14 +906,29 @@ export class CollectionService {
                 ),
               );
               if (Object.keys(changed).length) {
-                await tx.article.update({
-                  where: { id: existing.id },
+                const written = await tx.article.updateMany({
+                  where: {
+                    id: existing.id,
+                    mpId: input.mpId,
+                    sourceUrl: existing.sourceUrl,
+                    verifiedSourceUrl: existing.verifiedSourceUrl,
+                    updatedAt: existing.updatedAt,
+                    lastBodyStatus: existing.lastBodyStatus,
+                    ...(input.fetchMedia === false && changed.contentHtml
+                      ? { OR: [{ contentHtml: null }, { contentHtml: '' }] }
+                      : input.fetchMedia !== false
+                        ? { contentHtml: existing.contentHtml }
+                        : {}),
+                  },
                   data: changed,
                 });
-                updated++;
+                updated += written.count;
               }
             }
           }
+          Logger.log(
+            `Cache writes: ${Date.now() - transactionStarted}ms; created=${created}; updated=${updated}`,
+          );
           const latest = await tx.article.aggregate({
             where: { mpId: input.mpId },
             _max: { publishTime: true },
@@ -896,6 +949,9 @@ export class CollectionService {
           });
         },
         { timeout: 60000 },
+      );
+      Logger.log(
+        `Cache transaction: ${Date.now() - transactionStarted}ms; created=${created}; updated=${updated}`,
       );
       cacheDataChanged(created + updated);
       return {

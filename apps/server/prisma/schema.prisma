@@ -82,6 +82,7 @@ model Article {
   updatedAt   DateTime? @default(now()) @updatedAt @map("updated_at")
   feed        Feed      @relation(fields: [mpId], references: [id], onDelete: Cascade)
 
+  @@index([mpId])
   @@map("articles")
 }
 

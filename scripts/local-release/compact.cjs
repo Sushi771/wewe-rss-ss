@@ -22,6 +22,11 @@ function bundleServer(target, packageSource, builderSource) {
     main: path.join(target, 'dist/apps/server/src/main.js'),
     hbs: require.resolve('hbs', { paths: [packageSource] }),
   };
+  const recovery = path.join(
+    target,
+    'dist/apps/server/src/collection/cache-recovery-runtime.js',
+  );
+  if (fs.existsSync(recovery)) entries['cache-recovery'] = recovery;
   const inputs = new Set();
   const versions = new Map();
   const licenses = new Map();

@@ -440,4 +440,132 @@ describe('durable authorized batch (offline)', () => {
     await manager.runDue();
     expect(submit.mock.calls.map((a) => a[0])).toEqual([urls[0], urls[0]]);
   });
+  it('cache-only continues three accepted items across restart, preserving eleven unsent requests', async () => {
+    const ids = Array.from(
+      { length: 14 },
+      (_, i) => `MP_WXS_${1234500000 + i}`,
+    );
+    const first = make();
+    const run = jest.fn().mockResolvedValue({
+      state: 'waiting',
+      accepted: true,
+      message: 'accepted',
+    });
+    first.manager.attachRefresh(run);
+    const batch = await first.manager.enqueueRefresh(ids);
+    for (let i = 0; i < 3; i++) {
+      await first.manager.runDue();
+      clock += 30000;
+    }
+    const file = path.join(
+      directory,
+      '.wechat2rss-subscription-batches',
+      batch.batchId + '.json',
+    );
+    const record = JSON.parse(await fs.readFile(file, 'utf8'));
+    record.state = 'paused';
+    record.items[0].state = 'failed';
+    await fs.writeFile(file, JSON.stringify(record));
+    first.manager.close();
+    const second = make();
+    const cache = jest.fn().mockResolvedValue({
+      state: 'succeeded',
+      accepted: true,
+      message: 'cached',
+    });
+    second.manager.attachRefresh(cache);
+    const consumer = {
+      hasPending: jest.fn().mockResolvedValue(false),
+      runDue: jest.fn(),
+    };
+    second.manager.attachConsumer(consumer);
+    expect(await second.manager.resumeCacheOnly(batch.batchId)).toMatchObject({
+      cacheOnly: true,
+    });
+    await second.manager.resumeCacheOnly(batch.batchId); // Duplicate recovery delivery.
+    for (let i = 0; i < 3; i++) await second.manager.runDue();
+    expect(cache.mock.calls).toEqual(
+      ids.slice(0, 3).map((id) => [id, 'cache', false, { cacheOnly: true }]),
+    );
+    expect(consumer.runDue).not.toHaveBeenCalled();
+    expect((await second.manager.list())[0]).toMatchObject({
+      state: 'completed',
+      cacheOnly: true,
+    });
+    expect(
+      (await second.manager.list())[0].items
+        .slice(3)
+        .every((item) => item.state === 'queued' && !item.accepted),
+    ).toBe(true);
+    second.manager.close();
+    const recovered = make();
+    const afterRestart = jest.fn();
+    recovered.manager.attachRefresh(afterRestart);
+    await recovered.manager.init();
+    await recovered.manager.runDue();
+    expect(afterRestart).not.toHaveBeenCalled();
+    await expect(recovered.manager.resume(batch.batchId)).rejects.toThrow(
+      'BATCH_CACHE_ONLY',
+    );
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+  it('isolates a local accepted save failure but pauses on global or unclassified failures', async () => {
+    const ids = ['MP_WXS_1234567890', 'MP_WXS_2234567890', 'MP_WXS_3234567890'];
+    const { manager } = make();
+    const run = jest
+      .fn()
+      .mockResolvedValueOnce({
+        state: 'failed',
+        accepted: true,
+        stopBatch: false,
+        message: 'local save failed',
+      })
+      .mockResolvedValueOnce({
+        state: 'blocked',
+        accepted: false,
+        stopBatch: true,
+        message: 'account blocked',
+      });
+    manager.attachRefresh(run);
+    await manager.enqueueRefresh(ids);
+    await manager.runDue();
+    expect((await manager.list())[0].state).toBe('running');
+    clock += 30000;
+    await manager.runDue();
+    clock += 30000;
+    await manager.runDue();
+    expect((await manager.list())[0]).toMatchObject({
+      state: 'paused',
+      items: [{ state: 'failed' }, { state: 'blocked' }, { state: 'queued' }],
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+  it('cache-only cannot steal an active worker claim or replay an unknown submission', async () => {
+    let finish!: (result: BatchOutcome) => void;
+    const { manager } = make();
+    manager.attachRefresh(
+      jest.fn(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    );
+    const batch = await manager.enqueueRefresh(['MP_WXS_1234567890']);
+    const work = manager.runDue();
+    while (!finish) await new Promise((resolve) => setImmediate(resolve));
+    await expect(manager.resumeCacheOnly(batch.batchId)).rejects.toThrow(
+      'BATCH_BUSY',
+    );
+    finish({
+      state: 'blocked',
+      accepted: false,
+      submissionUnknown: true,
+      message: 'unknown',
+    });
+    await work;
+    await expect(manager.resumeCacheOnly(batch.batchId)).rejects.toThrow(
+      'BATCH_UNCONFIRMED',
+    );
+  });
 });

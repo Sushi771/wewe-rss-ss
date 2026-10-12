@@ -90,6 +90,8 @@ jobs:
         run: node --test scripts/cache-revision-watch.test.cjs scripts/cache-sync-status-ui.test.cjs
       - name: Test periodic SQLite snapshots and fail-closed leases offline
         run: python3 apps/server/scripts/test_sqlite_snapshot_guard.py -v
+      - name: Test cache-only Unicode transport and publisher identity offline
+        run: python3 apps/server/scripts/test_read-wechat2rss-cache.py
       - name: Test read-only SQLite cache signals on synthetic databases
         run: python3 apps/server/scripts/test-watch-wechat2rss-cache.py
       - name: Test isolated WeRead gateway probe

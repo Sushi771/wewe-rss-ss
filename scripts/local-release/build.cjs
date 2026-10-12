@@ -1,6 +1,7 @@
 // 只创建新版本，不停服务、不改已安装的依赖、旧 dist/client 或数据库。
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { parseArgs } = require('node:util');
 const { verifySourceSnapshot } = require('./verify-source.cjs');
 const { bundleServer } = require('./compact.cjs');
@@ -183,6 +184,43 @@ function build(options = {}) {
     inputs['tools/wechat-desktop-collector/collect.ps1'] = fileHash(
       path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
     );
+  let currentCommit = null;
+  if (!legacy) {
+    currentCommit = run('git', ['rev-parse', 'HEAD'], { cwd: root }).trim();
+    const tree = run(
+      'git',
+      ['ls-tree', '-r', '-z', '--full-tree', currentCommit],
+      { cwd: root },
+    );
+    const blobs = new Map(
+      tree
+        .split('\0')
+        .filter(Boolean)
+        .map((row) => {
+          const match = row.match(/^\d+ blob ([a-f0-9]{40})\t(.+)$/s);
+          if (!match) throw new Error('Unsupported release source entry');
+          return [match[2], match[1]];
+        }),
+    );
+    const blobHash = (bytes) =>
+      crypto
+        .createHash('sha1')
+        .update(`blob ${bytes.length}\0`)
+        .update(bytes)
+        .digest('hex');
+    for (const file of Object.keys(inputs)) {
+      const content = fs.readFileSync(path.join(sourceRoot, file));
+      const normalized = Buffer.from(
+        content.toString('utf8').replace(/\r\n/g, '\n'),
+      );
+      if (
+        !blobs.has(file) ||
+        (blobHash(content) !== blobs.get(file) &&
+          blobHash(normalized) !== blobs.get(file))
+      )
+        throw new Error('Release input differs from committed source: ' + file);
+    }
+  }
   const sourceHash = hash(JSON.stringify(inputs));
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
   const release = path.join(root, '.local-releases', id);
@@ -326,6 +364,7 @@ function build(options = {}) {
     ...(legacy ? [] : ['sqlite-snapshot-guard.py']),
     'verify-preservation.py',
     'watch-wechat2rss-cache.py',
+    'read-wechat2rss-cache.py',
   ])
     fs.copyFileSync(
       path.join(server, 'scripts', file),
@@ -371,7 +410,7 @@ function build(options = {}) {
     arch: process.arch,
     nodeVersion: process.version,
     sourceHash,
-    sourceCommit: legacy ? options.sourceCommit : null,
+    sourceCommit: legacy ? options.sourceCommit : currentCommit,
     schemaCompatibility: legacy ? 'legacy-additive' : 'current',
     startupInspection: legacy ? 'full' : 'schema-only-v1',
     ...(compact

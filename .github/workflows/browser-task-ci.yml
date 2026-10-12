@@ -9,6 +9,10 @@ on:
       - '.github/workflows/browser-task-ci.yml'
       - 'apps/server/src/collection/sqlite-snapshot-guard*'
       - 'apps/server/src/collection/insert-only-cache*'
+      - 'apps/server/src/collection/*cache*'
+      - 'apps/server/src/collection/wechat2rss-subscription-batches*'
+      - 'apps/server/src/feeds/cache-sync*'
+      - 'apps/server/src/trpc/trpc.service.ts'
 jobs:
   extension-offline:
     runs-on: ubuntu-latest

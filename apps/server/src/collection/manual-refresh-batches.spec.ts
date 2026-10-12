@@ -153,7 +153,7 @@ describe('manual refresh through the original batch scheduler (offline)', () => 
       items: [{ state: 'succeeded' }, { state: 'cancelled' }],
     });
   });
-  it('bounded cache checks pause safely and cache-only resume cannot resubmit', async () => {
+  it('bounded local cache checks finish safely and cache-only resume cannot resubmit', async () => {
     const { manager, run } = make();
     const batch = await manager.enqueueRefresh([ids[0]]);
     await manager.runDue();
@@ -161,8 +161,8 @@ describe('manual refresh through the original batch scheduler (offline)', () => 
       clock += 30000;
       await manager.runDue();
     }
-    expect((await manager.list())[0].state).toBe('paused');
-    await manager.resume(batch.batchId);
+    expect((await manager.list())[0].state).toBe('completed');
+    await manager.resumeCacheOnly(batch.batchId);
     await manager.runDue();
     expect(run.mock.calls.filter((call) => call[1] === 'submit')).toHaveLength(
       1,

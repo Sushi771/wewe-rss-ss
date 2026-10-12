@@ -1,6 +1,8 @@
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as providerRegistry from '../collection/provider-registry';
+import { Wechat2RssSubscriptionBatches } from '../collection/wechat2rss-subscription-batches';
 import { PrismaClient } from '@prisma/client';
 import { CollectionService } from '../collection/collection.service';
 import { TrpcService } from '../trpc/trpc.service';
@@ -267,4 +269,225 @@ describe('cache delta through original SQLite merge', () => {
     ).toEqual(before);
     expect(cacheRevision().revision).toBe(revision);
   });
+
+  it('preserves an intentionally cleared body and reports the remaining local gap without a write', async () => {
+    const identity = canonicalArticleUrl(
+      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=797&idx=1',
+    );
+    await prisma.article.create({
+      data: {
+        id: identity.id,
+        mpId,
+        title: 'edited-empty',
+        publishTime: 1760000000,
+        sourceUrl: identity.url,
+        verifiedSourceUrl: identity.url,
+        contentHtml: '',
+        picUrl: '',
+        lastBodyStatus: 'unavailable',
+        createdAt: new Date('2026-01-01'),
+        updatedAt: new Date('2026-01-02'),
+        metrics: '{"note":"keep"}',
+      },
+    });
+    const incoming: ProviderPage = {
+      articles: [
+        {
+          ...identity,
+          title: 'edited-empty',
+          publishTime: 1760000000,
+          contentHtml:
+            '<div class="rich_media_content"><p>upstream body</p></div>',
+          picUrl: '',
+        },
+      ],
+      coverage: 'recent-window',
+      upstreamCount: 1,
+      bodyMissing: 0,
+      imageBlocked: 0,
+    };
+    const before = await prisma.article.findUniqueOrThrow({
+      where: { id: identity.id },
+    });
+    const backups = (createVerifiedSqliteBackup as jest.Mock).mock.calls.length;
+    expect(
+      await trpc.syncCachedWechat2RssPage(mpId, incoming, false, {
+        fetchMedia: false,
+      }),
+    ).toMatchObject({ created: 0, updated: 0, bodyMissing: 1 });
+    expect(
+      await prisma.article.findUniqueOrThrow({ where: { id: identity.id } }),
+    ).toEqual(before);
+    expect((createVerifiedSqliteBackup as jest.Mock).mock.calls.length).toBe(
+      backups,
+    );
+  });
+  it('runs all 14 through the actual automatic cache entry; unchanged 21 are no-op, local failure isolates, media stays offline and replay is idempotent', async () => {
+    const ids = Array.from(
+      { length: 14 },
+      (_, i) => `MP_WXS_${4234567800 + i}`,
+    );
+    const pages = new Map<string, ProviderPage>();
+    for (const [i, id] of ids.entries()) {
+      await prisma.feed.create({
+        data: {
+          id,
+          mpName: `automatic-${i}`,
+          mpIntro: '',
+          mpCover: '',
+          collectionChannel: 'wechat2rss',
+          status: 1,
+          updateTime: 0,
+        },
+      });
+      const articles = Array.from({ length: i === 0 ? 21 : 1 }, (_, j) => ({
+        ...canonicalArticleUrl(
+          `https://mp.weixin.qq.com/s?__biz=${Buffer.from(id.slice(7)).toString('base64')}&mid=${800 + j}&idx=1`,
+        ),
+        title: `automatic-${i}-${j}`,
+        publishTime: 1760000000,
+        contentHtml: '<div class="rich_media_content"><p>cached body</p></div>',
+        picUrl: '',
+      }));
+      pages.set(id, {
+        articles,
+        coverage: 'recent-window',
+        upstreamCount: articles.length,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      });
+      if (i === 0)
+        for (const article of articles)
+          await prisma.article.create({
+            data: {
+              id: article.id,
+              mpId: id,
+              title: article.title,
+              publishTime: article.publishTime,
+              sourceUrl: article.url,
+              verifiedSourceUrl: article.url,
+              picUrl: '',
+              contentHtml: article.contentHtml,
+              lastBodyStatus: 'available',
+              metrics: '{"personal":true}',
+            },
+          });
+      if (i === 1) {
+        const article = articles[0];
+        const time = new Date('2026-01-01');
+        await prisma.article.create({
+          data: {
+            id: article.id,
+            mpId: id,
+            title: article.title,
+            publishTime: article.publishTime,
+            sourceUrl: article.url,
+            verifiedSourceUrl: article.url,
+            contentHtml: null,
+            picUrl: '',
+            lastBodyStatus: 'unavailable',
+            createdAt: time,
+            updatedAt: time,
+          },
+        });
+        article.contentHtml =
+          '<div class="rich_media_content"><p>safe missing fill</p><img src="https://mmbiz.qpic.cn/safe.png"></div>';
+      }
+    }
+    const originalRows = await prisma.article.findMany({
+      where: { mpId: ids[0] },
+    });
+    const network = jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValue(Error('NETWORK_FORBIDDEN'));
+    const provider = {
+      fetchArticles: jest.fn((id: string) => Promise.resolve(pages.get(id)!)),
+    };
+    const providerSpy = jest
+      .spyOn(providerRegistry, 'wechat2RssProvider')
+      .mockReturnValue(provider as any);
+    const oldSaver = jest.spyOn(trpc as any, 'refreshMpArticlesAndUpdateFeed');
+    const protectedSaver = jest.spyOn(trpc as any, 'recordCollectionResult');
+    const originalSync = trpc.syncCachedWechat2RssPage.bind(trpc);
+    const sync = jest
+      .spyOn(trpc, 'syncCachedWechat2RssPage')
+      .mockImplementation(async (id, page, listOnly, options) => {
+        if (id === ids[2]) throw new Error('synthetic local save failure');
+        return originalSync(id, page, listOnly, options);
+      });
+    let now = new Date('2026-10-12T01:15:00Z').getTime();
+    const manager = new Wechat2RssSubscriptionBatches(
+      () => path.join(root, 'test.db'),
+      () => 'automatic-entry-fixture',
+      jest.fn(),
+      async () => null,
+      async () => null,
+      () => now,
+    );
+    const stages: Array<[string, string]> = [];
+    manager.attachRefresh(async (id, stage) => {
+      stages.push([id, stage]);
+      if (stage === 'submit')
+        return {
+          state: 'waiting',
+          accepted: true,
+          message: 'offline accepted fixture',
+        };
+      return (trpc as any).runManualRefresh(id, stage, true);
+    });
+    try {
+      const batch = await manager.enqueueRefresh(ids, 'e'.repeat(64));
+      const before = protectedSaver.mock.calls.length;
+      // This is the production runManualRefresh automatic cache branch.
+      expect(
+        await (trpc as any).runManualRefresh(ids[0], 'cache', true),
+      ).toMatchObject({ state: 'succeeded' });
+      expect(protectedSaver.mock.calls.length).toBe(before);
+      for (let i = 0; i < 35; i++) {
+        await manager.runDue();
+        now += 30000;
+      }
+      const done = (await manager.list()).find(
+        (b) => b.batchId === batch.batchId,
+      )!;
+      expect(done.state).toBe('completed');
+      expect(done.items.filter((i) => i.state === 'failed')).toHaveLength(1);
+      expect(done.items.filter((i) => i.state === 'succeeded')).toHaveLength(
+        13,
+      );
+      expect(
+        new Set(
+          stages.filter(([, stage]) => stage === 'cache').map(([id]) => id),
+        ).size,
+      ).toBe(14);
+      expect(
+        await prisma.article.findMany({ where: { mpId: ids[0] } }),
+      ).toEqual(originalRows);
+      expect(
+        (
+          await prisma.article.findUniqueOrThrow({
+            where: { id: pages.get(ids[1])!.articles[0].id },
+          })
+        ).contentHtml,
+      ).toContain('safe missing fill');
+      const count = await prisma.article.count();
+      const backups = (createVerifiedSqliteBackup as jest.Mock).mock.calls
+        .length;
+      for (const id of ids.filter((id) => id !== ids[2]))
+        await (trpc as any).runManualRefresh(id, 'cache', true);
+      expect(await prisma.article.count()).toBe(count);
+      expect((createVerifiedSqliteBackup as jest.Mock).mock.calls.length).toBe(
+        backups,
+      );
+      expect(oldSaver).not.toHaveBeenCalled();
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      manager.close();
+      sync.mockRestore();
+      providerSpy.mockRestore();
+      network.mockRestore();
+      oldSaver.mockRestore();
+      protectedSaver.mockRestore();
+    }
+  }, 60000);
 });

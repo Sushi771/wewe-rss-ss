@@ -9,6 +9,7 @@ import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
+import { readLocalWechat2RssCache } from '../collection/local-cache-reader';
 import { cacheFailureReason } from '../collection/cache-failure';
 import { wechat2RssProvider } from '../collection/provider-registry';
 import { Wechat2RssProvider } from '../collection/providers/wechat2rss';
@@ -367,11 +368,12 @@ export class TrpcService {
       ),
     );
   }
-  /** Explicit overview action only. Scheduled and single-feed cache reads stay unchanged. */
+  /** Both manual and scheduled batches use this serial differential cache entry. */
   private async runManualRefresh(
     feedId: string,
     stage: 'submit' | 'cache',
     automatic = false,
+    options?: { cacheOnly: boolean },
   ): Promise<BatchOutcome> {
     if (
       automatic &&
@@ -408,20 +410,52 @@ export class TrpcService {
         message: '订阅已停用或来源已变化，本条停止；已有内容保留。',
       };
     if (stage === 'cache') {
-      const result = await this.refreshMpArticlesAndUpdateFeed(
-        feedId,
-        1,
-        'local-manual',
-      );
+      let page: ProviderPage;
+      if (options?.cacheOnly) {
+        try {
+          page = await readLocalWechat2RssCache(feedId, feed.mpName);
+        } catch {
+          return {
+            state: 'failed',
+            accepted: true,
+            stopBatch: false,
+            message: '本号本地缓存不可用；其他订阅继续，未发出外部请求。',
+          };
+        }
+      } else
+        page = await wechat2RssProvider().fetchArticles(feedId, feed.mpName);
+      let result: Awaited<ReturnType<TrpcService['syncCachedWechat2RssPage']>>;
+      try {
+        result = await this.syncCachedWechat2RssPage(feedId, page, false, {
+          fetchMedia: false,
+        });
+      } catch (error) {
+        if ((error as Error).message === 'CACHE_SYNC_STARTUP_BLOCKED')
+          throw error;
+        if ((error as Error).message === 'CACHE_SYNC_BUSY')
+          return {
+            state: 'waiting',
+            accepted: true,
+            message: '等待本号正在进行的本地保存。',
+          };
+        // The provider read remains outside this catch: authentication/risk
+        // failures stop the whole round. Local storage/content failures do not.
+        return {
+          state: 'failed',
+          accepted: true,
+          stopBatch: false,
+          message: '本号本地缓存保存失败；保留已有内容，继续其他订阅。',
+        };
+      }
       const ready =
-        'bodyMissing' in result &&
-        result.articles > 0 &&
-        result.bodyMissing === 0;
+        page.articles.length > 0 &&
+        result.bodyMissing === 0 &&
+        !result.identitySkipped;
       return {
         state: ready ? 'succeeded' : 'waiting',
         accepted: true,
         feedId,
-        listReady: result.articles > 0,
+        listReady: page.articles.length > 0,
         bodyReady:
           ready &&
           'imageBlocked' in result &&
@@ -552,6 +586,9 @@ export class TrpcService {
   stopSubscriptionBatch(id: string) {
     return this.taskStorage(() => this.subscriptionBatches.stop(id));
   }
+  resumeRefreshCacheOnly(id: string) {
+    return this.taskStorage(() => this.subscriptionBatches.resumeCacheOnly(id));
+  }
   resumeSubscriptionBatch(id: string) {
     return this.taskStorage(() => this.subscriptionBatches.resume(id));
   }
@@ -639,8 +676,8 @@ export class TrpcService {
       },
       (id) => this.subscriptionTasks.resume(id),
     );
-    this.subscriptionBatches.attachRefresh((id, stage, automatic) =>
-      this.runManualRefresh(id, stage, automatic),
+    this.subscriptionBatches.attachRefresh((id, stage, automatic, options) =>
+      this.runManualRefresh(id, stage, automatic, options),
     );
     const { url } =
       this.configService.get<ConfigurationType['platform']>('platform')!;
@@ -799,7 +836,10 @@ export class TrpcService {
     mpId: string,
     page: ProviderPage,
     listOnly: boolean,
+    options: { fetchMedia?: boolean } = {},
   ) {
+    const started = Date.now();
+    const fetchMedia = options.fetchMedia !== false;
     if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');
     assertProviderPage(page, mpId);
     const feed = await this.prismaService.feed.findUniqueOrThrow({
@@ -817,14 +857,32 @@ export class TrpcService {
         id: true,
         sourceUrl: true,
         verifiedSourceUrl: true,
-        contentHtml: !listOnly,
+        lastBodyStatus: true,
+        createdAt: true,
+        updatedAt: true,
         picUrl: !listOnly,
         title: true,
         publishTime: true,
       },
     });
+    // SQLite computes small flags; never transfer saved multi-megabyte HTML
+    // into the automatic no-op preflight or parse it in JavaScript.
+    const flags = listOnly
+      ? []
+      : await this.prismaService.$queryRaw<
+          Array<{
+            id: string;
+            bodyMissing: number;
+            remoteImages: number;
+          }>
+        >`SELECT id,
+      CASE WHEN content_html IS NULL OR content_html = '' THEN 1 ELSE 0 END AS bodyMissing,
+      CASE WHEN (content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%') THEN 1 ELSE 0 END AS remoteImages
+      FROM articles WHERE mp_id = ${mpId}`;
+    const bodyFlags = new Map(flags.map((row) => [row.id, row]));
     // Normalize saved identities once per snapshot, rather than once for each
     // incoming row. Keep the original first-match semantics for legacy IDs.
+    const incomingIds = new Set(page.articles.map((item) => item.id));
     const byIdentity = new Map<string, (typeof saved)[number]>();
     for (const row of saved) {
       if (!byIdentity.has(row.id)) byIdentity.set(row.id, row);
@@ -832,8 +890,17 @@ export class TrpcService {
         if (!url) continue;
         try {
           const id = canonicalArticleUrl(url).id;
-          if (!byIdentity.has(id)) byIdentity.set(id, row);
-        } catch {} // An opaque legacy URL is still checked by the protected saver.
+          if (
+            incomingIds.has(id) &&
+            byIdentity.has(id) &&
+            byIdentity.get(id)!.id !== row.id
+          )
+            throw new Error('CACHE_LOCAL_IDENTITY_CONFLICT');
+          byIdentity.set(id, row);
+        } catch (error) {
+          if ((error as Error).message === 'CACHE_LOCAL_IDENTITY_CONFLICT')
+            throw error;
+        } // An opaque legacy URL is still checked by the protected saver.
       }
     }
     const legacyByTitleTime = new Map<string, typeof saved>();
@@ -847,6 +914,7 @@ export class TrpcService {
       id: string;
       code: 'LEGACY_IDENTITY_UNVERIFIED';
     }> = [];
+    let protectedBodyMissing = 0;
     const neededArticles = page.articles.filter((item) => {
       const existing = byIdentity.get(item.id);
       if (!existing) {
@@ -864,36 +932,63 @@ export class TrpcService {
         return true;
       }
       if (listOnly) return false;
+      const flags = bodyFlags.get(existing.id);
+      // A later edit/clear is not evidence of a missing provider body. Leave
+      // it untouched unless a separate verified repair explicitly authorizes it.
+      const uneditedMissing =
+        flags?.bodyMissing &&
+        (fetchMedia || existing.lastBodyStatus === 'unavailable') &&
+        existing.createdAt &&
+        existing.updatedAt &&
+        (fetchMedia ||
+          existing.updatedAt.getTime() === existing.createdAt.getTime());
+      if (flags?.bodyMissing && item.contentHtml && !uneditedMissing)
+        protectedBodyMissing++;
       return (
-        (!existing.contentHtml && !!item.contentHtml) ||
-        (!existing.picUrl && !!item.picUrl) ||
-        !!(
-          item.contentHtml &&
-          existing.contentHtml &&
-          /<img\b[^>]*(?:src|data-src)=["']https?:\/\//i.test(
-            existing.contentHtml,
-          )
-        ) ||
+        (!!uneditedMissing && !!item.contentHtml) ||
+        (!existing.picUrl && !!item.picUrl && fetchMedia) ||
+        (!!flags?.remoteImages && fetchMedia) ||
         !existing.sourceUrl ||
         !existing.verifiedSourceUrl
       );
     });
-    if (!neededArticles.length)
+    if (!neededArticles.length) {
+      this.logger.log(
+        `Cache sync preflight: unchanged; ${Date.now() - started}ms; articles=${page.articles.length}`,
+      );
       return {
         created: 0,
         updated: 0,
-        bodyMissing: page.bodyMissing,
+        bodyMissing: page.bodyMissing + protectedBodyMissing,
         imageBlocked: page.imageBlocked,
         identitySkipped: preflightSkipped.length,
         identitySkippedArticles: preflightSkipped,
       };
+    }
+    const safeArticle = (item: ProviderPage['articles'][number]) => {
+      const existing = byIdentity.get(item.id);
+      const flags = existing && bodyFlags.get(existing.id);
+      if (
+        existing &&
+        flags?.bodyMissing &&
+        !(
+          (fetchMedia || existing.lastBodyStatus === 'unavailable') &&
+          existing.createdAt &&
+          existing.updatedAt &&
+          (fetchMedia ||
+            existing.updatedAt.getTime() === existing.createdAt.getTime())
+        )
+      )
+        return { ...item, contentHtml: null };
+      return item;
+    };
     const delta = {
       ...page,
       // Mixed batches recheck isolated identities under the original write
       // transaction, retaining its diagnostic report. Only an all-no-op batch
       // can avoid the backup and all writes above.
       articles: [
-        ...neededArticles,
+        ...neededArticles.map(safeArticle),
         ...page.articles.filter((item) =>
           preflightSkipped.some((row) => row.id === item.id),
         ),
@@ -903,7 +998,9 @@ export class TrpcService {
         ...page.articles.filter((item) =>
           preflightSkipped.some((row) => row.id === item.id),
         ),
-      ].filter((item) => !item.contentHtml).length,
+      ]
+        .map(safeArticle)
+        .filter((item) => !item.contentHtml).length,
     };
     if (
       process.env.SQLITE_INSERT_ONLY_FAST_PATH === '1' &&
@@ -940,6 +1037,7 @@ export class TrpcService {
           trigger: 'scheduled',
           cachedPage: delta,
           listOnly,
+          fetchMedia,
         });
       },
       true,
@@ -1016,7 +1114,9 @@ export class TrpcService {
           ? requireSqlite(feed)
           : requireSqlite;
       // 包括 running/failed 状态在内，任何本次采集写入都必须晚于备份核验。
+      const backupStarted = Date.now();
       await createVerifiedSqliteBackup({ allowMysqlSkip: !sqliteRequired });
+      this.logger.log(`Cache backup: ${Date.now() - backupStarted}ms`);
       await this.prismaService.feed.update({
         where: { id: mpId },
         data: {
