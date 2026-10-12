@@ -31,4 +31,20 @@ describe('persistent media restriction stop', () => {
         await fs.rm(directory, { recursive: true, force: true });
     }
   });
+  it('observes another worker marker and fails closed when storage cannot initialize', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-live-latch-'));
+    const database = path.join(dir, 'test.db');
+    await fs.writeFile(database, '');
+    const first = new MediaSafetyStop();
+    await first.initialize('file:' + database);
+    const other = new MediaSafetyStop();
+    await other.initialize('file:' + database);
+    await other.stop();
+    expect(first.isBlocked()).toBe(true);
+    const unavailable = new MediaSafetyStop();
+    await expect(unavailable.initialize('invalid')).rejects.toThrow(
+      'SQLITE_REQUIRED',
+    );
+    expect(unavailable.isBlocked()).toBe(true);
+  });
 });

@@ -5,3 +5,7 @@
 export { TrpcService } from '../trpc/trpc.service';
 export { CollectionService } from './collection.service';
 export { readLocalWechat2RssCache } from './local-cache-reader';
+
+export { canonicalArticleUrl } from './collection-format';
+export { mediaSafetyStop } from '../feeds/media-safety-stop';
+export { decodeInlineImage } from './image-fetch';

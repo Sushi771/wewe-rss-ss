@@ -35,6 +35,11 @@ export type CacheSyncDependencies = {
   mediaEnabled?(): boolean;
   onMediaBlocked?(): Promise<void>;
   mediaStopped?(): boolean;
+  /** Read-only stored-body flags, even when the upstream fingerprint is unchanged. */
+  inspectLocalMedia?(
+    id: string,
+    page: ProviderPage,
+  ): Promise<{ mediaReady: boolean }>;
   list(): Promise<Wechat2RssListedFeed[]>;
   localFeeds(): Promise<LocalFeed[]>;
   read(feed: Wechat2RssListedFeed, name: string): Promise<ProviderPage>;
@@ -191,6 +196,12 @@ export class CacheSyncEngine {
             await this.deps.sync(id, page, true);
             slot.fingerprint = fingerprint;
             this.media.set(id, { page, due: now });
+          } else if (!this.media.has(id)) {
+            // Reconcile local SQLite gaps without downloading healthy media or
+            // rewriting a successful list. Unknown readiness stays pending.
+            const local = await this.deps.inspectLocalMedia?.(id, page);
+            if (local?.mediaReady !== true)
+              this.media.set(id, { page, due: now });
           }
           slot.failures = 0;
           const delays =
@@ -242,6 +253,7 @@ export class CacheSyncEngine {
     if (
       this.mediaBusy ||
       this.mediaBlocked ||
+      this.deps.mediaStopped?.() ||
       this.stopped ||
       this.deps.mediaEnabled?.() === false ||
       !cacheSyncDaytime(this.deps.now())
@@ -262,7 +274,7 @@ export class CacheSyncEngine {
     this.mediaBusy = true;
     try {
       const result = await this.deps.sync(id, job.page, false);
-      if (this.media.get(id) !== job) return; // New snapshot supersedes this one.
+      // Security results are global, including a superseded snapshot.
       if (result.mediaRequestBlocked) {
         this.mediaBlocked = true;
         await this.deps.onMediaBlocked?.();
@@ -270,10 +282,11 @@ export class CacheSyncEngine {
         cacheSyncState.state = 'media-blocked';
         return;
       }
+      if (this.media.get(id) !== job) return; // New snapshot supersedes this one.
       if (
-        !result.bodyMissing &&
-        !result.imageBlocked &&
-        !result.localMediaPendingArticleCount
+        result.bodyMissing === 0 &&
+        result.imageBlocked === 0 &&
+        result.localMediaPendingArticleCount === 0
       ) {
         this.media.delete(id);
         slot.status.state = 'synced-cache';

@@ -11,7 +11,7 @@ import { databaseWritesAllowed, waitForStartupAudit } from '../startup-audit';
 import { CacheSyncEngine } from './cache-sync-engine';
 import { CacheSqliteMonitor } from './cache-sqlite-monitor';
 import { cacheSyncState } from './cache-sync-state';
-import { MediaSafetyStop } from './media-safety-stop';
+import { mediaSafetyStop } from './media-safety-stop';
 
 @Injectable()
 export class CacheSyncService
@@ -39,15 +39,18 @@ export class CacheSyncService
   }
   private async start() {
     try {
-      const safety = new MediaSafetyStop();
-      await safety.initialize(process.env.DATABASE_URL || '');
+      const safety = await mediaSafetyStop(process.env.DATABASE_URL || '');
       const provider = wechat2RssProvider();
       this.engine = new CacheSyncEngine({
         now: Date.now,
         mediaEnabled: () =>
-          process.env.WECHAT2RSS_CACHE_MEDIA !== '0' && !safety.blocked,
+          process.env.WECHAT2RSS_CACHE_MEDIA !== '0' && !safety.isBlocked(),
         onMediaBlocked: () => safety.stop(),
-        mediaStopped: () => safety.blocked,
+        mediaStopped: () => safety.isBlocked(),
+        inspectLocalMedia: (id, page) =>
+          this.trpc.syncCachedWechat2RssPage(id, page, false, {
+            inspectOnly: true,
+          }),
         list: () => provider.listSubscriptions(),
         localFeeds: async () =>
           (await this.prisma.feed.findMany({ where: { status: 1 } })).filter(

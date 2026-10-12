@@ -50,6 +50,7 @@ function setup(count = 1, mediaEnabled?: () => boolean) {
     updated: 0,
     bodyMissing: 1,
     imageBlocked: 0,
+    localMediaPendingArticleCount: 0,
   });
   const engine = new CacheSyncEngine({
     now: () => now,
@@ -81,6 +82,7 @@ describe('existing-cache synchronization', () => {
       updated: 0,
       bodyMissing: 0,
       imageBlocked: 0,
+      localMediaPendingArticleCount: 0,
     });
     await f.engine.tick();
     expect(f.sync.mock.calls.map((args) => args[2])).toEqual([true]);

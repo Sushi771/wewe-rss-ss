@@ -78,6 +78,8 @@ jobs:
         run: node --test scripts/sites-local-contract.test.mjs
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
+      - name: Test independent media reconciliation and global stop offline
+        run: node --test scripts/offline-media-recovery.test.cjs
       - name: Test single-article official verification UI offline
         run: node --test scripts/acceptance-article-verification.test.cjs
       - name: Test retained article path recovery offline

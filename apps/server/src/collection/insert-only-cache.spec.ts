@@ -279,16 +279,19 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
       syncTime: 0,
     });
     const {
+      localBodyMissingArticleCount,
       localMediaPendingArticleCount,
       mediaReady,
       upstreamImageBlockedCount,
       ...persistedResult
     } = result;
     expect({
+      localBodyMissingArticleCount,
       localMediaPendingArticleCount,
       mediaReady,
       upstreamImageBlockedCount,
     }).toEqual({
+      localBodyMissingArticleCount: 2,
       localMediaPendingArticleCount: 0,
       mediaReady: false,
       upstreamImageBlockedCount: 0,

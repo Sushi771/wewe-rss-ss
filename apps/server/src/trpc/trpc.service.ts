@@ -837,10 +837,22 @@ export class TrpcService {
     mpId: string,
     page: ProviderPage,
     listOnly: boolean,
-    options: { fetchMedia?: boolean } = {},
+    options: {
+      fetchMedia?: boolean;
+      inspectOnly?: boolean;
+      nightMediaUntil?: number;
+    } = {},
   ) {
     const started = Date.now();
-    const fetchMedia = options.fetchMedia !== false;
+    // Internal bounded batch exception; ordinary routes never supply this.
+    if (
+      options.nightMediaUntil !== undefined &&
+      (!Number.isFinite(options.nightMediaUntil) ||
+        options.nightMediaUntil <= started ||
+        options.nightMediaUntil > started + 30 * 60000)
+    )
+      throw new Error('MEDIA_NIGHT_PERMIT_INVALID');
+    const fetchMedia = options.fetchMedia !== false && !options.inspectOnly;
     if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');
     assertProviderPage(page, mpId);
     const feed = await this.prismaService.feed.findUniqueOrThrow({
@@ -868,20 +880,41 @@ export class TrpcService {
     });
     // SQLite computes small flags; never transfer saved multi-megabyte HTML
     // into the automatic no-op preflight or parse it in JavaScript.
-    const flags = listOnly
-      ? []
-      : await this.prismaService.$queryRaw<
-          Array<{
-            id: string;
-            bodyMissing: number;
-            remoteImages: number;
-            mediaPending: number;
-          }>
-        >`SELECT id,
-      CASE WHEN content_html IS NULL OR content_html = '' THEN 1 ELSE 0 END AS bodyMissing,
-      CASE WHEN (content_html LIKE '%<img% src="http%' OR content_html LIKE '%<img% src=''http%' OR content_html LIKE '%data-wewe-image-retryable="true"%' OR content_html LIKE '%data-wewe-image-retryable=''true''%') THEN 1 ELSE 0 END AS remoteImages,
-      CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img% src="http%' OR content_html LIKE '%<img% src=''http%') THEN 1 ELSE 0 END AS mediaPending
-      FROM articles WHERE mp_id = ${mpId}`;
+    const readFlags = async () => {
+      const rows = await this.prismaService.$queryRaw<
+        Array<{
+          id: string;
+          bodyMissing: number;
+          remoteImages: number;
+          mediaPending: number;
+        }>
+      >`WITH RECURSIVE image_tags(id, remaining, tag) AS (
+        SELECT id, lower(coalesce(content_html, '')), '' FROM articles WHERE mp_id = ${mpId}
+        UNION ALL
+        SELECT id,
+          substr(remaining, instr(remaining, '<img') + instr(substr(remaining, instr(remaining, '<img')), '>')),
+          substr(remaining, instr(remaining, '<img'), instr(substr(remaining, instr(remaining, '<img')), '>'))
+        FROM image_tags WHERE instr(remaining, '<img') > 0
+          AND instr(substr(remaining, instr(remaining, '<img')), '>') > 0
+      ), remote_flags AS (
+        SELECT id, max(CASE WHEN tag LIKE '% src="http%' OR tag LIKE '% src=''http%'
+          OR ((tag LIKE '% data-src="http%' OR tag LIKE '% data-src=''http%')
+            AND tag NOT LIKE '% src="data:image/%' AND tag NOT LIKE '% src=''data:image/%')
+          THEN 1 ELSE 0 END) AS remoteImages FROM image_tags GROUP BY id
+      ) SELECT a.id,
+        CASE WHEN a.content_html IS NULL OR a.content_html = '' THEN 1 ELSE 0 END AS bodyMissing,
+        CASE WHEN r.remoteImages = 1 OR a.content_html LIKE '%data-wewe-image-retryable="true"%'
+          OR a.content_html LIKE '%data-wewe-image-retryable=''true''%' THEN 1 ELSE 0 END AS remoteImages,
+        CASE WHEN r.remoteImages = 1 OR a.content_html LIKE '%data-wewe-image-pending=%' THEN 1 ELSE 0 END AS mediaPending
+        FROM articles a JOIN remote_flags r ON a.id = r.id WHERE a.mp_id = ${mpId}`;
+      return rows.map((row) => ({
+        ...row,
+        bodyMissing: Number(row.bodyMissing),
+        remoteImages: Number(row.remoteImages),
+        mediaPending: Number(row.mediaPending),
+      }));
+    };
+    const flags = listOnly ? [] : await readFlags();
     const bodyFlags = new Map(flags.map((row) => [row.id, row]));
     // Normalize saved identities once per snapshot, rather than once for each
     // incoming row. Keep the original first-match semantics for legacy IDs.
@@ -959,29 +992,33 @@ export class TrpcService {
     // availability or a historical queue/status flag. SQLite returns only flags.
     // After a write reread flags for this feed; the no-op path reuses its preflight.
     const mediaSummary = async (written = false) => {
-      const rows =
-        written && !listOnly
-          ? await this.prismaService.$queryRaw<
-              Array<{ id: string; mediaPending: number }>
-            >`
-          SELECT id, CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img% src="http%' OR content_html LIKE '%<img% src=''http%') THEN 1 ELSE 0 END AS mediaPending
-          FROM articles WHERE mp_id = ${mpId}`
-          : flags;
+      const rows = written && !listOnly ? await readFlags() : flags;
       const current = new Map(rows.map((row) => [row.id, row.mediaPending]));
       const localMediaPendingArticleCount = page.articles.filter((item) =>
         current.get(byIdentity.get(item.id)?.id || item.id),
       ).length;
+      const localBodyMissingArticleCount = page.articles.filter(
+        (item) =>
+          rows.find(
+            (row) => row.id === (byIdentity.get(item.id)?.id || item.id),
+          )?.bodyMissing !== 0,
+      ).length;
       return {
+        localBodyMissingArticleCount,
         localMediaPendingArticleCount,
         upstreamImageBlockedCount: page.imageBlocked,
         mediaReady:
           !listOnly &&
           page.articles.length > 0 &&
           localMediaPendingArticleCount === 0 &&
-          !preflightSkipped.length,
+          !preflightSkipped.length &&
+          page.bodyMissing === 0 &&
+          page.imageBlocked === 0 &&
+          protectedBodyMissing === 0 &&
+          localBodyMissingArticleCount === 0,
       };
     };
-    if (!neededArticles.length) {
+    if (options.inspectOnly || !neededArticles.length) {
       this.logger.log(
         `Cache sync preflight: unchanged; ${Date.now() - started}ms; articles=${page.articles.length}`,
       );
@@ -1098,6 +1135,7 @@ export class TrpcService {
           cachedPage: delta,
           listOnly,
           fetchMedia,
+          nightMediaUntil: options.nightMediaUntil,
         });
       },
       true,

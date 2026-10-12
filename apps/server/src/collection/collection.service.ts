@@ -24,6 +24,7 @@ import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { assertProviderPage, ProviderPage } from './subscription-provider';
 import { cacheDataChanged } from '../feeds/cache-sync-state';
+import { mediaSafetyStop } from '../feeds/media-safety-stop';
 import {
   readOwnerSearchConfig,
   fetchLiveOwnerArticles,
@@ -582,6 +583,8 @@ export class CollectionService {
     cachedPage?: ProviderPage;
     /** Hard local-only media fence, including protected-saver fallback. */
     fetchMedia?: boolean;
+    /** Internal one-batch exception; public refresh keeps its normal night fence. */
+    nightMediaUntil?: number;
   }) {
     const phaseStarted = Date.now();
     if (this.publicCollections.has(input.mpId))
@@ -635,6 +638,10 @@ export class CollectionService {
       const validated = assertProviderPage(normalized, input.mpId);
       // The first visible list contains real identities/times, with no false body
       // readiness. Full body/image archiving follows in the durable task.
+      const safety =
+        input.cachedPage && !input.listOnly
+          ? await mediaSafetyStop(process.env.DATABASE_URL || '')
+          : undefined;
       const page = input.listOnly
         ? {
             ...validated,
@@ -652,7 +659,12 @@ export class CollectionService {
                   requestGapMs: 250,
                   canFetchImage: () =>
                     input.fetchMedia !== false &&
-                    new Date(Date.now() + 8 * 3600000).getUTCHours() >= 6,
+                    process.env.WECHAT2RSS_CACHE_MEDIA !== '0' &&
+                    safety?.isBlocked() === false &&
+                    (new Date(Date.now() + 8 * 3600000).getUTCHours() >= 6 ||
+                      (input.nightMediaUntil !== undefined &&
+                        Date.now() < input.nightMediaUntil)),
+                  onMediaBlocked: () => safety!.stop(),
                 }
               : {}),
           });

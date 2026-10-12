@@ -86,6 +86,8 @@ export async function archiveProviderImages(
     /** Cache watcher may stop starting CDN downloads at the night boundary. */
     canFetchImage?: () => boolean;
     requestGapMs?: number;
+    /** Persist the global restriction before any storage transaction can fail. */
+    onMediaBlocked?: () => Promise<void>;
   } = {},
 ): Promise<ProviderPage> {
   let imageBlocked = page.imageBlocked;
@@ -161,8 +163,16 @@ export async function archiveProviderImages(
         $(image).removeAttr('data-src');
       } catch (error) {
         failedSources.add(source);
-        if (error instanceof ImageRequestBlockedError)
+        if (error instanceof ImageRequestBlockedError) {
           mediaRequestBlocked = true;
+          // The callback sets the shared in-memory latch before durable I/O.
+          // A failed marker write must still prevent further requests.
+          try {
+            await options.onMediaBlocked?.();
+          } catch {
+            /* fail closed */
+          }
+        }
         if (options.stopOnFailure)
           throw new Error(
             '公开合集图片请求受限或内容无效，已停止后续请求；本批未写入',

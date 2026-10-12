@@ -40,12 +40,15 @@ describe('cache delta through original SQLite merge', () => {
     enabled: process.env.WECHAT2RSS_ENABLED,
     base: process.env.WECHAT2RSS_BASE_URL,
     token: process.env.WECHAT2RSS_TOKEN,
+    database: process.env.DATABASE_URL,
   };
   beforeAll(async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     process.env.WECHAT2RSS_BASE_URL = 'http://127.0.0.1:18080/';
     process.env.WECHAT2RSS_TOKEN = 'offline-fixture-token';
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-cache-storage-'));
+    process.env.DATABASE_URL =
+      'file:' + path.join(root, 'test.db').replace(/\\/g, '/');
     prisma = new PrismaClient({
       datasources: {
         db: { url: 'file:' + path.join(root, 'test.db').replace(/\\/g, '/') },
@@ -92,6 +95,7 @@ describe('cache delta through original SQLite merge', () => {
         enabled: 'WECHAT2RSS_ENABLED',
         base: 'WECHAT2RSS_BASE_URL',
         token: 'WECHAT2RSS_TOKEN',
+        database: 'DATABASE_URL',
       }[name]!;
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -598,6 +602,255 @@ describe('cache delta through original SQLite merge', () => {
       expect(request).not.toHaveBeenCalled();
     } finally {
       request.mockRestore();
+      clock.mockRestore();
+    }
+  });
+  it('unchanged upstream requeues an actual SQLite media gap without rewriting the list or notes', async () => {
+    const { CacheSyncEngine } = await import('./cache-sync-engine');
+    const id = canonicalArticleUrl(
+      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=881&idx=1',
+    );
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const body =
+      '<div class="rich_media_content"><p>saved edit</p><img data-src="https://mmbiz.qpic.cn/reconcile"></div>';
+    const snapshot: ProviderPage = {
+      ...page(body),
+      articles: [
+        {
+          ...id,
+          title: 'reconcile',
+          publishTime: 1760000000,
+          picUrl: '',
+          contentHtml: body,
+        },
+      ],
+    };
+    await prisma.article.create({
+      data: {
+        id: id.id,
+        mpId: id.mpId,
+        picUrl: '',
+        title: 'reconcile',
+        publishTime: 1760000000,
+        sourceUrl: id.url,
+        verifiedSourceUrl: id.url,
+        contentHtml: body,
+        metrics: '{"note":"keep"}',
+      },
+    });
+    let now = Date.parse('2026-10-12T04:00:00Z');
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const network = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(
+        async () =>
+          new Response(png, { headers: { 'Content-Type': 'image/png' } }),
+      );
+    const metadata = {
+      feedId: mpId,
+      name: 'fixture',
+      feedUrl: '/feed/1234567890.json',
+      checkTime: null,
+      nextUpdateTime: null,
+      paused: false,
+    };
+    const sync = jest.fn((id: string, p: ProviderPage, listOnly: boolean) =>
+      trpc.syncCachedWechat2RssPage(id, p, listOnly),
+    );
+    const engine = new CacheSyncEngine({
+      now: () => now,
+      list: async () => [metadata],
+      localFeeds: async () => [{ id: mpId, mpName: 'fixture' }],
+      read: async () => snapshot,
+      sync,
+      inspectLocalMedia: (id, p) =>
+        trpc.syncCachedWechat2RssPage(id, p, false, { inspectOnly: true }),
+    });
+    const settle = async () => {
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (!(engine as any).mediaBusy) break;
+      }
+    };
+    try {
+      await engine.tick();
+      await settle();
+      expect(network).toHaveBeenCalledTimes(1);
+      await prisma.article.update({
+        where: { id: id.id },
+        data: { contentHtml: body },
+      });
+      network.mockClear();
+      now += 60000;
+      await engine.tick();
+      await settle();
+      expect(network).toHaveBeenCalledTimes(1);
+      expect(sync.mock.calls.filter((args) => args[2])).toHaveLength(1);
+      const stored = await prisma.article.findUniqueOrThrow({
+        where: { id: id.id },
+      });
+      expect(stored.contentHtml).toContain('saved edit');
+      expect(stored.contentHtml).toContain('data:image/png');
+      expect(stored.metrics).toBe('{"note":"keep"}');
+      now += 60000;
+      network.mockClear();
+      await engine.tick();
+      await settle();
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      engine.close();
+      network.mockRestore();
+      clock.mockRestore();
+    }
+  });
+  it('a bounded internal night permit downloads once; ordinary night and operational pause remain closed', async () => {
+    const id = canonicalArticleUrl(
+      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=882&idx=1',
+    );
+    const body =
+      '<div class="rich_media_content"><p>saved night edit</p><img src="https://mmbiz.qpic.cn/night-permit"></div>';
+    const snapshot: ProviderPage = {
+      ...page(body),
+      articles: [
+        {
+          ...id,
+          title: 'night',
+          publishTime: 1760000000,
+          picUrl: '',
+          contentHtml: body,
+        },
+      ],
+    };
+    await prisma.article.create({
+      data: {
+        id: id.id,
+        mpId: id.mpId,
+        picUrl: '',
+        title: 'night',
+        publishTime: 1760000000,
+        sourceUrl: id.url,
+        verifiedSourceUrl: id.url,
+        contentHtml: body,
+      },
+    });
+    const now = Date.parse('2026-10-12T17:00:00Z');
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const network = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(
+        async () =>
+          new Response(png, { headers: { 'Content-Type': 'image/png' } }),
+      );
+    const old = process.env.WECHAT2RSS_CACHE_MEDIA;
+    try {
+      await trpc.syncCachedWechat2RssPage(mpId, snapshot, false);
+      expect(network).not.toHaveBeenCalled();
+      process.env.WECHAT2RSS_CACHE_MEDIA = '0';
+      await trpc.syncCachedWechat2RssPage(mpId, snapshot, false, {
+        nightMediaUntil: now + 60000,
+      });
+      expect(network).not.toHaveBeenCalled();
+      delete process.env.WECHAT2RSS_CACHE_MEDIA;
+      await trpc.syncCachedWechat2RssPage(mpId, snapshot, false, {
+        nightMediaUntil: now + 60000,
+      });
+      expect(network).toHaveBeenCalledTimes(1);
+      const stored = await prisma.article.findUniqueOrThrow({
+        where: { id: id.id },
+      });
+      expect(stored.contentHtml).toContain('saved night edit');
+      await expect(
+        trpc.syncCachedWechat2RssPage(mpId, snapshot, false, {
+          nightMediaUntil: now + 31 * 60000,
+        }),
+      ).rejects.toThrow('MEDIA_NIGHT_PERMIT_INVALID');
+      await expect(
+        trpc.syncCachedWechat2RssPage(mpId, snapshot, false, {
+          nightMediaUntil: now,
+        }),
+      ).rejects.toThrow('MEDIA_NIGHT_PERMIT_INVALID');
+    } finally {
+      if (old === undefined) delete process.env.WECHAT2RSS_CACHE_MEDIA;
+      else process.env.WECHAT2RSS_CACHE_MEDIA = old;
+      network.mockRestore();
+      clock.mockRestore();
+    }
+  });
+  it('CDN restriction persists before a failed SQLite transaction; retry preserves edited body and starts no request', async () => {
+    const { MediaSafetyStop } = await import('./media-safety-stop');
+    const id = canonicalArticleUrl(
+      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=883&idx=1',
+    );
+    const body =
+      '<div class="rich_media_content"><p>edited transaction note</p><img src="https://mmbiz.qpic.cn/risk-before-transaction"></div>';
+    const snapshot: ProviderPage = {
+      ...page(body),
+      articles: [
+        {
+          ...id,
+          title: 'risk',
+          publishTime: 1760000000,
+          picUrl: '',
+          contentHtml: body,
+        },
+      ],
+    };
+    await prisma.article.create({
+      data: {
+        id: id.id,
+        mpId: id.mpId,
+        picUrl: '',
+        title: 'risk',
+        publishTime: 1760000000,
+        sourceUrl: id.url,
+        verifiedSourceUrl: id.url,
+        contentHtml: body,
+        metrics: '{"note":"protected"}',
+      },
+    });
+    const before = await prisma.article.findUniqueOrThrow({
+      where: { id: id.id },
+    });
+    const clock = jest
+      .spyOn(Date, 'now')
+      .mockReturnValue(Date.parse('2026-10-12T04:00:00Z'));
+    const network = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 403 }));
+    const transaction = jest
+      .spyOn(prisma, '$transaction')
+      .mockRejectedValueOnce(Error('SYNTHETIC_TRANSACTION_FAILURE'));
+    try {
+      await expect(
+        trpc.syncCachedWechat2RssPage(mpId, snapshot, false),
+      ).rejects.toThrow('SYNTHETIC_TRANSACTION_FAILURE');
+      expect(network).toHaveBeenCalledTimes(1);
+      const restarted = new MediaSafetyStop();
+      await restarted.initialize(process.env.DATABASE_URL!);
+      expect(restarted.isBlocked()).toBe(true);
+      expect(
+        await prisma.article.findUniqueOrThrow({ where: { id: id.id } }),
+      ).toEqual(before);
+      network.mockClear();
+      transaction.mockRestore();
+      const retry = await trpc.syncCachedWechat2RssPage(mpId, snapshot, false);
+      expect(retry.mediaReady).toBe(false);
+      expect(network).not.toHaveBeenCalled();
+      const after = await prisma.article.findUniqueOrThrow({
+        where: { id: id.id },
+      });
+      expect(after.contentHtml).toContain('edited transaction note');
+      expect(after.metrics).toBe(before.metrics);
+    } finally {
+      transaction.mockRestore();
+      network.mockRestore();
       clock.mockRestore();
     }
   });

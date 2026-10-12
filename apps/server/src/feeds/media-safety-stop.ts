@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, statSync } from 'node:fs';
 import * as path from 'node:path';
 
 /** A CDN restriction must survive restarts. This private latch never changes
@@ -22,6 +22,18 @@ export class MediaSafetyStop {
       this.blocked = false;
     }
   }
+  /** Recheck a latch written by another media worker; never auto-clear it. */
+  isBlocked() {
+    if (this.blocked || !this.marker) return true;
+    try {
+      statSync(this.marker);
+      this.blocked = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+        this.blocked = true;
+    }
+    return this.blocked;
+  }
   async stop() {
     this.blocked = true;
     if (!this.marker) throw new Error('MEDIA_SAFETY_STORAGE_UNAVAILABLE');
@@ -39,4 +51,20 @@ export class MediaSafetyStop {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
   }
+}
+
+// All cached collection paths share the same in-process latch. Initialization
+// failure closes only the media lane; metadata/list imports remain available.
+const stops = new Map<string, Promise<MediaSafetyStop>>();
+export function mediaSafetyStop(databaseUrl: string) {
+  let pending = stops.get(databaseUrl);
+  if (!pending) {
+    const safety = new MediaSafetyStop();
+    pending = safety
+      .initialize(databaseUrl)
+      .then(() => safety)
+      .catch(() => safety);
+    stops.set(databaseUrl, pending);
+  }
+  return pending;
 }
