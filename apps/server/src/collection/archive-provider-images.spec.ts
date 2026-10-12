@@ -340,3 +340,63 @@ describe('missing-only background media retries', () => {
     );
   });
 });
+
+describe('explicit maintenance image budget', () => {
+  afterEach(() => jest.restoreAllMocks());
+  const largePage = (): ProviderPage => {
+    const input = page();
+    input.articles[0].contentHtml =
+      '<div class="rich_media_content"><p>saved note</p>' +
+      [1, 2, 3]
+        .map((n) => `<img src="https://mmbiz.qpic.cn/${n}.png">`)
+        .join('') +
+      '</div>';
+    return input;
+  };
+  const mockLargeImages = () => {
+    const bytes = Buffer.alloc(8_000_000);
+    png.copy(bytes);
+    png.subarray(-12).copy(bytes, bytes.length - 12);
+    return jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(
+        async () =>
+          new Response(bytes, { headers: { 'Content-Type': 'image/png' } }),
+      );
+  };
+  it('retains the normal 20 MB article limit', async () => {
+    mockLargeImages();
+    const result = await archiveProviderImages(largePage(), {
+      preserveTextOnImageFailure: true,
+    });
+    expect(result.imageBlocked).toBe(1);
+    expect(result.articles[0].contentHtml).toContain(
+      'data-wewe-image-pending="1"',
+    );
+  });
+  it('archives a 24 MB body only with the explicit bounded maintenance option', async () => {
+    mockLargeImages();
+    const input = largePage();
+    const result = await archiveProviderImages(input, {
+      preserveTextOnImageFailure: true,
+      maxArticleImageBytes: 30_000_000,
+    });
+    expect(result.imageBlocked).toBe(0);
+    const saved = supplementSavedBodyImages(
+      input.articles[0].contentHtml!,
+      result.articles[0],
+    );
+    expect(saved).toContain('saved note');
+    expect(saved).not.toContain('https://');
+  });
+  it.each([0, -1, 30_000_001, Infinity, NaN, 1.5])(
+    'rejects invalid budget %s before fetching',
+    async (budget) => {
+      const fetchMock = jest.spyOn(global, 'fetch');
+      await expect(
+        archiveProviderImages(page(), { maxArticleImageBytes: budget }),
+      ).rejects.toThrow('ARTICLE_IMAGE_BUDGET_INVALID');
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+});

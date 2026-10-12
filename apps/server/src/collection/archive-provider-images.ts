@@ -85,6 +85,8 @@ export async function archiveProviderImages(
   page: ProviderPage,
   options: {
     stopOnFailure?: boolean;
+    /** Explicit maintenance only; normal callers retain the 20 MB default. */
+    maxArticleImageBytes?: number;
     preserveTextOnImageFailure?: boolean;
     /** Cache watcher may stop starting CDN downloads at the night boundary. */
     canFetchImage?: () => boolean;
@@ -93,6 +95,13 @@ export async function archiveProviderImages(
     onMediaBlocked?: () => Promise<void>;
   } = {},
 ): Promise<ProviderPage> {
+  const maxArticleImageBytes = options.maxArticleImageBytes ?? 20_000_000;
+  if (
+    !Number.isSafeInteger(maxArticleImageBytes) ||
+    maxArticleImageBytes <= 0 ||
+    maxArticleImageBytes > 30_000_000
+  )
+    throw new Error('ARTICLE_IMAGE_BUDGET_INVALID');
   let imageBlocked = page.imageBlocked;
   let mediaRequestBlocked = false;
   const sharedCache = new Map<string, string>();
@@ -156,7 +165,7 @@ export async function archiveProviderImages(
             ? decodeInlineImage(source)
             : await fetchAllowedImage(source);
           totalBytes += result.bytes.length;
-          if (totalBytes > 20_000_000)
+          if (totalBytes > maxArticleImageBytes)
             throw new Error('ARTICLE_IMAGES_TOO_LARGE');
           inline = `data:${result.type};base64,${result.bytes.toString('base64')}`;
           sharedCache.set(source, inline);

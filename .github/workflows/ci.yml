@@ -27,6 +27,8 @@ jobs:
         run: node --test scripts/local-release/readiness.test.cjs
       - name: Test explicit Wechat2RSS binding on owned SQLite copies
         run: node --test scripts/prepare-wechat2rss-test.test.cjs
+      - name: Test atomic saved-media CAS with real SQLite
+        run: node --test scripts/saved-media-cas.test.cjs
       - name: Test article layout repair and original-file preservation on Windows
         run: node --test scripts/repair-article-layout.test.cjs
 
