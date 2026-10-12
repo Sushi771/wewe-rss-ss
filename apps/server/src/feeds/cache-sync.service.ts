@@ -11,6 +11,7 @@ import { databaseWritesAllowed, waitForStartupAudit } from '../startup-audit';
 import { CacheSyncEngine } from './cache-sync-engine';
 import { CacheSqliteMonitor } from './cache-sqlite-monitor';
 import { cacheSyncState } from './cache-sync-state';
+import { MediaSafetyStop } from './media-safety-stop';
 
 @Injectable()
 export class CacheSyncService
@@ -36,12 +37,17 @@ export class CacheSyncService
       if (ok && !this.stopped) this.start();
     });
   }
-  private start() {
+  private async start() {
     try {
+      const safety = new MediaSafetyStop();
+      await safety.initialize(process.env.DATABASE_URL || '');
       const provider = wechat2RssProvider();
       this.engine = new CacheSyncEngine({
         now: Date.now,
-        mediaEnabled: () => process.env.WECHAT2RSS_CACHE_MEDIA !== '0',
+        mediaEnabled: () =>
+          process.env.WECHAT2RSS_CACHE_MEDIA !== '0' && !safety.blocked,
+        onMediaBlocked: () => safety.stop(),
+        mediaStopped: () => safety.blocked,
         list: () => provider.listSubscriptions(),
         localFeeds: async () =>
           (await this.prisma.feed.findMany({ where: { status: 1 } })).filter(

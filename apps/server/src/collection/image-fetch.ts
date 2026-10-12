@@ -77,6 +77,13 @@ export function allowedImageUrl(raw: string): URL {
   return url;
 }
 
+/** Authentication/rate restrictions stop the whole background media lane. */
+export class ImageRequestBlockedError extends Error {
+  constructor(readonly status: number) {
+    super('IMAGE_REQUEST_BLOCKED');
+  }
+}
+
 export async function fetchAllowedImage(
   raw: string,
 ): Promise<{ bytes: Buffer; type: string }> {
@@ -86,6 +93,10 @@ export async function fetchAllowedImage(
     signal: AbortSignal.timeout(10000),
     headers: { referer: 'https://mp.weixin.qq.com/' },
   });
+  if ([401, 403, 429].includes(response.status)) {
+    await response.body?.cancel();
+    throw new ImageRequestBlockedError(response.status);
+  }
   const type = (response.headers.get('content-type') || '')
     .split(';')[0]
     .toLowerCase();

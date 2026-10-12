@@ -9,6 +9,7 @@ import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
+import { savedBodyMediaInput } from '../collection/archive-provider-images';
 import { readLocalWechat2RssCache } from '../collection/local-cache-reader';
 import { cacheFailureReason } from '../collection/cache-failure';
 import { wechat2RssProvider } from '../collection/provider-registry';
@@ -878,7 +879,7 @@ export class TrpcService {
           }>
         >`SELECT id,
       CASE WHEN content_html IS NULL OR content_html = '' THEN 1 ELSE 0 END AS bodyMissing,
-      CASE WHEN (content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%') THEN 1 ELSE 0 END AS remoteImages,
+      CASE WHEN (content_html LIKE '%<img% src="http%' OR content_html LIKE '%<img% src=''http%' OR content_html LIKE '%data-wewe-image-retryable="true"%' OR content_html LIKE '%data-wewe-image-retryable=''true''%') THEN 1 ELSE 0 END AS remoteImages,
       CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img% src="http%' OR content_html LIKE '%<img% src=''http%') THEN 1 ELSE 0 END AS mediaPending
       FROM articles WHERE mp_id = ${mpId}`;
     const bodyFlags = new Map(flags.map((row) => [row.id, row]));
@@ -942,7 +943,7 @@ export class TrpcService {
         (fetchMedia || existing.lastBodyStatus === 'unavailable') &&
         existing.createdAt &&
         existing.updatedAt &&
-        (fetchMedia ||
+        ((fetchMedia && existing.lastBodyStatus === 'unavailable') ||
           existing.updatedAt.getTime() === existing.createdAt.getTime());
       if (flags?.bodyMissing && item.contentHtml && !uneditedMissing)
         protectedBodyMissing++;
@@ -994,6 +995,20 @@ export class TrpcService {
         identitySkippedArticles: preflightSkipped,
       };
     }
+    const missingMediaIds = neededArticles
+      .map((item) => byIdentity.get(item.id))
+      .filter((row) => row && bodyFlags.get(row.id)?.remoteImages)
+      .map((row) => row!.id);
+    const savedMedia =
+      !listOnly && fetchMedia && missingMediaIds.length
+        ? await this.prismaService.article.findMany({
+            where: { mpId, id: { in: missingMediaIds } },
+            select: { id: true, contentHtml: true },
+          })
+        : [];
+    const savedBodies = new Map(
+      savedMedia.map((row) => [row.id, row.contentHtml]),
+    );
     const safeArticle = (item: ProviderPage['articles'][number]) => {
       const existing = byIdentity.get(item.id);
       const flags = existing && bodyFlags.get(existing.id);
@@ -1004,11 +1019,19 @@ export class TrpcService {
           (fetchMedia || existing.lastBodyStatus === 'unavailable') &&
           existing.createdAt &&
           existing.updatedAt &&
-          (fetchMedia ||
+          ((fetchMedia && existing.lastBodyStatus === 'unavailable') ||
             existing.updatedAt.getTime() === existing.createdAt.getTime())
         )
       )
         return { ...item, contentHtml: null };
+      const savedBody = existing && savedBodies.get(existing.id);
+      if (savedBody) {
+        try {
+          return savedBodyMediaInput(savedBody, item);
+        } catch {
+          return { ...item, contentHtml: null };
+        }
+      }
       return item;
     };
     const delta = {

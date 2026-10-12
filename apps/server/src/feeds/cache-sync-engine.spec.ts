@@ -249,3 +249,32 @@ describe('existing-cache synchronization', () => {
     expect(cacheRevision()).not.toEqual(before);
   });
 });
+
+describe('media lane restriction isolation', () => {
+  it('halts all media on a restriction but continues ordinary list reads', async () => {
+    const f = setup(2);
+    const stop = jest.fn().mockResolvedValue(undefined);
+    (f.engine as any).deps.onMediaBlocked = stop;
+    f.read.mockResolvedValue(page('<p>cached body</p>'));
+    f.sync.mockImplementation(async (_id, _page, listOnly) =>
+      listOnly
+        ? { bodyMissing: 0, imageBlocked: 0 }
+        : ({
+            bodyMissing: 0,
+            imageBlocked: 1,
+            mediaRequestBlocked: true,
+          } as any),
+    );
+    await f.engine.tick();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(f.sync.mock.calls.filter((args) => !args[2])).toHaveLength(1);
+    f.time(60000);
+    await f.engine.tick();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(f.sync.mock.calls.filter((args) => !args[2])).toHaveLength(1);
+    expect(f.read.mock.calls.length).toBeGreaterThan(2);
+    expect(cacheSyncState.state).toBe('media-blocked');
+    f.engine.close();
+  });
+});

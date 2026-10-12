@@ -515,4 +515,90 @@ describe('cache delta through original SQLite merge', () => {
       protectedSaver.mockRestore();
     }
   }, 60000);
+  it('background media supplements only missing bytes, resumes partial progress and preserves edits', async () => {
+    const id = canonicalArticleUrl(
+      'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=880&idx=1',
+    );
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const inline = 'data:image/png;base64,' + png.toString('base64');
+    const saved =
+      '<div class="rich_media_content" style="color:red"><p>personal note</p><img src="' +
+      inline +
+      '"><img src="https://mmbiz.qpic.cn/b.jpg"><img src="https://mmbiz.qpic.cn/c.jpg"></div>';
+    await prisma.article.create({
+      data: {
+        id: id.id,
+        mpId: id.mpId,
+        title: 'media-fixture',
+        publishTime: 1760000000,
+        picUrl: '',
+        sourceUrl: id.url,
+        verifiedSourceUrl: id.url,
+        contentHtml: saved,
+        metrics: '{"note":"keep"}',
+        lastBodyStatus: 'available',
+      },
+    });
+    const incoming: ProviderPage = {
+      ...page(null),
+      bodyMissing: 0,
+      articles: [
+        {
+          ...id,
+          title: 'media-fixture',
+          publishTime: 1760000000,
+          picUrl: '',
+          contentHtml:
+            '<div class="rich_media_content"><p>provider text</p><img src="https://mmbiz.qpic.cn/a.jpg"><img src="https://mmbiz.qpic.cn/b.jpg"><img src="https://mmbiz.qpic.cn/c.jpg"></div>',
+        },
+      ],
+    };
+    const clock = jest
+      .spyOn(Date, 'now')
+      .mockReturnValue(Date.parse('2026-10-12T04:00:00Z'));
+    const request = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(async (url) => {
+        if (String(url).endsWith('c.jpg')) throw Error('OFFLINE_SINGLE_IMAGE');
+        return new Response(png, { headers: { 'Content-Type': 'image/png' } });
+      });
+    try {
+      const partial = await trpc.syncCachedWechat2RssPage(
+        mpId,
+        incoming,
+        false,
+      );
+      expect(partial.localMediaPendingArticleCount).toBe(1);
+      expect(request).toHaveBeenCalledTimes(2);
+      let stored = await prisma.article.findUniqueOrThrow({
+        where: { id: id.id },
+      });
+      expect(stored.contentHtml).toContain('personal note');
+      expect(stored.contentHtml).toContain('color:red');
+      expect(stored.metrics).toBe('{"note":"keep"}');
+      expect(stored.contentHtml?.match(/data:image/g)).toHaveLength(2);
+      request.mockClear();
+      request.mockImplementation(
+        async () =>
+          new Response(png, { headers: { 'Content-Type': 'image/png' } }),
+      );
+      await trpc.syncCachedWechat2RssPage(mpId, incoming, false);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(String(request.mock.calls[0][0])).toContain('c.jpg');
+      stored = await prisma.article.findUniqueOrThrow({ where: { id: id.id } });
+      expect(stored.contentHtml?.match(/data:image/g)).toHaveLength(3);
+      expect(stored.contentHtml).toContain('personal note');
+      request.mockClear();
+      const noOp = await trpc.syncCachedWechat2RssPage(mpId, incoming, false);
+      expect(noOp.mediaReady).toBe(true);
+      expect(noOp.updated).toBe(0);
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      request.mockRestore();
+      clock.mockRestore();
+    }
+  });
 });

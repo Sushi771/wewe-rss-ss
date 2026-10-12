@@ -33,6 +33,8 @@ export type CacheSyncDependencies = {
   now(): number;
   /** Operational pause keeps list imports and pending media intact. */
   mediaEnabled?(): boolean;
+  onMediaBlocked?(): Promise<void>;
+  mediaStopped?(): boolean;
   list(): Promise<Wechat2RssListedFeed[]>;
   localFeeds(): Promise<LocalFeed[]>;
   read(feed: Wechat2RssListedFeed, name: string): Promise<ProviderPage>;
@@ -45,6 +47,8 @@ export type CacheSyncDependencies = {
     updated?: number;
     bodyMissing?: number;
     imageBlocked?: number;
+    mediaRequestBlocked?: boolean;
+    localMediaPendingArticleCount?: number;
   }>;
 };
 
@@ -58,6 +62,7 @@ export class CacheSyncEngine {
   private busy = false;
   private rerun = false;
   private mediaBusy = false;
+  private mediaBlocked = false;
   private stopped = false;
   private media = new Map<string, { page: ProviderPage; due: number }>();
   private nextList = 0;
@@ -214,6 +219,8 @@ export class CacheSyncEngine {
       // Separate lane: slow image archives never hold the metadata/list worker.
       void this.runMedia();
     } finally {
+      if (this.mediaBlocked || this.deps.mediaStopped?.())
+        cacheSyncState.state = 'media-blocked';
       cacheSyncState.feeds = [...this.slots.values()].map((slot) => ({
         ...slot.status,
       }));
@@ -234,6 +241,7 @@ export class CacheSyncEngine {
   private async runMedia() {
     if (
       this.mediaBusy ||
+      this.mediaBlocked ||
       this.stopped ||
       this.deps.mediaEnabled?.() === false ||
       !cacheSyncDaytime(this.deps.now())
@@ -255,7 +263,18 @@ export class CacheSyncEngine {
     try {
       const result = await this.deps.sync(id, job.page, false);
       if (this.media.get(id) !== job) return; // New snapshot supersedes this one.
-      if (!result.bodyMissing && !result.imageBlocked) {
+      if (result.mediaRequestBlocked) {
+        this.mediaBlocked = true;
+        await this.deps.onMediaBlocked?.();
+        slot.status.state = 'media-pending';
+        cacheSyncState.state = 'media-blocked';
+        return;
+      }
+      if (
+        !result.bodyMissing &&
+        !result.imageBlocked &&
+        !result.localMediaPendingArticleCount
+      ) {
         this.media.delete(id);
         slot.status.state = 'synced-cache';
       } else {

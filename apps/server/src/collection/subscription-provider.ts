@@ -25,6 +25,7 @@ export type ProviderPage = {
   upstreamCount: number;
   bodyMissing: number;
   imageBlocked: number;
+  mediaRequestBlocked?: boolean;
   pages?: number;
   albums?: Array<{
     id: string;

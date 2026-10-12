@@ -649,6 +649,7 @@ export class CollectionService {
             preserveTextOnImageFailure: true,
             ...(input.cachedPage
               ? {
+                  requestGapMs: 250,
                   canFetchImage: () =>
                     input.fetchMedia !== false &&
                     new Date(Date.now() + 8 * 3600000).getUTCHours() >= 6,
@@ -862,7 +863,9 @@ export class CollectionService {
                   ? supplementSavedBodyImages(existing.contentHtml, item)
                   : undefined;
               const canFillBody =
-                input.fetchMedia !== false ||
+                (!input.cachedPage && input.fetchMedia !== false) ||
+                (input.fetchMedia !== false &&
+                  existing.lastBodyStatus === 'unavailable') ||
                 (existing.lastBodyStatus === 'unavailable' &&
                   existing.createdAt &&
                   existing.updatedAt &&
@@ -973,6 +976,7 @@ export class CollectionService {
           page.bodyMissing === 0 &&
           page.imageBlocked === 0,
         imageBlocked: page.imageBlocked,
+        mediaRequestBlocked: page.mediaRequestBlocked,
         message:
           `读取私有实例缓存 ${page.articles.length} 篇，归档新增 ${created}、补全 ${updated}。` +
           (identitySkippedArticles.length

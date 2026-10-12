@@ -1,5 +1,6 @@
 import {
   archiveProviderImages,
+  savedBodyMediaInput,
   supplementSavedBodyImages,
 } from './archive-provider-images';
 import { ProviderPage } from './subscription-provider';
@@ -230,5 +231,90 @@ describe('provider image archive', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       fetchMock.mockRestore();
     }
+  });
+});
+
+describe('missing-only background media retries', () => {
+  afterEach(() => jest.restoreAllMocks());
+  it('reuses saved inline bytes and preserves partial progress across retries', async () => {
+    const inline = `data:image/png;base64,${png.toString('base64')}`;
+    const incoming = page().articles[0];
+    incoming.contentHtml =
+      '<div class="rich_media_content"><img src="https://mmbiz.qpic.cn/a.jpg"><img src="https://mmbiz.qpic.cn/b.jpg"><img src="https://mmbiz.qpic.cn/c.jpg"></div>';
+    const saved = `<div class="rich_media_content" style="color:red"><p>my note</p><img src="${inline}"><img src="https://mmbiz.qpic.cn/b.jpg"><img src="https://mmbiz.qpic.cn/c.jpg"></div>`;
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(async (url) => {
+        if (String(url).endsWith('c.jpg')) throw new Error('offline');
+        return new Response(png, { headers: { 'Content-Type': 'image/png' } });
+      });
+    const first = await archiveProviderImages(
+      { ...page(), articles: [savedBodyMediaInput(saved, incoming)] },
+      { preserveTextOnImageFailure: true },
+    );
+    const partial = supplementSavedBodyImages(saved, first.articles[0])!;
+    expect(partial).toContain('my note');
+    expect(partial).toContain('color:red');
+    expect(partial.match(/data:image/g)).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(
+      async () =>
+        new Response(png, { headers: { 'Content-Type': 'image/png' } }),
+    );
+    const retry = await archiveProviderImages(
+      { ...page(), articles: [savedBodyMediaInput(partial, incoming)] },
+      { preserveTextOnImageFailure: true },
+    );
+    const complete = supplementSavedBodyImages(partial, retry.articles[0])!;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('c.jpg');
+    expect(complete.match(/data:image/g)).toHaveLength(3);
+    expect(complete).toContain('my note');
+  });
+  it('resumes data-src-only retryable images and clears only their completed marker', async () => {
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(
+        async () =>
+          new Response(png, { headers: { 'Content-Type': 'image/png' } }),
+      );
+    const saved =
+      '<div class="rich_media_content" data-wewe-image-retryable="true" data-wewe-image-pending="1"><p>note</p><img data-src="https://mmbiz.qpic.cn/a.jpg"></div>';
+    const result = await archiveProviderImages(
+      { ...page(), articles: [savedBodyMediaInput(saved, page().articles[0])] },
+      { preserveTextOnImageFailure: true },
+    );
+    const html = supplementSavedBodyImages(saved, result.articles[0])!;
+    expect(html).toContain('note');
+    expect(html).not.toContain('data-wewe-image-pending');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it('makes no request at night and leaves missing sources available for daytime', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch');
+    const result = await archiveProviderImages(page(), {
+      preserveTextOnImageFailure: true,
+      canFetchImage: () => false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.articles[0].contentHtml).toContain(
+      'https://mmbiz.qpic.cn/a.jpg',
+    );
+    expect(result.imageBlocked).toBe(1);
+  });
+  it('stops all traffic on 403 across articles', async () => {
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(async () => new Response('', { status: 403 }));
+    const input = page();
+    input.articles.push({ ...input.articles[0], id: 'second' });
+    const result = await archiveProviderImages(input, {
+      preserveTextOnImageFailure: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.mediaRequestBlocked).toBe(true);
+    expect(result.articles.every((a) => a.contentHtml?.includes('正文'))).toBe(
+      true,
+    );
   });
 });
