@@ -170,7 +170,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
           where: { id: item.id },
           data: {
             contentHtml:
-              '<div id="js_content">local<img src="data:image/png;base64,aGVsbG8=" /></div>',
+              '<div id="js_content">local<img data-src="https://mmbiz.qpic.cn/already-saved" src="data:image/png;base64,aGVsbG8=" /></div>',
           },
         });
         expect(

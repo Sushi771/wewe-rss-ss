@@ -879,7 +879,7 @@ export class TrpcService {
         >`SELECT id,
       CASE WHEN content_html IS NULL OR content_html = '' THEN 1 ELSE 0 END AS bodyMissing,
       CASE WHEN (content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%') THEN 1 ELSE 0 END AS remoteImages,
-      CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%' OR content_html LIKE '%<img%data-src=%') THEN 1 ELSE 0 END AS mediaPending
+      CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img% src="http%' OR content_html LIKE '%<img% src=''http%') THEN 1 ELSE 0 END AS mediaPending
       FROM articles WHERE mp_id = ${mpId}`;
     const bodyFlags = new Map(flags.map((row) => [row.id, row]));
     // Normalize saved identities once per snapshot, rather than once for each
@@ -963,7 +963,7 @@ export class TrpcService {
           ? await this.prismaService.$queryRaw<
               Array<{ id: string; mediaPending: number }>
             >`
-          SELECT id, CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img%src="http%' OR content_html LIKE '%<img%src=''http%' OR content_html LIKE '%<img%data-src=%') THEN 1 ELSE 0 END AS mediaPending
+          SELECT id, CASE WHEN (content_html LIKE '%data-wewe-image-pending=%' OR content_html LIKE '%<img% src="http%' OR content_html LIKE '%<img% src=''http%') THEN 1 ELSE 0 END AS mediaPending
           FROM articles WHERE mp_id = ${mpId}`
           : flags;
       const current = new Map(rows.map((row) => [row.id, row.mediaPending]));
