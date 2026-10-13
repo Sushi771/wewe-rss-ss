@@ -36,7 +36,7 @@ const page = (body: string | null = null, index = 1): ProviderPage => ({
   coverage: 'recent-window',
   upstreamCount: 1,
 });
-function setup(count = 1, mediaEnabled?: () => boolean) {
+function setup(count = 1, mediaEnabled?: () => boolean, syncText?: jest.Mock) {
   let now = start;
   const list = jest
     .fn()
@@ -59,6 +59,7 @@ function setup(count = 1, mediaEnabled?: () => boolean) {
     read,
     sync,
     mediaEnabled,
+    syncText,
   });
   cacheSyncState.signal = 'metadata';
   return {
@@ -73,6 +74,18 @@ function setup(count = 1, mediaEnabled?: () => boolean) {
   };
 }
 describe('existing-cache synchronization', () => {
+  it('saves text while CDN media is disabled, without invoking the media lane', async () => {
+    const syncText = jest.fn().mockResolvedValue({ bodyMissing: 0 });
+    const f = setup(1, () => false, syncText);
+    f.read.mockResolvedValue(page('<p>cached text</p>'));
+    await f.engine.tick();
+    expect(syncText).toHaveBeenCalledWith(
+      ids[0],
+      expect.objectContaining({ bodyMissing: 0 }),
+    );
+    expect(f.sync.mock.calls.every((call) => call[2] === true)).toBe(true);
+    f.engine.close();
+  });
   it('pauses media without losing list imports or the pending media snapshot', async () => {
     let enabled = false;
     const f = setup(1, () => enabled);

@@ -78,6 +78,27 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     await recovered.manager.runDue();
     expect(recovered.run).not.toHaveBeenCalled();
   });
+  it('a failed single-download consumer never blocks independent refresh submissions', async () => {
+    const { manager, run } = make();
+    const consumer = {
+      runDue: jest
+        .fn()
+        .mockRejectedValue(new Error('synthetic path unavailable')),
+      hasPending: jest
+        .fn()
+        .mockRejectedValue(new Error('synthetic task store unavailable')),
+    };
+    manager.attachConsumer(consumer);
+    await manager.enqueueRefresh(ids, '8'.repeat(64), 'scheduled-refresh');
+    await manager.init();
+    await manager.runDue();
+    clock += 30000;
+    await manager.runDue();
+    expect(run.mock.calls.map(([id]) => id)).toEqual(ids);
+    expect((await manager.list())[0].state).toBe('completed');
+    expect(consumer.runDue).toHaveBeenCalledTimes(2);
+    expect(consumer.hasPending).toHaveBeenCalled();
+  });
   it('an automatic round overlapping manual work records its intent without later replay', async () => {
     const a = make();
     await a.manager.enqueueRefresh(ids);
@@ -204,7 +225,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     await manager.runDue();
     expect(run).not.toHaveBeenCalled();
   });
-  it('risk control and unknown receipt pause the entire round, even on restart and next intent', async () => {
+  it('an unknown receipt isolates only its author across restart and subsequent slots', async () => {
     const { manager, run } = make(
       jest.fn().mockRejectedValue(new Error('synthetic unknown')),
     );
@@ -221,10 +242,130 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     await next.manager.enqueueRefresh(ids, 'f'.repeat(64), 'scheduled-refresh');
     await next.manager.runDue();
     expect(run).toHaveBeenCalledTimes(1);
-    expect(next.run).not.toHaveBeenCalled();
+    expect(next.run).toHaveBeenCalledTimes(1);
+    expect(next.run).toHaveBeenCalledWith(ids[1], 'submit', true);
     expect(
       (await manager.list()).find((item) => item.batchId === batch.batchId)
         ?.state,
-    ).toBe('paused');
+    ).toBe('completed');
+  });
+  it('300 subscriptions continue after one unknown, preserve receipts on restart, and exclude it next slot', async () => {
+    clock = Date.parse('2026-10-13T09:15:00+08:00');
+    const feeds = Array.from(
+      { length: 300 },
+      (_, index) => `MP_WXS_${1000000000 + index}`,
+    );
+    const run = jest.fn(async (feed: string) => {
+      if (feed === feeds[27]) throw new Error('synthetic unknown');
+      return { state: 'succeeded', accepted: true, message: 'synthetic ready' };
+    });
+    const first = make(run as any);
+    await first.manager.enqueueRefresh(
+      feeds,
+      '1'.repeat(64),
+      'scheduled-refresh',
+    );
+    for (let index = 0; index < 300; index++) {
+      await first.manager.runDue();
+      clock += 30000;
+    }
+    const result = (await first.manager.list())[0];
+    expect(result.state).toBe('completed');
+    expect(
+      result.items.filter((item) => item.state === 'succeeded'),
+    ).toHaveLength(299);
+    expect(result.items[27]).toMatchObject({
+      state: 'blocked',
+      accepted: false,
+    });
+    expect(run.mock.calls.filter(([feed]) => feed === feeds[27])).toHaveLength(
+      1,
+    );
+    const next = make();
+    clock = Date.parse('2026-10-13T14:00:00+08:00');
+    const nextBatch = await next.manager.enqueueRefresh(
+      feeds,
+      '2'.repeat(64),
+      'scheduled-refresh',
+    );
+    expect(nextBatch.items).toHaveLength(299);
+    expect(nextBatch.items.some((item) => item.feedId === feeds[27])).toBe(
+      false,
+    );
+    await Promise.all([first.manager.runDue(), next.manager.runDue()]);
+    expect(run.mock.calls.filter(([feed]) => feed === feeds[27])).toHaveLength(
+      1,
+    );
+  }, 30000);
+  it('preparation errors retry three times with durable backoff while independent items proceed', async () => {
+    const run = jest.fn(async (id: string) =>
+      id === ids[0]
+        ? {
+            state: 'failed',
+            accepted: false,
+            retryable: true,
+            stopBatch: false,
+            message: 'no submission',
+          }
+        : { state: 'succeeded', accepted: true, message: 'ready' },
+    );
+    const first = make(run as any);
+    await first.manager.enqueueRefresh(
+      ids,
+      '3'.repeat(64),
+      'scheduled-refresh',
+    );
+    await first.manager.runDue();
+    clock += 30000;
+    await first.manager.runDue();
+    expect(run.mock.calls.map(([id]) => id)).toEqual(ids);
+    const recovered = make(run as any);
+    clock += 30000;
+    await recovered.manager.runDue();
+    clock += 119999;
+    await recovered.manager.runDue();
+    expect(run).toHaveBeenCalledTimes(3);
+    clock++;
+    await recovered.manager.runDue();
+    expect(run).toHaveBeenCalledTimes(4);
+    expect((await recovered.manager.list())[0].state).toBe('completed');
+  });
+  it('read-only proof releases an old paused item; unknown proof never releases another author', async () => {
+    const { manager, run } = make(
+      jest.fn().mockRejectedValueOnce(Error('unknown')).mockResolvedValue({
+        state: 'succeeded',
+        accepted: true,
+        message: 'ready',
+      }),
+    );
+    const first = await manager.enqueueRefresh(
+      ids,
+      '4'.repeat(64),
+      'scheduled-refresh',
+    );
+    await manager.runDue();
+    const file = path.join(
+      directory,
+      '.wechat2rss-subscription-batches',
+      first.batchId + '.json',
+    );
+    const record = JSON.parse(await fs.readFile(file, 'utf8'));
+    record.state = 'paused'; // exact legacy state, before independent items ran
+    await fs.writeFile(file, JSON.stringify(record));
+    const proof = jest.fn().mockResolvedValue('unknown');
+    manager.attachReconciliation(proof);
+    clock += 30000;
+    await manager.runDue();
+    expect(run.mock.calls.map((call) => call[0])).toEqual(ids);
+    expect(proof).toHaveBeenCalledWith(ids[0], first.createdAt);
+    proof.mockResolvedValue('not-submitted');
+    clock += 60000;
+    await manager.runDue();
+    expect(run.mock.calls.map((call) => call[0])).toEqual([
+      ids[0],
+      ids[1],
+      ids[0],
+    ]);
+    expect((await manager.list())[0].state).toBe('completed');
   });
 });

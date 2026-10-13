@@ -42,6 +42,7 @@ import {
   assertSavedArticleIdentity,
   bodyRetryTarget,
   bodyRetryFailure,
+  bodyRetryRequestFailure,
   bodyRetryMessages,
   BodyRetryResult,
   BodyRetryBlockedError,
@@ -1085,6 +1086,7 @@ export class CollectionService {
           const result: BodyRetryResult = {
             status: 'failed',
             code,
+            requestFailure: bodyRetryRequestFailure(error),
             attemptedAt,
             cached: Boolean(current.contentHtml),
             filled: false,
@@ -1092,7 +1094,12 @@ export class CollectionService {
           };
           await tx.article.update({
             where: { id },
-            data: { lastBodyRetry: JSON.stringify(result) },
+            // Recording a failed attempt is not an edit to the missing body.
+            // Preserve its edit watermark so the cache worker can still fill it.
+            data: {
+              lastBodyRetry: JSON.stringify(result),
+              updatedAt: current.updatedAt,
+            },
           });
           return result;
         });

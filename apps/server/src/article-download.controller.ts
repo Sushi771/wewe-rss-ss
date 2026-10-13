@@ -67,7 +67,9 @@ export class ArticleDownloadController implements OnModuleDestroy {
       this.singleTasks = new Wechat2RssSingleTasks(
         () => {
           const raw = process.env.DATABASE_URL || '';
-          const database = raw.startsWith('file:') ? raw.slice(5) : '';
+          const database = raw.startsWith('file:')
+            ? decodeURIComponent(raw.slice(5).split('?')[0])
+            : '';
           if (!isAbsolute(database))
             throw new ArticleDownloadError('需要本机 SQLite 部署。', 409);
           return database;
@@ -143,7 +145,9 @@ export class ArticleDownloadController implements OnModuleDestroy {
   private localStore() {
     if (!this.store) {
       const raw = process.env.DATABASE_URL || '';
-      const database = raw.startsWith('file:') ? raw.slice(5) : '';
+      const database = raw.startsWith('file:')
+        ? decodeURIComponent(raw.slice(5).split('?')[0])
+        : '';
       if (!isAbsolute(database))
         throw new ArticleDownloadError('此功能需要本机 SQLite 桌面部署。', 409);
       this.store = new LocalArticleStore(
