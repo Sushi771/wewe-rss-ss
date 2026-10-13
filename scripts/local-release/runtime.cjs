@@ -230,7 +230,10 @@ async function runtime() {
   const engineCommit = actualEngineCommit(
     path.join(path.dirname(clientPath), 'query_engine-windows.dll.node'),
   );
-  if (manifest.prisma.engineCommit && engineCommit !== manifest.prisma.engineCommit)
+  if (
+    manifest.prisma.engineCommit &&
+    engineCommit !== manifest.prisma.engineCommit
+  )
     throw new Error('Native Prisma engine differs from release manifest');
   if (Prisma.prismaVersion.client !== manifest.prisma.clientVersion)
     throw new Error('运行时 Client 版本不一致');
