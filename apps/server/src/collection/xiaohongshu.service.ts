@@ -915,6 +915,7 @@ export class XiaohongshuService {
     }
     if (
       !creator?.externalAuthorId ||
+      typeof creator.displayName !== 'string' ||
       !creator.displayName.trim() ||
       !Array.isArray(tuple) ||
       tuple.length !== 3 ||
