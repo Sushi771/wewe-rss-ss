@@ -78,6 +78,27 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     await recovered.manager.runDue();
     expect(recovered.run).not.toHaveBeenCalled();
   });
+  it('a failed single-download consumer never blocks independent refresh submissions', async () => {
+    const { manager, run } = make();
+    const consumer = {
+      runDue: jest
+        .fn()
+        .mockRejectedValue(new Error('synthetic path unavailable')),
+      hasPending: jest
+        .fn()
+        .mockRejectedValue(new Error('synthetic task store unavailable')),
+    };
+    manager.attachConsumer(consumer);
+    await manager.enqueueRefresh(ids, '8'.repeat(64), 'scheduled-refresh');
+    await manager.init();
+    await manager.runDue();
+    clock += 30000;
+    await manager.runDue();
+    expect(run.mock.calls.map(([id]) => id)).toEqual(ids);
+    expect((await manager.list())[0].state).toBe('completed');
+    expect(consumer.runDue).toHaveBeenCalledTimes(2);
+    expect(consumer.hasPending).toHaveBeenCalled();
+  });
   it('an automatic round overlapping manual work records its intent without later replay', async () => {
     const a = make();
     await a.manager.enqueueRefresh(ids);

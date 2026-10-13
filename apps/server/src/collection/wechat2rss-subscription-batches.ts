@@ -173,6 +173,30 @@ export class Wechat2RssSubscriptionBatches {
     this.consumer = consumer;
     this.schedule();
   }
+  private consumerUnavailable = false;
+  private warnConsumerUnavailable() {
+    if (!this.consumerUnavailable)
+      console.warn('[WECHAT2RSS_DOWNLOAD_CONSUMER_UNAVAILABLE]');
+    this.consumerUnavailable = true;
+  }
+  private async consumerPending() {
+    try {
+      return Boolean(await this.consumer?.hasPending());
+    } catch {
+      this.warnConsumerUnavailable();
+      // Retain the consumer's durable work; its storage failure cannot suppress
+      // independent subscription refreshes or authorize another submission.
+      return true;
+    }
+  }
+  private async runConsumer() {
+    try {
+      await this.consumer?.runDue();
+      this.consumerUnavailable = false;
+    } catch {
+      this.warnConsumerUnavailable();
+    }
+  }
   wake() {
     this.schedule();
   }
@@ -708,7 +732,7 @@ export class Wechat2RssSubscriptionBatches {
               ['waiting', 'submitting'].includes(item.state),
             )),
       ) ||
-      (await this.consumer?.hasPending())
+      (await this.consumerPending())
     )
       this.schedule();
   }
@@ -734,7 +758,7 @@ export class Wechat2RssSubscriptionBatches {
       cacheOnlyRun = (await this.records()).some(
         (record) => record.cacheOnly && live(record),
       );
-      if (!cacheOnlyRun) await this.consumer?.runDue();
+      if (!cacheOnlyRun) await this.runConsumer();
       if (this.stopped) return;
       // Read-only reconciliation can prove preparation failed before the one-shot
       // reservation. An unknown receipt alone never authorizes another /add.
@@ -893,7 +917,7 @@ export class Wechat2RssSubscriptionBatches {
                 ['waiting', 'submitting'].includes(item.state),
               )),
         ) ||
-          (!cacheOnlyRun && (await this.consumer?.hasPending())))
+          (!cacheOnlyRun && (await this.consumerPending())))
       )
         this.schedule();
     }
