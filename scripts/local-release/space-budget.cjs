@@ -15,7 +15,7 @@ function canonical(value) {
     tail.unshift(path.basename(target));
     target = path.dirname(target);
   }
-  return path.join(fs.realpathSync(target), ...tail);
+  return path.join(fs.realpathSync.native(target), ...tail);
 }
 function inside(root, target) {
   const relative = path.relative(root, target);
@@ -43,14 +43,14 @@ function usage(root) {
     visited = new Set(),
     files = new Set();
   function visit(directory) {
-    const target = fs.realpathSync(directory);
+    const target = fs.realpathSync.native(directory);
     if (visited.has(target))
       throw new Error('Nested or repeated backup directory refused');
     visited.add(target);
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const file = path.join(directory, entry.name);
       if (entry.isSymbolicLink()) {
-        const resolved = fs.realpathSync(file);
+        const resolved = fs.realpathSync.native(file);
         if (
           !fs.statSync(file).isDirectory() ||
           !allowed.some((folder) => inside(folder, resolved))
@@ -62,7 +62,7 @@ function usage(root) {
       const stat = fs.statSync(file);
       if (stat.isDirectory()) visit(file);
       else {
-        const resolved = fs.realpathSync(file);
+        const resolved = fs.realpathSync.native(file);
         if (files.has(resolved)) continue;
         files.add(resolved);
         bytes += stat.size;

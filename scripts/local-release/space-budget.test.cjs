@@ -148,6 +148,22 @@ test('native production preparation reuses verified snapshots, detects mutation,
   assert.equal(second.backup.reused, true);
   assert.equal(second.backup.backup, first.backup.backup);
   assert.equal(budget.usage(backups).databases, 1);
+  const pythonReuse = JSON.parse(
+    execFileSync(
+      'python',
+      [
+        path.resolve(__dirname, '../../apps/server/scripts/backup-sqlite.py'),
+        '--database',
+        database,
+        '--backup-root',
+        backups,
+      ],
+      { encoding: 'utf8' },
+    ),
+  );
+  assert.equal(pythonReuse.reused, true);
+  assert.equal(pythonReuse.backup, first.backup.backup);
+  assert.equal(budget.usage(backups).databases, 1);
   const stat = fs.statSync(database);
   fs.utimesSync(database, stat.atime, new Date(stat.mtimeMs + 10000));
   const touched = await native.prepareStart(
@@ -222,10 +238,14 @@ test('frozen Windows-style metadata cannot authorize reuse after DB or WAL conte
     identities = new Map();
   for (const file of [database, database + '-wal'])
     if (fs.existsSync(file))
-      identities.set(file, original(file, { bigint: true }));
+      identities.set(
+        fs.realpathSync.native(file),
+        original(file, { bigint: true }),
+      );
   connection.exec("UPDATE articles SET title='same-size changed content'");
   fs.statSync = function (file, options) {
-    if (options?.bigint && identities.has(file)) return identities.get(file);
+    if (options?.bigint && identities.has(fs.realpathSync.native(file)))
+      return identities.get(fs.realpathSync.native(file));
     return original.apply(this, arguments);
   };
   try {

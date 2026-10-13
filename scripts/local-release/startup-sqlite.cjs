@@ -6,6 +6,7 @@ const { hash, fileHash, writeJson } = require('./lib.cjs');
 const budget = require('./space-budget.cjs');
 
 class UnsupportedBaselineValue extends Error {}
+class SourceChangedDuringPreparation extends Error {}
 const required = {
   feeds: ['collection_channel'],
   articles: ['last_body_status', 'verified_source_url', 'last_body_retry'],
@@ -265,7 +266,7 @@ function inspectConnection(
   };
 }
 function inspectDatabase(database, migrations, options) {
-  database = fs.realpathSync(database);
+  database = fs.realpathSync.native(database);
   const connection = open(database);
   try {
     return inspectConnection(connection, database, migrations, options);
@@ -335,8 +336,28 @@ function snapshotEqual(source, copied) {
   }
   return true;
 }
+function verifyCurrentSnapshot(database, backup, stage) {
+  // An unpinned observer notices commits made during the pinned row comparison.
+  const observer = new (sqlite().DatabaseSync)(database, { readOnly: true });
+  const current = open(database),
+    copied = open(backup);
+  try {
+    const version = observer.prepare('PRAGMA data_version').get().data_version;
+    if (
+      !snapshotEqual(current, copied) ||
+      observer.prepare('PRAGMA data_version').get().data_version !== version
+    )
+      throw new SourceChangedDuringPreparation(
+        'SQLite source changed during startup ' + stage,
+      );
+  } finally {
+    current.close();
+    copied.close();
+    observer.close();
+  }
+}
 async function prepareStart(database, migrations, backupRoot, baselineFile) {
-  database = fs.realpathSync(database);
+  database = fs.realpathSync.native(database);
   backupRoot = budget.canonical(backupRoot);
   if (budget.inside(backupRoot, database))
     throw new Error('Nested source/destination refused');
@@ -359,6 +380,7 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
           const inspection = inspectConnection(source, database, migrations);
           if (fileHash(previous.backup) !== previous.sha256)
             throw new Error('Recovery point changed during verification');
+          verifyCurrentSnapshot(database, previous.backup, 'reuse');
           writeJson(baselineFile, inspection);
           return {
             backup: {
@@ -375,7 +397,11 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
       }
     }
   } catch (error) {
-    if (fs.existsSync(baselineFile)) throw error;
+    if (
+      error instanceof SourceChangedDuringPreparation ||
+      fs.existsSync(baselineFile)
+    )
+      throw error;
   }
   const scope =
     process.env.SQLITE_BACKUP_KIND === 'test'
@@ -416,7 +442,7 @@ async function freshPrepareStart(
   backupRoot,
   baselineFile,
 ) {
-  database = fs.realpathSync(database);
+  database = fs.realpathSync.native(database);
   const identity = sourceIdentity(database);
   const connection = open(database);
   try {
@@ -461,17 +487,7 @@ async function freshPrepareStart(
     } finally {
       duplicate.close();
     }
-    const current = open(database),
-      verified = open(destination);
-    try {
-      assert(
-        snapshotEqual(current, verified),
-        'SQLite source changed during startup backup',
-      );
-    } finally {
-      current.close();
-      verified.close();
-    }
+    verifyCurrentSnapshot(database, destination, 'backup');
     connection.close();
     assert.deepEqual(
       sourceIdentity(database),

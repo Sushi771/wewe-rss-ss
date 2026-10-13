@@ -13,6 +13,16 @@ type Audit = {
 export function startupAudit(): Audit | undefined {
   return (globalThis as any).__weweStartupAudit;
 }
+/** Avoid startup-audit/periodic-snapshot races on the same bounded root. */
+export async function startSnapshotsAfterStartupAudit(
+  startSnapshots: () => Promise<void>,
+) {
+  const audit = startupAudit();
+  audit?.start();
+  if (audit && !(await audit.ready)) return false;
+  await startSnapshots();
+  return true;
+}
 export function startupMessage() {
   if (startupAudit()?.reason === 'space-budget-exceeded')
     return '备份空间预算不足，更新和修改已暂停，已有恢复点保留。请经确认归档或调整有限预算后重试。';

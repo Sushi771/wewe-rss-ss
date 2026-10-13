@@ -68,6 +68,16 @@ def compare_tables(source, backup, migrations, baseline):
                 raise ValueError("Startup backup changed protected row count: " + table)
 
 
+def verify_current_snapshot(database, backup):
+    """A fresh independent read view catches commits hidden by Windows metadata."""
+    with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as observer, closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as current, closing(sqlite3.connect(backup.as_uri() + '?mode=ro', uri=True)) as copied:
+        version = observer.execute('PRAGMA data_version').fetchone()
+        current.execute('PRAGMA query_only=ON'); current.execute('BEGIN')
+        copied.execute('PRAGMA query_only=ON'); copied.execute('BEGIN')
+        if not backup_api.snapshot_equal(current, copied) or observer.execute('PRAGMA data_version').fetchone() != version:
+            raise ValueError('SQLite source changed during startup backup; retry from a new snapshot')
+
+
 def prepare(database, migrations, backup_root, baseline_file):
     database = database.resolve(strict=True)
     backup_root = backup_root.resolve()
@@ -79,6 +89,7 @@ def prepare(database, migrations, backup_root, baseline_file):
             source.execute('PRAGMA query_only=ON;')
             source.execute('BEGIN')
             compare_tables(source, Path(previous['backup']), migrations, before)
+        verify_current_snapshot(database, Path(previous['backup']))
         if identity != source_identity(database):
             raise ValueError('SQLite source changed during startup reuse')
         with baseline_file.open('x', encoding='utf-8') as stream:
@@ -117,6 +128,7 @@ def fresh_prepare(database, migrations, backup_root, baseline_file):
             # Uses the very same pinned read snapshot as the full baseline.
             source.backup(destination, pages=1000, sleep=0.1)
         compare_tables(source, backup, migrations, before)
+    verify_current_snapshot(database, backup)
     if source_identity(database) != identity:
         raise ValueError("SQLite source changed during startup backup; retry from a new snapshot")
     digest = hashlib.sha256()
