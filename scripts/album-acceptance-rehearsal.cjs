@@ -613,6 +613,7 @@ async function parent() {
     );
     const copy = path.join(root, 'rehearsal.db');
     fs.copyFileSync(backup.backup, copy, fs.constants.COPYFILE_EXCL);
+    artifacts?.checkpoint();
     if (options['baseline-only']) {
       assert.deepEqual(snapshot(source), before, 'PRODUCTION_CHANGED');
       const report = {
@@ -757,6 +758,7 @@ async function parent() {
     );
     const scoped = path.join(root, 'export-scope.db');
     fs.copyFileSync(exportBackup.backup, scoped, fs.constants.COPYFILE_EXCL);
+    artifacts?.checkpoint();
     const replay = cassette(options.manifest);
     const { canonicalArticleUrl } = require(
       path.join(built, 'collection/collection-format'),

@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { parseArgs } = require('node:util');
+const artifactsApi = require('./test-artifacts.cjs');
 const {
   verifyRelease,
   readJson,
@@ -63,109 +64,131 @@ async function main() {
     fs.realpathSync(readJson(database + '.rehearsal.json').database),
     fs.realpathSync(database),
   );
-  run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
-    path.join(legacy, 'inspect-sqlite.py'),
-    '--database',
-    database,
-    '--migrations',
-    path.join(legacy, 'known-migrations'),
-    '--baseline',
-    path.join(audit, 'copy-before.json'),
-    '--require-current',
-  ]);
-  fs.writeFileSync(
-    database + '.rehearsal.json',
-    JSON.stringify({ releaseId: manifest.id, database }),
-  );
-  const pauseFile = path.join(root, 'tools/wechat-desktop-collector/.paused');
-  const guardReport = path.join(
-    audit,
-    `legacy-resume-${manifest.id}-guard.json`,
-  );
-  const log = fs.openSync(
-    path.join(audit, `legacy-resume-${manifest.id}.log`),
-    'wx',
-  );
-  const port = await unusedPort();
-  const child = spawn(
-    path.join(legacy, 'runtime/node.exe'),
-    [
-      path.join(legacy, 'runtime.cjs'),
-      'start',
+  const artifacts = artifactsApi.begin({
+    outputRoot: values['output-root'],
+    source: database,
+    realCopy: true,
+    prepared: true,
+    keep: false,
+  });
+  let failure;
+  try {
+    run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
+      path.join(legacy, 'inspect-sqlite.py'),
       '--database',
       database,
-      '--port',
-      String(port),
-      '--pause-file',
-      pauseFile,
-      '--rehearsal',
-      '--obsidian-root',
-      path.join(audit, 'legacy-resume-vault'),
-      '--guard-report',
-      guardReport,
-    ],
-    {
-      cwd: audit,
-      windowsHide: true,
-      shell: false,
-      env: { ...cleanEnvironment(), CRON_EXPRESSION: '0 0 1 1 *' },
-      stdio: ['ignore', log, log],
-    },
-  );
-  const closed = once(child, 'close');
-  let ready = false;
-  try {
-    const deadline = Date.now() + 360000;
-    while (Date.now() < deadline) {
-      if (child.exitCode !== null)
-        throw new Error('旧版回滚进程提前退出，查看 legacy-resume.log');
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/dash`, {
-          signal: AbortSignal.timeout(1000),
-        });
-        ready = response.ok;
-      } catch {
-        /* 等待启动 */
-      }
-      if (ready) break;
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-    assert(ready, '旧版回滚进程启动超时');
-    const dash = await fetch(`http://127.0.0.1:${port}/dash`);
-    const html = await dash.text();
-    const asset = html.match(/(?:src|href)="(\/dash\/assets\/[^"?#]+\.js)"/)[1];
-    const assetResponse = await fetch(`http://127.0.0.1:${port}${asset}`);
-    assert.equal(assetResponse.status, 200);
-    assert((await assetResponse.text()).length > 1000);
-    const rss = await fetch(
-      `http://127.0.0.1:${port}/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary`,
+      '--migrations',
+      path.join(legacy, 'known-migrations'),
+      '--baseline',
+      path.join(audit, 'copy-before.json'),
+      '--require-current',
+    ]);
+    fs.writeFileSync(
+      database + '.rehearsal.json',
+      JSON.stringify({ releaseId: manifest.id, database }),
     );
-    assert.equal(rss.status, 200);
-    assert.equal(((await rss.text()).match(/<item>/g) || []).length, 20);
-    assert.deepEqual(readJson(guardReport), {
-      installed: true,
-      blockedNetwork: 0,
-      blockedChildren: 0,
-    });
+    const pauseFile = path.join(root, 'tools/wechat-desktop-collector/.paused');
+    const guardReport = path.join(
+      audit,
+      `legacy-resume-${manifest.id}-guard.json`,
+    );
+    const log = fs.openSync(
+      path.join(audit, `legacy-resume-${manifest.id}.log`),
+      'wx',
+    );
+    const port = await unusedPort();
+    artifacts.checkpoint?.();
+    const child = spawn(
+      path.join(legacy, 'runtime/node.exe'),
+      [
+        path.join(legacy, 'runtime.cjs'),
+        'start',
+        '--database',
+        database,
+        '--port',
+        String(port),
+        '--pause-file',
+        pauseFile,
+        '--rehearsal',
+        '--obsidian-root',
+        path.join(audit, 'legacy-resume-vault'),
+        '--guard-report',
+        guardReport,
+      ],
+      {
+        cwd: audit,
+        windowsHide: true,
+        shell: false,
+        env: {
+          ...cleanEnvironment(),
+          ...artifacts.backupEnvironment,
+          CRON_EXPRESSION: '0 0 1 1 *',
+        },
+        stdio: ['ignore', log, log],
+      },
+    );
+    const closed = once(child, 'close');
+    let ready = false;
+    try {
+      const deadline = Date.now() + 360000;
+      while (Date.now() < deadline) {
+        if (child.exitCode !== null)
+          throw new Error('旧版回滚进程提前退出，查看 legacy-resume.log');
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/dash`, {
+            signal: AbortSignal.timeout(1000),
+          });
+          ready = response.ok;
+        } catch {
+          /* 等待启动 */
+        }
+        if (ready) break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      assert(ready, '旧版回滚进程启动超时');
+      const dash = await fetch(`http://127.0.0.1:${port}/dash`);
+      const html = await dash.text();
+      const asset = html.match(
+        /(?:src|href)="(\/dash\/assets\/[^"?#]+\.js)"/,
+      )[1];
+      const assetResponse = await fetch(`http://127.0.0.1:${port}${asset}`);
+      assert.equal(assetResponse.status, 200);
+      assert((await assetResponse.text()).length > 1000);
+      const rss = await fetch(
+        `http://127.0.0.1:${port}/feeds/MP_WXS_3895431412.rss?limit=20&mode=summary`,
+      );
+      assert.equal(rss.status, 200);
+      assert.equal(((await rss.text()).match(/<item>/g) || []).length, 20);
+      assert.deepEqual(readJson(guardReport), {
+        installed: true,
+        blockedNetwork: 0,
+        blockedChildren: 0,
+      });
+    } finally {
+      if (child.exitCode === null) child.kill();
+      await closed;
+      fs.closeSync(log);
+    }
+    const result = {
+      passed: true,
+      audit,
+      legacy,
+      migratedDatabase: database,
+      processStopped: true,
+      staticAsset: true,
+      rssItems: 20,
+    };
+    writeJson(
+      path.join(audit, `legacy-resume-${manifest.id}-summary.json`),
+      result,
+    );
+    console.log(JSON.stringify(result));
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    if (child.exitCode === null) child.kill();
-    await closed;
-    fs.closeSync(log);
+    artifacts.finish(failure);
   }
-  const result = {
-    passed: true,
-    audit,
-    legacy,
-    migratedDatabase: database,
-    processStopped: true,
-    staticAsset: true,
-    rssItems: 20,
-  };
-  writeJson(
-    path.join(audit, `legacy-resume-${manifest.id}-summary.json`),
-    result,
-  );
-  console.log(JSON.stringify(result));
 }
 
 if (require.main === module)

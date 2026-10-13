@@ -172,6 +172,11 @@ function begin({
     let finished = false;
     const checkpoint = () => {
       if (finished) throw new Error('Run already finished');
+      if (
+        budget.canonical(audit) !== audit ||
+        !equalIdentity(identity(audit), manifest.directoryIdentity)
+      )
+        throw new Error('Run directory identity changed; preserve for review');
       const previous = new Map(
         manifest.files.map((entry) => [entry.path, entry.identity]),
       );
@@ -212,6 +217,13 @@ function begin({
           manifest.failure =
             (error?.message || cleanupError?.message || '').slice(0, 4096) ||
             null;
+          if (
+            budget.canonical(audit) !== audit ||
+            !equalIdentity(identity(audit), manifest.directoryIdentity)
+          )
+            throw new Error(
+              'Run directory identity changed; preserve for review',
+            );
           save(audit, manifest);
           fs.writeFileSync(
             path.join(audit, 'space-summary.json'),

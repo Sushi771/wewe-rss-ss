@@ -112,6 +112,7 @@ async function rehearse() {
     assert(inside(audit, database));
     assert.notEqual(database.toLowerCase(), source.toLowerCase());
     fs.copyFileSync(backup.backup, database, fs.constants.COPYFILE_EXCL);
+    artifacts?.checkpoint();
     const baseline = path.join(audit, 'copy-before.json');
     const before = inspect(database, ['--output', baseline]);
     assert.deepEqual(
@@ -432,6 +433,7 @@ async function rehearse() {
     assert.equal(fileHash(backup.backup), backup.sha256);
     const rollback = path.join(audit, 'rollback.db');
     fs.copyFileSync(backup.backup, rollback, fs.constants.COPYFILE_EXCL);
+    artifacts?.checkpoint();
     const restored = inspect(rollback, [
       '--baseline',
       baseline,

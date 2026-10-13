@@ -356,6 +356,7 @@ async function controlledSwitch(options) {
       const copy = backup(source, 'source-backup');
       database = path.join(audit, 'rehearsal.db');
       fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
+      artifacts?.checkpoint();
       inspection(database, [
         '--baseline',
         path.join(audit, 'source-before.json'),

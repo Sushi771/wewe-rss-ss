@@ -280,3 +280,19 @@ test('foreign ownership and changed registered identity are refused before remov
   assert.equal(fs.readFileSync(run.database, 'utf8'), 'replacement user bytes');
   assert(fs.existsSync(path.join(root, '.test-run.lock')));
 });
+
+test('replaced audit directory cannot enroll or remove unknown databases', (t) => {
+  fixture(t);
+  const run = artifacts.begin({ migrations });
+  fs.renameSync(run.audit, run.audit + '-original');
+  fs.mkdirSync(run.audit);
+  const unknown = path.join(run.audit, 'unknown.db');
+  fs.writeFileSync(unknown, 'preserve');
+  assert.throws(() => run.checkpoint(), /directory identity changed/);
+  assert.throws(
+    () => run.finish(new Error('failure')),
+    /directory identity changed/,
+  );
+  assert.equal(fs.readFileSync(unknown, 'utf8'), 'preserve');
+  assert(!fs.existsSync(path.join(run.audit, 'space-summary.json')));
+});

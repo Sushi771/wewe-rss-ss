@@ -234,6 +234,7 @@ async function controlledRestart(options) {
         const copy = backup(source, 'source-backup');
         database = path.join(audit, 'rehearsal.db');
         fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
+        artifacts?.checkpoint();
       }
       port = options.port || (await unusedPort());
     } else if (options.mode === 'restart') backup(source, 'before-stop');
