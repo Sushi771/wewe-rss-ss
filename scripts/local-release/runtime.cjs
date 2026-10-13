@@ -320,6 +320,13 @@ async function runtime() {
         database,
         migrations: path.join(server, 'prisma/migrations'),
         auditRoot: backgroundAudit,
+        kind: values.production ? 'production' : 'test',
+        backupRoot: values.production
+          ? path.resolve(
+              process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
+                path.join(path.dirname(database), 'backups/full-snapshots'),
+            )
+          : undefined,
       });
   }
   // Legacy rollback bundles still carry the shared pause marker. Current

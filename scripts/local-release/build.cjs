@@ -380,6 +380,7 @@ function build(options = {}) {
     'inspect-sqlite.py',
     'prepare-start.py',
     'startup-sqlite.cjs',
+    'space-budget.cjs',
     'startup-audit.cjs',
     'offline-guard.cjs',
   ])

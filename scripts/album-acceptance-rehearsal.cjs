@@ -19,6 +19,8 @@ const options =
     ? parseArgs({
         options: {
           database: { type: 'string' },
+          'real-copy': { type: 'boolean', default: false },
+          'output-root': { type: 'string' },
           manifest: { type: 'string' },
           'runtime-root': { type: 'string' },
           worker: { type: 'string' },
@@ -37,7 +39,12 @@ const runtime = fs.realpathSync(
 const server = path.join(runtime, 'apps/server');
 const serverRequire = createRequire(path.join(server, 'package.json'));
 const built = path.join(server, 'dist/apps/server/src');
-const privateRoot = path.join(runtime, 'private-data', 'album-loop-qa');
+const privateRoot = path.resolve(
+  options['output-root'] ||
+    process.env.SQLITE_TEST_BUDGET_ROOT ||
+    process.env.WEWE_TEST_OUTPUT_ROOT ||
+    path.join(runtime, 'private-data', 'album-loop-qa'),
+);
 
 function inside(root, target) {
   const relative = path.relative(root, target);
@@ -576,80 +583,220 @@ async function parent() {
       'USE --database <absolute source SQLite> --manifest <private cassette> --runtime-root <built repo>',
     );
   const source = fs.realpathSync(options.database);
-  const before = snapshot(source);
-  const root = path.join(privateRoot, crypto.randomUUID());
-  fs.mkdirSync(root, { recursive: true });
-  checkPrivate(root);
-  const baseline = summary(before);
-  write(path.join(root, 'baseline-summary.json'), baseline);
-  const backup = JSON.parse(
-    run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
-      path.join(server, 'scripts/backup-sqlite.py'),
-      '--database',
-      source,
-      '--backup-root',
-      path.join(root, 'backups'),
-    ]),
-  );
-  assert.equal(backup.integrityCheck, 'ok');
-  assert.equal(hash(fs.readFileSync(backup.backup)), backup.sha256);
-  assert.deepEqual(snapshot(backup.backup), before, 'BACKUP_BASELINE_MISMATCH');
-  const copy = path.join(root, 'rehearsal.db');
-  fs.copyFileSync(backup.backup, copy, fs.constants.COPYFILE_EXCL);
-  if (options['baseline-only']) {
-    assert.deepEqual(snapshot(source), before, 'PRODUCTION_CHANGED');
-    const report = {
-      phase: 'read-only baseline and consistent backup',
-      baseline,
-      productionUnchanged: true,
-      integrity: 'ok',
-      reportDirectory: root,
+  const artifacts = require('./local-release/test-artifacts.cjs').begin({
+    outputRoot: privateRoot,
+    source,
+    realCopy: options['real-copy'],
+  });
+  let artifactError;
+  try {
+    const before = snapshot(source);
+    const root = artifacts.audit;
+    checkPrivate(root);
+    const baseline = summary(before);
+    write(path.join(root, 'baseline-summary.json'), baseline);
+    const backup = JSON.parse(
+      run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
+        path.join(server, 'scripts/backup-sqlite.py'),
+        '--database',
+        source,
+        '--backup-root',
+        path.join(root, 'backups'),
+      ]),
+    );
+    assert.equal(backup.integrityCheck, 'ok');
+    assert.equal(hash(fs.readFileSync(backup.backup)), backup.sha256);
+    assert.deepEqual(
+      snapshot(backup.backup),
+      before,
+      'BACKUP_BASELINE_MISMATCH',
+    );
+    const copy = path.join(root, 'rehearsal.db');
+    fs.copyFileSync(backup.backup, copy, fs.constants.COPYFILE_EXCL);
+    if (options['baseline-only']) {
+      assert.deepEqual(snapshot(source), before, 'PRODUCTION_CHANGED');
+      const report = {
+        phase: 'read-only baseline and consistent backup',
+        baseline,
+        productionUnchanged: true,
+        integrity: 'ok',
+        reportDirectory: root,
+      };
+      write(path.join(root, 'result.json'), report);
+      console.log(JSON.stringify(report));
+      return;
+    }
+    assert(options.manifest, 'PRIVATE_CASSETTE_REQUIRED');
+    const env = {
+      ...process.env,
+      DATABASE_URL: `file:${copy.replace(/\\/g, '/')}`,
     };
-    write(path.join(root, 'result.json'), report);
-    console.log(JSON.stringify(report));
-    return;
-  }
-  assert(options.manifest, 'PRIVATE_CASSETTE_REQUIRED');
-  const env = {
-    ...process.env,
-    DATABASE_URL: `file:${copy.replace(/\\/g, '/')}`,
-  };
-  run(
-    process.execPath,
-    [
-      serverRequire.resolve('prisma/build/index.js'),
-      'migrate',
-      'deploy',
-      '--schema',
-      path.join(server, 'prisma/schema.prisma'),
-    ],
-    { cwd: server, env },
-  );
-  const migrated = snapshot(copy);
-  const provenTimes = verifiedTimesFromCassette(
-    fs.realpathSync(options.manifest),
-  );
-  // Migration must preserve all pre-existing columns before any provider input.
-  preservation(before, migrated);
-  const stages = [];
-  let previous = migrated;
-  for (const stage of ['first', 'repeat', 'scheduled']) {
-    const output = path.join(root, `${stage}.json`);
-    const result = spawnSync(
+    run(
+      process.execPath,
+      [
+        serverRequire.resolve('prisma/build/index.js'),
+        'migrate',
+        'deploy',
+        '--schema',
+        path.join(server, 'prisma/schema.prisma'),
+      ],
+      { cwd: server, env },
+    );
+    const migrated = snapshot(copy);
+    const provenTimes = verifiedTimesFromCassette(
+      fs.realpathSync(options.manifest),
+    );
+    // Migration must preserve all pre-existing columns before any provider input.
+    preservation(before, migrated);
+    const stages = [];
+    let previous = migrated;
+    for (const stage of ['first', 'repeat', 'scheduled']) {
+      const output = path.join(root, `${stage}.json`);
+      const result = spawnSync(
+        process.execPath,
+        [
+          __filename,
+          '--worker',
+          stage,
+          '--copy',
+          copy,
+          '--output',
+          output,
+          '--manifest',
+          fs.realpathSync(options.manifest),
+          '--runtime-root',
+          runtime,
+          ...(options.live && stage === 'first' ? ['--live'] : []),
+        ],
+        {
+          cwd: server,
+          env,
+          windowsHide: true,
+          shell: false,
+          encoding: 'utf8',
+          timeout: 300000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      fs.writeFileSync(
+        path.join(root, `${stage}.log`),
+        `${result.stdout || ''}\n${result.stderr || ''}`,
+      );
+      if (
+        stage === 'first' &&
+        result.status !== 0 &&
+        options['expect-blocked']
+      ) {
+        const after = snapshot(copy);
+        preservation(migrated, after, true);
+        assert.deepEqual(
+          after.articles,
+          migrated.articles,
+          'FAILED_BATCH_ARTICLES_CHANGED',
+        );
+        const oldFeed = migrated.feeds.find((f) => f.id === TARGET);
+        const newFeed = after.feeds.find((f) => f.id === TARGET);
+        for (const key of [
+          'public_album_ids',
+          'collection_channel',
+          'local_directory',
+          'has_history',
+        ])
+          assert.deepEqual(
+            newFeed[key],
+            oldFeed[key],
+            'FAILED_BATCH_BINDING_CHANGED',
+          );
+        assert.equal(
+          JSON.parse(newFeed.last_collection_result).status,
+          'failed',
+        );
+        assert.deepEqual(snapshot(source), before, 'PRODUCTION_CHANGED');
+        const report = {
+          boundary:
+            'offline real-response replay with incomplete/challenged inputs; not a live request',
+          accepted: false,
+          blockedBatch: true,
+          articleWrites: 0,
+          bindingWrites: 0,
+          baseline,
+          productionUnchanged: true,
+          reportDirectory: root,
+          outstanding: [
+            'successful full-album body input',
+            'repeat zero-created',
+            'HTTP service restart/manual update',
+            'album exports',
+            'natural increment',
+          ],
+        };
+        write(path.join(root, 'result.json'), report);
+        console.log(JSON.stringify(report));
+        return;
+      }
+      assert.equal(result.status, 0, `STAGE_FAILED:${stage}:CHECK_PRIVATE_LOG`);
+      const current = snapshot(copy);
+      const protectedFields = preservation(
+        stage === 'first' ? migrated : previous,
+        current,
+        stage !== 'first',
+        provenTimes,
+      );
+      stages.push({ stage, ...json(output), protection: protectedFields });
+      previous = current;
+    }
+    // Narrow only a second export copy. Never delete rows from the source or rehearsal.
+    const exportBackup = JSON.parse(
+      run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
+        path.join(server, 'scripts/backup-sqlite.py'),
+        '--database',
+        copy,
+        '--backup-root',
+        path.join(root, 'export-backups'),
+      ]),
+    );
+    const scoped = path.join(root, 'export-scope.db');
+    fs.copyFileSync(exportBackup.backup, scoped, fs.constants.COPYFILE_EXCL);
+    const replay = cassette(options.manifest);
+    const { canonicalArticleUrl } = require(
+      path.join(built, 'collection/collection-format'),
+    );
+    const scopedDb = new DatabaseSync(scoped);
+    try {
+      for (const row of scopedDb
+        .prepare(
+          'SELECT id,source_url,verified_source_url FROM articles WHERE mp_id=?',
+        )
+        .all(TARGET)) {
+        let included = false;
+        try {
+          included = replay.identities.has(
+            canonicalArticleUrl(row.source_url || row.verified_source_url).id,
+          );
+        } catch {
+          /* legacy outside album */
+        }
+        if (!included)
+          scopedDb.prepare('DELETE FROM articles WHERE id=?').run(row.id);
+      }
+    } finally {
+      scopedDb.close();
+    }
+    const output = path.join(root, 'exports.json');
+    const exported = spawnSync(
       process.execPath,
       [
         __filename,
         '--worker',
-        stage,
+        'export',
         '--copy',
-        copy,
+        scoped,
         '--output',
         output,
         '--manifest',
         fs.realpathSync(options.manifest),
         '--runtime-root',
         runtime,
-        ...(options.live && stage === 'first' ? ['--live'] : []),
       ],
       {
         cwd: server,
@@ -662,149 +809,32 @@ async function parent() {
       },
     );
     fs.writeFileSync(
-      path.join(root, `${stage}.log`),
-      `${result.stdout || ''}\n${result.stderr || ''}`,
+      path.join(root, 'exports.log'),
+      `${exported.stdout || ''}\n${exported.stderr || ''}`,
     );
-    if (stage === 'first' && result.status !== 0 && options['expect-blocked']) {
-      const after = snapshot(copy);
-      preservation(migrated, after, true);
-      assert.deepEqual(
-        after.articles,
-        migrated.articles,
-        'FAILED_BATCH_ARTICLES_CHANGED',
-      );
-      const oldFeed = migrated.feeds.find((f) => f.id === TARGET);
-      const newFeed = after.feeds.find((f) => f.id === TARGET);
-      for (const key of [
-        'public_album_ids',
-        'collection_channel',
-        'local_directory',
-        'has_history',
-      ])
-        assert.deepEqual(
-          newFeed[key],
-          oldFeed[key],
-          'FAILED_BATCH_BINDING_CHANGED',
-        );
-      assert.equal(JSON.parse(newFeed.last_collection_result).status, 'failed');
-      assert.deepEqual(snapshot(source), before, 'PRODUCTION_CHANGED');
-      const report = {
-        boundary:
-          'offline real-response replay with incomplete/challenged inputs; not a live request',
-        accepted: false,
-        blockedBatch: true,
-        articleWrites: 0,
-        bindingWrites: 0,
-        baseline,
-        productionUnchanged: true,
-        reportDirectory: root,
-        outstanding: [
-          'successful full-album body input',
-          'repeat zero-created',
-          'HTTP service restart/manual update',
-          'album exports',
-          'natural increment',
-        ],
-      };
-      write(path.join(root, 'result.json'), report);
-      console.log(JSON.stringify(report));
-      return;
-    }
-    assert.equal(result.status, 0, `STAGE_FAILED:${stage}:CHECK_PRIVATE_LOG`);
-    const current = snapshot(copy);
-    const protectedFields = preservation(
-      stage === 'first' ? migrated : previous,
-      current,
-      stage !== 'first',
-      provenTimes,
-    );
-    stages.push({ stage, ...json(output), protection: protectedFields });
-    previous = current;
-  }
-  // Narrow only a second export copy. Never delete rows from the source or rehearsal.
-  const exportBackup = JSON.parse(
-    run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
-      path.join(server, 'scripts/backup-sqlite.py'),
-      '--database',
-      copy,
-      '--backup-root',
-      path.join(root, 'export-backups'),
-    ]),
-  );
-  const scoped = path.join(root, 'export-scope.db');
-  fs.copyFileSync(exportBackup.backup, scoped, fs.constants.COPYFILE_EXCL);
-  const replay = cassette(options.manifest);
-  const { canonicalArticleUrl } = require(
-    path.join(built, 'collection/collection-format'),
-  );
-  const scopedDb = new DatabaseSync(scoped);
-  try {
-    for (const row of scopedDb
-      .prepare(
-        'SELECT id,source_url,verified_source_url FROM articles WHERE mp_id=?',
-      )
-      .all(TARGET)) {
-      let included = false;
-      try {
-        included = replay.identities.has(
-          canonicalArticleUrl(row.source_url || row.verified_source_url).id,
-        );
-      } catch {
-        /* legacy outside album */
-      }
-      if (!included)
-        scopedDb.prepare('DELETE FROM articles WHERE id=?').run(row.id);
-    }
+    assert.equal(exported.status, 0, 'EXPORT_FAILED:CHECK_PRIVATE_LOG');
+    assert.deepEqual(snapshot(source), before, 'PRODUCTION_CHANGED');
+    preservation(migrated, snapshot(copy), false, provenTimes);
+    const report = {
+      boundary: options.live
+        ? 'first actual online provider update on isolated SQLite; repeats/exports replay saved inputs; no natural new publication proof'
+        : 'real saved responses replayed offline; not natural new publication proof',
+      restart:
+        'separate Node process persistence only; HTTP service restart remains unverified',
+      baseline,
+      stages,
+      exports: json(output),
+      productionUnchanged: true,
+      reportDirectory: root,
+    };
+    write(path.join(root, 'result.json'), report);
+    console.log(JSON.stringify(report));
+  } catch (error) {
+    artifactError = error;
+    throw error;
   } finally {
-    scopedDb.close();
+    artifacts.finish(artifactError);
   }
-  const output = path.join(root, 'exports.json');
-  const exported = spawnSync(
-    process.execPath,
-    [
-      __filename,
-      '--worker',
-      'export',
-      '--copy',
-      scoped,
-      '--output',
-      output,
-      '--manifest',
-      fs.realpathSync(options.manifest),
-      '--runtime-root',
-      runtime,
-    ],
-    {
-      cwd: server,
-      env,
-      windowsHide: true,
-      shell: false,
-      encoding: 'utf8',
-      timeout: 300000,
-      maxBuffer: 1024 * 1024,
-    },
-  );
-  fs.writeFileSync(
-    path.join(root, 'exports.log'),
-    `${exported.stdout || ''}\n${exported.stderr || ''}`,
-  );
-  assert.equal(exported.status, 0, 'EXPORT_FAILED:CHECK_PRIVATE_LOG');
-  assert.deepEqual(snapshot(source), before, 'PRODUCTION_CHANGED');
-  preservation(migrated, snapshot(copy), false, provenTimes);
-  const report = {
-    boundary: options.live
-      ? 'first actual online provider update on isolated SQLite; repeats/exports replay saved inputs; no natural new publication proof'
-      : 'real saved responses replayed offline; not natural new publication proof',
-    restart:
-      'separate Node process persistence only; HTTP service restart remains unverified',
-    baseline,
-    stages,
-    exports: json(output),
-    productionUnchanged: true,
-    reportDirectory: root,
-  };
-  write(path.join(root, 'result.json'), report);
-  console.log(JSON.stringify(report));
 }
 function selfTest() {
   const before = {

@@ -75,15 +75,19 @@ if (!isMainThread) {
       UnsupportedBaselineValue,
     } = require('./startup-sqlite.cjs');
     const { database, migrations, auditRoot } = workerData;
+    if (workerData.kind) process.env.SQLITE_BACKUP_KIND = workerData.kind;
+    const backupRoot =
+      workerData.backupRoot ||
+      (process.env.SQLITE_BACKUP_KIND === 'production'
+        ? path.resolve(
+            process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
+              path.join(path.dirname(database), 'backups/full-snapshots'),
+          )
+        : path.join(auditRoot, 'background-backup'));
     try {
       const baseline = path.join(auditRoot, 'background-baseline.json');
       try {
-        await prepareStart(
-          database,
-          migrations,
-          path.join(auditRoot, 'background-backup'),
-          baseline,
-        );
+        await prepareStart(database, migrations, backupRoot, baseline);
       } catch (error) {
         if (!(error instanceof UnsupportedBaselineValue)) throw error;
         require('./lib.cjs').run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
@@ -93,7 +97,7 @@ if (!isMainThread) {
           '--migrations',
           migrations,
           '--backup-root',
-          path.join(auditRoot, 'background-backup'),
+          backupRoot,
           '--baseline',
           baseline,
         ]);

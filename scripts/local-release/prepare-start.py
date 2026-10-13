@@ -16,6 +16,14 @@ spec = importlib.util.spec_from_file_location("inspect_sqlite", Path(__file__).w
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
 
+# Resolve in both a checkout and the standalone local-release bundle.
+backup_script = Path(__file__).parent / 'server/scripts/backup-sqlite.py'
+if not backup_script.exists():
+    backup_script = Path(__file__).parents[2] / 'apps/server/scripts/backup-sqlite.py'
+backup_spec = importlib.util.spec_from_file_location('backup_sqlite', backup_script)
+backup_api = importlib.util.module_from_spec(backup_spec)
+backup_spec.loader.exec_module(backup_api)
+
 
 def source_identity(database):
     result = []
@@ -59,6 +67,43 @@ def compare_tables(source, backup, migrations, baseline):
 
 
 def prepare(database, migrations, backup_root, baseline_file):
+    database = database.resolve(strict=True)
+    backup_root = backup_root.resolve()
+    previous = backup_api.reusable(database, backup_root)
+    if previous is not None:
+        identity = source_identity(database)
+        before = audit.inspect(database, migrations, require_current=True)
+        with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as source:
+            source.execute('PRAGMA query_only=ON;')
+            source.execute('BEGIN')
+            compare_tables(source, Path(previous['backup']), migrations, before)
+        if identity != source_identity(database):
+            raise ValueError('SQLite source changed during startup reuse')
+        with baseline_file.open('x', encoding='utf-8') as stream:
+            json.dump(before, stream, ensure_ascii=False)
+        return {'backup': previous, 'inspection': before}
+    backup_api.space_preflight(database, backup_root)
+    backup_root.mkdir(parents=True, exist_ok=True)
+    lease = backup_root / '.space-budget.lock'
+    with lease.open('x', encoding='utf-8') as stream:
+        stream.write(str(__import__('os').getpid()))
+    try:
+        backup_api.space_preflight(database, backup_root)
+        identity = backup_api.source_identity(database)
+        content = backup_api.source_hashes(database)
+        result = fresh_prepare(database, migrations, backup_root, baseline_file)
+        if identity != backup_api.source_identity(database):
+            raise ValueError('SQLite source changed before backup receipt')
+        result['backup']['sourceIdentity'] = identity
+        result['backup']['sourceFilesSha256'] = content
+        receipt = backup_root / ('.latest-' + hashlib.sha256(str(database).encode()).hexdigest()[:24] + '.json')
+        receipt.write_text(json.dumps(result['backup']), encoding='utf-8')
+        return result
+    finally:
+        lease.unlink()
+
+
+def fresh_prepare(database, migrations, backup_root, baseline_file):
     database = database.resolve(strict=True)
     identity = source_identity(database)
     directory = backup_root.resolve() / ("before-start-" + uuid.uuid4().hex)

@@ -31,15 +31,26 @@ async function main() {
     options: {
       legacy: { type: 'string' },
       audit: { type: 'string' },
+      'output-root': { type: 'string' },
+      'real-copy': { type: 'boolean', default: false },
     },
   });
   if (!values.legacy || !values.audit)
     throw new Error('须指定 --legacy 与 --audit');
+  if (!values['real-copy'])
+    throw new Error('Retained fixture resume requires --real-copy');
   const legacy = fs.realpathSync(values.legacy);
   const audit = fs.realpathSync(values.audit);
   const root = path.resolve(__dirname, '../..');
   assert(
-    inside(path.join(root, 'output/playwright/local-release-audit'), audit),
+    inside(
+      path.resolve(
+        values['output-root'] ||
+          process.env.WEWE_TEST_OUTPUT_ROOT ||
+          path.join(require('node:os').tmpdir(), 'wewe-rss-tests'),
+      ),
+      audit,
+    ),
   );
   const manifest = verifyRelease(legacy);
   assert.equal(manifest.schemaCompatibility, 'legacy-additive');

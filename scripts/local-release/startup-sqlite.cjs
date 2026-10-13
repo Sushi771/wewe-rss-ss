@@ -3,6 +3,7 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { hash, fileHash, writeJson } = require('./lib.cjs');
+const budget = require('./space-budget.cjs');
 
 class UnsupportedBaselineValue extends Error {}
 const required = {
@@ -286,6 +287,79 @@ function sourceIdentity(database) {
   });
 }
 async function prepareStart(database, migrations, backupRoot, baselineFile) {
+  database = fs.realpathSync(database);
+  backupRoot = budget.canonical(backupRoot);
+  if (budget.inside(backupRoot, database))
+    throw new Error('Nested source/destination refused');
+  const receipt = budget.reuseFile(backupRoot, database);
+  const identity = sourceIdentity(database);
+  try {
+    const previous = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+    if (
+      previous.native === true &&
+      previous.source === database &&
+      (JSON.stringify(previous.sourceIdentity) === JSON.stringify(identity) ||
+        (previous.sourceFilesSha256 &&
+          JSON.stringify(budget.sourceHashes(database)) ===
+            JSON.stringify(previous.sourceFilesSha256))) &&
+      budget.inside(backupRoot, budget.canonical(previous.backup)) &&
+      fileHash(previous.backup) === previous.sha256
+    ) {
+      inspectDatabase(previous.backup, migrations, { schemaOnly: true });
+      const inspection = inspectDatabase(database, migrations);
+      assert.deepEqual(
+        sourceIdentity(database),
+        identity,
+        'SQLite source changed during reuse',
+      );
+      writeJson(baselineFile, inspection);
+      return { backup: { ...previous, reused: true }, inspection };
+    }
+  } catch (error) {
+    // Missing or invalid receipts force a fresh verified snapshot within budget.
+    if (fs.existsSync(baselineFile)) throw error;
+  }
+  const scope =
+    process.env.SQLITE_BACKUP_KIND === 'test'
+      ? process.env.SQLITE_TEST_BUDGET_ROOT || backupRoot
+      : backupRoot;
+  if (!budget.inside(budget.canonical(scope), backupRoot))
+    throw new Error('Backup escapes test budget root');
+  budget.preflight(scope, budget.estimate(database));
+  const unlock = budget.lease(backupRoot);
+  try {
+    budget.preflight(scope, budget.estimate(database));
+    const content = budget.sourceHashes(database);
+    const result = await freshPrepareStart(
+      database,
+      migrations,
+      backupRoot,
+      baselineFile,
+    );
+    Object.assign(result.backup, {
+      sourceIdentity: identity,
+      sourceFilesSha256: content,
+      native: true,
+      reused: false,
+    });
+    budget.replaceJson(receipt, result.backup);
+    return result;
+  } catch (error) {
+    budget.replaceJson(path.join(backupRoot, 'last-failure.json'), {
+      failure: error.message,
+      existingFilesRetained: true,
+    });
+    throw error;
+  } finally {
+    unlock();
+  }
+}
+async function freshPrepareStart(
+  database,
+  migrations,
+  backupRoot,
+  baselineFile,
+) {
   database = fs.realpathSync(database);
   const identity = sourceIdentity(database);
   const connection = open(database);
