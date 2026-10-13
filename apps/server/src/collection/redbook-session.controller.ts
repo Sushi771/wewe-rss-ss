@@ -101,13 +101,11 @@ export class RedbookSessionController {
     try {
       return res.json(await action());
     } catch {
-      return res
-        .status(422)
-        .json({
-          code: 'REDBOOK_DIAGNOSTIC_REJECTED',
-          message: '本次操作未完成；请核对输入或停止原因，不会自动重试。',
-          diagnostic: this.runtime.diagnosticStatus(),
-        });
+      return res.status(422).json({
+        code: 'REDBOOK_DIAGNOSTIC_REJECTED',
+        message: '本次操作未完成；请核对输入或停止原因，不会自动重试。',
+        diagnostic: this.runtime.diagnosticStatus(),
+      });
     }
   }
   @Post('diagnostic/status')
