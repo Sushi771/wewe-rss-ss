@@ -18,7 +18,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { ArticleDownloadError, downloadArticleUrl } from './article-download';
 import { LocalArticleStore } from './article-local-save';
-import { PreparedArticle } from './article-local-save';
+import { PreparedArticle, ArticlePreparation } from './article-local-save';
 import { exportSourceFromFeed } from './article-export-source';
 import { pickArticleDirectory } from './article-folder-picker';
 import { privateOnlineMode } from './private-access';
@@ -81,7 +81,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
           this.running = true;
           try {
             return await this.localStore().save(
-              this.withExportSource(prepare),
+              await this.withExportSource(prepare),
               new Date(startedAt),
               directory,
             );
@@ -153,11 +153,8 @@ export class ArticleDownloadController implements OnModuleDestroy {
     return this.store;
   }
 
-  private withExportSource(
-    prepare: (directory: string) => Promise<PreparedArticle>,
-  ) {
-    return async (directory: string) => {
-      const article = await prepare(directory);
+  private async withExportSource(prepare: ArticlePreparation) {
+    const sourceFor = async (article: PreparedArticle) => {
       const identity = /^WX_(\d{5,15})_\d+_\d+$/.exec(article.articleId);
       const feed =
         identity && this.prisma
@@ -172,8 +169,20 @@ export class ArticleDownloadController implements OnModuleDestroy {
           422,
           { code: 'EXPORT_SOURCE_MISSING' },
         );
-      return { ...article, exportSource: exportSourceFromFeed(feed) };
+      return exportSourceFromFeed(feed);
     };
+    const source = prepare.identity
+      ? await sourceFor(prepare.identity)
+      : undefined;
+    const wrapped: ArticlePreparation = async (directory) => {
+      const article = await prepare(directory);
+      return { ...article, exportSource: source ?? (await sourceFor(article)) };
+    };
+    if (prepare.identity)
+      wrapped.identity = { ...prepare.identity, exportSource: source };
+    wrapped.seedImages = prepare.seedImages;
+    wrapped.canReuseLegacyImages = prepare.canReuseLegacyImages;
+    return wrapped;
   }
 
   private failure(error: unknown, res: Res, articleUrl?: unknown) {
@@ -826,7 +835,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
         }
       }
       const result = await store.save(
-        cachedPrepare ? prepare : this.withExportSource(prepare),
+        cachedPrepare ? prepare : await this.withExportSource(prepare),
       );
       res.setHeader('Cache-Control', 'private, no-store');
       return res.status(200).json({

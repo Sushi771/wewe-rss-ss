@@ -275,9 +275,12 @@ describe('trusted publisher/group shared layout, real files and no network', () 
     ).rejects.toMatchObject({ diagnostic: { code: 'SAVE_RECEIPT_INVALID' } });
     await fs.writeFile(receiptPath, JSON.stringify(receipt));
     await fs.unlink(join(first.directory, 'image', receipt.images[0]));
-    await expect(
-      store.save(prepareCachedArticleLocalExport(item(), source)),
-    ).rejects.toMatchObject({ diagnostic: { code: 'SAVE_RECEIPT_INVALID' } });
+    expect(
+      await store.save(prepareCachedArticleLocalExport(item(), source)),
+    ).toMatchObject({ status: 'repaired', markdownPath: first.markdownPath });
+    expect(
+      await fs.readFile(join(first.directory, 'image', receipt.images[0])),
+    ).toEqual(Buffer.from(png, 'base64'));
     expect(await fs.readFile(first.markdownPath, 'utf8')).toBe('编辑');
     expect(
       (await fs.readdir(first.directory)).filter((n) => n.endsWith('.md')),

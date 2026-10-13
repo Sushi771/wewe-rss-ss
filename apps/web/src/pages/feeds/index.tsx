@@ -438,7 +438,16 @@ const Feeds = () => {
   const handleClearSearch = () => handleSearchChange('');
   const [isBatchExporting, setIsBatchExporting] = useState(false);
   const batchExporting = useRef(false);
+  const exportCancelled = useRef(false);
+  const [exportResult, setExportResult] = useState('');
+  useEffect(
+    () => () => {
+      exportCancelled.current = true;
+    },
+    [],
+  );
   useEffect(() => {
+    exportCancelled.current = true;
     setArticleSelectedIds(new Set());
   }, [
     id,
@@ -460,41 +469,87 @@ const Feeds = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isSearchOpen]);
 
-  const handleBatchExport = async () => {
-    if (batchExporting.current || articleSelectedIds.size === 0) return;
+  const handleBatchExport = async (wholeScope = false) => {
+    if (
+      batchExporting.current ||
+      (!wholeScope && articleSelectedIds.size === 0) ||
+      dateError
+    )
+      return;
     batchExporting.current = true;
+    exportCancelled.current = false;
     setIsBatchExporting(true);
     const batchSelection = articleSelectedIds;
-    const ids = Array.from(articleSelectedIds);
-    let successCount = 0;
+    const counts = { new: 0, skipped: 0, repaired: 0, failed: 0 };
     const exportNotices = new Set<string>();
+    let ids = Array.from(articleSelectedIds);
     try {
+      if (wholeScope)
+        ids = await queryUtils.client.article.exportIds.query({
+          ...articleDateFilter,
+          group: folderFilter,
+          mpId: id || '',
+          search: search || undefined,
+        });
+      ids = Array.from(new Set(ids));
       for (const articleId of ids) {
-        const result =
-          await queryUtils.client.article.saveToObsidian.mutate(articleId);
-        if (result.datePendingReason)
-          exportNotices.add(`日期待核（${result.datePendingReason}）`);
-        if (result.legacyLayoutRetained)
-          exportNotices.add('保留原有位置及编辑');
-        successCount++;
+        if (exportCancelled.current) break;
+        try {
+          const result =
+            await queryUtils.client.article.saveToObsidian.mutate(articleId);
+          if (result.datePendingReason)
+            exportNotices.add(`日期待核（${result.datePendingReason}）`);
+          if (result.legacyLayoutRetained)
+            exportNotices.add('保留原有位置及编辑');
+          const status =
+            result.mediaComplete === false
+              ? 'failed'
+              : (result.status ?? (result.alreadySaved ? 'skipped' : 'new'));
+          counts[status]++;
+        } catch (error) {
+          counts.failed++;
+          exportNotices.add(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        setExportResult(
+          `新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`,
+        );
       }
-      toast.success(`成功导出 ${successCount} 篇文章`, {
+      const message = `${exportCancelled.current ? '已停止后续导出：' : ''}新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`;
+      setExportResult(message);
+      const notify =
+        counts.failed || exportCancelled.current
+          ? toast.warning
+          : toast.success;
+      notify(message, {
         description: Array.from(exportNotices).join('；') || undefined,
       });
-      // A filter change may clear selection while exporting. Do not erase a
-      // newer selection when this earlier snapshot finishes.
-      setArticleSelectedIds((current) =>
-        current === batchSelection ? new Set() : current,
-      );
-    } catch (err: unknown) {
-      toast.error(`导出中断 (${successCount}/${ids.length} 成功)`, {
-        description: err instanceof Error ? err.message : String(err),
+      if (!wholeScope && !counts.failed && !exportCancelled.current)
+        setArticleSelectedIds((current) =>
+          current === batchSelection ? new Set() : current,
+        );
+    } catch (error) {
+      toast.error('未能取得完整导出范围', {
+        description: error instanceof Error ? error.message : String(error),
       });
     } finally {
       batchExporting.current = false;
       setIsBatchExporting(false);
     }
   };
+
+  const filteredZipQuery = new URLSearchParams({
+    scope: 'filtered',
+    group: folderFilter,
+    ...(articleDateFilter.dateStart
+      ? { dateStart: articleDateFilter.dateStart }
+      : {}),
+    ...(articleDateFilter.dateEnd
+      ? { dateEnd: articleDateFilter.dateEnd }
+      : {}),
+    ...(search ? { search } : {}),
+  }).toString();
 
   useEffect(() => {
     if (feedData?.items) {
@@ -1248,6 +1303,32 @@ const Feeds = () => {
                 </Button>
               </Tooltip>
               {/* Batch actions appear when there is something to act on. */}
+              {!privateOnlineMode && (
+                <Button
+                  size="sm"
+                  className="h-8"
+                  isDisabled={isBatchExporting || Boolean(dateError)}
+                  onPress={() => handleBatchExport(true)}
+                >
+                  导出当前筛选全部到 Obsidian
+                </Button>
+              )}
+              {isBatchExporting && (
+                <Button
+                  size="sm"
+                  className="h-8"
+                  onPress={() => {
+                    exportCancelled.current = true;
+                  }}
+                >
+                  停止后续导出
+                </Button>
+              )}
+              {exportResult && (
+                <span role="status" aria-live="polite" className="text-xs">
+                  {exportResult}
+                </span>
+              )}
               {articleSelectedIds.size > 0 && (
                 <>
                   <span role="status" aria-live="polite" className="text-xs">
@@ -1277,7 +1358,7 @@ const Feeds = () => {
                       isDisabled={
                         isBatchExporting || articleSelectedIds.size === 0
                       }
-                      onPress={handleBatchExport}
+                      onPress={() => handleBatchExport()}
                     >
                       批量导出 Obsidian ({articleSelectedIds.size})
                     </Button>
@@ -1404,11 +1485,21 @@ const Feeds = () => {
                     </Button>
                   </Tooltip>
                   <a
-                    href={`${serverOriginUrl}/download/feed/${currentMpInfo.id}.zip`}
+                    title="整号完整快照，忽略日期与搜索；每次重新打包，浏览器不能检查本地下载历史"
+                    href={`${serverOriginUrl}/download/feed/${currentMpInfo.id}.zip?scope=all`}
                     className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
                   >
-                    下载本号 ZIP
+                    下载整号快照 ZIP
                   </a>
+                  {!dateError && (
+                    <a
+                      title="包含当前日期、分组和搜索范围全部文章；完整快照，每次重新打包"
+                      href={`${serverOriginUrl}/download/feed/${currentMpInfo.id}.zip?${filteredZipQuery}`}
+                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
+                    >
+                      下载当前筛选 ZIP
+                    </a>
+                  )}
                 </>
               ) : (
                 <>

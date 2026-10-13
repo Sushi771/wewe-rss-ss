@@ -1,3 +1,4 @@
+import { TRPCError } from '@trpc/server';
 import * as fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import * as path from 'node:path';
@@ -27,7 +28,34 @@ export type PreparedArticle = {
   sourceUrl?: string | null;
   publishTime?: number | null;
 };
+export type ArticlePreparation = ((
+  temporary: string,
+) => Promise<PreparedArticle>) & {
+  identity?: PreparedArticle;
+  canReuseLegacyImages?: boolean;
+  seedImages?: (
+    stage: string,
+    folder: string,
+    images: string[],
+  ) => Promise<void>;
+};
+type SourceReceipt = {
+  articleId: string;
+  source?: 'wechat2rss';
+  exportSource: ArticleExportSource;
+  complete: true;
+  mediaComplete?: boolean;
+  markdown: string;
+  images: string[];
+  imageMap?: Record<string, string>;
+  markdownSha256?: string;
+};
 type SavedArticle = {
+  status?: 'new' | 'skipped' | 'repaired' | 'failed';
+  receiptPath?: string;
+  receipt?: SourceReceipt;
+  receiptBytes?: string;
+  missingImages?: string[];
   publicationDate?: string | null;
   datePendingReason?: string;
   legacyLayoutRetained?: boolean;
@@ -185,10 +213,134 @@ export class LocalArticleStore {
   }
 
   async save(
-    prepare: (temporary: string) => Promise<PreparedArticle>,
+    prepare: ArticlePreparation,
+    now = new Date(),
+    confirmedDirectory?: string,
+  ): Promise<SavedArticle> {
+    const identity = prepare.identity;
+    if (!identity?.exportSource)
+      return this.savePrepared(prepare, now, confirmedDirectory);
+    const root = await validateLocalDirectory(
+      confirmedDirectory ?? (await this.read()).directory,
+    );
+    await fs.mkdir(root, { recursive: true });
+    await validateLocalDirectory(root);
+    const key = path.join(
+      root,
+      '.wewe-save-' +
+        exportIdentity(
+          JSON.stringify([
+            identity.articleId,
+            identity.source,
+            identity.exportSource.feedId,
+          ]),
+        ) +
+        '.lock',
+    );
+    const previous = sourceDirectoryReservations.get(key);
+    let release!: () => void;
+    const reservation = new Promise<void>((done) => {
+      release = done;
+    });
+    sourceDirectoryReservations.set(key, reservation);
+    await previous;
+    let locked = false;
+    try {
+      const value = JSON.stringify({ pid: process.pid, token: randomUUID() });
+      try {
+        await fs.writeFile(key, value, { flag: 'wx' });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const old = await fs.readFile(key, 'utf8');
+        const pid = JSON.parse(old).pid;
+        if (!Number.isInteger(pid) || pid <= 0)
+          throw fail('保存锁无法核实。', 'SAVE_LOCK_INVALID');
+        try {
+          process.kill(pid, 0);
+          throw fail('本篇正在保存，请稍后重试。', 'SAVE_BUSY');
+        } catch (probe) {
+          if ((probe as NodeJS.ErrnoException).code !== 'ESRCH') throw probe;
+        }
+        if ((await fs.readFile(key, 'utf8')) !== old)
+          throw fail('保存锁已改变。', 'SAVE_BUSY');
+        await fs.unlink(key);
+        await fs.writeFile(key, value, { flag: 'wx' });
+      }
+      locked = true;
+      const retained = await this.findRetainedArticle(root, identity);
+      if (
+        retained &&
+        retained.mediaComplete !== false &&
+        !retained.missingImages?.length
+      )
+        return this.retainedResult(retained, identity, 'skipped');
+      if (retained && !retained.receiptPath)
+        throw fail(
+          '旧版不完整回执缺少可核实图片映射，保留原文件。',
+          'SAVE_REPAIR_UNAVAILABLE',
+        );
+      if (
+        retained?.receipt &&
+        !retained.receipt.imageMap &&
+        retained.imageCount &&
+        !prepare.canReuseLegacyImages
+      )
+        throw fail(
+          '旧回执缺少原图映射，无法只补缺失图片；保留原文件。',
+          'SAVE_REPAIR_UNAVAILABLE',
+        );
+      return await this.savePrepared(prepare, now, root, retained);
+    } finally {
+      if (locked) await fs.unlink(key).catch(() => {});
+      release();
+      if (sourceDirectoryReservations.get(key) === reservation)
+        sourceDirectoryReservations.delete(key);
+    }
+  }
+
+  private retainedResult(
+    retained: SavedArticle,
+    article: PreparedArticle,
+    status: SavedArticle['status'],
+  ) {
+    const [group, feed] = exportSourceFolders(
+      article.exportSource!,
+      article.publishTime,
+    );
+    const publicResult = {
+      directory: retained.directory,
+      markdownPath: retained.markdownPath,
+      alreadySaved: retained.alreadySaved,
+      imageCount: retained.imageCount,
+      ...(retained.videoCount ? { videoCount: retained.videoCount } : {}),
+      ...(retained.mediaComplete !== undefined
+        ? { mediaComplete: retained.mediaComplete }
+        : {}),
+      ...(retained.legacyLayoutRetained ? { legacyLayoutRetained: true } : {}),
+    };
+    return {
+      ...publicResult,
+      ...exportPublication(article.publishTime),
+      status,
+      ...(![
+        group,
+        `${group}-${exportIdentity(article.exportSource!.groupId || 'ungrouped')}`,
+      ].includes(path.basename(path.dirname(retained.directory))) ||
+      ![
+        feed,
+        `${feed}-${exportIdentity(article.exportSource!.feedId)}`,
+      ].includes(path.basename(retained.directory))
+        ? { legacyLayoutRetained: true }
+        : {}),
+    };
+  }
+
+  private async savePrepared(
+    prepare: ArticlePreparation,
     now = new Date(),
     /** Frozen by an authorized internal job; never taken from an HTTP body. */
     confirmedDirectory?: string,
+    retained?: SavedArticle,
   ): Promise<SavedArticle> {
     let stage: string | undefined;
     let final: string | undefined;
@@ -207,7 +359,42 @@ export class LocalArticleStore {
       await validateLocalDirectory(dateDirectory);
       await fs.mkdir(dateDirectory, { recursive: true });
       stage = await fs.mkdtemp(path.join(dateDirectory, '.wewe-incomplete-'));
+      // Seed only verified receipt mappings. The exporter sees these files before any HTTP fetch.
+      if (retained?.receipt) {
+        await fs.mkdir(path.join(stage, 'image'));
+        for (const [staged, published] of Object.entries(
+          retained.receipt.imageMap || {},
+        )) {
+          if (
+            !/^image_[a-f0-9]{32}\.(png|jpe?g|gif|webp)$/.test(staged) ||
+            !retained.receipt.images.includes(published)
+          )
+            throw fail('图片映射无法核实。', 'SAVE_RECEIPT_INVALID');
+          if (!retained.missingImages?.includes(published as string))
+            await fs.copyFile(
+              path.join(retained.directory, 'image', published as string),
+              path.join(stage, 'image', staged),
+              constants.COPYFILE_EXCL,
+            );
+        }
+      }
+      if (retained?.receipt && prepare.seedImages)
+        await prepare.seedImages(
+          stage,
+          retained.directory,
+          retained.receipt.images.filter(
+            (name: string) => !retained.missingImages?.includes(name),
+          ),
+        );
       const article = await prepare(stage);
+      if (
+        prepare.identity &&
+        (article.articleId !== prepare.identity.articleId ||
+          article.source !== prepare.identity.source ||
+          article.exportSource?.feedId !==
+            prepare.identity.exportSource?.feedId)
+      )
+        throw fail('准备结果身份与保存身份不一致。', 'SAVE_IDENTITY_CONFLICT');
       if (
         !article.articleId ||
         !article.title ||
@@ -224,7 +411,7 @@ export class LocalArticleStore {
         throw fail('正文保存结果无效。', 'INVALID_PREPARED_ARTICLE');
       if (article.exportSource) {
         sourcedDateDirectory = dateDirectory;
-        return await this.publishSourcedArticle(root, stage, article);
+        return await this.publishSourcedArticle(root, stage, article, retained);
       }
       const shortId = createHash('sha256')
         .update(article.articleId)
@@ -427,7 +614,8 @@ export class LocalArticleStore {
         ...(videos.length ? { videoCount: videos.length } : {}),
       };
     } catch (error) {
-      if (error instanceof ArticleDownloadError) throw error;
+      if (error instanceof ArticleDownloadError || error instanceof TRPCError)
+        throw error;
       throw fail(
         '本机保存失败，请检查目录权限或磁盘空间；未完成保存。',
         'LOCAL_SAVE_FAILED',
@@ -456,6 +644,7 @@ export class LocalArticleStore {
     root: string,
     stage: string,
     article: PreparedArticle,
+    repair?: SavedArticle,
   ): Promise<SavedArticle> {
     const source = article.exportSource!;
     const publication = exportPublication(article.publishTime);
@@ -464,7 +653,12 @@ export class LocalArticleStore {
       article.publishTime,
     );
     const retained = await this.findRetainedArticle(root, article);
-    if (retained)
+    if (
+      retained &&
+      !repair &&
+      retained.mediaComplete !== false &&
+      !retained.missingImages?.length
+    )
       return {
         ...retained,
         ...publication,
@@ -478,12 +672,16 @@ export class LocalArticleStore {
           ? { legacyLayoutRetained: true }
           : {}),
       };
-    const group = await this.sourceDirectory(
-      root,
-      groupName,
-      source.groupId || 'ungrouped',
-    );
-    const folder = await this.sourceDirectory(group, feedName, source.feedId);
+    const group = repair
+      ? path.dirname(repair.directory)
+      : await this.sourceDirectory(
+          root,
+          groupName,
+          source.groupId || 'ungrouped',
+        );
+    const folder =
+      repair?.directory ??
+      (await this.sourceDirectory(group, feedName, source.feedId));
     const receipts = path.join(folder, '.wewe-articles');
     await validateLocalDirectory(receipts);
     await fs.mkdir(receipts, { recursive: true });
@@ -526,7 +724,7 @@ export class LocalArticleStore {
       }
       locked = true;
       const existing = await this.readSourceReceipt(folder, article);
-      if (existing) return { ...existing, ...publication };
+      if (existing && !repair) return { ...existing, ...publication };
       // WeChat article exports have no videos. Other adapters retain their
       // original per-article layout unless they explicitly supply this contract.
       if (article.videoCount)
@@ -540,7 +738,8 @@ export class LocalArticleStore {
       await validateLocalDirectory(imageDir);
       await validateLocalDirectory(path.join(stage, 'image'));
       const images = await fs.readdir(path.join(stage, 'image'));
-      const publishedImages = new Set<string>();
+      const publishedImages = new Set<string>(repair?.receipt?.images || []);
+      const imageMap: Record<string, string> = { ...repair?.receipt?.imageMap };
       for (const name of images) {
         if (!/^image_[a-f0-9]{32}\.(png|jpe?g|gif|webp)$/.test(name))
           throw fail('图片文件名无效。', 'INVALID_PREPARED_ARTICLE');
@@ -553,6 +752,13 @@ export class LocalArticleStore {
           .digest('hex')
           .slice(0, 32);
         const filename = `image_${identity}_${hash}${path.extname(name)}`;
+        const expected = imageMap[name];
+        if (expected && expected !== filename)
+          throw fail(
+            '图片内容已改变，不能冒充原图补齐。',
+            'SAVE_IMAGE_CONFLICT',
+          );
+        imageMap[name] = filename;
         const destination = path.join(imageDir, filename);
         if (destination.length > 255)
           throw fail('图片保存路径过长。', 'SAVE_PATH_TOO_LONG');
@@ -582,6 +788,79 @@ export class LocalArticleStore {
           '图片数量与内部保存合同不一致。',
           'INVALID_PREPARED_ARTICLE',
         );
+      if (repair) {
+        const missing = repair.missingImages || [];
+        for (const name of missing) {
+          try {
+            await fs.access(path.join(imageDir, name));
+          } catch {
+            throw fail(
+              '未取得与原回执一致的缺失图片，保留原正文。',
+              'SAVE_REPAIR_INCOMPLETE',
+            );
+          }
+        }
+        const added = [...publishedImages].filter(
+          (name) => !repair.receipt!.images.includes(name),
+        );
+        // Never rewrite the user's body. Newly available images have a companion note.
+        if (added.length) {
+          const companion = path.join(
+            folder,
+            `.wewe-media-${identity}-${exportIdentity(added.join(','))}.md`,
+          );
+          const content =
+            '# 补齐图片（原正文保留）\n\n' +
+            added.map((name) => `![](image/${name})`).join('\n\n');
+          try {
+            await fs.writeFile(companion, content, { flag: 'wx' });
+            created.push(companion);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+            const stat = await fs.lstat(companion);
+            if (
+              !stat.isFile() ||
+              stat.isSymbolicLink() ||
+              (await fs.readFile(companion, 'utf8')) !== content
+            )
+              throw fail('补齐说明已编辑，未覆盖。', 'SAVE_IMAGE_CONFLICT');
+          }
+        }
+        const mediaComplete = article.mediaComplete !== false;
+        const updated = {
+          ...repair.receipt,
+          images: [...publishedImages],
+          imageMap,
+          mediaComplete,
+        };
+        const temporary = repair.receiptPath! + '.' + randomUUID() + '.tmp';
+        try {
+          await fs.writeFile(temporary, JSON.stringify(updated), {
+            flag: 'wx',
+          });
+          // The per-identity lock protects the receipt; publication is atomic and resumable.
+          const stat = await fs.lstat(repair.receiptPath!);
+          if (
+            !stat.isFile() ||
+            stat.isSymbolicLink() ||
+            (await fs.readFile(repair.receiptPath!, 'utf8')) !==
+              repair.receiptBytes
+          )
+            throw fail(
+              '保存回执在补齐时已改变，未覆盖。',
+              'SAVE_RECEIPT_INVALID',
+            );
+          await fs.rename(temporary, repair.receiptPath!);
+        } finally {
+          await fs.unlink(temporary).catch(() => {});
+        }
+        complete = true;
+        return this.retainedResult(
+          { ...repair, imageCount: publishedImages.size, mediaComplete },
+          article,
+          mediaComplete ? 'repaired' : 'failed',
+        );
+      }
       markdown =
         exportSourceMarkdown(
           article.exportSource!,
@@ -592,6 +871,7 @@ export class LocalArticleStore {
       const stem =
         cleanTitle === article.title ? cleanTitle : `${cleanTitle}-${identity}`;
       let markdownPath: string | undefined;
+      const pendingPath = receiptPath + '.pending';
       for (let suffix = 1; suffix <= 100; suffix++) {
         const candidate = path.join(
           folder,
@@ -600,6 +880,22 @@ export class LocalArticleStore {
         if (candidate.length > 255)
           throw fail('保存路径过长，请选择较短目录。', 'SAVE_PATH_TOO_LONG');
         try {
+          const journal = {
+            articleId: article.articleId,
+            source: article.source,
+            exportSource: article.exportSource,
+            ...publication,
+            complete: true,
+            mediaComplete: article.mediaComplete !== false,
+            markdown: path.basename(candidate),
+            images: [...publishedImages],
+            imageMap,
+            markdownSha256: createHash('sha256').update(markdown).digest('hex'),
+          };
+          await fs.writeFile(pendingPath, JSON.stringify(journal), {
+            flag: 'wx',
+          });
+          created.push(pendingPath);
           const output = await fs.open(candidate, 'wx');
           created.push(candidate);
           try {
@@ -611,35 +907,24 @@ export class LocalArticleStore {
           break;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          if (created.includes(pendingPath)) {
+            await fs.unlink(pendingPath);
+            created.splice(created.indexOf(pendingPath), 1);
+          } else
+            throw fail('中断保存回执已存在，未覆盖。', 'SAVE_RECEIPT_INVALID');
         }
       }
       if (!markdownPath) throw fail('同名正文过多。', 'SAVE_NAME_CONFLICT');
-      const output = await fs.open(receiptPath, 'wx');
+      await fs.link(pendingPath, receiptPath);
       created.push(receiptPath);
-      try {
-        await output.writeFile(
-          JSON.stringify({
-            articleId: article.articleId,
-            source: article.source,
-            exportSource: article.exportSource,
-            ...publication,
-            complete: true,
-            ...(article.mediaComplete === false
-              ? { mediaComplete: false }
-              : {}),
-            markdown: path.basename(markdownPath),
-            images: [...publishedImages],
-          }),
-        );
-      } finally {
-        await output.close();
-      }
+      await fs.unlink(pendingPath);
       complete = true;
       return {
         directory: folder,
         markdownPath,
         alreadySaved: false,
         imageCount: publishedImages.size,
+        status: article.mediaComplete === false ? 'failed' : 'new',
         ...publication,
         ...(article.mediaComplete === false ? { mediaComplete: false } : {}),
       };
@@ -661,7 +946,9 @@ export class LocalArticleStore {
       try {
         const stat = await fs.lstat(file);
         if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
-        return JSON.parse(await fs.readFile(file, 'utf8')).identity;
+        const identity = JSON.parse(await fs.readFile(file, 'utf8')).identity;
+        if (typeof identity !== 'string' || !identity) throw new Error();
+        return identity;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT')
           return undefined;
@@ -758,37 +1045,111 @@ export class LocalArticleStore {
       receipts,
       `${exportIdentity(article.articleId)}-${article.source || 'cached'}.json`,
     );
+    const pendingPath = receiptPath + '.pending';
+    let readingPath = receiptPath;
     try {
-      const stat = await fs.lstat(receiptPath);
+      try {
+        await fs.lstat(receiptPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        readingPath = pendingPath;
+      }
+      const stat = await fs.lstat(readingPath);
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error();
-      const receipt = JSON.parse(await fs.readFile(receiptPath, 'utf8'));
+      const receiptBytes = await fs.readFile(readingPath, 'utf8');
+      const receipt: SourceReceipt = JSON.parse(receiptBytes);
       if (
         receipt.articleId !== article.articleId ||
         receipt.source !== article.source ||
+        receipt.exportSource?.feedId !== article.exportSource?.feedId ||
         receipt.complete !== true ||
         typeof receipt.markdown !== 'string' ||
         path.basename(receipt.markdown) !== receipt.markdown ||
         /[\\/:*?"<>|\x00-\x1f\x7f]/.test(receipt.markdown) ||
         !receipt.markdown.endsWith('.md') ||
-        !Array.isArray(receipt.images)
+        !Array.isArray(receipt.images) ||
+        new Set(receipt.images).size !== receipt.images.length ||
+        (receipt.mediaComplete !== undefined &&
+          typeof receipt.mediaComplete !== 'boolean')
+      )
+        throw new Error();
+      if (
+        receipt.imageMap !== undefined &&
+        (typeof receipt.imageMap !== 'object' ||
+          !receipt.imageMap ||
+          Array.isArray(receipt.imageMap) ||
+          Object.entries(receipt.imageMap).some(
+            ([key, value]) =>
+              !/^image_[a-f0-9]{32}\.(png|jpe?g|gif|webp)$/.test(key) ||
+              !receipt.images.includes(value),
+          ))
       )
         throw new Error();
       const markdownPath = path.join(folder, receipt.markdown);
-      const note = await fs.lstat(markdownPath);
+      let note;
+      try {
+        note = await fs.lstat(markdownPath);
+      } catch (error) {
+        if (
+          readingPath === pendingPath &&
+          (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ) {
+          // Journal precedes note creation: no body was published. Leave the
+          // content-addressed images in place and resume an ordinary new save.
+          await fs.unlink(pendingPath);
+          return undefined;
+        }
+        throw error;
+      }
       if (!note.isFile() || note.isSymbolicLink()) throw new Error();
       await validateLocalDirectory(path.join(folder, 'image'));
-      await fs.access(path.join(folder, 'image'));
+      const missingImages: string[] = [];
       for (const name of receipt.images) {
         if (
-          !/^image_[a-f0-9]{12}_[a-f0-9]{32}\.(png|jpe?g|gif|webp)$/.test(name)
+          !new RegExp(
+            `^image_${exportIdentity(article.articleId)}_[a-f0-9]{32}\\.(png|jpe?g|gif|webp)$`,
+          ).test(name)
         )
           throw new Error();
-        const image = await fs.lstat(path.join(folder, 'image', name));
-        if (!image.isFile() || image.isSymbolicLink()) throw new Error();
+        try {
+          const file = path.join(folder, 'image', name);
+          const image = await fs.lstat(file);
+          if (!image.isFile() || image.isSymbolicLink() || image.size < 1)
+            throw new Error();
+          if (
+            createHash('sha256')
+              .update(await fs.readFile(file))
+              .digest('hex')
+              .slice(0, 32) !== name.split('_')[2].split('.')[0]
+          )
+            throw new Error();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          missingImages.push(name);
+        }
+      }
+      if (readingPath === pendingPath) {
+        if (
+          missingImages.length ||
+          !receipt.markdownSha256 ||
+          createHash('sha256')
+            .update(await fs.readFile(markdownPath))
+            .digest('hex') !== receipt.markdownSha256
+        )
+          throw fail(
+            '中断保存的正文或图片尚未完整核实，保留原文件。',
+            'SAVE_RECOVERY_INCOMPLETE',
+          );
+        await fs.link(pendingPath, receiptPath);
+        await fs.unlink(pendingPath);
       }
       return {
         directory: folder,
         markdownPath,
+        receiptPath,
+        receiptBytes,
+        receipt,
+        missingImages,
         alreadySaved: true,
         imageCount: receipt.images.length,
         ...(receipt.mediaComplete === false ? { mediaComplete: false } : {}),
@@ -797,12 +1158,14 @@ export class LocalArticleStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         // Missing receipt is normal; missing files of an existing receipt are not.
         try {
-          await fs.lstat(receiptPath);
+          await fs.lstat(readingPath);
         } catch (missing) {
           if ((missing as NodeJS.ErrnoException).code === 'ENOENT')
             return undefined;
         }
       }
+      if (error instanceof ArticleDownloadError || error instanceof TRPCError)
+        throw error;
       throw fail(
         '已有保存回执或文件无法核实，未另存或覆盖正文图片。',
         'SAVE_RECEIPT_INVALID',

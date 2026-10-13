@@ -143,9 +143,11 @@ describe('all cached article local/ZIP export entry points share isolated image 
     expect(axios.get).not.toHaveBeenCalled();
   });
   it('missing or explicitly unavailable cache fails before original page or output requests', async () => {
-    expect(() =>
-      prepareCachedArticleLocalExport({ ...items[0], contentHtml: '' }),
-    ).toThrow('正文尚未缓存');
+    const prepare = prepareCachedArticleLocalExport({
+      ...items[0],
+      contentHtml: '',
+    });
+    await expect(prepare(join(root, 'unused'))).rejects.toThrow('正文尚未缓存');
     const caller = router.appRouter.createCaller({ errorMsg: null });
     items[0].lastBodyStatus = 'unavailable';
     await expect(

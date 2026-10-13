@@ -186,14 +186,20 @@ export class TrpcRouter {
   }
 
   /** Stage one feed for an authenticated browser ZIP download. Never write to OBSIDIAN_PATH. */
-  async buildOfflineFeedDirectory(feedId: string, directory: string) {
+  async buildOfflineFeedDirectory(
+    feedId: string,
+    directory: string,
+    filter: Parameters<typeof articleListWhere>[0] = {},
+    cancelled: () => boolean = () => false,
+  ) {
     const feed = await this.prismaService.feed.findUnique({
       where: { id: feedId },
       include: { group: true },
     });
     if (!feed) return null;
     const articles = await this.prismaService.article.findMany({
-      where: { mpId: feedId },
+      where: articleListWhere({ ...filter, mpId: feedId }),
+      take: 5001,
       orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
       select: {
         id: true,
@@ -215,14 +221,17 @@ export class TrpcRouter {
       directory,
     );
     for (const article of articles) {
+      if (cancelled()) throw new Error('导出已取消');
       try {
-        await store.save(
+        const saved = await store.save(
           prepareCachedArticleLocalExport(article, source),
           new Date(),
           directory,
         );
-        complete++;
+        if (saved.mediaComplete === false) incomplete.push(article.title);
+        else complete++;
       } catch {
+        if (cancelled()) throw new Error('导出已取消');
         const result = await store.save(
           async (stage) => {
             await fs.promises.mkdir(path.join(stage, 'image'));
@@ -234,6 +243,7 @@ export class TrpcRouter {
               articleId: article.id,
               title: article.title,
               imageCount: 0,
+              mediaComplete: false,
               exportSource: source,
               sourceUrl: article.sourceUrl,
               publishTime: article.publishTime,
@@ -253,6 +263,7 @@ export class TrpcRouter {
     await fs.promises.writeFile(
       path.join(directory, 'README.md'),
       `# ${feed.mpName}\n\n共 ${articles.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
+        `范围：${filter.dateStart || '不限开始'} 至 ${filter.dateEnd || '不限结束'}（上海日期）；搜索：${filter.search || '无'}；分组筛选：${filter.group || 'all'}。这是本次范围完整快照，不检测本地下载历史。\n\n` +
         `分组：${source.groupName || '未分组'}\n\n文章位于 YYYY-MM-DD_分组/公众号文件夹中；日期采用原文发布日期（上海时间），不同日期分别保存，缺可信日期为日期待核并写明原因，正常文件名保留文章标题，冲突时加稳定身份后缀；该号共用 image/，图片按文章身份隔离，正文使用相对引用。未完整篇目在各自文件中明确标注。\n`,
     );
     return {
@@ -1052,6 +1063,23 @@ export class TrpcRouter {
   });
 
   articleRouter = this.trpcService.router({
+    exportIds: this.trpcService.protectedProcedure
+      .input(articleFilterSchema)
+      .query(async ({ input }) => {
+        // One frozen identity list avoids live cursor drift during a long export.
+        const items = await this.prismaService.article.findMany({
+          where: articleListWhere(input),
+          orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
+          select: { id: true },
+          take: 5001,
+        });
+        if (items.length > 5000)
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: '当前筛选超过5000篇，请缩小日期范围。',
+          });
+        return items.map((item) => item.id);
+      }),
     summary: this.trpcService.protectedProcedure
       .input(articleFilterSchema)
       .query(async ({ input }) => {
@@ -1238,9 +1266,16 @@ export class TrpcRouter {
             obsidianPath,
           );
           return {
-            success: true,
+            success: result.mediaComplete !== false,
             path: result.markdownPath,
             alreadySaved: result.alreadySaved,
+            status:
+              result.status ??
+              (result.mediaComplete === false
+                ? 'failed'
+                : result.alreadySaved
+                  ? 'skipped'
+                  : 'new'),
             publicationDate: result.publicationDate,
             ...(result.datePendingReason
               ? { datePendingReason: result.datePendingReason }

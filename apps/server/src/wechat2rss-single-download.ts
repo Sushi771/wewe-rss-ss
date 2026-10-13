@@ -1,8 +1,8 @@
 import { ArticleDownloadError, downloadArticleUrl } from './article-download';
 import { canonicalArticleUrl } from './collection/collection-format';
 import { wechat2RssProvider } from './collection/provider-registry';
-import { archiveProviderImages } from './collection/archive-provider-images';
-import { prepareVerifiedProviderDownload } from './article-verified-download';
+import { prepareCachedArticleLocalExport } from './cached-article-local-export';
+import { ArticlePreparation } from './article-local-save';
 
 const fail = (code: string, message: string, status = 422) =>
   new ArticleDownloadError(message, status, { code, stage: 'article' });
@@ -79,31 +79,29 @@ export async function prepareWechat2RssSingleDownload(
       'WECHAT2RSS_SINGLE_IDENTITY_MISMATCH',
       'Wechat2RSS 缓存原文与输入链接不一致；未保存，不猜测文章身份。',
     );
-  let archived;
-  try {
-    archived = await archiveProviderImages(
-      {
-        articles: [article],
-        coverage: 'recent-window',
-        upstreamCount: 1,
-        bodyMissing: 0,
-        imageBlocked: 0,
-      },
-      { stopOnFailure: true },
-    );
-  } catch {
-    throw fail(
-      'WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE',
-      'Wechat2RSS 正文已匹配，但图片资源下载或字节校验失败；未保存正文或图片。',
-    );
-  }
-  const prepare = prepareVerifiedProviderDownload(
-    requested,
-    archived.articles[0],
-    true,
-  );
-  return async (directory: string) => ({
-    ...(await prepare(directory)),
-    source: 'wechat2rss' as const,
+  const cached = prepareCachedArticleLocalExport({
+    id: article.id,
+    title: article.title,
+    sourceUrl: article.url,
+    contentHtml: article.contentHtml,
+    publishTime: article.publishTime,
+    metrics: null,
+    lastBodyStatus: article.contentHtml.includes('data-wewe-image-pending=')
+      ? 'images-pending'
+      : 'available',
   });
+  const prepare: ArticlePreparation = async (directory) => {
+    try {
+      return { ...(await cached(directory)), source: 'wechat2rss' as const };
+    } catch {
+      throw fail(
+        'WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE',
+        'Wechat2RSS 正文已匹配，但图片资源下载或字节校验失败；未保存正文或图片。',
+      );
+    }
+  };
+  prepare.identity = { ...cached.identity!, source: 'wechat2rss' };
+  prepare.seedImages = cached.seedImages;
+  prepare.canReuseLegacyImages = cached.canReuseLegacyImages;
+  return prepare;
 }

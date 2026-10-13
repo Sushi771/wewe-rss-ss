@@ -60,6 +60,7 @@ function evaluate(
     Set,
     Array,
     Error,
+    exportCancelled: { current: false },
     ...scope,
   };
   vm.runInNewContext(
@@ -79,6 +80,9 @@ function exportFixture(ids: string[], save: (id: string) => Promise<any>) {
   const scope = {
     articleSelectedIds: state.selected,
     batchExporting: { current: false },
+    exportCancelled: { current: false },
+    dateError: undefined,
+    setExportResult: jest.fn(),
     setIsBatchExporting: (busy: boolean) => {
       state.busy = busy;
     },
@@ -88,7 +92,7 @@ function exportFixture(ids: string[], save: (id: string) => Promise<any>) {
       state.selected = typeof next === 'function' ? next(state.selected) : next;
     },
     queryUtils: { client: { article: { saveToObsidian: { mutate: save } } } },
-    toast: { success: jest.fn(), error: jest.fn() },
+    toast: { success: jest.fn(), error: jest.fn(), warning: jest.fn() },
   };
   return {
     state,
@@ -405,6 +409,9 @@ describe('feed batch selection actual UI and export handlers, offline', () => {
     const changed = jest.fn();
     evaluate(index.prop(clear, 'onPress')!, {
       batchExporting: { current: false },
+      exportCancelled: { current: false },
+      dateError: undefined,
+      setExportResult: jest.fn(),
       setArticleSelectedIds: changed,
     })();
     expect(changed.mock.calls[0][0].size).toBe(0);
@@ -440,16 +447,17 @@ describe('feed batch selection actual UI and export handlers, offline', () => {
     expect(f.state.busy).toBe(false);
     expect(f.scope.batchExporting.current).toBe(false);
   });
-  it('stops on failure, retains the entire original selection and releases the lock', async () => {
+  it('continues after failure, retains the entire original selection and releases the lock', async () => {
     const save = jest
       .fn()
       .mockResolvedValueOnce({})
-      .mockRejectedValueOnce(new Error('ISOLATED_FAILURE'));
+      .mockRejectedValueOnce(new Error('ISOLATED_FAILURE'))
+      .mockResolvedValue({});
     const f = exportFixture(['b', 'a', 'c'], save);
     await f.run();
-    expect(save.mock.calls).toEqual([['b'], ['a']]);
+    expect(save.mock.calls).toEqual([['b'], ['a'], ['c']]);
     expect(Array.from(f.state.selected)).toEqual(['b', 'a', 'c']);
-    expect(f.scope.toast.error.mock.calls[0][0]).toContain('1/3');
+    expect(f.scope.toast.warning.mock.calls[0][0]).toContain('失败 1');
     expect(f.state.busy).toBe(false);
     expect(f.scope.batchExporting.current).toBe(false);
   });
@@ -581,7 +589,7 @@ describe('selected UI IDs through original cached-article router/exporter into t
     save.mockClear();
     const failed = exportFixture([ids[2], ids[1], ids[0]], save);
     await failed.run();
-    expect(save.mock.calls).toEqual([[ids[2]], [ids[1]]]);
+    expect(save.mock.calls).toEqual([[ids[2]], [ids[1]], [ids[0]]]);
     expect(Array.from(failed.state.selected)).toEqual([ids[2], ids[1], ids[0]]);
     expect(fs.readFileSync(saved[0].path, 'utf8')).toBe('隔离模拟手写笔记');
     expect(global.fetch).not.toHaveBeenCalled();

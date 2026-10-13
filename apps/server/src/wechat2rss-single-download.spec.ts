@@ -410,10 +410,14 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     jest
       .mocked(images.fetchAllowedImage)
       .mockRejectedValue(new Error('unsafe upstream detail'));
-    await expect(prepareWechat2RssSingleDownload(url)).rejects.toMatchObject({
+    const prepare = await prepareWechat2RssSingleDownload(url);
+    expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+    await expect(prepare(folder)).rejects.toMatchObject({
       diagnostic: { code: 'WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE' },
     });
-    expect(await readdir(folder)).toEqual([]);
+    expect(
+      (await readdir(folder)).filter((name) => name.endsWith('.md')),
+    ).toEqual([]);
     expect(axios.get).not.toHaveBeenCalled();
   });
 
