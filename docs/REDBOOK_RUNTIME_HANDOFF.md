@@ -1,10 +1,24 @@
 # Redbook 运行时接入与有限验收
 
+## 本机页面：首次小量检查与正式归档分开
+
+原小红书页面的“本机首次小量检查”入口，仅在 localhost、127.0.0.1 或 ::1 地址可用。先选定已保存的博主主页，再由用户在掩码输入框填写订阅平台访问密码及自己账号的 a1、web_session。订阅平台访问密码是打开 WeWe 的密码，不是小红书验证码。页面不读取浏览器存储或现有 Cookie，不回显秘密，不保存到 localStorage/sessionStorage；提交后清空登录字段。已有访问密码复用到独立实例需要用户明确同意，不能因允许启动实例而自动读取其他配置。
+
+点击“仅保存本机会话”只保存内存会话，不请求平台；诊断最长 15 分钟。接下来用户分别确认读取一页列表、选择并确认读取一篇正文。没有分页追赶、自动重试或正式归档。列表仍严格检查 has_more/cursor 和作者归属，正文仍严格检查作者/笔记身份、时间单位与范围、全文及图片 URL 结构。URL 中的作者 ID 在这一步仅是待核验对象，不是可信作者绑定。
+
+图片默认关闭。单独勾选并点击下载时，最多尝试 1 或 2 张，合计最多 1,000,000 字节，CDN 不带账号头；不支持的 AVIF、超限或首个受限响应立即停止。受限/未知结构保留 pending 样本并将共享队列持久暂停，不允许通过新会话、重启、406 换签、HTML 或换端点绕过。样本只在内存中供本机查看，清除 Cookie、令牌、签名字段及嵌入 URL 的查询/片段；关闭页面清空页面内存，后台会话到期清空，用户也可先“撤销并清空”。不写 XhsNote、不建立已验证归档、不自动标记 reviewed=true。
+
+核验后用户填写从原笔记独立取得的全文、全部图片数量、北京时间，并分别确认作者归属、全文、全部图片顺序和发布时间，再明确允许后续正式归档。服务端按原 review contract 校验参考值、绑定证据与已保存主页；这个操作只启用剩余有效期内的正式 source，不发送请求、不刷新。原页面刷新仍必须另行点击，正式扫描最多三页/理论 90 条，增量、重复跳过、补缺及正文保护沿用原实现。成功交接也始终返回 platformVerified:false/liveValidation:pending，不能据此声称真实接口已验证。
+
+新增精确路由均为 POST /local/redbook/diagnostic/{status,session,list,detail,images,sample,review,discard}；只允许真实 loopback socket、严格原始 Host、匹配 Origin、现有应用访问密码，并拒绝任何 Forwarded、X-Forwarded-_ 或 Via。响应 Cache-Control:no-store。公开部署应拒绝整个 /local/redbook/_ 前缀。本机页面只发同源 POST，无任意 host/baseURL 注入。
+
+无需提前准备已经审核的真实 API 样本才能执行这个显式小量诊断；诊断不能绕过后续正式归档的人工核验。真实账号/签名/全文/原图仍需用户后续实测。本次仅离线合成验收，无真实 Cookie/API、生产数据库或媒体。
+
 本候选已有固定目标 API/图片 HTTP transport、短期内存会话、安全作者绑定、持久扫描状态和 Nest provider 实际装配。默认没有会话而关闭；有效交接后原小红书页面刷新可以调用来源，**不再是永久休眠骨架**。本次只用合成 HTTP/SQLite 验证，未配置真实账号、未发平台请求，平台接受签名及真实全文/原图仍待有限真实验收。
 
 ## 后端私有交接
 
-入口为 `GET /local/redbook/status`、`POST /local/redbook/session`、`POST /local/redbook/revoke`、`POST /local/redbook/resume-operator`。它们要求服务器 socket 的 loopback 对端、loopback Host、完全匹配 Host 的 Origin，以及部署已有的 AUTH_CODE；没有 AUTH_CODE 时拒绝。拒绝 Forwarded、X-Forwarded-_ 和 Via。部署若有本机反代，必须在代理明确 deny `/local/redbook/_`：应用不能识别删除全部转发头且重写 Host/Origin 的本机代理。PRIVATE_ONLINE_MODE 下同样支持直连本机交接，这四个精确路径使用专用上述门禁，其他私有路由继续要求原登录会话。WEWE_ACCEPTANCE_MODE 下交接拒绝。没有新增访问令牌或登录逻辑，没有前端 Cookie 输入或浏览器自动读取。
+入口为 `GET /local/redbook/status`、`POST /local/redbook/session`、`POST /local/redbook/revoke`、`POST /local/redbook/resume-operator`。它们要求服务器 socket 的 loopback 对端、loopback Host、完全匹配 Host 的 Origin，以及部署已有的 AUTH_CODE；没有 AUTH_CODE 时拒绝。拒绝 Forwarded、`X-Forwarded-*` 和 Via。部署若有本机反代，必须在代理明确 deny `/local/redbook/*`：应用不能识别删除全部转发头且重写 Host/Origin 的本机代理。PRIVATE_ONLINE_MODE 下同样支持直连本机交接，这些精确路径使用专用上述门禁，其他私有路由继续要求原登录会话。WEWE_ACCEPTANCE_MODE 下交接拒绝。没有新增访问令牌或登录逻辑，没有前端 Cookie 输入或浏览器自动读取。
 
 凭据仅保留内存，最长两小时，到期/撤销/关机清空引用并 abort 未完成 HTTP；重启需再次显式交接。撤销可取消正在等待作者查询的交接。活动扫描全部先收到取消，不因另一作者锁失败漏取消；已在提交的当前 SQLite 页可以完成并保留，然后停在检查点，不声称撤销已完成事务。安装/更换会话不重置扫描账本，不清除受限/不确定请求停顿。
 

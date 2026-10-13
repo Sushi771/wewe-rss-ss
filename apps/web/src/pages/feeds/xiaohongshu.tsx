@@ -12,6 +12,7 @@ import {
 } from '@nextui-org/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import dayjs from 'dayjs';
+import RedbookFirstCheck from '@web/components/RedbookFirstCheck';
 import ManagementFolders from '@web/components/ManagementFolders';
 import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
@@ -675,6 +676,10 @@ export default function Xiaohongshu() {
           </div>
         </div>
         <div className="space-y-2 border-b border-neutral-200 px-4 py-3 text-sm dark:border-neutral-700">
+          <RedbookFirstCheck
+            creator={current}
+            onEnabled={() => utils.xiaohongshu.capability.invalidate()}
+          />
           <p role="status">
             {capability.error
               ? '来源状态查询失败，未自动更新。'

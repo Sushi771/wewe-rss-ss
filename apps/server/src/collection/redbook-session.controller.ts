@@ -91,4 +91,92 @@ export class RedbookSessionController {
       return res.status(409).json({ code: 'REDBOOK_RESUME_BLOCKED' });
     }
   }
+  private async diagnosticAction(
+    req: Req,
+    res: Res,
+    action: () => unknown | Promise<unknown>,
+  ) {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!this.authorized(req, res)) return;
+    try {
+      return res.json(await action());
+    } catch {
+      return res
+        .status(422)
+        .json({
+          code: 'REDBOOK_DIAGNOSTIC_REJECTED',
+          message: '本次操作未完成；请核对输入或停止原因，不会自动重试。',
+          diagnostic: this.runtime.diagnosticStatus(),
+        });
+    }
+  }
+  @Post('diagnostic/status')
+  diagnosticStatus(@Request() req: Req, @Response() res: Res) {
+    return this.diagnosticAction(req, res, () =>
+      this.runtime.diagnosticStatus(),
+    );
+  }
+  @Post('diagnostic/session')
+  diagnosticSession(
+    @Request() req: Req,
+    @Response() res: Res,
+    @Body() body: unknown,
+  ) {
+    return this.diagnosticAction(req, res, () =>
+      this.runtime.startDiagnostic(body),
+    );
+  }
+  @Post('diagnostic/list')
+  diagnosticList(
+    @Request() req: Req,
+    @Response() res: Res,
+    @Body() body: unknown,
+  ) {
+    return this.diagnosticAction(req, res, () =>
+      this.runtime.diagnosticList(body),
+    );
+  }
+  @Post('diagnostic/detail')
+  diagnosticDetail(
+    @Request() req: Req,
+    @Response() res: Res,
+    @Body() body: unknown,
+  ) {
+    return this.diagnosticAction(req, res, () =>
+      this.runtime.diagnosticDetail(body),
+    );
+  }
+  @Post('diagnostic/images')
+  diagnosticImages(
+    @Request() req: Req,
+    @Response() res: Res,
+    @Body() body: unknown,
+  ) {
+    return this.diagnosticAction(req, res, () =>
+      this.runtime.diagnosticImages(body),
+    );
+  }
+  @Post('diagnostic/sample')
+  diagnosticSample(@Request() req: Req, @Response() res: Res) {
+    return this.diagnosticAction(req, res, () =>
+      this.runtime.diagnosticSample(),
+    );
+  }
+  @Post('diagnostic/review')
+  diagnosticReview(
+    @Request() req: Req,
+    @Response() res: Res,
+    @Body() body: unknown,
+  ) {
+    return this.diagnosticAction(req, res, () =>
+      this.runtime.approveDiagnostic(body),
+    );
+  }
+  @Post('diagnostic/discard')
+  diagnosticDiscard(@Request() req: Req, @Response() res: Res) {
+    return this.diagnosticAction(req, res, async () => {
+      await this.runtime.revoke();
+      return { discarded: true, configured: false };
+    });
+  }
 }

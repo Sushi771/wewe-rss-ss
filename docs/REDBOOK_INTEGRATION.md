@@ -1,5 +1,7 @@
 # Redbook 离线接入候选（2026-10-13）
 
+当前另有本机“首次小量检查”：一页列表 + 一篇选定正文，图片单独限量确认，pending 样本与正式归档分离；详见 [运行时交接](REDBOOK_RUNTIME_HANDOFF.md)。
+
 **后续运行闭环已补齐：**真实固定目标 HTTP transport、显式后端短期内存会话、带证据的首轮作者绑定、状态/完整缓存查询与 Nest 装配现已实现。默认无会话关闭，经过安全交接后原页面可发起有限手动刷新，不再永久休眠。下文旧候选的“未提供 transport/交接”的描述仅记录历史；当前使用与尚未取得的真实证据见 [运行时安全交接](REDBOOK_RUNTIME_HANDOFF.md)。
 
 独立分支 `codex/redbook-offline-integration` 基于 `edb0ecb`。本候选登记独立 `RedbookSource`，默认 `configured:false`，不创建凭据或状态文件，不发平台请求，不运行 CLI、不读浏览器 Cookie、不启动浏览器、不切账号/IP/代理、不部署生产。环境变量不能开启此来源，也不复用 Rnote 的 `X-API-Key` 合同。

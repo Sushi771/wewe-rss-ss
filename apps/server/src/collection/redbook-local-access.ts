@@ -2,7 +2,7 @@ import type { Request } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 export function redbookHandoffPath(path: string) {
-  return /^\/local\/redbook\/(status|session|revoke|resume-operator)$/.test(
+  return /^\/local\/redbook\/(status|session|revoke|resume-operator|diagnostic\/(status|session|list|detail|images|sample|review|discard))$/.test(
     path,
   );
 }

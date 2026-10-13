@@ -515,4 +515,345 @@ describe('actual Nest Redbook provider → private handoff → original refresh 
     expect(requests).toHaveLength(1);
     await restarted.onModuleDestroy();
   });
+
+  const diagnostic = () =>
+    post('/local/redbook/diagnostic/session', {
+      creatorId: 'local',
+      cookies: handoff().cookies,
+      expiresAt: Date.now() + 60000,
+      confirmLocalSession: true,
+    });
+  const diagnosticPost = (action: string, body: object = {}) =>
+    post('/local/redbook/diagnostic/' + action, body);
+  const diagnosticPair = async () => {
+    expect((await diagnostic()).status).toBe(201);
+    expect(
+      (await diagnosticPost('list', { confirmRequest: true })).status,
+    ).toBe(201);
+    expect(
+      (await diagnosticPost('detail', { confirmRequest: true, noteId: note }))
+        .status,
+    ).toBe(201);
+  };
+  const diagnosticReview = () => ({
+    authorIdentityChecked: true,
+    fullTextChecked: true,
+    allImagesChecked: true,
+    publicationTimeChecked: true,
+    allowFutureArchive: true,
+    observedText: detail.items[0].note_card.desc,
+    observedImageCount: 1,
+    publishedAt: 1700000000,
+  });
+  it('diagnostic first check needs no prior reviewed sample, makes no automatic request or archive, and exposes no cookies', async () => {
+    const response = await diagnostic();
+    expect(response.status).toBe(201);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toMatchObject({
+      reviewed: false,
+      archiveAllowed: false,
+      phase: 'ready',
+      listRequests: 0,
+      detailRequests: 0,
+    });
+    expect(requests).toHaveLength(0);
+    expect(app.get(RedbookRuntime).configured).toBe(false);
+    expect(
+      (await prisma.xhsCreator.findUnique({ where: { id: 'local' } }))
+        ?.externalAuthorId,
+    ).toBeNull();
+    expect(await prisma.xhsNote.count()).toBe(0);
+    expect(JSON.stringify(response.body)).not.toContain('synthetic-session');
+    expect((await post('/local/redbook/session', handoff())).status).toBe(422);
+    expect((await refresh()).body.result.data.status).toBe('unconfigured');
+  });
+  it('diagnostic list and selected detail each have one manual debit; images stay off and sample remains pending', async () => {
+    await diagnostic();
+    expect((await diagnosticPost('list', {})).status).toBe(422);
+    expect(requests).toHaveLength(0);
+    await diagnosticPost('list', { confirmRequest: true });
+    expect(
+      (await diagnosticPost('list', { confirmRequest: true })).status,
+    ).toBe(422);
+    expect(
+      (
+        await diagnosticPost('detail', {
+          confirmRequest: true,
+          noteId: 'outside-list',
+        })
+      ).status,
+    ).toBe(422);
+    expect(requests).toHaveLength(1);
+    await diagnosticPost('detail', { confirmRequest: true, noteId: note });
+    expect(
+      (await diagnosticPost('detail', { confirmRequest: true, noteId: note }))
+        .status,
+    ).toBe(422);
+    const sample = await diagnosticPost('sample');
+    expect(sample.body).toMatchObject({
+      reviewed: false,
+      archiveAllowed: false,
+      phase: 'sample-ready',
+      images: [],
+      listRequests: 1,
+      detailRequests: 1,
+      imageRequests: 0,
+    });
+    expect(JSON.stringify(sample.body)).not.toContain('synthetic-token');
+    expect(requests).toHaveLength(2);
+    expect(await prisma.xhsNote.count()).toBe(0);
+  });
+  it('diagnostic follows no next cursor even with more pages and rejects missing cursor without completion', async () => {
+    server.removeAllListeners('request');
+    server.on('request', (req, res) => {
+      requests.push({ path: req.url! });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          success: true,
+          code: 0,
+          data: { ...list, has_more: true, cursor: 'next-page' },
+        }),
+      );
+    });
+    await diagnostic();
+    const response = await diagnosticPost('list', { confirmRequest: true });
+    expect(response.body.phase).toBe('listed');
+    expect(requests).toHaveLength(1);
+    await diagnosticPost('list', { confirmRequest: true });
+    expect(requests).toHaveLength(1);
+    await diagnosticPost('discard');
+    server.removeAllListeners('request');
+    server.on('request', (req, res) => {
+      requests.push({ path: req.url! });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          success: true,
+          code: 0,
+          data: { ...list, has_more: true, cursor: '' },
+        }),
+      );
+    });
+    await diagnostic();
+    expect(
+      (await diagnosticPost('list', { confirmRequest: true })).body.diagnostic
+        .phase,
+    ).toBe('paused');
+    expect((await diagnosticPost('sample')).body.archiveAllowed).toBe(false);
+    expect(await prisma.xhsNote.count()).toBe(0);
+  });
+  it('diagnostic images require separate consent and respect the bounded budget, omit credentials, and never archive', async () => {
+    await diagnosticPair();
+    for (const body of [
+      { maxImages: 1, maxBytes: 1000000 },
+      { confirmImages: true, maxImages: 3, maxBytes: 1000000 },
+      { confirmImages: true, maxImages: 1, maxBytes: 1000001 },
+    ])
+      expect((await diagnosticPost('images', body)).status).toBe(422);
+    expect(requests).toHaveLength(2);
+    expect(
+      (
+        await diagnosticPost('images', {
+          confirmImages: true,
+          maxImages: 1,
+          maxBytes: 1024,
+        })
+      ).status,
+    ).toBe(201);
+    expect(requests).toHaveLength(3);
+    expect(requests[2].cookie).toBeUndefined();
+    const sample = (await diagnosticPost('sample')).body;
+    expect(sample.images).toHaveLength(1);
+    expect(sample.images[0].bytes).toBe(png.length);
+    expect(
+      (
+        await diagnosticPost('images', {
+          confirmImages: true,
+          maxImages: 1,
+          maxBytes: 1024,
+        })
+      ).status,
+    ).toBe(422);
+    expect(requests).toHaveLength(3);
+    expect(await prisma.xhsNote.count()).toBe(0);
+  });
+  it('diagnostic restriction pauses the shared queue across revoke/new sessions with no resign, HTML, or endpoint fallback', async () => {
+    upstreamStatus = 406;
+    await diagnostic();
+    expect(
+      (await diagnosticPost('list', { confirmRequest: true })).status,
+    ).toBe(422);
+    expect((await diagnosticPost('status')).body.phase).toBe('paused');
+    expect(
+      (await diagnosticPost('list', { confirmRequest: true })).status,
+    ).toBe(422);
+    await diagnosticPost('discard');
+    expect((await diagnostic()).status).toBe(422);
+    await post('/local/redbook/session', handoff());
+    await refresh();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].path).toContain('/api/sns/web/v2/user_posted');
+    expect(await prisma.xhsNote.count()).toBe(0);
+  });
+  it('diagnostic review requires independent references and four explicit attestations, then enables only later manual refresh', async () => {
+    await diagnosticPair();
+    expect((await diagnosticPost('review', {})).status).toBe(422);
+    expect(
+      (
+        await diagnosticPost('review', {
+          ...diagnosticReview(),
+          observedText: 'different',
+        })
+      ).status,
+    ).toBe(422);
+    expect(
+      (
+        await diagnosticPost('review', {
+          ...diagnosticReview(),
+          allImagesChecked: false,
+        })
+      ).status,
+    ).toBe(422);
+    expect(
+      (
+        await diagnosticPost('review', {
+          ...diagnosticReview(),
+          observedImageCount: 2,
+        })
+      ).status,
+    ).toBe(422);
+    expect(
+      (
+        await diagnosticPost('review', {
+          ...diagnosticReview(),
+          publishedAt: 1700000000123,
+        })
+      ).status,
+    ).toBe(422);
+    expect(requests).toHaveLength(2);
+    expect(app.get(RedbookRuntime).configured).toBe(false);
+    const response = await diagnosticPost('review', diagnosticReview());
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({
+      configured: true,
+      platformVerified: false,
+      liveValidation: 'pending',
+    });
+    expect(requests).toHaveLength(2);
+    expect(await prisma.xhsNote.count()).toBe(0);
+    expect((await diagnosticPost('status')).body.configured).toBe(false);
+    expect((await refresh()).body.result.data.added).toBe(1);
+    expect(await prisma.xhsNote.count()).toBe(1);
+  });
+  it('diagnostic revoke aborts an in-flight list and clears secrets/sample without subsequent requests', async () => {
+    let seen!: () => void;
+    const started = new Promise<void>((resolve) => {
+      seen = resolve;
+    });
+    server.removeAllListeners('request');
+    server.on('request', (req) => {
+      requests.push({ path: req.url! });
+      seen();
+    });
+    await diagnostic();
+    const pending = diagnosticPost('list', { confirmRequest: true }).then(
+      (value) => value,
+    );
+    await started;
+    expect((await diagnosticPost('discard')).status).toBe(201);
+    expect((await pending).status).toBe(422);
+    expect((await diagnosticPost('sample')).status).toBe(422);
+    expect(requests).toHaveLength(1);
+    expect((await diagnostic()).status).toBe(422);
+    expect(await prisma.xhsNote.count()).toBe(0);
+  });
+  it('diagnostic TTL expires without requests and all diagnostic routes enforce the direct-local gate', async () => {
+    expect(
+      (
+        await post('/local/redbook/diagnostic/session', {
+          creatorId: 'local',
+          cookies: handoff().cookies,
+          expiresAt: Date.now() + 910000,
+          confirmLocalSession: true,
+        })
+      ).status,
+    ).toBe(422);
+    const installed = await post('/local/redbook/diagnostic/session', {
+      creatorId: 'local',
+      cookies: handoff().cookies,
+      expiresAt: Date.now() + 40,
+      confirmLocalSession: true,
+    });
+    expect(installed.status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    expect(
+      (await diagnosticPost('list', { confirmRequest: true })).status,
+    ).toBe(422);
+    for (const action of [
+      'status',
+      'session',
+      'list',
+      'detail',
+      'images',
+      'sample',
+      'review',
+      'discard',
+    ]) {
+      expect(
+        (
+          await request(app.getHttpServer())
+            .post('/local/redbook/diagnostic/' + action)
+            .set('host', 'evil@localhost')
+            .set('origin', 'http://localhost')
+            .set('authorization', 'synthetic-local-access')
+            .send({})
+        ).status,
+      ).toBe(403);
+      expect(
+        (
+          await request(app.getHttpServer())
+            .post('/local/redbook/diagnostic/' + action)
+            .set('host', 'localhost')
+            .set('origin', 'http://localhost')
+            .set('authorization', 'synthetic-local-access')
+            .set('x-forwarded-path', '/')
+            .send({})
+        ).status,
+      ).toBe(403);
+    }
+    expect(requests).toHaveLength(0);
+  });
+
+  it('diagnostic media overrun stops before accepting image bytes or retrying', async () => {
+    await diagnosticPair();
+    server.removeAllListeners('request');
+    server.on('request', (req, res) => {
+      requests.push({ path: req.url!, cookie: req.headers.cookie });
+      res.writeHead(200, {
+        'content-type': 'image/png',
+        'content-length': '2000',
+      });
+      res.end(Buffer.alloc(2000));
+    });
+    const response = await diagnosticPost('images', {
+      confirmImages: true,
+      maxImages: 2,
+      maxBytes: 1024,
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.diagnostic).toMatchObject({
+      phase: 'paused',
+      imageRequests: 1,
+    });
+    expect(requests).toHaveLength(3);
+    expect((await diagnosticPost('sample')).body.images).toHaveLength(0);
+    expect(await prisma.xhsNote.count()).toBe(0);
+    await diagnosticPost('images', {
+      confirmImages: true,
+      maxImages: 2,
+      maxBytes: 1024,
+    });
+    expect(requests).toHaveLength(3);
+  });
 });

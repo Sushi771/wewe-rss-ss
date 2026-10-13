@@ -167,8 +167,15 @@ export function createRedbookHttpTransport(
 
 export function createRedbookMediaHttpTransport(
   sessionSignal?: AbortSignal,
+  maxBytes = 10_000_000,
 ): RedbookMediaTransport {
   return async (url, options) => {
+    if (
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 1 ||
+      maxBytes > 10_000_000
+    )
+      throw new Error('REDBOOK_HTTP_LIMITS');
     allowedRedbookMediaUrl(url.href);
     if (
       options.redirect !== 'manual' ||
@@ -184,7 +191,7 @@ export function createRedbookMediaHttpTransport(
       'GET',
       { accept: options.headers.accept },
       undefined,
-      10_000_000,
+      maxBytes,
       10000,
       signal,
     );

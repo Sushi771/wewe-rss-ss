@@ -25,4 +25,4 @@ jobs:
       - name: Generate existing Prisma types without opening a database
         run: pnpm --filter server exec prisma generate
       - name: Synthetic readonly client, media and durable scan tests (no platform)
-        run: pnpm --filter server exec jest redbook --runInBand
+        run: pnpm --filter server exec jest --testPathPattern='collection/redbook.*\.spec\.ts$' --runInBand

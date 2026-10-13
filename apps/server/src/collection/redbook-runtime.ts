@@ -1,15 +1,35 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { XhsCreator } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { RedbookClient } from './redbook-client';
+import { RedbookClient, RedbookPauseError } from './redbook-client';
 import {
   createRedbookHttpTransport,
   createRedbookMediaHttpTransport,
 } from './redbook-http';
-import { FileRedbookStateStore } from './redbook-scan-state';
-import { redbookReader, RedbookSource } from './redbook-source';
+import { FileRedbookStateStore, freshRedbookState } from './redbook-scan-state';
+import {
+  redbookReader,
+  RedbookSource,
+  REDBOOK_QUEUE_SCOPE,
+} from './redbook-source';
+import {
+  inspectRedbookDetail,
+  mapRedbookPage,
+  REDBOOK_RESPONSE_CONTRACT,
+} from './redbook-response';
+import { decodeInlineImage } from './image-fetch';
+import {
+  DiagnosticSession,
+  diagnosticConfirm,
+  diagnosticDetailInput,
+  diagnosticImageInput,
+  diagnosticReviewInput,
+  diagnosticPreview,
+  diagnosticSummary,
+} from './redbook-diagnostic';
 import { redbookBindingSchema, reviewRedbookBinding } from './redbook-evidence';
 import type {
   XhsSource,
@@ -44,6 +64,7 @@ type Session = {
 @Injectable()
 export class RedbookRuntime implements XhsSource, OnModuleDestroy {
   private session?: Session;
+  private diagnostic?: DiagnosticSession;
   private active = 0;
   private readonly activeCreators = new Map<string, number>();
   private changing = false;
@@ -63,7 +84,8 @@ export class RedbookRuntime implements XhsSource, OnModuleDestroy {
     };
   }
   async install(raw: unknown) {
-    if (this.active || this.changing) throw new Error('REDBOOK_SESSION_BUSY');
+    if (this.active || this.changing || this.diagnostic)
+      throw new Error('REDBOOK_SESSION_BUSY');
     this.changing = true;
     const epoch = this.epoch;
     try {
@@ -158,7 +180,354 @@ export class RedbookRuntime implements XhsSource, OnModuleDestroy {
   }
   async revoke() {
     this.epoch++;
-    await this.clearSession();
+    await Promise.all([this.clearSession(), this.clearDiagnostic()]);
+  }
+  private async clearDiagnostic() {
+    const diagnostic = this.diagnostic;
+    this.diagnostic = undefined;
+    if (!diagnostic) return;
+    clearTimeout(diagnostic.timer);
+    diagnostic.abort.abort();
+    for (const key of Object.keys(diagnostic.cookies))
+      delete diagnostic.cookies[key];
+    await diagnostic.flight;
+    diagnostic.list = undefined;
+    diagnostic.detail = undefined;
+    diagnostic.notes = [];
+    diagnostic.images = [];
+  }
+  diagnosticStatus() {
+    return diagnosticSummary(this.diagnostic);
+  }
+  async startDiagnostic(raw: unknown) {
+    if (this.active || this.changing || this.diagnostic || this.configured)
+      throw new Error('REDBOOK_SESSION_BUSY');
+    const schema = input
+      .pick({ cookies: true, expiresAt: true })
+      .extend({
+        creatorId: z.string().min(1).max(128),
+        confirmLocalSession: z.literal(true),
+      })
+      .strict();
+    const parsed = schema.parse(raw);
+    if (
+      !parsed.cookies.a1 ||
+      !parsed.cookies.web_session ||
+      Object.keys(parsed.cookies).length > 100 ||
+      parsed.expiresAt <= Date.now() ||
+      parsed.expiresAt > Date.now() + 15 * 60000
+    )
+      throw new Error('REDBOOK_SESSION_INVALID');
+    this.changing = true;
+    const epoch = this.epoch;
+    try {
+      const creator = await this.prisma.xhsCreator.findUnique({
+        where: { id: parsed.creatorId },
+      });
+      const author =
+        creator &&
+        /^https:\/\/www\.xiaohongshu\.com\/user\/profile\/([a-zA-Z0-9_-]{1,128})$/.exec(
+          creator.profileUrl,
+        )?.[1];
+      if (
+        !creator ||
+        !author ||
+        (creator.externalAuthorId && creator.externalAuthorId !== author)
+      )
+        throw new Error('REDBOOK_DIAGNOSTIC_PROFILE');
+      const database = process.env.DATABASE_URL?.startsWith('file:')
+        ? process.env.DATABASE_URL.slice(5)
+        : '';
+      if (!database || !isAbsolute(database) || /[?\x00]/.test(database))
+        throw new Error('REDBOOK_LOCAL_SQLITE_REQUIRED');
+      const store = new FileRedbookStateStore(
+        join(dirname(database), '.redbook-state'),
+      );
+      await store.exclusive(REDBOOK_QUEUE_SCOPE, async (state) => {
+        if (state && state.phase !== 'ready')
+          throw new Error('REDBOOK_SOURCE_PAUSED');
+      });
+      if (epoch !== this.epoch || parsed.expiresAt <= Date.now())
+        throw new Error('REDBOOK_HANDOFF_CANCELLED');
+      const cookies = { ...parsed.cookies },
+        abort = new AbortController(),
+        expiresAt = parsed.expiresAt;
+      const client = new RedbookClient({
+        transport: createRedbookHttpTransport(abort.signal),
+        cookies: () => {
+          if (abort.signal.aborted || Date.now() >= expiresAt)
+            throw new Error('REDBOOK_SESSION_EXPIRED');
+          return { ...cookies };
+        },
+      });
+      const timer = setTimeout(() => {
+        void this.revoke().catch(() => undefined);
+      }, expiresAt - Date.now());
+      timer.unref();
+      this.diagnostic = {
+        cookies,
+        abort,
+        expiresAt,
+        client,
+        store,
+        timer,
+        creatorId: creator.id,
+        authorId: author,
+        profileUrl: creator.profileUrl,
+        phase: 'ready',
+        listSpent: false,
+        detailSpent: false,
+        imagesSpent: false,
+        imageAttempts: 0,
+        notes: [],
+        images: [],
+      };
+      return this.diagnosticStatus();
+    } finally {
+      this.changing = false;
+    }
+  }
+  private currentDiagnostic() {
+    const diagnostic = this.diagnostic;
+    if (
+      !diagnostic ||
+      Date.now() >= diagnostic.expiresAt ||
+      diagnostic.abort.signal.aborted ||
+      diagnostic.phase === 'paused' ||
+      diagnostic.flight ||
+      this.active ||
+      this.changing
+    )
+      throw new Error('REDBOOK_DIAGNOSTIC_UNAVAILABLE');
+    return diagnostic;
+  }
+  private async diagnosticRequest(
+    diagnostic: DiagnosticSession,
+    run: () => Promise<void>,
+  ) {
+    this.active++;
+    let finished!: () => void;
+    diagnostic.flight = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    try {
+      await diagnostic.store.exclusive(
+        REDBOOK_QUEUE_SCOPE,
+        async (state, save) => {
+          if (state && state.phase !== 'ready')
+            throw new Error('REDBOOK_SOURCE_PAUSED');
+          await save({
+            ...freshRedbookState(REDBOOK_QUEUE_SCOPE),
+            phase: 'requesting',
+            pages: 1,
+          });
+          try {
+            await run();
+            if (
+              this.diagnostic !== diagnostic ||
+              diagnostic.abort.signal.aborted
+            )
+              throw new Error('REDBOOK_DIAGNOSTIC_CANCELLED');
+            await save(freshRedbookState(REDBOOK_QUEUE_SCOPE));
+            if (
+              this.diagnostic !== diagnostic ||
+              diagnostic.abort.signal.aborted
+            ) {
+              await save({
+                ...freshRedbookState(REDBOOK_QUEUE_SCOPE),
+                phase: 'paused',
+                reason: 'operator',
+              });
+              throw new Error('REDBOOK_DIAGNOSTIC_CANCELLED');
+            }
+          } catch (error) {
+            await save({
+              ...freshRedbookState(REDBOOK_QUEUE_SCOPE),
+              phase: 'paused',
+              reason: diagnostic.abort.signal.aborted
+                ? 'interrupted'
+                : 'upstream',
+            });
+            throw error;
+          }
+        },
+      );
+      return this.diagnosticStatus();
+    } catch (error) {
+      diagnostic.phase = 'paused';
+      diagnostic.stopCategory =
+        error instanceof RedbookPauseError
+          ? error.reason
+          : diagnostic.abort.signal.aborted
+            ? 'cancelled'
+            : 'response';
+      throw new Error('REDBOOK_DIAGNOSTIC_STOPPED');
+    } finally {
+      this.active--;
+      diagnostic.flight = undefined;
+      finished();
+    }
+  }
+  async diagnosticList(raw: unknown) {
+    diagnosticConfirm.parse(raw);
+    const diagnostic = this.currentDiagnostic();
+    if (diagnostic.listSpent) throw new Error('REDBOOK_DIAGNOSTIC_BUDGET');
+    diagnostic.listSpent = true;
+    return this.diagnosticRequest(diagnostic, async () => {
+      diagnostic.list = await diagnostic.client.getUserNotes(
+        diagnostic.authorId,
+        '',
+      );
+      diagnostic.notes = mapRedbookPage(
+        diagnostic.list,
+        diagnostic.authorId,
+      ).notes;
+      diagnostic.phase = 'listed';
+    });
+  }
+  async diagnosticDetail(raw: unknown) {
+    const parsed = diagnosticDetailInput.parse(raw),
+      diagnostic = this.currentDiagnostic();
+    const note = diagnostic.notes.find((item) => item.noteId === parsed.noteId);
+    if (!diagnostic.listSpent || diagnostic.detailSpent || !note)
+      throw new Error('REDBOOK_DIAGNOSTIC_BUDGET');
+    diagnostic.detailSpent = true;
+    diagnostic.noteId = note.noteId;
+    return this.diagnosticRequest(diagnostic, async () => {
+      diagnostic.detail = await diagnostic.client.getNoteById(
+        note.noteId,
+        note.xsecToken,
+      );
+      inspectRedbookDetail(diagnostic.detail, diagnostic.authorId, note.noteId);
+      diagnostic.phase = 'sample-ready';
+    });
+  }
+  async diagnosticImages(raw: unknown) {
+    const parsed = diagnosticImageInput.parse(raw),
+      diagnostic = this.currentDiagnostic();
+    if (
+      diagnostic.phase !== 'sample-ready' ||
+      diagnostic.imagesSpent ||
+      !diagnostic.noteId
+    )
+      throw new Error('REDBOOK_DIAGNOSTIC_BUDGET');
+    const detail = inspectRedbookDetail(
+      diagnostic.detail,
+      diagnostic.authorId,
+      diagnostic.noteId,
+    );
+    if (!detail.urls.length) throw new Error('REDBOOK_DIAGNOSTIC_NO_IMAGES');
+    diagnostic.imagesSpent = true;
+    return this.diagnosticRequest(diagnostic, async () => {
+      let remaining = parsed.maxBytes;
+      for (const url of detail.urls.slice(0, parsed.maxImages)) {
+        if (
+          this.diagnostic !== diagnostic ||
+          diagnostic.abort.signal.aborted ||
+          Date.now() >= diagnostic.expiresAt
+        )
+          throw new Error('REDBOOK_DIAGNOSTIC_CANCELLED');
+        if (remaining <= 0) throw new Error('REDBOOK_DIAGNOSTIC_IMAGE_BUDGET');
+        diagnostic.imageAttempts++;
+        const response = await createRedbookMediaHttpTransport(
+          diagnostic.abort.signal,
+          remaining,
+        )(url, {
+          redirect: 'manual',
+          credentials: 'omit',
+          headers: { accept: 'image/png,image/jpeg,image/gif,image/webp' },
+          signal: AbortSignal.timeout(10000),
+        });
+        const type = (response.headers.get('content-type') || '').split(';')[0];
+        if (
+          response.status !== 200 ||
+          response.redirected ||
+          !/^image\/(png|jpeg|gif|webp)$/.test(type)
+        )
+          throw new Error('REDBOOK_DIAGNOSTIC_IMAGE');
+        const bytes = Buffer.from(await response.arrayBuffer());
+        remaining -= bytes.length;
+        const inlineData = `data:${type};base64,${bytes.toString('base64')}`;
+        decodeInlineImage(inlineData);
+        diagnostic.images.push({
+          ordinal: diagnostic.images.length + 1,
+          inlineData,
+          bytes: bytes.length,
+        });
+      }
+    });
+  }
+  diagnosticSample() {
+    const diagnostic = this.diagnostic;
+    if (!diagnostic || Date.now() >= diagnostic.expiresAt)
+      throw new Error('REDBOOK_DIAGNOSTIC_UNAVAILABLE');
+    const secrets = [
+      ...Object.values(diagnostic.cookies),
+      ...diagnostic.notes.map((note) => note.xsecToken),
+    ];
+    return {
+      ...this.diagnosticStatus(),
+      list: diagnosticPreview(diagnostic.list, secrets),
+      detail: diagnosticPreview(diagnostic.detail, secrets),
+      images: diagnostic.images,
+    };
+  }
+  async approveDiagnostic(raw: unknown) {
+    const reference = diagnosticReviewInput.parse(raw),
+      diagnostic = this.currentDiagnostic();
+    if (diagnostic.phase !== 'sample-ready' || !diagnostic.noteId)
+      throw new Error('REDBOOK_REVIEW_REQUIRED');
+    const detail = inspectRedbookDetail(
+      diagnostic.detail,
+      diagnostic.authorId,
+      diagnostic.noteId,
+    );
+    if (
+      reference.observedImageCount !== detail.urls.length ||
+      reference.observedText !== detail.text ||
+      reference.publishedAt !== detail.publishedAt
+    )
+      throw new Error('REDBOOK_REVIEW_REFERENCE_MISMATCH');
+    const digest = (value: string) =>
+      createHash('sha256').update(value).digest('hex');
+    const handoff = {
+      cookies: { ...diagnostic.cookies },
+      expiresAt: diagnostic.expiresAt,
+      bindings: [
+        {
+          creatorId: diagnostic.creatorId,
+          authorId: diagnostic.authorId,
+          profileUrl: diagnostic.profileUrl,
+          review: {
+            contract: REDBOOK_RESPONSE_CONTRACT,
+            reviewedAt: Date.now(),
+            authorIdentityChecked: reference.authorIdentityChecked,
+            fullTextChecked: reference.fullTextChecked,
+            allImagesChecked: reference.allImagesChecked,
+            publicationTimeChecked: reference.publicationTimeChecked,
+            noteId: diagnostic.noteId,
+            publishedAt: reference.publishedAt,
+            textSha256: digest(reference.observedText),
+            imageUrlSha256s: detail.urls.map((url) => digest(url.href)),
+            list: diagnostic.list,
+            detail: diagnostic.detail,
+          },
+        },
+      ],
+    };
+    this.diagnostic = undefined;
+    clearTimeout(diagnostic.timer);
+    try {
+      return await this.install(handoff);
+    } finally {
+      diagnostic.abort.abort();
+      for (const key of Object.keys(diagnostic.cookies))
+        delete diagnostic.cookies[key];
+      diagnostic.list = undefined;
+      diagnostic.detail = undefined;
+      diagnostic.notes = [];
+      diagnostic.images = [];
+    }
   }
   private async clearSession() {
     const session = this.session;
