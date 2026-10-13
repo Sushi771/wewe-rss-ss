@@ -191,6 +191,8 @@ export class RedbookSource implements XhsSource {
                 throw new Error('REDBOOK_DETAIL_IDENTITY');
               items.push(detail);
             }
+            if (this.cancelled.has(creator.id))
+              throw new Error('REDBOOK_OPERATOR_PAUSE');
             state = { ...state, phase: 'awaiting-commit', noteIds: [...seen] };
             await save(state);
             const result = await commit({
@@ -200,6 +202,16 @@ export class RedbookSource implements XhsSource {
               pages: [{ requestCursor, nextCursor: page.nextCursor, items }],
             });
             added += result.added;
+            if (this.cancelled.has(creator.id)) {
+              state = {
+                ...state,
+                nextCursor: page.nextCursor,
+                phase: 'paused',
+                reason: 'operator',
+              };
+              await save(state);
+              return paused(added);
+            }
             state = {
               ...state,
               nextCursor: page.nextCursor,
@@ -232,6 +244,14 @@ export class RedbookSource implements XhsSource {
           return paused(added);
         }
       })
-      .finally(() => this.running.delete(creator.id));
+      .finally(async () => {
+        this.running.delete(creator.id);
+        // Also cover cancellation during the last checkpoint/lock release.
+        // The exclusive scan lock has been released before this runs.
+        if (this.cancelled.has(creator.id)) await this.pause(creator);
+      })
+      .then((result) =>
+        this.cancelled.has(creator.id) ? paused(result.added) : result,
+      );
   }
 }

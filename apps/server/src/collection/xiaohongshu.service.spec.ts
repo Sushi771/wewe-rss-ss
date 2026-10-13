@@ -494,7 +494,7 @@ describe('production XHS router/service → additive SQLite and original export 
       });
       expect(path.basename(first.body.markdownPath)).toBe('合成图文.md');
       expect(path.relative(destination, first.body.directory)).toMatch(
-        /^\d{4}-\d{2}-\d{2}_未分组[\\/]/,
+        /^\d{4}-\d{2}-\d{2}_小红书未分组[\\/]/,
       );
       const md = await fs.readFile(first.body.markdownPath, 'utf8');
       expect(md).toContain('完整合成正文');
@@ -541,7 +541,11 @@ describe('production XHS router/service → additive SQLite and original export 
             '<div id="js_content"><img src="https://example.com/remote.png"></div>',
         },
       });
-      expect((await post()).status).toBe(422);
+      // A complete trusted local receipt is checked before current cache bytes.
+      // The new identity seam intentionally skips without preparing corrupt cache.
+      const skipped = await post();
+      expect(skipped.status).toBe(200);
+      expect(skipped.body.alreadySaved).toBe(true);
       expect(await fs.readdir(destination)).toEqual(before);
     } finally {
       await app.close();

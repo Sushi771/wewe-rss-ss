@@ -212,6 +212,48 @@ describe('redbook durable bounded synthetic scans (no platform transport)', () =
       'REDBOOK_RESUME_BLOCKED',
     );
   });
+  it('persists pause on the final single detail and after final page commit', async () => {
+    const list = jest.fn(async () => ({
+      nextCursor: null,
+      notes: [{ noteId: 'n1', token: 't' }],
+    }));
+    const detail = jest.fn(async (_author, id) => {
+      await source.pause(creator);
+      return candidate(id);
+    });
+    const source = setup({ list, detail });
+    expect((await source.scan(creator, commit)).status).toBe('paused');
+    expect(commit).not.toHaveBeenCalled();
+    expect((await setup({ list, detail }).scan(creator, commit)).status).toBe(
+      'paused',
+    );
+    expect(list).toHaveBeenCalledTimes(1);
+    await store.exclusive('author', async (_old, save) =>
+      save(freshRedbookState('author')),
+    );
+    const final = setup({
+      list: async () => ({ nextCursor: null, notes: [] }),
+      detail: jest.fn(),
+    });
+    expect(
+      (
+        await final.scan(creator, async () => {
+          await final.pause(creator);
+          return { status: 'complete', added: 1, message: 'committed' };
+        })
+      ).status,
+    ).toBe('paused');
+    const noDispatch = jest.fn();
+    expect(
+      (
+        await setup({ list: noDispatch, detail: jest.fn() }).scan(
+          creator,
+          commit,
+        )
+      ).status,
+    ).toBe('paused');
+    expect(noDispatch).not.toHaveBeenCalled();
+  });
   it('commit failure records uncertainty and never retries a page on restart', async () => {
     const list = jest.fn(async () => ({ nextCursor: 'p2', notes: [] }));
     const reader = { list, detail: jest.fn() };
