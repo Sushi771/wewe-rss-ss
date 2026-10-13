@@ -1,242 +1,138 @@
-<div align="center">
-<img src="https://raw.githubusercontent.com/cooderl/wewe-rss/main/assets/logo.png" width="80" alt="预览"/>
+# WeWe RSS SS
 
-# [WeWe RSS](https://github.com/cooderl/wewe-rss)
+面向个人知识归档的微信公众号订阅、阅读和离线保存工具。在 [cooderl/wewe-rss](https://github.com/cooderl/wewe-rss) 基础上继续开发，保留 RSS 输出，并增加来源管理、持久刷新任务、作者分组、单篇下载和 Markdown / Obsidian 归档。
 
-更优雅的微信公众号订阅方式。
+## 版本范围
 
-![主界面](https://raw.githubusercontent.com/cooderl/wewe-rss/main/assets/preview1.png)
+本文按 **2026-10-13 集成版本 [`edb0ecb`](https://github.com/Sushi771/wewe-rss-ss/commit/edb0ecb799852a37bd26b7879a7962b10fbd98f3)** 的源码说明功能，代码位于 [`codex/manual-refresh-download-integration`](https://github.com/Sushi771/wewe-rss-ss/tree/codex/manual-refresh-download-integration)。默认 `main` 尚未包含这些集成改动；更新 README 不会升级默认分支代码、上游镜像或已有部署。以下功能、配置和命令均以该集成版本为准。
 
-</div>
+## 已实现功能
 
-## 当前方向（2026-09-29）
+- **公众号订阅与更新**：通过实际注册并配置的来源添加订阅。Wechat2RSS 路径支持持久任务、增量缓存同步、手动刷新全部合资格订阅和后台自动轮次。来源选择受配置和订阅绑定约束。
+- **阅读与管理**：文章搜索、日期筛选、作者分组与拖拽排序、批量选择与操作、阅读位置保留、正文内查找，以及深浅主题。
+- **单篇链接下载**：在「工具 → 文章下载」粘贴公众号链接，确认保存位置。正文仅使用 Wechat2RSS 的可靠缓存；必要时通过已有队列按需订阅公众号并等待目标文章。无精确链接映射时提供缓存文章选择，不按标题或顺序猜测目标。
+- **本机归档**：保存 Markdown 和相对路径图片，可直接放入 Obsidian，支持目录选择与路径记忆。同目录通过稳定文章身份及回执预检，完整文件跳过、可确认的缺图补齐，保留用户编辑的正文和独立笔记。
+- **按范围导出**：按公众号、分组、搜索和日期导出当前筛选的完整本地集合，覆盖分页后的文章；另有 ZIP 快照导出。RSS、Atom、JSON Feed 和 OPML 继续用于阅读器与订阅源迁移。
 
-本 fork 的最高优先级是研究并实现可自行维护的微信读书公众号订阅模块，暂停 Wechat2RSS 采购和部署。已有 Provider、私人登录、数据库保护、正文图片和离线导出保留；目前尚未从新来源取得目标号五篇真实文章，未接入生产订阅。现行要求见 [AGENTS.md](AGENTS.md)、[交付任务](docs/PRIVATE_ONLINE_DELIVERY_TASK.md)和[精简交接](docs/DEVELOPMENT_HANDOFF.md)。
+“已发现文章”只表示列表中有记录。正文可用、图片就绪和离线保存完整是不同状态；刷新批次成功不代表每篇正文、每张图片都已归档。
 
-## 历史方案：公众号订阅恢复实施状态
+## 工作流程与实现依据
 
-> 以下 Wechat2RSS 配置、授权与部署说明是前轮记录，现已暂停，不作为当前操作步骤。
+1. **注册来源和订阅**：后台读取私有配置，按公众号来源与启用状态选择适配器。Wechat2RSS 是外部授权实例，本项目负责管理、缓存和导出；旧微信读书登录或研究代码不等于当前已恢复的全文订阅服务。见 [Provider 注册][provider]、[订阅服务][subscription]。
+2. **排队刷新**：手动与自动刷新复用持久批次队列，串行提交、保留受理回执与单号冷却；重启后依靠原任务状态续接。鉴权、风控或未知受理会暂停流程。见 [批次实现][batches]、[调度说明][schedule-doc]。
+3. **同步缓存**：读取来源已有缓存，按稳定身份去重；无变化的完整文章跳过，新增及符合条件的正文缺口通过受保护写入保存。自动缓存阶段不下载媒体，不覆盖用户已有正文。见 [缓存实现][cache]、[缓存恢复说明][recovery-doc]。
+4. **离线保存**：先核对目录、身份和已有回执，再准备缺失媒体；图片校验后落盘，Markdown 使用相对路径。结果区分新增、跳过、补入和失败；媒体未齐不会被描述为完整归档。见 [保存实现][local-save]、[增量导出说明][export-doc]。
 
-前轮曾按[当时的实施任务书](docs/SUBSCRIPTION_IMPLEMENTATION_TASK.md)推进，Wechat2RSS 私有实例当时是第一候选；已有的 RSS、Markdown、Obsidian、SQLite 与按号批量导出继续由本项目负责。
+### 自动更新时段
 
-代码已增加显式 Provider 路由和默认关闭的 Wechat2RSS 接线；本机尚无授权实例，目标公众号五篇、正文、图片、持续新文和订阅前历史均未真实验证。生产库仍是只读核对的 12 号、1447 篇，本轮不修改生产数据。模拟测试或构建通过不表示订阅已恢复。
+主动轮次的代码时点固定为上海时间 **09:15、14:00、17:30**。需要同时设置 `WECHAT2RSS_ACTIVE_SCHEDULE=1`、`ENABLE_SCHEDULED_UPDATES=1`、`WECHAT2RSS_ENABLED=1`，且 `DISABLE_SCHEDULED_UPDATES` 不为 `1`。这是显式启用模式，并非安装后默认运行。
 
-本机服务在 `apps/server/.env.local` 填写 `WECHAT2RSS_ENABLED=1`、`WECHAT2RSS_BASE_URL`、`WECHAT2RSS_TOKEN`，并用 `WECHAT2RSS_FEED_IDS` 逐号放行已有订阅。密钥不进入 Git。私有实例可参照独立的 `docker-compose.wechat2rss.yml`；授权、Docker、本人扫码齐备后才启动。实例图片代理在模板中关闭，使正文使用原始微信图片地址；真实附件仍须单篇核验。定时仍需显式启用，并先通过 SQLite 副本和备份验收。
+每轮动态选取全部当前启用、来源合资格的订阅。首次启用安排下一时点；重启不逐轮补发历史任务。17:30 后不启动新的补跑轮次，已开始的队列可以继续到晚间；**00:00–06:00 不自动提交**。手动与新增订阅任务不受自动时刻表控制。此模式不使用旧 `CRON_EXPRESSION` 或 `SCHEDULED_MP_IDS` 决定时点和范围，详见 [调度源码][schedule-code]。
 
-Wechat2RSS 官方文档说明只抓当时最新 20 篇、只收录群发消息；本地旧文章不会因此删除。订阅前未被上游抓到的历史和非群发内容是独立能力缺口，不以近期订阅通过代替全历史完成。
+这些时点是计划配置，不保证每轮都成功。实际结果取决于来源、账号、缓存、数据库和安全停止状态，应查看批次回执以及正文、媒体状态。
 
-独立部署模板使用 [官方部署指南](https://wechat2rss.xlab.app/deploy/deploy)中的 `ttttmr/wechat2rss` 镜像，固定到 2026-09-29 从 [Docker Hub 标签接口](https://hub.docker.com/v2/repositories/ttttmr/wechat2rss/tags/latest)核对的 digest `sha256:000c3243ebdc5d7edc30cb00e52981b600f02d11f85fefcec27e2226c208082f`。模板仅绑定本机 `127.0.0.1:18080`，使用独立的忽略目录持久化；`RSS_KEEP_OLD_COUNT=-1` 只保留以后已抓到的文章，不补订阅前缺口。用户完成授权与本人登录后，可用 `node --env-file=apps/server/.env.local scripts/acceptance-wechat2rss.cjs --execute MP_WXS_<数字ID>` 做只读字段探测；不加 `--execute` 仅检查配置存在性。
+## 使用与导出
 
-## ✨ 功能
+1. 配置合法可用的来源，进入来源/账号管理完成该来源所需的本人登录，再添加公众号。分享链接用于识别和注册，不保证能取到链接对应的旧文章。
+2. 在公众号页搜索、分组或设置日期范围，再选择刷新或导出。关闭页面不取消后台已受理任务，结果可在任务列表查看。
+3. 「全选已加载」只选择当前已加载文章；「导出当前筛选全部」取得稳定 ID 快照，导出整个本地筛选集合，**不是只导出当前 20 篇列表页**。单次最多 5000 篇，超出时缩小范围；日期按上海时区处理，未知发布日期不计入明确日期筛选。
+4. 本机归档使用 `YYYY-MM-DD_分组/公众号/文章标题.md`，图片在该公众号目录的 `image/`，Markdown 引用相对路径。日期取可信原文发布时间；未知日期使用“日期待核”，无分组使用“未分组”。同名冲突加稳定身份后缀；分组改变不自动移动旧文件。
+5. 再次保存到同目录，先跳过完整文章，只补可安全确认的缺图，保留手写正文和笔记。旧回执缺少可靠映射、文件冲突或损坏时明确失败，不猜测覆盖。补图可能写入同目录的补充图片 Markdown，保留原正文。
 
-### 🎨 极致视觉与交互
+**ZIP 每次生成独立快照**，不对用户解压后的目录执行增量补图或保护编辑；本机目录保存才具有上述同目录增量语义。导出范围是本地已记录集合，不代表平台所有历史。
 
-- **macOS 原生品质体验**：深度参考 macOS 系统设计语言，全站采用 Glassmorphism 玻璃拟态效果，搭配 SF Pro 系统字体，提供极具品质感的视觉反馈。
-- **智能动态交互**：引入骨架屏加载动画与丝滑交互动效，确保从加载到阅读的每一个环节都流畅自然。
-- **自适应系统主题**：完美适配深色模式，色彩配比经过精心调优，缓解长时间阅读的视觉疲劳。
+RSS 示例：`/feeds/all.atom`、`/feeds/MP_WXS_<公众号ID>.json?limit=30`；支持 `title_include`、`title_exclude` 标题筛选。远程访问的认证范围应按实际部署核对，不能只因设置 `AUTH_CODE` 就假设所有 RSS 路径已保护。
 
-### 🔍 智慧搜索与管理
+## 运行与配置
 
-- **集成式文章搜索**：顶部工具栏内置可折叠搜索框，支持键盘快捷键 (ESC) 快速关闭，在大规模订阅源中也能瞬间定位目标内容。
-- **多维文章列表**：采用响应式百分比布局 (50/25/15/10 黄金比例)，彻底解决小屏幕下的文字截断问题，信息呈现错落有致。
-- **侧边栏极简高效**：支持鼠标拖拽自由排序，内置批量管理模式，支持一键清空或导出。
+当前集成源码使用 NestJS / tRPC、React / Vite、Prisma / SQLite。不要使用旧 README 中删除 Prisma 目录、切换旧 MySQL schema 的步骤，也不要用上游 `cooderl/wewe-rss:latest` 镜像代替本 fork 的构建。
 
-### 🚀 跨平台协作增强
+### 新建本机测试实例
 
-- **Obsidian 深度联动**：增强版导出功能，支持批量将文章一键保存至 Obsidian，自动处理图片本地化，补全知识管理闭环。
-- **同步进度可视化**：实时反馈公众号更新状态，批量同步进度与结果一目了然。
-- **阅读体验智能优化**：内置正文 HTML 自动清理与排版引擎，还原最清爽的阅读感受。
-- **历史文件迁移**：显式一次性导入已有 CSV/HTML，保留存量资料；不绑定外部目录，也不代表在线历史采集恢复。
+以下 PowerShell 命令只用于**独立检出和全新小型测试库**。先安装 Node.js 22 或更新的受支持版本、pnpm 10.32.0 和 Python 3（SQLite 备份与缓存读取需要）。密码和目录自行填写。生产升级先备份、用副本演练并构建固定产物，不能把这套初始化流程直接指向旧库。
 
-### 🛡️ 微信读书原生直连架构与文章同步升级
-
-- **彻底告别外部代理（解耦 502 问题）**：移除旧版依赖已离线的外部中转平台（`weread.111965.xyz`），直接对接微信读书官方 Native 扫码网关，实现全本地化无中转直连。
-- **官方 Native 扫码登录**：基于微信读书最新 Web 鉴权规范（`/api/auth/getLoginUid` 与 `/api/auth/getLoginInfo`），支持微信扫码在手机端一键确认登录，无需复杂抓包。
-- **微信文章短链算法精准还原**：解决微信读书内部字符转写问题（自动剥离 `MP_WXS_` 复合前缀并将 `~` 还原为 `_`），修复生成的公众号短链打开显示“参数错误”的问题。
-- **双重全文读取与 Obsidian 导出**：微信直连与微信读书官方 `/web/mp/content` 全文接口双重兜底，在线获取受微信验证和接口状态限制；导入本地 HTML 后优先从本地正文导出。
-- **全格式 RSS 支持**：生成标准微信公众号 RSS (支持 `.atom`, `.rss`, `.json` 格式)，完美适配各类阅读器。
-- **所有订阅源一键导出**：支持导出全量订阅源为 OPML 格式。
-
-### 高级功能
-
-- **标题过滤**：支持通过`/feeds/all.(json|rss|atom)`接口和`/feeds/:feed`对标题进行过滤
-
-  ```
-  {{ORIGIN_URL}}/feeds/all.atom?title_include=张三
-  {{ORIGIN_URL}}/feeds/MP_WXS_123.json?limit=30&title_include=张三|李四|王五&title_exclude=张三丰|赵六
-  ```
-
-  ```
-  {{ORIGIN_URL}}/feeds/MP_WXS_123.rss?update=true
-  ```
-
-## 🛠️ 开发者生产力 (Developer Productivity)
-
-为了提升开发效率与工程化质量，项目引入了以下优化方案：
-
-### 🍱 脚本归档与统一
-
-- **统一脚本目录**：将所有运维、检查与测试脚本从根目录迁移至 `scripts/` 目录，保持根目录整洁。
-- **标准化命令**：在根目录 `package.json` 中统一封装了常用任务：
-  - `pnpm accounts:check`: 快速检查库中账号状态。
-  - `pnpm feed:check`: 验证订阅源可用性。
-  - `pnpm feed:debug`: 开启详细日志调试特定订阅源。
-  - `pnpm lint`: 一键执行全站代码静态检查。
-
-### 🤖 自动化质量门禁
-
-- **持续集成 (CI)**：新增 GitHub Actions 工作流，覆盖所有 Pull Request 的格式化、Lint 与构建检测，确保主干代码稳定性。
-- **提交前置检查**：集成 `husky` 与 `lint-staged`，在 `git commit` 时自动触发 Prettier 格式化，强制维持代码风格一致。
-
-### 💅 极致工程化体验
-
-- **CSS 自动规范**：引入 `prettier-plugin-tailwindcss` 插件，自动对 Tailwind CSS 类名进行排序，极大提升样式代码的可读性。
-- **开发指南**：新增 [DEVELOPMENT.md](./DEVELOPMENT.md) 文档，为新贡献者提供快速上手说明。
-
-## 🚀 部署
-
-### 一键部署
-
-- [Deploy on Zeabur](https://zeabur.com/templates/DI9BBD)
-- [Railway](https://railway.app/)
-- [Hugging Face部署参考](https://github.com/cooderl/wewe-rss/issues/32)
-
-### Docker Compose 部署
-
-参考 [docker-compose.yml](https://github.com/cooderl/wewe-rss/blob/main/docker-compose.yml) 和 [docker-compose.sqlite.yml](https://github.com/cooderl/wewe-rss/blob/main/docker-compose.sqlite.yml)
-
-### Docker 命令启动
-
-#### MySQL (推荐)
-
-1. 创建docker网络
-
-   ```sh
-   docker network create wewe-rss
-   ```
-
-2. 启动 MySQL 数据库
-
-   ```sh
-   docker run -d \
-     --name db \
-     -e MYSQL_ROOT_PASSWORD=123456 \
-     -e TZ='Asia/Shanghai' \
-     -e MYSQL_DATABASE='wewe-rss' \
-     -v db_data:/var/lib/mysql \
-     --network wewe-rss \
-     mysql:8.3.0 --mysql-native-password=ON
-   ```
-
-3. 启动 Server
-   ```sh
-   docker run -d \
-     --name wewe-rss \
-     -p 4000:4000 \
-     -e DATABASE_URL='mysql://root:123456@db:3306/wewe-rss?schema=public&connect_timeout=30&pool_timeout=30&socket_timeout=30' \
-     -e AUTH_CODE=123567 \
-     --network wewe-rss \
-     cooderl/wewe-rss:latest
-   ```
-
-[Nginx配置参考](https://raw.githubusercontent.com/cooderl/wewe-rss/main/assets/nginx.example.conf)
-
-#### SQLite (不推荐)
-
-```sh
-docker run -d \
-  --name wewe-rss \
-  -p 4000:4000 \
-  -e DATABASE_TYPE=sqlite \
-  -e AUTH_CODE=123567 \
-  -v $(pwd)/data:/app/data \
-  cooderl/wewe-rss-sqlite:latest
+```powershell
+git clone https://github.com/Sushi771/wewe-rss-ss.git wewe-rss-ss-test
+Set-Location wewe-rss-ss-test
+git checkout edb0ecb799852a37bd26b7879a7962b10fbd98f3
+$env:DATABASE_TYPE = 'sqlite'
+$env:DATABASE_URL = 'file:../data/wewe-rss-test.db'
+$env:HOST = '127.0.0.1'
+$env:PORT = '4000'
+$env:AUTH_CODE = '<填写自己的长随机访问密码>'
+$env:OBSIDIAN_PATH = '<填写自己的归档目录>'
+$env:DISABLE_SCHEDULED_UPDATES = '1'
+New-Item -ItemType Directory -Force apps/server/data
+pnpm install --frozen-lockfile
+pnpm --filter server exec prisma migrate deploy
+$env:NODE_ENV = 'production'
+pnpm build:server
+pnpm build:web
+pnpm start:server
 ```
 
-### 本地部署
+环境变量保持在同一终端有效，端口需空闲。浏览器访问 `http://127.0.0.1:4000/dash`。来源默认未启用，启动页面不等于已接通采集。后续在私有运行环境配置来源；不提交实际 `.env`、Token 或会话。
 
-使用 `pnpm install && pnpm run -r build && pnpm run start:server` 命令 (可配合 pm2 守护进程)
+| 配置                                                      | 作用                                                                                                |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL` / `DATABASE_TYPE`                          | 当前版本使用 SQLite；`file:../data/...` 相对 Prisma schema 目录解析，示例落在 `apps/server/data/`。 |
+| `HOST` / `PORT`                                           | 默认监听 `0.0.0.0:4000`；本机显式设为 `127.0.0.1`。                                                 |
+| `AUTH_CODE`                                               | 管理接口访问密码，自行设置长随机值。                                                                |
+| `SERVER_ORIGIN_URL`                                       | 对外地址，用于生成 Feed 链接；远程部署使用实际 HTTPS 地址。                                         |
+| `OBSIDIAN_PATH`                                           | 服务所在电脑的归档根目录；显式指定自己的目录，也可通过工具页选择。                                  |
+| `WECHAT2RSS_ENABLED`                                      | `1` 才启用 Wechat2RSS 来源。                                                                        |
+| `WECHAT2RSS_BASE_URL` / `WECHAT2RSS_TOKEN`                | 已授权实例的地址和 Token，仅在后台私有环境配置。                                                    |
+| `WECHAT2RSS_FEED_IDS`                                     | 显式放行已有公众号 ID，逗号分隔；新增订阅另走来源注册与持久队列流程。                               |
+| `WECHAT2RSS_CACHE_DB`                                     | 本机实例缓存库位置；本地缓存同步/恢复需要可信、可访问的库。                                         |
+| `WECHAT2RSS_ACTIVE_SCHEDULE` / `ENABLE_SCHEDULED_UPDATES` | 同时为 `1` 才请求启用主动轮次，还需来源与启动检查通过。                                             |
+| `DISABLE_SCHEDULED_UPDATES`                               | `1` 禁止定时更新；测试库保持关闭。                                                                  |
 
-**详细步骤** (SQLite示例)：
+自建容器模板与私有部署设计见 [技术部署文档][deployment-doc]。模板需按目标版本核对迁移、来源授权和计划开关，不能只运行容器就认为订阅已就绪。Windows 固定产物、启动与回滚机制见 [本机版本化部署][release-doc]；其中旧日期的部署记录属于历史，不是本次部署指令。
 
-```shell
-# 需要提前声明环境变量,因为prisma会根据环境变量生成对应的数据库连接
-export DATABASE_URL="file:../data/wewe-rss.db"
-export DATABASE_TYPE="sqlite"
-# 删除mysql相关文件,避免prisma生成mysql连接
-rm -rf apps/server/prisma
-mv apps/server/prisma-sqlite apps/server/prisma
-# 生成prisma client
-npx prisma generate --schema apps/server/prisma/schema.prisma
-# 生成数据库表
-npx prisma migrate deploy --schema apps/server/prisma/schema.prisma
-# 构建并运行
-pnpm run -r build
-pnpm run start:server
-```
+### 数据、备份与安全
 
-## ⚙️ 环境变量
+- **主库与任务**：SQLite 主库保存订阅、文章和管理信息；数据库同目录还保存调度水位、刷新队列、单篇任务及锁。备份和恢复需同时考虑这些状态，避免只搬库文件后重复提交。
+- **来源数据与归档**：Wechat2RSS 缓存/授权数据与本项目主库分开；Markdown、图片和手写笔记另在自己确认的目录。它们都不应上传公共仓库。
+- **一致性备份**：使用 SQLite backup API 的 [备份脚本][backup-code]，检查完整性及结果，再用副本演练升级或恢复。运行中不要只复制主 `.db` 忽略 WAL 状态。回退程序不能用旧库覆盖新增文章和编辑。
+- **运行空间**：监控主库、来源缓存、写前备份、导出与固定产物占用；保留可用备份和回滚版本后再整理旧产物。新空间保护规则仍在独立候选开发中，不属于本文版本的已交付能力，不能认为膨胀已永久解决。
+- **访问边界**：本机绑定回环地址；远程配置 HTTPS 和受控访问，不直接暴露数据库、来源后台或私有目录。本人登录、合法授权和凭据保管由部署者负责。
 
-| 变量名                   | 说明                                                                    | 默认值                      |
-| ------------------------ | ----------------------------------------------------------------------- | --------------------------- |
-| `DATABASE_URL`           | **必填** 数据库地址，例如 `mysql://root:123456@127.0.0.1:3306/wewe-rss` | -                           |
-| `DATABASE_TYPE`          | 数据库类型，使用 SQLite 时需填写 `sqlite`                               | -                           |
-| `AUTH_CODE`              | 服务端接口请求授权码，空字符或不设置将不启用 (`/feeds`路径不需要)       | -                           |
-| `SERVER_ORIGIN_URL`      | 服务端访问地址，用于生成RSS完整路径                                     | -                           |
-| `MAX_REQUEST_PER_MINUTE` | 每分钟最大请求次数                                                      | 60                          |
-| `FEED_MODE`              | 输出模式，可选值 `fulltext` (会使接口响应变慢，占用更多内存)            | -                           |
-| `CRON_EXPRESSION`        | 定时更新订阅源Cron表达式                                                | `35 5,17 * * *`             |
-| `UPDATE_DELAY_TIME`      | 连续更新延迟时间，减少被关小黑屋                                        | `60s`                       |
-| `ENABLE_CLEAN_HTML`      | 是否开启正文html清理                                                    | `false`                     |
-| `PLATFORM_URL`           | 基础服务URL                                                             | `https://weread.111965.xyz` |
+## 已知边界与开发状态
 
-> **注意**: 国内DNS解析问题可使用 `https://weread.965111.xyz` 加速访问
+- 列表发现、正文缓存和图片归档分别受来源能力影响。单篇导出可能显示“正文未缓存”或“最近重试失败”；可读列表、成功定时任务或已有正文都不能证明所有媒体已齐。
+- 无法保证订阅前全部历史、所有非群发内容或永不漏文。单篇下载也不保证任意短链接、旧文章均有可靠缓存和身份映射。
+- 原图片地址失效、来源缺失或映射不可确认时可能无法补齐；部分可保存内容会明确标记媒体不完整，应保留失败信息和旧笔记。
+- **小红书**已有管理与离线缓存界面骨架，真实来源接入未完成。独立 `redbook` 候选尚未集成、上线或完成真实签名、字段和图片完整性验证，不是当前可用订阅来源。
+- **Rnote**仍为评估备选，多账号登录链路未通，不是已接通来源。实验适配器存在不代表可用于当前生产流程。
 
-## 🔔 钉钉通知
+## 相关文档
 
-进入 wewe-rss-dingtalk 目录按照 README.md 指引部署
+链接固定在本文对应的集成提交，可区分当前实现与各文档中的历史记录：
 
-## 📱 使用方式
+- [增量归档、筛选范围和 ZIP 合同][export-doc]
+- [单篇下载与缓存来源边界][download-doc]
+- [主动更新调度][schedule-doc] / [自动缓存同步与恢复][recovery-doc]
+- [技术部署与来源配置][deployment-doc]
+- [产品需求与规划][product-doc]（规划项不等于已交付）
+- [开发指南][development-doc] / [统一离线目录][layout-doc]
 
-1. 进入账号管理，点击添加账号，微信扫码登录微信读书账号。
+## 许可证与致谢
 
-   **注意不要勾选24小时后自动退出**
+沿用 [MIT License](LICENSE)，原作者 **@cooderl**，原项目 [cooderl/wewe-rss](https://github.com/cooderl/wewe-rss)。本仓库是继续开发的 fork，与上游版本、镜像及第三方来源分别维护；来源服务的授权、条款和可用性仍由其提供方决定。
 
-   <img width="400" src="./assets/preview2.png"/>
-
-2. 进入公众号源，点击添加，通过提交微信公众号分享链接，订阅微信公众号。
-   **添加频率过高容易被封控，等24小时解封**
-
-   <img width="400" src="./assets/preview3.png"/>
-
-## 🔑 账号状态说明
-
-| 状态       | 说明                                                                |
-| ---------- | ------------------------------------------------------------------- |
-| 今日小黑屋 | 账号被封控，等一天恢复。账号正常时可通过重启服务/容器清除小黑屋记录 |
-| 禁用       | 不使用该账号                                                        |
-| 失效       | 账号登录状态失效，需要重新登录                                      |
-
-## 💻 本地开发
-
-1. 安装 nodejs 20 和 pnpm
-2. 修改环境变量：
-   ```
-   cp ./apps/web/.env.local.example ./apps/web/.env
-   cp ./apps/server/.env.local.example ./apps/server/.env
-   ```
-3. 执行 `pnpm install && pnpm run build:web && pnpm dev`
-
-   ⚠️ **注意：此命令仅用于本地开发，不要用于部署！**
-
-4. 前端访问 `http://localhost:5173`，后端访问 `http://localhost:4000`
-
-## ⚠️ 风险声明
-
-原作者的 `weread.111965.xyz` 已经停止维护，需要的话可以登录wechat2rss进行购买部署。
-
-## 如果你觉得对你有帮助可以给我来杯可乐~https://wise.com/pay/me/jinn175
-
-## 📄 License
-
-[MIT](https://raw.githubusercontent.com/cooderl/wewe-rss/main/LICENSE) @cooderl
+[provider]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/collection/provider-registry.ts
+[subscription]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/trpc/trpc.service.ts
+[batches]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/collection/wechat2rss-subscription-batches.ts
+[cache]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/collection/insert-only-cache.ts
+[local-save]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/article-local-save.ts
+[schedule-code]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/feeds/active-refresh-schedule.ts
+[backup-code]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/scripts/backup-sqlite.py
+[export-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/INCREMENTAL_ARTICLE_EXPORT.md
+[download-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/ARTICLE_DOWNLOAD_TOOL.md
+[schedule-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/ACTIVE_REFRESH_SCHEDULE.md
+[recovery-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/AUTO_REFRESH_RECOVERY_20261012.md
+[deployment-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/paid-sources/TECHNICAL_DEPLOYMENT.md
+[release-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/LOCAL_RELEASE_REHEARSAL.md
+[product-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/paid-sources/PRODUCT_REQUIREMENTS.md
+[development-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/DEVELOPMENT.md
+[layout-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/OFFLINE_ARTICLE_LAYOUT.md
