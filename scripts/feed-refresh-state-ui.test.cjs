@@ -159,6 +159,7 @@ function fixture({
     exports: module.exports,
     Error,
     console,
+    URLSearchParams,
     setTimeout: (fn) => {
       const key = Symbol();
       timers.set(key, fn);
