@@ -1,4 +1,8 @@
-import { RedbookSource, RedbookReader } from './redbook-source';
+import {
+  RedbookSource,
+  RedbookReader,
+  REDBOOK_QUEUE_SCOPE,
+} from './redbook-source';
 import { FileRedbookStateStore, freshRedbookState } from './redbook-scan-state';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -231,6 +235,9 @@ describe('redbook durable bounded synthetic scans (no platform transport)', () =
     await store.exclusive('author', async (_old, save) =>
       save(freshRedbookState('author')),
     );
+    await store.exclusive(REDBOOK_QUEUE_SCOPE, async (_old, save) =>
+      save(freshRedbookState(REDBOOK_QUEUE_SCOPE)),
+    );
     const final = setup({
       list: async () => ({ nextCursor: null, notes: [] }),
       detail: jest.fn(),
@@ -266,6 +273,27 @@ describe('redbook durable bounded synthetic scans (no platform transport)', () =
     await expect(
       setup(reader).resumeOperatorCheckpoint(creator),
     ).rejects.toThrow('REDBOOK_RESUME_BLOCKED');
+  });
+  it('an upstream stop blocks other creators across restart and cannot be weakened by operator pause', async () => {
+    const list = jest.fn(async () => {
+      throw new Error('upstream refused');
+    });
+    const first = setup({ list, detail: jest.fn() });
+    expect((await first.scan(creator, commit)).status).toBe('paused');
+    const other = {
+      ...creator,
+      id: 'other-local',
+      externalAuthorId: 'other-author',
+    };
+    const noDispatch = jest.fn();
+    const restarted = setup({ list: noDispatch, detail: jest.fn() });
+    expect((await restarted.scan(other, commit)).status).toBe('paused');
+    await restarted.pause(other);
+    await expect(restarted.resumeOperatorCheckpoint(other)).rejects.toThrow(
+      'REDBOOK_RESUME_BLOCKED',
+    );
+    expect(noDispatch).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledTimes(1);
   });
   it('rejects corrupted persisted state rather than silently starting a new scan', async () => {
     await store.exclusive('author', async (_old, save) =>

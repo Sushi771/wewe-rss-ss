@@ -249,6 +249,7 @@ export default function Xiaohongshu() {
       const result = await refreshCreatorBatch(
         enabled.map((creator) => creator.id),
         updateCreator,
+        () => scanStopped.current,
       );
       const detail = result.failedId
         ? result.error || receipts.current[result.failedId] || '更新未完成。'
@@ -257,6 +258,17 @@ export default function Xiaohongshu() {
         `批量更新：完成 ${result.completed} 位，未完成 ${result.failedId ? 1 : 0} 位，未执行 ${result.remaining} 位；已停用跳过 ${items.length - enabled.length} 位。${detail}`,
       );
     });
+  const handlePause = async () => {
+    scanStopped.current = true;
+    const id = scanId.current;
+    if (!id) return;
+    try {
+      const result = await pauseScan.mutateAsync({ id });
+      setMessage(result.message);
+    } catch {
+      setMessage('暂停请求未确认，请核对扫描状态。');
+    }
+  };
   const handleDownload = () =>
     run(async () => {
       if (!current || !selectedNotes.length) return;
@@ -596,15 +608,7 @@ export default function Xiaohongshu() {
                 size="sm"
                 variant="flat"
                 onPress={() => {
-                  scanStopped.current = true;
-                  const id = scanId.current;
-                  if (id)
-                    void pauseScan
-                      .mutateAsync({ id })
-                      .then((result) => setMessage(result.message))
-                      .catch(() =>
-                        setMessage('暂停请求未确认，请核对扫描状态。'),
-                      );
+                  void handlePause();
                 }}
               >
                 暂停扫描
