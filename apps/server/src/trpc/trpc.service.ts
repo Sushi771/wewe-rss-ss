@@ -482,6 +482,8 @@ export class TrpcService {
       };
     this.activeSubscriptionAdds.add('wechat2rss:add');
     this.activeCollections.add(feedId);
+    let submissionStarted = false;
+    let preparationStage = '账号状态读取';
     try {
       const provider = wechat2RssProvider();
       const account = await provider.checkAccountStatus();
@@ -492,8 +494,10 @@ export class TrpcService {
           message: '上游账号受限或需要官方验证，本次未提交；队列已暂停。',
         };
       const now = Math.floor(Date.now() / 1000);
+      preparationStage = '一致性备份';
       await createVerifiedSqliteBackup();
       // Keep the original 15-minute per-feed reservation, including unknown results.
+      preparationStage = '本地提交预留';
       const reserved = await this.prismaService.feed.updateMany({
         where: {
           id: feedId,
@@ -510,6 +514,7 @@ export class TrpcService {
           message: '本号更新仍在冷却期或状态已变化，本次未提交；不会自动重发。',
         };
       try {
+        submissionStarted = true;
         await provider.refreshSubscription(feedId, automatic);
       } catch (error) {
         if (
@@ -543,10 +548,44 @@ export class TrpcService {
         feedId,
         message: '上游已受理更新，等待缓存生成；关闭页面后后台继续。',
       };
+    } catch (error) {
+      if (submissionStarted) throw error;
+      const timedOut =
+        error instanceof Error &&
+        error.message === 'SQLite 一致性备份超时，本次未写入';
+      return {
+        state: 'failed',
+        accepted: false,
+        submissionUnknown: false,
+        stopBatch: false,
+        retryable: true,
+        message: `${preparationStage}${timedOut ? '超时' : '失败'}；未发送上游更新，后台限次退避重试。`,
+      };
     } finally {
       this.activeSubscriptionAdds.delete('wechat2rss:add');
       this.activeCollections.delete(feedId);
     }
+  }
+  private async reconcileUnreservedRefresh(
+    feedId: string,
+    batchCreatedAt: number,
+  ) {
+    const feed = await this.prismaService.feed.findUnique({
+      where: { id: feedId },
+    });
+    // Every /add is preceded by this committed reservation. Missing or recreated
+    // feeds and newer reservations cannot prove that a request was never sent.
+    if (
+      !feed ||
+      resolveCollectionRoute(feed).channel !== 'wechat2rss' ||
+      !feed.createdAt ||
+      feed.createdAt.getTime() > batchCreatedAt ||
+      !Number.isSafeInteger(feed.providerRefreshAttemptTime)
+    )
+      return 'unknown' as const;
+    return feed.providerRefreshAttemptTime < Math.floor(batchCreatedAt / 1000)
+      ? ('not-submitted' as const)
+      : ('unknown' as const);
   }
   registerSubscriptionConsumer(consumer: {
     hasPending(): Promise<boolean>;
@@ -679,6 +718,9 @@ export class TrpcService {
     );
     this.subscriptionBatches.attachRefresh((id, stage, automatic, options) =>
       this.runManualRefresh(id, stage, automatic, options),
+    );
+    this.subscriptionBatches.attachReconciliation((id, createdAt) =>
+      this.reconcileUnreservedRefresh(id, createdAt),
     );
     const { url } =
       this.configService.get<ConfigurationType['platform']>('platform')!;

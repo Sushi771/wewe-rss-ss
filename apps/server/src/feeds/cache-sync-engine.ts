@@ -43,6 +43,8 @@ export type CacheSyncDependencies = {
   list(): Promise<Wechat2RssListedFeed[]>;
   localFeeds(): Promise<LocalFeed[]>;
   read(feed: Wechat2RssListedFeed, name: string): Promise<ProviderPage>;
+  /** Body text must not depend on the separate CDN media lane being enabled. */
+  syncText?(id: string, page: ProviderPage): Promise<unknown>;
   sync(
     id: string,
     page: ProviderPage,
@@ -194,14 +196,17 @@ export class CacheSyncEngine {
           // Never mark check_time consumed after a single unchanged/empty read.
           if (fingerprint !== slot.fingerprint) {
             await this.deps.sync(id, page, true);
+            await this.deps.syncText?.(id, page);
             slot.fingerprint = fingerprint;
             this.media.set(id, { page, due: now });
           } else if (!this.media.has(id)) {
             // Reconcile local SQLite gaps without downloading healthy media or
             // rewriting a successful list. Unknown readiness stays pending.
             const local = await this.deps.inspectLocalMedia?.(id, page);
-            if (local?.mediaReady !== true)
+            if (local?.mediaReady !== true) {
+              await this.deps.syncText?.(id, page);
               this.media.set(id, { page, due: now });
+            }
           }
           slot.failures = 0;
           const delays =

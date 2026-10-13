@@ -302,6 +302,7 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
       expect(await caller().article.retryBody(id)).toMatchObject({
         status: 'failed',
         code: 'request_failed',
+        requestFailure: { reason: 'http_status', httpStatus: status },
       });
       expect((await read()).contentHtml).toBeNull();
       expect(axios.get).toHaveBeenCalledTimes(1);
@@ -321,6 +322,22 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     expect(await caller().article.retryBody(id)).toMatchObject({
       status: 'available',
     });
+  });
+  it('retains only a safe timeout reason and preserves the missing-body edit watermark', async () => {
+    const before = await read();
+    (axios.get as jest.Mock).mockRejectedValueOnce({
+      code: 'ETIMEDOUT',
+      message: 'secret signed URL',
+      config: { headers: { Cookie: 'SECRET' } },
+    });
+    expect(await caller().article.retryBody(id)).toMatchObject({
+      status: 'failed',
+      requestFailure: { reason: 'timeout' },
+    });
+    const after = await read();
+    expect(after.updatedAt).toEqual(before.updatedAt);
+    expect(after.contentHtml).toBeNull();
+    expect(after.lastBodyRetry).not.toMatch(/SECRET|signed|Cookie/);
   });
 
   it('未绑定旧短链明确拒绝，不备份、不请求、不写状态', async () => {

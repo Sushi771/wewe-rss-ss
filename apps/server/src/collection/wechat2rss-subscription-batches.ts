@@ -35,7 +35,9 @@ export type BatchOutcome = {
   phase?: 'identity' | 'cache' | 'metadata';
   accepted?: boolean;
   submissionUnknown?: boolean;
-  /** Unclassified failures stop the round; only explicit local failures isolate. */
+  /** Safe preparation failure: no upstream submission was attempted. */
+  retryable?: boolean;
+  /** Known shared account restrictions may stop the round; unknown submits isolate. */
   stopBatch?: boolean;
 };
 type Item = Omit<BatchOutcome, 'state'> & {
@@ -44,6 +46,9 @@ type Item = Omit<BatchOutcome, 'state'> & {
   state: ItemState;
   refreshChecks?: number;
   refreshAfter?: number;
+  preparationRetries?: number;
+  retryAfter?: number;
+  nextReceiptCheck?: number;
 };
 type Batch = {
   version: 1;
@@ -69,6 +74,15 @@ const hash = (value: string) =>
 const isRefresh = (b: Batch) =>
   ['manual-refresh', 'scheduled-refresh'].includes(b.purpose || '');
 const live = (b: Batch) => ['queued', 'running', 'paused'].includes(b.state);
+const isolatedRefresh = (b: Batch) =>
+  isRefresh(b) &&
+  b.items.some((item) => item.submissionUnknown) &&
+  !b.items.some(
+    (item) =>
+      !item.submissionUnknown &&
+      ['blocked', 'failed'].includes(item.state) &&
+      item.stopBatch !== false,
+  );
 const view = (b: Batch) => ({
   batchId: b.batchId,
   purpose: b.purpose || 'subscription',
@@ -124,6 +138,15 @@ export class Wechat2RssSubscriptionBatches {
     automatic?: boolean,
     options?: { cacheOnly: boolean },
   ) => Promise<BatchOutcome>;
+  private reconcile?: (
+    feedId: string,
+    createdAt: number,
+  ) => Promise<'not-submitted' | 'unknown'>;
+  attachReconciliation(
+    check: NonNullable<Wechat2RssSubscriptionBatches['reconcile']>,
+  ) {
+    this.reconcile = check;
+  }
 
   /** Manual refresh shares the existing serial scheduler and durable records. */
   attachRefresh(
@@ -254,6 +277,16 @@ export class Wechat2RssSubscriptionBatches {
             typeof item.submissionUnknown !== 'boolean') ||
           (item.stopBatch !== undefined &&
             typeof item.stopBatch !== 'boolean') ||
+          (item.retryable !== undefined &&
+            typeof item.retryable !== 'boolean') ||
+          (item.preparationRetries !== undefined &&
+            (!Number.isSafeInteger(item.preparationRetries) ||
+              item.preparationRetries < 0 ||
+              item.preparationRetries > 3)) ||
+          (item.retryAfter !== undefined &&
+            !Number.isSafeInteger(item.retryAfter)) ||
+          (item.nextReceiptCheck !== undefined &&
+            !Number.isSafeInteger(item.nextReceiptCheck)) ||
           (item.articleUrl !== undefined &&
             subscriptionArticleUrl(item.articleUrl) !== item.articleUrl) ||
           (isRefresh(b) && (!item.feedId || item.articleUrl || item.taskId)) ||
@@ -667,6 +700,8 @@ export class Wechat2RssSubscriptionBatches {
       (await this.records()).some(
         (b) =>
           ['queued', 'running'].includes(b.state) ||
+          (b.state === 'paused' && isolatedRefresh(b)) ||
+          (isRefresh(b) && b.items.some((item) => item.submissionUnknown)) ||
           (isRefresh(b) &&
             b.state === 'stopped' &&
             b.items.some((item) =>
@@ -701,6 +736,52 @@ export class Wechat2RssSubscriptionBatches {
       );
       if (!cacheOnlyRun) await this.consumer?.runDue();
       if (this.stopped) return;
+      // Read-only reconciliation can prove preparation failed before the one-shot
+      // reservation. An unknown receipt alone never authorizes another /add.
+      if (this.reconcile)
+        for (const record of await this.records()) {
+          if (!isRefresh(record) || record.instance !== hash(this.instance()))
+            continue;
+          for (const item of record.items) {
+            if (
+              !item.submissionUnknown ||
+              (item.nextReceiptCheck || 0) > this.now()
+            )
+              continue;
+            item.nextReceiptCheck = this.now() + 60000;
+            let proof: 'not-submitted' | 'unknown' = 'unknown';
+            try {
+              proof = await this.reconcile(item.feedId!, record.createdAt);
+            } catch {
+              /* remain unknown */
+            }
+            if (proof === 'not-submitted') {
+              item.submissionUnknown = false;
+              item.stopBatch = false;
+              const expired =
+                record.purpose === 'scheduled-refresh' &&
+                Math.floor((this.now() + 8 * 3600000) / 86400000) >
+                  Math.floor((record.createdAt + 8 * 3600000) / 86400000);
+              item.state =
+                record.state === 'stopped' || expired ? 'cancelled' : 'queued';
+              item.message = '本地预留账本确认未提交；独立队列自动继续。';
+              if (item.state === 'queued') record.state = 'running';
+            }
+            await this.write(record);
+          }
+        }
+      // Older versions paused the whole refresh after one uncertain receipt.
+      // Keep that item blocked forever, but automatically release independent work.
+      for (const record of await this.records()) {
+        if (record.state !== 'paused' || !isolatedRefresh(record)) continue;
+        if (record.instance !== hash(this.instance())) continue;
+        record.state = record.items.some((item) =>
+          ['queued', 'waiting', 'submitting'].includes(item.state),
+        )
+          ? 'running'
+          : 'completed';
+        await this.write(record);
+      }
       const b = (await this.records()).find(
         (b) =>
           ['queued', 'running'].includes(b.state) ||
@@ -803,6 +884,9 @@ export class Wechat2RssSubscriptionBatches {
         ((await this.records()).some(
           (b) =>
             ['queued', 'running'].includes(b.state) ||
+            (this.reconcile &&
+              isRefresh(b) &&
+              b.items.some((item) => item.submissionUnknown)) ||
             (isRefresh(b) &&
               b.state === 'stopped' &&
               b.items.some((item) =>
@@ -820,11 +904,14 @@ export class Wechat2RssSubscriptionBatches {
       unknown.state = 'blocked';
       unknown.accepted = false;
       unknown.submissionUnknown = true;
-      unknown.message =
-        '上游提交回执未确认，已暂停；不会自动重发，请核对原请求。';
-      if (b.state !== 'stopped') b.state = 'paused';
+      unknown.message = '本号提交回执未确认；其他订阅继续，本号不会自动重发。';
+      if (b.state !== 'stopped')
+        b.state = b.items.some((item) =>
+          ['queued', 'waiting'].includes(item.state),
+        )
+          ? 'running'
+          : 'completed';
       await this.write(b);
-      return;
     }
     // Carrying the 17:30 tail through midnight would submit new requests in
     // the user's blackout. Expire only unsent automatic items at midnight;
@@ -855,7 +942,10 @@ export class Wechat2RssSubscriptionBatches {
     const item =
       b.items.find(
         (i) =>
-          maySubmit && i.state === 'queued' && b.nextSubmissionAt <= this.now(),
+          maySubmit &&
+          i.state === 'queued' &&
+          b.nextSubmissionAt <= this.now() &&
+          (i.retryAfter || 0) <= this.now(),
       ) ||
       b.items.find(
         (i) => i.state === 'waiting' && (i.refreshAfter || 0) <= this.now(),
@@ -892,7 +982,7 @@ export class Wechat2RssSubscriptionBatches {
         submissionUnknown: stage === 'submit',
         message:
           stage === 'submit'
-            ? '上游更新回执未确认，已暂停；不会自动重发。'
+            ? '本号更新回执未确认；其他订阅继续，本号不会自动重发。'
             : local
               ? '本地缓存处理失败；其他订阅继续，本次请求不会重发。'
               : '缓存检查失败，已暂停；上游请求不会重发。',
@@ -903,10 +993,24 @@ export class Wechat2RssSubscriptionBatches {
     if (!current) return;
     const target = current.items[item.index];
     Object.assign(target, result);
+    if (
+      stage === 'submit' &&
+      result.retryable &&
+      !target.accepted &&
+      !target.submissionUnknown
+    ) {
+      target.preparationRetries = Math.min(
+        3,
+        (target.preparationRetries || 0) + 1,
+      );
+      target.stopBatch = false;
+      target.state = target.preparationRetries < 3 ? 'queued' : 'failed';
+      target.retryAfter = this.now() + 30000 * 2 ** target.preparationRetries;
+    }
     if (stage === 'submit' && target.state === 'waiting' && !target.accepted) {
       target.state = 'blocked';
       target.submissionUnknown = true;
-      target.message = '提交回执未确认，已暂停；不会自动重发。';
+      target.message = '本号提交回执未确认；其他订阅继续，本号不会自动重发。';
     }
     target.refreshChecks =
       stage === 'cache' ? (target.refreshChecks || 0) + 1 : 0;
@@ -919,12 +1023,12 @@ export class Wechat2RssSubscriptionBatches {
     }
     if (current.state !== 'stopped')
       current.state =
-        target.submissionUnknown ||
-        (['blocked', 'failed'].includes(target.state) &&
-          !(
-            target.stopBatch === false &&
-            (stage === 'cache' || target.accepted)
-          ))
+        !target.submissionUnknown &&
+        ['blocked', 'failed'].includes(target.state) &&
+        !(
+          target.stopBatch === false &&
+          (stage === 'cache' || target.accepted || target.retryable)
+        )
           ? 'paused'
           : current.items.some((i) =>
                 (current.cacheOnly

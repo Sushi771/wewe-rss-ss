@@ -189,6 +189,39 @@ describe('explicit manual all-refresh boundary (offline)', () => {
     expect(service.activeCollections.size).toBe(0);
     expect(service.activeSubscriptionAdds.size).toBe(0);
   });
+  it('a backup failure is definitely pre-submission and safe for bounded automatic retry', async () => {
+    (createVerifiedSqliteBackup as jest.Mock).mockRejectedValueOnce(
+      new Error('private backup error'),
+    );
+    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+      state: 'failed',
+      accepted: false,
+      submissionUnknown: false,
+      retryable: true,
+      stopBatch: false,
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+    expect(service.prismaService.feed.updateMany).not.toHaveBeenCalled();
+    expect(service.activeCollections.size).toBe(0);
+  });
+  it('only a pre-existing feed with an older reservation proves no submission; same-second reservations remain unknown', async () => {
+    const created = Date.parse('2026-10-13T14:00:00.139+08:00');
+    feed.createdAt = new Date(created - 86400000);
+    feed.providerRefreshAttemptTime = Math.floor(created / 1000) - 1;
+    expect(await service.reconcileUnreservedRefresh(id, created)).toBe(
+      'not-submitted',
+    );
+    feed.providerRefreshAttemptTime++;
+    expect(await service.reconcileUnreservedRefresh(id, created)).toBe(
+      'unknown',
+    );
+    feed.providerRefreshAttemptTime = 0;
+    feed.createdAt = new Date(created + 1);
+    expect(await service.reconcileUnreservedRefresh(id, created)).toBe(
+      'unknown',
+    );
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
   it('accepted continuation only reads cache and never calls refreshSubscription', async () => {
     expect(await service.runManualRefresh(id, 'cache')).toMatchObject({
       state: 'succeeded',
