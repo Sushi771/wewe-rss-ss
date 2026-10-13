@@ -19,6 +19,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test bounded SQLite recovery generation on synthetic databases
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: |
+          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs
+          python -m unittest discover -s apps/server/scripts -p 'test_backup_space.py'
+          python -m unittest discover -s apps/server/scripts -p 'test_sqlite_snapshot_guard.py'
+          python -m unittest discover -s scripts/local-release -p 'test_prepare_start.py'
       - name: Test native loopback listener ownership and guarded stop
         run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
       - name: Test desktop feedback and Windows state-file contention offline

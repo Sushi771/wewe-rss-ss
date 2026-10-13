@@ -24,7 +24,7 @@ python apps/server/scripts/backup-space-status.py --database C:/path/to/project/
 
 ## 生产默认预算与当前实测
 
-原始候选的 32 份/64 GiB 不能直接用于此实例：2026-10-13 只读统计发现约 **161 个 SQLite、70,810,457,284 字节**（约 65.95 GiB），源库约 **714,854,400 字节**。该根实际在 E 盘，预检时 E 盘空闲约 617 GB；统计包含明确白名单内的旧 C 盘历史点，不能当作 E 盘都已新生成。
+原始候选的 32 份/64 GiB 不能直接用于此实例：2026-10-13 收口时重新只读统计发现 **163 个 SQLite、72,240,167,073 字节**（约 67.28 GiB），源库约 **714,854,400 字节**。该根实际在 E 盘，收口预检时 E 盘空闲约 620 GB；统计包含明确白名单内的旧 C 盘历史点，不能当作 E 盘都已新生成。
 
 修正后的有限生产默认值：**48 个 SQLite、32 GiB 总文件、生成后至少 4 GiB 空闲**。测试默认仍为 **12 个 SQLite、512 MiB、至少 256 MiB 空闲**。任何一项先到阈值就拒绝生成；配置必须为有限正整数。Node 入口、Python 备份和只读工具采用同样默认，legacy 历史点全部计入。
 
@@ -47,3 +47,20 @@ python apps/server/scripts/backup-space-status.py --database C:/path/to/project/
 文件 `dev/ino/size/mtime/ctime` 相同绝不授权跳过备份。Python 和 Node 每次复用都在独立 SQLite 一致读事务中比较全部 schema 对象和各表的完整 typed rows，再核验旧恢复点 SHA-256、完整性与源归属。SQLite 读视图包含已提交 WAL 内容，避免 Windows 持久写句柄时间戳延迟导致错复用。内容变化即使元数据被冻结也必须新建并校验恢复点；冻结元数据的 DB/WAL 回归覆盖这一点。
 
 周期守卫建立新可信代际仍要求新恢复点，原有 lease、字段保全、schema 验证和写入保护没有为省空间放宽。新恢复点源变化检查还会比较独立当前读视图，不能仅依赖 Windows 文件时间戳。
+
+## 2026-10-13 收口验收（未激活）
+
+运行源码固定在 `0174724cd41964b7e36391806b4dff468a129953`，构建一个紧凑包 `2026-10-13T07-58-48-227Z-5cd809add1f5`，含 88 个清单文件，总量约 121 MB（含固定 Node 与 Prisma 引擎）。未复制生产数据库、未重启生产、未移动/删除历史恢复点；旧 worktree 修正完整保留。后续提交只同步验收文档和 Windows CI，运行源码未变化，产物哈希清单未手工改写。
+
+- 包内受控合成冷启动通过，Dashboard 和 20 条缓存 RSS 就绪；隔离进程已停止。
+- 包内合成重启注入 `INJECTED_NEW_START_FAILURE`，应用回退通过，未覆盖数据库；隔离旧/新/回退进程已停止。
+- 实际构建包中的 Node 与 Python 入口均验证未变化复用、变化后超限拒绝、旧恢复点 SHA 不变；后台启动审计在超限后返回容量失败提示。真实 HTTP 核验缓存 Dashboard/RSS 200，更新参数及写方法 503，不发布成功 baseline。
+- 合成测试共用 512 MiB/12 库预算根；每次成功或失败仅清理该运行新建的合成 SQLite，保留小摘要/日志。无需再复制工作区或生产库。
+- Node 受影响核心及真实依赖闭包 51 项通过；Python 备份预算 11、周期保护 19、启动准备 6 项通过；改动文件格式检查与服务端/Web 类型构建通过。新增默认/预警一致性回归直接核对 32 GiB/48/余4 GiB 和 50%/不足24小时。
+- 全量 Jest：115 个 suite / 1705 项通过，1 个测试在 `trpc/subscription-source-selection.spec.ts:1158` 超过默认 5 秒；单独重跑仍超时，未声称全绿。该批量订阅测试及 Windows 状态文件发布代码本次未修改，未证明其基线是否通过。
+- 扩大本地发布测试初跑 145/148：新增只读默认数值问题已修正并单跑预算10项通过；缺失本地数据库 fixture 用新建小合成库单跑 release 7项通过并清理；剩余 `desktop-progress.test.cjs` 的 Windows overlapping-read `EPERM rename` 单独重跑仍失败。此失败保留为交付限制，不扩大桌面功能修复。
+- 附加旧 schema 迁移演练明确失败：紧凑包不含 `server/node_modules/prisma/build/index.js`。**本包仅通过当前 schema 启动/重启，不作为旧 schema 迁移包交付。**若确需迁移，另行选择有界构建预算下含 CLI 的正常包，并完成迁移、字段保全、导出和恢复验收；不能为此克隆大工作区或复制生产库。
+
+生产容量只读预检采用有限默认，结果 `nextBackupAllowed=false`、预警 true、可新增恢复点0。现有163库全部计入（包括明确只读legacy）；任何历史清单均不授权删除。激活前必须明确恢复窗口与具体可逆归档/回收清单、有限目标存储和负责人，验证可恢复性，使统一预检通过且留足必要生成余量。32 GiB不能同时保障持续变化下全天15分钟全量点且无需维护；不降低必要备份保障，不开启自动永久删除。
+
+本机证据保存在忽略的 `output/space-guard/closure-*.log`、`closure-production-readonly.json` 和 `synthetic-acceptance/run-*/space-summary.json`。其中含本机路径，不上传原始文件或生产数据。GitHub仅同步源码、测试、CI及此脱敏交接；候选保持 draft，不合并、不激活。

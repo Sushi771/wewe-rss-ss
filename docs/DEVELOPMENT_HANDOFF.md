@@ -478,3 +478,5 @@ resolver 审核已完成：公开 mobile `/mp/getreviewid` 的认证和 synckey 
 从 edb0ecb 在独立 E 盘轻量 worktree 实现生成端防护：默认合成演练、真实副本 opt-in、聚合测试预算、稳定生产备份根、已验证未变化内容去重及超限拒绝。生产恢复点不自动删除。未部署、未重启生产；历史清理由另一个明确白名单流程负责。集成与预算配置见 [SPACE_GUARD.md](SPACE_GUARD.md)。旧 release 必须重建才能包含新脚本；直接复制文件会破坏其哈希清单。
 
 空间防护独立审查修正：统一采集/周期/启动根及聚合锁，改为 SQLite 全库一致快照证明复用，补齐实际生产历史容量和只读迁移白名单。生产默认统一为 48 份/32 GiB/余 4 GiB，预警为 50% 或连续变化预测不足24小时，需人工归档与恢复窗口决策；配置迁移与交付限制见 [SPACE_GUARD_INTEGRATION.md](SPACE_GUARD_INTEGRATION.md)。未修改生产用户脏文件，未合入 redbook 候选，未重启生产。
+
+空间防护收口（2026-10-13）：有限默认已落实为32 GiB/48库/余4 GiB，50%或连续变化预测不足24小时预警。小合成库的真实紧凑包启动、注入失败回退、包内Node/Python预算拒绝及HTTP读可用/写503通过；重新只读统计生产163库、72.24 GB，超限，未激活。Node核心51、Python11+19+6通过；全量Jest1705通过/1超时，Windows状态文件竞争重跑失败，紧凑包缺迁移CLI不可当旧schema迁移包。精确证据和激活条件见 [SPACE_GUARD_INTEGRATION.md](SPACE_GUARD_INTEGRATION.md)。没有重启生产、永久删除/迁移历史、合入redbook或改主目录用户脏文件。
