@@ -1,4 +1,4 @@
-import { FC, useEffect, useMemo, useState } from 'react';
+import { FC, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
   Button,
   Spinner,
@@ -9,14 +9,27 @@ import {
   ModalBody,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
+import { ArticleSort } from '@web/utils/feed-browse-state';
+import { useArticleListPosition } from '@web/utils/use-article-list-position';
+import { getLoadedSelection } from '@web/utils/feed-selection';
 import dayjs from 'dayjs';
+import ArticleReader from '@web/components/ArticleReader';
 import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
+import { ArticleFilter, formatShanghaiPublicationTime } from '@wewe-rss/shared';
 
 interface ArticleListProps {
   search: string;
+  articleFilter?: ArticleFilter;
+  filterInvalid?: boolean;
+  sort: ArticleSort;
+  onSortChange: (sort: ArticleSort) => void;
+  direction: 'asc' | 'desc';
+  onDirectionChange: (direction: 'asc' | 'desc') => void;
   selectedIds: Set<string>;
   onSelectionChange: (selectedIds: Set<string>) => void;
+  isSelectionDisabled?: boolean;
+  collectionChannels?: Record<string, string>;
 }
 
 function metricDisplay(raw: string | null, key: 'read' | 'like' | 'favorite') {
@@ -30,13 +43,23 @@ function metricDisplay(raw: string | null, key: 'read' | 'like' | 'favorite') {
 
 const ArticleList: FC<ArticleListProps> = ({
   search,
+  articleFilter = {},
+  filterInvalid = false,
+  sort,
+  onSortChange: setSort,
+  direction,
+  onDirectionChange,
   selectedIds,
   onSelectionChange,
+  isSelectionDisabled = false,
+  collectionChannels = {},
 }) => {
   const { id } = useParams();
 
   const mpId = id || '';
   const [readingId, setReadingId] = useState<string | null>(null);
+  const [readerFindOpen, setReaderFindOpen] = useState(false);
+  useEffect(() => setReaderFindOpen(false), [readingId]);
   const reading = trpc.article.byId.useQuery(readingId || '', {
     enabled: Boolean(readingId),
   });
@@ -45,17 +68,12 @@ const ArticleList: FC<ArticleListProps> = ({
   const retryBody = async (articleId: string, title: string) => {
     try {
       const result = await bodyRetry.mutateAsync(articleId);
-      if (result.status === 'available')
-        toast.success(`${title}：${result.message}`);
+      if (result.status === 'available') toast.success(`${title}：正文可用`);
       else if (result.status === 'failed')
-        toast.error(`${title}：${result.message}`);
-      else toast.warning(`${title}：${result.message}`);
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : '正文重试失败，请重新读取文章状态。',
-      );
+        toast.error(`${title}：正文重试失败`);
+      else toast.warning(`${title}：正文暂不可用`);
+    } catch {
+      toast.error('正文重试失败，请稍后重试。');
     } finally {
       await Promise.all([
         queryUtils.article.list.invalidate(),
@@ -64,29 +82,18 @@ const ArticleList: FC<ArticleListProps> = ({
       ]);
     }
   };
-  const [sort, setSort] = useState<'publishTime' | 'readCount' | 'likeCount'>(
-    'publishTime',
+  const summary = trpc.article.summary.useQuery(
+    {
+      ...articleFilter,
+      mpId,
+      search: search || undefined,
+    },
+    { enabled: !filterInvalid, cacheTime: 0 },
   );
 
-  const summary = trpc.article.summary.useQuery({
-    mpId,
-    search: search || undefined,
-  });
-
   useEffect(() => {
-    setSort('publishTime');
     onSelectionChange(new Set());
   }, [mpId, search, onSelectionChange]);
-
-  useEffect(() => {
-    if (
-      summary.data &&
-      ((sort === 'readCount' && !summary.data.readAvailable) ||
-        (sort === 'likeCount' && !summary.data.likeAvailable))
-    ) {
-      setSort('publishTime');
-    }
-  }, [summary.data, sort]);
 
   const {
     data,
@@ -94,25 +101,68 @@ const ArticleList: FC<ArticleListProps> = ({
     isLoading,
     hasNextPage,
     isError,
-    error,
     refetch,
+    isFetching,
   } = trpc.article.list.useInfiniteQuery(
     {
       limit: 20,
+      ...articleFilter,
       mpId: mpId,
       search: search || undefined,
-      sort,
+      sort: collectionChannels[mpId] === 'wechat2rss' ? 'publishTime' : sort,
+      direction,
     },
     {
       getNextPageParam: (lastPage) => lastPage.nextCursor,
+      enabled: !filterInvalid,
+      cacheTime: 0,
+      keepPreviousData: false,
     },
   );
 
   const items = useMemo(() => {
-    return data?.pages.flatMap((page) => page.items) || [];
-  }, [data]);
+    return filterInvalid ? [] : data?.pages.flatMap((page) => page.items) || [];
+  }, [data, filterInvalid]);
+  const hasWechat2Rss =
+    collectionChannels[mpId] === 'wechat2rss' ||
+    (!mpId && Object.values(collectionChannels).includes('wechat2rss')) ||
+    items.some(
+      (item) =>
+        (collectionChannels[item.mpId] || item.feed?.collectionChannel) ===
+        'wechat2rss',
+    );
+  const readSortingAvailable = !hasWechat2Rss && !!summary.data?.readAvailable;
+  const likeSortingAvailable = !hasWechat2Rss && !!summary.data?.likeAvailable;
+
+  useEffect(() => {
+    if (!summary.isSuccess) return;
+    if (
+      (sort === 'readCount' && !readSortingAvailable) ||
+      (sort === 'likeCount' && !likeSortingAvailable)
+    )
+      setSort('publishTime');
+  }, [
+    readSortingAvailable,
+    likeSortingAvailable,
+    sort,
+    summary.isSuccess,
+    setSort,
+  ]);
+
+  const position = useArticleListPosition({
+    viewKey: JSON.stringify([mpId, search, articleFilter, sort, direction]),
+    pageCount: data?.pages.length || 0,
+    itemCount: items.length,
+    loading: isLoading && !filterInvalid,
+    fetching: isFetching,
+    hasNext: Boolean(hasNextPage),
+    failed: isError || filterInvalid,
+    loadNext: fetchNextPage,
+    paused: Boolean(readingId),
+  });
 
   const handleSelectAll = (isSelected: boolean) => {
+    if (isSelectionDisabled) return;
     if (isSelected) {
       onSelectionChange(new Set(items.map((item) => item.id)));
     } else {
@@ -122,95 +172,116 @@ const ArticleList: FC<ArticleListProps> = ({
 
   // Batch export moved to parent component for toolbar integration
 
-  const allSelected = items.length > 0 && selectedIds.size === items.length;
+  const selection = useMemo(
+    () => getLoadedSelection(items, selectedIds),
+    [items, selectedIds],
+  );
+  // Prune disappeared IDs before paint, so toolbar/export cannot imply hidden
+  // rows are selected. Loading another page only adds loaded IDs, never selection.
+  useLayoutEffect(() => {
+    if (selection.visibleSelectedIds.size !== selectedIds.size)
+      onSelectionChange(selection.visibleSelectedIds);
+  }, [selection, selectedIds, onSelectionChange]);
 
   return (
     <div className="flex h-full flex-col">
-      <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
-        排序
-        <select
-          aria-label="文章排序"
-          className="bg-background rounded border px-2 py-1"
-          value={sort}
-          onChange={(e) => {
-            setSort(e.target.value as typeof sort);
-            onSelectionChange(new Set());
-          }}
-        >
-          <option value="publishTime">发布时间</option>
-          <option value="readCount" disabled={!summary.data?.readAvailable}>
-            阅读量从高到低{summary.data?.readAvailable ? '' : '（未获取）'}
-          </option>
-          <option value="likeCount" disabled={!summary.data?.likeAvailable}>
-            点赞量从高到低{summary.data?.likeAvailable ? '' : '（未获取）'}
-          </option>
-        </select>
-        <span>
-          缺失指标不等于 0；带“+”为下限。收藏仅显示源数据，不以分享或在看代替。
-        </span>
-      </label>
-      <div className="text-default-500 px-3 pb-2 text-xs" aria-live="polite">
-        {summary.data ? (
-          <>
-            当前{search ? '筛选' : '订阅'}存量 {summary.data.articles}{' '}
-            篇；阅读已获取 {summary.data.readAvailable} 篇，点赞已获取{' '}
-            {summary.data.likeAvailable} 篇， 已缓存正文{' '}
-            {summary.data.cachedBodies} 篇。
-            {summary.data.oldestPublishTime &&
-            summary.data.newestPublishTime ? (
-              <>
-                {' '}
-                库内记录的发布时间范围：
-                {dayjs(summary.data.oldestPublishTime * 1e3).format(
-                  'YYYY-MM-DD',
-                )}{' '}
-                至{' '}
-                {dayjs(summary.data.newestPublishTime * 1e3).format(
-                  'YYYY-MM-DD',
-                )}
-                ，不代表期间无遗漏；存量日期尚需与原文核对。
-              </>
-            ) : null}
-            {!summary.data.readAvailable &&
-              !summary.data.likeAvailable &&
-              ' 尚未获取阅读和点赞，热度排序已禁用。'}
-          </>
-        ) : summary.isError ? (
-          '指标覆盖情况查询失败，暂不可按热度排序。'
-        ) : (
-          '正在读取存量与指标覆盖情况…'
-        )}
-      </div>
+      {
+        <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
+          排序
+          {
+            <select
+              aria-label="文章排序"
+              className="bg-background rounded border px-2 py-1"
+              value={sort}
+              onChange={(e) => {
+                setSort(e.target.value as typeof sort);
+                onSelectionChange(new Set());
+              }}
+            >
+              <option value="publishTime">发布时间</option>
+              {readSortingAvailable && (
+                <option value="readCount">阅读量从高到低</option>
+              )}
+              {likeSortingAvailable && (
+                <option value="likeCount">点赞量从高到低</option>
+              )}
+            </select>
+          }
+          {sort === 'publishTime' && (
+            <select
+              aria-label="发布时间顺序"
+              className="bg-background rounded border px-2 py-1"
+              value={direction}
+              onChange={(event) => {
+                onDirectionChange(event.target.value as 'asc' | 'desc');
+                onSelectionChange(new Set());
+              }}
+            >
+              <option value="desc">最新在前</option>
+              <option value="asc">最早在前</option>
+            </select>
+          )}
+          {!hasWechat2Rss && (readSortingAvailable || likeSortingAvailable) && (
+            <span>带“+”为下限。收藏仅显示源数据，不以分享或在看代替。</span>
+          )}
+        </label>
+      }
       {isError && (
         <div role="alert" className="px-3 py-2 text-sm text-red-600">
-          文章列表读取失败：{error.message}。
+          文章列表读取失败，请重试。
           {items.length ? '下方为此前已读取的存量。' : ''}
           <Button size="sm" variant="light" onPress={() => refetch()}>
             重试
           </Button>
         </div>
       )}
-      <div className="mt-2 flex-1 overflow-y-auto">
+      <div
+        ref={position.scrollRef}
+        onScroll={position.capturePosition}
+        className="mt-2 flex-1 overflow-y-auto"
+      >
         <div className="compact-list">
           <div className="compact-list-header">
             <div className="compact-col-check">
               <Checkbox
+                aria-label="全选已加载"
                 size="sm"
-                isSelected={allSelected}
+                isSelected={selection.allSelected}
+                isIndeterminate={selection.isIndeterminate}
+                isDisabled={isSelectionDisabled || items.length === 0}
                 onValueChange={handleSelectAll}
               />
             </div>
-            <div className="compact-col-title">文章标题</div>
-            <div className="compact-col-metadata">信息</div>
+            <div className="compact-col-title min-w-0 whitespace-nowrap">
+              <span className="mr-2 text-xs">全选已加载</span>
+              文章标题
+              {!filterInvalid &&
+                summary.data &&
+                ` · ${summary.data.articles} 篇`}
+            </div>
+            <div className="compact-col-metadata !hidden md:!flex">信息</div>
           </div>
 
           {items?.map((item) => (
-            <div key={item.id} className="compact-row article-row">
+            <div
+              key={item.id}
+              data-article-id={item.id}
+              className={`compact-row article-row ${
+                item.bodyCached &&
+                !item.bodyRetryResult &&
+                item.lastBodyStatus !== 'unavailable'
+                  ? 'article-row-ready'
+                  : ''
+              } !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center`}
+            >
               <div className="compact-col-check">
                 <Checkbox
+                  aria-label={`选择文章：${item.title}`}
                   size="sm"
+                  isDisabled={isSelectionDisabled}
                   isSelected={selectedIds.has(item.id)}
                   onValueChange={(isSelected) => {
+                    if (isSelectionDisabled) return;
                     const next = new Set(selectedIds);
                     if (isSelected) next.add(item.id);
                     else next.delete(item.id);
@@ -219,10 +290,17 @@ const ArticleList: FC<ArticleListProps> = ({
                 />
               </div>
               <a
-                className="compact-title text-[15px] hover:text-[#007AFF] dark:hover:text-[#0A84FF]"
+                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] md:!whitespace-nowrap dark:hover:text-[#0A84FF]"
                 target="_blank"
                 rel="noopener noreferrer"
+                title={
+                  item.bodyCached
+                    ? '点击标题阅读缓存正文'
+                    : '打开原文；本地正文未缓存'
+                }
+                aria-label={`${item.bodyCached ? '阅读缓存正文' : '打开原文'}：${item.title}`}
                 onClick={(event) => {
+                  position.rememberForReader();
                   if (item.bodyCached) {
                     event.preventDefault();
                     setReadingId(item.id);
@@ -232,22 +310,12 @@ const ArticleList: FC<ArticleListProps> = ({
               >
                 {item.title}
               </a>
-              <div className="flex w-[300px] shrink-0 flex-col items-end gap-0.5 text-neutral-500">
+              <div className="col-start-2 flex w-auto min-w-0 shrink-0 flex-col items-start gap-0.5 text-neutral-500 md:w-[300px] md:items-end">
                 <div
-                  className="flex items-center gap-2 text-xs"
+                  className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
-                  {item.bodyCached ? (
-                    <Button
-                      size="sm"
-                      variant="light"
-                      onPress={() => setReadingId(item.id)}
-                    >
-                      阅读已缓存正文
-                    </Button>
-                  ) : (
-                    <span>正文未缓存</span>
-                  )}
+                  {!item.bodyCached && <span>正文未缓存</span>}
                   {(!item.bodyCached ||
                     item.lastBodyStatus === 'unavailable' ||
                     item.bodyRetryResult?.status === 'failed') && (
@@ -273,13 +341,13 @@ const ArticleList: FC<ArticleListProps> = ({
                   )}
                 </div>
                 {!item.bodyCached && !item.bodyRetry.allowed && (
-                  <span className="text-right text-xs">
-                    {item.bodyRetry.reason}
+                  <span className="text-left text-xs md:text-right">
+                    正文暂不可重试
                   </span>
                 )}
                 {item.bodyRetryResult && (
                   <span
-                    className="text-right text-xs"
+                    className="text-left text-xs md:text-right"
                     title={`${dayjs(item.bodyRetryResult.attemptedAt * 1e3).format('YYYY-MM-DD HH:mm:ss')} ${item.bodyRetryResult.message}`}
                   >
                     最近重试：
@@ -295,15 +363,18 @@ const ArticleList: FC<ArticleListProps> = ({
                         : ''}
                   </span>
                 )}
-                <span
-                  className="whitespace-nowrap text-xs"
-                  title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
-                >
-                  阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
-                  {metricDisplay(item.metrics, 'like')} · 收藏{' '}
-                  {metricDisplay(item.metrics, 'favorite')}
-                </span>
-                <div className="flex w-full items-center justify-end gap-2 text-xs">
+                {(collectionChannels[item.mpId] ||
+                  item.feed?.collectionChannel) !== 'wechat2rss' && (
+                  <span
+                    className="whitespace-normal break-words text-xs md:whitespace-nowrap"
+                    title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
+                  >
+                    阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
+                    {metricDisplay(item.metrics, 'like')} · 收藏{' '}
+                    {metricDisplay(item.metrics, 'favorite')}
+                  </span>
+                )}
+                <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs md:flex-nowrap md:justify-end">
                   <span className="truncate">
                     {item.feed?.mpName || '未知'}
                   </span>
@@ -313,7 +384,7 @@ const ArticleList: FC<ArticleListProps> = ({
                     title="库内记录的发布时间；存量日期需与原文核对"
                   >
                     {item.publishTime > 0
-                      ? dayjs(item.publishTime * 1e3).format('YYYY-MM-DD HH:mm')
+                      ? formatShanghaiPublicationTime(item.publishTime)
                       : '发布时间未知'}
                   </span>
                 </div>
@@ -321,13 +392,13 @@ const ArticleList: FC<ArticleListProps> = ({
             </div>
           ))}
 
-          {isLoading && (
+          {isLoading && !filterInvalid && (
             <div className="flex justify-center p-4">
               <Spinner size="sm" />
             </div>
           )}
 
-          {hasNextPage && !isLoading && (
+          {hasNextPage && !isLoading && !filterInvalid && (
             <div className="flex justify-center p-4">
               <Button size="sm" variant="light" onPress={() => fetchNextPage()}>
                 加载更多
@@ -337,14 +408,19 @@ const ArticleList: FC<ArticleListProps> = ({
 
           {!isLoading && !isError && items?.length === 0 && (
             <div className="p-10 text-center text-sm text-neutral-400">
-              暂无数据
+              {filterInvalid ? '请修正日期范围' : '当前筛选暂无文章'}
             </div>
           )}
         </div>
       </div>
       <Modal
         isOpen={Boolean(readingId)}
-        onClose={() => setReadingId(null)}
+        onClose={() => {
+          position.restoreAfterReader();
+          setReaderFindOpen(false);
+          setReadingId(null);
+        }}
+        isKeyboardDismissDisabled={readerFindOpen}
         size="4xl"
         scrollBehavior="inside"
         classNames={{ wrapper: 'z-[200]', backdrop: 'z-[190]' }}
@@ -360,11 +436,11 @@ const ArticleList: FC<ArticleListProps> = ({
             ) : reading.error ? (
               <p role="alert">正文读取失败：{reading.error.message}</p>
             ) : reading.data?.contentHtml ? (
-              <iframe
-                title="已保存文章正文"
-                sandbox=""
-                className="h-[65vh] w-full rounded border bg-white"
-                srcDoc={`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>body{font:17px/1.8 sans-serif;padding:16px;color:#222;overflow-wrap:anywhere}img{max-width:100%;height:auto}p{margin:1em 0}</style></head><body>${reading.data.contentHtml}</body></html>`}
+              <ArticleReader
+                key={readingId}
+                contentHtml={reading.data.contentHtml}
+                findOpen={readerFindOpen}
+                onFindOpenChange={setReaderFindOpen}
               />
             ) : (
               <p role="alert">尚无已保存正文；没有自动请求腾讯原文。</p>

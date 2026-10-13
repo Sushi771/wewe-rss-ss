@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><title>本次官方文章任务</title>
+  <body style="width: 380px; max-height: 560px; overflow-y: auto; margin: 12px">
+    <h1>本次官方文章任务</h1>
+    <button id="probe" type="button">只读核验当前文章关联（不回送）</button>
+    <pre
+      id="probe-summary"
+      aria-live="polite"
+      style="
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        max-height: 300px;
+        overflow: auto;
+        font-family: inherit;
+        line-height: 1.5;
+      "
+    >
+尚未执行本次只读核验。</pre
+    >
+    <p>
+      本次只读核验可在已打开的官方文章页直接执行，无需任务配置。回送默认关闭；后台停止状态保留。
+    </p>
+    <details>
+      <summary>本篇回送（须本机启用一次任务；只读核验不需要）</summary>
+      <p id="current-tab">当前标签页尚未核对。</p>
+      <p>
+        仅回送当前文章正文、公开身份和确认的原图到本机，使用原 WeWe
+        保存器。不会发送网站 Cookie、token 或应用状态，也不读取其他文章。
+      </p>
+      <p>
+        权限：本机
+        http://127.0.0.1/*（浏览器模式覆盖各端口，本工具代码仅接受4000）及当前原图
+        https://mmbiz.qpic.cn/*。图片请求不带凭据，不接受跳转，不自动重试。
+      </p>
+      <form id="task">
+        <label
+          >本机地址
+          <input
+            id="base"
+            value="http://127.0.0.1:4000/"
+            readonly
+            required /></label
+        ><br />
+        <label
+          >本次配对密钥
+          <input id="key" type="password" autocomplete="off" required /></label
+        ><br />
+        <label
+          >本次任务编号 <input id="taskId" autocomplete="off" required /></label
+        ><br />
+        <label
+          ><input
+            id="permission-consent"
+            type="checkbox"
+          />我同意为本次任务申请上述本机和原图权限</label
+        >
+        <button id="grant" type="button">申请本次所需权限</button>
+        <button id="prepare" type="button">领取本机任务说明（不读正文）</button>
+        <pre
+          id="task-review"
+          style="white-space: pre-wrap; overflow-wrap: anywhere"
+        >
+尚未领取任务说明。</pre
+        >
+        <label
+          ><input
+            id="content-consent"
+            type="checkbox"
+            disabled
+          />我已核对这篇文章、实际图片数及保存目录，同意回送</label
+        >
+        <button id="send" type="submit" disabled>读取并回送本篇</button>
+        <button id="cancel" type="button" disabled>取消本窗口回送</button>
+        <button id="revoke" type="button">撤销本工具的本机和原图权限</button>
+        <p>
+          任务最长5分钟。请用取消按钮，关闭弹窗不保证取消；正在读取时取消可中断请求并阻止后续回送。已经接收的任务请在原
+          WeWe 取消或确认保存，已保存文件不会自动删除。
+        </p>
+      </form>
+    </details>
+    <p id="status" role="status">
+      未配置、未启用。不保存密钥；关闭此窗口即清除。
+    </p>
+    <script type="module" src="popup.mjs"></script>
+  </body>
+</html>

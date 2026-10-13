@@ -116,6 +116,75 @@ export function articlePublishTime(html: string): number | null {
     : null;
 }
 
+/** Read page-supplied public article links only; never derive a link from IDs. */
+export function articleOriginalLink(html: string): string | undefined {
+  const $ = load(html);
+  const values = $('meta[property="og:url"]')
+    .toArray()
+    .map((node) => $(node).attr('content') || '');
+  const scripts = $('script')
+    .toArray()
+    .map((node) => $(node).html() || '')
+    .join('\n');
+  for (const match of scripts.matchAll(
+    /\bvar\s+msg_link\s*=\s*(["'])([^"'\\\r\n]{0,4096})\1\s*;/g,
+  ))
+    values.push(match[2]);
+  if (
+    (scripts.match(/\bvar\s+msg_link\s*=/g) || []).length !==
+    values.length - $('meta[property="og:url"]').length
+  )
+    throw new Error('原文链接表达式无法静态核验');
+  const links = values.filter(Boolean).map((value) => {
+    const decoded = load('<span></span>')('span').html(value).text().trim();
+    if (decoded.length > 4096) throw new Error('原文链接无效');
+    const link = new URL(decoded);
+    if (
+      link.protocol !== 'https:' ||
+      link.hostname !== 'mp.weixin.qq.com' ||
+      link.port ||
+      link.username ||
+      link.password
+    )
+      throw new Error('原文链接无效');
+    if (link.pathname === '/s') {
+      const allowed = new Set(['__biz', 'mid', 'idx', 'sn', 'chksm']);
+      for (const key of link.searchParams.keys())
+        if (!allowed.has(key) || link.searchParams.getAll(key).length !== 1)
+          throw new Error('原文链接参数无效');
+      if (link.hash && link.hash !== '#rd') throw new Error('原文链接无效');
+      if (
+        link.searchParams.has('sn') &&
+        !/^[a-fA-F0-9]+$/.test(link.searchParams.get('sn')!)
+      )
+        throw new Error('原文链接签名无效');
+      if (
+        link.searchParams.has('chksm') &&
+        !/^[A-Za-z0-9_-]{1,256}$/.test(link.searchParams.get('chksm')!)
+      )
+        throw new Error('原文链接参数无效');
+      return {
+        provided: link.toString(),
+        comparison: canonicalArticleUrl(link.toString()).url,
+      };
+    }
+    if (
+      !/^\/s\/[A-Za-z0-9_-]{1,256}$/.test(link.pathname) ||
+      link.search ||
+      link.hash
+    )
+      throw new Error('原文链接无效');
+    return { provided: link.toString(), comparison: link.toString() };
+  });
+  if (new Set(links.map((link) => link.comparison)).size > 1)
+    throw new Error('原文链接字段冲突');
+  return links[0]?.provided;
+}
+
+/** Preserve callers' identity-conflict status when the supplied original
+ * disagrees with the independently parsed business identity. */
+export class ArticleIdentityConflictError extends Error {}
+
 export function articleIdentity(html: string) {
   const $ = load(html);
   if (!$('#js_content').length) throw new Error('没有可核验的原文结构');
@@ -129,6 +198,10 @@ export function articleIdentity(html: string) {
     );
     for (const match of html.matchAll(assignment)) {
       const expression = match[1].trim();
+      if (['mid', 'idx'].includes(name) && /^\d+$/.test(expression)) {
+        values.push(expression);
+        continue;
+      }
       // Bundled functions reuse names such as mid for local calculations. They
       // are not page identity literals; do not evaluate or collect them.
       if (!/^["']/.test(expression)) continue;
@@ -179,9 +252,23 @@ export function articleIdentity(html: string) {
     ['sn', sn || ''],
   ])
     if (val) url.searchParams.set(key, val);
+  const identity = canonicalArticleUrl(url.toString());
+  const canonical = articleOriginalLink(html);
+  if (canonical && new URL(canonical).pathname === '/s') {
+    const supplied = canonicalArticleUrl(canonical);
+    if (
+      supplied.id !== identity.id ||
+      supplied.mpId !== identity.mpId ||
+      (sn && new URL(supplied.url).searchParams.get('sn') !== sn)
+    )
+      throw new ArticleIdentityConflictError('原文链接与静态身份冲突');
+    // Keep the genuine supplied link, normalized by the existing URL policy.
+    // A page-provided sn need not be invented as a separate body scalar.
+    identity.url = supplied.url;
+  }
   return {
-    ...canonicalArticleUrl(url.toString()),
-    canonical: $('meta[property="og:url"]').attr('content'),
+    ...identity,
+    canonical,
     publishTime: articlePublishTime(html),
   };
 }

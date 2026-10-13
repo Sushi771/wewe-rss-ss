@@ -9,6 +9,7 @@ import {
   ModalHeader,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
+import { ArticleFilter } from '@wewe-rss/shared';
 import { toast } from 'sonner';
 
 export default function LocalCollection({
@@ -16,15 +17,21 @@ export default function LocalCollection({
   directory: initialDirectory,
   name,
   search,
+  articleFilter,
+  filterInvalid = false,
   selectedIds,
   onImported,
+  showMetricsExport = true,
 }: {
   mpId?: string;
   directory?: string | null;
   name?: string;
   search: string;
+  articleFilter?: ArticleFilter;
+  filterInvalid?: boolean;
   selectedIds: Set<string>;
   onImported?: (message: string) => void;
+  showMetricsExport?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [directory, setDirectory] = useState('');
@@ -53,33 +60,39 @@ export default function LocalCollection({
       >
         导入已有文件
       </Button>
-      <Button
-        size="sm"
-        className="mac-btn-outline"
-        isLoading={exporter.isLoading}
-        onPress={async () => {
-          try {
-            const result = await exporter.mutateAsync({
-              mpId,
-              search: search || undefined,
-              ids: selectedIds.size ? [...selectedIds] : undefined,
-            });
-            const url = URL.createObjectURL(
-              new Blob([result.csv], { type: 'text/csv;charset=utf-8' }),
-            );
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `公众号热度-${new Date().toISOString().slice(0, 10)}.csv`;
-            a.click();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-            toast.success(`已导出 ${result.count} 篇文章的指标`);
-          } catch (e) {
-            toast.error(e instanceof Error ? e.message : String(e));
-          }
-        }}
-      >
-        {selectedIds.size ? `导出热度 (${selectedIds.size})` : '导出热度 CSV'}
-      </Button>
+      {showMetricsExport && (
+        <Button
+          size="sm"
+          className="mac-btn-outline"
+          isLoading={exporter.isLoading}
+          isDisabled={filterInvalid}
+          onPress={async () => {
+            try {
+              const result = await exporter.mutateAsync({
+                ...articleFilter,
+                mpId,
+                search: search || undefined,
+                ids: selectedIds.size ? [...selectedIds] : undefined,
+              });
+              const url = URL.createObjectURL(
+                new Blob([result.csv], { type: 'text/csv;charset=utf-8' }),
+              );
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `公众号热度-${new Date().toISOString().slice(0, 10)}.csv`;
+              a.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+              toast.success(`已导出 ${result.count} 篇文章的指标`);
+            } catch (e) {
+              toast.error(e instanceof Error ? e.message : String(e));
+            }
+          }}
+        >
+          {selectedIds.size
+            ? `导出热度 (${selectedIds.size})`
+            : '导出当前筛选热度 CSV'}
+        </Button>
+      )}
       <Modal
         isOpen={open}
         onOpenChange={setOpen}

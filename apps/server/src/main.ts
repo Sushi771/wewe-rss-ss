@@ -1,5 +1,4 @@
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
 import { TrpcRouter } from '@server/trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
@@ -8,6 +7,16 @@ import { ConfigurationType } from './configuration';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import { assertPrivateConfig, privateAccessGuard } from './private-access';
+import { startupAudit, startupAuditHttpGuard } from './startup-audit';
+import {
+  startSqliteSnapshotGuard,
+  stopSqliteSnapshotGuard,
+} from './collection/sqlite-snapshot-guard';
+import {
+  readBrowserTaskOptIn,
+  browserTaskApplication,
+  mountBrowserTaskTransport,
+} from './browser-task.opt-in';
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -26,13 +35,19 @@ console.log('appVersion: v' + appVersion);
 
 async function bootstrap() {
   assertPrivateConfig();
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const browserOptIn = readBrowserTaskOptIn();
+  const app = await NestFactory.create<NestExpressApplication>(
+    browserTaskApplication(browserOptIn),
+    browserOptIn ? { bodyParser: false } : {},
+  );
   const configService = app.get(ConfigService);
 
   const { host, isProd, port } =
     configService.get<ConfigurationType['server']>('server')!;
 
   app.use(privateAccessGuard);
+  app.use(startupAuditHttpGuard);
+  mountBrowserTaskTransport(app, { host, port }, browserOptIn);
   if (process.env.WEWE_ACCEPTANCE_MODE === '1')
     app.use((req, res, next) => {
       res.setHeader(
@@ -64,6 +79,11 @@ async function bootstrap() {
   trpc.applyMiddleware(app);
 
   await app.listen(port, host);
+  startupAudit()?.start();
+  // Local-only optional snapshots never dispatch subscription/media work.
+  await startSqliteSnapshotGuard();
+  app.getHttpServer().once('close', stopSqliteSnapshotGuard);
+  process.once('exit', stopSqliteSnapshotGuard);
 
   console.log(`Server is running at http://${host}:${port}`);
 }

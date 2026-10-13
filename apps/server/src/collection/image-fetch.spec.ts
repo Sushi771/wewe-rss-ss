@@ -84,6 +84,32 @@ describe('archived image fetch boundary', () => {
     ).toThrow('IMAGE_RESPONSE_INVALID');
   });
 
+  it.each([
+    ['ignored punctuation', (value: string) => '!' + value],
+    [
+      'embedded whitespace',
+      (value: string) => value.slice(0, 4) + '\n' + value.slice(4),
+    ],
+    ['trailing newline', (value: string) => value + '\n'],
+    ['missing padding', (value: string) => value.replace(/=+$/, '')],
+    ['extra padding', (value: string) => value + '='],
+    ['URL-safe alphabet', (value: string) => value.replaceAll('/', '_')],
+  ])('rejects noncanonical Base64: %s', (_name, change) => {
+    const encoded = change(png.toString('base64'));
+    // Node's forgiving decoder still produces the same valid image bytes.
+    expect(Buffer.from(encoded, 'base64')).toEqual(png);
+    expect(() => decodeInlineImage('data:image/png;base64,' + encoded)).toThrow(
+      'IMAGE_RESPONSE_INVALID',
+    );
+  });
+
+  it('rejects oversized encoded input before Base64 decoding', () => {
+    const raw = 'data:image/png;base64,' + 'A'.repeat(13_333_340);
+    const decode = jest.spyOn(Buffer, 'from');
+    expect(() => decodeInlineImage(raw)).toThrow('IMAGE_RESPONSE_INVALID');
+    expect(decode).not.toHaveBeenCalled();
+  });
+
   it('accepts valid JPEG, GIF, and WebP containers', () => {
     const examples = [
       [

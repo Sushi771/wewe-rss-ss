@@ -103,9 +103,7 @@ const { csvCell } = require(path.join(built, 'collection/collection-format'));
     const markdown = await fs.readFile(saved.path, 'utf8');
     const attachments = [
       ...new Set(
-        markdown.match(
-          /attachments\/image_[a-f0-9]+\.(?:png|jpe?g|gif|webp)/g,
-        ) || [],
+        markdown.match(/image\/image_[a-f0-9]+\.(?:png|jpe?g|gif|webp)/g) || [],
       ),
     ];
     const images = await Promise.all(

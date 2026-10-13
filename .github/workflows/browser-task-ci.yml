@@ -1,0 +1,31 @@
+name: Official browser task offline
+on:
+  pull_request:
+    branches: [main, codex/manual-refresh-download-integration]
+    paths:
+      - 'extensions/wewe-official-task/**'
+      - 'apps/server/src/browser-task*'
+      - 'apps/server/test/browser-task-fixture.ts'
+      - '.github/workflows/browser-task-ci.yml'
+      - 'apps/server/src/collection/sqlite-snapshot-guard*'
+      - 'apps/server/src/collection/insert-only-cache*'
+      - 'apps/server/src/collection/*cache*'
+      - 'apps/server/src/collection/archive-provider-images*'
+      - 'apps/server/src/collection/wechat2rss-subscription-batches*'
+      - 'apps/server/src/feeds/cache-sync*'
+      - 'apps/server/src/trpc/trpc.service.ts'
+jobs:
+  extension-offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Test click-scoped extension transport and synthetic official DOM (no browser or platform)
+        run: node --test extensions/wewe-official-task/*.test.mjs

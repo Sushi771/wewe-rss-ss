@@ -68,7 +68,10 @@ function cleanBody(raw: unknown): {
         node.attr('src', image);
         if (!cover) cover = image;
       } else {
-        node.remove();
+        // Unknown no-source tags remain inert and explicitly unconfirmed.
+        // Unsafe nonempty addresses are removed, never requested.
+        if (!source) node.attr('data-wewe-image-unconfirmed', 'true');
+        else node.remove();
         imageBlocked++;
       }
     } else if (element['tagName'] === 'a') {
@@ -90,7 +93,9 @@ function cleanBody(raw: unknown): {
   if (!body.text().trim() && !body.find('img[src]').length)
     return { html: null, imageBlocked, cover };
   return {
-    html: `<div class="rich_media_content" id="js_content">${body.html()}</div>`,
+    // Keep incomplete-image provenance after sanitization; removing an unsafe
+    // or source-less tag must not turn it into a complete offline article.
+    html: `<div class="rich_media_content" id="js_content"${imageBlocked ? ` data-wewe-image-pending="${imageBlocked}"` : ''}>${body.html()}</div>`,
     imageBlocked,
     cover,
   };

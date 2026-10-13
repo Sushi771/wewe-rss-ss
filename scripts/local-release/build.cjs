@@ -1,8 +1,10 @@
 // 只创建新版本，不停服务、不改已安装的依赖、旧 dist/client 或数据库。
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { parseArgs } = require('node:util');
 const { verifySourceSnapshot } = require('./verify-source.cjs');
+const { bundleServer } = require('./compact.cjs');
 const {
   slash,
   readJson,
@@ -94,6 +96,12 @@ function build(options = {}) {
     ? fs.realpathSync(options.sourceRoot)
     : root;
   const legacy = sourceRoot !== root;
+  if (legacy && options.compact)
+    throw new Error('Compact packages only support the current schema');
+  if (options.compact && Number(process.versions.node.split('.')[0]) < 24)
+    throw new Error(
+      'Compact startup SQLite checks require the fixed Node 24 runtime',
+    );
   if (legacy && !inside(path.join(root, '.local-releases'), sourceRoot))
     throw new Error('旧版源码快照必须位于本项目忽略的 .local-releases 目录');
   if (
@@ -176,6 +184,43 @@ function build(options = {}) {
     inputs['tools/wechat-desktop-collector/collect.ps1'] = fileHash(
       path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
     );
+  let currentCommit = null;
+  if (!legacy) {
+    currentCommit = run('git', ['rev-parse', 'HEAD'], { cwd: root }).trim();
+    const tree = run(
+      'git',
+      ['ls-tree', '-r', '-z', '--full-tree', currentCommit],
+      { cwd: root },
+    );
+    const blobs = new Map(
+      tree
+        .split('\0')
+        .filter(Boolean)
+        .map((row) => {
+          const match = row.match(/^\d+ blob ([a-f0-9]{40})\t(.+)$/s);
+          if (!match) throw new Error('Unsupported release source entry');
+          return [match[2], match[1]];
+        }),
+    );
+    const blobHash = (bytes) =>
+      crypto
+        .createHash('sha1')
+        .update(`blob ${bytes.length}\0`)
+        .update(bytes)
+        .digest('hex');
+    for (const file of Object.keys(inputs)) {
+      const content = fs.readFileSync(path.join(sourceRoot, file));
+      const normalized = Buffer.from(
+        content.toString('utf8').replace(/\r\n/g, '\n'),
+      );
+      if (
+        !blobs.has(file) ||
+        (blobHash(content) !== blobs.get(file) &&
+          blobHash(normalized) !== blobs.get(file))
+      )
+        throw new Error('Release input differs from committed source: ' + file);
+    }
+  }
   const sourceHash = hash(JSON.stringify(inputs));
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
   const release = path.join(root, '.local-releases', id);
@@ -314,7 +359,13 @@ function build(options = {}) {
       { recursive: true },
     );
   fs.mkdirSync(path.join(target, 'scripts'));
-  for (const file of ['backup-sqlite.py', 'verify-preservation.py'])
+  for (const file of [
+    'backup-sqlite.py',
+    ...(legacy ? [] : ['sqlite-snapshot-guard.py']),
+    'verify-preservation.py',
+    'watch-wechat2rss-cache.py',
+    'read-wechat2rss-cache.py',
+  ])
     fs.copyFileSync(
       path.join(server, 'scripts', file),
       path.join(target, 'scripts', file),
@@ -327,12 +378,20 @@ function build(options = {}) {
     'lib.cjs',
     'runtime.cjs',
     'inspect-sqlite.py',
+    'prepare-start.py',
+    'startup-sqlite.cjs',
+    'startup-audit.cjs',
     'offline-guard.cjs',
   ])
     fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
   fs.mkdirSync(path.join(release, 'runtime'));
   fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
-  const dependencies = copyPackages(target, client, sourceServer);
+  const compact = options.compact
+    ? bundleServer(target, sourceServer, sourceWeb)
+    : undefined;
+  const dependencies = options.compact
+    ? compact.dependencies
+    : copyPackages(target, client, sourceServer);
   // Historical rollback packages retain their own helper. Current packages
   // contain no desktop collector code or executable.
   if (legacy) {
@@ -351,8 +410,16 @@ function build(options = {}) {
     arch: process.arch,
     nodeVersion: process.version,
     sourceHash,
-    sourceCommit: legacy ? options.sourceCommit : null,
+    sourceCommit: legacy ? options.sourceCommit : currentCommit,
     schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+    startupInspection: legacy ? 'full' : 'schema-only-v1',
+    ...(compact
+      ? {
+          executionLayout: 'compact-cjs-v1',
+          startupPreparation: 'node-background-backup-v1',
+          compact,
+        }
+      : {}),
     inputs,
     prisma: {
       clientVersion: readJson(path.join(installed, 'package.json')).version,
@@ -385,11 +452,13 @@ if (require.main === module) {
       options: {
         'source-root': { type: 'string' },
         'source-commit': { type: 'string' },
+        compact: { type: 'boolean', default: false },
       },
     });
     build({
       sourceRoot: values['source-root'],
       sourceCommit: values['source-commit'],
+      compact: values.compact,
     });
   } catch (error) {
     console.error(error.message);

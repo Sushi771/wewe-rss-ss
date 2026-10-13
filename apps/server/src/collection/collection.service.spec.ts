@@ -8,6 +8,7 @@ import { resolvePublicArticle } from './public-album';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { FeedsService } from '../feeds/feeds.service';
+import { archiveProviderImages } from './archive-provider-images';
 
 jest.mock('./public-album', () => ({
   fetchPublicAlbums: jest.fn(),
@@ -162,7 +163,9 @@ describe('local collection with real SQLite migrations', () => {
     const markdown = await fs.readFile(result.path, 'utf8');
     expect(markdown).toContain('正文内容');
     expect(markdown).toContain('| 收藏 | 未提供 |');
-    const image = markdown.match(/attachments\/image_[a-f0-9]+\.png/)?.[0];
+    const image = markdown.match(
+      /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
+    )?.[0];
     expect(image).toBeTruthy();
     expect(
       (await fs.stat(path.join(path.dirname(result.path), image!))).size,
@@ -174,19 +177,32 @@ describe('local collection with real SQLite migrations', () => {
     );
     expect(offline).toMatchObject({ articles: 2, complete: 1 });
     const exported = await fs.readFile(
-      path.join(offlineDirectory, offline!.incomplete[0], 'index.md'),
+      path.join(offlineDirectory, offline!.incomplete[0]),
       'utf8',
     );
-    expect(exported).toContain('无法离线阅读');
-    const completedFolder = (
-      await fs.readdir(path.join(offlineDirectory, 'articles'))
-    ).find((name) => !offline!.incomplete.some((item) => item.endsWith(name)));
-    expect(completedFolder).toBeTruthy();
+    expect(exported).toContain('无法完整离线阅读');
+    const publisherDirectory = path.dirname(
+      path.join(offlineDirectory, offline!.incomplete[0]),
+    );
+    expect(path.dirname(publisherDirectory)).toBe(
+      path.join(offlineDirectory, '2024-12-06_未分组'),
+    );
+    const notes = (await fs.readdir(publisherDirectory)).filter((name) =>
+      name.endsWith('.md'),
+    );
+    expect(notes).toHaveLength(2);
+    const completedNote = notes.find(
+      (name) =>
+        !offline!.incomplete.some((item) => path.basename(item) === name),
+    );
+    expect(completedNote).toBeTruthy();
     const completeMarkdown = await fs.readFile(
-      path.join(offlineDirectory, 'articles', completedFolder!, 'index.md'),
+      path.join(publisherDirectory, completedNote!),
       'utf8',
     );
-    expect(completeMarkdown).toMatch(/attachments\/image_[a-f0-9]+\.png/);
+    expect(completeMarkdown).toMatch(
+      /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
+    );
     const readme = await fs.readFile(
       path.join(offlineDirectory, 'README.md'),
       'utf8',
@@ -275,7 +291,7 @@ describe('local collection with real SQLite migrations', () => {
       const exported = await caller.article.saveToObsidian('legacy-short-link');
       const markdown = await fs.readFile(exported.path, 'utf8');
       const attachment = markdown.match(
-        /attachments\/image_[a-f0-9]+\.png/,
+        /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
       )?.[0];
       expect(attachment).toBeTruthy();
       expect(
@@ -533,5 +549,99 @@ describe('local collection with real SQLite migrations', () => {
         })
       ).sourceUrl,
     ).toBe(identity.url);
+  });
+  it('saves newly archived images into an existing body and remains duplicate-safe', async () => {
+    const identity = canonicalArticleUrl(url(99));
+    const original = await prisma.article.create({
+      data: {
+        id: 'legacy-image-save',
+        mpId,
+        title: 'saved-image',
+        picUrl: '',
+        publishTime: 1700000000,
+        sourceUrl: identity.url,
+        verifiedSourceUrl: identity.url,
+        contentHtml:
+          '<div class="rich_media_content"><p>saved annotation</p><img src="https://mmbiz.qpic.cn/a.jpg" alt="keep"></div>',
+        metrics: '{"read":{"value":20}}',
+        readCount: 20,
+        likeCount: 4,
+      },
+    });
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(png, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
+    try {
+      const page = await archiveProviderImages({
+        articles: [
+          {
+            ...identity,
+            url: identity.url,
+            mpId,
+            title: original.title,
+            publishTime: original.publishTime,
+            picUrl: '',
+            contentHtml:
+              '<div class="rich_media_content"><p>incoming text</p><img src="https://mmbiz.qpic.cn/a.jpg"></div>',
+          },
+        ],
+        coverage: 'recent-window',
+        upstreamCount: 1,
+        bodyMissing: 0,
+        imageBlocked: 0,
+      });
+      expect(await (service as any).saveVerifiedSearchPage(mpId, page)).toEqual(
+        { created: 0, updated: 1 },
+      );
+      const saved = await prisma.article.findUniqueOrThrow({
+        where: { id: original.id },
+      });
+      expect(saved.contentHtml).toContain('saved annotation');
+      expect(saved.contentHtml).not.toContain('incoming text');
+      expect(saved.contentHtml).toContain('data:image/png;base64,');
+      expect(saved.contentHtml).toContain('alt="keep"');
+      for (const field of [
+        'id',
+        'mpId',
+        'title',
+        'publishTime',
+        'sourceUrl',
+        'verifiedSourceUrl',
+        'metrics',
+        'readCount',
+        'likeCount',
+        'createdAt',
+      ] as const)
+        expect(saved[field]).toEqual(original[field]);
+      expect(await (service as any).saveVerifiedSearchPage(mpId, page)).toEqual(
+        { created: 0, updated: 0 },
+      );
+      expect(
+        await prisma.article.findUniqueOrThrow({ where: { id: original.id } }),
+      ).toEqual(saved);
+      const conflicting = {
+        ...page,
+        articles: page.articles.map((a) => ({
+          ...a,
+          publishTime: a.publishTime + 38,
+        })),
+      };
+      await expect(
+        (service as any).saveVerifiedSearchPage(mpId, conflicting),
+      ).rejects.toThrow('SEARCH_REPLAY_SAVED_METADATA_CONFLICT');
+      expect(
+        await prisma.article.findUniqueOrThrow({ where: { id: original.id } }),
+      ).toEqual(saved);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 });

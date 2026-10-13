@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+    />
+    <title>WeWe 私人图文归档 · 开发计划审阅</title>
+    <style>
+      :root {
+        --ink: #24332e;
+        --muted: #64726c;
+        --line: #d6ded5;
+        --paper: #f6f5ef;
+        --green: #216853;
+        --soft: #e5eee6;
+        --amber: #835b26;
+        --amber-soft: #f3ead7;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+        line-height: 1.75;
+      }
+      a {
+        color: var(--green);
+        text-underline-offset: 4px;
+      }
+      a:focus-visible,
+      summary:focus-visible {
+        outline: 3px solid var(--green);
+        outline-offset: 5px;
+      }
+      header {
+        border-bottom: 1px solid var(--line);
+      }
+      .bar {
+        max-width: 1100px;
+        margin: auto;
+        padding: 18px 28px;
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: center;
+      }
+      .brand {
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+      }
+      .stamp {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      main {
+        max-width: 1100px;
+        margin: auto;
+        padding: 42px 28px 64px;
+      }
+      .hero {
+        max-width: 820px;
+        margin-bottom: 34px;
+      }
+      .eyebrow {
+        color: var(--green);
+        font-size: 13px;
+        font-weight: 700;
+      }
+      h1 {
+        font-size: clamp(29px, 4vw, 44px);
+        line-height: 1.25;
+        margin: 12px 0 18px;
+        letter-spacing: -0.02em;
+      }
+      h2 {
+        font-size: 23px;
+        line-height: 1.4;
+        margin: 0 0 16px;
+      }
+      h3 {
+        font-size: 17px;
+        line-height: 1.45;
+        margin: 0 0 12px;
+      }
+      p {
+        margin: 0 0 12px;
+      }
+      .lead {
+        font-size: 17px;
+        color: #44564c;
+      }
+      .status {
+        border-left: 4px solid var(--green);
+        background: var(--soft);
+        padding: 16px 20px;
+      }
+      .status p:last-child {
+        margin: 0;
+      }
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 22px;
+        font-size: 14px;
+        margin: 28px 0 42px;
+      }
+      section {
+        margin: 0 0 42px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+      }
+      .card {
+        border: 1px solid var(--line);
+        background: #fffefa;
+        padding: 24px;
+        border-radius: 12px;
+      }
+      .number {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--muted);
+        margin-bottom: 14px;
+      }
+      .tag {
+        display: inline-block;
+        border-radius: 5px;
+        padding: 2px 8px;
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 14px;
+      }
+      .reuse {
+        color: var(--green);
+        background: var(--soft);
+      }
+      .wait {
+        color: var(--amber);
+        background: var(--amber-soft);
+      }
+      .card p {
+        font-size: 14px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .flow {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin: 18px 0;
+      }
+      .flow span {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 14px;
+        background: #fffefa;
+        font-size: 14px;
+      }
+      .flow b {
+        color: var(--muted);
+        font-weight: 400;
+      }
+      .table-scroll {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 630px;
+        font-size: 14px;
+        background: #fffefa;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 15px 18px;
+        vertical-align: top;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        background: var(--soft);
+        font-weight: 600;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      .note {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 12px 0 0;
+      }
+      .boundary {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 22px;
+      }
+      .boundary div {
+        padding: 22px;
+        border-top: 3px solid var(--green);
+        background: #fffefa;
+      }
+      .timeline {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .step {
+        border-top: 2px solid var(--line);
+        padding-top: 14px;
+      }
+      .step strong {
+        font-size: 15px;
+        display: block;
+      }
+      .step span {
+        color: var(--green);
+        font-size: 13px;
+      }
+      .step p {
+        font-size: 13px;
+        margin-top: 8px;
+      }
+      .estimate {
+        font-size: 23px;
+        color: var(--green);
+        margin-top: 22px;
+      }
+      .documents {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px 24px;
+      }
+      .documents a {
+        display: block;
+        border-bottom: 1px solid var(--line);
+        padding: 12px 0;
+        text-decoration: none;
+      }
+      .documents a:hover {
+        text-decoration: underline;
+      }
+      .documents small {
+        display: block;
+        color: var(--muted);
+      }
+      details {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fffefa;
+        padding: 16px 20px;
+        margin-top: 12px;
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      details p {
+        margin-top: 14px;
+        font-size: 14px;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        padding-top: 18px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      @media (max-width: 760px) {
+        main {
+          padding: 30px 18px 40px;
+        }
+        .bar {
+          padding: 16px 18px;
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 3px;
+        }
+        .grid,
+        .boundary,
+        .documents {
+          grid-template-columns: 1fr;
+        }
+        .timeline {
+          grid-template-columns: 1fr;
+          gap: 14px;
+        }
+        .card {
+          padding: 20px;
+        }
+        .flow {
+          gap: 8px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+      @media print {
+        body {
+          background: white;
+        }
+        nav {
+          display: none;
+        }
+        main {
+          max-width: none;
+          padding: 20px 0;
+        }
+        section,
+        .card {
+          break-inside: avoid;
+        }
+        .table-scroll {
+          overflow: visible;
+        }
+        table {
+          min-width: 0;
+        }
+        a {
+          color: var(--ink);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <section style="max-width: 1100px; margin: 20px auto; padding: 20px">
+      <h2>本轮工程增量</h2>
+      <p>
+        两平台单层文件夹、勾选/拖动移动、统一列表和手机收起侧栏已接线。工具页并列公众号与小红书单篇下载，来源默认关闭；共用原保存目录，每篇正文、图片及已核内部视频缓存独立保存。新统一界面与公众号手机标题已经隔离实测；真实来源、视频播放和
+        Sites 实际连接仍待完成；旧隔离验收不能覆盖新功能。
+      </p>
+    </section>
+    <header>
+      <div class="bar">
+        <div class="brand">WeWe / 私人图文归档</div>
+        <div class="stamp">2026.10.09 · 开发计划审阅稿</div>
+      </div>
+    </header>
+    <main>
+      <div class="hero">
+        <div class="eyebrow">公众号 + 小红书 · 同一个私人入口</div>
+        <h1>每天点一次更新，<br />把图文留在自己的归档里。</h1>
+        <p class="lead">
+          复用 wewe-rss-ss 的历史数据、正文图片和保存能力。第一期用私人 Sites
+          跨端查看，业务和主库留在常开的本机，不购 VPS。
+        </p>
+      </div>
+      <div class="status">
+        <p><strong>正式本机入口已接线，真实来源仍待确认。</strong></p>
+        <p>
+          小红书正式页面、独立数据库表和缓存图文本机保存已接线。保存目录沿用原设置，按下载日期生成每篇正文.md与image/，无需解压，ZIP为可选导出。隔离浏览器核心流程、合成文图保存和桌面布局修复已通过，手机展开正文、按钮及合成图片加载已通过；确认移除未验，原生审批待用户决定。来源未注册，待接入名单不代表订阅成功。Sites只读合同已做离线核验，默认身份和连接未配置；生产未迁移或部署，真实全文全图和跨端连接仍待完成。
+        </p>
+      </div>
+      <nav aria-label="文档导航">
+        <a href="#daily">日常体验</a>
+        <a href="#sources">来源选择</a>
+        <a href="#early">可以提前做</a>
+        <a href="#boundary">本机与 Sites</a>
+        <a href="CURRENT_UPDATES.md">本轮更新与剩余事项</a>
+        <a href="#schedule">排期</a>
+        <a href="#documents">完整文档</a>
+      </nav>
+      <section id="daily">
+        <h2>日常只围绕更新、阅读和保存</h2>
+        <div class="flow" aria-label="日常操作顺序">
+          <span>打开私人界面</span><b aria-hidden="true">→</b>
+          <span>手动更新全部</span><b aria-hidden="true">→</b>
+          <span>逐作者查看结果</span><b aria-hidden="true">→</b>
+          <span>阅读 / 下载归档</span>
+        </div>
+        <p>
+          新增、已存、等待上游、缺正文或缺图分别显示。失败不会清空旧内容；任务受理不会显示为已经更新。视频号、抖音和评论留到后续；订阅和单篇视频缓存均已接原保存器，按每篇正文.md、image/、video/归档；只核容器与字节，真实来源和播放完整性仍待验证。
+        </p>
+        <p class="note">
+          “完整图文”需要正文及全部图片实际保存、可打开。mock、HTTP200
+          或页面按钮出现都不是这个证据。
+        </p>
+      </section>
+      <section id="sources">
+        <h2>付费来源：已有接缝，逐项确认</h2>
+        <div class="grid">
+          <article class="card">
+            <span class="tag reuse">已有适配可复用</span>
+            <h3>公众号 / Wechat2RSS</h3>
+            <p>保留现有 Provider、原刷新和保存流程，薄接入本机私有实例。</p>
+            <p class="muted">
+              软件授权、Docker/WSL
+              和正常账号需具备；近期、历史、非群发分别验收。旧绑定不会因打开开关自动切换。
+            </p>
+          </article>
+          <article class="card">
+            <span class="tag wait">A · 托管接口待测试</span>
+            <h3>小红书 / Rnote API</h3>
+            <p>
+              按实际调用计费；优先核博主发布列表、分页、图文详情和图片字节。
+            </p>
+            <p class="muted">
+              本机管理与缓存保存已接线，上游adapter尚未实现。实际字段、覆盖、费用和归档许可仍需当前合同及样例。
+            </p>
+          </article>
+          <article class="card">
+            <span class="tag wait">B · 用户邮件待回复</span>
+            <h3>$200 / Web＋蒲公英源码</h3>
+            <p>
+              保留为候选；需要确认列表、分页、详情是否已经实现，以及许可、维护和持续依赖。
+            </p>
+            <p class="muted">
+              Web
+              签名层不是完整订阅能力证明。不能承诺购买后免一切成本或无需后续维护。
+            </p>
+          </article>
+        </div>
+        <p class="note">
+          供应商公开页面依据：<a href="https://wechat2rss.xlab.app/deploy/"
+            >Wechat2RSS</a
+          >
+          · <a href="https://rnote.dev/docs/guide">Rnote API</a> ·
+          <a href="https://rnote.dev/source">源码包</a>。本轮只读公开说明，没有
+          Key 调用、购买或平台取文。
+        </p>
+      </section>
+      <section id="early">
+        <h2>采购前可做的前三项</h2>
+        <div class="grid">
+          <article class="card">
+            <div class="number">01 / 原更新链路</div>
+            <h3>批次合同与明确来源</h3>
+            <p>
+              复用原逐号更新、备份、冷却和结果，离线补幂等、部分失败与中断保护，不重复实现采集器。
+            </p>
+          </article>
+          <article class="card">
+            <div class="number">02 / 跨平台归档</div>
+            <h3>小红书独立身份接缝</h3>
+            <p>
+              正式本机入口已接独立模型、缓存查看和原保存器；身份、分页去重及图片字节使用合成来源验证。真实首轮只取一个博主前三篇，仍待供应商实样。
+            </p>
+            <p>
+              合成模型先核作者、笔记、段落及图序；复用图片校验和导出。微信身份规则不套到小红书。
+            </p>
+          </article>
+          <article class="card">
+            <div class="number">03 / 私人跨端</div>
+            <h3>Sites 离线流程原型</h3>
+            <p>
+              先展示日常更新和离线状态；连接、内容副本及权限确认后才实现本机任务桥。
+            </p>
+          </article>
+        </div>
+      </section>
+      <section id="boundary">
+        <h2>本机和 Sites 各自负责什么</h2>
+        <div class="boundary">
+          <div>
+            <h3>本机：采集与可信主库</h3>
+            <p>
+              业务编排、供应商凭据、SQLite 和原 Obsidian
+              保存留在本机。现有历史、停止和定时策略保持。
+            </p>
+          </div>
+          <div>
+            <h3>Sites：私人界面与最小展示副本</h3>
+            <p>
+              建议评审本机主动连接的任务桥，不开放整个
+              4000。若要电脑离线时阅读全文，需另行确认最小云端正文/图片副本。
+            </p>
+          </div>
+        </div>
+        <p class="note">
+          Sites 在云端，不能直接访问本机
+          localhost。当前没有可用连接桥；本轮不创建站点、不配置隧道。
+        </p>
+        <details>
+          <summary>正式接线与部署边界</summary>
+          <p>
+            正式入口为/dash/xiaohongshu，使用真实受保护接口；新表仅在临时数据库演练，旧公众号保持。源代码同步到原GitHub草稿PR，未迁移或部署生产。登录后核心流程及合成图文本机保存已做真实浏览器验收，实际正文和图片字节另核；手机正文与按钮已核；确认移除未验，原生审批待用户决定，旧审批隔离实例保持，新文件夹验收实例按完整身份收尾。
+          </p>
+        </details>
+      </section>
+      <section id="schedule">
+        <h2>以每天 6 小时安排工程任务</h2>
+        <div class="timeline">
+          <div class="step">
+            <strong>采购前准备</strong><span>8–13h</span>
+            <p>内部契约、离线保护、小红书副本模型与界面原型。</p>
+          </div>
+          <div class="step">
+            <strong>公众号接入</strong><span>3–5h</span>
+            <p>当前实例、薄适配和原入口图文验收。</p>
+          </div>
+          <div class="step">
+            <strong>小红书接入</strong><span>6–10h</span>
+            <p>已确认 A/B 合同、图文归档和分页增量。</p>
+          </div>
+          <div class="step">
+            <strong>Sites 与连接</strong><span>6–9h</span>
+            <p>私人界面、任务桥、访问及跨端下载。</p>
+          </div>
+          <div class="step">
+            <strong>整体验收</strong><span>2–5h</span>
+            <p>重复、中断、回滚、图文打开和数据保护。</p>
+          </div>
+        </div>
+        <p class="estimate">5–7 个工程工作日 · 25–42 小时</p>
+        <p class="note">
+          采购前8–13h、采购后17–29h；已完成的前期工作从总量扣除。最初9–13天的扩展范围已撤出必做。不含预算、供应商回复、用户授权及自然新文等待。若
+          B 仅签名层或需要自行补采集器，重新估算，不套用此排期。
+        </p>
+        <details>
+          <summary>建议首个 6 小时怎样开工</summary>
+          <p>
+            1h 固定内部合同 → 1.5h 批次幂等与中断测试 → 1.5h
+            来源优先级与旧绑定保护 → 1h 小红书合成身份/归档模型 → 1h
+            相关检查与交接。默认关闭来源，全部离线；按有用单元交付，不固定耗满6小时；明确来源接缝已交付，继续文件夹、统一界面、独立工具及
+            Sites 实际绑定。
+          </p>
+        </details>
+      </section>
+      <section>
+        <h2>审阅后需要确定的三件事</h2>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>决定</th>
+                <th>已有信息</th>
+                <th>开工门槛</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>付费来源</td>
+                <td>公众号复用 Wechat2RSS；小红书 A 为托管 API，B 等邮件。</td>
+                <td>确认覆盖、许可、持续依赖和真实样例。</td>
+              </tr>
+              <tr>
+                <td>每日预算</td>
+                <td>按作者列表调用和新图文详情调用计算，不预设无限请求。</td>
+                <td>用户设单次范围/金额，按实际费率核算。</td>
+              </tr>
+              <tr>
+                <td>跨端内容副本</td>
+                <td>SQLite 留本机；Sites 离线读全文需要最小云端副本。</td>
+                <td>确认同步范围、存储/传输条件和连接方式。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section id="documents">
+        <h2>完整文档包</h2>
+        <div class="documents">
+          <a href="../PAID_MULTIPLATFORM_PLAN.md"
+            >用户总览<small>方向、复用和下一次开工建议</small></a
+          >
+          <a href="PRODUCT_REQUIREMENTS.md"
+            >产品需求与验收<small>需求状态、成功定义和真实验收矩阵</small></a
+          >
+          <a href="FRONTEND_INTERACTIONS.md"
+            >前端交互<small>每日更新、阅读、保存及失败分支</small></a
+          >
+          <a href="BACKEND_CONTRACT.md"
+            >后端与接口契约<small>已有接口、拟新增内部合同和未知字段</small></a
+          >
+          <a href="TECHNICAL_DEPLOYMENT.md"
+            >技术与部署边界<small
+              >具体源码、供应商依据、Sites 和本机边界</small
+            ></a
+          >
+          <a href="DEVELOPMENT_PLAN.md"
+            >开发任务与排期<small>六小时首批、工作日计划和确认项</small></a
+          >
+        </div>
+      </section>
+      <footer>
+        离线文档 ·
+        无自动网络请求或产品任务操作。包含交互示例的交付版只使用虚构数据；源码及非私人技术文档通过原GitHub草稿PR同步。正式页面隔离浏览器核心流程已核，剩余项详见完整文档；Sites与真实供应商仍未接通。
+      </footer>
+    </main>
+  </body>
+</html>

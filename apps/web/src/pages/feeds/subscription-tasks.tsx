@@ -1,0 +1,548 @@
+import {
+  Button,
+  Progress,
+  Modal,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+} from '@nextui-org/react';
+import { useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
+import { trpc } from '@web/utils/trpc';
+
+type Props = {
+  feeds: { id: string; mpName: string }[];
+  adding: boolean;
+  onSaved: (reveal: boolean) => Promise<void>;
+};
+
+type Exception = {
+  key: string;
+  batchId?: string;
+  taskId?: string;
+  name: string;
+  state: string;
+  code?: string;
+};
+const notificationKey = 'wewe-subscription-notifications-v1';
+const emptyBatches: never[] = [];
+function readNotifications(): Record<string, string> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(notificationKey) || '{}');
+    return saved && typeof saved === 'object' && !Array.isArray(saved)
+      ? saved
+      : {};
+  } catch {
+    return {};
+  }
+}
+function reason(state: string, code?: string) {
+  if (code === 'SUBSCRIPTION_PAUSED') return '本地订阅已停用，已有内容保留。';
+  if (code === 'LEGACY_IDENTITY_UNVERIFIED')
+    return '部分旧文章身份待核实，已隔离并保留旧正文。';
+  if (code === 'CACHE_READ_FAILED') return '缓存读取未完成，请继续检查原请求。';
+  if (code === 'CACHE_IMAGES_PENDING')
+    return '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。';
+  return state === 'blocked'
+    ? '本条处理已暂停，请核对原请求状态。'
+    : '本条读取或处理未完成，请继续检查原请求。';
+}
+
+/** Durable local progress only; the backend owns submission and sequencing. */
+const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
+  const seen = useRef(new Map<string, string>());
+  const observed = useRef(false);
+  const busy = useRef(false);
+  const [refreshError, setRefreshError] = useState(false);
+  const [acting, setActing] = useState<string>();
+  const [actionError, setActionError] = useState('');
+  const batches = trpc.feed.subscriptionBatches.useQuery(undefined, {
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: (data, query) =>
+      query.state.status === 'error'
+        ? false
+        : adding ||
+            data?.items.some((batch) =>
+              ['queued', 'running'].includes(batch.state),
+            )
+          ? 3000
+          : false,
+    async onSuccess(data) {
+      const changes = data.items
+        .flatMap((batch) =>
+          batch.items.map((item) => ({
+            ...item,
+            batchState: batch.state,
+            key: `${batch.batchId}:${item.index}`,
+          })),
+        )
+        .filter(
+          (item) =>
+            seen.current.get(item.key) !==
+            `${item.batchState}:${item.state}:${item.feedId}:${item.listReady}:${item.bodyReady}:${item.metadataPending}:${item.code}`,
+        );
+      const firstRead = !observed.current;
+      observed.current = true;
+      // Seed persisted history before any asynchronous read. A failed view read
+      // must not turn every subsequent status response into another retry.
+      const fresh = changes.filter(
+        (item) => item.feedId && (!firstRead || adding),
+      );
+      for (const item of changes)
+        seen.current.set(
+          item.key,
+          `${item.batchState}:${item.state}:${item.feedId}:${item.listReady}:${item.bodyReady}:${item.metadataPending}:${item.code}`,
+        );
+      if (!fresh.length) return;
+      try {
+        await onSaved(true);
+        setRefreshError(false);
+      } catch {
+        setRefreshError(true);
+      }
+    },
+  });
+  const stop = trpc.feed.stopSubscriptionBatch.useMutation({ retry: false });
+  const resume = trpc.feed.resumeSubscriptionBatch.useMutation({
+    retry: false,
+  });
+  const act = async (batchId: string, action: 'stop' | 'resume') => {
+    if (busy.current) return;
+    busy.current = true;
+    setActing(batchId);
+    setActionError('');
+    try {
+      await (action === 'stop' ? stop : resume).mutateAsync({ batchId });
+      await batches.refetch({ throwOnError: true });
+    } catch {
+      setActionError('操作结果暂未确认，请重新读取进度后核对。');
+    } finally {
+      busy.current = false;
+      setActing(undefined);
+    }
+  };
+  const [exceptions, setExceptions] = useState<Exception[]>([]);
+  const items = batches.data?.items || emptyBatches;
+  const legacy = useLegacySubscriptionTasks({
+    feeds,
+    adding,
+    onSaved,
+    excluded: items.flatMap((batch) =>
+      batch.items.flatMap((item) => (item.taskId ? [item.taskId] : [])),
+    ),
+  });
+  useEffect(() => {
+    if (!refreshError) return;
+    const expected = items.flatMap((batch) =>
+      batch.items.flatMap((item) => (item.feedId ? [item.feedId] : [])),
+    );
+    if (
+      expected.length &&
+      expected.every((id) => feeds.some((feed) => feed.id === id))
+    )
+      setRefreshError(false);
+  }, [feeds, items, refreshError]);
+  const notified = useRef(readNotifications());
+  const initialized = useRef(false);
+  const activeBefore = useRef(new Set<string>());
+  const active = items.filter((batch) =>
+    ['queued', 'running', 'paused'].includes(batch.state),
+  );
+  useEffect(() => {
+    if (!batches.data) return;
+    const fresh: Exception[] = [];
+    const observe = (key: string, signature: string, exception: Exception) => {
+      const previous = notified.current[key];
+      if (
+        (['failed', 'blocked'].includes(exception.state) ||
+          exception.code === 'CACHE_IMAGES_PENDING') &&
+        previous !== signature &&
+        (initialized.current || adding || previous !== undefined)
+      )
+        fresh.push(exception);
+      notified.current[key] = signature;
+    };
+    for (const batch of batches.data.items) {
+      for (const item of batch.items)
+        observe(
+          `${batch.batchId}:${item.index}`,
+          item.code === 'CACHE_IMAGES_PENDING'
+            ? `${item.state}:${item.code}`
+            : item.state,
+          {
+            key: `${batch.batchId}:${item.index}`,
+            batchId: batch.batchId,
+            taskId:
+              item.code === 'CACHE_IMAGES_PENDING' ? item.taskId : undefined,
+            name:
+              feeds.find((feed) => feed.id === item.feedId)?.mpName ||
+              `第 ${item.index + 1} 条`,
+            state: item.state,
+            code: item.code,
+          },
+        );
+      if (
+        activeBefore.current.has(batch.batchId) &&
+        batch.state === 'completed' &&
+        batch.items.length > 0 &&
+        batch.items.every((item) => item.state === 'succeeded')
+      )
+        toast.success(
+          batch.items.some((item) => item.code === 'CACHE_IMAGES_PENDING')
+            ? `订阅已保留 ${batch.items.length} / 共 ${batch.items.length}；正文已同步；媒体完整性未确认，正文和有效图片可保存。`
+            : `添加完成 ${batch.items.length} / 共 ${batch.items.length}`,
+          { duration: 3000 },
+        );
+    }
+    const excluded = batches.data.items.flatMap((batch) =>
+      batch.items.flatMap((item) => (item.taskId ? [item.taskId] : [])),
+    );
+    for (const task of (legacy.tasks.data?.items || []).filter(
+      (task) => !excluded.includes(task.taskId),
+    )) {
+      if (
+        task.state === 'succeeded' &&
+        ['pending', 'running'].includes(notified.current[task.taskId])
+      )
+        toast.success(
+          task.code === 'CACHE_IMAGES_PENDING'
+            ? '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。'
+            : '添加完成 1 / 共 1',
+          { duration: 3000 },
+        );
+      observe(
+        task.taskId,
+        task.code === 'CACHE_IMAGES_PENDING'
+          ? `${task.state}:${task.code}`
+          : task.state,
+        {
+          key: task.taskId,
+          taskId: task.taskId,
+          name:
+            feeds.find((feed) => feed.id === task.feedId)?.mpName ||
+            '先前添加任务',
+          state: task.state,
+          code: task.code,
+        },
+      );
+    }
+    activeBefore.current = new Set(
+      batches.data.items
+        .filter((batch) =>
+          ['queued', 'running', 'paused'].includes(batch.state),
+        )
+        .map((batch) => batch.batchId),
+    );
+    initialized.current = true;
+    try {
+      localStorage.setItem(notificationKey, JSON.stringify(notified.current));
+    } catch {
+      /* In-memory dedup still applies. */
+    }
+    if (fresh.length)
+      setExceptions((previous) => [
+        ...previous.filter(
+          (old) => !fresh.some((item) => item.key === old.key),
+        ),
+        ...fresh,
+      ]);
+  }, [batches.data, legacy.tasks.data, adding, feeds]);
+  const closeExceptions = () => setExceptions([]);
+  const completed = active
+    .flatMap((batch) => batch.items)
+    .filter(
+      (item) => item.bodyReady === true && item.state === 'succeeded',
+    ).length;
+  const accepted =
+    active
+      .flatMap((batch) => batch.items)
+      .filter((item) => item.accepted ?? !!item.taskId).length +
+    legacy.pending.filter((task) => ['pending', 'running'].includes(task.state))
+      .length;
+  const total =
+    active.reduce((sum, batch) => sum + batch.items.length, 0) +
+    legacy.pending.filter((task) => ['pending', 'running'].includes(task.state))
+      .length;
+  const waiting = active.some((batch) =>
+    batch.items.some((item) => item.state === 'waiting'),
+  );
+  const paused = active.some((batch) => batch.state === 'paused');
+  return (
+    <>
+      {adding && total === 0 && (
+        <section
+          aria-label="订阅添加进度"
+          aria-live="polite"
+          className="subscription-progress-summary"
+        >
+          <Progress
+            aria-label="正在受理添加请求"
+            label="正在受理添加请求"
+            isIndeterminate
+            size="sm"
+          />
+        </section>
+      )}
+      {total > 0 && (
+        <section
+          aria-label="订阅添加进度"
+          aria-live="polite"
+          className="subscription-progress-summary"
+        >
+          <Progress
+            aria-label="已完成的订阅数量"
+            value={accepted}
+            maxValue={total}
+            showValueLabel={false}
+            label={`上游已受理 ${accepted} / 共 ${total} · 内容同步 ${completed}${paused ? ' · 提交已暂停' : waiting ? ' · 等待缓存' : ' · 处理中'}`}
+            size="sm"
+          />
+          {active.map((batch) => (
+            <Button
+              key={batch.batchId}
+              size="sm"
+              variant="light"
+              isDisabled={!!acting}
+              isLoading={acting === batch.batchId}
+              onPress={() => act(batch.batchId, 'stop')}
+            >
+              停止未执行项
+            </Button>
+          ))}
+          {active
+            .filter((batch) => batch.state === 'paused')
+            .map((batch) => (
+              <Button
+                key={`resume:${batch.batchId}`}
+                size="sm"
+                variant="light"
+                isDisabled={!!acting}
+                isLoading={acting === batch.batchId}
+                onPress={() => act(batch.batchId, 'resume')}
+              >
+                继续检查原请求
+              </Button>
+            ))}
+        </section>
+      )}
+      {(batches.isError ||
+        legacy.tasks.isError ||
+        refreshError ||
+        legacy.error) && (
+        <p role="status" className="px-3 text-xs">
+          {refreshError || legacy.error
+            ? '列表读取失败，请重新读取。'
+            : '进度暂时无法读取。'}
+          <Button
+            size="sm"
+            variant="light"
+            onPress={async () => {
+              if (refreshError || legacy.error) {
+                try {
+                  await onSaved(true);
+                  setRefreshError(false);
+                  legacy.setError(false);
+                } catch {
+                  setRefreshError(true);
+                }
+              } else {
+                await batches.refetch();
+                await legacy.tasks.refetch();
+              }
+            }}
+          >
+            重新读取进度
+          </Button>
+        </p>
+      )}
+      {actionError && <p role="alert">{actionError}</p>}
+      {legacy.recoverable.length > 0 && (
+        <details className="px-3 text-xs">
+          <summary>查看未完成任务（{legacy.recoverable.length}）</summary>
+          {legacy.recoverable.map((task) => (
+            <Button
+              key={task.taskId}
+              size="sm"
+              variant="light"
+              onPress={async () => {
+                if (legacy.busy.current) return;
+                legacy.busy.current = true;
+                try {
+                  await legacy.resume.mutateAsync({ taskId: task.taskId });
+                  await legacy.tasks.refetch({ throwOnError: true });
+                } catch {
+                  setActionError('状态读取失败，请重新读取。');
+                } finally {
+                  legacy.busy.current = false;
+                }
+              }}
+            >
+              {feeds.find((feed) => feed.id === task.feedId)?.mpName ||
+                '未完成任务'}
+              · 继续检查缓存
+            </Button>
+          ))}
+        </details>
+      )}
+      <Modal
+        isOpen={exceptions.length > 0}
+        onOpenChange={(open) => {
+          if (!open) closeExceptions();
+        }}
+        portalContainer={
+          typeof document === 'undefined' ? undefined : document.body
+        }
+        placement="center"
+        scrollBehavior="inside"
+        isKeyboardDismissDisabled={false}
+        classNames={{
+          backdrop: 'subscription-dialog-backdrop',
+          wrapper: 'subscription-dialog-overlay',
+          base: 'subscription-dialog',
+          header: 'subscription-dialog-header',
+          body: 'subscription-dialog-body',
+          footer: 'subscription-dialog-footer',
+          closeButton: 'subscription-dialog-close',
+        }}
+      >
+        <ModalContent>
+          <ModalHeader>添加需要处理（{exceptions.length} 条）</ModalHeader>
+          <ModalBody tabIndex={0} aria-label="添加异常">
+            <p role="alert">
+              {exceptions.every((item) => item.code === 'CACHE_IMAGES_PENDING')
+                ? '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。'
+                : '部分内容需要处理，已保存的订阅与正文保留。'}
+            </p>
+            <details className="subscription-task-reason">
+              <summary>查看需要处理的订阅</summary>
+              {exceptions.map((item) => (
+                <p key={item.key}>
+                  {item.name}：{reason(item.state, item.code)}
+                </p>
+              ))}
+            </details>
+            {[
+              ...new Set(
+                exceptions.flatMap((item) =>
+                  item.batchId &&
+                  items.some(
+                    (batch) =>
+                      batch.batchId === item.batchId &&
+                      batch.state === 'paused',
+                  )
+                    ? [item.batchId]
+                    : [],
+                ),
+              ),
+            ].map((batchId) => (
+              <Button
+                key={batchId}
+                isDisabled={!!acting}
+                isLoading={acting === batchId}
+                onPress={() => act(batchId, 'resume')}
+              >
+                继续检查原请求
+              </Button>
+            ))}
+            {exceptions
+              .filter((item) => item.taskId)
+              .map((item) => (
+                <Button
+                  key={item.key}
+                  onPress={async () => {
+                    if (legacy.busy.current) return;
+                    legacy.busy.current = true;
+                    try {
+                      await legacy.resume.mutateAsync({ taskId: item.taskId! });
+                      await legacy.tasks.refetch({ throwOnError: true });
+                    } catch {
+                      legacy.setError(true);
+                    } finally {
+                      legacy.busy.current = false;
+                    }
+                  }}
+                >
+                  继续检查原请求
+                </Button>
+              ))}
+          </ModalBody>
+          <ModalFooter>
+            <span className="text-xs">关闭提示不取消后台任务。</span>
+            <Button variant="flat" onPress={closeExceptions}>
+              知道了
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+    </>
+  );
+};
+
+export default SubscriptionTasks;
+
+/** Accepted tasks from before batch support remain recoverable after reload. */
+const useLegacySubscriptionTasks = ({
+  adding,
+  onSaved,
+  excluded = [],
+}: Props & { excluded?: string[] }) => {
+  const seen = useRef(new Map<string, string>());
+  const observed = useRef(false);
+  const busy = useRef(false);
+  const [error, setError] = useState(false);
+  const tasks = trpc.feed.subscriptionTasks.useQuery(undefined, {
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: (data, query) =>
+      query.state.status === 'error'
+        ? false
+        : data?.items.some(
+              (task) =>
+                (!excluded.includes(task.taskId) ||
+                  task.phase === 'metadata') &&
+                ['pending', 'running'].includes(task.state),
+            )
+          ? 3000
+          : false,
+    async onSuccess(data) {
+      const firstRead = !observed.current;
+      observed.current = true;
+      let changed = false;
+      for (const task of data.items) {
+        const key = `${task.state}:${task.feedId}:${task.phase}`;
+        if (seen.current.get(task.taskId) === key) continue;
+        seen.current.set(task.taskId, key);
+        if (
+          task.feedId &&
+          (!excluded.includes(task.taskId) || task.phase === 'metadata') &&
+          (!firstRead || adding)
+        )
+          changed = true;
+      }
+      if (!changed) return;
+      try {
+        await onSaved(true);
+        setError(false);
+      } catch {
+        setError(true);
+      }
+    },
+  });
+  const resume = trpc.feed.resumeSubscriptionTask.useMutation({ retry: false });
+  const pending =
+    tasks.data?.items.filter(
+      (task) =>
+        !!task.taskId &&
+        (!excluded.includes(task.taskId) || task.phase === 'metadata') &&
+        ['pending', 'running'].includes(task.state),
+    ) || [];
+  const recoverable =
+    tasks.data?.items.filter(
+      (task) => !excluded.includes(task.taskId) && task.state === 'failed',
+    ) || [];
+  return { pending, recoverable, tasks, error, setError, resume, busy };
+};

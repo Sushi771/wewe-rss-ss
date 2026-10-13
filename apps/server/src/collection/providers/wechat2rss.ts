@@ -1,8 +1,31 @@
 import { isIP } from 'node:net';
 import { parseWechat2RssJsonFeed } from '../provider-article';
 import { ProviderPage, SubscriptionProvider } from '../subscription-provider';
+import { canonicalArticleUrl } from '../collection-format';
+import { selectWechat2RssSingleCache } from '../../wechat2rss-single-cache';
+import { parseWechat2RssFeedAvatar } from '../wechat2rss-feed-avatar';
+import {
+  parseWechat2RssListMetadata,
+  Wechat2RssListMetadata,
+} from '../wechat2rss-list-metadata';
+import {
+  activeRefreshScheduleEnabled,
+  automaticSubmissionAllowed,
+} from '../../feeds/active-refresh-schedule';
 
-type ListedFeed = { id: number | string; name: string; link: string };
+type ListedFeed = Record<string, unknown> & {
+  id: number | string;
+  name: string;
+  link: string;
+  paused?: boolean;
+};
+export type Wechat2RssListedFeed = {
+  feedId: string;
+  name: string;
+  feedUrl: string;
+} & Wechat2RssListMetadata;
+type IdentityRead = { deadline: number; remainingListRequests: number };
+const IDENTITY_CHECK_EXPIRED = 'WECHAT2RSS_IDENTITY_CHECK_EXPIRED';
 
 function privateHost(hostname: string): boolean {
   if (
@@ -50,15 +73,20 @@ export class Wechat2RssProvider implements SubscriptionProvider {
   private async get(
     path: string,
     params: Record<string, string> = {},
+    deadline?: number,
+    format: 'json' | 'text' = 'json',
   ): Promise<unknown> {
     const url = new URL(path, this.base);
     for (const [key, value] of Object.entries(params))
       url.searchParams.set(key, value);
     url.searchParams.set('k', this.token);
+    const remaining = deadline === undefined ? 10000 : deadline - Date.now();
+    if (remaining <= 0) throw new Error(IDENTITY_CHECK_EXPIRED);
+    const signal = AbortSignal.timeout(Math.min(10000, remaining));
     try {
       const response = await fetch(url, {
         redirect: 'manual',
-        signal: AbortSignal.timeout(10000),
+        signal,
       });
       if (response.status !== 200 || !response.body)
         throw new Error('HTTP_STATUS');
@@ -76,8 +104,13 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         }
         parts.push(bytes);
       }
-      return JSON.parse(Buffer.concat(parts).toString('utf8'));
+      if (deadline !== undefined && Date.now() >= deadline)
+        throw new Error(IDENTITY_CHECK_EXPIRED);
+      const text = Buffer.concat(parts).toString('utf8');
+      return format === 'text' ? text : JSON.parse(text);
     } catch {
+      if (deadline !== undefined && (Date.now() >= deadline || signal.aborted))
+        throw new Error(IDENTITY_CHECK_EXPIRED);
       throw new Error('WECHAT2RSS_REQUEST_FAILED');
     }
   }
@@ -93,12 +126,36 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return raw as Record<string, unknown>;
   }
 
-  async listSubscriptions() {
-    const feeds: Array<{ feedId: string; name: string; feedUrl: string }> = [];
+  /** Optional metadata from the same already-subscribed cache. Never refreshes
+   * or registers a subscription, follows redirects or returns a secret URL. */
+  async fetchFeedAvatar(feedId: string): Promise<string | undefined> {
+    const match = /^MP_WXS_(\d{5,15})$/.exec(feedId);
+    if (!match) return undefined;
+    try {
+      return parseWechat2RssFeedAvatar(
+        await this.get(`/feed/${match[1]}.xml`, {}, undefined, 'text'),
+      );
+    } catch {
+      // Avatar failures must not turn successful article imports into failures.
+      return undefined;
+    }
+  }
+
+  async listSubscriptions(read?: IdentityRead) {
+    const feeds: Wechat2RssListedFeed[] = [];
     let total: number | null = null;
     for (let page = 1; page <= 20; page++) {
+      if (
+        read &&
+        (Date.now() >= read.deadline || read.remainingListRequests-- <= 0)
+      )
+        throw new Error(IDENTITY_CHECK_EXPIRED);
       const raw = this.envelope(
-        await this.get('/list', { page: String(page), size: '50' }),
+        await this.get(
+          '/list',
+          { page: String(page), size: '50' },
+          read?.deadline,
+        ),
       );
       if (
         !Array.isArray(raw.data) ||
@@ -113,7 +170,8 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         if (
           !/^\d{5,15}$/.test(id) ||
           typeof item.name !== 'string' ||
-          typeof item.link !== 'string'
+          typeof item.link !== 'string' ||
+          (item.paused !== undefined && typeof item.paused !== 'boolean')
         )
           throw new Error('WECHAT2RSS_LIST_INVALID');
         const link = new URL(item.link);
@@ -127,6 +185,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
           feedId: `MP_WXS_${id}`,
           name: item.name.trim(),
           feedUrl: link.pathname,
+          ...parseWechat2RssListMetadata(item),
         });
       }
       if (feeds.length >= total) break;
@@ -141,8 +200,8 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return feeds;
   }
 
-  async checkAccountStatus() {
-    const raw = this.envelope(await this.get('/login/list'));
+  async checkAccountStatus(deadline?: number) {
+    const raw = this.envelope(await this.get('/login/list', {}, deadline));
     if (!Array.isArray(raw.data))
       throw new Error('WECHAT2RSS_LOGIN_LIST_INVALID');
     const accounts = raw.data as Array<Record<string, unknown>>;
@@ -157,7 +216,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     };
   }
 
-  async addSubscription(articleUrl: string) {
+  async acceptSubscription(articleUrl: string) {
     const link = new URL(articleUrl);
     if (
       link.protocol !== 'https:' ||
@@ -174,10 +233,36 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     if (typeof raw.data !== 'string')
       throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
     const accepted = new URL(raw.data);
-    const matches = (await this.listSubscriptions()).filter(
-      (v) => v.feedUrl === accepted.pathname,
+    if (
+      !['http:', 'https:'].includes(accepted.protocol) ||
+      accepted.username ||
+      accepted.password ||
+      !/^\/feed\/[A-Za-z0-9_-]+\.(xml|json)$/.test(accepted.pathname)
+    )
+      throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
+    // Only a path is retained; host/query may include private configuration.
+    return accepted.pathname;
+  }
+
+  async resolveAcceptedSubscription(feedPath: string, read?: IdentityRead) {
+    if (!/^\/feed\/[A-Za-z0-9_-]+\.(xml|json)$/.test(feedPath))
+      throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
+    const matches = (await this.listSubscriptions(read)).filter(
+      (v) =>
+        v.feedUrl.replace(/\.json$/, '.xml') ===
+        feedPath.replace(/\.json$/, '.xml'),
     );
-    if (matches.length !== 1) throw new Error('WECHAT2RSS_ACCEPTED_ID_PENDING');
+    if (!matches.length) {
+      console.info('[WECHAT2RSS_IDENTITY_PENDING]', 'record-missing');
+      return null;
+    }
+    if (matches.length !== 1) throw new Error('WECHAT2RSS_LIST_CONFLICT');
+    // An accepted URL/ID may precede publisher metadata. Keep identity pending
+    // rather than creating an unnamed subscription from an incomplete cache.
+    if (!matches[0].name) {
+      console.info('[WECHAT2RSS_IDENTITY_PENDING]', 'publisher-name-pending');
+      return null;
+    }
     return {
       feedId: matches[0].feedId,
       name: matches[0].name,
@@ -185,13 +270,96 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     };
   }
 
-  async refreshSubscription(feedId: string) {
+  /** One foreground add: up to three list checks, six paginated GETs and 35s total.
+   * No /addurl replay, detached timer or background polling. */
+  async waitForAcceptedSubscription(feedPath: string) {
+    const read: IdentityRead = {
+      deadline: Date.now() + 35000,
+      remainingListRequests: 6,
+    };
+    try {
+      for (const delay of [0, 3000, 27000]) {
+        if (delay) {
+          if (
+            read.remainingListRequests <= 0 ||
+            Date.now() + delay >= read.deadline
+          )
+            return null;
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+          const account = await this.checkAccountStatus(read.deadline);
+          if (!account.available)
+            throw new Error(
+              account.challenged
+                ? 'WECHAT2RSS_ACCOUNT_CHALLENGED'
+                : 'WECHAT2RSS_ACCOUNT_UNAVAILABLE',
+            );
+        }
+        const accepted = await this.resolveAcceptedSubscription(feedPath, read);
+        if (accepted) return accepted;
+      }
+      return null;
+    } catch (error) {
+      if (error instanceof Error && error.message === IDENTITY_CHECK_EXPIRED)
+        return null;
+      throw error;
+    }
+  }
+
+  async addSubscription(articleUrl: string) {
+    const path = await this.acceptSubscription(articleUrl);
+    const accepted = await this.resolveAcceptedSubscription(path);
+    if (!accepted) throw new Error('WECHAT2RSS_ACCEPTED_ID_PENDING');
+    return accepted;
+  }
+
+  async refreshSubscription(feedId: string, automatic = false) {
     if (!/^MP_WXS_\d{5,15}$/.test(feedId))
       throw new Error('WECHAT2RSS_FEED_ID_INVALID');
-    if (!(await this.listSubscriptions()).some((v) => v.feedId === feedId))
-      throw new Error('WECHAT2RSS_SUBSCRIPTION_MISSING');
+    const subscription = (await this.listSubscriptions()).find(
+      (v) => v.feedId === feedId,
+    );
+    if (!subscription) throw new Error('WECHAT2RSS_SUBSCRIPTION_MISSING');
+    if (subscription.paused === true)
+      throw new Error('WECHAT2RSS_SUBSCRIPTION_PAUSED');
+    if (
+      automatic &&
+      (!activeRefreshScheduleEnabled(process.env) ||
+        !automaticSubmissionAllowed(Date.now()))
+    )
+      throw new Error('WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED');
     this.envelope(await this.get(`/add/${feedId.slice(7)}`));
     return { accepted: true as const, pending: true as const };
+  }
+
+  /** Read one already-subscribed cache only. No /addurl, /add or original-page fetch. */
+  async fetchSingleCachedArticle(articleUrl: string, expectedFeedId?: string) {
+    if (new URL(articleUrl).pathname.startsWith('/s/') && !expectedFeedId)
+      // The documented aggregate feed is read-only. It can prove a short-link
+      // alias only when that exact URL and its original identity share an item.
+      // Never pass an undocumented URL filter to /api/query or resolve via /addurl.
+      return selectWechat2RssSingleCache(
+        await this.get('/feed/all.json'),
+        articleUrl,
+      );
+    const identity = new URL(articleUrl).pathname.startsWith('/s/')
+      ? null
+      : canonicalArticleUrl(articleUrl);
+    const feedId = expectedFeedId || identity!.mpId;
+    if (
+      !/^MP_WXS_\d{5,15}$/.test(feedId) ||
+      (identity && identity.mpId !== feedId)
+    )
+      throw new Error('WECHAT2RSS_FEED_ID_INVALID');
+    const matches = (await this.listSubscriptions()).filter(
+      (v) => v.feedId === feedId,
+    );
+    if (matches.length !== 1)
+      throw new Error('WECHAT2RSS_SUBSCRIPTION_MISSING');
+    const raw = await this.get(matches[0].feedUrl.replace(/\.xml$/, '.json'));
+    const selected = selectWechat2RssSingleCache(raw, articleUrl);
+    if (selected && selected.mpId !== feedId)
+      throw new Error('WECHAT2RSS_ARTICLE_IDENTITY_CONFLICT');
+    return selected;
   }
 
   async fetchArticles(
@@ -209,5 +377,34 @@ export class Wechat2RssProvider implements SubscriptionProvider {
       throw new Error('WECHAT2RSS_SUBSCRIPTION_NAME_CHANGED');
     const path = matches[0].feedUrl.replace(/\.xml$/, '.json');
     return parseWechat2RssJsonFeed(await this.get(path), feedId);
+  }
+
+  /** Read one validated cache without replaying /list or submitting work. */
+  async fetchListedArticles(feed: Wechat2RssListedFeed, expectedName: string) {
+    if (
+      !/^MP_WXS_\d{5,15}$/.test(feed.feedId) ||
+      !/^\/feed\/[A-Za-z0-9_-]+\.(?:xml|json)$/.test(feed.feedUrl) ||
+      feed.name !== expectedName
+    )
+      throw new Error('WECHAT2RSS_SUBSCRIPTION_NAME_CHANGED');
+    return parseWechat2RssJsonFeed(
+      await this.get(feed.feedUrl.replace(/\.xml$/, '.json')),
+      feed.feedId,
+    );
+  }
+
+  /** Only a persisted accepted response may supply this path. A missing display
+   * name does not invalidate its numeric publisher identity or exact cache. */
+  async fetchAcceptedArticles(
+    feedPath: string,
+    feedId: string,
+  ): Promise<ProviderPage> {
+    const match = /^\/feed\/(\d{5,15})\.(?:xml|json)$/.exec(feedPath);
+    if (!match || feedId !== `MP_WXS_${match[1]}`)
+      throw new Error('WECHAT2RSS_FEED_ID_INVALID');
+    return parseWechat2RssJsonFeed(
+      await this.get(feedPath.replace(/\.xml$/, '.json')),
+      feedId,
+    );
   }
 }
