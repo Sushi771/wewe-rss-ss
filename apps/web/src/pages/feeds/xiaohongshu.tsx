@@ -591,7 +591,7 @@ export default function Xiaohongshu() {
             >
               刷新此博主
             </Button>
-            {scanning && (
+            {scanning && capability.data?.canPause && (
               <Button
                 size="sm"
                 variant="flat"

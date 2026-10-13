@@ -372,6 +372,7 @@ export class XiaohongshuService {
       platform: 'xiaohongshu' as const,
       sourceConfigured: !!this.source && this.source.configured !== false,
       canRefresh: !!this.source && this.source.configured !== false,
+      canPause: !!this.source?.pause && this.source.configured !== false,
       message:
         this.source && this.source.configured !== false
           ? '来源已注册，更新仍须核验真实身份及完整图文。'
@@ -446,7 +447,8 @@ export class XiaohongshuService {
   }
   async pauseScan(id: string) {
     const creator = await this.getCreator(id);
-    await this.source?.pause?.(creator);
+    if (!this.source?.pause) return fail('当前来源不支持安全暂停。');
+    await this.source.pause(creator);
     return {
       paused: true,
       message: '已请求暂停；当前请求完成后停止后续请求。',

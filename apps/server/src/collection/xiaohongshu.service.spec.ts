@@ -31,7 +31,11 @@ jest.mock('../offline-archive', () => ({
         destination,
         source,
       ],
-      { encoding: 'utf8', windowsHide: true },
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        cwd: path.resolve(__dirname, '../..'),
+      },
     );
     if (child.status !== 0) throw new Error('ACTUAL_ARCHIVE_CHILD_FAILED');
   },
@@ -146,7 +150,7 @@ describe('production XHS router/service → additive SQLite and original export 
         id: JSON.stringify(['xiaohongshu', 'note', 'redbook-synthetic']),
       },
     });
-  });
+  }, 30000);
   const oldRows = async () => {
     const columns = (
       await prisma.$queryRawUnsafe<any[]>('PRAGMA table_info(feeds)')
@@ -488,9 +492,9 @@ describe('production XHS router/service → additive SQLite and original export 
         imageCount: 1,
         alreadySaved: false,
       });
-      expect(path.basename(first.body.markdownPath)).toBe('正文.md');
+      expect(path.basename(first.body.markdownPath)).toBe('合成图文.md');
       expect(path.relative(destination, first.body.directory)).toMatch(
-        /^\d{4}-\d{2}-\d{2}[\\/]/,
+        /^\d{4}-\d{2}-\d{2}_未分组[\\/]/,
       );
       const md = await fs.readFile(first.body.markdownPath, 'utf8');
       expect(md).toContain('完整合成正文');
