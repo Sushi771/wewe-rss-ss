@@ -220,6 +220,7 @@ function render(capability, options = {}) {
     exports: module.exports,
     require: requireMock,
     console,
+    URLSearchParams,
     // Article-position DOM events are covered by the isolated browser suite.
     window: {},
   });

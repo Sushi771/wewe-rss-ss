@@ -79,17 +79,21 @@ export async function prepareWechat2RssSingleDownload(
       'WECHAT2RSS_SINGLE_IDENTITY_MISMATCH',
       'Wechat2RSS 缓存原文与输入链接不一致；未保存，不猜测文章身份。',
     );
-  const cached = prepareCachedArticleLocalExport({
-    id: article.id,
-    title: article.title,
-    sourceUrl: article.url,
-    contentHtml: article.contentHtml,
-    publishTime: article.publishTime,
-    metrics: null,
-    lastBodyStatus: article.contentHtml.includes('data-wewe-image-pending=')
-      ? 'images-pending'
-      : 'available',
-  });
+  const cached = prepareCachedArticleLocalExport(
+    {
+      id: article.id,
+      title: article.title,
+      sourceUrl: article.url,
+      contentHtml: article.contentHtml,
+      publishTime: article.publishTime,
+      metrics: null,
+      lastBodyStatus: article.contentHtml.includes('data-wewe-image-pending=')
+        ? 'images-pending'
+        : 'available',
+    },
+    undefined,
+    { maxImages: 60, maxBytes: 20_000_000 },
+  );
   const prepare: ArticlePreparation = async (directory) => {
     try {
       return { ...(await cached(directory)), source: 'wechat2rss' as const };

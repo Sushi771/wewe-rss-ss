@@ -25,6 +25,7 @@ export type CachedExportArticle = Pick<
 export function prepareCachedArticleLocalExport(
   article: CachedExportArticle,
   exportSource?: ArticleExportSource,
+  limits?: { maxImages: number; maxBytes: number },
 ) {
   const snapshot = { ...article };
   const prepare: ArticlePreparation = async (directory: string) => {
@@ -39,6 +40,7 @@ export function prepareCachedArticleLocalExport(
       directory,
       fetchAllowedImage,
       'image',
+      limits,
     );
     const markdown = snapshot.sourceUrl
       ? exported.markdown

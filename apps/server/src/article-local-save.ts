@@ -807,7 +807,7 @@ export class LocalArticleStore {
         if (added.length) {
           const companion = path.join(
             folder,
-            `.wewe-media-${identity}-${exportIdentity(added.join(','))}.md`,
+            `补齐图片-${identity}-${exportIdentity(added.join(','))}.md`,
           );
           const content =
             '# 补齐图片（原正文保留）\n\n' +

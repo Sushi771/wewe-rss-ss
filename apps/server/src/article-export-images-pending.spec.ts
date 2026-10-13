@@ -122,4 +122,37 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
     expect(exported.markdown).not.toContain('qpic.cn');
     expect(await readdir(join(folder, 'image'))).toHaveLength(1);
   });
+  it('retains single-tool image limits even for pending media and counts reused files', async () => {
+    const cached = {
+      ...article,
+      lastBodyStatus: 'available',
+      contentHtml:
+        '<div id="js_content"><p>body</p><img src="data:image/png;base64,' +
+        png.toString('base64') +
+        '"></div>',
+    };
+    await expect(
+      buildArticleMarkdown(cached, '', folder, jest.fn(), 'image', {
+        maxImages: 0,
+        maxBytes: 20_000_000,
+      }),
+    ).rejects.toThrow('上限');
+    await expect(
+      buildArticleMarkdown(
+        { ...cached, lastBodyStatus: 'images-pending' },
+        '',
+        folder,
+        jest.fn(),
+        'image',
+        { maxImages: 60, maxBytes: png.length - 1 },
+      ),
+    ).rejects.toThrow('上限');
+    // A pre-seeded valid file still counts towards the total budget.
+    await expect(
+      buildArticleMarkdown(cached, '', folder, jest.fn(), 'image', {
+        maxImages: 60,
+        maxBytes: png.length - 1,
+      }),
+    ).rejects.toThrow('上限');
+  });
 });

@@ -33,6 +33,7 @@ export async function buildArticleMarkdown(
   downloadPath?: string,
   imageFetcher = fetchAllowedImage,
   imageDirectory: 'attachments' | 'image' = 'attachments',
+  limits?: { maxImages: number; maxBytes: number },
 ) {
   const id = article.id;
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
@@ -86,6 +87,16 @@ export async function buildArticleMarkdown(
     }
 
     const imgs = contentEl.find('img').get();
+    if (
+      limits &&
+      imgs.filter((img) => $(img).attr('src') || $(img).attr('data-src'))
+        .length > limits.maxImages
+    )
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: '正文图片超过保存上限。',
+      });
+    let totalImageBytes = 0;
     await pMap(
       imgs,
       async (img) => {
@@ -122,8 +133,17 @@ export async function buildArticleMarkdown(
                 : await imageFetcher(dataSrc);
               await fs.promises.writeFile(localPath, image.bytes);
             }
+            if (limits) {
+              totalImageBytes += (await fs.promises.stat(localPath)).size;
+              if (totalImageBytes > limits.maxBytes)
+                throw new TRPCError({
+                  code: 'PRECONDITION_FAILED',
+                  message: '正文图片总字节超过保存上限。',
+                });
+            }
             $img.attr('src', `${imageDirectory}/${fileName}`);
-          } catch {
+          } catch (error) {
+            if (error instanceof TRPCError) throw error;
             if (!mediaComplete) {
               $img.remove();
               return;
@@ -132,7 +152,7 @@ export async function buildArticleMarkdown(
           }
         } else $img.remove();
       },
-      { concurrency: 5 },
+      { concurrency: limits ? 1 : 5 },
     );
   } else {
     // For browser export, we use proxy URLs

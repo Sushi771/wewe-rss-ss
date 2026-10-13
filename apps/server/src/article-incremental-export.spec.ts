@@ -148,7 +148,7 @@ describe('incremental export: synthetic files and mocked media only', () => {
     expect(await fs.readFile(first.markdownPath, 'utf8')).toBe('My notes');
     expect(
       (await fs.readdir(first.directory)).filter((name) =>
-        name.startsWith('.wewe-media-'),
+        name.startsWith('补齐图片-'),
       ),
     ).toHaveLength(1);
     expect((await store.save(prepare())).status).toBe('skipped');
