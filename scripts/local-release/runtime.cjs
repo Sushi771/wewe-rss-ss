@@ -322,10 +322,7 @@ async function runtime() {
         auditRoot: backgroundAudit,
         kind: values.production ? 'production' : 'test',
         backupRoot: values.production
-          ? path.resolve(
-              process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
-                path.join(path.dirname(database), 'backups/full-snapshots'),
-            )
+          ? require('./space-budget.cjs').productionRoot(database)
           : undefined,
       });
   }

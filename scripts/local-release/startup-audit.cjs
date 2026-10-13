@@ -50,7 +50,10 @@ function createStartupAudit(options, WorkerClass = Worker) {
         );
         worker.on('message', (message) => {
           if (message?.status === 'ready') finish('ready');
-          else if (message?.status === 'failed') finish('failed');
+          else if (message?.status === 'failed') {
+            state.reason = message.reason;
+            finish('failed');
+          }
         });
         worker.on('error', (error) => {
           console.error('Startup audit worker:', error);
@@ -79,10 +82,7 @@ if (!isMainThread) {
     const backupRoot =
       workerData.backupRoot ||
       (process.env.SQLITE_BACKUP_KIND === 'production'
-        ? path.resolve(
-            process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
-              path.join(path.dirname(database), 'backups/full-snapshots'),
-          )
+        ? require('./space-budget.cjs').productionRoot(database)
         : path.join(auditRoot, 'background-backup'));
     try {
       const baseline = path.join(auditRoot, 'background-baseline.json');
@@ -107,7 +107,12 @@ if (!isMainThread) {
       // Detailed diagnostics remain in the private service log; UI has a short
       // message and never exposes paths, records, credentials or raw evidence.
       console.error('Startup database audit failed:', error);
-      parentPort.postMessage({ status: 'failed' });
+      parentPort.postMessage({
+        status: 'failed',
+        reason: /SQLITE_SPACE_BUDGET_EXCEEDED/.test(error.message)
+          ? 'space-budget-exceeded'
+          : 'verification-failed',
+      });
     }
   })();
 }

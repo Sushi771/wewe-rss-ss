@@ -187,3 +187,16 @@ describe('startup audit lifecycle', () => {
     },
   );
 });
+
+describe('capacity failure message', () => {
+  afterEach(() => delete global.__weweStartupAudit);
+  it('keeps reads available while explaining protected writes paused for capacity', () => {
+    global.__weweStartupAudit = {
+      status: 'failed',
+      reason: 'space-budget-exceeded',
+    };
+    const { startupMessage } = require('./startup-audit');
+    expect(startupMessage()).toContain('备份空间预算不足');
+    expect(startupMessage()).toContain('已有恢复点保留');
+  });
+});

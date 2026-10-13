@@ -277,6 +277,7 @@ function sourceIdentity(database) {
   return [database, database + '-wal'].map((file) => {
     try {
       const stat = fs.statSync(file, { bigint: true });
+      if (file.endsWith('-wal') && stat.size === 0n) return null;
       return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(
         String,
       );
@@ -285,6 +286,54 @@ function sourceIdentity(database) {
       throw error;
     }
   });
+}
+function snapshotEqual(source, copied) {
+  const schema = (connection) =>
+    connection
+      .prepare(
+        'SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name',
+      )
+      .all();
+  try {
+    assert.deepEqual(schema(source), schema(copied));
+  } catch {
+    return false;
+  }
+  for (const { name } of source
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    .all()) {
+    const info = source.prepare(`PRAGMA table_info(${quote(name)})`).all();
+    const primary = info
+      .filter((row) => row.pk)
+      .sort((a, b) => a.pk - b.pk)
+      .map((row) => quote(row.name));
+    const query = `SELECT ${info.map((row) => quote(row.name)).join(',')} FROM ${quote(name)} ORDER BY ${primary.length ? primary.join(',') : 'rowid'}`;
+    const rows = (connection) => {
+      const statement = connection.prepare(query);
+      statement.setReadBigInts(true);
+      statement.setReturnArrays(true);
+      return statement.iterate();
+    };
+    const original = rows(source),
+      duplicate = rows(copied);
+    for (;;) {
+      const left = original.next(),
+        right = duplicate.next();
+      if (left.done || right.done) {
+        if (left.done !== right.done) return false;
+        break;
+      }
+      if (left.value.length !== right.value.length) return false;
+      for (let i = 0; i < left.value.length; i++) {
+        const a = left.value[i],
+          b = right.value[i];
+        if (a instanceof Uint8Array && b instanceof Uint8Array) {
+          if (!Buffer.from(a).equals(Buffer.from(b))) return false;
+        } else if (!Object.is(a, b)) return false;
+      }
+    }
+  }
+  return true;
 }
 async function prepareStart(database, migrations, backupRoot, baselineFile) {
   database = fs.realpathSync(database);
@@ -296,27 +345,36 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
   try {
     const previous = JSON.parse(fs.readFileSync(receipt, 'utf8'));
     if (
-      previous.native === true &&
       previous.source === database &&
-      (JSON.stringify(previous.sourceIdentity) === JSON.stringify(identity) ||
-        (previous.sourceFilesSha256 &&
-          JSON.stringify(budget.sourceHashes(database)) ===
-            JSON.stringify(previous.sourceFilesSha256))) &&
       budget.inside(backupRoot, budget.canonical(previous.backup)) &&
       fileHash(previous.backup) === previous.sha256
     ) {
-      inspectDatabase(previous.backup, migrations, { schemaOnly: true });
-      const inspection = inspectDatabase(database, migrations);
-      assert.deepEqual(
-        sourceIdentity(database),
-        identity,
-        'SQLite source changed during reuse',
-      );
-      writeJson(baselineFile, inspection);
-      return { backup: { ...previous, reused: true }, inspection };
+      const source = open(database),
+        copied = open(previous.backup);
+      try {
+        if (snapshotEqual(source, copied)) {
+          inspectConnection(copied, previous.backup, migrations, {
+            schemaOnly: true,
+          });
+          const inspection = inspectConnection(source, database, migrations);
+          if (fileHash(previous.backup) !== previous.sha256)
+            throw new Error('Recovery point changed during verification');
+          writeJson(baselineFile, inspection);
+          return {
+            backup: {
+              ...previous,
+              reused: true,
+              reuseProof: 'all-schema-and-typed-rows-pinned-snapshot-v1',
+            },
+            inspection,
+          };
+        }
+      } finally {
+        source.close();
+        copied.close();
+      }
     }
   } catch (error) {
-    // Missing or invalid receipts force a fresh verified snapshot within budget.
     if (fs.existsSync(baselineFile)) throw error;
   }
   const scope =
@@ -326,10 +384,9 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
   if (!budget.inside(budget.canonical(scope), backupRoot))
     throw new Error('Backup escapes test budget root');
   budget.preflight(scope, budget.estimate(database));
-  const unlock = budget.lease(backupRoot);
+  const unlock = budget.lease(scope);
   try {
     budget.preflight(scope, budget.estimate(database));
-    const content = budget.sourceHashes(database);
     const result = await freshPrepareStart(
       database,
       migrations,
@@ -338,7 +395,6 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
     );
     Object.assign(result.backup, {
       sourceIdentity: identity,
-      sourceFilesSha256: content,
       native: true,
       reused: false,
     });
@@ -404,6 +460,17 @@ async function freshPrepareStart(
       }
     } finally {
       duplicate.close();
+    }
+    const current = open(database),
+      verified = open(destination);
+    try {
+      assert(
+        snapshotEqual(current, verified),
+        'SQLite source changed during startup backup',
+      );
+    } finally {
+      current.close();
+      verified.close();
     }
     connection.close();
     assert.deepEqual(

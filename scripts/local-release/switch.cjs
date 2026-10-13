@@ -314,10 +314,7 @@ async function controlledSwitch(options) {
             '--backup-root',
             rehearsal
               ? path.join(audit, name)
-              : path.resolve(
-                  process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
-                    path.join(path.dirname(source), 'backups/full-snapshots'),
-                ),
+              : require('./space-budget.cjs').productionRoot(source),
           ],
           { env },
         ),

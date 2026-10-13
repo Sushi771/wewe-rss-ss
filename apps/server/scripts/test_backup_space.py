@@ -36,7 +36,7 @@ class BackupSpaceTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as db, db:
             db.execute('UPDATE articles SET body="changed"')
         with patch.dict(os.environ, {'SQLITE_PRODUCTION_MAX_COPIES': '1'}):
-            with self.assertRaisesRegex(ValueError, 'budget exceeded'):
+            with self.assertRaisesRegex(ValueError, 'SPACE_BUDGET_EXCEEDED'):
                 backup.create_backup(self.database, self.backups)
         self.assertEqual(Path(first['backup']).read_bytes(), saved)
         self.assertEqual(len(list(self.backups.rglob('*.db'))), 1)
@@ -50,7 +50,7 @@ class BackupSpaceTests(unittest.TestCase):
     def test_free_space_byte_and_count_checks_happen_before_database_generation(self):
         for settings in [{'SQLITE_PRODUCTION_MAX_BYTES': '1'}, {'SQLITE_PRODUCTION_MIN_FREE_BYTES': str(2**60)}]:
             with patch.dict(os.environ, settings):
-                with self.assertRaisesRegex(ValueError, 'budget exceeded'):
+                with self.assertRaisesRegex(ValueError, 'SPACE_BUDGET_EXCEEDED'):
                     backup.create_backup(self.database, self.backups)
             self.assertFalse(self.backups.exists())
     def test_nested_destination_refused_and_failed_attempts_count_against_budget(self):
@@ -59,7 +59,7 @@ class BackupSpaceTests(unittest.TestCase):
         self.backups.mkdir()
         (self.backups/'failed.db').write_bytes(b'partial previous attempt')
         with patch.dict(os.environ, {'SQLITE_PRODUCTION_MAX_COPIES': '1'}):
-            with self.assertRaisesRegex(ValueError, 'budget exceeded'):
+            with self.assertRaisesRegex(ValueError, 'SPACE_BUDGET_EXCEEDED'):
                 backup.create_backup(self.database, self.backups)
         self.assertEqual((self.backups/'failed.db').read_bytes(), b'partial previous attempt')
     def test_wal_change_invalidates_reuse(self):
@@ -87,9 +87,37 @@ class BackupSpaceTests(unittest.TestCase):
     def test_test_budget_scans_aggregate_sibling_runs(self):
         sibling = self.root/'run-old'; sibling.mkdir(); (sibling/'old.db').write_bytes(b'old')
         with patch.dict(os.environ, {'SQLITE_BACKUP_KIND': 'test', 'SQLITE_TEST_BUDGET_ROOT': str(self.root), 'SQLITE_TEST_MAX_COPIES': '2'}):
-            with self.assertRaisesRegex(ValueError, 'budget exceeded'):
+            with self.assertRaisesRegex(ValueError, 'SPACE_BUDGET_EXCEEDED'):
                 backup.create_backup(self.database, self.backups)
         self.assertEqual((sibling/'old.db').read_bytes(), b'old')
+
+    def test_frozen_metadata_does_not_skip_a_changed_consistent_snapshot(self):
+        first = backup.create_backup(self.database, self.backups)
+        identity = backup.source_identity(self.database)
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute('UPDATE articles SET body="modified!"')
+        with patch.object(backup, 'source_identity', return_value=identity):
+            second = backup.create_backup(self.database, self.backups)
+            self.assertFalse(second['reused'])
+            self.assertNotEqual(first['backup'], second['backup'])
+            same = backup.create_backup(self.database, self.backups)
+            self.assertTrue(same['reused'])
+            self.assertIn('pinned-snapshot', same['reuseProof'])
+
+    def test_explicit_legacy_roots_count_history_without_authorizing_mutation(self):
+        legacy = self.root/'legacy'; legacy.mkdir(); (legacy/'unique.db').write_bytes(b'unique recovery point')
+        self.backups.mkdir()
+        if os.name == 'nt':
+            import subprocess
+            subprocess.run(['powershell','-NoProfile','-Command',f"New-Item -ItemType Junction -Path '{self.backups/'old'}' -Target '{legacy}' | Out-Null"],check=True)
+        else:
+            (self.backups/'old').symlink_to(legacy,target_is_directory=True)
+        with self.assertRaisesRegex(ValueError,'LAYOUT_REQUIRES_REVIEW'):
+            backup.space_preflight(self.database,self.backups)
+        with patch.dict(os.environ,{'SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)]),'SQLITE_PRODUCTION_MAX_COPIES':'1'}):
+            with self.assertRaisesRegex(ValueError,'SPACE_BUDGET_EXCEEDED'):
+                backup.space_preflight(self.database,self.backups)
+        self.assertEqual((legacy/'unique.db').read_bytes(),b'unique recovery point')
 
 if __name__ == '__main__':
     unittest.main()

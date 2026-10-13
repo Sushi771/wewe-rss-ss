@@ -39,7 +39,7 @@ function begin({
       ? budget.estimate(source) * 8 + 16 * 1024 ** 2
       : 16 * 1024 ** 2;
     budget.preflight(root, requestedBytes, 8);
-    unlock = budget.lease(root);
+    unlock = budget.lease(root, '.test-run.lock');
     const planned = budget.preflight(root, requestedBytes, 8);
     const audit = path.join(root, 'run-' + crypto.randomUUID());
     fs.mkdirSync(audit);
@@ -126,8 +126,7 @@ function begin({
       },
     };
   } catch (error) {
-    if (unlock && fs.existsSync(path.join(root, '.space-budget.lock')))
-      unlock();
+    if (unlock && fs.existsSync(path.join(root, '.test-run.lock'))) unlock();
     if (previousKind === undefined) delete process.env.SQLITE_BACKUP_KIND;
     else process.env.SQLITE_BACKUP_KIND = previousKind;
     if (previousRoot === undefined) delete process.env.SQLITE_TEST_BUDGET_ROOT;

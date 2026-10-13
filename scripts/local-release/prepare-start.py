@@ -30,6 +30,8 @@ def source_identity(database):
     for file in (database, Path(str(database) + "-wal")):
         try:
             stat = file.stat()
+            if str(file).endswith('-wal') and stat.st_size == 0:
+                result.append(None); continue
             result.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
         except FileNotFoundError:
             result.append(None)
@@ -84,18 +86,16 @@ def prepare(database, migrations, backup_root, baseline_file):
         return {'backup': previous, 'inspection': before}
     backup_api.space_preflight(database, backup_root)
     backup_root.mkdir(parents=True, exist_ok=True)
-    lease = backup_root / '.space-budget.lock'
+    lease = Path(backup_api.space_preflight(database, backup_root)['root']) / '.space-budget.lock'
     with lease.open('x', encoding='utf-8') as stream:
         stream.write(str(__import__('os').getpid()))
     try:
         backup_api.space_preflight(database, backup_root)
         identity = backup_api.source_identity(database)
-        content = backup_api.source_hashes(database)
         result = fresh_prepare(database, migrations, backup_root, baseline_file)
         if identity != backup_api.source_identity(database):
             raise ValueError('SQLite source changed before backup receipt')
         result['backup']['sourceIdentity'] = identity
-        result['backup']['sourceFilesSha256'] = content
         receipt = backup_root / ('.latest-' + hashlib.sha256(str(database).encode()).hexdigest()[:24] + '.json')
         receipt.write_text(json.dumps(result['backup']), encoding='utf-8')
         return result

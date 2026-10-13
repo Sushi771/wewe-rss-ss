@@ -180,10 +180,7 @@ async function controlledRestart(options) {
             database,
             '--backup-root',
             options.production
-              ? path.resolve(
-                  process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
-                    path.join(path.dirname(source), 'backups/full-snapshots'),
-                )
+              ? require('./space-budget.cjs').productionRoot(source)
               : path.join(audit, folder),
           ],
           { env },
@@ -354,10 +351,7 @@ async function controlledRestart(options) {
                   options.production
                     ? path.resolve(
                         process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
-                          path.join(
-                            path.dirname(source),
-                            'backups/full-snapshots',
-                          ),
+                          path.join(path.dirname(source), 'backups'),
                       )
                     : path.join(audit, 'before-start'),
                   '--baseline',
@@ -380,10 +374,7 @@ async function controlledRestart(options) {
                   options.production
                     ? path.resolve(
                         process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
-                          path.join(
-                            path.dirname(source),
-                            'backups/full-snapshots',
-                          ),
+                          path.join(path.dirname(source), 'backups'),
                       )
                     : path.join(audit, 'before-start'),
                   baseline,
