@@ -314,3 +314,32 @@ describe('SQLite backup gate (mock processes and filesystem only)', () => {
     await expect(operation).rejects.toThrow('备份超时');
   });
 });
+
+describe('production root and actionable capacity failure', () => {
+  const original = { ...process.env };
+  afterEach(() => {
+    for (const key of Object.keys(process.env))
+      if (!(key in original)) delete process.env[key];
+    Object.assign(process.env, original);
+    jest.useRealTimers();
+  });
+  it('collection writes use the configured root and explain budget stops without exposing paths', async () => {
+    start.mockReset();
+    checkAccess.mockReset().mockResolvedValue(undefined);
+    resolvePath.mockReset().mockResolvedValue(database);
+    process.env.DATABASE_URL = 'file:' + database;
+    process.env.SQLITE_PRODUCTION_BACKUP_ROOT = path.resolve(
+      'configured-production-backups',
+    );
+    const child = fakeBackup(),
+      operation = createVerifiedSqliteBackup();
+    const rejected = expect(operation).rejects.toThrow('备份空间预算不足');
+    await waitForSpawn();
+    expect(start.mock.calls[0][1]).toContain(
+      process.env.SQLITE_PRODUCTION_BACKUP_ROOT,
+    );
+    child.stderr.write('SQLITE_SPACE_BUDGET_EXCEEDED: private path');
+    child.emit('close', 1, null);
+    await rejected;
+  });
+});

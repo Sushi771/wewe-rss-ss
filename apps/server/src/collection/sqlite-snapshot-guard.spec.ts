@@ -79,6 +79,20 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
     process.chdir(originalCwd);
   });
 
+  it('periodic snapshots use the exact configured production root', async () => {
+    process.env.SQLITE_PRODUCTION_BACKUP_ROOT = path.join(
+      root,
+      'configured-backups',
+    );
+    const owner = await newOwner();
+    await waitForLease(owner);
+    expect(
+      (await readdir(process.env.SQLITE_PRODUCTION_BACKUP_ROOT)).some((name) =>
+        name.startsWith('periodic-snapshot-'),
+      ),
+    ).toBe(true);
+    await expect(readdir(path.join(root, 'backups'))).rejects.toThrow();
+  });
   it('defaults to rejection with scheduling disabled', async () => {
     process.env.SQLITE_PERIODIC_SNAPSHOT_ENABLED = '0';
     const owner = await newOwner();

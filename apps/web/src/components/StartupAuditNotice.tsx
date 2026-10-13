@@ -6,7 +6,7 @@ export default function StartupAuditNotice() {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     const check = async () => {
-      let done = false;
+      let delay = 1500;
       try {
         const response = await fetch('/startup-status', {
           cache: 'no-store',
@@ -15,12 +15,12 @@ export default function StartupAuditNotice() {
         if (response.ok) {
           const state = await response.json();
           if (!cancelled) setMessage(state.message || '');
-          done = state.status === 'ready';
+          delay = state.status === 'ready' ? 30000 : 1500;
         }
       } catch {
         /* A disconnected service must never be described as ready. */
       }
-      if (!cancelled && !done) timer = setTimeout(check, 1500);
+      if (!cancelled) timer = setTimeout(check, delay);
     };
     void check();
     return () => {

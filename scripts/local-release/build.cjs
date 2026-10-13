@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const { parseArgs } = require('node:util');
 const { verifySourceSnapshot } = require('./verify-source.cjs');
 const { bundleServer } = require('./compact.cjs');
+const buildBudget = require('./build-budget.cjs');
 const {
   slash,
   readJson,
@@ -224,225 +225,245 @@ function build(options = {}) {
   const sourceHash = hash(JSON.stringify(inputs));
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
   const release = path.join(root, '.local-releases', id);
-  fs.mkdirSync(release, { recursive: false });
-  const target = path.join(release, 'server');
-  fs.mkdirSync(target);
-  const workspace = path.join(release, 'build');
-  fs.mkdirSync(workspace);
-  const client = path.join(target, 'node_modules/.store/generated-prisma');
-  const installed = packageDir('@prisma/client', server);
-  const originalClient = path.dirname(
-    require.resolve('.prisma/client', { paths: [installed] }),
+  const reservation = buildBudget.begin(
+    path.dirname(release),
+    buildBudget.estimate(sourceServer),
   );
-  const engine = path.join(originalClient, 'query_engine-windows.dll.node');
-  const schema = fs
-    .readFileSync(path.join(sourceServer, 'prisma/schema.prisma'), 'utf8')
-    .replace(
-      'provider      = "prisma-client-js"',
-      `provider = "node ${slash(path.join(installed, 'generator-build/index.js'))}"\n  output = "${slash(client)}"`,
-    )
-    .replace(
-      'binaryTargets = ["native", "linux-musl"]',
-      'binaryTargets = ["native"]',
+  let failure;
+  try {
+    reservation.create(release);
+    const target = path.join(release, 'server');
+    fs.mkdirSync(target);
+    const workspace = path.join(release, 'build');
+    fs.mkdirSync(workspace);
+    const client = path.join(target, 'node_modules/.store/generated-prisma');
+    const installed = packageDir('@prisma/client', server);
+    const originalClient = path.dirname(
+      require.resolve('.prisma/client', { paths: [installed] }),
     );
-  fs.writeFileSync(path.join(workspace, 'schema.prisma'), schema);
-  const env = cleanEnvironment({
-    NODE_ENV: 'production',
-    PRISMA_GENERATE_SKIP_AUTOINSTALL: '1',
-  });
-  const cli = path.join(packageDir('prisma', server), 'build/index.js');
-  fs.writeFileSync(
-    path.join(workspace, 'generate.log'),
-    run(
-      process.execPath,
-      [cli, 'generate', '--schema', path.join(workspace, 'schema.prisma')],
-      { cwd: server, env: { ...env, PRISMA_QUERY_ENGINE_LIBRARY: engine } },
-    ),
-  );
-  if (
-    fileHash(path.join(client, 'query_engine-windows.dll.node')) !==
-    fileHash(engine)
-  )
-    throw new Error('生成的 Prisma 引擎与现有 Client 不匹配');
-  const paths = {
-    '@server/*': [slash(path.join(sourceServer, 'src/*'))],
-    '@wewe-rss/shared': [
-      slash(path.join(sourceRoot, 'packages/shared/src/index.ts')),
-    ],
-    '@prisma/client': [slash(client)],
-  };
-  const tsconfig = path.join(workspace, 'tsconfig.json');
-  writeJson(tsconfig, {
-    extends: slash(path.join(sourceServer, 'tsconfig.build.json')),
-    compilerOptions: {
-      paths,
-      typeRoots: [slash(path.join(server, 'node_modules/@types'))],
-      incremental: false,
-      sourceMap: false,
-      declaration: false,
-      outDir: slash(path.join(target, 'dist')),
-    },
-  });
-  const tsc = path.join(packageDir('typescript', server), 'bin/tsc');
-  run(process.execPath, [tsc, '-p', tsconfig], { cwd: sourceServer, env });
-  const compiledRoot = path.join(target, 'dist/apps/server/src');
-  walk(path.join(target, 'dist'), (relative, kind) => {
-    if (kind !== 'file' || !relative.endsWith('.js')) return;
-    const file = path.join(target, 'dist', relative);
-    const rewritten = fs
-      .readFileSync(file, 'utf8')
+    const engine = path.join(originalClient, 'query_engine-windows.dll.node');
+    const schema = fs
+      .readFileSync(path.join(sourceServer, 'prisma/schema.prisma'), 'utf8')
       .replace(
-        /require\(["'](@server\/[^"']+|@wewe-rss\/shared)["']\)/g,
-        (_, name) => {
-          const resolved =
-            name === '@wewe-rss/shared'
-              ? path.join(target, 'dist/packages/shared/src/index')
-              : path.join(compiledRoot, name.slice('@server/'.length));
-          let local = slash(path.relative(path.dirname(file), resolved));
-          if (!local.startsWith('.')) local = './' + local;
-          if (!fs.existsSync(resolved + '.js'))
-            throw new Error(`编译别名未找到: ${name}`);
-          return `require(${JSON.stringify(local)})`;
-        },
+        'provider      = "prisma-client-js"',
+        `provider = "node ${slash(path.join(installed, 'generator-build/index.js'))}"\n  output = "${slash(client)}"`,
+      )
+      .replace(
+        'binaryTargets = ["native", "linux-musl"]',
+        'binaryTargets = ["native"]',
       );
-    fs.writeFileSync(file, rewritten);
-  });
-  const web = sourceWeb;
-  const webConfig = path.join(workspace, 'tsconfig.web.json');
-  writeJson(webConfig, {
-    extends: slash(path.join(web, 'tsconfig.json')),
-    compilerOptions: {
-      paths: { ...paths, '@web/*': [slash(path.join(web, 'src/*'))] },
-      typeRoots: [
-        slash(path.join(web, 'node_modules/@types')),
-        slash(path.join(server, 'node_modules/@types')),
+    fs.writeFileSync(path.join(workspace, 'schema.prisma'), schema);
+    const env = cleanEnvironment({
+      NODE_ENV: 'production',
+      PRISMA_GENERATE_SKIP_AUTOINSTALL: '1',
+    });
+    const cli = path.join(packageDir('prisma', server), 'build/index.js');
+    fs.writeFileSync(
+      path.join(workspace, 'generate.log'),
+      run(
+        process.execPath,
+        [cli, 'generate', '--schema', path.join(workspace, 'schema.prisma')],
+        { cwd: server, env: { ...env, PRISMA_QUERY_ENGINE_LIBRARY: engine } },
+      ),
+    );
+    if (
+      fileHash(path.join(client, 'query_engine-windows.dll.node')) !==
+      fileHash(engine)
+    )
+      throw new Error('生成的 Prisma 引擎与现有 Client 不匹配');
+    const paths = {
+      '@server/*': [slash(path.join(sourceServer, 'src/*'))],
+      '@wewe-rss/shared': [
+        slash(path.join(sourceRoot, 'packages/shared/src/index.ts')),
       ],
-      incremental: false,
-    },
-  });
-  run(process.execPath, [tsc, '-p', webConfig, '--noEmit'], { cwd: web, env });
-  if (legacy) {
-    fs.writeFileSync(
-      path.join(workspace, 'web.log'),
-      run(
-        process.execPath,
-        [
-          path.join(__dirname, 'build-legacy-web.cjs'),
-          sourceWeb,
-          path.join(target, 'client'),
+      '@prisma/client': [slash(client)],
+    };
+    const tsconfig = path.join(workspace, 'tsconfig.json');
+    writeJson(tsconfig, {
+      extends: slash(path.join(sourceServer, 'tsconfig.build.json')),
+      compilerOptions: {
+        paths,
+        typeRoots: [slash(path.join(server, 'node_modules/@types'))],
+        incremental: false,
+        sourceMap: false,
+        declaration: false,
+        outDir: slash(path.join(target, 'dist')),
+      },
+    });
+    const tsc = path.join(packageDir('typescript', server), 'bin/tsc');
+    run(process.execPath, [tsc, '-p', tsconfig], { cwd: sourceServer, env });
+    const compiledRoot = path.join(target, 'dist/apps/server/src');
+    walk(path.join(target, 'dist'), (relative, kind) => {
+      if (kind !== 'file' || !relative.endsWith('.js')) return;
+      const file = path.join(target, 'dist', relative);
+      const rewritten = fs
+        .readFileSync(file, 'utf8')
+        .replace(
+          /require\(["'](@server\/[^"']+|@wewe-rss\/shared)["']\)/g,
+          (_, name) => {
+            const resolved =
+              name === '@wewe-rss/shared'
+                ? path.join(target, 'dist/packages/shared/src/index')
+                : path.join(compiledRoot, name.slice('@server/'.length));
+            let local = slash(path.relative(path.dirname(file), resolved));
+            if (!local.startsWith('.')) local = './' + local;
+            if (!fs.existsSync(resolved + '.js'))
+              throw new Error(`编译别名未找到: ${name}`);
+            return `require(${JSON.stringify(local)})`;
+          },
+        );
+      fs.writeFileSync(file, rewritten);
+    });
+    const web = sourceWeb;
+    const webConfig = path.join(workspace, 'tsconfig.web.json');
+    writeJson(webConfig, {
+      extends: slash(path.join(web, 'tsconfig.json')),
+      compilerOptions: {
+        paths: { ...paths, '@web/*': [slash(path.join(web, 'src/*'))] },
+        typeRoots: [
+          slash(path.join(web, 'node_modules/@types')),
+          slash(path.join(server, 'node_modules/@types')),
         ],
-        { cwd: root, env },
-      ),
-    );
-  } else {
-    fs.writeFileSync(
-      path.join(workspace, 'web.log'),
-      run(
-        process.execPath,
-        [
-          path.join(packageDir('vite', web), 'bin/vite.js'),
-          'build',
-          '--outDir',
-          path.join(target, 'client'),
-        ],
-        { cwd: web, env },
-      ),
-    );
-  }
-  fs.cpSync(path.join(sourceServer, 'prisma'), path.join(target, 'prisma'), {
-    recursive: true,
-  });
-  if (legacy)
-    fs.cpSync(
-      path.join(server, 'prisma/migrations'),
-      path.join(release, 'known-migrations'),
-      { recursive: true },
-    );
-  fs.mkdirSync(path.join(target, 'scripts'));
-  for (const file of [
-    'backup-sqlite.py',
-    ...(legacy ? [] : ['sqlite-snapshot-guard.py']),
-    'verify-preservation.py',
-    'watch-wechat2rss-cache.py',
-    'read-wechat2rss-cache.py',
-  ])
+        incremental: false,
+      },
+    });
+    run(process.execPath, [tsc, '-p', webConfig, '--noEmit'], {
+      cwd: web,
+      env,
+    });
+    if (legacy) {
+      fs.writeFileSync(
+        path.join(workspace, 'web.log'),
+        run(
+          process.execPath,
+          [
+            path.join(__dirname, 'build-legacy-web.cjs'),
+            sourceWeb,
+            path.join(target, 'client'),
+          ],
+          { cwd: root, env },
+        ),
+      );
+    } else {
+      fs.writeFileSync(
+        path.join(workspace, 'web.log'),
+        run(
+          process.execPath,
+          [
+            path.join(packageDir('vite', web), 'bin/vite.js'),
+            'build',
+            '--outDir',
+            path.join(target, 'client'),
+          ],
+          { cwd: web, env },
+        ),
+      );
+    }
+    fs.cpSync(path.join(sourceServer, 'prisma'), path.join(target, 'prisma'), {
+      recursive: true,
+    });
+    if (legacy)
+      fs.cpSync(
+        path.join(server, 'prisma/migrations'),
+        path.join(release, 'known-migrations'),
+        { recursive: true },
+      );
+    fs.mkdirSync(path.join(target, 'scripts'));
+    for (const file of [
+      'backup-sqlite.py',
+      'backup-space-status.py',
+      ...(legacy ? [] : ['sqlite-snapshot-guard.py']),
+      'verify-preservation.py',
+      'watch-wechat2rss-cache.py',
+      'read-wechat2rss-cache.py',
+    ])
+      fs.copyFileSync(
+        path.join(server, 'scripts', file),
+        path.join(target, 'scripts', file),
+      );
     fs.copyFileSync(
-      path.join(server, 'scripts', file),
-      path.join(target, 'scripts', file),
+      path.join(sourceServer, 'package.json'),
+      path.join(target, 'package.json'),
     );
-  fs.copyFileSync(
-    path.join(sourceServer, 'package.json'),
-    path.join(target, 'package.json'),
-  );
-  for (const file of [
-    'lib.cjs',
-    'runtime.cjs',
-    'inspect-sqlite.py',
-    'prepare-start.py',
-    'startup-sqlite.cjs',
-    'startup-audit.cjs',
-    'offline-guard.cjs',
-  ])
-    fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
-  fs.mkdirSync(path.join(release, 'runtime'));
-  fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
-  const compact = options.compact
-    ? bundleServer(target, sourceServer, sourceWeb)
-    : undefined;
-  const dependencies = options.compact
-    ? compact.dependencies
-    : copyPackages(target, client, sourceServer);
-  // Historical rollback packages retain their own helper. Current packages
-  // contain no desktop collector code or executable.
-  if (legacy) {
-    const helperDir = path.join(release, 'tools/wechat-desktop-collector');
-    fs.mkdirSync(helperDir, { recursive: true });
-    fs.copyFileSync(
-      path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
-      path.join(helperDir, 'collect.ps1'),
-    );
-  }
-  const manifest = {
-    format: 1,
-    id,
-    createdAt: new Date().toISOString(),
-    platform: process.platform,
-    arch: process.arch,
-    nodeVersion: process.version,
-    sourceHash,
-    sourceCommit: legacy ? options.sourceCommit : currentCommit,
-    schemaCompatibility: legacy ? 'legacy-additive' : 'current',
-    startupInspection: legacy ? 'full' : 'schema-only-v1',
-    ...(compact
-      ? {
-          executionLayout: 'compact-cjs-v1',
-          startupPreparation: 'node-background-backup-v1',
-          compact,
-        }
-      : {}),
-    inputs,
-    prisma: {
-      clientVersion: readJson(path.join(installed, 'package.json')).version,
-      cliVersion: readJson(
-        path.join(packageDir('prisma', server), 'package.json'),
-      ).version,
-      engineSha256: fileHash(engine),
-    },
-    dependencies,
-    desktopHelperIncluded: legacy,
-    ...fingerprint(release),
-  };
-  writeJson(path.join(release, 'release.json'), manifest);
-  console.log(
-    JSON.stringify({
-      release,
+    for (const file of [
+      'lib.cjs',
+      'runtime.cjs',
+      'inspect-sqlite.py',
+      'prepare-start.py',
+      'startup-sqlite.cjs',
+      'space-budget.cjs',
+      'startup-audit.cjs',
+      'offline-guard.cjs',
+    ])
+      fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
+    fs.mkdirSync(path.join(release, 'runtime'));
+    fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
+    const compact = options.compact
+      ? bundleServer(target, sourceServer, sourceWeb)
+      : undefined;
+    reservation.check();
+    const dependencies = options.compact
+      ? compact.dependencies
+      : copyPackages(target, client, sourceServer);
+    // Historical rollback packages retain their own helper. Current packages
+    // contain no desktop collector code or executable.
+    if (legacy) {
+      const helperDir = path.join(release, 'tools/wechat-desktop-collector');
+      fs.mkdirSync(helperDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
+        path.join(helperDir, 'collect.ps1'),
+      );
+    }
+    const manifest = {
+      format: 1,
       id,
+      createdAt: new Date().toISOString(),
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion: process.version,
       sourceHash,
-      dependencies: dependencies.length,
-      files: Object.keys(manifest.files).length,
-    }),
-  );
-  return release;
+      sourceCommit: legacy ? options.sourceCommit : currentCommit,
+      schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+      startupInspection: legacy ? 'full' : 'schema-only-v1',
+      ...(compact
+        ? {
+            executionLayout: 'compact-cjs-v1',
+            startupPreparation: 'node-background-backup-v1',
+            compact,
+          }
+        : {}),
+      inputs,
+      prisma: {
+        clientVersion: readJson(path.join(installed, 'package.json')).version,
+        cliVersion: readJson(
+          path.join(packageDir('prisma', server), 'package.json'),
+        ).version,
+        engineSha256: fileHash(engine),
+      },
+      dependencies,
+      desktopHelperIncluded: legacy,
+      ...fingerprint(release),
+    };
+    reservation.check();
+    writeJson(path.join(release, 'release.json'), manifest);
+    reservation.check();
+    console.log(
+      JSON.stringify({
+        release,
+        id,
+        sourceHash,
+        dependencies: dependencies.length,
+        files: Object.keys(manifest.files).length,
+      }),
+    );
+    return release;
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    reservation.finish(failure);
+  }
 }
 
 if (require.main === module) {

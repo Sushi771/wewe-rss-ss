@@ -2,6 +2,7 @@ import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
+import { resolveSqliteBackupRoot } from './sqlite-backup-root';
 import { createInterface } from 'node:readline';
 
 export interface FastInsertSnapshotLease {
@@ -125,7 +126,7 @@ export class SqliteSnapshotGuard {
           '--database',
           database,
           '--backup-root',
-          path.join(path.dirname(database), 'backups'),
+          resolveSqliteBackupRoot(database),
           '--interval-seconds',
           interval,
           '--max-age-seconds',

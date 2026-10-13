@@ -7,7 +7,19 @@ const { execFileSync } = require('node:child_process');
 const slash = (value) => value.replace(/\\/g, '/');
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
-const fileHash = (file) => hash(fs.readFileSync(file));
+const fileHash = (file) => {
+  const digest = crypto.createHash('sha256'),
+    buffer = Buffer.alloc(1024 * 1024);
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    let read;
+    while ((read = fs.readSync(descriptor, buffer, 0, buffer.length, null)) > 0)
+      digest.update(buffer.subarray(0, read));
+    return digest.digest('hex');
+  } finally {
+    fs.closeSync(descriptor);
+  }
+};
 const writeJson = (file, value) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' });

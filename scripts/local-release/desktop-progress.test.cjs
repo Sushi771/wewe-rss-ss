@@ -36,8 +36,8 @@ test(
         source.indexOf('$sha ='),
       )
       .replace(
-        'return ($reader.ReadToEnd()',
-        `Set-Content -LiteralPath ${quote(opened)} -Value opened; Start-Sleep -Milliseconds 100; return ($reader.ReadToEnd()`,
+        '$text = $reader.ReadToEnd()',
+        `Set-Content -LiteralPath ${quote(opened)} -Value opened; Start-Sleep -Milliseconds 100; $text = $reader.ReadToEnd()`,
       );
     const command = `$ErrorActionPreference='Stop'; $StateFile=${quote(state)}; ${reader}; (Read-StartupState).stage`;
     writeProgress(directory, 'app');

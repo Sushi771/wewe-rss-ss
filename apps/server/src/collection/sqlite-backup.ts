@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { access, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
+import { resolveSqliteBackupRoot } from './sqlite-backup-root';
 
 async function serverRoot() {
   for (const candidate of [
@@ -46,7 +47,7 @@ export async function createVerifiedSqliteBackup(
     path.isAbsolute(rawPath) ? rawPath : path.resolve(root, 'prisma', rawPath),
   );
   const script = path.join(root, 'scripts', 'backup-sqlite.py');
-  const backupRoot = path.join(path.dirname(database), 'backups');
+  const backupRoot = resolveSqliteBackupRoot(database);
   const python =
     process.env.SQLITE_BACKUP_PYTHON?.trim() ||
     (process.platform === 'win32' ? 'python' : 'python3');
@@ -106,8 +107,15 @@ export async function createVerifiedSqliteBackup(
     child.once('close', (code, signal) => {
       clearTimeout(timer);
       if (settled) return;
-      if (code !== 0 || signal) fail('SQLite 一致性备份未验证成功，本次未写入');
-      else {
+      if (code !== 0 || signal) {
+        if (stderr.includes('SQLITE_SPACE_BUDGET_EXCEEDED')) {
+          fail(
+            '备份空间预算不足，已停止写入以保留恢复点。请检查备份空间并经确认归档或调整有限预算后重试。',
+          );
+          return;
+        }
+        fail('SQLite 一致性备份未验证成功，本次未写入');
+      } else {
         settled = true;
         resolve(stdout);
       }

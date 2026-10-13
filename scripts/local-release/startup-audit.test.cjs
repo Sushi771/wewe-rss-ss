@@ -61,7 +61,12 @@ test('quick gate reports pending, then an idempotent worker verifies a pinned WA
   // Give the transient worker time to close, then prove it never restarted.
   await new Promise((resolve) => setTimeout(resolve, 100));
   state.start();
-  const backups = fs.readdirSync(path.join(f.auditRoot, 'background-backup'));
+  const backups = fs
+    .readdirSync(path.join(f.auditRoot, 'background-backup'), {
+      withFileTypes: true,
+    })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
   assert.equal(backups.length, 1);
   const backup = new DatabaseSync(
     path.join(f.auditRoot, 'background-backup', backups[0], 'wewe-rss.db'),
