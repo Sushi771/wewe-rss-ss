@@ -397,9 +397,23 @@ export class TrpcService {
         accepted: stage === 'cache',
         message: '已有任务处理中，等待串行处理；不会重复提交。',
       };
-    const feed = await this.prismaService.feed.findUnique({
-      where: { id: feedId },
-    });
+    let feed: Feed | null;
+    try {
+      feed = await this.prismaService.feed.findUnique({
+        where: { id: feedId },
+      });
+    } catch {
+      // This read precedes every reservation and upstream request. Storage
+      // contention cannot create an uncertain receipt or an unbounded replay.
+      return {
+        state: 'failed',
+        accepted: false,
+        submissionUnknown: false,
+        stopBatch: false,
+        retryable: true,
+        message: '订阅状态读取失败；未发送上游更新，后台限次退避重试。',
+      };
+    }
     if (
       !feed ||
       feed.status !== 1 ||

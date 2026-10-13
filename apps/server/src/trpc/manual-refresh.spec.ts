@@ -204,6 +204,21 @@ describe('explicit manual all-refresh boundary (offline)', () => {
     expect(service.prismaService.feed.updateMany).not.toHaveBeenCalled();
     expect(service.activeCollections.size).toBe(0);
   });
+  it('storage failures during the initial feed read cannot be mislabeled as unknown receipts', async () => {
+    service.prismaService.feed.findUnique.mockRejectedValueOnce({
+      name: 'PrismaClientRustPanicError',
+      message: 'private storage details',
+    });
+    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+      state: 'failed',
+      accepted: false,
+      retryable: true,
+      stopBatch: false,
+      submissionUnknown: false,
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+  });
   it('only a pre-existing feed with an older reservation proves no submission; same-second reservations remain unknown', async () => {
     const created = Date.parse('2026-10-13T14:00:00.139+08:00');
     feed.createdAt = new Date(created - 86400000);
