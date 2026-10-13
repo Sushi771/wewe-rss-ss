@@ -10,7 +10,7 @@
 
 核验后用户填写从原笔记独立取得的全文、全部图片数量、北京时间，并分别确认作者归属、全文、全部图片顺序和发布时间，再明确允许后续正式归档。服务端按原 review contract 校验参考值、绑定证据与已保存主页；这个操作只启用剩余有效期内的正式 source，不发送请求、不刷新。原页面刷新仍必须另行点击，正式扫描最多三页/理论 90 条，增量、重复跳过、补缺及正文保护沿用原实现。成功交接也始终返回 platformVerified:false/liveValidation:pending，不能据此声称真实接口已验证。
 
-新增精确路由均为 POST /local/redbook/diagnostic/{status,session,list,detail,images,sample,review,discard}；只允许真实 loopback socket、严格原始 Host、匹配 Origin、现有应用访问密码，并拒绝任何 Forwarded、X-Forwarded-_ 或 Via。响应 Cache-Control:no-store。公开部署应拒绝整个 /local/redbook/_ 前缀。本机页面只发同源 POST，无任意 host/baseURL 注入。
+新增精确路由均为 POST /local/redbook/diagnostic/{status,session,list,detail,images,sample,review,discard}；只允许真实 loopback socket、严格原始 Host、匹配 Origin、现有应用访问密码，并拒绝任何 Forwarded、`X-Forwarded-*` 或 Via。响应 Cache-Control:no-store。公开部署应拒绝整个 `/local/redbook/*` 前缀。本机页面只发同源 POST，无任意 host/baseURL 注入。
 
 无需提前准备已经审核的真实 API 样本才能执行这个显式小量诊断；诊断不能绕过后续正式归档的人工核验。真实账号/签名/全文/原图仍需用户后续实测。本次仅离线合成验收，无真实 Cookie/API、生产数据库或媒体。
 
@@ -18,7 +18,7 @@
 
 ## 后端私有交接
 
-入口为 `GET /local/redbook/status`、`POST /local/redbook/session`、`POST /local/redbook/revoke`、`POST /local/redbook/resume-operator`。它们要求服务器 socket 的 loopback 对端、loopback Host、完全匹配 Host 的 Origin，以及部署已有的 AUTH_CODE；没有 AUTH_CODE 时拒绝。拒绝 Forwarded、`X-Forwarded-*` 和 Via。部署若有本机反代，必须在代理明确 deny `/local/redbook/*`：应用不能识别删除全部转发头且重写 Host/Origin 的本机代理。PRIVATE_ONLINE_MODE 下同样支持直连本机交接，这些精确路径使用专用上述门禁，其他私有路由继续要求原登录会话。WEWE_ACCEPTANCE_MODE 下交接拒绝。没有新增访问令牌或登录逻辑，没有前端 Cookie 输入或浏览器自动读取。
+入口为 `GET /local/redbook/status`、`POST /local/redbook/session`、`POST /local/redbook/revoke`、`POST /local/redbook/resume-operator`。它们要求服务器 socket 的 loopback 对端、loopback Host、完全匹配 Host 的 Origin，以及部署已有的 AUTH_CODE；没有 AUTH_CODE 时拒绝。拒绝 Forwarded、`X-Forwarded-*` 和 Via。部署若有本机反代，必须在代理明确 deny `/local/redbook/*`：应用不能识别删除全部转发头且重写 Host/Origin 的本机代理。PRIVATE_ONLINE_MODE 下同样支持直连本机交接，这些精确路径使用专用上述门禁，其他私有路由继续要求原登录会话。WEWE_ACCEPTANCE_MODE 下交接拒绝。没有新增访问令牌或登录逻辑，新增本机页面仅供用户手动填写，不自动读取浏览器登录信息。
 
 凭据仅保留内存，最长两小时，到期/撤销/关机清空引用并 abort 未完成 HTTP；重启需再次显式交接。撤销可取消正在等待作者查询的交接。活动扫描全部先收到取消，不因另一作者锁失败漏取消；已在提交的当前 SQLite 页可以完成并保留，然后停在检查点，不声称撤销已完成事务。安装/更换会话不重置扫描账本，不清除受限/不确定请求停顿。
 
