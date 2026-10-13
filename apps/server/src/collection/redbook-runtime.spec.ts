@@ -293,6 +293,41 @@ describe('actual Nest Redbook provider → private handoff → original refresh 
     expect(requests).toHaveLength(0);
     expect(app.get(RedbookRuntime).configured).toBe(false);
   });
+  it.each([
+    'evil@localhost',
+    'localhost/ignored',
+    'localhost?ignored',
+    'localhost#ignored',
+    '127.0.0.1\\@localhost',
+    'localhost:65536',
+    'localhost:00080',
+  ])('rejects malformed local Host %s before enabling', async (host) => {
+    expect(
+      (
+        await post('/local/redbook/session', handoff())
+          .set('host', host)
+          .set('origin', 'http://localhost')
+      ).status,
+    ).toBe(403);
+    expect(app.get(RedbookRuntime).configured).toBe(false);
+    expect(requests).toHaveLength(0);
+  });
+  it.each([
+    'forwarded',
+    'x-forwarded-for',
+    'x-forwarded-host',
+    'x-forwarded-proto',
+    'x-forwarded-port',
+    'x-forwarded-path',
+    'x-forwarded-prefix',
+    'via',
+  ])('rejects forwarding header %s before enabling', async (name) => {
+    expect(
+      (await post('/local/redbook/session', handoff()).set(name, 'synthetic'))
+        .status,
+    ).toBe(403);
+    expect(requests).toHaveLength(0);
+  });
   it('refuses author identity already owned by a different local creator without networking', async () => {
     await prisma.xhsCreator.create({
       data: {

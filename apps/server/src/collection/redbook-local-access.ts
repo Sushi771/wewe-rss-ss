@@ -11,13 +11,14 @@ export function redbookLocalAccess(req: Request, authCode?: string) {
   if (
     !authCode ||
     typeof req.headers.authorization !== 'string' ||
-    [
-      'forwarded',
-      'x-forwarded-for',
-      'x-forwarded-host',
-      'x-forwarded-proto',
-      'via',
-    ].some((key) => req.headers[key] !== undefined) ||
+    Object.keys(req.headers).some((key) => {
+      const name = key.toLowerCase();
+      return (
+        name === 'forwarded' ||
+        name.startsWith('x-forwarded-') ||
+        name === 'via'
+      );
+    }) ||
     !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
       req.socket.remoteAddress || '',
     )
@@ -27,7 +28,12 @@ export function redbookLocalAccess(req: Request, authCode?: string) {
   if (!timingSafeEqual(digest(req.headers.authorization), digest(authCode)))
     return false;
   try {
-    const host = new URL(`${req.protocol}://${req.get('host')}`);
+    const authority = req.get('host') || '';
+    if (
+      !/^(localhost|127\.0\.0\.1|\[::1\])(?::[1-9]\d{0,4})?$/i.test(authority)
+    )
+      return false;
+    const host = new URL(`${req.protocol}://${authority}`);
     return (
       ['127.0.0.1', 'localhost', '[::1]'].includes(host.hostname) &&
       req.headers.origin === host.origin
