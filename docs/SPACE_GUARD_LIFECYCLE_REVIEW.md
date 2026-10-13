@@ -29,4 +29,27 @@ Direct `synthetic-sqlite.py`, small Node/Python unit fixture creation, and `acce
 
 ## Ownership / patch boundary
 
-This commit adds only this document and the independent audit probe. No helper or production code fix is included pending explicit modification ownership from the coordinating thread. Recommended regression gates after owner fixes: source unchanged plus zero disposable copies on failure; SIGINT cleanup and supervised hard-kill recovery; cross-root cumulative refusal before generation; resume refusal before process spawn; package quota refusal before `cpSync` or compiler output; failed build cleans only current-run artifacts; uppercase SQLite cleanup.
+Initial review commit `3440a19` added only this document and the independent audit probe. The coordinator subsequently authorized lifecycle helper, its tests and an explicit recovery tool; shared `space-budget.cjs` and production backup code remain outside this window's ownership.
+
+## Authorized helper follow-up
+
+All cooperating test windows must set the same `WEWE_TEST_OUTPUT_ROOT` once for the campaign, or use the shared default OS temp `wewe-rss-tests`. `--output-root` now selects only a subdirectory of this managed root. An arbitrary outside output root fails before creating output. The same root lease and cumulative 512 MiB / 12 SQLite / 256 MiB free-reserve preflight apply to sibling window directories, retained reports and explicitly kept evidence. Deliberately selecting different environment-level managed roots, direct writers that never call this helper, old package controllers and build outputs are outside this scope; this is not a machine-wide storage quota. Do not change the managed root per run to evade quota.
+
+```powershell
+$env:WEWE_TEST_OUTPUT_ROOT = 'E:/CodexTemp/wewe-guarded-tests'
+node scripts/local-release/rehearse.cjs --release <reviewed-package> --output-root E:/CodexTemp/wewe-guarded-tests/window-a
+```
+
+Each run creates an exclusive fresh audit directory, nonce-bound root owner lock and `run-manifest.json` **before** starting SQLite generation. The original source is outside the fresh audit and is never registered for cleanup. A successful `begin()` records synthetic file identity. `checkpoint()` records additional disposable SQLite files in this owned audit directory; adapters should call it after creating copies and before long async work. Regular `finish()` checkpoints current-run SQLite files and removes them by default, including opt-in real-source copies and all case variants/SQLite sidecars. Existing files outside this fresh audit, links and replaced registered identities are not removed. Failure details are limited to 4 KiB, with a small manifest and summary retained. Explicit `keep` retains evidence under the cumulative root budget; exceeding that budget at finish removes only current-run registered copies and reports failure. Kept evidence has no automatic expiry or historical deletion policy: reaching quota blocks further generation for manual review.
+
+If the owner is forcibly killed, no in-process helper can guarantee its `finally` runs. After stopping and verifying **only that run's** known children, use the explicit recovery tool:
+
+```powershell
+node scripts/local-release/recover-test-run.cjs --root E:/CodexTemp/wewe-guarded-tests --audit <exact-audit-from-manifest> --confirm-children-stopped
+```
+
+Recovery never kills a process. It refuses an active/reused PID, mismatched token or manifest, changed audit/file identity, links or an outside path. It checks all registered paths before deletion, removes only recorded run-owned SQLite, writes a small recovery summary, then releases the matching stale owner lock. Unknown/uncheckpointed SQLite is retained and the owner lock stays blocked for manual review; a kill during fixture generation can therefore leave a conservative review case. A separate recovery lease prevents overlapping recoveries. Report-only files and old sources/recovery points remain untouched. No automatic SIGINT handler that could delete a database under a still-live runtime child is installed; cooperative controller `finally` and verified post-termination recovery are the supported cancellation paths.
+
+New offline regression gates cover default cleanup of opt-in copies/case variants, sibling-root contention and cumulative copy/byte refusal, explicit keep, junction refusal, hard-kill recovery and retry, live/reused PID refusal, foreign owner token, replaced file identity, unknown-file preservation, owner-lock changes and environment restoration. All fixtures remain small synthetic data and each test removes only its own new temporary root.
+
+Remaining integration recommendations: checkpoint copies in rehearsal adapters before lengthy child/runtime work; add explicit shared test root/lease to resume; connect export temp/media outputs to bounded lifecycle; enforce package quota before `cpSync`/compiler output and clean only the failed build's fresh output. These are not claimed fixed by the helper patch and no deployment or push is performed by this window.

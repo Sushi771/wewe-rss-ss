@@ -32,6 +32,7 @@ function env(t, values) {
 }
 test('synthetic runs clean their own SQLite files on success and failure, retaining reports and old files', (t) => {
   const root = fixture(t);
+  env(t, { WEWE_TEST_OUTPUT_ROOT: root });
   fs.writeFileSync(path.join(root, 'old.db'), 'unique old recovery point');
   for (let index = 0; index < 8; index++) {
     const run = artifacts.begin({ outputRoot: root, migrations });
@@ -56,6 +57,7 @@ test('synthetic runs clean their own SQLite files on success and failure, retain
 test('real-copy opt-in, nested source and invalid policy are rejected before generating a run', (t) => {
   const root = fixture(t),
     source = path.join(root, 'existing.db');
+  env(t, { WEWE_TEST_OUTPUT_ROOT: root });
   fs.writeFileSync(source, 'original');
   assert.throws(
     () => artifacts.begin({ outputRoot: root, source, migrations }),
@@ -89,8 +91,9 @@ test('aggregate byte, copy and disk reserve budgets refuse new files without del
   assert.equal(fs.readFileSync(path.join(root, 'old.db'), 'utf8'), 'untouched');
 });
 test('exclusive run lease prevents overlapping budget reservations and fails closed after interruption', (t) => {
-  const root = fixture(t),
-    run = artifacts.begin({ outputRoot: root, migrations });
+  const root = fixture(t);
+  env(t, { WEWE_TEST_OUTPUT_ROOT: root });
+  const run = artifacts.begin({ outputRoot: root, migrations });
   assert.throws(
     () => artifacts.begin({ outputRoot: root, migrations }),
     /locked/,
@@ -108,6 +111,7 @@ test('exclusive run lease prevents overlapping budget reservations and fails clo
 });
 test('failed fixture creation releases lease and retains a small failure report', (t) => {
   const root = fixture(t);
+  env(t, { WEWE_TEST_OUTPUT_ROOT: root });
   assert.throws(() =>
     artifacts.begin({
       outputRoot: root,
