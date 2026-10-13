@@ -476,3 +476,8 @@ resolver 审核已完成：公开 mobile `/mp/getreviewid` 的认证和 synckey 
 ## 2026-10-13：Redbook离线候选
 
 独立 RedbookSource、裁剪本地签名/只读链路、三批持久扫描及图文导出身份已在隔离分支开发；真实来源保持关闭。准确能力、离线证据、真实schema/凭据缺口与小范围验收见 [Redbook接入候选](REDBOOK_INTEGRATION.md)。未部署生产，未发平台请求，不能称为真实接入通过。
+
+
+### Redbook 后端运行闭环（task13）
+
+固定目标 API/无账号图片 HTTP、显式本机认证会话交接、证据核对作者绑定及 Nest provider 已接到原刷新/SQLite/导出链路。会话为空时关闭，有效交接可启用；不再只交付休眠骨架。合成真实 Nest/HTTP/SQLite 已通，平台签名与真实全文/图片仍待用户安全凭据、真实证据及有限实测。用户操作和安全边界见 [运行时交接](REDBOOK_RUNTIME_HANDOFF.md)。未触碰生产、未发平台请求、未推送。固定 SHA 全量结果由 task13 最终报告另列，不混用 b73ae224 的旧验收。

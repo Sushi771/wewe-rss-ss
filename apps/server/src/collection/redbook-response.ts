@@ -174,12 +174,11 @@ async function downloadMedia(
   return { inlineData, byteLength: length };
 }
 
-export async function mapRedbookDetail(
+export function inspectRedbookDetail(
   raw: unknown,
   expectedAuthorId: string,
   expectedNoteId: string,
-  transport: RedbookMediaTransport = blockedMediaTransport,
-): Promise<XhsNormalizedCandidate> {
+) {
   const authorId = identifier(expectedAuthorId);
   const noteId = identifier(expectedNoteId);
   const detail = record(raw);
@@ -208,6 +207,24 @@ export async function mapRedbookDetail(
   );
   if (!text.trim() && urls.length === 0)
     throw new Error('REDBOOK_BODY_REJECTED');
+  return {
+    authorId,
+    noteId,
+    title,
+    text,
+    urls,
+    publishedAt: Math.floor((card.time as number) / 1000),
+  };
+}
+
+export async function mapRedbookDetail(
+  raw: unknown,
+  expectedAuthorId: string,
+  expectedNoteId: string,
+  transport: RedbookMediaTransport = blockedMediaTransport,
+): Promise<XhsNormalizedCandidate> {
+  const { authorId, noteId, title, text, urls, publishedAt } =
+    inspectRedbookDetail(raw, expectedAuthorId, expectedNoteId);
   let totalBytes = 0;
   const images: XhsNormalizedCandidate['images'] = [];
   for (const url of urls) {
@@ -224,7 +241,7 @@ export async function mapRedbookDetail(
     noteId,
     kind: 'image-text',
     // Existing archive contract stores epoch seconds, truncating milliseconds.
-    publishedAt: Math.floor((card.time as number) / 1000),
+    publishedAt,
     title,
     text,
     textStatus: 'full',
