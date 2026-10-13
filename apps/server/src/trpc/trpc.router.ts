@@ -1379,6 +1379,9 @@ export class TrpcRouter {
   });
 
   xiaohongshuRouter = this.trpcService.router({
+    pauseScan: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.pauseScan(input.id)),
     capability: this.trpcService.protectedProcedure.query(() =>
       this.xhs.capability(),
     ),

@@ -13,6 +13,9 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { ArticleDownloadController } from '../article-download.controller';
 import * as picker from '../article-folder-picker';
+import { RedbookSource, redbookReader } from './redbook-source';
+import { RedbookClient } from './redbook-client';
+import { FileRedbookStateStore } from './redbook-scan-state';
 
 // Existing archiver v8 is ESM and Jest runs CJS. Execute the actual unchanged
 // offline-archive source in a normal Node child; do not fake archive output.
@@ -51,6 +54,99 @@ describe('production XHS router/service → additive SQLite and original export 
   let root: string, prisma: PrismaClient, creatorId: string;
   const originalEnv = { ...process.env };
   let snapshot: unknown;
+  it('streams synthetic audited client/mapper pages into SQLite with durable checkpoints and cache dedupe', async () => {
+    const requests: string[] = [];
+    const client = new RedbookClient({
+      cookies: () => ({ a1: 'synthetic', web_session: 'synthetic' }),
+      transport: async (request) => {
+        requests.push(request.method);
+        return {
+          status: 200,
+          url: request.url,
+          body: {
+            success: true,
+            code: 0,
+            data:
+              request.method === 'GET'
+                ? {
+                    notes: [
+                      {
+                        note_id: 'redbook-synthetic',
+                        user: { user_id: 'synthetic-author' },
+                        xsec_token: 'synthetic-token',
+                      },
+                    ],
+                    cursor: '',
+                    has_more: false,
+                  }
+                : {
+                    items: [
+                      {
+                        id: 'redbook-synthetic',
+                        note_card: {
+                          note_id: 'redbook-synthetic',
+                          user: { user_id: 'synthetic-author' },
+                          type: 'normal',
+                          time: 1760000000000,
+                          title: 'Redbook fixture',
+                          desc: 'Synthetic full caption',
+                          image_list: [
+                            {
+                              url_default:
+                                'https://sns-webpic-qc.xhscdn.com/synthetic',
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+          },
+        };
+      },
+    });
+    const source = new RedbookSource({
+      reader: redbookReader(
+        client,
+        async () =>
+          new Response(Buffer.from(png, 'base64'), {
+            headers: { 'content-type': 'image/png' },
+          }),
+      ),
+      store: new FileRedbookStateStore(path.join(root, 'redbook-state')),
+      contractReviewed: true, // Synthetic test seam only; real contract is unproved.
+      authorFor: () => 'synthetic-author',
+      isComplete: async (id, noteId) =>
+        !!(await prisma.xhsNote.findFirst({
+          where: {
+            creatorId: id,
+            id: JSON.stringify(['xiaohongshu', 'note', noteId]),
+            status: 'complete',
+          },
+        })),
+    });
+    const service = new XiaohongshuService(prisma as any, source);
+    const first = await service.refresh(creatorId);
+    expect(first).toMatchObject({ status: 'complete', added: 1 });
+    expect(requests).toEqual(['GET', 'POST']);
+    expect(
+      (
+        await service.body(
+          creatorId,
+          JSON.stringify(['xiaohongshu', 'note', 'redbook-synthetic']),
+        )
+      ).images,
+    ).toEqual(['data:image/png;base64,' + png]);
+    expect(await service.refresh(creatorId)).toMatchObject({
+      status: 'complete',
+      added: 0,
+    });
+    expect(requests).toEqual(['GET', 'POST', 'GET']);
+    await prisma.xhsNote.delete({
+      where: {
+        id: JSON.stringify(['xiaohongshu', 'note', 'redbook-synthetic']),
+      },
+    });
+  });
   const oldRows = async () => {
     const columns = (
       await prisma.$queryRawUnsafe<any[]>('PRAGMA table_info(feeds)')

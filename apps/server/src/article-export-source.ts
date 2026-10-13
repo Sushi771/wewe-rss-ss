@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 /** Internal, trusted Feed/ManagementGroup records only; never request JSON. */
 export type ArticleExportSource = {
+  platform?: 'xiaohongshu';
   feedId: string;
   feedName: string;
   groupId?: string | null;
@@ -103,5 +104,5 @@ export function exportSourceMarkdown(
     publication.publicationDate ||
     `日期待核（${publication.datePendingReason}）`;
   const line = (value: string) => value.replace(/[\r\n]/g, ' ');
-  return `公众号：${line(source.feedName)}\n\n分组：${line(source.groupName || '未分组')}\n\n原文发布日期（上海时间）：${date}\n\n原文链接：${sourceUrl ? line(sourceUrl) : '未记录'}\n\n`;
+  return `${source.platform === 'xiaohongshu' ? '小红书博主' : '公众号'}：${line(source.feedName)}\n\n分组：${line(source.groupName || '未分组')}\n\n原文发布日期（上海时间）：${date}\n\n原文链接：${sourceUrl ? line(sourceUrl) : '未记录'}\n\n`;
 }

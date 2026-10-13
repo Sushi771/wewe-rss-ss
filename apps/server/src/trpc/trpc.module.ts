@@ -8,7 +8,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SUBSCRIPTION_DISCOVERY } from '../collection/subscription-add';
 import { createNativeSubscriptionDiscovery } from '../collection/subscription-native-adapter';
 import { resolveWereadPublisherOriginal } from '../collection/weread-public-original';
-import { XiaohongshuService } from '../collection/xiaohongshu.service';
+import {
+  XiaohongshuService,
+  XHS_SOURCE,
+} from '../collection/xiaohongshu.service';
+import { RedbookSource } from '../collection/redbook-source';
 
 @Module({
   imports: [PrismaModule, WereadModule],
@@ -18,6 +22,9 @@ import { XiaohongshuService } from '../collection/xiaohongshu.service';
     TrpcRouter,
     CollectionService,
     XiaohongshuService,
+    // Registered but dormant. Credentials, real schema evidence and transports
+    // require a separate reviewed handoff; environment variables cannot enable it.
+    { provide: XHS_SOURCE, useFactory: () => new RedbookSource() },
     {
       provide: SUBSCRIPTION_DISCOVERY,
       inject: [PrismaService, CollectionService],

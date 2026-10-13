@@ -21,6 +21,7 @@ import {
   verifiedDownloadBody,
 } from '../article-verified-download';
 import { ArticleDownloadError } from '../article-download';
+import type { ArticlePreparation } from '../article-local-save';
 import {
   inspectCachedMp4,
   prepareXhsVideoDownload,
@@ -36,17 +37,30 @@ export type XhsSubscriptionCandidate = XhsNormalizedCandidate & {
  * A future adapter must establish identities and whole-body/media evidence before
  * setting evidenceVerified. Client requests cannot supply this object.
  */
+export type XhsReadResult = {
+  authorId: string;
+  evidenceVerified: boolean;
+  pages: {
+    requestCursor: string | null;
+    nextCursor: string | null;
+    items: XhsSubscriptionCandidate[];
+  }[];
+  initialCursor?: string | null;
+};
 export interface XhsSource {
-  read(creator: XhsCreator): Promise<{
-    authorId: string;
-    evidenceVerified: boolean;
-    pages: {
-      requestCursor: string | null;
-      nextCursor: string | null;
-      items: XhsSubscriptionCandidate[];
-    }[];
-  }>;
+  configured?: boolean;
+  read(creator: XhsCreator): Promise<XhsReadResult>;
+  scan?: (
+    creator: XhsCreator,
+    commit: (result: XhsReadResult) => Promise<XhsRefreshResult>,
+  ) => Promise<XhsRefreshResult>;
+  pause?: (creator: XhsCreator) => Promise<void>;
 }
+export type XhsRefreshResult = {
+  status: 'complete' | 'partial' | 'paused';
+  added: number;
+  message: string;
+};
 const fail = (
   message: string,
   code:
@@ -356,11 +370,12 @@ export class XiaohongshuService {
   capability() {
     return {
       platform: 'xiaohongshu' as const,
-      sourceConfigured: !!this.source,
-      canRefresh: !!this.source,
-      message: this.source
-        ? '来源已注册，更新仍须核验真实身份及完整图文。'
-        : '待接入数据源；可以管理待接入博主，尚不能读取新笔记。',
+      sourceConfigured: !!this.source && this.source.configured !== false,
+      canRefresh: !!this.source && this.source.configured !== false,
+      message:
+        this.source && this.source.configured !== false
+          ? '来源已注册，更新仍须核验真实身份及完整图文。'
+          : '待接入数据源；可以管理待接入博主，尚不能读取新笔记。',
     };
   }
   async list(input?: { groupId?: string | null }) {
@@ -427,6 +442,14 @@ export class XiaohongshuService {
       subscribed: false,
       creator,
       message: '已保存待接入博主；尚未建立上游订阅或读取笔记。',
+    };
+  }
+  async pauseScan(id: string) {
+    const creator = await this.getCreator(id);
+    await this.source?.pause?.(creator);
+    return {
+      paused: true,
+      message: '已请求暂停；当前请求完成后停止后续请求。',
     };
   }
   async edit(id: string, enabled: boolean) {
@@ -496,155 +519,170 @@ export class XiaohongshuService {
           added: 0,
           message: '博主已暂停，未请求数据源。',
         };
-      if (!this.source)
+      if (!this.source || this.source.configured === false)
         return {
           status: 'unconfigured' as const,
           added: 0,
           message: this.capability().message,
         };
-      const result = await this.source.read(creator);
-      if (
-        !result.evidenceVerified ||
-        (creator.externalAuthorId &&
-          creator.externalAuthorId !== result.authorId)
-      )
-        return fail('来源身份或完整图文证据未通过，旧归档保留。');
-      let ledger = xhsPageLedger(result.authorId);
-      const drafts = new Map<
-        string,
-        {
-          draft: ReturnType<typeof xhsArchiveDraft>;
-          video: XhsVerifiedVideoCache['video'] | null;
-          kind: 'image-text' | 'video';
-        }
-      >();
-      const timestamps = new Map<string, number>();
-      for (const page of result.pages) {
-        ledger = appendXhsPage(
-          ledger,
-          { authorId: result.authorId, ...page },
-          3,
-        ).ledger;
-        for (const item of page.items) {
-          if (item.video && !Buffer.isBuffer(item.video.bytes))
-            return fail('视频缓存须为已取得的完整字节，旧缓存保持不变。');
-          const video =
-            item.kind === 'video' && item.video
-              ? { ...item.video, bytes: Buffer.from(item.video.bytes) }
-              : null;
-          const draft = xhsArchiveDraft(
-            result.authorId,
-            video ? { ...item, kind: 'image-text' } : item,
-          );
-          if (video) {
-            // Reuse the single-note byte/identity/text/cover/hash/container gate.
-            prepareXhsVideoDownload({
-              evidenceVerified: result.evidenceVerified,
-              note: item,
-              video,
-            });
-          } else if (item.video)
-            return fail('视频缓存与笔记类型不一致，旧缓存保持不变。');
-          if (
-            draft.status === 'candidate' &&
-            !draft.readyForEvidenceCheck &&
-            !video
-          )
-            return fail('全文或图片缓存未通过核查，旧归档保持不变。');
-          const previous = drafts.get(draft.noteKey);
-          if (!previous || (previous.draft.status === 'video-skipped' && video))
-            drafts.set(draft.noteKey, { draft, video, kind: item.kind });
-          if (!timestamps.has(draft.noteKey))
-            timestamps.set(draft.noteKey, item.publishedAt);
-        }
-      }
-      if (!result.pages.length) return fail('未收到可核验列表，旧归档保留。');
-      await createVerifiedSqliteBackup();
-      const added = await this.prisma.$transaction(async (tx) => {
-        let count = 0;
-        for (const { draft: d, video, kind } of drafts.values()) {
-          const old = await tx.xhsNote.findUnique({ where: { id: d.noteKey } });
-          if (old) {
-            if (old.creatorId !== id)
-              return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
-            if (old.status !== 'video-skipped' || !video) continue;
-          }
-          const contentHtml =
-            d.status === 'candidate'
-              ? '<div id="js_content">' +
-                d.text
-                  .split('\n')
-                  .map((p) => '<p>' + escape(p) + '</p>')
-                  .join('') +
-                d.images
-                  .map(
-                    (i) =>
-                      '<img src="data:' +
-                      i.type +
-                      ';base64,' +
-                      i.bytes.toString('base64') +
-                      '">',
-                  )
-                  .join('') +
-                // The shared video contract allows a real complete video with
-                // no caption/cover. Mark this local-only structural placeholder;
-                // title survives the unchanged sanitizer's attribute allowlist.
-                (video && !d.text.trim() && !d.images.length
-                  ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
-                  : '') +
-                '</div>'
-              : null;
-          const data = {
-            title:
-              d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
-            status: d.status === 'candidate' ? 'complete' : 'video-skipped',
-            contentHtml,
-            kind,
-            videoBytes: video?.bytes ?? null,
-            videoMimeType: video?.mimeType ?? null,
-            videoExpectedBytes: video?.expectedBytes ?? null,
-            videoSha256: video?.sha256 ?? null,
-          };
-          if (old) {
-            // Only a skipped video's missing archive may be filled. Keep its
-            // stable ID, creator relation, and previously trusted publication time.
-            await tx.xhsNote.update({ where: { id: old.id }, data });
-          } else {
-            await tx.xhsNote.create({
-              data: {
-                id: d.noteKey,
-                creatorId: id,
-                publishTime: timestamps.get(d.noteKey)!,
-                ...data,
-              },
-            });
-          }
-          if (d.status === 'candidate') count++;
-        }
-        await tx.xhsCreator.update({
-          where: { id },
-          data: {
-            externalAuthorId: result.authorId,
-            lastStatus: ledger.supplierReportedEnd ? 'complete' : 'partial',
-            lastCheckedAt: Math.floor(Date.now() / 1000),
-          },
-        });
-        return count;
-      });
-      return {
-        status: ledger.supplierReportedEnd
-          ? ('complete' as const)
-          : ('partial' as const),
-        added,
-        message: ledger.supplierReportedEnd
-          ? '本次来源列表窗口处理完成；不表示全历史覆盖。'
-          : '已处理有限窗口，后续列表尚未完成。',
-      };
+      if (this.source.scan)
+        return await this.source.scan(creator, (result) =>
+          this.archiveSourceResult(id, creator, result),
+        );
+      return await this.archiveSourceResult(
+        id,
+        creator,
+        await this.source.read(creator),
+      );
     } catch {
       return fail('本次更新未完成，请核对数据源；旧归档保留，不会自动重试。');
     } finally {
       this.active.delete(id);
     }
+  }
+  private async archiveSourceResult(
+    id: string,
+    creator: XhsCreator,
+    result: XhsReadResult,
+  ): Promise<XhsRefreshResult> {
+    if (
+      !result.evidenceVerified ||
+      (creator.externalAuthorId && creator.externalAuthorId !== result.authorId)
+    )
+      return fail('来源身份或完整图文证据未通过，旧归档保留。');
+    let ledger = xhsPageLedger(result.authorId);
+    ledger.nextCursor = result.initialCursor ?? null;
+    const drafts = new Map<
+      string,
+      {
+        draft: ReturnType<typeof xhsArchiveDraft>;
+        video: XhsVerifiedVideoCache['video'] | null;
+        kind: 'image-text' | 'video';
+      }
+    >();
+    const timestamps = new Map<string, number>();
+    for (const page of result.pages) {
+      ledger = appendXhsPage(
+        ledger,
+        { authorId: result.authorId, ...page },
+        3,
+      ).ledger;
+      for (const item of page.items) {
+        if (item.video && !Buffer.isBuffer(item.video.bytes))
+          return fail('视频缓存须为已取得的完整字节，旧缓存保持不变。');
+        const video =
+          item.kind === 'video' && item.video
+            ? { ...item.video, bytes: Buffer.from(item.video.bytes) }
+            : null;
+        const draft = xhsArchiveDraft(
+          result.authorId,
+          video ? { ...item, kind: 'image-text' } : item,
+        );
+        if (video) {
+          // Reuse the single-note byte/identity/text/cover/hash/container gate.
+          prepareXhsVideoDownload({
+            evidenceVerified: result.evidenceVerified,
+            note: item,
+            video,
+          });
+        } else if (item.video)
+          return fail('视频缓存与笔记类型不一致，旧缓存保持不变。');
+        if (
+          draft.status === 'candidate' &&
+          !draft.readyForEvidenceCheck &&
+          !video
+        )
+          return fail('全文或图片缓存未通过核查，旧归档保持不变。');
+        const previous = drafts.get(draft.noteKey);
+        if (!previous || (previous.draft.status === 'video-skipped' && video))
+          drafts.set(draft.noteKey, { draft, video, kind: item.kind });
+        if (!timestamps.has(draft.noteKey))
+          timestamps.set(draft.noteKey, item.publishedAt);
+      }
+    }
+    if (!result.pages.length) return fail('未收到可核验列表，旧归档保留。');
+    await createVerifiedSqliteBackup();
+    const added = await this.prisma.$transaction(async (tx) => {
+      let count = 0;
+      for (const { draft: d, video, kind } of drafts.values()) {
+        const old = await tx.xhsNote.findUnique({ where: { id: d.noteKey } });
+        if (old) {
+          if (old.creatorId !== id)
+            return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
+          if (old.status === 'complete') continue;
+          if (old.status === 'video-skipped' && !video) continue;
+          if (d.status !== 'candidate' || !d.readyForEvidenceCheck) continue;
+        }
+        const contentHtml =
+          d.status === 'candidate'
+            ? '<div id="js_content">' +
+              d.text
+                .split('\n')
+                .map((p) => '<p>' + escape(p) + '</p>')
+                .join('') +
+              d.images
+                .map(
+                  (i) =>
+                    '<img src="data:' +
+                    i.type +
+                    ';base64,' +
+                    i.bytes.toString('base64') +
+                    '">',
+                )
+                .join('') +
+              // The shared video contract allows a real complete video with
+              // no caption/cover. Mark this local-only structural placeholder;
+              // title survives the unchanged sanitizer's attribute allowlist.
+              (video && !d.text.trim() && !d.images.length
+                ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
+                : '') +
+              '</div>'
+            : null;
+        const data = {
+          title: d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
+          status: d.status === 'candidate' ? 'complete' : 'video-skipped',
+          contentHtml,
+          kind,
+          videoBytes: video?.bytes ?? null,
+          videoMimeType: video?.mimeType ?? null,
+          videoExpectedBytes: video?.expectedBytes ?? null,
+          videoSha256: video?.sha256 ?? null,
+        };
+        if (old) {
+          // Fill a previously incomplete cache only. Preserve its stable ID,
+          // creator relation, and previously trusted publication time.
+          await tx.xhsNote.update({ where: { id: old.id }, data });
+        } else {
+          await tx.xhsNote.create({
+            data: {
+              id: d.noteKey,
+              creatorId: id,
+              publishTime: timestamps.get(d.noteKey)!,
+              ...data,
+            },
+          });
+        }
+        if (d.status === 'candidate') count++;
+      }
+      await tx.xhsCreator.update({
+        where: { id },
+        data: {
+          externalAuthorId: result.authorId,
+          lastStatus: ledger.supplierReportedEnd ? 'complete' : 'partial',
+          lastCheckedAt: Math.floor(Date.now() / 1000),
+        },
+      });
+      return count;
+    });
+    return {
+      status: ledger.supplierReportedEnd
+        ? ('complete' as const)
+        : ('partial' as const),
+      added,
+      message: ledger.supplierReportedEnd
+        ? '本次来源列表窗口处理完成；不表示全历史覆盖。'
+        : '已处理有限窗口，后续列表尚未完成。',
+    };
   }
   async body(creatorId: string, noteId: string) {
     const note = await this.prisma.xhsNote.findFirst({
@@ -763,7 +801,10 @@ export class XiaohongshuService {
   /** Snapshot only this creator's complete cached note, never accept page content
    * or a path from the caller. Original local saver grants the destination.
    */
-  async prepareLocalDownload(creatorId: string, noteId: string) {
+  async prepareLocalDownload(
+    creatorId: string,
+    noteId: string,
+  ): Promise<ArticlePreparation> {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
     });
@@ -860,17 +901,73 @@ export class XiaohongshuService {
         422,
         { code: 'XHS_CACHED_VIDEO_INVALID' },
       );
+    const creator = await this.prisma.xhsCreator.findUnique({
+      where: { id: creatorId },
+      include: { group: true },
+    });
+    let tuple: unknown;
+    try {
+      tuple = JSON.parse(note.id);
+    } catch {
+      /* Never guess a legacy identity from a title, URL or directory. */
+    }
+    if (
+      !creator?.externalAuthorId ||
+      !creator.displayName.trim() ||
+      !Array.isArray(tuple) ||
+      tuple.length !== 3 ||
+      tuple[0] !== 'xiaohongshu' ||
+      tuple[1] !== 'note' ||
+      typeof tuple[2] !== 'string' ||
+      !tuple[2].trim() ||
+      JSON.stringify(tuple) !== note.id ||
+      (creator.group && creator.group.platform !== 'xiaohongshu')
+    )
+      throw new ArticleDownloadError(
+        '缓存博主或笔记身份无法核实，未保存。',
+        422,
+        { code: 'XHS_CACHED_IDENTITY_UNAVAILABLE' },
+      );
+    const exportSource = {
+      platform: 'xiaohongshu' as const,
+      feedId: JSON.stringify([
+        'xiaohongshu',
+        'author',
+        creator.externalAuthorId,
+      ]),
+      feedName: creator.displayName,
+      groupId: JSON.stringify([
+        'xiaohongshu',
+        'group',
+        creator.group?.id || 'ungrouped',
+      ]),
+      groupName: creator.group?.name || '小红书未分组',
+    };
+    // Snapshot cached HTML, but defer expensive byte/body validation until the
+    // saver needs a new export or repair. Its verified receipt can skip complete
+    // files across download days without parsing the cached body again.
     const article = {
       ...note,
-      contentHtml: verifiedDownloadBody(note.contentHtml),
       lastBodyStatus: 'available',
       metrics: null,
     };
-    return (directory: string) =>
-      buildCompleteArticleDownload(
+    const prepare: ArticlePreparation = async (directory: string) => ({
+      ...(await buildCompleteArticleDownload(
         article,
         '小红书本地缓存（笔记身份：' + note.id + '）',
         directory,
-      );
+      )),
+      exportSource,
+    });
+    prepare.identity = {
+      articleId: note.id,
+      title: note.title,
+      imageCount: 0,
+      publishTime: note.publishTime,
+      exportSource,
+    };
+    // No legacy reuse opt-in: only the saver's verified original-image map can
+    // seed repairs. Missing/untrusted maps must fail without touching user text.
+    return prepare;
   }
 }

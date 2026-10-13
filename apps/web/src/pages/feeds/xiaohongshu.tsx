@@ -76,6 +76,9 @@ export default function Xiaohongshu() {
   const [saveSettings, setSaveSettings] = useState<SaveSettings | null>(null);
   const [directory, setDirectory] = useState('');
   const active = useRef(false);
+  const scanId = useRef<string | null>(null);
+  const scanStopped = useRef(false);
+  const [scanning, setScanning] = useState(false);
   const receipts = useRef<Record<string, string>>({});
   useEffect(() => {
     let current = true;
@@ -146,6 +149,7 @@ export default function Xiaohongshu() {
   const edit = trpc.xiaohongshu.edit.useMutation();
   const remove = trpc.xiaohongshu.remove.useMutation();
   const refresh = trpc.xiaohongshu.refresh.useMutation();
+  const pauseScan = trpc.xiaohongshu.pauseScan.useMutation();
   const exportNotes = trpc.xiaohongshu.export.useMutation();
   const saveGroup = trpc.xiaohongshu.saveGroup.useMutation();
   const removeGroup = trpc.xiaohongshu.removeGroup.useMutation();
@@ -165,6 +169,7 @@ export default function Xiaohongshu() {
     if (active.current) return;
     active.current = true;
     setBusy(true);
+    scanStopped.current = false;
     setMessage('');
     try {
       await operation();
@@ -204,7 +209,13 @@ export default function Xiaohongshu() {
     });
   };
   const updateCreator = async (id: string) => {
-    const result = await refresh.mutateAsync({ id });
+    if (scanStopped.current) return 'paused';
+    scanId.current = id;
+    setScanning(true);
+    const result = await refresh.mutateAsync({ id }).finally(() => {
+      scanId.current = null;
+      setScanning(false);
+    });
     const name =
       creators.data?.items.find((creator) => creator.id === id)?.displayName ||
       '已选博主';
@@ -580,6 +591,25 @@ export default function Xiaohongshu() {
             >
               刷新此博主
             </Button>
+            {scanning && (
+              <Button
+                size="sm"
+                variant="flat"
+                onPress={() => {
+                  scanStopped.current = true;
+                  const id = scanId.current;
+                  if (id)
+                    void pauseScan
+                      .mutateAsync({ id })
+                      .then((result) => setMessage(result.message))
+                      .catch(() =>
+                        setMessage('暂停请求未确认，请核对扫描状态。'),
+                      );
+                }}
+              >
+                暂停扫描
+              </Button>
+            )}
             <Button
               size="sm"
               variant="light"
