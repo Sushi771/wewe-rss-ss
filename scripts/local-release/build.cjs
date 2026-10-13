@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const { parseArgs } = require('node:util');
 const { verifySourceSnapshot } = require('./verify-source.cjs');
 const { bundleServer } = require('./compact.cjs');
+const { actualEngineCommit } = require('./engine-audit.cjs');
 const {
   slash,
   readJson,
@@ -377,6 +378,7 @@ function build(options = {}) {
   for (const file of [
     'lib.cjs',
     'runtime.cjs',
+    'engine-audit.cjs',
     'inspect-sqlite.py',
     'prepare-start.py',
     'startup-sqlite.cjs',
@@ -427,6 +429,7 @@ function build(options = {}) {
         path.join(packageDir('prisma', server), 'package.json'),
       ).version,
       engineSha256: fileHash(engine),
+      engineCommit: actualEngineCommit(engine),
     },
     dependencies,
     desktopHelperIncluded: legacy,

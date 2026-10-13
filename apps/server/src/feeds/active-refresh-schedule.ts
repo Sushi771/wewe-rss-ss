@@ -52,6 +52,7 @@ export function automaticSubmissionAllowed(now: number) {
  * the durable queue, whose intentKey remains authoritative for acceptance. */
 export class ActiveRefreshScheduler {
   private busy = false;
+  private accepting = new Set<string>();
   constructor(
     private readonly database: () => string,
     private readonly enqueue: (intentKey: string) => Promise<unknown>,
@@ -88,8 +89,59 @@ export class ActiveRefreshScheduler {
       const state = JSON.parse(await fs.readFile(file, 'utf8'));
       if (state.version !== 1 || !Number.isSafeInteger(state.notBefore))
         throw new Error('SCHEDULE_STATE_INVALID');
-      const round = latestActiveRefreshRound(now, state.notBefore);
-      if (round) await this.enqueue(round.intentKey);
+      const observed = latestActiveRefreshRound(now, state.notBefore);
+      const pending = state.pending;
+      if (pending !== undefined) {
+        const expected = latestActiveRefreshRound(pending.due, state.notBefore);
+        if (
+          !expected ||
+          expected.due !== pending.due ||
+          expected.intentKey !== pending.intentKey
+        )
+          throw new Error('SCHEDULE_STATE_INVALID');
+      }
+      // A previously observed same-day intent survives acceptance failures,
+      // including DB/worker-lock failures in the last 17:30 minute. A fresh
+      // evening deployment still cannot invent an unobserved catch-up round.
+      const round =
+        pending &&
+        local(pending.due).date === local(now).date &&
+        (!observed || pending.due >= observed.due)
+          ? pending
+          : observed;
+      if (!round || !automaticSubmissionAllowed(now)) return;
+      const persist = async (next: typeof state) => {
+        const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+        const handle = await fs.open(temporary, 'wx', 0o600);
+        try {
+          await handle.writeFile(JSON.stringify(next));
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        try {
+          await fs.rename(temporary, file);
+        } finally {
+          await fs.unlink(temporary).catch(() => undefined);
+        }
+      };
+      await persist({ ...state, pending: round });
+      // Long DB reads/queue acceptance must not prevent the next slot's tick
+      // from recording its own intent (especially 17:29 -> 17:30).
+      this.busy = false;
+      if (this.accepting.has(round.intentKey)) return;
+      this.accepting.add(round.intentKey);
+      try {
+        await this.enqueue(round.intentKey);
+        const current = JSON.parse(await fs.readFile(file, 'utf8'));
+        if (current.pending?.intentKey === round.intentKey)
+          await persist({
+            version: 1,
+            notBefore: Math.max(current.notBefore, round.due + 1),
+          });
+      } finally {
+        this.accepting.delete(round.intentKey);
+      }
     } finally {
       this.busy = false;
     }

@@ -3,6 +3,7 @@ const path = require('node:path');
 const { parseArgs } = require('node:util');
 const Module = require('node:module');
 const { isIP } = require('node:net');
+const { actualEngineCommit, sqliteRuntimeUrl } = require('./engine-audit.cjs');
 const {
   verifyReleaseAsync,
   fileHash,
@@ -215,7 +216,7 @@ async function runtime() {
           ]),
         );
   const env = cleanEnvironment({
-    DATABASE_URL: 'file:' + database.replace(/\\/g, '/'),
+    DATABASE_URL: sqliteRuntimeUrl(database),
     NODE_ENV: 'production',
     DATABASE_TYPE: 'sqlite',
   });
@@ -226,6 +227,11 @@ async function runtime() {
   process.chdir(server);
   const clientPath = require.resolve('@prisma/client', { paths: [server] });
   const { PrismaClient, Prisma } = require(clientPath);
+  const engineCommit = actualEngineCommit(
+    path.join(path.dirname(clientPath), 'query_engine-windows.dll.node'),
+  );
+  if (manifest.prisma.engineCommit && engineCommit !== manifest.prisma.engineCommit)
+    throw new Error('Native Prisma engine differs from release manifest');
   if (Prisma.prismaVersion.client !== manifest.prisma.clientVersion)
     throw new Error('运行时 Client 版本不一致');
   const client = new PrismaClient();
@@ -306,6 +312,8 @@ async function runtime() {
       prisma: Prisma.prismaVersion,
       clientPath,
       engineSha256: manifest.prisma.engineSha256,
+      actualEngineCommit: engineCommit,
+      sqliteConnectionLimit: 1,
       counts,
       schemaCompatibility: manifest.schemaCompatibility,
       pending: inspected.pending,
