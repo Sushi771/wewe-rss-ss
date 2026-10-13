@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Request } from 'express';
 import { createHash } from 'node:crypto';
 import { redbookLocalAccess, redbookHandoffPath } from './redbook-local-access';
@@ -163,7 +165,11 @@ describe('task18 independent runtime lifecycle (no database, no network)', () =>
   let runtime: RedbookRuntime;
   beforeEach(() => {
     process.env.DATABASE_URL =
-      'file:E:/CodexValidation/task-18-redbook-security/.task18-tmp/synthetic.sqlite';
+      'file:' +
+      join(tmpdir(), 'redbook-task18-no-network', 'synthetic.sqlite').replace(
+        /\\/g,
+        '/',
+      );
     runtime = new RedbookRuntime({
       xhsCreator: {
         findUnique: async () => ({

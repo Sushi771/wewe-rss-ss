@@ -10,7 +10,7 @@ The fixture was untracked while executed and is included in this patch commit.
 
 The previous source `fab97a792271bf7341383ea92a2424aec74d7317` accepted non-Host URL components (`evil@localhost`, path, query, fragment) because URL parsing repaired Host input. It also accepted `x-forwarded-port`, `x-forwarded-path`, and `x-forwarded-prefix` despite the runbook requiring all forwarded headers to be rejected. The independent regression reproduced all seven failures (39 total tests, 32 passed, 7 failed). Actual loopback socket, password, and matching Origin checks still applied; no remote authentication bypass was demonstrated.
 
-The main owner fixed both rules in `ff1049a`: raw Host grammar permits only localhost/127.0.0.1/[::1] with an optional legal port, and all forwarded/x-forwarded-*/via header names are rejected. Independent regression of all seven cases passes on the new source.
+The main owner fixed both rules in `ff1049a`: raw Host grammar permits only localhost/127.0.0.1/[::1] with an optional legal port, and all forwarded/x-forwarded-\*/via header names are rejected. Independent regression of all seven cases passes on the new source.
 
 No additional reproducible defect was found in the reviewed session/identity scope. Credentials enter only through explicit backend POST JSON, remain in memory for at most two hours, and status never returns cookies, evidence payloads, or signatures. Revoke clears the cookie object, aborts the session, and blocks an in-flight handoff using the epoch check. Default runtime status is unconfigured with platformVerified:false and liveValidation:pending.
 
@@ -35,3 +35,7 @@ Evidence: ignored `output/task18/security-fab97a7.result.json`, `security-ff1049
 Existing `GET /local/redbook/status`, `POST /local/redbook/session`, `POST /local/redbook/revoke`, and `POST /local/redbook/resume-operator` remain owned by the main integration thread. Session body and operator evidence schema are documented in `REDBOOK_RUNTIME_HANDOFF.md`. Nest uses one shared RedbookRuntime instance for the controller and XHS_SOURCE.
 
 No real credentials were read, stored, created, or used; no platform requests, login/authorization, production DB/media access, deployment, merge, push, or remote CI occurred. This review establishes local mechanisms and synthetic flow only. Real API/schema/full-text/image completeness/publication-time semantics and platform signing acceptance remain unverified. Explicit user credential handoff and scoped live evidence are still needed before declaring the source ready for real testing. Node 20/22 execution is not covered by this Node24 review.
+
+## Linux 集成补记
+
+原报告的测试提交、SHA256、Node24 日志仍按原记录保留。后续 task13 集成在 GitHub Node20.16/22 离线矩阵发现两项生命周期用例硬编码 Windows E 盘路径，Linux 正确拒绝该非绝对路径；只将合成 DATABASE_URL 改为系统临时目录下的原生绝对路径，不改断言、生产模块或真实数据库。当前集成 fixture 的新哈希与最终 SHA 验收由 task13 最终报告另列，不能使用旧 fixture 哈希表示修订后的测试。
