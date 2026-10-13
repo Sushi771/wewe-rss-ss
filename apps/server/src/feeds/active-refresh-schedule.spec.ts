@@ -10,6 +10,72 @@ import {
 
 const time = (value: string) => Date.parse(`2026-10-12T${value}+08:00`);
 describe('Shanghai active refresh schedule (offline)', () => {
+  it('serializes completion read-modify-write against the next slot persistence', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'completion-slot-test-'),
+    );
+    const db = path.join(dir, 'synthetic.db');
+    const file = path.join(dir, '.wechat2rss-active-schedule.json');
+    await fs.writeFile(db, 'synthetic');
+    await fs.writeFile(file, JSON.stringify({ version: 1, notBefore: 0 }));
+    let finish!: () => void;
+    let releaseWrite!: () => void;
+    let completionEntered!: () => void;
+    let acceptanceEntered!: () => void;
+    const first = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const barrier = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const completing = new Promise<void>((resolve) => {
+      completionEntered = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      acceptanceEntered = resolve;
+    });
+    const originalOpen = fs.open.bind(fs);
+    let writes = 0;
+    const open = jest
+      .spyOn(fs, 'open')
+      .mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+        if (String(args[0]).endsWith('.tmp') && ++writes === 2) {
+          completionEntered();
+          await barrier;
+        }
+        return originalOpen(...args);
+      });
+    const enqueue = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        acceptanceEntered();
+        return first;
+      })
+      .mockRejectedValueOnce(new Error('worker lock busy'));
+    const scheduler = new ActiveRefreshScheduler(() => db, enqueue);
+    try {
+      const old = scheduler.tick(time('17:29:00'));
+      await entered;
+      finish();
+      // The old callback has already read its pending state, but has not
+      // renamed the file clearing it. This is the reviewed overwrite window.
+      await completing;
+      const next = expect(scheduler.tick(time('17:30:00'))).rejects.toThrow(
+        'worker lock busy',
+      );
+      releaseWrite();
+      await old;
+      await next;
+      expect(
+        JSON.parse(await fs.readFile(file, 'utf8')).pending.intentKey,
+      ).toBe(latestActiveRefreshRound(time('17:30:00'), 0)!.intentKey);
+    } finally {
+      finish();
+      releaseWrite();
+      open.mockRestore();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
   it.each(['09:15:00', '14:00:00', '17:30:00'])(
     'has a stable unique round at %s',
     (slot) => {

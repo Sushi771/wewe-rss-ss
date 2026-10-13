@@ -219,6 +219,20 @@ describe('explicit manual all-refresh boundary (offline)', () => {
     expect(provider.refreshSubscription).not.toHaveBeenCalled();
     expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
   });
+  it('cache-stage initial read failures preserve an already accepted update and never allow resubmission', async () => {
+    service.prismaService.feed.findUnique.mockRejectedValueOnce(
+      new Error('synthetic storage busy'),
+    );
+    expect(await service.runManualRefresh(id, 'cache')).toMatchObject({
+      state: 'failed',
+      accepted: true,
+      retryable: false,
+      stopBatch: false,
+      submissionUnknown: false,
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+  });
   it('only a pre-existing feed with an older reservation proves no submission; same-second reservations remain unknown', async () => {
     const created = Date.parse('2026-10-13T14:00:00.139+08:00');
     feed.createdAt = new Date(created - 86400000);

@@ -51,16 +51,23 @@ export function automaticSubmissionAllowed(now: number) {
  * missed round. Restarts reuse it; only the latest same-day round is offered to
  * the durable queue, whose intentKey remains authoritative for acceptance. */
 export class ActiveRefreshScheduler {
-  private busy = false;
+  private stateWork: Promise<void> = Promise.resolve();
   private accepting = new Set<string>();
   constructor(
     private readonly database: () => string,
     private readonly enqueue: (intentKey: string) => Promise<unknown>,
   ) {}
+  private stateChange<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.stateWork.then(work);
+    this.stateWork = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
   async tick(now = Date.now()) {
-    if (this.busy || !Number.isSafeInteger(now)) return;
-    this.busy = true;
-    try {
+    if (!Number.isSafeInteger(now)) return;
+    const ready = await this.stateChange(async () => {
       const database = await fs.realpath(this.database());
       const file = path.join(
         path.dirname(database),
@@ -126,24 +133,26 @@ export class ActiveRefreshScheduler {
         }
       };
       await persist({ ...state, pending: round });
-      // Long DB reads/queue acceptance must not prevent the next slot's tick
-      // from recording its own intent (especially 17:29 -> 17:30).
-      this.busy = false;
-      if (this.accepting.has(round.intentKey)) return;
-      this.accepting.add(round.intentKey);
-      try {
-        await this.enqueue(round.intentKey);
+      return { round, file, persist };
+    });
+    if (!ready) return;
+    const { round, file, persist } = ready;
+    // DB acceptance runs outside the short state critical section. A later
+    // slot is queued for persistence rather than dropped by a busy callback.
+    if (this.accepting.has(round.intentKey)) return;
+    this.accepting.add(round.intentKey);
+    try {
+      await this.enqueue(round.intentKey);
+      await this.stateChange(async () => {
         const current = JSON.parse(await fs.readFile(file, 'utf8'));
         if (current.pending?.intentKey === round.intentKey)
           await persist({
             version: 1,
             notBefore: Math.max(current.notBefore, round.due + 1),
           });
-      } finally {
-        this.accepting.delete(round.intentKey);
-      }
+      });
     } finally {
-      this.busy = false;
+      this.accepting.delete(round.intentKey);
     }
   }
 }

@@ -23,3 +23,39 @@
 用户指定文章在上游私有缓存已有正文。对这一篇缓存离线跑原解析器得到2884字正文和21张图片；禁用所有图片请求后正文仍保留、图片标为待补。生产当时关闭媒体通道，旧监听器将正文也挡在该通道中。此前已失败重试改变了该行更新水位；本篇恢复需按准确来源身份受控补缺，不能按同标题匹配。
 
 离线回归覆盖300项中一项未知、其余299项继续、跨时段未知去重、并发互斥、重启、持久退避、原文诊断去敏、正文编辑水位和媒体关闭时文字保存。代码通过不代表生产部署或17:30真实执行已完成；部署及恢复结果须另记实际证据。
+
+# Follow-up review: slot persistence and SQLite runtime
+
+Production recorded `Active refresh round deferred` at Shanghai 17:30:07 on
+2026-10-13, with no corresponding 17:30 durable batch. The old scheduler drops
+rounds after the 17:30 minute and does not retain failed acceptance. Its catch
+discards the concrete exception, so the historical log cannot distinguish the
+feed-list query failure from worker-lock contention. A small production
+read-only query did independently return `database is locked`.
+
+Observed same-day intents are now synced to disk before DB acceptance. All
+state read-modify-write operations, including completion cleanup, share a short
+critical section; acceptance runs outside it. Deterministic tests cover a 17:29
+callback paused after its state read while 17:30 arrives, worker-lock failure,
+17:31 retry, restart, quiet hours and no unobserved evening replay. Existing
+durable queue intent deduplication and unknown-submission isolation remain.
+
+The installed generated client reports engine commit `605197…`, but the actual
+compatible DLL returns `5a9203…`. Release manifests and startup diagnostics now
+read the native DLL version directly. A DLL-only upgrade is unsafe: the newer
+engine with the existing client fails raw queries with `e.map is not a function`.
+
+An isolated real SQLite experiment with two concurrent deferred read-to-write
+transactions and a separate read-only backup reproduced the production
+`quaint.rs:167` panic using the default pool (0/8 operations succeeded, 2
+panics). The same compatible client/DLL with `connection_limit=1` completed
+8/8 operations, without errors or panics, while nine read-only backups
+succeeded. The runtime now applies this limit in memory before loading Prisma;
+disk configuration stays unchanged. A bounded real-SQLite positive regression
+is included in CI, alongside the native-engine audit checks.
+
+Initial feed-read failures preserve `accepted:true` in the cache stage and can
+never authorize upstream resubmission. Only a pre-submission failure is safely
+retryable. Historical unknowns require current committed reservation evidence
+before being cleared; a database lock alone does not prove their requests were
+never sent.

@@ -407,11 +407,14 @@ export class TrpcService {
       // contention cannot create an uncertain receipt or an unbounded replay.
       return {
         state: 'failed',
-        accepted: false,
+        accepted: stage === 'cache',
         submissionUnknown: false,
         stopBatch: false,
-        retryable: true,
-        message: '订阅状态读取失败；未发送上游更新，后台限次退避重试。',
+        retryable: stage === 'submit',
+        message:
+          stage === 'submit'
+            ? '订阅状态读取失败；未发送上游更新，后台限次退避重试。'
+            : '已受理更新的缓存状态读取失败；保留已受理状态，不会重新提交上游更新。',
       };
     }
     if (
