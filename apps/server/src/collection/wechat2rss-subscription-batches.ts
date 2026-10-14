@@ -565,6 +565,12 @@ export class Wechat2RssSubscriptionBatches {
                 record.items
                   .filter(
                     (item) =>
+                      (['queued', 'waiting', 'submitting'].includes(
+                        item.state,
+                      ) ||
+                        item.submissionUnknown ||
+                        (item.accepted === true &&
+                          item.state !== 'succeeded')) &&
                       !(
                         record.purpose === 'scheduled-refresh' &&
                         item.state === 'queued' &&
