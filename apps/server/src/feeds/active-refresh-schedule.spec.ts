@@ -10,6 +10,72 @@ import {
 
 const time = (value: string) => Date.parse(`2026-10-12T${value}+08:00`);
 describe('Shanghai active refresh schedule (offline)', () => {
+  it('serializes completion read-modify-write against the next slot persistence', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'completion-slot-test-'),
+    );
+    const db = path.join(dir, 'synthetic.db');
+    const file = path.join(dir, '.wechat2rss-active-schedule.json');
+    await fs.writeFile(db, 'synthetic');
+    await fs.writeFile(file, JSON.stringify({ version: 1, notBefore: 0 }));
+    let finish!: () => void;
+    let releaseWrite!: () => void;
+    let completionEntered!: () => void;
+    let acceptanceEntered!: () => void;
+    const first = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const barrier = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const completing = new Promise<void>((resolve) => {
+      completionEntered = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      acceptanceEntered = resolve;
+    });
+    const originalOpen = fs.open.bind(fs);
+    let writes = 0;
+    const open = jest
+      .spyOn(fs, 'open')
+      .mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+        if (String(args[0]).endsWith('.tmp') && ++writes === 2) {
+          completionEntered();
+          await barrier;
+        }
+        return originalOpen(...args);
+      });
+    const enqueue = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        acceptanceEntered();
+        return first;
+      })
+      .mockRejectedValueOnce(new Error('worker lock busy'));
+    const scheduler = new ActiveRefreshScheduler(() => db, enqueue);
+    try {
+      const old = scheduler.tick(time('17:29:00'));
+      await entered;
+      finish();
+      // The old callback has already read its pending state, but has not
+      // renamed the file clearing it. This is the reviewed overwrite window.
+      await completing;
+      const next = expect(scheduler.tick(time('17:30:00'))).rejects.toThrow(
+        'worker lock busy',
+      );
+      releaseWrite();
+      await old;
+      await next;
+      expect(
+        JSON.parse(await fs.readFile(file, 'utf8')).pending.intentKey,
+      ).toBe(latestActiveRefreshRound(time('17:30:00'), 0)!.intentKey);
+    } finally {
+      finish();
+      releaseWrite();
+      open.mockRestore();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
   it.each(['09:15:00', '14:00:00', '17:30:00'])(
     'has a stable unique round at %s',
     (slot) => {
@@ -83,6 +149,113 @@ describe('Shanghai active refresh schedule (offline)', () => {
         ],
       ]);
     } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+  it('retains an observed 17:30 intent after DB/lock failure across restart and minute boundary', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pending-slot-test-'));
+    const db = path.join(dir, 'synthetic.db');
+    const file = path.join(dir, '.wechat2rss-active-schedule.json');
+    await fs.writeFile(db, 'synthetic');
+    await fs.writeFile(file, JSON.stringify({ version: 1, notBefore: 0 }));
+    const enqueue = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('worker lock busy'))
+      .mockResolvedValue({});
+    const make = () => new ActiveRefreshScheduler(() => db, enqueue);
+    try {
+      await expect(make().tick(time('17:30:00'))).rejects.toThrow(
+        'worker lock busy',
+      );
+      const intent = latestActiveRefreshRound(time('17:30:00'), 0)!.intentKey;
+      expect(
+        JSON.parse(await fs.readFile(file, 'utf8')).pending.intentKey,
+      ).toBe(intent);
+      await make().tick(time('17:31:00'));
+      await make().tick(time('17:32:00'));
+      expect(enqueue.mock.calls).toEqual([[intent], [intent]]);
+      expect(
+        JSON.parse(await fs.readFile(file, 'utf8')).pending,
+      ).toBeUndefined();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+  it('does not submit a retained previous-day intent in quiet hours or replay it the next day', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pending-quiet-test-'));
+    const db = path.join(dir, 'synthetic.db');
+    await fs.writeFile(db, 'synthetic');
+    await fs.writeFile(
+      path.join(dir, '.wechat2rss-active-schedule.json'),
+      JSON.stringify({
+        version: 1,
+        notBefore: 0,
+        pending: latestActiveRefreshRound(time('17:30:00'), 0),
+      }),
+    );
+    const enqueue = jest.fn().mockResolvedValue({});
+    try {
+      const scheduler = new ActiveRefreshScheduler(() => db, enqueue);
+      await scheduler.tick(Date.parse('2026-10-13T05:00:00+08:00'));
+      await scheduler.tick(Date.parse('2026-10-13T06:00:00+08:00'));
+      expect(enqueue).not.toHaveBeenCalled();
+      await scheduler.tick(Date.parse('2026-10-13T09:15:00+08:00'));
+      expect(enqueue.mock.calls).toEqual([
+        [
+          latestActiveRefreshRound(Date.parse('2026-10-13T09:15:00+08:00'), 0)!
+            .intentKey,
+        ],
+      ]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+  it('records 17:30 while a 17:29 previous-slot acceptance is still waiting', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'overlap-slot-test-'));
+    const db = path.join(dir, 'synthetic.db');
+    const file = path.join(dir, '.wechat2rss-active-schedule.json');
+    await fs.writeFile(db, 'synthetic');
+    await fs.writeFile(file, JSON.stringify({ version: 1, notBefore: 0 }));
+    let finish!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const first = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const enqueue = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        started();
+        return first;
+      })
+      .mockRejectedValueOnce(new Error('database locked'));
+    const scheduler = new ActiveRefreshScheduler(() => db, enqueue);
+    try {
+      const waiting = scheduler.tick(time('17:29:00'));
+      await entered;
+      await expect(scheduler.tick(time('17:30:00'))).rejects.toThrow(
+        'database locked',
+      );
+      const intent = latestActiveRefreshRound(time('17:30:00'), 0)!.intentKey;
+      expect(
+        JSON.parse(await fs.readFile(file, 'utf8')).pending.intentKey,
+      ).toBe(intent);
+      finish();
+      await waiting;
+      expect(
+        JSON.parse(await fs.readFile(file, 'utf8')).pending.intentKey,
+      ).toBe(intent);
+      enqueue.mockResolvedValue({});
+      await scheduler.tick(time('17:31:00'));
+      expect(enqueue.mock.calls.map(([key]) => key)).toEqual([
+        latestActiveRefreshRound(time('14:00:00'), 0)!.intentKey,
+        intent,
+        intent,
+      ]);
+    } finally {
+      finish();
       await fs.rm(dir, { recursive: true, force: true });
     }
   });

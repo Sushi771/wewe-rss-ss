@@ -1,4 +1,8 @@
 import {
+  redbookHandoffPath,
+  redbookLocalAccess,
+} from './collection/redbook-local-access';
+import {
   createHash,
   createHmac,
   randomBytes,
@@ -88,6 +92,11 @@ export function privateAccessGuard(
 ) {
   if (!privateOnlineMode()) return next();
   const pathname = req.path;
+  // Dedicated direct-local handoff uses the existing AUTH_CODE, never a new token.
+  if (redbookHandoffPath(pathname)) {
+    if (redbookLocalAccess(req, process.env.AUTH_CODE)) return next();
+    return res.status(403).json({ code: 'REDBOOK_LOCAL_ONLY' });
+  }
   if (
     pathname === '/auth/login' ||
     pathname === '/robots.txt' ||

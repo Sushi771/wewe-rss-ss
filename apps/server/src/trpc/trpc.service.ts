@@ -27,6 +27,7 @@ import {
 } from '../feeds/active-refresh-schedule';
 import {
   BatchOutcome,
+  PreparedRefresh,
   Wechat2RssSubscriptionBatches,
 } from '../collection/wechat2rss-subscription-batches';
 import {
@@ -243,6 +244,8 @@ export class TrpcService {
 
   private readonly logger = new Logger(this.constructor.name);
   private readonly subscriptionTasks: Wechat2RssSubscriptionTasks;
+  private activeRefreshWave?: string;
+  private preparedRefreshCount = 0;
   private readonly subscriptionBatches: Wechat2RssSubscriptionBatches;
 
   async onModuleInit() {
@@ -397,9 +400,26 @@ export class TrpcService {
         accepted: stage === 'cache',
         message: '已有任务处理中，等待串行处理；不会重复提交。',
       };
-    const feed = await this.prismaService.feed.findUnique({
-      where: { id: feedId },
-    });
+    let feed: Feed | null;
+    try {
+      feed = await this.prismaService.feed.findUnique({
+        where: { id: feedId },
+      });
+    } catch {
+      // This read precedes every reservation and upstream request. Storage
+      // contention cannot create an uncertain receipt or an unbounded replay.
+      return {
+        state: 'failed',
+        accepted: stage === 'cache',
+        submissionUnknown: false,
+        stopBatch: false,
+        retryable: stage === 'submit',
+        message:
+          stage === 'submit'
+            ? '订阅状态读取失败；未发送上游更新，后台限次退避重试。'
+            : '已受理更新的缓存状态读取失败；保留已受理状态，不会重新提交上游更新。',
+      };
+    }
     if (
       !feed ||
       feed.status !== 1 ||
@@ -482,6 +502,8 @@ export class TrpcService {
       };
     this.activeSubscriptionAdds.add('wechat2rss:add');
     this.activeCollections.add(feedId);
+    let submissionStarted = false;
+    let preparationStage = '账号状态读取';
     try {
       const provider = wechat2RssProvider();
       const account = await provider.checkAccountStatus();
@@ -492,8 +514,10 @@ export class TrpcService {
           message: '上游账号受限或需要官方验证，本次未提交；队列已暂停。',
         };
       const now = Math.floor(Date.now() / 1000);
+      preparationStage = '一致性备份';
       await createVerifiedSqliteBackup();
       // Keep the original 15-minute per-feed reservation, including unknown results.
+      preparationStage = '本地提交预留';
       const reserved = await this.prismaService.feed.updateMany({
         where: {
           id: feedId,
@@ -510,6 +534,7 @@ export class TrpcService {
           message: '本号更新仍在冷却期或状态已变化，本次未提交；不会自动重发。',
         };
       try {
+        submissionStarted = true;
         await provider.refreshSubscription(feedId, automatic);
       } catch (error) {
         if (
@@ -543,10 +568,205 @@ export class TrpcService {
         feedId,
         message: '上游已受理更新，等待缓存生成；关闭页面后后台继续。',
       };
+    } catch (error) {
+      if (submissionStarted) throw error;
+      const timedOut =
+        error instanceof Error &&
+        error.message === 'SQLite 一致性备份超时，本次未写入';
+      return {
+        state: 'failed',
+        accepted: false,
+        submissionUnknown: false,
+        stopBatch: false,
+        retryable: true,
+        message: `${preparationStage}${timedOut ? '超时' : '失败'}；未发送上游更新，后台限次退避重试。`,
+      };
     } finally {
       this.activeSubscriptionAdds.delete('wechat2rss:add');
       this.activeCollections.delete(feedId);
     }
+  }
+  /** Serial account/list checks, verified snapshot and SQLite reservation.
+   * Held feed guards are released even when a whole prepared wave is stopped. */
+  private async prepareRefreshWaveItem(
+    feedId: string,
+    automatic: boolean,
+    waveKey: string,
+  ): Promise<PreparedRefresh> {
+    const noRequest = (outcome: BatchOutcome): PreparedRefresh => ({
+      outcome,
+      release: () => {},
+    });
+    if (
+      this.isRefreshAllMpArticlesRunning ||
+      this.activeCollections.has(feedId) ||
+      (this.activeSubscriptionAdds.has('wechat2rss:add') &&
+        this.activeRefreshWave !== waveKey)
+    )
+      return noRequest({
+        state: 'queued',
+        accepted: false,
+        stopBatch: false,
+        message: 'Existing work holds collection admission; update not sent.',
+      });
+    const feed = await this.prismaService.feed.findUnique({
+      where: { id: feedId },
+    });
+    if (
+      !feed ||
+      feed.status !== 1 ||
+      resolveCollectionRoute(feed).channel !== 'wechat2rss'
+    )
+      return noRequest({
+        state: 'skipped',
+        accepted: false,
+        stopBatch: false,
+        message: 'Subscription disabled or route changed; update not sent.',
+      });
+    if (
+      this.isRefreshAllMpArticlesRunning ||
+      this.activeCollections.has(feedId) ||
+      (this.activeSubscriptionAdds.has('wechat2rss:add') &&
+        this.activeRefreshWave !== waveKey)
+    )
+      return noRequest({
+        state: 'queued',
+        accepted: false,
+        stopBatch: false,
+        message: 'Collection admission changed during lookup; update not sent.',
+      });
+    this.activeRefreshWave = waveKey;
+    this.preparedRefreshCount++;
+    this.activeSubscriptionAdds.add('wechat2rss:add');
+    this.activeCollections.add(feedId);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.activeCollections.delete(feedId);
+      if (--this.preparedRefreshCount === 0) {
+        this.activeRefreshWave = undefined;
+        this.activeSubscriptionAdds.delete('wechat2rss:add');
+      }
+    };
+    try {
+      const provider = wechat2RssProvider();
+      const account = await provider.checkAccountStatus();
+      if (account.challenged || !account.available) {
+        release();
+        return noRequest({
+          state: 'blocked',
+          accepted: false,
+          stopBatch: true,
+          sharedRestriction: true,
+          restrictionKind: 'account',
+          message: 'Account restricted; prepared wave will not be submitted.',
+        });
+      }
+      const submit = await provider.prepareRefreshSubscription(
+        feedId,
+        automatic,
+      );
+      await createVerifiedSqliteBackup();
+      const now = Math.floor(Date.now() / 1000);
+      const reserved = await this.prismaService.feed.updateMany({
+        where: {
+          id: feedId,
+          status: 1,
+          collectionChannel: feed.collectionChannel,
+          providerRefreshAttemptTime: { lte: now - 900 },
+        },
+        data: { providerRefreshAttemptTime: now },
+      });
+      if (reserved.count !== 1) {
+        release();
+        return noRequest({
+          state: 'skipped',
+          accepted: false,
+          stopBatch: false,
+          message:
+            'Subscription reservation or cooldown changed; update not sent.',
+        });
+      }
+      return {
+        release,
+        cancel: async () => {
+          await this.prismaService.feed.updateMany({
+            where: { id: feedId, providerRefreshAttemptTime: now },
+            data: {
+              providerRefreshAttemptTime: feed.providerRefreshAttemptTime,
+            },
+          });
+        },
+        submit: async () => {
+          await submit();
+          return {
+            state: 'waiting',
+            accepted: true,
+            submissionUnknown: false,
+            stopBatch: false,
+            feedId,
+            message: 'Upstream accepted update; cache check pending.',
+          };
+        },
+      };
+    } catch (error) {
+      release();
+      const code = (error as Error)?.message;
+      if (
+        [
+          'WECHAT2RSS_SUBSCRIPTION_PAUSED',
+          'WECHAT2RSS_SUBSCRIPTION_MISSING',
+        ].includes(code)
+      )
+        return noRequest({
+          state: 'skipped',
+          accepted: false,
+          submissionUnknown: false,
+          stopBatch: false,
+          message: 'Upstream subscription paused or removed; update not sent.',
+        });
+      if (code === 'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED')
+        return noRequest({
+          state: 'queued',
+          accepted: false,
+          submissionUnknown: false,
+          stopBatch: false,
+          message: 'Automatic window closed; update not sent.',
+        });
+      return noRequest({
+        state: code === 'WECHAT2RSS_RATE_LIMITED' ? 'blocked' : 'failed',
+        accepted: false,
+        submissionUnknown: false,
+        retryable: code !== 'WECHAT2RSS_RATE_LIMITED',
+        stopBatch: code === 'WECHAT2RSS_RATE_LIMITED',
+        sharedRestriction: code === 'WECHAT2RSS_RATE_LIMITED',
+        restrictionKind:
+          code === 'WECHAT2RSS_RATE_LIMITED' ? 'rate-limit' : undefined,
+        message: 'Preparation failed before update request.',
+      });
+    }
+  }
+  private async reconcileUnreservedRefresh(
+    feedId: string,
+    batchCreatedAt: number,
+  ) {
+    const feed = await this.prismaService.feed.findUnique({
+      where: { id: feedId },
+    });
+    // Every /add is preceded by this committed reservation. Missing or recreated
+    // feeds and newer reservations cannot prove that a request was never sent.
+    if (
+      !feed ||
+      resolveCollectionRoute(feed).channel !== 'wechat2rss' ||
+      !feed.createdAt ||
+      feed.createdAt.getTime() > batchCreatedAt ||
+      !Number.isSafeInteger(feed.providerRefreshAttemptTime)
+    )
+      return 'unknown' as const;
+    return feed.providerRefreshAttemptTime < Math.floor(batchCreatedAt / 1000)
+      ? ('not-submitted' as const)
+      : ('unknown' as const);
   }
   registerSubscriptionConsumer(consumer: {
     hasPending(): Promise<boolean>;
@@ -679,6 +899,17 @@ export class TrpcService {
     );
     this.subscriptionBatches.attachRefresh((id, stage, automatic, options) =>
       this.runManualRefresh(id, stage, automatic, options),
+    );
+    this.subscriptionBatches.attachRefreshPreparation(
+      (id, automatic, waveKey) =>
+        this.prepareRefreshWaveItem(id, automatic, waveKey),
+    );
+    this.subscriptionBatches.attachRestrictionCheck(async () => {
+      const account = await wechat2RssProvider().checkAccountStatus();
+      return account.available && !account.challenged;
+    });
+    this.subscriptionBatches.attachReconciliation((id, createdAt) =>
+      this.reconcileUnreservedRefresh(id, createdAt),
     );
     const { url } =
       this.configService.get<ConfigurationType['platform']>('platform')!;

@@ -35,7 +35,7 @@ export type CacheSyncDependencies = {
   mediaEnabled?(): boolean;
   onMediaBlocked?(): Promise<void>;
   mediaStopped?(): boolean;
-  /** Read-only stored-body flags, even when the upstream fingerprint is unchanged. */
+  /** Read-only fallback for dependencies without text reconciliation. */
   inspectLocalMedia?(
     id: string,
     page: ProviderPage,
@@ -43,6 +43,12 @@ export type CacheSyncDependencies = {
   list(): Promise<Wechat2RssListedFeed[]>;
   localFeeds(): Promise<LocalFeed[]>;
   read(feed: Wechat2RssListedFeed, name: string): Promise<ProviderPage>;
+  /** Reconcile text without CDN requests and return fresh stored-media readiness.
+   * Missing readiness remains pending; never reuse a previous tick's summary. */
+  syncText?(
+    id: string,
+    page: ProviderPage,
+  ): Promise<{ mediaReady?: boolean } | void>;
   sync(
     id: string,
     page: ProviderPage,
@@ -194,14 +200,20 @@ export class CacheSyncEngine {
           // Never mark check_time consumed after a single unchanged/empty read.
           if (fingerprint !== slot.fingerprint) {
             await this.deps.sync(id, page, true);
+            await this.deps.syncText?.(id, page);
             slot.fingerprint = fingerprint;
             this.media.set(id, { page, due: now });
           } else if (!this.media.has(id)) {
             // Reconcile local SQLite gaps without downloading healthy media or
             // rewriting a successful list. Unknown readiness stays pending.
-            const local = await this.deps.inspectLocalMedia?.(id, page);
-            if (local?.mediaReady !== true)
+            // Text reconciliation already reads current local flags and rereads
+            // them after writes. Use that result instead of inspecting twice.
+            const local = this.deps.syncText
+              ? await this.deps.syncText(id, page)
+              : await this.deps.inspectLocalMedia?.(id, page);
+            if (local?.mediaReady !== true) {
               this.media.set(id, { page, due: now });
+            }
           }
           slot.failures = 0;
           const delays =

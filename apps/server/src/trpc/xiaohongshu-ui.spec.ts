@@ -67,11 +67,20 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
       creator: '',
       note: 'old-note',
       busy: false,
+      scanning: false,
     };
     const invalidated = jest.fn().mockResolvedValue(undefined);
     const scope: any = {
       Error,
       active: { current: false },
+      scanStopped: { current: false },
+      scanId: { current: null },
+      setScanning: (v: boolean) => (state.scanning = v),
+      pauseScan: {
+        mutateAsync: jest
+          .fn()
+          .mockResolvedValue({ paused: true, message: '已请求暂停' }),
+      },
       setBusy: (v: boolean) => (state.busy = v),
       setMessage: (v: string) => (state.message = v),
       displayName: state.name,
@@ -211,6 +220,38 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     evaluate('selectCreator', scope)('b');
     expect(state.creator).toBe('a');
     expect(text).toContain('if (active.current) return;');
+  });
+  it('requests pause for the active creator and leaves later creators unsubmitted', async () => {
+    const { scope, state } = harness();
+    let finish!: (result: unknown) => void;
+    scope.capability.data.canRefresh = true;
+    scope.refresh = {
+      mutateAsync: jest.fn(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    };
+    scope.utils.xiaohongshu.notes = {
+      invalidate: jest.fn().mockResolvedValue(undefined),
+    };
+    scope.updateCreator = evaluate('updateCreator', scope);
+    const batch = evaluate('handleRefreshAll', scope)();
+    expect(scope.scanId.current).toBe('a');
+    expect(state.scanning).toBe(true);
+    await evaluate('handlePause', scope)();
+    expect(scope.pauseScan.mutateAsync).toHaveBeenCalledWith({ id: 'a' });
+    finish({
+      status: 'complete',
+      added: 0,
+      message: 'current request finished',
+    });
+    await batch;
+    expect(scope.refresh.mutateAsync.mock.calls).toEqual([[{ id: 'a' }]]);
+    expect(state.message).toContain('未执行 1 位');
+    expect(state.busy).toBe(false);
+    expect(state.scanning).toBe(false);
   });
   it('uses selected complete cached-note IDs for local save and creates no browser ZIP', async () => {
     const { scope, state } = harness();
@@ -624,6 +665,7 @@ describe('shared single-level management folder actual handlers (offline)', () =
       disabled: false,
       active: { current: false },
       onBusyChange: jest.fn(),
+      setSaving: jest.fn(),
       setError: jest.fn(),
       selectedIds: ['a', 'b'],
       dragType: 'application/x-wewe-xiaohongshu',
@@ -679,6 +721,7 @@ describe('shared single-level management folder actual handlers (offline)', () =
     finish();
     await first;
     expect(scope.onBusyChange.mock.calls).toEqual([[true], [false]]);
+    expect(scope.setSaving.mock.calls).toEqual([[true], [false]]);
     await run(() => Promise.reject(new Error('组中仍有订阅，拒绝删除')));
     expect(scope.setError).toHaveBeenLastCalledWith('组中仍有订阅，拒绝删除');
     expect(scope.active.current).toBe(false);
@@ -690,7 +733,7 @@ describe('shared single-level management folder actual handlers (offline)', () =
     );
     expect(feeds).toContain('<ManagementFolders');
     expect(text).toContain('<ManagementFolders');
-    expect(feeds).toContain('moveFeeds.mutateAsync({ ids, groupId })');
+    expect(feeds).toContain('moveFeeds.mutateAsync(');
     expect(text).toContain('moveCreators.mutateAsync({ ids, groupId })');
     expect(source).toContain('移动已选');
     expect(source).not.toMatch(/parentId|粉丝|follower/i);

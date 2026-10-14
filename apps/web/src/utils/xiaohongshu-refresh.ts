@@ -2,6 +2,7 @@
 export async function refreshCreatorBatch(
   ids: string[],
   refresh: (id: string) => Promise<string>,
+  shouldStop: () => boolean = () => false,
 ): Promise<{
   completed: number;
   remaining: number;
@@ -10,6 +11,7 @@ export async function refreshCreatorBatch(
 }> {
   let completed = 0;
   for (const id of ids) {
+    if (shouldStop()) return { completed, remaining: ids.length - completed };
     let status: string;
     try {
       status = await refresh(id);

@@ -9,9 +9,10 @@ import { SUBSCRIPTION_DISCOVERY } from '../collection/subscription-add';
 import { createNativeSubscriptionDiscovery } from '../collection/subscription-native-adapter';
 import { resolveWereadPublisherOriginal } from '../collection/weread-public-original';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
+import { RedbookModule } from '../collection/redbook.module';
 
 @Module({
-  imports: [PrismaModule, WereadModule],
+  imports: [PrismaModule, WereadModule, RedbookModule],
   controllers: [],
   providers: [
     TrpcService,

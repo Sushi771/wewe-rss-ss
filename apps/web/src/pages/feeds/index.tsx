@@ -922,12 +922,25 @@ const Feeds = () => {
               aria-label="手机选择公众号"
               className="bg-background mt-1 w-full min-w-0 rounded border p-2 text-sm"
               value={currentMpId}
-              disabled={folderBusy}
               onChange={(event) => {
-                if (folderOperation.current) return;
                 const selected = event.target.value;
                 setCurrentMpId(selected);
-                navigate(selected ? `/feeds/${selected}` : '/feeds');
+                const selectedFeed = orderedFeeds.find(
+                  (feed) => feed.id === selected,
+                );
+                const visibleInFolder =
+                  folderFilter === 'all' ||
+                  (folderFilter === 'ungrouped'
+                    ? !selectedFeed?.groupId
+                    : selectedFeed?.groupId === folderFilter);
+                navigate(selected ? `/feeds/${selected}` : '/feeds', {
+                  state: selected
+                    ? {
+                        feedId: selected,
+                        feedFolder: visibleInFolder ? folderFilter : 'all',
+                      }
+                    : undefined,
+                });
                 setMobileSidebarOpen(false);
               }}
             >
@@ -942,12 +955,10 @@ const Feeds = () => {
           <Button
             size="sm"
             variant="flat"
-            isDisabled={folderBusy}
             aria-expanded={mobileSidebarOpen}
             aria-controls="wechat-management-sidebar"
             onPress={() => {
-              if (!folderOperation.current)
-                setMobileSidebarOpen(!mobileSidebarOpen);
+              setMobileSidebarOpen(!mobileSidebarOpen);
             }}
           >
             {mobileSidebarOpen ? '收起管理' : '管理公众号'}
@@ -1074,6 +1085,11 @@ const Feeds = () => {
 
           <ManagementFolders
             folders={folders.data?.items || []}
+            members={orderedFeeds.map((feed) => ({
+              id: feed.id,
+              name: feed.mpName || '公众号信息待补全',
+              groupId: feed.groupId,
+            }))}
             filter={folderFilter}
             selectedIds={isManageMode ? selectedIds : []}
             dragType="application/x-wewe-wechat"
@@ -1084,7 +1100,6 @@ const Feeds = () => {
               !folders.data
             }
             onFilter={(filter) => {
-              if (folderOperation.current) return;
               setFolderFilter(filter);
               setSelectedIds([]);
               setArticleSelectedIds(new Set());
@@ -1097,12 +1112,34 @@ const Feeds = () => {
               setFolderBusy(value);
             }}
             onReorder={async (ids, expectedIds) => {
-              try {
-                await queryUtils.feed.groups.cancel();
-                await reorderFolders.mutateAsync({ ids, expectedIds });
-              } finally {
-                await folders.refetch({ throwOnError: true });
-              }
+              await queryUtils.feed.groups.cancel();
+              const saved = await reorderFolders.mutateAsync({
+                ids,
+                expectedIds,
+              });
+              const orders = new Map(saved.ids.map((id, order) => [id, order]));
+              queryUtils.feed.groups.setData(undefined, (previous) => {
+                if (!previous) return previous;
+                const items = previous.items
+                  .map((folder) => ({
+                    ...folder,
+                    order: orders.get(folder.id) ?? folder.order,
+                  }))
+                  .sort((a, b) => a.order - b.order);
+                return { ...previous, items };
+              });
+              void folders.refetch().then(
+                (result) => {
+                  if (result.error)
+                    toast.warning(
+                      '文件夹排序已保存，列表刷新失败，请稍后刷新页面核对',
+                    );
+                },
+                () =>
+                  toast.warning(
+                    '文件夹排序已保存，列表刷新失败，请稍后刷新页面核对',
+                  ),
+              );
             }}
             onSave={async (input) => {
               await saveFolder.mutateAsync(input);
@@ -1118,9 +1155,34 @@ const Feeds = () => {
               setDraggedItem(null);
               if (draggedItem !== null) setOrderedFeeds(dragSnapshot.current);
               await queryUtils.feed.list.cancel();
-              await moveFeeds.mutateAsync({ ids, groupId });
+              const saved = await moveFeeds.mutateAsync({
+                ids: [...new Set(ids)],
+                groupId,
+              });
+              // The mutation is authoritative. A slow list read must not keep
+              // classification locked or turn a committed move into a failure.
+              const moved = new Set(saved.ids);
+              queryUtils.feed.list.setData({}, (previous) => {
+                if (!previous) return previous;
+                const items = previous.items.map((feed) =>
+                  moved.has(feed.id)
+                    ? { ...feed, groupId: saved.groupId }
+                    : feed,
+                );
+                setOrderedFeeds(items);
+                return { ...previous, items };
+              });
               setSelectedIds([]);
-              await refetchFeedList({ throwOnError: true });
+              void refetchFeedList().then(
+                (result) => {
+                  if (result.error)
+                    toast.warning(
+                      '分类已保存，列表刷新失败，请稍后刷新页面核对',
+                    );
+                },
+                () =>
+                  toast.warning('分类已保存，列表刷新失败，请稍后刷新页面核对'),
+              );
             }}
           />
           {folders.error && (
@@ -1133,17 +1195,15 @@ const Feeds = () => {
             <div className="px-0">
               <ul className="flex w-full flex-col pb-4">
                 {orderedFeeds
+                  .map((item, index) => ({ item, index }))
                   .filter(
-                    (item) =>
+                    ({ item }) =>
                       folderFilter === 'all' ||
                       (folderFilter === 'ungrouped'
                         ? !item.groupId
                         : item.groupId === folderFilter),
                   )
-                  .map((item) => {
-                    const index = orderedFeeds.findIndex(
-                      (feed) => feed.id === item.id,
-                    );
+                  .map(({ item, index }) => {
                     const isSelected = selectedIds.includes(item.id);
                     return (
                       <li
@@ -1190,12 +1250,17 @@ const Feeds = () => {
                               : ''
                         } ${isManageMode ? 'drag-handle' : ''}`}
                         onClick={() => {
-                          if (folderOperation.current) return;
                           if (isManageMode) {
+                            if (folderOperation.current) return;
                             toggleSelect(item.id);
                           } else {
                             setCurrentMpId(item.id);
-                            navigate(`/feeds/${item.id}`);
+                            navigate(`/feeds/${item.id}`, {
+                              state: {
+                                feedId: item.id,
+                                feedFolder: folderFilter,
+                              },
+                            });
                             setMobileSidebarOpen(false);
                           }
                         }}
@@ -1855,11 +1920,14 @@ const Feeds = () => {
             </p>
           )}
           {currentMpInfo && collectionChannel === 'wechat2rss' && (
-            <CacheSyncStatus key={currentMpId} feedId={currentMpId} />
+            <CacheSyncStatus
+              key={`cache-status:${currentMpId}`}
+              feedId={currentMpId}
+            />
           )}
           {currentMpInfo && (
             <details
-              key={currentMpId}
+              key={`source-details:${currentMpId}`}
               className="feed-reading-details shrink-0 border-b border-neutral-200 text-xs dark:border-neutral-700"
             >
               <summary className="cursor-pointer px-3 py-1 text-neutral-500">

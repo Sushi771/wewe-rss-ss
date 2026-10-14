@@ -38,10 +38,13 @@ const note = (): XhsNormalizedCandidate => ({
   expectedImageCount: 1,
   images: [{ ordinal: 1, inlineData: 'data:image/png;base64,' + png }],
 });
+// Test fixture labels are encoded at the fixture seam, never guessed in production.
+const cachedKey = (id: string) =>
+  id.startsWith('[') ? id : JSON.stringify(['xiaohongshu', 'note', id]);
 const cached = (id: string, creatorId = 'creator-a') => ({
-  id,
+  id: cachedKey(id),
   creatorId,
-  title: id,
+  title: JSON.parse(cachedKey(id))[2],
   publishTime: 1700000000,
   status: 'complete',
   kind: null,
@@ -80,7 +83,7 @@ describe('XHS single tool and bounded cache batch use original local publication
   const batch = (ids = ['note-a', 'note-b', 'note-c'], pickToken?: string) =>
     post(batchPath, {
       creatorId: 'creator-a',
-      noteIds: ids,
+      noteIds: ids.map(cachedKey),
       ...(pickToken ? { pickToken } : {}),
     });
   const files = async () => {
@@ -89,9 +92,9 @@ describe('XHS single tool and bounded cache batch use original local publication
       await Promise.all(
         days.map(async (day) => {
           const directory = join(destination, day);
-          return (await fs.readdir(directory)).map((entry) =>
-            join(directory, entry),
-          );
+          return (await fs.readdir(directory, { withFileTypes: true }))
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => join(directory, entry.name));
         }),
       )
     ).flat();
@@ -112,7 +115,12 @@ describe('XHS single tool and bounded cache batch use original local publication
             xhsCreator: {
               findUnique: async ({ where }: { where: { id: string } }) =>
                 where.id === 'creator-a'
-                  ? { id: 'creator-a', externalAuthorId: 'verified-author' }
+                  ? {
+                      id: 'creator-a',
+                      externalAuthorId: 'verified-author',
+                      displayName: '合成博主',
+                      group: null,
+                    }
                   : null,
             },
           },
@@ -146,7 +154,7 @@ describe('XHS single tool and bounded cache batch use original local publication
     findFirst
       .mockReset()
       .mockImplementation(async ({ where }) =>
-        ['note-a', 'note-b', 'note-c'].includes(where.id) &&
+        ['note-a', 'note-b', 'note-c'].map(cachedKey).includes(where.id) &&
         where.creatorId === 'creator-a'
           ? cached(where.id)
           : null,
@@ -338,24 +346,28 @@ describe('XHS single tool and bounded cache batch use original local publication
 
   it('prevalidates every creator-bound cached identity before any batch files', async () => {
     findFirst.mockImplementation(async ({ where }) =>
-      where.id === 'note-a' ? cached('note-a') : null,
+      where.id === cachedKey('note-a') ? cached('note-a') : null,
     );
     expect((await batch(['note-a', 'other-creators-note'])).status).toBe(422);
     expect(findFirst.mock.calls.map(([arg]) => arg.where)).toEqual([
-      { id: 'note-a', creatorId: 'creator-a', status: 'complete' },
-      { id: 'other-creators-note', creatorId: 'creator-a', status: 'complete' },
+      { id: cachedKey('note-a'), creatorId: 'creator-a', status: 'complete' },
+      {
+        id: cachedKey('other-creators-note'),
+        creatorId: 'creator-a',
+        status: 'complete',
+      },
     ]);
     expect(await fs.readdir(destination)).toEqual([]);
     expect(sourceRead).not.toHaveBeenCalled();
   });
 
   it('preserves first complete Markdown/PNG on second disk failure and never writes third', async () => {
-    const originalCopy = fs.copyFile;
-    let copies = 0;
-    jest.spyOn(mutableFs, 'copyFile').mockImplementation(async (...args) => {
-      if (++copies === 2)
+    const originalLink = fs.link;
+    let publications = 0;
+    jest.spyOn(mutableFs, 'link').mockImplementation(async (...args) => {
+      if (++publications === 2)
         throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
-      await originalCopy(...args);
+      await originalLink(...args);
     });
     const result = await batch();
     expect(result.status).toBe(422);
@@ -366,14 +378,14 @@ describe('XHS single tool and bounded cache batch use original local publication
     });
     const folders = await files();
     expect(folders).toHaveLength(1);
-    expect(await fs.readFile(join(folders[0], '正文.md'), 'utf8')).toContain(
+    expect(await fs.readFile(join(folders[0], 'note-a.md'), 'utf8')).toContain(
       '缓存完整正文',
     );
     const images = await fs.readdir(join(folders[0], 'image'));
     expect(await fs.readFile(join(folders[0], 'image', images[0]))).toEqual(
       Buffer.from(png, 'base64'),
     );
-    expect(copies).toBe(2);
+    expect(publications).toBe(2);
   });
 
   it('uses one native grant for the whole batch, deduplicates IDs and preserves repeats', async () => {
@@ -389,7 +401,13 @@ describe('XHS single tool and bounded cache batch use original local publication
     expect(
       (await batch(['note-a', 'note-b'], again.body.pickToken)).body,
     ).toMatchObject({ savedCount: 0, alreadySavedCount: 2 });
-    expect(await files()).toHaveLength(2);
+    const folders = await files();
+    expect(folders).toHaveLength(1);
+    expect(
+      (await fs.readdir(folders[0]))
+        .filter((name) => name.endsWith('.md'))
+        .sort(),
+    ).toEqual(['note-a.md', 'note-b.md']);
     expect(picker.pickArticleDirectory).toHaveBeenCalledTimes(2);
   });
 

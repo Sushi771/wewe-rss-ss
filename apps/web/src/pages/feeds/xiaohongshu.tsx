@@ -12,6 +12,7 @@ import {
 } from '@nextui-org/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import dayjs from 'dayjs';
+import RedbookFirstCheck from '@web/components/RedbookFirstCheck';
 import ManagementFolders from '@web/components/ManagementFolders';
 import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
@@ -76,6 +77,9 @@ export default function Xiaohongshu() {
   const [saveSettings, setSaveSettings] = useState<SaveSettings | null>(null);
   const [directory, setDirectory] = useState('');
   const active = useRef(false);
+  const scanId = useRef<string | null>(null);
+  const scanStopped = useRef(false);
+  const [scanning, setScanning] = useState(false);
   const receipts = useRef<Record<string, string>>({});
   useEffect(() => {
     let current = true;
@@ -146,6 +150,7 @@ export default function Xiaohongshu() {
   const edit = trpc.xiaohongshu.edit.useMutation();
   const remove = trpc.xiaohongshu.remove.useMutation();
   const refresh = trpc.xiaohongshu.refresh.useMutation();
+  const pauseScan = trpc.xiaohongshu.pauseScan.useMutation();
   const exportNotes = trpc.xiaohongshu.export.useMutation();
   const saveGroup = trpc.xiaohongshu.saveGroup.useMutation();
   const removeGroup = trpc.xiaohongshu.removeGroup.useMutation();
@@ -165,6 +170,7 @@ export default function Xiaohongshu() {
     if (active.current) return;
     active.current = true;
     setBusy(true);
+    scanStopped.current = false;
     setMessage('');
     try {
       await operation();
@@ -204,7 +210,13 @@ export default function Xiaohongshu() {
     });
   };
   const updateCreator = async (id: string) => {
-    const result = await refresh.mutateAsync({ id });
+    if (scanStopped.current) return 'paused';
+    scanId.current = id;
+    setScanning(true);
+    const result = await refresh.mutateAsync({ id }).finally(() => {
+      scanId.current = null;
+      setScanning(false);
+    });
     const name =
       creators.data?.items.find((creator) => creator.id === id)?.displayName ||
       '已选博主';
@@ -238,6 +250,7 @@ export default function Xiaohongshu() {
       const result = await refreshCreatorBatch(
         enabled.map((creator) => creator.id),
         updateCreator,
+        () => scanStopped.current,
       );
       const detail = result.failedId
         ? result.error || receipts.current[result.failedId] || '更新未完成。'
@@ -246,6 +259,17 @@ export default function Xiaohongshu() {
         `批量更新：完成 ${result.completed} 位，未完成 ${result.failedId ? 1 : 0} 位，未执行 ${result.remaining} 位；已停用跳过 ${items.length - enabled.length} 位。${detail}`,
       );
     });
+  const handlePause = async () => {
+    scanStopped.current = true;
+    const id = scanId.current;
+    if (!id) return;
+    try {
+      const result = await pauseScan.mutateAsync({ id });
+      setMessage(result.message);
+    } catch {
+      setMessage('暂停请求未确认，请核对扫描状态。');
+    }
+  };
   const handleDownload = () =>
     run(async () => {
       if (!current || !selectedNotes.length) return;
@@ -580,6 +604,17 @@ export default function Xiaohongshu() {
             >
               刷新此博主
             </Button>
+            {scanning && capability.data?.canPause && (
+              <Button
+                size="sm"
+                variant="flat"
+                onPress={() => {
+                  void handlePause();
+                }}
+              >
+                暂停扫描
+              </Button>
+            )}
             <Button
               size="sm"
               variant="light"
@@ -641,6 +676,10 @@ export default function Xiaohongshu() {
           </div>
         </div>
         <div className="space-y-2 border-b border-neutral-200 px-4 py-3 text-sm dark:border-neutral-700">
+          <RedbookFirstCheck
+            creator={current}
+            onEnabled={() => utils.xiaohongshu.capability.invalidate()}
+          />
           <p role="status">
             {capability.error
               ? '来源状态查询失败，未自动更新。'

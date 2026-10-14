@@ -13,6 +13,9 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { ArticleDownloadController } from '../article-download.controller';
 import * as picker from '../article-folder-picker';
+import { RedbookSource, redbookReader } from './redbook-source';
+import { RedbookClient } from './redbook-client';
+import { FileRedbookStateStore } from './redbook-scan-state';
 
 // Existing archiver v8 is ESM and Jest runs CJS. Execute the actual unchanged
 // offline-archive source in a normal Node child; do not fake archive output.
@@ -28,7 +31,11 @@ jest.mock('../offline-archive', () => ({
         destination,
         source,
       ],
-      { encoding: 'utf8', windowsHide: true },
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        cwd: path.resolve(__dirname, '../..'),
+      },
     );
     if (child.status !== 0) throw new Error('ACTUAL_ARCHIVE_CHILD_FAILED');
   },
@@ -51,6 +58,99 @@ describe('production XHS router/service → additive SQLite and original export 
   let root: string, prisma: PrismaClient, creatorId: string;
   const originalEnv = { ...process.env };
   let snapshot: unknown;
+  it('streams synthetic audited client/mapper pages into SQLite with durable checkpoints and cache dedupe', async () => {
+    const requests: string[] = [];
+    const client = new RedbookClient({
+      cookies: () => ({ a1: 'synthetic', web_session: 'synthetic' }),
+      transport: async (request) => {
+        requests.push(request.method);
+        return {
+          status: 200,
+          url: request.url,
+          body: {
+            success: true,
+            code: 0,
+            data:
+              request.method === 'GET'
+                ? {
+                    notes: [
+                      {
+                        note_id: 'redbook-synthetic',
+                        user: { user_id: 'synthetic-author' },
+                        xsec_token: 'synthetic-token',
+                      },
+                    ],
+                    cursor: '',
+                    has_more: false,
+                  }
+                : {
+                    items: [
+                      {
+                        id: 'redbook-synthetic',
+                        note_card: {
+                          note_id: 'redbook-synthetic',
+                          user: { user_id: 'synthetic-author' },
+                          type: 'normal',
+                          time: 1760000000000,
+                          title: 'Redbook fixture',
+                          desc: 'Synthetic full caption',
+                          image_list: [
+                            {
+                              url_default:
+                                'https://sns-webpic-qc.xhscdn.com/synthetic',
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+          },
+        };
+      },
+    });
+    const source = new RedbookSource({
+      reader: redbookReader(
+        client,
+        async () =>
+          new Response(Buffer.from(png, 'base64'), {
+            headers: { 'content-type': 'image/png' },
+          }),
+      ),
+      store: new FileRedbookStateStore(path.join(root, 'redbook-state')),
+      contractReviewed: true, // Synthetic test seam only; real contract is unproved.
+      authorFor: () => 'synthetic-author',
+      isComplete: async (id, noteId) =>
+        !!(await prisma.xhsNote.findFirst({
+          where: {
+            creatorId: id,
+            id: JSON.stringify(['xiaohongshu', 'note', noteId]),
+            status: 'complete',
+          },
+        })),
+    });
+    const service = new XiaohongshuService(prisma as any, source);
+    const first = await service.refresh(creatorId);
+    expect(first).toMatchObject({ status: 'complete', added: 1 });
+    expect(requests).toEqual(['GET', 'POST']);
+    expect(
+      (
+        await service.body(
+          creatorId,
+          JSON.stringify(['xiaohongshu', 'note', 'redbook-synthetic']),
+        )
+      ).images,
+    ).toEqual(['data:image/png;base64,' + png]);
+    expect(await service.refresh(creatorId)).toMatchObject({
+      status: 'complete',
+      added: 0,
+    });
+    expect(requests).toEqual(['GET', 'POST', 'GET']);
+    await prisma.xhsNote.delete({
+      where: {
+        id: JSON.stringify(['xiaohongshu', 'note', 'redbook-synthetic']),
+      },
+    });
+  }, 30000);
   const oldRows = async () => {
     const columns = (
       await prisma.$queryRawUnsafe<any[]>('PRAGMA table_info(feeds)')
@@ -392,9 +492,9 @@ describe('production XHS router/service → additive SQLite and original export 
         imageCount: 1,
         alreadySaved: false,
       });
-      expect(path.basename(first.body.markdownPath)).toBe('正文.md');
+      expect(path.basename(first.body.markdownPath)).toBe('合成图文.md');
       expect(path.relative(destination, first.body.directory)).toMatch(
-        /^\d{4}-\d{2}-\d{2}[\\/]/,
+        /^\d{4}-\d{2}-\d{2}_小红书未分组[\\/]/,
       );
       const md = await fs.readFile(first.body.markdownPath, 'utf8');
       expect(md).toContain('完整合成正文');
@@ -441,7 +541,11 @@ describe('production XHS router/service → additive SQLite and original export 
             '<div id="js_content"><img src="https://example.com/remote.png"></div>',
         },
       });
-      expect((await post()).status).toBe(422);
+      // A complete trusted local receipt is checked before current cache bytes.
+      // The new identity seam intentionally skips without preparing corrupt cache.
+      const skipped = await post();
+      expect(skipped.status).toBe(200);
+      expect(skipped.body.alreadySaved).toBe(true);
       expect(await fs.readdir(destination)).toEqual(before);
     } finally {
       await app.close();

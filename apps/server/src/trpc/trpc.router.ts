@@ -1118,16 +1118,20 @@ export class TrpcRouter {
         const { cursor } = input;
         const where = articleListWhere(input);
 
-        const items = await findArticleListRows(this.prismaService, {
-          orderBy: articleListOrder(input),
-          take: limit + 1,
-          where,
-          cursor: cursor
-            ? {
-                id: cursor,
-              }
-            : undefined,
-        });
+        const items = await findArticleListRows(
+          this.prismaService,
+          {
+            orderBy: articleListOrder(input),
+            take: limit + 1,
+            where,
+            cursor: cursor
+              ? {
+                  id: cursor,
+                }
+              : undefined,
+          },
+          { databaseUrl: process.env.DATABASE_URL },
+        );
         let nextCursor: typeof cursor | undefined = undefined;
         if (items.length > limit) {
           // Remove the last item and use it as next cursor
@@ -1138,11 +1142,14 @@ export class TrpcRouter {
         }
 
         return {
-          items: items.map((item) => ({
-            ...item,
-            bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
-            bodyRetryResult: readBodyRetryResult(item.lastBodyRetry),
-          })),
+          items: items.map((item) => {
+            const { lastBodyRetry, ...publicItem } = item;
+            return {
+              ...publicItem,
+              bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
+              bodyRetryResult: readBodyRetryResult(lastBodyRetry),
+            };
+          }),
           nextCursor,
         };
       }),
@@ -1158,11 +1165,12 @@ export class TrpcRouter {
             message: `No article with id '${id}'`,
           });
         }
+        const { lastBodyRetry, ...publicArticle } = article;
         return {
-          ...article,
+          ...publicArticle,
           bodyCached: Boolean(article.contentHtml),
           bodyRetry: bodyRetryAvailability(article, !!(ctx as any).isLocal),
-          bodyRetryResult: readBodyRetryResult(article.lastBodyRetry),
+          bodyRetryResult: readBodyRetryResult(lastBodyRetry),
         };
       }),
 
@@ -1379,6 +1387,9 @@ export class TrpcRouter {
   });
 
   xiaohongshuRouter = this.trpcService.router({
+    pauseScan: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .mutation(({ input }) => this.xhs.pauseScan(input.id)),
     capability: this.trpcService.protectedProcedure.query(() =>
       this.xhs.capability(),
     ),

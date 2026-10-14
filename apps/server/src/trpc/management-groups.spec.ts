@@ -407,6 +407,71 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
         .localDirectory,
     ).toBe('unchanged-local-path');
   });
+  it('persists a full 100-member batch across a fresh client, makes repeat adds idempotent, and rolls back a failed commit', async () => {
+    const { api } = caller();
+    const group = await api.feed.saveGroup({ name: 'batch target' });
+    const ids = Array.from({ length: 100 }, (_, i) => `batch-feed-${i}`);
+    try {
+      await prisma.$transaction(
+        ids.map((id) =>
+          prisma.feed.create({
+            data: {
+              id,
+              mpName: id,
+              mpCover: '',
+              mpIntro: '',
+              updateTime: 123,
+            },
+          }),
+        ),
+      );
+      const transaction = prisma.$transaction.bind(prisma);
+      const broken = jest
+        .spyOn(prisma, '$transaction')
+        .mockImplementationOnce(((operation: any) =>
+          transaction(async (tx) => {
+            await operation(tx);
+            throw new Error('synthetic commit failure');
+          })) as any);
+      await expect(
+        api.feed.moveFeeds({ ids, groupId: group.id }),
+      ).rejects.toThrow('synthetic commit failure');
+      broken.mockRestore();
+      expect(
+        await prisma.feed.count({ where: { id: { in: ids }, groupId: null } }),
+      ).toBe(100);
+      await api.feed.moveFeeds({ ids, groupId: group.id });
+      await api.feed.moveFeeds({ ids, groupId: group.id });
+      const fresh = new PrismaClient({
+        datasources: { db: { url: process.env.DATABASE_URL } },
+      });
+      try {
+        expect(
+          await fresh.feed.count({
+            where: { id: { in: ids }, groupId: group.id },
+          }),
+        ).toBe(100);
+        expect(await fresh.feed.count({ where: { id: { in: ids } } })).toBe(
+          100,
+        );
+      } finally {
+        await fresh.$disconnect();
+      }
+      await expect(
+        api.feed.moveFeeds({
+          ids: [...ids.slice(0, 99), 'missing'],
+          groupId: null,
+        }),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(
+        await prisma.feed.count({
+          where: { id: { in: ids }, groupId: group.id },
+        }),
+      ).toBe(100);
+    } finally {
+      await prisma.feed.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
   it('rejects foreign platform groups, foreign or missing IDs without moving any member', async () => {
     const { api } = caller();
     const wx = await api.feed.saveGroup({ name: 'wx' });

@@ -29,7 +29,7 @@ export function prepareCachedArticleLocalExport(
 ) {
   const snapshot = { ...article };
   const prepare: ArticlePreparation = async (directory: string) => {
-    if (!snapshot.contentHtml || snapshot.lastBodyStatus === 'unavailable')
+    if (!snapshot.contentHtml)
       throw new TRPCError({
         code: 'PRECONDITION_FAILED',
         message: '正文尚未缓存，不能完成离线导出；未重新请求原文。',

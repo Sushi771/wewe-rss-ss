@@ -2,16 +2,61 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      [
+        main,
+        codex/sqlite-backup-bounded-20261014,
+        codex/sqlite-backup-child-exit-20261014,
+        codex/sqlite-backup-production-base-20261014,
+        codex/sqlite-backup-slow-copy-20261014,
+        codex/article-list-read-timeout-20261014,
+        codex/backend-recovery-integration-20261014,
+        codex/folder-selection-overlay-fix,
+        codex/performance-five-candidate-20261014,
+        codex/cache-sync-single-preflight-20261014,
+        codex/bounded-five-submit-20261014,
+      ]
   pull_request:
     branches:
       [
         main,
         codex/manual-refresh-download-integration,
         codex/cold-launch-profile,
+        codex/automatic-refresh-recovery-20261013,
+        codex/body-cache-retry-status,
+        codex/backend-recovery-integration-20261014,
       ]
 
 jobs:
+  cache-reconcile-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Test fresh cache reconciliation on synthetic SQLite
+        run: pnpm --filter server exec jest --runInBand src/feeds/cache-sync-engine.spec.ts src/feeds/cache-sync-storage.spec.ts
+      - name: Test independent media lane and check server types
+        run: |
+          node --test scripts/offline-media-recovery.test.cjs
+          pnpm --filter server exec tsc --noEmit --incremental false
+      - name: Compare pinned and current engines with original SQL offline
+        run: node apps/server/scripts/benchmark-cache-reconcile.cjs "$RUNNER_TEMP" > cache-reconcile-benchmark.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cache-reconcile-benchmark
+          path: cache-reconcile-benchmark.json
+
   windows-process-identity:
     runs-on: windows-latest
     steps:
@@ -19,6 +64,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Test local Redbook startup handshake and confirmation gateway offline
+        working-directory: scripts/redbook-local-confirmation
+        run: node --test redbook-startup.test.cjs redbook-pair-gateway.test.cjs
       - name: Test native loopback listener ownership and guarded stop
         run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
       - name: Test desktop feedback and Windows state-file contention offline
@@ -36,6 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Offline rollback test loads the committed serial base.
       - uses: pnpm/action-setup@v3
         with:
           version: 9
@@ -66,6 +116,8 @@ jobs:
         run: node --test scripts/wechat-source-metrics-ui.test.cjs
       - name: Test compact reading toolbar and collapsed diagnostics offline
         run: node --test scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs
+      - name: Test current article cache and retry history offline
+        run: node --test scripts/article-body-state.test.cjs
       - name: Test Shanghai date shortcuts and isolated reader find offline
         env:
           NODE_OPTIONS: --experimental-websocket
@@ -75,7 +127,7 @@ jobs:
       - name: Test unavailable new-subscription source and retained input offline
         run: node --test scripts/feed-add-ui.test.cjs scripts/subscription-tasks-ui.test.cjs scripts/subscription-dialog-layout.test.cjs
       - name: Test Xiaohongshu batch completion and download failure states offline
-        run: node --test scripts/xiaohongshu-refresh-ui.test.cjs
+        run: node --test scripts/xiaohongshu-refresh-ui.test.cjs scripts/redbook-first-check-ui.test.cjs
       - name: Test closed Sites metadata contract offline
         run: node --test scripts/sites-local-contract.test.mjs
       - name: Test Server
@@ -94,6 +146,8 @@ jobs:
         run: node --test scripts/cache-revision-watch.test.cjs scripts/cache-sync-status-ui.test.cjs
       - name: Test periodic SQLite snapshots and fail-closed leases offline
         run: python3 apps/server/scripts/test_sqlite_snapshot_guard.py -v
+      - name: Test bounded consistent backups with real synthetic concurrent writers
+        run: python3 apps/server/scripts/test_backup_sqlite.py -v
       - name: Test cache-only Unicode transport and publisher identity offline
         run: python3 apps/server/scripts/test_read-wechat2rss-cache.py
       - name: Test read-only SQLite cache signals on synthetic databases
@@ -107,7 +161,7 @@ jobs:
       - name: Test native subscribed MP and review probes offline
         run: node --test scripts/research/probe-subscribed-mp-once.spec.cjs scripts/research/probe-native-review-owner07.spec.cjs
       - name: Test official album runtime scheduling policy
-        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs scripts/local-release/startup-acceptance.test.cjs
+        run: node --test scripts/local-release/engine-audit.test.cjs scripts/local-release/sqlite-concurrency.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs scripts/local-release/startup-acceptance.test.cjs
       - name: Test desktop dependency startup and launch locking offline
         run: node --test scripts/local-release/desktop-dependencies.test.cjs scripts/local-release/desktop-progress.test.cjs scripts/local-release/desktop-home-entry.test.cjs
       - name: Test startup schema checks and exact database preservation
