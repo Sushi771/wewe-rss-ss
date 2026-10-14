@@ -232,6 +232,49 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
     await manager.runDue();
     expect(run.mock.calls.map((call) => call[0])).toEqual([ids[0], ids[1]]);
   });
+  it('a later slot can refresh a previously successful subscription while its peer retains the original retry', async () => {
+    const run = jest.fn(async (feed: string) =>
+      feed === ids[0] ? failure : success,
+    );
+    const { manager } = make(run as any);
+    const original = await manager.enqueueRefresh(
+      ids.slice(0, 2),
+      '4'.repeat(64),
+      'scheduled-refresh',
+    );
+    await manager.runDue();
+    clock += 30000;
+    await manager.runDue();
+    clock = Date.parse('2026-10-14T17:30:00+08:00');
+    const later = await manager.enqueueRefresh(
+      ids.slice(0, 2),
+      '5'.repeat(64),
+      'scheduled-refresh',
+    );
+    expect(later.items.map((item) => item.state)).toEqual([
+      'skipped',
+      'queued',
+    ]);
+    await manager.runDue(); // Original failed item consumes its next attempt.
+    clock += 30000;
+    await manager.runDue(); // Original backoff yields to the new successful item.
+    expect(run.mock.calls.map((call) => call[0])).toEqual([
+      ids[0],
+      ids[1],
+      ids[0],
+      ids[1],
+    ]);
+    expect((await disk(original.batchId)).items[0].preparationRetries).toBe(2);
+    expect(
+      await manager.enqueueRefresh(
+        ids.slice(0, 2),
+        '5'.repeat(64),
+        'scheduled-refresh',
+      ),
+    ).toMatchObject({ batchId: later.batchId, reused: true });
+    await manager.runDue();
+    expect(run).toHaveBeenCalledTimes(4);
+  });
   it('a crash during a retry consumes its claim; only explicit read-only proof permits another attempt', async () => {
     let finish!: (outcome: BatchOutcome) => void;
     const run = jest

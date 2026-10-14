@@ -44,6 +44,10 @@ authoritative. Repeated delivery of one automatic slot reuses the same record.
 Pending legacy retries are restored before overlapping later slots are
 deduplicated. A delayed item cannot prevent independent items in another
 round from running; the existing global submission spacing remains in force.
+Completed successes in a still-running older round may join a new automatic
+slot. Pending retries and accepted-but-incomplete or uncertain requests stay
+with their original intent; one failed peer cannot suppress the next update
+of an already successful subscription.
 
 Before a retry callback runs, the queue persists its incremented count and
 `submitting` state atomically. A crash at that boundary consumes the claim and
