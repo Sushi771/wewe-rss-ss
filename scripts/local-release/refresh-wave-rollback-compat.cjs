@@ -28,17 +28,18 @@ const restrictionMethods = `
       }
     }
     b.state = b.items.some(i => ['queued','waiting','submitting'].includes(i.state)) ? 'running' : 'completed';
-    await this.write(b); return true;
+    return this.write(b, true);
   }
 `;
 
 /** Apply only to the serial worker from an isolated rollback checkout based on
  * the actual deployed commit. Does not read/write a database or durable state. */
 function compatibleSerialRefreshWorker(source) {
-  const marker = '// Bounded-wave rollback state compatibility v3.';
+  const marker = '// Bounded-wave rollback state compatibility v4.';
   if (
     source.includes('// Bounded-wave rollback state compatibility.') ||
-    source.includes('// Bounded-wave rollback state compatibility v2.')
+    source.includes('// Bounded-wave rollback state compatibility v2.') ||
+    source.includes('// Bounded-wave rollback state compatibility v3.')
   )
     throw new Error('ROLLBACK_REBUILD_REQUIRED');
   if (source.includes('private async runRefreshWave('))
@@ -51,7 +52,7 @@ function compatibleSerialRefreshWorker(source) {
   };
   replace(
     '  private async write(b: Batch) {',
-    "  private readonly batchWrites = new Map<string, Promise<void>>();\n  private async write(b: Batch, preserveStopped = false) {\n    const previous = this.batchWrites.get(b.batchId) || Promise.resolve();\n    const pending = previous.catch(() => {}).then(async () => {\n      if (preserveStopped) {\n        const latest = await this.read(b.batchId);\n        if (!latest || latest.state === 'stopped') {\n          if (latest) Object.assign(b, latest);\n          return;\n        }\n      }\n      await this.persistWrite(b);\n    });\n    this.batchWrites.set(b.batchId, pending);\n    try { await pending; }\n    finally {\n      if (this.batchWrites.get(b.batchId) === pending) this.batchWrites.delete(b.batchId);\n    }\n  }\n  private async persistWrite(b: Batch) {",
+    "  private readonly batchWrites = new Map<string, Promise<boolean>>();\n  /** All existing-state writes honor stop at their serialized persistence boundary.\n   * Only creation, explicit stop, and a single genuine receipt have special modes. */\n  private async write(\n    b: Batch,\n    mode: boolean | 'receipt' | 'stop' = true,\n    receiptIndex?: number,\n  ) {\n    const persisted = JSON.parse(JSON.stringify(b)) as Batch;\n    const previous = this.batchWrites.get(b.batchId) || Promise.resolve(true);\n    const pending = previous\n      .catch(() => false)\n      .then(async () => {\n        const latest = mode === false ? undefined : await this.read(b.batchId);\n        if (mode !== false && !latest) return false;\n        if (mode === 'stop') {\n          Object.assign(persisted, latest);\n          persisted.state = 'stopped';\n          for (const item of persisted.items)\n            if (item.state === 'queued') {\n              item.state = 'cancelled';\n              item.message = '剩余任务已停止，未发送。';\n            }\n        } else if (latest?.state === 'stopped') {\n          if (mode !== 'receipt') {\n            Object.assign(b, latest);\n            return false;\n          }\n          const receipt = persisted.items[receiptIndex!];\n          if (!receipt || !latest.items[receiptIndex!]) return false;\n          latest.items[receiptIndex!] = { ...receipt };\n          if (\n            receipt.state === 'queued' &&\n            !receipt.accepted &&\n            !receipt.submissionUnknown\n          )\n            latest.items[receiptIndex!].state = 'cancelled';\n          latest.nextSubmissionAt = Math.max(\n            latest.nextSubmissionAt,\n            persisted.nextSubmissionAt,\n          );\n          Object.assign(persisted, latest);\n        }\n        await this.persistWrite(persisted);\n        if (mode === 'stop' || (mode === 'receipt' && latest?.state === 'stopped'))\n          Object.assign(b, persisted);\n        else b.updatedAt = persisted.updatedAt;\n        return true;\n      });\n    this.batchWrites.set(b.batchId, pending);\n    try {\n      return await pending;\n    } finally {\n      if (this.batchWrites.get(b.batchId) === pending)\n        this.batchWrites.delete(b.batchId);\n    }\n  }\n  private async persistWrite(b: Batch) {\n",
   );
   const recoveryStart = source.indexOf('  private async recoverPreparation(');
   const recoveryEnd = source.indexOf('  async runDue(', recoveryStart);
@@ -63,6 +64,36 @@ function compatibleSerialRefreshWorker(source) {
       .slice(recoveryStart, recoveryEnd)
       .replaceAll('await this.write(b);', 'await this.write(b, true);') +
     source.slice(recoveryEnd);
+  // The default persistence mode protects every automatic recovery/coverage write.
+  replace(
+    '      await this.write(b);\n      this.schedule();\n      return view(b);',
+    '      await this.write(b, false);\n      this.schedule();\n      return view(b);',
+  );
+  replace(
+    '      await this.write(b);\n      this.schedule();\n      return { ...view(b), reused: false };',
+    '      await this.write(b, false);\n      this.schedule();\n      return { ...view(b), reused: false };',
+  );
+  replace('await this.write(joined);', 'await this.write(joined, false);');
+  const stopStart = source.indexOf('  async stop('),
+    stopEnd = source.indexOf('  async resume(', stopStart);
+  source =
+    source.slice(0, stopStart) +
+    source
+      .slice(stopStart, stopEnd)
+      .replace('await this.write(b);', "await this.write(b, 'stop');") +
+    source.slice(stopEnd);
+  source = source.replaceAll(
+    'await this.write(current);',
+    "await this.write(current, 'receipt', item.index);",
+  );
+  replace(
+    'await this.write(b); // Includes',
+    'if (!(await this.write(b))) return; // Includes',
+  );
+  replace(
+    'await this.write(b); // Reserve exactly once',
+    'if (!(await this.write(b))) return true; // Reserve exactly once',
+  );
   replace(
     '  stopBatch?: boolean;',
     "  stopBatch?: boolean;\n  sharedRestriction?: boolean;\n  restrictionKind?: 'account' | 'rate-limit';",
@@ -140,6 +171,11 @@ function compatibleSerialRefreshWorker(source) {
   block = block.replace(
     "      if (b.state !== 'stopped')",
     "      }\n      if (b.state !== 'stopped')",
+  );
+  block = block.replace(
+    "    const unknowns = b.items.filter((i) => i.state === 'submitting');\n",
+    "    const unknowns = b.items.filter((i) => i.state === 'submitting');\n" +
+      "    // Interrupted claims may be recorded as unknown after stop, never resumed.\n    if (b.state === 'stopped' && unknowns.length) {\n      for (const interrupted of unknowns) {\n        const latest = await this.read(b.batchId);\n        if (!latest) return true;\n        const target = latest.items[interrupted.index];\n        if (target.state !== 'submitting') continue;\n        target.state = target.accepted === true ? 'waiting' : 'blocked';\n        target.submissionUnknown = target.accepted !== true;\n        target.message = '中断提交回执未知；保持停止，不重新提交。';\n        await this.write(latest, 'receipt', target.index);\n        Object.assign(b, latest);\n      }\n      return true;\n    }\n",
   );
   return marker + '\n' + source.slice(0, start) + block + source.slice(end);
 }

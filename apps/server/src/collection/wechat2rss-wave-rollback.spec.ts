@@ -73,6 +73,149 @@ describe('actual serial rollback worker (offline)', () => {
     ['wave', Wechat2RssSubscriptionBatches],
     ['compatible serial', Compatible],
   ])(
+    '%s records stopped interrupted claims as unknown without restart',
+    async (_name, Type) => {
+      const worker = make(Type as typeof Wechat2RssSubscriptionBatches);
+      jest.spyOn(worker as any, 'schedule').mockImplementation(() => {});
+      const submit = jest.fn();
+      worker.attachRefresh(submit);
+      const batch = await worker.enqueueRefresh(ids);
+      const record = JSON.parse(await fs.readFile(file(batch.batchId), 'utf8'));
+      record.state = 'stopped';
+      record.items.forEach((item: any) => {
+        item.state = 'submitting';
+        item.preparationRetries = 3;
+      });
+      await fs.writeFile(file(batch.batchId), JSON.stringify(record));
+      await worker.runDue();
+      const retained = JSON.parse(
+        await fs.readFile(file(batch.batchId), 'utf8'),
+      );
+      expect(retained.state).toBe('stopped');
+      expect(
+        retained.items.every(
+          (item: any) =>
+            item.state === 'blocked' &&
+            item.submissionUnknown &&
+            item.preparationRetries === 3,
+        ),
+      ).toBe(true);
+      expect(submit).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    ['wave', Wechat2RssSubscriptionBatches],
+    ['compatible serial', Compatible],
+  ])(
+    '%s retains a late receipt without undoing queued stop',
+    async (_name, Type) => {
+      const worker = make(Type as typeof Wechat2RssSubscriptionBatches);
+      jest.spyOn(worker as any, 'schedule').mockImplementation(() => {});
+      worker.attachRefresh(jest.fn());
+      const batch = await worker.enqueueRefresh(ids.slice(0, 2));
+      const record = JSON.parse(await fs.readFile(file(batch.batchId), 'utf8'));
+      record.state = 'running';
+      record.items[0].state = 'submitting';
+      await fs.writeFile(file(batch.batchId), JSON.stringify(record));
+      const internal = worker as any;
+      const persist = internal.persistWrite.bind(worker);
+      let unblock!: () => void;
+      let blocked = false;
+      jest
+        .spyOn(internal, 'persistWrite')
+        .mockImplementationOnce(async (b: any) => {
+          blocked = true;
+          await new Promise<void>((resolve) => {
+            unblock = resolve;
+          });
+          return persist(b);
+        });
+      const writes = jest.spyOn(internal, 'write');
+      const preceding = internal.write(record);
+      await until(() => blocked);
+      const stopping = worker.stop(batch.batchId);
+      await until(() => writes.mock.calls.length >= 2);
+      const receipt = JSON.parse(JSON.stringify(record));
+      Object.assign(receipt.items[0], {
+        state: 'waiting',
+        accepted: true,
+        submissionUnknown: false,
+        message: 'fixture accepted',
+      });
+      const saving = internal.write(receipt, 'receipt', 0);
+      unblock();
+      await preceding;
+      await stopping;
+      expect(await saving).toBe(true);
+      const retained = JSON.parse(
+        await fs.readFile(file(batch.batchId), 'utf8'),
+      );
+      expect(retained.state).toBe('stopped');
+      expect(retained.items[0]).toMatchObject({
+        state: 'waiting',
+        accepted: true,
+      });
+      expect(retained.items[1].state).toBe('cancelled');
+    },
+  );
+  it.each([
+    ['wave', Wechat2RssSubscriptionBatches],
+    ['compatible serial', Compatible],
+  ])(
+    '%s keeps a queued stop ahead of restriction release',
+    async (_name, Type) => {
+      const worker = make(Type as typeof Wechat2RssSubscriptionBatches);
+      jest.spyOn(worker as any, 'schedule').mockImplementation(() => {});
+      worker.attachRefresh(jest.fn());
+      const batch = await worker.enqueueRefresh(ids.slice(0, 2));
+      const record = JSON.parse(await fs.readFile(file(batch.batchId), 'utf8'));
+      record.state = 'paused';
+      Object.assign(record.items[0], {
+        state: 'blocked',
+        sharedRestriction: true,
+        restrictionKind: 'rate-limit',
+        stopBatch: true,
+        accepted: false,
+      });
+      await fs.writeFile(file(batch.batchId), JSON.stringify(record));
+      const internal = worker as any;
+      const persist = internal.persistWrite.bind(worker);
+      let unblock!: () => void;
+      let blocked = false;
+      jest
+        .spyOn(internal, 'persistWrite')
+        .mockImplementationOnce(async (b: any) => {
+          blocked = true;
+          await new Promise<void>((resolve) => {
+            unblock = resolve;
+          });
+          return persist(b);
+        });
+      const writes = jest.spyOn(internal, 'write');
+      const preceding = internal.write(record);
+      await until(() => blocked);
+      const stopping = worker.stop(batch.batchId);
+      await until(() => writes.mock.calls.length >= 2);
+      worker.attachRestrictionCheck(async () => true);
+      const releasing = internal.releaseSharedRestriction(record);
+      await until(() => writes.mock.calls.length >= 3);
+      unblock();
+      await preceding;
+      await stopping;
+      expect(await releasing).toBe(false);
+      const retained = JSON.parse(
+        await fs.readFile(file(batch.batchId), 'utf8'),
+      );
+      expect(retained.state).toBe('stopped');
+      expect(retained.items[0].sharedRestriction).toBe(true);
+      expect(retained.items[0].state).toBe('blocked');
+      expect(retained.items[1].state).toBe('cancelled');
+    },
+  );
+  it.each([
+    ['wave', Wechat2RssSubscriptionBatches],
+    ['compatible serial', Compatible],
+  ])(
     '%s preserves a stop while an account check awaits',
     async (_name, Type) => {
       const worker = make(Type as typeof Wechat2RssSubscriptionBatches);
