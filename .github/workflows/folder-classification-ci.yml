@@ -26,6 +26,7 @@ on:
         codex/folder-batch-add-fix,
         codex/backend-recovery-integration-20261014,
         codex/folder-selection-overlay-fix,
+        codex/performance-five-candidate-20261014,
       ]
 
 permissions:
