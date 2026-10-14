@@ -86,3 +86,8 @@ pnpm --filter server exec jest --runInBand --runTestsByPath \
 Production activation and observation belong to the integration owner. No
 production state migration, platform request or service restart is performed
 by these offline tests.
+
+Use one worker version for this state directory. Older releases that validate
+preparation counts only up to three cannot read records with larger retry
+counts. Preserve those records when preparing a rollback; running a legacy
+worker alongside the updated queue can bypass its deduplication view.

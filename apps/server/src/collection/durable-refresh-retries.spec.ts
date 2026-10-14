@@ -146,10 +146,14 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
       'scheduled-refresh',
     );
     for (let attempt = 1; attempt <= 8; attempt++) {
+      const attemptStartedAt = clock;
       await manager.runDue();
       expect(run).toHaveBeenCalledTimes(attempt);
       const item = (await disk(batch.batchId)).items[0];
       expect(item.preparationRetries).toBe(attempt);
+      expect(item.retryAfter - attemptStartedAt).toBe(
+        Math.min(1800000, 30000 * 2 ** attempt),
+      );
       clock = item.retryAfter;
     }
     expect((await manager.list())[0]).toMatchObject({
