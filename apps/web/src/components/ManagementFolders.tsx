@@ -16,10 +16,12 @@ import {
 } from '@nextui-org/react';
 import { useRef, useState } from 'react';
 import FolderDragRow from './FolderDragRow';
+import FolderMemberPicker, { FolderMember } from './FolderMemberPicker';
 
 type Folder = { id: string; name: string };
 type Props = {
   folders: Folder[];
+  members?: FolderMember[];
   filter: string;
   selectedIds: string[];
   dragType: string;
@@ -35,6 +37,7 @@ type Props = {
 /** Application-owned folders never change upstream identities or disk paths. */
 export default function ManagementFolders({
   folders,
+  members,
   filter,
   selectedIds,
   dragType,
@@ -50,22 +53,28 @@ export default function ManagementFolders({
   const [name, setName] = useState('');
   const [destination, setDestination] = useState('');
   const [error, setError] = useState('');
+  const [addingTo, setAddingTo] = useState<Folder>();
+  const [saving, setSaving] = useState(false);
   const active = useRef(false);
   const run = async (operation: () => Promise<unknown>) => {
-    if (disabled || active.current) return;
+    if (disabled || active.current) return false;
     active.current = true;
+    setSaving(true);
     onBusyChange(true);
     setError('');
     try {
       await operation();
+      return true;
     } catch (cause) {
       setError(
         cause instanceof Error
           ? cause.message
           : '文件夹操作未完成，请重新读取列表。',
       );
+      return false;
     } finally {
       active.current = false;
+      setSaving(false);
       onBusyChange(false);
     }
   };
@@ -145,7 +154,6 @@ export default function ManagementFolders({
           >
             <button
               type="button"
-              disabled={disabled}
               aria-pressed={filter === folder.id}
               className={`mac-sidebar-item folder-filter text-left ${filter === folder.id ? 'active' : ''}`}
               title={folder.name}
@@ -174,6 +182,9 @@ export default function ManagementFolders({
                     if (key === 'rename') {
                       setEditing(folder);
                       setName(folder.name);
+                    } else if (key === 'add') {
+                      setError('');
+                      setAddingTo(folder);
                     } else if (key === 'delete') {
                       if (
                         window.confirm(
@@ -191,6 +202,9 @@ export default function ManagementFolders({
                   }}
                 >
                   <DropdownItem key="rename">重命名</DropdownItem>
+                  {members ? (
+                    <DropdownItem key="add">添加订阅</DropdownItem>
+                  ) : null}
                   <DropdownItem
                     key="up"
                     isDisabled={!onReorder || folders[0]?.id === folder.id}
@@ -259,6 +273,22 @@ export default function ManagementFolders({
             移动已选
           </Button>
         </div>
+      )}
+      {saving && (
+        <p role="status" className="text-xs text-neutral-500">
+          正在保存分类，请等待确认；仍可浏览订阅。
+        </p>
+      )}
+      {addingTo && members && (
+        <FolderMemberPicker
+          key={addingTo.id}
+          folder={addingTo}
+          members={members}
+          error={error}
+          disabled={disabled || saving}
+          onClose={() => setAddingTo(undefined)}
+          onAdd={(ids) => run(() => onMove(ids, addingTo.id))}
+        />
       )}
       {error && (
         <p role="alert" className="break-words text-xs text-red-600">
