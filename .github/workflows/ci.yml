@@ -11,6 +11,7 @@ on:
         codex/sqlite-backup-slow-copy-20261014,
         codex/article-list-read-timeout-20261014,
         codex/backend-recovery-integration-20261014,
+        codex/cache-sync-single-preflight-20261014,
       ]
   pull_request:
     branches:
