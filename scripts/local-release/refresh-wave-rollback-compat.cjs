@@ -35,8 +35,11 @@ const restrictionMethods = `
 /** Apply only to the serial worker from an isolated rollback checkout based on
  * the actual deployed commit. Does not read/write a database or durable state. */
 function compatibleSerialRefreshWorker(source) {
-  const marker = '// Bounded-wave rollback state compatibility v2.';
-  if (source.includes('// Bounded-wave rollback state compatibility.'))
+  const marker = '// Bounded-wave rollback state compatibility v3.';
+  if (
+    source.includes('// Bounded-wave rollback state compatibility.') ||
+    source.includes('// Bounded-wave rollback state compatibility v2.')
+  )
     throw new Error('ROLLBACK_REBUILD_REQUIRED');
   if (source.includes('private async runRefreshWave('))
     throw new Error('ROLLBACK_REQUIRES_SERIAL_BASE');
@@ -46,6 +49,20 @@ function compatibleSerialRefreshWorker(source) {
       throw new Error('ROLLBACK_SOURCE_NOT_SUPPORTED');
     source = source.replace(before, after);
   };
+  replace(
+    '  private async write(b: Batch) {',
+    "  private readonly batchWrites = new Map<string, Promise<void>>();\n  private async write(b: Batch, preserveStopped = false) {\n    const previous = this.batchWrites.get(b.batchId) || Promise.resolve();\n    const pending = previous.catch(() => {}).then(async () => {\n      if (preserveStopped) {\n        const latest = await this.read(b.batchId);\n        if (!latest || latest.state === 'stopped') {\n          if (latest) Object.assign(b, latest);\n          return;\n        }\n      }\n      await this.persistWrite(b);\n    });\n    this.batchWrites.set(b.batchId, pending);\n    try { await pending; }\n    finally {\n      if (this.batchWrites.get(b.batchId) === pending) this.batchWrites.delete(b.batchId);\n    }\n  }\n  private async persistWrite(b: Batch) {",
+  );
+  const recoveryStart = source.indexOf('  private async recoverPreparation(');
+  const recoveryEnd = source.indexOf('  async runDue(', recoveryStart);
+  if (recoveryStart < 0 || recoveryEnd < 0)
+    throw new Error('ROLLBACK_SOURCE_NOT_SUPPORTED');
+  source =
+    source.slice(0, recoveryStart) +
+    source
+      .slice(recoveryStart, recoveryEnd)
+      .replaceAll('await this.write(b);', 'await this.write(b, true);') +
+    source.slice(recoveryEnd);
   replace(
     '  stopBatch?: boolean;',
     "  stopBatch?: boolean;\n  sharedRestriction?: boolean;\n  restrictionKind?: 'account' | 'rate-limit';",
@@ -64,7 +81,11 @@ function compatibleSerialRefreshWorker(source) {
   );
   replace(
     '      await this.coverPreparation(pending);',
-    '      for (const record of pending) await this.releaseSharedRestriction(record);\n      await this.coverPreparation(await this.records());',
+    '      for (const record of pending) await this.releaseSharedRestriction(record);\n      const latestRecords = await this.records();\n      await this.coverPreparation(latestRecords);',
+  );
+  replace(
+    '      for (const record of pending) await this.recoverPreparation(record);',
+    '      for (const record of latestRecords) await this.recoverPreparation(record);',
   );
   replace(
     "                item.state === 'queued' &&\n                !record.items.some(",

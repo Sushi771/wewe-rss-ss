@@ -45,6 +45,11 @@ kind are conservative and require explicit resume. Both paths retain unknown
 receipts, retry counts, absolute deadlines and the scheduled quiet window.
 Recovery, wave admission and the compatible serial worker each check the
 restriction independently, including after a not-submitted proof.
+
+After an asynchronous account check, coverage and preparation recovery share one
+fresh record snapshot. Recovery writes serialize per batch and recheck the latest
+stopped state before persistence, preserving cancellations and retry budgets.
+The compatible serial rollback worker applies the same protection.
 Unknown generic network failures isolate the affected source rather than
 inventing an account-wide restriction.
 
