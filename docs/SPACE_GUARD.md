@@ -74,3 +74,4 @@ python -m unittest discover -s scripts/local-release -p 'test_prepare_start.py'
 ## 集成与迁移
 
 实际生产根、显式只读迁移白名单、七天预警、当前容量预检及人工归档规则见 [集成说明](SPACE_GUARD_INTEGRATION.md)。旧 32 份/64 GiB 候选不足以兼容当前历史，不能直接上线。
+> Periodic review implementation: [SQLite retention review](SQLITE_RETENTION_REVIEW.md). Scans are opt-in and do not delete recovery points or change subscription admission. Exact approved file batches still require fresh resource/reference checks and a separate authorized executor.

@@ -373,6 +373,8 @@ function build(options = {}) {
     for (const file of [
       'backup-sqlite.py',
       'backup-space-status.py',
+      'sqlite-retention-plan.py',
+      'query-retention-resources.ps1',
       ...(legacy ? [] : ['sqlite-snapshot-guard.py']),
       'verify-preservation.py',
       'watch-wechat2rss-cache.py',

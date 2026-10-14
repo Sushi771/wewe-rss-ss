@@ -34,3 +34,4 @@
 本地 Python 11+8+19+8+4、发布生命周期169项通过，服务端/前端类型与构建、相关lint通过。全量本地Jest首次123/126套件、1831/1834项通过；三个ZIP子进程因从仓库根启动不能解析TypeScript而失败，从规定的apps/server目录复核原三套件31项全部通过，导出实现未改。上一集成提交90a34b8的CI38581856480五任务成功（126套件1834项）；该次PR事件实际测的是9320f46，即90a34b8与当时f82fade开发基线的合成merge。本PR随后固定到精确生产d8c35aa，已把该固定审查分支纳入PR CI过滤器；最终新HEAD及其d8c35aa合成merge须以PR最新CI为准，不能把前次不同基线CI冒称为最终CI。
 
 生产数据、配置、服务和两个原仓库脏文件均未改动；没有复制生产库、下载新依赖、生成生产备份或便携包。现有依赖只读复用，小规模服务端/前端构建输出在隔离目录。该防护是应用入口预算，不是操作系统配额，也不限制任意第三方、直接旧版本或其他媒体写盘。
+> Current integration includes the later production source `be1a5d03c92b9a4497c1ff226f9440099f5fc360`. The `d8c35aa` baseline and capacity observations below describe the earlier review. [Periodic retention review implementation](SQLITE_RETENTION_REVIEW.md) adds bounded opt-in scans and exact action-time validation; it does not activate production or implement automatic historic-data deletion.

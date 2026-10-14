@@ -119,5 +119,17 @@ class BackupSpaceTests(unittest.TestCase):
                 backup.space_preflight(self.database,self.backups)
         self.assertEqual((legacy/'unique.db').read_bytes(),b'unique recovery point')
 
+    def test_unlinked_explicit_physical_legacy_root_is_counted_before_generation(self):
+        legacy=(self.root/'unlinked-history').resolve();legacy.mkdir();file=legacy/'unique.db';file.write_bytes(b'recovery retained')
+        with patch.dict(os.environ,{'SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy),str(legacy)]),
+                                  'SQLITE_PRODUCTION_MAX_COPIES':'1'}):
+            self.assertEqual(backup.managed_files(self.backups),[file])
+            with self.assertRaisesRegex(ValueError,'SPACE_BUDGET_EXCEEDED'):backup.create_backup(self.database,self.backups)
+        self.assertFalse(self.backups.exists());self.assertEqual(file.read_bytes(),b'recovery retained')
+
+    def test_live_source_cannot_be_managed_as_legacy_recovery_storage(self):
+        with patch.dict(os.environ,{'SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(self.root.resolve())])}):
+            with self.assertRaisesRegex(ValueError,'Source inside legacy'):backup.space_preflight(self.database,self.backups)
+
 if __name__ == '__main__':
     unittest.main()

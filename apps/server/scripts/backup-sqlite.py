@@ -157,6 +157,10 @@ def managed_files(root):
                 if canonical_file not in seen_files:
                     seen_files.add(canonical_file); result.append(canonical_file)
     if root.exists(): visit(root)
+    # Explicit physical historic roots count even without a junction alias.
+    # A target already traversed through a declared link is counted once.
+    for folder in allowed:
+        if folder not in seen_directories: visit(folder)
     return result
 
 
@@ -165,6 +169,8 @@ def space_preflight(database, backup_root):
     database, backup_root = Path(database).resolve(), Path(backup_root).resolve()
     if database.is_relative_to(backup_root):
         raise ValueError('Nested source/destination refused')
+    if any(database.is_relative_to(folder) for folder in legacy_roots()):
+        raise ValueError('Source inside legacy backup root refused')
     test = os.environ.get('SQLITE_BACKUP_KIND') == 'test'
     root = Path(os.environ.get('SQLITE_TEST_BUDGET_ROOT', backup_root)).resolve() if test else backup_root
     if not backup_root.is_relative_to(root):
