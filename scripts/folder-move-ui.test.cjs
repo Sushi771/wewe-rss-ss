@@ -83,6 +83,7 @@ function fixture({ fail = false } = {}) {
   const move = vm.runInNewContext(code, context);
   return {
     move,
+    scope: context,
     events,
     visible: () => visible,
     cache: () => cache,
@@ -157,4 +158,74 @@ test('explicit SQLite backup timeout never publishes a destination or clears the
     f.events.map((event) => event[0]),
     ['cancel', 'save'],
   );
+});
+
+test('late folder reads cannot undo a newer saved assignment', async () => {
+  const location = { paths: [path.resolve('apps/web')] };
+  const queryPackage = require.resolve('@tanstack/react-query', location);
+  const { QueryClient, QueryObserver } = require(queryPackage);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, cacheTime: Infinity } },
+  });
+  const key = ['feed.list', {}];
+  const initial = {
+    items: [
+      { id: 'a', groupId: null },
+      { id: 'b', groupId: 'old' },
+    ],
+  };
+  const reads = [];
+  // Ignore AbortSignal deliberately: the old transport still returns data.
+  const read = () => new Promise((resolve) => reads.push(resolve));
+  client.setQueryData(key, initial);
+  const observer = new QueryObserver(client, {
+    queryKey: key,
+    queryFn: read,
+    enabled: false,
+  });
+  let rendered = initial.items;
+  const unsubscribe = observer.subscribe((result) => {
+    if (result.data) rendered = result.data.items;
+  });
+  const f = fixture();
+  f.scope.queryUtils = {
+    feed: {
+      list: {
+        cancel: () => client.cancelQueries(key),
+        setData: (_, update) => client.setQueryData(key, update),
+      },
+    },
+  };
+  f.scope.refetchFeedList = () => observer.refetch();
+  try {
+    await f.move(['a'], 'first');
+    await settle();
+    assert.equal(reads.length, 1);
+    await f.move(['a'], 'second');
+    await settle();
+    assert.equal(reads.length, 2);
+    reads[1]({
+      items: [
+        { id: 'a', groupId: 'second' },
+        { id: 'b', groupId: 'old' },
+      ],
+    });
+    await settle();
+    reads[0]({
+      items: [
+        { id: 'a', groupId: 'first' },
+        { id: 'b', groupId: 'old' },
+      ],
+    });
+    await settle();
+    assert.equal(client.getQueryData(key).items[0].groupId, 'second');
+    assert.equal(rendered[0].groupId, 'second');
+    const destinations = f.events
+      .filter((event) => event[0] === 'save')
+      .map((event) => event[1].groupId);
+    assert.deepEqual(destinations, ['first', 'second']);
+  } finally {
+    unsubscribe();
+    client.clear();
+  }
 });

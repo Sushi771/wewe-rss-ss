@@ -9,6 +9,7 @@ on:
       - 'apps/web/src/pages/feeds/index.tsx'
       - 'apps/web/src/pages/feeds/cache-sync-status.tsx'
       - 'apps/server/src/trpc/management-groups.spec.ts'
+      - 'apps/server/src/trpc/xiaohongshu-ui.spec.ts'
       - 'scripts/folder-*.test.cjs'
       - 'scripts/cache-status-switch-browser.test.cjs'
       - 'scripts/offline-browser-fixture.cjs'
@@ -41,7 +42,7 @@ jobs:
       - name: Test actual classification callbacks and selection offline
         run: node --test scripts/folder-navigation-ui.test.cjs scripts/folder-member-picker.test.cjs scripts/folder-move-ui.test.cjs scripts/feed-group-drag-ui.test.cjs scripts/cache-sync-status-ui.test.cjs scripts/feed-refresh-state-ui.test.cjs
       - name: Test transactions and fresh-client persistence on synthetic SQLite
-        run: pnpm --filter server exec jest --runInBand src/trpc/management-groups.spec.ts
+        run: pnpm --filter server exec jest --runInBand src/trpc/management-groups.spec.ts src/trpc/xiaohongshu-ui.spec.ts
       - name: Require installed headless Chrome
         run: test -x /usr/bin/google-chrome
       - name: Test native folder drop, multi-add and React reconciliation offline
