@@ -113,7 +113,7 @@ function guardModulePath(release, resolved) {
   // ancestor walk repeated for every dependency in the immutable package.
   if (
     !Module.isBuiltin(resolved) &&
-    !inside(release, fs.realpathSync.native(resolved))
+    !inside(fs.realpathSync.native(release), fs.realpathSync.native(resolved))
   )
     throw new Error('Runtime dependency escaped the fixed release');
 }
@@ -122,7 +122,7 @@ function guardNativePath(release, manifest, file) {
   const canonical = fs.realpathSync.native(file);
   const relative = path.relative(release, canonical).replace(/\\/g, '/');
   if (
-    !inside(release, canonical) ||
+    !inside(fs.realpathSync.native(release), canonical) ||
     !relative.endsWith('.node') ||
     !manifest.files[relative] ||
     fileHash(canonical) !== manifest.files[relative]
@@ -331,6 +331,10 @@ async function runtime() {
         database,
         migrations: path.join(server, 'prisma/migrations'),
         auditRoot: backgroundAudit,
+        kind: values.production ? 'production' : 'test',
+        backupRoot: values.production
+          ? require('./space-budget.cjs').productionRoot(database)
+          : undefined,
       });
   }
   // Legacy rollback bundles still carry the shared pause marker. Current

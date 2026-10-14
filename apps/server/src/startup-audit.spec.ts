@@ -1,8 +1,16 @@
+import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { tmpdir } from 'node:os';
+import { SqliteSnapshotGuard } from './collection/sqlite-snapshot-guard';
 import {
   startupAuditHttpGuard,
   assertDatabaseWritesAllowed,
   databaseWritesAllowed,
   waitForStartupAudit,
+  startupMessage,
+  startSnapshotsAfterStartupAudit,
 } from './startup-audit';
 import { PrismaService } from './prisma/prisma.service';
 import { TrpcService } from './trpc/trpc.service';
@@ -186,4 +194,111 @@ describe('startup audit lifecycle', () => {
       }
     },
   );
+});
+
+describe('capacity failure message', () => {
+  afterEach(() => delete global.__weweStartupAudit);
+  it('keeps reads available while explaining protected writes paused for capacity', () => {
+    global.__weweStartupAudit = {
+      status: 'failed',
+      reason: 'space-budget-exceeded',
+    };
+    expect(startupMessage()).toContain('备份空间预算不足');
+    expect(startupMessage()).toContain('已有恢复点保留');
+  });
+});
+
+describe('startup audit and periodic snapshots share a finite root', () => {
+  it('finishes the real startup worker before starting the enabled Python owner', async () => {
+    const originalEnv = { ...process.env };
+    const directory = fs.mkdtempSync(
+      path.join(tmpdir(), 'wewe-startup-periodic-'),
+    );
+    const database = path.join(directory, 'synthetic.db'),
+      backups = path.join(directory, 'backups');
+    const migrations = path.resolve(__dirname, '../prisma/migrations');
+    const owner = new SqliteSnapshotGuard();
+    try {
+      execFileSync(
+        process.env.SQLITE_BACKUP_PYTHON ||
+          (process.platform === 'win32' ? 'python' : 'python3'),
+        [
+          path.resolve(
+            __dirname,
+            '../../../scripts/local-release/synthetic-sqlite.py',
+          ),
+          '--database',
+          database,
+          '--migrations',
+          migrations,
+        ],
+        {
+          windowsHide: true,
+          env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+        },
+      );
+      Object.assign(process.env, {
+        DATABASE_URL: 'file:' + database,
+        SQLITE_PERIODIC_SNAPSHOT_ENABLED: '1',
+        SQLITE_BACKUP_KIND: 'test',
+        SQLITE_TEST_BACKUP_ROOT: backups,
+        SQLITE_TEST_BUDGET_ROOT: directory,
+      });
+      const localRequire = createRequire(__filename);
+      const { createStartupAudit } = localRequire(
+        path.resolve(
+          __dirname,
+          '../../../scripts/local-release/startup-audit.cjs',
+        ),
+      );
+      const audit = createStartupAudit({
+        database,
+        migrations,
+        auditRoot: path.join(directory, 'audit'),
+        backupRoot: backups,
+        kind: 'test',
+      });
+      (globalThis as any).__weweStartupAudit = audit;
+      let periodicStarted = false;
+      const started = startSnapshotsAfterStartupAudit(async () => {
+        expect(audit.status).toBe('ready');
+        expect(fs.existsSync(path.join(backups, '.space-budget.lock'))).toBe(
+          false,
+        );
+        expect(
+          fs
+            .readdirSync(backups)
+            .filter((name) => name.startsWith('before-start-')),
+        ).toHaveLength(1);
+        periodicStarted = true;
+        await owner.start();
+      });
+      expect(periodicStarted).toBe(false);
+      await expect(started).resolves.toBe(true);
+      let healthy = false;
+      for (let i = 0; i < 30; i++) {
+        const status = await owner.query();
+        if (status.verified && status.fresh) {
+          healthy = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      expect(healthy).toBe(true);
+      expect(audit.status).toBe('ready');
+      expect(
+        fs
+          .readdirSync(backups)
+          .filter((name) => name.startsWith('periodic-snapshot-')),
+      ).toHaveLength(1);
+    } finally {
+      owner.stop();
+      delete (globalThis as any).__weweStartupAudit;
+      process.env = originalEnv;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(path.dirname(directory)).toBe(tmpdir());
+      expect(path.basename(directory)).toMatch(/^wewe-startup-periodic-/);
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }, 20000);
 });

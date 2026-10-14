@@ -50,7 +50,10 @@ function createStartupAudit(options, WorkerClass = Worker) {
         );
         worker.on('message', (message) => {
           if (message?.status === 'ready') finish('ready');
-          else if (message?.status === 'failed') finish('failed');
+          else if (message?.status === 'failed') {
+            state.reason = message.reason;
+            finish('failed');
+          }
         });
         worker.on('error', (error) => {
           console.error('Startup audit worker:', error);
@@ -75,15 +78,16 @@ if (!isMainThread) {
       UnsupportedBaselineValue,
     } = require('./startup-sqlite.cjs');
     const { database, migrations, auditRoot } = workerData;
+    if (workerData.kind) process.env.SQLITE_BACKUP_KIND = workerData.kind;
+    const backupRoot =
+      workerData.backupRoot ||
+      (process.env.SQLITE_BACKUP_KIND === 'production'
+        ? require('./space-budget.cjs').productionRoot(database)
+        : path.join(auditRoot, 'background-backup'));
     try {
       const baseline = path.join(auditRoot, 'background-baseline.json');
       try {
-        await prepareStart(
-          database,
-          migrations,
-          path.join(auditRoot, 'background-backup'),
-          baseline,
-        );
+        await prepareStart(database, migrations, backupRoot, baseline);
       } catch (error) {
         if (!(error instanceof UnsupportedBaselineValue)) throw error;
         require('./lib.cjs').run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
@@ -93,7 +97,7 @@ if (!isMainThread) {
           '--migrations',
           migrations,
           '--backup-root',
-          path.join(auditRoot, 'background-backup'),
+          backupRoot,
           '--baseline',
           baseline,
         ]);
@@ -103,7 +107,12 @@ if (!isMainThread) {
       // Detailed diagnostics remain in the private service log; UI has a short
       // message and never exposes paths, records, credentials or raw evidence.
       console.error('Startup database audit failed:', error);
-      parentPort.postMessage({ status: 'failed' });
+      parentPort.postMessage({
+        status: 'failed',
+        reason: /SQLITE_SPACE_BUDGET_EXCEEDED/.test(error.message)
+          ? 'space-budget-exceeded'
+          : 'verification-failed',
+      });
     }
   })();
 }

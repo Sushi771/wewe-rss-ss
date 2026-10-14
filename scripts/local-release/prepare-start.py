@@ -16,12 +16,22 @@ spec = importlib.util.spec_from_file_location("inspect_sqlite", Path(__file__).w
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
 
+# Resolve in both a checkout and the standalone local-release bundle.
+backup_script = Path(__file__).parent / 'server/scripts/backup-sqlite.py'
+if not backup_script.exists():
+    backup_script = Path(__file__).parents[2] / 'apps/server/scripts/backup-sqlite.py'
+backup_spec = importlib.util.spec_from_file_location('backup_sqlite', backup_script)
+backup_api = importlib.util.module_from_spec(backup_spec)
+backup_spec.loader.exec_module(backup_api)
+
 
 def source_identity(database):
     result = []
     for file in (database, Path(str(database) + "-wal")):
         try:
             stat = file.stat()
+            if str(file).endswith('-wal') and stat.st_size == 0:
+                result.append(None); continue
             result.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
         except FileNotFoundError:
             result.append(None)
@@ -58,7 +68,53 @@ def compare_tables(source, backup, migrations, baseline):
                 raise ValueError("Startup backup changed protected row count: " + table)
 
 
+def verify_current_snapshot(database, backup):
+    """A fresh independent read view catches commits hidden by Windows metadata."""
+    with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as observer, closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as current, closing(sqlite3.connect(backup.as_uri() + '?mode=ro', uri=True)) as copied:
+        version = observer.execute('PRAGMA data_version').fetchone()
+        current.execute('PRAGMA query_only=ON'); current.execute('BEGIN')
+        copied.execute('PRAGMA query_only=ON'); copied.execute('BEGIN')
+        if not backup_api.snapshot_equal(current, copied) or observer.execute('PRAGMA data_version').fetchone() != version:
+            raise ValueError('SQLite source changed during startup backup; retry from a new snapshot')
+
+
 def prepare(database, migrations, backup_root, baseline_file):
+    database = database.resolve(strict=True)
+    backup_root = backup_root.resolve()
+    previous = backup_api.reusable(database, backup_root)
+    if previous is not None:
+        identity = source_identity(database)
+        before = audit.inspect(database, migrations, require_current=True)
+        with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as source:
+            source.execute('PRAGMA query_only=ON;')
+            source.execute('BEGIN')
+            compare_tables(source, Path(previous['backup']), migrations, before)
+        verify_current_snapshot(database, Path(previous['backup']))
+        if identity != source_identity(database):
+            raise ValueError('SQLite source changed during startup reuse')
+        with baseline_file.open('x', encoding='utf-8') as stream:
+            json.dump(before, stream, ensure_ascii=False)
+        return {'backup': previous, 'inspection': before}
+    backup_api.space_preflight(database, backup_root)
+    backup_root.mkdir(parents=True, exist_ok=True)
+    lease = Path(backup_api.space_preflight(database, backup_root)['root']) / '.space-budget.lock'
+    with lease.open('x', encoding='utf-8') as stream:
+        stream.write(str(__import__('os').getpid()))
+    try:
+        backup_api.space_preflight(database, backup_root)
+        identity = backup_api.source_identity(database)
+        result = fresh_prepare(database, migrations, backup_root, baseline_file)
+        if identity != backup_api.source_identity(database):
+            raise ValueError('SQLite source changed before backup receipt')
+        result['backup']['sourceIdentity'] = identity
+        receipt = backup_root / ('.latest-' + hashlib.sha256(str(database).encode()).hexdigest()[:24] + '.json')
+        receipt.write_text(json.dumps(result['backup']), encoding='utf-8')
+        return result
+    finally:
+        lease.unlink()
+
+
+def fresh_prepare(database, migrations, backup_root, baseline_file):
     database = database.resolve(strict=True)
     identity = source_identity(database)
     directory = backup_root.resolve() / ("before-start-" + uuid.uuid4().hex)
@@ -72,6 +128,7 @@ def prepare(database, migrations, backup_root, baseline_file):
             # Uses the very same pinned read snapshot as the full baseline.
             source.backup(destination, pages=1000, sleep=0.1)
         compare_tables(source, backup, migrations, before)
+    verify_current_snapshot(database, backup)
     if source_identity(database) != identity:
         raise ValueError("SQLite source changed during startup backup; retry from a new snapshot")
     digest = hashlib.sha256()

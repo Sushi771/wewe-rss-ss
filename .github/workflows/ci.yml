@@ -15,6 +15,7 @@ on:
         codex/performance-five-candidate-20261014,
         codex/cache-sync-single-preflight-20261014,
         codex/bounded-five-submit-20261014,
+        codex/space-guard-production-compat-20261014,
       ]
   pull_request:
     branches:
@@ -64,6 +65,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test bounded SQLite recovery generation on synthetic databases
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: |
+          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/entry-budget.test.cjs
+          python -m unittest discover -s apps/server/scripts -p 'test_backup_space.py'
+          python -m unittest discover -s apps/server/scripts -p 'test_sqlite_snapshot_guard.py'
+          python -m unittest discover -s scripts/local-release -p 'test_prepare_start.py'
       - name: Test native loopback listener ownership and guarded stop
         run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
       - name: Test desktop feedback and Windows state-file contention offline
@@ -127,6 +140,10 @@ jobs:
         run: node --test scripts/xiaohongshu-refresh-ui.test.cjs
       - name: Test closed Sites metadata contract offline
         run: node --test scripts/sites-local-contract.test.mjs
+      - name: Select fixed Node 24 for SQLite startup and server integration tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
       - name: Test independent media reconciliation and global stop offline
@@ -145,6 +162,8 @@ jobs:
         run: python3 apps/server/scripts/test_sqlite_snapshot_guard.py -v
       - name: Test bounded consistent backups with real synthetic concurrent writers
         run: python3 apps/server/scripts/test_backup_sqlite.py -v
+      - name: Rehearse approved retention slots and capacity recovery on synthetic SQLite
+        run: python3 apps/server/scripts/test_space_guard_compat.py -v
       - name: Test cache-only Unicode transport and publisher identity offline
         run: python3 apps/server/scripts/test_read-wechat2rss-cache.py
       - name: Test read-only SQLite cache signals on synthetic databases
