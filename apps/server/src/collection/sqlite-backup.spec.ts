@@ -42,7 +42,7 @@ async function waitForSpawn() {
   expect(start).toHaveBeenCalledTimes(1);
 }
 
-describe('SQLite backup gate (mock processes and filesystem only)', () => {
+describe('SQLite backup gate (synthetic children and mocked filesystem)', () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;
   const originalPython = process.env.SQLITE_BACKUP_PYTHON;
   const originalPlatform = Object.getOwnPropertyDescriptor(
@@ -51,6 +51,7 @@ describe('SQLite backup gate (mock processes and filesystem only)', () => {
   )!;
 
   beforeEach(() => {
+    jest.spyOn(console, 'info').mockImplementation(() => undefined);
     jest.useFakeTimers();
     start.mockReset();
     checkAccess.mockReset().mockResolvedValue(undefined);
@@ -60,6 +61,7 @@ describe('SQLite backup gate (mock processes and filesystem only)', () => {
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     jest.useRealTimers();
     Object.defineProperty(process, 'platform', originalPlatform);
     if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
@@ -288,16 +290,16 @@ describe('SQLite backup gate (mock processes and filesystem only)', () => {
   });
 
   it.each(['stdout', 'stderr'])(
-    'rejects oversized %s without relying on process termination',
+    'waits for child close before rejecting oversized %s',
     async (stream) => {
       const child = fakeBackup();
       const operation = createVerifiedSqliteBackup();
       const check = expect(operation).rejects.toThrow('输出超限');
       await waitForSpawn();
       child[stream as 'stdout' | 'stderr'].write('中'.repeat(1500));
-      await check;
       expect(child.kill).toHaveBeenCalledTimes(1);
       child.emit('close', 0, null);
+      await check;
     },
   );
 
@@ -306,11 +308,162 @@ describe('SQLite backup gate (mock processes and filesystem only)', () => {
     const operation = createVerifiedSqliteBackup();
     const check = expect(operation).rejects.toThrow('备份超时');
     await waitForSpawn();
+    let finished = false;
+    void operation.catch(() => {
+      finished = true;
+    });
     await jest.advanceTimersByTimeAsync(60000);
-    await check;
+    expect(finished).toBe(false);
     expect(child.kill).toHaveBeenCalledTimes(1);
     child.stdout.write(JSON.stringify(report));
     child.emit('close', 0, null);
+    await check;
     await expect(operation).rejects.toThrow('备份超时');
+  });
+
+  it('fences retries after failed termination and releases the fence only on close', async () => {
+    const child = fakeBackup();
+    child.kill.mockImplementation(() => {
+      throw new Error('private kill failure');
+    });
+    const operation = createVerifiedSqliteBackup();
+    const check = expect(operation).rejects.toThrow('退出未确认');
+    await waitForSpawn();
+    await jest.advanceTimersByTimeAsync(65000);
+    await check;
+    expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    await expect(createVerifiedSqliteBackup()).rejects.toThrow('退出未确认');
+    expect(start).toHaveBeenCalledTimes(1);
+    child.emit('close', null, 'SIGKILL');
+    const next = fakeBackup();
+    const retried = createVerifiedSqliteBackup();
+    for (let i = 0; i < 20 && start.mock.calls.length < 2; i++)
+      await Promise.resolve();
+    expect(start).toHaveBeenCalledTimes(2);
+    next.stdout.write(JSON.stringify(report));
+    next.emit('close', 0, null);
+    await expect(retried).resolves.toEqual(report);
+    expect(
+      JSON.stringify((console.info as jest.Mock).mock.calls),
+    ).not.toContain('private kill failure');
+  });
+
+  it('blocks a second child while a timed-out child is still stopping', async () => {
+    const child = fakeBackup();
+    const operation = createVerifiedSqliteBackup();
+    const check = expect(operation).rejects.toThrow('备份超时');
+    await waitForSpawn();
+    await jest.advanceTimersByTimeAsync(60000);
+    await expect(createVerifiedSqliteBackup()).rejects.toThrow('退出未确认');
+    expect(start).toHaveBeenCalledTimes(1);
+    child.emit('close', null, 'SIGTERM');
+    await check;
+  });
+
+  it('keeps the fence until every previously started timed-out child closes', async () => {
+    const first = fakeBackup();
+    const second = fakeBackup();
+    const operations = [
+      createVerifiedSqliteBackup(),
+      createVerifiedSqliteBackup(),
+    ];
+    const checks = operations.map((operation) =>
+      expect(operation).rejects.toThrow('备份超时'),
+    );
+    for (let i = 0; i < 30 && start.mock.calls.length < 2; i++)
+      await Promise.resolve();
+    expect(start).toHaveBeenCalledTimes(2);
+    await jest.advanceTimersByTimeAsync(60000);
+    second.emit('close', null, 'SIGTERM');
+    await checks[1];
+    await expect(createVerifiedSqliteBackup()).rejects.toThrow('退出未确认');
+    expect(start).toHaveBeenCalledTimes(2);
+    first.emit('close', null, 'SIGTERM');
+    await checks[0];
+  });
+
+  it('logs only allowlisted stage telemetry, never raw child diagnostics', async () => {
+    const child = fakeBackup();
+    const operation = createVerifiedSqliteBackup();
+    const check = expect(operation).rejects.toThrow('未验证成功');
+    await waitForSpawn();
+    child.stderr.write(
+      JSON.stringify({
+        diagnostics: {
+          stage: 'copy',
+          journalMode: 'delete',
+          copySteps: 7,
+          busySteps: 2,
+          milliseconds: { lock: 12, copy: 5001, secret: 'private body' },
+          secret: 'cookie=private-secret',
+        },
+      }),
+    );
+    child.emit('close', 1, null);
+    await check;
+    const logged = JSON.parse((console.info as jest.Mock).mock.calls[0][0]);
+    expect(logged).toMatchObject({
+      event: 'sqlite-backup',
+      stage: 'copy',
+      milliseconds: { lock: 12, copy: 5001 },
+    });
+    expect(JSON.stringify(logged)).not.toMatch(/private|cookie|secret/);
+  });
+
+  it('preserves retryable timeout classification from the bounded Python copy', async () => {
+    const child = fakeBackup();
+    const operation = createVerifiedSqliteBackup();
+    const check = expect(operation).rejects.toThrow('备份超时');
+    await waitForSpawn();
+    child.stderr.write(
+      JSON.stringify({
+        event: 'sqlite-backup-failed',
+        reason: 'timeout',
+        diagnostics: { stage: 'copy' },
+      }),
+    );
+    child.emit('close', 1, null);
+    await check;
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it('confirms a real isolated child closes on timeout before allowing retry', async () => {
+    const realSpawn =
+      jest.requireActual<typeof import('node:child_process')>(
+        'node:child_process',
+      ).spawn;
+    let closed = false;
+    let realChild: ReturnType<typeof spawn>;
+    start.mockImplementationOnce(() => {
+      // No database access: exercise the actual OS child termination lifecycle.
+      realChild = realSpawn(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        {
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      realChild.once('close', () => {
+        closed = true;
+      });
+      return realChild;
+    });
+    const operation = createVerifiedSqliteBackup();
+    const check = expect(operation).rejects.toThrow('备份超时');
+    await waitForSpawn();
+    await jest.advanceTimersByTimeAsync(60000);
+    await check;
+    expect(closed).toBe(true);
+    expect(realChild!.exitCode !== null || realChild!.signalCode !== null).toBe(
+      true,
+    );
+    const next = fakeBackup();
+    const retried = createVerifiedSqliteBackup();
+    for (let i = 0; i < 20 && start.mock.calls.length < 2; i++)
+      await Promise.resolve();
+    next.stdout.write(JSON.stringify(report));
+    next.emit('close', 0, null);
+    await expect(retried).resolves.toEqual(report);
   });
 });
