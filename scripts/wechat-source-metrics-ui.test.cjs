@@ -24,6 +24,64 @@ const article = (mpId, channel, raw = metrics) => ({
   bodyRetry: { allowed: false, reason: '合成状态' },
   publishTime: 1,
 });
+const failedRetry = {
+  status: 'failed',
+  filled: false,
+  cached: false,
+  attemptedAt: 1700000000,
+  message: '原文请求失败；缓存保留。',
+  requestFailure: { reason: 'http_status', httpStatus: 302 },
+};
+test('actual list rendering shows cache availability and dated failure history after cache fill or reload', () => {
+  const item = {
+    ...article('paid', 'wechat2rss'),
+    bodyRetryResult: failedRetry,
+  };
+  for (const row of [item, JSON.parse(JSON.stringify(item))]) {
+    const view = fixture({ items: [row] }).render();
+    assert.match(view.text, /正文已缓存，可阅读/);
+    assert.match(
+      view.text,
+      /上次原文重试：失败.*HTTP 302 跳转，未跟随.*当前缓存仍可阅读/,
+    );
+    assert(
+      !view.nodes.some((node) =>
+        node.props['aria-label']?.startsWith('重试正文：'),
+      ),
+    );
+  }
+});
+test('actual list rendering keeps missing-cache failures retryable and reports later success honestly', () => {
+  const item = {
+    ...article('paid', 'wechat2rss'),
+    bodyCached: false,
+    bodyRetryResult: failedRetry,
+    bodyRetry: { allowed: true, reason: '' },
+  };
+  const missing = fixture({ items: [item] }).render();
+  assert.match(missing.text, /正文未缓存.*上次原文重试：失败/);
+  assert(
+    missing.nodes.some(
+      (node) =>
+        node.props['aria-label']?.startsWith('重试正文：') &&
+        !node.props.isDisabled,
+    ),
+  );
+  const ready = fixture({
+    items: [
+      {
+        ...item,
+        bodyCached: true,
+        bodyRetryResult: { ...failedRetry, status: 'available', filled: true },
+      },
+    ],
+  }).render();
+  assert.match(
+    ready.text,
+    /正文已缓存，可阅读.*上次原文重试：成功，已补入正文/,
+  );
+  assert.doesNotMatch(ready.text, /上次原文重试：失败/);
+});
 function fixture({
   mpId = 'paid',
   items = [article('paid', 'wechat2rss')],
@@ -82,6 +140,9 @@ function fixture({
     },
   };
   const modules = {
+    '@web/utils/article-body-state': loadActualTs(
+      'apps/web/src/utils/article-body-state.ts',
+    ),
     '@web/utils/feed-selection': loadActualTs(
       'apps/web/src/utils/feed-selection.ts',
     ),
