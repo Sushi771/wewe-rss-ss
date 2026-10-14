@@ -68,6 +68,43 @@ still consumes its attempt budget.
 
 ## Integration and validation
 
+### Equivalent later successes and unresolved receipts
+
+Manual and automatic v1 batches use the same existing-subscription `/add`
+operation; the automatic flag adds schedule gates. Their known scope is
+`wechat2rss-subscription-current-v1`. A newer confirmed `succeeded` /
+`accepted: true` record for the same instance and feed can satisfy an older
+explicitly unsent preparation intent. Its durable `refreshClaimedAt` is the
+lower bound of that update attempt; legacy successful records fall back to
+their creation time. Equal timestamps, a different instance/feed/scope,
+cache-only work and unconfirmed acceptance cannot establish later coverage.
+
+Covered items become `skipped` with `supersededBy` identifying the batch,
+creation time, claim time and scope. They remain visibly unsubmitted, and
+their counts, backoff and deadline are preserved. This is intent coverage,
+not a claim that the skipped request itself succeeded. A recovered current
+refresh may similarly satisfy later pending legacy intents created before
+its actual claim, avoiding duplicate preparation callbacks in old queues.
+
+Batch- or item-level `mustExecute: true` prohibits this supersession. An
+explicit unsupported `refreshScope`, or unknown batch/item fields that might
+describe a different range, preserves the item as `blocked` with
+`coverageReviewRequired: true`. The module cannot execute that unknown scope
+through its existing callback contract and does not label it successful.
+The integration owner must resolve the scope before resuming it.
+
+Another accepted-but-incomplete or unknown receipt for the same instance/feed
+holds the original unsent intent with `waitingForReceipt`. It consumes no
+attempts while held and cannot invoke another submit callback. Existing
+read-only reconciliation and accepted cache checks continue; a proven later
+success can cover the older item without clearing the other receipt. No
+cooldown value or error message is used as successful-refresh evidence.
+
+Coverage requires a durable successful batch record. An independent manual
+refresh that records no such receipt is not inferable from this module. It
+needs equivalent read-only evidence supplied by the integration layer; a
+feed's 15-minute reservation alone cannot prove successful scope coverage.
+
 The batch module uses the existing `attachRefresh` and `attachReconciliation`
 contracts. The service must classify `retryable` only before its committed
 reservation and platform call; exceptions after those boundaries remain
@@ -87,6 +124,7 @@ Run the relevant regression suites with:
 ```sh
 pnpm --filter server exec jest --runInBand --runTestsByPath \
   src/collection/durable-refresh-retries.spec.ts \
+  src/collection/covered-preparation-intents.spec.ts \
   src/collection/scheduled-refresh-batches.spec.ts \
   src/collection/manual-refresh-batches.spec.ts \
   src/collection/wechat2rss-subscription-batches.spec.ts \
@@ -102,3 +140,21 @@ Use one worker version for this state directory. Older releases that validate
 preparation counts only up to three cannot read records with larger retry
 counts. Preserve those records when preparing a rollback; running a legacy
 worker alongside the updated queue can bypass its deduplication view.
+
+### Rollback compatibility plan
+
+Keep this state reader and guarded scheduler when rolling back unrelated
+backup, list or UI code. Their callback contracts remain compatible. If a
+rollback build must use an older scheduler, first backport acceptance of the
+eight-attempt schema, preserve all budget/receipt/supersession fields, and
+backport the claim guards and coverage rules. Validate the rollback artifact
+on synthetic state and a retained snapshot before activation. An unpatched
+old worker is not compatible: silently omitting an unreadable batch can allow
+a new intent to bypass its reservations.
+
+Do not clamp counts to three, reset intent keys/deadlines, discard unreadable
+files or rewrite live state to accommodate the old validator. Current-reader
+and snapshot tests verify that counts above three remain intact and are not
+omitted. This plan changes no production records; the owner must prepare and
+validate a compatible rollback artifact rather than run a legacy worker on
+new state.
