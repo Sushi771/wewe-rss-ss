@@ -59,7 +59,10 @@ function fixture({ fail = false } = {}) {
     moveFeeds: {
       mutateAsync: async (input) => {
         events.push(['save', input]);
-        if (fail) throw Error('Synthetic mutation rejected');
+        if (fail)
+          throw Error(
+            typeof fail === 'string' ? fail : 'Synthetic mutation rejected',
+          );
         return {
           ids: [...new Set(input.ids)],
           groupId: input.groupId,
@@ -112,6 +115,15 @@ test('acknowledged folder drop releases the mutation before a stalled list refre
   await settle();
   assert(f.events.some((event) => event[0] === 'warning'));
   assert.equal(f.events.filter((event) => event[0] === 'save').length, 1);
+  assert.deepEqual(
+    f.visible().map((row) => row.groupId),
+    ['new', 'new'],
+    'refresh failure cannot undo an acknowledged commit',
+  );
+  assert.deepEqual(
+    f.cache().items.map((row) => row.groupId),
+    ['new', 'new'],
+  );
 });
 test('rejected move preserves membership and selection, restores the drag snapshot, and does not reread or replay', async () => {
   const f = fixture({ fail: true });
@@ -125,4 +137,24 @@ test('rejected move preserves membership and selection, restores the drag snapsh
     [null, 'old'],
   );
   assert(!f.events.some((event) => ['selection', 'read'].includes(event[0])));
+});
+test('explicit SQLite backup timeout never publishes a destination or clears the retained selection', async () => {
+  const message = 'SQLite 一致性备份超时，本次未写入';
+  const f = fixture({ fail: message });
+  await assert.rejects(
+    f.move(['a', 'b'], 'new'),
+    (error) => error.message === message,
+  );
+  assert.deepEqual(
+    f.visible().map((row) => row.groupId),
+    [null, 'old'],
+  );
+  assert.deepEqual(
+    f.cache().items.map((row) => row.groupId),
+    [null, 'old'],
+  );
+  assert.deepEqual(
+    f.events.map((event) => event[0]),
+    ['cancel', 'save'],
+  );
 });
