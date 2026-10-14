@@ -205,6 +205,44 @@ class BackupTests(unittest.TestCase):
             worker.stdout.close(); worker.stderr.close()
             if not worker.stdin.closed: worker.stdin.close()
 
+    def test_autonomous_periodic_backup_allows_short_writer_to_commit_during_copy(self):
+        worker = subprocess.Popen([
+            sys.executable, "-u", "-c",
+            "import sqlite3,sys; c=sqlite3.connect(sys.argv[1],timeout=.05);"
+            "sys.stdin.readline(); c.execute('UPDATE feeds SET value=1');"
+            "c.commit(); print('committed',flush=True)", str(self.database)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        real_connect = sqlite3.connect
+        wrote = []
+        test = self
+        class Source(sqlite3.Connection):
+            def backup(source, destination, **kwargs):
+                original = kwargs["progress"]
+                def progress(status, remaining, total):
+                    if remaining and not wrote:
+                        wrote.append(True)
+                        worker.stdin.write("go\n"); worker.stdin.flush()
+                        test.assertEqual(worker.stdout.readline().strip(), "committed")
+                    original(status, remaining, total)
+                kwargs["progress"] = progress
+                return super().backup(destination, **kwargs)
+        def connect(*args, **kwargs):
+            if str(args[0]) == self.database.as_uri() + "?mode=ro": kwargs["factory"] = Source
+            return real_connect(*args, **kwargs)
+        try:
+            with patch.object(backup.sqlite3, "connect", connect):
+                report = backup.create_backup(self.database, self.backups, prefix="periodic-snapshot")
+            worker.stdin.close(); worker.wait(timeout=3)
+            self.assertEqual(worker.returncode, 0, worker.stderr.read())
+            self.assertTrue(wrote)
+            with closing(real_connect(report["backup"])) as saved:
+                self.assertEqual(saved.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+                self.assertEqual(saved.execute("SELECT value FROM feeds").fetchone(), (1,))
+        finally:
+            if worker.poll() is None: worker.kill(); worker.wait(timeout=3)
+            worker.stdout.close(); worker.stderr.close()
+            if not worker.stdin.closed: worker.stdin.close()
+
 
 if __name__ == "__main__":
     unittest.main()
