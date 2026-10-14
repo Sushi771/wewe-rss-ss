@@ -65,6 +65,25 @@ export function prepareCachedArticleLocalExport(
     publishTime: snapshot.publishTime,
   };
   const html = load(snapshot.contentHtml || '');
+  const content = html('.rich_media_content').length
+    ? html('.rich_media_content')
+    : html('#js_content');
+  // A legacy receipt cannot prove media that the cached source omitted.
+  // Missing database content alone must not invalidate an existing export.
+  if (
+    snapshot.contentHtml &&
+    (snapshot.lastBodyStatus === 'images-pending' ||
+      snapshot.contentHtml.includes('data-wewe-image-pending=') ||
+      content
+        .find('img')
+        .toArray()
+        .some(
+          (element) =>
+            !html(element).attr('src')?.trim() &&
+            !html(element).attr('data-src')?.trim(),
+        ))
+  )
+    prepare.identity.mediaComplete = false;
   prepare.canReuseLegacyImages = html('img')
     .toArray()
     .every((element) => {
