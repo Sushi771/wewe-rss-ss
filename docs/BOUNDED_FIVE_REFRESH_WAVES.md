@@ -1,0 +1,66 @@
+# Bounded refresh waves
+
+Manual and scheduled subscription refreshes use the same storage-locked worker.
+Each wave selects at most five eligible subscriptions; fourteen subscriptions form
+5 + 5 + 4. A tail of one to four is submitted in full. There is no independent
+timer or per-round concurrency pool that could multiply the account limit.
+
+The default minimum interval between wave launches remains 30 seconds. A wave
+must finish its network calls and durable receipt writes before another starts.
+Serial preparation of the next wave can extend the interval beyond 30 seconds.
+The public upstream API documents individual GET `/add/:id` requests and does
+not promise batch acceptance or an internal concurrency level. Five concurrent
+client requests do not prove five concurrent upstream crawls.
+
+Preparation checks the account and subscription, creates a verified consistent
+backup, and conditionally reserves each feed in SQLite, serially. Prepared
+closures contain only the update request. Existing collection guards stay held
+until every request has settled. Receipt persistence and cancellation writes run
+serially; an individual storage failure cannot release the wave lock while other
+requests or receipt writes remain in flight.
+
+Every source has a durable claim before preparation and a separate outcome.
+Successful peers retain acceptance. Unknown outcomes remain unknown and are not
+resubmitted. A process interrupted with a claim in `submitting` is conservatively
+reconciled, preserving the existing retry budget and deadline. Safe preparation
+failures retain the existing three manual/eight automatic attempt limits and
+absolute automatic 24-hour deadline; they rejoin eligible waves after backoff.
+Disabled, removed, paused and cooling-down sources are skipped independently.
+
+Account restrictions stop a prepared wave before launch. An HTTP 429 from an
+update retains uncertainty, stops subsequent waves of that intent, and persists
+a shared minimum two-minute cooldown for other intents. Already issued requests
+are allowed to settle and retain their own receipts. The restricted intent is not
+automatically resumed. New work after the cooldown still checks account state.
+Unknown generic network failures isolate the affected source rather than
+inventing an account-wide restriction.
+
+The optional durable `sharedRestriction` flag distinguishes an explicit shared
+restriction from an uncertain receipt. Older strict state readers do not accept
+that field. A future deployment must include a compatible rollback reader and
+must preserve new receipts, rather than restoring an older state snapshot.
+
+## Offline evidence and limits
+
+Fixtures cover 1, 4, 5, 6 and 14 sources, an exact tail, no sixth active request,
+serial preparation, shared storage admission, receipt uncertainty, restart,
+account restrictions, HTTP 429, cancellation and isolated preparation retries.
+Service-level fixtures confirm that list checks, backups and reservations finish
+before any update closure is invoked; no SQLite reservation is written by a
+successful network closure. Provider fixtures use synthetic responses only.
+
+With one-second serial preparation per source and three-second parallel network
+responses, the 14-source fixture launches at 5, 40 and 74 seconds and receives
+the final network result at 77 seconds. This is a synthetic scheduler example,
+not a measured upstream speed or a cache/media completion promise. Cache checks
+retain their existing 30-second cadence and single-consumer behavior.
+
+Further measured candidates are page-scoped saved-body flag reads and eliminating
+duplicate unchanged-page preflights. These are separate changes. Verified backup
+reuse already exists and is not a new gain in this change. Preparation may still
+need a fresh backup after another feed reservation changes the database. It must
+not reuse an unverified or changed snapshot merely to increase concurrency.
+
+No production deployment, live concurrency experiment, new platform request,
+schema migration, media fetch, export directory change or handwritten-body update
+is part of this development change.
