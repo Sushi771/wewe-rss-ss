@@ -19,13 +19,27 @@ export function useFeedBrowseState(sourceId?: string) {
   const location = useLocation();
   const navigate = useNavigate();
   const route = location.pathname + location.search;
+  // A click inside a folder carries its browsing context. A direct source URL
+  // still starts without an unrelated cached folder restriction.
+  const folderContext =
+    !location.search &&
+    sourceId &&
+    location.state?.feedId === sourceId &&
+    typeof location.state?.feedFolder === 'string' &&
+    location.state.feedFolder.length > 0 &&
+    location.state.feedFolder.length <= 200
+      ? location.state.feedFolder
+      : undefined;
   const [state, setState] = useState(() => ({
     route,
-    filters: initialBrowseFilters(
-      browserStorage('sessionStorage'),
-      sourceId,
-      location.search,
-    ),
+    filters: {
+      ...initialBrowseFilters(
+        browserStorage('sessionStorage'),
+        sourceId,
+        location.search,
+      ),
+      ...(folderContext ? { folderFilter: folderContext } : {}),
+    },
     generation: 0,
   }));
   // Derive the new URL's state before queries render; never query with stale scope.
@@ -38,7 +52,9 @@ export function useFeedBrowseState(sourceId?: string) {
             ? initialBrowseFilters(undefined, sourceId, location.search)
             : {
                 ...state.filters,
-                folderFilter: sourceId ? 'all' : state.filters.folderFilter,
+                folderFilter: sourceId
+                  ? folderContext || 'all'
+                  : state.filters.folderFilter,
               },
           generation: state.generation + 1,
         };

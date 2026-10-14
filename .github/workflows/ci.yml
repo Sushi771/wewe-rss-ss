@@ -11,6 +11,7 @@ on:
         codex/sqlite-backup-slow-copy-20261014,
         codex/article-list-read-timeout-20261014,
         codex/backend-recovery-integration-20261014,
+        codex/folder-selection-overlay-fix,
       ]
   pull_request:
     branches:
@@ -20,6 +21,7 @@ on:
         codex/cold-launch-profile,
         codex/automatic-refresh-recovery-20261013,
         codex/body-cache-retry-status,
+        codex/backend-recovery-integration-20261014,
       ]
 
 jobs:

@@ -925,7 +925,22 @@ const Feeds = () => {
               onChange={(event) => {
                 const selected = event.target.value;
                 setCurrentMpId(selected);
-                navigate(selected ? `/feeds/${selected}` : '/feeds');
+                const selectedFeed = orderedFeeds.find(
+                  (feed) => feed.id === selected,
+                );
+                const visibleInFolder =
+                  folderFilter === 'all' ||
+                  (folderFilter === 'ungrouped'
+                    ? !selectedFeed?.groupId
+                    : selectedFeed?.groupId === folderFilter);
+                navigate(selected ? `/feeds/${selected}` : '/feeds', {
+                  state: selected
+                    ? {
+                        feedId: selected,
+                        feedFolder: visibleInFolder ? folderFilter : 'all',
+                      }
+                    : undefined,
+                });
                 setMobileSidebarOpen(false);
               }}
             >
@@ -1240,7 +1255,12 @@ const Feeds = () => {
                             toggleSelect(item.id);
                           } else {
                             setCurrentMpId(item.id);
-                            navigate(`/feeds/${item.id}`);
+                            navigate(`/feeds/${item.id}`, {
+                              state: {
+                                feedId: item.id,
+                                feedFolder: folderFilter,
+                              },
+                            });
                             setMobileSidebarOpen(false);
                           }
                         }}

@@ -68,6 +68,18 @@ export default function FolderMemberPicker({
   return (
     <Modal
       isOpen
+      portalContainer={
+        typeof document === 'undefined' ? undefined : document.body
+      }
+      classNames={{
+        backdrop: 'subscription-dialog-backdrop',
+        wrapper: 'subscription-dialog-overlay',
+        base: 'subscription-dialog',
+        header: 'subscription-dialog-header',
+        body: 'subscription-dialog-body',
+        footer: 'subscription-dialog-footer',
+        closeButton: 'subscription-dialog-close',
+      }}
       scrollBehavior="inside"
       onClose={() => {
         if (!disabled) onClose();

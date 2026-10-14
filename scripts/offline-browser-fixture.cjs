@@ -17,12 +17,40 @@ const browser =
   ].find(fs.existsSync);
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const modulePath = (p) => JSON.stringify(p.replaceAll('\\', '/'));
-async function withFixture(source, run, aliases = {}) {
+async function withFixture(source, run, aliases = {}, options = {}) {
   const temp = fs.mkdtempSync(
     path.join(os.tmpdir(), 'wewe-classification-ui-'),
   );
   const entry = path.join(temp, 'fixture.tsx');
   fs.writeFileSync(entry, source);
+  let productionPostcss;
+  if (options.productionStyles) {
+    const configPath = path.join(web, 'tailwind.config.ts');
+    const tailwindEntry = require.resolve('tailwindcss', { paths: [web] });
+    const jiti = require(
+      require.resolve('jiti', { paths: [path.dirname(tailwindEntry)] }),
+    )(__filename);
+    const loaded = jiti(configPath);
+    const config = loaded.default || loaded;
+    const reactEntry = require.resolve('@nextui-org/react', { paths: [web] });
+    const theme = path.dirname(
+      require.resolve('@nextui-org/theme', {
+        paths: [path.dirname(reactEntry)],
+      }),
+    );
+    productionPostcss = {
+      plugins: [
+        require(require.resolve('tailwindcss', { paths: [web] }))({
+          ...config,
+          content: [
+            ...config.content.map((pattern) => path.resolve(web, pattern)),
+            path.join(theme, '**/*.{js,ts,jsx,tsx}'),
+          ],
+        }),
+        require(require.resolve('autoprefixer', { paths: [web] }))(),
+      ],
+    };
+  }
   const { build } = await import(
     pathToFileURL(
       path.join(
@@ -48,6 +76,7 @@ async function withFixture(source, run, aliases = {}) {
     },
     logLevel: 'error',
     esbuild: { jsx: 'automatic' },
+    css: productionPostcss ? { postcss: productionPostcss } : undefined,
     build: {
       outDir: path.join(temp, 'bundle'),
       emptyOutDir: true,
@@ -69,10 +98,16 @@ async function withFixture(source, run, aliases = {}) {
     if (req.url === '/fixture.js') {
       res.setHeader('Content-Type', 'text/javascript');
       res.end(fs.readFileSync(path.join(temp, 'bundle/fixture.js')));
+    } else if (req.url === '/fixture.css' && options.productionStyles) {
+      const cssFile = fs
+        .readdirSync(path.join(temp, 'bundle'))
+        .find((name) => name.endsWith('.css'));
+      res.setHeader('Content-Type', 'text/css');
+      res.end(fs.readFileSync(path.join(temp, 'bundle', cssFile)));
     } else if (req.url === '/') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(
-        '<!doctype html><html><body><div id="root"></div><script src="/fixture.js"></script></body></html>',
+        `<!doctype html><html><head>${options.productionStyles ? '<link rel="stylesheet" href="/fixture.css">' : ''}</head><body><div id="root"></div><script src="/fixture.js"></script></body></html>`,
       );
     } else {
       res.statusCode = 404;
