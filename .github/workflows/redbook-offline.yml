@@ -7,6 +7,9 @@ on:
       - 'apps/server/src/collection/redbook-vendor/**'
       - '.github/workflows/redbook-offline.yml'
       - 'scripts/redbook-local-confirmation/**'
+      - 'scripts/redbook-first-check-ui.test.cjs'
+      - 'apps/web/src/components/RedbookFirstCheck.tsx'
+      - 'apps/web/src/utils/redbook-first-check.ts'
 jobs:
   compatibility:
     runs-on: ubuntu-latest
@@ -30,3 +33,6 @@ jobs:
       - name: Test local Redbook startup handshake and confirmation gateway offline
         working-directory: scripts/redbook-local-confirmation
         run: node --test redbook-startup.test.cjs redbook-pair-gateway.test.cjs
+
+      - name: Test Redbook first check UI with synthetic responses
+        run: node --test scripts/redbook-first-check-ui.test.cjs
