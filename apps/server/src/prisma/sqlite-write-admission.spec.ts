@@ -59,7 +59,9 @@ describe('real application Prisma admission with actual Python backup and SQLite
 
   it('queues ORM, raw SQL, batch and short interactive transactions before engine admission', async () => {
     const childProcess =
-      require('node:child_process') as typeof import('node:child_process');
+      jest.requireActual<typeof import('node:child_process')>(
+        'node:child_process',
+      );
     const realSpawn = childProcess.spawn;
     let started!: () => void;
     const copying = new Promise<void>((resolve) => {
@@ -167,7 +169,9 @@ describe('real application Prisma admission with actual Python backup and SQLite
 
   it('lets an already open real transaction finish before starting a queued backup', async () => {
     const native =
-      require('node:child_process') as typeof import('node:child_process');
+      jest.requireActual<typeof import('node:child_process')>(
+        'node:child_process',
+      );
     const spy = jest.spyOn(native, 'spawn');
     let begun!: () => void, proceed!: () => void;
     const ready = new Promise<void>((resolve) => {
