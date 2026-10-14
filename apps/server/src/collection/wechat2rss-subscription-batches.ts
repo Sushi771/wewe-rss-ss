@@ -39,7 +39,17 @@ export type BatchOutcome = {
   retryable?: boolean;
   /** Known shared account restrictions may stop the round; unknown submits isolate. */
   stopBatch?: boolean;
+  /** Explicit shared throttle/account signal, distinct from an uncertain request. */
+  sharedRestriction?: boolean;
 };
+export type PreparedRefresh = {
+  outcome?: BatchOutcome;
+  /** Network-only update; preparation and all SQLite writes have finished. */
+  submit?: () => Promise<BatchOutcome>;
+  release: () => void;
+  cancel?: () => Promise<void>;
+};
+
 type Item = Omit<BatchOutcome, 'state'> & {
   index: number;
   articleUrl?: string;
@@ -128,6 +138,7 @@ const itemFields = new Set([
   'submissionUnknown',
   'retryable',
   'stopBatch',
+  'sharedRestriction',
   'refreshChecks',
   'refreshAfter',
   'preparationRetries',
@@ -163,6 +174,7 @@ const safePreparation = (item: Item) =>
   ['queued', 'failed'].includes(item.state);
 const automaticRecovery = (b: Batch) =>
   b.purpose === 'scheduled-refresh' &&
+  !b.items.some((item) => item.sharedRestriction === true) &&
   !b.cacheOnly &&
   b.state !== 'stopped' &&
   !b.items.some(
@@ -174,6 +186,7 @@ const automaticRecovery = (b: Batch) =>
   b.items.some((item) => safePreparation(item) && !item.retryExhausted);
 const isolatedRefresh = (b: Batch) =>
   isRefresh(b) &&
+  !b.items.some((item) => item.sharedRestriction === true) &&
   b.items.some((item) => item.submissionUnknown) &&
   !b.items.some(
     (item) =>
@@ -244,6 +257,17 @@ export class Wechat2RssSubscriptionBatches {
     automatic?: boolean,
     options?: { cacheOnly: boolean },
   ) => Promise<BatchOutcome>;
+  private prepareRefresh?: (
+    feedId: string,
+    automatic: boolean,
+    waveKey: string,
+  ) => Promise<PreparedRefresh>;
+  attachRefreshPreparation(
+    prepare: NonNullable<Wechat2RssSubscriptionBatches['prepareRefresh']>,
+  ) {
+    if (this.prepareRefresh) throw new Error('BATCH_PREPARATION_EXISTS');
+    this.prepareRefresh = prepare;
+  }
   private reconcile?: (
     feedId: string,
     createdAt: number,
@@ -403,6 +427,8 @@ export class Wechat2RssSubscriptionBatches {
                 item[key] > 1000000),
           ) ||
           (item.accepted !== undefined && typeof item.accepted !== 'boolean') ||
+          (item.sharedRestriction !== undefined &&
+            typeof item.sharedRestriction !== 'boolean') ||
           (item.submissionUnknown !== undefined &&
             typeof item.submissionUnknown !== 'boolean') ||
           (item.stopBatch !== undefined &&
@@ -1304,6 +1330,28 @@ export class Wechat2RssSubscriptionBatches {
       (b.purpose !== 'scheduled-refresh' ||
         (activeRefreshScheduleEnabled(process.env) &&
           automaticSubmissionAllowed(this.now())));
+    if (
+      maySubmit &&
+      this.prepareRefresh &&
+      b.nextSubmissionAt <= this.now() &&
+      b.items.some(
+        (i) =>
+          i.state === 'queued' &&
+          !i.accepted &&
+          !i.submissionUnknown &&
+          !i.retryExhausted &&
+          !i.waitingForReceipt &&
+          (i.retryAfter || 0) <= this.now(),
+      )
+    ) {
+      if (
+        (await this.records()).some(
+          (record) => record.nextSubmissionAt > this.now(),
+        )
+      )
+        return changed;
+      return this.runRefreshWave(b);
+    }
     const item =
       b.items.find(
         (i) =>
@@ -1403,11 +1451,261 @@ export class Wechat2RssSubscriptionBatches {
               : '缓存检查失败，已暂停；上游请求不会重发。',
       };
     }
-    if (this.stopped) return true;
+    return this.finishRefresh(b, item, stage, result, retryClaim);
+  }
+  /** One storage-locked worker owns a wave across manual and scheduled intents.
+   * Prepare serially, send only network closures concurrently, persist receipts
+   * through one chain. A wave never authorizes a sixth in-flight request. */
+  private async runRefreshWave(b: Batch) {
+    const selected = b.items
+      .filter(
+        (i) =>
+          i.state === 'queued' &&
+          !i.accepted &&
+          !i.submissionUnknown &&
+          !i.retryExhausted &&
+          !i.waitingForReceipt &&
+          (i.retryAfter || 0) <= this.now(),
+      )
+      .slice(0, 5);
+    const prepared: Array<{
+      item: Item;
+      job: PreparedRefresh;
+      retryClaim: boolean;
+    }> = [];
+    const automatic = b.purpose === 'scheduled-refresh';
+    const waveKey = `${b.batchId}/${this.now()}`;
+    try {
+      for (const original of selected) {
+        if (this.stopped) break;
+        const current = await this.read(b.batchId);
+        if (
+          !current ||
+          current.state === 'stopped' ||
+          current.state === 'paused'
+        )
+          break;
+        const item = current.items[original.index];
+        if (item.state !== 'queued' || item.accepted || item.submissionUnknown)
+          continue;
+        const retryClaim = automatic && safePreparation(item);
+        const deadline =
+          item.retryDeadlineAt || current.createdAt + AUTOMATIC_RETRY_WINDOW;
+        if (
+          retryClaim &&
+          (this.now() >= deadline ||
+            (item.preparationRetries || 0) >= AUTOMATIC_PREPARATION_LIMIT)
+        ) {
+          item.retryExhausted =
+            this.now() >= deadline ? 'deadline' : 'attempt-limit';
+          await this.write(current);
+          await this.finishRefresh(
+            current,
+            item,
+            'submit',
+            {
+              state: 'failed',
+              accepted: false,
+              stopBatch: false,
+              message: 'Preparation budget exhausted before submission.',
+            },
+            retryClaim,
+          );
+          continue;
+        }
+        if (retryClaim)
+          item.preparationRetries = (item.preparationRetries || 0) + 1;
+        item.refreshClaimedAt = this.now();
+        item.state = 'submitting';
+        current.state = 'running';
+        await this.write(current);
+        let job: PreparedRefresh;
+        try {
+          job = await this.prepareRefresh!(item.feedId!, automatic, waveKey);
+        } catch {
+          job = {
+            outcome: {
+              state: 'failed',
+              accepted: false,
+              retryable: true,
+              stopBatch: false,
+              message: 'Serial preparation failed; update not sent.',
+            },
+            release: () => {},
+          };
+        }
+        if (!job.submit) {
+          job.release();
+          const outcome = job.outcome || {
+            state: 'failed' as const,
+            accepted: false,
+            retryable: true,
+            stopBatch: false,
+            message: 'Missing network closure; update not sent.',
+          };
+          await this.finishRefresh(
+            current,
+            item,
+            'submit',
+            outcome,
+            retryClaim,
+          );
+          if (outcome.stopBatch === true) break;
+        } else prepared.push({ item, job, retryClaim });
+      }
+      // Recheck persisted stop/restriction/window/deadline after asynchronous
+      // preparation, before any closure can issue a request.
+      let current = await this.read(b.batchId);
+      const allowed =
+        !this.stopped &&
+        current &&
+        !['stopped', 'paused'].includes(current.state) &&
+        (!automatic ||
+          (activeRefreshScheduleEnabled(process.env) &&
+            automaticSubmissionAllowed(this.now())));
+      const send: typeof prepared = [];
+      for (const entry of prepared) {
+        const expired =
+          entry.retryClaim &&
+          this.now() >=
+            (entry.item.retryDeadlineAt ||
+              b.createdAt + AUTOMATIC_RETRY_WINDOW);
+        if (!allowed || expired) {
+          await entry.job.cancel?.();
+          await this.finishRefresh(
+            b,
+            entry.item,
+            'submit',
+            {
+              state: expired ? 'failed' : 'queued',
+              accepted: false,
+              submissionUnknown: false,
+              stopBatch: false,
+              retryable: expired,
+              message:
+                'Prepared update not sent: stop, account restriction, window or deadline.',
+            },
+            entry.retryClaim,
+          );
+        } else send.push(entry);
+      }
+      if (!send.length) return true;
+      current = await this.read(b.batchId);
+      if (!current) return true;
+      current.nextSubmissionAt = this.now() + 30000;
+      await this.write(current); // Durable global batch spacing before launch.
+      current = await this.read(b.batchId);
+      if (
+        this.stopped ||
+        !current ||
+        ['stopped', 'paused'].includes(current.state)
+      ) {
+        for (const entry of send) {
+          await entry.job.cancel?.();
+          await this.finishRefresh(
+            b,
+            entry.item,
+            'submit',
+            {
+              state: 'queued',
+              accepted: false,
+              submissionUnknown: false,
+              stopBatch: false,
+              message: 'Stopped after preparation; update not sent.',
+            },
+            entry.retryClaim,
+          );
+        }
+        return true;
+      }
+      let persistence = Promise.resolve();
+      const receipts = await Promise.allSettled(
+        send.map(async (entry) => {
+          let result: BatchOutcome;
+          let cancelBeforeReceipt = false;
+          try {
+            if (
+              entry.retryClaim &&
+              this.now() >=
+                (entry.item.retryDeadlineAt ||
+                  b.createdAt + AUTOMATIC_RETRY_WINDOW)
+            ) {
+              cancelBeforeReceipt = true;
+              result = {
+                state: 'failed',
+                accepted: false,
+                retryable: true,
+                submissionUnknown: false,
+                stopBatch: false,
+                message:
+                  'Preparation deadline crossed before launch; update not sent.',
+              };
+            } else result = await entry.job.submit!();
+          } catch (error) {
+            const code = (error as Error)?.message;
+            if (code === 'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED') {
+              cancelBeforeReceipt = true;
+              result = {
+                state: 'queued',
+                accepted: false,
+                submissionUnknown: false,
+                stopBatch: false,
+                message: 'Automatic window closed before update request.',
+              };
+            } else
+              result = {
+                state: 'blocked',
+                accepted: false,
+                submissionUnknown: true,
+                stopBatch: code === 'WECHAT2RSS_RATE_LIMITED',
+                sharedRestriction: code === 'WECHAT2RSS_RATE_LIMITED',
+                message: 'Update response uncertain; retained without replay.',
+              };
+          }
+          const queued = persistence.then(async () => {
+            if (cancelBeforeReceipt) await entry.job.cancel?.();
+            await this.finishRefresh(
+              b,
+              entry.item,
+              'submit',
+              result,
+              entry.retryClaim,
+            );
+          });
+          persistence = queued.catch(() => {});
+          await queued;
+        }),
+      );
+      await persistence;
+      if (receipts.some((receipt) => receipt.status === 'rejected'))
+        throw new Error('WAVE_RECEIPT_STORAGE_FAILED');
+      return true;
+    } finally {
+      prepared.forEach((entry) => entry.job.release());
+    }
+  }
+  private async finishRefresh(
+    b: Batch,
+    item: Item,
+    stage: 'submit' | 'cache',
+    result: BatchOutcome,
+    retryClaim = false,
+  ) {
     const current = await this.read(b.batchId);
     if (!current) return true;
     const target = current.items[item.index];
     Object.assign(target, result);
+    if (
+      current.state === 'stopped' &&
+      target.state === 'queued' &&
+      !target.accepted
+    )
+      target.state = 'cancelled';
+    if (result.sharedRestriction)
+      current.nextSubmissionAt = Math.max(
+        current.nextSubmissionAt,
+        this.now() + 120000,
+      );
     if (stage === 'cache') target.accepted = true;
     if (
       stage === 'submit' &&
@@ -1465,13 +1763,20 @@ export class Wechat2RssSubscriptionBatches {
         '上游已受理，缓存同步仍未就绪；已停止检查，已有内容保留。';
     }
     if (current.state !== 'stopped')
-      current.state =
-        !target.submissionUnknown &&
-        ['blocked', 'failed'].includes(target.state) &&
-        !(
-          target.stopBatch === false &&
-          (stage === 'cache' || target.accepted || target.retryable)
-        )
+      current.state = current.items.some(
+        (i) =>
+          i.sharedRestriction === true ||
+          (!i.submissionUnknown &&
+            ['blocked', 'failed'].includes(i.state) &&
+            i.stopBatch === true),
+      )
+        ? 'paused'
+        : !target.submissionUnknown &&
+            ['blocked', 'failed'].includes(target.state) &&
+            !(
+              target.stopBatch === false &&
+              (stage === 'cache' || target.accepted || target.retryable)
+            )
           ? 'paused'
           : current.items.some((i) =>
                 (current.cacheOnly

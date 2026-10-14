@@ -88,6 +88,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         redirect: 'manual',
         signal,
       });
+      if (response.status === 429) throw new Error('WECHAT2RSS_RATE_LIMITED');
       if (response.status !== 200 || !response.body)
         throw new Error('HTTP_STATUS');
       const parts: Buffer[] = [];
@@ -108,7 +109,8 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         throw new Error(IDENTITY_CHECK_EXPIRED);
       const text = Buffer.concat(parts).toString('utf8');
       return format === 'text' ? text : JSON.parse(text);
-    } catch {
+    } catch (error) {
+      if ((error as Error)?.message === 'WECHAT2RSS_RATE_LIMITED') throw error;
       if (deadline !== undefined && (Date.now() >= deadline || signal.aborted))
         throw new Error(IDENTITY_CHECK_EXPIRED);
       throw new Error('WECHAT2RSS_REQUEST_FAILED');
@@ -313,6 +315,11 @@ export class Wechat2RssProvider implements SubscriptionProvider {
   }
 
   async refreshSubscription(feedId: string, automatic = false) {
+    return (await this.prepareRefreshSubscription(feedId, automatic))();
+  }
+
+  /** List/account preparation stays outside concurrent update requests. */
+  async prepareRefreshSubscription(feedId: string, automatic = false) {
     if (!/^MP_WXS_\d{5,15}$/.test(feedId))
       throw new Error('WECHAT2RSS_FEED_ID_INVALID');
     const subscription = (await this.listSubscriptions()).find(
@@ -327,8 +334,16 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         !automaticSubmissionAllowed(Date.now()))
     )
       throw new Error('WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED');
-    this.envelope(await this.get(`/add/${feedId.slice(7)}`));
-    return { accepted: true as const, pending: true as const };
+    return async () => {
+      if (
+        automatic &&
+        (!activeRefreshScheduleEnabled(process.env) ||
+          !automaticSubmissionAllowed(Date.now()))
+      )
+        throw new Error('WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED');
+      this.envelope(await this.get(`/add/${feedId.slice(7)}`));
+      return { accepted: true as const, pending: true as const };
+    };
   }
 
   /** Read one already-subscribed cache only. No /addurl, /add or original-page fetch. */
