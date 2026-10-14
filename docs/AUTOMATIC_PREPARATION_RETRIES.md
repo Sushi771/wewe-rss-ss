@@ -59,6 +59,13 @@ error leaves that item isolated. Confirmed acceptance is never cleared by
 preparation flags or a later cache-stage failure; accepted cache work never
 re-enters submission.
 
+Receipt reconciliation and storage reads can cross the absolute deadline.
+The queue rechecks both deadline and attempt limit after the last asynchronous
+read and before reserving a retry. It checks the deadline again after saving
+the claim, before invoking submission. Exhaustion is saved without a platform
+call and yields to independent work; a claim already saved before expiry
+still consumes its attempt budget.
+
 ## Integration and validation
 
 The batch module uses the existing `attachRefresh` and `attachReconciliation`
