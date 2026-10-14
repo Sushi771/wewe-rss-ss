@@ -46,7 +46,7 @@ function App(){
  const setDraggedItem=()=>{};const setOrderedFeeds=setRows;const setSelectedIds=()=>{};
  const calls=useRef([]),fail=useRef(false);
  const queryUtils={feed:{list:{cancel:async()=>{},setData:(_,update)=>setRows(update({items:rows}).items)}}};
- const moveFeeds={mutateAsync:async({ids,groupId})=>{calls.current.push({ids,groupId});if(fail.current)throw Error('Synthetic save failed');const next=rows.map(row=>ids.includes(row.id)?{...row,groupId}:row);localStorage.setItem('rows',JSON.stringify(next));return {ids,groupId,moved:ids.length};}};
+ const moveFeeds={mutateAsync:async({ids,groupId})=>{calls.current.push({ids,groupId});if(fail.current)throw Error(typeof fail.current==='string'?fail.current:'Synthetic save failed');const next=rows.map(row=>ids.includes(row.id)?{...row,groupId}:row);localStorage.setItem('rows',JSON.stringify(next));return {ids,groupId,moved:ids.length};}};
  const refetchFeedList=()=>new Promise(()=>{}); const toast={warning:()=>{}};
  window.fixture={rows,busy,filter,calls:calls.current,setFail:value=>{fail.current=value;}};
  return <ManagementFolders folders={[{id:'g1',name:'Folder A'},{id:'g2',name:'Folder B'}]} members={rows} filter={filter} selectedIds={[]} dragType="application/x-wewe-wechat" disabled={busy} onBusyChange={setBusy} onFilter={setFilter} onSave={async()=>{}} onRemove={async()=>{}} onMove={${onMove}}/>;
@@ -79,6 +79,32 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
           'stalled post-save list read does not retain UI lock',
         );
         assert.equal(await evaluate('window.fixture.calls.length'), 1);
+        // Exact user-reported no-write failure: restore old membership, unlock
+        // controls and allow navigation. A rejected move is never a success.
+        await evaluate(
+          `window.fixture.setFail('SQLite 一致性备份超时，本次未写入')`,
+        );
+        const other = await evaluate(
+          `(()=>{const r=document.querySelectorAll('.folder-navigation-row')[3].getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`,
+        );
+        await send('Input.dispatchDragEvent', {
+          type: 'dragEnter',
+          ...other,
+          data,
+        });
+        await send('Input.dispatchDragEvent', { type: 'drop', ...other, data });
+        await pause(80);
+        assert.equal(await evaluate('window.fixture.rows[1].groupId'), 'g1');
+        assert.equal(await evaluate('window.fixture.busy'), false);
+        assert.match(
+          await evaluate('document.querySelector("[role=alert]").textContent'),
+          /SQLite 一致性备份超时，本次未写入/,
+        );
+        await evaluate(
+          `document.querySelectorAll('.folder-filter')[3].click()`,
+        );
+        await pause(25);
+        assert.equal(await evaluate('window.fixture.filter'), 'g2');
         await send('Page.reload');
         await pause(200);
         assert.equal(await evaluate('window.fixture.rows[1].groupId'), 'g1');
