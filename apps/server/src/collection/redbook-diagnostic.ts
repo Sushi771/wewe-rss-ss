@@ -118,7 +118,7 @@ export function diagnosticSummary(session?: DiagnosticSession) {
       imageRequests: 0,
     };
   return {
-    configured: session.expiresAt > Date.now(),
+    configured: session.expiresAt > Date.now() && !session.abort.signal.aborted,
     reviewed: false,
     archiveAllowed: false,
     phase: session.phase,

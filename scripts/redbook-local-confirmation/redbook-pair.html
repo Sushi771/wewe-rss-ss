@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Redbook 本机小量诊断</title>
+    <link rel="stylesheet" href="/pair.css" />
+    <script src="/pair.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>Redbook 本机小量诊断</h1>
+      <p>
+        无需记密码。在本机启动窗口确认这个浏览器后，访问有效期为24小时；关闭实例即失效。凭证仅留内存，刷新页面后需重新确认。
+      </p>
+      <p>
+        小红书登录信息在本机内存最多保留24小时，平台提前失效仍立即停止；这不是平台真实有效期。已经去除凭据的样本可在本次24小时访问内查看。最多一页列表、一篇选定正文，图片默认关闭；正式批量归档和审核启用未开放。
+      </p>
+      <section>
+        <button id="pair">请求本机确认</button>
+        <p id="pairStatus" role="status">尚未确认，诊断不可用。</p>
+        <p id="comparison"></p>
+        <p id="expiry"></p>
+      </section>
+      <fieldset id="diagnostic" disabled>
+        <legend>确认后手动操作</legend>
+        <form id="creatorForm">
+          <label
+            >博主备注
+            <input
+              id="name"
+              maxlength="120"
+              required
+              autocomplete="off" /></label
+          ><label
+            >规范主页
+            <input
+              id="profile"
+              type="url"
+              required
+              autocomplete="off"
+              placeholder="https://www.xiaohongshu.com/user/profile/…" /></label
+          ><button>保存待核验博主（不请求平台）</button>
+        </form>
+        <form id="sessionForm" autocomplete="off">
+          <p>只在本机填写自己账号的两个登录字段，不发到聊天。</p>
+          <label
+            >a1
+            <input id="a1" type="password" autocomplete="off" required /></label
+          ><label
+            >web_session
+            <input
+              id="webSession"
+              type="password"
+              autocomplete="off"
+              required /></label
+          ><button>仅保存本次24小时内存会话</button>
+        </form>
+        <p>
+          <button id="status">读取本机状态</button
+          ><button id="list">确认读取一页列表</button>
+        </p>
+        <label
+          >选择一篇笔记
+          <select id="note">
+            <option value="">先读取列表</option>
+          </select></label
+        ><button id="detail">确认读取这篇正文</button>
+        <p>
+          <label
+            ><input
+              id="allowImages"
+              type="checkbox"
+            />单独允许少量图片（共最多1MB）</label
+          ><select id="imageCount">
+            <option value="1">1张</option>
+            <option value="2">2张</option></select
+          ><button id="images">确认下载这些图片</button>
+        </p>
+        <button id="sample">查看待核验样本</button
+        ><button id="discard">撤销本次浏览器确认并清空会话</button>
+      </fieldset>
+      <p id="message" role="status"></p>
+      <pre id="preview"></pre>
+      <div id="pictures"></div>
+      <p>
+        核对码仅用于本机窗口确认，2分钟内有效；它不是24小时访问凭证。码失效可在启动窗口输入
+        R 后重新请求。不要向其他网站、聊天或剪贴板提交任何访问凭证或小红书会话。
+      </p>
+    </main>
+  </body>
+</html>

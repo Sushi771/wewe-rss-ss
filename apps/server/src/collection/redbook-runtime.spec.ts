@@ -685,6 +685,8 @@ describe('actual Nest Redbook provider → private handoff → original refresh 
       (await diagnosticPost('list', { confirmRequest: true })).status,
     ).toBe(422);
     expect((await diagnosticPost('status')).body.phase).toBe('paused');
+    expect((await diagnosticPost('status')).body.configured).toBe(false);
+    expect((app.get(RedbookRuntime) as any).diagnostic.cookies).toEqual({});
     expect(
       (await diagnosticPost('list', { confirmRequest: true })).status,
     ).toBe(422);
@@ -768,13 +770,60 @@ describe('actual Nest Redbook provider → private handoff → original refresh 
     expect((await diagnostic()).status).toBe(422);
     expect(await prisma.xhsNote.count()).toBe(0);
   });
+  it('authorized diagnostic retention accepts 24 hours, never renews on reads, and clears credentials at absolute expiry', async () => {
+    const deadline = Date.now() + 24 * 3600000;
+    expect(
+      (
+        await post('/local/redbook/diagnostic/session', {
+          creatorId: 'local',
+          cookies: handoff().cookies,
+          expiresAt: deadline,
+          confirmLocalSession: true,
+        })
+      ).status,
+    ).toBe(201);
+    const runtime = app.get(RedbookRuntime);
+    expect(runtime.diagnosticStatus().expiresAt).toBe(deadline);
+    await diagnosticPost('list', { confirmRequest: true });
+    expect(runtime.diagnosticStatus().expiresAt).toBe(deadline);
+    const retained = (runtime as any).diagnostic;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(deadline);
+    try {
+      expect(runtime.diagnosticStatus().configured).toBe(false);
+      expect(retained.cookies).toEqual({});
+      expect(retained.abort.signal.aborted).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(requests).toHaveLength(1);
+  });
+  it('review of a long diagnostic session preserves the independent two-hour formal-session cap', async () => {
+    expect(
+      (
+        await post('/local/redbook/diagnostic/session', {
+          creatorId: 'local',
+          cookies: handoff().cookies,
+          expiresAt: Date.now() + 24 * 3600000,
+          confirmLocalSession: true,
+        })
+      ).status,
+    ).toBe(201);
+    await diagnosticPost('list', { confirmRequest: true });
+    await diagnosticPost('detail', { confirmRequest: true, noteId: note });
+    const response = await diagnosticPost('review', diagnosticReview());
+    expect(response.status).toBe(201);
+    expect(response.body.expiresAt).toBeLessThanOrEqual(
+      Date.now() + 2 * 3600000,
+    );
+    expect(await prisma.xhsNote.count()).toBe(0);
+  });
   it('diagnostic TTL expires without requests and all diagnostic routes enforce the direct-local gate', async () => {
     expect(
       (
         await post('/local/redbook/diagnostic/session', {
           creatorId: 'local',
           cookies: handoff().cookies,
-          expiresAt: Date.now() + 910000,
+          expiresAt: Date.now() + 24 * 3600000 + 10000,
           confirmLocalSession: true,
         })
       ).status,

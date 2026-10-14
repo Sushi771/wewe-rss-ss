@@ -197,6 +197,8 @@ export class RedbookRuntime implements XhsSource, OnModuleDestroy {
     diagnostic.images = [];
   }
   diagnosticStatus() {
+    if (this.diagnostic && Date.now() >= this.diagnostic.expiresAt)
+      void this.clearDiagnostic().catch(() => undefined);
     return diagnosticSummary(this.diagnostic);
   }
   async startDiagnostic(raw: unknown) {
@@ -215,7 +217,7 @@ export class RedbookRuntime implements XhsSource, OnModuleDestroy {
       !parsed.cookies.web_session ||
       Object.keys(parsed.cookies).length > 100 ||
       parsed.expiresAt <= Date.now() ||
-      parsed.expiresAt > Date.now() + 15 * 60000
+      parsed.expiresAt > Date.now() + 24 * 3600000
     )
       throw new Error('REDBOOK_SESSION_INVALID');
     this.changing = true;
@@ -289,6 +291,8 @@ export class RedbookRuntime implements XhsSource, OnModuleDestroy {
   }
   private currentDiagnostic() {
     const diagnostic = this.diagnostic;
+    if (diagnostic && Date.now() >= diagnostic.expiresAt)
+      void this.clearDiagnostic().catch(() => undefined);
     if (
       !diagnostic ||
       Date.now() >= diagnostic.expiresAt ||
@@ -361,6 +365,17 @@ export class RedbookRuntime implements XhsSource, OnModuleDestroy {
           : diagnostic.abort.signal.aborted
             ? 'cancelled'
             : 'response';
+      // Stop retaining login fields as soon as the platform/transport rejects the diagnostic.
+      const secrets = [
+        ...Object.values(diagnostic.cookies),
+        ...diagnostic.notes.map((note) => note.xsecToken),
+      ];
+      diagnostic.list = diagnosticPreview(diagnostic.list, secrets);
+      diagnostic.detail = diagnosticPreview(diagnostic.detail, secrets);
+      diagnostic.notes = [];
+      for (const key of Object.keys(diagnostic.cookies))
+        delete diagnostic.cookies[key];
+      diagnostic.abort.abort();
       throw new Error('REDBOOK_DIAGNOSTIC_STOPPED');
     } finally {
       this.active--;
@@ -492,7 +507,7 @@ export class RedbookRuntime implements XhsSource, OnModuleDestroy {
       createHash('sha256').update(value).digest('hex');
     const handoff = {
       cookies: { ...diagnostic.cookies },
-      expiresAt: diagnostic.expiresAt,
+      expiresAt: Math.min(diagnostic.expiresAt, Date.now() + 2 * 3600000),
       bindings: [
         {
           creatorId: diagnostic.creatorId,
