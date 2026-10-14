@@ -189,6 +189,36 @@ test(
         await api.evaluate('window.fixture.requests.at(-1).group'),
         'folder-a',
       );
+      await click(
+        api,
+        `Array.from(document.querySelectorAll('button')).find(n=>n.textContent==='清除筛选与浏览位置')`,
+      );
+      assert.equal(
+        await api.evaluate('window.fixture.requests.at(-1).group'),
+        'all',
+      );
+      await click(
+        api,
+        `document.querySelector('li.mac-sidebar-item.active span.flex-1')`,
+      );
+      assert.equal(
+        await api.evaluate('window.fixture.route'),
+        '/feeds/source0',
+      );
+      assert.equal(
+        await api.evaluate('window.fixture.requests.at(-1).group'),
+        'all',
+      );
+      await api.evaluate('window.fixture.navigate(-1)');
+      await api.pause(100);
+      assert.equal(
+        await api.evaluate('window.fixture.route'),
+        '/feeds/source0',
+      );
+      assert.equal(
+        await api.evaluate('window.fixture.requests.at(-1).group'),
+        'folder-a',
+      );
     });
   },
 );
@@ -204,16 +234,39 @@ test(
         mobile: false,
       });
       await ready(api);
-      await click(
-        api,
-        `document.querySelector('[data-sort-folder="folder-a"] .folder-navigation-row').querySelectorAll('button')[1]`,
+      const trigger = `document.querySelector('[data-sort-folder="folder-a"] .folder-navigation-row').querySelectorAll('button')[1]`;
+      const openPicker = async () => {
+        await api.evaluate(`void(window.fixture.pickerTrigger=${trigger})`);
+        await click(api, trigger);
+        await click(
+          api,
+          `Array.from(document.querySelectorAll('[role=menuitem]')).find(n=>n.textContent==='添加订阅')`,
+        );
+        await api.pause(250);
+      };
+      const key = async (value, code, modifiers = 0) => {
+        await api.send('Input.dispatchKeyEvent', {
+          type: 'keyDown',
+          key: value,
+          code,
+          modifiers,
+          windowsVirtualKeyCode: value === 'Tab' ? 9 : 27,
+        });
+        await api.send('Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          key: value,
+          code,
+          modifiers,
+          windowsVirtualKeyCode: value === 'Tab' ? 9 : 27,
+        });
+        await api.pause(100);
+      };
+      await openPicker();
+      assert(
+        await api.evaluate(
+          `document.querySelector('[role=dialog]').contains(document.activeElement)`,
+        ),
       );
-      await api.pause(100);
-      await click(
-        api,
-        `Array.from(document.querySelectorAll('[role=menuitem]')).find(n=>n.textContent==='添加订阅')`,
-      );
-      await api.pause(250);
       for (const [width, height] of [
         [1280, 800],
         [390, 500],
@@ -254,6 +307,84 @@ test(
           'document.querySelector("[role=dialog] input[type=checkbox]").checked',
         ),
         true,
+      );
+      await api.send('Emulation.setDeviceMetricsOverride', {
+        width: 1280,
+        height: 800,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await api.pause(100);
+      await api.evaluate(
+        `Array.from(document.querySelectorAll('[role=dialog] button')).filter(n=>!n.disabled).at(-1).focus()`,
+      );
+      await key('Tab', 'Tab');
+      assert(
+        await api.evaluate(
+          `document.querySelector('[role=dialog]').contains(document.activeElement)`,
+        ),
+      );
+      await api.evaluate(
+        `document.querySelector('[role=dialog] button').focus()`,
+      );
+      await key('Tab', 'Tab', 8);
+      assert(
+        await api.evaluate(
+          `document.querySelector('[role=dialog]').contains(document.activeElement)`,
+        ),
+      );
+      await key('Escape', 'Escape');
+      await api.pause(250);
+      assert.equal(
+        await api.evaluate(`Boolean(document.querySelector('[role=dialog]'))`),
+        false,
+      );
+      assert(
+        await api.evaluate(
+          'document.activeElement===window.fixture.pickerTrigger',
+        ),
+      );
+      await openPicker();
+      await api.send('Input.dispatchMouseEvent', {
+        type: 'mousePressed',
+        x: 2,
+        y: 2,
+        button: 'left',
+        buttons: 1,
+        clickCount: 1,
+      });
+      await api.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x: 2,
+        y: 2,
+        button: 'left',
+        buttons: 0,
+        clickCount: 1,
+      });
+      await api.pause(350);
+      assert.equal(
+        await api.evaluate(`Boolean(document.querySelector('[role=dialog]'))`),
+        false,
+      );
+      assert(
+        await api.evaluate(
+          'document.activeElement===window.fixture.pickerTrigger',
+        ),
+      );
+      await openPicker();
+      await click(
+        api,
+        `document.querySelector('[role=dialog] .subscription-dialog-close')`,
+      );
+      await api.pause(250);
+      assert.equal(
+        await api.evaluate(`Boolean(document.querySelector('[role=dialog]'))`),
+        false,
+      );
+      assert(
+        await api.evaluate(
+          'document.activeElement===window.fixture.pickerTrigger',
+        ),
       );
     });
   },

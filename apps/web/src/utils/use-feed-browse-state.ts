@@ -32,6 +32,7 @@ export function useFeedBrowseState(sourceId?: string) {
       : undefined;
   const [state, setState] = useState(() => ({
     route,
+    entryKey: location.key,
     filters: {
       ...initialBrowseFilters(
         browserStorage('sessionStorage'),
@@ -42,23 +43,25 @@ export function useFeedBrowseState(sourceId?: string) {
     },
     generation: 0,
   }));
-  // Derive the new URL's state before queries render; never query with stale scope.
-  const current =
-    state.route === route
-      ? state
-      : {
-          route,
-          filters: location.search
-            ? initialBrowseFilters(undefined, sourceId, location.search)
-            : {
-                ...state.filters,
-                folderFilter: sourceId
-                  ? folderContext || 'all'
-                  : state.filters.folderFilter,
-              },
-          generation: state.generation + 1,
-        };
-  if (state.route !== route) setState(current);
+  // The same URL may have multiple history entries with different folder context.
+  // Derive each entry's state before queries render; never query with stale scope.
+  const sameEntry = state.route === route && state.entryKey === location.key;
+  const current = sameEntry
+    ? state
+    : {
+        route,
+        entryKey: location.key,
+        filters: location.search
+          ? initialBrowseFilters(undefined, sourceId, location.search)
+          : {
+              ...state.filters,
+              folderFilter: sourceId
+                ? folderContext || 'all'
+                : state.filters.folderFilter,
+            },
+        generation: state.generation + 1,
+      };
+  if (!sameEntry) setState(current);
   const update = useCallback(
     <K extends keyof FeedBrowseFilters>(
       key: K,
