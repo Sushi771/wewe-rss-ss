@@ -471,4 +471,88 @@ describe('five-request waves (offline)', () => {
       );
     }
   });
+  it('not-submitted proof cannot clear a 429 restriction; a separate fresh check may release temporary cooldown', async () => {
+    const m = make(),
+      calls: string[] = [];
+    m.attachRefreshPreparation(async (id) => ({
+      release: () => {},
+      submit: async () => {
+        calls.push(id);
+        if (id === ids[0] && calls.length === 1)
+          throw new Error('WECHAT2RSS_RATE_LIMITED');
+        return accepted;
+      },
+    }));
+    const batch = await m.enqueueRefresh(ids.slice(0, 6));
+    await m.runDue();
+    m.attachReconciliation(async () => 'not-submitted');
+    clock += 150000;
+    await m.runDue();
+    expect(calls).toHaveLength(5);
+    let record = JSON.parse(
+      await fs.readFile(
+        path.join(
+          directory,
+          '.wechat2rss-subscription-batches',
+          batch.batchId + '.json',
+        ),
+        'utf8',
+      ),
+    );
+    expect(record.state).toBe('paused');
+    expect(record.items[0].sharedRestriction).toBe(true);
+    expect(record.items[0].submissionUnknown).toBe(false);
+    const check = jest.fn().mockResolvedValue(false);
+    m.attachRestrictionCheck(check);
+    await m.runDue();
+    expect(calls).toHaveLength(5);
+    clock += 120000;
+    check.mockResolvedValue(true);
+    await m.runDue();
+    record = JSON.parse(
+      await fs.readFile(
+        path.join(
+          directory,
+          '.wechat2rss-subscription-batches',
+          batch.batchId + '.json',
+        ),
+        'utf8',
+      ),
+    );
+    expect(record.items[0].sharedRestriction).toBe(false);
+    expect(calls).toHaveLength(7);
+  });
+  it('known account restriction requires explicit resume plus a fresh healthy account check', async () => {
+    const m = make(),
+      send = jest.fn().mockResolvedValue(accepted);
+    let first = true;
+    m.attachRefreshPreparation(async () =>
+      first
+        ? ((first = false),
+          {
+            release: () => {},
+            outcome: {
+              state: 'blocked',
+              accepted: false,
+              sharedRestriction: true,
+              restrictionKind: 'account',
+              stopBatch: true,
+              message: 'fixture account restriction',
+            },
+          })
+        : { release: () => {}, submit: send },
+    );
+    const batch = await m.enqueueRefresh(ids.slice(0, 1));
+    await m.runDue();
+    const check = jest.fn().mockResolvedValue(true);
+    m.attachRestrictionCheck(check);
+    clock += 150000;
+    await m.runDue();
+    expect(check).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    await m.resume(batch.batchId);
+    await m.runDue();
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
 });

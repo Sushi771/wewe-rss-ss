@@ -41,6 +41,7 @@ export type BatchOutcome = {
   stopBatch?: boolean;
   /** Explicit shared throttle/account signal, distinct from an uncertain request. */
   sharedRestriction?: boolean;
+  restrictionKind?: 'account' | 'rate-limit';
 };
 export type PreparedRefresh = {
   outcome?: BatchOutcome;
@@ -139,6 +140,7 @@ const itemFields = new Set([
   'retryable',
   'stopBatch',
   'sharedRestriction',
+  'restrictionKind',
   'refreshChecks',
   'refreshAfter',
   'preparationRetries',
@@ -268,6 +270,77 @@ export class Wechat2RssSubscriptionBatches {
     if (this.prepareRefresh) throw new Error('BATCH_PREPARATION_EXISTS');
     this.prepareRefresh = prepare;
   }
+
+  private restrictionCheck?: () => Promise<boolean>;
+  attachRestrictionCheck(check: () => Promise<boolean>) {
+    this.restrictionCheck = check;
+  }
+  private async releaseSharedRestriction(b: Batch, explicit = false) {
+    let restricted = b.items.filter((i) => i.sharedRestriction === true);
+    if (
+      !restricted.length ||
+      !this.restrictionCheck ||
+      this.now() < b.nextSubmissionAt ||
+      (!explicit &&
+        restricted.some((i) => i.restrictionKind !== 'rate-limit')) ||
+      b.instance !== hash(this.instance()) ||
+      b.state === 'stopped' ||
+      (b.purpose === 'scheduled-refresh' &&
+        (!activeRefreshScheduleEnabled(process.env) ||
+          !automaticSubmissionAllowed(this.now())))
+    )
+      return false;
+    let clear = false;
+    try {
+      clear = await this.restrictionCheck();
+    } catch {
+      /* remain restricted */
+    }
+    const latest = await this.read(b.batchId);
+    if (
+      this.stopped ||
+      !latest ||
+      this.now() < latest.nextSubmissionAt ||
+      latest.state === 'stopped' ||
+      latest.instance !== hash(this.instance()) ||
+      (!explicit &&
+        latest.items.some(
+          (i) =>
+            i.sharedRestriction === true && i.restrictionKind !== 'rate-limit',
+        ))
+    )
+      return false;
+    Object.assign(b, latest);
+    restricted = b.items.filter((i) => i.sharedRestriction === true);
+
+    if (!clear) {
+      if (!explicit) {
+        b.nextSubmissionAt = this.now() + 120000;
+        await this.write(b);
+      }
+      return false;
+    }
+    for (const item of restricted) {
+      item.sharedRestriction = false;
+      item.stopBatch = false;
+      if (
+        item.state === 'blocked' &&
+        !item.accepted &&
+        !item.submissionUnknown
+      ) {
+        item.state = 'queued';
+        item.retryable = true;
+      }
+    }
+    b.state = b.items.some((i) =>
+      ['queued', 'waiting', 'submitting'].includes(i.state),
+    )
+      ? 'running'
+      : 'completed';
+    await this.write(b);
+    return true;
+  }
+
   private reconcile?: (
     feedId: string,
     createdAt: number,
@@ -427,6 +500,8 @@ export class Wechat2RssSubscriptionBatches {
                 item[key] > 1000000),
           ) ||
           (item.accepted !== undefined && typeof item.accepted !== 'boolean') ||
+          (item.restrictionKind !== undefined &&
+            !['account', 'rate-limit'].includes(item.restrictionKind)) ||
           (item.sharedRestriction !== undefined &&
             typeof item.sharedRestriction !== 'boolean') ||
           (item.submissionUnknown !== undefined &&
@@ -776,6 +851,11 @@ export class Wechat2RssSubscriptionBatches {
     if (b.instance !== hash(this.instance()))
       throw new Error('BATCH_INSTANCE_CHANGED');
     if (isRefresh(b)) {
+      if (
+        b.items.some((i) => i.sharedRestriction === true) &&
+        !(await this.releaseSharedRestriction(b, true))
+      )
+        return view(b);
       // Never turn an interrupted/unknown /add into another submission.
       // Only cache reads of a confirmed accepted request may be resumed.
       for (const item of b.items)
@@ -875,6 +955,12 @@ export class Wechat2RssSubscriptionBatches {
         (b) =>
           ['queued', 'running'].includes(b.state) ||
           automaticRecovery(b) ||
+          (this.restrictionCheck &&
+            b.items.some(
+              (i) =>
+                i.sharedRestriction === true &&
+                i.restrictionKind === 'rate-limit',
+            )) ||
           (b.state === 'paused' && isolatedRefresh(b)) ||
           (isRefresh(b) && b.items.some((item) => item.submissionUnknown)) ||
           (isRefresh(b) &&
@@ -1070,7 +1156,8 @@ export class Wechat2RssSubscriptionBatches {
       if (!cacheOnlyRun) await this.runConsumer();
       if (this.stopped) return;
       const pending = await this.records();
-      await this.coverPreparation(pending);
+      for (const record of pending) await this.releaseSharedRestriction(record);
+      await this.coverPreparation(await this.records());
       for (const record of pending) await this.recoverPreparation(record);
       // Read-only reconciliation can prove preparation failed before the one-shot
       // reservation. An unknown receipt alone never authorizes another /add.
@@ -1131,6 +1218,7 @@ export class Wechat2RssSubscriptionBatches {
               item.message = '本地预留账本确认未提交；独立队列自动继续。';
               if (
                 item.state === 'queued' &&
+                !record.items.some((i) => i.sharedRestriction === true) &&
                 !record.items.some(
                   (prior) =>
                     !prior.submissionUnknown &&
@@ -1266,6 +1354,12 @@ export class Wechat2RssSubscriptionBatches {
           (b) =>
             ['queued', 'running'].includes(b.state) ||
             automaticRecovery(b) ||
+            (this.restrictionCheck &&
+              b.items.some(
+                (i) =>
+                  i.sharedRestriction === true &&
+                  i.restrictionKind === 'rate-limit',
+              )) ||
             (this.reconcile &&
               isRefresh(b) &&
               b.items.some((item) => item.submissionUnknown)) ||
@@ -1281,6 +1375,7 @@ export class Wechat2RssSubscriptionBatches {
     }
   }
   private async runRefresh(b: Batch) {
+    if (this.stopped) return false;
     let changed = false;
     const unknowns = b.items.filter((i) => i.state === 'submitting');
     if (unknowns.length) {
@@ -1329,6 +1424,7 @@ export class Wechat2RssSubscriptionBatches {
       }
     }
     const maySubmit =
+      !b.items.some((i) => i.sharedRestriction === true) &&
       !b.cacheOnly &&
       (b.purpose !== 'scheduled-refresh' ||
         (activeRefreshScheduleEnabled(process.env) &&
@@ -1460,6 +1556,13 @@ export class Wechat2RssSubscriptionBatches {
    * Prepare serially, send only network closures concurrently, persist receipts
    * through one chain. A wave never authorizes a sixth in-flight request. */
   private async runRefreshWave(b: Batch) {
+    if (b.items.some((i) => i.sharedRestriction === true)) {
+      if (b.state !== 'stopped') {
+        b.state = 'paused';
+        await this.write(b);
+      }
+      return true;
+    }
     const selected = b.items
       .filter(
         (i) =>
@@ -1662,6 +1765,8 @@ export class Wechat2RssSubscriptionBatches {
                 submissionUnknown: true,
                 stopBatch: code === 'WECHAT2RSS_RATE_LIMITED',
                 sharedRestriction: code === 'WECHAT2RSS_RATE_LIMITED',
+                restrictionKind:
+                  code === 'WECHAT2RSS_RATE_LIMITED' ? 'rate-limit' : undefined,
                 message: 'Update response uncertain; retained without replay.',
               };
           }

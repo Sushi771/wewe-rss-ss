@@ -33,8 +33,18 @@ Disabled, removed, paused and cooling-down sources are skipped independently.
 Account restrictions stop a prepared wave before launch. An HTTP 429 from an
 update retains uncertainty, stops subsequent waves of that intent, and persists
 a shared minimum two-minute cooldown for other intents. Already issued requests
-are allowed to settle and retain their own receipts. The restricted intent is not
-automatically resumed. New work after the cooldown still checks account state.
+are allowed to settle and retain their own receipts. A not-submitted receipt proof
+never clears the independent restriction or authorizes another wave.
+
+Temporary 429 restrictions use `restrictionKind: rate-limit`. After cooldown, a
+separate fresh account-status check may release them; an absent, failed or
+unhealthy check keeps the intent paused and extends the read-check backoff.
+Known account restrictions use `restrictionKind: account` and require explicit
+resume plus a fresh healthy account check. Legacy restriction records without a
+kind are conservative and require explicit resume. Both paths retain unknown
+receipts, retry counts, absolute deadlines and the scheduled quiet window.
+Recovery, wave admission and the compatible serial worker each check the
+restriction independently, including after a not-submitted proof.
 Unknown generic network failures isolate the affected source rather than
 inventing an account-wide restriction.
 

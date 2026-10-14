@@ -659,6 +659,7 @@ export class TrpcService {
           accepted: false,
           stopBatch: true,
           sharedRestriction: true,
+          restrictionKind: 'account',
           message: 'Account restricted; prepared wave will not be submitted.',
         });
       }
@@ -740,6 +741,8 @@ export class TrpcService {
         retryable: code !== 'WECHAT2RSS_RATE_LIMITED',
         stopBatch: code === 'WECHAT2RSS_RATE_LIMITED',
         sharedRestriction: code === 'WECHAT2RSS_RATE_LIMITED',
+        restrictionKind:
+          code === 'WECHAT2RSS_RATE_LIMITED' ? 'rate-limit' : undefined,
         message: 'Preparation failed before update request.',
       });
     }
@@ -901,6 +904,10 @@ export class TrpcService {
       (id, automatic, waveKey) =>
         this.prepareRefreshWaveItem(id, automatic, waveKey),
     );
+    this.subscriptionBatches.attachRestrictionCheck(async () => {
+      const account = await wechat2RssProvider().checkAccountStatus();
+      return account.available && !account.challenged;
+    });
     this.subscriptionBatches.attachReconciliation((id, createdAt) =>
       this.reconcileUnreservedRefresh(id, createdAt),
     );
