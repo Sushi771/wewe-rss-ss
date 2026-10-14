@@ -316,6 +316,9 @@ export class LocalArticleStore {
       ...(retained.mediaComplete !== undefined
         ? { mediaComplete: retained.mediaComplete }
         : {}),
+      // Keep the existing note and assets, but do not inherit a legacy
+      // complete claim contradicted by the current cached source.
+      ...(article.mediaComplete === false ? { mediaComplete: false } : {}),
       ...(retained.legacyLayoutRetained ? { legacyLayoutRetained: true } : {}),
     };
     return {

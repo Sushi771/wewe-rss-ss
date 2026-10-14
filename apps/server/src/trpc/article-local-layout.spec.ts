@@ -229,6 +229,30 @@ describe('all cached article local/ZIP export entry points share isolated image 
       const one = await caller.article.saveToObsidian(items[0].id);
       expect(one).toMatchObject({ success: false, mediaComplete: false });
       expect(await fs.readFile(one.path, 'utf8')).toContain('媒体完整性未确认');
+      const receipts = join(dirname(one.path), '.wewe-articles');
+      const receiptPath = join(
+        receipts,
+        (await fs.readdir(receipts)).find((name) => name.endsWith('.json'))!,
+      );
+      const receipt = JSON.parse(await fs.readFile(receiptPath, 'utf8'));
+      delete receipt.imageMap;
+      await fs.writeFile(
+        receiptPath,
+        JSON.stringify({ ...receipt, mediaComplete: true }),
+      );
+      const legacyReceipt = await fs.readFile(receiptPath, 'utf8');
+      await fs.writeFile(one.path, 'User handwritten notes');
+      expect(await caller.article.saveToObsidian(items[0].id)).toMatchObject({
+        success: false,
+        mediaComplete: false,
+        alreadySaved: true,
+        status: 'skipped',
+        path: one.path,
+      });
+      expect(await fs.readFile(one.path, 'utf8')).toBe(
+        'User handwritten notes',
+      );
+      expect(await fs.readFile(receiptPath, 'utf8')).toBe(legacyReceipt);
       const zip = join(root, 'no-source-zip');
       const batch = await router.buildOfflineFeedDirectory(feed.id, zip);
       expect(batch).toMatchObject({ complete: 1 });
