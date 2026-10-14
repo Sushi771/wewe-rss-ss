@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import axios from 'axios';
 import { TrpcRouter } from './trpc.router';
@@ -220,4 +220,52 @@ describe('all cached article local/ZIP export entry points share isolated image 
     expect(fetch).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });
+  it.each(['available', 'unavailable'])(
+    'single and batch exports report source-less images as incomplete despite %s history',
+    async (status) => {
+      items[0].lastBodyStatus = status;
+      items[0].contentHtml = '<div id="js_content"><p>正文</p><img></div>';
+      const caller = router.appRouter.createCaller({ errorMsg: null });
+      const one = await caller.article.saveToObsidian(items[0].id);
+      expect(one).toMatchObject({ success: false, mediaComplete: false });
+      expect(await fs.readFile(one.path, 'utf8')).toContain('媒体完整性未确认');
+      const receipts = join(dirname(one.path), '.wewe-articles');
+      const receiptPath = join(
+        receipts,
+        (await fs.readdir(receipts)).find((name) => name.endsWith('.json'))!,
+      );
+      const receipt = JSON.parse(await fs.readFile(receiptPath, 'utf8'));
+      delete receipt.imageMap;
+      await fs.writeFile(
+        receiptPath,
+        JSON.stringify({ ...receipt, mediaComplete: true }),
+      );
+      const legacyReceipt = await fs.readFile(receiptPath, 'utf8');
+      await fs.writeFile(one.path, 'User handwritten notes');
+      expect(await caller.article.saveToObsidian(items[0].id)).toMatchObject({
+        success: false,
+        mediaComplete: false,
+        alreadySaved: true,
+        status: 'skipped',
+        path: one.path,
+      });
+      expect(await fs.readFile(one.path, 'utf8')).toBe(
+        'User handwritten notes',
+      );
+      expect(await fs.readFile(receiptPath, 'utf8')).toBe(legacyReceipt);
+      const zip = join(root, 'no-source-zip');
+      const batch = await router.buildOfflineFeedDirectory(feed.id, zip);
+      expect(batch).toMatchObject({ complete: 1 });
+      expect(batch?.incomplete).toHaveLength(1);
+      if (!batch) throw new Error('Expected publisher batch');
+      const relative = batch.incomplete[0];
+      expect(basename(relative)).toBe(`${items[0].title}.md`);
+      expect(isAbsolute(relative)).toBe(false);
+      expect(await fs.readFile(join(zip, relative), 'utf8')).toContain(
+        '媒体完整性未确认',
+      );
+      expect(fetch).not.toHaveBeenCalled();
+      expect(axios.get).not.toHaveBeenCalled();
+    },
+  );
 });

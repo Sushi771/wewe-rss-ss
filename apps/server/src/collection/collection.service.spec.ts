@@ -160,8 +160,10 @@ describe('local collection with real SQLite migrations', () => {
       code: 'ENOENT',
     });
     const result = await caller.article.saveToObsidian('legacy-short-link');
+    expect(result).toMatchObject({ success: false, mediaComplete: false });
     const markdown = await fs.readFile(result.path, 'utf8');
     expect(markdown).toContain('正文内容');
+    expect(markdown).toContain('媒体完整性未确认');
     expect(markdown).toContain('| 收藏 | 未提供 |');
     const image = markdown.match(
       /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
@@ -170,19 +172,31 @@ describe('local collection with real SQLite migrations', () => {
     expect(
       (await fs.stat(path.join(path.dirname(result.path), image!))).size,
     ).toBeGreaterThan(0);
+    expect(
+      await fs.readFile(path.join(path.dirname(result.path), image!)),
+    ).toEqual(await fs.readFile(path.join(directory, 'pixel.png')));
     const offlineDirectory = path.join(root, 'offline-feed');
     const offline = await router.buildOfflineFeedDirectory(
       mpId,
       offlineDirectory,
     );
-    expect(offline).toMatchObject({ articles: 2, complete: 1 });
+    expect(offline).toMatchObject({ articles: 2, complete: 0 });
+    expect(offline!.incomplete).toHaveLength(2);
+    const missingBody = offline!.incomplete.find(
+      (item) => path.basename(item) === '次条.md',
+    )!;
+    const partialMedia = offline!.incomplete.find(
+      (item) => path.basename(item) === '主条.md',
+    )!;
+    expect(missingBody).toBeTruthy();
+    expect(partialMedia).toBeTruthy();
     const exported = await fs.readFile(
-      path.join(offlineDirectory, offline!.incomplete[0]),
+      path.join(offlineDirectory, missingBody),
       'utf8',
     );
     expect(exported).toContain('无法完整离线阅读');
     const publisherDirectory = path.dirname(
-      path.join(offlineDirectory, offline!.incomplete[0]),
+      path.join(offlineDirectory, missingBody),
     );
     expect(path.dirname(publisherDirectory)).toBe(
       path.join(offlineDirectory, '2024-12-06_未分组'),
@@ -191,15 +205,11 @@ describe('local collection with real SQLite migrations', () => {
       name.endsWith('.md'),
     );
     expect(notes).toHaveLength(2);
-    const completedNote = notes.find(
-      (name) =>
-        !offline!.incomplete.some((item) => path.basename(item) === name),
-    );
-    expect(completedNote).toBeTruthy();
     const completeMarkdown = await fs.readFile(
-      path.join(publisherDirectory, completedNote!),
+      path.join(offlineDirectory, partialMedia),
       'utf8',
     );
+    expect(completeMarkdown).toContain('媒体完整性未确认');
     expect(completeMarkdown).toMatch(
       /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
     );
@@ -207,7 +217,7 @@ describe('local collection with real SQLite migrations', () => {
       path.join(offlineDirectory, 'README.md'),
       'utf8',
     );
-    expect(readme).toContain('未完整 1 篇');
+    expect(readme).toContain('未完整 2 篇');
     process.env.PRIVATE_ONLINE_MODE = '1';
     try {
       // Restored owner management stays behind the existing private login.
