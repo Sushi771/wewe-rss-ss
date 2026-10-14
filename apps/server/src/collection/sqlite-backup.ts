@@ -247,8 +247,9 @@ export async function createVerifiedSqliteBackup(
     report.integrityCheck !== 'ok' ||
     typeof report.backup !== 'string' ||
     !report.backup ||
-    !/^[a-f0-9]{64}$/.test(report.sha256 || '')
+    typeof report.sha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(report.sha256)
   )
     throw new Error('SQLite 备份验证失败，本次未写入');
-  return report;
+  return { ...report, backup: report.backup, sha256: report.sha256 };
 }
