@@ -15,7 +15,8 @@ on:
       - 'scripts/offline-browser-fixture.cjs'
       - '.github/workflows/folder-classification-ci.yml'
   push:
-    branches: [codex/folder-batch-add-fix]
+    branches:
+      [codex/folder-batch-add-fix, codex/backend-recovery-integration-20261014]
 
 permissions:
   contents: read
