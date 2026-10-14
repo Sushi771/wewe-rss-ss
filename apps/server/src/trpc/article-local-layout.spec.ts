@@ -220,4 +220,26 @@ describe('all cached article local/ZIP export entry points share isolated image 
     expect(fetch).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });
+  it.each(['available', 'unavailable'])(
+    'single and batch exports report source-less images as incomplete despite %s history',
+    async (status) => {
+      items[0].lastBodyStatus = status;
+      items[0].contentHtml = '<div id="js_content"><p>正文</p><img></div>';
+      const caller = router.appRouter.createCaller({ errorMsg: null });
+      const one = await caller.article.saveToObsidian(items[0].id);
+      expect(one).toMatchObject({ success: false, mediaComplete: false });
+      expect(await fs.readFile(one.path, 'utf8')).toContain('媒体完整性未确认');
+      expect(
+        await router.buildOfflineFeedDirectory(
+          feed.id,
+          join(root, 'no-source-zip'),
+        ),
+      ).toMatchObject({
+        complete: 1,
+        incomplete: [items[0].title],
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(axios.get).not.toHaveBeenCalled();
+    },
+  );
 });
