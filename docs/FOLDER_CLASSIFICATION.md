@@ -22,3 +22,9 @@
 - `apps/server/src/trpc/management-groups.spec.ts` 在新建临时 SQLite 上运行真实分类接口。100 项一次保存、新客户端读取、重复添加、事务提交失败回滚、缺失 ID 原子拒绝，以及既有文章、元数据和本地目录保护均有断言。
 
 专用公开 CI：`.github/workflows/folder-classification-ci.yml`。本轮没有修改生产分类、复制生产数据库或媒体，没有启动上游采集、部署或合并。
+
+## 连续操作与旧响应
+
+新一轮分类写入前会取消现有 `feed.list` 读取；已取消读取即使在网络层晚返回，也不得覆盖较新的分类缓存。`scripts/folder-move-ui.test.cjs` 使用实际安装的 TanStack QueryClient / QueryObserver，执行两次真实页面分类回调，故意让旧读取忽略 AbortSignal 并最后返回，检查缓存和订阅者仍保留第二次已确认分类。普通文件夹切换只改变本地筛选，不把其他文件夹的响应写成分类结果。
+
+共享分类组件的提取式测试 `xiaohongshu-ui.spec.ts` 同时覆盖新增保存状态 hook；专用 CI 纳入这套回归，完整项目 CI 仍须通过后才视为全量验收完成。
