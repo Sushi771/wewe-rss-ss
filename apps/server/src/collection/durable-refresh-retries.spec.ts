@@ -311,8 +311,9 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
     jest
       .spyOn(manager as any, 'write')
       .mockImplementation(async (current: any) => {
-        await write(current);
+        const persisted = await write(current);
         if (current.items[0].state === 'submitting') clock += 2;
+        return persisted;
       });
     await manager.runDue();
     expect(run).not.toHaveBeenCalled();
