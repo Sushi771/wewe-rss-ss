@@ -1,3 +1,4 @@
+// Bounded-wave rollback state compatibility v4.
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -39,6 +40,8 @@ export type BatchOutcome = {
   retryable?: boolean;
   /** Known shared account restrictions may stop the round; unknown submits isolate. */
   stopBatch?: boolean;
+  sharedRestriction?: boolean;
+  restrictionKind?: 'account' | 'rate-limit';
 };
 type Item = Omit<BatchOutcome, 'state'> & {
   index: number;
@@ -128,6 +131,8 @@ const itemFields = new Set([
   'submissionUnknown',
   'retryable',
   'stopBatch',
+  'sharedRestriction',
+  'restrictionKind',
   'refreshChecks',
   'refreshAfter',
   'preparationRetries',
@@ -163,6 +168,7 @@ const safePreparation = (item: Item) =>
   ['queued', 'failed'].includes(item.state);
 const automaticRecovery = (b: Batch) =>
   b.purpose === 'scheduled-refresh' &&
+  !b.items.some((item) => item.sharedRestriction === true) &&
   !b.cacheOnly &&
   b.state !== 'stopped' &&
   !b.items.some(
@@ -174,6 +180,7 @@ const automaticRecovery = (b: Batch) =>
   b.items.some((item) => safePreparation(item) && !item.retryExhausted);
 const isolatedRefresh = (b: Batch) =>
   isRefresh(b) &&
+  !b.items.some((item) => item.sharedRestriction === true) &&
   b.items.some((item) => item.submissionUnknown) &&
   !b.items.some(
     (item) =>
@@ -244,6 +251,76 @@ export class Wechat2RssSubscriptionBatches {
     automatic?: boolean,
     options?: { cacheOnly: boolean },
   ) => Promise<BatchOutcome>;
+
+  private restrictionCheck?: () => Promise<boolean>;
+  attachRestrictionCheck(check: () => Promise<boolean>) {
+    this.restrictionCheck = check;
+  }
+  private async releaseSharedRestriction(b: Batch, explicit = false) {
+    let restricted = b.items.filter((i) => i.sharedRestriction === true);
+    if (
+      !restricted.length ||
+      !this.restrictionCheck ||
+      this.now() < b.nextSubmissionAt ||
+      (!explicit &&
+        restricted.some((i) => i.restrictionKind !== 'rate-limit')) ||
+      b.instance !== hash(this.instance()) ||
+      b.state === 'stopped' ||
+      (b.purpose === 'scheduled-refresh' &&
+        (!activeRefreshScheduleEnabled(process.env) ||
+          !automaticSubmissionAllowed(this.now())))
+    )
+      return false;
+    let clear = false;
+    try {
+      clear = await this.restrictionCheck();
+    } catch {
+      /* remain restricted */
+    }
+    const latest = await this.read(b.batchId);
+    if (
+      this.stopped ||
+      !latest ||
+      this.now() < latest.nextSubmissionAt ||
+      latest.state === 'stopped' ||
+      latest.instance !== hash(this.instance()) ||
+      (!explicit &&
+        latest.items.some(
+          (i) =>
+            i.sharedRestriction === true && i.restrictionKind !== 'rate-limit',
+        ))
+    )
+      return false;
+    Object.assign(b, latest);
+    restricted = b.items.filter((i) => i.sharedRestriction === true);
+
+    if (!clear) {
+      if (!explicit) {
+        b.nextSubmissionAt = this.now() + 120000;
+        await this.write(b);
+      }
+      return false;
+    }
+    for (const item of restricted) {
+      item.sharedRestriction = false;
+      item.stopBatch = false;
+      if (
+        item.state === 'blocked' &&
+        !item.accepted &&
+        !item.submissionUnknown
+      ) {
+        item.state = 'queued';
+        item.retryable = true;
+      }
+    }
+    b.state = b.items.some((i) =>
+      ['queued', 'waiting', 'submitting'].includes(i.state),
+    )
+      ? 'running'
+      : 'completed';
+    return this.write(b, true);
+  }
+
   private reconcile?: (
     feedId: string,
     createdAt: number,
@@ -403,6 +480,10 @@ export class Wechat2RssSubscriptionBatches {
                 item[key] > 1000000),
           ) ||
           (item.accepted !== undefined && typeof item.accepted !== 'boolean') ||
+          (item.sharedRestriction !== undefined &&
+            typeof item.sharedRestriction !== 'boolean') ||
+          (item.restrictionKind !== undefined &&
+            !['account', 'rate-limit'].includes(item.restrictionKind)) ||
           (item.submissionUnknown !== undefined &&
             typeof item.submissionUnknown !== 'boolean') ||
           (item.stopBatch !== undefined &&
@@ -443,7 +524,67 @@ export class Wechat2RssSubscriptionBatches {
       throw e;
     }
   }
-  private async write(b: Batch) {
+  private readonly batchWrites = new Map<string, Promise<boolean>>();
+  /** All existing-state writes honor stop at their serialized persistence boundary.
+   * Only creation, explicit stop, and a single genuine receipt have special modes. */
+  private async write(
+    b: Batch,
+    mode: boolean | 'receipt' | 'stop' = true,
+    receiptIndex?: number,
+  ) {
+    const persisted = JSON.parse(JSON.stringify(b)) as Batch;
+    const previous = this.batchWrites.get(b.batchId) || Promise.resolve(true);
+    const pending = previous
+      .catch(() => false)
+      .then(async () => {
+        const latest = mode === false ? undefined : await this.read(b.batchId);
+        if (mode !== false && !latest) return false;
+        if (mode === 'stop') {
+          Object.assign(persisted, latest);
+          persisted.state = 'stopped';
+          for (const item of persisted.items)
+            if (item.state === 'queued') {
+              item.state = 'cancelled';
+              item.message = '剩余任务已停止，未发送。';
+            }
+        } else if (latest?.state === 'stopped') {
+          if (mode !== 'receipt') {
+            Object.assign(b, latest);
+            return false;
+          }
+          const receipt = persisted.items[receiptIndex!];
+          if (!receipt || !latest.items[receiptIndex!]) return false;
+          latest.items[receiptIndex!] = { ...receipt };
+          if (
+            receipt.state === 'queued' &&
+            !receipt.accepted &&
+            !receipt.submissionUnknown
+          )
+            latest.items[receiptIndex!].state = 'cancelled';
+          latest.nextSubmissionAt = Math.max(
+            latest.nextSubmissionAt,
+            persisted.nextSubmissionAt,
+          );
+          Object.assign(persisted, latest);
+        }
+        await this.persistWrite(persisted);
+        if (
+          mode === 'stop' ||
+          (mode === 'receipt' && latest?.state === 'stopped')
+        )
+          Object.assign(b, persisted);
+        else b.updatedAt = persisted.updatedAt;
+        return true;
+      });
+    this.batchWrites.set(b.batchId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.batchWrites.get(b.batchId) === pending)
+        this.batchWrites.delete(b.batchId);
+    }
+  }
+  private async persistWrite(b: Batch) {
     b.updatedAt = this.now();
     const file = path.join(await this.storage(), b.batchId + '.json');
     const temp = file + '.' + randomUUID() + '.tmp';
@@ -572,7 +713,7 @@ export class Wechat2RssSubscriptionBatches {
         state: items.some((i) => i.state === 'queued') ? 'queued' : 'completed',
         items,
       };
-      await this.write(b);
+      await this.write(b, false);
       this.schedule();
       return view(b);
     } finally {
@@ -690,7 +831,7 @@ export class Wechat2RssSubscriptionBatches {
                 : 'Existing refresh round retained; no duplicate automatic submission.',
             })),
           };
-          await this.write(joined);
+          await this.write(joined, false);
           this.schedule();
           return { ...view(joined), reused: true };
         }
@@ -722,7 +863,7 @@ export class Wechat2RssSubscriptionBatches {
           message: '等待串行提交上游更新。',
         })),
       };
-      await this.write(b);
+      await this.write(b, false);
       this.schedule();
       return { ...view(b), reused: false };
     } finally {
@@ -740,7 +881,7 @@ export class Wechat2RssSubscriptionBatches {
         item.state = 'cancelled';
         item.message = '剩余请求已停止，未发送。';
       }
-    await this.write(b);
+    await this.write(b, 'stop');
     return view(b);
   }
   async resume(id: string) {
@@ -750,6 +891,11 @@ export class Wechat2RssSubscriptionBatches {
     if (b.instance !== hash(this.instance()))
       throw new Error('BATCH_INSTANCE_CHANGED');
     if (isRefresh(b)) {
+      if (
+        b.items.some((i) => i.sharedRestriction === true) &&
+        !(await this.releaseSharedRestriction(b, true))
+      )
+        return view(b);
       // Never turn an interrupted/unknown /add into another submission.
       // Only cache reads of a confirmed accepted request may be resumed.
       for (const item of b.items)
@@ -849,6 +995,12 @@ export class Wechat2RssSubscriptionBatches {
         (b) =>
           ['queued', 'running'].includes(b.state) ||
           automaticRecovery(b) ||
+          (this.restrictionCheck &&
+            b.items.some(
+              (i) =>
+                i.sharedRestriction === true &&
+                i.restrictionKind === 'rate-limit',
+            )) ||
           (b.state === 'paused' && isolatedRefresh(b)) ||
           (isRefresh(b) && b.items.some((item) => item.submissionUnknown)) ||
           (isRefresh(b) &&
@@ -908,7 +1060,7 @@ export class Wechat2RssSubscriptionBatches {
     )
       ? 'running'
       : 'completed';
-    await this.write(b);
+    await this.write(b, true);
   }
   /** A later equivalent success satisfies an older unsent update intent. This
    * is an explanatory skip, never a fabricated success or another submission. */
@@ -1026,7 +1178,7 @@ export class Wechat2RssSubscriptionBatches {
         )
           ? 'running'
           : 'completed';
-      await this.write(b);
+      await this.write(b, true);
     }
   }
   async runDue() {
@@ -1044,8 +1196,10 @@ export class Wechat2RssSubscriptionBatches {
       if (!cacheOnlyRun) await this.runConsumer();
       if (this.stopped) return;
       const pending = await this.records();
-      await this.coverPreparation(pending);
-      for (const record of pending) await this.recoverPreparation(record);
+      for (const record of pending) await this.releaseSharedRestriction(record);
+      const latestRecords = await this.records();
+      await this.coverPreparation(latestRecords);
+      for (const record of latestRecords) await this.recoverPreparation(record);
       // Read-only reconciliation can prove preparation failed before the one-shot
       // reservation. An unknown receipt alone never authorizes another /add.
       if (this.reconcile)
@@ -1105,6 +1259,7 @@ export class Wechat2RssSubscriptionBatches {
               item.message = '本地预留账本确认未提交；独立队列自动继续。';
               if (
                 item.state === 'queued' &&
+                !record.items.some((i) => i.sharedRestriction === true) &&
                 !record.items.some(
                   (prior) =>
                     !prior.submissionUnknown &&
@@ -1196,7 +1351,7 @@ export class Wechat2RssSubscriptionBatches {
         item.state = 'submitting';
         b.state = 'running';
         b.nextSubmissionAt = this.now() + 5000;
-        await this.write(b); // Includes all unsent URLs before the first upstream call.
+        if (!(await this.write(b))) return; // Includes all unsent URLs before the first upstream call.
         try {
           result = await this.submit(
             item.articleUrl!,
@@ -1230,7 +1385,7 @@ export class Wechat2RssSubscriptionBatches {
         )
           ? 'running'
           : 'completed';
-      await this.write(current);
+      await this.write(current, 'receipt', item.index);
     } finally {
       if (release) await release();
       this.busy = false;
@@ -1240,6 +1395,12 @@ export class Wechat2RssSubscriptionBatches {
           (b) =>
             ['queued', 'running'].includes(b.state) ||
             automaticRecovery(b) ||
+            (this.restrictionCheck &&
+              b.items.some(
+                (i) =>
+                  i.sharedRestriction === true &&
+                  i.restrictionKind === 'rate-limit',
+              )) ||
             (this.reconcile &&
               isRefresh(b) &&
               b.items.some((item) => item.submissionUnknown)) ||
@@ -1255,12 +1416,31 @@ export class Wechat2RssSubscriptionBatches {
     }
   }
   private async runRefresh(b: Batch) {
+    if (this.stopped) return false;
     let changed = false;
-    const unknown = b.items.find((i) => i.state === 'submitting');
-    if (unknown) {
-      unknown.state = unknown.accepted === true ? 'waiting' : 'blocked';
-      unknown.submissionUnknown = unknown.accepted !== true;
-      unknown.message = '本号提交回执未确认；其他订阅继续，本号不会自动重发。';
+    const unknowns = b.items.filter((i) => i.state === 'submitting');
+    // Interrupted claims may be recorded as unknown after stop, never resumed.
+    if (b.state === 'stopped' && unknowns.length) {
+      for (const interrupted of unknowns) {
+        const latest = await this.read(b.batchId);
+        if (!latest) return true;
+        const target = latest.items[interrupted.index];
+        if (target.state !== 'submitting') continue;
+        target.state = target.accepted === true ? 'waiting' : 'blocked';
+        target.submissionUnknown = target.accepted !== true;
+        target.message = '中断提交回执未知；保持停止，不重新提交。';
+        await this.write(latest, 'receipt', target.index);
+        Object.assign(b, latest);
+      }
+      return true;
+    }
+    if (unknowns.length) {
+      for (const unknown of unknowns) {
+        unknown.state = unknown.accepted === true ? 'waiting' : 'blocked';
+        unknown.submissionUnknown = unknown.accepted !== true;
+        unknown.message =
+          '本号提交回执未确认；其他订阅继续，本号不会自动重发。';
+      }
       if (b.state !== 'stopped')
         b.state = b.items.some((item) =>
           ['queued', 'waiting'].includes(item.state),
@@ -1300,6 +1480,7 @@ export class Wechat2RssSubscriptionBatches {
       }
     }
     const maySubmit =
+      !b.items.some((i) => i.sharedRestriction === true) &&
       !b.cacheOnly &&
       (b.purpose !== 'scheduled-refresh' ||
         (activeRefreshScheduleEnabled(process.env) &&
@@ -1370,7 +1551,7 @@ export class Wechat2RssSubscriptionBatches {
       item.state = 'submitting';
       b.state = 'running';
       b.nextSubmissionAt = this.now() + 30000;
-      await this.write(b); // Reserve exactly once before an /add can leave the process.
+      if (!(await this.write(b))) return true; // Reserve exactly once before an /add can leave the process.
       // Persistence itself can cross the deadline. No callback has run yet,
       // so this process can safely terminate the claim without a platform call.
       const expiredAfterWrite = claimExhaustion(true);
@@ -1481,7 +1662,7 @@ export class Wechat2RssSubscriptionBatches {
               )
             ? 'running'
             : 'completed';
-    await this.write(current);
+    await this.write(current, 'receipt', item.index);
     if (target.state === 'succeeded' && target.accepted)
       await this.coverPreparation(await this.records());
     return true;

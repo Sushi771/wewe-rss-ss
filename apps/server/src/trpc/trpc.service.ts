@@ -736,6 +736,10 @@ export class TrpcService {
     this.subscriptionBatches.attachRefresh((id, stage, automatic, options) =>
       this.runManualRefresh(id, stage, automatic, options),
     );
+    this.subscriptionBatches.attachRestrictionCheck(async () => {
+      const account = await wechat2RssProvider().checkAccountStatus();
+      return account.available && !account.challenged;
+    });
     this.subscriptionBatches.attachReconciliation((id, createdAt) =>
       this.reconcileUnreservedRefresh(id, createdAt),
     );
