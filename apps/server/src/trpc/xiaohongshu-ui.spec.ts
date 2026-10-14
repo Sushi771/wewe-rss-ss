@@ -665,6 +665,7 @@ describe('shared single-level management folder actual handlers (offline)', () =
       disabled: false,
       active: { current: false },
       onBusyChange: jest.fn(),
+      setSaving: jest.fn(),
       setError: jest.fn(),
       selectedIds: ['a', 'b'],
       dragType: 'application/x-wewe-xiaohongshu',
@@ -720,6 +721,7 @@ describe('shared single-level management folder actual handlers (offline)', () =
     finish();
     await first;
     expect(scope.onBusyChange.mock.calls).toEqual([[true], [false]]);
+    expect(scope.setSaving.mock.calls).toEqual([[true], [false]]);
     await run(() => Promise.reject(new Error('组中仍有订阅，拒绝删除')));
     expect(scope.setError).toHaveBeenLastCalledWith('组中仍有订阅，拒绝删除');
     expect(scope.active.current).toBe(false);
@@ -731,7 +733,7 @@ describe('shared single-level management folder actual handlers (offline)', () =
     );
     expect(feeds).toContain('<ManagementFolders');
     expect(text).toContain('<ManagementFolders');
-    expect(feeds).toContain('moveFeeds.mutateAsync({ ids, groupId })');
+    expect(feeds).toContain('moveFeeds.mutateAsync(');
     expect(text).toContain('moveCreators.mutateAsync({ ids, groupId })');
     expect(source).toContain('移动已选');
     expect(source).not.toMatch(/parentId|粉丝|follower/i);

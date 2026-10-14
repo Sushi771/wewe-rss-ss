@@ -36,7 +36,7 @@ const page = (body: string | null = null, index = 1): ProviderPage => ({
   coverage: 'recent-window',
   upstreamCount: 1,
 });
-function setup(count = 1, mediaEnabled?: () => boolean) {
+function setup(count = 1, mediaEnabled?: () => boolean, syncText?: jest.Mock) {
   let now = start;
   const list = jest
     .fn()
@@ -59,6 +59,7 @@ function setup(count = 1, mediaEnabled?: () => boolean) {
     read,
     sync,
     mediaEnabled,
+    syncText,
   });
   cacheSyncState.signal = 'metadata';
   return {
@@ -72,7 +73,110 @@ function setup(count = 1, mediaEnabled?: () => boolean) {
     },
   };
 }
+const drainMedia = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+};
+async function reconciledFixture() {
+  let mediaEnabled = true;
+  const syncText = jest.fn().mockResolvedValue({ mediaReady: true });
+  const inspect = jest.fn().mockResolvedValue({ mediaReady: false });
+  const f = setup(1, () => mediaEnabled, syncText);
+  (f.engine as any).deps.inspectLocalMedia = inspect;
+  f.read.mockResolvedValue(page('<p>unchanged provider text</p>'));
+  f.sync.mockResolvedValue({
+    bodyMissing: 0,
+    imageBlocked: 0,
+    localMediaPendingArticleCount: 0,
+  });
+  await f.engine.tick();
+  await drainMedia();
+  expect(cacheSyncState.feeds[0].state).toBe('synced-cache');
+  f.sync.mockClear();
+  syncText.mockClear();
+  f.time(60000);
+  return {
+    ...f,
+    syncText,
+    inspect,
+    pauseMedia: () => {
+      mediaEnabled = false;
+    },
+  };
+}
+describe('fresh unchanged-page text reconciliation', () => {
+  it('uses one current text result for a healthy page without ingesting the list or archiving media', async () => {
+    const f = await reconciledFixture();
+    const revision = cacheRevision();
+    await f.engine.tick();
+    await drainMedia();
+    expect(f.syncText).toHaveBeenCalledTimes(1);
+    expect(f.inspect).not.toHaveBeenCalled();
+    expect(f.sync).not.toHaveBeenCalled();
+    expect(cacheSyncState.feeds[0].state).toBe('synced-cache');
+    expect(cacheRevision()).toEqual(revision);
+    f.engine.close();
+  });
+  it.each([
+    ['local media changed', { mediaReady: false }],
+    ['body remains missing', { mediaReady: false, bodyMissing: 1 }],
+    ['readiness omitted', {}],
+    ['result unavailable', undefined],
+  ])(
+    'keeps %s pending using this tick rather than the previous complete result',
+    async (_name, result) => {
+      const f = await reconciledFixture();
+      f.pauseMedia();
+      f.syncText.mockResolvedValue(result);
+      await f.engine.tick();
+      expect(f.syncText).toHaveBeenCalledTimes(1);
+      expect(f.inspect).not.toHaveBeenCalled();
+      expect(f.sync).not.toHaveBeenCalled();
+      expect(cacheSyncState.feeds[0].state).toBe('media-pending');
+      f.engine.close();
+    },
+  );
+  it('retains failure and retries fresh text reconciliation before declaring readiness', async () => {
+    const f = await reconciledFixture();
+    f.syncText.mockRejectedValueOnce(Error('OFFLINE_TEXT_FAILURE'));
+    await f.engine.tick();
+    expect(cacheSyncState.feeds[0].state).toBe('unavailable');
+    expect(f.sync).not.toHaveBeenCalled();
+    f.time(69000);
+    await f.engine.tick();
+    expect(f.syncText).toHaveBeenCalledTimes(1);
+    f.time(70000);
+    await f.engine.tick();
+    expect(f.syncText).toHaveBeenCalledTimes(2);
+    expect(f.inspect).not.toHaveBeenCalled();
+    expect(cacheSyncState.feeds[0].state).toBe('synced-cache');
+    f.engine.close();
+  });
+  it('continues full list/text reconciliation when the provider body or media changes', async () => {
+    const f = await reconciledFixture();
+    f.pauseMedia();
+    f.read.mockResolvedValue(
+      page('<p>new body</p><img src="https://fixture.invalid/image">'),
+    );
+    await f.engine.tick();
+    expect(f.sync.mock.calls.map((args) => args[2])).toEqual([true]);
+    expect(f.syncText).toHaveBeenCalledTimes(1);
+    expect(cacheSyncState.feeds[0].state).toBe('media-pending');
+    f.engine.close();
+  });
+});
 describe('existing-cache synchronization', () => {
+  it('saves text while CDN media is disabled, without invoking the media lane', async () => {
+    const syncText = jest.fn().mockResolvedValue({ bodyMissing: 0 });
+    const f = setup(1, () => false, syncText);
+    f.read.mockResolvedValue(page('<p>cached text</p>'));
+    await f.engine.tick();
+    expect(syncText).toHaveBeenCalledWith(
+      ids[0],
+      expect.objectContaining({ bodyMissing: 0 }),
+    );
+    expect(f.sync.mock.calls.every((call) => call[2] === true)).toBe(true);
+    f.engine.close();
+  });
   it('pauses media without losing list imports or the pending media snapshot', async () => {
     let enabled = false;
     const f = setup(1, () => enabled);
