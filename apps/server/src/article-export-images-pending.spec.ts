@@ -32,6 +32,31 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
     await rm(folder, { recursive: true, force: true });
   });
 
+  it('keeps many source-less slots unknown, retains actual bytes and omits empty statistics', async () => {
+    const fetcher = jest.fn();
+    const exported = await buildArticleMarkdown(
+      {
+        ...article,
+        lastBodyStatus: 'available',
+        contentHtml: `<div id="js_content"><p>可靠正文</p>${'<img>'.repeat(210)}<img src="data:image/png;base64,${png.toString('base64')}"></div>`,
+      },
+      '',
+      folder,
+      fetcher,
+      'image',
+    );
+    expect(exported.mediaComplete).toBe(false);
+    expect(exported.markdown).toContain('媒体完整性未确认');
+    expect(exported.markdown).toContain('可靠正文');
+    expect(exported.markdown).not.toMatch(
+      /丢失210|缺失210|指标来源|\| 指标 \|/,
+    );
+    const files = await readdir(join(folder, 'image'));
+    expect(files).toHaveLength(1);
+    expect(await readFile(join(folder, 'image', files[0]))).toEqual(png);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it.each(['available', 'unavailable'])(
     'detects lost image sources in cached and cleaned bodies with %s history',
     async (status) => {
