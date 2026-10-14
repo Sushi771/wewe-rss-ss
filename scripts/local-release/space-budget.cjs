@@ -34,19 +34,21 @@ function legacyRoots() {
     roots.some((value) => typeof value !== 'string' || !path.isAbsolute(value))
   )
     throw new Error('Invalid SQLITE_PRODUCTION_LEGACY_ROOTS');
-  return roots.map((value) => canonical(value));
+  return [...new Set(roots.map((value) => fs.realpathSync.native(value)))];
 }
 function usage(root) {
   let bytes = 0,
     databases = 0;
   const allowed = legacyRoots(),
     visited = new Set(),
+    active = new Set(),
     files = new Set();
   function visit(directory) {
     const target = fs.realpathSync.native(directory);
-    if (visited.has(target))
-      throw new Error('Nested or repeated backup directory refused');
+    if (active.has(target)) throw new Error('Cyclic backup directory refused');
+    if (visited.has(target)) return;
     visited.add(target);
+    active.add(target);
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const file = path.join(directory, entry.name);
       if (entry.isSymbolicLink()) {
@@ -69,8 +71,10 @@ function usage(root) {
         if (/\.(db|sqlite|sqlite3)$/i.test(file)) databases++;
       }
     }
+    active.delete(target);
   }
   if (fs.existsSync(root)) visit(root);
+  for (const folder of allowed) if (!visited.has(folder)) visit(folder);
   return { bytes, databases };
 }
 function estimate(database) {
@@ -87,6 +91,11 @@ function preflight(root, bytes, copies = 1, database) {
   root = canonical(root);
   if (database && inside(root, canonical(database)))
     throw new Error('Nested source/destination refused');
+  if (
+    database &&
+    legacyRoots().some((folder) => inside(folder, canonical(database)))
+  )
+    throw new Error('Source inside legacy backup root refused');
   let parent = root;
   while (!fs.existsSync(parent)) parent = path.dirname(parent);
   const test = process.env.SQLITE_BACKUP_KIND === 'test';

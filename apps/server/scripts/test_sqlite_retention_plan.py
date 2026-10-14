@@ -192,6 +192,35 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(self.plan()['payload']['summary']['existingCopies'],3)
             self.link(legacy/'cycle',legacy)
             with self.assertRaisesRegex(retention.MaintenanceError,'CYCLIC'):self.plan()
+    def move_old_to_legacy(self):
+        legacy=self.folder/'legacy';legacy.mkdir();directory=legacy/'old-point';self.old.parent.rename(directory)
+        self.old=directory/'synthetic.db'
+        receipt=directory/'verification.json';r=json.loads(receipt.read_text());r['backup']=str(self.old);receipt.write_text(json.dumps(r))
+        return legacy
+    def test_each_declared_legacy_owner_and_latest_protects_its_point(self):
+        legacy=self.move_old_to_legacy()
+        with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
+            for name in ('snapshot-owner-synthetic.json','.latest-synthetic.json'):
+                reference=legacy/name;reference.write_text(json.dumps({'backup':str(self.old),'source':str(self.source)}))
+                plan=self.plan();self.assertIn(str(self.old),plan['payload']['protected'])
+                self.assertFalse(plan['payload']['candidates']);self.assertFalse(self.validate(plan)['validated'])
+                reference.unlink()  # This synthetic fixture's reference only.
+    def test_new_or_changed_legacy_reference_invalidates_action_time_approval(self):
+        legacy=self.move_old_to_legacy()
+        with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
+            for name in ('snapshot-owner-synthetic.json','.latest-synthetic.json'):
+                reference=legacy/name
+                plan=self.plan();self.assertEqual(len(plan['payload']['candidates']),1)
+                reference.write_text(json.dumps({'backup':str(self.old)}))
+                with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):self.validate(plan)
+                reference.write_text(json.dumps({'backup':str(self.keep)}))
+                plan=self.plan();reference.write_text(json.dumps({'backup':str(self.old)}))
+                with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):self.validate(plan)
+                reference.unlink()
+    def test_declared_root_set_change_invalidates_action_time_approval(self):
+        legacy=self.folder/'extra-root';legacy.mkdir();plan=self.plan()
+        with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
+            with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):self.validate(plan)
     @unittest.skipUnless(os.name=='nt' and shutil.which('pwsh'),'Windows RestartManager helper')
     def test_real_windows_resource_helper_and_cli_only_validate_synthetic_batch(self):
         plan=self.plan();batch=self.folder/'batch.json';batch.write_bytes(retention.canonical_json(plan))

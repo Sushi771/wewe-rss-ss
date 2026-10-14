@@ -107,10 +107,11 @@ def files_and_refs(root, budget, protected_paths=()):
     state = root / '.retention-review'
     data_files = [p for p in files if p.suffix.lower() in ('.db', '.sqlite', '.sqlite3')]
     refs = {str(local_path(p)): 'explicit deployment/migration/identity protection' for p in protected_paths}
-    reference_records = []
+    reference_roots={root.resolve(),*backup.legacy_roots()}
+    reference_records = [{'declaredRoots':sorted(str(p) for p in reference_roots)}]
     for p in files:
         budget.tick()
-        if p.parent == root and (p.name.startswith('snapshot-owner-') or p.name.startswith('.latest-')) and p.suffix == '.json':
+        if p.parent in reference_roots and (p.name.startswith('snapshot-owner-') or p.name.startswith('.latest-')) and p.suffix.lower() == '.json':
             r = budget.json(p)
             target = local_path(r.get('backup'))
             refs[str(target)] = 'current owner/latest receipt'

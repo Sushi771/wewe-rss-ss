@@ -295,6 +295,134 @@ test('only explicit production legacy roots are counted through migration juncti
   assert.throws(() => budget.usage(root), /LAYOUT_REQUIRES_REVIEW/);
 });
 
+function pythonLegacyUsage(root) {
+  const script = [
+    'import importlib.util,json,sys',
+    'from pathlib import Path',
+    's=importlib.util.spec_from_file_location("backup",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)',
+    'files=m.managed_files(Path(sys.argv[2]))',
+    'print(json.dumps({"bytes":sum(p.stat().st_size for p in files),"databases":sum(p.suffix.lower() in (".db",".sqlite",".sqlite3") for p in files)}))',
+  ].join('\n');
+  return JSON.parse(
+    execFileSync(
+      'python',
+      [
+        '-c',
+        script,
+        path.resolve(__dirname, '../../apps/server/scripts/backup-sqlite.py'),
+        root,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+      },
+    ),
+  );
+}
+function pythonLegacyAdmission(root, database) {
+  const script = [
+    'import importlib.util,json,sys',
+    'from pathlib import Path',
+    's=importlib.util.spec_from_file_location("backup",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)',
+    'try:',
+    ' m.space_preflight(Path(sys.argv[3]),Path(sys.argv[2]));print(json.dumps({"allowed":True}))',
+    'except ValueError as e: print(json.dumps({"allowed":False,"reason":str(e)}))',
+  ].join('\n');
+  return JSON.parse(
+    execFileSync(
+      'python',
+      [
+        '-c',
+        script,
+        path.resolve(__dirname, '../../apps/server/scripts/backup-sqlite.py'),
+        root,
+        database,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+      },
+    ),
+  );
+}
+test('Node and Python count unlinked physical history and reject the same small byte budget', (t) => {
+  const fixtureRoot = fixture(t),
+    legacy = fixture(t),
+    root = path.join(fixtureRoot, 'not-created');
+  const database = path.join(fixtureRoot, 'source.db'),
+    history = path.join(legacy, 'recovery.db');
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(database);
+  db.exec('CREATE TABLE probe(id INTEGER PRIMARY KEY, value TEXT)');
+  db.close();
+  fs.copyFileSync(database, history);
+  const reserve = budget.estimate(database);
+  env(t, {
+    SQLITE_BACKUP_KIND: 'production',
+    SQLITE_PRODUCTION_LEGACY_ROOTS: JSON.stringify([legacy, legacy]),
+    SQLITE_PRODUCTION_MAX_BYTES: String(reserve + 1000),
+    SQLITE_PRODUCTION_MIN_FREE_BYTES: '1',
+  });
+  const counted = budget.usage(root);
+  assert.equal(counted.bytes, 8192);
+  assert.equal(counted.databases, 1);
+  assert.deepEqual(pythonLegacyUsage(root), counted);
+  assert.throws(
+    () => budget.preflight(root, reserve, 1, database),
+    /SPACE_BUDGET_EXCEEDED/,
+  );
+  const python = pythonLegacyAdmission(root, database);
+  assert.equal(python.allowed, false);
+  assert.match(python.reason, /SPACE_BUDGET_EXCEEDED/);
+  assert(!fs.existsSync(root));
+  assert.equal(fs.statSync(history).size, 8192);
+});
+test('Node and Python both refuse a source inside a declared physical legacy root', (t) => {
+  const legacy = fixture(t),
+    parent = fixture(t),
+    root = path.join(parent, 'not-created'),
+    database = path.join(legacy, 'live.db');
+  fs.writeFileSync(database, Buffer.alloc(8192));
+  env(t, {
+    SQLITE_BACKUP_KIND: 'production',
+    SQLITE_PRODUCTION_LEGACY_ROOTS: JSON.stringify([legacy]),
+  });
+  assert.throws(
+    () => budget.preflight(root, budget.estimate(database), 1, database),
+    /Source inside legacy/,
+  );
+  const python = pythonLegacyAdmission(root, database);
+  assert.equal(python.allowed, false);
+  assert.match(python.reason, /Source inside legacy/);
+  assert(!fs.existsSync(root));
+});
+test('Node and Python deduplicate declared aliases and still reject real cycles', (t) => {
+  const root = fixture(t),
+    legacy = fixture(t),
+    point = path.join(legacy, 'point');
+  fs.mkdirSync(point);
+  fs.writeFileSync(path.join(point, 'unique.db'), Buffer.alloc(8192));
+  for (const name of ['one', 'two'])
+    fs.symlinkSync(
+      point,
+      path.join(root, name),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+  env(t, {
+    SQLITE_BACKUP_KIND: 'production',
+    SQLITE_PRODUCTION_LEGACY_ROOTS: JSON.stringify([legacy, legacy]),
+  });
+  assert.deepEqual(budget.usage(root), { bytes: 8192, databases: 1 });
+  assert.deepEqual(pythonLegacyUsage(root), budget.usage(root));
+  fs.symlinkSync(
+    legacy,
+    path.join(legacy, 'cycle'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  assert.throws(() => budget.usage(root), /Cyclic/);
+  assert.throws(() => pythonLegacyUsage(root), /Cyclic/);
+});
+
 test('finite production defaults and half-full/under-one-day warnings agree with read-only Python status', (t) => {
   const root = fixture(t),
     database = path.join(root, 'source.db'),
