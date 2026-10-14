@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import axios from 'axios';
 import { TrpcRouter } from './trpc.router';
@@ -229,15 +229,17 @@ describe('all cached article local/ZIP export entry points share isolated image 
       const one = await caller.article.saveToObsidian(items[0].id);
       expect(one).toMatchObject({ success: false, mediaComplete: false });
       expect(await fs.readFile(one.path, 'utf8')).toContain('媒体完整性未确认');
-      expect(
-        await router.buildOfflineFeedDirectory(
-          feed.id,
-          join(root, 'no-source-zip'),
-        ),
-      ).toMatchObject({
-        complete: 1,
-        incomplete: [items[0].title],
-      });
+      const zip = join(root, 'no-source-zip');
+      const batch = await router.buildOfflineFeedDirectory(feed.id, zip);
+      expect(batch).toMatchObject({ complete: 1 });
+      expect(batch?.incomplete).toHaveLength(1);
+      if (!batch) throw new Error('Expected publisher batch');
+      const relative = batch.incomplete[0];
+      expect(basename(relative)).toBe(`${items[0].title}.md`);
+      expect(isAbsolute(relative)).toBe(false);
+      expect(await fs.readFile(join(zip, relative), 'utf8')).toContain(
+        '媒体完整性未确认',
+      );
       expect(fetch).not.toHaveBeenCalled();
       expect(axios.get).not.toHaveBeenCalled();
     },
