@@ -221,6 +221,11 @@ class RetentionTests(unittest.TestCase):
         legacy=self.folder/'extra-root';legacy.mkdir();plan=self.plan()
         with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
             with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):self.validate(plan)
+    def test_active_refresh_boundary_is_protected_and_new_boundary_invalidates_approval(self):
+        reference=self.root/'refresh-recovery-owner-synthetic.json'
+        plan=self.plan();reference.write_text(json.dumps({'backup':str(self.old),'source':str(self.source)}))
+        self.assertIn(str(self.old),self.plan()['payload']['protected'])
+        with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):self.validate(plan)
     @unittest.skipUnless(os.name=='nt' and shutil.which('pwsh'),'Windows RestartManager helper')
     def test_real_windows_resource_helper_and_cli_only_validate_synthetic_batch(self):
         plan=self.plan();batch=self.folder/'batch.json';batch.write_bytes(retention.canonical_json(plan))

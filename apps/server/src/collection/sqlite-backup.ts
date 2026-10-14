@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { sqliteWrites } from './sqlite-write-coordinator';
 import { resolveSqliteBackupRoot } from './sqlite-backup-root';
+import { refreshRecovery } from './sqlite-refresh-recovery';
 
 // A kill request is not an exit receipt. Keep a failed-to-stop child fenced
 // until its close event, including after the bounded caller wait has expired.
@@ -128,6 +129,7 @@ export async function createVerifiedSqliteBackup(
             windowsHide: true,
             shell: false,
             stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
           },
         );
       } catch {
@@ -250,28 +252,34 @@ export async function createVerifiedSqliteBackup(
     });
   // Python revalidates all schema and typed rows on every reuse. File identity
   // and header-only process caches cannot authorize skipping that proof.
-  return sqliteWrites.snapshot(async () => {
-    const output = await execute();
-    let report: {
-      integrityCheck?: string;
-      source?: string;
-      backup?: string;
-      sha256?: string;
-    };
-    try {
-      report = JSON.parse(output);
-    } catch {
-      throw new Error('SQLite 备份验证报告无效，本次未写入');
-    }
-    if (
-      !report ||
-      report.integrityCheck !== 'ok' ||
-      typeof report.backup !== 'string' ||
-      !report.backup ||
-      typeof report.sha256 !== 'string' ||
-      !/^[a-f0-9]{64}$/.test(report.sha256)
-    )
-      throw new Error('SQLite 备份验证失败，本次未写入');
-    return { ...report, backup: report.backup, sha256: report.sha256 };
-  });
+  if (sqliteWrites.hasWriteAdmission())
+    throw new Error(
+      'Cannot establish a recovery snapshot inside an admitted write',
+    );
+  return refreshRecovery.snapshot(database, backupRoot, () =>
+    sqliteWrites.snapshot(async () => {
+      const output = await execute();
+      let report: {
+        integrityCheck?: string;
+        source?: string;
+        backup?: string;
+        sha256?: string;
+      };
+      try {
+        report = JSON.parse(output);
+      } catch {
+        throw new Error('SQLite 备份验证报告无效，本次未写入');
+      }
+      if (
+        !report ||
+        report.integrityCheck !== 'ok' ||
+        typeof report.backup !== 'string' ||
+        !report.backup ||
+        typeof report.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(report.sha256)
+      )
+        throw new Error('SQLite 备份验证失败，本次未写入');
+      return { ...report, backup: report.backup, sha256: report.sha256 };
+    }),
+  );
 }

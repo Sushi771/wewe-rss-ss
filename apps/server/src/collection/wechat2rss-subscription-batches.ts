@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { subscriptionArticleUrl } from './subscription-add';
 import { batchStorageLock } from './batch-storage-lock';
+import { refreshRecovery } from './sqlite-refresh-recovery';
 import {
   activeRefreshScheduleEnabled,
   automaticSubmissionAllowed,
@@ -1603,11 +1604,19 @@ export class Wechat2RssSubscriptionBatches {
     }
     let result: BatchOutcome;
     try {
-      result = b.cacheOnly
-        ? await this.refresh(item.feedId!, 'cache', false, { cacheOnly: true })
-        : b.purpose === 'scheduled-refresh'
-          ? await this.refresh(item.feedId!, stage, true)
-          : await this.refresh(item.feedId!, stage);
+      result = await refreshRecovery.run(
+        b.batchId,
+        b.items.map((i) => i.feedId!).filter(Boolean),
+        item.feedId!,
+        async () =>
+          b.cacheOnly
+            ? await this.refresh!(item.feedId!, 'cache', false, {
+                cacheOnly: true,
+              })
+            : b.purpose === 'scheduled-refresh'
+              ? await this.refresh!(item.feedId!, stage, true)
+              : await this.refresh!(item.feedId!, stage),
+      );
     } catch (error) {
       const local =
         stage === 'cache' &&
@@ -1702,7 +1711,12 @@ export class Wechat2RssSubscriptionBatches {
         if (!(await this.write(current))) break;
         let job: PreparedRefresh;
         try {
-          job = await this.prepareRefresh!(item.feedId!, automatic, waveKey);
+          job = await refreshRecovery.run(
+            b.batchId,
+            b.items.map((i) => i.feedId!).filter(Boolean),
+            item.feedId!,
+            () => this.prepareRefresh!(item.feedId!, automatic, waveKey),
+          );
         } catch {
           job = {
             outcome: {
@@ -1973,6 +1987,8 @@ export class Wechat2RssSubscriptionBatches {
             ? 'running'
             : 'completed';
     await this.write(current, 'receipt', item.index);
+    if (['completed', 'stopped'].includes(current.state))
+      await refreshRecovery.close(current.batchId);
     if (target.state === 'succeeded' && target.accepted)
       await this.coverPreparation(await this.records());
     return true;

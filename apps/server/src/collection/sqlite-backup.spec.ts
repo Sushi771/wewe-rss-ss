@@ -135,7 +135,7 @@ describe('SQLite backup gate (synthetic children and mocked filesystem)', () => 
       });
       await waitForSpawn();
       expect(completed).toBe(false);
-      expect(start.mock.calls[0]).toEqual([
+      expect(start.mock.calls[0].slice(0, 2)).toEqual([
         command,
         [
           path.join(process.cwd(), 'scripts', 'backup-sqlite.py'),
@@ -144,8 +144,14 @@ describe('SQLite backup gate (synthetic children and mocked filesystem)', () => 
           '--backup-root',
           path.join(path.dirname(database), 'backups'),
         ],
-        { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] },
       ]);
+      const { env, ...spawnOptions } = start.mock.calls[0][2]!;
+      expect(spawnOptions).toEqual({
+        windowsHide: true,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      expect(env?.PYTHONDONTWRITEBYTECODE).toBe('1');
       child.stdout.write(JSON.stringify(report));
       await Promise.resolve();
       expect(completed).toBe(false);

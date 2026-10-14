@@ -30,6 +30,10 @@ export class SqliteWriteCoordinator {
     this.drain();
   }
 
+  hasWriteAdmission() {
+    return this.context.getStore()?.active === true;
+  }
+
   private acquire(kind: Kind): Promise<() => void> {
     if (this.queue.length >= this.maxQueued)
       return Promise.reject(
