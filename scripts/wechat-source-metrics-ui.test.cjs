@@ -32,7 +32,7 @@ const failedRetry = {
   message: '原文请求失败；缓存保留。',
   requestFailure: { reason: 'http_status', httpStatus: 302 },
 };
-test('actual list rendering shows cache availability and dated failure history after cache fill or reload', () => {
+test('actual list rendering shows current availability and keeps retry history out of row UI after reload', () => {
   const item = {
     ...article('paid', 'wechat2rss'),
     bodyRetryResult: failedRetry,
@@ -40,9 +40,9 @@ test('actual list rendering shows cache availability and dated failure history a
   for (const row of [item, JSON.parse(JSON.stringify(item))]) {
     const view = fixture({ items: [row] }).render();
     assert.match(view.text, /正文已缓存，可阅读/);
-    assert.match(
-      view.text,
-      /上次原文重试：失败.*HTTP 302 跳转，未跟随.*当前缓存仍可阅读/,
+    assert.doesNotMatch(
+      JSON.stringify(view.nodes),
+      /上次原文重试|HTTP 302|原文请求失败|1700000000/,
     );
     assert(
       !view.nodes.some((node) =>
@@ -51,7 +51,7 @@ test('actual list rendering shows cache availability and dated failure history a
     );
   }
 });
-test('actual list rendering keeps missing-cache failures retryable and reports later success honestly', () => {
+test('actual list rendering keeps missing-cache actions available and hides historical success and failure', () => {
   const item = {
     ...article('paid', 'wechat2rss'),
     bodyCached: false,
@@ -59,7 +59,8 @@ test('actual list rendering keeps missing-cache failures retryable and reports l
     bodyRetry: { allowed: true, reason: '' },
   };
   const missing = fixture({ items: [item] }).render();
-  assert.match(missing.text, /正文未缓存.*上次原文重试：失败/);
+  assert.match(missing.text, /正文未缓存/);
+  assert.doesNotMatch(missing.text, /上次原文重试|HTTP 302/);
   assert(
     missing.nodes.some(
       (node) =>
@@ -76,11 +77,31 @@ test('actual list rendering keeps missing-cache failures retryable and reports l
       },
     ],
   }).render();
-  assert.match(
-    ready.text,
-    /正文已缓存，可阅读.*上次原文重试：成功，已补入正文/,
-  );
-  assert.doesNotMatch(ready.text, /上次原文重试：失败/);
+  assert.match(ready.text, /正文已缓存，可阅读/);
+  assert.doesNotMatch(ready.text, /上次原文重试|已补入正文|HTTP 302/);
+});
+test('current failed user retry gives a concise toast without publishing audit details into the row', async () => {
+  const item = {
+    ...article('paid', 'wechat2rss'),
+    bodyCached: false,
+    bodyRetryResult: failedRetry,
+    bodyRetry: { allowed: true, reason: '' },
+  };
+  const before = JSON.stringify(item);
+  const current = fixture({
+    items: [item],
+    retryResult: { ...failedRetry, message: 'HTTP 302 Cookie=SECRET' },
+  });
+  const button = current
+    .render()
+    .nodes.find((node) => node.props['aria-label']?.startsWith('重试正文：'));
+  await button.props.onPress();
+  assert.equal(current.toasts.length, 1);
+  assert.equal(current.toasts[0].kind, 'error');
+  assert.match(current.toasts[0].message, /正文重试失败/);
+  assert.doesNotMatch(current.toasts[0].message, /HTTP|Cookie|SECRET/);
+  assert.doesNotMatch(current.render().text, /上次原文重试|HTTP/);
+  assert.equal(JSON.stringify(item), before);
 });
 function fixture({
   mpId = 'paid',
@@ -88,7 +109,9 @@ function fixture({
   channels = { paid: 'wechat2rss', native: 'owner-weread-latest' },
   readAvailable = 1,
   likeAvailable = 1,
+  retryResult = { status: 'available' },
 } = {}) {
+  const toasts = [];
   const state = [],
     params = { id: mpId };
   let cursor = 0,
@@ -112,10 +135,21 @@ function fixture({
     useLayoutEffect() {},
   };
   const trpc = {
-    useUtils: () => ({}),
+    useUtils: () => ({
+      article: {
+        list: { invalidate: async () => {} },
+        summary: { invalidate: async () => {} },
+        byId: { invalidate: async () => {} },
+      },
+    }),
     article: {
       byId: { useQuery: () => ({}) },
-      retryBody: { useMutation: () => ({ isLoading: false }) },
+      retryBody: {
+        useMutation: () => ({
+          isLoading: false,
+          mutateAsync: async () => retryResult,
+        }),
+      },
       summary: {
         useQuery: () => ({
           data: {
@@ -166,7 +200,14 @@ function fixture({
     },
     'react-router-dom': { useParams: () => params },
     dayjs: { default: () => ({ format: () => '合成日期' }) },
-    sonner: { toast: {} },
+    sonner: {
+      toast: Object.fromEntries(
+        ['success', 'error', 'warning'].map((kind) => [
+          kind,
+          (message) => toasts.push({ kind, message }),
+        ]),
+      ),
+    },
   };
   const module = { exports: {} };
   const source = ts.transpileModule(
@@ -231,6 +272,7 @@ function fixture({
   }
   return {
     render,
+    toasts,
     params,
     get query() {
       return query;

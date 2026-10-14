@@ -12,7 +12,6 @@ import { trpc } from '@web/utils/trpc';
 import { ArticleSort } from '@web/utils/feed-browse-state';
 import { useArticleListPosition } from '@web/utils/use-article-list-position';
 import { getLoadedSelection } from '@web/utils/feed-selection';
-import dayjs from 'dayjs';
 import { articleBodyState } from '@web/utils/article-body-state';
 import ArticleReader from '@web/components/ArticleReader';
 import { useParams } from 'react-router-dom';
@@ -268,11 +267,7 @@ const ArticleList: FC<ArticleListProps> = ({
               key={item.id}
               data-article-id={item.id}
               className={`compact-row article-row ${
-                item.bodyCached &&
-                !item.bodyRetryResult &&
-                item.lastBodyStatus !== 'unavailable'
-                  ? 'article-row-ready'
-                  : ''
+                item.bodyCached ? 'article-row-ready' : ''
               } !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center`}
             >
               <div className="compact-col-check">
@@ -316,12 +311,7 @@ const ArticleList: FC<ArticleListProps> = ({
                   className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
-                  <span>
-                    {
-                      articleBodyState(item.bodyCached, item.bodyRetryResult)
-                        .current
-                    }
-                  </span>
+                  <span>{articleBodyState(item.bodyCached).current}</span>
                   {!item.bodyCached && (
                     <Button
                       size="sm"
@@ -347,21 +337,6 @@ const ArticleList: FC<ArticleListProps> = ({
                 {!item.bodyCached && !item.bodyRetry.allowed && (
                   <span className="text-left text-xs md:text-right">
                     正文暂不可重试
-                  </span>
-                )}
-                {item.bodyRetryResult && (
-                  <span
-                    className="text-left text-xs md:text-right"
-                    title={`${dayjs(item.bodyRetryResult.attemptedAt * 1e3).format('YYYY-MM-DD HH:mm:ss')} ${item.bodyRetryResult.message}`}
-                  >
-                    {
-                      articleBodyState(item.bodyCached, item.bodyRetryResult)
-                        .history
-                    }
-                    {' · '}
-                    {dayjs(item.bodyRetryResult.attemptedAt * 1e3).format(
-                      'MM-DD HH:mm',
-                    )}
                   </span>
                 )}
                 {(collectionChannels[item.mpId] ||
