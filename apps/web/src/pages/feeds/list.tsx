@@ -13,6 +13,7 @@ import { ArticleSort } from '@web/utils/feed-browse-state';
 import { useArticleListPosition } from '@web/utils/use-article-list-position';
 import { getLoadedSelection } from '@web/utils/feed-selection';
 import dayjs from 'dayjs';
+import { articleBodyState } from '@web/utils/article-body-state';
 import ArticleReader from '@web/components/ArticleReader';
 import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -315,10 +316,13 @@ const ArticleList: FC<ArticleListProps> = ({
                   className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
-                  {!item.bodyCached && <span>正文未缓存</span>}
-                  {(!item.bodyCached ||
-                    item.lastBodyStatus === 'unavailable' ||
-                    item.bodyRetryResult?.status === 'failed') && (
+                  <span>
+                    {
+                      articleBodyState(item.bodyCached, item.bodyRetryResult)
+                        .current
+                    }
+                  </span>
+                  {!item.bodyCached && (
                     <Button
                       size="sm"
                       variant="light"
@@ -350,17 +354,14 @@ const ArticleList: FC<ArticleListProps> = ({
                     className="text-left text-xs md:text-right"
                     title={`${dayjs(item.bodyRetryResult.attemptedAt * 1e3).format('YYYY-MM-DD HH:mm:ss')} ${item.bodyRetryResult.message}`}
                   >
-                    最近重试：
-                    {item.bodyRetryResult.status === 'available'
-                      ? '正文可用'
-                      : item.bodyRetryResult.status === 'unavailable'
-                        ? '未取得正文'
-                        : '失败'}
-                    {item.bodyRetryResult.filled
-                      ? '，已补入正文'
-                      : item.bodyRetryResult.cached
-                        ? '，已有缓存保留'
-                        : ''}
+                    {
+                      articleBodyState(item.bodyCached, item.bodyRetryResult)
+                        .history
+                    }
+                    {' · '}
+                    {dayjs(item.bodyRetryResult.attemptedAt * 1e3).format(
+                      'MM-DD HH:mm',
+                    )}
                   </span>
                 )}
                 {(collectionChannels[item.mpId] ||

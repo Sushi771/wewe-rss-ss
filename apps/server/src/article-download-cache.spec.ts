@@ -91,7 +91,6 @@ describe('verified saved article download, no HTTP or database writes', () => {
       'embedded video without archived bytes',
       { contentHtml: '<div id="js_content"><p>正文</p><video></video></div>' },
     ],
-    ['unavailable body', { lastBodyStatus: 'unavailable' }],
     [
       'remote image',
       {
@@ -110,6 +109,42 @@ describe('verified saved article download, no HTTP or database writes', () => {
   ])('blocks %s without falling back to acquisition', async (_name, patch) => {
     await expect(
       findCachedDownloadArticle(db([{ ...row(), ...patch }]), url),
+    ).rejects.toMatchObject({
+      diagnostic: { code: 'CACHED_ARTICLE_UNAVAILABLE' },
+    });
+  });
+
+  it('retains usable downloads after a failed or unavailable upstream attempt and client reconstruction', async () => {
+    const article = {
+      ...row(),
+      lastBodyStatus: 'unavailable',
+      lastBodyRetry: JSON.stringify({
+        status: 'failed',
+        code: 'request_failed',
+        attemptedAt: 1700000000,
+        cached: true,
+        filled: false,
+      }),
+    };
+    const before = JSON.stringify(article);
+    expect(await findCachedDownloadArticle(db([article]), url)).toBe(article);
+    const reloaded = JSON.parse(before);
+    expect(await findCachedDownloadArticle(db([reloaded]), url)).toBe(reloaded);
+    const folder = await mkdtemp(join(tmpdir(), 'wewe-history-download-'));
+    try {
+      expect(await buildCachedArticleDownload(reloaded, folder)).toMatchObject({
+        articleId: article.id,
+        imageCount: 1,
+      });
+      expect(await readFile(join(folder, 'index.md'), 'utf8')).toContain(
+        '真实字段回归',
+      );
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+    expect(JSON.stringify(article)).toBe(before);
+    await expect(
+      findCachedDownloadArticle(db([{ ...article, contentHtml: null }]), url),
     ).rejects.toMatchObject({
       diagnostic: { code: 'CACHED_ARTICLE_UNAVAILABLE' },
     });
