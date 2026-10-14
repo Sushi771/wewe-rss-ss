@@ -50,6 +50,16 @@ After an asynchronous account check, coverage and preparation recovery share one
 fresh record snapshot. Recovery writes serialize per batch and recheck the latest
 stopped state before persistence, preserving cancellations and retry budgets.
 The compatible serial rollback worker applies the same protection.
+
+All writes to existing batches use this protection by default: restriction
+release/backoff, coverage, reconciliation, resume, cache-only recovery, expiry,
+restart recovery, claims and wave spacing. A rejected claim cannot submit.
+Only new-batch creation, explicit stop and genuine receipt persistence use
+special modes. Stop merges the latest record; a late receipt updates only its
+own item while keeping the stopped batch and unrelated cancellations.
+Restriction release reports false when persistence loses to a queued stop.
+Interrupted stopped claims are recorded one item at a time as unknown while
+retaining the stopped state and original preparation budgets; no request replays.
 Unknown generic network failures isolate the affected source rather than
 inventing an account-wide restriction.
 

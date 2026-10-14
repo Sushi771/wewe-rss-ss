@@ -337,8 +337,7 @@ export class Wechat2RssSubscriptionBatches {
     )
       ? 'running'
       : 'completed';
-    await this.write(b);
-    return true;
+    return this.write(b, true);
   }
 
   private reconcile?: (
@@ -544,24 +543,61 @@ export class Wechat2RssSubscriptionBatches {
       throw e;
     }
   }
-  private readonly batchWrites = new Map<string, Promise<void>>();
-  private async write(b: Batch, preserveStopped = false) {
-    const previous = this.batchWrites.get(b.batchId) || Promise.resolve();
+  private readonly batchWrites = new Map<string, Promise<boolean>>();
+  /** All existing-state writes honor stop at their serialized persistence boundary.
+   * Only creation, explicit stop, and a single genuine receipt have special modes. */
+  private async write(
+    b: Batch,
+    mode: boolean | 'receipt' | 'stop' = true,
+    receiptIndex?: number,
+  ) {
+    const persisted = JSON.parse(JSON.stringify(b)) as Batch;
+    const previous = this.batchWrites.get(b.batchId) || Promise.resolve(true);
     const pending = previous
-      .catch(() => {})
+      .catch(() => false)
       .then(async () => {
-        if (preserveStopped) {
-          const latest = await this.read(b.batchId);
-          if (!latest || latest.state === 'stopped') {
-            if (latest) Object.assign(b, latest);
-            return;
+        const latest = mode === false ? undefined : await this.read(b.batchId);
+        if (mode !== false && !latest) return false;
+        if (mode === 'stop') {
+          Object.assign(persisted, latest);
+          persisted.state = 'stopped';
+          for (const item of persisted.items)
+            if (item.state === 'queued') {
+              item.state = 'cancelled';
+              item.message = '剩余任务已停止，未发送。';
+            }
+        } else if (latest?.state === 'stopped') {
+          if (mode !== 'receipt') {
+            Object.assign(b, latest);
+            return false;
           }
+          const receipt = persisted.items[receiptIndex!];
+          if (!receipt || !latest.items[receiptIndex!]) return false;
+          latest.items[receiptIndex!] = { ...receipt };
+          if (
+            receipt.state === 'queued' &&
+            !receipt.accepted &&
+            !receipt.submissionUnknown
+          )
+            latest.items[receiptIndex!].state = 'cancelled';
+          latest.nextSubmissionAt = Math.max(
+            latest.nextSubmissionAt,
+            persisted.nextSubmissionAt,
+          );
+          Object.assign(persisted, latest);
         }
-        await this.persistWrite(b);
+        await this.persistWrite(persisted);
+        if (
+          mode === 'stop' ||
+          (mode === 'receipt' && latest?.state === 'stopped')
+        )
+          Object.assign(b, persisted);
+        else b.updatedAt = persisted.updatedAt;
+        return true;
       });
     this.batchWrites.set(b.batchId, pending);
     try {
-      await pending;
+      return await pending;
     } finally {
       if (this.batchWrites.get(b.batchId) === pending)
         this.batchWrites.delete(b.batchId);
@@ -696,7 +732,7 @@ export class Wechat2RssSubscriptionBatches {
         state: items.some((i) => i.state === 'queued') ? 'queued' : 'completed',
         items,
       };
-      await this.write(b);
+      await this.write(b, false);
       this.schedule();
       return view(b);
     } finally {
@@ -814,7 +850,7 @@ export class Wechat2RssSubscriptionBatches {
                 : 'Existing refresh round retained; no duplicate automatic submission.',
             })),
           };
-          await this.write(joined);
+          await this.write(joined, false);
           this.schedule();
           return { ...view(joined), reused: true };
         }
@@ -846,7 +882,7 @@ export class Wechat2RssSubscriptionBatches {
           message: '等待串行提交上游更新。',
         })),
       };
-      await this.write(b);
+      await this.write(b, false);
       this.schedule();
       return { ...view(b), reused: false };
     } finally {
@@ -864,7 +900,7 @@ export class Wechat2RssSubscriptionBatches {
         item.state = 'cancelled';
         item.message = '剩余请求已停止，未发送。';
       }
-    await this.write(b);
+    await this.write(b, 'stop');
     return view(b);
   }
   async resume(id: string) {
@@ -1334,7 +1370,7 @@ export class Wechat2RssSubscriptionBatches {
         item.state = 'submitting';
         b.state = 'running';
         b.nextSubmissionAt = this.now() + 5000;
-        await this.write(b); // Includes all unsent URLs before the first upstream call.
+        if (!(await this.write(b))) return; // Includes all unsent URLs before the first upstream call.
         try {
           result = await this.submit(
             item.articleUrl!,
@@ -1368,7 +1404,7 @@ export class Wechat2RssSubscriptionBatches {
         )
           ? 'running'
           : 'completed';
-      await this.write(current);
+      await this.write(current, 'receipt', item.index);
     } finally {
       if (release) await release();
       this.busy = false;
@@ -1402,6 +1438,21 @@ export class Wechat2RssSubscriptionBatches {
     if (this.stopped) return false;
     let changed = false;
     const unknowns = b.items.filter((i) => i.state === 'submitting');
+    // Interrupted claims may be recorded as unknown after stop, never resumed.
+    if (b.state === 'stopped' && unknowns.length) {
+      for (const interrupted of unknowns) {
+        const latest = await this.read(b.batchId);
+        if (!latest) return true;
+        const target = latest.items[interrupted.index];
+        if (target.state !== 'submitting') continue;
+        target.state = target.accepted === true ? 'waiting' : 'blocked';
+        target.submissionUnknown = target.accepted !== true;
+        target.message = '中断提交回执未知；保持停止，不重新提交。';
+        await this.write(latest, 'receipt', target.index);
+        Object.assign(b, latest);
+      }
+      return true;
+    }
     if (unknowns.length) {
       for (const unknown of unknowns) {
         unknown.state = unknown.accepted === true ? 'waiting' : 'blocked';
@@ -1541,7 +1592,7 @@ export class Wechat2RssSubscriptionBatches {
       item.state = 'submitting';
       b.state = 'running';
       b.nextSubmissionAt = this.now() + 30000;
-      await this.write(b); // Reserve exactly once before an /add can leave the process.
+      if (!(await this.write(b))) return true; // Reserve exactly once before an /add can leave the process.
       // Persistence itself can cross the deadline. No callback has run yet,
       // so this process can safely terminate the claim without a platform call.
       const expiredAfterWrite = claimExhaustion(true);
@@ -1648,7 +1699,7 @@ export class Wechat2RssSubscriptionBatches {
         item.refreshClaimedAt = this.now();
         item.state = 'submitting';
         current.state = 'running';
-        await this.write(current);
+        if (!(await this.write(current))) break;
         let job: PreparedRefresh;
         try {
           job = await this.prepareRefresh!(item.feedId!, automatic, waveKey);
@@ -1921,7 +1972,7 @@ export class Wechat2RssSubscriptionBatches {
               )
             ? 'running'
             : 'completed';
-    await this.write(current);
+    await this.write(current, 'receipt', item.index);
     if (target.state === 'succeeded' && target.accepted)
       await this.coverPreparation(await this.records());
     return true;
