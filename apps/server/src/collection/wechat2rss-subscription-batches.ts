@@ -1282,11 +1282,14 @@ export class Wechat2RssSubscriptionBatches {
   }
   private async runRefresh(b: Batch) {
     let changed = false;
-    const unknown = b.items.find((i) => i.state === 'submitting');
-    if (unknown) {
-      unknown.state = unknown.accepted === true ? 'waiting' : 'blocked';
-      unknown.submissionUnknown = unknown.accepted !== true;
-      unknown.message = '本号提交回执未确认；其他订阅继续，本号不会自动重发。';
+    const unknowns = b.items.filter((i) => i.state === 'submitting');
+    if (unknowns.length) {
+      for (const unknown of unknowns) {
+        unknown.state = unknown.accepted === true ? 'waiting' : 'blocked';
+        unknown.submissionUnknown = unknown.accepted !== true;
+        unknown.message =
+          '本号提交回执未确认；其他订阅继续，本号不会自动重发。';
+      }
       if (b.state !== 'stopped')
         b.state = b.items.some((item) =>
           ['queued', 'waiting'].includes(item.state),
@@ -1691,6 +1694,9 @@ export class Wechat2RssSubscriptionBatches {
     result: BatchOutcome,
     retryClaim = false,
   ) {
+    // Late callbacks after process shutdown leave claims uncertain. A persisted
+    // batch stop still retains live receipts while this worker remains open.
+    if (this.stopped) return true;
     const current = await this.read(b.batchId);
     if (!current) return true;
     const target = current.items[item.index];

@@ -22,7 +22,10 @@ requests or receipt writes remain in flight.
 Every source has a durable claim before preparation and a separate outcome.
 Successful peers retain acceptance. Unknown outcomes remain unknown and are not
 resubmitted. A process interrupted with a claim in `submitting` is conservatively
-reconciled, preserving the existing retry budget and deadline. Safe preparation
+reconciled, preserving the existing retry budget and deadline. All interrupted
+wave claims become unknown together. Late callbacks after worker shutdown do
+not certify receipts; an explicit batch stop while the worker remains open still
+retains live receipts. Safe preparation
 failures retain the existing three manual/eight automatic attempt limits and
 absolute automatic 24-hour deadline; they rejoin eligible waves after backoff.
 Disabled, removed, paused and cooling-down sources are skipped independently.
@@ -36,9 +39,17 @@ Unknown generic network failures isolate the affected source rather than
 inventing an account-wide restriction.
 
 The optional durable `sharedRestriction` flag distinguishes an explicit shared
-restriction from an uncertain receipt. Older strict state readers do not accept
-that field. A future deployment must include a compatible rollback reader and
-must preserve new receipts, rather than restoring an older state snapshot.
+restriction from an uncertain receipt. Older workers preserve the raw field but
+do not honor it, and can resume a restricted round after cooldown.
+`scripts/local-release/refresh-wave-rollback-compat.cjs` provides
+`compatibleSerialRefreshWorker(source)` for the serial worker in an isolated
+rollback checkout based on the actual deployed commit. It adds strict boolean
+validation, retains the explicit shared restriction and cooldown, and converts
+all interrupted wave claims to unknown without replay. It is idempotent and
+rejects a concurrent worker as the rollback base. The helper never reads or
+writes a database or durable state. Rebuild and verify that isolated rollback
+bundle before a future deployment; preserve new receipts instead of restoring
+an older state snapshot.
 
 ## Offline evidence and limits
 
@@ -48,6 +59,10 @@ account restrictions, HTTP 429, cancellation and isolated preparation retries.
 Service-level fixtures confirm that list checks, backups and reservations finish
 before any update closure is invoked; no SQLite reservation is written by a
 successful network closure. Provider fixtures use synthetic responses only.
+Rollback fixtures load the actual committed serial worker, demonstrate that its
+unmodified worker ignores the restriction, then verify the compatible worker against
+state produced by the new worker, including a 429 cooldown and five interrupted
+claims. The fixture database remains unchanged.
 
 With one-second serial preparation per source and three-second parallel network
 responses, the 14-source fixture launches at 5, 40 and 74 seconds and receives
