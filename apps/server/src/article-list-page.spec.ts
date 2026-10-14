@@ -7,6 +7,8 @@ import { findArticleListRows } from './article-list-page';
 describe('article list metadata with real isolated SQLite, no body transfer', () => {
   let prisma: PrismaClient, directory: string;
   const queries: string[] = [];
+  let delayNextReadMs = 0;
+  let failNextRead = false;
   beforeAll(async () => {
     directory = await mkdtemp(join(tmpdir(), 'wewe-list-regression-'));
     prisma = new PrismaClient({
@@ -20,6 +22,26 @@ describe('article list metadata with real isolated SQLite, no body transfer', ()
     (prisma as any).$on('query', (event: { query: string }) =>
       queries.push(event.query),
     );
+    prisma.$use(async (params, next) => {
+      if (
+        params.model === 'Article' &&
+        params.action === 'findMany' &&
+        failNextRead
+      ) {
+        failNextRead = false;
+        throw new Error('isolated read failure');
+      }
+      if (
+        params.model === 'Article' &&
+        params.action === 'findMany' &&
+        delayNextReadMs
+      ) {
+        const delay = delayNextReadMs;
+        delayNextReadMs = 0;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      return next(params);
+    });
     await prisma.$executeRawUnsafe(`CREATE TABLE feeds (
       id TEXT PRIMARY KEY, mp_name TEXT NOT NULL, mp_cover TEXT NOT NULL, mp_intro TEXT NOT NULL,
       status INTEGER NOT NULL DEFAULT 1, sync_time INTEGER NOT NULL DEFAULT 0, update_time INTEGER NOT NULL,
@@ -121,5 +143,117 @@ describe('article list metadata with real isolated SQLite, no body transfer', ()
       (await prisma.article.findUniqueOrThrow({ where: { id: 'article-0' } }))
         .contentHtml,
     ).toBe('<p>new synthetic body</p>');
+  });
+  it('keeps a real snapshot readable beyond the default five-second deadline without transferring bodies or replaying queries', async () => {
+    const query = {
+      where: { mpId: 'publisher-b' },
+      take: 4,
+      orderBy: { publishTime: 'desc' as const },
+    };
+    const expected = await findArticleListRows(prisma, query);
+    queries.length = 0;
+    delayNextReadMs = 5500;
+    const started = Date.now();
+    expect(await findArticleListRows(prisma, query)).toEqual(expected);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(5500);
+    expect(queries.filter((q) => q.startsWith('BEGIN'))).toHaveLength(1);
+    expect(
+      queries.filter((q) => q.startsWith('SELECT') && q.includes('articles')),
+    ).toHaveLength(2);
+    expect(
+      queries
+        .filter((q) => q.startsWith('SELECT'))
+        .every((q) => !q.split(/\bFROM\b/)[0].includes('content_html')),
+    ).toBe(true);
+    expect(expected.every((row) => !('contentHtml' in row))).toBe(true);
+    await expect(prisma.article.count()).resolves.toBe(8);
+  }, 15000);
+  it('reuses identical lightweight pages and deduplicates concurrent loads, then invalidates on committed article and category changes', async () => {
+    const options = {
+      databaseUrl: 'file:' + join(directory, 'fixture.db').replace(/\\/g, '/'),
+    };
+    const query = {
+      where: { mpId: 'publisher-a' },
+      take: 4,
+      orderBy: { publishTime: 'desc' as const },
+    };
+    queries.length = 0;
+    delayNextReadMs = 50;
+    const [first, concurrent] = await Promise.all([
+      findArticleListRows(prisma, query, options),
+      findArticleListRows(prisma, query, options),
+    ]);
+    expect(concurrent).toEqual(first);
+    expect(queries.filter((q) => q.startsWith('BEGIN'))).toHaveLength(1);
+    queries.length = 0;
+    const repeated = await findArticleListRows(prisma, query, options);
+    expect(repeated).toEqual(first);
+    expect(repeated).not.toBe(first);
+    expect(queries).toHaveLength(0);
+    await prisma.article.update({
+      where: { id: 'article-0' },
+      data: { contentHtml: null },
+    });
+    expect(
+      (await findArticleListRows(prisma, query, options)).find(
+        (row) => row.id === 'article-0',
+      )?.bodyCached,
+    ).toBe(false);
+    await prisma.feed.update({
+      where: { id: 'publisher-a' },
+      data: { groupId: 'changed-category' },
+    });
+    expect(
+      (await findArticleListRows(prisma, query, options))[0].feed.groupId,
+    ).toBe('changed-category');
+    const filtered = await findArticleListRows(
+      prisma,
+      { ...query, where: { mpId: 'publisher-b' } },
+      options,
+    );
+    expect(filtered.every((row) => row.mpId === 'publisher-b')).toBe(true);
+  });
+  it('does not hide a fresh read failure with an invalidated old page', async () => {
+    const options = {
+      databaseUrl: 'file:' + join(directory, 'fixture.db').replace(/\\/g, '/'),
+    };
+    const query = { where: { id: 'article-0' } };
+    await findArticleListRows(prisma, query, options);
+    await prisma.article.update({
+      where: { id: 'article-0' },
+      data: { title: 'Changed after cached page' },
+    });
+    failNextRead = true;
+    await expect(findArticleListRows(prisma, query, options)).rejects.toThrow(
+      'isolated read failure',
+    );
+    expect((await findArticleListRows(prisma, query, options))[0].title).toBe(
+      'Changed after cached page',
+    );
+  });
+  it('expires reuse and bypasses it in WAL mode instead of trusting a stale main-file counter', async () => {
+    const options = {
+      databaseUrl: 'file:' + join(directory, 'fixture.db').replace(/\\/g, '/'),
+    };
+    const query = { where: { id: 'article-1' } };
+    await findArticleListRows(prisma, query, options);
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now + 31000);
+    try {
+      queries.length = 0;
+      await findArticleListRows(prisma, query, options);
+      expect(queries.some((sql) => sql.startsWith('BEGIN'))).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+    await prisma.$queryRawUnsafe('PRAGMA journal_mode=WAL');
+    try {
+      queries.length = 0;
+      await findArticleListRows(prisma, query, options);
+      await findArticleListRows(prisma, query, options);
+      expect(queries.filter((sql) => sql.startsWith('BEGIN'))).toHaveLength(2);
+    } finally {
+      await prisma.$queryRawUnsafe('PRAGMA journal_mode=DELETE');
+    }
   });
 });
