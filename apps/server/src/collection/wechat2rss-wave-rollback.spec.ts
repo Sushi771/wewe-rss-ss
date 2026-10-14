@@ -190,5 +190,43 @@ describe('actual serial rollback worker (offline)', () => {
     expect(() =>
       compatibleSerialRefreshWorker('private async runRefreshWave('),
     ).toThrow('ROLLBACK_REQUIRES_SERIAL_BASE');
+    expect(() =>
+      compatibleSerialRefreshWorker(
+        '// Bounded-wave rollback state compatibility.',
+      ),
+    ).toThrow('ROLLBACK_REBUILD_REQUIRED');
+  });
+  it('compatible serial recovery cannot treat a not-submitted proof as restriction release', async () => {
+    const current = make(Wechat2RssSubscriptionBatches);
+    current.attachRefresh(async () => accepted);
+    current.attachRefreshPreparation(async (id) => ({
+      release: () => {},
+      submit: async () => {
+        if (id === ids[0]) throw new Error('WECHAT2RSS_RATE_LIMITED');
+        return accepted;
+      },
+    }));
+    const batch = await current.enqueueRefresh([...ids, 'MP_WXS_1234567999']);
+    await current.runDue();
+    current.close();
+    const rollback = make(Compatible),
+      refresh = jest.fn().mockResolvedValue(accepted);
+    rollback.attachRefresh(refresh);
+    rollback.attachReconciliation(async () => 'not-submitted');
+    clock += 150000;
+    await rollback.runDue();
+    const record = JSON.parse(await fs.readFile(file(batch.batchId), 'utf8'));
+    expect(record.items[0].submissionUnknown).toBe(false);
+    expect(record.items[0].sharedRestriction).toBe(true);
+    expect(record.state).toBe('paused');
+    expect(refresh).not.toHaveBeenCalled();
+    const check = jest.fn().mockResolvedValue(false);
+    rollback.attachRestrictionCheck(check);
+    await rollback.runDue();
+    expect(refresh).not.toHaveBeenCalled();
+    clock += 120000;
+    check.mockResolvedValue(true);
+    await rollback.runDue();
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });
