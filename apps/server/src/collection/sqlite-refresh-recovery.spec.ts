@@ -97,6 +97,13 @@ describe('finite before-round recovery instead of a full copy per subscription',
     expect(path.dirname(directory)).toBe(path.resolve(os.tmpdir()));
     await fs.rm(directory, { recursive: true, force: true });
   });
+  it('an unclaimed round scope does not replace independently protected cache-only admission', async () => {
+    await refreshRecovery.run(makeKey(), members, members[0], async () => {
+      expect(refreshRecovery.captureWriteGuard()).toBeUndefined();
+      await expect(sqliteWrites.write(async () => 42)).resolves.toBe(42);
+    });
+    expect(await backups()).toBe(37);
+  });
   it('demonstrates the previous per-submit policy stops the twelfth of fourteen writes', async () => {
     let completed = 0;
     for (const id of members) {
@@ -475,4 +482,164 @@ describe('finite before-round recovery instead of a full copy per subscription',
     ).rejects.toThrow('membership');
     expect(operation).not.toHaveBeenCalled();
   });
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  };
+  const owner = async () =>
+    path.join(
+      root,
+      (await fs.readdir(root)).find((n) =>
+        n.startsWith('refresh-recovery-owner-'),
+      )!,
+    );
+  it.each(['expiry', 'close'])(
+    'checks %s after queued write admission, preserving successful data and receipt bytes',
+    async (reason) => {
+      let clock = Date.now();
+      jest
+        .spyOn(refreshRecovery as unknown as { now: () => number }, 'now')
+        .mockImplementation(() => clock);
+      const key = makeKey();
+      const receipt = path.join(directory, 'successful-receipt.json');
+      await refreshRecovery.run(key, members, members[0], async () => {
+        await createVerifiedSqliteBackup();
+        await sqliteWrites.write(async () => {
+          db.prepare('INSERT INTO articles VALUES(?,?,?)').run(
+            'successful',
+            'successful body',
+            7,
+          );
+          db.prepare('UPDATE categories SET title=? WHERE id=?').run(
+            'successful classification',
+            'favorite',
+          );
+          await fs.writeFile(receipt, JSON.stringify({ state: 'succeeded' }));
+        });
+      });
+      const beforeReceipt = await fs.readFile(receipt);
+      const hold = deferred(),
+        entered = deferred(),
+        proved = deferred();
+      const blocker = sqliteWrites.snapshot(async () => {
+        entered.resolve();
+        await hold.promise;
+      });
+      await entered.promise;
+      const operation = jest.fn(async () => {
+        db.prepare('INSERT INTO articles VALUES(?,?,?)').run(
+          'late',
+          'must not execute',
+          0,
+        );
+      });
+      const queued = refreshRecovery.run(key, members, members[1], async () => {
+        await createVerifiedSqliteBackup();
+        proved.resolve();
+        await sqliteWrites.write(operation);
+      });
+      const rejected = expect(queued).rejects.toThrow('expired or closed');
+      await proved.promise;
+      if (reason === 'expiry') clock += 900001;
+      else await refreshRecovery.close(key);
+      hold.resolve();
+      await blocker;
+      await rejected;
+      expect(operation).not.toHaveBeenCalled();
+      expect(
+        db.prepare("SELECT body FROM articles WHERE id='successful'").get()
+          ?.body,
+      ).toBe('successful body');
+      expect(
+        db.prepare("SELECT title FROM categories WHERE id='favorite'").get()
+          ?.title,
+      ).toBe('successful classification');
+      expect(await fs.readFile(receipt)).toEqual(beforeReceipt);
+      await expect(sqliteWrites.write(async () => 42)).resolves.toBe(42); // Rejected admission released, no replay.
+    },
+  );
+  it.each(['missing', 'replaced', 'content'])(
+    'rejects a %s owner before sharing and preserves the DB snapshot',
+    async (change) => {
+      const key = makeKey();
+      let point!: string;
+      await refreshRecovery.run(key, members, members[0], async () => {
+        point = await backupPath();
+      });
+      const reference = await owner();
+      const bytes = await fs.readFile(reference);
+      if (change === 'content')
+        await fs.writeFile(
+          reference,
+          Buffer.from(
+            bytes
+              .toString()
+              .replace('database-before-round', 'altered-before-round'),
+          ),
+        );
+      else {
+        await fs.rename(reference, reference + '.fixture');
+        if (change === 'replaced') await fs.writeFile(reference, bytes);
+      }
+      await expect(
+        refreshRecovery.run(key, members, members[1], () =>
+          createVerifiedSqliteBackup(),
+        ),
+      ).rejects.toThrow('owner reference');
+      expect((await fs.stat(point)).size).toBeGreaterThan(0);
+      expect(await backups()).toBe(38);
+      if (change !== 'missing')
+        expect(await fs.readFile(reference)).toBeDefined(); // Unproved replacement is not cleaned as ours.
+    },
+  );
+  it.each(['owner', 'backup', 'source'])(
+    'rechecks %s changes after queueing and before engine entry',
+    async (change) => {
+      const key = makeKey();
+      let point!: string;
+      await refreshRecovery.run(key, members, members[0], async () => {
+        point = await backupPath();
+      });
+      const hold = deferred(),
+        entered = deferred(),
+        proved = deferred();
+      const blocker = sqliteWrites.snapshot(async () => {
+        entered.resolve();
+        await hold.promise;
+      });
+      await entered.promise;
+      const operation = jest.fn(async () => {
+        db.exec('UPDATE feeds SET attempt=9');
+      });
+      const queued = refreshRecovery.run(key, members, members[1], async () => {
+        await createVerifiedSqliteBackup();
+        proved.resolve();
+        await sqliteWrites.write(operation);
+      });
+      const rejected = expect(queued).rejects.toThrow();
+      await proved.promise;
+      if (change === 'owner') {
+        const reference = await owner();
+        await fs.rename(reference, reference + '.fixture');
+      } else if (change === 'backup') {
+        await fs.writeFile(point, Buffer.alloc((await fs.stat(point)).size));
+      } else {
+        db.close();
+        await fs.rename(source, source + '.fixture');
+        await fs.copyFile(source + '.fixture', source);
+        db = new DatabaseSync(source);
+      }
+      hold.resolve();
+      await blocker;
+      await rejected;
+      expect(operation).not.toHaveBeenCalled();
+      expect(
+        db.prepare('SELECT COUNT(*) AS n FROM feeds WHERE attempt=0').get()?.n,
+      ).toBe(14);
+      await expect(sqliteWrites.write(async () => 42)).resolves.toBe(42);
+    },
+  );
 });

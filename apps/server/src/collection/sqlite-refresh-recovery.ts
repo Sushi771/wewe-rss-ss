@@ -23,12 +23,25 @@ type Boundary = {
   database?: string;
   root?: string;
   sourceIdentity?: string;
+  configuredRoot?: string;
+  backupIdentity?: string;
   reference?: string;
   referenceBytes?: Buffer;
   referenceIdentity?: string;
   timer?: NodeJS.Timeout;
 };
 const fileIdentity = (s: { dev: bigint; ino: bigint }) => `${s.dev}/${s.ino}`;
+const fingerprint = (s: {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}) => [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join('/');
+export type RecoveryWriteGuard = {
+  validate: (full: boolean) => Promise<void>;
+  assertCurrent: () => void;
+};
 
 /** A before-round recovery boundary, never a claim that changed DB content equals it. */
 export class RefreshRecoveryBoundaries {
@@ -142,9 +155,118 @@ export class RefreshRecoveryBoundaries {
         digest.digest('hex') !== expected
       )
         throw new Error('Recovery file changed or checksum unproved');
+      return fingerprint(after);
     } finally {
       await handle.close();
     }
+  }
+  private async assertReference(b: Boundary) {
+    try {
+      if (
+        !b.reference ||
+        !b.referenceBytes ||
+        !b.referenceIdentity ||
+        b.referenceBytes.length > 16384
+      )
+        throw new Error();
+      const before = await fs.lstat(b.reference, { bigint: true });
+      if (
+        !before.isFile() ||
+        before.isSymbolicLink() ||
+        fileIdentity(before) !== b.referenceIdentity ||
+        before.size !== BigInt(b.referenceBytes.length)
+      )
+        throw new Error();
+      const handle = await fs.open(b.reference, 'r');
+      try {
+        const opened = await handle.stat({ bigint: true });
+        const buffer = Buffer.alloc(b.referenceBytes.length + 1);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        const after = await handle.stat({ bigint: true });
+        const atPath = await fs.lstat(b.reference, { bigint: true });
+        if (
+          fileIdentity(opened) !== b.referenceIdentity ||
+          fingerprint(opened) !== fingerprint(after) ||
+          atPath.isSymbolicLink() ||
+          fingerprint(after) !== fingerprint(atPath) ||
+          bytesRead !== b.referenceBytes.length ||
+          !buffer.subarray(0, bytesRead).equals(b.referenceBytes)
+        )
+          throw new Error();
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      throw new Error(
+        'Refresh recovery owner reference identity/content unproved',
+      );
+    }
+  }
+  /** Captured before queueing; evaluated only after write admission and before the engine. */
+  captureWriteGuard(): RecoveryWriteGuard | undefined {
+    const permit = this.context.getStore();
+    if (!permit) return undefined;
+    const b = permit.boundary;
+    // A scope alone grants no recovery authorization. Cache-only paths may
+    // instead use their independently verified insert-only recovery policy.
+    // Once this boundary was claimed (or failed), its guard cannot be bypassed.
+    if (!b.report && !b.pending && !b.closing) return undefined;
+    const assertCurrent = () => {
+      if (
+        !permit.active ||
+        b.closing ||
+        b.expires <= this.now() ||
+        this.records.get(b.key) !== b
+      )
+        throw new Error(
+          'Refresh recovery boundary expired or closed before execution',
+        );
+      if (
+        !b.report ||
+        !b.database ||
+        !b.root ||
+        !b.configuredRoot ||
+        !b.sourceIdentity ||
+        !b.backupIdentity
+      )
+        throw new Error(
+          'Verified refresh recovery boundary required before execution',
+        );
+    };
+    return {
+      assertCurrent,
+      validate: async (full) => {
+        try {
+          assertCurrent();
+          await this.assertReference(b);
+          if (
+            (await fs.realpath(b.configuredRoot!)) !== b.root ||
+            fileIdentity(await fs.stat(b.database!, { bigint: true })) !==
+              b.sourceIdentity
+          )
+            throw new Error(
+              'Refresh recovery source/root changed before execution',
+            );
+          const identity = full
+            ? await this.hash(b.report!.backup, b.report!.sha256)
+            : fingerprint(await fs.stat(b.report!.backup, { bigint: true }));
+          if (identity !== b.backupIdentity)
+            throw new Error('Recovery file changed before execution');
+          await this.assertReference(b);
+          if (
+            fileIdentity(await fs.stat(b.database!, { bigint: true })) !==
+            b.sourceIdentity
+          )
+            throw new Error(
+              'Refresh recovery source replaced before execution',
+            );
+          assertCurrent();
+        } catch (error) {
+          b.closing = true;
+          throw error;
+        }
+      },
+    };
   }
   async snapshot(
     database: string,
@@ -196,7 +318,7 @@ export class RefreshRecoveryBoundaries {
           path.isAbsolute(relative)
         )
           throw new Error('Verified batch recovery boundary required');
-        await this.hash(backup, report.sha256);
+        const backupIdentity = await this.hash(backup, report.sha256);
         const reference = path.join(
           actualRoot,
           `refresh-recovery-owner-${randomUUID()}.json`,
@@ -228,6 +350,8 @@ export class RefreshRecoveryBoundaries {
         b.database = database;
         b.root = actualRoot;
         b.sourceIdentity = sourceIdentity;
+        b.configuredRoot = root;
+        b.backupIdentity = backupIdentity;
         b.report = { ...report, backup };
         return b.report;
       })();
@@ -244,7 +368,10 @@ export class RefreshRecoveryBoundaries {
         throw new Error('Refresh recovery source changed');
       // Every shared use proves the recovery FILE. It intentionally does not
       // compare the now-changed live database to the before-round snapshot.
-      await this.hash(report.backup, report.sha256);
+      await this.assertReference(b);
+      if ((await this.hash(report.backup, report.sha256)) !== b.backupIdentity)
+        throw new Error('Recovery file changed before sharing');
+      await this.assertReference(b);
       if (
         b.closing ||
         b.expires <= this.now() ||

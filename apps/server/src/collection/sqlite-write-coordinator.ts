@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { refreshRecovery, RecoveryWriteGuard } from './sqlite-refresh-recovery';
 
 type Kind = 'write' | 'backup';
 type Entry = {
@@ -19,6 +20,8 @@ export class SqliteWriteCoordinator {
   constructor(
     private waitMs = 75000,
     private maxQueued = 256,
+    private captureGuard: () => RecoveryWriteGuard | undefined = () =>
+      refreshRecovery.captureWriteGuard(),
   ) {}
 
   fence(owner: object) {
@@ -82,7 +85,9 @@ export class SqliteWriteCoordinator {
     // Transaction middleware runs inside the admission acquired by $transaction.
     // Expired detached async contexts must not bypass a later backup.
     let release: () => void;
-    if (this.context.getStore()?.active) {
+    const nested = this.context.getStore()?.active === true;
+    const guard = this.captureGuard();
+    if (nested) {
       // Track nested admission independently: a deliberately detached operation
       // can outlive its caller and must still prevent a backup from starting.
       this.writes++;
@@ -95,6 +100,15 @@ export class SqliteWriteCoordinator {
     }
     const permit = { active: true };
     try {
+      // Full recovery-file proof before opening a connection/transaction.
+      // Nested middleware rechecks time, owner and file identity without a
+      // large hash read inside Prisma's already-open short transaction.
+      if (guard) {
+        await guard.validate(!nested);
+        guard.assertCurrent();
+      }
+      if (!nested && this.fences.size)
+        throw new Error('SQLite write fenced before engine execution');
       return await this.context.run(permit, operation);
     } finally {
       permit.active = false;
