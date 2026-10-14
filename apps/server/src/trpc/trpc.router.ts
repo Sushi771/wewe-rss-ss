@@ -231,7 +231,13 @@ export class TrpcRouter {
           new Date(),
           directory,
         );
-        if (saved.mediaComplete === false) incomplete.push(article.title);
+        if (saved.mediaComplete === false)
+          incomplete.push(
+            path
+              .relative(directory, saved.markdownPath)
+              .split(path.sep)
+              .join('/'),
+          );
         else complete++;
       } catch {
         if (cancelled()) throw new Error('导出已取消');
