@@ -2,13 +2,21 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      [
+        main,
+        codex/sqlite-backup-bounded-20261014,
+        codex/sqlite-backup-child-exit-20261014,
+        codex/sqlite-backup-production-base-20261014,
+      ]
   pull_request:
     branches:
       [
         main,
         codex/manual-refresh-download-integration,
         codex/cold-launch-profile,
+        codex/automatic-refresh-recovery-20261013,
+        codex/body-cache-retry-status,
       ]
 
 jobs:
@@ -66,6 +74,8 @@ jobs:
         run: node --test scripts/wechat-source-metrics-ui.test.cjs
       - name: Test compact reading toolbar and collapsed diagnostics offline
         run: node --test scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs
+      - name: Test current article cache and retry history offline
+        run: node --test scripts/article-body-state.test.cjs
       - name: Test Shanghai date shortcuts and isolated reader find offline
         env:
           NODE_OPTIONS: --experimental-websocket
@@ -94,6 +104,8 @@ jobs:
         run: node --test scripts/cache-revision-watch.test.cjs scripts/cache-sync-status-ui.test.cjs
       - name: Test periodic SQLite snapshots and fail-closed leases offline
         run: python3 apps/server/scripts/test_sqlite_snapshot_guard.py -v
+      - name: Test bounded consistent backups with real synthetic concurrent writers
+        run: python3 apps/server/scripts/test_backup_sqlite.py -v
       - name: Test cache-only Unicode transport and publisher identity offline
         run: python3 apps/server/scripts/test_read-wechat2rss-cache.py
       - name: Test read-only SQLite cache signals on synthetic databases
@@ -107,7 +119,7 @@ jobs:
       - name: Test native subscribed MP and review probes offline
         run: node --test scripts/research/probe-subscribed-mp-once.spec.cjs scripts/research/probe-native-review-owner07.spec.cjs
       - name: Test official album runtime scheduling policy
-        run: node --test scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs scripts/local-release/startup-acceptance.test.cjs
+        run: node --test scripts/local-release/engine-audit.test.cjs scripts/local-release/sqlite-concurrency.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/readiness.test.cjs scripts/local-release/launch.test.cjs scripts/local-release/startup-acceptance.test.cjs
       - name: Test desktop dependency startup and launch locking offline
         run: node --test scripts/local-release/desktop-dependencies.test.cjs scripts/local-release/desktop-progress.test.cjs scripts/local-release/desktop-home-entry.test.cjs
       - name: Test startup schema checks and exact database preservation

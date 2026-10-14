@@ -35,7 +35,9 @@ export type BatchOutcome = {
   phase?: 'identity' | 'cache' | 'metadata';
   accepted?: boolean;
   submissionUnknown?: boolean;
-  /** Unclassified failures stop the round; only explicit local failures isolate. */
+  /** Safe preparation failure: no upstream submission was attempted. */
+  retryable?: boolean;
+  /** Known shared account restrictions may stop the round; unknown submits isolate. */
   stopBatch?: boolean;
 };
 type Item = Omit<BatchOutcome, 'state'> & {
@@ -44,6 +46,22 @@ type Item = Omit<BatchOutcome, 'state'> & {
   state: ItemState;
   refreshChecks?: number;
   refreshAfter?: number;
+  preparationRetries?: number;
+  retryAfter?: number;
+  retryDeadlineAt?: number;
+  retryExhausted?: 'attempt-limit' | 'deadline';
+  nextReceiptCheck?: number;
+  refreshScope?: string;
+  mustExecute?: boolean;
+  coverageReviewRequired?: boolean;
+  waitingForReceipt?: boolean;
+  refreshClaimedAt?: number;
+  supersededBy?: {
+    batchId: string;
+    createdAt: number;
+    scope: string;
+    claimedAt: number;
+  };
 };
 type Batch = {
   version: 1;
@@ -56,6 +74,8 @@ type Batch = {
     | 'manual-refresh'
     | 'scheduled-refresh';
   intentKey?: string;
+  refreshScope?: string;
+  mustExecute?: boolean;
   /** A durable continuation of accepted cache work, never unsent submissions. */
   cacheOnly?: boolean;
   createdAt: number;
@@ -69,6 +89,98 @@ const hash = (value: string) =>
 const isRefresh = (b: Batch) =>
   ['manual-refresh', 'scheduled-refresh'].includes(b.purpose || '');
 const live = (b: Batch) => ['queued', 'running', 'paused'].includes(b.state);
+const AUTOMATIC_PREPARATION_LIMIT = 8;
+const AUTOMATIC_RETRY_WINDOW = 24 * 3600000;
+const CURRENT_REFRESH_SCOPE = 'wechat2rss-subscription-current-v1';
+const batchFields = new Set([
+  'version',
+  'batchId',
+  'instance',
+  'signature',
+  'purpose',
+  'intentKey',
+  'cacheOnly',
+  'createdAt',
+  'updatedAt',
+  'nextSubmissionAt',
+  'state',
+  'items',
+  'refreshScope',
+  'mustExecute',
+]);
+const itemFields = new Set([
+  'index',
+  'articleUrl',
+  'state',
+  'message',
+  'taskId',
+  'feedId',
+  'bodyReady',
+  'textReady',
+  'mediaReady',
+  'localMediaPendingArticleCount',
+  'upstreamImageBlockedCount',
+  'imagePendingCount',
+  'listReady',
+  'code',
+  'phase',
+  'accepted',
+  'submissionUnknown',
+  'retryable',
+  'stopBatch',
+  'refreshChecks',
+  'refreshAfter',
+  'preparationRetries',
+  'retryAfter',
+  'retryDeadlineAt',
+  'retryExhausted',
+  'nextReceiptCheck',
+  'refreshScope',
+  'mustExecute',
+  'coverageReviewRequired',
+  'supersededBy',
+  'waitingForReceipt',
+  'refreshClaimedAt',
+]);
+/** Legacy v1 manual/automatic refreshes share the audited current /add contract.
+ * Unknown metadata or an explicit different scope cannot establish equivalence. */
+const refreshScope = (b: Batch, item: Item) =>
+  isRefresh(b) &&
+  Object.keys(b).every((key) => batchFields.has(key)) &&
+  Object.keys(item).every((key) => itemFields.has(key)) &&
+  [b.mustExecute, item.mustExecute].every(
+    (value) => value === undefined || typeof value === 'boolean',
+  ) &&
+  (item.refreshScope ?? b.refreshScope ?? CURRENT_REFRESH_SCOPE) ===
+    CURRENT_REFRESH_SCOPE
+    ? CURRENT_REFRESH_SCOPE
+    : undefined;
+const safePreparation = (item: Item) =>
+  item.retryable === true &&
+  item.accepted === false &&
+  !item.submissionUnknown &&
+  item.stopBatch === false &&
+  ['queued', 'failed'].includes(item.state);
+const automaticRecovery = (b: Batch) =>
+  b.purpose === 'scheduled-refresh' &&
+  !b.cacheOnly &&
+  b.state !== 'stopped' &&
+  !b.items.some(
+    (item) =>
+      !item.submissionUnknown &&
+      ['blocked', 'failed'].includes(item.state) &&
+      item.stopBatch !== false,
+  ) &&
+  b.items.some((item) => safePreparation(item) && !item.retryExhausted);
+const isolatedRefresh = (b: Batch) =>
+  isRefresh(b) &&
+  b.items.some((item) => item.submissionUnknown) &&
+  !b.items.some(
+    (item) =>
+      !item.submissionUnknown &&
+      ['blocked', 'failed'].includes(item.state) &&
+      item.stopBatch !== false,
+  );
 const view = (b: Batch) => ({
   batchId: b.batchId,
   purpose: b.purpose || 'subscription',
@@ -93,6 +205,14 @@ const view = (b: Batch) => ({
     listReady: item.listReady,
     code: item.code,
     stopBatch: item.stopBatch,
+    submissionUnknown: item.submissionUnknown,
+    preparationRetries: item.preparationRetries,
+    retryAfter: item.retryAfter,
+    retryDeadlineAt: item.retryDeadlineAt,
+    retryExhausted: item.retryExhausted,
+    coverageReviewRequired: item.coverageReviewRequired,
+    waitingForReceipt: item.waitingForReceipt,
+    supersededBy: item.supersededBy,
     metadataPending: false,
     // Bind internal consumers to the original intent without publishing URLs.
     articleUrlHash: item.articleUrl ? hash(item.articleUrl) : undefined,
@@ -124,6 +244,15 @@ export class Wechat2RssSubscriptionBatches {
     automatic?: boolean,
     options?: { cacheOnly: boolean },
   ) => Promise<BatchOutcome>;
+  private reconcile?: (
+    feedId: string,
+    createdAt: number,
+  ) => Promise<'not-submitted' | 'unknown'>;
+  attachReconciliation(
+    check: NonNullable<Wechat2RssSubscriptionBatches['reconcile']>,
+  ) {
+    this.reconcile = check;
+  }
 
   /** Manual refresh shares the existing serial scheduler and durable records. */
   attachRefresh(
@@ -149,6 +278,30 @@ export class Wechat2RssSubscriptionBatches {
       throw new Error('BATCH_CONSUMER_EXISTS');
     this.consumer = consumer;
     this.schedule();
+  }
+  private consumerUnavailable = false;
+  private warnConsumerUnavailable() {
+    if (!this.consumerUnavailable)
+      console.warn('[WECHAT2RSS_DOWNLOAD_CONSUMER_UNAVAILABLE]');
+    this.consumerUnavailable = true;
+  }
+  private async consumerPending() {
+    try {
+      return Boolean(await this.consumer?.hasPending());
+    } catch {
+      this.warnConsumerUnavailable();
+      // Retain the consumer's durable work; its storage failure cannot suppress
+      // independent subscription refreshes or authorize another submission.
+      return true;
+    }
+  }
+  private async runConsumer() {
+    try {
+      await this.consumer?.runDue();
+      this.consumerUnavailable = false;
+    } catch {
+      this.warnConsumerUnavailable();
+    }
   }
   wake() {
     this.schedule();
@@ -254,6 +407,21 @@ export class Wechat2RssSubscriptionBatches {
             typeof item.submissionUnknown !== 'boolean') ||
           (item.stopBatch !== undefined &&
             typeof item.stopBatch !== 'boolean') ||
+          (item.retryable !== undefined &&
+            typeof item.retryable !== 'boolean') ||
+          (item.preparationRetries !== undefined &&
+            (!Number.isSafeInteger(item.preparationRetries) ||
+              item.preparationRetries < 0 ||
+              item.preparationRetries > AUTOMATIC_PREPARATION_LIMIT)) ||
+          (item.retryAfter !== undefined &&
+            !Number.isSafeInteger(item.retryAfter)) ||
+          (item.retryDeadlineAt !== undefined &&
+            (!Number.isSafeInteger(item.retryDeadlineAt) ||
+              item.retryDeadlineAt !== b.createdAt + AUTOMATIC_RETRY_WINDOW)) ||
+          (item.retryExhausted !== undefined &&
+            !['attempt-limit', 'deadline'].includes(item.retryExhausted)) ||
+          (item.nextReceiptCheck !== undefined &&
+            !Number.isSafeInteger(item.nextReceiptCheck)) ||
           (item.articleUrl !== undefined &&
             subscriptionArticleUrl(item.articleUrl) !== item.articleUrl) ||
           (isRefresh(b) && (!item.feedId || item.articleUrl || item.taskId)) ||
@@ -452,6 +620,10 @@ export class Wechat2RssSubscriptionBatches {
         intentKey &&
         records.find((b) => isRefresh(b) && b.intentKey === intentKey);
       if (original) return { ...view(original), reused: true };
+      // Restore legacy terminal preparation failures before cross-slot deduplication.
+      // The original intent and retry budget remain authoritative.
+      await this.coverPreparation(records);
+      for (const record of records) await this.recoverPreparation(record);
       const uncertain = new Set(
         records
           .filter(isRefresh)
@@ -474,9 +646,16 @@ export class Wechat2RssSubscriptionBatches {
                 record.items
                   .filter(
                     (item) =>
+                      (['queued', 'waiting', 'submitting'].includes(
+                        item.state,
+                      ) ||
+                        item.submissionUnknown ||
+                        (item.accepted === true &&
+                          item.state !== 'succeeded')) &&
                       !(
                         record.purpose === 'scheduled-refresh' &&
                         item.state === 'queued' &&
+                        !item.retryDeadlineAt &&
                         Math.floor((this.now() + 8 * 3600000) / 86400000) >
                           Math.floor(
                             (record.createdAt + 8 * 3600000) / 86400000,
@@ -496,6 +675,7 @@ export class Wechat2RssSubscriptionBatches {
             ...same,
             batchId: randomUUID(),
             purpose,
+            refreshScope: CURRENT_REFRESH_SCOPE,
             intentKey,
             state: fresh.length ? 'queued' : 'completed',
             createdAt: this.now(),
@@ -526,6 +706,7 @@ export class Wechat2RssSubscriptionBatches {
         signature: hash(JSON.stringify([purpose, [...ids].sort()])),
         purpose,
         intentKey,
+        refreshScope: CURRENT_REFRESH_SCOPE,
         createdAt: this.now(),
         updatedAt: this.now(),
         nextSubmissionAt: Math.max(
@@ -667,13 +848,16 @@ export class Wechat2RssSubscriptionBatches {
       (await this.records()).some(
         (b) =>
           ['queued', 'running'].includes(b.state) ||
+          automaticRecovery(b) ||
+          (b.state === 'paused' && isolatedRefresh(b)) ||
+          (isRefresh(b) && b.items.some((item) => item.submissionUnknown)) ||
           (isRefresh(b) &&
             b.state === 'stopped' &&
             b.items.some((item) =>
               ['waiting', 'submitting'].includes(item.state),
             )),
       ) ||
-      (await this.consumer?.hasPending())
+      (await this.consumerPending())
     )
       this.schedule();
   }
@@ -687,6 +871,164 @@ export class Wechat2RssSubscriptionBatches {
     }, 5000);
     this.timer.unref();
   }
+  /** Upgrade only explicit unsent failures. Never infer safety from an error
+   * message, a missing accepted flag, or a terminal batch state. */
+  private async recoverPreparation(b: Batch) {
+    if (!automaticRecovery(b) || b.instance !== hash(this.instance())) return;
+    let changed = false;
+    for (const item of b.items) {
+      if (!safePreparation(item) || item.retryExhausted) continue;
+      const deadline = b.createdAt + AUTOMATIC_RETRY_WINDOW;
+      if (!item.retryDeadlineAt) {
+        item.retryDeadlineAt = deadline;
+        changed = true;
+      }
+      const exhausted =
+        (item.preparationRetries || 0) >= AUTOMATIC_PREPARATION_LIMIT
+          ? 'attempt-limit'
+          : this.now() >= deadline
+            ? 'deadline'
+            : undefined;
+      if (exhausted) {
+        item.state = 'failed';
+        item.retryExhausted = exhausted;
+        item.message = '补试次数或期限已用尽，本次更新未提交。';
+        changed = true;
+      } else if (item.state === 'failed') {
+        item.state = 'queued';
+        // Old retries already have a persisted delay; never shorten it on restart.
+        item.retryAfter = Math.max(item.retryAfter || 0, b.updatedAt + 60000);
+        item.message = '未提交的准备失败项已恢复，后台将按原计划补试。';
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    b.state = b.items.some((item) =>
+      ['queued', 'waiting', 'submitting'].includes(item.state),
+    )
+      ? 'running'
+      : 'completed';
+    await this.write(b);
+  }
+  /** A later equivalent success satisfies an older unsent update intent. This
+   * is an explanatory skip, never a fabricated success or another submission. */
+  private async coverPreparation(records: Batch[]) {
+    const successes = new Map<
+      string,
+      { batchId: string; createdAt: number; scope: string; claimedAt: number }
+    >();
+    const unresolved = new Set<string>();
+    const instance = hash(this.instance());
+    for (const b of records) {
+      if (b.instance === instance && isRefresh(b))
+        for (const item of b.items)
+          if (
+            item.submissionUnknown ||
+            item.state === 'submitting' ||
+            (item.accepted === true && item.state !== 'succeeded')
+          )
+            unresolved.add(`${b.instance}/${item.feedId}`);
+      if (
+        b.instance !== instance ||
+        b.cacheOnly ||
+        b.createdAt > this.now() ||
+        b.updatedAt < b.createdAt ||
+        b.updatedAt > this.now()
+      )
+        continue;
+      for (const item of b.items) {
+        const scope = refreshScope(b, item);
+        if (
+          !scope ||
+          item.state !== 'succeeded' ||
+          item.accepted !== true ||
+          item.submissionUnknown
+        )
+          continue;
+        const key = `${b.instance}/${item.feedId}`;
+        const claimedAt = item.refreshClaimedAt ?? b.createdAt;
+        if (
+          !Number.isSafeInteger(claimedAt) ||
+          claimedAt < b.createdAt ||
+          claimedAt > b.updatedAt
+        )
+          continue;
+        if (!successes.has(key) || successes.get(key)!.claimedAt < claimedAt)
+          successes.set(key, {
+            batchId: b.batchId,
+            createdAt: b.createdAt,
+            scope,
+            claimedAt,
+          });
+      }
+    }
+    for (const b of records) {
+      if (
+        !isRefresh(b) ||
+        b.instance !== instance ||
+        b.cacheOnly ||
+        b.state === 'stopped'
+      )
+        continue;
+      let changed = false;
+      for (const item of b.items) {
+        if (!safePreparation(item)) continue;
+        const scope = refreshScope(b, item);
+        if (!scope) {
+          item.state = 'blocked';
+          item.coverageReviewRequired = true;
+          item.message =
+            '刷新范围无法确认，保留原意图；核对前不会补试或标为成功。';
+          changed = true;
+          continue;
+        }
+        const key = `${b.instance}/${item.feedId}`;
+        const newer = successes.get(key);
+        const required =
+          (b.mustExecute !== undefined && b.mustExecute !== false) ||
+          (item.mustExecute !== undefined && item.mustExecute !== false);
+        if (
+          !required &&
+          newer &&
+          newer.claimedAt > b.createdAt &&
+          newer.scope === scope
+        ) {
+          item.state = 'skipped';
+          item.waitingForReceipt = false;
+          item.supersededBy = newer;
+          item.message =
+            '较晚的同等订阅刷新已成功；本条旧未提交意图已被覆盖，不再补试。';
+          changed = true;
+        } else if (unresolved.has(key)) {
+          if (!item.waitingForReceipt) {
+            item.waitingForReceipt = true;
+            item.message =
+              '同订阅另有已受理或未知回执，原补试意图保留；核对前不重复提交。';
+            changed = true;
+          }
+        } else if (item.waitingForReceipt) {
+          item.waitingForReceipt = false;
+          changed = true;
+        }
+      }
+      if (!changed) continue;
+      if (
+        b.state !== 'paused' ||
+        !b.items.some(
+          (item) =>
+            !item.submissionUnknown &&
+            ['blocked', 'failed'].includes(item.state) &&
+            item.stopBatch !== false,
+        )
+      )
+        b.state = b.items.some((item) =>
+          ['queued', 'waiting', 'submitting'].includes(item.state),
+        )
+          ? 'running'
+          : 'completed';
+      await this.write(b);
+    }
+  }
   async runDue() {
     if (this.busy || this.stopped) return;
     this.busy = true;
@@ -699,9 +1041,97 @@ export class Wechat2RssSubscriptionBatches {
       cacheOnlyRun = (await this.records()).some(
         (record) => record.cacheOnly && live(record),
       );
-      if (!cacheOnlyRun) await this.consumer?.runDue();
+      if (!cacheOnlyRun) await this.runConsumer();
       if (this.stopped) return;
-      const b = (await this.records()).find(
+      const pending = await this.records();
+      await this.coverPreparation(pending);
+      for (const record of pending) await this.recoverPreparation(record);
+      // Read-only reconciliation can prove preparation failed before the one-shot
+      // reservation. An unknown receipt alone never authorizes another /add.
+      if (this.reconcile)
+        for (const record of await this.records()) {
+          if (!isRefresh(record) || record.instance !== hash(this.instance()))
+            continue;
+          for (const item of record.items) {
+            if (
+              !item.submissionUnknown ||
+              item.accepted === true ||
+              item.state === 'succeeded' ||
+              (item.nextReceiptCheck || 0) > this.now()
+            )
+              continue;
+            item.nextReceiptCheck = this.now() + 60000;
+            let proof: 'not-submitted' | 'unknown' = 'unknown';
+            try {
+              proof = await this.reconcile(item.feedId!, record.createdAt);
+            } catch {
+              /* remain unknown */
+            }
+            if (proof === 'not-submitted') {
+              item.submissionUnknown = false;
+              item.stopBatch = false;
+              const expired =
+                record.purpose === 'scheduled-refresh' &&
+                Math.floor((this.now() + 8 * 3600000) / 86400000) >
+                  Math.floor((record.createdAt + 8 * 3600000) / 86400000);
+              item.state =
+                record.state === 'stopped' || record.cacheOnly || expired
+                  ? 'cancelled'
+                  : 'queued';
+              if (
+                record.purpose === 'scheduled-refresh' &&
+                !record.cacheOnly &&
+                record.state !== 'stopped'
+              ) {
+                // Proof permits another bounded preparation attempt, never a
+                // budget reset. Count the interrupted first attempt as well.
+                item.accepted = false;
+                item.retryable = true;
+                item.preparationRetries = item.preparationRetries || 1;
+                item.retryDeadlineAt =
+                  record.createdAt + AUTOMATIC_RETRY_WINDOW;
+                item.state = 'queued';
+                if (
+                  this.now() >= item.retryDeadlineAt ||
+                  item.preparationRetries >= AUTOMATIC_PREPARATION_LIMIT
+                ) {
+                  item.state = 'failed';
+                  item.retryExhausted =
+                    this.now() >= item.retryDeadlineAt
+                      ? 'deadline'
+                      : 'attempt-limit';
+                }
+              }
+              item.message = '本地预留账本确认未提交；独立队列自动继续。';
+              if (
+                item.state === 'queued' &&
+                !record.items.some(
+                  (prior) =>
+                    !prior.submissionUnknown &&
+                    ['blocked', 'failed'].includes(prior.state) &&
+                    prior.stopBatch !== false,
+                )
+              )
+                record.state = 'running';
+            }
+            await this.write(record);
+          }
+        }
+      // Newly proven unsent work must also respect later equivalent successes.
+      await this.coverPreparation(await this.records());
+      // Older versions paused the whole refresh after one uncertain receipt.
+      // Keep that item blocked forever, but automatically release independent work.
+      for (const record of await this.records()) {
+        if (record.state !== 'paused' || !isolatedRefresh(record)) continue;
+        if (record.instance !== hash(this.instance())) continue;
+        record.state = record.items.some((item) =>
+          ['queued', 'waiting', 'submitting'].includes(item.state),
+        )
+          ? 'running'
+          : 'completed';
+        await this.write(record);
+      }
+      const candidates = (await this.records()).filter(
         (b) =>
           ['queued', 'running'].includes(b.state) ||
           (isRefresh(b) &&
@@ -710,16 +1140,22 @@ export class Wechat2RssSubscriptionBatches {
               ['waiting', 'submitting'].includes(item.state),
             )),
       );
+      // A delayed retry in one round must not monopolize independent later work.
+      let b: Batch | undefined;
+      for (const candidate of candidates) {
+        if (candidate.instance !== hash(this.instance())) {
+          candidate.state = 'paused';
+          await this.write(candidate);
+          return;
+        }
+        if (isRefresh(candidate)) {
+          if (await this.runRefresh(candidate)) return;
+          continue;
+        }
+        b = candidate;
+        break;
+      }
       if (!b) return;
-      if (b.instance !== hash(this.instance())) {
-        b.state = 'paused';
-        await this.write(b);
-        return;
-      }
-      if (isRefresh(b)) {
-        await this.runRefresh(b);
-        return;
-      }
       // Accepted cache work is independent of later serial submissions. Each
       // new submission still checks the account and keeps its one-shot receipt.
       for (const prior of b.items)
@@ -803,48 +1239,64 @@ export class Wechat2RssSubscriptionBatches {
         ((await this.records()).some(
           (b) =>
             ['queued', 'running'].includes(b.state) ||
+            automaticRecovery(b) ||
+            (this.reconcile &&
+              isRefresh(b) &&
+              b.items.some((item) => item.submissionUnknown)) ||
             (isRefresh(b) &&
               b.state === 'stopped' &&
               b.items.some((item) =>
                 ['waiting', 'submitting'].includes(item.state),
               )),
         ) ||
-          (!cacheOnlyRun && (await this.consumer?.hasPending())))
+          (!cacheOnlyRun && (await this.consumerPending())))
       )
         this.schedule();
     }
   }
   private async runRefresh(b: Batch) {
+    let changed = false;
     const unknown = b.items.find((i) => i.state === 'submitting');
     if (unknown) {
-      unknown.state = 'blocked';
-      unknown.accepted = false;
-      unknown.submissionUnknown = true;
-      unknown.message =
-        '上游提交回执未确认，已暂停；不会自动重发，请核对原请求。';
-      if (b.state !== 'stopped') b.state = 'paused';
+      unknown.state = unknown.accepted === true ? 'waiting' : 'blocked';
+      unknown.submissionUnknown = unknown.accepted !== true;
+      unknown.message = '本号提交回执未确认；其他订阅继续，本号不会自动重发。';
+      if (b.state !== 'stopped')
+        b.state = b.items.some((item) =>
+          ['queued', 'waiting'].includes(item.state),
+        )
+          ? 'running'
+          : 'completed';
       await this.write(b);
-      return;
+      changed = true;
     }
     // Carrying the 17:30 tail through midnight would submit new requests in
-    // the user's blackout. Expire only unsent automatic items at midnight;
-    // accepted cache work and all manual/subscription intents remain intact.
+    // the user's blackout. Ordinary unsent work expires at midnight; explicit
+    // preparation retries retain their absolute deadline and obey quiet hours.
     if (b.purpose === 'scheduled-refresh' && !b.cacheOnly) {
       const day = (value: number) =>
         Math.floor((value + 8 * 3600000) / 86400000);
       if (day(this.now()) > day(b.createdAt)) {
+        let expired = false;
         for (const pending of b.items)
-          if (pending.state === 'queued') {
+          if (pending.state === 'queued' && !pending.retryDeadlineAt) {
             pending.state = 'cancelled';
             pending.message =
               'Previous automatic round expired at Shanghai midnight; not submitted.';
+            expired = true;
           }
-        if (!b.items.some((i) => ['queued', 'waiting'].includes(i.state))) {
+        if (
+          !b.items.some((i) => ['queued', 'waiting'].includes(i.state)) &&
+          b.state !== 'completed'
+        ) {
           b.state = 'completed';
           await this.write(b);
-          return;
+          return true;
         }
-        await this.write(b);
+        if (expired) {
+          await this.write(b);
+          changed = true;
+        }
       }
     }
     const maySubmit =
@@ -855,24 +1307,77 @@ export class Wechat2RssSubscriptionBatches {
     const item =
       b.items.find(
         (i) =>
-          maySubmit && i.state === 'queued' && b.nextSubmissionAt <= this.now(),
+          maySubmit &&
+          i.state === 'queued' &&
+          i.accepted !== true &&
+          !i.submissionUnknown &&
+          !i.retryExhausted &&
+          !i.waitingForReceipt &&
+          b.nextSubmissionAt <= this.now() &&
+          (i.retryAfter || 0) <= this.now(),
       ) ||
       b.items.find(
         (i) => i.state === 'waiting' && (i.refreshAfter || 0) <= this.now(),
       );
-    if (!item || !this.refresh) return;
+    if (!item || !this.refresh) return changed;
     const stage = item.state === 'queued' ? 'submit' : 'cache';
+    const retryClaim =
+      stage === 'submit' &&
+      b.purpose === 'scheduled-refresh' &&
+      safePreparation(item);
+    const claimExhaustion = (claimed = false) => {
+      if (!retryClaim) return undefined;
+      return this.now() >=
+        (item.retryDeadlineAt || b.createdAt + AUTOMATIC_RETRY_WINDOW)
+        ? 'deadline'
+        : !claimed &&
+            (item.preparationRetries || 0) >= AUTOMATIC_PREPARATION_LIMIT
+          ? 'attempt-limit'
+          : undefined;
+    };
+    const expireClaim = async (
+      exhausted: NonNullable<ReturnType<typeof claimExhaustion>>,
+    ) => {
+      item.state = 'failed';
+      item.retryExhausted = exhausted;
+      item.message = '补试次数或期限已用尽，本次更新未提交。';
+      b.state = b.items.some((pending) =>
+        ['queued', 'waiting', 'submitting'].includes(pending.state),
+      )
+        ? 'running'
+        : 'completed';
+      await this.write(b);
+    };
     if (stage === 'submit') {
       if (
         (await this.records()).some(
           (record) => record.nextSubmissionAt > this.now(),
         )
       )
-        return;
+        return changed;
+      // Recovery and receipt reads may cross the deadline. Check again after
+      // the last asynchronous read, before reserving this attempt on disk.
+      const exhausted = claimExhaustion();
+      if (exhausted) {
+        await expireClaim(exhausted);
+        return false; // Yield to independent later rounds.
+      }
+      // Persist the bounded attempt before the callback can run. An interrupted
+      // attempt consumes its budget and becomes unknown until read-only proof.
+      if (retryClaim)
+        item.preparationRetries = (item.preparationRetries || 0) + 1;
+      item.refreshClaimedAt = this.now();
       item.state = 'submitting';
       b.state = 'running';
       b.nextSubmissionAt = this.now() + 30000;
       await this.write(b); // Reserve exactly once before an /add can leave the process.
+      // Persistence itself can cross the deadline. No callback has run yet,
+      // so this process can safely terminate the claim without a platform call.
+      const expiredAfterWrite = claimExhaustion(true);
+      if (expiredAfterWrite) {
+        await expireClaim(expiredAfterWrite);
+        return false;
+      }
     }
     let result: BatchOutcome;
     try {
@@ -892,21 +1397,63 @@ export class Wechat2RssSubscriptionBatches {
         submissionUnknown: stage === 'submit',
         message:
           stage === 'submit'
-            ? '上游更新回执未确认，已暂停；不会自动重发。'
+            ? '本号更新回执未确认；其他订阅继续，本号不会自动重发。'
             : local
               ? '本地缓存处理失败；其他订阅继续，本次请求不会重发。'
               : '缓存检查失败，已暂停；上游请求不会重发。',
       };
     }
-    if (this.stopped) return;
+    if (this.stopped) return true;
     const current = await this.read(b.batchId);
-    if (!current) return;
+    if (!current) return true;
     const target = current.items[item.index];
     Object.assign(target, result);
+    if (stage === 'cache') target.accepted = true;
+    if (
+      stage === 'submit' &&
+      result.retryable === true &&
+      result.stopBatch === false &&
+      ['failed', 'queued'].includes(result.state) &&
+      target.accepted === false &&
+      !target.submissionUnknown
+    ) {
+      const automatic = current.purpose === 'scheduled-refresh';
+      const limit = automatic ? AUTOMATIC_PREPARATION_LIMIT : 3;
+      if (!retryClaim)
+        target.preparationRetries = Math.min(
+          limit,
+          (target.preparationRetries || 0) + 1,
+        );
+      target.stopBatch = false;
+      if (automatic)
+        target.retryDeadlineAt = current.createdAt + AUTOMATIC_RETRY_WINDOW;
+      target.retryExhausted =
+        target.preparationRetries! >= limit
+          ? 'attempt-limit'
+          : automatic && this.now() >= target.retryDeadlineAt!
+            ? 'deadline'
+            : undefined;
+      target.state = target.retryExhausted
+        ? 'failed'
+        : current.state === 'stopped'
+          ? 'cancelled'
+          : 'queued';
+      target.retryAfter =
+        this.now() + Math.min(1800000, 30000 * 2 ** target.preparationRetries!);
+      target.message = target.retryExhausted
+        ? '补试次数或期限已用尽，本次更新未提交。'
+        : '提交前准备失败，后台已保存限次补试计划。';
+    }
+    if (
+      target.accepted ||
+      target.submissionUnknown ||
+      ['succeeded', 'skipped'].includes(target.state)
+    )
+      target.retryable = false;
     if (stage === 'submit' && target.state === 'waiting' && !target.accepted) {
       target.state = 'blocked';
       target.submissionUnknown = true;
-      target.message = '提交回执未确认，已暂停；不会自动重发。';
+      target.message = '本号提交回执未确认；其他订阅继续，本号不会自动重发。';
     }
     target.refreshChecks =
       stage === 'cache' ? (target.refreshChecks || 0) + 1 : 0;
@@ -919,12 +1466,12 @@ export class Wechat2RssSubscriptionBatches {
     }
     if (current.state !== 'stopped')
       current.state =
-        target.submissionUnknown ||
-        (['blocked', 'failed'].includes(target.state) &&
-          !(
-            target.stopBatch === false &&
-            (stage === 'cache' || target.accepted)
-          ))
+        !target.submissionUnknown &&
+        ['blocked', 'failed'].includes(target.state) &&
+        !(
+          target.stopBatch === false &&
+          (stage === 'cache' || target.accepted || target.retryable)
+        )
           ? 'paused'
           : current.items.some((i) =>
                 (current.cacheOnly
@@ -935,6 +1482,9 @@ export class Wechat2RssSubscriptionBatches {
             ? 'running'
             : 'completed';
     await this.write(current);
+    if (target.state === 'succeeded' && target.accepted)
+      await this.coverPreparation(await this.records());
+    return true;
   }
   close() {
     this.stopped = true;

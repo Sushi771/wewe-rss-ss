@@ -46,8 +46,9 @@ export async function findCachedDownloadArticle(
       throw unavailable();
     if (!identity && ![row.sourceUrl, row.verifiedSourceUrl].includes(url))
       throw unavailable();
-    if (!row.contentHtml || row.lastBodyStatus === 'unavailable')
-      throw unavailable();
+    // A later unsuccessful upstream check cannot revoke a verified local body.
+    // Validate its actual contents below, independently from request history.
+    if (!row.contentHtml) throw unavailable();
     verifiedDownloadBody(row.contentHtml);
     return row;
   } catch {
@@ -61,8 +62,16 @@ export async function buildCachedArticleDownload(
   directory: string,
 ) {
   try {
+    verifiedDownloadBody(article.contentHtml);
     return await buildCompleteArticleDownload(
-      article,
+      {
+        ...article,
+        // This local export view is validated above; never rewrite persisted history.
+        lastBodyStatus:
+          article.lastBodyStatus === 'unavailable'
+            ? 'available'
+            : article.lastBodyStatus,
+      },
       bodyRetryTarget(article).url,
       directory,
     );

@@ -49,6 +49,8 @@ function load(file, modules) {
     exports: module.exports,
     require: (name) => {
       if (name === '@web/utils/feed-selection') return selection;
+      if (name === '@web/utils/article-body-state')
+        return loadActualTs('apps/web/src/utils/article-body-state.ts');
       if (name === '@wewe-rss/shared') return articleDates;
       assert(name in modules, name);
       return modules[name];

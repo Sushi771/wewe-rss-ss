@@ -57,6 +57,10 @@ export class CacheSyncService
             (feed) => resolveCollectionRoute(feed).channel === 'wechat2rss',
           ),
         read: (feed, name) => provider.fetchListedArticles(feed, name),
+        syncText: (id, page) =>
+          this.trpc.syncCachedWechat2RssPage(id, page, false, {
+            fetchMedia: false,
+          }),
         sync: (id, page, listOnly) =>
           this.trpc.syncCachedWechat2RssPage(id, page, listOnly),
       });
