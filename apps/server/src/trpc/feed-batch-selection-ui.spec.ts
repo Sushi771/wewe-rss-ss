@@ -7,6 +7,7 @@ import axios from 'axios';
 import { TrpcRouter } from './trpc.router';
 import { TrpcService } from './trpc.service';
 import { getLoadedSelection } from '../../../web/src/utils/feed-selection';
+import { articleBodyState } from '../../../web/src/utils/article-body-state';
 
 // Execute the actual handlers and component, with offline query/hook fixtures.
 // This checks behavior and accessibility props; it is not browser visual proof.
@@ -167,41 +168,43 @@ function listFixture(initialItems: string[]) {
     },
   }).outputText;
   const requireMock = (name: string) =>
-    name === 'react'
-      ? react
-      : name === 'react/jsx-runtime'
-        ? { jsx, jsxs: jsx }
-        : name === '@nextui-org/react'
-          ? Object.fromEntries(
-              [
-                'Checkbox',
-                'Button',
-                'Spinner',
-                'Modal',
-                'ModalContent',
-                'ModalHeader',
-                'ModalBody',
-              ].map((n) => [n, n]),
-            )
-          : name === '@web/utils/trpc'
-            ? { trpc }
-            : name === '@web/utils/feed-selection'
-              ? { getLoadedSelection }
-              : name === '@web/utils/use-article-list-position'
-                ? {
-                    useArticleListPosition: () => ({
-                      scrollRef: { current: null },
-                      capturePosition() {},
-                      cancelRestore() {},
-                      rememberForReader() {},
-                      restoreAfterReader() {},
-                    }),
-                  }
-                : name === 'react-router-dom'
-                  ? { useParams: () => params }
-                  : name === '@wewe-rss/shared'
-                    ? { formatShanghaiPublicationTime: () => 'fixture-time' }
-                    : {};
+    name === '@web/utils/article-body-state'
+      ? { articleBodyState }
+      : name === 'react'
+        ? react
+        : name === 'react/jsx-runtime'
+          ? { jsx, jsxs: jsx }
+          : name === '@nextui-org/react'
+            ? Object.fromEntries(
+                [
+                  'Checkbox',
+                  'Button',
+                  'Spinner',
+                  'Modal',
+                  'ModalContent',
+                  'ModalHeader',
+                  'ModalBody',
+                ].map((n) => [n, n]),
+              )
+            : name === '@web/utils/trpc'
+              ? { trpc }
+              : name === '@web/utils/feed-selection'
+                ? { getLoadedSelection }
+                : name === '@web/utils/use-article-list-position'
+                  ? {
+                      useArticleListPosition: () => ({
+                        scrollRef: { current: null },
+                        capturePosition() {},
+                        cancelRestore() {},
+                        rememberForReader() {},
+                        restoreAfterReader() {},
+                      }),
+                    }
+                  : name === 'react-router-dom'
+                    ? { useParams: () => params }
+                    : name === '@wewe-rss/shared'
+                      ? { formatShanghaiPublicationTime: () => 'fixture-time' }
+                      : {};
   new Function('require', 'exports', 'module', compiled)(
     requireMock,
     mod.exports,

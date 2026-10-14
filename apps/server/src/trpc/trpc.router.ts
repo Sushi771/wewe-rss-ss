@@ -1138,11 +1138,14 @@ export class TrpcRouter {
         }
 
         return {
-          items: items.map((item) => ({
-            ...item,
-            bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
-            bodyRetryResult: readBodyRetryResult(item.lastBodyRetry),
-          })),
+          items: items.map((item) => {
+            const { lastBodyRetry, ...publicItem } = item;
+            return {
+              ...publicItem,
+              bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
+              bodyRetryResult: readBodyRetryResult(lastBodyRetry),
+            };
+          }),
           nextCursor,
         };
       }),
@@ -1158,11 +1161,12 @@ export class TrpcRouter {
             message: `No article with id '${id}'`,
           });
         }
+        const { lastBodyRetry, ...publicArticle } = article;
         return {
-          ...article,
+          ...publicArticle,
           bodyCached: Boolean(article.contentHtml),
           bodyRetry: bodyRetryAvailability(article, !!(ctx as any).isLocal),
-          bodyRetryResult: readBodyRetryResult(article.lastBodyRetry),
+          bodyRetryResult: readBodyRetryResult(lastBodyRetry),
         };
       }),
 

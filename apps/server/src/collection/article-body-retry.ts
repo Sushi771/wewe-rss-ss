@@ -131,7 +131,39 @@ export function readBodyRetryResult(raw: string | null) {
       typeof value.filled !== 'boolean'
     )
       return null;
-    return { ...value, message: bodyRetryMessages[value.code] };
+    const reasons = [
+      'timeout',
+      'connection_refused',
+      'dns',
+      'http_status',
+      'network',
+      'invalid_response',
+    ];
+    const failure = value.requestFailure;
+    const requestFailure =
+      value.code === 'request_failed' &&
+      failure &&
+      reasons.includes(failure.reason)
+        ? {
+            reason: failure.reason,
+            ...(failure.reason === 'http_status' &&
+            Number.isInteger(failure.httpStatus) &&
+            failure.httpStatus! >= 100 &&
+            failure.httpStatus! <= 599
+              ? { httpStatus: failure.httpStatus }
+              : {}),
+          }
+        : undefined;
+    // Never spread persisted diagnostics: legacy values may contain raw URLs/errors.
+    return {
+      status: value.status,
+      code: value.code,
+      attemptedAt: value.attemptedAt,
+      cached: value.cached,
+      filled: value.filled,
+      message: bodyRetryMessages[value.code],
+      ...(requestFailure ? { requestFailure } : {}),
+    };
   } catch {
     return null;
   }

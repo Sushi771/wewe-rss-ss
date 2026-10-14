@@ -9,6 +9,7 @@ on:
         main,
         codex/manual-refresh-download-integration,
         codex/cold-launch-profile,
+        codex/automatic-refresh-recovery-20261013,
       ]
 
 jobs:
@@ -66,6 +67,8 @@ jobs:
         run: node --test scripts/wechat-source-metrics-ui.test.cjs
       - name: Test compact reading toolbar and collapsed diagnostics offline
         run: node --test scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs
+      - name: Test current article cache and retry history offline
+        run: node --test scripts/article-body-state.test.cjs
       - name: Test Shanghai date shortcuts and isolated reader find offline
         env:
           NODE_OPTIONS: --experimental-websocket

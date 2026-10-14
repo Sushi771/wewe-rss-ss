@@ -607,6 +607,44 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     expect(axios.get).not.toHaveBeenCalled();
     expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
   });
+  it('list and detail responses exclude raw persisted diagnostic secrets while retaining safe history', async () => {
+    const raw = JSON.stringify({
+      status: 'failed',
+      code: 'request_failed',
+      attemptedAt: time,
+      cached: true,
+      filled: false,
+      message: 'Cookie=SECRET',
+      rawError: 'SECRET',
+      requestFailure: {
+        reason: 'http_status',
+        httpStatus: 302,
+        url: 'https://evil.invalid/SECRET',
+      },
+    });
+    await prisma.article.update({
+      where: { id },
+      data: { lastBodyRetry: raw, contentHtml: oldBody },
+    });
+    const list = await caller().article.list({
+      mpId,
+      search: title,
+      limit: 20,
+    });
+    const detail = await caller().article.byId(id);
+    for (const response of [list.items[0], detail]) {
+      expect(response).not.toHaveProperty('lastBodyRetry');
+      expect(response.bodyRetryResult).toMatchObject({
+        status: 'failed',
+        requestFailure: { reason: 'http_status', httpStatus: 302 },
+      });
+      expect(JSON.stringify(response)).not.toMatch(
+        /SECRET|Cookie|evil|rawError/,
+      );
+    }
+    expect((await read()).lastBodyRetry).toBe(raw);
+  });
+
   it('accepts a current official long canonical for a canonical-ID row without changing old time', async () => {
     await prisma.article.update({
       where: { id },
