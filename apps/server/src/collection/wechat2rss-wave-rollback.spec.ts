@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -68,6 +69,78 @@ describe('actual serial rollback worker (offline)', () => {
   };
   const file = (id: string) =>
     path.join(directory, '.wechat2rss-subscription-batches', id + '.json');
+  it.each([
+    ['wave', Wechat2RssSubscriptionBatches],
+    ['compatible serial', Compatible],
+  ])(
+    '%s preserves a stop while an account check awaits',
+    async (_name, Type) => {
+      const worker = make(Type as typeof Wechat2RssSubscriptionBatches);
+      jest.spyOn(worker as any, 'schedule').mockImplementation(() => {});
+      const submit = jest.fn();
+      worker.attachRefresh(submit);
+      const holder = await worker.enqueueRefresh(ids.slice(0, 1));
+      const old = { batchId: randomUUID() };
+      const blocked = JSON.parse(
+        await fs.readFile(file(holder.batchId), 'utf8'),
+      );
+      blocked.state = 'paused';
+      Object.assign(blocked.items[0], {
+        state: 'blocked',
+        sharedRestriction: true,
+        restrictionKind: 'rate-limit',
+        stopBatch: true,
+        accepted: false,
+      });
+      await fs.writeFile(file(holder.batchId), JSON.stringify(blocked));
+      const previous = JSON.parse(
+        await fs.readFile(file(holder.batchId), 'utf8'),
+      );
+      previous.batchId = old.batchId;
+      previous.items = ids.slice(1, 3).map((feedId, index) => ({
+        index,
+        feedId,
+        state: 'queued',
+        message: 'fixture pending',
+        retryable: true,
+        accepted: false,
+        stopBatch: false,
+      }));
+      previous.purpose = 'scheduled-refresh';
+      previous.intentKey = 'c'.repeat(64);
+      previous.state = 'paused';
+      Object.assign(previous.items[0], {
+        state: 'failed',
+        retryable: true,
+        accepted: false,
+        stopBatch: false,
+        preparationRetries: 3,
+      });
+      await fs.writeFile(file(old.batchId), JSON.stringify(previous));
+      let finish!: (clear: boolean) => void;
+      let entered = false;
+      worker.attachRestrictionCheck(() => {
+        if (entered) return Promise.resolve(false);
+        entered = true;
+        return new Promise<boolean>((resolve) => {
+          finish = resolve;
+        });
+      });
+      const due = worker.runDue();
+      await until(() => entered);
+      await worker.stop(old.batchId);
+      finish(false);
+      await due;
+      // Recovery must also reject a stale object at its persistence boundary.
+      await (worker as any).recoverPreparation(previous);
+      const retained = JSON.parse(await fs.readFile(file(old.batchId), 'utf8'));
+      expect(retained.state).toBe('stopped');
+      expect(retained.items[0].state).toBe('failed');
+      expect(retained.items[0].preparationRetries).toBe(3);
+      expect(retained.items[1].state).toBe('cancelled');
+      expect(submit).not.toHaveBeenCalled();
+    },
+  );
   async function until(check: () => boolean) {
     for (let i = 0; i < 1000; i++) {
       if (check()) return;

@@ -544,7 +544,30 @@ export class Wechat2RssSubscriptionBatches {
       throw e;
     }
   }
-  private async write(b: Batch) {
+  private readonly batchWrites = new Map<string, Promise<void>>();
+  private async write(b: Batch, preserveStopped = false) {
+    const previous = this.batchWrites.get(b.batchId) || Promise.resolve();
+    const pending = previous
+      .catch(() => {})
+      .then(async () => {
+        if (preserveStopped) {
+          const latest = await this.read(b.batchId);
+          if (!latest || latest.state === 'stopped') {
+            if (latest) Object.assign(b, latest);
+            return;
+          }
+        }
+        await this.persistWrite(b);
+      });
+    this.batchWrites.set(b.batchId, pending);
+    try {
+      await pending;
+    } finally {
+      if (this.batchWrites.get(b.batchId) === pending)
+        this.batchWrites.delete(b.batchId);
+    }
+  }
+  private async persistWrite(b: Batch) {
     b.updatedAt = this.now();
     const file = path.join(await this.storage(), b.batchId + '.json');
     const temp = file + '.' + randomUUID() + '.tmp';
@@ -1020,7 +1043,7 @@ export class Wechat2RssSubscriptionBatches {
     )
       ? 'running'
       : 'completed';
-    await this.write(b);
+    await this.write(b, true);
   }
   /** A later equivalent success satisfies an older unsent update intent. This
    * is an explanatory skip, never a fabricated success or another submission. */
@@ -1138,7 +1161,7 @@ export class Wechat2RssSubscriptionBatches {
         )
           ? 'running'
           : 'completed';
-      await this.write(b);
+      await this.write(b, true);
     }
   }
   async runDue() {
@@ -1157,8 +1180,9 @@ export class Wechat2RssSubscriptionBatches {
       if (this.stopped) return;
       const pending = await this.records();
       for (const record of pending) await this.releaseSharedRestriction(record);
-      await this.coverPreparation(await this.records());
-      for (const record of pending) await this.recoverPreparation(record);
+      const latestRecords = await this.records();
+      await this.coverPreparation(latestRecords);
+      for (const record of latestRecords) await this.recoverPreparation(record);
       // Read-only reconciliation can prove preparation failed before the one-shot
       // reservation. An unknown receipt alone never authorizes another /add.
       if (this.reconcile)
