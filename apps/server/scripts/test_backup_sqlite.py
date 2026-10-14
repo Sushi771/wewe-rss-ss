@@ -143,13 +143,45 @@ class BackupTests(unittest.TestCase):
             backup.sha256(self.database, time.monotonic() - 1)
 
     def test_copy_budget_configuration_is_bounded_and_fails_closed(self):
-        for value in ("nan", "inf", "0", "0.1", "-1", "16", "not-a-number"):
+        for value in ("nan", "inf", "0", "0.1", "-1", "46", "not-a-number"):
             with self.subTest(value=value), patch.dict(os.environ, {"SQLITE_BACKUP_COPY_TIMEOUT_SECONDS": value}):
                 with self.assertRaises(ValueError):
                     backup.create_backup(self.database, self.backups)
                 self.assertFalse(self.backups.exists())
         with patch.dict(os.environ, {"SQLITE_BACKUP_COPY_TIMEOUT_SECONDS": "1"}):
             self.assertEqual(backup.create_backup(self.database, self.backups)["integrityCheck"], "ok")
+
+    def test_slow_copy_exceeding_old_budget_remains_bounded_by_total_deadline(self):
+        real_connect = sqlite3.connect
+        real_clock = time.monotonic
+        elapsed = [0]
+
+        class SlowSource(sqlite3.Connection):
+            def backup(source, destination, **kwargs):
+                original = kwargs["progress"]
+                def progress(*args):
+                    # Real SQLite copy, virtual disk delay: no 20-second test sleep.
+                    elapsed[0] = 20
+                    original(*args)
+                kwargs["progress"] = progress
+                return super().backup(destination, **kwargs)
+
+        def connect(*args, **kwargs):
+            if str(args[0]) == self.database.as_uri() + "?mode=ro":
+                kwargs["factory"] = SlowSource
+            return real_connect(*args, **kwargs)
+
+        with patch.object(backup.sqlite3, "connect", connect), \
+                patch.object(backup.time, "monotonic", lambda: real_clock() + elapsed[0]):
+            with self.assertRaises(TimeoutError):
+                backup.create_backup(self.database, self.backups, copy_timeout=15)
+            elapsed[0] = 0
+            report = backup.create_backup(self.database, self.backups)
+            self.assertEqual(report["integrityCheck"], "ok")
+            self.assertGreaterEqual(report["diagnostics"]["milliseconds"]["copy"], 20000)
+            elapsed[0] = 0
+            with self.assertRaises(TimeoutError):
+                backup.create_backup(self.database, self.backups, timeout=10)
 
     def test_short_writer_timeout_rolls_back_and_retries_same_intent_after_snapshot(self):
         # A 50ms writer cannot commit while a rollback-journal snapshot is held.
