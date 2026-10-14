@@ -660,14 +660,23 @@ describe('cache delta through original SQLite merge', () => {
     const sync = jest.fn((id: string, p: ProviderPage, listOnly: boolean) =>
       trpc.syncCachedWechat2RssPage(id, p, listOnly),
     );
+    const syncText = jest.fn((id: string, p: ProviderPage) =>
+      trpc.syncCachedWechat2RssPage(id, p, false, { fetchMedia: false }),
+    );
+    let mediaEnabled = true;
+    const queries = jest.spyOn(prisma, '$queryRaw');
+    const flagQueries = () =>
+      queries.mock.calls.filter((args) =>
+        String(args[0]).includes('WITH RECURSIVE image_tags'),
+      );
     const engine = new CacheSyncEngine({
       now: () => now,
       list: async () => [metadata],
       localFeeds: async () => [{ id: mpId, mpName: 'fixture' }],
       read: async () => snapshot,
       sync,
-      inspectLocalMedia: (id, p) =>
-        trpc.syncCachedWechat2RssPage(id, p, false, { inspectOnly: true }),
+      syncText,
+      mediaEnabled: () => mediaEnabled,
     });
     const settle = async () => {
       for (let i = 0; i < 100; i++) {
@@ -684,7 +693,16 @@ describe('cache delta through original SQLite merge', () => {
         data: { contentHtml: body },
       });
       network.mockClear();
+      syncText.mockClear();
+      queries.mockClear();
+      mediaEnabled = false;
       now += 60000;
+      await engine.tick();
+      await settle();
+      expect(syncText).toHaveBeenCalledTimes(1);
+      expect(flagQueries()).toHaveLength(1);
+      expect(network).not.toHaveBeenCalled();
+      mediaEnabled = true;
       await engine.tick();
       await settle();
       expect(network).toHaveBeenCalledTimes(1);
@@ -697,13 +715,18 @@ describe('cache delta through original SQLite merge', () => {
       expect(stored.metrics).toBe('{"note":"keep"}');
       now += 60000;
       network.mockClear();
+      syncText.mockClear();
+      queries.mockClear();
       await engine.tick();
       await settle();
       expect(network).not.toHaveBeenCalled();
+      expect(syncText).toHaveBeenCalledTimes(1);
+      expect(flagQueries()).toHaveLength(1);
     } finally {
       engine.close();
       network.mockRestore();
       clock.mockRestore();
+      queries.mockRestore();
     }
   });
   it('a bounded internal night permit downloads once; ordinary night and operational pause remain closed', async () => {

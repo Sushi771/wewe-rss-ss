@@ -47,10 +47,6 @@ export class CacheSyncService
           process.env.WECHAT2RSS_CACHE_MEDIA !== '0' && !safety.isBlocked(),
         onMediaBlocked: () => safety.stop(),
         mediaStopped: () => safety.isBlocked(),
-        inspectLocalMedia: (id, page) =>
-          this.trpc.syncCachedWechat2RssPage(id, page, false, {
-            inspectOnly: true,
-          }),
         list: () => provider.listSubscriptions(),
         localFeeds: async () =>
           (await this.prisma.feed.findMany({ where: { status: 1 } })).filter(
