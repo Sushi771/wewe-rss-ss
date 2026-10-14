@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 const stoppingBackups = new Map<string, Set<ReturnType<typeof spawn>>>();
 
 function logDiagnostic(attempt: string, outcome: string, output: string) {
-  let diagnostics: Record<string, unknown> = {};
+  const diagnostics: Record<string, unknown> = {};
   try {
     const raw = JSON.parse(output)?.diagnostics;
     if (
