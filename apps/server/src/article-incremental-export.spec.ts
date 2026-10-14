@@ -78,11 +78,13 @@ describe('incremental export: synthetic files and mocked media only', () => {
       identity: base.identity,
     });
     const temporary = jest.spyOn(fs, 'mkdtemp');
-    expect(await store.save(callback)).toMatchObject({
+    const repeated = await store.save(callback);
+    expect(repeated).toMatchObject({
       status: 'skipped',
       markdownPath: first.markdownPath,
       legacyLayoutRetained: true,
     });
+    expect(repeated.mediaComplete).not.toBe(false);
     expect(callback).not.toHaveBeenCalled();
     expect(temporary).not.toHaveBeenCalled();
     expect(images.fetchAllowedImage).not.toHaveBeenCalled();
@@ -90,6 +92,43 @@ describe('incremental export: synthetic files and mocked media only', () => {
       'User edits and notes',
     );
   });
+  it.each(['<img>', '<img src=" " data-src=" ">'])(
+    'downgrades a legacy false-complete receipt for %s without preparing or changing user notes',
+    async (missingImage) => {
+      const cached = {
+        contentHtml: `<div id="js_content"><p>Body</p>${missingImage}</div>`,
+      };
+      const first = await store.save(prepare(cached));
+      const file = await receiptAt(first.directory);
+      const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
+      delete receipt.imageMap;
+      await fs.writeFile(
+        file,
+        JSON.stringify({ ...receipt, mediaComplete: true }),
+      );
+      const legacyBytes = await fs.readFile(file, 'utf8');
+      await fs.writeFile(first.markdownPath, 'User handwritten notes');
+      jest.mocked(images.fetchAllowedImage).mockClear();
+      const base = prepare(cached);
+      const callback: ArticlePreparation = Object.assign(jest.fn(base), {
+        identity: base.identity,
+      });
+      const temporary = jest.spyOn(fs, 'mkdtemp');
+      expect(await store.save(callback)).toMatchObject({
+        status: 'skipped',
+        alreadySaved: true,
+        mediaComplete: false,
+        markdownPath: first.markdownPath,
+      });
+      expect(callback).not.toHaveBeenCalled();
+      expect(temporary).not.toHaveBeenCalled();
+      expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+      expect(await fs.readFile(first.markdownPath, 'utf8')).toBe(
+        'User handwritten notes',
+      );
+      expect(await fs.readFile(file, 'utf8')).toBe(legacyBytes);
+    },
+  );
   it('different roots save normally and simultaneous repeat clicks create only one note', async () => {
     const [first, second] = await Promise.all([
       store.save(prepare()),
