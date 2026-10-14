@@ -39,9 +39,6 @@ export async function buildArticleMarkdown(
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
   let html = article.contentHtml || '';
-  const mediaComplete =
-    article.lastBodyStatus !== 'images-pending' &&
-    !html.includes('data-wewe-image-pending=');
   if (!html && article.lastBodyStatus === 'unavailable')
     throw new TRPCError({
       code: 'PRECONDITION_FAILED',
@@ -79,6 +76,20 @@ export async function buildArticleMarkdown(
       '未获取到正文，请在 WeChatDownload 下载对应 HTML 后重新导入',
     );
   }
+
+  // Sanitization may retain an image element while dropping an unsafe source.
+  // Removing that element for Markdown is not evidence that all media is saved.
+  const mediaComplete =
+    article.lastBodyStatus !== 'images-pending' &&
+    !html.includes('data-wewe-image-pending=') &&
+    !contentEl
+      .find('img')
+      .toArray()
+      .some(
+        (img) =>
+          !($(img).attr('src') || '').trim() &&
+          !($(img).attr('data-src') || '').trim(),
+      );
 
   if (downloadPath) {
     const attachmentsDir = path.join(downloadPath, imageDirectory);
