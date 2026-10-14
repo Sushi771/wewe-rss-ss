@@ -386,6 +386,38 @@ describe('five-request waves (offline)', () => {
       );
     }
   });
+  it('recovers all five interrupted claims as unknown after worker shutdown without replay', async () => {
+    const first = make(),
+      releases: Array<() => void> = [];
+    first.attachRefreshPreparation(async () => ({
+      release: () => {},
+      submit: async () => {
+        await new Promise<void>((r) => releases.push(r));
+        return accepted;
+      },
+    }));
+    const batch = await first.enqueueRefresh(ids.slice(0, 5));
+    const pending = first.runDue();
+    await until(() => releases.length === 5);
+    first.close();
+    releases.forEach((r) => r());
+    await pending;
+    const next = make(),
+      submit = jest.fn().mockResolvedValue(accepted);
+    next.attachRefreshPreparation(async () => ({ release: () => {}, submit }));
+    clock += 60000;
+    await next.runDue();
+    const restored = (await next.list()).find(
+      (b) => b.batchId === batch.batchId,
+    )!;
+    expect(
+      restored.items.every(
+        (i) =>
+          i.submissionUnknown && i.accepted === false && i.state === 'blocked',
+      ),
+    ).toBe(true);
+    expect(submit).not.toHaveBeenCalled();
+  });
   it('rechecks the automatic deadline after preparation without resetting its budget or sending', async () => {
     const keys = [
       'WECHAT2RSS_ACTIVE_SCHEDULE',
