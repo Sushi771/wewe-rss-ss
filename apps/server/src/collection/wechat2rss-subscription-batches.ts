@@ -1119,6 +1119,29 @@ export class Wechat2RssSubscriptionBatches {
       stage === 'submit' &&
       b.purpose === 'scheduled-refresh' &&
       safePreparation(item);
+    const claimExhaustion = (claimed = false) => {
+      if (!retryClaim) return undefined;
+      return this.now() >=
+        (item.retryDeadlineAt || b.createdAt + AUTOMATIC_RETRY_WINDOW)
+        ? 'deadline'
+        : !claimed &&
+            (item.preparationRetries || 0) >= AUTOMATIC_PREPARATION_LIMIT
+          ? 'attempt-limit'
+          : undefined;
+    };
+    const expireClaim = async (
+      exhausted: NonNullable<ReturnType<typeof claimExhaustion>>,
+    ) => {
+      item.state = 'failed';
+      item.retryExhausted = exhausted;
+      item.message = '补试次数或期限已用尽，本次更新未提交。';
+      b.state = b.items.some((pending) =>
+        ['queued', 'waiting', 'submitting'].includes(pending.state),
+      )
+        ? 'running'
+        : 'completed';
+      await this.write(b);
+    };
     if (stage === 'submit') {
       if (
         (await this.records()).some(
@@ -1126,6 +1149,13 @@ export class Wechat2RssSubscriptionBatches {
         )
       )
         return changed;
+      // Recovery and receipt reads may cross the deadline. Check again after
+      // the last asynchronous read, before reserving this attempt on disk.
+      const exhausted = claimExhaustion();
+      if (exhausted) {
+        await expireClaim(exhausted);
+        return false; // Yield to independent later rounds.
+      }
       // Persist the bounded attempt before the callback can run. An interrupted
       // attempt consumes its budget and becomes unknown until read-only proof.
       if (retryClaim)
@@ -1134,6 +1164,13 @@ export class Wechat2RssSubscriptionBatches {
       b.state = 'running';
       b.nextSubmissionAt = this.now() + 30000;
       await this.write(b); // Reserve exactly once before an /add can leave the process.
+      // Persistence itself can cross the deadline. No callback has run yet,
+      // so this process can safely terminate the claim without a platform call.
+      const expiredAfterWrite = claimExhaustion(true);
+      if (expiredAfterWrite) {
+        await expireClaim(expiredAfterWrite);
+        return false;
+      }
     }
     let result: BatchOutcome;
     try {

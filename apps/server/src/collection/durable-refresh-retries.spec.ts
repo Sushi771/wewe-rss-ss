@@ -232,6 +232,97 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
     await manager.runDue();
     expect(run.mock.calls.map((call) => call[0])).toEqual([ids[0], ids[1]]);
   });
+  it('rechecks the deadline after asynchronous unknown-receipt reconciliation and continues independent work', async () => {
+    const { manager, run } = make();
+    const batch = await seed(manager, ids.slice(0, 2));
+    const record = await disk(batch.batchId);
+    record.state = 'running';
+    Object.assign(record.items[0], {
+      state: 'queued',
+      retryAfter: 0,
+      retryDeadlineAt: batch.createdAt + 86400000,
+    });
+    Object.assign(record.items[1], {
+      state: 'blocked',
+      retryable: false,
+      submissionUnknown: true,
+    });
+    await fs.writeFile(file(batch.batchId), JSON.stringify(record));
+    clock = batch.createdAt + 86400000 - 1;
+    await manager.enqueueRefresh([ids[2]], '6'.repeat(64), 'scheduled-refresh');
+    const proof = jest.fn(async () => {
+      clock += 2;
+      return 'unknown' as const;
+    });
+    manager.attachReconciliation(proof);
+    await manager.runDue();
+    expect(proof).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls).toEqual([[ids[2], 'submit', true]]);
+    const exhausted = await disk(batch.batchId);
+    expect(exhausted.items[0]).toMatchObject({
+      state: 'failed',
+      retryExhausted: 'deadline',
+      accepted: false,
+      preparationRetries: 3,
+    });
+    expect(exhausted.items[1].submissionUnknown).toBe(true);
+    manager.close();
+    const recovered = make();
+    await recovered.manager.init();
+    await recovered.manager.runDue();
+    expect(recovered.run).not.toHaveBeenCalled();
+  });
+  it('refuses an exhausted attempt budget at claim time and yields to independent work', async () => {
+    const { manager, run } = make();
+    const batch = await seed(manager, [ids[0]]);
+    clock += 60000;
+    await manager.enqueueRefresh([ids[1]], '7'.repeat(64), 'scheduled-refresh');
+    const record = await disk(batch.batchId);
+    Object.assign(record.items[0], {
+      state: 'queued',
+      preparationRetries: 8,
+      retryAfter: 0,
+    });
+    await fs.writeFile(file(batch.batchId), JSON.stringify(record));
+    // Exercise the final claim gate independently from the earlier recovery pass.
+    expect(await (manager as any).runRefresh(record)).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+    expect((await disk(batch.batchId)).items[0]).toMatchObject({
+      state: 'failed',
+      retryExhausted: 'attempt-limit',
+      preparationRetries: 8,
+    });
+    await manager.runDue();
+    expect(run.mock.calls).toEqual([[ids[1], 'submit', true]]);
+  });
+  it('does not invoke submission when durable claim persistence crosses the absolute deadline', async () => {
+    const { manager, run } = make();
+    const batch = await seed(manager, [ids[0]]);
+    const record = await disk(batch.batchId);
+    record.state = 'running';
+    Object.assign(record.items[0], {
+      state: 'queued',
+      retryAfter: 0,
+      retryDeadlineAt: batch.createdAt + 86400000,
+    });
+    await fs.writeFile(file(batch.batchId), JSON.stringify(record));
+    clock = batch.createdAt + 86400000 - 1;
+    const write = (manager as any).write.bind(manager);
+    jest
+      .spyOn(manager as any, 'write')
+      .mockImplementation(async (current: any) => {
+        await write(current);
+        if (current.items[0].state === 'submitting') clock += 2;
+      });
+    await manager.runDue();
+    expect(run).not.toHaveBeenCalled();
+    expect((await disk(batch.batchId)).items[0]).toMatchObject({
+      state: 'failed',
+      accepted: false,
+      preparationRetries: 4,
+      retryExhausted: 'deadline',
+    });
+  });
   it('a later slot can refresh a previously successful subscription while its peer retains the original retry', async () => {
     const run = jest.fn(async (feed: string) =>
       feed === ids[0] ? failure : success,
