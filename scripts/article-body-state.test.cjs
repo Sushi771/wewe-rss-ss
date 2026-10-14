@@ -54,11 +54,11 @@ test('the real list shows current cache and historical time; stale failure canno
   const source = fs.readFileSync('apps/web/src/pages/feeds/list.tsx', 'utf8');
   assert.match(
     source,
-    /articleBodyState\(item.bodyCached, item.bodyRetryResult\).current/,
+    /articleBodyState\(item.bodyCached, item.bodyRetryResult\)\s*\.current/,
   );
   assert.match(
     source,
-    /articleBodyState\(item.bodyCached, item.bodyRetryResult\).history/,
+    /articleBodyState\(item.bodyCached, item.bodyRetryResult\)\s*\.history/,
   );
   assert.doesNotMatch(source, /item.bodyRetryResult\?\.status === 'failed'/);
 });

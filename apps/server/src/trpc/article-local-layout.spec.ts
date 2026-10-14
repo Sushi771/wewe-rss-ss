@@ -142,7 +142,7 @@ describe('all cached article local/ZIP export entry points share isolated image 
     expect(fetch).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });
-  it('missing or explicitly unavailable cache fails before original page or output requests', async () => {
+  it('missing cache fails before original page or output requests', async () => {
     const prepare = prepareCachedArticleLocalExport({
       ...items[0],
       contentHtml: '',
@@ -150,9 +150,55 @@ describe('all cached article local/ZIP export entry points share isolated image 
     await expect(prepare(join(root, 'unused'))).rejects.toThrow('正文尚未缓存');
     const caller = router.appRouter.createCaller({ errorMsg: null });
     items[0].lastBodyStatus = 'unavailable';
+    items[0].contentHtml = '';
     await expect(
       caller.article.saveToObsidian(items[0].id),
     ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+  it('single list save and batch ZIP accept complete cache despite historical unavailable, preserve notes and do not request originals', async () => {
+    items.forEach((item) => {
+      item.lastBodyStatus = 'unavailable';
+    });
+    const caller = router.appRouter.createCaller({ errorMsg: null });
+    const before = JSON.stringify(items);
+    const one = await caller.article.saveToObsidian(items[0].id);
+    expect(one).toMatchObject({ success: true, status: 'new' });
+    await fs.writeFile(one.path, 'User handwritten notes');
+    expect(await caller.article.saveToObsidian(items[0].id)).toMatchObject({
+      success: true,
+      alreadySaved: true,
+    });
+    expect(await fs.readFile(one.path, 'utf8')).toBe('User handwritten notes');
+    expect(
+      await router.buildOfflineFeedDirectory(
+        feed.id,
+        join(root, 'history-zip'),
+      ),
+    ).toMatchObject({ articles: 2, complete: 2, incomplete: [] });
+    expect(JSON.stringify(items)).toBe(before);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+  it('single and batch entry points retain media incompleteness and reject corrupt image bytes', async () => {
+    const caller = router.appRouter.createCaller({ errorMsg: null });
+    items[0].lastBodyStatus = 'images-pending';
+    items[0].contentHtml =
+      '<div id="js_content"><p>Body</p><span data-wewe-image-pending="1">Missing</span></div>';
+    const partial = await caller.article.saveToObsidian(items[0].id);
+    expect(partial).toMatchObject({ success: false, mediaComplete: false });
+    items[1].lastBodyStatus = 'unavailable';
+    items[1].contentHtml =
+      '<div id="js_content"><p>Body</p><img src="data:image/png;base64,YQ=="></div>';
+    await expect(caller.article.saveToObsidian(items[1].id)).rejects.toThrow();
+    const batch = await router.buildOfflineFeedDirectory(
+      feed.id,
+      join(root, 'bad-media-zip'),
+    );
+    if (!batch) throw new Error('Expected publisher batch');
+    expect(batch.complete).toBe(0);
+    expect(batch.incomplete).toHaveLength(2);
     expect(fetch).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });
