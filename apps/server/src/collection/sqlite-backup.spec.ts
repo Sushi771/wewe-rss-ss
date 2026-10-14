@@ -4,6 +4,7 @@ import { access, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
+import { sqliteWrites } from './sqlite-write-coordinator';
 
 jest.mock('node:child_process', () => ({ spawn: jest.fn() }));
 jest.mock('node:fs/promises', () => ({
@@ -334,7 +335,13 @@ describe('SQLite backup gate (synthetic children and mocked filesystem)', () => 
     expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
     await expect(createVerifiedSqliteBackup()).rejects.toThrow('退出未确认');
     expect(start).toHaveBeenCalledTimes(1);
+    const write = jest.fn(async () => 1);
+    const queuedWrite = sqliteWrites.write(write);
+    await Promise.resolve();
+    expect(write).not.toHaveBeenCalled();
     child.emit('close', null, 'SIGKILL');
+    await expect(queuedWrite).resolves.toBe(1);
+    expect(write).toHaveBeenCalledTimes(1);
     const next = fakeBackup();
     const retried = createVerifiedSqliteBackup();
     for (let i = 0; i < 20 && start.mock.calls.length < 2; i++)
@@ -360,26 +367,23 @@ describe('SQLite backup gate (synthetic children and mocked filesystem)', () => 
     await check;
   });
 
-  it('keeps the fence until every previously started timed-out child closes', async () => {
+  it('queues another backup caller until the timed-out child has closed', async () => {
     const first = fakeBackup();
     const second = fakeBackup();
-    const operations = [
-      createVerifiedSqliteBackup(),
-      createVerifiedSqliteBackup(),
-    ];
-    const checks = operations.map((operation) =>
-      expect(operation).rejects.toThrow('备份超时'),
-    );
+    const operation = createVerifiedSqliteBackup();
+    const check = expect(operation).rejects.toThrow('备份超时');
+    await waitForSpawn();
+    const queued = createVerifiedSqliteBackup();
+    await jest.advanceTimersByTimeAsync(60000);
+    expect(start).toHaveBeenCalledTimes(1);
+    first.emit('close', null, 'SIGTERM');
+    await check;
     for (let i = 0; i < 30 && start.mock.calls.length < 2; i++)
       await Promise.resolve();
     expect(start).toHaveBeenCalledTimes(2);
-    await jest.advanceTimersByTimeAsync(60000);
-    second.emit('close', null, 'SIGTERM');
-    await checks[1];
-    await expect(createVerifiedSqliteBackup()).rejects.toThrow('退出未确认');
-    expect(start).toHaveBeenCalledTimes(2);
-    first.emit('close', null, 'SIGTERM');
-    await checks[0];
+    second.stdout.write(JSON.stringify(report));
+    second.emit('close', 0, null);
+    await expect(queued).resolves.toEqual(report);
   });
 
   it('logs only allowlisted stage telemetry, never raw child diagnostics', async () => {

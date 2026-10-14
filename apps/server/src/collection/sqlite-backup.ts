@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { access, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { sqliteWrites } from './sqlite-write-coordinator';
 
 // A kill request is not an exit receipt. Keep a failed-to-stop child fenced
 // until its close event, including after the bounded caller wait has expired.
@@ -114,123 +115,131 @@ export async function createVerifiedSqliteBackup(
     (process.platform === 'win32' ? 'python' : 'python3');
   if (/[\0\r\n]/.test(python))
     throw new Error('SQLite 备份 Python 可执行路径无效，本次未写入');
-  const output = await new Promise<string>((resolve, reject) => {
-    let child: ReturnType<typeof spawn>;
-    try {
-      // A configured interpreter is one executable, never a shell command.
-      child = spawn(
-        python,
-        [script, '--database', database, '--backup-root', backupRoot],
-        { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-    } catch {
-      reject(new Error('无法启动 SQLite 一致性备份，本次未写入'));
-      return;
-    }
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    let stopping: string | undefined;
-    let forceTimer: ReturnType<typeof setTimeout> | undefined;
-    let exitTimer: ReturnType<typeof setTimeout> | undefined;
-    const attempt = randomUUID();
-    const fail = (message: string) => {
-      if (settled) return;
-      settled = true;
-      logDiagnostic(
-        attempt,
-        stoppingBackups.get(database)?.has(child)
-          ? 'termination-unconfirmed'
-          : stopping
-            ? 'stopped'
-            : 'failed',
-        stderr,
-      );
-      reject(new Error(message));
-    };
-    const stop = (message: string) => {
-      if (settled || stopping) return;
-      clearTimeout(timer);
-      stopping = message;
-      const group =
-        stoppingBackups.get(database) || new Set<ReturnType<typeof spawn>>();
-      group.add(child);
-      stoppingBackups.set(database, group);
-      // Both waits are bounded. If termination cannot be confirmed, retain the
-      // fence rather than allowing another child to contend with this one.
-      forceTimer = setTimeout(() => {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* Wait for close or fence. */
-        }
-      }, 1000);
-      exitTimer = setTimeout(() => {
-        fail(`${message}；子进程退出未确认，已阻止重试`);
-      }, 5000);
+  const execute = () =>
+    new Promise<string>((resolve, reject) => {
+      let child: ReturnType<typeof spawn>;
       try {
-        child.kill();
+        // A configured interpreter is one executable, never a shell command.
+        child = spawn(
+          python,
+          [script, '--database', database, '--backup-root', backupRoot],
+          {
+            windowsHide: true,
+            shell: false,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
       } catch {
-        // Do not confuse a failed kill request with confirmed process exit.
-      }
-    };
-    const timer = setTimeout(() => {
-      stop('SQLite 一致性备份超时，本次未写入');
-    }, 60000);
-    child.stdout!.setEncoding('utf8');
-    child.stderr!.setEncoding('utf8');
-    child.stdout!.on('data', (chunk: string) => {
-      if (settled || stopping) return;
-      if (Buffer.byteLength(stdout) + Buffer.byteLength(chunk) > 4096)
-        stop('SQLite 一致性备份输出超限，本次未写入');
-      else stdout += chunk;
-    });
-    child.stderr!.on('data', (chunk: string) => {
-      if (settled || stopping) return;
-      if (Buffer.byteLength(stderr) + Buffer.byteLength(chunk) > 4096)
-        stop('SQLite 一致性备份输出超限，本次未写入');
-      else stderr += chunk;
-    });
-    child.once('error', () => {
-      if (stopping) return;
-      clearTimeout(timer);
-      if (child.pid) stop('SQLite 一致性备份进程异常，本次未写入');
-      else fail('无法启动 SQLite 一致性备份，本次未写入');
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      clearTimeout(forceTimer);
-      clearTimeout(exitTimer);
-      const group = stoppingBackups.get(database);
-      group?.delete(child);
-      if (group?.size === 0) stoppingBackups.delete(database);
-      if (settled) return;
-      if (stopping) {
-        fail(stopping);
+        reject(new Error('无法启动 SQLite 一致性备份，本次未写入'));
         return;
       }
-      if (code !== 0 || signal) {
-        let timedOut = false;
-        try {
-          const failure = JSON.parse(stderr);
-          timedOut =
-            failure?.event === 'sqlite-backup-failed' &&
-            failure?.reason === 'timeout';
-        } catch {
-          /* Ignore raw child exceptions. */
-        }
-        fail(
-          timedOut
-            ? 'SQLite 一致性备份超时，本次未写入'
-            : 'SQLite 一致性备份未验证成功，本次未写入',
-        );
-      } else {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      let stopping: string | undefined;
+      let forceTimer: ReturnType<typeof setTimeout> | undefined;
+      let exitTimer: ReturnType<typeof setTimeout> | undefined;
+      const attempt = randomUUID();
+      const fail = (message: string) => {
+        if (settled) return;
         settled = true;
-        logDiagnostic(attempt, 'process-exited', stdout);
-        resolve(stdout);
-      }
+        logDiagnostic(
+          attempt,
+          stoppingBackups.get(database)?.has(child)
+            ? 'termination-unconfirmed'
+            : stopping
+              ? 'stopped'
+              : 'failed',
+          stderr,
+        );
+        reject(new Error(message));
+      };
+      const stop = (message: string) => {
+        if (settled || stopping) return;
+        clearTimeout(timer);
+        stopping = message;
+        const group =
+          stoppingBackups.get(database) || new Set<ReturnType<typeof spawn>>();
+        group.add(child);
+        stoppingBackups.set(database, group);
+        sqliteWrites.fence(child);
+        // Both waits are bounded. If termination cannot be confirmed, retain the
+        // fence rather than allowing another child to contend with this one.
+        forceTimer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* Wait for close or fence. */
+          }
+        }, 1000);
+        exitTimer = setTimeout(() => {
+          fail(`${message}；子进程退出未确认，已阻止重试`);
+        }, 5000);
+        try {
+          child.kill();
+        } catch {
+          // Do not confuse a failed kill request with confirmed process exit.
+        }
+      };
+      const timer = setTimeout(() => {
+        stop('SQLite 一致性备份超时，本次未写入');
+      }, 60000);
+      child.stdout!.setEncoding('utf8');
+      child.stderr!.setEncoding('utf8');
+      child.stdout!.on('data', (chunk: string) => {
+        if (settled || stopping) return;
+        if (Buffer.byteLength(stdout) + Buffer.byteLength(chunk) > 4096)
+          stop('SQLite 一致性备份输出超限，本次未写入');
+        else stdout += chunk;
+      });
+      child.stderr!.on('data', (chunk: string) => {
+        if (settled || stopping) return;
+        if (Buffer.byteLength(stderr) + Buffer.byteLength(chunk) > 4096)
+          stop('SQLite 一致性备份输出超限，本次未写入');
+        else stderr += chunk;
+      });
+      child.once('error', () => {
+        if (stopping) return;
+        clearTimeout(timer);
+        if (child.pid) stop('SQLite 一致性备份进程异常，本次未写入');
+        else fail('无法启动 SQLite 一致性备份，本次未写入');
+      });
+      child.once('close', (code, signal) => {
+        clearTimeout(timer);
+        clearTimeout(forceTimer);
+        clearTimeout(exitTimer);
+        const group = stoppingBackups.get(database);
+        group?.delete(child);
+        if (group?.size === 0) stoppingBackups.delete(database);
+        sqliteWrites.unfence(child);
+        if (settled) return;
+        if (stopping) {
+          fail(stopping);
+          return;
+        }
+        if (code !== 0 || signal) {
+          let timedOut = false;
+          try {
+            const failure = JSON.parse(stderr);
+            timedOut =
+              failure?.event === 'sqlite-backup-failed' &&
+              failure?.reason === 'timeout';
+          } catch {
+            /* Ignore raw child exceptions. */
+          }
+          fail(
+            timedOut
+              ? 'SQLite 一致性备份超时，本次未写入'
+              : 'SQLite 一致性备份未验证成功，本次未写入',
+          );
+        } else {
+          settled = true;
+          logDiagnostic(attempt, 'process-exited', stdout);
+          resolve(stdout);
+        }
+      });
     });
-  });
+  const output = await sqliteWrites.snapshot(execute);
   let report: {
     integrityCheck?: string;
     source?: string;

@@ -151,9 +151,12 @@ def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
         source.execute("PRAGMA query_only=ON")
         source.set_progress_handler(lambda: int(time.monotonic() > copy_deadline), 1000)
         diagnostics.journal = source.execute("PRAGMA journal_mode").fetchone()[0]
-        source.execute("BEGIN")
-        # BEGIN alone is deferred; this read actually acquires the snapshot.
-        source.execute("SELECT rootpage FROM sqlite_master LIMIT 1").fetchone()
+        if prefix != "periodic-snapshot":
+            source.execute("BEGIN")
+            # App admission happens before a connection/transaction opens.
+            # Autonomous periodic copying must stay online, without a long read
+            # lock that could conflict with short app transaction deadlines.
+            source.execute("SELECT rootpage FROM sqlite_master LIMIT 1").fetchone()
         diagnostics.enter("copy")
         with closing(sqlite3.connect(backup, timeout=0.1)) as destination:
             def progress(status, _remaining, _total):
