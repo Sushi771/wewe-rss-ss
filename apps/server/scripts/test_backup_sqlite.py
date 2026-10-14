@@ -151,6 +151,60 @@ class BackupTests(unittest.TestCase):
         with patch.dict(os.environ, {"SQLITE_BACKUP_COPY_TIMEOUT_SECONDS": "1"}):
             self.assertEqual(backup.create_backup(self.database, self.backups)["integrityCheck"], "ok")
 
+    def test_short_writer_timeout_rolls_back_and_retries_same_intent_after_snapshot(self):
+        # A 50ms writer cannot commit while a rollback-journal snapshot is held.
+        # Retrying MUST rollback the whole failed transaction before waiting;
+        # this worker keeps one immutable intent and has an explicit retry bound.
+        worker = subprocess.Popen([
+            sys.executable, "-u", "-c",
+            "import sqlite3,sys,time; c=sqlite3.connect(sys.argv[1],timeout=.05);"
+            "sys.stdin.readline();\n"
+            "for attempt in range(8):\n"
+            " try:\n"
+            "  c.execute('UPDATE feeds SET value=value+1'); c.commit();"
+            " print('committed',flush=True); break\n"
+            " except sqlite3.OperationalError as error:\n"
+            "  c.rollback()\n"
+            "  if error.sqlite_errorcode not in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED): raise\n"
+            "  print('rolled-back',flush=True); time.sleep(.02)\n"
+            "else: raise SystemExit('explicit retry exhaustion')\n",
+            str(self.database)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        real_connect = sqlite3.connect
+        test = self
+        started = []
+
+        class Source(sqlite3.Connection):
+            def backup(source, destination, **kwargs):
+                original = kwargs["progress"]
+                def progress(status, remaining, total):
+                    if not started:
+                        started.append(True)
+                        worker.stdin.write("go\n"); worker.stdin.flush()
+                        test.assertEqual(worker.stdout.readline().strip(), "rolled-back")
+                    original(status, remaining, total)
+                kwargs["progress"] = progress
+                return super().backup(destination, **kwargs)
+
+        def connect(*args, **kwargs):
+            if str(args[0]) == self.database.as_uri() + "?mode=ro":
+                kwargs["factory"] = Source
+            return real_connect(*args, **kwargs)
+        try:
+            with patch.object(backup.sqlite3, "connect", connect):
+                report = backup.create_backup(self.database, self.backups)
+            worker.stdin.close(); worker.wait(timeout=3)
+            self.assertEqual(worker.returncode, 0, worker.stderr.read())
+            self.assertIn("committed", worker.stdout.read())
+            with closing(real_connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT value FROM feeds").fetchone(), (1,))
+            with closing(real_connect(report["backup"])) as db:
+                self.assertEqual(db.execute("SELECT value FROM feeds").fetchone(), (0,))
+        finally:
+            if worker.poll() is None: worker.kill(); worker.wait(timeout=3)
+            worker.stdout.close(); worker.stderr.close()
+            if not worker.stdin.closed: worker.stdin.close()
+
 
 if __name__ == "__main__":
     unittest.main()
