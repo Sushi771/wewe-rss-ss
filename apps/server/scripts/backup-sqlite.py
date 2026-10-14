@@ -102,10 +102,10 @@ def create_backup(database, backup_root, prefix="before-collection", timeout=55,
     deadline = time.monotonic() + timeout
     diagnostics = diagnostics or BackupDiagnostics()
     if copy_timeout is None:
-        copy_timeout = float(os.environ.get("SQLITE_BACKUP_COPY_TIMEOUT_SECONDS", "15"))
-        if not 1 <= copy_timeout <= 15:
+        copy_timeout = float(os.environ.get("SQLITE_BACKUP_COPY_TIMEOUT_SECONDS", "45"))
+        if not 1 <= copy_timeout <= 45:
             raise ValueError("SQLite backup copy budget invalid")
-    if not math.isfinite(copy_timeout) or not 0 < copy_timeout <= 15:
+    if not math.isfinite(copy_timeout) or not 0 < copy_timeout <= 45:
         raise ValueError("SQLite backup copy budget invalid")
     # Periodic and original write-before backups share this operation lock.
     # Lock contention is bounded and failure never permits an unprotected write.
@@ -119,7 +119,7 @@ def create_backup(database, backup_root, prefix="before-collection", timeout=55,
 
 
 def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
-                   copy_timeout=15):
+                   copy_timeout=45):
     """Same online API and verification for periodic and write-before backups.
 
     The start is the conservative recovery bound, NOT verification completion:
@@ -142,7 +142,9 @@ def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
 
     # A pinned read snapshot prevents the online API from restarting on every
     # external commit. In rollback-journal mode its SHARED lock delays commits;
-    # cap acquisition + copy at fifteen seconds and release BEFORE verification/hash.
+    # cap acquisition + copy at 45 seconds, within the 55-second total deadline,
+    # and release BEFORE verification/hash. The app coordinator admits writers
+    # before opening Prisma transactions, so their short clocks start afterward.
     # No journal-mode change, writer connection, or write transaction is used.
     diagnostics.enter("snapshot")
     copy_deadline = min(deadline, time.monotonic() + copy_timeout)
