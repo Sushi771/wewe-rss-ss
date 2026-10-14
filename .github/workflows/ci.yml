@@ -2,7 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      [
+        main,
+        codex/sqlite-backup-bounded-20261014,
+        codex/sqlite-backup-child-exit-20261014,
+      ]
   pull_request:
     branches:
       [
