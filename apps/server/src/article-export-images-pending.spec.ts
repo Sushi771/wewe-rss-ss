@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { buildArticleMarkdown } from './article-export';
 import { LocalArticleStore } from './article-local-save';
 import { prepareVerifiedProviderDownload } from './article-verified-download';
+import { articleContentHtml } from './collection/article-page';
 
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
@@ -30,6 +31,32 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
   afterEach(async () => {
     await rm(folder, { recursive: true, force: true });
   });
+
+  it.each(['available', 'unavailable'])(
+    'detects lost image sources in cached and cleaned bodies with %s history',
+    async (status) => {
+      for (const html of [
+        '<div id="js_content"><p>可靠正文</p><img></div>',
+        articleContentHtml(
+          '<div id="js_content"><p>可靠正文</p><img src="javascript:alert(1)"></div>',
+        ),
+      ]) {
+        if (!html)
+          throw new Error('Cleaned fixture must retain its cached body');
+        const fetcher = jest.fn();
+        const exported = await buildArticleMarkdown(
+          { ...article, contentHtml: html, lastBodyStatus: status },
+          '',
+          undefined,
+          fetcher,
+        );
+        expect(exported.mediaComplete).toBe(false);
+        expect(exported.markdown).toContain('可靠正文');
+        expect(exported.markdown).toContain('媒体完整性未确认');
+        expect(fetcher).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('saves reliable text and actual image bytes, reports the limit and preserves edited duplicate notes', async () => {
     const store = new LocalArticleStore(
@@ -98,6 +125,29 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
     expect(() =>
       prepareVerifiedProviderDownload(url, providerArticle),
     ).toThrow();
+  });
+  it('retains per-image uncertainty even if the original body lacks a root pending marker', async () => {
+    const raw = body.replace(' data-wewe-image-pending="1"', '');
+    const prepare = prepareVerifiedProviderDownload(
+      url,
+      {
+        id: article.id,
+        mpId: 'MP_WXS_1234567890',
+        picUrl: '',
+        title: article.title,
+        url,
+        publishTime: article.publishTime,
+        contentHtml: raw,
+      },
+      true,
+    );
+    expect(await prepare(folder)).toMatchObject({
+      imageCount: 1,
+      mediaComplete: false,
+    });
+    expect(await readFile(join(folder, 'index.md'), 'utf8')).toContain(
+      '媒体完整性未确认',
+    );
   });
 
   it('keeps usable text when a known pending image still fails, while retaining valid images', async () => {
