@@ -1097,12 +1097,34 @@ const Feeds = () => {
               setFolderBusy(value);
             }}
             onReorder={async (ids, expectedIds) => {
-              try {
-                await queryUtils.feed.groups.cancel();
-                await reorderFolders.mutateAsync({ ids, expectedIds });
-              } finally {
-                await folders.refetch({ throwOnError: true });
-              }
+              await queryUtils.feed.groups.cancel();
+              const saved = await reorderFolders.mutateAsync({
+                ids,
+                expectedIds,
+              });
+              const orders = new Map(saved.ids.map((id, order) => [id, order]));
+              queryUtils.feed.groups.setData(undefined, (previous) => {
+                if (!previous) return previous;
+                const items = previous.items
+                  .map((folder) => ({
+                    ...folder,
+                    order: orders.get(folder.id) ?? folder.order,
+                  }))
+                  .sort((a, b) => a.order - b.order);
+                return { ...previous, items };
+              });
+              void folders.refetch().then(
+                (result) => {
+                  if (result.error)
+                    toast.warning(
+                      '文件夹排序已保存，列表刷新失败，请稍后刷新页面核对',
+                    );
+                },
+                () =>
+                  toast.warning(
+                    '文件夹排序已保存，列表刷新失败，请稍后刷新页面核对',
+                  ),
+              );
             }}
             onSave={async (input) => {
               await saveFolder.mutateAsync(input);

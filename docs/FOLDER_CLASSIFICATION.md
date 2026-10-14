@@ -28,3 +28,9 @@
 新一轮分类写入前会取消现有 `feed.list` 读取；已取消读取即使在网络层晚返回，也不得覆盖较新的分类缓存。`scripts/folder-move-ui.test.cjs` 使用实际安装的 TanStack QueryClient / QueryObserver，执行两次真实页面分类回调，故意让旧读取忽略 AbortSignal 并最后返回，检查缓存和订阅者仍保留第二次已确认分类。普通文件夹切换只改变本地筛选，不把其他文件夹的响应写成分类结果。
 
 共享分类组件的提取式测试 `xiaohongshu-ui.spec.ts` 同时覆盖新增保存状态 hook；专用 CI 纳入这套回归，完整项目 CI 仍须通过后才视为全量验收完成。
+
+## 文件夹顺序保存
+
+文件夹排序也根据 `reorderGroups` 成功返回的完整 ID 顺序更新缓存，立即释放操作锁，后续分组读取独立执行。刷新失败显示“文件夹排序已保存，列表刷新失败”，不回滚已提交顺序。保存拒绝保留原顺序与原错误，不再在 `finally` 中等待可能挂起的第二次读取。
+
+`scripts/folder-reorder-ui.test.cjs` 执行实际页面排序回调，覆盖成功后的刷新挂起、刷新失败与保存拒绝，并用实际 TanStack QueryObserver 检验连续两次排序后旧响应最后返回不能覆盖新顺序。`scripts/folder-reorder-browser.test.cjs` 在真实 React / NextUI 隔离浏览器中检查排序菜单、刷新挂起时 UI 锁释放、成功后刷新错误单独提示，以及保存失败仍保留原顺序并可以浏览。
