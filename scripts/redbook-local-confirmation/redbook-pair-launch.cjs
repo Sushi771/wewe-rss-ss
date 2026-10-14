@@ -6,7 +6,6 @@ const fs = require('node:fs'),
   readline = require('node:readline'),
   Module = require('node:module');
 const { randomBytes, randomUUID } = require('node:crypto');
-const { gateway } = require('./redbook-pair-gateway.cjs');
 // These arguments contain paths only, never passwords or account credentials.
 const repo = path.resolve(__dirname, '../..');
 const artifact = process.argv[2] && path.resolve(process.argv[2]);
@@ -14,17 +13,44 @@ const dir = path.join(
   require('node:os').tmpdir(),
   'wewe-redbook-diagnostic-' + randomUUID(),
 );
-if (
-  !artifact ||
-  !fs.existsSync(path.join(artifact, 'server-dist/apps/server/src/main.js'))
-)
-  throw Error('COMPILED_ARTIFACT_REQUIRED');
-fs.mkdirSync(dir, { recursive: false });
 const PUBLIC_PORT = 49163,
   INNER_PORT = 49164;
 const controlWriter = process.stdout.write.bind(process.stdout);
 const control = (message) =>
   controlWriter('REDBOOK_CONTROL:' + JSON.stringify(message) + '\n');
+// Startup diagnostics contain fixed enums only; never error messages or app logs.
+const startupBegan = performance.now();
+let startupPhase = 'NODE_ENTERED',
+  startupComplete = false;
+const startupProgress = (phase) => {
+  startupPhase = phase;
+  control({
+    status: 'starting',
+    phase,
+    elapsedMs: Math.round(performance.now() - startupBegan),
+  });
+};
+const startupFailure = (error) => {
+  if (startupComplete) return;
+  const code = [
+    'MODULE_NOT_FOUND',
+    'ENOENT',
+    'EACCES',
+    'EADDRINUSE',
+    'P1001',
+    'P1002',
+    'P1003',
+  ].includes(error?.code)
+    ? error.code
+    : error?.message === 'LOCAL_BACKEND_NOT_READY'
+      ? 'BACKEND_NOT_READY'
+      : 'BOOTSTRAP_ERROR';
+  control({ status: 'startup_rejected', phase: startupPhase, code });
+  process.exit(1);
+};
+process.on('unhandledRejection', startupFailure);
+process.on('uncaughtException', startupFailure);
+startupProgress('NODE_ENTERED');
 // Application logs, HTTP bodies and credentials never enter the launcher pipe/log.
 const discard = (...args) => {
   const callback = args.find((arg) => typeof arg === 'function');
@@ -93,8 +119,19 @@ async function portCheck(port) {
   await new Promise((ok) => server.close(ok));
 }
 async function main() {
+  startupProgress('ARTIFACT_CHECK');
+  if (
+    !artifact ||
+    !fs.existsSync(path.join(artifact, 'server-dist/apps/server/src/main.js'))
+  )
+    throw Error('COMPILED_ARTIFACT_REQUIRED');
+
+  startupProgress('PORT_CHECK');
   await portCheck(PUBLIC_PORT);
   await portCheck(INNER_PORT);
+  fs.mkdirSync(dir, { recursive: false });
+  startupProgress('GATEWAY_LOAD');
+  const { gateway } = require('./redbook-pair-gateway.cjs');
   const keep =
     /^(path|systemroot|windir|comspec|pathext|userprofile|appdata|localappdata|programdata|programfiles(?:\(x86\))?|number_of_processors|processor_architecture|systemdrive)$/i;
   process.env = Object.fromEntries(
@@ -168,6 +205,7 @@ async function main() {
     TEMP: tmp,
     TMP: tmp,
   });
+  startupProgress('DATABASE_INIT');
   const { PrismaClient } = require('@prisma/client');
   const prisma = new PrismaClient();
   if (!fs.existsSync(database))
@@ -196,6 +234,7 @@ async function main() {
           .version || '0.0.0',
     }),
   );
+  startupProgress('BACKEND_LOAD');
   process.chdir(dir);
   require(path.join(artifact, 'server-dist/apps/server/src/main.js'));
   const rawRequest = (route, body, signal, cookie) =>
@@ -251,10 +290,27 @@ async function main() {
       request.on('error', () => reject(Error('LOCAL_BACKEND_REJECTED')));
       request.end(JSON.stringify(body));
     });
+  startupProgress('BACKEND_PROBE');
   let backendReady = false;
-  for (let attempt = 0; attempt < 40; attempt++) {
+  for (
+    let attempt = 0;
+    attempt < 40 && performance.now() - startupBegan < 35000;
+    attempt++
+  ) {
     try {
-      await rawRequest('/local/redbook/diagnostic/status', {});
+      await rawRequest(
+        '/local/redbook/diagnostic/status',
+        {},
+        AbortSignal.timeout(
+          Math.max(
+            1,
+            Math.min(
+              2000,
+              Math.floor(35000 - (performance.now() - startupBegan)),
+            ),
+          ),
+        ),
+      );
       backendReady = true;
       break;
     } catch {}
@@ -286,6 +342,7 @@ async function main() {
       await rawRequest('/local/redbook/diagnostic/' + action, body, signal)
     ).value;
   };
+  startupProgress('GATEWAY_LISTEN');
   surface = gateway({
     port: PUBLIC_PORT,
     backend,
@@ -298,6 +355,7 @@ async function main() {
     surface.server.once('error', bad);
     surface.server.listen(PUBLIC_PORT, '127.0.0.1', ok);
   });
+  startupComplete = true;
   control({
     status: 'ready',
     url: 'http://127.0.0.1:' + PUBLIC_PORT + '/pair',
@@ -305,7 +363,4 @@ async function main() {
     durationHours: 24,
   });
 }
-main().catch(() => {
-  control({ status: 'startup_rejected' });
-  process.exit(1);
-});
+main().catch(startupFailure);

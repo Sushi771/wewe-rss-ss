@@ -19,6 +19,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Test local Redbook startup handshake and confirmation gateway offline
+        working-directory: scripts/redbook-local-confirmation
+        run: node --test redbook-startup.test.cjs redbook-pair-gateway.test.cjs
       - name: Test native loopback listener ownership and guarded stop
         run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
       - name: Test desktop feedback and Windows state-file contention offline

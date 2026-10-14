@@ -8,10 +8,26 @@ function Read-Control($process) {
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
     while ([DateTime]::UtcNow -lt $deadline) {
         $read = $process.StandardOutput.ReadLineAsync()
-        if (-not $read.Wait(45000)) { throw 'PAIR_READY_TIMEOUT' }
+        $remaining = [Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if (-not $read.Wait($remaining)) { throw 'PAIR_READY_TIMEOUT' }
         $line = $read.Result
         if ($null -eq $line) { throw 'PAIR_PIPE_CLOSED' }
-        if ($line.StartsWith('REDBOOK_CONTROL:')) { return ($line.Substring(16) | ConvertFrom-Json) }
+        if ($line.StartsWith('REDBOOK_CONTROL:')) {
+            $message = $line.Substring(16) | ConvertFrom-Json
+            if ($message.status -eq 'starting') {
+                if ($message.phase -in @('NODE_ENTERED','ARTIFACT_CHECK','GATEWAY_LOAD','PORT_CHECK','DATABASE_INIT','BACKEND_LOAD','BACKEND_PROBE','GATEWAY_LISTEN')) {
+                    Write-Host ('STARTUP_STAGE: ' + $message.phase)
+                }
+                continue
+            }
+            if ($message.status -eq 'startup_rejected') {
+                if ($message.phase -in @('NODE_ENTERED','ARTIFACT_CHECK','GATEWAY_LOAD','PORT_CHECK','DATABASE_INIT','BACKEND_LOAD','BACKEND_PROBE','GATEWAY_LISTEN') -and $message.code -in @('MODULE_NOT_FOUND','ENOENT','EACCES','EADDRINUSE','P1001','P1002','P1003','BACKEND_NOT_READY','BOOTSTRAP_ERROR')) {
+                    throw ('PAIR_' + $message.phase + '_' + $message.code)
+                }
+                throw 'PAIR_START_REJECTED'
+            }
+            return $message
+        }
     }
     throw 'PAIR_READY_TIMEOUT'
 }
@@ -65,7 +81,7 @@ try {
     $pairFailed = $true
     Write-Host '本机确认入口未就绪或已断开。请检查49163/49164是否被占用、已验收构建是否存在。不会停止其他服务。'
     $pairReason = $_.Exception.Message
-    if ($pairReason -match '^PAIR_[A-Z_]+$') { Write-Host ('错误代码：' + $pairReason) }
+    if ($pairReason -match '^PAIR_[A-Z0-9_]+$') { Write-Host ('错误代码：' + $pairReason) }
 } finally {
     if ($null -ne $pairProcess) {
         if (-not $pairProcess.HasExited) {

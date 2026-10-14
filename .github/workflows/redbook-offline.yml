@@ -6,6 +6,7 @@ on:
       - 'apps/server/src/collection/redbook*'
       - 'apps/server/src/collection/redbook-vendor/**'
       - '.github/workflows/redbook-offline.yml'
+      - 'scripts/redbook-local-confirmation/**'
 jobs:
   compatibility:
     runs-on: ubuntu-latest
@@ -26,3 +27,6 @@ jobs:
         run: pnpm --filter server exec prisma generate
       - name: Synthetic readonly client, media and durable scan tests (no platform)
         run: pnpm --filter server exec jest --testPathPattern='collection/redbook.*\.spec\.ts$' --runInBand
+      - name: Test local Redbook startup handshake and confirmation gateway offline
+        working-directory: scripts/redbook-local-confirmation
+        run: node --test redbook-startup.test.cjs redbook-pair-gateway.test.cjs
