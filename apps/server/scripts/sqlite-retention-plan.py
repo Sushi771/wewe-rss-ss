@@ -80,11 +80,12 @@ class ReadBudget:
         return result.hexdigest()
 
 def bounded_files(root, budget):
-    allowed=backup.legacy_roots();files=[];seen=set()
+    allowed=backup.legacy_roots();files=[];seen=set();active=set()
     def visit(directory):
         budget.tick();canonical=directory.resolve(strict=True)
-        if canonical in seen:raise MaintenanceError('REPEATED_DIRECTORY')
-        seen.add(canonical)
+        if canonical in active:raise MaintenanceError('CYCLIC_DIRECTORY')
+        if canonical in seen:return
+        seen.add(canonical);active.add(canonical)
         if len(seen)>4096:raise MaintenanceError('SCAN_DIRECTORY_LIMIT')
         for file in directory.iterdir():
             budget.tick()
@@ -95,6 +96,7 @@ def bounded_files(root, budget):
             elif file.is_file():
                 files.append(file.resolve(strict=True))
                 if len(files)>4096:raise MaintenanceError('SCAN_FILE_LIMIT')
+        active.remove(canonical)
     if root.exists():visit(root)
     for folder in allowed:
         if folder not in seen:visit(folder)

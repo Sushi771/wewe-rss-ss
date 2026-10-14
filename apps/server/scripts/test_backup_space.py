@@ -131,5 +131,22 @@ class BackupSpaceTests(unittest.TestCase):
         with patch.dict(os.environ,{'SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(self.root.resolve())])}):
             with self.assertRaisesRegex(ValueError,'Source inside legacy'):backup.space_preflight(self.database,self.backups)
 
+    def link(self,alias,target):
+        if os.name=='nt':
+            import subprocess
+            subprocess.run(['powershell','-NoProfile','-Command',f"New-Item -ItemType Junction -Path '{alias}' -Target '{target}' | Out-Null"],check=True)
+        else:alias.symlink_to(target,target_is_directory=True)
+
+    def test_repeated_declared_aliases_and_direct_physical_root_count_once(self):
+        legacy=(self.root/'historic').resolve();legacy.mkdir();point=legacy/'point';point.mkdir();file=point/'unique.db';file.write_bytes(b'keep')
+        self.backups.mkdir();self.link(self.backups/'one',point);self.link(self.backups/'two',point)
+        with patch.dict(os.environ,{'SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
+            self.assertEqual(backup.managed_files(self.backups),[file])
+
+    def test_declared_link_cycle_still_fails_closed(self):
+        legacy=(self.root/'cyclic-history').resolve();legacy.mkdir();self.link(legacy/'cycle',legacy)
+        with patch.dict(os.environ,{'SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
+            with self.assertRaisesRegex(ValueError,'Cyclic'):backup.managed_files(self.backups)
+
 if __name__ == '__main__':
     unittest.main()

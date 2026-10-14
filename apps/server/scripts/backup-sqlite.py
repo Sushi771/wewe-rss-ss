@@ -138,12 +138,14 @@ def managed_files(root):
     as generation destinations. Unlisted links and cycles fail closed.
     """
     allowed = legacy_roots()
-    seen_directories, seen_files, result = set(), set(), []
+    seen_directories, active_directories, seen_files, result = set(), set(), set(), []
     def visit(directory):
         canonical = directory.resolve(strict=True)
-        if canonical in seen_directories:
-            raise ValueError('Nested or repeated backup directory refused')
+        if canonical in active_directories:
+            raise ValueError('Cyclic backup directory refused')
+        if canonical in seen_directories: return
         seen_directories.add(canonical)
+        active_directories.add(canonical)
         for file in directory.iterdir():
             linked = file.is_symlink() or (hasattr(file,'is_junction') and file.is_junction())
             if linked:
@@ -156,6 +158,7 @@ def managed_files(root):
                 canonical_file = file.resolve(strict=True)
                 if canonical_file not in seen_files:
                     seen_files.add(canonical_file); result.append(canonical_file)
+        active_directories.remove(canonical)
     if root.exists(): visit(root)
     # Explicit physical historic roots count even without a junction alias.
     # A target already traversed through a declared link is counted once.

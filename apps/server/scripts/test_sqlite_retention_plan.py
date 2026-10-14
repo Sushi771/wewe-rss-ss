@@ -181,6 +181,17 @@ class RetentionTests(unittest.TestCase):
             self.assertIn(str(file),[x['path'] for x in plan['payload']['held']]);self.assertEqual(file.read_bytes(),b'unknown historic point')
         with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(self.folder)])}):
             with self.assertRaisesRegex(retention.MaintenanceError,'NESTED_SOURCE'):self.plan()
+    def link(self,alias,target):
+        if os.name=='nt':
+            subprocess.run(['powershell','-NoProfile','-Command',f"New-Item -ItemType Junction -Path '{alias}' -Target '{target}' | Out-Null"],check=True)
+        else:alias.symlink_to(target,target_is_directory=True)
+    def test_declared_repeated_aliases_are_deduplicated_and_cycles_refused(self):
+        legacy=self.folder/'history';legacy.mkdir();point=legacy/'point';point.mkdir();file=point/'unique.db';file.write_bytes(b'keep')
+        self.link(self.root/'history-a',point);self.link(self.root/'history-b',point)
+        with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
+            self.assertEqual(self.plan()['payload']['summary']['existingCopies'],3)
+            self.link(legacy/'cycle',legacy)
+            with self.assertRaisesRegex(retention.MaintenanceError,'CYCLIC'):self.plan()
     @unittest.skipUnless(os.name=='nt' and shutil.which('pwsh'),'Windows RestartManager helper')
     def test_real_windows_resource_helper_and_cli_only_validate_synthetic_batch(self):
         plan=self.plan();batch=self.folder/'batch.json';batch.write_bytes(retention.canonical_json(plan))
