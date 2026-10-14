@@ -10,6 +10,7 @@ on:
         codex/manual-refresh-download-integration,
         codex/cold-launch-profile,
         codex/automatic-refresh-recovery-20261013,
+        codex/body-cache-retry-status,
       ]
 
 jobs:
