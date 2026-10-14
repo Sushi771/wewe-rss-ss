@@ -8,6 +8,7 @@ on:
         codex/sqlite-backup-bounded-20261014,
         codex/sqlite-backup-child-exit-20261014,
         codex/sqlite-backup-production-base-20261014,
+        codex/article-list-read-timeout-20261014,
       ]
   pull_request:
     branches:

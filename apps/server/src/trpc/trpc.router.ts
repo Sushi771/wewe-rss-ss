@@ -1118,16 +1118,20 @@ export class TrpcRouter {
         const { cursor } = input;
         const where = articleListWhere(input);
 
-        const items = await findArticleListRows(this.prismaService, {
-          orderBy: articleListOrder(input),
-          take: limit + 1,
-          where,
-          cursor: cursor
-            ? {
-                id: cursor,
-              }
-            : undefined,
-        });
+        const items = await findArticleListRows(
+          this.prismaService,
+          {
+            orderBy: articleListOrder(input),
+            take: limit + 1,
+            where,
+            cursor: cursor
+              ? {
+                  id: cursor,
+                }
+              : undefined,
+          },
+          { databaseUrl: process.env.DATABASE_URL },
+        );
         let nextCursor: typeof cursor | undefined = undefined;
         if (items.length > limit) {
           // Remove the last item and use it as next cursor
