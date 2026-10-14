@@ -24,6 +24,35 @@ on:
       ]
 
 jobs:
+  cache-reconcile-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Test fresh cache reconciliation on synthetic SQLite
+        run: pnpm --filter server exec jest --runInBand src/feeds/cache-sync-engine.spec.ts src/feeds/cache-sync-storage.spec.ts
+      - name: Test independent media lane and check server types
+        run: |
+          node --test scripts/offline-media-recovery.test.cjs
+          pnpm --filter server exec tsc --noEmit --incremental false
+      - name: Compare pinned and current engines with original SQL offline
+        run: node apps/server/scripts/benchmark-cache-reconcile.cjs "$RUNNER_TEMP" > cache-reconcile-benchmark.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cache-reconcile-benchmark
+          path: cache-reconcile-benchmark.json
+
   windows-process-identity:
     runs-on: windows-latest
     steps:
