@@ -173,16 +173,18 @@ export function metricsMarkdown(article: {
   metrics?: string | null;
 }) {
   const metrics: Metrics = JSON.parse(article.metrics || '{}');
-  const lines = (Object.keys(metricLabels) as (keyof Metrics)[]).map((key) => {
-    const metric = metrics[key];
-    return `| ${metricLabels[key]} | ${metric?.display ?? '未提供'} | ${metric?.fileTime ?? ''} |`;
-  });
+  const lines = (Object.keys(metricLabels) as (keyof Metrics)[])
+    .filter((key) => metrics[key] != null)
+    .map((key) => {
+      const metric = metrics[key]!;
+      return `| ${metricLabels[key]} | ${metric.display} | ${metric.fileTime} |`;
+    });
   return (
     `# ${article.title.replace(/[\r\n]/g, ' ')}\n\n原文：${article.sourceUrl || `https://mp.weixin.qq.com/s/${article.id}`}\n\n` +
-    `| 指标 | 数值 | 数据文件时间（UTC） |\n| --- | --- | --- |\n${lines.join('\n')}\n\n` +
-    (Object.keys(metrics).length
-      ? `指标来源：WeChatDownload CSV 导入（未提供的指标留空；带“+”为下限，文件时间不是精确采集时间）。\n\n`
-      : `指标来源：未获取。原文链接或公开合集不代表已取得阅读、点赞或收藏数据。\n\n`)
+    (lines.length
+      ? `| 指标 | 数值 | 数据文件时间（UTC） |\n| --- | --- | --- |\n${lines.join('\n')}\n\n` +
+        `指标来源：WeChatDownload CSV 导入（仅展示已提供的指标；带“+”为下限，文件时间不是精确采集时间）。\n\n`
+      : '')
   );
 }
 

@@ -15,6 +15,7 @@ on:
         codex/performance-five-candidate-20261014,
         codex/cache-sync-single-preflight-20261014,
         codex/bounded-five-submit-20261014,
+        codex/export-real-metrics-only-20261014,
       ]
   pull_request:
     branches:

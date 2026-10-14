@@ -60,6 +60,17 @@ describe('full filter export scope on an isolated SQLite database; no external r
           id: 'fixture-' + String(i).padStart(2, '0'),
           mpId: filter.mpId,
           title: i === 28 ? 'other' : 'match ' + i,
+          sourceUrl: `https://mp.weixin.qq.com/s/fixture-${i}`,
+          metrics:
+            i === 1
+              ? JSON.stringify({
+                  like: {
+                    value: 0,
+                    display: '0',
+                    fileTime: '2026-10-01T00:00:00Z',
+                  },
+                })
+              : null,
           picUrl: '',
           publishTime:
             i === 25
@@ -156,8 +167,39 @@ describe('full filter export scope on an isolated SQLite database; no external r
     expect(
       await readFile(join(root, 'zip-one', 'README.md'), 'utf8'),
     ).toContain('2026-10-11 至 2026-10-11');
+    const notes = (
+      await readdir(join(root, 'zip-one'), { recursive: true })
+    ).filter((name) => name.endsWith('.md') && name !== 'README.md');
+    expect(notes).toHaveLength(25);
+    for (const name of notes) {
+      const markdown = await readFile(join(root, 'zip-one', name), 'utf8');
+      expect(markdown).toContain('Offline body');
+      expect(markdown).toContain('公众号：Test publisher');
+      expect(markdown).toContain('原文发布日期（上海时间）：2026-10-11');
+      expect(markdown).toContain('原文：https://mp.weixin.qq.com/s/fixture-');
+      expect(markdown).not.toContain('未提供');
+      if (markdown.includes('# match 1\n')) {
+        expect(markdown).toContain('| 点赞 | 0 | 2026-10-01T00:00:00Z |');
+      } else expect(markdown).not.toContain('| 指标 |');
+    }
     expect(fetch).not.toHaveBeenCalled();
   }, 30000);
+  it('uses the same no-placeholder template for single browser and local exports, preserving edited repeats', async () => {
+    const browser = await api.article.exportMarkdown('fixture-00');
+    expect(browser.markdown).toContain('# match 0');
+    expect(browser.markdown).toContain('Offline body');
+    expect(browser.markdown).toContain('公众号：Test publisher');
+    expect(browser.markdown).not.toContain('指标');
+    const first = await api.article.saveToObsidian('fixture-00');
+    expect(first.status).toBe('new');
+    expect(await readFile(first.path, 'utf8')).not.toContain('指标');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(first.path, '用户笔记\n旧指标表保留');
+    const repeated = await api.article.saveToObsidian('fixture-00');
+    expect(repeated).toMatchObject({ status: 'skipped', path: first.path });
+    expect(await readFile(first.path, 'utf8')).toBe('用户笔记\n旧指标表保留');
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it('invalid ZIP ranges return 400 before staging; cancellation stops subsequent articles', async () => {
     const controller = new OfflineExportController(router);
     const response: any = {
