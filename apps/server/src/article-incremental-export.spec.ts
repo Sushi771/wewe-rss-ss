@@ -66,6 +66,11 @@ describe('incremental export: synthetic files and mocked media only', () => {
 
   it('skips before prepare or temporary generation, across changed dates/title and missing database body', async () => {
     const first = await store.save(prepare());
+    const initialMarkdown = await fs.readFile(first.markdownPath, 'utf8');
+    expect(initialMarkdown).toContain('Body');
+    expect(initialMarkdown).toContain('# Fixture');
+    expect(initialMarkdown).toContain('公众号：Test');
+    expect(initialMarkdown).not.toContain('| 指标 |');
     await fs.writeFile(first.markdownPath, 'User edits and notes');
     jest.mocked(images.fetchAllowedImage).mockClear();
     const base = prepare({
@@ -151,6 +156,12 @@ describe('incremental export: synthetic files and mocked media only', () => {
         name.startsWith('补齐图片-'),
       ),
     ).toHaveLength(1);
+    const companion = (await fs.readdir(first.directory)).find((name) =>
+      name.startsWith('补齐图片-'),
+    )!;
+    expect(
+      await fs.readFile(join(first.directory, companion), 'utf8'),
+    ).not.toContain('| 指标 |');
     expect((await store.save(prepare())).status).toBe('skipped');
   });
   it('failed repair retains receipt and edits, clears locks and can safely resume', async () => {

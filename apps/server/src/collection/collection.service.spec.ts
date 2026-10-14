@@ -162,7 +162,8 @@ describe('local collection with real SQLite migrations', () => {
     const result = await caller.article.saveToObsidian('legacy-short-link');
     const markdown = await fs.readFile(result.path, 'utf8');
     expect(markdown).toContain('正文内容');
-    expect(markdown).toContain('| 收藏 | 未提供 |');
+    expect(markdown).not.toContain('| 收藏 |');
+    expect(markdown).toContain('| 点赞 | 0 |');
     const image = markdown.match(
       /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
     )?.[0];
