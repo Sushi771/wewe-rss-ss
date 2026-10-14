@@ -297,7 +297,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
       1,
     );
   }, 30000);
-  it('preparation errors retry three times with durable backoff while independent items proceed', async () => {
+  it('preparation errors retain durable backoff beyond three attempts while independent items proceed', async () => {
     const run = jest.fn(async (id: string) =>
       id === ids[0]
         ? {
@@ -328,6 +328,12 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     clock++;
     await recovered.manager.runDue();
     expect(run).toHaveBeenCalledTimes(4);
+    expect((await recovered.manager.list())[0].state).toBe('running');
+    for (let attempt = 4; attempt <= 8; attempt++) {
+      clock = (await recovered.manager.list())[0].items[0].retryAfter!;
+      await recovered.manager.runDue();
+    }
+    expect(run).toHaveBeenCalledTimes(9); // Eight preparation attempts, one independent success.
     expect((await recovered.manager.list())[0].state).toBe('completed');
   });
   it('read-only proof releases an old paused item; unknown proof never releases another author', async () => {
