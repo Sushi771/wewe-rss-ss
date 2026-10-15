@@ -446,3 +446,73 @@ test('narrow mode holds exact 129 historical names without inspecting their muta
     f.policy.legacyIds.push('extra-history');
     assert.throws(() => f.apply(), /LEGACY_INVENTORY/);
   }));
+for (const kind of [
+  'ledger-replaced',
+  'ledger-in-place',
+  'lock-replaced',
+  'same-token-lock',
+  'policy-replaced',
+  'registry-replaced',
+  'sentinel-replaced',
+])
+  test('foreign authority is preserved on refusal: ' + kind, () =>
+    fixture((f) => {
+      const ledger = path.join(f.registry, f.policy.scopeId + '.state.json'),
+        lock = path.join(f.registry, f.policy.scopeId + '.lock'),
+        sentinel = ledger + '.adopted';
+      let changed = false,
+        preserved,
+        expected;
+      f.query = () => {
+        if (!changed) {
+          changed = true;
+          if (kind === 'ledger-replaced') {
+            fs.renameSync(ledger, ledger + '.prior');
+            fs.writeFileSync(ledger, 'FOREIGN_LEDGER_MUST_BE_PRESERVED');
+            preserved = ledger;
+          }
+          if (kind === 'ledger-in-place') {
+            fs.writeFileSync(ledger, 'FOREIGN_IN_PLACE');
+            preserved = ledger;
+          }
+          if (kind === 'lock-replaced' || kind === 'same-token-lock') {
+            const token = fs.readFileSync(lock);
+            fs.renameSync(lock, lock + '.prior');
+            fs.writeFileSync(
+              lock,
+              kind === 'same-token-lock' ? token : 'FOREIGN_LOCK',
+            );
+            preserved = lock;
+          }
+          if (kind === 'policy-replaced') {
+            fs.renameSync(f.file, f.file + '.prior');
+            fs.copyFileSync(f.file + '.prior', f.file);
+            preserved = ledger;
+          }
+          if (kind === 'registry-replaced') {
+            fs.renameSync(f.registry, f.registry + '.prior');
+            fs.mkdirSync(f.registry);
+            fs.writeFileSync(ledger, 'FOREIGN_REGISTRY');
+            preserved = ledger;
+          }
+          if (kind === 'sentinel-replaced') {
+            const value = fs.readFileSync(sentinel);
+            fs.renameSync(sentinel, sentinel + '.prior');
+            fs.writeFileSync(sentinel, value);
+            preserved = ledger;
+          }
+          expected = fs.readFileSync(preserved);
+        }
+        return f.facts();
+      };
+      assert.throws(() => f.apply());
+      assert(changed);
+      assert.deepEqual(fs.readFileSync(preserved), expected);
+      assert(f.policy.pair.every((row) => !fs.existsSync(row.target)));
+      if (kind !== 'registry-replaced')
+        assert(
+          fs.existsSync(lock),
+          'uncertain owner lock must remain for review',
+        );
+    }),
+  );

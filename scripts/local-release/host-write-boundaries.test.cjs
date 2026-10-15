@@ -35,7 +35,7 @@ const catalog = {
   indirect: ['lifecycle-owner-fixture', 'recover-test-run', 'startup-audit'],
   pure: ['engine-audit', 'refresh-wave-rollback-compat'],
   readonly: ['scope-inventory', 'verify-source', 'windows-release-references'],
-  registry: ['release-scope', 'once-pair-admission'],
+  registry: ['release-scope', 'once-pair-admission', 'once-pair-publication'],
   gateway: ['lib'],
 };
 

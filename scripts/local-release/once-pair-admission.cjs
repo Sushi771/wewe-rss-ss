@@ -20,6 +20,10 @@ const PIN_FILES = [
   'install-lifecycle.cjs',
   'space-budget.cjs',
   'once-pair-admission.cjs',
+  'once-pair-publication.cjs',
+  'once-pair-state.py',
+  'process-identity.ps1',
+  'tcp-listeners.ps1',
   'windows-release-references.cjs',
   'windows-release-reference-collector.ps1',
   'windows-reference-directory-identity.cs',
@@ -67,7 +71,12 @@ function codePins() {
     PIN_FILES.map((name) => [name, fileHash(path.join(__dirname, name))]),
   );
 }
-function checkPlan(policyFile, expected, requireApproval = false) {
+function checkPlan(
+  policyFile,
+  expected,
+  requireApproval = false,
+  allowPublished = false,
+) {
   if (hostEffects.currentLease()) fail('NESTED_ADMISSION');
   const file = canonical(policyFile),
     p = read(file),
@@ -148,9 +157,19 @@ function checkPlan(policyFile, expected, requireApproval = false) {
   )
     fail('LEGACY_INVENTORY');
   const pointer = path.join(p.installRoot, 'active.json');
+  const pointerId = read(pointer, 65536).id;
+  const publishedHash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify({ format: 1, id: pointerId }) + '\n')
+    .digest('hex');
   if (
-    fileHash(pointer) !== p.pointerSha256 ||
-    read(pointer, 65536).id !== p.currentId
+    (fileHash(pointer) !== p.pointerSha256 || pointerId !== p.currentId) &&
+    !(
+      allowPublished &&
+      p.publication &&
+      [p.currentId, ...p.pair.map((item) => item.id)].includes(pointerId) &&
+      fileHash(pointer) === publishedHash
+    )
   )
     fail('CURRENT_POINTER');
   const protectedIds = p.protectedPackages.map((item) => item.id);
@@ -340,6 +359,8 @@ function withAdmission(policyFile, expected, action, options = {}) {
     pins = codePins();
   let state,
     ledgerIdentity,
+    lockIdentity,
+    sentinelIdentity,
     ledgerSha,
     closed = false,
     lastReceipt,
@@ -387,13 +408,23 @@ function withAdmission(policyFile, expected, action, options = {}) {
       hash(identity(p.registryDirectory)) !== hash(p.registryIdentity)
     )
       fail('OWNER_OR_POLICY_CHANGED');
+    if (lockIdentity && hash(fileIdentity(lock)) !== hash(lockIdentity))
+      fail('LOCK_REPLACED');
+    if (!ledgerIdentity && present(ledger)) fail('UNEXPECTED_LEDGER');
     if (ledgerIdentity && hash(fileIdentity(ledger)) !== hash(ledgerIdentity))
       fail('LEDGER_REPLACED');
     if (ledgerSha && fileHash(ledger) !== ledgerSha) fail('LEDGER_CHANGED');
+    if (
+      sentinelIdentity &&
+      hash(fileIdentity(sentinel)) !== hash(sentinelIdentity)
+    )
+      fail('SENTINEL_REPLACED');
+    if (!sentinelIdentity && present(sentinel)) fail('UNEXPECTED_SENTINEL');
     if (present(sentinel) && fs.readFileSync(sentinel, 'utf8') !== expected)
       fail('SENTINEL_CHANGED');
   };
   function save() {
+    owner();
     const text = JSON.stringify({ payload: state, digest: hash(state) }),
       temporary = ledger + '.' + nonce + '.tmp';
     if (
@@ -410,9 +441,13 @@ function withAdmission(policyFile, expected, action, options = {}) {
     } finally {
       fs.closeSync(descriptor);
     }
+    const publishedIdentity = fileIdentity(temporary),
+      publishedSha = crypto.createHash('sha256').update(text).digest('hex');
+    owner();
     fs.renameSync(temporary, ledger);
-    ledgerIdentity = fileIdentity(ledger);
-    ledgerSha = fileHash(ledger);
+    ledgerIdentity = publishedIdentity;
+    ledgerSha = publishedSha;
+    owner();
   }
   function query() {
     const observation = {
@@ -831,6 +866,7 @@ function withAdmission(policyFile, expected, action, options = {}) {
       fail('PHYSICAL_RESERVE');
   }
   fs.writeFileSync(lock, token, { flag: 'wx', mode: 0o600 });
+  lockIdentity = fileIdentity(lock);
   try {
     if (present(ledger)) {
       const envelope = read(ledger);
@@ -869,6 +905,7 @@ function withAdmission(policyFile, expected, action, options = {}) {
         fail('INVALID_COMPLETED_LEDGER');
       ledgerIdentity = fileIdentity(ledger);
       ledgerSha = fileHash(ledger);
+      sentinelIdentity = fileIdentity(sentinel);
     } else {
       if (
         present(sentinel) ||
@@ -898,6 +935,7 @@ function withAdmission(policyFile, expected, action, options = {}) {
       };
       save();
       fs.writeFileSync(sentinel, expected, { flag: 'wx', mode: 0o600 });
+      sentinelIdentity = fileIdentity(sentinel);
     }
     state.claim = {
       id: crypto.randomUUID(),
@@ -922,7 +960,14 @@ function withAdmission(policyFile, expected, action, options = {}) {
       }
     });
   } catch (error) {
-    if (present(lock) && fs.readFileSync(lock, 'utf8') === token) {
+    let stillOwned = false;
+    try {
+      owner();
+      stillOwned = true;
+    } catch {
+      /* Preserve foreign/uncertain authority, including the lock. */
+    }
+    if (stillOwned) {
       if (
         state?.claim &&
         !state.slots.some((row) => row.started && !row.complete)
@@ -938,12 +983,15 @@ function withAdmission(policyFile, expected, action, options = {}) {
 function main(argv) {
   if (
     ![2, 3].includes(argv.length) ||
-    !['--review', '--apply'].includes(argv[0]) ||
+    !['--review', '--apply', '--deploy', '--rollback'].includes(argv[0]) ||
     (argv[0] === '--review' && argv.length !== 3)
   )
     fail('USAGE');
   if (argv[0] === '--review') {
     const result = checkPlan(argv[1], argv[2]);
+    const publication = result.p.publication
+      ? require('./once-pair-publication.cjs').validate(result.p)
+      : null;
     return {
       admission: false,
       registryWritten: false,
@@ -952,11 +1000,16 @@ function main(argv) {
       heldId: result.p.heldId,
       targets: result.p.pair,
       limits: LIMITS,
+      ...(publication ? { publicationLimits: publication.limits } : {}),
     };
   }
   // The two-argument form avoids a self-referential digest in the policy's
   // exact launcher argv pin. This is process-local input, never machine config.
   const expected = argv[2] || process.env.WEWE_ONCE_PAIR_SHA256;
+  if (['--deploy', '--rollback'].includes(argv[0]))
+    return require('./once-pair-publication.cjs').execute(argv[1], expected, {
+      rollback: argv[0] === '--rollback',
+    });
   return withAdmission(argv[1], expected, (lease, result) => {
     const candidate = result.pair.find((row) => row.role === 'candidate'),
       rollback = result.pair.find((row) => row.role === 'rollback');
@@ -990,10 +1043,11 @@ function main(argv) {
 }
 module.exports = { LIMITS, MODE, codePins, checkPlan, withAdmission, main };
 if (require.main === module) {
-  try {
-    process.stdout.write(JSON.stringify(main(process.argv.slice(2))) + '\n');
-  } catch (error) {
-    process.stderr.write(error.message + '\n');
-    process.exitCode = 1;
-  }
+  Promise.resolve()
+    .then(() => main(process.argv.slice(2)))
+    .then((result) => process.stdout.write(JSON.stringify(result) + '\n'))
+    .catch((error) => {
+      process.stderr.write(error.message + '\n');
+      process.exitCode = 1;
+    });
 }
