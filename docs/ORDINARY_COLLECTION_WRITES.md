@@ -22,6 +22,8 @@ All SQLite writes retain PR39's physical free-space margin, actual database iden
 
 `CollectionService.replayWereadDirectory`, `replayVerifiedSearch`, `replayBrowserDomUpdate` and `importVerifiedSearchBackfill` remain explicit protected replay/backfill operations. Directory/history import and merges are unchanged.
 
+Protected replay/backfill reuses the identity saver while preserving its approved write set: existing cache commit and remote submission ledgers remain unchanged. Only ordinary source collection adds the new verified-page SQL receipt. A source change during transport still rejects an ordinary page before any article or receipt commit.
+
 `collectMp2RssRecent20` takes one independent verified backup only when the saved source is not `mp2rss`. `collectPublicAlbums` takes one only when the saved source is not `public-album` or its normalized album-ID set changes. An ordinary refresh of the same saved binding takes zero. A failed source-change backup prevents transport and writes; source/version changes during preparation abort the transaction.
 
 Native subscription activation/repair retains the supplied backup callback in `addSubscriptionFromArticle` / `repairExistingSubscription`: that workflow publishes a private source binding and can delete an inactive staged feed on rollback. It is not the cache-only continuation above. Account session replacement, actual deletion, migrations, upgrades, formal maintenance and periodic recovery snapshots retain their own protection. This change does not weaken or relabel those boundaries.

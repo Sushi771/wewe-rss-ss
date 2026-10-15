@@ -187,6 +187,35 @@ describe('ordinary collection boundaries on synthetic SQLite', () => {
     await integrity();
   });
 
+  it('protected offline replay reuse preserves pre-existing cache receipt ledgers exactly', async () => {
+    await db.$executeRawUnsafe(
+      "INSERT INTO cache_refresh_commits VALUES ('retained', 'synthetic-other-feed', 'retained-result', 1)",
+    );
+    const before = await receipts();
+    await (collection as any).saveVerifiedSearchPage(mpId, page, false);
+    await (collection as any).saveVerifiedSearchPage(mpId, page, false);
+    expect(await db.article.count()).toBe(2);
+    expect(await receipts()).toEqual(before);
+    await integrity();
+  });
+
+  it('a source change during transport rejects the prepared ordinary page without weakening the source fence', async () => {
+    (fetchLiveOwnerArticles as jest.Mock).mockImplementationOnce(async () => {
+      await db.feed.update({
+        where: { id: mpId },
+        data: { collectionChannel: 'owner-weread-latest' },
+      });
+      return page;
+    });
+    await expect(collection.collectOwnerSearch(mpId)).rejects.toThrow(
+      'COLLECTION_SOURCE_CHANGED',
+    );
+    expect(await db.article.count()).toBe(0);
+    expect(await receipts()).toHaveLength(0);
+    expect(fetchLiveOwnerArticles).toHaveBeenCalledTimes(1);
+    expect(backup).not.toHaveBeenCalled();
+  });
+
   it('lost SQL acknowledgement retains the committed receipt; a later local cache save cannot duplicate rows', async () => {
     const transaction = db.$transaction.bind(db);
     jest

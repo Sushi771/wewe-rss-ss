@@ -457,11 +457,16 @@ export class CollectionService {
                 },
               });
             }
-            const receiptId = createHash('sha256')
-              .update(JSON.stringify(['verified-page-v1', mpId, page]))
-              .digest('hex');
-            await tx.$executeRaw`INSERT INTO cache_refresh_commits(id,mp_id,result_json,committed_at_ms)
-              VALUES(${receiptId},${mpId},${JSON.stringify({ created, updated })},${Date.now()}) ON CONFLICT(id) DO NOTHING`;
+            // Protected offline replay/backfill shares the identity saver, but
+            // its approved write set must leave existing remote/cache ledgers
+            // untouched. Only ordinary source collection adds this SQL receipt.
+            if (expectedChannel) {
+              const receiptId = createHash('sha256')
+                .update(JSON.stringify(['verified-page-v1', mpId, page]))
+                .digest('hex');
+              await tx.$executeRaw`INSERT INTO cache_refresh_commits(id,mp_id,result_json,committed_at_ms)
+                VALUES(${receiptId},${mpId},${JSON.stringify({ created, updated })},${Date.now()}) ON CONFLICT(id) DO NOTHING`;
+            }
           },
           { timeout: 60000 },
         ),

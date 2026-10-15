@@ -365,6 +365,10 @@ describe('directory replay through protected SQLite persistence', () => {
   const replay = () =>
     prepareWereadDirectoryReplay([raw(group())], expected, [body()]);
   it('the existing refresh collector inserts ten, deduplicates a later manual refresh and discovers a new article', async () => {
+    await prisma.feed.update({
+      where: { id: expected.mpId },
+      data: { collectionChannel: 'owner-weread-latest' },
+    });
     const oldConfig = process.env.OWNER_SEARCH_CONFIG_FILE;
     const config = {
       ...expected,
