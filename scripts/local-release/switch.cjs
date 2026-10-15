@@ -72,7 +72,7 @@ function processIdentity(action, pid, port, expected) {
   return JSON.parse(run(powershell, args, { env: cleanEnvironment() }));
 }
 
-function portOwnersAsync(port) {
+async function portOwnersAsync(port) {
   // Only this read-only action overlaps database preparation. Identity/Stop
   // keep their existing complete contract and the original PS fallback.
   if (
@@ -82,7 +82,7 @@ function portOwnersAsync(port) {
     return Promise.resolve(processIdentity('Port', undefined, port));
   const tool = require('./identity-tool.cjs').identityTool();
   if (!tool) return Promise.resolve(processIdentity('Port', undefined, port));
-  // Fallback or helper-integrity failures throw before preparation is invoked.
+  // Query and helper-integrity failures reject; they never imply a free port.
   return promisify(execFile)(tool, ['Port', '0', String(port), '', '', ''], {
     windowsHide: true,
     shell: false,
