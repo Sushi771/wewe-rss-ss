@@ -154,12 +154,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       return [s.dev, s.ino, s.birthtimeNs].map(String);
     };
     const entriesAt = (at) =>
-      fs
-        .readdirSync(at, { withFileTypes: true })
-        .map((e) => ({
-          name: e.name,
-          kind: e.isDirectory() ? 'directory' : e.isFile() ? 'file' : 'other',
-        }));
+      fs.readdirSync(at, { withFileTypes: true }).map((e) => ({
+        name: e.name,
+        kind: e.isDirectory() ? 'directory' : e.isFile() ? 'file' : 'other',
+      }));
     const sortedEntries = (rows) => rows.map((e) => JSON.stringify(e)).sort();
     function watchDirectory(at, expected, entries) {
       if (
