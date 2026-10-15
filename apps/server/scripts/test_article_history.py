@@ -277,6 +277,20 @@ class HistoryTests(unittest.TestCase):
         receipts[0]['identity'] = history.database_identity(str(self.old).swapcase())
         self.assertIn('protected-recovery-point', self.plan(protections=receipts)['heldReasons'])
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows short path aliases')
+    def test_windows_short_source_and_long_root_are_consistent(self):
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(32768)
+        get_short = ctypes.windll.kernel32.GetShortPathNameW
+        count = get_short(str(self.old.resolve()), buffer, len(buffer))
+        self.assertGreater(count, 0)
+        self.assertEqual(history.regular(buffer.value, [self.sources.resolve()]), self.old.resolve())
+        # Both root and file normalize identically even when TEMP itself is short.
+        self.assertEqual(history.identity(buffer.value), history.identity(self.old.resolve()))
+        self.archive = Path(buffer.value).parent / 'unsafe-archive'
+        with self.assertRaisesRegex(history.CoverageError, 'outside retirement roots'):
+            self.prepare()
+
     def test_source_change_and_file_replacement_reject_stale_archive(self):
         self.prepare()
         self.change(title='changed after prepare')
