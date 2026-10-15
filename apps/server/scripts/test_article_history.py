@@ -334,7 +334,7 @@ class HistoryTests(unittest.TestCase):
         body = self.archive / entry['body']
         self.assertGreater(len(str(body)), 260)
         native = history.native_path(body)
-        self.assertEqual(history.regular(native, [self.archive]), history.absolute_path(body))
+        self.assertEqual(history.regular(native, [self.archive]), history.resolved_path(body))
         self.assertEqual(history.identity(native), history.identity(body))
         self.assertFalse(history.identity(native)['path'].startswith('\\\\?\\'))
         with self.assertRaisesRegex(history.CoverageError, 'outside declared roots'):
