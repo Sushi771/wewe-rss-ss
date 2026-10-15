@@ -34,14 +34,25 @@ def database(path, body='<p>original</p>', *, title='title', metrics='{"reads":1
 
 
 def fake_browser(root, pages):
-    manifest = json.loads((root / 'manifest.json').read_text())
+    manifest = json.loads(history.native_path(root / 'manifest.json').read_text())
     image_counts = {e['reader']: len(e['assets']) for e in manifest['entries']}
     return {'pages': len(pages), 'decoded': True, 'remoteRequests': 0, 'images': sum(image_counts.values()), 'imageInputs': 0}
 
 
+class LongTemporaryDirectory(tempfile.TemporaryDirectory):
+    """Clean up this fixture's own long paths without changing its logical name."""
+    def cleanup(self):
+        original = self.name
+        try:
+            self.name = str(history.native_path(original))
+            super().cleanup()
+        finally:
+            self.name = original
+
+
 class HistoryTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='article-history-test-')
+        self.temp = LongTemporaryDirectory(prefix='article-history-test-')
         self.root = Path(self.temp.name)
         self.sources = self.root / 'sources'
         self.sources.mkdir()
@@ -65,7 +76,7 @@ class HistoryTests(unittest.TestCase):
                 db.execute('UPDATE articles SET "' + column + '"=?', (value,))
 
     def manifest(self):
-        return json.loads((self.archive / 'manifest.json').read_text())
+        return json.loads(history.native_path(self.archive / 'manifest.json').read_text())
 
     def receipts(self):
         owner = self.root / 'owner.db'
@@ -88,13 +99,13 @@ class HistoryTests(unittest.TestCase):
         manifest = self.manifest()
         entry = manifest['entries'][0]
         self.assertNotEqual(entry['bodySha256'], entry['currentMatch']['body'])
-        self.assertEqual((self.archive / entry['body']).read_bytes(), b'<p>original</p>')
-        meta = json.loads((self.archive / entry['metadata']).read_text())
+        self.assertEqual(history.native_path(self.archive / entry['body']).read_bytes(), b'<p>original</p>')
+        meta = json.loads(history.native_path(self.archive / entry['metadata']).read_text())
         self.assertEqual(meta['extension'], {'sqliteBlobBase64': 'AP8='})
         self.assertEqual(meta['metrics'], '{"reads":1}')
         self.assertIn('context', manifest['sources'][0])
         self.assertTrue(history.verifyCoverage(self.archive)['verified'])
-        self.assertNotIn(b'NEVER-ARCHIVE-THIS-TEST-TOKEN', b''.join(p.read_bytes() for p in self.archive.rglob('*') if p.is_file()))
+        self.assertNotIn(b'NEVER-ARCHIVE-THIS-TEST-TOKEN', b''.join(p.read_bytes() for p in history.native_path(self.archive).rglob('*') if p.is_file()))
 
     def test_metadata_only_version_is_not_discarded(self):
         self.change(content_html='<p>new body</p>', title='old title', metrics='{"reads":99}')
@@ -216,7 +227,7 @@ class HistoryTests(unittest.TestCase):
         self.change(content_html=f'<script>fetch("https://example.invalid")</script><meta http-equiv="refresh" content="0;url=x"><iframe src="x"></iframe><img src="{INLINE}" onerror="alert(1)"><p>readable</p>')
         self.prepare()
         manifest = self.manifest()
-        reader = (self.archive / manifest['entries'][0]['reader']).read_text()
+        reader = history.native_path(self.archive / manifest['entries'][0]['reader']).read_text()
         self.assertNotIn('fetch(', reader)
         self.assertNotIn('onerror', reader)
         self.assertNotIn('<iframe', reader)
@@ -227,7 +238,7 @@ class HistoryTests(unittest.TestCase):
         self.prepare()
         entry = self.manifest()['entries'][0]
         for name in (entry['body'], entry['assets'][0], entry['reader']):
-            target = self.archive / name
+            target = history.native_path(self.archive / name)
             original = target.read_bytes()
             target.write_bytes(b'corrupt')
             with self.assertRaises(history.CoverageError):
@@ -248,7 +259,7 @@ class HistoryTests(unittest.TestCase):
         manifest = self.manifest()
         forged = history.page('forged', '<p>no images</p>')
         name = 'readers/' + history.digest(forged) + '.html'
-        (self.archive / name).write_bytes(forged)
+        history.native_path(self.archive / name).write_bytes(forged)
         manifest['files'][name] = {'sha256': history.digest(forged), 'bytes': len(forged)}
         manifest['entries'][0]['reader'] = name
         manifest['entries'][0]['assets'] = []
@@ -311,6 +322,24 @@ class HistoryTests(unittest.TestCase):
         self.assertIn('two-distinct-verified-recovery-points-required', plan['heldReasons'])
         receipts[0]['identity'] = history.database_identity(str(self.old).swapcase())
         self.assertIn('protected-recovery-point', self.plan(protections=receipts)['heldReasons'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows extended path I/O')
+    def test_windows_long_objects_keep_logical_identity_scope_and_corruption_checks(self):
+        self.archive = self.root / ('deep-' + 'd' * 70) / 'archive'
+        self.prepare()
+        entry = self.manifest()['entries'][0]
+        body = self.archive / entry['body']
+        self.assertGreater(len(str(body)), 260)
+        native = history.native_path(body)
+        self.assertEqual(history.regular(native, [self.archive]), history.absolute_path(body))
+        self.assertEqual(history.identity(native), history.identity(body))
+        self.assertFalse(history.identity(native)['path'].startswith('\\\\?\\'))
+        with self.assertRaisesRegex(history.CoverageError, 'outside declared roots'):
+            history.regular(native, [self.sources])
+        self.assertTrue(history.verifyCoverage(self.archive)['verified'])
+        native.write_bytes(b'corrupt')
+        with self.assertRaises(history.CoverageError):
+            history.verifyCoverage(self.archive)
 
     @unittest.skipUnless(os.name == 'nt', 'Windows short path aliases')
     def test_windows_short_source_and_long_root_are_consistent(self):
@@ -436,7 +465,7 @@ class HistoryTests(unittest.TestCase):
 class BrowserIntegration(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('ARTICLE_HISTORY_BROWSER_REQUIRED') == '1', 'enable real offline Chrome integration explicitly')
     def test_legacy_alias_and_input_reference_browser_comparison(self):
-        with tempfile.TemporaryDirectory(prefix='article-reference-test-') as temp:
+        with LongTemporaryDirectory(prefix='article-reference-test-') as temp:
             root = Path(temp)
             sources = root / 'sources'
             sources.mkdir()
@@ -451,7 +480,7 @@ class BrowserIntegration(unittest.TestCase):
             # Independent raw HTML control, bypassing Reader, uses the same PNG.
             (root / 'assets').mkdir()
             asset = 'assets/' + history.digest(PNG) + '.png'
-            (root / asset).write_bytes(PNG)
+            history.native_path(root / asset).write_bytes(PNG)
             (root / 'reference.html').write_bytes(history.page('raw alias control', '<image src="' + asset + '">'))
             control = history.browser_check(root, ['reference.html'])
             self.assertEqual(control['images'], verified['browser']['images'])
@@ -478,7 +507,7 @@ class BrowserIntegration(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('ARTICLE_HISTORY_BROWSER_REQUIRED') == '1', 'enable real offline Chrome integration explicitly')
     def test_real_decode_no_requests_and_corrupt_pixels_rejected(self):
-        with tempfile.TemporaryDirectory(prefix='article-history-browser-test-') as temp:
+        with LongTemporaryDirectory(prefix='article-history-browser-test-') as temp:
             root = Path(temp)
             sources = root / 'sources'
             sources.mkdir()

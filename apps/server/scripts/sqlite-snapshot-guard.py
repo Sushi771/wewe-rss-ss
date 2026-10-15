@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import sqlite3
 import sys
 import threading
@@ -335,8 +336,13 @@ def main():
                 except Exception as error:
                     # Never echo raw SQL, account values, exceptions or paths.
                     code = str(error) if type(error).__name__ == 'HostError' else 'HISTORY_REVIEW_FAILED'
+                    if not re.fullmatch('[A-Z_]{1,80}', code):
+                        code = 'HISTORY_REVIEW_FAILED'
                     result = {'verified': False, 'fresh': False, 'eligible': [],
-                              'reason': code, 'permanentDeletionPerformed': False}
+                              'reason': code, 'permanentDeletionPerformed': False,
+                              'diagnostic': article_history_host.safe_diagnostic(error) if 'article_history_host' in locals() else
+                                  {'format': 'article-history-diagnostic-v1', 'stage': 'owner-request',
+                                   'errorType': 'UnknownError', 'code': 'UNCLASSIFIED'}}
             else:
                 result = {"verified": False, "fresh": False, "reason": "unknown-operation"}
             print(json.dumps({"id": request.get("id"), "result": result}), flush=True)

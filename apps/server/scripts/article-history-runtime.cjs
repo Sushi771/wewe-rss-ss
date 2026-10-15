@@ -2,6 +2,129 @@
 const { randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
 
+function safeDiagnostic(value) {
+  const pick = (value, allowed, fallback) =>
+    allowed.includes(value) ? value : fallback;
+  if (value?.format !== 'article-history-diagnostic-v1') return undefined;
+  const result = {
+    format: value.format,
+    stage: pick(
+      value.stage,
+      [
+        'owner-request',
+        'owner-proof',
+        'references',
+        'recovery-owner',
+        'recovery-previous',
+        'source-state',
+        'archive-prepare',
+        'coverage',
+        'resource-query',
+        'final-check',
+        'approval-coverage',
+        'approval-source',
+        'approval-recovery',
+        'approval-resource',
+      ],
+      'owner-request',
+    ),
+    errorType: pick(
+      value.errorType,
+      [
+        'HostError',
+        'CoverageError',
+        'BrowserCheckError',
+        'OperationalError',
+        'DatabaseError',
+        'IntegrityError',
+        'ProgrammingError',
+        'OSError',
+        'PermissionError',
+        'FileNotFoundError',
+        'TimeoutExpired',
+        'ValueError',
+        'TypeError',
+        'JSONDecodeError',
+      ],
+      'UnknownError',
+    ),
+    code: pick(
+      value.code,
+      [
+        'EBUSY',
+        'EPERM',
+        'ENOENT',
+        'EACCES',
+        'EIO',
+        'ENOSPC',
+        'EMFILE',
+        'SQLITE_BUSY',
+        'SQLITE_LOCKED',
+        'SQLITE_CORRUPT',
+        'SQLITE_NOTADB',
+        'SQLITE_ERROR',
+        'SQLITE_CONSTRAINT',
+        'SQLITE_INTERRUPT',
+        'PROCESS_TIMEOUT',
+      ],
+      'UNCLASSIFIED',
+    ),
+  };
+  if (value.browser && typeof value.browser === 'object') {
+    result.browser = {
+      phase: pick(
+        value.browser.phase,
+        [
+          'input',
+          'startup',
+          'connect',
+          'cdp',
+          'decode',
+          'remote-check',
+          'process',
+        ],
+        'process',
+      ),
+      errorType: pick(
+        value.browser.errorType,
+        ['Error', 'TypeError', 'SyntaxError', 'RangeError', 'TimeoutExpired'],
+        'UnknownError',
+      ),
+      code: pick(
+        value.browser.code,
+        [
+          'ENOENT',
+          'EBUSY',
+          'EPERM',
+          'EACCES',
+          'ECONNREFUSED',
+          'ECONNRESET',
+          'BROWSER_EXITED',
+          'STARTUP_EXHAUSTED',
+          'INVALID_PORT_FILE',
+          'CDP_TIMEOUT',
+          'CDP_ERROR',
+          'DECODE_FAILED',
+          'REMOTE_RESOURCE_BLOCKED',
+          'BROWSER_DEADLINE',
+          'PROCESS_TIMEOUT',
+          'INVALID_BROWSER_RESULT',
+        ],
+        'UNCLASSIFIED',
+      ),
+    };
+    if (['ENOENT', 'EBUSY', 'EPERM'].includes(value.browser.resourceCode))
+      result.browser.resourceCode = value.browser.resourceCode;
+    if (
+      Number.isInteger(value.browser.attempts) &&
+      value.browser.attempts >= 0 &&
+      value.browser.attempts <= 120
+    )
+      result.browser.attempts = value.browser.attempts;
+  }
+  return result;
+}
+
 /** Private existing owner pipe, not a public HTTP/JSON receipt endpoint. */
 function exchange(child, operation, payload = {}) {
   if (!child?.stdin?.writable)
@@ -37,7 +160,16 @@ function exchange(child, operation, payload = {}) {
           const code = /^[A-Z_]{1,80}$/.test(value.result?.reason || '')
             ? value.result.reason
             : 'UNPROVED';
-          finish(Error('History owner review blocked: ' + code));
+          const diagnostic = safeDiagnostic(value.result?.diagnostic);
+          const suffix = diagnostic
+            ? ` [${diagnostic.stage}/${diagnostic.errorType}/${diagnostic.code}${diagnostic.browser ? '/' + diagnostic.browser.phase + '/' + diagnostic.browser.code : ''}]`
+            : '';
+          finish(
+            Object.assign(
+              Error('History owner review blocked: ' + code + suffix),
+              { diagnostic },
+            ),
+          );
           return;
         }
         finish(null, value.result);
@@ -72,4 +204,4 @@ async function withRuntimeReferences(
     return request(operation, payload);
   });
 }
-module.exports = { exchange, withRuntimeReferences };
+module.exports = { exchange, withRuntimeReferences, safeDiagnostic };
