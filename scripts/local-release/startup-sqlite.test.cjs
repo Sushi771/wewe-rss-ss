@@ -355,3 +355,55 @@ for (const column of [
     );
   });
 }
+
+test('reuse rejects a WAL commit after pinned equality even with frozen source metadata', async (t) => {
+  const f = fixture(t),
+    database = fs.realpathSync.native(f.database),
+    writer = new sqlite.DatabaseSync(database);
+  writer.exec('PRAGMA journal_mode=WAL');
+  const backups = path.join(f.root, 'backups');
+  const first = await prepareStart(
+    f.database,
+    f.migrations,
+    backups,
+    path.join(f.root, 'first.json'),
+  );
+  const saved = fs.readFileSync(first.backup.backup);
+  const openOriginal = fs.openSync,
+    statOriginal = fs.statSync;
+  const pinned = new Map();
+  for (const file of [database, database + '-wal'])
+    if (fs.existsSync(file))
+      pinned.set(file, statOriginal(file, { bigint: true }));
+  let hashes = 0,
+    injected = false;
+  fs.statSync = function (file, options) {
+    if (options?.bigint && pinned.has(file)) return pinned.get(file);
+    return statOriginal.apply(this, arguments);
+  };
+  fs.openSync = function (file, ...args) {
+    if (file === first.backup.backup && ++hashes === 2) {
+      writer.exec("UPDATE articles SET body='late reuse commit' WHERE id='a'");
+      injected = true;
+    }
+    return openOriginal.call(this, file, ...args);
+  };
+  try {
+    await assert.rejects(
+      prepareStart(
+        f.database,
+        f.migrations,
+        backups,
+        path.join(f.root, 'stale.json'),
+      ),
+      /source changed during startup reuse/,
+    );
+    assert.equal(injected, true);
+    assert.equal(fs.existsSync(path.join(f.root, 'stale.json')), false);
+    assert.deepEqual(fs.readFileSync(first.backup.backup), saved);
+  } finally {
+    fs.openSync = openOriginal;
+    fs.statSync = statOriginal;
+    writer.close();
+  }
+});

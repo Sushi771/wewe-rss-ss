@@ -1,3 +1,4 @@
+import { protectedFeedDelete } from '../collection/protected-feed-delete';
 import { buildArticleMarkdown } from '../article-export';
 import { cacheRevision, cacheSyncStatus } from '../feeds/cache-sync-state';
 import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
@@ -978,7 +979,7 @@ export class TrpcRouter {
     delete: this.trpcService.protectedProcedure
       .input(z.string())
       .mutation(async ({ input: id }) => {
-        await this.prismaService.feed.delete({ where: { id } });
+        await protectedFeedDelete(this.prismaService, [id], true);
         return id;
       }),
     updateOrder: this.trpcService.protectedProcedure
@@ -1008,17 +1009,10 @@ export class TrpcRouter {
       )
       .mutation(({ input }) => this.trpcService.reorderFeeds(input)),
     batchDelete: this.trpcService.protectedProcedure
-      .input(z.array(z.string()))
-      .mutation(async ({ input: ids }) => {
-        await this.prismaService.feed.deleteMany({
-          where: {
-            id: {
-              in: ids,
-            },
-          },
-        });
-        return ids;
-      }),
+      .input(z.array(z.string().min(1).max(128)).max(1000))
+      .mutation(async ({ input: ids }) =>
+        protectedFeedDelete(this.prismaService, ids),
+      ),
 
     refreshArticles: this.trpcService.protectedProcedure
       .input(

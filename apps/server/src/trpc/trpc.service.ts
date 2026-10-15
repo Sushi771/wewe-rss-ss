@@ -19,7 +19,19 @@ import {
   ProviderPage,
 } from '../collection/subscription-provider';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
-import { tryInsertOnlyCachedPage } from '../collection/insert-only-cache';
+import {
+  incrementalWrite,
+  assertIncrementalTransaction,
+} from '../collection/incremental-write';
+import {
+  readRefreshSubmission,
+  reserveRefreshSubmission,
+  beginRefreshSubmission,
+  finishRefreshSubmission,
+  cancelRefreshPreparation,
+  RefreshSubmissionTicket,
+  refreshSubmissionProof,
+} from '../collection/refresh-submission-claim';
 import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
 import {
   activeRefreshScheduleEnabled,
@@ -377,7 +389,7 @@ export class TrpcService {
     feedId: string,
     stage: 'submit' | 'cache',
     automatic = false,
-    options?: { cacheOnly: boolean },
+    options?: { cacheOnly?: boolean; claimKey?: string },
   ): Promise<BatchOutcome> {
     if (
       automatic &&
@@ -443,8 +455,28 @@ export class TrpcService {
             message: '本号本地缓存不可用；其他订阅继续，未发出外部请求。',
           };
         }
-      } else
-        page = await wechat2RssProvider().fetchArticles(feedId, feed.mpName);
+      } else {
+        try {
+          page = await wechat2RssProvider().fetchArticles(feedId, feed.mpName);
+        } catch (error) {
+          if (
+            [
+              'WECHAT2RSS_SUBSCRIPTION_MISSING',
+              'WECHAT2RSS_SUBSCRIPTION_NAME_CHANGED',
+              'WECHAT2RSS_SUBSCRIPTION_PAUSED',
+            ].includes((error as Error).message)
+          )
+            return {
+              state: 'failed',
+              accepted: true,
+              submissionUnknown: false,
+              stopBatch: false,
+              message:
+                'This subscription is unavailable or changed; independent sources continue.',
+            };
+          throw error;
+        }
+      }
       let result: Awaited<ReturnType<TrpcService['syncCachedWechat2RssPage']>>;
       try {
         result = await this.syncCachedWechat2RssPage(feedId, page, false, {
@@ -503,8 +535,15 @@ export class TrpcService {
     this.activeSubscriptionAdds.add('wechat2rss:add');
     this.activeCollections.add(feedId);
     let submissionStarted = false;
+    let ticket: RefreshSubmissionTicket | undefined;
     let preparationStage = '账号状态读取';
     try {
+      const prior = await readRefreshSubmission(
+        this.prismaService,
+        options?.claimKey || '',
+        feedId,
+      );
+      if (prior) return prior;
       const provider = wechat2RssProvider();
       const account = await provider.checkAccountStatus();
       if (account.challenged || !account.available)
@@ -514,29 +553,33 @@ export class TrpcService {
           message: '上游账号受限或需要官方验证，本次未提交；队列已暂停。',
         };
       const now = Math.floor(Date.now() / 1000);
-      preparationStage = '一致性备份';
-      await createVerifiedSqliteBackup();
       // Keep the original 15-minute per-feed reservation, including unknown results.
       preparationStage = '本地提交预留';
-      const reserved = await this.prismaService.feed.updateMany({
-        where: {
-          id: feedId,
-          status: 1,
-          collectionChannel: feed.collectionChannel,
-          providerRefreshAttemptTime: { lte: now - 900 },
-        },
-        data: { providerRefreshAttemptTime: now },
-      });
-      if (reserved.count !== 1)
-        return {
-          state: automatic ? 'skipped' : 'blocked',
-          accepted: false,
-          message: '本号更新仍在冷却期或状态已变化，本次未提交；不会自动重发。',
-        };
+      const reservation = await reserveRefreshSubmission(
+        this.prismaService,
+        feed,
+        options?.claimKey || '',
+        now,
+      );
+      if (!reservation.ticket)
+        return !automatic && reservation.outcome?.state === 'skipped'
+          ? { ...reservation.outcome, state: 'blocked' }
+          : reservation.outcome!;
+      ticket = reservation.ticket;
       try {
+        await beginRefreshSubmission(this.prismaService, ticket);
         submissionStarted = true;
         await provider.refreshSubscription(feedId, automatic);
+        await finishRefreshSubmission(this.prismaService, ticket, 'accepted');
       } catch (error) {
+        if (
+          [
+            'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED',
+            'WECHAT2RSS_SUBSCRIPTION_PAUSED',
+            'WECHAT2RSS_SUBSCRIPTION_MISSING',
+          ].includes((error as Error).message)
+        )
+          await finishRefreshSubmission(this.prismaService, ticket, 'not-sent');
         if (
           automatic &&
           (error as Error).message === 'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED'
@@ -569,7 +612,15 @@ export class TrpcService {
         message: '上游已受理更新，等待缓存生成；关闭页面后后台继续。',
       };
     } catch (error) {
-      if (submissionStarted) throw error;
+      if (submissionStarted) {
+        if (ticket)
+          await finishRefreshSubmission(
+            this.prismaService,
+            ticket,
+            'unknown',
+          ).catch(() => undefined);
+        throw error;
+      }
       const timedOut =
         error instanceof Error &&
         error.message === 'SQLite 一致性备份超时，本次未写入';
@@ -650,6 +701,16 @@ export class TrpcService {
       }
     };
     try {
+      const claimKey = waveKey.split('/')[0];
+      const prior = await readRefreshSubmission(
+        this.prismaService,
+        claimKey,
+        feedId,
+      );
+      if (prior) {
+        release();
+        return noRequest(prior);
+      }
       const provider = wechat2RssProvider();
       const account = await provider.checkAccountStatus();
       if (account.challenged || !account.available) {
@@ -667,39 +728,45 @@ export class TrpcService {
         feedId,
         automatic,
       );
-      await createVerifiedSqliteBackup();
       const now = Math.floor(Date.now() / 1000);
-      const reserved = await this.prismaService.feed.updateMany({
-        where: {
-          id: feedId,
-          status: 1,
-          collectionChannel: feed.collectionChannel,
-          providerRefreshAttemptTime: { lte: now - 900 },
-        },
-        data: { providerRefreshAttemptTime: now },
-      });
-      if (reserved.count !== 1) {
+      const reserved = await reserveRefreshSubmission(
+        this.prismaService,
+        feed,
+        claimKey,
+        now,
+      );
+      if (!reserved.ticket) {
         release();
-        return noRequest({
-          state: 'skipped',
-          accepted: false,
-          stopBatch: false,
-          message:
-            'Subscription reservation or cooldown changed; update not sent.',
-        });
+        return noRequest(reserved.outcome!);
       }
+      const ticket = reserved.ticket;
       return {
         release,
         cancel: async () => {
-          await this.prismaService.feed.updateMany({
-            where: { id: feedId, providerRefreshAttemptTime: now },
-            data: {
-              providerRefreshAttemptTime: feed.providerRefreshAttemptTime,
-            },
-          });
+          await cancelRefreshPreparation(this.prismaService, ticket);
         },
         submit: async () => {
-          await submit();
+          await beginRefreshSubmission(this.prismaService, ticket);
+          try {
+            await submit();
+            await finishRefreshSubmission(
+              this.prismaService,
+              ticket,
+              'accepted',
+            );
+          } catch (error) {
+            const unsent = [
+              'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED',
+              'WECHAT2RSS_SUBSCRIPTION_PAUSED',
+              'WECHAT2RSS_SUBSCRIPTION_MISSING',
+            ].includes((error as Error).message);
+            await finishRefreshSubmission(
+              this.prismaService,
+              ticket,
+              unsent ? 'not-sent' : 'unknown',
+            ).catch(() => undefined);
+            throw error;
+          }
           return {
             state: 'waiting',
             accepted: true,
@@ -750,7 +817,16 @@ export class TrpcService {
   private async reconcileUnreservedRefresh(
     feedId: string,
     batchCreatedAt: number,
+    batchId?: string,
   ) {
+    if (batchId) {
+      const proof = await refreshSubmissionProof(
+        this.prismaService,
+        batchId,
+        feedId,
+      );
+      if (proof) return proof;
+    }
     const feed = await this.prismaService.feed.findUnique({
       where: { id: feedId },
     });
@@ -908,8 +984,8 @@ export class TrpcService {
       const account = await wechat2RssProvider().checkAccountStatus();
       return account.available && !account.challenged;
     });
-    this.subscriptionBatches.attachReconciliation((id, createdAt) =>
-      this.reconcileUnreservedRefresh(id, createdAt),
+    this.subscriptionBatches.attachReconciliation((id, createdAt, batchId) =>
+      this.reconcileUnreservedRefresh(id, createdAt, batchId),
     );
     const { url } =
       this.configService.get<ConfigurationType['platform']>('platform')!;
@@ -1045,6 +1121,13 @@ export class TrpcService {
     trigger: 'local-manual' | 'scheduled' | 'public' = 'public',
   ) {
     this.logger.debug(`Backend update trigger: ${trigger}`);
+    const current = await this.prismaService.feed.findUniqueOrThrow({
+      where: { id: mpId },
+    });
+    if (resolveCollectionRoute(current).channel === 'wechat2rss')
+      return this.incrementalCollection(mpId, (feed) =>
+        this.refreshArticles(feed, page, resolveCollectionRoute(feed), trigger),
+      );
     let route: CollectionRoute;
     return this.recordCollectionResult(
       mpId,
@@ -1250,6 +1333,26 @@ export class TrpcService {
       };
     };
     if (options.inspectOnly || !neededArticles.length) {
+      let legacyRunning = false;
+      try {
+        legacyRunning =
+          JSON.parse(feed.lastCollectionResult || '{}').status === 'running';
+      } catch {
+        /* unknown user status is not rewritten */
+      }
+      if (!options.inspectOnly && legacyRunning && !preflightSkipped.length) {
+        const repaired = await this.incrementalCollection(mpId, (current) =>
+          this.collectionService.collectWechat2RssRecent({
+            mpId,
+            mpName: current.mpName,
+            trigger: 'scheduled',
+            cachedPage: page,
+            listOnly,
+            fetchMedia: false,
+          }),
+        );
+        return { ...repaired, ...(await mediaSummary(true)) };
+      }
       this.logger.log(
         `Cache sync preflight: unchanged; ${Date.now() - started}ms; articles=${page.articles.length}`,
       );
@@ -1322,55 +1425,22 @@ export class TrpcService {
         .map(safeArticle)
         .filter((item) => !item.contentHtml).length,
     };
-    if (
-      process.env.SQLITE_INSERT_ONLY_FAST_PATH === '1' &&
-      !preflightSkipped.length
-    ) {
-      // Hold the same original per-feed lock. The fast saver atomically commits
-      // articles, ledger and final local state, so no running/failed status may
-      // be written outside its transaction without the original full backup.
-      if (this.activeCollections.has(mpId)) throw new Error('CACHE_SYNC_BUSY');
-      this.activeCollections.add(mpId);
-      try {
-        const inserted = await tryInsertOnlyCachedPage(
-          this.prismaService,
-          feed,
-          delta,
-          listOnly,
-        );
-        if (inserted)
-          return {
-            ...inserted,
-            ...(await mediaSummary(true)),
-            bodyMissing: Math.max(
-              inserted.bodyMissing ?? 0,
-              page.bodyMissing + protectedBodyMissing,
-            ),
-          };
-      } finally {
-        this.activeCollections.delete(mpId);
-      }
-    }
-    return this.recordCollectionResult(
-      mpId,
-      (current) => {
-        if (
-          current.status !== 1 ||
-          resolveCollectionRoute(current).channel !== 'wechat2rss'
-        )
-          throw new Error('CACHE_SYNC_FEED_DISABLED');
-        return this.collectionService.collectWechat2RssRecent({
-          mpId,
-          mpName: current.mpName,
-          trigger: 'scheduled',
-          cachedPage: delta,
-          listOnly,
-          fetchMedia,
-          nightMediaUntil: options.nightMediaUntil,
-        });
-      },
-      true,
-    ).then(async (result) => ({
+    return this.incrementalCollection(mpId, (current) => {
+      if (
+        current.status !== 1 ||
+        resolveCollectionRoute(current).channel !== 'wechat2rss'
+      )
+        throw new Error('CACHE_SYNC_FEED_DISABLED');
+      return this.collectionService.collectWechat2RssRecent({
+        mpId,
+        mpName: current.mpName,
+        trigger: 'scheduled',
+        cachedPage: delta,
+        listOnly,
+        fetchMedia,
+        nightMediaUntil: options.nightMediaUntil,
+      });
+    }).then(async (result) => ({
       ...result,
       ...(await mediaSummary(true)),
       // A written delta cannot hide a preserved gap outside that delta.
@@ -1387,6 +1457,27 @@ export class TrpcService {
       () => this.collectionService.collectPublicAlbums(input),
       true,
     );
+  }
+
+  private async incrementalCollection<T>(
+    mpId: string,
+    collect: (feed: Feed) => Promise<T>,
+  ): Promise<T> {
+    if (this.activeCollections.has(mpId)) throw new Error('CACHE_SYNC_BUSY');
+    this.activeCollections.add(mpId);
+    try {
+      const feed = await this.prismaService.feed.findUniqueOrThrow({
+        where: { id: mpId },
+      });
+      if (
+        feed.status !== 1 ||
+        resolveCollectionRoute(feed).channel !== 'wechat2rss'
+      )
+        throw new Error('CACHE_SYNC_FEED_DISABLED');
+      return await collect(feed);
+    } finally {
+      this.activeCollections.delete(mpId);
+    }
   }
 
   private readonly activeCollections = new Set<string>();
@@ -1450,11 +1541,38 @@ export class TrpcService {
         typeof requireSqlite === 'function'
           ? requireSqlite(feed)
           : requireSqlite;
-      // 包括 running/failed 状态在内，任何本次采集写入都必须晚于备份核验。
-      const backupStarted = Date.now();
-      await createVerifiedSqliteBackup({ allowMysqlSkip: !sqliteRequired });
-      this.logger.log(`Cache backup: ${Date.now() - backupStarted}ms`);
-      await this.prismaService.feed.update({
+      const sqlite = !(process.env.DATABASE_URL || '').startsWith('mysql:');
+      if (sqliteRequired && !sqlite) throw new Error('SQLITE_REQUIRED');
+      let statusVersion = feed.lastCollectionResult;
+      const writeResult = async (input: {
+        data: { lastCollectionResult: string };
+        where: { id: string };
+      }) => {
+        const operation = () =>
+          this.prismaService.$transaction(async (tx) => {
+            if (sqlite) await assertIncrementalTransaction(tx);
+            // A later cache SQL receipt or concurrent edit wins over this outer
+            // progress/error receipt, including an interrupted commit response.
+            const changed = await tx.feed.updateMany({
+              where: {
+                id: mpId,
+                mpName: feed.mpName,
+                status: feed.status,
+                lastCollectionResult: statusVersion,
+              },
+              data: input.data,
+            });
+            if (changed.count) statusVersion = input.data.lastCollectionResult;
+          });
+        return sqlite
+          ? incrementalWrite(
+              this.prismaService,
+              Buffer.byteLength(input.data.lastCollectionResult),
+              operation,
+            )
+          : operation();
+      };
+      await writeResult({
         where: { id: mpId },
         data: {
           lastCollectionResult: JSON.stringify({
@@ -1483,7 +1601,7 @@ export class TrpcService {
                   '$1=[已隐藏]',
                 )
                 .slice(0, 500);
-        await this.prismaService.feed.update({
+        await writeResult({
           where: { id: mpId },
           data: {
             lastCollectionResult: JSON.stringify({
@@ -1499,7 +1617,7 @@ export class TrpcService {
         });
         throw new Error(message);
       }
-      await this.prismaService.feed.update({
+      await writeResult({
         where: { id: mpId },
         data: {
           lastCollectionResult: JSON.stringify({
@@ -1890,14 +2008,18 @@ export class TrpcService {
             ? '私有实例账号受限，本次未新增；请本人在实例处理，链接已保留。'
             : '私有实例没有正常登录账号，本次未新增，链接已保留。',
         };
-      const backup = await createVerifiedSqliteBackup();
-      if (!('source' in backup) || typeof backup.source !== 'string')
-        throw new Error('SQLite 一致性备份没有确认源库，本次未新增。');
-      const journal = await wechat2RssAddReceipt(
-        backup.source,
-        url,
-        backup.backup,
+      const database = await incrementalWrite(this.prismaService, 4096, () =>
+        this.prismaService.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          const files = await tx.$queryRawUnsafe<
+            Array<{ name: string; file: string }>
+          >('PRAGMA database_list');
+          const source = files.find((file) => file.name === 'main')?.file;
+          if (!source) throw new Error('SQLITE_REQUIRED');
+          return source;
+        }),
       );
+      const journal = await wechat2RssAddReceipt(database, url);
       let feedPath = journal.receipt?.feedPath;
       if (journal.receipt && !feedPath)
         return {
@@ -1950,10 +2072,6 @@ export class TrpcService {
         phase: 'identity',
       });
       subscriptionTaskId = acceptedTask.taskId;
-      if (backup.backup) {
-        await this.subscriptionTasks.snapshot(backup.backup);
-        await this.subscriptionBatches.snapshot(backup.backup);
-      }
       if (fastAccepted && /^\/feed\/\d{5,15}\.(?:xml|json)$/.test(feedPath))
         return await this.stageAcceptedSubscription(
           url,
@@ -2074,48 +2192,60 @@ export class TrpcService {
     upstreamSubmitted: boolean,
     acceptedFeedPath?: string,
   ) {
-    const old = await this.prismaService.feed.findUnique({
-      where: { id: accepted.feedId },
-    });
-    if (old && old.mpName && old.mpName !== accepted.name)
-      throw new Error('私有实例与现有订阅名称不一致，请先核对身份。');
-    let feed =
-      old ||
-      (await this.prismaService.feed.create({
-        data: {
-          id: accepted.feedId,
-          mpName: accepted.name,
-          mpCover: '',
-          mpIntro: '',
-          updateTime: 0,
-          syncTime: 0,
-          hasHistory: -1,
-          collectionChannel: 'wechat2rss',
-        },
-      }));
-    let sourceBindingChanged = !old;
-    // Explicit Wechat2RSS selection may repair a legacy record with NO saved
-    // source or album binding. Preserve real saved sources and paused state.
-    if (old && old.collectionChannel == null && !old.publicAlbumIds) {
-      const changed = await this.prismaService.feed.updateMany({
-        where: {
-          id: old.id,
-          mpName: accepted.name,
-          collectionChannel: null,
-          publicAlbumIds: old.publicAlbumIds,
-        },
-        data: { collectionChannel: 'wechat2rss' },
-      });
-      if (changed.count !== 1)
-        throw new Error('Wechat2RSS binding changed during identity check');
-      feed = await this.prismaService.feed.findUniqueOrThrow({
-        where: { id: old.id },
-      });
-      sourceBindingChanged = true;
-    }
+    const { feed, created, sourceBindingChanged } = await incrementalWrite(
+      this.prismaService,
+      4096,
+      () =>
+        this.prismaService.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          const old = await tx.feed.findUnique({
+            where: { id: accepted.feedId },
+          });
+          if (old && old.mpName && old.mpName !== accepted.name)
+            throw new Error('私有实例与现有订阅名称不一致，请先核对身份。');
+          let feed =
+            old ||
+            (await tx.feed.create({
+              data: {
+                id: accepted.feedId,
+                mpName: accepted.name,
+                mpCover: '',
+                mpIntro: '',
+                updateTime: 0,
+                syncTime: 0,
+                hasHistory: -1,
+                collectionChannel: 'wechat2rss',
+              },
+            }));
+          let sourceBindingChanged = !old;
+          // Explicit Wechat2RSS selection may repair a legacy record with NO saved
+          // source or album binding. Preserve real saved sources and paused state.
+          if (old && old.collectionChannel == null && !old.publicAlbumIds) {
+            const changed = await tx.feed.updateMany({
+              where: {
+                id: old.id,
+                mpName: accepted.name,
+                collectionChannel: null,
+                publicAlbumIds: old.publicAlbumIds,
+              },
+              data: { collectionChannel: 'wechat2rss' },
+            });
+            if (changed.count !== 1)
+              throw new Error(
+                'Wechat2RSS binding changed during identity check',
+              );
+            feed = await tx.feed.findUniqueOrThrow({
+              where: { id: old.id },
+            });
+            sourceBindingChanged = true;
+          }
+
+          return { feed, created: !old, sourceBindingChanged };
+        }),
+    );
     return await this.finishWechat2RssSubscription(
       feed,
-      !old,
+      created,
       upstreamSubmitted,
       sourceBindingChanged,
       acceptedFeedPath,
@@ -2130,43 +2260,53 @@ export class TrpcService {
   ) {
     void articleUrl;
     const feedId = `MP_WXS_${/^\/feed\/(\d{5,15})\.(?:xml|json)$/.exec(feedPath)![1]}`;
-    const old = await this.prismaService.feed.findUnique({
-      where: { id: feedId },
-    });
-    let feed =
-      old ||
-      (await this.prismaService.feed.create({
-        data: {
-          id: feedId,
-          mpName: '',
-          mpCover: '',
-          mpIntro: '',
-          updateTime: 0,
-          syncTime: 0,
-          hasHistory: -1,
-          collectionChannel: 'wechat2rss',
-        },
-      }));
-    let sourceBindingChanged = !old;
-    if (old && old.collectionChannel == null && !old.publicAlbumIds) {
-      const changed = await this.prismaService.feed.updateMany({
-        where: {
-          id: old.id,
-          collectionChannel: null,
-          publicAlbumIds: old.publicAlbumIds,
-        },
-        data: { collectionChannel: 'wechat2rss' },
-      });
-      if (changed.count !== 1) throw new Error('BINDING_CHANGED');
-      feed = await this.prismaService.feed.findUniqueOrThrow({
-        where: { id: old.id },
-      });
-      sourceBindingChanged = true;
-    }
+    const { feed, created, sourceBindingChanged } = await incrementalWrite(
+      this.prismaService,
+      4096,
+      () =>
+        this.prismaService.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          const old = await tx.feed.findUnique({
+            where: { id: feedId },
+          });
+          let feed =
+            old ||
+            (await tx.feed.create({
+              data: {
+                id: feedId,
+                mpName: '',
+                mpCover: '',
+                mpIntro: '',
+                updateTime: 0,
+                syncTime: 0,
+                hasHistory: -1,
+                collectionChannel: 'wechat2rss',
+              },
+            }));
+          let sourceBindingChanged = !old;
+          if (old && old.collectionChannel == null && !old.publicAlbumIds) {
+            const changed = await tx.feed.updateMany({
+              where: {
+                id: old.id,
+                collectionChannel: null,
+                publicAlbumIds: old.publicAlbumIds,
+              },
+              data: { collectionChannel: 'wechat2rss' },
+            });
+            if (changed.count !== 1) throw new Error('BINDING_CHANGED');
+            feed = await tx.feed.findUniqueOrThrow({
+              where: { id: old.id },
+            });
+            sourceBindingChanged = true;
+          }
+
+          return { feed, created: !old, sourceBindingChanged };
+        }),
+    );
     if (feed.collectionChannel !== 'wechat2rss' || feed.status !== 1) {
       const result = await this.finishWechat2RssSubscription(
         feed,
-        !old,
+        created,
         upstreamSubmitted,
         sourceBindingChanged,
       );
@@ -2196,7 +2336,7 @@ export class TrpcService {
       status: 'pending' as const,
       accepted: true,
       pending: true,
-      created: !old,
+      created,
       sourceBindingChanged,
       feed,
       upstreamSubmitted,
@@ -2250,13 +2390,6 @@ export class TrpcService {
               ? '文章正文与图片已入库，公众号名称仍待实例补全。'
               : '可核验文章已保留，公众号名称仍待实例补全；旧文章身份隔离状态保留。',
           };
-        const backup = await createVerifiedSqliteBackup();
-        if (!('source' in backup) || !backup.source)
-          throw new Error('BACKUP_FAILED');
-        if (backup.backup) {
-          await this.subscriptionTasks.snapshot(backup.backup);
-          await this.subscriptionBatches.snapshot(backup.backup);
-        }
         const feed = await this.prismaService.feed.findUniqueOrThrow({
           where: { id: task.feedId },
         });
@@ -2268,10 +2401,20 @@ export class TrpcService {
           throw new Error('METADATA_CHANGED');
         await this.collectionService.supplementWechat2RssAvatar(feed.id);
         if (!feed.mpName)
-          await this.prismaService.feed.updateMany({
-            where: { id: feed.id, mpName: '', collectionChannel: 'wechat2rss' },
-            data: { mpName: metadata.name },
-          });
+          await incrementalWrite(this.prismaService, 4096, () =>
+            this.prismaService.$transaction(async (tx) => {
+              await assertIncrementalTransaction(tx);
+              const changed = await tx.feed.updateMany({
+                where: {
+                  id: feed.id,
+                  mpName: '',
+                  collectionChannel: 'wechat2rss',
+                },
+                data: { mpName: metadata.name },
+              });
+              if (!changed.count) throw new Error('METADATA_CHANGED');
+            }),
+          );
         return {
           ...base,
           bodyReady: task.bodyReady === true,
@@ -2308,20 +2451,12 @@ export class TrpcService {
             message: '正在等待完整订阅记录；关闭弹窗后仍会自动接续。',
           };
       }
-      const backup = await createVerifiedSqliteBackup();
-      if (!('source' in backup) || typeof backup.source !== 'string')
-        throw new Error('BACKUP_FAILED');
       const journal = await wechat2RssAddReceipt(
-        backup.source,
+        decodeURIComponent(rawDatabase.slice(5).split('?')[0]),
         task.articleUrl,
-        backup.backup,
       );
       if (journal.receipt?.feedPath !== task.feedPath)
         throw new Error('RECEIPT_CHANGED');
-      if (backup.backup) {
-        await this.subscriptionTasks.snapshot(backup.backup);
-        await this.subscriptionBatches.snapshot(backup.backup);
-      }
       const exactPath =
         task.feedId && /^\/feed\/\d{5,15}\.(?:xml|json)$/.test(task.feedPath)
           ? task.feedPath

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { assertIncrementalWriteAdmission } from './incremental-write';
 
 type Kind = 'write' | 'backup';
 type Entry = {
@@ -15,6 +16,7 @@ export class SqliteWriteCoordinator {
   private queue: Entry[] = [];
   private fences = new Set<object>();
   private context = new AsyncLocalStorage<{ active: boolean }>();
+  private protectedContext = new AsyncLocalStorage<{ active: boolean }>();
 
   constructor(
     private waitMs = 75000,
@@ -28,6 +30,10 @@ export class SqliteWriteCoordinator {
   unfence(owner: object) {
     this.fences.delete(owner);
     this.drain();
+  }
+
+  hasWriteAdmission() {
+    return this.context.getStore()?.active === true;
   }
 
   private acquire(kind: Kind): Promise<() => void> {
@@ -78,7 +84,8 @@ export class SqliteWriteCoordinator {
     // Transaction middleware runs inside the admission acquired by $transaction.
     // Expired detached async contexts must not bypass a later backup.
     let release: () => void;
-    if (this.context.getStore()?.active) {
+    const nested = this.context.getStore()?.active === true;
+    if (nested || this.protectedContext.getStore()?.active === true) {
       // Track nested admission independently: a deliberately detached operation
       // can outlive its caller and must still prevent a backup from starting.
       this.writes++;
@@ -91,6 +98,10 @@ export class SqliteWriteCoordinator {
     }
     const permit = { active: true };
     try {
+      const incremental = assertIncrementalWriteAdmission();
+      if (incremental) await incremental;
+      if (!nested && this.fences.size)
+        throw new Error('SQLite write fenced before engine execution');
       return await this.context.run(permit, operation);
     } finally {
       permit.active = false;
@@ -101,10 +112,34 @@ export class SqliteWriteCoordinator {
   async snapshot<T>(operation: () => Promise<T>): Promise<T> {
     if (this.context.getStore()?.active)
       throw new Error('不能在已开始的 SQLite 事务中申请备份');
+    if (this.protectedContext.getStore()?.active) return operation();
     const release = await this.acquire('backup');
     try {
       return await operation();
     } finally {
+      release();
+    }
+  }
+
+  /** Keep other application writes out from recovery verification through commit. */
+  async protectedWrite<T>(
+    backup: () => Promise<unknown>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (
+      this.context.getStore()?.active ||
+      this.protectedContext.getStore()?.active
+    )
+      throw new Error('Nested protected SQLite operation refused');
+    const release = await this.acquire('backup');
+    const permit = { active: true };
+    try {
+      return await this.protectedContext.run(permit, async () => {
+        await backup();
+        return this.write(operation);
+      });
+    } finally {
+      permit.active = false;
       release();
     }
   }

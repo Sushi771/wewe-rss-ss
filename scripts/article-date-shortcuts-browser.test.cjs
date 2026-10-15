@@ -5,10 +5,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
+const { waitForBrowser } = require('./browser-readiness.cjs');
 const root = process.env.DATE_SHORTCUTS_REPO || path.resolve(__dirname, '..');
 const sourceRoot = process.env.DATE_SHORTCUTS_SOURCE || root;
 const web = path.join(root, 'apps/web');
@@ -172,6 +173,35 @@ createRoot(document.getElementById('root')).render(<App/>);
     });
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const fixtureUrl = `http://127.0.0.1:${server.address().port}/`;
+    let browserVersion = 'not-probed-on-Windows';
+    let sharedMemoryAvailableBytes = null;
+    if (process.platform === 'linux') {
+      try {
+        browserVersion = execFileSync(chrome, ['--version'], {
+          encoding: 'utf8',
+          timeout: 3000,
+        }).trim();
+      } catch {
+        browserVersion = 'version-probe-failed';
+      }
+      try {
+        const disk = fs.statfsSync('/dev/shm');
+        sharedMemoryAvailableBytes = disk.bavail * disk.bsize;
+      } catch {
+        /* Diagnose as unknown rather than changing browser flags. */
+      }
+    }
+    console.info(
+      JSON.stringify({
+        event: 'isolated-browser-start',
+        platform: process.platform,
+        nodeVersion: process.version,
+        browser: path.basename(chrome),
+        browserVersion,
+        freeMemoryBytes: os.freemem(),
+        sharedMemoryAvailableBytes,
+      }),
+    );
     const child = spawn(
       chrome,
       [
@@ -192,28 +222,25 @@ createRoot(document.getElementById('root')).render(<App/>);
     );
     let browserError = '';
     child.stderr.on('data', (chunk) => {
-      browserError += chunk;
+      browserError = (browserError + chunk).slice(-8192);
     });
     child.on('error', (error) => {
       browserError += error.message;
     });
     let ws;
     try {
-      const portFile = path.join(temp, 'profile/DevToolsActivePort');
-      for (let i = 0; i < 100 && !fs.existsSync(portFile); i++)
-        await pause(100);
-      assert(
-        fs.existsSync(portFile),
-        `isolated browser started (exit=${child.exitCode}): ${browserError.slice(-1500)}`,
+      const startupReady = await waitForBrowser({
+        child,
+        profile: path.join(temp, 'profile'),
+        stderr: () => browserError,
+      });
+      console.info(
+        JSON.stringify({
+          event: 'isolated-browser-ready',
+          ...startupReady.diagnostics,
+        }),
       );
-      const port = fs.readFileSync(portFile, 'utf8').split('\n')[0];
-      const tabs = await (
-        await fetch(`http://127.0.0.1:${port}/json/list`)
-      ).json();
-      const page = tabs.find(
-        (tab) => tab.type === 'page' && tab.url === 'about:blank',
-      );
-      assert(page, 'isolated blank page is available');
+      const page = startupReady.page;
       ws = new WebSocket(page.webSocketDebuggerUrl);
       await new Promise((resolve, reject) => {
         ws.addEventListener('open', resolve, { once: true });

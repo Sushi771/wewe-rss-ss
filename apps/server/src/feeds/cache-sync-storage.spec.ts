@@ -191,8 +191,8 @@ describe('cache delta through original SQLite merge', () => {
       updated: 0,
       identitySkipped: 1,
     });
-    // One preflight plus three <=40-item candidate reads; no per-article reads.
-    expect(articleReads).toBe(4);
+    // One preflight plus three bounded same-feed and three cross-feed identity reads.
+    expect(articleReads).toBe(7);
     expect(
       await prisma.article.findUniqueOrThrow({ where: { id: old.id } }),
     ).toEqual(old);
