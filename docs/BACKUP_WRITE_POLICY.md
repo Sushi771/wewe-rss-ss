@@ -8,6 +8,8 @@
 
 AST 扫描只读生产 TypeScript 源码，不导入应用、不连接数据库、不发网络请求。它覆盖应用保护函数及现有删除保护包装。它是工程回归检查，并非任意 JavaScript 间接调用的安全沙箱；运行时条件分支、循环次数和事务正确性仍由合成 SQLite 故障/并发测试证明。新增合法保护入口必须更新精确函数、理由和运行时矩阵，不能按整文件放行。
 
+守卫跟踪备份模块的 namespace、CommonJS `require`、动态 `import` 及 import-equals 来源。点访问、字符串字面量和无插值模板的直接已知调用按预算登记；namespace 的常量键、插值模板、动态键、解构/函数提取、别名传递、反射和重新导出一律作为待审核引用拒绝。它不把无法静态解析的调用当作零次，也不推测运行时键值；审核后应改为可定位的直接调用并按精确函数登记。无关模块的动态访问、纯类型导入与未使用导入不受此规则影响。
+
 ```sh
 node --test scripts/check-backup-policy.test.cjs
 node scripts/check-backup-policy.cjs

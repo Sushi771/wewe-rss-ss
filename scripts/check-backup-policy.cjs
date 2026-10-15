@@ -31,44 +31,145 @@ function scopeOf(node) {
 function inspectSource(source, file) {
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   const aliases = new Map([...gates].map((name) => [name, name]));
+  const namespaces = new Set();
+  const declarations = new Set();
+  const reported = new Set();
   const calls = [],
     references = [];
+  const staticText = (node) =>
+    node &&
+    (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+      ? node.text
+      : undefined;
+  const protectedModule = (node) =>
+    /(?:^|\/)(?:sqlite-backup|protected-delete|protected-feed-delete|protected-article-delete)(?:\.[cm]?[jt]s)?$/i.test(
+      (staticText(node) || '').replaceAll('\\', '/').split(/[?#]/, 1)[0],
+    );
+  const wrapper = (node) =>
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) ||
+    ts.isNonNullExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isAwaitExpression(node);
+  function unwrap(node) {
+    while (node && wrapper(node)) node = node.expression;
+    return node;
+  }
+  function outer(node) {
+    while (node.parent && wrapper(node.parent)) node = node.parent;
+    return node;
+  }
+  function moduleLoad(node) {
+    node = unwrap(node);
+    return (
+      node &&
+      ts.isCallExpression(node) &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) &&
+          node.expression.text === 'require')) &&
+      protectedModule(node.arguments[0])
+    );
+  }
+  function gateOf(node) {
+    node = unwrap(node);
+    if (!node) return;
+    if (ts.isIdentifier(node)) return aliases.get(node.text);
+    const key = ts.isPropertyAccessExpression(node)
+      ? node.name.text
+      : ts.isElementAccessExpression(node)
+        ? staticText(node.argumentExpression)
+        : undefined;
+    return gates.has(key) ? key : undefined;
+  }
+  function directCall(node) {
+    node = outer(node);
+    return ts.isCallExpression(node.parent) && node.parent.expression === node;
+  }
+  function reference(node, reason) {
+    const position = node.getStart();
+    if (reported.has(position)) return;
+    reported.add(position);
+    references.push({
+      file,
+      scope: scopeOf(node),
+      line: tree.getLineAndCharacterOfPosition(position).line + 1,
+      reason,
+    });
+  }
   for (const item of tree.statements) {
-    if (ts.isImportDeclaration(item)) {
+    if (ts.isImportDeclaration(item) && !item.importClause?.isTypeOnly) {
       const bindings = item.importClause?.namedBindings;
       if (bindings && ts.isNamedImports(bindings))
         for (const entry of bindings.elements)
-          if (gates.has((entry.propertyName || entry.name).text))
+          if (
+            !entry.isTypeOnly &&
+            gates.has((entry.propertyName || entry.name).text)
+          )
             aliases.set(
               entry.name.text,
               (entry.propertyName || entry.name).text,
             );
+      if (protectedModule(item.moduleSpecifier)) {
+        if (bindings && ts.isNamespaceImport(bindings)) {
+          namespaces.add(bindings.name.text);
+          declarations.add(bindings.name);
+        }
+        if (item.importClause?.name) {
+          namespaces.add(item.importClause.name.text);
+          declarations.add(item.importClause.name);
+        }
+      }
+    }
+    if (
+      ts.isImportEqualsDeclaration(item) &&
+      !item.isTypeOnly &&
+      ts.isExternalModuleReference(item.moduleReference) &&
+      protectedModule(item.moduleReference.expression)
+    ) {
+      namespaces.add(item.name.text);
+      declarations.add(item.name);
     }
   }
-  function visit(node) {
+  function collect(node) {
     if (
-      ts.isElementAccessExpression(node) &&
-      ts.isStringLiteral(node.argumentExpression) &&
-      gates.has(node.argumentExpression.text) &&
-      !(ts.isCallExpression(node.parent) && node.parent.expression === node)
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      moduleLoad(node.initializer)
+    ) {
+      namespaces.add(node.name.text);
+      declarations.add(node.name);
+    }
+    ts.forEachChild(node, collect);
+  }
+  collect(tree);
+  function namespaceUse(node) {
+    const value = outer(node),
+      parent = value.parent;
+    if (
+      ts.isVariableDeclaration(parent) &&
+      parent.initializer === value &&
+      ts.isIdentifier(parent.name) &&
+      moduleLoad(value)
     )
-      references.push({
-        file,
-        scope: scopeOf(node),
-        line: tree.getLineAndCharacterOfPosition(node.getStart()).line + 1,
-      });
-    const callee = ts.isCallExpression(node) && node.expression;
-    const gate =
-      callee &&
-      (ts.isIdentifier(callee)
-        ? aliases.get(callee.text)
-        : ts.isPropertyAccessExpression(callee) && gates.has(callee.name.text)
-          ? callee.name.text
-          : ts.isElementAccessExpression(callee) &&
-              ts.isStringLiteral(callee.argumentExpression) &&
-              gates.has(callee.argumentExpression.text)
-            ? callee.argumentExpression.text
-            : undefined);
+      return;
+    if (
+      (ts.isPropertyAccessExpression(parent) ||
+        ts.isElementAccessExpression(parent)) &&
+      parent.expression === value
+    ) {
+      // A known member is checked as a complete expression below. All unresolved
+      // keys, including const identifiers and interpolated templates, need review.
+      if (!gateOf(parent))
+        reference(parent, 'Unresolved backup namespace access');
+    } else
+      reference(
+        value,
+        'Backup module capability escapes a direct registered call',
+      );
+  }
+  function visit(node) {
+    const gate = ts.isCallExpression(node) && gateOf(node.expression);
     if (gate)
       calls.push({
         file,
@@ -77,27 +178,26 @@ function inspectSource(source, file) {
         line: tree.getLineAndCharacterOfPosition(node.getStart()).line + 1,
       });
     if (
+      (ts.isPropertyAccessExpression(node) ||
+        ts.isElementAccessExpression(node)) &&
+      gateOf(node) &&
+      !directCall(node)
+    )
+      reference(node, 'Extracted backup function');
+    if (
       ts.isIdentifier(node) &&
-      aliases.has(node.text) &&
+      !declarations.has(node) &&
       !ts.isImportSpecifier(node.parent) &&
-      !ts.isFunctionDeclaration(node.parent)
+      !(ts.isFunctionDeclaration(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
     ) {
-      const p = node.parent;
-      if (
-        !(ts.isCallExpression(p) && p.expression === node) &&
-        !(
-          ts.isPropertyAccessExpression(p) &&
-          p.name === node &&
-          ts.isCallExpression(p.parent) &&
-          p.parent.expression === p
-        )
-      )
-        references.push({
-          file,
-          scope: scopeOf(node),
-          line: tree.getLineAndCharacterOfPosition(node.getStart()).line + 1,
-        });
+      if (aliases.has(node.text) && !directCall(node))
+        reference(node, 'Extracted backup function');
+      if (namespaces.has(node.text)) namespaceUse(node);
     }
+    if (moduleLoad(node) && ts.isCallExpression(node)) namespaceUse(node);
+    if (ts.isExportDeclaration(node) && protectedModule(node.moduleSpecifier))
+      reference(node, 'Re-exported backup capability requires explicit review');
     ts.forEachChild(node, visit);
   }
   visit(tree);
@@ -145,7 +245,7 @@ function violations(found, policy) {
   errors.push(
     ...found.references.map(
       (item) =>
-        `Unreviewed backup alias/reference at ${item.file}:${item.line}`,
+        `Unreviewed backup alias/reference at ${item.file}:${item.line}${item.reason ? `: ${item.reason}` : ''}`,
     ),
   );
   for (const item of found.calls) {
