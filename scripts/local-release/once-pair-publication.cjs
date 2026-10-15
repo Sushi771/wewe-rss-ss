@@ -475,7 +475,7 @@ function nativeOperations(p, u, audit, check) {
         );
       });
     },
-    start(release) {
+    start(release, { recovery = false } = {}) {
       const m = packageInputs(release);
       if (m.desktopHelperIncluded !== false)
         fail('DESKTOP_HELPER_NOT_AUTHORIZED');
@@ -498,6 +498,14 @@ function nativeOperations(p, u, audit, check) {
             LOCAL_RELEASE_CONTROLLED_START: m.id,
             LOCAL_RELEASE_REUSE_VERIFIED: '0',
             LOCAL_RELEASE_STARTUP_AUDIT_ROOT: '',
+            ...(recovery
+              ? {
+                  ENABLE_SCHEDULED_UPDATES: '0',
+                  DISABLE_SCHEDULED_UPDATES: '1',
+                  WECHAT2RSS_ENABLED: '0',
+                  WECHAT2RSS_CACHE_SYNC: '0',
+                }
+              : {}),
           },
           stdio: 'ignore',
           windowsHide: true,
@@ -665,11 +673,31 @@ async function execute(policyFile, expected, options = {}) {
   )
     fail('INSTALLATION_NOT_COMPLETE');
   const pointer = path.join(p.installRoot, 'active.json');
+  // Pin each existing ancestor down to the audit parent, including intervening
+  // directories below the policy root. A surviving leaf cannot own a new parent.
+  const auditRoot = p.roots.find((r) =>
+      inside(r.path, path.dirname(u.auditRoot)),
+    ),
+    auditParents = [];
+  for (let at = path.dirname(u.auditRoot); ; at = path.dirname(at)) {
+    if (auditParents.length >= 128 || !inside(auditRoot.path, at))
+      fail('AUDIT_ANCESTRY');
+    auditParents.push({ path: at, identity: identity(at) });
+    if (at === auditRoot.path) break;
+  }
+  if (
+    state.publication &&
+    hash(state.publication.auditParents) !== hash(auditParents)
+  )
+    fail('AUDIT_ANCESTRY_CHANGED');
   if (
     (state.publication?.status === 'passed' && !options.rollback) ||
     state.publication?.status === 'rolled-back'
   ) {
-    if (fileHash(pointer) !== state.publication.pointerSha256)
+    if (
+      fileHash(pointer) !== state.publication.pointerSha256 ||
+      hash(identity(pointer)) !== hash(state.publication.pointerIdentity)
+    )
       fail('REPLAY_POINTER_CHANGED');
     for (const item of plan.pair) {
       verifyRelease(item.target);
@@ -707,7 +735,8 @@ async function execute(policyFile, expected, options = {}) {
     auditIdentity = state.publication?.auditIdentity,
     transition = false,
     recovering = false,
-    pointerSha = state.publication?.pointerSha256 || p.pointerSha256;
+    pointerSha = state.publication?.pointerSha256 || p.pointerSha256,
+    pointerIdentity = state.publication?.pointerIdentity || identity(pointer);
   const initialDb =
     state.publication?.databaseBaselineBytes ?? databaseBytes(u.database);
   if (databaseBytes(u.database) > u.limits.sourceCeilingBytes) {
@@ -727,7 +756,18 @@ async function execute(policyFile, expected, options = {}) {
       hash(identity(ledger)) !== hash(ledgerIdentity) ||
       hash(identity(lock)) !== hash(lockIdentity) ||
       hash(identity(p.registryDirectory)) !== hash(p.registryIdentity) ||
+      canonical(p.registryDirectory) !== p.registryDirectory ||
+      [...p.roots, ...auditParents].some(
+        (r) =>
+          canonical(r.path) !== r.path ||
+          !fs.lstatSync(r.path).isDirectory() ||
+          hash(identity(r.path)) !== hash(r.identity),
+      ) ||
+      (auditIdentity &&
+        (canonical(u.auditRoot) !== u.auditRoot ||
+          hash(identity(u.auditRoot)) !== hash(auditIdentity))) ||
       fileHash(pointer) !== pointerSha ||
+      hash(identity(pointer)) !== hash(pointerIdentity) ||
       hash(identity(u.database)) !== hash(u.databaseIdentity)
     )
       fail('OWNER_OR_INPUT_CHANGED');
@@ -871,6 +911,7 @@ async function execute(policyFile, expected, options = {}) {
         rollbackSpent: false,
         databaseBaselineBytes: initialDb,
         audit: u.auditRoot,
+        auditParents,
       };
       state.claim = {
         id: crypto.randomUUID(),
@@ -944,9 +985,16 @@ async function execute(policyFile, expected, options = {}) {
           ),
           text = JSON.stringify({ format: 1, id }) + '\n';
         fs.writeFileSync(temp, text, { flag: 'wx' });
+        const publishedIdentity = identity(temp),
+          publishedSha = crypto.createHash('sha256').update(text).digest('hex');
+        check();
         fs.renameSync(temp, pointer);
-        state.publication.pointerSha256 = fileHash(pointer);
-        pointerSha = state.publication.pointerSha256;
+        // Trust only the file and bytes we prepared, never a post-rename read.
+        pointerSha = publishedSha;
+        pointerIdentity = publishedIdentity;
+        owner();
+        state.publication.pointerSha256 = publishedSha;
+        state.publication.pointerIdentity = publishedIdentity;
         save();
       };
       const finish = (status, identity, health) => {
@@ -967,6 +1015,7 @@ async function execute(policyFile, expected, options = {}) {
           rollbackId: path.basename(rollback),
           protectedIds: p.protectedIds,
         });
+        check();
         return { ...state.publication, reused: false };
       };
       const fallback = async (error) => {
@@ -987,7 +1036,7 @@ async function execute(policyFile, expected, options = {}) {
           p.packageProofs[path.basename(target)]
         )
           fail('FALLBACK_PACKAGE_CHANGED');
-        child = ops.start(target);
+        child = ops.start(target, { recovery: true });
         const health = await ops.ready(child),
           identity = ops.identity('Snapshot', child.pid);
         if (identity.executable !== path.join(target, 'runtime/node.exe'))

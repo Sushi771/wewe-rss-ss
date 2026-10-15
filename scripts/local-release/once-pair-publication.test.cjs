@@ -7,6 +7,8 @@ const test = require('node:test'),
 const admission = require('./once-pair-admission.cjs'),
   publication = require('./once-pair-publication.cjs');
 const { fingerprint, fileHash, hostEffects } = require('./lib.cjs');
+const { createRequire } = require('node:module');
+const { EventEmitter } = require('node:events');
 const identity = (at) => {
   const s = fs.lstatSync(at, { bigint: true });
   return [s.dev, s.ino, s.birthtimeNs].map(String);
@@ -555,4 +557,264 @@ test('an approval bound to another application commit cannot publish a new froze
     await assert.rejects(f.execute(), /APPLICATION_APPROVAL_BINDING/);
     assert.deepEqual(f.events, []);
     assert(!fs.existsSync(path.join(f.root, 'candidate')));
+  }));
+
+// Compile the private native adapter only for this owned-fixture test. Native
+// process imports are replaced explicitly; no fallback to real child_process.
+function captureStarts(f) {
+  const sourceFile = require.resolve('./once-pair-publication.cjs');
+  const systemRoot = path.join(f.base, 'system-root');
+  const powershell = path.join(
+    systemRoot,
+    'System32/WindowsPowerShell/v1.0/powershell.exe',
+  );
+  fs.mkdirSync(path.dirname(powershell), { recursive: true });
+  fs.writeFileSync(powershell, 'inert-native-command-never-executed');
+  f.policy.publication.powershellSha256 = fileHash(powershell);
+  const envFile = path.join(path.dirname(f.root), 'apps/server/.env.local');
+  const enabled =
+    'ENABLE_SCHEDULED_UPDATES=1\nDISABLE_SCHEDULED_UPDATES=0\nWECHAT2RSS_ENABLED=1\nWECHAT2RSS_CACHE_SYNC=1\n';
+  fs.writeFileSync(envFile, enabled);
+  f.policy.publication.environmentFiles = [
+    { path: envFile, sha256: fileHash(envFile) },
+  ];
+  fs.writeFileSync(f.file, JSON.stringify(f.policy));
+  const starts = [],
+    load = createRequire(sourceFile);
+  const mockRequire = (name) => {
+    if (name === 'node:child_process')
+      return {
+        execFileSync(executable, args) {
+          assert.equal(executable, powershell);
+          assert.equal(args[args.indexOf('-Action') + 1], 'Port');
+          return '[]';
+        },
+        spawn(executable, args, options) {
+          starts.push({ executable, args, env: options.env });
+          return new EventEmitter();
+        },
+      };
+    return load(name);
+  };
+  const factory = new Function(
+    'require',
+    '__dirname',
+    'module',
+    fs.readFileSync(sourceFile, 'utf8') + '\nreturn nativeOperations;',
+  )(mockRequire, __dirname, { exports: {} });
+  const originalRoot = process.env.SystemRoot,
+    originalStart = f.operations.start;
+  process.env.SystemRoot = systemRoot;
+  const native = factory(
+    f.policy,
+    f.policy.publication,
+    f.policy.publication.auditRoot,
+    () => {},
+  );
+  f.operations.start = (release, options) => {
+    native.start(release, options);
+    return originalStart(release, options);
+  };
+  return {
+    starts,
+    enabled,
+    envFile,
+    restore() {
+      f.operations.start = originalStart;
+      if (originalRoot === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = originalRoot;
+    },
+  };
+}
+
+for (const explicit of [false, true])
+  test(
+    (explicit ? 'explicit' : 'automatic') +
+      ' recovery overrides inherited enabled upstream and scheduling after environment load',
+    () =>
+      fixture(async (f) => {
+        const captured = captureStarts(f);
+        try {
+          if (!explicit) f.failAt = 'candidate-health';
+          const result = await f.execute();
+          assert.equal(result.status, explicit ? 'passed' : 'rolled-back');
+          if (explicit)
+            assert.equal((await f.execute(true)).status, 'rolled-back');
+          assert.equal(captured.starts.length, 2);
+          const [candidate, recovery] = captured.starts;
+          assert(
+            candidate.executable.includes(path.sep + 'candidate' + path.sep),
+          );
+          assert(
+            recovery.executable.includes(path.sep + 'rollback' + path.sep),
+          );
+          assert.equal(candidate.env.ENABLE_SCHEDULED_UPDATES, '1');
+          assert.equal(candidate.env.DISABLE_SCHEDULED_UPDATES, '0');
+          assert.equal(candidate.env.WECHAT2RSS_ENABLED, '1');
+          assert.equal(candidate.env.WECHAT2RSS_CACHE_SYNC, '1');
+          assert.equal(recovery.env.ENABLE_SCHEDULED_UPDATES, '0');
+          assert.equal(recovery.env.DISABLE_SCHEDULED_UPDATES, '1');
+          assert.equal(recovery.env.WECHAT2RSS_ENABLED, '0');
+          assert.equal(recovery.env.WECHAT2RSS_CACHE_SYNC, '0');
+          const schedule = require('./runtime.cjs').scheduledUpdatesEnabled;
+          const manifest = {
+            schemaCompatibility: 'current',
+            desktopHelperIncluded: false,
+          };
+          assert(
+            schedule(manifest, {
+              enabled: candidate.env.ENABLE_SCHEDULED_UPDATES,
+              mp2RssFeedKey: 'synthetic-config',
+            }),
+          );
+          assert(
+            !schedule(manifest, {
+              enabled: recovery.env.ENABLE_SCHEDULED_UPDATES,
+              mp2RssFeedKey: 'synthetic-config',
+            }),
+          );
+          assert.equal(
+            fs.readFileSync(captured.envFile, 'utf8'),
+            captured.enabled,
+          );
+        } finally {
+          captured.restore();
+        }
+      }),
+  );
+
+test('pre-migration current recovery also disables inherited upstream and scheduling', () =>
+  fixture(async (f) => {
+    const captured = captureStarts(f);
+    try {
+      f.failAt = 'after-stop';
+      assert.equal((await f.execute()).status, 'rolled-back');
+      assert.equal(captured.starts.length, 1);
+      const recovery = captured.starts[0];
+      assert(recovery.executable.includes(path.sep + 'current' + path.sep));
+      assert.equal(recovery.env.ENABLE_SCHEDULED_UPDATES, '0');
+      assert.equal(recovery.env.DISABLE_SCHEDULED_UPDATES, '1');
+      assert.equal(recovery.env.WECHAT2RSS_ENABLED, '0');
+      assert.equal(recovery.env.WECHAT2RSS_CACHE_SYNC, '0');
+      assert.equal(fs.readFileSync(captured.envFile, 'utf8'), captured.enabled);
+      assert(!f.events.includes('migrate'));
+    } finally {
+      captured.restore();
+    }
+  }));
+
+for (const nested of [false, true])
+  test(`audit ${nested ? 'intervening' : 'policy-root'} parent replacement preserves the leaf but refuses before stop`, () =>
+    fixture(async (f) => {
+      if (nested) {
+        const parent = path.join(
+          path.dirname(f.policy.publication.auditRoot),
+          'nested',
+        );
+        fs.mkdirSync(parent);
+        f.policy.publication.auditRoot = path.join(parent, 'one-upgrade');
+        fs.writeFileSync(f.file, JSON.stringify(f.policy));
+      }
+      const backup = f.operations.backup;
+      let replaced = false,
+        leaf;
+      f.operations.backup = (...args) => {
+        const result = backup(...args);
+        if (!replaced) {
+          replaced = true;
+          const audit = f.policy.publication.auditRoot,
+            parent = path.dirname(audit);
+          leaf = identity(audit);
+          fs.renameSync(parent, parent + '.prior');
+          fs.mkdirSync(parent);
+          fs.renameSync(
+            path.join(parent + '.prior', path.basename(audit)),
+            audit,
+          );
+          fs.writeFileSync(
+            path.join(parent, 'foreign-parent-marker'),
+            'FOREIGN_PARENT',
+          );
+          assert.deepEqual(identity(audit), leaf);
+        }
+        return result;
+      };
+      await assert.rejects(f.execute(), /OWNER_OR_INPUT_CHANGED/);
+      assert(replaced);
+      assert(!f.events.includes('Stop'));
+      assert(!f.events.some((e) => e.startsWith('start:')));
+      assert(
+        fs.existsSync(
+          path.join(f.policy.registryDirectory, f.policy.scopeId + '.lock'),
+        ),
+      );
+      assert.equal(
+        fs.readFileSync(
+          path.join(
+            path.dirname(f.policy.publication.auditRoot),
+            'foreign-parent-marker',
+          ),
+          'utf8',
+        ),
+        'FOREIGN_PARENT',
+      );
+    }));
+
+for (const kind of ['replacement', 'in-place', 'same-bytes-replacement'])
+  test(`active pointer ${kind} after rename cannot be blessed or overwritten by fallback`, () =>
+    fixture(async (f) => {
+      const pointer = path.join(f.root, 'active.json'),
+        rename = fs.renameSync;
+      let replaced = false,
+        foreign;
+      fs.renameSync = (from, to) => {
+        const out = rename(from, to);
+        if (to === pointer && !replaced) {
+          replaced = true;
+          foreign =
+            kind === 'same-bytes-replacement'
+              ? fs.readFileSync(pointer)
+              : Buffer.from(JSON.stringify({ format: 1, id: 'held' }) + '\n');
+          if (kind !== 'in-place') rename(pointer, pointer + '.foreign-prior');
+          fs.writeFileSync(pointer, foreign);
+        }
+        return out;
+      };
+      try {
+        await assert.rejects(f.execute(), /OWNER_OR_INPUT_CHANGED/);
+      } finally {
+        fs.renameSync = rename;
+      }
+      assert(replaced);
+      assert.deepEqual(fs.readFileSync(pointer), foreign);
+      assert.deepEqual(
+        f.events.filter((e) => e.startsWith('start:')),
+        ['start:candidate'],
+      );
+      assert(!f.events.includes('stop-child'));
+      assert(
+        !fs.existsSync(
+          path.join(f.policy.publication.auditRoot, 'passed.json'),
+        ),
+      );
+      const registry = f.policy.registryDirectory;
+      assert(fs.existsSync(path.join(registry, f.policy.scopeId + '.lock')));
+      const state = JSON.parse(
+        fs.readFileSync(path.join(registry, f.policy.scopeId + '.state.json')),
+      ).payload;
+      assert.equal(state.publication.status, 'running');
+      assert(state.claim);
+    }));
+
+test('completed replay refuses a same-bytes replacement of the published pointer', () =>
+  fixture(async (f) => {
+    assert.equal((await f.execute()).status, 'passed');
+    const pointer = path.join(f.root, 'active.json'),
+      bytes = fs.readFileSync(pointer),
+      count = f.events.length;
+    fs.renameSync(pointer, pointer + '.prior');
+    fs.writeFileSync(pointer, bytes);
+    await assert.rejects(f.execute(), /REPLAY_POINTER_CHANGED/);
+    assert.equal(f.events.length, count);
+    assert.deepEqual(fs.readFileSync(pointer), bytes);
   }));
