@@ -119,7 +119,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
       await a.manager.enqueueRefresh(ids, key, 'scheduled-refresh'),
     ).toMatchObject({
       purpose: 'scheduled-refresh',
-      state: 'completed',
+      state: 'deferred',
       reused: true,
     });
     await a.manager.runDue();
@@ -130,7 +130,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
       await recovered.manager.enqueueRefresh(ids, key, 'scheduled-refresh'),
     ).toMatchObject({
       purpose: 'scheduled-refresh',
-      state: 'completed',
+      state: 'deferred',
       reused: true,
     });
     expect(recovered.run).not.toHaveBeenCalled();

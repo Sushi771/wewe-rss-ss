@@ -1,3 +1,4 @@
+import { refreshCacheFailure } from '../collection/refresh-cache-failure';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
@@ -417,19 +418,17 @@ export class TrpcService {
       feed = await this.prismaService.feed.findUnique({
         where: { id: feedId },
       });
-    } catch {
+    } catch (error) {
+      if (stage === 'cache') return refreshCacheFailure(error, 'feed-read');
       // This read precedes every reservation and upstream request. Storage
       // contention cannot create an uncertain receipt or an unbounded replay.
       return {
         state: 'failed',
-        accepted: stage === 'cache',
+        accepted: false,
         submissionUnknown: false,
         stopBatch: false,
-        retryable: stage === 'submit',
-        message:
-          stage === 'submit'
-            ? '订阅状态读取失败；未发送上游更新，后台限次退避重试。'
-            : '已受理更新的缓存状态读取失败；保留已受理状态，不会重新提交上游更新。',
+        retryable: true,
+        message: '订阅状态读取失败；未发送上游更新，后台限次退避重试。',
       };
     }
     if (
@@ -440,6 +439,8 @@ export class TrpcService {
       return {
         state: automatic && stage === 'submit' ? 'skipped' : 'blocked',
         accepted: stage === 'cache',
+        stopBatch: false,
+        code: 'SOURCE_CHANGED',
         message: '订阅已停用或来源已变化，本条停止；已有内容保留。',
       };
     if (stage === 'cache') {
@@ -447,34 +448,14 @@ export class TrpcService {
       if (options?.cacheOnly) {
         try {
           page = await readLocalWechat2RssCache(feedId, feed.mpName);
-        } catch {
-          return {
-            state: 'failed',
-            accepted: true,
-            stopBatch: false,
-            message: '本号本地缓存不可用；其他订阅继续，未发出外部请求。',
-          };
+        } catch (error) {
+          return refreshCacheFailure(error, 'cache-read');
         }
       } else {
         try {
           page = await wechat2RssProvider().fetchArticles(feedId, feed.mpName);
         } catch (error) {
-          if (
-            [
-              'WECHAT2RSS_SUBSCRIPTION_MISSING',
-              'WECHAT2RSS_SUBSCRIPTION_NAME_CHANGED',
-              'WECHAT2RSS_SUBSCRIPTION_PAUSED',
-            ].includes((error as Error).message)
-          )
-            return {
-              state: 'failed',
-              accepted: true,
-              submissionUnknown: false,
-              stopBatch: false,
-              message:
-                'This subscription is unavailable or changed; independent sources continue.',
-            };
-          throw error;
+          return refreshCacheFailure(error, 'cache-read');
         }
       }
       let result: Awaited<ReturnType<TrpcService['syncCachedWechat2RssPage']>>;
@@ -483,22 +464,7 @@ export class TrpcService {
           fetchMedia: false,
         });
       } catch (error) {
-        if ((error as Error).message === 'CACHE_SYNC_STARTUP_BLOCKED')
-          throw error;
-        if ((error as Error).message === 'CACHE_SYNC_BUSY')
-          return {
-            state: 'waiting',
-            accepted: true,
-            message: '等待本号正在进行的本地保存。',
-          };
-        // The provider read remains outside this catch: authentication/risk
-        // failures stop the whole round. Local storage/content failures do not.
-        return {
-          state: 'failed',
-          accepted: true,
-          stopBatch: false,
-          message: '本号本地缓存保存失败；保留已有内容，继续其他订阅。',
-        };
+        return refreshCacheFailure(error, 'cache-save');
       }
       const ready =
         page.articles.length > 0 &&
