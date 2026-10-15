@@ -1,0 +1,230 @@
+/* Native Node 24 CDP: no package install, no remote content, own browser only. */
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const http = require('node:http');
+const { spawn } = require('node:child_process');
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function main() {
+  let input = '';
+  for await (const chunk of process.stdin) input += chunk;
+  const { root, pages } = JSON.parse(input);
+  if (!Array.isArray(pages) || pages.length > 128) throw Error('page budget');
+  const candidates = [
+    process.env.ARTICLE_HISTORY_CHROME,
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+  ];
+  const cache = path.join(os.homedir(), 'AppData/Local/ms-playwright');
+  if (fs.existsSync(cache))
+    for (const item of fs.readdirSync(cache)) {
+      if (/^chromium-\d+$/.test(item))
+        candidates.push(path.join(cache, item, 'chrome-win/chrome.exe'));
+    }
+  const executable = candidates.find((p) => p && fs.existsSync(p));
+  if (!executable || typeof WebSocket === 'undefined')
+    throw Error('Chrome/Edge and Node 24 required');
+  let remoteRequests = 0;
+  const allowed = new Set(pages);
+  const server = http.createServer((req, res) => {
+    const name = req.url.slice(1);
+    if (name === 'favicon.ico') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (
+      !allowed.has(name) &&
+      !/^assets\/[0-9a-f]{64}\.(png|jpeg|gif|webp)$/.test(name)
+    ) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    const file = path.join(root, name);
+    const ext = path.extname(file);
+    const mime = {
+      '.html': 'text/html; charset=utf-8',
+      '.png': 'image/png',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+    }[ext];
+    if (!mime || !fs.existsSync(file)) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': mime,
+      'Content-Security-Policy':
+        "default-src 'none'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-store',
+    });
+    fs.createReadStream(file).pipe(res);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}/`;
+  const profile = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'article-history-browser-'),
+  );
+  const child = spawn(
+    executable,
+    [
+      '--headless=new',
+      '--no-sandbox',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-component-update',
+      '--disable-sync',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-default-apps',
+      '--remote-debugging-address=127.0.0.1',
+      '--remote-debugging-port=0',
+      '--proxy-server=http://127.0.0.1:9',
+      '--proxy-bypass-list=127.0.0.1',
+      `--user-data-dir=${profile}`,
+      'about:blank',
+    ],
+    { windowsHide: true, stdio: 'ignore' },
+  );
+  let socket;
+  try {
+    child.on('error', () => {});
+    const active = path.join(profile, 'DevToolsActivePort');
+    for (let i = 0; i < 120 && !fs.existsSync(active); i++) await pause(100);
+    if (!fs.existsSync(active)) throw Error('browser startup timeout');
+    const port = Number(fs.readFileSync(active, 'utf8').split('\n')[0]);
+    const target = await fetch(
+      `http://127.0.0.1:${port}/json/new?about:blank`,
+      { method: 'PUT' },
+    ).then((r) => r.json());
+    socket = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      socket.onopen = resolve;
+      socket.onerror = reject;
+    });
+    let id = 0;
+    const pending = new Map();
+    const command = (method, params = {}) =>
+      new Promise((resolve, reject) => {
+        const key = ++id;
+        const timer = setTimeout(() => {
+          pending.delete(key);
+          reject(Error(`CDP timeout: ${method}`));
+        }, 10000);
+        pending.set(key, { resolve, reject, timer });
+        socket.send(JSON.stringify({ id: key, method, params }));
+      });
+    socket.onmessage = ({ data }) => {
+      const event = JSON.parse(data);
+      if (event.id && pending.has(event.id)) {
+        const waiter = pending.get(event.id);
+        pending.delete(event.id);
+        clearTimeout(waiter.timer);
+        if (event.error) waiter.reject(Error(event.error.message));
+        else waiter.resolve(event.result);
+      }
+      if (event.method === 'Fetch.requestPaused') {
+        const { requestId, request } = event.params;
+        const name = request.url.startsWith(origin)
+          ? request.url.slice(origin.length)
+          : null;
+        const permitted =
+          name !== null &&
+          (name === 'favicon.ico' ||
+            allowed.has(name) ||
+            /^assets\/[0-9a-f]{64}\.(png|jpeg|gif|webp)$/.test(name));
+        if (!permitted) remoteRequests++;
+        command(
+          permitted ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+          permitted
+            ? { requestId }
+            : { requestId, errorReason: 'BlockedByClient' },
+        ).catch(() => {});
+      }
+    };
+    await command('Page.enable');
+    await command('Runtime.enable');
+    await command('Emulation.setScriptExecutionDisabled', { value: true });
+    await command('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    let images = 0;
+    for (const name of pages) {
+      await command('Page.navigate', { url: origin + name });
+      let status;
+      for (let i = 0; i < 100; i++) {
+        const result = await command('Runtime.evaluate', {
+          returnByValue: true,
+          expression: `JSON.stringify({url:location.href,ready:document.readyState,title:document.title,images:Array.from(document.images,x=>({done:x.complete,ok:x.naturalWidth>0&&x.naturalHeight>0}))})`,
+        });
+        status = JSON.parse(result.result.value || '{}');
+        if (
+          status.url === origin + name &&
+          status.ready === 'complete' &&
+          status.images.every((x) => x.done)
+        )
+          break;
+        await pause(50);
+      }
+      if (
+        status.url !== origin + name ||
+        status.ready !== 'complete' ||
+        !status.title ||
+        status.images.some((x) => !x.done || !x.ok)
+      )
+        throw Error('reader or image decode failed');
+      images += status.images.length;
+    }
+    if (remoteRequests) throw Error('non-archive request blocked');
+    process.stdout.write(
+      JSON.stringify({
+        pages: pages.length,
+        images,
+        decoded: true,
+        remoteRequests,
+      }),
+    );
+  } finally {
+    if (socket) socket.close();
+    // Only this helper's child/profile are owned here; never inspect/stop services.
+    child.kill();
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else {
+        child.once('exit', resolve);
+        setTimeout(resolve, 3000);
+      }
+    });
+    server.closeAllConnections();
+    server.close();
+    // Browser may release Windows handles late. A small private temp profile may
+    // remain; never make a broad or cross-shell recursive cleanup attempt.
+    try {
+      fs.rmSync(profile, {
+        recursive: true,
+        force: true,
+        maxRetries: 2,
+        retryDelay: 100,
+      });
+    } catch {}
+  }
+}
+const deadline = setTimeout(() => {
+  process.stderr.write('browser deadline');
+  process.exit(1);
+}, 170000);
+main()
+  .catch((error) => {
+    process.stderr.write(error.message);
+    process.exitCode = 1;
+  })
+  .finally(() => clearTimeout(deadline));
