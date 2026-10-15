@@ -16,6 +16,7 @@ export class SqliteWriteCoordinator {
   private queue: Entry[] = [];
   private fences = new Set<object>();
   private context = new AsyncLocalStorage<{ active: boolean }>();
+  private protectedContext = new AsyncLocalStorage<{ active: boolean }>();
 
   constructor(
     private waitMs = 75000,
@@ -84,7 +85,7 @@ export class SqliteWriteCoordinator {
     // Expired detached async contexts must not bypass a later backup.
     let release: () => void;
     const nested = this.context.getStore()?.active === true;
-    if (nested) {
+    if (nested || this.protectedContext.getStore()?.active === true) {
       // Track nested admission independently: a deliberately detached operation
       // can outlive its caller and must still prevent a backup from starting.
       this.writes++;
@@ -111,10 +112,34 @@ export class SqliteWriteCoordinator {
   async snapshot<T>(operation: () => Promise<T>): Promise<T> {
     if (this.context.getStore()?.active)
       throw new Error('不能在已开始的 SQLite 事务中申请备份');
+    if (this.protectedContext.getStore()?.active) return operation();
     const release = await this.acquire('backup');
     try {
       return await operation();
     } finally {
+      release();
+    }
+  }
+
+  /** Keep other application writes out from recovery verification through commit. */
+  async protectedWrite<T>(
+    backup: () => Promise<unknown>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (
+      this.context.getStore()?.active ||
+      this.protectedContext.getStore()?.active
+    )
+      throw new Error('Nested protected SQLite operation refused');
+    const release = await this.acquire('backup');
+    const permit = { active: true };
+    try {
+      return await this.protectedContext.run(permit, async () => {
+        await backup();
+        return this.write(operation);
+      });
+    } finally {
+      permit.active = false;
       release();
     }
   }

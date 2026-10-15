@@ -26,6 +26,14 @@ Recovery-copy byte/count limits, a disabled periodic owner, a failed periodic ba
 
 The periodic owner emits `[SQLITE_PERIODIC_SNAPSHOT_FAILED]` on failure/unavailability and `[SQLITE_PERIODIC_SNAPSHOT_RECOVERED]` on recovery. Alerts do not stop ordinary writes. Its interval configuration is unchanged. A protected high-risk operation still fails before its write if its own required backup cannot be verified or admitted.
 
+## Single and bulk feed deletion
+
+`feed.delete` and `feed.batchDelete` share a protected deletion gate. They freeze the selected feed versions before waiting for exclusive application admission, recheck them after admission, and keep that admission through the independent verified protected backup and the cascading delete transaction. No delete is attempted when backup verification, quota admission or child-exit proof fails. A missing single target is rejected; an empty/nonexistent batch is a no-op. Batches are bounded to 1000 input IDs and duplicate IDs are deleted only once.
+
+The backup must prove the actual Prisma source and carry the protected high-risk marker. The transaction checks actual durability/foreign keys, canonical source path, main/WAL/journal file identity/version and all selected feed fields again before deletion. Concurrent application writes wait outside the engine. An external edit or file replacement during backup rejects the operation; The transaction first acquires SQLite's writer reservation with a zero-row update before reading business rows. This excludes competing external writers and avoids a stale WAL read-to-write upgrade; a change committed before admission is detected by the recheck. A trigger/error while deleting a later target rolls back preceding cascades too. Successful deletion intentionally removes the selected feeds and their articles while retaining nonselected rows, classifications, durable remote claims and the verified recovery point. It does not remove exported files or restore a database automatically.
+
+The route regressions use real SQLite, the actual Prisma admission middleware, a verified tiny backup and external clients. They exercise both backup-failure zero-delete routes, selected-only success, data/identity changes, late SQL failure, queued writers, overlapping deletes, disabled foreign keys, uncertain-child fences and external WAL conflict. Ordinary refresh remains on its separate zero-snapshot path.
+
 ## Migration and release review
 
 The additive migration `20261015090000_incremental_refresh_commits` creates two small receipt tables and one index. It does not rewrite business rows. Production upgrade remains a high-risk boundary: the release owner must make and verify an independent protected backup before applying migrations, build the exact reviewed commit, and follow the established controlled release procedure. This development PR does not merge, deploy, restart, change environment configuration or delete real files.

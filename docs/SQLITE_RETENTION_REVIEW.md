@@ -1,6 +1,6 @@
 # SQLite recovery-point maintenance
 
-Ordinary incremental refresh uses transactions and durable receipts, with no full snapshot per item or round. See [incremental refresh safety](INCREMENTAL_REFRESH_SAFETY.md). Timed backups keep their current interval. High-risk operations retain an independent verified backup. This replaces the earlier 15-minute shared-round recovery design; that design is removed from the implementation.
+Ordinary incremental refresh uses transactions and durable receipts, with no full snapshot per item or round. See [incremental refresh safety](INCREMENTAL_REFRESH_SAFETY.md). Timed backups keep their current interval. High-risk operations retain an independent verified backup. Single and bulk feed deletion use the same protected backup gate and one cascading transaction; see the linked safety document for concurrency and identity checks. This replaces the earlier 15-minute shared-round recovery design; that design is removed from the implementation.
 
 ## Finite budgets and business impact
 
