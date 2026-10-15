@@ -51,7 +51,7 @@ const Feeds = () => {
 
   const { isOpen, onOpen, onClose } = useDisclosure();
   const folders = trpc.feed.groups.useQuery(undefined, { retry: false });
-  const saveFolder = trpc.feed.saveGroup.useMutation();
+  const saveFolder = trpc.feed.saveGroup.useMutation({ retry: false });
   const removeFolder = trpc.feed.removeGroup.useMutation();
   const moveFeeds = trpc.feed.moveFeeds.useMutation();
   const reorderFolders = trpc.feed.reorderGroups.useMutation({ retry: false });
@@ -1142,8 +1142,27 @@ const Feeds = () => {
               );
             }}
             onSave={async (input) => {
-              await saveFolder.mutateAsync(input);
-              await folders.refetch();
+              await queryUtils.feed.groups.cancel();
+              const saved = await saveFolder.mutateAsync(input);
+              // Cancel any read begun during the mutation before installing
+              // the committed row. A rename does not change membership/order.
+              await queryUtils.feed.groups.cancel();
+              queryUtils.feed.groups.setData(undefined, (previous) => {
+                if (!previous) return previous;
+                const exists = previous.items.some(
+                  (folder) => folder.id === saved.id,
+                );
+                return {
+                  ...previous,
+                  items: exists
+                    ? previous.items.map((folder) =>
+                        folder.id === saved.id ? saved : folder,
+                      )
+                    : [...previous.items, saved].sort(
+                        (a, b) => a.order - b.order || a.id.localeCompare(b.id),
+                      ),
+                };
+              });
             }}
             onRemove={async (id) => {
               await removeFolder.mutateAsync({ id });

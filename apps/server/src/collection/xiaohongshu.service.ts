@@ -9,6 +9,12 @@ import {
   XhsNormalizedCandidate,
 } from './xiaohongshu-contract';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
+import {
+  assertIncrementalTransaction,
+  assertIncrementalWriteAdmission,
+  incrementalWrite,
+} from './incremental-write';
+import { sqliteWrites } from './sqlite-write-coordinator';
 import { buildArticleMarkdown } from '../article-export';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -111,6 +117,24 @@ async function mutateManagement<T>(action: () => Promise<T>) {
     managementMutationActive = false;
   }
 }
+/** Ordinary classification edits share PR39's admission and durable transaction. */
+function mutateManagementIncremental<T>(
+  db: PrismaService,
+  expectedBytes: number,
+  action: (tx: Prisma.TransactionClient) => Promise<T>,
+) {
+  return mutateManagement(() =>
+    incrementalWrite(db, expectedBytes, () =>
+      sqliteWrites.write(async () => {
+        await assertIncrementalWriteAdmission();
+        return db.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          return action(tx);
+        });
+      }),
+    ),
+  );
+}
 export function managementMemberIds(ids: string[], maxIdLength = 128) {
   if (
     !ids.length ||
@@ -149,9 +173,10 @@ export async function saveManagementGroup(
   const name = input.name.trim();
   if (!name || name.length > 80 || /[\x00-\x1f\x7f]/.test(name))
     return fail('分组名称须为 1–80 个字符，不能含控制字符。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(name, 'utf8') + 4096,
+    async (tx) => {
       if (input.id) {
         await getManagementGroup(tx, platform, input.id);
         return tx.managementGroup.update({
@@ -173,8 +198,8 @@ export async function saveManagementGroup(
             )._max.order ?? -1) + 1,
         },
       });
-    });
-  });
+    },
+  );
 }
 /** Compare the saved order inside the transaction; stale clients cannot overwrite it. */
 export async function reorderManagementGroups(
@@ -193,9 +218,10 @@ export async function reorderManagementGroups(
     )
   )
     return fail('分组排序必须包含完整且不重复的 ID。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify(input), 'utf8'),
+    async (tx) => {
       const saved = await tx.managementGroup.findMany({
         where: { platform },
         orderBy: [{ order: 'asc' }, { id: 'asc' }],
@@ -210,8 +236,8 @@ export async function reorderManagementGroups(
       for (const [order, id] of input.ids.entries())
         await tx.managementGroup.update({ where: { id }, data: { order } });
       return { ids: input.ids };
-    });
-  });
+    },
+  );
 }
 
 /** Feed sorting only writes the complete membership of one group, preserving other groups. */
@@ -230,9 +256,10 @@ export async function reorderManagementFeeds(
     input.some((f) => !Number.isSafeInteger(f.order) || f.order < 0)
   )
     return fail('公众号排序 ID 或顺序无效。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify(input), 'utf8'),
+    async (tx) => {
       const rows = await tx.feed.findMany({
         where: { id: { in: input.map((f) => f.id) } },
       });
@@ -269,8 +296,8 @@ export async function reorderManagementFeeds(
           Prisma.sql`UPDATE feeds SET "order" = ${order} WHERE id = ${id}`,
         );
       return true;
-    });
-  });
+    },
+  );
 }
 
 export async function removeManagementGroup(
@@ -299,9 +326,10 @@ export async function moveManagementMembers(
   groupId: string | null,
 ) {
   const unique = managementMemberIds(ids);
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify({ ids: unique, groupId }), 'utf8'),
+    async (tx) => {
       if (groupId !== null) await getManagementGroup(tx, platform, groupId);
       const where = { id: { in: unique } };
       const count =
@@ -317,8 +345,8 @@ export async function moveManagementMembers(
         );
       else await tx.xhsCreator.updateMany({ where, data: { groupId } });
       return { moved: unique.length, ids: unique, groupId };
-    });
-  });
+    },
+  );
 }
 
 /** Store the supplied public page as a pending link, never derive a trusted ID. */
