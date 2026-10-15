@@ -217,6 +217,93 @@ class HostTests(unittest.TestCase):
         with self.assertRaisesRegex(host.HostError, 'RECOVERY_CHANGED'):
             self.service.validate_approval(plan, self.approval(plan))
 
+    def add_foreign_keys(self):
+        # Schema is part of owner identity: initialize a NEW real owner after
+        # fixture migrations, rather than weakening its schema-change guard.
+        self.owner.close()
+        for path in (self.live, self.old, self.previous):
+            with closing(sqlite3.connect(path, isolation_level=None)) as db:
+                db.executescript('CREATE TABLE parents(id TEXT PRIMARY KEY); '
+                                 'CREATE TABLE jobs(parent TEXT REFERENCES parents(id)); '
+                                 "INSERT INTO parents VALUES('present'); "
+                                 "INSERT INTO jobs VALUES('present');")
+        self.owner = owner_module.SnapshotGuard(self.live, self.backups)
+        self.addCleanup(self.owner.close)
+        self.owner.tick()
+        self.service.owner = self.owner
+        self.assertTrue(self.owner.query()['fresh'])
+
+    def break_foreign_key(self, path):
+        with closing(sqlite3.connect(path, isolation_level=None)) as db:
+            # Existing SQLite files can contain violations even with intact pages.
+            db.execute("INSERT INTO jobs VALUES('missing')")
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchall(), [('ok',)])
+            self.assertTrue(db.execute('PRAGMA foreign_key_check').fetchall())
+
+    def test_initial_previous_foreign_key_violation_blocks_review(self):
+        self.add_foreign_keys()
+        self.break_foreign_key(self.previous)
+        with self.assertRaisesRegex(host.HostError, 'FOREIGN_KEY_CHECK_FAILED'):
+            self.review()
+        self.assertFalse((self.root / 'archives').exists())
+        self.assertFalse(self.service.issued)
+
+    def test_initial_owner_foreign_key_violation_blocks_review(self):
+        self.add_foreign_keys()
+        self.break_foreign_key(self.live)
+        self.owner.tick()
+        with self.assertRaisesRegex(host.HostError, 'FOREIGN_KEY_CHECK_FAILED'):
+            self.review()
+        self.assertFalse(self.service.issued)
+
+    def test_foreign_key_check_execution_error_blocks_review(self):
+        self.add_foreign_keys()
+        with closing(sqlite3.connect(self.previous, isolation_level=None)) as db:
+            db.executescript('CREATE TABLE bad_parent(id TEXT); '
+                             'CREATE TABLE bad_job(parent TEXT REFERENCES bad_parent(id));')
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchall(), [('ok',)])
+            with self.assertRaises(sqlite3.DatabaseError):
+                db.execute('PRAGMA foreign_key_check').fetchall()
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.review()
+        self.assertFalse(self.service.issued)
+
+    def test_candidate_foreign_key_violation_blocks_review(self):
+        self.add_foreign_keys()
+        self.break_foreign_key(self.old)
+        with self.assertRaisesRegex(host.HostError, 'FOREIGN_KEY_CHECK_FAILED'):
+            self.review()
+        self.assertFalse(self.service.issued)
+
+    def test_approval_rechecks_actual_foreign_keys_in_changed_previous(self):
+        self.add_foreign_keys()
+        plan = self.review()
+        self.assertTrue(plan['eligible'])
+        self.break_foreign_key(self.previous)
+        with self.assertRaisesRegex(host.HostError, 'FOREIGN_KEY_CHECK_FAILED'):
+            self.service.validate_approval(plan, self.approval(plan))
+        self.assertTrue(self.old.exists())
+
+    def test_valid_foreign_keys_are_actually_checked_in_review_and_approval(self):
+        self.add_foreign_keys()
+        actual_connect = sqlite3.connect
+        checked = []
+        def traced_connect(path, *args, **kwargs):
+            db = actual_connect(path, *args, **kwargs)
+            db.set_trace_callback(lambda sql: checked.append(str(path))
+                                  if sql.strip().lower() == 'pragma foreign_key_check' else None)
+            return db
+        with patch.object(host.sqlite3, 'connect', side_effect=traced_connect):
+            plan = self.review()
+            recovery_uris = [Path(p['identity']['main']['path']).as_uri() + '?mode=ro&immutable=1'
+                             for p in plan['protections']]
+            for uri in recovery_uris:
+                self.assertEqual(checked.count(uri), 1)
+            checked.clear()
+            self.assertTrue(self.service.validate_approval(plan, self.approval(plan))['approvedForReview'])
+            for uri in recovery_uris:
+                self.assertEqual(checked.count(uri), 1)
+
     def test_budget_fail_closed_without_database_copy(self):
         self.service.config['maxReadBytes'] = 65536
         with self.assertRaises(history.CoverageError):

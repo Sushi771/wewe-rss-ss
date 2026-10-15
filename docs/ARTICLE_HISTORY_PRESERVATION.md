@@ -113,7 +113,7 @@ const checked = await validateArticleHistoryApproval(result.review, {
 
 这两个调用通过现有持锁 owner 的私有进程管道运行。Node 使用实际 `sqliteWrites.snapshot` 排他准入，在持有准入期间读取 `activeVerifiedBackupReferences()` 的真实进程内复用缓存，发送运行时引用后再发审核请求。缺少这个同步时宿主拒绝生成候选；磁盘 JSON、调用者自填 SHA 或独立归档模块的成功结果不能代替它。当前普通导出只使用现库，现库始终保护；未来会读取候选备份文件的恢复/导出/迁移工作必须在入队前调用 `pinArticleHistoryReference(token, path)`，完成后调用 `unpinArticleHistoryReference(token)`。不得在已持有写入/备份准入的回调内部再次调用这些维护 API。
 
-宿主从实际 owner 内存记录获取 generation、snapshotGeneration、源身份和已验证快照摘要，重新检查 owner 锁、诊断文件与内存字节、data_version 和 freshness。存在未快照写入或 dirty 状态时立即阻断；审核不调用 `tick`、不强制创建快照、不修改现库。它使用现成 owner 快照及受信进程配置选定的 previous 点，分别执行全文件 SHA 和 SQLite integrity_check；两点必须是不同物理文件、无 WAL/SHM/journal。配置者必须选定该数据库的必要恢复点，不能把任意请求携带的路径或磁盘回执当恢复点授权。
+宿主从实际 owner 内存记录获取 generation、snapshotGeneration、源身份和已验证快照摘要，重新检查 owner 锁、诊断文件与内存字节、data_version 和 freshness。存在未快照写入或 dirty 状态时立即阻断；审核不调用 `tick`、不强制创建快照、不修改现库。它使用现成 owner 快照及受信进程配置选定的 previous 点，分别执行全文件 SHA 和 SQLite integrity_check / foreign_key_check；两点必须是不同物理文件、无 WAL/SHM/journal。配置者必须选定该数据库的必要恢复点，不能把任意请求携带的路径或磁盘回执当恢复点授权。
 
 非文章覆盖不再由调用者填写摘要：宿主读取候选及两个恢复点的实际 SQLite schema 和全部非 `articles` 表，包括账号、队列、订阅及其他状态；只在内存对原始行做哈希和重复行计数。某候选的所有非文章行及其 multiplicity、全部 schema 必须能由**同一个**保留点覆盖，不能把互不兼容的两个状态拼成证明。不同 schema、独有账号/队列值、重复行缺口等都阻断。原始非文章值不会写入审核报告、归档或日志。
 
@@ -144,6 +144,8 @@ const checked = await validateArticleHistoryApproval(result.review, {
 Windows 使用只查询的 Restart Manager 接口直接核验候选与两个恢复点的占用，不接受外部提供的“无人占用”JSON。查询失败、有人占用或结果过期都阻断。当前 Linux 未实现具有完整跨用户可见性的资源查询，因此宿主候选保持空；独立离线归档/图片验证仍可运行。不要把 Linux 的归档成功解释为已证明可退役。
 
 默认宿主累计读取预算 256 MiB、240 秒，最多 16 个候选；显式配置上限为 16 GiB、300 秒，归档仍有独立预算。超限失败，不自动提高预算、不复制整个数据库。维护审核会占用排他准入，应用写入可能等待或按既有等待上限失败；此功能为显式维护调用，不能放入普通刷新或定时任务。本次仅做小型合成验收，没有对真实大库扫描、发布或启用。
+
+外键检查在初审和批准复验中都实际查询 SQLite，不接受调用方提供的布尔回执。`integrity_check=ok` 仍可能存在外键违规；任意一条 `foreign_key_check` 结果或执行错误都会阻断审核，适用于 owner、previous 及候选库。批准复验重新检查两个恢复点，而不是只相信首次文件摘要；检查沿用读取预算和 SQLite 进度超时。
 
 ## 精确批准与验收边界
 
