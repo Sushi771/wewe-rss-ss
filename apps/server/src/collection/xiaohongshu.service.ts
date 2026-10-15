@@ -9,6 +9,12 @@ import {
   XhsNormalizedCandidate,
 } from './xiaohongshu-contract';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
+import {
+  assertIncrementalTransaction,
+  assertIncrementalWriteAdmission,
+  incrementalWrite,
+} from './incremental-write';
+import { sqliteWrites } from './sqlite-write-coordinator';
 import { buildArticleMarkdown } from '../article-export';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -150,15 +156,26 @@ export async function saveManagementGroup(
   if (!name || name.length > 80 || /[\x00-\x1f\x7f]/.test(name))
     return fail('分组名称须为 1–80 个字符，不能含控制字符。', 'BAD_REQUEST');
   return mutateManagement(async () => {
+    if (input.id) {
+      const id = input.id;
+      // A label-only edit uses the same durable ordinary-write admission as
+      // incremental refresh. It never scans articles or creates a recovery copy.
+      return incrementalWrite(db, Buffer.byteLength(name, 'utf8'), () =>
+        sqliteWrites.write(async () => {
+          await assertIncrementalWriteAdmission();
+          return db.$transaction(async (tx) => {
+            await assertIncrementalTransaction(tx);
+            await getManagementGroup(tx, platform, id);
+            return tx.managementGroup.update({
+              where: { id },
+              data: { name },
+            });
+          });
+        }),
+      );
+    }
     await createVerifiedSqliteBackup();
     return db.$transaction(async (tx) => {
-      if (input.id) {
-        await getManagementGroup(tx, platform, input.id);
-        return tx.managementGroup.update({
-          where: { id: input.id },
-          data: { name },
-        });
-      }
       return tx.managementGroup.create({
         data: {
           id: randomUUID(),

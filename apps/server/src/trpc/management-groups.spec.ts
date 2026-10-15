@@ -407,6 +407,97 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
         .localDirectory,
     ).toBe('unchanged-local-path');
   });
+  it('ordinary renames commit without snapshots, retain same-name IDs and survive a fresh client', async () => {
+    const { api } = caller();
+    for (const id of ['rename-a', 'rename-b'])
+      await prisma.managementGroup.create({
+        data: { id, name: 'same', platform: 'wechat', order: 7 },
+      });
+    const snapshots = jest
+      .spyOn(backup, 'createVerifiedSqliteBackup')
+      .mockRejectedValue(new Error('BACKUP_QUOTA_FULL'));
+    expect(
+      await api.feed.saveGroup({ id: 'rename-a', name: '  changed  ' }),
+    ).toMatchObject({
+      id: 'rename-a',
+      name: 'changed',
+      platform: 'wechat',
+      order: 7,
+    });
+    await api.feed.saveGroup({ id: 'rename-a', name: 'same' });
+    const fresh = new PrismaClient();
+    try {
+      expect(
+        await fresh.managementGroup.findMany({ where: { platform: 'wechat' } }),
+      ).toHaveLength(2);
+      expect(
+        (
+          await fresh.managementGroup.findUniqueOrThrow({
+            where: { id: 'rename-a' },
+          })
+        ).name,
+      ).toBe('same');
+    } finally {
+      await fresh.$disconnect();
+    }
+    expect(snapshots).not.toHaveBeenCalled();
+    // New group creation keeps the independently protected path.
+    await expect(api.feed.saveGroup({ name: 'new' })).rejects.toThrow(
+      'BACKUP_QUOTA_FULL',
+    );
+  });
+  it('ordinary rename rejects unsafe durability, insufficient disk, foreign IDs and a late SQL failure without changing rows', async () => {
+    const { api } = caller();
+    await prisma.managementGroup.create({
+      data: { id: 'rename-safe', name: 'old', platform: 'wechat' },
+    });
+    const snapshots = jest
+      .spyOn(backup, 'createVerifiedSqliteBackup')
+      .mockRejectedValue(new Error('UNEXPECTED_SNAPSHOT'));
+    await expect(
+      api.xiaohongshu.saveGroup({ id: 'rename-safe', name: 'cross' }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await prisma.$executeRawUnsafe('PRAGMA synchronous=OFF');
+    try {
+      await expect(
+        api.feed.saveGroup({ id: 'rename-safe', name: 'unsafe' }),
+      ).rejects.toThrow('INCREMENTAL_DURABILITY_MODE_UNPROVED');
+    } finally {
+      await prisma.$executeRawUnsafe('PRAGMA synchronous=FULL');
+    }
+    const volume = await fs.statfs(root, { bigint: true });
+    const disk = jest
+      .spyOn(fs, 'statfs')
+      .mockResolvedValue({ ...volume, bavail: 0n } as any);
+    try {
+      await expect(
+        api.feed.saveGroup({ id: 'rename-safe', name: 'disk full' }),
+      ).rejects.toThrow('INCREMENTAL_DISK_SPACE_INSUFFICIENT');
+    } finally {
+      disk.mockRestore();
+    }
+    await prisma.$executeRawUnsafe(
+      "CREATE TRIGGER rename_abort AFTER UPDATE ON management_groups BEGIN SELECT RAISE(ABORT, 'synthetic late failure'); END",
+    );
+    try {
+      await expect(
+        api.feed.saveGroup({ id: 'rename-safe', name: 'rejected' }),
+      ).rejects.toThrow();
+    } finally {
+      await prisma.$executeRawUnsafe('DROP TRIGGER rename_abort');
+    }
+    expect(
+      (
+        await prisma.managementGroup.findUniqueOrThrow({
+          where: { id: 'rename-safe' },
+        })
+      ).name,
+    ).toBe('old');
+    expect(snapshots).not.toHaveBeenCalled();
+    await expect(
+      api.feed.saveGroup({ id: 'rename-safe', name: 'ok after failures' }),
+    ).resolves.toMatchObject({ name: 'ok after failures' });
+  });
   it('persists a full 100-member batch across a fresh client, makes repeat adds idempotent, and rolls back a failed commit', async () => {
     const { api } = caller();
     const group = await api.feed.saveGroup({ name: 'batch target' });

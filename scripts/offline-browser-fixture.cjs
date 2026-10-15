@@ -95,6 +95,7 @@ async function withFixture(source, run, aliases = {}, options = {}) {
     },
   });
   const server = http.createServer((req, res) => {
+    if (options.handleRequest?.(req, res)) return;
     if (req.url === '/fixture.js') {
       res.setHeader('Content-Type', 'text/javascript');
       res.end(fs.readFileSync(path.join(temp, 'bundle/fixture.js')));

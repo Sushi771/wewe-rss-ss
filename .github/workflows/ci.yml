@@ -16,6 +16,7 @@ on:
         codex/cache-sync-single-preflight-20261014,
         codex/bounded-five-submit-20261014,
         codex/export-real-metrics-only-20261014,
+        codex/folder-rename-latency,
       ]
   pull_request:
     branches:
@@ -26,6 +27,7 @@ on:
         codex/automatic-refresh-recovery-20261013,
         codex/body-cache-retry-status,
         codex/backend-recovery-integration-20261014,
+        codex/space-guard-review-base-20261014,
       ]
 
 jobs:
