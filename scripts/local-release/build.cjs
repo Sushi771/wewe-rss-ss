@@ -416,7 +416,16 @@ function build(options = {}) {
       'backup-space-status.py',
       'sqlite-retention-plan.py',
       'query-retention-resources.ps1',
-      ...(legacy ? [] : ['sqlite-snapshot-guard.py']),
+      ...(legacy
+        ? []
+        : [
+            'sqlite-snapshot-guard.py',
+            'article_history.py',
+            'article_history_host.py',
+            'article-history-browser.cjs',
+            'article-history-runtime.cjs',
+            'article-history-resources.ps1',
+          ]),
       'verify-preservation.py',
       'watch-wechat2rss-cache.py',
       'read-wechat2rss-cache.py',

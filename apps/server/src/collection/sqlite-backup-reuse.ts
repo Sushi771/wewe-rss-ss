@@ -14,6 +14,14 @@ type Entry = {
 const entries = new Map<string, Entry>();
 const lifetime = 30000;
 
+/** Read only; called under sqliteWrites.snapshot by history maintenance. */
+export function activeVerifiedBackupReferences(): string[] {
+  const now = Date.now();
+  return [...entries.values()]
+    .filter((entry) => entry.expires > now)
+    .map((entry) => entry.report.backup);
+}
+
 async function identity(file: string) {
   const value = await stat(file, { bigint: true });
   if (!value.isFile() || !value.ino)

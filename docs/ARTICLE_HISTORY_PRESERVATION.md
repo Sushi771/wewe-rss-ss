@@ -2,7 +2,7 @@
 
 旧数据库中同 ID 的正文、标题、指标或来源链接可能与现库不同。直接按文章数量或 ID 判断“已有覆盖”会丢失旧版本。本模块先把文章历史保存为独立的内容寻址归档，再验证覆盖，最后生成需要具体批次批准的只读退役清单。
 
-入口是 `apps/server/scripts/article_history.py`，三个接口为 `prepareArchive`、`verifyCoverage`、`planRetirements`。此分支只增加脚本、合成测试、文档和独立 CI；通过 JSON 清单接口与空间守卫/PR39 衔接，不修改服务、调度器、数据库 schema 或 PR39 的工作区。
+归档入口是 `apps/server/scripts/article_history.py`，三个接口为 `prepareArchive`、`verifyCoverage`、`planRetirements`。宿主入口为 `article_history_host.py`，已接入现有 snapshot owner 的私有 stdio 和服务内部维护 API。功能默认关闭，无自动调度或删除执行器；不改数据库 schema、PR39 工作区或正在运行的生产发布。
 
 ## 用户可见行为
 
@@ -94,3 +94,61 @@ python -m unittest test_article_history -v
 ```
 
 全部数据库均为测试临时目录中的小型合成库，图片为一个像素。覆盖正文新旧版本、元数据独立版本、跨 feed/旧 ID 独立保留、内嵌/本地图去重、外链未知、损坏与路径穿越、待补图标记、归档篡改、遗漏 ledger、源替换、WAL 写入/检查点/快速改回、预算中止、必要恢复点及默认无候选。独立 CI 在 Windows 和 Linux 上运行真实浏览器，验证有效 PNG 解码成功、签名正确但像素损坏的 PNG 解码失败、零远端资源请求。单元用例中的 browser mock 只用于状态组合，不能代替这一真实集成验证。
+
+## 宿主接入：从真实状态生成证明
+
+服务内部入口位于 `src/collection/sqlite-snapshot-guard.ts`：
+
+```typescript
+const result = await reviewArticleHistory([oldDatabasePath]);
+// 展示 result.review 的完整路径、大小、SHA、阻断原因和 batchSha256。
+// 用户明确批准该批次后，仍只执行重新校验，绝不删除：
+const checked = await validateArticleHistoryApproval(result.review, {
+  action: 'permanent-delete-exact-files',
+  batchSha256: result.review.batchSha256,
+  paths: result.review.eligible.map((entry) => entry.identity.main.path),
+  approvedAtEpoch: Math.floor(Date.now() / 1000),
+});
+```
+
+这两个调用通过现有持锁 owner 的私有进程管道运行。Node 使用实际 `sqliteWrites.snapshot` 排他准入，在持有准入期间读取 `activeVerifiedBackupReferences()` 的真实进程内复用缓存，发送运行时引用后再发审核请求。缺少这个同步时宿主拒绝生成候选；磁盘 JSON、调用者自填 SHA 或独立归档模块的成功结果不能代替它。当前普通导出只使用现库，现库始终保护；未来会读取候选备份文件的恢复/导出/迁移工作必须在入队前调用 `pinArticleHistoryReference(token, path)`，完成后调用 `unpinArticleHistoryReference(token)`。不得在已持有写入/备份准入的回调内部再次调用这些维护 API。
+
+宿主从实际 owner 内存记录获取 generation、snapshotGeneration、源身份和已验证快照摘要，重新检查 owner 锁、诊断文件与内存字节、data_version 和 freshness。存在未快照写入或 dirty 状态时立即阻断；审核不调用 `tick`、不强制创建快照、不修改现库。它使用现成 owner 快照及受信进程配置选定的 previous 点，分别执行全文件 SHA 和 SQLite integrity_check；两点必须是不同物理文件、无 WAL/SHM/journal。配置者必须选定该数据库的必要恢复点，不能把任意请求携带的路径或磁盘回执当恢复点授权。
+
+非文章覆盖不再由调用者填写摘要：宿主读取候选及两个恢复点的实际 SQLite schema 和全部非 `articles` 表，包括账号、队列、订阅及其他状态；只在内存对原始行做哈希和重复行计数。某候选的所有非文章行及其 multiplicity、全部 schema 必须能由**同一个**保留点覆盖，不能把互不兼容的两个状态拼成证明。不同 schema、独有账号/队列值、重复行缺口等都阻断。原始非文章值不会写入审核报告、归档或日志。
+
+## 引用目录、占用和配置
+
+启用需要受信服务配置 `SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED=1`、`SQLITE_ARTICLE_HISTORY_MAINTENANCE_WINDOW=1` 与 `SQLITE_ARTICLE_HISTORY_HOST_CONFIG`。维护窗口开关是强制前提，操作者需先暂停普通采集和备份文件消费；缺少任一开关都拒绝维护操作。默认值不改变既有服务行为。配置示例只表示接口，不会在本 PR 中应用到任何生产环境：
+
+```json
+{
+  "sourceRoots": ["C:/review-backups"],
+  "recoveryRoots": ["C:/verified-recoveries"],
+  "previous": "C:/verified-recoveries/previous/wewe-rss.db",
+  "archiveRoot": "C:/private-article-history",
+  "referenceFiles": ["C:/app/.local-releases/active.json"],
+  "mediaRoots": [],
+  "maxReadBytes": 268435456,
+  "seconds": 240,
+  "archiveBytes": 134217728
+}
+```
+
+`referenceFiles` 必须包含适用于该实例的发布、迁移、人工保留和排队操作记录；不能用无关空目录宣称没有引用。宿主还会重扫这些文件的父目录、源/恢复根和候选父目录的 JSON 文件，绑定目录清单、文件身份、字节摘要及内存引用 generation。新记录出现、内容变化、缺失记录、未知 JSON 格式、维护锁或不可读目录均阻断，不静默忽略。支持：
+
+- 实际 `.local-releases/active.json` 的 `{"format":1,"id":"..."}`：解析到同目录下的发布子目录，检查 `release.json` ID，保护整棵目录。
+- `{"format":"article-history-references-v1","paths":[...]}` 或既有 `sqlite-retention-protected-v1`：保护绝对路径、相对记录所在目录的路径和本地 `file:` URI，目录引用保护整个子树。空 `{}` 和未知格式会拒绝。
+- owner/latest 指针中的 `backup` 路径；候选父目录内带明确 `sqlite-recovery-origin-v1` 的 verification 记录，`protected` 来源保持保护；来源不明的旧记录不会取得退役资格。
+
+Windows 使用只查询的 Restart Manager 接口直接核验候选与两个恢复点的占用，不接受外部提供的“无人占用”JSON。查询失败、有人占用或结果过期都阻断。当前 Linux 未实现具有完整跨用户可见性的资源查询，因此宿主候选保持空；独立离线归档/图片验证仍可运行。不要把 Linux 的归档成功解释为已证明可退役。
+
+默认宿主累计读取预算 256 MiB、240 秒，最多 16 个候选；显式配置上限为 16 GiB、300 秒，归档仍有独立预算。超限失败，不自动提高预算、不复制整个数据库。维护审核会占用排他准入，应用写入可能等待或按既有等待上限失败；此功能为显式维护调用，不能放入普通刷新或定时任务。本次仅做小型合成验收，没有对真实大库扫描、发布或启用。
+
+## 精确批准与验收边界
+
+宿主清单含每个候选的精确文件身份、字节数及全文件 SHA、恢复点证明、非文章覆盖摘要、owner generation、引用目录摘要、即时占用查询、归档 manifest SHA 和完整 `batchSha256`。Windows file index、纳秒时间等超过 JavaScript 安全整数范围的值使用十进制字符串，确保 Node/Python 往返不丢精度。清单有效期 300 秒；只认同一 owner 进程内实际签发的精确清单，新审核替代旧审核，重启后旧批次失效。
+
+批准必须精确匹配 `permanent-delete-exact-files`、批次 SHA、完整路径集合及批准时间。验证阶段重跑归档/浏览器、源全文件 SHA、恢复点完整性、运行时/磁盘引用、资源占用，并在结束时再次检查文件、归档和到期时间。返回值仍是 `executable=false`、`permanentDeletionPerformed=false`；未来执行器还必须核验批准来源、重新检查每个实际文件句柄和活动引用。这里没有永久删除操作，也不会把历史删除批准扩展到新批次。
+
+新增宿主验收使用真实 `SnapshotGuard`、真实 Node `SqliteWriteCoordinator` 和复用缓存、私有 stdio、真实离线浏览器及 Windows 原生占用查询；数据库均为几十 KiB 的合成样本。Node 端到端覆盖清单跨语言往返及具体批准的重新校验。其他用例覆盖独有非文章状态/重复行/缺失表、伪造 owner 诊断、未快照写入、未知引用目录、真实发布指针、相对路径/URI、新引用出现、恢复点变化、未知占用与预算中止。非 legacy 构建显式携带全部宿主脚本；本 PR 不构建或切换生产发布。

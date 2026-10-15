@@ -6,8 +6,17 @@ on:
       - 'apps/server/scripts/article_history.py'
       - 'apps/server/scripts/article-history-browser.cjs'
       - 'apps/server/scripts/test_article_history.py'
+      - 'apps/server/scripts/article_history_host.py'
+      - 'apps/server/scripts/test_article_history_host.py'
+      - 'apps/server/scripts/article-history-runtime.cjs'
+      - 'apps/server/scripts/test-article-history-runtime.cjs'
+      - 'apps/server/scripts/article-history-resources.ps1'
+      - 'apps/server/scripts/sqlite-snapshot-guard.py'
+      - 'apps/server/src/collection/sqlite-snapshot-guard.ts'
+      - 'apps/server/src/collection/sqlite-backup-reuse.ts'
       - 'docs/ARTICLE_HISTORY_PRESERVATION.md'
       - '.github/workflows/article-history.yml'
+      - 'scripts/local-release/build.cjs'
   push:
     branches: ['codex/article-history-preservation-*']
   workflow_dispatch:
@@ -35,6 +44,14 @@ jobs:
         working-directory: apps/server/scripts
         env:
           ARTICLE_HISTORY_BROWSER_REQUIRED: '1'
-        run: python -m unittest test_article_history -v
+        run: python -m unittest test_article_history test_article_history_host test_sqlite_snapshot_guard -v
+      - name: Actual Node coordinator and owner stdio integration
+        run: node --experimental-transform-types --test apps/server/scripts/test-article-history-runtime.cjs
       - name: Browser syntax
         run: node --check apps/server/scripts/article-history-browser.cjs
+      - name: Typecheck isolated maintenance integration
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/history-typecheck" --ignore-scripts --package-lock=false --no-save typescript@5.5.4 @types/node@22
+          node "$RUNNER_TEMP/history-typecheck/node_modules/typescript/bin/tsc" --noEmit --skipLibCheck --strict --target ES2021 --module commonjs --moduleResolution node --typeRoots "$RUNNER_TEMP/history-typecheck/node_modules/@types" apps/server/src/collection/sqlite-snapshot-guard.ts
