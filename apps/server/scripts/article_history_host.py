@@ -7,6 +7,7 @@ to delete files. The existing owner remains the source of snapshot authority.
 from collections import Counter
 from contextlib import closing, contextmanager
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -24,6 +25,46 @@ import article_history as history
 
 class HostError(history.CoverageError):
     pass
+
+
+STAGES = {'owner-request', 'owner-proof', 'references', 'recovery-owner', 'recovery-previous',
+          'source-state', 'archive-prepare', 'coverage', 'resource-query', 'final-check',
+          'approval-coverage', 'approval-source', 'approval-recovery', 'approval-resource'}
+
+
+def run_stage(stage, function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except Exception as error:
+        if getattr(error, 'history_stage', None) not in STAGES:
+            error.history_stage = stage
+        raise
+
+
+def safe_diagnostic(error):
+    """Bounded allowlists only: no messages, SQL, paths, input values or traces."""
+    name = type(error).__name__
+    error_type = name if name in {'HostError', 'CoverageError', 'BrowserCheckError', 'OperationalError',
+        'DatabaseError', 'IntegrityError', 'ProgrammingError', 'OSError', 'PermissionError',
+        'FileNotFoundError', 'TimeoutExpired', 'ValueError', 'TypeError', 'JSONDecodeError'} else 'UnknownError'
+    code = 'UNCLASSIFIED'
+    if isinstance(error, OSError):
+        code = errno.errorcode.get(error.errno, 'UNCLASSIFIED')
+        if code not in {'EBUSY', 'EPERM', 'ENOENT', 'EACCES', 'EIO', 'ENOSPC', 'EMFILE'}:
+            code = 'UNCLASSIFIED'
+    elif isinstance(error, sqlite3.Error):
+        value = getattr(error, 'sqlite_errorname', '')
+        if value in {'SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_CORRUPT', 'SQLITE_NOTADB',
+                     'SQLITE_ERROR', 'SQLITE_CONSTRAINT', 'SQLITE_INTERRUPT'}:
+            code = value
+    elif isinstance(error, subprocess.TimeoutExpired):
+        code = 'PROCESS_TIMEOUT'
+    stage = getattr(error, 'history_stage', 'owner-request')
+    diagnostic = {'format': 'article-history-diagnostic-v1',
+                  'stage': stage if stage in STAGES else 'owner-request', 'errorType': error_type, 'code': code}
+    if isinstance(error, history.BrowserCheckError):
+        diagnostic['browser'] = history.browser_diagnostic(error.browser_diagnostic)
+    return diagnostic
 
 
 def wire(value):
@@ -63,7 +104,7 @@ def file_sha(path, budget):
     before = history.identity(path)
     budget.charge(before['size'])
     result = hashlib.sha256()
-    with Path(path).open('rb') as handle:
+    with history.native_path(path).open('rb') as handle:
         opened = os.fstat(handle.fileno())
         if (opened.st_dev, opened.st_ino, opened.st_size) != (before['device'], before['inode'], before['size']):
             raise HostError('FILE_HANDLE_CHANGED')
@@ -344,10 +385,10 @@ class HistoryReviewHost:
         catalog_roots = self.sources + self.recoveries + [p.parent for p in sources]
         # Same serialized owner request thread, plus lock against local pin changes.
         with self.registry.lock:
-            owner = self.owner_proof()
-            refs = reference_snapshot(self.references, self.registry, budget, catalog_roots)
-            owner_state = verified_state(owner['backup'], self.recoveries, budget)
-            previous_state = verified_state(self.previous, self.recoveries, budget)
+            owner = run_stage('owner-proof', self.owner_proof)
+            refs = run_stage('references', reference_snapshot, self.references, self.registry, budget, catalog_roots)
+            owner_state = run_stage('recovery-owner', verified_state, owner['backup'], self.recoveries, budget)
+            previous_state = run_stage('recovery-previous', verified_state, self.previous, self.recoveries, budget)
             if owner_state['sha256'] != owner['sha256'] or physical(owner_state['identity']) == physical(previous_state['identity']):
                 raise HostError('RECOVERY_PAIR_UNPROVED')
             points = [('owner', owner_state), ('previous', previous_state)]
@@ -357,7 +398,7 @@ class HistoryReviewHost:
                     raise HostError('ACTIVE_OR_PROTECTED_REFERENCE')
                 if re.search('identity|migration|rollback|release|deploy|manual|protected', source.parent.name, re.I):
                     raise HostError('RECOVERY_BOUNDARY_NAME')
-            states = [verified_state(source, self.sources, budget) for source in sources]
+            states = [run_stage('source-state', verified_state, source, self.sources, budget) for source in sources]
             covered = []
             for source in states:
                 match = next((role for role, point in points if state_covers(point, source)), None)
@@ -368,7 +409,7 @@ class HistoryReviewHost:
                                 'stateDigest': history.digest(history.canonical({k: dict(v) for k, v in source['tables'].items()}))})
             # The archive chooses its output, not an untrusted IPC request.
             archive = self.archive_root / ('history-' + uuid.uuid4().hex)
-            prepared = history.prepareArchive(sources, owner['backup'], archive, source_roots=self.sources,
+            prepared = run_stage('archive-prepare', history.prepareArchive, sources, owner['backup'], archive, source_roots=self.sources,
                                               media_roots=self.config.get('mediaRoots', ()),
                                               max_bytes=self.config.get('archiveBytes', 128 * 1024**2))
             receipts = [{'role': role, 'identity': point['identity'],
@@ -376,12 +417,12 @@ class HistoryReviewHost:
                         for role, point in points]
             state_receipt = {'manifestSha256': prepared['manifestSha256'],
                              'verificationSha256': history.digest(history.canonical(covered))}
-            plan = history.planRetirements(archive, protections=receipts, non_article_coverage=state_receipt)
+            plan = run_stage('coverage', history.planRetirements, archive, protections=receipts, non_article_coverage=state_receipt)
             budget.tick()
             final_refs = reference_snapshot(self.references, self.registry, budget, catalog_roots)
             if self.owner_proof() != owner or final_refs != refs:
                 raise HostError('OWNER_OR_ACTIVE_REFERENCES_CHANGED')
-            resources = resource_probe(sources + [Path(owner['backup']), self.previous])
+            resources = run_stage('resource-query', resource_probe, sources + [Path(owner['backup']), self.previous])
             if resources.get('querySucceeded') is not True or any(x.get('users') != [] for x in resources.get('files', [])):
                 plan['heldReasons'].append('RESOURCE_OCCUPANCY_UNPROVED_OR_BUSY')
                 plan['eligible'] = []
@@ -431,20 +472,20 @@ class HistoryReviewHost:
         with self.registry.lock:
             if wire(self.owner_proof()) != plan['owner'] or reference_snapshot(self.references, self.registry, budget, catalog_roots)['sha256'] != plan['referenceDigest']:
                 raise HostError('APPROVED_REFERENCES_CHANGED')
-            check = history.verifyCoverage(plan['archive'])
+            check = run_stage('approval-coverage', history.verifyCoverage, plan['archive'])
             if not check['verified'] or check['manifestSha256'] != plan['manifestSha256']:
                 raise HostError('APPROVED_ARCHIVE_CHANGED')
             for entry in plan['eligible']:
                 path = entry['identity']['main']['path']
-                if wire(closed_identity(path, self.sources)) != entry['identity'] or file_sha(path, budget) != entry['sha256']:
+                if wire(run_stage('approval-source', closed_identity, path, self.sources)) != entry['identity'] or run_stage('approval-source', file_sha, path, budget) != entry['sha256']:
                     raise HostError('APPROVED_SOURCE_CHANGED')
             # Independently recheck actual retained bytes/integrity, not receipt shape.
             for receipt in plan['protections']:
-                point = verified_state(receipt['identity']['main']['path'], self.recoveries, budget)
+                point = run_stage('approval-recovery', verified_state, receipt['identity']['main']['path'], self.recoveries, budget)
                 proof = history.digest(history.canonical({k: v for k, v in point.items() if k != 'tables'}))
                 if wire(point['identity']) != receipt['identity'] or proof != receipt['verificationSha256']:
                     raise HostError('APPROVED_RECOVERY_CHANGED')
-            resources = resource_probe([Path(p) for p in expected_paths] + [Path(x['identity']['main']['path']) for x in plan['protections']])
+            resources = run_stage('approval-resource', resource_probe, [Path(p) for p in expected_paths] + [Path(x['identity']['main']['path']) for x in plan['protections']])
             if resources.get('querySucceeded') is not True or any(x.get('users') != [] for x in resources.get('files', [])):
                 raise HostError('APPROVED_RESOURCE_CHECK_FAILED')
             if wire(self.owner_proof()) != plan['owner'] or reference_snapshot(self.references, self.registry, budget, catalog_roots)['sha256'] != plan['referenceDigest']:

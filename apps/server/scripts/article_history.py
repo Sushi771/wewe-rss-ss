@@ -25,6 +25,35 @@ class CoverageError(Exception):
     pass
 
 
+class BrowserCheckError(CoverageError):
+    def __init__(self, diagnostic):
+        super().__init__('offline browser validation failed: ' + diagnostic['phase'] + '/' + diagnostic['code'])
+        self.browser_diagnostic = diagnostic
+
+
+BROWSER_PHASES = {'input', 'startup', 'connect', 'cdp', 'decode', 'remote-check', 'process'}
+BROWSER_CODES = {'ENOENT', 'EBUSY', 'EPERM', 'EACCES', 'ECONNREFUSED', 'ECONNRESET',
+                 'BROWSER_EXITED', 'STARTUP_EXHAUSTED', 'INVALID_PORT_FILE', 'CDP_TIMEOUT',
+                 'CDP_ERROR', 'DECODE_FAILED', 'REMOTE_RESOURCE_BLOCKED', 'BROWSER_DEADLINE',
+                 'PROCESS_TIMEOUT', 'INVALID_BROWSER_RESULT', 'UNCLASSIFIED'}
+
+
+def browser_diagnostic(value):
+    """Only fixed classifications cross the owner pipe; never stderr text."""
+    if not isinstance(value, dict):
+        value = {}
+    pick = lambda value, choices, default: value if isinstance(value, str) and value in choices else default
+    result = {'phase': pick(value.get('phase'), BROWSER_PHASES, 'process'),
+            'errorType': pick(value.get('errorType'), {
+                'Error', 'TypeError', 'SyntaxError', 'RangeError', 'UnknownError', 'TimeoutExpired'}, 'UnknownError'),
+            'code': pick(value.get('code'), BROWSER_CODES, 'UNCLASSIFIED')}
+    if value.get('resourceCode') in ('ENOENT', 'EBUSY', 'EPERM'):
+        result['resourceCode'] = value['resourceCode']
+    if type(value.get('attempts')) is int and 0 <= value['attempts'] <= 120:
+        result['attempts'] = value['attempts']
+    return result
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -42,25 +71,48 @@ def canonical(value):
                       separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
+def absolute_path(path):
+    """One logical spelling for scope/manifest comparisons, including Win32 I/O aliases."""
+    value = os.path.abspath(path)
+    if os.name == 'nt' and value.startswith('\\\\?\\'):
+        value = value[4:]
+        if not re.match(r'^[A-Za-z]:\\', value):
+            raise CoverageError('unsupported device namespace')
+    return Path(value)
+
+
+def native_path(path):
+    """Extended drive path only at the OS I/O boundary; never changes roots/authority."""
+    path = absolute_path(path)
+    if os.name == 'nt' and re.match(r'^[A-Za-z]:\\', str(path)):
+        return Path('\\\\?\\' + str(path))
+    return path
+
+
+def resolved_path(path, *, strict=True):
+    return absolute_path(native_path(path).resolve(strict=strict))
+
+
 def regular(path, roots=None):
-    path = Path(os.path.abspath(path))
+    path = absolute_path(path)
     for part in [path, *path.parents]:
-        info = part.lstat()
+        info = native_path(part).lstat()
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise CoverageError("symlink/reparse path rejected")
     # Windows TEMP may use RUNNER~1: compare canonical long paths on BOTH sides.
     # Reparse rejection precedes resolution so it cannot silently bless a link.
-    path = path.resolve(strict=True)
-    if not path.is_file() or path.stat().st_nlink != 1:
+    path = resolved_path(path)
+    info = native_path(path).stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise CoverageError("expected a regular file with one link")
-    if roots is not None and not any(path.is_relative_to(Path(r).resolve()) for r in roots):
+    if roots is not None and not any(path.is_relative_to(resolved_path(r)) for r in roots):
         raise CoverageError("file outside declared roots")
     return path
 
 
 def identity(path):
     path = regular(path)
-    info = path.stat()  # Path.stat, not cached Windows DirEntry.stat.
+    info = native_path(path).stat()  # Fresh Path.stat, not cached DirEntry.stat.
     if not info.st_ino:
         raise CoverageError("filesystem does not expose stable file identity")
     return {"path": str(path), "device": info.st_dev, "inode": info.st_ino,
@@ -73,7 +125,7 @@ def database_identity(path):
     sidecars = {}
     for suffix in ("-wal", "-journal"):
         side = Path(str(path) + suffix)
-        sidecars[suffix] = identity(side) if side.exists() else None
+        sidecars[suffix] = identity(side) if native_path(side).exists() else None
     return {"main": main, "sidecars": sidecars}
 
 
@@ -94,7 +146,7 @@ def read_file(path, budget, limit=32 * 1024 * 1024):
         raise CoverageError("individual file limit exceeded")
     budget.charge(before["size"])
     # Bound the read even if a writer grows the file after the initial stat.
-    with Path(path).open("rb") as handle:
+    with native_path(path).open("rb") as handle:
         opened = os.fstat(handle.fileno())
         if (opened.st_dev, opened.st_ino, opened.st_size) != (before["device"], before["inode"], before["size"]):
             raise CoverageError("opened file identity changed")
@@ -267,7 +319,7 @@ class Reader(HTMLParser):
                     if not self.media_roots or Path(decoded).is_absolute() or ":" in decoded:
                         raise CoverageError("local image requires relative path and media roots")
                     candidates = [Path(root) / decoded for root in self.media_roots]
-                    matches = [regular(p, self.media_roots) for p in candidates if p.exists()]
+                    matches = [regular(p, self.media_roots) for p in candidates if native_path(p).exists()]
                     if len(matches) != 1:
                         raise CoverageError("local image missing or ambiguous")
                     data = read_file(matches[0], self.store.budget)
@@ -334,8 +386,8 @@ class Store:
         if name not in self.files:
             self.budget.charge(len(data))
             target = self.root / name
-            target.parent.mkdir(exist_ok=True)
-            target.write_bytes(data)
+            native_path(target.parent).mkdir(exist_ok=True)
+            native_path(target).write_bytes(data)
             self.files[name] = {"sha256": digest(data), "bytes": len(data)}
         return name
 
@@ -347,22 +399,22 @@ def prepareArchive(sources, current, archive_root, *, source_roots, media_roots=
         raise CoverageError("expected 1..64 source files")
     current = regular(current)
     sources = [regular(p, source_roots) for p in sources]
-    physical_sources = {(p.stat().st_dev, p.stat().st_ino) for p in sources}
-    if len(physical_sources) != len(sources) or (current.stat().st_dev, current.stat().st_ino) in physical_sources:
+    physical_sources = {(native_path(p).stat().st_dev, native_path(p).stat().st_ino) for p in sources}
+    if len(physical_sources) != len(sources) or (native_path(current).stat().st_dev, native_path(current).stat().st_ino) in physical_sources:
         raise CoverageError("duplicate source or current supplied as retirement source")
-    destination = Path(os.path.abspath(archive_root))
+    destination = absolute_path(archive_root)
     for parent in [destination.parent, *destination.parent.parents]:
-        if parent.exists() and (parent.is_symlink() or getattr(parent.lstat(), "st_file_attributes", 0) & 0x400):
+        if native_path(parent).exists() and (native_path(parent).is_symlink() or getattr(native_path(parent).lstat(), "st_file_attributes", 0) & 0x400):
             raise CoverageError("archive parent reparse path rejected")
-    destination = destination.resolve(strict=False)
-    if destination.exists() or any(destination.is_relative_to(Path(r).resolve()) for r in source_roots):
+    destination = resolved_path(destination, strict=False)
+    if native_path(destination).exists() or any(destination.is_relative_to(resolved_path(r)) for r in source_roots):
         raise CoverageError("archive must be new and outside retirement roots")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    native_path(destination.parent).mkdir(parents=True, exist_ok=True)
     for parent in [destination.parent, *destination.parent.parents]:
-        if parent.is_symlink() or getattr(parent.lstat(), "st_file_attributes", 0) & 0x400:
+        if native_path(parent).is_symlink() or getattr(native_path(parent).lstat(), "st_file_attributes", 0) & 0x400:
             raise CoverageError("archive parent reparse path rejected")
     budget = Budget(max_bytes)
-    staging = Path(tempfile.mkdtemp(prefix=".article-history-building-", dir=destination.parent))
+    staging = absolute_path(tempfile.mkdtemp(prefix=".article-history-building-", dir=native_path(destination.parent)))
     store = Store(staging, budget)
     current_rows = {}
 
@@ -402,7 +454,7 @@ def prepareArchive(sources, current, archive_root, *, source_roots, media_roots=
                     for i, entry in enumerate(ledger))
     index = page("Preserved article history", links)
     budget.charge(len(index))
-    (staging / "index.html").write_bytes(index)
+    native_path(staging / "index.html").write_bytes(index)
     store.files["index.html"] = {"sha256": digest(index), "bytes": len(index)}
     manifest = {"schemaVersion": 1, "scope": "wechat-articles-only", "current": current_fp,
                 "sources": provenance, "entries": ledger, "files": store.files,
@@ -413,15 +465,15 @@ def prepareArchive(sources, current, archive_root, *, source_roots, media_roots=
     if len(payload) > 16 * 1024 * 1024:
         raise CoverageError("manifest limit exceeded; split the batch")
     budget.charge(len(payload))
-    (staging / "manifest.json").write_bytes(payload)
-    staging.rename(destination)
+    native_path(staging / "manifest.json").write_bytes(payload)
+    native_path(staging).rename(native_path(destination))
     return {"archive": str(destination), "manifestSha256": digest(payload),
             "articles": len(ledger), "issues": manifest["issues"],
             "externalUnknownCount": len(manifest["externalUnknown"])}
 
 
 def load_manifest(root):
-    root = Path(root).absolute()
+    root = absolute_path(root)
     manifest_identity = identity(root / "manifest.json")
     raw = read_file(regular(root / "manifest.json"), Budget(16 * 1024 * 1024), 16 * 1024 * 1024)
     manifest = json.loads(raw)
@@ -457,12 +509,25 @@ def load_manifest(root):
 def browser_check(root, pages):
     script = Path(__file__).with_name("article-history-browser.cjs")
     request = canonical({"root": str(root), "pages": pages}).decode("ascii")
-    result = subprocess.run(["node", str(script)], input=request, text=True,
-                            capture_output=True, timeout=180,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        result = subprocess.run(["node", str(script)], input=request, text=True,
+                                capture_output=True, timeout=180,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired as error:
+        raise BrowserCheckError(browser_diagnostic({'phase': 'process', 'errorType': 'TimeoutExpired',
+                                                    'code': 'PROCESS_TIMEOUT'})) from error
     if result.returncode:
-        raise CoverageError("offline browser validation failed: " + result.stderr[-400:])
-    return json.loads(result.stdout)
+        try:
+            failure = json.loads(result.stderr) if len(result.stderr) <= 2048 else {}
+            if failure.get('format') != 'article-history-browser-error-v1':
+                failure = {}
+        except (ValueError, AttributeError):
+            failure = {}
+        raise BrowserCheckError(browser_diagnostic(failure))
+    try:
+        return json.loads(result.stdout)
+    except ValueError as error:
+        raise BrowserCheckError(browser_diagnostic({'phase': 'process', 'code': 'INVALID_BROWSER_RESULT'})) from error
 
 
 def verifyCoverage(archive_root):

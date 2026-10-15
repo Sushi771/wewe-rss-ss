@@ -5,6 +5,7 @@ on:
     paths:
       - 'apps/server/scripts/article_history.py'
       - 'apps/server/scripts/article-history-browser.cjs'
+      - 'apps/server/scripts/test-article-history-browser.cjs'
       - 'apps/server/scripts/test_article_history.py'
       - 'apps/server/scripts/article_history_host.py'
       - 'apps/server/scripts/test_article_history_host.py'
@@ -47,6 +48,10 @@ jobs:
         run: python -m unittest test_article_history test_article_history_host test_sqlite_snapshot_guard -v
       - name: Actual Node coordinator and owner stdio integration
         run: node --experimental-transform-types --test apps/server/scripts/test-article-history-runtime.cjs
+      - name: Bounded startup faults and six consecutive real offline browser runs
+        env:
+          ARTICLE_HISTORY_BROWSER_REQUIRED: '1'
+        run: node --test apps/server/scripts/test-article-history-browser.cjs
       - name: Browser syntax
         run: node --check apps/server/scripts/article-history-browser.cjs
       - name: Typecheck isolated maintenance integration

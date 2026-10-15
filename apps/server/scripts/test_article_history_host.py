@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import article_history as history
 import article_history_host as host
-from test_article_history import database, fake_browser
+from test_article_history import database, fake_browser, LongTemporaryDirectory
 
 spec = importlib.util.spec_from_file_location('history_test_owner', Path(__file__).with_name('sqlite-snapshot-guard.py'))
 owner_module = importlib.util.module_from_spec(spec)
@@ -26,9 +26,60 @@ def free_resources(paths):
             'files': [{'path': str(path), 'users': []} for path in paths]}
 
 
+class DiagnosticTests(unittest.TestCase):
+    def test_browser_failure_keeps_safe_stage_type_code_without_retry(self):
+        failure = {'format': 'article-history-browser-error-v1', 'phase': 'startup',
+                   'errorType': 'Error', 'code': 'STARTUP_EXHAUSTED', 'resourceCode': 'EBUSY',
+                   'attempts': 120, 'message': 'PRIVATE path/SQL/token'}
+        result = subprocess.CompletedProcess([], 1, '', json.dumps(failure))
+        with patch.object(history.subprocess, 'run', return_value=result) as run:
+            with self.assertRaises(history.BrowserCheckError) as caught:
+                host.run_stage('coverage', history.browser_check, Path('.'), [])
+        self.assertEqual(run.call_count, 1)
+        report = host.safe_diagnostic(caught.exception)
+        self.assertEqual(report['stage'], 'coverage')
+        self.assertEqual(report['errorType'], 'BrowserCheckError')
+        self.assertEqual(report['browser']['resourceCode'], 'EBUSY')
+        self.assertEqual(report['browser']['attempts'], 120)
+        self.assertNotIn('PRIVATE', json.dumps(report))
+
+    def test_unknown_stderr_and_browser_timeout_remain_safe_failures(self):
+        for stderr in ('PRIVATE path/token', '{"format":"wrong","phase":"private"}',
+                       json.dumps({'format': 'article-history-browser-error-v1', 'phase': [], 'code': {}, 'errorType': 'PRIVATE'})):
+            with patch.object(history.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', stderr)) as run:
+                with self.assertRaises(history.BrowserCheckError) as caught:
+                    history.browser_check(Path('.'), [])
+            self.assertEqual(run.call_count, 1)
+            report = host.safe_diagnostic(caught.exception)
+            self.assertEqual(report['browser']['code'], 'UNCLASSIFIED')
+            self.assertNotIn('PRIVATE', json.dumps(report))
+        with patch.object(history.subprocess, 'run', side_effect=subprocess.TimeoutExpired('PRIVATE command', 180)) as run:
+            with self.assertRaises(history.BrowserCheckError) as caught:
+                host.run_stage('approval-coverage', history.browser_check, Path('.'), [])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(host.safe_diagnostic(caught.exception)['browser']['code'], 'PROCESS_TIMEOUT')
+
+    def test_sqlite_and_os_failures_keep_classification_without_raw_values(self):
+        with closing(sqlite3.connect(':memory:')) as db:
+            try:
+                host.run_stage('recovery-previous', db.execute, 'SELECT * FROM PRIVATE_TOKEN')
+            except sqlite3.Error as error:
+                report = host.safe_diagnostic(error)
+        self.assertEqual(report['stage'], 'recovery-previous')
+        self.assertEqual(report['errorType'], 'OperationalError')
+        self.assertEqual(report['code'], 'SQLITE_ERROR')
+        self.assertNotIn('PRIVATE_TOKEN', json.dumps(report))
+        try:
+            host.run_stage('resource-query', lambda: (_ for _ in ()).throw(PermissionError(13, 'PRIVATE', 'PRIVATE')))
+        except OSError as error:
+            report = host.safe_diagnostic(error)
+        self.assertEqual(report['code'], 'EACCES')
+        self.assertNotIn('PRIVATE', json.dumps(report))
+
+
 class HostTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='history-host-test-')
+        self.temp = LongTemporaryDirectory(prefix='history-host-test-')
         self.root = Path(self.temp.name)
         self.live = self.root / 'live.db'
         self.old_root = self.root / 'old'
@@ -314,7 +365,7 @@ class HostTests(unittest.TestCase):
 class HostStdioIntegration(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('ARTICLE_HISTORY_BROWSER_REQUIRED') == '1', 'real offline browser opt-in')
     def test_actual_owner_private_stdio_to_real_browser_and_os_resource_query(self):
-        with tempfile.TemporaryDirectory(prefix='history-owner-e2e-') as temp:
+        with LongTemporaryDirectory(prefix='history-owner-e2e-') as temp:
             root = Path(temp)
             old_root = root / 'old'
             recovery = root / 'recovery'

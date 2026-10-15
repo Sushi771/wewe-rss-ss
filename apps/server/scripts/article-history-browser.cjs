@@ -7,6 +7,121 @@ const http = require('node:http');
 const { spawn } = require('node:child_process');
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const phases = new Set([
+  'input',
+  'startup',
+  'connect',
+  'cdp',
+  'decode',
+  'remote-check',
+]);
+const codes = new Set([
+  'ENOENT',
+  'EBUSY',
+  'EPERM',
+  'EACCES',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'BROWSER_EXITED',
+  'STARTUP_EXHAUSTED',
+  'INVALID_PORT_FILE',
+  'CDP_TIMEOUT',
+  'CDP_ERROR',
+  'DECODE_FAILED',
+  'REMOTE_RESOURCE_BLOCKED',
+  'BROWSER_DEADLINE',
+]);
+let phase = 'input';
+function failure(code) {
+  return Object.assign(Error(code), { code });
+}
+function diagnostic(error, currentPhase = phase) {
+  const code = codes.has(error?.code)
+    ? error.code
+    : codes.has(error?.cause?.code)
+      ? error.cause.code
+      : 'UNCLASSIFIED';
+  return {
+    format: 'article-history-browser-error-v1',
+    phase: phases.has(currentPhase) ? currentPhase : 'input',
+    errorType: ['Error', 'TypeError', 'SyntaxError', 'RangeError'].includes(
+      error?.name,
+    )
+      ? error.name
+      : 'UnknownError',
+    code,
+    ...(codes.has(error?.resourceCode)
+      ? { resourceCode: error.resourceCode }
+      : {}),
+    ...(Number.isInteger(error?.attempts)
+      ? { attempts: Math.min(120, Math.max(0, error.attempts)) }
+      : {}),
+  };
+}
+
+// Retry ONLY the owned browser's startup port-file availability, never a
+// verification/approval, CDP error, malformed complete port, or decode result.
+async function waitForDevToolsPort(
+  file,
+  child,
+  {
+    readFile = fs.readFileSync,
+    sleep = pause,
+    now = () => performance.now(),
+    timeoutMs = 12000,
+    maxAttempts = 120,
+    spawnError = () => null,
+  } = {},
+) {
+  const until = now() + Math.min(timeoutMs, 12000);
+  let resourceCode;
+  let attempts = 0;
+  while (attempts < Math.min(maxAttempts, 120) && now() < until) {
+    if (spawnError()) throw spawnError();
+    if (child.exitCode !== null || child.signalCode)
+      throw failure('BROWSER_EXITED');
+    attempts++;
+    try {
+      const raw = readFile(file, 'utf8');
+      if (Buffer.byteLength(raw) > 1024) throw failure('INVALID_PORT_FILE');
+      const lines = raw.split('\n');
+      if (
+        (lines[0] &&
+          (!/^\d{1,5}$/.test(lines[0]) ||
+            Number(lines[0]) < 1 ||
+            Number(lines[0]) > 65535)) ||
+        lines.slice(2).some((line) => line.trim())
+      )
+        throw failure('INVALID_PORT_FILE');
+      // Chrome can expose the file before either line has been fully written.
+      if (
+        lines.length >= 2 &&
+        lines[1].trim() &&
+        !'/devtools/browser/'.startsWith(lines[1].trim())
+      ) {
+        const port = Number(lines[0]);
+        if (
+          !/^\d{1,5}$/.test(lines[0]) ||
+          !Number.isInteger(port) ||
+          port < 1 ||
+          port > 65535 ||
+          !/^\/devtools\/browser\/[a-zA-Z0-9-]{1,128}$/.test(lines[1].trim())
+        )
+          throw failure('INVALID_PORT_FILE');
+        if (child.exitCode !== null || child.signalCode)
+          throw failure('BROWSER_EXITED');
+        return port;
+      }
+      resourceCode = undefined; // incomplete file, not a complete invalid port
+    } catch (error) {
+      if (!['ENOENT', 'EBUSY', 'EPERM'].includes(error.code)) throw error;
+      resourceCode = error.code;
+    }
+    await sleep(Math.min(100, Math.max(0, until - now())));
+  }
+  throw Object.assign(failure('STARTUP_EXHAUSTED'), { attempts, resourceCode });
+}
+
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
@@ -99,11 +214,16 @@ async function main() {
   );
   let socket;
   try {
-    child.on('error', () => {});
+    phase = 'startup';
+    let spawnError;
+    child.on('error', (error) => {
+      spawnError = error;
+    });
     const active = path.join(profile, 'DevToolsActivePort');
-    for (let i = 0; i < 120 && !fs.existsSync(active); i++) await pause(100);
-    if (!fs.existsSync(active)) throw Error('browser startup timeout');
-    const port = Number(fs.readFileSync(active, 'utf8').split('\n')[0]);
+    const port = await waitForDevToolsPort(active, child, {
+      spawnError: () => spawnError,
+    });
+    phase = 'connect';
     const target = await fetch(
       `http://127.0.0.1:${port}/json/new?about:blank`,
       { method: 'PUT' },
@@ -120,7 +240,7 @@ async function main() {
         const key = ++id;
         const timer = setTimeout(() => {
           pending.delete(key);
-          reject(Error(`CDP timeout: ${method}`));
+          reject(failure('CDP_TIMEOUT'));
         }, 10000);
         pending.set(key, { resolve, reject, timer });
         socket.send(JSON.stringify({ id: key, method, params }));
@@ -131,7 +251,7 @@ async function main() {
         const waiter = pending.get(event.id);
         pending.delete(event.id);
         clearTimeout(waiter.timer);
-        if (event.error) waiter.reject(Error(event.error.message));
+        if (event.error) waiter.reject(failure('CDP_ERROR'));
         else waiter.resolve(event.result);
       }
       if (event.method === 'Fetch.requestPaused') {
@@ -153,6 +273,7 @@ async function main() {
         ).catch(() => {});
       }
     };
+    phase = 'cdp';
     await command('Page.enable');
     await command('Runtime.enable');
     await command('Emulation.setScriptExecutionDisabled', { value: true });
@@ -160,6 +281,7 @@ async function main() {
     let images = 0;
     let imageInputs = 0;
     for (const name of pages) {
+      phase = 'decode';
       await command('Page.navigate', { url: origin + name });
       let status;
       for (let i = 0; i < 100; i++) {
@@ -185,11 +307,12 @@ async function main() {
         status.images.some((x) => !x.done || !x.ok) ||
         status.imageInputs.some((x) => !x.done || !x.ok)
       )
-        throw Error('reader or image decode failed');
+        throw failure('DECODE_FAILED');
       images += status.images.length;
       imageInputs += status.imageInputs.length;
     }
-    if (remoteRequests) throw Error('non-archive request blocked');
+    phase = 'remote-check';
+    if (remoteRequests) throw failure('REMOTE_RESOURCE_BLOCKED');
     process.stdout.write(
       JSON.stringify({
         pages: pages.length,
@@ -224,13 +347,18 @@ async function main() {
     } catch {}
   }
 }
-const deadline = setTimeout(() => {
-  process.stderr.write('browser deadline');
-  process.exit(1);
-}, 170000);
-main()
-  .catch((error) => {
-    process.stderr.write(error.message);
-    process.exitCode = 1;
-  })
-  .finally(() => clearTimeout(deadline));
+if (require.main === module) {
+  const deadline = setTimeout(() => {
+    process.stderr.write(
+      JSON.stringify(diagnostic(failure('BROWSER_DEADLINE'))),
+    );
+    process.exit(1);
+  }, 170000);
+  main()
+    .catch((error) => {
+      process.stderr.write(JSON.stringify(diagnostic(error)));
+      process.exitCode = 1;
+    })
+    .finally(() => clearTimeout(deadline));
+}
+module.exports = { waitForDevToolsPort, diagnostic };
