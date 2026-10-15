@@ -342,8 +342,9 @@ class RetentionTests(unittest.TestCase):
         plan=self.plan();batch=self.folder/'batch.json';batch.write_bytes(retention.canonical_json(plan))
         approval,_resources=self.inputs(plan);approved=self.folder/'approval.json';approved.write_text(json.dumps(approval))
         report=self.folder/'resources.json'
+        # Allow the helper's 30-second work budget plus PowerShell/Add-Type startup.
         probe=subprocess.run(['pwsh','-NoProfile','-File',str(Path(__file__).with_name('query-retention-resources.ps1')),
-                              '-Batch',str(batch),'-Output',str(report)],capture_output=True,text=True,timeout=20)
+                              '-Batch',str(batch),'-Output',str(report)],capture_output=True,text=True,timeout=45)
         self.assertEqual(probe.returncode,0,probe.stderr)
         proof=json.loads(report.read_text(encoding='utf-8'));self.assertEqual(len(proof['files']),2)
         self.assertTrue(all(x['querySucceeded'] and x['users']==[] for x in proof['files']))
