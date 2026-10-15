@@ -145,7 +145,47 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     const roots = policy.roots.map((r) => canonical(r.path));
     const manifests = new Map(),
       watched = new Map();
-    function watch(at, required = true) {
+    const directoryWatches = new Map(),
+      absentDirectories = new Set();
+    const directoryId = (at) => {
+      const s = fs.lstatSync(at, { bigint: true });
+      if (!s.isDirectory() || s.isSymbolicLink() || !same(canonical(at), at))
+        fail('REFERENCE_SHORTCUT_DIRECTORY_INVALID');
+      return [s.dev, s.ino, s.birthtimeNs].map(String);
+    };
+    const entriesAt = (at) =>
+      fs
+        .readdirSync(at, { withFileTypes: true })
+        .map((e) => ({
+          name: e.name,
+          kind: e.isDirectory() ? 'directory' : e.isFile() ? 'file' : 'other',
+        }));
+    const sortedEntries = (rows) => rows.map((e) => JSON.stringify(e)).sort();
+    function watchDirectory(at, expected, entries) {
+      if (
+        !Array.isArray(expected) ||
+        expected.length !== 3 ||
+        !expected.every((v) => typeof v === 'string' && /^-?[0-9]+$/.test(v)) ||
+        hash(directoryId(at)) !== hash(expected)
+      )
+        fail('REFERENCE_SHORTCUT_DIRECTORY_IDENTITY_CHANGED');
+      if (
+        entries &&
+        hash(sortedEntries(entriesAt(at))) !== hash(sortedEntries(entries))
+      )
+        fail('REFERENCE_SHORTCUT_DIRECTORY_CHANGED');
+      if (hash(directoryId(at)) !== hash(expected))
+        fail('REFERENCE_SHORTCUT_DIRECTORY_IDENTITY_CHANGED');
+      const prior = directoryWatches.get(at);
+      if (prior && hash(prior.identity) !== hash(expected))
+        fail('REFERENCE_SHORTCUT_DIRECTORY_IDENTITY_CHANGED');
+      directoryWatches.set(at, {
+        identity: expected,
+        entries: entries || prior?.entries,
+      });
+    }
+    const watchLimits = new Map();
+    function watch(at, required = true, limit = 8 * 1024 ** 2) {
       const s = exists(at);
       if (!s) {
         if (required) fail('REFERENCE_SOURCE_MISSING');
@@ -154,7 +194,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         watched.set(at, null);
         return;
       }
-      const value = bytes(at, 8 * 1024 ** 2);
+      const value = bytes(at, limit);
       const current = {
         digest: digest(value),
         identity: identity(fs.lstatSync(at, { bigint: true })),
@@ -162,6 +202,13 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       if (watched.has(at) && hash(watched.get(at)) !== hash(current))
         fail('REFERENCE_SOURCE_CHANGED_DURING_QUERY');
       watched.set(at, current);
+      watchLimits.set(at, Math.max(watchLimits.get(at) || 0, limit));
+      return value;
+    }
+    function watchPinned(spec, limit = 1024 * 1024) {
+      if (!spec || !hex(spec.sha256)) fail('REFERENCE_PIN_REQUIRED');
+      const value = watch(canonical(spec.path), true, limit);
+      if (digest(value) !== spec.sha256) fail('REFERENCE_PIN_CHANGED');
       return value;
     }
     function packageAt(at) {
@@ -253,10 +300,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       )
         fail('REFERENCE_LAUNCHER_INVALID');
       for (const f of l.files) {
-        pinned(f);
-        watch(canonical(f.path));
+        watchPinned(f);
       }
-      pinned(l.executable, 256 * 1024 ** 2);
+      watchPinned(l.executable, 256 * 1024 ** 2);
       if (!same(canonical(l.argv[0]), canonical(l.executable.path)))
         fail('REFERENCE_LAUNCHER_EXECUTABLE_CHANGED');
       const ptr = canonical(l.pointerPath);
@@ -267,6 +313,21 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         cwd: canonical(l.workingDirectory),
       };
     });
+    const harmlessActions = cfg.harmlessActions || [];
+    if (!Array.isArray(harmlessActions) || harmlessActions.length > 64)
+      fail('REFERENCE_HARMLESS_ACTION_POLICY_INVALID');
+    for (const action of harmlessActions) {
+      if (
+        !['tasks', 'shortcuts'].includes(action.kind) ||
+        !Array.isArray(action.argv) ||
+        !action.argv.length ||
+        !action.argv.every((v) => typeof v === 'string') ||
+        !same(canonical(action.argv[0]), canonical(action.executable?.path))
+      )
+        fail('REFERENCE_HARMLESS_ACTION_POLICY_INVALID');
+      watchPinned(action.executable, 256 * 1024 ** 2);
+      canonical(action.workingDirectory);
+    }
     const relevantText = (text) =>
       typeof text === 'string' &&
       [...roots, ...cfg.launchers.map((l) => path.dirname(l.entry))].some(
@@ -291,7 +352,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       }
       if (relevantText(token)) fail('REFERENCE_COMMAND_PATH_UNRESOLVED');
     }
-    function resolveInvocation(tokens, cwd, isProcess = false) {
+    function resolveInvocation(tokens, cwd, isProcess = false, kind = 'tasks') {
       const launch = launchers.find(
         (l) =>
           hash(tokens) === hash(l.argv) &&
@@ -327,16 +388,65 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         const ref = pathReference(token, cwd);
         if (ref) refs.set(ref.packagePath, ref);
       }
+      const host = path.basename(tokens[0] || '').toLowerCase();
+      if (
+        tokens.some((t) =>
+          /^(-file|-f|-command|-encodedcommand|-enc|--eval|-e|\/c|\/k|\/\/e:.*)$/i.test(
+            t,
+          ),
+        )
+      )
+        fail('REFERENCE_INDIRECT_LAUNCHER_UNREVIEWED');
+      // An outside script can refer to any package without naming that package
+      // in argv. Do not read/execute it to guess its meaning. Only an exact
+      // reviewed launcher mapping, or a direct entry in an approved package,
+      // can establish a script reference.
+      if (
+        /^(powershell|pwsh|cmd|wscript|cscript|mshta|rundll32|regsvr32)(\.exe)?$/.test(
+          host,
+        )
+      )
+        fail('REFERENCE_INDIRECT_LAUNCHER_UNREVIEWED');
+      if (
+        tokens.some((t) => /\.(ps1|psm1|vbs|vbe|wsf|wsh|bat|cmd|jse)$/i.test(t))
+      )
+        fail('REFERENCE_INDIRECT_LAUNCHER_UNREVIEWED');
+      const scriptTokens = tokens.filter((t) =>
+        /\.(ps1|psm1|vbs|vbe|js|jse|wsf|wsh|bat|cmd|cjs|mjs|py|pyw|pl|rb|sh)$/i.test(
+          t,
+        ),
+      );
+      for (const token of scriptTokens)
+        if (!pathReference(token, cwd))
+          fail('REFERENCE_INDIRECT_LAUNCHER_UNREVIEWED');
+      if (
+        /^(node|nodejs|python[0-9.]*|pythonw|py|perl|ruby|bash|sh|zsh|deno|bun)(\.exe)?$/.test(
+          host,
+        ) &&
+        !scriptTokens.length
+      )
+        fail('REFERENCE_INDIRECT_LAUNCHER_UNREVIEWED');
       const cwdRef = cwd ? pathReference(cwd) : undefined;
       if (cwdRef) refs.set(cwdRef.packagePath, cwdRef);
       if ((tokens.some(relevantText) || relevantText(cwd)) && !refs.size)
         fail('REFERENCE_LAUNCHER_UNRESOLVED');
+      if (
+        !isProcess &&
+        !refs.size &&
+        !harmlessActions.some(
+          (a) =>
+            a.kind === kind &&
+            hash(a.argv) === hash(tokens) &&
+            cwd &&
+            same(canonical(cwd), canonical(a.workingDirectory)),
+        )
+      )
+        fail('REFERENCE_APPLICATION_ACTION_UNREVIEWED');
       return [...refs.values()];
     }
     for (const file of cfg.rollbackFiles) {
-      const raw = pinned(file),
+      const raw = watchPinned(file),
         doc = JSON.parse(raw.toString('utf8'));
-      watch(canonical(file.path));
       if (
         doc.format !== 1 ||
         !Array.isArray(doc.packages) ||
@@ -353,7 +463,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       }
     }
     result.categories.pointers = result.categories.rollback = true;
-    const proofRaw = pinned(cfg.compatibilityProof),
+    const proofRaw = watchPinned(cfg.compatibilityProof),
       proof = JSON.parse(proofRaw.toString('utf8'));
     if (
       digest(proofRaw) !== policy.compatibilityProofSha256 ||
@@ -382,7 +492,6 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       )
         fail('REFERENCE_COMPATIBILITY_BINDING_INVALID');
     }
-    watch(canonical(cfg.compatibilityProof.path));
     result.compatibility = {
       verified: true,
       businessDatabaseRestored: false,
@@ -491,7 +600,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         fail('REFERENCE_PROCESS_CHANGED');
       }
       const exe = canonical(p.executable),
-        executableSha256 = digest(bytes(exe, 256 * 1024 ** 2));
+        executableSha256 = digest(watch(exe, true, 256 * 1024 ** 2));
       for (const ref of refs)
         record('processes', ref, {
           pid,
@@ -547,6 +656,42 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       )
     )
       fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
+    if (
+      native.shortcutCoverage.length !== 6 ||
+      new Set(native.shortcutCoverage.map((c) => c.kind)).size !== 6 ||
+      !Array.isArray(native.shortcutDirectories)
+    )
+      fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
+    for (const coverage of native.shortcutCoverage) {
+      if (
+        typeof coverage.path !== 'string' ||
+        !path.isAbsolute(coverage.path) ||
+        path.resolve(coverage.path) !== coverage.path
+      )
+        fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
+      if (coverage.status === 'absent') {
+        const ancestor = coverage.ancestor;
+        if (
+          !ancestor ||
+          typeof ancestor.path !== 'string' ||
+          !path.isAbsolute(ancestor.path) ||
+          same(ancestor.path, coverage.path) ||
+          !inside(ancestor.path, coverage.path)
+        )
+          fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
+        watchDirectory(ancestor.path, ancestor.identity);
+        if (exists(coverage.path))
+          fail('REFERENCE_SHORTCUT_ABSENT_DIRECTORY_APPEARED');
+        absentDirectories.add(coverage.path);
+      } else {
+        const snapshot = native.shortcutDirectories.find((d) =>
+          same(d.path, coverage.path),
+        );
+        if (!snapshot || hash(snapshot.identity) !== hash(coverage.identity))
+          fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
+        watchDirectory(coverage.path, coverage.identity);
+      }
+    }
     for (const t of native.tasks) {
       if (!t.identity || !Array.isArray(t.actions) || !t.actions.length)
         fail('REFERENCE_TASK_INVALID');
@@ -569,22 +714,31 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     )
       fail('REFERENCE_SHORTCUT_DIRECTORY_QUERY_INCOMPLETE');
     for (const dir of native.shortcutDirectories) {
-      const stat = fs.lstatSync(dir.path);
       if (
-        !stat.isDirectory() ||
-        stat.isSymbolicLink() ||
-        !Array.isArray(dir.entries)
+        !Array.isArray(dir.entries) ||
+        !native.shortcutCoverage.some(
+          (c) => c.status === 'enumerated' && inside(c.path, dir.path),
+        )
       )
         fail('REFERENCE_SHORTCUT_DIRECTORY_INVALID');
-      const current = fs
-        .readdirSync(dir.path, { withFileTypes: true })
-        .map((e) => ({
-          name: e.name,
-          kind: e.isDirectory() ? 'directory' : e.isFile() ? 'file' : 'other',
-        }));
-      const sorted = (rows) => rows.map((e) => JSON.stringify(e)).sort();
-      if (hash(sorted(current)) !== hash(sorted(dir.entries)))
-        fail('REFERENCE_SHORTCUT_DIRECTORY_CHANGED');
+      watchDirectory(dir.path, dir.identity, dir.entries);
+      for (const e of dir.entries) {
+        if (
+          e.kind === 'directory' &&
+          !native.shortcutDirectories.some((child) =>
+            same(child.path, path.join(dir.path, e.name)),
+          )
+        )
+          fail('REFERENCE_SHORTCUT_DIRECTORY_QUERY_INCOMPLETE');
+        if (
+          e.kind === 'file' &&
+          path.extname(e.name).toLowerCase() === '.lnk' &&
+          !native.shortcuts.some((s) =>
+            same(s.path, path.join(dir.path, e.name)),
+          )
+        )
+          fail('REFERENCE_SHORTCUT_DIRECTORY_QUERY_INCOMPLETE');
+      }
     }
     for (const s of native.shortcuts) {
       if (
@@ -599,6 +753,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       for (const ref of resolveInvocation(
         [s.target, ...argv(s.arguments)],
         s.workingDirectory,
+        false,
+        'shortcuts',
       ))
         record('shortcuts', ref, {
           identity: hash([
@@ -693,12 +849,16 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       if (
         expected === null
           ? !!exists(at)
-          : digest(bytes(at, 8 * 1024 ** 2)) !== expected.digest ||
+          : digest(bytes(at, watchLimits.get(at))) !== expected.digest ||
             hash(identity(fs.lstatSync(at, { bigint: true }))) !==
               hash(expected.identity)
       )
         fail('REFERENCE_SOURCE_CHANGED_DURING_QUERY');
     }
+    for (const [at, expected] of directoryWatches)
+      watchDirectory(at, expected.identity, expected.entries);
+    for (const at of absentDirectories)
+      if (exists(at)) fail('REFERENCE_SHORTCUT_ABSENT_DIRECTORY_APPEARED');
     result.records.sort((a, b) =>
       JSON.stringify(a).localeCompare(JSON.stringify(b)),
     );
@@ -717,6 +877,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
 function main(policyFile) {
   const policyBytes = bytes(canonical(policyFile)),
     policy = JSON.parse(policyBytes.toString('utf8'));
+  const policyIdentity = identity(
+    fs.lstatSync(canonical(policyFile), { bigint: true }),
+  );
   const collector = path.join(
     __dirname,
     'windows-release-reference-collector.ps1',
@@ -728,6 +891,19 @@ function main(policyFile) {
   )
     fail('REFERENCE_PROBE_PIN_REQUIRED');
   pinned(policy.probe);
+  const probeIdentity = identity(
+    fs.lstatSync(canonical(policy.probe.path), { bigint: true }),
+  );
+  const helper = path.join(
+    __dirname,
+    'windows-reference-directory-identity.cs',
+  );
+  if (
+    policy.windowsReferences?.collectorIdentitySha256 !== digest(bytes(helper))
+  )
+    fail('REFERENCE_COLLECTOR_PIN_CHANGED');
+  const collectorIdentity = identity(fs.lstatSync(collector, { bigint: true })),
+    helperIdentity = identity(fs.lstatSync(helper, { bigint: true }));
   if (policy.windowsReferences?.collectorSha256 !== digest(bytes(collector)))
     fail('REFERENCE_COLLECTOR_PIN_CHANGED');
   const collectorExecutable = path.join(
@@ -751,13 +927,27 @@ function main(policyFile) {
   const native = JSON.parse(output.replace(/^\uFEFF/, ''));
   if (
     native.policySha256 !== digest(policyBytes) ||
-    digest(bytes(policyFile)) !== digest(policyBytes)
+    digest(bytes(policyFile)) !== digest(policyBytes) ||
+    hash(policyIdentity) !==
+      hash(identity(fs.lstatSync(canonical(policyFile), { bigint: true })))
   )
     fail('REFERENCE_POLICY_CHANGED');
   pinned(policy.probe);
   if (policy.windowsReferences.collectorSha256 !== digest(bytes(collector)))
     fail('REFERENCE_COLLECTOR_PIN_CHANGED');
-  return probe(policy, native, {
+  if (
+    hash(probeIdentity) !==
+      hash(
+        identity(fs.lstatSync(canonical(policy.probe.path), { bigint: true })),
+      ) ||
+    hash(collectorIdentity) !==
+      hash(identity(fs.lstatSync(collector, { bigint: true }))) ||
+    hash(helperIdentity) !==
+      hash(identity(fs.lstatSync(helper, { bigint: true }))) ||
+    policy.windowsReferences.collectorIdentitySha256 !== digest(bytes(helper))
+  )
+    fail('REFERENCE_COLLECTOR_PIN_CHANGED');
+  const result = probe(policy, native, {
     self: {
       pid: process.pid,
       executable: process.execPath,
@@ -766,6 +956,30 @@ function main(policyFile) {
       collectorArgv: [collectorExecutable, ...collectorArgs],
     },
   });
+  // Recheck after resolution as well: configured immutable sources must not
+  // change while the resolver performs its later filesystem checks.
+  pinned(policy.probe);
+  if (
+    digest(bytes(policyFile)) !== digest(policyBytes) ||
+    hash(policyIdentity) !==
+      hash(identity(fs.lstatSync(canonical(policyFile), { bigint: true })))
+  )
+    fail('REFERENCE_POLICY_CHANGED');
+  if (
+    hash(probeIdentity) !==
+      hash(
+        identity(fs.lstatSync(canonical(policy.probe.path), { bigint: true })),
+      ) ||
+    policy.windowsReferences.collectorSha256 !== digest(bytes(collector)) ||
+    hash(collectorIdentity) !==
+      hash(identity(fs.lstatSync(collector, { bigint: true }))) ||
+    policy.windowsReferences.collectorIdentitySha256 !==
+      digest(bytes(helper)) ||
+    hash(helperIdentity) !==
+      hash(identity(fs.lstatSync(helper, { bigint: true })))
+  )
+    fail('REFERENCE_COLLECTOR_PIN_CHANGED');
+  return result;
 }
 if (require.main === module) {
   let value;

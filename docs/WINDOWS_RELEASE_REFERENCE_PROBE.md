@@ -23,8 +23,16 @@ The collector reads two `Win32_Process` snapshots, two `Get-ScheduledTask`
 action snapshots, `Win32_UserProfile`, and the current/common Desktop,
 Start Menu and Startup known folders. Existing `.lnk` files are resolved with
 `WScript.Shell.CreateShortcut` without calling `Save` or launching the link.
-Shortcut bytes are hashed and checked independently by Node; all enumerated
-directory entry lists are rechecked to detect additions/removals. Disabled
+Shortcut bytes are hashed and checked independently by Node. Every known-folder
+coverage record carries its canonical path and native volume/file-index/creation
+identity. An absent folder carries the nearest existing ancestor's canonical
+identity instead; the missing path is checked again at publication. Enumerated
+directory identities and entry lists are rechecked to detect replacement and
+additions/removals, and each folder/shortcut must bind a complete inventory.
+The adjacent pinned C# helper uses read-only handles without following a directory
+reparse point; parent path aliases, inaccessible and remote paths refuse. Windows
+PowerShell loads this helper with `Add-Type` (its compiler may use OS temporary
+files); it does not create a production identity cache or change system settings. Disabled
 tasks still count. Unrelated browser shortcuts do not become package references.
 
 The Node resolver canonicalizes direct executable/argument paths, including
@@ -38,8 +46,19 @@ dependency closure; pinning only an entry script is not evidence that its
 imports cannot change. A launcher process with no observable cwd additionally
 requires the reviewed `cwdIndependent: true` assertion; use it only for a
 launcher whose path resolution is entirely absolute or based on `__dirname`.
-Shell command/encoded-command actions, relative unresolved package paths, unknown launchers,
+Unreviewed PowerShell `-File`, WScript/CScript, batch, encoded/eval/shell flags,
+outside script entries (including renamed hosts), relative unresolved package paths, unknown launchers,
 changed launcher files and fourth protected packages hold admission.
+
+Unrelated task/shortcut native applications also need an explicit bounded
+`harmlessActions` entry with kind (`tasks` or `shortcuts`), exact argv, working
+directory and executable pin. This does not allow a script host to bypass the
+reviewed launcher mapping. There are no wildcard actions or implicit browser
+exceptions. All configured executable contents and identities join the final
+watched-file audit, with the existing 256-MiB executable read bound retained.
+Other immutable policy/probe/collector/helper/proof files are likewise rechecked
+after resolution. These checks are repeated observations, not an atomic OS-wide
+snapshot or a static proof of arbitrary executable behavior.
 
 Relevant processes and their recursive children require PID, parent PID,
 creation time, command line and a freshly hashed executable. PID reuse,
@@ -98,6 +117,7 @@ proof outside Git. The existing scope policy still pins `probe.path` and
 {
   "format": 1,
   "collectorSha256": "<hash of adjacent collector.ps1>",
+  "collectorIdentitySha256": "<hash of adjacent windows-reference-directory-identity.cs>",
   "packages": [
     { "id": "<current-id>", "path": "<absolute existing package path>" },
     { "id": "<candidate-id>", "path": "<absolute frozen source path>" },
@@ -121,6 +141,14 @@ proof outside Git. The existing scope policy still pins `probe.path` and
     {
       "path": "<absolute reviewed rollback-reference document>",
       "sha256": "<hash>"
+    }
+  ],
+  "harmlessActions": [
+    {
+      "kind": "shortcuts",
+      "argv": ["<absolute reviewed browser.exe>", "http://127.0.0.1:18080/#/"],
+      "workingDirectory": "<absolute reviewed directory>",
+      "executable": { "path": "<same browser.exe>", "sha256": "<hash>" }
     }
   ],
   "compatibilityProof": {
@@ -182,6 +210,11 @@ Fixtures contain only tiny inert executables, manifests, text pretending to be
 shortcut bytes, synthetic host API results and an owned temporary junction.
 The suite exercises the real scope guard with those facts and changing own
 claims. It never calls native production discovery or executes a fixture file.
+Regression tests include the independent R1-R3 counterexamples, before/late
+missing-directory appearance, ancestor/directory replacement with unchanged
+names/bytes, and late executable content/identity replacement. A Windows-only
+test loads just the directory helper against an owned temporary fixture and
+compares its identity with Node; it does not collect host references.
 The PowerShell collector is syntax-checked separately; its privileged Windows
 API behavior still needs independent host acceptance before production adoption.
 

@@ -2,6 +2,7 @@ param([Parameter(Mandatory=$true)][string]$PolicyFile)
 # Read-only host facts. No scripts/shortcuts/tasks are launched or modified.
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+Add-Type -LiteralPath (Join-Path $PSScriptRoot 'windows-reference-directory-identity.cs') -ErrorAction Stop
 $errors=[System.Collections.Generic.List[string]]::new()
 $coverage=[System.Collections.Generic.List[object]]::new()
 $shortcuts=[System.Collections.Generic.List[object]]::new()
@@ -14,6 +15,11 @@ function Expand-ReferenceText([string]$value) {
   $expanded=[Environment]::ExpandEnvironmentVariables($value)
   if ($expanded -match '%[A-Za-z_][A-Za-z0-9_]*%') { throw 'REFERENCE_NATIVE_ENVIRONMENT_UNRESOLVED' }
   $expanded
+}
+function Directory-Proof([string]$value) {
+  $proof=[WeWeReferenceDirectoryIdentity]::Read($value)
+  if ($null -eq $proof) { return $null }
+  [PSCustomObject]@{path=$proof.path;identity=@($proof.dev,$proof.ino,$proof.birthtimeNs)}
 }
 function Processes {
   $items=@(Get-CimInstance Win32_Process -ErrorAction Stop)
@@ -66,20 +72,32 @@ try {
       Budget
       $folder=[Environment]::GetFolderPath([Enum]::Parse([Environment+SpecialFolder],$folders[$i]))
       if (-not $folder) { throw 'REFERENCE_NATIVE_KNOWN_FOLDER_UNKNOWN' }
-      if (-not [IO.Directory]::Exists($folder)) {
-        if ([IO.File]::Exists($folder)) { throw 'REFERENCE_NATIVE_KNOWN_FOLDER_INVALID' }
-        $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='absent'})
+      $rootProof=Directory-Proof $folder
+      if ($null -eq $rootProof) {
+        $parent=[IO.Path]::GetDirectoryName($folder)
+        while ($parent -and $null -eq ($ancestor=Directory-Proof $parent)) {
+          Budget
+          $parent=[IO.Path]::GetDirectoryName($parent)
+        }
+        if (-not $parent -or $null -eq $ancestor) { throw 'REFERENCE_NATIVE_ABSENCE_ANCESTOR_UNKNOWN' }
+        $relative=$folder.Substring($parent.Length).TrimStart([char]'\')
+        $missing=[IO.Path]::Combine($ancestor.path,$relative)
+        $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$missing;status='absent';ancestor=$ancestor})
         continue
       }
+      $folder=$rootProof.path
       $pending=[System.Collections.Generic.Stack[string]]::new();$pending.Push($folder)
       while ($pending.Count) {
         Budget
         $at=$pending.Pop()
+        $dirProof=Directory-Proof $at
+        if ($null -eq $dirProof) { throw 'REFERENCE_NATIVE_SHORTCUT_DIRECTORY_CHANGED' }
+        $at=$dirProof.path
         $dir=Get-Item -LiteralPath $at -Force -ErrorAction Stop
         if ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'REFERENCE_NATIVE_SHORTCUT_ALIAS_REQUIRES_REVIEW' }
         $entries=@(Get-ChildItem -LiteralPath $at -Force -ErrorAction Stop)
         if ($directorySnapshots.Count -ge 4096) { throw 'REFERENCE_NATIVE_SHORTCUT_DIRECTORY_LIMIT' }
-        $directorySnapshots.Add([PSCustomObject]@{path=$at;entries=@($entries | ForEach-Object {
+        $directorySnapshots.Add([PSCustomObject]@{path=$at;identity=$dirProof.identity;entries=@($entries | ForEach-Object {
           [PSCustomObject]@{name=$_.Name;kind=$(if ($_.PSIsContainer) {'directory'} else {'file'})}
         })})
         foreach ($entry in $entries) {
@@ -96,7 +114,7 @@ try {
           if ((Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne $hashBefore) { throw 'REFERENCE_NATIVE_SHORTCUT_CHANGED' }
         }
       }
-      $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='enumerated'})
+      $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='enumerated';identity=$rootProof.identity})
     }
   } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
   $tasksAfter=@(Tasks)

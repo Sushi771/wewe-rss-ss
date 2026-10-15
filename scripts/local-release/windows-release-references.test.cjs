@@ -9,6 +9,10 @@ const { probe, argv } = require('./windows-release-references.cjs');
 const sha = (v) => crypto.createHash('sha256').update(v).digest('hex');
 const hash = (v) => sha(JSON.stringify(v));
 const quote = (v) => '"' + v + '"';
+const directoryIdentity = (at) => {
+  const s = fs.lstatSync(at, { bigint: true });
+  return [s.dev, s.ino, s.birthtimeNs].map(String);
+};
 function fixture(run) {
   const base = fs.mkdtempSync(
     path.join(os.tmpdir(), 'wewe-reference-adapter-'),
@@ -159,7 +163,11 @@ function fixture(run) {
       },
     ],
     shortcutDirectories: [
-      { path: links, entries: [{ name: 'synthetic.lnk', kind: 'file' }] },
+      {
+        path: links,
+        identity: directoryIdentity(links),
+        entries: [{ name: 'synthetic.lnk', kind: 'file' }],
+      },
     ],
     shortcutCoverage: [
       'Desktop',
@@ -168,7 +176,12 @@ function fixture(run) {
       'CommonStartMenu',
       'Startup',
       'CommonStartup',
-    ].map((kind) => ({ kind, status: 'enumerated' })),
+    ].map((kind) => ({
+      kind,
+      path: links,
+      identity: directoryIdentity(links),
+      status: 'enumerated',
+    })),
   };
   native.tasksAfter = structuredClone(native.tasks);
   const f = {
@@ -339,6 +352,15 @@ test('unrelated browser shortcut does not claim a release reference', () =>
     f.native.shortcuts[0].target = f.controller;
     f.native.shortcuts[0].arguments = 'http://127.0.0.1:18080/#/';
     f.native.shortcuts[0].workingDirectory = f.base;
+    reject(f, 'REFERENCE_APPLICATION_ACTION_UNREVIEWED');
+    f.policy.windowsReferences.harmlessActions = [
+      {
+        kind: 'shortcuts',
+        argv: [f.controller, f.native.shortcuts[0].arguments],
+        workingDirectory: f.base,
+        executable: f.pin(f.controller),
+      },
+    ];
     const r = f.run();
     assert(r.complete);
     assert(!r.records.some((r) => r.kind === 'shortcuts'));
@@ -547,3 +569,267 @@ test('encoded shell actions are unresolved even if they hide the root text', () 
     f.native.tasksAfter = structuredClone(f.native.tasks);
     reject(f, 'REFERENCE_SHELL_COMMAND_UNRESOLVED');
   }));
+function hiddenFourth(f, extension) {
+  const fourth = path.join(f.installed, 'fourth');
+  fs.mkdirSync(fourth);
+  f.write(path.join(fourth, 'release.json'), {
+    format: 1,
+    id: 'fourth',
+    sourceCommit: '4'.repeat(40),
+  });
+  const target = path.join(fourth, 'runtime.exe');
+  f.write(target, 'inert fourth runtime');
+  const outside = path.join(f.base, 'unreviewed');
+  fs.mkdirSync(outside);
+  const script = path.join(outside, 'launch.' + extension);
+  f.write(
+    script,
+    extension === 'ps1'
+      ? `& '${target}'`
+      : `CreateObject("WScript.Shell").Run "${target}"`,
+  );
+  return { script, target };
+}
+for (const kind of ['tasks', 'shortcuts', 'processes']) {
+  for (const [host, extension, prefix] of [
+    ['powershell.exe', 'ps1', '-NoProfile -File '],
+    ['wscript.exe', 'vbs', ''],
+    ['cscript.exe', 'vbs', ''],
+    ['renamed-host.exe', 'cmd', ''],
+  ]) {
+    test(`R1: ${kind} cannot hide a fourth package through ${host}`, () =>
+      fixture((f) => {
+        const { script } = hiddenFourth(f, extension),
+          exe = path.join(f.base, host);
+        f.write(exe, 'inert unreviewed host');
+        const args = prefix + quote(script);
+        if (kind === 'tasks') {
+          f.native.tasks.push({
+            identity: 'HiddenFourth',
+            actions: [
+              { execute: exe, arguments: args, workingDirectory: f.base },
+            ],
+          });
+          f.native.tasksAfter = structuredClone(f.native.tasks);
+        }
+        if (kind === 'shortcuts')
+          Object.assign(f.native.shortcuts[0], {
+            target: exe,
+            arguments: args,
+            workingDirectory: f.base,
+          });
+        if (kind === 'processes') {
+          const p = f.process(50, 1, exe, quote(exe) + ' ' + args);
+          f.native.processesBefore.push(p);
+          f.native.processesAfter.push(structuredClone(p));
+        }
+        reject(f, 'REFERENCE_INDIRECT_LAUNCHER_UNREVIEWED');
+      }));
+  }
+}
+test('R1 control: a direct fourth-package task is still refused', () =>
+  fixture((f) => {
+    const { target } = hiddenFourth(f, 'ps1');
+    f.native.tasks.push({
+      identity: 'DirectFourth',
+      actions: [
+        {
+          execute: target,
+          arguments: '',
+          workingDirectory: path.dirname(target),
+        },
+      ],
+    });
+    f.native.tasksAfter = structuredClone(f.native.tasks);
+    reject(f, 'REFERENCE_PACKAGE_UNAPPROVED');
+  }));
+test('R1 control: an exact pinned reviewed PowerShell launcher may trace the active pointer', () =>
+  fixture((f) => {
+    const exe = path.join(f.base, 'powershell.exe');
+    f.write(exe, 'inert host');
+    const folder = path.join(f.project, 'reviewed');
+    fs.mkdirSync(folder);
+    const script = path.join(folder, 'launch.ps1');
+    f.write(script, '# reviewed inert entry');
+    f.policy.windowsReferences.launchers.push({
+      entry: script,
+      argv: [exe, '-NoProfile', '-File', script],
+      workingDirectory: f.base,
+      executable: f.pin(exe),
+      files: [f.pin(script)],
+      pointerPath: f.pointer,
+    });
+    f.native.tasks.push({
+      identity: 'Reviewed',
+      actions: [
+        {
+          execute: exe,
+          arguments: '-NoProfile -File ' + quote(script),
+          workingDirectory: f.base,
+        },
+      ],
+    });
+    f.native.tasksAfter = structuredClone(f.native.tasks);
+    assert(f.run().complete);
+  }));
+function absentStartup(f) {
+  const ancestor = path.join(f.base, 'absent-parent');
+  fs.mkdirSync(ancestor);
+  const missing = path.join(ancestor, 'Startup');
+  Object.assign(
+    f.native.shortcutCoverage.find((c) => c.kind === 'CommonStartup'),
+    {
+      status: 'absent',
+      path: missing,
+      identity: undefined,
+      ancestor: { path: ancestor, identity: directoryIdentity(ancestor) },
+    },
+  );
+  return { ancestor, missing };
+}
+test('R2 control: a proven absent known folder remains a valid covered absence', () =>
+  fixture((f) => {
+    absentStartup(f);
+    assert(f.run().complete);
+  }));
+test('R2: absent CommonStartup that appeared before resolution is refused', () =>
+  fixture((f) => {
+    const { missing } = absentStartup(f);
+    fs.mkdirSync(missing);
+    f.write(path.join(missing, 'new.lnk'), 'inert link');
+    reject(f, 'REFERENCE_SHORTCUT_ABSENT_DIRECTORY_APPEARED');
+  }));
+test('R2: missing folder appearance after its initial check is revalidated before publication', () =>
+  fixture((f) => {
+    const { missing } = absentStartup(f),
+      dir = f.native.shortcutDirectories[0],
+      entries = dir.entries;
+    let changed = false;
+    Object.defineProperty(dir, 'entries', {
+      get() {
+        if (!changed) {
+          changed = true;
+          fs.mkdirSync(missing);
+          f.write(path.join(missing, 'new.lnk'), 'inert link');
+        }
+        return entries;
+      },
+    });
+    reject(f, 'REFERENCE_SHORTCUT_ABSENT_DIRECTORY_APPEARED');
+  }));
+test('R2: coverage path and identity must bind an actual enumerated directory', () =>
+  fixture((f) => {
+    f.native.shortcutCoverage[0].path = f.base;
+    reject(f, 'REFERENCE_HOST_COVERAGE_INCOMPLETE');
+  }));
+function replaceOwnedDirectory(f, at) {
+  const saved = at + '-previous';
+  assert(insideFixture(f, at) && insideFixture(f, saved));
+  fs.renameSync(at, saved);
+  fs.mkdirSync(at);
+  for (const entry of fs.readdirSync(saved)) {
+    const source = path.join(saved, entry);
+    assert(fs.lstatSync(source).isFile());
+    fs.copyFileSync(source, path.join(at, entry));
+  }
+}
+function insideFixture(f, at) {
+  return path.resolve(at).startsWith(path.resolve(f.base) + path.sep);
+}
+test('R2: directory replacement with identical names and shortcut bytes is refused', () =>
+  fixture((f) => {
+    replaceOwnedDirectory(f, path.dirname(f.shortcut));
+    reject(f, 'REFERENCE_SHORTCUT_DIRECTORY_IDENTITY_CHANGED');
+  }));
+test('R2: late directory replacement after inventory check is refused', () =>
+  fixture((f) => {
+    const s = f.native.shortcuts[0],
+      target = s.target;
+    let changed = false;
+    Object.defineProperty(s, 'target', {
+      get() {
+        if (!changed) {
+          changed = true;
+          replaceOwnedDirectory(f, path.dirname(f.shortcut));
+        }
+        return target;
+      },
+    });
+    reject(f, 'REFERENCE_SHORTCUT_DIRECTORY_IDENTITY_CHANGED');
+  }));
+test('R2: replaced absence ancestor cannot certify the still-missing child', () =>
+  fixture((f) => {
+    const { ancestor } = absentStartup(f),
+      dir = f.native.shortcutDirectories[0],
+      entries = dir.entries;
+    let changed = false;
+    Object.defineProperty(dir, 'entries', {
+      get() {
+        if (!changed) {
+          changed = true;
+          replaceOwnedDirectory(f, ancestor);
+        }
+        return entries;
+      },
+    });
+    reject(f, 'REFERENCE_SHORTCUT_DIRECTORY_IDENTITY_CHANGED');
+  }));
+for (const mode of ['bytes', 'same-bytes-replaced-identity'])
+  test(`R3: late launcher executable change (${mode}) is refused`, () =>
+    fixture((f) => {
+      const dirs = f.native.shortcutDirectories;
+      let changed = false;
+      Object.defineProperty(f.native, 'shortcutDirectories', {
+        get() {
+          if (!changed) {
+            changed = true;
+            if (mode === 'bytes')
+              f.write(f.controller, 'changed late executable');
+            else {
+              const replacement = path.join(f.base, 'replacement.exe');
+              fs.copyFileSync(f.controller, replacement);
+              assert(
+                insideFixture(f, replacement) && insideFixture(f, f.controller),
+              );
+              fs.renameSync(replacement, f.controller);
+            }
+          }
+          return dirs;
+        },
+      });
+      reject(f, 'REFERENCE_SOURCE_CHANGED_DURING_QUERY');
+    }));
+test('R3: executable watch retains its larger read bound at final verification', () =>
+  fixture((f) => {
+    fs.writeFileSync(f.controller, Buffer.alloc(8 * 1024 ** 2 + 1));
+    f.policy.windowsReferences.launchers[0].executable = f.pin(f.controller);
+    assert(f.run().complete);
+  }));
+if (process.platform === 'win32')
+  test('R2 native helper identity matches Node on an owned fixture and proves absence', () =>
+    fixture((f) => {
+      const helper = path.join(
+        __dirname,
+        'windows-reference-directory-identity.cs',
+      );
+      const literal = (s) => "'" + s.replaceAll("'", "''") + "'";
+      const code = `Add-Type -LiteralPath ${literal(helper)}; $proof=[WeWeReferenceDirectoryIdentity]::Read(${literal(path.dirname(f.shortcut))}); if ($null -ne [WeWeReferenceDirectoryIdentity]::Read(${literal(path.join(f.base, 'missing'))})) {throw 'absence failed'}; $proof | ConvertTo-Json -Compress`;
+      const output = execFileSync(
+        path.join(
+          process.env.SystemRoot,
+          'System32/WindowsPowerShell/v1.0/powershell.exe',
+        ),
+        ['-NoProfile', '-NonInteractive', '-Command', code],
+        {
+          windowsHide: true,
+          encoding: 'utf8',
+          timeout: 15000,
+          maxBuffer: 128 * 1024,
+        },
+      );
+      const proof = JSON.parse(output);
+      assert.deepEqual(
+        [proof.dev, proof.ino, proof.birthtimeNs],
+        directoryIdentity(path.dirname(f.shortcut)),
+      );
+    }));
