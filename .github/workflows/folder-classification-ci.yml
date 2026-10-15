@@ -64,7 +64,7 @@ jobs:
       - name: Test native folder drop, multi-add and React reconciliation offline
         env:
           LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
-        run: node --test scripts/folder-subscriptions-browser.test.cjs scripts/folder-reorder-browser.test.cjs scripts/cache-status-switch-browser.test.cjs scripts/folder-selection-overlay-browser.test.cjs
+        run: node --test --test-concurrency=1 scripts/folder-subscriptions-browser.test.cjs scripts/folder-reorder-browser.test.cjs scripts/cache-status-switch-browser.test.cjs scripts/folder-selection-overlay-browser.test.cjs
       - name: Test rename UI and durable commit separately through local HTTP
         env:
           LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
