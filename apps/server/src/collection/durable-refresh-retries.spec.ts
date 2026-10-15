@@ -452,32 +452,39 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
     'stopped',
     'cache-only',
     'wrong-instance',
-  ])('does not revive %s terminal work', async (kind) => {
-    const first = make();
-    const batch = await seed(first.manager, [ids[0]]);
-    const record = await disk(batch.batchId);
-    if (kind === 'accepted') record.items[0].accepted = true;
-    if (kind === 'unknown') record.items[0].submissionUnknown = true;
-    if (kind === 'unclassified') {
-      delete record.items[0].retryable;
-      delete record.items[0].accepted;
-    }
-    if (kind === 'stopped') record.state = 'stopped';
-    if (kind === 'cache-only') record.cacheOnly = true;
-    await fs.writeFile(file(batch.batchId), JSON.stringify(record));
-    first.manager.close();
-    const next = make(
-      undefined,
-      kind === 'wrong-instance' ? 'different' : undefined,
-    );
-    const proof = jest.fn().mockResolvedValue('unknown');
-    next.manager.attachReconciliation(proof);
-    clock += 300000;
-    await next.manager.init();
-    await next.manager.runDue();
-    expect(next.run).not.toHaveBeenCalled();
-    if (kind !== 'unknown') expect(proof).not.toHaveBeenCalled();
-  });
+  ])(
+    'does not resubmit %s terminal work; only accepted receipts can resume cache',
+    async (kind) => {
+      const first = make();
+      const batch = await seed(first.manager, [ids[0]]);
+      const record = await disk(batch.batchId);
+      if (kind === 'accepted') record.items[0].accepted = true;
+      if (kind === 'unknown') record.items[0].submissionUnknown = true;
+      if (kind === 'unclassified') {
+        delete record.items[0].retryable;
+        delete record.items[0].accepted;
+      }
+      if (kind === 'stopped') record.state = 'stopped';
+      if (kind === 'cache-only') record.cacheOnly = true;
+      await fs.writeFile(file(batch.batchId), JSON.stringify(record));
+      first.manager.close();
+      const next = make(
+        undefined,
+        kind === 'wrong-instance' ? 'different' : undefined,
+      );
+      const proof = jest.fn().mockResolvedValue('unknown');
+      next.manager.attachReconciliation(proof);
+      clock += 300000;
+      await next.manager.init();
+      await next.manager.runDue();
+      if (kind === 'accepted')
+        expect(next.run.mock.calls).toEqual([
+          [ids[0], 'cache', false, { cacheOnly: true }],
+        ]);
+      else expect(next.run).not.toHaveBeenCalled();
+      if (kind !== 'unknown') expect(proof).not.toHaveBeenCalled();
+    },
+  );
   it('never clears an accepted receipt from contradictory retry flags or cache outcomes', async () => {
     const { manager, run } = make(
       jest
@@ -495,10 +502,15 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
     await manager.runDue();
     clock += 60000;
     await manager.runDue();
-    expect(run.mock.calls.map((call) => call[1])).toEqual(['submit', 'cache']);
+    expect(run.mock.calls.map((call) => call[1])).toEqual([
+      'submit',
+      'cache',
+      'cache',
+    ]);
     expect((await manager.list())[0].items[0]).toMatchObject({
       accepted: true,
-      state: 'failed',
+      state: 'waiting',
+      cacheOnly: true,
     });
   });
   it('stop during a safe failure does not resurrect unsent work after restart', async () => {

@@ -118,6 +118,54 @@ describe('explicit manual all-refresh boundary (offline)', () => {
     expect(provider.refreshSubscription).not.toHaveBeenCalled();
     expect(service.syncCachedWechat2RssPage).not.toHaveBeenCalled();
   });
+  it.each(['feed-read', 'cache-read', 'cache-save'])(
+    'records classified cache failures at %s without leaking the exception or resubmitting',
+    async (point) => {
+      const error = Object.assign(Error('private SQL token path'), {
+        code: 'P2028',
+      });
+      if (point === 'feed-read')
+        service.prismaService.feed.findUnique.mockRejectedValue(error);
+      else if (point === 'cache-read')
+        provider.fetchArticles.mockRejectedValue(error);
+      else service.syncCachedWechat2RssPage.mockRejectedValue(error);
+      const result = await service.runManualRefresh(id, 'cache', true);
+      expect(result).toMatchObject({
+        accepted: true,
+        submissionUnknown: false,
+        stopBatch: false,
+        failureReason: 'CACHE_STORAGE_TIMEOUT',
+        failurePoint: point,
+      });
+      expect(JSON.stringify(result)).not.toContain('private SQL token path');
+      expect(provider.refreshSubscription).not.toHaveBeenCalled();
+      expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'WECHAT2RSS_ACCOUNT_CHALLENGED',
+    'WECHAT2RSS_RATE_LIMITED',
+    'CACHE_SYNC_STARTUP_BLOCKED',
+  ])('preserves the cache shared/startup gate %s', async (message) => {
+    provider.fetchArticles.mockRejectedValue(Error(message));
+    expect(await service.runManualRefresh(id, 'cache', true)).toMatchObject({
+      state: 'blocked',
+      accepted: true,
+      stopBatch: true,
+      failurePoint: 'global-gate',
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
+  it('a removed or changed accepted subscription is terminal only for that source', async () => {
+    service.prismaService.feed.findUnique.mockResolvedValue(null);
+    expect(await service.runManualRefresh(id, 'cache', true)).toMatchObject({
+      state: 'blocked',
+      accepted: true,
+      stopBatch: false,
+      code: 'SOURCE_CHANGED',
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
   it('ordinary subscription projections keep all original batches and do not expose manual ones', async () => {
     expect(await service.subscriptionBatchList()).toEqual([
       { purpose: 'subscription' },
