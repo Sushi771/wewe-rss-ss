@@ -1,4 +1,8 @@
 import {
+  incrementalWrite,
+  assertIncrementalTransaction,
+} from './incremental-write';
+import {
   reserveRefreshSubmission,
   beginRefreshSubmission,
   finishRefreshSubmission,
@@ -545,4 +549,19 @@ describe('ordinary incremental transactions and durable remote claims without sn
       await retained();
     },
   );
+  it('rejects unsafe durability on the actual connection without changing the pragma', async () => {
+    await prisma.$executeRawUnsafe('PRAGMA synchronous=OFF');
+    await expect(
+      incrementalWrite(prisma, 0, () =>
+        prisma.$transaction((tx) => assertIncrementalTransaction(tx)),
+      ),
+    ).rejects.toThrow('INCREMENTAL_DURABILITY_MODE_UNPROVED');
+    expect(
+      Number(
+        (await prisma.$queryRawUnsafe<any[]>('PRAGMA synchronous'))[0]
+          .synchronous,
+      ),
+    ).toBe(0);
+    await retained();
+  });
 });

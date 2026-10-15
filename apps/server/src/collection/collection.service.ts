@@ -679,7 +679,10 @@ export class CollectionService {
         // conditional write preserves a concurrently changed avatar/source.
         if (!input.cachedPage)
           await incrementalWrite(this.prisma, 4096, () =>
-            this.prisma.$transaction(async (tx) => supplementAvatar(tx)),
+            this.prisma.$transaction(async (tx) => {
+              await assertIncrementalTransaction(tx);
+              await supplementAvatar(tx);
+            }),
           );
         return {
           source: 'wechat2rss' as const,
