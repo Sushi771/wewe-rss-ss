@@ -265,11 +265,7 @@ describe('startup audit and periodic snapshots share a finite root', () => {
         expect(fs.existsSync(path.join(backups, '.space-budget.lock'))).toBe(
           false,
         );
-        expect(
-          fs
-            .readdirSync(backups)
-            .filter((name) => name.startsWith('before-start-')),
-        ).toHaveLength(1);
+        expect(fs.existsSync(backups)).toBe(false);
         periodicStarted = true;
         await owner.start();
       });

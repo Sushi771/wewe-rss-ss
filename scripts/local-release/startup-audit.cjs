@@ -73,35 +73,12 @@ function createStartupAudit(options, WorkerClass = Worker) {
 
 if (!isMainThread) {
   (async () => {
-    const {
-      prepareStart,
-      UnsupportedBaselineValue,
-    } = require('./startup-sqlite.cjs');
+    const { auditCurrentDatabase } = require('./startup-sqlite.cjs');
     const { database, migrations, auditRoot } = workerData;
     if (workerData.kind) process.env.SQLITE_BACKUP_KIND = workerData.kind;
-    const backupRoot =
-      workerData.backupRoot ||
-      (process.env.SQLITE_BACKUP_KIND === 'production'
-        ? require('./space-budget.cjs').productionRoot(database)
-        : path.join(auditRoot, 'background-backup'));
     try {
       const baseline = path.join(auditRoot, 'background-baseline.json');
-      try {
-        await prepareStart(database, migrations, backupRoot, baseline);
-      } catch (error) {
-        if (!(error instanceof UnsupportedBaselineValue)) throw error;
-        require('./lib.cjs').run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
-          path.join(__dirname, 'prepare-start.py'),
-          '--database',
-          database,
-          '--migrations',
-          migrations,
-          '--backup-root',
-          backupRoot,
-          '--baseline',
-          baseline,
-        ]);
-      }
+      auditCurrentDatabase(database, migrations, baseline);
       parentPort.postMessage({ status: 'ready' });
     } catch (error) {
       // Detailed diagnostics remain in the private service log; UI has a short

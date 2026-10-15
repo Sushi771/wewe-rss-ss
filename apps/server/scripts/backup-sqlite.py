@@ -237,7 +237,7 @@ def reusable(database, backup_root, deadline=None):
     try:
         report = json.loads(receipt.read_text(encoding='utf-8'))
         backup = Path(report['backup']).resolve(strict=True)
-        if report['source'] != str(database) or not backup.is_relative_to(backup_root) or sha256(backup, deadline) != report['sha256']:
+        if report.get('recoveryOrigin',{}).get('kind') != 'protected' or report['source'] != str(database) or not backup.is_relative_to(backup_root) or sha256(backup, deadline) != report['sha256']:
             return None
         with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(backup.as_uri() + '?mode=ro', uri=True)) as copied:
             if deadline is not None:
@@ -378,6 +378,8 @@ def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
         "diagnostics": diagnostics.report(),
         "sourceIdentity": identity if source_identity(database) == identity else None,
         "reused": False,
+        "recoveryOrigin": {"format":"sqlite-recovery-origin-v1",
+                           "kind":"periodic" if prefix == "periodic-snapshot" else "protected"},
     }
     (directory / "verification.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

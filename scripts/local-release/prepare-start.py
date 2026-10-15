@@ -139,6 +139,7 @@ def fresh_prepare(database, migrations, backup_root, baseline_file):
         "createdAtUtc": datetime.now(timezone.utc).isoformat(),
         "source": str(database),
         "backup": str(backup),
+        "recoveryOrigin": {"format": "sqlite-recovery-origin-v1", "kind": "protected"},
         "integrityCheck": "ok",
         "sha256": digest.hexdigest(),
         "feeds": before["tables"]["feeds"]["rows"],

@@ -1,78 +1,39 @@
-# SQLite 空间维护与恢复点复核
+# SQLite recovery-point maintenance
 
-防磁盘膨胀包含两件事：生成恢复点之前检查空间预算，定期整理可复核的保留清单。两者都不会自动删除业务数据库。清单扫描失败、超时或预算告警不改变订阅写入门禁；备份生成仍遵守既有容量检查。因此，已经超出备份预算的部署需要先解决容量和恢复点保留策略，再启用完整保护，避免所有需要先备份的写入一直等待。
+Ordinary incremental refresh uses transactions and durable receipts, with no full snapshot per item or round. See [incremental refresh safety](INCREMENTAL_REFRESH_SAFETY.md). Timed backups keep their current interval. High-risk operations retain an independent verified backup. This replaces the earlier 15-minute shared-round recovery design; that design is removed from the implementation.
 
-本改动提供可实际启动的周期扫描及人工操作前的精确校验。默认关闭周期扫描，部署代码本身不会启用已有生产进程。扫描输出是运维复核文件，尚无产品页面中的备份选择或一键恢复功能。
+## Finite budgets and business impact
 
-需要先只启用扫描时，可在独立维护工具目录放置该精确提交的 `sqlite-retention-plan.py`、`backup-sqlite.py` 和 Windows 查询工具，单次调用下面的 CLI，再经授权设置每小时的外部维护调度。导入备份模块只使用函数定义，不执行备份，不覆盖现有服务的脚本。该方式只生成有限清单，不改变现有订阅写入门禁；本次交付没有创建生产调度、写入清单或启用服务。完整 PR 还包含生成前容量门禁，即使只设置扫描 opt-in，部署完整 PR 后容量门禁也会生效；超限时必须先解决保留总量，不能把“扫描独立”理解为完整候选可直接上线。
+Production recovery generation defaults remain 32 GiB, 48 copies and 4 GiB free physical space. Declared legacy roots count toward the same budget; aliases are deduplicated and cycles rejected. This PR does not expand global limits, change production configuration, remove a real backup or deploy anything. Full recovery quotas can prevent the next timed/high-risk backup and produce an alert, but do not stop ordinary refresh or routine startup. Actual source-volume shortage still blocks a write safely.
 
-## 用户可见的影响
+The planner reads recovery metadata and bounded file content, without requesting platform data or modifying subscriptions, articles, images, metrics or groups. It never deletes, moves, archives or restores a database. The optional scanner runs after server listen, fails independently, and defaults off. Registered scanner reports alone rotate to at most three files of 256 KiB each; unknown files and approval documents are never automatically collected.
 
-- 既有订阅、文章、正文和指标保留；扫描不读取业务源库内容、不请求外部平台，也不改服务配置。
-- 当前快照 owner、最新同源已验证恢复点、显式指定的部署/身份/迁移边界均保留。唯一历史即使过期，也只进入 `held` 复核项；年龄不是可以删除的证明。
-- 重复文件只有实际 SHA 一致并保留一个可用代表，才可以经过独立批准和操作时校验。零字节文件必须已超过一小时、没有同目录其他产物、未被引用且未被使用。
-- 扫描产生的清单最多保留 3 份，每份不超过 256 KiB；只回收登记且身份/格式可验证的清单和本次创建的临时 JSON。未知文件、批准文件和真实恢复点不自动回收。
+## Explicit opt-in retention policy
 
-## 部署负责人启用步骤
+Without `SQLITE_RETENTION_POLICY`, unique historical points remain held for human review. An explicit JSON policy enables a bounded selection proposal, not deletion. Defaults are a target of 48 ordinary points, latest two, minimum one hour, one point per two-hour bucket over the recent 24 hours, daily coverage for seven days, weekly coverage for four weeks, and a maximum ordinary age of 28 days. The legacy `roundDays=7` field applies only to old producer-marked write-before points; current ordinary refresh creates none. Mandatory time windows take priority over the count target, producing an alert if they exceed it.
 
-1. 使用精确通过 CI 的提交构建候选包，核对该提交包含当前生产基线。在隔离小型合成 SQLite 上完成原启动审计、备份容量、周期 owner 和订阅写入回归。
-2. 清点配置的同一备份根及显式 legacy 根，保留当前 owner、最新写前恢复点、部署前后、身份合并及迁移边界。将这些绝对路径放入 `SQLITE_RETENTION_PROTECTED_PATHS` 的 JSON 数组。业务源库必须在备份根之外。不要通过新根或无限预算绕过旧根占用。
-3. 核实有限预算、实际恢复点生成速率、下一完整恢复点需要的余量和最低磁盘余量。默认生产恢复点总量 32 GiB、48 份；本扫描的年龄复核默认 7 天。年龄不决定删除，边界保护也不受年龄影响。若现状超限，先按明确清单处理容量，不能直接启用一个会持续拒绝所有写前备份的配置。
-4. 经生产变更批准，设置 `SQLITE_RETENTION_SCAN_ENABLED=1`；`SQLITE_RETENTION_SCAN_INTERVAL_SECONDS` 为 3600 至 86400 秒，默认 3600。沿用已有 `DATABASE_URL`、`SQLITE_PRODUCTION_BACKUP_ROOT`、`SQLITE_PRODUCTION_LEGACY_ROOTS` 和 `SQLITE_BACKUP_PYTHON`，由部署负责人执行原受控发布/重启流程。本次开发没有实施这些操作。
-5. 首轮扫描在服务监听后异步开始；查看备份根 `.retention-review/latest-status.json` 和对应 `retention-*.json`。确认告警、受保护路径和待核验重复项。日志失败事件不包含源内容或私有路径。禁用扫描需要生产负责人按原变更流程撤销 opt-in 并重启；不是运行时远程控制接口。
+Only same-source, structurally valid producer-marked ordinary periodic/write-before receipts are eligible. Unknown/unmarked legacy files remain held. Current owner/latest references, newest same-source recovery, explicit protected paths, deployment/migration/identity/manual boundary names and high-risk `recoveryOrigin.kind=protected` receipts are always protected. A high-risk backup may reuse only another verified protected point with fully equal schema and typed rows; it cannot silently borrow an ordinary periodic point that rotation might retire.
 
-## 技术约束与手工复核
+A `retention-protected.json` manifest uses format `sqlite-retention-protected-v1` and an explicit `paths` array (at most 256) within declared roots. `SQLITE_RETENTION_PROTECTED_PATHS` also accepts an explicit JSON path array. Source data must remain outside all recovery roots. Newly written high-risk verification receipts contain the protected producer marker; old boundaries must be identified conservatively during release review.
 
-调用 `python apps/server/scripts/sqlite-retention-plan.py --database <绝对源库路径> --backup-root <绝对备份根>` 可单次生成清单。它不复制源库，不执行数据库删除、移动、归档或服务控制。测试环境应设置 `SQLITE_BACKUP_KIND=test`，使用任务专属的小型合成目录。不要对生产执行测试脚本。
+Warnings cover byte/count pressure, mandatory windows exceeding target, physical headroom, reserve-copy threshold and projected retention headroom. Projection uses a configurable expected generations/day value, not a claim about measured production growth. Check the actual periodic interval when selecting it: for example a 15-minute interval generates up to 96 points/day. Warnings never authorize deleting unique history or blocking all subscriptions.
 
-扫描默认读取上限 64 MiB、10 秒；最多枚举 4096 个文件和 4096 个目录。不能在预算内完成 SHA 的大文件标为 `requires-bounded-sha-check`，不能据回执自行认定相同。Python 单次校验最多 20 秒，Node 子进程最多 30 秒；输出上限 16 KiB，无 shell、Windows 隐藏窗口。每个实例不重叠扫描，超时后未确认退出的自有子进程会阻止再次启动；跨实例报告写入由短期文件锁协调。存在生成锁、未列出的链接、变化的引用、SQLite sidecar 或不完整证据时保留数据或使扫描失败。
+## Read-only planning and action-time validation
 
-显式 legacy 物理根即使没有 junction/symlink 别名，也同时计入生成前总预算和扫描清单；已通过声明链接访问的同一目标只计一次。多个已声明别名指向同一已完成目标时去重，指向当前递归路径的真正循环继续拒绝。业务源库禁止位于这些历史根内。此修正避免“列出了历史根但它没有链接，所以没有算入”的预算缺口；现有有限预算可能因此更早拒绝生成，负责人必须先核验余量，不能把维护扫描成功理解为写入已获准。
+Run `python apps/server/scripts/sqlite-retention-plan.py --database <source> --backup-root <root>` from an isolated maintenance context. It reads at most 64 MiB in ten seconds by default and bounds entries/directories; insufficient proof is held or rejected. The server opt-in uses `SQLITE_RETENTION_SCAN_ENABLED=1` and an interval from 3600 to 86400 seconds, default 3600. The script, backup helper and resource query helper can also be inspected/run independently without deploying the server.
 
-原生 Node 启动审计与 Python 备份使用相同的全部声明根、物理去重、循环拒绝和源库边界；8 KiB 合成历史文件也必须计入，不能因某个入口漏算而放行。扫描及操作前两次引用校验均读取当前根和每个 legacy 根顶层的 owner/latest 文件。声明根集合本身纳入引用摘要；新增/改变历史根的 owner/latest 或修改根集合使旧批准失效。当前根之外的活动恢复点不能进入可执行批次。
+Every proposed exact batch binds paths, file identity, actual hashes, representative recovery point, root/reference inventory and policy digest. Before a separately authorized irreversible action, validation requires an exact approval no older than five minutes and a successful empty Windows Restart Manager resource report no older than 60 seconds. Unique expired history additionally requires explicit `uniqueHistoryPaths` approval. Replaced files, new owner/protection references, changed policy/inventory, sidecars, active ownership, resource query failure or changed hashes reject the action. Validation rechecks the retained representative with SQLite quick_check and never performs the deletion itself.
 
-清单的 `digest` 是对 `payload` 按 UTF-8、键排序、紧凑 JSON 编码的 SHA-256。操作前，人工批准记录应在受控本地文件中包含：
+Do not turn a validated list into recursive directory deletion or wire the planner to a timer that deletes files. Any real deletion/move/recycle action still needs an exact current list, independent recovery review and the user's specific authorization. Development build/dependency/cache directories are outside this database planner; no broad cleanup command is provided.
 
-```json
-{
-  "batchId": "从清单复制",
-  "digest": "从清单复制",
-  "action": "permanent-delete-exact-files",
-  "approvedAtEpoch": 0,
-  "paths": ["逐条复制全部获批 candidate 的绝对路径"]
-}
-```
+## Recycle-bin limitation
 
-`approvedAtEpoch` 应记录真实人的本次批准时间，禁止由执行器伪造、自动续期或从泛化的“以后类似都删”推导。清单有效期 24 小时，批准最多 5 分钟。只批准部分候选时，重新形成并复核新的清单及摘要，不能改动已批准的摘要或偷偷扩大路径。
+Windows exposes recycling through IFileOperation, but undo is conditional and may be held only for the Explorer session. `SHQueryRecycleBinW` reports current size/count, not a guarantee that a particular large file can be restored. Recycling has not been implemented or demonstrated as a recoverable retirement action here, and is not counted as freed physical space. No recycle, restore or empty-bin operation is part of this PR.
 
-由平台适用的只读文件占用查询产生 `resources.json`：`batchId`、`digest`、`checkedAtEpoch` 与清单绑定，`files` 为候选和保留代表的 `{ "path": "绝对路径", "querySucceeded": true, "users": [] }` 列表。报告须在 60 秒内，无查询结果不得视为没有占用。Windows 可用 RestartManager 的查询 API，不调用关闭/重启 API；不能用“仅列出 sqlite 进程”替代实际文件资源查询。
+References: [operation flags](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-setoperationflags), [recycle-bin query](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shqueryrecyclebinw), [aborted-operation check](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-getanyoperationsaborted).
 
-Windows 提供可直接使用的只读查询辅助工具：`pwsh -NoProfile -File apps/server/scripts/query-retention-resources.ps1 -Batch <清单> -Output <新的本地资源报告>`。只查询清单内候选和代表，不覆盖已有报告，不调用关闭/重启 API；校验器随后重新验证清单摘要。查询开始时间作为报告时间，每次调用之间检查 30 秒截止；原生 API 单次阻塞不能由这个脚本中断，因此若查询未及时返回，应停止这次操作并重新取得新批准和资源报告。禁止在批准文件里存放生产凭据或把这些本地运行报告上传到代码 PR。
+## Verification and rollout boundary
 
-```text
-python apps/server/scripts/sqlite-retention-plan.py --database <源库> --backup-root <根> --batch <清单> --approval <批准记录> --resources <资源报告> --max-read-bytes <本批有限读取预算>
-```
+Python tests cover finite tiers on tiny SQLite fixtures, protected high-risk receipts, exact unique-history approval, changed references/policy, bounded scanning, junction deduplication/cycles, active users and unchanged business bytes. TypeScript tests cover scanner isolation and periodic failure alerts. Native startup tests cover full quota with zero recovery copies, schema and integrity validation; backup tests retain pre-write refusal on exhausted budgets.
 
-重复文件实际 SHA、代表的只读 SQLite `quick_check`、身份/大小/时间、边界、最新引用、生成锁和占用在操作时重新校验。默认 64 MiB 不足以校验大恢复点时，应先估算精确获批批次的读取量，设置有限值（最大 4 GiB，仍有 20 秒截止）；大批次拆成重新批准的小批次，不能全盘哈希或无限等待。部分候选不通过时退出码为 2；输入或全局证明失败为 1。
-
-**校验器不执行删除。** 即使退出码为 0，输出仍为 `permanentDeletionPerformed=false`。有权执行的人需再次核对当前健康状态、owner/部署边界及引用，并使用平台支持的按已验证文件句柄执行方式，封住校验后替换/占用的竞态。不能直接把清单变为路径循环 `Remove-Item`，不能递归删除目录，也不能把本校验器当作通用自动清理器。永久删除需独立、明确批准；只读扫描启用不包含这项权限。
-
-如果希望回收开发构建包、独立工作区或其他备份目录，需要各自登记所有者、来源、活动引用和恢复价值，并形成新的精确审核批次。本模块没有自动删除那些目录的入口。回收自己的有限扫描报告不代表已经实现整个机器的历史备份轮换。
-
-## 订阅批次的恢复边界与有限维护窗口
-
-手动/定时订阅刷新使用原持久化批次 ID 和固定成员集合建立恢复边界。首次进入原完整备份门禁，必须取得一致 SQLite 快照与有效 SHA；后续同批次的提交准备和缓存保存，在最多 15 分钟内共享这个起点。共享前仍实际核验恢复文件 SHA、源库文件身份及备份根；明确标记 `recoveryBoundary=true`、`snapshotMatchesCurrentSource=false`，不能冒称当前已变化的库与旧快照相同。活动边界写入最多几个小型 owner 引用，扫描/批准校验均保护它。完成/过期只回收当前内存所有者可证明的小型引用 JSON，不删除数据库恢复点；进程中断留下的引用保留待复核。
-
-这改变了刷新批次的可恢复粒度：恢复点对应本轮开始前，不能精确回到每个订阅提交前并同时保留其后其他写入。**没有自动回灌、自动恢复或失败时替换当前库的路径。** 某项失败、点损坏、超时或过期会使未执行的工作等待/失败，已成功导入的文章、正文、指标、分类和其他当前写入保留。人工若选择旧点，必须先保全当前库及当前持久化队列/回执，明确哪些成功写入需要合并保留；不能盲目恢复旧队列，把历史 queued 状态当成重新提交授权。保留文件和证明不足时停止恢复，不能覆盖这 15 分钟内成功的数据。
-
-跨批次不借用缓存边界，重启不信任旧进程内许可，过期后重新进入完整验证；手动/定时并发分别绑定自己的批次。源库/根/成员变化或未确认子进程退出均不放宽原协调门禁。边界最多 4 个并行记录、固定 15 分钟；共享恢复文件的 SHA 校验最多 10 秒、文件上限 4 GiB，实际大库仍有读取成本，合成测试不代表生产耗时。
-
-共享点返回前和协调器实际取得写入执行权后，都校验边界存活/有效期以及 owner 文件的原身份和精确内容。排队期间过期、显式关闭、owner 移走/替换/改写或源/恢复文件变化，使执行前检查失败，释放准入且不调用 Prisma/写入回调；不在已准入写入中重新备份。事务开始前重新核验恢复文件 SHA，已进入短事务的嵌套写入再查有效期、引用和文件身份，避免在事务内部反复扫描大恢复文件。此拒绝路径没有自动回灌、重放或覆盖成功数据；后续重试必须在事务外合法建立新边界。
-
-容量保证的条件是同一批次在有效边界内完成，恢复文件和源身份持续可验证。37 个旧点、48 份上限的合成场景中，旧逐项策略仅完成 11 项便用尽空位；原 durable worker 的 14 项准备和 14 项缓存写入，在共享边界下只新增一个点（37→38），旧业务内容和批次前恢复点均验证保留。首次完整验证若复用现有完全一致的点，新增可为零。过期、重启、其他独立操作及周期 owner 仍可能新增点，不能把整台机器的增长上界宣称为一份。
-
-长期最小运行规则是保持有限 32 GiB/48 份与最低磁盘余量，按实际新增速率提前维护。11 个空位只是 11 个**新恢复世代**的额度，必须同时为周期/启动点留空间；不是永久免维护承诺。清单在达到 50% 或预测不足一天时提示复核。部署负责人在可用世代降到 2 份前完成下一次明确保留/归档审批，并以未来一轮及下一周期点的实际大小复核余量。没有可验证的新起点时暂缓新批次的提交，保留原持久化意图；不能通过扩大到无限预算、移动到不计数新根或自动永久删除独立历史来放行。生产启用这个恢复粒度变化仍需单独受控批准，本次开发没有启用它。
-
-## 验证
-
-`test_sqlite_retention_plan.py` 仅生成几 KiB 的合成 SQLite，覆盖重复/唯一历史、空文件、当前/新 owner、latest 回执变化、生成锁、sidecar、严格批准摘要/范围/时效、占用证明、有限读取、报告轮换、失败临时产物回收和业务内容保留。`sqlite-retention-maintenance.spec.ts` 覆盖默认关闭、有限周期、不重叠、失败隔离、受控子进程和未确认退出围栏。Windows 与 Linux CI 都运行 Python 测试，服务器测试运行调度器回归。
+The release owner must review the exact CI-passing SHA against the then-current production commit, reconcile actual recovery inventory and protect upgrade/migration boundaries before any controlled release. This PR is development-only. It does not authorize merging main, force pushing, deployment, restarting services, global configuration changes or irreversible cleanup.

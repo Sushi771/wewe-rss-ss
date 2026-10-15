@@ -3,7 +3,6 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { subscriptionArticleUrl } from './subscription-add';
 import { batchStorageLock } from './batch-storage-lock';
-import { refreshRecovery } from './sqlite-refresh-recovery';
 import {
   activeRefreshScheduleEnabled,
   automaticSubmissionAllowed,
@@ -242,6 +241,8 @@ const view = (b: Batch) => ({
 export class Wechat2RssSubscriptionBatches {
   private directory?: string;
   private initialized = false;
+  private historyUnproved = false;
+  private readonly warnedInvalidHistory = new Set<string>();
   private stopped = false;
   private busy = false;
   private accepting = false;
@@ -258,7 +259,7 @@ export class Wechat2RssSubscriptionBatches {
     feedId: string,
     stage: 'submit' | 'cache',
     automatic?: boolean,
-    options?: { cacheOnly: boolean },
+    options?: { cacheOnly?: boolean; claimKey?: string },
   ) => Promise<BatchOutcome>;
   private prepareRefresh?: (
     feedId: string,
@@ -344,7 +345,8 @@ export class Wechat2RssSubscriptionBatches {
   private reconcile?: (
     feedId: string,
     createdAt: number,
-  ) => Promise<'not-submitted' | 'unknown'>;
+    batchId?: string,
+  ) => Promise<'not-submitted' | 'unknown' | 'accepted'>;
   attachReconciliation(
     check: NonNullable<Wechat2RssSubscriptionBatches['reconcile']>,
   ) {
@@ -357,7 +359,7 @@ export class Wechat2RssSubscriptionBatches {
       feedId: string,
       stage: 'submit' | 'cache',
       automatic?: boolean,
-      options?: { cacheOnly: boolean },
+      options?: { cacheOnly?: boolean; claimKey?: string },
     ) => Promise<BatchOutcome>,
   ) {
     if (this.refresh) throw new Error('BATCH_REFRESH_EXISTS');
@@ -627,14 +629,22 @@ export class Wechat2RssSubscriptionBatches {
     );
     if (names.length > 1000) throw new Error('BATCH_LIMIT');
     const result: Batch[] = [];
+    let unproved = false;
     for (const n of names) {
       try {
         const b = await this.read(n.slice(0, -5));
-        if (b) result.push(b);
+        if (!b) throw new Error('BATCH_HISTORY_UNPROVED');
+        result.push(b);
+        this.warnedInvalidHistory.delete(n);
       } catch {
-        console.warn('[WECHAT2RSS_BATCH_INVALID]');
+        unproved = true;
+        if (!this.warnedInvalidHistory.has(n)) {
+          this.warnedInvalidHistory.add(n);
+          console.warn('[WECHAT2RSS_BATCH_HISTORY_UNPROVED]');
+        }
       }
     }
+    this.historyUnproved = unproved;
     return result.sort((a, b) => a.createdAt - b.createdAt);
   }
   async list() {
@@ -715,6 +725,7 @@ export class Wechat2RssSubscriptionBatches {
         JSON.stringify([purpose, items.map((i) => i.articleUrl || i.state)]),
       );
       const records = await this.records();
+      if (this.historyUnproved) throw new Error('BATCH_HISTORY_UNPROVED');
       const same = records.find((b) => live(b) && b.signature === signature);
       if (same) return view(same);
       if (records.some(live)) throw new Error('BATCH_BUSY');
@@ -777,6 +788,7 @@ export class Wechat2RssSubscriptionBatches {
       const records = await this.records();
       if (intentKey !== undefined && !/^[a-f0-9]{64}$/.test(intentKey))
         throw new Error('BATCH_INVALID');
+      if (this.historyUnproved) throw new Error('BATCH_HISTORY_UNPROVED');
       const original =
         intentKey &&
         records.find((b) => isRefresh(b) && b.intentKey === intentKey);
@@ -1235,13 +1247,27 @@ export class Wechat2RssSubscriptionBatches {
             )
               continue;
             item.nextReceiptCheck = this.now() + 60000;
-            let proof: 'not-submitted' | 'unknown' = 'unknown';
+            let proof: 'not-submitted' | 'unknown' | 'accepted' = 'unknown';
             try {
-              proof = await this.reconcile(item.feedId!, record.createdAt);
+              proof = await this.reconcile(
+                item.feedId!,
+                record.createdAt,
+                record.batchId,
+              );
             } catch {
               /* remain unknown */
             }
-            if (proof === 'not-submitted') {
+            if (proof === 'accepted') {
+              item.accepted = true;
+              item.submissionUnknown = false;
+              item.retryable = false;
+              item.stopBatch = false;
+              item.state = 'waiting';
+              item.refreshAfter = this.now();
+              if (record.state !== 'stopped') record.state = 'running';
+              item.message =
+                'Durable accepted receipt recovered; cache-only continuation, no remote replay.';
+            } else if (proof === 'not-submitted') {
               item.submissionUnknown = false;
               item.stopBatch = false;
               const expired =
@@ -1500,6 +1526,7 @@ export class Wechat2RssSubscriptionBatches {
       }
     }
     const maySubmit =
+      !this.historyUnproved &&
       !b.items.some((i) => i.sharedRestriction === true) &&
       !b.cacheOnly &&
       (b.purpose !== 'scheduled-refresh' ||
@@ -1604,19 +1631,20 @@ export class Wechat2RssSubscriptionBatches {
     }
     let result: BatchOutcome;
     try {
-      result = await refreshRecovery.run(
-        b.batchId,
-        b.items.map((i) => i.feedId!).filter(Boolean),
-        item.feedId!,
-        async () =>
-          b.cacheOnly
-            ? await this.refresh!(item.feedId!, 'cache', false, {
-                cacheOnly: true,
-              })
-            : b.purpose === 'scheduled-refresh'
-              ? await this.refresh!(item.feedId!, stage, true)
-              : await this.refresh!(item.feedId!, stage),
-      );
+      result = b.cacheOnly
+        ? await this.refresh!(item.feedId!, 'cache', false, {
+            cacheOnly: true,
+          })
+        : stage === 'cache'
+          ? b.purpose === 'scheduled-refresh'
+            ? await this.refresh!(item.feedId!, stage, true)
+            : await this.refresh!(item.feedId!, stage)
+          : await this.refresh!(
+              item.feedId!,
+              stage,
+              b.purpose === 'scheduled-refresh',
+              { claimKey: b.batchId },
+            );
     } catch (error) {
       const local =
         stage === 'cache' &&
@@ -1711,12 +1739,7 @@ export class Wechat2RssSubscriptionBatches {
         if (!(await this.write(current))) break;
         let job: PreparedRefresh;
         try {
-          job = await refreshRecovery.run(
-            b.batchId,
-            b.items.map((i) => i.feedId!).filter(Boolean),
-            item.feedId!,
-            () => this.prepareRefresh!(item.feedId!, automatic, waveKey),
-          );
+          job = await this.prepareRefresh!(item.feedId!, automatic, waveKey);
         } catch {
           job = {
             outcome: {
@@ -1751,7 +1774,9 @@ export class Wechat2RssSubscriptionBatches {
       // Recheck persisted stop/restriction/window/deadline after asynchronous
       // preparation, before any closure can issue a request.
       let current = await this.read(b.batchId);
+      await this.records(); // Recheck all durable history after async preparation.
       const allowed =
+        !this.historyUnproved &&
         !this.stopped &&
         current &&
         !['stopped', 'paused'].includes(current.state) &&
@@ -1791,6 +1816,7 @@ export class Wechat2RssSubscriptionBatches {
       await this.write(current); // Durable global batch spacing before launch.
       current = await this.read(b.batchId);
       if (
+        this.historyUnproved ||
         this.stopped ||
         !current ||
         ['stopped', 'paused'].includes(current.state)
@@ -1987,8 +2013,6 @@ export class Wechat2RssSubscriptionBatches {
             ? 'running'
             : 'completed';
     await this.write(current, 'receipt', item.index);
-    if (['completed', 'stopped'].includes(current.state))
-      await refreshRecovery.close(current.batchId);
     if (target.state === 'succeeded' && target.accepted)
       await this.coverPreparation(await this.records());
     return true;

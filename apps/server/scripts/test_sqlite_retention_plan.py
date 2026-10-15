@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+import uuid
 from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location('retention',Path(__file__).with_name('sqlite-retention-plan.py'))
@@ -62,6 +63,13 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(before,{str(p):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
         self.assertFalse(plan['payload']['summary']['automaticDeletion'])
 
+    def test_protected_high_risk_receipt_is_never_a_retirement_candidate(self):
+        receipt=self.old.parent/'verification.json';r=json.loads(receipt.read_text())
+        r['recoveryOrigin']={'format':'sqlite-recovery-origin-v1','kind':'protected'};receipt.write_text(json.dumps(r))
+        plan=self.plan();self.assertIn(str(self.old),plan['payload']['protected']);self.assertFalse(plan['payload']['candidates'])
+        receipt.write_text(json.dumps({**r,'sha256':'f'*64}))
+        with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):self.validate(plan)
+
     def test_valid_action_time_check_never_deletes(self):
         result=self.validate(self.plan())
         self.assertEqual(len(result['validated']),1);self.assertFalse(result['skipped'])
@@ -74,6 +82,109 @@ class RetentionTests(unittest.TestCase):
         plan=self.plan();held={x['path']:x for x in plan['payload']['held']}
         self.assertEqual(held[str(unique)]['kind'],'expired-review')
         self.assertNotIn(str(unique),[x['path'] for x in plan['payload']['candidates']])
+
+    def ordinary(self,age_hours,kind='periodic',value=None):
+        stamp=self.now-age_hours*3600
+        prefix='periodic-snapshot' if kind=='periodic' else 'before-collection'
+        name=prefix+'-'+datetime.fromtimestamp(stamp,timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid.uuid4().hex[:8]
+        file=self.database(name,stamp,value or name)
+        receipt=file.parent/'verification.json';r=json.loads(receipt.read_text())
+        r['recoveryOrigin']={'format':'sqlite-recovery-origin-v1','kind':kind}
+        receipt.write_text(json.dumps(r));return file
+
+    def tier_fixture(self):
+        files=[self.ordinary(h) for h in (72,71,70)]
+        policy={'maxOrdinaryCopies':2,'keepLatest':2,'roundDays':1,'recentHours':1,
+                'dailyDays':1,'weeklyWeeks':0,'maximumAgeDays':1,'bucketHours':1}
+        plan=self.plan(policy=policy);a,r=self.inputs(plan)
+        a['uniqueHistoryPaths']=[x['path'] for x in plan['payload']['candidates'] if x['kind']=='retention-expired']
+        return files,policy,plan,a,r
+
+    def test_tiered_count_plan_lists_exact_unique_history_but_never_deletes(self):
+        files,policy,plan,a,r=self.tier_fixture()
+        entries=[x for x in plan['payload']['candidates'] if x['kind']=='retention-expired']
+        self.assertEqual([x['path'] for x in entries],[str(files[0])])
+        self.assertIn('UNIQUE',entries[0]['evidence'])
+        before={str(p):p.read_bytes() for p in files}
+        result=self.validate(plan,a,r,policy=policy)
+        self.assertIn(str(files[0]),[x['path'] for x in result['validated']])
+        self.assertFalse(result['permanentDeletionPerformed'])
+        self.assertEqual(before,{str(p):p.read_bytes() for p in files})
+
+    def test_unique_history_requires_its_own_exact_path_acknowledgement(self):
+        _files,policy,plan,a,r=self.tier_fixture()
+        for paths in (None,[],['another file']):
+            changed={**a,'uniqueHistoryPaths':paths}
+            if paths is None:changed.pop('uniqueHistoryPaths')
+            with self.assertRaisesRegex(retention.MaintenanceError,'UNIQUE_HISTORY_LOSS_APPROVAL'):
+                self.validate(plan,changed,r,policy=policy)
+
+    def test_policy_change_invalidates_action_time_approval(self):
+        _files,policy,plan,a,r=self.tier_fixture()
+        with self.assertRaisesRegex(retention.MaintenanceError,'POLICY_CHANGED'):
+            self.validate(plan,a,r,policy={**policy,'maxOrdinaryCopies':3})
+
+    def test_active_and_explicit_release_protections_override_retirement(self):
+        files,policy,_plan,_a,_r=self.tier_fixture()
+        (self.root/'snapshot-owner-test.json').write_text(json.dumps({'backup':str(files[0])}))
+        plan=self.plan(policy=policy,protected_paths=[str(files[1])])
+        self.assertTrue(all(str(x) in plan['payload']['protected'] for x in files))
+        self.assertFalse([x for x in plan['payload']['candidates'] if x['kind']=='retention-expired'])
+
+    def test_manual_manifest_is_bound_and_new_protection_invalidates_approval(self):
+        files,policy,plan,a,r=self.tier_fixture()
+        manifest=self.root/'retention-protected.json'
+        manifest.write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':[str(files[0])]}))
+        self.assertIn(str(files[0]),self.plan(policy=policy)['payload']['protected'])
+        with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):
+            self.validate(plan,a,r,policy=policy)
+        manifest.write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':[str(self.source)]}))
+        with self.assertRaisesRegex(retention.MaintenanceError,'PROTECTION_OUTSIDE_ROOTS'):self.plan(policy=policy)
+
+    def test_retirement_rechecks_file_identity_receipt_and_occupancy(self):
+        files,policy,plan,a,r=self.tier_fixture()
+        changed=copy.deepcopy(r)
+        for row in changed['files']:
+            if row['path']==str(files[0]):row['users']=['synthetic holder']
+        self.assertNotIn(str(files[0]),[x['path'] for x in self.validate(plan,a,changed,policy=policy)['validated']])
+        receipt=files[0].parent/'verification.json';raw=json.loads(receipt.read_text());raw['note']='changed'
+        receipt.write_text(json.dumps(raw))
+        with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):
+            self.validate(plan,a,r,policy=policy)
+
+    def test_replaced_retirement_file_invalidates_inventory_proof(self):
+        files,policy,plan,a,r=self.tier_fixture()
+        replacement=files[0].with_suffix('.fixture');files[0].rename(replacement);shutil.copyfile(replacement,files[0])
+        with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):
+            self.validate(plan,a,r,policy=policy)
+
+    def test_round_window_exceeds_soft_count_instead_of_discarding_recovery(self):
+        points=[self.ordinary(48+i,'write-before') for i in range(5)]
+        plan=self.plan(policy={'maxOrdinaryCopies':2})
+        self.assertTrue(all(str(p) in plan['payload']['protected'] for p in points))
+        self.assertTrue(plan['payload']['summary']['ordinaryTargetExceeded'])
+        self.assertIn('protected-time-windows-exceed-count-target',plan['payload']['summary']['warningReasons'])
+
+    def test_configurable_time_and_48_copy_window_use_only_small_fixtures(self):
+        points=[self.ordinary(2+i*12) for i in range(60)]
+        plan=self.plan(policy={})
+        self.assertEqual(plan['payload']['summary']['retainedOrdinaryCopies'],48)
+        retired=[x for x in plan['payload']['candidates'] if x['kind']=='retention-expired']
+        self.assertEqual(len(retired),12)
+        self.assertTrue(all(p.exists() for p in points))
+        self.assertLess(sum(p.stat().st_size for p in points),1024**2)
+
+    def test_unmarked_or_other_source_points_are_not_claimed_by_tier_policy(self):
+        unknown=self.database('unmarked',self.now-40*86400,'unmarked historic state')
+        foreign=self.ordinary(960);receipt=foreign.parent/'verification.json'
+        r=json.loads(receipt.read_text());r['source']=str(self.folder/'other.db');receipt.write_text(json.dumps(r))
+        plan=self.plan(policy={});retired=[x['path'] for x in plan['payload']['candidates'] if x['kind']=='retention-expired']
+        self.assertNotIn(str(unknown),retired);self.assertNotIn(str(foreign),retired)
+
+    def test_finite_tier_policy_and_inconsistent_windows_fail_closed(self):
+        for bad in ({'maxOrdinaryCopies':True},{'keepLatest':1},{'unknown':1},{'weeklyWeeks':5,'maximumAgeDays':28},
+                    {'keepLatest':3,'maxOrdinaryCopies':2},{'recentHours':1,'bucketHours':2}):
+            with self.subTest(bad=bad),self.assertRaises(retention.MaintenanceError):self.plan(policy=bad)
 
     def test_owner_and_explicit_boundaries_are_protected(self):
         (self.root/'snapshot-owner-test.json').write_text(json.dumps({'backup':str(self.old)}))

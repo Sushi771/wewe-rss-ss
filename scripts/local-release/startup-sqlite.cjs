@@ -265,11 +265,52 @@ function inspectConnection(
     tables,
   };
 }
+function recoverHotJournal(database) {
+  if (
+    fs.existsSync(database + '-journal') &&
+    fs.statSync(database + '-journal').size
+  ) {
+    // Let SQLite recover its own hot rollback journal after an interrupted write.
+    // No backup restore, migration, journal-mode change or application DML.
+    const recovery = new (sqlite().DatabaseSync)(database, { timeout: 10000 });
+    try {
+      recovery.prepare('PRAGMA schema_version').get();
+    } finally {
+      recovery.close();
+    }
+  }
+}
 function inspectDatabase(database, migrations, options) {
   database = fs.realpathSync.native(database);
+  if (options?.startupGate) recoverHotJournal(database);
   const connection = open(database);
   try {
     return inspectConnection(connection, database, migrations, options);
+  } finally {
+    connection.close();
+  }
+}
+function auditCurrentDatabase(database, migrations, baselineFile) {
+  database = fs.realpathSync.native(database);
+  recoverHotJournal(database);
+  const before = fs.statSync(database, { bigint: true });
+  const connection = open(database);
+  try {
+    inspectConnection(connection, database, migrations, {
+      startupGate: true,
+      schemaOnly: true,
+    });
+    const inspection = inspectConnection(connection, database, migrations, {
+      schemaOnly: true,
+    });
+    const after = fs.statSync(database, { bigint: true });
+    assert.equal(
+      String(before.dev) + '/' + before.ino,
+      String(after.dev) + '/' + after.ino,
+      'Startup source replaced',
+    );
+    writeJson(baselineFile, inspection);
+    return inspection;
   } finally {
     connection.close();
   }
@@ -366,6 +407,7 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
   try {
     const previous = JSON.parse(fs.readFileSync(receipt, 'utf8'));
     if (
+      previous.recoveryOrigin?.kind === 'protected' &&
       previous.source === database &&
       budget.inside(backupRoot, budget.canonical(previous.backup)) &&
       fileHash(previous.backup) === previous.sha256
@@ -421,9 +463,17 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
     );
     Object.assign(result.backup, {
       sourceIdentity: identity,
+      recoveryOrigin: {
+        format: 'sqlite-recovery-origin-v1',
+        kind: 'protected',
+      },
       native: true,
       reused: false,
     });
+    budget.replaceJson(
+      path.join(path.dirname(result.backup.backup), 'verification.json'),
+      result.backup,
+    );
     budget.replaceJson(receipt, result.backup);
     return result;
   } catch (error) {
@@ -512,6 +562,7 @@ async function freshPrepareStart(
 }
 module.exports = {
   inspectDatabase,
+  auditCurrentDatabase,
   prepareStart,
   digestRows,
   UnsupportedBaselineValue,

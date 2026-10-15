@@ -712,10 +712,7 @@ describe('backend collection routing', () => {
     expect(await prisma.article.count()).toBe(0);
     const feed = await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } });
     expect(feed.syncTime).toBe(0);
-    expect(JSON.parse(feed.lastCollectionResult || '{}')).toMatchObject({
-      status: 'failed',
-      coverage: 'none',
-    });
+    expect(feed.lastCollectionResult).toBeNull();
   });
 
   it('manual and scheduled owner search share the same normal update route and retain blocked status', async () => {
@@ -901,11 +898,7 @@ describe('backend collection routing', () => {
     ).rejects.toThrow('list service unavailable');
     const feed = await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } });
     expect(feed.syncTime).toBe(1700000000);
-    expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject({
-      status: 'failed',
-      complete: false,
-      coverage: 'none',
-    });
+    expect(feed.lastCollectionResult).toBeNull();
     expect(await prisma.article.count()).toBe(0);
   });
 });
