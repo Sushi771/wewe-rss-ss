@@ -107,6 +107,12 @@ def verified_state(path, roots, budget):
         db.set_progress_handler(lambda: int(time.monotonic() > budget.deadline), 1000)
         if db.execute('PRAGMA integrity_check').fetchmany(2) != [('ok',)]:
             raise HostError('SQLITE_INTEGRITY_FAILED')
+        # integrity_check does not validate relational foreign-key constraints.
+        # Execute on every source/recovery, including fresh approval rechecks;
+        # a single violation or a SQLite execution error must fail closed.
+        budget.charge(fp['main']['size'])
+        if db.execute('PRAGMA foreign_key_check').fetchone() is not None:
+            raise HostError('SQLITE_FOREIGN_KEY_CHECK_FAILED')
         schema = db.execute('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name').fetchall()
         budget.charge(len(history.canonical(schema)))
         for kind, name, _, _ in schema:
