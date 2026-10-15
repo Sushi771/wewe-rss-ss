@@ -395,9 +395,7 @@ describe('two explicitly bound publishers through original refresh/save (synthet
     ).toBe('旧笔记必须保留');
     expect(transport).toHaveBeenCalledTimes(44);
     expect(imageTransport).not.toHaveBeenCalled();
-    expect(backups).toHaveBeenCalledTimes(8);
-    for (const result of backups.mock.results)
-      expect(await result.value).toMatchObject({ integrityCheck: 'ok' });
+    expect(backups).not.toHaveBeenCalled();
   }, 60000);
 
   it('rejects wrong publisher binding and wrong owner session before HTTP, retaining articles and original stops', async () => {

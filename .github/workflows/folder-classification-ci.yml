@@ -7,11 +7,15 @@ on:
         main,
         codex/manual-refresh-download-integration,
         codex/backend-recovery-integration-20261014,
+        codex/space-guard-review-base-20261014,
       ]
     paths:
       - 'apps/web/src/components/FolderMemberPicker.tsx'
       - 'apps/web/src/components/ManagementFolders.tsx'
       - 'apps/web/src/pages/feeds/index.tsx'
+      - 'apps/web/src/pages/feeds/xiaohongshu.tsx'
+      - 'apps/server/src/collection/xiaohongshu.service.ts'
+      - 'apps/server/src/collection/incremental-write.ts'
       - 'apps/web/src/utils/use-feed-browse-state.ts'
       - 'apps/web/src/pages/feeds/cache-sync-status.tsx'
       - 'apps/server/src/trpc/management-groups.spec.ts'
@@ -52,7 +56,7 @@ jobs:
           pnpm --filter web exec eslint src/components/ManagementFolders.tsx src/components/FolderMemberPicker.tsx src/pages/feeds/index.tsx --max-warnings 0
           pnpm --filter web build
       - name: Test actual classification callbacks and selection offline
-        run: node --test scripts/folder-navigation-ui.test.cjs scripts/folder-member-picker.test.cjs scripts/folder-move-ui.test.cjs scripts/folder-reorder-ui.test.cjs scripts/feed-group-drag-ui.test.cjs scripts/cache-sync-status-ui.test.cjs scripts/feed-refresh-state-ui.test.cjs
+        run: node --test scripts/folder-navigation-ui.test.cjs scripts/folder-member-picker.test.cjs scripts/folder-move-ui.test.cjs scripts/folder-reorder-ui.test.cjs scripts/folder-rename-ui.test.cjs scripts/feed-group-drag-ui.test.cjs scripts/cache-sync-status-ui.test.cjs scripts/feed-refresh-state-ui.test.cjs
       - name: Test transactions and fresh-client persistence on synthetic SQLite
         run: pnpm --filter server exec jest --runInBand src/trpc/management-groups.spec.ts src/trpc/xiaohongshu-ui.spec.ts
       - name: Require installed headless Chrome
@@ -60,4 +64,10 @@ jobs:
       - name: Test native folder drop, multi-add and React reconciliation offline
         env:
           LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
-        run: node --test scripts/folder-subscriptions-browser.test.cjs scripts/folder-reorder-browser.test.cjs scripts/cache-status-switch-browser.test.cjs scripts/folder-selection-overlay-browser.test.cjs
+        run: node --test --test-concurrency=1 scripts/folder-subscriptions-browser.test.cjs scripts/folder-reorder-browser.test.cjs scripts/cache-status-switch-browser.test.cjs scripts/folder-selection-overlay-browser.test.cjs
+      - name: Test rename UI and durable commit separately through local HTTP
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+          RENAME_BENCHMARK_FULL_PAGE: 'true'
+          RENAME_BENCHMARK_SAMPLES: '12'
+        run: node --test scripts/folder-rename-browser.test.cjs

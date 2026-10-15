@@ -79,6 +79,20 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
     process.chdir(originalCwd);
   });
 
+  it('periodic snapshots use the exact configured production root', async () => {
+    process.env.SQLITE_PRODUCTION_BACKUP_ROOT = path.join(
+      root,
+      'configured-backups',
+    );
+    const owner = await newOwner();
+    await waitForLease(owner);
+    expect(
+      (await readdir(process.env.SQLITE_PRODUCTION_BACKUP_ROOT)).some((name) =>
+        name.startsWith('periodic-snapshot-'),
+      ),
+    ).toBe(true);
+    await expect(readdir(path.join(root, 'backups'))).rejects.toThrow();
+  });
   it('defaults to rejection with scheduling disabled', async () => {
     process.env.SQLITE_PERIODIC_SNAPSHOT_ENABLED = '0';
     const owner = await newOwner();
@@ -212,5 +226,42 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
       await assertInsertOnlySnapshotPermit(tx, outerCopy);
     });
     await notifySqliteSnapshotDirty(outerCopy);
+  });
+  it('reports periodic quota failure once without preventing unrelated ordinary database work', async () => {
+    Object.assign(process.env, {
+      SQLITE_BACKUP_KIND: 'test',
+      SQLITE_TEST_MAX_BYTES: '1',
+      SQLITE_TEST_MAX_COPIES: '1',
+      SQLITE_TEST_BACKUP_ROOT: path.join(root, 'full-budget'),
+    });
+    const warning = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const owner = await newOwner();
+      for (
+        let n = 0;
+        n < 50 &&
+        !warning.mock.calls.some(
+          (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+        );
+        n++
+      )
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(
+        warning.mock.calls.filter(
+          (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+        ),
+      ).toHaveLength(1);
+      expect((await owner.query()).fresh).toBe(false);
+      await prisma.$executeRawUnsafe(
+        "INSERT INTO articles VALUES ('ordinary-after-backup-failure','retained')",
+      );
+      expect(
+        await prisma.$queryRawUnsafe(
+          "SELECT body FROM articles WHERE id='ordinary-after-backup-failure'",
+        ),
+      ).toEqual([{ body: 'retained' }]);
+    } finally {
+      warning.mockRestore();
+    }
   });
 });

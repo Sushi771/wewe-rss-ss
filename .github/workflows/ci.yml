@@ -15,7 +15,9 @@ on:
         codex/performance-five-candidate-20261014,
         codex/cache-sync-single-preflight-20261014,
         codex/bounded-five-submit-20261014,
+        codex/space-guard-production-compat-20261014,
         codex/export-real-metrics-only-20261014,
+        codex/folder-rename-latency,
       ]
   pull_request:
     branches:
@@ -26,6 +28,7 @@ on:
         codex/automatic-refresh-recovery-20261013,
         codex/body-cache-retry-status,
         codex/backend-recovery-integration-20261014,
+        codex/space-guard-review-base-20261014,
       ]
 
 jobs:
@@ -65,6 +68,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test bounded SQLite recovery generation on synthetic databases
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: |
+          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs scripts/local-release/entry-budget.test.cjs
+          python -m unittest discover -s apps/server/scripts -p 'test_backup_space.py'
+          python -m unittest discover -s apps/server/scripts -p 'test_sqlite_retention_plan.py'
+          python -m unittest discover -s apps/server/scripts -p 'test_sqlite_snapshot_guard.py'
+          python -m unittest discover -s scripts/local-release -p 'test_prepare_start.py'
+      - name: Parse read-only reference collector with Windows PowerShell
+        shell: powershell
+        run: |
+          $referenceTokens = $null
+          $referenceSyntaxErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'scripts/local-release/windows-release-reference-collector.ps1').Path, [ref]$referenceTokens, [ref]$referenceSyntaxErrors) | Out-Null
+          if ($referenceSyntaxErrors.Count -gt 0) { throw 'Read-only reference collector syntax failed' }
       - name: Test native loopback listener ownership and guarded stop
         run: node --test scripts/local-release/process-identity.test.cjs scripts/local-release/identity-tool.test.cjs scripts/local-release/launch.test.cjs
       - name: Test desktop feedback and Windows state-file contention offline
@@ -95,8 +118,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Test finite release generation and installation lifetimes offline
+        run: node --test --test-concurrency=1 scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs
+
       - name: Format check
         run: pnpm fmt.check
+
+      - name: Enforce explicit backup boundaries without database or network access
+        run: |
+          node --test scripts/check-backup-policy.test.cjs
+          node scripts/check-backup-policy.cjs
 
       - name: Lint Server
         run: pnpm --filter server lint
@@ -119,7 +150,7 @@ jobs:
       - name: Test Shanghai date shortcuts and isolated reader find offline
         env:
           NODE_OPTIONS: --experimental-websocket
-        run: node --test scripts/article-date-shortcuts.test.cjs scripts/feed-browse-state.test.cjs scripts/article-date-shortcuts-browser.test.cjs scripts/article-reader-find.test.cjs
+        run: node --test scripts/browser-readiness.test.cjs scripts/article-date-shortcuts.test.cjs scripts/feed-browse-state.test.cjs scripts/article-date-shortcuts-browser.test.cjs scripts/article-reader-find.test.cjs
       - name: Test feed sidebar scroll and compact navigation layout offline
         run: node --test scripts/feed-sidebar-layout.test.cjs scripts/folder-navigation-ui.test.cjs scripts/feed-group-drag-ui.test.cjs
       - name: Test unavailable new-subscription source and retained input offline
@@ -128,6 +159,10 @@ jobs:
         run: node --test scripts/xiaohongshu-refresh-ui.test.cjs
       - name: Test closed Sites metadata contract offline
         run: node --test scripts/sites-local-contract.test.mjs
+      - name: Select fixed Node 24 for SQLite startup and server integration tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
       - name: Test independent media reconciliation and global stop offline
@@ -146,6 +181,10 @@ jobs:
         run: python3 apps/server/scripts/test_sqlite_snapshot_guard.py -v
       - name: Test bounded consistent backups with real synthetic concurrent writers
         run: python3 apps/server/scripts/test_backup_sqlite.py -v
+      - name: Rehearse approved retention slots and capacity recovery on synthetic SQLite
+        run: python3 apps/server/scripts/test_space_guard_compat.py -v
+      - name: Test bounded retention review and exact action-time approval on synthetic SQLite
+        run: python3 apps/server/scripts/test_sqlite_retention_plan.py -v
       - name: Test cache-only Unicode transport and publisher identity offline
         run: python3 apps/server/scripts/test_read-wechat2rss-cache.py
       - name: Test read-only SQLite cache signals on synthetic databases

@@ -4,6 +4,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Wechat2RssSubscriptionBatches } from './wechat2rss-subscription-batches';
 
+function refreshCalls(run: { mock: { calls: unknown[][] } }) {
+  return run.mock.calls.map((call) => {
+    if (call[1] === 'submit')
+      expect(call[3]).toEqual(
+        expect.objectContaining({
+          claimKey: expect.stringMatching(/^[a-f0-9-]{36}$/),
+        }),
+      );
+    return call[2] === false ? call.slice(0, 2) : call.slice(0, 3);
+  });
+}
+
 describe('equivalent refresh intent coverage (synthetic only)', () => {
   let directory: string, clock: number, template: any;
   const managers: Wechat2RssSubscriptionBatches[] = [];
@@ -138,7 +150,7 @@ describe('equivalent refresh intent coverage (synthetic only)', () => {
       await manager.runDue();
       clock += 30000;
     }
-    expect(run.mock.calls).toEqual(
+    expect(refreshCalls(run)).toEqual(
       ids.slice(2).map((feedId) => [feedId, 'submit', true]),
     );
     manager.close();
@@ -165,7 +177,7 @@ describe('equivalent refresh intent coverage (synthetic only)', () => {
       await manager.runDue();
       clock = (await disk(original.batchId)).items[0].retryAfter;
       await manager.runDue();
-      expect(run).toHaveBeenCalledWith(ids[0], 'submit', true);
+      expect(refreshCalls(run)).toContainEqual([ids[0], 'submit', true]);
       expect(
         (await disk(original.batchId)).items[0].supersededBy,
       ).toBeUndefined();
@@ -235,7 +247,7 @@ describe('equivalent refresh intent coverage (synthetic only)', () => {
     await manager.runDue();
     clock = (await disk(old.batchId)).items[0].retryAfter;
     await manager.runDue();
-    expect(run).toHaveBeenCalledWith(ids[0], 'submit', true);
+    expect(refreshCalls(run)).toContainEqual([ids[0], 'submit', true]);
     expect((await disk(old.batchId)).items[0].supersededBy).toBeUndefined();
   });
   it.each(['accepted', 'unknown'])(
@@ -353,7 +365,7 @@ describe('equivalent refresh intent coverage (synthetic only)', () => {
     );
     const { manager, run } = make();
     await manager.runDue();
-    expect(run.mock.calls).toEqual([[ids[0], 'cache']]);
+    expect(refreshCalls(run)).toEqual([[ids[0], 'cache']]);
     expect((await disk(old.batchId)).items[0]).toMatchObject({
       state: 'skipped',
       accepted: false,
@@ -379,7 +391,7 @@ describe('equivalent refresh intent coverage (synthetic only)', () => {
     proof.mockResolvedValue('not-submitted');
     clock += 60000;
     await manager.runDue();
-    expect(run.mock.calls).toEqual([[ids[0], 'submit', true]]);
+    expect(refreshCalls(run)).toEqual([[ids[0], 'submit', true]]);
     expect((await disk(old.batchId)).items[0].preparationRetries).toBe(4);
     expect((await disk(unknown.batchId)).items[0]).toMatchObject({
       state: 'skipped',

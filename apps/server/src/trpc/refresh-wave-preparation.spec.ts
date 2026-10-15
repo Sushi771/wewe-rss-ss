@@ -3,6 +3,39 @@ import * as registry from '../collection/provider-registry';
 import * as backups from '../collection/sqlite-backup';
 import { PreparedRefresh } from '../collection/wechat2rss-subscription-batches';
 
+jest.mock('../collection/refresh-submission-claim', () => ({
+  readRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  reserveRefreshSubmission: jest.fn(async (prisma, feed, _batch, now) => {
+    const reserved = await prisma.feed.updateMany({
+      where: {
+        id: feed.id,
+        status: 1,
+        collectionChannel: feed.collectionChannel,
+        providerRefreshAttemptTime: { lte: now - 900 },
+      },
+      data: { providerRefreshAttemptTime: now },
+    });
+    return reserved.count === 1
+      ? {
+          ticket: {
+            id: 'synthetic',
+            mpId: feed.id,
+            reservedAt: now,
+            previousAt: feed.providerRefreshAttemptTime || 0,
+          },
+        }
+      : { outcome: { state: 'skipped', accepted: false, stopBatch: false } };
+  }),
+  beginRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  finishRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  cancelRefreshPreparation: jest.fn(async (prisma, ticket) => {
+    await prisma.feed.updateMany({
+      where: { id: ticket.mpId, providerRefreshAttemptTime: ticket.reservedAt },
+      data: { providerRefreshAttemptTime: ticket.previousAt },
+    });
+  }),
+}));
+
 describe('refresh wave preparation (offline)', () => {
   const saved = process.env.WECHAT2RSS_ENABLED;
   afterEach(() => {
@@ -57,7 +90,7 @@ describe('refresh wave preparation (offline)', () => {
     jest.spyOn(registry, 'wechat2RssProvider').mockReturnValue(provider);
     return { service, events, send, provider };
   }
-  it('finishes serial list/backup/reservation before exposing network-only closures, and releases guards', async () => {
+  it('finishes serial list/durable reservation before exposing network-only closures, and releases guards', async () => {
     const { service, events } = fixture();
     const jobs: PreparedRefresh[] = [];
     for (let i = 0; i < 5; i++)
@@ -69,7 +102,7 @@ describe('refresh wave preparation (offline)', () => {
         ),
       );
     expect(events).toEqual(
-      Array.from({ length: 5 }, () => ['list', 'backup', 'write']).flat(),
+      Array.from({ length: 5 }, () => ['list', 'write']).flat(),
     );
     expect(service.activeCollections.size).toBe(5);
     const writes = service.prismaService.feed.updateMany.mock.calls.length;

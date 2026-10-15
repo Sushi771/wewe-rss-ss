@@ -36,8 +36,8 @@ test(
         source.indexOf('$sha ='),
       )
       .replace(
-        'return ($reader.ReadToEnd()',
-        `Set-Content -LiteralPath ${quote(opened)} -Value opened; Start-Sleep -Milliseconds 100; return ($reader.ReadToEnd()`,
+        '$text = $reader.ReadToEnd()',
+        `Set-Content -LiteralPath ${quote(opened)} -Value opened; Start-Sleep -Milliseconds 100; $text = $reader.ReadToEnd()`,
       );
     const command = `$ErrorActionPreference='Stop'; $StateFile=${quote(state)}; ${reader}; (Read-StartupState).stage`;
     writeProgress(directory, 'app');
@@ -121,7 +121,17 @@ function fixture({
       env: { ProgramFiles: 'C:/Program Files', SystemRoot: 'C:/Windows' },
       argv: check ? ['node', 'entry', '--check'] : ['node', 'entry'],
     },
-    require(name) {
+    require: function fixtureRequire(name) {
+      if (name === './lib.cjs') {
+        const lib = require(name);
+        return {
+          hostEffects: {
+            ...lib.hostEffects,
+            fs: fixtureRequire('node:fs'),
+            processes: fixtureRequire('node:child_process'),
+          },
+        };
+      }
       if (name === 'node:fs')
         return {
           existsSync: () => true,
@@ -179,6 +189,17 @@ function fixture({
             return child;
           },
         };
+      assert(
+        [
+          'node:path',
+          'node:os',
+          'node:util',
+          'node:events',
+          'node:perf_hooks',
+          'node:crypto',
+        ].includes(name),
+        'Unexpected VM dependency: ' + name,
+      );
       return require(name);
     },
   };

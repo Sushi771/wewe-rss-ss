@@ -147,7 +147,7 @@ export default function Xiaohongshu() {
   const remove = trpc.xiaohongshu.remove.useMutation();
   const refresh = trpc.xiaohongshu.refresh.useMutation();
   const exportNotes = trpc.xiaohongshu.export.useMutation();
-  const saveGroup = trpc.xiaohongshu.saveGroup.useMutation();
+  const saveGroup = trpc.xiaohongshu.saveGroup.useMutation({ retry: false });
   const removeGroup = trpc.xiaohongshu.removeGroup.useMutation();
   const moveCreators = trpc.xiaohongshu.moveCreators.useMutation();
   useEffect(() => {
@@ -443,8 +443,25 @@ export default function Xiaohongshu() {
             setBusy(value);
           }}
           onSave={async (input) => {
-            await saveGroup.mutateAsync(input);
-            await invalidateFolders();
+            await utils.xiaohongshu.groups.cancel();
+            const saved = await saveGroup.mutateAsync(input);
+            await utils.xiaohongshu.groups.cancel();
+            utils.xiaohongshu.groups.setData(undefined, (previous) => {
+              if (!previous) return previous;
+              const exists = previous.items.some(
+                (folder) => folder.id === saved.id,
+              );
+              return {
+                ...previous,
+                items: exists
+                  ? previous.items.map((folder) =>
+                      folder.id === saved.id ? saved : folder,
+                    )
+                  : [...previous.items, saved].sort(
+                      (a, b) => a.order - b.order || a.id.localeCompare(b.id),
+                    ),
+              };
+            });
           }}
           onRemove={async (id) => {
             await removeGroup.mutateAsync({ id });

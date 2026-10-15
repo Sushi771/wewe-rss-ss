@@ -6,6 +6,18 @@ import {
   Wechat2RssSubscriptionBatches,
 } from './wechat2rss-subscription-batches';
 
+function refreshCalls(run: { mock: { calls: unknown[][] } }) {
+  return run.mock.calls.map((call) => {
+    if (call[1] === 'submit')
+      expect(call[3]).toEqual(
+        expect.objectContaining({
+          claimKey: expect.stringMatching(/^[a-f0-9-]{36}$/),
+        }),
+      );
+    return call[2] === false ? call.slice(0, 2) : call.slice(0, 3);
+  });
+}
+
 describe('persistent automatic preparation retries (synthetic only)', () => {
   let directory: string, clock: number;
   const managers: Wechat2RssSubscriptionBatches[] = [];
@@ -128,7 +140,7 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
       await recovered.manager.runDue();
       clock += 30000;
     }
-    expect(recovered.run.mock.calls).toEqual(
+    expect(refreshCalls(recovered.run)).toEqual(
       ids.slice(3).map((id) => [id, 'submit', true]),
     );
     expect((await recovered.manager.list())[0].state).toBe('completed');
@@ -219,7 +231,7 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
     expect(newSlot.items[0].state).toBe('skipped');
     await next.manager.runDue();
     expect(next.run).toHaveBeenCalledTimes(1);
-    expect(next.run).toHaveBeenCalledWith(ids[0], 'submit', true);
+    expect(refreshCalls(next.run)).toContainEqual([ids[0], 'submit', true]);
   });
   it('an earlier backoff does not starve a later independent round', async () => {
     const { manager, run } = make(
@@ -257,7 +269,7 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
     manager.attachReconciliation(proof);
     await manager.runDue();
     expect(proof).toHaveBeenCalledTimes(1);
-    expect(run.mock.calls).toEqual([[ids[2], 'submit', true]]);
+    expect(refreshCalls(run)).toEqual([[ids[2], 'submit', true]]);
     const exhausted = await disk(batch.batchId);
     expect(exhausted.items[0]).toMatchObject({
       state: 'failed',
@@ -293,7 +305,7 @@ describe('persistent automatic preparation retries (synthetic only)', () => {
       preparationRetries: 8,
     });
     await manager.runDue();
-    expect(run.mock.calls).toEqual([[ids[1], 'submit', true]]);
+    expect(refreshCalls(run)).toEqual([[ids[1], 'submit', true]]);
   });
   it('does not invoke submission when durable claim persistence crosses the absolute deadline', async () => {
     const { manager, run } = make();

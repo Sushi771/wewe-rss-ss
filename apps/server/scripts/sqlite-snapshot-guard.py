@@ -292,6 +292,7 @@ def main():
         while True:
             if guard.monotonic() >= guard.next_check:
                 guard.tick()
+                print(json.dumps({'event':'periodic-snapshot-status','ok':guard.record is not None}),flush=True)
             try:
                 request = requests.get(timeout=min(1, max(0, guard.next_check - guard.monotonic())))
             except queue.Empty:

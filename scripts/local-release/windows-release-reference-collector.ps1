@@ -1,0 +1,135 @@
+param([Parameter(Mandatory=$true)][string]$PolicyFile)
+# Read-only host facts. No scripts/shortcuts/tasks are launched or modified.
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+Add-Type -LiteralPath (Join-Path $PSScriptRoot 'windows-reference-directory-identity.cs') -ErrorAction Stop
+$errors=[System.Collections.Generic.List[string]]::new()
+$coverage=[System.Collections.Generic.List[object]]::new()
+$shortcuts=[System.Collections.Generic.List[object]]::new()
+$directorySnapshots=[System.Collections.Generic.List[object]]::new()
+$deadline=[DateTime]::UtcNow.AddSeconds(16)
+function Budget {
+  if ([DateTime]::UtcNow -gt $deadline) { throw 'REFERENCE_NATIVE_DEADLINE' }
+}
+function Expand-ReferenceText([string]$value) {
+  $expanded=[Environment]::ExpandEnvironmentVariables($value)
+  if ($expanded -match '%[A-Za-z_][A-Za-z0-9_]*%') { throw 'REFERENCE_NATIVE_ENVIRONMENT_UNRESOLVED' }
+  $expanded
+}
+function Directory-Proof([string]$value) {
+  $proof=[WeWeReferenceDirectoryIdentity]::Read($value)
+  if ($null -eq $proof) { return $null }
+  [PSCustomObject]@{path=$proof.path;identity=@($proof.dev,$proof.ino,$proof.birthtimeNs)}
+}
+function Processes {
+  $items=@(Get-CimInstance Win32_Process -ErrorAction Stop)
+  if ($items.Count -gt 8192) { throw 'REFERENCE_NATIVE_PROCESS_LIMIT' }
+  @($items | ForEach-Object {
+    Budget
+    [PSCustomObject]@{
+      pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;name=[string]$_.Name
+      executable=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine
+      startUtc=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null })
+    }
+  })
+}
+function Tasks {
+  $items=@(Get-ScheduledTask -ErrorAction Stop)
+  if ($items.Count -gt 8192) { throw 'REFERENCE_NATIVE_TASK_LIMIT' }
+  @($items | Sort-Object TaskPath,TaskName | ForEach-Object {
+    Budget
+    [PSCustomObject]@{
+      identity=([string]$_.TaskPath+[string]$_.TaskName)
+      actions=@($_.Actions | ForEach-Object {
+        [PSCustomObject]@{execute=(Expand-ReferenceText ([string]$_.Execute));arguments=(Expand-ReferenceText ([string]$_.Arguments));workingDirectory=(Expand-ReferenceText ([string]$_.WorkingDirectory))}
+      })
+    }
+  })
+}
+$before=@();$after=@();$tasks=@();$tasksAfter=@()
+try {
+  $policyBytes=[IO.File]::ReadAllBytes($PolicyFile)
+  $sha=[Security.Cryptography.SHA256]::Create()
+  $policySha=([BitConverter]::ToString($sha.ComputeHash($policyBytes))).Replace('-','').ToLowerInvariant()
+  $policy=[Text.Encoding]::UTF8.GetString($policyBytes) | ConvertFrom-Json
+  $before=@(Processes)
+  $tasks=@(Tasks)
+  # Current and common known folders cover this single-user adapter. Additional
+  # non-special profiles are an explicit incomplete scope, never silently skipped.
+  $profiles=@(Get-CimInstance Win32_UserProfile -ErrorAction Stop | Where-Object { -not $_.Special })
+  foreach ($userProfile in $profiles) {
+    Budget
+    if (-not [string]::Equals([string]$userProfile.LocalPath,$env:USERPROFILE,[StringComparison]::OrdinalIgnoreCase)) {
+      throw 'REFERENCE_NATIVE_OTHER_PROFILE_REQUIRES_REVIEW'
+    }
+  }
+  $folders=@('Desktop','CommonDesktopDirectory','StartMenu','CommonStartMenu','Startup','CommonStartup')
+  $labels=@('Desktop','CommonDesktop','StartMenu','CommonStartMenu','Startup','CommonStartup')
+  $seen=[System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $shell=New-Object -ComObject WScript.Shell
+  try {
+    for ($i=0;$i -lt $folders.Count;$i++) {
+      Budget
+      $folder=[Environment]::GetFolderPath([Enum]::Parse([Environment+SpecialFolder],$folders[$i]))
+      if (-not $folder) { throw 'REFERENCE_NATIVE_KNOWN_FOLDER_UNKNOWN' }
+      $rootProof=Directory-Proof $folder
+      if ($null -eq $rootProof) {
+        $parent=[IO.Path]::GetDirectoryName($folder)
+        while ($parent -and $null -eq ($ancestor=Directory-Proof $parent)) {
+          Budget
+          $parent=[IO.Path]::GetDirectoryName($parent)
+        }
+        if (-not $parent -or $null -eq $ancestor) { throw 'REFERENCE_NATIVE_ABSENCE_ANCESTOR_UNKNOWN' }
+        $relative=$folder.Substring($parent.Length).TrimStart([char]'\')
+        $missing=[IO.Path]::Combine($ancestor.path,$relative)
+        $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$missing;status='absent';ancestor=$ancestor})
+        continue
+      }
+      $folder=$rootProof.path
+      $pending=[System.Collections.Generic.Stack[string]]::new();$pending.Push($folder)
+      while ($pending.Count) {
+        Budget
+        $at=$pending.Pop()
+        $dirProof=Directory-Proof $at
+        if ($null -eq $dirProof) { throw 'REFERENCE_NATIVE_SHORTCUT_DIRECTORY_CHANGED' }
+        $at=$dirProof.path
+        $dir=Get-Item -LiteralPath $at -Force -ErrorAction Stop
+        if ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'REFERENCE_NATIVE_SHORTCUT_ALIAS_REQUIRES_REVIEW' }
+        $entries=@(Get-ChildItem -LiteralPath $at -Force -ErrorAction Stop)
+        if ($directorySnapshots.Count -ge 4096) { throw 'REFERENCE_NATIVE_SHORTCUT_DIRECTORY_LIMIT' }
+        $directorySnapshots.Add([PSCustomObject]@{path=$at;identity=$dirProof.identity;entries=@($entries | ForEach-Object {
+          [PSCustomObject]@{name=$_.Name;kind=$(if ($_.PSIsContainer) {'directory'} else {'file'})}
+        })})
+        foreach ($entry in $entries) {
+          Budget
+          if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'REFERENCE_NATIVE_SHORTCUT_ALIAS_REQUIRES_REVIEW' }
+          if ($entry.PSIsContainer) { $pending.Push($entry.FullName);continue }
+          if ($entry.Extension -ine '.lnk' -or -not $seen.Add($entry.FullName)) { continue }
+          if ($seen.Count -gt 8192 -or $entry.Length -gt 1048576) { throw 'REFERENCE_NATIVE_SHORTCUT_LIMIT' }
+          $hashBefore=(Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+          $link=$shell.CreateShortcut($entry.FullName)
+          try {
+            $shortcuts.Add([PSCustomObject]@{path=$entry.FullName;sha256=$hashBefore;target=(Expand-ReferenceText ([string]$link.TargetPath));arguments=(Expand-ReferenceText ([string]$link.Arguments));workingDirectory=(Expand-ReferenceText ([string]$link.WorkingDirectory))})
+          } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
+          if ((Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne $hashBefore) { throw 'REFERENCE_NATIVE_SHORTCUT_CHANGED' }
+        }
+      }
+      $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='enumerated';identity=$rootProof.identity})
+    }
+  } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+  $tasksAfter=@(Tasks)
+  $after=@(Processes)
+  Budget
+} catch {
+  $code=[string]$_.Exception.Message
+  if ($code -notmatch '^REFERENCE_NATIVE_[A-Z_]+$') { $code='REFERENCE_NATIVE_QUERY_FAILED' }
+  $errors.Add($code)
+}
+$complete=$errors.Count -eq 0
+[PSCustomObject]@{
+  format=1;complete=$complete;policySha256=$policySha
+  categories=@{processes=$complete;tasks=$complete;shortcuts=$complete}
+  errors=@($errors.ToArray());processesBefore=@($before);processesAfter=@($after)
+  tasks=@($tasks);tasksAfter=@($tasksAfter);shortcuts=@($shortcuts.ToArray());shortcutCoverage=@($coverage.ToArray())
+  shortcutDirectories=@($directorySnapshots.ToArray())
+} | ConvertTo-Json -Depth 8 -Compress

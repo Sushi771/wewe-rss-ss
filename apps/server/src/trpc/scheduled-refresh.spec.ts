@@ -10,6 +10,39 @@ jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest.fn(),
 }));
 
+jest.mock('../collection/refresh-submission-claim', () => ({
+  readRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  reserveRefreshSubmission: jest.fn(async (prisma, feed, _batch, now) => {
+    const reserved = await prisma.feed.updateMany({
+      where: {
+        id: feed.id,
+        status: 1,
+        collectionChannel: feed.collectionChannel,
+        providerRefreshAttemptTime: { lte: now - 900 },
+      },
+      data: { providerRefreshAttemptTime: now },
+    });
+    return reserved.count === 1
+      ? {
+          ticket: {
+            id: 'synthetic',
+            mpId: feed.id,
+            reservedAt: now,
+            previousAt: feed.providerRefreshAttemptTime || 0,
+          },
+        }
+      : { outcome: { state: 'skipped', accepted: false, stopBatch: false } };
+  }),
+  beginRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  finishRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  cancelRefreshPreparation: jest.fn(async (prisma, ticket) => {
+    await prisma.feed.updateMany({
+      where: { id: ticket.mpId, providerRefreshAttemptTime: ticket.reservedAt },
+      data: { providerRefreshAttemptTime: ticket.previousAt },
+    });
+  }),
+}));
+
 describe('dynamic automatic subscription boundary (offline)', () => {
   const original = { ...process.env };
   const id = 'MP_WXS_1234567890',
@@ -103,7 +136,11 @@ describe('dynamic automatic subscription boundary (offline)', () => {
     'skips deleted/disabled/source-changed item without pausing the remaining round',
     async (changed) => {
       feed = changed;
-      expect(await service.runManualRefresh(id, 'submit', true)).toMatchObject({
+      expect(
+        await service.runManualRefresh(id, 'submit', true, {
+          claimKey: 'synthetic',
+        }),
+      ).toMatchObject({
         state: 'skipped',
         accepted: false,
       });
@@ -113,7 +150,11 @@ describe('dynamic automatic subscription boundary (offline)', () => {
   );
   it('shares the 15-minute reservation with single manual refresh, skipping a cooling automatic item', async () => {
     service.prismaService.feed.updateMany.mockResolvedValue({ count: 0 });
-    expect(await service.runManualRefresh(id, 'submit', true)).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', true, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'skipped',
       accepted: false,
     });
@@ -125,7 +166,11 @@ describe('dynamic automatic subscription boundary (offline)', () => {
       challenged: true,
       retryAfter: '3600',
     });
-    expect(await service.runManualRefresh(id, 'submit', true)).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', true, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'blocked',
       accepted: false,
     });
@@ -137,7 +182,11 @@ describe('dynamic automatic subscription boundary (offline)', () => {
     provider.refreshSubscription.mockRejectedValue(
       Error('WECHAT2RSS_SUBSCRIPTION_PAUSED'),
     );
-    expect(await service.runManualRefresh(id, 'submit', true)).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', true, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'skipped',
       accepted: false,
     });
@@ -146,7 +195,11 @@ describe('dynamic automatic subscription boundary (offline)', () => {
     (Date.now as jest.Mock).mockReturnValue(
       Date.parse('2026-10-13T00:00:00+08:00'),
     );
-    expect(await service.runManualRefresh(id, 'submit', true)).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', true, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'queued',
       accepted: false,
     });
