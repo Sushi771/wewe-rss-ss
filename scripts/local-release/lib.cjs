@@ -16,8 +16,10 @@ const hostContext = globalThis[contextKey];
 function currentHostLease() {
   return hostContext.getStore();
 }
-function assertHostWrite() {
-  currentHostLease()?.assertWritable();
+function assertHostWrite(method, args) {
+  const lease = currentHostLease();
+  if (method && lease?.assertHostEffect) lease.assertHostEffect(method, args);
+  else lease?.assertWritable();
 }
 function assertUnscopedHostEffect() {
   if (currentHostLease())
@@ -106,6 +108,14 @@ function guardedFiles(target, promises = false) {
       if (key === 'promises') return guardedPromises;
       const value = Reflect.get(object, key, object);
       const method = typeof key === 'string' ? key.replace(/Sync$/, '') : '';
+      if (key === 'closeSync')
+        return (...args) => {
+          try {
+            return Reflect.apply(object[key], object, args);
+          } finally {
+            currentHostLease()?.forgetDescriptor?.(args[0]);
+          }
+        };
       if (
         typeof value === 'function' &&
         ['readFile', 'createReadStream', 'ReadStream'].includes(method)
@@ -120,7 +130,7 @@ function guardedFiles(target, promises = false) {
                   : undefined,
               )
             )
-              assertHostWrite();
+              assertHostWrite(key, args);
             return Reflect.apply(object[key], receiver, args);
           },
           construct(target, args, newTarget) {
@@ -132,19 +142,22 @@ function guardedFiles(target, promises = false) {
                   : undefined,
               )
             )
-              assertHostWrite();
+              assertHostWrite(key, args);
             return Reflect.construct(object[key], args, newTarget);
           },
         });
       if (typeof value !== 'function' || readOnlyFiles.has(method))
         return value;
       return function (...args) {
-        if (method !== 'open' || writesOnOpen(args[1])) assertHostWrite();
+        if (method !== 'open' || writesOnOpen(args[1]))
+          assertHostWrite(key, args);
         // Resolve dynamically so the existing offline preloader and test stubs
         // cannot be bypassed by an earlier captured native function.
         const result = new.target
           ? Reflect.construct(object[key], args)
           : Reflect.apply(object[key], object, args);
+        if (key === 'openSync' && writesOnOpen(args[1]))
+          currentHostLease()?.noteDescriptor?.(result, args[0]);
         return promises && method === 'open'
           ? result.then(guardedFileHandle)
           : result;
@@ -170,7 +183,7 @@ const processes = new Proxy(nativeProcesses, {
     )
       return value;
     const dispatch = (...args) => {
-      assertHostWrite();
+      assertHostWrite('process.' + key, args);
       return Reflect.apply(target[key], target, args);
     };
     Object.defineProperty(dispatch, require('node:util').promisify.custom, {
@@ -179,7 +192,7 @@ const processes = new Proxy(nativeProcesses, {
         return (
           custom &&
           ((...args) => {
-            assertHostWrite();
+            assertHostWrite('process.' + key, args);
             return Reflect.apply(custom, target, args);
           })
         );

@@ -732,6 +732,7 @@ function within(request, run, options) {
   return result;
 }
 module.exports = {
+  validateReferences,
   inspect,
   open,
   within,

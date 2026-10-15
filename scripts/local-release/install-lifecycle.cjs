@@ -97,7 +97,7 @@ function role(source, block) {
     throw new Error('RELEASE_ROLE_PROOF_INVALID');
   return { folder, manifest: m, manifestSha, ...amount };
 }
-function loadState(file) {
+function loadState(file, legacyLimit = 128) {
   if (!exists(file)) return;
   const s = fs.lstatSync(file);
   if (!s.isFile() || s.isSymbolicLink() || s.size > 65536)
@@ -112,7 +112,7 @@ function loadState(file) {
     value.digest !==
       crypto.createHash('sha256').update(JSON.stringify(p)).digest('hex') ||
     !Array.isArray(p.legacyIds) ||
-    p.legacyIds.length > 128 ||
+    p.legacyIds.length > legacyLimit ||
     !Array.isArray(p.managedIds) ||
     p.managedIds.length < 1 ||
     p.managedIds.length > 3 ||
@@ -151,6 +151,7 @@ function store(file, payload) {
 function installPair(root, plan, options = {}) {
   require('./release-scope.cjs').assertWritableSession(['install']);
   options.scope?.assertWritable?.(['install']);
+  const legacyLimit = options.scope?.legacyLimit === 129 ? 129 : 128;
   root = canonical(root);
   const maxBytes = options.maxBytes ?? DEFAULTS.bytes,
     minFree = options.minFree ?? DEFAULTS.free;
@@ -166,7 +167,7 @@ function installPair(root, plan, options = {}) {
   if (
     options.adoptLegacy !== undefined &&
     (!Array.isArray(options.adoptLegacy) ||
-      options.adoptLegacy.length > 128 ||
+      options.adoptLegacy.length > legacyLimit ||
       !options.adoptLegacy.every(id))
   )
     throw new Error('RELEASE_ADOPTION_REQUIRES_EXACT_INVENTORY');
@@ -228,7 +229,7 @@ function installPair(root, plan, options = {}) {
     const ids = sorted([...sources.keys()]);
     if (ids.length > DEFAULTS.packages)
       throw new Error('RELEASE_PACKAGE_LIMIT_EXCEEDED');
-    const prior = loadState(stateFile),
+    const prior = loadState(stateFile, legacyLimit),
       found = artifacts(root);
     let legacy;
     if (prior) {
@@ -255,7 +256,7 @@ function installPair(root, plan, options = {}) {
     } else {
       legacy = found.filter((value) => !ids.includes(value));
       if (
-        legacy.length > 128 ||
+        legacy.length > legacyLimit ||
         legacy.some((value) => !id(value)) ||
         !Array.isArray(options.adoptLegacy) ||
         !equal(sorted(options.adoptLegacy), legacy)
@@ -315,12 +316,14 @@ function installPair(root, plan, options = {}) {
       fs.mkdirSync(target);
       owned.push({ target, identity: fs.lstatSync(target, { bigint: true }) });
       shared.createdOutput(target);
-      fs.cpSync(source.folder, target, {
-        recursive: true,
-        force: false,
-        errorOnExist: true,
-        filter: (file) => !fs.lstatSync(file).isSymbolicLink(),
-      });
+      if (shared.copyPackage) shared.copyPackage(source.folder, target);
+      else
+        fs.cpSync(source.folder, target, {
+          recursive: true,
+          force: false,
+          errorOnExist: true,
+          filter: (file) => !fs.lstatSync(file).isSymbolicLink(),
+        });
       for (const [name, relative] of Object.entries(
         source.manifest.links || {},
       )) {
