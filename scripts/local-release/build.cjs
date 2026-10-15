@@ -98,6 +98,7 @@ function copyPackages(
 }
 
 function build(options = {}) {
+  require('./release-scope.cjs').assertWritableSession(['build']);
   if (process.platform !== 'win32')
     throw new Error('此入口只验证 Windows 本机 SQLite 部署');
   const sourceRoot = options.sourceRoot

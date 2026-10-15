@@ -599,7 +599,7 @@ test('the async scope remains exclusive across a controller await boundary', () 
       async () => {
         assert(scope.requireSession());
         await Promise.resolve();
-        assert.throws(() => f.open(1), /EEXIST/);
+        assert.throws(() => f.open(1), /NESTED_OPEN_FORBIDDEN/);
         scope.requireSession().check();
       },
       f.options(),

@@ -9,6 +9,7 @@ const { fileHash } = require('./lib.cjs');
 const DEFAULT_BYTES = 768 * 1024 ** 2,
   MIN_FREE = 4 * 1024 ** 3;
 const context = new AsyncLocalStorage();
+const WRITE_KINDS = ['build', 'install', 'activate', 'restart', 'switch'];
 const hash = (v) =>
   crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const {
@@ -166,6 +167,7 @@ function validateReferences(value, policy) {
   return hash(value);
 }
 function open(request, options = {}) {
+  if (session()) throw new Error('RELEASE_SCOPE_NESTED_OPEN_FORBIDDEN');
   request = { runtimeCopies: 0, ...request };
   const configPath = options.configPath || process.env.WEWE_RELEASE_SCOPE_FILE,
     expected = options.configSha256 || process.env.WEWE_RELEASE_SCOPE_SHA256;
@@ -480,12 +482,42 @@ function open(request, options = {}) {
     };
     prior.claim = claim;
     save();
+    const assertWritable = (kinds = WRITE_KINDS, reserveBytes = 1) => {
+      owner();
+      if (
+        !WRITE_KINDS.includes(claim.kind) ||
+        !kinds.includes(claim.kind) ||
+        claim.reserveBytes < reserveBytes
+      )
+        throw new Error('RELEASE_SCOPE_WRITE_OPERATION_NOT_AUTHORIZED');
+    };
     return {
       policy,
       check,
+      assertWritable,
+      assertOperation(nested, nestedOptions = {}) {
+        owner();
+        const at = nested.root ? canonical(nested.root) : undefined;
+        if (
+          nested.kind !== claim.kind ||
+          at !== claim.root ||
+          !Number.isSafeInteger(nested.reserveBytes) ||
+          nested.reserveBytes < 0 ||
+          nested.reserveBytes > claim.reserveBytes ||
+          !Number.isInteger(nested.runtimeCopies ?? 0) ||
+          (nested.runtimeCopies ?? 0) < 0 ||
+          (nested.runtimeCopies ?? 0) > claim.runtimeCopies ||
+          (nested.transition === true && request.transition !== true) ||
+          (nestedOptions.configPath &&
+            canonical(nestedOptions.configPath) !== file) ||
+          (nestedOptions.configSha256 &&
+            nestedOptions.configSha256 !== configSha)
+        )
+          throw new Error('RELEASE_SCOPE_NESTED_OPERATION_EXCEEDS_CLAIM');
+      },
       inventoryMetrics: () => verifier.metrics(),
       assertOwnedDirectory(folder) {
-        owner();
+        assertWritable();
         const at = canonical(folder),
           row = prior.outputs.find(
             (r) =>
@@ -516,10 +548,16 @@ function open(request, options = {}) {
         )
           throw new Error('RELEASE_SCOPE_UNREGISTERED_ROOT');
       },
+      authorizePublication(folder) {
+        assertWritable(['activate', 'restart', 'switch'], 4096);
+        if (path.dirname(canonical(folder)) !== claim.root)
+          throw new Error('RELEASE_SCOPE_PUBLICATION_ROOT_NOT_AUTHORIZED');
+        this.authorizePackage(folder);
+      },
       authorizeRecoveryPackage(folder) {
         if (!['restart', 'switch'].includes(claim.kind))
           throw new Error('RELEASE_SCOPE_RECOVERY_OPERATION_REQUIRED');
-        this.authorizePackage(folder);
+        this.authorizePublication(folder);
         const spec = policy.windowsReferences?.compatibilityProof;
         if (!spec || spec.sha256 !== policy.compatibilityProofSha256)
           throw new Error('RELEASE_SCOPE_RECOVERY_PROOF_REQUIRED');
@@ -570,6 +608,7 @@ function open(request, options = {}) {
         return proof.rollback;
       },
       registerOutput(output) {
+        assertWritable();
         check();
         const at = path.resolve(output),
           parent = canonical(path.dirname(at));
@@ -588,7 +627,7 @@ function open(request, options = {}) {
         save();
       },
       createdOutput(output) {
-        owner();
+        assertWritable();
         const at = canonical(output),
           row = prior.outputs.find(
             (r) => r.path === at && r.claim === claim.id && !r.complete,
@@ -599,6 +638,7 @@ function open(request, options = {}) {
         save();
       },
       allowCleanup(outputs) {
+        assertWritable();
         check();
         const facts = references().value;
         if (
@@ -655,8 +695,12 @@ function requireSession() {
   if (!value) throw new Error('RELEASE_SCOPE_SESSION_REQUIRED');
   return value;
 }
+function assertWritableSession(kinds, reserveBytes) {
+  session()?.assertWritable(kinds, reserveBytes);
+}
 function within(request, run, options) {
   if (session()) {
+    session().assertOperation(request, options);
     session().check();
     return run(session());
   }
@@ -688,6 +732,7 @@ module.exports = {
   within,
   session,
   requireSession,
+  assertWritableSession,
   DEFAULT_BYTES,
   MIN_FREE,
 };

@@ -146,6 +146,8 @@ function estimate(server, node = process.execPath) {
   return dependencies * 2 + fs.statSync(node).size + 128 * 1024 ** 2;
 }
 function begin(root, requestedBytes, { packages = 1, shared } = {}) {
+  require('./release-scope.cjs').assertWritableSession(['build', 'install']);
+  shared?.assertWritable?.(['build', 'install']);
   root = budget.canonical(root);
   const max = Number(process.env.WEWE_RELEASE_MAX_BYTES || 768 * 1024 ** 2);
   const reserve = Number(

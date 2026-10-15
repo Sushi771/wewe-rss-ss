@@ -35,6 +35,7 @@ function accepted(release, options) {
 }
 function recordAcceptance(release, options = {}) {
   const scope = require('./release-scope.cjs');
+  scope.assertWritableSession(['restart', 'switch']);
   if (scope.session() && !options.receiptRoot)
     throw new Error('RELEASE_SCOPE_ACCEPTANCE_AUDIT_REQUIRED');
   if (options.receiptRoot)

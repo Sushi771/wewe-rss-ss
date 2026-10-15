@@ -6,7 +6,10 @@ const test = require('node:test'),
   crypto = require('node:crypto');
 const scope = require('./release-scope.cjs'),
   { fingerprint, fileHash } = require('./lib.cjs');
-function fixture(run) {
+function fixture(
+  run,
+  { candidateId = 'candidate', pointerNewline = false } = {},
+) {
   const base = fs.mkdtempSync(
       path.join(os.tmpdir(), 'wewe-scoped-publication-'),
     ),
@@ -32,7 +35,7 @@ function fixture(run) {
         ');',
     );
   const proofs = {};
-  for (const id of ['current', 'candidate']) {
+  for (const id of ['current', candidateId]) {
     const dir = path.join(releases, id);
     for (const name of [
       'runtime/node.exe',
@@ -63,6 +66,8 @@ function fixture(run) {
     path.join(releases, 'active.json'),
     JSON.stringify({ format: 1, id: 'current' }),
   );
+  if (pointerNewline)
+    fs.appendFileSync(path.join(releases, 'active.json'), '\n');
   const policy = {
       format: 1,
       scopeId: crypto.randomUUID(),
@@ -72,7 +77,7 @@ function fixture(run) {
       maxBytes: scope.DEFAULT_BYTES,
       maxGrowthBytes: 1024 * 1024,
       maxNewRuntimeCopies: 2,
-      protectedIds: ['current', 'candidate'],
+      protectedIds: ['current', candidateId],
       packageProofs: proofs,
       compatibilityProofSha256: 'd'.repeat(64),
     },
@@ -109,7 +114,7 @@ function fixture(run) {
     releases,
     audits,
     current: path.join(releases, 'current'),
-    candidate: path.join(releases, 'candidate'),
+    candidate: path.join(releases, candidateId),
     active: require(path.join(scripts, 'active-release.cjs')),
     acceptance: require(path.join(scripts, 'startup-acceptance.cjs')),
     options,
@@ -363,4 +368,190 @@ test('a changed rollback proof cannot authorize recovery even if a query fixture
       },
       f.options,
     );
+  }));
+
+test('P1: observation refuses sync and async ordinary publication before any pointer or cache write', () =>
+  fixture(async (f) => {
+    const pointer = path.join(f.releases, 'active.json'),
+      before = fs.readFileSync(pointer),
+      members = fs.readdirSync(f.releases);
+    await scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      async () => {
+        assert.throws(
+          () => f.active.writeActiveRelease(f.candidate),
+          /WRITE_OPERATION_NOT_AUTHORIZED/,
+        );
+        await assert.rejects(
+          f.active.writeActiveReleaseAsync(f.candidate),
+          /WRITE_OPERATION_NOT_AUTHORIZED/,
+        );
+        assert.deepEqual(fs.readFileSync(pointer), before);
+        assert.deepEqual(fs.readdirSync(f.releases), members);
+      },
+      f.options,
+    );
+    assert.deepEqual(fs.readFileSync(pointer), before);
+    assert.deepEqual(fs.readdirSync(f.releases), members);
+  }));
+
+test('P1: nested activation cannot elevate observation kind, root, reservations, policy or transition', () =>
+  fixture((f) => {
+    const pointer = path.join(f.releases, 'active.json'),
+      before = fs.readFileSync(pointer);
+    scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      () => {
+        const observation = {
+          kind: 'reference-inspection',
+          root: f.releases,
+          reserveBytes: 0,
+        };
+        for (const change of [
+          { kind: 'activate', reserveBytes: 4096, transition: true },
+          { reserveBytes: 1 },
+          { runtimeCopies: 1 },
+          { root: f.audits },
+          { transition: true },
+        ]) {
+          let called = false;
+          assert.throws(
+            () =>
+              scope.within(
+                { ...observation, ...change },
+                () => {
+                  called = true;
+                  f.active.writeActiveRelease(f.candidate);
+                },
+                f.options,
+              ),
+            /NESTED_OPERATION_EXCEEDS_CLAIM/,
+          );
+          assert.equal(called, false);
+        }
+        assert.throws(
+          () =>
+            scope.within(
+              observation,
+              () => assert.fail('wrong policy executed'),
+              { ...f.options, configSha256: 'f'.repeat(64) },
+            ),
+          /NESTED_OPERATION_EXCEEDS_CLAIM/,
+        );
+        assert.throws(
+          () =>
+            scope.open(
+              { kind: 'activate', root: f.releases, reserveBytes: 4096 },
+              f.options,
+            ),
+          /NESTED_OPEN_FORBIDDEN/,
+        );
+        assert.equal(
+          scope.within(observation, () => 'read-only'),
+          'read-only',
+        );
+        assert.deepEqual(fs.readFileSync(pointer), before);
+      },
+      f.options,
+    );
+    assert.deepEqual(fs.readFileSync(pointer), before);
+  }));
+
+test('P1: equal-length current and nextone pointer substitution is refused despite zero net byte growth', () =>
+  fixture(
+    (f) => {
+      const pointer = path.join(f.releases, 'active.json'),
+        before = fs.readFileSync(pointer),
+        replacement = Buffer.from(
+          JSON.stringify({ format: 1, id: 'nextone' }) + '\n',
+        );
+      assert.equal(before.length, replacement.length);
+      scope.within(
+        {
+          kind: 'reference-inspection',
+          root: f.releases,
+          reserveBytes: 0,
+          transition: true,
+        },
+        () =>
+          assert.throws(
+            () => f.active.writeActiveRelease(f.candidate),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+          ),
+        f.options,
+      );
+      assert.deepEqual(fs.readFileSync(pointer), before);
+      assert(
+        !fs
+          .readdirSync(f.releases)
+          .some((name) => /^active-.*\.tmp$/.test(name)),
+      );
+    },
+    { candidateId: 'nextone', pointerNewline: true },
+  ));
+
+test('observation cannot enter other host write or controller APIs before they touch files or processes', () =>
+  fixture(async (f) => {
+    const before = scope.inspect([f.releases, f.audits]);
+    await scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      async (lease) => {
+        for (const call of [
+          () => lease.registerOutput(path.join(f.audits, 'new')),
+          () => lease.createdOutput(f.audits),
+          () => lease.allowCleanup([]),
+          () => lease.assertOwnedDirectory(f.audits),
+          () =>
+            f.acceptance.recordAcceptance(f.current, { receiptRoot: f.audits }),
+          () => require('./build.cjs').build(),
+          () => require('./build-budget.cjs').begin(f.releases, 4096),
+          () => require('./install-lifecycle.cjs').installPair(f.releases, {}),
+        ])
+          assert.throws(call, /WRITE_OPERATION_NOT_AUTHORIZED/);
+        await assert.rejects(
+          require('./restart.cjs').controlledRestart({ startupReuse: true }),
+          /WRITE_OPERATION_NOT_AUTHORIZED/,
+        );
+        await assert.rejects(
+          require('./switch.cjs').controlledSwitch({ production: false }),
+          /WRITE_OPERATION_NOT_AUTHORIZED/,
+        );
+        await assert.rejects(
+          require('./logon-start.cjs').startAtLogon(),
+          /WRITE_OPERATION_NOT_AUTHORIZED/,
+        );
+        assert.throws(
+          () => require('./logon-start.cjs').activateRunning(f.candidate),
+          /NESTED_OPERATION_EXCEEDS_CLAIM/,
+        );
+      },
+      f.options,
+    );
+    const after = scope.inspect([f.releases, f.audits]);
+    assert.equal(after.baseline.digest, before.baseline.digest);
+    assert.equal(after.baseline.metadataDigest, before.baseline.metadataDigest);
+  }));
+
+test('ordinary publication requires a publisher claim and at least the atomic pointer reservation', () =>
+  fixture((f) => {
+    const pointer = path.join(f.releases, 'active.json'),
+      before = fs.readFileSync(pointer);
+    for (const request of [
+      { kind: 'build', reserveBytes: 4096 },
+      { kind: 'install', reserveBytes: 4096 },
+      { kind: 'activate', reserveBytes: 0 },
+      { kind: 'activate', reserveBytes: 4095 },
+    ]) {
+      scope.within(
+        { ...request, root: f.releases },
+        () => {
+          assert.throws(
+            () => f.active.writeActiveRelease(f.candidate),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+          );
+        },
+        f.options,
+      );
+      assert.deepEqual(fs.readFileSync(pointer), before);
+    }
   }));

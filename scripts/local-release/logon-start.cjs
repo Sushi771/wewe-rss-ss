@@ -39,6 +39,7 @@ function classifyListener(
 }
 
 async function startAtLogon() {
+  require('./release-scope.cjs').assertWritableSession(['restart']);
   if (process.platform !== 'win32') throw new Error('登录任务仅支持 Windows');
   // Login starts only the verified web server package.
   const identity = processIdentity('Discover', undefined, 4000);

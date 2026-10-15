@@ -55,6 +55,10 @@ function readActiveRelease(options) {
 }
 
 function writeActiveRelease(candidate, options) {
+  require('./release-scope.cjs').assertWritableSession(
+    ['activate', 'restart', 'switch'],
+    4096,
+  );
   // Seed a validated receipt during activation, before the user's next launch.
   return storePointer(
     checkedRelease(candidate, {
@@ -67,6 +71,10 @@ function writeActiveRelease(candidate, options) {
 }
 
 async function writeActiveReleaseAsync(candidate, options) {
+  require('./release-scope.cjs').assertWritableSession(
+    ['activate', 'restart', 'switch'],
+    4096,
+  );
   const release = checkedDirectory(candidate);
   const manifest = await verifyReleaseAsync(release, {
     ...options,
@@ -80,7 +88,7 @@ function storePointer({ release, manifest }, options = {}) {
   if (scope) {
     if (options.recovery === true) scope.authorizeRecoveryPackage(release);
     else {
-      scope.authorizePackage(release);
+      scope.authorizePublication(release);
       scope.check(true);
     }
   }

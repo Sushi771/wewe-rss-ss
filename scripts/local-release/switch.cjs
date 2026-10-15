@@ -214,6 +214,7 @@ function loadProductionEnvironment() {
 }
 
 async function controlledSwitch(options) {
+  require('./release-scope.cjs').assertWritableSession(['switch']);
   if (!options.production) return controlledSwitchInner(options);
   return require('./release-scope.cjs').within(
     {

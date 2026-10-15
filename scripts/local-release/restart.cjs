@@ -59,6 +59,7 @@ function commandLine(release, database, port, verifiedManifest) {
 }
 
 async function controlledRestart(options) {
+  require('./release-scope.cjs').assertWritableSession(['restart']);
   // Reject fixture-only flags before resolving paths or opening any release claim.
   if (
     (options.preparedRehearsal || options.coldLaunchRehearsal) &&

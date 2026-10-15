@@ -149,6 +149,8 @@ function store(file, payload) {
   }
 }
 function installPair(root, plan, options = {}) {
+  require('./release-scope.cjs').assertWritableSession(['install']);
+  options.scope?.assertWritable?.(['install']);
   root = canonical(root);
   const maxBytes = options.maxBytes ?? DEFAULTS.bytes,
     minFree = options.minFree ?? DEFAULTS.free;
