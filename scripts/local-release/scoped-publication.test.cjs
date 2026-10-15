@@ -981,3 +981,100 @@ test('a direct observation or zero-allocation lease cannot escape a context-boun
         .some((name) => /\.(lock|state\.json|adopted)$/.test(name)),
     );
   }));
+
+test('read APIs reject writable string/numeric flags before creating or truncating files', () =>
+  fixture((f) => {
+    const io = require('./lib.cjs').hostEffects.fs;
+    const existing = path.join(f.current, 'runtime.cjs'),
+      before = fs.readFileSync(existing);
+    let callbackCalled = false;
+    scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      () => {
+        for (const flag of [
+          'w',
+          'w+',
+          'a',
+          'r+',
+          fs.constants.O_CREAT,
+          fs.constants.O_TRUNC,
+          fs.constants.O_RDWR,
+          -1,
+          0x40000000,
+        ]) {
+          for (const target of [
+            path.join(f.audits, 'must-not-exist'),
+            existing,
+          ]) {
+            for (const call of [
+              () => io.readFileSync(target, { flag }),
+              () => new io.readFileSync(target, { flag }),
+              () =>
+                io.readFile(target, { flag }, () => {
+                  callbackCalled = true;
+                }),
+              () => io.promises.readFile(target, { flag }),
+              () => io.createReadStream(target, { flags: flag }),
+              () => new io.ReadStream(target, { flags: flag }),
+            ])
+              assert.throws(call, /WRITE_OPERATION_NOT_AUTHORIZED/);
+            assert.deepEqual(fs.readFileSync(existing), before);
+            assert(!fs.existsSync(path.join(f.audits, 'must-not-exist')));
+          }
+        }
+      },
+      f.options,
+    );
+    assert.equal(callbackCalled, false);
+  }));
+
+test('observation preserves ordinary string, default, descriptor and numeric read paths', () =>
+  fixture(async (f) => {
+    const io = require('./lib.cjs').hostEffects.fs,
+      file = path.join(f.current, 'runtime.cjs');
+    await scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      async () => {
+        assert.equal(io.readFileSync(file, 'utf8'), 'inert');
+        assert.equal(io.promises.createReadStream, undefined);
+        for (const flag of [
+          undefined,
+          'r',
+          'rs',
+          'sr',
+          fs.constants.O_RDONLY,
+        ]) {
+          assert.equal(
+            io.readFileSync(file, { encoding: 'utf8', flag }),
+            'inert',
+          );
+          assert.equal(
+            await io.promises.readFile(file, { encoding: 'utf8', flag }),
+            'inert',
+          );
+          const callbackRead = await new Promise((resolve, reject) =>
+            io.readFile(file, { encoding: 'utf8', flag }, (error, value) =>
+              error ? reject(error) : resolve(value),
+            ),
+          );
+          assert.equal(callbackRead, 'inert');
+          for (const stream of [
+            io.createReadStream(file, { flags: flag }),
+            new io.ReadStream(file, { flags: flag }),
+          ]) {
+            let value = '';
+            for await (const chunk of stream) value += chunk;
+            assert.equal(value, 'inert');
+          }
+        }
+        const fd = io.openSync(file, fs.constants.O_RDONLY);
+        try {
+          assert.equal(io.readFileSync(fd, 'utf8'), 'inert');
+        } finally {
+          io.closeSync(fd);
+        }
+      },
+      f.options,
+    );
+    assert.deepEqual(fs.readdirSync(f.audits), []);
+  }));

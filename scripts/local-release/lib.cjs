@@ -50,17 +50,32 @@ const readOnlyFiles = new Set([
   'StatFs',
   'ReadStream',
 ]);
-function writesOnOpen(flags = 'r') {
-  if (typeof flags === 'string') return /[wa+]/.test(flags);
-  if (typeof flags !== 'number') return true;
-  return Boolean(
-    flags &
-    (nativeFs.constants.O_WRONLY |
-      nativeFs.constants.O_RDWR |
-      nativeFs.constants.O_APPEND |
-      nativeFs.constants.O_CREAT |
-      nativeFs.constants.O_TRUNC),
+function readOnlyFlags(flags) {
+  if (flags == null) return true;
+  if (typeof flags === 'string') return ['r', 'rs', 'sr'].includes(flags);
+  const allowed = [
+    'O_RDONLY',
+    'O_SYNC',
+    'O_DSYNC',
+    'O_NONBLOCK',
+    'O_NOFOLLOW',
+    'O_DIRECTORY',
+    'O_NOCTTY',
+    'O_CLOEXEC',
+    'O_LARGEFILE',
+  ]
+    .map((name) => nativeFs.constants[name])
+    .filter(Number.isInteger)
+    .reduce((bits, value) => bits | value, 0);
+  return (
+    Number.isInteger(flags) &&
+    flags >= 0 &&
+    flags <= 0x7fffffff &&
+    (flags & ~allowed) === 0
   );
+}
+function writesOnOpen(flags) {
+  return !readOnlyFlags(flags);
 }
 function guardedFileHandle(handle) {
   const readOnly = new Set([
@@ -91,6 +106,36 @@ function guardedFiles(target, promises = false) {
       if (key === 'promises') return guardedPromises;
       const value = Reflect.get(object, key, object);
       const method = typeof key === 'string' ? key.replace(/Sync$/, '') : '';
+      if (
+        typeof value === 'function' &&
+        ['readFile', 'createReadStream', 'ReadStream'].includes(method)
+      )
+        return new Proxy(value, {
+          apply(target, receiver, args) {
+            const options = args[1];
+            if (
+              !readOnlyFlags(
+                options && typeof options === 'object'
+                  ? options[method === 'readFile' ? 'flag' : 'flags']
+                  : undefined,
+              )
+            )
+              assertHostWrite();
+            return Reflect.apply(object[key], receiver, args);
+          },
+          construct(target, args, newTarget) {
+            const options = args[1];
+            if (
+              !readOnlyFlags(
+                options && typeof options === 'object'
+                  ? options[method === 'readFile' ? 'flag' : 'flags']
+                  : undefined,
+              )
+            )
+              assertHostWrite();
+            return Reflect.construct(object[key], args, newTarget);
+          },
+        });
       if (typeof value !== 'function' || readOnlyFiles.has(method))
         return value;
       return function (...args) {
