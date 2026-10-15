@@ -158,19 +158,22 @@ async function main() {
     await command('Emulation.setScriptExecutionDisabled', { value: true });
     await command('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
     let images = 0;
+    let imageInputs = 0;
     for (const name of pages) {
       await command('Page.navigate', { url: origin + name });
       let status;
       for (let i = 0; i < 100; i++) {
         const result = await command('Runtime.evaluate', {
           returnByValue: true,
-          expression: `JSON.stringify({url:location.href,ready:document.readyState,title:document.title,images:Array.from(document.images,x=>({done:x.complete,ok:x.naturalWidth>0&&x.naturalHeight>0}))})`,
+          awaitPromise: true,
+          expression: `(async()=>JSON.stringify({url:location.href,ready:document.readyState,title:document.title,images:Array.from(document.images,x=>({done:x.complete,ok:x.naturalWidth>0&&x.naturalHeight>0})),imageInputs:await Promise.all(Array.from(document.querySelectorAll('input[type="image" i]'),async x=>{const p=new Image();p.src=x.src;try{await p.decode()}catch{}return {done:p.complete,ok:p.naturalWidth>0&&p.naturalHeight>0}}))}))()`,
         });
         status = JSON.parse(result.result.value || '{}');
         if (
           status.url === origin + name &&
           status.ready === 'complete' &&
-          status.images.every((x) => x.done)
+          status.images.every((x) => x.done) &&
+          status.imageInputs.every((x) => x.done)
         )
           break;
         await pause(50);
@@ -179,16 +182,19 @@ async function main() {
         status.url !== origin + name ||
         status.ready !== 'complete' ||
         !status.title ||
-        status.images.some((x) => !x.done || !x.ok)
+        status.images.some((x) => !x.done || !x.ok) ||
+        status.imageInputs.some((x) => !x.done || !x.ok)
       )
         throw Error('reader or image decode failed');
       images += status.images.length;
+      imageInputs += status.imageInputs.length;
     }
     if (remoteRequests) throw Error('non-archive request blocked');
     process.stdout.write(
       JSON.stringify({
         pages: pages.length,
         images,
+        imageInputs,
         decoded: true,
         remoteRequests,
       }),
