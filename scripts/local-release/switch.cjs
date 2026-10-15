@@ -416,12 +416,20 @@ async function controlledSwitchInner(options) {
           path.join(audit, `${label}-guard.json`),
         );
       else args.push('--production');
-      require('./release-scope.cjs').session()?.check(true);
+      const scopeLease = require('./release-scope.cjs').session();
+      if (scopeLease) {
+        if (label === 'old-fallback')
+          scopeLease.authorizeRecoveryPackage(bundle);
+        else scopeLease.check(true);
+      }
       const child = spawn(path.join(bundle, 'runtime/node.exe'), args, {
         cwd: audit,
         env: {
           ...env,
           LOCAL_RELEASE_CONTROLLED_START: manifest.id,
+          ...(require('./release-scope.cjs').session()
+            ? { LOCAL_RELEASE_REUSE_VERIFIED: '0' }
+            : {}),
           ...(bundle === legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),
         },
         windowsHide: true,

@@ -83,7 +83,7 @@ async function controlledRestart(options) {
     (lease) => {
       lease.authorizePackage(options.release);
       lease.authorizePackage(options.previous || options.release);
-      return controlledRestartInner(options);
+      return controlledRestartInner({ ...options, reuseVerified: false });
     },
   );
 }
@@ -293,7 +293,12 @@ async function controlledRestartInner(options) {
           path.join(audit, `${label}-guard.json`),
         );
       else args.push('--production');
-      require('./release-scope.cjs').session()?.check(true);
+      const scopeLease = require('./release-scope.cjs').session();
+      if (scopeLease) {
+        if (label === 'previous-fallback')
+          scopeLease.authorizeRecoveryPackage(bundlePath);
+        else scopeLease.check(true);
+      }
       const child = spawn(path.join(bundlePath, 'runtime/node.exe'), args, {
         cwd: audit,
         env: {
@@ -449,7 +454,12 @@ async function controlledRestartInner(options) {
       const newIdentity = processIdentity('Snapshot', newChild.pid, port);
       assert.equal(newIdentity.pid, newChild.pid);
       if (rssItems === 20 && manifest.executionLayout === 'compact-cjs-v1')
-        recordAcceptance(release);
+        recordAcceptance(
+          release,
+          require('./release-scope.cjs').session()
+            ? { receiptRoot: audit }
+            : undefined,
+        );
       // Advance the ignored local pointer only after the new production process is ready.
       // The logon task has a stable action and follows this pointer after future deployments.
       if (options.production)
@@ -487,7 +497,8 @@ async function controlledRestartInner(options) {
             fallbackChild.pid,
             port,
           );
-          if (options.production) await writeActiveReleaseAsync(previous);
+          if (options.production)
+            await writeActiveReleaseAsync(previous, { recovery: true });
           const summary = {
             passed: options.rehearsal && options.injectFailure === true,
             mode: options.production ? 'production' : 'rehearsal',

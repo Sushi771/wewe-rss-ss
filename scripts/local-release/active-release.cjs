@@ -59,9 +59,10 @@ function writeActiveRelease(candidate, options) {
   return storePointer(
     checkedRelease(candidate, {
       ...options,
-      reuseVerified: true,
+      reuseVerified: !require('./release-scope.cjs').session(),
       runningOnly: false,
     }),
+    options,
   );
 }
 
@@ -69,16 +70,19 @@ async function writeActiveReleaseAsync(candidate, options) {
   const release = checkedDirectory(candidate);
   const manifest = await verifyReleaseAsync(release, {
     ...options,
-    reuseVerified: true,
+    reuseVerified: !require('./release-scope.cjs').session(),
   });
-  return storePointer(checkedManifest(release, manifest));
+  return storePointer(checkedManifest(release, manifest), options);
 }
 
-function storePointer({ release, manifest }) {
+function storePointer({ release, manifest }, options = {}) {
   const scope = require('./release-scope.cjs').session();
   if (scope) {
-    scope.authorizePackage(release);
-    scope.check(true);
+    if (options.recovery === true) scope.authorizeRecoveryPackage(release);
+    else {
+      scope.authorizePackage(release);
+      scope.check(true);
+    }
   }
   const temporary = path.join(releases, `active-${randomUUID()}.tmp`);
   try {

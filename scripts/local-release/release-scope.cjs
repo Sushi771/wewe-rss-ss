@@ -484,7 +484,22 @@ function open(request, options = {}) {
       policy,
       check,
       inventoryMetrics: () => verifier.metrics(),
+      assertOwnedDirectory(folder) {
+        owner();
+        const at = canonical(folder),
+          row = prior.outputs.find(
+            (r) =>
+              r.claim === claim.id &&
+              !r.complete &&
+              r.identity &&
+              contains(r.path, at),
+          );
+        if (!row || hash(identity(row.path)) !== hash(row.identity))
+          throw new Error('RELEASE_SCOPE_OWNED_AUDIT_REQUIRED');
+        return at;
+      },
       authorizePackage(folder) {
+        owner();
         const m = read(
           path.join(canonical(folder), 'release.json'),
           8 * 1024 ** 2,
@@ -500,6 +515,59 @@ function open(request, options = {}) {
           !policy.roots.some((root) => contains(root.path, canonical(folder)))
         )
           throw new Error('RELEASE_SCOPE_UNREGISTERED_ROOT');
+      },
+      authorizeRecoveryPackage(folder) {
+        if (!['restart', 'switch'].includes(claim.kind))
+          throw new Error('RELEASE_SCOPE_RECOVERY_OPERATION_REQUIRED');
+        this.authorizePackage(folder);
+        const spec = policy.windowsReferences?.compatibilityProof;
+        if (!spec || spec.sha256 !== policy.compatibilityProofSha256)
+          throw new Error('RELEASE_SCOPE_RECOVERY_PROOF_REQUIRED');
+        const fd = fs.openSync(canonical(spec.path), 'r'),
+          buffer = Buffer.alloc(1024 * 1024 + 1);
+        let count = 0;
+        try {
+          while (count < buffer.length) {
+            const n = fs.readSync(
+              fd,
+              buffer,
+              count,
+              buffer.length - count,
+              null,
+            );
+            if (!n) break;
+            count += n;
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+        const raw = buffer.subarray(0, count);
+        if (
+          count > 1024 * 1024 ||
+          crypto.createHash('sha256').update(raw).digest('hex') !== spec.sha256
+        )
+          throw new Error('RELEASE_SCOPE_RECOVERY_PROOF_CHANGED');
+        const proof = JSON.parse(raw.toString('utf8')),
+          m = read(path.join(folder, 'release.json'), 8 * 1024 ** 2);
+        if (
+          proof.format !== 1 ||
+          proof.kind !== 'additive-schema-unknown-claim-rollback' ||
+          proof.businessDatabaseRestored !== false ||
+          [
+            'additiveSchema',
+            'unknownClaimsPreserved',
+            'businessRowsPreserved',
+            'rollbackStarted',
+          ].some((k) => proof.checks?.[k] !== true) ||
+          proof.rollback?.id !== m.id ||
+          proof.rollback?.sourceCommit !== m.sourceCommit ||
+          proof.rollback?.manifestSha256 !==
+            fileHash(path.join(folder, 'release.json'))
+        )
+          throw new Error('RELEASE_SCOPE_RECOVERY_TARGET_UNPROVEN');
+        // This authorizes only the already installed compatible app. It grants
+        // no new output, copy budget, registry reset or database restoration.
+        return proof.rollback;
       },
       registerOutput(output) {
         check();
@@ -597,7 +665,7 @@ function within(request, run, options) {
   try {
     result = context.run(lease, () => run(lease));
   } catch (error) {
-    lease.close(error);
+    lease.close(error, { transition: request.transition === true });
     throw error;
   }
   if (result && typeof result.then === 'function')
@@ -611,7 +679,7 @@ function within(request, run, options) {
         throw error;
       },
     );
-  lease.close();
+  lease.close(undefined, { transition: request.transition === true });
   return result;
 }
 module.exports = {

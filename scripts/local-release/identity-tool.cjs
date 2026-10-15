@@ -23,6 +23,9 @@ function identityTool({
       throw new Error('Identity tool integrity mismatch');
     return executable;
   }
+  // A shared release lease must not create an unregistered historical cache.
+  // The existing ownership-checked PowerShell implementation remains available.
+  if (require('./release-scope.cjs').session()) return undefined;
   const compiler = path.join(
     process.env.SystemRoot || 'C:\\Windows',
     'Microsoft.NET/Framework64/v4.0.30319/csc.exe',

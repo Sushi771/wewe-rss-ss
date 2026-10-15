@@ -3,7 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { hash, fileHash } = require('./lib.cjs');
 const root = path.resolve(__dirname, '../..');
-function context(release) {
+function context(release, { receiptRoot } = {}) {
   release = fs.realpathSync(release);
   const key = hash(
     release +
@@ -13,14 +13,14 @@ function context(release) {
       fileHash(path.join(__dirname, 'switch.cjs')),
   );
   const file = path.join(
-    root,
-    '.local-releases/.startup-acceptance',
+    receiptRoot || root,
+    receiptRoot ? '.startup-acceptance' : '.local-releases/.startup-acceptance',
     hash(release) + '.json',
   );
   return { key, file };
 }
-function accepted(release) {
-  const { key, file } = context(release);
+function accepted(release, options) {
+  const { key, file } = context(release, options);
   try {
     const receipt = JSON.parse(fs.readFileSync(file, 'utf8'));
     return (
@@ -33,9 +33,16 @@ function accepted(release) {
     return false;
   }
 }
-function recordAcceptance(release) {
-  const { key, file } = context(release);
+function recordAcceptance(release, options = {}) {
+  const scope = require('./release-scope.cjs');
+  if (scope.session() && !options.receiptRoot)
+    throw new Error('RELEASE_SCOPE_ACCEPTANCE_AUDIT_REQUIRED');
+  if (options.receiptRoot)
+    scope.requireSession().assertOwnedDirectory(options.receiptRoot);
+  const { key, file } = context(release, options);
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (options.receiptRoot)
+    scope.requireSession().assertOwnedDirectory(path.dirname(file));
   const temporary = file + '.' + crypto.randomUUID() + '.tmp';
   try {
     fs.writeFileSync(
