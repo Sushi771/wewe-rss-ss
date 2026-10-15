@@ -48,6 +48,9 @@ def regular(path, roots=None):
         info = part.lstat()
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise CoverageError("symlink/reparse path rejected")
+    # Windows TEMP may use RUNNER~1: compare canonical long paths on BOTH sides.
+    # Reparse rejection precedes resolution so it cannot silently bless a link.
+    path = path.resolve(strict=True)
     if not path.is_file() or path.stat().st_nlink != 1:
         raise CoverageError("expected a regular file with one link")
     if roots is not None and not any(path.is_relative_to(Path(r).resolve()) for r in roots):
@@ -326,6 +329,10 @@ def prepareArchive(sources, current, archive_root, *, source_roots, media_roots=
     if len(physical_sources) != len(sources) or (current.stat().st_dev, current.stat().st_ino) in physical_sources:
         raise CoverageError("duplicate source or current supplied as retirement source")
     destination = Path(os.path.abspath(archive_root))
+    for parent in [destination.parent, *destination.parent.parents]:
+        if parent.exists() and (parent.is_symlink() or getattr(parent.lstat(), "st_file_attributes", 0) & 0x400):
+            raise CoverageError("archive parent reparse path rejected")
+    destination = destination.resolve(strict=False)
     if destination.exists() or any(destination.is_relative_to(Path(r).resolve()) for r in source_roots):
         raise CoverageError("archive must be new and outside retirement roots")
     destination.parent.mkdir(parents=True, exist_ok=True)
