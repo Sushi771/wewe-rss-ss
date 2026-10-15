@@ -1,5 +1,5 @@
 // Bounded offline cold-start measurements; no database or release-tree cloning.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
@@ -15,6 +15,7 @@ async function benchmark({
   resumeReport,
   baselineRef,
 }) {
+  require('./lib.cjs').hostEffects.assertWritable();
   if (resumeReport || (baselineRef && baselineRef !== 'HEAD'))
     throw new Error(
       'Historical controllers and resumable database copies require a separate reviewed budget; use the guarded current benchmark',

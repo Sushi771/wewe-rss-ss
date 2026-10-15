@@ -1,9 +1,9 @@
 // 仅对保留的演练副本重试旧版进程回滚；始终只结束本脚本创建的子进程。
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const net = require('node:net');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn } = require('./lib.cjs').hostEffects.processes;
 const { once } = require('node:events');
 const { parseArgs } = require('node:util');
 const artifactsApi = require('./test-artifacts.cjs');
@@ -28,6 +28,7 @@ async function unusedPort() {
 }
 
 async function main() {
+  require('./lib.cjs').hostEffects.assertWritable();
   const { values } = parseArgs({
     options: {
       legacy: { type: 'string' },

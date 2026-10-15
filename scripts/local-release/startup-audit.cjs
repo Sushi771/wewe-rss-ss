@@ -9,6 +9,7 @@ const {
 } = require('node:worker_threads');
 
 function createStartupAudit(options, WorkerClass = Worker) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const startedAt = Date.now();
   let worker;
   let settled = false;

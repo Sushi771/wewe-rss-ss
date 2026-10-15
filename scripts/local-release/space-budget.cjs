@@ -1,5 +1,5 @@
 // Fail closed; this module never removes historical data.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const crypto = require('node:crypto');
 function positive(name, fallback) {
@@ -159,6 +159,7 @@ function preflight(root, bytes, copies = 1, database) {
   };
 }
 function lease(root, name = '.space-budget.lock') {
+  require('./lib.cjs').hostEffects.assertWritable();
   root = canonical(root);
   fs.mkdirSync(root, { recursive: true });
   const file = path.join(root, name);
@@ -208,6 +209,7 @@ function sourceHashes(database) {
   });
 }
 function replaceJson(file, value) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const temporary = file + '.' + crypto.randomUUID() + '.tmp';
   fs.writeFileSync(temporary, JSON.stringify(value), { flag: 'wx' });
   fs.renameSync(temporary, file);

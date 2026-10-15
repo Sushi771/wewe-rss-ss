@@ -1,8 +1,8 @@
 // 当前 schema 的 Windows 本机启动/重启。仅停止精确核验的本项目进程。
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn } = require('./lib.cjs').hostEffects.processes;
 const { parseArgs } = require('node:util');
 const {
   verifyRelease,

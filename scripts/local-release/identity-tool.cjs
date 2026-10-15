@@ -1,6 +1,6 @@
 // Compile the existing Windows identity checks once, then verify the tiny tool
 // before every invocation. No service, OS setting, dependency install or network.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { fileHash, readJson, run } = require('./lib.cjs');

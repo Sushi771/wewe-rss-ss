@@ -1,4 +1,4 @@
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -266,6 +266,7 @@ function inspectConnection(
   };
 }
 function recoverHotJournal(database) {
+  require('./lib.cjs').hostEffects.assertWritable();
   if (
     fs.existsSync(database + '-journal') &&
     fs.statSync(database + '-journal').size
@@ -398,6 +399,7 @@ function verifyCurrentSnapshot(database, backup, stage) {
   }
 }
 async function prepareStart(database, migrations, backupRoot, baselineFile) {
+  require('./lib.cjs').hostEffects.assertWritable();
   database = fs.realpathSync.native(database);
   backupRoot = budget.canonical(backupRoot);
   if (budget.inside(backupRoot, database))
@@ -492,6 +494,7 @@ async function freshPrepareStart(
   backupRoot,
   baselineFile,
 ) {
+  require('./lib.cjs').hostEffects.assertWritable();
   database = fs.realpathSync.native(database);
   const identity = sourceIdentity(database);
   const connection = open(database);

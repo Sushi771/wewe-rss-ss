@@ -1,10 +1,11 @@
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { packageDir, readJson, inside } = require('./lib.cjs');
 
 // Compile TypeScript with the existing tsc step first: Nest's emitted decorator
 // metadata is required. This packages its CommonJS output, not TypeScript.
 function bundleServer(target, packageSource, builderSource) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const esbuildDirectory = packageDir(
     'esbuild',
     packageDir('vite', builderSource),

@@ -555,3 +555,353 @@ test('ordinary publication requires a publisher claim and at least the atomic po
       assert.deepEqual(fs.readFileSync(pointer), before);
     }
   }));
+
+test('observation reads and sync/async verification never create or repair a global receipt', async () => {
+  for (const corrupt of [false, true])
+    await fixture(async (f) => {
+      const lib = require('./lib.cjs'),
+        cache = path.join(f.releases, '.verification-cache');
+      const read = async () => {
+        assert.equal(
+          f.active.readActiveRelease({ reuseVerified: true }).manifest.id,
+          'current',
+        );
+        assert.equal(
+          lib.verifyRelease(f.current, { reuseVerified: true }).id,
+          'current',
+        );
+        assert.equal(
+          (await lib.verifyReleaseAsync(f.current, { reuseVerified: true })).id,
+          'current',
+        );
+      };
+      if (!corrupt) {
+        await scope.within(
+          { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+          read,
+          f.options,
+        );
+        assert(!fs.existsSync(cache));
+        return;
+      }
+      fs.mkdirSync(cache);
+      const broken = path.join(cache, 'broken.json');
+      fs.writeFileSync(broken, 'broken-receipt-retained');
+      const policy = JSON.parse(fs.readFileSync(f.options.configPath));
+      Object.assign(policy, scope.inspect(policy.roots.map((r) => r.path)));
+      fs.writeFileSync(f.options.configPath, JSON.stringify(policy));
+      f.options.configSha256 = fileHash(f.options.configPath);
+      const before = scope.inspect([f.releases]);
+      await scope.within(
+        { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+        read,
+        f.options,
+      );
+      assert.deepEqual(fs.readdirSync(cache), ['broken.json']);
+      assert.equal(fs.readFileSync(broken, 'utf8'), 'broken-receipt-retained');
+      assert.equal(
+        scope.inspect([f.releases]).baseline.metadataDigest,
+        before.baseline.metadataDigest,
+      );
+    });
+});
+
+test('compact running-release observation performs a full audit without a hidden receipt write', () =>
+  fixture((f) => {
+    const manifestFile = path.join(f.current, 'release.json'),
+      manifest = JSON.parse(fs.readFileSync(manifestFile));
+    manifest.executionLayout = 'compact-cjs-v1';
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+    const policy = JSON.parse(fs.readFileSync(f.options.configPath));
+    policy.packageProofs.current = fileHash(manifestFile);
+    Object.assign(policy, scope.inspect(policy.roots.map((r) => r.path)));
+    fs.writeFileSync(f.options.configPath, JSON.stringify(policy));
+    f.options.configSha256 = fileHash(f.options.configPath);
+    scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      () => {
+        assert.equal(
+          require('./lib.cjs').verifyRunningRelease(f.current).id,
+          'current',
+        );
+        assert.equal(
+          f.active.readActiveRelease({ runningOnly: true }).manifest.id,
+          'current',
+        );
+      },
+      f.options,
+    );
+    assert(!fs.existsSync(path.join(f.releases, '.verification-cache')));
+  }));
+
+test('desktop installation refuses a release scope before even a stubbed native writer is reached', () =>
+  fixture((f) => {
+    const lib = require('./lib.cjs'),
+      saved = lib.run;
+    const modulePath = require.resolve('./install-desktop.cjs'),
+      cached = require.cache[modulePath];
+    let calls = 0;
+    lib.run = () => {
+      calls++;
+      return '{"verified":true}';
+    };
+    delete require.cache[modulePath];
+    try {
+      const { installDesktop } = require('./install-desktop.cjs');
+      scope.within(
+        { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+        () => {
+          assert.throws(
+            () =>
+              installDesktop({
+                root: path.dirname(f.releases),
+                testDesktop: f.audits,
+              }),
+            /UNREGISTERED_HOST_EFFECT/,
+          );
+        },
+        f.options,
+      );
+      assert.equal(calls, 0);
+    } finally {
+      lib.run = saved;
+      if (cached) require.cache[modulePath] = cached;
+      else delete require.cache[modulePath];
+    }
+  }));
+
+test('one common file/process gateway rejects implicit output across sync, callback, promise and handle APIs', () =>
+  fixture(async (f) => {
+    const effects = require('./lib.cjs').hostEffects,
+      target = path.join(f.audits, 'forbidden');
+    await scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      async () => {
+        for (const name of [
+          'mkdirSync',
+          'mkdtempSync',
+          'writeFileSync',
+          'appendFileSync',
+          'renameSync',
+          'copyFileSync',
+          'cpSync',
+          'linkSync',
+          'symlinkSync',
+          'unlinkSync',
+          'rmSync',
+          'truncateSync',
+          'chmodSync',
+          'utimesSync',
+          'createWriteStream',
+          'writeSync',
+          'writevSync',
+          'mkdir',
+          'writeFile',
+          'appendFile',
+          'rename',
+          'copyFile',
+          'cp',
+          'unlink',
+        ]) {
+          assert.throws(
+            () => effects.fs[name](target),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+            name,
+          );
+        }
+        for (const flags of [
+          'w',
+          'a',
+          'r+',
+          fs.constants.O_RDWR,
+          fs.constants.O_CREAT | fs.constants.O_WRONLY,
+        ]) {
+          assert.throws(
+            () => effects.fs.openSync(target, flags),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+          );
+          assert.throws(
+            () => effects.fs.promises.open(target, flags),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+          );
+        }
+        for (const name of [
+          'mkdir',
+          'mkdtemp',
+          'writeFile',
+          'appendFile',
+          'rename',
+          'copyFile',
+          'cp',
+          'link',
+          'symlink',
+          'unlink',
+          'rm',
+          'truncate',
+          'chmod',
+          'utimes',
+        ])
+          assert.throws(
+            () => effects.fs.promises[name](target),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+            name,
+          );
+        const handle = await effects.fs.promises.open(
+          path.join(f.current, 'runtime.cjs'),
+          'r',
+        );
+        try {
+          const bytes = Buffer.alloc(5);
+          await handle.read(bytes);
+          assert.equal(bytes.toString(), 'inert');
+          for (const name of [
+            'write',
+            'writev',
+            'writeFile',
+            'appendFile',
+            'truncate',
+            'chmod',
+            'utimes',
+            'sync',
+            'datasync',
+            'createWriteStream',
+          ])
+            assert.throws(
+              () => handle[name](),
+              /WRITE_OPERATION_NOT_AUTHORIZED/,
+              name,
+            );
+        } finally {
+          await handle.close();
+        }
+        for (const name of [
+          'exec',
+          'execFile',
+          'execFileSync',
+          'execSync',
+          'fork',
+          'spawn',
+          'spawnSync',
+        ])
+          assert.throws(
+            () => effects.processes[name]('never-executed'),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+            name,
+          );
+        assert.throws(
+          () =>
+            require('node:util').promisify(effects.processes.execFile)(
+              'never-executed',
+            ),
+          /WRITE_OPERATION_NOT_AUTHORIZED/,
+        );
+        assert.throws(
+          () => require('./lib.cjs').writeJson(target, {}),
+          /WRITE_OPERATION_NOT_AUTHORIZED/,
+        );
+      },
+      f.options,
+    );
+    assert.deepEqual(fs.readdirSync(f.audits), []);
+  }));
+
+test('the process gateway preserves custom promisify results and dynamically respects existing preload hooks', () =>
+  fixture(async (f) => {
+    const native = require('node:child_process'),
+      effects = require('./lib.cjs').hostEffects;
+    const oldSync = native.execFileSync,
+      oldAsync = native.execFile;
+    const { promisify } = require('node:util');
+    let calls = 0;
+    try {
+      native.execFileSync = () => {
+        calls++;
+        return 'hooked';
+      };
+      const stub = () => assert.fail('custom promisify required');
+      stub[promisify.custom] = async () => {
+        calls++;
+        return { stdout: 'out', stderr: 'err' };
+      };
+      native.execFile = stub;
+      assert.equal(require('./lib.cjs').run('stubbed', []), 'hooked');
+      assert.deepEqual(await promisify(effects.processes.execFile)('stubbed'), {
+        stdout: 'out',
+        stderr: 'err',
+      });
+      await scope.within(
+        { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+        async () => {
+          assert.throws(
+            () => require('./lib.cjs').run('stubbed', []),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+          );
+          assert.throws(
+            () => promisify(effects.processes.execFile)('stubbed'),
+            /WRITE_OPERATION_NOT_AUTHORIZED/,
+          );
+        },
+        f.options,
+      );
+      assert.equal(calls, 2);
+    } finally {
+      native.execFileSync = oldSync;
+      native.execFile = oldAsync;
+    }
+  }));
+
+test('indirect builders, dependency actions, workers, recovery and browser entries reject observation first', () =>
+  fixture(async (f) => {
+    await scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      async () => {
+        for (const call of [
+          () => require('./build.cjs').copyPackages(),
+          () => require('./compact.cjs').bundleServer(),
+          () => require('./desktop-progress.cjs').writeProgress(),
+          () => require('./desktop-start.cjs').openBrowser(),
+          () =>
+            require('./startup-audit.cjs').createStartupAudit(
+              {},
+              class {
+                constructor() {
+                  assert.fail('worker reached');
+                }
+              },
+            ),
+          () => require('./test-artifacts.cjs').begin({}),
+          () => require('./test-artifacts.cjs').recover({}),
+          () => require('./space-budget.cjs').lease(),
+          () => require('./space-budget.cjs').replaceJson(),
+          () => require('./switch.cjs').loadProductionEnvironment(),
+        ])
+          assert.throws(call, /WRITE_OPERATION_NOT_AUTHORIZED/);
+        for (const call of [
+          () => require('./build-legacy-web.cjs').buildLegacyWeb(),
+          () =>
+            require('./desktop-dependencies.cjs').ensureDependencies({
+              engineReady() {
+                assert.fail('adapter reached');
+              },
+            }),
+          () => require('./desktop-dependencies.cjs').withLaunchLock(),
+          () => require('./desktop-progress.cjs').showProgress(),
+          () => require('./benchmark-launch.cjs').benchmark({}),
+          () => require('./rehearse.cjs').rehearse(),
+          () => require('./resume-legacy.cjs').main(),
+          () => require('./runtime.cjs').runtime(),
+          () => require('./startup-sqlite.cjs').prepareStart(),
+          () =>
+            require('./switch.cjs').stopOwned({
+              exitCode: null,
+              kill() {
+                assert.fail('kill reached');
+              },
+            }),
+        ])
+          await assert.rejects(call(), /WRITE_OPERATION_NOT_AUTHORIZED/);
+      },
+      f.options,
+    );
+    assert.deepEqual(fs.readdirSync(f.audits), []);
+  }));

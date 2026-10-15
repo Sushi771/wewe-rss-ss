@@ -1,9 +1,9 @@
 // Bounded offline runs. Existing sources and unregistered interrupted files stay untouched.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { execFileSync } = require('node:child_process');
+const { execFileSync } = require('./lib.cjs').hostEffects.processes;
 const budget = require('./space-budget.cjs');
 const sqlite = /\.(db|sqlite|sqlite3)(-wal|-shm|-journal)?$/i;
 const manifestName = 'run-manifest.json';
@@ -94,6 +94,7 @@ function begin({
   keep = false,
   prepared = false,
 }) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const root = budget.canonical(
     process.env.WEWE_TEST_OUTPUT_ROOT ||
       path.join(os.tmpdir(), 'wewe-rss-tests'),
@@ -286,6 +287,7 @@ function begin({
   }
 }
 function recover({ root, audit, confirmChildrenStopped = false }) {
+  require('./lib.cjs').hostEffects.assertWritable();
   root = budget.canonical(root);
   audit = path.resolve(audit);
   if (!confirmChildrenStopped)

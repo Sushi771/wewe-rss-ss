@@ -1,5 +1,5 @@
 // 只创建新版本，不停服务、不改已安装的依赖、旧 dist/client 或数据库。
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { parseArgs } = require('node:util');
@@ -29,6 +29,7 @@ function copyPackages(
   packageSource = server,
   checkpoint = () => {},
 ) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const seen = new Map();
   const versions = [];
   // resolve.paths('buffer') returns null for Node core names. A trailing slash

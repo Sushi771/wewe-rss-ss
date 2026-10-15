@@ -1,7 +1,7 @@
 // UI state contains only allowlisted messages; credentials and response bodies stay out.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn } = require('./lib.cjs').hostEffects.processes;
 const { randomUUID } = require('node:crypto');
 const { failure } = require('./desktop-dependencies.cjs');
 const stages = {
@@ -33,6 +33,7 @@ function progressState(stage, error) {
   };
 }
 function writeProgress(directory, stage, error) {
+  require('./lib.cjs').hostEffects.assertWritable();
   fs.mkdirSync(directory, { recursive: true });
   const file = path.join(directory, 'desktop-start-status.json');
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -59,6 +60,7 @@ function writeProgress(directory, stage, error) {
   }
 }
 async function showProgress(directory) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const receipt = path.join(directory, `desktop-ui-${randomUUID()}.json`);
   const log = fs.openSync(
     path.join(directory, 'desktop-progress-errors.log'),

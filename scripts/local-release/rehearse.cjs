@@ -1,9 +1,9 @@
 // 对源库只读备份；迁移、运行、导出、回滚全部发生在新建的本机忽略目录。
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const net = require('node:net');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn } = require('./lib.cjs').hostEffects.processes;
 const { parseArgs } = require('node:util');
 const { once } = require('node:events');
 const { createRequire } = require('node:module');
@@ -30,6 +30,7 @@ async function unusedPort() {
 }
 
 async function rehearse() {
+  require('./lib.cjs').hostEffects.assertWritable();
   const { values } = parseArgs({
     options: {
       release: { type: 'string' },

@@ -1,9 +1,9 @@
 // Windows 本机受控切换：一致性备份、迁移、新版启动；失败只回滚应用进程，不覆盖数据库。
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const net = require('node:net');
 const assert = require('node:assert/strict');
-const { spawn, execFile } = require('node:child_process');
+const { spawn, execFile } = require('./lib.cjs').hostEffects.processes;
 const { once } = require('node:events');
 const { parseArgs, promisify } = require('node:util');
 const {
@@ -197,6 +197,7 @@ async function waitReady(
 }
 
 async function stopOwned(child) {
+  require('./lib.cjs').hostEffects.assertWritable();
   if (!child || child.exitCode !== null) return;
   const closed = once(child, 'close');
   child.kill();
@@ -204,6 +205,7 @@ async function stopOwned(child) {
 }
 
 function loadProductionEnvironment() {
+  require('./lib.cjs').hostEffects.assertWritable();
   const server = path.join(root, 'apps/server');
   // Node 内置 envFile 只填充缺失值；本机 .env.local 优先，文件内容不写入审计。
   for (const file of ['.env.local', '.env']) {

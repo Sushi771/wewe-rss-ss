@@ -1,5 +1,5 @@
 // The logon task reads this local pointer; only a verified production start may advance it.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const {

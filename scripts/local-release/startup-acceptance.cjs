@@ -1,4 +1,4 @@
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { hash, fileHash } = require('./lib.cjs');

@@ -1,7 +1,7 @@
 // Desktop-only dependency gate. Never creates containers, reads secrets, or stops services.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
-const { execFile, spawn } = require('node:child_process');
+const { execFile, spawn } = require('./lib.cjs').hostEffects.processes;
 const root = path.resolve(__dirname, '../..');
 const pinFile = path.join(root, 'private-data/desktop-start/container.json');
 const pipe = 'npipe:////./pipe/dockerDesktopLinuxEngine';
@@ -290,6 +290,7 @@ async function ensureDependencies(
   pin,
   { reuseOnly = false, projectRoot = root, onProgress = () => {} } = {},
 ) {
+  require('./lib.cjs').hostEffects.assertWritable();
   if (!(await a.engineReady(3000))) {
     if (reuseOnly) throw failure('DOCKER_NOT_READY');
     onProgress('engine');
@@ -333,6 +334,7 @@ async function withLaunchLock(
     onWait = () => {},
   } = {},
 ) {
+  require('./lib.cjs').hostEffects.assertWritable();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const end = now() + timeout;
   let fd;

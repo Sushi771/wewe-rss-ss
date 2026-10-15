@@ -1,6 +1,6 @@
 // Finite upgrade admission for verified installed roles, not build worktrees.
 // No historical deletion, service control, database copy, or network request.
-const fs = require('node:fs'),
+const fs = require('./lib.cjs').hostEffects.fs,
   path = require('node:path'),
   crypto = require('node:crypto');
 const {

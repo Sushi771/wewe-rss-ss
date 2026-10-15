@@ -1,9 +1,10 @@
 // Read-only implementation review: creates and removes only its own tiny fixtures.
-const fs = require('node:fs');
+require('./lib.cjs').hostEffects.assertWritable();
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const os = require('node:os');
 const assert = require('node:assert/strict');
-const { fork, execFileSync } = require('node:child_process');
+const { fork, execFileSync } = require('./lib.cjs').hostEffects.processes;
 const repository =
   process.env.LIFECYCLE_REPOSITORY || path.resolve(__dirname, '../..');
 const scripts = path.join(repository, 'scripts/local-release');

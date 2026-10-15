@@ -1,4 +1,4 @@
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { parseArgs } = require('node:util');
 const Module = require('node:module');
@@ -131,6 +131,7 @@ function guardNativePath(release, manifest, file) {
 }
 
 async function runtime() {
+  require('./lib.cjs').hostEffects.assertWritable();
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {

@@ -1,5 +1,5 @@
 // Stable Task Scheduler entry point. It never stops a listener on port 4000.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { parseArgs } = require('node:util');
 const {
