@@ -1,0 +1,40 @@
+name: Article history preservation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/server/scripts/article_history.py'
+      - 'apps/server/scripts/article-history-browser.cjs'
+      - 'apps/server/scripts/test_article_history.py'
+      - 'docs/ARTICLE_HISTORY_PRESERVATION.md'
+      - '.github/workflows/article-history.yml'
+  push:
+    branches: ['codex/article-history-preservation-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-preservation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Synthetic coverage and real offline browser decoding
+        working-directory: apps/server/scripts
+        env:
+          ARTICLE_HISTORY_BROWSER_REQUIRED: '1'
+        run: python -m unittest test_article_history -v
+      - name: Browser syntax
+        run: node --check apps/server/scripts/article-history-browser.cjs
