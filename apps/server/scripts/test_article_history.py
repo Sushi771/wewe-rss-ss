@@ -325,7 +325,10 @@ class HistoryTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'nt', 'Windows extended path I/O')
     def test_windows_long_objects_keep_logical_identity_scope_and_corruption_checks(self):
-        self.archive = self.root / ('deep-' + 'd' * 70) / 'archive'
+        self.archive = self.root / 'deep'
+        while len(str(self.archive / 'bodies' / ('a' * 64 + '.html'))) <= 300:
+            self.archive /= 'd' * 40
+        self.archive /= 'archive'
         self.prepare()
         entry = self.manifest()['entries'][0]
         body = self.archive / entry['body']
