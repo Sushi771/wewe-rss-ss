@@ -6,6 +6,39 @@ const test = require('node:test'),
   crypto = require('node:crypto');
 const scope = require('./release-scope.cjs');
 const { fileHash } = require('./lib.cjs');
+test('default policy retains complete content hashing on every checkpoint', () =>
+  fixture((f) => {
+    const lease = f.open(),
+      before = lease.inventoryMetrics().readBytes;
+    lease.check();
+    assert(lease.inventoryMetrics().readBytes > before);
+    lease.close();
+  }));
+test('scope opens hash historical contents afresh, then checkpoint metadata without rereading historical bytes', () =>
+  fixture((f) => {
+    f.policy.scanBudget = {
+      profile: 'legacy-stream-v1',
+      checkpointMode: 'identity-times-v1',
+    };
+    f.save();
+    const first = f.open(),
+      read = first.inventoryMetrics().readBytes;
+    assert(read > 0);
+    first.check();
+    first.check();
+    assert.equal(first.inventoryMetrics().readBytes, read);
+    first.close();
+    const second = f.open();
+    assert(second.inventoryMetrics().readBytes > 0);
+    second.close();
+  }));
+test('old inventory format cannot be silently upgraded or adopted as a fresh baseline', () =>
+  fixture((f) => {
+    f.policy.baseline.format = 'old-in-memory-v1';
+    f.save();
+    assert.throws(() => f.open(), /INVENTORY_VERSION_REVIEW_REQUIRED/);
+    assert(!fs.existsSync(path.join(f.base, f.policy.scopeId + '.state.json')));
+  }));
 function fixture(run) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-release-scope-')),
     installed = path.join(base, 'installed'),

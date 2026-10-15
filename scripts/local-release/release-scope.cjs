@@ -11,11 +11,10 @@ const DEFAULT_BYTES = 768 * 1024 ** 2,
 const context = new AsyncLocalStorage();
 const hash = (v) =>
   crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
-const controls = new Set([
-  '.build-budget.lock',
-  '.release-lifecycle.json',
-  'active.json',
-]);
+const {
+  createVerifier,
+  FORMAT: INVENTORY_FORMAT,
+} = require('./scope-inventory.cjs');
 function read(file, max = 1024 * 1024) {
   const s = fs.lstatSync(file);
   if (!s.isFile() || s.isSymbolicLink() || s.size > max)
@@ -73,75 +72,7 @@ function state(file) {
     throw new Error('RELEASE_SCOPE_STATE_CORRUPT');
   return v.payload;
 }
-function scan(roots, excluded = []) {
-  let bytes = 0,
-    entries = 0,
-    runtimeCopies = 0;
-  const rows = [],
-    deadline = performance.now() + 30000;
-  const excludedAt = (file) =>
-    excluded.some((output) => contains(output, file));
-  for (const root of roots) {
-    const folder = canonical(root.path);
-    if (hash(identity(folder)) !== hash(root.identity) || folder !== root.path)
-      throw new Error('RELEASE_SCOPE_ROOT_CHANGED');
-    function visit(at, relative = '') {
-      const s = fs.lstatSync(at, { bigint: true });
-      if (++entries > 100000 || performance.now() > deadline)
-        throw new Error('RELEASE_SCOPE_SCAN_INCOMPLETE');
-      const key = [root.path, relative.replace(/\\/g, '/')];
-      if (s.isSymbolicLink()) {
-        const target = canonical(at);
-        if (!roots.some((r) => contains(r.path, target)))
-          throw new Error('RELEASE_SCOPE_LINK_ESCAPE');
-        if (!excludedAt(at))
-          rows.push([...key, 'link', String(s.dev), String(s.ino), target]);
-        return;
-      }
-      if (s.isDirectory()) {
-        if (!excludedAt(at))
-          rows.push([
-            ...key,
-            'dir',
-            String(s.dev),
-            String(s.ino),
-            String(s.birthtimeNs),
-          ]);
-        for (const name of fs.readdirSync(at).sort())
-          visit(path.join(at, name), path.join(relative, name));
-        return;
-      }
-      if (!s.isFile() || s.nlink > 1n)
-        throw new Error('RELEASE_SCOPE_UNSUPPORTED_FILE_OR_HARDLINK');
-      bytes += Number(s.size);
-      if (path.basename(at).toLowerCase() === 'node.exe') runtimeCopies++;
-      if (!Number.isSafeInteger(bytes))
-        throw new Error('RELEASE_SCOPE_BYTES_INVALID');
-      const control =
-        path.dirname(at) === folder && controls.has(path.basename(at));
-      if (control && s.size > 65536n)
-        throw new Error('RELEASE_SCOPE_CONTROL_FILE_LIMIT');
-      if (!control && !excludedAt(at)) {
-        const digest = fileHash(at),
-          after = fs.lstatSync(at, { bigint: true });
-        for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'])
-          if (s[field] !== after[field])
-            throw new Error('RELEASE_SCOPE_FILE_CHANGED_DURING_SCAN');
-        rows.push([
-          ...key,
-          'file',
-          ...[s.dev, s.ino, s.birthtimeNs, s.size, s.mtimeNs, s.ctimeNs].map(
-            String,
-          ),
-          digest,
-        ]);
-      }
-    }
-    visit(folder);
-  }
-  return { bytes, entries, runtimeCopies, digest: hash(rows) };
-}
-function inspect(paths) {
+function inspect(paths, options = {}) {
   const roots = paths
     .map((value) => {
       const folder = canonical(value);
@@ -158,7 +89,12 @@ function inspect(paths) {
         contains(roots[j].path, roots[i].path)
       )
         throw new Error('RELEASE_SCOPE_OVERLAPPING_ROOTS');
-  return { roots, baseline: scan(roots) };
+  const verifier = createVerifier(options.scanBudget, {
+    onSegment: options.onSegment,
+  });
+  const baseline = verifier.scan(roots);
+  options.onMetrics?.(verifier.metrics());
+  return { roots, baseline };
 }
 function validateReferences(value, policy) {
   const kinds = [
@@ -296,6 +232,17 @@ function open(request, options = {}) {
     policy.roots.some((root) => contains(root.path, policy.registryDirectory))
   )
     throw new Error('RELEASE_SCOPE_REGISTRY_IDENTITY_INVALID');
+  if (
+    policy.baseline.format !== INVENTORY_FORMAT ||
+    !/^[a-f0-9]{64}$/.test(policy.baseline.metadataDigest || '')
+  )
+    throw new Error('RELEASE_SCOPE_INVENTORY_VERSION_REVIEW_REQUIRED');
+  const verifier = createVerifier(policy.scanBudget, {
+    onSegment: options.onScanSegment,
+  });
+  const useMetadata = verifier.limits.checkpointMode === 'identity-times-v1';
+  let fullValidated = false;
+  const verifiedOutputs = new Set();
   const directory = policy.registryDirectory,
     lock = path.join(directory, policy.scopeId + '.lock'),
     ledger = path.join(directory, policy.scopeId + '.state.json');
@@ -360,11 +307,16 @@ function open(request, options = {}) {
     checkRoots(policy.roots);
     if (present(ledger) && hash(state(ledger)) !== hash(prior))
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
-    const measure = scan(
+    const measure = verifier.scan(
       policy.roots,
       prior.outputs.map((row) => row.path),
+      { metadataOnly: useMetadata && fullValidated },
     );
-    if (measure.digest !== policy.baseline.digest)
+    if (
+      measure.metadataDigest !== policy.baseline.metadataDigest ||
+      ((!useMetadata || !fullValidated) &&
+        measure.digest !== policy.baseline.digest)
+    )
       throw new Error('RELEASE_SCOPE_FROZEN_HISTORY_CHANGED');
     if (
       measure.bytes > policy.maxBytes ||
@@ -387,11 +339,21 @@ function open(request, options = {}) {
       if (row.complete) {
         if (
           !present(row.path) ||
-          hash(identity(row.path)) !== hash(row.identity) ||
-          scan([{ path: row.path, identity: row.identity }]).digest !==
-            row.digest
+          hash(identity(row.path)) !== hash(row.identity)
         )
           throw new Error('RELEASE_SCOPE_MANAGED_OUTPUT_CHANGED');
+        const snapshot = verifier.scan(
+          [{ path: row.path, identity: row.identity }],
+          [],
+          { metadataOnly: useMetadata && verifiedOutputs.has(row.path) },
+        );
+        if (
+          snapshot.metadataDigest !== row.metadataDigest ||
+          ((!useMetadata || !verifiedOutputs.has(row.path)) &&
+            snapshot.digest !== row.digest)
+        )
+          throw new Error('RELEASE_SCOPE_MANAGED_OUTPUT_CHANGED');
+        verifiedOutputs.add(row.path);
       }
     for (const row of prior.outputs)
       if (
@@ -407,6 +369,7 @@ function open(request, options = {}) {
         throw new Error('RELEASE_SCOPE_PHYSICAL_RESERVE_EXCEEDED');
     }
     references(allowTransition);
+    fullValidated = true;
     return measure;
   };
   try {
@@ -429,7 +392,8 @@ function open(request, options = {}) {
               (row.complete !== true ||
                 !Array.isArray(row.identity) ||
                 row.identity.length !== 3 ||
-                !/^[a-f0-9]{64}$/.test(row.digest || ''))),
+                !/^[a-f0-9]{64}$/.test(row.digest || '') ||
+                !/^[a-f0-9]{64}$/.test(row.metadataDigest || ''))),
         )
       )
         throw new Error('RELEASE_SCOPE_STATE_INVALID');
@@ -442,9 +406,13 @@ function open(request, options = {}) {
       if (present(sentinel))
         throw new Error('RELEASE_SCOPE_LEDGER_MISSING_REQUIRES_REVIEW');
       prior = { format: 1, configSha, outputs: [], claim: null };
-      const initial = scan(policy.roots);
-      if (initial.digest !== policy.baseline.digest)
+      const initial = verifier.scan(policy.roots);
+      if (
+        initial.digest !== policy.baseline.digest ||
+        initial.metadataDigest !== policy.baseline.metadataDigest
+      )
         throw new Error('RELEASE_SCOPE_BASELINE_MISMATCH');
+      fullValidated = true;
       save();
       fs.writeFileSync(sentinel, configSha, { flag: 'wx', mode: 0o600 });
     }
@@ -489,6 +457,7 @@ function open(request, options = {}) {
     return {
       policy,
       check,
+      inventoryMetrics: () => verifier.metrics(),
       authorizePackage(folder) {
         const m = read(
           path.join(canonical(folder), 'release.json'),
@@ -562,9 +531,11 @@ function open(request, options = {}) {
                 'RELEASE_SCOPE_FAILED_OUTPUT_HELD_REQUIRES_REVIEW',
               );
             row.identity = identity(row.path);
-            row.digest = scan([
+            const receipt = verifier.scan([
               { path: row.path, identity: row.identity },
-            ]).digest;
+            ]);
+            row.digest = receipt.digest;
+            row.metadataDigest = receipt.metadataDigest;
             row.complete = true;
           }
           prior.outputs = prior.outputs.filter((row) => present(row.path));
