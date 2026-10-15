@@ -17,7 +17,7 @@ const pause = () => {
   const promise = new Promise<void>((r) => (resolve = r));
   return { promise, resolve };
 };
-describe('protected feed deletion through actual router and SQLite middleware', () => {
+describe('protected existing deletion routes through actual router and SQLite middleware', () => {
   let root: string,
     database: string,
     prisma: PrismaService,
@@ -483,5 +483,184 @@ describe('protected feed deletion through actual router and SQLite middleware', 
     ).rejects.toThrow();
     expect(backup.createVerifiedSqliteBackup).not.toHaveBeenCalled();
     expect(await snapshot()).toEqual(before);
+  });
+
+  it('article.delete refuses an unverified backup and leaves all content intact', async () => {
+    const before = await snapshot();
+    jest
+      .mocked(backup.createVerifiedSqliteBackup)
+      .mockRejectedValueOnce(Error('SYNTHETIC_BACKUP_FAILED'));
+    await expect(api.article.delete('article-0')).rejects.toThrow(
+      'SYNTHETIC_BACKUP_FAILED',
+    );
+    expect(backup.createVerifiedSqliteBackup).toHaveBeenCalledTimes(1);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('article.delete creates exactly one protected recovery point and deletes only that article', async () => {
+    const before = await snapshot();
+    expect(await api.article.delete('article-0')).toBe('article-0');
+    expect(backup.createVerifiedSqliteBackup).toHaveBeenCalledTimes(1);
+    const report = await jest.mocked(backup.createVerifiedSqliteBackup).mock
+      .results[0].value;
+    expect(report.recoveryOrigin.kind).toBe('protected');
+    expect(
+      createHash('sha256')
+        .update(await fs.readFile(report.backup))
+        .digest('hex'),
+    ).toBe(report.sha256);
+    // Read the tiny, newly created synthetic recovery point independently.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { DatabaseSync } = require('node:sqlite');
+    const saved = new DatabaseSync(report.backup, { readOnly: true });
+    try {
+      const row = saved
+        .prepare('SELECT content_html,metrics FROM articles WHERE id=?')
+        .get('article-0');
+      expect(row.content_html).toBe(before.articles[0].contentHtml);
+      expect(row.metrics).toBe(before.articles[0].metrics);
+    } finally {
+      saved.close();
+    }
+    const after = await snapshot();
+    expect(after).toEqual({
+      ...before,
+      articles: before.articles.filter((row) => row.id !== 'article-0'),
+    });
+  });
+
+  it('article.delete keeps missing and unauthorized targets outside the backup gate', async () => {
+    const before = await snapshot();
+    await expect(api.article.delete('missing')).rejects.toThrow();
+    await expect(
+      caller('login required').article.delete('article-0'),
+    ).rejects.toThrow('login required');
+    expect(backup.createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each(['body', 'feed'] as const)(
+    'article.delete rejects a changed %s during protection',
+    async (field) => {
+      jest
+        .mocked(backup.createVerifiedSqliteBackup)
+        .mockImplementationOnce(async (options) => {
+          const report = await realBackup(options);
+          await other.article.update({
+            where: { id: 'article-0' },
+            data:
+              field === 'body'
+                ? { contentHtml: 'concurrent local edit' }
+                : { mpId: ids[1] },
+          });
+          return report;
+        });
+      await expect(api.article.delete('article-0')).rejects.toThrow(
+        'ARTICLE_DELETE_DATABASE_CHANGED',
+      );
+      expect(await prisma.article.count()).toBe(3);
+      expect(backup.createVerifiedSqliteBackup).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('article.delete rejects a stale selection after queued admission without making a recovery copy', async () => {
+    const held = pause(),
+      release = pause(),
+      selected = pause();
+    const gate = sqliteWrites.write(async () => {
+      held.resolve();
+      await release.promise;
+    });
+    await held.promise;
+    const find = prisma.article.findUniqueOrThrow.bind(prisma.article);
+    jest.spyOn(prisma.article, 'findUniqueOrThrow').mockImplementationOnce(((
+      ...args: any[]
+    ) =>
+      (find as any)(...args).then((row: any) => {
+        selected.resolve();
+        return row;
+      })) as any);
+    const deleting = api.article.delete('article-0');
+    const rejected = expect(deleting).rejects.toThrow(
+      'ARTICLE_DELETE_TARGETS_CHANGED',
+    );
+    await selected.promise;
+    await other.article.update({
+      where: { id: 'article-0' },
+      data: { title: 'changed while queued' },
+    });
+    release.resolve();
+    await gate;
+    await rejected;
+    expect(backup.createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    expect(await prisma.article.count()).toBe(3);
+  });
+
+  it('article.delete holds other application writes until commit and preserves them afterward', async () => {
+    const begun = pause(),
+      release = pause();
+    jest
+      .mocked(backup.createVerifiedSqliteBackup)
+      .mockImplementationOnce(async (options) => {
+        const report = await realBackup(options);
+        begun.resolve();
+        await release.promise;
+        return report;
+      });
+    const deleting = api.article.delete('article-0');
+    await begun.promise;
+    let wrote = false;
+    const writing = prisma.article
+      .update({
+        where: { id: 'article-1' },
+        data: { title: 'queued article edit' },
+      })
+      .then(() => {
+        wrote = true;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(wrote).toBe(false);
+    release.resolve();
+    await deleting;
+    await writing;
+    expect(
+      (await prisma.article.findUniqueOrThrow({ where: { id: 'article-1' } }))
+        .title,
+    ).toBe('queued article edit');
+    expect(backup.createVerifiedSqliteBackup).toHaveBeenCalledTimes(1);
+  });
+
+  it('article.delete rolls back a late SQL failure after its single verified backup', async () => {
+    await prisma.$executeRawUnsafe(
+      "CREATE TRIGGER refuse_article_delete BEFORE DELETE ON articles BEGIN SELECT RAISE(ABORT,'synthetic-delete-failure'); END",
+    );
+    const before = await snapshot();
+    await expect(api.article.delete('article-0')).rejects.toThrow();
+    expect(await snapshot()).toEqual(before);
+    expect(backup.createVerifiedSqliteBackup).toHaveBeenCalledTimes(1);
+  });
+
+  it('article.delete rejects ordinary, wrong-source and malformed recovery proofs', async () => {
+    const before = await snapshot();
+    for (const extra of [
+      {
+        recoveryOrigin: {
+          format: 'sqlite-recovery-origin-v1',
+          kind: 'periodic',
+        },
+      },
+      { source: path.join(root, 'missing.db') },
+      { integrityCheck: 'failed' },
+      { sha256: '' },
+    ]) {
+      jest
+        .mocked(backup.createVerifiedSqliteBackup)
+        .mockImplementationOnce(
+          async (options) =>
+            ({ ...(await realBackup(options)), ...extra }) as any,
+        );
+      await expect(api.article.delete('article-0')).rejects.toThrow();
+      expect(await snapshot()).toEqual(before);
+    }
   });
 });

@@ -55,6 +55,7 @@ export default function ManagementFolders({
   const [error, setError] = useState('');
   const [addingTo, setAddingTo] = useState<Folder>();
   const [saving, setSaving] = useState(false);
+  const [pendingRename, setPendingRename] = useState<Folder>();
   const active = useRef(false);
   const run = async (operation: () => Promise<unknown>) => {
     if (disabled || active.current) return false;
@@ -98,6 +99,49 @@ export default function ManagementFolders({
     ids.splice(to, 0, id);
     void run(() => onReorder(ids, expectedIds));
   };
+  const save = () => {
+    if (disabled || active.current) return;
+    const trimmed = name.trim();
+    if (
+      !trimmed ||
+      trimmed.length > 80 ||
+      Array.from(trimmed).some((char) => {
+        const code = char.charCodeAt(0);
+        return code < 32 || code === 127;
+      })
+    ) {
+      setError('分组名称须为 1–80 个字符，不能含控制字符。');
+      return;
+    }
+    if (editing?.name === trimmed) {
+      setEditing(undefined);
+      return;
+    }
+    void run(async () => {
+      // This overlay is provisional; the cache contains confirmed names only.
+      // Keep the synchronous mutation fence until the server acknowledges it.
+      if (editing) {
+        setPendingRename({ id: editing.id, name: trimmed });
+        setEditing(undefined);
+      }
+      try {
+        await onSave({ ...(editing ? { id: editing.id } : {}), name: trimmed });
+        setEditing(undefined);
+      } catch (cause) {
+        if (!editing) throw cause;
+        throw new Error(
+          `“${trimmed}”未确认保存，已恢复上次确认的名称；请刷新核对后重试。${cause instanceof Error ? cause.message : ''}`,
+        );
+      } finally {
+        setPendingRename(undefined);
+      }
+    });
+  };
+  const displayedFolders = folders.map((folder) =>
+    folder.id === pendingRename?.id
+      ? { ...folder, name: pendingRename.name }
+      : folder,
+  );
   return (
     <div className="folder-navigation" aria-label="管理文件夹">
       <div className="folder-navigation-header">
@@ -123,6 +167,7 @@ export default function ManagementFolders({
           aria-label="新建文件夹"
           isDisabled={disabled}
           onPress={() => {
+            setError('');
             setEditing(null);
             setName('');
           }}
@@ -133,7 +178,7 @@ export default function ManagementFolders({
       {[
         { id: 'all', name: '全部' },
         { id: 'ungrouped', name: '未分组' },
-        ...folders,
+        ...displayedFolders,
       ].map((folder) => {
         const row = (
           <div
@@ -180,6 +225,7 @@ export default function ManagementFolders({
                   onAction={(key) => {
                     if (disabled || active.current) return;
                     if (key === 'rename') {
+                      setError('');
                       setEditing(folder);
                       setName(folder.name);
                     } else if (key === 'add') {
@@ -255,7 +301,7 @@ export default function ManagementFolders({
               onChange={(event) => setDestination(event.target.value)}
             >
               <option value="">未分组</option>
-              {folders.map((folder) => (
+              {displayedFolders.map((folder) => (
                 <option key={folder.id} value={folder.id}>
                   {folder.name}
                 </option>
@@ -296,6 +342,7 @@ export default function ManagementFolders({
         </p>
       )}
       <Modal
+        disableAnimation
         isOpen={editing !== undefined}
         onClose={() => {
           if (!disabled && !active.current) setEditing(undefined);
@@ -324,15 +371,7 @@ export default function ManagementFolders({
             <Button
               color="primary"
               isDisabled={disabled || !name.trim()}
-              onPress={() =>
-                void run(async () => {
-                  await onSave({
-                    ...(editing ? { id: editing.id } : {}),
-                    name: name.trim(),
-                  });
-                  setEditing(undefined);
-                })
-              }
+              onPress={save}
             >
               保存
             </Button>

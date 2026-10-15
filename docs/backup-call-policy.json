@@ -1,0 +1,272 @@
+{
+  "version": 1,
+  "principle": "Routine writes: zero snapshot calls. Explicit high-risk actions: one protection boundary per operation. Periodic snapshots are independent.",
+  "boundaries": [
+    {
+      "file": "apps/server/src/collection/account-write.ts",
+      "scope": "editAccount",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Only an explicit token replacement; ordinary name/status edits take the incremental branch. Runtime field matrix required."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.replayWereadDirectory",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit offline replay or reviewed one-time historical import, outside routine collection."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.replayVerifiedSearch",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit offline replay or reviewed one-time historical import, outside routine collection."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.replayBrowserDomUpdate",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit offline replay or reviewed one-time historical import, outside routine collection."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.importVerifiedSearchBackfill",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit offline replay or reviewed one-time historical import, outside routine collection."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.collectMp2RssRecent20",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Only a real collection-channel or normalized album-binding change; unchanged routine updates have zero calls. Runtime conditional matrix required."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.collectPublicAlbums",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Only a real collection-channel or normalized album-binding change; unchanged routine updates have zero calls. Runtime conditional matrix required."
+    },
+    {
+      "file": "apps/server/src/collection/owner-weread-batch-resume.ts",
+      "scope": "activateReviewedWereadBatch",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit reviewed batch activation changes source bindings."
+    },
+    {
+      "file": "apps/server/src/collection/protected-delete.ts",
+      "scope": "protectedDelete",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Shared exclusive recovery gate before target revalidation and atomic deletion."
+    },
+    {
+      "file": "apps/server/src/collection/protected-feed-delete.ts",
+      "scope": "protectedFeedDelete",
+      "gate": "protectedDelete",
+      "maxCalls": 1,
+      "rationale": "Existing single/bulk feed deletion delegates once to shared recovery boundary."
+    },
+    {
+      "file": "apps/server/src/collection/protected-article-delete.ts",
+      "scope": "protectedArticleDelete",
+      "gate": "protectedDelete",
+      "maxCalls": 1,
+      "rationale": "Existing single article deletion delegates once to shared recovery boundary."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "removeManagementGroup",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit group deletion keeps its independent recovery gate."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "XiaohongshuService.remove",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit subscription deletion remains protected."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.router.ts",
+      "scope": "TrpcRouter.collectionRouter.importDirectory",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit reviewed filesystem import may replay historical content."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.router.ts",
+      "scope": "TrpcRouter.accountRouter.add",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit credential installation or account deletion remains protected."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.router.ts",
+      "scope": "TrpcRouter.accountRouter.delete",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit credential installation or account deletion remains protected."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.router.ts",
+      "scope": "TrpcRouter.feedRouter.delete",
+      "gate": "protectedFeedDelete",
+      "maxCalls": 1,
+      "rationale": "Existing feed deletion route delegates once; no per-item backup loop."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.router.ts",
+      "scope": "TrpcRouter.feedRouter.batchDelete",
+      "gate": "protectedFeedDelete",
+      "maxCalls": 1,
+      "rationale": "Existing feed deletion route delegates once; no per-item backup loop."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.router.ts",
+      "scope": "TrpcRouter.articleRouter.delete",
+      "gate": "protectedArticleDelete",
+      "maxCalls": 1,
+      "rationale": "Existing single article deletion route delegates once."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.service.ts",
+      "scope": "TrpcService.repairExistingSubscription",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Only explicit native private-source activation callback, including staged rollback deletion. Ordinary Wechat2RSS creation does not enter this gate."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.service.ts",
+      "scope": "TrpcService.addSubscriptionFromArticle",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Only explicit native private-source activation callback, including staged rollback deletion. Ordinary Wechat2RSS creation does not enter this gate."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.service.ts",
+      "scope": "TrpcService.getLoginResult",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Successful QR account/session replacement installs credentials; polling without replacement does not request a backup."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.collectOwnerSearch",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Routine incremental collection/body cache uses transaction, deduplication and SQL receipts; never falls back to a full snapshot."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.collectVerifiedWereadCandidate",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Routine incremental collection/body cache uses transaction, deduplication and SQL receipts; never falls back to a full snapshot."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.collectOwnerWereadLatest",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Routine incremental collection/body cache uses transaction, deduplication and SQL receipts; never falls back to a full snapshot."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.retryArticleBody",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Routine incremental collection/body cache uses transaction, deduplication and SQL receipts; never falls back to a full snapshot."
+    },
+    {
+      "file": "apps/server/src/collection/collection.service.ts",
+      "scope": "CollectionService.collectWechat2RssRecent",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Routine incremental collection/body cache uses transaction, deduplication and SQL receipts; never falls back to a full snapshot."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "saveManagementGroup",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Ordinary group/subscription/cache writes use existing incremental admission and an atomic transaction."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "reorderManagementGroups",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Ordinary group/subscription/cache writes use existing incremental admission and an atomic transaction."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "reorderManagementFeeds",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Ordinary group/subscription/cache writes use existing incremental admission and an atomic transaction."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "moveManagementMembers",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Ordinary group/subscription/cache writes use existing incremental admission and an atomic transaction."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "XiaohongshuService.add",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Ordinary group/subscription/cache writes use existing incremental admission and an atomic transaction."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "XiaohongshuService.edit",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Ordinary group/subscription/cache writes use existing incremental admission and an atomic transaction."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu.service.ts",
+      "scope": "XiaohongshuService.refresh",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Ordinary group/subscription/cache writes use existing incremental admission and an atomic transaction."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.service.ts",
+      "scope": "TrpcService.recordCollectionResult",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Generic status wrappers, refresh preparation and subscription continuation must not impose a default full-snapshot gate."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.service.ts",
+      "scope": "TrpcService.continueAcceptedSubscription",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Generic status wrappers, refresh preparation and subscription continuation must not impose a default full-snapshot gate."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.service.ts",
+      "scope": "TrpcService.runManualRefresh",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Generic status wrappers, refresh preparation and subscription continuation must not impose a default full-snapshot gate."
+    },
+    {
+      "file": "apps/server/src/trpc/trpc.service.ts",
+      "scope": "TrpcService.prepareRefreshWaveItem",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Generic status wrappers, refresh preparation and subscription continuation must not impose a default full-snapshot gate."
+    }
+  ]
+}

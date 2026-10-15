@@ -17,6 +17,7 @@ on:
         codex/bounded-five-submit-20261014,
         codex/space-guard-production-compat-20261014,
         codex/export-real-metrics-only-20261014,
+        codex/folder-rename-latency,
       ]
   pull_request:
     branches:
@@ -122,6 +123,11 @@ jobs:
 
       - name: Format check
         run: pnpm fmt.check
+
+      - name: Enforce explicit backup boundaries without database or network access
+        run: |
+          node --test scripts/check-backup-policy.test.cjs
+          node scripts/check-backup-policy.cjs
 
       - name: Lint Server
         run: pnpm --filter server lint

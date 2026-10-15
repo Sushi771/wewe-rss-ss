@@ -228,7 +228,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(await prisma.feed.count()).toBe(0);
   });
 
-  it('explicit paid choice bypasses registered native only after the existing config gate and backup', async () => {
+  it('explicit paid choice bypasses registered native after the existing config gate, with zero snapshots', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     const { caller } = setup();
     expect(
@@ -253,7 +253,6 @@ describe('explicit add source through original router (offline SQLite)', () => {
     });
     expect(events).toEqual([
       '/login/list',
-      'backup',
       '/addurl',
       '/list',
       `/feed/${number}.xml`,
@@ -611,7 +610,6 @@ describe('explicit add source through original router (offline SQLite)', () => {
     });
     expect(events).toEqual([
       '/login/list',
-      'backup',
       '/addurl',
       '/list',
       `/feed/${number}.xml`,
@@ -645,32 +643,29 @@ describe('explicit add source through original router (offline SQLite)', () => {
     },
   );
 
-  it('backup failure prevents /addurl and preserves the empty database', async () => {
+  it('unavailable snapshots do not block ordinary /addurl registration', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
-    backup.mockRejectedValueOnce(new Error('synthetic-backup-failure'));
+    backup.mockRejectedValue(new Error('synthetic-backup-failure'));
     await expect(
       setup().caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
-    ).resolves.toMatchObject({
-      status: 'failed',
-      accepted: false,
-      code: 'ADD_FAILED',
-    });
-    expect(events).toEqual(['/login/list']);
-    expect(await prisma.feed.count()).toBe(0);
-    expect(native.discover).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({ status: 'pending', accepted: true });
+    expect(backup).not.toHaveBeenCalled();
+    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+    expect(await prisma.feed.count()).toBe(1);
   });
 
-  it('rejects a concurrent paid add before backup or upstream and releases its lock on completion', async () => {
+  it('rejects a concurrent paid add before a second upstream request and releases its lock on completion', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     const { caller } = setup();
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     const started = new Promise<void>((resolve) => (entered = resolve));
-    backup.mockImplementationOnce(async (options) => {
+    const transport = request.getMockImplementation()!;
+    request.mockImplementationOnce(async (input) => {
       entered();
       await gate;
-      return realBackup(options);
+      return transport(input);
     });
     const first = caller.feed.addFromArticle({
       articleUrl,
@@ -688,8 +683,8 @@ describe('explicit add source through original router (offline SQLite)', () => {
           source: 'wechat2rss',
         }),
       ).rejects.toMatchObject({ code: 'CONFLICT' });
-      expect(backup).toHaveBeenCalledTimes(1);
-      expect(events).toEqual(['/login/list']);
+      expect(backup).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
     } finally {
       release();
       await first;
@@ -703,14 +698,15 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(native.discover).not.toHaveBeenCalled();
   });
 
-  it('releases the paid add lock after backup or upstream failure without automatic replay', async () => {
+  it('releases the paid add lock after local admission or upstream failure without automatic replay', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     const { caller } = setup();
-    backup.mockRejectedValueOnce(new Error('synthetic-backup-failure'));
+    process.env.SQLITE_INCREMENTAL_MIN_FREE_BYTES = 'invalid';
     await expect(
       caller.feed.addFromArticle({ articleUrl, source: 'wechat2rss' }),
     ).resolves.toMatchObject({ status: 'failed', accepted: false });
     expect(events).toEqual(['/login/list']);
+    delete process.env.SQLITE_INCREMENTAL_MIN_FREE_BYTES;
     request.mockRejectedValueOnce(
       new Error('synthetic-private-request-failure'),
     );
@@ -1641,7 +1637,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
     expect(
       await (service as any).continueAcceptedSubscription(task),
     ).toMatchObject({ state: 'blocked', code: 'SUBSCRIPTION_PAUSED' });
-    expect(events).toEqual(['backup']);
+    expect(events).toEqual([]);
     service.onModuleDestroy();
   });
 

@@ -299,135 +299,177 @@ export class CollectionService {
     page: ProviderPage,
     advanceSync = false,
     expected?: { created: number; updated: number },
+    expectedChannel?: string,
   ) {
     let created = 0,
       updated = 0;
-    await this.prisma.$transaction(
-      async (tx) => {
-        const currentFeed = await tx.feed.findUniqueOrThrow({
-          where: { id: mpId },
-        });
-        for (const item of page.articles) {
-          const identity = canonicalArticleUrl(item.url);
-          const base = new URL(identity.url);
-          base.searchParams.delete('sn');
-          const matches = await tx.article.findMany({
-            where: {
-              mpId,
-              OR: [
-                { id: item.id },
-                ...(item.shortUrl
-                  ? [
-                      { id: item.shortUrl.split('/').at(-1)! },
-                      { sourceUrl: item.shortUrl },
-                      { verifiedSourceUrl: item.shortUrl },
-                    ]
-                  : []),
-                { sourceUrl: base.toString() },
-                { sourceUrl: { startsWith: base.toString() + '&sn=' } },
-                { verifiedSourceUrl: base.toString() },
-                {
-                  verifiedSourceUrl: { startsWith: base.toString() + '&sn=' },
-                },
-              ],
-            },
-          });
-          if (matches.length > 1)
-            throw new Error('SEARCH_REPLAY_AMBIGUOUS_OLD_ID');
-          const existing = matches[0];
-          if (existing) {
-            assertSavedArticleIdentity(existing, {
-              ...identity,
-              ...(item.shortUrl ? { shortUrl: item.shortUrl } : {}),
+    await incrementalWrite(
+      this.prisma,
+      Buffer.byteLength(JSON.stringify(page)),
+      () =>
+        this.prisma.$transaction(
+          async (tx) => {
+            await assertIncrementalTransaction(tx);
+            const currentFeed = await tx.feed.findUniqueOrThrow({
+              where: { id: mpId },
             });
-            // Search gets no album-specific 60-second relaxation. Every old
-            // title, trusted time and known signature must remain consistent.
             if (
-              existing.publishTime !== item.publishTime ||
-              existing.title.normalize('NFKC').replace(/\s+/gu, '') !==
-                item.title.normalize('NFKC').replace(/\s+/gu, '')
+              expectedChannel &&
+              (currentFeed.status !== 1 ||
+                currentFeed.collectionChannel !== expectedChannel)
             )
-              throw new Error('SEARCH_REPLAY_SAVED_METADATA_CONFLICT');
-            for (const url of [
-              existing.sourceUrl,
-              existing.verifiedSourceUrl,
-            ]) {
-              if (
-                url &&
-                new URL(url).pathname === '/s' &&
-                canonicalArticleUrl(url).url !== item.url
-              )
-                throw new Error('SEARCH_REPLAY_SAVED_SIGNATURE_CONFLICT');
-            }
-            const supplemented = existing.contentHtml
-              ? supplementSavedBodyImages(existing.contentHtml, item)
-              : undefined;
-            const data = {
-              ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
-              ...(!existing.verifiedSourceUrl
-                ? { verifiedSourceUrl: item.url }
-                : {}),
-              ...(!existing.contentHtml && item.contentHtml
-                ? {
-                    contentHtml: item.contentHtml,
-                    lastBodyStatus: 'available',
-                  }
-                : {}),
-              ...(supplemented ? { contentHtml: supplemented } : {}),
-            };
-            if (Object.keys(data).length) {
-              await tx.article.update({ where: { id: existing.id }, data });
-              updated++;
-            }
-          } else {
-            // A title collision with an opaque legacy ID cannot be merged or
-            // duplicated without independent identity evidence.
-            if (
-              await tx.article.findFirst({
+              throw new Error('COLLECTION_SOURCE_CHANGED');
+            for (const item of page.articles) {
+              const identity = canonicalArticleUrl(item.url);
+              const base = new URL(identity.url);
+              base.searchParams.delete('sn');
+              const matches = await tx.article.findMany({
                 where: {
                   mpId,
-                  title: item.title,
-                  sourceUrl: null,
-                  verifiedSourceUrl: null,
+                  OR: [
+                    { id: item.id },
+                    ...(item.shortUrl
+                      ? [
+                          { id: item.shortUrl.split('/').at(-1)! },
+                          { sourceUrl: item.shortUrl },
+                          { verifiedSourceUrl: item.shortUrl },
+                        ]
+                      : []),
+                    { sourceUrl: base.toString() },
+                    { sourceUrl: { startsWith: base.toString() + '&sn=' } },
+                    { verifiedSourceUrl: base.toString() },
+                    {
+                      verifiedSourceUrl: {
+                        startsWith: base.toString() + '&sn=',
+                      },
+                    },
+                  ],
                 },
-              })
+              });
+              if (matches.length > 1)
+                throw new Error('SEARCH_REPLAY_AMBIGUOUS_OLD_ID');
+              const existing = matches[0];
+              if (existing) {
+                assertSavedArticleIdentity(existing, {
+                  ...identity,
+                  ...(item.shortUrl ? { shortUrl: item.shortUrl } : {}),
+                });
+                // Search gets no album-specific 60-second relaxation. Every old
+                // title, trusted time and known signature must remain consistent.
+                if (
+                  existing.publishTime !== item.publishTime ||
+                  existing.title.normalize('NFKC').replace(/\s+/gu, '') !==
+                    item.title.normalize('NFKC').replace(/\s+/gu, '')
+                )
+                  throw new Error('SEARCH_REPLAY_SAVED_METADATA_CONFLICT');
+                for (const url of [
+                  existing.sourceUrl,
+                  existing.verifiedSourceUrl,
+                ]) {
+                  if (
+                    url &&
+                    new URL(url).pathname === '/s' &&
+                    canonicalArticleUrl(url).url !== item.url
+                  )
+                    throw new Error('SEARCH_REPLAY_SAVED_SIGNATURE_CONFLICT');
+                }
+                const supplemented = existing.contentHtml
+                  ? supplementSavedBodyImages(existing.contentHtml, item)
+                  : undefined;
+                const data = {
+                  ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
+                  ...(!existing.verifiedSourceUrl
+                    ? { verifiedSourceUrl: item.url }
+                    : {}),
+                  ...(!existing.contentHtml && item.contentHtml
+                    ? {
+                        contentHtml: item.contentHtml,
+                        lastBodyStatus: 'available',
+                      }
+                    : {}),
+                  ...(supplemented ? { contentHtml: supplemented } : {}),
+                };
+                if (Object.keys(data).length) {
+                  await tx.article.update({ where: { id: existing.id }, data });
+                  updated++;
+                }
+              } else {
+                // A title collision with an opaque legacy ID cannot be merged or
+                // duplicated without independent identity evidence.
+                if (
+                  await tx.article.findFirst({
+                    where: {
+                      mpId,
+                      title: item.title,
+                      sourceUrl: null,
+                      verifiedSourceUrl: null,
+                    },
+                  })
+                )
+                  throw new Error('SEARCH_REPLAY_UNRESOLVED_LEGACY_ID');
+                await tx.article.create({
+                  data: {
+                    id: item.id,
+                    mpId,
+                    title: item.title,
+                    publishTime: item.publishTime,
+                    sourceUrl: item.url,
+                    verifiedSourceUrl: item.url,
+                    contentHtml: item.contentHtml,
+                    picUrl: item.picUrl,
+                    lastBodyStatus: 'available',
+                  },
+                });
+                created++;
+              }
+            }
+            if (
+              expected &&
+              (created !== expected.created || updated !== expected.updated)
             )
-              throw new Error('SEARCH_REPLAY_UNRESOLVED_LEGACY_ID');
-            await tx.article.create({
-              data: {
-                id: item.id,
-                mpId,
-                title: item.title,
-                publishTime: item.publishTime,
-                sourceUrl: item.url,
-                verifiedSourceUrl: item.url,
-                contentHtml: item.contentHtml,
-                picUrl: item.picUrl,
-                lastBodyStatus: 'available',
-              },
-            });
-            created++;
-          }
-        }
-        if (
-          expected &&
-          (created !== expected.created || updated !== expected.updated)
-        )
-          throw new Error('SEARCH_BACKFILL_UNEXPECTED_WRITE_SET');
-        if (advanceSync && page.articles.length) {
-          await tx.feed.update({
-            where: { id: mpId },
-            data: {
-              syncTime: Math.floor(Date.now() / 1000),
-              updateTime: Math.max(
-                currentFeed.updateTime,
-                ...page.articles.map((item) => item.publishTime),
-              ),
-            },
-          });
-        }
-      },
-      { timeout: 60000 },
+              throw new Error('SEARCH_BACKFILL_UNEXPECTED_WRITE_SET');
+            if (advanceSync && page.articles.length) {
+              await tx.feed.update({
+                where: { id: mpId },
+                data: {
+                  syncTime: Math.floor(Date.now() / 1000),
+                  updateTime: Math.max(
+                    currentFeed.updateTime,
+                    ...page.articles.map((item) => item.publishTime),
+                  ),
+                  ...(expectedChannel
+                    ? {
+                        lastCollectionResult: JSON.stringify({
+                          source: expectedChannel,
+                          status: 'partial',
+                          complete: false,
+                          coverage: page.coverage,
+                          articles: page.articles.length,
+                          created,
+                          updated,
+                          bodyMissing: page.bodyMissing,
+                          imageBlocked: page.imageBlocked,
+                          attemptedAt: Math.floor(Date.now() / 1000),
+                          message: `本轮保存 ${page.articles.length} 篇（新增 ${created}、补全 ${updated}），仅覆盖来源已核验窗口，旧文章与正文保留。`,
+                        }),
+                      }
+                    : {}),
+                },
+              });
+            }
+            // Protected offline replay/backfill shares the identity saver, but
+            // its approved write set must leave existing remote/cache ledgers
+            // untouched. Only ordinary source collection adds this SQL receipt.
+            if (expectedChannel) {
+              const receiptId = createHash('sha256')
+                .update(JSON.stringify(['verified-page-v1', mpId, page]))
+                .digest('hex');
+              await tx.$executeRaw`INSERT INTO cache_refresh_commits(id,mp_id,result_json,committed_at_ms)
+                VALUES(${receiptId},${mpId},${JSON.stringify({ created, updated })},${Date.now()}) ON CONFLICT(id) DO NOTHING`;
+            }
+          },
+          { timeout: 60000 },
+        ),
     );
     return { created, updated };
   }
@@ -439,8 +481,13 @@ export class CollectionService {
       const config = await readOwnerSearchConfig(mpId);
       // Preflight retains the existing platform stop before even searching.
       const page = await fetchLiveOwnerArticles(config);
-      await createVerifiedSqliteBackup();
-      const saved = await this.saveVerifiedSearchPage(mpId, page, true);
+      const saved = await this.saveVerifiedSearchPage(
+        mpId,
+        page,
+        true,
+        undefined,
+        'owner-web-search',
+      );
       return {
         source: 'owner-web-search' as const,
         status: 'partial' as const,
@@ -487,8 +534,13 @@ export class CollectionService {
       )
         throw new Error('候选公众号尚未成功绑定或订阅身份已变化。');
       const page = await continueVerifiedWereadCandidate(result);
-      await createVerifiedSqliteBackup();
-      const saved = await this.saveVerifiedSearchPage(mpId, page, true);
+      const saved = await this.saveVerifiedSearchPage(
+        mpId,
+        page,
+        true,
+        undefined,
+        'owner-weread-latest',
+      );
       return {
         source: 'owner-weread-latest' as const,
         status: 'partial' as const,
@@ -512,8 +564,13 @@ export class CollectionService {
     try {
       const config = await readOwnerSearchConfig(mpId);
       const page = await fetchOwnerWereadLatest(config, trigger);
-      await createVerifiedSqliteBackup();
-      const saved = await this.saveVerifiedSearchPage(mpId, page, true);
+      const saved = await this.saveVerifiedSearchPage(
+        mpId,
+        page,
+        true,
+        undefined,
+        'owner-weread-latest',
+      );
       return {
         source: 'owner-weread-latest' as const,
         status: 'partial' as const,
@@ -565,17 +622,19 @@ export class CollectionService {
       : Promise.resolve();
   }
 
-  /** Internal metadata continuation, after the caller's account check and
-   * verified backup. A completed body must not skip a still-empty avatar. */
+  /** Cache-only metadata continuation. A completed body must not skip an avatar. */
   async supplementWechat2RssAvatar(mpId: string) {
     const feed = await this.prisma.feed.findUniqueOrThrow({
       where: { id: mpId },
     });
     const avatar = await this.readWechat2RssAvatar(feed, wechat2RssProvider());
     if (!avatar) return;
-    await this.prisma.$transaction(async (tx) => {
-      await this.writeWechat2RssAvatar(tx, mpId, avatar);
-    });
+    await incrementalWrite(this.prisma, Buffer.byteLength(avatar), () =>
+      this.prisma.$transaction(async (tx) => {
+        await assertIncrementalTransaction(tx);
+        await this.writeWechat2RssAvatar(tx, mpId, avatar);
+      }),
+    );
   }
 
   async collectWechat2RssRecent(input: {
@@ -1126,14 +1185,11 @@ export class CollectionService {
     this.publicCollections.add(initial.mpId);
     try {
       bodyRetryTarget(initial);
-      // 失败状态也属于写入；备份失败时没有网络请求或数据库变化。
-      try {
-        await createVerifiedSqliteBackup();
-      } catch {
-        throw new BodyRetryBlockedError(
-          '一致性备份失败，本次未请求原文或写入状态。',
-        );
-      }
+      // Prove local write capacity before requesting the original. Do not hold
+      // admission or a SQLite transaction across HTTP, and never replay HTTP.
+      await incrementalWrite(this.prisma, 4096, () =>
+        this.prisma.$transaction((tx) => assertIncrementalTransaction(tx)),
+      );
       const article = await this.prisma.article.findUniqueOrThrow({
         where: { id },
       });
@@ -1155,67 +1211,80 @@ export class CollectionService {
             '文章信息在重试期间已变更，请重新读取文章。',
           );
       };
+      let fetched: Awaited<ReturnType<typeof fetchArticleBody>>;
       try {
-        const fetched = await fetchArticleBody(article);
-        return await this.prisma.$transaction(async (tx) => {
-          const current = await tx.article.findUniqueOrThrow({ where: { id } });
-          unchangedIdentity(current);
-          const status = fetched.contentHtml ? 'available' : 'unavailable';
-          const result: BodyRetryResult = {
-            status,
-            code: status,
-            attemptedAt,
-            cached: Boolean(current.contentHtml || fetched.contentHtml),
-            filled: Boolean(!current.contentHtml && fetched.contentHtml),
-            message: bodyRetryMessages[status],
-          };
-          await tx.article.update({
-            where: { id },
-            data: {
-              lastBodyStatus: status,
-              // Only the identity-checked original ct may replace an
-              // unverified album list timestamp.
-              ...(!current.verifiedSourceUrl &&
-              current.publishTime !== fetched.originalPublishTime
-                ? { publishTime: fetched.originalPublishTime }
-                : {}),
-              verifiedSourceUrl:
-                current.verifiedSourceUrl || fetched.verifiedSourceUrl,
-              lastBodyRetry: JSON.stringify(result),
-              ...(!current.contentHtml && fetched.contentHtml
-                ? { contentHtml: fetched.contentHtml }
-                : {}),
-            },
-          });
-          return result;
-        });
+        fetched = await fetchArticleBody(article);
       } catch (error) {
         const code = bodyRetryFailure(error);
-        // 不持久化 HTTP/数据库错误原文，避免带出请求参数或正文。
-        return await this.prisma.$transaction(async (tx) => {
-          const current = await tx.article.findUniqueOrThrow({ where: { id } });
-          unchangedIdentity(current);
-          const result: BodyRetryResult = {
-            status: 'failed',
-            code,
-            requestFailure: bodyRetryRequestFailure(error),
-            attemptedAt,
-            cached: Boolean(current.contentHtml),
-            filled: false,
-            message: bodyRetryMessages[code],
-          };
-          await tx.article.update({
-            where: { id },
-            // Recording a failed attempt is not an edit to the missing body.
-            // Preserve its edit watermark so the cache worker can still fill it.
-            data: {
-              lastBodyRetry: JSON.stringify(result),
-              updatedAt: current.updatedAt,
-            },
-          });
-          return result;
-        });
+        // Only transport/validation errors reach here. A SQL error or an
+        // interrupted commit acknowledgement must not be relabelled/retried.
+        return incrementalWrite(this.prisma, 4096, () =>
+          this.prisma.$transaction(async (tx) => {
+            await assertIncrementalTransaction(tx);
+            const current = await tx.article.findUniqueOrThrow({
+              where: { id },
+            });
+            unchangedIdentity(current);
+            const result: BodyRetryResult = {
+              status: 'failed',
+              code,
+              requestFailure: bodyRetryRequestFailure(error),
+              attemptedAt,
+              cached: Boolean(current.contentHtml),
+              filled: false,
+              message: bodyRetryMessages[code],
+            };
+            await tx.article.update({
+              where: { id },
+              data: {
+                lastBodyRetry: JSON.stringify(result),
+                updatedAt: current.updatedAt,
+              },
+            });
+            return result;
+          }),
+        );
       }
+      return await incrementalWrite(
+        this.prisma,
+        Buffer.byteLength(JSON.stringify(fetched)),
+        () =>
+          this.prisma.$transaction(async (tx) => {
+            await assertIncrementalTransaction(tx);
+            const current = await tx.article.findUniqueOrThrow({
+              where: { id },
+            });
+            unchangedIdentity(current);
+            const status = fetched.contentHtml ? 'available' : 'unavailable';
+            const result: BodyRetryResult = {
+              status,
+              code: status,
+              attemptedAt,
+              cached: Boolean(current.contentHtml || fetched.contentHtml),
+              filled: Boolean(!current.contentHtml && fetched.contentHtml),
+              message: bodyRetryMessages[status],
+            };
+            await tx.article.update({
+              where: { id },
+              data: {
+                lastBodyStatus: status,
+                // Only the identity-checked original ct may replace an
+                // unverified album list timestamp.
+                ...(!current.verifiedSourceUrl &&
+                current.publishTime !== fetched.originalPublishTime
+                  ? { publishTime: fetched.originalPublishTime }
+                  : {}),
+                verifiedSourceUrl:
+                  current.verifiedSourceUrl || fetched.verifiedSourceUrl,
+                lastBodyRetry: JSON.stringify(result),
+                ...(!current.contentHtml && fetched.contentHtml
+                  ? { contentHtml: fetched.contentHtml }
+                  : {}),
+              },
+            });
+            return result;
+          }),
+      );
     } finally {
       this.publicCollections.delete(initial.mpId);
     }
@@ -1231,99 +1300,123 @@ export class CollectionService {
       });
       if (feed.mpName !== input.mpName)
         throw new Error('订阅号名称已变化，本次未写入文章');
+      if (feed.collectionChannel !== 'mp2rss')
+        await createVerifiedSqliteBackup(); // Explicit source replacement stays protected.
       // The complete upstream page and all original identities are checked before a write.
       const articles = await fetchMp2RssRecent20(input.mpId, input.mpName);
       let created = 0;
       let updated = 0;
-      await this.prisma.$transaction(
-        async (tx) => {
-          for (const item of articles) {
-            const baseUrl = item.url.split('&sn=')[0];
-            const matches = await tx.article.findMany({
-              where: {
-                mpId: input.mpId,
-                OR: [
-                  { id: item.id },
-                  ...(item.shortUrl
-                    ? [{ id: item.shortUrl.split('/').at(-1)! }]
-                    : []),
-                  ...(item.shortUrl ? [{ sourceUrl: item.shortUrl }] : []),
-                  { sourceUrl: item.url },
-                  { sourceUrl: baseUrl },
-                  { sourceUrl: { startsWith: `${baseUrl}&sn=` } },
-                  { verifiedSourceUrl: baseUrl },
-                  { verifiedSourceUrl: { startsWith: `${baseUrl}&sn=` } },
-                ],
-              },
-            });
-            if (matches.length > 1)
-              throw new Error('同一原文对应多条旧记录，本次未写入文章');
-            const existing = matches[0];
-            if (existing)
-              assertSavedArticleIdentity(existing, {
-                ...item,
-                shortUrl: item.shortUrl || undefined,
+      await incrementalWrite(
+        this.prisma,
+        Buffer.byteLength(JSON.stringify(articles)),
+        () =>
+          this.prisma.$transaction(
+            async (tx) => {
+              await assertIncrementalTransaction(tx);
+              const currentFeed = await tx.feed.findUniqueOrThrow({
+                where: { id: input.mpId },
               });
-            if (existing) {
-              const data = {
-                title: item.title,
-                publishTime: item.publishTime!,
-                verifiedSourceUrl: existing.verifiedSourceUrl || item.url,
-                lastBodyStatus: item.contentHtml ? 'available' : 'unavailable',
-                ...(existing.sourceUrl
-                  ? {}
-                  : { sourceUrl: item.shortUrl || item.url }),
-                ...(existing.picUrl ? {} : { picUrl: item.picUrl }),
-                ...(existing.contentHtml
-                  ? {}
-                  : { contentHtml: item.contentHtml }),
-              };
               if (
-                existing.title !== data.title ||
-                existing.publishTime !== data.publishTime ||
-                !existing.verifiedSourceUrl ||
-                (!existing.sourceUrl && data.sourceUrl) ||
-                (!existing.picUrl && item.picUrl) ||
-                (!existing.contentHtml && item.contentHtml) ||
-                existing.lastBodyStatus !== data.lastBodyStatus
-              ) {
-                await tx.article.update({ where: { id: existing.id }, data });
-                updated++;
+                currentFeed.mpName !== feed.mpName ||
+                currentFeed.status !== feed.status ||
+                currentFeed.collectionChannel !== feed.collectionChannel
+              )
+                throw new Error('COLLECTION_SOURCE_CHANGED');
+              for (const item of articles) {
+                const baseUrl = item.url.split('&sn=')[0];
+                const matches = await tx.article.findMany({
+                  where: {
+                    mpId: input.mpId,
+                    OR: [
+                      { id: item.id },
+                      ...(item.shortUrl
+                        ? [{ id: item.shortUrl.split('/').at(-1)! }]
+                        : []),
+                      ...(item.shortUrl ? [{ sourceUrl: item.shortUrl }] : []),
+                      { sourceUrl: item.url },
+                      { sourceUrl: baseUrl },
+                      { sourceUrl: { startsWith: `${baseUrl}&sn=` } },
+                      { verifiedSourceUrl: baseUrl },
+                      { verifiedSourceUrl: { startsWith: `${baseUrl}&sn=` } },
+                    ],
+                  },
+                });
+                if (matches.length > 1)
+                  throw new Error('同一原文对应多条旧记录，本次未写入文章');
+                const existing = matches[0];
+                if (existing)
+                  assertSavedArticleIdentity(existing, {
+                    ...item,
+                    shortUrl: item.shortUrl || undefined,
+                  });
+                if (existing) {
+                  const data = {
+                    title: existing.title || item.title,
+                    publishTime: existing.publishTime || item.publishTime!,
+                    verifiedSourceUrl: existing.verifiedSourceUrl || item.url,
+                    lastBodyStatus: existing.contentHtml
+                      ? existing.lastBodyStatus || 'available'
+                      : item.contentHtml
+                        ? 'available'
+                        : 'unavailable',
+                    ...(existing.sourceUrl
+                      ? {}
+                      : { sourceUrl: item.shortUrl || item.url }),
+                    ...(existing.picUrl ? {} : { picUrl: item.picUrl }),
+                    ...(existing.contentHtml
+                      ? {}
+                      : { contentHtml: item.contentHtml }),
+                  };
+                  if (
+                    existing.title !== data.title ||
+                    existing.publishTime !== data.publishTime ||
+                    !existing.verifiedSourceUrl ||
+                    (!existing.sourceUrl && data.sourceUrl) ||
+                    (!existing.picUrl && item.picUrl) ||
+                    (!existing.contentHtml && item.contentHtml) ||
+                    existing.lastBodyStatus !== data.lastBodyStatus
+                  ) {
+                    await tx.article.update({
+                      where: { id: existing.id },
+                      data,
+                    });
+                    updated++;
+                  }
+                } else {
+                  await tx.article.create({
+                    data: {
+                      id: item.id,
+                      mpId: input.mpId,
+                      title: item.title,
+                      publishTime: item.publishTime!,
+                      sourceUrl: item.shortUrl || item.url,
+                      verifiedSourceUrl: item.url,
+                      picUrl: item.picUrl,
+                      contentHtml: item.contentHtml,
+                      lastBodyStatus: item.contentHtml
+                        ? 'available'
+                        : 'unavailable',
+                    },
+                  });
+                  created++;
+                }
               }
-            } else {
-              await tx.article.create({
+              const latest = await tx.article.aggregate({
+                where: { mpId: input.mpId },
+                _max: { publishTime: true },
+              });
+              await tx.feed.update({
+                where: { id: input.mpId },
                 data: {
-                  id: item.id,
-                  mpId: input.mpId,
-                  title: item.title,
-                  publishTime: item.publishTime!,
-                  sourceUrl: item.shortUrl || item.url,
-                  verifiedSourceUrl: item.url,
-                  picUrl: item.picUrl,
-                  contentHtml: item.contentHtml,
-                  lastBodyStatus: item.contentHtml
-                    ? 'available'
-                    : 'unavailable',
+                  collectionChannel: 'mp2rss',
+                  syncTime: Math.floor(Date.now() / 1000),
+                  updateTime: latest._max.publishTime || 0,
+                  hasHistory: -1,
                 },
               });
-              created++;
-            }
-          }
-          const latest = await tx.article.aggregate({
-            where: { mpId: input.mpId },
-            _max: { publishTime: true },
-          });
-          await tx.feed.update({
-            where: { id: input.mpId },
-            data: {
-              collectionChannel: 'mp2rss',
-              syncTime: Math.floor(Date.now() / 1000),
-              updateTime: latest._max.publishTime || 0,
-              hasHistory: -1,
             },
-          });
-        },
-        { timeout: 60000 },
+            { timeout: 60000 },
+          ),
       );
       return {
         source: 'mp2rss' as const,
@@ -1346,7 +1439,21 @@ export class CollectionService {
       throw new Error('该公众号正在采集公开合集，请等待本次结束');
     this.publicCollections.add(input.mpId);
     try {
-      await this.prisma.feed.findUniqueOrThrow({ where: { id: input.mpId } });
+      const feed = await this.prisma.feed.findUniqueOrThrow({
+        where: { id: input.mpId },
+      });
+      const albumIds = JSON.stringify([...new Set(input.albumIds)].sort());
+      let existingAlbums: string | undefined;
+      try {
+        existingAlbums = JSON.stringify(
+          [...new Set(JSON.parse(feed.publicAlbumIds || '[]'))].sort(),
+        );
+      } catch {}
+      if (
+        feed.collectionChannel !== 'public-album' ||
+        existingAlbums !== albumIds
+      )
+        await createVerifiedSqliteBackup(); // Binding replacement is a high-risk boundary.
       const result = await publicAlbumProvider(
         input.mpId,
         input.albumIds,
@@ -1520,88 +1627,108 @@ export class CollectionService {
         updated = 0,
         correctedPublishTimes = 0;
       // All network and identity validation finishes before any article or binding write.
-      await this.prisma.$transaction(
-        async (tx) => {
-          for (const entry of prepared) {
-            const { item, verified } = entry;
-            const existing = entry.existingId
-              ? await tx.article.findUniqueOrThrow({
-                  where: { id: entry.existingId },
-                })
-              : null;
-            if (existing) {
-              assertSavedArticleIdentity(
-                existing,
-                canonicalArticleUrl(item.url),
-              );
+      await incrementalWrite(
+        this.prisma,
+        Buffer.byteLength(JSON.stringify(prepared)),
+        () =>
+          this.prisma.$transaction(
+            async (tx) => {
+              await assertIncrementalTransaction(tx);
+              const currentFeed = await tx.feed.findUniqueOrThrow({
+                where: { id: input.mpId },
+              });
               if (
-                entry.correctPublishTime &&
-                (!/^WX_\d{5,15}_\d+_[1-9]\d*$/.test(existing.id) ||
-                  existing.contentHtml ||
-                  existing.verifiedSourceUrl ||
-                  existing.publishTime !== entry.listPublishTime ||
-                  !entry.originalPublishTime ||
-                  Math.abs(existing.publishTime - entry.originalPublishTime) >
-                    60)
+                currentFeed.mpName !== feed.mpName ||
+                currentFeed.status !== feed.status ||
+                currentFeed.collectionChannel !== feed.collectionChannel ||
+                currentFeed.publicAlbumIds !== feed.publicAlbumIds
               )
-                throw new Error('原文时间校正条件已变化，本批未写入');
-              const data = {
-                ...(entry.correctPublishTime
-                  ? { publishTime: entry.originalPublishTime }
-                  : {}),
-                ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
-                ...(!existing.verifiedSourceUrl && verified
-                  ? { verifiedSourceUrl: item.url }
-                  : {}),
-                ...(!existing.contentHtml && item.contentHtml
-                  ? {
+                throw new Error('COLLECTION_SOURCE_CHANGED');
+              for (const entry of prepared) {
+                const { item, verified } = entry;
+                const existing = entry.existingId
+                  ? await tx.article.findUniqueOrThrow({
+                      where: { id: entry.existingId },
+                    })
+                  : null;
+                if (existing) {
+                  assertSavedArticleIdentity(
+                    existing,
+                    canonicalArticleUrl(item.url),
+                  );
+                  if (
+                    entry.correctPublishTime &&
+                    (!/^WX_\d{5,15}_\d+_[1-9]\d*$/.test(existing.id) ||
+                      existing.contentHtml ||
+                      existing.verifiedSourceUrl ||
+                      existing.publishTime !== entry.listPublishTime ||
+                      !entry.originalPublishTime ||
+                      Math.abs(
+                        existing.publishTime - entry.originalPublishTime,
+                      ) > 60)
+                  )
+                    throw new Error('原文时间校正条件已变化，本批未写入');
+                  const data = {
+                    ...(entry.correctPublishTime
+                      ? { publishTime: entry.originalPublishTime }
+                      : {}),
+                    ...(!existing.sourceUrl ? { sourceUrl: item.url } : {}),
+                    ...(!existing.verifiedSourceUrl && verified
+                      ? { verifiedSourceUrl: item.url }
+                      : {}),
+                    ...(!existing.contentHtml && item.contentHtml
+                      ? {
+                          contentHtml: item.contentHtml,
+                          lastBodyStatus: 'available',
+                        }
+                      : {}),
+                    ...(!existing.picUrl && item.picUrl
+                      ? { picUrl: item.picUrl }
+                      : {}),
+                  };
+                  if (Object.keys(data).length) {
+                    await tx.article.update({
+                      where: { id: existing.id },
+                      data,
+                    });
+                    updated++;
+                    if (entry.correctPublishTime) correctedPublishTimes++;
+                  }
+                } else {
+                  await tx.article.create({
+                    data: {
+                      id: item.id,
+                      mpId: input.mpId,
+                      title: item.title,
+                      publishTime: item.publishTime,
+                      picUrl: item.picUrl,
+                      sourceUrl: item.url,
+                      verifiedSourceUrl: verified ? item.url : null,
                       contentHtml: item.contentHtml,
                       lastBodyStatus: 'available',
-                    }
-                  : {}),
-                ...(!existing.picUrl && item.picUrl
-                  ? { picUrl: item.picUrl }
-                  : {}),
-              };
-              if (Object.keys(data).length) {
-                await tx.article.update({ where: { id: existing.id }, data });
-                updated++;
-                if (entry.correctPublishTime) correctedPublishTimes++;
+                    },
+                  });
+                  created++;
+                }
               }
-            } else {
-              await tx.article.create({
+              const latest = await tx.article.aggregate({
+                where: { mpId: input.mpId },
+                _max: { publishTime: true },
+              });
+              await tx.feed.update({
+                where: { id: input.mpId },
                 data: {
-                  id: item.id,
-                  mpId: input.mpId,
-                  title: item.title,
-                  publishTime: item.publishTime,
-                  picUrl: item.picUrl,
-                  sourceUrl: item.url,
-                  verifiedSourceUrl: verified ? item.url : null,
-                  contentHtml: item.contentHtml,
-                  lastBodyStatus: 'available',
+                  publicAlbumIds: JSON.stringify([...new Set(input.albumIds)]),
+                  collectionChannel: 'public-album',
+                  localDirectory: null,
+                  syncTime: Math.floor(Date.now() / 1000),
+                  updateTime: latest._max.publishTime || 0,
+                  hasHistory: -1,
                 },
               });
-              created++;
-            }
-          }
-          const latest = await tx.article.aggregate({
-            where: { mpId: input.mpId },
-            _max: { publishTime: true },
-          });
-          await tx.feed.update({
-            where: { id: input.mpId },
-            data: {
-              publicAlbumIds: JSON.stringify([...new Set(input.albumIds)]),
-              collectionChannel: 'public-album',
-              localDirectory: null,
-              syncTime: Math.floor(Date.now() / 1000),
-              updateTime: latest._max.publishTime || 0,
-              hasHistory: -1,
             },
-          });
-        },
-        { timeout: 60000 },
+            { timeout: 60000 },
+          ),
       );
       return {
         source: 'public-album' as const,

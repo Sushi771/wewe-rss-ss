@@ -1,4 +1,6 @@
 import { protectedFeedDelete } from '../collection/protected-feed-delete';
+import { protectedArticleDelete } from '../collection/protected-article-delete';
+import { editAccount } from '../collection/account-write';
 import { buildArticleMarkdown } from '../article-export';
 import { cacheRevision, cacheSyncStatus } from '../feeds/cache-sync-state';
 import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
@@ -695,18 +697,7 @@ export class TrpcRouter {
       .input(AccountSchemas.edit)
       .mutation(async ({ input }) => {
         const { id, data } = input;
-        await createVerifiedSqliteBackup({ allowMysqlSkip: true });
-        const account = await this.prismaService.account.update({
-          where: { id },
-          data,
-          select: {
-            id: true,
-            name: true,
-            status: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        });
+        const account = await editAccount(this.prismaService, id, data);
         this.trpcService.removeBlockedAccount(id);
         return account;
       }),
@@ -1209,7 +1200,7 @@ export class TrpcRouter {
     delete: this.trpcService.protectedProcedure
       .input(z.string())
       .mutation(async ({ input: id }) => {
-        await this.prismaService.article.delete({ where: { id } });
+        await protectedArticleDelete(this.prismaService, id);
         return id;
       }),
     exportMarkdown: this.trpcService.protectedProcedure

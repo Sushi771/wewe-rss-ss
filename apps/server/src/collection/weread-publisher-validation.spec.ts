@@ -805,7 +805,7 @@ describe('publisher candidate directory: offline transport and success-only bind
         coverage: 'recent-window',
         complete: false,
       });
-      expect(createVerifiedSqliteBackup).toHaveBeenCalledTimes(1);
+      expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
       expect(await prisma.article.count({ where: { mpId } })).toBe(10);
       expect(
         await prisma.article.findUniqueOrThrow({ where: { id: old.id } }),
