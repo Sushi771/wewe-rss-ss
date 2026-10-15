@@ -9,6 +9,10 @@ import {
   XhsNormalizedCandidate,
 } from './xiaohongshu-contract';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
+import {
+  incrementalWrite,
+  assertIncrementalTransaction,
+} from './incremental-write';
 import { buildArticleMarkdown } from '../article-export';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -415,13 +419,17 @@ export class XiaohongshuService {
         creator: old,
         message: '此主页已在待接入列表中。',
       };
-    await createVerifiedSqliteBackup();
     const proposedId = randomUUID();
-    const creator = await this.prisma.xhsCreator.upsert({
-      where: { profileUrl },
-      create: { id: proposedId, profileUrl, displayName: name },
-      update: {},
-    });
+    const creator = await incrementalWrite(this.prisma, 4096, () =>
+      this.prisma.$transaction(async (tx) => {
+        await assertIncrementalTransaction(tx);
+        return tx.xhsCreator.upsert({
+          where: { profileUrl },
+          create: { id: proposedId, profileUrl, displayName: name },
+          update: {},
+        });
+      }),
+    );
     return {
       created: creator.id === proposedId,
       subscribed: false,
@@ -435,11 +443,12 @@ export class XiaohongshuService {
     this.active.add(id);
     try {
       await this.getCreator(id);
-      await createVerifiedSqliteBackup();
-      return await this.prisma.xhsCreator.update({
-        where: { id },
-        data: { enabled },
-      });
+      return await incrementalWrite(this.prisma, 4096, () =>
+        this.prisma.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          return tx.xhsCreator.update({ where: { id }, data: { enabled } });
+        }),
+      );
     } finally {
       this.active.delete(id);
     }
@@ -559,78 +568,102 @@ export class XiaohongshuService {
         }
       }
       if (!result.pages.length) return fail('未收到可核验列表，旧归档保留。');
-      await createVerifiedSqliteBackup();
-      const added = await this.prisma.$transaction(async (tx) => {
-        let count = 0;
-        for (const { draft: d, video, kind } of drafts.values()) {
-          const old = await tx.xhsNote.findUnique({ where: { id: d.noteKey } });
-          if (old) {
-            if (old.creatorId !== id)
-              return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
-            if (old.status !== 'video-skipped' || !video) continue;
-          }
-          const contentHtml =
-            d.status === 'candidate'
-              ? '<div id="js_content">' +
-                d.text
-                  .split('\n')
-                  .map((p) => '<p>' + escape(p) + '</p>')
-                  .join('') +
-                d.images
-                  .map(
-                    (i) =>
-                      '<img src="data:' +
-                      i.type +
-                      ';base64,' +
-                      i.bytes.toString('base64') +
-                      '">',
-                  )
-                  .join('') +
-                // The shared video contract allows a real complete video with
-                // no caption/cover. Mark this local-only structural placeholder;
-                // title survives the unchanged sanitizer's attribute allowlist.
-                (video && !d.text.trim() && !d.images.length
-                  ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
-                  : '') +
-                '</div>'
-              : null;
-          const data = {
-            title:
-              d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
-            status: d.status === 'candidate' ? 'complete' : 'video-skipped',
-            contentHtml,
-            kind,
-            videoBytes: video?.bytes ?? null,
-            videoMimeType: video?.mimeType ?? null,
-            videoExpectedBytes: video?.expectedBytes ?? null,
-            videoSha256: video?.sha256 ?? null,
-          };
-          if (old) {
-            // Only a skipped video's missing archive may be filled. Keep its
-            // stable ID, creator relation, and previously trusted publication time.
-            await tx.xhsNote.update({ where: { id: old.id }, data });
-          } else {
-            await tx.xhsNote.create({
-              data: {
-                id: d.noteKey,
-                creatorId: id,
-                publishTime: timestamps.get(d.noteKey)!,
-                ...data,
-              },
+      const expectedBytes = [...drafts.values()].reduce(
+        (bytes, { draft, video }) =>
+          bytes +
+          Buffer.byteLength(JSON.stringify({ ...draft, images: undefined })) +
+          (draft.images || []).reduce(
+            (sum, image) => sum + image.bytes.length * 2,
+            0,
+          ) +
+          (video?.bytes.length || 0),
+        4096,
+      );
+      const added = await incrementalWrite(this.prisma, expectedBytes, () =>
+        this.prisma.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          const current = await tx.xhsCreator.findUniqueOrThrow({
+            where: { id },
+          });
+          if (
+            !current.enabled ||
+            current.profileUrl !== creator.profileUrl ||
+            current.externalAuthorId !== creator.externalAuthorId
+          )
+            return fail('博主身份或启用状态已变化，旧归档保留。', 'CONFLICT');
+          let count = 0;
+          for (const { draft: d, video, kind } of drafts.values()) {
+            const old = await tx.xhsNote.findUnique({
+              where: { id: d.noteKey },
             });
+            if (old) {
+              if (old.creatorId !== id)
+                return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
+              if (old.status !== 'video-skipped' || !video) continue;
+            }
+            const contentHtml =
+              d.status === 'candidate'
+                ? '<div id="js_content">' +
+                  d.text
+                    .split('\n')
+                    .map((p) => '<p>' + escape(p) + '</p>')
+                    .join('') +
+                  d.images
+                    .map(
+                      (i) =>
+                        '<img src="data:' +
+                        i.type +
+                        ';base64,' +
+                        i.bytes.toString('base64') +
+                        '">',
+                    )
+                    .join('') +
+                  // The shared video contract allows a real complete video with
+                  // no caption/cover. Mark this local-only structural placeholder;
+                  // title survives the unchanged sanitizer's attribute allowlist.
+                  (video && !d.text.trim() && !d.images.length
+                    ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
+                    : '') +
+                  '</div>'
+                : null;
+            const data = {
+              title:
+                d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
+              status: d.status === 'candidate' ? 'complete' : 'video-skipped',
+              contentHtml,
+              kind,
+              videoBytes: video?.bytes ?? null,
+              videoMimeType: video?.mimeType ?? null,
+              videoExpectedBytes: video?.expectedBytes ?? null,
+              videoSha256: video?.sha256 ?? null,
+            };
+            if (old) {
+              // Only a skipped video's missing archive may be filled. Keep its
+              // stable ID, creator relation, and previously trusted publication time.
+              await tx.xhsNote.update({ where: { id: old.id }, data });
+            } else {
+              await tx.xhsNote.create({
+                data: {
+                  id: d.noteKey,
+                  creatorId: id,
+                  publishTime: timestamps.get(d.noteKey)!,
+                  ...data,
+                },
+              });
+            }
+            if (d.status === 'candidate') count++;
           }
-          if (d.status === 'candidate') count++;
-        }
-        await tx.xhsCreator.update({
-          where: { id },
-          data: {
-            externalAuthorId: result.authorId,
-            lastStatus: ledger.supplierReportedEnd ? 'complete' : 'partial',
-            lastCheckedAt: Math.floor(Date.now() / 1000),
-          },
-        });
-        return count;
-      });
+          await tx.xhsCreator.update({
+            where: { id },
+            data: {
+              externalAuthorId: result.authorId,
+              lastStatus: ledger.supplierReportedEnd ? 'complete' : 'partial',
+              lastCheckedAt: Math.floor(Date.now() / 1000),
+            },
+          });
+          return count;
+        }),
+      );
       return {
         status: ledger.supplierReportedEnd
           ? ('complete' as const)
