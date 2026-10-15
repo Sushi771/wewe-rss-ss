@@ -77,17 +77,19 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       collection,
     );
     const xhs = new XiaohongshuService(prisma as any, source);
+    const router = new TrpcRouter(
+      service,
+      prisma as any,
+      config,
+      {} as any,
+      {} as any,
+      xhs,
+    ).appRouter;
     return {
       service,
       xhs,
-      api: new TrpcRouter(
-        service,
-        prisma as any,
-        config,
-        {} as any,
-        {} as any,
-        xhs,
-      ).appRouter.createCaller({ errorMsg, isLocal: true }),
+      api: router.createCaller({ errorMsg, isLocal: true }),
+      openWindow: () => router.createCaller({ errorMsg, isLocal: true }),
     };
   };
   beforeAll(async () => {
@@ -218,6 +220,169 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
     await prisma.xhsCreator.updateMany({ data: { groupId: null } });
     await prisma.managementGroup.deleteMany();
   });
+  const ordinaryRoutes: [string, (api: any) => Promise<unknown>][] = [
+    ['wechat create', (api) => api.feed.saveGroup({ name: 'new folder' })],
+    [
+      'xiaohongshu create',
+      (api) => api.xiaohongshu.saveGroup({ name: 'new folder' }),
+    ],
+    [
+      'wechat rename',
+      (api) => api.feed.saveGroup({ id: 'ordinary-wx-a', name: 'renamed' }),
+    ],
+    [
+      'xiaohongshu rename',
+      (api) =>
+        api.xiaohongshu.saveGroup({ id: 'ordinary-xhs-a', name: 'renamed' }),
+    ],
+    [
+      'group reorder',
+      (api) =>
+        api.feed.reorderGroups({
+          ids: ['ordinary-wx-b', 'ordinary-wx-a'],
+          expectedIds: ['ordinary-wx-a', 'ordinary-wx-b'],
+        }),
+    ],
+    [
+      'feed reorder',
+      (api) =>
+        api.feed.updateOrder([
+          { id: 'feed-a', order: 1, expectedOrder: 0, expectedGroupId: null },
+          { id: 'feed-b', order: 0, expectedOrder: 0, expectedGroupId: null },
+        ]),
+    ],
+    [
+      'wechat single move',
+      (api) =>
+        api.feed.moveFeeds({ ids: ['feed-a'], groupId: 'ordinary-wx-a' }),
+    ],
+    [
+      'wechat batch add',
+      (api) =>
+        api.feed.moveFeeds({
+          ids: ['feed-a', 'feed-a', 'feed-b'],
+          groupId: 'ordinary-wx-a',
+        }),
+    ],
+    [
+      'xiaohongshu single move',
+      (api) =>
+        api.xiaohongshu.moveCreators({
+          ids: ['creator-a'],
+          groupId: 'ordinary-xhs-a',
+        }),
+    ],
+    [
+      'xiaohongshu batch add',
+      (api) =>
+        api.xiaohongshu.moveCreators({
+          ids: ['creator-a', 'creator-a', 'creator-b'],
+          groupId: 'ordinary-xhs-a',
+        }),
+    ],
+  ];
+  const seedOrdinary = async () => {
+    for (const platform of ['wechat', 'xiaohongshu'])
+      for (const [order, suffix] of ['a', 'b'].entries()) {
+        const id = `ordinary-${platform === 'wechat' ? 'wx' : 'xhs'}-${suffix}`;
+        await prisma.managementGroup.create({
+          data: { id, platform, name: id, order },
+        });
+      }
+  };
+  const classifications = async (db = prisma) => ({
+    groups: await db.managementGroup.findMany({ orderBy: { id: 'asc' } }),
+    feeds: await db.feed.findMany({
+      select: { id: true, groupId: true, order: true },
+      orderBy: { id: 'asc' },
+    }),
+    creators: await db.xhsCreator.findMany({
+      select: { id: true, groupId: true },
+      orderBy: { id: 'asc' },
+    }),
+  });
+  it.each(ordinaryRoutes)(
+    'zero-snapshot ordinary %s persists through a fresh client',
+    async (_label, operation) => {
+      await seedOrdinary();
+      const snapshots = jest
+        .spyOn(backup, 'createVerifiedSqliteBackup')
+        .mockRejectedValue(new Error('UNEXPECTED_FULL_BACKUP'));
+      try {
+        await operation(caller().api);
+        expect(snapshots).not.toHaveBeenCalled();
+        const fresh = new PrismaClient();
+        try {
+          expect(await classifications(fresh)).toEqual(await classifications());
+        } finally {
+          await fresh.$disconnect();
+        }
+      } finally {
+        await prisma.$executeRawUnsafe('UPDATE feeds SET "order"=0');
+      }
+    },
+  );
+  it.each(ordinaryRoutes)(
+    'ordinary %s rolls back a late commit fault and releases its locks without a snapshot',
+    async (_label, operation) => {
+      await seedOrdinary();
+      const before = await classifications();
+      const snapshots = jest
+        .spyOn(backup, 'createVerifiedSqliteBackup')
+        .mockRejectedValue(new Error('UNEXPECTED_FULL_BACKUP'));
+      const transaction = prisma.$transaction.bind(prisma);
+      const broken = jest
+        .spyOn(prisma, '$transaction')
+        .mockImplementationOnce(((action: any) =>
+          transaction(async (tx) => {
+            await action(tx);
+            throw new Error('LATE_ORDINARY_COMMIT_FAILURE');
+          })) as any);
+      try {
+        await expect(operation(caller().api)).rejects.toThrow(
+          'LATE_ORDINARY_COMMIT_FAILURE',
+        );
+        expect(await classifications()).toEqual(before);
+        broken.mockRestore();
+        await operation(caller().api);
+        expect(snapshots).not.toHaveBeenCalled();
+      } finally {
+        broken.mockRestore();
+        await prisma.$executeRawUnsafe('UPDATE feeds SET "order"=0');
+      }
+    },
+  );
+  it.each(ordinaryRoutes)(
+    'ordinary %s fails closed on physical space and actual connection durability',
+    async (_label, operation) => {
+      await seedOrdinary();
+      const before = await classifications();
+      const snapshots = jest
+        .spyOn(backup, 'createVerifiedSqliteBackup')
+        .mockRejectedValue(new Error('UNEXPECTED_FULL_BACKUP'));
+      await prisma.$executeRawUnsafe('PRAGMA synchronous=OFF');
+      try {
+        await expect(operation(caller().api)).rejects.toThrow(
+          'INCREMENTAL_DURABILITY_MODE_UNPROVED',
+        );
+      } finally {
+        await prisma.$executeRawUnsafe('PRAGMA synchronous=FULL');
+      }
+      const volume = await fs.statfs(root, { bigint: true });
+      const disk = jest
+        .spyOn(fs, 'statfs')
+        .mockResolvedValue({ ...volume, bavail: 0n } as any);
+      try {
+        await expect(operation(caller().api)).rejects.toThrow(
+          'INCREMENTAL_DISK_SPACE_INSUFFICIENT',
+        );
+      } finally {
+        disk.mockRestore();
+      }
+      expect(await classifications()).toEqual(before);
+      expect(snapshots).not.toHaveBeenCalled();
+    },
+  );
   afterEach(async () => {
     expect(await rows()).toEqual(originalRows);
     expect(global.fetch).not.toHaveBeenCalled();
@@ -441,10 +606,10 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       await fresh.$disconnect();
     }
     expect(snapshots).not.toHaveBeenCalled();
-    // New group creation keeps the independently protected path.
-    await expect(api.feed.saveGroup({ name: 'new' })).rejects.toThrow(
-      'BACKUP_QUOTA_FULL',
-    );
+    await expect(api.feed.saveGroup({ name: 'new' })).resolves.toMatchObject({
+      name: 'new',
+    });
+    expect(snapshots).not.toHaveBeenCalled();
   });
   it('ordinary rename rejects unsafe durability, insufficient disk, foreign IDs and a late SQL failure without changing rows', async () => {
     const { api } = caller();
@@ -500,6 +665,9 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
   });
   it('persists a full 100-member batch across a fresh client, makes repeat adds idempotent, and rolls back a failed commit', async () => {
     const { api } = caller();
+    const snapshots = jest
+      .spyOn(backup, 'createVerifiedSqliteBackup')
+      .mockRejectedValue(new Error('UNEXPECTED_FULL_BACKUP'));
     const group = await api.feed.saveGroup({ name: 'batch target' });
     const ids = Array.from({ length: 100 }, (_, i) => `batch-feed-${i}`);
     try {
@@ -559,6 +727,7 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
           where: { id: { in: ids }, groupId: group.id },
         }),
       ).toBe(100);
+      expect(snapshots).not.toHaveBeenCalled();
     } finally {
       await prisma.feed.deleteMany({ where: { id: { in: ids } } });
     }
@@ -590,18 +759,24 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       (await prisma.xhsCreator.findMany()).every((c) => c.groupId === null),
     ).toBe(true);
   });
-  it('retains all rows when backup fails and releases both the group and creator locks', async () => {
+  it('retains protected group deletion and unrelated creator edit gates when backup fails', async () => {
     const { api } = caller();
     const group = await api.xiaohongshu.saveGroup({ name: 'before' });
     const gate = jest
       .spyOn(backup, 'createVerifiedSqliteBackup')
       .mockRejectedValue(new Error('backup failed'));
-    await expect(
-      api.xiaohongshu.moveCreators({ ids: ['creator-a'], groupId: group.id }),
-    ).rejects.toThrow('backup failed');
-    await expect(api.feed.saveGroup({ name: 'unwritten' })).rejects.toThrow(
+    await expect(api.xiaohongshu.removeGroup({ id: group.id })).rejects.toThrow(
       'backup failed',
     );
+    await expect(
+      api.xiaohongshu.edit({ id: 'creator-a', enabled: false }),
+    ).rejects.toThrow('backup failed');
+    expect(
+      await prisma.managementGroup.findUnique({ where: { id: group.id } }),
+    ).not.toBeNull();
+    await expect(
+      api.feed.saveGroup({ name: 'ordinary still available' }),
+    ).resolves.toMatchObject({ name: 'ordinary still available' });
     expect(
       (
         await prisma.xhsCreator.findUniqueOrThrow({
@@ -620,30 +795,37 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
     ).toBe(1);
   });
   it('serializes concurrent group mutation across namespaces and creator assignment against refresh', async () => {
-    const { api } = caller();
+    const backend = caller();
+    const { api } = backend;
+    const otherWindow = backend.openWindow();
     let release!: () => void;
-    const gate = jest
-      .spyOn(backup, 'createVerifiedSqliteBackup')
-      .mockImplementationOnce(
-        () =>
-          new Promise<any>((resolve) => {
-            release = () => resolve({});
-          }),
-      );
+    const transaction = prisma.$transaction.bind(prisma);
+    const gate = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((
+      action: any,
+    ) =>
+      transaction(async (tx) => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return action(tx);
+      })) as any);
     const moving = api.xiaohongshu.moveCreators({
       ids: ['creator-a'],
       groupId: null,
     });
     while (!release) await new Promise((r) => setTimeout(r, 1));
-    await expect(
-      api.feed.saveGroup({ name: 'during move' }),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
-    await expect(
-      api.xiaohongshu.edit({ id: 'creator-a', enabled: false }),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
-    release();
-    await moving;
-    gate.mockRestore();
+    try {
+      await expect(
+        otherWindow.feed.saveGroup({ name: 'during move' }),
+      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      await expect(
+        otherWindow.xiaohongshu.edit({ id: 'creator-a', enabled: false }),
+      ).rejects.toMatchObject({ code: 'CONFLICT' });
+    } finally {
+      release();
+      await moving;
+      gate.mockRestore();
+    }
     let reject!: (error: Error) => void;
     const read = jest.fn(
       () =>
@@ -672,6 +854,53 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
         })
       ).moved,
     ).toBe(1);
+  });
+
+  it('two window callers reject stale group and feed order without snapshots or lost assignments', async () => {
+    await seedOrdinary();
+    const snapshots = jest
+      .spyOn(backup, 'createVerifiedSqliteBackup')
+      .mockRejectedValue(new Error('UNEXPECTED_FULL_BACKUP'));
+    const backend = caller();
+    const firstWindow = backend.api,
+      secondWindow = backend.openWindow();
+    const firstView = (await firstWindow.feed.groups()).items.map((g) => g.id);
+    const secondView = (await secondWindow.feed.groups()).items.map(
+      (g) => g.id,
+    );
+    await firstWindow.feed.reorderGroups({
+      ids: [...firstView].reverse(),
+      expectedIds: firstView,
+    });
+    const confirmed = await classifications();
+    await expect(
+      secondWindow.feed.reorderGroups({
+        ids: secondView,
+        expectedIds: secondView,
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await classifications()).toEqual(confirmed);
+    await firstWindow.feed.moveFeeds({
+      ids: ['feed-a'],
+      groupId: 'ordinary-wx-a',
+    });
+    await expect(
+      secondWindow.feed.updateOrder([
+        { id: 'feed-a', order: 1, expectedOrder: 0, expectedGroupId: null },
+      ]),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(
+      (await prisma.feed.findUniqueOrThrow({ where: { id: 'feed-a' } }))
+        .groupId,
+    ).toBe('ordinary-wx-a');
+    await secondWindow.feed.moveFeeds({
+      ids: ['feed-b'],
+      groupId: 'ordinary-wx-a',
+    });
+    expect(
+      await prisma.feed.count({ where: { groupId: 'ordinary-wx-a' } }),
+    ).toBe(2);
+    expect(snapshots).not.toHaveBeenCalled();
   });
   it('respects the existing feed body-retry lock and releases a batch after failure', async () => {
     let finish!: () => void;
