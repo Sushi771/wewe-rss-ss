@@ -201,6 +201,24 @@ function validateReferences(value, policy) {
     )
       throw new Error('RELEASE_SCOPE_UNRESOLVED_REFERENCE');
     if (
+      r.viaPointer &&
+      (!['tasks', 'shortcuts'].includes(r.kind) ||
+        typeof r.viaPointer.path !== 'string' ||
+        !path.isAbsolute(r.viaPointer.path) ||
+        canonical(r.viaPointer.path) !== r.viaPointer.path ||
+        !policy.roots.some((root) => contains(root.path, r.viaPointer.path)) ||
+        path.basename(r.viaPointer.path) !== 'active.json' ||
+        !/^[a-f0-9]{64}$/.test(r.viaPointer.launcherSha256 || '') ||
+        !value.records.some(
+          (p) =>
+            p.kind === 'pointers' &&
+            p.pointerPath === r.viaPointer.path &&
+            p.packageId === r.packageId &&
+            p.packagePath === r.packagePath,
+        ))
+    )
+      throw new Error('RELEASE_SCOPE_UNRESOLVED_REFERENCE');
+    if (
       r.kind === 'processes' &&
       (!Number.isInteger(r.pid) ||
         r.pid < 1 ||
@@ -346,7 +364,14 @@ function open(request, options = {}) {
     const value = query(),
       digest = validateReferences(value, policy);
     const stable = (v) =>
-      v.records.filter((r) => !['processes', 'pointers'].includes(r.kind));
+      v.records
+        .filter((r) => !['processes', 'pointers'].includes(r.kind))
+        .map((r) =>
+          r.viaPointer
+            ? { ...r, packageId: undefined, packagePath: undefined }
+            : r,
+        )
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     if (
       refs &&
       digest !== refs &&
