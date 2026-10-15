@@ -224,6 +224,29 @@ function build(options = {}) {
     }
   }
   const sourceHash = hash(JSON.stringify(inputs));
+  const reusable = buildBudget.findReusable(
+    path.join(root, '.local-releases'),
+    {
+      sourceHash,
+      sourceCommit: legacy ? options.sourceCommit : currentCommit,
+      nodeVersion: process.version,
+      runtimeSha256: fileHash(process.execPath),
+      schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+      executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
+    },
+  );
+  if (reusable) {
+    console.log(
+      JSON.stringify({
+        release: reusable.directory,
+        id: reusable.manifest.id,
+        sourceHash,
+        reused: true,
+        sourceCommit: reusable.manifest.sourceCommit,
+      }),
+    );
+    return reusable.directory;
+  }
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
   const release = path.join(root, '.local-releases', id);
   const reservation = buildBudget.begin(
