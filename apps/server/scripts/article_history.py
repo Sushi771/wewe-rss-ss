@@ -211,6 +211,14 @@ class Reader(HTMLParser):
         self.suppressed = 0
 
     def handle_starttag(self, tag, attrs):
+        # HTML's legacy <image> spelling is rendered as <img> by Chromium.
+        if tag == "image":
+            tag = "img"
+        names = [name for name, _ in attrs]
+        # HTML keeps the FIRST duplicate; dict would silently keep the LAST.
+        # Do not claim a pixel mapping for ambiguous attribute lists.
+        if len(names) != len(set(names)):
+            self.issues.append("duplicate-attributes-coverage-unknown")
         attrs = dict(attrs)
         if tag in {"script", "style", "iframe", "object", "embed", "svg", "math"}:
             if tag != "script":
@@ -221,11 +229,14 @@ class Reader(HTMLParser):
             return
         if attrs.get("data-wewe-image-pending", "0") not in {"0", "", "false"}:
             self.issues.append("pending-image-marker")
-        css = attrs.get("style", "").lower()
+        css = (attrs.get("style") or "").lower()
         if any(k in attrs for k in ("srcset", "poster", "background")) or any(marker in css for marker in ("url", "image", "background", "\\", "@")):
             self.issues.append("unsupported-image-reference")
-        if tag in {"source", "video", "audio", "link"}:
+        if tag in {"source", "video", "audio", "link", "canvas", "applet", "portal"}:
             self.issues.append("unsupported-media-reference")
+        if tag != "img" and (any(k in attrs for k in ("src", "data-src", "xlink:href")) or
+                             (tag == "input" and (attrs.get("type") or "").strip().lower() == "image")):
+            self.issues.append("unsupported-image-bearing-element")
         if tag == "img":
             # A verified inline src takes precedence over stale remote data-src.
             address = attrs.get("src") or attrs.get("data-src")
@@ -284,6 +295,17 @@ class Reader(HTMLParser):
     def handle_data(self, data):
         if not self.suppressed:
             self.output.append(html.escape(data))
+
+    def close(self):
+        # HTMLParser.close() emits incomplete tags as plain data. Inspect its
+        # unconsumed markup before that information is lost. Escaped text and
+        # complete comments have already been tokenized, and are not images.
+        remainder = self.rawdata.lstrip()
+        if (not self.suppressed and remainder.startswith("<") and
+                not remainder.startswith("<!--") and
+                re.match(r"<\s*[A-Za-z!?]", remainder)):
+            self.issues.append("unparsed-markup-coverage-unknown")
+        super().close()
 
 
 CSP = "default-src 'none'; img-src 'self'; style-src 'none'; base-uri 'none'; form-action 'none'"
@@ -508,7 +530,7 @@ def verifyCoverage(archive_root):
         raise CoverageError("browser page limit exceeded; split the batch")
     result = browser_check(root, pages)
     image_counts = {entry["reader"]: len(entry["assets"]) for entry in manifest["entries"]}
-    if result.get("pages") != len(pages) or result.get("images") != sum(image_counts.values()) or result.get("remoteRequests") != 0 or not result.get("decoded"):
+    if result.get("pages") != len(pages) or result.get("images") != sum(image_counts.values()) or result.get("imageInputs") != 0 or result.get("remoteRequests") != 0 or not result.get("decoded"):
         raise CoverageError("incomplete browser coverage")
     if load_manifest(root)[2] != sha:
         raise CoverageError("manifest changed during verification")

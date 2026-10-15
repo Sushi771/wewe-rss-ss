@@ -36,7 +36,7 @@ def database(path, body='<p>original</p>', *, title='title', metrics='{"reads":1
 def fake_browser(root, pages):
     manifest = json.loads((root / 'manifest.json').read_text())
     image_counts = {e['reader']: len(e['assets']) for e in manifest['entries']}
-    return {'pages': len(pages), 'decoded': True, 'remoteRequests': 0, 'images': sum(image_counts.values())}
+    return {'pages': len(pages), 'decoded': True, 'remoteRequests': 0, 'images': sum(image_counts.values()), 'imageInputs': 0}
 
 
 class HistoryTests(unittest.TestCase):
@@ -144,6 +144,41 @@ class HistoryTests(unittest.TestCase):
         self.prepare(media_roots=[media])
         self.assertEqual(len(self.manifest()['entries'][0]['assets']), 1)
         self.assertTrue(history.verifyCoverage(self.archive)['verified'])
+
+    def test_legacy_image_alias_preserves_local_and_inline_pixels(self):
+        (self.root / 'pixel.png').write_bytes(PNG)
+        self.change(content_html=f'<image src="pixel.png"><IMAGE src="{INLINE}">')
+        self.prepare(media_roots=[self.root])
+        entry = self.manifest()['entries'][0]
+        self.assertEqual(len(entry['assets']), 2)
+        self.assertEqual(len(set(entry['assets'])), 1)
+        self.assertTrue(history.verifyCoverage(self.archive)['verified'])
+
+    def test_input_image_and_unfinished_media_markup_never_qualify(self):
+        cases = [f'<input type="image" src="{INLINE}">', '<input TYPE="IMAGE" src="pixel.png">',
+                 f'<img src="{INLINE}', '<img src="https://example.invalid/incomplete',
+                 '<image src="pixel.png"', '<unknown src="pixel.png">']
+        for number, body in enumerate(cases):
+            with self.subTest(case=number):
+                self.change(content_html=body)
+                self.archive = self.root / ('unresolved-' + str(number))
+                self.prepare(media_roots=[self.root])
+                self.assertFalse(history.verifyCoverage(self.archive)['verified'])
+                self.assertFalse(history.planRetirements(self.archive)['eligible'])
+
+    def test_comments_and_escaped_markup_are_not_image_references(self):
+        self.change(content_html='<!-- <image src="missing.png"> --><p>&lt;img src="missing.png"&gt;</p>')
+        self.prepare()
+        self.assertFalse(self.manifest()['issues'])
+        self.assertFalse(self.manifest()['entries'][0]['assets'])
+        self.assertTrue(history.verifyCoverage(self.archive)['verified'])
+
+    def test_duplicate_attributes_cannot_replace_first_unknown_pixels(self):
+        self.change(content_html=f'<img src="https://example.invalid/first-unknown" src="{INLINE}">')
+        self.prepare()
+        self.assertIn('duplicate-attributes-coverage-unknown', self.manifest()['issues'])
+        self.assertFalse(history.verifyCoverage(self.archive)['verified'])
+        self.assertFalse(history.planRetirements(self.archive)['eligible'])
 
     def test_remote_unknown_holds_by_default_and_requires_explicit_acknowledgment(self):
         self.change(content_html='<img src="https://example.invalid/never-fetch">')
@@ -399,6 +434,48 @@ class HistoryTests(unittest.TestCase):
 
 
 class BrowserIntegration(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('ARTICLE_HISTORY_BROWSER_REQUIRED') == '1', 'enable real offline Chrome integration explicitly')
+    def test_legacy_alias_and_input_reference_browser_comparison(self):
+        with tempfile.TemporaryDirectory(prefix='article-reference-test-') as temp:
+            root = Path(temp)
+            sources = root / 'sources'
+            sources.mkdir()
+            old, current = sources / 'old.db', root / 'current.db'
+            database(old, '<image src="pixel.png">')
+            database(current)
+            (root / 'pixel.png').write_bytes(PNG)
+            archive = root / 'archive'
+            history.prepareArchive([old], current, archive, source_roots=[sources], media_roots=[root])
+            verified = history.verifyCoverage(archive)
+            self.assertEqual(verified['browser']['images'], 1)
+            # Independent raw HTML control, bypassing Reader, uses the same PNG.
+            (root / 'assets').mkdir()
+            asset = 'assets/' + history.digest(PNG) + '.png'
+            (root / asset).write_bytes(PNG)
+            (root / 'reference.html').write_bytes(history.page('raw alias control', '<image src="' + asset + '">'))
+            control = history.browser_check(root, ['reference.html'])
+            self.assertEqual(control['images'], verified['browser']['images'])
+            (root / 'reference.html').write_bytes(history.page('duplicate attribute control', '<image src="' + asset + '" src="missing.png">'))
+            control = history.browser_check(root, ['reference.html'])
+            self.assertEqual(control['images'], 1)  # Chromium keeps first src.
+            (root / 'reference.html').write_bytes(history.page('raw input control', '<input type="image" src="' + asset + '">'))
+            # The helper separately inspects image inputs; document.images alone
+            # excludes them, although Chromium renders their pixels.
+            control = history.browser_check(root, ['reference.html'])
+            self.assertEqual(control['imageInputs'], 1)
+            self.assertTrue(control['decoded'])
+            (root / 'reference.html').write_text('<!doctype html><title>incomplete control</title><body><img src="' + INLINE, encoding='utf-8')
+            control = history.browser_check(root, ['reference.html'])
+            self.assertEqual(control['images'], 0)
+            self.assertEqual(control['imageInputs'], 0)
+            for number, body in enumerate((f'<input type="image" src="{INLINE}">', f'<img src="{INLINE}', '<img src="https://example.invalid/incomplete', f'<img src="https://example.invalid/first-unknown" src="{INLINE}">')):
+                with connect(old) as db:
+                    db.execute('UPDATE articles SET content_html=?', (body,))
+                broken = root / ('held-' + str(number))
+                history.prepareArchive([old], current, broken, source_roots=[sources])
+                self.assertFalse(history.verifyCoverage(broken)['verified'])
+                self.assertFalse(history.planRetirements(broken)['eligible'])
+
     @unittest.skipUnless(os.environ.get('ARTICLE_HISTORY_BROWSER_REQUIRED') == '1', 'enable real offline Chrome integration explicitly')
     def test_real_decode_no_requests_and_corrupt_pixels_rejected(self):
         with tempfile.TemporaryDirectory(prefix='article-history-browser-test-') as temp:
