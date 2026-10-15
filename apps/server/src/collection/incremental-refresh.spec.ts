@@ -292,7 +292,11 @@ describe('ordinary incremental transactions and durable remote claims without sn
       },
     );
     child.stdout!.resume();
-    child.stderr!.resume();
+    let diagnostics = '';
+    child.stderr!.on('data', (chunk) => {
+      if (diagnostics.length < 4096)
+        diagnostics += String(chunk).slice(0, 4096 - diagnostics.length);
+    });
     try {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(
@@ -310,7 +314,7 @@ describe('ordinary incremental transactions and durable remote claims without sn
         });
         child.on('exit', () => {
           clearTimeout(timer);
-          reject(Error('SYNTHETIC_CHILD_EARLY_EXIT'));
+          reject(Error('SYNTHETIC_CHILD_EARLY_EXIT: ' + diagnostics));
         });
       });
     } finally {

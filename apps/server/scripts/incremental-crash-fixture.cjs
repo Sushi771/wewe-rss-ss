@@ -8,7 +8,12 @@ require('ts-node').register({
 });
 require('tsconfig-paths').register({
   baseUrl: server,
-  paths: { '@server/*': ['src/*'] },
+  paths: {
+    '@server/*': ['src/*'],
+    '@wewe-rss/shared': [
+      path.resolve(server, '../../packages/shared/src/index.ts'),
+    ],
+  },
 });
 const { PrismaClient } = require('@prisma/client');
 const {
