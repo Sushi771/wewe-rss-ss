@@ -60,14 +60,51 @@ The coordinator integrated both independent commits and added checkpoint calls a
 
 ## Release package lifetime and existing installations
 
-A self-contained package intentionally pins its own Node executable so startup and rollback do not depend on a mutable machine-wide runtime. One copy per protected package is useful; keeping every historical build is not required. Previously every build used a new timestamp directory, successful packages were never evicted, and only a failed invocation's own output was cleaned. The cumulative budget was not retroactively adopted by historical installations. There was no completed-package count limit or verified-candidate reuse, so repeated development and release attempts could accumulate runtimes.
+A self-contained package intentionally pins its own Node executable so startup and rollback do not depend on a mutable machine-wide runtime. Previously `build.cjs` used a new timestamp directory on every invocation and `copyFileSync(process.execPath, release/runtime/node.exe)` created another runtime. Successful packages were never retired: only a failed invocation's owned output was removed. Whole-package installation copied that runtime again into the installation root. The cumulative build quota was not a retrospective cleanup policy, and there was no completed-package count limit or verified-candidate reuse.
 
-The minimum retained roles are the current running package, one independently verified compatible rollback, and one frozen in-flight candidate. They may refer to fewer than three distinct packages. The generation/installation guard now permits at most three physical direct package/output directories, alongside the unchanged cumulative 768 MiB default and 4 GiB post-allocation free-space reserve. An installer adding both candidate and rollback must reserve `packages: 2` and register each newly created direct directory before copying. Known identity/startup/verification caches and source worktrees do not use a package slot, but all their regular-file bytes still count in the same cumulative budget. Unknown or interrupted output directories occupy slots and are preserved for review.
+### Separate generation and installation boundaries
 
-The builder first checks for an existing package with the exact source commit, source-input digest, layout, schema compatibility, Node version and runtime SHA. Only a complete byte/metadata verification with no active build claim permits reuse. It returns that same directory without compiling or copying another Node executable. Damaged, changed, foreign, mismatched or in-flight packages are never adopted or overwritten. Concurrent generation remains protected by the owned root lock. New generation stops before copying when slots or capacity are exhausted. Obvious over-count/over-byte roots reject before lengthy recursive scanning; inventory work is bounded and incomplete evidence fails closed.
+The build workspace now permits at most three direct package/output directories, a cumulative 768 MiB default across the entire build root, and a 4 GiB post-allocation volume reserve. Registered helper caches and `worktrees` do not consume a package slot but their regular bytes still consume that **build workspace** quota. Unknown/interrupted outputs occupy slots. A reservation for two outputs must use `begin(root, bytes, { packages: 2 })` and register both new direct directories. Exhaustion refuses generation; it never evicts existing output. Inventory limits and early over-count/byte rejection prevent an unbounded historical scan.
 
-No successful historical package is automatically deleted, including a no-longer-current package. Before a subsequent generation, the release owner must identify the three roles, confirm process/active/rollback references, and obtain exact approval for any obsolete real packages that must be retired. Active and compatible rollback packages remain protected throughout validation. A replacement package is never permission to restore an old database. Successful switching and rollback continue to use their original manifest/runtime/source checks.
+Before compiling, the builder can return an existing package only after exact source commit, source-input hash, layout, schema compatibility, Node version and runtime SHA comparison, complete byte/metadata verification and absence of an active build claim. Repeated attempts at the same frozen candidate return the same directory without another Node copy. Corrupt or mismatched packages are preserved and rejected.
 
-For a pre-policy installation already above the count or cumulative limit, the guard deliberately refuses new output. Do not reinterpret the byte budget as per-package, exclude history, choose a fresh root to hide it, or automatically raise the baseline each attempt. First prepare a read-only inventory and an exact proposed retention/disposition list. Any finite capacity exception or real historical removal requires an explicit decision; merely raising bytes cannot bypass the fixed three-directory count limit. This development change does not clear or move old production packages or change global settings.
+An existing production `.local-releases` root can also contain source worktrees, nested build history, helper caches and historical installed packages. It is incorrect to apply the build root's three-output count or cumulative byte quota to that composite directory as though every entry were a live installed role. `install-lifecycle.cjs` therefore provides a distinct installation protocol. It admits the **current running package, one verified compatible rollback and one frozen candidate**, at most three distinct package IDs and **768 MiB total regular-file bytes across those roles**. It checks actual volume free space before and after allocation, including rounded new-file/directory/link overhead, with at least 4 GiB left. All files on the volume, including historical packages and worktrees, affect that physical reserve. This does not raise a threshold, turn the budget into a per-package quota, or relabel historical bytes as freed space.
 
-A content-addressed, immutable shared runtime could reduce the remaining two or three physical copies later. That requires independent reference/identity/hash and concurrent-lifetime validation; it is not implemented by this minimal lifecycle change.
+The first adoption requires the exact reviewed list of existing historical installed IDs outside those roles (`adoptLegacy`, at most 128 IDs). Detection is shallow and bounded: a direct directory with `release.json` or `runtime/node.exe` is an installed artifact; nested worktree/build outputs are governed by their own generation root. `.release-lifecycle.json` freezes this legacy list and the managed role IDs. Legacy packages remain held, physically present and unavailable for implicit promotion. The baseline cannot grow on subsequent attempts. An unknown new installed artifact is rejected. Any previous managed role that drops out of the next three-role plan but remains on disk causes `RELEASE_RETIREMENT_APPROVAL_REQUIRED` before copying. It cannot be silently absorbed into legacy history. After a separately reviewed and approved exact retirement, the next bounded round can proceed. No retirement/delete command is included here.
+
+Thus an old installation can temporarily hold its fixed historical backlog plus the three managed roles. It must not be reported as having only three physical runtimes. The backlog remains a separately inventoried storage debt pending explicit disposition; no automatic deletion or ever-growing exception is permitted. Missing source provenance or unreadable Git objects require preservation and review. Shared read-only, content-addressed runtimes are a possible later change and are not implemented here.
+
+### Reviewed installation protocol
+
+The release owner freezes a private JSON plan before execution. All three proofs must contain the expected 40-character `sourceCommit` and SHA-256 of the complete `release.json`, derived from the independently verified packages. The existing active pointer must be format 1 and match `current`. Candidate and rollback paths refer to existing frozen packages; nothing is rebuilt or downloaded.
+
+```json
+{
+  "root": "<existing production .local-releases>",
+  "plan": {
+    "current": "<active-package-id>",
+    "candidate": "<absolute frozen-candidate-path>",
+    "rollback": "<absolute frozen-compatible-rollback-path>",
+    "proofs": {
+      "current": { "sourceCommit": "<40 hex>", "manifestSha256": "<64 hex>" },
+      "candidate": { "sourceCommit": "<40 hex>", "manifestSha256": "<64 hex>" },
+      "rollback": { "sourceCommit": "<40 hex>", "manifestSha256": "<64 hex>" }
+    }
+  },
+  "adoptLegacy": [
+    "<each exact historical installed id outside the three roles>"
+  ]
+}
+```
+
+After separate approval of the concrete plan, only the production owner runs:
+
+```powershell
+node scripts/local-release/install-lifecycle.cjs --plan <reviewed-private-json>
+```
+
+The module has no service, SQLite, backup, process-kill or network operation. It serializes cooperating writers using the same owned `.build-budget.lock`, fully verifies source and existing target manifests/files/links, refuses mismatched targets, and reuses exact already-installed outputs. It persists the exact managed intent before copying so a terminated copy cannot become a new legacy baseline. An incomplete existing copy fails verification and requires review. It checks frozen proofs, active pointer and owner again before completion. Ordinary failure removes only this invocation's new identity-verified directories; a changed owner, active pointer or any changed output identity preserves output for review. It never overwrites a target or deletes a historical package. The caller retains responsibility for the already approved protected upgrade backup, schema compatibility acceptance, controlled switch and rollback protocol.
+
+Installing this host tooling does not change the frozen application candidate. Its tooling SHA and CI evidence must be reviewed separately; it does not authorize rebuilding, changing the approved application SHA, deploying, restarting or deleting real history. Existing handwritten installation scripts must call `installPair(root, plan, options)` (or this reviewed-plan CLI), replacing the incorrect `buildBudget.begin(compositeRoot, pairBytes)` and whole-package `cpSync` path; merely importing the helper while keeping the old installer is insufficient. Nonparticipating historical scripts remain outside the protocol and must not be used for future releases.
+
+Offline fixtures cover 28 tiny historical runtime copies, three-role accounting despite unrelated worktrees, immutable legacy adoption, refusal of unretired/unknown output, a fixture-only separately approved retirement, repeated reuse, frozen proof mismatch, cumulative byte/free-space exhaustion, failed-copy cleanup, replaced identities, concurrent active/lock changes, interrupted partial copies, internal/escaping aliases, and the actual plan CLI. They copy no real database or production package and execute no copied runtime.
