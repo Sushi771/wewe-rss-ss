@@ -545,7 +545,7 @@ test('adapter facts are accepted by the actual scope guard across own intent cha
     for (const list of [f.native.processesBefore, f.native.processesAfter])
       list.find((p) => p.pid === 99).pid = process.pid;
     const lease = scope.open(
-      { kind: 'synthetic-adapter', root: f.installed, reserveBytes: 128 },
+      { kind: 'switch', root: f.installed, reserveBytes: 128 },
       {
         configPath: policyFile,
         configSha256: configSha,

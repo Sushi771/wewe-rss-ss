@@ -905,3 +905,79 @@ test('indirect builders, dependency actions, workers, recovery and browser entri
     );
     assert.deepEqual(fs.readdirSync(f.audits), []);
   }));
+
+test('copied library and controller modules retain the same observation capability', () =>
+  fixture(async (f) => {
+    for (const name of [
+      'lib.cjs',
+      'release-scope.cjs',
+      'scope-inventory.cjs',
+    ]) {
+      const file = path.join(f.scripts, name);
+      fs.copyFileSync(path.join(__dirname, name), file);
+      delete require.cache[file];
+    }
+    const copyLib = require(path.join(f.scripts, 'lib.cjs'));
+    const copyScope = require(path.join(f.scripts, 'release-scope.cjs'));
+    await scope.within(
+      { kind: 'reference-inspection', root: f.releases, reserveBytes: 0 },
+      async () => {
+        assert.equal(copyScope.session(), scope.session());
+        assert.throws(
+          () =>
+            copyLib.hostEffects.fs.writeFileSync(
+              path.join(f.audits, 'forbidden'),
+              'no',
+            ),
+          /WRITE_OPERATION_NOT_AUTHORIZED/,
+        );
+        assert.throws(
+          () =>
+            copyScope.open(
+              { kind: 'activate', root: f.releases, reserveBytes: 4096 },
+              f.options,
+            ),
+          /NESTED_OPEN_FORBIDDEN/,
+        );
+        assert.throws(
+          () =>
+            copyScope.within(
+              { kind: 'activate', root: f.releases, reserveBytes: 4096 },
+              () => assert.fail('copied controller callback reached'),
+              f.options,
+            ),
+          /NESTED_OPERATION_EXCEEDS_CLAIM/,
+        );
+        assert.equal(
+          copyLib.verifyRelease(f.current, { reuseVerified: true }).id,
+          'current',
+        );
+        assert.equal(
+          (await copyLib.verifyReleaseAsync(f.current, { reuseVerified: true }))
+            .id,
+          'current',
+        );
+      },
+      f.options,
+    );
+    assert(!fs.existsSync(path.join(f.releases, '.verification-cache')));
+    assert.deepEqual(fs.readdirSync(f.audits), []);
+  }));
+
+test('a direct observation or zero-allocation lease cannot escape a context-bound callback', () =>
+  fixture((f) => {
+    for (const request of [
+      { kind: 'reference-inspection', reserveBytes: 0 },
+      { kind: 'unknown-inspection', reserveBytes: 4096 },
+      { kind: 'activate', reserveBytes: 0 },
+    ])
+      assert.throws(
+        () => scope.open({ ...request, root: f.releases }, f.options),
+        /OBSERVATION_REQUIRES_WITHIN/,
+      );
+    assert(
+      !fs
+        .readdirSync(f.base)
+        .some((name) => /\.(lock|state\.json|adopted)$/.test(name)),
+    );
+  }));

@@ -3,13 +3,13 @@
 const fs = require('node:fs'),
   path = require('node:path'),
   crypto = require('node:crypto');
-const { AsyncLocalStorage } = require('node:async_hooks');
 const { execFileSync } = require('node:child_process');
 const { fileHash } = require('./lib.cjs');
 const DEFAULT_BYTES = 768 * 1024 ** 2,
   MIN_FREE = 4 * 1024 ** 3;
-const context = new AsyncLocalStorage();
+const context = require('./lib.cjs').hostEffects.context;
 const WRITE_KINDS = ['build', 'install', 'activate', 'restart', 'switch'];
+const BOUND_OPERATION = Symbol('bound-operation');
 const hash = (v) =>
   crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const {
@@ -166,9 +166,14 @@ function validateReferences(value, policy) {
   }
   return hash(value);
 }
-function open(request, options = {}) {
+function open(request, options = {}, boundOperation) {
   if (session()) throw new Error('RELEASE_SCOPE_NESTED_OPEN_FORBIDDEN');
   request = { runtimeCopies: 0, ...request };
+  if (
+    boundOperation !== BOUND_OPERATION &&
+    (!WRITE_KINDS.includes(request.kind) || request.reserveBytes < 1)
+  )
+    throw new Error('RELEASE_SCOPE_OBSERVATION_REQUIRES_WITHIN');
   const configPath = options.configPath || process.env.WEWE_RELEASE_SCOPE_FILE,
     expected = options.configSha256 || process.env.WEWE_RELEASE_SCOPE_SHA256;
   if (!configPath || !/^[a-f0-9]{64}$/.test(expected || ''))
@@ -704,7 +709,7 @@ function within(request, run, options) {
     session().check();
     return run(session());
   }
-  const lease = open(request, options);
+  const lease = open(request, options, BOUND_OPERATION);
   let result;
   try {
     result = context.run(lease, () => run(lease));

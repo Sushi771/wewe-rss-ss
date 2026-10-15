@@ -199,10 +199,14 @@ test('L1: source and destination bytes share one scope; exact completed output i
     const lease = f.open();
     const at = output(f, lease);
     lease.close();
-    const next = f.open(0);
-    const measured = next.check();
-    assert.equal(measured.bytes, f.policy.baseline.bytes + 128);
-    next.close();
+    scope.within(
+      { kind: 'reference-inspection', root: f.installed, reserveBytes: 0 },
+      (next) => {
+        const measured = next.check();
+        assert.equal(measured.bytes, f.policy.baseline.bytes + 128);
+      },
+      f.options(),
+    );
     assert.equal(fs.readFileSync(path.join(at, 'runtime')).length, 128);
   }));
 test('L2: a completed old output consumes total capacity until separately reviewed retirement', () =>

@@ -3,13 +3,18 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createRequire } = require('node:module');
 const nativeProcesses = require('node:child_process');
+const { AsyncLocalStorage } = require('node:async_hooks');
 
-// A standalone frozen runtime has no host release-scope module. Host modules
-// share its already-loaded lease without loading a new scope or creating state.
+// Shared by source copies/aliases in this process, without a policy, filesystem
+// write or dependency on a release-scope file in standalone packaged runtimes.
+const contextKey = Symbol.for('wewe-rss.host-release-context.v1');
+if (!Object.prototype.hasOwnProperty.call(globalThis, contextKey))
+  Object.defineProperty(globalThis, contextKey, {
+    value: new AsyncLocalStorage(),
+  });
+const hostContext = globalThis[contextKey];
 function currentHostLease() {
-  return require.cache[
-    path.join(__dirname, 'release-scope.cjs')
-  ]?.exports?.session?.();
+  return hostContext.getStore();
 }
 function assertHostWrite() {
   currentHostLease()?.assertWritable();
@@ -139,6 +144,7 @@ const processes = new Proxy(nativeProcesses, {
   },
 });
 const hostEffects = Object.freeze({
+  context: hostContext,
   fs,
   processes,
   currentLease: currentHostLease,
