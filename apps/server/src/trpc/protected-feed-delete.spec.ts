@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -273,10 +274,6 @@ describe('protected feed deletion through actual router and SQLite middleware', 
   });
   it('cannot lose an external WAL write at the delete transaction boundary', async () => {
     await prisma.$queryRawUnsafe('PRAGMA journal_mode=WAL');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { DatabaseSync } = require('node:sqlite');
-    const outside = new DatabaseSync(database, { timeout: 100 });
-    outside.prepare('SELECT count(*) FROM feeds').get();
     let entered = false,
       externalError: unknown;
     const transaction = prisma.$transaction.bind(prisma);
@@ -293,13 +290,27 @@ describe('protected feed deletion through actual router and SQLite middleware', 
                   if (method === 'deleteMany')
                     return async (args: any) => {
                       entered = true;
-                      try {
-                        outside.exec(
-                          "UPDATE articles SET content_html='<p>WAL edit after recheck</p>' WHERE id='article-0'",
-                        );
-                      } catch (error) {
-                        externalError = error;
-                      }
+                      // An actual second PID is required: Node and Prisma can
+                      // load different SQLite libraries within one process.
+                      const child = spawnSync(
+                        process.execPath,
+                        [
+                          '-e',
+                          `const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.argv[1],{timeout:100});try{db.exec("UPDATE articles SET content_html='<p>WAL edit after recheck</p>' WHERE id='article-0'");console.log(JSON.stringify({ok:true}));}catch(error){console.log(JSON.stringify({ok:false,error:error.message}));}finally{db.close();}`,
+                          database,
+                        ],
+                        {
+                          windowsHide: true,
+                          shell: false,
+                          encoding: 'utf8',
+                          timeout: 5000,
+                          maxBuffer: 8192,
+                        },
+                      );
+                      expect(child.status).toBe(0);
+                      const result = JSON.parse(child.stdout.trim());
+                      expect(result.ok).toBe(false);
+                      externalError = result.error;
                       return delegate.deleteMany(args);
                     };
                   const value = Reflect.get(delegate, method);
@@ -314,18 +325,11 @@ describe('protected feed deletion through actual router and SQLite middleware', 
         });
         return fn(guarded);
       }, options)) as any);
-    try {
-      await api.feed.batchDelete(ids.slice(0, 2));
-      expect(entered).toBe(true);
-      expect(String(externalError)).toMatch(/locked|busy|timeout|timed out/i);
-      expect(await prisma.feed.count()).toBe(1);
-      expect(await prisma.article.count()).toBe(1);
-      expect(outside.prepare('SELECT count(*) AS n FROM feeds').get().n).toBe(
-        1,
-      );
-    } finally {
-      outside.close();
-    }
+    await api.feed.batchDelete(ids.slice(0, 2));
+    expect(entered).toBe(true);
+    expect(String(externalError)).toMatch(/locked|busy|timeout|timed out/i);
+    expect(await prisma.feed.count()).toBe(1);
+    expect(await prisma.article.count()).toBe(1);
   });
   it('holds queued application writers out throughout backup and deletion without deadlocking middleware', async () => {
     const begun = pause(),
