@@ -72,6 +72,8 @@ The production owner must provide a read-only reference probe whose file SHA is 
 
 The offline scope tests exercise the L1-L12 refusal boundaries, including a real owned inert-child hard kill. They do not establish full operational acceptance of historical retirement, registry amendment, Windows reference discovery or a real production switch/rollback. Those remain explicit review boundaries. The implementation is suitable for independent code review; it is **not an authorization to enable an exception, install, switch, clean history, or claim production readiness**.
 
+An existing historical layout above the bounded verifier's entry/time limit remains refused even after a capacity exception is approved. Production-scale adoption would need a separately reviewed complete inventory/immutability method; merely approving more bytes or increasing this verifier's limit is not acceptance of that method. This minimal version implements conservative admission and hold semantics and does not claim to unblock such an existing layout.
+
 A self-contained package intentionally pins its own Node executable so startup and rollback do not depend on a mutable machine-wide runtime. Previously `build.cjs` used a new timestamp directory on every invocation and `copyFileSync(process.execPath, release/runtime/node.exe)` created another runtime. Successful packages were never retired: only a failed invocation's owned output was removed. Whole-package installation copied that runtime again into the installation root. The cumulative build quota was not a retrospective cleanup policy, and there was no completed-package count limit or verified-candidate reuse.
 
 ### Separate generation and installation boundaries

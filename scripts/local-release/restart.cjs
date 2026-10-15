@@ -59,6 +59,17 @@ function commandLine(release, database, port, verifiedManifest) {
 }
 
 async function controlledRestart(options) {
+  // Reject fixture-only flags before resolving paths or opening any release claim.
+  if (
+    (options.preparedRehearsal || options.coldLaunchRehearsal) &&
+    !options.rehearsal
+  )
+    throw new Error('Prepared/cold fixture flags require rehearsal mode');
+  if (
+    (options.preparedRehearsal || options.coldLaunchRehearsal) &&
+    options.mode !== 'start'
+  )
+    throw new Error('Prepared/cold fixture flags only measure a cold start');
   if (!options.production || options.startupReuse === true)
     return controlledRestartInner(options);
   const scope = require('./release-scope.cjs');
@@ -77,16 +88,6 @@ async function controlledRestart(options) {
   );
 }
 async function controlledRestartInner(options) {
-  if (
-    (options.preparedRehearsal || options.coldLaunchRehearsal) &&
-    !options.rehearsal
-  )
-    throw new Error('Prepared/cold fixture flags require rehearsal mode');
-  if (
-    (options.preparedRehearsal || options.coldLaunchRehearsal) &&
-    options.mode !== 'start'
-  )
-    throw new Error('Prepared/cold fixture flags only measure a cold start');
   if (process.platform !== 'win32') throw new Error('仅支持 Windows 本机');
   if (options.production === options.rehearsal)
     throw new Error('须且只能选择 --production 或 --rehearsal');
