@@ -182,6 +182,7 @@ async function fixture(run) {
         powershellSha256:
           'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
         environmentFiles: [],
+        expectedChildren: [],
         pendingMigrations: ['additive'],
         allowedNewTables: ['new_table'],
         health: {
@@ -232,6 +233,13 @@ async function fixture(run) {
       operations: {
         identity(action, pid, expected) {
           events.push(action);
+          if (['AuxiliarySnapshot', 'WaitAuxiliary'].includes(action))
+            return {
+              format: 1,
+              verifiedCount: policy.publication.expectedChildren.length,
+              exited: action === 'WaitAuxiliary',
+              remainingPids: [],
+            };
           if (action === 'Port')
             return service ? [{ OwningProcess: service.pid }] : [];
           assert.equal(service?.pid, pid);
@@ -347,7 +355,9 @@ test('full narrow deploy installs exact pair, preserves data and held fallback, 
     const held = fingerprint(path.join(f.root, 'held'));
     const result = await f.execute();
     assert.equal(result.status, 'passed');
-    assert.equal(f.backupCount(), 2);
+    assert.equal(f.backupCount(), 1);
+    assert(f.events.indexOf('Stop') < f.events.indexOf('backup'));
+    assert(f.events.indexOf('Port') < f.events.indexOf('backup'));
     assert.deepEqual(
       f.events.filter((e) => e.startsWith('start:')),
       ['start:candidate'],
@@ -405,7 +415,7 @@ test('migration error uses compatible fallback on the live partially migrated da
     );
     assert.deepEqual(JSON.parse(fs.readFileSync(f.database)).new_table, []);
   }));
-test('explicit rollback has one protected snapshot slot; repeats allocate no packages or backups', () =>
+test('explicit rollback preserves later writes in the same DB without another backup; repeats reuse the pair', () =>
   fixture(async (f) => {
     await f.execute();
     const ids = ['candidate', 'rollback'].map((id) =>
@@ -413,13 +423,29 @@ test('explicit rollback has one protected snapshot slot; repeats allocate no pac
     );
     const deployed = await f.execute();
     assert(deployed.reused);
-    assert.equal(f.backupCount(), 2);
+    assert.equal(f.backupCount(), 1);
+    const later = JSON.parse(fs.readFileSync(f.database));
+    later.claims.push({
+      id: 2,
+      accepted: true,
+      attempted: true,
+      unknown: true,
+    });
+    fs.writeFileSync(f.database, JSON.stringify(later));
+    const originalBackup = path.join(
+      f.policy.publication.auditRoot,
+      'backups/b1/snapshot.db',
+    );
+    const backupSha = fileHash(originalBackup);
+    assert.equal(JSON.parse(fs.readFileSync(originalBackup)).claims.length, 1);
     const result = await f.execute(true);
     assert.equal(result.status, 'rolled-back');
-    assert.equal(f.backupCount(), 3);
+    assert.equal(f.backupCount(), 1);
+    assert.deepEqual(JSON.parse(fs.readFileSync(f.database)), later);
+    assert.equal(fileHash(originalBackup), backupSha);
     assert((await f.execute(true)).reused);
     assert((await f.execute()).reused);
-    assert.equal(f.backupCount(), 3);
+    assert.equal(f.backupCount(), 1);
     assert.deepEqual(
       ['candidate', 'rollback'].map((id) => identity(path.join(f.root, id))),
       ids,
@@ -474,13 +500,13 @@ for (const kind of [
 ])
   test('publication preserves foreign authority: ' + kind, () =>
     fixture(async (f) => {
-      const original = f.operations.backup;
+      const original = f.operations.identity;
       let foreign,
         bytes,
         changed = false;
-      f.operations.backup = (...args) => {
+      f.operations.identity = (...args) => {
         const result = original(...args);
-        if (!changed) {
+        if (args[0] === 'Snapshot' && !changed) {
           changed = true;
           const registry = f.policy.registryDirectory,
             ledger = path.join(registry, f.policy.scopeId + '.state.json'),
@@ -715,12 +741,12 @@ for (const nested of [false, true])
         f.policy.publication.auditRoot = path.join(parent, 'one-upgrade');
         fs.writeFileSync(f.file, JSON.stringify(f.policy));
       }
-      const backup = f.operations.backup;
+      const snapshot = f.operations.identity;
       let replaced = false,
         leaf;
-      f.operations.backup = (...args) => {
-        const result = backup(...args);
-        if (!replaced) {
+      f.operations.identity = (...args) => {
+        const result = snapshot(...args);
+        if (args[0] === 'Snapshot' && !replaced) {
           replaced = true;
           const audit = f.policy.publication.auditRoot,
             parent = path.dirname(audit);
@@ -817,4 +843,199 @@ test('completed replay refuses a same-bytes replacement of the published pointer
     await assert.rejects(f.execute(), /REPLAY_POINTER_CHANGED/);
     assert.equal(f.events.length, count);
     assert.deepEqual(fs.readFileSync(pointer), bytes);
+  }));
+
+test('single-backup and installation allowances match the fixed reviewed ceilings', () => {
+  const limit = publication.allowance(805306368);
+  assert.equal(admission.LIMITS.bytes, 245837824);
+  assert.equal(admission.LIMITS.copy, 244789248);
+  assert.equal(admission.LIMITS.metadata, 1048576);
+  assert.equal(limit.backupBytes, 1611661312);
+  assert.equal(limit.migrationBytes, 872415232);
+  assert.equal(limit.auditBytes, 16777216);
+  assert.equal(limit.maxBackups, 1);
+  assert.equal(admission.LIMITS.bytes + limit.additionalBytes, 2746691584);
+  assert.equal(
+    admission.LIMITS.free + admission.LIMITS.bytes + limit.additionalBytes,
+    7041658880,
+  );
+  assert.throws(
+    () => publication.allowance(805306368 + 4096),
+    /SOURCE_CEILING/,
+  );
+});
+
+test('an older multi-backup publication allowance is refused before install or stop', () =>
+  fixture(async (f) => {
+    f.policy.publication.limits.maxBackups = 3;
+    fs.writeFileSync(f.file, JSON.stringify(f.policy));
+    await assert.rejects(f.execute(), /FINITE_ALLOWANCE/);
+    assert.deepEqual(f.events, []);
+    assert(!fs.existsSync(path.join(f.root, 'candidate')));
+  }));
+
+for (const mode of ['success', 'timeout', 'identity-changed'])
+  test(`exact parent-bound auxiliary processes ${mode} before the only backup`, () =>
+    fixture(async (f) => {
+      f.policy.publication.expectedChildren = [
+        'watch-wechat2rss-cache.py',
+        'sqlite-snapshot-guard.py',
+      ].map((script, index) => ({
+        pid: 21 + index,
+        parentPid: 10,
+        startUtc: '2026-10-15T00:00:01.0000000Z',
+        executable: f.policy.publication.python.path,
+        commandLine:
+          'python ' + path.join(f.root, 'current/server/scripts', script),
+      }));
+      fs.writeFileSync(f.file, JSON.stringify(f.policy));
+      const original = f.operations.identity;
+      f.operations.identity = (action, ...args) => {
+        if (mode === 'timeout' && action === 'WaitAuxiliary')
+          throw Error('SYNTHETIC_AUX_TIMEOUT');
+        if (mode === 'identity-changed' && action === 'AuxiliarySnapshot')
+          throw Error('SYNTHETIC_AUX_IDENTITY');
+        return original(action, ...args);
+      };
+      if (mode === 'success') {
+        assert.equal((await f.execute()).status, 'passed');
+        assert(
+          f.events.indexOf('AuxiliarySnapshot') < f.events.indexOf('Stop'),
+        );
+        assert(f.events.indexOf('Stop') < f.events.indexOf('WaitAuxiliary'));
+        assert(f.events.indexOf('WaitAuxiliary') < f.events.indexOf('backup'));
+        assert.equal(f.backupCount(), 1);
+      } else {
+        await assert.rejects(f.execute(), /SYNTHETIC_AUX_/);
+        assert.equal(f.backupCount(), 0);
+        assert(!f.events.includes('migrate'));
+        assert(!f.events.some((e) => e.startsWith('start:')));
+        assert.equal(f.events.includes('Stop'), mode === 'timeout');
+      }
+    }));
+
+test('failed backup spends the only attempt, preserves its partial output, and restores current without migration', () =>
+  fixture(async (f) => {
+    const original = f.operations.backup;
+    let attempts = 0,
+      partial;
+    f.operations.backup = (...args) => {
+      attempts++;
+      partial = original(...args).backup;
+      fs.writeFileSync(partial, 'SYNTHETIC_FAILED_BACKUP');
+      throw Error('SYNTHETIC_BACKUP_FAILED');
+    };
+    const result = await f.execute();
+    assert.equal(result.status, 'rolled-back');
+    assert.equal(result.backups, 1);
+    assert.equal(result.databaseRestored, false);
+    assert.equal(attempts, 1);
+    assert(!f.events.includes('migrate'));
+    assert.deepEqual(JSON.parse(fs.readFileSync(f.database)), f.initial);
+    assert.deepEqual(
+      f.events.filter((e) => e.startsWith('start:')),
+      ['start:current'],
+    );
+    assert.equal(fs.readFileSync(partial, 'utf8'), 'SYNTHETIC_FAILED_BACKUP');
+    assert((await f.execute()).reused);
+    assert((await f.execute(true)).reused);
+    assert.equal(attempts, 1);
+  }));
+
+test('backup baseline mismatch cannot migrate or consume a second attempt', () =>
+  fixture(async (f) => {
+    const original = f.operations.backup;
+    f.operations.backup = (...args) => {
+      const b = original(...args);
+      fs.writeFileSync(b.backup, JSON.stringify({ ...f.initial, claims: [] }));
+      return { ...b, sha256: fileHash(b.backup) };
+    };
+    assert.equal((await f.execute()).status, 'rolled-back');
+    assert.equal(f.backupCount(), 1);
+    assert(!f.events.includes('migrate'));
+    assert.deepEqual(JSON.parse(fs.readFileSync(f.database)), f.initial);
+    assert(f.events.includes('start:current'));
+  }));
+
+test('unconfirmed stop with a live old writer never creates a backup', () =>
+  fixture(async (f) => {
+    const identity = f.operations.identity;
+    f.operations.identity = (action, ...args) =>
+      action === 'Stop'
+        ? { ...f.service(), stopped: false }
+        : identity(action, ...args);
+    await assert.rejects(f.execute(), /STOP_UNCONFIRMED/);
+    assert.equal(f.backupCount(), 0);
+    assert(!f.events.includes('migrate'));
+    assert.equal(f.service().pid, 10);
+    assert(!f.events.some((e) => e.startsWith('start:')));
+  }));
+
+for (const timing of ['after-stop', 'after-backup'])
+  test(`a foreign writer ${timing} holds before migration without a second snapshot`, () =>
+    fixture(async (f) => {
+      const identity = f.operations.identity,
+        backup = f.operations.backup;
+      let busy = timing === 'after-stop';
+      f.operations.identity = (action, ...args) =>
+        action === 'Port' && busy
+          ? [{ OwningProcess: 999 }]
+          : identity(action, ...args);
+      f.operations.backup = (...args) => {
+        const b = backup(...args);
+        busy = true;
+        return b;
+      };
+      const start = f.operations.start;
+      f.operations.start = (...args) => {
+        if (busy) throw Error('SYNTHETIC_PORT_BUSY');
+        return start(...args);
+      };
+      await assert.rejects(f.execute(), /WRITERS_NOT_STOPPED/);
+      assert.equal(f.backupCount(), timing === 'after-stop' ? 0 : 1);
+      assert(!f.events.includes('migrate'));
+      assert(!f.events.some((e) => e.startsWith('start:')));
+      const ledger = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            f.policy.registryDirectory,
+            f.policy.scopeId + '.state.json',
+          ),
+        ),
+      ).payload;
+      assert.equal(ledger.publication.status, 'held');
+      assert(ledger.claim);
+      await assert.rejects(
+        f.execute(),
+        /INSTALLATION_NOT_COMPLETE|INTERRUPTED_PUBLICATION_HELD/,
+      );
+      assert.equal(f.backupCount(), timing === 'after-stop' ? 0 : 1);
+    }));
+
+test('empty port alone is insufficient when the complete reference query retains another package process', () =>
+  fixture(async (f) => {
+    const facts = f.facts;
+    f.facts = () => ({
+      ...facts(),
+      records: f.events.includes('Stop')
+        ? [
+            {
+              kind: 'processes',
+              packageId: 'held',
+              packagePath: path.join(f.root, 'held'),
+              identity: 'synthetic-other-writer',
+              pid: 999,
+              startUtc: 'synthetic',
+              executableSha256: 'a'.repeat(64),
+            },
+          ]
+        : [],
+    });
+    f.operations.start = () => {
+      throw Error('SYNTHETIC_WRITER_PRESENT');
+    };
+    await assert.rejects(f.execute(), /WRITERS_NOT_STOPPED/);
+    assert.equal(f.backupCount(), 0);
+    assert(!f.events.includes('migrate'));
+    assert(!f.events.some((e) => e.startsWith('start:')));
   }));

@@ -226,7 +226,7 @@ test('real CLI dispatch installs only frozen pair, keeps four protected IDs and 
     const pointer = fileHash(path.join(f.root, 'active.json'));
     const result = f.apply();
     assert.deepEqual(result.installedIds.sort(), ['candidate', 'rollback']);
-    assert.equal(result.admission.maxAdditionalBytes, 244453376);
+    assert.equal(result.admission.maxAdditionalBytes, 245837824);
     assert.equal(result.admission.publicationAuthorized, false);
     assert.equal(result.admission.newRuntimeCopies, 2);
     assert.equal(fileHash(path.join(f.root, 'active.json')), pointer);

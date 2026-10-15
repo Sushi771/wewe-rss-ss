@@ -6,8 +6,8 @@ const processes = require('node:child_process');
 const { hostEffects, fileHash, verifyRelease } = require('./lib.cjs');
 const { createVerifier } = require('./scope-inventory.cjs');
 const LIMITS = Object.freeze({
-  bytes: 244453376,
-  copy: 243404800,
+  bytes: 245837824,
+  copy: 244789248,
   metadata: 1048576,
   runtimes: 2,
   free: 4 * 1024 ** 3,

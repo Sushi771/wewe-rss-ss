@@ -1,16 +1,64 @@
 ﻿# Windows 进程身份核验。Stop 操作持有 Process 对象句柄，避免按 PID 二次查找后误杀复用 PID。
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port', 'Discover')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port', 'Discover', 'AuxiliarySnapshot', 'WaitAuxiliary')][string]$Action,
     [int]$TargetPid,
     [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
     [string]$ExpectedStartUtc,
     [string]$ExpectedExecutable,
-    [string]$ExpectedCommandLine
+    [string]$ExpectedCommandLine,
+    [string]$ExpectedAuxiliaryJson
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'tcp-listeners.ps1')
+if ($Action -in @('AuxiliarySnapshot', 'WaitAuxiliary')) {
+    if (-not $ExpectedAuxiliaryJson -or $ExpectedAuxiliaryJson.Length -gt 65536) { throw 'EXACT_AUXILIARY_BINDING_REQUIRED' }
+    $decodedPins = ConvertFrom-Json -InputObject $ExpectedAuxiliaryJson
+    $pins = @($decodedPins)
+    if ($pins.Count -gt 2 -or @($pins | Select-Object -ExpandProperty pid -Unique).Count -ne $pins.Count) { throw 'EXACT_AUXILIARY_LIMIT' }
+    $handles = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+    try {
+        foreach ($pin in $pins) {
+            if ([int]$pin.pid -le 0 -or [int]$pin.parentPid -le 0 -or -not $pin.startUtc -or -not $pin.executable -or -not $pin.commandLine) { throw 'EXACT_AUXILIARY_BINDING_REQUIRED' }
+            try { $child = [System.Diagnostics.Process]::GetProcessById([int]$pin.pid) }
+            catch {
+                if ($_.Exception.InnerException -is [System.ArgumentException]) { continue }
+                throw
+            }
+            $handles.Add($child)
+            $null = $child.Handle
+            if ($child.HasExited) { continue }
+            $childStart = $child.StartTime.ToUniversalTime().ToString('o')
+            $childCim = Get-CimInstance Win32_Process -Filter "ProcessId=$($pin.pid)"
+            if ($null -eq $childCim) {
+                if ($child.HasExited) { continue }
+                throw 'EXACT_AUXILIARY_QUERY_INCOMPLETE'
+            }
+            if ($childStart -cne [string]$pin.startUtc -or
+                [int]$childCim.ParentProcessId -ne [int]$pin.parentPid -or
+                -not [string]::Equals([string]$childCim.ExecutablePath, [string]$pin.executable, [StringComparison]::OrdinalIgnoreCase) -or
+                -not [string]::Equals([string]$childCim.CommandLine, [string]$pin.commandLine, [StringComparison]::Ordinal) -or
+                [Math]::Abs(($childCim.CreationDate.ToUniversalTime() - $child.StartTime.ToUniversalTime()).TotalSeconds) -gt 1) {
+                throw 'EXACT_AUXILIARY_IDENTITY_CHANGED'
+            }
+        }
+        if ($Action -eq 'WaitAuxiliary') {
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            foreach ($child in $handles) {
+                if (-not $child.HasExited) {
+                    $remaining = [Math]::Max(0, [Math]::Min(60000, [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)))
+                    if (-not $child.WaitForExit([int]$remaining)) { throw 'EXACT_AUXILIARY_EXIT_TIMEOUT' }
+                }
+            }
+        }
+        $remainingPids = @($handles | Where-Object { -not $_.HasExited } | ForEach-Object { $_.Id })
+        [ordered]@{format=1;verifiedCount=$pins.Count;exited=($remainingPids.Count -eq 0);remainingPids=$remainingPids} | ConvertTo-Json -Compress -Depth 3
+    } finally {
+        foreach ($child in $handles) { $child.Dispose() }
+    }
+    return
+}
 if ($Action -eq 'Port') {
     $listeners = @(Get-LocalTcpListener -Port $Port |
         Select-Object LocalAddress, OwningProcess)

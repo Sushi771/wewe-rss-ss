@@ -8,6 +8,107 @@ const { processIdentity, portOwnersAsync, stopOwned } = require('./switch.cjs');
 const windows = { skip: process.platform !== 'win32', timeout: 90000 };
 
 test(
+  'exact auxiliary identity waits for owned stdin EOF without terminating a different identity',
+  windows,
+  async () => {
+    const { execFile, execFileSync } = require('node:child_process');
+    const { promisify } = require('node:util');
+    const path = require('node:path');
+    const shell = path.join(
+      process.env.SystemRoot || 'C:\\Windows',
+      'System32/WindowsPowerShell/v1.0/powershell.exe',
+    );
+    const helper = path.join(__dirname, 'process-identity.ps1');
+    const start = () =>
+      spawn(
+        process.execPath,
+        [
+          '-e',
+          "process.stdin.resume();process.stdin.on('end',()=>process.exit(0))",
+        ],
+        { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] },
+      );
+    const children = [start(), start()];
+    const closed = Promise.all(children.map((child) => once(child, 'close')));
+    try {
+      const pins = children.map((child) =>
+        JSON.parse(
+          execFileSync(
+            shell,
+            [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              `$ErrorActionPreference='Stop';$p=[Diagnostics.Process]::GetProcessById(${child.pid});$c=Get-CimInstance Win32_Process -Filter 'ProcessId=${child.pid}';[ordered]@{pid=$p.Id;parentPid=[int]$c.ParentProcessId;startUtc=$p.StartTime.ToUniversalTime().ToString('o');executable=$c.ExecutablePath;commandLine=$c.CommandLine}|ConvertTo-Json -Compress`,
+            ],
+            { windowsHide: true, encoding: 'utf8', timeout: 15000 },
+          ),
+        ),
+      );
+      assert(pins.every((pin) => pin.parentPid === process.pid));
+      const args = (action, values = pins) => [
+        '-NoProfile',
+        '-NonInteractive',
+        '-File',
+        helper,
+        '-Action',
+        action,
+        '-Port',
+        '4000',
+        '-ExpectedAuxiliaryJson',
+        JSON.stringify(values),
+      ];
+      assert.throws(
+        () =>
+          execFileSync(
+            shell,
+            args('AuxiliarySnapshot', [
+              {
+                ...pins[0],
+                startUtc: '2000-01-01T00:00:00.0000000Z',
+              },
+            ]),
+            { windowsHide: true, stdio: 'pipe', timeout: 15000 },
+          ),
+        (error) =>
+          String(error.stderr).includes('EXACT_AUXILIARY_IDENTITY_CHANGED'),
+      );
+      assert(children.every((child) => child.exitCode === null));
+      const snapshot = JSON.parse(
+        execFileSync(shell, args('AuxiliarySnapshot'), {
+          windowsHide: true,
+          encoding: 'utf8',
+          timeout: 15000,
+        }),
+      );
+      assert.equal(snapshot.verifiedCount, 2);
+      assert.equal(snapshot.exited, false);
+      const waiting = promisify(execFile)(shell, args('WaitAuxiliary'), {
+        windowsHide: true,
+        encoding: 'utf8',
+        timeout: 65000,
+      });
+      const endInput = setTimeout(
+        () => children.forEach((child) => child.stdin.end()),
+        2000,
+      );
+      let result;
+      try {
+        result = JSON.parse((await waiting).stdout);
+      } finally {
+        clearTimeout(endInput);
+      }
+      assert.equal(result.verifiedCount, 2);
+      assert.equal(result.exited, true);
+      assert.deepEqual(result.remainingPids, []);
+      assert((await closed).every(([code]) => code === 0));
+    } finally {
+      for (const child of children) if (child.exitCode === null) child.kill();
+    }
+  },
+);
+
+test(
   'asynchronous port check rejects invalid ports rather than treating failure as free',
   windows,
   async () => {

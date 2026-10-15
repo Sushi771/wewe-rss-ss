@@ -46,11 +46,11 @@ function allowance(sourceCeilingBytes) {
   if (
     !Number.isSafeInteger(sourceCeilingBytes) ||
     sourceCeilingBytes < 4096 ||
-    sourceCeilingBytes > 1024 ** 3 ||
+    sourceCeilingBytes > 768 * MiB ||
     sourceCeilingBytes % 4096
   )
     fail('SOURCE_CEILING');
-  const backupBytes = 4 * sourceCeilingBytes + 2 * MiB,
+  const backupBytes = 2 * sourceCeilingBytes + MiB,
     migrationBytes = sourceCeilingBytes + 64 * MiB,
     auditBytes = 16 * MiB;
   return {
@@ -59,7 +59,7 @@ function allowance(sourceCeilingBytes) {
     migrationBytes,
     auditBytes,
     additionalBytes: backupBytes + migrationBytes + auditBytes,
-    maxBackups: 3,
+    maxBackups: 1,
     maxPublications: 1,
     maxRollbacks: 1,
   };
@@ -144,6 +144,32 @@ function validate(p) {
   )
     fail('EXPECTED_COMMAND');
   for (const spec of [u.python, u.schemaEngine]) pin(spec);
+  if (
+    !Array.isArray(u.expectedChildren) ||
+    u.expectedChildren.length > 2 ||
+    new Set(u.expectedChildren.map((c) => c.pid)).size !==
+      u.expectedChildren.length ||
+    u.expectedChildren.some(
+      (c) =>
+        !Number.isInteger(c.pid) ||
+        c.pid < 1 ||
+        c.pid === u.expected.pid ||
+        c.parentPid !== u.expected.pid ||
+        !Number.isFinite(Date.parse(c.startUtc)) ||
+        c.executable !== u.python.path ||
+        typeof c.commandLine !== 'string' ||
+        Buffer.byteLength(c.commandLine) > 32768 ||
+        !['watch-wechat2rss-cache.py', 'sqlite-snapshot-guard.py'].some(
+          (script) =>
+            require('./windows-release-references.cjs')
+              .argv(c.commandLine)
+              .includes(
+                path.join(p.installRoot, p.currentId, 'server/scripts', script),
+              ),
+        ),
+    )
+  )
+    fail('EXACT_AUXILIARY_BINDING');
   if (!/^[a-f0-9]{64}$/.test(u.powershellSha256 || '')) fail('POWERSHELL_PIN');
   if (
     !Array.isArray(u.environmentFiles) ||
@@ -336,17 +362,20 @@ function nativeOperations(p, u, audit, check) {
           String(pid || 0),
           '-Port',
           '4000',
-          ...(expected
-            ? [
-                '-ExpectedStartUtc',
-                expected.startUtc,
-                '-ExpectedExecutable',
-                expected.executable,
-                '-ExpectedCommandLine',
-                expected.commandLine,
-              ]
-            : []),
+          ...(['AuxiliarySnapshot', 'WaitAuxiliary'].includes(action)
+            ? ['-ExpectedAuxiliaryJson', JSON.stringify(u.expectedChildren)]
+            : expected
+              ? [
+                  '-ExpectedStartUtc',
+                  expected.startUtc,
+                  '-ExpectedExecutable',
+                  expected.executable,
+                  '-ExpectedCommandLine',
+                  expected.commandLine,
+                ]
+              : []),
         ],
+        { timeout: action === 'WaitAuxiliary' ? 65000 : 180000 },
       ),
     );
   return {
@@ -369,7 +398,7 @@ function nativeOperations(p, u, audit, check) {
             SQLITE_BACKUP_KIND: 'production',
             SQLITE_PRODUCTION_LEGACY_ROOTS: '[]',
             SQLITE_PRODUCTION_MAX_BYTES: String(u.limits.backupBytes),
-            SQLITE_PRODUCTION_MAX_COPIES: '3',
+            SQLITE_PRODUCTION_MAX_COPIES: '1',
             SQLITE_PRODUCTION_MIN_FREE_BYTES: String(FREE),
           },
         },
@@ -900,6 +929,7 @@ async function execute(policyFile, expected, options = {}) {
     child,
     oldStopped = false,
     stopAttempted = false,
+    childrenStopped = u.expectedChildren.length === 0,
     migrationAttempted = options.rollback === true;
   try {
     if (!state.publication) {
@@ -968,7 +998,8 @@ async function execute(policyFile, expected, options = {}) {
           if (a[key] !== b[key]) fail('PROCESS_IDENTITY');
       };
       const backup = (label) => {
-        if (state.publication.backups >= 3) fail('BACKUP_CREDIT_SPENT');
+        if (state.publication.backups >= u.limits.maxBackups)
+          fail('BACKUP_CREDIT_SPENT');
         if (databaseBytes(u.database) > u.limits.sourceCeilingBytes)
           fail('SOURCE_CEILING');
         state.publication.backups++;
@@ -976,6 +1007,28 @@ async function execute(policyFile, expected, options = {}) {
         const b = ops.backup(candidate);
         receipt(label, b);
         return b;
+      };
+      const writersStopped = () => {
+        references();
+        const owners = ops.identity('Port', 0);
+        if (
+          !Array.isArray(owners) ||
+          owners.length ||
+          facts.records.some((r) => r.kind === 'processes')
+        )
+          fail('WRITERS_NOT_STOPPED');
+      };
+      const auxiliaries = (action) => {
+        if (!u.expectedChildren.length) return;
+        const result = ops.identity(action, 0);
+        if (
+          result?.format !== 1 ||
+          result.verifiedCount !== u.expectedChildren.length ||
+          !Array.isArray(result.remainingPids) ||
+          (action === 'WaitAuxiliary' &&
+            (result.exited !== true || result.remainingPids.length))
+        )
+          fail('EXACT_AUXILIARY_UNCONFIRMED');
       };
       const publish = (id) => {
         check();
@@ -1029,7 +1082,7 @@ async function execute(policyFile, expected, options = {}) {
         const target = migrationAttempted
           ? rollback
           : path.join(p.installRoot, p.currentId);
-        references();
+        writersStopped();
         verifyRelease(target);
         if (
           fileHash(path.join(target, 'release.json')) !==
@@ -1057,9 +1110,8 @@ async function execute(policyFile, expected, options = {}) {
           ? state.publication.identity
           : u.expected;
         same(ops.identity('Snapshot', expectedProcess.pid), expectedProcess);
-        if (!options.rollback) backup('before-stop');
-        else backup('before-rollback');
-        same(ops.identity('Snapshot', expectedProcess.pid), expectedProcess);
+        // The original helpers are bound to the old parent, not later candidates.
+        if (!options.rollback) auxiliaries('AuxiliarySnapshot');
         references();
         stage('stop-reserved');
         transition = true;
@@ -1072,6 +1124,9 @@ async function execute(policyFile, expected, options = {}) {
         if (stopped.stopped !== true) fail('STOP_UNCONFIRMED');
         oldStopped = true;
         stage('old-stopped');
+        if (!options.rollback) auxiliaries('WaitAuxiliary');
+        childrenStopped = true;
+        writersStopped();
         if (options.rollback) return await fallback(Error('EXPLICIT_ROLLBACK'));
         const final = backup('after-stop');
         const baseline = ops.state(u.database);
@@ -1081,6 +1136,7 @@ async function execute(policyFile, expected, options = {}) {
         const before = ops.inspect(candidate, u.database, false);
         if (hash(before.pending) !== hash(u.pendingMigrations))
           fail('PENDING_MIGRATIONS_CHANGED');
+        writersStopped();
         stage('migration-reserved');
         migrationAttempted = true;
         const migrated = await ops.migrate(candidate);
@@ -1114,6 +1170,7 @@ async function execute(policyFile, expected, options = {}) {
           if (Array.isArray(owners) && owners.length === 0) oldStopped = true;
         }
         if (!oldStopped) throw error;
+        if (!childrenStopped) throw error;
         if (state.publication.rollbackSpent) throw error;
         return await fallback(error);
       }
