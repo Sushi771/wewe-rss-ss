@@ -187,6 +187,7 @@ function installPair(root, plan, options = {}) {
   };
   const stateFile = path.join(root, '.release-lifecycle.json'),
     owned = [];
+  let shared;
   let complete = false;
   try {
     const disk = fs.statfsSync(root, { bigint: true }),
@@ -282,6 +283,15 @@ function installPair(root, plan, options = {}) {
       throw new Error('RELEASE_MANAGED_BYTES_EXCEEDED');
     if (disk.bavail * disk.bsize - BigInt(physical) < BigInt(minFree))
       throw new Error('RELEASE_PHYSICAL_RESERVE_EXCEEDED');
+    shared =
+      options.scope ||
+      require('./release-scope.cjs').open({
+        kind: 'install',
+        root,
+        reserveBytes: physical,
+        runtimeCopies: missing.length,
+      });
+    shared.check();
     assertOwner();
     if (fileHash(pointer) !== pointerSha)
       throw new Error('RELEASE_CURRENT_CHANGED');
@@ -296,10 +306,13 @@ function installPair(root, plan, options = {}) {
       maxBytes: DEFAULTS.bytes,
     });
     for (const { target, source } of missing) {
+      shared.check();
+      shared.registerOutput(target);
       assertOwner();
       if (exists(target)) throw new Error('RELEASE_TARGET_APPEARED');
       fs.mkdirSync(target);
       owned.push({ target, identity: fs.lstatSync(target, { bigint: true }) });
+      shared.createdOutput(target);
       fs.cpSync(source.folder, target, {
         recursive: true,
         force: false,
@@ -324,6 +337,7 @@ function installPair(root, plan, options = {}) {
         throw new Error('RELEASE_INSTALLED_PROOF_CHANGED');
     }
     assertOwner();
+    shared.check();
     if (fileHash(pointer) !== pointerSha)
       throw new Error('RELEASE_CURRENT_CHANGED');
     let finalBytes = 0;
@@ -361,6 +375,7 @@ function installPair(root, plan, options = {}) {
     try {
       assertOwner();
       if (!complete && owned.length) {
+        shared?.allowCleanup(owned.map((row) => row.target));
         if (fileHash(pointer) !== pointerSha)
           throw new Error('RELEASE_CURRENT_CHANGED_PRESERVE_OUTPUT');
         for (const { target, identity } of owned) {
@@ -377,8 +392,14 @@ function installPair(root, plan, options = {}) {
           fs.rmSync(target, { recursive: true });
       }
     } finally {
-      assertOwner();
-      fs.unlinkSync(lock);
+      try {
+        assertOwner();
+        fs.unlinkSync(lock);
+      } finally {
+        shared?.close(
+          complete ? undefined : new Error('installation incomplete'),
+        );
+      }
     }
   }
 }

@@ -58,7 +58,18 @@ function fixture(run) {
       rollback: proof(rollback),
     },
   };
-  const options = { adoptLegacy: [] };
+  // Unit seam for the local-role layer. The real CLI below uses release-scope;
+  // its cross-root/inventory/reference cases are in release-scope.test.cjs.
+  const options = {
+    adoptLegacy: [],
+    scope: {
+      check() {},
+      registerOutput() {},
+      createdOutput() {},
+      allowCleanup() {},
+      close() {},
+    },
+  };
   const before = fingerprint(current);
   try {
     return run({
@@ -414,12 +425,69 @@ test('the reviewed-plan CLI installs and then reuses exactly the same tiny fixtu
       JSON.stringify({ root: f.root, plan: f.plan, adoptLegacy: [] }),
     );
     const { execFileSync } = require('node:child_process');
+    const scope = require('./release-scope.cjs'),
+      crypto = require('node:crypto');
+    const facts = path.join(f.base, 'facts.json'),
+      probe = path.join(f.base, 'probe.cjs'),
+      policyFile = path.join(f.base, 'scope-policy.json');
+    fs.writeFileSync(
+      facts,
+      JSON.stringify({
+        complete: true,
+        categories: Object.fromEntries(
+          [
+            'processes',
+            'tasks',
+            'shortcuts',
+            'pointers',
+            'rollback',
+            'inflight',
+          ].map((k) => [k, true]),
+        ),
+        records: [],
+        errors: [],
+        uncertainChildren: [],
+        compatibility: {
+          verified: true,
+          businessDatabaseRestored: false,
+          proofSha256: 'd'.repeat(64),
+        },
+      }),
+    );
+    fs.writeFileSync(
+      probe,
+      'const fs=require("node:fs"),path=require("node:path");process.stdout.write(fs.readFileSync(path.join(__dirname,"facts.json")));',
+    );
+    fs.writeFileSync(
+      policyFile,
+      JSON.stringify({
+        format: 1,
+        scopeId: crypto.randomUUID(),
+        registryDirectory: fs.realpathSync.native(f.base),
+        registryIdentity: scope.inspect([f.base]).roots[0].identity,
+        ...scope.inspect([f.root, f.sources]),
+        maxBytes: scope.DEFAULT_BYTES,
+        maxGrowthBytes: 1024 * 1024,
+        maxNewRuntimeCopies: 2,
+        protectedIds: ['current', 'candidate', 'rollback'],
+        compatibilityProofSha256: 'd'.repeat(64),
+        probe: { path: probe, sha256: fileHash(probe) },
+      }),
+    );
     const run = () =>
       JSON.parse(
         execFileSync(
           process.execPath,
           [require.resolve('./install-lifecycle.cjs'), '--plan', file],
-          { encoding: 'utf8', windowsHide: true },
+          {
+            encoding: 'utf8',
+            windowsHide: true,
+            env: {
+              ...process.env,
+              WEWE_RELEASE_SCOPE_FILE: policyFile,
+              WEWE_RELEASE_SCOPE_SHA256: fileHash(policyFile),
+            },
+          },
         ),
       );
     assert.equal(run().installedIds.length, 2);

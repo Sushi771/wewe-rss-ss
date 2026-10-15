@@ -75,7 +75,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: |
-          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/entry-budget.test.cjs
+          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/entry-budget.test.cjs
           python -m unittest discover -s apps/server/scripts -p 'test_backup_space.py'
           python -m unittest discover -s apps/server/scripts -p 'test_sqlite_retention_plan.py'
           python -m unittest discover -s apps/server/scripts -p 'test_sqlite_snapshot_guard.py'
@@ -111,7 +111,7 @@ jobs:
         run: pnpm install
 
       - name: Test finite release generation and installation lifetimes offline
-        run: node --test --test-concurrency=1 scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs
+        run: node --test --test-concurrency=1 scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs
 
       - name: Format check
         run: pnpm fmt.check

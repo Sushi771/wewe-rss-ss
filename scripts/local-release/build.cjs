@@ -23,7 +23,12 @@ const {
 const root = path.resolve(__dirname, '../..');
 const server = path.join(root, 'apps/server');
 
-function copyPackages(destination, generatedClient, packageSource = server) {
+function copyPackages(
+  destination,
+  generatedClient,
+  packageSource = server,
+  checkpoint = () => {},
+) {
   const seen = new Map();
   const versions = [];
   // resolve.paths('buffer') returns null for Node core names. A trailing slash
@@ -49,6 +54,7 @@ function copyPackages(destination, generatedClient, packageSource = server) {
       `${pkg.name.replace(/[^a-zA-Z0-9_.-]/g, '_')}-${pkg.version}-${hash(source).slice(0, 8)}`,
     );
     seen.set(source, target);
+    checkpoint();
     fs.cpSync(source, target, {
       recursive: true,
       errorOnExist: true,
@@ -249,12 +255,19 @@ function build(options = {}) {
   }
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
   const release = path.join(root, '.local-releases', id);
-  const reservation = buildBudget.begin(
-    path.dirname(release),
-    buildBudget.estimate(sourceServer),
-  );
+  const requestedBytes = buildBudget.estimate(sourceServer);
+  const shared = require('./release-scope.cjs').open({
+    kind: 'build',
+    root: path.dirname(release),
+    reserveBytes: requestedBytes,
+    runtimeCopies: 1,
+  });
+  let reservation;
   let failure;
   try {
+    reservation = buildBudget.begin(path.dirname(release), requestedBytes, {
+      shared,
+    });
     reservation.create(release);
     const target = path.join(release, 'server');
     fs.mkdirSync(target);
@@ -315,6 +328,7 @@ function build(options = {}) {
       },
     });
     const tsc = path.join(packageDir('typescript', server), 'bin/tsc');
+    reservation.check();
     run(process.execPath, [tsc, '-p', tsconfig], { cwd: sourceServer, env });
     const compiledRoot = path.join(target, 'dist/apps/server/src');
     walk(path.join(target, 'dist'), (relative, kind) => {
@@ -351,6 +365,7 @@ function build(options = {}) {
         incremental: false,
       },
     });
+    reservation.check();
     run(process.execPath, [tsc, '-p', webConfig, '--noEmit'], {
       cwd: web,
       env,
@@ -383,6 +398,7 @@ function build(options = {}) {
         ),
       );
     }
+    reservation.check();
     fs.cpSync(path.join(sourceServer, 'prisma'), path.join(target, 'prisma'), {
       recursive: true,
     });
@@ -424,6 +440,7 @@ function build(options = {}) {
     ])
       fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
     fs.mkdirSync(path.join(release, 'runtime'));
+    reservation.check();
     fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
     const compact = options.compact
       ? bundleServer(target, sourceServer, sourceWeb)
@@ -431,7 +448,7 @@ function build(options = {}) {
     reservation.check();
     const dependencies = options.compact
       ? compact.dependencies
-      : copyPackages(target, client, sourceServer);
+      : copyPackages(target, client, sourceServer, () => reservation.check());
     // Historical rollback packages retain their own helper. Current packages
     // contain no desktop collector code or executable.
     if (legacy) {
@@ -490,13 +507,16 @@ function build(options = {}) {
     failure = error;
     throw error;
   } finally {
-    reservation.finish(failure);
+    try {
+      reservation?.finish(failure);
+    } finally {
+      shared.close(failure);
+    }
   }
 }
 
 if (require.main === module) {
   try {
-    fs.mkdirSync(path.join(root, '.local-releases'), { recursive: true });
     const { values } = parseArgs({
       options: {
         'source-root': { type: 'string' },

@@ -145,7 +145,7 @@ function estimate(server, node = process.execPath) {
   // browser output and bounded subprocess log buffers. Final size is checked too.
   return dependencies * 2 + fs.statSync(node).size + 128 * 1024 ** 2;
 }
-function begin(root, requestedBytes, { packages = 1 } = {}) {
+function begin(root, requestedBytes, { packages = 1, shared } = {}) {
   root = budget.canonical(root);
   const max = Number(process.env.WEWE_RELEASE_MAX_BYTES || 768 * 1024 ** 2);
   const reserve = Number(
@@ -179,6 +179,7 @@ function begin(root, requestedBytes, { packages = 1 } = {}) {
   const owned = [];
   let done = false;
   function check(additional = 0) {
+    shared?.check();
     if (done || !Number.isSafeInteger(additional) || additional < 0)
       throw new Error('Invalid or completed release reservation');
     const existing = packageDirectories(root).length;
@@ -215,11 +216,13 @@ function begin(root, requestedBytes, { packages = 1 } = {}) {
         throw new Error('Invalid owned build directory');
       if (packageDirectories(root).length >= MAX_PACKAGES)
         throw new Error('RELEASE_PACKAGE_LIMIT_EXCEEDED');
+      shared?.registerOutput(directory);
       fs.mkdirSync(directory);
       owned.push({
         directory,
         identity: fs.lstatSync(directory, { bigint: true }),
       });
+      shared?.createdOutput(directory);
     },
     check,
     finish(error) {
@@ -227,6 +230,7 @@ function begin(root, requestedBytes, { packages = 1 } = {}) {
       done = true;
       try {
         if (error) {
+          shared?.allowCleanup(owned.map((row) => row.directory));
           // Validate the whole owned batch before removing any failed output.
           for (const { directory, identity } of owned) {
             const current = fs.lstatSync(directory, { bigint: true });

@@ -59,6 +59,24 @@ function commandLine(release, database, port, verifiedManifest) {
 }
 
 async function controlledRestart(options) {
+  if (!options.production || options.startupReuse === true)
+    return controlledRestartInner(options);
+  const scope = require('./release-scope.cjs');
+  return scope.within(
+    {
+      kind: 'restart',
+      root: path.dirname(fs.realpathSync(options.release)),
+      reserveBytes: 256 * 1024 ** 2,
+      transition: true,
+    },
+    (lease) => {
+      lease.authorizePackage(options.release);
+      lease.authorizePackage(options.previous || options.release);
+      return controlledRestartInner(options);
+    },
+  );
+}
+async function controlledRestartInner(options) {
   if (
     (options.preparedRehearsal || options.coldLaunchRehearsal) &&
     !options.rehearsal
@@ -131,7 +149,12 @@ async function controlledRestart(options) {
         path.join(root, 'output/playwright/local-release-audit'),
       `controlled-restart-${Date.now()}-${process.pid}`,
     );
-  if (!artifacts) fs.mkdirSync(audit, { recursive: true });
+  if (!artifacts) {
+    const lease = require('./release-scope.cjs').session();
+    lease?.registerOutput(audit);
+    fs.mkdirSync(audit, { recursive: true });
+    lease?.createdOutput(audit);
+  }
   let artifactError;
   try {
     const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
@@ -269,6 +292,7 @@ async function controlledRestart(options) {
           path.join(audit, `${label}-guard.json`),
         );
       else args.push('--production');
+      require('./release-scope.cjs').session()?.check(true);
       const child = spawn(path.join(bundlePath, 'runtime/node.exe'), args, {
         cwd: audit,
         env: {

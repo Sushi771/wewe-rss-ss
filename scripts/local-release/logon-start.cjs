@@ -68,6 +68,7 @@ async function startAtLogon() {
     production: true,
     rehearsal: false,
     reuseVerified: true,
+    startupReuse: true,
   });
   return {
     status: 'started',
@@ -78,6 +79,20 @@ async function startAtLogon() {
 }
 
 function activateRunning(candidate) {
+  return require('./release-scope.cjs').within(
+    {
+      kind: 'activate',
+      root: path.dirname(fs.realpathSync(candidate)),
+      reserveBytes: 256 * 1024,
+      transition: true,
+    },
+    (lease) => {
+      lease.authorizePackage(candidate);
+      return activateRunningInner(candidate);
+    },
+  );
+}
+function activateRunningInner(candidate) {
   const { release } = checkedRelease(candidate);
   const listener = classifyListener(
     processIdentity('Port', undefined, 4000),

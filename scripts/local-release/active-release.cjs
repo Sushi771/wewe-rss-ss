@@ -75,6 +75,11 @@ async function writeActiveReleaseAsync(candidate, options) {
 }
 
 function storePointer({ release, manifest }) {
+  const scope = require('./release-scope.cjs').session();
+  if (scope) {
+    scope.authorizePackage(release);
+    scope.check(true);
+  }
   const temporary = path.join(releases, `active-${randomUUID()}.tmp`);
   try {
     fs.writeFileSync(

@@ -214,6 +214,22 @@ function loadProductionEnvironment() {
 }
 
 async function controlledSwitch(options) {
+  if (!options.production) return controlledSwitchInner(options);
+  return require('./release-scope.cjs').within(
+    {
+      kind: 'switch',
+      root: path.dirname(fs.realpathSync(options.release)),
+      reserveBytes: 256 * 1024 ** 2,
+      transition: true,
+    },
+    (lease) => {
+      lease.authorizePackage(options.release);
+      lease.authorizePackage(options.legacy);
+      return controlledSwitchInner(options);
+    },
+  );
+}
+async function controlledSwitchInner(options) {
   if (process.platform !== 'win32') throw new Error('只支持 Windows 本机切换');
   const rehearsal = options.rehearsal === true;
   if (!rehearsal && !options.production)
@@ -268,7 +284,12 @@ async function controlledSwitch(options) {
         path.join(root, 'output/playwright/local-release-audit'),
       `controlled-switch-${Date.now()}-${process.pid}`,
     );
-  if (!artifacts) fs.mkdirSync(audit, { recursive: true });
+  if (!artifacts) {
+    const lease = require('./release-scope.cjs').session();
+    lease?.registerOutput(audit);
+    fs.mkdirSync(audit, { recursive: true });
+    lease?.createdOutput(audit);
+  }
   let artifactError;
   try {
     const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
@@ -395,6 +416,7 @@ async function controlledSwitch(options) {
           path.join(audit, `${label}-guard.json`),
         );
       else args.push('--production');
+      require('./release-scope.cjs').session()?.check(true);
       const child = spawn(path.join(bundle, 'runtime/node.exe'), args, {
         cwd: audit,
         env: {
