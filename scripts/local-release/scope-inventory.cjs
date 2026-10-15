@@ -309,6 +309,14 @@ function createVerifier(configuration, options = {}) {
   return {
     scan,
     limits,
+    assertBudget() {
+      if (now() - started > limits.durationMs)
+        throw new Error('RELEASE_SCOPE_SCAN_TIME_BUDGET');
+      if (metrics.visitedEntries > limits.operationEntries)
+        throw new Error('RELEASE_SCOPE_SCAN_ENTRY_BUDGET');
+      if (metrics.readBytes > limits.operationReadBytes)
+        throw new Error('RELEASE_SCOPE_SCAN_READ_BUDGET');
+    },
     metrics: () => ({
       ...metrics,
       elapsedMs: Math.floor(now() - started),

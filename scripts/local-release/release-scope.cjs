@@ -308,8 +308,9 @@ function open(request, options = {}) {
     );
   };
   const references = (allowTransition = false) => {
-    const value = query(),
-      digest = validateReferences(value, policy);
+    const value = query();
+    verifier.assertBudget();
+    const digest = validateReferences(value, policy);
     const stable = (v) =>
       v.records
         .filter((r) => !['processes', 'pointers'].includes(r.kind))

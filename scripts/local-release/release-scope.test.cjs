@@ -6,6 +6,48 @@ const test = require('node:test'),
   crypto = require('node:crypto');
 const scope = require('./release-scope.cjs');
 const { fileHash } = require('./lib.cjs');
+test('elapsed reference-query time cannot reset or exceed the shared operation deadline before allocation', () =>
+  fixture((f) => {
+    f.policy.scanBudget = { durationMs: 2000 };
+    f.save();
+    const options = f.options();
+    let queries = 0;
+    options.query = () => {
+      queries++;
+      const end = performance.now() + 2100;
+      while (performance.now() < end) {}
+      return structuredClone(f.facts);
+    };
+    assert.throws(
+      () =>
+        scope.open(
+          { kind: 'install', root: f.installed, reserveBytes: 1 },
+          options,
+        ),
+      /SCAN_TIME_BUDGET/,
+    );
+    assert.equal(queries, 1);
+    assert(!fs.existsSync(path.join(f.installed, 'candidate')));
+  }));
+test('opt-in metadata checkpoints still hold a changed frozen file before another allocation', () =>
+  fixture((f) => {
+    f.policy.scanBudget = {
+      profile: 'legacy-stream-v1',
+      checkpointMode: 'identity-times-v1',
+    };
+    f.save();
+    const lease = f.open();
+    fs.appendFileSync(path.join(f.current, 'node.exe'), 'changed');
+    assert.throws(
+      () => lease.registerOutput(path.join(f.build, 'candidate')),
+      /FROZEN_HISTORY_CHANGED/,
+    );
+    assert(!fs.existsSync(path.join(f.build, 'candidate')));
+    assert.throws(
+      () => lease.close(new Error('history changed')),
+      /FROZEN_HISTORY_CHANGED/,
+    );
+  }));
 test('default policy retains complete content hashing on every checkpoint', () =>
   fixture((f) => {
     const lease = f.open(),

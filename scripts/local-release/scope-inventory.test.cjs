@@ -4,6 +4,38 @@ const test = require('node:test'),
   os = require('node:os'),
   path = require('node:path');
 const { createVerifier, MEMORY, FORMAT } = require('./scope-inventory.cjs');
+test('time spent between passes remains charged to the same verification operation', () => {
+  let clock = 0;
+  const v = virtual(1, 1),
+    verifier = createVerifier(
+      { durationMs: 10 },
+      { io: v.io, now: () => clock },
+    );
+  verifier.scan(v.roots);
+  clock = 11;
+  assert.throws(() => verifier.assertBudget(), /SCAN_TIME_BUDGET/);
+});
+test('a directory changed after an emitted segment cannot produce a complete receipt', () => {
+  const v = virtual(3, 1024),
+    original = v.io.lstatSync;
+  let changed = false,
+    segments = 0;
+  v.io.lstatSync = (at) => {
+    const s = original(at);
+    if (at === v.root && changed) s.mtimeNs = 2n;
+    return s;
+  };
+  const verifier = createVerifier(undefined, {
+    io: v.io,
+    onSegment() {
+      segments++;
+      changed = true;
+    },
+  });
+  assert.throws(() => verifier.scan(v.roots), /DIRECTORY_CHANGED_DURING_SCAN/);
+  assert(segments > 0);
+  assert.equal(v.handles(), 0);
+});
 test('read-only inspector CLI returns a complete private receipt without adopting or writing into its roots', () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-stream-inspect-')),
     root = path.join(base, 'registered');
@@ -218,6 +250,13 @@ test('content IO is pre-budgeted and metadata-only checkpoints never reread cont
     assert.equal(metadata.readBytes, 0);
     assert.equal(metadata.metadataDigest, full.metadataDigest);
     assert.equal(verifier.metrics().readBytes, fileSize);
+    const cumulative = createVerifier({
+      scanReadBytes: fileSize,
+      operationReadBytes: fileSize,
+    });
+    cumulative.scan(roots);
+    assert.throws(() => cumulative.scan(roots), /SCAN_READ_BUDGET/);
+    assert.equal(cumulative.metrics().readBytes, fileSize);
     fs.writeFileSync(file, Buffer.alloc(fileSize, 8));
     const changed = verifier.scan(roots, [], { metadataOnly: true });
     assert.notEqual(changed.metadataDigest, full.metadataDigest);
