@@ -70,3 +70,27 @@ Before a production decision, freeze the fourteen files and plan, verify the
 exact CI head and independent review, record the acknowledged indirect-access risk,
 and obtain approval for that plan digest and maintenance ownership exception.
 Only the approved execution may create a real maintenance lock and record.
+
+The existing `--execute` entry also accepts one explicitly approved
+`maintenance.continueBeforeStop` checkpoint. It pins the previous maintenance
+plan, record and lock (SHA and file identity), and the recorded controller
+PID/start/executable/argv. Historical controller identity must come from the
+retained execution evidence. The native adapter checks only that single PID
+twice and refuses any present/reused PID or uncertain query; absence does not
+authenticate historical identity.
+
+Only the exact two completed copies followed by the pre-stop input-pin failure
+are eligible. Any stop, backup, migration, publication or recovery intent,
+partial output, audit/service state or changed package refuses. Old and new
+plans must match except the exact runtime pins, plan location, approval and
+checkpoint binding. No new package is copied and no allowance is reset.
+
+A fixed `.maintenance.json.pre-stop.json` receipt is exclusively created,
+fsynced and read back before replacing the same maintenance record and lock.
+It permanently retains the complete previous record/lock text and source pins,
+new caller/nonce/plan and current exit observation. It shares the original
+1 MiB metadata ceiling, including temporary files. Partial receipt or authority
+installation holds; its presence prevents another transfer under a new approval.
+The shared owner parser validates the receipt and retained history. Successful
+installation continues at the existing pending-migration/process checks before
+stop. This checkpoint adds no general resume, cleanup or credit reset.

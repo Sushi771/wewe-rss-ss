@@ -7,6 +7,79 @@ const { processIdentity, portOwnersAsync, stopOwned } = require('./switch.cjs');
 
 const windows = { skip: process.platform !== 'win32', timeout: 90000 };
 
+test(
+  'pre-stop native identity adapter refuses an owned live controller and confirms its observed exit',
+  windows,
+  async () => {
+    const { execFileSync } = require('node:child_process'),
+      fs = require('node:fs'),
+      path = require('node:path');
+    const shell = fs.realpathSync.native(
+      path.join(
+        process.env.SystemRoot || 'C:\\Windows',
+        'System32/WindowsPowerShell/v1.0/powershell.exe',
+      ),
+    );
+    const child = spawn(
+      process.execPath,
+      [
+        '-e',
+        "process.stdin.resume();process.stdin.on('end',()=>process.exit(0))",
+      ],
+      { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] },
+    );
+    const closed = once(child, 'close');
+    try {
+      const controller = JSON.parse(
+        execFileSync(
+          shell,
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `$ErrorActionPreference='Stop';$p=[Diagnostics.Process]::GetProcessById(${child.pid});$c=Get-CimInstance Win32_Process -Filter 'ProcessId=${child.pid}';[ordered]@{pid=$p.Id;startUtc=$p.StartTime.ToUniversalTime().ToString('o');executable=$c.ExecutablePath;commandLine=$c.CommandLine}|ConvertTo-Json -Compress`,
+          ],
+          { windowsHide: true, encoding: 'utf8', timeout: 15000 },
+        ),
+      );
+      const u = {
+        environmentFiles: [],
+        python: { path: 'unused-python' },
+        schemaEngine: { path: 'unused-engine' },
+        powershellSha256: require('./lib.cjs').fileHash(shell),
+      };
+      const native = require('./once-pair-publication.cjs').nativeOperations(
+        { publication: u },
+        u,
+        'unused-audit',
+        () => {},
+      );
+      assert.throws(
+        () => native.identity('ControllerExited', child.pid, controller),
+        (e) => String(e.stderr).includes('CONTROLLER_STILL_PRESENT'),
+      );
+      assert.equal(child.exitCode, null);
+      child.stdin.end();
+      await closed;
+      assert.deepEqual(
+        native.identity('ControllerExited', child.pid, controller),
+        { format: 1, pid: child.pid, exited: true },
+      );
+      assert.throws(
+        () =>
+          native.identity('ControllerExited', child.pid, {
+            ...controller,
+            startUtc: '',
+          }),
+        (e) => String(e.stderr).includes('CONTROLLER_IDENTITY_REQUIRED'),
+      );
+    } finally {
+      child.stdin.end();
+      await closed;
+    }
+  },
+);
+
 // Load the actual module with explicit, inert process boundaries. This makes
 // fallback/integrity paths deterministic without a compiler cache or native query.
 function isolatedPortQuery({ force, tool, stdout, failure, at }) {

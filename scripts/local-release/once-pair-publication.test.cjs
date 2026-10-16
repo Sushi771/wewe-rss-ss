@@ -10,6 +10,81 @@ const { fingerprint, fileHash, hostEffects } = require('./lib.cjs');
 const { createRequire } = require('node:module');
 const { EventEmitter } = require('node:events');
 const fixedMaintenance = require('./fixed-maintenance.cjs');
+async function installedPreStop(f) {
+  const original = f.operations.identity;
+  f.operations.identity = (action, ...args) => {
+    if (action === 'Snapshot') throw Error('ONCE_PUBLICATION_INPUT_PIN');
+    return original(action, ...args);
+  };
+  await assert.rejects(f.maintenance(), /ONCE_PUBLICATION_INPUT_PIN/);
+  f.operations.identity = original;
+  const pin = (at) => ({
+    path: fs.realpathSync.native(at),
+    sha256: fileHash(at),
+    identity: identity(at),
+  });
+  const recordFile = fixedMaintenance.recordPath(f.policy),
+    lockFile = path.join(
+      f.policy.registryDirectory,
+      f.policy.scopeId + '.lock',
+    );
+  const envelope = JSON.parse(fs.readFileSync(recordFile)),
+    lock = JSON.parse(fs.readFileSync(lockFile));
+  // Synthetic prior controller; native exit observation is explicitly mocked.
+  envelope.payload.pid = 900001;
+  envelope.digest = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(envelope.payload))
+    .digest('hex');
+  fs.writeFileSync(recordFile, JSON.stringify(envelope));
+  lock.pid = 900001;
+  lock.recordPin = pin(recordFile);
+  fs.writeFileSync(lockFile, JSON.stringify(lock));
+  const c = {
+    plan: pin(f.file),
+    record: pin(recordFile),
+    lock: pin(lockFile),
+    controller: {
+      pid: 900001,
+      startUtc: '2026-10-16T00:00:00.000Z',
+      executable: process.execPath,
+      commandLine: [
+        process.execPath,
+        path.join(__dirname, 'fixed-maintenance.cjs'),
+        '--execute',
+        f.file,
+        fileHash(f.file),
+      ]
+        .map((x) => '"' + x + '"')
+        .join(' '),
+    },
+  };
+  const oldRecord = fs.readFileSync(recordFile, 'utf8'),
+    oldLock = fs.readFileSync(lockFile, 'utf8');
+  f.file = path.join(f.base, 'pre-stop-policy.json');
+  fs.writeFileSync(f.file, '{}');
+  f.policy.maintenance.planPath = fs.realpathSync.native(f.file);
+  f.policy.maintenance.approval.id += '-pre-stop';
+  f.policy.maintenance.continueBeforeStop = c;
+  f.operations.identity = (action, pid, expected) => {
+    if (action === 'ControllerExited') {
+      f.events.push(action);
+      assert.deepEqual(expected, c.controller);
+      return f.controllerExit || { format: 1, pid, exited: true };
+    }
+    return original(action, pid, expected);
+  };
+  f.writePreStop = () => fs.writeFileSync(f.file, JSON.stringify(f.policy));
+  f.writePreStop();
+  return {
+    c,
+    recordFile,
+    lockFile,
+    oldRecord,
+    oldLock,
+    receipt: recordFile + '.pre-stop.json',
+  };
+}
 async function maintenanceFixture(run) {
   return fixture(async (f) => {
     const rollbackFile = path.join(f.base, 'synthetic-rollback.json');
@@ -608,6 +683,258 @@ async function fixture(run) {
     fs.rmSync(base, { recursive: true });
   }
 }
+test('pre-stop continuation transfers the same installed pair once with original remaining credits and full parser', () =>
+  maintenanceFixture(async (f) => {
+    const source = await installedPreStop(f),
+      copy = admission.copyPackageFiles;
+    const before = f.policy.pair.map((x) => identity(x.target));
+    admission.copyPackageFiles = () => {
+      throw Error('MUST_NOT_COPY_AGAIN');
+    };
+    f.parserQuery = (p, r) =>
+      require('./windows-release-references.cjs').probe(
+        p,
+        f.observation(p, r),
+        { callerPid: process.pid },
+      );
+    try {
+      assert.equal((await f.maintenance()).status, 'passed');
+      const r = f.maintenanceRecord(),
+        receipt = JSON.parse(fs.readFileSync(source.receipt));
+      assert.equal(receipt.recordText, source.oldRecord);
+      assert.equal(receipt.lockText, source.oldLock);
+      assert.equal(r.pid, process.pid);
+      assert.notEqual(r.nonce, JSON.parse(source.oldLock).nonce);
+      assert.deepEqual(
+        f.policy.pair.map((x) => identity(x.target)),
+        before,
+      );
+      assert.equal(f.backupCount(), 1);
+      assert.equal(f.events.filter((x) => x === 'migrate').length, 1);
+      assert.equal(r.recoverySpent, false);
+      assert.equal(r.slots.filter((s) => s.complete).length, 2);
+      assert.equal(
+        r.history.filter((h) => h.stage.startsWith('copy-')).length,
+        4,
+      );
+      assert.equal(
+        r.history.filter((h) => h.stage === 'pre-stop-continuation').length,
+        1,
+      );
+      assert.deepEqual(f.policy.limits, admission.LIMITS);
+      await assert.rejects(f.maintenance(), /PRE_STOP_SOURCE|CURRENT_POINTER/);
+    } finally {
+      admission.copyPackageFiles = copy;
+    }
+  }));
+
+test('pre-stop continuation unapproved review remains read-only and execution creates no receipt', () =>
+  maintenanceFixture(async (f) => {
+    const source = await installedPreStop(f);
+    f.policy.maintenance.approval.confirmed = false;
+    f.writePreStop();
+    const before = [
+      fs.readFileSync(source.recordFile),
+      fs.readFileSync(source.lockFile),
+    ];
+    assert(fixedMaintenance.review(f.file, fileHash(f.file)).continuation);
+    await assert.rejects(f.maintenance(), /PLAN_BINDING/);
+    assert.deepEqual(
+      [fs.readFileSync(source.recordFile), fs.readFileSync(source.lockFile)],
+      before,
+    );
+    assert(!fs.existsSync(source.receipt));
+    assert(!f.events.includes('ControllerExited'));
+    assert(!f.events.includes('Stop'));
+  }));
+
+test('pre-stop continuation concurrent approval cannot acquire another transfer or backup', () =>
+  maintenanceFixture(async (f) => {
+    const source = await installedPreStop(f),
+      open = fs.openSync;
+    let concurrent,
+      triggered = false;
+    fs.openSync = (at, ...args) => {
+      const fd = open(at, ...args);
+      if (at === source.receipt && !triggered) {
+        triggered = true;
+        concurrent = f.maintenance().then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        );
+      }
+      return fd;
+    };
+    try {
+      assert.equal((await f.maintenance()).status, 'passed');
+      assert.match((await concurrent).error.message, /PRE_STOP_SOURCE/);
+      assert.equal(f.backupCount(), 1);
+      assert.equal(f.events.filter((x) => x === 'migrate').length, 1);
+    } finally {
+      fs.openSync = open;
+    }
+  }));
+
+test('pre-stop continuation preserves the sole same-database compatible recovery allowance', () =>
+  maintenanceFixture(async (f) => {
+    await installedPreStop(f);
+    f.failAt = 'candidate-health';
+    const limits = JSON.stringify(f.policy.publication.limits);
+    assert.equal((await f.maintenance()).status, 'recovered');
+    const r = f.maintenanceRecord();
+    assert.equal(r.backupSpent, true);
+    assert.equal(r.migrationAttempted, true);
+    assert.equal(r.recoverySpent, true);
+    assert.equal(f.backupCount(), 1);
+    assert.equal(f.events.filter((x) => x === 'start:rollback').length, 1);
+    assert.equal(
+      r.history.filter((h) => h.stage.startsWith('copy-')).length,
+      4,
+    );
+    assert.equal(JSON.stringify(f.policy.publication.limits), limits);
+    await assert.rejects(f.maintenance());
+    assert.equal(f.backupCount(), 1);
+  }));
+
+for (const field of [
+  'stopAttempted',
+  'backupSpent',
+  'migrationAttempted',
+  'recoverySpent',
+  'publicationSpent',
+  'partial',
+  'unknown',
+])
+  test(
+    'pre-stop continuation rejects prior ' +
+      field +
+      ' without spending remaining credit',
+    () =>
+      maintenanceFixture(async (f) => {
+        const source = await installedPreStop(f),
+          envelope = JSON.parse(fs.readFileSync(source.recordFile));
+        if (field === 'partial') envelope.payload.slots[0].complete = false;
+        else if (field === 'unknown') envelope.payload.extraCredit = false;
+        else envelope.payload[field] = true;
+        envelope.digest = crypto
+          .createHash('sha256')
+          .update(JSON.stringify(envelope.payload))
+          .digest('hex');
+        fs.writeFileSync(source.recordFile, JSON.stringify(envelope));
+        source.c.record = {
+          path: source.recordFile,
+          sha256: fileHash(source.recordFile),
+          identity: identity(source.recordFile),
+        };
+        const lock = JSON.parse(fs.readFileSync(source.lockFile));
+        lock.recordPin = source.c.record;
+        fs.writeFileSync(source.lockFile, JSON.stringify(lock));
+        source.c.lock = {
+          path: source.lockFile,
+          sha256: fileHash(source.lockFile),
+          identity: identity(source.lockFile),
+        };
+        f.writePreStop();
+        await assert.rejects(f.maintenance(), /PRE_STOP_STATE/);
+        assert.equal(f.backupCount(), 0);
+        assert(!f.events.includes('Stop'));
+        assert(!fs.existsSync(source.receipt));
+      }),
+  );
+
+for (const mode of [
+  'live',
+  'uncertain',
+  'policy',
+  'identity',
+  'package',
+  'receipt',
+  'partial-receipt',
+  'after-receipt',
+  'after-record',
+])
+  test(
+    'pre-stop continuation holds ' +
+      mode +
+      ' without reinstallation or business actions',
+    () =>
+      maintenanceFixture(async (f) => {
+        const source = await installedPreStop(f),
+          saved = fs.fsyncSync,
+          write = fs.writeFileSync,
+          rename = fs.renameSync;
+        if (mode === 'live')
+          f.controllerExit = { format: 1, pid: 900001, exited: false };
+        if (mode === 'uncertain') f.controllerExit = {};
+        if (mode === 'policy') {
+          f.policy.publication.limits.backupBytes++;
+          f.writePreStop();
+        }
+        if (mode === 'identity') {
+          source.c.record.identity[1] += 'wrong';
+          f.writePreStop();
+        }
+        if (mode === 'package')
+          fs.writeFileSync(
+            path.join(f.root, 'candidate/runtime.cjs'),
+            'changed',
+          );
+        if (mode === 'receipt') fs.writeFileSync(source.receipt, 'foreign');
+        if (mode === 'partial-receipt')
+          fs.writeFileSync = (at, text, ...args) => {
+            if (
+              typeof at === 'number' &&
+              String(text).includes('installed-pair-pre-stop-v1')
+            ) {
+              write(at, String(text).slice(0, 80), ...args);
+              throw Error('SYNTHETIC_PARTIAL_RECEIPT');
+            }
+            return write(at, text, ...args);
+          };
+        if (mode === 'after-receipt') {
+          fs.fsyncSync = (fd) => {
+            if (
+              fs.existsSync(source.receipt) &&
+              fs
+                .readFileSync(source.receipt, 'utf8')
+                .includes('installed-pair-pre-stop-v1')
+            ) {
+              saved(fd);
+              throw Error('SYNTHETIC_AFTER_RECEIPT_FSYNC');
+            }
+            return saved(fd);
+          };
+        }
+        if (mode === 'after-record')
+          fs.renameSync = (from, to) => {
+            const result = rename(from, to);
+            if (to === source.recordFile) throw Error('SYNTHETIC_AFTER_RECORD');
+            return result;
+          };
+        try {
+          await assert.rejects(f.maintenance());
+        } finally {
+          fs.fsyncSync = saved;
+          fs.writeFileSync = write;
+          fs.renameSync = rename;
+        }
+        assert.equal(f.backupCount(), 0);
+        assert(!f.events.includes('Stop'));
+        assert(!f.events.includes('migrate'));
+        if (
+          [
+            'partial-receipt',
+            'after-receipt',
+            'after-record',
+            'receipt',
+          ].includes(mode)
+        ) {
+          assert(fs.existsSync(source.receipt));
+          await assert.rejects(f.maintenance());
+        }
+      }),
+  );
+
 test('fixed maintenance unrelated background churn remains visible risk without blocking the fixed sequence', () =>
   maintenanceFixture(async (f) => {
     const api = require('./windows-release-references.cjs'),

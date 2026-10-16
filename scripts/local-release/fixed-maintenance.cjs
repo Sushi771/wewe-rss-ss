@@ -1,4 +1,5 @@
-// One fixed maintenance run. No resume, retry, cleanup or credit reset.
+// One fixed maintenance run; only the verified installed-pair pre-stop checkpoint
+// can transfer once. No general resume, cleanup or credit reset.
 const fs = require('node:fs'),
   path = require('node:path'),
   crypto = require('node:crypto');
@@ -43,6 +44,7 @@ const pinAt = (at) => ({
 const recordPath = (p) =>
   path.join(p.registryDirectory, p.scopeId + '.maintenance.json');
 const lockPath = (p) => path.join(p.registryDirectory, p.scopeId + '.lock');
+const preStopPath = (p) => recordPath(p) + '.pre-stop.json';
 const toolPins = () => ({
   ...once.codePins(),
   'fixed-maintenance.cjs': fileHash(__filename),
@@ -69,7 +71,10 @@ function bindings(p, expected, requireApproval = false) {
     m.kind !== KIND ||
     canonical(m.planPath) !== m.planPath ||
     fileHash(m.planPath) !== expected ||
-    Object.keys(m).sort().join('|') !==
+    Object.keys(m)
+      .filter((k) => k !== 'continueBeforeStop')
+      .sort()
+      .join('|') !==
       [
         'approval',
         'format',
@@ -82,6 +87,8 @@ function bindings(p, expected, requireApproval = false) {
     hash(m.toolPins) !== hash(toolPins()) ||
     !m.approval ||
     !m.approval.id ||
+    (Object.hasOwn(m, 'continueBeforeStop') &&
+      (!m.continueBeforeStop || typeof m.continueBeforeStop !== 'object')) ||
     (requireApproval && m.approval.confirmed !== true)
   )
     fail('PLAN_BINDING');
@@ -275,6 +282,7 @@ function validateOwner(p, expected, lock, record, callerPid, terminal = false) {
           'baseline',
           'migrationResult',
           'error',
+          'preStopContinuation',
         ].includes(k),
     ) ||
     !Array.isArray(record.slots) ||
@@ -297,7 +305,238 @@ function validateOwner(p, expected, lock, record, callerPid, terminal = false) {
     (record.service && !validService(p, record))
   )
     fail('RECORD_OWNER');
+  if (p.maintenance.continueBeforeStop) {
+    const receipt = JSON.parse(
+      once.pinnedDocument(record.preStopContinuation, preStopPath(p), true),
+    );
+    const c = p.maintenance.continueBeforeStop;
+    const prior = JSON.parse(receipt.recordText).payload;
+    if (
+      receipt.kind !== 'installed-pair-pre-stop-v1' ||
+      receipt.configSha !== expected ||
+      receipt.pid !== callerPid ||
+      receipt.nonce !== lock.nonce ||
+      receipt.exited?.format !== 1 ||
+      receipt.exited.pid !== c.controller.pid ||
+      receipt.exited.exited !== true ||
+      record.history.length < prior.history.length + 1 ||
+      hash(record.history.slice(0, prior.history.length)) !==
+        hash(prior.history) ||
+      record.history[prior.history.length]?.stage !== 'pre-stop-continuation' ||
+      hash(receipt.previous) !== hash(c) ||
+      crypto.createHash('sha256').update(receipt.recordText).digest('hex') !==
+        c.record.sha256 ||
+      crypto.createHash('sha256').update(receipt.lockText).digest('hex') !==
+        c.lock.sha256
+    )
+      fail('PRE_STOP_RECEIPT');
+  } else if (record.preStopContinuation) fail('PRE_STOP_RECEIPT');
   return record;
+}
+
+// One checkpoint, using the same record and remaining allowance. The fixed
+// receipt consumes transfer before replacing authority; any partial install holds.
+function preStopSource(plan) {
+  const { p, pair } = plan,
+    c = p.maintenance.continueBeforeStop;
+  if (
+    !c ||
+    Object.keys(c).sort().join('|') !== 'controller|lock|plan|record' ||
+    present(preStopPath(p))
+  )
+    fail('PRE_STOP_SOURCE');
+  const planText = once.pinnedDocument(c.plan, undefined, true),
+    old = JSON.parse(planText),
+    recordText = once.pinnedDocument(c.record, recordPath(p), true),
+    envelope = JSON.parse(recordText),
+    lockText = once.pinnedDocument(c.lock, lockPath(p), true),
+    lock = JSON.parse(lockText),
+    r = envelope.payload;
+  const normalized = (value) => {
+    const q = structuredClone(value);
+    delete q.codePins;
+    delete q.probe;
+    delete q.windowsReferences.collectorSha256;
+    delete q.windowsReferences.collectorIdentitySha256;
+    delete q.maintenance.toolPins;
+    delete q.maintenance.planPath;
+    delete q.maintenance.approval;
+    delete q.maintenance.continueBeforeStop;
+    return q;
+  };
+  const vector = (pins) =>
+    hash(Object.entries(pins).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  if (
+    !old.maintenance ||
+    old.maintenance.continueBeforeStop ||
+    old.maintenance.approval?.confirmed !== true ||
+    old.maintenance.planPath !== c.plan.path ||
+    hash(normalized(old)) !== hash(normalized(p)) ||
+    ![
+      'eb47168a408dcff98f07579e12a708f5a20d68f14a307a8d4109a13336866fc4',
+      '14074b5b389c07f69fbbd8ada8083a629c5efd1982d59d2d8e5abf8a261cae93',
+      vector(toolPins()),
+    ].includes(vector(old.maintenance.toolPins)) ||
+    Object.keys(old.maintenance.toolPins).sort().join('|') !==
+      Object.keys(toolPins()).sort().join('|') ||
+    hash(old.codePins) !==
+      hash(
+        Object.fromEntries(
+          Object.entries(old.maintenance.toolPins).filter(
+            ([k]) => k !== 'fixed-maintenance.cjs',
+          ),
+        ),
+      ) ||
+    old.probe.sha256 !== old.codePins['windows-release-references.cjs']
+  )
+    fail('PRE_STOP_PLAN');
+  for (const [name, digest] of Object.entries(old.maintenance.toolPins))
+    if (fileHash(path.join(path.dirname(old.probe.path), name)) !== digest)
+      fail('PRE_STOP_OLD_TOOL');
+  const controller = c.controller;
+  if (
+    !controller ||
+    Object.keys(controller).sort().join('|') !==
+      'commandLine|executable|pid|startUtc' ||
+    !Number.isInteger(controller.pid) ||
+    controller.pid <= 0 ||
+    controller.pid === process.pid ||
+    !Number.isFinite(Date.parse(controller.startUtc)) ||
+    !path.isAbsolute(controller.executable) ||
+    hash(
+      require('./windows-release-references.cjs').argv(controller.commandLine),
+    ) !==
+      hash([
+        controller.executable,
+        path.join(path.dirname(old.probe.path), 'fixed-maintenance.cjs'),
+        '--execute',
+        c.plan.path,
+        c.plan.sha256,
+      ])
+  )
+    fail('PRE_STOP_CONTROLLER');
+  if (
+    !r ||
+    envelope.digest !== hash(r) ||
+    r.format !== 1 ||
+    r.kind !== KIND ||
+    r.configSha !== c.plan.sha256 ||
+    r.sourceSha !== hash(p.maintenance.sourceFiles) ||
+    r.pid !== controller.pid ||
+    r.nonce !== lock.nonce ||
+    !r.nonce ||
+    lock.kind !== KIND ||
+    lock.pid !== r.pid ||
+    lock.configSha !== c.plan.sha256 ||
+    hash(lock.recordPin) !== hash(c.record) ||
+    Object.keys(lock).sort().join('|') !==
+      'configSha|kind|nonce|pid|recordPin' ||
+    r.status !== 'hold' ||
+    r.stage !== 'hold' ||
+    r.preStopContinuation ||
+    [
+      'stopAttempted',
+      'backupSpent',
+      'migrationAttempted',
+      'recoverySpent',
+      'publicationSpent',
+    ].some((k) => r[k] !== false) ||
+    r.service !== null ||
+    r.auditIdentity !== null ||
+    ['backup', 'baseline', 'migrationResult', 'health'].some((k) =>
+      Object.hasOwn(r, k),
+    ) ||
+    !Array.isArray(r.history) ||
+    hash(r.history.map((x) => x.stage)) !==
+      hash([
+        'copy-candidate-intent',
+        'copy-candidate-complete',
+        'copy-rollback-intent',
+        'copy-rollback-complete',
+      ]) ||
+    r.error?.code !== 'ONCE_PUBLICATION_INPUT_PIN' ||
+    !Array.isArray(r.slots) ||
+    r.slots.length !== 2 ||
+    !Array.isArray(r.outputs) ||
+    r.outputs.length !== 2 ||
+    hash(r.claim) !==
+      hash({
+        id: r.nonce,
+        kind: 'maintenance',
+        root: p.installRoot,
+        outputs: pair.map((x) => x.target),
+      }) ||
+    r.slots.some(
+      (s) =>
+        s.started !== true ||
+        s.complete !== true ||
+        !pair.some((x) => x.id === s.id && x.target === s.path) ||
+        hash(directoryIdentity(s.path)) !== hash(s.identity),
+    ) ||
+    new Set(r.slots.map((s) => s.id)).size !== 2 ||
+    r.outputs.some(
+      (o) =>
+        o.complete !== true ||
+        o.claim !== r.nonce ||
+        !pair.some((x) => x.target === o.path),
+    ) ||
+    new Set(r.outputs.map((o) => o.path)).size !== 2 ||
+    present(p.publication.auditRoot)
+  )
+    fail('PRE_STOP_STATE');
+  const allowedKeys = [
+    'format',
+    'kind',
+    'configSha',
+    'sourceSha',
+    'pid',
+    'nonce',
+    'status',
+    'stage',
+    'backupSpent',
+    'migrationAttempted',
+    'recoverySpent',
+    'publicationSpent',
+    'stopAttempted',
+    'slots',
+    'outputs',
+    'claim',
+    'service',
+    'pointer',
+    'auditIdentity',
+    'history',
+    'error',
+  ];
+  if (
+    Object.keys(r).some((k) => !allowedKeys.includes(k)) ||
+    r.slots.some(
+      (s) =>
+        Object.keys(s).sort().join('|') !== 'complete|id|identity|path|started',
+    ) ||
+    r.outputs.some(
+      (o) => Object.keys(o).sort().join('|') !== 'claim|complete|path',
+    )
+  )
+    fail('PRE_STOP_STATE');
+  const pointer = path.join(p.installRoot, 'active.json');
+  if (
+    hash(r.pointer) !==
+    hash({
+      path: pointer,
+      sha256: p.pointerSha256,
+      identity: identity(pointer),
+    })
+  )
+    fail('PRE_STOP_POINTER');
+  for (const item of pair) {
+    verifyRelease(item.target);
+    if (
+      fileHash(path.join(item.target, 'release.json')) !==
+      item.pkg.spec.manifestSha256
+    )
+      fail('PRE_STOP_PACKAGE');
+  }
+  return { record: r, recordText, lockText, previous: c };
 }
 function validService(p, r) {
   const s = r.service,
@@ -336,16 +575,22 @@ function review(file, expected) {
     { p } = plan;
   bindings(p, expected, false);
   publication.validate(p);
+  const continuation = p.maintenance.continueBeforeStop
+    ? preStopSource(plan)
+    : null;
   if (
-    p.pair.some((x) => present(x.target)) ||
+    (!continuation && p.pair.some((x) => present(x.target))) ||
     present(p.publication.auditRoot) ||
-    present(recordPath(p)) ||
-    present(lockPath(p))
+    (!continuation && (present(recordPath(p)) || present(lockPath(p))))
   )
     fail('EXISTING_OUTPUT_OR_OWNER');
   const allowed = new Set(
     Object.values(p.maintenance.sourceFiles).map((x) => path.basename(x.path)),
   );
+  if (continuation) {
+    allowed.add(path.basename(recordPath(p)));
+    allowed.add(path.basename(lockPath(p)));
+  }
   if (
     fs
       .readdirSync(p.registryDirectory)
@@ -355,7 +600,7 @@ function review(file, expected) {
       .some((n) => n.startsWith('active-') && n.endsWith('.tmp'))
   )
     fail('FOREIGN_CONTROL');
-  return plan;
+  return { ...plan, continuation };
 }
 async function execute(file, expected, options = {}) {
   const plan = review(file, expected),
@@ -373,6 +618,7 @@ async function execute(file, expected, options = {}) {
       ...Object.values(m.sourceFiles).map((x) => x.path),
       lock,
       recordFile,
+      ...(plan.continuation ? [preStopPath(p)] : []),
     ]);
   const auditParents = [];
   for (let at = path.dirname(u.auditRoot); ; at = path.dirname(at)) {
@@ -384,9 +630,10 @@ async function execute(file, expected, options = {}) {
     auditParents.push({ path: at, identity: directoryIdentity(at) });
     if (p.roots.some((r) => r.path === at)) break;
   }
-  let lockPin,
-    recordPin,
+  let lockPin = plan.continuation ? m.continueBeforeStop.lock : undefined,
+    recordPin = plan.continuation ? m.continueBeforeStop.record : undefined,
     persistedRecord,
+    transferring = !!plan.continuation,
     uncertain = false,
     safeStopped = false,
     child,
@@ -427,6 +674,7 @@ async function execute(file, expected, options = {}) {
       auditIdentity: null,
       history: [],
     };
+  if (plan.continuation) record = structuredClone(plan.continuation.record);
   const rounded = (n) => Math.ceil(n / plan.metadataBlock) * plan.metadataBlock;
   const controlFiles = () => {
     const files = fs
@@ -484,7 +732,10 @@ async function execute(file, expected, options = {}) {
     guardPins();
     if (lockPin) {
       const raw = once.pinnedDocument(lockPin, lock, true);
-      if (recordPin)
+      if (transferring) {
+        once.pinnedDocument(m.continueBeforeStop.record, recordFile, true);
+        once.pinnedDocument(m.continueBeforeStop.plan, undefined, true);
+      } else if (recordPin)
         validateOwner(
           p,
           expected,
@@ -721,46 +972,114 @@ async function execute(file, expected, options = {}) {
   publication.reserve([
     [
       p.installRoot,
-      once.LIMITS.copy + Math.max(0, once.LIMITS.metadata - metadataUsed()),
+      (plan.continuation
+        ? Math.max(
+            0,
+            once.LIMITS.copy - pair.reduce((n, x) => n + x.pkg.physical, 0),
+          )
+        : once.LIMITS.copy) +
+        Math.max(0, once.LIMITS.metadata - metadataUsed()),
     ],
     [u.auditRoot, u.limits.backupBytes + u.limits.auditBytes],
     [u.database, u.limits.migrationBytes],
   ]);
   // Only approved execution creates authority. Partial initialization is held.
   try {
-    lockPin = create(
-      lock,
-      JSON.stringify({
-        kind: KIND,
-        pid: process.pid,
-        nonce,
-        configSha: expected,
-        recordPin: null,
-      }),
-    );
-    recordPin = create(
-      recordFile,
-      JSON.stringify({ payload: record, digest: hash(record) }),
-    );
-    lockPin = replace(
-      lock,
-      JSON.stringify({
-        kind: KIND,
-        pid: process.pid,
-        nonce,
-        configSha: expected,
+    if (plan.continuation) {
+      owner();
+      const c = m.continueBeforeStop;
+      const exited = ops.identity(
+        'ControllerExited',
+        c.controller.pid,
+        c.controller,
+      );
+      if (
+        exited?.format !== 1 ||
+        exited.pid !== c.controller.pid ||
+        exited.exited !== true
+      )
+        fail('PRE_STOP_CONTROLLER_EXIT');
+      owner();
+      const receiptPin = create(
+        preStopPath(p),
+        JSON.stringify({
+          kind: 'installed-pair-pre-stop-v1',
+          configSha: expected,
+          pid: process.pid,
+          nonce,
+          previous: c,
+          exited,
+          recordText: plan.continuation.recordText,
+          lockText: plan.continuation.lockText,
+          atUtc: new Date().toISOString(),
+        }),
+      );
+      record.configSha = expected;
+      record.pid = process.pid;
+      record.nonce = nonce;
+      record.status = 'running';
+      record.stage = 'pre-stop-continuation';
+      record.claim.id = nonce;
+      record.outputs.forEach((o) => (o.claim = nonce));
+      record.preStopContinuation = receiptPin;
+      record.history.push({
+        stage: 'pre-stop-continuation',
+        atUtc: new Date().toISOString(),
+      });
+      recordPin = replace(
+        recordFile,
+        JSON.stringify({ payload: record, digest: hash(record) }),
         recordPin,
-      }),
-      lockPin,
-    );
-    persistedRecord = structuredClone(record);
+      );
+      lockPin = replace(
+        lock,
+        JSON.stringify({
+          kind: KIND,
+          pid: process.pid,
+          nonce,
+          configSha: expected,
+          recordPin,
+        }),
+        lockPin,
+      );
+      persistedRecord = structuredClone(record);
+      transferring = false;
+      owner();
+    } else {
+      lockPin = create(
+        lock,
+        JSON.stringify({
+          kind: KIND,
+          pid: process.pid,
+          nonce,
+          configSha: expected,
+          recordPin: null,
+        }),
+      );
+      recordPin = create(
+        recordFile,
+        JSON.stringify({ payload: record, digest: hash(record) }),
+      );
+      lockPin = replace(
+        lock,
+        JSON.stringify({
+          kind: KIND,
+          pid: process.pid,
+          nonce,
+          configSha: expected,
+          recordPin,
+        }),
+        lockPin,
+      );
+      persistedRecord = structuredClone(record);
+    }
   } catch (e) {
     uncertain = true;
     throw e;
   }
   try {
     references();
-    for (const item of pair) {
+    for (const item of plan.continuation ? [] : pair) {
       references();
       const slot = record.slots.find((x) => x.id === item.id);
       if (present(item.target)) fail('TARGET_PRESENT');

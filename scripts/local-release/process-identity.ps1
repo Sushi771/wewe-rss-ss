@@ -1,7 +1,7 @@
 ﻿# Windows 进程身份核验。Stop 操作持有 Process 对象句柄，避免按 PID 二次查找后误杀复用 PID。
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port', 'Discover', 'AuxiliarySnapshot', 'WaitAuxiliary')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port', 'Discover', 'AuxiliarySnapshot', 'WaitAuxiliary', 'ControllerExited')][string]$Action,
     [int]$TargetPid,
     [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
     [string]$ExpectedStartUtc,
@@ -12,6 +12,25 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'tcp-listeners.ps1')
+if ($Action -eq 'ControllerExited') {
+    # Single approved controller PID only. Any present/reused PID or query
+    # uncertainty refuses; this branch never kills or enumerates other processes.
+    if ($TargetPid -le 0 -or -not $ExpectedStartUtc -or -not $ExpectedExecutable -or -not $ExpectedCommandLine) { throw 'CONTROLLER_IDENTITY_REQUIRED' }
+    foreach ($attempt in 1..2) {
+        $controller = $null
+        try { $controller = [System.Diagnostics.Process]::GetProcessById($TargetPid) }
+        catch {
+            if (-not ($_.Exception.InnerException -is [System.ArgumentException])) { throw }
+        }
+        if ($null -ne $controller) {
+            $controller.Dispose()
+            throw 'CONTROLLER_STILL_PRESENT'
+        }
+        if ($null -ne (Get-CimInstance Win32_Process -Filter "ProcessId=$TargetPid")) { throw 'CONTROLLER_STILL_PRESENT' }
+    }
+    [ordered]@{format=1;pid=$TargetPid;exited=$true} | ConvertTo-Json -Compress
+    return
+}
 if ($Action -in @('AuxiliarySnapshot', 'WaitAuxiliary')) {
     if (-not $ExpectedAuxiliaryJson -or $ExpectedAuxiliaryJson.Length -gt 65536) { throw 'EXACT_AUXILIARY_BINDING_REQUIRED' }
     $decodedPins = ConvertFrom-Json -InputObject $ExpectedAuxiliaryJson
