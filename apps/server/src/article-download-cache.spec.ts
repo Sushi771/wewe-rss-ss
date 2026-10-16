@@ -88,6 +88,10 @@ describe('verified saved article download, no HTTP or database writes', () => {
     ],
     ['missing body', { contentHtml: null }],
     [
+      'image without a source',
+      { contentHtml: '<div id="js_content"><p>正文</p><img></div>' },
+    ],
+    [
       'embedded video without archived bytes',
       { contentHtml: '<div id="js_content"><p>正文</p><video></video></div>' },
     ],

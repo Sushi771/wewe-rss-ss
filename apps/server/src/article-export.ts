@@ -17,6 +17,39 @@ import { metricsMarkdown } from './collection/collection-format';
 import { TRPCError } from '@trpc/server';
 import { Article } from '@prisma/client';
 
+/** Inspect only body media; a failed historical retry does not erase a cache. */
+export function cachedMediaUnconfirmed(
+  article: Pick<Article, 'contentHtml' | 'lastBodyStatus'>,
+) {
+  if (!article.contentHtml) return false;
+  const $ = load(article.contentHtml);
+  const content = $('.rich_media_content').length
+    ? $('.rich_media_content')
+    : $('#js_content');
+  return (
+    article.lastBodyStatus === 'images-pending' ||
+    content.is('[data-wewe-image-pending]') ||
+    content.find('[data-wewe-image-pending]').length > 0 ||
+    content
+      .find('img')
+      .toArray()
+      .some((img) => {
+        const src = $(img).attr('src') || '';
+        const source = src.startsWith('data:')
+          ? src
+          : $(img).attr('data-src') || src;
+        if (!source.trim()) return true;
+        try {
+          if (source.startsWith('data:')) decodeInlineImage(source);
+          else allowedImageUrl(source);
+          return false;
+        } catch {
+          return true;
+        }
+      })
+  );
+}
+
 /** Shared existing Markdown/attachments exporter, used by subscriptions and the link tool. */
 export async function buildArticleMarkdown(
   article: Pick<
@@ -34,14 +67,12 @@ export async function buildArticleMarkdown(
   imageFetcher = fetchAllowedImage,
   imageDirectory: 'attachments' | 'image' = 'attachments',
   limits?: { maxImages: number; maxBytes: number },
+  allowPartialImages = false,
 ) {
   const id = article.id;
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
   let html = article.contentHtml || '';
-  const mediaComplete =
-    article.lastBodyStatus !== 'images-pending' &&
-    !html.includes('data-wewe-image-pending=');
   if (!html && article.lastBodyStatus === 'unavailable')
     throw new TRPCError({
       code: 'PRECONDITION_FAILED',
@@ -80,6 +111,15 @@ export async function buildArticleMarkdown(
     );
   }
 
+  // Sanitization may retain an image element while dropping an unsafe source.
+  // Removing that element for Markdown is not evidence that all media is saved.
+  const mediaUnconfirmed = cachedMediaUnconfirmed({
+    ...article,
+    contentHtml: html,
+  });
+  let mediaComplete = !mediaUnconfirmed;
+  const missingSources = new Set<string>();
+
   if (downloadPath) {
     const attachmentsDir = path.join(downloadPath, imageDirectory);
     if (!fs.existsSync(attachmentsDir)) {
@@ -97,6 +137,7 @@ export async function buildArticleMarkdown(
         message: '正文图片超过保存上限。',
       });
     let totalImageBytes = 0;
+    const downloads = new Map<string, Promise<boolean>>();
     await pMap(
       imgs,
       async (img) => {
@@ -126,30 +167,52 @@ export async function buildArticleMarkdown(
           const fileName = `image_${hash}.${safeExt}`;
           const localPath = path.join(attachmentsDir, fileName);
 
-          try {
-            if (!fs.existsSync(localPath)) {
-              const image = dataSrc.startsWith('data:')
-                ? decodeInlineImage(dataSrc)
-                : await imageFetcher(dataSrc);
-              await fs.promises.writeFile(localPath, image.bytes);
-            }
-            if (limits) {
-              totalImageBytes += (await fs.promises.stat(localPath)).size;
-              if (totalImageBytes > limits.maxBytes)
-                throw new TRPCError({
-                  code: 'PRECONDITION_FAILED',
-                  message: '正文图片总字节超过保存上限。',
-                });
-            }
-            $img.attr('src', `${imageDirectory}/${fileName}`);
-          } catch (error) {
-            if (error instanceof TRPCError) throw error;
-            if (!mediaComplete) {
-              $img.remove();
-              return;
-            }
-            throw new Error('图片未能安全下载，离线导出未完成');
+          let download = downloads.get(fileName);
+          if (!download) {
+            download = (async () => {
+              // Validation failures are unknown media, not an HTTP failure.
+              let inline: ReturnType<typeof decodeInlineImage> | undefined;
+              try {
+                if (dataSrc.startsWith('data:'))
+                  inline = decodeInlineImage(dataSrc);
+                else allowedImageUrl(dataSrc);
+              } catch {
+                mediaComplete = false;
+                return false;
+              }
+              if (!fs.existsSync(localPath)) {
+                let image: { bytes: Buffer; type: string } | undefined = inline;
+                if (!image) {
+                  try {
+                    image = await imageFetcher(dataSrc);
+                  } catch (error) {
+                    // Strict single-download callers must retain their error
+                    // provenance and must not publish a partial success bundle.
+                    if (!allowPartialImages && !mediaUnconfirmed) throw error;
+                    mediaComplete = false;
+                    missingSources.add(dataSrc);
+                    return false;
+                  }
+                }
+                // Disk failures remain errors; they are not missing remote media.
+                await fs.promises.writeFile(localPath, image.bytes);
+              }
+              if (limits) {
+                totalImageBytes += (await fs.promises.stat(localPath)).size;
+                if (totalImageBytes > limits.maxBytes)
+                  throw new TRPCError({
+                    code: 'PRECONDITION_FAILED',
+                    message: '正文图片总字节超过保存上限。',
+                  });
+              }
+              return true;
+            })();
+            // Share success and failure across repeated DOM references. Byte
+            // budgets charge each physical file once, including seeded files.
+            downloads.set(fileName, download);
           }
+          if (await download) $img.attr('src', `${imageDirectory}/${fileName}`);
+          else $img.remove();
         } else $img.remove();
       },
       { concurrency: limits ? 1 : 5 },
@@ -175,6 +238,7 @@ export async function buildArticleMarkdown(
             );
           }
         } catch {
+          mediaComplete = false;
           $img.remove();
         }
       }
@@ -191,10 +255,19 @@ export async function buildArticleMarkdown(
     contentHtml,
     markdown:
       (article.sourceUrl ? metricsMarkdown(article) : '') +
-      (mediaComplete
+      (missingSources.size
+        ? `> 正文图片获取失败：${missingSources.size} 个已知来源未保存。已保留正文和可取得的图片。\n\n`
+        : '') +
+      (!mediaUnconfirmed
         ? ''
         : '> 媒体完整性未确认：原缓存含无源或未核图片项。已保存正文和可取得的图片，不代表原篇全部媒体已归档。\n\n') +
       markdown,
     mediaComplete,
+    mediaStatus: mediaComplete
+      ? ('complete' as const)
+      : missingSources.size
+        ? ('missing' as const)
+        : ('unconfirmed' as const),
+    missingImageCount: missingSources.size,
   };
 }
