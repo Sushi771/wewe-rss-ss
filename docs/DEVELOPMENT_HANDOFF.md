@@ -496,3 +496,17 @@ resolver 审核已完成：公开 mobile `/mp/getreviewid` 的认证和 synckey 
 ## 2026-10-14: bounded retention review candidate
 
 The isolated disk-guard branch now includes production source `be1a5d03c92b9a4497c1ff226f9440099f5fc360`, opt-in hourly review scanning, bounded owned-report rotation, exact batch/digest/path/time approval checks, resource evidence, and action-time identity/SHA/SQLite/reference checks. Read [SQLite retention review](SQLITE_RETENTION_REVIEW.md) for product impact and deployment steps. Unique or unattributed recovery points remain held; the validator has no database deletion or service-control operation. Production activation and any new exact permanent-deletion batch need their own authorization. This handoff update is in the isolated branch; it does not overwrite a dirty source checkout.
+
+## 2026-10-16: Periodic restart snapshot deduplication candidate
+
+The two backup/guard producer files matched production source 45a3942 before this
+patch. That production version already uses incremental writes for ordinary feed
+updates and group changes; those business changes are not reimplemented here.
+The remaining duplicate-copy case is a periodic owner restart with unchanged
+data. It now repeats full hash/integrity/schema/typed-row verification and starts
+a new owner/snapshot generation while reusing the same physical snapshot. Old
+tokens remain invalid, and original copy UTC times are distinct from fresh proof
+times. Protected high-risk backup reuse and retention/deletion rules are unchanged.
+Tests use only bounded synthetic databases and owned temporary outputs. A hard
+quota is not automatic rotation or evidence that old production files were freed.
+No production data, configuration, service or deployed PR46 package was changed.

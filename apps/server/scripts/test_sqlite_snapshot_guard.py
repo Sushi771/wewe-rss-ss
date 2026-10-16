@@ -130,9 +130,12 @@ class SnapshotTests(unittest.TestCase):
         guard.tick()
         self.assertEqual(len(self.snapshots()), 2)
 
-    def test_restart_ignores_edited_plausible_receipt_and_takes_new_backup(self):
+    def test_restart_ignores_edited_owner_and_fully_revalidates_existing_bytes(self):
         guard = self.guard()
         guard.tick()
+        old_lease = guard.query()['lease']
+        saved = Path(guard.record['backup']).read_bytes()
+        copy_start = guard.record['copyStartedAtUtc']
         guard.close()
         self.guards.remove(guard)
         receipt = json.loads(guard.receipt.read_text())
@@ -140,10 +143,17 @@ class SnapshotTests(unittest.TestCase):
         guard.receipt.write_text(json.dumps(receipt))
         restarted = self.guard()
         self.assertFalse(restarted.query()["fresh"])
-        restarted.tick()
+        with patch.object(module.backup_module, 'snapshot_equal', wraps=module.backup_module.snapshot_equal) as compare:
+            restarted.tick()
+        self.assertEqual(compare.call_count, 1)
         self.assertTrue(restarted.query()["fresh"])
         self.assertNotEqual(restarted.generation, guard.generation)
-        self.assertEqual(len(self.snapshots()), 2)
+        self.assertNotEqual(restarted.record['snapshotGeneration'], guard.record['snapshotGeneration'])
+        self.assertFalse(restarted.validate(old_lease['token'])['fresh'])
+        self.assertTrue(restarted.record['backupReused'])
+        self.assertEqual(restarted.record['copyStartedAtUtc'], copy_start)
+        self.assertEqual(Path(restarted.record['backup']).read_bytes(), saved)
+        self.assertEqual(len(self.snapshots()), 1)
 
     def test_multi_process_owner_lock_fails_promptly_and_does_not_stack(self):
         guard = self.guard()

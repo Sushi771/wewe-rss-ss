@@ -232,12 +232,13 @@ def snapshot_equal(source, copied):
     return True
 
 
-def reusable(database, backup_root, deadline=None):
+def reusable(database, backup_root, deadline=None, allow_periodic=False):
     receipt = backup_root / ('.latest-' + hashlib.sha256(str(database).encode()).hexdigest()[:24] + '.json')
     try:
         report = json.loads(receipt.read_text(encoding='utf-8'))
         backup = Path(report['backup']).resolve(strict=True)
-        if report.get('recoveryOrigin',{}).get('kind') != 'protected' or report['source'] != str(database) or not backup.is_relative_to(backup_root) or sha256(backup, deadline) != report['sha256']:
+        kinds = ('protected', 'periodic') if allow_periodic else ('protected',)
+        if report.get('recoveryOrigin',{}).get('kind') not in kinds or report['source'] != str(database) or not backup.is_relative_to(backup_root) or sha256(backup, deadline) != report['sha256']:
             return None
         with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(backup.as_uri() + '?mode=ro', uri=True)) as copied:
             if deadline is not None:
@@ -271,9 +272,12 @@ def create_backup(database, backup_root, prefix="before-collection", timeout=55,
     with FileLock(database.parent / f".full-snapshot-{lock_name}.lock",
                   timeout=max(0, min(30, timeout))) as lock:
         backup_root = Path(backup_root).resolve()
-        # The periodic guard establishes a new trust generation on restart.
-        # Its existing version-based unchanged-data logic owns that decision.
-        report = None if prefix == 'periodic-snapshot' else reusable(database, backup_root, deadline)
+        # Restart still needs a new full proof, never authority from a saved
+        # owner/token. Hash + integrity + every typed row can prove the existing
+        # periodic bytes current without creating an identical physical copy.
+        # High-risk callers retain their existing protected-origin requirement.
+        report = reusable(database, backup_root, deadline,
+                          allow_periodic=prefix == 'periodic-snapshot')
         if report is None:
             space_preflight(database, backup_root)
             backup_root.mkdir(parents=True, exist_ok=True)

@@ -30,6 +30,64 @@ class BackupSpaceTests(unittest.TestCase):
         self.assertEqual(first['startedAtUtc'], second['startedAtUtc'])
         self.assertEqual(len(list(self.backups.rglob('*.db'))), 1)
         self.assertEqual(self.database.read_bytes(), original)
+    def test_periodic_restart_revalidates_unchanged_snapshot_at_copy_limit(self):
+        first = backup.create_backup(self.database, self.backups, prefix='periodic-snapshot')
+        original = self.database.read_bytes()
+        saved = Path(first['backup']).read_bytes()
+        with patch.dict(os.environ, {'SQLITE_PRODUCTION_MAX_COPIES': '1'}):
+            second = backup.create_backup(self.database, self.backups, prefix='periodic-snapshot')
+        self.assertTrue(second['reused'])
+        self.assertEqual(second['backup'], first['backup'])
+        self.assertEqual(second['startedAtUtc'], first['startedAtUtc'])
+        self.assertEqual(second['createdAtUtc'], first['createdAtUtc'])
+        self.assertEqual(len(list(self.backups.rglob('*.db'))), 1)
+        self.assertEqual(self.database.read_bytes(), original)
+        self.assertEqual(Path(first['backup']).read_bytes(), saved)
+    def test_periodic_changed_or_corrupt_snapshot_keeps_recovery_and_unknown_files(self):
+        for change in ('source', 'backup', 'receipt'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(prefix='periodic-refusal-', dir=self.root) as folder:
+                root = Path(folder)
+                first = backup.create_backup(self.database, root, prefix='periodic-snapshot')
+                unknown = root / 'unknown-reference.sqlite'
+                unknown.write_bytes(b'unknown provenance must remain')
+                if change == 'source':
+                    with closing(sqlite3.connect(self.database)) as db, db:
+                        db.execute('UPDATE articles SET body=body || " changed"')
+                elif change == 'backup':
+                    Path(first['backup']).write_bytes(b'corrupt snapshot retained for review')
+                else:
+                    next(root.glob('.latest-*.json')).write_text('{}')
+                live = self.database.read_bytes()
+                saved = Path(first['backup']).read_bytes()
+                with patch.dict(os.environ, {'SQLITE_PRODUCTION_MAX_COPIES': '1'}):
+                    with self.assertRaisesRegex(ValueError, 'SPACE_BUDGET_EXCEEDED'):
+                        backup.create_backup(self.database, root, prefix='periodic-snapshot')
+                self.assertEqual(self.database.read_bytes(), live)
+                self.assertEqual(Path(first['backup']).read_bytes(), saved)
+                self.assertEqual(unknown.read_bytes(), b'unknown provenance must remain')
+                self.assertEqual(len(list(root.rglob('*.db'))), 1)
+    def test_periodic_wal_commit_is_not_hidden_by_unchanged_main_file(self):
+        with closing(sqlite3.connect(self.database)) as writer:
+            writer.execute('PRAGMA journal_mode=WAL')
+            first = backup.create_backup(self.database, self.backups, prefix='periodic-snapshot')
+            saved = Path(first['backup']).read_bytes()
+            writer.execute('UPDATE articles SET body="committed in WAL"')
+            writer.commit()
+            with patch.dict(os.environ, {'SQLITE_PRODUCTION_MAX_COPIES': '1'}):
+                with self.assertRaisesRegex(ValueError, 'SPACE_BUDGET_EXCEEDED'):
+                    backup.create_backup(self.database, self.backups, prefix='periodic-snapshot')
+            self.assertEqual(writer.execute('SELECT body FROM articles').fetchone()[0], 'committed in WAL')
+            self.assertEqual(Path(first['backup']).read_bytes(), saved)
+    def test_required_protected_backup_is_created_once_then_reused(self):
+        periodic = backup.create_backup(self.database, self.backups, prefix='periodic-snapshot')
+        first = backup.create_backup(self.database, self.backups)
+        second = backup.create_backup(self.database, self.backups)
+        self.assertFalse(first['reused'])
+        self.assertEqual(first['recoveryOrigin']['kind'], 'protected')
+        self.assertNotEqual(first['backup'], periodic['backup'])
+        self.assertTrue(second['reused'])
+        self.assertEqual(second['backup'], first['backup'])
+        self.assertEqual(len(list(self.backups.rglob('*.db'))), 2)
     def test_changed_source_at_quota_is_refused_and_unique_recovery_point_untouched(self):
         first = backup.create_backup(self.database, self.backups)
         saved = Path(first['backup']).read_bytes()

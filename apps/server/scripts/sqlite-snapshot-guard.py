@@ -182,6 +182,11 @@ class SnapshotGuard:
                 "schemaVersion": after_schema, "schemaSha256": after_hash,
                 "backup": str(backup), "sha256": report["sha256"],
                 "backupFingerprint": fingerprint(backup),
+                # These original copy times remain distinct from this guard's
+                # fresh verification/coverage interval, including after restart.
+                "backupReused": report.get("reused") is True,
+                "copyStartedAtUtc": report.get("startedAtUtc"),
+                "copySucceededAtUtc": report.get("createdAtUtc"),
                 "backupStartedAtMs": int(start_wall * 1000),
                 "backupSucceededAtMs": int(completed_wall * 1000),
                 "backupStartedMono": start_mono, "backupSucceededMono": completed_mono,
