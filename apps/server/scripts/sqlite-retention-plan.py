@@ -378,7 +378,8 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
     if headroom/rate<3:alarms.append('less-than-three-days-at-configured-rate')
     payload = {'format':FORMAT,'root':str(root),'database':str(database),'createdAtEpoch':now,'expiresAtEpoch':now+86400,
                'referenceDigest':ref_digest,'referenceRecords':records,'protected':refs,'candidates':candidates,'held':held,
-                'policy':{'maxBytes':maximum,'maxCopies':copies,'ageDays':age_days,'retention':policy,**({'periodicOnly':True} if periodic_only else {})},
+                'policy':{'maxBytes':maximum,'maxCopies':copies,'ageDays':age_days,'retention':policy,
+                          **({'periodicOnly':True,'referenceConcurrency':'current-publishers-and-pinned-manifests-v1'} if periodic_only else {})},
                'summary':{'existingBytes':used,'existingCopies':len(databases),'readBytes':budget.used,
                           'candidateCount':len(candidates),'candidateBytes':sum(x['bytes'] for x in candidates),
                           'generationInProgress':paused,'warning':bool(alarms),'warningReasons':alarms,
@@ -479,6 +480,7 @@ def validate_batch(plan, approval, resource_report, now=None, read_bytes=64*1024
     retired,_tier=policy_refs(database,root,_files,_db,refs,records,budget,now,policy,periodic_only)
     # Latest same-source protections established by the plan are also retained.
     refs.update(p['protected'])
+    if periodic_only and records!=p.get('referenceRecords'):raise MaintenanceError('BOUND_REFERENCE_RECORDS_CHANGED')
     if digest({'records':records,'protected':sorted(refs)})!=p['referenceDigest'] or not generation_clear(root,owned_lease):
         raise MaintenanceError('LIVE_REFERENCES_OR_GENERATION_CHANGED')
     resource_files=resource_report.get('files',[])
@@ -539,7 +541,7 @@ def validate_batch(plan, approval, resource_report, now=None, read_bytes=64*1024
 
 class WindowsPin:
     """Delete the verified object by handle, never by a re-resolved pathname."""
-    def __init__(self,path,expected,directory=False,delete=False):
+    def __init__(self,path,expected,directory=False,delete=False,sharing=0):
         if os.name!='nt':raise MaintenanceError('VERIFIED_ROTATION_REQUIRES_WINDOWS')
         import ctypes
         from ctypes import wintypes
@@ -548,9 +550,11 @@ class WindowsPin:
         create=self.api.CreateFileW
         create.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,wintypes.LPVOID,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
         create.restype=wintypes.HANDLE
-        # Directory handles deny rename; data handles deny all other access.
+        # Directories deny rename. Selected data is exclusive; reference readers
+        # and existing OS lock streams use explicit non-delete sharing modes.
         access=(0 if directory else 0x80000000)|(0x10000 if delete else 0)
-        handle=create(str(path),access,3 if directory else 0,None,3,0x00200000|(0x02000000 if directory else 0),None)
+        if sharing not in (0,1,3):raise MaintenanceError('UNSAFE_PIN_SHARING')
+        handle=create(str(path),access,3 if directory else sharing,None,3,0x00200000|(0x02000000 if directory else 0),None)
         if handle==wintypes.HANDLE(-1).value:raise MaintenanceError('EXCLUSIVE_OBJECT_PIN_FAILED')
         try:self.fd=msvcrt.open_osfhandle(handle,os.O_RDONLY|os.O_BINARY)
         except BaseException:
@@ -592,9 +596,36 @@ class WindowsPin:
     def __exit__(self,*_args):self.close()
 
 
+def pin_rotation_references(stack,plan):
+    """Freeze supported manual publishers; producer publication is OS-locked.
+
+    No missing-file placeholder is created: absence cannot be pinned. A real
+    protection manifest must already exist in every scanned reference root.
+    """
+    p=plan['payload'];roots={local_path(p['root']),*backup.legacy_roots()}
+    records=p['referenceRecords'];manifests={r['protectionManifest']:r for r in records if 'protectionManifest' in r}
+    paths={r[key] for r in records for key in ('file','protectedReceipt') if key in r}
+    if len(paths)+len(manifests)>256:raise MaintenanceError('REFERENCE_PIN_LIMIT')
+    key=hashlib.sha256(p['database'].encode()).hexdigest()[:24]
+    publisher_names={f'.latest-{key}.json',f'snapshot-owner-{key}.json'}
+    for record in records:
+        if (record.get('source') not in (None,p['database'])
+            or ('file' in record and (Path(record['file']).name not in publisher_names or record.get('source')!=p['database']))):
+            raise MaintenanceError('UNSUPPORTED_REFERENCE_PUBLISHER')
+    for root in roots:
+        manifest=root/'retention-protected.json';record=manifests.get(str(manifest))
+        if record is None:raise MaintenanceError('PREEXISTING_PROTECTION_MANIFEST_REQUIRED')
+        stack.enter_context(WindowsPin(manifest,record['identity'],sharing=1))
+    # Existing diagnostics/references remain readable for validation but cannot
+    # be edited, replaced or removed for the lifetime of this critical section.
+    for path in sorted(paths):stack.enter_context(WindowsPin(Path(path),identity(Path(path)),sharing=1))
+
+
 def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*1024**2,protected_paths=(),policy=None):
     if plan.get('payload',{}).get('policy',{}).get('periodicOnly') is not True:
         raise MaintenanceError('PERIODIC_ROTATION_PLAN_REQUIRED')
+    if plan['payload']['policy'].get('referenceConcurrency')!='current-publishers-and-pinned-manifests-v1':
+        raise MaintenanceError('REFERENCE_CONCURRENCY_PLAN_REQUIRED')
     result=validate_batch(plan,approval,resource_report,now,read_bytes,protected_paths,policy)
     if result['skipped']:raise MaintenanceError('ROTATION_BATCH_NOT_FULLY_PROVED')
     if os.name!='nt':raise MaintenanceError('VERIFIED_ROTATION_REQUIRES_WINDOWS')
@@ -604,10 +635,17 @@ def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*
             'attempted':[],'permanentDeletionPerformed':False,'status':'complete'}
     with ExitStack() as stack:
         # Pin all ancestor directories before locks or deletions; no junctions.
-        for directory in reversed((root,*root.parents)):
+        directories={d for r in (root,database.parent,*backup.legacy_roots()) for d in (r,*r.parents)}
+        for directory in sorted(directories,key=lambda d:(len(d.parts),str(d))):
             stack.enter_context(WindowsPin(directory,directory_identity(directory),directory=True))
         lock_name=hashlib.sha256(str(database).encode()).hexdigest()[:24]
         lock=stack.enter_context(backup.FileLock(database.parent/f'.full-snapshot-{lock_name}.lock',timeout=0))
+        # The guard publishes after create_backup returns and can renew an
+        # unchanged owner without a new copy. Its lifetime lock must be ours too.
+        owner_lock=stack.enter_context(backup.FileLock(database.parent/f'.snapshot-{lock_name}.lock',timeout=0))
+        for held_lock in (lock,owner_lock):
+            stack.enter_context(WindowsPin(held_lock.path,identity(held_lock.path),sharing=3))
+        pin_rotation_references(stack,plan)
         lease=root/'.space-budget.lock'
         with lease.open('x',encoding='utf-8') as stream:
             json.dump({'kind':'explicit-periodic-rotation','batchId':plan['batchId'],'pid':os.getpid()},stream)
@@ -628,7 +666,7 @@ def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*
                 if data.sha(budget)!=entry['sha256'] or receipt.sha(budget)!=entry['receiptSha256']:
                     raise MaintenanceError('PINNED_PERIODIC_CHECKSUM_CHANGED')
                 pins.append((entry,data,receipt,folder))
-            lock.check()
+            lock.check();owner_lock.check()
             if not generation_clear(root,owned):raise MaintenanceError('ROTATION_LEASE_CHANGED')
             action_now=int(time.time()) if now is None else now
             if not 0<=action_now-approval['approvedAtEpoch']<=300 or action_now>p['expiresAtEpoch']:
@@ -638,7 +676,7 @@ def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*
             # No recursive delete, automatic retry, or fallback pathname unlink.
             for entry,data,receipt,folder in pins:
                 try:
-                    budget.tick();lock.check()
+                    budget.tick();lock.check();owner_lock.check()
                     if not generation_clear(root,owned):raise MaintenanceError('ROTATION_LEASE_CHANGED')
                     for key,path,pin in (('deleted',entry['path'],data),('deletedMetadata',entry['receipt'],receipt),
                                          ('removedDirectories',entry['directory'],folder)):

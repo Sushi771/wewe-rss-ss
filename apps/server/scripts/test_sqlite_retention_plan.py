@@ -1,7 +1,8 @@
-"""Small synthetic SQLite fixtures only. No production database or deletion."""
+"""Small synthetic SQLite fixtures only; deletion is limited to owned temp files."""
 from contextlib import closing
 from datetime import datetime, timezone
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -100,9 +101,11 @@ class RetentionTests(unittest.TestCase):
         a['uniqueHistoryPaths']=[x['path'] for x in plan['payload']['candidates'] if x['kind']=='retention-expired']
         return files,policy,plan,a,r
 
-    def rotation_fixture(self,count=3,**changes):
+    def rotation_fixture(self,count=3,manifest=True,**changes):
         # Tiny fixture source retains business/history rows throughout rotation.
         shutil.copyfile(self.keep,self.source)
+        if manifest:
+            (self.root/'retention-protected.json').write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':[]}))
         files=[self.ordinary(72+i) for i in range(count)]
         policy={'maxOrdinaryCopies':2,'keepLatest':2,'roundDays':1,'recentHours':1,
                 'dailyDays':1,'weeklyWeeks':0,'maximumAgeDays':28,'bucketHours':1,**changes}
@@ -114,6 +117,142 @@ class RetentionTests(unittest.TestCase):
 
     def execute_rotation(self,plan,a,r,policy):
         return retention.execute_periodic_batch(plan,a,r,now=self.now,policy=policy)
+
+    @unittest.skipUnless(os.name=='nt','Windows protection publication critical section')
+    def test_native_rotation_missing_manifest_never_enters_deletion_or_creates_placeholder(self):
+        _files,policy,plan,a,r=self.rotation_fixture(manifest=False)
+        with patch.object(retention.WindowsPin,'delete',side_effect=AssertionError('owned delete guard')) as delete:
+            with self.assertRaisesRegex(retention.MaintenanceError,'PREEXISTING_PROTECTION_MANIFEST_REQUIRED'):
+                self.execute_rotation(plan,a,r,policy)
+        delete.assert_not_called();self.assertFalse((self.root/'retention-protected.json').exists())
+        self.assertTrue(all(Path(p).exists() for p in a['paths']))
+
+    @unittest.skipUnless(os.name=='nt','Windows preexisting protection writer exclusion')
+    def test_native_rotation_preexisting_manifest_writer_holds_before_deletion(self):
+        _files,policy,plan,a,r=self.rotation_fixture();manifest=self.root/'retention-protected.json';original=manifest.read_bytes()
+        with manifest.open('r+b') as writer,patch.object(retention.WindowsPin,'delete',side_effect=AssertionError('owned delete guard')) as delete:
+            with self.assertRaisesRegex(retention.MaintenanceError,'EXCLUSIVE_OBJECT_PIN_FAILED'):
+                self.execute_rotation(plan,a,r,policy)
+            self.assertFalse(writer.closed);delete.assert_not_called()
+        self.assertEqual(manifest.read_bytes(),original);self.assertTrue(all(Path(p).exists() for p in a['paths']))
+
+    @unittest.skipUnless(os.name=='nt','Windows protection publication critical section')
+    def test_native_rotation_late_protection_write_and_replace_are_excluded_without_delete(self):
+        _files,policy,plan,a,r=self.rotation_fixture();manifest=self.root/'retention-protected.json'
+        original=manifest.read_bytes();native=retention.WindowsPin.sha
+        for replace in (False,True):
+            attempts=[]
+            def publish_after_validation(pin,budget):
+                value=native(pin,budget)
+                if not attempts:
+                    attempts.append(True)
+                    data=json.dumps({'format':'sqlite-retention-protected-v1','paths':a['paths']})
+                    if replace:
+                        temporary=self.root/'owned-new-protection.tmp';temporary.write_text(data)
+                        try:temporary.replace(manifest)
+                        finally:temporary.unlink()
+                    else:manifest.write_text(data)
+                return value
+            with self.subTest(replace=replace),patch.object(retention.WindowsPin,'sha',publish_after_validation),\
+                 patch.object(retention.WindowsPin,'delete',side_effect=AssertionError('owned delete guard')) as delete:
+                with self.assertRaises(PermissionError):self.execute_rotation(plan,a,r,policy)
+            delete.assert_not_called();self.assertEqual(attempts,[True]);self.assertEqual(manifest.read_bytes(),original)
+            self.assertTrue(all(Path(p).exists() for p in a['paths']));self.assertFalse((self.root/'.space-budget.lock').exists())
+        # Failed publication/rotation does not leave the manifest frozen.
+        manifest.write_bytes(original)
+
+    @unittest.skipUnless(os.name=='nt','Windows current publisher locks')
+    def test_native_rotation_active_guard_refuses_without_stopping_owner_or_deleting(self):
+        _files,policy,plan,a,r=self.rotation_fixture()
+        spec=importlib.util.spec_from_file_location('owned_guard',Path(__file__).with_name('sqlite-snapshot-guard.py'))
+        guard_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(guard_module)
+        guard=guard_module.SnapshotGuard(self.source,self.root)
+        try:
+            with patch.object(retention.WindowsPin,'delete',side_effect=AssertionError('owned delete guard')) as delete:
+                with self.assertRaises(TimeoutError):self.execute_rotation(plan,a,r,policy)
+            delete.assert_not_called();guard.lock.check()
+            self.assertEqual(guard.source.execute('SELECT name FROM feeds').fetchone(),('retained subscription',))
+        finally:guard.close()
+        self.assertTrue(all(Path(p).exists() for p in a['paths']))
+
+    @unittest.skipUnless(os.name=='nt','Windows current publisher locks')
+    def test_native_rotation_excludes_backup_guard_and_lock_replacement_through_action_boundary(self):
+        _files,policy,plan,a,r=self.rotation_fixture();native=retention.WindowsPin.sha;observed=[]
+        key=hashlib.sha256(str(self.source).encode()).hexdigest()[:24]
+        def inspect_critical_section(pin,budget):
+            value=native(pin,budget)
+            if not observed:
+                for name in (f'.snapshot-{key}.lock',f'.full-snapshot-{key}.lock'):
+                    lock=self.source.parent/name
+                    with self.assertRaises(TimeoutError):retention.backup.FileLock(lock,timeout=0)
+                    with self.assertRaises(PermissionError):lock.rename(lock.with_suffix('.moved'))
+                    observed.append(name)
+                raise AssertionError('OWNED_NO_DELETE_AFTER_PUBLISHER_LOCK_PROOF')
+            return value
+        with patch.object(retention.WindowsPin,'sha',inspect_critical_section),\
+             patch.object(retention.WindowsPin,'delete',side_effect=AssertionError('owned delete guard')) as delete:
+            with self.assertRaisesRegex(AssertionError,'OWNED_NO_DELETE_AFTER_PUBLISHER_LOCK_PROOF'):
+                self.execute_rotation(plan,a,r,policy)
+        delete.assert_not_called();self.assertEqual(len(observed),2)
+        for name in observed:
+            with retention.backup.FileLock(self.source.parent/name,timeout=0):pass
+
+    @unittest.skipUnless(os.name=='nt','Windows protection publication ordering')
+    def test_native_rotation_protection_published_before_freeze_wins_and_stops_deletion(self):
+        _files,policy,plan,a,r=self.rotation_fixture();native=retention.validate_batch;count=[]
+        manifest=self.root/'retention-protected.json'
+        def publish_before_freeze(*args,**kwargs):
+            result=native(*args,**kwargs)
+            if not count:
+                count.append(True);manifest.write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':a['paths']}))
+            return result
+        with patch.object(retention,'validate_batch',publish_before_freeze),\
+             patch.object(retention.WindowsPin,'delete',side_effect=AssertionError('owned delete guard')) as delete:
+            with self.assertRaises(retention.MaintenanceError):self.execute_rotation(plan,a,r,policy)
+        delete.assert_not_called();self.assertEqual(json.loads(manifest.read_text())['paths'],a['paths'])
+        self.assertTrue(all(Path(p).exists() for p in a['paths']))
+
+    def test_periodic_rotation_old_plan_without_reference_protocol_is_not_executable(self):
+        _files,policy,plan,a,r=self.rotation_fixture();old=copy.deepcopy(plan)
+        old['payload']['policy'].pop('referenceConcurrency')
+        with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCE_CONCURRENCY_PLAN_REQUIRED'):
+            self.execute_rotation(old,a,r,policy)
+        altered=copy.deepcopy(plan);altered['payload']['referenceRecords']=[]
+        altered['digest']=retention.digest(altered['payload'])
+        with self.assertRaisesRegex(retention.MaintenanceError,'BOUND_REFERENCE_RECORDS_CHANGED'):
+            self.execute_rotation(altered,{**a,'digest':altered['digest']},{**r,'digest':altered['digest']},policy)
+
+    @unittest.skipUnless(os.name=='nt','Windows supported publisher namespace')
+    def test_native_rotation_unknown_or_foreign_reference_publishers_hold_execution(self):
+        _files,policy,_plan,_a,_r=self.rotation_fixture()
+        reference=self.root/'refresh-recovery-owner-unmanaged.json'
+        reference.write_text(json.dumps({'backup':str(self.keep),'source':str(self.source)}))
+        plan=self.plan(policy=policy,periodic_only=True);a,r=self.inputs(plan)
+        a.update(action='rotate-exact-periodic-backups',uniqueHistoryPaths=[x['path'] for x in plan['payload']['candidates']],
+                 metadataPaths=[x['receipt'] for x in plan['payload']['candidates']],directories=[x['directory'] for x in plan['payload']['candidates']])
+        with patch.object(retention.WindowsPin,'delete',side_effect=AssertionError('owned delete guard')) as delete:
+            with self.assertRaisesRegex(retention.MaintenanceError,'UNSUPPORTED_REFERENCE_PUBLISHER'):
+                self.execute_rotation(plan,a,r,policy)
+        delete.assert_not_called();self.assertTrue(reference.exists())
+
+    @unittest.skipUnless(os.name=='nt','Windows all declared manual protection roots')
+    def test_native_rotation_legacy_root_manifest_is_also_pinned_against_late_protection(self):
+        _files,policy,_plan,_a,_r=self.rotation_fixture();legacy=self.folder/'legacy';legacy.mkdir()
+        manifest=legacy/'retention-protected.json';manifest.write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':[]}))
+        with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
+            plan=self.plan(policy=policy,periodic_only=True);a,r=self.inputs(plan)
+            a.update(action='rotate-exact-periodic-backups',uniqueHistoryPaths=[x['path'] for x in plan['payload']['candidates']],
+                     metadataPaths=[x['receipt'] for x in plan['payload']['candidates']],directories=[x['directory'] for x in plan['payload']['candidates']])
+            native=retention.WindowsPin.sha;injected=[];original=manifest.read_bytes()
+            def late_legacy_protection(pin,budget):
+                value=native(pin,budget)
+                if not injected:
+                    injected.append(True);manifest.write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':a['paths']}))
+                return value
+            with patch.object(retention.WindowsPin,'sha',late_legacy_protection),\
+                 patch.object(retention.WindowsPin,'delete',side_effect=AssertionError('owned delete guard')) as delete:
+                with self.assertRaises(PermissionError):self.execute_rotation(plan,a,r,policy)
+            delete.assert_not_called();self.assertEqual(manifest.read_bytes(),original)
 
     def test_periodic_rotation_count_and_byte_targets_include_all_retained_points(self):
         size=self.keep.stat().st_size
