@@ -1,9 +1,9 @@
 // Windows 本机受控切换：一致性备份、迁移、新版启动；失败只回滚应用进程，不覆盖数据库。
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const net = require('node:net');
 const assert = require('node:assert/strict');
-const { spawn, execFile } = require('node:child_process');
+const { spawn, execFile } = require('./lib.cjs').hostEffects.processes;
 const { once } = require('node:events');
 const { parseArgs, promisify } = require('node:util');
 const {
@@ -72,7 +72,7 @@ function processIdentity(action, pid, port, expected) {
   return JSON.parse(run(powershell, args, { env: cleanEnvironment() }));
 }
 
-function portOwnersAsync(port) {
+async function portOwnersAsync(port) {
   // Only this read-only action overlaps database preparation. Identity/Stop
   // keep their existing complete contract and the original PS fallback.
   if (
@@ -82,7 +82,7 @@ function portOwnersAsync(port) {
     return Promise.resolve(processIdentity('Port', undefined, port));
   const tool = require('./identity-tool.cjs').identityTool();
   if (!tool) return Promise.resolve(processIdentity('Port', undefined, port));
-  // Fallback or helper-integrity failures throw before preparation is invoked.
+  // Query and helper-integrity failures reject; they never imply a free port.
   return promisify(execFile)(tool, ['Port', '0', String(port), '', '', ''], {
     windowsHide: true,
     shell: false,
@@ -197,6 +197,7 @@ async function waitReady(
 }
 
 async function stopOwned(child) {
+  require('./lib.cjs').hostEffects.assertWritable();
   if (!child || child.exitCode !== null) return;
   const closed = once(child, 'close');
   child.kill();
@@ -204,6 +205,7 @@ async function stopOwned(child) {
 }
 
 function loadProductionEnvironment() {
+  require('./lib.cjs').hostEffects.assertWritable();
   const server = path.join(root, 'apps/server');
   // Node 内置 envFile 只填充缺失值；本机 .env.local 优先，文件内容不写入审计。
   for (const file of ['.env.local', '.env']) {
@@ -214,6 +216,23 @@ function loadProductionEnvironment() {
 }
 
 async function controlledSwitch(options) {
+  require('./release-scope.cjs').assertWritableSession(['switch']);
+  if (!options.production) return controlledSwitchInner(options);
+  return require('./release-scope.cjs').within(
+    {
+      kind: 'switch',
+      root: path.dirname(fs.realpathSync(options.release)),
+      reserveBytes: 256 * 1024 ** 2,
+      transition: true,
+    },
+    (lease) => {
+      lease.authorizePackage(options.release);
+      lease.authorizePackage(options.legacy);
+      return controlledSwitchInner(options);
+    },
+  );
+}
+async function controlledSwitchInner(options) {
   if (process.platform !== 'win32') throw new Error('只支持 Windows 本机切换');
   const rehearsal = options.rehearsal === true;
   if (!rehearsal && !options.production)
@@ -223,7 +242,7 @@ async function controlledSwitch(options) {
     throw new Error('故障注入只允许隔离演练');
   const release = fs.realpathSync(options.release);
   const legacy = fs.realpathSync(options.legacy);
-  const source = fs.realpathSync(options.database);
+  let source = rehearsal ? null : fs.realpathSync(options.database);
   const current = verifyRelease(release);
   const old = verifyRelease(legacy);
   assert.equal(current.schemaCompatibility, 'current');
@@ -236,6 +255,10 @@ async function controlledSwitch(options) {
       source,
       fs.realpathSync(path.join(root, 'apps/server/data/wewe-rss.db')),
     );
+    if (process.env.SQLITE_BACKUP_KIND === 'test')
+      throw new Error(
+        'Production control refuses inherited test backup policy',
+      );
     loadProductionEnvironment();
   }
   const pauseFile = path.join(root, 'tools/wechat-desktop-collector/.paused');
@@ -245,283 +268,324 @@ async function controlledSwitch(options) {
     '用户暂停状态不符',
   );
   const pauseHash = fileHash(pauseFile);
-  const audit = path.join(
-    root,
-    'output/playwright/local-release-audit',
-    `controlled-switch-${Date.now()}-${process.pid}`,
-  );
-  fs.mkdirSync(audit, { recursive: false });
-  const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
-  const env = cleanEnvironment({
-    NODE_ENV: 'production',
-    PYTHONUTF8: '1',
-    PYTHONIOENCODING: 'utf-8',
-    PYTHONDONTWRITEBYTECODE: '1',
-  });
-  if (rehearsal)
-    Object.assign(env, {
-      AUTH_CODE: '',
-      FEED_MODE: '',
-      WECHAT_DESKTOP_MP_IDS: '',
-      WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
-      DISABLE_SCHEDULED_UPDATES: '1',
-      PLATFORM_URL: 'http://127.0.0.1:1',
+  const artifacts = rehearsal
+    ? require('./test-artifacts.cjs').begin({
+        outputRoot: options.outputRoot,
+        source: options.database,
+        realCopy: options.realCopy,
+        keep: options.keepTestDatabases,
+        legacy: true,
+        migrations: path.join(release, 'server/prisma/migrations'),
+      })
+    : null;
+  if (artifacts) source = artifacts.database;
+  const audit =
+    artifacts?.audit ||
+    path.join(
+      options.outputRoot ||
+        process.env.WEWE_PRODUCTION_AUDIT_ROOT ||
+        path.join(root, 'output/playwright/local-release-audit'),
+      `controlled-switch-${Date.now()}-${process.pid}`,
+    );
+  if (!artifacts) {
+    const lease = require('./release-scope.cjs').session();
+    lease?.registerOutput(audit);
+    fs.mkdirSync(audit, { recursive: true });
+    lease?.createdOutput(audit);
+  }
+  let artifactError;
+  try {
+    const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
+    const env = cleanEnvironment({
+      NODE_ENV: 'production',
+      SQLITE_BACKUP_KIND: rehearsal ? 'test' : 'production',
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+      PYTHONDONTWRITEBYTECODE: '1',
     });
-  const inspection = (database, flags = []) =>
-    JSON.parse(
-      run(
-        python,
-        [
-          path.join(release, 'inspect-sqlite.py'),
-          '--database',
-          database,
-          '--migrations',
-          path.join(release, 'server/prisma/migrations'),
-          ...flags,
-        ],
-        { env },
-      ),
-    );
-  const backup = (database, name) => {
-    const result = JSON.parse(
-      run(
-        python,
-        [
-          path.join(release, 'server/scripts/backup-sqlite.py'),
-          '--database',
-          database,
-          '--backup-root',
-          path.join(audit, name),
-        ],
-        { env },
-      ),
-    );
-    assert.equal(result.integrityCheck, 'ok');
-    assert.equal(fileHash(result.backup), result.sha256);
-    return result;
-  };
-  const sourceBefore = inspection(source, [
-    '--output',
-    path.join(audit, 'source-before.json'),
-  ]);
-  const sourceObservation = () => {
-    try {
-      const after = inspection(source, [
-        '--output',
-        path.join(audit, 'source-after.json'),
-      ]);
-      return {
-        unchanged:
-          JSON.stringify(after.tables) === JSON.stringify(sourceBefore.tables),
-        feeds: after.tables.feeds.rows,
-        articles: after.tables.articles.rows,
-      };
-    } catch (error) {
-      return { unchanged: null, error: error.message };
-    }
-  };
-  assert.deepEqual(
-    sourceBefore.pending,
-    expectedPending,
-    '仅允许预期的三项加性迁移',
-  );
-  let database = source;
-  let port = 4000;
-  let oldChild = null;
-  if (rehearsal) {
-    const copy = backup(source, 'source-backup');
-    database = path.join(audit, 'rehearsal.db');
-    fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
-    inspection(database, [
-      '--baseline',
+    if (rehearsal)
+      Object.assign(env, {
+        AUTH_CODE: '',
+        FEED_MODE: '',
+        WECHAT_DESKTOP_MP_IDS: '',
+        WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
+        DISABLE_SCHEDULED_UPDATES: '1',
+        PLATFORM_URL: 'http://127.0.0.1:1',
+      });
+    const inspection = (database, flags = []) =>
+      JSON.parse(
+        run(
+          python,
+          [
+            path.join(release, 'inspect-sqlite.py'),
+            '--database',
+            database,
+            '--migrations',
+            path.join(release, 'server/prisma/migrations'),
+            ...flags,
+          ],
+          { env },
+        ),
+      );
+    const backup = (database, name) => {
+      const result = JSON.parse(
+        run(
+          python,
+          [
+            path.join(release, 'server/scripts/backup-sqlite.py'),
+            '--database',
+            database,
+            '--backup-root',
+            rehearsal
+              ? path.join(audit, name)
+              : require('./space-budget.cjs').productionRoot(source),
+          ],
+          { env },
+        ),
+      );
+      assert.equal(result.integrityCheck, 'ok');
+      assert.equal(fileHash(result.backup), result.sha256);
+      return result;
+    };
+    const sourceBefore = inspection(source, [
+      '--output',
       path.join(audit, 'source-before.json'),
     ]);
-    port = await unusedPort();
-  } else {
-    backup(source, 'before-stop');
-  }
-  function marker(manifest) {
-    if (rehearsal)
-      fs.writeFileSync(
-        database + '.rehearsal.json',
-        JSON.stringify({ releaseId: manifest.id, database }),
-      );
-  }
-  function start(bundle, label) {
-    const manifest = bundle === legacy ? old : current;
-    marker(manifest);
-    const log = fs.openSync(path.join(audit, `${label}.log`), 'wx');
-    const args = [
-      path.join(bundle, 'runtime.cjs'),
-      'start',
-      '--database',
-      database,
-      '--port',
-      String(port),
-      '--pause-file',
-      pauseFile,
-    ];
-    if (rehearsal)
-      args.push(
-        '--rehearsal',
-        '--obsidian-root',
-        path.join(audit, `${label}-vault`),
-        '--guard-report',
-        path.join(audit, `${label}-guard.json`),
-      );
-    else args.push('--production');
-    const child = spawn(path.join(bundle, 'runtime/node.exe'), args, {
-      cwd: audit,
-      env: {
-        ...env,
-        LOCAL_RELEASE_CONTROLLED_START: manifest.id,
-        ...(bundle === legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),
-      },
-      windowsHide: true,
-      shell: false,
-      detached: !rehearsal,
-      stdio: ['ignore', log, log],
-    });
-    fs.closeSync(log);
-    return child;
-  }
-  let identity;
-  if (rehearsal) {
-    try {
-      marker(old);
-      oldChild = start(legacy, 'old-before');
-      await waitReady(port, oldChild);
-      identity = processIdentity('Snapshot', oldChild.pid, port);
-    } catch (error) {
-      await stopOwned(oldChild);
-      throw error;
+    const sourceObservation = () => {
+      try {
+        const after = inspection(source, [
+          '--output',
+          path.join(audit, 'source-after.json'),
+        ]);
+        return {
+          unchanged:
+            JSON.stringify(after.tables) ===
+            JSON.stringify(sourceBefore.tables),
+          feeds: after.tables.feeds.rows,
+          articles: after.tables.articles.rows,
+        };
+      } catch (error) {
+        return { unchanged: null, error: error.message };
+      }
+    };
+    assert.deepEqual(
+      sourceBefore.pending,
+      expectedPending,
+      '仅允许预期的三项加性迁移',
+    );
+    let database = source;
+    let port = 4000;
+    let oldChild = null;
+    if (rehearsal) {
+      const copy = backup(source, 'source-backup');
+      database = path.join(audit, 'rehearsal.db');
+      fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
+      artifacts?.checkpoint();
+      inspection(database, [
+        '--baseline',
+        path.join(audit, 'source-before.json'),
+      ]);
+      port = await unusedPort();
+    } else {
+      backup(source, 'before-stop');
     }
-  } else {
-    if (!options.expected || !Number.isInteger(options.expected.pid))
-      throw new Error('生产切换须指定旧进程的完整预期身份');
-    identity = processIdentity('Snapshot', options.expected.pid, port);
-    sameIdentity(identity, { ...options.expected, port });
-    assert.match(identity.executable, /[\\/]node\.exe$/i);
-    assert.equal(
-      identity.commandLine,
-      `"${identity.executable}" dist/apps/server/src/main`,
-      '旧命令并非本项目当前启动命令',
-    );
-  }
-  let stopped = false;
-  let migrated = false;
-  let newChild;
-  let fallbackChild;
-  try {
-    const stoppedIdentity = processIdentity(
-      'Stop',
-      identity.pid,
-      port,
-      identity,
-    );
-    assert.equal(stoppedIdentity.stopped, true);
-    stopped = true;
-    // 停止后再取一致性备份，捕捉预检与停止之间可能发生的写入。
-    const finalBackup = backup(database, 'after-stop');
-    const finalBaseline = path.join(audit, 'final-baseline.json');
-    const finalBefore = inspection(database, ['--output', finalBaseline]);
-    assert.deepEqual(finalBefore.pending, expectedPending);
-    inspection(finalBackup.backup, ['--baseline', finalBaseline]);
-    const node = path.join(release, 'runtime/node.exe');
-    const server = path.join(release, 'server');
-    const migrateEnv = {
-      ...env,
-      DATABASE_URL: 'file:' + database.replace(/\\/g, '/'),
-    };
-    fs.writeFileSync(
-      path.join(audit, 'migrate.log'),
-      run(
-        node,
-        [
-          path.join(server, 'node_modules/prisma/build/index.js'),
-          'migrate',
-          'deploy',
-          '--schema',
-          path.join(server, 'prisma/schema.prisma'),
-        ],
-        { cwd: server, env: migrateEnv },
-      ),
-    );
-    inspection(database, [
-      '--baseline',
-      finalBaseline,
-      '--require-current',
-      '--output',
-      path.join(audit, 'after-migration.json'),
-    ]);
-    migrated = true;
-    if (options.injectFailure) throw new Error('INJECTED_NEW_START_FAILURE');
-    newChild = start(release, 'new');
-    await waitReady(port, newChild);
-    const newIdentity = processIdentity('Snapshot', newChild.pid, port);
-    assert.equal(newIdentity.pid, newChild.pid);
-    assert.equal(fileHash(pauseFile), pauseHash);
-    const summary = {
-      passed: true,
-      mode: rehearsal ? 'rehearsal' : 'production',
-      audit,
-      database,
-      finalBackup: finalBackup.backup,
-      migrated,
-      oldStopped: true,
-      newIdentity,
-      rollbackUsed: false,
-      sourceObservation: rehearsal ? sourceObservation() : null,
-    };
-    writeJson(path.join(audit, 'summary.json'), summary);
-    if (!rehearsal) newChild.unref();
-    return summary;
-  } catch (error) {
-    if (!stopped) throw error;
-    await stopOwned(newChild);
-    // 数据库即便已部分迁移也保留；旧版只读新列兼容性由副本演练证明。
-    try {
-      fallbackChild = start(legacy, 'old-fallback');
-      await waitReady(port, fallbackChild);
-      const fallbackIdentity = processIdentity(
-        'Snapshot',
-        fallbackChild.pid,
-        port,
+    function marker(manifest) {
+      if (rehearsal)
+        fs.writeFileSync(
+          database + '.rehearsal.json',
+          JSON.stringify({ releaseId: manifest.id, database }),
+        );
+    }
+    function start(bundle, label) {
+      const manifest = bundle === legacy ? old : current;
+      marker(manifest);
+      const log = fs.openSync(path.join(audit, `${label}.log`), 'wx');
+      const args = [
+        path.join(bundle, 'runtime.cjs'),
+        'start',
+        '--database',
+        database,
+        '--port',
+        String(port),
+        '--pause-file',
+        pauseFile,
+      ];
+      if (rehearsal)
+        args.push(
+          '--rehearsal',
+          '--obsidian-root',
+          path.join(audit, `${label}-vault`),
+          '--guard-report',
+          path.join(audit, `${label}-guard.json`),
+        );
+      else args.push('--production');
+      const scopeLease = require('./release-scope.cjs').session();
+      if (scopeLease) {
+        if (label === 'old-fallback')
+          scopeLease.authorizeRecoveryPackage(bundle);
+        else scopeLease.check(true);
+      }
+      const child = spawn(path.join(bundle, 'runtime/node.exe'), args, {
+        cwd: audit,
+        env: {
+          ...env,
+          LOCAL_RELEASE_CONTROLLED_START: manifest.id,
+          ...(require('./release-scope.cjs').session()
+            ? { LOCAL_RELEASE_REUSE_VERIFIED: '0' }
+            : {}),
+          ...(bundle === legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),
+        },
+        windowsHide: true,
+        shell: false,
+        detached: !rehearsal,
+        stdio: ['ignore', log, log],
+      });
+      fs.closeSync(log);
+      return child;
+    }
+    let identity;
+    if (rehearsal) {
+      try {
+        marker(old);
+        oldChild = start(legacy, 'old-before');
+        await waitReady(port, oldChild);
+        identity = processIdentity('Snapshot', oldChild.pid, port);
+      } catch (error) {
+        await stopOwned(oldChild);
+        throw error;
+      }
+    } else {
+      if (!options.expected || !Number.isInteger(options.expected.pid))
+        throw new Error('生产切换须指定旧进程的完整预期身份');
+      identity = processIdentity('Snapshot', options.expected.pid, port);
+      sameIdentity(identity, { ...options.expected, port });
+      assert.match(identity.executable, /[\\/]node\.exe$/i);
+      assert.equal(
+        identity.commandLine,
+        `"${identity.executable}" dist/apps/server/src/main`,
+        '旧命令并非本项目当前启动命令',
       );
+    }
+    let stopped = false;
+    let migrated = false;
+    let newChild;
+    let fallbackChild;
+    try {
+      const stoppedIdentity = processIdentity(
+        'Stop',
+        identity.pid,
+        port,
+        identity,
+      );
+      assert.equal(stoppedIdentity.stopped, true);
+      stopped = true;
+      // 停止后再取一致性备份，捕捉预检与停止之间可能发生的写入。
+      const finalBackup = backup(database, 'after-stop');
+      const finalBaseline = path.join(audit, 'final-baseline.json');
+      const finalBefore = inspection(database, ['--output', finalBaseline]);
+      assert.deepEqual(finalBefore.pending, expectedPending);
+      inspection(finalBackup.backup, ['--baseline', finalBaseline]);
+      const node = path.join(release, 'runtime/node.exe');
+      const server = path.join(release, 'server');
+      const migrateEnv = {
+        ...env,
+        DATABASE_URL: 'file:' + database.replace(/\\/g, '/'),
+      };
+      fs.writeFileSync(
+        path.join(audit, 'migrate.log'),
+        run(
+          node,
+          [
+            path.join(server, 'node_modules/prisma/build/index.js'),
+            'migrate',
+            'deploy',
+            '--schema',
+            path.join(server, 'prisma/schema.prisma'),
+          ],
+          { cwd: server, env: migrateEnv },
+        ),
+      );
+      inspection(database, [
+        '--baseline',
+        finalBaseline,
+        '--require-current',
+        '--output',
+        path.join(audit, 'after-migration.json'),
+      ]);
+      migrated = true;
+      if (options.injectFailure) throw new Error('INJECTED_NEW_START_FAILURE');
+      newChild = start(release, 'new');
+      await waitReady(port, newChild);
+      const newIdentity = processIdentity('Snapshot', newChild.pid, port);
+      assert.equal(newIdentity.pid, newChild.pid);
+      assert.equal(fileHash(pauseFile), pauseHash);
       const summary = {
-        passed: rehearsal && options.injectFailure === true,
+        passed: true,
         mode: rehearsal ? 'rehearsal' : 'production',
         audit,
         database,
+        finalBackup: finalBackup.backup,
         migrated,
         oldStopped: true,
-        rollbackUsed: true,
-        failure: error.message,
-        fallbackIdentity,
-        databaseRestored: false,
+        newIdentity,
+        rollbackUsed: false,
         sourceObservation: rehearsal ? sourceObservation() : null,
       };
-      assert.equal(fileHash(pauseFile), pauseHash);
       writeJson(path.join(audit, 'summary.json'), summary);
-      if (!rehearsal) fallbackChild.unref();
-      if (!rehearsal) throw error;
+      if (!rehearsal) newChild.unref();
       return summary;
-    } catch (fallbackError) {
-      if (fallbackError !== error) {
-        writeJson(path.join(audit, 'fallback-failure.json'), {
-          newFailure: error.message,
-          fallbackFailure: fallbackError.message,
-          databaseRestored: false,
+    } catch (error) {
+      if (!stopped) throw error;
+      await stopOwned(newChild);
+      // 数据库即便已部分迁移也保留；旧版只读新列兼容性由副本演练证明。
+      try {
+        fallbackChild = start(legacy, 'old-fallback');
+        await waitReady(port, fallbackChild);
+        const fallbackIdentity = processIdentity(
+          'Snapshot',
+          fallbackChild.pid,
+          port,
+        );
+        const summary = {
+          passed: rehearsal && options.injectFailure === true,
+          mode: rehearsal ? 'rehearsal' : 'production',
+          audit,
           database,
-        });
+          migrated,
+          oldStopped: true,
+          rollbackUsed: true,
+          failure: error.message,
+          fallbackIdentity,
+          databaseRestored: false,
+          sourceObservation: rehearsal ? sourceObservation() : null,
+        };
+        assert.equal(fileHash(pauseFile), pauseHash);
+        writeJson(path.join(audit, 'summary.json'), summary);
+        if (!rehearsal) fallbackChild.unref();
+        if (!rehearsal) throw error;
+        return summary;
+      } catch (fallbackError) {
+        if (fallbackError !== error) {
+          writeJson(path.join(audit, 'fallback-failure.json'), {
+            newFailure: error.message,
+            fallbackFailure: fallbackError.message,
+            databaseRestored: false,
+            database,
+          });
+        }
+        throw fallbackError;
       }
-      throw fallbackError;
+    } finally {
+      if (rehearsal) {
+        for (const child of [oldChild, newChild, fallbackChild])
+          await stopOwned(child);
+      }
     }
+  } catch (error) {
+    artifactError = error;
+    throw error;
   } finally {
-    if (rehearsal) {
-      for (const child of [oldChild, newChild, fallbackChild])
-        await stopOwned(child);
-    }
+    artifacts?.finish(artifactError);
   }
 }
 
@@ -529,6 +593,9 @@ async function main() {
   const { values } = parseArgs({
     options: {
       release: { type: 'string' },
+      'output-root': { type: 'string' },
+      'real-copy': { type: 'boolean', default: false },
+      'keep-test-databases': { type: 'boolean', default: false },
       legacy: { type: 'string' },
       database: { type: 'string' },
       rehearsal: { type: 'boolean', default: false },
@@ -540,7 +607,11 @@ async function main() {
       'expected-command-line': { type: 'string' },
     },
   });
-  if (!values.release || !values.legacy || !values.database)
+  if (
+    !values.release ||
+    !values.legacy ||
+    (values.production && !values.database)
+  )
     throw new Error('须指定 --release、--legacy、--database 和切换模式');
   const expected = values.production
     ? {
@@ -552,6 +623,9 @@ async function main() {
     : undefined;
   const result = await controlledSwitch({
     release: values.release,
+    outputRoot: values['output-root'],
+    realCopy: values['real-copy'],
+    keepTestDatabases: values['keep-test-databases'],
     legacy: values.legacy,
     database: values.database,
     rehearsal: values.rehearsal,

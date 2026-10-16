@@ -56,10 +56,18 @@ describe('explicit add source through original router (offline SQLite)', () => {
     process.env = {
       ...originalEnv,
       DATABASE_URL: `file:${database.replace(/\\/g, '/')}`,
+      SQLITE_BACKUP_KIND: 'test',
+      SQLITE_TEST_BUDGET_ROOT: root,
       WECHAT2RSS_ENABLED: '0',
       WECHAT2RSS_BASE_URL: 'http://127.0.0.1:18080/',
       WECHAT2RSS_TOKEN: 'synthetic-provider-token',
     };
+    // Only this owned synthetic fixture's previous test recovery points may be
+    // removed. Keeping them across cases otherwise grows quota scans and makes
+    // the suite test a long-lived production archive instead of one operation.
+    expect(path.dirname(root)).toBe(os.tmpdir());
+    expect(path.basename(root)).toMatch(/^wewe-source-selection-/);
+    await fs.rm(path.join(root, 'backups'), { recursive: true, force: true });
     delete process.env.WEWE_ACCEPTANCE_MODE;
     delete process.env.PRIVATE_ONLINE_MODE;
     await prisma.article.deleteMany();
@@ -248,7 +256,6 @@ describe('explicit add source through original router (offline SQLite)', () => {
       'backup',
       '/addurl',
       '/list',
-      'backup',
       `/feed/${number}.xml`,
       '/list',
       `/feed/${number}.json`,
@@ -607,7 +614,6 @@ describe('explicit add source through original router (offline SQLite)', () => {
       'backup',
       '/addurl',
       '/list',
-      'backup',
       `/feed/${number}.xml`,
       '/list',
       `/feed/${number}.json`,
@@ -1298,7 +1304,10 @@ describe('explicit add source through original router (offline SQLite)', () => {
     ).toBe(keptAvatar);
     expect(events.some((e) => e.startsWith('/add/'))).toBe(false);
     next.service.onModuleDestroy();
-  });
+    // Real child-process backups and full typed-row verification are part of
+    // this offline integration test; preserve a finite I/O deadline without
+    // constraining it to Jest's 5-second unit-test default.
+  }, 30000);
 
   it('an uncertain batch submission pauses remaining links and restart cannot replay addurl', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';

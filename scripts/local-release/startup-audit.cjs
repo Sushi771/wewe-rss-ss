@@ -9,6 +9,7 @@ const {
 } = require('node:worker_threads');
 
 function createStartupAudit(options, WorkerClass = Worker) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const startedAt = Date.now();
   let worker;
   let settled = false;
@@ -50,7 +51,10 @@ function createStartupAudit(options, WorkerClass = Worker) {
         );
         worker.on('message', (message) => {
           if (message?.status === 'ready') finish('ready');
-          else if (message?.status === 'failed') finish('failed');
+          else if (message?.status === 'failed') {
+            state.reason = message.reason;
+            finish('failed');
+          }
         });
         worker.on('error', (error) => {
           console.error('Startup audit worker:', error);
@@ -70,40 +74,23 @@ function createStartupAudit(options, WorkerClass = Worker) {
 
 if (!isMainThread) {
   (async () => {
-    const {
-      prepareStart,
-      UnsupportedBaselineValue,
-    } = require('./startup-sqlite.cjs');
+    const { auditCurrentDatabase } = require('./startup-sqlite.cjs');
     const { database, migrations, auditRoot } = workerData;
+    if (workerData.kind) process.env.SQLITE_BACKUP_KIND = workerData.kind;
     try {
       const baseline = path.join(auditRoot, 'background-baseline.json');
-      try {
-        await prepareStart(
-          database,
-          migrations,
-          path.join(auditRoot, 'background-backup'),
-          baseline,
-        );
-      } catch (error) {
-        if (!(error instanceof UnsupportedBaselineValue)) throw error;
-        require('./lib.cjs').run(process.env.SQLITE_BACKUP_PYTHON || 'python', [
-          path.join(__dirname, 'prepare-start.py'),
-          '--database',
-          database,
-          '--migrations',
-          migrations,
-          '--backup-root',
-          path.join(auditRoot, 'background-backup'),
-          '--baseline',
-          baseline,
-        ]);
-      }
+      auditCurrentDatabase(database, migrations, baseline);
       parentPort.postMessage({ status: 'ready' });
     } catch (error) {
       // Detailed diagnostics remain in the private service log; UI has a short
       // message and never exposes paths, records, credentials or raw evidence.
       console.error('Startup database audit failed:', error);
-      parentPort.postMessage({ status: 'failed' });
+      parentPort.postMessage({
+        status: 'failed',
+        reason: /SQLITE_SPACE_BUDGET_EXCEEDED/.test(error.message)
+          ? 'space-budget-exceeded'
+          : 'verification-failed',
+      });
     }
   })();
 }

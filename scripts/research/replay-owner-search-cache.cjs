@@ -327,95 +327,110 @@ async function exportsWorker(dir, copy) {
   }
 }
 async function parent() {
-  const source = path.join(server, 'data/wewe-rss.db'),
-    before = snapshot(source),
-    old = rows(source);
-  const dir = path.join(
-    root,
-    'private-data/single-account-update-20260930',
-    'replay-' + crypto.randomUUID(),
-  );
-  fs.mkdirSync(dir);
-  const backup = JSON.parse(
-    run('python', [
-      path.join(server, 'scripts/backup-sqlite.py'),
-      '--database',
-      source,
-      '--backup-root',
-      path.join(dir, 'backups'),
-    ]),
-  );
-  const backupFile = backup.backup;
-  if (!backupFile) throw Error('BACKUP_REPORT_PATH_REQUIRED');
-  const copy = path.join(dir, 'replay.db');
-  fs.copyFileSync(backupFile, copy);
-  assert.equal(hash(fs.readFileSync(copy)), hash(fs.readFileSync(backupFile)));
-  write(copy + '.search-replay.json', {
-    mode: 'real-response-replay',
-    sourceDatabase: source,
+  const source = path.join(server, 'data/wewe-rss.db');
+  if (!process.argv.includes('--real-copy'))
+    throw new Error('Real response replay requires --real-copy');
+  const artifacts = require('../local-release/test-artifacts.cjs').begin({
+    source,
+    realCopy: true,
+    outputRoot:
+      process.env.WEWE_TEST_OUTPUT_ROOT ||
+      path.join(root, 'private-data/single-account-update-20260930'),
   });
-  let afterFirst;
-  for (const stage of ['first', 'restart']) {
-    const output = run(
-      process.execPath,
-      [__filename, '--worker', stage, dir, copy],
-      { cwd: server },
-    );
-    fs.writeFileSync(path.join(dir, stage + '.log'), output);
-    const current = rows(copy);
-    sameOld(old, current);
-    assert.equal(
-      current.articles.length,
-      old.articles.length + json(path.join(dir, 'first.json')).created,
-    );
-    if (afterFirst) assert.deepEqual(current, afterFirst);
-    else afterFirst = current;
-  }
-  const exportCopy = path.join(dir, 'export-only.db');
-  const exportBackup = JSON.parse(
-    run('python', [
-      path.join(server, 'scripts/backup-sqlite.py'),
-      '--database',
-      copy,
-      '--backup-root',
-      path.join(dir, 'export-backup'),
-    ]),
-  );
-  fs.copyFileSync(exportBackup.backup, exportCopy);
-  const only = json(path.join(dir, 'first.json')).verified.map((v) => v.id);
-  const db = new DatabaseSync(exportCopy);
+  let artifactError;
   try {
-    db.prepare('DELETE FROM articles WHERE id NOT IN (?,?)').run(...only);
-    db.prepare('DELETE FROM feeds WHERE id <> ?').run(inputs().mpId);
+    const before = snapshot(source),
+      old = rows(source),
+      dir = artifacts.audit;
+    const backup = JSON.parse(
+      run('python', [
+        path.join(server, 'scripts/backup-sqlite.py'),
+        '--database',
+        source,
+        '--backup-root',
+        path.join(dir, 'backups'),
+      ]),
+    );
+    const backupFile = backup.backup;
+    if (!backupFile) throw Error('BACKUP_REPORT_PATH_REQUIRED');
+    const copy = path.join(dir, 'replay.db');
+    fs.copyFileSync(backupFile, copy);
+    assert.equal(
+      hash(fs.readFileSync(copy)),
+      hash(fs.readFileSync(backupFile)),
+    );
+    write(copy + '.search-replay.json', {
+      mode: 'real-response-replay',
+      sourceDatabase: source,
+    });
+    let afterFirst;
+    for (const stage of ['first', 'restart']) {
+      const output = run(
+        process.execPath,
+        [__filename, '--worker', stage, dir, copy],
+        { cwd: server },
+      );
+      fs.writeFileSync(path.join(dir, stage + '.log'), output);
+      const current = rows(copy);
+      sameOld(old, current);
+      assert.equal(
+        current.articles.length,
+        old.articles.length + json(path.join(dir, 'first.json')).created,
+      );
+      if (afterFirst) assert.deepEqual(current, afterFirst);
+      else afterFirst = current;
+    }
+    const exportCopy = path.join(dir, 'export-only.db');
+    const exportBackup = JSON.parse(
+      run('python', [
+        path.join(server, 'scripts/backup-sqlite.py'),
+        '--database',
+        copy,
+        '--backup-root',
+        path.join(dir, 'export-backup'),
+      ]),
+    );
+    fs.copyFileSync(exportBackup.backup, exportCopy);
+    const only = json(path.join(dir, 'first.json')).verified.map((v) => v.id);
+    const db = new DatabaseSync(exportCopy);
+    try {
+      db.prepare('DELETE FROM articles WHERE id NOT IN (?,?)').run(...only);
+      db.prepare('DELETE FROM feeds WHERE id <> ?').run(inputs().mpId);
+    } finally {
+      db.close();
+    }
+    fs.writeFileSync(
+      path.join(dir, 'exports.log'),
+      run(process.execPath, [__filename, '--exports', dir, exportCopy], {
+        cwd: server,
+      }),
+    );
+    assert.deepEqual(rows(copy), afterFirst);
+    assert.deepEqual(snapshot(source), before);
+    const summary = {
+      discovery: 'persisted real response replay',
+      candidateCount: 26,
+      selected: 5,
+      verifiedOriginals: 2,
+      unverifiedOriginals: 3,
+      first: json(path.join(dir, 'first.json')).created,
+      afterRestartCreated: json(path.join(dir, 'restart.json')).created,
+      exports: json(path.join(dir, 'exports.json')),
+      allOldColumnsPreserved: true,
+      productionUnchanged: true,
+      productionSourceEnabled: false,
+      backup,
+      copy,
+      dir,
+    };
+    write(path.join(dir, 'result.json'), summary);
+    console.log(JSON.stringify(summary));
+  } catch (error) {
+    artifactError = error;
+    throw error;
   } finally {
-    db.close();
+    artifacts.finish(artifactError);
   }
-  fs.writeFileSync(
-    path.join(dir, 'exports.log'),
-    run(process.execPath, [__filename, '--exports', dir, exportCopy], {
-      cwd: server,
-    }),
-  );
-  assert.deepEqual(rows(copy), afterFirst);
-  assert.deepEqual(snapshot(source), before);
-  const summary = {
-    discovery: 'persisted real response replay',
-    candidateCount: 26,
-    selected: 5,
-    verifiedOriginals: 2,
-    unverifiedOriginals: 3,
-    first: json(path.join(dir, 'first.json')).created,
-    afterRestartCreated: json(path.join(dir, 'restart.json')).created,
-    exports: json(path.join(dir, 'exports.json')),
-    allOldColumnsPreserved: true,
-    productionUnchanged: true,
-    productionSourceEnabled: false,
-    backup,
-    copy,
-    dir,
-  };
-  write(path.join(dir, 'result.json'), summary);
-  console.log(JSON.stringify(summary));
 }
 module.exports = { inputs };
 if (require.main === module) {
@@ -424,7 +439,7 @@ if (require.main === module) {
     ? worker(a[1], a[2], a[3])
     : a[0] === '--exports'
       ? exportsWorker(a[1], a[2])
-      : a.length === 0
+      : a.length === 1 && a[0] === '--real-copy'
         ? parent()
         : Promise.reject(Error('usage_gate'))
   ).catch((e) => {

@@ -163,7 +163,17 @@ test('container list and pinned identity queries overlap and still reject duplic
       setTimeout,
       clearTimeout,
       fetch,
-      require(name) {
+      require: function fixtureRequire(name) {
+        if (name === './lib.cjs') {
+          const lib = require(name);
+          return {
+            hostEffects: {
+              ...lib.hostEffects,
+              fs: fixtureRequire('node:fs'),
+              processes: fixtureRequire('node:child_process'),
+            },
+          };
+        }
         if (name === 'node:fs')
           return {
             lstatSync: () => ({
@@ -178,6 +188,17 @@ test('container list and pinned identity queries overlap and still reject duplic
             execFile: (_, args, options, callback) =>
               callbacks.push({ args, callback }),
           };
+        assert(
+          [
+            'node:path',
+            'node:os',
+            'node:util',
+            'node:events',
+            'node:perf_hooks',
+            'node:crypto',
+          ].includes(name),
+          'Unexpected VM dependency: ' + name,
+        );
         return require(name);
       },
     });

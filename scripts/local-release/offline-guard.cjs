@@ -1,5 +1,6 @@
 // 仅隔离演练子进程加载。拒绝 socket/DNS/UDP、fetch 和子进程，不修改系统网络设置。
-const fs = require('node:fs');
+require('./lib.cjs').hostEffects.assertUnscoped();
+const fs = require('./lib.cjs').hostEffects.fs;
 const { syncBuiltinESMExports } = require('node:module');
 const report = process.env.REHEARSAL_GUARD_REPORT;
 if (!report) throw new Error('缺少隔离网络审计文件');
@@ -45,7 +46,7 @@ for (const key of Object.keys(dns.promises))
 const udp = require('node:dgram').Socket.prototype;
 udp.send = udp.connect = network;
 global.fetch = network;
-const child = require('node:child_process');
+const child = require('./lib.cjs').hostEffects.processes;
 for (const key of [
   'spawn',
   'spawnSync',

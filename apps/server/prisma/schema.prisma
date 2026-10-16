@@ -34,6 +34,25 @@ model CacheInsertBatch {
   @@map("cache_insert_batches")
 }
 
+model CacheRefreshCommit {
+  id String @id
+  mpId String @map("mp_id")
+  resultJson String @map("result_json")
+  committedAtMs BigInt @map("committed_at_ms")
+  @@index([mpId])
+  @@map("cache_refresh_commits")
+}
+
+model RefreshSubmissionClaim {
+  id String @id
+  mpId String @map("mp_id")
+  state String
+  reservedAt Int @map("reserved_at")
+  previousAt Int @map("previous_at")
+  updatedAtMs BigInt @map("updated_at_ms")
+  @@map("refresh_submission_claims")
+}
+
 model Feed {
   id         String    @id
   mpName     String    @map("mp_name")

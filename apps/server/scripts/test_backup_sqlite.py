@@ -34,6 +34,9 @@ class BackupTests(unittest.TestCase):
     def test_real_external_writer_and_consistent_copy_in_delete_and_wal(self):
         for mode in ("delete", "wal"):
             with self.subTest(mode=mode):
+                # Each journal mode must exercise a new copy, not reuse the
+                # identical fully verified snapshot from the previous mode.
+                self.backups = Path(self.temp.name) / ('backups-' + mode)
                 with closing(sqlite3.connect(self.database)) as db:
                     db.execute("PRAGMA journal_mode=" + mode)
                     db.execute("UPDATE feeds SET value=0"); db.commit()
@@ -180,6 +183,8 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(report["integrityCheck"], "ok")
             self.assertGreaterEqual(report["diagnostics"]["milliseconds"]["copy"], 20000)
             elapsed[0] = 0
+            with closing(real_connect(self.database)) as changed, changed:
+                changed.execute('UPDATE feeds SET value=2')
             with self.assertRaises(TimeoutError):
                 backup.create_backup(self.database, self.backups, timeout=10)
 

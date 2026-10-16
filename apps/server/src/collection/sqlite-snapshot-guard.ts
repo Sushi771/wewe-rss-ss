@@ -2,6 +2,7 @@ import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
+import { resolveSqliteBackupRoot } from './sqlite-backup-root';
 import { createInterface } from 'node:readline';
 
 export interface FastInsertSnapshotLease {
@@ -58,6 +59,7 @@ export class SqliteSnapshotGuard {
   >();
   private id = 0;
   private reason = 'snapshot-owner-not-started';
+  private periodicFailed = false;
   private starting?: Promise<void>;
   private generation?: string;
   private databasePath?: string;
@@ -125,13 +127,18 @@ export class SqliteSnapshotGuard {
           '--database',
           database,
           '--backup-root',
-          path.join(path.dirname(database), 'backups'),
+          resolveSqliteBackupRoot(database),
           '--interval-seconds',
           interval,
           '--max-age-seconds',
           maxAge,
         ],
-        { windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] },
+        {
+          windowsHide: true,
+          shell: false,
+          env: { ...process.env },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
       );
       this.child = child;
       // Python stderr may contain private paths: drain without forwarding it.
@@ -140,7 +147,17 @@ export class SqliteSnapshotGuard {
       lines.on('line', (line) => {
         try {
           if (Buffer.byteLength(line) > 8192) throw new Error();
-          const { id, result } = JSON.parse(line);
+          const message = JSON.parse(line);
+          if (message.event === 'periodic-snapshot-status') {
+            if (typeof message.ok !== 'boolean') throw new Error();
+            if (!message.ok && !this.periodicFailed)
+              console.warn('[SQLITE_PERIODIC_SNAPSHOT_FAILED]');
+            if (message.ok && this.periodicFailed)
+              console.info('[SQLITE_PERIODIC_SNAPSHOT_RECOVERED]');
+            this.periodicFailed = !message.ok;
+            return;
+          }
+          const { id, result } = message;
           const pending = this.pending.get(id);
           if (!pending) return;
           if (
@@ -188,7 +205,7 @@ export class SqliteSnapshotGuard {
       child.stdin.on('error', () => this.stop('snapshot-owner-unavailable'));
       child.once('close', () => {
         lines.close();
-        this.stop('snapshot-owner-stopped');
+        if (this.child === child) this.stop('snapshot-owner-exited');
       });
     } catch {
       this.stop('snapshot-owner-unavailable');
@@ -196,6 +213,17 @@ export class SqliteSnapshotGuard {
   }
 
   stop(reason = 'snapshot-owner-stopped') {
+    if (
+      [
+        'snapshot-owner-unavailable',
+        'snapshot-owner-protocol-failed',
+        'snapshot-owner-exited',
+      ].includes(reason) &&
+      !this.periodicFailed
+    ) {
+      this.periodicFailed = true;
+      console.warn('[SQLITE_PERIODIC_SNAPSHOT_FAILED]');
+    }
     this.reason = reason;
     const child = this.child;
     this.child = undefined;
