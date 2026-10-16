@@ -135,20 +135,48 @@ async function withFixture(source, run, aliases = {}, options = {}) {
     { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
   );
   let stderr = '',
-    ws;
+    ws,
+    phase = 'startup',
+    lastMethod;
+  const started = performance.now();
+  let exited = false;
+  const exit = new Promise((resolve) => {
+    child.once('exit', () => {
+      exited = true;
+      resolve();
+    });
+    child.once('error', () => {
+      exited = true;
+      resolve();
+    });
+  });
+  const waitForExit = async (milliseconds) => {
+    let timer;
+    try {
+      await Promise.race([
+        exit,
+        new Promise((resolve) => (timer = setTimeout(resolve, milliseconds))),
+      ]);
+      return exited;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   child.stderr.on('data', (chunk) => {
-    stderr += chunk;
+    stderr = (stderr + chunk).slice(-4000);
   });
   child.on('error', (error) => {
     stderr += error.message;
   });
   try {
     const portFile = path.join(temp, 'profile/DevToolsActivePort');
-    for (let i = 0; i < 100 && !fs.existsSync(portFile); i++) await pause(100);
+    for (let i = 0; i < 100 && !exited && !fs.existsSync(portFile); i++)
+      await pause(100);
     assert(
       fs.existsSync(portFile),
       `isolated browser unavailable: ${stderr.slice(-1000)}`,
     );
+    phase = 'connect';
     const port = fs.readFileSync(portFile, 'utf8').split('\n')[0];
     const tabs = await (
       await fetch(`http://127.0.0.1:${port}/json/list`)
@@ -169,7 +197,9 @@ async function withFixture(source, run, aliases = {}, options = {}) {
       if (!p) return;
       pending.delete(m.id);
       clearTimeout(p.timer);
-      m.error ? p.reject(Error(m.error.message)) : p.resolve(m.result);
+      m.error
+        ? p.reject(Error(`CDP ${p.method}: ${m.error.message}`))
+        : p.resolve(m.result);
     });
     const send = (method, params = {}) =>
       new Promise((resolve, reject) => {
@@ -178,7 +208,8 @@ async function withFixture(source, run, aliases = {}, options = {}) {
           pending.delete(id);
           reject(Error(`CDP timeout: ${method}`));
         }, 10000);
-        pending.set(id, { resolve, reject, timer });
+        lastMethod = method;
+        pending.set(id, { resolve, reject, timer, method });
         ws.send(JSON.stringify({ id, method, params }));
       });
     const evaluate = async (expression) => {
@@ -190,9 +221,11 @@ async function withFixture(source, run, aliases = {}, options = {}) {
       assert(!result.exceptionDetails, JSON.stringify(result.exceptionDetails));
       return result.result.value;
     };
+    phase = 'initial-navigation';
     await send('Page.navigate', {
       url: `http://127.0.0.1:${server.address().port}/`,
     });
+    phase = 'fixture-render';
     for (
       let i = 0;
       i < 100 && !(await evaluate('Boolean(window.fixture)'));
@@ -200,15 +233,33 @@ async function withFixture(source, run, aliases = {}, options = {}) {
     )
       await pause(50);
     assert(await evaluate('Boolean(window.fixture)'), 'fixture renders');
+    phase = 'test';
     await run({ evaluate, send, pause });
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: 'classification-browser-failure',
+        phase,
+        lastMethod,
+        elapsedMs: Math.round(performance.now() - started),
+        browserExited: exited,
+        exitCode: child.exitCode,
+        signalCode: child.signalCode,
+        stderr,
+      }),
+    );
+    throw error;
   } finally {
     if (ws?.readyState === WebSocket.OPEN)
       ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));
     ws?.close();
-    child.kill();
+    if (!(await waitForExit(2000))) {
+      child.kill();
+      assert(await waitForExit(5000), 'owned fixture browser exit unconfirmed');
+    }
     child.stderr.destroy();
     server.closeAllConnections();
-    server.close();
+    await new Promise((resolve) => server.close(resolve));
   }
 }
 module.exports = { browser, withFixture, web, modulePath };

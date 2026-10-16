@@ -58,6 +58,25 @@ new measurement in this integration.
 Final lint/format checks and CI are recorded with the integration commit. Local
 logs, screenshots, fixtures, databases, and raw diagnostics remain outside Git.
 
+### Classification browser CI follow-up
+
+On integration commit `4870ecf`, [classification attempt 1](https://github.com/Sushi771/wewe-rss-ss/actions/runs/38935626175/attempts/1)
+passed the six component browser tests, then failed in the rename test with
+`Inspected target navigated or closed`. [Attempt 2](https://github.com/Sushi771/wewe-rss-ss/actions/runs/38935626175/attempts/2)
+failed before the cache-status test's business assertions: Chrome did not publish
+its debugging port within the existing ten-second limit. Five other browser
+tests passed; rename was not reached. The stderr bus messages do not establish
+resource contention or prove the cause of either failure.
+
+Local delayed navigation/reload probes did not reproduce the CDP failure. A real
+browser regression did reproduce a separate lifecycle gap: the fixture returned
+before its own browser's exit was confirmed. The fixture now waits for graceful
+exit, then terminates only its own child if needed and confirms exit. Normal and
+assertion-failure paths are covered. Existing startup and business-assertion
+limits remain unchanged; there is no retry. Failures now retain phase, CDP method,
+bounded stderr and child exit state so a future failure can be classified without
+guessing. This fix does not claim either original failure's root cause is proven.
+
 ## Release limits and remaining risk
 
 This is not production deployment approval. No production deployment credit was
