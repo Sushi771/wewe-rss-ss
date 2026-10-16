@@ -347,9 +347,11 @@ function nativeOperations(p, u, audit, check) {
   const processIdentity = (action, pid, expected) =>
     JSON.parse(
       run(
-        path.join(
-          process.env.SystemRoot || 'C:\\Windows',
-          'System32/WindowsPowerShell/v1.0/powershell.exe',
+        canonical(
+          path.join(
+            process.env.SystemRoot || 'C:\\Windows',
+            'System32/WindowsPowerShell/v1.0/powershell.exe',
+          ),
         ),
         [
           '-NoProfile',

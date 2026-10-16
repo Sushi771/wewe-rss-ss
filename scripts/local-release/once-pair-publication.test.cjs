@@ -1439,13 +1439,15 @@ function captureStarts(f) {
   ];
   fs.writeFileSync(f.file, JSON.stringify(f.policy));
   const starts = [],
+    identities = [],
     load = createRequire(sourceFile);
   const mockRequire = (name) => {
     if (name === 'node:child_process')
       return {
-        execFileSync(executable, args) {
-          assert.equal(executable, powershell);
+        execFileSync(executable, args, options) {
+          assert.equal(executable, fs.realpathSync.native(powershell));
           assert.equal(args[args.indexOf('-Action') + 1], 'Port');
+          identities.push({ executable, args, options });
           return '[]';
         },
         spawn(executable, args, options) {
@@ -1476,6 +1478,10 @@ function captureStarts(f) {
   };
   return {
     starts,
+    identities,
+    native,
+    systemRoot,
+    powershell,
     enabled,
     envFile,
     restore() {
@@ -1485,6 +1491,53 @@ function captureStarts(f) {
     },
   };
 }
+
+test('native identity canonicalizes constructed PowerShell path and retains exact hash and argv checks', () =>
+  fixture(async (f) => {
+    const captured = captureStarts(f);
+    try {
+      process.env.SystemRoot =
+        process.platform === 'win32'
+          ? captured.systemRoot.replace(/system-root$/, 'SYSTEM-ROOT')
+          : captured.systemRoot;
+      const constructed = path.join(
+        process.env.SystemRoot,
+        'System32/WindowsPowerShell/v1.0/powershell.exe',
+      );
+      if (process.platform === 'win32')
+        assert.notEqual(constructed, fs.realpathSync.native(constructed));
+      assert.deepEqual(captured.native.identity('Port', 0), []);
+      assert.equal(captured.identities.length, 1);
+      const call = captured.identities[0];
+      assert.equal(
+        call.executable,
+        fs.realpathSync.native(captured.powershell),
+      );
+      assert.deepEqual(call.args, [
+        '-NoProfile',
+        '-NonInteractive',
+        '-File',
+        path.join(__dirname, 'process-identity.ps1'),
+        '-Action',
+        'Port',
+        '-TargetPid',
+        '0',
+        '-Port',
+        '4000',
+      ]);
+      assert.equal(call.options.shell, false);
+      assert.equal(call.options.windowsHide, true);
+      assert.equal(call.options.timeout, 180000);
+      assert.equal(call.options.encoding, 'utf8');
+      assert.equal(call.options.maxBuffer, 2 * 1024 ** 2);
+      f.policy.publication.powershellSha256 = '0'.repeat(64);
+      assert.throws(() => captured.native.identity('Port', 0), /INPUT_PIN/);
+      assert.equal(captured.identities.length, 1);
+      assert.deepEqual(captured.starts, []);
+    } finally {
+      captured.restore();
+    }
+  }));
 
 for (const explicit of [false, true])
   test(
