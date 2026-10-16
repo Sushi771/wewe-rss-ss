@@ -197,12 +197,19 @@ describe('body media status with synthetic bytes and mocked requests only', () =
     expect(repaired).toMatchObject({
       status: 'repaired',
       mediaStatus: 'complete',
-      imageCount: 2,
+      // Both synthetic sources return identical bytes, so the publisher keeps
+      // one physical content-hashed file while recording both source mappings.
+      imageCount: 1,
     });
     expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
     expect(jest.mocked(images.fetchAllowedImage).mock.calls[0][0]).toContain(
       '/new.png',
     );
     expect(await readFile(first.markdownPath, 'utf8')).toBe('User notes');
+    expect(
+      (await store.save(prepareCachedArticleLocalExport(updated, source)))
+        .status,
+    ).toBe('skipped');
+    expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
   });
 });
