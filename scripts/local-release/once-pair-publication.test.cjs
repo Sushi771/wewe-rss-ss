@@ -1047,6 +1047,10 @@ for (const mode of [
           source.c.record.identity[1] += 'wrong';
           f.writePreStop();
         }
+        if (mode === 'invented-history') {
+          source.c.controller.startUtc = '2026-10-16T00:00:00Z';
+          f.writePreStop();
+        }
         if (mode === 'package')
           fs.writeFileSync(
             path.join(f.root, 'candidate/runtime.cjs'),
@@ -1186,10 +1190,6 @@ test('fixed maintenance unrelated background churn remains visible risk without 
           }
           assert(run(n).errors.length, fault);
         }
-      }
-      if (mode === 'invented-history') {
-        source.c.controller.startUtc = '2026-10-16T00:00:00Z';
-        f.writePreStop();
       }
       // Every real check in the finite fixture sees a different unrelated PID.
       base.processesBefore.push({ ...row, pid: pid + checks });
