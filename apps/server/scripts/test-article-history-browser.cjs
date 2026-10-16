@@ -10,15 +10,122 @@ const { EventEmitter } = require('node:events');
 const {
   waitForDevToolsPort,
   diagnostic,
+  createBrowserTrace,
 } = require('./article-history-browser.cjs');
 const valid = '9222\n/devtools/browser/1234-abcd';
 const child = () => ({ exitCode: null, signalCode: null });
+
+test('synthetic diagnostics bound stderr/events and never retain private strings', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'history-trace-unit-'));
+  try {
+    let milliseconds = 0;
+    const trace = createBrowserTrace({
+      enabled: true,
+      directory: root,
+      now: () => milliseconds++,
+    });
+    for (let i = 0; i < 240; i++)
+      trace.record('cdp-send', {
+        method: 'Runtime.evaluate',
+        bytes: i,
+        url: 'secret-url',
+        token: 'secret-token',
+      });
+    trace.record('secret-event', { method: 'secret-method' });
+    trace.stderr(
+      Buffer.from(
+        'DevTools listening on ws://private:secret-token/path\n' +
+          'secret-token '.repeat(5000) +
+          '\nFATAL Permission denied Resource temporarily unavailable',
+      ),
+    );
+    trace.finish(
+      'failure',
+      Object.assign(Error('secret-token private SQL'), {
+        code: 'STARTUP_EXHAUSTED',
+        resourceCode: 'EBUSY',
+        attempts: 120,
+      }),
+    );
+    trace.finish('success');
+    const files = fs.readdirSync(root);
+    assert.equal(files.length, 1);
+    const bytes = fs.readFileSync(path.join(root, files[0]));
+    assert.ok(bytes.length <= 32768);
+    assert.ok(!bytes.toString().includes('secret'));
+    assert.ok(!bytes.toString().includes('private'));
+    const result = JSON.parse(bytes);
+    assert.equal(result.events.length, 128);
+    assert.ok(result.droppedEvents > 0);
+    assert.equal(result.stderr.truncated, true);
+    assert.equal(result.stderr.sampledBytes, 16384);
+    assert.ok(result.stderr.classifications.includes('DEVTOOLS_LISTENING'));
+    assert.ok(result.stderr.classifications.includes('RESOURCE_LIMIT'));
+    assert.ok(result.stderr.classifications.includes('PERMISSION'));
+    assert.equal(result.failure.attempts, 120);
+    assert.equal(result.failure.resourceCode, 'EBUSY');
+  } finally {
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+test('synthetic diagnostics are opt-in, directory-count bounded and non-fatal on write failure', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'history-trace-limit-'));
+  try {
+    createBrowserTrace({ directory: path.join(root, 'disabled') }).finish(
+      'failure',
+      Error('private'),
+    );
+    assert.equal(fs.existsSync(path.join(root, 'disabled')), false);
+    const blocked = path.join(root, 'blocked');
+    fs.writeFileSync(blocked, 'owned fixture');
+    assert.doesNotThrow(() =>
+      createBrowserTrace({ enabled: true, directory: blocked }).finish(
+        'failure',
+        Error('private'),
+      ),
+    );
+    const full = path.join(root, 'full');
+    fs.mkdirSync(full);
+    for (let i = 0; i < 64; i++)
+      fs.writeFileSync(path.join(full, `${i}.json`), '{}');
+    createBrowserTrace({ enabled: true, directory: full }).finish('success');
+    assert.equal(fs.readdirSync(full).length, 64);
+  } finally {
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+test('startup observation retains polling reason without increasing attempts or budget', async () => {
+  let elapsed = 0;
+  const observations = [];
+  await assert.rejects(
+    waitForDevToolsPort('unused', child(), {
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+      timeoutMs: 250,
+      readFile: () => {
+        throw Object.assign(Error('private'), { code: 'EBUSY' });
+      },
+      observe: (value) => observations.push(value),
+    }),
+    (error) => error.code === 'STARTUP_EXHAUSTED' && error.attempts === 3,
+  );
+  assert.equal(elapsed, 250);
+  assert.deepEqual(
+    observations.map((value) => value.portState),
+    ['busy', 'busy', 'busy', 'exhausted'],
+  );
+  assert.equal(observations[3].code, 'EBUSY');
+});
 
 // Execute the exact CLI with mocked owned resources and explicit clock ticks.
 // No browser starts, ports, profiles or external requests are created here.
 async function deadlineFixture(
   stage,
-  { childStalls = false, profile = 'ok' } = {},
+  { childStalls = false, profile = 'ok', diagnostics = false } = {},
 ) {
   const source = fs.readFileSync(
     path.join(__dirname, 'article-history-browser.cjs'),
@@ -33,8 +140,15 @@ async function deadlineFixture(
     socket: 0,
     exits: [],
     stderr: '',
+    artifacts: [],
+    stderrDestroyed: 0,
   };
   const ownedChild = Object.assign(new EventEmitter(), {
+    stderr: Object.assign(new EventEmitter(), {
+      destroy() {
+        calls.stderrDestroyed++;
+      },
+    }),
     exitCode: null,
     signalCode: null,
     kill() {
@@ -54,6 +168,15 @@ async function deadlineFixture(
   };
   const modules = {
     'node:fs': {
+      mkdirSync() {},
+      lstatSync: () => ({
+        isDirectory: () => true,
+        isSymbolicLink: () => false,
+      }),
+      readdirSync: () => [],
+      writeFileSync(_file, value) {
+        calls.artifacts.push(JSON.parse(value));
+      },
       existsSync: (file) => file === '/owned/mock-browser',
       mkdtempSync: () => '/owned/mock-profile',
       readFileSync: () => {
@@ -75,7 +198,11 @@ async function deadlineFixture(
       },
     },
     'node:path': path,
-    'node:os': { homedir: () => '/owned/home', tmpdir: () => '/owned/temp' },
+    'node:os': {
+      homedir: () => '/owned/home',
+      tmpdir: () => '/owned/temp',
+      freemem: () => 1024,
+    },
     'node:http': { createServer: () => server },
     'node:child_process': { spawn: () => ownedChild },
   };
@@ -91,7 +218,21 @@ async function deadlineFixture(
   stdin.destroy = () => {};
   const cliProcess = {
     stdin,
-    env: { ARTICLE_HISTORY_CHROME: '/owned/mock-browser' },
+    pid: 42,
+    env: {
+      ARTICLE_HISTORY_CHROME: '/owned/mock-browser',
+      ...(diagnostics
+        ? {
+            GITHUB_ACTIONS: 'true',
+            ARTICLE_HISTORY_SYNTHETIC_DIAGNOSTICS: '1',
+            RUNNER_TEMP: '/owned/temp',
+            ARTICLE_HISTORY_DIAGNOSTICS_DIR: path.resolve(
+              '/owned/temp',
+              'article-history-diagnostics',
+            ),
+          }
+        : {}),
+    },
     stdout: {
       write() {
         if (stage !== 'cleanup') assert.fail('must not publish success');
@@ -168,6 +309,11 @@ async function deadlineFixture(
     entry[1].callback();
   };
   await settle();
+  if (diagnostics)
+    ownedChild.stderr.emit(
+      'data',
+      Buffer.from('DevTools listening on ws://private/secret-token'),
+    );
   fire(170000);
   await settle();
   if (childStalls) {
@@ -197,6 +343,16 @@ async function deadlineFixture(
   assert.equal(result.cleanup.profileRemoved, profile === 'ok');
   assert.ok(!calls.stderr.includes('private'));
   if (['socket', 'cdp'].includes(stage)) assert.equal(calls.socket, 1);
+  if (diagnostics) {
+    assert.equal(calls.stderrDestroyed, 1);
+    assert.equal(calls.artifacts.length, 1);
+    const artifact = calls.artifacts[0];
+    assert.equal(artifact.failure.code, 'BROWSER_DEADLINE');
+    assert.ok(artifact.events.some((row) => row.event === 'http-start'));
+    assert.ok(artifact.events.some((row) => row.event === 'cleanup-end'));
+    assert.ok(artifact.stderr.classifications.includes('DEVTOOLS_LISTENING'));
+    assert.ok(!JSON.stringify(artifact).includes('secret-token'));
+  }
 }
 
 for (const stage of ['startup', 'connect', 'socket', 'cdp'])
@@ -208,6 +364,8 @@ test('hard deadline reports profile cleanup failure without private error text',
   deadlineFixture('connect', { profile: 'fail' }));
 test('hard deadline still reports failure if it arrives during normal cleanup', () =>
   deadlineFixture('cleanup', { profile: 'stall' }));
+test('hard deadline writes bounded synthetic diagnostics and releases inherited stderr', () =>
+  deadlineFixture('connect', { diagnostics: true }));
 function clock() {
   let elapsed = 0;
   return {
