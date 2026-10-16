@@ -317,7 +317,7 @@ class RetentionTests(unittest.TestCase):
         with self.assertRaisesRegex(retention.MaintenanceError,'POLICY_CHANGED'):
             self.execute_rotation(plan,a,r,{**policy,'maxOrdinaryBytes':1})
         owner=self.root/'refresh-recovery-owner-new.json';owner.write_text(json.dumps({'backup':str(file)}))
-        with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):
+        with self.assertRaisesRegex(retention.MaintenanceError,'BOUND_REFERENCE_RECORDS_CHANGED'):
             self.execute_rotation(plan,a,r,policy)
         self.assertTrue(file.exists());self.assertEqual(owner.read_text(),json.dumps({'backup':str(file)}))
 
