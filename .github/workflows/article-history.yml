@@ -35,7 +35,6 @@ jobs:
     timeout-minutes: 8
     env:
       ARTICLE_HISTORY_SYNTHETIC_DIAGNOSTICS: '1'
-      ARTICLE_HISTORY_DIAGNOSTICS_DIR: ${{ runner.temp }}/article-history-diagnostics
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,12 +47,16 @@ jobs:
         working-directory: apps/server/scripts
         env:
           ARTICLE_HISTORY_BROWSER_REQUIRED: '1'
+          ARTICLE_HISTORY_DIAGNOSTICS_DIR: ${{ runner.temp }}/article-history-diagnostics
         run: python -m unittest test_article_history test_article_history_host test_sqlite_snapshot_guard -v
       - name: Actual Node coordinator and owner stdio integration
+        env:
+          ARTICLE_HISTORY_DIAGNOSTICS_DIR: ${{ runner.temp }}/article-history-diagnostics
         run: node --experimental-transform-types --test apps/server/scripts/test-article-history-runtime.cjs
       - name: Bounded startup faults and six consecutive real offline browser runs
         env:
           ARTICLE_HISTORY_BROWSER_REQUIRED: '1'
+          ARTICLE_HISTORY_DIAGNOSTICS_DIR: ${{ runner.temp }}/article-history-diagnostics
         run: node --test apps/server/scripts/test-article-history-browser.cjs
       - name: Browser syntax
         run: node --check apps/server/scripts/article-history-browser.cjs
