@@ -134,6 +134,213 @@ const visibleProcess = (p) =>
   !!p.commandLine.trim() &&
   typeof p.startUtc === 'string' &&
   Number.isFinite(Date.parse(p.startUtc));
+// Only the already-verified read-only probe -> collector chain can own this
+// transient console. Its exact observed identity is checked before removal.
+function collectorChain(before, after, callerPid, self) {
+  const own = before.get(self.pid),
+    last = after.get(self.pid);
+  if (
+    !visibleProcess(own) ||
+    !last ||
+    own.parentPid !== callerPid ||
+    hash(own) !== hash(last) ||
+    !same(canonical(own.executable), canonical(self.executable)) ||
+    hash(argv(own.commandLine)) !== hash(self.argv)
+  )
+    fail('REFERENCE_PROBE_IDENTITY_UNCERTAIN');
+  const children = [...before.values()].filter((r) => r.parentPid === own.pid);
+  if (children.length !== 1) fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+  const child = children[0];
+  if (
+    !visibleProcess(child) ||
+    !after.has(child.pid) ||
+    hash(child) !== hash(after.get(child.pid)) ||
+    !same(canonical(child.executable), canonical(self.collectorExecutable)) ||
+    hash(argv(child.commandLine)) !== hash(self.collectorArgv) ||
+    Date.parse(child.startUtc) < Date.parse(own.startUtc)
+  )
+    fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+  const consoles = [...before.values()].filter(
+    (r) => r.parentPid === child.pid,
+  );
+  if (consoles.length > 1) fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+  const accepted = [own, child];
+  if (consoles.length) {
+    const console = consoles[0];
+    const command = visibleProcess(console) ? argv(console.commandLine) : [];
+    const consolePath = (s) =>
+      canonical(s.startsWith('\\??\\') ? s.slice(4) : s);
+    if (
+      !self.consoleExecutable ||
+      !Array.isArray(self.consoleArgv) ||
+      !visibleProcess(console) ||
+      !after.has(console.pid) ||
+      console.name.toLowerCase() !== 'conhost.exe' ||
+      hash(console) !== hash(after.get(console.pid)) ||
+      !same(canonical(console.executable), canonical(self.consoleExecutable)) ||
+      !command.length ||
+      !same(consolePath(command[0]), consolePath(self.consoleArgv[0])) ||
+      hash(command.slice(1)) !== hash(self.consoleArgv.slice(1)) ||
+      Date.parse(console.startUtc) < Date.parse(child.startUtc)
+    )
+      fail('REFERENCE_PROBE_CONSOLE_UNCERTAIN');
+    accepted.push(console);
+  }
+  const ids = new Set(accepted.map((r) => r.pid));
+  for (const r of [...before.values(), ...after.values()])
+    if (ids.has(r.parentPid) && !ids.has(r.pid))
+      fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+  return accepted.map(processTuple);
+}
+const taskKind = 'once-background-task-actions-v1';
+const taskActionFields = [
+  'execute',
+  'arguments',
+  'workingDirectory',
+  'actionType',
+  'cimClass',
+  'id',
+  'classId',
+  'data',
+  'identitySha256',
+];
+function taskActionTuple(task, index) {
+  const a = task.actions[index];
+  if (
+    !a ||
+    Object.keys(a).some((k) => !taskActionFields.includes(k)) ||
+    ['execute', 'arguments', 'workingDirectory'].some(
+      (k) => typeof a[k] !== 'string' || a[k].length > 32768,
+    ) ||
+    ['actionType', 'cimClass', 'id', 'classId', 'data'].some(
+      (k) => a[k] != null && (typeof a[k] !== 'string' || a[k].length > 32768),
+    ) ||
+    (a.identitySha256 != null && !hex(a.identitySha256)) ||
+    (task.actionsSha256 != null && !hex(task.actionsSha256))
+  )
+    fail('REFERENCE_TASK_ACTION_METADATA_INVALID');
+  if (
+    a.actionType === 'com-handler' &&
+    (!/^\{[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\}$/i.test(
+      a.classId || '',
+    ) ||
+      a.cimClass !== 'MSFT_TaskComHandlerAction' ||
+      a.execute)
+  )
+    fail('REFERENCE_TASK_ACTION_METADATA_INVALID');
+  return {
+    taskIdentity: task.identity,
+    actionIndex: index,
+    taskActionsSha256: task.actionsSha256 ?? null,
+    action: Object.fromEntries(
+      taskActionFields.map((k) => [
+        k,
+        a[k] ?? (k === 'actionType' ? 'unreported' : null),
+      ]),
+    ),
+  };
+}
+function operationTaskContract(p) {
+  const c = p.windowsReferences?.operationCoverage?.taskCoverage;
+  if (!c) return null;
+  if (
+    !operationProcessContract(p) ||
+    c.format !== 1 ||
+    c.kind !== taskKind ||
+    c.globalTaskInvocationCoverageComplete !== false ||
+    c.coverageClaim !==
+      'bound-background-actions-only;indirect-db-access-unproven' ||
+    Object.keys(c).sort().join('|') !==
+      [
+        'backgroundActions',
+        'coverageClaim',
+        'format',
+        'globalTaskInvocationCoverageComplete',
+        'kind',
+      ].join('|') ||
+    !Array.isArray(c.backgroundActions) ||
+    c.backgroundActions.length > 1024 ||
+    Buffer.byteLength(JSON.stringify(c.backgroundActions)) > 1024 ** 2
+  )
+    fail('REFERENCE_TASK_OPERATION_CONTRACT_INVALID');
+  const seen = new Set();
+  for (const row of c.backgroundActions) {
+    const key = JSON.stringify([row.taskIdentity, row.actionIndex]);
+    if (
+      typeof row.taskIdentity !== 'string' ||
+      !row.taskIdentity ||
+      row.taskIdentity.length > 2048 ||
+      !Number.isInteger(row.actionIndex) ||
+      row.actionIndex < 0 ||
+      row.actionIndex > 63 ||
+      seen.has(key)
+    )
+      fail('REFERENCE_TASK_OPERATION_CONTRACT_INVALID');
+    seen.add(key);
+    const actions = [];
+    actions[row.actionIndex] = row.action;
+    const a = row.action;
+    if (
+      !hex(row.taskActionsSha256) ||
+      !hex(a?.identitySha256) ||
+      !(
+        (a.actionType === 'exec' &&
+          a.cimClass === 'MSFT_TaskExecAction' &&
+          a.execute) ||
+        (a.actionType === 'com-handler' &&
+          a.cimClass === 'MSFT_TaskComHandlerAction')
+      ) ||
+      hash(row) !==
+        hash(
+          taskActionTuple(
+            {
+              identity: row.taskIdentity,
+              actionsSha256: row.taskActionsSha256,
+              actions,
+            },
+            row.actionIndex,
+          ),
+        )
+    )
+      fail('REFERENCE_TASK_OPERATION_CONTRACT_INVALID');
+  }
+  return c;
+}
+function validateOperationTaskSummary(p, value) {
+  const contract = operationTaskContract(p);
+  if (!contract) return false;
+  const proof = value.operationCoverage?.taskCoverage;
+  if (
+    value.categories?.tasks !== false ||
+    proof?.kind !== taskKind ||
+    proof.contractSha256 !== hash(contract) ||
+    proof.globalTaskInvocationCoverageComplete !== false ||
+    proof.backgroundDbAccessExcluded !== false ||
+    hash(proof.backgroundActions) !== hash(contract.backgroundActions)
+  )
+    fail('REFERENCE_OPERATION_TASK_COVERAGE_INVALID');
+  return true;
+}
+function validateOperationStartupSummary(p, value) {
+  const rows = (p.windowsReferences.harmlessActions || []).filter(
+    (a) => a.uninspectedWorkingDirectory === true,
+  );
+  const expected = rows
+    .map((a) => ({
+      ...a.shortcut,
+      executable: a.executable,
+      uninspectedWorkingDirectory: true,
+      backgroundDbAccessExcluded: false,
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+  const actual = value.operationCoverage?.uninspectedStartupActions || [];
+  if (
+    !Array.isArray(actual) ||
+    hash([...actual].sort((a, b) => a.path.localeCompare(b.path))) !==
+      hash(expected)
+  )
+    fail('REFERENCE_OPERATION_STARTUP_ACTION_COVERAGE_INVALID');
+}
 function operationProcessContract(p) {
   const c = p.windowsReferences?.operationCoverage?.processCoverage;
   if (!c) return null;
@@ -451,6 +658,7 @@ function operationContract(p) {
   )
     fail('REFERENCE_OPERATION_CONTRACT_INVALID');
   operationProcessContract(p);
+  operationTaskContract(p);
   return scope;
 }
 function probe(policy, native, { callerPid = process.ppid, self } = {}) {
@@ -686,6 +894,13 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       };
     });
     const harmlessActions = cfg.harmlessActions || [];
+    const emptyStartupActions = [];
+    const disclosedEmptyCwd = (a) =>
+      scope &&
+      a.kind === 'shortcuts' &&
+      a.workingDirectory === '' &&
+      a.uninspectedWorkingDirectory === true &&
+      a.backgroundDbAccessExcluded === false;
     if (!Array.isArray(harmlessActions) || harmlessActions.length > 64)
       fail('REFERENCE_HARMLESS_ACTION_POLICY_INVALID');
     for (const action of harmlessActions) {
@@ -698,7 +913,18 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       )
         fail('REFERENCE_HARMLESS_ACTION_POLICY_INVALID');
       watchPinned(action.executable, 256 * 1024 ** 2);
-      canonical(action.workingDirectory);
+      if (!disclosedEmptyCwd(action)) canonical(action.workingDirectory);
+      else {
+        const s = action.shortcut;
+        if (
+          !s ||
+          s.workingDirectory !== '' ||
+          s.target !== action.argv[0] ||
+          hash([s.target, ...argv(s.arguments)]) !== hash(action.argv)
+        )
+          fail('REFERENCE_HARMLESS_ACTION_POLICY_INVALID');
+        watchPinned({ path: s.path, sha256: s.sha256 });
+      }
     }
     const relevantText = (text) =>
       typeof text === 'string' &&
@@ -724,7 +950,14 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       }
       if (relevantText(token)) fail('REFERENCE_COMMAND_PATH_UNRESOLVED');
     }
-    function resolveInvocation(tokens, cwd, isProcess = false, kind = 'tasks') {
+    function resolveInvocation(
+      tokens,
+      cwd,
+      isProcess = false,
+      kind = 'tasks',
+      allowDatabaseArgument = false,
+      sourceShortcut,
+    ) {
       const launch = launchers.find(
         (l) =>
           hash(tokens) === hash(l.argv) &&
@@ -757,6 +990,11 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         fail('REFERENCE_SHELL_COMMAND_UNRESOLVED');
       const refs = new Map();
       for (const token of tokens) {
+        // The exact identity-bound current runtime names the retained live DB
+        // as data. A data-root file is not a release package. No other process
+        // or task obtains this interpretation.
+        if (allowDatabaseArgument && same(token, policy.publication.database))
+          continue;
         const ref = pathReference(token, cwd);
         if (ref) refs.set(ref.packagePath, ref);
       }
@@ -809,8 +1047,11 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           (a) =>
             a.kind === kind &&
             hash(a.argv) === hash(tokens) &&
-            cwd &&
-            same(canonical(cwd), canonical(a.workingDirectory)),
+            (cwd
+              ? same(canonical(cwd), canonical(a.workingDirectory))
+              : cwd === '' &&
+                disclosedEmptyCwd(a) &&
+                hash(a.shortcut) === hash(sourceShortcut)),
         )
       )
         fail('REFERENCE_APPLICATION_ACTION_UNREVIEWED');
@@ -903,42 +1144,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       after = processMap(native.processesAfter),
       matched = new Map();
     if (self) {
-      const p = before.get(self.pid),
-        current = after.get(self.pid);
-      if (
-        !p ||
-        !current ||
-        p.parentPid !== callerPid ||
-        hash(p) !== hash(current) ||
-        !same(canonical(p.executable), canonical(self.executable)) ||
-        hash(argv(p.commandLine)) !== hash(self.argv)
-      )
-        fail('REFERENCE_PROBE_IDENTITY_UNCERTAIN');
-      const children = [...before.values()].filter(
-        (p) => p.parentPid === self.pid,
-      );
-      if (children.length !== 1) fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
-      const child = children[0];
-      if (
-        !after.has(child.pid) ||
-        hash(child) !== hash(after.get(child.pid)) ||
-        !same(
-          canonical(child.executable),
-          canonical(self.collectorExecutable),
-        ) ||
-        hash(argv(child.commandLine)) !== hash(self.collectorArgv) ||
-        [...before.values(), ...after.values()].some(
-          (p) =>
-            p.parentPid === child.pid ||
-            (p.parentPid === self.pid && p.pid !== child.pid),
-        )
-      )
-        fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
-      // Exactly this hash-pinned read-only invocation is transient. Every other
-      // descendant is still retained, including children of the controller.
-      for (const pid of [self.pid, child.pid]) {
-        before.delete(pid);
-        after.delete(pid);
+      result.collectorChain = collectorChain(before, after, callerPid, self);
+      for (const row of result.collectorChain) {
+        before.delete(row.pid);
+        after.delete(row.pid);
       }
     }
     const processView = processContract
@@ -953,11 +1162,30 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           p.executable === e.executable &&
           p.commandLine === e.commandLine,
       );
+    // Win32_Process CreationDate has microsecond precision; the publication
+    // helper separately verifies the exact .NET100ns creation identity/handle.
+    const approvedParent = (p) =>
+      processView &&
+      p.pid === policy.publication.expected.pid &&
+      (p.startUtc === policy.publication.expected.startUtc ||
+        p.startUtc ===
+          policy.publication.expected.startUtc.replace(
+            /(\.\d{6})\dZ$/,
+            '$10Z',
+          )) &&
+      p.executable === policy.publication.expected.executable &&
+      p.commandLine === policy.publication.expected.commandLine;
     for (const p of before.values()) {
       if (processView && !processView.related.has(p.pid)) continue;
       const refs = approvedAuxiliary(p)
         ? []
-        : resolveInvocation(argv(p.commandLine), p.workingDirectory, true);
+        : resolveInvocation(
+            argv(p.commandLine),
+            p.workingDirectory,
+            true,
+            'tasks',
+            approvedParent(p),
+          );
       const executableRef = pathReference(p.executable);
       if (
         executableRef &&
@@ -1101,10 +1329,44 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           native.shortcutCoverage.filter((c) => staticKinds.includes(c.kind)),
         )
       : null;
+    const taskContract = operationTaskContract(policy);
+    const taskPins = new Map(
+      (taskContract?.backgroundActions || []).map((r) => [
+        JSON.stringify([r.taskIdentity, r.actionIndex]),
+        r,
+      ]),
+    );
+    const taskBackground = [];
+    const taskNeedles = [
+      ...policy.roots.map((r) => r.path),
+      ...cfg.launchers.flatMap((l) => [l.entry, ...l.files.map((f) => f.path)]),
+      policy.publication?.database,
+      path.basename(policy.publication?.database || ''),
+    ]
+      .filter(Boolean)
+      .map((s) => s.replaceAll('\\', '/').toLowerCase());
+    const seenTasks = new Set();
     for (const t of native.tasks) {
       if (!t.identity || !Array.isArray(t.actions) || !t.actions.length)
         fail('REFERENCE_TASK_INVALID');
-      for (const action of t.actions) {
+      if (seenTasks.has(t.identity) || t.actions.length > 64)
+        fail('REFERENCE_TASK_INVALID');
+      seenTasks.add(t.identity);
+      for (const [index, action] of t.actions.entries()) {
+        const pin = taskPins.get(JSON.stringify([t.identity, index]));
+        if (pin) {
+          const row = taskActionTuple(t, index);
+          const text = [t.identity, ...Object.values(action)]
+            .filter((v) => typeof v === 'string')
+            .map((v) => v.replaceAll('\\', '/').toLowerCase())
+            .join('\n');
+          if (taskNeedles.some((n) => text.includes(n)))
+            fail('REFERENCE_BACKGROUND_TASK_BECAME_ASSOCIATED');
+          if (hash(row) !== hash(pin))
+            fail('REFERENCE_BACKGROUND_TASK_CHANGED');
+          taskBackground.push(row);
+          continue;
+        }
         if (
           typeof action.execute !== 'string' ||
           !action.execute ||
@@ -1116,7 +1378,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           record('tasks', ref, { identity: hash([t.identity, action]) });
       }
     }
-    result.categories.tasks = true;
+    if (taskBackground.length !== taskPins.size)
+      fail('REFERENCE_BACKGROUND_TASK_BINDING_NOT_OBSERVED');
+    result.categories.tasks = !taskContract;
     if (
       !Array.isArray(native.shortcutDirectories) ||
       native.shortcutDirectories.length > 4096
@@ -1186,11 +1450,23 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         fail('REFERENCE_SHORTCUT_INVALID');
       const actual = digest(watch(s.path));
       if (actual !== s.sha256) fail('REFERENCE_SHORTCUT_CHANGED');
+      const emptyAction = harmlessActions.find(
+        (a) => disclosedEmptyCwd(a) && hash(a.shortcut) === hash(s),
+      );
+      if (emptyAction)
+        emptyStartupActions.push({
+          ...s,
+          executable: emptyAction.executable,
+          uninspectedWorkingDirectory: true,
+          backgroundDbAccessExcluded: false,
+        });
       for (const ref of resolveInvocation(
         [s.target, ...argv(s.arguments)],
         s.workingDirectory,
         false,
         'shortcuts',
+        false,
+        s,
       ))
         record('shortcuts', ref, {
           identity: hash([
@@ -1203,6 +1479,11 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         });
     }
     result.categories.shortcuts = !scope;
+    if (
+      emptyStartupActions.length !==
+      harmlessActions.filter(disclosedEmptyCwd).length
+    )
+      fail('REFERENCE_STARTUP_ACTION_BINDING_NOT_OBSERVED');
     // The querying controller owns the scope lock. Its changing in-progress
     // intent is checked, but is not an external reference to its own output.
     const registry = canonical(policy.registryDirectory),
@@ -1313,7 +1594,19 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         ),
         uninspectedStaticScopes,
         uninspectedStaticJunctions: [],
+        uninspectedStartupActions: emptyStartupActions,
         ...(processView ? { processCoverage: processView.summary } : {}),
+        ...(taskContract
+          ? {
+              taskCoverage: {
+                kind: taskKind,
+                contractSha256: hash(taskContract),
+                globalTaskInvocationCoverageComplete: false,
+                backgroundDbAccessExcluded: false,
+                backgroundActions: taskContract.backgroundActions,
+              },
+            }
+          : {}),
       };
     }
   } catch (error) {
@@ -1407,6 +1700,14 @@ function main(policyFile) {
       argv: [process.execPath, process.argv[1], policyFile],
       collectorExecutable,
       collectorArgv: [collectorExecutable, ...collectorArgs],
+      consoleExecutable: path.join(
+        process.env.SystemRoot,
+        'System32/conhost.exe',
+      ),
+      consoleArgv: [
+        '\\??\\' + path.join(process.env.SystemRoot, 'System32/conhost.exe'),
+        '0x4',
+      ],
     },
   });
   // Recheck after resolution as well: configured immutable sources must not
@@ -1463,4 +1764,9 @@ module.exports = {
   operationProcessView,
   operationProcessTuple: processTuple,
   validateOperationProcessSummary,
+  collectorChain,
+  taskActionTuple,
+  operationTaskContract,
+  validateOperationTaskSummary,
+  validateOperationStartupSummary,
 };

@@ -898,6 +898,15 @@ for (const processScoped of [false, true])
             backgroundGaps: [],
           };
         f.policy.windowsReferences.operationCoverage = scope;
+        if (processScoped)
+          scope.taskCoverage = {
+            format: 1,
+            kind: 'once-background-task-actions-v1',
+            globalTaskInvocationCoverageComplete: false,
+            coverageClaim:
+              'bound-background-actions-only;indirect-db-access-unproven',
+            backgroundActions: [],
+          };
         fs.writeFileSync(f.file, JSON.stringify(f.policy));
         const facts = f.facts;
         f.facts = () => {
@@ -910,7 +919,7 @@ for (const processScoped of [false, true])
             categories: {
               ...r.categories,
               shortcuts: false,
-              ...(processScoped ? { processes: false } : {}),
+              ...(processScoped ? { processes: false, tasks: false } : {}),
             },
             operationCoverage: {
               kind: scope.kind,
@@ -947,6 +956,16 @@ for (const processScoped of [false, true])
                       globalProcessVisibilityComplete: false,
                       globalInvocationCoverageComplete: false,
                       backgroundGaps: [],
+                    },
+                    taskCoverage: {
+                      kind: scope.taskCoverage.kind,
+                      contractSha256: crypto
+                        .createHash('sha256')
+                        .update(JSON.stringify(scope.taskCoverage))
+                        .digest('hex'),
+                      globalTaskInvocationCoverageComplete: false,
+                      backgroundDbAccessExcluded: false,
+                      backgroundActions: [],
                     },
                   }
                 : {}),

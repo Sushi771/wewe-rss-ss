@@ -65,7 +65,12 @@ function Get-CimInstance($ClassName,$ErrorAction) {
 }
 function Get-ScheduledTask($ErrorAction) {
   $global:OwnedCounts.tasks++
-  foreach($t in $global:OwnedFixture.tasks) { [PSCustomObject]@{TaskPath='\';TaskName=$t.identity;Actions=$t.actions} }
+  foreach($t in $global:OwnedFixture.tasks) {
+    $actions=@($t.actions | ForEach-Object {
+      [PSCustomObject]@{Execute=$_.execute;Arguments=$_.arguments;WorkingDirectory=$_.workingDirectory;CimClass=[PSCustomObject]@{CimClassName=$(if($_.cimClass){$_.cimClass}else{'MSFT_TaskExecAction'})};Id=$_.id;ClassId=$_.classId;Data=$_.data}
+    })
+    [PSCustomObject]@{TaskPath='\';TaskName=$t.identity;Actions=$actions}
+  }
 }
 function Get-Item($LiteralPath,[switch]$Force,$ErrorAction) {
   if (Owned-Path $LiteralPath) { $global:OwnedCounts.staticMetadata++ }

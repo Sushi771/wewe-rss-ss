@@ -55,17 +55,29 @@ function Processes {
     }
   })
 }
+function Task-Digest($value) {
+  $text=ConvertTo-Json -InputObject $value -Depth 8 -Compress
+  if([Text.Encoding]::UTF8.GetByteCount($text) -gt 65536){throw 'REFERENCE_NATIVE_TASK_METADATA_LIMIT'}
+  $h=[Security.Cryptography.SHA256]::Create()
+  try {([BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()} finally {$h.Dispose()}
+}
 function Tasks {
   $items=@(Get-ScheduledTask -ErrorAction Stop)
   if ($items.Count -gt 8192) { throw 'REFERENCE_NATIVE_TASK_LIMIT' }
   @($items | Sort-Object TaskPath,TaskName | ForEach-Object {
     Budget
-    [PSCustomObject]@{
-      identity=([string]$_.TaskPath+[string]$_.TaskName)
-      actions=@($_.Actions | ForEach-Object {
-        [PSCustomObject]@{execute=(Expand-ReferenceText ([string]$_.Execute));arguments=(Expand-ReferenceText ([string]$_.Arguments));workingDirectory=(Expand-ReferenceText ([string]$_.WorkingDirectory))}
-      })
-    }
+    $identity=([string]$_.TaskPath+[string]$_.TaskName)
+    if(@($_.Actions).Count -gt 64){throw 'REFERENCE_NATIVE_TASK_METADATA_LIMIT'}
+    $actions=@($_.Actions | ForEach-Object {
+      Budget
+      $class=[string]$_.CimClass.CimClassName
+      $kind=switch -Exact ($class) {'MSFT_TaskExecAction' {'exec'} 'MSFT_TaskComHandlerAction' {'com-handler'} default {'unknown'}}
+      $row=[ordered]@{execute=(Expand-ReferenceText ([string]$_.Execute));arguments=(Expand-ReferenceText ([string]$_.Arguments));workingDirectory=(Expand-ReferenceText ([string]$_.WorkingDirectory));actionType=$kind;cimClass=$class;id=[string]$_.Id;classId=[string]$_.ClassId;data=[string]$_.Data}
+      foreach($v in $row.Values){if(([string]$v).Length -gt 32768){throw 'REFERENCE_NATIVE_TASK_METADATA_LIMIT'}}
+      $row.identitySha256=Task-Digest $row
+      [PSCustomObject]$row
+    })
+    [PSCustomObject]@{identity=$identity;actions=$actions;actionsSha256=(Task-Digest ([ordered]@{identity=$identity;actions=$actions}))}
   })
 }
 function Profile-Scope($profiles, [string]$current, $scope) {

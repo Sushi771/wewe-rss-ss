@@ -99,7 +99,8 @@ function inspect(paths, options = {}) {
 }
 function validateReferences(value, policy, operation) {
   const scoped = value?.operationSufficient === true;
-  let processScoped = false;
+  let processScoped = false,
+    taskScoped = false;
   if (scoped) {
     const {
       operationContract,
@@ -131,6 +132,15 @@ function validateReferences(value, policy, operation) {
         policy,
         value,
       );
+    taskScoped =
+      require('./windows-release-references.cjs').validateOperationTaskSummary(
+        policy,
+        value,
+      );
+    require('./windows-release-references.cjs').validateOperationStartupSummary(
+      policy,
+      value,
+    );
   }
   const kinds = [
     'processes',
@@ -149,7 +159,9 @@ function validateReferences(value, policy, operation) {
       .filter(
         (k) =>
           !scoped ||
-          (k !== 'shortcuts' && (!processScoped || k !== 'processes')),
+          (k !== 'shortcuts' &&
+            (!processScoped || k !== 'processes') &&
+            (!taskScoped || k !== 'tasks')),
       )
       .some((k) => value.categories?.[k] !== true) ||
     !Array.isArray(value.records) ||

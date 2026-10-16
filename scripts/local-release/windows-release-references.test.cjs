@@ -356,6 +356,110 @@ function operationFixture(f) {
   };
 }
 
+function taskFixture(f) {
+  processFixture(f);
+  const actions = [
+    {
+      execute: '',
+      arguments: '',
+      workingDirectory: '',
+      actionType: 'com-handler',
+      cimClass: 'MSFT_TaskComHandlerAction',
+      id: '',
+      classId: '{12345678-1234-1234-1234-123456789abc}',
+      data: 'opaque component input',
+    },
+    {
+      execute: f.worker,
+      arguments: '--external',
+      workingDirectory: f.base,
+      actionType: 'exec',
+      cimClass: 'MSFT_TaskExecAction',
+      id: '',
+      classId: '',
+      data: '',
+    },
+  ];
+  for (const a of actions) a.identitySha256 = hash(a);
+  f.native.tasks.push({
+    identity: '\\Background',
+    actions,
+    actionsSha256: hash(actions),
+  });
+  f.native.tasksAfter = structuredClone(f.native.tasks);
+  const api = require('./windows-release-references.cjs');
+  f.policy.windowsReferences.operationCoverage.taskCoverage = {
+    format: 1,
+    kind: 'once-background-task-actions-v1',
+    globalTaskInvocationCoverageComplete: false,
+    coverageClaim: 'bound-background-actions-only;indirect-db-access-unproven',
+    backgroundActions: actions.map((_, i) =>
+      api.taskActionTuple(f.native.tasks[1], i),
+    ),
+  };
+}
+test('operation task contract retains exact COM/exec gaps through final scope validation without global claims', () =>
+  fixture((f) => {
+    taskFixture(f);
+    const r = f.run();
+    assert.deepEqual(r.errors, []);
+    assert(r.operationSufficient);
+    assert.equal(r.categories.tasks, false);
+    const scope = require('./release-scope.cjs');
+    for (const operation of ['install', 'publish', 'rollback'])
+      scope.validateReferences(r, f.policy, operation);
+    assert.throws(() => scope.validateReferences(r, f.policy, 'retire'));
+    const forged = structuredClone(r);
+    forged.operationCoverage.taskCoverage.backgroundDbAccessExcluded = true;
+    assert.throws(
+      () => scope.validateReferences(forged, f.policy, 'publish'),
+      /TASK_COVERAGE_INVALID/,
+    );
+  }));
+for (const fault of [
+  'new-action',
+  'changed-clsid',
+  'changed-data',
+  'changed-type',
+  'changed-definition',
+  'missing-post',
+  'unknown-empty-execute',
+  'missing-metadata',
+  'associated-db',
+  'associated-package',
+  'associated-launcher',
+])
+  test('operation task contract refuses ' + fault, () =>
+    fixture((f) => {
+      taskFixture(f);
+      const t = f.native.tasks[1],
+        c = f.policy.windowsReferences.operationCoverage.taskCoverage;
+      if (fault === 'new-action') t.actions.push({ ...t.actions[1] });
+      if (fault === 'changed-clsid')
+        t.actions[0].classId = '{aaaaaaaa-1234-1234-1234-123456789abc}';
+      if (fault === 'changed-data') t.actions[0].data = 'changed';
+      if (fault === 'changed-type') t.actions[0].actionType = 'exec';
+      if (fault === 'changed-definition') t.actionsSha256 = 'f'.repeat(64);
+      if (fault === 'missing-metadata') delete t.actions[0].cimClass;
+      if (fault === 'unknown-empty-execute') {
+        delete f.policy.windowsReferences.operationCoverage.taskCoverage;
+        t.actions[0] = { execute: '', arguments: '', workingDirectory: '' };
+      }
+      if (fault.startsWith('associated-')) {
+        t.actions[0].data =
+          fault === 'associated-db'
+            ? f.policy.publication.database
+            : fault === 'associated-package'
+              ? f.packages[0].path
+              : f.launcher;
+        c.backgroundActions[0] =
+          require('./windows-release-references.cjs').taskActionTuple(t, 0);
+      }
+      f.native.tasksAfter =
+        fault === 'missing-post' ? [] : structuredClone(f.native.tasks);
+      assert.equal(f.run().operationSufficient, false, JSON.stringify(f.run()));
+    }),
+  );
 function processFixture(f) {
   operationFixture(f);
   f.policy.publication.expected = {
@@ -409,6 +513,103 @@ function processFixture(f) {
       change(rows.find((r) => r.pid === 2000));
   };
 }
+for (const fault of ['none', 'one-microsecond', 'other-pid', 'different-db'])
+  test('exact current runtime data argument ' + fault, () =>
+    fixture((f) => {
+      processFixture(f);
+      const db = f.policy.publication.database;
+      fs.mkdirSync(path.dirname(db), { recursive: true });
+      f.write(db, 'inert data file, never opened as SQLite');
+      f.policy.roots.push({ path: path.dirname(db) });
+      for (const list of [f.native.processesBefore, f.native.processesAfter]) {
+        const r = list.find((x) => x.pid === 10);
+        r.commandLine += ' --database ' + quote(db);
+        r.startUtc = '2026-01-01T00:00:00.1234560Z';
+      }
+      f.policy.publication.expected = {
+        ...f.native.processesBefore[0],
+        port: 4000,
+        startUtc: '2026-01-01T00:00:00.1234567Z',
+      };
+      if (fault === 'one-microsecond')
+        f.policy.publication.expected.startUtc = '2026-01-01T00:00:00.1234577Z';
+      if (fault === 'other-pid') f.policy.publication.expected.pid = 123;
+      if (fault === 'different-db')
+        f.policy.publication.expected.commandLine += ' --foreign';
+      const r = f.run();
+      if (fault === 'none') assert(r.operationSufficient, JSON.stringify(r));
+      else assert.equal(r.operationSufficient, false, JSON.stringify(r));
+    }),
+  );
+for (const fault of [
+  'none',
+  'changed-args',
+  'changed-path',
+  'changed-bytes',
+  'missing-disclosure',
+  'default-strict',
+  'script',
+])
+  test('exact empty-cwd Startup binding ' + fault, () =>
+    fixture((f) => {
+      processFixture(f);
+      const startup = f.native.shortcutCoverage.find(
+        (x) => x.kind === 'Startup',
+      ).path;
+      const file = path.join(startup, 'owned-background.lnk');
+      f.write(file, 'inert shortcut');
+      f.native.shortcutDirectories
+        .find((x) => x.path === startup)
+        .entries.push({ name: path.basename(file), kind: 'file' });
+      const s = {
+        path: file,
+        sha256: f.pin(file).sha256,
+        target: f.worker,
+        arguments: '--background',
+        workingDirectory: '',
+      };
+      f.native.shortcuts[0] = s;
+      f.policy.windowsReferences.harmlessActions = [
+        {
+          kind: 'shortcuts',
+          argv: [s.target, ...argv(s.arguments)],
+          workingDirectory: '',
+          shortcut: { ...s },
+          uninspectedWorkingDirectory: true,
+          backgroundDbAccessExcluded: false,
+          executable: f.pin(f.worker),
+        },
+      ];
+      if (fault === 'changed-args') s.arguments += ' --new';
+      if (fault === 'changed-path') s.path = f.launcher;
+      if (fault === 'changed-bytes') f.write(s.path, 'changed shortcut');
+      if (fault === 'missing-disclosure')
+        delete f.policy.windowsReferences.harmlessActions[0]
+          .uninspectedWorkingDirectory;
+      if (fault === 'default-strict')
+        delete f.policy.windowsReferences.operationCoverage;
+      if (fault === 'script') {
+        s.arguments = 'external.js';
+        const a = f.policy.windowsReferences.harmlessActions[0];
+        a.argv = [s.target, s.arguments];
+        a.shortcut = { ...s };
+      }
+      const r = f.run();
+      if (fault === 'none') {
+        assert(r.operationSufficient, JSON.stringify(r));
+        assert.equal(r.operationCoverage.uninspectedStartupActions.length, 1);
+        const scope = require('./release-scope.cjs');
+        for (const op of ['install', 'publish', 'rollback'])
+          scope.validateReferences(r, f.policy, op);
+        const forged = structuredClone(r);
+        forged.operationCoverage.uninspectedStartupActions = [];
+        assert.throws(
+          () => scope.validateReferences(forged, f.policy, 'publish'),
+          /STARTUP_ACTION_COVERAGE_INVALID/,
+        );
+      } else assert.equal(r.operationSufficient, false, JSON.stringify(r));
+    }),
+  );
 
 test('operation process contract retains 215 exact background gaps without global writer claims', () =>
   fixture((f) => {
@@ -1340,6 +1541,80 @@ test('a task edit or newly added shortcut cannot disappear into a completed quer
     f.write(path.join(path.dirname(f.shortcut), 'new.lnk'), 'new inert link');
     reject(f, 'REFERENCE_SHORTCUT_DIRECTORY_CHANGED');
   }));
+for (const fault of [
+  'none',
+  'wrong-parent',
+  'wrong-exe',
+  'wrong-args',
+  'opaque',
+  'reused-start',
+  'new-after',
+  'missing-after',
+  'extra-child',
+  'grandchild',
+  'outside-chain',
+])
+  test('read-only collector console chain ' + fault, () =>
+    fixture((f) => {
+      processFixture(f);
+      const consoleExe = path.join(f.base, 'conhost.exe');
+      f.write(consoleExe, 'owned inert console');
+      const self = {
+        pid: 200,
+        executable: f.controller,
+        argv: [f.controller, 'probe.cjs'],
+        collectorExecutable: f.worker,
+        collectorArgv: [f.worker, 'collector.ps1'],
+        consoleExecutable: consoleExe,
+        consoleArgv: [consoleExe, '0x4'],
+      };
+      const own = [
+        f.process(200, 99, f.controller, `${quote(f.controller)} probe.cjs`),
+        f.process(201, 200, f.worker, `${quote(f.worker)} collector.ps1`),
+        {
+          ...f.process(202, 201, consoleExe, `${quote(consoleExe)} 0x4`),
+          name: 'conhost.exe',
+        },
+      ];
+      if (fault === 'wrong-parent') own[2].parentPid = 200;
+      if (fault === 'wrong-exe') own[2].executable = f.worker;
+      if (fault === 'wrong-args') own[2].commandLine += ' --foreign';
+      if (fault === 'opaque') own[2].commandLine = '';
+      f.native.processesBefore.push(...own);
+      f.native.processesAfter.push(...structuredClone(own));
+      if (fault === 'reused-start')
+        f.native.processesAfter.at(-1).startUtc = '2026-01-02T00:00:00.000Z';
+      if (fault === 'new-after') f.native.processesBefore.pop();
+      if (fault === 'missing-after') f.native.processesAfter.pop();
+      if (fault === 'outside-chain') {
+        for (const list of [f.native.processesBefore, f.native.processesAfter])
+          list.at(-1).parentPid = 10;
+      }
+      if (fault === 'extra-child' || fault === 'grandchild') {
+        const p = f.process(
+          203,
+          fault === 'grandchild' ? 202 : 201,
+          f.worker,
+          quote(f.worker),
+        );
+        f.native.processesBefore.push(p);
+        f.native.processesAfter.push({ ...p });
+      }
+      const r = probe(f.policy, f.native, { callerPid: 99, self });
+      if (fault === 'none') {
+        assert(r.operationSufficient, JSON.stringify(r));
+        assert.deepEqual(
+          r.collectorChain.map((x) => x.pid),
+          [200, 201, 202],
+        );
+        assert(!r.records.some((x) => x.pid === 202));
+      } else if (fault === 'outside-chain') {
+        assert(r.operationSufficient, JSON.stringify(r));
+        assert(r.records.some((x) => x.pid === 202));
+        assert(!r.collectorChain.some((x) => x.pid === 202));
+      } else assert.equal(r.operationSufficient, false, JSON.stringify(r));
+    }),
+  );
 test('only the exact transient probe and its pinned collector are excluded from controller children', () =>
   fixture((f) => {
     const self = {
@@ -1362,7 +1637,14 @@ test('only the exact transient probe and its pinned collector are excluded from 
     f.native.processesBefore.push(foreign);
     f.native.processesAfter.push(structuredClone(foreign));
     const held = probe(f.policy, f.native, { callerPid: 99, self });
-    assert(held.errors.includes('REFERENCE_PROBE_CHILD_UNCERTAIN'));
+    assert(
+      held.errors.some((e) =>
+        [
+          'REFERENCE_PROBE_CHILD_UNCERTAIN',
+          'REFERENCE_PROBE_CONSOLE_UNCERTAIN',
+        ].includes(e),
+      ),
+    );
   }));
 test('adapter facts are accepted by the actual scope guard across own intent changes', () =>
   fixture((f) => {
@@ -1642,6 +1924,46 @@ test('R3: executable watch retains its larger read bound at final verification',
     f.policy.windowsReferences.launchers[0].executable = f.pin(f.controller);
     assert(f.run().complete);
   }));
+if (process.platform === 'win32')
+  test('actual task collector retains explicit COM metadata and stable bounded identity digests', () => {
+    const r = JSON.parse(
+      execFileSync(
+        path.join(
+          process.env.SystemRoot,
+          'System32/WindowsPowerShell/v1.0/powershell.exe',
+        ),
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-File',
+          path.join(__dirname, 'windows-task-metadata.fixture.ps1'),
+          '-Source',
+          path.join(__dirname, 'windows-release-reference-collector.ps1'),
+        ],
+        {
+          windowsHide: true,
+          encoding: 'utf8',
+          timeout: 20000,
+          maxBuffer: 128 * 1024,
+        },
+      ),
+    );
+    const first = r.first[0],
+      com = first.actions[0];
+    assert.equal(com.actionType, 'com-handler');
+    assert.equal(com.cimClass, 'MSFT_TaskComHandlerAction');
+    assert.equal(com.execute, '');
+    assert(com.classId);
+    assert.equal(com.id, 'owned-com');
+    assert.equal(com.data, 'original input');
+    assert.match(com.identitySha256, /^[a-f0-9]{64}$/);
+    assert.equal(first.actions[1].actionType, 'exec');
+    assert.notEqual(com.identitySha256, r.data[0].actions[0].identitySha256);
+    assert.notEqual(first.actionsSha256, r.data[0].actionsSha256);
+    assert.notEqual(r.data[0].actionsSha256, r.class[0].actionsSha256);
+    assert(r.oversizeRefused);
+    assert.equal(r.nativeQueries, 0);
+  });
 if (process.platform === 'win32')
   test('R2 native helper identity matches Node on an owned fixture and proves absence', () =>
     fixture((f) => {
