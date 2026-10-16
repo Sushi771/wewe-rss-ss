@@ -35,6 +35,216 @@ let phase = 'input';
 function failure(code) {
   return Object.assign(Error(code), { code });
 }
+const cdpMethods = new Set([
+  'Page.enable',
+  'Runtime.enable',
+  'Emulation.setScriptExecutionDisabled',
+  'Fetch.enable',
+  'Page.navigate',
+  'Runtime.evaluate',
+  'Fetch.continueRequest',
+  'Fetch.failRequest',
+]);
+const traceEvents = new Set([
+  'input',
+  'server-ready',
+  'spawn',
+  'port-poll',
+  'http-start',
+  'http-ready',
+  'socket-start',
+  'socket-ready',
+  'cdp-send',
+  'cdp-reply',
+  'cdp-timeout',
+  'page-start',
+  'cleanup-start',
+  'child-exit',
+  'cleanup-end',
+  'stderr-listening',
+  'stderr-error',
+]);
+
+/** Synthetic CI only. Persist classifications, never raw stderr or CDP data. */
+function createBrowserTrace({
+  enabled = false,
+  directory,
+  now = () => performance.now(),
+} = {}) {
+  const empty = {
+    enabled: false,
+    record() {},
+    stderr() {},
+    finish() {},
+    child() {
+      return {};
+    },
+  };
+  if (!enabled || !directory || !path.isAbsolute(directory)) return empty;
+  const start = now();
+  let saved = false,
+    dropped = 0,
+    bytes = 0,
+    head = Buffer.alloc(0),
+    tail = Buffer.alloc(0),
+    listening = false;
+  const events = [];
+  const record = (event, data = {}) => {
+    if (!traceEvents.has(event)) return;
+    const row = {
+      event,
+      milliseconds: Math.max(0, Math.min(180000, Math.round(now() - start))),
+    };
+    for (const key of [
+      'attempt',
+      'bytes',
+      'pid',
+      'exitCode',
+      'httpStatus',
+      'pageIndex',
+      'freeMemoryBytes',
+      'cpuUserTicks',
+      'cpuSystemTicks',
+      'rssPages',
+      'threads',
+    ])
+      if (Number.isSafeInteger(data[key]) && data[key] >= 0)
+        row[key] = data[key];
+    for (const key of ['exited', 'profileRemoved'])
+      if (typeof data[key] === 'boolean') row[key] = data[key];
+    if (cdpMethods.has(data.method)) row.method = data.method;
+    if (codes.has(data.code)) row.code = data.code;
+    if (
+      [
+        'absent',
+        'busy',
+        'denied',
+        'incomplete',
+        'valid',
+        'rejected',
+        'exhausted',
+      ].includes(data.portState)
+    )
+      row.portState = data.portState;
+    if (
+      ['R', 'S', 'D', 'Z', 'T', 'W', 'X', 'I', 'P'].includes(data.processState)
+    )
+      row.processState = data.processState;
+    if (
+      ['SIGTERM', 'SIGKILL', 'SIGABRT', 'SIGSEGV', 'SIGBUS', 'SIGILL'].includes(
+        data.signal,
+      )
+    )
+      row.signal = data.signal;
+    if (events.length === 128) {
+      events.splice(32, 1);
+      dropped++;
+    }
+    events.push(row);
+  };
+  return {
+    enabled: true,
+    record,
+    child(child) {
+      const result = {
+        exited: !!child && (child.exitCode !== null || !!child.signalCode),
+        freeMemoryBytes: Math.floor(os.freemem()),
+      };
+      if (!child) return result;
+      result.pid = child.pid;
+      result.exitCode = child.exitCode;
+      result.signal = child.signalCode;
+      // Only this spawned child's bounded /proc stat, not a process scan.
+      if (process.platform === 'linux' && Number.isSafeInteger(child.pid)) {
+        try {
+          const raw = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
+          if (raw.length < 4096) {
+            const values = raw
+              .slice(raw.lastIndexOf(')') + 2)
+              .trim()
+              .split(/\s+/);
+            Object.assign(result, {
+              processState: values[0],
+              cpuUserTicks: Number(values[11]),
+              cpuSystemTicks: Number(values[12]),
+              threads: Number(values[17]),
+              rssPages: Number(values[21]),
+            });
+          }
+        } catch {}
+      }
+      return result;
+    },
+    stderr(chunk) {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes = Math.min(Number.MAX_SAFE_INTEGER, bytes + value.length);
+      if (head.length < 8192)
+        head = Buffer.concat([head, value.subarray(0, 8192 - head.length)]);
+      tail = Buffer.concat([tail, value.subarray(-8192)]).subarray(-8192);
+      if (
+        !listening &&
+        /DevTools listening on/i.test(head.toString() + tail.toString())
+      ) {
+        listening = true;
+        record('stderr-listening');
+      }
+    },
+    finish(outcome, error) {
+      if (saved) return;
+      saved = true;
+      const text = head.toString() + '\n' + tail.toString();
+      const classifications = [
+        ['DEVTOOLS_LISTENING', /DevTools listening on/i],
+        ['PROFILE_LOCK', /ProcessSingleton|SingletonLock|profile.*in use/i],
+        [
+          'SANDBOX',
+          /No usable sandbox|Running as root without --no-sandbox|sandbox.*failed/i,
+        ],
+        ['MISSING_LIBRARY', /error while loading shared libraries/i],
+        ['DISPLAY', /Missing X server|\$DISPLAY|cannot open display/i],
+        [
+          'RESOURCE_LIMIT',
+          /Resource temporarily unavailable|pthread_create|Cannot allocate memory|Out of memory|No space left on device/i,
+        ],
+        ['PERMISSION', /Permission denied|Access is denied/i],
+        ['BIND', /Address already in use|bind\(\).*failed/i],
+        ['DBUS', /dbus|D-Bus/i],
+        ['CRASHPAD', /crashpad/i],
+        ['GPU', /gpu.*(?:error|failed)|GPU process exited/i],
+        ['FATAL', /\bFATAL\b/i],
+      ]
+        .filter(([, pattern]) => pattern.test(text))
+        .map(([name]) => name);
+      const summary = {
+        format: 'article-history-synthetic-diagnostic-v1',
+        outcome: outcome === 'success' ? 'success' : 'failure',
+        events,
+        droppedEvents: dropped,
+        stderr: {
+          bytesObserved: bytes,
+          sampledBytes: Math.min(bytes, 16384),
+          truncated: bytes > 16384,
+          classifications,
+        },
+        ...(error ? { failure: diagnostic(error) } : {}),
+      };
+      try {
+        fs.mkdirSync(directory, { recursive: true });
+        const stat = fs.lstatSync(directory);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+        if (fs.readdirSync(directory).length >= 64) return;
+        const encoded = JSON.stringify(summary);
+        if (Buffer.byteLength(encoded) > 32768) return;
+        fs.writeFileSync(
+          path.join(directory, `browser-${process.pid}-${Date.now()}.json`),
+          encoded,
+          { flag: 'wx', mode: 0o600 },
+        );
+      } catch {} // Diagnostics must never change the validation outcome.
+    },
+  };
+}
+let trace;
 function abortable(operation, signal) {
   if (!signal) return operation;
   return new Promise((resolve, reject) => {
@@ -99,6 +309,7 @@ async function waitForDevToolsPort(
     maxAttempts = 120,
     spawnError = () => null,
     signal,
+    observe = () => {},
   } = {},
 ) {
   const until = now() + Math.min(timeoutMs, 12000);
@@ -139,19 +350,54 @@ async function waitForDevToolsPort(
           throw failure('INVALID_PORT_FILE');
         if (child.exitCode !== null || child.signalCode)
           throw failure('BROWSER_EXITED');
+        observe({
+          attempt: attempts,
+          bytes: Buffer.byteLength(raw),
+          portState: 'valid',
+        });
         return port;
       }
+      observe({
+        attempt: attempts,
+        bytes: Buffer.byteLength(raw),
+        portState: 'incomplete',
+      });
       resourceCode = undefined; // incomplete file, not a complete invalid port
     } catch (error) {
+      observe({
+        attempt: attempts,
+        code: error.code,
+        portState:
+          error.code === 'ENOENT'
+            ? 'absent'
+            : error.code === 'EBUSY'
+              ? 'busy'
+              : error.code === 'EPERM'
+                ? 'denied'
+                : 'rejected',
+      });
       if (!['ENOENT', 'EBUSY', 'EPERM'].includes(error.code)) throw error;
       resourceCode = error.code;
     }
     await abortable(sleep(Math.min(100, Math.max(0, until - now()))), signal);
   }
+  observe({ attempt: attempts, code: resourceCode, portState: 'exhausted' });
   throw Object.assign(failure('STARTUP_EXHAUSTED'), { attempts, resourceCode });
 }
 
 async function main(signal) {
+  const directory = process.env.ARTICLE_HISTORY_DIAGNOSTICS_DIR;
+  trace = createBrowserTrace({
+    enabled:
+      process.env.GITHUB_ACTIONS === 'true' &&
+      process.env.ARTICLE_HISTORY_SYNTHETIC_DIAGNOSTICS === '1' &&
+      !!process.env.RUNNER_TEMP &&
+      !!directory &&
+      path.resolve(directory) ===
+        path.resolve(process.env.RUNNER_TEMP, 'article-history-diagnostics'),
+    directory,
+  });
+  trace.record('input');
   const input = await abortable(
     (async () => {
       let value = '';
@@ -228,6 +474,7 @@ async function main(signal) {
       signal,
     );
     const origin = `http://127.0.0.1:${server.address().port}/`;
+    trace.record('server-ready');
     profile = fs.mkdtempSync(
       path.join(os.tmpdir(), 'article-history-browser-'),
     );
@@ -251,8 +498,19 @@ async function main(signal) {
         `--user-data-dir=${profile}`,
         'about:blank',
       ],
-      { windowsHide: true, stdio: 'ignore' },
+      {
+        windowsHide: true,
+        stdio: trace.enabled ? ['ignore', 'ignore', 'pipe'] : 'ignore',
+      },
     );
+    trace.record('spawn', trace.child(child));
+    if (trace.enabled) {
+      child.stderr?.on('data', (chunk) => trace.stderr(chunk));
+      child.stderr?.on('error', (error) =>
+        trace.record('stderr-error', { code: error.code }),
+      );
+      child.on('exit', () => trace.record('child-exit', trace.child(child)));
+    }
     phase = 'startup';
     let spawnError;
     child.on('error', (error) => {
@@ -262,16 +520,24 @@ async function main(signal) {
     const port = await waitForDevToolsPort(active, child, {
       spawnError: () => spawnError,
       signal,
+      observe: trace.enabled
+        ? (value) => trace.record('port-poll', value)
+        : undefined,
     });
     phase = 'connect';
+    trace.record('http-start', trace.child(child));
     const target = await abortable(
       fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
         method: 'PUT',
         signal,
-      }).then((r) => r.json()),
+      }).then((r) => {
+        trace.record('http-ready', { httpStatus: r.status });
+        return r.json();
+      }),
       signal,
     );
     socket = new WebSocket(target.webSocketDebuggerUrl);
+    trace.record('socket-start');
     await abortable(
       new Promise((resolve, reject) => {
         socket.onopen = resolve;
@@ -279,6 +545,7 @@ async function main(signal) {
       }),
       signal,
     );
+    trace.record('socket-ready');
     let id = 0;
     const command = (method, params = {}) =>
       abortable(
@@ -288,11 +555,13 @@ async function main(signal) {
             return;
           }
           const key = ++id;
+          trace.record('cdp-send', { method });
           const timer = setTimeout(() => {
             pending.delete(key);
+            trace.record('cdp-timeout', { method, ...trace.child(child) });
             reject(failure('CDP_TIMEOUT'));
           }, 10000);
-          pending.set(key, { resolve, reject, timer });
+          pending.set(key, { resolve, reject, timer, method });
           socket.send(JSON.stringify({ id: key, method, params }));
         }),
         signal,
@@ -301,6 +570,7 @@ async function main(signal) {
       const event = JSON.parse(data);
       if (event.id && pending.has(event.id)) {
         const waiter = pending.get(event.id);
+        trace.record('cdp-reply', { method: waiter.method });
         pending.delete(event.id);
         clearTimeout(waiter.timer);
         if (event.error) waiter.reject(failure('CDP_ERROR'));
@@ -334,6 +604,7 @@ async function main(signal) {
     let imageInputs = 0;
     for (const name of pages) {
       phase = 'decode';
+      trace.record('page-start', { pageIndex: pages.indexOf(name) });
       await command('Page.navigate', { url: origin + name });
       let status;
       for (let i = 0; i < 100; i++) {
@@ -375,6 +646,7 @@ async function main(signal) {
       }),
     );
   } finally {
+    trace.record('cleanup-start', trace.child(child));
     for (const waiter of pending.values()) {
       clearTimeout(waiter.timer);
       waiter.reject(signal?.reason || failure('CDP_ERROR'));
@@ -402,6 +674,9 @@ async function main(signal) {
           child.once('exit', exited);
         }
       });
+      // Descendants can inherit this pipe. Diagnostics must not keep a
+      // completed helper alive after the owned root's cleanup wait.
+      if (trace.enabled) child.stderr?.destroy();
     }
     try {
       server?.closeAllConnections();
@@ -442,6 +717,7 @@ async function main(signal) {
         childExited: !child || child.exitCode !== null || !!child.signalCode,
         profileRemoved,
       };
+    trace.record('cleanup-end', { ...trace.child(child), profileRemoved });
   }
 }
 if (require.main === module) {
@@ -451,6 +727,7 @@ if (require.main === module) {
   const report = (error) => {
     if (!reported) {
       reported = true;
+      trace?.finish('failure', error);
       process.stderr.write(JSON.stringify(diagnostic(error)));
     }
   };
@@ -465,6 +742,9 @@ if (require.main === module) {
     }, 6000);
   }, 170000);
   main(controller.signal)
+    .then(() => {
+      if (!controller.signal.aborted) trace?.finish('success');
+    })
     .catch((error) => {
       report(error);
       process.exitCode = 1;
@@ -480,4 +760,4 @@ if (require.main === module) {
       }
     });
 }
-module.exports = { waitForDevToolsPort, diagnostic };
+module.exports = { waitForDevToolsPort, diagnostic, createBrowserTrace };

@@ -33,6 +33,9 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 8
+    env:
+      ARTICLE_HISTORY_SYNTHETIC_DIAGNOSTICS: '1'
+      ARTICLE_HISTORY_DIAGNOSTICS_DIR: ${{ runner.temp }}/article-history-diagnostics
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -60,3 +63,11 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/history-typecheck" --ignore-scripts --package-lock=false --no-save typescript@5.5.4 @types/node@22
           node "$RUNNER_TEMP/history-typecheck/node_modules/typescript/bin/tsc" --noEmit --skipLibCheck --strict --target ES2021 --module commonjs --moduleResolution node --typeRoots "$RUNNER_TEMP/history-typecheck/node_modules/@types" apps/server/src/collection/sqlite-snapshot-guard.ts
+      - name: Retain bounded synthetic browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: article-history-synthetic-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/article-history-diagnostics/*.json
+          if-no-files-found: warn
+          retention-days: 3
