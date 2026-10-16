@@ -9,6 +9,8 @@ import {
   cacheSyncState,
 } from './cache-sync-state';
 import { ProviderPage } from '../collection/subscription-provider';
+import { Wechat2RssResponseError } from '../collection/providers/wechat2rss-response';
+import { cacheSyncStatus } from './cache-sync-state';
 const start = Date.parse('2026-10-11T08:00:00Z');
 const ids = ['MP_WXS_1234567890', 'MP_WXS_2345678901'];
 const metadata = (feedId = ids[0]) => ({
@@ -165,6 +167,63 @@ describe('fresh unchanged-page text reconciliation', () => {
   });
 });
 describe('existing-cache synchronization', () => {
+  it('retains safe read-limit diagnostics, continues peers, and clears the error after recovery', async () => {
+    const f = setup(
+      2,
+      () => false,
+      jest.fn().mockResolvedValue({ mediaReady: true }),
+    );
+    f.read.mockRejectedValueOnce(
+      new Wechat2RssResponseError('WECHAT2RSS_RESPONSE_TOO_LARGE', {
+        responseBytes: 16777217,
+        responseLimitBytes: 16777216,
+      }),
+    );
+    await f.engine.tick();
+    expect(cacheSyncState.feeds[0]).toMatchObject({
+      state: 'unavailable',
+      failure: {
+        failureReason: 'CACHE_RESPONSE_TOO_LARGE',
+        failurePoint: 'cache-read',
+        failureCode: 'WECHAT2RSS_RESPONSE_TOO_LARGE',
+        responseBytes: 16777217,
+        responseLimitBytes: 16777216,
+      },
+    });
+    expect(cacheSyncState.feeds[1].state).not.toBe('unavailable');
+    const snapshot = cacheSyncStatus();
+    snapshot.feeds[0].failure!.responseBytes = 0;
+    expect(cacheSyncState.feeds[0].failure!.responseBytes).toBe(16777217);
+    f.time(10000);
+    await f.engine.tick();
+    expect(cacheSyncState.feeds[0].state).toBe('media-pending');
+    expect(cacheSyncState.feeds[0].failure).toBeUndefined();
+    f.engine.close();
+  });
+  it('distinguishes metadata/read/import failure stages without raw messages or secrets', async () => {
+    const f = setup(1, () => false);
+    f.list.mockRejectedValueOnce(
+      new Wechat2RssResponseError('WECHAT2RSS_HTTP_STATUS', {
+        httpStatus: 503,
+      }),
+    );
+    await f.engine.tick();
+    expect(cacheSyncStatus().metadataFailure).toMatchObject({
+      failureReason: 'CACHE_HTTP_STATUS',
+      failurePoint: 'metadata-read',
+      httpStatus: 503,
+    });
+    f.time(10000);
+    f.sync.mockRejectedValueOnce(Error('private SQL synthetic-secret'));
+    await f.engine.tick();
+    expect(cacheSyncState.metadataFailure).toBeUndefined();
+    expect(cacheSyncState.feeds[0].failure).toMatchObject({
+      failurePoint: 'cache-import',
+      failureReason: 'CACHE_UNKNOWN_ERROR',
+    });
+    expect(JSON.stringify(cacheSyncStatus())).not.toContain('synthetic-secret');
+    f.engine.close();
+  });
   it('saves text while CDN media is disabled, without invoking the media lane', async () => {
     const syncText = jest.fn().mockResolvedValue({ bodyMissing: 0 });
     const f = setup(1, () => false, syncText);

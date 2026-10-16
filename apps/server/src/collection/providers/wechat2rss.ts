@@ -1,4 +1,11 @@
 import { isIP } from 'node:net';
+import {
+  readWechat2RssResponse,
+  waitForWechat2RssResponse,
+  Wechat2RssResponseError,
+  WECHAT2RSS_CACHE_RESPONSE_LIMIT,
+  WECHAT2RSS_CONTROL_RESPONSE_LIMIT,
+} from './wechat2rss-response';
 import { parseWechat2RssJsonFeed } from '../provider-article';
 import { ProviderPage, SubscriptionProvider } from '../subscription-provider';
 import { canonicalArticleUrl } from '../collection-format';
@@ -83,37 +90,59 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     const remaining = deadline === undefined ? 10000 : deadline - Date.now();
     if (remaining <= 0) throw new Error(IDENTITY_CHECK_EXPIRED);
     const signal = AbortSignal.timeout(Math.min(10000, remaining));
+    const responseDeadline = Math.min(Date.now() + 10000, deadline ?? Infinity);
     try {
-      const response = await fetch(url, {
+      const pending = fetch(url, {
         redirect: 'manual',
         signal,
+      }).then((response) => {
+        if (signal.aborted) void response.body?.cancel().catch(() => undefined);
+        return response;
       });
-      if (response.status === 429) throw new Error('WECHAT2RSS_RATE_LIMITED');
-      if (response.status !== 200 || !response.body)
-        throw new Error('HTTP_STATUS');
-      const parts: Buffer[] = [];
-      let size = 0;
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const bytes = Buffer.from(value);
-        size += bytes.length;
-        if (size > 4_000_000) {
-          await reader.cancel();
-          throw new Error('RESPONSE_TOO_LARGE');
-        }
-        parts.push(bytes);
+      const response = await waitForWechat2RssResponse(pending, signal);
+      if (response.status === 429) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new Wechat2RssResponseError('WECHAT2RSS_RATE_LIMITED', {
+          httpStatus: 429,
+        });
       }
+      if (response.status !== 200) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new Wechat2RssResponseError('WECHAT2RSS_HTTP_STATUS', {
+          httpStatus: response.status,
+        });
+      }
+      const limit =
+        format === 'json' && /^\/feed\/[A-Za-z0-9_-]+\.json$/.test(path)
+          ? WECHAT2RSS_CACHE_RESPONSE_LIMIT
+          : WECHAT2RSS_CONTROL_RESPONSE_LIMIT;
+      const text = await readWechat2RssResponse(
+        response,
+        limit,
+        signal,
+        responseDeadline,
+      );
       if (deadline !== undefined && Date.now() >= deadline)
         throw new Error(IDENTITY_CHECK_EXPIRED);
-      const text = Buffer.concat(parts).toString('utf8');
-      return format === 'text' ? text : JSON.parse(text);
+      if (format === 'text') return text;
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Wechat2RssResponseError('WECHAT2RSS_INVALID_JSON');
+      }
     } catch (error) {
       if ((error as Error)?.message === 'WECHAT2RSS_RATE_LIMITED') throw error;
-      if (deadline !== undefined && (Date.now() >= deadline || signal.aborted))
+      if (
+        deadline !== undefined &&
+        (Date.now() >= deadline ||
+          signal.aborted ||
+          (error as Error)?.message === 'WECHAT2RSS_REQUEST_TIMEOUT')
+      )
         throw new Error(IDENTITY_CHECK_EXPIRED);
-      throw new Error('WECHAT2RSS_REQUEST_FAILED');
+      if (error instanceof Wechat2RssResponseError) throw error;
+      if (signal.aborted)
+        throw new Wechat2RssResponseError('WECHAT2RSS_REQUEST_TIMEOUT');
+      throw new Wechat2RssResponseError('WECHAT2RSS_NETWORK_ERROR');
     }
   }
 
