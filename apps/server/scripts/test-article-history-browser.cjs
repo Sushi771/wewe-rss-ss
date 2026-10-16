@@ -94,7 +94,7 @@ async function deadlineFixture(
     env: { ARTICLE_HISTORY_CHROME: '/owned/mock-browser' },
     stdout: {
       write() {
-        assert.fail('must not publish success');
+        if (stage !== 'cleanup') assert.fail('must not publish success');
       },
     },
     stderr: {
@@ -113,12 +113,22 @@ async function deadlineFixture(
   };
   class Socket {
     constructor() {
-      if (stage === 'cdp') queueMicrotask(() => this.onopen());
+      if (['cdp', 'cleanup'].includes(stage))
+        queueMicrotask(() => this.onopen());
     }
     close() {
       calls.socket++;
     }
-    send() {} // The first CDP command stays pending.
+    send(raw) {
+      // Most cases stall the first CDP command. The cleanup case completes
+      // normal work, then the operation deadline arrives during profile removal.
+      if (stage === 'cleanup') {
+        const { id } = JSON.parse(raw);
+        queueMicrotask(() =>
+          this.onmessage({ data: JSON.stringify({ id, result: {} }) }),
+        );
+      }
+    }
   }
   vm.runInNewContext(
     source,
@@ -175,7 +185,14 @@ async function deadlineFixture(
   );
   const result = JSON.parse(calls.stderr);
   assert.equal(result.code, 'BROWSER_DEADLINE');
-  assert.equal(result.phase, stage === 'socket' ? 'connect' : stage);
+  assert.equal(
+    result.phase,
+    stage === 'cleanup'
+      ? 'remote-check'
+      : stage === 'socket'
+        ? 'connect'
+        : stage,
+  );
   assert.equal(result.cleanup.childExited, !childStalls);
   assert.equal(result.cleanup.profileRemoved, profile === 'ok');
   assert.ok(!calls.stderr.includes('private'));
@@ -189,6 +206,8 @@ test('hard deadline bounds stalled child and profile cleanup independently', () 
   deadlineFixture('connect', { childStalls: true, profile: 'stall' }));
 test('hard deadline reports profile cleanup failure without private error text', () =>
   deadlineFixture('connect', { profile: 'fail' }));
+test('hard deadline still reports failure if it arrives during normal cleanup', () =>
+  deadlineFixture('cleanup', { profile: 'stall' }));
 function clock() {
   let elapsed = 0;
   return {
