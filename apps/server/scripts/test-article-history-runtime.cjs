@@ -6,6 +6,14 @@ const path = require('node:path');
 const os = require('node:os');
 const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
+// The production coordinator now imports the incremental-write graph. Use the
+// project's installed TS compiler for its extensionless CommonJS imports, as
+// the application build does, instead of Node's standalone type stripping.
+require('ts-node').register({
+  transpileOnly: true,
+  project: path.join(__dirname, '../tsconfig.json'),
+  compilerOptions: { module: 'CommonJS', incremental: false },
+});
 const {
   SqliteWriteCoordinator,
 } = require('../src/collection/sqlite-write-coordinator.ts');

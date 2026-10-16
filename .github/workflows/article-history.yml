@@ -19,7 +19,9 @@ on:
       - '.github/workflows/article-history.yml'
       - 'scripts/local-release/build.cjs'
   push:
-    branches: ['codex/article-history-preservation-*']
+    branches:
+      - 'codex/article-history-preservation-*'
+      - 'codex/backend-recovery-integration-20261014'
   workflow_dispatch:
 
 permissions:
@@ -43,6 +45,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - name: Install the actual coordinator dependency graph
+        run: pnpm install --frozen-lockfile
       - name: Synthetic coverage and real offline browser decoding
         working-directory: apps/server/scripts
         env:
@@ -60,12 +67,8 @@ jobs:
         run: node --test apps/server/scripts/test-article-history-browser.cjs
       - name: Browser syntax
         run: node --check apps/server/scripts/article-history-browser.cjs
-      - name: Typecheck isolated maintenance integration
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          npm install --prefix "$RUNNER_TEMP/history-typecheck" --ignore-scripts --package-lock=false --no-save typescript@5.5.4 @types/node@22
-          node "$RUNNER_TEMP/history-typecheck/node_modules/typescript/bin/tsc" --noEmit --skipLibCheck --strict --target ES2021 --module commonjs --moduleResolution node --typeRoots "$RUNNER_TEMP/history-typecheck/node_modules/@types" apps/server/src/collection/sqlite-snapshot-guard.ts
+      - name: Typecheck actual maintenance integration
+        run: pnpm --filter server exec tsc --noEmit --incremental false -p tsconfig.build.json
       - name: Retain bounded synthetic browser failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

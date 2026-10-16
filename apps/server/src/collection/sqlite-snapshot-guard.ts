@@ -2,6 +2,7 @@ import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
+import { createRequire } from 'node:module';
 import { resolveSqliteBackupRoot } from './sqlite-backup-root';
 import { createInterface } from 'node:readline';
 import { sqliteWrites } from './sqlite-write-coordinator';
@@ -266,7 +267,7 @@ export class SqliteSnapshotGuard {
     )
       throw new Error('Article history maintenance disabled');
     // Loaded only after opt-in; never accepts caller-supplied recovery proofs.
-    const runtime = require(this.historyRuntimePath);
+    const runtime = createRequire(__filename)(this.historyRuntimePath);
     return runtime.withRuntimeReferences(
       {
         coordinator: sqliteWrites,

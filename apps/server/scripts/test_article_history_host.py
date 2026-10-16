@@ -139,6 +139,43 @@ class HostTests(unittest.TestCase):
             self.review()
         self.assertFalse((self.root / 'archives').exists())
 
+    def test_capacity_status_is_observed_without_accepting_reference_fields(self):
+        status = self.backups / '.space-budget-status.json'
+        value = json.loads(status.read_text(encoding='utf8'))
+        self.assertEqual(len(self.review()['eligible']), 1)
+        value['paths'] = [str(self.old)]
+        status.write_text(json.dumps(value), encoding='utf8')
+        with self.assertRaisesRegex(host.HostError, 'REFERENCE_STATUS_INVALID'):
+            self.review()
+
+    def test_capacity_status_change_invalidates_exact_review_approval(self):
+        plan = self.review()
+        status = self.backups / '.space-budget-status.json'
+        value = json.loads(status.read_text(encoding='utf8'))
+        value['warning'] = not value['warning']
+        status.write_text(json.dumps(value), encoding='utf8')
+        with self.assertRaisesRegex(host.HostError, 'APPROVED_REFERENCES_CHANGED'):
+            self.service.validate_approval(plan, self.approval(plan))
+        self.assertTrue(self.old.exists())
+
+    def test_unknown_json_is_not_exempted_as_capacity_telemetry(self):
+        value = (self.backups / '.space-budget-status.json').read_text(encoding='utf8')
+        (self.backups / 'foreign-status.json').write_text(value, encoding='utf8')
+        with self.assertRaisesRegex(host.HostError, 'REFERENCE_FORMAT_UNSUPPORTED'):
+            self.review()
+
+    def test_capacity_status_rejects_invalid_types_numbers_and_timestamp(self):
+        status = self.backups / '.space-budget-status.json'
+        original = json.loads(status.read_text(encoding='utf8'))
+        for key, value in [('warning', 'false'), ('nextBackupAllowed', 1),
+                           ('estimatedDaysAtContinuousChanges', -1),
+                           ('estimatedDaysAtContinuousChanges', float('inf')),
+                           ('recordedAt', '2026-10-16T10:00:00')]:
+            with self.subTest(key=key, value=value):
+                status.write_text(json.dumps({**original, key: value}), encoding='utf8')
+                with self.assertRaisesRegex(host.HostError, 'REFERENCE_STATUS_INVALID'):
+                    self.review()
+
     def test_schema_difference_holds_even_when_no_extra_rows(self):
         with closing(sqlite3.connect(self.old, isolation_level=None)) as db:
             db.execute('CREATE TABLE unknown_queue(id TEXT)')

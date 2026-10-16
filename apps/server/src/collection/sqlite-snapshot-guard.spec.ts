@@ -227,41 +227,45 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
     });
     await notifySqliteSnapshotDirty(outerCopy);
   });
-  it('reports periodic quota failure once without preventing unrelated ordinary database work', async () => {
-    Object.assign(process.env, {
-      SQLITE_BACKUP_KIND: 'test',
-      SQLITE_TEST_MAX_BYTES: '1',
-      SQLITE_TEST_MAX_COPIES: '1',
-      SQLITE_TEST_BACKUP_ROOT: path.join(root, 'full-budget'),
-    });
-    const warning = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      const owner = await newOwner();
-      for (
-        let n = 0;
-        n < 50 &&
-        !warning.mock.calls.some(
-          (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+  it.each(['0', '1'])(
+    'reports periodic quota failure without blocking ordinary writes with history review enabled=%s',
+    async (historyEnabled) => {
+      Object.assign(process.env, {
+        SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED: historyEnabled,
+        SQLITE_BACKUP_KIND: 'test',
+        SQLITE_TEST_MAX_BYTES: '1',
+        SQLITE_TEST_MAX_COPIES: '1',
+        SQLITE_TEST_BACKUP_ROOT: path.join(root, 'full-budget'),
+      });
+      const warning = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const owner = await newOwner();
+        for (
+          let n = 0;
+          n < 50 &&
+          !warning.mock.calls.some(
+            (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+          );
+          n++
+        )
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(
+          warning.mock.calls.filter(
+            (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+          ),
+        ).toHaveLength(1);
+        expect((await owner.query()).fresh).toBe(false);
+        await prisma.$executeRawUnsafe(
+          "INSERT INTO articles VALUES ('ordinary-after-backup-failure','retained')",
         );
-        n++
-      )
-        await new Promise((resolve) => setTimeout(resolve, 30));
-      expect(
-        warning.mock.calls.filter(
-          (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
-        ),
-      ).toHaveLength(1);
-      expect((await owner.query()).fresh).toBe(false);
-      await prisma.$executeRawUnsafe(
-        "INSERT INTO articles VALUES ('ordinary-after-backup-failure','retained')",
-      );
-      expect(
-        await prisma.$queryRawUnsafe(
-          "SELECT body FROM articles WHERE id='ordinary-after-backup-failure'",
-        ),
-      ).toEqual([{ body: 'retained' }]);
-    } finally {
-      warning.mockRestore();
-    }
-  });
+        expect(
+          await prisma.$queryRawUnsafe(
+            "SELECT body FROM articles WHERE id='ordinary-after-backup-failure'",
+          ),
+        ).toEqual([{ body: 'retained' }]);
+      } finally {
+        warning.mockRestore();
+      }
+    },
+  );
 });

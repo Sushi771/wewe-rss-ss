@@ -6,6 +6,7 @@ to delete files. The existing owner remains the source of snapshot authority.
 """
 from collections import Counter
 from contextlib import closing, contextmanager
+from datetime import datetime
 import copy
 import errno
 import hashlib
@@ -295,6 +296,21 @@ def reference_snapshot(files, registry, budget, roots=()):
             if json.loads(release_raw).get('id') != value['id']:
                 raise HostError('ACTIVE_RELEASE_MANIFEST_MISMATCH')
             records.append({'identity': history.identity(release_manifest), 'sha256': history.digest(release_raw)})
+        elif file.name == '.space-budget-status.json':
+            # Production capacity telemetry is not a reference or authority.
+            # Still bind its identity/hash below, so changes invalidate review.
+            fields = {'nextBackupAllowed', 'warning', 'estimatedDaysAtContinuousChanges', 'recordedAt'}
+            days = value.get('estimatedDaysAtContinuousChanges')
+            stamp = value.get('recordedAt')
+            if (set(value) != fields or type(value.get('nextBackupAllowed')) is not bool
+                    or type(value.get('warning')) is not bool or type(days) not in {int, float}
+                    or not 0 <= days <= 1e12 or not isinstance(stamp, str) or len(stamp) > 80):
+                raise HostError('REFERENCE_STATUS_INVALID')
+            try:
+                if datetime.fromisoformat(stamp.replace('Z', '+00:00')).tzinfo is None:
+                    raise ValueError('timezone required')
+            except ValueError:
+                raise HostError('REFERENCE_STATUS_INVALID') from None
         elif value.get('format') in {'article-history-references-v1', 'sqlite-retention-protected-v1'}:
             if set(value) != {'format', 'paths'} or not isinstance(value.get('paths'), list) or len(value['paths']) > 256:
                 raise HostError('REFERENCE_CATALOG_INVALID')
