@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { cacheFailureDiagnostic } from '../collection/cache-failure';
 import { Wechat2RssListedFeed } from '../collection/providers/wechat2rss';
 import { ProviderPage } from '../collection/subscription-provider';
 import { cacheSyncState, CacheSyncFeedState } from './cache-sync-state';
@@ -160,10 +161,16 @@ export class CacheSyncEngine {
               this.media.delete(id);
             }
           this.listFailures = 0;
+          cacheSyncState.metadataFailure = undefined;
           this.nextList = now + 5000;
           cacheSyncState.lastMetadataAt = new Date(now).toISOString();
           cacheSyncState.state = 'watching-cache';
-        } catch {
+        } catch (error) {
+          cacheSyncState.metadataFailure = cacheFailureDiagnostic(
+            error,
+            'metadata-read',
+            this.deps.now(),
+          );
           this.nextList =
             now + Math.min(60000, 5000 * 2 ** Math.min(++this.listFailures, 4));
           cacheSyncState.state = 'upstream-unavailable';
@@ -193,8 +200,10 @@ export class CacheSyncEngine {
         )
           continue;
         if (readBudget-- <= 0) break;
+        let point: 'cache-read' | 'cache-import' = 'cache-read';
         try {
           const page = await this.deps.read(slot.metadata, slot.local.mpName);
+          point = 'cache-import';
           const fingerprint = cachePageFingerprint(page);
           // If cache HTTP lags its DB marker, keep rechecking the affected feed.
           // Never mark check_time consumed after a single unchanged/empty read.
@@ -216,6 +225,7 @@ export class CacheSyncEngine {
             }
           }
           slot.failures = 0;
+          slot.status.failure = undefined;
           const delays =
             cacheSyncState.signal === 'sqlite'
               ? [1000, 2000, 5000, 15000, 30000, 60000]
@@ -232,6 +242,11 @@ export class CacheSyncEngine {
           cacheSyncState.lastSyncAt = slot.status.lastCacheReadAt;
         } catch (error) {
           slot.status.state = 'unavailable';
+          slot.status.failure = cacheFailureDiagnostic(
+            error,
+            point,
+            this.deps.now(),
+          );
           slot.nextRead =
             now +
             (error instanceof Error && error.message === 'CACHE_SYNC_BUSY'

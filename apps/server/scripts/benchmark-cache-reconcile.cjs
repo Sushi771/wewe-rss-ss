@@ -48,9 +48,33 @@ function compile(source, dependency) {
   return loaded.exports;
 }
 const state = compile(fs.readFileSync(stateFile, 'utf8'), require);
+const responseDiagnostics = compile(
+  fs.readFileSync(
+    path.join(
+      repo,
+      'apps/server/src/collection/providers/wechat2rss-response.ts',
+    ),
+    'utf8',
+  ),
+  require,
+);
+const cacheFailures = compile(
+  fs.readFileSync(
+    path.join(repo, 'apps/server/src/collection/cache-failure.ts'),
+    'utf8',
+  ),
+  (name) =>
+    name === './providers/wechat2rss-response'
+      ? responseDiagnostics
+      : require(name),
+);
 const loadEngine = (source) =>
   compile(source, (name) =>
-    name === './cache-sync-state' ? state : require(name),
+    name === './cache-sync-state'
+      ? state
+      : name === '../collection/cache-failure'
+        ? cacheFailures
+        : require(name),
   ).CacheSyncEngine;
 const engines = {
   before: loadEngine(beforeSource),

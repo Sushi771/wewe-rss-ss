@@ -137,7 +137,7 @@ describe('Wechat2RSS private HTTP client', () => {
       'fixture-token',
     );
     await expect(provider.checkAccountStatus()).rejects.toThrow(
-      'WECHAT2RSS_REQUEST_FAILED',
+      'WECHAT2RSS_HTTP_STATUS',
     );
   });
 });
@@ -271,7 +271,7 @@ describe('foreground accepted-identity checks (synthetic time and HTTP only)', (
       .mockResolvedValue(response({}, 500));
     await expect(
       provider().waitForAcceptedSubscription('/feed/' + number + '.xml'),
-    ).rejects.toThrow('WECHAT2RSS_REQUEST_FAILED');
+    ).rejects.toThrow('WECHAT2RSS_HTTP_STATUS');
     await jest.advanceTimersByTimeAsync(60000);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
