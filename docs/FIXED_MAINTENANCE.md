@@ -57,6 +57,22 @@ child exit, or uncertain publication holds the operation. It does not start a
 second recovery. Bounded reference diagnostics are retained privately in the
 fixed record; CLI output contains safe codes and summary fields only.
 
+The reference probe exports its shared API before dispatching its CLI. A service
+record invokes the shared command-line parser during maintenance owner validation;
+dispatching first exposed an incomplete CommonJS export through a circular require.
+Diagnostics retain maintenance error codes and a small exception-type whitelist,
+without raw messages, paths, command lines or stacks. If the sole recovery also
+fails, its bounded diagnostic is saved alongside the original failure in the same
+record and metadata budget.
+
+After a verified healthy detached service has been recorded, a fully persisted
+HOLD releases only the controller's Node child-process reference. The CLI retains
+its failure exit status while the service continues running. Failed HOLD
+persistence and an unverified service do not take this path. The lock, claim,
+record, receipts, failure history and spent credits remain; this is neither a
+resume entry nor permission to repeat any action. It does not release a controller
+that was already running older code, or finish a missing pointer publication.
+
 Validation uses the existing inert publication fixture family, including a
 genuinely consumed synthetic continuation and the full reference parser. It
 covers concurrency/replay, changed source authority, partial copies, failed
@@ -64,6 +80,12 @@ credit persistence, backup failure, migration timeout with confirmed and unknown
 exit, changed migration lists, health failure, uncertain publication, shared
 metadata limits and diagnostic redaction. Existing Windows fixtures separately
 verify the actual Node → Node probe → PowerShell synchronous process chain.
+Additional Windows tests run the real probe CLI against persisted synthetic
+candidate and recovery service records, replacing only native collection with
+frozen observations. An owned inert detached child test verifies that the real
+maintenance HOLD path lets its controller exit while the child remains alive and
+later exits naturally; it performs no process termination. Refusal cases cover
+failed HOLD persistence, unhealthy recovery and replay without new credit.
 Synthetic results do not establish production admission or subscription recovery.
 
 Before a production decision, freeze the fourteen files and plan, verify the

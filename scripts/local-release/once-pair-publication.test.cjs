@@ -668,7 +668,13 @@ async function fixture(run, api = { admission, publication }) {
         start(release) {
           events.push('start:' + path.basename(release));
           assert(!service);
-          const child = { pid: ++next, exitCode: null, unref() {} };
+          const child = {
+            pid: ++next,
+            exitCode: null,
+            unref() {
+              events.push('unref:' + path.basename(release));
+            },
+          };
           service = {
             pid: child.pid,
             startUtc: '2026-10-15T01:00:00Z',
@@ -1302,6 +1308,192 @@ test('fixed maintenance parser validates actual fixed owner and rejects caller, 
     assert.equal((await f.maintenance()).status, 'passed');
     assert(exercised);
   }));
+for (const recovery of [false, true])
+  test(
+    'fixed maintenance actual probe CLI validates persisted service: ' +
+      (recovery ? 'rollback' : 'candidate'),
+    { skip: process.platform !== 'win32' },
+    () =>
+      maintenanceFixture(async (f) => {
+        if (recovery) f.failAt = 'candidate-health';
+        f.policy.windowsReferences.collectorSha256 = fileHash(
+          path.join(__dirname, 'windows-release-reference-collector.ps1'),
+        );
+        f.policy.windowsReferences.collectorIdentitySha256 = fileHash(
+          path.join(__dirname, 'windows-reference-directory-identity.cs'),
+        );
+        fs.writeFileSync(f.file, JSON.stringify(f.policy));
+        let calls = 0;
+        f.parserQuery = (p, r) => {
+          if (!r.service) return f.factsWithOwner(p, r);
+          const observation = path.join(f.base, 'cli-native.json');
+          fs.writeFileSync(observation, JSON.stringify(f.observation(p, r)));
+          const raw = require('node:child_process').execFileSync(
+            process.execPath,
+            [
+              '--require',
+              path.join(__dirname, 'fixtures/maintenance-cli-native.cjs'),
+              p.probe.path,
+              f.file,
+            ],
+            {
+              encoding: 'utf8',
+              windowsHide: true,
+              timeout: 20000,
+              maxBuffer: 1024 ** 2,
+              env: {
+                ...process.env,
+                NODE_OPTIONS: '',
+                WEWE_OWNED_NATIVE: observation,
+              },
+            },
+          );
+          const out = JSON.parse(raw);
+          assert.deepEqual(out.errors, []);
+          assert.equal(out.operationSufficient, true);
+          assert.equal(out.maintenanceOwner.nonce, r.nonce);
+          calls++;
+          return out;
+        };
+        // The ordinary fixture owns every pre-service query. Only persisted
+        // service observations launch the actual unmodified probe CLI.
+        f.factsWithOwner = (p, r) => {
+          const lock = JSON.parse(
+            fs.readFileSync(
+              path.join(p.registryDirectory, p.scopeId + '.lock'),
+            ),
+          );
+          return {
+            ...f.facts(),
+            maintenanceOwner: {
+              kind: fixedMaintenance.KIND,
+              configSha: fileHash(f.file),
+              nonce: r.nonce,
+              recordSha256: lock.recordPin.sha256,
+              recordIdentity: lock.recordPin.identity,
+            },
+          };
+        };
+        assert.equal(
+          (await f.maintenance()).status,
+          recovery ? 'recovered' : 'passed',
+        );
+        assert.equal(calls, 1);
+      }),
+  );
+
+for (const mode of ['healthy', 'hold-save-fails', 'unhealthy'])
+  test('fixed maintenance recovery HOLD child reference: ' + mode, () =>
+    maintenanceFixture(async (f) => {
+      f.failAt = 'candidate-health';
+      const facts = f.facts,
+        ready = f.operations.ready,
+        rename = fs.renameSync;
+      f.facts = () => {
+        const r = f.maintenanceRecord();
+        if (r.recoverySpent && r.service)
+          return {
+            ...facts(),
+            complete: false,
+            errors: ['REFERENCE_QUERY_FAILED'],
+            referenceDiagnostic: {
+              stage: 'processes',
+              codes: ['FIXED_MAINTENANCE_RECORD_OWNER'],
+              exceptionType: 'TypeError',
+              message: 'C:/private SECRET_ARGV',
+            },
+          };
+        return facts();
+      };
+      if (mode === 'unhealthy')
+        f.operations.ready = async (...a) => {
+          if (f.maintenanceRecord().recoverySpent)
+            throw Error('FIXED_MAINTENANCE_HEALTH_FAILED');
+          return ready(...a);
+        };
+      if (mode === 'hold-save-fails')
+        fs.renameSync = (from, to) => {
+          if (
+            to === fixedMaintenance.recordPath(f.policy) &&
+            JSON.parse(fs.readFileSync(from)).payload.status === 'hold'
+          )
+            throw Error('FIXED_MAINTENANCE_HOLD_SAVE_FAILED');
+          return rename(from, to);
+        };
+      let error;
+      try {
+        await f.maintenance();
+      } catch (e) {
+        error = e;
+      } finally {
+        fs.renameSync = rename;
+      }
+      assert(error);
+      assert.equal(f.backupCount(), 1);
+      assert.equal(f.events.filter((e) => e === 'migrate').length, 1);
+      assert.equal(f.events.filter((e) => e === 'stop-child').length, 1);
+      assert.equal(f.events.includes('unref:rollback'), mode === 'healthy');
+      if (mode === 'healthy') {
+        const r = f.maintenanceRecord();
+        assert.equal(r.status, 'hold');
+        assert.equal(r.recoverySpent, true);
+        assert.equal(r.publicationSpent, false);
+        assert.equal(r.error.code, 'SYNTHETIC_HEALTH_FAILURE');
+        assert(
+          r.error.recovery.referenceDiagnostic.codes.includes(
+            'FIXED_MAINTENANCE_RECORD_OWNER',
+          ),
+        );
+        assert.equal(
+          r.error.recovery.referenceDiagnostic.exceptionType,
+          'TypeError',
+        );
+        const cli = fixedMaintenance.formatCliError(error);
+        assert(cli.includes('FIXED_MAINTENANCE_RECORD_OWNER'));
+        assert(cli.includes('TypeError'));
+        assert(!/SECRET|private/.test(cli));
+        assert.equal(error.referenceDiagnostic.diagnosticStored, true);
+      }
+      assert(
+        fs.existsSync(
+          path.join(f.policy.registryDirectory, f.policy.scopeId + '.lock'),
+        ),
+      );
+      await assert.rejects(f.maintenance());
+      assert.equal(f.backupCount(), 1);
+    }),
+  );
+
+test('fixed maintenance durable healthy recovery HOLD exits while its detached service survives', async () => {
+  const root = fs.mkdtempSync(
+    path.join(fs.realpathSync.native(os.tmpdir()), 'wewe-hold-exit-'),
+  );
+  const stem = path.join(root, 'owned-service');
+  try {
+    const parent = require('node:child_process').spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'fixtures/maintenance-hold-exit.cjs'), stem],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 90000,
+        env: { ...process.env, NODE_OPTIONS: '' },
+      },
+    );
+    assert.equal(parent.error, undefined);
+    assert.equal(parent.status, 1, parent.stderr);
+    assert.equal(JSON.parse(parent.stdout).status, 'hold');
+    assert(!fs.existsSync(stem + '.done'), 'controller exited before service');
+    const until = Date.now() + 12000;
+    while (!fs.existsSync(stem + '.done') && Date.now() < until)
+      await new Promise((r) => setTimeout(r, 30));
+    assert.equal(fs.readFileSync(stem + '.done', 'utf8'), 'natural-exit');
+  } finally {
+    assert(path.basename(root).startsWith('wewe-hold-exit-'));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('fixed maintenance migration list changes after backup before migration refuses migration', () =>
   maintenanceFixture(async (f) => {
     const inspect = f.operations.inspect;

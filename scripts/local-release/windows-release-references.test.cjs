@@ -295,6 +295,46 @@ test('probe CLI catch preserves safe pre-parser errors and transport details wit
   assert(!JSON.stringify(summary).includes('TOKEN'));
 });
 
+test('probe bounded diagnostics retain maintenance codes and exception type without raw exception text', () => {
+  const api = require('./windows-release-references.cjs');
+  const safe = api.cliResult(() => {
+    throw Error('FIXED_MAINTENANCE_RECORD_OWNER');
+  });
+  assert(
+    safe.referenceDiagnostic.codes.includes('FIXED_MAINTENANCE_RECORD_OWNER'),
+  );
+  const typed = api.cliResult(() => {
+    throw new TypeError('C:/private SECRET_ARGV argv is not a function');
+  });
+  assert.equal(typed.referenceDiagnostic.exceptionType, 'TypeError');
+  assert(!/private|SECRET|argv|stack/.test(JSON.stringify(typed)));
+  assert.equal(
+    api.referenceDiagnostic({ exceptionType: 'C:/SECRET' }).exceptionType,
+    undefined,
+  );
+  fixture((f) => {
+    Object.defineProperty(f.native, 'processesBefore', {
+      get() {
+        throw new TypeError('C:/private SECRET_ARGV');
+      },
+    });
+    const out = f.run();
+    assert.equal(out.referenceDiagnostic.exceptionType, 'TypeError');
+    assert(!/private|SECRET|stack/.test(JSON.stringify(out)));
+    let wrapped;
+    try {
+      require('./release-scope.cjs').validateReferences(
+        out,
+        f.policy,
+        'install',
+      );
+    } catch (e) {
+      wrapped = e;
+    }
+    assert.equal(wrapped.referenceDiagnostic.exceptionType, 'TypeError');
+  });
+});
+
 function operationFixture(f) {
   const source = path.join(f.base, 'sources');
   fs.mkdirSync(source);

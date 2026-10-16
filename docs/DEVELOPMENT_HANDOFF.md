@@ -496,3 +496,17 @@ resolver 审核已完成：公开 mobile `/mp/getreviewid` 的认证和 synckey 
 ## 2026-10-14: bounded retention review candidate
 
 The isolated disk-guard branch now includes production source `be1a5d03c92b9a4497c1ff226f9440099f5fc360`, opt-in hourly review scanning, bounded owned-report rotation, exact batch/digest/path/time approval checks, resource evidence, and action-time identity/SHA/SQLite/reference checks. Read [SQLite retention review](SQLITE_RETENTION_REVIEW.md) for product impact and deployment steps. Unique or unattributed recovery points remain held; the validator has no database deletion or service-control operation. Production activation and any new exact permanent-deletion batch need their own authorization. This handoff update is in the isolated branch; it does not overwrite a dirty source checkout.
+
+## 2026-10-16: Maintenance CLI and durable HOLD candidate
+
+The reference CLI now exports its shared API before execution, so persisted service
+owner validation can use the command-line parser through the existing circular
+module dependency. Bounded diagnostics retain maintenance codes and exception
+types, and retain the sole recovery failure alongside the first failure. After a
+healthy detached service and HOLD are durably recorded, only the controller's
+child reference is released; the failure exit status, retained lock/claim/history
+and all consumed credits remain. Persistence failure and unverified health do not
+release that reference. This code does not change an already-running controller,
+resume maintenance, repeat recovery or complete a missing pointer publication.
+See [fixed maintenance](FIXED_MAINTENANCE.md) for the owned CLI, exit and refusal
+fixtures. Development verification and production closeout remain separate.

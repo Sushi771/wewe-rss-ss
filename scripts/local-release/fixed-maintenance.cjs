@@ -619,6 +619,28 @@ function review(file, expected) {
     fail('FOREIGN_CONTROL');
   return { ...plan, continuation };
 }
+function failureEvidence(error) {
+  const api = require('./windows-release-references.cjs');
+  const diagnostic = api.referenceDiagnostic({
+    stage: 'admission',
+    exceptionType: error.name,
+    transportCode: error.code,
+    codes: [error.message],
+    ...error.referenceDiagnostic,
+  });
+  const privateDiagnostic = api.privateReferenceDiagnostic(
+    error.privateReferenceDiagnostic,
+  );
+  return {
+    code: /^[A-Z_]{1,128}$/.test(error.message)
+      ? error.message
+      : 'MAINTENANCE_FAILED',
+    referenceDiagnostic: diagnostic,
+    ...(privateDiagnostic
+      ? { privateReferenceDiagnostic: privateDiagnostic }
+      : {}),
+  };
+}
 async function execute(file, expected, options = {}) {
   const plan = review(file, expected),
     { p, pair } = plan,
@@ -654,6 +676,7 @@ async function execute(file, expected, options = {}) {
     uncertain = false,
     safeStopped = false,
     child,
+    healthyChild,
     record = {
       format: 1,
       kind: KIND,
@@ -983,6 +1006,7 @@ async function execute(file, expected, options = {}) {
     record.service = { ...snapshot, release };
     record.health = healthy;
     save();
+    healthyChild = child;
     references();
     return snapshot;
   };
@@ -1204,24 +1228,8 @@ async function execute(file, expected, options = {}) {
     };
   } catch (error) {
     if (!uncertain) {
-      const api = require('./windows-release-references.cjs');
-      const diagnostic = api.referenceDiagnostic({
-        stage: 'admission',
-        codes: [error.message],
-        ...error.referenceDiagnostic,
-      });
-      const privateDiagnostic = api.privateReferenceDiagnostic(
-        error.privateReferenceDiagnostic,
-      );
-      record.error = {
-        code: /^[A-Z_]+$/.test(error.message)
-          ? error.message
-          : 'MAINTENANCE_FAILED',
-        referenceDiagnostic: diagnostic,
-        ...(privateDiagnostic
-          ? { privateReferenceDiagnostic: privateDiagnostic }
-          : {}),
-      };
+      record.error = failureEvidence(error);
+      const diagnostic = record.error.referenceDiagnostic;
       try {
         save();
         error.referenceDiagnostic = { ...diagnostic, diagnosticStored: true };
@@ -1243,6 +1251,7 @@ async function execute(file, expected, options = {}) {
         if (child) {
           await ops.stopChild(child);
           child = undefined;
+          healthyChild = undefined;
           save();
         }
         writersStopped();
@@ -1271,6 +1280,13 @@ async function execute(file, expected, options = {}) {
         };
       } catch (recoveryError) {
         error = recoveryError;
+        // Preserve the first failure as well as the sole recovery failure.
+        // Both use the same bounded diagnostics and metadata allowance.
+        record.error.recovery = failureEvidence(recoveryError);
+        error.referenceDiagnostic = {
+          ...record.error.recovery.referenceDiagnostic,
+          diagnosticStored: false,
+        };
       }
     }
     if (!uncertain) {
@@ -1278,6 +1294,11 @@ async function execute(file, expected, options = {}) {
         record.status = 'hold';
         record.stage = 'hold';
         save();
+        if (record.error?.recovery)
+          error.referenceDiagnostic.diagnosticStored = true;
+        // A durable HOLD has no remaining controller work. Keep the verified
+        // healthy detached service alive without keeping this CLI alive.
+        if (child && child === healthyChild) child.unref?.();
       } catch {
         uncertain = true;
       }

@@ -86,7 +86,7 @@ function referenceDiagnostic(value = {}) {
       (Array.isArray(value.codes) ? value.codes : []).filter(
         (s) =>
           typeof s === 'string' &&
-          /^(REFERENCE|RELEASE_SCOPE|ONCE_PAIR|ONCE_PUBLICATION)_[A-Z_]{1,96}$/.test(
+          /^(REFERENCE|RELEASE_SCOPE|ONCE_PAIR|ONCE_PUBLICATION|FIXED_MAINTENANCE)_[A-Z_]{1,96}$/.test(
             s,
           ),
       ),
@@ -118,6 +118,11 @@ function referenceDiagnostic(value = {}) {
       ? value.stage
       : 'unknown',
     codes,
+    ...(['Error', 'TypeError', 'SyntaxError', 'RangeError'].includes(
+      value.exceptionType,
+    )
+      ? { exceptionType: value.exceptionType }
+      : {}),
     ...(chainBranches.includes(value.chainBranch)
       ? { chainBranch: value.chainBranch }
       : {}),
@@ -1955,6 +1960,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     );
     result.referenceDiagnostic = referenceDiagnostic({
       stage,
+      exceptionType: error.name,
+      transportCode: error.code,
+      status: error.status,
       ...error.referenceDiagnostic,
       codes: [
         ...result.errors,
@@ -2116,6 +2124,7 @@ function cliResult(run) {
       uncertainChildren: [],
       referenceDiagnostic: referenceDiagnostic({
         stage: 'probe-main',
+        exceptionType: error.name,
         codes: [error.message, 'REFERENCE_NATIVE_QUERY_FAILED'],
         transportCode: error.code,
         status: error.status,
@@ -2123,13 +2132,8 @@ function cliResult(run) {
     };
   }
 }
-if (require.main === module) {
-  const value = cliResult(() => {
-    if (process.argv.length !== 3) fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
-    return main(process.argv[2]);
-  });
-  process.stdout.write(JSON.stringify(value) + '\n');
-}
+// Shared owner validation can require argv while main is running. Publish the
+// complete API before dispatching the CLI, including on the first load.
 module.exports = {
   probe,
   argv,
@@ -2150,3 +2154,10 @@ module.exports = {
   privateReferenceDiagnostic,
   cliResult,
 };
+if (require.main === module) {
+  const value = cliResult(() => {
+    if (process.argv.length !== 3) fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
+    return main(process.argv[2]);
+  });
+  process.stdout.write(JSON.stringify(value) + '\n');
+}
