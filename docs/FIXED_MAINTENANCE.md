@@ -18,7 +18,15 @@ plan binds the retained approved policy, exact ledger/adopted/continuation bytes
 and file identities, and the full fourteen-file closure. Only the reviewed tool
 pins, probe binding, collector hashes and explicitly approved background process
 bindings may differ from the retained policy. Process, task and Startup rules
-continue to apply; an updated background list requires a separate risk decision.
+continue to apply; the automatic mode keeps its frozen background bindings.
+
+For this fixed maintenance mode only, unrelated background process observations
+are retained as visible risk rather than an exact PID allowlist. Their additions,
+removals and restarts do not require an identical observation digest. Association
+by service identity, paths, argv, parent chains and port ownership is still checked
+first; related changes and opaque execution hosts still refuse. The existing
+automatic mode retains its exact background bindings. Neither mode proves that
+all indirect database access has been excluded.
 
 Execution owns the original scope's exclusive lock with an explicit maintenance
 kind and uses one fixed `<scope>.maintenance.json` record. It never modifies the
@@ -59,6 +67,6 @@ verify the actual Node → Node probe → PowerShell synchronous process chain.
 Synthetic results do not establish production admission or subscription recovery.
 
 Before a production decision, freeze the fourteen files and plan, verify the
-exact CI head and independent review, resolve the background-list risk decision,
+exact CI head and independent review, record the acknowledged indirect-access risk,
 and obtain approval for that plan digest and maintenance ownership exception.
 Only the approved execution may create a real maintenance lock and record.

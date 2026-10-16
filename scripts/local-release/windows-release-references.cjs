@@ -595,7 +595,14 @@ function operationProcessContract(p) {
     fail('REFERENCE_PROCESS_OPERATION_CONTRACT_INVALID');
   return c;
 }
-function operationProcessView(p, native, before, after, callerPid) {
+function operationProcessView(
+  p,
+  native,
+  before,
+  after,
+  callerPid,
+  maintenance = false,
+) {
   const contract = operationProcessContract(p);
   if (!contract) return null;
   const port = p.publication.expected.port;
@@ -689,7 +696,8 @@ function operationProcessView(p, native, before, after, callerPid) {
   };
   for (const r of [...before.values(), ...after.values()]) {
     if (related.has(r.pid)) {
-      if (pins.has(r.pid)) fail('REFERENCE_BACKGROUND_BECAME_ASSOCIATED');
+      if (!maintenance && pins.has(r.pid))
+        fail('REFERENCE_BACKGROUND_BECAME_ASSOCIATED');
       if (!visibleProcess(r)) fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
       const other = after.get(r.pid),
         first = before.get(r.pid);
@@ -712,7 +720,8 @@ function operationProcessView(p, native, before, after, callerPid) {
           hash(processTuple(after.get(r.pid)))
       )
         fail('REFERENCE_INFLIGHT_OWNER_CHANGED');
-      if (pins.has(r.pid)) fail('REFERENCE_CONTROLLER_BACKGROUND_BOUND');
+      if (!maintenance && pins.has(r.pid))
+        fail('REFERENCE_CONTROLLER_BACKGROUND_BOUND');
       continue;
     }
     if (!needsGap(r)) continue;
@@ -725,6 +734,15 @@ function operationProcessView(p, native, before, after, callerPid) {
         operationHostCommand.test(r.commandLine || ''))
     )
       fail('REFERENCE_OPAQUE_INTERPRETER_UNRESOLVED');
+    // Only the verified fixed-maintenance owner treats unrelated observations
+    // as visible risk, not a PID allowlist. Related/opaque-host checks stay above.
+    if (maintenance) {
+      if (
+        !background.some((x) => hash(processTuple(x)) === hash(processTuple(r)))
+      )
+        background.push({ ...r });
+      continue;
+    }
     const pin = pins.get(r.pid),
       first = before.get(r.pid),
       last = after.get(r.pid);
@@ -738,7 +756,7 @@ function operationProcessView(p, native, before, after, callerPid) {
       fail('REFERENCE_BACKGROUND_GAP_UNBOUND');
     if (!background.some((x) => x.pid === r.pid)) background.push({ ...r });
   }
-  if (background.length !== pins.size)
+  if (!maintenance && background.length !== pins.size)
     fail('REFERENCE_BACKGROUND_BINDING_NOT_OBSERVED');
   background.sort((a, b) => a.pid - b.pid);
   return {
@@ -770,12 +788,15 @@ function validateOperationProcessSummary(p, value) {
     proof.globalProcessVisibilityComplete !== false ||
     proof.globalInvocationCoverageComplete !== false ||
     !Array.isArray(proof.backgroundGaps) ||
-    hash(
-      proof.backgroundGaps.map(processTuple).sort((a, b) => a.pid - b.pid),
-    ) !==
+    (p.maintenance?.kind !== 'fixed-once-maintenance-v1' &&
       hash(
-        contract.backgroundGaps.map(processTuple).sort((a, b) => a.pid - b.pid),
-      )
+        proof.backgroundGaps.map(processTuple).sort((a, b) => a.pid - b.pid),
+      ) !==
+        hash(
+          contract.backgroundGaps
+            .map(processTuple)
+            .sort((a, b) => a.pid - b.pid),
+        ))
   )
     fail('REFERENCE_OPERATION_PROCESS_COVERAGE_INVALID');
   return true;
@@ -1433,7 +1454,14 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     }
     stage = 'processes';
     const processView = processContract
-      ? operationProcessView(policy, native, before, after, callerPid)
+      ? operationProcessView(
+          policy,
+          native,
+          before,
+          after,
+          callerPid,
+          !!maintenanceRecord,
+        )
       : null;
     const approvedAuxiliary = (p) =>
       processView &&

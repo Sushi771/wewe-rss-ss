@@ -608,6 +608,160 @@ async function fixture(run) {
     fs.rmSync(base, { recursive: true });
   }
 }
+test('fixed maintenance unrelated background churn remains visible risk without blocking the fixed sequence', () =>
+  maintenanceFixture(async (f) => {
+    const api = require('./windows-release-references.cjs'),
+      validate = require('./release-scope.cjs').validateReferences;
+    let checks = 0,
+      negatives = false;
+    f.parserQuery = (p, r) => {
+      const base = f.observation(p, r),
+        pid = 9000001;
+      const row = {
+        pid,
+        parentPid: 1,
+        name: 'node.exe',
+        executable: process.execPath,
+        commandLine:
+          '"' +
+          process.execPath +
+          '" "' +
+          path.join(f.base, 'unrelated-background.cjs') +
+          '"',
+        startUtc: '2026-10-16T00:00:00Z',
+      };
+      const run = (n) => api.probe(p, n, { callerPid: process.pid });
+      if (!negatives) {
+        negatives = true;
+        for (const change of ['add', 'remove', 'restart', 'same-pid-restart']) {
+          const n = structuredClone(base);
+          if (change !== 'add') n.processesBefore.push({ ...row });
+          if (change !== 'remove')
+            n.processesAfter.push({
+              ...row,
+              pid: change === 'restart' ? pid + 1 : pid,
+              startUtc: '2026-10-16T00:01:00Z',
+            });
+          const out = run(n);
+          assert.deepEqual(out.errors, [], change);
+          assert.equal(typeof validate(out, p, 'install'), 'string');
+          assert(
+            out.operationCoverage.processCoverage.backgroundGaps.length > 0,
+          );
+          assert.equal(
+            out.operationCoverage.processCoverage.globalDbWriterExclusion,
+            false,
+          );
+        }
+        for (const fault of [
+          'related-identity',
+          'port',
+          'related-path',
+          'parent-chain',
+          'opaque-host',
+          'startup-directory',
+        ]) {
+          const n = structuredClone(base);
+          if (fault === 'related-identity')
+            n.processesAfter.find(
+              (x) => x.pid === p.publication.expected.pid,
+            ).startUtc = '2026-10-16T00:02:00Z';
+          else if (fault === 'port')
+            n.processCoverage.listenersAfter[0].pid = pid;
+          else if (fault === 'startup-directory')
+            n.shortcutDirectories[0].identity[1] = '0';
+          else {
+            n.processesBefore.push({ ...row });
+            n.processesAfter.push({ ...row });
+            for (const list of [n.processesBefore, n.processesAfter]) {
+              const x = list.find((x) => x.pid === pid);
+              if (fault === 'related-path') x.workingDirectory = p.installRoot;
+              if (fault === 'parent-chain')
+                x.parentPid = p.publication.expected.pid;
+              if (fault === 'opaque-host') {
+                x.executable = '';
+                x.commandLine = '';
+              }
+            }
+          }
+          assert(run(n).errors.length, fault);
+        }
+      }
+      // Every real check in the finite fixture sees a different unrelated PID.
+      base.processesBefore.push({ ...row, pid: pid + checks });
+      base.processesAfter.push({ ...row, pid: pid + checks++ });
+      const out = run(base);
+      assert.deepEqual(out.errors, []);
+      return out;
+    };
+    assert.equal((await f.maintenance()).status, 'passed');
+    assert(checks > 2);
+    assert(negatives);
+  }));
+test('fixed maintenance related database writer cannot become unrelated background', () =>
+  maintenanceFixture(async (f) => {
+    const api = require('./windows-release-references.cjs');
+    let observed = false;
+    f.parserQuery = (p, r) => {
+      const n = f.observation(p, r);
+      if (!f.service()) {
+        const writer = {
+          ...p.publication.expected,
+          pid: 9000001,
+          parentPid: 1,
+          name: 'node.exe',
+        };
+        n.processesBefore.push({ ...writer });
+        n.processesAfter.push({ ...writer });
+        observed = true;
+      }
+      const out = api.probe(p, n, { callerPid: process.pid });
+      if (observed && out.errors.length === 0)
+        assert(
+          out.records.some((x) => x.kind === 'processes' && x.pid === 9000001),
+        );
+      return out;
+    };
+    await assert.rejects(
+      f.maintenance(),
+      /WRITERS_NOT_STOPPED|REFERENCE_QUERY_INCOMPLETE/,
+    );
+    assert(observed);
+    assert.equal(f.backupCount(), 0);
+    assert(!f.events.includes('migrate'));
+  }));
+for (const target of ['directory', 'database'])
+  test(
+    'fixed maintenance background simplification retains ' +
+      target +
+      ' identity refusal',
+    () =>
+      maintenanceFixture(async (f) => {
+        let original, held;
+        f.queryHook = () => {
+          f.queryHook = null;
+          original = target === 'directory' ? f.root : f.database;
+          held = original + '.held-fixture';
+          fs.renameSync(original, held);
+          if (target === 'directory') fs.mkdirSync(original);
+          else fs.writeFileSync(original, fs.readFileSync(held));
+        };
+        try {
+          await assert.rejects(
+            f.maintenance(),
+            /DIRECTORY_CHANGED|DATABASE_CHANGED/,
+          );
+          assert(!f.events.includes('Stop'));
+          assert.equal(f.backupCount(), 0);
+        } finally {
+          if (held) {
+            if (target === 'directory') fs.rmdirSync(original);
+            else fs.unlinkSync(original);
+            fs.renameSync(held, original);
+          }
+        }
+      }),
+  );
 test('fixed maintenance parser validates actual fixed owner and rejects caller, nonce and record identity changes', () =>
   maintenanceFixture(async (f) => {
     const api = require('./windows-release-references.cjs');
