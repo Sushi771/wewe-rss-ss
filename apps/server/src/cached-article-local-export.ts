@@ -89,7 +89,8 @@ export function prepareCachedArticleLocalExport(
     prepare.identity.mediaComplete = false;
     prepare.identity.mediaStatus = 'unconfirmed';
   }
-  prepare.canReuseLegacyImages = html('img')
+  prepare.canReuseLegacyImages = content
+    .find('img')
     .toArray()
     .every((element) => {
       const src = html(element).attr('src') || '';
@@ -101,10 +102,9 @@ export function prepareCachedArticleLocalExport(
   prepare.seedImages = async (stage, folder, images) => {
     // Old receipts lack URL mappings. Archived inline bytes can still identify
     // existing content hashes without requesting any media or changing names.
-    const $ = load(snapshot.contentHtml || '');
     await fs.mkdir(join(stage, 'image'), { recursive: true });
-    for (const element of $('img').toArray()) {
-      const src = $(element).attr('src') || '';
+    for (const element of content.find('img').toArray()) {
+      const src = html(element).attr('src') || '';
       if (!src.startsWith('data:image/')) continue;
       let bytes: Buffer;
       try {

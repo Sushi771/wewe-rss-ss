@@ -89,6 +89,43 @@ describe('body media status with synthetic bytes and mocked requests only', () =
     expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
     expect(await readdir(join(root, 'image'))).toHaveLength(1);
   });
+  it('ignores outside decoration while reusing legacy inline images during repair', async () => {
+    const source = {
+      feedId: 'MP_WXS_1234567890',
+      feedName: 'Fixture',
+      groupId: 'g',
+      groupName: 'Group',
+    };
+    const store = new LocalArticleStore(join(root, 'settings.json'), root);
+    const cached = {
+      ...article,
+      lastBodyStatus: 'images-pending',
+      contentHtml: `<div id="js_content"><p>Body</p><img src="data:image/png;base64,${png.toString('base64')}"></div>`,
+    };
+    const first = await store.save(
+      prepareCachedArticleLocalExport(cached, source),
+    );
+    const receipts = join(first.directory, '.wewe-articles');
+    const receiptFile = join(
+      receipts,
+      (await readdir(receipts)).find((name) => name.endsWith('.json'))!,
+    );
+    const receipt = JSON.parse(await readFile(receiptFile, 'utf8'));
+    delete receipt.imageMap;
+    await writeFile(receiptFile, JSON.stringify(receipt));
+    const current = {
+      ...cached,
+      lastBodyStatus: 'available',
+      contentHtml:
+        '<img src="https://mmbiz.qpic.cn/avatar.png">' +
+        cached.contentHtml +
+        '<img src="data:image/png;base64,YQ==">',
+    };
+    expect(
+      await store.save(prepareCachedArticleLocalExport(current, source)),
+    ).toMatchObject({ status: 'repaired', mediaComplete: true, imageCount: 1 });
+    expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+  });
 
   it('deduplicates concurrent downloads without a byte limit too', async () => {
     jest.mocked(images.fetchAllowedImage).mockImplementation(async () => {
