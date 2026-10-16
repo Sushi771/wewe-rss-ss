@@ -1,0 +1,76 @@
+name: Article history preservation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/server/scripts/article_history.py'
+      - 'apps/server/scripts/article-history-browser.cjs'
+      - 'apps/server/scripts/test-article-history-browser.cjs'
+      - 'apps/server/scripts/test_article_history.py'
+      - 'apps/server/scripts/article_history_host.py'
+      - 'apps/server/scripts/test_article_history_host.py'
+      - 'apps/server/scripts/article-history-runtime.cjs'
+      - 'apps/server/scripts/test-article-history-runtime.cjs'
+      - 'apps/server/scripts/article-history-resources.ps1'
+      - 'apps/server/scripts/sqlite-snapshot-guard.py'
+      - 'apps/server/src/collection/sqlite-snapshot-guard.ts'
+      - 'apps/server/src/collection/sqlite-backup-reuse.ts'
+      - 'docs/ARTICLE_HISTORY_PRESERVATION.md'
+      - '.github/workflows/article-history.yml'
+      - 'scripts/local-release/build.cjs'
+  push:
+    branches: ['codex/article-history-preservation-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-preservation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    env:
+      ARTICLE_HISTORY_SYNTHETIC_DIAGNOSTICS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Synthetic coverage and real offline browser decoding
+        working-directory: apps/server/scripts
+        env:
+          ARTICLE_HISTORY_BROWSER_REQUIRED: '1'
+          ARTICLE_HISTORY_DIAGNOSTICS_DIR: ${{ runner.temp }}/article-history-diagnostics
+        run: python -m unittest test_article_history test_article_history_host test_sqlite_snapshot_guard -v
+      - name: Actual Node coordinator and owner stdio integration
+        env:
+          ARTICLE_HISTORY_DIAGNOSTICS_DIR: ${{ runner.temp }}/article-history-diagnostics
+        run: node --experimental-transform-types --test apps/server/scripts/test-article-history-runtime.cjs
+      - name: Bounded startup faults and six consecutive real offline browser runs
+        env:
+          ARTICLE_HISTORY_BROWSER_REQUIRED: '1'
+          ARTICLE_HISTORY_DIAGNOSTICS_DIR: ${{ runner.temp }}/article-history-diagnostics
+        run: node --test apps/server/scripts/test-article-history-browser.cjs
+      - name: Browser syntax
+        run: node --check apps/server/scripts/article-history-browser.cjs
+      - name: Typecheck isolated maintenance integration
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/history-typecheck" --ignore-scripts --package-lock=false --no-save typescript@5.5.4 @types/node@22
+          node "$RUNNER_TEMP/history-typecheck/node_modules/typescript/bin/tsc" --noEmit --skipLibCheck --strict --target ES2021 --module commonjs --moduleResolution node --typeRoots "$RUNNER_TEMP/history-typecheck/node_modules/@types" apps/server/src/collection/sqlite-snapshot-guard.ts
+      - name: Retain bounded synthetic browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: article-history-synthetic-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/article-history-diagnostics/*.json
+          if-no-files-found: warn
+          retention-days: 3

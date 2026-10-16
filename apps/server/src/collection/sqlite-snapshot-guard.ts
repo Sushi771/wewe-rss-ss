@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { access, realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
+import { sqliteWrites } from './sqlite-write-coordinator';
+import { activeVerifiedBackupReferences } from './sqlite-backup-reuse';
 
 export interface FastInsertSnapshotLease {
   token: string;
@@ -61,6 +63,7 @@ export class SqliteSnapshotGuard {
   private starting?: Promise<void>;
   private generation?: string;
   private databasePath?: string;
+  private historyRuntimePath?: string;
   private nodeIdentity?: [string, string];
   private readonly issued = new Map<string, FastInsertSnapshotLease>();
 
@@ -118,6 +121,11 @@ export class SqliteSnapshotGuard {
       )
         throw new Error();
       this.reason = 'startup-backup-required';
+      this.historyRuntimePath = path.join(
+        root,
+        'scripts',
+        'article-history-runtime.cjs',
+      );
       const child = spawn(
         python,
         [
@@ -139,7 +147,11 @@ export class SqliteSnapshotGuard {
       const lines = createInterface({ input: child.stdout });
       lines.on('line', (line) => {
         try {
-          if (Buffer.byteLength(line) > 8192) throw new Error();
+          const limit =
+            process.env.SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED === '1'
+              ? 256 * 1024
+              : 8192;
+          if (Buffer.byteLength(line) > limit) throw new Error();
           const { id, result } = JSON.parse(line);
           const pending = this.pending.get(id);
           if (!pending) return;
@@ -207,6 +219,36 @@ export class SqliteSnapshotGuard {
       pending.resolve(fallback(reason));
     }
     this.pending.clear();
+  }
+
+  /** Explicit internal maintenance API. No timer, route or delete operation. */
+  async historyReview(
+    operation:
+      | 'history-review'
+      | 'history-validate-approval'
+      | 'history-pin'
+      | 'history-unpin',
+    payload: Record<string, unknown>,
+  ) {
+    if (
+      process.env.SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED !== '1' ||
+      process.env.SQLITE_ARTICLE_HISTORY_MAINTENANCE_WINDOW !== '1' ||
+      !this.historyRuntimePath ||
+      !this.child
+    )
+      throw new Error('Article history maintenance disabled');
+    // Loaded only after opt-in; never accepts caller-supplied recovery proofs.
+    const runtime = require(this.historyRuntimePath);
+    return runtime.withRuntimeReferences(
+      {
+        coordinator: sqliteWrites,
+        activeBackupReferences: activeVerifiedBackupReferences,
+        request: (op: string, args: Record<string, unknown>) =>
+          runtime.exchange(this.child, op, args),
+      },
+      operation,
+      payload,
+    );
   }
 
   private request(operation: string, token?: string) {
@@ -320,6 +362,17 @@ export const assertFastInsertSnapshotLease = (
 ) => owner.assertLease(transaction, lease);
 export const markFastInsertSnapshotDirty = (lease: FastInsertSnapshotLease) =>
   owner.markDirty(lease);
+
+export const reviewArticleHistory = (sources: string[]) =>
+  owner.historyReview('history-review', { sources });
+export const validateArticleHistoryApproval = (
+  plan: unknown,
+  approval: unknown,
+) => owner.historyReview('history-validate-approval', { plan, approval });
+export const pinArticleHistoryReference = (token: string, path: string) =>
+  owner.historyReview('history-pin', { token, path });
+export const unpinArticleHistoryReference = (token: string) =>
+  owner.historyReview('history-unpin', { token });
 
 export async function recentVerifiedSqliteSnapshot(): Promise<InsertOnlySnapshot | null> {
   const health = await owner.query();
