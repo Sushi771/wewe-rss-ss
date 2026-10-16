@@ -382,6 +382,7 @@ function checkPlan(
       p.approval.id.length > 160)
   )
     fail('EXPLICIT_APPROVAL_REQUIRED');
+  if (requireApproval && p.maintenance) fail('MAINTENANCE_ENTRY_REQUIRED');
   if (hash(p.limits) !== hash(LIMITS) || hash(p.codePins) !== hash(codePins()))
     fail('FINITE_LIMITS_OR_CODE_PIN');
   if (!Array.isArray(p.roots) || !p.roots.length || p.roots.length > 32)
@@ -631,6 +632,97 @@ function checkPlan(
       fail('COMPATIBILITY_ROLE');
   }
   return { file, configSha, p, packages, pair, block, metadataBlock, verifier };
+}
+function copyPackageFiles(item, slot, owner) {
+  const source = item.source,
+    target = item.target;
+  if (
+    !slot.identity ||
+    slot.path !== target ||
+    slot.complete ||
+    hash(identity(target)) !== hash(slot.identity)
+  )
+    fail('COPY_BINDING');
+  const buffer = Buffer.alloc(64 * 1024);
+  for (const [relative, spec] of Object.entries(item.pkg.files)) {
+    owner();
+    if (hash(identity(target)) !== hash(slot.identity)) fail('TARGET_IDENTITY');
+    const from = path.resolve(source, relative),
+      to = path.resolve(target, relative);
+    let directory = target;
+    for (const component of path
+      .relative(target, path.dirname(to))
+      .split(path.sep)
+      .filter(Boolean)) {
+      directory = path.join(directory, component);
+      if (!present(directory)) fs.mkdirSync(directory);
+      const stat = fs.lstatSync(directory);
+      if (
+        !stat.isDirectory() ||
+        stat.isSymbolicLink() ||
+        canonical(directory) !== directory
+      )
+        fail('TARGET_ALIAS');
+    }
+    if (!contains(target, canonical(path.dirname(to)))) fail('TARGET_ALIAS');
+    const input = fs.openSync(from, 'r'),
+      digest = crypto.createHash('sha256');
+    let output;
+    try {
+      output = fs.openSync(to, 'wx');
+      const before = fs.fstatSync(input, { bigint: true });
+      if (
+        hash(
+          [
+            before.dev,
+            before.ino,
+            before.birthtimeNs,
+            before.ctimeNs,
+            before.mtimeNs,
+          ].map(String),
+        ) !== hash(spec.identity) ||
+        Number(before.size) !== spec.bytes
+      )
+        fail('COPY_SOURCE_CHANGED');
+      let remaining = spec.bytes;
+      while (remaining) {
+        const count = fs.readSync(
+          input,
+          buffer,
+          0,
+          Math.min(remaining, buffer.length),
+          null,
+        );
+        if (!count) fail('COPY_SOURCE_TRUNCATED');
+        digest.update(buffer.subarray(0, count));
+        let written = 0;
+        while (written < count)
+          written += fs.writeSync(output, buffer, written, count - written);
+        remaining -= count;
+      }
+      if (
+        fs.readSync(input, buffer, 0, 1, null) ||
+        digest.digest('hex') !== spec.sha256
+      )
+        fail('COPY_SOURCE_HASH');
+      const after = fs.fstatSync(input, { bigint: true });
+      if (
+        hash(
+          [
+            after.dev,
+            after.ino,
+            after.birthtimeNs,
+            after.ctimeNs,
+            after.mtimeNs,
+          ].map(String),
+        ) !== hash(spec.identity)
+      )
+        fail('COPY_SOURCE_CHANGED');
+    } finally {
+      if (output !== undefined) fs.closeSync(output);
+      fs.closeSync(input);
+    }
+  }
 }
 function withAdmission(policyFile, expected, action, options = {}) {
   const plan = checkPlan(policyFile, expected, true),
@@ -1080,88 +1172,7 @@ function withAdmission(policyFile, expected, action, options = {}) {
         hash(identity(target)) !== hash(slot.identity)
       )
         fail('COPY_BINDING');
-      const buffer = Buffer.alloc(64 * 1024);
-      for (const [relative, spec] of Object.entries(item.pkg.files)) {
-        owner();
-        if (hash(identity(target)) !== hash(slot.identity))
-          fail('TARGET_IDENTITY');
-        const from = path.resolve(source, relative),
-          to = path.resolve(target, relative);
-        let directory = target;
-        for (const component of path
-          .relative(target, path.dirname(to))
-          .split(path.sep)
-          .filter(Boolean)) {
-          directory = path.join(directory, component);
-          if (!present(directory)) fs.mkdirSync(directory);
-          const stat = fs.lstatSync(directory);
-          if (
-            !stat.isDirectory() ||
-            stat.isSymbolicLink() ||
-            canonical(directory) !== directory
-          )
-            fail('TARGET_ALIAS');
-        }
-        if (!contains(target, canonical(path.dirname(to))))
-          fail('TARGET_ALIAS');
-        const input = fs.openSync(from, 'r'),
-          digest = crypto.createHash('sha256');
-        let output;
-        try {
-          output = fs.openSync(to, 'wx');
-          const before = fs.fstatSync(input, { bigint: true });
-          if (
-            hash(
-              [
-                before.dev,
-                before.ino,
-                before.birthtimeNs,
-                before.ctimeNs,
-                before.mtimeNs,
-              ].map(String),
-            ) !== hash(spec.identity) ||
-            Number(before.size) !== spec.bytes
-          )
-            fail('COPY_SOURCE_CHANGED');
-          let remaining = spec.bytes;
-          while (remaining) {
-            const count = fs.readSync(
-              input,
-              buffer,
-              0,
-              Math.min(remaining, buffer.length),
-              null,
-            );
-            if (!count) fail('COPY_SOURCE_TRUNCATED');
-            digest.update(buffer.subarray(0, count));
-            let written = 0;
-            while (written < count)
-              written += fs.writeSync(output, buffer, written, count - written);
-            remaining -= count;
-          }
-          if (
-            fs.readSync(input, buffer, 0, 1, null) ||
-            digest.digest('hex') !== spec.sha256
-          )
-            fail('COPY_SOURCE_HASH');
-          const after = fs.fstatSync(input, { bigint: true });
-          if (
-            hash(
-              [
-                after.dev,
-                after.ino,
-                after.birthtimeNs,
-                after.ctimeNs,
-                after.mtimeNs,
-              ].map(String),
-            ) !== hash(spec.identity)
-          )
-            fail('COPY_SOURCE_CHANGED');
-        } finally {
-          if (output !== undefined) fs.closeSync(output);
-          fs.closeSync(input);
-        }
-      }
+      copyPackageFiles(item, slot, owner);
       slot.copied = true;
       save();
     },
@@ -1579,10 +1590,12 @@ module.exports = {
   codePins,
   checkPlan,
   withAdmission,
+  copyPackageFiles,
   main,
   formatCliError,
   validateContinuation,
   continuationPath,
+  pinnedDocument,
 };
 if (require.main === module) {
   Promise.resolve()

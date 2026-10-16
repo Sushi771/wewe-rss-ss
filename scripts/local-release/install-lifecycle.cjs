@@ -148,6 +148,20 @@ function store(file, payload) {
     if (exists(temp)) fs.unlinkSync(temp);
   }
 }
+function copyPackageLinks(target, manifest) {
+  for (const [name, relative] of Object.entries(manifest.links || {})) {
+    const link = path.resolve(target, name),
+      destination = path.resolve(target, relative);
+    if (!inside(target, link) || !inside(target, destination))
+      throw new Error('RELEASE_LINK_ESCAPE');
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    fs.symlinkSync(
+      destination,
+      link,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+  }
+}
 function installPair(root, plan, options = {}) {
   require('./release-scope.cjs').assertWritableSession(['install']);
   options.scope?.assertWritable?.(['install']);
@@ -324,20 +338,7 @@ function installPair(root, plan, options = {}) {
           errorOnExist: true,
           filter: (file) => !fs.lstatSync(file).isSymbolicLink(),
         });
-      for (const [name, relative] of Object.entries(
-        source.manifest.links || {},
-      )) {
-        const link = path.resolve(target, name),
-          destination = path.resolve(target, relative);
-        if (!inside(target, link) || !inside(target, destination))
-          throw new Error('RELEASE_LINK_ESCAPE');
-        fs.mkdirSync(path.dirname(link), { recursive: true });
-        fs.symlinkSync(
-          destination,
-          link,
-          process.platform === 'win32' ? 'junction' : 'dir',
-        );
-      }
+      copyPackageLinks(target, source.manifest);
       if (role(target, block).manifestSha !== source.manifestSha)
         throw new Error('RELEASE_INSTALLED_PROOF_CHANGED');
     }
@@ -408,7 +409,7 @@ function installPair(root, plan, options = {}) {
     }
   }
 }
-module.exports = { installPair, DEFAULTS };
+module.exports = { installPair, DEFAULTS, copyPackageLinks };
 if (require.main === module) {
   try {
     if (process.argv.length !== 4 || process.argv[2] !== '--plan')

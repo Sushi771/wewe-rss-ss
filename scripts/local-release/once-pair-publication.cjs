@@ -443,6 +443,7 @@ function nativeOperations(p, u, audit, check) {
           );
           child.once('close', () => {
             clearTimeout(killTimer);
+            if (error) error.migrationExitConfirmed = true;
             error ? reject(error) : resolve(value);
           });
         };
@@ -646,6 +647,42 @@ function nativeOperations(p, u, audit, check) {
     },
   };
 }
+function atomicPublish(
+  pointer,
+  id,
+  check,
+  prepared = () => {},
+  reserveMetadata = () => {},
+) {
+  check();
+  reserveMetadata();
+  const temporary = path.join(
+    path.dirname(pointer),
+    'active-' + crypto.randomUUID() + '.tmp',
+  );
+  const text = JSON.stringify({ format: 1, id }) + '\n';
+  const fd = fs.openSync(temporary, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const publishedIdentity = identity(temporary),
+    publishedSha = hashText(text);
+  prepared(temporary);
+  check();
+  fs.renameSync(temporary, pointer);
+  const finalIdentity = identity(pointer);
+  if (
+    hash(finalIdentity.slice(0, 2)) !== hash(publishedIdentity.slice(0, 2)) ||
+    fileHash(pointer) !== publishedSha
+  )
+    fail('ATOMIC_PUBLICATION_CHANGED');
+  return { identity: finalIdentity, sha256: publishedSha };
+}
+const hashText = (text) =>
+  crypto.createHash('sha256').update(text).digest('hex');
 async function execute(policyFile, expected, options = {}) {
   if (hostEffects.currentLease()) fail('OBSERVATION_OR_NESTED');
   const once = require('./once-pair-admission.cjs');
@@ -1055,23 +1092,13 @@ async function execute(policyFile, expected, options = {}) {
           fail('EXACT_AUXILIARY_UNCONFIRMED');
       };
       const publish = (id) => {
-        check();
-        const temp = path.join(
-            p.installRoot,
-            'active-' + crypto.randomUUID() + '.tmp',
-          ),
-          text = JSON.stringify({ format: 1, id }) + '\n';
-        fs.writeFileSync(temp, text, { flag: 'wx' });
-        const publishedIdentity = identity(temp),
-          publishedSha = crypto.createHash('sha256').update(text).digest('hex');
-        check();
-        fs.renameSync(temp, pointer);
+        const published = atomicPublish(pointer, id, check);
         // Trust only the file and bytes we prepared, never a post-rename read.
-        pointerSha = publishedSha;
-        pointerIdentity = publishedIdentity;
+        pointerSha = published.sha256;
+        pointerIdentity = published.identity;
         owner();
-        state.publication.pointerSha256 = publishedSha;
-        state.publication.pointerIdentity = publishedIdentity;
+        state.publication.pointerSha256 = published.sha256;
+        state.publication.pointerIdentity = published.identity;
         save();
       };
       const finish = (status, identity, health) => {
@@ -1252,4 +1279,8 @@ module.exports = {
   measure,
   databaseBytes,
   execute,
+  nativeOperations,
+  atomicPublish,
+  additiveMigrations,
+  reserve,
 };

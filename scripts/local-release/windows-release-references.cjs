@@ -1355,6 +1355,74 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     const before = processMap(native.processesBefore),
       after = processMap(native.processesAfter),
       matched = new Map();
+    // Maintenance is a distinct, fully pinned owner of the same scope. The
+    // retained automatic held ledger is never made writable or reinterpreted.
+    const ownerPrefix = path.join(
+      canonical(policy.registryDirectory),
+      policy.scopeId,
+    );
+    const ownerLock = policy.maintenance
+      ? JSON.parse(watch(ownerPrefix + '.lock').toString('utf8'))
+      : undefined;
+    let maintenanceRecord;
+    if (policy.maintenance) {
+      if (!scope || !processContract)
+        fail('REFERENCE_MAINTENANCE_SCOPE_REQUIRED');
+      const entry = path.join(__dirname, 'fixed-maintenance.cjs');
+      const pins = policy.maintenance.toolPins;
+      if (
+        !pins ||
+        Object.keys(pins).length !== 14 ||
+        !hex(pins['fixed-maintenance.cjs'])
+      )
+        fail('REFERENCE_MAINTENANCE_PIN_REQUIRED');
+      // Validate the entry's bytes before loading its shared owner validator.
+      watchPinned({ path: entry, sha256: pins['fixed-maintenance.cjs'] });
+      for (const [name, sha256] of Object.entries(pins)) {
+        if (path.basename(name) !== name)
+          fail('REFERENCE_MAINTENANCE_PIN_REQUIRED');
+        watchPinned({ path: path.join(__dirname, name), sha256 });
+      }
+      const fixed = require('./fixed-maintenance.cjs');
+      const controller = before.get(callerPid),
+        controllerAfter = after.get(callerPid);
+      if (
+        !visibleProcess(controller) ||
+        !controllerAfter ||
+        hash(processTuple(controller)) !==
+          hash(processTuple(controllerAfter)) ||
+        hash(argv(controller.commandLine)) !==
+          hash([
+            controller.executable,
+            entry,
+            '--execute',
+            policy.maintenance.planPath,
+            native.policySha256,
+          ])
+      )
+        fail('REFERENCE_MAINTENANCE_CALLER_UNCERTAIN');
+      const raw = watchPinned(ownerLock.recordPin),
+        envelope = JSON.parse(raw.toString('utf8'));
+      maintenanceRecord = fixed.validateOwner(
+        policy,
+        native.policySha256,
+        ownerLock,
+        envelope.payload,
+        callerPid,
+      );
+      for (const pin of [
+        policy.maintenance.sourcePolicy,
+        ...Object.values(policy.maintenance.sourceFiles),
+      ])
+        watchPinned(pin);
+      result.maintenanceOwner = {
+        kind: fixed.KIND,
+        configSha: native.policySha256,
+        nonce: ownerLock.nonce,
+        recordSha256: ownerLock.recordPin.sha256,
+        recordIdentity: ownerLock.recordPin.identity,
+      };
+    }
     if (self) {
       stage = 'collector-chain';
       result.collectorChain = collectorChain(before, after, callerPid, self);
@@ -1378,17 +1446,18 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       );
     // Win32_Process CreationDate has microsecond precision; the publication
     // helper separately verifies the exact .NET100ns creation identity/handle.
-    const approvedParent = (p) =>
+    const matchesParent = (p, expected) =>
       processView &&
-      p.pid === policy.publication.expected.pid &&
-      (p.startUtc === policy.publication.expected.startUtc ||
-        p.startUtc ===
-          policy.publication.expected.startUtc.replace(
-            /(\.\d{6})\dZ$/,
-            '$10Z',
-          )) &&
-      p.executable === policy.publication.expected.executable &&
-      p.commandLine === policy.publication.expected.commandLine;
+      p.pid === expected.pid &&
+      (p.startUtc === expected.startUtc ||
+        p.startUtc === expected.startUtc.replace(/(\.\d{6})\dZ$/, '$10Z')) &&
+      p.executable === expected.executable &&
+      p.commandLine === expected.commandLine;
+    const approvedParent = (p) =>
+      (processView && matchesParent(p, policy.publication.expected)) ||
+      (maintenanceRecord?.service &&
+        p.parentPid === callerPid &&
+        matchesParent(p, maintenanceRecord.service));
     for (const p of before.values()) {
       if (processView && !processView.related.has(p.pid)) continue;
       const refs = approvedAuxiliary(p)
@@ -1707,6 +1776,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       prefix = path.join(registry, policy.scopeId);
     const lockRaw = watch(prefix + '.lock'),
       lock = JSON.parse(lockRaw.toString('utf8'));
+    if (!maintenanceRecord && lock.kind)
+      fail('REFERENCE_CONTROLLER_KIND_UNREVIEWED');
     if (
       lock.pid !== callerPid ||
       !Number.isInteger(callerPid) ||
@@ -1726,10 +1797,13 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       return doc.payload;
     }
     const ledgerFile = prefix + '.state.json',
-      ledger = envelope(ledgerFile);
+      ledger = maintenanceRecord || envelope(ledgerFile);
     if (ledger.configSha !== lock.configSha || !Array.isArray(ledger.outputs))
       fail('REFERENCE_INFLIGHT_STATE_INVALID');
-    if (ledger.continuation || policy.preCopyContinuation) {
+    if (
+      !maintenanceRecord &&
+      (ledger.continuation || policy.preCopyContinuation)
+    ) {
       if (
         !ledger.complete &&
         (ledger.claim?.kind !== 'install' ||
