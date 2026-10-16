@@ -1,10 +1,10 @@
 """Bounded data-read-only maintenance planning and explicit batch validation.
 
-This module has no database deletion/move or service-control operation.
-Only its small registered review reports may be rotated in .retention-review.
+Default planning/validation never deletes data. Explicit Windows execution is
+limited to approved, pinned old periodic snapshots in this managed root.
 """
 import argparse
-from contextlib import closing
+from contextlib import closing, ExitStack
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
@@ -22,7 +22,7 @@ backup = importlib.util.module_from_spec(spec); spec.loader.exec_module(backup)
 FORMAT = 'sqlite-retention-review-v1'
 MAX_REPORT_BYTES = 256 * 1024
 MAX_REPORTS = 3
-POLICY_DEFAULTS = {'maxOrdinaryCopies':48,'keepLatest':2,'minimumAgeHours':1,
+POLICY_DEFAULTS = {'maxOrdinaryCopies':48,'maxOrdinaryBytes':32*1024**3,'keepLatest':2,'minimumAgeHours':1,
                    'roundDays':7,'recentHours':24,'bucketHours':2,'dailyDays':7,
                    'weeklyWeeks':4,'maximumAgeDays':28,'warningPercent':80,
                    'reserveCopies':16,'expectedGenerationsPerDay':6}
@@ -42,6 +42,30 @@ def identity(file):
         raise MaintenanceError('FILE_IDENTITY_UNPROVED')
     return [str(stat.st_dev), str(stat.st_ino), str(stat.st_size), str(stat.st_mtime_ns), str(stat.st_ctime_ns)]
 
+def directory_identity(directory):
+    info=directory.stat()
+    if not directory.is_dir() or not info.st_ino:raise MaintenanceError('DIRECTORY_IDENTITY_UNPROVED')
+    return [str(info.st_dev),str(info.st_ino)]
+
+def generation_clear(root, owned_lease=None):
+    lease=root/'.space-budget.lock'
+    if owned_lease is None:return not lease.exists()
+    return lease.exists() and identity(lease)==owned_lease
+
+def periodic_artifacts(entry,root,retired,budget):
+    file=Path(entry['path']);receipt=Path(entry['receipt']);folder=file.parent
+    if (file!=local_path(str(file)) or folder.parent!=root or str(file) not in retired
+        or not re.fullmatch(r'periodic-snapshot-\d{8}T\d{6}Z-[a-f0-9]{8}',folder.name)
+        or receipt!=folder/'verification.json' or set(folder.iterdir())!={file,receipt}
+        or directory_identity(folder)!=entry['directoryIdentity'] or str(folder)!=entry['directory']):
+        raise MaintenanceError('PERIODIC_ARTIFACT_SCOPE_CHANGED')
+    for path in (root,folder,file,receipt):
+        if path.is_symlink() or (hasattr(path,'is_junction') and path.is_junction()):raise MaintenanceError('PERIODIC_LINK_REFUSED')
+    if (entry['receipt']!=retired[str(file)]['receipt'] or entry['sha256']!=retired[str(file)]['sha256']
+        or entry['createdAtEpoch']!=retired[str(file)]['at'] or entry['bytes']!=file.stat().st_size
+        or identity(receipt)!=entry['receiptIdentity']
+        or budget.sha(receipt)!=entry['receiptSha256']):raise MaintenanceError('PERIODIC_RECEIPT_CHANGED')
+
 def local_path(value):
     if not isinstance(value, str) or not Path(value).is_absolute() or value.startswith(('\\\\', '//')) or any(c in value for c in '\0\r\n'):
         raise MaintenanceError('INVALID_LOCAL_PATH')
@@ -58,7 +82,7 @@ def retention_policy(value):
     if value is None:return None
     if not isinstance(value,dict) or set(value)-set(POLICY_DEFAULTS):raise MaintenanceError('INVALID_RETENTION_POLICY')
     result={**POLICY_DEFAULTS,**value}
-    limits={'maxOrdinaryCopies':(2,256),'keepLatest':(2,16),'minimumAgeHours':(1,168),
+    limits={'maxOrdinaryCopies':(2,256),'maxOrdinaryBytes':(1,128*1024**3),'keepLatest':(2,16),'minimumAgeHours':(1,168),
             'roundDays':(1,31),'recentHours':(1,168),'bucketHours':(1,24),'dailyDays':(1,90),
             'weeklyWeeks':(0,52),'maximumAgeDays':(1,365),'warningPercent':(10,99),
             'reserveCopies':(2,128),'expectedGenerationsPerDay':(1,96)}
@@ -69,7 +93,7 @@ def retention_policy(value):
     return result
 
 
-def policy_refs(database,root,files,databases,refs,records,budget,now,policy):
+def policy_refs(database,root,files,databases,refs,records,budget,now,policy,periodic_only=False):
     if policy is None:return {},{}
     points={};inventory=[]
     for p in databases:inventory.append({'path':str(p),'identity':identity(p)})
@@ -81,17 +105,19 @@ def policy_refs(database,root,files,databases,refs,records,budget,now,policy):
                 or str(local_path(r['source']))!=str(database) or r.get('integrityCheck')!='ok'
                 or not re.fullmatch('[a-f0-9]{64}',r.get('sha256',''))
                 or origin.get('format')!='sqlite-recovery-origin-v1' or origin.get('kind') not in ('write-before','periodic')):continue
+            if periodic_only and (origin['kind']!='periodic' or target.parent.parent!=root):continue
             expected='before-collection' if origin['kind']=='write-before' else 'periodic-snapshot'
             if not re.fullmatch(expected+r'-\d{8}T\d{6}Z-[a-f0-9]{8}',target.parent.name):continue
             date=datetime.fromisoformat(r['createdAtUtc'].replace('Z','+00:00'))
             if date.tzinfo is None or date.timestamp()>now:continue
             at=int(date.timestamp());path=str(target)
             inventory.append({'receipt':str(p),'identity':identity(p),'contentDigest':digest(r)})
-            if path not in refs:points[path]={'at':at,'kind':origin['kind'],'receipt':str(p),
+            if periodic_only or path not in refs:points[path]={'at':at,'kind':origin['kind'],'receipt':str(p),
                                             'receiptIdentity':identity(p),'sha256':r['sha256']}
         except MaintenanceError:raise
         except (KeyError,ValueError,OSError):continue
     ordered=sorted(points,key=lambda p:(points[p]['at'],p),reverse=True);keep={}
+    if periodic_only:keep.update({p:refs[p] for p in points if p in refs})
     def retain(path,reason):keep.setdefault(path,reason)
     for path in ordered[:policy['keepLatest']]:retain(path,'latest ordinary recovery points')
     buckets=set()
@@ -108,13 +134,17 @@ def policy_refs(database,root,files,databases,refs,records,budget,now,policy):
     # Fill unused slots with the newest remaining ordinary points, within maximum age.
     # Mandatory windows may exceed the target; warn rather than silently weaken recovery.
     for path in ordered:
-        if len(keep)<policy['maxOrdinaryCopies'] and now-points[path]['at']<policy['maximumAgeDays']*86400:retain(path,'ordinary count allowance')
+        used=sum(Path(p).stat().st_size for p in keep)
+        if (len(keep)<policy['maxOrdinaryCopies'] and used+Path(path).stat().st_size<=policy['maxOrdinaryBytes']
+            and now-points[path]['at']<policy['maximumAgeDays']*86400):retain(path,'ordinary count/byte allowance')
     retired={p:r for p,r in points.items() if p not in keep}
     refs.update(keep)
     records.append({'retentionPolicy':policy,'inventoryDigest':digest(sorted(inventory,key=lambda x:canonical_json(x))),
                     'retained':sorted(keep),'retirement':sorted(retired)})
-    return retired,{'ordinaryCopies':len(points),'retainedOrdinaryCopies':len(keep),
+    retained_bytes=sum(Path(p).stat().st_size for p in keep)
+    return retired,{'ordinaryCopies':len(points),'retainedOrdinaryCopies':len(keep),'retainedOrdinaryBytes':retained_bytes,
                     'ordinaryTargetExceeded':len(keep)>policy['maxOrdinaryCopies'],
+                    'ordinaryByteTargetExceeded':retained_bytes>policy['maxOrdinaryBytes'],
                     'retirementCount':len(retired),'requiresExactUniqueHistoryApproval':bool(retired)}
 
 class ReadBudget:
@@ -222,13 +252,14 @@ def files_and_refs(root, budget, protected_paths=()):
     reference_records.sort(key=lambda r:canonical_json(r))
     return files, data_files, refs, reference_records, state
 
-def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**2, seconds=10, age_days=7, policy=None):
+def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**2, seconds=10, age_days=7, policy=None, periodic_only=False):
     database, root = local_path(str(database)), local_path(str(root))
     if database.is_relative_to(root): raise MaintenanceError('NESTED_SOURCE_DESTINATION')
     if any(database.is_relative_to(p) for p in backup.legacy_roots()):raise MaintenanceError('NESTED_SOURCE_LEGACY_ROOT')
     now = int(time.time()) if now is None else finite(now, 1, 2**53)
     age_days = finite(age_days, 1, 365)
     policy=retention_policy(policy)
+    if periodic_only and policy is None:raise MaintenanceError('EXPLICIT_PERIODIC_POLICY_REQUIRED')
     budget = ReadBudget(read_bytes, seconds)
     files, databases, refs, records, _state = files_and_refs(root, budget, protected_paths)
     paused = (root / '.space-budget.lock').exists()
@@ -243,7 +274,8 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
             source = str(local_path(r['source']))
             date = datetime.fromisoformat(r['createdAtUtc'].replace('Z','+00:00'))
             if date.tzinfo is None or date.timestamp() > now: continue
-            receipt_by_backup[str(target)] = {'source':source,'sha256':r['sha256'],'at':int(date.timestamp()),'receipt':str(p)}
+            receipt_by_backup[str(target)] = {'source':source,'sha256':r['sha256'],'at':int(date.timestamp()),'receipt':str(p),
+                                            'origin':r.get('recoveryOrigin',{}).get('kind')}
         except MaintenanceError:raise
         except (KeyError, ValueError, OSError):
             continue
@@ -252,7 +284,7 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
         if receipt['source'] not in newest or receipt['at'] > newest[receipt['source']][0]:
             newest[receipt['source']] = (receipt['at'], path)
     for _at, path in newest.values(): refs[path] = 'latest verified receipt per source'
-    retired,tier_summary=policy_refs(database,root,files,databases,refs,records,budget,now,policy)
+    retired,tier_summary=policy_refs(database,root,files,databases,refs,records,budget,now,policy,periodic_only)
     ref_digest = digest({'records':records, 'protected':sorted(refs)})
     candidates, held = [], []
     groups = {}
@@ -271,7 +303,26 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
         if any(Path(path+suffix).exists() for suffix in ('-wal','-shm','-journal')):
             held.append({'path':path,'reason':'SQLite sidecar present; retained'});continue
         r = receipt_by_backup.get(path)
-        if size == 0:
+        if periodic_only:
+            if path not in retired:
+                held.append({'path':path,'reason':'not an eligible old managed periodic point'});continue
+            receipt=Path(retired[path]['receipt'])
+            if set(p.parent.iterdir())!={p,receipt}:
+                held.append({'path':path,'reason':'unknown sibling artifacts; retained'});continue
+            keepers=[Path(k) for k,v in receipt_by_backup.items() if k in refs and v['source']==str(database)
+                     and v['origin']=='periodic' and Path(k).parent.parent==root]
+            if not keepers:raise MaintenanceError('PERIODIC_RECOVERY_REPRESENTATIVE_UNPROVED')
+            keeper=max(keepers,key=lambda k:receipt_by_backup[str(k)]['at']);keeper_receipt=receipt_by_backup[str(keeper)]
+            receipt_sha=budget.sha(receipt)
+            if receipt_sha is None:raise MaintenanceError('READ_BUDGET_EXCEEDED')
+            candidates.append({'path':path,'identity':stamp,'bytes':size,'kind':'retention-expired',
+                               'sha256':r['sha256'],'source':r['source'],'createdAtEpoch':r['at'],
+                               'receipt':str(receipt),'receiptIdentity':identity(receipt),'receiptSha256':receipt_sha,
+                               'directory':str(p.parent),'directoryIdentity':directory_identity(p.parent),
+                               'representative':str(keeper),'representativeIdentity':identity(keeper),
+                               'representativeSha256':keeper_receipt['sha256'],
+                               'evidence':'old managed periodic point outside configured count/byte/time retention; exact history-loss approval required'})
+        elif size == 0:
             if now - p.stat().st_mtime < 3600 or list(x for x in p.parent.iterdir() if x != p):
                 held.append({'path':path,'reason':'fresh or sibling artifacts'});continue
             candidates.append({'path':path,'identity':stamp,'bytes':0,'kind':'empty','sha256':hashlib.sha256(b'').hexdigest(),
@@ -305,7 +356,7 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
     # Changed live references or a new generation lease invalidate this scan.
     _f, _d, new_refs, new_records, _s = files_and_refs(root, budget, protected_paths)
     for _at,path in newest.values(): new_refs[path]='latest verified receipt per source'
-    policy_refs(database,root,_f,_d,new_refs,new_records,budget,now,policy)
+    policy_refs(database,root,_f,_d,new_refs,new_records,budget,now,policy,periodic_only)
     if digest({'records':new_records,'protected':sorted(new_refs)}) != ref_digest or (root/'.space-budget.lock').exists() != paused:
         raise MaintenanceError('REFERENCES_CHANGED_DURING_SCAN')
     prefix = 'SQLITE_TEST' if os.environ.get('SQLITE_BACKUP_KIND') == 'test' else 'SQLITE_PRODUCTION'
@@ -322,17 +373,19 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
     if used>=maximum*threshold or len(databases)>=copies*threshold:alarms.append('capacity-threshold')
     if headroom<=(policy['reserveCopies'] if policy else 2):alarms.append('generation-reserve')
     if tier_summary.get('ordinaryTargetExceeded'):alarms.append('protected-time-windows-exceed-count-target')
+    if tier_summary.get('ordinaryByteTargetExceeded'):alarms.append('protected-time-windows-exceed-byte-target')
     rate=policy['expectedGenerationsPerDay'] if policy else 96
     if headroom/rate<3:alarms.append('less-than-three-days-at-configured-rate')
     payload = {'format':FORMAT,'root':str(root),'database':str(database),'createdAtEpoch':now,'expiresAtEpoch':now+86400,
                'referenceDigest':ref_digest,'referenceRecords':records,'protected':refs,'candidates':candidates,'held':held,
-               'policy':{'maxBytes':maximum,'maxCopies':copies,'ageDays':age_days,'retention':policy},
+                'policy':{'maxBytes':maximum,'maxCopies':copies,'ageDays':age_days,'retention':policy,**({'periodicOnly':True} if periodic_only else {})},
                'summary':{'existingBytes':used,'existingCopies':len(databases),'readBytes':budget.used,
                           'candidateCount':len(candidates),'candidateBytes':sum(x['bytes'] for x in candidates),
                           'generationInProgress':paused,'warning':bool(alarms),'warningReasons':alarms,
                           'headroomGenerations':headroom,'estimatedDaysAtConfiguredRate':round(headroom/rate,2),
                           'configuredGenerationsPerDay':rate,'nextReservedBytes':reserved,**tier_summary,
                           'automaticDeletion':False}}
+    if periodic_only:payload['rootIdentity']=directory_identity(root)
     checksum = digest(payload)
     return {'batchId':f'retention-{now}-{checksum[:16]}','digest':checksum,'payload':payload}
 
@@ -393,33 +446,40 @@ def persist_plan(plan):
         write_owned_json(status_path,{'format':'sqlite-retention-status-v1','batchId':plan['batchId'],'digest':plan['digest'],**plan['payload']['summary']})
     return output
 
-def validate_batch(plan, approval, resource_report, now=None, read_bytes=64*1024**2, protected_paths=(), policy=None):
+def validate_batch(plan, approval, resource_report, now=None, read_bytes=64*1024**2, protected_paths=(), policy=None, owned_lease=None):
     now=int(time.time()) if now is None else now
     p=plan.get('payload',{})
     if p.get('format')!=FORMAT or plan.get('digest')!=digest(p): raise MaintenanceError('BATCH_DIGEST_MISMATCH')
     policy=retention_policy(policy)
     if p.get('policy',{}).get('retention')!=policy:raise MaintenanceError('RETENTION_POLICY_CHANGED')
-    if approval.get('batchId')!=plan['batchId'] or approval.get('digest')!=plan['digest'] or approval.get('action')!='permanent-delete-exact-files':
+    periodic_only=p.get('policy',{}).get('periodicOnly') is True
+    if periodic_only and policy is None:raise MaintenanceError('EXPLICIT_PERIODIC_POLICY_REQUIRED')
+    action='rotate-exact-periodic-backups' if periodic_only else 'permanent-delete-exact-files'
+    if approval.get('batchId')!=plan['batchId'] or approval.get('digest')!=plan['digest'] or approval.get('action')!=action:
         raise MaintenanceError('EXACT_ACTION_TIME_APPROVAL_REQUIRED')
     approved_at=approval.get('approvedAtEpoch')
     if not isinstance(approved_at,int) or isinstance(approved_at,bool) or not p['createdAtEpoch']<=approved_at<=now or now-approved_at>300 or now>p['expiresAtEpoch']:
         raise MaintenanceError('APPROVAL_EXPIRED_OR_INVALID')
     paths=[x['path'] for x in p['candidates']]
-    if len(paths)!=len(set(paths)) or sorted(approval.get('paths',[]))!=sorted(paths): raise MaintenanceError('APPROVAL_SCOPE_MISMATCH')
+    if len(paths)>128 or len(paths)!=len(set(paths)) or sorted(approval.get('paths',[]))!=sorted(paths): raise MaintenanceError('APPROVAL_SCOPE_MISMATCH')
+    if periodic_only and (sorted(approval.get('metadataPaths',[]))!=sorted(x['receipt'] for x in p['candidates'])
+        or sorted(approval.get('directories',[]))!=sorted(x['directory'] for x in p['candidates'])):
+        raise MaintenanceError('EXACT_PERIODIC_METADATA_APPROVAL_REQUIRED')
     unique=[x['path'] for x in p['candidates'] if x['kind']=='retention-expired']
     if unique and sorted(approval.get('uniqueHistoryPaths',[]))!=sorted(unique):
         raise MaintenanceError('EXACT_UNIQUE_HISTORY_LOSS_APPROVAL_REQUIRED')
     if resource_report.get('batchId')!=plan['batchId'] or resource_report.get('digest')!=plan['digest'] or not 0<=now-resource_report.get('checkedAtEpoch',0)<=60:
         raise MaintenanceError('FRESH_BOUND_RESOURCE_CHECK_REQUIRED')
     root=local_path(p['root']);budget=ReadBudget(read_bytes,20)
+    if periodic_only and directory_identity(root)!=p.get('rootIdentity'):raise MaintenanceError('ROOT_IDENTITY_CHANGED')
     database=local_path(p['database'])
     if database.is_relative_to(root) or any(database.is_relative_to(x) for x in backup.legacy_roots()):
         raise MaintenanceError('NESTED_SOURCE_DESTINATION')
     _files,_db,refs,records,_state=files_and_refs(root,budget,protected_paths)
-    retired,_tier=policy_refs(database,root,_files,_db,refs,records,budget,now,policy)
+    retired,_tier=policy_refs(database,root,_files,_db,refs,records,budget,now,policy,periodic_only)
     # Latest same-source protections established by the plan are also retained.
     refs.update(p['protected'])
-    if digest({'records':records,'protected':sorted(refs)})!=p['referenceDigest'] or (root/'.space-budget.lock').exists():
+    if digest({'records':records,'protected':sorted(refs)})!=p['referenceDigest'] or not generation_clear(root,owned_lease):
         raise MaintenanceError('LIVE_REFERENCES_OR_GENERATION_CHANGED')
     resource_files=resource_report.get('files',[])
     resources={x['path']:x for x in resource_files}
@@ -428,6 +488,16 @@ def validate_batch(plan, approval, resource_report, now=None, read_bytes=64*1024
     for entry in p['candidates']:
         try:
             file=local_path(entry['path'])
+            if periodic_only:
+                if entry['kind']!='retention-expired' or entry['representative'] in paths:raise MaintenanceError('PERIODIC_SCOPE_REQUIRED')
+                periodic_artifacts(entry,root,retired,budget)
+                keep=local_path(entry['representative'])
+                if str(keep) not in refs or keep.parent.parent!=root:raise MaintenanceError('PERIODIC_RECOVERY_REPRESENTATIVE_UNPROVED')
+                proof=budget.json(keep.parent/'verification.json')
+                if (proof.get('recoveryOrigin')!={'format':'sqlite-recovery-origin-v1','kind':'periodic'}
+                    or local_path(proof['source'])!=database or local_path(proof['backup'])!=keep
+                    or proof.get('integrityCheck')!='ok' or proof.get('sha256')!=entry['representativeSha256']):
+                    raise MaintenanceError('PERIODIC_RECOVERY_REPRESENTATIVE_UNPROVED')
             if not (file.is_relative_to(root) or any(file.is_relative_to(x) for x in backup.legacy_roots())): raise MaintenanceError('PATH_OUTSIDE_ROOT')
             if str(file) in refs or identity(file)!=entry['identity']:raise MaintenanceError('FILE_CHANGED_OR_PROTECTED')
             if any(Path(str(file)+s).exists() for s in ('-wal','-shm','-journal')):raise MaintenanceError('SQLITE_SIDECAR_PRESENT')
@@ -460,12 +530,129 @@ def validate_batch(plan, approval, resource_report, now=None, read_bytes=64*1024
         except (ValueError,OSError,sqlite3.Error) as error:
             skipped.append({'path':entry['path'],'reason':str(error) if isinstance(error,MaintenanceError) else 'CHECK_FAILED'})
     _f,_d,final_refs,final_records,_s=files_and_refs(root,budget,protected_paths)
-    policy_refs(database,root,_f,_d,final_refs,final_records,budget,now,policy)
+    policy_refs(database,root,_f,_d,final_refs,final_records,budget,now,policy,periodic_only)
     final_refs.update(p['protected'])
-    if digest({'records':final_records,'protected':sorted(final_refs)})!=p['referenceDigest'] or (root/'.space-budget.lock').exists():
+    if digest({'records':final_records,'protected':sorted(final_refs)})!=p['referenceDigest'] or not generation_clear(root,owned_lease):
         raise MaintenanceError('LIVE_REFERENCES_OR_GENERATION_CHANGED')
     return {'batchId':plan['batchId'],'validated':valid,'skipped':skipped,'permanentDeletionPerformed':False,
             'executorMustRecheckVerifiedHandles':True}
+
+class WindowsPin:
+    """Delete the verified object by handle, never by a re-resolved pathname."""
+    def __init__(self,path,expected,directory=False,delete=False):
+        if os.name!='nt':raise MaintenanceError('VERIFIED_ROTATION_REQUIRES_WINDOWS')
+        import ctypes
+        from ctypes import wintypes
+        import msvcrt
+        self.api=ctypes.WinDLL('kernel32',use_last_error=True);self.fd=None
+        create=self.api.CreateFileW
+        create.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,wintypes.LPVOID,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+        create.restype=wintypes.HANDLE
+        # Directory handles deny rename; data handles deny all other access.
+        access=(0 if directory else 0x80000000)|(0x10000 if delete else 0)
+        handle=create(str(path),access,3 if directory else 0,None,3,0x00200000|(0x02000000 if directory else 0),None)
+        if handle==wintypes.HANDLE(-1).value:raise MaintenanceError('EXCLUSIVE_OBJECT_PIN_FAILED')
+        try:self.fd=msvcrt.open_osfhandle(handle,os.O_RDONLY|os.O_BINARY)
+        except BaseException:
+            self.api.CloseHandle.argtypes=[wintypes.HANDLE];self.api.CloseHandle(handle);raise
+        try:
+            info=os.fstat(self.fd)
+            actual=[str(info.st_dev),str(info.st_ino)]
+            # Windows pathname stat keeps creation time in its legacy ctime
+            # field; fstat can expose change time there. Bind creation explicitly.
+            if not directory:actual += [str(info.st_size),str(info.st_mtime_ns),str(getattr(info,'st_birthtime_ns',info.st_ctime_ns))]
+            if (actual!=expected or info.st_file_attributes&0x400 or (not directory and info.st_nlink!=1)):
+                raise MaintenanceError('PINNED_OBJECT_CHANGED_OR_LINKED')
+        except BaseException:self.close();raise
+
+    def sha(self,budget):
+        budget.tick();info=os.fstat(self.fd)
+        if budget.used+info.st_size>budget.maximum:raise MaintenanceError('READ_BUDGET_EXCEEDED')
+        checksum=hashlib.sha256();os.lseek(self.fd,0,os.SEEK_SET)
+        while chunk:=os.read(self.fd,1024**2):
+            budget.tick();budget.used+=len(chunk);checksum.update(chunk)
+        return checksum.hexdigest()
+
+    def delete(self):
+        import ctypes
+        from ctypes import wintypes
+        import msvcrt
+        dispose=self.api.SetFileInformationByHandle
+        dispose.argtypes=[wintypes.HANDLE,ctypes.c_int,wintypes.LPVOID,wintypes.DWORD];dispose.restype=wintypes.BOOL
+        flag=ctypes.c_ubyte(1)  # FILE_DISPOSITION_INFO.DeleteFile is BOOLEAN.
+        if not dispose(msvcrt.get_osfhandle(self.fd),4,ctypes.byref(flag),ctypes.sizeof(flag)):
+            raise MaintenanceError('VERIFIED_OBJECT_DELETE_FAILED')
+        self.close()  # Deletion applies to this exact handle on close.
+
+    def close(self):
+        if self.fd is not None:
+            fd,self.fd=self.fd,None;os.close(fd)
+
+    def __enter__(self):return self
+    def __exit__(self,*_args):self.close()
+
+
+def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*1024**2,protected_paths=(),policy=None):
+    if plan.get('payload',{}).get('policy',{}).get('periodicOnly') is not True:
+        raise MaintenanceError('PERIODIC_ROTATION_PLAN_REQUIRED')
+    result=validate_batch(plan,approval,resource_report,now,read_bytes,protected_paths,policy)
+    if result['skipped']:raise MaintenanceError('ROTATION_BATCH_NOT_FULLY_PROVED')
+    if os.name!='nt':raise MaintenanceError('VERIFIED_ROTATION_REQUIRES_WINDOWS')
+    p=plan['payload'];root=local_path(p['root']);database=local_path(p['database'])
+    if not database.is_file():raise MaintenanceError('ACTIVE_SOURCE_MISSING')
+    output={'batchId':plan['batchId'],'deleted':[],'deletedMetadata':[],'removedDirectories':[],
+            'attempted':[],'permanentDeletionPerformed':False,'status':'complete'}
+    with ExitStack() as stack:
+        # Pin all ancestor directories before locks or deletions; no junctions.
+        for directory in reversed((root,*root.parents)):
+            stack.enter_context(WindowsPin(directory,directory_identity(directory),directory=True))
+        lock_name=hashlib.sha256(str(database).encode()).hexdigest()[:24]
+        lock=stack.enter_context(backup.FileLock(database.parent/f'.full-snapshot-{lock_name}.lock',timeout=0))
+        lease=root/'.space-budget.lock'
+        with lease.open('x',encoding='utf-8') as stream:
+            json.dump({'kind':'explicit-periodic-rotation','batchId':plan['batchId'],'pid':os.getpid()},stream)
+            stream.flush();os.fsync(stream.fileno())
+        owned=identity(lease)
+        try:
+            checked=validate_batch(plan,approval,resource_report,now,read_bytes,protected_paths,policy,owned_lease=owned)
+            if checked['skipped']:raise MaintenanceError('ROTATION_BATCH_NOT_FULLY_PROVED')
+            budget=ReadBudget(read_bytes,20);pins=[];keepers={}
+            for entry in checked['validated']:
+                keep=entry['representative']
+                if keep not in keepers:
+                    keepers[keep]=stack.enter_context(WindowsPin(Path(keep),entry['representativeIdentity']))
+                    if keepers[keep].sha(budget)!=entry['representativeSha256']:raise MaintenanceError('PINNED_RECOVERY_CHECKSUM_CHANGED')
+                folder=stack.enter_context(WindowsPin(Path(entry['directory']),entry['directoryIdentity'],directory=True,delete=True))
+                data=stack.enter_context(WindowsPin(Path(entry['path']),entry['identity'],delete=True))
+                receipt=stack.enter_context(WindowsPin(Path(entry['receipt']),entry['receiptIdentity'],delete=True))
+                if data.sha(budget)!=entry['sha256'] or receipt.sha(budget)!=entry['receiptSha256']:
+                    raise MaintenanceError('PINNED_PERIODIC_CHECKSUM_CHANGED')
+                pins.append((entry,data,receipt,folder))
+            lock.check()
+            if not generation_clear(root,owned):raise MaintenanceError('ROTATION_LEASE_CHANGED')
+            action_now=int(time.time()) if now is None else now
+            if not 0<=action_now-approval['approvedAtEpoch']<=300 or action_now>p['expiresAtEpoch']:
+                raise MaintenanceError('APPROVAL_EXPIRED_OR_INVALID')
+            if not 0<=action_now-resource_report['checkedAtEpoch']<=60:raise MaintenanceError('FRESH_BOUND_RESOURCE_CHECK_REQUIRED')
+            # Every object is pinned and checked before the first irreversible call.
+            # No recursive delete, automatic retry, or fallback pathname unlink.
+            for entry,data,receipt,folder in pins:
+                try:
+                    budget.tick();lock.check()
+                    if not generation_clear(root,owned):raise MaintenanceError('ROTATION_LEASE_CHANGED')
+                    for key,path,pin in (('deleted',entry['path'],data),('deletedMetadata',entry['receipt'],receipt),
+                                         ('removedDirectories',entry['directory'],folder)):
+                        output['attempted'].append(path);pin.delete();output[key].append(path)
+                        output['permanentDeletionPerformed']=True
+                except (OSError,MaintenanceError):
+                    completed=sum(len(output[k]) for k in ('deleted','deletedMetadata','removedDirectories'))
+                    uncertain=len(output['attempted'])>completed
+                    output.update(status='partial-failed',deletionOutcomeUncertain=uncertain)
+                    if uncertain and not output['permanentDeletionPerformed']:output['permanentDeletionPerformed']=None
+                    break
+        finally:
+            if generation_clear(root,owned):lease.unlink()  # This invocation's control lease only.
+    return output
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -475,24 +662,32 @@ def main():
     parser.add_argument('--batch',type=Path)
     parser.add_argument('--approval',type=Path)
     parser.add_argument('--resources',type=Path)
+    parser.add_argument('--periodic-only',action='store_true',help='preview only managed periodic rotation')
+    parser.add_argument('--execute-periodic',action='store_true',help='irreversibly execute an exact approved periodic batch (Windows)')
     args=parser.parse_args()
     try:
         protected=json.loads(os.environ.get('SQLITE_RETENTION_PROTECTED_PATHS','[]'))
         if not isinstance(protected,list):raise MaintenanceError('INVALID_PROTECTED_PATHS')
         policy=retention_policy(json.loads(os.environ['SQLITE_RETENTION_POLICY']) if 'SQLITE_RETENTION_POLICY' in os.environ else None)
-        if args.batch or args.approval or args.resources:
+        if args.batch or args.approval or args.resources or args.execute_periodic:
             if not all((args.batch,args.approval,args.resources)):raise MaintenanceError('APPROVAL_INPUTS_REQUIRED')
             if any(p.stat().st_size>MAX_REPORT_BYTES for p in (args.batch,args.approval,args.resources)):
                 raise MaintenanceError('APPROVAL_INPUT_BYTE_LIMIT')
             inputs=[json.loads(p.read_text(encoding='utf-8-sig')) for p in (args.batch,args.approval,args.resources)]
             if local_path(inputs[0]['payload']['root'])!=local_path(str(args.backup_root)) or local_path(inputs[0]['payload']['database'])!=local_path(str(args.database)):
                 raise MaintenanceError('CLI_ROOT_SOURCE_MISMATCH')
+            if args.periodic_only and inputs[0]['payload']['policy'].get('periodicOnly') is not True:raise MaintenanceError('PERIODIC_ROTATION_PLAN_REQUIRED')
+            if args.execute_periodic:
+                result=execute_periodic_batch(*inputs,read_bytes=args.max_read_bytes,protected_paths=protected,policy=policy)
+                print(json.dumps(result))
+                if result['status']!='complete':raise SystemExit(2)
+                return
             result=validate_batch(*inputs,read_bytes=args.max_read_bytes,protected_paths=protected,policy=policy)
             print(json.dumps({'batchId':result['batchId'],'validatedCount':len(result['validated']),'skippedCount':len(result['skipped']),
                               'permanentDeletionPerformed':False}))
             if result['skipped']:raise SystemExit(2)
         else:
-            plan=make_plan(args.database,args.backup_root,protected_paths=protected,read_bytes=args.max_read_bytes,policy=policy)
+            plan=make_plan(args.database,args.backup_root,protected_paths=protected,read_bytes=args.max_read_bytes,policy=policy,periodic_only=args.periodic_only)
             persist_plan(plan)
             print(json.dumps({'batchId':plan['batchId'],'digest':plan['digest'],**plan['payload']['summary']}))
     except Exception as error:
