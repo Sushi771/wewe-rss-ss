@@ -164,3 +164,11 @@ Browser → Python owner → Node 私有管道保留固定白名单的阶段、�
 批准必须精确匹配 `permanent-delete-exact-files`、批次 SHA、完整路径集合及批准时间。验证阶段重跑归档/浏览器、源全文件 SHA、恢复点完整性、运行时/磁盘引用、资源占用，并在结束时再次检查文件、归档和到期时间。返回值仍是 `executable=false`、`permanentDeletionPerformed=false`；未来执行器还必须核验批准来源、重新检查每个实际文件句柄和活动引用。这里没有永久删除操作，也不会把历史删除批准扩展到新批次。
 
 新增宿主验收使用真实 `SnapshotGuard`、真实 Node `SqliteWriteCoordinator` 和复用缓存、私有 stdio、真实离线浏览器及 Windows 原生占用查询；数据库均为几十 KiB 的合成样本。Node 端到端覆盖清单跨语言往返及具体批准的重新校验。其他用例覆盖独有非文章状态/重复行/缺失表、伪造 owner 诊断、未快照写入、未知引用目录、真实发布指针、相对路径/URI、新引用出现、恢复点变化、未知占用与预算中止。非 legacy 构建显式携带全部宿主脚本；本 PR 不构建或切换生产发布。
+
+## Hard-deadline cleanup
+
+The CLI retains its 170-second operation deadline. Cancellation interrupts owned startup, CDP connection, socket-open and command waits and enters the same `finally` cleanup as ordinary errors. This also covers an injected fetch that ignores AbortSignal. Pending CDP timers are rejected and cleared before closing the owned socket, browser child and loopback server.
+
+Cleanup waits at most 3 seconds for the owned root child and 2 seconds for asynchronous removal of its private profile; a separate 6-second emergency grace bounds the deadline exit if cleanup cannot complete. Only that helper's resources are handled. Deadline diagnostics retain the safe phase/code and add boolean `cleanup.childExited` and `cleanup.profileRemoved`; root-child exit does not establish that every descendant exited, and a failed profile removal is not reported as success. No paths, file contents or raw exception messages are emitted.
+
+Six deterministic CLI fixtures cover startup, stalled connect, socket-open, CDP command, stalled child/profile cleanup and profile-removal failure. They use fully mocked resources and do not replace the independent actual-browser hard-deadline verification.
