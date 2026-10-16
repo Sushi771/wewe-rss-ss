@@ -176,7 +176,7 @@ test(
   () => {
     const raw = execFileSync(
       process.execPath,
-      [path.join(__dirname, 'windows-collector-chain.fixture.cjs'), 'driver'],
+      [path.join(__dirname, 'fixtures/collector-chain.cjs'), 'driver'],
       {
         windowsHide: true,
         encoding: 'utf8',

@@ -648,6 +648,9 @@ function withAdmission(policyFile, expected, action, options = {}) {
     sentinelIdentity,
     ledgerSha,
     closed = false,
+    failureRecorded = false,
+    failureEvidenceUncertain = false,
+    pendingReferenceFailure,
     lastReceipt,
     allocatedThisCall = 0;
   let sentinelConfigSha = expected,
@@ -750,6 +753,54 @@ function withAdmission(policyFile, expected, action, options = {}) {
     ledgerSha = publishedSha;
     owner();
   }
+  function retainFailure(error) {
+    if (failureRecorded || failureEvidenceUncertain) return;
+    const diagnosticApi = require('./windows-release-references.cjs');
+    const privateDiagnostic = diagnosticApi.privateReferenceDiagnostic(
+      error.privateReferenceDiagnostic,
+    );
+    const continued = state?.continuationAttempt?.nonce === nonce;
+    if (!privateDiagnostic && !continued) return;
+    try {
+      owner();
+      if (privateDiagnostic) {
+        state.referenceFailures ||= [];
+        state.referenceFailures.push({
+          nonce,
+          operation: 'install',
+          atUtc: new Date().toISOString(),
+          diagnostic: diagnosticApi.referenceDiagnostic(
+            error.referenceDiagnostic,
+          ),
+          privateDiagnostic,
+        });
+      }
+      if (continued) {
+        state.continuationAttempt.status = 'held';
+        state.continuationAttempt.finishedAtUtc = new Date().toISOString();
+        state.continuationAttempt.error = diagnosticApi.referenceDiagnostic({
+          stage: 'admission',
+          codes: [error.message],
+          ...error.referenceDiagnostic,
+        });
+      }
+      save();
+      failureRecorded = true;
+      if (privateDiagnostic)
+        error.referenceDiagnostic = diagnosticApi.referenceDiagnostic({
+          ...error.referenceDiagnostic,
+          diagnosticStored: true,
+        });
+    } catch {
+      failureEvidenceUncertain = true;
+      if (privateDiagnostic)
+        error.referenceDiagnostic = diagnosticApi.referenceDiagnostic({
+          ...error.referenceDiagnostic,
+          diagnosticStored: false,
+        });
+      throw error;
+    }
+  }
   function query() {
     const observation = {
       assertWritable() {
@@ -777,17 +828,24 @@ function withAdmission(policyFile, expected, action, options = {}) {
         }),
       );
     });
-    require('./release-scope.cjs').validateReferences(
-      facts,
-      {
-        ...p,
-        protectedIds: p.protectedPackages.map((item) => item.id),
-        packageProofs: Object.fromEntries(
-          p.protectedPackages.map((item) => [item.id, item.manifestSha256]),
-        ),
-      },
-      'install',
-    );
+    try {
+      require('./release-scope.cjs').validateReferences(
+        facts,
+        {
+          ...p,
+          protectedIds: p.protectedPackages.map((item) => item.id),
+          packageProofs: Object.fromEntries(
+            p.protectedPackages.map((item) => [item.id, item.manifestSha256]),
+          ),
+        },
+        'install',
+      );
+    } catch (error) {
+      // Installer finally blocks may pass a generic error to close(). Keep the
+      // original query refusal until this invocation releases its ownership.
+      pendingReferenceFailure = error;
+      throw error;
+    }
     for (const record of facts.records) {
       const allowed = [
         plan.packages.get(record.packageId)?.spec.path,
@@ -1112,12 +1170,15 @@ function withAdmission(policyFile, expected, action, options = {}) {
     },
     close(error) {
       if (closed) return;
+      error = pendingReferenceFailure || error;
       closed = true;
       try {
         owner();
         if (error) {
+          retainFailure(error);
           if (state.slots.some((row) => row.started && !row.complete)) {
             save();
+            if (error.referenceDiagnostic) throw error;
             fail('INTERRUPTED_OUTPUT_HELD');
           }
           state.claim = null;
@@ -1155,9 +1216,15 @@ function withAdmission(policyFile, expected, action, options = {}) {
           historicalDeletionPerformed: false,
           publicationAuthorized: false,
         };
+      } catch (error) {
+        // Final checks can fail here too; record while ownership still exists.
+        retainFailure(error);
+        throw error;
       } finally {
-        owner();
-        fs.unlinkSync(lock);
+        if (!failureEvidenceUncertain) {
+          owner();
+          fs.unlinkSync(lock);
+        }
       }
     },
     receipt() {
@@ -1402,6 +1469,7 @@ function withAdmission(policyFile, expected, action, options = {}) {
     // A failed/uncertain consumption write cannot be retried with a new ID.
     // Keep the current exclusive lock and any partial fixed receipt as evidence.
     if (continuationStarted && !continuationCommitted) throw error;
+    if (failureEvidenceUncertain) throw error;
     let stillOwned = false;
     try {
       owner();
@@ -1410,47 +1478,7 @@ function withAdmission(policyFile, expected, action, options = {}) {
       /* Preserve foreign/uncertain authority, including the lock. */
     }
     if (stillOwned) {
-      const diagnosticApi = require('./windows-release-references.cjs');
-      const privateDiagnostic = diagnosticApi.privateReferenceDiagnostic(
-        error.privateReferenceDiagnostic,
-      );
-      if (privateDiagnostic) {
-        state.referenceFailures ||= [];
-        state.referenceFailures.push({
-          nonce,
-          operation: 'install',
-          atUtc: new Date().toISOString(),
-          diagnostic: diagnosticApi.referenceDiagnostic(
-            error.referenceDiagnostic,
-          ),
-          privateDiagnostic,
-        });
-        try {
-          save();
-          error.referenceDiagnostic = diagnosticApi.referenceDiagnostic({
-            ...error.referenceDiagnostic,
-            diagnosticStored: true,
-          });
-        } catch {
-          // Preserve the original refusal and lock if evidence cannot be saved.
-          error.referenceDiagnostic = diagnosticApi.referenceDiagnostic({
-            ...error.referenceDiagnostic,
-            diagnosticStored: false,
-          });
-          throw error;
-        }
-      }
-      if (state?.continuationAttempt?.nonce === nonce) {
-        state.continuationAttempt.status = 'held';
-        state.continuationAttempt.finishedAtUtc = new Date().toISOString();
-        state.continuationAttempt.error =
-          require('./windows-release-references.cjs').referenceDiagnostic({
-            stage: 'admission',
-            codes: [error.message],
-            ...error.referenceDiagnostic,
-          });
-        save();
-      }
+      retainFailure(error);
       if (
         state?.claim &&
         !state.slots.some((row) => row.started && !row.complete)

@@ -1,3 +1,4 @@
+# Test-only process tree collection; no production admission dependency.
 param([int]$ProbePid,[int]$ControllerPid)
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'

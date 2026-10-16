@@ -723,6 +723,119 @@ test('private diagnostic persistence failure preserves original refusal and hold
     assert(fs.existsSync(path.join(f.registry, f.policy.scopeId + '.lock')));
     assert(!fs.existsSync(f.policy.pair[0].target));
   }));
+for (const timing of [
+  'after-initial-check',
+  'after-slot-started',
+  'final-close-check',
+  'continued-inner-check',
+])
+  test(
+    'private chain failure is retained at inner admission close ' + timing,
+    () =>
+      fixture((f) => {
+        if (timing === 'continued-inner-check') prepareContinuation(f);
+        let queries = 0;
+        const row = {
+          pid: 202,
+          parentPid: 201,
+          name: 'conhost.exe',
+          executable: 'C:/PRIVATE/conhost.exe',
+          commandLine: 'SECRET_ARGV',
+          startUtc: '2026-01-01T00:00:00Z',
+        };
+        f.query = () => {
+          queries++;
+          const bad =
+            timing === 'after-initial-check'
+              ? queries > 1
+              : timing === 'continued-inner-check'
+                ? queries > 1
+                : timing === 'final-close-check'
+                  ? f.ledger().slots.every((s) => s.copied === true)
+                  : f.ledger().slots.some((s) => s.started);
+          return bad
+            ? {
+                ...f.facts(),
+                complete: false,
+                errors: ['REFERENCE_PROBE_CHILD_UNCERTAIN'],
+                referenceDiagnostic: {
+                  stage: 'collector-chain',
+                  chainBranch: 'unexpected-descendant',
+                },
+                privateReferenceDiagnostic: {
+                  format: 1,
+                  branch: 'unexpected-descendant',
+                  before: [row],
+                  after: [row],
+                },
+              }
+            : f.facts();
+        };
+        let error;
+        try {
+          f.apply();
+        } catch (e) {
+          error = e;
+        }
+        assert.equal(error.message, 'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+        assert.equal(error.referenceDiagnostic.diagnosticStored, true);
+        const state = f.ledger();
+        assert.deepEqual(state.referenceFailures[0].privateDiagnostic.before, [
+          row,
+        ]);
+        assert.equal(state.referenceFailures.length, 1);
+        assert(!/SECRET|PRIVATE/.test(admission.formatCliError(error)));
+        if (['after-slot-started', 'final-close-check'].includes(timing))
+          assert(state.slots.some((s) => s.started && !s.complete));
+        else assert(state.slots.every((s) => !s.started));
+        for (const slot of state.slots)
+          if (!slot.started) assert(!fs.existsSync(slot.path));
+        if (timing === 'after-slot-started')
+          assert.equal(state.slots.filter((s) => s.started).length, 1);
+        if (timing === 'continued-inner-check')
+          assert.equal(state.continuationAttempt.status, 'held');
+      }),
+  );
+test('private diagnostic persistence failure inside installer close holds lock and preserves original query error', () =>
+  fixture((f) => {
+    let queries = 0;
+    f.query = () =>
+      ++queries === 1
+        ? f.facts()
+        : {
+            ...f.facts(),
+            complete: false,
+            errors: ['REFERENCE_PROBE_CHILD_UNCERTAIN'],
+            referenceDiagnostic: {
+              stage: 'collector-chain',
+              chainBranch: 'unexpected-descendant',
+            },
+            privateReferenceDiagnostic: {
+              format: 1,
+              branch: 'unexpected-descendant',
+              before: [],
+              after: [],
+            },
+          };
+    const original = fs.writeFileSync;
+    fs.writeFileSync = (at, data, ...rest) => {
+      if (String(data).includes('referenceFailures'))
+        throw Error('SYNTHETIC_DIAGNOSTIC_WRITE_FAILURE');
+      return original(at, data, ...rest);
+    };
+    let error;
+    try {
+      f.apply();
+    } catch (e) {
+      error = e;
+    } finally {
+      fs.writeFileSync = original;
+    }
+    assert.equal(error.message, 'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    assert.equal(error.referenceDiagnostic.diagnosticStored, false);
+    assert(fs.existsSync(path.join(f.registry, f.policy.scopeId + '.lock')));
+    assert(f.ledger().slots.every((s) => !s.started));
+  }));
 test('real CLI dispatch installs only frozen pair, keeps four protected IDs and three managed roles', () =>
   fixture((f) => {
     const immutable = f.specs.slice(0, 2).map((s) => fingerprint(s.path));

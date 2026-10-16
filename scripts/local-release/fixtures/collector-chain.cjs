@@ -18,7 +18,7 @@ if (process.argv[2] === 'driver') {
     '-NoProfile',
     '-NonInteractive',
     '-File',
-    path.join(__dirname, 'windows-collector-chain.fixture.ps1'),
+    path.join(__dirname, 'collector-chain.ps1'),
     '-ProbePid',
     String(process.pid),
     '-ControllerPid',
@@ -47,7 +47,7 @@ if (process.argv[2] === 'driver') {
       '0x4',
     ],
   };
-  const accepted = require('./windows-release-references.cjs').collectorChain(
+  const accepted = require('../windows-release-references.cjs').collectorChain(
     new Map(native.before.map((r) => [r.pid, r])),
     new Map(native.after.map((r) => [r.pid, r])),
     process.ppid,
