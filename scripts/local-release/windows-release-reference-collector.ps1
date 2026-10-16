@@ -7,6 +7,8 @@ $errors=[System.Collections.Generic.List[string]]::new()
 $coverage=[System.Collections.Generic.List[object]]::new()
 $shortcuts=[System.Collections.Generic.List[object]]::new()
 $directorySnapshots=[System.Collections.Generic.List[object]]::new()
+$staticJunctions=[System.Collections.Generic.List[object]]::new()
+$profileFacts=@();$profileFactsAfter=@();$scoped=$false
 $deadline=[DateTime]::UtcNow.AddSeconds(16)
 function Budget {
   if ([DateTime]::UtcNow -gt $deadline) { throw 'REFERENCE_NATIVE_DEADLINE' }
@@ -46,23 +48,42 @@ function Tasks {
     }
   })
 }
+function Profile-Scope($profiles, [string]$current, $scope) {
+  $other=@($profiles | Where-Object { -not $_.Special -and -not [string]::Equals([string]$_.LocalPath,$current,[StringComparison]::OrdinalIgnoreCase) })
+  if ($null -eq $scope) {
+    if ($other.Count) { throw 'REFERENCE_NATIVE_OTHER_PROFILE_REQUIRES_REVIEW' }
+    return
+  }
+  if ($other.Count -ne @($scope.uninspectedProfiles).Count) { throw 'REFERENCE_NATIVE_PROFILE_SCOPE_CHANGED' }
+  foreach ($p in $other) {
+    $pin=@($scope.uninspectedProfiles | Where-Object { $_.sid -ceq [string]$p.SID })
+    if ($pin.Count -ne 1 -or $p.Loaded -or [int]$p.Status -ne 0 -or
+      -not [string]::Equals([string]$pin[0].path,[string]$p.LocalPath,[StringComparison]::OrdinalIgnoreCase) -or
+      $pin[0].loaded -ne $false -or $pin[0].special -ne $false -or $pin[0].staticShortcutsInspected -ne $false) {
+      throw 'REFERENCE_NATIVE_PROFILE_SCOPE_CHANGED'
+    }
+    [PSCustomObject]@{sid=[string]$p.SID;path=[string]$p.LocalPath;special=$false;loaded=$false;status=[int]$p.Status;staticShortcutsInspected=$false}
+  }
+}
 $before=@();$after=@();$tasks=@();$tasksAfter=@()
 try {
   $policyBytes=[IO.File]::ReadAllBytes($PolicyFile)
   $sha=[Security.Cryptography.SHA256]::Create()
   $policySha=([BitConverter]::ToString($sha.ComputeHash($policyBytes))).Replace('-','').ToLowerInvariant()
   $policy=[Text.Encoding]::UTF8.GetString($policyBytes) | ConvertFrom-Json
+  $scope=$policy.windowsReferences.operationCoverage
+  $scoped=$null -ne $scope
+  if ($scoped -and ($scope.format -ne 1 -or $scope.kind -cne 'non-retiring-once-pair-v1' -or
+    $scope.preserveLegacy -ne $true -or $scope.globalReferenceComplete -ne $false -or
+    $policy.mode -cne 'once-frozen-pair-v1' -or ($policy.approval.operations -join '|') -cne 'install|publish|rollback' -or
+    @($policy.pair).Count -ne 2 -or $policy.publication.limits.maxBackups -ne 1 -or
+    $policy.publication.limits.maxPublications -ne 1 -or $policy.publication.limits.maxRollbacks -ne 1)) {
+    throw 'REFERENCE_NATIVE_OPERATION_SCOPE_INVALID'
+  }
   $before=@(Processes)
   $tasks=@(Tasks)
-  # Current and common known folders cover this single-user adapter. Additional
-  # non-special profiles are an explicit incomplete scope, never silently skipped.
-  $profiles=@(Get-CimInstance Win32_UserProfile -ErrorAction Stop | Where-Object { -not $_.Special })
-  foreach ($userProfile in $profiles) {
-    Budget
-    if (-not [string]::Equals([string]$userProfile.LocalPath,$env:USERPROFILE,[StringComparison]::OrdinalIgnoreCase)) {
-      throw 'REFERENCE_NATIVE_OTHER_PROFILE_REQUIRES_REVIEW'
-    }
-  }
+  # No profile directories, account ownership or impersonation tokens are queried.
+  $profileFacts=@(Profile-Scope @(Get-CimInstance Win32_UserProfile -ErrorAction Stop) $env:USERPROFILE $scope)
   $folders=@('Desktop','CommonDesktopDirectory','StartMenu','CommonStartMenu','Startup','CommonStartup')
   $labels=@('Desktop','CommonDesktop','StartMenu','CommonStartMenu','Startup','CommonStartup')
   $seen=[System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -72,6 +93,12 @@ try {
       Budget
       $folder=[Environment]::GetFolderPath([Enum]::Parse([Environment+SpecialFolder],$folders[$i]))
       if (-not $folder) { throw 'REFERENCE_NATIVE_KNOWN_FOLDER_UNKNOWN' }
+      $staticOnly=$scoped -and $labels[$i] -notin @('Startup','CommonStartup')
+      if ($staticOnly -and (Test-Path -LiteralPath $folder) -and ((Get-Item -LiteralPath $folder -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        $staticJunctions.Add([PSCustomObject]@{path=$folder;inspected=$false;reason='unrelated-static-junction'})
+        $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='uninspected-static-junction'})
+        continue
+      }
       $rootProof=Directory-Proof $folder
       if ($null -eq $rootProof) {
         $parent=[IO.Path]::GetDirectoryName($folder)
@@ -98,11 +125,15 @@ try {
         $entries=@(Get-ChildItem -LiteralPath $at -Force -ErrorAction Stop)
         if ($directorySnapshots.Count -ge 4096) { throw 'REFERENCE_NATIVE_SHORTCUT_DIRECTORY_LIMIT' }
         $directorySnapshots.Add([PSCustomObject]@{path=$at;identity=$dirProof.identity;entries=@($entries | ForEach-Object {
-          [PSCustomObject]@{name=$_.Name;kind=$(if ($_.PSIsContainer) {'directory'} else {'file'})}
+          [PSCustomObject]@{name=$_.Name;kind=$(if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {'junction'} elseif ($_.PSIsContainer) {'directory'} else {'file'})}
         })})
         foreach ($entry in $entries) {
           Budget
-          if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'REFERENCE_NATIVE_SHORTCUT_ALIAS_REQUIRES_REVIEW' }
+          if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            if (-not $staticOnly -or -not $entry.PSIsContainer) { throw 'REFERENCE_NATIVE_SHORTCUT_ALIAS_REQUIRES_REVIEW' }
+            $staticJunctions.Add([PSCustomObject]@{path=$entry.FullName;inspected=$false;reason='unrelated-static-junction'})
+            continue
+          }
           if ($entry.PSIsContainer) { $pending.Push($entry.FullName);continue }
           if ($entry.Extension -ine '.lnk' -or -not $seen.Add($entry.FullName)) { continue }
           if ($seen.Count -gt 8192 -or $entry.Length -gt 1048576) { throw 'REFERENCE_NATIVE_SHORTCUT_LIMIT' }
@@ -119,16 +150,20 @@ try {
   } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
   $tasksAfter=@(Tasks)
   $after=@(Processes)
+  if ($scoped) { $profileFactsAfter=@(Profile-Scope @(Get-CimInstance Win32_UserProfile -ErrorAction Stop) $env:USERPROFILE $scope) }
   Budget
 } catch {
   $code=[string]$_.Exception.Message
   if ($code -notmatch '^REFERENCE_NATIVE_[A-Z_]+$') { $code='REFERENCE_NATIVE_QUERY_FAILED' }
   $errors.Add($code)
 }
-$complete=$errors.Count -eq 0
+$sufficient=$errors.Count -eq 0
+$complete=$sufficient -and -not $scoped
 [PSCustomObject]@{
   format=1;complete=$complete;policySha256=$policySha
-  categories=@{processes=$complete;tasks=$complete;shortcuts=$complete}
+  operationSufficient=($scoped -and $sufficient);globalReferenceComplete=$complete
+  operationCoverage=$(if ($scoped) { @{kind='non-retiring-once-pair-v1';profilesBefore=@($profileFacts);profilesAfter=@($profileFactsAfter);staticJunctions=@($staticJunctions.ToArray())} } else {$null})
+  categories=@{processes=$sufficient;tasks=$sufficient;shortcuts=$complete}
   errors=@($errors.ToArray());processesBefore=@($before);processesAfter=@($after)
   tasks=@($tasks);tasksAfter=@($tasksAfter);shortcuts=@($shortcuts.ToArray());shortcutCoverage=@($coverage.ToArray())
   shortcutDirectories=@($directorySnapshots.ToArray())

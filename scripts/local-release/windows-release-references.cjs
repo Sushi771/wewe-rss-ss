@@ -106,15 +106,83 @@ function argv(command) {
   }
   return out;
 }
+const operationKind = 'non-retiring-once-pair-v1';
+const profileRows = (rows) =>
+  rows
+    .map((r) => ({
+      sid: r.sid,
+      path: r.path,
+      special: r.special,
+      loaded: r.loaded,
+      status: r.status,
+      staticShortcutsInspected: r.staticShortcutsInspected,
+    }))
+    .sort((a, b) => a.sid.localeCompare(b.sid));
+function operationContract(p) {
+  const scope = p.windowsReferences?.operationCoverage;
+  if (!scope) return null;
+  const ids = [p.currentId, p.heldId, ...(p.pair || []).map((r) => r.id)];
+  if (
+    scope.format !== 1 ||
+    scope.kind !== operationKind ||
+    scope.preserveLegacy !== true ||
+    scope.globalReferenceComplete !== false ||
+    p.mode !== 'once-frozen-pair-v1' ||
+    hash(p.approval?.operations) !== hash(['install', 'publish', 'rollback']) ||
+    !Array.isArray(p.pair) ||
+    p.pair.length !== 2 ||
+    hash(p.pair.map((r) => r.role).sort()) !==
+      hash(['candidate', 'rollback']) ||
+    new Set(ids).size !== 4 ||
+    hash([...p.protectedIds].sort()) !== hash([...ids].sort()) ||
+    !Array.isArray(p.legacyIds) ||
+    !p.legacyIds.includes(p.heldId) ||
+    !path.isAbsolute(p.installRoot) ||
+    p.pair.some(
+      (r) =>
+        r.target !== path.join(p.installRoot, r.id) ||
+        !path.isAbsolute(r.source) ||
+        inside(p.installRoot, r.source) ||
+        p.approval[r.role + 'Commit'] !==
+          p.protectedPackages?.find((s) => s.id === r.id)?.sourceCommit,
+    ) ||
+    p.publication?.database !==
+      path.join(path.dirname(p.installRoot), 'apps/server/data/wewe-rss.db') ||
+    p.publication?.limits?.maxBackups !== 1 ||
+    p.publication.limits.maxPublications !== 1 ||
+    p.publication.limits.maxRollbacks !== 1 ||
+    !Array.isArray(scope.uninspectedProfiles) ||
+    scope.uninspectedProfiles.length > 2 ||
+    new Set(scope.uninspectedProfiles.map((r) => r.sid)).size !==
+      scope.uninspectedProfiles.length ||
+    scope.uninspectedProfiles.some(
+      (r) =>
+        !/^S-\d+(?:-\d+){2,15}$/.test(r.sid) ||
+        typeof r.path !== 'string' ||
+        !path.isAbsolute(r.path) ||
+        path.resolve(r.path) !== r.path ||
+        r.special !== false ||
+        r.loaded !== false ||
+        r.status !== 0 ||
+        r.staticShortcutsInspected !== false,
+    )
+  )
+    fail('REFERENCE_OPERATION_CONTRACT_INVALID');
+  return scope;
+}
 function probe(policy, native, { callerPid = process.ppid, self } = {}) {
   const result = {
     complete: false,
+    globalReferenceComplete: false,
+    operationSufficient: false,
     categories: Object.fromEntries(kinds.map((k) => [k, false])),
     records: [],
     errors: [],
     uncertainChildren: [],
   };
   try {
+    const scope = operationContract(policy);
+    if (scope) result.globalReferenceComplete = false;
     const cfg = policy.windowsReferences;
     if (
       !cfg ||
@@ -134,12 +202,27 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     if (
       !native ||
       native.format !== 1 ||
-      native.complete !== true ||
+      (scope
+        ? native.complete !== false ||
+          native.operationSufficient !== true ||
+          native.globalReferenceComplete !== false ||
+          native.categories?.shortcuts !== false ||
+          native.operationCoverage?.kind !== operationKind ||
+          !Array.isArray(native.operationCoverage.profilesBefore) ||
+          !Array.isArray(native.operationCoverage.profilesAfter) ||
+          hash(profileRows(native.operationCoverage.profilesBefore)) !==
+            hash(profileRows(scope.uninspectedProfiles)) ||
+          hash(profileRows(native.operationCoverage.profilesAfter)) !==
+            hash(profileRows(scope.uninspectedProfiles))
+        : native.complete !== true ||
+          native.globalReferenceComplete === false ||
+          native.operationSufficient === true) ||
       !Array.isArray(native.errors) ||
       native.errors.length ||
-      ['processes', 'tasks', 'shortcuts'].some(
-        (k) => native.categories?.[k] !== true,
-      )
+      (scope
+        ? ['processes', 'tasks']
+        : ['processes', 'tasks', 'shortcuts']
+      ).some((k) => native.categories?.[k] !== true)
     )
       fail('REFERENCE_NATIVE_QUERY_INCOMPLETE');
     const roots = policy.roots.map((r) => canonical(r.path));
@@ -147,6 +230,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       watched = new Map();
     const directoryWatches = new Map(),
       absentDirectories = new Set();
+    const junctionWatches = new Map();
     const directoryId = (at) => {
       const s = fs.lstatSync(at, { bigint: true });
       if (!s.isDirectory() || s.isSymbolicLink() || !same(canonical(at), at))
@@ -156,7 +240,14 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     const entriesAt = (at) =>
       fs.readdirSync(at, { withFileTypes: true }).map((e) => ({
         name: e.name,
-        kind: e.isDirectory() ? 'directory' : e.isFile() ? 'file' : 'other',
+        kind:
+          scope && e.isSymbolicLink()
+            ? 'junction'
+            : e.isDirectory()
+              ? 'directory'
+              : e.isFile()
+                ? 'file'
+                : 'other',
       }));
     const sortedEntries = (rows) => rows.map((e) => JSON.stringify(e)).sort();
     function watchDirectory(at, expected, entries) {
@@ -649,11 +740,47 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       ].some(
         (k) =>
           !native.shortcutCoverage.some(
-            (r) => r.kind === k && ['enumerated', 'absent'].includes(r.status),
+            (r) =>
+              r.kind === k &&
+              (['enumerated', 'absent'].includes(r.status) ||
+                (scope &&
+                  !['Startup', 'CommonStartup'].includes(k) &&
+                  r.status === 'uninspected-static-junction')),
           ),
       )
     )
       fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
+    const junctions = scope ? native.operationCoverage.staticJunctions : [];
+    if (!Array.isArray(junctions) || junctions.length > 64)
+      fail('REFERENCE_STATIC_JUNCTION_INVALID');
+    for (const r of junctions) {
+      if (
+        !scope ||
+        r.inspected !== false ||
+        r.reason !== 'unrelated-static-junction' ||
+        typeof r.path !== 'string' ||
+        !path.isAbsolute(r.path) ||
+        path.resolve(r.path) !== r.path ||
+        native.shortcutCoverage.some(
+          (c) =>
+            ['Startup', 'CommonStartup'].includes(c.kind) &&
+            inside(c.path, r.path),
+        ) ||
+        !native.shortcutCoverage.some(
+          (c) =>
+            !['Startup', 'CommonStartup'].includes(c.kind) &&
+            inside(c.path, r.path),
+        )
+      )
+        fail('REFERENCE_STATIC_JUNCTION_INVALID');
+      const read = () => {
+        const stat = fs.lstatSync(r.path, { bigint: true });
+        if (!stat.isSymbolicLink()) fail('REFERENCE_STATIC_JUNCTION_CHANGED');
+        return { identity: identity(stat), target: fs.readlinkSync(r.path) };
+      };
+      const snapshot = read();
+      junctionWatches.set(r.path, { read, snapshot });
+    }
     if (
       native.shortcutCoverage.length !== 6 ||
       new Set(native.shortcutCoverage.map((c) => c.kind)).size !== 6 ||
@@ -667,7 +794,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         path.resolve(coverage.path) !== coverage.path
       )
         fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
-      if (coverage.status === 'absent') {
+      if (coverage.status === 'uninspected-static-junction') {
+        if (!scope || !junctionWatches.has(coverage.path))
+          fail('REFERENCE_STATIC_JUNCTION_INVALID');
+      } else if (coverage.status === 'absent') {
         const ancestor = coverage.ancestor;
         if (
           !ancestor ||
@@ -722,6 +852,11 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       watchDirectory(dir.path, dir.identity, dir.entries);
       for (const e of dir.entries) {
         if (
+          e.kind === 'junction' &&
+          (!scope || !junctionWatches.has(path.join(dir.path, e.name)))
+        )
+          fail('REFERENCE_STATIC_JUNCTION_INVALID');
+        if (
           e.kind === 'directory' &&
           !native.shortcutDirectories.some((child) =>
             same(child.path, path.join(dir.path, e.name)),
@@ -764,7 +899,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           ]),
         });
     }
-    result.categories.shortcuts = true;
+    result.categories.shortcuts = !scope;
     // The querying controller owns the scope lock. Its changing in-progress
     // intent is checked, but is not an external reference to its own output.
     const registry = canonical(policy.registryDirectory),
@@ -860,7 +995,31 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     result.records.sort((a, b) =>
       JSON.stringify(a).localeCompare(JSON.stringify(b)),
     );
-    result.complete = true;
+    for (const value of junctionWatches.values())
+      if (hash(value.read()) !== hash(value.snapshot))
+        fail('REFERENCE_STATIC_JUNCTION_CHANGED');
+    result.complete = !scope;
+    result.globalReferenceComplete = !scope;
+    if (scope) {
+      result.operationSufficient = true;
+      result.operationCoverage = {
+        kind: operationKind,
+        contractSha256: hash(scope),
+        startupComplete: true,
+        pinnedLaunchersVerified: true,
+        uninspectedProfiles: profileRows(
+          native.operationCoverage.profilesAfter,
+        ),
+        uninspectedStaticJunctions: [...junctionWatches]
+          .map(([at, v]) => ({
+            path: at,
+            inspected: false,
+            reason: 'unrelated-static-junction',
+            ...v.snapshot,
+          }))
+          .sort((a, b) => a.path.localeCompare(b.path)),
+      };
+    }
   } catch (error) {
     // Keep private paths/command lines out of errors. Full raw host evidence is
     // never printed. A failed category is not silently declared empty.
@@ -987,6 +1146,8 @@ if (require.main === module) {
   } catch {
     value = {
       complete: false,
+      globalReferenceComplete: false,
+      operationSufficient: false,
       categories: Object.fromEntries(kinds.map((k) => [k, false])),
       records: [],
       errors: ['REFERENCE_NATIVE_QUERY_FAILED'],
@@ -995,4 +1156,10 @@ if (require.main === module) {
   }
   process.stdout.write(JSON.stringify(value) + '\n');
 }
-module.exports = { probe, argv, main };
+module.exports = {
+  probe,
+  argv,
+  main,
+  operationContract,
+  operationProfiles: profileRows,
+};

@@ -305,6 +305,7 @@ function checkPlan(
       fail('PAIR_BINDING');
     return { ...item, pkg };
   });
+  require('./windows-release-references.cjs').operationContract(p);
   if (
     block * 64 + pair.reduce((sum, item) => sum + item.pkg.physical, 0) >
     LIMITS.copy
@@ -476,13 +477,17 @@ function withAdmission(policyFile, expected, action, options = {}) {
         }),
       );
     });
-    require('./release-scope.cjs').validateReferences(facts, {
-      ...p,
-      protectedIds: p.protectedPackages.map((item) => item.id),
-      packageProofs: Object.fromEntries(
-        p.protectedPackages.map((item) => [item.id, item.manifestSha256]),
-      ),
-    });
+    require('./release-scope.cjs').validateReferences(
+      facts,
+      {
+        ...p,
+        protectedIds: p.protectedPackages.map((item) => item.id),
+        packageProofs: Object.fromEntries(
+          p.protectedPackages.map((item) => [item.id, item.manifestSha256]),
+        ),
+      },
+      'install',
+    );
     for (const record of facts.records) {
       const allowed = [
         plan.packages.get(record.packageId)?.spec.path,
@@ -491,7 +496,10 @@ function withAdmission(policyFile, expected, action, options = {}) {
       if (!allowed.includes(canonical(record.packagePath)))
         fail('UNAPPROVED_REFERENCE_PATH');
     }
-    const digest = hash(facts.records);
+    const digest = hash({
+      records: facts.records,
+      operationCoverage: facts.operationCoverage,
+    });
     if (state.claim.refs && state.claim.refs !== digest)
       fail('REFERENCES_CHANGED');
     state.claim.refs = digest;

@@ -873,7 +873,11 @@ async function execute(policyFile, expected, options = {}) {
             }),
           ),
     );
-    require('./release-scope.cjs').validateReferences(result, p);
+    require('./release-scope.cjs').validateReferences(
+      result,
+      p,
+      options.rollback ? 'rollback' : 'publish',
+    );
     for (const r of result.records) {
       if (
         ![
@@ -897,8 +901,14 @@ async function execute(policyFile, expected, options = {}) {
         );
     if (
       facts &&
-      hash(transition ? stable(facts) : facts.records) !==
-        hash(transition ? stable(result) : result.records)
+      hash({
+        records: transition ? stable(facts) : facts.records,
+        operationCoverage: facts.operationCoverage,
+      }) !==
+        hash({
+          records: transition ? stable(result) : result.records,
+          operationCoverage: result.operationCoverage,
+        })
     )
       fail('REFERENCES_CHANGED');
     facts = result;

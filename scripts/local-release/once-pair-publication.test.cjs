@@ -874,6 +874,45 @@ test('an older multi-backup publication allowance is refused before install or s
     assert(!fs.existsSync(path.join(f.root, 'candidate')));
   }));
 
+test('operation coverage is accepted by the exact install, publish and same-DB rollback call sites', () =>
+  fixture(async (f) => {
+    const scope = {
+      format: 1,
+      kind: 'non-retiring-once-pair-v1',
+      preserveLegacy: true,
+      globalReferenceComplete: false,
+      uninspectedProfiles: [],
+    };
+    f.policy.windowsReferences.operationCoverage = scope;
+    fs.writeFileSync(f.file, JSON.stringify(f.policy));
+    const facts = f.facts;
+    f.facts = () => {
+      const r = facts();
+      return {
+        ...r,
+        complete: false,
+        globalReferenceComplete: false,
+        operationSufficient: true,
+        categories: { ...r.categories, shortcuts: false },
+        operationCoverage: {
+          kind: scope.kind,
+          contractSha256: crypto
+            .createHash('sha256')
+            .update(JSON.stringify(scope))
+            .digest('hex'),
+          startupComplete: true,
+          pinnedLaunchersVerified: true,
+          uninspectedProfiles: [],
+          uninspectedStaticJunctions: [],
+        },
+      };
+    };
+    assert.equal((await f.execute()).status, 'passed');
+    assert.equal((await f.execute(true)).status, 'rolled-back');
+    assert.equal(f.backupCount(), 1);
+    assert.equal(f.events.filter((e) => e === 'migrate').length, 1);
+  }));
+
 for (const mode of ['success', 'timeout', 'identity-changed'])
   test(`exact parent-bound auxiliary processes ${mode} before the only backup`, () =>
     fixture(async (f) => {

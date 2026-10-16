@@ -229,6 +229,245 @@ function reject(f, expected) {
   assert.equal(r.complete, false);
   assert(r.errors.includes(expected), JSON.stringify(r));
 }
+
+function operationFixture(f) {
+  const source = path.join(f.base, 'sources');
+  fs.mkdirSync(source);
+  for (const p of f.packages.slice(1)) {
+    const at = path.join(source, p.id);
+    fs.renameSync(p.path, at);
+    p.path = at;
+  }
+  const held = { id: 'held', path: path.join(f.installed, 'held') };
+  fs.mkdirSync(held.path);
+  f.write(path.join(held.path, 'release.json'), {
+    format: 1,
+    id: held.id,
+    sourceCommit: '4'.repeat(40),
+  });
+  f.packages.push(held);
+  const p = f.policy;
+  p.roots.push({ path: source });
+  p.mode = 'once-frozen-pair-v1';
+  p.installRoot = f.installed;
+  p.currentId = 'current';
+  p.heldId = 'held';
+  p.legacyIds = ['held'];
+  p.protectedIds = f.packages.map((r) => r.id);
+  p.protectedPackages = f.packages.map((r) => ({
+    ...r,
+    sourceCommit: JSON.parse(fs.readFileSync(path.join(r.path, 'release.json')))
+      .sourceCommit,
+  }));
+  p.packageProofs.held = f.pin(path.join(held.path, 'release.json')).sha256;
+  p.pair = ['candidate', 'rollback'].map((role) => ({
+    role,
+    id: role,
+    source: f.packages.find((r) => r.id === role).path,
+    target: path.join(f.installed, role),
+  }));
+  p.approval = {
+    operations: ['install', 'publish', 'rollback'],
+    candidateCommit: '2'.repeat(40),
+    rollbackCommit: '3'.repeat(40),
+  };
+  p.publication = {
+    database: path.join(
+      path.dirname(f.installed),
+      'apps/server/data/wewe-rss.db',
+    ),
+    limits: { maxBackups: 1, maxPublications: 1, maxRollbacks: 1 },
+  };
+  p.windowsReferences.packages = [...f.packages];
+  f.write(f.rollbackFile, { format: 1, packages: [f.packages[2]] });
+  p.windowsReferences.rollbackFiles = [f.pin(f.rollbackFile)];
+  const profiles = [500, 1007].map((id) => ({
+    sid: 'S-1-5-21-1-2-3-' + id,
+    path: path.join(f.base, 'unread-profile-' + id),
+    special: false,
+    loaded: false,
+    status: 0,
+    staticShortcutsInspected: false,
+  }));
+  p.windowsReferences.operationCoverage = {
+    format: 1,
+    kind: 'non-retiring-once-pair-v1',
+    preserveLegacy: true,
+    globalReferenceComplete: false,
+    uninspectedProfiles: profiles,
+  };
+  Object.assign(f.native, {
+    complete: false,
+    operationSufficient: true,
+    globalReferenceComplete: false,
+    operationCoverage: {
+      kind: 'non-retiring-once-pair-v1',
+      profilesBefore: structuredClone(profiles),
+      profilesAfter: structuredClone(profiles),
+      staticJunctions: [],
+    },
+  });
+  f.native.categories.shortcuts = false;
+  for (const c of f.native.shortcutCoverage.filter((c) =>
+    ['Startup', 'CommonStartup'].includes(c.kind),
+  )) {
+    const at = path.join(f.base, c.kind);
+    fs.mkdirSync(at);
+    Object.assign(c, { path: at, identity: directoryIdentity(at) });
+    f.native.shortcutDirectories.push({
+      path: at,
+      identity: c.identity,
+      entries: [],
+    });
+  }
+  f.addStaticJunction = (startup = false) => {
+    const parent = startup
+      ? f.native.shortcutCoverage.find((r) => r.kind === 'Startup').path
+      : path.dirname(f.shortcut);
+    const target = path.join(f.base, 'retained-static-target');
+    fs.mkdirSync(target);
+    const at = path.join(parent, 'unrelated-link');
+    fs.symlinkSync(
+      target,
+      at,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    f.native.shortcutDirectories
+      .find((r) => r.path === parent)
+      .entries.push({ name: 'unrelated-link', kind: 'junction' });
+    f.native.operationCoverage.staticJunctions.push({
+      path: at,
+      inspected: false,
+      reason: 'unrelated-static-junction',
+    });
+    return at;
+  };
+}
+
+test('operation coverage admits only its explicit call sites and preserves truthful static gaps', () =>
+  fixture((f) => {
+    operationFixture(f);
+    const link = f.addStaticJunction();
+    const r = f.run();
+    assert.deepEqual(r.errors, []);
+    assert.equal(r.complete, false);
+    assert.equal(r.globalReferenceComplete, false);
+    assert.equal(r.operationSufficient, true);
+    assert.equal(r.categories.shortcuts, false);
+    assert.equal(r.operationCoverage.uninspectedProfiles.length, 2);
+    assert.equal(r.operationCoverage.uninspectedStaticJunctions[0].path, link);
+    assert(
+      !fs.existsSync(
+        f.policy.windowsReferences.operationCoverage.uninspectedProfiles[0]
+          .path,
+      ),
+    );
+    const validate = require('./release-scope.cjs').validateReferences;
+    for (const action of ['install', 'publish', 'rollback'])
+      assert.equal(typeof validate(r, f.policy, action), 'string');
+    assert.throws(() => validate(r, f.policy), /OPERATION_COVERAGE/);
+    assert.throws(() => validate(r, f.policy, 'retire'), /OPERATION_COVERAGE/);
+    assert.throws(
+      () =>
+        validate(
+          { ...r, complete: true, globalReferenceComplete: true },
+          f.policy,
+          'install',
+        ),
+      /OPERATION_COVERAGE/,
+    );
+  }));
+
+for (const fault of ['retire', 'extra-target', 'backup-credit', 'preservation'])
+  test('operation coverage refuses broader capability: ' + fault, () =>
+    fixture((f) => {
+      operationFixture(f);
+      if (fault === 'retire') f.policy.approval.operations.push('retire');
+      if (fault === 'extra-target') f.policy.pair[0].target += '-other';
+      if (fault === 'backup-credit') f.policy.publication.limits.maxBackups = 2;
+      if (fault === 'preservation')
+        f.policy.windowsReferences.operationCoverage.preserveLegacy = false;
+      reject(f, 'REFERENCE_OPERATION_CONTRACT_INVALID');
+    }),
+  );
+
+for (const fault of [
+  'profile-change',
+  'denied-process',
+  'changed-task',
+  'missing-startup',
+  'startup-junction',
+  'unreported-junction',
+])
+  test('operation coverage keeps necessary failures closed: ' + fault, () =>
+    fixture((f) => {
+      operationFixture(f);
+      if (fault === 'profile-change')
+        f.native.operationCoverage.profilesAfter[0].loaded = true;
+      if (fault === 'denied-process')
+        f.native.errors.push('REFERENCE_NATIVE_QUERY_FAILED');
+      if (fault === 'changed-task') f.native.tasksAfter = [];
+      if (fault === 'missing-startup') f.native.shortcutCoverage.pop();
+      if (fault === 'startup-junction') f.addStaticJunction(true);
+      if (fault === 'unreported-junction') {
+        f.addStaticJunction();
+        f.native.operationCoverage.staticJunctions = [];
+      }
+      const r = f.run();
+      assert.equal(r.operationSufficient, false);
+      assert.equal(r.complete, false);
+      assert(r.errors.length, fault);
+    }),
+  );
+
+test(
+  'operation profile classifier uses only supplied metadata and retains default refusal',
+  { skip: process.platform !== 'win32' },
+  () =>
+    fixture((f) => {
+      operationFixture(f);
+      const input = path.join(f.base, 'profiles.json'),
+        script = path.join(f.base, 'classify.ps1');
+      f.write(input, f.policy.windowsReferences.operationCoverage);
+      f.write(
+        script,
+        `param($Source,$InputFile)
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'syntax'}
+$node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Profile-Scope'},$true)
+. ([scriptblock]::Create($node.Extent.Text))
+$scope=Get-Content -LiteralPath $InputFile -Raw | ConvertFrom-Json
+$profiles=@($scope.uninspectedProfiles | ForEach-Object { [PSCustomObject]@{SID=$_.sid;LocalPath=$_.path;Special=$false;Loaded=$false;Status=0} })
+$rows=@(Profile-Scope $profiles 'current-profile' $scope)
+if($rows.Count -ne 2){throw 'missing truthful rows'}
+$rejections=0
+try {Profile-Scope $profiles 'current-profile' $null;throw 'accepted-default'} catch {if($_.Exception.Message -ne 'REFERENCE_NATIVE_OTHER_PROFILE_REQUIRES_REVIEW'){throw};$rejections++}
+$profiles[0].Loaded=$true
+try {Profile-Scope $profiles 'current-profile' $scope;throw 'accepted-change'} catch {if($_.Exception.Message -ne 'REFERENCE_NATIVE_PROFILE_SCOPE_CHANGED'){throw};$rejections++}
+@{rows=$rows.Count;rejections=$rejections}|ConvertTo-Json -Compress
+`,
+      );
+      const output = execFileSync(
+        path.join(
+          process.env.SystemRoot,
+          'System32/WindowsPowerShell/v1.0/powershell.exe',
+        ),
+        [
+          '-NoProfile',
+          '-File',
+          script,
+          '-Source',
+          path.join(__dirname, 'windows-release-reference-collector.ps1'),
+          '-InputFile',
+          input,
+        ],
+        { encoding: 'utf8', windowsHide: true, timeout: 15000 },
+      );
+      assert.deepEqual(JSON.parse(output), { rows: 2, rejections: 2 });
+    }),
+);
 test('real contract emits all six complete categories from pinned synthetic sources', () =>
   fixture((f) => {
     const r = f.run();

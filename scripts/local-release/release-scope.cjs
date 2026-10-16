@@ -97,7 +97,41 @@ function inspect(paths, options = {}) {
   options.onMetrics?.(verifier.metrics());
   return { roots, baseline };
 }
-function validateReferences(value, policy) {
+function validateReferences(value, policy, operation) {
+  const scoped = value?.operationSufficient === true;
+  if (scoped) {
+    const {
+      operationContract,
+      operationProfiles,
+    } = require('./windows-release-references.cjs');
+    const contract = operationContract(policy);
+    if (
+      !contract ||
+      !['install', 'publish', 'rollback'].includes(operation) ||
+      value.complete !== false ||
+      value.globalReferenceComplete !== false ||
+      value.categories?.shortcuts !== false ||
+      value.operationCoverage?.kind !== contract.kind ||
+      value.operationCoverage.contractSha256 !== hash(contract) ||
+      value.operationCoverage.startupComplete !== true ||
+      value.operationCoverage.pinnedLaunchersVerified !== true ||
+      !Array.isArray(value.operationCoverage.uninspectedProfiles) ||
+      hash(operationProfiles(value.operationCoverage.uninspectedProfiles)) !==
+        hash(operationProfiles(contract.uninspectedProfiles)) ||
+      !Array.isArray(value.operationCoverage.uninspectedStaticJunctions) ||
+      value.operationCoverage.uninspectedStaticJunctions.length > 64 ||
+      value.operationCoverage.uninspectedStaticJunctions.some(
+        (r) =>
+          r.inspected !== false ||
+          r.reason !== 'unrelated-static-junction' ||
+          typeof r.path !== 'string' ||
+          !path.isAbsolute(r.path) ||
+          !Array.isArray(r.identity) ||
+          typeof r.target !== 'string',
+      )
+    )
+      throw new Error('RELEASE_SCOPE_OPERATION_COVERAGE_INVALID');
+  }
   const kinds = [
     'processes',
     'tasks',
@@ -108,8 +142,12 @@ function validateReferences(value, policy) {
   ];
   if (
     !value ||
-    value.complete !== true ||
-    kinds.some((k) => value.categories?.[k] !== true) ||
+    (scoped
+      ? false
+      : value.complete !== true || value.globalReferenceComplete === false) ||
+    kinds
+      .filter((k) => !scoped || k !== 'shortcuts')
+      .some((k) => value.categories?.[k] !== true) ||
     !Array.isArray(value.records) ||
     value.records.length > 4096 ||
     !Array.isArray(value.errors) ||
