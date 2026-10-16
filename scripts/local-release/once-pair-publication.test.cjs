@@ -874,56 +874,91 @@ test('an older multi-backup publication allowance is refused before install or s
     assert(!fs.existsSync(path.join(f.root, 'candidate')));
   }));
 
-test('operation coverage is accepted by the exact install, publish and same-DB rollback call sites', () =>
-  fixture(async (f) => {
-    const scope = {
-      format: 1,
-      kind: 'non-retiring-once-pair-v1',
-      staticScopeMode: 'startup-and-pinned-launchers-v1',
-      preserveLegacy: true,
-      globalReferenceComplete: false,
-      uninspectedProfiles: [],
-    };
-    f.policy.windowsReferences.operationCoverage = scope;
-    fs.writeFileSync(f.file, JSON.stringify(f.policy));
-    const facts = f.facts;
-    f.facts = () => {
-      const r = facts();
-      return {
-        ...r,
-        complete: false,
-        globalReferenceComplete: false,
-        operationSufficient: true,
-        categories: { ...r.categories, shortcuts: false },
-        operationCoverage: {
-          kind: scope.kind,
-          staticScopeMode: scope.staticScopeMode,
-          contractSha256: crypto
-            .createHash('sha256')
-            .update(JSON.stringify(scope))
-            .digest('hex'),
-          startupComplete: true,
-          pinnedLaunchersVerified: true,
+for (const processScoped of [false, true])
+  test(
+    'operation coverage is accepted by the exact install, publish and same-DB rollback call sites' +
+      (processScoped ? ' with related-process coverage' : ''),
+    () =>
+      fixture(async (f) => {
+        const scope = {
+          format: 1,
+          kind: 'non-retiring-once-pair-v1',
+          staticScopeMode: 'startup-and-pinned-launchers-v1',
+          preserveLegacy: true,
+          globalReferenceComplete: false,
           uninspectedProfiles: [],
-          uninspectedStaticScopes: [
-            'Desktop',
-            'CommonDesktop',
-            'StartMenu',
-            'CommonStartMenu',
-          ].map((kind) => ({
-            kind,
-            inspected: false,
-            reason: 'outside-non-retiring-operation',
-          })),
-          uninspectedStaticJunctions: [],
-        },
-      };
-    };
-    assert.equal((await f.execute()).status, 'passed');
-    assert.equal((await f.execute(true)).status, 'rolled-back');
-    assert.equal(f.backupCount(), 1);
-    assert.equal(f.events.filter((e) => e === 'migrate').length, 1);
-  }));
+        };
+        if (processScoped)
+          scope.processCoverage = {
+            format: 1,
+            kind: 'once-related-processes-v1',
+            globalDbWriterExclusion: false,
+            coverageClaim:
+              'related-processes-only;uninspected-background-db-access-unproven',
+            backgroundGaps: [],
+          };
+        f.policy.windowsReferences.operationCoverage = scope;
+        fs.writeFileSync(f.file, JSON.stringify(f.policy));
+        const facts = f.facts;
+        f.facts = () => {
+          const r = facts();
+          return {
+            ...r,
+            complete: false,
+            globalReferenceComplete: false,
+            operationSufficient: true,
+            categories: {
+              ...r.categories,
+              shortcuts: false,
+              ...(processScoped ? { processes: false } : {}),
+            },
+            operationCoverage: {
+              kind: scope.kind,
+              staticScopeMode: scope.staticScopeMode,
+              contractSha256: crypto
+                .createHash('sha256')
+                .update(JSON.stringify(scope))
+                .digest('hex'),
+              startupComplete: true,
+              pinnedLaunchersVerified: true,
+              uninspectedProfiles: [],
+              uninspectedStaticScopes: [
+                'Desktop',
+                'CommonDesktop',
+                'StartMenu',
+                'CommonStartMenu',
+              ].map((kind) => ({
+                kind,
+                inspected: false,
+                reason: 'outside-non-retiring-operation',
+              })),
+              uninspectedStaticJunctions: [],
+              ...(processScoped
+                ? {
+                    processCoverage: {
+                      kind: scope.processCoverage.kind,
+                      contractSha256: crypto
+                        .createHash('sha256')
+                        .update(JSON.stringify(scope.processCoverage))
+                        .digest('hex'),
+                      relatedChecksComplete: true,
+                      requiredPortChecked: true,
+                      globalDbWriterExclusion: false,
+                      globalProcessVisibilityComplete: false,
+                      globalInvocationCoverageComplete: false,
+                      backgroundGaps: [],
+                    },
+                  }
+                : {}),
+            },
+          };
+        };
+        assert.equal((await f.execute()).status, 'passed');
+        assert.equal((await f.execute(true)).status, 'rolled-back');
+        assert.equal(f.backupCount(), 1);
+        assert.equal(f.events.filter((e) => e === 'migrate').length, 1);
+      }),
+  );
 
 for (const mode of ['success', 'timeout', 'identity-changed'])
   test(`exact parent-bound auxiliary processes ${mode} before the only backup`, () =>

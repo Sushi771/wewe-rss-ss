@@ -19,7 +19,18 @@ foreach($item in @('$shell','$link')) {
 $hashCall='Shortcut-Sha256 $entry.FullName'
 if (($src.Split(@($hashCall),[StringSplitOptions]::None).Count-1) -ne 2) {throw 'hash boundary changed'}
 $src=$src.Replace($hashCall,'Owned-ShortcutHash $entry.FullName')
+if(($src.Split(@('. $tcp'),[StringSplitOptions]::None).Count-1) -ne 1){throw 'TCP helper boundary changed'}
+$src=$src.Replace('. $tcp','[void]$tcp')
+$tcpPath='$tcp=Join-Path $PSScriptRoot ''tcp-listeners.ps1'''
+if(-not $src.Contains($tcpPath)){throw 'TCP path boundary changed'}
+$src=$src.Replace($tcpPath,'$tcp=Join-Path $global:OwnedHelperRoot ''tcp-listeners.ps1''')
 $collector=[scriptblock]::Create($src)
+function Get-LocalTcpListener($Port){
+  $global:OwnedCounts.portQueries++
+  if($global:OwnedCase -eq 'denied-operation-port'){throw [ComponentModel.Win32Exception]::new(5)}
+  if($Port -ne 4000){throw 'unexpected fixture port'}
+  [PSCustomObject]@{LocalPort=$Port;OwningProcess=10;LocalAddress='127.0.0.1'}
+}
 function Owned-Path([string]$at) {
   $root=[IO.Path]::GetFullPath($global:OwnedFixture.root).TrimEnd('\')+'\'
   $full=[IO.Path]::GetFullPath($at)
@@ -107,9 +118,11 @@ function New-Object($ComObject) {
 function Owned-ReleaseCom($value) {}
 $results=[System.Collections.Generic.List[object]]::new()
 $positive=$null
-foreach($case in @('success','get-filehash-unavailable','default-strict','denied-startup','changed-startup-entry','missing-startup-entry','denied-pinned-entry','changed-pinned-entry','denied-post-process','deadline','denied-shortcut-hash','oversize-shortcut-hash','com-create-failure')) {
+$cases=@('success','get-filehash-unavailable','default-strict','denied-startup','changed-startup-entry','missing-startup-entry','denied-pinned-entry','changed-pinned-entry','denied-post-process','deadline','denied-shortcut-hash','oversize-shortcut-hash','com-create-failure')
+if($global:OwnedFixture.processScoped){$cases+=@('denied-operation-port')}
+foreach($case in $cases) {
   $global:OwnedCase=$case
-  $global:OwnedCounts=@{processes=0;tasks=0;profiles=0;staticMetadata=0;staticEnumerations=0;staticHashes=0;staticCom=0;hashes=0;hashCmdletCalls=0;com=0;resolved=[System.Collections.Generic.List[string]]::new();enumerated=[System.Collections.Generic.List[string]]::new()}
+  $global:OwnedCounts=@{processes=0;tasks=0;profiles=0;portQueries=0;staticMetadata=0;staticEnumerations=0;staticHashes=0;staticCom=0;hashes=0;hashCmdletCalls=0;com=0;resolved=[System.Collections.Generic.List[string]]::new();enumerated=[System.Collections.Generic.List[string]]::new()}
   foreach($file in $global:OwnedFixture.links.PSObject.Properties.Name) {
     if(Owned-Path $file) {throw 'bad Startup fixture'}
     [IO.File]::WriteAllText($file,'inert synthetic shortcut')

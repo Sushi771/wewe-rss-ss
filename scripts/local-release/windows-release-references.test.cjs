@@ -356,6 +356,228 @@ function operationFixture(f) {
   };
 }
 
+function processFixture(f) {
+  operationFixture(f);
+  f.policy.publication.expected = {
+    ...f.native.processesBefore[0],
+    port: 4000,
+  };
+  f.policy.publication.expectedChildren = [{ ...f.native.processesBefore[1] }];
+  const gaps = Array.from({ length: 215 }, (_, i) => ({
+    pid: 2000 + i,
+    parentPid: 1,
+    name:
+      i < 8
+        ? [
+            'Secure System',
+            'Registry',
+            'smss.exe',
+            'csrss.exe',
+            'wininit.exe',
+            'csrss.exe',
+            'winlogon.exe',
+            'services.exe',
+          ][i]
+        : 'ThirdPartyService.exe',
+    executable: '',
+    commandLine: '',
+    startUtc: '2026-01-01T00:00:00.000Z',
+  }));
+  f.policy.windowsReferences.operationCoverage.processCoverage = {
+    format: 1,
+    kind: 'once-related-processes-v1',
+    globalDbWriterExclusion: false,
+    coverageClaim:
+      'related-processes-only;uninspected-background-db-access-unproven',
+    backgroundGaps: structuredClone(gaps),
+  };
+  f.native.processesBefore.push(...structuredClone(gaps));
+  f.native.processesAfter.push(...structuredClone(gaps));
+  f.native.processCoverage = {
+    format: 1,
+    port: 4000,
+    listenersBefore: [{ port: 4000, pid: 10, address: '127.0.0.1' }],
+    listenersAfter: [{ port: 4000, pid: 10, address: '127.0.0.1' }],
+  };
+  f.changeBackground = (change) => {
+    for (const rows of [
+      f.native.processesBefore,
+      f.native.processesAfter,
+      f.policy.windowsReferences.operationCoverage.processCoverage
+        .backgroundGaps,
+    ])
+      change(rows.find((r) => r.pid === 2000));
+  };
+}
+
+test('operation process contract retains 215 exact background gaps without global writer claims', () =>
+  fixture((f) => {
+    processFixture(f);
+    const r = f.run();
+    assert.deepEqual(r.errors, []);
+    assert.equal(r.operationSufficient, true);
+    assert.equal(r.categories.processes, false);
+    assert.equal(r.globalReferenceComplete, false);
+    const q = r.operationCoverage.processCoverage;
+    assert.equal(q.backgroundGaps.length, 215);
+    assert.equal(q.globalProcessVisibilityComplete, false);
+    assert.equal(q.globalDbWriterExclusion, false);
+    assert.equal(q.globalInvocationCoverageComplete, false);
+    assert(
+      q.backgroundGaps.some(
+        (p) => p.name === 'ThirdPartyService.exe' && !p.executable,
+      ),
+    );
+    assert.deepEqual(
+      r.records
+        .filter((x) => x.kind === 'processes')
+        .map((x) => x.pid)
+        .sort((a, b) => a - b),
+      [10, 11],
+    );
+    const validate = require('./release-scope.cjs').validateReferences;
+    for (const action of ['install', 'publish', 'rollback'])
+      assert.equal(typeof validate(r, f.policy, action), 'string');
+    assert.throws(() => validate(r, f.policy, 'retire'));
+    const forged = structuredClone(r);
+    forged.operationCoverage.processCoverage.globalDbWriterExclusion = true;
+    assert.throws(() => validate(forged, f.policy, 'install'));
+    delete f.policy.windowsReferences.operationCoverage.processCoverage;
+    assert(f.run().errors.includes('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE'));
+  }));
+
+for (const signal of ['database', 'package', 'port', 'descendant'])
+  test(
+    'operation process contract never exempts a bound system name with ' +
+      signal +
+      ' association',
+    () =>
+      fixture((f) => {
+        processFixture(f);
+        if (signal === 'database')
+          f.changeBackground(
+            (p) =>
+              (p.commandLine =
+                'tool --database ' + quote(f.policy.publication.database)),
+          );
+        if (signal === 'package')
+          f.changeBackground(
+            (p) =>
+              (p.executable = path.join(f.packages[0].path, 'runtime.exe')),
+          );
+        if (signal === 'descendant')
+          f.changeBackground((p) => (p.parentPid = 11));
+        if (signal === 'port')
+          for (const k of ['listenersBefore', 'listenersAfter'])
+            f.native.processCoverage[k][0].pid = 2000;
+        const r = f.run();
+        assert.equal(r.operationSufficient, false);
+        assert(
+          r.errors.includes('REFERENCE_BACKGROUND_BECAME_ASSOCIATED'),
+          JSON.stringify(r),
+        );
+      }),
+  );
+
+for (const host of ['mshta.exe', 'rundll32.exe', 'regsvr32.exe'])
+  test(
+    'operation process contract rejects bound opaque execution host ' + host,
+    () =>
+      fixture((f) => {
+        processFixture(f);
+        f.changeBackground((p) => (p.name = host));
+        assert(
+          f.run().errors.includes('REFERENCE_OPAQUE_INTERPRETER_UNRESOLVED'),
+        );
+        f.changeBackground((p) => {
+          p.name = 'System background';
+          p.executable = path.join(f.base, host);
+        });
+        assert(
+          f.run().errors.includes('REFERENCE_OPAQUE_INTERPRETER_UNRESOLVED'),
+        );
+      }),
+  );
+
+for (const fault of [
+  'new-unknown',
+  'changed-gap',
+  'missing-post',
+  'missing-port',
+  'changed-port',
+  'opaque-interpreter',
+  'global-switch',
+])
+  test('operation process contract refuses ' + fault, () =>
+    fixture((f) => {
+      processFixture(f);
+      if (fault === 'new-unknown')
+        for (const k of ['processesBefore', 'processesAfter'])
+          f.native[k].push({
+            ...f.native.processesBefore.find((p) => p.pid === 2000),
+            pid: 9000,
+          });
+      if (fault === 'changed-gap')
+        f.native.processesAfter.find((p) => p.pid === 2000).startUtc =
+          '2026-01-02T00:00:00.000Z';
+      if (fault === 'missing-post') delete f.native.processesAfter;
+      if (fault === 'missing-port')
+        delete f.native.processCoverage.listenersAfter;
+      if (fault === 'changed-port')
+        f.native.processCoverage.listenersAfter = [];
+      if (fault === 'opaque-interpreter')
+        f.changeBackground((p) => (p.name = 'python.exe'));
+      if (fault === 'global-switch')
+        f.policy.windowsReferences.operationCoverage.processCoverage.allowUnknownProcesses = true;
+      const r = f.run();
+      assert.equal(r.operationSufficient, false);
+      assert(r.errors.length, fault);
+    }),
+  );
+
+test('operation process contract requires an exact stable binding before skipping an unrelated shell invocation', () =>
+  fixture((f) => {
+    processFixture(f);
+    const row = {
+      pid: 9001,
+      parentPid: 1,
+      name: 'powershell.exe',
+      executable: f.controller,
+      commandLine:
+        quote(f.controller) + ' -Command "uninspected background script.ps1"',
+      startUtc: '2026-01-01T00:00:00.000Z',
+    };
+    f.native.processesBefore.push(structuredClone(row));
+    f.native.processesAfter.push(structuredClone(row));
+    assert.equal(f.run().operationSufficient, false);
+    f.policy.windowsReferences.operationCoverage.processCoverage.backgroundGaps.push(
+      row,
+    );
+    const r = f.run();
+    assert.deepEqual(r.errors, []);
+    assert.equal(
+      r.operationCoverage.processCoverage.backgroundGaps.length,
+      216,
+    );
+    for (const rows of [f.native.processesBefore, f.native.processesAfter])
+      rows.find((p) => p.pid === 9001).commandLine +=
+        ' ' + quote(f.policy.publication.database);
+    assert.equal(f.run().operationSufficient, false);
+  }));
+
+test('operation process contract parses only exact approved auxiliaries without weakening descendant visibility', () =>
+  fixture((f) => {
+    processFixture(f);
+    for (const rows of [f.native.processesBefore, f.native.processesAfter])
+      rows.find((p) => p.pid === 11).commandLine =
+        quote(f.worker) + ' -c "approved codec only"';
+    f.policy.publication.expectedChildren[0].commandLine =
+      f.native.processesBefore.find((p) => p.pid === 11).commandLine;
+    assert.equal(f.run().operationSufficient, true);
+    f.native.processesAfter.find((p) => p.pid === 11).executable = '';
+    assert.equal(f.run().operationSufficient, false);
+  }));
+
 test(
   'native shortcut hashes without optional cmdlet and retains sharing refusal',
   { skip: process.platform !== 'win32' },
@@ -471,232 +693,281 @@ for (const fault of ['retire', 'extra-target', 'backup-credit', 'preservation'])
     }),
   );
 
-test(
-  'actual collector excludes a 1403-directory static forest and reaches both dynamic snapshots',
-  { skip: process.platform !== 'win32' },
-  () =>
-    fixture((f) => {
-      operationFixture(f);
-      const folders = {},
-        staticRoots = [],
-        specs = [
-          ['Desktop', 1336, 26],
-          ['CommonDesktopDirectory', 1, 19],
-          ['StartMenu', 34, 45],
-          ['CommonStartMenu', 32, 85],
-        ];
-      for (const [name, dirs, links] of specs) {
-        const root = (folders[name] = path.join(f.base, 'static-' + name));
-        fs.mkdirSync(root);
-        staticRoots.push(root);
-        for (let i = 1; i < dirs; i++)
-          fs.mkdirSync(path.join(root, 'unrelated-' + i));
-        for (let i = 0; i < links; i++)
-          f.write(path.join(root, 'unrelated-' + i + '.lnk'), 'never parsed');
-      }
-      const links = {};
-      const explicitEntry = path.join(f.project, 'explicit-start.lnk');
-      f.write(explicitEntry, 'inert synthetic shortcut');
-      f.policy.windowsReferences.launchers[0].files.push(f.pin(explicitEntry));
-      links[explicitEntry] = {
-        target: f.controller,
-        arguments: quote(f.launcher) + ' start',
-        workingDirectory: f.project,
-      };
-      for (const kind of ['Startup', 'CommonStartup']) {
-        const at = (folders[kind] = path.join(f.base, kind));
-        const file = path.join(at, 'owned-start.lnk');
-        links[file] = {
+for (const processScoped of [false, true])
+  test(
+    'actual collector excludes a 1403-directory static forest and reaches both dynamic snapshots' +
+      (processScoped ? ' with operation process port coverage' : ''),
+    { skip: process.platform !== 'win32' },
+    () =>
+      fixture((f) => {
+        operationFixture(f);
+        const folders = {},
+          staticRoots = [],
+          specs = [
+            ['Desktop', 1336, 26],
+            ['CommonDesktopDirectory', 1, 19],
+            ['StartMenu', 34, 45],
+            ['CommonStartMenu', 32, 85],
+          ];
+        for (const [name, dirs, links] of specs) {
+          const root = (folders[name] = path.join(f.base, 'static-' + name));
+          fs.mkdirSync(root);
+          staticRoots.push(root);
+          for (let i = 1; i < dirs; i++)
+            fs.mkdirSync(path.join(root, 'unrelated-' + i));
+          for (let i = 0; i < links; i++)
+            f.write(path.join(root, 'unrelated-' + i + '.lnk'), 'never parsed');
+        }
+        const links = {};
+        const explicitEntry = path.join(f.project, 'explicit-start.lnk');
+        f.write(explicitEntry, 'inert synthetic shortcut');
+        f.policy.windowsReferences.launchers[0].files.push(
+          f.pin(explicitEntry),
+        );
+        links[explicitEntry] = {
           target: f.controller,
           arguments: quote(f.launcher) + ' start',
           workingDirectory: f.project,
         };
-      }
-      const processes = structuredClone(f.native.processesBefore);
-      while (processes.length < 587)
-        processes.push(
-          f.process(
-            1000 + processes.length,
-            1,
-            f.controller,
-            quote(f.controller),
+        for (const kind of ['Startup', 'CommonStartup']) {
+          const at = (folders[kind] = path.join(f.base, kind));
+          const file = path.join(at, 'owned-start.lnk');
+          links[file] = {
+            target: f.controller,
+            arguments: quote(f.launcher) + ' start',
+            workingDirectory: f.project,
+          };
+        }
+        const processes = structuredClone(f.native.processesBefore);
+        while (processes.length < 587)
+          processes.push(
+            f.process(
+              1000 + processes.length,
+              1,
+              f.controller,
+              quote(f.controller),
+            ),
+          );
+        const tasks = Array.from({ length: 226 }, (_, i) => ({
+          ...structuredClone(f.native.tasks[0]),
+          identity: 'OwnedTask' + i,
+        }));
+        const policyFile = path.join(f.base, 'collector-policy.json'),
+          defaultPolicy = path.join(f.base, 'default-policy.json');
+        if (processScoped) {
+          f.policy.publication.expected = {
+            ...f.native.processesBefore[0],
+            port: 4000,
+          };
+          f.policy.publication.expectedChildren = [
+            { ...f.native.processesBefore[1] },
+          ];
+          f.policy.windowsReferences.operationCoverage.processCoverage = {
+            format: 1,
+            kind: 'once-related-processes-v1',
+            globalDbWriterExclusion: false,
+            coverageClaim:
+              'related-processes-only;uninspected-background-db-access-unproven',
+            backgroundGaps: [],
+          };
+          f.policy.codePins = {
+            'tcp-listeners.ps1': f.pin(
+              path.join(__dirname, 'tcp-listeners.ps1'),
+            ).sha256,
+          };
+        }
+        f.write(policyFile, f.policy);
+        const strict = structuredClone(f.policy);
+        delete strict.windowsReferences.operationCoverage;
+        f.write(defaultPolicy, strict);
+        const fixtureFile = path.join(f.base, 'collector-fixture.json');
+        f.write(fixtureFile, {
+          root: f.base,
+          helperRoot: __dirname,
+          folders,
+          staticRoots,
+          links,
+          explicitEntry,
+          processes,
+          tasks,
+          profiles:
+            f.policy.windowsReferences.operationCoverage.uninspectedProfiles,
+          policy: policyFile,
+          defaultPolicy,
+          processScoped,
+        });
+        const output = execFileSync(
+          path.join(
+            process.env.SystemRoot,
+            'System32/WindowsPowerShell/v1.0/powershell.exe',
+          ),
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-File',
+            path.join(__dirname, 'windows-operation-collector.fixture.ps1'),
+            '-Source',
+            path.join(__dirname, 'windows-release-reference-collector.ps1'),
+            '-FixtureFile',
+            fixtureFile,
+          ],
+          {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 60000,
+            maxBuffer: 8 * 1024 ** 2,
+          },
+        );
+        const report = JSON.parse(output),
+          good = report.results.find((r) => r.name === 'success');
+        assert.equal(report.results.length, processScoped ? 14 : 13);
+        assert.equal(good.operationSufficient, true, JSON.stringify(good));
+        assert.equal(good.counts.portQueries, processScoped ? 2 : 0);
+        if (processScoped) {
+          const denied = report.results.find(
+            (r) => r.name === 'denied-operation-port',
+          );
+          assert.equal(denied.operationSufficient, false);
+          assert.equal(denied.failureContext.stage, 'operation-port-before');
+          assert(
+            denied.failureContext.exceptions.some(
+              (e) => e.nativeErrorCode === 5,
+            ),
+          );
+        }
+        assert.equal(good.operationSufficient, true, JSON.stringify(good));
+        assert.equal(good.complete, false);
+        assert.equal(good.globalReferenceComplete, false);
+        assert.deepEqual(good.errors, []);
+        assert.equal(good.processesAfter, 587);
+        assert.equal(good.tasksAfter, 226);
+        assert.equal(good.profilesAfter, 2);
+        assert.equal(good.counts.processes, 2);
+        assert.equal(good.counts.tasks, 2);
+        assert.equal(good.counts.profiles, 2);
+        assert.equal(good.directoryCount, 2);
+        assert.equal(good.shortcutCount, 3);
+        assert.deepEqual(good.counts.resolved, ['Startup', 'CommonStartup']);
+        assert.deepEqual(good.counts.enumerated, [
+          folders.Startup,
+          folders.CommonStartup,
+        ]);
+        assert.equal(good.counts.com, 3);
+        assert.equal(good.counts.hashes, 6);
+        for (const key of [
+          'staticMetadata',
+          'staticEnumerations',
+          'staticHashes',
+          'staticCom',
+        ])
+          assert.equal(good.counts[key], 0, key);
+        const unavailable = report.results.find(
+          (r) => r.name === 'get-filehash-unavailable',
+        );
+        assert.equal(unavailable.operationSufficient, true);
+        for (const row of report.results)
+          assert.equal(row.counts.hashCmdletCalls, 0);
+        assert.equal(good.failureContext, null);
+        assert(!JSON.stringify(report).includes('SECRET_FIXTURE'));
+        const hashFailure = report.results.find(
+          (r) => r.name === 'denied-shortcut-hash',
+        );
+        assert.equal(hashFailure.failureContext.stage, 'shortcut-hash-before');
+        assert.equal(hashFailure.failureContext.folderKind, 'Startup');
+        assert(
+          hashFailure.failureContext.exceptions.some(
+            (e) => e.type === 'System.UnauthorizedAccessException',
           ),
         );
-      const tasks = Array.from({ length: 226 }, (_, i) => ({
-        ...structuredClone(f.native.tasks[0]),
-        identity: 'OwnedTask' + i,
-      }));
-      const policyFile = path.join(f.base, 'collector-policy.json'),
-        defaultPolicy = path.join(f.base, 'default-policy.json');
-      f.write(policyFile, f.policy);
-      const strict = structuredClone(f.policy);
-      delete strict.windowsReferences.operationCoverage;
-      f.write(defaultPolicy, strict);
-      const fixtureFile = path.join(f.base, 'collector-fixture.json');
-      f.write(fixtureFile, {
-        root: f.base,
-        helperRoot: __dirname,
-        folders,
-        staticRoots,
-        links,
-        explicitEntry,
-        processes,
-        tasks,
-        profiles:
-          f.policy.windowsReferences.operationCoverage.uninspectedProfiles,
-        policy: policyFile,
-        defaultPolicy,
-      });
-      const output = execFileSync(
-        path.join(
-          process.env.SystemRoot,
-          'System32/WindowsPowerShell/v1.0/powershell.exe',
-        ),
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-File',
-          path.join(__dirname, 'windows-operation-collector.fixture.ps1'),
-          '-Source',
-          path.join(__dirname, 'windows-release-reference-collector.ps1'),
-          '-FixtureFile',
-          fixtureFile,
-        ],
-        {
-          encoding: 'utf8',
-          windowsHide: true,
-          timeout: 60000,
-          maxBuffer: 8 * 1024 ** 2,
-        },
-      );
-      const report = JSON.parse(output),
-        good = report.results.find((r) => r.name === 'success');
-      assert.equal(report.results.length, 13);
-      assert.equal(good.operationSufficient, true, JSON.stringify(good));
-      assert.equal(good.complete, false);
-      assert.equal(good.globalReferenceComplete, false);
-      assert.deepEqual(good.errors, []);
-      assert.equal(good.processesAfter, 587);
-      assert.equal(good.tasksAfter, 226);
-      assert.equal(good.profilesAfter, 2);
-      assert.equal(good.counts.processes, 2);
-      assert.equal(good.counts.tasks, 2);
-      assert.equal(good.counts.profiles, 2);
-      assert.equal(good.directoryCount, 2);
-      assert.equal(good.shortcutCount, 3);
-      assert.deepEqual(good.counts.resolved, ['Startup', 'CommonStartup']);
-      assert.deepEqual(good.counts.enumerated, [
-        folders.Startup,
-        folders.CommonStartup,
-      ]);
-      assert.equal(good.counts.com, 3);
-      assert.equal(good.counts.hashes, 6);
-      for (const key of [
-        'staticMetadata',
-        'staticEnumerations',
-        'staticHashes',
-        'staticCom',
-      ])
-        assert.equal(good.counts[key], 0, key);
-      const unavailable = report.results.find(
-        (r) => r.name === 'get-filehash-unavailable',
-      );
-      assert.equal(unavailable.operationSufficient, true);
-      for (const row of report.results)
-        assert.equal(row.counts.hashCmdletCalls, 0);
-      assert.equal(good.failureContext, null);
-      assert(!JSON.stringify(report).includes('SECRET_FIXTURE'));
-      const hashFailure = report.results.find(
-        (r) => r.name === 'denied-shortcut-hash',
-      );
-      assert.equal(hashFailure.failureContext.stage, 'shortcut-hash-before');
-      assert.equal(hashFailure.failureContext.folderKind, 'Startup');
-      assert(
-        hashFailure.failureContext.exceptions.some(
-          (e) => e.type === 'System.UnauthorizedAccessException',
-        ),
-      );
-      const comFailure = report.results.find(
-        (r) => r.name === 'com-create-failure',
-      );
-      assert.equal(comFailure.failureContext.stage, 'shortcut-com-create');
-      assert(
-        comFailure.failureContext.exceptions.some(
-          (e) => e.hresult === '0x80070005',
-        ),
-      );
-      const oversize = report.results.find(
-        (r) => r.name === 'oversize-shortcut-hash',
-      );
-      assert(oversize.errors.includes('REFERENCE_NATIVE_SHORTCUT_LIMIT'));
-      for (const bad of report.results.filter(
-        (r) => !['success', 'get-filehash-unavailable'].includes(r.name),
-      )) {
-        assert.equal(bad.operationSufficient, false, bad.name);
-        assert.equal(bad.complete, false, bad.name);
-        assert(bad.errors.length, bad.name);
-      }
-      const baseline = report.results.find((r) => r.name === 'default-strict');
-      assert.equal(baseline.counts.staticEnumerations, 1);
-      assert(
-        baseline.errors.includes('REFERENCE_NATIVE_UNRELATED_STATIC_TRAVERSAL'),
-      );
-      const deadline = report.results.find((r) => r.name === 'deadline');
-      assert(deadline.errors.includes('REFERENCE_NATIVE_DEADLINE'));
-      assert.equal(deadline.processesAfter, 0);
-      // Feed actual collector output into the unchanged process/task/launcher/pointer checks.
-      f.native = report.native;
-      const configSha = f.pin(policyFile).sha256;
-      f.write(f.lock, { pid: 99, nonce: 'owned-nonce', configSha });
-      f.state.configSha = configSha;
-      f.saveState();
-      const checked = probe(f.policy, report.native, { callerPid: 99 });
-      assert.deepEqual(checked.errors, []);
-      assert.equal(checked.operationSufficient, true);
-      assert.equal(checked.operationCoverage.uninspectedStaticScopes.length, 4);
-      const validate = require('./release-scope.cjs').validateReferences;
-      assert.equal(typeof validate(checked, f.policy, 'install'), 'string');
-      for (const omitted of ['processesAfter', 'tasksAfter']) {
-        const missing = { ...report.native, [omitted]: [] };
-        const rejected = probe(f.policy, missing, { callerPid: 99 });
-        assert(rejected.errors.length, omitted);
-      }
-      const missingPinned = {
-        ...report.native,
-        shortcuts: report.native.shortcuts.filter(
-          (s) => s.path !== explicitEntry,
-        ),
-      };
-      assert(
-        probe(f.policy, missingPinned, { callerPid: 99 }).errors.includes(
-          'REFERENCE_PINNED_SHORTCUT_QUERY_INCOMPLETE',
-        ),
-      );
-      fs.unlinkSync(explicitEntry);
-      assert(probe(f.policy, report.native, { callerPid: 99 }).errors.length);
-      console.log(
-        JSON.stringify({
-          fixture: 'actual-collector-static-forest',
-          staticDirectories: 1403,
-          staticShortcuts: 175,
-          processes: 587,
-          tasks: 226,
-          staticCalls: 0,
-          startupDirectories: good.directoryCount,
-          postSnapshots: {
-            processes: good.processesAfter,
-            tasks: good.tasksAfter,
-            profiles: good.profilesAfter,
-          },
-          cases: report.results.map((r) => ({
-            name: r.name,
-            operationSufficient: r.operationSufficient,
-            errors: r.errors,
-          })),
-        }),
-      );
-    }),
-);
+        const comFailure = report.results.find(
+          (r) => r.name === 'com-create-failure',
+        );
+        assert.equal(comFailure.failureContext.stage, 'shortcut-com-create');
+        assert(
+          comFailure.failureContext.exceptions.some(
+            (e) => e.hresult === '0x80070005',
+          ),
+        );
+        const oversize = report.results.find(
+          (r) => r.name === 'oversize-shortcut-hash',
+        );
+        assert(oversize.errors.includes('REFERENCE_NATIVE_SHORTCUT_LIMIT'));
+        for (const bad of report.results.filter(
+          (r) => !['success', 'get-filehash-unavailable'].includes(r.name),
+        )) {
+          assert.equal(bad.operationSufficient, false, bad.name);
+          assert.equal(bad.complete, false, bad.name);
+          assert(bad.errors.length, bad.name);
+        }
+        const baseline = report.results.find(
+          (r) => r.name === 'default-strict',
+        );
+        assert.equal(baseline.counts.staticEnumerations, 1);
+        assert(
+          baseline.errors.includes(
+            'REFERENCE_NATIVE_UNRELATED_STATIC_TRAVERSAL',
+          ),
+        );
+        const deadline = report.results.find((r) => r.name === 'deadline');
+        assert(deadline.errors.includes('REFERENCE_NATIVE_DEADLINE'));
+        assert.equal(deadline.processesAfter, 0);
+        // Feed actual collector output into the unchanged process/task/launcher/pointer checks.
+        f.native = report.native;
+        const configSha = f.pin(policyFile).sha256;
+        f.write(f.lock, { pid: 99, nonce: 'owned-nonce', configSha });
+        f.state.configSha = configSha;
+        f.saveState();
+        const checked = probe(f.policy, report.native, { callerPid: 99 });
+        assert.deepEqual(checked.errors, []);
+        assert.equal(checked.operationSufficient, true);
+        assert.equal(
+          checked.operationCoverage.uninspectedStaticScopes.length,
+          4,
+        );
+        const validate = require('./release-scope.cjs').validateReferences;
+        assert.equal(typeof validate(checked, f.policy, 'install'), 'string');
+        for (const omitted of ['processesAfter', 'tasksAfter']) {
+          const missing = { ...report.native, [omitted]: [] };
+          const rejected = probe(f.policy, missing, { callerPid: 99 });
+          assert(rejected.errors.length, omitted);
+        }
+        const missingPinned = {
+          ...report.native,
+          shortcuts: report.native.shortcuts.filter(
+            (s) => s.path !== explicitEntry,
+          ),
+        };
+        assert(
+          probe(f.policy, missingPinned, { callerPid: 99 }).errors.includes(
+            'REFERENCE_PINNED_SHORTCUT_QUERY_INCOMPLETE',
+          ),
+        );
+        fs.unlinkSync(explicitEntry);
+        assert(probe(f.policy, report.native, { callerPid: 99 }).errors.length);
+        console.log(
+          JSON.stringify({
+            fixture: 'actual-collector-static-forest',
+            processScoped,
+            staticDirectories: 1403,
+            staticShortcuts: 175,
+            processes: 587,
+            tasks: 226,
+            staticCalls: 0,
+            startupDirectories: good.directoryCount,
+            postSnapshots: {
+              processes: good.processesAfter,
+              tasks: good.tasksAfter,
+              profiles: good.profilesAfter,
+            },
+            cases: report.results.map((r) => ({
+              name: r.name,
+              operationSufficient: r.operationSufficient,
+              errors: r.errors,
+            })),
+          }),
+        );
+      }),
+  );
 
 for (const fault of [
   'profile-change',

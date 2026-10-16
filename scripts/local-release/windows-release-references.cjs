@@ -107,6 +107,264 @@ function argv(command) {
   return out;
 }
 const operationKind = 'non-retiring-once-pair-v1';
+const processKind = 'once-related-processes-v1';
+const operationHostNames =
+  'node|nodejs|python[0-9.]*|pythonw|py|powershell|pwsh|cmd|wscript|cscript|mshta|rundll32|regsvr32|bash|sh|deno|bun';
+const operationHost = new RegExp(
+  '^(?:' + operationHostNames + ')(?:\\.exe)?$',
+  'i',
+);
+const operationHostCommand = new RegExp(
+  '(?:^|[\\\\/\\s"])(?:' + operationHostNames + ')(?:\\.exe)?(?:[\\s"]|$)',
+  'i',
+);
+const processTuple = (p) => ({
+  pid: p.pid,
+  parentPid: p.parentPid,
+  name: p.name,
+  executable: p.executable ?? null,
+  commandLine: p.commandLine ?? null,
+  startUtc: p.startUtc,
+  workingDirectory: p.workingDirectory ?? null,
+});
+const visibleProcess = (p) =>
+  typeof p?.executable === 'string' &&
+  !!p.executable.trim() &&
+  typeof p.commandLine === 'string' &&
+  !!p.commandLine.trim() &&
+  typeof p.startUtc === 'string' &&
+  Number.isFinite(Date.parse(p.startUtc));
+function operationProcessContract(p) {
+  const c = p.windowsReferences?.operationCoverage?.processCoverage;
+  if (!c) return null;
+  if (
+    c.format !== 1 ||
+    c.kind !== processKind ||
+    c.globalDbWriterExclusion !== false ||
+    Object.keys(c).sort().join('|') !==
+      [
+        'backgroundGaps',
+        'coverageClaim',
+        'format',
+        'globalDbWriterExclusion',
+        'kind',
+      ].join('|') ||
+    c.coverageClaim !==
+      'related-processes-only;uninspected-background-db-access-unproven' ||
+    !Array.isArray(c.backgroundGaps) ||
+    c.backgroundGaps.length > 1024 ||
+    Buffer.byteLength(JSON.stringify(c.backgroundGaps)) > 512 * 1024 ||
+    new Set(c.backgroundGaps.map((r) => r.pid)).size !==
+      c.backgroundGaps.length ||
+    c.backgroundGaps.some(
+      (r) =>
+        !Number.isInteger(r.pid) ||
+        r.pid <= 4 ||
+        !Number.isInteger(r.parentPid) ||
+        r.parentPid < 0 ||
+        typeof r.name !== 'string' ||
+        !r.name ||
+        r.name.length > 260 ||
+        typeof r.startUtc !== 'string' ||
+        !Number.isFinite(Date.parse(r.startUtc)) ||
+        [r.executable, r.commandLine, r.workingDirectory].some(
+          (v) => v != null && (typeof v !== 'string' || v.length > 32768),
+        ),
+    ) ||
+    !Number.isInteger(p.publication?.expected?.pid) ||
+    p.publication.expected.pid <= 0 ||
+    !Number.isInteger(p.publication?.expected?.port) ||
+    p.publication.expected.port < 1 ||
+    p.publication.expected.port > 65535
+  )
+    fail('REFERENCE_PROCESS_OPERATION_CONTRACT_INVALID');
+  return c;
+}
+function operationProcessView(p, native, before, after, callerPid) {
+  const contract = operationProcessContract(p);
+  if (!contract) return null;
+  const port = p.publication.expected.port;
+  const facts = native.processCoverage;
+  if (
+    facts?.format !== 1 ||
+    facts.port !== port ||
+    !Array.isArray(facts.listenersBefore) ||
+    !Array.isArray(facts.listenersAfter) ||
+    facts.listenersBefore.length > 64 ||
+    facts.listenersAfter.length > 64
+  )
+    fail('REFERENCE_OPERATION_PORT_QUERY_INCOMPLETE');
+  const listenerRows = (rows) =>
+    rows
+      .map((r) => {
+        if (
+          r.port !== port ||
+          !Number.isInteger(r.pid) ||
+          r.pid <= 0 ||
+          typeof r.address !== 'string' ||
+          r.address.length > 128
+        )
+          fail('REFERENCE_OPERATION_PORT_QUERY_INCOMPLETE');
+        return { port: r.port, pid: r.pid, address: r.address };
+      })
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const portsBefore = listenerRows(facts.listenersBefore),
+    portsAfter = listenerRows(facts.listenersAfter);
+  if (hash(portsBefore) !== hash(portsAfter))
+    fail('REFERENCE_OPERATION_PORT_CHANGED');
+  const normalized = (s) =>
+    String(s || '')
+      .replaceAll('\\', '/')
+      .replace(/\/+/g, '/')
+      .toLowerCase();
+  const needles = [
+    ...p.roots.map((r) => r.path),
+    ...p.windowsReferences.launchers.flatMap((l) => [
+      l.entry,
+      ...l.files.map((f) => f.path),
+    ]),
+    p.publication.database,
+    path.basename(p.publication.database),
+  ].map(normalized);
+  const signal = (r) =>
+    [r.executable, r.commandLine, r.workingDirectory].some((value) => {
+      const text = normalized(value);
+      return text && needles.some((n) => n && text.includes(n));
+    });
+  const related = new Set([
+    p.publication.expected.pid,
+    ...(p.publication.expectedChildren || []).map((r) => r.pid),
+    ...portsBefore.map((r) => r.pid),
+    ...portsAfter.map((r) => r.pid),
+  ]);
+  for (const r of [...before.values(), ...after.values()])
+    if (signal(r)) related.add(r.pid);
+  const children = new Map();
+  for (const r of [...before.values(), ...after.values()]) {
+    if (!children.has(r.parentPid)) children.set(r.parentPid, new Set());
+    children.get(r.parentPid).add(r.pid);
+  }
+  const queue = [...related];
+  for (let i = 0; i < queue.length; i++)
+    for (const pid of children.get(queue[i]) || [])
+      if (!related.has(pid)) {
+        related.add(pid);
+        queue.push(pid);
+      }
+  for (const owner of portsBefore)
+    if (!before.has(owner.pid) || !after.has(owner.pid))
+      fail('REFERENCE_OPERATION_PORT_OWNER_NOT_VISIBLE');
+  const pins = new Map(contract.backgroundGaps.map((r) => [r.pid, r]));
+  const background = [];
+  const needsGap = (r) => {
+    if (!visibleProcess(r)) return true;
+    try {
+      argv(r.commandLine);
+    } catch {
+      return true;
+    }
+    const text = r.commandLine;
+    return (
+      /\.(?:ps1|psm1|vbs|vbe|wsf|wsh|bat|cmd|js|cjs|mjs|py|pyw|pl|rb|sh)(?:[\s"']|$)/i.test(
+        text,
+      ) ||
+      operationHost.test(path.basename(r.executable)) ||
+      operationHostCommand.test(text)
+    );
+  };
+  for (const r of [...before.values(), ...after.values()]) {
+    if (related.has(r.pid)) {
+      if (pins.has(r.pid)) fail('REFERENCE_BACKGROUND_BECAME_ASSOCIATED');
+      if (!visibleProcess(r)) fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
+      const other = after.get(r.pid),
+        first = before.get(r.pid);
+      if (
+        !first ||
+        !other ||
+        hash(processTuple(first)) !== hash(processTuple(other))
+      )
+        fail('REFERENCE_PROCESS_CHANGED');
+      continue;
+    }
+    // The full-visibility controller remains subject to the existing live lock,
+    // nonce and before/after identity checks; it is not a background exception.
+    if (r.pid === callerPid) {
+      if (
+        !visibleProcess(r) ||
+        !before.has(r.pid) ||
+        !after.has(r.pid) ||
+        hash(processTuple(before.get(r.pid))) !==
+          hash(processTuple(after.get(r.pid)))
+      )
+        fail('REFERENCE_INFLIGHT_OWNER_CHANGED');
+      if (pins.has(r.pid)) fail('REFERENCE_CONTROLLER_BACKGROUND_BOUND');
+      continue;
+    }
+    if (!needsGap(r)) continue;
+    // An opaque interpreter is an unresolved association signal, not an OS name
+    // exemption. No process name authorizes a background acceptance.
+    if (
+      !visibleProcess(r) &&
+      (operationHost.test(r.name) ||
+        operationHost.test(path.basename(r.executable || '')) ||
+        operationHostCommand.test(r.commandLine || ''))
+    )
+      fail('REFERENCE_OPAQUE_INTERPRETER_UNRESOLVED');
+    const pin = pins.get(r.pid),
+      first = before.get(r.pid),
+      last = after.get(r.pid);
+    if (
+      !pin ||
+      !first ||
+      !last ||
+      hash(processTuple(first)) !== hash(processTuple(last)) ||
+      hash(processTuple(first)) !== hash(processTuple(pin))
+    )
+      fail('REFERENCE_BACKGROUND_GAP_UNBOUND');
+    if (!background.some((x) => x.pid === r.pid)) background.push({ ...r });
+  }
+  if (background.length !== pins.size)
+    fail('REFERENCE_BACKGROUND_BINDING_NOT_OBSERVED');
+  background.sort((a, b) => a.pid - b.pid);
+  return {
+    related,
+    background,
+    summary: {
+      kind: processKind,
+      contractSha256: hash(contract),
+      relatedChecksComplete: true,
+      requiredPortChecked: true,
+      globalDbWriterExclusion: false,
+      globalProcessVisibilityComplete: false,
+      globalInvocationCoverageComplete: false,
+      backgroundGaps: background,
+    },
+  };
+}
+function validateOperationProcessSummary(p, value) {
+  const contract = operationProcessContract(p);
+  if (!contract) return false;
+  const proof = value.operationCoverage?.processCoverage;
+  if (
+    value.categories?.processes !== false ||
+    proof?.kind !== processKind ||
+    proof.contractSha256 !== hash(contract) ||
+    proof.relatedChecksComplete !== true ||
+    proof.requiredPortChecked !== true ||
+    proof.globalDbWriterExclusion !== false ||
+    proof.globalProcessVisibilityComplete !== false ||
+    proof.globalInvocationCoverageComplete !== false ||
+    !Array.isArray(proof.backgroundGaps) ||
+    hash(
+      proof.backgroundGaps.map(processTuple).sort((a, b) => a.pid - b.pid),
+    ) !==
+      hash(
+        contract.backgroundGaps.map(processTuple).sort((a, b) => a.pid - b.pid),
+      )
+  )
+    fail('REFERENCE_OPERATION_PROCESS_COVERAGE_INVALID');
+  return true;
+}
 const staticKinds = [
   'Desktop',
   'CommonDesktop',
@@ -192,6 +450,7 @@ function operationContract(p) {
     )
   )
     fail('REFERENCE_OPERATION_CONTRACT_INVALID');
+  operationProcessContract(p);
   return scope;
 }
 function probe(policy, native, { callerPid = process.ppid, self } = {}) {
@@ -610,6 +869,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       businessDatabaseRestored: false,
       proofSha256: digest(proofRaw),
     };
+    const processContract = operationProcessContract(policy);
     function processMap(list) {
       if (!Array.isArray(list) || list.length > 8192)
         fail('REFERENCE_PROCESS_QUERY_INVALID');
@@ -630,8 +890,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         )
           continue;
         if (
-          !p.executable ||
-          !p.commandLine ||
+          (!processContract && (!p.executable || !p.commandLine)) ||
           typeof p.startUtc !== 'string' ||
           !Number.isFinite(Date.parse(p.startUtc))
         )
@@ -682,12 +941,23 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         after.delete(pid);
       }
     }
-    for (const p of before.values()) {
-      const refs = resolveInvocation(
-        argv(p.commandLine),
-        p.workingDirectory,
-        true,
+    const processView = processContract
+      ? operationProcessView(policy, native, before, after, callerPid)
+      : null;
+    const approvedAuxiliary = (p) =>
+      processView &&
+      (policy.publication.expectedChildren || []).some(
+        (e) =>
+          p.pid === e.pid &&
+          p.parentPid === e.parentPid &&
+          p.executable === e.executable &&
+          p.commandLine === e.commandLine,
       );
+    for (const p of before.values()) {
+      if (processView && !processView.related.has(p.pid)) continue;
+      const refs = approvedAuxiliary(p)
+        ? []
+        : resolveInvocation(argv(p.commandLine), p.workingDirectory, true);
       const executableRef = pathReference(p.executable);
       if (
         executableRef &&
@@ -705,6 +975,11 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         }
       if (!changed) break;
     }
+    if (processView)
+      for (const pid of processView.related) {
+        if (before.has(pid) && !matched.has(pid))
+          fail('REFERENCE_ASSOCIATED_PROCESS_UNRESOLVED');
+      }
     for (const [pid, refs] of matched) {
       const p = before.get(pid),
         current = after.get(pid);
@@ -730,7 +1005,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         });
     }
     for (const p of after.values())
-      if (!matched.has(p.pid)) {
+      if (
+        !matched.has(p.pid) &&
+        (!processView || processView.related.has(p.pid))
+      ) {
         const refs = resolveInvocation(
           argv(p.commandLine),
           p.workingDirectory,
@@ -745,7 +1023,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           fail('REFERENCE_PROCESS_APPEARED');
         }
       }
-    result.categories.processes = true;
+    result.categories.processes = !processView;
     if (
       !Array.isArray(native.tasks) ||
       native.tasks.length > 8192 ||
@@ -1035,6 +1313,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         ),
         uninspectedStaticScopes,
         uninspectedStaticJunctions: [],
+        ...(processView ? { processCoverage: processView.summary } : {}),
       };
     }
   } catch (error) {
@@ -1180,4 +1459,8 @@ module.exports = {
   operationContract,
   operationProfiles: profileRows,
   operationStaticScopes,
+  operationProcessContract,
+  operationProcessView,
+  operationProcessTuple: processTuple,
+  validateOperationProcessSummary,
 };

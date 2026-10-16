@@ -99,6 +99,7 @@ function inspect(paths, options = {}) {
 }
 function validateReferences(value, policy, operation) {
   const scoped = value?.operationSufficient === true;
+  let processScoped = false;
   if (scoped) {
     const {
       operationContract,
@@ -125,6 +126,11 @@ function validateReferences(value, policy, operation) {
     )
       throw new Error('RELEASE_SCOPE_OPERATION_COVERAGE_INVALID');
     operationStaticScopes(value.operationCoverage.uninspectedStaticScopes);
+    processScoped =
+      require('./windows-release-references.cjs').validateOperationProcessSummary(
+        policy,
+        value,
+      );
   }
   const kinds = [
     'processes',
@@ -140,7 +146,11 @@ function validateReferences(value, policy, operation) {
       ? false
       : value.complete !== true || value.globalReferenceComplete === false) ||
     kinds
-      .filter((k) => !scoped || k !== 'shortcuts')
+      .filter(
+        (k) =>
+          !scoped ||
+          (k !== 'shortcuts' && (!processScoped || k !== 'processes')),
+      )
       .some((k) => value.categories?.[k] !== true) ||
     !Array.isArray(value.records) ||
     value.records.length > 4096 ||

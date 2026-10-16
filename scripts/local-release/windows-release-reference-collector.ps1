@@ -8,6 +8,7 @@ $coverage=[System.Collections.Generic.List[object]]::new()
 $shortcuts=[System.Collections.Generic.List[object]]::new()
 $directorySnapshots=[System.Collections.Generic.List[object]]::new()
 $profileFacts=@();$profileFactsAfter=@();$scoped=$false
+$processScoped=$false;$listenersBefore=@();$listenersAfter=@()
 $diagnosticContext=[PSCustomObject]@{stage='policy-read';folderKind=$null;failure=$null}
 $deadline=[DateTime]::UtcNow.AddSeconds(16)
 function Reference-Stage([string]$stage,[string]$folderKind) {
@@ -120,6 +121,15 @@ function Read-Shortcut($entry,$shell) {
   Reference-Stage 'shortcut-hash-after' $diagnosticContext.folderKind
   if ((Shortcut-Sha256 $entry.FullName) -ne $hashBefore) { throw 'REFERENCE_NATIVE_SHORTCUT_CHANGED' }
 }
+function Operation-Listeners {
+  $port=[int]$policy.publication.expected.port
+  $rows=@(Get-LocalTcpListener -Port $port)
+  if($rows.Count -gt 64){throw 'REFERENCE_NATIVE_OPERATION_PORT_LIMIT'}
+  @($rows | ForEach-Object {
+    Budget
+    [PSCustomObject]@{port=[int]$_.LocalPort;pid=[int]$_.OwningProcess;address=[string]$_.LocalAddress}
+  })
+}
 $before=@();$after=@();$tasks=@();$tasksAfter=@()
 try {
   $policyBytes=[IO.File]::ReadAllBytes($PolicyFile)
@@ -135,6 +145,19 @@ try {
     @($policy.pair).Count -ne 2 -or $policy.publication.limits.maxBackups -ne 1 -or
     $policy.publication.limits.maxPublications -ne 1 -or $policy.publication.limits.maxRollbacks -ne 1)) {
     throw 'REFERENCE_NATIVE_OPERATION_SCOPE_INVALID'
+  }
+  $processScoped=$scoped -and $null -ne $scope.processCoverage
+  if($processScoped){
+    if($scope.processCoverage.format -ne 1 -or $scope.processCoverage.kind -cne 'once-related-processes-v1' -or
+      $scope.processCoverage.globalDbWriterExclusion -ne $false -or
+      $scope.processCoverage.coverageClaim -cne 'related-processes-only;uninspected-background-db-access-unproven' -or
+      [int]$policy.publication.expected.port -lt 1 -or [int]$policy.publication.expected.port -gt 65535){throw 'REFERENCE_NATIVE_PROCESS_SCOPE_INVALID'}
+    Reference-Stage 'operation-port-helper' $null
+    $tcp=Join-Path $PSScriptRoot 'tcp-listeners.ps1'
+    if((Shortcut-Sha256 $tcp) -cne $policy.codePins.'tcp-listeners.ps1'){throw 'REFERENCE_NATIVE_TCP_HELPER_PIN_CHANGED'}
+    . $tcp
+    Reference-Stage 'operation-port-before' $null
+    $listenersBefore=@(Operation-Listeners)
   }
   Reference-Stage 'processes-before' $null
   $before=@(Processes)
@@ -233,6 +256,10 @@ try {
     Reference-Stage 'profiles-after' $null
     $profileFactsAfter=@(Profile-Scope @(Get-CimInstance Win32_UserProfile -ErrorAction Stop) $env:USERPROFILE $scope)
   }
+  if($processScoped){
+    Reference-Stage 'operation-port-after' $null
+    $listenersAfter=@(Operation-Listeners)
+  }
   Budget
 } catch {
   Reference-Failure $_
@@ -248,6 +275,7 @@ $complete=$sufficient -and -not $scoped
   operationCoverage=$(if ($scoped) { @{kind='non-retiring-once-pair-v1';staticScopeMode=$scope.staticScopeMode;profilesBefore=@($profileFacts);profilesAfter=@($profileFactsAfter);staticJunctions=@()} } else {$null})
   categories=@{processes=$sufficient;tasks=$sufficient;shortcuts=$complete}
   failureContext=$diagnosticContext.failure
+  processCoverage=$(if($processScoped){@{format=1;port=[int]$policy.publication.expected.port;listenersBefore=@($listenersBefore);listenersAfter=@($listenersAfter)}}else{$null})
   errors=@($errors.ToArray());processesBefore=@($before);processesAfter=@($after)
   tasks=@($tasks);tasksAfter=@($tasksAfter);shortcuts=@($shortcuts.ToArray());shortcutCoverage=@($coverage.ToArray())
   shortcutDirectories=@($directorySnapshots.ToArray())
