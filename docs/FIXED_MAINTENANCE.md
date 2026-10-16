@@ -68,8 +68,10 @@ record and metadata budget.
 After a verified healthy detached service has been recorded, a fully persisted
 HOLD releases only the controller's Node child-process reference. The CLI retains
 its failure exit status while the service continues running. Failed HOLD
-persistence and an unverified service do not take this path. The lock, claim,
-record, receipts, failure history and spent credits remain; this is neither a
+persistence and an unverified service do not take this path. An attempted child
+stop invalidates its previous health observation before the stop call, including
+when that call fails with an unknown exit state. The lock, claim, record,
+receipts, failure history and spent credits remain; this is neither a
 resume entry nor permission to repeat any action. It does not release a controller
 that was already running older code, or finish a missing pointer publication.
 

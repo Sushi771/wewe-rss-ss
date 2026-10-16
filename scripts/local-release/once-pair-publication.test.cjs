@@ -1464,6 +1464,50 @@ for (const mode of ['healthy', 'hold-save-fails', 'unhealthy'])
     }),
   );
 
+test('fixed maintenance candidate stop failure invalidates prior health before durable HOLD', () =>
+  maintenanceFixture(async (f) => {
+    const facts = f.facts;
+    let stopAttempts = 0;
+    f.facts = () =>
+      f.maintenanceRecord().service
+        ? {
+            ...facts(),
+            complete: false,
+            errors: ['REFERENCE_QUERY_FAILED'],
+            referenceDiagnostic: {
+              stage: 'processes',
+              codes: ['FIXED_MAINTENANCE_RECORD_OWNER'],
+            },
+          }
+        : facts();
+    f.operations.stopChild = async () => {
+      stopAttempts++;
+      throw Error('ONCE_PUBLICATION_OWNED_CHILD_STOP_TIMEOUT');
+    };
+    await assert.rejects(f.maintenance(), /OWNED_CHILD_STOP_TIMEOUT/);
+    const r = f.maintenanceRecord();
+    assert.equal(r.status, 'hold');
+    assert.equal(r.service, null);
+    assert.equal(r.recoverySpent, true);
+    assert.equal(r.publicationSpent, false);
+    assert.equal(stopAttempts, 1);
+    assert(!f.events.some((x) => x.startsWith('unref:')));
+    assert(!f.events.includes('start:rollback'));
+    assert.equal(r.error.code, 'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    assert(
+      r.error.referenceDiagnostic.codes.includes(
+        'FIXED_MAINTENANCE_RECORD_OWNER',
+      ),
+    );
+    assert.equal(
+      r.error.recovery.code,
+      'ONCE_PUBLICATION_OWNED_CHILD_STOP_TIMEOUT',
+    );
+    await assert.rejects(f.maintenance());
+    assert.equal(stopAttempts, 1);
+    assert.equal(f.backupCount(), 1);
+  }));
+
 test('fixed maintenance durable healthy recovery HOLD exits while its detached service survives', async () => {
   const root = fs.mkdtempSync(
     path.join(fs.realpathSync.native(os.tmpdir()), 'wewe-hold-exit-'),

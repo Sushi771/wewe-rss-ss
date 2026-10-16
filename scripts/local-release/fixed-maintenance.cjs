@@ -1249,9 +1249,11 @@ async function execute(file, expected, options = {}) {
         record.service = null;
         stage('recovery-intent');
         if (child) {
+          // A stop attempt invalidates the earlier health observation even if
+          // stopping throws before the child can be confirmed exited.
+          healthyChild = undefined;
           await ops.stopChild(child);
           child = undefined;
-          healthyChild = undefined;
           save();
         }
         writersStopped();
