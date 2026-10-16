@@ -88,20 +88,57 @@ function pinnedDocument(spec, exactPath, raw = false) {
     canonical(spec.path) !== spec.path ||
     !/^[a-f0-9]{64}$/.test(spec.sha256 || '') ||
     hash(fileIdentity(spec.path)) !== hash(spec.identity) ||
-    fs.lstatSync(spec.path).nlink !== 1 ||
-    fileHash(spec.path) !== spec.sha256
+    fs.lstatSync(spec.path).nlink !== 1
   )
     fail('CONTINUATION_INPUT_PIN');
-  const bytes = fs.readFileSync(spec.path);
-  if (
-    bytes.length > LIMITS.metadata ||
-    crypto.createHash('sha256').update(bytes).digest('hex') !== spec.sha256 ||
-    hash(fileIdentity(spec.path)) !== hash(spec.identity) ||
-    canonical(spec.path) !== spec.path ||
-    fileHash(spec.path) !== spec.sha256
-  )
-    fail('CONTINUATION_INPUT_CHANGED');
-  return raw ? bytes.toString('utf8') : JSON.parse(bytes.toString('utf8'));
+  const fd = fs.openSync(spec.path, 'r');
+  try {
+    const readPinnedBytes = () => {
+      const before = fs.fstatSync(fd, { bigint: true });
+      if (!before.isFile() || before.size > BigInt(LIMITS.metadata))
+        fail('DOCUMENT_LIMIT');
+      if (
+        before.nlink !== 1n ||
+        hash([before.dev, before.ino, before.birthtimeNs].map(String)) !==
+          hash(spec.identity)
+      )
+        fail('CONTINUATION_INPUT_CHANGED');
+      // One extra byte detects growth without ever reading an unbounded file.
+      const buffer = Buffer.alloc(Number(before.size) + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const n = fs.readSync(
+          fd,
+          buffer,
+          length,
+          buffer.length - length,
+          length,
+        );
+        if (!n) break;
+        length += n;
+      }
+      const after = fs.fstatSync(fd, { bigint: true });
+      const bytes = buffer.subarray(0, length);
+      if (
+        BigInt(length) !== before.size ||
+        after.size !== before.size ||
+        after.nlink !== 1n ||
+        hash([after.dev, after.ino, after.birthtimeNs].map(String)) !==
+          hash(spec.identity) ||
+        crypto.createHash('sha256').update(bytes).digest('hex') !==
+          spec.sha256 ||
+        hash(fileIdentity(spec.path)) !== hash(spec.identity) ||
+        canonical(spec.path) !== spec.path
+      )
+        fail('CONTINUATION_INPUT_CHANGED');
+      return bytes;
+    };
+    const bytes = readPinnedBytes();
+    readPinnedBytes();
+    return raw ? bytes.toString('utf8') : JSON.parse(bytes.toString('utf8'));
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 function continuationProjection(policy) {
   const q = structuredClone(policy);

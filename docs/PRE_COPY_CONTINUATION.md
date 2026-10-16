@@ -16,6 +16,8 @@ The explicitly supplied expected new policy digest binds the destination without
 
 The scope, registry/roots/identities, package pair/proofs, pointer and publication/DB identity/limits stay exact. Recursive policy comparison permits only code/probe/collector pins, the exact disclosed background-process tuple list and specific approval/continuation fields to change. Other fields remain exact. Background changes still require separate explicit risk approval and fresh equality checks; they are never silently refreshed.
 
+Pinned input documents are opened and their actual handle identity and size checked before content reads or hashing. Reads are capped at the checked size plus one byte (at most 1MiB plus one); growth, identity changes and either of two bounded digest checks refuse.
+
 ## Admission and failure rules
 
 The old ledger permits only the original pre-copy schema: claim=null, outputs=[], exactly two unique slots with started=false, complete=false, identity=null and copied absent/false. Root complete may be absent/false under that old protocol. Unknown state/credit fields, publication state, any started/copied/complete slot, occupied target (including empty directory/link), existing audit root, changed ownership/pins, foreign controls/tmp or concurrent lock refuse. No business data is copied or reset.

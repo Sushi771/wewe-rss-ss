@@ -298,6 +298,59 @@ test('pre-copy continuation archives exact old bytes, retains sentinel/credits a
     assert.equal(f.apply().admission.newRuntimeCopies, 0);
     assert.equal(fileHash(b.receipt), receiptSha);
   }));
+test('pre-copy continuation refuses oversized pinned input before reading or hashing its contents', () =>
+  fixture((f) => {
+    const b = prepareContinuation(f);
+    fs.writeFileSync(b.outcome, Buffer.alloc(admission.LIMITS.metadata + 1));
+    b.c.previousOutcome = {
+      path: b.outcome,
+      identity: identity(b.outcome),
+      sha256: 'f'.repeat(64),
+    };
+    let descriptor,
+      reads = 0,
+      wholeReads = 0;
+    const open = fs.openSync,
+      close = fs.closeSync,
+      read = fs.readSync,
+      wholeRead = fs.readFileSync;
+    fs.openSync = (at, ...args) => {
+      const fd = open(at, ...args);
+      if (at === b.outcome) descriptor = fd;
+      return fd;
+    };
+    fs.closeSync = (fd) => {
+      if (fd === descriptor) descriptor = undefined;
+      return close(fd);
+    };
+    fs.readSync = (fd, ...args) => {
+      if (fd === descriptor) {
+        reads++;
+        throw new Error('OVERSIZED_INPUT_READ');
+      }
+      return read(fd, ...args);
+    };
+    fs.readFileSync = (at, ...args) => {
+      if (at === b.outcome || (descriptor !== undefined && at === descriptor)) {
+        wholeReads++;
+        throw new Error('OVERSIZED_INPUT_WHOLE_READ');
+      }
+      return wholeRead(at, ...args);
+    };
+    try {
+      assert.throws(() => f.apply(), /ONCE_PAIR_DOCUMENT_LIMIT/);
+      assert.equal(reads, 0);
+      assert.equal(wholeReads, 0);
+      assert(!fs.existsSync(b.receipt));
+      assert(!fs.existsSync(path.join(f.root, 'candidate')));
+      assert(!fs.existsSync(path.join(f.root, 'rollback')));
+    } finally {
+      fs.openSync = open;
+      fs.closeSync = close;
+      fs.readSync = read;
+      fs.readFileSync = wholeRead;
+    }
+  }));
 for (const fault of [
   'started',
   'complete',
