@@ -100,6 +100,212 @@ class RetentionTests(unittest.TestCase):
         a['uniqueHistoryPaths']=[x['path'] for x in plan['payload']['candidates'] if x['kind']=='retention-expired']
         return files,policy,plan,a,r
 
+    def rotation_fixture(self,count=3,**changes):
+        # Tiny fixture source retains business/history rows throughout rotation.
+        shutil.copyfile(self.keep,self.source)
+        files=[self.ordinary(72+i) for i in range(count)]
+        policy={'maxOrdinaryCopies':2,'keepLatest':2,'roundDays':1,'recentHours':1,
+                'dailyDays':1,'weeklyWeeks':0,'maximumAgeDays':28,'bucketHours':1,**changes}
+        plan=self.plan(policy=policy,periodic_only=True);a,r=self.inputs(plan)
+        a.update(action='rotate-exact-periodic-backups',uniqueHistoryPaths=[x['path'] for x in plan['payload']['candidates']],
+                 metadataPaths=[x['receipt'] for x in plan['payload']['candidates']],
+                 directories=[x['directory'] for x in plan['payload']['candidates']])
+        return files,policy,plan,a,r
+
+    def execute_rotation(self,plan,a,r,policy):
+        return retention.execute_periodic_batch(plan,a,r,now=self.now,policy=policy)
+
+    def test_periodic_rotation_count_and_byte_targets_include_all_retained_points(self):
+        size=self.keep.stat().st_size
+        files,policy,plan,a,r=self.rotation_fixture(count=5,maxOrdinaryCopies=4,maxOrdinaryBytes=2*size-1)
+        # Latest two are mandatory even below their combined byte footprint.
+        self.assertEqual(plan['payload']['summary']['ordinaryCopies'],5)
+        self.assertEqual(plan['payload']['summary']['retainedOrdinaryCopies'],2)
+        self.assertTrue(plan['payload']['summary']['ordinaryByteTargetExceeded'])
+        self.assertEqual(len(plan['payload']['candidates']),3)
+        self.assertEqual(len(self.validate(plan,a,r,policy=policy)['validated']),3)
+        self.assertTrue(all(p.exists() for p in files))
+
+    def test_periodic_rotation_capacity_retires_old_points_before_count_target(self):
+        files,policy,plan,_a,_r=self.rotation_fixture(count=5,maxOrdinaryCopies=5,maxOrdinaryBytes=3*self.keep.stat().st_size)
+        self.assertEqual(plan['payload']['summary']['retainedOrdinaryCopies'],3)
+        self.assertEqual(plan['payload']['summary']['retainedOrdinaryBytes'],3*files[0].stat().st_size)
+        self.assertEqual(len(plan['payload']['candidates']),2)
+
+    def test_periodic_rotation_preserves_other_origins_unknown_files_and_all_business_bytes(self):
+        _files,policy,_plan,_a,_r=self.rotation_fixture()
+        boundaries=[self.ordinary(960,'write-before'),self.ordinary(961)]
+        receipt=boundaries[1].parent/'verification.json';data=json.loads(receipt.read_text())
+        data['recoveryOrigin']['kind']='protected';receipt.write_text(json.dumps(data))
+        unknown=self.root/'historic-articles.sqlite';unknown.write_bytes(b'unattributed history')
+        before={str(p):p.read_bytes() for p in self.folder.rglob('*') if p.is_file()}
+        plan=self.plan(policy=policy,periodic_only=True)
+        paths=[x['path'] for x in plan['payload']['candidates']]
+        self.assertTrue(all(str(p) not in paths for p in (*boundaries,unknown,self.source,self.old,self.keep)))
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.folder.rglob('*') if p.is_file()})
+
+    def test_periodic_rotation_active_owner_and_only_recovery_points_are_never_retired(self):
+        files,policy,_plan,_a,_r=self.rotation_fixture()
+        ref=self.root/'snapshot-owner-synthetic.json';ref.write_text(json.dumps({'backup':str(files[-1])}))
+        plan=self.plan(policy=policy,periodic_only=True)
+        self.assertFalse(plan['payload']['candidates'])
+        self.assertTrue(plan['payload']['summary']['ordinaryTargetExceeded'])
+        for p in files[1:]:
+            p.unlink();(p.parent/'verification.json').unlink();p.parent.rmdir()
+        ref.unlink();plan=self.plan(policy=policy,periodic_only=True)
+        self.assertFalse(plan['payload']['candidates']);self.assertIn(str(files[0]),plan['payload']['protected'])
+
+    def test_periodic_rotation_requires_new_exact_action_history_and_metadata_approval(self):
+        _files,policy,plan,a,r=self.rotation_fixture()
+        before={str(p):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        for change in ({'action':'permanent-delete-exact-files'},{'metadataPaths':[]},{'directories':[]},
+                       {'paths':[]},{'uniqueHistoryPaths':[]},{'approvedAtEpoch':self.now-301}):
+            with self.subTest(change=change),self.assertRaises(retention.MaintenanceError):
+                self.execute_rotation(plan,{**a,**change},r,policy)
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+        with self.assertRaisesRegex(retention.MaintenanceError,'PERIODIC_ROTATION_PLAN_REQUIRED'):
+            self.execute_rotation(self.plan(),a,r,None)
+        with self.assertRaisesRegex(retention.MaintenanceError,'EXPLICIT_PERIODIC_POLICY_REQUIRED'):
+            self.plan(periodic_only=True)
+
+    def test_periodic_rotation_changed_siblings_receipt_policy_and_refs_refuse_execution(self):
+        _files,policy,plan,a,r=self.rotation_fixture()
+        entry=plan['payload']['candidates'][0];file=Path(entry['path'])
+        extra=file.parent/'operator-note.txt';extra.write_text('keep')
+        self.assertTrue(self.validate(plan,a,r,policy=policy)['skipped'])
+        with self.assertRaisesRegex(retention.MaintenanceError,'NOT_FULLY_PROVED'):self.execute_rotation(plan,a,r,policy)
+        extra.unlink()
+        with self.assertRaisesRegex(retention.MaintenanceError,'POLICY_CHANGED'):
+            self.execute_rotation(plan,a,r,{**policy,'maxOrdinaryBytes':1})
+        owner=self.root/'refresh-recovery-owner-new.json';owner.write_text(json.dumps({'backup':str(file)}))
+        with self.assertRaisesRegex(retention.MaintenanceError,'REFERENCES_OR_GENERATION_CHANGED'):
+            self.execute_rotation(plan,a,r,policy)
+        self.assertTrue(file.exists());self.assertEqual(owner.read_text(),json.dumps({'backup':str(file)}))
+
+    def test_periodic_rotation_sidecars_corrupt_receipts_and_finite_byte_policy_fail_closed(self):
+        _files,policy,plan,a,r=self.rotation_fixture();entry=plan['payload']['candidates'][0]
+        sidecar=Path(entry['path']+'-wal');sidecar.write_bytes(b'owned fixture WAL')
+        with self.assertRaisesRegex(retention.MaintenanceError,'NOT_FULLY_PROVED'):self.execute_rotation(plan,a,r,policy)
+        sidecar.unlink();receipt=Path(entry['receipt']);raw=receipt.read_bytes();receipt.write_bytes(b'{}')
+        with self.assertRaises(retention.MaintenanceError):self.execute_rotation(plan,a,r,policy)
+        receipt.write_bytes(raw)
+        for value in (0,-1,True,129*1024**3):
+            with self.subTest(value=value),self.assertRaises(retention.MaintenanceError):
+                self.plan(policy={**policy,'maxOrdinaryBytes':value},periodic_only=True)
+
+    def test_periodic_rotation_modified_batch_cannot_substitute_receipt_hash_or_unknown_recovery(self):
+        _files,policy,plan,a,r=self.rotation_fixture()
+        for changes in ({'sha256':'f'*64},{'representative':str(self.keep),'representativeIdentity':retention.identity(self.keep),
+                                                'representativeSha256':retention.ReadBudget().sha(self.keep)}):
+            changed=copy.deepcopy(plan);changed['payload']['candidates'][0].update(changes)
+            changed['digest']=retention.digest(changed['payload'])
+            approved={**a,'digest':changed['digest']};resources=copy.deepcopy(r);resources['digest']=changed['digest']
+            resources['files'] += [{'path':str(self.keep),'querySucceeded':True,'users':[]}]
+            with self.subTest(changes=changes),self.assertRaisesRegex(retention.MaintenanceError,'NOT_FULLY_PROVED'):
+                self.execute_rotation(changed,approved,resources,policy)
+
+    @unittest.skipUnless(os.name=='nt' and shutil.which('pwsh'),'Windows exact CLI and owned resource query')
+    def test_native_periodic_cli_preview_validation_and_explicit_execution_are_separate(self):
+        _files,policy,plan,a,_r=self.rotation_fixture();batch=self.folder/'rotation.json'
+        batch.write_bytes(retention.canonical_json(plan));approval=self.folder/'approval.json';approval.write_text(json.dumps(a))
+        resources=self.folder/'resources.json'
+        probe=subprocess.run(['pwsh','-NoProfile','-File',str(Path(__file__).with_name('query-retention-resources.ps1')),
+                              '-Batch',str(batch),'-Output',str(resources)],capture_output=True,text=True,timeout=45)
+        self.assertEqual(probe.returncode,0,probe.stdout+probe.stderr)
+        command=[sys.executable,str(Path(__file__).with_name('sqlite-retention-plan.py')),
+                 '--database',str(self.source),'--backup-root',str(self.root),'--periodic-only']
+        env={**os.environ,'SQLITE_RETENTION_POLICY':json.dumps(policy),'SQLITE_PRODUCTION_LEGACY_ROOTS':'[]'}
+        preview=subprocess.run(command,capture_output=True,text=True,timeout=15,env=env)
+        self.assertEqual(preview.returncode,0,preview.stdout+preview.stderr)
+        self.assertTrue(all(Path(p).exists() for p in a['paths']))
+        bound=command+['--batch',str(batch),'--approval',str(approval),'--resources',str(resources)]
+        validation=subprocess.run(bound,capture_output=True,text=True,timeout=15,env=env)
+        self.assertEqual(validation.returncode,0,validation.stdout+validation.stderr)
+        self.assertFalse(json.loads(validation.stdout)['permanentDeletionPerformed'])
+        self.assertTrue(all(Path(p).exists() for p in a['paths']))
+        executed=subprocess.run(bound+['--execute-periodic'],capture_output=True,text=True,timeout=20,env=env)
+        self.assertEqual(executed.returncode,0,executed.stdout+executed.stderr)
+        self.assertEqual(json.loads(executed.stdout)['deleted'],a['paths'])
+        self.assertTrue(all(not Path(p).exists() for p in a['paths']));self.assertTrue(self.source.exists())
+
+    @unittest.skipUnless(os.name=='nt','Windows exact-handle deletion')
+    def test_native_periodic_rotation_deletes_only_approved_fixture_objects_and_replay_fails(self):
+        files,policy,plan,a,r=self.rotation_fixture(count=5)
+        before={str(p):p.read_bytes() for p in self.folder.rglob('*') if p.is_file()}
+        result=self.execute_rotation(plan,a,r,policy)
+        self.assertEqual(result['status'],'complete');self.assertTrue(result['permanentDeletionPerformed'])
+        self.assertEqual(set(result['deleted']),set(a['paths']))
+        self.assertEqual(set(result['deletedMetadata']),set(a['metadataPaths']))
+        self.assertEqual(set(result['removedDirectories']),set(a['directories']))
+        removed=set(a['paths']+a['metadataPaths'])
+        for path,data in before.items():
+            self.assertEqual(Path(path).exists(),path not in removed)
+            if path not in removed:self.assertEqual(Path(path).read_bytes(),data)
+        self.assertFalse((self.root/'.space-budget.lock').exists())
+        with self.assertRaises(retention.MaintenanceError):self.execute_rotation(plan,a,r,policy)
+        self.assertEqual(sum(p.exists() for p in files),2)
+
+    @unittest.skipUnless(os.name=='nt','Windows rotation followed by real synthetic backup generation')
+    def test_native_periodic_rotation_restores_capacity_for_next_backup_and_keeps_current_history(self):
+        _files,policy,plan,a,r=self.rotation_fixture(count=5)
+        with closing(sqlite3.connect(self.source)) as db,db:
+            db.execute('CREATE TABLE articles(id INTEGER PRIMARY KEY, content)')
+            db.execute('INSERT INTO articles VALUES(1,?)',('retained historical article',))
+        live=self.source.read_bytes();unknown=self.old.read_bytes()
+        with patch.dict(os.environ,{'SQLITE_TEST_MAX_COPIES':'5','SQLITE_TEST_MAX_BYTES':str(4*1024**2),
+                                    'SQLITE_TEST_MIN_FREE_BYTES':'1','SQLITE_TEST_BUDGET_ROOT':str(self.root)}):
+            with self.assertRaisesRegex(ValueError,'SPACE_BUDGET_EXCEEDED'):
+                retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+            result=self.execute_rotation(plan,a,r,policy);self.assertEqual(result['status'],'complete')
+            report=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+        self.assertEqual(self.source.read_bytes(),live);self.assertEqual(self.old.read_bytes(),unknown)
+        self.assertEqual(len(list(self.root.rglob('*.db'))),5)
+        with closing(sqlite3.connect(report['backup'])) as db:
+            self.assertEqual(db.execute('SELECT content FROM articles').fetchone(),('retained historical article',))
+
+    @unittest.skipUnless(os.name=='nt','Windows exclusive object pins')
+    def test_native_periodic_rotation_resource_and_live_handle_occupancy_never_delete(self):
+        _files,policy,plan,a,r=self.rotation_fixture();file=Path(a['paths'][0])
+        busy=copy.deepcopy(r)
+        for row in busy['files']:
+            if row['path']==str(file):row['users']=['fixture reader']
+        with self.assertRaisesRegex(retention.MaintenanceError,'NOT_FULLY_PROVED'):self.execute_rotation(plan,a,busy,policy)
+        with file.open('rb') as _reader:
+            with self.assertRaisesRegex(retention.MaintenanceError,'EXCLUSIVE_OBJECT_PIN_FAILED'):
+                self.execute_rotation(plan,a,r,policy)
+        self.assertTrue(file.exists());self.assertTrue(Path(a['metadataPaths'][0]).exists())
+
+    @unittest.skipUnless(os.name=='nt','Windows partial-action reporting')
+    def test_native_periodic_rotation_partial_failure_stops_without_second_candidate_or_replay(self):
+        _files,policy,plan,a,r=self.rotation_fixture(count=5)
+        with patch.object(retention.WindowsPin,'delete',side_effect=OSError('synthetic pre-disposition failure')):
+            uncertain=self.execute_rotation(plan,a,r,policy)
+        self.assertIsNone(uncertain['permanentDeletionPerformed']);self.assertTrue(uncertain['deletionOutcomeUncertain'])
+        self.assertEqual(len(uncertain['attempted']),1);self.assertTrue(all(Path(p).exists() for p in a['paths']))
+        native=retention.WindowsPin.delete;calls=[]
+        def fail_receipt(pin):
+            calls.append(pin)
+            if len(calls)==2:raise OSError('synthetic receipt deletion failure')
+            return native(pin)
+        with patch.object(retention.WindowsPin,'delete',fail_receipt):result=self.execute_rotation(plan,a,r,policy)
+        self.assertEqual(result['status'],'partial-failed');self.assertEqual(len(result['deleted']),1)
+        self.assertTrue(result['deletionOutcomeUncertain']);self.assertEqual(result['deletedMetadata'],[])
+        self.assertEqual(len(result['attempted']),2);self.assertTrue(all(Path(p).exists() for p in a['metadataPaths']))
+        self.assertTrue(all(Path(p).exists() for p in a['paths'] if p!=result['deleted'][0]))
+        with self.assertRaises(retention.MaintenanceError):self.execute_rotation(plan,a,r,policy)
+
+    @unittest.skipUnless(os.name=='nt','Windows no-rename object pins')
+    def test_native_periodic_pin_blocks_write_or_replacement_of_same_fixture_before_delete(self):
+        _files,policy,plan,a,r=self.rotation_fixture();file=Path(a['paths'][0]);native=retention.WindowsPin.sha;checked=[]
+        def check_pin(pin,budget):
+            if os.fstat(pin.fd).st_ino==file.stat().st_ino:
+                for operation in (lambda:file.write_bytes(b'wrong object'),lambda:file.rename(file.with_suffix('.moved'))):
+                    with self.assertRaises(PermissionError):operation()
+                checked.append(True)
+            return native(pin,budget)
+        with patch.object(retention.WindowsPin,'sha',check_pin):result=self.execute_rotation(plan,a,r,policy)
+        self.assertEqual(checked,[True]);self.assertEqual(result['status'],'complete')
+
     def test_tiered_count_plan_lists_exact_unique_history_but_never_deletes(self):
         files,policy,plan,a,r=self.tier_fixture()
         entries=[x for x in plan['payload']['candidates'] if x['kind']=='retention-expired']
