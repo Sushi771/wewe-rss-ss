@@ -108,6 +108,35 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       client().fetchListedArticles(listed, listed.name),
     ).rejects.toThrow('WECHAT2RSS_EMPTY_BODY');
   });
+  it.each([
+    ['closed', 'WECHAT2RSS_EMPTY_BODY'],
+    ['zero-chunk', 'WECHAT2RSS_EMPTY_BODY'],
+    ['whitespace', 'WECHAT2RSS_INVALID_JSON'],
+  ])(
+    'classifies a non-null HTTP200 %s stream without another request',
+    async (kind, expected) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          if (kind === 'zero-chunk') controller.enqueue(new Uint8Array(0));
+          if (kind === 'whitespace')
+            controller.enqueue(new TextEncoder().encode(' \n\t'));
+          controller.close();
+        },
+      });
+      const response = new Response(body, { status: 200 });
+      expect(response.body).not.toBeNull();
+      const request = jest.spyOn(global, 'fetch').mockResolvedValue(response);
+      await expect(
+        client().fetchListedArticles(listed, listed.name),
+      ).rejects.toMatchObject({
+        message: expected,
+        ...(kind === 'whitespace'
+          ? {}
+          : { responseBytes: 0, responseLimitBytes: LIMIT }),
+      });
+      expect(request).toHaveBeenCalledTimes(1);
+    },
+  );
   it('accepts an exactly-at-limit response rather than truncating it', async () => {
     const base = '{"items":[],"padding":""}';
     const wire = base.replace(

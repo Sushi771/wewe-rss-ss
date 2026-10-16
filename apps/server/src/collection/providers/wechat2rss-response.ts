@@ -119,6 +119,11 @@ export async function readWechat2RssResponse(
     parts.push(decode(undefined, false));
     if (Date.now() >= deadline)
       throw new Wechat2RssResponseError('WECHAT2RSS_REQUEST_TIMEOUT');
+    if (size === 0)
+      throw new Wechat2RssResponseError('WECHAT2RSS_EMPTY_BODY', {
+        responseBytes: 0,
+        responseLimitBytes: limit,
+      });
     return parts.join('');
   } finally {
     // A hostile/failed stream must not turn cancellation into an unbounded wait

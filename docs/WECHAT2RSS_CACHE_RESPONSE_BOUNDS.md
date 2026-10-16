@@ -33,6 +33,10 @@ string piece per block before joining for JSON parsing. It avoids retaining a
 Buffer for every network chunk and avoids a second full-response Buffer copy.
 The final text, parsed JSON and sanitized bodies still consume memory; this is
 a bounded buffered JSON parser, not an unlimited streaming article importer.
+The 64 KiB value describes only the reusable working byte buffer, and 16 MiB
+describes only the decoded response-stream byte limit. Neither is a bound on
+the complete pipeline's peak memory or process RSS; decoded strings, JSON
+objects, parser/DOM structures and sanitized output also contribute.
 
 The same abort signal bounds header and body waits. Abort listeners are removed
 after each wait, avoiding one retained promise reaction per tiny chunk.
@@ -56,7 +60,8 @@ it does not establish the wire size or original exception of an uncaptured
 production response. Renderer field layout and escaping must match before a
 reconstructed size can be treated as actual response evidence.
 
-Regressions cover the exact new limit, limit+1, lying length/encoding headers,
+Regressions cover null bodies, non-null zero-byte streams, nonempty whitespace
+JSON failures, the exact new limit, limit+1, lying length/encoding headers,
 non-settling cancellation, header/body timeout, one-byte UTF-8 chunks, unchanged
 control/body/item ceilings, and independent cache status recovery. All requests
 are synthetic; no refresh, `/add`, original article/image request or full database
