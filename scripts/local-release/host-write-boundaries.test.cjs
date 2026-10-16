@@ -77,6 +77,7 @@ test('the native read-only exceptions contain no filesystem mutation calls', () 
     'fstatSync',
     'existsSync',
     'realpathSync',
+    'readlinkSync',
     'readdirSync',
     'opendirSync',
     'openSync',
