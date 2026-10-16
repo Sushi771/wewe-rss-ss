@@ -276,10 +276,24 @@ export class LocalArticleStore {
       // A valid old receipt does not cover newly cached image sources. Reuse
       // its verified files and run the existing companion-note repair path.
       if (
-        retained?.receipt?.imageMap &&
-        prepare.hasUnarchivedMedia?.(retained.receipt.imageMap)
-      )
+        retained?.receipt &&
+        prepare.hasUnarchivedMedia?.(retained.receipt.imageMap || {})
+      ) {
+        // No URL mapping means an old complete receipt cannot establish
+        // current remote-image coverage, even if it originally had zero images.
+        // Keep the note/receipt unchanged and report uncertainty before HTTP.
+        if (
+          !retained.receipt.imageMap &&
+          !prepare.canReuseLegacyImages &&
+          retained.mediaComplete !== false
+        )
+          return this.retainedResult(
+            retained,
+            { ...identity, mediaComplete: false, mediaStatus: 'unconfirmed' },
+            'failed',
+          );
         retained.mediaComplete = false;
+      }
       if (
         retained &&
         retained.mediaComplete !== false &&
