@@ -22,6 +22,8 @@ export type PreparedArticle = {
   imageCount: number;
   videoCount?: number;
   mediaComplete?: boolean;
+  mediaStatus?: 'complete' | 'missing' | 'unconfirmed';
+  missingImageCount?: number;
   /** Set only by a trusted internal source adapter, never browser JSON. */
   source?: 'wechat2rss';
   exportSource?: ArticleExportSource;
@@ -33,6 +35,7 @@ export type ArticlePreparation = ((
 ) => Promise<PreparedArticle>) & {
   identity?: PreparedArticle;
   canReuseLegacyImages?: boolean;
+  hasUnarchivedMedia?: (imageMap: Record<string, string>) => boolean;
   seedImages?: (
     stage: string,
     folder: string,
@@ -51,6 +54,8 @@ type SourceReceipt = {
   markdownSha256?: string;
 };
 type SavedArticle = {
+  mediaStatus?: PreparedArticle['mediaStatus'];
+  missingImageCount?: number;
   status?: 'new' | 'skipped' | 'repaired' | 'failed';
   receiptPath?: string;
   receipt?: SourceReceipt;
@@ -268,6 +273,13 @@ export class LocalArticleStore {
       }
       locked = true;
       const retained = await this.findRetainedArticle(root, identity);
+      // A valid old receipt does not cover newly cached image sources. Reuse
+      // its verified files and run the existing companion-note repair path.
+      if (
+        retained?.receipt?.imageMap &&
+        prepare.hasUnarchivedMedia?.(retained.receipt.imageMap)
+      )
+        retained.mediaComplete = false;
       if (
         retained &&
         retained.mediaComplete !== false &&
@@ -319,6 +331,10 @@ export class LocalArticleStore {
       // Keep the existing note and assets, but do not inherit a legacy
       // complete claim contradicted by the current cached source.
       ...(article.mediaComplete === false ? { mediaComplete: false } : {}),
+      ...(article.mediaStatus ? { mediaStatus: article.mediaStatus } : {}),
+      ...(article.missingImageCount !== undefined
+        ? { missingImageCount: article.missingImageCount }
+        : {}),
       ...(retained.legacyLayoutRetained ? { legacyLayoutRetained: true } : {}),
     };
     return {
@@ -614,6 +630,8 @@ export class LocalArticleStore {
         alreadySaved: false,
         imageCount: images.length,
         ...(article.mediaComplete === false ? { mediaComplete: false } : {}),
+        mediaStatus: article.mediaStatus,
+        missingImageCount: article.missingImageCount,
         ...(videos.length ? { videoCount: videos.length } : {}),
       };
     } catch (error) {
@@ -928,6 +946,8 @@ export class LocalArticleStore {
         alreadySaved: false,
         imageCount: publishedImages.size,
         status: article.mediaComplete === false ? 'failed' : 'new',
+        mediaStatus: article.mediaStatus,
+        missingImageCount: article.missingImageCount,
         ...publication,
         ...(article.mediaComplete === false ? { mediaComplete: false } : {}),
       };
