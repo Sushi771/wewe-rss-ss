@@ -73,11 +73,21 @@ Only the approved execution may create a real maintenance lock and record.
 
 The existing `--execute` entry also accepts one explicitly approved
 `maintenance.continueBeforeStop` checkpoint. It pins the previous maintenance
-plan, record and lock (SHA and file identity), and the recorded controller
-PID/start/executable/argv. Historical controller identity must come from the
-retained execution evidence. The native adapter checks only that single PID
-twice and refuses any present/reused PID or uncertain query; absence does not
-authenticate historical identity.
+plan, record and lock (SHA and file identity), and the real recorded controller
+PID with the explicit `historicalIdentity: "not-recorded"` declaration. The old
+protocol did not retain start/executable/argv; this checkpoint refuses invented
+historical identity fields. The new exact plan approval binds this evidence gap.
+The native adapter checks only that single PID twice and refuses any
+present/reused PID or uncertain query; its result explicitly claims only current
+PID absence. It cannot authenticate historical creation identity or globally
+exclude unobserved different-PID writers. Existing related-writer checks remain.
+
+The checkpoint also explicitly pins all fourteen previous tool files in its
+`tools` map. These files are frozen evidence whose raw hashes must match the old
+plan, with canonical file paths and stable file identities. They need not reside
+in the original tool directory, which may already contain the upgraded code.
+The old approved plan and its original invocation paths remain unchanged.
+The frozen evidence pins are rechecked by the shared owner validation.
 
 Only the exact two completed copies followed by the pre-stop input-pin failure
 are eligible. Any stop, backup, migration, publication or recovery intent,

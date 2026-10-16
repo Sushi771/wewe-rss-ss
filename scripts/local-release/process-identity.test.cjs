@@ -63,15 +63,16 @@ test(
       await closed;
       assert.deepEqual(
         native.identity('ControllerExited', child.pid, controller),
-        { format: 1, pid: child.pid, exited: true },
+        {
+          format: 1,
+          pid: child.pid,
+          exited: true,
+          observation: 'current-pid-absence-only',
+        },
       );
       assert.throws(
-        () =>
-          native.identity('ControllerExited', child.pid, {
-            ...controller,
-            startUtc: '',
-          }),
-        (e) => String(e.stderr).includes('CONTROLLER_IDENTITY_REQUIRED'),
+        () => native.identity('ControllerExited', 0),
+        (e) => String(e.stderr).includes('CONTROLLER_PID_REQUIRED'),
       );
     } finally {
       child.stdin.end();

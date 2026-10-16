@@ -49,6 +49,29 @@ const toolPins = () => ({
   ...once.codePins(),
   'fixed-maintenance.cjs': fileHash(__filename),
 });
+function oldToolEvidence(c, old) {
+  const pins = old.maintenance?.toolPins;
+  if (
+    !pins ||
+    !c.tools ||
+    Object.keys(c.tools).sort().join('|') !==
+      Object.keys(toolPins()).sort().join('|')
+  )
+    fail('PRE_STOP_OLD_TOOL');
+  let directory;
+  for (const [name, spec] of Object.entries(c.tools)) {
+    if (
+      !spec ||
+      spec.sha256 !== pins[name] ||
+      path.basename(spec.path || '') !== name
+    )
+      fail('PRE_STOP_OLD_TOOL');
+    const parent = path.dirname(spec.path);
+    if (directory && parent !== directory) fail('PRE_STOP_OLD_TOOL');
+    directory = parent;
+    once.pinnedDocument(spec, path.join(directory, name), true);
+  }
+}
 function projection(p) {
   const q = structuredClone(p);
   delete q.maintenance;
@@ -212,6 +235,13 @@ function bindings(p, expected, requireApproval = false) {
     if (spec.sourceCommit !== (role === 'candidate' ? CANDIDATE : RECOVERY))
       fail('FIXED_PACKAGE');
   }
+  if (m.continueBeforeStop)
+    oldToolEvidence(
+      m.continueBeforeStop,
+      JSON.parse(
+        once.pinnedDocument(m.continueBeforeStop.plan, undefined, true),
+      ),
+    );
   return { old, source: s };
 }
 function validateOwner(p, expected, lock, record, callerPid, terminal = false) {
@@ -319,6 +349,7 @@ function validateOwner(p, expected, lock, record, callerPid, terminal = false) {
       receipt.exited?.format !== 1 ||
       receipt.exited.pid !== c.controller.pid ||
       receipt.exited.exited !== true ||
+      receipt.exited.observation !== 'current-pid-absence-only' ||
       record.history.length < prior.history.length + 1 ||
       hash(record.history.slice(0, prior.history.length)) !==
         hash(prior.history) ||
@@ -341,7 +372,7 @@ function preStopSource(plan) {
     c = p.maintenance.continueBeforeStop;
   if (
     !c ||
-    Object.keys(c).sort().join('|') !== 'controller|lock|plan|record' ||
+    Object.keys(c).sort().join('|') !== 'controller|lock|plan|record|tools' ||
     present(preStopPath(p))
   )
     fail('PRE_STOP_SOURCE');
@@ -390,29 +421,15 @@ function preStopSource(plan) {
     old.probe.sha256 !== old.codePins['windows-release-references.cjs']
   )
     fail('PRE_STOP_PLAN');
-  for (const [name, digest] of Object.entries(old.maintenance.toolPins))
-    if (fileHash(path.join(path.dirname(old.probe.path), name)) !== digest)
-      fail('PRE_STOP_OLD_TOOL');
+  oldToolEvidence(c, old);
   const controller = c.controller;
   if (
     !controller ||
-    Object.keys(controller).sort().join('|') !==
-      'commandLine|executable|pid|startUtc' ||
+    Object.keys(controller).sort().join('|') !== 'historicalIdentity|pid' ||
     !Number.isInteger(controller.pid) ||
     controller.pid <= 0 ||
     controller.pid === process.pid ||
-    !Number.isFinite(Date.parse(controller.startUtc)) ||
-    !path.isAbsolute(controller.executable) ||
-    hash(
-      require('./windows-release-references.cjs').argv(controller.commandLine),
-    ) !==
-      hash([
-        controller.executable,
-        path.join(path.dirname(old.probe.path), 'fixed-maintenance.cjs'),
-        '--execute',
-        c.plan.path,
-        c.plan.sha256,
-      ])
+    controller.historicalIdentity !== 'not-recorded'
   )
     fail('PRE_STOP_CONTROLLER');
   if (
@@ -996,7 +1013,8 @@ async function execute(file, expected, options = {}) {
       if (
         exited?.format !== 1 ||
         exited.pid !== c.controller.pid ||
-        exited.exited !== true
+        exited.exited !== true ||
+        exited.observation !== 'current-pid-absence-only'
       )
         fail('PRE_STOP_CONTROLLER_EXIT');
       owner();

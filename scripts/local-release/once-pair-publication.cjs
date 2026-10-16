@@ -366,7 +366,7 @@ function nativeOperations(p, u, audit, check) {
           '4000',
           ...(['AuxiliarySnapshot', 'WaitAuxiliary'].includes(action)
             ? ['-ExpectedAuxiliaryJson', JSON.stringify(u.expectedChildren)]
-            : expected
+            : expected && action !== 'ControllerExited'
               ? [
                   '-ExpectedStartUtc',
                   expected.startUtc,

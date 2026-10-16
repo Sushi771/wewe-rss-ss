@@ -44,19 +44,20 @@ async function installedPreStop(f) {
     plan: pin(f.file),
     record: pin(recordFile),
     lock: pin(lockFile),
+    tools: Object.fromEntries(
+      Object.keys(f.policy.maintenance.toolPins).map((name) => [
+        name,
+        pin(
+          path.join(
+            f.frozenEvidenceDirectory || path.dirname(f.policy.probe.path),
+            name,
+          ),
+        ),
+      ]),
+    ),
     controller: {
       pid: 900001,
-      startUtc: '2026-10-16T00:00:00.000Z',
-      executable: process.execPath,
-      commandLine: [
-        process.execPath,
-        path.join(__dirname, 'fixed-maintenance.cjs'),
-        '--execute',
-        f.file,
-        fileHash(f.file),
-      ]
-        .map((x) => '"' + x + '"')
-        .join(' '),
+      historicalIdentity: 'not-recorded',
     },
   };
   const oldRecord = fs.readFileSync(recordFile, 'utf8'),
@@ -70,7 +71,14 @@ async function installedPreStop(f) {
     if (action === 'ControllerExited') {
       f.events.push(action);
       assert.deepEqual(expected, c.controller);
-      return f.controllerExit || { format: 1, pid, exited: true };
+      return (
+        f.controllerExit || {
+          format: 1,
+          pid,
+          exited: true,
+          observation: 'current-pid-absence-only',
+        }
+      );
     }
     return original(action, pid, expected);
   };
@@ -85,7 +93,11 @@ async function installedPreStop(f) {
     receipt: recordFile + '.pre-stop.json',
   };
 }
-async function maintenanceFixture(run) {
+async function maintenanceFixture(
+  run,
+  api = { admission, publication, fixedMaintenance },
+) {
+  const { admission, fixedMaintenance } = api;
   return fixture(async (f) => {
     const rollbackFile = path.join(f.base, 'synthetic-rollback.json');
     fs.writeFileSync(
@@ -208,6 +220,14 @@ async function maintenanceFixture(run) {
       errors: ['REFERENCE_BACKGROUND_GAP_UNBOUND'],
     });
     await assert.rejects(f.execute(), /REFERENCE_QUERY_INCOMPLETE/);
+    if (api.previous) {
+      f.policy.codePins = admission.codePins();
+      f.policy.probe = {
+        path: path.join(api.directory, 'windows-release-references.cjs'),
+        sha256: admission.codePins()['windows-release-references.cjs'],
+      };
+      f.publicationAdapter = api.publication;
+    }
     const ledger = path.join(
       f.policy.registryDirectory,
       f.policy.scopeId + '.state.json',
@@ -257,47 +277,64 @@ async function maintenanceFixture(run) {
       adopted: spec(ledger + '.adopted'),
       continuation: spec(admission.continuationPath(f.policy)),
     };
+    const runtimePins = fixedMaintenance.toolPins();
+    f.policy.codePins = Object.fromEntries(
+      Object.entries(runtimePins).filter(
+        ([name]) => name !== 'fixed-maintenance.cjs',
+      ),
+    );
+    f.policy.probe = {
+      path: path.join(
+        api.maintenanceDirectory || __dirname,
+        'windows-release-references.cjs',
+      ),
+      sha256: runtimePins['windows-release-references.cjs'],
+    };
     f.policy.maintenance = {
       format: 1,
       kind: fixedMaintenance.KIND,
       planPath: fs.realpathSync.native(f.file),
       sourcePolicy: spec(source),
       sourceFiles,
-      toolPins: fixedMaintenance.toolPins(),
+      toolPins: runtimePins,
       approval: { id: 'synthetic-maintenance', confirmed: true },
     };
     f.facts = facts;
     fs.writeFileSync(f.file, JSON.stringify(f.policy));
     f.maintenance = () =>
-      fixedMaintenance.execute(f.file, fileHash(f.file), {
-        operations: f.operations,
-        query: (p, r) => {
-          const lock = JSON.parse(
-            fs.readFileSync(
-              path.join(p.registryDirectory, p.scopeId + '.lock'),
-            ),
-          );
-          fixedMaintenance.validateOwner(
-            p,
-            fileHash(f.file),
-            lock,
-            r,
-            process.pid,
-          );
-          f.queryHook?.(p, r);
-          if (f.parserQuery) return f.parserQuery(p, r);
-          return {
-            ...f.facts(),
-            maintenanceOwner: {
-              kind: fixedMaintenance.KIND,
-              configSha: fileHash(f.file),
-              nonce: r.nonce,
-              recordSha256: lock.recordPin.sha256,
-              recordIdentity: lock.recordPin.identity,
-            },
-          };
+      (f.maintenanceAdapter || fixedMaintenance).execute(
+        f.file,
+        fileHash(f.file),
+        {
+          operations: f.operations,
+          query: (p, r) => {
+            const lock = JSON.parse(
+              fs.readFileSync(
+                path.join(p.registryDirectory, p.scopeId + '.lock'),
+              ),
+            );
+            (f.maintenanceAdapter || fixedMaintenance).validateOwner(
+              p,
+              fileHash(f.file),
+              lock,
+              r,
+              process.pid,
+            );
+            f.queryHook?.(p, r);
+            if (f.parserQuery) return f.parserQuery(p, r);
+            return {
+              ...f.facts(),
+              maintenanceOwner: {
+                kind: fixedMaintenance.KIND,
+                configSha: fileHash(f.file),
+                nonce: r.nonce,
+                recordSha256: lock.recordPin.sha256,
+                recordIdentity: lock.recordPin.identity,
+              },
+            };
+          },
         },
-      });
+      );
     f.maintenanceRecord = () =>
       JSON.parse(fs.readFileSync(fixedMaintenance.recordPath(f.policy)))
         .payload;
@@ -328,7 +365,7 @@ async function maintenanceFixture(run) {
         f.initial.claims,
       );
     }
-  });
+  }, api.previous || api);
 }
 const identity = (at) => {
   const s = fs.lstatSync(at, { bigint: true });
@@ -379,7 +416,8 @@ function pkg(parent, id) {
     manifestSha256: fileHash(path.join(at, 'release.json')),
   };
 }
-async function fixture(run) {
+async function fixture(run, api = { admission, publication }) {
+  const { admission, publication } = api;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-publish-pair-'));
   try {
     const project = path.join(base, 'project'),
@@ -494,7 +532,9 @@ async function fixture(run) {
       })),
       compatibilityProofSha256: fileHash(proof),
       windowsReferences: { compatibilityProof: pin(proof) },
-      probe: pin(path.join(__dirname, 'windows-release-references.cjs')),
+      probe: pin(
+        path.join(api.directory || __dirname, 'windows-release-references.cjs'),
+      ),
       publication: {
         format: 1,
         limits: publication.allowance(1024 * 1024),
@@ -665,11 +705,15 @@ async function fixture(run) {
           return JSON.stringify(f.facts());
         };
         try {
-          return await publication.execute(file, digest, {
-            rollback,
-            operations: f.operations,
-            query: () => f.facts(),
-          });
+          return await (f.publicationAdapter || publication).execute(
+            file,
+            digest,
+            {
+              rollback,
+              operations: f.operations,
+              query: () => f.facts(),
+            },
+          );
         } finally {
           cp.execFileSync = saved;
         }
@@ -683,6 +727,134 @@ async function fixture(run) {
     fs.rmSync(base, { recursive: true });
   }
 }
+for (const mode of ['upgrade', 'changed-frozen-file', 'wrong-frozen-identity'])
+  test(
+    'actual 2337 pre-stop transition uses frozen evidence after mutable tools upgrade: ' +
+      mode,
+    async () => {
+      const data = require('./fixtures/pre-stop-2337-code.json'),
+        zlib = require('node:zlib');
+      const temp = fs.realpathSync.native(os.tmpdir()),
+        code = fs.mkdtempSync(path.join(temp, 'wewe-old-code-'));
+      const materialize = (version, at) => {
+        fs.mkdirSync(at);
+        for (const [name, spec] of Object.entries(
+          data.versions[version].files,
+        )) {
+          const bytes = zlib.gunzipSync(Buffer.from(spec.gzip, 'base64'), {
+            maxOutputLength: 1024 ** 2,
+          });
+          assert.equal(bytes.length, spec.bytes);
+          assert.equal(
+            crypto.createHash('sha256').update(bytes).digest('hex'),
+            spec.sha256,
+          );
+          fs.writeFileSync(path.join(at, name), bytes);
+        }
+        return fs.realpathSync.native(at);
+      };
+      const stable = materialize(
+        '2337e0d7313d942e02af13722d42126a289c1f44',
+        path.join(code, '2337-frozen'),
+      );
+      const mutable = materialize(
+        '2337e0d7313d942e02af13722d42126a289c1f44',
+        path.join(code, '2337-original-worktree'),
+      );
+      const source = materialize('a45190a', path.join(code, 'a451-source'));
+      const previous = materialize('c438798', path.join(code, 'c438-source'));
+      const api = {
+        directory: source,
+        maintenanceDirectory: mutable,
+        admission: require(path.join(source, 'once-pair-admission.cjs')),
+        publication: require(path.join(source, 'once-pair-publication.cjs')),
+        fixedMaintenance: require(path.join(mutable, 'fixed-maintenance.cjs')),
+        previous: {
+          directory: previous,
+          admission: require(path.join(previous, 'once-pair-admission.cjs')),
+          publication: require(
+            path.join(previous, 'once-pair-publication.cjs'),
+          ),
+        },
+      };
+      try {
+        await maintenanceFixture(async (f) => {
+          f.frozenEvidenceDirectory = stable;
+          const prior = await installedPreStop(f);
+          assert.equal(
+            JSON.parse(fs.readFileSync(prior.c.plan.path)).probe.path,
+            path.join(mutable, 'windows-release-references.cjs'),
+          );
+          const oldPlan = fs.readFileSync(prior.c.plan.path),
+            oldControls = [
+              fs.readFileSync(prior.recordFile),
+              fs.readFileSync(prior.lockFile),
+            ];
+          for (const name of Object.keys(fixedMaintenance.toolPins()))
+            fs.copyFileSync(
+              path.join(__dirname, name),
+              path.join(mutable, name),
+            );
+          assert.notEqual(
+            fileHash(path.join(mutable, 'once-pair-publication.cjs')),
+            JSON.parse(oldPlan).maintenance.toolPins[
+              'once-pair-publication.cjs'
+            ],
+          );
+          f.maintenanceAdapter = fixedMaintenance;
+          f.policy.codePins = admission.codePins();
+          f.policy.probe = {
+            path: path.join(__dirname, 'windows-release-references.cjs'),
+            sha256: admission.codePins()['windows-release-references.cjs'],
+          };
+          f.policy.maintenance.toolPins = fixedMaintenance.toolPins();
+          f.writePreStop();
+          if (mode === 'changed-frozen-file')
+            fs.appendFileSync(
+              prior.c.tools['fixed-maintenance.cjs'].path,
+              '\n// changed',
+            );
+          if (mode === 'wrong-frozen-identity') {
+            prior.c.tools['fixed-maintenance.cjs'].identity[1] += 'wrong';
+            f.writePreStop();
+          }
+          if (mode === 'upgrade') {
+            assert(
+              fixedMaintenance.review(f.file, fileHash(f.file)).continuation,
+            );
+            assert.equal((await f.maintenance()).status, 'passed');
+            assert.equal(f.backupCount(), 1);
+            assert.equal(
+              f
+                .maintenanceRecord()
+                .history.filter((h) => h.stage.startsWith('copy-')).length,
+              4,
+            );
+          } else {
+            await assert.rejects(
+              f.maintenance(),
+              /CONTINUATION_INPUT_(PIN|CHANGED)/,
+            );
+            assert.equal(f.backupCount(), 0);
+            assert(!f.events.includes('Stop'));
+            assert(!fs.existsSync(prior.receipt));
+            assert.deepEqual(
+              [
+                fs.readFileSync(prior.recordFile),
+                fs.readFileSync(prior.lockFile),
+              ],
+              oldControls,
+            );
+          }
+          assert.deepEqual(fs.readFileSync(prior.c.plan.path), oldPlan);
+        }, api);
+      } finally {
+        assert(code.startsWith(temp + path.sep));
+        fs.rmSync(code, { recursive: true, force: true });
+      }
+    },
+  );
+
 test('pre-stop continuation transfers the same installed pair once with original remaining credits and full parser', () =>
   maintenanceFixture(async (f) => {
     const source = await installedPreStop(f),
@@ -852,6 +1024,7 @@ for (const mode of [
   'partial-receipt',
   'after-receipt',
   'after-record',
+  'invented-history',
 ])
   test(
     'pre-stop continuation holds ' +
@@ -1013,6 +1186,10 @@ test('fixed maintenance unrelated background churn remains visible risk without 
           }
           assert(run(n).errors.length, fault);
         }
+      }
+      if (mode === 'invented-history') {
+        source.c.controller.startUtc = '2026-10-16T00:00:00Z';
+        f.writePreStop();
       }
       // Every real check in the finite fixture sees a different unrelated PID.
       base.processesBefore.push({ ...row, pid: pid + checks });

@@ -15,7 +15,7 @@ $ErrorActionPreference = 'Stop'
 if ($Action -eq 'ControllerExited') {
     # Single approved controller PID only. Any present/reused PID or query
     # uncertainty refuses; this branch never kills or enumerates other processes.
-    if ($TargetPid -le 0 -or -not $ExpectedStartUtc -or -not $ExpectedExecutable -or -not $ExpectedCommandLine) { throw 'CONTROLLER_IDENTITY_REQUIRED' }
+    if ($TargetPid -le 0) { throw 'CONTROLLER_PID_REQUIRED' }
     foreach ($attempt in 1..2) {
         $controller = $null
         try { $controller = [System.Diagnostics.Process]::GetProcessById($TargetPid) }
@@ -28,7 +28,7 @@ if ($Action -eq 'ControllerExited') {
         }
         if ($null -ne (Get-CimInstance Win32_Process -Filter "ProcessId=$TargetPid")) { throw 'CONTROLLER_STILL_PRESENT' }
     }
-    [ordered]@{format=1;pid=$TargetPid;exited=$true} | ConvertTo-Json -Compress
+    [ordered]@{format=1;pid=$TargetPid;exited=$true;observation='current-pid-absence-only'} | ConvertTo-Json -Compress
     return
 }
 if ($Action -in @('AuxiliarySnapshot', 'WaitAuxiliary')) {
