@@ -260,7 +260,10 @@ async function withFixture(source, run, aliases = {}, options = {}) {
       ws?.close();
       if (!(await waitForExit(2000))) {
         child.kill();
-        assert(await waitForExit(5000), 'owned fixture browser exit unconfirmed');
+        assert(
+          await waitForExit(5000),
+          'owned fixture browser exit unconfirmed',
+        );
       }
     } finally {
       child.stderr.destroy();
