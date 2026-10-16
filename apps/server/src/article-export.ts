@@ -67,6 +67,7 @@ export async function buildArticleMarkdown(
   imageFetcher = fetchAllowedImage,
   imageDirectory: 'attachments' | 'image' = 'attachments',
   limits?: { maxImages: number; maxBytes: number },
+  allowPartialImages = false,
 ) {
   const id = article.id;
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
@@ -184,7 +185,10 @@ export async function buildArticleMarkdown(
                 if (!image) {
                   try {
                     image = await imageFetcher(dataSrc);
-                  } catch {
+                  } catch (error) {
+                    // Strict single-download callers must retain their error
+                    // provenance and must not publish a partial success bundle.
+                    if (!allowPartialImages && !mediaUnconfirmed) throw error;
                     mediaComplete = false;
                     missingSources.add(dataSrc);
                     return false;
