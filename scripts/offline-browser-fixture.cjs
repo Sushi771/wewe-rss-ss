@@ -205,7 +205,7 @@ async function withFixture(source, run, aliases = {}, options = {}) {
         ? p.reject(Error(`CDP ${p.method}: ${m.error.message}`))
         : p.resolve(m.result);
     });
-    const send = (method, params = {}) =>
+    const command = (method, params = {}) =>
       new Promise((resolve, reject) => {
         const id = ++serial;
         const timer = setTimeout(() => {
@@ -216,6 +216,29 @@ async function withFixture(source, run, aliases = {}, options = {}) {
         pending.set(id, { resolve, reject, timer, method });
         ws.send(JSON.stringify({ id, method, params }));
       });
+    const send = async (method, params = {}) => {
+      if (method !== 'Page.navigate' && method !== 'Page.reload')
+        return command(method, params);
+      let timer, onLoad;
+      const loaded = new Promise((resolve, reject) => {
+        onLoad = (event) => {
+          if (JSON.parse(event.data).method === 'Page.loadEventFired')
+            resolve();
+        };
+        ws.addEventListener('message', onLoad);
+        timer = setTimeout(
+          () => reject(Error(`CDP load timeout: ${method}`)),
+          10000,
+        );
+      });
+      try {
+        const [result] = await Promise.all([command(method, params), loaded]);
+        return result;
+      } finally {
+        clearTimeout(timer);
+        ws.removeEventListener('message', onLoad);
+      }
+    };
     const evaluate = async (expression) => {
       const result = await send('Runtime.evaluate', {
         expression,
@@ -226,6 +249,7 @@ async function withFixture(source, run, aliases = {}, options = {}) {
       return result.result.value;
     };
     phase = 'initial-navigation';
+    await send('Page.enable');
     await send('Page.navigate', {
       url: `http://127.0.0.1:${server.address().port}/`,
     });

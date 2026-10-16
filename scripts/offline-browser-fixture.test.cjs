@@ -46,3 +46,40 @@ test(
     );
   },
 );
+
+test(
+  'reload waits for the new document and its delayed script before evaluation',
+  { skip: !browser, timeout: 60000 },
+  async () => {
+    let documents = 0;
+    await withFixture(
+      'window.fixture = {};',
+      async ({ evaluate, send }) => {
+        assert.equal(await evaluate('window.fixture.generation'), '1');
+        await send('Page.reload');
+        assert.equal(await evaluate('window.fixture?.generation'), '2');
+        assert.equal(await evaluate('document.readyState'), 'complete');
+      },
+      {},
+      {
+        handleRequest(req, res) {
+          if (req.url === '/') {
+            res.setHeader('Content-Type', 'text/html');
+            res.end(
+              `<!doctype html><html data-generation="${++documents}"><body><script src="/fixture.js"></script></body></html>`,
+            );
+            return true;
+          }
+          if (req.url !== '/fixture.js') return false;
+          setTimeout(() => {
+            res.setHeader('Content-Type', 'text/javascript');
+            res.end(
+              'window.fixture = {generation: document.documentElement.dataset.generation};',
+            );
+          }, 500);
+          return true;
+        },
+      },
+    );
+  },
+);

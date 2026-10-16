@@ -77,6 +77,17 @@ limits remain unchanged; there is no retry. Failures now retain phase, CDP metho
 bounded stderr and child exit state so a future failure can be classified without
 guessing. This fix does not claim either original failure's root cause is proven.
 
+The follow-up on `60d44e8` reproduced the rename CDP error with Chrome still
+running, during a test `Runtime.evaluate`, after all seven component/lifecycle
+checks passed ([run 38938827420](https://github.com/Sushi771/wewe-rss-ss/actions/runs/38938827420)).
+A local delayed-script regression then reproduced the synchronization gap:
+`Page.reload` returned before the new document's script completed, and the next
+evaluation read an undefined fixture. Navigation and reload now enable Page
+events and wait for the new load event before allowing the next command. The
+existing ten-second command bound remains; no failed command is retried. This
+addresses the demonstrated navigation gap. The earlier one-off Chrome startup
+timeout still has no proven resource-contention cause.
+
 ## Release limits and remaining risk
 
 This is not production deployment approval. No production deployment credit was
