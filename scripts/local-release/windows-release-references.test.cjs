@@ -384,10 +384,12 @@ test(
         },
       );
       const r = JSON.parse(output),
-        file = path.join(f.project, '\u6D4B-owned.lnk');
+        file = path.join(f.project, '\u6D4B-owned.lnk'),
+        ascii = path.join(f.project, 'ascii-owned.lnk');
       assert.equal(r.hashCmdletCalls, 0);
-      assert.equal(r.normal.sha256, f.pin(file).sha256);
-      assert.equal(r.normal.path, file);
+      assert.equal(r.normal.sha256, f.pin(ascii).sha256);
+      assert.equal(r.normal.path, ascii);
+      assert.equal(r.unicodeHash, f.pin(file).sha256);
       assert.equal(
         path.resolve(r.normal.target).toLowerCase(),
         path.join(f.project, 'inert-target.exe').toLowerCase(),
@@ -396,6 +398,20 @@ test(
         path.resolve(r.normal.workingDirectory).toLowerCase(),
         f.project.toLowerCase(),
       );
+      if (r.unicodeRecord?.target) {
+        assert.equal(
+          path.resolve(r.unicodeRecord.target).toLowerCase(),
+          path.join(f.project, 'inert-target.exe').toLowerCase(),
+        );
+      } else if (r.unicodeRecord) {
+        // Legacy WSH may not decode names outside the host ANSI codepage.
+        // This is an incomplete required reference, never a harmless shortcut.
+        f.native.shortcuts.push(r.unicodeRecord);
+        assert(f.run().errors.includes('REFERENCE_SHORTCUT_INVALID'));
+      } else {
+        assert(r.unicodeFailure?.exceptions.length);
+        assert(r.unicodeFailure.stage.startsWith('shortcut-'));
+      }
       assert.equal(r.sharingRefused, true);
       assert.equal(r.failureContext.stage, 'shortcut-hash-before');
       assert.equal(r.failureContext.folderKind, 'Startup');
