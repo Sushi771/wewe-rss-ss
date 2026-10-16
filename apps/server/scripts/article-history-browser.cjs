@@ -474,7 +474,10 @@ if (require.main === module) {
       clearTimeout(emergency);
       // A cancelled injected/native operation can keep an external handle
       // alive. Exit only after finally attempted this helper's bounded cleanup.
-      if (controller.signal.aborted) process.exit(1);
+      if (controller.signal.aborted) {
+        report(controller.signal.reason);
+        process.exit(1);
+      }
     });
 }
 module.exports = { waitForDevToolsPort, diagnostic };
