@@ -5,12 +5,190 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
+const vm = require('node:vm');
+const { EventEmitter } = require('node:events');
 const {
   waitForDevToolsPort,
   diagnostic,
 } = require('./article-history-browser.cjs');
 const valid = '9222\n/devtools/browser/1234-abcd';
 const child = () => ({ exitCode: null, signalCode: null });
+
+// Execute the exact CLI with mocked owned resources and explicit clock ticks.
+// No browser starts, ports, profiles or external requests are created here.
+async function deadlineFixture(
+  stage,
+  { childStalls = false, profile = 'ok' } = {},
+) {
+  const source = fs.readFileSync(
+    path.join(__dirname, 'article-history-browser.cjs'),
+    'utf8',
+  );
+  const timers = new Map();
+  let sequence = 0;
+  const calls = {
+    kill: 0,
+    remove: 0,
+    close: 0,
+    socket: 0,
+    exits: [],
+    stderr: '',
+  };
+  const ownedChild = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+    kill() {
+      calls.kill++;
+      if (!childStalls) this.exitCode = 0;
+    },
+  });
+  const server = {
+    listen(_port, _host, ready) {
+      ready();
+    },
+    address: () => ({ port: 12345 }),
+    closeAllConnections() {},
+    close() {
+      calls.close++;
+    },
+  };
+  const modules = {
+    'node:fs': {
+      existsSync: (file) => file === '/owned/mock-browser',
+      mkdtempSync: () => '/owned/mock-profile',
+      readFileSync: () => {
+        if (stage === 'startup')
+          throw Object.assign(Error('private'), { code: 'ENOENT' });
+        return '12345\n/devtools/browser/owned-fixture\n';
+      },
+      promises: {
+        rm: () => {
+          calls.remove++;
+          return profile === 'stall'
+            ? new Promise(() => {})
+            : profile === 'fail'
+              ? Promise.reject(
+                  Object.assign(Error('private token/path'), { code: 'EPERM' }),
+                )
+              : Promise.resolve();
+        },
+      },
+    },
+    'node:path': path,
+    'node:os': { homedir: () => '/owned/home', tmpdir: () => '/owned/temp' },
+    'node:http': { createServer: () => server },
+    'node:child_process': { spawn: () => ownedChild },
+  };
+  const cliModule = { exports: {} };
+  const cliRequire = (name) => {
+    assert.ok(name in modules);
+    return modules[name];
+  };
+  cliRequire.main = cliModule;
+  const stdin = (async function* () {
+    yield JSON.stringify({ root: '/owned/root', pages: [] });
+  })();
+  stdin.destroy = () => {};
+  const cliProcess = {
+    stdin,
+    env: { ARTICLE_HISTORY_CHROME: '/owned/mock-browser' },
+    stdout: {
+      write() {
+        assert.fail('must not publish success');
+      },
+    },
+    stderr: {
+      write(text) {
+        calls.stderr += text;
+      },
+    },
+    exit(code) {
+      calls.exits.push({
+        code,
+        kill: calls.kill,
+        remove: calls.remove,
+        close: calls.close,
+      });
+    },
+  };
+  class Socket {
+    constructor() {
+      if (stage === 'cdp') queueMicrotask(() => this.onopen());
+    }
+    close() {
+      calls.socket++;
+    }
+    send() {} // The first CDP command stays pending.
+  }
+  vm.runInNewContext(
+    source,
+    {
+      require: cliRequire,
+      module: cliModule,
+      exports: cliModule.exports,
+      process: cliProcess,
+      Buffer,
+      performance,
+      AbortController,
+      WebSocket: Socket,
+      fetch: () =>
+        stage === 'connect'
+          ? new Promise(() => {})
+          : Promise.resolve({
+              json: async () => ({
+                webSocketDebuggerUrl: 'ws://127.0.0.1/mock',
+              }),
+            }),
+      setTimeout(callback, ms) {
+        const id = ++sequence;
+        timers.set(id, { callback, ms });
+        return id;
+      },
+      clearTimeout(id) {
+        timers.delete(id);
+      },
+    },
+    { timeout: 3000 },
+  );
+  const settle = () => new Promise(setImmediate);
+  const fire = (ms) => {
+    const entry = [...timers].find(([, timer]) => timer.ms === ms);
+    assert.ok(entry, `expected bounded ${ms}ms timer`);
+    timers.delete(entry[0]);
+    entry[1].callback();
+  };
+  await settle();
+  fire(170000);
+  await settle();
+  if (childStalls) {
+    fire(3000);
+    await settle();
+  }
+  if (profile === 'stall') {
+    fire(2000);
+    await settle();
+  }
+  assert.deepEqual(calls.exits, [{ code: 1, kill: 1, remove: 1, close: 1 }]);
+  assert.equal(
+    [...timers.values()].some((timer) => [6000, 10000].includes(timer.ms)),
+    false,
+  );
+  const result = JSON.parse(calls.stderr);
+  assert.equal(result.code, 'BROWSER_DEADLINE');
+  assert.equal(result.phase, stage === 'socket' ? 'connect' : stage);
+  assert.equal(result.cleanup.childExited, !childStalls);
+  assert.equal(result.cleanup.profileRemoved, profile === 'ok');
+  assert.ok(!calls.stderr.includes('private'));
+  if (['socket', 'cdp'].includes(stage)) assert.equal(calls.socket, 1);
+}
+
+for (const stage of ['startup', 'connect', 'socket', 'cdp'])
+  test(`hard deadline cleans owned resources before exit during ${stage}`, () =>
+    deadlineFixture(stage));
+test('hard deadline bounds stalled child and profile cleanup independently', () =>
+  deadlineFixture('connect', { childStalls: true, profile: 'stall' }));
+test('hard deadline reports profile cleanup failure without private error text', () =>
+  deadlineFixture('connect', { profile: 'fail' }));
 function clock() {
   let elapsed = 0;
   return {

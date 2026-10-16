@@ -35,6 +35,24 @@ let phase = 'input';
 function failure(code) {
   return Object.assign(Error(code), { code });
 }
+function abortable(operation, signal) {
+  if (!signal) return operation;
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(signal.reason);
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener('abort', aborted, { once: true });
+    Promise.resolve(operation).then(
+      (value) => {
+        signal.removeEventListener('abort', aborted);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', aborted);
+        reject(error);
+      },
+    );
+  });
+}
 function diagnostic(error, currentPhase = phase) {
   const code = codes.has(error?.code)
     ? error.code
@@ -56,6 +74,15 @@ function diagnostic(error, currentPhase = phase) {
     ...(Number.isInteger(error?.attempts)
       ? { attempts: Math.min(120, Math.max(0, error.attempts)) }
       : {}),
+    ...(typeof error?.cleanup?.childExited === 'boolean' &&
+    typeof error?.cleanup?.profileRemoved === 'boolean'
+      ? {
+          cleanup: {
+            childExited: error.cleanup.childExited,
+            profileRemoved: error.cleanup.profileRemoved,
+          },
+        }
+      : {}),
   };
 }
 
@@ -71,12 +98,14 @@ async function waitForDevToolsPort(
     timeoutMs = 12000,
     maxAttempts = 120,
     spawnError = () => null,
+    signal,
   } = {},
 ) {
   const until = now() + Math.min(timeoutMs, 12000);
   let resourceCode;
   let attempts = 0;
   while (attempts < Math.min(maxAttempts, 120) && now() < until) {
+    if (signal?.aborted) throw signal.reason;
     if (spawnError()) throw spawnError();
     if (child.exitCode !== null || child.signalCode)
       throw failure('BROWSER_EXITED');
@@ -117,14 +146,20 @@ async function waitForDevToolsPort(
       if (!['ENOENT', 'EBUSY', 'EPERM'].includes(error.code)) throw error;
       resourceCode = error.code;
     }
-    await sleep(Math.min(100, Math.max(0, until - now())));
+    await abortable(sleep(Math.min(100, Math.max(0, until - now()))), signal);
   }
   throw Object.assign(failure('STARTUP_EXHAUSTED'), { attempts, resourceCode });
 }
 
-async function main() {
-  let input = '';
-  for await (const chunk of process.stdin) input += chunk;
+async function main(signal) {
+  const input = await abortable(
+    (async () => {
+      let value = '';
+      for await (const chunk of process.stdin) value += chunk;
+      return value;
+    })(),
+    signal,
+  );
   const { root, pages } = JSON.parse(input);
   if (!Array.isArray(pages) || pages.length > 128) throw Error('page budget');
   const candidates = [
@@ -147,73 +182,77 @@ async function main() {
     throw Error('Chrome/Edge and Node 24 required');
   let remoteRequests = 0;
   const allowed = new Set(pages);
-  const server = http.createServer((req, res) => {
-    const name = req.url.slice(1);
-    if (name === 'favicon.ico') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-    if (
-      !allowed.has(name) &&
-      !/^assets\/[0-9a-f]{64}\.(png|jpeg|gif|webp)$/.test(name)
-    ) {
-      res.writeHead(404);
-      res.end();
-      return;
-    }
-    const file = path.join(root, name);
-    const ext = path.extname(file);
-    const mime = {
-      '.html': 'text/html; charset=utf-8',
-      '.png': 'image/png',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-    }[ext];
-    if (!mime || !fs.existsSync(file)) {
-      res.writeHead(404);
-      res.end();
-      return;
-    }
-    res.writeHead(200, {
-      'Content-Type': mime,
-      'Content-Security-Policy':
-        "default-src 'none'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-      'X-Content-Type-Options': 'nosniff',
-      'Cache-Control': 'no-store',
-    });
-    fs.createReadStream(file).pipe(res);
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const origin = `http://127.0.0.1:${server.address().port}/`;
-  const profile = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'article-history-browser-'),
-  );
-  const child = spawn(
-    executable,
-    [
-      '--headless=new',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-component-update',
-      '--disable-sync',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-default-apps',
-      '--remote-debugging-address=127.0.0.1',
-      '--remote-debugging-port=0',
-      '--proxy-server=http://127.0.0.1:9',
-      '--proxy-bypass-list=127.0.0.1',
-      `--user-data-dir=${profile}`,
-      'about:blank',
-    ],
-    { windowsHide: true, stdio: 'ignore' },
-  );
-  let socket;
+  let server, profile, child, socket;
+  const pending = new Map();
   try {
+    server = http.createServer((req, res) => {
+      const name = req.url.slice(1);
+      if (name === 'favicon.ico') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      if (
+        !allowed.has(name) &&
+        !/^assets\/[0-9a-f]{64}\.(png|jpeg|gif|webp)$/.test(name)
+      ) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const file = path.join(root, name);
+      const ext = path.extname(file);
+      const mime = {
+        '.html': 'text/html; charset=utf-8',
+        '.png': 'image/png',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+      }[ext];
+      if (!mime || !fs.existsSync(file)) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': mime,
+        'Content-Security-Policy':
+          "default-src 'none'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'no-store',
+      });
+      fs.createReadStream(file).pipe(res);
+    });
+    await abortable(
+      new Promise((resolve) => server.listen(0, '127.0.0.1', resolve)),
+      signal,
+    );
+    const origin = `http://127.0.0.1:${server.address().port}/`;
+    profile = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'article-history-browser-'),
+    );
+    child = spawn(
+      executable,
+      [
+        '--headless=new',
+        '--no-sandbox',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-component-update',
+        '--disable-sync',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-default-apps',
+        '--remote-debugging-address=127.0.0.1',
+        '--remote-debugging-port=0',
+        '--proxy-server=http://127.0.0.1:9',
+        '--proxy-bypass-list=127.0.0.1',
+        `--user-data-dir=${profile}`,
+        'about:blank',
+      ],
+      { windowsHide: true, stdio: 'ignore' },
+    );
     phase = 'startup';
     let spawnError;
     child.on('error', (error) => {
@@ -222,29 +261,42 @@ async function main() {
     const active = path.join(profile, 'DevToolsActivePort');
     const port = await waitForDevToolsPort(active, child, {
       spawnError: () => spawnError,
+      signal,
     });
     phase = 'connect';
-    const target = await fetch(
-      `http://127.0.0.1:${port}/json/new?about:blank`,
-      { method: 'PUT' },
-    ).then((r) => r.json());
+    const target = await abortable(
+      fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
+        method: 'PUT',
+        signal,
+      }).then((r) => r.json()),
+      signal,
+    );
     socket = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      socket.onopen = resolve;
-      socket.onerror = reject;
-    });
-    let id = 0;
-    const pending = new Map();
-    const command = (method, params = {}) =>
+    await abortable(
       new Promise((resolve, reject) => {
-        const key = ++id;
-        const timer = setTimeout(() => {
-          pending.delete(key);
-          reject(failure('CDP_TIMEOUT'));
-        }, 10000);
-        pending.set(key, { resolve, reject, timer });
-        socket.send(JSON.stringify({ id: key, method, params }));
-      });
+        socket.onopen = resolve;
+        socket.onerror = reject;
+      }),
+      signal,
+    );
+    let id = 0;
+    const command = (method, params = {}) =>
+      abortable(
+        new Promise((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          const key = ++id;
+          const timer = setTimeout(() => {
+            pending.delete(key);
+            reject(failure('CDP_TIMEOUT'));
+          }, 10000);
+          pending.set(key, { resolve, reject, timer });
+          socket.send(JSON.stringify({ id: key, method, params }));
+        }),
+        signal,
+      );
     socket.onmessage = ({ data }) => {
       const event = JSON.parse(data);
       if (event.id && pending.has(event.id)) {
@@ -298,7 +350,7 @@ async function main() {
           status.imageInputs.every((x) => x.done)
         )
           break;
-        await pause(50);
+        await abortable(pause(50), signal);
       }
       if (
         status.url !== origin + name ||
@@ -323,42 +375,106 @@ async function main() {
       }),
     );
   } finally {
-    if (socket) socket.close();
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(signal?.reason || failure('CDP_ERROR'));
+    }
+    pending.clear();
+    try {
+      if (socket) socket.close();
+    } catch {}
     // Only this helper's child/profile are owned here; never inspect/stop services.
-    child.kill();
-    await new Promise((resolve) => {
-      if (child.exitCode !== null) resolve();
-      else {
-        child.once('exit', resolve);
-        setTimeout(resolve, 3000);
-      }
-    });
-    server.closeAllConnections();
-    server.close();
+    if (child) {
+      try {
+        child.kill();
+      } catch {}
+      await new Promise((resolve) => {
+        if (child.exitCode !== null || child.signalCode) resolve();
+        else {
+          const exited = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(() => {
+            child.removeListener('exit', exited);
+            resolve();
+          }, 3000);
+          child.once('exit', exited);
+        }
+      });
+    }
+    try {
+      server?.closeAllConnections();
+    } catch {}
+    try {
+      server?.close();
+    } catch {}
     // Browser may release Windows handles late. A small private temp profile may
     // remain; never make a broad or cross-shell recursive cleanup attempt.
+    let profileRemoved = !profile;
     try {
-      fs.rmSync(profile, {
-        recursive: true,
-        force: true,
-        maxRetries: 2,
-        retryDelay: 100,
-      });
+      if (profile) {
+        let timer;
+        try {
+          profileRemoved = await Promise.race([
+            fs.promises
+              .rm(profile, {
+                recursive: true,
+                force: true,
+                maxRetries: 2,
+                retryDelay: 100,
+              })
+              .then(
+                () => true,
+                () => false,
+              ),
+            new Promise((resolve) => {
+              timer = setTimeout(() => resolve(false), 2000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
     } catch {}
+    if (signal?.aborted)
+      signal.reason.cleanup = {
+        childExited: !child || child.exitCode !== null || !!child.signalCode,
+        profileRemoved,
+      };
   }
 }
 if (require.main === module) {
-  const deadline = setTimeout(() => {
-    process.stderr.write(
-      JSON.stringify(diagnostic(failure('BROWSER_DEADLINE'))),
-    );
-    process.exit(1);
-  }, 170000);
-  main()
-    .catch((error) => {
+  const controller = new AbortController();
+  let emergency;
+  let reported = false;
+  const report = (error) => {
+    if (!reported) {
+      reported = true;
       process.stderr.write(JSON.stringify(diagnostic(error)));
+    }
+  };
+  const deadline = setTimeout(() => {
+    // Cancel owned waits so main enters finally, even if a CDP fetch ignores
+    // AbortSignal. Reserve a separate, bounded cleanup grace before hard exit.
+    controller.abort(failure('BROWSER_DEADLINE'));
+    process.stdin.destroy?.();
+    emergency = setTimeout(() => {
+      report(controller.signal.reason);
+      process.exit(1);
+    }, 6000);
+  }, 170000);
+  main(controller.signal)
+    .catch((error) => {
+      report(error);
       process.exitCode = 1;
     })
-    .finally(() => clearTimeout(deadline));
+    .finally(() => {
+      clearTimeout(deadline);
+      clearTimeout(emergency);
+      // A cancelled injected/native operation can keep an external handle
+      // alive. Exit only after finally attempted this helper's bounded cleanup.
+      if (controller.signal.aborted) process.exit(1);
+    });
 }
 module.exports = { waitForDevToolsPort, diagnostic };
