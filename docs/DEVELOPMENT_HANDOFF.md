@@ -510,3 +510,17 @@ release that reference. This code does not change an already-running controller,
 resume maintenance, repeat recovery or complete a missing pointer publication.
 See [fixed maintenance](FIXED_MAINTENANCE.md) for the owned CLI, exit and refusal
 fixtures. Development verification and production closeout remain separate.
+
+## 2026-10-16: Periodic restart snapshot deduplication candidate
+
+The two backup/guard producer files matched production source 45a3942 before this
+patch. That production version already uses incremental writes for ordinary feed
+updates and group changes; those business changes are not reimplemented here.
+The remaining duplicate-copy case is a periodic owner restart with unchanged
+data. It now repeats full hash/integrity/schema/typed-row verification and starts
+a new owner/snapshot generation while reusing the same physical snapshot. Old
+tokens remain invalid, and original copy UTC times are distinct from fresh proof
+times. Protected high-risk backup reuse and retention/deletion rules are unchanged.
+Tests use only bounded synthetic databases and owned temporary outputs. A hard
+quota is not automatic rotation or evidence that old production files were freed.
+No production data, configuration, service or deployed PR46 package was changed.
