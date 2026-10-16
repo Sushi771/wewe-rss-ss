@@ -98,6 +98,11 @@ function inspect(paths, options = {}) {
   return { roots, baseline };
 }
 function validateReferences(value, policy, operation) {
+  if (
+    policy.preCopyContinuation &&
+    !['install', 'publish', 'rollback'].includes(operation)
+  )
+    throw new Error('RELEASE_SCOPE_CONTINUATION_OPERATION_INVALID');
   const scoped = value?.operationSufficient === true;
   let processScoped = false,
     taskScoped = false;
@@ -170,8 +175,25 @@ function validateReferences(value, policy, operation) {
     value.errors.length ||
     !Array.isArray(value.uncertainChildren) ||
     value.uncertainChildren.length
-  )
-    throw new Error('RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+  ) {
+    const error = new Error('RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    error.referenceDiagnostic =
+      require('./windows-release-references.cjs').referenceDiagnostic({
+        ...value?.referenceDiagnostic,
+        stage: value?.referenceDiagnostic?.stage || 'scope-validation',
+        codes: [
+          ...(Array.isArray(value?.errors) ? value.errors : []),
+          ...(Array.isArray(value?.referenceDiagnostic?.codes)
+            ? value.referenceDiagnostic.codes
+            : []),
+        ],
+        complete: value?.complete,
+        operationSufficient: value?.operationSufficient,
+        globalReferenceComplete: value?.globalReferenceComplete,
+        categories: value?.categories,
+      });
+    throw error;
+  }
   if (
     value.compatibility?.verified !== true ||
     value.compatibility.businessDatabaseRestored !== false ||

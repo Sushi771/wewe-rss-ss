@@ -15,6 +15,84 @@ const kinds = [
 const digest = (value) =>
   crypto.createHash('sha256').update(value).digest('hex');
 const hash = (value) => digest(JSON.stringify(value));
+function referenceDiagnostic(value = {}) {
+  const token = (s) =>
+    typeof s === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,95}$/.test(s)
+      ? s
+      : undefined;
+  const codes = [
+    ...new Set(
+      (Array.isArray(value.codes) ? value.codes : []).filter(
+        (s) =>
+          typeof s === 'string' &&
+          /^(REFERENCE|RELEASE_SCOPE|ONCE_PAIR|ONCE_PUBLICATION)_[A-Z_]{1,96}$/.test(
+            s,
+          ),
+      ),
+    ),
+  ].slice(0, 16);
+  const transportCodes = [
+    'ETIMEDOUT',
+    'ENOBUFS',
+    'ENOENT',
+    'EACCES',
+    'EPERM',
+    'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+  ];
+  return {
+    stage: [
+      'policy',
+      'native-validation',
+      'policy-bindings',
+      'processes',
+      'collector-chain',
+      'tasks',
+      'shortcuts',
+      'inflight',
+      'final-verification',
+      'probe-main',
+      'scope-validation',
+      'admission',
+    ].includes(value.stage)
+      ? value.stage
+      : 'unknown',
+    codes,
+    ...(token(value.nativeStage)
+      ? { nativeStage: token(value.nativeStage) }
+      : {}),
+    ...(token(value.nativeErrorId)
+      ? { nativeErrorId: token(value.nativeErrorId) }
+      : {}),
+    ...(token(value.nativeCategory)
+      ? { nativeCategory: token(value.nativeCategory) }
+      : {}),
+    ...(transportCodes.includes(value.transportCode)
+      ? { transportCode: value.transportCode }
+      : {}),
+    ...(Number.isInteger(value.status) &&
+    value.status >= 0 &&
+    value.status <= 255
+      ? { status: value.status }
+      : {}),
+    ...Object.fromEntries(
+      ['complete', 'operationSufficient', 'globalReferenceComplete']
+        .filter((k) => typeof value[k] === 'boolean')
+        .map((k) => [k, value[k]]),
+    ),
+    ...(value.categories && typeof value.categories === 'object'
+      ? {
+          categories: Object.fromEntries(
+            kinds.map((k) => [
+              k,
+              typeof value.categories[k] === 'boolean'
+                ? value.categories[k]
+                : null,
+            ]),
+          ),
+        }
+      : {}),
+  };
+}
 const fail = (code) => {
   throw new Error(code);
 };
@@ -671,6 +749,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     errors: [],
     uncertainChildren: [],
   };
+  let stage = 'policy';
   try {
     const scope = operationContract(policy);
     if (scope) result.globalReferenceComplete = false;
@@ -690,6 +769,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       !Array.isArray(policy.protectedIds)
     )
       fail('REFERENCE_POLICY_INVALID');
+    stage = 'native-validation';
     if (
       !native ||
       native.format !== 1 ||
@@ -717,6 +797,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       ).some((k) => native.categories?.[k] !== true)
     )
       fail('REFERENCE_NATIVE_QUERY_INCOMPLETE');
+    stage = 'policy-bindings';
     const roots = policy.roots.map((r) => canonical(r.path));
     const manifests = new Map(),
       watched = new Map();
@@ -1110,6 +1191,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       businessDatabaseRestored: false,
       proofSha256: digest(proofRaw),
     };
+    stage = 'processes';
     const processContract = operationProcessContract(policy);
     function processMap(list) {
       if (!Array.isArray(list) || list.length > 8192)
@@ -1144,12 +1226,14 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       after = processMap(native.processesAfter),
       matched = new Map();
     if (self) {
+      stage = 'collector-chain';
       result.collectorChain = collectorChain(before, after, callerPid, self);
       for (const row of result.collectorChain) {
         before.delete(row.pid);
         after.delete(row.pid);
       }
     }
+    stage = 'processes';
     const processView = processContract
       ? operationProcessView(policy, native, before, after, callerPid)
       : null;
@@ -1252,6 +1336,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         }
       }
     result.categories.processes = !processView;
+    stage = 'tasks';
     if (
       !Array.isArray(native.tasks) ||
       native.tasks.length > 8192 ||
@@ -1414,6 +1499,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           fail('REFERENCE_SHORTCUT_DIRECTORY_QUERY_INCOMPLETE');
       }
     }
+    stage = 'shortcuts';
     const pinnedShortcuts = scope
       ? cfg.launchers
           .flatMap((l) => l.files)
@@ -1486,6 +1572,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       fail('REFERENCE_STARTUP_ACTION_BINDING_NOT_OBSERVED');
     // The querying controller owns the scope lock. Its changing in-progress
     // intent is checked, but is not an external reference to its own output.
+    stage = 'inflight';
     const registry = canonical(policy.registryDirectory),
       prefix = path.join(registry, policy.scopeId);
     const lockRaw = watch(prefix + '.lock'),
@@ -1512,6 +1599,22 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       ledger = envelope(ledgerFile);
     if (ledger.configSha !== lock.configSha || !Array.isArray(ledger.outputs))
       fail('REFERENCE_INFLIGHT_STATE_INVALID');
+    if (ledger.continuation || policy.preCopyContinuation) {
+      if (
+        !ledger.complete &&
+        (ledger.claim?.kind !== 'install' ||
+          ledger.continuationAttempt?.nonce !== lock.nonce ||
+          ledger.continuationAttempt.status !== 'running')
+      )
+        fail('REFERENCE_CONTINUATION_OWNER_UNCERTAIN');
+      const authority =
+        require('./once-pair-admission.cjs').validateContinuation(
+          policy,
+          ledger,
+          lock.configSha,
+        );
+      for (const pin of authority.files) watchPinned(pin);
+    }
     if (
       ledger.claim &&
       (typeof ledger.claim.id !== 'string' ||
@@ -1562,6 +1665,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       } else watch(lifecycle, false);
     }
     result.categories.inflight = true;
+    stage = 'final-verification';
     for (const [at, expected] of watched) {
       if (
         expected === null
@@ -1617,6 +1721,27 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         ? error.message
         : 'REFERENCE_QUERY_FAILED',
     );
+    result.referenceDiagnostic = referenceDiagnostic({
+      stage,
+      codes: [
+        ...result.errors,
+        error.message,
+        ...(stage === 'native-validation' && Array.isArray(native?.errors)
+          ? native.errors
+          : []),
+      ],
+      ...(stage === 'native-validation'
+        ? {
+            nativeStage: native?.failureContext?.stage,
+            nativeErrorId: native?.failureContext?.errorId,
+            nativeCategory: native?.failureContext?.category,
+          }
+        : {}),
+      complete: result.complete,
+      operationSufficient: result.operationSufficient,
+      globalReferenceComplete: result.globalReferenceComplete,
+      categories: result.categories,
+    });
   }
   return result;
 }
@@ -1735,22 +1860,36 @@ function main(policyFile) {
     fail('REFERENCE_COLLECTOR_PIN_CHANGED');
   return result;
 }
-if (require.main === module) {
-  let value;
+function cliResult(run) {
   try {
-    if (process.argv.length !== 3) fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
-    value = main(process.argv[2]);
-  } catch {
-    value = {
+    return run();
+  } catch (error) {
+    return {
       complete: false,
       globalReferenceComplete: false,
       operationSufficient: false,
       categories: Object.fromEntries(kinds.map((k) => [k, false])),
       records: [],
-      errors: ['REFERENCE_NATIVE_QUERY_FAILED'],
+      errors: [
+        /^REFERENCE_[A-Z_]+$/.test(error.message)
+          ? error.message
+          : 'REFERENCE_NATIVE_QUERY_FAILED',
+      ],
       uncertainChildren: [],
+      referenceDiagnostic: referenceDiagnostic({
+        stage: 'probe-main',
+        codes: [error.message, 'REFERENCE_NATIVE_QUERY_FAILED'],
+        transportCode: error.code,
+        status: error.status,
+      }),
     };
   }
+}
+if (require.main === module) {
+  const value = cliResult(() => {
+    if (process.argv.length !== 3) fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
+    return main(process.argv[2]);
+  });
   process.stdout.write(JSON.stringify(value) + '\n');
 }
 module.exports = {
@@ -1769,4 +1908,6 @@ module.exports = {
   operationTaskContract,
   validateOperationTaskSummary,
   validateOperationStartupSummary,
+  referenceDiagnostic,
+  cliResult,
 };

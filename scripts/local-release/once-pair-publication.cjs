@@ -701,6 +701,10 @@ async function execute(policyFile, expected, options = {}) {
     )
   )
     fail('INSTALLATION_NOT_COMPLETE');
+  const continuationAuthority =
+    state.continuation || p.preCopyContinuation
+      ? once.validateContinuation(p, state, expected)
+      : null;
   const pointer = path.join(p.installRoot, 'active.json');
   // Pin each existing ancestor down to the audit parent, including intervening
   // directories below the policy root. A surviving leaf cannot own a new parent.
@@ -779,7 +783,8 @@ async function execute(policyFile, expected, options = {}) {
       fileHash(plan.file) !== expected ||
       hash(identity(plan.file)) !== hash(policyIdentity) ||
       hash(identity(ledger + '.adopted')) !== hash(sentinelIdentity) ||
-      fs.readFileSync(ledger + '.adopted', 'utf8') !== expected ||
+      fs.readFileSync(ledger + '.adopted', 'utf8') !==
+        (continuationAuthority?.sentinelConfigSha || expected) ||
       hash(once.codePins()) !== hash(p.codePins) ||
       fileHash(ledger) !== ledgerSha ||
       hash(identity(ledger)) !== hash(ledgerIdentity) ||
@@ -800,6 +805,15 @@ async function execute(policyFile, expected, options = {}) {
       hash(identity(u.database)) !== hash(u.databaseIdentity)
     )
       fail('OWNER_OR_INPUT_CHANGED');
+    if (continuationAuthority)
+      for (const pin of continuationAuthority.files)
+        if (
+          canonical(pin.path) !== pin.path ||
+          hash(identity(pin.path)) !== hash(pin.identity) ||
+          fileHash(pin.path) !== pin.sha256 ||
+          fs.lstatSync(pin.path).nlink !== 1
+        )
+          fail('CONTINUATION_AUTHORITY_CHANGED');
   };
   const save = () => {
     owner();

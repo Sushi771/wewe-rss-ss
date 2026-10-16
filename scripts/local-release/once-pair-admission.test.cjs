@@ -208,6 +208,342 @@ function patch(object, key, replacement, run) {
     object[key] = saved;
   }
 }
+function prepareContinuation(f) {
+  f.query = () => ({
+    ...f.facts(),
+    complete: false,
+    errors: ['REFERENCE_BACKGROUND_GAP_UNBOUND'],
+  });
+  assert.throws(() => f.apply(), /REFERENCE_QUERY_INCOMPLETE/);
+  delete f.query;
+  const ledger = path.join(f.registry, f.policy.scopeId + '.state.json'),
+    sentinel = ledger + '.adopted',
+    previous = path.join(f.base, 'previous-policy.json'),
+    outcome = path.join(f.base, 'failed-before-copy.json');
+  fs.copyFileSync(f.file, previous);
+  const spec = (at) => ({
+    path: at,
+    sha256: fileHash(at),
+    identity: identity(at),
+  });
+  const oldSha = fileHash(previous),
+    ledgerText = fs.readFileSync(ledger, 'utf8'),
+    sentinelText = fs.readFileSync(sentinel, 'utf8');
+  fs.writeFileSync(
+    outcome,
+    JSON.stringify({
+      outcome: 'HELD_BEFORE_PACKAGE_COPY',
+      executionPolicySha256: oldSha,
+    }),
+  );
+  const c = {
+    format: 1,
+    kind: 'verified-pre-copy-continuation-v1',
+    id: crypto.randomUUID(),
+    previousLedger: spec(ledger),
+    previousOutcome: spec(outcome),
+    previousPolicy: spec(previous),
+    previousSentinel: spec(sentinel),
+  };
+  f.policy.preCopyContinuation = c;
+  f.policy.approval.id += '-continuation';
+  f.policy.approval.continuation = {
+    id: c.id,
+    fromConfigSha: oldSha,
+    fromLedgerSha: c.previousLedger.sha256,
+    fromSentinelSha: c.previousSentinel.sha256,
+  };
+  return {
+    ledger,
+    sentinel,
+    previous,
+    outcome,
+    c,
+    ledgerText,
+    sentinelText,
+    receipt: admission.continuationPath(f.policy),
+    spec,
+    changeState(change) {
+      const envelope = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+      change(envelope.payload);
+      envelope.digest = crypto
+        .createHash('sha256')
+        .update(JSON.stringify(envelope.payload))
+        .digest('hex');
+      fs.writeFileSync(ledger, JSON.stringify(envelope));
+      c.previousLedger = spec(ledger);
+      f.policy.approval.continuation.fromLedgerSha = c.previousLedger.sha256;
+    },
+  };
+}
+test('pre-copy continuation archives exact old bytes, retains sentinel/credits and completes only one installation', () =>
+  fixture((f) => {
+    const b = prepareContinuation(f),
+      result = f.apply();
+    assert.equal(result.installedIds.length, 2);
+    const state = f.ledger(),
+      receipt = JSON.parse(fs.readFileSync(b.receipt, 'utf8'));
+    assert.equal(receipt.previousLedgerText, b.ledgerText);
+    assert.equal(fs.readFileSync(b.sentinel, 'utf8'), b.sentinelText);
+    assert.equal(receipt.priorFailedAttempts, 1);
+    assert.equal(state.continuationAttempt.status, 'installed');
+    assert.equal(state.continuationAttempt.priorFailedAttempts, 1);
+    assert.equal(state.configSha, fileHash(f.file));
+    assert.equal(
+      admission.validateContinuation(f.policy, state, fileHash(f.file))
+        .sentinelConfigSha,
+      b.sentinelText,
+    );
+    const receiptSha = fileHash(b.receipt);
+    assert.equal(f.apply().admission.newRuntimeCopies, 0);
+    assert.equal(fileHash(b.receipt), receiptSha);
+  }));
+for (const fault of [
+  'started',
+  'complete',
+  'copied',
+  'identity',
+  'outputs',
+  'claim',
+  'publication',
+  'credit',
+  'unknown-state',
+  'unknown-slot',
+  'existing-target',
+  'target-link',
+  'legacy-tmp',
+  'ledger-hash',
+  'ledger-identity',
+  'sentinel-hash',
+  'sentinel-identity',
+  'policy-hash',
+  'policy-identity',
+  'outcome-hash',
+  'nonallowed-policy',
+  'scope-changed',
+  'approval-binding',
+  'existing-receipt',
+  'concurrent-lock',
+  'metadata-limit',
+  'unsupported-old-protocol',
+])
+  test('pre-copy continuation refuses ' + fault, () =>
+    fixture((f) => {
+      const b = prepareContinuation(f);
+      if (['started', 'complete', 'copied'].includes(fault))
+        b.changeState((s) => (s.slots[0][fault] = true));
+      if (fault === 'identity')
+        b.changeState((s) => (s.slots[0].identity = ['1', '2', '3']));
+      if (fault === 'outputs')
+        b.changeState((s) =>
+          s.outputs.push({ path: path.join(f.root, 'candidate') }),
+        );
+      if (fault === 'claim')
+        b.changeState((s) => (s.claim = { id: 'unknown' }));
+      if (fault === 'publication')
+        b.changeState((s) => (s.publication = { backupAttempts: 0 }));
+      if (fault === 'credit') b.changeState((s) => (s.backupAttempts = 1));
+      if (fault === 'unknown-state')
+        b.changeState((s) => (s.unreviewed = false));
+      if (fault === 'unknown-slot')
+        b.changeState((s) => (s.slots[0].unreviewed = false));
+      if (fault === 'existing-target')
+        fs.mkdirSync(path.join(f.root, 'candidate'));
+      if (fault === 'target-link')
+        fs.symlinkSync(
+          path.join(f.root, 'current'),
+          path.join(f.root, 'candidate'),
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      if (fault === 'legacy-tmp')
+        fs.writeFileSync(b.ledger + '.foreign.tmp', 'foreign');
+      if (fault === 'ledger-hash') fs.appendFileSync(b.ledger, ' ');
+      if (fault === 'ledger-identity') {
+        fs.renameSync(b.ledger, b.ledger + '.prior');
+        fs.writeFileSync(b.ledger, b.ledgerText);
+      }
+      if (fault === 'sentinel-hash')
+        fs.writeFileSync(b.sentinel, 'f'.repeat(64));
+      if (fault === 'sentinel-identity') {
+        fs.renameSync(b.sentinel, b.sentinel + '.prior');
+        fs.writeFileSync(b.sentinel, b.sentinelText);
+      }
+      if (fault === 'policy-hash') fs.appendFileSync(b.previous, ' ');
+      if (fault === 'policy-identity') {
+        const text = fs.readFileSync(b.previous);
+        fs.renameSync(b.previous, b.previous + '.prior');
+        fs.writeFileSync(b.previous, text);
+      }
+      if (fault === 'outcome-hash') fs.appendFileSync(b.outcome, ' ');
+      if (fault === 'nonallowed-policy') f.policy.unreviewed = 'changed';
+      if (fault === 'scope-changed') f.policy.scopeId = crypto.randomUUID();
+      if (fault === 'approval-binding')
+        f.policy.approval.continuation.fromLedgerSha = 'f'.repeat(64);
+      if (fault === 'existing-receipt')
+        fs.writeFileSync(b.receipt, 'partial or foreign receipt');
+      if (fault === 'concurrent-lock')
+        fs.writeFileSync(
+          path.join(f.registry, f.policy.scopeId + '.lock'),
+          'foreign lock',
+        );
+      if (fault === 'metadata-limit')
+        fs.writeFileSync(
+          path.join(f.root, '.release-lifecycle.json'),
+          Buffer.alloc(admission.LIMITS.metadata),
+        );
+      if (fault === 'unsupported-old-protocol') {
+        const old = JSON.parse(fs.readFileSync(b.previous, 'utf8'));
+        old.codePins['lib.cjs'] = 'f'.repeat(64);
+        fs.writeFileSync(b.previous, JSON.stringify(old));
+        b.c.previousPolicy = b.spec(b.previous);
+        f.policy.approval.continuation.fromConfigSha =
+          b.c.previousPolicy.sha256;
+      }
+      assert.throws(() => f.apply());
+      // No rejected transfer may allocate the other package.
+      assert(!fs.existsSync(path.join(f.root, 'rollback')));
+      if (!['existing-target', 'target-link'].includes(fault))
+        assert(!fs.existsSync(path.join(f.root, 'candidate')));
+      if (fault === 'existing-receipt')
+        assert.equal(
+          fs.readFileSync(b.receipt, 'utf8'),
+          'partial or foreign receipt',
+        );
+    }),
+  );
+for (const fault of [
+  'receipt-replaced',
+  'receipt-in-place',
+  'receipt-hardlinked',
+  'legacy-tmp-after-install',
+  'second-transfer-approval',
+])
+  test('completed continuation rejects authority change ' + fault, () =>
+    fixture((f) => {
+      const b = prepareContinuation(f);
+      f.apply();
+      const bytes = fs.readFileSync(b.receipt);
+      if (fault === 'receipt-replaced') {
+        fs.renameSync(b.receipt, b.receipt + '.prior');
+        fs.writeFileSync(b.receipt, bytes);
+      }
+      if (fault === 'receipt-in-place') fs.appendFileSync(b.receipt, ' ');
+      if (fault === 'receipt-hardlinked')
+        fs.linkSync(b.receipt, path.join(f.base, 'receipt-alias'));
+      if (fault === 'legacy-tmp-after-install')
+        fs.writeFileSync(b.ledger + '.foreign.tmp', 'foreign');
+      if (fault === 'second-transfer-approval') {
+        f.policy.preCopyContinuation.id = crypto.randomUUID();
+        f.policy.approval.id += '-again';
+        f.policy.approval.continuation.id = f.policy.preCopyContinuation.id;
+      }
+      assert.throws(() => f.apply());
+      assert(fs.existsSync(path.join(f.root, 'candidate')));
+    }),
+  );
+test('pre-copy continuation spent before failed query cannot replay or receive another approval', () =>
+  fixture((f) => {
+    const b = prepareContinuation(f);
+    f.query = () => ({
+      ...f.facts(),
+      complete: false,
+      errors: ['REFERENCE_BACKGROUND_GAP_UNBOUND'],
+    });
+    assert.throws(() => f.apply(), /REFERENCE_QUERY_INCOMPLETE/);
+    const bytes = fs.readFileSync(b.receipt),
+      state = f.ledger();
+    assert.equal(state.continuationAttempt.status, 'held');
+    assert(state.slots.every((s) => !s.started));
+    delete f.query;
+    assert.throws(() => f.apply(), /CONTINUATION_ALREADY_CONSUMED/);
+    assert.deepEqual(fs.readFileSync(b.receipt), bytes);
+  }));
+for (const fault of [
+  'receipt-create',
+  'receipt-partial',
+  'receipt-checksum',
+  'before-ledger-commit',
+  'after-ledger-commit',
+  'during-install',
+])
+  test('pre-copy continuation conservatively holds interrupted ' + fault, () =>
+    fixture((f) => {
+      const b = prepareContinuation(f),
+        write = fs.writeFileSync,
+        open = fs.openSync,
+        read = fs.readFileSync,
+        rename = fs.renameSync;
+      let receiptFd,
+        created = false;
+      fs.openSync = function (at, ...args) {
+        if (at === b.receipt) {
+          if (fault === 'receipt-create')
+            throw Error('SIMULATED_CREATE_FAILURE');
+          receiptFd = open.call(this, at, ...args);
+          return receiptFd;
+        }
+        return open.call(this, at, ...args);
+      };
+      fs.writeFileSync = function (at, value, ...args) {
+        if (at === receiptFd) {
+          created = true;
+          if (fault === 'receipt-checksum')
+            return write.call(this, at, 'checksum mismatch', ...args);
+          if (fault === 'receipt-partial') {
+            write.call(this, at, 'partial receipt');
+            throw Error('SIMULATED_PARTIAL_WRITE');
+          }
+        }
+        return write.call(this, at, value, ...args);
+      };
+      fs.readFileSync = function (at, ...args) {
+        return read.call(this, at, ...args);
+      };
+      fs.renameSync = function (from, to) {
+        if (fault === 'before-ledger-commit' && to === b.ledger && created)
+          throw Error('SIMULATED_COMMIT_FAILURE');
+        return rename.call(this, from, to);
+      };
+      if (fault === 'after-ledger-commit')
+        f.query = () => {
+          throw Error('SIMULATED_AFTER_COMMIT');
+        };
+      if (fault === 'during-install') {
+        const mkdir = fs.mkdirSync;
+        fs.mkdirSync = function (at, ...args) {
+          if (at === path.join(f.root, 'candidate'))
+            throw Error('SIMULATED_INSTALL_FAILURE');
+          return mkdir.call(this, at, ...args);
+        };
+        try {
+          assert.throws(() => f.apply());
+        } finally {
+          fs.mkdirSync = mkdir;
+        }
+      } else {
+        try {
+          assert.throws(() => f.apply());
+        } finally {
+          fs.openSync = open;
+          fs.writeFileSync = write;
+          fs.readFileSync = read;
+          fs.renameSync = rename;
+        }
+      }
+      fs.openSync = open;
+      fs.writeFileSync = write;
+      fs.readFileSync = read;
+      fs.renameSync = rename;
+      delete f.query;
+      const receiptBytes = fs.existsSync(b.receipt)
+        ? fs.readFileSync(b.receipt)
+        : null;
+      assert.throws(() => f.apply());
+      if (receiptBytes)
+        assert.deepEqual(fs.readFileSync(b.receipt), receiptBytes);
+      assert.equal(fs.readFileSync(b.sentinel, 'utf8'), b.sentinelText);
+    }),
+  );
 test('review performs no adoption and does not require approval', () =>
   fixture((f) => {
     f.policy.approval.confirmed = false;
@@ -218,6 +554,42 @@ test('review performs no adoption and does not require approval', () =>
     assert.throws(
       () => admission.main(['--apply', f.file, f.pin()]),
       /EXPLICIT_APPROVAL_REQUIRED/,
+    );
+  }));
+test('admission failure before allocation retains inner query diagnostic for CLI without granting effects', () =>
+  fixture((f) => {
+    f.query = () => ({
+      complete: false,
+      operationSufficient: false,
+      globalReferenceComplete: false,
+      categories: { processes: false },
+      records: [],
+      errors: ['REFERENCE_BACKGROUND_GAP_UNBOUND'],
+      uncertainChildren: [],
+      referenceDiagnostic: {
+        stage: 'processes',
+        codes: ['REFERENCE_BACKGROUND_GAP_UNBOUND'],
+        stderr: 'SECRET',
+        commandLine: 'SECRET',
+      },
+    });
+    let error;
+    try {
+      f.apply();
+    } catch (e) {
+      error = e;
+    }
+    assert.equal(error.message, 'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    const output = admission.formatCliError(error);
+    assert(output.includes('REFERENCE_BACKGROUND_GAP_UNBOUND'));
+    assert(output.includes('processes'));
+    assert(!output.includes('SECRET'));
+    assert(!fs.existsSync(path.join(f.root, 'candidate')));
+    assert(!fs.existsSync(path.join(f.root, 'rollback')));
+    assert(f.ledger().slots.every((s) => !s.started && !s.complete));
+    assert.equal(
+      fs.readFileSync(path.join(f.root, 'business.db'), 'utf8'),
+      'synthetic-business',
     );
   }));
 test('real CLI dispatch installs only frozen pair, keeps four protected IDs and three managed roles', () =>

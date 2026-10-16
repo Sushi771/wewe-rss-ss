@@ -71,6 +71,253 @@ function codePins() {
     PIN_FILES.map((name) => [name, fileHash(path.join(__dirname, name))]),
   );
 }
+const continuationKind = 'verified-pre-copy-continuation-v1';
+// Reviewed c438798 protocol writes publication/credit intent before business
+// effects. Arbitrary historical code pins cannot establish unused credits.
+const legacyPreCopyPins =
+  '377a9e77c6096bc0c46ee1cdef6289eb6be03f046add701ad1154649f346cfec';
+const continuationPath = (p) =>
+  path.join(p.registryDirectory, p.scopeId + '.state.json.continuation.json');
+function pinnedDocument(spec, exactPath, raw = false) {
+  if (
+    !spec ||
+    Object.keys(spec).sort().join('|') !== 'identity|path|sha256' ||
+    !Array.isArray(spec.identity) ||
+    spec.identity.length !== 3 ||
+    (exactPath && spec.path !== exactPath) ||
+    canonical(spec.path) !== spec.path ||
+    !/^[a-f0-9]{64}$/.test(spec.sha256 || '') ||
+    hash(fileIdentity(spec.path)) !== hash(spec.identity) ||
+    fs.lstatSync(spec.path).nlink !== 1 ||
+    fileHash(spec.path) !== spec.sha256
+  )
+    fail('CONTINUATION_INPUT_PIN');
+  const bytes = fs.readFileSync(spec.path);
+  if (
+    bytes.length > LIMITS.metadata ||
+    crypto.createHash('sha256').update(bytes).digest('hex') !== spec.sha256 ||
+    hash(fileIdentity(spec.path)) !== hash(spec.identity) ||
+    canonical(spec.path) !== spec.path ||
+    fileHash(spec.path) !== spec.sha256
+  )
+    fail('CONTINUATION_INPUT_CHANGED');
+  return raw ? bytes.toString('utf8') : JSON.parse(bytes.toString('utf8'));
+}
+function continuationProjection(policy) {
+  const q = structuredClone(policy);
+  delete q.preCopyContinuation;
+  delete q.codePins;
+  delete q.probe;
+  if (q.approval) {
+    delete q.approval.id;
+    delete q.approval.confirmed;
+    delete q.approval.receipt;
+    delete q.approval.continuation;
+  }
+  if (q.windowsReferences) {
+    delete q.windowsReferences.collectorSha256;
+    delete q.windowsReferences.collectorIdentitySha256;
+    if (q.windowsReferences.operationCoverage?.processCoverage)
+      delete q.windowsReferences.operationCoverage.processCoverage
+        .backgroundGaps;
+  }
+  return q;
+}
+function preCopyState(state, p, fromSha) {
+  if (
+    !state ||
+    Object.keys(state).some(
+      (k) =>
+        ![
+          'format',
+          'once',
+          'configSha',
+          'outputs',
+          'claim',
+          'slots',
+          'complete',
+        ].includes(k),
+    ) ||
+    state.format !== 1 ||
+    state.once !== MODE ||
+    state.configSha !== fromSha ||
+    state.claim !== null ||
+    !Array.isArray(state.outputs) ||
+    state.outputs.length ||
+    (state.complete !== undefined && state.complete !== false) ||
+    !Array.isArray(state.slots) ||
+    state.slots.length !== 2 ||
+    state.slots.some(
+      (s) =>
+        Object.keys(s).some(
+          (k) =>
+            ![
+              'id',
+              'path',
+              'started',
+              'complete',
+              'identity',
+              'copied',
+            ].includes(k),
+        ) ||
+        s.started !== false ||
+        s.complete !== false ||
+        s.identity !== null ||
+        (s.copied !== undefined && s.copied !== false) ||
+        !p.pair.some((t) => t.id === s.id && t.target === s.path),
+    ) ||
+    new Set(state.slots.map((s) => s.id)).size !== 2
+  )
+    fail('CONTINUATION_NOT_PRE_COPY');
+}
+function continuationPolicy(p, expected) {
+  const c = p.preCopyContinuation;
+  if (
+    !c ||
+    c.format !== 1 ||
+    c.kind !== continuationKind ||
+    !/^[a-f0-9-]{36}$/.test(c.id || '') ||
+    Object.keys(c).sort().join('|') !==
+      [
+        'format',
+        'id',
+        'kind',
+        'previousLedger',
+        'previousOutcome',
+        'previousPolicy',
+        'previousSentinel',
+      ].join('|')
+  )
+    fail('CONTINUATION_CONTRACT');
+  const old = pinnedDocument(c.previousPolicy);
+  if (
+    c.previousPolicy.sha256 === expected ||
+    old.preCopyContinuation ||
+    old.approval?.confirmed !== true ||
+    p.approval?.confirmed !== true ||
+    !p.approval.id ||
+    p.approval.id === old.approval.id ||
+    hash(p.approval.continuation) !==
+      hash({
+        id: c.id,
+        fromConfigSha: c.previousPolicy.sha256,
+        fromLedgerSha: c.previousLedger.sha256,
+        fromSentinelSha: c.previousSentinel.sha256,
+      }) ||
+    hash(continuationProjection(old)) !== hash(continuationProjection(p))
+  )
+    fail('CONTINUATION_POLICY_DIFFERENCE');
+  const oldRoot = path.dirname(old.probe.path);
+  const oldPins = hash(PIN_FILES.map((name) => [name, old.codePins?.[name]])),
+    currentPins = codePins();
+  if (
+    oldPins !== legacyPreCopyPins &&
+    oldPins !== hash(PIN_FILES.map((name) => [name, currentPins[name]]))
+  )
+    fail('CONTINUATION_UNSUPPORTED_OLD_PROTOCOL');
+  if (
+    Object.keys(old.codePins || {})
+      .sort()
+      .join('|') !== [...PIN_FILES].sort().join('|') ||
+    old.probe.sha256 !== old.codePins['windows-release-references.cjs']
+  )
+    fail('CONTINUATION_OLD_CODE_PIN');
+  for (const name of PIN_FILES) {
+    const at = path.join(oldRoot, name);
+    if (canonical(at) !== at || fileHash(at) !== old.codePins[name])
+      fail('CONTINUATION_OLD_CODE_PIN');
+  }
+  const outcome = pinnedDocument(c.previousOutcome);
+  // Historical outcome is pinned evidence, never proof of unused credits by
+  // itself. Old code protocol + exact pre-copy state/targets provide that proof.
+  if (
+    outcome.outcome !== 'HELD_BEFORE_PACKAGE_COPY' ||
+    outcome.executionPolicySha256 !== c.previousPolicy.sha256
+  )
+    fail('CONTINUATION_FAILURE_EVIDENCE');
+  return { c, old };
+}
+function validateContinuation(p, state, expected) {
+  if (
+    p.mode !== MODE ||
+    state.format !== 1 ||
+    state.once !== MODE ||
+    state.configSha !== expected
+  )
+    fail('CONTINUATION_STATE_BINDING');
+  if (!state.continuation) {
+    if (p.preCopyContinuation) fail('CONTINUATION_STATE_MISSING');
+    return null;
+  }
+  const { c } = continuationPolicy(p, expected),
+    s = state.continuation,
+    at = continuationPath(p);
+  if (
+    fs
+      .readdirSync(p.registryDirectory)
+      .some(
+        (name) =>
+          name.startsWith(p.scopeId + '.state.json.') &&
+          ![p.scopeId + '.state.json.adopted', path.basename(at)].includes(
+            name,
+          ),
+      )
+  )
+    fail('CONTINUATION_FOREIGN_CONTROL');
+  if (
+    Object.keys(s).sort().join('|') !==
+      ['id', 'receiptIdentity', 'receiptSha256'].join('|') ||
+    s.id !== c.id ||
+    hash(fileIdentity(at)) !== hash(s.receiptIdentity) ||
+    fileHash(at) !== s.receiptSha256 ||
+    canonical(at) !== at ||
+    fs.lstatSync(at).nlink !== 1
+  )
+    fail('CONTINUATION_RECEIPT_CHANGED');
+  const r = pinnedDocument(
+    { path: at, sha256: s.receiptSha256, identity: s.receiptIdentity },
+    at,
+  );
+  if (
+    r.format !== 1 ||
+    r.kind !== continuationKind ||
+    r.id !== c.id ||
+    r.fromConfigSha !== c.previousPolicy.sha256 ||
+    r.toConfigSha !== expected ||
+    r.approvalId !== p.approval.id ||
+    hash(r.previousLedger) !== hash(c.previousLedger) ||
+    hash(r.previousSentinel) !== hash(c.previousSentinel) ||
+    hash(r.previousPolicy) !== hash(c.previousPolicy) ||
+    hash(r.previousOutcome) !== hash(c.previousOutcome) ||
+    typeof r.previousLedgerText !== 'string' ||
+    crypto.createHash('sha256').update(r.previousLedgerText).digest('hex') !==
+      c.previousLedger.sha256 ||
+    r.previousSentinelText !== c.previousPolicy.sha256
+  )
+    fail('CONTINUATION_RECEIPT_INVALID');
+  const envelope = JSON.parse(r.previousLedgerText);
+  if (envelope.digest !== hash(envelope.payload))
+    fail('CONTINUATION_HISTORY_CORRUPT');
+  preCopyState(envelope.payload, p, c.previousPolicy.sha256);
+  pinnedDocument(
+    c.previousSentinel,
+    path.join(p.registryDirectory, p.scopeId + '.state.json.adopted'),
+    true,
+  );
+  if (
+    fs.readFileSync(c.previousSentinel.path, 'utf8') !== r.previousSentinelText
+  )
+    fail('CONTINUATION_SENTINEL_CHANGED');
+  return {
+    sentinelConfigSha: r.fromConfigSha,
+    files: [
+      { path: at, sha256: s.receiptSha256, identity: s.receiptIdentity },
+      c.previousPolicy,
+      c.previousOutcome,
+      c.previousSentinel,
+    ],
+  };
+}
 function checkPlan(
   policyFile,
   expected,
@@ -366,6 +613,10 @@ function withAdmission(policyFile, expected, action, options = {}) {
     closed = false,
     lastReceipt,
     allocatedThisCall = 0;
+  let sentinelConfigSha = expected,
+    continuationAuthority = null,
+    continuationStarted = false,
+    continuationCommitted = false;
   const descriptors = new Map(),
     ownedMetadata = new Set();
   const metadataPath = (at) =>
@@ -376,20 +627,19 @@ function withAdmission(policyFile, expected, action, options = {}) {
     ) &&
       path.dirname(at) === p.installRoot);
   const controlFiles = () => [
-    lock,
-    ledger,
-    sentinel,
-    ...fs
-      .readdirSync(p.registryDirectory)
-      .filter(
-        (name) =>
-          name.startsWith(p.scopeId + '.state.json.') && name.endsWith('.tmp'),
-      )
-      .map((name) => path.join(p.registryDirectory, name)),
-    ...fs
-      .readdirSync(p.installRoot)
-      .filter((name) => metadataPath(path.join(p.installRoot, name)))
-      .map((name) => path.join(p.installRoot, name)),
+    ...new Set([
+      lock,
+      ledger,
+      sentinel,
+      ...fs
+        .readdirSync(p.registryDirectory)
+        .filter((name) => name.startsWith(p.scopeId + '.state.json.'))
+        .map((name) => path.join(p.registryDirectory, name)),
+      ...fs
+        .readdirSync(p.installRoot)
+        .filter((name) => metadataPath(path.join(p.installRoot, name)))
+        .map((name) => path.join(p.installRoot, name)),
+    ]),
   ];
   const metadataUsed = () =>
     controlFiles().reduce((sum, file) => {
@@ -421,8 +671,21 @@ function withAdmission(policyFile, expected, action, options = {}) {
     )
       fail('SENTINEL_REPLACED');
     if (!sentinelIdentity && present(sentinel)) fail('UNEXPECTED_SENTINEL');
-    if (present(sentinel) && fs.readFileSync(sentinel, 'utf8') !== expected)
+    if (
+      present(sentinel) &&
+      fs.readFileSync(sentinel, 'utf8') !== sentinelConfigSha
+    )
       fail('SENTINEL_CHANGED');
+    if (continuationAuthority)
+      for (const pin of continuationAuthority.files) {
+        if (
+          canonical(pin.path) !== pin.path ||
+          hash(fileIdentity(pin.path)) !== hash(pin.identity) ||
+          fileHash(pin.path) !== pin.sha256 ||
+          fs.lstatSync(pin.path).nlink !== 1
+        )
+          fail('CONTINUATION_AUTHORITY_CHANGED');
+      }
   };
   function save() {
     owner();
@@ -842,6 +1105,10 @@ function withAdmission(policyFile, expected, action, options = {}) {
         }
         state.claim = null;
         state.complete = true;
+        if (state.continuationAttempt?.nonce === nonce) {
+          state.continuationAttempt.status = 'installed';
+          state.continuationAttempt.finishedAtUtc = new Date().toISOString();
+        }
         save();
         lastReceipt = {
           installedIds: state.slots.map((row) => row.id),
@@ -882,39 +1149,166 @@ function withAdmission(policyFile, expected, action, options = {}) {
       if (
         !state ||
         envelope.digest !== hash(state) ||
-        state.configSha !== expected ||
         state.once !== MODE ||
         state.claim ||
         state.slots?.length !== 2
       )
         fail('INTERRUPTED_OR_FOREIGN_LEDGER');
+      let continued = false;
+      if (state.configSha !== expected && p.preCopyContinuation) {
+        const { c } = continuationPolicy(p, expected),
+          receipt = continuationPath(p);
+        if (present(receipt)) fail('CONTINUATION_ALREADY_CONSUMED');
+        const previousLedgerText = pinnedDocument(
+            c.previousLedger,
+            ledger,
+            true,
+          ),
+          sourceEnvelope = JSON.parse(previousLedgerText);
+        if (
+          sourceEnvelope.digest !== hash(sourceEnvelope.payload) ||
+          hash(state) !== hash(sourceEnvelope.payload)
+        )
+          fail('CONTINUATION_SOURCE_CHANGED');
+        const oldSentinel = pinnedDocument(c.previousSentinel, sentinel, true);
+        if (
+          oldSentinel !== c.previousPolicy.sha256 ||
+          state.configSha !== c.previousPolicy.sha256
+        )
+          fail('CONTINUATION_SOURCE_CONFIG');
+        preCopyState(state, p, c.previousPolicy.sha256);
+        if (
+          pair.some((item) => present(item.target)) ||
+          (p.publication && present(p.publication.auditRoot)) ||
+          fs
+            .readdirSync(p.registryDirectory)
+            .some(
+              (name) =>
+                name.startsWith(p.scopeId + '.state.json.') &&
+                name !== path.basename(sentinel),
+            )
+        )
+          fail('CONTINUATION_TARGET_OR_CONTROL_EXISTS');
+        if (
+          p.publication &&
+          (canonical(p.publication.database) !== p.publication.database ||
+            hash(fileIdentity(p.publication.database)) !==
+              hash(p.publication.databaseIdentity))
+        )
+          fail('CONTINUATION_DATABASE_CHANGED');
+        if (
+          fileHash(path.join(p.installRoot, 'active.json')) !== p.pointerSha256
+        )
+          fail('CONTINUATION_POINTER_CHANGED');
+        ledgerIdentity = c.previousLedger.identity;
+        ledgerSha = c.previousLedger.sha256;
+        sentinelIdentity = fileIdentity(sentinel);
+        sentinelConfigSha = oldSentinel;
+        const receiptValue = {
+          format: 1,
+          kind: continuationKind,
+          id: c.id,
+          fromConfigSha: c.previousPolicy.sha256,
+          toConfigSha: expected,
+          approvalId: p.approval.id,
+          previousPolicy: c.previousPolicy,
+          previousLedger: c.previousLedger,
+          previousSentinel: c.previousSentinel,
+          previousOutcome: c.previousOutcome,
+          previousLedgerText,
+          previousSentinelText: oldSentinel,
+          createdAtUtc: new Date().toISOString(),
+          priorFailedAttempts: 1,
+          priorFailedAttemptCountComplete: false,
+        };
+        const text = JSON.stringify(receiptValue);
+        if (
+          Buffer.byteLength(text) > 65536 ||
+          metadataUsed() +
+            Math.ceil(Buffer.byteLength(text) / plan.metadataBlock) *
+              plan.metadataBlock +
+            plan.metadataBlock >
+            LIMITS.metadata
+        )
+          fail('METADATA_LIMIT');
+        owner();
+        continuationStarted = true;
+        const fd = fs.openSync(receipt, 'wx', 0o600);
+        try {
+          fs.writeFileSync(fd, text);
+          fs.fsyncSync(fd);
+        } finally {
+          fs.closeSync(fd);
+        }
+        const receiptPin = {
+          path: receipt,
+          sha256: crypto.createHash('sha256').update(text).digest('hex'),
+          identity: fileIdentity(receipt),
+        };
+        if (fileHash(receipt) !== receiptPin.sha256)
+          fail('CONTINUATION_RECEIPT_CHANGED');
+        continuationAuthority = {
+          sentinelConfigSha: oldSentinel,
+          files: [
+            receiptPin,
+            c.previousPolicy,
+            c.previousOutcome,
+            c.previousSentinel,
+          ],
+        };
+        owner();
+        state.configSha = expected;
+        state.continuation = {
+          id: c.id,
+          receiptSha256: receiptPin.sha256,
+          receiptIdentity: receiptPin.identity,
+        };
+        state.continuationAttempt = {
+          nonce,
+          startedAtUtc: new Date().toISOString(),
+          status: 'running',
+          priorFailedAttempts: 1,
+          priorFailedAttemptCountComplete: false,
+        };
+        save();
+        continuationCommitted = true;
+        continued = true;
+      }
+      if (state.configSha !== expected) fail('INTERRUPTED_OR_FOREIGN_LEDGER');
+      if (!continued && state.continuation) {
+        continuationAuthority = validateContinuation(p, state, expected);
+        sentinelConfigSha = continuationAuthority.sentinelConfigSha;
+        if (!state.complete) fail('CONTINUATION_ALREADY_CONSUMED');
+      }
       if (
-        !state.complete ||
-        state.outputs?.length !== 2 ||
-        pair.some(
-          (item) =>
-            !state.slots.some(
-              (slot) =>
-                slot.id === item.id &&
-                slot.path === item.target &&
-                slot.complete &&
-                hash(identity(slot.path)) === hash(slot.identity),
-            ),
-        ) ||
-        state.slots.some(
-          (slot) =>
-            !pair.some(
-              (item) => item.id === slot.id && item.target === slot.path,
-            ),
-        ) ||
-        !present(sentinel) ||
-        fs.readFileSync(sentinel, 'utf8') !== expected
+        !continued &&
+        (!state.complete ||
+          state.outputs?.length !== 2 ||
+          pair.some(
+            (item) =>
+              !state.slots.some(
+                (slot) =>
+                  slot.id === item.id &&
+                  slot.path === item.target &&
+                  slot.complete &&
+                  hash(identity(slot.path)) === hash(slot.identity),
+              ),
+          ) ||
+          state.slots.some(
+            (slot) =>
+              !pair.some(
+                (item) => item.id === slot.id && item.target === slot.path,
+              ),
+          ) ||
+          !present(sentinel) ||
+          fs.readFileSync(sentinel, 'utf8') !== sentinelConfigSha)
       )
         fail('INVALID_COMPLETED_LEDGER');
       ledgerIdentity = fileIdentity(ledger);
       ledgerSha = fileHash(ledger);
       sentinelIdentity = fileIdentity(sentinel);
     } else {
+      if (p.preCopyContinuation) fail('CONTINUATION_SOURCE_MISSING');
       if (
         present(sentinel) ||
         fs
@@ -968,6 +1362,9 @@ function withAdmission(policyFile, expected, action, options = {}) {
       }
     });
   } catch (error) {
+    // A failed/uncertain consumption write cannot be retried with a new ID.
+    // Keep the current exclusive lock and any partial fixed receipt as evidence.
+    if (continuationStarted && !continuationCommitted) throw error;
     let stillOwned = false;
     try {
       owner();
@@ -976,6 +1373,17 @@ function withAdmission(policyFile, expected, action, options = {}) {
       /* Preserve foreign/uncertain authority, including the lock. */
     }
     if (stillOwned) {
+      if (state?.continuationAttempt?.nonce === nonce) {
+        state.continuationAttempt.status = 'held';
+        state.continuationAttempt.finishedAtUtc = new Date().toISOString();
+        state.continuationAttempt.error =
+          require('./windows-release-references.cjs').referenceDiagnostic({
+            stage: 'admission',
+            codes: [error.message],
+            ...error.referenceDiagnostic,
+          });
+        save();
+      }
       if (
         state?.claim &&
         !state.slots.some((row) => row.started && !row.complete)
@@ -1049,13 +1457,44 @@ function main(argv) {
     );
   });
 }
-module.exports = { LIMITS, MODE, codePins, checkPlan, withAdmission, main };
+function formatCliError(error) {
+  const code =
+    /^(REFERENCE|RELEASE_SCOPE|ONCE_PAIR|ONCE_PUBLICATION)_[A-Z_]+$/.test(
+      error.message,
+    )
+      ? error.message
+      : 'ONCE_PAIR_FAILED';
+  return (
+    code +
+    '\n' +
+    (error.referenceDiagnostic
+      ? 'REFERENCE_DIAGNOSTIC ' +
+        JSON.stringify(
+          require('./windows-release-references.cjs').referenceDiagnostic(
+            error.referenceDiagnostic,
+          ),
+        ) +
+        '\n'
+      : '')
+  );
+}
+module.exports = {
+  LIMITS,
+  MODE,
+  codePins,
+  checkPlan,
+  withAdmission,
+  main,
+  formatCliError,
+  validateContinuation,
+  continuationPath,
+};
 if (require.main === module) {
   Promise.resolve()
     .then(() => main(process.argv.slice(2)))
     .then((result) => process.stdout.write(JSON.stringify(result) + '\n'))
     .catch((error) => {
-      process.stderr.write(error.message + '\n');
+      process.stderr.write(formatCliError(error));
       process.exitCode = 1;
     });
 }

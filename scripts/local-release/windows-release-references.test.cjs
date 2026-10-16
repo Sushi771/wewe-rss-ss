@@ -229,6 +229,71 @@ function reject(f, expected) {
   assert.equal(r.complete, false);
   assert(r.errors.includes(expected), JSON.stringify(r));
 }
+test('failed native validation preserves bounded inner codes/stage through scope and admission CLI formatting', () =>
+  fixture((f) => {
+    f.native.complete = false;
+    f.native.errors = [
+      'REFERENCE_NATIVE_DEADLINE',
+      'SECRET C:\\private\\secret --token=hidden',
+    ];
+    f.native.failureContext = {
+      stage: 'operation-port-after',
+      errorId: 'UnauthorizedAccessException',
+      category: 'PermissionDenied',
+      message: 'SECRET_TOKEN',
+      path: 'C:\\private\\secret',
+    };
+    const r = f.run();
+    assert.deepEqual(r.errors, ['REFERENCE_NATIVE_QUERY_INCOMPLETE']);
+    assert(r.referenceDiagnostic.codes.includes('REFERENCE_NATIVE_DEADLINE'));
+    assert.equal(r.referenceDiagnostic.nativeStage, 'operation-port-after');
+    let held;
+    try {
+      require('./release-scope.cjs').validateReferences(r, f.policy, 'install');
+    } catch (e) {
+      held = e;
+    }
+    assert.equal(held.message, 'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    const output = require('./once-pair-admission.cjs').formatCliError(held);
+    assert(output.includes('REFERENCE_NATIVE_DEADLINE'));
+    assert(output.includes('native-validation'));
+    assert(!/SECRET|private|hidden|token|message/.test(output));
+  }));
+test('probe CLI catch preserves safe pre-parser errors and transport details without stderr/command/stack', () => {
+  const api = require('./windows-release-references.cjs');
+  const pinned = api.cliResult(() => {
+    throw new Error('REFERENCE_COLLECTOR_PIN_CHANGED');
+  });
+  assert.deepEqual(pinned.errors, ['REFERENCE_COLLECTOR_PIN_CHANGED']);
+  const error = Object.assign(
+    new Error('SECRET C:\\private\\secret --token=hidden'),
+    {
+      code: 'ETIMEDOUT',
+      status: 1,
+      stderr: 'PRIVATE_STDERR',
+      stdout: 'PRIVATE_STDOUT',
+      cmd: 'PRIVATE_CMD',
+    },
+  );
+  const failed = api.cliResult(() => {
+    throw error;
+  });
+  assert.equal(failed.referenceDiagnostic.transportCode, 'ETIMEDOUT');
+  assert.equal(failed.referenceDiagnostic.status, 1);
+  assert(!/SECRET|PRIVATE|private|token|stack/.test(JSON.stringify(failed)));
+  const summary = api.referenceDiagnostic({
+    stage: 'C:\\private',
+    codes: Array(100)
+      .fill('REFERENCE_BACKGROUND_GAP_UNBOUND')
+      .concat(['PRIVATE PAYLOAD']),
+    categories: { processes: false, secret: 'TOKEN' },
+    stderr: 'SECRET',
+  });
+  assert.equal(summary.stage, 'unknown');
+  assert.deepEqual(summary.codes, ['REFERENCE_BACKGROUND_GAP_UNBOUND']);
+  assert.equal(Object.keys(summary.categories).length, 6);
+  assert(!JSON.stringify(summary).includes('TOKEN'));
+});
 
 function operationFixture(f) {
   const source = path.join(f.base, 'sources');
@@ -460,6 +525,104 @@ for (const fault of [
       assert.equal(f.run().operationSufficient, false, JSON.stringify(f.run()));
     }),
   );
+test('final probe recognizes the same continuation anchor only for the currently locked incomplete attempt', () =>
+  fixture((f) => {
+    processFixture(f);
+    const admission = require('./once-pair-admission.cjs');
+    f.policy.codePins = admission.codePins();
+    f.policy.probe = f.pin(
+      path.join(__dirname, 'windows-release-references.cjs'),
+    );
+    Object.assign(f.policy.approval, { confirmed: true, id: 'old-execution' });
+    const previous = path.join(f.base, 'previous-policy.json'),
+      outcome = path.join(f.base, 'old-outcome.json'),
+      sentinel = f.ledger + '.adopted';
+    f.write(previous, f.policy);
+    const oldSha = f.pin(previous).sha256;
+    const oldState = {
+      format: 1,
+      once: 'once-frozen-pair-v1',
+      configSha: oldSha,
+      outputs: [],
+      claim: null,
+      slots: f.policy.pair.map((x) => ({
+        id: x.id,
+        path: x.target,
+        started: false,
+        complete: false,
+        identity: null,
+      })),
+    };
+    const oldText = JSON.stringify({
+      payload: oldState,
+      digest: hash(oldState),
+    });
+    f.write(f.ledger, oldText);
+    f.write(sentinel, oldSha);
+    f.write(outcome, {
+      outcome: 'HELD_BEFORE_PACKAGE_COPY',
+      executionPolicySha256: oldSha,
+    });
+    const spec = (at) => ({ ...f.pin(at), identity: directoryIdentity(at) }),
+      c = {
+        format: 1,
+        kind: 'verified-pre-copy-continuation-v1',
+        id: crypto.randomUUID(),
+        previousPolicy: spec(previous),
+        previousLedger: spec(f.ledger),
+        previousSentinel: spec(sentinel),
+        previousOutcome: spec(outcome),
+      };
+    f.policy.preCopyContinuation = c;
+    f.policy.approval.id = 'new-execution';
+    f.policy.approval.continuation = {
+      id: c.id,
+      fromConfigSha: oldSha,
+      fromLedgerSha: c.previousLedger.sha256,
+      fromSentinelSha: c.previousSentinel.sha256,
+    };
+    const nextSha = hash(f.policy),
+      receipt = admission.continuationPath(f.policy);
+    f.write(receipt, {
+      format: 1,
+      kind: c.kind,
+      id: c.id,
+      fromConfigSha: oldSha,
+      toConfigSha: nextSha,
+      approvalId: f.policy.approval.id,
+      previousPolicy: c.previousPolicy,
+      previousLedger: c.previousLedger,
+      previousSentinel: c.previousSentinel,
+      previousOutcome: c.previousOutcome,
+      previousLedgerText: oldText,
+      previousSentinelText: oldSha,
+    });
+    const state = {
+      ...oldState,
+      configSha: nextSha,
+      continuation: {
+        id: c.id,
+        receiptSha256: f.pin(receipt).sha256,
+        receiptIdentity: directoryIdentity(receipt),
+      },
+      continuationAttempt: { nonce: 'owned-nonce', status: 'running' },
+      claim: {
+        id: 'continued',
+        kind: 'install',
+        root: f.installed,
+        outputs: [],
+      },
+    };
+    const save = () =>
+      f.write(f.ledger, { payload: state, digest: hash(state) });
+    save();
+    f.write(f.lock, { pid: 99, nonce: 'owned-nonce', configSha: nextSha });
+    f.native.policySha256 = nextSha;
+    assert(f.run().operationSufficient, JSON.stringify(f.run()));
+    state.continuationAttempt.nonce = 'other-owner';
+    save();
+    assert(f.run().errors.includes('REFERENCE_CONTINUATION_OWNER_UNCERTAIN'));
+  }));
 function processFixture(f) {
   operationFixture(f);
   f.policy.publication.expected = {

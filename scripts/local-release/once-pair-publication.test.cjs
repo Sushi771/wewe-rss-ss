@@ -350,6 +350,73 @@ async function fixture(run) {
     fs.rmSync(base, { recursive: true });
   }
 }
+test('continued pre-copy ledger uses the same old adopted anchor through install, publication and sole-backup rollback', () =>
+  fixture(async (f) => {
+    const facts = f.facts;
+    f.facts = () => ({
+      ...facts(),
+      complete: false,
+      errors: ['REFERENCE_BACKGROUND_GAP_UNBOUND'],
+    });
+    await assert.rejects(f.execute(), /REFERENCE_QUERY_INCOMPLETE/);
+    assert.deepEqual(f.events, []);
+    f.facts = facts;
+    const ledger = path.join(
+        f.policy.registryDirectory,
+        f.policy.scopeId + '.state.json',
+      ),
+      sentinel = ledger + '.adopted',
+      previous = path.join(f.base, 'previous-policy.json'),
+      outcome = path.join(f.base, 'old-outcome.json');
+    fs.copyFileSync(f.file, previous);
+    const spec = (at) => ({
+        path: at,
+        sha256: fileHash(at),
+        identity: identity(at),
+      }),
+      oldSha = fileHash(previous),
+      oldText = fs.readFileSync(ledger, 'utf8');
+    fs.writeFileSync(
+      outcome,
+      JSON.stringify({
+        outcome: 'HELD_BEFORE_PACKAGE_COPY',
+        executionPolicySha256: oldSha,
+      }),
+    );
+    const c = {
+      format: 1,
+      kind: 'verified-pre-copy-continuation-v1',
+      id: crypto.randomUUID(),
+      previousPolicy: spec(previous),
+      previousLedger: spec(ledger),
+      previousSentinel: spec(sentinel),
+      previousOutcome: spec(outcome),
+    };
+    f.policy.preCopyContinuation = c;
+    f.policy.approval.id += '-continuation';
+    f.policy.approval.continuation = {
+      id: c.id,
+      fromConfigSha: oldSha,
+      fromLedgerSha: c.previousLedger.sha256,
+      fromSentinelSha: c.previousSentinel.sha256,
+    };
+    fs.writeFileSync(f.file, JSON.stringify(f.policy));
+    assert.equal((await f.execute()).status, 'passed');
+    assert.equal((await f.execute(true)).status, 'rolled-back');
+    assert.equal(f.backupCount(), 1);
+    assert.equal(f.events.filter((x) => x === 'migrate').length, 1);
+    assert.equal(fs.readFileSync(sentinel, 'utf8'), oldSha);
+    assert.equal(
+      JSON.parse(fs.readFileSync(admission.continuationPath(f.policy), 'utf8'))
+        .previousLedgerText,
+      oldText,
+    );
+    assert.throws(
+      () =>
+        require('./release-scope.cjs').validateReferences(f.facts(), f.policy),
+      /CONTINUATION_OPERATION_INVALID/,
+    );
+  }));
 test('full narrow deploy installs exact pair, preserves data and held fallback, publishes after health', () =>
   fixture(async (f) => {
     const held = fingerprint(path.join(f.root, 'held'));
