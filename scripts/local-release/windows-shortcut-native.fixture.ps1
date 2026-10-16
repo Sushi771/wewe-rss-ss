@@ -17,8 +17,12 @@ $target=[IO.Path]::Combine($OwnedDirectory,'inert-target.exe')
 [IO.File]::WriteAllText($target,'inert owned target; never executed')
 $shell=New-Object -ComObject WScript.Shell
 try {
-  $link=$shell.CreateShortcut($file);$link.TargetPath=$target;$link.WorkingDirectory=$OwnedDirectory;$link.Save()
+  # WSH Save is locale-sensitive on hosted runners. Construct an ASCII-named
+  # fixture, then rename with Unicode IO; production still reads the Unicode path.
+  $ascii=[IO.Path]::Combine($OwnedDirectory,'ascii-owned.lnk')
+  $link=$shell.CreateShortcut($ascii);$link.TargetPath=$target;$link.WorkingDirectory=$OwnedDirectory;$link.Save()
   [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link)
+  [IO.File]::Move($ascii,$file)
   $deadline=[DateTime]::UtcNow.AddSeconds(16)
   $diagnosticContext=[PSCustomObject]@{stage='unit';folderKind='Startup';failure=$null}
   $seen=[System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)

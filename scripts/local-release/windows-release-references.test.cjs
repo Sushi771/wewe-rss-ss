@@ -387,6 +387,15 @@ test(
         file = path.join(f.project, '\u6D4B-owned.lnk');
       assert.equal(r.hashCmdletCalls, 0);
       assert.equal(r.normal.sha256, f.pin(file).sha256);
+      assert.equal(r.normal.path, file);
+      assert.equal(
+        path.resolve(r.normal.target).toLowerCase(),
+        path.join(f.project, 'inert-target.exe').toLowerCase(),
+      );
+      assert.equal(
+        path.resolve(r.normal.workingDirectory).toLowerCase(),
+        f.project.toLowerCase(),
+      );
       assert.equal(r.sharingRefused, true);
       assert.equal(r.failureContext.stage, 'shortcut-hash-before');
       assert.equal(r.failureContext.folderKind, 'Startup');
