@@ -253,6 +253,36 @@ describe('all cached article local/ZIP export entry points share isolated image 
     expect(fetch).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });
+  it('does not return success for an unmapped legacy zero-image receipt after a remote image is cached', async () => {
+    items[0].contentHtml = '<div id="js_content"><p>Original text</p></div>';
+    const caller = router.appRouter.createCaller({ errorMsg: null });
+    const first = await caller.article.saveToObsidian(items[0].id);
+    const receipts = join(dirname(first.path), '.wewe-articles');
+    const file = join(
+      receipts,
+      (await fs.readdir(receipts)).find((name) => name.endsWith('.json'))!,
+    );
+    const legacy = JSON.parse(await fs.readFile(file, 'utf8'));
+    delete legacy.imageMap;
+    const bytes = JSON.stringify(legacy);
+    await fs.writeFile(file, bytes);
+    await fs.writeFile(first.path, 'User notes');
+    items[0].contentHtml =
+      '<div id="js_content"><p>Updated text</p><img src="https://mmbiz.qpic.cn/new.png"></div>';
+    const image = jest.spyOn(imageFetch, 'fetchAllowedImage');
+    expect(await caller.article.saveToObsidian(items[0].id)).toMatchObject({
+      success: false,
+      status: 'failed',
+      mediaComplete: false,
+      mediaStatus: 'unconfirmed',
+      path: first.path,
+    });
+    expect(image).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+    expect(await fs.readFile(first.path, 'utf8')).toBe('User notes');
+    expect(await fs.readFile(file, 'utf8')).toBe(bytes);
+  });
   it('splits a publisher ZIP by each original date and retains unknown-date body and reason', async () => {
     items[1].publishTime = 1791432900;
     items.push({ ...article('WX_1234567890_2247000003_1'), publishTime: 0 });

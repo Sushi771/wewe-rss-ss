@@ -249,4 +249,90 @@ describe('body media status with synthetic bytes and mocked requests only', () =
     ).toBe('skipped');
     expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
   });
+  it('keeps an unmapped legacy zero-image receipt unconfirmed when a remote body image appears', async () => {
+    const source = {
+      feedId: 'MP_WXS_1234567890',
+      feedName: 'Fixture',
+      groupId: 'g',
+      groupName: 'Group',
+    };
+    const store = new LocalArticleStore(join(root, 'settings.json'), root);
+    const first = await store.save(
+      prepareCachedArticleLocalExport(
+        {
+          ...article,
+          contentHtml: '<div id="js_content"><p>Original text</p></div>',
+        },
+        source,
+      ),
+    );
+    const receipts = join(first.directory, '.wewe-articles');
+    const file = join(
+      receipts,
+      (await readdir(receipts)).find((name) => name.endsWith('.json'))!,
+    );
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.imageMap;
+    const bytes = JSON.stringify(legacy);
+    await writeFile(file, bytes);
+    await writeFile(first.markdownPath, 'User notes');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(
+        await store.save(prepareCachedArticleLocalExport(article, source)),
+      ).toMatchObject({
+        status: 'failed',
+        imageCount: 0,
+        mediaComplete: false,
+        mediaStatus: 'unconfirmed',
+      });
+      expect(await readFile(file, 'utf8')).toBe(bytes);
+      expect(await readFile(first.markdownPath, 'utf8')).toBe('User notes');
+    }
+    expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+    // A genuinely incomplete legacy zero-image receipt retains its existing
+    // safe repair behavior; no previously stored media needs a URL mapping.
+    await writeFile(file, JSON.stringify({ ...legacy, mediaComplete: false }));
+    jest
+      .mocked(images.fetchAllowedImage)
+      .mockResolvedValue({ bytes: png, type: 'image/png' });
+    expect(
+      await store.save(prepareCachedArticleLocalExport(article, source)),
+    ).toMatchObject({ status: 'repaired', imageCount: 1, mediaComplete: true });
+    expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
+    expect(await readFile(first.markdownPath, 'utf8')).toBe('User notes');
+  });
+  it('still verifies and reuses inline bytes from a complete legacy receipt without mappings', async () => {
+    const source = {
+      feedId: 'MP_WXS_1234567890',
+      feedName: 'Fixture',
+      groupId: 'g',
+      groupName: 'Group',
+    };
+    const store = new LocalArticleStore(join(root, 'settings.json'), root);
+    const cached = {
+      ...article,
+      contentHtml: `<div id="js_content"><p>Original text</p><img src="data:image/png;base64,${png.toString('base64')}"></div>`,
+    };
+    const first = await store.save(
+      prepareCachedArticleLocalExport(cached, source),
+    );
+    const receipts = join(first.directory, '.wewe-articles');
+    const file = join(
+      receipts,
+      (await readdir(receipts)).find((name) => name.endsWith('.json'))!,
+    );
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.imageMap;
+    await writeFile(file, JSON.stringify(legacy));
+    await writeFile(first.markdownPath, 'User notes');
+    expect(
+      await store.save(prepareCachedArticleLocalExport(cached, source)),
+    ).toMatchObject({ status: 'repaired', imageCount: 1, mediaComplete: true });
+    expect(await readFile(first.markdownPath, 'utf8')).toBe('User notes');
+    expect(
+      (await store.save(prepareCachedArticleLocalExport(cached, source)))
+        .status,
+    ).toBe('skipped');
+    expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+  });
 });
