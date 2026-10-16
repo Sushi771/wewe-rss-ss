@@ -21,6 +21,11 @@ test(
         'window.fixture = { ready: true };',
         async ({ evaluate }) => {
           assert.equal(await evaluate('window.fixture.ready'), true);
+          if (round === 1)
+            ownedChild.emit(
+              'error',
+              Error('synthetic child operation failure'),
+            );
         },
       );
       assert(

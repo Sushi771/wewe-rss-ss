@@ -146,8 +146,12 @@ async function withFixture(source, run, aliases = {}, options = {}) {
       resolve();
     });
     child.once('error', () => {
-      exited = true;
-      resolve();
+      // Only a failed spawn has no process to wait for. A later operation
+      // error (for example kill failure) is not proof that this child exited.
+      if (child.pid === undefined) {
+        exited = true;
+        resolve();
+      }
     });
   });
   const waitForExit = async (milliseconds) => {
@@ -250,16 +254,19 @@ async function withFixture(source, run, aliases = {}, options = {}) {
     );
     throw error;
   } finally {
-    if (ws?.readyState === WebSocket.OPEN)
-      ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));
-    ws?.close();
-    if (!(await waitForExit(2000))) {
-      child.kill();
-      assert(await waitForExit(5000), 'owned fixture browser exit unconfirmed');
+    try {
+      if (ws?.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));
+      ws?.close();
+      if (!(await waitForExit(2000))) {
+        child.kill();
+        assert(await waitForExit(5000), 'owned fixture browser exit unconfirmed');
+      }
+    } finally {
+      child.stderr.destroy();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
     }
-    child.stderr.destroy();
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
   }
 }
 module.exports = { browser, withFixture, web, modulePath };
