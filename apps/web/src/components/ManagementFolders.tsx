@@ -16,10 +16,12 @@ import {
 } from '@nextui-org/react';
 import { useRef, useState } from 'react';
 import FolderDragRow from './FolderDragRow';
+import FolderMemberPicker, { FolderMember } from './FolderMemberPicker';
 
 type Folder = { id: string; name: string };
 type Props = {
   folders: Folder[];
+  members?: FolderMember[];
   filter: string;
   selectedIds: string[];
   dragType: string;
@@ -35,6 +37,7 @@ type Props = {
 /** Application-owned folders never change upstream identities or disk paths. */
 export default function ManagementFolders({
   folders,
+  members,
   filter,
   selectedIds,
   dragType,
@@ -50,22 +53,29 @@ export default function ManagementFolders({
   const [name, setName] = useState('');
   const [destination, setDestination] = useState('');
   const [error, setError] = useState('');
+  const [addingTo, setAddingTo] = useState<Folder>();
+  const [saving, setSaving] = useState(false);
+  const [pendingRename, setPendingRename] = useState<Folder>();
   const active = useRef(false);
   const run = async (operation: () => Promise<unknown>) => {
-    if (disabled || active.current) return;
+    if (disabled || active.current) return false;
     active.current = true;
+    setSaving(true);
     onBusyChange(true);
     setError('');
     try {
       await operation();
+      return true;
     } catch (cause) {
       setError(
         cause instanceof Error
           ? cause.message
           : '文件夹操作未完成，请重新读取列表。',
       );
+      return false;
     } finally {
       active.current = false;
+      setSaving(false);
       onBusyChange(false);
     }
   };
@@ -89,6 +99,49 @@ export default function ManagementFolders({
     ids.splice(to, 0, id);
     void run(() => onReorder(ids, expectedIds));
   };
+  const save = () => {
+    if (disabled || active.current) return;
+    const trimmed = name.trim();
+    if (
+      !trimmed ||
+      trimmed.length > 80 ||
+      Array.from(trimmed).some((char) => {
+        const code = char.charCodeAt(0);
+        return code < 32 || code === 127;
+      })
+    ) {
+      setError('分组名称须为 1–80 个字符，不能含控制字符。');
+      return;
+    }
+    if (editing?.name === trimmed) {
+      setEditing(undefined);
+      return;
+    }
+    void run(async () => {
+      // This overlay is provisional; the cache contains confirmed names only.
+      // Keep the synchronous mutation fence until the server acknowledges it.
+      if (editing) {
+        setPendingRename({ id: editing.id, name: trimmed });
+        setEditing(undefined);
+      }
+      try {
+        await onSave({ ...(editing ? { id: editing.id } : {}), name: trimmed });
+        setEditing(undefined);
+      } catch (cause) {
+        if (!editing) throw cause;
+        throw new Error(
+          `“${trimmed}”未确认保存，已恢复上次确认的名称；请刷新核对后重试。${cause instanceof Error ? cause.message : ''}`,
+        );
+      } finally {
+        setPendingRename(undefined);
+      }
+    });
+  };
+  const displayedFolders = folders.map((folder) =>
+    folder.id === pendingRename?.id
+      ? { ...folder, name: pendingRename.name }
+      : folder,
+  );
   return (
     <div className="folder-navigation" aria-label="管理文件夹">
       <div className="folder-navigation-header">
@@ -114,6 +167,7 @@ export default function ManagementFolders({
           aria-label="新建文件夹"
           isDisabled={disabled}
           onPress={() => {
+            setError('');
             setEditing(null);
             setName('');
           }}
@@ -124,7 +178,7 @@ export default function ManagementFolders({
       {[
         { id: 'all', name: '全部' },
         { id: 'ungrouped', name: '未分组' },
-        ...folders,
+        ...displayedFolders,
       ].map((folder) => {
         const row = (
           <div
@@ -145,7 +199,6 @@ export default function ManagementFolders({
           >
             <button
               type="button"
-              disabled={disabled}
               aria-pressed={filter === folder.id}
               className={`mac-sidebar-item folder-filter text-left ${filter === folder.id ? 'active' : ''}`}
               title={folder.name}
@@ -172,8 +225,12 @@ export default function ManagementFolders({
                   onAction={(key) => {
                     if (disabled || active.current) return;
                     if (key === 'rename') {
+                      setError('');
                       setEditing(folder);
                       setName(folder.name);
+                    } else if (key === 'add') {
+                      setError('');
+                      setAddingTo(folder);
                     } else if (key === 'delete') {
                       if (
                         window.confirm(
@@ -191,6 +248,9 @@ export default function ManagementFolders({
                   }}
                 >
                   <DropdownItem key="rename">重命名</DropdownItem>
+                  {members ? (
+                    <DropdownItem key="add">添加订阅</DropdownItem>
+                  ) : null}
                   <DropdownItem
                     key="up"
                     isDisabled={!onReorder || folders[0]?.id === folder.id}
@@ -241,7 +301,7 @@ export default function ManagementFolders({
               onChange={(event) => setDestination(event.target.value)}
             >
               <option value="">未分组</option>
-              {folders.map((folder) => (
+              {displayedFolders.map((folder) => (
                 <option key={folder.id} value={folder.id}>
                   {folder.name}
                 </option>
@@ -260,12 +320,29 @@ export default function ManagementFolders({
           </Button>
         </div>
       )}
+      {saving && (
+        <p role="status" className="text-xs text-neutral-500">
+          正在保存分类，请等待确认；仍可浏览订阅。
+        </p>
+      )}
+      {addingTo && members && (
+        <FolderMemberPicker
+          key={addingTo.id}
+          folder={addingTo}
+          members={members}
+          error={error}
+          disabled={disabled || saving}
+          onClose={() => setAddingTo(undefined)}
+          onAdd={(ids) => run(() => onMove(ids, addingTo.id))}
+        />
+      )}
       {error && (
         <p role="alert" className="break-words text-xs text-red-600">
           {error}
         </p>
       )}
       <Modal
+        disableAnimation
         isOpen={editing !== undefined}
         onClose={() => {
           if (!disabled && !active.current) setEditing(undefined);
@@ -294,15 +371,7 @@ export default function ManagementFolders({
             <Button
               color="primary"
               isDisabled={disabled || !name.trim()}
-              onPress={() =>
-                void run(async () => {
-                  await onSave({
-                    ...(editing ? { id: editing.id } : {}),
-                    name: name.trim(),
-                  });
-                  setEditing(undefined);
-                })
-              }
+              onPress={save}
             >
               保存
             </Button>

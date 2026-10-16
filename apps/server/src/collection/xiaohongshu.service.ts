@@ -9,6 +9,12 @@ import {
   XhsNormalizedCandidate,
 } from './xiaohongshu-contract';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
+import {
+  assertIncrementalTransaction,
+  assertIncrementalWriteAdmission,
+  incrementalWrite,
+} from './incremental-write';
+import { sqliteWrites } from './sqlite-write-coordinator';
 import { buildArticleMarkdown } from '../article-export';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -111,6 +117,24 @@ async function mutateManagement<T>(action: () => Promise<T>) {
     managementMutationActive = false;
   }
 }
+/** Ordinary classification edits share PR39's admission and durable transaction. */
+function mutateManagementIncremental<T>(
+  db: PrismaService,
+  expectedBytes: number,
+  action: (tx: Prisma.TransactionClient) => Promise<T>,
+) {
+  return mutateManagement(() =>
+    incrementalWrite(db, expectedBytes, () =>
+      sqliteWrites.write(async () => {
+        await assertIncrementalWriteAdmission();
+        return db.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          return action(tx);
+        });
+      }),
+    ),
+  );
+}
 export function managementMemberIds(ids: string[], maxIdLength = 128) {
   if (
     !ids.length ||
@@ -149,9 +173,10 @@ export async function saveManagementGroup(
   const name = input.name.trim();
   if (!name || name.length > 80 || /[\x00-\x1f\x7f]/.test(name))
     return fail('分组名称须为 1–80 个字符，不能含控制字符。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(name, 'utf8') + 4096,
+    async (tx) => {
       if (input.id) {
         await getManagementGroup(tx, platform, input.id);
         return tx.managementGroup.update({
@@ -173,8 +198,8 @@ export async function saveManagementGroup(
             )._max.order ?? -1) + 1,
         },
       });
-    });
-  });
+    },
+  );
 }
 /** Compare the saved order inside the transaction; stale clients cannot overwrite it. */
 export async function reorderManagementGroups(
@@ -193,9 +218,10 @@ export async function reorderManagementGroups(
     )
   )
     return fail('分组排序必须包含完整且不重复的 ID。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify(input), 'utf8'),
+    async (tx) => {
       const saved = await tx.managementGroup.findMany({
         where: { platform },
         orderBy: [{ order: 'asc' }, { id: 'asc' }],
@@ -210,8 +236,8 @@ export async function reorderManagementGroups(
       for (const [order, id] of input.ids.entries())
         await tx.managementGroup.update({ where: { id }, data: { order } });
       return { ids: input.ids };
-    });
-  });
+    },
+  );
 }
 
 /** Feed sorting only writes the complete membership of one group, preserving other groups. */
@@ -230,9 +256,10 @@ export async function reorderManagementFeeds(
     input.some((f) => !Number.isSafeInteger(f.order) || f.order < 0)
   )
     return fail('公众号排序 ID 或顺序无效。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify(input), 'utf8'),
+    async (tx) => {
       const rows = await tx.feed.findMany({
         where: { id: { in: input.map((f) => f.id) } },
       });
@@ -269,8 +296,8 @@ export async function reorderManagementFeeds(
           Prisma.sql`UPDATE feeds SET "order" = ${order} WHERE id = ${id}`,
         );
       return true;
-    });
-  });
+    },
+  );
 }
 
 export async function removeManagementGroup(
@@ -299,9 +326,10 @@ export async function moveManagementMembers(
   groupId: string | null,
 ) {
   const unique = managementMemberIds(ids);
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify({ ids: unique, groupId }), 'utf8'),
+    async (tx) => {
       if (groupId !== null) await getManagementGroup(tx, platform, groupId);
       const where = { id: { in: unique } };
       const count =
@@ -317,8 +345,8 @@ export async function moveManagementMembers(
         );
       else await tx.xhsCreator.updateMany({ where, data: { groupId } });
       return { moved: unique.length, ids: unique, groupId };
-    });
-  });
+    },
+  );
 }
 
 /** Store the supplied public page as a pending link, never derive a trusted ID. */
@@ -415,13 +443,17 @@ export class XiaohongshuService {
         creator: old,
         message: '此主页已在待接入列表中。',
       };
-    await createVerifiedSqliteBackup();
     const proposedId = randomUUID();
-    const creator = await this.prisma.xhsCreator.upsert({
-      where: { profileUrl },
-      create: { id: proposedId, profileUrl, displayName: name },
-      update: {},
-    });
+    const creator = await incrementalWrite(this.prisma, 4096, () =>
+      this.prisma.$transaction(async (tx) => {
+        await assertIncrementalTransaction(tx);
+        return tx.xhsCreator.upsert({
+          where: { profileUrl },
+          create: { id: proposedId, profileUrl, displayName: name },
+          update: {},
+        });
+      }),
+    );
     return {
       created: creator.id === proposedId,
       subscribed: false,
@@ -435,11 +467,12 @@ export class XiaohongshuService {
     this.active.add(id);
     try {
       await this.getCreator(id);
-      await createVerifiedSqliteBackup();
-      return await this.prisma.xhsCreator.update({
-        where: { id },
-        data: { enabled },
-      });
+      return await incrementalWrite(this.prisma, 4096, () =>
+        this.prisma.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          return tx.xhsCreator.update({ where: { id }, data: { enabled } });
+        }),
+      );
     } finally {
       this.active.delete(id);
     }
@@ -559,78 +592,102 @@ export class XiaohongshuService {
         }
       }
       if (!result.pages.length) return fail('未收到可核验列表，旧归档保留。');
-      await createVerifiedSqliteBackup();
-      const added = await this.prisma.$transaction(async (tx) => {
-        let count = 0;
-        for (const { draft: d, video, kind } of drafts.values()) {
-          const old = await tx.xhsNote.findUnique({ where: { id: d.noteKey } });
-          if (old) {
-            if (old.creatorId !== id)
-              return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
-            if (old.status !== 'video-skipped' || !video) continue;
-          }
-          const contentHtml =
-            d.status === 'candidate'
-              ? '<div id="js_content">' +
-                d.text
-                  .split('\n')
-                  .map((p) => '<p>' + escape(p) + '</p>')
-                  .join('') +
-                d.images
-                  .map(
-                    (i) =>
-                      '<img src="data:' +
-                      i.type +
-                      ';base64,' +
-                      i.bytes.toString('base64') +
-                      '">',
-                  )
-                  .join('') +
-                // The shared video contract allows a real complete video with
-                // no caption/cover. Mark this local-only structural placeholder;
-                // title survives the unchanged sanitizer's attribute allowlist.
-                (video && !d.text.trim() && !d.images.length
-                  ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
-                  : '') +
-                '</div>'
-              : null;
-          const data = {
-            title:
-              d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
-            status: d.status === 'candidate' ? 'complete' : 'video-skipped',
-            contentHtml,
-            kind,
-            videoBytes: video?.bytes ?? null,
-            videoMimeType: video?.mimeType ?? null,
-            videoExpectedBytes: video?.expectedBytes ?? null,
-            videoSha256: video?.sha256 ?? null,
-          };
-          if (old) {
-            // Only a skipped video's missing archive may be filled. Keep its
-            // stable ID, creator relation, and previously trusted publication time.
-            await tx.xhsNote.update({ where: { id: old.id }, data });
-          } else {
-            await tx.xhsNote.create({
-              data: {
-                id: d.noteKey,
-                creatorId: id,
-                publishTime: timestamps.get(d.noteKey)!,
-                ...data,
-              },
+      const expectedBytes = [...drafts.values()].reduce(
+        (bytes, { draft, video }) =>
+          bytes +
+          Buffer.byteLength(JSON.stringify({ ...draft, images: undefined })) +
+          (draft.images || []).reduce(
+            (sum, image) => sum + image.bytes.length * 2,
+            0,
+          ) +
+          (video?.bytes.length || 0),
+        4096,
+      );
+      const added = await incrementalWrite(this.prisma, expectedBytes, () =>
+        this.prisma.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          const current = await tx.xhsCreator.findUniqueOrThrow({
+            where: { id },
+          });
+          if (
+            !current.enabled ||
+            current.profileUrl !== creator.profileUrl ||
+            current.externalAuthorId !== creator.externalAuthorId
+          )
+            return fail('博主身份或启用状态已变化，旧归档保留。', 'CONFLICT');
+          let count = 0;
+          for (const { draft: d, video, kind } of drafts.values()) {
+            const old = await tx.xhsNote.findUnique({
+              where: { id: d.noteKey },
             });
+            if (old) {
+              if (old.creatorId !== id)
+                return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
+              if (old.status !== 'video-skipped' || !video) continue;
+            }
+            const contentHtml =
+              d.status === 'candidate'
+                ? '<div id="js_content">' +
+                  d.text
+                    .split('\n')
+                    .map((p) => '<p>' + escape(p) + '</p>')
+                    .join('') +
+                  d.images
+                    .map(
+                      (i) =>
+                        '<img src="data:' +
+                        i.type +
+                        ';base64,' +
+                        i.bytes.toString('base64') +
+                        '">',
+                    )
+                    .join('') +
+                  // The shared video contract allows a real complete video with
+                  // no caption/cover. Mark this local-only structural placeholder;
+                  // title survives the unchanged sanitizer's attribute allowlist.
+                  (video && !d.text.trim() && !d.images.length
+                    ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
+                    : '') +
+                  '</div>'
+                : null;
+            const data = {
+              title:
+                d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
+              status: d.status === 'candidate' ? 'complete' : 'video-skipped',
+              contentHtml,
+              kind,
+              videoBytes: video?.bytes ?? null,
+              videoMimeType: video?.mimeType ?? null,
+              videoExpectedBytes: video?.expectedBytes ?? null,
+              videoSha256: video?.sha256 ?? null,
+            };
+            if (old) {
+              // Only a skipped video's missing archive may be filled. Keep its
+              // stable ID, creator relation, and previously trusted publication time.
+              await tx.xhsNote.update({ where: { id: old.id }, data });
+            } else {
+              await tx.xhsNote.create({
+                data: {
+                  id: d.noteKey,
+                  creatorId: id,
+                  publishTime: timestamps.get(d.noteKey)!,
+                  ...data,
+                },
+              });
+            }
+            if (d.status === 'candidate') count++;
           }
-          if (d.status === 'candidate') count++;
-        }
-        await tx.xhsCreator.update({
-          where: { id },
-          data: {
-            externalAuthorId: result.authorId,
-            lastStatus: ledger.supplierReportedEnd ? 'complete' : 'partial',
-            lastCheckedAt: Math.floor(Date.now() / 1000),
-          },
-        });
-        return count;
-      });
+          await tx.xhsCreator.update({
+            where: { id },
+            data: {
+              externalAuthorId: result.authorId,
+              lastStatus: ledger.supplierReportedEnd ? 'complete' : 'partial',
+              lastCheckedAt: Math.floor(Date.now() / 1000),
+            },
+          });
+          return count;
+        }),
+      );
       return {
         status: ledger.supplierReportedEnd
           ? ('complete' as const)

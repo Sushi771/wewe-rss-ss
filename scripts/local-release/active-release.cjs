@@ -1,5 +1,5 @@
 // The logon task reads this local pointer; only a verified production start may advance it.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const {
@@ -55,26 +55,43 @@ function readActiveRelease(options) {
 }
 
 function writeActiveRelease(candidate, options) {
+  require('./release-scope.cjs').assertWritableSession(
+    ['activate', 'restart', 'switch'],
+    4096,
+  );
   // Seed a validated receipt during activation, before the user's next launch.
   return storePointer(
     checkedRelease(candidate, {
       ...options,
-      reuseVerified: true,
+      reuseVerified: !require('./release-scope.cjs').session(),
       runningOnly: false,
     }),
+    options,
   );
 }
 
 async function writeActiveReleaseAsync(candidate, options) {
+  require('./release-scope.cjs').assertWritableSession(
+    ['activate', 'restart', 'switch'],
+    4096,
+  );
   const release = checkedDirectory(candidate);
   const manifest = await verifyReleaseAsync(release, {
     ...options,
-    reuseVerified: true,
+    reuseVerified: !require('./release-scope.cjs').session(),
   });
-  return storePointer(checkedManifest(release, manifest));
+  return storePointer(checkedManifest(release, manifest), options);
 }
 
-function storePointer({ release, manifest }) {
+function storePointer({ release, manifest }, options = {}) {
+  const scope = require('./release-scope.cjs').session();
+  if (scope) {
+    if (options.recovery === true) scope.authorizeRecoveryPackage(release);
+    else {
+      scope.authorizePublication(release);
+      scope.check(true);
+    }
+  }
   const temporary = path.join(releases, `active-${randomUUID()}.tmp`);
   try {
     fs.writeFileSync(

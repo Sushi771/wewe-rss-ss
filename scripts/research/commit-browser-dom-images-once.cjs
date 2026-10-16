@@ -42,6 +42,11 @@ const EXPECTED_INSERT_TABLES = [
   ...EXPECTED_GROUP_TABLES,
   'cache_insert_batches',
 ].sort();
+const EXPECTED_INCREMENTAL_TABLES = [
+  ...EXPECTED_INSERT_TABLES,
+  'cache_refresh_commits',
+  'refresh_submission_claims',
+].sort();
 const INSERT_COLUMNS = [
   'id',
   'mp_id',
@@ -181,10 +186,11 @@ function snapshot(db, omitTarget = false) {
     tableNames !== JSON.stringify(EXPECTED_TABLES) &&
     tableNames !== JSON.stringify(EXPECTED_XHS_TABLES) &&
     tableNames !== JSON.stringify(EXPECTED_GROUP_TABLES) &&
-    tableNames !== JSON.stringify(EXPECTED_INSERT_TABLES)
+    tableNames !== JSON.stringify(EXPECTED_INSERT_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_INCREMENTAL_TABLES)
   )
     fail('SQLITE_SCHEMA_UNEXPECTED');
-  if (tableNames === JSON.stringify(EXPECTED_INSERT_TABLES)) {
+  if (definitions.some((row) => row.name === 'cache_insert_batches')) {
     const columns = db.prepare('PRAGMA table_info(cache_insert_batches)').all();
     const expected = INSERT_COLUMNS.map((name, i) => ({
       name,
@@ -202,6 +208,45 @@ function snapshot(db, omitTarget = false) {
     }));
     if (JSON.stringify(actual) !== JSON.stringify(expected))
       fail('SQLITE_SCHEMA_UNEXPECTED');
+  }
+  if (tableNames === JSON.stringify(EXPECTED_INCREMENTAL_TABLES)) {
+    const schemas = {
+      cache_refresh_commits: [
+        ['id', 'TEXT'],
+        ['mp_id', 'TEXT'],
+        ['result_json', 'TEXT'],
+        ['committed_at_ms', 'BIGINT'],
+      ],
+      refresh_submission_claims: [
+        ['id', 'TEXT'],
+        ['mp_id', 'TEXT'],
+        ['state', 'TEXT'],
+        ['reserved_at', 'INTEGER'],
+        ['previous_at', 'INTEGER'],
+        ['updated_at_ms', 'BIGINT'],
+      ],
+    };
+    for (const [table, fields] of Object.entries(schemas)) {
+      const actual = db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map(({ name, type, notnull, dflt_value, pk }) => ({
+          name,
+          type,
+          notnull,
+          dflt_value,
+          pk,
+        }));
+      const expected = fields.map(([name, type], i) => ({
+        name,
+        type,
+        notnull: 1,
+        dflt_value: null,
+        pk: i === 0 ? 1 : 0,
+      }));
+      if (JSON.stringify(actual) !== JSON.stringify(expected))
+        fail('SQLITE_SCHEMA_UNEXPECTED');
+    }
   }
   const tables = {};
   for (const { name, sql } of definitions) {

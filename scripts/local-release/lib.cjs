@@ -1,14 +1,175 @@
-const fs = require('node:fs');
+const nativeFs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createRequire } = require('node:module');
-const { execFileSync } = require('node:child_process');
+const nativeProcesses = require('node:child_process');
+const { AsyncLocalStorage } = require('node:async_hooks');
+
+// Shared by source copies/aliases in this process, without a policy, filesystem
+// write or dependency on a release-scope file in standalone packaged runtimes.
+const contextKey = Symbol.for('wewe-rss.host-release-context.v1');
+if (!Object.prototype.hasOwnProperty.call(globalThis, contextKey))
+  Object.defineProperty(globalThis, contextKey, {
+    value: new AsyncLocalStorage(),
+  });
+const hostContext = globalThis[contextKey];
+function currentHostLease() {
+  return hostContext.getStore();
+}
+function assertHostWrite() {
+  currentHostLease()?.assertWritable();
+}
+function assertUnscopedHostEffect() {
+  if (currentHostLease())
+    throw new Error('RELEASE_SCOPE_UNREGISTERED_HOST_EFFECT');
+}
+const readOnlyFiles = new Set([
+  'access',
+  'close',
+  'exists',
+  'fstat',
+  'glob',
+  'lstat',
+  'opendir',
+  'read',
+  'readFile',
+  'readdir',
+  'readlink',
+  'readv',
+  'realpath',
+  'stat',
+  'statfs',
+  'createReadStream',
+  'openAsBlob',
+  'watch',
+  'watchFile',
+  'unwatchFile',
+  'Dir',
+  'Dirent',
+  'Stats',
+  'StatFs',
+  'ReadStream',
+]);
+function writesOnOpen(flags = 'r') {
+  if (typeof flags === 'string') return /[wa+]/.test(flags);
+  if (typeof flags !== 'number') return true;
+  return Boolean(
+    flags &
+    (nativeFs.constants.O_WRONLY |
+      nativeFs.constants.O_RDWR |
+      nativeFs.constants.O_APPEND |
+      nativeFs.constants.O_CREAT |
+      nativeFs.constants.O_TRUNC),
+  );
+}
+function guardedFileHandle(handle) {
+  const readOnly = new Set([
+    'close',
+    'read',
+    'readv',
+    'readFile',
+    'stat',
+    'readLines',
+    'readableWebStream',
+    'createReadStream',
+    Symbol.asyncDispose,
+  ]);
+  return new Proxy(handle, {
+    get(target, key) {
+      const value = Reflect.get(target, key, target);
+      if (typeof value !== 'function') return value;
+      return (...args) => {
+        if (!readOnly.has(key)) assertHostWrite();
+        return Reflect.apply(value, target, args);
+      };
+    },
+  });
+}
+function guardedFiles(target, promises = false) {
+  return new Proxy(target, {
+    get(object, key) {
+      if (key === 'promises') return guardedPromises;
+      const value = Reflect.get(object, key, object);
+      const method = typeof key === 'string' ? key.replace(/Sync$/, '') : '';
+      if (typeof value !== 'function' || readOnlyFiles.has(method))
+        return value;
+      return function (...args) {
+        if (method !== 'open' || writesOnOpen(args[1])) assertHostWrite();
+        // Resolve dynamically so the existing offline preloader and test stubs
+        // cannot be bypassed by an earlier captured native function.
+        const result = new.target
+          ? Reflect.construct(object[key], args)
+          : Reflect.apply(object[key], object, args);
+        return promises && method === 'open'
+          ? result.then(guardedFileHandle)
+          : result;
+      };
+    },
+  });
+}
+const guardedPromises = guardedFiles(nativeFs.promises, true);
+const fs = guardedFiles(nativeFs);
+const processes = new Proxy(nativeProcesses, {
+  get(target, key) {
+    const value = Reflect.get(target, key, target);
+    if (
+      ![
+        'exec',
+        'execFile',
+        'execFileSync',
+        'execSync',
+        'fork',
+        'spawn',
+        'spawnSync',
+      ].includes(key)
+    )
+      return value;
+    const dispatch = (...args) => {
+      assertHostWrite();
+      return Reflect.apply(target[key], target, args);
+    };
+    Object.defineProperty(dispatch, require('node:util').promisify.custom, {
+      get() {
+        const custom = target[key][require('node:util').promisify.custom];
+        return (
+          custom &&
+          ((...args) => {
+            assertHostWrite();
+            return Reflect.apply(custom, target, args);
+          })
+        );
+      },
+    });
+    return dispatch;
+  },
+});
+const hostEffects = Object.freeze({
+  context: hostContext,
+  fs,
+  processes,
+  currentLease: currentHostLease,
+  assertWritable: assertHostWrite,
+  assertUnscoped: assertUnscopedHostEffect,
+});
 
 const slash = (value) => value.replace(/\\/g, '/');
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
-const fileHash = (file) => hash(fs.readFileSync(file));
+const fileHash = (file) => {
+  const digest = crypto.createHash('sha256'),
+    buffer = Buffer.alloc(1024 * 1024);
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    let read;
+    while ((read = fs.readSync(descriptor, buffer, 0, buffer.length, null)) > 0)
+      digest.update(buffer.subarray(0, read));
+    return digest.digest('hex');
+  } finally {
+    fs.closeSync(descriptor);
+  }
+};
 const writeJson = (file, value) => {
+  assertHostWrite();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' });
 };
@@ -222,6 +383,7 @@ function verificationContext(directory) {
 // altered or damaged receipts still run the original complete byte audit and
 // its before/after metadata check before any package code may execute.
 async function verifyReleaseAsync(directory, { reuseVerified = false } = {}) {
+  reuseVerified = reuseVerified && !currentHostLease();
   if (!reuseVerified) return verifyRelease(directory);
   const context = verificationContext(directory);
   const metadata = await releaseMetadataAsync(context.directory);
@@ -240,6 +402,7 @@ async function verifyReleaseAsync(directory, { reuseVerified = false } = {}) {
 }
 
 function verifyRelease(directory, { reuseVerified = false } = {}) {
+  reuseVerified = reuseVerified && !currentHostLease();
   const context = verificationContext(directory);
   const { manifest, receipt, key } = context;
   directory = context.directory;
@@ -299,7 +462,7 @@ function cleanEnvironment(extra = {}) {
 }
 
 function run(command, args, options = {}) {
-  return execFileSync(command, args, {
+  return processes.execFileSync(command, args, {
     windowsHide: true,
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -310,6 +473,7 @@ function run(command, args, options = {}) {
 }
 
 module.exports = {
+  hostEffects,
   slash,
   readJson,
   fileHash,

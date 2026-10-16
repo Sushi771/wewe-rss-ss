@@ -1,3 +1,15 @@
+## 2026-10-16：有界周期备份轮换开发候选，未执行生产
+
+独立复核发现首版 `bdfaad6` 在最终验证后仍可新增保护清单，不得据此前全绿 CI 视为无条件集成通过。修正把当前源库的备份/guard owner 两把既有 OS 锁、不可替换的锁文件句柄及各声明根预先存在的手工保护清单句柄持有到操作结束；清单先发布则旧计划失效，执行先占锁则写入/原子替换被拒绝。guard 活跃、清单缺失或旧/异源/未知引用发布者均拒绝轮换，不停服务。仅支持当前生产者协议与既有固定手工清单，不宣称能冻结任意第三方目录写者；独立写者或旧协议未证明时不可执行。旧批准需重新预览，边界细节见下方留存文档。
+
+现有留存规划器已补 `--periodic-only` 预览及独立 `--execute-periodic` Windows 入口，沿用现有清单、引用、校验、资源查询和恢复生成锁。数量/容量目标分别为可配置的 `maxOrdinaryCopies`/`maxOrdinaryBytes`；活动引用、最新至少两份及必要时间窗口优先保留，超目标告警而不牺牲恢复点。执行仅限同一根下已标记的旧周期副本及精确批准的回执/空目录；升级恢复、未知来源、其他根及当前库/历史文章排除。批准绑定本次精确清单和历史状态损失，默认预览/验证不删；句柄身份、哈希、占用全部证明后才逐项删除，部分失败停止，不自动重试。详情见[留存与显式轮换](SQLITE_RETENTION_REVIEW.md#explicit-bounded-periodic-rotation-windows)。
+
+此前已核的发布工具 authority 文件替换窗口仍是单独已知限制，本轮不进行发布或扩建该工具。仅小型离线夹具执行删除；没有生产扫描、生产库复制、真实文件清理、全局配置更改或部署。原仓库用户脏文件保持不变。
+
+## 2026-10-14：PR23 生产兼容候选，未激活
+
+隔离集成生产 d8c35aa 与 PR23 5fd295a，保留生产写入协调、超时/退出 fencing 与引擎审计，预算/可靠复用及临时生命周期接入。只读库存现为340库/约106.36GiB（含122空库），默认32GiB/48库预检不通过；未处置历史、改配置或部署。合成阈值、轮换空槽、失败不删旧点、容量恢复准入与临时回收通过；完整验证和上线门槛见 [当前兼容集成](SPACE_GUARD_PRODUCTION_COMPAT_20261014.md)。原仓库用户脏文件保持不动，生产负责人导出工作另行完成后须重新核最终基线。
+
 # 自建订阅当前断点（2026-10-06）
 
 ## 2026-10-14：一致性备份并发与超时退出修复候选
@@ -480,3 +492,29 @@ resolver 审核已完成：公开 mobile `/mp/getreviewid` 的认证和 synckey 
 固定任务的“每次询问目录”移到创建前，原生选择凭据消费后只保留服务器侧该任务的同目录保存证明；普通保存不能复用，HTTP 不能提交该证明。任务期间路径按钮锁定并说明原因。外部目录变更继续拒绝写盘，状态保留明确的 `SAVE_DIRECTORY_CHANGED`；取消、重新确认目录与新的接收许可是后续步骤，恢复旧目录也不能重放冲突任务。旧未绑定任务仍支持选择路径后本机重试。
 
 真实原 TSX 离线回归22项，以及原 Nest opt-in/任务/controller32项通过；覆盖选择取消不创建、先选B后披露B、无需再次选择即可保存、合成首次写盘失败后同目录重试、实际 Markdown/PNG 字节、普通保存凭据拒绝和目录冲突双目的地不写。无真实浏览器或平台操作。准确源码 `7020d3c58732698e2f387f14327b98151f2ebaf5` 的 CI37615506950四项成功，57套件836测试；extension37615506883成功45项，日志对应合成merge72c701be2746e222d796491d32860b24c7d26709及准确源码。新独立包冷启动/故障回退与备份、完整字段/私有配置/Python保护核验通过，已受控更新至仅回环4000，默认关闭接收和定时；原页面实际资源包含新的固定目录与冲突提示。旧不可变包保留。最终0.2.1扩展包9文件与权限保持原样；真实安装/权限/配对/回送及原按钮文件打开仍待明确授权与验收。
+
+## 2026-10-13 空间防护候选
+
+从 edb0ecb 在独立 E 盘轻量 worktree 实现生成端防护：默认合成演练、真实副本 opt-in、聚合测试预算、稳定生产备份根、已验证未变化内容去重及超限拒绝。生产恢复点不自动删除。未部署、未重启生产；历史清理由另一个明确白名单流程负责。集成与预算配置见 [SPACE_GUARD.md](SPACE_GUARD.md)。旧 release 必须重建才能包含新脚本；直接复制文件会破坏其哈希清单。
+
+空间防护独立审查修正：统一采集/周期/启动根及聚合锁，改为 SQLite 全库一致快照证明复用，补齐实际生产历史容量和只读迁移白名单。生产默认统一为 48 份/32 GiB/余 4 GiB，预警为 50% 或连续变化预测不足24小时，需人工归档与恢复窗口决策；配置迁移与交付限制见 [SPACE_GUARD_INTEGRATION.md](SPACE_GUARD_INTEGRATION.md)。未修改生产用户脏文件，未合入 redbook 候选，未重启生产。
+
+空间防护修复收口（2026-10-13）：32 GiB/48 库/余 4 GiB 与 50%/不足24小时预警已落实；统一根和 SQLite 全内容独立发布门验证通过。全量 Jest 1707、Python 11+19+8 通过，正常正式包的迁移/数据库回滚/缓存与导出通过；新紧凑包启动、注入失败回退与预算拒绝 HTTP 只读通过。生命周期 helper、显式身份核验恢复、768MiB 累计构建预算和 resume/HTML 入口统一受管根已集成。最终发布测试数、SHA/CI 以 [集成验收](SPACE_GUARD_INTEGRATION.md) 和最终证据为准。用户已明确批准 PR #23 改到集成分支，已执行且冲突解除；新HEAD CI需按实际运行核验。最新只读统一逻辑根数量仍超48，历史83计数已过期，未激活；有界恢复窗口/历史归档策略仍需具体决定。本窗口未重启生产、未删/迁历史恢复点、未修改主目录用户脏文件或混入 redbook。
+
+## 2026-10-14: bounded retention review candidate
+
+The isolated disk-guard branch now includes production source `be1a5d03c92b9a4497c1ff226f9440099f5fc360`, opt-in hourly review scanning, bounded owned-report rotation, exact batch/digest/path/time approval checks, resource evidence, and action-time identity/SHA/SQLite/reference checks. Read [SQLite retention review](SQLITE_RETENTION_REVIEW.md) for product impact and deployment steps. Unique or unattributed recovery points remain held; the validator has no database deletion or service-control operation. Production activation and any new exact permanent-deletion batch need their own authorization. This handoff update is in the isolated branch; it does not overwrite a dirty source checkout.
+
+## 2026-10-16: Periodic restart snapshot deduplication candidate
+
+The two backup/guard producer files matched production source 45a3942 before this
+patch. That production version already uses incremental writes for ordinary feed
+updates and group changes; those business changes are not reimplemented here.
+The remaining duplicate-copy case is a periodic owner restart with unchanged
+data. It now repeats full hash/integrity/schema/typed-row verification and starts
+a new owner/snapshot generation while reusing the same physical snapshot. Old
+tokens remain invalid, and original copy UTC times are distinct from fresh proof
+times. Protected high-risk backup reuse and retention/deletion rules are unchanged.
+Tests use only bounded synthetic databases and owned temporary outputs. A hard
+quota is not automatic rotation or evidence that old production files were freed.
+No production data, configuration, service or deployed PR46 package was changed.

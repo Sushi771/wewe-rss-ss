@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as providerRegistry from '../collection/provider-registry';
+import * as localCache from '../collection/local-cache-reader';
 import { Wechat2RssSubscriptionBatches } from '../collection/wechat2rss-subscription-batches';
 import { PrismaClient } from '@prisma/client';
 import { CollectionService } from '../collection/collection.service';
@@ -191,8 +192,8 @@ describe('cache delta through original SQLite merge', () => {
       updated: 0,
       identitySkipped: 1,
     });
-    // One preflight plus three <=40-item candidate reads; no per-article reads.
-    expect(articleReads).toBe(4);
+    // One preflight plus three bounded same-feed and three cross-feed identity reads.
+    expect(articleReads).toBe(7);
     expect(
       await prisma.article.findUniqueOrThrow({ where: { id: old.id } }),
     ).toEqual(old);
@@ -435,13 +436,18 @@ describe('cache delta through original SQLite merge', () => {
     const providerSpy = jest
       .spyOn(providerRegistry, 'wechat2RssProvider')
       .mockReturnValue(provider as any);
+    const localCacheSpy = jest
+      .spyOn(localCache, 'readLocalWechat2RssCache')
+      .mockImplementation(async (id) => pages.get(id)!);
     const oldSaver = jest.spyOn(trpc as any, 'refreshMpArticlesAndUpdateFeed');
     const protectedSaver = jest.spyOn(trpc as any, 'recordCollectionResult');
     const originalSync = trpc.syncCachedWechat2RssPage.bind(trpc);
+    let failSave = true;
     const sync = jest
       .spyOn(trpc, 'syncCachedWechat2RssPage')
       .mockImplementation(async (id, page, listOnly, options) => {
-        if (id === ids[2]) throw new Error('synthetic local save failure');
+        if (id === ids[2] && failSave)
+          throw new Error('synthetic local save failure');
         return originalSync(id, page, listOnly, options);
       });
     let now = new Date('2026-10-12T01:15:00Z').getTime();
@@ -454,7 +460,7 @@ describe('cache delta through original SQLite merge', () => {
       () => now,
     );
     const stages: Array<[string, string]> = [];
-    manager.attachRefresh(async (id, stage) => {
+    manager.attachRefresh(async (id, stage, _automatic, options) => {
       stages.push([id, stage]);
       if (stage === 'submit')
         return {
@@ -462,7 +468,12 @@ describe('cache delta through original SQLite merge', () => {
           accepted: true,
           message: 'offline accepted fixture',
         };
-      return (trpc as any).runManualRefresh(id, stage, true);
+      return (trpc as any).runManualRefresh(
+        id,
+        stage,
+        !options?.cacheOnly,
+        options,
+      );
     });
     try {
       const batch = await manager.enqueueRefresh(ids, 'e'.repeat(64));
@@ -479,11 +490,34 @@ describe('cache delta through original SQLite merge', () => {
       const done = (await manager.list()).find(
         (b) => b.batchId === batch.batchId,
       )!;
-      expect(done.state).toBe('completed');
-      expect(done.items.filter((i) => i.state === 'failed')).toHaveLength(1);
+      expect(done.state).toBe('running');
+      expect(done.items.filter((i) => i.state === 'waiting')).toHaveLength(1);
+      expect(done.items[2]).toMatchObject({
+        accepted: true,
+        cacheOnly: true,
+        stopBatch: false,
+        failurePoint: 'cache-save',
+        failureReason: 'CACHE_UNKNOWN_ERROR',
+      });
       expect(done.items.filter((i) => i.state === 'succeeded')).toHaveLength(
         13,
       );
+      // Release only the synthetic storage failure. Recovery must use local
+      // cache and the real SQLite merge, without fetching or submitting again.
+      failSave = false;
+      now = done.items[2].refreshAfter!;
+      const readsBeforeRecovery = provider.fetchArticles.mock.calls.length;
+      await manager.runDue();
+      const recovered = (await manager.list()).find(
+        (b) => b.batchId === batch.batchId,
+      )!;
+      expect(recovered.state).toBe('completed');
+      expect(recovered.items.every((i) => i.state === 'succeeded')).toBe(true);
+      expect(localCacheSpy).toHaveBeenCalledWith(ids[2], 'automatic-2');
+      expect(provider.fetchArticles.mock.calls).toHaveLength(
+        readsBeforeRecovery,
+      );
+      expect(stages.filter(([, stage]) => stage === 'submit')).toHaveLength(14);
       expect(
         new Set(
           stages.filter(([, stage]) => stage === 'cache').map(([id]) => id),
@@ -514,6 +548,7 @@ describe('cache delta through original SQLite merge', () => {
       manager.close();
       sync.mockRestore();
       providerSpy.mockRestore();
+      localCacheSpy.mockRestore();
       network.mockRestore();
       oldSaver.mockRestore();
       protectedSaver.mockRestore();
@@ -660,14 +695,23 @@ describe('cache delta through original SQLite merge', () => {
     const sync = jest.fn((id: string, p: ProviderPage, listOnly: boolean) =>
       trpc.syncCachedWechat2RssPage(id, p, listOnly),
     );
+    const syncText = jest.fn((id: string, p: ProviderPage) =>
+      trpc.syncCachedWechat2RssPage(id, p, false, { fetchMedia: false }),
+    );
+    let mediaEnabled = true;
+    const queries = jest.spyOn(prisma, '$queryRaw');
+    const flagQueries = () =>
+      queries.mock.calls.filter((args) =>
+        String(args[0]).includes('WITH RECURSIVE image_tags'),
+      );
     const engine = new CacheSyncEngine({
       now: () => now,
       list: async () => [metadata],
       localFeeds: async () => [{ id: mpId, mpName: 'fixture' }],
       read: async () => snapshot,
       sync,
-      inspectLocalMedia: (id, p) =>
-        trpc.syncCachedWechat2RssPage(id, p, false, { inspectOnly: true }),
+      syncText,
+      mediaEnabled: () => mediaEnabled,
     });
     const settle = async () => {
       for (let i = 0; i < 100; i++) {
@@ -684,7 +728,16 @@ describe('cache delta through original SQLite merge', () => {
         data: { contentHtml: body },
       });
       network.mockClear();
+      syncText.mockClear();
+      queries.mockClear();
+      mediaEnabled = false;
       now += 60000;
+      await engine.tick();
+      await settle();
+      expect(syncText).toHaveBeenCalledTimes(1);
+      expect(flagQueries()).toHaveLength(1);
+      expect(network).not.toHaveBeenCalled();
+      mediaEnabled = true;
       await engine.tick();
       await settle();
       expect(network).toHaveBeenCalledTimes(1);
@@ -697,13 +750,18 @@ describe('cache delta through original SQLite merge', () => {
       expect(stored.metrics).toBe('{"note":"keep"}');
       now += 60000;
       network.mockClear();
+      syncText.mockClear();
+      queries.mockClear();
       await engine.tick();
       await settle();
       expect(network).not.toHaveBeenCalled();
+      expect(syncText).toHaveBeenCalledTimes(1);
+      expect(flagQueries()).toHaveLength(1);
     } finally {
       engine.close();
       network.mockRestore();
       clock.mockRestore();
+      queries.mockRestore();
     }
   });
   it('a bounded internal night permit downloads once; ordinary night and operational pause remain closed', async () => {

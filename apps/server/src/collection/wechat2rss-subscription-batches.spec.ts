@@ -509,7 +509,7 @@ describe('durable authorized batch (offline)', () => {
     );
     expect(run).toHaveBeenCalledTimes(3);
   });
-  it('isolates a local accepted save failure but pauses on global or unclassified failures', async () => {
+  it('retains accepted local cache recovery but pauses new submissions on an explicit global failure', async () => {
     const ids = ['MP_WXS_1234567890', 'MP_WXS_2234567890', 'MP_WXS_3234567890'];
     const { manager } = make();
     const run = jest
@@ -536,7 +536,11 @@ describe('durable authorized batch (offline)', () => {
     await manager.runDue();
     expect((await manager.list())[0]).toMatchObject({
       state: 'paused',
-      items: [{ state: 'failed' }, { state: 'blocked' }, { state: 'queued' }],
+      items: [
+        { state: 'waiting', cacheOnly: true },
+        { state: 'blocked' },
+        { state: 'queued' },
+      ],
     });
     expect(run).toHaveBeenCalledTimes(2);
   });

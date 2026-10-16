@@ -594,12 +594,12 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
     ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
     expect(gate).not.toHaveBeenCalled();
   });
-  it('rejects creator mixing, corrupted cached bytes/identity and backup failure without partial writes or published files', async () => {
+  it('rejects creator mixing, corrupted cached bytes/identity and low disk without partial writes or published files', async () => {
     const api = service();
     const before = await prisma.xhsNote.findMany({ orderBy: { id: 'asc' } });
     const gate = jest
-      .spyOn(backup, 'createVerifiedSqliteBackup')
-      .mockRejectedValueOnce(new Error('backup failure'));
+      .spyOn(fs, 'statfs')
+      .mockResolvedValueOnce({ bavail: 0n, bsize: 4096n } as any);
     await expect(api.refresh('creator')).rejects.toMatchObject({
       code: 'PRECONDITION_FAILED',
     });

@@ -1,0 +1,388 @@
+{
+  "baseline": "f82fadeba752cffbc8934010c0bd05dc35b88675",
+  "synthetic": true,
+  "articles": 80,
+  "inlineBodyKiB": 128,
+  "samplesPerCase": 5,
+  "networkRequests": 0,
+  "productionWrites": 0,
+  "results": [
+    {
+      "mode": "healthy",
+      "equivalentState": true,
+      "before": {
+        "medianMs": 409.7667000000001,
+        "samples": [
+          {
+            "elapsedMs": 403.9209000000001,
+            "flagReads": 1,
+            "textCalls": 0,
+            "state": "synced-cache"
+          },
+          {
+            "elapsedMs": 421.8855999999996,
+            "flagReads": 1,
+            "textCalls": 0,
+            "state": "synced-cache"
+          },
+          {
+            "elapsedMs": 409.7667000000001,
+            "flagReads": 1,
+            "textCalls": 0,
+            "state": "synced-cache"
+          },
+          {
+            "elapsedMs": 416.73569999999927,
+            "flagReads": 1,
+            "textCalls": 0,
+            "state": "synced-cache"
+          },
+          {
+            "elapsedMs": 399.1075000000001,
+            "flagReads": 1,
+            "textCalls": 0,
+            "state": "synced-cache"
+          }
+        ]
+      },
+      "after": {
+        "medianMs": 423.4165000000012,
+        "samples": [
+          {
+            "elapsedMs": 422.44630000000006,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "synced-cache"
+          },
+          {
+            "elapsedMs": 408.96659999999974,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "synced-cache"
+          },
+          {
+            "elapsedMs": 437.96090000000095,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "synced-cache"
+          },
+          {
+            "elapsedMs": 424.65500000000065,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "synced-cache"
+          },
+          {
+            "elapsedMs": 423.4165000000012,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "synced-cache"
+          }
+        ]
+      }
+    },
+    {
+      "mode": "pending",
+      "equivalentState": true,
+      "before": {
+        "medianMs": 787.6044000000002,
+        "samples": [
+          {
+            "elapsedMs": 790.5730000000003,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 781.023799999999,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 803.3578000000016,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 775.2609999999986,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 787.6044000000002,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          }
+        ]
+      },
+      "after": {
+        "medianMs": 396.78419999999824,
+        "samples": [
+          {
+            "elapsedMs": 393.59379999999874,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 419.0121999999974,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 381.91430000000037,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 396.78419999999824,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 425.84119999999893,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          }
+        ]
+      }
+    },
+    {
+      "mode": "missing",
+      "equivalentState": true,
+      "before": {
+        "medianMs": 806.0572000000029,
+        "samples": [
+          {
+            "elapsedMs": 801.084600000002,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 806.0572000000029,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 782.8546999999962,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 960.8268000000025,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 898.5478000000003,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          }
+        ]
+      },
+      "after": {
+        "medianMs": 411.2911000000022,
+        "samples": [
+          {
+            "elapsedMs": 410.38570000000254,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 404.0008999999991,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 411.2911000000022,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 422.5977000000057,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 484.8649000000005,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          }
+        ]
+      }
+    },
+    {
+      "mode": "unknown",
+      "equivalentState": true,
+      "before": {
+        "medianMs": 1274.633600000001,
+        "samples": [
+          {
+            "elapsedMs": 1305.8427999999985,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 1274.633600000001,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 1500.2217999999993,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 825.6304999999993,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 830.7811999999976,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "media-pending"
+          }
+        ]
+      },
+      "after": {
+        "medianMs": 582.0797999999995,
+        "samples": [
+          {
+            "elapsedMs": 876.2214999999997,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 801.0987999999998,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 524.7780999999959,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 582.0797999999995,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          },
+          {
+            "elapsedMs": 386.0063000000009,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "media-pending"
+          }
+        ]
+      }
+    },
+    {
+      "mode": "failed",
+      "equivalentState": true,
+      "before": {
+        "medianMs": 823.4535000000033,
+        "samples": [
+          {
+            "elapsedMs": 826.4593000000023,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "unavailable"
+          },
+          {
+            "elapsedMs": 903.9219999999914,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "unavailable"
+          },
+          {
+            "elapsedMs": 823.4535000000033,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "unavailable"
+          },
+          {
+            "elapsedMs": 795.9928999999975,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "unavailable"
+          },
+          {
+            "elapsedMs": 822.1754999999976,
+            "flagReads": 2,
+            "textCalls": 1,
+            "state": "unavailable"
+          }
+        ]
+      },
+      "after": {
+        "medianMs": 445.51110000000335,
+        "samples": [
+          {
+            "elapsedMs": 445.51110000000335,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "unavailable"
+          },
+          {
+            "elapsedMs": 484.0161999999982,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "unavailable"
+          },
+          {
+            "elapsedMs": 401.91109999999753,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "unavailable"
+          },
+          {
+            "elapsedMs": 396.66849999999977,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "unavailable"
+          },
+          {
+            "elapsedMs": 462.6782999999996,
+            "flagReads": 1,
+            "textCalls": 1,
+            "state": "unavailable"
+          }
+        ]
+      }
+    }
+  ],
+  "limits": [
+    "Actual engine control flow and unchanged production recursive SQL; dependency stand-ins exclude Prisma admission, metadata identity checking and write transactions.",
+    "Healthy case remains one scan; pending/missing/unknown/failed cases remove one scan.",
+    "Five alternating pairs, fixture SQL/IPC wall time, not production round savings.",
+    "Synthetic fixtures retained."
+  ],
+  "currentEngineSha256": "6604fad2d65564f63b342c0f14837888cb2ceb4be4c4fb24b731794bca412222"
+}

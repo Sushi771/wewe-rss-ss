@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import sqlite3
 import sys
 import threading
@@ -182,6 +183,11 @@ class SnapshotGuard:
                 "schemaVersion": after_schema, "schemaSha256": after_hash,
                 "backup": str(backup), "sha256": report["sha256"],
                 "backupFingerprint": fingerprint(backup),
+                # These original copy times remain distinct from this guard's
+                # fresh verification/coverage interval, including after restart.
+                "backupReused": report.get("reused") is True,
+                "copyStartedAtUtc": report.get("startedAtUtc"),
+                "copySucceededAtUtc": report.get("createdAtUtc"),
                 "backupStartedAtMs": int(start_wall * 1000),
                 "backupSucceededAtMs": int(completed_wall * 1000),
                 "backupStartedMono": start_mono, "backupSucceededMono": completed_mono,
@@ -274,10 +280,12 @@ def main():
     guard = SnapshotGuard(args.database, args.backup_root,
                           args.interval_seconds, args.max_age_seconds)
     requests = queue.Queue()
+    history_host = None  # explicit opt-in private IPC; never an automatic task
 
     def read_requests():
         for line in sys.stdin:
-            if len(line) > 8192:
+            limit = 256 * 1024 if os.environ.get('SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED') == '1' else 8192
+            if len(line.encode('utf-8')) > limit:
                 requests.put(None)
                 return
             try:
@@ -292,6 +300,7 @@ def main():
         while True:
             if guard.monotonic() >= guard.next_check:
                 guard.tick()
+                print(json.dumps({'event':'periodic-snapshot-status','ok':guard.record is not None}),flush=True)
             try:
                 request = requests.get(timeout=min(1, max(0, guard.next_check - guard.monotonic())))
             except queue.Empty:
@@ -305,6 +314,35 @@ def main():
                 result = guard.validate(request.get("token"))
             elif operation == "dirty":
                 result = guard.dirty(request.get("token"))
+            elif operation in {"history-review", "history-pin", "history-unpin", "history-sync", "history-validate-approval"}:
+                try:
+                    import article_history_host
+                    if history_host is None:
+                        history_host = article_history_host.from_environment(guard)
+                    if operation == "history-sync":
+                        history_host.registry.sync_runtime(request.get('runtime', {}))
+                        result = {'verified': False, 'fresh': False, 'runtimeReferencesSynced': True}
+                    elif operation == "history-pin":
+                        history_host.registry.pin(request.get('token', ''), request.get('path', ''))
+                        result = {'verified': False, 'fresh': False, 'referencePinned': True}
+                    elif operation == "history-unpin":
+                        history_host.registry.unpin(request.get('token', ''))
+                        result = {'verified': False, 'fresh': False, 'referenceUnpinned': True}
+                    elif operation == "history-validate-approval":
+                        result = history_host.validate_approval(request.get('plan', {}), request.get('approval', {}))
+                    else:
+                        result = {'verified': False, 'fresh': False,
+                                  'review': history_host.review(request.get('sources'))}
+                except Exception as error:
+                    # Never echo raw SQL, account values, exceptions or paths.
+                    code = str(error) if type(error).__name__ == 'HostError' else 'HISTORY_REVIEW_FAILED'
+                    if not re.fullmatch('[A-Z_]{1,80}', code):
+                        code = 'HISTORY_REVIEW_FAILED'
+                    result = {'verified': False, 'fresh': False, 'eligible': [],
+                              'reason': code, 'permanentDeletionPerformed': False,
+                              'diagnostic': article_history_host.safe_diagnostic(error) if 'article_history_host' in locals() else
+                                  {'format': 'article-history-diagnostic-v1', 'stage': 'owner-request',
+                                   'errorType': 'UnknownError', 'code': 'UNCLASSIFIED'}}
             else:
                 result = {"verified": False, "fresh": False, "reason": "unknown-operation"}
             print(json.dumps({"id": request.get("id"), "result": result}), flush=True)

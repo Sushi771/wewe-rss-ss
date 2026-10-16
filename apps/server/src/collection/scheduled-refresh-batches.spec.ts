@@ -3,6 +3,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Wechat2RssSubscriptionBatches } from './wechat2rss-subscription-batches';
 
+function refreshCalls(run: { mock: { calls: unknown[][] } }) {
+  return run.mock.calls.map((call) => {
+    if (call[1] === 'submit')
+      expect(call[3]).toEqual(
+        expect.objectContaining({
+          claimKey: expect.stringMatching(/^[a-f0-9-]{36}$/),
+        }),
+      );
+    return call[2] === false ? call.slice(0, 2) : call.slice(0, 3);
+  });
+}
+
 describe('automatic refresh shares durable manual queue (offline)', () => {
   let directory: string, clock: number;
   const managers: Wechat2RssSubscriptionBatches[] = [];
@@ -107,7 +119,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
       await a.manager.enqueueRefresh(ids, key, 'scheduled-refresh'),
     ).toMatchObject({
       purpose: 'scheduled-refresh',
-      state: 'completed',
+      state: 'deferred',
       reused: true,
     });
     await a.manager.runDue();
@@ -118,7 +130,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
       await recovered.manager.enqueueRefresh(ids, key, 'scheduled-refresh'),
     ).toMatchObject({
       purpose: 'scheduled-refresh',
-      state: 'completed',
+      state: 'deferred',
       reused: true,
     });
     expect(recovered.run).not.toHaveBeenCalled();
@@ -170,7 +182,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     expect(run).toHaveBeenCalledTimes(1);
     clock++;
     await manager.runDue();
-    expect(run.mock.calls).toEqual([
+    expect(refreshCalls(run)).toEqual([
       [ids[0], 'submit'],
       [ids[1], 'submit', true],
     ]);
@@ -184,7 +196,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     await manager.runDue();
     clock += 30000;
     await manager.runDue();
-    expect(run.mock.calls).toEqual([
+    expect(refreshCalls(run)).toEqual([
       [ids[0], 'submit', true],
       [ids[1], 'submit', true],
     ]);
@@ -243,7 +255,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     await next.manager.runDue();
     expect(run).toHaveBeenCalledTimes(1);
     expect(next.run).toHaveBeenCalledTimes(1);
-    expect(next.run).toHaveBeenCalledWith(ids[1], 'submit', true);
+    expect(refreshCalls(next.run)).toContainEqual([ids[1], 'submit', true]);
     expect(
       (await manager.list()).find((item) => item.batchId === batch.batchId)
         ?.state,
@@ -297,7 +309,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
       1,
     );
   }, 30000);
-  it('preparation errors retry three times with durable backoff while independent items proceed', async () => {
+  it('preparation errors retain durable backoff beyond three attempts while independent items proceed', async () => {
     const run = jest.fn(async (id: string) =>
       id === ids[0]
         ? {
@@ -328,6 +340,12 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     clock++;
     await recovered.manager.runDue();
     expect(run).toHaveBeenCalledTimes(4);
+    expect((await recovered.manager.list())[0].state).toBe('running');
+    for (let attempt = 4; attempt <= 8; attempt++) {
+      clock = (await recovered.manager.list())[0].items[0].retryAfter!;
+      await recovered.manager.runDue();
+    }
+    expect(run).toHaveBeenCalledTimes(9); // Eight preparation attempts, one independent success.
     expect((await recovered.manager.list())[0].state).toBe('completed');
   });
   it('read-only proof releases an old paused item; unknown proof never releases another author', async () => {
@@ -357,7 +375,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
     clock += 30000;
     await manager.runDue();
     expect(run.mock.calls.map((call) => call[0])).toEqual(ids);
-    expect(proof).toHaveBeenCalledWith(ids[0], first.createdAt);
+    expect(proof).toHaveBeenCalledWith(ids[0], first.createdAt, first.batchId);
     proof.mockResolvedValue('not-submitted');
     clock += 60000;
     await manager.runDue();

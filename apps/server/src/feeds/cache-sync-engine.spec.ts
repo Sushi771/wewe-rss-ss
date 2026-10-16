@@ -9,6 +9,8 @@ import {
   cacheSyncState,
 } from './cache-sync-state';
 import { ProviderPage } from '../collection/subscription-provider';
+import { Wechat2RssResponseError } from '../collection/providers/wechat2rss-response';
+import { cacheSyncStatus } from './cache-sync-state';
 const start = Date.parse('2026-10-11T08:00:00Z');
 const ids = ['MP_WXS_1234567890', 'MP_WXS_2345678901'];
 const metadata = (feedId = ids[0]) => ({
@@ -73,7 +75,155 @@ function setup(count = 1, mediaEnabled?: () => boolean, syncText?: jest.Mock) {
     },
   };
 }
+const drainMedia = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+};
+async function reconciledFixture() {
+  let mediaEnabled = true;
+  const syncText = jest.fn().mockResolvedValue({ mediaReady: true });
+  const inspect = jest.fn().mockResolvedValue({ mediaReady: false });
+  const f = setup(1, () => mediaEnabled, syncText);
+  (f.engine as any).deps.inspectLocalMedia = inspect;
+  f.read.mockResolvedValue(page('<p>unchanged provider text</p>'));
+  f.sync.mockResolvedValue({
+    bodyMissing: 0,
+    imageBlocked: 0,
+    localMediaPendingArticleCount: 0,
+  });
+  await f.engine.tick();
+  await drainMedia();
+  expect(cacheSyncState.feeds[0].state).toBe('synced-cache');
+  f.sync.mockClear();
+  syncText.mockClear();
+  f.time(60000);
+  return {
+    ...f,
+    syncText,
+    inspect,
+    pauseMedia: () => {
+      mediaEnabled = false;
+    },
+  };
+}
+describe('fresh unchanged-page text reconciliation', () => {
+  it('uses one current text result for a healthy page without ingesting the list or archiving media', async () => {
+    const f = await reconciledFixture();
+    const revision = cacheRevision();
+    await f.engine.tick();
+    await drainMedia();
+    expect(f.syncText).toHaveBeenCalledTimes(1);
+    expect(f.inspect).not.toHaveBeenCalled();
+    expect(f.sync).not.toHaveBeenCalled();
+    expect(cacheSyncState.feeds[0].state).toBe('synced-cache');
+    expect(cacheRevision()).toEqual(revision);
+    f.engine.close();
+  });
+  it.each([
+    ['local media changed', { mediaReady: false }],
+    ['body remains missing', { mediaReady: false, bodyMissing: 1 }],
+    ['readiness omitted', {}],
+    ['result unavailable', undefined],
+  ])(
+    'keeps %s pending using this tick rather than the previous complete result',
+    async (_name, result) => {
+      const f = await reconciledFixture();
+      f.pauseMedia();
+      f.syncText.mockResolvedValue(result);
+      await f.engine.tick();
+      expect(f.syncText).toHaveBeenCalledTimes(1);
+      expect(f.inspect).not.toHaveBeenCalled();
+      expect(f.sync).not.toHaveBeenCalled();
+      expect(cacheSyncState.feeds[0].state).toBe('media-pending');
+      f.engine.close();
+    },
+  );
+  it('retains failure and retries fresh text reconciliation before declaring readiness', async () => {
+    const f = await reconciledFixture();
+    f.syncText.mockRejectedValueOnce(Error('OFFLINE_TEXT_FAILURE'));
+    await f.engine.tick();
+    expect(cacheSyncState.feeds[0].state).toBe('unavailable');
+    expect(f.sync).not.toHaveBeenCalled();
+    f.time(69000);
+    await f.engine.tick();
+    expect(f.syncText).toHaveBeenCalledTimes(1);
+    f.time(70000);
+    await f.engine.tick();
+    expect(f.syncText).toHaveBeenCalledTimes(2);
+    expect(f.inspect).not.toHaveBeenCalled();
+    expect(cacheSyncState.feeds[0].state).toBe('synced-cache');
+    f.engine.close();
+  });
+  it('continues full list/text reconciliation when the provider body or media changes', async () => {
+    const f = await reconciledFixture();
+    f.pauseMedia();
+    f.read.mockResolvedValue(
+      page('<p>new body</p><img src="https://fixture.invalid/image">'),
+    );
+    await f.engine.tick();
+    expect(f.sync.mock.calls.map((args) => args[2])).toEqual([true]);
+    expect(f.syncText).toHaveBeenCalledTimes(1);
+    expect(cacheSyncState.feeds[0].state).toBe('media-pending');
+    f.engine.close();
+  });
+});
 describe('existing-cache synchronization', () => {
+  it('retains safe read-limit diagnostics, continues peers, and clears the error after recovery', async () => {
+    const f = setup(
+      2,
+      () => false,
+      jest.fn().mockResolvedValue({ mediaReady: true }),
+    );
+    f.read.mockRejectedValueOnce(
+      new Wechat2RssResponseError('WECHAT2RSS_RESPONSE_TOO_LARGE', {
+        responseBytes: 16777217,
+        responseLimitBytes: 16777216,
+      }),
+    );
+    await f.engine.tick();
+    expect(cacheSyncState.feeds[0]).toMatchObject({
+      state: 'unavailable',
+      failure: {
+        failureReason: 'CACHE_RESPONSE_TOO_LARGE',
+        failurePoint: 'cache-read',
+        failureCode: 'WECHAT2RSS_RESPONSE_TOO_LARGE',
+        responseBytes: 16777217,
+        responseLimitBytes: 16777216,
+      },
+    });
+    expect(cacheSyncState.feeds[1].state).not.toBe('unavailable');
+    const snapshot = cacheSyncStatus();
+    snapshot.feeds[0].failure!.responseBytes = 0;
+    expect(cacheSyncState.feeds[0].failure!.responseBytes).toBe(16777217);
+    f.time(10000);
+    await f.engine.tick();
+    expect(cacheSyncState.feeds[0].state).toBe('media-pending');
+    expect(cacheSyncState.feeds[0].failure).toBeUndefined();
+    f.engine.close();
+  });
+  it('distinguishes metadata/read/import failure stages without raw messages or secrets', async () => {
+    const f = setup(1, () => false);
+    f.list.mockRejectedValueOnce(
+      new Wechat2RssResponseError('WECHAT2RSS_HTTP_STATUS', {
+        httpStatus: 503,
+      }),
+    );
+    await f.engine.tick();
+    expect(cacheSyncStatus().metadataFailure).toMatchObject({
+      failureReason: 'CACHE_HTTP_STATUS',
+      failurePoint: 'metadata-read',
+      httpStatus: 503,
+    });
+    f.time(10000);
+    f.sync.mockRejectedValueOnce(Error('private SQL synthetic-secret'));
+    await f.engine.tick();
+    expect(cacheSyncState.metadataFailure).toBeUndefined();
+    expect(cacheSyncState.feeds[0].failure).toMatchObject({
+      failurePoint: 'cache-import',
+      failureReason: 'CACHE_UNKNOWN_ERROR',
+    });
+    expect(JSON.stringify(cacheSyncStatus())).not.toContain('synthetic-secret');
+    f.engine.close();
+  });
   it('saves text while CDN media is disabled, without invoking the media lane', async () => {
     const syncText = jest.fn().mockResolvedValue({ bodyMissing: 0 });
     const f = setup(1, () => false, syncText);

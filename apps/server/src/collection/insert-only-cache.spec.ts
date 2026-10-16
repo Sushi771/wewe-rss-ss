@@ -63,6 +63,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     Array<{ id: string; created_count: number }>
   >`
     SELECT id, created_count FROM cache_insert_batches
+    UNION ALL SELECT id,json_extract(result_json,'$.created') AS created_count FROM cache_refresh_commits
   `;
   const insert = (page = makePage(), listOnly = true) =>
     tryInsertOnlyCachedPage(prisma, expected, page, listOnly);
@@ -195,6 +196,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     await prisma.article.deleteMany();
     await prisma.feed.deleteMany();
     await prisma.$executeRaw`DELETE FROM cache_insert_batches`;
+    await prisma.$executeRaw`DELETE FROM cache_refresh_commits`;
     expected = await prisma.feed.create({
       data: {
         id: mpId,
@@ -298,10 +300,10 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     });
     // Media projection is read after commit; never add status-only database writes.
     expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject(
-      persistedResult,
+      JSON.parse(JSON.stringify(persistedResult)),
     );
     expect(cacheRevision().revision).not.toBe(version);
-    expect(dirty).toHaveBeenCalledTimes(1);
+    expect(dirty).not.toHaveBeenCalled();
     expect(backup).not.toHaveBeenCalled();
   });
   it('repeated delivery is a no-op even after a user edit; no row, batch or revision duplication', async () => {
@@ -329,10 +331,10 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     );
     expect(await ledger()).toHaveLength(1);
     expect(cacheRevision().revision).toBe(version);
-    expect(dirty).toHaveBeenCalledTimes(1);
+    expect(dirty).not.toHaveBeenCalled();
   });
   it.each(['disabled', 'expired', 'missing', 'unreadable', 'guard-rejected'])(
-    '%s guard returns to original full-backup path',
+    '%s legacy guard cannot block ordinary atomic refresh',
     async (kind) => {
       if (kind === 'disabled') delete process.env.SQLITE_INSERT_ONLY_FAST_PATH;
       if (kind === 'expired') probe.mockResolvedValue(null);
@@ -344,8 +346,8 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
       expect(
         await trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
       ).toMatchObject({ created: 2 });
-      expect(backup).toHaveBeenCalledTimes(1);
-      expect(await ledger()).toHaveLength(0);
+      expect(backup).not.toHaveBeenCalled();
+      expect(await ledger()).toHaveLength(1);
       expect(dirty).not.toHaveBeenCalled();
     },
   );
@@ -357,13 +359,13 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     expect(await insert()).toBeNull();
     expect(await prisma.article.count()).toBe(0);
   });
-  it('without additive ledger schema safely uses full backup; does not auto-migrate', async () => {
+  it('ordinary refresh does not need the legacy insert-only snapshot ledger', async () => {
     await prisma.$executeRaw`DROP TABLE cache_insert_batches`;
     try {
       expect(
         await trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
       ).toMatchObject({ created: 2 });
-      expect(backup).toHaveBeenCalledTimes(1);
+      expect(backup).not.toHaveBeenCalled();
     } finally {
       await initSql(
         path.resolve(
@@ -388,26 +390,13 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     expect(await insert()).toMatchObject({ created: 2 });
     expect(await ledger()).toHaveLength(1);
   });
-  it('lease revoked after local state write rolls back and then invokes original backup', async () => {
-    assertLease
-      .mockReset()
-      .mockResolvedValue(undefined)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(Error('SYNTHETIC_LEASE_REVOKED'));
-    backup.mockImplementationOnce(async () => {
-      expect(await prisma.article.count()).toBe(0);
-      expect(await ledger()).toHaveLength(0);
-      expect(
-        await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
-      ).toEqual(expected);
-      return { integrityCheck: 'ok' };
-    });
+  it('legacy lease revocation cannot gate the ordinary transaction', async () => {
+    assertLease.mockRejectedValue(Error('SYNTHETIC_LEASE_REVOKED'));
     expect(
       await trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
     ).toMatchObject({ created: 2 });
-    expect(backup).toHaveBeenCalledTimes(1);
-    expect(await ledger()).toHaveLength(0);
+    expect(backup).not.toHaveBeenCalled();
+    expect(await ledger()).toHaveLength(1);
     expect(dirty).not.toHaveBeenCalled();
   });
   it('rechecks source/name/status in transaction, preserving a concurrent user source edit', async () => {
@@ -422,7 +411,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     ).toEqual(before);
     expect(await prisma.article.count()).toBe(0);
   });
-  it('protects all old fields and routes mixed existing/new media updates through backup', async () => {
+  it('protects all old fields and routes mixed existing/new media updates in the ordinary transaction', async () => {
     await trpc.syncCachedWechat2RssPage(mpId, makePage(1), true);
     await prisma.article.update({
       where: { id: makePage(1).articles[0].id },
@@ -443,7 +432,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
         false,
       ),
     ).toMatchObject({ created: 1, updated: 1 });
-    expect(backup).toHaveBeenCalledTimes(1);
+    expect(backup).not.toHaveBeenCalled();
     const saved = await prisma.article.findUniqueOrThrow({
       where: { id: old.id },
     });
@@ -456,7 +445,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
       verifiedSourceUrl: old.verifiedSourceUrl,
       createdAt: old.createdAt,
     });
-    expect(await ledger()).toHaveLength(1);
+    expect(await ledger()).toHaveLength(2);
   });
   it('ambiguous short-link row is quarantined by original path without title guesses', async () => {
     await prisma.article.create({
@@ -477,11 +466,11 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     expect(
       await trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
     ).toMatchObject({ created: 1, identitySkipped: 1 });
-    expect(backup).toHaveBeenCalledTimes(1);
+    expect(backup).not.toHaveBeenCalled();
     expect(
       await prisma.article.findUniqueOrThrow({ where: { id: before.id } }),
     ).toEqual(before);
-    expect(await ledger()).toHaveLength(0);
+    expect(await ledger()).toHaveLength(1);
   });
   it('protects alternate URL order and cross-feed stable identity conflicts', async () => {
     const first = makePage().articles[0];
@@ -508,7 +497,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     const before = await prisma.article.findMany();
     await expect(
       trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
-    ).rejects.toThrow('CACHE_INSERT_IDENTITY_CONFLICT');
+    ).rejects.toThrow('已保存文章与原文身份冲突');
     expect(await prisma.article.findMany()).toEqual(before);
     expect(backup).not.toHaveBeenCalled();
     expect(await ledger()).toHaveLength(0);
@@ -562,21 +551,18 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
       request.mockRestore();
     }
   });
-  it('failed fallback backup makes no article, batch, status, dirty or revision change', async () => {
-    probe.mockResolvedValue(null);
-    backup.mockRejectedValueOnce(Error('SYNTHETIC_BACKUP_FAILED'));
-    const version = cacheRevision().revision;
-    await expect(
-      trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
-    ).rejects.toThrow('SYNTHETIC_BACKUP_FAILED');
-    expect(await prisma.article.count()).toBe(0);
-    expect(await ledger()).toHaveLength(0);
+  it('a failed snapshot cannot gate an ordinary canonical insert', async () => {
+    backup.mockRejectedValueOnce(Error('SYNTHETIC_BACKUP_FAILURE'));
     expect(
-      await prisma.feed.findUniqueOrThrow({ where: { id: mpId } }),
-    ).toEqual(expected);
-    expect(cacheRevision().revision).toBe(version);
+      await trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
+    ).toMatchObject({ created: 2 });
+    expect(await prisma.article.count()).toBe(2);
+    expect(await ledger()).toHaveLength(1);
+    expect(backup).not.toHaveBeenCalled();
     expect(dirty).not.toHaveBeenCalled();
+    backup.mockReset().mockResolvedValue({ integrityCheck: 'ok' });
   });
+
   it('preserves every existing article column when inserting distinct peers', async () => {
     const identity = canonicalArticleUrl(
       'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=999&idx=1',
@@ -603,7 +589,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
       await prisma.article.findUniqueOrThrow({ where: { id: old.id } }),
     ).toEqual(old);
   });
-  it('unknown legacy ID without any source requires original full protection even with different title/time', async () => {
+  it('unknown legacy ID without any source is retained during ordinary inserts even with different title/time', async () => {
     const old = await prisma.article.create({
       data: {
         id: 'opaque-unknown',
@@ -618,8 +604,8 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     expect(
       await trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
     ).toMatchObject({ created: 2 });
-    expect(backup).toHaveBeenCalledTimes(1);
-    expect(await ledger()).toHaveLength(0);
+    expect(backup).not.toHaveBeenCalled();
+    expect(await ledger()).toHaveLength(1);
     expect(
       await prisma.article.findUniqueOrThrow({ where: { id: old.id } }),
     ).toEqual(old);
@@ -638,22 +624,15 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     expect(await prisma.article.count()).toBe(0);
     expect(await ledger()).toHaveLength(0);
   });
-  it('postcommit dirty failure never re-enters backup or reports a rolled-back batch', async () => {
-    const warning = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  it('ordinary commits are independent of legacy postcommit dirty notification failures', async () => {
     dirty.mockRejectedValueOnce(Error('SYNTHETIC_DIRTY_FAILURE'));
-    try {
-      expect(
-        await trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
-      ).toMatchObject({ created: 2 });
-      expect(await prisma.article.count()).toBe(2);
-      expect(await ledger()).toHaveLength(1);
-      expect(backup).not.toHaveBeenCalled();
-      expect(warning).toHaveBeenCalledWith(
-        'SQLITE_SNAPSHOT_DIRTY_NOTIFICATION_FAILED',
-      );
-    } finally {
-      warning.mockRestore();
-    }
+    expect(
+      await trpc.syncCachedWechat2RssPage(mpId, makePage(), true),
+    ).toMatchObject({ created: 2 });
+    expect(await prisma.article.count()).toBe(2);
+    expect(await ledger()).toHaveLength(1);
+    expect(backup).not.toHaveBeenCalled();
+    expect(dirty).not.toHaveBeenCalled();
   });
   it('dirty notification observes committed articles and batch plus published revision', async () => {
     const version = cacheRevision().revision;

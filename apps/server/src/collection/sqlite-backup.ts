@@ -3,6 +3,7 @@ import { access, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { sqliteWrites } from './sqlite-write-coordinator';
+import { resolveSqliteBackupRoot } from './sqlite-backup-root';
 
 // A kill request is not an exit receipt. Keep a failed-to-stop child fenced
 // until its close event, including after the bounded caller wait has expired.
@@ -109,7 +110,7 @@ export async function createVerifiedSqliteBackup(
   const script = path.join(root, 'scripts', 'backup-sqlite.py');
   if (stoppingBackups.has(database))
     throw new Error('SQLite 备份子进程退出未确认，本次未写入');
-  const backupRoot = path.join(path.dirname(database), 'backups');
+  const backupRoot = resolveSqliteBackupRoot(database);
   const python =
     process.env.SQLITE_BACKUP_PYTHON?.trim() ||
     (process.platform === 'win32' ? 'python' : 'python3');
@@ -127,6 +128,7 @@ export async function createVerifiedSqliteBackup(
             windowsHide: true,
             shell: false,
             stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
           },
         );
       } catch {
@@ -219,8 +221,12 @@ export async function createVerifiedSqliteBackup(
         }
         if (code !== 0 || signal) {
           let timedOut = false;
+          let budgetFailure = false;
+          let layoutReview = false;
           try {
             const failure = JSON.parse(stderr);
+            budgetFailure = failure?.reason === 'space-budget';
+            layoutReview = failure?.reason === 'layout-review';
             timedOut =
               failure?.event === 'sqlite-backup-failed' &&
               failure?.reason === 'timeout';
@@ -228,9 +234,13 @@ export async function createVerifiedSqliteBackup(
             /* Ignore raw child exceptions. */
           }
           fail(
-            timedOut
-              ? 'SQLite 一致性备份超时，本次未写入'
-              : 'SQLite 一致性备份未验证成功，本次未写入',
+            budgetFailure
+              ? '备份空间预算不足，已停止写入以保留恢复点。请审阅备份空间并明确确认归档，不会自动删旧点。'
+              : layoutReview
+                ? '备份历史目录链接须明确审阅，本次未写入。'
+                : timedOut
+                  ? 'SQLite 一致性备份超时，本次未写入'
+                  : 'SQLite 一致性备份未验证成功，本次未写入',
           );
         } else {
           settled = true;
@@ -239,26 +249,34 @@ export async function createVerifiedSqliteBackup(
         }
       });
     });
-  const output = await sqliteWrites.snapshot(execute);
-  let report: {
-    integrityCheck?: string;
-    source?: string;
-    backup?: string;
-    sha256?: string;
-  };
-  try {
-    report = JSON.parse(output);
-  } catch {
-    throw new Error('SQLite 备份验证报告无效，本次未写入');
-  }
-  if (
-    !report ||
-    report.integrityCheck !== 'ok' ||
-    typeof report.backup !== 'string' ||
-    !report.backup ||
-    typeof report.sha256 !== 'string' ||
-    !/^[a-f0-9]{64}$/.test(report.sha256)
-  )
-    throw new Error('SQLite 备份验证失败，本次未写入');
-  return { ...report, backup: report.backup, sha256: report.sha256 };
+  // Python revalidates all schema and typed rows on every reuse. File identity
+  // and header-only process caches cannot authorize skipping that proof.
+  if (sqliteWrites.hasWriteAdmission())
+    throw new Error(
+      'Cannot establish a recovery snapshot inside an admitted write',
+    );
+  return sqliteWrites.snapshot(async () => {
+    const output = await execute();
+    let report: {
+      integrityCheck?: string;
+      source?: string;
+      backup?: string;
+      sha256?: string;
+    };
+    try {
+      report = JSON.parse(output);
+    } catch {
+      throw new Error('SQLite 备份验证报告无效，本次未写入');
+    }
+    if (
+      !report ||
+      report.integrityCheck !== 'ok' ||
+      typeof report.backup !== 'string' ||
+      !report.backup ||
+      typeof report.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(report.sha256)
+    )
+      throw new Error('SQLite 备份验证失败，本次未写入');
+    return { ...report, backup: report.backup, sha256: report.sha256 };
+  });
 }

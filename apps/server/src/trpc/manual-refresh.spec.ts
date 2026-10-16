@@ -9,6 +9,39 @@ jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest.fn(),
 }));
 
+jest.mock('../collection/refresh-submission-claim', () => ({
+  readRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  reserveRefreshSubmission: jest.fn(async (prisma, feed, _batch, now) => {
+    const reserved = await prisma.feed.updateMany({
+      where: {
+        id: feed.id,
+        status: 1,
+        collectionChannel: feed.collectionChannel,
+        providerRefreshAttemptTime: { lte: now - 900 },
+      },
+      data: { providerRefreshAttemptTime: now },
+    });
+    return reserved.count === 1
+      ? {
+          ticket: {
+            id: 'synthetic',
+            mpId: feed.id,
+            reservedAt: now,
+            previousAt: feed.providerRefreshAttemptTime || 0,
+          },
+        }
+      : { outcome: { state: 'skipped', accepted: false, stopBatch: false } };
+  }),
+  beginRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  finishRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  cancelRefreshPreparation: jest.fn(async (prisma, ticket) => {
+    await prisma.feed.updateMany({
+      where: { id: ticket.mpId, providerRefreshAttemptTime: ticket.reservedAt },
+      data: { providerRefreshAttemptTime: ticket.previousAt },
+    });
+  }),
+}));
+
 describe('explicit manual all-refresh boundary (offline)', () => {
   const id = 'MP_WXS_1234567890';
   let service: any, provider: any, feed: any;
@@ -85,6 +118,54 @@ describe('explicit manual all-refresh boundary (offline)', () => {
     expect(provider.refreshSubscription).not.toHaveBeenCalled();
     expect(service.syncCachedWechat2RssPage).not.toHaveBeenCalled();
   });
+  it.each(['feed-read', 'cache-read', 'cache-save'])(
+    'records classified cache failures at %s without leaking the exception or resubmitting',
+    async (point) => {
+      const error = Object.assign(Error('private SQL token path'), {
+        code: 'P2028',
+      });
+      if (point === 'feed-read')
+        service.prismaService.feed.findUnique.mockRejectedValue(error);
+      else if (point === 'cache-read')
+        provider.fetchArticles.mockRejectedValue(error);
+      else service.syncCachedWechat2RssPage.mockRejectedValue(error);
+      const result = await service.runManualRefresh(id, 'cache', true);
+      expect(result).toMatchObject({
+        accepted: true,
+        submissionUnknown: false,
+        stopBatch: false,
+        failureReason: 'CACHE_STORAGE_TIMEOUT',
+        failurePoint: point,
+      });
+      expect(JSON.stringify(result)).not.toContain('private SQL token path');
+      expect(provider.refreshSubscription).not.toHaveBeenCalled();
+      expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'WECHAT2RSS_ACCOUNT_CHALLENGED',
+    'WECHAT2RSS_RATE_LIMITED',
+    'CACHE_SYNC_STARTUP_BLOCKED',
+  ])('preserves the cache shared/startup gate %s', async (message) => {
+    provider.fetchArticles.mockRejectedValue(Error(message));
+    expect(await service.runManualRefresh(id, 'cache', true)).toMatchObject({
+      state: 'blocked',
+      accepted: true,
+      stopBatch: true,
+      failurePoint: 'global-gate',
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
+  it('a removed or changed accepted subscription is terminal only for that source', async () => {
+    service.prismaService.feed.findUnique.mockResolvedValue(null);
+    expect(await service.runManualRefresh(id, 'cache', true)).toMatchObject({
+      state: 'blocked',
+      accepted: true,
+      stopBatch: false,
+      code: 'SOURCE_CHANGED',
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
   it('ordinary subscription projections keep all original batches and do not expose manual ones', async () => {
     expect(await service.subscriptionBatchList()).toEqual([
       { purpose: 'subscription' },
@@ -120,8 +201,12 @@ describe('explicit manual all-refresh boundary (offline)', () => {
     );
     expect(service.subscriptionBatches.enqueueRefresh).not.toHaveBeenCalled();
   });
-  it('backs up and atomically reserves the existing per-feed 15-minute cooldown before one provider update', async () => {
-    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+  it('atomically reserves without a snapshot the existing per-feed 15-minute cooldown before one provider update', async () => {
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'waiting',
       accepted: true,
     });
@@ -135,11 +220,7 @@ describe('explicit manual all-refresh boundary (offline)', () => {
       reservation.data.providerRefreshAttemptTime -
         reservation.where.providerRefreshAttemptTime.lte,
     ).toBe(900);
-    expect(
-      (createVerifiedSqliteBackup as jest.Mock).mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      service.prismaService.feed.updateMany.mock.invocationCallOrder[0],
-    );
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
     expect(
       service.prismaService.feed.updateMany.mock.invocationCallOrder[0],
     ).toBeLessThan(provider.refreshSubscription.mock.invocationCallOrder[0]);
@@ -152,7 +233,11 @@ describe('explicit manual all-refresh boundary (offline)', () => {
       available: true,
       challenged: true,
     });
-    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'blocked',
       accepted: false,
     });
@@ -161,18 +246,30 @@ describe('explicit manual all-refresh boundary (offline)', () => {
       challenged: false,
     });
     service.prismaService.feed.updateMany.mockResolvedValue({ count: 0 });
-    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'blocked',
       accepted: false,
     });
     feed.status = 0;
-    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'blocked',
       accepted: false,
     });
     feed.status = 1;
     feed.collectionChannel = 'public-album';
-    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'blocked',
       accepted: false,
     });
@@ -182,26 +279,25 @@ describe('explicit manual all-refresh boundary (offline)', () => {
     provider.refreshSubscription.mockRejectedValue(
       new Error('synthetic unknown receipt'),
     );
-    await expect(service.runManualRefresh(id, 'submit')).rejects.toThrow(
-      'synthetic unknown receipt',
-    );
+    await expect(
+      service.runManualRefresh(id, 'submit', false, { claimKey: 'synthetic' }),
+    ).rejects.toThrow('synthetic unknown receipt');
     expect(service.prismaService.feed.updateMany).toHaveBeenCalledTimes(1);
     expect(service.activeCollections.size).toBe(0);
     expect(service.activeSubscriptionAdds.size).toBe(0);
   });
-  it('a backup failure is definitely pre-submission and safe for bounded automatic retry', async () => {
+  it('ordinary submission succeeds independently of a failed backup quota', async () => {
     (createVerifiedSqliteBackup as jest.Mock).mockRejectedValueOnce(
       new Error('private backup error'),
     );
-    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
-      state: 'failed',
-      accepted: false,
-      submissionUnknown: false,
-      retryable: true,
-      stopBatch: false,
-    });
-    expect(provider.refreshSubscription).not.toHaveBeenCalled();
-    expect(service.prismaService.feed.updateMany).not.toHaveBeenCalled();
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({ state: 'waiting', accepted: true });
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    expect(provider.refreshSubscription).toHaveBeenCalledTimes(1);
+    expect(service.prismaService.feed.updateMany).toHaveBeenCalledTimes(1);
     expect(service.activeCollections.size).toBe(0);
   });
   it('storage failures during the initial feed read cannot be mislabeled as unknown receipts', async () => {
@@ -209,7 +305,11 @@ describe('explicit manual all-refresh boundary (offline)', () => {
       name: 'PrismaClientRustPanicError',
       message: 'private storage details',
     });
-    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'failed',
       accepted: false,
       retryable: true,
@@ -273,7 +373,11 @@ describe('explicit manual all-refresh boundary (offline)', () => {
       service.activeCollections.add(id);
       return feed;
     });
-    expect(await service.runManualRefresh(id, 'submit')).toMatchObject({
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
       state: 'queued',
       accepted: false,
     });

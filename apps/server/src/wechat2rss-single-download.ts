@@ -93,6 +93,7 @@ export async function prepareWechat2RssSingleDownload(
     },
     undefined,
     { maxImages: 60, maxBytes: 20_000_000 },
+    false,
   );
   const prepare: ArticlePreparation = async (directory) => {
     try {
@@ -107,5 +108,6 @@ export async function prepareWechat2RssSingleDownload(
   prepare.identity = { ...cached.identity!, source: 'wechat2rss' };
   prepare.seedImages = cached.seedImages;
   prepare.canReuseLegacyImages = cached.canReuseLegacyImages;
+  prepare.hasUnarchivedMedia = cached.hasUnarchivedMedia;
   return prepare;
 }

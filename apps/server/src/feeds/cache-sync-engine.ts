@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { cacheFailureDiagnostic } from '../collection/cache-failure';
 import { Wechat2RssListedFeed } from '../collection/providers/wechat2rss';
 import { ProviderPage } from '../collection/subscription-provider';
 import { cacheSyncState, CacheSyncFeedState } from './cache-sync-state';
@@ -35,7 +36,7 @@ export type CacheSyncDependencies = {
   mediaEnabled?(): boolean;
   onMediaBlocked?(): Promise<void>;
   mediaStopped?(): boolean;
-  /** Read-only stored-body flags, even when the upstream fingerprint is unchanged. */
+  /** Read-only fallback for dependencies without text reconciliation. */
   inspectLocalMedia?(
     id: string,
     page: ProviderPage,
@@ -43,8 +44,12 @@ export type CacheSyncDependencies = {
   list(): Promise<Wechat2RssListedFeed[]>;
   localFeeds(): Promise<LocalFeed[]>;
   read(feed: Wechat2RssListedFeed, name: string): Promise<ProviderPage>;
-  /** Body text must not depend on the separate CDN media lane being enabled. */
-  syncText?(id: string, page: ProviderPage): Promise<unknown>;
+  /** Reconcile text without CDN requests and return fresh stored-media readiness.
+   * Missing readiness remains pending; never reuse a previous tick's summary. */
+  syncText?(
+    id: string,
+    page: ProviderPage,
+  ): Promise<{ mediaReady?: boolean } | void>;
   sync(
     id: string,
     page: ProviderPage,
@@ -156,10 +161,16 @@ export class CacheSyncEngine {
               this.media.delete(id);
             }
           this.listFailures = 0;
+          cacheSyncState.metadataFailure = undefined;
           this.nextList = now + 5000;
           cacheSyncState.lastMetadataAt = new Date(now).toISOString();
           cacheSyncState.state = 'watching-cache';
-        } catch {
+        } catch (error) {
+          cacheSyncState.metadataFailure = cacheFailureDiagnostic(
+            error,
+            'metadata-read',
+            this.deps.now(),
+          );
           this.nextList =
             now + Math.min(60000, 5000 * 2 ** Math.min(++this.listFailures, 4));
           cacheSyncState.state = 'upstream-unavailable';
@@ -189,8 +200,10 @@ export class CacheSyncEngine {
         )
           continue;
         if (readBudget-- <= 0) break;
+        let point: 'cache-read' | 'cache-import' = 'cache-read';
         try {
           const page = await this.deps.read(slot.metadata, slot.local.mpName);
+          point = 'cache-import';
           const fingerprint = cachePageFingerprint(page);
           // If cache HTTP lags its DB marker, keep rechecking the affected feed.
           // Never mark check_time consumed after a single unchanged/empty read.
@@ -202,13 +215,17 @@ export class CacheSyncEngine {
           } else if (!this.media.has(id)) {
             // Reconcile local SQLite gaps without downloading healthy media or
             // rewriting a successful list. Unknown readiness stays pending.
-            const local = await this.deps.inspectLocalMedia?.(id, page);
+            // Text reconciliation already reads current local flags and rereads
+            // them after writes. Use that result instead of inspecting twice.
+            const local = this.deps.syncText
+              ? await this.deps.syncText(id, page)
+              : await this.deps.inspectLocalMedia?.(id, page);
             if (local?.mediaReady !== true) {
-              await this.deps.syncText?.(id, page);
               this.media.set(id, { page, due: now });
             }
           }
           slot.failures = 0;
+          slot.status.failure = undefined;
           const delays =
             cacheSyncState.signal === 'sqlite'
               ? [1000, 2000, 5000, 15000, 30000, 60000]
@@ -225,6 +242,11 @@ export class CacheSyncEngine {
           cacheSyncState.lastSyncAt = slot.status.lastCacheReadAt;
         } catch (error) {
           slot.status.state = 'unavailable';
+          slot.status.failure = cacheFailureDiagnostic(
+            error,
+            point,
+            this.deps.now(),
+          );
           slot.nextRead =
             now +
             (error instanceof Error && error.message === 'CACHE_SYNC_BUSY'
