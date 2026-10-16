@@ -1739,12 +1739,13 @@ for (const fault of [
           name: 'conhost.exe',
         },
       ];
-      if (fault === 'wrong-parent') own[2].parentPid = 200;
       if (fault === 'wrong-exe') own[2].executable = f.worker;
       if (fault === 'wrong-args') own[2].commandLine += ' --foreign';
       if (fault === 'opaque') own[2].commandLine = '';
       f.native.processesBefore.push(...own);
       f.native.processesAfter.push(...structuredClone(own));
+      if (fault === 'wrong-parent')
+        f.native.processesAfter.at(-1).parentPid = 200;
       if (fault === 'reused-start')
         f.native.processesAfter.at(-1).startUtc = '2026-01-02T00:00:00.000Z';
       if (fault === 'new-after') f.native.processesBefore.pop();
@@ -1778,6 +1779,47 @@ for (const fault of [
       } else assert.equal(r.operationSufficient, false, JSON.stringify(r));
     }),
   );
+test('collector chain refusal retains bounded private rows and a safe exact branch through the full parser', () =>
+  fixture((f) => {
+    processFixture(f);
+    const self = {
+      pid: 200,
+      executable: f.controller,
+      argv: [f.controller, 'probe.cjs'],
+      collectorExecutable: f.worker,
+      collectorArgv: [f.worker, 'collector.ps1'],
+    };
+    const own = [
+      f.process(200, 99, f.controller, `${quote(f.controller)} probe.cjs`),
+      f.process(201, 200, f.worker, `${quote(f.worker)} wrong.ps1`),
+    ];
+    f.native.processesBefore.push(...own);
+    f.native.processesAfter.push(...structuredClone(own));
+    const result = probe(f.policy, f.native, { callerPid: 99, self });
+    assert.equal(result.referenceDiagnostic.stage, 'collector-chain');
+    assert.equal(
+      result.referenceDiagnostic.chainBranch,
+      'collector-candidate-count',
+    );
+    assert.deepEqual(result.privateReferenceDiagnostic.before, own);
+    let error;
+    try {
+      require('./release-scope.cjs').validateReferences(
+        result,
+        f.policy,
+        'install',
+      );
+    } catch (e) {
+      error = e;
+    }
+    assert.deepEqual(
+      error.privateReferenceDiagnostic,
+      result.privateReferenceDiagnostic,
+    );
+    const output = require('./once-pair-admission.cjs').formatCliError(error);
+    assert(output.includes('collector-candidate-count'));
+    assert(!output.includes(f.base));
+  }));
 test('only the exact transient probe and its pinned collector are excluded from controller children', () =>
   fixture((f) => {
     const self = {

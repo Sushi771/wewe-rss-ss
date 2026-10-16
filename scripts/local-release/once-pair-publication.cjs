@@ -1200,12 +1200,37 @@ async function execute(policyFile, expected, options = {}) {
       }
     });
   } catch (error) {
+    const diagnosticApi = require('./windows-release-references.cjs');
+    const privateDiagnostic = diagnosticApi.privateReferenceDiagnostic(
+      error.privateReferenceDiagnostic,
+    );
+    if (privateDiagnostic) {
+      state.referenceFailures ||= [];
+      state.referenceFailures.push({
+        operation: options.rollback ? 'rollback' : 'publish',
+        atUtc: new Date().toISOString(),
+        diagnostic: diagnosticApi.referenceDiagnostic(
+          error.referenceDiagnostic,
+        ),
+        privateDiagnostic,
+      });
+    }
     if (state.publication) {
       state.publication.status = 'held';
       state.publication.failure = 'publication-incomplete';
       try {
         save();
+        if (privateDiagnostic)
+          error.referenceDiagnostic = diagnosticApi.referenceDiagnostic({
+            ...error.referenceDiagnostic,
+            diagnosticStored: true,
+          });
       } catch {
+        if (privateDiagnostic)
+          error.referenceDiagnostic = diagnosticApi.referenceDiagnostic({
+            ...error.referenceDiagnostic,
+            diagnosticStored: false,
+          });
         /* preserve uncertain claim */
       }
     }

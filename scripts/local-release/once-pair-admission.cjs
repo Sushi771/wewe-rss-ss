@@ -1410,6 +1410,36 @@ function withAdmission(policyFile, expected, action, options = {}) {
       /* Preserve foreign/uncertain authority, including the lock. */
     }
     if (stillOwned) {
+      const diagnosticApi = require('./windows-release-references.cjs');
+      const privateDiagnostic = diagnosticApi.privateReferenceDiagnostic(
+        error.privateReferenceDiagnostic,
+      );
+      if (privateDiagnostic) {
+        state.referenceFailures ||= [];
+        state.referenceFailures.push({
+          nonce,
+          operation: 'install',
+          atUtc: new Date().toISOString(),
+          diagnostic: diagnosticApi.referenceDiagnostic(
+            error.referenceDiagnostic,
+          ),
+          privateDiagnostic,
+        });
+        try {
+          save();
+          error.referenceDiagnostic = diagnosticApi.referenceDiagnostic({
+            ...error.referenceDiagnostic,
+            diagnosticStored: true,
+          });
+        } catch {
+          // Preserve the original refusal and lock if evidence cannot be saved.
+          error.referenceDiagnostic = diagnosticApi.referenceDiagnostic({
+            ...error.referenceDiagnostic,
+            diagnosticStored: false,
+          });
+          throw error;
+        }
+      }
       if (state?.continuationAttempt?.nonce === nonce) {
         state.continuationAttempt.status = 'held';
         state.continuationAttempt.finishedAtUtc = new Date().toISOString();

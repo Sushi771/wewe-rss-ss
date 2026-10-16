@@ -645,6 +645,84 @@ test('admission failure before allocation retains inner query diagnostic for CLI
       'synthetic-business',
     );
   }));
+test('private chain diagnostic persists raw related rows in the sole ledger without CLI leakage', () =>
+  fixture((f) => {
+    const row = {
+      pid: 200,
+      parentPid: process.pid,
+      name: 'node.exe',
+      executable: 'C:/PRIVATE/node.exe',
+      commandLine: 'SECRET_ARGV',
+      startUtc: '2026-01-01T00:00:00Z',
+    };
+    f.query = () => ({
+      ...f.facts(),
+      complete: false,
+      errors: ['REFERENCE_PROBE_CHILD_UNCERTAIN'],
+      referenceDiagnostic: {
+        stage: 'collector-chain',
+        chainBranch: 'unexpected-descendant',
+        codes: ['REFERENCE_PROBE_CHILD_UNCERTAIN'],
+      },
+      privateReferenceDiagnostic: {
+        format: 1,
+        branch: 'unexpected-descendant',
+        before: [row],
+        after: [row],
+      },
+    });
+    let error;
+    try {
+      f.apply();
+    } catch (e) {
+      error = e;
+    }
+    assert.equal(error.message, 'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    assert.equal(error.referenceDiagnostic.diagnosticStored, true);
+    assert.deepEqual(f.ledger().referenceFailures[0].privateDiagnostic.before, [
+      row,
+    ]);
+    assert(admission.formatCliError(error).includes('unexpected-descendant'));
+    assert(!/SECRET|PRIVATE/.test(admission.formatCliError(error)));
+    assert(!fs.existsSync(f.policy.pair[0].target));
+    assert(f.ledger().slots.every((s) => !s.started));
+  }));
+test('private diagnostic persistence failure preserves original refusal and holds the owned lock', () =>
+  fixture((f) => {
+    f.query = () => ({
+      ...f.facts(),
+      complete: false,
+      errors: ['REFERENCE_PROBE_CHILD_UNCERTAIN'],
+      referenceDiagnostic: {
+        stage: 'collector-chain',
+        chainBranch: 'unexpected-descendant',
+      },
+      privateReferenceDiagnostic: {
+        format: 1,
+        branch: 'unexpected-descendant',
+        before: [],
+        after: [],
+      },
+    });
+    const original = fs.writeFileSync;
+    fs.writeFileSync = (at, data, ...rest) => {
+      if (String(data).includes('referenceFailures'))
+        throw Error('SYNTHETIC_DIAGNOSTIC_WRITE_FAILURE');
+      return original(at, data, ...rest);
+    };
+    let error;
+    try {
+      f.apply();
+    } catch (e) {
+      error = e;
+    } finally {
+      fs.writeFileSync = original;
+    }
+    assert.equal(error.message, 'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    assert.equal(error.referenceDiagnostic.diagnosticStored, false);
+    assert(fs.existsSync(path.join(f.registry, f.policy.scopeId + '.lock')));
+    assert(!fs.existsSync(f.policy.pair[0].target));
+  }));
 test('real CLI dispatch installs only frozen pair, keeps four protected IDs and three managed roles', () =>
   fixture((f) => {
     const immutable = f.specs.slice(0, 2).map((s) => fingerprint(s.path));

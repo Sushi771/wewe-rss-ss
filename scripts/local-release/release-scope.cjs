@@ -192,6 +192,10 @@ function validateReferences(value, policy, operation) {
         globalReferenceComplete: value?.globalReferenceComplete,
         categories: value?.categories,
       });
+    error.privateReferenceDiagnostic =
+      require('./windows-release-references.cjs').privateReferenceDiagnostic(
+        value?.privateReferenceDiagnostic,
+      );
     throw error;
   }
   if (

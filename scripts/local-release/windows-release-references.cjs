@@ -15,6 +15,67 @@ const kinds = [
 const digest = (value) =>
   crypto.createHash('sha256').update(value).digest('hex');
 const hash = (value) => digest(JSON.stringify(value));
+const chainBranches = [
+  'probe-identity',
+  'collector-candidate-count',
+  'collector-identity',
+  'probe-console-count',
+  'probe-console-identity',
+  'collector-console-count',
+  'collector-console-identity',
+  'unexpected-descendant',
+];
+function privateReferenceDiagnostic(value) {
+  if (!value || value.format !== 1 || !chainBranches.includes(value.branch))
+    return;
+  const out = {
+    format: 1,
+    branch: value.branch,
+    before: [],
+    after: [],
+    truncated: value.truncated === true,
+  };
+  for (const key of ['before', 'after']) {
+    if (!Array.isArray(value[key])) return;
+    out[key + 'Count'] =
+      Number.isInteger(value[key + 'Count']) &&
+      value[key + 'Count'] >= value[key].length &&
+      value[key + 'Count'] <= 8192
+        ? value[key + 'Count']
+        : value[key].length;
+    if (value[key].length > 16) out.truncated = true;
+    for (const row of value[key].slice(0, 16)) {
+      if (
+        !row ||
+        !Number.isInteger(row.pid) ||
+        !Number.isInteger(row.parentPid)
+      )
+        continue;
+      const copy = { pid: row.pid, parentPid: row.parentPid };
+      for (const [field, limit] of [
+        ['name', 256],
+        ['executable', 2048],
+        ['commandLine', 8192],
+        ['startUtc', 64],
+      ]) {
+        const text = typeof row[field] === 'string' ? row[field] : null;
+        copy[field] = text === null ? null : text.slice(0, limit);
+        if (text !== null && text.length > limit) out.truncated = true;
+      }
+      out[key].push(copy);
+      if (Buffer.byteLength(JSON.stringify(out)) > 64 * 1024) {
+        out[key].pop();
+        out.truncated = true;
+        break;
+      }
+    }
+  }
+  while (Buffer.byteLength(JSON.stringify(out)) > 64 * 1024) {
+    (out.after.length ? out.after : out.before).pop();
+    out.truncated = true;
+  }
+  return out;
+}
 function referenceDiagnostic(value = {}) {
   const token = (s) =>
     typeof s === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,95}$/.test(s)
@@ -57,6 +118,15 @@ function referenceDiagnostic(value = {}) {
       ? value.stage
       : 'unknown',
     codes,
+    ...(chainBranches.includes(value.chainBranch)
+      ? { chainBranch: value.chainBranch }
+      : {}),
+    ...(typeof value.diagnosticStored === 'boolean'
+      ? { diagnosticStored: value.diagnosticStored }
+      : {}),
+    ...(typeof value.privateDiagnosticTruncated === 'boolean'
+      ? { privateDiagnosticTruncated: value.privateDiagnosticTruncated }
+      : {}),
     ...(token(value.nativeStage)
       ? { nativeStage: token(value.nativeStage) }
       : {}),
@@ -212,23 +282,65 @@ const visibleProcess = (p) =>
   !!p.commandLine.trim() &&
   typeof p.startUtc === 'string' &&
   Number.isFinite(Date.parse(p.startUtc));
-// Only the already-verified read-only probe -> collector chain can own this
-// transient console. Its exact observed identity is checked before removal.
+// Only the verified probe and exact collector may each own one console.
+// Full before/after identities and the entire child tree remain mandatory.
 function collectorChain(before, after, callerPid, self) {
+  const certain = (predicate) => {
+    try {
+      return predicate();
+    } catch {
+      return false;
+    }
+  };
+  const reject = (branch, code = 'REFERENCE_PROBE_CHILD_UNCERTAIN') => {
+    const ids = new Set([self.pid]);
+    const all = [...before.values(), ...after.values()];
+    for (let depth = 0; depth < 16; depth++) {
+      const count = ids.size;
+      for (const row of all) if (ids.has(row.parentPid)) ids.add(row.pid);
+      if (ids.size === count) break;
+    }
+    const error = new Error(code);
+    error.privateReferenceDiagnostic = privateReferenceDiagnostic({
+      format: 1,
+      branch,
+      truncated: all.some((row) => ids.has(row.parentPid) && !ids.has(row.pid)),
+      before: [...before.values()].filter((row) => ids.has(row.pid)),
+      after: [...after.values()].filter((row) => ids.has(row.pid)),
+    });
+    error.referenceDiagnostic = {
+      chainBranch: branch,
+      privateDiagnosticTruncated: error.privateReferenceDiagnostic.truncated,
+    };
+    throw error;
+  };
   const own = before.get(self.pid),
     last = after.get(self.pid);
   if (
-    !visibleProcess(own) ||
-    !last ||
-    own.parentPid !== callerPid ||
-    hash(own) !== hash(last) ||
-    !same(canonical(own.executable), canonical(self.executable)) ||
-    hash(argv(own.commandLine)) !== hash(self.argv)
+    !certain(
+      () =>
+        !(
+          !visibleProcess(own) ||
+          !last ||
+          own.parentPid !== callerPid ||
+          hash(own) !== hash(last) ||
+          !same(canonical(own.executable), canonical(self.executable)) ||
+          hash(argv(own.commandLine)) !== hash(self.argv)
+        ),
+    )
   )
-    fail('REFERENCE_PROBE_IDENTITY_UNCERTAIN');
+    reject('probe-identity', 'REFERENCE_PROBE_IDENTITY_UNCERTAIN');
   const children = [...before.values()].filter((r) => r.parentPid === own.pid);
-  if (children.length !== 1) fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
-  const child = children[0];
+  const candidates = children.filter((r) =>
+    certain(
+      () =>
+        visibleProcess(r) &&
+        same(canonical(r.executable), canonical(self.collectorExecutable)) &&
+        hash(argv(r.commandLine)) === hash(self.collectorArgv),
+    ),
+  );
+  if (candidates.length !== 1) reject('collector-candidate-count');
+  const child = candidates[0];
   if (
     !visibleProcess(child) ||
     !after.has(child.pid) ||
@@ -237,37 +349,55 @@ function collectorChain(before, after, callerPid, self) {
     hash(argv(child.commandLine)) !== hash(self.collectorArgv) ||
     Date.parse(child.startUtc) < Date.parse(own.startUtc)
   )
-    fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
-  const consoles = [...before.values()].filter(
-    (r) => r.parentPid === child.pid,
-  );
-  if (consoles.length > 1) fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+    reject('collector-identity');
   const accepted = [own, child];
-  if (consoles.length) {
-    const console = consoles[0];
-    const command = visibleProcess(console) ? argv(console.commandLine) : [];
+  const consoleFor = (owner, rows, role) => {
+    if (rows.length > 1) reject(role + '-console-count');
+    if (!rows.length) return;
+    const console = rows[0];
+    const command =
+      certain(() => visibleProcess(console) && argv(console.commandLine)) || [];
     const consolePath = (s) =>
       canonical(s.startsWith('\\??\\') ? s.slice(4) : s);
     if (
-      !self.consoleExecutable ||
-      !Array.isArray(self.consoleArgv) ||
-      !visibleProcess(console) ||
-      !after.has(console.pid) ||
-      console.name.toLowerCase() !== 'conhost.exe' ||
-      hash(console) !== hash(after.get(console.pid)) ||
-      !same(canonical(console.executable), canonical(self.consoleExecutable)) ||
-      !command.length ||
-      !same(consolePath(command[0]), consolePath(self.consoleArgv[0])) ||
-      hash(command.slice(1)) !== hash(self.consoleArgv.slice(1)) ||
-      Date.parse(console.startUtc) < Date.parse(child.startUtc)
+      !certain(
+        () =>
+          !(
+            !self.consoleExecutable ||
+            !Array.isArray(self.consoleArgv) ||
+            !visibleProcess(console) ||
+            !after.has(console.pid) ||
+            console.name.toLowerCase() !== 'conhost.exe' ||
+            hash(console) !== hash(after.get(console.pid)) ||
+            !same(
+              canonical(console.executable),
+              canonical(self.consoleExecutable),
+            ) ||
+            !command.length ||
+            !same(consolePath(command[0]), consolePath(self.consoleArgv[0])) ||
+            hash(command.slice(1)) !== hash(self.consoleArgv.slice(1)) ||
+            console.parentPid !== owner.pid ||
+            Date.parse(console.startUtc) < Date.parse(owner.startUtc)
+          ),
+      )
     )
-      fail('REFERENCE_PROBE_CONSOLE_UNCERTAIN');
+      reject(role + '-console-identity', 'REFERENCE_PROBE_CONSOLE_UNCERTAIN');
     accepted.push(console);
-  }
+  };
+  consoleFor(
+    own,
+    children.filter((r) => r.pid !== child.pid),
+    'probe',
+  );
+  consoleFor(
+    child,
+    [...before.values()].filter((r) => r.parentPid === child.pid),
+    'collector',
+  );
   const ids = new Set(accepted.map((r) => r.pid));
   for (const r of [...before.values(), ...after.values()])
     if (ids.has(r.parentPid) && !ids.has(r.pid))
-      fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+      reject('unexpected-descendant');
   return accepted.map(processTuple);
 }
 const taskKind = 'once-background-task-actions-v1';
@@ -1723,6 +1853,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     );
     result.referenceDiagnostic = referenceDiagnostic({
       stage,
+      ...error.referenceDiagnostic,
       codes: [
         ...result.errors,
         error.message,
@@ -1742,6 +1873,11 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       globalReferenceComplete: result.globalReferenceComplete,
       categories: result.categories,
     });
+    const privateDiagnostic = privateReferenceDiagnostic(
+      error.privateReferenceDiagnostic,
+    );
+    if (privateDiagnostic)
+      result.privateReferenceDiagnostic = privateDiagnostic;
   }
   return result;
 }
@@ -1909,5 +2045,6 @@ module.exports = {
   validateOperationTaskSummary,
   validateOperationStartupSummary,
   referenceDiagnostic,
+  privateReferenceDiagnostic,
   cliResult,
 };

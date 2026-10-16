@@ -912,6 +912,59 @@ test('completed replay refuses a same-bytes replacement of the published pointer
     assert.deepEqual(fs.readFileSync(pointer), bytes);
   }));
 
+test('private chain diagnostic persists before publication stop without exposing raw CLI fields', () =>
+  fixture(async (f) => {
+    const original = f.facts.bind(f),
+      ledger = path.join(
+        f.policy.registryDirectory,
+        f.policy.scopeId + '.state.json',
+      );
+    const row = {
+      pid: 201,
+      parentPid: 200,
+      name: 'conhost.exe',
+      executable: 'C:/PRIVATE/conhost.exe',
+      commandLine: 'SECRET_ARGV',
+      startUtc: '2026-01-01T00:00:00Z',
+    };
+    f.facts = () => {
+      const good = original();
+      if (
+        !fs.existsSync(ledger) ||
+        !JSON.parse(fs.readFileSync(ledger)).payload.publication
+      )
+        return good;
+      return {
+        ...good,
+        complete: false,
+        errors: ['REFERENCE_PROBE_CHILD_UNCERTAIN'],
+        referenceDiagnostic: {
+          stage: 'collector-chain',
+          chainBranch: 'unexpected-descendant',
+        },
+        privateReferenceDiagnostic: {
+          format: 1,
+          branch: 'unexpected-descendant',
+          before: [row],
+          after: [row],
+        },
+      };
+    };
+    let error;
+    try {
+      await f.execute();
+    } catch (e) {
+      error = e;
+    }
+    assert.equal(error.message, 'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    assert.equal(error.referenceDiagnostic.diagnosticStored, true);
+    const state = JSON.parse(fs.readFileSync(ledger)).payload;
+    assert.deepEqual(state.referenceFailures[0].privateDiagnostic.after, [row]);
+    assert(!/SECRET|PRIVATE/.test(admission.formatCliError(error)));
+    assert(!f.events.includes('Stop'));
+    assert.equal(f.backupCount(), 0);
+    assert(!f.events.includes('migrate'));
+  }));
 test('single-backup and installation allowances match the fixed reviewed ceilings', () => {
   const limit = publication.allowance(805306368);
   assert.equal(admission.LIMITS.bytes, 245837824);
