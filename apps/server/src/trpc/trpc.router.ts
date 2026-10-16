@@ -218,6 +218,11 @@ export class TrpcRouter {
     await fs.promises.mkdir(directory, { recursive: true });
     let complete = 0;
     const incomplete: string[] = [];
+    const incompleteDetails: {
+      path: string;
+      reason: 'body-not-cached' | 'missing' | 'unconfirmed' | 'export-failed';
+      missingImageCount?: number;
+    }[] = [];
     const source = exportSourceFromFeed(feed);
     const store = new LocalArticleStore(
       path.join(directory, '.unused-settings.json'),
@@ -231,14 +236,19 @@ export class TrpcRouter {
           new Date(),
           directory,
         );
-        if (saved.mediaComplete === false)
+        if (saved.mediaComplete === false) {
           incomplete.push(
             path
               .relative(directory, saved.markdownPath)
               .split(path.sep)
               .join('/'),
           );
-        else complete++;
+          incompleteDetails.push({
+            path: incomplete[incomplete.length - 1],
+            reason: saved.mediaStatus === 'missing' ? 'missing' : 'unconfirmed',
+            missingImageCount: saved.missingImageCount,
+          });
+        } else complete++;
       } catch {
         if (cancelled()) throw new Error('导出已取消');
         const result = await store.save(
@@ -267,6 +277,10 @@ export class TrpcRouter {
             .split(path.sep)
             .join('/'),
         );
+        incompleteDetails.push({
+          path: incomplete[incomplete.length - 1],
+          reason: article.contentHtml ? 'export-failed' : 'body-not-cached',
+        });
       }
     }
     await fs.promises.writeFile(
@@ -275,11 +289,30 @@ export class TrpcRouter {
         `范围：${filter.dateStart || '不限开始'} 至 ${filter.dateEnd || '不限结束'}（上海日期）；搜索：${filter.search || '无'}；分组筛选：${filter.group || 'all'}。这是本次范围完整快照，不检测本地下载历史。\n\n` +
         `分组：${source.groupName || '未分组'}\n\n文章位于 YYYY-MM-DD_分组/公众号文件夹中；日期采用原文发布日期（上海时间），不同日期分别保存，缺可信日期为日期待核并写明原因，正常文件名保留文章标题，冲突时加稳定身份后缀；该号共用 image/，图片按文章身份隔离，正文使用相对引用。未完整篇目在各自文件中明确标注。\n`,
     );
+    // Stable reason codes keep cache absence separate from body media failures.
+    const incompleteLabels = {
+      'body-not-cached': '正文未缓存',
+      missing: '已知正文图片未取得',
+      unconfirmed: '媒体完整性未确认',
+      'export-failed': '导出未完成',
+    };
+    if (incompleteDetails.length)
+      await fs.promises.appendFile(
+        path.join(directory, 'README.md'),
+        '\n' +
+          incompleteDetails
+            .map(
+              (item) =>
+                `- ${item.path}: ${incompleteLabels[item.reason]}${item.missingImageCount ? ` (${item.missingImageCount})` : ''}\n`,
+            )
+            .join(''),
+      );
     return {
       name: feed.mpName,
       articles: articles.length,
       complete,
       incomplete,
+      incompleteDetails,
     };
   }
 
@@ -1213,9 +1246,21 @@ export class TrpcRouter {
       .input(z.string())
       .mutation(async ({ input: id }) => {
         try {
-          const { markdown, title } = await this.getArticleMarkdown(id);
+          const {
+            markdown,
+            title,
+            mediaComplete,
+            mediaStatus,
+            missingImageCount,
+          } = await this.getArticleMarkdown(id);
           // Browser Markdown must not overwrite an Obsidian file with proxy image URLs.
-          return { markdown, title };
+          return {
+            markdown,
+            title,
+            mediaComplete,
+            mediaStatus,
+            missingImageCount,
+          };
         } catch (err: any) {
           this.logger.error(`Export Markdown error for ${id}: ${err.message}`);
           if (err instanceof TRPCError) throw err;
@@ -1266,6 +1311,10 @@ export class TrpcRouter {
           );
           return {
             success: result.mediaComplete !== false,
+            mediaStatus:
+              result.mediaStatus ??
+              (result.mediaComplete === false ? 'unconfirmed' : 'complete'),
+            missingImageCount: result.missingImageCount,
             path: result.markdownPath,
             alreadySaved: result.alreadySaved,
             status:

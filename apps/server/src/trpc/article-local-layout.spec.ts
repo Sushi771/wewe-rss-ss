@@ -6,6 +6,7 @@ import { TrpcRouter } from './trpc.router';
 import { TrpcService } from './trpc.service';
 import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
 import { exportSourceFolders } from '../article-export-source';
+import * as imageFetch from '../collection/image-fetch';
 
 const png =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
@@ -181,7 +182,7 @@ describe('all cached article local/ZIP export entry points share isolated image 
     expect(fetch).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });
-  it('single and batch entry points retain media incompleteness and reject corrupt image bytes', async () => {
+  it('single and batch entry points retain usable body and reject corrupt image bytes as unconfirmed media', async () => {
     const caller = router.appRouter.createCaller({ errorMsg: null });
     items[0].lastBodyStatus = 'images-pending';
     items[0].contentHtml =
@@ -191,7 +192,11 @@ describe('all cached article local/ZIP export entry points share isolated image 
     items[1].lastBodyStatus = 'unavailable';
     items[1].contentHtml =
       '<div id="js_content"><p>Body</p><img src="data:image/png;base64,YQ=="></div>';
-    await expect(caller.article.saveToObsidian(items[1].id)).rejects.toThrow();
+    expect(await caller.article.saveToObsidian(items[1].id)).toMatchObject({
+      success: false,
+      mediaStatus: 'unconfirmed',
+      missingImageCount: 0,
+    });
     const batch = await router.buildOfflineFeedDirectory(
       feed.id,
       join(root, 'bad-media-zip'),
@@ -199,6 +204,52 @@ describe('all cached article local/ZIP export entry points share isolated image 
     if (!batch) throw new Error('Expected publisher batch');
     expect(batch.complete).toBe(0);
     expect(batch.incomplete).toHaveLength(2);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+  it('reports cache absence, unknown media and actual failed sources separately in ZIP and browser output', async () => {
+    items[0].contentHtml = '';
+    items[1].contentHtml =
+      '<div id="js_content"><p>Unknown body</p><img src="javascript:invalid"></div>';
+    items.push({
+      ...article('WX_1234567890_2247000003_1'),
+      contentHtml:
+        '<div id="js_content"><p>Known body</p><img src="https://mmbiz.qpic.cn/a.png"><img src="https://mmbiz.qpic.cn/a.png"></div>',
+    });
+    items.push({
+      ...article('WX_1234567890_2247000004_1'),
+      lastBodyStatus: 'unavailable',
+      contentHtml:
+        '<img><div id="js_content"><p>Cached body despite historical retry</p></div>',
+    });
+    const image = jest
+      .spyOn(imageFetch, 'fetchAllowedImage')
+      .mockRejectedValue(new Error('OFFLINE'));
+    const folder = join(root, 'status-zip');
+    const batch = await router.buildOfflineFeedDirectory(feed.id, folder);
+    expect(batch).toMatchObject({ complete: 1, articles: 4 });
+    expect(batch?.incompleteDetails.map((item) => item.reason)).toEqual([
+      'body-not-cached',
+      'unconfirmed',
+      'missing',
+    ]);
+    expect(batch?.incompleteDetails[2].missingImageCount).toBe(1);
+    expect(
+      await fs.readFile(join(folder, batch!.incompleteDetails[2].path), 'utf8'),
+    ).toContain('Known body');
+    const summary = await fs.readFile(join(folder, 'README.md'), 'utf8');
+    expect(summary).toContain('正文未缓存');
+    expect(summary).toContain('媒体完整性未确认');
+    expect(summary).toContain('已知正文图片未取得 (1)');
+    const browser = await router.appRouter
+      .createCaller({ errorMsg: null })
+      .article.exportMarkdown(items[1].id);
+    expect(browser).toMatchObject({
+      mediaComplete: false,
+      mediaStatus: 'unconfirmed',
+      missingImageCount: 0,
+    });
+    expect(image).toHaveBeenCalledTimes(1);
     expect(fetch).not.toHaveBeenCalled();
     expect(axios.get).not.toHaveBeenCalled();
   });
