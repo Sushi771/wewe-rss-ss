@@ -879,6 +879,7 @@ test('operation coverage is accepted by the exact install, publish and same-DB r
     const scope = {
       format: 1,
       kind: 'non-retiring-once-pair-v1',
+      staticScopeMode: 'startup-and-pinned-launchers-v1',
       preserveLegacy: true,
       globalReferenceComplete: false,
       uninspectedProfiles: [],
@@ -896,6 +897,7 @@ test('operation coverage is accepted by the exact install, publish and same-DB r
         categories: { ...r.categories, shortcuts: false },
         operationCoverage: {
           kind: scope.kind,
+          staticScopeMode: scope.staticScopeMode,
           contractSha256: crypto
             .createHash('sha256')
             .update(JSON.stringify(scope))
@@ -903,6 +905,16 @@ test('operation coverage is accepted by the exact install, publish and same-DB r
           startupComplete: true,
           pinnedLaunchersVerified: true,
           uninspectedProfiles: [],
+          uninspectedStaticScopes: [
+            'Desktop',
+            'CommonDesktop',
+            'StartMenu',
+            'CommonStartMenu',
+          ].map((kind) => ({
+            kind,
+            inspected: false,
+            reason: 'outside-non-retiring-operation',
+          })),
           uninspectedStaticJunctions: [],
         },
       };

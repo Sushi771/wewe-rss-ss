@@ -103,6 +103,7 @@ function validateReferences(value, policy, operation) {
     const {
       operationContract,
       operationProfiles,
+      operationStaticScopes,
     } = require('./windows-release-references.cjs');
     const contract = operationContract(policy);
     if (
@@ -112,6 +113,7 @@ function validateReferences(value, policy, operation) {
       value.globalReferenceComplete !== false ||
       value.categories?.shortcuts !== false ||
       value.operationCoverage?.kind !== contract.kind ||
+      value.operationCoverage.staticScopeMode !== contract.staticScopeMode ||
       value.operationCoverage.contractSha256 !== hash(contract) ||
       value.operationCoverage.startupComplete !== true ||
       value.operationCoverage.pinnedLaunchersVerified !== true ||
@@ -119,18 +121,10 @@ function validateReferences(value, policy, operation) {
       hash(operationProfiles(value.operationCoverage.uninspectedProfiles)) !==
         hash(operationProfiles(contract.uninspectedProfiles)) ||
       !Array.isArray(value.operationCoverage.uninspectedStaticJunctions) ||
-      value.operationCoverage.uninspectedStaticJunctions.length > 64 ||
-      value.operationCoverage.uninspectedStaticJunctions.some(
-        (r) =>
-          r.inspected !== false ||
-          r.reason !== 'unrelated-static-junction' ||
-          typeof r.path !== 'string' ||
-          !path.isAbsolute(r.path) ||
-          !Array.isArray(r.identity) ||
-          typeof r.target !== 'string',
-      )
+      value.operationCoverage.uninspectedStaticJunctions.length !== 0
     )
       throw new Error('RELEASE_SCOPE_OPERATION_COVERAGE_INVALID');
+    operationStaticScopes(value.operationCoverage.uninspectedStaticScopes);
   }
   const kinds = [
     'processes',

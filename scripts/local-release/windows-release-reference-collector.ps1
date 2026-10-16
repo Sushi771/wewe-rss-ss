@@ -7,7 +7,6 @@ $errors=[System.Collections.Generic.List[string]]::new()
 $coverage=[System.Collections.Generic.List[object]]::new()
 $shortcuts=[System.Collections.Generic.List[object]]::new()
 $directorySnapshots=[System.Collections.Generic.List[object]]::new()
-$staticJunctions=[System.Collections.Generic.List[object]]::new()
 $profileFacts=@();$profileFactsAfter=@();$scoped=$false
 $deadline=[DateTime]::UtcNow.AddSeconds(16)
 function Budget {
@@ -65,6 +64,16 @@ function Profile-Scope($profiles, [string]$current, $scope) {
     [PSCustomObject]@{sid=[string]$p.SID;path=[string]$p.LocalPath;special=$false;loaded=$false;status=[int]$p.Status;staticShortcutsInspected=$false}
   }
 }
+function Read-Shortcut($entry,$shell) {
+  if ($entry.Extension -ine '.lnk' -or -not $seen.Add($entry.FullName)) { return }
+  if ($seen.Count -gt 8192 -or $entry.Length -gt 1048576) { throw 'REFERENCE_NATIVE_SHORTCUT_LIMIT' }
+  $hashBefore=(Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+  $link=$shell.CreateShortcut($entry.FullName)
+  try {
+    $shortcuts.Add([PSCustomObject]@{path=$entry.FullName;sha256=$hashBefore;target=(Expand-ReferenceText ([string]$link.TargetPath));arguments=(Expand-ReferenceText ([string]$link.Arguments));workingDirectory=(Expand-ReferenceText ([string]$link.WorkingDirectory))})
+  } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
+  if ((Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne $hashBefore) { throw 'REFERENCE_NATIVE_SHORTCUT_CHANGED' }
+}
 $before=@();$after=@();$tasks=@();$tasksAfter=@()
 try {
   $policyBytes=[IO.File]::ReadAllBytes($PolicyFile)
@@ -74,6 +83,7 @@ try {
   $scope=$policy.windowsReferences.operationCoverage
   $scoped=$null -ne $scope
   if ($scoped -and ($scope.format -ne 1 -or $scope.kind -cne 'non-retiring-once-pair-v1' -or
+    $scope.staticScopeMode -cne 'startup-and-pinned-launchers-v1' -or
     $scope.preserveLegacy -ne $true -or $scope.globalReferenceComplete -ne $false -or
     $policy.mode -cne 'once-frozen-pair-v1' -or ($policy.approval.operations -join '|') -cne 'install|publish|rollback' -or
     @($policy.pair).Count -ne 2 -or $policy.publication.limits.maxBackups -ne 1 -or
@@ -91,14 +101,14 @@ try {
   try {
     for ($i=0;$i -lt $folders.Count;$i++) {
       Budget
-      $folder=[Environment]::GetFolderPath([Enum]::Parse([Environment+SpecialFolder],$folders[$i]))
-      if (-not $folder) { throw 'REFERENCE_NATIVE_KNOWN_FOLDER_UNKNOWN' }
-      $staticOnly=$scoped -and $labels[$i] -notin @('Startup','CommonStartup')
-      if ($staticOnly -and (Test-Path -LiteralPath $folder) -and ((Get-Item -LiteralPath $folder -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        $staticJunctions.Add([PSCustomObject]@{path=$folder;inspected=$false;reason='unrelated-static-junction'})
-        $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='uninspected-static-junction'})
+      # Static desktop/start-menu trees are not inputs to non-retiring operations.
+      # Do not even resolve/open these roots; record the entire uninspected scope.
+      if ($scoped -and $labels[$i] -notin @('Startup','CommonStartup')) {
+        $coverage.Add([PSCustomObject]@{kind=$labels[$i];status='not-inspected-operation-scope';inspected=$false;reason='outside-non-retiring-operation'})
         continue
       }
+      $folder=[Environment]::GetFolderPath([Enum]::Parse([Environment+SpecialFolder],$folders[$i]))
+      if (-not $folder) { throw 'REFERENCE_NATIVE_KNOWN_FOLDER_UNKNOWN' }
       $rootProof=Directory-Proof $folder
       if ($null -eq $rootProof) {
         $parent=[IO.Path]::GetDirectoryName($folder)
@@ -130,22 +140,29 @@ try {
         foreach ($entry in $entries) {
           Budget
           if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            if (-not $staticOnly -or -not $entry.PSIsContainer) { throw 'REFERENCE_NATIVE_SHORTCUT_ALIAS_REQUIRES_REVIEW' }
-            $staticJunctions.Add([PSCustomObject]@{path=$entry.FullName;inspected=$false;reason='unrelated-static-junction'})
-            continue
+            throw 'REFERENCE_NATIVE_SHORTCUT_ALIAS_REQUIRES_REVIEW'
           }
           if ($entry.PSIsContainer) { $pending.Push($entry.FullName);continue }
-          if ($entry.Extension -ine '.lnk' -or -not $seen.Add($entry.FullName)) { continue }
-          if ($seen.Count -gt 8192 -or $entry.Length -gt 1048576) { throw 'REFERENCE_NATIVE_SHORTCUT_LIMIT' }
-          $hashBefore=(Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-          $link=$shell.CreateShortcut($entry.FullName)
-          try {
-            $shortcuts.Add([PSCustomObject]@{path=$entry.FullName;sha256=$hashBefore;target=(Expand-ReferenceText ([string]$link.TargetPath));arguments=(Expand-ReferenceText ([string]$link.Arguments));workingDirectory=(Expand-ReferenceText ([string]$link.WorkingDirectory))})
-          } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
-          if ((Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne $hashBefore) { throw 'REFERENCE_NATIVE_SHORTCUT_CHANGED' }
+          Read-Shortcut $entry $shell
         }
       }
       $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='enumerated';identity=$rootProof.identity})
+    }
+    if ($scoped) {
+      if (@($policy.windowsReferences.launchers).Count -gt 16) {throw 'REFERENCE_NATIVE_LAUNCHER_LIMIT'}
+      foreach($launcher in $policy.windowsReferences.launchers) {
+        if (@($launcher.files).Count -gt 128) {throw 'REFERENCE_NATIVE_LAUNCHER_LIMIT'}
+        foreach($pin in $launcher.files) {
+          if ([IO.Path]::GetExtension([string]$pin.path) -ine '.lnk') {continue}
+          Budget
+          if (-not [IO.Path]::IsPathRooted([string]$pin.path) -or $pin.sha256 -notmatch '^[a-f0-9]{64}$') {throw 'REFERENCE_NATIVE_PINNED_SHORTCUT_INVALID'}
+          $entry=Get-Item -LiteralPath $pin.path -Force -ErrorAction Stop
+          if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {throw 'REFERENCE_NATIVE_SHORTCUT_ALIAS_REQUIRES_REVIEW'}
+          Read-Shortcut $entry $shell
+          $found=@($shortcuts | Where-Object { $_.path -ieq $entry.FullName })
+          if ($found.Count -ne 1 -or $found[0].sha256 -cne $pin.sha256) {throw 'REFERENCE_NATIVE_PINNED_SHORTCUT_CHANGED'}
+        }
+      }
     }
   } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
   $tasksAfter=@(Tasks)
@@ -162,7 +179,7 @@ $complete=$sufficient -and -not $scoped
 [PSCustomObject]@{
   format=1;complete=$complete;policySha256=$policySha
   operationSufficient=($scoped -and $sufficient);globalReferenceComplete=$complete
-  operationCoverage=$(if ($scoped) { @{kind='non-retiring-once-pair-v1';profilesBefore=@($profileFacts);profilesAfter=@($profileFactsAfter);staticJunctions=@($staticJunctions.ToArray())} } else {$null})
+  operationCoverage=$(if ($scoped) { @{kind='non-retiring-once-pair-v1';staticScopeMode=$scope.staticScopeMode;profilesBefore=@($profileFacts);profilesAfter=@($profileFactsAfter);staticJunctions=@()} } else {$null})
   categories=@{processes=$sufficient;tasks=$sufficient;shortcuts=$complete}
   errors=@($errors.ToArray());processesBefore=@($before);processesAfter=@($after)
   tasks=@($tasks);tasksAfter=@($tasksAfter);shortcuts=@($shortcuts.ToArray());shortcutCoverage=@($coverage.ToArray())

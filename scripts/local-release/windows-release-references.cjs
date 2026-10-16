@@ -107,6 +107,29 @@ function argv(command) {
   return out;
 }
 const operationKind = 'non-retiring-once-pair-v1';
+const staticKinds = [
+  'Desktop',
+  'CommonDesktop',
+  'StartMenu',
+  'CommonStartMenu',
+];
+function operationStaticScopes(rows) {
+  if (
+    !Array.isArray(rows) ||
+    rows.length !== 4 ||
+    new Set(rows.map((r) => r.kind)).size !== 4 ||
+    rows.some(
+      (r) =>
+        !staticKinds.includes(r.kind) ||
+        r.inspected !== false ||
+        r.reason !== 'outside-non-retiring-operation',
+    )
+  )
+    fail('REFERENCE_STATIC_SCOPE_INVALID');
+  return rows
+    .map((r) => ({ kind: r.kind, inspected: false, reason: r.reason }))
+    .sort((a, b) => a.kind.localeCompare(b.kind));
+}
 const profileRows = (rows) =>
   rows
     .map((r) => ({
@@ -125,6 +148,7 @@ function operationContract(p) {
   if (
     scope.format !== 1 ||
     scope.kind !== operationKind ||
+    scope.staticScopeMode !== 'startup-and-pinned-launchers-v1' ||
     scope.preserveLegacy !== true ||
     scope.globalReferenceComplete !== false ||
     p.mode !== 'once-frozen-pair-v1' ||
@@ -208,6 +232,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           native.globalReferenceComplete !== false ||
           native.categories?.shortcuts !== false ||
           native.operationCoverage?.kind !== operationKind ||
+          native.operationCoverage.staticScopeMode !== scope.staticScopeMode ||
           !Array.isArray(native.operationCoverage.profilesBefore) ||
           !Array.isArray(native.operationCoverage.profilesAfter) ||
           hash(profileRows(native.operationCoverage.profilesBefore)) !==
@@ -230,7 +255,6 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       watched = new Map();
     const directoryWatches = new Map(),
       absentDirectories = new Set();
-    const junctionWatches = new Map();
     const directoryId = (at) => {
       const s = fs.lstatSync(at, { bigint: true });
       if (!s.isDirectory() || s.isSymbolicLink() || !same(canonical(at), at))
@@ -744,43 +768,15 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
               r.kind === k &&
               (['enumerated', 'absent'].includes(r.status) ||
                 (scope &&
-                  !['Startup', 'CommonStartup'].includes(k) &&
-                  r.status === 'uninspected-static-junction')),
+                  staticKinds.includes(k) &&
+                  r.status === 'not-inspected-operation-scope')),
           ),
       )
     )
       fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
     const junctions = scope ? native.operationCoverage.staticJunctions : [];
-    if (!Array.isArray(junctions) || junctions.length > 64)
+    if (!Array.isArray(junctions) || junctions.length)
       fail('REFERENCE_STATIC_JUNCTION_INVALID');
-    for (const r of junctions) {
-      if (
-        !scope ||
-        r.inspected !== false ||
-        r.reason !== 'unrelated-static-junction' ||
-        typeof r.path !== 'string' ||
-        !path.isAbsolute(r.path) ||
-        path.resolve(r.path) !== r.path ||
-        native.shortcutCoverage.some(
-          (c) =>
-            ['Startup', 'CommonStartup'].includes(c.kind) &&
-            inside(c.path, r.path),
-        ) ||
-        !native.shortcutCoverage.some(
-          (c) =>
-            !['Startup', 'CommonStartup'].includes(c.kind) &&
-            inside(c.path, r.path),
-        )
-      )
-        fail('REFERENCE_STATIC_JUNCTION_INVALID');
-      const read = () => {
-        const stat = fs.lstatSync(r.path, { bigint: true });
-        if (!stat.isSymbolicLink()) fail('REFERENCE_STATIC_JUNCTION_CHANGED');
-        return { identity: identity(stat), target: fs.readlinkSync(r.path) };
-      };
-      const snapshot = read();
-      junctionWatches.set(r.path, { read, snapshot });
-    }
     if (
       native.shortcutCoverage.length !== 6 ||
       new Set(native.shortcutCoverage.map((c) => c.kind)).size !== 6 ||
@@ -788,16 +784,18 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     )
       fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
     for (const coverage of native.shortcutCoverage) {
+      if (scope && staticKinds.includes(coverage.kind)) {
+        if (coverage.status !== 'not-inspected-operation-scope')
+          fail('REFERENCE_STATIC_SCOPE_INVALID');
+        continue;
+      }
       if (
         typeof coverage.path !== 'string' ||
         !path.isAbsolute(coverage.path) ||
         path.resolve(coverage.path) !== coverage.path
       )
         fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
-      if (coverage.status === 'uninspected-static-junction') {
-        if (!scope || !junctionWatches.has(coverage.path))
-          fail('REFERENCE_STATIC_JUNCTION_INVALID');
-      } else if (coverage.status === 'absent') {
+      if (coverage.status === 'absent') {
         const ancestor = coverage.ancestor;
         if (
           !ancestor ||
@@ -820,6 +818,11 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         watchDirectory(coverage.path, coverage.identity);
       }
     }
+    const uninspectedStaticScopes = scope
+      ? operationStaticScopes(
+          native.shortcutCoverage.filter((c) => staticKinds.includes(c.kind)),
+        )
+      : null;
     for (const t of native.tasks) {
       if (!t.identity || !Array.isArray(t.actions) || !t.actions.length)
         fail('REFERENCE_TASK_INVALID');
@@ -851,11 +854,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         fail('REFERENCE_SHORTCUT_DIRECTORY_INVALID');
       watchDirectory(dir.path, dir.identity, dir.entries);
       for (const e of dir.entries) {
-        if (
-          e.kind === 'junction' &&
-          (!scope || !junctionWatches.has(path.join(dir.path, e.name)))
-        )
-          fail('REFERENCE_STATIC_JUNCTION_INVALID');
+        if (e.kind === 'junction') fail('REFERENCE_STATIC_JUNCTION_INVALID');
         if (
           e.kind === 'directory' &&
           !native.shortcutDirectories.some((child) =>
@@ -873,7 +872,33 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           fail('REFERENCE_SHORTCUT_DIRECTORY_QUERY_INCOMPLETE');
       }
     }
+    const pinnedShortcuts = scope
+      ? cfg.launchers
+          .flatMap((l) => l.files)
+          .filter((f) => path.extname(f.path).toLowerCase() === '.lnk')
+      : [];
+    if (
+      scope &&
+      pinnedShortcuts.some(
+        (p) => !native.shortcuts.some((s) => same(s.path, p.path)),
+      )
+    )
+      fail('REFERENCE_PINNED_SHORTCUT_QUERY_INCOMPLETE');
     for (const s of native.shortcuts) {
+      if (
+        scope &&
+        !pinnedShortcuts.some(
+          (p) => typeof s.path === 'string' && same(p.path, s.path),
+        ) &&
+        !native.shortcutCoverage.some(
+          (c) =>
+            ['Startup', 'CommonStartup'].includes(c.kind) &&
+            c.status === 'enumerated' &&
+            typeof s.path === 'string' &&
+            inside(c.path, s.path),
+        )
+      )
+        fail('REFERENCE_SHORTCUT_OUTSIDE_OPERATION_SCOPE');
       if (
         !s.path ||
         !s.target ||
@@ -995,29 +1020,21 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     result.records.sort((a, b) =>
       JSON.stringify(a).localeCompare(JSON.stringify(b)),
     );
-    for (const value of junctionWatches.values())
-      if (hash(value.read()) !== hash(value.snapshot))
-        fail('REFERENCE_STATIC_JUNCTION_CHANGED');
     result.complete = !scope;
     result.globalReferenceComplete = !scope;
     if (scope) {
       result.operationSufficient = true;
       result.operationCoverage = {
         kind: operationKind,
+        staticScopeMode: scope.staticScopeMode,
         contractSha256: hash(scope),
         startupComplete: true,
         pinnedLaunchersVerified: true,
         uninspectedProfiles: profileRows(
           native.operationCoverage.profilesAfter,
         ),
-        uninspectedStaticJunctions: [...junctionWatches]
-          .map(([at, v]) => ({
-            path: at,
-            inspected: false,
-            reason: 'unrelated-static-junction',
-            ...v.snapshot,
-          }))
-          .sort((a, b) => a.path.localeCompare(b.path)),
+        uninspectedStaticScopes,
+        uninspectedStaticJunctions: [],
       };
     }
   } catch (error) {
@@ -1162,4 +1179,5 @@ module.exports = {
   main,
   operationContract,
   operationProfiles: profileRows,
+  operationStaticScopes,
 };

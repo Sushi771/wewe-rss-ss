@@ -292,6 +292,7 @@ function operationFixture(f) {
   p.windowsReferences.operationCoverage = {
     format: 1,
     kind: 'non-retiring-once-pair-v1',
+    staticScopeMode: 'startup-and-pinned-launchers-v1',
     preserveLegacy: true,
     globalReferenceComplete: false,
     uninspectedProfiles: profiles,
@@ -302,6 +303,7 @@ function operationFixture(f) {
     globalReferenceComplete: false,
     operationCoverage: {
       kind: 'non-retiring-once-pair-v1',
+      staticScopeMode: 'startup-and-pinned-launchers-v1',
       profilesBefore: structuredClone(profiles),
       profilesAfter: structuredClone(profiles),
       staticJunctions: [],
@@ -320,6 +322,20 @@ function operationFixture(f) {
       entries: [],
     });
   }
+  f.native.shortcutCoverage = f.native.shortcutCoverage.map((c) =>
+    ['Startup', 'CommonStartup'].includes(c.kind)
+      ? c
+      : {
+          kind: c.kind,
+          status: 'not-inspected-operation-scope',
+          inspected: false,
+          reason: 'outside-non-retiring-operation',
+        },
+  );
+  f.native.shortcutDirectories = f.native.shortcutDirectories.filter(
+    (d) => d.path !== path.dirname(f.shortcut),
+  );
+  f.native.shortcuts = [];
   f.addStaticJunction = (startup = false) => {
     const parent = startup
       ? f.native.shortcutCoverage.find((r) => r.kind === 'Startup').path
@@ -332,14 +348,10 @@ function operationFixture(f) {
       at,
       process.platform === 'win32' ? 'junction' : 'dir',
     );
-    f.native.shortcutDirectories
-      .find((r) => r.path === parent)
-      .entries.push({ name: 'unrelated-link', kind: 'junction' });
-    f.native.operationCoverage.staticJunctions.push({
-      path: at,
-      inspected: false,
-      reason: 'unrelated-static-junction',
-    });
+    if (startup)
+      f.native.shortcutDirectories
+        .find((r) => r.path === parent)
+        .entries.push({ name: 'unrelated-link', kind: 'junction' });
     return at;
   };
 }
@@ -355,7 +367,9 @@ test('operation coverage admits only its explicit call sites and preserves truth
     assert.equal(r.operationSufficient, true);
     assert.equal(r.categories.shortcuts, false);
     assert.equal(r.operationCoverage.uninspectedProfiles.length, 2);
-    assert.equal(r.operationCoverage.uninspectedStaticJunctions[0].path, link);
+    assert.equal(r.operationCoverage.uninspectedStaticJunctions.length, 0);
+    assert.equal(r.operationCoverage.uninspectedStaticScopes.length, 4);
+    assert(!JSON.stringify(r).includes(link));
     assert(
       !fs.existsSync(
         f.policy.windowsReferences.operationCoverage.uninspectedProfiles[0]
@@ -391,6 +405,200 @@ for (const fault of ['retire', 'extra-target', 'backup-credit', 'preservation'])
     }),
   );
 
+test(
+  'actual collector excludes a 1403-directory static forest and reaches both dynamic snapshots',
+  { skip: process.platform !== 'win32' },
+  () =>
+    fixture((f) => {
+      operationFixture(f);
+      const folders = {},
+        staticRoots = [],
+        specs = [
+          ['Desktop', 1336, 26],
+          ['CommonDesktopDirectory', 1, 19],
+          ['StartMenu', 34, 45],
+          ['CommonStartMenu', 32, 85],
+        ];
+      for (const [name, dirs, links] of specs) {
+        const root = (folders[name] = path.join(f.base, 'static-' + name));
+        fs.mkdirSync(root);
+        staticRoots.push(root);
+        for (let i = 1; i < dirs; i++)
+          fs.mkdirSync(path.join(root, 'unrelated-' + i));
+        for (let i = 0; i < links; i++)
+          f.write(path.join(root, 'unrelated-' + i + '.lnk'), 'never parsed');
+      }
+      const links = {};
+      const explicitEntry = path.join(f.project, 'explicit-start.lnk');
+      f.write(explicitEntry, 'inert synthetic shortcut');
+      f.policy.windowsReferences.launchers[0].files.push(f.pin(explicitEntry));
+      links[explicitEntry] = {
+        target: f.controller,
+        arguments: quote(f.launcher) + ' start',
+        workingDirectory: f.project,
+      };
+      for (const kind of ['Startup', 'CommonStartup']) {
+        const at = (folders[kind] = path.join(f.base, kind));
+        const file = path.join(at, 'owned-start.lnk');
+        links[file] = {
+          target: f.controller,
+          arguments: quote(f.launcher) + ' start',
+          workingDirectory: f.project,
+        };
+      }
+      const processes = structuredClone(f.native.processesBefore);
+      while (processes.length < 587)
+        processes.push(
+          f.process(
+            1000 + processes.length,
+            1,
+            f.controller,
+            quote(f.controller),
+          ),
+        );
+      const tasks = Array.from({ length: 226 }, (_, i) => ({
+        ...structuredClone(f.native.tasks[0]),
+        identity: 'OwnedTask' + i,
+      }));
+      const policyFile = path.join(f.base, 'collector-policy.json'),
+        defaultPolicy = path.join(f.base, 'default-policy.json');
+      f.write(policyFile, f.policy);
+      const strict = structuredClone(f.policy);
+      delete strict.windowsReferences.operationCoverage;
+      f.write(defaultPolicy, strict);
+      const fixtureFile = path.join(f.base, 'collector-fixture.json');
+      f.write(fixtureFile, {
+        root: f.base,
+        helperRoot: __dirname,
+        folders,
+        staticRoots,
+        links,
+        explicitEntry,
+        processes,
+        tasks,
+        profiles:
+          f.policy.windowsReferences.operationCoverage.uninspectedProfiles,
+        policy: policyFile,
+        defaultPolicy,
+      });
+      const output = execFileSync(
+        path.join(
+          process.env.SystemRoot,
+          'System32/WindowsPowerShell/v1.0/powershell.exe',
+        ),
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-File',
+          path.join(__dirname, 'windows-operation-collector.fixture.ps1'),
+          '-Source',
+          path.join(__dirname, 'windows-release-reference-collector.ps1'),
+          '-FixtureFile',
+          fixtureFile,
+        ],
+        {
+          encoding: 'utf8',
+          windowsHide: true,
+          timeout: 60000,
+          maxBuffer: 8 * 1024 ** 2,
+        },
+      );
+      const report = JSON.parse(output),
+        good = report.results.find((r) => r.name === 'success');
+      assert.equal(report.results.length, 9);
+      assert.equal(good.operationSufficient, true, JSON.stringify(good));
+      assert.equal(good.complete, false);
+      assert.equal(good.globalReferenceComplete, false);
+      assert.deepEqual(good.errors, []);
+      assert.equal(good.processesAfter, 587);
+      assert.equal(good.tasksAfter, 226);
+      assert.equal(good.profilesAfter, 2);
+      assert.equal(good.counts.processes, 2);
+      assert.equal(good.counts.tasks, 2);
+      assert.equal(good.counts.profiles, 2);
+      assert.equal(good.directoryCount, 2);
+      assert.equal(good.shortcutCount, 3);
+      assert.deepEqual(good.counts.resolved, ['Startup', 'CommonStartup']);
+      assert.deepEqual(good.counts.enumerated, [
+        folders.Startup,
+        folders.CommonStartup,
+      ]);
+      assert.equal(good.counts.com, 3);
+      assert.equal(good.counts.hashes, 6);
+      for (const key of [
+        'staticMetadata',
+        'staticEnumerations',
+        'staticHashes',
+        'staticCom',
+      ])
+        assert.equal(good.counts[key], 0, key);
+      for (const bad of report.results.filter((r) => r.name !== 'success')) {
+        assert.equal(bad.operationSufficient, false, bad.name);
+        assert.equal(bad.complete, false, bad.name);
+        assert(bad.errors.length, bad.name);
+      }
+      const baseline = report.results.find((r) => r.name === 'default-strict');
+      assert.equal(baseline.counts.staticEnumerations, 1);
+      assert(
+        baseline.errors.includes('REFERENCE_NATIVE_UNRELATED_STATIC_TRAVERSAL'),
+      );
+      const deadline = report.results.find((r) => r.name === 'deadline');
+      assert(deadline.errors.includes('REFERENCE_NATIVE_DEADLINE'));
+      assert.equal(deadline.processesAfter, 0);
+      // Feed actual collector output into the unchanged process/task/launcher/pointer checks.
+      f.native = report.native;
+      const configSha = f.pin(policyFile).sha256;
+      f.write(f.lock, { pid: 99, nonce: 'owned-nonce', configSha });
+      f.state.configSha = configSha;
+      f.saveState();
+      const checked = probe(f.policy, report.native, { callerPid: 99 });
+      assert.deepEqual(checked.errors, []);
+      assert.equal(checked.operationSufficient, true);
+      assert.equal(checked.operationCoverage.uninspectedStaticScopes.length, 4);
+      const validate = require('./release-scope.cjs').validateReferences;
+      assert.equal(typeof validate(checked, f.policy, 'install'), 'string');
+      for (const omitted of ['processesAfter', 'tasksAfter']) {
+        const missing = { ...report.native, [omitted]: [] };
+        const rejected = probe(f.policy, missing, { callerPid: 99 });
+        assert(rejected.errors.length, omitted);
+      }
+      const missingPinned = {
+        ...report.native,
+        shortcuts: report.native.shortcuts.filter(
+          (s) => s.path !== explicitEntry,
+        ),
+      };
+      assert(
+        probe(f.policy, missingPinned, { callerPid: 99 }).errors.includes(
+          'REFERENCE_PINNED_SHORTCUT_QUERY_INCOMPLETE',
+        ),
+      );
+      fs.unlinkSync(explicitEntry);
+      assert(probe(f.policy, report.native, { callerPid: 99 }).errors.length);
+      console.log(
+        JSON.stringify({
+          fixture: 'actual-collector-static-forest',
+          staticDirectories: 1403,
+          staticShortcuts: 175,
+          processes: 587,
+          tasks: 226,
+          staticCalls: 0,
+          startupDirectories: good.directoryCount,
+          postSnapshots: {
+            processes: good.processesAfter,
+            tasks: good.tasksAfter,
+            profiles: good.profilesAfter,
+          },
+          cases: report.results.map((r) => ({
+            name: r.name,
+            operationSufficient: r.operationSufficient,
+            errors: r.errors,
+          })),
+        }),
+      );
+    }),
+);
+
 for (const fault of [
   'profile-change',
   'denied-process',
@@ -398,6 +606,12 @@ for (const fault of [
   'missing-startup',
   'startup-junction',
   'unreported-junction',
+  'static-directory-leak',
+  'static-shortcut-leak',
+  'missing-post-process',
+  'missing-post-profile',
+  'deadline-exit-zero',
+  'changed-launcher',
 ])
   test('operation coverage keeps necessary failures closed: ' + fault, () =>
     fixture((f) => {
@@ -410,9 +624,23 @@ for (const fault of [
       if (fault === 'missing-startup') f.native.shortcutCoverage.pop();
       if (fault === 'startup-junction') f.addStaticJunction(true);
       if (fault === 'unreported-junction') {
-        f.addStaticJunction();
-        f.native.operationCoverage.staticJunctions = [];
+        f.addStaticJunction(true);
       }
+      if (fault === 'static-directory-leak')
+        f.native.shortcutDirectories.push({
+          path: path.dirname(f.shortcut),
+          identity: directoryIdentity(path.dirname(f.shortcut)),
+          entries: [],
+        });
+      if (fault === 'static-shortcut-leak')
+        f.native.shortcuts.push({ path: f.shortcut });
+      if (fault === 'missing-post-process') f.native.processesAfter = [];
+      if (fault === 'missing-post-profile')
+        f.native.operationCoverage.profilesAfter = [];
+      if (fault === 'deadline-exit-zero')
+        f.native.errors = ['REFERENCE_NATIVE_DEADLINE'];
+      if (fault === 'changed-launcher')
+        f.write(f.launcher, 'changed pinned launcher');
       const r = f.run();
       assert.equal(r.operationSufficient, false);
       assert.equal(r.complete, false);
