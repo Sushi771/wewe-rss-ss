@@ -356,6 +356,47 @@ function operationFixture(f) {
   };
 }
 
+test(
+  'native shortcut hashes without optional cmdlet and retains sharing refusal',
+  { skip: process.platform !== 'win32' },
+  () =>
+    fixture((f) => {
+      const output = execFileSync(
+        path.join(
+          process.env.SystemRoot,
+          'System32/WindowsPowerShell/v1.0/powershell.exe',
+        ),
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-File',
+          path.join(__dirname, 'windows-shortcut-native.fixture.ps1'),
+          '-Source',
+          path.join(__dirname, 'windows-release-reference-collector.ps1'),
+          '-OwnedDirectory',
+          f.project,
+        ],
+        {
+          encoding: 'utf8',
+          windowsHide: true,
+          timeout: 15000,
+          maxBuffer: 128 * 1024,
+        },
+      );
+      const r = JSON.parse(output),
+        file = path.join(f.project, '\u6D4B-owned.lnk');
+      assert.equal(r.hashCmdletCalls, 0);
+      assert.equal(r.normal.sha256, f.pin(file).sha256);
+      assert.equal(r.sharingRefused, true);
+      assert.equal(r.failureContext.stage, 'shortcut-hash-before');
+      assert.equal(r.failureContext.folderKind, 'Startup');
+      assert(
+        r.failureContext.exceptions.some((e) => e.hresult === '0x80070020'),
+      );
+      assert(!JSON.stringify(r.failureContext).includes(f.project));
+    }),
+);
+
 test('operation coverage admits only its explicit call sites and preserves truthful static gaps', () =>
   fixture((f) => {
     operationFixture(f);
@@ -505,7 +546,7 @@ test(
       );
       const report = JSON.parse(output),
         good = report.results.find((r) => r.name === 'success');
-      assert.equal(report.results.length, 9);
+      assert.equal(report.results.length, 13);
       assert.equal(good.operationSufficient, true, JSON.stringify(good));
       assert.equal(good.complete, false);
       assert.equal(good.globalReferenceComplete, false);
@@ -532,7 +573,40 @@ test(
         'staticCom',
       ])
         assert.equal(good.counts[key], 0, key);
-      for (const bad of report.results.filter((r) => r.name !== 'success')) {
+      const unavailable = report.results.find(
+        (r) => r.name === 'get-filehash-unavailable',
+      );
+      assert.equal(unavailable.operationSufficient, true);
+      for (const row of report.results)
+        assert.equal(row.counts.hashCmdletCalls, 0);
+      assert.equal(good.failureContext, null);
+      assert(!JSON.stringify(report).includes('SECRET_FIXTURE'));
+      const hashFailure = report.results.find(
+        (r) => r.name === 'denied-shortcut-hash',
+      );
+      assert.equal(hashFailure.failureContext.stage, 'shortcut-hash-before');
+      assert.equal(hashFailure.failureContext.folderKind, 'Startup');
+      assert(
+        hashFailure.failureContext.exceptions.some(
+          (e) => e.type === 'System.UnauthorizedAccessException',
+        ),
+      );
+      const comFailure = report.results.find(
+        (r) => r.name === 'com-create-failure',
+      );
+      assert.equal(comFailure.failureContext.stage, 'shortcut-com-create');
+      assert(
+        comFailure.failureContext.exceptions.some(
+          (e) => e.hresult === '0x80070005',
+        ),
+      );
+      const oversize = report.results.find(
+        (r) => r.name === 'oversize-shortcut-hash',
+      );
+      assert(oversize.errors.includes('REFERENCE_NATIVE_SHORTCUT_LIMIT'));
+      for (const bad of report.results.filter(
+        (r) => !['success', 'get-filehash-unavailable'].includes(r.name),
+      )) {
         assert.equal(bad.operationSufficient, false, bad.name);
         assert.equal(bad.complete, false, bad.name);
         assert(bad.errors.length, bad.name);

@@ -16,7 +16,9 @@ foreach($item in @('$shell','$link')) {
   if (-not $src.Contains($release)) { throw 'COM release boundary changed' }
   $src=$src.Replace($release,'[void](Owned-ReleaseCom '+$item+')')
 }
-$src=$src.Replace('$code=[string]$_.Exception.Message','$global:OwnedLastError=[string]$_;$code=[string]$_.Exception.Message')
+$hashCall='Shortcut-Sha256 $entry.FullName'
+if (($src.Split(@($hashCall),[StringSplitOptions]::None).Count-1) -ne 2) {throw 'hash boundary changed'}
+$src=$src.Replace($hashCall,'Owned-ShortcutHash $entry.FullName')
 $collector=[scriptblock]::Create($src)
 function Owned-Path([string]$at) {
   $root=[IO.Path]::GetFullPath($global:OwnedFixture.root).TrimEnd('\')+'\'
@@ -73,17 +75,20 @@ function Get-ChildItem($LiteralPath,[switch]$Force,$ErrorAction) {
   }
   $entries
 }
-function Get-FileHash($LiteralPath,$Algorithm,$ErrorAction) {
+function Get-FileHash {
+  $global:OwnedCounts.hashCmdletCalls++
+  throw [Management.Automation.CommandNotFoundException]::new('Unavailable optional hash command')
+}
+function Owned-ShortcutHash($LiteralPath) {
   if (Owned-Path $LiteralPath) { $global:OwnedCounts.staticHashes++;throw 'REFERENCE_NATIVE_UNRELATED_STATIC_HASH' }
   $global:OwnedCounts.hashes++
-  if($global:OwnedCase -eq 'changed-pinned-entry' -and $LiteralPath -eq $global:OwnedFixture.explicitEntry) {return [PSCustomObject]@{Hash=('0'*64)}}
+  if($global:OwnedCase -eq 'denied-shortcut-hash') {throw [UnauthorizedAccessException]::new('SECRET_FIXTURE_PATH must not leak')}
+  if($global:OwnedCase -eq 'oversize-shortcut-hash') {[IO.File]::WriteAllBytes($LiteralPath,[byte[]]::new(1048577))}
+  if($global:OwnedCase -eq 'changed-pinned-entry' -and $LiteralPath -eq $global:OwnedFixture.explicitEntry) {[IO.File]::WriteAllText($LiteralPath,'changed pinned fixture')}
   if($global:OwnedCase -eq 'changed-startup-entry' -and $global:OwnedCounts.hashes -eq 2) {
-    return [PSCustomObject]@{Hash=('0'*64)}
+    [IO.File]::WriteAllText($LiteralPath,'changed Startup fixture')
   }
-  if($Algorithm -ne 'SHA256') {throw 'unexpected hash algorithm'}
-  $hasher=[Security.Cryptography.SHA256]::Create()
-  try { [PSCustomObject]@{Hash=([BitConverter]::ToString($hasher.ComputeHash([IO.File]::ReadAllBytes($LiteralPath)))).Replace('-','')} }
-  finally {$hasher.Dispose()}
+  Shortcut-Sha256 $LiteralPath
 }
 function New-Object($ComObject) {
   if($ComObject -ne 'WScript.Shell') {throw 'unexpected COM object'}
@@ -92,6 +97,7 @@ function New-Object($ComObject) {
     param($at)
     if (Owned-Path $at) { $global:OwnedCounts.staticCom++;throw 'REFERENCE_NATIVE_UNRELATED_STATIC_COM' }
     $global:OwnedCounts.com++
+    if($global:OwnedCase -eq 'com-create-failure') {throw [Runtime.InteropServices.COMException]::new('SECRET_FIXTURE_TARGET must not leak',-2147024891)}
     $r=$global:OwnedFixture.links.$at
     if($null -eq $r) {throw 'unknown fixture shortcut'}
     [PSCustomObject]@{TargetPath=$r.target;Arguments=$r.arguments;WorkingDirectory=$r.workingDirectory}
@@ -101,9 +107,9 @@ function New-Object($ComObject) {
 function Owned-ReleaseCom($value) {}
 $results=[System.Collections.Generic.List[object]]::new()
 $positive=$null
-foreach($case in @('success','default-strict','denied-startup','changed-startup-entry','missing-startup-entry','denied-pinned-entry','changed-pinned-entry','denied-post-process','deadline')) {
-  $global:OwnedCase=$case;$global:OwnedLastError=$null
-  $global:OwnedCounts=@{processes=0;tasks=0;profiles=0;staticMetadata=0;staticEnumerations=0;staticHashes=0;staticCom=0;hashes=0;com=0;resolved=[System.Collections.Generic.List[string]]::new();enumerated=[System.Collections.Generic.List[string]]::new()}
+foreach($case in @('success','get-filehash-unavailable','default-strict','denied-startup','changed-startup-entry','missing-startup-entry','denied-pinned-entry','changed-pinned-entry','denied-post-process','deadline','denied-shortcut-hash','oversize-shortcut-hash','com-create-failure')) {
+  $global:OwnedCase=$case
+  $global:OwnedCounts=@{processes=0;tasks=0;profiles=0;staticMetadata=0;staticEnumerations=0;staticHashes=0;staticCom=0;hashes=0;hashCmdletCalls=0;com=0;resolved=[System.Collections.Generic.List[string]]::new();enumerated=[System.Collections.Generic.List[string]]::new()}
   foreach($file in $global:OwnedFixture.links.PSObject.Properties.Name) {
     if(Owned-Path $file) {throw 'bad Startup fixture'}
     [IO.File]::WriteAllText($file,'inert synthetic shortcut')
@@ -112,6 +118,6 @@ foreach($case in @('success','default-strict','denied-startup','changed-startup-
   $raw=& $collector -PolicyFile $policy
   $r=$raw | ConvertFrom-Json
   if($case -eq 'success') {$positive=$r}
-  $results.Add([PSCustomObject]@{name=$case;counts=$global:OwnedCounts;diagnostic=$global:OwnedLastError;complete=$r.complete;operationSufficient=$r.operationSufficient;globalReferenceComplete=$r.globalReferenceComplete;errors=$r.errors;processesAfter=@($r.processesAfter).Count;tasksAfter=@($r.tasksAfter).Count;profilesAfter=@($r.operationCoverage.profilesAfter).Count;directoryCount=@($r.shortcutDirectories).Count;shortcutCount=@($r.shortcuts).Count})
+  $results.Add([PSCustomObject]@{name=$case;counts=$global:OwnedCounts;failureContext=$r.failureContext;complete=$r.complete;operationSufficient=$r.operationSufficient;globalReferenceComplete=$r.globalReferenceComplete;errors=$r.errors;processesAfter=@($r.processesAfter).Count;tasksAfter=@($r.tasksAfter).Count;profilesAfter=@($r.operationCoverage.profilesAfter).Count;directoryCount=@($r.shortcutDirectories).Count;shortcutCount=@($r.shortcuts).Count})
 }
 @{results=@($results.ToArray());native=$positive} | ConvertTo-Json -Depth 12 -Compress
