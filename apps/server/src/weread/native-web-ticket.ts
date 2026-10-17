@@ -3,8 +3,11 @@ import {
   OwnerWebSession,
   ownerSessionCookie,
 } from '../collection/owner-web-search';
-
-const COOKIE_NAMES = new Set(['wr_vid', 'wr_skey', 'wr_rt', 'wr_ql', 'wr_pf']);
+import {
+  applyNormalWebRenewal,
+  NORMAL_WEB_RENEWAL_URL,
+  NormalWebRenewal,
+} from './normal-web-renewal';
 
 function credentialHeader(value: unknown): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
@@ -17,42 +20,6 @@ function credentialHeader(value: unknown): string | undefined {
   return value;
 }
 
-function renewedSession(
-  session: OwnerWebSession,
-  setCookies: unknown,
-  ownerVid: string,
-): OwnerWebSession {
-  if (setCookies !== undefined && !Array.isArray(setCookies))
-    throw new Error('WEB_RENEWAL_COOKIE_INVALID');
-  const cookies = new Map(
-    session.cookies.map((cookie) => [cookie.name, cookie]),
-  );
-  for (const line of (setCookies || []) as unknown[]) {
-    if (typeof line !== 'string') throw new Error('WEB_RENEWAL_COOKIE_INVALID');
-    const pair = line.split(';', 1)[0];
-    const match = /^([A-Za-z][A-Za-z0-9_-]*)=([^;\s\x00-\x1f\x7f]*)$/.exec(
-      pair,
-    );
-    if (!match || !COOKIE_NAMES.has(match[1])) continue;
-    if (!match[2]) throw new Error('WEB_RENEWAL_COOKIE_INVALID');
-    cookies.set(match[1], {
-      name: match[1],
-      value: match[2],
-      domain: '.weread.qq.com',
-      path: '/',
-      secure: true,
-      expires: -1,
-    });
-  }
-  const updated: OwnerWebSession = {
-    ...session,
-    capturedAt: new Date().toISOString(),
-    cookies: [...cookies.values()],
-  };
-  ownerSessionCookie(updated, ownerVid);
-  return updated;
-}
-
 /** Direct-Web renewal shape follows finlater/weread.koplugin@24c0765
  * (scripts/verify_qr_login.py, weread/lib/client.lua).
  * Callers must enforce a one-shot
@@ -62,11 +29,12 @@ function renewedSession(
 export async function renewDirectWebTicket(
   session: OwnerWebSession,
   ownerVid: string,
-): Promise<{
-  session: OwnerWebSession;
-  ticket?: string;
-  wrpa?: string;
-}> {
+): Promise<
+  NormalWebRenewal & {
+    ticket?: string;
+    wrpa?: string;
+  }
+> {
   const cookie = ownerSessionCookie(session, ownerVid);
   if (!session.cookies.some((entry) => entry.name === 'wr_rt'))
     throw new Error('WEB_RENEWAL_REFRESH_TOKEN_MISSING');
@@ -74,8 +42,13 @@ export async function renewDirectWebTicket(
   let response;
   try {
     response = await axios.post(
-      'https://weread.qq.com/web/login/renewal',
-      { rq: '%2Fweb%2Fbook%2Fread', ql: false },
+      NORMAL_WEB_RENEWAL_URL,
+      {
+        rq: '%2Fweb%2Fbook%2Fread',
+        ql:
+          session.cookies.find((entry) => entry.name === 'wr_ql')?.value ===
+          '1',
+      },
       {
         headers: {
           Cookie: cookie,
@@ -104,13 +77,19 @@ export async function renewDirectWebTicket(
   if (![true, 1, '1'].includes(data.succ))
     throw new Error('WEB_RENEWAL_NOT_SUCCESS');
 
-  const updated = renewedSession(
+  const updated = applyNormalWebRenewal(
     session,
-    response.headers['set-cookie'],
     ownerVid,
+    {
+      url: NORMAL_WEB_RENEWAL_URL,
+      status: response.status,
+      data,
+      setCookies: response.headers['set-cookie'],
+    },
+    new Date().toISOString(),
   );
   return {
-    session: updated,
+    ...updated,
     ticket: credentialHeader(response.headers['x-wr-ticket']),
     wrpa: credentialHeader(response.headers['x-wrpa-0']),
   };
