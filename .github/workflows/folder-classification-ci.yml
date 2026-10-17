@@ -9,6 +9,7 @@ on:
         codex/backend-recovery-integration-20261014,
         codex/space-guard-review-base-20261014,
         codex/receipt-retention-integration-20261017,
+        codex/terminal-refresh-integration-20261017,
       ]
     paths:
       - 'apps/web/src/components/FolderMemberPicker.tsx'
@@ -18,6 +19,10 @@ on:
       - 'apps/web/src/provider/trpc.tsx'
       - 'apps/server/src/article-list-page.ts'
       - 'apps/server/src/article-list-page.spec.ts'
+      - 'apps/server/src/article-list-cache.ts'
+      - 'apps/server/src/article-list-read-timing.ts'
+      - 'apps/server/src/article-list-read-timing.spec.ts'
+      - 'apps/server/src/prisma/prisma.service.ts'
       - 'scripts/article-list-*.test.cjs'
       - 'apps/web/src/pages/feeds/xiaohongshu.tsx'
       - 'apps/server/src/collection/xiaohongshu.service.ts'
