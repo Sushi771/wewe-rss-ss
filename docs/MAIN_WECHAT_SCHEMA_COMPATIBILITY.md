@@ -10,6 +10,7 @@ The current main schema strips the deployed `group`, `dateStart`, `dateEnd` and 
 - Retain XhsCreator/XhsNote table definitions and their grouping/video metadata as historical database compatibility. On a fresh database these tables are empty. Existing opaque rows are retained on upgrade. This is explicitly disclosed schema compatibility, not an enabled Xiaohongshu feature.
 - Preserve the original management-group foreign keys, ordering and lookup indexes, cache-insert ledger, cache-refresh receipts and refresh-submission claim tables. No table is dropped or rebuilt by the seven added migrations.
 - Reuse the deployed date and article-filter helpers. The actual list and summary routes apply group/search/source/date scope; publication ordering supports both directions with the original ID tie break. Metric sorting remains descending. Invalid dates, reversed ranges and invalid directions are rejected rather than stripped.
+- Reuse the deployed protected one-article import schema adapter and its regression tests. Known historical layouts are captured in full, including grouping, BLOB bytes, INSERT receipts, refresh commits and unknown claims. Unexpected tables or malformed ledger layouts still fail, and no historical row is exempted from drift checks.
 
 The XHS service/router, collection/provider activation, account credentials, download endpoints, frontend navigation and prototypes are not introduced. Rnote and paid prototypes are also excluded. No new backup cadence, copy-count policy, retirement behavior or daily-backup branch is included. The main README is unchanged.
 
@@ -33,5 +34,7 @@ The fixtures cover:
 The actual tRPC caller/SQLite tests cover Shanghai day boundaries, group and ungrouped membership, source/search intersection, list/summary agreement, ascending cursor ties, metric zeros, legacy inputs, authorization and invalid-filter rejection. They do not send upstream or download requests.
 
 The first Windows fixture run passed its four compatibility assertions but failed cleanup because its generated native DLL was loaded inside the owned fixture directory. The fixture now reuses the installed native engine from outside that directory, retains the same freshly generated model/client and restores its temporary environment setting. The failed run is not counted as successful validation.
+
+The first exact-head CI also exposed the old protected import tool's four-table schema allowlist. Its image-import job failed with `SQLITE_SCHEMA_UNEXPECTED`. The follow-up includes the already deployed adapter and preservation tests from aeb, rather than skipping the image job or removing its strict old-row/ledger assertions.
 
 Development tests and synthetic upgrade paths do not establish production acceptance. The scheduled natural-refresh acceptance and independent review remain prerequisites for any later main merge; creating a draft PR does not authorize a deployment.
