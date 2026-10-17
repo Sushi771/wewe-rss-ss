@@ -277,11 +277,15 @@ describe('explicit manual all-refresh boundary (offline)', () => {
   });
   it('an unknown upstream receipt releases locks but retains its cooldown reservation', async () => {
     provider.refreshSubscription.mockRejectedValue(
-      new Error('synthetic unknown receipt'),
+      new Error('synthetic unknown receipt https://private.invalid/?k=secret'),
     );
     await expect(
       service.runManualRefresh(id, 'submit', false, { claimKey: 'synthetic' }),
-    ).rejects.toThrow('synthetic unknown receipt');
+    ).rejects.toMatchObject({
+      name: 'RefreshSubmissionError',
+      message: 'REFRESH_SUBMISSION_UNKNOWN',
+      failure: { phase: 'transport', code: 'REFRESH_SUBMISSION_UNKNOWN' },
+    });
     expect(service.prismaService.feed.updateMany).toHaveBeenCalledTimes(1);
     expect(service.activeCollections.size).toBe(0);
     expect(service.activeSubscriptionAdds.size).toBe(0);
