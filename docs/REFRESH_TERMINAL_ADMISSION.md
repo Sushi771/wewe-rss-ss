@@ -36,7 +36,7 @@ Unknown outcomes are never released because they are old. Explicit stop,
 instance guards, shared account/rate/startup gates and bounded preparation/cache
 budgets remain in force. Explicit cache-only recovery retains its unsent history
 and cannot inherit permission to submit it. A durable accepted receipt paired
-with an interrupted submitting label can continue only as cache work.
+with a stale queued or interrupted submitting label can continue only as cache work.
 
 `refresh-terminal-admission.spec.ts` uses synthetic durable records and mocked
 callbacks with network access rejected. It covers a full 14-source later round,

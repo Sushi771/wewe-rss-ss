@@ -460,23 +460,26 @@ describe('terminal refresh admission (synthetic durable records only)', () => {
     await manager.runDue();
     expect(run.mock.calls[0][3]).toEqual({ claimKey: next.batchId });
   });
-  it('recovers a confirmed accepted submitting label only as cache work', async () => {
-    await seed(
-      [{ state: 'submitting', accepted: true, submissionUnknown: false }],
-      { createdAt: clock - 60000, updatedAt: clock - 50000 },
-    );
-    const { manager, run } = make();
-    const next = await manager.enqueueRefresh(
-      [ids[0]],
-      '4'.repeat(64),
-      'scheduled-refresh',
-    );
-    expect(next.items[0].state).toBe('skipped');
-    await manager.runDue();
-    expect(run.mock.calls).toEqual([
-      [ids[0], 'cache', false, { cacheOnly: true }],
-    ]);
-  });
+  it.each(['queued', 'submitting'])(
+    'recovers a confirmed accepted %s label only as cache work',
+    async (state) => {
+      await seed([{ state, accepted: true, submissionUnknown: false }], {
+        createdAt: clock - 60000,
+        updatedAt: clock - 50000,
+      });
+      const { manager, run } = make();
+      const next = await manager.enqueueRefresh(
+        [ids[0]],
+        '4'.repeat(64),
+        'scheduled-refresh',
+      );
+      expect(next.items[0].state).toBe('skipped');
+      await manager.runDue();
+      expect(run.mock.calls).toEqual([
+        [ids[0], 'cache', false, { cacheOnly: true }],
+      ]);
+    },
+  );
   it('releases an ambiguous historical claim only after read-only not-submitted proof, never by age alone', async () => {
     const old = await seed([
       {

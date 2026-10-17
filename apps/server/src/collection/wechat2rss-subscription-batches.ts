@@ -269,7 +269,9 @@ const activePreparationRetry = (b: Batch, item: Item, now: number) =>
       item.retryDeadlineAt ?? Infinity,
     );
 const activeCacheReceipt = (b: Batch, item: Item, now: number) =>
-  pendingCache(item) &&
+  item.accepted === true &&
+  !item.submissionUnknown &&
+  ['queued', 'waiting', 'failed', 'blocked'].includes(item.state) &&
   (globalCacheGate(item) ||
     (!item.cacheRetryExhausted &&
       (item.refreshChecks || 0) < CACHE_CHECK_LIMIT &&
@@ -1294,7 +1296,7 @@ export class Wechat2RssSubscriptionBatches {
       let changed = false;
       for (const item of b.items) {
         if (
-          item.state === 'submitting' &&
+          ['queued', 'submitting'].includes(item.state) &&
           item.accepted === true &&
           !item.submissionUnknown
         ) {
