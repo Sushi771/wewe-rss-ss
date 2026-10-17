@@ -16,6 +16,7 @@ on:
         codex/cache-sync-single-preflight-20261014,
         codex/bounded-five-submit-20261014,
         codex/space-guard-production-compat-20261014,
+        codex/periodic-auto-retention-20261017,
         codex/export-real-metrics-only-20261014,
         codex/folder-rename-latency,
       ]
@@ -32,6 +33,7 @@ on:
         codex/routine-write-backup-boundaries,
         codex/automatic-refresh-failure-isolation,
         codex/cache-response-capacity-diagnostics,
+        codex/terminal-refresh-integration-20261017,
       ]
 
 jobs:
@@ -79,11 +81,20 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: |
+          $fixtureTemp = node -e "process.stdout.write(require('node:fs').realpathSync.native(require('node:os').tmpdir()))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TEMP = $fixtureTemp
+          $env:TMP = $fixtureTemp
           node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs scripts/local-release/entry-budget.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s apps/server/scripts -p 'test_backup_space.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s apps/server/scripts -p 'test_sqlite_retention_plan.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s apps/server/scripts -p 'test_sqlite_snapshot_guard.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s scripts/local-release -p 'test_prepare_start.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Parse read-only reference collector with Windows PowerShell
         shell: powershell
         run: |
