@@ -140,6 +140,7 @@ function listFixture(initialItems: string[]) {
       ];
     },
     useMemo: (fn: () => any) => fn(),
+    useCallback: (fn: (...args: any[]) => any) => fn,
     useEffect: registerEffect,
     useLayoutEffect: registerEffect,
   };
