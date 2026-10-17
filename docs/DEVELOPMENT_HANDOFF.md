@@ -1,3 +1,7 @@
+## 2026-10-17: terminal refresh integration, not deployed
+
+PR47 full range through `6aa511cec97f039e03bb2dab29db7a88c013c856` is integrated on the deployed `12d04edebedf6eed3be07466f9cbf3b899a437a8` baseline. Closed known-unsent tails and exhausted cache work no longer permanently reserve later intents; unknown submissions, in-flight ownership and original budgets remain protected. Every-source coverage stays visible for terminal batches. See [integration scope, validation and deployment boundary](TERMINAL_REFRESH_INTEGRATION_20261017.md). No production deployment or queue changes are included in this development task.
+
 ## 2026-10-16：有界周期备份轮换开发候选，未执行生产
 
 独立复核发现首版 `bdfaad6` 在最终验证后仍可新增保护清单，不得据此前全绿 CI 视为无条件集成通过。修正把当前源库的备份/guard owner 两把既有 OS 锁、不可替换的锁文件句柄及各声明根预先存在的手工保护清单句柄持有到操作结束；清单先发布则旧计划失效，执行先占锁则写入/原子替换被拒绝。guard 活跃、清单缺失或旧/异源/未知引用发布者均拒绝轮换，不停服务。仅支持当前生产者协议与既有固定手工清单，不宣称能冻结任意第三方目录写者；独立写者或旧协议未证明时不可执行。旧批准需重新预览，边界细节见下方留存文档。

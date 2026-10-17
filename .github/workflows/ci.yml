@@ -31,6 +31,7 @@ on:
         codex/space-guard-review-base-20261014,
         codex/routine-write-backup-boundaries,
         codex/automatic-refresh-failure-isolation,
+        codex/cache-response-capacity-diagnostics,
       ]
 
 jobs:
