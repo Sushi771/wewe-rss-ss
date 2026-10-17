@@ -76,3 +76,8 @@ The progress page also displays terminal coverage, so a completed parent with
 Coverage is a read projection, not a new persisted queue format or permission to
 send a request. Synthetic regressions include 128 sources, 14-source partial
 coverage, owner completion after restart, retained unknowns and legal exclusions.
+The parent record's `updatedAt` is not a per-source completion receipt. A retained
+owner's completed source counts as a current update only when its own claim is
+at or after the new intent. A proven earlier claim is a separate prior-round
+exclusion; missing claim evidence remains an anomaly. Neither earns full-update
+wording merely because some other child updated the parent record.

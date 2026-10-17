@@ -346,6 +346,7 @@ const refreshCoverage = (b: Batch, records: Batch[], now: number) => {
                 ((other.state === 'succeeded' &&
                   other.accepted === true &&
                   !other.submissionUnknown &&
+                  Number.isSafeInteger(other.refreshClaimedAt) &&
                   (item.supersededBy
                     ? other.refreshClaimedAt === item.supersededBy.claimedAt
                     : record.updatedAt >= b.createdAt)) ||
@@ -363,9 +364,15 @@ const refreshCoverage = (b: Batch, records: Batch[], now: number) => {
             'retained-submission-unconfirmed',
             owner.batchId,
           );
-        return retained.state === 'succeeded'
-          ? outcome('completed', 'verified-retained-completion', owner.batchId)
-          : outcome('pending', 'active-retained-work', owner.batchId);
+        if (retained.state === 'succeeded')
+          return retained.refreshClaimedAt! >= b.createdAt
+            ? outcome(
+                'completed',
+                'verified-retained-completion',
+                owner.batchId,
+              )
+            : outcome('excluded', 'prior-round-completion', owner.batchId);
+        return outcome('pending', 'active-retained-work', owner.batchId);
       }
       return outcome('anomaly', 'skipped-without-valid-coverage');
     }
@@ -397,8 +404,10 @@ const refreshCoverage = (b: Batch, records: Batch[], now: number) => {
     pending,
     legitimateSkipped:
       excluded +
-      items.filter((item) => item.ownerBatchId && item.status !== 'anomaly')
-        .length,
+      items.filter(
+        (item) =>
+          item.ownerBatchId && ['pending', 'completed'].includes(item.status),
+      ).length,
     excluded,
     anomalies,
     fullyUpdated: expected > 0 && completed === expected,

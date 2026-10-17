@@ -522,53 +522,67 @@ describe('terminal refresh admission (synthetic durable records only)', () => {
     });
     expect(restarted.run).not.toHaveBeenCalled();
   });
-  it('distinguishes active retained coverage from completion and verifies it again after restart', async () => {
-    const owner = await seed(
-      [{ state: 'waiting', accepted: true, submissionUnknown: false }],
-      { state: 'running', createdAt: clock - 60000, updatedAt: clock - 1000 },
-    );
-    const first = make();
-    const next = await first.manager.enqueueRefresh(
-      ids,
-      '6'.repeat(64),
-      'scheduled-refresh',
-    );
-    expect(next.coverage).toMatchObject({
-      expected: 14,
-      pending: 14,
-      completed: 0,
-      legitimateSkipped: 1,
-      anomalies: 0,
-      fullyUpdated: false,
-    });
-    const current = await disk(next.batchId);
-    current.state = 'completed';
-    current.items = current.items.map((item: any) =>
-      item.state === 'queued' ? { ...item, ...ready } : item,
-    );
-    await fs.writeFile(file(next.batchId), JSON.stringify(current));
-    first.manager.close();
-    const second = make();
-    expect(
-      (await second.manager.list()).find((b) => b.batchId === next.batchId)
-        ?.coverage,
-    ).toMatchObject({ completed: 13, pending: 1, fullyUpdated: false });
-    owner.items[0] = { ...owner.items[0], ...ready };
-    owner.state = 'completed';
-    owner.updatedAt = clock + 1;
-    await fs.writeFile(file(owner.batchId), JSON.stringify(owner));
-    expect(
-      (await second.manager.list()).find((b) => b.batchId === next.batchId)
-        ?.coverage,
-    ).toMatchObject({
-      expected: 14,
-      completed: 14,
-      pending: 0,
-      anomalies: 0,
-      fullyUpdated: true,
-    });
-    expect(second.run).not.toHaveBeenCalled();
-  });
+  it.each(['prior-claim', 'later-claim', 'missing-claim'])(
+    'verifies retained %s coverage by source claim after restart, never by parent update time',
+    async (kind) => {
+      const owner = await seed(
+        [
+          {
+            state: kind === 'later-claim' ? 'queued' : 'waiting',
+            accepted: kind !== 'later-claim',
+            submissionUnknown: false,
+            ...(kind === 'prior-claim'
+              ? { refreshClaimedAt: clock - 1000 }
+              : {}),
+          },
+        ],
+        { state: 'running', createdAt: clock - 60000, updatedAt: clock - 1000 },
+      );
+      const first = make();
+      const next = await first.manager.enqueueRefresh(
+        ids,
+        '6'.repeat(64),
+        'scheduled-refresh',
+      );
+      expect(next.coverage).toMatchObject({
+        expected: 14,
+        pending: 14,
+        completed: 0,
+        legitimateSkipped: 1,
+        anomalies: 0,
+        fullyUpdated: false,
+      });
+      const current = await disk(next.batchId);
+      current.state = 'completed';
+      current.items = current.items.map((item: any) =>
+        item.state === 'queued' ? { ...item, ...ready } : item,
+      );
+      await fs.writeFile(file(next.batchId), JSON.stringify(current));
+      first.manager.close();
+      const second = make();
+      expect(
+        (await second.manager.list()).find((b) => b.batchId === next.batchId)
+          ?.coverage,
+      ).toMatchObject({ completed: 13, pending: 1, fullyUpdated: false });
+      owner.items[0] = { ...owner.items[0], ...ready };
+      if (kind === 'later-claim') owner.items[0].refreshClaimedAt = clock + 1;
+      owner.state = 'completed';
+      owner.updatedAt = clock + 1;
+      await fs.writeFile(file(owner.batchId), JSON.stringify(owner));
+      expect(
+        (await second.manager.list()).find((b) => b.batchId === next.batchId)
+          ?.coverage,
+      ).toMatchObject({
+        expected: 14,
+        completed: kind === 'later-claim' ? 14 : 13,
+        pending: 0,
+        excluded: kind === 'prior-claim' ? 1 : 0,
+        anomalies: kind === 'missing-claim' ? 1 : 0,
+        fullyUpdated: kind === 'later-claim',
+      });
+      expect(second.run).not.toHaveBeenCalled();
+    },
+  );
   it('reports explicit source exclusions separately from updates', async () => {
     const old = await seed([
       { state: 'skipped', accepted: false, code: 'SOURCE_CHANGED' },
