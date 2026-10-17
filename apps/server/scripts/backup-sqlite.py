@@ -224,7 +224,7 @@ def legacy_link_allowed(target, registration):
 
 def preview_legacy_roots(root, database=None):
     """No target traversal or DB content read; this proposal grants no authority."""
-    root=local_directory(str(Path(root).absolute()));targets={};aliases=[];deadline=time.monotonic()+10;entries=0
+    root=local_directory(str(Path(root).resolve(strict=True)));targets={};aliases=[];deadline=time.monotonic()+10;entries=0
     if database is not None and Path(database).resolve().is_relative_to(root):raise ValueError('Nested source/destination refused')
     def visit(folder,depth=0):
         nonlocal entries
