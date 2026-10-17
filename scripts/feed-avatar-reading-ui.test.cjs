@@ -30,6 +30,7 @@ function hooks() {
         ];
       },
       useMemo: (fn) => fn(),
+      useCallback: (fn) => fn,
       useEffect() {},
       useLayoutEffect() {},
     },
