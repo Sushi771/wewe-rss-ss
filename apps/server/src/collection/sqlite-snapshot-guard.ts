@@ -50,6 +50,95 @@ const fallback = (reason: string): FastInsertSnapshotHealth => ({
   reason,
 });
 
+export function safePeriodicSnapshotFailure(value: unknown) {
+  const codes = new Set([
+    'SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW',
+    'SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID',
+    'SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED',
+    'SQLITE_BACKUP_LAYOUT_AMBIGUOUS_REGISTRATION',
+    'SQLITE_BACKUP_LAYOUT_IDENTITY_UNPROVED',
+    'SQLITE_BACKUP_LAYOUT_SCAN_LIMIT',
+    'SQLITE_SPACE_BUDGET_EXCEEDED',
+    'SQLITE_PERIODIC_RETENTION_HELD',
+    'SQLITE_PERIODIC_RETENTION_PROOF_LIMIT',
+    'SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED',
+    'SQLITE_PERIODIC_RETENTION_POLICY_INVALID',
+    'SQLITE_BACKUP_VERIFICATION_FAILED',
+    'SQLITE_BACKUP_SOURCE_CHANGED',
+    'SQLITE_BACKUP_BUSY',
+    'SQLITE_BACKUP_TIMEOUT',
+    'SQLITE_BACKUP_FAILED',
+  ]);
+  if (!value || typeof value !== 'object') return undefined;
+  const { code, stage } = value as Record<string, unknown>;
+  if (typeof code !== 'string' || !codes.has(code)) return undefined;
+  if (
+    typeof stage !== 'string' ||
+    ![
+      'layout',
+      'budget',
+      'lock',
+      'snapshot',
+      'copy',
+      'verify',
+      'hash',
+      'rotation',
+      'unknown',
+    ].includes(stage)
+  )
+    return undefined;
+  return { code, stage };
+}
+
+export function safePeriodicRetentionStatus(value: unknown) {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as Record<string, unknown>;
+  if (!['complete', 'held', 'disabled'].includes(String(input.status)))
+    return undefined;
+  const codes = new Set([
+    'COMPLETE',
+    'DISABLED',
+    'UNIQUE_HISTORY_RETAINED',
+    'PROTECTED_WINDOWS_RETAINED',
+    'CANDIDATES_HELD',
+    'AUTO_DELETE_UNCERTAIN',
+    'AUTO_RETENTION_HELD',
+    'HISTORY_MAINTENANCE_ACTIVE',
+    'TWO_VERIFIED_RECOVERY_POINTS_REQUIRED',
+    'PREEXISTING_PROTECTION_MANIFEST_REQUIRED',
+    'UNSUPPORTED_REFERENCE_PUBLISHER',
+    'BOUND_REFERENCE_RECORDS_CHANGED',
+    'REFERENCE_PIN_LIMIT',
+    'VERIFIED_ROTATION_REQUIRES_WINDOWS',
+    'SQLITE_SPACE_BUDGET_EXCEEDED',
+    'EXCLUSIVE_OBJECT_PIN_FAILED',
+    'SQLITE_PERIODIC_RETENTION_PROOF_LIMIT',
+    'READ_BUDGET_EXCEEDED',
+    'SCAN_DEADLINE',
+  ]);
+  const code =
+    typeof input.code === 'string' && codes.has(input.code)
+      ? input.code
+      : 'AUTO_RETENTION_HELD';
+  const count = (name: string) => {
+    const value = input[name];
+    return typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value >= 0 &&
+      value <= 8192
+      ? value
+      : null;
+  };
+  return {
+    status: input.status as string,
+    code,
+    deletedCopies: count('deletedCopies'),
+    heldUnique: count('heldUnique'),
+    heldOther: count('heldOther'),
+    protectedOrUnknown: count('protectedOrUnknown'),
+  };
+}
+
 /** Private stdio to one OS-locked owner; no persisted receipt grants a lease. */
 export class SqliteSnapshotGuard {
   private child?: ChildProcessWithoutNullStreams;
@@ -63,6 +152,8 @@ export class SqliteSnapshotGuard {
   private id = 0;
   private reason = 'snapshot-owner-not-started';
   private periodicFailed = false;
+  private periodicFailureKey = '';
+  private retentionStatusKey = '';
   private starting?: Promise<void>;
   private generation?: string;
   private databasePath?: string;
@@ -163,11 +254,34 @@ export class SqliteSnapshotGuard {
           const message = JSON.parse(line);
           if (message.event === 'periodic-snapshot-status') {
             if (typeof message.ok !== 'boolean') throw new Error();
-            if (!message.ok && !this.periodicFailed)
-              console.warn('[SQLITE_PERIODIC_SNAPSHOT_FAILED]');
+            const failure = safePeriodicSnapshotFailure(message.failure);
+            const key = failure ? `${failure.code}:${failure.stage}` : '';
+            if (
+              !message.ok &&
+              (!this.periodicFailed || key !== this.periodicFailureKey)
+            ) {
+              if (failure)
+                console.warn('[SQLITE_PERIODIC_SNAPSHOT_FAILED]', failure);
+              else console.warn('[SQLITE_PERIODIC_SNAPSHOT_FAILED]');
+            }
             if (message.ok && this.periodicFailed)
               console.info('[SQLITE_PERIODIC_SNAPSHOT_RECOVERED]');
             this.periodicFailed = !message.ok;
+            this.periodicFailureKey = message.ok ? '' : key;
+            const retention = safePeriodicRetentionStatus(message.retention);
+            if (retention) {
+              const retentionKey = JSON.stringify(retention);
+              if (retentionKey !== this.retentionStatusKey) {
+                if (retention.status === 'held')
+                  console.warn('[SQLITE_PERIODIC_RETENTION_HELD]', retention);
+                else if (this.retentionStatusKey)
+                  console.info(
+                    '[SQLITE_PERIODIC_RETENTION_COMPLETE]',
+                    retention,
+                  );
+              }
+              this.retentionStatusKey = retentionKey;
+            }
             return;
           }
           const { id, result } = message;

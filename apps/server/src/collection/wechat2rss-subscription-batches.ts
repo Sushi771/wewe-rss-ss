@@ -1,4 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  UnknownOccupancyRelease,
+  UnknownReleaseBinding,
+  unknownItemDigest,
+  validUnknownRelease,
+  readUnknownReleaseApproval,
+  unknownReleaseSummary,
+} from './refresh-occupancy-release';
+import {
+  refreshSubmissionFailure,
+  validRefreshSubmissionFailure,
+  RefreshSubmissionFailure,
+} from './refresh-response-receipt';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { subscriptionArticleUrl } from './subscription-add';
@@ -50,6 +63,8 @@ export type BatchOutcome = {
   restrictionKind?: 'account' | 'rate-limit';
   failureReason?: CacheFailureReason;
   failurePoint?: RefreshCacheFailurePoint;
+  submissionFailure?: RefreshSubmissionFailure;
+  reconciliationFailure?: RefreshSubmissionFailure;
 };
 export type PreparedRefresh = {
   outcome?: BatchOutcome;
@@ -78,6 +93,8 @@ type Item = Omit<BatchOutcome, 'state'> & {
   cacheOnly?: boolean;
   cacheFailureAt?: number;
   cacheRetryExhausted?: 'attempt-limit' | 'deadline';
+  occupancyRelease?: UnknownOccupancyRelease;
+  releaseSourceSha256?: string;
   supersededBy?: {
     batchId: string;
     createdAt: number;
@@ -223,6 +240,10 @@ const itemFields = new Set([
   'cacheRetryExhausted',
   'failureReason',
   'failurePoint',
+  'submissionFailure',
+  'reconciliationFailure',
+  'occupancyRelease',
+  'releaseSourceSha256',
 ]);
 /** Legacy v1 manual/automatic refreshes share the audited current /add contract.
  * Unknown metadata or an explicit different scope cannot establish equivalence. */
@@ -278,10 +299,51 @@ const activeCacheReceipt = (b: Batch, item: Item, now: number) =>
       (item.refreshChecks || 0) < CACHE_CHECK_LIMIT &&
       now < b.createdAt + CACHE_RECOVERY_WINDOW &&
       !['SOURCE_CHANGED', 'SUBSCRIPTION_PAUSED'].includes(item.code || '')));
-/** Reservation follows work that can still run, not a historical child label.
- * An unknown request always reserves its feed, regardless of parent or age. */
-const retainsRefreshItem = (b: Batch, item: Item, now: number) =>
-  uncertainSubmission(item) ||
+const releasedUnknown = (b: Batch, item: Item) => {
+  const r = item.occupancyRelease;
+  return (
+    validUnknownRelease(r) &&
+    isRefresh(b) &&
+    ['completed', 'stopped'].includes(b.state) &&
+    item.submissionUnknown === true &&
+    item.accepted === false &&
+    r.instance === b.instance &&
+    r.batchId === b.batchId &&
+    r.intentKey === b.intentKey &&
+    r.feedId === item.feedId &&
+    r.index === item.index &&
+    r.itemSha256 === unknownItemDigest(item) &&
+    r.resolvedAt >= (item.refreshClaimedAt ?? Infinity) &&
+    r.resolvedAt > b.createdAt
+  );
+};
+type FutureAdmission = {
+  instance: string;
+  intentKey?: string;
+  createdAt: number;
+  sources: Map<string, string>;
+};
+const occupiesUnknown = (b: Batch, item: Item, future?: FutureAdmission) =>
+  uncertainSubmission(item) &&
+  !(
+    releasedUnknown(b, item) &&
+    future?.instance === b.instance &&
+    future?.intentKey &&
+    future.intentKey !== b.intentKey &&
+    future.createdAt > item.occupancyRelease!.resolvedAt &&
+    future.createdAt >= item.occupancyRelease!.futureRoundNotBefore &&
+    future.sources.get(`${b.batchId}:${item.index}`) ===
+      item.occupancyRelease!.sourceSha256
+  );
+/** Historical uncertainty stays visible. Only an explicit bound disposition may
+ * release occupancy for a different, subsequently created intent. */
+const retainsRefreshItem = (
+  b: Batch,
+  item: Item,
+  now: number,
+  future?: FutureAdmission,
+) =>
+  occupiesUnknown(b, item, future) ||
   activeCacheReceipt(b, item, now) ||
   activePreparationRetry(b, item, now) ||
   (live(b) &&
@@ -470,9 +532,12 @@ const view = (b: Batch, records: Batch[] = [b], now = Date.now()) => ({
     cacheRetryExhausted: item.cacheRetryExhausted,
     failureReason: item.failureReason,
     failurePoint: item.failurePoint,
+    submissionFailure: item.submissionFailure,
+    reconciliationFailure: item.reconciliationFailure,
     coverageReviewRequired: item.coverageReviewRequired,
     waitingForReceipt: item.waitingForReceipt,
     supersededBy: item.supersededBy,
+    occupancyRelease: unknownReleaseSummary(item.occupancyRelease),
     metadataPending: false,
     // Bind internal consumers to the original intent without publishing URLs.
     articleUrlHash: item.articleUrl ? hash(item.articleUrl) : undefined,
@@ -504,12 +569,13 @@ export class Wechat2RssSubscriptionBatches {
     feedId: string,
     stage: 'submit' | 'cache',
     automatic?: boolean,
-    options?: { cacheOnly?: boolean; claimKey?: string },
+    options?: { cacheOnly?: boolean; claimKey?: string; sourceSha256?: string },
   ) => Promise<BatchOutcome>;
   private prepareRefresh?: (
     feedId: string,
     automatic: boolean,
     waveKey: string,
+    sourceSha256?: string,
   ) => Promise<PreparedRefresh>;
   attachRefreshPreparation(
     prepare: NonNullable<Wechat2RssSubscriptionBatches['prepareRefresh']>,
@@ -604,7 +670,11 @@ export class Wechat2RssSubscriptionBatches {
       feedId: string,
       stage: 'submit' | 'cache',
       automatic?: boolean,
-      options?: { cacheOnly?: boolean; claimKey?: string },
+      options?: {
+        cacheOnly?: boolean;
+        claimKey?: string;
+        sourceSha256?: string;
+      },
     ) => Promise<BatchOutcome>,
   ) {
     if (this.refresh) throw new Error('BATCH_REFRESH_EXISTS');
@@ -662,6 +732,118 @@ export class Wechat2RssSubscriptionBatches {
     private readonly resumeTask: (id: string) => Promise<unknown>,
     private readonly now: () => number = Date.now,
   ) {}
+
+  private unknownReleaseSource?: (
+    feedId: string,
+    batchId: string,
+    claimedAt: number,
+    receiptAt: number,
+    quiescent?: boolean,
+  ) => Promise<string>;
+  attachUnknownReleaseSource(
+    check: NonNullable<Wechat2RssSubscriptionBatches['unknownReleaseSource']>,
+  ) {
+    this.unknownReleaseSource = check;
+  }
+  async unknownRefreshReleaseBinding(
+    batchId: string,
+    feedId: string,
+  ): Promise<UnknownReleaseBinding> {
+    const b = await this.read(batchId),
+      item = b?.items.find((i) => i.feedId === feedId);
+    if (
+      !b ||
+      !item ||
+      !this.unknownReleaseSource ||
+      !isRefresh(b) ||
+      b.cacheOnly ||
+      b.instance !== hash(this.instance()) ||
+      !b.intentKey ||
+      !['completed', 'stopped'].includes(b.state) ||
+      b.items.some(
+        (i) =>
+          ['queued', 'submitting', 'waiting'].includes(i.state) ||
+          i.sharedRestriction === true,
+      ) ||
+      item.submissionUnknown !== true ||
+      item.accepted !== false ||
+      !validSourceClaim(b, item, this.now()) ||
+      !refreshScope(b, item)
+    )
+      throw Error('UNKNOWN_RELEASE_UNPROVED');
+    const sourceSha256 = await this.unknownReleaseSource(
+      feedId,
+      batchId,
+      item.refreshClaimedAt!,
+      b.updatedAt,
+      true,
+    );
+    if (!/^[a-f0-9]{64}$/.test(sourceSha256))
+      throw Error('UNKNOWN_RELEASE_UNPROVED');
+    return {
+      instance: b.instance,
+      batchId,
+      intentKey: b.intentKey,
+      feedId,
+      index: item.index,
+      itemSha256: unknownItemDigest(item),
+      sourceSha256,
+    };
+  }
+  async releaseUnknownRefreshOccupancy(input: {
+    batchId: string;
+    feedId: string;
+    approvalFile: string;
+    approvalSha256: string;
+    evidenceFile: string;
+  }) {
+    if (this.busy || this.accepting) throw Error('BATCH_BUSY');
+    const unlock = await batchStorageLock(await this.storage());
+    if (!unlock) throw Error('BATCH_BUSY');
+    try {
+      const binding = await this.unknownRefreshReleaseBinding(
+        input.batchId,
+        input.feedId,
+      );
+      const b = (await this.read(input.batchId))!,
+        item = b.items[binding.index];
+      if (unknownItemDigest(item) !== binding.itemSha256)
+        throw Error('UNKNOWN_RELEASE_CHANGED');
+      const existing = item.occupancyRelease;
+      const record = await readUnknownReleaseApproval(
+        input,
+        binding,
+        existing?.resolvedAt ?? this.now(),
+      );
+      if (existing) {
+        if (
+          !releasedUnknown(b, item) ||
+          existing.approvalSha256 !== record.approvalSha256 ||
+          existing.evidenceSha256 !== record.evidenceSha256
+        )
+          throw Error('UNKNOWN_RELEASE_CHANGED');
+        return { ...view(b, [b], this.now()), reused: true };
+      }
+      if (
+        (await this.unknownReleaseSource!(
+          input.feedId,
+          input.batchId,
+          item.refreshClaimedAt!,
+          b.updatedAt,
+          true,
+        )) !== binding.sourceSha256
+      )
+        throw Error('UNKNOWN_RELEASE_CHANGED');
+      item.occupancyRelease = record;
+      if (Buffer.byteLength(JSON.stringify(b)) > 500000)
+        throw Error('UNKNOWN_RELEASE_SIZE_LIMIT');
+      if (!(await this.write(b, 'release', item.index)))
+        throw Error('UNKNOWN_RELEASE_CHANGED');
+      return { ...view(b, [b], this.now()), reused: false };
+    } finally {
+      await unlock();
+    }
+  }
 
   private async storage() {
     if (this.directory) return this.directory;
@@ -780,10 +962,17 @@ export class Wechat2RssSubscriptionBatches {
             !refreshCacheFailurePoints.includes(item.failurePoint)) ||
           (item.restrictionKind !== undefined &&
             !['account', 'rate-limit'].includes(item.restrictionKind)) ||
+          (item.submissionFailure !== undefined &&
+            !validRefreshSubmissionFailure(item.submissionFailure)) ||
+          (item.reconciliationFailure !== undefined &&
+            !validRefreshSubmissionFailure(item.reconciliationFailure)) ||
           (item.sharedRestriction !== undefined &&
             typeof item.sharedRestriction !== 'boolean') ||
           (item.submissionUnknown !== undefined &&
             typeof item.submissionUnknown !== 'boolean') ||
+          (item.releaseSourceSha256 !== undefined &&
+            !/^[a-f0-9]{64}$/.test(item.releaseSourceSha256)) ||
+          (item.occupancyRelease !== undefined && !releasedUnknown(b, item)) ||
           (item.stopBatch !== undefined &&
             typeof item.stopBatch !== 'boolean') ||
           (item.retryable !== undefined &&
@@ -827,7 +1016,7 @@ export class Wechat2RssSubscriptionBatches {
    * Only creation, explicit stop, and a single genuine receipt have special modes. */
   private async write(
     b: Batch,
-    mode: boolean | 'receipt' | 'stop' = true,
+    mode: boolean | 'receipt' | 'stop' | 'release' = true,
     receiptIndex?: number,
   ) {
     const persisted = JSON.parse(JSON.stringify(b)) as Batch;
@@ -835,44 +1024,93 @@ export class Wechat2RssSubscriptionBatches {
     const pending = previous
       .catch(() => false)
       .then(async () => {
-        const latest = mode === false ? undefined : await this.read(b.batchId);
-        if (mode !== false && !latest) return false;
-        if (mode === 'stop') {
-          Object.assign(persisted, latest);
-          persisted.state = 'stopped';
-          for (const item of persisted.items)
-            if (item.state === 'queued') {
-              item.state = 'cancelled';
-              item.message = '剩余任务已停止，未发送。';
-            }
-        } else if (latest?.state === 'stopped') {
-          if (mode !== 'receipt') {
+        // Stop intentionally bypasses the worker mutex. Serialize the actual
+        // read/replace boundary across manager instances as well as this map.
+        let unlock: (() => Promise<void>) | undefined;
+        for (let attempt = 0; attempt < 50 && !unlock; attempt++) {
+          unlock = await batchStorageLock(
+            await this.storage(),
+            b.batchId + '.write.lock',
+          );
+          if (!unlock) await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!unlock) throw Error('BATCH_BUSY');
+        try {
+          const latest =
+            mode === false ? undefined : await this.read(b.batchId);
+          if (mode !== false && !latest) return false;
+          if (mode === 'release') {
+            const r = persisted.items[receiptIndex!]?.occupancyRelease;
+            if (
+              !r ||
+              !latest ||
+              latest.items[receiptIndex!]?.occupancyRelease ||
+              unknownItemDigest(latest.items[receiptIndex!]) !== r.itemSha256 ||
+              latest.state !== persisted.state
+            )
+              return false;
+            const target = {
+              ...latest.items[receiptIndex!],
+              occupancyRelease: r,
+            };
+            if (
+              !releasedUnknown({ ...latest, updatedAt: r.resolvedAt }, target)
+            )
+              return false;
+            Object.assign(persisted, latest);
+            persisted.items[receiptIndex!] = target;
+          } else if (
+            latest?.items.some((i) => releasedUnknown(latest, i)) &&
+            (persisted.state !== latest.state ||
+              latest.items.some(
+                (i) =>
+                  releasedUnknown(latest, i) &&
+                  JSON.stringify(i) !==
+                    JSON.stringify(persisted.items[i.index]),
+              ))
+          ) {
             Object.assign(b, latest);
             return false;
           }
-          const receipt = persisted.items[receiptIndex!];
-          if (!receipt || !latest.items[receiptIndex!]) return false;
-          latest.items[receiptIndex!] = { ...receipt };
+          if (mode === 'stop') {
+            Object.assign(persisted, latest);
+            persisted.state = 'stopped';
+            for (const item of persisted.items)
+              if (item.state === 'queued') {
+                item.state = 'cancelled';
+                item.message = '剩余任务已停止，未发送。';
+              }
+          } else if (latest?.state === 'stopped' && mode !== 'release') {
+            if (mode !== 'receipt') {
+              Object.assign(b, latest);
+              return false;
+            }
+            const receipt = persisted.items[receiptIndex!];
+            if (!receipt || !latest.items[receiptIndex!]) return false;
+            latest.items[receiptIndex!] = { ...receipt };
+            if (
+              receipt.state === 'queued' &&
+              !receipt.accepted &&
+              !receipt.submissionUnknown
+            )
+              latest.items[receiptIndex!].state = 'cancelled';
+            latest.nextSubmissionAt = Math.max(
+              latest.nextSubmissionAt,
+              persisted.nextSubmissionAt,
+            );
+            Object.assign(persisted, latest);
+          }
+          await this.persistWrite(persisted);
           if (
-            receipt.state === 'queued' &&
-            !receipt.accepted &&
-            !receipt.submissionUnknown
+            mode === 'stop' ||
+            (mode === 'receipt' && latest?.state === 'stopped')
           )
-            latest.items[receiptIndex!].state = 'cancelled';
-          latest.nextSubmissionAt = Math.max(
-            latest.nextSubmissionAt,
-            persisted.nextSubmissionAt,
-          );
-          Object.assign(persisted, latest);
+            Object.assign(b, persisted);
+          else b.updatedAt = persisted.updatedAt;
+          return true;
+        } finally {
+          await unlock();
         }
-        await this.persistWrite(persisted);
-        if (
-          mode === 'stop' ||
-          (mode === 'receipt' && latest?.state === 'stopped')
-        )
-          Object.assign(b, persisted);
-        else b.updatedAt = persisted.updatedAt;
-        return true;
       });
     this.batchWrites.set(b.batchId, pending);
     try {
@@ -1094,12 +1332,59 @@ export class Wechat2RssSubscriptionBatches {
       await this.coverPreparation(records);
       for (const record of records) await this.recoverPreparation(record);
       for (const record of records) await this.recoverAcceptedCache(record);
+      const future: FutureAdmission = {
+        instance: hash(this.instance()),
+        intentKey,
+        createdAt: this.now(),
+        sources: new Map(),
+      };
+      for (const record of records)
+        for (const item of record.items) {
+          if (!releasedUnknown(record, item) || !this.unknownReleaseSource)
+            continue;
+          try {
+            const sourceSha256 = await this.unknownReleaseSource(
+              item.feedId!,
+              record.batchId,
+              item.refreshClaimedAt!,
+              record.updatedAt,
+            );
+            const r = item.occupancyRelease!;
+            await readUnknownReleaseApproval(
+              r,
+              {
+                instance: record.instance,
+                batchId: record.batchId,
+                intentKey: record.intentKey!,
+                feedId: item.feedId!,
+                index: item.index,
+                itemSha256: unknownItemDigest(item),
+                sourceSha256,
+              },
+              r.resolvedAt,
+            );
+            future.sources.set(`${record.batchId}:${item.index}`, sourceSha256);
+          } catch {
+            /* retain occupancy */
+          }
+        }
+      const releasedSource = (feedId: string) =>
+        records
+          .flatMap((r) =>
+            r.items.filter(
+              (i) =>
+                i.feedId === feedId &&
+                releasedUnknown(r, i) &&
+                !occupiesUnknown(r, i, future),
+            ),
+          )
+          .at(0)?.occupancyRelease?.sourceSha256;
       const uncertain = new Set(
         records
           .filter(isRefresh)
           .flatMap((record) =>
             record.items
-              .filter((item) => uncertainSubmission(item))
+              .filter((item) => occupiesUnknown(record, item, future))
               .map((item) => item.feedId),
           ),
       );
@@ -1114,7 +1399,7 @@ export class Wechat2RssSubscriptionBatches {
       if (same) {
         if (purpose === 'scheduled-refresh' && intentKey) {
           const retained = (record: Batch, item: Item) =>
-            retainsRefreshItem(record, item, this.now());
+            retainsRefreshItem(record, item, this.now(), future);
           const existing = new Set(
             records
               .filter(isRefresh)
@@ -1168,6 +1453,9 @@ export class Wechat2RssSubscriptionBatches {
               feedId,
               state: fresh.includes(feedId) ? 'queued' : 'skipped',
               accepted: false,
+              ...(fresh.includes(feedId) && releasedSource(feedId)
+                ? { releaseSourceSha256: releasedSource(feedId) }
+                : {}),
               message: fresh.includes(feedId)
                 ? 'Waiting behind existing refresh work.'
                 : 'Existing refresh round retained; no duplicate automatic submission.',
@@ -1209,7 +1497,7 @@ export class Wechat2RssSubscriptionBatches {
                     record.items.some(
                       (item) =>
                         requested.includes(item.feedId!) &&
-                        uncertainSubmission(item),
+                        occupiesUnknown(record, item, future),
                     ),
                 )
                 .map((record) => record.batchId)
@@ -1219,6 +1507,9 @@ export class Wechat2RssSubscriptionBatches {
           feedId,
           state: ids.includes(feedId) ? 'queued' : 'skipped',
           accepted: false,
+          ...(ids.includes(feedId) && releasedSource(feedId)
+            ? { releaseSourceSha256: releasedSource(feedId) }
+            : {}),
           message: '等待串行提交上游更新。',
         })),
       };
@@ -1766,6 +2057,7 @@ export class Wechat2RssSubscriptionBatches {
           for (const item of record.items) {
             if (
               !item.submissionUnknown ||
+              releasedUnknown(record, item) ||
               item.accepted === true ||
               item.state === 'succeeded' ||
               (item.nextReceiptCheck || 0) > this.now()
@@ -1779,10 +2071,14 @@ export class Wechat2RssSubscriptionBatches {
                 record.createdAt,
                 record.batchId,
               );
-            } catch {
-              /* remain unknown */
+            } catch (error) {
+              item.reconciliationFailure = refreshSubmissionFailure(
+                error,
+                'sql-receipt',
+              );
             }
             if (proof === 'accepted') {
+              delete item.reconciliationFailure;
               item.accepted = true;
               item.submissionUnknown = false;
               item.retryable = false;
@@ -1793,6 +2089,7 @@ export class Wechat2RssSubscriptionBatches {
               item.message =
                 'Durable accepted receipt recovered; cache-only continuation, no remote replay.';
             } else if (proof === 'not-submitted') {
+              delete item.reconciliationFailure;
               item.submissionUnknown = false;
               item.stopBatch = false;
               const expired =
@@ -2215,7 +2512,12 @@ export class Wechat2RssSubscriptionBatches {
                 item.feedId!,
                 stage,
                 b.purpose === 'scheduled-refresh',
-                { claimKey: b.batchId },
+                {
+                  claimKey: b.batchId,
+                  ...(item.releaseSourceSha256
+                    ? { sourceSha256: item.releaseSourceSha256 }
+                    : {}),
+                },
               );
     } catch (error) {
       result =
@@ -2226,6 +2528,7 @@ export class Wechat2RssSubscriptionBatches {
               stopBatch: true,
               accepted: false,
               submissionUnknown: true,
+              submissionFailure: refreshSubmissionFailure(error),
               message:
                 'Update receipt uncertain; independent sources continue without replay.',
             };
@@ -2307,7 +2610,14 @@ export class Wechat2RssSubscriptionBatches {
         if (!(await this.write(current))) break;
         let job: PreparedRefresh;
         try {
-          job = await this.prepareRefresh!(item.feedId!, automatic, waveKey);
+          job = item.releaseSourceSha256
+            ? await this.prepareRefresh!(
+                item.feedId!,
+                automatic,
+                waveKey,
+                item.releaseSourceSha256,
+              )
+            : await this.prepareRefresh!(item.feedId!, automatic, waveKey);
         } catch {
           job = {
             outcome: {
@@ -2446,6 +2756,7 @@ export class Wechat2RssSubscriptionBatches {
                 state: 'blocked',
                 accepted: false,
                 submissionUnknown: true,
+                submissionFailure: refreshSubmissionFailure(error),
                 stopBatch: code === 'WECHAT2RSS_RATE_LIMITED',
                 sharedRestriction: code === 'WECHAT2RSS_RATE_LIMITED',
                 restrictionKind:

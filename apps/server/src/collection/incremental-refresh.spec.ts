@@ -351,7 +351,12 @@ describe('ordinary incremental transactions and durable remote claims without sn
     },
     20000,
   );
-  it.each(['remote-attempted', 'remote-response', 'remote-accepted'])(
+  it.each([
+    'remote-attempted',
+    'remote-response',
+    'remote-validated-response',
+    'remote-accepted',
+  ])(
     'never replays an abruptly killed remote claim at %s',
     async (stage) => {
       const counter = await killAt(stage);
@@ -376,7 +381,7 @@ describe('ordinary incremental transactions and durable remote claims without sn
         .filter(Boolean).length;
       expect(originalCalls).toBe(stage === 'remote-attempted' ? 0 : 1);
       const record = (await batches().list())[0];
-      if (stage === 'remote-accepted')
+      if (['remote-accepted', 'remote-validated-response'].includes(stage))
         expect(record.items[0].accepted).toBe(true);
       else expect(record.items[0].submissionUnknown).toBe(true);
       await retained();

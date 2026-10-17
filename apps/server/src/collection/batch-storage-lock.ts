@@ -14,8 +14,13 @@ const alive = (pid: number) => {
  * malformed/empty claims fail closed. Recovery itself is serialized, so a
  * contender cannot remove a newly acquired worker claim. No timed lease can
  * expire while an upstream response is still outstanding. */
-export async function batchStorageLock(directory: string) {
-  const lock = path.join(directory, 'worker.lock');
+export async function batchStorageLock(
+  directory: string,
+  name = 'worker.lock',
+) {
+  if (!/^(?:worker|[a-f0-9-]{36}\.write)\.lock$/.test(name))
+    throw Error('BATCH_INVALID');
+  const lock = path.join(directory, name);
   const recovery = lock + '.recovery';
   const take = async () => {
     try {

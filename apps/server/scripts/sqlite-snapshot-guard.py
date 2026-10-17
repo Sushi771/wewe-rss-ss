@@ -35,6 +35,15 @@ def fingerprint(path):
 
 
 OwnerLock = backup_module.FileLock
+_retention_module = None
+
+
+def automatic_retention(owner):
+    global _retention_module
+    if _retention_module is None:
+        spec=importlib.util.spec_from_file_location('periodic_retention',Path(__file__).with_name('sqlite-retention-plan.py'))
+        _retention_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(_retention_module)
+    return _retention_module.automatic_after_snapshot(owner)
 
 
 class SnapshotGuard:
@@ -63,6 +72,7 @@ class SnapshotGuard:
         self.generation = uuid.uuid4().hex
         self.receipt = self.backup_root / f"snapshot-owner-{lock_name}.json"
         self.record = None
+        self.failure = None
         self.reason = "startup-backup-required"
         self.fatal = False
         self.leases = {}
@@ -126,6 +136,7 @@ class SnapshotGuard:
 
     def tick(self):
         """Serialized startup/periodic work. No backup in query/validate/dirty."""
+        stage='snapshot'
         try:
             wall, mono = self.clock()
             self.next_check = mono + self.interval
@@ -138,6 +149,7 @@ class SnapshotGuard:
                         and not self.record["dirty"]):
                     # Rehash existing verified backup periodically. Full integrity
                     # was performed on creation; its exact bytes must still match.
+                    stage='hash'
                     if backup_module.sha256(Path(self.record["backup"])) != self.record["sha256"]:
                         raise ValueError("snapshot-checksum-failed")
                     after, after_schema, after_hash = self.database_state()
@@ -148,12 +160,16 @@ class SnapshotGuard:
                         self.record["coverageAtMs"] = int(wall * 1000)
                         self.record["coverageMono"] = mono
                         self.persist()
+                        self.failure=None
                         return
             # Invalidate before any IO: failure cannot leave a previously usable
             # record active. Backup API handles ordinary concurrent source writes.
             self.invalidate("snapshot-in-progress")
             start_wall, start_mono = self.clock()
+            stage='copy'
             report = self.backup(self.database, self.backup_root, prefix="periodic-snapshot")
+            self.retention_lease_identity=report.get('retentionLeaseIdentity')
+            stage='verify'
             completed_wall, completed_mono = self.clock()
             after, after_schema, after_hash = self.database_state()
             backup = Path(report["backup"]).resolve(strict=True)
@@ -197,7 +213,17 @@ class SnapshotGuard:
             }
             self.persist()
             self.reason = None
+            self.failure = None
+            if backup_module.periodic_retention_policy() is not None:
+                try:
+                    self.record['automaticRetention']=automatic_retention(self)
+                except Exception:
+                    # The new recovery point remains valid even when cleanup
+                    # cannot be proved. Its existing generation lease stays held.
+                    self.record['automaticRetention']={'status':'held','code':'AUTO_RETENTION_HELD','deletedCopies':None}
+                self.persist()
         except Exception as error:
+            self.failure=backup_module.safe_backup_failure(error,stage)
             reason = str(error)
             safe = reason if reason in {
                 "clock-rollback", "database-replaced", "owner-lock-replaced",
@@ -207,6 +233,11 @@ class SnapshotGuard:
                 "snapshot-schema-mismatch",
             } else "snapshot-io-or-verification-failed"
             self.invalidate(safe, fatal=safe in {"database-replaced", "owner-lock-replaced"})
+
+    def status(self):
+        return {'event':'periodic-snapshot-status','ok':self.record is not None,
+                **({'failure':self.failure} if self.record is None and self.failure else {}),
+                **({'retention':self.record['automaticRetention']} if self.record and 'automaticRetention' in self.record else {})}
 
     def query(self):
         try:
@@ -300,7 +331,7 @@ def main():
         while True:
             if guard.monotonic() >= guard.next_check:
                 guard.tick()
-                print(json.dumps({'event':'periodic-snapshot-status','ok':guard.record is not None}),flush=True)
+                print(json.dumps(guard.status()),flush=True)
             try:
                 request = requests.get(timeout=min(1, max(0, guard.next_check - guard.monotonic())))
             except queue.Empty:

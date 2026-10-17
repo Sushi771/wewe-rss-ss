@@ -53,11 +53,19 @@ async function main() {
   } else {
     registry.wechat2RssProvider = () => ({
       checkAccountStatus: async () => ({ available: true, challenged: false }),
-      prepareRefreshSubscription: async () => async () => {
-        if (stage === 'remote-attempted') await barrier(stage);
-        fs.appendFileSync(counter, 'request\n');
-        if (stage === 'remote-response') await barrier(stage);
-      },
+      prepareRefreshSubscription:
+        async (_id, _automatic, accepted) => async () => {
+          if (stage === 'remote-attempted') await barrier(stage);
+          fs.appendFileSync(counter, 'request\n');
+          if (stage === 'remote-response') await barrier(stage);
+          await accepted?.({
+            version: 1,
+            httpStatus: 200,
+            receivedAt: Date.now(),
+            responseDigest: 'a'.repeat(64),
+          });
+          if (stage === 'remote-validated-response') await barrier(stage);
+        },
       fetchArticles: async () => page,
     });
     const trpc = new TrpcService(

@@ -1,4 +1,11 @@
 import { refreshCacheFailure } from '../collection/refresh-cache-failure';
+import { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';
+import {
+  saveRefreshResponseReceipt,
+  refreshSubmissionFailure,
+  RefreshSubmissionError,
+  RefreshSubmissionFailure,
+} from '../collection/refresh-response-receipt';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
@@ -32,6 +39,7 @@ import {
   cancelRefreshPreparation,
   RefreshSubmissionTicket,
   refreshSubmissionProof,
+  unknownRefreshSource,
 } from '../collection/refresh-submission-claim';
 import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
 import {
@@ -390,7 +398,7 @@ export class TrpcService {
     feedId: string,
     stage: 'submit' | 'cache',
     automatic = false,
-    options?: { cacheOnly?: boolean; claimKey?: string },
+    options?: { cacheOnly?: boolean; claimKey?: string; sourceSha256?: string },
   ): Promise<BatchOutcome> {
     if (
       automatic &&
@@ -434,7 +442,10 @@ export class TrpcService {
     if (
       !feed ||
       feed.status !== 1 ||
-      resolveCollectionRoute(feed).channel !== 'wechat2rss'
+      resolveCollectionRoute(feed).channel !== 'wechat2rss' ||
+      (stage === 'submit' &&
+        options?.sourceSha256 !== undefined &&
+        refreshFeedSourceDigest(feed) !== options.sourceSha256)
     )
       return {
         state: automatic && stage === 'submit' ? 'skipped' : 'blocked',
@@ -532,10 +543,14 @@ export class TrpcService {
           ? { ...reservation.outcome, state: 'blocked' }
           : reservation.outcome!;
       ticket = reservation.ticket;
+      let receiptPhase: RefreshSubmissionFailure['phase'] = 'transport';
       try {
         await beginRefreshSubmission(this.prismaService, ticket);
         submissionStarted = true;
-        await provider.refreshSubscription(feedId, automatic);
+        await provider.refreshSubscription(feedId, automatic, (response) =>
+          saveRefreshResponseReceipt(ticket!, response),
+        );
+        receiptPhase = 'sql-receipt';
         await finishRefreshSubmission(this.prismaService, ticket, 'accepted');
       } catch (error) {
         if (
@@ -570,7 +585,9 @@ export class TrpcService {
             message:
               'Upstream subscription is paused or removed; no update submitted.',
           };
-        throw error;
+        throw new RefreshSubmissionError(
+          refreshSubmissionFailure(error, receiptPhase),
+        );
       }
       return {
         state: 'waiting',
@@ -610,6 +627,7 @@ export class TrpcService {
     feedId: string,
     automatic: boolean,
     waveKey: string,
+    sourceSha256?: string,
   ): Promise<PreparedRefresh> {
     const noRequest = (outcome: BatchOutcome): PreparedRefresh => ({
       outcome,
@@ -633,7 +651,9 @@ export class TrpcService {
     if (
       !feed ||
       feed.status !== 1 ||
-      resolveCollectionRoute(feed).channel !== 'wechat2rss'
+      resolveCollectionRoute(feed).channel !== 'wechat2rss' ||
+      (sourceSha256 !== undefined &&
+        refreshFeedSourceDigest(feed) !== sourceSha256)
     )
       return noRequest({
         state: 'skipped',
@@ -695,6 +715,7 @@ export class TrpcService {
       const submit = await provider.prepareRefreshSubscription(
         feedId,
         automatic,
+        (response) => saveRefreshResponseReceipt(ticket, response),
       );
       const now = Math.floor(Date.now() / 1000);
       const reserved = await reserveRefreshSubmission(
@@ -715,8 +736,10 @@ export class TrpcService {
         },
         submit: async () => {
           await beginRefreshSubmission(this.prismaService, ticket);
+          let receiptPhase: RefreshSubmissionFailure['phase'] = 'transport';
           try {
             await submit();
+            receiptPhase = 'sql-receipt';
             await finishRefreshSubmission(
               this.prismaService,
               ticket,
@@ -733,7 +756,13 @@ export class TrpcService {
               ticket,
               unsent ? 'not-sent' : 'unknown',
             ).catch(() => undefined);
-            throw error;
+            if (unsent) throw error;
+            const failure = refreshSubmissionFailure(error, receiptPhase);
+            console.warn(
+              '[REFRESH_SUBMISSION_UNCERTAIN]',
+              JSON.stringify({ claimId: ticket.id, ...failure }),
+            );
+            throw new RefreshSubmissionError(failure);
           }
           return {
             state: 'waiting',
@@ -858,6 +887,22 @@ export class TrpcService {
   resumeSubscriptionBatch(id: string) {
     return this.taskStorage(() => this.subscriptionBatches.resume(id));
   }
+  unknownRefreshReleaseBinding(batchId: string, feedId: string) {
+    return this.taskStorage(() =>
+      this.subscriptionBatches.unknownRefreshReleaseBinding(batchId, feedId),
+    );
+  }
+  releaseUnknownRefreshOccupancy(input: {
+    batchId: string;
+    feedId: string;
+    approvalFile: string;
+    approvalSha256: string;
+    evidenceFile: string;
+  }) {
+    return this.taskStorage(() =>
+      this.subscriptionBatches.releaseUnknownRefreshOccupancy(input),
+    );
+  }
 
   constructor(
     private readonly prismaService: PrismaService,
@@ -946,8 +991,26 @@ export class TrpcService {
       this.runManualRefresh(id, stage, automatic, options),
     );
     this.subscriptionBatches.attachRefreshPreparation(
-      (id, automatic, waveKey) =>
-        this.prepareRefreshWaveItem(id, automatic, waveKey),
+      (id, automatic, waveKey, sourceSha256) =>
+        this.prepareRefreshWaveItem(id, automatic, waveKey, sourceSha256),
+    );
+    this.subscriptionBatches.attachUnknownReleaseSource(
+      (id, batchId, claimedAt, receiptAt, quiescent) => {
+        if (
+          quiescent &&
+          (this.isRefreshAllMpArticlesRunning ||
+            this.activeCollections.has(id) ||
+            this.activeSubscriptionAdds.has('wechat2rss:add'))
+        )
+          throw Error('UNKNOWN_RELEASE_EXECUTOR_ACTIVE');
+        return unknownRefreshSource(
+          this.prismaService,
+          batchId,
+          id,
+          claimedAt,
+          receiptAt,
+        );
+      },
     );
     this.subscriptionBatches.attachRestrictionCheck(async () => {
       const account = await wechat2RssProvider().checkAccountStatus();

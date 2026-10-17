@@ -20,8 +20,16 @@ export function findArticleListRows(
   return reusableArticleList(prisma, query, options?.databaseUrl, () =>
     prisma.$transaction(
       async (tx) => {
-        const rows = await tx.article.findMany({
+        // Sort/filter/cursor only the narrow identity projection. Otherwise
+        // SQLite may read metadata after large body payloads for every row
+        // considered by its sorter, even though HTML is not returned.
+        const page = await tx.article.findMany({
           ...query,
+          select: { id: true },
+        });
+        if (!page.length) return [];
+        const rows = await tx.article.findMany({
+          where: { id: { in: page.map((row) => row.id) } },
           select: {
             id: true,
             mpId: true,
@@ -38,7 +46,6 @@ export function findArticleListRows(
             feed: true,
           },
         });
-        if (!rows.length) return [];
         const cached = await tx.article.findMany({
           where: {
             id: { in: rows.map((row) => row.id) },
@@ -48,7 +55,16 @@ export function findArticleListRows(
           select: { id: true },
         });
         const ids = new Set(cached.map((row) => row.id));
-        return rows.map((row) => ({ ...row, bodyCached: ids.has(row.id) }));
+        const byId = new Map(
+          rows.map((row) => [row.id, { ...row, bodyCached: ids.has(row.id) }]),
+        );
+        // IN has no ordering guarantee. Identity selection and hydration stay
+        // in the same snapshot, including the unseen next-cursor row.
+        return page.map(({ id }) => {
+          const row = byId.get(id);
+          if (!row) throw new Error('ARTICLE_LIST_SNAPSHOT_ROW_MISSING');
+          return row;
+        });
       },
       { maxWait: 15000, timeout: 30000 },
     ),

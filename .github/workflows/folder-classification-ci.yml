@@ -8,11 +8,22 @@ on:
         codex/manual-refresh-download-integration,
         codex/backend-recovery-integration-20261014,
         codex/space-guard-review-base-20261014,
+        codex/receipt-retention-integration-20261017,
+        codex/terminal-refresh-integration-20261017,
       ]
     paths:
       - 'apps/web/src/components/FolderMemberPicker.tsx'
       - 'apps/web/src/components/ManagementFolders.tsx'
       - 'apps/web/src/pages/feeds/index.tsx'
+      - 'apps/web/src/pages/feeds/list.tsx'
+      - 'apps/web/src/provider/trpc.tsx'
+      - 'apps/server/src/article-list-page.ts'
+      - 'apps/server/src/article-list-page.spec.ts'
+      - 'apps/server/src/article-list-cache.ts'
+      - 'apps/server/src/article-list-read-timing.ts'
+      - 'apps/server/src/article-list-read-timing.spec.ts'
+      - 'apps/server/src/prisma/prisma.service.ts'
+      - 'scripts/article-list-*.test.cjs'
       - 'apps/web/src/pages/feeds/xiaohongshu.tsx'
       - 'apps/server/src/collection/xiaohongshu.service.ts'
       - 'apps/server/src/collection/incremental-write.ts'
@@ -72,3 +83,10 @@ jobs:
           RENAME_BENCHMARK_FULL_PAGE: 'true'
           RENAME_BENCHMARK_SAMPLES: '12'
         run: node --test scripts/folder-rename-browser.test.cjs
+      - name: Compare uncached article pages and full pagination on synthetic SQLite
+        run: node --test scripts/article-list-performance.test.cjs
+      - name: Test independent article HTTP pages, restore, filters and visible errors
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+          ARTICLE_LIST_BROWSER_SAMPLES: '3'
+        run: node --test scripts/article-list-browser.test.cjs

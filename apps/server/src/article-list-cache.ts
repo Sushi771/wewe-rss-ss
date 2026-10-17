@@ -1,6 +1,11 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { cacheRevision } from './feeds/cache-sync-state';
+import {
+  withArticleListReadTiming,
+  articleListReadPhase,
+  articleListCacheTiming,
+} from './article-list-read-timing';
 
 type Entry = { token: string; expires: number; bytes: number; rows: unknown };
 const caches = new WeakMap<
@@ -59,14 +64,30 @@ async function revisionToken(databaseUrl?: string) {
   }
 }
 
-export async function reusableArticleList<T>(
+export function reusableArticleList<T>(
   client: object,
   query: unknown,
   databaseUrl: string | undefined,
   load: () => Promise<T>,
 ): Promise<T> {
-  const token = await revisionToken(databaseUrl);
-  if (!token) return load();
+  return withArticleListReadTiming(() =>
+    reuseArticleList(client, query, databaseUrl, load),
+  );
+}
+
+async function reuseArticleList<T>(
+  client: object,
+  query: unknown,
+  databaseUrl: string | undefined,
+  load: () => Promise<T>,
+): Promise<T> {
+  const token = await articleListReadPhase('revisionBefore', () =>
+    revisionToken(databaseUrl),
+  );
+  if (!token) {
+    articleListCacheTiming('bypass');
+    return articleListReadPhase('snapshot', load);
+  }
   let cache = caches.get(client);
   if (!cache) {
     cache = { entries: new Map(), pending: new Map() };
@@ -75,16 +96,25 @@ export async function reusableArticleList<T>(
   const key = JSON.stringify(query);
   const hit = cache.entries.get(key);
   if (hit && hit.token === token && hit.expires > Date.now()) {
+    articleListCacheTiming('hit');
     cache.entries.delete(key);
     cache.entries.set(key, hit);
     return structuredClone(hit.rows) as T;
   }
   const pendingKey = token + '/' + key;
   const existing = cache.pending.get(pendingKey);
-  if (existing) return structuredClone(await existing) as T;
+  if (existing) {
+    articleListCacheTiming('coalesced');
+    return structuredClone(await existing) as T;
+  }
+  articleListCacheTiming('miss');
   const operation = (async () => {
-    const rows = await load();
-    if ((await revisionToken(databaseUrl)) === token) {
+    const rows = await articleListReadPhase('snapshot', load);
+    if (
+      (await articleListReadPhase('revisionAfter', () =>
+        revisionToken(databaseUrl),
+      )) === token
+    ) {
       const bytes = Buffer.byteLength(JSON.stringify(rows));
       if (bytes <= MAX_BYTES) {
         cache!.entries.delete(key);

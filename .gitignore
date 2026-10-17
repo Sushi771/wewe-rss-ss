@@ -158,3 +158,4 @@ __pycache__/
 # Private local verification and generated fixture artifacts
 /output/
 /apps/output/
+.wechat2rss-refresh-responses/

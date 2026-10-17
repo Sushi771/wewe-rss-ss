@@ -903,6 +903,50 @@ export class TrpcRouter {
       .mutation(({ input }) =>
         this.trpcService.stopSubscriptionBatch(input.batchId),
       ),
+    unknownRefreshReleaseBinding: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          batchId: z.string().uuid(),
+          feedId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+        }),
+      )
+      .query(({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'Local explicit disposition only.',
+          });
+        return this.trpcService.unknownRefreshReleaseBinding(
+          input.batchId,
+          input.feedId,
+        );
+      }),
+    releaseUnknownRefreshOccupancy: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          batchId: z.string().uuid(),
+          feedId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+          approvalFile: z
+            .string()
+            .min(1)
+            .max(4096)
+            .regex(/^[^\0\r\n]+$/),
+          approvalSha256: z.string().regex(/^[a-f0-9]{64}$/),
+          evidenceFile: z
+            .string()
+            .min(1)
+            .max(4096)
+            .regex(/^[^\0\r\n]+$/),
+        }),
+      )
+      .mutation(({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'Local explicit disposition only.',
+          });
+        return this.trpcService.releaseUnknownRefreshOccupancy(input);
+      }),
     resumeSubscriptionBatch: this.trpcService.protectedProcedure
       .input(z.object({ batchId: z.string().uuid() }))
       .mutation(({ input }) =>
