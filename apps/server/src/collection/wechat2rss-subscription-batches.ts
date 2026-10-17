@@ -1,4 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  refreshSubmissionFailure,
+  validRefreshSubmissionFailure,
+  RefreshSubmissionFailure,
+} from './refresh-response-receipt';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { subscriptionArticleUrl } from './subscription-add';
@@ -50,6 +55,8 @@ export type BatchOutcome = {
   restrictionKind?: 'account' | 'rate-limit';
   failureReason?: CacheFailureReason;
   failurePoint?: RefreshCacheFailurePoint;
+  submissionFailure?: RefreshSubmissionFailure;
+  reconciliationFailure?: RefreshSubmissionFailure;
 };
 export type PreparedRefresh = {
   outcome?: BatchOutcome;
@@ -223,6 +230,8 @@ const itemFields = new Set([
   'cacheRetryExhausted',
   'failureReason',
   'failurePoint',
+  'submissionFailure',
+  'reconciliationFailure',
 ]);
 /** Legacy v1 manual/automatic refreshes share the audited current /add contract.
  * Unknown metadata or an explicit different scope cannot establish equivalence. */
@@ -470,6 +479,8 @@ const view = (b: Batch, records: Batch[] = [b], now = Date.now()) => ({
     cacheRetryExhausted: item.cacheRetryExhausted,
     failureReason: item.failureReason,
     failurePoint: item.failurePoint,
+    submissionFailure: item.submissionFailure,
+    reconciliationFailure: item.reconciliationFailure,
     coverageReviewRequired: item.coverageReviewRequired,
     waitingForReceipt: item.waitingForReceipt,
     supersededBy: item.supersededBy,
@@ -780,6 +791,10 @@ export class Wechat2RssSubscriptionBatches {
             !refreshCacheFailurePoints.includes(item.failurePoint)) ||
           (item.restrictionKind !== undefined &&
             !['account', 'rate-limit'].includes(item.restrictionKind)) ||
+          (item.submissionFailure !== undefined &&
+            !validRefreshSubmissionFailure(item.submissionFailure)) ||
+          (item.reconciliationFailure !== undefined &&
+            !validRefreshSubmissionFailure(item.reconciliationFailure)) ||
           (item.sharedRestriction !== undefined &&
             typeof item.sharedRestriction !== 'boolean') ||
           (item.submissionUnknown !== undefined &&
@@ -1779,10 +1794,14 @@ export class Wechat2RssSubscriptionBatches {
                 record.createdAt,
                 record.batchId,
               );
-            } catch {
-              /* remain unknown */
+            } catch (error) {
+              item.reconciliationFailure = refreshSubmissionFailure(
+                error,
+                'sql-receipt',
+              );
             }
             if (proof === 'accepted') {
+              delete item.reconciliationFailure;
               item.accepted = true;
               item.submissionUnknown = false;
               item.retryable = false;
@@ -1793,6 +1812,7 @@ export class Wechat2RssSubscriptionBatches {
               item.message =
                 'Durable accepted receipt recovered; cache-only continuation, no remote replay.';
             } else if (proof === 'not-submitted') {
+              delete item.reconciliationFailure;
               item.submissionUnknown = false;
               item.stopBatch = false;
               const expired =
@@ -2226,6 +2246,7 @@ export class Wechat2RssSubscriptionBatches {
               stopBatch: true,
               accepted: false,
               submissionUnknown: true,
+              submissionFailure: refreshSubmissionFailure(error),
               message:
                 'Update receipt uncertain; independent sources continue without replay.',
             };
@@ -2446,6 +2467,7 @@ export class Wechat2RssSubscriptionBatches {
                 state: 'blocked',
                 accepted: false,
                 submissionUnknown: true,
+                submissionFailure: refreshSubmissionFailure(error),
                 stopBatch: code === 'WECHAT2RSS_RATE_LIMITED',
                 sharedRestriction: code === 'WECHAT2RSS_RATE_LIMITED',
                 restrictionKind:

@@ -32,6 +32,7 @@ on:
         codex/routine-write-backup-boundaries,
         codex/automatic-refresh-failure-isolation,
         codex/cache-response-capacity-diagnostics,
+        codex/terminal-refresh-integration-20261017,
       ]
 
 jobs:

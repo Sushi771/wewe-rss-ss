@@ -14,6 +14,12 @@ Ordinary Wechat2RSS updates use atomic SQLite transactions and durable remote-at
 
 Remote state cannot be proved exactly across a crash between local durable commit and an external server. Conservatively retaining an unknown claim can require manual reconciliation even if no HTTP request actually reached the server. It must never be treated as an automatic retry permission. Receipts remain in SQLite; this change does not prune them or reset unknown history.
 
+Validated responses now have a bounded private proof bridge before the SQL
+accepted receipt. Only a matching durable proof can automatically repair that
+same unknown claim, without resubmission; absent proof still remains unknown.
+See [response reconciliation](REFRESH_RESPONSE_RECONCILIATION.md) for the exact
+validation, diagnostics, cleanup and cache/content limits.
+
 Malformed or unreadable historical batch receipts stop new remote submissions until history is reconciled. Valid accepted/cache-only work can still continue. Each wave rechecks history after asynchronous preparation. Provider subscription missing/name-change errors fail only that source; account-wide restrictions keep their shared pause behavior.
 
 Cache writes preserve existing article identities, nonempty user edits, saved inline images, metrics, classifications and publication times. Alternate query-string order is canonicalized. Matching an article owned by another feed or multiple ambiguous matches rejects the whole transaction. A payload receipt is evidence, not permission to skip current row checks or future media repair. Legacy `running` feed status is repaired through a cache-only atomic transaction.

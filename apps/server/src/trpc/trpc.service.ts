@@ -1,4 +1,10 @@
 import { refreshCacheFailure } from '../collection/refresh-cache-failure';
+import {
+  saveRefreshResponseReceipt,
+  refreshSubmissionFailure,
+  RefreshSubmissionError,
+  RefreshSubmissionFailure,
+} from '../collection/refresh-response-receipt';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
@@ -532,10 +538,14 @@ export class TrpcService {
           ? { ...reservation.outcome, state: 'blocked' }
           : reservation.outcome!;
       ticket = reservation.ticket;
+      let receiptPhase: RefreshSubmissionFailure['phase'] = 'transport';
       try {
         await beginRefreshSubmission(this.prismaService, ticket);
         submissionStarted = true;
-        await provider.refreshSubscription(feedId, automatic);
+        await provider.refreshSubscription(feedId, automatic, (response) =>
+          saveRefreshResponseReceipt(ticket!, response),
+        );
+        receiptPhase = 'sql-receipt';
         await finishRefreshSubmission(this.prismaService, ticket, 'accepted');
       } catch (error) {
         if (
@@ -570,7 +580,9 @@ export class TrpcService {
             message:
               'Upstream subscription is paused or removed; no update submitted.',
           };
-        throw error;
+        throw new RefreshSubmissionError(
+          refreshSubmissionFailure(error, receiptPhase),
+        );
       }
       return {
         state: 'waiting',
@@ -695,6 +707,7 @@ export class TrpcService {
       const submit = await provider.prepareRefreshSubscription(
         feedId,
         automatic,
+        (response) => saveRefreshResponseReceipt(ticket, response),
       );
       const now = Math.floor(Date.now() / 1000);
       const reserved = await reserveRefreshSubmission(
@@ -715,8 +728,10 @@ export class TrpcService {
         },
         submit: async () => {
           await beginRefreshSubmission(this.prismaService, ticket);
+          let receiptPhase: RefreshSubmissionFailure['phase'] = 'transport';
           try {
             await submit();
+            receiptPhase = 'sql-receipt';
             await finishRefreshSubmission(
               this.prismaService,
               ticket,
@@ -733,7 +748,13 @@ export class TrpcService {
               ticket,
               unsent ? 'not-sent' : 'unknown',
             ).catch(() => undefined);
-            throw error;
+            if (unsent) throw error;
+            const failure = refreshSubmissionFailure(error, receiptPhase);
+            console.warn(
+              '[REFRESH_SUBMISSION_UNCERTAIN]',
+              JSON.stringify({ claimId: ticket.id, ...failure }),
+            );
+            throw new RefreshSubmissionError(failure);
           }
           return {
             state: 'waiting',
