@@ -176,15 +176,40 @@ describe('accepted refresh cache isolation (synthetic durable records)', () => {
       cacheRetryExhausted: 'attempt-limit',
       accepted: true,
     });
+    expect(
+      (
+        await recovered.enqueueRefresh(
+          [ids[0]],
+          'a'.repeat(64),
+          'scheduled-refresh',
+        )
+      ).batchId,
+    ).toBe(b.batchId);
+    await recovered.runDue();
+    expect(run).toHaveBeenCalledTimes(2);
+    clock = Date.parse('2026-10-12T17:30:00+08:00');
     const next = await recovered.enqueueRefresh(
       [ids[0]],
       'c'.repeat(64),
       'scheduled-refresh',
     );
-    expect(next.state).toBe('deferred');
+    expect(next.state).toBe('queued');
     clock += 3600000;
     await recovered.runDue();
-    expect(run).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(run.mock.calls[2]).toEqual([
+      ids[0],
+      'submit',
+      true,
+      { claimKey: next.batchId },
+    ]);
+    expect(
+      (await recovered.list()).find((x) => x.batchId === b.batchId)!.items[0],
+    ).toMatchObject({
+      accepted: true,
+      refreshChecks: 10,
+      cacheRetryExhausted: 'attempt-limit',
+    });
   });
   it('expires accepted recovery before a cache callback after its absolute deadline', async () => {
     const run = jest

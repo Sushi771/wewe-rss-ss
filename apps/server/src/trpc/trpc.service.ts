@@ -566,6 +566,7 @@ export class TrpcService {
           return {
             state: 'skipped',
             accepted: false,
+            code: 'SUBSCRIPTION_PAUSED',
             message:
               'Upstream subscription is paused or removed; no update submitted.',
           };
@@ -638,6 +639,7 @@ export class TrpcService {
         state: 'skipped',
         accepted: false,
         stopBatch: false,
+        code: 'SOURCE_CHANGED',
         message: 'Subscription disabled or route changed; update not sent.',
       });
     if (
@@ -757,6 +759,7 @@ export class TrpcService {
           accepted: false,
           submissionUnknown: false,
           stopBatch: false,
+          code: 'SUBSCRIPTION_PAUSED',
           message: 'Upstream subscription paused or removed; update not sent.',
         });
       if (code === 'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED')

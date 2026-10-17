@@ -5,6 +5,17 @@ import { trpc } from '@web/utils/trpc';
 type Batch = {
   batchId: string;
   state: string;
+  coverage?: {
+    expected: number;
+    submitted: number;
+    completed: number;
+    pending: number;
+    legitimateSkipped: number;
+    excluded: number;
+    anomalies: number;
+    fullyUpdated: boolean;
+    items: { feedId?: string; status: string; reason: string }[];
+  };
   items: {
     index: number;
     state: string;
@@ -31,7 +42,10 @@ export default function ManualRefreshProgress({
   const busy = useRef(false);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState('');
-  if (!batch || !['queued', 'running', 'paused'].includes(batch.state))
+  if (
+    !batch ||
+    (!['queued', 'running', 'paused'].includes(batch.state) && !batch.coverage)
+  )
     return null;
   const accepted = batch.items.filter((item) => item.accepted).length;
   const synced = batch.items.filter(
@@ -62,7 +76,17 @@ export default function ManualRefreshProgress({
       setActing(false);
     }
   };
-  const status = batch.state === 'paused' ? '已暂停' : '更新中';
+  const status = batch.coverage
+    ? batch.coverage.fullyUpdated
+      ? '已全部更新'
+      : batch.coverage.anomalies
+        ? '需核对'
+        : batch.coverage.pending
+          ? '等待完成'
+          : '含合法跳过'
+    : batch.state === 'paused'
+      ? '已暂停'
+      : '更新中';
   return (
     <section
       aria-label="全部更新进度"
@@ -71,11 +95,23 @@ export default function ManualRefreshProgress({
     >
       <Progress
         size="sm"
-        value={accepted}
+        value={batch.coverage ? batch.coverage.completed : accepted}
         maxValue={batch.items.length}
         aria-label="上游更新受理数量"
-        label={`共 ${batch.items.length} 个 · 排队 ${queued} · 上游已受理 ${accepted} · 缓存已同步 ${synced} · ${status}`}
+        label={
+          batch.coverage
+            ? `已完成 ${batch.coverage.completed}/${batch.coverage.expected} · ${status}`
+            : `共 ${batch.items.length} 个 · 排队 ${queued} · 上游已受理 ${accepted} · 缓存已同步 ${synced} · ${status}`
+        }
       />
+      {batch.coverage && (
+        <p role={batch.coverage.anomalies ? 'alert' : 'status'}>
+          {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 合法跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
+          {batch.coverage.fullyUpdated
+            ? '本轮全部更新完成。'
+            : '本轮尚未全部更新完成。'}
+        </p>
+      )}
       {['queued', 'running', 'paused'].includes(batch.state) && (
         <Button
           size="sm"
