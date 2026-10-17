@@ -894,4 +894,133 @@ class AutomaticRetentionTests(unittest.TestCase):
         self.assertTrue(self.points[0].exists());self.assertEqual(unknown.read_bytes(),b'unique unknown historical bytes')
         self.assertGreater(guard.record['automaticRetention']['deletedCopies'],0)
 
+    def test_stored_generated_columns_are_compared_in_coverage_and_reuse(self):
+        with closing(sqlite3.connect(':memory:')) as old,closing(sqlite3.connect(':memory:')) as new:
+            schema='CREATE TABLE unknown_state(id INTEGER PRIMARY KEY,value,derived GENERATED ALWAYS AS (versioned(value)) STORED)'
+            for db,offset in ((old,1),(new,2)):
+                db.create_function('versioned',1,lambda value,offset=offset:value+offset,deterministic=True)
+                db.execute(schema);db.execute('INSERT INTO unknown_state(id,value) VALUES(1,5)')
+            self.assertEqual(list(old.execute('SELECT * FROM unknown_state')),[(1,5,6)])
+            self.assertEqual(list(new.execute('SELECT * FROM unknown_state')),[(1,5,7)])
+            self.assertFalse(retention.backup.snapshot_covers(new,old,retention.ReadBudget()))
+            self.assertFalse(retention.backup.snapshot_equal(new,old))
+            self.assertTrue(retention.backup.snapshot_covers(old,old,retention.ReadBudget()))
+            self.assertTrue(retention.backup.snapshot_equal(old,old))
+            for db in (old,new):
+                db.execute('ALTER TABLE unknown_state RENAME TO feeds')
+                db.execute('ALTER TABLE feeds RENAME COLUMN derived TO sync_time')
+            self.assertFalse(retention.backup.snapshot_covers(new,old,retention.ReadBudget()))
+        with closing(sqlite3.connect(':memory:')) as db:
+            db.execute('CREATE TABLE virtual_value(id INTEGER PRIMARY KEY,value,derived GENERATED ALWAYS AS(value+1) VIRTUAL)')
+            db.execute('INSERT INTO virtual_value(id,value) VALUES(1,5)')
+            self.assertFalse(retention.backup.snapshot_covers(db,db,retention.ReadBudget()))
+            self.assertFalse(retention.backup.snapshot_equal(db,db))
+
+    def generated_source(self):
+        with closing(sqlite3.connect(self.source)) as db,db:
+            db.create_function('abs',1,lambda value:value+1,deterministic=True)
+            db.execute('CREATE TABLE unknown_state(id INTEGER PRIMARY KEY,value,derived GENERATED ALWAYS AS(abs(value)) STORED)')
+            db.execute('INSERT INTO unknown_state(id,value) VALUES(1,5)')
+
+    def change_generated_value(self):
+        with closing(sqlite3.connect(self.source)) as db,db:
+            db.create_function('abs',1,lambda value:value+2,deterministic=True)
+            db.execute('UPDATE unknown_state SET value=value')
+
+    def test_actual_owner_retains_only_old_stored_generated_value(self):
+        self.generated_source()
+        for index in range(6):
+            report=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+            point=Path(report['backup']);self.points.append(point)
+            report['createdAtUtc']=datetime.fromtimestamp(time.time()-7200-(6-index)*60,timezone.utc).isoformat()
+            (point.parent/'verification.json').write_text(json.dumps(report))
+            if index==0:self.change_generated_value()
+            self.append()
+        os.environ['SQLITE_PERIODIC_RETENTION_ENABLED']='1';guard=self.owner();guard.tick()
+        self.assertTrue(guard.record,guard.status());self.assertTrue(self.points[0].exists())
+        self.assertEqual(guard.record['automaticRetention']['code'],'UNIQUE_HISTORY_RETAINED')
+        self.assertGreater(guard.record['automaticRetention']['deletedCopies'],0)
+        with closing(sqlite3.connect(self.points[0])) as db:
+            self.assertEqual(list(db.execute('SELECT derived FROM unknown_state')),[(6,)])
+        with closing(sqlite3.connect(guard.record['backup'])) as db:
+            self.assertEqual(list(db.execute('SELECT derived FROM unknown_state')),[(7,)])
+
+    def test_changed_stored_generated_value_without_other_changes_requires_new_copy(self):
+        self.generated_source();first=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+        self.change_generated_value();second=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+        self.assertFalse(second['reused']);self.assertNotEqual(first['backup'],second['backup'])
+
+    def test_marker_release_pins_out_late_write_unlink_and_replacement_and_uses_no_path_unlink(self):
+        self.seed();guard=self.owner();lease=self.root/'.space-budget.lock';native=retention.WindowsPin.delete
+        replacement=self.root/'owned-foreign-marker.tmp';replacement.write_bytes(b'foreign marker must remain')
+        observed=[];denied=[];unlink=Path.unlink
+        def boundary(pin):
+            info=os.fstat(pin.fd);stamp=lease.stat()
+            if (info.st_dev,info.st_ino)==(stamp.st_dev,stamp.st_ino):
+                os.lseek(pin.fd,0,os.SEEK_SET);original=os.read(pin.fd,8193);observed.append(True)
+                for operation in (lambda:lease.write_bytes(b'late edit'),lambda:unlink(lease),lambda:replacement.replace(lease),
+                                  lambda:self.root.rename(self.folder/'owned-moved-root')):
+                    with self.assertRaises(PermissionError):operation()
+                    denied.append(True)
+                os.lseek(pin.fd,0,os.SEEK_SET);self.assertEqual(os.read(pin.fd,8193),original)
+            return native(pin)
+        def no_path_unlink(path,*args,**kwargs):
+            if path==lease:raise AssertionError('automatic marker release must be identity-bound')
+            return unlink(path,*args,**kwargs)
+        with patch.object(retention.WindowsPin,'delete',boundary),patch.object(Path,'unlink',no_path_unlink):guard.tick()
+        self.assertEqual(observed,[True]);self.assertEqual(denied,[True]*4)
+        self.assertEqual(guard.record['automaticRetention']['status'],'complete')
+        self.assertFalse(lease.exists());self.assertEqual(replacement.read_bytes(),b'foreign marker must remain')
+
+    def test_marker_replaced_before_native_pin_is_preserved_and_stops_deletion_and_replay(self):
+        self.seed();guard=self.owner();lease=self.root/'.space-budget.lock';native=retention.WindowsPin.__init__;seen=[]
+        replacement=self.root/'owned-foreign-marker.tmp';data=b'foreign task reservation';replacement.write_bytes(data)
+        def admission(pin,path,*args,**kwargs):
+            if Path(path)==lease and not seen:
+                lease.unlink();replacement.replace(lease);seen.append(True)
+            return native(pin,path,*args,**kwargs)
+        with patch.object(retention.WindowsPin,'__init__',admission):guard.tick()
+        self.assertEqual(seen,[True]);self.assertEqual(lease.read_bytes(),data)
+        self.assertTrue(guard.record);self.assertEqual(guard.record['automaticRetention']['status'],'held')
+        self.assertTrue(all(point.exists() for point in self.points))
+        count=len(list(self.root.glob('periodic-snapshot-*')));self.append();guard.tick()
+        self.assertIsNone(guard.record);self.assertEqual(len(list(self.root.glob('periodic-snapshot-*'))),count)
+        self.assertEqual(lease.read_bytes(),data)
+
+    def test_marker_native_release_failure_keeps_allocation_held_and_cannot_replay(self):
+        self.seed();guard=self.owner();lease=self.root/'.space-budget.lock';native=retention.WindowsPin.delete;seen=[]
+        def failure(pin):
+            info=os.fstat(pin.fd);stamp=lease.stat()
+            if (info.st_dev,info.st_ino)==(stamp.st_dev,stamp.st_ino):seen.append(True);raise OSError('owned release failure')
+            return native(pin)
+        with patch.object(retention.WindowsPin,'delete',failure):guard.tick()
+        self.assertEqual(seen,[True]);self.assertTrue(guard.record);self.assertEqual(guard.record['automaticRetention']['status'],'held')
+        self.assertTrue(lease.exists());count=len(list(self.root.glob('periodic-snapshot-*')))
+        self.append();guard.tick();self.assertIsNone(guard.record)
+        self.assertEqual(len(list(self.root.glob('periodic-snapshot-*'))),count);self.assertTrue(lease.exists())
+
+    def test_same_bytes_marker_replaced_during_initial_read_is_not_adopted(self):
+        self.seed();guard=self.owner();lease=self.root/'.space-budget.lock';native=Path.open;seen=[]
+        replacement=self.root/'owned-foreign-marker.tmp'
+        def replace_on_read(path,mode='r',*args,**kwargs):
+            if path==lease and mode=='rb' and not seen:
+                with native(lease,'rb') as stream:data=stream.read()
+                replacement.write_bytes(data);before=retention.identity(lease)
+                lease.unlink();replacement.replace(lease);seen.append((before,retention.identity(lease),data))
+            return native(path,mode,*args,**kwargs)
+        with patch.object(Path,'open',replace_on_read):guard.tick()
+        self.assertEqual(len(seen),1);self.assertNotEqual(seen[0][0],seen[0][1])
+        self.assertTrue(guard.record);self.assertEqual(guard.record['automaticRetention']['code'],'AUTO_LEASE_CHANGED')
+        self.assertEqual(lease.read_bytes(),seen[0][2]);self.assertTrue(all(point.exists() for point in self.points))
+
+    def test_reused_snapshot_creates_and_releases_only_its_opened_marker_without_new_copy(self):
+        self.seed()
+        with patch.dict(os.environ,{'SQLITE_PERIODIC_RETENTION_ENABLED':'0'}):
+            report=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+        guard=self.owner();guard.tick();self.assertTrue(guard.record,guard.status())
+        self.assertTrue(guard.record['backupReused']);self.assertEqual(guard.record['backup'],report['backup'])
+        self.assertEqual(guard.record['automaticRetention']['status'],'complete')
+        self.assertFalse((self.root/'.space-budget.lock').exists())
+        self.assertEqual(len(list(self.root.glob('periodic-snapshot-*/wewe-rss.db'))),4)
+
 if __name__=='__main__':unittest.main()

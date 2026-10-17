@@ -679,6 +679,7 @@ def automatic_after_snapshot(owner):
     result={'status':'held','code':'AUTO_RETENTION_HELD','deletedCopies':0,'heldUnique':0,'heldOther':0}
     root=local_path(str(owner.backup_root));database=local_path(str(owner.database));current=local_path(record['backup'])
     owned=None
+    lease_pins=ExitStack()
     try:
         if os.name!='nt':raise MaintenanceError('VERIFIED_ROTATION_REQUIRES_WINDOWS')
         if os.environ.get('SQLITE_ARTICLE_HISTORY_MAINTENANCE_WINDOW')=='1':raise MaintenanceError('HISTORY_MAINTENANCE_ACTIVE')
@@ -701,22 +702,33 @@ def automatic_after_snapshot(owner):
                 with lease.open('x',encoding='utf-8') as stream:
                     json.dump({'format':'sqlite-periodic-retention-lease-v1','pid':os.getpid(),'source':str(database)},stream)
                     stream.flush();os.fsync(stream.fileno())
-            elif identity(lease)!=getattr(owner,'retention_lease_identity',None):
-                raise MaintenanceError('AUTO_LEASE_CHANGED')
+                    info=os.fstat(stream.fileno())
+                    owned=[str(v) for v in (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,
+                                           getattr(info,'st_birthtime_ns',info.st_ctime_ns))]
+            else:
+                owned=getattr(owner,'retention_lease_identity',None)
+                if identity(lease)!=owned:raise MaintenanceError('AUTO_LEASE_CHANGED')
             if lease.stat().st_size>8192:raise MaintenanceError('AUTO_LEASE_INVALID')
-            saved=json.loads(lease.read_text(encoding='utf-8'))
+            with lease.open('rb') as stream:lease_bytes=stream.read(8193)
+            if len(lease_bytes)>8192:raise MaintenanceError('AUTO_LEASE_INVALID')
+            saved=json.loads(lease_bytes)
             if saved.get('format')!='sqlite-periodic-retention-lease-v1' or saved.get('source')!=str(database) or saved.get('pid')!=os.getpid():
                 raise MaintenanceError('AUTO_LEASE_INVALID')
-            owned=identity(lease)
+            if identity(lease)!=owned:raise MaintenanceError('AUTO_LEASE_CHANGED')
             plan=make_plan(database,root,protected_paths=protected,policy=policy,periodic_only=True,owned_lease=owned,seconds=5)
             p=plan['payload']
             result['protectedOrUnknown']=len(p['held'])
             registrations=[Path(r['registrationManifest']).parent for r in p['referenceRecords'] if 'registrationManifest' in r]
             directories={d for r in (root,database.parent,*backup.legacy_roots(),*registrations) for d in (r,*r.parents)}
             for folder in sorted(directories,key=lambda d:(len(d.parts),str(d))):
-                stack.enter_context(WindowsPin(folder,directory_identity(folder),directory=True))
+                lease_pins.enter_context(WindowsPin(folder,directory_identity(folder),directory=True))
+            # Own this exact marker object through the final release, including
+            # after data/reference handles close. Deny both writes and replace;
+            # never remove a subsequently resolved pathname.
+            marker=lease_pins.enter_context(WindowsPin(lease,owned,delete=True))
             for held in (full,owner.lock):stack.enter_context(WindowsPin(held.path,identity(held.path),sharing=3))
             pin_rotation_references(stack,plan)
+            if marker.sha(budget)!=hashlib.sha256(lease_bytes).hexdigest():raise MaintenanceError('AUTO_LEASE_CHANGED')
             files,databases,refs,records,_=files_and_refs(root,budget,protected)
             retired,_summary=policy_refs(database,root,files,databases,refs,records,budget,int(time.time()),policy,True)
             refs.update(p['protected'])
@@ -804,7 +816,7 @@ def automatic_after_snapshot(owner):
                 or shutil.disk_usage(root).free-8192<minimum):raise MaintenanceError('SQLITE_SPACE_BUDGET_EXCEEDED')
             full.check();owner.lock.check()
             if not generation_clear(root,owned):raise MaintenanceError('AUTO_OWNER_OR_LEASE_CHANGED')
-            lease.unlink()
+            marker.delete()
         result.update(status='held' if result['heldUnique'] or result['heldOther'] or result['targetExceeded'] else 'complete',
                       code='UNIQUE_HISTORY_RETAINED' if result['heldUnique'] else 'CANDIDATES_HELD' if result['heldOther']
                       else 'PROTECTED_WINDOWS_RETAINED' if result['targetExceeded'] else 'COMPLETE')
@@ -813,6 +825,8 @@ def automatic_after_snapshot(owner):
         code=str(error) if isinstance(error,MaintenanceError) else backup.safe_backup_failure(error,'rotation')['code']
         result['code']=code if re.fullmatch('[A-Z_]{1,80}',code) else 'AUTO_RETENTION_HELD'
         return result
+    finally:
+        lease_pins.close()
 
 
 def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*1024**2,protected_paths=(),policy=None):
