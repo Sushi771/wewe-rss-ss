@@ -35,6 +35,8 @@ jobs:
         run: pnpm --filter web build
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
+      - name: Test fresh and existing database schema compatibility offline
+        run: node --test apps/server/scripts/test-main-schema-compatibility.cjs
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)

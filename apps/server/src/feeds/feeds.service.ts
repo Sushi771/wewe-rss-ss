@@ -325,6 +325,7 @@ export class FeedsService {
         lastCollectionResult: null,
         collectionChannel: null,
         providerRefreshAttemptTime: 0,
+        groupId: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };

@@ -1,0 +1,40 @@
+{
+  "source": "aeb7483c85db8d13f1345011266ae7ee6046adc0",
+  "mainSource": "7f392f85865491d685f14fb16e5f0b27286374ac",
+  "mainMigrations": [
+    "20240301104100_init/migration.sql",
+    "20241214172323_has_history/migration.sql",
+    "20260319021733_make_feed_optional/migration.sql",
+    "20260319022805_add_cascade_delete/migration.sql",
+    "20260324094912_add_feed_order/migration.sql",
+    "20260927050000_public_albums/migration.sql",
+    "20260927080000_local_collection/migration.sql",
+    "20260927090000_collection_result/migration.sql",
+    "20260927110000_collection_channel/migration.sql",
+    "20260928020000_article_body_status/migration.sql",
+    "20260928030000_article_body_retry/migration.sql",
+    "20260929010000_provider_refresh_cooldown/migration.sql"
+  ],
+  "schemaSha256": "144cb875395fdda7cd8e57ade3f210207c6e9cfc2678ae0e09c390d3777b4815",
+  "migrations": {
+    "20240301104100_init/migration.sql": "12d27bcdb235d4bc2f03397f511779dfa3f41860e9375d4e12bf571fe9eb297c",
+    "20241214172323_has_history/migration.sql": "47c9ef3738a1fc3822a3378d006fbfea3b5eab5cc26c01174f673a2327461427",
+    "20260319021733_make_feed_optional/migration.sql": "db8791767880fd58c7060c694b168c809c82ceac4314bdb738db942ab6b18289",
+    "20260319022805_add_cascade_delete/migration.sql": "53f770335c1103e5adcccba4858d524a013bba05e42817e12dcbd4633bac76da",
+    "20260324094912_add_feed_order/migration.sql": "5044d45aa419bb683e2939f4d30e38e0de567dc304aaca7584f437b4e6e04fd4",
+    "20260927050000_public_albums/migration.sql": "58b86e162f0b8ce2e51cc33f1a9ab9ce5525a24ca43b517b4a11fbd67ac957e0",
+    "20260927080000_local_collection/migration.sql": "68c67021888fc6f8cf8df0eeee3d10b74f0b90f1bd6f7b0908ed552302dc6d56",
+    "20260927090000_collection_result/migration.sql": "db9a1634af33359d3e244315cf116fd561b13b6df7e6d5fd6c036459634dbfc2",
+    "20260927110000_collection_channel/migration.sql": "393d48c69b4ec9f696efc09f84927877b80bcc624738a4f83bb30ccc4d7b412c",
+    "20260928020000_article_body_status/migration.sql": "1fa29ad9dd60f205798cd6bc441b6a1025f9a75c097d2ab22d2b1723a610d118",
+    "20260928030000_article_body_retry/migration.sql": "36b9eeb5415a1c94652ed9f5dec9e53a3635d1b6a90bc04c4338212b13ed3f2e",
+    "20260929010000_provider_refresh_cooldown/migration.sql": "90fe98dc071013060e79f1f8569db94cf8af01f15cca661c6f9ab2c0191a7375",
+    "20261009050000_add_xhs_local_archive/migration.sql": "f26dacc05b89f5b0a11be9e07eca0837e060f4ff04334f489c27949c18f2aa0b",
+    "20261009063000_add_management_groups/migration.sql": "e40b0c39a22b9739295b0eb628640f04c775f4e6a93f29b0e0588a73bb794c43",
+    "20261009080000_add_xhs_video_cache/migration.sql": "ac2f2b3721107ba13a652d1d7a2263fb6a0bdc19d5864681e7d08cfaec16f745",
+    "20261010090000_management_group_order/migration.sql": "67ba2343c1cf6fb095ee602bf91937ff05bc3a2b8952bf9dd5028a65cf49f930",
+    "20261011090000_cache_insert_batches/migration.sql": "eebe230ec29ce9173f63a693a5887298f98e2ebb56ad83ae1f8a15a24cc57284",
+    "20261012043000_article_feed_lookup_index/migration.sql": "62fa4b8915e13b7db9dff2d5a39b8a37b993733d0f8f5198714622f2f98fcddc",
+    "20261015090000_incremental_refresh_commits/migration.sql": "6dc686ed56807f72fc983250d0d2c233804fd17d0e6c05221cef85076b8cb589"
+  }
+}
