@@ -241,6 +241,10 @@ class BackupSpaceTests(unittest.TestCase):
         preview=backup.preview_legacy_roots(self.backups,self.database)
         self.assertFalse(preview['inventoryComplete']);self.assertFalse(preview['registration']['confirmed'])
         self.assertEqual(len(preview['aliases']),2);self.assertEqual(len(preview['registration']['roots']),1)
+        alias=self.root/'managed-root-alias';self.link(alias,self.backups)
+        canonical=backup.preview_legacy_roots(alias,self.database)
+        self.assertEqual(canonical['registration'],preview['registration'])
+        self.assertEqual(canonical['aliases'],preview['aliases'])
         self.assertFalse((self.backups/'.retention-review').exists())
         with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':'[]',
                                     'SQLITE_PRODUCTION_LEGACY_ROOTS_FILE':str(manifest)}):
