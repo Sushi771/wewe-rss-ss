@@ -3,6 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join, dirname, resolve, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { findArticleListRows } from './article-list-page';
+import { ConfigService } from '@nestjs/config';
+import { TrpcService } from './trpc/trpc.service';
+import { TrpcRouter } from './trpc/trpc.router';
+
+jest.mock('./offline-archive', () => ({ archiveDirectory: jest.fn() }));
 
 describe('article list metadata with real isolated SQLite, no body transfer', () => {
   let prisma: PrismaClient, directory: string;
@@ -82,6 +87,54 @@ describe('article list metadata with real isolated SQLite, no body transfer', ()
       await rm(directory, { recursive: true, force: true });
     }
   });
+  it('selects the ordered page identities before reading wide metadata only for that page', async () => {
+    queries.length = 0;
+    await findArticleListRows(prisma, {
+      take: 3,
+      orderBy: [{ publishTime: 'desc' }, { id: 'desc' }],
+    });
+    const selects = queries.filter(
+      (sql) => sql.startsWith('SELECT') && sql.includes('articles'),
+    );
+    expect(selects[0].split(/\bFROM\b/)[0]).not.toContain('last_body_status');
+    expect(selects[0].split(/\bFROM\b/)[0]).not.toContain('metrics');
+    const metadata = selects.find((sql) => sql.includes('last_body_status'));
+    expect(metadata).toMatch(/\bIN\s*\(/);
+    expect(metadata).not.toMatch(/ORDER BY/);
+  });
+  it('keeps exact summary counts and date boundaries without COUNT materializing archived body values', async () => {
+    const config = new ConfigService({
+      auth: { code: 'synthetic' },
+      platform: { url: '' },
+      feed: { updateDelayTime: 0 },
+    });
+    const service = new TrpcService(
+      prisma as any,
+      config,
+      {} as any,
+      {} as any,
+    );
+    const api = new TrpcRouter(
+      service,
+      prisma as any,
+      config,
+      {} as any,
+      {} as any,
+    ).appRouter.createCaller({ errorMsg: null, isLocal: true });
+    queries.length = 0;
+    expect(await api.article.summary({ mpId: 'publisher-a' })).toEqual({
+      articles: 4,
+      readAvailable: 4,
+      likeAvailable: 4,
+      cachedBodies: 3,
+      oldestPublishTime: 100,
+      newestPublishTime: 103,
+    });
+    expect(queries.filter((sql) => sql.startsWith('SELECT'))).toHaveLength(4);
+    expect(queries.some((sql) => /COUNT\([^)]*content_html/i.test(sql))).toBe(
+      false,
+    );
+  });
   it('matches old metadata/Boolean semantics for null, empty, whitespace and large retained bodies', async () => {
     const query = {
       where: { mpId: 'publisher-a' },
@@ -159,7 +212,7 @@ describe('article list metadata with real isolated SQLite, no body transfer', ()
     expect(queries.filter((q) => q.startsWith('BEGIN'))).toHaveLength(1);
     expect(
       queries.filter((q) => q.startsWith('SELECT') && q.includes('articles')),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(
       queries
         .filter((q) => q.startsWith('SELECT'))

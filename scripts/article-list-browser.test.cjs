@@ -1,0 +1,450 @@
+'use strict';
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { performance } = require('node:perf_hooks');
+const {
+  browser,
+  withFixture,
+  web,
+  modulePath,
+} = require('./offline-browser-fixture.cjs');
+const server = path.resolve('apps/server');
+const ts = require(require.resolve('typescript', { paths: [server] }));
+const epoch = () => performance.timeOrigin + performance.now();
+test(
+  'actual list/provider over local HTTP: summary cannot hold rows, pagination is fenced and failures stay visible',
+  { skip: !browser, timeout: 180000 },
+  async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-article-http-'));
+    const url =
+      'file:' + path.join(root, 'synthetic.sqlite').replaceAll('\\', '/');
+    const previousUrl = process.env.DATABASE_URL;
+    // Relative URL deliberately bypasses lightweight page reuse for every request.
+    process.env.DATABASE_URL = url;
+    const oldLoader = require.extensions['.ts'];
+    require.extensions['.ts'] = (m, file) =>
+      m._compile(
+        ts.transpileModule(fs.readFileSync(file, 'utf8'), {
+          compilerOptions: {
+            module: ts.ModuleKind.CommonJS,
+            target: ts.ScriptTarget.ES2021,
+            experimentalDecorators: true,
+            emitDecoratorMetadata: true,
+            esModuleInterop: true,
+          },
+        }).outputText,
+        file,
+      );
+    const undo = require(
+      require.resolve('tsconfig-paths', { paths: [server] }),
+    ).register({
+      baseUrl: path.resolve('.'),
+      paths: {
+        '@server/*': ['apps/server/src/*'],
+        '@wewe-rss/shared': ['packages/shared/src/index.ts'],
+      },
+    });
+    let prisma, release;
+    try {
+      const { PrismaClient } = require(
+        require.resolve('@prisma/client', { paths: [server] }),
+      );
+      const { ConfigService } = require(
+        require.resolve('@nestjs/config', { paths: [server] }),
+      );
+      const {
+        TrpcService,
+      } = require('../apps/server/src/trpc/trpc.service.ts');
+      const { TrpcRouter } = require('../apps/server/src/trpc/trpc.router.ts');
+      const { createExpressMiddleware } = require(
+        require.resolve('@trpc/server/adapters/express', { paths: [server] }),
+      );
+      const express = require(require.resolve('express', { paths: [server] }));
+      prisma = new PrismaClient({
+        datasources: { db: { url } },
+        log: [{ emit: 'event', level: 'query' }],
+      });
+      process.env.DATABASE_URL = 'file:synthetic-relative-cache-bypass.sqlite';
+      const sql = [];
+      prisma.$on('query', (e) =>
+        sql.push({ sql: e.query, duration: e.duration }),
+      );
+      for (const migration of fs
+        .readdirSync(path.join(server, 'prisma/migrations'))
+        .filter((n) => /^\d/.test(n))
+        .sort())
+        for (const statement of fs
+          .readFileSync(
+            path.join(server, 'prisma/migrations', migration, 'migration.sql'),
+            'utf8',
+          )
+          .split(';')
+          .map((s) => s.trim())
+          .filter(Boolean))
+          await prisma.$executeRawUnsafe(statement);
+      await prisma.managementGroup.create({
+        data: { id: 'group-a', name: 'Synthetic folder', platform: 'wechat' },
+      });
+      for (let i = 0; i < 6; i++)
+        await prisma.feed.create({
+          data: {
+            id: 'f' + i,
+            mpName: 'Publisher ' + i,
+            mpCover: '',
+            mpIntro: '',
+            updateTime: 0,
+            groupId: i < 3 ? 'group-a' : null,
+          },
+        });
+      const count = Number(process.env.ARTICLE_LIST_BENCHMARK_ROWS || 1800);
+      assert(Number.isSafeInteger(count) && count >= 120 && count <= 3000);
+      await prisma.$executeRawUnsafe(
+        `WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x+1 < ?)
+   INSERT INTO articles(id,mp_id,title,pic_url,publish_time,content_html,read_count,like_count,created_at)
+   SELECT 'article-'||printf('%06d',x),'f'||(x%6),'Synthetic '||x,'',1700000000+CAST(x/3 AS INTEGER),
+   CASE WHEN x%7=0 THEN NULL WHEN x%7=1 THEN '' WHEN x%7=2 THEN ' ' ELSE '<p>'||replace(hex(zeroblob(32768)),'00','x')||'</p>' END,x%99,x%17,CURRENT_TIMESTAMP FROM n`,
+        count,
+      );
+      const config = new ConfigService({
+        auth: { code: 'synthetic' },
+        platform: { url: '' },
+        feed: { updateDelayTime: 0 },
+      });
+      const service = new TrpcService(prisma, config, {}, {});
+      const router = new TrpcRouter(service, prisma, config, {}, {}).appRouter;
+      const application = express();
+      const requests = [];
+      let phase = 'summary-held',
+        failNext = false,
+        holdNext = 0;
+      let held = false;
+      const latch = new Promise((resolve) => {
+        release = resolve;
+      });
+      const summaryMiddlewares =
+        router._def.procedures['article.summary']._def.middlewares;
+      summaryMiddlewares.splice(
+        summaryMiddlewares.length - 1,
+        0,
+        async ({ next }) => {
+          if (!held) {
+            held = true;
+            await latch;
+          }
+          return next();
+        },
+      );
+      application.use(
+        '/trpc',
+        (req, res, next) => {
+          const record = {
+            phase,
+            procedures: req.url.split('?')[0],
+            start: epoch(),
+            sqlStart: sql.length,
+          };
+          requests.push(record);
+          assert.equal(req.method, 'GET');
+          assert.equal(req.headers.authorization, 'synthetic');
+          res.once('finish', () => {
+            record.ms = epoch() - record.start;
+            record.status = res.statusCode;
+            record.databaseMs = sql
+              .slice(record.sqlStart)
+              .reduce((s, e) => s + e.duration, 0);
+          });
+          if (req.url.includes('article.list') && failNext) {
+            failNext = false;
+            res
+              .status(503)
+              .json({ error: { message: 'Synthetic list unavailable' } });
+            return;
+          }
+          if (req.url.includes('article.list') && holdNext) {
+            const delay = holdNext;
+            holdNext = 0;
+            setTimeout(next, delay);
+          } else next();
+        },
+        createExpressMiddleware({
+          router,
+          createContext: () => ({ errorMsg: null, isLocal: true }),
+        }),
+      );
+      const env = path.join(root, 'env.ts');
+      fs.writeFileSync(
+        env,
+        "export const serverOriginUrl=window.location.origin;export const enabledAuthCode=true;export const privateOnlineMode=false;export const acceptanceMode=false;export const appVersion='synthetic';export const isProd=false;",
+      );
+      const source = `
+import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
+import {BrowserRouter,Routes,Route,useNavigate} from 'react-router-dom';
+import {TrpcProvider} from ${modulePath(path.join(web, 'src/provider/trpc.tsx'))};
+import {trpc} from ${modulePath(path.join(web, 'src/utils/trpc.ts'))};
+import ArticleList from ${modulePath(path.join(web, 'src/pages/feeds/list.tsx'))};
+import ${modulePath(path.join(web, 'src/index.css'))};
+localStorage.setItem('authCode','synthetic');
+function App(){const [filter,setFilter]=useState({}),[search,setSearch]=useState(''),[sort,setSort]=useState('publishTime'),[direction,setDirection]=useState('desc'),[selected,setSelected]=useState(new Set());const utils=trpc.useUtils();const navigate=useNavigate();
+window.fixture={setFilter,setSearch,navigate,selected:()=>[...selected],refresh:()=>{window.dispatchEvent(new Event('wewe-articles-refresh'));return utils.article.list.invalidate();},fresh:()=>utils.article.list.reset()};
+return <div style={{height:'900px'}}><ArticleList search={search} articleFilter={filter} sort={sort} onSortChange={setSort} direction={direction} onDirectionChange={setDirection} selectedIds={selected} onSelectionChange={setSelected}/></div>}
+createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider><Routes><Route path='/*' element={<App/>}/></Routes></TrpcProvider></BrowserRouter>);`;
+      const measurements = [];
+      await withFixture(
+        source,
+        async ({ evaluate, send, pause }) => {
+          const rows = () =>
+            evaluate(
+              "Array.from(document.querySelectorAll('[data-article-id]'),e=>e.dataset.articleId)",
+            );
+          const until = async (condition, message, limit = 5000) => {
+            for (let t = 0; t < limit; t += 25) {
+              if (await condition()) return;
+              await pause(25);
+            }
+            assert.fail(message);
+          };
+          const measurementOnly =
+            process.env.ARTICLE_LIST_MEASUREMENT_ONLY === 'true';
+          const clickMore = (times = 1) =>
+            evaluate(
+              `(()=>{const button=Array.from(document.querySelectorAll('button')).find(e=>e.textContent.trim()==='加载更多');for(let i=0;i<${times};i++)button.click()})()`,
+            );
+          if (measurementOnly) {
+            release();
+            await until(
+              async () =>
+                (await rows()).length === 20 && requests.every((r) => r.status),
+              'baseline initial request settled',
+            );
+          }
+          if (!measurementOnly) {
+            try {
+              await until(() => held, 'summary request arrived');
+              await until(
+                async () => (await rows()).length === 20,
+                'first rows must render while summary remains held',
+                2500,
+              );
+            } finally {
+              release();
+            }
+            assert(
+              requests.some(
+                (r) =>
+                  r.procedures.includes('article.list') && r.status === 200,
+              ),
+            );
+            assert(
+              !requests.some(
+                (r) =>
+                  r.procedures.includes('article.list') &&
+                  r.procedures.includes('summary'),
+              ),
+            );
+            await until(
+              () => requests.every((r) => r.status),
+              'summary acknowledgement',
+            );
+            const initial = await rows();
+            assert.equal(new Set(initial).size, 20);
+            await evaluate(
+              'document.querySelector(\'[aria-label^="选择文章："]\').click()',
+            );
+            const selected = await evaluate('window.fixture.selected()');
+            assert.equal(selected.length, 1);
+            phase = 'rapid-next';
+            holdNext = 150;
+            const before = requests.length;
+            await clickMore(2);
+            await until(
+              async () => (await rows()).length === 40,
+              'one next page',
+            );
+            assert.equal(
+              requests
+                .slice(before)
+                .filter((r) => r.procedures.includes('article.list')).length,
+              1,
+            );
+            assert.deepEqual((await rows()).slice(0, 20), initial);
+            assert.equal(new Set(await rows()).size, 40);
+            assert.deepEqual(
+              await evaluate('window.fixture.selected()'),
+              selected,
+            );
+            phase = 'reload-two-pages';
+            await send('Page.reload');
+            await until(
+              async () => (await rows()).length === 40,
+              'restore exactly two pages',
+            );
+            assert.equal(new Set(await rows()).size, 40);
+            phase = 'refresh-two-pages';
+            const first = await rows();
+            await evaluate('window.fixture.refresh()');
+            assert.deepEqual(await rows(), first);
+            phase = 'folder';
+            await evaluate("window.fixture.setFilter({group:'group-a'})");
+            await until(
+              async () => (await rows()).length === 20,
+              'folder page',
+            );
+            const ids = await rows();
+            for (const id of ids) assert(Number(id.slice(8)) % 6 < 3);
+            phase = 'search';
+            await evaluate("window.fixture.setSearch('Synthetic 11')");
+            await until(async () => {
+              const found = await rows();
+              return (
+                found.length === 20 &&
+                found.every((id) =>
+                  Number(id.slice(8)).toString().startsWith('11'),
+                )
+              );
+            }, 'search scope');
+            phase = 'date-empty';
+            await evaluate(
+              "window.fixture.setFilter({dateStart:'2020-01-01',dateEnd:'2020-01-02'})",
+            );
+            await until(
+              async () =>
+                requests.some(
+                  (r) =>
+                    r.phase === 'date-empty' &&
+                    r.procedures.includes('article.list') &&
+                    r.status === 200,
+                ) && (await rows()).length === 0,
+              'empty date range',
+            );
+            phase = 'return-all';
+            await evaluate(
+              "window.fixture.setFilter({});window.fixture.setSearch('')",
+            );
+            await until(
+              async () => (await rows()).length === 20,
+              'return to first page',
+            );
+            phase = 'read-failure';
+            failNext = true;
+            await evaluate('void window.fixture.fresh()');
+            await until(
+              () =>
+                evaluate(
+                  "document.querySelector('[role=alert]')?.textContent.includes('文章列表读取失败')",
+                ),
+              'explicit list error',
+            );
+            assert.equal(
+              requests.filter(
+                (r) =>
+                  r.phase === 'read-failure' &&
+                  r.procedures.includes('article.list'),
+              ).length,
+              1,
+              'failed reads are not silently replayed',
+            );
+            phase = 'retry';
+            await evaluate(
+              "Array.from(document.querySelectorAll('button')).find(e=>e.textContent.trim()==='重试').click()",
+            );
+            await until(
+              async () => (await rows()).length === 20,
+              'manual retry recovers',
+            );
+          }
+          const samples = Number(process.env.ARTICLE_LIST_BROWSER_SAMPLES || 6);
+          assert(
+            Number.isSafeInteger(samples) && samples >= 1 && samples <= 30,
+          );
+          for (let i = 0; i < samples; i++)
+            for (const stage of ['first', 'next', 'refresh']) {
+              phase = stage + '-' + i;
+              if (stage === 'first') {
+                const { identifier } = await send(
+                  'Page.addScriptToEvaluateOnNewDocument',
+                  { source: 'sessionStorage.clear()' },
+                );
+                const start = epoch();
+                await send('Page.reload');
+                await send('Page.removeScriptToEvaluateOnNewDocument', {
+                  identifier,
+                });
+                await until(
+                  async () => (await rows()).length === 20,
+                  'fresh first page',
+                );
+                measurements.push({ stage, ms: epoch() - start });
+              } else if (stage === 'next') {
+                const start = epoch();
+                await clickMore();
+                await until(
+                  async () => (await rows()).length === 40,
+                  'next page sample',
+                );
+                measurements.push({ stage, ms: epoch() - start });
+              } else {
+                const start = epoch();
+                await evaluate('window.fixture.refresh()');
+                measurements.push({
+                  stage,
+                  ms: epoch() - start,
+                  rows: (await rows()).length,
+                });
+              }
+            }
+        },
+        {
+          'react-router-dom': path.join(web, 'node_modules/react-router-dom'),
+          '../utils/env': env,
+          '@web/utils/env': env,
+          '@web': path.join(web, 'src'),
+          '@wewe-rss/shared': path.resolve('packages/shared/src/index.ts'),
+        },
+        {
+          productionStyles: true,
+          handleRequest: (req, res) => {
+            if (req.url.startsWith('/trpc/')) {
+              application(req, res);
+              return true;
+            }
+            return false;
+          },
+        },
+      );
+      assert(
+        requests
+          .filter((r) => r.procedures.includes('summary'))
+          .every((r) => r.status === 200),
+        'statistics must succeed, not be replaced by an error',
+      );
+      const result = {
+        scope:
+          'actual ArticleList and TrpcProvider; original protected HTTP routes; synthetic 32KiB bodies; no page reuse',
+        count,
+        requests: requests.map(({ start, sqlStart, ...r }) => r),
+        measurements,
+      };
+      if (process.env.ARTICLE_LIST_BROWSER_OUTPUT) {
+        const destination = path.resolve(
+          process.env.ARTICLE_LIST_BROWSER_OUTPUT,
+        );
+        assert(destination.startsWith(path.resolve('output') + path.sep));
+        fs.writeFileSync(destination, JSON.stringify(result, null, 2) + '\n');
+      }
+      console.log(JSON.stringify(result));
+    } finally {
+      release?.();
+      await prisma?.$disconnect();
+      undo();
+      require.extensions['.ts'] = oldLoader;
+      if (previousUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousUrl;
+      assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+      assert(path.basename(root).startsWith('wewe-article-http-'));
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

@@ -1,4 +1,11 @@
-import { FC, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import {
+  FC,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+} from 'react';
 import {
   Button,
   Spinner,
@@ -117,7 +124,12 @@ const ArticleList: FC<ArticleListProps> = ({
       enabled: !filterInvalid,
       cacheTime: 0,
       keepPreviousData: false,
+      retry: false,
     },
+  );
+  const loadNext = useCallback(
+    () => fetchNextPage({ cancelRefetch: false }),
+    [fetchNextPage],
   );
 
   const items = useMemo(() => {
@@ -157,7 +169,7 @@ const ArticleList: FC<ArticleListProps> = ({
     fetching: isFetching,
     hasNext: Boolean(hasNextPage),
     failed: isError || filterInvalid,
-    loadNext: fetchNextPage,
+    loadNext,
     paused: Boolean(readingId),
   });
 
@@ -376,7 +388,12 @@ const ArticleList: FC<ArticleListProps> = ({
 
           {hasNextPage && !isLoading && !filterInvalid && (
             <div className="flex justify-center p-4">
-              <Button size="sm" variant="light" onPress={() => fetchNextPage()}>
+              <Button
+                size="sm"
+                variant="light"
+                isDisabled={isFetching}
+                onPress={() => void loadNext()}
+              >
                 加载更多
               </Button>
             </div>

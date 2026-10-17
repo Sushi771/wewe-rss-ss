@@ -34,6 +34,7 @@ on:
         codex/automatic-refresh-failure-isolation,
         codex/cache-response-capacity-diagnostics,
         codex/terminal-refresh-integration-20261017,
+        codex/receipt-retention-integration-20261017,
       ]
 
 jobs:
