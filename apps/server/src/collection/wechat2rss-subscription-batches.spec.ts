@@ -495,7 +495,7 @@ describe('durable authorized batch (offline)', () => {
     expect(
       (await second.manager.list())[0].items
         .slice(3)
-        .every((item) => item.state === 'queued' && !item.accepted),
+        .every((item) => item.state === 'cancelled' && !item.accepted),
     ).toBe(true);
     second.manager.close();
     const recovered = make();
