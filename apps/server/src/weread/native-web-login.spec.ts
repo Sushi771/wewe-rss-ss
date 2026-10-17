@@ -33,6 +33,10 @@ describe('native Web QR login (no real HTTP)', () => {
           accessToken: 'normal-qr-token',
           refreshToken: 'renew/+?',
         },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { userVid: 123, name: '真实读书昵称' },
       });
     const login = new NativeWebLogin();
     const qr = await login.create();
@@ -47,7 +51,8 @@ describe('native Web QR login (no real HTTP)', () => {
     expect(ownerSessionCookie(result.webSession!, '123')).toContain('wr_ql=0');
     expect(JSON.parse(result.token!).wr_rt).toBe('renew%2F%2B%3F');
     expect(await login.poll(qr.uuid)).toBe(result);
-    expect(axios.get).toHaveBeenCalledTimes(2);
+    expect(result.profile?.name).toBe('真实读书昵称');
+    expect(axios.get).toHaveBeenCalledTimes(3);
     expect(axios.get).toHaveBeenNthCalledWith(
       1,
       'https://weread.qq.com/api/auth/getLoginUid',
@@ -63,6 +68,22 @@ describe('native Web QR login (no real HTTP)', () => {
       }),
     );
     expect(axios.post).not.toHaveBeenCalled();
+  });
+  it('preserves confirmed login when own profile refuses, without retrying on repeated polls', async () => {
+    (axios.get as jest.Mock)
+      .mockResolvedValueOnce({ status: 200, data: { uid: 'uid-example' } })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { webLoginVid: 123, accessToken: 'normal-qr-token' },
+      })
+      .mockResolvedValueOnce({ status: 403, data: {} });
+    const login = new NativeWebLogin();
+    const qr = await login.create();
+    const result = await login.poll(qr.uuid);
+    expect(result.vid).toBe(123);
+    expect(result.profile).toBeUndefined();
+    expect(await login.poll(qr.uuid)).toBe(result);
+    expect(axios.get).toHaveBeenCalledTimes(3);
   });
   it('does not save malformed Web refresh credentials', async () => {
     (axios.get as jest.Mock)
