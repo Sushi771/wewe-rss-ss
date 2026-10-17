@@ -21,6 +21,10 @@ const navbarItemLink = [
     href: '/feeds',
     name: '公众号源',
   },
+  {
+    href: '/tools',
+    name: '工具',
+  },
 ];
 
 const Nav = () => {
@@ -89,13 +93,13 @@ const Nav = () => {
         </Tooltip>
 
         {/* macOS-style pill navigation */}
-        <NavbarContent className="hidden sm:flex" justify="center">
-          <div className="mac-nav-pills">
+        <NavbarContent className="flex" justify="center">
+          <div className="mac-nav-pills flex gap-3">
             {navbarItemLink.map((item) => (
               <RouterLink
                 key={item.href}
                 to={item.href}
-                className={`mac-nav-pill ${pathname.startsWith(item.href) ? 'active' : ''}`}
+                className={`mac-nav-pill whitespace-nowrap ${item.href === '/feeds' ? 'hidden sm:inline-flex' : ''} ${pathname.startsWith(item.href) ? 'active text-primary font-medium' : ''}`}
               >
                 {item.name}
               </RouterLink>

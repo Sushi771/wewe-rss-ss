@@ -9,6 +9,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { FeedsModule } from './feeds/feeds.module';
 import { PrivateAccessController } from './private-access.controller';
 import { OfflineExportController } from './offline-export.controller';
+import { ArticleDownloadController } from './article-download.controller';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { OfflineExportController } from './offline-export.controller';
     AppController,
     PrivateAccessController,
     OfflineExportController,
+    ArticleDownloadController,
   ],
   providers: [AppService],
 })
