@@ -122,36 +122,166 @@ def positive(name, fallback):
     return value
 
 
-def legacy_roots():
+MAX_LAYOUT_ENTRIES = 8192
+MAX_LEGACY_ROOTS = 256
+MAX_LEGACY_DOCUMENT = 256*1024
+
+
+def safe_backup_failure(error,stage='unknown'):
+    """Finite diagnostic only: never return exception text, paths or argv."""
+    text=str(error)
+    for code in ('SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW','SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID',
+                 'SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED','SQLITE_BACKUP_LAYOUT_AMBIGUOUS_REGISTRATION',
+                 'SQLITE_BACKUP_LAYOUT_IDENTITY_UNPROVED','SQLITE_BACKUP_LAYOUT_SCAN_LIMIT'):
+        if text.startswith(code):return {'code':code,'stage':'layout'}
+    if text.startswith('SQLITE_SPACE_BUDGET_EXCEEDED'):return {'code':'SQLITE_SPACE_BUDGET_EXCEEDED','stage':'budget'}
+    if text in ('SQLITE_PERIODIC_RETENTION_HELD','SQLITE_PERIODIC_RETENTION_PROOF_LIMIT','SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED'):
+        return {'code':text,'stage':'rotation'}
+    if text=='SQLITE_PERIODIC_RETENTION_POLICY_INVALID':return {'code':text,'stage':'budget'}
+    if text in ('snapshot-checksum-failed','snapshot-verification-failed','snapshot-integrity-failed','snapshot-schema-mismatch'):
+        return {'code':'SQLITE_BACKUP_VERIFICATION_FAILED','stage':'hash' if text=='snapshot-checksum-failed' else 'verify'}
+    if text in ('database-replaced','database-schema-changed'):return {'code':'SQLITE_BACKUP_SOURCE_CHANGED','stage':'verify'}
+    if text.startswith(('Cyclic backup directory','Nested source/','Source inside legacy')):
+        return {'code':'SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW','stage':'layout'}
+    if isinstance(error,TimeoutError) and 'lock' in text.lower():return {'code':'SQLITE_BACKUP_BUSY','stage':'lock'}
+    allowed={'lock','snapshot','copy','verify','hash','rotation','unknown'}
+    return {'code':'SQLITE_BACKUP_TIMEOUT' if isinstance(error,TimeoutError) else 'SQLITE_BACKUP_FAILED',
+            'stage':stage if stage in allowed else 'unknown'}
+
+
+def directory_identity(path):
+    info=path.stat()
+    if not path.is_dir() or not info.st_ino:raise ValueError('SQLITE_BACKUP_LAYOUT_IDENTITY_UNPROVED')
+    return [str(info.st_dev),str(info.st_ino)]
+
+
+def local_directory(value):
+    if not isinstance(value,str) or not Path(value).is_absolute() or value.startswith(('\\\\','//')) or any(x in value for x in '\0\r\n'):
+        raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+    path=Path(value)
+    if path.resolve(strict=True)!=path:raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+    directory_identity(path)
+    return path
+
+
+def _legacy_registration(root=None):
     if os.environ.get('SQLITE_BACKUP_KIND') == 'test':
-        return []
-    roots = json.loads(os.environ.get('SQLITE_PRODUCTION_LEGACY_ROOTS', '[]'))
-    if not isinstance(roots, list) or any(not isinstance(value,str) or not Path(value).is_absolute() for value in roots):
-        raise ValueError('Invalid SQLITE_PRODUCTION_LEGACY_ROOTS')
-    return [Path(value).resolve(strict=True) for value in roots]
+        return {'roots':[],'exact':False,'record':None}
+    raw=os.environ.get('SQLITE_PRODUCTION_LEGACY_ROOTS','[]')
+    filename=os.environ.get('SQLITE_PRODUCTION_LEGACY_ROOTS_FILE')
+    if len(raw.encode())>MAX_LEGACY_DOCUMENT:raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+    roots=json.loads(raw)
+    if not isinstance(roots,list) or len(roots)>MAX_LEGACY_ROOTS:raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+    if not filename:
+        if any(not isinstance(value,str) or not Path(value).is_absolute() for value in roots):
+            raise ValueError('Invalid SQLITE_PRODUCTION_LEGACY_ROOTS')
+        return {'roots':list(dict.fromkeys(Path(value).resolve(strict=True) for value in roots)),'exact':False,'record':None}
+    if roots:raise ValueError('SQLITE_BACKUP_LAYOUT_AMBIGUOUS_REGISTRATION')
+    file=Path(filename)
+    if not file.is_absolute() or str(file).startswith(('\\\\','//')) or file.is_symlink() or (hasattr(file,'is_junction') and file.is_junction()):
+        raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+    before=file.stat()
+    if not file.is_file() or not before.st_ino or before.st_size>MAX_LEGACY_DOCUMENT:raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+    with file.open('rb') as stream:
+        opened=os.fstat(stream.fileno())
+        if (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino):raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED')
+        data=stream.read(MAX_LEGACY_DOCUMENT+1)
+    after=file.stat()
+    stamp=lambda info:[str(info.st_dev),str(info.st_ino),str(info.st_size),str(info.st_mtime_ns),str(info.st_ctime_ns)]
+    if len(data)>MAX_LEGACY_DOCUMENT or stamp(before)!=stamp(after):raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED')
+    document=json.loads(data.decode('utf-8-sig'))
+    if (not isinstance(document,dict) or set(document)!={'format','confirmed','backupRoot','backupRootIdentity','roots'}
+        or document['format']!='sqlite-legacy-roots-v1' or document['confirmed'] is not True
+        or not isinstance(document['roots'],list) or len(document['roots'])>MAX_LEGACY_ROOTS):
+        raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+    managed=local_directory(document['backupRoot'])
+    if directory_identity(managed)!=document['backupRootIdentity'] or (root is not None and Path(root).resolve()!=managed):
+        raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED')
+    physical=[]
+    for entry in document['roots']:
+        if not isinstance(entry,dict) or set(entry)!={'path','identity'}:raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+        target=local_directory(entry['path'])
+        if directory_identity(target)!=entry['identity']:raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED')
+        physical.append(target)
+    if len(set(physical))!=len(physical):raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID')
+    return {'roots':physical,'exact':True,'record':{'registrationManifest':str(file.resolve()),'identity':stamp(after),
+                                                 'sha256':hashlib.sha256(data).hexdigest()}}
 
 
-def managed_files(root):
+def legacy_registration(root=None):
+    try:return _legacy_registration(root)
+    except (OSError,json.JSONDecodeError,UnicodeError,KeyError,TypeError):
+        raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID') from None
+
+
+def legacy_roots():
+    return legacy_registration()['roots']
+
+
+def legacy_link_allowed(target, registration):
+    return target in registration['roots'] if registration['exact'] else any(target.is_relative_to(p) for p in registration['roots'])
+
+
+def preview_legacy_roots(root, database=None):
+    """No target traversal or DB content read; this proposal grants no authority."""
+    root=local_directory(str(Path(root).absolute()));targets={};aliases=[];deadline=time.monotonic()+10;entries=0
+    if database is not None and Path(database).resolve().is_relative_to(root):raise ValueError('Nested source/destination refused')
+    def visit(folder,depth=0):
+        nonlocal entries
+        if depth>64:raise ValueError('SQLITE_BACKUP_LAYOUT_SCAN_LIMIT')
+        for file in folder.iterdir():
+            entries+=1
+            if entries>MAX_LAYOUT_ENTRIES or time.monotonic()>deadline:raise ValueError('SQLITE_BACKUP_LAYOUT_SCAN_LIMIT')
+            if file.is_symlink() or (hasattr(file,'is_junction') and file.is_junction()):
+                target=local_directory(str(file.resolve(strict=True)));stamp=directory_identity(target)
+                if database is not None and Path(database).resolve().is_relative_to(target):raise ValueError('Source inside legacy backup root refused')
+                aliases.append({'path':str(file.absolute()),'target':str(target),'targetIdentity':stamp})
+                targets[str(target)]=stamp
+                if len(targets)>MAX_LEGACY_ROOTS:raise ValueError('SQLITE_BACKUP_LAYOUT_SCAN_LIMIT')
+            elif file.is_dir():visit(file,depth+1)
+    visit(root)
+    result={'format':'sqlite-legacy-roots-proposal-v1','inventoryComplete':False,'aliases':aliases,
+            'registration':{'format':'sqlite-legacy-roots-v1','confirmed':False,'backupRoot':str(root),
+                            'backupRootIdentity':directory_identity(root),
+                            'roots':[{'path':p,'identity':targets[p]} for p in sorted(targets)]},
+            'note':'Metadata only; review exact physical roots. Registration neither changes quotas nor authorizes deletion.'}
+    if len(json.dumps(result,ensure_ascii=False).encode())>MAX_LEGACY_DOCUMENT:raise ValueError('SQLITE_BACKUP_LAYOUT_SCAN_LIMIT')
+    return result
+
+
+def managed_files(root, deadline=None):
     """Only explicitly listed historic roots may be traversed through links.
 
     Canonical paths are visited once; legacy targets are counted but never used
     as generation destinations. Unlisted links and cycles fail closed.
     """
-    allowed = legacy_roots()
+    registration=legacy_registration(root);allowed=registration['roots']
+    root_stamp=directory_identity(root) if root.exists() else None
+    physical_stamps=[directory_identity(p) for p in allowed]
+    stop=min(time.monotonic()+10,deadline) if deadline is not None else time.monotonic()+10
+    entries=0;links=[]
     seen_directories, active_directories, seen_files, result = set(), set(), set(), []
     def visit(directory):
+        nonlocal entries
+        if time.monotonic()>stop:
+            if deadline is not None and time.monotonic()>deadline:raise TimeoutError('SQLite backup deadline exhausted')
+            raise ValueError('SQLITE_BACKUP_LAYOUT_SCAN_LIMIT')
         canonical = directory.resolve(strict=True)
+        if len(active_directories)>64:raise ValueError('SQLITE_BACKUP_LAYOUT_SCAN_LIMIT')
         if canonical in active_directories:
             raise ValueError('Cyclic backup directory refused')
         if canonical in seen_directories: return
         seen_directories.add(canonical)
         active_directories.add(canonical)
         for file in directory.iterdir():
+            entries+=1
+            if entries>MAX_LAYOUT_ENTRIES or time.monotonic()>stop:raise ValueError('SQLITE_BACKUP_LAYOUT_SCAN_LIMIT')
             linked = file.is_symlink() or (hasattr(file,'is_junction') and file.is_junction())
             if linked:
                 target = file.resolve(strict=True)
-                if not file.is_dir() or not any(target.is_relative_to(folder) for folder in allowed):
+                if not file.is_dir() or not legacy_link_allowed(target,registration):
                     raise ValueError('SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW: unlisted link '+str(file))
+                links.append((file,target,directory_identity(target)))
             if file.is_dir():
                 visit(file)
             elif file.is_file():
@@ -164,10 +294,29 @@ def managed_files(root):
     # A target already traversed through a declared link is counted once.
     for folder in allowed:
         if folder not in seen_directories: visit(folder)
+    if (legacy_registration(root)!=registration or [directory_identity(p) for p in allowed]!=physical_stamps
+        or (directory_identity(root) if root.exists() else None)!=root_stamp
+        or any(file.resolve(strict=True)!=target or directory_identity(target)!=stamp for file,target,stamp in links)):
+        raise ValueError('SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED')
     return result
 
 
-def space_preflight(database, backup_root):
+def periodic_retention_policy():
+    if os.environ.get('SQLITE_PERIODIC_RETENTION_ENABLED')!='1':return None
+    limits={'copies':('SQLITE_PERIODIC_RETENTION_COPIES',4,2,16),
+            'bytes':('SQLITE_PERIODIC_RETENTION_BYTES',4*1024**3,1,32*1024**3),
+            'reserveBytes':('SQLITE_PERIODIC_RETENTION_RESERVE_BYTES',2*1024**3,2*1024**2,8*1024**3),
+            'readBytes':('SQLITE_PERIODIC_RETENTION_READ_BYTES',8*1024**3,1,16*1024**3)}
+    result={}
+    for key,(name,default,low,high) in limits.items():
+        try:value=int(os.environ.get(name,default))
+        except ValueError:raise ValueError('SQLITE_PERIODIC_RETENTION_POLICY_INVALID') from None
+        if not low<=value<=high:raise ValueError('SQLITE_PERIODIC_RETENTION_POLICY_INVALID')
+        result[key]=value
+    return result
+
+
+def space_preflight(database, backup_root, deadline=None, reserve=None):
     """Count all existing files, including failed copies; never prune them."""
     database, backup_root = Path(database).resolve(), Path(backup_root).resolve()
     if database.is_relative_to(backup_root):
@@ -182,7 +331,7 @@ def space_preflight(database, backup_root):
     max_bytes = positive(prefix + '_MAX_BYTES', (512 * 1024**2) if test else (32 * 1024**3))
     max_copies = positive(prefix + '_MAX_COPIES', 12 if test else 48)
     min_free = positive(prefix + '_MIN_FREE_BYTES', (256 * 1024**2) if test else (4 * 1024**3))
-    files = managed_files(root)
+    files = managed_files(root,deadline)
     used = sum(file.stat().st_size for file in files)
     copies = sum(file.suffix.lower() in ('.db', '.sqlite', '.sqlite3') for file in files)
     expected = 2 * sum(file.stat().st_size for file in (database, Path(str(database) + '-wal')) if file.exists()) + 1024**2
@@ -197,9 +346,16 @@ def space_preflight(database, backup_root):
         status = {'nextBackupAllowed':allowed,'warning':not allowed or used/max_bytes>=.5 or copies/max_copies>=.5 or more/96<1,'estimatedDaysAtContinuousChanges':round(more/96,2),'recordedAt':datetime.now(timezone.utc).isoformat()}
         temporary=root/('.space-budget-status-'+uuid.uuid4().hex+'.tmp')
         temporary.write_text(json.dumps(status),encoding='utf-8'); temporary.replace(root/'.space-budget-status.json')
-    if used + expected > max_bytes or copies + 1 > max_copies or free - expected < min_free:
+    normal=used+expected<=max_bytes and copies+1<=max_copies and free-expected>=min_free
+    overflow=False
+    if not normal and reserve is not None:
+        overflow=(expected<=reserve['reserveBytes'] and free-expected>=min_free
+                  and copies<=reserve.get('baselineCopies',copies)
+                  and used<=reserve.get('baselineBytes',used)+8192)
+    if not normal and not overflow:
         raise ValueError(f'SQLITE_SPACE_BUDGET_EXCEEDED: root={root}, existingBytes={used}, existingCopies={copies}, requestedBytes={expected}, freeBytes={free}. Review recovery points manually; nothing was deleted.')
-    return {'root': str(root), 'existingBytes': used, 'existingCopies': copies, 'requestedBytes': expected, 'freeBytes': free}
+    return {'root': str(root), 'existingBytes': used, 'existingCopies': copies, 'requestedBytes': expected,
+            'freeBytes': free,'overflow':overflow}
 
 
 def snapshot_equal(source, copied):
@@ -229,6 +385,42 @@ def snapshot_equal(source, copied):
                         return False
                 elif a != b:
                     return False
+    return True
+
+
+def snapshot_covers(current, previous, budget):
+    """All old typed durable rows survive; only derived feed summaries differ.
+
+    No article field, note, metric, subscription identity or unknown table/column
+    is discarded. A changed durable value or deleted row holds the old point.
+    """
+    schema="SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+    if list(current.execute(schema))!=list(previous.execute(schema)):return False
+    quote=lambda value:'"'+value.replace('"','""')+'"'
+    derived_feed={'sync_time','update_time','updated_at','has_history','last_collection_result','provider_refresh_attempt_time'}
+    count=0
+    for (table,) in previous.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
+        info=list(previous.execute(f'PRAGMA table_info({quote(table)})'))
+        columns=[r[1] for r in info if table!='feeds' or r[1] not in derived_feed]
+        primary=[r[1] for r in sorted(info,key=lambda r:r[5]) if r[5]]
+        hidden=next((name for name in ('rowid','_rowid_','oid') if name not in [r[1].lower() for r in info]),None)
+        if not primary and hidden is None:return False
+        key=primary or [hidden];selected=list(dict.fromkeys(key+columns))
+        query='SELECT '+','.join(map(quote,selected))+' FROM '+quote(table)
+        lookup=query+' WHERE '+' AND '.join(quote(p)+' IS ?' for p in key)
+        for old in previous.execute(query):
+            budget.tick();count+=1
+            if count>100000:raise ValueError('SQLITE_PERIODIC_RETENTION_PROOF_LIMIT')
+            # SQLite permits duplicate NULL primary keys in ordinary tables.
+            # A single lookup cannot prove their multiplicity survived.
+            if any(v is None for v in old[:len(key)]):return False
+            new=current.execute(lookup,old[:len(key)]).fetchone()
+            if new is None:return False
+            for values in (old,new):
+                budget.used+=sum(len(v.encode()) if isinstance(v,str) else len(v) if isinstance(v,bytes) else 8 for v in values)
+            if budget.used>budget.maximum:raise ValueError('SQLITE_PERIODIC_RETENTION_PROOF_LIMIT')
+            if any(type(a) is not type(b) or (struct.pack('>d',a)!=struct.pack('>d',b) if isinstance(a,float) else a!=b)
+                   for a,b in zip(old,new)):return False
     return True
 
 
@@ -272,6 +464,13 @@ def create_backup(database, backup_root, prefix="before-collection", timeout=55,
     with FileLock(database.parent / f".full-snapshot-{lock_name}.lock",
                   timeout=max(0, min(30, timeout))) as lock:
         backup_root = Path(backup_root).resolve()
+        automatic=periodic_retention_policy() if prefix=='periodic-snapshot' else None
+        if (automatic and os.environ.get('SQLITE_BACKUP_KIND')=='test'
+            and Path(os.environ.get('SQLITE_TEST_BUDGET_ROOT',backup_root)).resolve()!=backup_root):
+            raise ValueError('SQLITE_PERIODIC_RETENTION_POLICY_INVALID')
+        lease=backup_root/'.space-budget.lock'
+        lease_identity=None
+        if automatic and lease.exists():raise ValueError('SQLITE_PERIODIC_RETENTION_HELD')
         # Restart still needs a new full proof, never authority from a saved
         # owner/token. Hash + integrity + every typed row can prove the existing
         # periodic bytes current without creating an identical physical copy.
@@ -279,30 +478,40 @@ def create_backup(database, backup_root, prefix="before-collection", timeout=55,
         report = reusable(database, backup_root, deadline,
                           allow_periodic=prefix == 'periodic-snapshot')
         if report is None:
-            space_preflight(database, backup_root)
+            initial=space_preflight(database, backup_root,deadline,reserve=automatic)
             backup_root.mkdir(parents=True, exist_ok=True)
             # Shared with native startup preparation. A crash leaves an explicit
             # blocked lease for operator review, not an unbounded next copy.
-            lease = Path(space_preflight(database, backup_root)['root']) / '.space-budget.lock'
+            lease = Path(initial['root']) / '.space-budget.lock'
+            reservation={**automatic,'baselineCopies':initial['existingCopies'],'baselineBytes':initial['existingBytes']} if automatic else None
             with lease.open('x', encoding='utf-8') as stream:
-                json.dump({'pid': os.getpid(), 'startedAt': datetime.now(timezone.utc).isoformat()}, stream)
+                json.dump({'pid': os.getpid(), 'startedAt': datetime.now(timezone.utc).isoformat(),
+                           **({'format':'sqlite-periodic-retention-lease-v1','source':str(database),
+                               'baselineCopies':initial['existingCopies'],'baselineBytes':initial['existingBytes'],
+                               'reserveBytes':automatic['reserveBytes']} if automatic else {})}, stream)
+                stream.flush();os.fsync(stream.fileno())
+                info=os.fstat(stream.fileno())
+                lease_identity=[str(v) for v in (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,
+                                getattr(info,'st_birthtime_ns',info.st_ctime_ns))]
             try:
-                space_preflight(database, backup_root)
+                space_preflight(database, backup_root,deadline,reserve=reservation)
                 report = _create_backup(database, backup_root, prefix,
-                                        deadline - time.monotonic(), diagnostics, copy_timeout)
+                                        deadline - time.monotonic(), diagnostics, copy_timeout,
+                                        **({'max_bytes':automatic['reserveBytes']-1024**2} if automatic else {}))
             except BaseException as error:
                 (backup_root / 'last-failure.json').write_text(json.dumps({'failure': type(error).__name__, 'message': str(error), 'existingFilesRetained': True}), encoding='utf-8')
                 raise
             finally:
-                lease.unlink()
+                if not automatic:lease.unlink()
         if time.monotonic() > deadline:
             raise TimeoutError('SQLite backup deadline exhausted')
         lock.check()
-        return {**report, "diagnostics": diagnostics.report()}
+        return {**report, "diagnostics": diagnostics.report(),
+                **({'retentionLeaseIdentity':lease_identity} if automatic else {})}
 
 
 def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
-                   copy_timeout=45):
+                   copy_timeout=45, max_bytes=None):
     """Same online API and verification for periodic and write-before backups.
 
     The start is the conservative recovery bound, NOT verification completion:
@@ -337,6 +546,9 @@ def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
         source.execute("PRAGMA query_only=ON")
         source.set_progress_handler(lambda: int(time.monotonic() > copy_deadline), 1000)
         diagnostics.journal = source.execute("PRAGMA journal_mode").fetchone()[0]
+        page_size=source.execute('PRAGMA page_size').fetchone()[0]
+        if max_bytes is not None and source.execute('PRAGMA page_count').fetchone()[0]*page_size>max_bytes:
+            raise ValueError('SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED')
         if prefix != "periodic-snapshot":
             source.execute("BEGIN")
             # App admission happens before a connection/transaction opens.
@@ -350,8 +562,12 @@ def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
                 diagnostics.busy_steps += int(status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED))
                 if time.monotonic() > copy_deadline:
                     raise TimeoutError("SQLite backup timed out")
+                if max_bytes is not None and (_total*page_size>max_bytes or backup.stat().st_size>max_bytes):
+                    raise ValueError('SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED')
 
-            source.backup(destination, pages=1000, sleep=0.01, progress=progress)
+            source.backup(destination, pages=1000 if max_bytes is None else max(1,min(64,256*1024//page_size)), sleep=0.01, progress=progress)
+    if max_bytes is not None and backup.stat().st_size>max_bytes:
+        raise ValueError('SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED')
 
     diagnostics.enter("verify")
     with closing(sqlite3.connect(backup.as_uri() + "?mode=ro", uri=True)) as verify:

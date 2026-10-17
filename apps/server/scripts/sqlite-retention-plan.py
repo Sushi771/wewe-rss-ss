@@ -109,7 +109,7 @@ def policy_refs(database,root,files,databases,refs,records,budget,now,policy,per
             expected='before-collection' if origin['kind']=='write-before' else 'periodic-snapshot'
             if not re.fullmatch(expected+r'-\d{8}T\d{6}Z-[a-f0-9]{8}',target.parent.name):continue
             date=datetime.fromisoformat(r['createdAtUtc'].replace('Z','+00:00'))
-            if date.tzinfo is None or date.timestamp()>now:continue
+            if date.tzinfo is None or int(date.timestamp())>now:continue
             at=int(date.timestamp());path=str(target)
             inventory.append({'receipt':str(p),'identity':identity(p),'contentDigest':digest(r)})
             if periodic_only or path not in refs:points[path]={'at':at,'kind':origin['kind'],'receipt':str(p),
@@ -148,8 +148,8 @@ def policy_refs(database,root,files,databases,refs,records,budget,now,policy,per
                     'retirementCount':len(retired),'requiresExactUniqueHistoryApproval':bool(retired)}
 
 class ReadBudget:
-    def __init__(self, maximum=64*1024**2, seconds=10):
-        self.maximum = finite(maximum, 1, 4*1024**3)
+    def __init__(self, maximum=64*1024**2, seconds=10, ceiling=4*1024**3):
+        self.maximum = finite(maximum, 1, ceiling)
         self.used = 0
         self.deadline = time.monotonic() + finite(seconds, 1, 20)
         self.hashes = {}
@@ -180,7 +180,7 @@ class ReadBudget:
         return result.hexdigest()
 
 def bounded_files(root, budget):
-    allowed=backup.legacy_roots();files=[];seen=set();active=set()
+    registration=backup.legacy_registration(root);allowed=registration['roots'];files=[];seen=set();active=set()
     def visit(directory):
         budget.tick();canonical=directory.resolve(strict=True)
         if canonical in active:raise MaintenanceError('CYCLIC_DIRECTORY')
@@ -190,7 +190,7 @@ def bounded_files(root, budget):
         for file in directory.iterdir():
             budget.tick()
             linked=file.is_symlink() or (hasattr(file,'is_junction') and file.is_junction())
-            if linked and (not file.is_dir() or not any(file.resolve(strict=True).is_relative_to(p) for p in allowed)):
+            if linked and (not file.is_dir() or not backup.legacy_link_allowed(file.resolve(strict=True),registration)):
                 raise MaintenanceError('UNLISTED_LINK')
             if file.is_dir():visit(file)
             elif file.is_file():
@@ -200,6 +200,7 @@ def bounded_files(root, budget):
     if root.exists():visit(root)
     for folder in allowed:
         if folder not in seen:visit(folder)
+    if backup.legacy_registration(root)!=registration:raise MaintenanceError('LEGACY_REGISTRATION_CHANGED')
     return list(dict.fromkeys(files))
 
 def files_and_refs(root, budget, protected_paths=()):
@@ -209,6 +210,8 @@ def files_and_refs(root, budget, protected_paths=()):
     refs = {str(local_path(p)): 'explicit deployment/migration/identity protection' for p in protected_paths}
     reference_roots={root.resolve(),*backup.legacy_roots()}
     reference_records = [{'declaredRoots':sorted(str(p) for p in reference_roots)}]
+    registration=backup.legacy_registration(root)
+    if registration['record']:reference_records.append(registration['record'])
     for p in files:
         budget.tick()
         if p.parent in reference_roots and (p.name.startswith(('snapshot-owner-','refresh-recovery-owner-','.latest-'))) and p.suffix.lower() == '.json':
@@ -252,7 +255,7 @@ def files_and_refs(root, budget, protected_paths=()):
     reference_records.sort(key=lambda r:canonical_json(r))
     return files, data_files, refs, reference_records, state
 
-def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**2, seconds=10, age_days=7, policy=None, periodic_only=False):
+def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**2, seconds=10, age_days=7, policy=None, periodic_only=False, owned_lease=None):
     database, root = local_path(str(database)), local_path(str(root))
     if database.is_relative_to(root): raise MaintenanceError('NESTED_SOURCE_DESTINATION')
     if any(database.is_relative_to(p) for p in backup.legacy_roots()):raise MaintenanceError('NESTED_SOURCE_LEGACY_ROOT')
@@ -262,7 +265,7 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
     if periodic_only and policy is None:raise MaintenanceError('EXPLICIT_PERIODIC_POLICY_REQUIRED')
     budget = ReadBudget(read_bytes, seconds)
     files, databases, refs, records, _state = files_and_refs(root, budget, protected_paths)
-    paused = (root / '.space-budget.lock').exists()
+    paused = not generation_clear(root,owned_lease)
     receipt_by_backup = {}
     for p in files:
         if p.name != 'verification.json': continue
@@ -273,7 +276,7 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
                 continue
             source = str(local_path(r['source']))
             date = datetime.fromisoformat(r['createdAtUtc'].replace('Z','+00:00'))
-            if date.tzinfo is None or date.timestamp() > now: continue
+            if date.tzinfo is None or int(date.timestamp()) > now: continue
             receipt_by_backup[str(target)] = {'source':source,'sha256':r['sha256'],'at':int(date.timestamp()),'receipt':str(p),
                                             'origin':r.get('recoveryOrigin',{}).get('kind')}
         except MaintenanceError:raise
@@ -357,7 +360,7 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
     _f, _d, new_refs, new_records, _s = files_and_refs(root, budget, protected_paths)
     for _at,path in newest.values(): new_refs[path]='latest verified receipt per source'
     policy_refs(database,root,_f,_d,new_refs,new_records,budget,now,policy,periodic_only)
-    if digest({'records':new_records,'protected':sorted(new_refs)}) != ref_digest or (root/'.space-budget.lock').exists() != paused:
+    if digest({'records':new_records,'protected':sorted(new_refs)}) != ref_digest or (not generation_clear(root,owned_lease)) != paused:
         raise MaintenanceError('REFERENCES_CHANGED_DURING_SCAN')
     prefix = 'SQLITE_TEST' if os.environ.get('SQLITE_BACKUP_KIND') == 'test' else 'SQLITE_PRODUCTION'
     maximum = backup.positive(prefix+'_MAX_BYTES', 512*1024**2 if prefix=='SQLITE_TEST' else 32*1024**3)
@@ -604,7 +607,7 @@ def pin_rotation_references(stack,plan):
     """
     p=plan['payload'];roots={local_path(p['root']),*backup.legacy_roots()}
     records=p['referenceRecords'];manifests={r['protectionManifest']:r for r in records if 'protectionManifest' in r}
-    paths={r[key] for r in records for key in ('file','protectedReceipt') if key in r}
+    paths={r[key] for r in records for key in ('file','protectedReceipt','registrationManifest') if key in r}
     if len(paths)+len(manifests)>256:raise MaintenanceError('REFERENCE_PIN_LIMIT')
     key=hashlib.sha256(p['database'].encode()).hexdigest()[:24]
     publisher_names={f'.latest-{key}.json',f'snapshot-owner-{key}.json'}
@@ -621,6 +624,197 @@ def pin_rotation_references(stack,plan):
     for path in sorted(paths):stack.enter_context(WindowsPin(Path(path),identity(Path(path)),sharing=1))
 
 
+def _delete_pinned_points(plan,entries,stack,budget,check,extra_pins=()):
+    """Shared irreversible boundary; every caller must establish its own authority."""
+    output={'batchId':plan['batchId'],'deleted':[],'deletedMetadata':[],'removedDirectories':[],
+            'attempted':[],'permanentDeletionPerformed':False,'status':'complete'}
+    pins=[];keepers={}
+    def keep(file,stamp,checksum):
+        if file not in keepers:
+            stack.enter_context(WindowsPin(Path(file).parent,directory_identity(Path(file).parent),directory=True))
+            keepers[file]=stack.enter_context(WindowsPin(Path(file),stamp))
+            if keepers[file].sha(budget)!=checksum:raise MaintenanceError('PINNED_RECOVERY_CHECKSUM_CHANGED')
+    for file,stamp,checksum in extra_pins:keep(file,stamp,checksum)
+    for entry in entries:
+        keep(entry['representative'],entry['representativeIdentity'],entry['representativeSha256'])
+        folder=stack.enter_context(WindowsPin(Path(entry['directory']),entry['directoryIdentity'],directory=True,delete=True))
+        data=stack.enter_context(WindowsPin(Path(entry['path']),entry['identity'],delete=True))
+        receipt=stack.enter_context(WindowsPin(Path(entry['receipt']),entry['receiptIdentity'],delete=True))
+        if data.sha(budget)!=entry['sha256'] or receipt.sha(budget)!=entry['receiptSha256']:
+            raise MaintenanceError('PINNED_PERIODIC_CHECKSUM_CHANGED')
+        if any(Path(entry['path']+s).exists() for s in ('-wal','-shm','-journal')):
+            raise MaintenanceError('SQLITE_SIDECAR_PRESENT')
+        pins.append((entry,data,receipt,folder))
+    check()
+    for entry,data,receipt,folder in pins:
+        try:
+            budget.tick();check()
+            for key,path,pin in (('deleted',entry['path'],data),('deletedMetadata',entry['receipt'],receipt),
+                                 ('removedDirectories',entry['directory'],folder)):
+                output['attempted'].append(path);pin.delete();output[key].append(path)
+                output['permanentDeletionPerformed']=True
+        except (OSError,ValueError):
+            completed=sum(len(output[k]) for k in ('deleted','deletedMetadata','removedDirectories'))
+            uncertain=len(output['attempted'])>completed
+            output.update(status='partial-failed',deletionOutcomeUncertain=uncertain)
+            if uncertain and not output['permanentDeletionPerformed']:output['permanentDeletionPerformed']=None
+            break
+    return output
+
+
+def automatic_after_snapshot(owner):
+    """Private actual-owner continuation, not a CLI/approval bypass.
+
+    The enabled policy permits ONLY covered periodic points. Manual unique-state
+    retirement still requires its existing exact human approval and resource proof.
+    """
+    settings=backup.periodic_retention_policy()
+    if settings is None:return {'status':'disabled','code':'DISABLED','deletedCopies':0}
+    record=owner.record
+    if not record:raise MaintenanceError('AUTO_VERIFIED_OWNER_REQUIRED')
+    generation=record['snapshotGeneration']
+    if getattr(owner,'retention_attempted_generation',None)==generation:
+        return record.get('automaticRetention',{'status':'held','code':'ALREADY_ATTEMPTED','deletedCopies':0})
+    owner.retention_attempted_generation=generation
+    result={'status':'held','code':'AUTO_RETENTION_HELD','deletedCopies':0,'heldUnique':0,'heldOther':0}
+    root=local_path(str(owner.backup_root));database=local_path(str(owner.database));current=local_path(record['backup'])
+    owned=None
+    try:
+        if os.name!='nt':raise MaintenanceError('VERIFIED_ROTATION_REQUIRES_WINDOWS')
+        if os.environ.get('SQLITE_ARTICLE_HISTORY_MAINTENANCE_WINDOW')=='1':raise MaintenanceError('HISTORY_MAINTENANCE_ACTIVE')
+        protected=json.loads(os.environ.get('SQLITE_RETENTION_PROTECTED_PATHS','[]'))
+        if not isinstance(protected,list):raise MaintenanceError('INVALID_PROTECTED_PATHS')
+        protected=[*protected,str(current),str(database)]
+        owner.lock.check()
+        if owner.lock.stream.closed or local_path(owner.source.execute('PRAGMA database_list').fetchone()[2])!=database:
+            raise MaintenanceError('AUTO_VERIFIED_OWNER_REQUIRED')
+        policy=retention_policy({'maxOrdinaryCopies':settings['copies'],'maxOrdinaryBytes':settings['bytes'],
+                                 'keepLatest':2,'minimumAgeHours':1,'roundDays':1,'recentHours':1,'bucketHours':1,
+                                 'dailyDays':1,'weeklyWeeks':0,'maximumAgeDays':1,'reserveCopies':2,'expectedGenerationsPerDay':96})
+        budget=ReadBudget(settings['readBytes'],20,ceiling=16*1024**3)
+        with ExitStack() as stack:
+            key=hashlib.sha256(str(database).encode()).hexdigest()[:24]
+            full=stack.enter_context(backup.FileLock(database.parent/f'.full-snapshot-{key}.lock',timeout=0))
+            lease=root/'.space-budget.lock'
+            if not lease.exists():
+                if getattr(owner,'retention_lease_identity',None) is not None:raise MaintenanceError('AUTO_LEASE_CHANGED')
+                with lease.open('x',encoding='utf-8') as stream:
+                    json.dump({'format':'sqlite-periodic-retention-lease-v1','pid':os.getpid(),'source':str(database)},stream)
+                    stream.flush();os.fsync(stream.fileno())
+            elif identity(lease)!=getattr(owner,'retention_lease_identity',None):
+                raise MaintenanceError('AUTO_LEASE_CHANGED')
+            if lease.stat().st_size>8192:raise MaintenanceError('AUTO_LEASE_INVALID')
+            saved=json.loads(lease.read_text(encoding='utf-8'))
+            if saved.get('format')!='sqlite-periodic-retention-lease-v1' or saved.get('source')!=str(database) or saved.get('pid')!=os.getpid():
+                raise MaintenanceError('AUTO_LEASE_INVALID')
+            owned=identity(lease)
+            plan=make_plan(database,root,protected_paths=protected,policy=policy,periodic_only=True,owned_lease=owned,seconds=5)
+            p=plan['payload']
+            result['protectedOrUnknown']=len(p['held'])
+            registrations=[Path(r['registrationManifest']).parent for r in p['referenceRecords'] if 'registrationManifest' in r]
+            directories={d for r in (root,database.parent,*backup.legacy_roots(),*registrations) for d in (r,*r.parents)}
+            for folder in sorted(directories,key=lambda d:(len(d.parts),str(d))):
+                stack.enter_context(WindowsPin(folder,directory_identity(folder),directory=True))
+            for held in (full,owner.lock):stack.enter_context(WindowsPin(held.path,identity(held.path),sharing=3))
+            pin_rotation_references(stack,plan)
+            files,databases,refs,records,_=files_and_refs(root,budget,protected)
+            retired,_summary=policy_refs(database,root,files,databases,refs,records,budget,int(time.time()),policy,True)
+            refs.update(p['protected'])
+            if records!=p['referenceRecords'] or digest({'records':records,'protected':sorted(refs)})!=p['referenceDigest']:
+                raise MaintenanceError('BOUND_REFERENCE_RECORDS_CHANGED')
+            current_stamp=identity(current)
+            if list(map(str,record['backupFingerprint']))!=current_stamp:raise MaintenanceError('AUTO_OWNER_POINT_CHANGED')
+            if any(Path(str(current)+s).exists() for s in ('-wal','-shm','-journal')):raise MaintenanceError('AUTO_OWNER_POINT_CHANGED')
+            # Two distinct, independently checked recovery files before ANY deletion.
+            previous=None
+            if p['candidates']:
+                for receipt in files:
+                    if receipt.name!='verification.json':continue
+                    try:proof=budget.json(receipt);target=local_path(proof.get('backup',''))
+                    except (OSError,ValueError):continue
+                    if (target==current or str(target) not in refs or target.parent!=receipt.parent
+                        or proof.get('source')!=str(database) or proof.get('integrityCheck')!='ok'):continue
+                    if any(Path(str(target)+s).exists() for s in ('-wal','-shm','-journal')):continue
+                    try:
+                        stamp=identity(target)
+                        with WindowsPin(target,stamp,sharing=1) as pin:
+                            if pin.sha(budget)!=proof.get('sha256'):continue
+                            if budget.used+target.stat().st_size>budget.maximum:raise MaintenanceError('READ_BUDGET_EXCEEDED')
+                            budget.used+=target.stat().st_size
+                            with closing(sqlite3.connect(target.as_uri()+'?mode=ro&immutable=1',uri=True)) as db:
+                                db.set_progress_handler(lambda:int(time.monotonic()>budget.deadline),1000)
+                                if list(db.execute('PRAGMA integrity_check'))!=[('ok',)]:continue
+                                schema=list(db.execute('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name'))
+                                if hashlib.sha256(json.dumps(schema,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()!=record['schemaSha256']:continue
+                        previous=(str(target),stamp,proof['sha256']);break
+                    except (OSError,ValueError,sqlite3.Error):continue
+                if previous is None:raise MaintenanceError('TWO_VERIFIED_RECOVERY_POINTS_REQUIRED')
+            covered=[]
+            result['heldOther']+=max(0,len(p['candidates'])-8)
+            for entry in p['candidates'][:8]:
+                # Leave enough of this SAME bounded budget to rehash every
+                # deletion handle and both recovery points. Otherwise a late
+                # proof must not consume the budget needed by the commit step.
+                reserved=(2*current.stat().st_size+5*entry['bytes']
+                          +(Path(previous[0]).stat().st_size if previous else 0)
+                          +sum(e['bytes']+4096 for e in covered)+8192)
+                if budget.used+reserved>budget.maximum:
+                    result['heldOther']+=len(p['candidates'])-len(covered)-result['heldUnique']-result['heldOther'];break
+                try:
+                    periodic_artifacts(entry,root,retired,budget)
+                    file=local_path(entry['path'])
+                    if any(Path(str(file)+s).exists() for s in ('-wal','-shm','-journal')):raise MaintenanceError('SQLITE_SIDECAR_PRESENT')
+                    with WindowsPin(current,current_stamp,sharing=1) as new_pin,WindowsPin(file,entry['identity'],sharing=1) as old_pin:
+                        if new_pin.sha(budget)!=record['sha256'] or old_pin.sha(budget)!=entry['sha256']:
+                            raise MaintenanceError('CHECKSUM_UNPROVED')
+                        with closing(sqlite3.connect(current.as_uri()+'?mode=ro&immutable=1',uri=True)) as new,\
+                             closing(sqlite3.connect(file.as_uri()+'?mode=ro&immutable=1',uri=True)) as old:
+                            for db in (new,old):
+                                db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,32*1024**2)
+                                db.set_progress_handler(lambda:int(time.monotonic()>budget.deadline),1000)
+                                db.execute('PRAGMA query_only=ON');db.execute('BEGIN')
+                            if not backup.snapshot_covers(new,old,budget):
+                                result['heldUnique']+=1;continue
+                    covered.append({**entry,'representative':str(current),'representativeIdentity':current_stamp,
+                                    'representativeSha256':record['sha256']})
+                except (OSError,ValueError,sqlite3.Error):result['heldOther']+=1
+            def check():
+                budget.tick();full.check();owner.lock.check()
+                if owner.record is not record or not generation_clear(root,owned):raise MaintenanceError('AUTO_OWNER_OR_LEASE_CHANGED')
+            check()
+            outcome=_delete_pinned_points(plan,covered,stack,budget,check,[previous] if previous and covered else ())
+            result['deletedCopies']=len(outcome['deleted'])
+            deleted_bytes=sum(e['bytes'] for e in covered if e['path'] in outcome['deleted'])
+            result['targetExceeded']=(p['summary']['ordinaryCopies']-result['deletedCopies']>settings['copies']
+                or p['summary']['retainedOrdinaryBytes']+sum(e['bytes'] for e in p['candidates'])-deleted_bytes>settings['bytes'])
+            if outcome['status']!='complete':
+                result.update(code='AUTO_DELETE_UNCERTAIN',deletionOutcomeUncertain=outcome.get('deletionOutcomeUncertain',True))
+                return result
+        # Close native data handles before counting. Return to the original hard
+        # stored-data cap before releasing this one staging allocation. A future
+        # copy may use one new slot only after this cycle restored the hard cap.
+        with backup.FileLock(database.parent/f'.full-snapshot-{key}.lock',timeout=0) as full:
+            files=backup.managed_files(root,budget.deadline)
+            test=os.environ.get('SQLITE_BACKUP_KIND')=='test';prefix='SQLITE_TEST' if test else 'SQLITE_PRODUCTION'
+            maximum=backup.positive(prefix+'_MAX_BYTES',512*1024**2 if test else 32*1024**3)
+            copies=backup.positive(prefix+'_MAX_COPIES',12 if test else 48)
+            minimum=backup.positive(prefix+'_MIN_FREE_BYTES',256*1024**2 if test else 4*1024**3)
+            if (sum(f.stat().st_size for f in files)+8192>maximum
+                or sum(f.suffix.lower() in ('.db','.sqlite','.sqlite3') for f in files)>copies
+                or shutil.disk_usage(root).free-8192<minimum):raise MaintenanceError('SQLITE_SPACE_BUDGET_EXCEEDED')
+            full.check();owner.lock.check()
+            if not generation_clear(root,owned):raise MaintenanceError('AUTO_OWNER_OR_LEASE_CHANGED')
+            lease.unlink()
+        result.update(status='held' if result['heldUnique'] or result['heldOther'] or result['targetExceeded'] else 'complete',
+                      code='UNIQUE_HISTORY_RETAINED' if result['heldUnique'] else 'CANDIDATES_HELD' if result['heldOther']
+                      else 'PROTECTED_WINDOWS_RETAINED' if result['targetExceeded'] else 'COMPLETE')
+        return result
+    except (OSError,ValueError,sqlite3.Error) as error:
+        code=str(error) if isinstance(error,MaintenanceError) else backup.safe_backup_failure(error,'rotation')['code']
+        result['code']=code if re.fullmatch('[A-Z_]{1,80}',code) else 'AUTO_RETENTION_HELD'
+        return result
+
+
 def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*1024**2,protected_paths=(),policy=None):
     if plan.get('payload',{}).get('policy',{}).get('periodicOnly') is not True:
         raise MaintenanceError('PERIODIC_ROTATION_PLAN_REQUIRED')
@@ -635,7 +829,8 @@ def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*
             'attempted':[],'permanentDeletionPerformed':False,'status':'complete'}
     with ExitStack() as stack:
         # Pin all ancestor directories before locks or deletions; no junctions.
-        directories={d for r in (root,database.parent,*backup.legacy_roots()) for d in (r,*r.parents)}
+        registrations=[Path(r['registrationManifest']).parent for r in p['referenceRecords'] if 'registrationManifest' in r]
+        directories={d for r in (root,database.parent,*backup.legacy_roots(),*registrations) for d in (r,*r.parents)}
         for directory in sorted(directories,key=lambda d:(len(d.parts),str(d))):
             stack.enter_context(WindowsPin(directory,directory_identity(directory),directory=True))
         lock_name=hashlib.sha256(str(database).encode()).hexdigest()[:24]
@@ -654,40 +849,14 @@ def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*
         try:
             checked=validate_batch(plan,approval,resource_report,now,read_bytes,protected_paths,policy,owned_lease=owned)
             if checked['skipped']:raise MaintenanceError('ROTATION_BATCH_NOT_FULLY_PROVED')
-            budget=ReadBudget(read_bytes,20);pins=[];keepers={}
-            for entry in checked['validated']:
-                keep=entry['representative']
-                if keep not in keepers:
-                    keepers[keep]=stack.enter_context(WindowsPin(Path(keep),entry['representativeIdentity']))
-                    if keepers[keep].sha(budget)!=entry['representativeSha256']:raise MaintenanceError('PINNED_RECOVERY_CHECKSUM_CHANGED')
-                folder=stack.enter_context(WindowsPin(Path(entry['directory']),entry['directoryIdentity'],directory=True,delete=True))
-                data=stack.enter_context(WindowsPin(Path(entry['path']),entry['identity'],delete=True))
-                receipt=stack.enter_context(WindowsPin(Path(entry['receipt']),entry['receiptIdentity'],delete=True))
-                if data.sha(budget)!=entry['sha256'] or receipt.sha(budget)!=entry['receiptSha256']:
-                    raise MaintenanceError('PINNED_PERIODIC_CHECKSUM_CHANGED')
-                pins.append((entry,data,receipt,folder))
-            lock.check();owner_lock.check()
-            if not generation_clear(root,owned):raise MaintenanceError('ROTATION_LEASE_CHANGED')
-            action_now=int(time.time()) if now is None else now
-            if not 0<=action_now-approval['approvedAtEpoch']<=300 or action_now>p['expiresAtEpoch']:
-                raise MaintenanceError('APPROVAL_EXPIRED_OR_INVALID')
-            if not 0<=action_now-resource_report['checkedAtEpoch']<=60:raise MaintenanceError('FRESH_BOUND_RESOURCE_CHECK_REQUIRED')
-            # Every object is pinned and checked before the first irreversible call.
-            # No recursive delete, automatic retry, or fallback pathname unlink.
-            for entry,data,receipt,folder in pins:
-                try:
-                    budget.tick();lock.check();owner_lock.check()
-                    if not generation_clear(root,owned):raise MaintenanceError('ROTATION_LEASE_CHANGED')
-                    for key,path,pin in (('deleted',entry['path'],data),('deletedMetadata',entry['receipt'],receipt),
-                                         ('removedDirectories',entry['directory'],folder)):
-                        output['attempted'].append(path);pin.delete();output[key].append(path)
-                        output['permanentDeletionPerformed']=True
-                except (OSError,MaintenanceError):
-                    completed=sum(len(output[k]) for k in ('deleted','deletedMetadata','removedDirectories'))
-                    uncertain=len(output['attempted'])>completed
-                    output.update(status='partial-failed',deletionOutcomeUncertain=uncertain)
-                    if uncertain and not output['permanentDeletionPerformed']:output['permanentDeletionPerformed']=None
-                    break
+            def check():
+                lock.check();owner_lock.check()
+                if not generation_clear(root,owned):raise MaintenanceError('ROTATION_LEASE_CHANGED')
+                action_now=int(time.time()) if now is None else now
+                if not 0<=action_now-approval['approvedAtEpoch']<=300 or action_now>p['expiresAtEpoch']:
+                    raise MaintenanceError('APPROVAL_EXPIRED_OR_INVALID')
+                if not 0<=action_now-resource_report['checkedAtEpoch']<=60:raise MaintenanceError('FRESH_BOUND_RESOURCE_CHECK_REQUIRED')
+            output=_delete_pinned_points(plan,checked['validated'],stack,ReadBudget(read_bytes,20),check)
         finally:
             if generation_clear(root,owned):lease.unlink()  # This invocation's control lease only.
     return output
@@ -702,8 +871,13 @@ def main():
     parser.add_argument('--resources',type=Path)
     parser.add_argument('--periodic-only',action='store_true',help='preview only managed periodic rotation')
     parser.add_argument('--execute-periodic',action='store_true',help='irreversibly execute an exact approved periodic batch (Windows)')
+    parser.add_argument('--preview-layout',action='store_true',help='read-only exact physical-directory registration proposal; never follows historical links')
     args=parser.parse_args()
     try:
+        if args.preview_layout:
+            if any((args.batch,args.approval,args.resources,args.execute_periodic,args.periodic_only)):raise MaintenanceError('LAYOUT_PREVIEW_MODE_CONFLICT')
+            print(json.dumps(backup.preview_legacy_roots(args.backup_root,args.database),ensure_ascii=False))
+            return
         protected=json.loads(os.environ.get('SQLITE_RETENTION_PROTECTED_PATHS','[]'))
         if not isinstance(protected,list):raise MaintenanceError('INVALID_PROTECTED_PATHS')
         policy=retention_policy(json.loads(os.environ['SQLITE_RETENTION_POLICY']) if 'SQLITE_RETENTION_POLICY' in os.environ else None)
@@ -729,7 +903,8 @@ def main():
             persist_plan(plan)
             print(json.dumps({'batchId':plan['batchId'],'digest':plan['digest'],**plan['payload']['summary']}))
     except Exception as error:
-        print(json.dumps({'event':'sqlite-retention-scan','status':'failed','code':str(error) if isinstance(error,MaintenanceError) else 'SCAN_FAILED'}))
+        code=str(error) if isinstance(error,MaintenanceError) else backup.safe_backup_failure(error)['code']
+        print(json.dumps({'event':'sqlite-retention-scan','status':'failed','code':code}))
         raise SystemExit(1)
 
 if __name__=='__main__': main()

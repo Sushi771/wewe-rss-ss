@@ -206,5 +206,55 @@ class BackupSpaceTests(unittest.TestCase):
         with patch.dict(os.environ,{'SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
             with self.assertRaisesRegex(ValueError,'Cyclic'):backup.managed_files(self.backups)
 
+    def registration(self):
+        self.backups.mkdir();legacy=(self.root/'physical-history').resolve();legacy.mkdir()
+        file=legacy/'unique.db';file.write_bytes(b'never deleted');manifest=self.root/'registration.json'
+        document={'format':'sqlite-legacy-roots-v1','confirmed':True,'backupRoot':str(self.backups.resolve()),
+                  'backupRootIdentity':backup.directory_identity(self.backups),
+                  'roots':[{'path':str(legacy),'identity':backup.directory_identity(legacy)}]}
+        manifest.write_text(json.dumps(document))
+        return legacy,file,manifest,document
+
+    def test_exact_manifest_counts_unlinked_history_and_rejects_unapproved_or_changed_identity(self):
+        legacy,file,manifest,document=self.registration()
+        with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':'[]',
+                                    'SQLITE_PRODUCTION_LEGACY_ROOTS_FILE':str(manifest)}):
+            self.assertEqual(backup.managed_files(self.backups),[file])
+            document['confirmed']=False;manifest.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError,'REGISTRATION_INVALID'):backup.managed_files(self.backups)
+            document['confirmed']=True;document['roots'][0]['identity']=['0','0'];manifest.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError,'REGISTRATION_CHANGED'):backup.managed_files(self.backups)
+        self.assertEqual(file.read_bytes(),b'never deleted')
+
+    def test_oversized_registration_is_rejected_before_open_and_ambiguous_config_fails(self):
+        legacy,file,manifest,document=self.registration();manifest.write_bytes(b' '*(backup.MAX_LEGACY_DOCUMENT+1))
+        with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':'[]',
+                                    'SQLITE_PRODUCTION_LEGACY_ROOTS_FILE':str(manifest)}):
+            with patch.object(Path,'open',side_effect=AssertionError('oversized document must not be read')):
+                with self.assertRaisesRegex(ValueError,'REGISTRATION_INVALID'):backup.legacy_registration(self.backups)
+            with patch.dict(os.environ,{'SQLITE_PRODUCTION_LEGACY_ROOTS':json.dumps([str(legacy)])}):
+                with self.assertRaisesRegex(ValueError,'AMBIGUOUS_REGISTRATION'):backup.legacy_registration(self.backups)
+
+    def test_metadata_preview_deduplicates_exact_targets_without_traversing_or_authorizing(self):
+        legacy,file,manifest,document=self.registration()
+        self.link(self.backups/'one',legacy);self.link(self.backups/'two',legacy)
+        preview=backup.preview_legacy_roots(self.backups,self.database)
+        self.assertFalse(preview['inventoryComplete']);self.assertFalse(preview['registration']['confirmed'])
+        self.assertEqual(len(preview['aliases']),2);self.assertEqual(len(preview['registration']['roots']),1)
+        self.assertFalse((self.backups/'.retention-review').exists())
+        with patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'production','SQLITE_PRODUCTION_LEGACY_ROOTS':'[]',
+                                    'SQLITE_PRODUCTION_LEGACY_ROOTS_FILE':str(manifest)}):
+            self.assertEqual(backup.managed_files(self.backups),[file])
+            child=legacy/'not-individually-approved';child.mkdir();self.link(self.backups/'unapproved',child)
+            with self.assertRaisesRegex(ValueError,'LAYOUT_REQUIRES_REVIEW'):backup.managed_files(self.backups)
+        self.assertEqual(file.read_bytes(),b'never deleted')
+
+    def test_diagnostics_never_include_exception_paths_or_commands(self):
+        for error,code in ((ValueError('SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW: private-path'),'SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW'),
+                           (ValueError('SQLITE_SPACE_BUDGET_EXCEEDED: private-path'),'SQLITE_SPACE_BUDGET_EXCEEDED'),
+                           (OSError('private argv'),'SQLITE_BACKUP_FAILED')):
+            output=backup.safe_backup_failure(error,'copy');self.assertEqual(output['code'],code)
+            self.assertNotIn('private',json.dumps(output));self.assertEqual(set(output),{'code','stage'})
+
 if __name__ == '__main__':
     unittest.main()

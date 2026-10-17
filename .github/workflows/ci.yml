@@ -16,6 +16,7 @@ on:
         codex/cache-sync-single-preflight-20261014,
         codex/bounded-five-submit-20261014,
         codex/space-guard-production-compat-20261014,
+        codex/periodic-auto-retention-20261017,
         codex/export-real-metrics-only-20261014,
         codex/folder-rename-latency,
       ]
@@ -32,6 +33,7 @@ on:
         codex/routine-write-backup-boundaries,
         codex/automatic-refresh-failure-isolation,
         codex/cache-response-capacity-diagnostics,
+        codex/terminal-refresh-integration-20261017,
       ]
 
 jobs:
