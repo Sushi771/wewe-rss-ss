@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Feed, PrismaClient } from '@prisma/client';
 import type { BatchOutcome } from './wechat2rss-subscription-batches';
+import { refreshFeedSourceDigest } from './refresh-occupancy-release';
 import {
   discardAcceptedRefreshResponse,
   readRefreshResponseReceipt,
@@ -65,6 +66,33 @@ export async function readRefreshSubmission(
     claimId(batch, feed),
   );
   return settled(rows[0]);
+}
+/** Read-only binding for an explicit disposition; it cannot infer acceptance. */
+export async function unknownRefreshSource(
+  prisma: PrismaClient,
+  batch: string,
+  feed: string,
+  claimedAt: number,
+  receiptAt: number,
+) {
+  const rows = await prisma.$queryRawUnsafe<Array<Claim>>(
+    'SELECT state,mp_id,reserved_at,previous_at FROM refresh_submission_claims WHERE id=?',
+    claimId(batch, feed),
+  );
+  const claim = rows[0],
+    current = await prisma.feed.findUnique({ where: { id: feed } });
+  if (
+    !claim ||
+    !['attempted', 'unknown'].includes(claim.state) ||
+    claim.mp_id !== feed ||
+    claim.reserved_at < Math.floor(claimedAt / 1000) ||
+    claim.reserved_at * 1000 > receiptAt ||
+    !current ||
+    current.status !== 1 ||
+    current.collectionChannel !== 'wechat2rss'
+  )
+    throw Error('UNKNOWN_RELEASE_SOURCE_UNPROVED');
+  return refreshFeedSourceDigest(current);
 }
 export async function refreshSubmissionProof(
   prisma: PrismaClient,
@@ -237,6 +265,8 @@ export async function beginRefreshSubmission(
         feed.status !== 1 ||
         feed.collectionChannel !== ticket.channel ||
         feed.mpName !== ticket.name ||
+        (ticket.feedCreatedAt !== undefined &&
+          feed.createdAt.getTime() !== ticket.feedCreatedAt) ||
         feed.providerRefreshAttemptTime !== ticket.reservedAt
       )
         throw new Error('REFRESH_PREPARATION_CHANGED');

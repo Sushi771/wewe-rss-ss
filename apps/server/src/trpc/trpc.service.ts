@@ -1,4 +1,5 @@
 import { refreshCacheFailure } from '../collection/refresh-cache-failure';
+import { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';
 import {
   saveRefreshResponseReceipt,
   refreshSubmissionFailure,
@@ -38,6 +39,7 @@ import {
   cancelRefreshPreparation,
   RefreshSubmissionTicket,
   refreshSubmissionProof,
+  unknownRefreshSource,
 } from '../collection/refresh-submission-claim';
 import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
 import {
@@ -396,7 +398,7 @@ export class TrpcService {
     feedId: string,
     stage: 'submit' | 'cache',
     automatic = false,
-    options?: { cacheOnly?: boolean; claimKey?: string },
+    options?: { cacheOnly?: boolean; claimKey?: string; sourceSha256?: string },
   ): Promise<BatchOutcome> {
     if (
       automatic &&
@@ -440,7 +442,10 @@ export class TrpcService {
     if (
       !feed ||
       feed.status !== 1 ||
-      resolveCollectionRoute(feed).channel !== 'wechat2rss'
+      resolveCollectionRoute(feed).channel !== 'wechat2rss' ||
+      (stage === 'submit' &&
+        options?.sourceSha256 !== undefined &&
+        refreshFeedSourceDigest(feed) !== options.sourceSha256)
     )
       return {
         state: automatic && stage === 'submit' ? 'skipped' : 'blocked',
@@ -622,6 +627,7 @@ export class TrpcService {
     feedId: string,
     automatic: boolean,
     waveKey: string,
+    sourceSha256?: string,
   ): Promise<PreparedRefresh> {
     const noRequest = (outcome: BatchOutcome): PreparedRefresh => ({
       outcome,
@@ -645,7 +651,9 @@ export class TrpcService {
     if (
       !feed ||
       feed.status !== 1 ||
-      resolveCollectionRoute(feed).channel !== 'wechat2rss'
+      resolveCollectionRoute(feed).channel !== 'wechat2rss' ||
+      (sourceSha256 !== undefined &&
+        refreshFeedSourceDigest(feed) !== sourceSha256)
     )
       return noRequest({
         state: 'skipped',
@@ -879,6 +887,22 @@ export class TrpcService {
   resumeSubscriptionBatch(id: string) {
     return this.taskStorage(() => this.subscriptionBatches.resume(id));
   }
+  unknownRefreshReleaseBinding(batchId: string, feedId: string) {
+    return this.taskStorage(() =>
+      this.subscriptionBatches.unknownRefreshReleaseBinding(batchId, feedId),
+    );
+  }
+  releaseUnknownRefreshOccupancy(input: {
+    batchId: string;
+    feedId: string;
+    approvalFile: string;
+    approvalSha256: string;
+    evidenceFile: string;
+  }) {
+    return this.taskStorage(() =>
+      this.subscriptionBatches.releaseUnknownRefreshOccupancy(input),
+    );
+  }
 
   constructor(
     private readonly prismaService: PrismaService,
@@ -967,8 +991,26 @@ export class TrpcService {
       this.runManualRefresh(id, stage, automatic, options),
     );
     this.subscriptionBatches.attachRefreshPreparation(
-      (id, automatic, waveKey) =>
-        this.prepareRefreshWaveItem(id, automatic, waveKey),
+      (id, automatic, waveKey, sourceSha256) =>
+        this.prepareRefreshWaveItem(id, automatic, waveKey, sourceSha256),
+    );
+    this.subscriptionBatches.attachUnknownReleaseSource(
+      (id, batchId, claimedAt, receiptAt, quiescent) => {
+        if (
+          quiescent &&
+          (this.isRefreshAllMpArticlesRunning ||
+            this.activeCollections.has(id) ||
+            this.activeSubscriptionAdds.has('wechat2rss:add'))
+        )
+          throw Error('UNKNOWN_RELEASE_EXECUTOR_ACTIVE');
+        return unknownRefreshSource(
+          this.prismaService,
+          batchId,
+          id,
+          claimedAt,
+          receiptAt,
+        );
+      },
     );
     this.subscriptionBatches.attachRestrictionCheck(async () => {
       const account = await wechat2RssProvider().checkAccountStatus();

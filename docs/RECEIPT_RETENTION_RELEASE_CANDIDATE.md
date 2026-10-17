@@ -10,11 +10,13 @@ merge a GitHub PR, deploy, change running configuration or authorize deletion.
 | Periodic retention / PR49 | `446865080d5fd322329b99b714c99b0818ff1a49` |
 | Response receipts / PR50  | `c5db7b1e81f13f3aeff55cf962e46e111013cef3` |
 
-The integration retains both reviewed histories. Their runtime and test files are
-preserved byte for byte; the shared CI workflow retains both changes. This release
-note is the only new integration document. The final candidate SHA and its own CI
-results are recorded in the draft integration PR, independently of either source
-PR's earlier green checks.
+The base integration `af25b5ec10fc832e0a763f31915f502ae58fd6dd` retained both
+reviewed histories and all 23 reviewed file blobs. Its follow-up adds the explicit
+[unknown future-occupancy control](UNKNOWN_REFRESH_OCCUPANCY_RELEASE.md), after
+the historical unknown gate was found to hold later rounds indefinitely. Both
+reviewed source HEADs remain ancestors. The final candidate SHA and its own CI
+results are recorded in the draft integration PR; the base integration's earlier
+green checks do not verify this follow-up.
 
 ## Automatic cleanup stays disabled
 
@@ -38,6 +40,13 @@ An old unknown request without a matching durable validated-response proof remai
 unknown. This candidate cannot reconstruct its missing response or exception.
 HTTP200 access logs, check/scheduling timestamps and cache activity do not establish
 acceptance, and the recovery path never resends an unknown request.
+
+An independently authorized, evidence-bound disposition may release that item's
+occupancy for a different future intent after an explicit boundary. It preserves
+the original unknown SQL/item ledger and history coverage anomaly, seals old
+execution, and does not enqueue, wake or make a request. Without matching approval,
+evidence and source/instance binding, it remains held. This is separate from
+accepted-response recovery; actual disposition and rollout require separate action.
 
 For a request with a valid matching proof, the existing worker may recover the same
 SQL claim through strict incremental admission and a conditional transaction.

@@ -13,7 +13,9 @@ import {
   refreshSubmissionProof,
   reserveRefreshSubmission,
   RefreshSubmissionTicket,
+  unknownRefreshSource,
 } from './refresh-submission-claim';
+import { refreshFeedSourceDigest } from './refresh-occupancy-release';
 import {
   readRefreshResponseReceipt,
   refreshSubmissionFailure,
@@ -98,6 +100,210 @@ describe('validated refresh response proof (tiny owned SQLite, no network)', () 
         ticket.id,
       )
     )[0].state;
+  it('unknown release binding reads the exact SQL claim and current source without changing either', async () => {
+    await finishRefreshSubmission(prisma, ticket, 'unknown');
+    const feed = await prisma.feed.findUniqueOrThrow({ where: { id } });
+    expect(
+      await unknownRefreshSource(
+        prisma,
+        batch,
+        id,
+        ticket.reservedAt * 1000,
+        Date.now(),
+      ),
+    ).toBe(refreshFeedSourceDigest(feed));
+    expect(await state()).toBe('unknown');
+    await expect(
+      unknownRefreshSource(
+        prisma,
+        'wrong-intent',
+        id,
+        ticket.reservedAt * 1000,
+        Date.now(),
+      ),
+    ).rejects.toThrow('UNKNOWN_RELEASE_SOURCE_UNPROVED');
+    await expect(
+      unknownRefreshSource(
+        prisma,
+        batch,
+        id,
+        (ticket.reservedAt + 10) * 1000,
+        Date.now(),
+      ),
+    ).rejects.toThrow('UNKNOWN_RELEASE_SOURCE_UNPROVED');
+    await prisma.feed.update({
+      where: { id },
+      data: { collectionChannel: 'public-album' },
+    });
+    await expect(
+      unknownRefreshSource(
+        prisma,
+        batch,
+        id,
+        ticket.reservedAt * 1000,
+        Date.now(),
+      ),
+    ).rejects.toThrow('UNKNOWN_RELEASE_SOURCE_UNPROVED');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+  it('both serial and prepared submission reject a released-round source that changed after admission', async () => {
+    const service: any = new TrpcService(
+      prisma as any,
+      { get: () => ({ url: '', updateDelayTime: 0 }) } as any,
+      {} as any,
+      new CollectionService(prisma as any),
+    );
+    try {
+      expect(
+        await service.runManualRefresh(id, 'submit', false, {
+          claimKey: 'new-round',
+          sourceSha256: 'f'.repeat(64),
+        }),
+      ).toMatchObject({ code: 'SOURCE_CHANGED', accepted: false });
+      expect(
+        (
+          await service.prepareRefreshWaveItem(
+            id,
+            false,
+            'new-round',
+            'f'.repeat(64),
+          )
+        ).outcome,
+      ).toMatchObject({ code: 'SOURCE_CHANGED', accepted: false });
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(await state()).toBe('attempted');
+    } finally {
+      service.onModuleDestroy();
+    }
+  });
+  it('an explicitly released unknown keeps its SQL ledger while exactly one different future batch submits', async () => {
+    const nextId = 'MP_WXS_3234567890';
+    await prisma.feed.create({
+      data: {
+        id: nextId,
+        mpName: 'synthetic-future',
+        mpCover: '',
+        mpIntro: '',
+        status: 1,
+        collectionChannel: 'wechat2rss',
+        updateTime: 0,
+      },
+    });
+    let clock = Date.now(),
+      submitted = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    process.env.WECHAT2RSS_ENABLED = '1';
+    jest.spyOn(registry, 'wechat2RssProvider').mockReturnValue({
+      checkAccountStatus: async () => ({ available: true, challenged: false }),
+      prepareRefreshSubscription:
+        async (
+          _id: string,
+          _auto: boolean,
+          accepted: (r: ReturnType<typeof response>) => Promise<void>,
+        ) =>
+        async () => {
+          submitted++;
+          if (submitted === 1) throw Error('synthetic response unavailable');
+          await accepted(response());
+          return { accepted: true, pending: true };
+        },
+    } as any);
+    const service: any = new TrpcService(
+      prisma as any,
+      { get: () => ({ url: '', updateDelayTime: 0 }) } as any,
+      {} as any,
+      new CollectionService(prisma as any),
+    );
+    const m = service.subscriptionBatches;
+    jest.spyOn(m, 'schedule').mockImplementation(() => {});
+    try {
+      const old = await service.beginManualRefreshAll([nextId], 'a'.repeat(64));
+      await m.runDue();
+      const oldItem = (await m.list()).find(
+        (b: any) => b.batchId === old.batchId,
+      ).items[0];
+      expect(oldItem).toMatchObject({
+        submissionUnknown: true,
+        accepted: false,
+      });
+      const oldLedgerFile = path.join(
+        root,
+        '.wechat2rss-subscription-batches',
+        old.batchId + '.json',
+      );
+      const originalClaimTime = JSON.parse(
+        await fs.readFile(oldLedgerFile, 'utf8'),
+      ).items[0].refreshClaimedAt;
+      clock += 1000;
+      const binding = await service.unknownRefreshReleaseBinding(
+        old.batchId,
+        nextId,
+      );
+      const evidenceFile = path.join(root, 'future-observation.txt');
+      await fs.writeFile(
+        evidenceFile,
+        'Synthetic reviewed attempt and executor quiescence; original response missing.',
+      );
+      const approval = {
+        version: 1,
+        action: 'release-future-rounds-only',
+        authorized: true,
+        ...binding,
+        approvedAt: clock,
+        futureRoundNotBefore: clock + 960000,
+        evidenceSha256: createHash('sha256')
+          .update(await fs.readFile(evidenceFile))
+          .digest('hex'),
+      };
+      const approvalFile = path.join(root, 'future-approval.json'),
+        bytes = JSON.stringify(approval);
+      await fs.writeFile(approvalFile, bytes);
+      await service.releaseUnknownRefreshOccupancy({
+        batchId: old.batchId,
+        feedId: nextId,
+        approvalFile,
+        approvalSha256: createHash('sha256').update(bytes).digest('hex'),
+        evidenceFile,
+      });
+      expect(submitted).toBe(1);
+      clock += 960001;
+      const fresh = await service.beginManualRefreshAll(
+        [nextId],
+        'b'.repeat(64),
+      );
+      expect(fresh.items[0].state).toBe('queued');
+      await m.runDue();
+      expect(submitted).toBe(2);
+      expect(
+        await claims.readRefreshSubmission(prisma, old.batchId, nextId),
+      ).toMatchObject({ submissionUnknown: true, accepted: false });
+      expect(
+        await claims.readRefreshSubmission(prisma, fresh.batchId, nextId),
+      ).toMatchObject({ accepted: true });
+      expect(
+        (await service.beginManualRefreshAll([nextId], 'a'.repeat(64))).batchId,
+      ).toBe(old.batchId);
+      expect(
+        (await m.list()).find((b: any) => b.batchId === old.batchId),
+      ).toMatchObject({
+        coverage: { anomalies: 1, fullyUpdated: false },
+        items: [
+          {
+            submissionUnknown: true,
+            accepted: false,
+          },
+        ],
+      });
+      expect(
+        JSON.parse(await fs.readFile(oldLedgerFile, 'utf8')).items[0]
+          .refreshClaimedAt,
+      ).toBe(originalClaimTime);
+      expect(submitted).toBe(2);
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      service.onModuleDestroy();
+    }
+  });
   it('repairs unknown after restart only from a complete matching response proof, without requests', async () => {
     await saveRefreshResponseReceipt(ticket, response());
     const raw = await fs.readFile(file(), 'utf8');
