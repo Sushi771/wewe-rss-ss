@@ -16,6 +16,8 @@ import {
 } from './weread-directory';
 import {
   ownerLatestAuthHash,
+  ownerLatestFailureReason,
+  ownerLatestStageLabel,
   ownerLatestStopMessage,
 } from './owner-weread-session-state';
 
@@ -117,6 +119,33 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
       await write();
       if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
       cookies.absorb(url, r.headers?.['set-cookie']);
+      // HTTP 200 can still carry a business refusal in directory or content.
+      // Keep its numeric code, never its arbitrary upstream message, and stop
+      // before parsing article metadata or making a subsequent request.
+      if (!html || /^\s*[\[{]/.test(r.data)) {
+        let data: any;
+        try {
+          data = JSON.parse(r.data);
+        } catch {
+          throw new Error('读书响应格式无效');
+        }
+        for (const key of ['errCode', 'errcode', 'code']) {
+          const value = data?.[key];
+          if (
+            value === undefined ||
+            value === null ||
+            value === 0 ||
+            value === '0'
+          )
+            continue;
+          if (
+            (typeof value !== 'number' && typeof value !== 'string') ||
+            !/^-?\d{1,10}$/.test(String(value))
+          )
+            throw new Error('读书响应格式无效');
+          throw new Error(`业务码 ${Number(value)}`);
+        }
+      }
       return r.data;
     };
     if (c.wereadDirectoryEnabled === true) {
@@ -184,10 +213,6 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
     const cover = JSON.parse(
       await get('https://weread.qq.com/api/mp/cover', { bookId: c.mpId }),
     );
-    if (cover.errCode || cover.errcode || cover.code)
-      throw new Error(
-        `业务码 ${Number(cover.errCode || cover.errcode || cover.code)}`,
-      );
     if (
       cover.name !== c.name ||
       typeof cover.title !== 'string' ||
@@ -261,18 +286,12 @@ export async function fetchOwnerWereadLatest(c: SearchConfig) {
         stage,
         requests,
         sessionAuthHash,
-        reason:
-          e instanceof Error &&
-          /^(HTTP \d+|业务码 -?\d+|腾讯验证或访问限制|最新篇身份或字段无效|正文身份、真实发布时间或内容无效)$/.test(
-            e.message,
-          )
-            ? e.message
-            : '请求、响应或本地保存失败',
+        reason: ownerLatestFailureReason(e),
       };
       await write();
     }
     throw new OwnerUpdateStopped(
-      '读书最新篇更新未完成，已停止后续请求，旧文章和正文保留。',
+      `读书更新未完成：${ownerLatestStageLabel(stage)}（${ownerLatestFailureReason(e)}），已停止后续请求，旧文章和正文保留。`,
     );
   } finally {
     await lock.close();
