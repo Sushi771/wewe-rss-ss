@@ -243,6 +243,49 @@ const safePreparation = (item: Item) =>
   !item.submissionUnknown &&
   item.stopBatch === false &&
   ['queued', 'failed'].includes(item.state);
+const scheduledDayExpired = (b: Batch, now: number) =>
+  b.purpose === 'scheduled-refresh' &&
+  Math.floor((now + 8 * 3600000) / 86400000) >
+    Math.floor((b.createdAt + 8 * 3600000) / 86400000);
+const uncertainSubmission = (item: Item) =>
+  item.submissionUnknown === true ||
+  item.state === 'submitting' ||
+  (item.accepted !== true &&
+    (item.state === 'waiting' ||
+      (item.state === 'queued' &&
+        item.refreshClaimedAt !== undefined &&
+        item.submissionUnknown !== false &&
+        !safePreparation(item))));
+const activePreparationRetry = (b: Batch, item: Item, now: number) =>
+  b.purpose === 'scheduled-refresh' &&
+  !b.cacheOnly &&
+  b.state !== 'stopped' &&
+  safePreparation(item) &&
+  !item.retryExhausted &&
+  (item.preparationRetries || 0) < AUTOMATIC_PREPARATION_LIMIT &&
+  now <
+    Math.min(
+      b.createdAt + AUTOMATIC_RETRY_WINDOW,
+      item.retryDeadlineAt ?? Infinity,
+    );
+const activeCacheReceipt = (b: Batch, item: Item, now: number) =>
+  pendingCache(item) &&
+  (globalCacheGate(item) ||
+    (!item.cacheRetryExhausted &&
+      (item.refreshChecks || 0) < CACHE_CHECK_LIMIT &&
+      now < b.createdAt + CACHE_RECOVERY_WINDOW &&
+      !['SOURCE_CHANGED', 'SUBSCRIPTION_PAUSED'].includes(item.code || '')));
+/** Reservation follows work that can still run, not a historical child label.
+ * An unknown request always reserves its feed, regardless of parent or age. */
+const retainsRefreshItem = (b: Batch, item: Item, now: number) =>
+  uncertainSubmission(item) ||
+  activeCacheReceipt(b, item, now) ||
+  activePreparationRetry(b, item, now) ||
+  (live(b) &&
+    !b.cacheOnly &&
+    item.accepted !== true &&
+    ['queued', 'waiting'].includes(item.state) &&
+    (!scheduledDayExpired(b, now) || activePreparationRetry(b, item, now)));
 const automaticRecovery = (b: Batch) =>
   b.purpose === 'scheduled-refresh' &&
   !b.items.some((item) => item.sharedRestriction === true) &&
@@ -903,6 +946,7 @@ export class Wechat2RssSubscriptionBatches {
       if (original) return { ...view(original), reused: true };
       // Restore legacy terminal preparation failures before cross-slot deduplication.
       // The original intent and retry budget remain authoritative.
+      await this.normalizeRefreshLifecycle(records);
       await this.coverPreparation(records);
       for (const record of records) await this.recoverPreparation(record);
       for (const record of records) await this.recoverAcceptedCache(record);
@@ -911,30 +955,22 @@ export class Wechat2RssSubscriptionBatches {
           .filter(isRefresh)
           .flatMap((record) =>
             record.items
-              .filter(
-                (item) => item.submissionUnknown || item.state === 'submitting',
-              )
+              .filter((item) => uncertainSubmission(item))
               .map((item) => item.feedId),
           ),
       );
       // A repeated overview click rejoins the existing request even if order changed.
       const same =
         records.find((b) => live(b) && isRefresh(b)) ||
-        records.find((b) => isRefresh(b) && b.items.some(pendingCache));
+        records.find(
+          (b) =>
+            isRefresh(b) &&
+            b.items.some((item) => activeCacheReceipt(b, item, this.now())),
+        );
       if (same) {
         if (purpose === 'scheduled-refresh' && intentKey) {
           const retained = (record: Batch, item: Item) =>
-            ((live(record) &&
-              ['queued', 'waiting', 'submitting'].includes(item.state)) ||
-              item.submissionUnknown ||
-              (item.accepted === true && item.state !== 'succeeded')) &&
-            !(
-              record.purpose === 'scheduled-refresh' &&
-              item.state === 'queued' &&
-              !item.retryDeadlineAt &&
-              Math.floor((this.now() + 8 * 3600000) / 86400000) >
-                Math.floor((record.createdAt + 8 * 3600000) / 86400000)
-            );
+            retainsRefreshItem(record, item, this.now());
           const existing = new Set(
             records
               .filter(isRefresh)
@@ -1245,11 +1281,137 @@ export class Wechat2RssSubscriptionBatches {
         : settledRefreshState(b);
     await this.write(b);
   }
+  /** Retire obsolete unsent/cache continuations under the existing storage lock.
+   * Keep accepted receipts and retry budgets; never turn them into new claims. */
+  private async normalizeRefreshLifecycle(records: Batch[]) {
+    for (const b of records) {
+      if (
+        !isRefresh(b) ||
+        b.instance !== hash(this.instance()) ||
+        b.state === 'stopped'
+      )
+        continue;
+      let changed = false;
+      for (const item of b.items) {
+        if (
+          item.state === 'submitting' &&
+          item.accepted === true &&
+          !item.submissionUnknown
+        ) {
+          item.state = 'waiting';
+          item.cacheOnly = true;
+          item.refreshAfter ??= this.now();
+          changed = true;
+        }
+        if (uncertainSubmission(item)) {
+          if (
+            item.accepted !== true &&
+            (item.submissionUnknown !== true ||
+              ['queued', 'waiting', 'submitting'].includes(item.state))
+          ) {
+            item.submissionUnknown = true;
+            item.retryable = false;
+            item.state = 'blocked';
+            item.message =
+              'Unconfirmed original request retained; no automatic replay.';
+            changed = true;
+          }
+          continue;
+        }
+        if (
+          pendingCache(item) &&
+          !globalCacheGate(item) &&
+          (item.cacheRetryExhausted ||
+            (item.refreshChecks || 0) >= CACHE_CHECK_LIMIT ||
+            this.now() >= b.createdAt + CACHE_RECOVERY_WINDOW)
+        ) {
+          if (
+            item.state !== 'failed' ||
+            item.stopBatch !== false ||
+            !item.cacheRetryExhausted
+          ) {
+            item.cacheRetryExhausted ||=
+              (item.refreshChecks || 0) >= CACHE_CHECK_LIMIT
+                ? 'attempt-limit'
+                : 'deadline';
+            item.state = 'failed';
+            item.stopBatch = false;
+            item.retryable = false;
+            item.message =
+              'Original cache continuation ended; accepted receipt retained without replay.';
+            changed = true;
+          }
+        } else if (
+          safePreparation(item) &&
+          b.purpose === 'scheduled-refresh' &&
+          !activePreparationRetry(b, item, this.now())
+        ) {
+          if (
+            b.purpose === 'scheduled-refresh' &&
+            !b.cacheOnly &&
+            (item.retryExhausted ||
+              (item.preparationRetries || 0) >= AUTOMATIC_PREPARATION_LIMIT ||
+              this.now() >=
+                Math.min(
+                  b.createdAt + AUTOMATIC_RETRY_WINDOW,
+                  item.retryDeadlineAt ?? Infinity,
+                ))
+          ) {
+            if (item.state !== 'failed' || !item.retryExhausted) {
+              item.retryExhausted ||=
+                (item.preparationRetries || 0) >= AUTOMATIC_PREPARATION_LIMIT
+                  ? 'attempt-limit'
+                  : 'deadline';
+              item.retryDeadlineAt ??= b.createdAt + AUTOMATIC_RETRY_WINDOW;
+              item.state = 'failed';
+              item.message =
+                'Original preparation budget exhausted; not submitted.';
+              changed = true;
+            }
+          }
+        } else if (
+          item.state === 'queued' &&
+          item.accepted === false &&
+          !b.cacheOnly &&
+          !activePreparationRetry(b, item, this.now()) &&
+          (!live(b) || scheduledDayExpired(b, this.now()))
+        ) {
+          item.state = 'cancelled';
+          item.message =
+            'Closed or expired original intent retired; not submitted or replayed.';
+          changed = true;
+        }
+      }
+      if (!changed) continue;
+      if (
+        !b.items.some(blocksRefresh) &&
+        !b.items.some(
+          (item) =>
+            !item.accepted &&
+            !item.submissionUnknown &&
+            ['failed', 'blocked'].includes(item.state) &&
+            item.stopBatch !== false,
+        )
+      )
+        b.state = b.cacheOnly
+          ? b.items.some((item) => item.state === 'waiting')
+            ? 'running'
+            : 'completed'
+          : settledRefreshState(b);
+      await this.write(b, true);
+    }
+  }
   /** Upgrade only explicit unsent failures. Never infer safety from an error
    * message, a missing accepted flag, or a terminal batch state. */
   private async recoverPreparation(b: Batch) {
     if (!automaticRecovery(b) || b.instance !== hash(this.instance())) return;
-    let changed = false;
+    let changed =
+      ['completed', 'deferred'].includes(b.state) &&
+      b.items.some(
+        (item) =>
+          item.state === 'queued' &&
+          activePreparationRetry(b, item, this.now()),
+      );
     for (const item of b.items) {
       if (!safePreparation(item) || item.retryExhausted) continue;
       const deadline = b.createdAt + AUTOMATIC_RETRY_WINDOW;
@@ -1297,9 +1459,8 @@ export class Wechat2RssSubscriptionBatches {
       if (b.instance === instance && isRefresh(b))
         for (const item of b.items)
           if (
-            item.submissionUnknown ||
-            item.state === 'submitting' ||
-            (item.accepted === true && item.state !== 'succeeded')
+            uncertainSubmission(item) ||
+            activeCacheReceipt(b, item, this.now())
           )
             unresolved.add(`${b.instance}/${item.feedId}`);
       if (
@@ -1420,6 +1581,7 @@ export class Wechat2RssSubscriptionBatches {
       const pending = await this.records();
       for (const record of pending) await this.releaseSharedRestriction(record);
       const latestRecords = await this.records();
+      await this.normalizeRefreshLifecycle(latestRecords);
       await this.coverPreparation(latestRecords);
       for (const record of latestRecords) await this.recoverPreparation(record);
       for (const record of latestRecords)
@@ -1700,7 +1862,12 @@ export class Wechat2RssSubscriptionBatches {
       if (day(this.now()) > day(b.createdAt)) {
         let expired = false;
         for (const pending of b.items)
-          if (pending.state === 'queued' && !pending.retryDeadlineAt) {
+          if (
+            pending.state === 'queued' &&
+            pending.accepted === false &&
+            !uncertainSubmission(pending) &&
+            !safePreparation(pending)
+          ) {
             pending.state = 'cancelled';
             pending.message =
               'Previous automatic round expired at Shanghai midnight; not submitted.';
