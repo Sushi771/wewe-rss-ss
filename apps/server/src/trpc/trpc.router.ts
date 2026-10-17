@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   AccountSchemas,
   ArticleSchemas,
+  articleFilterSchema,
   FeedSchemas,
   PlatformSchemas,
 } from '@wewe-rss/shared';
@@ -10,6 +11,7 @@ import { TrpcService } from '@server/trpc/trpc.service';
 import * as trpcExpress from '@trpc/server/adapters/express';
 import { TRPCError } from '@trpc/server';
 import { PrismaService } from '@server/prisma/prisma.service';
+import { articleListWhere, articleListOrder } from '../article-list-filter';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
 import TurndownService from 'turndown';
@@ -656,24 +658,9 @@ export class TrpcRouter {
 
   articleRouter = this.trpcService.router({
     summary: this.trpcService.protectedProcedure
-      .input(
-        z.object({
-          mpId: z.string().optional(),
-          search: z.string().optional(),
-        }),
-      )
+      .input(articleFilterSchema)
       .query(async ({ input }) => {
-        const where = {
-          mpId: input.mpId || undefined,
-          ...(input.search
-            ? {
-                OR: [
-                  { title: { contains: input.search } },
-                  { feed: { mpName: { contains: input.search } } },
-                ],
-              }
-            : {}),
-        };
+        const where = articleListWhere(input);
         const [range, readAvailable, likeAvailable, cachedBodies] =
           await this.prismaService.$transaction([
             this.prismaService.article.aggregate({
@@ -705,24 +692,11 @@ export class TrpcRouter {
       .input(ArticleSchemas.list)
       .query(async ({ input, ctx }) => {
         const limit = input.limit ?? 1000;
-        const { cursor, mpId, search } = input;
-
-        const where: any = {};
-        if (mpId) where.mpId = mpId;
-        if (search) {
-          where.OR = [
-            { title: { contains: search } },
-            { feed: { mpName: { contains: search } } },
-          ];
-        }
+        const { cursor } = input;
+        const where = articleListWhere(input);
 
         const items = await this.prismaService.article.findMany({
-          orderBy: [
-            {
-              [input.sort || 'publishTime']: 'desc',
-            },
-            { id: 'desc' },
-          ],
+          orderBy: articleListOrder(input),
           take: limit + 1,
           where,
           cursor: cursor

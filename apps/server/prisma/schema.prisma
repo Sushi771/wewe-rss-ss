@@ -19,6 +19,40 @@ model Account {
   @@map("accounts")
 }
 
+// Immutable audit of opt-in pure INSERT batches; no cascading delete/recovery.
+model CacheInsertBatch {
+  id String @id
+  mpId String @map("mp_id")
+  articleManifest String @map("article_manifest")
+  snapshotGeneration String @map("snapshot_generation")
+  guardGeneration String @map("guard_generation")
+  backupStartedAtMs BigInt @map("backup_started_at_ms")
+  coverageAtMs BigInt @map("coverage_at_ms")
+  createdCount Int @map("created_count")
+  committedAtMs BigInt @map("committed_at_ms")
+
+  @@map("cache_insert_batches")
+}
+
+model CacheRefreshCommit {
+  id String @id
+  mpId String @map("mp_id")
+  resultJson String @map("result_json")
+  committedAtMs BigInt @map("committed_at_ms")
+  @@index([mpId])
+  @@map("cache_refresh_commits")
+}
+
+model RefreshSubmissionClaim {
+  id String @id
+  mpId String @map("mp_id")
+  state String
+  reservedAt Int @map("reserved_at")
+  previousAt Int @map("previous_at")
+  updatedAtMs BigInt @map("updated_at_ms")
+  @@map("refresh_submission_claims")
+}
+
 model Feed {
   id         String    @id
   mpName     String    @map("mp_name")
@@ -37,7 +71,11 @@ model Feed {
   collectionChannel String? @map("collection_channel")
   /// Unix seconds when a manual Wechat2RSS /add attempt was reserved, including failed requests.
   providerRefreshAttemptTime Int @default(0) @map("provider_refresh_attempt_time")
+  groupId    String? @map("group_id")
+  group      ManagementGroup? @relation(fields: [groupId], references: [id], onDelete: Restrict)
   articles   Article[]
+
+  @@index([groupId])
 
   @@map("feeds")
 }
@@ -63,5 +101,56 @@ model Article {
   updatedAt   DateTime? @default(now()) @updatedAt @map("updated_at")
   feed        Feed      @relation(fields: [mpId], references: [id], onDelete: Cascade)
 
+  @@index([mpId])
   @@map("articles")
+}
+
+// Local pending creators are separate from trusted upstream author identities.
+// No WeChat Feed/Article ID or relation is changed by these additive tables.
+model XhsCreator {
+  id               String    @id @default(cuid())
+  profileUrl       String    @unique @map("profile_url")
+  displayName      String    @map("display_name")
+  externalAuthorId String?   @unique @map("external_author_id")
+  enabled          Boolean   @default(true)
+  lastStatus       String    @default("pending") @map("last_status")
+  lastCheckedAt    Int       @default(0) @map("last_checked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  groupId          String?   @map("group_id")
+  group            ManagementGroup? @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  notes            XhsNote[]
+
+  @@index([groupId])
+  @@map("xhs_creators")
+}
+
+// Local organization labels are independent of upstream source bindings and paths.
+model ManagementGroup {
+  id       String       @id @default(cuid())
+  name     String
+  platform String
+  order    Int          @default(0)
+  feeds    Feed[]
+  creators XhsCreator[]
+
+  @@index([platform])
+  @@map("management_groups")
+}
+
+model XhsNote {
+  id          String     @id
+  creatorId   String     @map("creator_id")
+  title       String
+  publishTime Int        @map("publish_time")
+  status      String
+  contentHtml String?    @map("content_html")
+  kind        String?
+  videoBytes  Bytes?     @map("video_bytes")
+  videoMimeType String?  @map("video_mime_type")
+  videoExpectedBytes Int? @map("video_expected_bytes")
+  videoSha256 String?   @map("video_sha256")
+  creator     XhsCreator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@index([creatorId, publishTime])
+  @@map("xhs_notes")
 }
