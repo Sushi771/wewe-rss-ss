@@ -567,7 +567,8 @@ describe('terminal refresh admission (synthetic durable records only)', () => {
       owner.items[0] = { ...owner.items[0], ...ready };
       if (kind === 'later-claim') owner.items[0].refreshClaimedAt = clock + 1;
       owner.state = 'completed';
-      owner.updatedAt = clock + 1;
+      clock += 1;
+      owner.updatedAt = clock;
       await fs.writeFile(file(owner.batchId), JSON.stringify(owner));
       expect(
         (await second.manager.list()).find((b) => b.batchId === next.batchId)
@@ -679,6 +680,164 @@ describe('terminal refresh admission (synthetic durable records only)', () => {
       expect(run.mock.calls).toEqual([
         [ids[0], 'cache', false, { cacheOnly: true }],
       ]);
+    },
+  );
+  it('independent: an expired live queued record without accepted evidence never submits its obsolete intent', async () => {
+    const old = await seed([{ state: 'queued' }], { state: 'running' });
+    const { manager, run } = make();
+    await manager.enqueueRefresh([ids[0]], '9'.repeat(64), 'scheduled-refresh');
+    for (let i = 0; i < 3; i++) {
+      await manager.runDue();
+      clock += 30000;
+    }
+    expect(
+      run.mock.calls.some(
+        (call) => call[1] === 'submit' && call[3]?.claimKey === old.batchId,
+      ),
+    ).toBe(false);
+    expect(run.mock.calls.filter((call) => call[1] === 'submit')).toHaveLength(
+      0,
+    );
+  });
+  it('independent: a retained claim later than its own receipt update is not completion proof', async () => {
+    const owner = await seed(
+      [
+        {
+          state: 'waiting',
+          accepted: true,
+          submissionUnknown: false,
+          refreshClaimedAt: clock - 1000,
+        },
+      ],
+      { state: 'running', createdAt: clock - 60000, updatedAt: clock - 1000 },
+    );
+    const { manager, run } = make();
+    const next = await manager.enqueueRefresh(
+      [ids[0]],
+      '4'.repeat(64),
+      'scheduled-refresh',
+    );
+    owner.items[0] = {
+      ...owner.items[0],
+      ...ready,
+      refreshClaimedAt: clock + 60000,
+    };
+    owner.state = 'completed';
+    owner.updatedAt = clock;
+    await fs.writeFile(file(owner.batchId), JSON.stringify(owner));
+    const coverage = (await manager.list()).find(
+      (batch) => batch.batchId === next.batchId,
+    )!.coverage!;
+    expect(run).not.toHaveBeenCalled();
+    expect(coverage.fullyUpdated).toBe(false);
+    expect(coverage.completed).toBe(0);
+    expect(coverage.anomalies).toBe(1);
+  });
+  it.each([
+    'running',
+    'completed',
+    'paused',
+    'cache-only',
+    'explicit-unknown-false',
+  ])(
+    'holds legacy missing accepted evidence in %s until read-only proof, then admits only a fresh claim',
+    async (kind) => {
+      const old = await seed(
+        [
+          {
+            state: 'queued',
+            ...(kind === 'explicit-unknown-false'
+              ? { submissionUnknown: false }
+              : {}),
+          },
+        ],
+        {
+          state: ['running', 'completed', 'paused'].includes(kind)
+            ? kind
+            : 'running',
+          ...(kind === 'cache-only' ? { cacheOnly: true } : {}),
+        },
+      );
+      const first = make();
+      first.manager.attachReconciliation(
+        jest.fn().mockResolvedValue('unknown'),
+      );
+      const held = await first.manager.enqueueRefresh(
+        [ids[0]],
+        'a'.repeat(64),
+        'scheduled-refresh',
+      );
+      expect(held.items[0].state).toBe('skipped');
+      expect(held.coverage).toMatchObject({
+        expected: 1,
+        anomalies: 1,
+        fullyUpdated: false,
+      });
+      for (let i = 0; i < 3; i++) {
+        await first.manager.runDue();
+        clock += 60000;
+      }
+      expect(first.run).not.toHaveBeenCalled();
+      const uncertain = (await disk(old.batchId)).items[0];
+      expect(uncertain.accepted).toBeUndefined();
+      expect(uncertain).toMatchObject({
+        state: 'blocked',
+        submissionUnknown: true,
+        retryable: false,
+      });
+      first.manager.close();
+      const next = make();
+      next.manager.attachReconciliation(
+        jest.fn().mockResolvedValue('not-submitted'),
+      );
+      await next.manager.runDue();
+      expect(next.run).not.toHaveBeenCalled();
+      const fresh = await next.manager.enqueueRefresh(
+        [ids[0]],
+        'b'.repeat(64),
+        'scheduled-refresh',
+      );
+      await next.manager.runDue();
+      expect(next.run.mock.calls).toEqual([
+        [ids[0], 'submit', true, { claimKey: fresh.batchId }],
+      ]);
+    },
+  );
+  it.each(['before-created', 'after-receipt', 'future-receipt'])(
+    'rejects %s source chronology in both owner and retained coverage without requests',
+    async (kind) => {
+      const owner = await seed(
+        [
+          {
+            state: 'waiting',
+            accepted: true,
+            submissionUnknown: false,
+            refreshClaimedAt: clock - 1000,
+          },
+        ],
+        { state: 'running', createdAt: clock - 60000, updatedAt: clock - 1000 },
+      );
+      const { manager, run } = make();
+      const next = await manager.enqueueRefresh(
+        [ids[0]],
+        'c'.repeat(64),
+        'scheduled-refresh',
+      );
+      owner.items[0] = {
+        ...owner.items[0],
+        ...ready,
+        refreshClaimedAt:
+          kind === 'before-created' ? owner.createdAt - 1 : clock + 1000,
+      };
+      owner.state = 'completed';
+      owner.updatedAt = kind === 'future-receipt' ? clock + 2000 : clock;
+      await fs.writeFile(file(owner.batchId), JSON.stringify(owner));
+      for (const id of [owner.batchId, next.batchId])
+        expect(
+          (await manager.list()).find((batch) => batch.batchId === id)
+            ?.coverage,
+        ).toMatchObject({ completed: 0, anomalies: 1, fullyUpdated: false });
+      expect(run).not.toHaveBeenCalled();
     },
   );
   it('releases an ambiguous historical claim only after read-only not-submitted proof, never by age alone', async () => {

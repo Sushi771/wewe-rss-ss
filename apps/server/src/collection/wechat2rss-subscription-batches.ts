@@ -250,6 +250,7 @@ const scheduledDayExpired = (b: Batch, now: number) =>
 const uncertainSubmission = (item: Item) =>
   item.submissionUnknown === true ||
   item.state === 'submitting' ||
+  (item.state === 'queued' && item.accepted === undefined) ||
   (item.accepted !== true &&
     (item.state === 'waiting' ||
       (item.state === 'queued' &&
@@ -288,6 +289,13 @@ const retainsRefreshItem = (b: Batch, item: Item, now: number) =>
     item.accepted !== true &&
     ['queued', 'waiting'].includes(item.state) &&
     (!scheduledDayExpired(b, now) || activePreparationRetry(b, item, now)));
+/** A source claim cannot be newer than its own durable receipt or this read. */
+const validSourceClaim = (b: Batch, item: Item, now: number) =>
+  Number.isSafeInteger(item.refreshClaimedAt) &&
+  item.refreshClaimedAt! >= b.createdAt &&
+  item.refreshClaimedAt! <= b.updatedAt &&
+  b.createdAt <= b.updatedAt &&
+  b.updatedAt <= now;
 const automaticRecovery = (b: Batch) =>
   b.purpose === 'scheduled-refresh' &&
   !b.items.some((item) => item.sharedRestriction === true) &&
@@ -324,7 +332,10 @@ const refreshCoverage = (b: Batch, records: Batch[], now: number) => {
     if (item.coverageReviewRequired)
       return outcome('anomaly', 'coverage-unproved');
     if (item.state === 'succeeded' && item.accepted === true)
-      return outcome('completed', 'local-completion');
+      return item.refreshClaimedAt === undefined ||
+        validSourceClaim(b, item, now)
+        ? outcome('completed', 'local-completion')
+        : outcome('anomaly', 'source-receipt-chronology-unproved');
     if (item.state === 'skipped') {
       if (
         ['SOURCE_CHANGED', 'SUBSCRIPTION_PAUSED'].includes(item.code || '') &&
@@ -346,7 +357,7 @@ const refreshCoverage = (b: Batch, records: Batch[], now: number) => {
                 ((other.state === 'succeeded' &&
                   other.accepted === true &&
                   !other.submissionUnknown &&
-                  Number.isSafeInteger(other.refreshClaimedAt) &&
+                  validSourceClaim(record, other, now) &&
                   (item.supersededBy
                     ? other.refreshClaimedAt === item.supersededBy.claimedAt
                     : record.updatedAt >= b.createdAt)) ||
@@ -2062,7 +2073,7 @@ export class Wechat2RssSubscriptionBatches {
       b.items.some(
         (i) =>
           i.state === 'queued' &&
-          !i.accepted &&
+          i.accepted === false &&
           !i.submissionUnknown &&
           !i.retryExhausted &&
           !i.waitingForReceipt &&
@@ -2082,7 +2093,7 @@ export class Wechat2RssSubscriptionBatches {
         (i) =>
           maySubmit &&
           i.state === 'queued' &&
-          i.accepted !== true &&
+          i.accepted === false &&
           !i.submissionUnknown &&
           !i.retryExhausted &&
           !i.waitingForReceipt &&
@@ -2236,7 +2247,7 @@ export class Wechat2RssSubscriptionBatches {
       .filter(
         (i) =>
           i.state === 'queued' &&
-          !i.accepted &&
+          i.accepted === false &&
           !i.submissionUnknown &&
           !i.retryExhausted &&
           !i.waitingForReceipt &&

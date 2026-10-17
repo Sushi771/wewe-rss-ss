@@ -81,3 +81,29 @@ owner's completed source counts as a current update only when its own claim is
 at or after the new intent. A proven earlier claim is a separate prior-round
 exclusion; missing claim evidence remains an anomaly. Neither earns full-update
 wording merely because some other child updated the parent record.
+
+## Legacy evidence and receipt chronology
+
+Legacy v1 accepts an omitted `accepted` field. Omission is not a not-submitted
+receipt: a queued legacy child now enters the existing unknown/reconciliation
+protocol, including when a separate `submissionUnknown: false` field is present.
+Age does not cancel it or grant a second claim. Normalization preserves the
+missing accepted evidence, and all refresh submission selectors require explicit
+`accepted === false`. Existing read-only database proof may then establish
+not-submitted or accepted, with the original deadlines and budgets unchanged.
+Without proof it remains held. Once an expired old intent is proven unsent, a
+distinct later intent may claim the source; the expired intent is not replayed.
+
+A present source claim must satisfy `createdAt <= claimedAt <= updatedAt <= now`
+for its own batch. Both local and retained coverage reject contradictory receipt
+chronology as an anomaly. A later claim cannot earn completion from an earlier
+receipt, and advancing another parent's timestamp cannot repair that contradiction.
+The positive restart fixture advances its clock to the actual receipt time rather
+than relying on a future synthetic timestamp.
+
+Run native subscription/SQLite integration tests from `apps/server` or the
+repository root, the two supported application launch directories. Setting Jest's
+`rootDir` does not change `process.cwd()`. An unrelated launch directory fails the
+existing backup component lookup before staging a feed, correctly preserving its
+binding/deletion protection. That launch error must not be fixed by bypassing the
+backup gate or weakening native-subscription assertions.
