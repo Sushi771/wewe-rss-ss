@@ -698,4 +698,329 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertEqual(json.loads(result.stdout)['validatedCount'],1);self.assertTrue(self.old.exists());self.assertTrue(self.keep.exists())
 
+@unittest.skipUnless(os.name=='nt','Actual Windows handles; owned tiny SQLite only')
+class AutomaticRetentionTests(unittest.TestCase):
+    def setUp(self):
+        temp=tempfile.TemporaryDirectory(prefix='automatic-retention-owned-');self.addCleanup(temp.cleanup)
+        self.folder=Path(temp.name).resolve();self.root=self.folder/'backups';self.root.mkdir();self.source=self.folder/'source.db'
+        settings=patch.dict(os.environ,{'SQLITE_BACKUP_KIND':'test','SQLITE_TEST_MAX_BYTES':str(16*1024**2),
+            'SQLITE_TEST_MAX_COPIES':'48','SQLITE_TEST_MIN_FREE_BYTES':'1','SQLITE_PRODUCTION_LEGACY_ROOTS':'[]',
+            'SQLITE_PERIODIC_RETENTION_ENABLED':'0','SQLITE_PERIODIC_RETENTION_COPIES':'4',
+            'SQLITE_PERIODIC_RETENTION_BYTES':str(1024**2),'SQLITE_PERIODIC_RETENTION_RESERVE_BYTES':str(2*1024**2),
+            'SQLITE_PERIODIC_RETENTION_READ_BYTES':str(16*1024**2),'SQLITE_ARTICLE_HISTORY_MAINTENANCE_WINDOW':'0'})
+        settings.start();self.addCleanup(settings.stop)
+        with closing(sqlite3.connect(self.source)) as db,db:
+            db.executescript('CREATE TABLE feeds(id TEXT PRIMARY KEY,name TEXT,sync_time INTEGER);'
+                'CREATE TABLE articles(id INTEGER PRIMARY KEY,body TEXT,metric INTEGER);'
+                'CREATE TABLE notes(id INTEGER PRIMARY KEY,body TEXT);'
+                "INSERT INTO feeds VALUES('feed','Preserved subscription',0);"
+                "INSERT INTO articles VALUES(1,'Preserved complete body',7);"
+                "INSERT INTO notes VALUES(1,'Preserved note');")
+        (self.root/'retention-protected.json').write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':[]}))
+        self.points=[];self.serial=1;self.guards=[];self.addCleanup(self.close_guards)
+        spec=importlib.util.spec_from_file_location('automatic_guard',Path(__file__).with_name('sqlite-snapshot-guard.py'))
+        self.guardmod=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.guardmod)
+        # Exercise the actual guard tick and actual rotator, retaining one module
+        # instance solely so fault injection reaches the native delete boundary.
+        self.guardmod._retention_module=retention
+
+    def close_guards(self):
+        for guard in self.guards:guard.close()
+        self.guards=[]
+
+    def append(self):
+        self.serial+=1
+        with closing(sqlite3.connect(self.source)) as db,db:
+            db.execute('INSERT INTO articles VALUES(?,?,?)',(self.serial,'Appended body '+str(self.serial),self.serial))
+            db.execute('UPDATE feeds SET sync_time=?',(self.serial,))
+
+    def seed(self,count=6,unique=False):
+        for index in range(count):
+            if index==1 and unique:
+                with closing(sqlite3.connect(self.source)) as db,db:db.execute("UPDATE notes SET body='New note'")
+            report=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+            point=Path(report['backup']);self.points.append(point)
+            report['createdAtUtc']=datetime.fromtimestamp(time.time()-7200-(count-index)*60,timezone.utc).isoformat()
+            # This edits only fixture timestamps to exercise age eligibility.
+            (point.parent/'verification.json').write_text(json.dumps(report))
+            self.append()
+        os.environ['SQLITE_PERIODIC_RETENTION_ENABLED']='1'
+
+    def owner(self,**kwargs):
+        guard=self.guardmod.SnapshotGuard(self.source,self.root,**kwargs);self.guards.append(guard);return guard
+
+    def business(self):
+        with closing(sqlite3.connect(self.source)) as db:
+            return [list(db.execute('SELECT * FROM '+table+' ORDER BY id')) for table in ('feeds','articles','notes')]
+
+    def test_actual_owner_rotates_append_only_points_and_restores_hard_cap_after_one_staging_slot(self):
+        self.seed();os.environ['SQLITE_TEST_MAX_COPIES']='4';before=self.business();guard=self.owner();guard.tick()
+        self.assertIsNotNone(guard.record,guard.status());result=guard.record['automaticRetention']
+        self.assertEqual(result['status'],'complete',result);self.assertGreaterEqual(result['deletedCopies'],3)
+        self.assertEqual(len(list(self.root.glob('periodic-snapshot-*/wewe-rss.db'))),4)
+        self.assertFalse((self.root/'.space-budget.lock').exists());self.assertEqual(self.business(),before)
+        for point in self.root.glob('periodic-snapshot-*/wewe-rss.db'):
+            with closing(sqlite3.connect(point)) as db:self.assertEqual(db.execute('PRAGMA integrity_check').fetchone(),('ok',))
+        self.append();guard.tick();self.assertTrue(guard.record,guard.status())
+        self.assertEqual(len(list(self.root.glob('periodic-snapshot-*/wewe-rss.db'))),4)
+
+    def test_unique_notes_body_metric_unknown_and_nullable_duplicate_keys_are_never_covered(self):
+        self.seed(unique=True);guard=self.owner();guard.tick();result=guard.record['automaticRetention']
+        self.assertGreaterEqual(result['heldUnique'],1,result);self.assertTrue(self.points[0].exists())
+        with closing(sqlite3.connect(self.points[0])) as db:self.assertEqual(db.execute('SELECT body FROM notes').fetchone(),('Preserved note',))
+        for change in ("UPDATE articles SET body='changed' WHERE id=1",'UPDATE articles SET metric=8 WHERE id=1',
+                       'DELETE FROM notes'):
+            with closing(sqlite3.connect(':memory:')) as old,closing(sqlite3.connect(':memory:')) as new:
+                with closing(sqlite3.connect(self.points[0])) as saved:saved.backup(old);saved.backup(new)
+                new.execute(change)
+                self.assertFalse(retention.backup.snapshot_covers(new,old,retention.ReadBudget()))
+        with closing(sqlite3.connect(':memory:')) as old,closing(sqlite3.connect(':memory:')) as new:
+            for db in (old,new):db.executescript('CREATE TABLE unknown_state(id PRIMARY KEY,value);INSERT INTO unknown_state VALUES(NULL,1);')
+            old.execute('INSERT INTO unknown_state VALUES(NULL,1)')
+            self.assertFalse(retention.backup.snapshot_covers(new,old,retention.ReadBudget()))
+
+    def test_copy_failure_preserves_all_old_points_and_marker_prevents_restart_allocation(self):
+        self.seed();before=self.business();native=self.guardmod.backup_module._create_backup
+        def failed(*args,**kwargs):native(*args,**kwargs);raise OSError('private-path-must-not-escape')
+        guard=self.owner()
+        with patch.object(self.guardmod.backup_module,'_create_backup',failed):guard.tick()
+        self.assertIsNone(guard.record);self.assertTrue(all(p.exists() for p in self.points))
+        self.assertTrue((self.root/'.space-budget.lock').exists());count=len(list(self.root.glob('periodic-snapshot-*')))
+        self.close_guards();again=self.owner();again.tick()
+        self.assertIsNone(again.record);self.assertEqual(again.failure['code'],'SQLITE_PERIODIC_RETENTION_HELD')
+        self.assertEqual(len(list(self.root.glob('periodic-snapshot-*'))),count);self.assertEqual(self.business(),before)
+
+    def test_interruption_after_first_exact_delete_keeps_two_recovery_points_and_does_not_replay(self):
+        self.seed(unique=True);guard=self.owner();native=retention.WindowsPin.delete;calls=[]
+        def interrupted(pin):
+            native(pin);calls.append(True);raise KeyboardInterrupt('owned interruption after native close')
+        with patch.object(retention.WindowsPin,'delete',interrupted),self.assertRaises(KeyboardInterrupt):guard.tick()
+        self.assertEqual(len(calls),1);self.assertTrue(self.points[0].exists())
+        saved=Path(guard.record['backup']);self.assertTrue(saved.exists())
+        self.assertGreaterEqual(len(list(self.root.glob('periodic-snapshot-*/wewe-rss.db'))),2)
+        self.assertTrue((self.root/'.space-budget.lock').exists());count=len(list(self.root.glob('periodic-snapshot-*')))
+        self.close_guards();again=self.owner();again.tick();self.assertIsNone(again.record)
+        self.assertEqual(len(list(self.root.glob('periodic-snapshot-*'))),count)
+
+    def test_live_candidate_reader_and_unknown_backlog_hold_without_unlimited_staging(self):
+        self.seed();os.environ['SQLITE_TEST_MAX_COPIES']='2';guard=self.owner()
+        streams=[p.open('rb') for p in self.points]
+        try:guard.tick()
+        finally:
+            for stream in streams:stream.close()
+        self.assertTrue(guard.record);self.assertTrue(all(p.exists() for p in self.points))
+        self.assertEqual(guard.record['automaticRetention']['status'],'held');self.assertTrue((self.root/'.space-budget.lock').exists())
+        self.append();count=len(list(self.root.glob('periodic-snapshot-*')));guard.tick()
+        self.assertIsNone(guard.record);self.assertEqual(len(list(self.root.glob('periodic-snapshot-*'))),count)
+        # Ordinary committed source updates do not borrow snapshot/retention credit.
+        self.append();self.assertEqual(self.business()[1][-1][0],self.serial)
+
+    def test_existing_manifest_protection_and_history_window_are_respected(self):
+        self.seed();manifest=self.root/'retention-protected.json'
+        manifest.write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':[str(self.points[0])]}))
+        guard=self.owner();guard.tick();self.assertTrue(guard.record,guard.status());self.assertTrue(self.points[0].exists())
+        self.append();os.environ['SQLITE_ARTICLE_HISTORY_MAINTENANCE_WINDOW']='1';guard.tick()
+        self.assertTrue(guard.record);self.assertEqual(guard.record['automaticRetention']['code'],'HISTORY_MAINTENANCE_ACTIVE')
+        self.assertTrue((self.root/'.space-budget.lock').exists())
+
+    def test_reserve_growth_and_full_snapshot_concurrency_never_delete_old_points(self):
+        self.seed();guard=self.owner();key=hashlib.sha256(str(self.source).encode()).hexdigest()[:24]
+        with retention.backup.FileLock(self.source.parent/f'.full-snapshot-{key}.lock'):
+            with self.assertRaises(TimeoutError):retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot',timeout=.02)
+        self.assertTrue(all(p.exists() for p in self.points));self.assertFalse((self.root/'.space-budget.lock').exists())
+        native=self.guardmod.backup_module._create_backup
+        def grow(*args,**kwargs):
+            with closing(sqlite3.connect(self.source)) as db,db:db.execute('INSERT INTO notes VALUES(2,?)',('x'*(1200*1024),))
+            return native(*args,**kwargs)
+        with patch.object(self.guardmod.backup_module,'_create_backup',grow):guard.tick()
+        self.assertIsNone(guard.record);self.assertEqual(guard.failure['code'],'SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED')
+        self.assertTrue(all(p.exists() for p in self.points));self.assertTrue((self.root/'.space-budget.lock').exists())
+        self.assertLess(sum(p.stat().st_size for p in self.root.glob('periodic-snapshot-*/*')),2*1024**2)
+
+    def test_growth_during_real_online_backup_aborts_within_one_bounded_staging_reserve(self):
+        self.seed();guard=self.owner();module=self.guardmod.backup_module;connect=sqlite3.connect;grew=[]
+        with closing(connect(self.source)) as db,db:db.execute('INSERT INTO notes VALUES(2,?)',('x'*(400*1024),))
+        source=self.source
+        class GrowingConnection(sqlite3.Connection):
+            def backup(connection,destination,**kwargs):
+                progress=kwargs['progress']
+                def observed(status,remaining,total):
+                    progress(status,remaining,total)
+                    if not grew:
+                        grew.append(True)
+                        with closing(connect(source)) as writer,writer:
+                            writer.execute('INSERT INTO notes VALUES(3,?)',('y'*(900*1024),))
+                return super().backup(destination,**{**kwargs,'progress':observed})
+        def instrument(*args,**kwargs):
+            if str(args[0]).startswith(self.source.as_uri()):kwargs['factory']=GrowingConnection
+            return connect(*args,**kwargs)
+        with patch.object(module.sqlite3,'connect',instrument):guard.tick()
+        self.assertEqual(grew,[True]);self.assertIsNone(guard.record)
+        self.assertEqual(guard.failure['code'],'SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED')
+        self.assertTrue(all(p.exists() for p in self.points));self.assertTrue((self.root/'.space-budget.lock').exists())
+        self.assertLess(sum(p.stat().st_size for p in self.root.glob('periodic-snapshot-*/*')),2*1024**2)
+
+    def test_same_pid_lease_rewrite_is_not_adopted_after_verified_copy(self):
+        self.seed();native=self.guardmod.backup_module.create_backup
+        def altered(*args,**kwargs):
+            report=native(*args,**kwargs);lease=self.root/'.space-budget.lock'
+            value=json.loads(lease.read_text());value['unownedExtra']='changed';lease.write_text(json.dumps(value))
+            return report
+        guard=self.owner(backup=altered);guard.tick()
+        self.assertTrue(guard.record);self.assertEqual(guard.record['automaticRetention']['code'],'AUTO_LEASE_CHANGED')
+        self.assertTrue(all(p.exists() for p in self.points));self.assertTrue((self.root/'.space-budget.lock').exists())
+
+    def test_late_manual_reference_publication_is_blocked_by_actual_native_reference_pin(self):
+        self.seed();guard=self.owner();manifest=self.root/'retention-protected.json';native=retention.WindowsPin.sha;attempts=[];denied=[]
+        original=manifest.read_bytes()
+        def attempted(pin,budget):
+            result=native(pin,budget)
+            if not attempts:
+                attempts.append(True)
+                try:manifest.write_text(json.dumps({'format':'sqlite-retention-protected-v1','paths':[str(self.points[0])]}))
+                except PermissionError:denied.append(True)
+            return result
+        with patch.object(retention.WindowsPin,'sha',attempted):guard.tick()
+        self.assertEqual(attempts,[True]);self.assertEqual(denied,[True]);self.assertTrue(guard.record)
+        self.assertEqual(manifest.read_bytes(),original)
+        self.assertEqual(guard.record['automaticRetention']['status'],'complete')
+        self.assertGreater(guard.record['automaticRetention']['deletedCopies'],0)
+
+    def test_protected_origin_and_unknown_files_survive_automatic_retirement(self):
+        self.seed();receipt=self.points[0].parent/'verification.json';value=json.loads(receipt.read_text())
+        value['recoveryOrigin']['kind']='protected';receipt.write_text(json.dumps(value))
+        unknown=self.root/'unknown.sqlite';unknown.write_bytes(b'unique unknown historical bytes')
+        guard=self.owner();guard.tick();self.assertTrue(guard.record,guard.status())
+        self.assertTrue(self.points[0].exists());self.assertEqual(unknown.read_bytes(),b'unique unknown historical bytes')
+        self.assertGreater(guard.record['automaticRetention']['deletedCopies'],0)
+
+    def test_stored_generated_columns_are_compared_in_coverage_and_reuse(self):
+        with closing(sqlite3.connect(':memory:')) as old,closing(sqlite3.connect(':memory:')) as new:
+            schema='CREATE TABLE unknown_state(id INTEGER PRIMARY KEY,value,derived GENERATED ALWAYS AS (versioned(value)) STORED)'
+            for db,offset in ((old,1),(new,2)):
+                db.create_function('versioned',1,lambda value,offset=offset:value+offset,deterministic=True)
+                db.execute(schema);db.execute('INSERT INTO unknown_state(id,value) VALUES(1,5)')
+            self.assertEqual(list(old.execute('SELECT * FROM unknown_state')),[(1,5,6)])
+            self.assertEqual(list(new.execute('SELECT * FROM unknown_state')),[(1,5,7)])
+            self.assertFalse(retention.backup.snapshot_covers(new,old,retention.ReadBudget()))
+            self.assertFalse(retention.backup.snapshot_equal(new,old))
+            self.assertTrue(retention.backup.snapshot_covers(old,old,retention.ReadBudget()))
+            self.assertTrue(retention.backup.snapshot_equal(old,old))
+            for db in (old,new):
+                db.execute('ALTER TABLE unknown_state RENAME TO feeds')
+                db.execute('ALTER TABLE feeds RENAME COLUMN derived TO sync_time')
+            self.assertFalse(retention.backup.snapshot_covers(new,old,retention.ReadBudget()))
+        with closing(sqlite3.connect(':memory:')) as db:
+            db.execute('CREATE TABLE virtual_value(id INTEGER PRIMARY KEY,value,derived GENERATED ALWAYS AS(value+1) VIRTUAL)')
+            db.execute('INSERT INTO virtual_value(id,value) VALUES(1,5)')
+            self.assertFalse(retention.backup.snapshot_covers(db,db,retention.ReadBudget()))
+            self.assertFalse(retention.backup.snapshot_equal(db,db))
+
+    def generated_source(self):
+        with closing(sqlite3.connect(self.source)) as db,db:
+            db.create_function('abs',1,lambda value:value+1,deterministic=True)
+            db.execute('CREATE TABLE unknown_state(id INTEGER PRIMARY KEY,value,derived GENERATED ALWAYS AS(abs(value)) STORED)')
+            db.execute('INSERT INTO unknown_state(id,value) VALUES(1,5)')
+
+    def change_generated_value(self):
+        with closing(sqlite3.connect(self.source)) as db,db:
+            db.create_function('abs',1,lambda value:value+2,deterministic=True)
+            db.execute('UPDATE unknown_state SET value=value')
+
+    def test_actual_owner_retains_only_old_stored_generated_value(self):
+        self.generated_source()
+        for index in range(6):
+            report=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+            point=Path(report['backup']);self.points.append(point)
+            report['createdAtUtc']=datetime.fromtimestamp(time.time()-7200-(6-index)*60,timezone.utc).isoformat()
+            (point.parent/'verification.json').write_text(json.dumps(report))
+            if index==0:self.change_generated_value()
+            self.append()
+        os.environ['SQLITE_PERIODIC_RETENTION_ENABLED']='1';guard=self.owner();guard.tick()
+        self.assertTrue(guard.record,guard.status());self.assertTrue(self.points[0].exists())
+        self.assertEqual(guard.record['automaticRetention']['code'],'UNIQUE_HISTORY_RETAINED')
+        self.assertGreater(guard.record['automaticRetention']['deletedCopies'],0)
+        with closing(sqlite3.connect(self.points[0])) as db:
+            self.assertEqual(list(db.execute('SELECT derived FROM unknown_state')),[(6,)])
+        with closing(sqlite3.connect(guard.record['backup'])) as db:
+            self.assertEqual(list(db.execute('SELECT derived FROM unknown_state')),[(7,)])
+
+    def test_changed_stored_generated_value_without_other_changes_requires_new_copy(self):
+        self.generated_source();first=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+        self.change_generated_value();second=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+        self.assertFalse(second['reused']);self.assertNotEqual(first['backup'],second['backup'])
+
+    def test_marker_release_pins_out_late_write_unlink_and_replacement_and_uses_no_path_unlink(self):
+        self.seed();guard=self.owner();lease=self.root/'.space-budget.lock';native=retention.WindowsPin.delete
+        replacement=self.root/'owned-foreign-marker.tmp';replacement.write_bytes(b'foreign marker must remain')
+        observed=[];denied=[];unlink=Path.unlink
+        def boundary(pin):
+            info=os.fstat(pin.fd);stamp=lease.stat()
+            if (info.st_dev,info.st_ino)==(stamp.st_dev,stamp.st_ino):
+                os.lseek(pin.fd,0,os.SEEK_SET);original=os.read(pin.fd,8193);observed.append(True)
+                for operation in (lambda:lease.write_bytes(b'late edit'),lambda:unlink(lease),lambda:replacement.replace(lease),
+                                  lambda:self.root.rename(self.folder/'owned-moved-root')):
+                    with self.assertRaises(PermissionError):operation()
+                    denied.append(True)
+                os.lseek(pin.fd,0,os.SEEK_SET);self.assertEqual(os.read(pin.fd,8193),original)
+            return native(pin)
+        def no_path_unlink(path,*args,**kwargs):
+            if path==lease:raise AssertionError('automatic marker release must be identity-bound')
+            return unlink(path,*args,**kwargs)
+        with patch.object(retention.WindowsPin,'delete',boundary),patch.object(Path,'unlink',no_path_unlink):guard.tick()
+        self.assertEqual(observed,[True]);self.assertEqual(denied,[True]*4)
+        self.assertEqual(guard.record['automaticRetention']['status'],'complete')
+        self.assertFalse(lease.exists());self.assertEqual(replacement.read_bytes(),b'foreign marker must remain')
+
+    def test_marker_replaced_before_native_pin_is_preserved_and_stops_deletion_and_replay(self):
+        self.seed();guard=self.owner();lease=self.root/'.space-budget.lock';native=retention.WindowsPin.__init__;seen=[]
+        replacement=self.root/'owned-foreign-marker.tmp';data=b'foreign task reservation';replacement.write_bytes(data)
+        def admission(pin,path,*args,**kwargs):
+            if Path(path)==lease and not seen:
+                lease.unlink();replacement.replace(lease);seen.append(True)
+            return native(pin,path,*args,**kwargs)
+        with patch.object(retention.WindowsPin,'__init__',admission):guard.tick()
+        self.assertEqual(seen,[True]);self.assertEqual(lease.read_bytes(),data)
+        self.assertTrue(guard.record);self.assertEqual(guard.record['automaticRetention']['status'],'held')
+        self.assertTrue(all(point.exists() for point in self.points))
+        count=len(list(self.root.glob('periodic-snapshot-*')));self.append();guard.tick()
+        self.assertIsNone(guard.record);self.assertEqual(len(list(self.root.glob('periodic-snapshot-*'))),count)
+        self.assertEqual(lease.read_bytes(),data)
+
+    def test_marker_native_release_failure_keeps_allocation_held_and_cannot_replay(self):
+        self.seed();guard=self.owner();lease=self.root/'.space-budget.lock';native=retention.WindowsPin.delete;seen=[]
+        def failure(pin):
+            info=os.fstat(pin.fd);stamp=lease.stat()
+            if (info.st_dev,info.st_ino)==(stamp.st_dev,stamp.st_ino):seen.append(True);raise OSError('owned release failure')
+            return native(pin)
+        with patch.object(retention.WindowsPin,'delete',failure):guard.tick()
+        self.assertEqual(seen,[True]);self.assertTrue(guard.record);self.assertEqual(guard.record['automaticRetention']['status'],'held')
+        self.assertTrue(lease.exists());count=len(list(self.root.glob('periodic-snapshot-*')))
+        self.append();guard.tick();self.assertIsNone(guard.record)
+        self.assertEqual(len(list(self.root.glob('periodic-snapshot-*'))),count);self.assertTrue(lease.exists())
+
+    def test_same_bytes_marker_replaced_during_initial_read_is_not_adopted(self):
+        self.seed();guard=self.owner();lease=self.root/'.space-budget.lock';native=Path.open;seen=[]
+        replacement=self.root/'owned-foreign-marker.tmp'
+        def replace_on_read(path,mode='r',*args,**kwargs):
+            if path==lease and mode=='rb' and not seen:
+                with native(lease,'rb') as stream:data=stream.read()
+                replacement.write_bytes(data);before=retention.identity(lease)
+                lease.unlink();replacement.replace(lease);seen.append((before,retention.identity(lease),data))
+            return native(path,mode,*args,**kwargs)
+        with patch.object(Path,'open',replace_on_read):guard.tick()
+        self.assertEqual(len(seen),1);self.assertNotEqual(seen[0][0],seen[0][1])
+        self.assertTrue(guard.record);self.assertEqual(guard.record['automaticRetention']['code'],'AUTO_LEASE_CHANGED')
+        self.assertEqual(lease.read_bytes(),seen[0][2]);self.assertTrue(all(point.exists() for point in self.points))
+
+    def test_reused_snapshot_creates_and_releases_only_its_opened_marker_without_new_copy(self):
+        self.seed()
+        with patch.dict(os.environ,{'SQLITE_PERIODIC_RETENTION_ENABLED':'0'}):
+            report=retention.backup.create_backup(self.source,self.root,prefix='periodic-snapshot')
+        guard=self.owner();guard.tick();self.assertTrue(guard.record,guard.status())
+        self.assertTrue(guard.record['backupReused']);self.assertEqual(guard.record['backup'],report['backup'])
+        self.assertEqual(guard.record['automaticRetention']['status'],'complete')
+        self.assertFalse((self.root/'.space-budget.lock').exists())
+        self.assertEqual(len(list(self.root.glob('periodic-snapshot-*/wewe-rss.db'))),4)
+
 if __name__=='__main__':unittest.main()

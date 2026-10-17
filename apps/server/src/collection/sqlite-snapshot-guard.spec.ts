@@ -10,6 +10,8 @@ import {
   stopSqliteSnapshotGuard,
   assertInsertOnlySnapshotPermit,
   notifySqliteSnapshotDirty,
+  safePeriodicSnapshotFailure,
+  safePeriodicRetentionStatus,
 } from './sqlite-snapshot-guard';
 
 describe('snapshot owner with real local Python / Prisma SQLite only', () => {
@@ -254,6 +256,14 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
             (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
           ),
         ).toHaveLength(1);
+        expect(
+          warning.mock.calls.find(
+            (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+          )?.[1],
+        ).toEqual({
+          code: 'SQLITE_SPACE_BUDGET_EXCEEDED',
+          stage: 'budget',
+        });
         expect((await owner.query()).fresh).toBe(false);
         await prisma.$executeRawUnsafe(
           "INSERT INTO articles VALUES ('ordinary-after-backup-failure','retained')",
@@ -268,4 +278,60 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
       }
     },
   );
+});
+
+describe('bounded snapshot and automatic retention diagnostics', () => {
+  it('keeps distinct safe layout/budget/rotation codes and strips private fields', () => {
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW',
+        stage: 'layout',
+        path: 'private',
+      }),
+    ).toEqual({
+      code: 'SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW',
+      stage: 'layout',
+    });
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'SQLITE_PERIODIC_RETENTION_HELD',
+        stage: 'rotation',
+        error: 'private',
+      }),
+    ).toEqual({
+      code: 'SQLITE_PERIODIC_RETENTION_HELD',
+      stage: 'rotation',
+    });
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'arbitrary private path',
+        stage: 'layout',
+      }),
+    ).toBeUndefined();
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'SQLITE_BACKUP_FAILED',
+        stage: 'private argv',
+      }),
+    ).toBeUndefined();
+    expect(
+      safePeriodicRetentionStatus({
+        status: 'held',
+        code: 'private error',
+        deletedCopies: -1,
+        heldUnique: 2,
+        path: 'private',
+      }),
+    ).toEqual({
+      status: 'held',
+      code: 'AUTO_RETENTION_HELD',
+      deletedCopies: null,
+      heldUnique: 2,
+      heldOther: null,
+      protectedOrUnknown: null,
+    });
+    expect(
+      safePeriodicRetentionStatus({ status: 'unknown', code: 'COMPLETE' }),
+    ).toBeUndefined();
+  });
 });
