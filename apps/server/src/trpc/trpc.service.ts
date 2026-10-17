@@ -14,9 +14,9 @@ import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { BodyRetryBlockedError } from '../collection/article-body-retry';
 import { Feed } from '@prisma/client';
 import { promises as fs } from 'node:fs';
-import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { ownerSessionCookie } from '../collection/owner-web-search';
+import { saveNativeAccountSession } from '../collection/owner-weread-binding';
 import {
   CollectionRoute,
   parseBoundAlbumIds,
@@ -623,24 +623,17 @@ export class TrpcService {
           const bindings = Object.values(config.feeds || {}).filter(
             (v: any) => v.ownerVid === accountId,
           ) as any[];
+          // Keep the native login server-side for an explicit account-page
+          // binding, including a selected owner not yet bound to this feed.
+          const sessionFile = await saveNativeAccountSession(
+            configFile,
+            result.webSession,
+          );
           if (bindings.length) {
             const key = createHash('sha256')
               .update(JSON.stringify(result.webSession))
               .digest('hex')
               .slice(0, 24);
-            const sessionFile = path.join(
-              path.dirname(configFile),
-              `native-session-${key}.json`,
-            );
-            try {
-              await fs.writeFile(
-                sessionFile,
-                JSON.stringify(result.webSession),
-                { flag: 'wx', mode: 0o600 },
-              );
-            } catch (e: any) {
-              if (e.code !== 'EEXIST') throw e;
-            }
             for (const binding of bindings) binding.sessionFile = sessionFile;
             const history = configFile + `.before-native-${key}`;
             try {

@@ -1,11 +1,11 @@
 import { Controller, Get, Param, Response } from '@nestjs/common';
 import { Response as Res } from 'express';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TrpcRouter } from './trpc/trpc.router';
-import { ZipArchive } from 'archiver';
+import { archiveDirectory } from './offline-archive';
 
 // The archive is staged outside the workspace and removed after the response.
 
@@ -23,16 +23,7 @@ export class OfflineExportController {
       const result = await this.router.buildOfflineFeedDirectory(id, folder);
       if (!result) return res.status(404).send('公众号不存在');
       const archivePath = path.join(temporary, 'feed.zip');
-      await new Promise<void>((resolve, reject) => {
-        const output = createWriteStream(archivePath);
-        const archive = new ZipArchive({ zlib: { level: 6 } });
-        output.on('close', resolve);
-        output.on('error', reject);
-        archive.on('error', reject);
-        archive.pipe(output);
-        archive.directory(folder, false);
-        archive.finalize().catch(reject);
-      });
+      await archiveDirectory(folder, archivePath);
       const size = (await stat(archivePath)).size;
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Length', String(size));

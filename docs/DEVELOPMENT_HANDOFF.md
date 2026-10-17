@@ -1,5 +1,37 @@
 # 自建订阅当前断点（2026-10-03）
 
+## 2026-10-04：正常Web登录已接到原手动Provider，等待用户确认后真实验收
+
+- 在同一隔离订阅worktree复用原官方QR登录，服务端保存尚未绑定账号的原生Web会话；现有账号页补“重新登录”“连接手动更新”的预览和明确确认。凭据不回传界面，不抽取Edge秘密、不重放WRPA，未改下载器。只允许本机已认证请求，预览/确认均无腾讯取文。
+- 确认连接时检查真实原生登录索引与当前账号凭据一致、预览版本和刷新锁；保留旧配置/状态不可变快照、历史停止和冷却，只给本人正常登录产生的不同认证上下文明确授权。已失败的同一凭据不能重复授权，新停止会使授权失效。连接后用原HTTP目录/正文/图片及事务去重链路，未新建采集框架或自动刷新。
+- 已核当前私有目录为 `private-data/update-fix-20260930/`，不存在native登录停止，新索引0；生产仍未改。父线程需先协调审查/部署，并向用户确认：用当前成功账号所属微信操作现有账号管理“重新登录/添加账号”，核对昵称及脱敏VID，再连接“妈妈部落畅聊阁”手动更新。具体步骤、保存位置及会话过期行为见 [说明](WEREAD_MANUAL_REFRESH.md#正常web登录连接原手动刷新)。先验最新10篇正文/本地图片及原刷新去重，不重复首篇取证或要求人工采10篇。
+- 全量后端38 suites/528 tests、前后端构建、前端类型检查及修改文件ESLint/Prettier通过。正常登录绑定及连续传输均是隔离Mock回归，腾讯请求和生产写入0，不代表最新10篇线上恢复。
+- 接入提交 `0402f7b` 的GitHub CI `37211668775` 全部通过。随后补配置提交失败回滚：只有证明旧配置未变时恢复旧状态，清理由本次独占创建的pending文件，既有中断文件保持；11项绑定回归通过，最后补丁另核准确提交CI。
+
+## 2026-10-04：隔离订阅修复核实真实缺口，原按钮停止原因可区分
+
+- 从已提交 `044e310` 建立 Temp 独立 worktree / `codex/manual-subscription-web-bridge`；下载线程的主工作区未提交文件不动，未监听4000、重启服务、替换凭据或解除停止。实际数据库只读核验2账号/12订阅/1450文章、quick_check=ok；私有配置定时关闭、目录模式false、旧cover HTTP401停止仍在。
+- 真实目录两页离线解析20+20组/40篇，最近10选取正确；原按钮至Provider/正文/图片归档/事务去重已接线。插件已只读确认首篇显示至END、1张远程图已加载、标题/ct/biz/mid/idx与保存证据一致；残留验证提示不代表正文失败，无需重复证明首篇或让用户采10篇。当前缺口为成功Edge会话的安全可重复后台取文衔接，不能靠旧WRPA或重放旧账号失败请求解决；GET正文请求合同已有记录，无需再为此取证。详见 [手动更新说明](WEREAD_MANUAL_REFRESH.md#当前实际缺口与原按钮诊断)。
+- 修复目录/正文HTTP200业务拒绝丢失数字错误码、目录失败误显示正文停止、正文身份冲突被压成普通失败；未知错误文字不直接展示。门禁保持，后续请求停止。7 suites/122 tests、后端构建、修改文件ESLint通过；腾讯请求/生产写入0，最新10篇真实刷新未验收。隔离分支仅准备审查，合并与部署由父线程协调。
+
+## 2026-10-04：下载工具空白反馈核查
+
+- 用户原`启动WeWe-RSS.bat`只调用已停用prepare-local并退出1，不能启动。现接回受控`logon-start.cjs start`，显式定时关闭、跟随active.json、已运行完整身份匹配才复用，成功后本机Edge打开工具页；不停止/迁移现有进程。Git固定bat CRLF，`--check`只省略浏览器，实际入口验证复用PID18288。应用包无需重构，身份拒绝回归和生产逐字段保护复核通过。
+- 用户确认在ChatGPT内打开本机链接。原4000仍归属已核进程18288，HTML/JS/CSS正常；独立本机Edge直接打开、刷新及尾斜杠路由实际显示URL输入框和下载按钮。未发现本机路由或部署包空白故障，未改应用代码、启动进程或凭据。
+- [打开方式](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md#打开本机工具)改为在运行软件的Windows本机Edge/Chrome地址栏输入地址。当前执行器没有可调用的Computer Use node_repl，不能宣称检查了用户现有浏览器窗口；使用独立Edge验证，不碰已停腾讯URL。外部字体和版本检查被隔离阻止，原始截图和资源响应保留在本机忽略目录`output/playwright/local-release-audit/blank-page-*`，无平台取文或数据库改动。
+
+## 2026-10-04：集成本机已受控启动，Windows归属查询修补
+
+- 复现自有回环监听：CIM/原生TCP行状态异常，netstat缺失；改为Windows原生 `TCP_TABLE_OWNER_PID_LISTENER` 专用表核监听归属，不推断ALL表未知状态。保留Process句柄、启动时间、程序路径、命令行与预期身份停止门禁；原生错误不降级HTTP或空列表。2项Windows回归和16项运行回归通过，新增Windows CI。
+- 固定包`.local-releases/2026-10-04T10-18-17-755Z-213913c1bd74`通过`restart.cjs --mode start --production`，启动审计`controlled-restart-1791111748983-19472`，活动指针已推进。应用源码仍为`68aa31f`对应包，只改包外启动器，无需重构包。固定回环4000、定时关闭；2账号/12订阅/1450文章全部字段与启动前一致性备份相同，quick_check=ok。
+- 当前没有新的平台取文、来源切换或登录尝试；`wereadDirectoryEnabled`仍false。真实单篇链接和最新10篇正文图片/原刷新去重仍未验收。步骤、诊断依据与实际状态见[集成说明](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md)；原始证据/备份/截图仅保留本机忽略目录。
+
+## 2026-10-04：手动订阅与独立下载组合集成
+
+- 唯一集成者在`codex/manual-refresh-download-integration`合并`185ea7f`与`b7c0895`，无冲突；保留下载源分支/worktree。最小diff核对原导出为代码抽取，工具无数据库依赖且不改订阅模块，补齐内嵌/远程图片总预算回归。
+- 组合37 suites/503 tests、前后端构建和前端ESLint通过；运行策略/就绪/依赖闭包16项通过。固定包`.local-releases/2026-10-04T10-18-17-755Z-213913c1bd74`已生成（264依赖/13294文件/无桌面helper）。准确运行步骤及真实缺口见[集成交付说明](MANUAL_REFRESH_DOWNLOAD_INTEGRATION.md)。未生产启动、改凭据、开启实时目录或请求平台；生产仍2/12/1450、4000无监听。
+- 固定包`verify`完整性ok，独立Node/Prisma的SQLite副本`probe`返回runtime-verified、12/1450、pending=[]及清单匹配的引擎哈希。后续只按受控冷启动器部署，明确ENABLE_SCHEDULED_UPDATES=0、DISABLE_SCHEDULED_UPDATES=1；当前不执行部署或真实链接验证。
+
 ## 2026-10-04：原刷新函数目录模式已接线，保存下载复用原实现
 
 - 用户要求先读清源码后尽快修订阅；实际链路为前端 `feed.refreshArticles` → `TrpcService.refreshMpArticlesAndUpdateFeed/refreshArticles` → `CollectionService.collectOwnerWereadLatest` → `fetchOwnerWereadLatest`。原阻点确实是最后一步的cover单篇，`WereadService.getMpArticles`是停用旧链，不能改它冒充原按钮修复。
