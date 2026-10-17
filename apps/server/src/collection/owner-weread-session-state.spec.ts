@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { ownerSessionCookie, OwnerWebSession } from './owner-web-search';
 import {
   ownerLatestAuthHash,
+  ownerLatestFailureReason,
   ownerLatestStopMessage,
   recordOwnerLatestOfflineVerification,
 } from './owner-weread-session-state';
@@ -124,6 +125,51 @@ function evidence() {
 }
 
 describe('owner latest session stop ownership (offline only)', () => {
+  it.each([
+    ['directory-0', '目录'],
+    ['directory-next', '目录'],
+    ['content-1', '正文'],
+    ['content-10', '正文'],
+    ['images', '图片归档'],
+    ['cover', '最新篇'],
+    ['unknown', '更新'],
+  ])(
+    'reports the actual stopped stage without changing the state (%s)',
+    (stage, label) => {
+      const state = {
+        stop: {
+          sessionAuthHash: ownerLatestAuthHash(session(), '123'),
+          stage,
+          reason: 'HTTP 401',
+        },
+      };
+      const before = JSON.stringify(state);
+      expect(ownerLatestStopMessage(state, session(), '123', mpId)).toContain(
+        `${label}已停止：HTTP 401`,
+      );
+      expect(JSON.stringify(state)).toBe(before);
+    },
+  );
+  it('never exposes arbitrary transport or historical error text in the product message', () => {
+    const privateError = 'https://weread.qq.com/?token=private-fixture';
+    expect(ownerLatestFailureReason(new Error(privateError))).toBe(
+      '请求、响应或本地保存失败',
+    );
+    expect(
+      ownerLatestFailureReason(new Error('WEREAD_BODY_ACCESS_CHALLENGE')),
+    ).toBe('腾讯验证或访问限制');
+    const state = {
+      stop: {
+        sessionAuthHash: ownerLatestAuthHash(session(), '123'),
+        stage: 'directory-0',
+        reason: privateError,
+      },
+    };
+    expect(ownerLatestStopMessage(state, session(), '123', mpId)).not.toContain(
+      'private-fixture',
+    );
+    expect(state.stop.reason).toBe(privateError);
+  });
   it('identifies auth independently of auxiliary cookies, capture time and cookie order', () => {
     const first = session(),
       next = session();
