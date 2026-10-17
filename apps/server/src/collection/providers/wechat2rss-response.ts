@@ -12,12 +12,14 @@ export type Wechat2RssResponseErrorCode =
   | 'WECHAT2RSS_REQUEST_TIMEOUT'
   | 'WECHAT2RSS_NETWORK_ERROR';
 type ResponseDetails = {
+  phase?: 'headers' | 'body' | 'json';
   httpStatus?: number;
   responseBytes?: number;
   responseLimitBytes?: number;
 };
 /** Fixed code and numbers only: never retain URL, response text or raw cause. */
 export class Wechat2RssResponseError extends Error {
+  readonly phase?: 'headers' | 'body' | 'json';
   readonly httpStatus?: number;
   readonly responseBytes?: number;
   readonly responseLimitBytes?: number;
