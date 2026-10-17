@@ -231,9 +231,10 @@ const Feeds = () => {
       }
     },
   });
-  const manualBatch = manualBatches.data?.items.find((batch) =>
-    ['queued', 'running', 'paused'].includes(batch.state),
-  );
+  const manualBatch =
+    manualBatches.data?.items.find((batch) =>
+      ['queued', 'running', 'paused'].includes(batch.state),
+    ) ?? manualBatches.data?.items[0];
   const {
     mutateAsync: getHistoryArticles,
     isLoading: isGetHistoryArticlesLoading,

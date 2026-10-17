@@ -310,7 +310,109 @@ const isolatedRefresh = (b: Batch) =>
       ['blocked', 'failed'].includes(item.state) &&
       item.stopBatch !== false,
   );
-const view = (b: Batch) => ({
+/** Derived audit of every original input. A skipped label alone proves nothing. */
+const refreshCoverage = (b: Batch, records: Batch[], now: number) => {
+  const items = b.items.map((item) => {
+    const scope = refreshScope(b, item);
+    const outcome = (
+      status: 'completed' | 'pending' | 'excluded' | 'anomaly',
+      reason: string,
+      ownerBatchId?: string,
+    ) => ({ feedId: item.feedId, status, reason, ownerBatchId });
+    if (uncertainSubmission(item))
+      return outcome('anomaly', 'submission-unconfirmed');
+    if (item.coverageReviewRequired)
+      return outcome('anomaly', 'coverage-unproved');
+    if (item.state === 'succeeded' && item.accepted === true)
+      return outcome('completed', 'local-completion');
+    if (item.state === 'skipped') {
+      if (
+        ['SOURCE_CHANGED', 'SUBSCRIPTION_PAUSED'].includes(item.code || '') &&
+        item.accepted === false
+      )
+        return outcome('excluded', item.code!);
+      const owner =
+        scope &&
+        records.find(
+          (record) =>
+            record.instance === b.instance &&
+            record.batchId !== b.batchId &&
+            (b.retainedBatchIds?.includes(record.batchId) ||
+              item.supersededBy?.batchId === record.batchId) &&
+            record.items.some(
+              (other) =>
+                other.feedId === item.feedId &&
+                refreshScope(record, other) === scope &&
+                ((other.state === 'succeeded' &&
+                  other.accepted === true &&
+                  !other.submissionUnknown &&
+                  (item.supersededBy
+                    ? other.refreshClaimedAt === item.supersededBy.claimedAt
+                    : record.updatedAt >= b.createdAt)) ||
+                  (!item.supersededBy &&
+                    retainsRefreshItem(record, other, now))),
+            ),
+        );
+      const retained = owner
+        ? owner.items.find((other) => other.feedId === item.feedId)
+        : undefined;
+      if (owner && retained) {
+        if (uncertainSubmission(retained))
+          return outcome(
+            'anomaly',
+            'retained-submission-unconfirmed',
+            owner.batchId,
+          );
+        return retained.state === 'succeeded'
+          ? outcome('completed', 'verified-retained-completion', owner.batchId)
+          : outcome('pending', 'active-retained-work', owner.batchId);
+      }
+      return outcome('anomaly', 'skipped-without-valid-coverage');
+    }
+    if (
+      ['queued', 'waiting'].includes(item.state) &&
+      live(b) &&
+      retainsRefreshItem(b, item, now)
+    )
+      return outcome('pending', 'active-local-work');
+    return outcome(
+      'anomaly',
+      item.state === 'cancelled' ? 'not-submitted' : 'unfinished-work',
+    );
+  });
+  const count = (status: string) =>
+    items.filter((item) => item.status === status).length;
+  const expected = items.length;
+  const completed = count('completed'),
+    pending = count('pending'),
+    excluded = count('excluded'),
+    anomalies = count('anomaly');
+  const submitted = b.items.filter(
+    (item) => item.accepted === true && !uncertainSubmission(item),
+  ).length;
+  return {
+    expected,
+    submitted,
+    completed,
+    pending,
+    legitimateSkipped:
+      excluded +
+      items.filter((item) => item.ownerBatchId && item.status !== 'anomaly')
+        .length,
+    excluded,
+    anomalies,
+    fullyUpdated: expected > 0 && completed === expected,
+    status: anomalies
+      ? 'attention'
+      : pending
+        ? 'in-progress'
+        : excluded
+          ? 'complete-with-exclusions'
+          : 'complete',
+    items,
+  };
+};
+const view = (b: Batch, records: Batch[] = [b], now = Date.now()) => ({
   batchId: b.batchId,
   purpose: b.purpose || 'subscription',
   intentKey: b.intentKey,
@@ -319,6 +421,7 @@ const view = (b: Batch) => ({
   state: b.state,
   createdAt: b.createdAt,
   updatedAt: b.updatedAt,
+  coverage: isRefresh(b) ? refreshCoverage(b, records, now) : undefined,
   items: b.items.map((item) => ({
     index: item.index,
     state: item.state,
@@ -801,13 +904,14 @@ export class Wechat2RssSubscriptionBatches {
     return result.sort((a, b) => a.createdAt - b.createdAt);
   }
   async list() {
-    const batches = (await this.records())
+    const records = await this.records();
+    const batches = records
       .sort(
         (a, b) =>
           Number(live(b)) - Number(live(a)) || b.createdAt - a.createdAt,
       )
       .slice(0, 100)
-      .map(view);
+      .map((b) => view(b, records, this.now()));
     // Read the latest durable continuation, including metadata after a batch
     // completed. This projection never resumes a stopped batch or submits work.
     for (const batch of batches) {
@@ -835,6 +939,23 @@ export class Wechat2RssSubscriptionBatches {
         batch.items.every((item) => item.state === 'succeeded')
       )
         batch.state = 'completed';
+      const original = records.find(
+        (record) => record.batchId === batch.batchId,
+      )!;
+      if (isRefresh(original))
+        batch.coverage = refreshCoverage(
+          {
+            ...original,
+            items: original.items.map((item, index) => ({
+              ...item,
+              state: batch.items[index].state,
+              code: batch.items[index].code,
+              bodyReady: batch.items[index].bodyReady,
+            })),
+          },
+          records,
+          this.now(),
+        );
     }
     return batches;
   }
@@ -945,7 +1066,8 @@ export class Wechat2RssSubscriptionBatches {
       const original =
         intentKey &&
         records.find((b) => isRefresh(b) && b.intentKey === intentKey);
-      if (original) return { ...view(original), reused: true };
+      if (original)
+        return { ...view(original, records, this.now()), reused: true };
       // Restore legacy terminal preparation failures before cross-slot deduplication.
       // The original intent and retry budget remain authoritative.
       await this.normalizeRefreshLifecycle(records);
@@ -1033,13 +1155,16 @@ export class Wechat2RssSubscriptionBatches {
           };
           await this.write(joined, false);
           this.schedule();
-          return { ...view(joined), reused: true };
+          return { ...view(joined, records, this.now()), reused: true };
         }
-        return { ...view(same), reused: true };
+        return { ...view(same, records, this.now()), reused: true };
       }
       if (records.some(live)) throw new Error('BATCH_BUSY');
       const ids = [...new Set(feedIds)].filter((id) => !uncertain.has(id));
-      if (!ids.length) throw new Error('BATCH_UNCONFIRMED');
+      if (!ids.length && purpose !== 'scheduled-refresh')
+        throw new Error('BATCH_UNCONFIRMED');
+      const requested =
+        purpose === 'scheduled-refresh' ? [...new Set(feedIds)] : ids;
       const b: Batch = {
         version: 1,
         batchId: randomUUID(),
@@ -1054,18 +1179,32 @@ export class Wechat2RssSubscriptionBatches {
           this.now(),
           ...records.map((record) => record.nextSubmissionAt),
         ),
-        state: 'queued',
-        items: ids.map((feedId, index) => ({
+        state: ids.length ? 'queued' : 'deferred',
+        retainedBatchIds:
+          purpose === 'scheduled-refresh'
+            ? records
+                .filter(
+                  (record) =>
+                    isRefresh(record) &&
+                    record.items.some(
+                      (item) =>
+                        requested.includes(item.feedId!) &&
+                        uncertainSubmission(item),
+                    ),
+                )
+                .map((record) => record.batchId)
+            : undefined,
+        items: requested.map((feedId, index) => ({
           index,
           feedId,
-          state: 'queued',
+          state: ids.includes(feedId) ? 'queued' : 'skipped',
           accepted: false,
           message: '等待串行提交上游更新。',
         })),
       };
       await this.write(b, false);
       this.schedule();
-      return { ...view(b), reused: false };
+      return { ...view(b, records, this.now()), reused: false };
     } finally {
       this.accepting = false;
       await release();
@@ -1159,6 +1298,16 @@ export class Wechat2RssSubscriptionBatches {
       )
         throw new Error('BATCH_UNCONFIRMED');
       b.cacheOnly = true;
+      for (const item of b.items)
+        if (
+          item.state === 'queued' &&
+          item.accepted === false &&
+          !uncertainSubmission(item)
+        ) {
+          item.state = 'cancelled';
+          item.message =
+            'Unsent intent retired by cache-only recovery; no update submitted.';
+        }
       for (const item of b.items) {
         if (
           item.accepted &&
@@ -1346,6 +1495,7 @@ export class Wechat2RssSubscriptionBatches {
         } else if (
           safePreparation(item) &&
           b.purpose === 'scheduled-refresh' &&
+          !b.cacheOnly &&
           !activePreparationRetry(b, item, this.now())
         ) {
           if (
@@ -1374,9 +1524,8 @@ export class Wechat2RssSubscriptionBatches {
         } else if (
           item.state === 'queued' &&
           item.accepted === false &&
-          !b.cacheOnly &&
           !activePreparationRetry(b, item, this.now()) &&
-          (!live(b) || scheduledDayExpired(b, this.now()))
+          (b.cacheOnly || !live(b) || scheduledDayExpired(b, this.now()))
         ) {
           item.state = 'cancelled';
           item.message =

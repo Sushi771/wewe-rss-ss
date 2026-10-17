@@ -432,7 +432,7 @@ describe('terminal refresh admission (synthetic durable records only)', () => {
     expect(first.run).toHaveBeenCalledTimes(1);
     expect(second.run).not.toHaveBeenCalled();
   });
-  it('keeps an ended explicit cache-only batch completed and its unsent history intact', async () => {
+  it('retires an ended cache-only unsent tail without replay and reports the incomplete round', async () => {
     const old = await seed(
       [
         { state: 'waiting', accepted: true, submissionUnknown: false },
@@ -454,11 +454,198 @@ describe('terminal refresh admission (synthetic durable records only)', () => {
           accepted: true,
           cacheRetryExhausted: 'deadline',
         }),
-        expect.objectContaining({ state: 'queued', accepted: false }),
+        expect.objectContaining({ state: 'cancelled', accepted: false }),
       ],
+    });
+    expect(
+      (await manager.list()).find((b) => b.batchId === old.batchId)?.coverage,
+    ).toMatchObject({
+      expected: 2,
+      completed: 0,
+      anomalies: 2,
+      fullyUpdated: false,
     });
     await manager.runDue();
     expect(run.mock.calls[0][3]).toEqual({ claimKey: next.batchId });
+  });
+  it('counts an unproved skipped tail as missing coverage even when the parent says completed', async () => {
+    const old = await seed(
+      ids.map((_, i) =>
+        i < 12 ? ready : { state: 'skipped', accepted: false },
+      ),
+    );
+    const { manager } = make();
+    expect(
+      (await manager.list()).find((b) => b.batchId === old.batchId)?.coverage,
+    ).toMatchObject({
+      expected: 14,
+      submitted: 12,
+      completed: 12,
+      legitimateSkipped: 0,
+      anomalies: 2,
+      fullyUpdated: false,
+      status: 'attention',
+    });
+  });
+  it('preserves every requested source when terminal unknown history excludes a claim, including after restart', async () => {
+    const old = await seed([
+      { state: 'blocked', accepted: false, submissionUnknown: true },
+    ]);
+    const first = make();
+    const next = await first.manager.enqueueRefresh(
+      ids,
+      '5'.repeat(64),
+      'scheduled-refresh',
+    );
+    expect(next.items).toHaveLength(14);
+    expect(next.retainedBatchIds).toContain(old.batchId);
+    expect(next.coverage).toMatchObject({
+      expected: 14,
+      submitted: 0,
+      completed: 0,
+      pending: 13,
+      anomalies: 1,
+      fullyUpdated: false,
+    });
+    first.manager.close();
+    const restarted = make();
+    const repeated = await restarted.manager.enqueueRefresh(
+      ids,
+      '5'.repeat(64),
+      'scheduled-refresh',
+    );
+    expect(repeated.batchId).toBe(next.batchId);
+    expect(repeated.coverage).toMatchObject({
+      expected: 14,
+      anomalies: 1,
+      fullyUpdated: false,
+    });
+    expect(restarted.run).not.toHaveBeenCalled();
+  });
+  it('distinguishes active retained coverage from completion and verifies it again after restart', async () => {
+    const owner = await seed(
+      [{ state: 'waiting', accepted: true, submissionUnknown: false }],
+      { state: 'running', createdAt: clock - 60000, updatedAt: clock - 1000 },
+    );
+    const first = make();
+    const next = await first.manager.enqueueRefresh(
+      ids,
+      '6'.repeat(64),
+      'scheduled-refresh',
+    );
+    expect(next.coverage).toMatchObject({
+      expected: 14,
+      pending: 14,
+      completed: 0,
+      legitimateSkipped: 1,
+      anomalies: 0,
+      fullyUpdated: false,
+    });
+    const current = await disk(next.batchId);
+    current.state = 'completed';
+    current.items = current.items.map((item: any) =>
+      item.state === 'queued' ? { ...item, ...ready } : item,
+    );
+    await fs.writeFile(file(next.batchId), JSON.stringify(current));
+    first.manager.close();
+    const second = make();
+    expect(
+      (await second.manager.list()).find((b) => b.batchId === next.batchId)
+        ?.coverage,
+    ).toMatchObject({ completed: 13, pending: 1, fullyUpdated: false });
+    owner.items[0] = { ...owner.items[0], ...ready };
+    owner.state = 'completed';
+    owner.updatedAt = clock + 1;
+    await fs.writeFile(file(owner.batchId), JSON.stringify(owner));
+    expect(
+      (await second.manager.list()).find((b) => b.batchId === next.batchId)
+        ?.coverage,
+    ).toMatchObject({
+      expected: 14,
+      completed: 14,
+      pending: 0,
+      anomalies: 0,
+      fullyUpdated: true,
+    });
+    expect(second.run).not.toHaveBeenCalled();
+  });
+  it('reports explicit source exclusions separately from updates', async () => {
+    const old = await seed([
+      { state: 'skipped', accepted: false, code: 'SOURCE_CHANGED' },
+      { state: 'skipped', accepted: false, code: 'SUBSCRIPTION_PAUSED' },
+    ]);
+    const { manager } = make();
+    expect(
+      (await manager.list()).find((b) => b.batchId === old.batchId)?.coverage,
+    ).toMatchObject({
+      expected: 2,
+      submitted: 0,
+      completed: 0,
+      excluded: 2,
+      legitimateSkipped: 2,
+      anomalies: 0,
+      fullyUpdated: false,
+      status: 'complete-with-exclusions',
+    });
+  });
+  it('records a fully unknown-held round without dropping inputs or sending another request', async () => {
+    await seed(
+      ids.map(() => ({
+        state: 'blocked',
+        accepted: false,
+        submissionUnknown: true,
+      })),
+    );
+    const { manager, run } = make();
+    const next = await manager.enqueueRefresh(
+      ids,
+      '8'.repeat(64),
+      'scheduled-refresh',
+    );
+    expect(next.state).toBe('deferred');
+    expect(next.items).toHaveLength(14);
+    expect(next.coverage).toMatchObject({
+      expected: 14,
+      submitted: 0,
+      completed: 0,
+      anomalies: 14,
+      fullyUpdated: false,
+    });
+    await manager.runDue();
+    expect(run).not.toHaveBeenCalled();
+  });
+  it('admits 128 sources after old known accepted cache budgets end without manual per-source repair', async () => {
+    const many = Array.from(
+      { length: 128 },
+      (_, i) => `MP_WXS_${2234500000 + i}`,
+    );
+    await seed(
+      many.map((feedId) => ({
+        feedId,
+        state: 'failed',
+        accepted: true,
+        submissionUnknown: false,
+        stopBatch: false,
+        cacheRetryExhausted: 'deadline',
+      })),
+    );
+    const { manager, run } = make();
+    const next = await manager.enqueueRefresh(
+      many,
+      '7'.repeat(64),
+      'scheduled-refresh',
+    );
+    expect(next.items.filter((item) => item.state === 'queued')).toHaveLength(
+      128,
+    );
+    expect(next.coverage).toMatchObject({
+      expected: 128,
+      pending: 128,
+      completed: 0,
+      anomalies: 0,
+      fullyUpdated: false,
+    });
+    expect(run).not.toHaveBeenCalled();
   });
   it.each(['queued', 'submitting'])(
     'recovers a confirmed accepted %s label only as cache work',

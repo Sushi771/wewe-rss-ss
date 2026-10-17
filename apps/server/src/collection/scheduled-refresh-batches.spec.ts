@@ -223,7 +223,17 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
       '0'.repeat(64),
       'scheduled-refresh',
     );
-    expect(second.items.map((item) => item.feedId)).toEqual([ids[1]]);
+    expect(second.items.map((item) => item.feedId)).toEqual(ids);
+    expect(second.items.map((item) => item.state)).toEqual([
+      'skipped',
+      'queued',
+    ]);
+    expect(second.coverage).toMatchObject({
+      expected: 2,
+      pending: 1,
+      anomalies: 1,
+      fullyUpdated: false,
+    });
     expect(run).toHaveBeenCalledTimes(1);
   });
   it('midnight new automatic items cannot submit, and disabling prevents queued submissions', async () => {
@@ -261,7 +271,7 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
         ?.state,
     ).toBe('completed');
   });
-  it('300 subscriptions continue after one unknown, preserve receipts on restart, and exclude it next slot', async () => {
+  it('300 subscriptions continue after one unknown, preserve its audit entry after restart, and never resubmit it next slot', async () => {
     clock = Date.parse('2026-10-13T09:15:00+08:00');
     const feeds = Array.from(
       { length: 300 },
@@ -300,10 +310,19 @@ describe('automatic refresh shares durable manual queue (offline)', () => {
       '2'.repeat(64),
       'scheduled-refresh',
     );
-    expect(nextBatch.items).toHaveLength(299);
-    expect(nextBatch.items.some((item) => item.feedId === feeds[27])).toBe(
-      false,
-    );
+    expect(nextBatch.items).toHaveLength(300);
+    expect(
+      nextBatch.items.filter((item) => item.state === 'queued'),
+    ).toHaveLength(299);
+    expect(
+      nextBatch.items.find((item) => item.feedId === feeds[27]),
+    ).toMatchObject({ state: 'skipped', accepted: false });
+    expect(nextBatch.coverage).toMatchObject({
+      expected: 300,
+      pending: 299,
+      anomalies: 1,
+      fullyUpdated: false,
+    });
     await Promise.all([first.manager.runDue(), next.manager.runDue()]);
     expect(run.mock.calls.filter(([feed]) => feed === feeds[27])).toHaveLength(
       1,

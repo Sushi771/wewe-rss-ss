@@ -50,3 +50,29 @@ Deployment and verification are separate operational decisions. This patch does
 not deploy or alter production records during development. After a reviewed
 deployment, the next natural scheduler intent exercises the corrected admission;
 historical batches need not be manually replayed to create that new intent.
+
+## Parent completion and source coverage
+
+The explicit `resumeCacheOnly` path and its cache-result settlement previously
+considered only remaining `waiting` children. It could mark the parent completed
+while leaving an ordinary unsent `queued` tail, since cache-only mode deliberately
+cannot submit that tail. Conversion now cancels explicitly known-unsent children;
+the worker applies the same repair to legacy cache-only records under its lock.
+The accepted flag and original input remain, so cancellation cannot masquerade as
+an upstream update or erase evidence. An ambiguous claim is never cancelled this way.
+This is a reproducible code path, not a claim about an undocumented historical call.
+
+Every refresh response/list derives a coverage audit from the original source
+list and the current durable receipts. Scheduled admission retains unknown-held
+sources in its input even when it cannot claim them. Counts distinguish expected,
+submitted in this round, completed, pending, legitimate skips, exclusions and
+anomalies. A skipped label requires a structured source-change/pause result or
+a valid retained owner/verified completion. Active retained work remains pending;
+unconfirmed or missing owner evidence remains an anomaly. A legal exclusion is
+not an update. `fullyUpdated` is true only when every input has completion evidence.
+The progress page also displays terminal coverage, so a completed parent with
+12 successes and two unproved skips cannot disappear as apparent full coverage.
+
+Coverage is a read projection, not a new persisted queue format or permission to
+send a request. Synthetic regressions include 128 sources, 14-source partial
+coverage, owner completion after restart, retained unknowns and legal exclusions.
