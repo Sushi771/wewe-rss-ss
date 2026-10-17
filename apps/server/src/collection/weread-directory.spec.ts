@@ -61,7 +61,7 @@ const raw = (...groups: ReturnType<typeof group>[]) => ({
 });
 const body = (n = 1, image = inline): SavedWereadBody => {
   const candidate = parseWereadDirectory(raw(group(n)), expected).articles[0];
-  const html = `<meta property="og:url" content="https://mp.weixin.qq.com/s/${candidate.originalId}"><h1 id="activity-name">文章${n}</h1><span id="js_name">测试号</span><div id="js_content"><p>完整正文</p><img src="${image}" onload="bad()"><script>bad()</script></div><script>var biz="${biz}";var mid="${n}";var idx="1";var sn="abcd";var ct=${candidate.publishTime};</script>`;
+  const html = `<meta property="og:url" content="https://mp.weixin.qq.com/s/${candidate.originalId}"><h1 id="activity-name">文章${n}</h1><span id="js_name">测试号</span><div id="js_content"><p>完整正文</p><img src="${image}" onload="bad()"><script>bad()</script></div><script>var biz="${biz}";var mid="${n}";var idx="1";var sn="abcd";var ct=${candidate.directoryTime};</script>`;
   return {
     reviewId: candidate.reviewId,
     html,
@@ -88,7 +88,7 @@ describe('official Web MP directory and saved body adapter (no network)', () => 
     const page = parseWereadDirectory(raw(group()), expected);
     expect(page.articles[0]).toMatchObject({
       mpId: expected.mpId,
-      publishTime: 1700000099,
+      directoryTime: 1700000099,
     });
     expect(page.articles[0]).not.toHaveProperty('id');
     expect(page).toMatchObject({
@@ -175,8 +175,47 @@ describe('official Web MP directory and saved body adapter (no network)', () => 
     expect(replay.page.articles[0].contentHtml).not.toMatch(/onload|<script/);
     expect(replay.complete).toBe(false);
   });
+  it('uses internally consistent original body time independently of directory order time', () => {
+    const candidate = parseWereadDirectory(raw(group()), expected).articles[0];
+    const original = body();
+    const html = original.html.replace(
+      'ct=1700000099',
+      'ct=1700000040;var create_time="1700000040";window.cgiDataNew={ori_create_time:"1700000040",ori_send_time:"1700000040",create_timestamp:"1700000040"}',
+    );
+    const saved = { ...original, html, sha256: hash(html) };
+    const article = verifyWereadDirectoryBody(candidate, saved);
+    expect(candidate.directoryTime).toBe(1700000099);
+    expect(article.publishTime).toBe(1700000040);
+    expect(article.id).toBe('WX_1234567890_1_1');
+    // A difference across a minute/day is not an identity check or a new
+    // fabricated time. The independently validated body remains authoritative.
+    const otherDirectoryTime = { ...candidate, directoryTime: 1700100000 };
+    expect(
+      verifyWereadDirectoryBody(otherDirectoryTime, saved).publishTime,
+    ).toBe(1700000040);
+  });
   it.each([
-    ['ct=1700000099', 'ct=1700000098'],
+    'var ct=0;',
+    'var ct=9999999999;',
+    'var ct=1700000099;var create_time="1700000098";',
+    'var ct=1700000099;window.cgiDataNew={ori_create_time:"1700000098"};',
+    '',
+  ])(
+    'rejects missing/invalid/conflicting body time rather than using directory time (%s)',
+    (fields) => {
+      const candidate = parseWereadDirectory(raw(group()), expected)
+        .articles[0];
+      const html = body().html.replace('var ct=1700000099;', fields);
+      expect(() =>
+        verifyWereadDirectoryBody(candidate, {
+          ...body(),
+          html,
+          sha256: hash(html),
+        }),
+      ).toThrow();
+    },
+  );
+  it.each([
     ['var biz="MTIzNDU2Nzg5MA=="', 'var biz="OTk5OTk5OTk5OQ=="'],
     ['文章1', '别的文章'],
     ['>测试号<', '>另一个号<'],
