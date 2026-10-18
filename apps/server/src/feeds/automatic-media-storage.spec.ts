@@ -15,6 +15,7 @@ import {
   cacheSyncState,
 } from './cache-sync-state';
 import { CacheSyncEngine } from './cache-sync-engine';
+import { buildArticleMarkdown } from '../article-export';
 import * as startup from '../startup-audit';
 jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest.fn(() => {
@@ -172,6 +173,27 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
     expect(
       await prisma.$queryRaw`SELECT id FROM cache_refresh_commits`,
     ).toEqual([]);
+    const imageFetcher = jest
+      .fn()
+      .mockRejectedValue(Error('CDN_MUST_NOT_REPEAT'));
+    const exported = await buildArticleMarkdown(
+      rows[0],
+      '',
+      path.join(root, 'export'),
+      imageFetcher,
+      'image',
+    );
+    expect(exported).toMatchObject({
+      mediaComplete: true,
+      mediaStatus: 'complete',
+      missingImageCount: 0,
+    });
+    const images = await fs.readdir(path.join(root, 'export', 'image'));
+    expect(images).toHaveLength(1);
+    expect(
+      await fs.readFile(path.join(root, 'export', 'image', images[0])),
+    ).toEqual(png);
+    expect(imageFetcher).not.toHaveBeenCalled();
   });
   it('defaults to future changes; preserves the persisted activation boundary and can explicitly opt into bounded history', async () => {
     const scan = new AutomaticMediaScan(prisma);

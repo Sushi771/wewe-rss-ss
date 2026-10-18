@@ -20,6 +20,7 @@ on:
         codex/backup-daily-bounded-v1,
         codex/daily-saved-media-combined,
         codex/automatic-wechat-media-repair-20261018,
+        codex/automatic-media-clean-export-20261018,
         codex/export-real-metrics-only-20261014,
         codex/folder-rename-latency,
       ]
@@ -28,6 +29,7 @@ on:
       [
         main,
         codex/daily-saved-media-combined,
+        codex/automatic-wechat-media-repair-20261018,
         codex/manual-refresh-download-integration,
         codex/cold-launch-profile,
         codex/automatic-refresh-recovery-20261013,

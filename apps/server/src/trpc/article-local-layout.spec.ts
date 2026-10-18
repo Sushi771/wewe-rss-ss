@@ -309,7 +309,9 @@ describe('all cached article local/ZIP export entry points share isolated image 
       const caller = router.appRouter.createCaller({ errorMsg: null });
       const one = await caller.article.saveToObsidian(items[0].id);
       expect(one).toMatchObject({ success: false, mediaComplete: false });
-      expect(await fs.readFile(one.path, 'utf8')).toContain('媒体完整性未确认');
+      expect(await fs.readFile(one.path, 'utf8')).not.toContain(
+        '媒体完整性未确认',
+      );
       const receipts = join(dirname(one.path), '.wewe-articles');
       const receiptPath = join(
         receipts,
@@ -342,7 +344,7 @@ describe('all cached article local/ZIP export entry points share isolated image 
       const relative = batch.incomplete[0];
       expect(basename(relative)).toBe(`${items[0].title}.md`);
       expect(isAbsolute(relative)).toBe(false);
-      expect(await fs.readFile(join(zip, relative), 'utf8')).toContain(
+      expect(await fs.readFile(join(zip, relative), 'utf8')).not.toContain(
         '媒体完整性未确认',
       );
       expect(fetch).not.toHaveBeenCalled();

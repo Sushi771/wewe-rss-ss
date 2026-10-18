@@ -165,7 +165,7 @@ describe('local collection with real SQLite migrations', () => {
     expect(markdown).toContain('正文内容');
     expect(markdown).not.toContain('| 收藏 |');
     expect(markdown).toContain('| 点赞 | 0 |');
-    expect(markdown).toContain('媒体完整性未确认');
+    expect(markdown).not.toContain('媒体完整性未确认');
     const image = markdown.match(
       /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
     )?.[0];
@@ -210,7 +210,7 @@ describe('local collection with real SQLite migrations', () => {
       path.join(offlineDirectory, partialMedia),
       'utf8',
     );
-    expect(completeMarkdown).toContain('媒体完整性未确认');
+    expect(completeMarkdown).not.toContain('媒体完整性未确认');
     expect(completeMarkdown).toMatch(
       /image\/image_[a-f0-9]{12}_[a-f0-9]{32}\.png/,
     );
