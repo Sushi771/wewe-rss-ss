@@ -119,7 +119,9 @@ export async function buildArticleMarkdown(
     const candidate = $(element);
     if (
       candidate.text().trim() !== launcherLabel ||
-      candidate.find('img, video, audio, iframe, svg').length ||
+      candidate.find(
+        'img, picture, video, audio, iframe, svg, canvas, object, embed, blockquote, ul, ol, table, pre, code',
+      ).length ||
       (candidate.is('a, span') && !candidate.parent().is(contentEl))
     )
       continue;

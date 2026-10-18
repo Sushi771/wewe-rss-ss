@@ -85,6 +85,8 @@ describe('future Markdown contains article content without generated media notes
     `<p>Author says <span>${launcher}</span></p>`,
     `<p>${launcher}</p><p>More article content</p>`,
     `<blockquote><p>${launcher}</p></blockquote>`,
+    `<section><blockquote><p>${launcher}</p></blockquote></section>`,
+    `<div><pre><code>${launcher}</code></pre></div>`,
     `<ul><li><p>${launcher}</p></li></ul>`,
     `<p><a href="weixin://dl/business/"><img alt="Author image" src="data:image/png;base64,${png.toString('base64')}">${launcher}</a></p>`,
   ])('preserves author content and images: %s', async (suffix) => {
