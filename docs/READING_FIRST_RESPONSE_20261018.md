@@ -93,3 +93,12 @@ requests are allowed; fixtures contain no private data and are finally removed.
 Final same-method before/after tables and exact-head CI belong to this reading
 draft PR. They must not be mixed with PR70/71/72 export results or earlier browser
 samples that did not explicitly evict inactive byId entries between first reads.
+
+The final ordinary page comparison does not show a clear speedup: n=5 first-row
+observer P50/P95 177.27/210.51ms →170.88/219.88ms, and in-page first-body
+click-to-iframe-load92.80/110.70ms →109.40/113.60ms. The controlled batch-blocking
+case is the demonstrated improvement, not a faster SQL/body cache. For this warm
+synthetic fixture, provisional reference budgets are first-screen observer P95
+250ms and cached32KiB iframe-event P95200ms; these are not universal150ms promises
+or production acceptance. The automated observer includes CDP/polling overhead
+and must not be substituted for the in-page event interval.

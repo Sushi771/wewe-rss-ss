@@ -341,7 +341,9 @@ async function main() {
         fixture: {
           baseline,
           node: process.version,
-          engine: Prisma.prismaVersion.engine,
+          engine:
+            (Prisma.prismaVersion as { client: string; engine?: string }).engine ??
+            null,
           articles: 6000,
           feeds: 200,
           bodyBytes: 32768,
