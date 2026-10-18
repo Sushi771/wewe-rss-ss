@@ -1915,7 +1915,7 @@ export class Wechat2RssSubscriptionBatches {
       string,
       { batchId: string; createdAt: number; scope: string; claimedAt: number }
     >();
-    const unresolved = new Set<string>();
+    const unresolved = new Map<string, { batch: Batch; item: Item }[]>();
     const instance = hash(this.instance());
     for (const b of records) {
       if (b.instance === instance && isRefresh(b))
@@ -1923,8 +1923,12 @@ export class Wechat2RssSubscriptionBatches {
           if (
             uncertainSubmission(item) ||
             activeCacheReceipt(b, item, this.now())
-          )
-            unresolved.add(`${b.instance}/${item.feedId}`);
+          ) {
+            const key = `${b.instance}/${item.feedId}`;
+            const pending = unresolved.get(key) || [];
+            pending.push({ batch: b, item });
+            unresolved.set(key, pending);
+          }
       if (
         b.instance !== instance ||
         b.cacheOnly ||
@@ -1996,7 +2000,28 @@ export class Wechat2RssSubscriptionBatches {
           item.message =
             '较晚的同等订阅刷新已成功；本条旧未提交意图已被覆盖，不再补试。';
           changed = true;
-        } else if (unresolved.has(key)) {
+        } else if (
+          unresolved.get(key)?.some(
+            ({ batch: prior, item: pending }) =>
+              // Admission persisted the validated source for this future intent.
+              // Reuse its bound release rules without altering the old unknown.
+              occupiesUnknown(prior, pending, {
+                instance: b.instance,
+                intentKey: b.intentKey,
+                createdAt: b.createdAt,
+                sources: new Map(
+                  item.releaseSourceSha256
+                    ? [
+                        [
+                          `${prior.batchId}:${pending.index}`,
+                          item.releaseSourceSha256,
+                        ],
+                      ]
+                    : [],
+                ),
+              }) || activeCacheReceipt(prior, pending, this.now()),
+          )
+        ) {
           if (!item.waitingForReceipt) {
             item.waitingForReceipt = true;
             item.message =

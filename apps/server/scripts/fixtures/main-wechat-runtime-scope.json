@@ -34,7 +34,7 @@
     "apps/server/src/collection/refresh-submission-claim.ts": "ad0f9ee43cc4a3c989d6e8cd1959e66a5840ee5c0290c8e10ed4f00e4896057e",
     "apps/server/src/collection/refresh-response-receipt.ts": "bb498607659cac6ab1ccbc14d1019fbdb55975590a88cb504341c86e7f6987c7",
     "apps/server/src/collection/refresh-occupancy-release.ts": "b9d6e9d356248fd30d86b8a9be57f3cc6224c0bb71cec4d5bc7e778c48c81ecb",
-    "apps/server/src/collection/wechat2rss-subscription-batches.ts": "dce4e137bfc8c6d80cfb9140ec730618fce96c1efd77b69005c028a8d1f19c5e",
+    "apps/server/src/collection/wechat2rss-subscription-batches.ts": "2456cd1ec1f7def10efcaaa410ff15303c9dc949445592a73e1d27e0c36851d1",
     "apps/server/src/collection/wechat2rss-subscription-tasks.ts": "b02fc23e499c63c25a758bc87ce49db802a1ba0e8f16520ae68a2e231e4ec17a",
     "apps/server/src/collection/providers/wechat2rss.ts": "7ef4d3f955a04a25dc58a96a7f08fa5d0844e89dd4b6be057cd0abdeabfafb9f",
     "apps/server/src/collection/archive-provider-images.ts": "c5d7839fefddf7f455ca0bf41b77ae61c20a5f493c26b7813d0dcc29710734f1",
@@ -155,5 +155,12 @@
     "exportMarkdown": "5f0ae52caf74eff4c50e10a05badc82c0638082e1cd560275890b0a716f467a2",
     "saveToObsidian": "4a4b5e5374d56a850ab27e91dc8a728106b560aa95573054e2bc63936459ae57",
     "supplementSavedMedia": "445a52f4aff105987b5be0c9483a50cd0ea3b92b45bd15481ca1a5d92f5d7a85"
+  },
+  "followups": {
+    "preparationOccupancyRelease": {
+      "sourceCommit": "e6600122d64aaa541dc92a4b97491601537135cd",
+      "file": "apps/server/src/collection/wechat2rss-subscription-batches.ts",
+      "scope": "coverPreparation only; reuse current intent and admitted source digest with occupiesUnknown; historical unknown remains sealed"
+    }
   }
 }

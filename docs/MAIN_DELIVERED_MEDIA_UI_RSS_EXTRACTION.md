@@ -33,6 +33,16 @@ All development fixtures use owned temporary databases/directories. Production e
 
 ## Operational boundaries
 
+The preparation-occupancy followup from
+`e6600122d64aaa541dc92a4b97491601537135cd` changes only
+`coverPreparation` in the shared batch manager. Retry coverage now uses the
+current persisted intent, creation time and admitted source digest with the
+existing `occupiesUnknown` predicate. A released old unknown cannot reoccupy that
+bound future retry; different/missing source, same intent, invalid release/time
+binding, a new unknown or active accepted-cache work still holds it. Historical
+unknown records remain unchanged. The source manifest records this explicit
+followup instead of changing unrelated main hashes.
+
 Periodic lifecycle remains default-off unless explicitly configured and initialized for the intended source/root. Turning it off after initialization holds safely. Ordinary media commits stay incremental; first upgrade/startup protection and destructive actions keep their recovery gates. A pending recovery point can still hold a high-risk action that needs a new protected copy. Capacity forecasts retain the configured cadence and hard cumulative budget.
 
 Enabling production behavior, changing its configuration, deploying this candidate, deleting a recovery point and merging to main require the production owner's separate release decision. Existing live deployment and natural-update acceptance are managed outside this PR.
