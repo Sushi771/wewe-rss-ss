@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { TrpcService } from './trpc/trpc.service';
 import { TrpcRouter } from './trpc/trpc.router';
@@ -171,17 +171,24 @@ describe('full filter export scope on an isolated SQLite database; no external r
       await readdir(join(root, 'zip-one'), { recursive: true })
     ).filter((name) => name.endsWith('.md') && name !== 'README.md');
     expect(notes).toHaveLength(25);
+    let metricNotes = 0;
     for (const name of notes) {
       const markdown = await readFile(join(root, 'zip-one', name), 'utf8');
       expect(markdown).toContain('Offline body');
       expect(markdown).toContain('公众号：Test publisher');
       expect(markdown).toContain('原文发布日期（上海时间）：2026-10-11');
-      expect(markdown).toContain('原文：https://mp.weixin.qq.com/s/fixture-');
+      expect(markdown).toContain(
+        '原文链接：https://mp.weixin.qq.com/s/fixture-',
+      );
+      expect(markdown).not.toMatch(/^原文：/m);
+      expect(markdown).not.toMatch(/^# match /m);
       expect(markdown).not.toContain('未提供');
-      if (markdown.includes('# match 1\n')) {
+      if (basename(name) === 'match 1.md') {
+        metricNotes++;
         expect(markdown).toContain('| 点赞 | 0 | 2026-10-01T00:00:00Z |');
       } else expect(markdown).not.toContain('| 指标 |');
     }
+    expect(metricNotes).toBe(1);
     expect(fetch).not.toHaveBeenCalled();
   }, 30000);
   it('uses the same no-placeholder template for single browser and local exports, preserving edited repeats', async () => {
