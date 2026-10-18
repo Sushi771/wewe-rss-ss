@@ -1,6 +1,6 @@
 import { ArticleFilter } from '@wewe-rss/shared';
 import { useArticleListPosition } from '@web/utils/use-article-list-position';
-import { FC, useCallback, useEffect, useMemo, useState } from 'react';
+import { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Spinner,
@@ -111,6 +111,7 @@ const ArticleList: FC<ArticleListProps> = ({
     data,
     fetchNextPage,
     isFetching,
+    isFetchingNextPage,
     isLoading,
     hasNextPage,
     isError,
@@ -133,17 +134,39 @@ const ArticleList: FC<ArticleListProps> = ({
     },
   );
 
-  const loadNext = useCallback(
-    () => fetchNextPage({ cancelRefetch: false }),
-    [fetchNextPage],
-  );
+  const listViewKey = JSON.stringify([
+    mpId,
+    search,
+    articleFilter,
+    sort,
+    direction,
+  ]);
+  const activeView = useRef(listViewKey);
+  activeView.current = listViewKey;
+  const [nextPageFailed, setNextPageFailed] = useState(false);
+  useEffect(() => {
+    activeView.current = listViewKey;
+    setNextPageFailed(false);
+    return () => {
+      activeView.current = '';
+    };
+  }, [listViewKey]);
+  const loadNext = useCallback(async () => {
+    try {
+      const result = await fetchNextPage({ cancelRefetch: false });
+      if (activeView.current === listViewKey) setNextPageFailed(result.isError);
+      return result;
+    } catch {
+      if (activeView.current === listViewKey) setNextPageFailed(true);
+    }
+  }, [fetchNextPage, listViewKey]);
 
   const items = useMemo(() => {
     return data?.pages.flatMap((page) => page.items) || [];
   }, [data]);
 
   const position = useArticleListPosition({
-    viewKey: JSON.stringify([mpId, search, articleFilter, sort, direction]),
+    viewKey: listViewKey,
     pageCount: data?.pages.length || 0,
     itemCount: items.length,
     loading: isLoading,
@@ -166,7 +189,7 @@ const ArticleList: FC<ArticleListProps> = ({
   const allSelected = items.length > 0 && selectedIds.size === items.length;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
         排序
         <select
@@ -234,7 +257,10 @@ const ArticleList: FC<ArticleListProps> = ({
       <div
         ref={position.scrollRef}
         onScroll={position.capturePosition}
-        className="mt-2 flex-1 overflow-y-auto"
+        role="region"
+        aria-label="文章列表"
+        tabIndex={0}
+        className="mt-2 min-h-0 flex-1 overflow-y-auto"
       >
         <div className="compact-list">
           <div className="compact-list-header">
@@ -377,18 +403,50 @@ const ArticleList: FC<ArticleListProps> = ({
             </div>
           )}
 
-          {hasNextPage && !isLoading && (
-            <div className="flex justify-center p-4">
+          {!isLoading && (hasNextPage || (isError && items.length > 0)) && (
+            <div
+              data-article-pagination
+              className="flex flex-col items-center gap-2 p-4"
+            >
+              {isError && (
+                <p role="alert" className="text-sm text-red-600">
+                  加载未完成，已有文章保留。
+                </p>
+              )}
               <Button
                 size="sm"
                 variant="light"
                 isDisabled={isFetching}
-                onPress={() => void loadNext()}
+                isLoading={isFetchingNextPage}
+                onPress={() =>
+                  void (isError && !nextPageFailed
+                    ? refetch({ cancelRefetch: false })
+                    : loadNext())
+                }
               >
-                加载更多
+                {isFetchingNextPage
+                  ? '正在加载…'
+                  : isError
+                    ? '重试加载'
+                    : '加载更多'}
               </Button>
             </div>
           )}
+
+          {!isLoading &&
+          !isFetching &&
+          !isError &&
+          data?.pages.length &&
+          hasNextPage === false &&
+          items.length > 0 ? (
+            <p
+              data-article-pagination
+              role="status"
+              className="p-4 text-center text-xs text-neutral-500"
+            >
+              已显示当前筛选的全部 {items.length} 篇文章
+            </p>
+          ) : null}
 
           {!isLoading && !isError && items?.length === 0 && (
             <div className="p-10 text-center text-sm text-neutral-400">

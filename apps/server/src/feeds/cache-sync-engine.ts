@@ -32,6 +32,11 @@ type Slot = {
 };
 export type CacheSyncDependencies = {
   now(): number;
+  /** Durable adapter replaces the volatile page media queue in the main service. */
+  durableMedia?: {
+    tick(allowedFeeds: ReadonlySet<string>): Promise<void>;
+    close(): void;
+  };
   /** Operational pause keeps list imports and pending media intact. */
   mediaEnabled?(): boolean;
   onMediaBlocked?(): Promise<void>;
@@ -94,6 +99,7 @@ export class CacheSyncEngine {
   }
   close() {
     this.stopped = true;
+    this.deps.durableMedia?.close();
   }
   async tick() {
     if (this.stopped) return;
@@ -211,7 +217,7 @@ export class CacheSyncEngine {
             await this.deps.sync(id, page, true);
             await this.deps.syncText?.(id, page);
             slot.fingerprint = fingerprint;
-            this.media.set(id, { page, due: now });
+            if (!this.deps.durableMedia) this.media.set(id, { page, due: now });
           } else if (!this.media.has(id)) {
             // Reconcile local SQLite gaps without downloading healthy media or
             // rewriting a successful list. Unknown readiness stays pending.
@@ -220,7 +226,7 @@ export class CacheSyncEngine {
             const local = this.deps.syncText
               ? await this.deps.syncText(id, page)
               : await this.deps.inspectLocalMedia?.(id, page);
-            if (local?.mediaReady !== true) {
+            if (local?.mediaReady !== true && !this.deps.durableMedia) {
               this.media.set(id, { page, due: now });
             }
           }
@@ -257,6 +263,22 @@ export class CacheSyncEngine {
       // Separate lane: slow image archives never hold the metadata/list worker.
       void this.runMedia();
     } finally {
+      if (this.deps.durableMedia && !this.stopped) {
+        const allowed = new Set(
+          cacheSyncDaytime(this.deps.now()) &&
+            !cacheSyncState.metadataFailure &&
+            this.deps.mediaEnabled?.() !== false &&
+            !this.deps.mediaStopped?.()
+            ? [...this.slots]
+                .filter(([, slot]) => slot.metadata.paused === false)
+                .map(([id]) => id)
+            : [],
+        );
+        // Discovery/recovery still runs when downloads are paused. No upstream I/O.
+        void this.deps.durableMedia.tick(allowed).catch(() => {
+          cacheSyncState.mediaFailure = 'MEDIA_WORKER_UNAVAILABLE';
+        });
+      }
       if (this.mediaBlocked || this.deps.mediaStopped?.())
         cacheSyncState.state = 'media-blocked';
       cacheSyncState.feeds = [...this.slots.values()].map((slot) => ({

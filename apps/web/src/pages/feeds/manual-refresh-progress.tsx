@@ -1,10 +1,11 @@
 import { Button, Progress } from '@nextui-org/react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { trpc } from '@web/utils/trpc';
 
 type Batch = {
   batchId: string;
   state: string;
+  updatedAt?: number;
   coverage?: {
     expected: number;
     submitted: number;
@@ -42,6 +43,40 @@ export default function ManualRefreshProgress({
   const busy = useRef(false);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState('');
+  const coverage = batch?.coverage;
+  const fullySuccessful = Boolean(
+    batch?.state === 'completed' &&
+    coverage?.fullyUpdated &&
+    coverage.expected > 0 &&
+    coverage.completed === coverage.expected &&
+    coverage.submitted === coverage.expected &&
+    !coverage.pending &&
+    !coverage.legitimateSkipped &&
+    !coverage.excluded &&
+    !coverage.anomalies &&
+    batch.items.every((item) => item.state === 'succeeded'),
+  );
+  const previous = useRef<{ batchId: string; state: string }>();
+  const [recentSuccess, setRecentSuccess] = useState<string>();
+  const batchId = batch?.batchId;
+  const batchState = batch?.state;
+  useEffect(() => {
+    const before = previous.current;
+    previous.current =
+      batchId && batchState ? { batchId, state: batchState } : undefined;
+    setRecentSuccess(undefined);
+    // Initial history is quiet. Only an observed running -> successful transition
+    // gets brief feedback, with no toast and no replay when the page is reopened.
+    if (
+      fullySuccessful &&
+      before?.batchId === batchId &&
+      ['queued', 'running'].includes(before?.state || '')
+    ) {
+      setRecentSuccess(batchId);
+      const timer = setTimeout(() => setRecentSuccess(undefined), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [batchId, batchState, fullySuccessful]);
   if (
     !batch ||
     (!['queued', 'running', 'paused'].includes(batch.state) && !batch.coverage)
@@ -77,40 +112,59 @@ export default function ManualRefreshProgress({
     }
   };
   const status = batch.coverage
-    ? batch.coverage.fullyUpdated
+    ? fullySuccessful
       ? '已全部更新'
       : batch.coverage.anomalies
         ? '需核对'
         : batch.coverage.pending
           ? '等待完成'
-          : '含合法跳过'
+          : batch.coverage.legitimateSkipped || batch.coverage.excluded
+            ? '含合法跳过'
+            : '需核对'
     : batch.state === 'paused'
       ? '已暂停'
       : '更新中';
+  const finished =
+    Number.isSafeInteger(batch.updatedAt) &&
+    batch.updatedAt! > 0 &&
+    batch.updatedAt! <= Date.now() + 300000
+      ? new Date(batch.updatedAt!)
+      : undefined;
+  const lastSuccess = finished
+    ? `上次更新成功 ${new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(finished)}`
+    : '上次更新成功';
   return (
     <section
-      aria-label="全部更新进度"
+      aria-label={fullySuccessful ? '最近更新' : '全部更新进度'}
       aria-live="polite"
-      className="subscription-progress-summary"
+      className={
+        fullySuccessful
+          ? 'px-3 py-1 text-xs text-neutral-500'
+          : 'subscription-progress-summary'
+      }
     >
-      <Progress
-        size="sm"
-        value={batch.coverage ? batch.coverage.completed : accepted}
-        maxValue={batch.items.length}
-        aria-label="上游更新受理数量"
-        label={
-          batch.coverage
-            ? `已完成 ${batch.coverage.completed}/${batch.coverage.expected} · ${status}`
-            : `共 ${batch.items.length} 个 · 排队 ${queued} · 上游已受理 ${accepted} · 缓存已同步 ${synced} · ${status}`
-        }
-      />
-      {batch.coverage && (
-        <p role={batch.coverage.anomalies ? 'alert' : 'status'}>
-          {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 合法跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
-          {batch.coverage.fullyUpdated
-            ? '本轮全部更新完成。'
-            : '本轮尚未全部更新完成。'}
-        </p>
+      {!fullySuccessful && (
+        <Progress
+          size="sm"
+          value={batch.coverage ? batch.coverage.completed : accepted}
+          maxValue={batch.items.length}
+          aria-label="上游更新受理数量"
+          label={
+            batch.coverage
+              ? `已完成 ${batch.coverage.completed}/${batch.coverage.expected} · ${status}`
+              : `共 ${batch.items.length} 个 · 排队 ${queued} · 上游已受理 ${accepted} · 缓存已同步 ${synced} · ${status}`
+          }
+        />
+      )}
+      {!fullySuccessful && batch.coverage && batch.coverage.anomalies > 0 && (
+        <p role="alert">部分更新需要处理，请查看详情。</p>
       )}
       {['queued', 'running', 'paused'].includes(batch.state) && (
         <Button
@@ -134,7 +188,19 @@ export default function ManualRefreshProgress({
       )}
       {error && <p role="alert">{error}</p>}
       <details open={batch.state === 'paused'}>
-        <summary>查看逐号进度</summary>
+        <summary>
+          {fullySuccessful
+            ? recentSuccess === batch.batchId
+              ? '本轮全部更新完成。'
+              : lastSuccess
+            : '查看逐号进度'}
+        </summary>
+        {batch.coverage && (
+          <p>
+            {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 合法跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
+            {fullySuccessful ? '本轮全部更新完成。' : '本轮尚未全部更新完成。'}
+          </p>
+        )}
         <ul>
           {batch.items.map((item) => (
             <li key={item.index} className="py-1 text-xs">

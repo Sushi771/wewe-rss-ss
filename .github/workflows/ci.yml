@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/main-delivered-media-ui-rss-20261018]
   pull_request:
     branches: [main]
 
@@ -46,6 +46,12 @@ jobs:
           LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
           ARTICLE_LIST_BROWSER_SAMPLES: '1'
         run: node --test scripts/article-list-browser.test.cjs
+      - name: Test delivered status and media UI offline
+        run: node --test scripts/storage-status-ui.test.cjs scripts/cache-sync-status-ui.test.cjs scripts/local-release/space-budget.test.cjs
+      - name: Test delivered reading and automatic media components in a browser
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+        run: node --test scripts/reading-status-browser.test.cjs scripts/automatic-media-status-browser.test.cjs
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)
@@ -97,3 +103,14 @@ jobs:
           docker compose --env-file .env.public-album.example -f docker-compose.public-album.yml config --quiet
       - name: Build private online image
         run: docker build -f Dockerfile.private-online -t wewe-rss-private:ci .
+
+  windows-backup-lifecycle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify native Windows lifecycle and exact retirement protection on temporary databases
+        working-directory: apps/server/scripts
+        run: python -m unittest test_periodic_lifecycle test_backup_sqlite test_backup_space test_space_guard_compat test_sqlite_snapshot_guard test_sqlite_retention_plan

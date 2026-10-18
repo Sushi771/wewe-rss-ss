@@ -5,6 +5,7 @@ import Accounts from './pages/accounts';
 import { BaseLayout } from './layouts/base';
 import { TrpcProvider } from './provider/trpc';
 import ThemeProvider from './provider/theme';
+import StorageStatus from './pages/tools/storage-status';
 
 function App() {
   return (
@@ -16,6 +17,10 @@ function App() {
               <Route index element={<Feeds />} />
               <Route path="/feeds/:id?" element={<Feeds />} />
               <Route path="/accounts" element={<Accounts />} />
+              <Route
+                path="/tools/article-download"
+                element={<StorageStatus />}
+              />
               <Route path="/login" element={<Login />} />
             </Route>
           </Routes>

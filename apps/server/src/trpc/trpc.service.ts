@@ -18,6 +18,14 @@ import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
 import { savedBodyMediaInput } from '../collection/archive-provider-images';
+import { automaticMediaPlan } from '../collection/automatic-media-body';
+import {
+  inspectSavedMedia,
+  prepareSavedMediaWrite,
+  readSavedMediaManifest,
+  savedMediaIds,
+  SavedMediaSnapshot,
+} from '../collection/saved-media-writeback';
 import { readLocalWechat2RssCache } from '../collection/local-cache-reader';
 import { cacheFailureReason } from '../collection/cache-failure';
 import { wechat2RssProvider } from '../collection/provider-registry';
@@ -1110,6 +1118,72 @@ export class TrpcService {
         );
       },
     );
+  }
+
+  /** Exact stored-body repair using the main instance's original collection gate. */
+  async commitAutomaticArticleMedia(
+    row: SavedMediaSnapshot,
+    images: ReadonlyMap<string, string>,
+  ) {
+    if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');
+    return this.incrementalCollection(row.mpId, async (feed) => {
+      const plan = automaticMediaPlan(row, images);
+      await this.collectionService.collectWechat2RssRecent({
+        mpId: feed.id,
+        mpName: feed.mpName,
+        trigger: 'local-manual',
+        cachedPage: plan.page,
+        fetchMedia: true,
+        savedMedia: plan.write,
+      });
+    });
+  }
+
+  /** Fixed, operator-bound offline repair remains independent of automatic tasks. */
+  async supplementSavedArticleMedia(rawIds: string[]) {
+    const ids = savedMediaIds.parse(rawIds);
+    if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');
+    const binding = await readSavedMediaManifest();
+    return this.incrementalCollection(binding.manifest.mpId, async (feed) => {
+      const plan = await prepareSavedMediaWrite(
+        this.prismaService,
+        binding,
+        ids,
+      );
+      const result = plan.page.articles.length
+        ? await this.collectionService.collectWechat2RssRecent({
+            mpId: feed.id,
+            mpName: feed.mpName,
+            trigger: 'local-manual',
+            cachedPage: plan.page,
+            fetchMedia: true,
+            savedMedia: plan.write,
+          })
+        : undefined;
+      const rows = await this.prismaService.article.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, mpId: true, contentHtml: true },
+      });
+      const articles = ids.map((id) => {
+        const row = rows.find(
+          (item) => item.id === id && item.mpId === feed.id,
+        );
+        const state = inspectSavedMedia(row?.contentHtml || null);
+        return {
+          id,
+          status: state.ready
+            ? ('complete' as const)
+            : ('unconfirmed' as const),
+          ...state,
+        };
+      });
+      return {
+        updated: result?.updated || 0,
+        created: 0,
+        mediaReady: articles.every((row) => row.ready),
+        articles,
+      };
+    });
   }
 
   /** Internal cache watcher only. No add/refresh/original-page request.

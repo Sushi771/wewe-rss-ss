@@ -1,3 +1,11 @@
+import { buildArticleMarkdown } from '../article-export';
+import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
+import { LocalArticleStore } from '../article-local-save';
+import {
+  exportSourceFromFeed,
+  exportSourceMarkdown,
+} from '../article-export-source';
+import { savedMediaIds } from '../collection/saved-media-writeback';
 import { findArticleListRows } from '../article-list-page';
 import { cacheRevision, cacheSyncStatus } from '../feeds/cache-sync-state';
 import { protectedFeedDelete } from '../collection/protected-feed-delete';
@@ -18,26 +26,12 @@ import { PrismaService } from '@server/prisma/prisma.service';
 import { articleListWhere, articleListOrder } from '../article-list-filter';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from '@server/configuration';
-import TurndownService from 'turndown';
-import dayjs from 'dayjs';
-import { load } from 'cheerio';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as crypto from 'node:crypto';
-import pMap from '@cjs-exporter/p-map';
 import { WereadService } from '@server/weread/weread.service';
 import { CollectionService } from '../collection/collection.service';
-import {
-  articlePageRequest,
-  BODY_UNAVAILABLE_MESSAGE,
-} from '../collection/article-page';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
 import { resolveCollectionRoute } from '../collection/collection-channel';
-import {
-  allowedImageUrl,
-  decodeInlineImage,
-  fetchAllowedImage,
-} from '../collection/image-fetch';
 import { hasPrivateSession, privateOnlineMode } from '../private-access';
 import {
   bodyRetryAvailability,
@@ -49,7 +43,6 @@ import {
   csvCell,
   metricLabels,
   Metrics,
-  metricsMarkdown,
 } from '../collection/collection-format';
 import { scanOwnerCandidates } from '../collection/owner-candidate-scan';
 
@@ -172,59 +165,130 @@ export class TrpcRouter {
   }
 
   /** Stage one feed for an authenticated browser ZIP download. Never write to OBSIDIAN_PATH. */
-  async buildOfflineFeedDirectory(feedId: string, directory: string) {
+  async buildOfflineFeedDirectory(
+    feedId: string,
+    directory: string,
+    filter: Parameters<typeof articleListWhere>[0] = {},
+    cancelled: () => boolean = () => false,
+  ) {
     const feed = await this.prismaService.feed.findUnique({
       where: { id: feedId },
+      include: { group: true },
     });
     if (!feed) return null;
     const articles = await this.prismaService.article.findMany({
-      where: { mpId: feedId },
+      where: articleListWhere({ ...filter, mpId: feedId }),
+      take: 5001,
       orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-      select: { id: true, title: true, sourceUrl: true, contentHtml: true },
+      select: {
+        id: true,
+        title: true,
+        sourceUrl: true,
+        contentHtml: true,
+        lastBodyStatus: true,
+        metrics: true,
+        publishTime: true,
+      },
     });
     if (articles.length > 5000) throw new Error('离线导出文章超过上限');
     await fs.promises.mkdir(directory, { recursive: true });
     let complete = 0;
     const incomplete: string[] = [];
-    for (const [index, article] of articles.entries()) {
-      const safeTitle =
-        article.title
-          .replace(/[\\/:*?"<>|\x00-\x1f]/g, '-')
-          .replace(/[. ]+$/g, '')
-          .slice(0, 75) || '未命名';
-      const relative = `articles/${String(index + 1).padStart(4, '0')}-${safeTitle}`;
-      const articleDirectory = path.join(directory, relative);
-      await fs.promises.mkdir(articleDirectory, { recursive: true });
-      let markdown: string;
-      if (article.contentHtml) {
-        try {
-          markdown = (
-            await this.getArticleMarkdown(article.id, articleDirectory)
-          ).markdown;
-          complete++;
-        } catch {
-          incomplete.push(relative);
-          markdown = `# ${article.title}\n\n正文或图片未能完整归档，本篇未通过离线验收。\n\n原文：${article.sourceUrl || '未记录'}\n`;
-        }
-      } else {
-        incomplete.push(relative);
-        markdown = `# ${article.title}\n\n正文尚未缓存，本篇无法离线阅读。\n\n原文：${article.sourceUrl || '未记录'}\n`;
+    const incompleteDetails: {
+      path: string;
+      reason: 'body-not-cached' | 'missing' | 'unconfirmed' | 'export-failed';
+      missingImageCount?: number;
+    }[] = [];
+    const source = exportSourceFromFeed(feed);
+    const store = new LocalArticleStore(
+      path.join(directory, '.unused-settings.json'),
+      directory,
+    );
+    for (const article of articles) {
+      if (cancelled()) throw new Error('导出已取消');
+      try {
+        const saved = await store.save(
+          prepareCachedArticleLocalExport(article, source),
+          new Date(),
+          directory,
+        );
+        if (saved.mediaComplete === false) {
+          incomplete.push(
+            path
+              .relative(directory, saved.markdownPath)
+              .split(path.sep)
+              .join('/'),
+          );
+          incompleteDetails.push({
+            path: incomplete[incomplete.length - 1],
+            reason: saved.mediaStatus === 'missing' ? 'missing' : 'unconfirmed',
+            missingImageCount: saved.missingImageCount,
+          });
+        } else complete++;
+      } catch {
+        if (cancelled()) throw new Error('导出已取消');
+        const result = await store.save(
+          async (stage) => {
+            await fs.promises.mkdir(path.join(stage, 'image'));
+            await fs.promises.writeFile(
+              path.join(stage, 'index.md'),
+              `# ${article.title.replace(/[\r\n]/g, ' ')}\n\n正文或图片尚未完整归档，本篇无法完整离线阅读。\n`,
+            );
+            return {
+              articleId: article.id,
+              title: article.title,
+              imageCount: 0,
+              mediaComplete: false,
+              exportSource: source,
+              sourceUrl: article.sourceUrl,
+              publishTime: article.publishTime,
+            };
+          },
+          new Date(),
+          directory,
+        );
+        incomplete.push(
+          path
+            .relative(directory, result.markdownPath)
+            .split(path.sep)
+            .join('/'),
+        );
+        incompleteDetails.push({
+          path: incomplete[incomplete.length - 1],
+          reason: article.contentHtml ? 'export-failed' : 'body-not-cached',
+        });
       }
-      await fs.promises.writeFile(
-        path.join(articleDirectory, 'index.md'),
-        markdown,
-      );
     }
     await fs.promises.writeFile(
       path.join(directory, 'README.md'),
       `# ${feed.mpName}\n\n共 ${articles.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
-        '文章位于 articles/ 下，每篇的图片路径相对其 index.md。未完整篇目在各自文件中明确标注。\n',
+        `范围：${filter.dateStart || '不限开始'} 至 ${filter.dateEnd || '不限结束'}（上海日期）；搜索：${filter.search || '无'}；分组筛选：${filter.group || 'all'}。这是本次范围完整快照，不检测本地下载历史。\n\n` +
+        `分组：${source.groupName || '未分组'}\n\n文章位于 YYYY-MM-DD_分组/公众号文件夹中；日期采用原文发布日期（上海时间），不同日期分别保存，缺可信日期为日期待核并写明原因，正常文件名保留文章标题，冲突时加稳定身份后缀；该号共用 image/，图片按文章身份隔离，正文使用相对引用。未完整篇目在各自文件中明确标注。\n`,
     );
+    // Stable reason codes keep cache absence separate from body media failures.
+    const incompleteLabels = {
+      'body-not-cached': '正文未缓存',
+      missing: '已知正文图片未取得',
+      unconfirmed: '媒体完整性未确认',
+      'export-failed': '导出未完成',
+    };
+    if (incompleteDetails.length)
+      await fs.promises.appendFile(
+        path.join(directory, 'README.md'),
+        '\n' +
+          incompleteDetails
+            .map(
+              (item) =>
+                `- ${item.path}: ${incompleteLabels[item.reason]}${item.missingImageCount ? ` (${item.missingImageCount})` : ''}\n`,
+            )
+            .join(''),
+      );
     return {
       name: feed.mpName,
       articles: articles.length,
       complete,
       incomplete,
+      incompleteDetails,
     };
   }
 
@@ -771,6 +835,12 @@ export class TrpcRouter {
   });
 
   articleRouter = this.trpcService.router({
+    supplementSavedMedia: this.trpcService.protectedProcedure
+      .input(z.object({ ids: savedMediaIds }).strict())
+      .mutation(({ input, ctx }) => {
+        if (!(ctx as any).isLocal) throw new TRPCError({ code: 'FORBIDDEN' });
+        return this.trpcService.supplementSavedArticleMedia(input.ids);
+      }),
     summary: this.trpcService.protectedProcedure
       .input(articleFilterSchema)
       .query(async ({ input }) => {
@@ -912,9 +982,21 @@ export class TrpcRouter {
       .input(z.string())
       .mutation(async ({ input: id }) => {
         try {
-          const { markdown, title } = await this.getArticleMarkdown(id);
+          const {
+            markdown,
+            title,
+            mediaComplete,
+            mediaStatus,
+            missingImageCount,
+          } = await this.getArticleMarkdown(id);
           // Browser Markdown must not overwrite an Obsidian file with proxy image URLs.
-          return { markdown, title };
+          return {
+            markdown,
+            title,
+            mediaComplete,
+            mediaStatus,
+            missingImageCount,
+          };
         } catch (err: any) {
           this.logger.error(`Export Markdown error for ${id}: ${err.message}`);
           if (err instanceof TRPCError) throw err;
@@ -936,6 +1018,7 @@ export class TrpcRouter {
           });
         const article = await this.prismaService.article.findUnique({
           where: { id },
+          include: { feed: { include: { group: true } } },
         });
         if (!article) {
           throw new TRPCError({
@@ -948,23 +1031,44 @@ export class TrpcRouter {
           this.configService.get<ConfigurationType['feed']>('feed')!;
 
         try {
-          const dateFolder = dayjs().format('YYYY-MM-DD');
-          const finalPath = path.join(obsidianPath, dateFolder);
-          const { markdown, title } = await this.getArticleMarkdown(
-            id,
-            finalPath,
+          // Batch export calls this same mutation per ID. Share the tool's
+          // isolated directory, atomic publication and edited-note protection.
+          const store = new LocalArticleStore(
+            path.join(obsidianPath, '.wewe-list-export-settings.json'),
+            obsidianPath,
           );
-
-          if (!fs.existsSync(finalPath)) {
-            await fs.promises.mkdir(finalPath, { recursive: true });
-          }
-
-          const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 100);
-          const filePath = path.join(finalPath, `${safeTitle}-${id}.md`);
-
-          await fs.promises.writeFile(filePath, markdown);
-
-          return { success: true, path: filePath };
+          const result = await store.save(
+            prepareCachedArticleLocalExport(
+              article,
+              exportSourceFromFeed(article.feed),
+            ),
+            new Date(),
+            obsidianPath,
+          );
+          return {
+            success: result.mediaComplete !== false,
+            mediaStatus:
+              result.mediaStatus ??
+              (result.mediaComplete === false ? 'unconfirmed' : 'complete'),
+            missingImageCount: result.missingImageCount,
+            path: result.markdownPath,
+            alreadySaved: result.alreadySaved,
+            status:
+              result.status ??
+              (result.mediaComplete === false
+                ? 'failed'
+                : result.alreadySaved
+                  ? 'skipped'
+                  : 'new'),
+            publicationDate: result.publicationDate,
+            ...(result.datePendingReason
+              ? { datePendingReason: result.datePendingReason }
+              : {}),
+            ...(result.legacyLayoutRetained
+              ? { legacyLayoutRetained: true }
+              : {}),
+            ...(result.mediaComplete === false ? { mediaComplete: false } : {}),
+          };
         } catch (err: any) {
           this.logger.error(`Save to Obsidian error for ${id}: ${err.message}`);
           if (err instanceof TRPCError) throw err;
@@ -977,150 +1081,26 @@ export class TrpcRouter {
       }),
   });
 
-  private async downloadImage(url: string, destPath: string) {
-    if (url.startsWith('data:')) {
-      const { bytes } = decodeInlineImage(url);
-      await fs.promises.writeFile(destPath, bytes);
-      return;
-    }
-    const image = await fetchAllowedImage(url);
-    await fs.promises.writeFile(destPath, image.bytes);
-  }
-
   private async getArticleMarkdown(id: string, downloadPath?: string) {
     const article = await this.prismaService.article.findUnique({
       where: { id },
+      include: { feed: { include: { group: true } } },
     });
-    if (!article) {
-      throw new Error(`No article with id '${id}'`);
-    }
-
-    const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
-
-    let html = article.contentHtml || '';
-    if (!html && article.lastBodyStatus === 'unavailable')
-      throw new TRPCError({
-        code: 'PRECONDITION_FAILED',
-        message: BODY_UNAVAILABLE_MESSAGE,
-      });
-    if (!html) {
-      const source = new URL(url);
-      if (
-        source.protocol !== 'https:' ||
-        source.hostname !== 'mp.weixin.qq.com' ||
-        source.username ||
-        source.password ||
-        source.port
-      )
-        throw new Error('文章来源未核验，不能远程读取');
-      html = await articlePageRequest(url)
-        .text()
-        .catch(() => '');
-    }
-
-    if (!html) {
-      throw new Error(`Failed to load article content for ${id}`);
-    }
-
-    const $ = load(html, { decodeEntities: false });
+    if (!article) throw new Error(`No article with id '${id}'`);
     const { originUrl } = this.configService.get('feed');
-    const serverHost = originUrl || 'http://localhost:4000';
-
-    const contentEl = $('.rich_media_content').length
-      ? $('.rich_media_content')
-      : $('#js_content');
-    if (
-      !contentEl.length ||
-      (!contentEl.text().trim() && !contentEl.find('img').length)
-    ) {
-      throw new Error(
-        '未获取到正文，请在 WeChatDownload 下载对应 HTML 后重新导入',
-      );
-    }
-
-    if (downloadPath) {
-      const attachmentsDir = path.join(downloadPath, 'attachments');
-      if (!fs.existsSync(attachmentsDir)) {
-        await fs.promises.mkdir(attachmentsDir, { recursive: true });
-      }
-
-      const imgs = contentEl.find('img').get();
-      await pMap(
-        imgs,
-        async (img) => {
-          const $img = $(img);
-          const src = $img.attr('src') || '';
-          // An archived data URI takes precedence over an old remote lazy-load URL.
-          const dataSrc = src.startsWith('data:')
-            ? src
-            : $img.attr('data-src') || src;
-          if (dataSrc) {
-            let ext = 'jpg';
-            if (dataSrc.startsWith('data:image/'))
-              ext = dataSrc.slice(11).split(';')[0];
-            else {
-              try {
-                const imageUrl = new URL(dataSrc);
-                ext =
-                  imageUrl.searchParams.get('wx_fmt') ||
-                  path.extname(imageUrl.pathname).slice(1) ||
-                  'jpg';
-              } catch {
-                // The download validator reports an invalid URL below.
-              }
-            }
-            const hash = crypto.createHash('md5').update(dataSrc).digest('hex');
-            const safeExt = /^(png|jpe?g|gif|webp)$/.test(ext) ? ext : 'jpg';
-            const fileName = `image_${hash}.${safeExt}`;
-            const localPath = path.join(attachmentsDir, fileName);
-
-            try {
-              if (!fs.existsSync(localPath)) {
-                await this.downloadImage(dataSrc, localPath);
-              }
-              $img.attr('src', `attachments/${fileName}`);
-            } catch {
-              throw new Error('图片未能安全下载，离线导出未完成');
-            }
-          }
-        },
-        { concurrency: 5 },
-      );
-    } else {
-      // For browser export, we use proxy URLs
-      contentEl.find('img').each((_, img) => {
-        const $img = $(img);
-        const src = $img.attr('src') || '';
-        const dataSrc = src.startsWith('data:')
-          ? src
-          : $img.attr('data-src') || src;
-        if (dataSrc) {
-          try {
-            if (dataSrc.startsWith('data:')) {
-              decodeInlineImage(dataSrc);
-              $img.attr('src', dataSrc);
-            } else {
-              allowedImageUrl(dataSrc);
-              $img.attr(
-                'src',
-                `${serverHost}/proxy/image?url=${encodeURIComponent(dataSrc)}`,
-              );
-            }
-          } catch {
-            $img.remove();
-          }
-        }
-      });
-    }
-
-    const contentHtml = $.html(contentEl);
-
-    const turndownService = new TurndownService();
-    const markdown = turndownService.turndown(contentHtml);
-
+    const exported = await buildArticleMarkdown(
+      article,
+      originUrl || 'http://localhost:4000',
+      downloadPath,
+    );
     return {
-      title: article.title,
-      markdown: (article.sourceUrl ? metricsMarkdown(article) : '') + markdown,
+      ...exported,
+      markdown:
+        exportSourceMarkdown(
+          exportSourceFromFeed(article.feed),
+          article.sourceUrl,
+          article.publishTime,
+        ) + exported.markdown,
     };
   }
 

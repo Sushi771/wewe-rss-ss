@@ -4,7 +4,7 @@ import {
   assertIncrementalTransaction,
 } from './incremental-write';
 import { legacyArticleIdentityAmbiguous } from './legacy-article-identity';
-import { cacheDataChanged } from '../feeds/cache-sync-state';
+import { cacheDataChanged, hintMediaArticles } from '../feeds/cache-sync-state';
 import { mediaSafetyStop } from '../feeds/media-safety-stop';
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
@@ -26,6 +26,11 @@ import {
 } from './archive-provider-images';
 import { Article } from '@prisma/client';
 import { decodeInlineImage } from './image-fetch';
+import {
+  assertSavedMediaSnapshots,
+  retainUnconfirmedSavedMedia,
+  SavedMediaWrite,
+} from './saved-media-writeback';
 import { fetchMp2RssRecent20 } from './mp2rss';
 import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
@@ -505,7 +510,20 @@ export class CollectionService {
     fetchMedia?: boolean;
     /** Internal one-batch exception; public refresh keeps its normal night fence. */
     nightMediaUntil?: number;
+    /** Internal exact stored-body repair; no upstream or historical feed writes. */
+    savedMedia?: SavedMediaWrite;
   }) {
+    if (
+      !input.savedMedia &&
+      input.fetchMedia === undefined &&
+      process.env.WECHAT2RSS_CACHE_SYNC === '1' &&
+      process.env.WECHAT2RSS_ENABLED === '1' &&
+      process.env.WEWE_ACCEPTANCE_MODE !== '1' &&
+      !process.env.REHEARSAL_GUARD_REPORT
+    ) {
+      // Normal newly saved text completes before the durable media lane runs.
+      input = { ...input, fetchMedia: false };
+    }
     const phaseStarted = Date.now();
     if (this.publicCollections.has(input.mpId))
       throw new Error('该公众号正在更新，请等待本次结束');
@@ -574,6 +592,10 @@ export class CollectionService {
           }
         : await archiveProviderImages(validated, {
             preserveTextOnImageFailure: true,
+            verifiedImages: input.savedMedia?.images,
+            ...(!input.cachedPage && input.fetchMedia === false
+              ? { canFetchImage: () => false }
+              : {}),
             ...(input.cachedPage
               ? {
                   requestGapMs: 250,
@@ -677,6 +699,8 @@ export class CollectionService {
         this.prisma.$transaction(
           async (tx) => {
             await assertIncrementalTransaction(tx);
+            if (input.savedMedia)
+              await assertSavedMediaSnapshots(tx, input.savedMedia);
             const currentFeed = await tx.feed.findUniqueOrThrow({
               where: { id: input.mpId },
             });
@@ -756,7 +780,10 @@ export class CollectionService {
                     publishTime: true,
                     sourceUrl: true,
                     verifiedSourceUrl: true,
-                    contentHtml: !input.listOnly && input.fetchMedia !== false,
+                    contentHtml:
+                      !input.savedMedia &&
+                      !input.listOnly &&
+                      input.fetchMedia !== false,
                     picUrl: true,
                     lastBodyStatus: true,
                     createdAt: true,
@@ -804,7 +831,22 @@ export class CollectionService {
                       throw new Error('已保存文章与原文身份冲突');
                   }
                 }
-                cacheCandidates.push(...rows);
+                // Keep collision metadata checks, but media repair must never
+                // load other candidates' potentially multi-MB bodies. The exact
+                // selected snapshots were already rechecked in this transaction.
+                cacheCandidates.push(
+                  ...rows.map((row) =>
+                    input.savedMedia
+                      ? {
+                          ...row,
+                          contentHtml: [
+                            ...input.savedMedia.snapshots.values(),
+                          ].find((snapshot) => snapshot.id === row.id)
+                            ?.contentHtml,
+                        }
+                      : row,
+                  ),
+                );
               }
             }
             Logger.log(
@@ -833,12 +875,16 @@ export class CollectionService {
               sourceWithoutSn.searchParams.delete('sn');
               const sourceBase = sourceWithoutSn.toString();
               const sourceWithSn = `${sourceBase}&sn=`;
+              const exactSavedId = input.savedMedia?.snapshots.get(item.id)?.id;
+              if (input.savedMedia && !exactSavedId)
+                throw new Error('SAVED_MEDIA_SCOPE_INVALID');
               const matches = cacheCandidates
                 ? [
                     ...new Map(
                       cacheCandidates
                         .filter(
                           (saved) =>
+                            (!!input.savedMedia && saved.id === exactSavedId) ||
                             saved.id === item.id ||
                             [saved.sourceUrl, saved.verifiedSourceUrl].some(
                               (url) =>
@@ -868,6 +914,7 @@ export class CollectionService {
               const existing = matches[0];
               if (existing) assertSavedArticleIdentity(existing, identity);
               if (!existing) {
+                if (input.savedMedia) throw new Error('SAVED_MEDIA_CONFLICT');
                 const possibleLegacy = cacheCandidates
                   ? cacheCandidates.filter(
                       (saved) =>
@@ -913,10 +960,16 @@ export class CollectionService {
                 });
                 created++;
               } else {
-                const supplemented =
+                const supplementedBody =
                   input.fetchMedia !== false && existing.contentHtml
-                    ? supplementSavedBodyImages(existing.contentHtml, item)
+                    ? supplementSavedBodyImages(existing.contentHtml, item, {
+                        preserveFragment: !!input.savedMedia,
+                      })
                     : undefined;
+                const supplemented =
+                  supplementedBody && input.savedMedia
+                    ? retainUnconfirmedSavedMedia(supplementedBody)
+                    : supplementedBody;
                 const canFillBody =
                   (!input.cachedPage && input.fetchMedia !== false) ||
                   (input.fetchMedia !== false &&
@@ -932,14 +985,20 @@ export class CollectionService {
                   item.contentHtml?.includes('data-wewe-image-pending=')
                     ? { lastBodyStatus: 'images-pending' }
                     : {}),
-                  ...(!existing.sourceUrl ? { sourceUrl: identity.url } : {}),
-                  ...(!existing.verifiedSourceUrl
+                  ...(!input.savedMedia && !existing.sourceUrl
+                    ? { sourceUrl: identity.url }
+                    : {}),
+                  ...(!input.savedMedia && !existing.verifiedSourceUrl
                     ? { verifiedSourceUrl: identity.url }
                     : {}),
                   ...(canFillBody && !existing.contentHtml && item.contentHtml
                     ? { contentHtml: item.contentHtml }
                     : {}),
                   ...(supplemented ? { contentHtml: supplemented } : {}),
+                  ...(input.savedMedia &&
+                  supplemented?.includes('data-wewe-image-pending=')
+                    ? { lastBodyStatus: 'images-pending' }
+                    : {}),
                   ...(supplemented &&
                   existing.lastBodyStatus === 'images-pending' &&
                   !supplemented.includes('data-wewe-image-pending=')
@@ -980,6 +1039,8 @@ export class CollectionService {
                     },
                     data: changed,
                   });
+                  if (input.savedMedia && written.count !== 1)
+                    throw new Error('SAVED_MEDIA_CONFLICT');
                   updated += written.count;
                 }
               }
@@ -987,6 +1048,10 @@ export class CollectionService {
             Logger.log(
               `Cache writes: ${Date.now() - transactionStarted}ms; created=${created}; updated=${updated}`,
             );
+            if (input.savedMedia) {
+              committed = summary();
+              return;
+            }
             const latest = await tx.article.aggregate({
               where: { mpId: input.mpId },
               _max: { publishTime: true },
@@ -1023,6 +1088,8 @@ export class CollectionService {
         `Cache transaction: ${Date.now() - transactionStarted}ms; created=${created}; updated=${updated}`,
       );
       cacheDataChanged(created + updated);
+      if (created + updated > 0)
+        hintMediaArticles(page.articles.map((row) => row.id));
       return committed!;
     } finally {
       this.publicCollections.delete(input.mpId);

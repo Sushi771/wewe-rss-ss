@@ -88,6 +88,7 @@ function estimate(database) {
   );
 }
 function preflight(root, bytes, copies = 1, database) {
+  const interval = snapshotInterval();
   root = canonical(root);
   if (database && inside(root, canonical(database)))
     throw new Error('Nested source/destination refused');
@@ -135,8 +136,12 @@ function preflight(root, bytes, copies = 1, database) {
         !allowed ||
         current.bytes / maxBytes >= 0.5 ||
         current.databases / maxCopies >= 0.5 ||
-        more / 96 < 1,
-      estimatedDaysAtContinuousChanges: Math.round((more / 96) * 100) / 100,
+        (more * interval) / 86400 < 1,
+      estimatedDaysAtContinuousChanges:
+        Math.round(((more * interval) / 86400) * 100) / 100,
+      continuousChangedSnapshotIntervalSeconds: interval,
+      forecastBasis:
+        'continuously-changing-source; unchanged snapshots may be reused',
       recordedAt: new Date().toISOString(),
     });
   }
@@ -223,7 +228,20 @@ function productionRoot(database) {
     throw new Error('SQLite backup root must be an absolute local path');
   return canonical(configured || path.join(path.dirname(database), 'backups'));
 }
+function snapshotInterval(
+  value = process.env.SQLITE_SNAPSHOT_INTERVAL_SECONDS ?? '900',
+) {
+  if (
+    !/^\d+$/.test(String(value)) ||
+    String(value).trim() !== String(value) ||
+    Number(value) < 60 ||
+    Number(value) > 86400
+  )
+    throw new Error('SQLITE_PERIODIC_POLICY_INVALID');
+  return Number(value);
+}
 module.exports = {
+  snapshotInterval,
   productionRoot,
   positive,
   canonical,

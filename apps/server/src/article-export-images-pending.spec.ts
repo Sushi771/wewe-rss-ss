@@ -1,0 +1,215 @@
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { buildArticleMarkdown } from './article-export';
+import { LocalArticleStore } from './article-local-save';
+import { prepareCachedArticleLocalExport } from './cached-article-local-export';
+import { articleContentHtml } from './collection/article-page';
+
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+  'base64',
+);
+const url =
+  'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcdef';
+const body = `<div id="js_content" data-wewe-image-pending="1"><p>可靠正文</p><img data-wewe-image-unconfirmed="true"><img src="data:image/png;base64,${png.toString('base64')}"></div>`;
+const article = {
+  id: 'WX_1234567890_2247000001_1',
+  title: '合成文章',
+  sourceUrl: url,
+  metrics: null,
+  publishTime: 1700000000,
+  contentHtml: body,
+  lastBodyStatus: 'images-pending',
+};
+
+describe('unconfirmed media preserves usable text and valid image export', () => {
+  let folder: string;
+  beforeEach(async () => {
+    folder = await mkdtemp(join(tmpdir(), 'wewe-media-unconfirmed-'));
+  });
+  afterEach(async () => {
+    await rm(folder, { recursive: true, force: true });
+  });
+
+  it('keeps many source-less slots unknown, retains actual bytes and omits empty statistics', async () => {
+    const fetcher = jest.fn();
+    const exported = await buildArticleMarkdown(
+      {
+        ...article,
+        lastBodyStatus: 'available',
+        contentHtml: `<div id="js_content"><p>可靠正文</p>${'<img>'.repeat(210)}<img src="data:image/png;base64,${png.toString('base64')}"></div>`,
+      },
+      '',
+      folder,
+      fetcher,
+      'image',
+    );
+    expect(exported.mediaComplete).toBe(false);
+    expect(exported.markdown).not.toContain('媒体完整性未确认');
+    expect(exported.markdown).toContain('可靠正文');
+    expect(exported.markdown).not.toMatch(
+      /丢失210|缺失210|指标来源|\| 指标 \|/,
+    );
+    const files = await readdir(join(folder, 'image'));
+    expect(files).toHaveLength(1);
+    expect(await readFile(join(folder, 'image', files[0]))).toEqual(png);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(['available', 'unavailable'])(
+    'detects lost image sources in cached and cleaned bodies with %s history',
+    async (status) => {
+      for (const html of [
+        '<div id="js_content"><p>可靠正文</p><img></div>',
+        articleContentHtml(
+          '<div id="js_content"><p>可靠正文</p><img src="javascript:alert(1)"></div>',
+        ),
+      ]) {
+        if (!html)
+          throw new Error('Cleaned fixture must retain its cached body');
+        const fetcher = jest.fn();
+        const exported = await buildArticleMarkdown(
+          { ...article, contentHtml: html, lastBodyStatus: status },
+          '',
+          undefined,
+          fetcher,
+        );
+        expect(exported.mediaComplete).toBe(false);
+        expect(exported.markdown).toContain('可靠正文');
+        expect(exported.markdown).not.toContain('媒体完整性未确认');
+        expect(fetcher).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('saves reliable text and actual image bytes, reports the limit and preserves edited duplicate notes', async () => {
+    const store = new LocalArticleStore(
+      join(folder, 'preferences.json'),
+      join(folder, 'notes'),
+    );
+    const fetcher = jest.fn();
+    const prepare = async (directory: string) => {
+      const result = await buildArticleMarkdown(
+        article,
+        '',
+        directory,
+        fetcher,
+        'image',
+      );
+      await writeFile(join(directory, 'index.md'), result.markdown);
+      return {
+        articleId: article.id,
+        title: article.title,
+        imageCount: 1,
+        mediaComplete: result.mediaComplete,
+      };
+    };
+    const saved = await store.save(prepare);
+    expect(saved).toMatchObject({ imageCount: 1, mediaComplete: false });
+    const markdown = await readFile(saved.markdownPath, 'utf8');
+    expect(markdown).toContain('可靠正文');
+    expect(markdown).not.toContain('媒体完整性未确认');
+    const images = await readdir(join(saved.directory, 'image'));
+    expect(images).toHaveLength(1);
+    expect(await readFile(join(saved.directory, 'image', images[0]))).toEqual(
+      png,
+    );
+    expect(
+      JSON.parse(
+        await readFile(join(saved.directory, '.wewe-article.json'), 'utf8'),
+      ),
+    ).toMatchObject({ complete: true, mediaComplete: false });
+    await writeFile(saved.markdownPath, '用户编辑');
+    expect(await store.save(prepare)).toMatchObject({
+      alreadySaved: true,
+      mediaComplete: false,
+    });
+    expect(await readFile(saved.markdownPath, 'utf8')).toBe('用户编辑');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('keeps the unconfirmed cached flag without counting a source-less tag as a saved image', async () => {
+    const prepare = prepareCachedArticleLocalExport({
+      ...article,
+      contentHtml: body,
+    });
+    expect(await prepare(folder)).toMatchObject({
+      imageCount: 1,
+      mediaComplete: false,
+    });
+    expect(await readFile(join(folder, 'index.md'), 'utf8')).not.toContain(
+      '媒体完整性未确认',
+    );
+  });
+  it('retains per-image uncertainty even if the original body lacks a root pending marker', async () => {
+    const raw = body.replace(' data-wewe-image-pending="1"', '');
+    const prepare = prepareCachedArticleLocalExport({
+      ...article,
+      contentHtml: raw,
+    });
+    expect(await prepare(folder)).toMatchObject({
+      imageCount: 1,
+      mediaComplete: false,
+    });
+    expect(await readFile(join(folder, 'index.md'), 'utf8')).not.toContain(
+      '媒体完整性未确认',
+    );
+  });
+
+  it('keeps usable text when a known pending image still fails, while retaining valid images', async () => {
+    const fetcher = jest.fn();
+    fetcher.mockRejectedValue(new Error('OFFLINE'));
+    const exported = await buildArticleMarkdown(
+      {
+        ...article,
+        contentHtml: body.replace(
+          '</div>',
+          '<img data-src="https://mmbiz.qpic.cn/fixture.png"></div>',
+        ),
+      },
+      '',
+      folder,
+      fetcher,
+      'image',
+    );
+    expect(exported.mediaComplete).toBe(false);
+    expect(exported.markdown).toContain('可靠正文');
+    expect(exported.markdown).not.toContain('媒体完整性未确认');
+    expect(exported.markdown).not.toContain('qpic.cn');
+    expect(await readdir(join(folder, 'image'))).toHaveLength(1);
+  });
+  it('retains single-tool image limits even for pending media and counts reused files', async () => {
+    const cached = {
+      ...article,
+      lastBodyStatus: 'available',
+      contentHtml:
+        '<div id="js_content"><p>body</p><img src="data:image/png;base64,' +
+        png.toString('base64') +
+        '"></div>',
+    };
+    await expect(
+      buildArticleMarkdown(cached, '', folder, jest.fn(), 'image', {
+        maxImages: 0,
+        maxBytes: 20_000_000,
+      }),
+    ).rejects.toThrow('上限');
+    await expect(
+      buildArticleMarkdown(
+        { ...cached, lastBodyStatus: 'images-pending' },
+        '',
+        folder,
+        jest.fn(),
+        'image',
+        { maxImages: 60, maxBytes: png.length - 1 },
+      ),
+    ).rejects.toThrow('上限');
+    // A pre-seeded valid file still counts towards the total budget.
+    await expect(
+      buildArticleMarkdown(cached, '', folder, jest.fn(), 'image', {
+        maxImages: 60,
+        maxBytes: png.length - 1,
+      }),
+    ).rejects.toThrow('上限');
+  });
+});

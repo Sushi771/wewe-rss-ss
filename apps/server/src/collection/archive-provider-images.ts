@@ -44,14 +44,18 @@ export function savedBodyMediaInput(
 export function supplementSavedBodyImages(
   savedHtml: string,
   article: ProviderArticle,
+  options: { preserveFragment?: boolean } = {},
 ): string | undefined {
   const sources = archivedSources.get(article);
   if (!sources) return undefined;
-  const $ = load(savedHtml);
+  const $ = load(savedHtml, undefined, !options.preserveFragment);
   const body = $('.rich_media_content, #js_content').first();
   if (!body.length) return undefined;
   let changed = false;
-  for (const image of body.find('img').toArray()) {
+  for (const image of (options.preserveFragment
+    ? $('img')
+    : body.find('img')
+  ).toArray()) {
     const el = $(image);
     const src = el.attr('src') || '';
     if (src.startsWith('data:image/')) continue;
@@ -77,7 +81,11 @@ export function supplementSavedBodyImages(
     body.removeAttr('data-wewe-image-pending');
     body.removeAttr('data-wewe-image-retryable');
   }
-  return changed ? $.html(body) : undefined;
+  return changed
+    ? options.preserveFragment
+      ? $.html()
+      : $.html(body)
+    : undefined;
 }
 
 /** Store provider body images inside SQLite so restart and ZIP export do not depend on the CDN. */
@@ -93,6 +101,8 @@ export async function archiveProviderImages(
     requestGapMs?: number;
     /** Persist the global restriction before any storage transaction can fail. */
     onMediaBlocked?: () => Promise<void>;
+    /** Internal verified local bytes only. Supplying this map forbids HTTP. */
+    verifiedImages?: ReadonlyMap<string, string>;
   } = {},
 ): Promise<ProviderPage> {
   const maxArticleImageBytes = options.maxArticleImageBytes ?? 20_000_000;
@@ -147,23 +157,49 @@ export async function archiveProviderImages(
       attempted.add(source);
       try {
         let inline = cached.get(source) || sharedCache.get(source);
+        if (options.verifiedImages && inline && !cached.has(source)) {
+          totalBytes += decodeInlineImage(inline).bytes.length;
+          if (totalBytes > maxArticleImageBytes)
+            throw new Error('ARTICLE_IMAGES_TOO_LARGE');
+        }
         if (!inline) {
+          const verified = options.verifiedImages?.get(source);
           if (failedSources.has(source))
             throw new Error('IMAGE_RETRY_DEFERRED');
-          if (!source.startsWith('data:') && options.requestGapMs) {
-            const delay = options.requestGapMs - (Date.now() - lastRequest);
-            if (delay > 0)
-              await new Promise((resolve) => setTimeout(resolve, delay));
-          }
           if (
+            !verified &&
+            options.verifiedImages &&
+            !source.startsWith('data:')
+          )
+            throw new Error('SAVED_MEDIA_SOURCE_NOT_BOUND');
+          if (
+            !verified &&
             !source.startsWith('data:') &&
             (mediaRequestBlocked || options.canFetchImage?.() === false)
           )
             throw new Error('CACHE_SYNC_NIGHT_WINDOW');
+          if (
+            !verified &&
+            !source.startsWith('data:') &&
+            options.requestGapMs
+          ) {
+            const delay = options.requestGapMs - (Date.now() - lastRequest);
+            if (delay > 0)
+              await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+          // A pause can arrive during the rate wait; recheck before the GET.
+          if (
+            !verified &&
+            !source.startsWith('data:') &&
+            options.canFetchImage?.() === false
+          )
+            throw new Error('CACHE_SYNC_NIGHT_WINDOW');
           if (!source.startsWith('data:')) lastRequest = Date.now();
-          const result = source.startsWith('data:')
-            ? decodeInlineImage(source)
-            : await fetchAllowedImage(source);
+          const result = verified
+            ? decodeInlineImage(verified)
+            : source.startsWith('data:')
+              ? decodeInlineImage(source)
+              : await fetchAllowedImage(source);
           totalBytes += result.bytes.length;
           if (totalBytes > maxArticleImageBytes)
             throw new Error('ARTICLE_IMAGES_TOO_LARGE');
