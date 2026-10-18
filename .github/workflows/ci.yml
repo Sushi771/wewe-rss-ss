@@ -19,6 +19,7 @@ on:
         codex/periodic-auto-retention-20261017,
         codex/backup-daily-bounded-v1,
         codex/daily-saved-media-combined,
+        codex/automatic-wechat-media-repair-20261018,
         codex/export-real-metrics-only-20261014,
         codex/folder-rename-latency,
       ]
@@ -26,6 +27,7 @@ on:
     branches:
       [
         main,
+        codex/daily-saved-media-combined,
         codex/manual-refresh-download-integration,
         codex/cold-launch-profile,
         codex/automatic-refresh-recovery-20261013,

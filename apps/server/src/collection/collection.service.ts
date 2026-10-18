@@ -33,7 +33,7 @@ import { fetchMp2RssRecent20 } from './mp2rss';
 import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { assertProviderPage, ProviderPage } from './subscription-provider';
-import { cacheDataChanged } from '../feeds/cache-sync-state';
+import { cacheDataChanged, hintMediaArticles } from '../feeds/cache-sync-state';
 import { mediaSafetyStop } from '../feeds/media-safety-stop';
 import {
   readOwnerSearchConfig,
@@ -658,6 +658,17 @@ export class CollectionService {
     /** Internal exact stored-body repair; no upstream or historical feed writes. */
     savedMedia?: SavedMediaWrite;
   }) {
+    if (
+      !input.savedMedia &&
+      input.fetchMedia === undefined &&
+      process.env.WECHAT2RSS_CACHE_SYNC === '1' &&
+      process.env.WECHAT2RSS_ENABLED === '1' &&
+      process.env.WEWE_ACCEPTANCE_MODE !== '1' &&
+      !process.env.REHEARSAL_GUARD_REPORT
+    ) {
+      // Normal newly saved text completes before the durable media lane runs.
+      input = { ...input, fetchMedia: false };
+    }
     const phaseStarted = Date.now();
     if (this.publicCollections.has(input.mpId))
       throw new Error('该公众号正在更新，请等待本次结束');
@@ -727,6 +738,9 @@ export class CollectionService {
         : await archiveProviderImages(validated, {
             preserveTextOnImageFailure: true,
             verifiedImages: input.savedMedia?.images,
+            ...(!input.cachedPage && input.fetchMedia === false
+              ? { canFetchImage: () => false }
+              : {}),
             ...(input.cachedPage
               ? {
                   requestGapMs: 250,
@@ -911,7 +925,10 @@ export class CollectionService {
                     publishTime: true,
                     sourceUrl: true,
                     verifiedSourceUrl: true,
-                    contentHtml: !input.listOnly && input.fetchMedia !== false,
+                    contentHtml:
+                      !input.savedMedia &&
+                      !input.listOnly &&
+                      input.fetchMedia !== false,
                     picUrl: true,
                     lastBodyStatus: true,
                     createdAt: true,
@@ -959,7 +976,22 @@ export class CollectionService {
                       throw new Error('已保存文章与原文身份冲突');
                   }
                 }
-                cacheCandidates.push(...rows);
+                // Keep collision metadata checks, but media repair must never
+                // load other candidates' potentially multi-MB bodies. The exact
+                // selected snapshots were already rechecked in this transaction.
+                cacheCandidates.push(
+                  ...rows.map((row) =>
+                    input.savedMedia
+                      ? {
+                          ...row,
+                          contentHtml: [
+                            ...input.savedMedia.snapshots.values(),
+                          ].find((snapshot) => snapshot.id === row.id)
+                            ?.contentHtml,
+                        }
+                      : row,
+                  ),
+                );
               }
             }
             Logger.log(
@@ -1201,6 +1233,8 @@ export class CollectionService {
         `Cache transaction: ${Date.now() - transactionStarted}ms; created=${created}; updated=${updated}`,
       );
       cacheDataChanged(created + updated);
+      if (created + updated > 0)
+        hintMediaArticles(page.articles.map((row) => row.id));
       return committed!;
     } finally {
       this.publicCollections.delete(input.mpId);

@@ -1,5 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import type { CacheFailureDiagnostic } from '../collection/cache-failure';
+import type { AutomaticMediaSummary } from './automatic-media-queue';
+
+const mediaHints = new Set<string>();
+export function hintMediaArticles(ids: string[]) {
+  for (const id of ids) if (mediaHints.size < 100) mediaHints.add(id);
+}
+export function takeMediaHints() {
+  const ids = [...mediaHints].slice(0, 20);
+  for (const id of ids) mediaHints.delete(id);
+  return ids;
+}
 
 // Process-local notification only: no network or writes from a revision query.
 const epoch = randomUUID();
@@ -36,10 +47,14 @@ export const cacheSyncState = {
   lastSyncAt: null as string | null,
   metadataFailure: undefined as CacheFailureDiagnostic | undefined,
   feeds: [] as CacheSyncFeedState[],
+  media: [] as AutomaticMediaSummary[],
+  mediaPause: undefined as string | undefined,
+  mediaFailure: undefined as string | undefined,
 };
 export function cacheSyncStatus() {
   return {
     ...cacheSyncState,
+    media: cacheSyncState.media.map((row) => ({ ...row })),
     ...cacheRevision(),
     lastChangedAt,
     // Copy objects so a caller cannot mutate the scheduler.

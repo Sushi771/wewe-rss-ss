@@ -32,6 +32,30 @@ const png = Buffer.from(
 describe('provider image archive', () => {
   afterEach(() => jest.restoreAllMocks());
 
+  it('text-only reconciliation never waits for a CDN rate gap or starts a request', async () => {
+    jest.useFakeTimers();
+    try {
+      const fetchMock = jest
+        .spyOn(global, 'fetch')
+        .mockRejectedValue(Error('NETWORK_FORBIDDEN'));
+      const timer = jest.spyOn(global, 'setTimeout');
+      const input = page();
+      input.articles[0].contentHtml =
+        '<div id="js_content">text<img data-src="https://mmbiz.qpic.cn/a"><img data-src="https://mmbiz.qpic.cn/b"></div>';
+      const result = await archiveProviderImages(input, {
+        canFetchImage: () => false,
+        requestGapMs: 250,
+        preserveTextOnImageFailure: true,
+      });
+      expect(result.articles[0].contentHtml).toContain('text');
+      expect(result.imageBlocked).toBe(2);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(timer).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('supplements exact saved image URLs without replacing saved text or styles', async () => {
     const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
       new Response(png, {

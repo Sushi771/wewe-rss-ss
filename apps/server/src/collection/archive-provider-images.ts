@@ -175,16 +175,23 @@ export async function archiveProviderImages(
           if (
             !verified &&
             !source.startsWith('data:') &&
+            (mediaRequestBlocked || options.canFetchImage?.() === false)
+          )
+            throw new Error('CACHE_SYNC_NIGHT_WINDOW');
+          if (
+            !verified &&
+            !source.startsWith('data:') &&
             options.requestGapMs
           ) {
             const delay = options.requestGapMs - (Date.now() - lastRequest);
             if (delay > 0)
               await new Promise((resolve) => setTimeout(resolve, delay));
           }
+          // A pause can arrive during the rate wait; recheck before the GET.
           if (
             !verified &&
             !source.startsWith('data:') &&
-            (mediaRequestBlocked || options.canFetchImage?.() === false)
+            options.canFetchImage?.() === false
           )
             throw new Error('CACHE_SYNC_NIGHT_WINDOW');
           if (!source.startsWith('data:')) lastRequest = Date.now();
