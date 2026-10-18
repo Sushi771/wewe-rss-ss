@@ -25,7 +25,21 @@ Planning and validation remain non-destructive. The existing `sqlite-retention-p
 An example **review policy**, not production authorization, is:
 
 ```json
-{"maxOrdinaryCopies":3,"maxOrdinaryBytes":4294967296,"keepLatest":2,"minimumAgeHours":1,"roundDays":7,"recentHours":1,"bucketHours":1,"dailyDays":1,"weeklyWeeks":0,"maximumAgeDays":365,"warningPercent":80,"reserveCopies":2,"expectedGenerationsPerDay":1}
+{
+  "maxOrdinaryCopies": 3,
+  "maxOrdinaryBytes": 4294967296,
+  "keepLatest": 2,
+  "minimumAgeHours": 1,
+  "roundDays": 7,
+  "recentHours": 1,
+  "bucketHours": 1,
+  "dailyDays": 1,
+  "weeklyWeeks": 0,
+  "maximumAgeDays": 365,
+  "warningPercent": 80,
+  "reserveCopies": 2,
+  "expectedGenerationsPerDay": 1
+}
 ```
 
 The operator must separately review the exact plan and supply the existing short-lived approval binding its batch/digest/action, database paths, receipt paths, directories and unique-history paths, plus a fresh bound resource report. `--batch`, `--approval` and `--resources` validate without deleting. Only separately approved `--execute-periodic` executes that exact action. It acquires the full-snapshot and owner lifetime OS locks; this is not a service-stop endpoint. Existing activation owners must separately arrange an approved maintenance window. Missing protection manifests, unknown reference publishers or occupied files continue to refuse execution.
