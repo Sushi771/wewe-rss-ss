@@ -1,3 +1,4 @@
+import { refreshFeedViews } from '@web/utils/refresh-feed-view';
 import {
   Avatar,
   Button,
@@ -14,7 +15,7 @@ import {
   Input,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import dayjs from 'dayjs';
@@ -24,8 +25,14 @@ import {
   serverOriginUrl,
 } from '@web/utils/env';
 import ArticleList from './list';
+import ManualRefreshProgress from './manual-refresh-progress';
 import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
+
+function preserveArticlePosition() {
+  if (typeof window.dispatchEvent === 'function')
+    window.dispatchEvent(new Event('wewe-articles-refresh'));
+}
 
 const Feeds = () => {
   const { id } = useParams();
@@ -49,6 +56,70 @@ const Feeds = () => {
   const isAddFeedLoading = isGetMpInfoLoading;
   const { mutateAsync: refreshMpArticles, isLoading: isGetArticlesLoading } =
     trpc.feed.refreshArticles.useMutation();
+  const { mutateAsync: beginRefreshAll } =
+    trpc.feed.beginRefreshAll.useMutation({ retry: false });
+  // History is a baseline, not a new update. Only a batch observed running on
+  // this page may trigger its final cache reread, and claim that transition
+  // before awaiting so concurrent query callbacks cannot repeat it.
+  const manualObservedStates = useRef(new Map<string, string>());
+  const manualObserved = useRef(false);
+  const manualBatches = trpc.feed.manualRefreshBatches.useQuery(undefined, {
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: (data, query) =>
+      query.state.status !== 'error' &&
+      data?.items.some((batch) => ['queued', 'running'].includes(batch.state))
+        ? 3000
+        : false,
+    async onSuccess(data) {
+      const firstRead = !manualObserved.current;
+      manualObserved.current = true;
+      const finished = data.items.filter((batch) => {
+        const previous = manualObservedStates.current.get(batch.batchId);
+        manualObservedStates.current.set(batch.batchId, batch.state);
+        return (
+          (previous ? ['queued', 'running'].includes(previous) : !firstRead) &&
+          !['queued', 'running'].includes(batch.state)
+        );
+      });
+      if (finished.length) {
+        if (
+          finished.some(
+            (batch) =>
+              batch.state === 'paused' ||
+              batch.items.some((item) =>
+                ['blocked', 'failed'].includes(item.state),
+              ),
+          )
+        ) {
+          toast.warning('更新需要处理，请查看暂停状态');
+        } else if (
+          finished.some((batch) =>
+            batch.items.some(
+              (item) => item.state === 'succeeded' && !item.bodyReady,
+            ),
+          )
+        ) {
+          toast.warning('缓存已同步，部分正文或图片仍待核');
+        }
+        try {
+          preserveArticlePosition();
+          await Promise.all([
+            refetchFeedList(),
+            queryUtils.article.list.invalidate(),
+            queryUtils.article.summary.invalidate(),
+          ]);
+        } catch {
+          toast.warning('更新已结束，列表读取失败，请手动刷新');
+        }
+      }
+    },
+  });
+  const manualBatch =
+    manualBatches.data?.items.find((batch) =>
+      ['queued', 'running', 'paused'].includes(batch.state),
+    ) ?? manualBatches.data?.items[0];
   const {
     mutateAsync: getHistoryArticles,
     isLoading: isGetHistoryArticlesLoading,
@@ -62,8 +133,13 @@ const Feeds = () => {
       refetchOnReconnect: true,
     });
 
-  const { data: isRefreshAllMpArticlesRunning } =
+  const { data: legacyRefreshRunning } =
     trpc.feed.isRefreshAllMpArticlesRunning.useQuery();
+  const isRefreshAllMpArticlesRunning =
+    legacyRefreshRunning ||
+    !!manualBatches.data?.items.some((batch) =>
+      ['queued', 'running', 'paused'].includes(batch.state),
+    );
 
   const { mutateAsync: deleteFeed, isLoading: isDeleteFeedLoading } =
     trpc.feed.delete.useMutation({});
@@ -75,6 +151,58 @@ const Feeds = () => {
   const [orderedFeeds, setOrderedFeeds] = useState(feedData?.items || []);
 
   const [refreshedMpIds, setRefreshedMpIds] = useState<string[]>([]);
+  const [refreshingMpIds, setRefreshingMpIds] = useState<string[]>([]);
+  const [isManualBatchRefreshing, setIsManualBatchRefreshing] = useState(false);
+  // Mutation loading is shared across requests. Own each manual task by feed ID
+  // and lock synchronously so rapid clicks cannot race the next React render.
+  const manualRefreshTasks = useRef(new Map<string, symbol>());
+  const refreshFeedbackTimers = useRef(
+    new Map<string, ReturnType<typeof setTimeout>>(),
+  );
+  const refreshPageMounted = useRef(true);
+  useEffect(() => {
+    refreshPageMounted.current = true;
+    const tasks = manualRefreshTasks.current;
+    const timers = refreshFeedbackTimers.current;
+    return () => {
+      refreshPageMounted.current = false;
+      tasks.clear();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+  // The empty key owns a manual batch only; server batch status stays separate.
+  const beginManualRefresh = (mpId: string) => {
+    if (
+      !refreshPageMounted.current ||
+      manualRefreshTasks.current.has('') ||
+      manualRefreshTasks.current.has(mpId) ||
+      (!mpId && manualRefreshTasks.current.size > 0)
+    )
+      return null;
+    const token = Symbol(mpId);
+    manualRefreshTasks.current.set(mpId, token);
+    clearTimeout(refreshFeedbackTimers.current.get(mpId));
+    refreshFeedbackTimers.current.delete(mpId);
+    if (mpId) {
+      setRefreshingMpIds((previous) => [...previous, mpId]);
+      setRefreshedMpIds((previous) => previous.filter((id) => id !== mpId));
+    } else {
+      setIsManualBatchRefreshing(true);
+      setIsRefreshedAll(false);
+    }
+    return token;
+  };
+  const isCurrentRefresh = (mpId: string, token: symbol) =>
+    refreshPageMounted.current &&
+    manualRefreshTasks.current.get(mpId) === token;
+  const finishManualRefresh = (mpId: string, token: symbol) => {
+    if (!isCurrentRefresh(mpId, token)) return;
+    manualRefreshTasks.current.delete(mpId);
+    if (mpId)
+      setRefreshingMpIds((previous) => previous.filter((id) => id !== mpId));
+    else setIsManualBatchRefreshing(false);
+  };
   const [isRefreshedAll, setIsRefreshedAll] = useState(false);
   const [isCollectingAlbums, setIsCollectingAlbums] = useState(false);
   const [updateStates, setUpdateStates] = useState<
@@ -184,10 +312,14 @@ const Feeds = () => {
     for (const link of wxsLinks) {
       try {
         const result = await addFromArticle({ articleUrl: link.trim() });
-        toast.success('订阅已受理，文章更新中', {
-          description: `公众号 ${result.feed.mpName}`,
-        });
-        await queryUtils.article.list.reset();
+        if (!result.feed || result.pending) toast.warning(result.message);
+        else
+          toast.success('订阅已受理，文章更新中', {
+            description: result.feed
+              ? `公众号 ${result.feed.mpName}`
+              : result.message,
+          });
+        await queryUtils.article.list.invalidate();
         await queryUtils.article.summary.invalidate();
       } catch (error) {
         failedLinks.push(link);
@@ -323,7 +455,7 @@ const Feeds = () => {
       : collectionChannel === 'owner-web-search'
         ? '更新和定时任务直接请求腾讯搜索与原文，保存取得的正文。搜索可能漏文；认证、验证或频控限制会停止请求并显示原因。'
         : collectionChannel === 'wechat2rss'
-          ? '“更新”提交一次上游任务并读取当前缓存；任务受理不等于新文章已取得。定时读取缓存并保存本地。订阅前历史及非群发文章不保证覆盖。'
+          ? '“更新本号”只读取当前缓存；“更新全部”及已启用的定时轮次才排队提交上游更新。任务受理不等于正文图片已取得。订阅前历史及非群发文章不保证覆盖。'
           : collectionChannel === 'public-album'
             ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个官方合集，核验原文并本地缓存正文图片；覆盖这些合集，不代表公众号全部历史。该通道不提供阅读、点赞或收藏。`
             : collectionChannel === 'unavailable'
@@ -629,7 +761,7 @@ const Feeds = () => {
                               );
                             } finally {
                               await refetchFeedList();
-                              await queryUtils.article.list.reset();
+                              await queryUtils.article.list.invalidate();
                               await queryUtils.article.summary.invalidate();
                             }
                           }
@@ -772,19 +904,43 @@ const Feeds = () => {
                       <Button
                         size="sm"
                         className="mac-btn-outline"
-                        isDisabled={isGetArticlesLoading || isCollectingAlbums}
+                        isDisabled={
+                          isAddFeedLoading ||
+                          refreshingMpIds.includes(currentMpInfo.id) ||
+                          isManualBatchRefreshing ||
+                          !!isRefreshAllMpArticlesRunning ||
+                          isCollectingAlbums
+                        }
                         onPress={async () => {
                           const mpId = currentMpInfo.id;
+                          if (
+                            !mpId ||
+                            isAddFeedLoading ||
+                            isCollectingAlbums ||
+                            isRefreshAllMpArticlesRunning
+                          )
+                            return;
+                          const token = beginManualRefresh(mpId);
+                          if (!token) return;
                           try {
                             const results = await refreshMpArticles({ mpId });
-                            await refetchFeedList();
-                            await queryUtils.article.list.reset();
-                            await queryUtils.article.summary.invalidate();
+                            if (!isCurrentRefresh(mpId, token)) return;
+                            void queryUtils.feed.cacheSyncStatus.invalidate();
+                            preserveArticlePosition();
+                            await refreshFeedViews(
+                              refetchFeedList,
+                              () => queryUtils.article.list.invalidate(),
+                              () => queryUtils.article.summary.invalidate(),
+                            );
+                            if (!isCurrentRefresh(mpId, token)) return;
                             if (
                               results.length > 0 &&
                               results.every((r) => r.complete)
                             )
-                              setRefreshedMpIds((prev) => [...prev, mpId]);
+                              setRefreshedMpIds((prev) => [
+                                ...prev.filter((id) => id !== mpId),
+                                mpId,
+                              ]);
                             for (const result of results) {
                               rememberUpdate(
                                 mpId,
@@ -808,13 +964,21 @@ const Feeds = () => {
                                   duration: 10000,
                                 });
                             }
-                            setTimeout(() => {
-                              setRefreshedMpIds((prev) =>
-                                prev.filter((id) => id !== mpId),
-                              );
-                            }, 3000);
+                            refreshFeedbackTimers.current.set(
+                              mpId,
+                              setTimeout(() => {
+                                refreshFeedbackTimers.current.delete(mpId);
+                                if (refreshPageMounted.current)
+                                  setRefreshedMpIds((prev) =>
+                                    prev.filter((id) => id !== mpId),
+                                  );
+                              }, 3000),
+                            );
                           } catch (e) {
-                            await refetchFeedList();
+                            if (!isCurrentRefresh(mpId, token)) return;
+                            // A failed local reread must never keep the task locked.
+                            await refetchFeedList().catch(() => undefined);
+                            if (!isCurrentRefresh(mpId, token)) return;
                             rememberUpdate(
                               mpId,
                               'error',
@@ -823,6 +987,8 @@ const Feeds = () => {
                             toast.error(
                               e instanceof Error ? e.message : '更新失败',
                             );
+                          } finally {
+                            finishManualRefresh(mpId, token);
                           }
                         }}
                       >
@@ -843,10 +1009,10 @@ const Feeds = () => {
                           <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
                         </svg>
                         <span className="text-[14px]">
-                          {isGetArticlesLoading
+                          {refreshingMpIds.includes(currentMpInfo.id)
                             ? '更新中'
                             : refreshedMpIds.includes(currentMpInfo.id)
-                              ? '更新完成'
+                              ? '缓存已同步'
                               : '更新本号'}
                         </span>
                       </Button>
@@ -873,49 +1039,40 @@ const Feeds = () => {
                       size="sm"
                       className="mac-btn-outline h-8"
                       isDisabled={
+                        isAddFeedLoading ||
                         isRefreshAllMpArticlesRunning ||
-                        isGetArticlesLoading ||
+                        isManualBatchRefreshing ||
+                        refreshingMpIds.length > 0 ||
                         isCollectingAlbums
                       }
                       onPress={async () => {
+                        if (
+                          isAddFeedLoading ||
+                          isCollectingAlbums ||
+                          isRefreshAllMpArticlesRunning
+                        )
+                          return;
+                        const token = beginManualRefresh('');
+                        if (!token) return;
                         try {
-                          const results = await refreshMpArticles({});
-                          await refetchFeedList();
-                          await queryUtils.article.list.reset();
-                          await queryUtils.article.summary.invalidate();
-                          for (const result of results) {
-                            if ('id' in result && typeof result.id === 'string')
-                              rememberUpdate(
-                                result.id,
-                                result.source,
-                                result.message,
-                                result.status,
-                              );
-                          }
-                          setIsRefreshedAll(
-                            results.length > 0 &&
-                              results.every((r) => r.complete),
+                          const batch = await beginRefreshAll();
+                          if (!isCurrentRefresh('', token)) return;
+                          toast.info(
+                            `${batch.reused ? '继续查看原批次' : '更新请求已排队'}：共 ${batch.total} 个，待发送 ${batch.queuedCount} 个`,
+                            {
+                              description: `${batch.skippedCount ? `${batch.skippedCount} 个停用或其他来源订阅未提交。` : ''}后台串行提交并查询缓存，关闭页面后仍继续。`,
+                            },
                           );
-                          const complete = results.filter(
-                            (r) => r.complete,
-                          ).length;
-                          const incomplete = results.filter((r) => !r.complete);
-                          if (incomplete.length)
-                            toast.warning(
-                              `完整更新 ${complete} 个；${incomplete.length} 个采集受限或阻塞`,
-                              {
-                                description: incomplete
-                                  .map((r) => r.message)
-                                  .join('；'),
-                                duration: 12000,
-                              },
-                            );
-                          else toast.success(`完整更新 ${complete} 个公众号`);
-                          setTimeout(() => setIsRefreshedAll(false), 3000);
+                          await manualBatches.refetch();
                         } catch (e) {
+                          if (!isCurrentRefresh('', token)) return;
                           toast.error(
-                            e instanceof Error ? e.message : '更新失败',
+                            e instanceof Error
+                              ? e.message
+                              : '更新请求未确认，请查询原批次；不要重复点击。',
                           );
+                        } finally {
+                          finishManualRefresh('', token);
                         }
                       }}
                     >
@@ -936,10 +1093,15 @@ const Feeds = () => {
                         <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
                       </svg>
                       <span className="text-[14px]">
-                        {isRefreshAllMpArticlesRunning || isGetArticlesLoading
-                          ? '更新中'
+                        {isRefreshAllMpArticlesRunning ||
+                        isManualBatchRefreshing
+                          ? isManualBatchRefreshing
+                            ? '正在受理'
+                            : manualBatch?.state === 'paused'
+                              ? '更新已暂停'
+                              : '后台更新中'
                           : isRefreshedAll
-                            ? '更新完成'
+                            ? '缓存已同步'
                             : '更新全部'}
                       </span>
                     </Button>
@@ -1150,6 +1312,16 @@ const Feeds = () => {
             </details>
           )}
           <div className="flex-1 overflow-auto">
+            <ManualRefreshProgress
+              batch={manualBatch}
+              feeds={feedData?.items || []}
+              onChange={() => manualBatches.refetch()}
+            />
+            {manualBatches.isError && (
+              <Button size="sm" onPress={() => void manualBatches.refetch()}>
+                重新读取更新任务
+              </Button>
+            )}
             <ArticleList
               search={search}
               selectedIds={articleSelectedIds}

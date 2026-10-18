@@ -16,7 +16,7 @@ jobs:
           version: 9
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: 'pnpm'
 
       - name: Install dependencies
@@ -35,6 +35,17 @@ jobs:
         run: pnpm --filter web build
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
+      - name: Test fresh and existing database schema compatibility offline
+        run: node --test apps/server/scripts/test-main-schema-compatibility.cjs
+      - name: Verify extracted runtime source boundaries
+        run: node --test scripts/main-wechat-runtime-scope.test.cjs
+      - name: Test extracted refresh UI and bounded list state offline
+        run: node --test scripts/feed-refresh-state-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-browse-state.test.cjs
+      - name: Test actual article list over isolated authenticated HTTP
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+          ARTICLE_LIST_BROWSER_SAMPLES: '1'
+        run: node --test scripts/article-list-browser.test.cjs
       - name: Test isolated WeRead gateway probe
         run: node --test scripts/probe-weread-gateway.test.cjs
       - name: Test isolated owner SDK handoff and resolver (no real HTTP)

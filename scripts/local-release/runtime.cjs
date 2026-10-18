@@ -1,3 +1,5 @@
+const { isIP } = require('node:net');
+const { sqliteRuntimeUrl } = require('./engine-audit.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const { parseArgs } = require('node:util');
@@ -11,8 +13,42 @@ const {
   run,
 } = require('./lib.cjs');
 
-// Scheduling is an explicit opt-in. A valid persisted official-album binding
-// is sufficient; the anonymous source must not require a different provider's key.
+// Mirror the Provider constructor's private URL/token boundary without loading
+// the application or making requests during the runtime's scheduling decision.
+function validWechat2RssConfig(settings) {
+  if (
+    typeof settings.wechat2RssToken !== 'string' ||
+    !settings.wechat2RssToken ||
+    settings.wechat2RssToken.length > 512
+  )
+    return false;
+  try {
+    const url = new URL(settings.wechat2RssBaseUrl);
+    const host = url.hostname;
+    const parts = host.split('.').map(Number);
+    const privateHost =
+      ['localhost', 'wechat2rss', '127.0.0.1', '[::1]'].includes(host) ||
+      (isIP(host) === 4 &&
+        (parts[0] === 10 ||
+          parts[0] === 127 ||
+          (parts[0] === 192 && parts[1] === 168) ||
+          (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)));
+    return (
+      ['http:', 'https:'].includes(url.protocol) &&
+      privateHost &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      url.pathname === '/'
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Scheduling is an explicit opt-in. Each source uses its own configuration and
+// binding; no source requires a different provider's key.
 function scheduledUpdatesEnabled(manifest, settings) {
   if (
     manifest.schemaCompatibility !== 'current' ||
@@ -21,6 +57,26 @@ function scheduledUpdatesEnabled(manifest, settings) {
   )
     return false;
   if (settings.mp2RssFeedKey?.trim()) return true;
+  if (settings.wechat2RssEnabled === '1' && validWechat2RssConfig(settings)) {
+    const allowed = new Set(
+      (settings.wechat2RssFeedIds || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter((id) => /^MP_WXS_\d{5,15}$/.test(id)),
+    );
+    if (
+      (settings.wechat2RssFeeds || []).some(
+        (feed) =>
+          feed.status === 1 &&
+          /^MP_WXS_\d{5,15}$/.test(feed.id) &&
+          (feed.collectionChannel === 'wechat2rss' ||
+            (feed.collectionChannel == null &&
+              !feed.publicAlbumIds &&
+              allowed.has(feed.id))),
+      )
+    )
+      return true;
+  }
   if (
     settings.ownerSearchConfigFile &&
     (settings.ownerSearchFeeds || []).some(
@@ -100,7 +156,7 @@ async function runtime() {
     ]),
   );
   const env = cleanEnvironment({
-    DATABASE_URL: 'file:' + database.replace(/\\/g, '/'),
+    DATABASE_URL: sqliteRuntimeUrl(database),
     NODE_ENV: 'production',
     DATABASE_TYPE: 'sqlite',
   });
@@ -127,6 +183,7 @@ async function runtime() {
   let counts;
   let publicAlbumFeeds = [];
   let ownerSearchFeeds = [];
+  let wechat2RssFeeds = [];
   try {
     // raw 查询用于暴露曾出现过的 5.22 engine / 5.10 client 协议不兼容。
     const [{ version }] = await client.$queryRawUnsafe(
@@ -152,6 +209,15 @@ async function runtime() {
       await client.feed.findFirst({ select: { collectionChannel: true } });
       publicAlbumFeeds = await client.feed.findMany({
         where: { status: 1, collectionChannel: 'public-album' },
+        select: {
+          id: true,
+          status: true,
+          collectionChannel: true,
+          publicAlbumIds: true,
+        },
+      });
+      wechat2RssFeeds = await client.feed.findMany({
+        where: { status: 1 },
         select: {
           id: true,
           status: true,
@@ -212,6 +278,11 @@ async function runtime() {
       mp2RssFeedKey: process.env.MP2RSS_FEED_KEY,
       publicAlbumFeeds,
       ownerSearchFeeds,
+      wechat2RssFeeds,
+      wechat2RssEnabled: process.env.WECHAT2RSS_ENABLED,
+      wechat2RssToken: process.env.WECHAT2RSS_TOKEN,
+      wechat2RssBaseUrl: process.env.WECHAT2RSS_BASE_URL,
+      wechat2RssFeedIds: process.env.WECHAT2RSS_FEED_IDS,
       ownerSearchConfigFile: process.env.OWNER_SEARCH_CONFIG_FILE,
     });
     Object.assign(process.env, {
@@ -264,4 +335,4 @@ if (require.main === module)
     console.error(error.message);
     process.exitCode = 1;
   });
-module.exports = { runtime, scheduledUpdatesEnabled };
+module.exports = { runtime, scheduledUpdatesEnabled, validWechat2RssConfig };

@@ -48,13 +48,18 @@ export function decodeInlineImage(raw: string): {
   bytes: Buffer;
   type: ImageType;
 } {
-  const match = raw.match(
-    /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+={0,2})$/,
-  );
-  if (!match || match[2].length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4)
+  // Match only the fixed-size header: scanning a multi-MB Base64 capture with
+  // a greedy regexp can exhaust the V8 regexp stack. The canonical round trip
+  // below still rejects whitespace, invalid alphabet and malformed padding.
+  const match = raw.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,/);
+  if (
+    !match ||
+    raw.length - match[0].length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4
+  )
     throw new Error('IMAGE_RESPONSE_INVALID');
-  const bytes = Buffer.from(match[2], 'base64');
-  if (bytes.toString('base64') !== match[2])
+  const encoded = raw.slice(match[0].length);
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.toString('base64') !== encoded)
     throw new Error('IMAGE_RESPONSE_INVALID');
   return { bytes, type: assertImageContainer(bytes, match[1]) };
 }
@@ -72,6 +77,13 @@ export function allowedImageUrl(raw: string): URL {
   return url;
 }
 
+/** Authentication/rate restrictions stop the whole background media lane. */
+export class ImageRequestBlockedError extends Error {
+  constructor(readonly status: number) {
+    super('IMAGE_REQUEST_BLOCKED');
+  }
+}
+
 export async function fetchAllowedImage(
   raw: string,
 ): Promise<{ bytes: Buffer; type: string }> {
@@ -81,6 +93,10 @@ export async function fetchAllowedImage(
     signal: AbortSignal.timeout(10000),
     headers: { referer: 'https://mp.weixin.qq.com/' },
   });
+  if ([401, 403, 429].includes(response.status)) {
+    await response.body?.cancel();
+    throw new ImageRequestBlockedError(response.status);
+  }
   const type = (response.headers.get('content-type') || '')
     .split(';')[0]
     .toLowerCase();

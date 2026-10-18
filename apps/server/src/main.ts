@@ -1,3 +1,11 @@
+import {
+  startSnapshotsAfterStartupAudit,
+  startupAuditHttpGuard,
+} from './startup-audit';
+import {
+  startSqliteSnapshotGuard,
+  stopSqliteSnapshotGuard,
+} from './collection/sqlite-snapshot-guard';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { TrpcRouter } from '@server/trpc/trpc.router';
@@ -33,6 +41,7 @@ async function bootstrap() {
     configService.get<ConfigurationType['server']>('server')!;
 
   app.use(privateAccessGuard);
+  app.use(startupAuditHttpGuard);
   if (process.env.WEWE_ACCEPTANCE_MODE === '1')
     app.use((req, res, next) => {
       res.setHeader(
@@ -64,6 +73,15 @@ async function bootstrap() {
   trpc.applyMiddleware(app);
 
   await app.listen(port, host);
+  let closed = false;
+  app.getHttpServer().once('close', () => {
+    closed = true;
+    stopSqliteSnapshotGuard();
+  });
+  process.once('exit', stopSqliteSnapshotGuard);
+  await startSnapshotsAfterStartupAudit(async () => {
+    if (!closed) await startSqliteSnapshotGuard();
+  });
 
   console.log(`Server is running at http://${host}:${port}`);
 }

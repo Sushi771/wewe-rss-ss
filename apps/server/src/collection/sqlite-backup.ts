@@ -1,6 +1,68 @@
 import { spawn } from 'node:child_process';
 import { access, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { sqliteWrites } from './sqlite-write-coordinator';
+import { resolveSqliteBackupRoot } from './sqlite-backup-root';
+
+// A kill request is not an exit receipt. Keep a failed-to-stop child fenced
+// until its close event, including after the bounded caller wait has expired.
+const stoppingBackups = new Map<string, Set<ReturnType<typeof spawn>>>();
+
+function logDiagnostic(attempt: string, outcome: string, output: string) {
+  const diagnostics: Record<string, unknown> = {};
+  try {
+    const raw = JSON.parse(output)?.diagnostics;
+    if (
+      raw &&
+      ['lock', 'snapshot', 'copy', 'verify', 'hash', 'complete'].includes(
+        raw.stage,
+      )
+    ) {
+      diagnostics.stage = raw.stage;
+      if (
+        [
+          'delete',
+          'truncate',
+          'persist',
+          'memory',
+          'wal',
+          'off',
+          'unknown',
+        ].includes(raw.journalMode)
+      )
+        diagnostics.journalMode = raw.journalMode;
+      for (const key of ['copySteps', 'busySteps'])
+        if (Number.isSafeInteger(raw[key]) && raw[key] >= 0)
+          diagnostics[key] = raw[key];
+      const timings: Record<string, number> = {};
+      for (const key of [
+        'lock',
+        'snapshot',
+        'copy',
+        'verify',
+        'hash',
+        'complete',
+      ])
+        if (
+          Number.isSafeInteger(raw.milliseconds?.[key]) &&
+          raw.milliseconds[key] >= 0
+        )
+          timings[key] = raw.milliseconds[key];
+      diagnostics.milliseconds = timings;
+    }
+  } catch {
+    // Never log raw child output, exceptions, paths, or SQL.
+  }
+  console.info(
+    JSON.stringify({
+      event: 'sqlite-backup',
+      attempt,
+      outcome,
+      ...diagnostics,
+    }),
+  );
+}
 
 async function serverRoot() {
   for (const candidate of [
@@ -46,86 +108,175 @@ export async function createVerifiedSqliteBackup(
     path.isAbsolute(rawPath) ? rawPath : path.resolve(root, 'prisma', rawPath),
   );
   const script = path.join(root, 'scripts', 'backup-sqlite.py');
-  const backupRoot = path.join(path.dirname(database), 'backups');
+  if (stoppingBackups.has(database))
+    throw new Error('SQLite 备份子进程退出未确认，本次未写入');
+  const backupRoot = resolveSqliteBackupRoot(database);
   const python =
     process.env.SQLITE_BACKUP_PYTHON?.trim() ||
     (process.platform === 'win32' ? 'python' : 'python3');
   if (/[\0\r\n]/.test(python))
     throw new Error('SQLite 备份 Python 可执行路径无效，本次未写入');
-  const output = await new Promise<string>((resolve, reject) => {
-    let child: ReturnType<typeof spawn>;
-    try {
-      // A configured interpreter is one executable, never a shell command.
-      child = spawn(
-        python,
-        [script, '--database', database, '--backup-root', backupRoot],
-        { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-    } catch {
-      reject(new Error('无法启动 SQLite 一致性备份，本次未写入'));
-      return;
-    }
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const fail = (message: string) => {
-      if (settled) return;
-      settled = true;
-      reject(new Error(message));
-    };
-    const stop = (message: string) => {
-      clearTimeout(timer);
-      fail(message);
+  const execute = () =>
+    new Promise<string>((resolve, reject) => {
+      let child: ReturnType<typeof spawn>;
       try {
-        child.kill();
+        // A configured interpreter is one executable, never a shell command.
+        child = spawn(
+          python,
+          [script, '--database', database, '--backup-root', backupRoot],
+          {
+            windowsHide: true,
+            shell: false,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+          },
+        );
       } catch {
-        // The request remains rejected even if process termination fails.
+        reject(new Error('无法启动 SQLite 一致性备份，本次未写入'));
+        return;
       }
-    };
-    const timer = setTimeout(() => {
-      stop('SQLite 一致性备份超时，本次未写入');
-    }, 60000);
-    child.stdout!.setEncoding('utf8');
-    child.stderr!.setEncoding('utf8');
-    child.stdout!.on('data', (chunk: string) => {
-      if (settled) return;
-      if (Buffer.byteLength(stdout) + Buffer.byteLength(chunk) > 4096)
-        stop('SQLite 一致性备份输出超限，本次未写入');
-      else stdout += chunk;
-    });
-    child.stderr!.on('data', (chunk: string) => {
-      if (settled) return;
-      if (Buffer.byteLength(stderr) + Buffer.byteLength(chunk) > 4096)
-        stop('SQLite 一致性备份输出超限，本次未写入');
-      else stderr += chunk;
-    });
-    child.once('error', () => {
-      clearTimeout(timer);
-      fail('无法启动 SQLite 一致性备份，本次未写入');
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      if (settled) return;
-      if (code !== 0 || signal) fail('SQLite 一致性备份未验证成功，本次未写入');
-      else {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      let stopping: string | undefined;
+      let forceTimer: ReturnType<typeof setTimeout> | undefined;
+      let exitTimer: ReturnType<typeof setTimeout> | undefined;
+      const attempt = randomUUID();
+      const fail = (message: string) => {
+        if (settled) return;
         settled = true;
-        resolve(stdout);
-      }
+        logDiagnostic(
+          attempt,
+          stoppingBackups.get(database)?.has(child)
+            ? 'termination-unconfirmed'
+            : stopping
+              ? 'stopped'
+              : 'failed',
+          stderr,
+        );
+        reject(new Error(message));
+      };
+      const stop = (message: string) => {
+        if (settled || stopping) return;
+        clearTimeout(timer);
+        stopping = message;
+        const group =
+          stoppingBackups.get(database) || new Set<ReturnType<typeof spawn>>();
+        group.add(child);
+        stoppingBackups.set(database, group);
+        sqliteWrites.fence(child);
+        // Both waits are bounded. If termination cannot be confirmed, retain the
+        // fence rather than allowing another child to contend with this one.
+        forceTimer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* Wait for close or fence. */
+          }
+        }, 1000);
+        exitTimer = setTimeout(() => {
+          fail(`${message}；子进程退出未确认，已阻止重试`);
+        }, 5000);
+        try {
+          child.kill();
+        } catch {
+          // Do not confuse a failed kill request with confirmed process exit.
+        }
+      };
+      const timer = setTimeout(() => {
+        stop('SQLite 一致性备份超时，本次未写入');
+      }, 60000);
+      child.stdout!.setEncoding('utf8');
+      child.stderr!.setEncoding('utf8');
+      child.stdout!.on('data', (chunk: string) => {
+        if (settled || stopping) return;
+        if (Buffer.byteLength(stdout) + Buffer.byteLength(chunk) > 4096)
+          stop('SQLite 一致性备份输出超限，本次未写入');
+        else stdout += chunk;
+      });
+      child.stderr!.on('data', (chunk: string) => {
+        if (settled || stopping) return;
+        if (Buffer.byteLength(stderr) + Buffer.byteLength(chunk) > 4096)
+          stop('SQLite 一致性备份输出超限，本次未写入');
+        else stderr += chunk;
+      });
+      child.once('error', () => {
+        if (stopping) return;
+        clearTimeout(timer);
+        if (child.pid) stop('SQLite 一致性备份进程异常，本次未写入');
+        else fail('无法启动 SQLite 一致性备份，本次未写入');
+      });
+      child.once('close', (code, signal) => {
+        clearTimeout(timer);
+        clearTimeout(forceTimer);
+        clearTimeout(exitTimer);
+        const group = stoppingBackups.get(database);
+        group?.delete(child);
+        if (group?.size === 0) stoppingBackups.delete(database);
+        sqliteWrites.unfence(child);
+        if (settled) return;
+        if (stopping) {
+          fail(stopping);
+          return;
+        }
+        if (code !== 0 || signal) {
+          let timedOut = false;
+          let budgetFailure = false;
+          let layoutReview = false;
+          try {
+            const failure = JSON.parse(stderr);
+            budgetFailure = failure?.reason === 'space-budget';
+            layoutReview = failure?.reason === 'layout-review';
+            timedOut =
+              failure?.event === 'sqlite-backup-failed' &&
+              failure?.reason === 'timeout';
+          } catch {
+            /* Ignore raw child exceptions. */
+          }
+          fail(
+            budgetFailure
+              ? '备份空间预算不足，已停止写入以保留恢复点。请审阅备份空间并明确确认归档，不会自动删旧点。'
+              : layoutReview
+                ? '备份历史目录链接须明确审阅，本次未写入。'
+                : timedOut
+                  ? 'SQLite 一致性备份超时，本次未写入'
+                  : 'SQLite 一致性备份未验证成功，本次未写入',
+          );
+        } else {
+          settled = true;
+          logDiagnostic(attempt, 'process-exited', stdout);
+          resolve(stdout);
+        }
+      });
     });
+  // Python revalidates all schema and typed rows on every reuse. File identity
+  // and header-only process caches cannot authorize skipping that proof.
+  if (sqliteWrites.hasWriteAdmission())
+    throw new Error(
+      'Cannot establish a recovery snapshot inside an admitted write',
+    );
+  return sqliteWrites.snapshot(async () => {
+    const output = await execute();
+    let report: {
+      integrityCheck?: string;
+      source?: string;
+      backup?: string;
+      sha256?: string;
+    };
+    try {
+      report = JSON.parse(output);
+    } catch {
+      throw new Error('SQLite 备份验证报告无效，本次未写入');
+    }
+    if (
+      !report ||
+      report.integrityCheck !== 'ok' ||
+      typeof report.backup !== 'string' ||
+      !report.backup ||
+      typeof report.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(report.sha256)
+    )
+      throw new Error('SQLite 备份验证失败，本次未写入');
+    return { ...report, backup: report.backup, sha256: report.sha256 };
   });
-  let report: { integrityCheck?: string; backup?: string; sha256?: string };
-  try {
-    report = JSON.parse(output);
-  } catch {
-    throw new Error('SQLite 备份验证报告无效，本次未写入');
-  }
-  if (
-    !report ||
-    report.integrityCheck !== 'ok' ||
-    typeof report.backup !== 'string' ||
-    !report.backup ||
-    !/^[a-f0-9]{64}$/.test(report.sha256 || '')
-  )
-    throw new Error('SQLite 备份验证失败，本次未写入');
-  return report;
 }

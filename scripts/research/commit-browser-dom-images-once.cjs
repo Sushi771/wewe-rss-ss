@@ -31,6 +31,33 @@ const PRIVATE_BASE = path.join(
 const PRODUCTION_DB = path.join(ROOT, 'apps/server/data/wewe-rss.db');
 const HEX_SHA = /^[a-f0-9]{64}$/;
 const EXPECTED_TABLES = ['_prisma_migrations', 'accounts', 'articles', 'feeds'];
+// The additive XHS migration is optional for older, unmigrated databases.
+// Known additive layouts are snapshotted in full; unexpected tables still stop.
+const EXPECTED_XHS_TABLES = [...EXPECTED_TABLES, 'xhs_creators', 'xhs_notes'];
+const EXPECTED_GROUP_TABLES = [
+  ...EXPECTED_XHS_TABLES,
+  'management_groups',
+].sort();
+const EXPECTED_INSERT_TABLES = [
+  ...EXPECTED_GROUP_TABLES,
+  'cache_insert_batches',
+].sort();
+const EXPECTED_INCREMENTAL_TABLES = [
+  ...EXPECTED_INSERT_TABLES,
+  'cache_refresh_commits',
+  'refresh_submission_claims',
+].sort();
+const INSERT_COLUMNS = [
+  'id',
+  'mp_id',
+  'article_manifest',
+  'snapshot_generation',
+  'guard_generation',
+  'backup_started_at_ms',
+  'coverage_at_ms',
+  'created_count',
+  'committed_at_ms',
+];
 const MAX_REHEARSAL_AGE_MS = 2 * 60 * 60 * 1000;
 
 function fail(code) {
@@ -136,7 +163,9 @@ function encodeRows(rows) {
     Object.fromEntries(
       Object.entries(row).map(([key, value]) => [
         key,
-        Buffer.isBuffer(value) ? ['blob', sha256(value)] : value,
+        value instanceof Uint8Array
+          ? ['blob', value.byteLength, sha256(value)]
+          : value,
       ]),
     ),
   );
@@ -152,11 +181,73 @@ function snapshot(db, omitTarget = false) {
       "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
     .all();
+  const tableNames = JSON.stringify(definitions.map((row) => row.name));
   if (
-    JSON.stringify(definitions.map((row) => row.name)) !==
-    JSON.stringify(EXPECTED_TABLES)
+    tableNames !== JSON.stringify(EXPECTED_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_XHS_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_GROUP_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_INSERT_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_INCREMENTAL_TABLES)
   )
     fail('SQLITE_SCHEMA_UNEXPECTED');
+  if (definitions.some((row) => row.name === 'cache_insert_batches')) {
+    const columns = db.prepare('PRAGMA table_info(cache_insert_batches)').all();
+    const expected = INSERT_COLUMNS.map((name, i) => ({
+      name,
+      type: i < 5 ? 'TEXT' : i === 7 ? 'INTEGER' : 'BIGINT',
+      notnull: 1,
+      dflt_value: null,
+      pk: i === 0 ? 1 : 0,
+    }));
+    const actual = columns.map(({ name, type, notnull, dflt_value, pk }) => ({
+      name,
+      type,
+      notnull,
+      dflt_value,
+      pk,
+    }));
+    if (JSON.stringify(actual) !== JSON.stringify(expected))
+      fail('SQLITE_SCHEMA_UNEXPECTED');
+  }
+  if (tableNames === JSON.stringify(EXPECTED_INCREMENTAL_TABLES)) {
+    const schemas = {
+      cache_refresh_commits: [
+        ['id', 'TEXT'],
+        ['mp_id', 'TEXT'],
+        ['result_json', 'TEXT'],
+        ['committed_at_ms', 'BIGINT'],
+      ],
+      refresh_submission_claims: [
+        ['id', 'TEXT'],
+        ['mp_id', 'TEXT'],
+        ['state', 'TEXT'],
+        ['reserved_at', 'INTEGER'],
+        ['previous_at', 'INTEGER'],
+        ['updated_at_ms', 'BIGINT'],
+      ],
+    };
+    for (const [table, fields] of Object.entries(schemas)) {
+      const actual = db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map(({ name, type, notnull, dflt_value, pk }) => ({
+          name,
+          type,
+          notnull,
+          dflt_value,
+          pk,
+        }));
+      const expected = fields.map(([name, type], i) => ({
+        name,
+        type,
+        notnull: 1,
+        dflt_value: null,
+        pk: i === 0 ? 1 : 0,
+      }));
+      if (JSON.stringify(actual) !== JSON.stringify(expected))
+        fail('SQLITE_SCHEMA_UNEXPECTED');
+    }
+  }
   const tables = {};
   for (const { name, sql } of definitions) {
     const safe = `"${name.replaceAll('"', '""')}"`;
