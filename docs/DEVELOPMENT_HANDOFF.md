@@ -1,3 +1,7 @@
+## 2026-10-18: bounded daily backup lifecycle, development only
+
+Prepared independently on exact `aeb7483c85db8d13f1345011266ae7ee6046adc0`. The Windows opt-in lifecycle persists the original physical generation boundary across restarts and limits admitted periodic data to three normal points plus one pending-confirmation point, under unchanged cumulative caps. Each permanent retirement still needs the existing exact action-time approval; partial outcomes retain the same spent allocation. Unknown/protected origins stay separate. Capacity diagnostics now derive 900/86400 cadence and display the actual interval. No production activation, database copy or retirement was performed. See [activation boundary, fixed-state protocol, exact review flow and synthetic coverage](PERIODIC_BACKUP_CONFIRMED_LIFECYCLE.md). This work is outside the current integration acceptance/main-merge range.
+
 ## 2026-10-17: terminal refresh integration, not deployed
 
 PR47 full range through `6aa511cec97f039e03bb2dab29db7a88c013c856` is integrated on the deployed `12d04edebedf6eed3be07466f9cbf3b899a437a8` baseline. Closed known-unsent tails and exhausted cache work no longer permanently reserve later intents; unknown submissions, in-flight ownership and original budgets remain protected. Every-source coverage stays visible for terminal batches. See [integration scope, validation and deployment boundary](TERMINAL_REFRESH_INTEGRATION_20261017.md). No production deployment or queue changes are included in this development task.

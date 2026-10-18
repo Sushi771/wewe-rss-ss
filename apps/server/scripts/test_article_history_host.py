@@ -148,6 +148,42 @@ class HostTests(unittest.TestCase):
         with self.assertRaisesRegex(host.HostError, 'REFERENCE_STATUS_INVALID'):
             self.review()
 
+    def test_both_old_and_cadence_telemetry_remain_strict_and_observed(self):
+        status=self.backups/'.space-budget-status.json'
+        current=json.loads(status.read_text(encoding='utf8'))
+        old={k:current[k] for k in ('nextBackupAllowed','warning','estimatedDaysAtContinuousChanges','recordedAt')}
+        for value in (old,{**old,'continuousChangedSnapshotIntervalSeconds':86400,
+                           'forecastBasis':'continuously-changing-source; unchanged snapshots may be reused'}):
+            status.write_text(json.dumps(value),encoding='utf8')
+            self.assertEqual(len(self.review()['eligible']),1)
+        for change in ({'continuousChangedSnapshotIntervalSeconds':'86400'},
+                       {'continuousChangedSnapshotIntervalSeconds':True},
+                       {'continuousChangedSnapshotIntervalSeconds':86401},
+                       {'forecastBasis':'paths are allowed'}, {'paths':[str(self.old)]}):
+            status.write_text(json.dumps({**current,**change}),encoding='utf8')
+            with self.assertRaisesRegex(host.HostError,'REFERENCE_STATUS_INVALID'):self.review()
+
+    @unittest.skipUnless(os.name=='nt','Actual lifecycle read-only native pins')
+    def test_ready_lifecycle_is_bound_and_only_adds_protected_targets(self):
+        backup=owner_module.backup_module
+        with patch.dict(os.environ,{'SQLITE_PERIODIC_LIFECYCLE_ENABLED':'1',
+                                   'SQLITE_PERIODIC_RETENTION_COPIES':'3','SQLITE_PERIODIC_RETENTION_ENABLED':'0'}):
+            report=backup.create_backup(self.live,self.backups,prefix='periodic-snapshot')
+        self.assertTrue(report['reused'])
+        self.assertEqual(len(self.review()['eligible']),1)
+        plan=self.review()
+        initfile,_state=backup.periodic_lifecycle().paths(self.live.resolve(),self.backups.resolve())
+        initfile.write_bytes(initfile.read_bytes()+b' ')
+        with self.assertRaisesRegex(host.HostError,'REFERENCE_LIFECYCLE_INVALID'):
+            self.service.validate_approval(plan,self.approval(plan))
+
+    def test_lifecycle_like_foreign_or_orphan_files_are_not_exempted(self):
+        for name in ('.periodic-lifecycle-foreign.json','.periodic-lifecycle-'+('a'*24)+'.init'):
+            file=self.backups/name;file.write_text('{}',encoding='utf8')
+            try:
+                with self.assertRaisesRegex(host.HostError,'REFERENCE_LIFECYCLE_INVALID'):self.review()
+            finally:file.unlink()  # Owned synthetic control only.
+
     def test_capacity_status_change_invalidates_exact_review_approval(self):
         plan = self.review()
         status = self.backups / '.space-budget-status.json'

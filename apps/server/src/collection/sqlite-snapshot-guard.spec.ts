@@ -12,9 +12,38 @@ import {
   notifySqliteSnapshotDirty,
   safePeriodicSnapshotFailure,
   safePeriodicRetentionStatus,
+  safePeriodicLifecycleStatus,
 } from './sqlite-snapshot-guard';
 
 describe('snapshot owner with real local Python / Prisma SQLite only', () => {
+  it('keeps lifecycle diagnostics finite and strips paths, arbitrary errors and lease claims', () => {
+    expect(
+      safePeriodicLifecycleStatus({
+        status: 'pending-confirmation',
+        normalCopies: 3,
+        pendingCopies: 1,
+        intervalSeconds: 86400,
+        path: 'private',
+        fresh: true,
+      }),
+    ).toEqual({
+      status: 'pending-confirmation',
+      normalCopies: 3,
+      pendingCopies: 1,
+      intervalSeconds: 86400,
+      automaticDeletion: false,
+    });
+    expect(
+      safePeriodicLifecycleStatus({ status: 'private/path' }),
+    ).toBeUndefined();
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'SQLITE_PERIODIC_NOT_DUE',
+        stage: 'rotation',
+        argv: 'private',
+      }),
+    ).toEqual({ code: 'SQLITE_PERIODIC_NOT_DUE', stage: 'rotation' });
+  });
   const originalEnv = { ...process.env };
   const originalCwd = process.cwd();
   let root: string;

@@ -10,6 +10,7 @@ import {
   exportSourceMarkdown,
 } from '../article-export-source';
 import { findArticleListRows } from '../article-list-page';
+import { savedMediaIds } from '../collection/saved-media-writeback';
 import { articleListWhere, articleListOrder } from '../article-list-filter';
 import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
@@ -1131,6 +1132,12 @@ export class TrpcRouter {
   });
 
   articleRouter = this.trpcService.router({
+    supplementSavedMedia: this.trpcService.protectedProcedure
+      .input(z.object({ ids: savedMediaIds }).strict())
+      .mutation(({ input, ctx }) => {
+        if (!(ctx as any).isLocal) throw new TRPCError({ code: 'FORBIDDEN' });
+        return this.trpcService.supplementSavedArticleMedia(input.ids);
+      }),
     exportIds: this.trpcService.protectedProcedure
       .input(articleFilterSchema)
       .query(async ({ input }) => {
