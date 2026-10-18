@@ -301,24 +301,35 @@ test('explicit test-only retention supports the synthetic import fixture; old ro
 
 test('default rehearsal uses a tiny synthetic source and reclaims databases after confirmed disconnect', async () => {
   await withCache(async (dir) => {
-    const result = await runImageCopyRehearsal({
-      baseDir: dir,
-      testExpectedHash: domSha,
-    });
-    assert.equal(result.syntheticDatabase, true);
-    assert.equal(result.firstPass.created, 1);
-    assert.equal(result.oldRowsUnchanged, true);
-    assert.equal(result.networkRequests, 0);
-    const summary = JSON.parse(
-      fs.readFileSync(path.join(result.audit, 'space-summary.json')),
-    );
-    assert.equal(summary.retained, false);
-    assert.equal(summary.usage.databases, 0);
-    assert(summary.removedSyntheticFiles >= 2);
-    assert(
-      !fs.existsSync(path.join(path.dirname(result.audit), '.test-run.lock')),
-    );
-    assert(fs.existsSync(path.join(result.audit, 'result.json')));
+    const oldBackupRoot = process.env.SQLITE_TEST_BACKUP_ROOT;
+    const outsideBackupRoot = path.join(dir, 'unapproved-backups');
+    process.env.SQLITE_TEST_BACKUP_ROOT = outsideBackupRoot;
+    try {
+      const result = await runImageCopyRehearsal({
+        baseDir: dir,
+        testExpectedHash: domSha,
+      });
+      assert.equal(result.syntheticDatabase, true);
+      assert.equal(result.firstPass.created, 1);
+      assert.equal(result.oldRowsUnchanged, true);
+      assert.equal(result.networkRequests, 0);
+      const summary = JSON.parse(
+        fs.readFileSync(path.join(result.audit, 'space-summary.json')),
+      );
+      assert.equal(summary.retained, false);
+      assert.equal(summary.usage.databases, 0);
+      assert(summary.removedSyntheticFiles >= 2);
+      assert(
+        !fs.existsSync(path.join(path.dirname(result.audit), '.test-run.lock')),
+      );
+      assert(fs.existsSync(path.join(result.audit, 'result.json')));
+      assert(!fs.existsSync(outsideBackupRoot));
+      assert.equal(process.env.SQLITE_TEST_BACKUP_ROOT, outsideBackupRoot);
+    } finally {
+      if (oldBackupRoot === undefined)
+        delete process.env.SQLITE_TEST_BACKUP_ROOT;
+      else process.env.SQLITE_TEST_BACKUP_ROOT = oldBackupRoot;
+    }
   });
 });
 

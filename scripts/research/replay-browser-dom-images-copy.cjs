@@ -379,6 +379,7 @@ async function runImageCopyRehearsal(options = {}) {
     database: process.env.DATABASE_URL,
     scheduled: process.env.DISABLE_SCHEDULED_UPDATES,
     privateMode: process.env.PRIVATE_ONLINE_MODE,
+    testBackupRoot: process.env.SQLITE_TEST_BACKUP_ROOT,
   };
   let prisma, artifacts, artifactError;
   try {
@@ -397,6 +398,7 @@ async function runImageCopyRehearsal(options = {}) {
     // every logical source row as well before claiming the source is intact.
     const sourceBefore = snapshotTables(sourceDb);
     const trialDir = artifacts.audit;
+    process.env.SQLITE_TEST_BACKUP_ROOT = path.join(trialDir, 'backups');
     const copyDb = path.join(trialDir, 'trial.db');
     const source = new DatabaseSync(sourceDb, { readOnly: true });
     try {
@@ -537,6 +539,9 @@ async function runImageCopyRehearsal(options = {}) {
       if (oldEnv.privateMode === undefined)
         delete process.env.PRIVATE_ONLINE_MODE;
       else process.env.PRIVATE_ONLINE_MODE = oldEnv.privateMode;
+      if (oldEnv.testBackupRoot === undefined)
+        delete process.env.SQLITE_TEST_BACKUP_ROOT;
+      else process.env.SQLITE_TEST_BACKUP_ROOT = oldEnv.testBackupRoot;
       guard.restore();
     }
     artifacts?.finish(artifactError);

@@ -90,19 +90,29 @@ function audit(root) {
 test('directory replay writes and deduplicates only synthetic data, then reclaims databases and retains the report', async (t) => {
   const root = fixture(t),
     sample = replay();
-  const result = await replayDirectoryFixture(sample.mpId, sample.value);
-  assert.equal(result.syntheticDatabase, true);
-  assert.equal(result.first.created, 1);
-  assert.equal(result.second.created, 0);
-  assert.equal(result.networkRequests, 0);
-  assert.equal(result.oldRowsUnchanged, true);
-  const summary = JSON.parse(
-    fs.readFileSync(path.join(result.audit, 'space-summary.json')),
-  );
-  assert.equal(summary.usage.databases, 0);
-  assert.equal(summary.retained, false);
-  assert(!fs.existsSync(path.join(root, '.test-run.lock')));
-  assert(fs.existsSync(path.join(result.audit, 'result.json')));
+  const oldBackupRoot = process.env.SQLITE_TEST_BACKUP_ROOT;
+  const outsideBackupRoot = path.join(root, 'unapproved-backups');
+  process.env.SQLITE_TEST_BACKUP_ROOT = outsideBackupRoot;
+  try {
+    const result = await replayDirectoryFixture(sample.mpId, sample.value);
+    assert.equal(result.syntheticDatabase, true);
+    assert.equal(result.first.created, 1);
+    assert.equal(result.second.created, 0);
+    assert.equal(result.networkRequests, 0);
+    assert.equal(result.oldRowsUnchanged, true);
+    const summary = JSON.parse(
+      fs.readFileSync(path.join(result.audit, 'space-summary.json')),
+    );
+    assert.equal(summary.usage.databases, 0);
+    assert.equal(summary.retained, false);
+    assert(!fs.existsSync(path.join(root, '.test-run.lock')));
+    assert(fs.existsSync(path.join(result.audit, 'result.json')));
+    assert(!fs.existsSync(outsideBackupRoot));
+    assert.equal(process.env.SQLITE_TEST_BACKUP_ROOT, outsideBackupRoot);
+  } finally {
+    if (oldBackupRoot === undefined) delete process.env.SQLITE_TEST_BACKUP_ROOT;
+    else process.env.SQLITE_TEST_BACKUP_ROOT = oldBackupRoot;
+  }
 });
 
 test('directory replay failure after fixture creation cleans only this run and restores environment/network functions', async (t) => {

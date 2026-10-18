@@ -112,6 +112,7 @@ async function replayDirectoryFixture(mpId, replay) {
     const copy = path.join(trial, 'copy.db');
     const oldDatabase = process.env.DATABASE_URL;
     const oldScheduled = process.env.DISABLE_SCHEDULED_UPDATES;
+    const oldTestBackupRoot = process.env.SQLITE_TEST_BACKUP_ROOT;
     let prisma,
       artifactError,
       writerClosed = true;
@@ -136,6 +137,7 @@ async function replayDirectoryFixture(mpId, replay) {
       );
       process.env.DATABASE_URL = `file:${copy.replace(/\\/g, '/')}`;
       process.env.DISABLE_SCHEDULED_UPDATES = '1';
+      process.env.SQLITE_TEST_BACKUP_ROOT = path.join(trial, 'backups');
       const { PrismaClient } = local('@prisma/client');
       const { CollectionService } = require(
         path.join(built, 'collection/collection.service'),
@@ -209,6 +211,9 @@ async function replayDirectoryFixture(mpId, replay) {
       if (oldScheduled === undefined)
         delete process.env.DISABLE_SCHEDULED_UPDATES;
       else process.env.DISABLE_SCHEDULED_UPDATES = oldScheduled;
+      if (oldTestBackupRoot === undefined)
+        delete process.env.SQLITE_TEST_BACKUP_ROOT;
+      else process.env.SQLITE_TEST_BACKUP_ROOT = oldTestBackupRoot;
       if (writerClosed) artifacts.finish(artifactError);
     }
   } finally {
