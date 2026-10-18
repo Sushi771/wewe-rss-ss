@@ -8,10 +8,13 @@ import { TrpcService } from '../trpc/trpc.service';
 import { wechat2RssProvider } from '../collection/provider-registry';
 import { resolveCollectionRoute } from '../collection/collection-channel';
 import { databaseWritesAllowed, waitForStartupAudit } from '../startup-audit';
-import { CacheSyncEngine } from './cache-sync-engine';
+import { CacheSyncEngine, cacheSyncDaytime } from './cache-sync-engine';
 import { CacheSqliteMonitor } from './cache-sqlite-monitor';
 import { cacheSyncState } from './cache-sync-state';
 import { mediaSafetyStop } from './media-safety-stop';
+import { AutomaticMediaQueue } from './automatic-media-queue';
+import { AutomaticMediaScan } from './automatic-media-scan';
+import { fetchAllowedImage } from '../collection/image-fetch';
 
 @Injectable()
 export class CacheSyncService
@@ -41,7 +44,55 @@ export class CacheSyncService
     try {
       const safety = await mediaSafetyStop(process.env.DATABASE_URL || '');
       const provider = wechat2RssProvider();
+      let allowedFeeds: ReadonlySet<string> = new Set();
+      const scan = new AutomaticMediaScan(this.prisma);
+      const media = new AutomaticMediaQueue(
+        decodeURIComponent(
+          (process.env.DATABASE_URL || '').slice(5).split('?')[0],
+        ),
+        {
+          now: Date.now,
+          scan: (cursor, since) =>
+            scan.page(
+              cursor,
+              since,
+              process.env.WECHAT2RSS_AUTOMATIC_MEDIA_HISTORY === '1',
+            ),
+          load: (id) => scan.load(id),
+          commit: (row, images) =>
+            this.trpc.commitAutomaticArticleMedia(row, images),
+          fetch: fetchAllowedImage,
+          canFetch: (id) =>
+            !this.stopped &&
+            databaseWritesAllowed() &&
+            allowedFeeds.has(id) &&
+            process.env.WECHAT2RSS_CACHE_MEDIA !== '0' &&
+            !safety.isBlocked() &&
+            cacheSyncDaytime(Date.now()),
+          stop: () => safety.stop(),
+          publish: (summary, code) => {
+            cacheSyncState.media = summary;
+            cacheSyncState.mediaFailure = code;
+            cacheSyncState.mediaPause = safety.isBlocked()
+              ? 'blocked'
+              : process.env.WECHAT2RSS_CACHE_MEDIA === '0'
+                ? 'disabled'
+                : !cacheSyncDaytime(Date.now())
+                  ? 'night'
+                  : !allowedFeeds.size
+                    ? 'metadata'
+                    : undefined;
+          },
+        },
+      );
       this.engine = new CacheSyncEngine({
+        durableMedia: {
+          tick: async (allowed) => {
+            allowedFeeds = allowed;
+            await media.tick();
+          },
+          close: () => media.close(),
+        },
         now: Date.now,
         mediaEnabled: () =>
           process.env.WECHAT2RSS_CACHE_MEDIA !== '0' && !safety.isBlocked(),

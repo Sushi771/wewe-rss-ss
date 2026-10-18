@@ -83,6 +83,10 @@ jobs:
           RENAME_BENCHMARK_FULL_PAGE: 'true'
           RENAME_BENCHMARK_SAMPLES: '12'
         run: node --test scripts/folder-rename-browser.test.cjs
+      - name: Test automatic media retry and pause diagnostics locally
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+        run: node --test scripts/automatic-media-status-browser.test.cjs
       - name: Compare uncached article pages and full pagination on synthetic SQLite
         run: node --test scripts/article-list-performance.test.cjs
       - name: Test independent article HTTP pages, restore, filters and visible errors
