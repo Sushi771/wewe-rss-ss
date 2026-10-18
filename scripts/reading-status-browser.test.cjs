@@ -193,12 +193,12 @@ const initial=${JSON.stringify(batch)};function App(){const [batch,setBatch]=use
             ),
           'details route opens and reads',
         );
-        assert.equal(
-          await evaluate(
-            "(()=>{const r=document.querySelector('#storage-backup').getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()",
-          ),
-          true,
-          'details link scrolls the nested tools container into view',
+        await until(
+          () =>
+            evaluate(
+              "(()=>{const e=document.querySelector('#storage-backup');const r=e.getBoundingClientRect(),p=e.parentElement.getBoundingClientRect();return r.top>=Math.max(0,p.top)-1&&r.bottom<=Math.min(innerHeight,p.bottom)+1})()",
+            ),
+          'details link reveals the loaded card within its scroll container and viewport',
         );
         apiError = true;
         await evaluate(

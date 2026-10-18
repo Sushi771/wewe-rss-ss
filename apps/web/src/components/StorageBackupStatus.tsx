@@ -46,6 +46,15 @@ export default function StorageBackupStatus() {
       controller.abort();
     };
   }, [open, attempt]);
+  useEffect(() => {
+    if (hash !== '#storage-backup' || !open || loading || (!state && !error))
+      return;
+    // Async details can grow after the initial hash navigation scroll.
+    const frame = requestAnimationFrame(() =>
+      details.current?.scrollIntoView({ block: 'nearest' }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [hash, key, open, loading, state, error]);
   return (
     <details
       ref={details}
