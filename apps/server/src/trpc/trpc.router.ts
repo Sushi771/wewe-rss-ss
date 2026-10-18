@@ -1,3 +1,7 @@
+import { findArticleListRows } from '../article-list-page';
+import { cacheRevision, cacheSyncStatus } from '../feeds/cache-sync-state';
+import { protectedFeedDelete } from '../collection/protected-feed-delete';
+import { protectedArticleDelete } from '../collection/protected-article-delete';
 import { INestApplication, Injectable, Logger } from '@nestjs/common';
 import { z } from 'zod';
 import {
@@ -481,6 +485,123 @@ export class TrpcRouter {
   });
 
   feedRouter = this.trpcService.router({
+    cacheRevision: this.trpcService.protectedProcedure.query(() =>
+      cacheRevision(),
+    ),
+    cacheSyncStatus: this.trpcService.protectedProcedure.query(() =>
+      cacheSyncStatus(),
+    ),
+    subscriptionTasks: this.trpcService.protectedProcedure.query(async () => ({
+      items: await this.trpcService.subscriptionTaskList(),
+    })),
+    addSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ articleUrls: z.array(z.string().max(4096)).min(1).max(20) })
+          .strict(),
+      )
+      .mutation(({ input }) =>
+        this.trpcService.addSubscriptionBatch(input.articleUrls),
+      ),
+    subscriptionBatches: this.trpcService.protectedProcedure.query(
+      async () => ({ items: await this.trpcService.subscriptionBatchList() }),
+    ),
+    manualRefreshBatches: this.trpcService.protectedProcedure.query(
+      async () => ({
+        items: (await this.trpcService.subscriptionBatchList(true)).filter(
+          (batch) => batch.purpose === 'manual-refresh',
+        ),
+      }),
+    ),
+    beginRefreshAll: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            feedIds: z
+              .array(z.string().regex(/^MP_WXS_\d{5,15}$/))
+              .min(1)
+              .max(1000)
+              .optional(),
+            intentKey: z
+              .string()
+              .regex(/^[a-f0-9]{64}$/)
+              .optional(),
+          })
+          .optional(),
+      )
+      .mutation(({ ctx, input }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '提交上游更新仅限本机手动入口。',
+          });
+        return this.trpcService.beginManualRefreshAll(
+          input?.feedIds,
+          input?.intentKey,
+        );
+      }),
+    stopSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }))
+      .mutation(({ input }) =>
+        this.trpcService.stopSubscriptionBatch(input.batchId),
+      ),
+    unknownRefreshReleaseBinding: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          batchId: z.string().uuid(),
+          feedId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+        }),
+      )
+      .query(({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'Local explicit disposition only.',
+          });
+        return this.trpcService.unknownRefreshReleaseBinding(
+          input.batchId,
+          input.feedId,
+        );
+      }),
+    releaseUnknownRefreshOccupancy: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          batchId: z.string().uuid(),
+          feedId: z.string().regex(/^MP_WXS_\d{5,15}$/),
+          approvalFile: z
+            .string()
+            .min(1)
+            .max(4096)
+            .regex(/^[^\0\r\n]+$/),
+          approvalSha256: z.string().regex(/^[a-f0-9]{64}$/),
+          evidenceFile: z
+            .string()
+            .min(1)
+            .max(4096)
+            .regex(/^[^\0\r\n]+$/),
+        }),
+      )
+      .mutation(({ input, ctx }) => {
+        if (!(ctx as any).isLocal)
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'Local explicit disposition only.',
+          });
+        return this.trpcService.releaseUnknownRefreshOccupancy(input);
+      }),
+    resumeSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }))
+      .mutation(({ input }) =>
+        this.trpcService.resumeSubscriptionBatch(input.batchId),
+      ),
+    subscriptionTask: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().regex(/^[a-f0-9]{64}$/) }))
+      .query(({ input }) => this.trpcService.subscriptionTask(input.taskId)),
+    resumeSubscriptionTask: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().regex(/^[a-f0-9]{64}$/) }))
+      .mutation(({ input }) =>
+        this.trpcService.resumeSubscriptionTask(input.taskId),
+      ),
     searchCandidates: this.trpcService.protectedProcedure
       .input(z.object({ mpId: z.string().regex(/^MP_WXS_\d{5,15}$/) }))
       .query(({ input }) => this.readSearchCandidateSnapshot(input.mpId)),
@@ -586,7 +707,7 @@ export class TrpcRouter {
     delete: this.trpcService.protectedProcedure
       .input(z.string())
       .mutation(async ({ input: id }) => {
-        await this.prismaService.feed.delete({ where: { id } });
+        await protectedFeedDelete(this.prismaService, [id], true);
         return id;
       }),
     updateOrder: this.trpcService.protectedProcedure
@@ -602,17 +723,10 @@ export class TrpcRouter {
         return true;
       }),
     batchDelete: this.trpcService.protectedProcedure
-      .input(z.array(z.string()))
-      .mutation(async ({ input: ids }) => {
-        await this.prismaService.feed.deleteMany({
-          where: {
-            id: {
-              in: ids,
-            },
-          },
-        });
-        return ids;
-      }),
+      .input(z.array(z.string().min(1).max(128)).max(1000))
+      .mutation(async ({ input: ids }) =>
+        protectedFeedDelete(this.prismaService, ids),
+      ),
 
     refreshArticles: this.trpcService.protectedProcedure
       .input(
@@ -695,32 +809,20 @@ export class TrpcRouter {
         const { cursor } = input;
         const where = articleListWhere(input);
 
-        const items = await this.prismaService.article.findMany({
-          orderBy: articleListOrder(input),
-          take: limit + 1,
-          where,
-          cursor: cursor
-            ? {
-                id: cursor,
-              }
-            : undefined,
-          select: {
-            id: true,
-            mpId: true,
-            title: true,
-            picUrl: true,
-            publishTime: true,
-            sourceUrl: true,
-            lastBodyStatus: true,
-            verifiedSourceUrl: true,
-            lastBodyRetry: true,
-            contentHtml: true,
-            metrics: true,
-            readCount: true,
-            likeCount: true,
-            feed: true,
+        const items = await findArticleListRows(
+          this.prismaService,
+          {
+            orderBy: articleListOrder(input),
+            take: limit + 1,
+            where,
+            cursor: cursor
+              ? {
+                  id: cursor,
+                }
+              : undefined,
           },
-        });
+          { databaseUrl: process.env.DATABASE_URL },
+        );
         let nextCursor: typeof cursor | undefined = undefined;
         if (items.length > limit) {
           // Remove the last item and use it as next cursor
@@ -731,12 +833,14 @@ export class TrpcRouter {
         }
 
         return {
-          items: items.map(({ contentHtml, ...item }) => ({
-            ...item,
-            bodyCached: Boolean(contentHtml),
-            bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
-            bodyRetryResult: readBodyRetryResult(item.lastBodyRetry),
-          })),
+          items: items.map((item) => {
+            const { lastBodyRetry, ...publicItem } = item;
+            return {
+              ...publicItem,
+              bodyRetry: bodyRetryAvailability(item, !!(ctx as any).isLocal),
+              bodyRetryResult: readBodyRetryResult(lastBodyRetry),
+            };
+          }),
           nextCursor,
         };
       }),
@@ -801,7 +905,7 @@ export class TrpcRouter {
     delete: this.trpcService.protectedProcedure
       .input(z.string())
       .mutation(async ({ input: id }) => {
-        await this.prismaService.article.delete({ where: { id } });
+        await protectedArticleDelete(this.prismaService, id);
         return id;
       }),
     exportMarkdown: this.trpcService.protectedProcedure

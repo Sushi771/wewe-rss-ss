@@ -1,0 +1,62 @@
+{
+  "source": "aeb7483c85db8d13f1345011266ae7ee6046adc0",
+  "parent": "389bd33ae2ea8eee4d0d1231c8634562836531cd",
+  "mainSource": "7f392f85865491d685f14fb16e5f0b27286374ac",
+  "collectionMembers": {
+    "constructor": "b4d3c51048bafd12d9c1939ec01dd33b372dfd9c1d98ea322a59e888c2cdc24a",
+    "publicCollections": "bdbc4546be56c24a79adb604cac47a42a56b6122d227826348a13845df0760c6",
+    "replayWereadDirectory": "5a8430a546e4ceac6feabbc306b44da3cd1068a6b4aad845e01cc03a94491b1e",
+    "replayVerifiedSearch": "19ddcd85f8a3b98264e73636cd4c98f5e75535609c532dbfa96cc950749c537e",
+    "replayBrowserDomUpdate": "2291f6f5bb1f58d726c969de7d618c0c7be05fc19c0e6c467c995a219109bbc3",
+    "importVerifiedSearchBackfill": "a6c1c66698f1f7182955826802bfaf6d2452b7566d76615a8f50880b95680dfe",
+    "saveVerifiedSearchPage": "c04f1e841281ad8b8c9bd55d162e962dc7854159bfcb0e223a5ecec5122746e8",
+    "collectOwnerSearch": "6ce85c118db106c6c514c64fa5dbef311285e6c3c0d0b7079fa5f61cc62d18c9",
+    "collectOwnerWereadLatest": "dc2e12954ebdefc76a1c6ec2a5ec0ea14426c1fcc7f6a70922ce5021f510d937",
+    "collectWechat2RssRecent": "2c25f540d81a0c013aca17d727c0ba8d2642f8fef642de4bc9707e9a084efa40",
+    "retryArticleBody": "1792bcfb95cf5b5df700fe56991764c7e14b3856a0c89bfd09f0a98671bbe034",
+    "collectMp2RssRecent20": "776b72150a7a10117f7a4a6234f6eb20adecf2f0ff981bd03c01623618339299",
+    "collectPublicAlbums": "471d4db93add210c4ea2cc819ae5fd309180f84e0a14142daa811341bd0d0bc5",
+    "scan": "28148a2a73cfff1577bf2d8e078d7048dfdd2fe501ffa0855980a0f7f252506a",
+    "preview": "77b9e1953594fa97f25c5c611176092731f382bd27a12c5eaea3f0ae19435562",
+    "importDirectory": "8ad726587bfdaa44f0b7b3589b8a33154fd7227724360af3a4a5d5937f3ab80e",
+    "readWechat2RssAvatar": "ad83d7087b050d17c44ceb3a057a0eefd3b41ba8d2f8657ef64a2157f2db60ec",
+    "writeWechat2RssAvatar": "fd9c1917e7050cd9961df9138282b5a604e92712a6f7cd26264d11e2a0f050e4",
+    "supplementWechat2RssAvatar": "e64099a9095ab93e56586123bdc14252ee880923bc0da8855565410266a4c89d"
+  },
+  "nativeLoginMembers": {
+    "createLoginUrl": "a33ad186c59ba32bf775c352b60c4a0fa4dac3bac47fda6b20a4dfb69e4ae987",
+    "getLoginResult": "f03c28c2e743dbcbcf2955ea3ef0ab9d61ea24b12a3cd74caa59350d81ce1e50",
+    "savedLogins": "76c77dfc88bf46135d53e7c94f7176979ef20b89602ae4463864fb43ecb04fed"
+  },
+  "criticalBlobs": {
+    "apps/server/src/collection/incremental-write.ts": "8a9fdcca275a5f530fe3652d899004c130603c5ad22d023548b4226500c12930",
+    "apps/server/src/collection/sqlite-write-coordinator.ts": "1eda84e565f359b391eb22950cfb939d6e7ca18533e87a71d2e22c1b8523cfba",
+    "apps/server/src/collection/refresh-submission-claim.ts": "ad0f9ee43cc4a3c989d6e8cd1959e66a5840ee5c0290c8e10ed4f00e4896057e",
+    "apps/server/src/collection/refresh-response-receipt.ts": "bb498607659cac6ab1ccbc14d1019fbdb55975590a88cb504341c86e7f6987c7",
+    "apps/server/src/collection/refresh-occupancy-release.ts": "b9d6e9d356248fd30d86b8a9be57f3cc6224c0bb71cec4d5bc7e778c48c81ecb",
+    "apps/server/src/collection/wechat2rss-subscription-batches.ts": "dce4e137bfc8c6d80cfb9140ec730618fce96c1efd77b69005c028a8d1f19c5e",
+    "apps/server/src/collection/wechat2rss-subscription-tasks.ts": "b02fc23e499c63c25a758bc87ce49db802a1ba0e8f16520ae68a2e231e4ec17a",
+    "apps/server/src/collection/providers/wechat2rss.ts": "7ef4d3f955a04a25dc58a96a7f08fa5d0844e89dd4b6be057cd0abdeabfafb9f",
+    "apps/server/src/collection/archive-provider-images.ts": "a595c7d46167f177fe3236153c480e23f301dfc4b974313a1a57da09ffc1a11e",
+    "apps/server/src/collection/sqlite-backup.ts": "27deafbf7f5989de4821d232895548ff5a7480891c2ec5538ba6fde12c4a6010",
+    "apps/server/src/collection/sqlite-backup-root.ts": "4e2084debda2ef2144a6444a825f38fd2483411722eab46d920b1524d16fba0a",
+    "apps/server/src/feeds/active-refresh-schedule.ts": "4f0e6fe0135d9d386c8b7515698b3a38b89d80eff195f0135fe9d58c3e1aaad9",
+    "apps/server/src/article-list-page.ts": "ba1685718db050e9525e578063fcc324a4fbf3de2fd33a7612c3708e351df003",
+    "apps/server/src/article-list-cache.ts": "9fa5704f2ef933179416b93a3bbe81ff951131e372c82f3c69e567f012b7ef9d",
+    "apps/server/src/article-list-read-timing.ts": "e62c89feff9f9850a658893260eefa2cc235bf1aaa57bdc27fd260b4bb357134",
+    "apps/server/scripts/backup-sqlite.py": "0b2d49d5575b240022c2834d8eb396c10f49d6c3a8252ed890b817da065ad9a5",
+    "apps/server/scripts/sqlite-snapshot-guard.py": "8216a68ae707ea3c5d63598a368dc370f8307b7c88cc9cf6363a3dbdc0f86e0e"
+  },
+  "excludedFiles": [
+    "apps/server/src/collection/xiaohongshu.service.ts",
+    "apps/server/scripts/periodic-lifecycle.py",
+    "apps/server/src/collection/saved-media-writeback.ts"
+  ],
+  "appRouters": [
+    "feed",
+    "account",
+    "article",
+    "platform",
+    "collection"
+  ]
+}

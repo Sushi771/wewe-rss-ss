@@ -1,3 +1,4 @@
+import { CacheSyncService } from './cache-sync.service';
 import { Module } from '@nestjs/common';
 import { FeedsController } from './feeds.controller';
 import { FeedsService } from './feeds.service';
@@ -7,6 +8,6 @@ import { TrpcModule } from '@server/trpc/trpc.module';
 @Module({
   imports: [PrismaModule, TrpcModule],
   controllers: [FeedsController],
-  providers: [FeedsService],
+  providers: [FeedsService, CacheSyncService],
 })
 export class FeedsModule {}

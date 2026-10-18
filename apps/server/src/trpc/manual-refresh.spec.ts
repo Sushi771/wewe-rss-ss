@@ -1,0 +1,391 @@
+import { TrpcService } from './trpc.service';
+import { wechat2RssProvider } from '../collection/provider-registry';
+import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
+jest.mock('../collection/provider-registry', () => ({
+  wechat2RssProvider: jest.fn(),
+  enabledWechat2RssFeedIds: () => new Set(),
+}));
+jest.mock('../collection/sqlite-backup', () => ({
+  createVerifiedSqliteBackup: jest.fn(),
+}));
+
+jest.mock('../collection/refresh-submission-claim', () => ({
+  readRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  reserveRefreshSubmission: jest.fn(async (prisma, feed, _batch, now) => {
+    const reserved = await prisma.feed.updateMany({
+      where: {
+        id: feed.id,
+        status: 1,
+        collectionChannel: feed.collectionChannel,
+        providerRefreshAttemptTime: { lte: now - 900 },
+      },
+      data: { providerRefreshAttemptTime: now },
+    });
+    return reserved.count === 1
+      ? {
+          ticket: {
+            id: 'synthetic',
+            mpId: feed.id,
+            reservedAt: now,
+            previousAt: feed.providerRefreshAttemptTime || 0,
+          },
+        }
+      : { outcome: { state: 'skipped', accepted: false, stopBatch: false } };
+  }),
+  beginRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  finishRefreshSubmission: jest.fn().mockResolvedValue(undefined),
+  cancelRefreshPreparation: jest.fn(async (prisma, ticket) => {
+    await prisma.feed.updateMany({
+      where: { id: ticket.mpId, providerRefreshAttemptTime: ticket.reservedAt },
+      data: { providerRefreshAttemptTime: ticket.previousAt },
+    });
+  }),
+}));
+
+describe('explicit manual all-refresh boundary (offline)', () => {
+  const id = 'MP_WXS_1234567890';
+  let service: any, provider: any, feed: any;
+  const previousEnabled = process.env.WECHAT2RSS_ENABLED;
+  afterAll(() => {
+    if (previousEnabled === undefined) delete process.env.WECHAT2RSS_ENABLED;
+    else process.env.WECHAT2RSS_ENABLED = previousEnabled;
+  });
+  beforeEach(() => {
+    process.env.WECHAT2RSS_ENABLED = '1';
+    jest.clearAllMocks();
+    feed = {
+      id,
+      status: 1,
+      collectionChannel: 'wechat2rss',
+      providerRefreshAttemptTime: 0,
+    };
+    provider = {
+      checkAccountStatus: jest
+        .fn()
+        .mockResolvedValue({ available: true, challenged: false }),
+      refreshSubscription: jest.fn().mockResolvedValue({ accepted: true }),
+      fetchArticles: jest.fn().mockResolvedValue({
+        articles: Array.from({ length: 10 }, () => ({})),
+        bodyMissing: 0,
+        imageBlocked: 0,
+      }),
+    };
+    (wechat2RssProvider as jest.Mock).mockReturnValue(provider);
+    (createVerifiedSqliteBackup as jest.Mock).mockResolvedValue({
+      source: 'synthetic',
+    });
+    service = Object.create(TrpcService.prototype);
+    service.activeCollections = new Set();
+    service.activeSubscriptionAdds = new Set();
+    service.isRefreshAllMpArticlesRunning = false;
+    service.prismaService = {
+      feed: {
+        findUnique: jest.fn().mockImplementation(async () => feed),
+        findMany: jest.fn().mockResolvedValue([feed]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+    service.subscriptionBatches = {
+      enqueueRefresh: jest.fn().mockResolvedValue({
+        batchId: 'synthetic',
+        purpose: 'manual-refresh',
+        items: [{ feedId: id, state: 'queued' }],
+        reused: false,
+      }),
+      list: jest
+        .fn()
+        .mockResolvedValue([
+          { purpose: 'subscription' },
+          { purpose: 'manual-refresh' },
+        ]),
+    };
+    service.syncCachedWechat2RssPage = jest.fn().mockResolvedValue({
+      articles: 10,
+      bodyMissing: 0,
+      imageBlocked: 0,
+      status: 'partial',
+      mediaReady: true,
+      localMediaPendingArticleCount: 0,
+      upstreamImageBlockedCount: 0,
+    });
+  });
+  it('immediately acknowledges the frozen eligible set without performing a provider update or cache fetch', async () => {
+    const reply = await service.beginManualRefreshAll([id]);
+    expect(reply).toMatchObject({ total: 1, queuedCount: 1, skippedCount: 0 });
+    expect(service.prismaService.feed.findMany.mock.calls[0][0].where).toEqual({
+      id: { in: [id] },
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+    expect(service.syncCachedWechat2RssPage).not.toHaveBeenCalled();
+  });
+  it.each(['feed-read', 'cache-read', 'cache-save'])(
+    'records classified cache failures at %s without leaking the exception or resubmitting',
+    async (point) => {
+      const error = Object.assign(Error('private SQL token path'), {
+        code: 'P2028',
+      });
+      if (point === 'feed-read')
+        service.prismaService.feed.findUnique.mockRejectedValue(error);
+      else if (point === 'cache-read')
+        provider.fetchArticles.mockRejectedValue(error);
+      else service.syncCachedWechat2RssPage.mockRejectedValue(error);
+      const result = await service.runManualRefresh(id, 'cache', true);
+      expect(result).toMatchObject({
+        accepted: true,
+        submissionUnknown: false,
+        stopBatch: false,
+        failureReason: 'CACHE_STORAGE_TIMEOUT',
+        failurePoint: point,
+      });
+      expect(JSON.stringify(result)).not.toContain('private SQL token path');
+      expect(provider.refreshSubscription).not.toHaveBeenCalled();
+      expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'WECHAT2RSS_ACCOUNT_CHALLENGED',
+    'WECHAT2RSS_RATE_LIMITED',
+    'CACHE_SYNC_STARTUP_BLOCKED',
+  ])('preserves the cache shared/startup gate %s', async (message) => {
+    provider.fetchArticles.mockRejectedValue(Error(message));
+    expect(await service.runManualRefresh(id, 'cache', true)).toMatchObject({
+      state: 'blocked',
+      accepted: true,
+      stopBatch: true,
+      failurePoint: 'global-gate',
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
+  it('a removed or changed accepted subscription is terminal only for that source', async () => {
+    service.prismaService.feed.findUnique.mockResolvedValue(null);
+    expect(await service.runManualRefresh(id, 'cache', true)).toMatchObject({
+      state: 'blocked',
+      accepted: true,
+      stopBatch: false,
+      code: 'SOURCE_CHANGED',
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
+  it('ordinary subscription projections keep all original batches and do not expose manual ones', async () => {
+    expect(await service.subscriptionBatchList()).toEqual([
+      { purpose: 'subscription' },
+    ]);
+    expect(await service.subscriptionBatchList(true)).toHaveLength(2);
+  });
+  it('an original-click intent rejoins its durable completed record without querying changed subscriptions or submitting', async () => {
+    const intentKey = 'a'.repeat(64);
+    service.subscriptionBatches.list.mockResolvedValue([
+      {
+        batchId: 'original',
+        purpose: 'manual-refresh',
+        intentKey,
+        state: 'completed',
+        items: [{ state: 'succeeded' }],
+      },
+    ]);
+    service.isRefreshAllMpArticlesRunning = true;
+    expect(await service.beginManualRefreshAll([id], intentKey)).toMatchObject({
+      batchId: 'original',
+      reused: true,
+      total: 1,
+      queuedCount: 0,
+    });
+    expect(service.prismaService.feed.findMany).not.toHaveBeenCalled();
+    expect(service.subscriptionBatches.enqueueRefresh).not.toHaveBeenCalled();
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
+  it('the old in-flight cache batch prevents another all-refresh request', async () => {
+    service.isRefreshAllMpArticlesRunning = true;
+    await expect(service.beginManualRefreshAll()).rejects.toThrow(
+      '原批量缓存同步仍在后台运行',
+    );
+    expect(service.subscriptionBatches.enqueueRefresh).not.toHaveBeenCalled();
+  });
+  it('atomically reserves without a snapshot the existing per-feed 15-minute cooldown before one provider update', async () => {
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
+      state: 'waiting',
+      accepted: true,
+    });
+    const reservation = service.prismaService.feed.updateMany.mock.calls[0][0];
+    expect(reservation.where).toMatchObject({
+      id,
+      status: 1,
+      collectionChannel: 'wechat2rss',
+    });
+    expect(
+      reservation.data.providerRefreshAttemptTime -
+        reservation.where.providerRefreshAttemptTime.lte,
+    ).toBe(900);
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    expect(
+      service.prismaService.feed.updateMany.mock.invocationCallOrder[0],
+    ).toBeLessThan(provider.refreshSubscription.mock.invocationCallOrder[0]);
+    expect(provider.refreshSubscription).toHaveBeenCalledTimes(1);
+    expect(service.activeCollections.size).toBe(0);
+    expect(service.activeSubscriptionAdds.size).toBe(0);
+  });
+  it('account challenge, cooldown and paused/source-changed feeds cannot submit /add', async () => {
+    provider.checkAccountStatus.mockResolvedValue({
+      available: true,
+      challenged: true,
+    });
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
+      state: 'blocked',
+      accepted: false,
+    });
+    provider.checkAccountStatus.mockResolvedValue({
+      available: true,
+      challenged: false,
+    });
+    service.prismaService.feed.updateMany.mockResolvedValue({ count: 0 });
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
+      state: 'blocked',
+      accepted: false,
+    });
+    feed.status = 0;
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
+      state: 'blocked',
+      accepted: false,
+    });
+    feed.status = 1;
+    feed.collectionChannel = 'public-album';
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
+      state: 'blocked',
+      accepted: false,
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
+  it('an unknown upstream receipt releases locks but retains its cooldown reservation', async () => {
+    provider.refreshSubscription.mockRejectedValue(
+      new Error('synthetic unknown receipt https://private.invalid/?k=secret'),
+    );
+    await expect(
+      service.runManualRefresh(id, 'submit', false, { claimKey: 'synthetic' }),
+    ).rejects.toMatchObject({
+      name: 'RefreshSubmissionError',
+      message: 'REFRESH_SUBMISSION_UNKNOWN',
+      failure: { phase: 'transport', code: 'REFRESH_SUBMISSION_UNKNOWN' },
+    });
+    expect(service.prismaService.feed.updateMany).toHaveBeenCalledTimes(1);
+    expect(service.activeCollections.size).toBe(0);
+    expect(service.activeSubscriptionAdds.size).toBe(0);
+  });
+  it('ordinary submission succeeds independently of a failed backup quota', async () => {
+    (createVerifiedSqliteBackup as jest.Mock).mockRejectedValueOnce(
+      new Error('private backup error'),
+    );
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({ state: 'waiting', accepted: true });
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    expect(provider.refreshSubscription).toHaveBeenCalledTimes(1);
+    expect(service.prismaService.feed.updateMany).toHaveBeenCalledTimes(1);
+    expect(service.activeCollections.size).toBe(0);
+  });
+  it('storage failures during the initial feed read cannot be mislabeled as unknown receipts', async () => {
+    service.prismaService.feed.findUnique.mockRejectedValueOnce({
+      name: 'PrismaClientRustPanicError',
+      message: 'private storage details',
+    });
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
+      state: 'failed',
+      accepted: false,
+      retryable: true,
+      stopBatch: false,
+      submissionUnknown: false,
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+  });
+  it('cache-stage initial read failures preserve an already accepted update and never allow resubmission', async () => {
+    service.prismaService.feed.findUnique.mockRejectedValueOnce(
+      new Error('synthetic storage busy'),
+    );
+    expect(await service.runManualRefresh(id, 'cache')).toMatchObject({
+      state: 'failed',
+      accepted: true,
+      retryable: false,
+      stopBatch: false,
+      submissionUnknown: false,
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+  });
+  it('only a pre-existing feed with an older reservation proves no submission; same-second reservations remain unknown', async () => {
+    const created = Date.parse('2026-10-13T14:00:00.139+08:00');
+    feed.createdAt = new Date(created - 86400000);
+    feed.providerRefreshAttemptTime = Math.floor(created / 1000) - 1;
+    expect(await service.reconcileUnreservedRefresh(id, created)).toBe(
+      'not-submitted',
+    );
+    feed.providerRefreshAttemptTime++;
+    expect(await service.reconcileUnreservedRefresh(id, created)).toBe(
+      'unknown',
+    );
+    feed.providerRefreshAttemptTime = 0;
+    feed.createdAt = new Date(created + 1);
+    expect(await service.reconcileUnreservedRefresh(id, created)).toBe(
+      'unknown',
+    );
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+  });
+  it('accepted continuation only reads cache and never calls refreshSubscription', async () => {
+    expect(await service.runManualRefresh(id, 'cache')).toMatchObject({
+      state: 'succeeded',
+      accepted: true,
+      listReady: true,
+      bodyReady: true,
+    });
+    expect(service.syncCachedWechat2RssPage).toHaveBeenCalledWith(
+      id,
+      expect.any(Object),
+      false,
+      { fetchMedia: false },
+    );
+    expect(provider.fetchArticles).toHaveBeenCalledWith(id, feed.mpName);
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+    expect(provider.checkAccountStatus).not.toHaveBeenCalled();
+  });
+  it('rechecks a lock acquired during feed lookup without removing another operation lock', async () => {
+    service.prismaService.feed.findUnique.mockImplementation(async () => {
+      service.activeCollections.add(id);
+      return feed;
+    });
+    expect(
+      await service.runManualRefresh(id, 'submit', false, {
+        claimKey: 'synthetic',
+      }),
+    ).toMatchObject({
+      state: 'queued',
+      accepted: false,
+    });
+    expect(provider.refreshSubscription).not.toHaveBeenCalled();
+    expect(service.activeCollections.has(id)).toBe(true);
+  });
+});

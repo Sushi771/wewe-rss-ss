@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { httpBatchLink, loggerLink } from '@trpc/client';
+import { httpBatchLink, httpLink, loggerLink, splitLink } from '@trpc/client';
 import { useNavigate } from 'react-router-dom';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -78,33 +78,34 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
       }),
   );
 
-  const [trpcClient] = useState(() =>
-    trpc.createClient({
+  const [trpcClient] = useState(() => {
+    const transport = {
+      url: serverOriginUrl + '/trpc',
+      async headers() {
+        if (privateOnlineMode) return {};
+        const token = getAuthCode();
+        if (!token) {
+          handleNoAuth();
+          return {};
+        }
+        return { Authorization: `${token}` };
+      },
+    };
+    return trpc.createClient({
       links: [
         loggerLink({
           enabled: () => true,
         }),
-        httpBatchLink({
-          url: serverOriginUrl + '/trpc',
-          async headers() {
-            if (privateOnlineMode) return {};
-            const token = getAuthCode();
-
-            if (!token) {
-              handleNoAuth();
-              return {};
-            }
-
-            return token
-              ? {
-                  Authorization: `${token}`,
-                }
-              : {};
-          },
+        splitLink({
+          // A batch responds only after its slowest procedure. Let each list
+          // page render independently of summary/task/verification reads.
+          condition: (operation) => operation.path === 'article.list',
+          true: httpLink(transport),
+          false: httpBatchLink(transport),
         }),
       ],
-    }),
-  );
+    });
+  });
   return (
     <trpc.Provider client={trpcClient} queryClient={queryClient}>
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>

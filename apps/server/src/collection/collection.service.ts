@@ -1,4 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+import {
+  incrementalWrite,
+  assertIncrementalTransaction,
+} from './incremental-write';
+import { legacyArticleIdentityAmbiguous } from './legacy-article-identity';
+import { cacheDataChanged } from '../feeds/cache-sync-state';
+import { mediaSafetyStop } from '../feeds/media-safety-stop';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -12,7 +20,11 @@ import {
   Metrics,
 } from './collection-format';
 import { resolvePublicArticle } from './public-album';
-import { archiveProviderImages } from './archive-provider-images';
+import {
+  archiveProviderImages,
+  supplementSavedBodyImages,
+} from './archive-provider-images';
+import { Article } from '@prisma/client';
 import { decodeInlineImage } from './image-fetch';
 import { fetchMp2RssRecent20 } from './mp2rss';
 import { publicAlbumProvider, wechat2RssProvider } from './provider-registry';
@@ -484,7 +496,17 @@ export class CollectionService {
     mpId: string;
     mpName: string;
     trigger: 'local-manual' | 'scheduled' | 'public';
+    /** Internal, receipt-proved cache path; never accepted from public input. */
+    acceptedFeedPath?: string;
+    listOnly?: boolean;
+    /** Internal validated existing-cache snapshot; never exposed as public input. */
+    cachedPage?: ProviderPage;
+    /** Hard local-only media fence, including protected-saver fallback. */
+    fetchMedia?: boolean;
+    /** Internal one-batch exception; public refresh keeps its normal night fence. */
+    nightMediaUntil?: number;
   }) {
+    const phaseStarted = Date.now();
     if (this.publicCollections.has(input.mpId))
       throw new Error('该公众号正在更新，请等待本次结束');
     this.publicCollections.add(input.mpId);
@@ -495,42 +517,25 @@ export class CollectionService {
       if (feed.mpName !== input.mpName)
         throw new Error('订阅名称已变化，本次未写入');
       const provider = wechat2RssProvider();
-      const account = await provider.checkAccountStatus();
-      if (!account.available) {
-        return {
-          source: 'wechat2rss' as const,
-          status: 'blocked' as const,
-          complete: false as const,
-          coverage: 'none' as const,
-          articles: 0,
-          created: 0,
-          updated: 0,
-          message: account.challenged
-            ? '上游账号受限，等待本人在私有实例处理；本次未读取文章。'
-            : '私有实例没有可用登录账号；本次未读取文章。',
-        };
-      }
-      // /add accepts an asynchronous job. Scheduled reads avoid submitting one per feed.
-      const now = Math.floor(Date.now() / 1000);
-      // Reserve before the HTTP call. A crash or uncertain response must not
-      // submit a second asynchronous /add job immediately after restart.
-      const reserved =
-        input.trigger !== 'scheduled' &&
-        (
-          await this.prisma.feed.updateMany({
-            where: {
-              id: input.mpId,
-              providerRefreshAttemptTime: { lte: now - 15 * 60 },
-            },
-            data: { providerRefreshAttemptTime: now },
-          })
-        ).count === 1;
-      let accepted = false;
-      if (reserved) {
-        const result = await provider.refreshSubscription(input.mpId);
-        accepted = result.accepted;
-      }
-      const fetched = await provider.fetchArticles(input.mpId, input.mpName);
+      // Cache reads do not submit upstream work. A collection-account state
+      // cannot invalidate already cached identities/body bytes; the cache
+      // endpoint still enforces its own access and response validation.
+      // All ordinary refreshes only consume cache. /addurl is reserved for an
+      // explicit new-subscription action; /add also updates already subscribed feeds.
+      const feedAvatar = input.cachedPage
+        ? undefined
+        : await this.readWechat2RssAvatar(feed, provider);
+      const supplementAvatar = (tx: Pick<typeof this.prisma, 'feed'>) =>
+        this.writeWechat2RssAvatar(tx, input.mpId, feedAvatar);
+      const accepted = false;
+      const fetched =
+        input.cachedPage ||
+        (input.acceptedFeedPath
+          ? await provider.fetchAcceptedArticles(
+              input.acceptedFeedPath,
+              input.mpId,
+            )
+          : await provider.fetchArticles(input.mpId, input.mpName));
       if (
         !fetched ||
         !Array.isArray(fetched.articles) ||
@@ -550,139 +555,475 @@ export class CollectionService {
           }
         }),
       };
-      const page = await archiveProviderImages(
-        assertProviderPage(normalized, input.mpId),
-      );
+      const validated = assertProviderPage(normalized, input.mpId);
+      // The first visible list contains real identities/times, with no false body
+      // readiness. Full body/image archiving follows in the durable task.
+      const safety =
+        input.cachedPage && !input.listOnly
+          ? await mediaSafetyStop(process.env.DATABASE_URL || '')
+          : undefined;
+      const page = input.listOnly
+        ? {
+            ...validated,
+            articles: validated.articles.map((item) => ({
+              ...item,
+              contentHtml: null,
+              picUrl: '',
+            })),
+            bodyMissing: validated.articles.length,
+          }
+        : await archiveProviderImages(validated, {
+            preserveTextOnImageFailure: true,
+            ...(input.cachedPage
+              ? {
+                  requestGapMs: 250,
+                  canFetchImage: () =>
+                    input.fetchMedia !== false &&
+                    process.env.WECHAT2RSS_CACHE_MEDIA !== '0' &&
+                    safety?.isBlocked() === false &&
+                    (new Date(Date.now() + 8 * 3600000).getUTCHours() >= 6 ||
+                      (input.nightMediaUntil !== undefined &&
+                        Date.now() < input.nightMediaUntil)),
+                  onMediaBlocked: () => safety!.stop(),
+                }
+              : {}),
+          });
       if (!page.articles.length) {
+        // Publisher metadata can be ready before the first article. The
+        // conditional write preserves a concurrently changed avatar/source.
+        if (!input.cachedPage)
+          await incrementalWrite(this.prisma, 4096, () =>
+            this.prisma.$transaction(async (tx) => {
+              await assertIncrementalTransaction(tx);
+              await supplementAvatar(tx);
+            }),
+          );
         return {
           source: 'wechat2rss' as const,
-          status:
-            accepted ||
-            reserved ||
-            feed.providerRefreshAttemptTime > now - 15 * 60
-              ? ('pending' as const)
-              : ('blocked' as const),
+          status: 'pending' as const,
           complete: false as const,
           coverage: 'none' as const,
           articles: 0,
           created: 0,
           updated: 0,
           accepted,
-          message: accepted
-            ? '上游已受理更新任务，当前缓存还没有可核验文章；稍后读取，不代表更新成功。'
-            : reserved || feed.providerRefreshAttemptTime > now - 15 * 60
-              ? '上游更新请求处于冷却期，缓存尚无可核验文章；稍后只读检查。'
-              : '上游缓存没有可核验文章；本次未写入。',
+          bodyMissing: 0,
+          imageBlocked: 0,
+          identitySkipped: 0,
+          identitySkippedArticles: [],
+          listReady: false,
+          bodyReady: false,
+          message:
+            '订阅已保留，当前缓存尚无可核验文章；稍后使用更新读取缓存，本次未提交上游更新。',
         };
       }
       let created = 0;
       let updated = 0;
-      await this.prisma.$transaction(
-        async (tx) => {
-          for (const item of page.articles) {
-            // Title and time only detect a possible legacy collision; never merge by them.
-            // Normalize the new URL before matching old short-ID rows. The sn
-            // signature may change while biz/mid/idx still name the same article.
-            const identity = canonicalArticleUrl(item.url);
-            const sourceWithoutSn = new URL(identity.url);
-            sourceWithoutSn.searchParams.delete('sn');
-            const sourceBase = sourceWithoutSn.toString();
-            const sourceWithSn = `${sourceBase}&sn=`;
-            const matches = await tx.article.findMany({
-              where: {
-                OR: [
-                  { id: item.id },
-                  { sourceUrl: sourceBase },
-                  { sourceUrl: { startsWith: sourceWithSn } },
-                  { verifiedSourceUrl: sourceBase },
-                  { verifiedSourceUrl: { startsWith: sourceWithSn } },
-                ],
-              },
-            });
-            if (matches.length > 1)
-              throw new Error('原文身份对应多条旧记录，本批未写入');
-            const existing = matches[0];
-            if (existing) assertSavedArticleIdentity(existing, identity);
-            if (!existing) {
-              const possibleLegacy = await tx.article.findFirst({
-                where: {
-                  mpId: input.mpId,
-                  title: item.title,
-                  publishTime: item.publishTime,
-                },
-              });
-              if (possibleLegacy)
-                throw new Error('疑似旧短链身份未核实，本批未写入');
-              await tx.article.create({
-                data: {
-                  id: item.id,
-                  mpId: input.mpId,
-                  title: item.title,
-                  publishTime: item.publishTime,
-                  sourceUrl: identity.url,
-                  verifiedSourceUrl: identity.url,
-                  contentHtml: item.contentHtml,
-                  picUrl: item.picUrl,
-                  lastBodyStatus: item.contentHtml
-                    ? 'available'
-                    : 'unavailable',
-                },
-              });
-              created++;
-            } else {
-              const data = {
-                ...(!existing.sourceUrl ? { sourceUrl: identity.url } : {}),
-                ...(!existing.verifiedSourceUrl
-                  ? { verifiedSourceUrl: identity.url }
-                  : {}),
-                ...(!existing.contentHtml && item.contentHtml
-                  ? { contentHtml: item.contentHtml }
-                  : {}),
-                ...(!existing.picUrl && item.picUrl
-                  ? { picUrl: item.picUrl }
-                  : {}),
-                ...(!existing.contentHtml && item.contentHtml
-                  ? { lastBodyStatus: 'available' }
-                  : {}),
-              };
-              if (Object.keys(data).length) {
-                await tx.article.update({ where: { id: existing.id }, data });
-                updated++;
-              }
-            }
-          }
-          const latest = await tx.article.aggregate({
-            where: { mpId: input.mpId },
-            _max: { publishTime: true },
-          });
-          await tx.feed.update({
-            where: { id: input.mpId },
-            data: {
-              collectionChannel: 'wechat2rss',
-              syncTime: Math.floor(Date.now() / 1000),
-              updateTime: latest._max.publishTime || feed.updateTime,
-              hasHistory: -1,
-            },
-          });
-        },
-        { timeout: 60000 },
-      );
-      return {
+      const identitySkippedArticles: Array<{
+        id: string;
+        code: 'LEGACY_IDENTITY_UNVERIFIED';
+      }> = [];
+      const summary = () => ({
         source: 'wechat2rss' as const,
         status: 'partial' as const,
         complete: false as const,
         coverage: page.coverage,
-        articles: page.articles.length,
+        articles: page.articles.length - identitySkippedArticles.length,
         created,
         updated,
         accepted,
         bodyMissing: page.bodyMissing,
+        identitySkipped: identitySkippedArticles.length,
+        identitySkippedArticles,
+        listReady: page.articles.length > identitySkippedArticles.length,
+        bodyReady:
+          !input.listOnly &&
+          identitySkippedArticles.length === 0 &&
+          page.bodyMissing === 0 &&
+          page.imageBlocked === 0,
         imageBlocked: page.imageBlocked,
+        mediaRequestBlocked: page.mediaRequestBlocked,
         message:
           `读取私有实例缓存 ${page.articles.length} 篇，归档新增 ${created}、补全 ${updated}。` +
+          (identitySkippedArticles.length
+            ? ` ${identitySkippedArticles.length} 篇与旧记录身份无法区分，已隔离；旧正文保留，其余可核验文章已同步。`
+            : '') +
           (accepted ? '上游新任务仍可能进行中。' : '') +
           ` 正文缺失 ${page.bodyMissing}，图片受限 ${page.imageBlocked}；订阅前历史与非群发不保证覆盖。`,
-      };
+      });
+      const payloadBytes = Buffer.byteLength(JSON.stringify(page));
+      const receiptId = createHash('sha256')
+        .update(
+          JSON.stringify([
+            'cache-refresh-v1',
+            input.mpId,
+            !!input.listOnly,
+            input.fetchMedia !== false,
+            {
+              ...page,
+              articles: [...page.articles].sort((x, y) =>
+                x.id.localeCompare(y.id),
+              ),
+            },
+          ]),
+        )
+        .digest('hex');
+      let committed: ReturnType<typeof summary> | undefined;
+      const transactionStarted = Date.now();
+      Logger.log(
+        `Cache prepare: ${transactionStarted - phaseStarted}ms; articles=${page.articles.length}`,
+      );
+      await incrementalWrite(this.prisma, payloadBytes, () =>
+        this.prisma.$transaction(
+          async (tx) => {
+            await assertIncrementalTransaction(tx);
+            const currentFeed = await tx.feed.findUniqueOrThrow({
+              where: { id: input.mpId },
+            });
+            if (
+              currentFeed.status !== 1 ||
+              currentFeed.collectionChannel !== feed.collectionChannel ||
+              currentFeed.mpName !== feed.mpName
+            )
+              throw new Error('CACHE_SYNC_FEED_CHANGED');
+            // A prior payload receipt is not authority to skip current row/CAS
+            // checks: local edits or a later media repair can change eligibility.
+            await supplementAvatar(tx);
+            // Existing-cache batches share candidate reads inside the same write
+            // transaction. Never cache these rows across imports or backups.
+            const identities = page.articles.map((item) => {
+              const identity = canonicalArticleUrl(item.url);
+              const base = new URL(identity.url);
+              base.searchParams.delete('sn');
+              return {
+                item,
+                identity,
+                base: base.toString(),
+                prefix: `${base}&sn=`,
+              };
+            });
+            const cacheCandidates:
+              | Array<
+                  Pick<
+                    Article,
+                    | 'id'
+                    | 'mpId'
+                    | 'title'
+                    | 'publishTime'
+                    | 'sourceUrl'
+                    | 'verifiedSourceUrl'
+                    | 'picUrl'
+                    | 'lastBodyStatus'
+                    | 'createdAt'
+                    | 'updatedAt'
+                  > & { contentHtml?: string | null }
+                >
+              | undefined = [];
+            if (cacheCandidates) {
+              // Bound SQLite expression depth for the provider's <=1000 rows.
+              for (let offset = 0; offset < identities.length; offset += 40) {
+                const slice = identities.slice(offset, offset + 40);
+                const rows = await tx.article.findMany({
+                  where: {
+                    mpId: input.mpId,
+                    OR: slice.flatMap(({ item, identity, base, prefix }) => [
+                      { id: identity.id },
+                      {
+                        sourceUrl: {
+                          contains: 'mid=' + identity.id.split('_')[2],
+                        },
+                      },
+                      {
+                        verifiedSourceUrl: {
+                          contains: 'mid=' + identity.id.split('_')[2],
+                        },
+                      },
+                      { sourceUrl: base },
+                      { sourceUrl: { startsWith: prefix } },
+                      { verifiedSourceUrl: base },
+                      { verifiedSourceUrl: { startsWith: prefix } },
+                      {
+                        mpId: input.mpId,
+                        title: item.title,
+                        publishTime: item.publishTime,
+                      },
+                    ]),
+                  },
+                  select: {
+                    id: true,
+                    mpId: true,
+                    title: true,
+                    publishTime: true,
+                    sourceUrl: true,
+                    verifiedSourceUrl: true,
+                    contentHtml: !input.listOnly && input.fetchMedia !== false,
+                    picUrl: true,
+                    lastBodyStatus: true,
+                    createdAt: true,
+                    updatedAt: true,
+                  },
+                });
+                const foreign = await tx.article.findMany({
+                  where: {
+                    mpId: { not: input.mpId },
+                    OR: slice.flatMap(({ identity }) => [
+                      { id: identity.id },
+                      {
+                        sourceUrl: {
+                          contains: 'mid=' + identity.id.split('_')[2],
+                        },
+                      },
+                      {
+                        verifiedSourceUrl: {
+                          contains: 'mid=' + identity.id.split('_')[2],
+                        },
+                      },
+                    ]),
+                  },
+                  select: {
+                    id: true,
+                    sourceUrl: true,
+                    verifiedSourceUrl: true,
+                  },
+                });
+                const wanted = new Set(
+                  slice.map(({ identity }) => identity.id),
+                );
+                for (const row of foreign) {
+                  if (wanted.has(row.id))
+                    throw new Error('已保存文章与原文身份冲突');
+                  for (const url of [row.sourceUrl, row.verifiedSourceUrl]) {
+                    if (!url) continue;
+                    let canonical: string | undefined;
+                    try {
+                      canonical = canonicalArticleUrl(url).id;
+                    } catch {
+                      /* Unknown sources cannot prove this collision. */
+                    }
+                    if (canonical && wanted.has(canonical))
+                      throw new Error('已保存文章与原文身份冲突');
+                  }
+                }
+                cacheCandidates.push(...rows);
+              }
+            }
+            Logger.log(
+              `Cache candidates: ${Date.now() - transactionStarted}ms; rows=${cacheCandidates?.length || 0}`,
+            );
+            if (cacheCandidates && input.fetchMedia === false) {
+              const flags = await tx.$queryRaw<
+                Array<{ id: string; missing: number }>
+              >`
+              SELECT id, CASE WHEN content_html IS NULL OR content_html = '' THEN 1 ELSE 0 END AS missing
+              FROM articles WHERE mp_id = ${input.mpId}`;
+              const missing = new Map(
+                flags.map((row) => [row.id, row.missing]),
+              );
+              for (const row of cacheCandidates)
+                row.contentHtml = missing.get(row.id)
+                  ? null
+                  : '__WEWE_EXISTING_BODY__';
+            }
+            for (const item of page.articles) {
+              // Title and time only detect a possible legacy collision; never merge by them.
+              // Normalize the new URL before matching old short-ID rows. The sn
+              // signature may change while biz/mid/idx still name the same article.
+              const identity = canonicalArticleUrl(item.url);
+              const sourceWithoutSn = new URL(identity.url);
+              sourceWithoutSn.searchParams.delete('sn');
+              const sourceBase = sourceWithoutSn.toString();
+              const sourceWithSn = `${sourceBase}&sn=`;
+              const matches = cacheCandidates
+                ? [
+                    ...new Map(
+                      cacheCandidates
+                        .filter(
+                          (saved) =>
+                            saved.id === item.id ||
+                            [saved.sourceUrl, saved.verifiedSourceUrl].some(
+                              (url) =>
+                                url === sourceBase ||
+                                (!!url &&
+                                  url
+                                    .toLowerCase()
+                                    .startsWith(sourceWithSn.toLowerCase())),
+                            ),
+                        )
+                        .map((row) => [row.id, row]),
+                    ).values(),
+                  ]
+                : await tx.article.findMany({
+                    where: {
+                      OR: [
+                        { id: item.id },
+                        { sourceUrl: sourceBase },
+                        { sourceUrl: { startsWith: sourceWithSn } },
+                        { verifiedSourceUrl: sourceBase },
+                        { verifiedSourceUrl: { startsWith: sourceWithSn } },
+                      ],
+                    },
+                  });
+              if (matches.length > 1)
+                throw new Error('原文身份对应多条旧记录，本批未写入');
+              const existing = matches[0];
+              if (existing) assertSavedArticleIdentity(existing, identity);
+              if (!existing) {
+                const possibleLegacy = cacheCandidates
+                  ? cacheCandidates.filter(
+                      (saved) =>
+                        saved.mpId === input.mpId &&
+                        saved.title === item.title &&
+                        saved.publishTime === item.publishTime,
+                    )
+                  : await tx.article.findMany({
+                      where: {
+                        mpId: input.mpId,
+                        title: item.title,
+                        publishTime: item.publishTime,
+                      },
+                    });
+                const ambiguous = possibleLegacy.some((saved) =>
+                  legacyArticleIdentityAmbiguous(saved, identity),
+                );
+                if (ambiguous) {
+                  // Preserve this row and its note. Never merge by title/time or
+                  // let one unverifiable legacy identity roll back proved peers.
+                  identitySkippedArticles.push({
+                    id: identity.id,
+                    code: 'LEGACY_IDENTITY_UNVERIFIED',
+                  });
+                  continue;
+                }
+                await tx.article.create({
+                  data: {
+                    id: item.id,
+                    mpId: input.mpId,
+                    title: item.title,
+                    publishTime: item.publishTime,
+                    sourceUrl: identity.url,
+                    verifiedSourceUrl: identity.url,
+                    contentHtml: item.contentHtml,
+                    picUrl: item.picUrl,
+                    lastBodyStatus: item.contentHtml
+                      ? item.contentHtml.includes('data-wewe-image-pending=')
+                        ? 'images-pending'
+                        : 'available'
+                      : 'unavailable',
+                  },
+                });
+                created++;
+              } else {
+                const supplemented =
+                  input.fetchMedia !== false && existing.contentHtml
+                    ? supplementSavedBodyImages(existing.contentHtml, item)
+                    : undefined;
+                const canFillBody =
+                  (!input.cachedPage && input.fetchMedia !== false) ||
+                  (input.fetchMedia !== false &&
+                    existing.lastBodyStatus === 'unavailable') ||
+                  (existing.lastBodyStatus === 'unavailable' &&
+                    existing.createdAt &&
+                    existing.updatedAt &&
+                    existing.createdAt.getTime() ===
+                      existing.updatedAt.getTime());
+                const data = {
+                  ...(canFillBody &&
+                  !existing.contentHtml &&
+                  item.contentHtml?.includes('data-wewe-image-pending=')
+                    ? { lastBodyStatus: 'images-pending' }
+                    : {}),
+                  ...(!existing.sourceUrl ? { sourceUrl: identity.url } : {}),
+                  ...(!existing.verifiedSourceUrl
+                    ? { verifiedSourceUrl: identity.url }
+                    : {}),
+                  ...(canFillBody && !existing.contentHtml && item.contentHtml
+                    ? { contentHtml: item.contentHtml }
+                    : {}),
+                  ...(supplemented ? { contentHtml: supplemented } : {}),
+                  ...(supplemented &&
+                  existing.lastBodyStatus === 'images-pending' &&
+                  !supplemented.includes('data-wewe-image-pending=')
+                    ? { lastBodyStatus: 'available' }
+                    : {}),
+                  ...(!existing.picUrl && item.picUrl
+                    ? { picUrl: item.picUrl }
+                    : {}),
+                  ...(canFillBody && !existing.contentHtml && item.contentHtml
+                    ? {
+                        lastBodyStatus: item.contentHtml.includes(
+                          'data-wewe-image-pending=',
+                        )
+                          ? 'images-pending'
+                          : 'available',
+                      }
+                    : {}),
+                };
+                const changed = Object.fromEntries(
+                  Object.entries(data).filter(
+                    ([key, value]) => existing[key] !== value,
+                  ),
+                );
+                if (Object.keys(changed).length) {
+                  const written = await tx.article.updateMany({
+                    where: {
+                      id: existing.id,
+                      mpId: input.mpId,
+                      sourceUrl: existing.sourceUrl,
+                      verifiedSourceUrl: existing.verifiedSourceUrl,
+                      updatedAt: existing.updatedAt,
+                      lastBodyStatus: existing.lastBodyStatus,
+                      ...(input.fetchMedia === false && changed.contentHtml
+                        ? { OR: [{ contentHtml: null }, { contentHtml: '' }] }
+                        : input.fetchMedia !== false
+                          ? { contentHtml: existing.contentHtml }
+                          : {}),
+                    },
+                    data: changed,
+                  });
+                  updated += written.count;
+                }
+              }
+            }
+            Logger.log(
+              `Cache writes: ${Date.now() - transactionStarted}ms; created=${created}; updated=${updated}`,
+            );
+            const latest = await tx.article.aggregate({
+              where: { mpId: input.mpId },
+              _max: { publishTime: true },
+            });
+            await tx.feed.update({
+              where: { id: input.mpId },
+              data: {
+                collectionChannel: 'wechat2rss',
+                ...(input.listOnly ||
+                identitySkippedArticles.length ||
+                page.bodyMissing ||
+                page.imageBlocked
+                  ? {}
+                  : { syncTime: Math.floor(Date.now() / 1000) }),
+                updateTime: Math.max(
+                  currentFeed.updateTime,
+                  latest._max.publishTime || 0,
+                ),
+                hasHistory: -1,
+                lastCollectionResult: JSON.stringify({
+                  ...summary(),
+                  attemptedAt: Math.floor(Date.now() / 1000),
+                }),
+              },
+            });
+            committed = summary();
+            await tx.$executeRaw`INSERT INTO cache_refresh_commits(id,mp_id,result_json,committed_at_ms)
+            VALUES(${receiptId},${input.mpId},${JSON.stringify(committed)},${Date.now()}) ON CONFLICT(id) DO NOTHING`;
+          },
+          { timeout: 60000 },
+        ),
+      );
+      Logger.log(
+        `Cache transaction: ${Date.now() - transactionStarted}ms; created=${created}; updated=${updated}`,
+      );
+      cacheDataChanged(created + updated);
+      return committed!;
     } finally {
       this.publicCollections.delete(input.mpId);
     }
@@ -1565,5 +1906,44 @@ export class CollectionService {
       hasHistory: -1,
       message: `一次性导入 ${scan.items.length} 篇（新增 ${created}，更新 ${updated}）。仅导入所选历史文件，不代表公众号完整更新，也不绑定目录或启用定时订阅。`,
     };
+  }
+
+  private async readWechat2RssAvatar(
+    feed: { id: string; mpCover: string; collectionChannel: string | null },
+    provider: ReturnType<typeof wechat2RssProvider>,
+  ) {
+    return !feed.mpCover &&
+      feed.collectionChannel === 'wechat2rss' &&
+      typeof provider.fetchFeedAvatar === 'function'
+      ? provider.fetchFeedAvatar(feed.id)
+      : undefined;
+  }
+
+  private writeWechat2RssAvatar(
+    tx: Pick<typeof this.prisma, 'feed'>,
+    mpId: string,
+    avatar: string | undefined,
+  ) {
+    return avatar
+      ? tx.feed.updateMany({
+          where: { id: mpId, collectionChannel: 'wechat2rss', mpCover: '' },
+          data: { mpCover: avatar },
+        })
+      : Promise.resolve();
+  }
+
+  /** Cache-only metadata continuation. A completed body must not skip an avatar. */
+  async supplementWechat2RssAvatar(mpId: string) {
+    const feed = await this.prisma.feed.findUniqueOrThrow({
+      where: { id: mpId },
+    });
+    const avatar = await this.readWechat2RssAvatar(feed, wechat2RssProvider());
+    if (!avatar) return;
+    await incrementalWrite(this.prisma, Buffer.byteLength(avatar), () =>
+      this.prisma.$transaction(async (tx) => {
+        await assertIncrementalTransaction(tx);
+        await this.writeWechat2RssAvatar(tx, mpId, avatar);
+      }),
+    );
   }
 }

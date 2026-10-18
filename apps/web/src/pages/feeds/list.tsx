@@ -1,4 +1,6 @@
-import { FC, useEffect, useMemo, useState } from 'react';
+import { ArticleFilter } from '@wewe-rss/shared';
+import { useArticleListPosition } from '@web/utils/use-article-list-position';
+import { FC, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Spinner,
@@ -15,6 +17,10 @@ import { toast } from 'sonner';
 
 interface ArticleListProps {
   search: string;
+  articleFilter?: ArticleFilter;
+  sort?: 'publishTime' | 'readCount' | 'likeCount';
+  onSortChange?: (sort: 'publishTime' | 'readCount' | 'likeCount') => void;
+  direction?: 'asc' | 'desc';
   selectedIds: Set<string>;
   onSelectionChange: (selectedIds: Set<string>) => void;
 }
@@ -30,6 +36,10 @@ function metricDisplay(raw: string | null, key: 'read' | 'like' | 'favorite') {
 
 const ArticleList: FC<ArticleListProps> = ({
   search,
+  articleFilter = {},
+  sort: requestedSort,
+  onSortChange,
+  direction = 'desc',
   selectedIds,
   onSelectionChange,
 }) => {
@@ -64,11 +74,20 @@ const ArticleList: FC<ArticleListProps> = ({
       ]);
     }
   };
-  const [sort, setSort] = useState<'publishTime' | 'readCount' | 'likeCount'>(
-    'publishTime',
-  );
+  const [localSort, setLocalSort] = useState<
+    'publishTime' | 'readCount' | 'likeCount'
+  >('publishTime');
 
+  const sort = requestedSort ?? localSort;
+  const setSort = useCallback(
+    (value: typeof localSort) => {
+      if (onSortChange) onSortChange(value);
+      else setLocalSort(value);
+    },
+    [onSortChange],
+  );
   const summary = trpc.article.summary.useQuery({
+    ...articleFilter,
     mpId,
     search: search || undefined,
   });
@@ -76,7 +95,7 @@ const ArticleList: FC<ArticleListProps> = ({
   useEffect(() => {
     setSort('publishTime');
     onSelectionChange(new Set());
-  }, [mpId, search, onSelectionChange]);
+  }, [mpId, search, onSelectionChange, setSort]);
 
   useEffect(() => {
     if (
@@ -86,11 +105,12 @@ const ArticleList: FC<ArticleListProps> = ({
     ) {
       setSort('publishTime');
     }
-  }, [summary.data, sort]);
+  }, [summary.data, sort, setSort]);
 
   const {
     data,
     fetchNextPage,
+    isFetching,
     isLoading,
     hasNextPage,
     isError,
@@ -99,19 +119,40 @@ const ArticleList: FC<ArticleListProps> = ({
   } = trpc.article.list.useInfiniteQuery(
     {
       limit: 20,
+      ...articleFilter,
+      direction,
       mpId: mpId,
       search: search || undefined,
       sort,
     },
     {
       getNextPageParam: (lastPage) => lastPage.nextCursor,
+      retry: false,
+      cacheTime: 0,
+      keepPreviousData: false,
     },
+  );
+
+  const loadNext = useCallback(
+    () => fetchNextPage({ cancelRefetch: false }),
+    [fetchNextPage],
   );
 
   const items = useMemo(() => {
     return data?.pages.flatMap((page) => page.items) || [];
   }, [data]);
 
+  const position = useArticleListPosition({
+    viewKey: JSON.stringify([mpId, search, articleFilter, sort, direction]),
+    pageCount: data?.pages.length || 0,
+    itemCount: items.length,
+    loading: isLoading,
+    fetching: isFetching,
+    hasNext: Boolean(hasNextPage),
+    failed: isError,
+    loadNext,
+    paused: Boolean(readingId),
+  });
   const handleSelectAll = (isSelected: boolean) => {
     if (isSelected) {
       onSelectionChange(new Set(items.map((item) => item.id)));
@@ -190,7 +231,11 @@ const ArticleList: FC<ArticleListProps> = ({
           </Button>
         </div>
       )}
-      <div className="mt-2 flex-1 overflow-y-auto">
+      <div
+        ref={position.scrollRef}
+        onScroll={position.capturePosition}
+        className="mt-2 flex-1 overflow-y-auto"
+      >
         <div className="compact-list">
           <div className="compact-list-header">
             <div className="compact-col-check">
@@ -205,10 +250,15 @@ const ArticleList: FC<ArticleListProps> = ({
           </div>
 
           {items?.map((item) => (
-            <div key={item.id} className="compact-row article-row">
+            <div
+              data-article-id={item.id}
+              key={item.id}
+              className="compact-row article-row"
+            >
               <div className="compact-col-check">
                 <Checkbox
                   size="sm"
+                  aria-label={`选择文章：${item.title}`}
                   isSelected={selectedIds.has(item.id)}
                   onValueChange={(isSelected) => {
                     const next = new Set(selectedIds);
@@ -329,7 +379,12 @@ const ArticleList: FC<ArticleListProps> = ({
 
           {hasNextPage && !isLoading && (
             <div className="flex justify-center p-4">
-              <Button size="sm" variant="light" onPress={() => fetchNextPage()}>
+              <Button
+                size="sm"
+                variant="light"
+                isDisabled={isFetching}
+                onPress={() => void loadNext()}
+              >
                 加载更多
               </Button>
             </div>
