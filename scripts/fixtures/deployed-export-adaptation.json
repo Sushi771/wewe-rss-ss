@@ -28,7 +28,6 @@
     "saveToObsidian": "4a4b5e5374d56a850ab27e91dc8a728106b560aa95573054e2bc63936459ae57"
   },
   "criticalFiles": {
-    "apps/server/src/article-export.ts": "84cf4e1b7ed40f62e09d88fee96baa5aaa22776fb1e8b122174f1a615c5b9261",
     "apps/server/src/article-export-source.ts": "97bbf7a725e4b2989498da36ec9b6ae7e2258f33d921c4141c0aeaa38e265c1a",
     "apps/server/src/article-download.controller.ts": "af8b041c54a25b7d5a48aa1a9aebd1f98dc70224291e454d39112f369a004e09",
     "apps/server/src/offline-export.controller.ts": "11e8124cb8589fb0d2e23f66bcd8fd5ea561e532b01c2f0023883f05c3e2c715",
@@ -46,5 +45,7 @@
     "scripts/local-release/restart.cjs": "d958e4f2be1bb1f3f031f809669dde57057ffa6c6c7b2cce993862b4c466a4cc",
     "scripts/local-release/startup-audit.cjs": "fd260bf9dbfd8d7ea4b9c509fc0ba7efdd86773d6e5dc6c14cd6fa09801867bd"
   },
-  "indexLayout": "6d47878dc6885554eda020cf8efb16622b8eb69d51bef8b164fdf97d22880e2d"
+  "indexLayout": "6d47878dc6885554eda020cf8efb16622b8eb69d51bef8b164fdf97d22880e2d",
+  "articleExportConversion": "a46acea74e60a7f58ae169f74cd8cf6ce34984155bf6a1f683724ae8fe9c725b",
+  "articleExportPredicate": "4f3b3d0e2ded2892353b737898b311f24b458c6b3bb693d7d13188658a5de309"
 }

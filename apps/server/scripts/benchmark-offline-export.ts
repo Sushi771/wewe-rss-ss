@@ -10,7 +10,16 @@ import { performance } from 'node:perf_hooks';
 import * as ts from 'typescript';
 import { Module } from 'node:module';
 
-const baseline = '8a3141c43b1b09e92ebd75780f26c58939557906';
+const baseline =
+  process.env.EXPORT_BENCHMARK_BASELINE ||
+  '8a3141c43b1b09e92ebd75780f26c58939557906';
+if (
+  ![
+    '8a3141c43b1b09e92ebd75780f26c58939557906',
+    '4862fd3a7d7a11a20e783454c7ecd317d7060237',
+  ].includes(baseline)
+)
+  throw new Error('Unsupported reviewed baseline');
 /** Pin the full local import graph, including ArticleDownloadError, to deployed source. */
 function deployedModules() {
   const cache = new Map<string, any>();
@@ -280,6 +289,16 @@ async function main() {
         {} as any,
         {} as any,
       );
+      const CurrentStore =
+        process.env.EXPORT_STAGE_PROFILE === '1'
+          ? (await import('../src/article-local-save')).LocalArticleStore
+          : undefined;
+      // Diagnostic CJS helper is intentionally opt-in and outside runtime code.
+      const profiler =
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        require('./export-stage-profiler.cjs').exportStageProfiler(
+          CurrentStore,
+        );
       const folder = join(root, 'archive');
       const sourceHash =
         mode === 'old'
@@ -311,9 +330,11 @@ async function main() {
         peakRss = Math.max(peakRss, m.rss);
         peakHeap = Math.max(peakHeap, m.heapUsed);
       }, 5);
+      profiler.start();
       const start = performance.now();
       const result = await router.buildOfflineFeedDirectory(feedId, folder);
       const ms = performance.now() - start;
+      const stages = profiler.finish();
       clearInterval(timer);
       const hash = createHash('sha256');
       let temporaryBytes = 0;
@@ -349,6 +370,7 @@ async function main() {
         temporaryBytes,
         queries,
         maxBodyRows,
+        stages,
         contentHash: hash.digest('hex'),
       };
       const progress = resolve(__dirname, '../../../output');

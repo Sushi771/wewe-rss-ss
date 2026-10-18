@@ -9,7 +9,16 @@ import { performance } from 'node:perf_hooks';
 import { createHash } from 'node:crypto';
 import type { LocalArticleStore } from '../src/article-local-save';
 
-const baseline = '8a3141c43b1b09e92ebd75780f26c58939557906';
+const baseline =
+  process.env.EXPORT_BENCHMARK_BASELINE ||
+  '8a3141c43b1b09e92ebd75780f26c58939557906';
+if (
+  ![
+    '8a3141c43b1b09e92ebd75780f26c58939557906',
+    '4862fd3a7d7a11a20e783454c7ecd317d7060237',
+  ].includes(baseline)
+)
+  throw new Error('Unsupported reviewed baseline');
 /** Pin the full local import graph, including ArticleDownloadError, to deployed source. */
 function deployedModules() {
   const cache = new Map<string, any>();
@@ -253,6 +262,11 @@ async function main() {
       groupName: 'Group ' + (n % 2),
     });
     const rows = [];
+    // Diagnostic CJS helper is intentionally opt-in and outside runtime code.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const profiler = require('./export-stage-profiler.cjs').exportStageProfiler(
+      Store,
+    );
     const readdir = fs.readdir;
     const opendir = fs.opendir;
     let rootScans = 0;
@@ -282,6 +296,7 @@ async function main() {
           peakRss = Math.max(peakRss, usage.rss);
           peakHeap = Math.max(peakHeap, usage.heapUsed);
         }, 5);
+        profiler.start();
         const start = performance.now();
         const statuses: string[] = [];
         const total = phase === 'few-new' ? count + 2 : count;
@@ -295,7 +310,9 @@ async function main() {
               (await active.save(prepare(article(n), source(n)))).status!,
             );
         };
-        if (mode === 'old') await run(store);
+        // PR71 already has retained batches: the comparison must exercise that
+        // actual path, not artificially force its old single-save fallback.
+        if (mode === 'old' && baseline.startsWith('8a3141c')) await run(store);
         else
           for (let offset = 0; offset < total; offset += 64) {
             const end = Math.min(offset + 64, total);
@@ -314,6 +331,7 @@ async function main() {
             );
           }
         const ms = performance.now() - start;
+        const stages = profiler.finish();
         clearInterval(timer);
         const expectedStatuses =
           phase === 'first'
@@ -352,6 +370,7 @@ async function main() {
           phase,
           ms,
           rootScans,
+          stages,
           peakRss,
           peakHeap,
           stageBytes,
