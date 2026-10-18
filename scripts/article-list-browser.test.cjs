@@ -210,9 +210,13 @@ import {trpc} from ${modulePath(path.join(web, 'src/utils/trpc.ts'))};
 import ArticleList from ${modulePath(listFile)};
 import ${modulePath(path.join(web, 'src/index.css'))};
 localStorage.setItem('authCode','synthetic');
-document.addEventListener('load',(e)=>{if(e.target instanceof HTMLIFrameElement && e.target.src.startsWith('blob:'))window.readerLoaded=performance.now()},true);
+window.readerStages={};
+const fixtureEpoch=()=>performance.timeOrigin+performance.now();
+const fixtureCreateUrl=URL.createObjectURL.bind(URL);URL.createObjectURL=(blob)=>{const url=fixtureCreateUrl(blob);if(blob.type.startsWith('text/html'))window.readerStages.blobAt=fixtureEpoch();return url};
+const fixtureFetch=fetch.bind(window);window.fetch=async(...args)=>{const reading=String(args[0]).includes('article.byId');if(reading)window.readerStages.requestAt=fixtureEpoch();const response=await fixtureFetch(...args);if(reading){window.readerStages.headersAt=fixtureEpoch();const json=response.json.bind(response);response.json=async()=>{const data=await json();window.readerStages.jsonAt=fixtureEpoch();return data}}return response};
+document.addEventListener('load',(e)=>{if(e.target instanceof HTMLIFrameElement && e.target.src.startsWith('blob:')){window.readerLoaded=performance.now();window.readerStages.loadAt=fixtureEpoch()}},true);
 function App(){const [filter,setFilter]=useState({}),[search,setSearch]=useState(''),[sort,setSort]=useState('publishTime'),[direction,setDirection]=useState('desc'),[selected,setSelected]=useState(new Set());const utils=trpc.useUtils();const queryClient=useQueryClient();const navigate=useNavigate();
-window.fixture={pending:()=>queryClient.isFetching({queryKey:[['article','list']]}),setFilter,setSearch,setDirection,navigate,selected:()=>[...selected],refresh:()=>{window.dispatchEvent(new Event('wewe-articles-refresh'));return utils.article.list.invalidate();},fresh:()=>utils.article.list.reset()};
+window.fixture={freshBody:()=>queryClient.removeQueries({queryKey:[['article','byId']],type:'inactive'}),pending:()=>queryClient.isFetching({queryKey:[['article','list']]}),setFilter,setSearch,setDirection,navigate,selected:()=>[...selected],refresh:()=>{window.dispatchEvent(new Event('wewe-articles-refresh'));return utils.article.list.invalidate();},fresh:()=>utils.article.list.reset()};
 return <div className="app-shell"><div className="app-route"><div className="feed-workspace"><div className="mac-content feed-content !min-w-0 !overflow-y-auto"><header className="shrink-0 p-4">文章列表</header><div className="feed-article-scroll flex-1 overflow-hidden"><ArticleList search={search} articleFilter={filter} sort={sort} onSortChange={setSort} direction={direction} onDirectionChange={setDirection} selectedIds={selected} onSelectionChange={setSelected}/></div></div></div></div></div>}
 createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider><Routes><Route path='/*' element={<App/>}/></Routes></TrpcProvider></BrowserRouter>);`;
       const measurements = [];
@@ -612,15 +616,21 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                   );
               } else if (stage === 'reader') {
                 for (const warmth of ['first-read', 'warm-read']) {
+                  if (warmth === 'first-read')
+                    await evaluate('window.fixture.freshBody()');
                   const start = epoch();
                   await evaluate(
-                    "window.readerLoaded=0;Array.from(document.querySelectorAll('[data-article-id]')).find(e=>Number(e.dataset.articleId.slice(8))%7>=3).querySelector('a.compact-title').click()",
+                    "window.readerLoaded=0;window.readerStages={clickAt:performance.timeOrigin+performance.now()};Array.from(document.querySelectorAll('[data-article-id]')).find(e=>Number(e.dataset.articleId.slice(8))%7>=3).querySelector('a.compact-title').click()",
                   );
                   await until(
                     () => evaluate('Boolean(window.readerLoaded)'),
                     'saved HTML iframe loaded',
                   );
-                  measurements.push({ stage: warmth, ms: epoch() - start });
+                  measurements.push({
+                    stage: warmth,
+                    ms: epoch() - start,
+                    stages: await evaluate('window.readerStages'),
+                  });
                   await evaluate(
                     `document.querySelector('button[aria-label="Close"]').click()`,
                   );

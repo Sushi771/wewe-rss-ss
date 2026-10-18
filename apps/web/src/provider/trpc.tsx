@@ -122,9 +122,12 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
           enabled: () => true,
         }),
         splitLink({
-          // A batch responds only after its slowest procedure. Let each list
-          // page render independently of summary/task/verification reads.
-          condition: (operation) => operation.path === 'article.list',
+          // Each reading response must be independent of slower background
+          // tasks in the same batch. Auth, cache and cancellation stay shared.
+          condition: (operation) =>
+            ['article.list', 'article.summary', 'article.byId'].includes(
+              operation.path,
+            ),
           true: httpLink(transport),
           false: httpBatchLink(transport),
         }),
