@@ -702,7 +702,9 @@ describe('cache delta through original SQLite merge', () => {
     const queries = jest.spyOn(prisma, '$queryRaw');
     const flagQueries = () =>
       queries.mock.calls.filter((args) =>
-        String(args[0]).includes('WITH RECURSIVE image_tags'),
+        String((args[0] as any).sql || args[0]).includes(
+          'cache_body_media_flags',
+        ),
       );
     const engine = new CacheSyncEngine({
       now: () => now,

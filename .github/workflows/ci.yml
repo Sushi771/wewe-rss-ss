@@ -22,6 +22,7 @@ on:
         codex/automatic-wechat-media-repair-20261018,
         codex/automatic-media-clean-export-20261018,
         codex/reading-ui-media-final-20261018,
+        codex/cache-read-contention-20261018,
         codex/export-real-metrics-only-20261014,
         codex/folder-rename-latency,
       ]
@@ -29,6 +30,7 @@ on:
     branches:
       [
         main,
+        codex/reading-ui-media-final-20261018,
         codex/daily-saved-media-combined,
         codex/automatic-wechat-media-repair-20261018,
         codex/automatic-media-clean-export-20261018,

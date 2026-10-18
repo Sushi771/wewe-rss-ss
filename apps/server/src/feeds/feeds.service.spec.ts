@@ -10,6 +10,11 @@ import * as path from 'node:path';
 import { FeedsController } from './feeds.controller';
 import { startupAuditHttpGuard } from '../startup-audit';
 import * as backup from '../collection/sqlite-backup';
+import { canonicalArticleUrl } from '../collection/collection-format';
+import { CollectionService } from '../collection/collection.service';
+import { ProviderPage } from '../collection/subscription-provider';
+import { findArticleListRows } from '../article-list-page';
+import { noisePng } from '../../test/fixtures/cache-noise-png';
 
 describe('FeedsService', () => {
   let service: FeedsService;
@@ -171,6 +176,7 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
     await dash.text();
   }
   async function rss(timeout = 2500) {
+    const readsBefore = articleReads.length;
     const result = await fetch(
       base + `/feeds/${feedId}.rss?limit=20&mode=summary`,
       {
@@ -181,7 +187,9 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
     const xml = await result.text();
     expect((xml.match(/<item>/g) || []).length).toBe(20);
     expect(xml).not.toContain('synthetic body');
-    expect(articleReads[articleReads.length - 1].select).toEqual({
+    expect(
+      articleReads.slice(readsBefore).map((row) => row.select),
+    ).toContainEqual({
       id: true,
       title: true,
       publishTime: true,
@@ -231,6 +239,153 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
     expect(html).not.toHaveBeenCalled();
     expect(backup.createVerifiedSqliteBackup).not.toHaveBeenCalled();
   });
+  it('summary RSS and uncached list stay within 2.5s during the real full cache preflight', async () => {
+    await prisma.feed.update({
+      where: { id: feedId },
+      data: { collectionChannel: 'wechat2rss' },
+    });
+    const inline = 'data:image/png;base64,' + noisePng().toString('base64');
+    const body =
+      '<div id="js_content">synthetic body' +
+      `<img src="${inline}">`.repeat(60) +
+      '</div>';
+    await prisma.article.deleteMany({ where: { mpId: feedId } });
+    const articles: ProviderPage['articles'] = [];
+    for (let n = 0; n < 25; n++) {
+      const identity = canonicalArticleUrl(
+        `https://mp.weixin.qq.com/s?__biz=${Buffer.from(feedId.slice(7)).toString('base64')}&mid=${100 + n}&idx=1`,
+      );
+      const article = {
+        ...identity,
+        title: 'Synthetic ' + n,
+        picUrl: '',
+        publishTime: 1760000000 + n,
+        contentHtml: body,
+      };
+      articles.push(article);
+      await prisma.article.create({
+        data: {
+          id: article.id,
+          mpId: feedId,
+          title: article.title,
+          picUrl: '',
+          publishTime: article.publishTime,
+          sourceUrl: article.url,
+          verifiedSourceUrl: article.url,
+          contentHtml: body,
+          lastBodyStatus: 'available',
+        },
+      });
+    }
+    const backend = new TrpcService(
+      prisma,
+      new ConfigService({
+        platform: { url: '' },
+        feed: { updateDelayTime: 0 },
+      }),
+      {} as any,
+      new CollectionService(prisma),
+    );
+    const page: ProviderPage = {
+      articles,
+      coverage: 'recent-window',
+      upstreamCount: 25,
+      bodyMissing: 0,
+      imageBlocked: 0,
+    };
+    const samples: Array<{
+      preflightMs: number;
+      rssMs: number;
+      listMs: number;
+    }> = [];
+    let enter: (() => void) | undefined;
+    prisma.$use(async (params, next) => {
+      if (enter && params.action === 'queryRaw') {
+        const ready = enter;
+        enter = undefined;
+        ready();
+      }
+      return next(params);
+    });
+    try {
+      for (let n = 0; n < 5; n++) {
+        const running = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        const began = performance.now();
+        const background = backend
+          .syncCachedWechat2RssPage(feedId, page, false, { fetchMedia: false })
+          .then((result) => ({ result, ms: performance.now() - began }));
+        await running;
+        await new Promise((resolve) => setImmediate(resolve));
+        const rssAt = performance.now(),
+          listAt = performance.now();
+        const [flags, rssMs, list] = await Promise.all([
+          background,
+          rss().then(() => performance.now() - rssAt),
+          findArticleListRows(prisma, {
+            take: 20,
+            orderBy: [{ publishTime: 'desc' }, { id: 'desc' }],
+          }).then((rows) => ({ rows, ms: performance.now() - listAt })),
+        ]);
+        expect(flags.result).toMatchObject({
+          created: 0,
+          updated: 0,
+          mediaReady: true,
+          localMediaPendingArticleCount: 0,
+        });
+        expect(list.rows).toHaveLength(20);
+        expect(list.rows.every((row) => row.bodyCached)).toBe(true);
+        expect(rssMs).toBeLessThan(2500);
+        expect(list.ms).toBeLessThan(2500);
+        samples.push({ preflightMs: flags.ms, rssMs, listMs: list.ms });
+      }
+      expect(html).not.toHaveBeenCalled();
+      expect(backup.createVerifiedSqliteBackup).not.toHaveBeenCalled();
+      if (process.env.CACHE_PREFLIGHT_MEASURE === '1') {
+        const percentile = (
+          field: keyof (typeof samples)[number],
+          part: number,
+        ) =>
+          samples.map((row) => row[field]).sort((a, b) => a - b)[
+            Math.ceil(samples.length * part) - 1
+          ];
+        const summary = Object.fromEntries(
+          (['preflightMs', 'rssMs', 'listMs'] as const).map((field) => [
+            field,
+            {
+              n: samples.length,
+              p50: percentile(field, 0.5),
+              p95: percentile(field, 0.95),
+            },
+          ]),
+        );
+        const output = path.resolve(
+          __dirname,
+          '../../../../output/cache-preflight-full-service.private.json',
+        );
+        await fs.mkdir(path.dirname(output), { recursive: true });
+        await fs.writeFile(
+          output,
+          JSON.stringify(
+            {
+              node: process.version,
+              connectionLimit: 1,
+              rows: 25,
+              imagesPerBody: 60,
+              bodyBytes: Buffer.byteLength(body),
+              samples,
+              summary,
+            },
+            null,
+            2,
+          ),
+        );
+      }
+    } finally {
+      backend.onModuleDestroy();
+    }
+  }, 30000);
 });
 
 describe('RSS summary projection preserves every output and full-text mode', () => {
