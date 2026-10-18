@@ -53,6 +53,7 @@ function fixture(batch) {
         return {
           useRef: (value) => ({ current: value }),
           useState: (value) => [value, () => {}],
+          useEffect: () => {},
         };
       if (name === '@nextui-org/react')
         return { Button: 'Button', Progress: 'Progress' };
@@ -243,4 +244,26 @@ test('legal exclusions remain visibly different from a fully updated round', () 
   assert(done.text.includes('本轮全部更新完成。'));
   assert.equal(done.buttons.length, 0);
   assert.equal(done.requests.length, 0);
+});
+
+test('an unexplained terminal gap is not invented as a legal skip or a full success', () => {
+  const f = fixture({
+    batchId: 'unconfirmed-terminal',
+    state: 'completed',
+    items: [item],
+    coverage: {
+      expected: 1,
+      submitted: 1,
+      completed: 1,
+      pending: 0,
+      legitimateSkipped: 0,
+      excluded: 0,
+      anomalies: 0,
+      fullyUpdated: false,
+      items: [],
+    },
+  });
+  assert(f.progress.props.label.includes('需核对'));
+  assert(!f.progress.props.label.includes('含合法跳过'));
+  assert(!f.progress.props.label.includes('已全部更新'));
 });

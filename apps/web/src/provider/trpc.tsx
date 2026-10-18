@@ -6,6 +6,10 @@ import { toast } from 'sonner';
 import { isTRPCClientError, trpc } from '../utils/trpc';
 import { getAuthCode, setAuthCode } from '../utils/auth';
 import {
+  isStorageFailure,
+  STORAGE_DETAILS_PATH,
+} from '../utils/startup-status';
+import {
   enabledAuthCode,
   privateOnlineMode,
   serverOriginUrl,
@@ -45,10 +49,19 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
               if (isTRPCClientError(error)) {
                 if (error.data?.httpStatus === 401) {
                   toast.error('无权限', {
+                    id: 'wewe-auth-required',
                     description: error.message,
                   });
 
                   handleNoAuth();
+                } else if (isStorageFailure(error.message)) {
+                  toast.error('存储空间受限，本次操作未完成。', {
+                    id: 'wewe-storage-limited',
+                    action: {
+                      label: '查看详情',
+                      onClick: () => navigate(STORAGE_DETAILS_PATH),
+                    },
+                  });
                 } else {
                   toast.error('请求失败!', {
                     description: error.message,
@@ -63,9 +76,18 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
               if (isTRPCClientError(error)) {
                 if (error.data?.httpStatus === 401) {
                   toast.error('无权限', {
+                    id: 'wewe-auth-required',
                     description: error.message,
                   });
                   handleNoAuth();
+                } else if (isStorageFailure(error.message)) {
+                  toast.error('存储空间受限，本次操作未完成。', {
+                    id: 'wewe-storage-limited',
+                    action: {
+                      label: '查看详情',
+                      onClick: () => navigate(STORAGE_DETAILS_PATH),
+                    },
+                  });
                 } else {
                   toast.error('请求失败!', {
                     description: error.message,

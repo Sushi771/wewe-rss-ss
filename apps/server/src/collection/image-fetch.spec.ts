@@ -2,6 +2,8 @@ import {
   allowedImageUrl,
   decodeInlineImage,
   fetchAllowedImage,
+  ImageRequestBlockedError,
+  ImageRequestTransientError,
 } from './image-fetch';
 
 const png = Buffer.from(
@@ -11,6 +13,43 @@ const png = Buffer.from(
 
 describe('archived image fetch boundary', () => {
   afterEach(() => jest.restoreAllMocks());
+
+  it.each([408, 500, 502, 503, 504])(
+    'classifies HTTP %s as transient, distinct from policy stops',
+    async (status) => {
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response(null, { status }));
+      await expect(
+        fetchAllowedImage('https://mmbiz.qpic.cn/photo'),
+      ).rejects.toBeInstanceOf(ImageRequestTransientError);
+    },
+  );
+  it.each([401, 403, 429])(
+    'retains persistent lane-stop classification for HTTP %s',
+    async (status) => {
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response(null, { status }));
+      await expect(
+        fetchAllowedImage('https://mmbiz.qpic.cn/photo'),
+      ).rejects.toBeInstanceOf(ImageRequestBlockedError);
+    },
+  );
+  it('retains a policy stop even when cancelling the denied response fails', async () => {
+    const response = new Response(null, { status: 403 });
+    Object.defineProperty(response, 'body', {
+      value: {
+        cancel: async () => {
+          throw Error('CANCEL_FAILED');
+        },
+      },
+    });
+    jest.spyOn(global, 'fetch').mockResolvedValue(response);
+    await expect(
+      fetchAllowedImage('https://mmbiz.qpic.cn/photo'),
+    ).rejects.toBeInstanceOf(ImageRequestBlockedError);
+  });
 
   it('rejects local destinations and redirect responses', async () => {
     expect(() => allowedImageUrl('http://127.0.0.1/private')).toThrow(
@@ -82,6 +121,32 @@ describe('archived image fetch boundary', () => {
     expect(() =>
       decodeInlineImage(`data:image/jpeg;base64,${png.toString('base64')}`),
     ).toThrow('IMAGE_RESPONSE_INVALID');
+  });
+
+  it.each([
+    ['ignored punctuation', (value: string) => '!' + value],
+    [
+      'embedded whitespace',
+      (value: string) => value.slice(0, 4) + '\n' + value.slice(4),
+    ],
+    ['trailing newline', (value: string) => value + '\n'],
+    ['missing padding', (value: string) => value.replace(/=+$/, '')],
+    ['extra padding', (value: string) => value + '='],
+    ['URL-safe alphabet', (value: string) => value.replaceAll('/', '_')],
+  ])('rejects noncanonical Base64: %s', (_name, change) => {
+    const encoded = change(png.toString('base64'));
+    // Node's forgiving decoder still produces the same valid image bytes.
+    expect(Buffer.from(encoded, 'base64')).toEqual(png);
+    expect(() => decodeInlineImage('data:image/png;base64,' + encoded)).toThrow(
+      'IMAGE_RESPONSE_INVALID',
+    );
+  });
+
+  it('rejects oversized encoded input before Base64 decoding', () => {
+    const raw = 'data:image/png;base64,' + 'A'.repeat(13_333_340);
+    const decode = jest.spyOn(Buffer, 'from');
+    expect(() => decodeInlineImage(raw)).toThrow('IMAGE_RESPONSE_INVALID');
+    expect(decode).not.toHaveBeenCalled();
   });
 
   it('accepts valid JPEG, GIF, and WebP containers', () => {

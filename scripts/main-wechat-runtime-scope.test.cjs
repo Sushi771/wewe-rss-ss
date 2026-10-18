@@ -50,7 +50,37 @@ test('native login remains main implementation and shared deployed safety polici
   for (const [file, expected] of Object.entries(manifest.criticalBlobs))
     assert.equal(hash(read(file)), expected, file);
 });
-test('the application does not register XHS or import the separate daily lifecycle and media writeback branches', () => {
+
+test('only the selected deployed media methods and export routes change on main', () => {
+  assert.deepEqual(
+    members('apps/server/src/trpc/trpc.service.ts'),
+    manifest.trpcServiceMembers,
+  );
+  const file = 'apps/server/src/trpc/trpc.router.ts';
+  const actual = members(file);
+  delete actual.articleRouter;
+  assert.deepEqual(actual, manifest.routerMembers);
+  const ast = ts.createSourceFile(
+    file,
+    read(file),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const declaration = ast.statements.find(ts.isClassDeclaration);
+  const article = declaration.members.find(
+    (node) => node.name?.getText(ast) === 'articleRouter',
+  );
+  assert.deepEqual(
+    Object.fromEntries(
+      article.initializer.arguments[0].properties.map((node) => [
+        node.name.getText(ast),
+        tokens(node.getText(ast)),
+      ]),
+    ),
+    manifest.articleRoutes,
+  );
+});
+test('the main extraction excludes XHS and general download tools while keeping the authorized deployed lifecycle', () => {
   const file = 'apps/server/src/trpc/trpc.router.ts';
   const ast = ts.createSourceFile(
     file,
@@ -73,8 +103,14 @@ test('the application does not register XHS or import the separate daily lifecyc
   assert(!read('apps/server/src/app.module.ts').includes('Xiaohongshu'));
   assert(!read('apps/server/src/trpc/trpc.module.ts').includes('Xiaohongshu'));
   assert(
-    !read('apps/server/scripts/sqlite-snapshot-guard.py').includes(
+    read('apps/server/scripts/backup-sqlite.py').includes(
       'SQLITE_PERIODIC_LIFECYCLE_ENABLED',
     ),
   );
+  assert(
+    read('apps/server/src/trpc/trpc.router.ts').includes(
+      'supplementSavedMedia',
+    ),
+  );
+  assert(!read('apps/server/src/trpc/trpc.router.ts').includes('exportIds'));
 });

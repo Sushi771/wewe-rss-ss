@@ -26,6 +26,7 @@ import {
 } from '@web/utils/env';
 import ArticleList from './list';
 import ManualRefreshProgress from './manual-refresh-progress';
+import CacheSyncStatus from './cache-sync-status';
 import LocalCollection from './collection';
 import PublicAlbums from './public-albums';
 
@@ -498,7 +499,7 @@ const Feeds = () => {
 
   return (
     <>
-      <div className="flex h-full">
+      <div className="flex h-full min-h-0">
         <div className="mac-sidebar">
           <div className="flex items-center justify-between px-4 py-3">
             <span className="text-[13px] font-bold uppercase tracking-widest text-neutral-400/80">
@@ -676,7 +677,7 @@ const Feeds = () => {
             </div>
           ) : null}
         </div>
-        <div className="mac-content">
+        <div className="mac-content min-h-0 min-w-0">
           <div className="mac-toolbar !h-auto shrink-0 !flex-wrap !py-2">
             <div className="flex min-w-0 basis-full items-center gap-2 overflow-hidden">
               <span className="truncate text-[15px] font-semibold">
@@ -1311,7 +1312,11 @@ const Feeds = () => {
               </div>
             </details>
           )}
-          <div className="flex-1 overflow-auto">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <details className="shrink-0 px-3 py-1 text-xs">
+              <summary>同步详情</summary>
+              <CacheSyncStatus feedId={currentMpId} />
+            </details>
             <ManualRefreshProgress
               batch={manualBatch}
               feeds={feedData?.items || []}
@@ -1322,11 +1327,13 @@ const Feeds = () => {
                 重新读取更新任务
               </Button>
             )}
-            <ArticleList
-              search={search}
-              selectedIds={articleSelectedIds}
-              onSelectionChange={setArticleSelectedIds}
-            />
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <ArticleList
+                search={search}
+                selectedIds={articleSelectedIds}
+                onSelectionChange={setArticleSelectedIds}
+              />
+            </div>
           </div>
         </div>
       </div>

@@ -63,6 +63,14 @@ export function safePeriodicSnapshotFailure(value: unknown) {
     'SQLITE_PERIODIC_RETENTION_PROOF_LIMIT',
     'SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED',
     'SQLITE_PERIODIC_RETENTION_POLICY_INVALID',
+    'SQLITE_PERIODIC_NOT_DUE',
+    'SQLITE_PERIODIC_PENDING_CONFIRMATION',
+    'SQLITE_PERIODIC_LIFECYCLE_HELD',
+    'SQLITE_PERIODIC_EVIDENCE_INVALID',
+    'SQLITE_PERIODIC_CONFIRMATION_REQUIRED',
+    'SQLITE_PERIODIC_POLICY_INVALID',
+    'SQLITE_PERIODIC_NATIVE_RELEASE_REQUIRED',
+    'SQLITE_PERIODIC_UNIQUE_HISTORY_HELD',
     'SQLITE_BACKUP_VERIFICATION_FAILED',
     'SQLITE_BACKUP_SOURCE_CHANGED',
     'SQLITE_BACKUP_BUSY',
@@ -88,6 +96,36 @@ export function safePeriodicSnapshotFailure(value: unknown) {
   )
     return undefined;
   return { code, stage };
+}
+
+export function safePeriodicLifecycleStatus(value: unknown) {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as Record<string, unknown>;
+  if (
+    ![
+      'ready',
+      'pending-confirmation',
+      'copy-intent',
+      'retirement-started',
+      'releasing',
+      'held',
+    ].includes(String(input.status))
+  )
+    return undefined;
+  const count = (key: string, maximum: number) =>
+    typeof input[key] === 'number' &&
+    Number.isSafeInteger(input[key]) &&
+    (input[key] as number) >= 0 &&
+    (input[key] as number) <= maximum
+      ? (input[key] as number)
+      : null;
+  return {
+    status: String(input.status),
+    normalCopies: count('normalCopies', 48),
+    pendingCopies: count('pendingCopies', 1),
+    intervalSeconds: count('intervalSeconds', 86400),
+    automaticDeletion: false,
+  };
 }
 
 export function safePeriodicRetentionStatus(value: unknown) {
@@ -269,6 +307,13 @@ export class SqliteSnapshotGuard {
             this.periodicFailed = !message.ok;
             this.periodicFailureKey = message.ok ? '' : key;
             const retention = safePeriodicRetentionStatus(message.retention);
+            const lifecycle = safePeriodicLifecycleStatus(message.lifecycle);
+            if (lifecycle) {
+              const lifecycleKey = JSON.stringify(lifecycle);
+              if (this.retentionStatusKey !== lifecycleKey)
+                console.info('[SQLITE_PERIODIC_LIFECYCLE]', lifecycle);
+              this.retentionStatusKey = lifecycleKey;
+            }
             if (retention) {
               const retentionKey = JSON.stringify(retention);
               if (retentionKey !== this.retentionStatusKey) {

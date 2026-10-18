@@ -21,6 +21,10 @@ const navbarItemLink = [
     href: '/feeds',
     name: '公众号源',
   },
+  {
+    href: '/tools/article-download',
+    name: '存储与备份',
+  },
 ];
 
 const Nav = () => {

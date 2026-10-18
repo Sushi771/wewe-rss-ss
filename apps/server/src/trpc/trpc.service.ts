@@ -1,3 +1,4 @@
+import { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';
 import { refreshCacheFailure } from '../collection/refresh-cache-failure';
 import { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';
 import {
@@ -18,6 +19,14 @@ import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
 import { CollectionService } from '../collection/collection.service';
 import { savedBodyMediaInput } from '../collection/archive-provider-images';
+import { automaticMediaPlan } from '../collection/automatic-media-body';
+import {
+  inspectSavedMedia,
+  prepareSavedMediaWrite,
+  readSavedMediaManifest,
+  savedMediaIds,
+  SavedMediaSnapshot,
+} from '../collection/saved-media-writeback';
 import { readLocalWechat2RssCache } from '../collection/local-cache-reader';
 import { cacheFailureReason } from '../collection/cache-failure';
 import { wechat2RssProvider } from '../collection/provider-registry';
@@ -1112,6 +1121,72 @@ export class TrpcService {
     );
   }
 
+  /** Exact stored-body repair using the main instance's original collection gate. */
+  async commitAutomaticArticleMedia(
+    row: SavedMediaSnapshot,
+    images: ReadonlyMap<string, string>,
+  ) {
+    if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');
+    return this.incrementalCollection(row.mpId, async (feed) => {
+      const plan = automaticMediaPlan(row, images);
+      await this.collectionService.collectWechat2RssRecent({
+        mpId: feed.id,
+        mpName: feed.mpName,
+        trigger: 'local-manual',
+        cachedPage: plan.page,
+        fetchMedia: true,
+        savedMedia: plan.write,
+      });
+    });
+  }
+
+  /** Fixed, operator-bound offline repair remains independent of automatic tasks. */
+  async supplementSavedArticleMedia(rawIds: string[]) {
+    const ids = savedMediaIds.parse(rawIds);
+    if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');
+    const binding = await readSavedMediaManifest();
+    return this.incrementalCollection(binding.manifest.mpId, async (feed) => {
+      const plan = await prepareSavedMediaWrite(
+        this.prismaService,
+        binding,
+        ids,
+      );
+      const result = plan.page.articles.length
+        ? await this.collectionService.collectWechat2RssRecent({
+            mpId: feed.id,
+            mpName: feed.mpName,
+            trigger: 'local-manual',
+            cachedPage: plan.page,
+            fetchMedia: true,
+            savedMedia: plan.write,
+          })
+        : undefined;
+      const rows = await this.prismaService.article.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, mpId: true, contentHtml: true },
+      });
+      const articles = ids.map((id) => {
+        const row = rows.find(
+          (item) => item.id === id && item.mpId === feed.id,
+        );
+        const state = inspectSavedMedia(row?.contentHtml || null);
+        return {
+          id,
+          status: state.ready
+            ? ('complete' as const)
+            : ('unconfirmed' as const),
+          ...state,
+        };
+      });
+      return {
+        updated: result?.updated || 0,
+        created: 0,
+        mediaReady: articles.every((row) => row.ready),
+        articles,
+      };
+    });
+  }
+
   /** Internal cache watcher only. No add/refresh/original-page request.
    * A read-only preflight avoids backups and status writes on unchanged caches.
    * The normal lock, verified backup and protected merge are still used on writes. */
@@ -1160,44 +1235,6 @@ export class TrpcService {
         publishTime: true,
       },
     });
-    // SQLite computes small flags; never transfer saved multi-megabyte HTML
-    // into the automatic no-op preflight or parse it in JavaScript.
-    const readFlags = async () => {
-      const rows = await this.prismaService.$queryRaw<
-        Array<{
-          id: string;
-          bodyMissing: number;
-          remoteImages: number;
-          mediaPending: number;
-        }>
-      >`WITH RECURSIVE image_tags(id, remaining, tag) AS (
-        SELECT id, lower(coalesce(content_html, '')), '' FROM articles WHERE mp_id = ${mpId}
-        UNION ALL
-        SELECT id,
-          substr(remaining, instr(remaining, '<img') + instr(substr(remaining, instr(remaining, '<img')), '>')),
-          substr(remaining, instr(remaining, '<img'), instr(substr(remaining, instr(remaining, '<img')), '>'))
-        FROM image_tags WHERE instr(remaining, '<img') > 0
-          AND instr(substr(remaining, instr(remaining, '<img')), '>') > 0
-      ), remote_flags AS (
-        SELECT id, max(CASE WHEN tag LIKE '% src="http%' OR tag LIKE '% src=''http%'
-          OR ((tag LIKE '% data-src="http%' OR tag LIKE '% data-src=''http%')
-            AND tag NOT LIKE '% src="data:image/%' AND tag NOT LIKE '% src=''data:image/%')
-          THEN 1 ELSE 0 END) AS remoteImages FROM image_tags GROUP BY id
-      ) SELECT a.id,
-        CASE WHEN a.content_html IS NULL OR a.content_html = '' THEN 1 ELSE 0 END AS bodyMissing,
-        CASE WHEN r.remoteImages = 1 OR a.content_html LIKE '%data-wewe-image-retryable="true"%'
-          OR a.content_html LIKE '%data-wewe-image-retryable=''true''%' THEN 1 ELSE 0 END AS remoteImages,
-        CASE WHEN r.remoteImages = 1 OR a.content_html LIKE '%data-wewe-image-pending=%' THEN 1 ELSE 0 END AS mediaPending
-        FROM articles a JOIN remote_flags r ON a.id = r.id WHERE a.mp_id = ${mpId}`;
-      return rows.map((row) => ({
-        ...row,
-        bodyMissing: Number(row.bodyMissing),
-        remoteImages: Number(row.remoteImages),
-        mediaPending: Number(row.mediaPending),
-      }));
-    };
-    const flags = listOnly ? [] : await readFlags();
-    const bodyFlags = new Map(flags.map((row) => [row.id, row]));
     // Normalize saved identities once per snapshot, rather than once for each
     // incoming row. Keep the original first-match semantics for legacy IDs.
     const incomingIds = new Set(page.articles.map((item) => item.id));
@@ -1221,6 +1258,14 @@ export class TrpcService {
         } // An opaque legacy URL is still checked by the protected saver.
       }
     }
+    const readFlags = () =>
+      readCachedBodyMediaFlags(
+        this.prismaService,
+        mpId,
+        page.articles.map((item) => byIdentity.get(item.id)?.id || item.id),
+      );
+    const flags = listOnly ? [] : await readFlags();
+    const bodyFlags = new Map(flags.map((row) => [row.id, row]));
     const legacyByTitleTime = new Map<string, typeof saved>();
     for (const row of saved) {
       const key = JSON.stringify([row.title, row.publishTime]);

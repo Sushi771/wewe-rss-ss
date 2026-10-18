@@ -33,6 +33,28 @@ const mpCache = new LRUCache<string, string>({
   max: 5000,
 });
 
+type RssArticle = Pick<
+  Article,
+  | 'id'
+  | 'title'
+  | 'publishTime'
+  | 'picUrl'
+  | 'mpId'
+  | 'sourceUrl'
+  | 'lastBodyStatus'
+> &
+  Partial<Pick<Article, 'contentHtml'>>;
+
+const summaryArticleSelect = {
+  id: true,
+  title: true,
+  publishTime: true,
+  picUrl: true,
+  mpId: true,
+  sourceUrl: true,
+  lastBodyStatus: true,
+} as const;
+
 @Injectable()
 export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(this.constructor.name);
@@ -296,7 +318,7 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   }: {
     type: string;
     feedInfo: FeedInfo;
-    articles: Article[];
+    articles: RssArticle[];
     mode?: string;
   }) {
     const { originUrl, mode: globalMode } =
@@ -390,7 +412,15 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       type = 'atom';
     }
 
-    let articles: Article[];
+    const configuredMode =
+      this.configService.get<ConfigurationType['feed']>('feed')!.mode;
+    const fulltext =
+      typeof mode === 'string'
+        ? mode === 'fulltext'
+        : configuredMode === 'fulltext';
+    const select = fulltext ? undefined : summaryArticleSelect;
+
+    let articles: RssArticle[];
     let feedInfo: FeedInfo;
     if (id) {
       feedInfo = (await this.prismaService.feed.findFirst({
@@ -402,6 +432,7 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       }
 
       articles = await this.prismaService.article.findMany({
+        select,
         where: { mpId: id },
         orderBy: { publishTime: 'desc' },
         take: limit,
@@ -409,6 +440,7 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       });
     } else {
       articles = await this.prismaService.article.findMany({
+        select,
         orderBy: { publishTime: 'desc' },
         take: limit,
         skip: (page - 1) * limit,
