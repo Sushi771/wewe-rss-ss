@@ -1,5 +1,5 @@
 // Offline: run from repository root with Node and Python installed.
-// Compares pinned baseline/current engines using the unchanged production SQL on
+// Compares pinned baseline/current schedulers using the frozen c80d240 SQL on
 // one small synthetic SQLite database. No provider, production config, or HTTP.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,16 +20,15 @@ const beforeSource = cp.execFileSync(
     windowsHide: true,
   },
 );
-const trpc = fs.readFileSync(
-  path.join(repo, 'apps/server/src/trpc/trpc.service.ts'),
+const frozenPredicate = fs.readFileSync(
+  path.join(repo, 'apps/server/test/fixtures/legacy-cache-body-flags.ts'),
   'utf8',
 );
-const sqlStart = trpc.indexOf(
-  '`WITH RECURSIVE image_tags',
-  trpc.indexOf('const readFlags = async'),
-);
-const sql = trpc
-  .slice(sqlStart + 1, trpc.indexOf('`;', sqlStart))
+const sqlStart = frozenPredicate.indexOf('`WITH RECURSIVE image_tags');
+const sqlEnd = frozenPredicate.indexOf('`;', sqlStart);
+assert(sqlStart >= 0 && sqlEnd > sqlStart, 'FROZEN_CACHE_FLAGS_SQL_NOT_FOUND');
+const sql = frozenPredicate
+  .slice(sqlStart + 1, sqlEnd)
   .replaceAll('${mpId}', '?');
 const stateFile = path.join(repo, 'apps/server/src/feeds/cache-sync-state.ts');
 function compile(source, dependency) {
@@ -265,7 +264,7 @@ async function main() {
           productionWrites: 0,
           results,
           limits: [
-            'Actual engine control flow and unchanged production recursive SQL; dependency stand-ins exclude Prisma admission, metadata identity checking and write transactions.',
+            'Actual scheduler control flow and frozen c80d240 recursive SQL; dependency stand-ins exclude Prisma admission, metadata identity checking and write transactions. The current preflight SQL is measured separately.',
             'Healthy case remains one scan; pending/missing/unknown/failed cases remove one scan.',
             'Five alternating pairs, fixture SQL/IPC wall time, not production round savings.',
             'Synthetic fixtures retained.',
