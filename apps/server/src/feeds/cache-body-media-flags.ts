@@ -11,9 +11,14 @@ export type CachedBodyMediaFlags = {
 /** Match the old SQL's tag/attribute rules in one linear pass. In particular,
  * a stale data-src beside a valid inline src is not another remote request. */
 function remoteImageTag(html: string) {
-  const images = /<img[^>]*>/gi;
-  for (let match = images.exec(html); match; match = images.exec(html)) {
-    const tag = match[0].toLowerCase();
+  const source = html.toLowerCase();
+  let offset = 0;
+  while (offset < source.length) {
+    const start = source.indexOf('<img', offset);
+    if (start < 0) return false;
+    const end = source.indexOf('>', start);
+    if (end < 0) return false;
+    const tag = source.slice(start, end + 1);
     if (tag.includes(' src="http') || tag.includes(" src='http")) return true;
     if (
       (tag.includes(' data-src="http') || tag.includes(" data-src='http")) &&
@@ -21,6 +26,7 @@ function remoteImageTag(html: string) {
       !tag.includes(" src='data:image/")
     )
       return true;
+    offset = end + 1;
   }
   return false;
 }

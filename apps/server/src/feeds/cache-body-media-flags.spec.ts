@@ -121,4 +121,12 @@ describe('bounded linear cache body media flags', () => {
     expect(rows.find((row) => row.id === 'b')!.mediaPending).toBe(1);
     expect(rows.find((row) => row.id === 'c')!.mediaPending).toBe(1);
   });
+  it('stops after an unclosed tag without regex backtracking across repeated openers', async () => {
+    await put('broken', '<img '.repeat(50_000) + ' data-src="http://cdn/a"');
+    const start = performance.now();
+    expect(await readCachedBodyMediaFlags(prisma, 'feed', ['broken'])).toEqual([
+      { id: 'broken', bodyMissing: 0, remoteImages: 0, mediaPending: 0 },
+    ]);
+    expect(performance.now() - start).toBeLessThan(2500);
+  });
 });
