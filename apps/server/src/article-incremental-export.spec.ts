@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { LocalArticleStore, ArticlePreparation } from './article-local-save';
 import { prepareCachedArticleLocalExport } from './cached-article-local-export';
@@ -68,7 +68,8 @@ describe('incremental export: synthetic files and mocked media only', () => {
     const first = await store.save(prepare());
     const initialMarkdown = await fs.readFile(first.markdownPath, 'utf8');
     expect(initialMarkdown).toContain('Body');
-    expect(initialMarkdown).toContain('# Fixture');
+    expect(basename(first.markdownPath)).toBe('Fixture.md');
+    expect(initialMarkdown).not.toContain('# Fixture');
     expect(initialMarkdown).toContain('公众号：Test');
     expect(initialMarkdown).not.toContain('| 指标 |');
     await fs.writeFile(first.markdownPath, 'User edits and notes');

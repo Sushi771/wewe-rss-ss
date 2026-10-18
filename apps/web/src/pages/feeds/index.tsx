@@ -2155,7 +2155,6 @@ const Feeds = () => {
             className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs"
             role="status"
           >
-            <span>筛选与排序在本次浏览中记住</span>
             <button
               type="button"
               className="hover:bg-default-100 rounded px-2 py-1 text-sm"
@@ -2176,7 +2175,7 @@ const Feeds = () => {
               setArticleSelectedIds(new Set());
             }}
           />
-          <div className="feed-article-scroll flex-1 overflow-auto">
+          <div className="feed-article-scroll flex-1 overflow-hidden">
             <ArticleList
               key={JSON.stringify([
                 id,

@@ -43,11 +43,13 @@ export function prepareCachedArticleLocalExport(
       'image',
       limits,
       allowPartialImages,
+      // The local publisher supplies the source header; Obsidian displays the
+      // article filename as its inline title. Never filter author body headings.
+      { includeTitle: false, includeSourceLink: false },
     );
-    const markdown = snapshot.sourceUrl
-      ? exported.markdown
-      : `# ${snapshot.title.replace(/[\r\n]/g, ' ')}\n\n${exported.markdown}`;
-    await fs.writeFile(join(directory, 'index.md'), markdown, { flag: 'wx' });
+    await fs.writeFile(join(directory, 'index.md'), exported.markdown, {
+      flag: 'wx',
+    });
     return {
       articleId: snapshot.id,
       title: snapshot.title,
