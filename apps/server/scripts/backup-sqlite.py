@@ -126,10 +126,37 @@ MAX_LAYOUT_ENTRIES = 8192
 MAX_LEGACY_ROOTS = 256
 MAX_LEGACY_DOCUMENT = 256*1024
 
+_lifecycle = None
+
+
+def periodic_lifecycle():
+    global _lifecycle
+    if _lifecycle is None:
+        import importlib.util
+        file=Path(__file__).with_name('periodic-lifecycle.py').resolve()
+        name='wewe_periodic_lifecycle_'+hashlib.sha256(str(file).encode()).hexdigest()[:24]
+        if name in sys.modules:
+            _lifecycle=sys.modules[name]
+        else:
+            spec = importlib.util.spec_from_file_location(name,file)
+            module=importlib.util.module_from_spec(spec)
+            sys.modules[name]=module
+            try:spec.loader.exec_module(module)
+            except BaseException:
+                del sys.modules[name]
+                raise
+            _lifecycle=module
+    return _lifecycle
+
 
 def safe_backup_failure(error,stage='unknown'):
     """Finite diagnostic only: never return exception text, paths or argv."""
     text=str(error)
+    if text in ('SQLITE_PERIODIC_NOT_DUE','SQLITE_PERIODIC_PENDING_CONFIRMATION',
+                'SQLITE_PERIODIC_LIFECYCLE_HELD','SQLITE_PERIODIC_EVIDENCE_INVALID',
+                'SQLITE_PERIODIC_CONFIRMATION_REQUIRED','SQLITE_PERIODIC_POLICY_INVALID',
+                'SQLITE_PERIODIC_NATIVE_RELEASE_REQUIRED','SQLITE_PERIODIC_UNIQUE_HISTORY_HELD'):
+        return {'code':text,'stage':'rotation'}
     for code in ('SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW','SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID',
                  'SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED','SQLITE_BACKUP_LAYOUT_AMBIGUOUS_REGISTRATION',
                  'SQLITE_BACKUP_LAYOUT_IDENTITY_UNPROVED','SQLITE_BACKUP_LAYOUT_SCAN_LIMIT'):
@@ -343,7 +370,12 @@ def space_preflight(database, backup_root, deadline=None, reserve=None):
     if not test and root.exists():
         actual = max(database.stat().st_size,1)
         more = max(0,min(max_copies-copies,(max_bytes-used-expected)//actual+1,(free-min_free-expected)//actual+1))
-        status = {'nextBackupAllowed':allowed,'warning':not allowed or used/max_bytes>=.5 or copies/max_copies>=.5 or more/96<1,'estimatedDaysAtContinuousChanges':round(more/96,2),'recordedAt':datetime.now(timezone.utc).isoformat()}
+        interval=periodic_lifecycle().interval()
+        days=more*interval/86400
+        status = {'nextBackupAllowed':allowed,'warning':not allowed or used/max_bytes>=.5 or copies/max_copies>=.5 or days<1,
+                  'estimatedDaysAtContinuousChanges':round(days,2),'continuousChangedSnapshotIntervalSeconds':interval,
+                  'forecastBasis':'continuously-changing-source; unchanged snapshots may be reused',
+                  'recordedAt':datetime.now(timezone.utc).isoformat()}
         temporary=root/('.space-budget-status-'+uuid.uuid4().hex+'.tmp')
         temporary.write_text(json.dumps(status),encoding='utf-8'); temporary.replace(root/'.space-budget-status.json')
     normal=used+expected<=max_bytes and copies+1<=max_copies and free-expected>=min_free
@@ -460,6 +492,32 @@ def reusable(database, backup_root, deadline=None, allow_periodic=False):
 
 
 def create_backup(database, backup_root, prefix="before-collection", timeout=55,
+                  diagnostics=None, copy_timeout=None, periodic_now=None):
+    if prefix != 'periodic-snapshot':
+        return _create_backup_legacy(database, backup_root, prefix, timeout, diagnostics, copy_timeout)
+    enabled=os.environ.get('SQLITE_PERIODIC_LIFECYCLE_ENABLED','0')
+    if enabled not in ('0','1'):raise ValueError('SQLITE_PERIODIC_POLICY_INVALID')
+    if enabled!='1':
+        database,backup_root=Path(database).resolve(strict=True),Path(backup_root).resolve()
+        if periodic_lifecycle().previously_enabled(database,backup_root):
+            raise ValueError('SQLITE_PERIODIC_LIFECYCLE_HELD')
+        return _create_backup_legacy(database, backup_root, prefix, timeout, diagnostics, copy_timeout)
+    if os.name!='nt':raise ValueError('SQLITE_PERIODIC_NATIVE_RELEASE_REQUIRED')
+    copy_timeout=float(os.environ.get('SQLITE_BACKUP_COPY_TIMEOUT_SECONDS','45')) if copy_timeout is None else copy_timeout
+    if not math.isfinite(copy_timeout) or not 0 < copy_timeout <= 45:
+        raise ValueError('SQLite backup copy budget invalid')
+    return periodic_lifecycle().create(sys.modules.get(__name__) or _self_module(),
+        Path(database).resolve(strict=True),Path(backup_root).resolve(),timeout,
+        diagnostics or BackupDiagnostics(),copy_timeout,periodic_now)
+
+
+def _self_module():
+    # importlib callers need not insert this script in sys.modules.
+    from types import SimpleNamespace
+    return SimpleNamespace(**globals())
+
+
+def _create_backup_legacy(database, backup_root, prefix="before-collection", timeout=55,
                   diagnostics=None, copy_timeout=None):
     database = Path(database).resolve(strict=True)
     lock_name = hashlib.sha256(str(database).encode()).hexdigest()[:24]
@@ -523,7 +581,7 @@ def create_backup(database, backup_root, prefix="before-collection", timeout=55,
 
 
 def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
-                   copy_timeout=45, max_bytes=None):
+                   copy_timeout=45, max_bytes=None, periodic_metadata=None):
     """Same online API and verification for periodic and write-before backups.
 
     The start is the conservative recovery bound, NOT verification completion:
@@ -613,6 +671,9 @@ def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
         "recoveryOrigin": {"format":"sqlite-recovery-origin-v1",
                            "kind":"periodic" if prefix == "periodic-snapshot" else "protected"},
     }
+    if periodic_metadata is not None:
+        if prefix != 'periodic-snapshot':raise ValueError('periodic metadata on protected copy')
+        report['periodicLifecycle']=periodic_metadata
     (directory / "verification.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -620,6 +681,10 @@ def _create_backup(database, backup_root, prefix, timeout, diagnostics=None,
     temporary = receipt.with_suffix('.tmp')
     temporary.write_text(json.dumps(report, ensure_ascii=False), encoding='utf-8')
     temporary.replace(receipt)
+    if periodic_metadata is not None:
+        # State publication may only claim durable verified copy receipts.
+        for file in (backup,directory/'verification.json',receipt):
+            with file.open('r+b') as stream:os.fsync(stream.fileno())
     return report
 
 
