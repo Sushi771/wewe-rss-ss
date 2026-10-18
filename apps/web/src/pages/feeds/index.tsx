@@ -455,7 +455,7 @@ const Feeds = () => {
       : collectionChannel === 'owner-web-search'
         ? '更新和定时任务直接请求腾讯搜索与原文，保存取得的正文。搜索可能漏文；认证、验证或频控限制会停止请求并显示原因。'
         : collectionChannel === 'wechat2rss'
-          ? '“更新”提交一次上游任务并读取当前缓存；任务受理不等于新文章已取得。定时读取缓存并保存本地。订阅前历史及非群发文章不保证覆盖。'
+          ? '“更新本号”只读取当前缓存；“更新全部”及已启用的定时轮次才排队提交上游更新。任务受理不等于正文图片已取得。订阅前历史及非群发文章不保证覆盖。'
           : collectionChannel === 'public-album'
             ? `“更新”在线刷新已绑定的 ${currentAlbumIds.length} 个官方合集，核验原文并本地缓存正文图片；覆盖这些合集，不代表公众号全部历史。该通道不提供阅读、点赞或收藏。`
             : collectionChannel === 'unavailable'
