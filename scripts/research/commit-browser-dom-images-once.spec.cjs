@@ -152,6 +152,8 @@ function makeSourceDb(file, { groups = true } = {}) {
 
 async function withRehearsal(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-image-import-test-'));
+  const oldRoot = process.env.WEWE_TEST_OUTPUT_ROOT;
+  process.env.WEWE_TEST_OUTPUT_ROOT = path.join(dir, 'managed');
   try {
     fs.writeFileSync(path.join(dir, 'official-browser-dom.html'), html);
     fs.writeFileSync(
@@ -182,17 +184,13 @@ async function withRehearsal(fn) {
     });
     const sourceDb = path.join(dir, 'source.db');
     makeSourceDb(sourceDb);
-    await runImageCopyRehearsal({
+    const rehearsal = await runImageCopyRehearsal({
       baseDir: dir,
       sourceDb,
       testExpectedHash: domSha,
+      keepTestDatabases: true,
     });
-    const trialDir = path.join(
-      dir,
-      fs
-        .readdirSync(dir)
-        .find((name) => name.startsWith('image-replay-trial-')),
-    );
+    const trialDir = rehearsal.audit;
     const options = {
       baseDir: dir,
       sourceDb,
@@ -202,6 +200,8 @@ async function withRehearsal(fn) {
     };
     await fn(options);
   } finally {
+    if (oldRoot === undefined) delete process.env.WEWE_TEST_OUTPUT_ROOT;
+    else process.env.WEWE_TEST_OUTPUT_ROOT = oldRoot;
     assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
     fs.rmSync(dir, { recursive: true, force: true });
   }
