@@ -86,6 +86,7 @@ describe('feed task recovery callbacks (actual UI, offline)', () => {
         require(id: string) {
           if (id === 'react')
             return {
+              useEffect: () => {},
               useRef: (value: unknown) => ({ current: value }),
               useState: (value: unknown) => [value, () => {}],
             };
