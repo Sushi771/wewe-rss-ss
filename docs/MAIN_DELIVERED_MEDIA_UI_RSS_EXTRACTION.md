@@ -33,6 +33,23 @@ All development fixtures use owned temporary databases/directories. Production e
 
 ## Operational boundaries
 
+The cache-read contention followup is fully extracted from PR64
+`a5e8f2544f7836df503794d684f5b607cccc071e`, including its benchmark compatibility
+commit `f5d463f9ff3d3b47beec3e4c86f61d0eccd82756`, tests and fixtures. Only the
+`syncCachedWechat2RssPage` member is adapted in main's service; the new helper
+matches the source. The existing occupancy fix remains unchanged. The main CI
+also runs the frozen-legacy-SQL scheduler comparison with its baseline history
+available, rather than attempting to scrape SQL removed from the runtime.
+
+Cache flags now use one statement over the current page's saved IDs. Healthy
+inline bodies return flags only; ambiguous image attributes use a bounded linear
+probe after the connection is released. The total 8,000,000-byte probe limit
+keeps oversized/deferred cases pending. See
+[the contention analysis](CACHE_PREFLIGHT_READ_CONTENTION.md) for synthetic
+evidence and its limits. No connection, timeout, transaction, CAS or list-cache
+policy is relaxed; production concurrency acceptance remains with the release
+owner at the original RSS threshold.
+
 The preparation-occupancy followup from
 `e6600122d64aaa541dc92a4b97491601537135cd` changes only
 `coverPreparation` in the shared batch manager. Retry coverage now uses the

@@ -45,7 +45,8 @@
     "apps/server/src/article-list-cache.ts": "9fa5704f2ef933179416b93a3bbe81ff951131e372c82f3c69e567f012b7ef9d",
     "apps/server/src/article-list-read-timing.ts": "e62c89feff9f9850a658893260eefa2cc235bf1aaa57bdc27fd260b4bb357134",
     "apps/server/scripts/backup-sqlite.py": "ad9805577c1cdd42182fcfcd23936f11d0a1852399c1ad8a467aad2e82ba376d",
-    "apps/server/scripts/sqlite-snapshot-guard.py": "bfc3d8bb8ccbe3cbbd3149019c3c614eb4ab9f271c8d679ce0459f49a520ddc1"
+    "apps/server/scripts/sqlite-snapshot-guard.py": "bfc3d8bb8ccbe3cbbd3149019c3c614eb4ab9f271c8d679ce0459f49a520ddc1",
+    "apps/server/src/feeds/cache-body-media-flags.ts": "aaa0ec82b53be022ad2e15a39d8f365201f2e58f7b519bba6b1c492007539807"
   },
   "excludedFiles": [
     "apps/server/src/collection/xiaohongshu.service.ts",
@@ -102,7 +103,7 @@
     "getAvailableAccount": "aa76db121d179f96d6daa7e35b12cc76296a761751fa6103af6594addc589855",
     "getMpArticles": "31908c77717b35cca6515e57133816ddbbc621247966d7359f130c7c7145fa6b",
     "refreshMpArticlesAndUpdateFeed": "c6c59bacdb300fd465b713d5c4efaf44c1783695abae46286cb3131a2ca5f2d1",
-    "syncCachedWechat2RssPage": "4c8413cedfcc2ca6a82694f399859284617b8b1489b9b078865a471160356416",
+    "syncCachedWechat2RssPage": "a72149d7f8035dfe7eeb47c60879003c9ae5c3acd193e7417f85edd7a8537d09",
     "collectPublicAlbums": "729f655614efd59d34d05e8546153ca9924c68fb9b4ab823a36c9c61abb52800",
     "incrementalCollection": "804ca1799f5b72567d5f20918479e7b9faf94fa097d3c6cacfda2f545822bc47",
     "activeCollections": "68d733fcd4657b2b679d7e7d176c697495cd88e5f6f180929485496b962b828c",
@@ -161,6 +162,16 @@
       "sourceCommit": "e6600122d64aaa541dc92a4b97491601537135cd",
       "file": "apps/server/src/collection/wechat2rss-subscription-batches.ts",
       "scope": "coverPreparation only; reuse current intent and admitted source digest with occupiesUnknown; historical unknown remains sealed"
+    },
+    "cacheReadContention": {
+      "sourceCommit": "a5e8f2544f7836df503794d684f5b607cccc071e",
+      "sourceBase": "e6600122d64aaa541dc92a4b97491601537135cd",
+      "runtimeFiles": [
+        "apps/server/src/feeds/cache-body-media-flags.ts",
+        "apps/server/src/trpc/trpc.service.ts"
+      ],
+      "scope": "Only the syncCachedWechat2RssPage member changes; page-scoped SQL and bounded linear media flags, no shared policy change",
+      "testCompatibilityCommit": "f5d463f9ff3d3b47beec3e4c86f61d0eccd82756"
     }
   }
 }

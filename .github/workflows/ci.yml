@@ -114,3 +114,30 @@ jobs:
       - name: Verify native Windows lifecycle and exact retirement protection on temporary databases
         working-directory: apps/server/scripts
         run: python -m unittest test_periodic_lifecycle test_backup_sqlite test_backup_space test_space_guard_compat test_sqlite_snapshot_guard test_sqlite_retention_plan
+
+  cache-reconcile-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Test cache flags and reconciliation on owned SQLite
+        run: pnpm --filter server exec jest --runInBand src/feeds/cache-body-media-flags.spec.ts src/feeds/cache-sync-engine.spec.ts src/feeds/cache-sync-storage.spec.ts
+      - name: Verify server types without changing admission policy
+        run: pnpm --filter server exec tsc --noEmit --incremental false
+      - name: Compare pinned and current schedulers with frozen legacy SQL
+        run: node apps/server/scripts/benchmark-cache-reconcile.cjs "$RUNNER_TEMP" > cache-reconcile-benchmark.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cache-reconcile-benchmark
+          path: cache-reconcile-benchmark.json
