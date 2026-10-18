@@ -1,7 +1,6 @@
 'use strict';
 
-// All fixtures are synthetic. The optional real cache is exercised separately
-// by the copy-only CLI after collection; tests never make HTTP requests.
+// All databases and cached images here are synthetic; no HTTP requests.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -10,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const https = require('node:https');
 const { DatabaseSync } = require('node:sqlite');
+const { createRequire } = require('node:module');
 const {
   TARGET_ARTICLE_ID,
   TARGET_MP_ID,
@@ -59,6 +59,8 @@ test.after(() => {
 
 async function withCache(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-image-copy-test-'));
+  const oldRoot = process.env.WEWE_TEST_OUTPUT_ROOT;
+  process.env.WEWE_TEST_OUTPUT_ROOT = path.join(dir, 'managed');
   try {
     fs.writeFileSync(path.join(dir, 'official-browser-dom.html'), html);
     fs.writeFileSync(
@@ -89,6 +91,8 @@ async function withCache(fn) {
     });
     return await fn(dir);
   } finally {
+    if (oldRoot === undefined) delete process.env.WEWE_TEST_OUTPUT_ROOT;
+    else process.env.WEWE_TEST_OUTPUT_ROOT = oldRoot;
     assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -252,7 +256,7 @@ test('rejects image paths, byte hash changes, and invalid image containers', asy
   });
 });
 
-test('executes two protected writes only on a synthetic SQLite copy; old rows and source stay unchanged', async () => {
+test('explicit test-only retention supports the synthetic import fixture; old rows and source stay unchanged', async () => {
   await withCache(async (dir) => {
     const sourceDb = path.join(dir, 'source.db');
     makeSourceDb(sourceDb);
@@ -261,17 +265,14 @@ test('executes two protected writes only on a synthetic SQLite copy; old rows an
       baseDir: dir,
       sourceDb,
       testExpectedHash: domSha,
+      keepTestDatabases: true,
     });
     assert.equal(result.success, true);
     assert.equal(result.firstPass.created, 1);
     assert.equal(result.secondPass.updated, 0);
     assert.equal(result.networkRequests, 0);
     assert.equal(sha256(fs.readFileSync(sourceDb)), beforeHash);
-    const trials = fs
-      .readdirSync(dir)
-      .filter((name) => name.startsWith('image-replay-trial-'));
-    assert.equal(trials.length, 1);
-    const copyDb = path.join(dir, trials[0], 'trial.db');
+    const copyDb = path.join(result.audit, 'trial.db');
     const db = new DatabaseSync(copyDb, { readOnly: true });
     try {
       const row = db
@@ -294,6 +295,107 @@ test('executes two protected writes only on a synthetic SQLite copy; old rows an
       );
     } finally {
       db.close();
+    }
+  });
+});
+
+test('default rehearsal uses a tiny synthetic source and reclaims databases after confirmed disconnect', async () => {
+  await withCache(async (dir) => {
+    const result = await runImageCopyRehearsal({
+      baseDir: dir,
+      testExpectedHash: domSha,
+    });
+    assert.equal(result.syntheticDatabase, true);
+    assert.equal(result.firstPass.created, 1);
+    assert.equal(result.oldRowsUnchanged, true);
+    assert.equal(result.networkRequests, 0);
+    const summary = JSON.parse(
+      fs.readFileSync(path.join(result.audit, 'space-summary.json')),
+    );
+    assert.equal(summary.retained, false);
+    assert.equal(summary.usage.databases, 0);
+    assert(summary.removedSyntheticFiles >= 2);
+    assert(
+      !fs.existsSync(path.join(path.dirname(result.audit), '.test-run.lock')),
+    );
+    assert(fs.existsSync(path.join(result.audit, 'result.json')));
+  });
+});
+
+test('failure after copying a fixture reclaims only owned databases and preserves input and unrelated files', async () => {
+  await withCache(async (dir) => {
+    const sourceDb = path.join(dir, 'source.db');
+    makeSourceDb(sourceDb);
+    const db = new DatabaseSync(sourceDb);
+    try {
+      db.prepare('UPDATE articles SET id=? WHERE id=?').run(
+        TARGET_ARTICLE_ID,
+        'WX_synthetic_old',
+      );
+    } finally {
+      db.close();
+    }
+    const before = fs.readFileSync(sourceDb);
+    const unrelated = path.join(dir, 'unrelated.db');
+    fs.writeFileSync(unrelated, 'existing unapproved file');
+    await assert.rejects(
+      runImageCopyRehearsal({
+        baseDir: dir,
+        sourceDb,
+        testExpectedHash: domSha,
+      }),
+      /TARGET_ALREADY_IN_SOURCE_DATABASE/,
+    );
+    const managed = path.join(dir, 'managed');
+    const audit = path.join(
+      managed,
+      fs.readdirSync(managed).find((name) => name.startsWith('run-')),
+    );
+    const summary = JSON.parse(
+      fs.readFileSync(path.join(audit, 'space-summary.json')),
+    );
+    assert.equal(summary.usage.databases, 0);
+    assert.equal(summary.failure, 'TARGET_ALREADY_IN_SOURCE_DATABASE');
+    assert.equal(summary.retained, false);
+    assert(!fs.existsSync(path.join(managed, '.test-run.lock')));
+    assert.deepEqual(fs.readFileSync(sourceDb), before);
+    assert.equal(
+      fs.readFileSync(unrelated, 'utf8'),
+      'existing unapproved file',
+    );
+  });
+});
+
+test('image replay preserves its database and lease when disconnect is unconfirmed', async () => {
+  await withCache(async (dir) => {
+    const local = createRequire(path.join(ROOT, 'apps/server/package.json'));
+    const client = local('@prisma/client'),
+      Original = client.PrismaClient;
+    client.PrismaClient = class extends Original {
+      async $disconnect() {
+        await super.$disconnect();
+        throw Error('INJECTED_DISCONNECT_UNCONFIRMED');
+      }
+    };
+    const originalFetch = global.fetch,
+      originalDatabase = process.env.DATABASE_URL;
+    try {
+      await assert.rejects(
+        runImageCopyRehearsal({ baseDir: dir, testExpectedHash: domSha }),
+        /INJECTED_DISCONNECT_UNCONFIRMED/,
+      );
+      const managed = path.join(dir, 'managed');
+      const audit = path.join(
+        managed,
+        fs.readdirSync(managed).find((name) => name.startsWith('run-')),
+      );
+      assert(fs.existsSync(path.join(audit, 'trial.db')));
+      assert(fs.existsSync(path.join(managed, '.test-run.lock')));
+      assert(!fs.existsSync(path.join(audit, 'space-summary.json')));
+      assert.equal(global.fetch, originalFetch);
+      assert.equal(process.env.DATABASE_URL, originalDatabase);
+    } finally {
+      client.PrismaClient = Original;
     }
   });
 });
