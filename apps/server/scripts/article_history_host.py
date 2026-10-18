@@ -10,6 +10,7 @@ from datetime import datetime
 import copy
 import errno
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -232,6 +233,35 @@ class ActiveReferences:
             return {'generation': self.generation, 'pins': dict(self.pins), 'runtimePaths': self.runtime_paths}
 
 
+_periodic_lifecycle = None
+
+
+def observed_periodic_lifecycle(file, raw, budget):
+    """Observe the existing bounded control pair as protections, never authority."""
+    global _periodic_lifecycle
+    if _periodic_lifecycle is None:
+        spec=importlib.util.spec_from_file_location('history_lifecycle_backup',Path(__file__).with_name('backup-sqlite.py'))
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        _periodic_lifecycle=module.periodic_lifecycle()
+    try:
+        initfile=history.regular(file.with_suffix('.init'))
+        initraw=history.read_file(initfile,budget,128*1024)
+        source=history.regular(json.loads(initraw)['source'])
+        if _periodic_lifecycle.paths(source,file.parent)[1]!=file:
+            raise ValueError('wrong source-bound control name')
+        with _periodic_lifecycle.Store(source,file.parent) as store:
+            if store.raw!=raw or store.state['initSha256']!=history.digest(initraw):
+                raise ValueError('changed control pair')
+            if store.state['status']!='ready':
+                raise HostError('REFERENCE_MAINTENANCE_ACTIVE')
+            targets=[p['path'] for p in store.state['normal']]
+        return targets,{'identity':history.identity(initfile),'sha256':history.digest(initraw)}
+    except HostError:
+        raise
+    except (OSError,ValueError,KeyError,TypeError,AttributeError):
+        raise HostError('REFERENCE_LIFECYCLE_INVALID') from None
+
+
 def reference_snapshot(files, registry, budget, roots=()):
     if not files or len(files) > 32:
         raise HostError('EXPLICIT_REFERENCE_CATALOG_REQUIRED')
@@ -249,6 +279,11 @@ def reference_snapshot(files, registry, budget, roots=()):
             raise HostError('REFERENCE_DIRECTORY_LIMIT')
         if any(e.name in {'.space-budget.lock', '.backup.lock'} for e in entries):
             raise HostError('REFERENCE_MAINTENANCE_ACTIVE')
+        for entry in entries:
+            if entry.name.startswith('.periodic-lifecycle-'):
+                if (not re.fullmatch(r'\.periodic-lifecycle-[a-f0-9]{24}\.(init|json)',entry.name)
+                        or not entry.with_suffix('.json' if entry.suffix=='.init' else '.init').is_file()):
+                    raise HostError('REFERENCE_LIFECYCLE_INVALID')
         names = sorted(e.name for e in entries if e.suffix == '.json' and e.is_file())
         inventory.append({'root': str(root.resolve()), 'jsonFiles': names})
         found.update(root / name for name in names)
@@ -300,17 +335,27 @@ def reference_snapshot(files, registry, budget, roots=()):
             # Production capacity telemetry is not a reference or authority.
             # Still bind its identity/hash below, so changes invalidate review.
             fields = {'nextBackupAllowed', 'warning', 'estimatedDaysAtContinuousChanges', 'recordedAt'}
+            extended=fields|{'continuousChangedSnapshotIntervalSeconds','forecastBasis'}
             days = value.get('estimatedDaysAtContinuousChanges')
             stamp = value.get('recordedAt')
-            if (set(value) != fields or type(value.get('nextBackupAllowed')) is not bool
+            if (set(value) not in (fields,extended) or type(value.get('nextBackupAllowed')) is not bool
                     or type(value.get('warning')) is not bool or type(days) not in {int, float}
                     or not 0 <= days <= 1e12 or not isinstance(stamp, str) or len(stamp) > 80):
                 raise HostError('REFERENCE_STATUS_INVALID')
+            if set(value)==extended:
+                cadence=value['continuousChangedSnapshotIntervalSeconds']
+                if (type(cadence) is not int or not 60<=cadence<=86400
+                        or value['forecastBasis']!='continuously-changing-source; unchanged snapshots may be reused'):
+                    raise HostError('REFERENCE_STATUS_INVALID')
             try:
                 if datetime.fromisoformat(stamp.replace('Z', '+00:00')).tzinfo is None:
                     raise ValueError('timezone required')
             except ValueError:
                 raise HostError('REFERENCE_STATUS_INVALID') from None
+        elif re.fullmatch(r'\.periodic-lifecycle-[a-f0-9]{24}\.json',file.name):
+            protected,init_record=observed_periodic_lifecycle(file,raw,budget)
+            for target in protected:paths(target,file.parent)
+            records.append(init_record)
         elif value.get('format') in {'article-history-references-v1', 'sqlite-retention-protected-v1'}:
             if set(value) != {'format', 'paths'} or not isinstance(value.get('paths'), list) or len(value['paths']) > 256:
                 raise HostError('REFERENCE_CATALOG_INVALID')

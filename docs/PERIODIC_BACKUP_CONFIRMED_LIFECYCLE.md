@@ -50,6 +50,8 @@ Approval never waives preservation: every durable old typed row, note, body, met
 
 Owner IPC includes a finite, path-free lifecycle status and failure code. A not-due/held owner does not manufacture a lease from disk metadata. Product diagnostics explain pending confirmation and incomplete operations, and show the actual configured 15-minute/24-hour cadence in capacity estimates. Node/Python forecasts use `headroom * interval / 86400`, distinguish continuously changing data from unchanged reuse, and retain the existing hard ceilings. These estimates describe global space, not authority to bypass the separate pending gate or a guarantee of future successful copies.
 
+The history-reference consumer accepts both the original four-field capacity telemetry and the exact new six-field form, validating cadence and the fixed forecast-basis text. Unknown fields remain rejected. A ready lifecycle's exact source-bound control pair is observed by identity/hash and its normal recovery files only add protections; orphan/foreign controls and incomplete operations hold review. This does not turn telemetry or lifecycle metadata into deletion approval.
+
 Ordinary additive collection remains on the existing incremental path. Startup audits, protected replacement/migration operations, and other callers requiring protected recovery retain their existing gates; a shared pending marker can defer a new protected copy. This patch neither disables all subscriptions nor promises every write is permitted while storage/recovery evidence is held. Resolve the exact pending action or evidence gap through the production owner; do not enable unattended deletion to clear a warning.
 
 ## Owned synthetic verification
