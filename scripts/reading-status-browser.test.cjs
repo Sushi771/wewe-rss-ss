@@ -50,7 +50,7 @@ test(
     };
     const source = `import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {MemoryRouter,Routes,Route,useNavigate} from 'react-router-dom';
 import Startup from ${modulePath(path.join(web, 'src/components/StartupAuditNotice.tsx'))};import Storage from ${modulePath(path.join(web, 'src/components/StorageBackupStatus.tsx'))};import Progress from ${modulePath(path.join(web, 'src/pages/feeds/manual-refresh-progress.tsx'))};
-const initial=${JSON.stringify(batch)};function App(){const [batch,setBatch]=useState(initial),[key,setKey]=useState(0);const navigate=useNavigate();window.fixture={setBatch,initial,remount:()=>setKey(k=>k+1),navigate,mutations:()=>window.__mutations};return <><Startup key={key}/><Routes><Route path='/feeds' element={<Progress batch={batch} feeds={[]} onChange={async()=>{}}/>}/><Route path='/tools/article-download' element={<Storage/>}/></Routes></>};createRoot(document.getElementById('root')).render(<MemoryRouter initialEntries={['/feeds']}><App/></MemoryRouter>);`;
+const initial=${JSON.stringify(batch)};function App(){const [batch,setBatch]=useState(initial),[key,setKey]=useState(0);const navigate=useNavigate();window.fixture={setBatch,initial,remount:()=>setKey(k=>k+1),navigate,mutations:()=>window.__mutations};return <><Startup key={key}/><Routes><Route path='/feeds' element={<Progress batch={batch} feeds={[]} onChange={async()=>{}}/>}/><Route path='/tools/article-download' element={<div style={{height:'80vh',overflowY:'auto'}}><div style={{height:1000}}>Download form</div><Storage/></div>}/></Routes></>};createRoot(document.getElementById('root')).render(<MemoryRouter initialEntries={['/feeds']}><App/></MemoryRouter>);`;
     await withFixture(
       source,
       async ({ evaluate, pause, send }) => {
@@ -192,6 +192,13 @@ const initial=${JSON.stringify(batch)};function App(){const [batch,setBatch]=use
               "Boolean(document.querySelector('#storage-backup[open]'))&&document.body.innerText.includes('请核对恢复点后处理')",
             ),
           'details route opens and reads',
+        );
+        assert.equal(
+          await evaluate(
+            "(()=>{const r=document.querySelector('#storage-backup').getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()",
+          ),
+          true,
+          'details link scrolls the nested tools container into view',
         );
         apiError = true;
         await evaluate(

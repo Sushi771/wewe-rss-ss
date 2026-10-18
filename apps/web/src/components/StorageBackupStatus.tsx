@@ -1,18 +1,28 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { readStartupStatus, StartupStatus } from '@web/utils/startup-status';
 
 /** Read on demand in the existing tools page, not a permanent reading banner. */
 export default function StorageBackupStatus() {
-  const { hash } = useLocation();
+  const { hash, key } = useLocation();
+  const details = useRef<HTMLDetailsElement>(null);
+  const lastNavigation = useRef(key);
   const [open, setOpen] = useState(hash === '#storage-backup');
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<StartupStatus>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
-    if (hash === '#storage-backup') setOpen(true);
-  }, [hash]);
+    const changed = lastNavigation.current !== key;
+    lastNavigation.current = key;
+    if (hash !== '#storage-backup') return;
+    setOpen(true);
+    if (changed) setAttempt((value) => value + 1);
+    const frame = requestAnimationFrame(() =>
+      details.current?.scrollIntoView({ block: 'start' }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [hash, key]);
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
@@ -38,6 +48,7 @@ export default function StorageBackupStatus() {
   }, [open, attempt]);
   return (
     <details
+      ref={details}
       id="storage-backup"
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}

@@ -118,7 +118,9 @@ export default function ManualRefreshProgress({
         ? '需核对'
         : batch.coverage.pending
           ? '等待完成'
-          : '含合法跳过'
+          : batch.coverage.legitimateSkipped || batch.coverage.excluded
+            ? '含合法跳过'
+            : '需核对'
     : batch.state === 'paused'
       ? '已暂停'
       : '更新中';
