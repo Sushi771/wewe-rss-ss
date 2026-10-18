@@ -382,6 +382,162 @@ describe('explicit unknown future-round release (owned files, no upstream)', () 
       JSON.parse(await fs.readFile(file(), 'utf8')).items[13],
     ).toMatchObject({ accepted: false, submissionUnknown: true });
   });
+  it.each(['preparation-failure', 'proven-not-submitted'])(
+    'continues the bound future intent after %s and restart without replaying the released unknown',
+    async (kind) => {
+      const m: any = make();
+      jest.spyOn(m, 'schedule').mockImplementation(() => {});
+      await m.releaseUnknownRefreshOccupancy(await request(m));
+      const sealed = await fs.readFile(file(), 'utf8');
+      clock += 86400000;
+      const next = await m.enqueueRefresh(
+        [ids[13]],
+        nextIntent,
+        'scheduled-refresh',
+      );
+      expect(
+        JSON.parse(
+          await fs.readFile(
+            path.join(path.dirname(file()), next.batchId + '.json'),
+            'utf8',
+          ),
+        ).items[0],
+      ).toMatchObject({
+        state: 'queued',
+        releaseSourceSha256: 'c'.repeat(64),
+      });
+      if (kind === 'preparation-failure')
+        run.mockResolvedValueOnce({
+          state: 'failed',
+          accepted: false,
+          submissionUnknown: false,
+          retryable: true,
+          stopBatch: false,
+          message: 'Synthetic preparation failed before submission',
+        });
+      else run.mockRejectedValueOnce(Error('Synthetic unconfirmed callback'));
+      await m.runDue();
+      expect(run).toHaveBeenCalledTimes(1);
+      const nextFile = path.join(path.dirname(file()), next.batchId + '.json');
+      const held = JSON.parse(await fs.readFile(nextFile, 'utf8'));
+      // State left by the previous coverPreparation implementation at restart.
+      held.items[0].waitingForReceipt = true;
+      await fs.writeFile(nextFile, JSON.stringify(held));
+      m.close();
+      clock += 60001;
+      const restarted: any = make();
+      const reconcile = jest.fn().mockResolvedValue('not-submitted');
+      restarted.attachReconciliation(reconcile);
+      await restarted.runDue();
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(
+        run.mock.calls.every((call) => call[3]?.claimKey === next.batchId),
+      ).toBe(true);
+      expect(
+        run.mock.calls.every(
+          (call) => call[3]?.sourceSha256 === 'c'.repeat(64),
+        ),
+      ).toBe(true);
+      expect(
+        (await restarted.list()).find((b: any) => b.batchId === next.batchId),
+      ).toMatchObject({ state: 'completed', items: [{ state: 'succeeded' }] });
+      expect(
+        JSON.parse(await fs.readFile(nextFile, 'utf8')).items[0]
+          .waitingForReceipt,
+      ).toBe(false);
+      expect(await fs.readFile(file(), 'utf8')).toBe(sealed);
+      expect(
+        reconcile.mock.calls.every((call) => call[2] === next.batchId),
+      ).toBe(true);
+      expect(global.fetch).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'missing-source',
+    'changed-source',
+    'same-intent',
+    'before-release',
+    'before-boundary',
+    'release-instance',
+    'release-intent',
+    'release-item',
+    'changed-unknown',
+    'new-unknown',
+    'accepted-cache',
+  ])(
+    'keeps preparation waiting for %s instead of ignoring historical uncertainty globally',
+    async (kind) => {
+      const m: any = make();
+      jest.spyOn(m, 'schedule').mockImplementation(() => {});
+      await m.releaseUnknownRefreshOccupancy(await request(m));
+      clock += 86400000;
+      const next = await m.enqueueRefresh(
+        [ids[13]],
+        nextIntent,
+        'scheduled-refresh',
+      );
+      const nextFile = path.join(path.dirname(file()), next.batchId + '.json');
+      const current = JSON.parse(await fs.readFile(nextFile, 'utf8'));
+      const prior = JSON.parse(await fs.readFile(file(), 'utf8'));
+      const records = [prior, current];
+      Object.assign(current.items[0], {
+        retryable: true,
+        submissionUnknown: false,
+        stopBatch: false,
+        waitingForReceipt: true,
+      });
+      if (kind === 'missing-source')
+        delete current.items[0].releaseSourceSha256;
+      if (kind === 'changed-source')
+        current.items[0].releaseSourceSha256 = 'f'.repeat(64);
+      if (kind === 'same-intent') current.intentKey = originalIntent;
+      if (kind === 'before-release')
+        current.createdAt = prior.items[13].occupancyRelease.resolvedAt;
+      if (kind === 'before-boundary')
+        current.createdAt =
+          prior.items[13].occupancyRelease.futureRoundNotBefore - 1;
+      if (kind === 'release-instance')
+        prior.items[13].occupancyRelease.instance = 'f'.repeat(64);
+      if (kind === 'release-intent')
+        prior.items[13].occupancyRelease.intentKey = nextIntent;
+      if (kind === 'release-item') prior.items[13].occupancyRelease.index = 12;
+      if (kind === 'changed-unknown')
+        prior.items[13].message = 'Changed unknown evidence';
+      if (kind === 'new-unknown' || kind === 'accepted-cache') {
+        const additional = JSON.parse(JSON.stringify(prior));
+        additional.batchId = '22222222-2222-4222-8222-222222222222';
+        additional.intentKey = 'f'.repeat(64);
+        additional.createdAt = clock - 1000;
+        additional.updatedAt = clock;
+        additional.items = [{ ...additional.items[13], index: 0 }];
+        delete additional.items[0].occupancyRelease;
+        if (kind === 'accepted-cache')
+          Object.assign(additional.items[0], {
+            state: 'waiting',
+            accepted: true,
+            submissionUnknown: false,
+          });
+        records.push(additional);
+        await fs.writeFile(
+          path.join(path.dirname(file()), additional.batchId + '.json'),
+          JSON.stringify(additional),
+        );
+      }
+      await fs.writeFile(file(), JSON.stringify(prior));
+      await fs.writeFile(nextFile, JSON.stringify(current));
+      const sealed = await fs.readFile(file(), 'utf8');
+      // Exercise the contextual predicate directly, including bindings that the
+      // outer durable-record parser also rejects before any submission.
+      await m.coverPreparation(records);
+      expect(
+        JSON.parse(await fs.readFile(nextFile, 'utf8')).items[0]
+          .waitingForReceipt,
+      ).toBe(true);
+      expect(await fs.readFile(file(), 'utf8')).toBe(sealed);
+      expect(run).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    },
+  );
   it('serializes a real concurrent stale receipt writer against release publication', async () => {
     const m: any = make(),
       other: any = make(),

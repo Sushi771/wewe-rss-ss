@@ -68,6 +68,15 @@ serial and prepared admission. Source replacement after enqueue is refused befor
 a request; SQL reservation and feed creation identity are checked before launch.
 All ordinary account, stop, time-window, cooldown and deduplication gates remain.
 
+Preparation-retry coverage also applies this rule for each persisted current
+intent. It carries that item's source digest, validated at admission, into
+`occupiesUnknown`; it does not turn a released historical unknown into a global
+source hold again after preparation failure or a not-submitted reconciliation.
+Instance, distinct intent, release/boundary times and source binding must all
+match. A missing/mismatched binding, another unknown receipt or active accepted
+cache work still holds the retry. Clearing an old `waitingForReceipt` flag does
+not alter the historical item or its unknown claim.
+
 Serialized persistence refuses stale writes that would erase or alter the sealed
 unknown item or resurrect its terminal parent. Background reconciliation skips
 the sealed historical item, so it does not mutate its SQL unknown into accepted.
