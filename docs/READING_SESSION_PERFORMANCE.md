@@ -19,21 +19,21 @@
 
 ## 同环境浏览器测量
 
-Windows、Node24.11.1、本机隔离 Chrome，原 ArticleList/TrpcProvider、受认证的原 tRPC HTTP 路由，新建200订阅/1200文章合成 SQLite，正文约32 KiB。服务端页面复用明确旁路；使用开发夹具 bundle，非生产压缩资产。旧版通过 `READING_BASELINE_SHA=33ec7c3…` 读取固定源码，新版使用工作区源码。每个版本一个独立浏览器，旧组随后新组，每项5次，并非交替独占主机实验；同时有其它隔离测试和正常主机I/O。没有请求外部平台或生产接口。
+Windows、Node24.11.1、本机隔离 Chrome，原 ArticleList/TrpcProvider、受认证的原 tRPC HTTP 路由，新建200订阅/1200文章合成 SQLite，正文约32 KiB。服务端页面复用明确旁路；使用开发夹具 bundle，非生产压缩资产。旧版通过 `READING_BASELINE_SHA=33ec7c3…` 读取固定源码，新版使用工作区源码。每个版本一个独立浏览器，旧组随后新组，每项5次，并非交替独占主机实验；同时有其它隔离测试和正常主机I/O。没有请求外部平台或生产接口。 Final-source measurements explicitly select a cached, nonempty 32 KiB body. The earlier first-row selection could measure whitespace-only content; that earlier run is retained privately and superseded by this table.
 
 | 阶段，毫秒，n=5/版本       | 旧 P50 / P95    | 新 P50 / P95    |
 | -------------------------- | --------------- | --------------- |
-| 夹具重载到首20行           | 218.45 / 259.51 | 213.61 / 228.27 |
-| 下一页到40行               | 95.17 / 152.07  | 96.46 / 108.15  |
-| 返回两页列表，缓存可见     | 115.62 / 157.72 | 65.35 / 79.65   |
-| 返回后，后台复核完成       | 143.34 / 188.83 | 141.82 / 190.81 |
-| 已缓存正文首次 iframe load | 143.57 / 286.98 | 136.86 / 227.43 |
-| 同篇再次 iframe load       | 79.15 / 100.77  | 81.63 / 145.69  |
-| 两页手动刷新完成           | 43.88 / 51.91   | 43.86 / 52.64   |
+| 夹具重载到首20行           | 178.35 / 225.26 | 216.45 / 257.68 |
+| 下一页到40行               | 71.82 / 95.26   | 91.78 / 104.23  |
+| 返回两页列表，缓存可见     | 79.90 / 107.98  | 53.82 / 71.34   |
+| 返回后，后台复核完成       | 115.84 / 143.61 | 132.22 / 168.51 |
+| 已缓存正文首次 iframe load | 125.36 / 190.20 | 134.89 / 330.61 |
+| 同篇再次 iframe load       | 77.59 / 217.47  | 78.67 / 149.72  |
+| 两页手动刷新完成           | 35.43 / 45.42   | 40.56 / 50.12   |
 
-收益集中在返回时不再等待两页读取。每次返回的后台列表请求仍为2个，复核完成时间基本不变；不能声称数据库读取已省去或缓存表示最新状态。首屏、翻页和正文没有可归因的明显加速。页面重载包含夹具JS/CSS与组件执行，P95仍超过150ms；正文首次打开P95也未达到150ms。热翻页在本夹具内低于500ms，不代表任意机器或生产负载都满足。
+The measured benefit is immediate cached visibility on return. Background list requests remain two per return, and visible cached data does not establish completed revalidation or persistence. First load, next page, first reader and background revalidation did not improve in this final run; several percentiles were slower. Five sequential samples on a shared host cannot attribute those differences, so this is not evidence of whole-app acceleration. First load and first reader P95 still exceed 150 ms. Hot pagination below 500 ms here is specific to this synthetic fixture, not a promise for every machine or load.
 
-返回并复核后由同一CDP命令触发GC，JS堆各5样本约为旧7.04–7.07 MiB、新7.79–7.82 MiB，增加约0.78 MiB。这是回收后保留堆，不是整个浏览器进程峰值。原位置/认证的 WebStorage 序列化估值两组均840字节；新增查询缓存没有持久化写入，浏览器 profile 的实际磁盘占用未单独计量。导出的进程采样峰值、暂存字节和内容hash另列在导出文档中。
+返回并复核后由同一CDP命令触发GC，JS堆各5样本约为旧7.03–7.05 MiB、新7.80–7.82 MiB，增加约0.78 MiB。这是回收后保留堆，不是整个浏览器进程峰值。原位置/认证的 WebStorage 序列化估值两组均840字节；新增查询缓存没有持久化写入，浏览器 profile 的实际磁盘占用未单独计量。导出的进程采样峰值、暂存字节和内容hash另列在导出文档中。
 
 HTTP记录的 `databaseMs` 来自共享SQL事件区间，并发时可能混入其它请求，不能作为严格单请求归因。表中页面墙钟和独立HTTP记录不依赖该字段。
 
@@ -61,3 +61,5 @@ node --test scripts/reading-query-cache.test.cjs scripts/export-article-batches.
 新增本地批量入口 `article.saveToObsidianBatch` 每次最多64个固定ID，只接受ID列表，目录仍来自既有配置。它先读取轻量成员，再按8篇读取正文，逐篇沿用原子发布；不在文件校验期间占用数据库事务。回执只包含用户可见路径、完成/媒体/日期状态，不返回内部回执内容。失败保留已完成文件并停止后续项；断开请求在当前原子项结束后停止，释放整批锁。前端固定选中项，串行提交64项分组，无自动重试；卸载页面取消后续提交。并发采集提交数5及自动缺图修复没有修改。
 
 对已部署 `8a3141c43b1b09e92ebd75780f26c58939557906` 做了临时Git索引的局部补丁检查：store、cached export 和 provider 的对应修改可以直接应用；router、列表和 feeds/index 因既有版本分叉不能整段直接应用。此检查没有修改运行目录，也不代表兼容验收。后续集成必须逐段接入新路由/正文分批、缓存选项及批量调用，保留部署版日期/分组浏览、ArticleReader、缓存版本失效、取消和日期待确认提示，禁止用本候选旧main页面覆盖生产页面。正式发布前仍需在这一集成版本上重做类型、浏览器与实际用户路径验收。
+
+Final local server regression: 84 suites / 1170 tests passed. The default 1800-row browser functional regression passed. Exact commit 7164322 failed its first CI web type check (and image build) because the added publicationDate client type omitted the server's valid null state. Follow-up 4d9bbf0 accepts that existing state without changing runtime behavior. The first failure is retained; release gating must use the final exact-head CI.
