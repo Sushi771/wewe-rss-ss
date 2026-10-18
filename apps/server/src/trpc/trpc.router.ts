@@ -176,21 +176,42 @@ export class TrpcRouter {
       include: { group: true },
     });
     if (!feed) return null;
-    const articles = await this.prismaService.article.findMany({
+    const identities = await this.prismaService.article.findMany({
       where: articleListWhere({ ...filter, mpId: feedId }),
       take: 5001,
       orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-      select: {
-        id: true,
-        title: true,
-        sourceUrl: true,
-        contentHtml: true,
-        lastBodyStatus: true,
-        metrics: true,
-        publishTime: true,
-      },
+      select: { id: true },
     });
-    if (articles.length > 5000) throw new Error('离线导出文章超过上限');
+    if (identities.length > 5000)
+      throw new Error('Offline export article limit exceeded');
+    // Freeze membership/order without retaining every cached body. Each body and
+    // its export metadata are read together; later insertions cannot enter this request.
+    const articles = async function* (prisma: PrismaService) {
+      for (let offset = 0; offset < identities.length; offset += 8) {
+        if (cancelled()) throw new Error('Offline export cancelled');
+        const ids = identities.slice(offset, offset + 8).map((row) => row.id);
+        const batch = await prisma.article.findMany({
+          where: { mpId: feedId, id: { in: ids } },
+          select: {
+            id: true,
+            title: true,
+            sourceUrl: true,
+            contentHtml: true,
+            lastBodyStatus: true,
+            metrics: true,
+            publishTime: true,
+          },
+        });
+        const byId = new Map(batch.map((article) => [article.id, article]));
+        for (const id of ids) {
+          const article = byId.get(id);
+          // Do not silently claim a complete archive after concurrent deletion.
+          if (!article)
+            throw new Error('Offline export membership changed; retry');
+          yield article;
+        }
+      }
+    };
     await fs.promises.mkdir(directory, { recursive: true });
     let complete = 0;
     const incomplete: string[] = [];
@@ -204,7 +225,7 @@ export class TrpcRouter {
       path.join(directory, '.unused-settings.json'),
       directory,
     );
-    for (const article of articles) {
+    for await (const article of articles(this.prismaService)) {
       if (cancelled()) throw new Error('导出已取消');
       try {
         const saved = await store.save(
@@ -261,7 +282,7 @@ export class TrpcRouter {
     }
     await fs.promises.writeFile(
       path.join(directory, 'README.md'),
-      `# ${feed.mpName}\n\n共 ${articles.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
+      `# ${feed.mpName}\n\n共 ${identities.length} 篇；正文与图片离线完整 ${complete} 篇；未完整 ${incomplete.length} 篇。\n\n` +
         `范围：${filter.dateStart || '不限开始'} 至 ${filter.dateEnd || '不限结束'}（上海日期）；搜索：${filter.search || '无'}；分组筛选：${filter.group || 'all'}。这是本次范围完整快照，不检测本地下载历史。\n\n` +
         `分组：${source.groupName || '未分组'}\n\n文章位于 YYYY-MM-DD_分组/公众号文件夹中；日期采用原文发布日期（上海时间），不同日期分别保存，缺可信日期为日期待核并写明原因，正常文件名保留文章标题，冲突时加稳定身份后缀；该号共用 image/，图片按文章身份隔离，正文使用相对引用。未完整篇目在各自文件中明确标注。\n`,
     );
@@ -285,7 +306,7 @@ export class TrpcRouter {
       );
     return {
       name: feed.mpName,
-      articles: articles.length,
+      articles: identities.length,
       complete,
       incomplete,
       incompleteDetails,
