@@ -3,7 +3,7 @@ type Saved = {
   alreadySaved: boolean;
   status?: string;
   markdownPath: string;
-  publicationDate?: string;
+  publicationDate?: string | null;
   datePendingReason?: string;
   legacyLayoutRetained?: boolean;
   mediaStatus?: string;
