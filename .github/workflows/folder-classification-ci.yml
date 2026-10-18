@@ -6,6 +6,7 @@ on:
       [
         main,
         codex/daily-saved-media-combined,
+        codex/automatic-wechat-media-repair-20261018,
         codex/manual-refresh-download-integration,
         codex/backend-recovery-integration-20261014,
         codex/space-guard-review-base-20261014,
@@ -42,6 +43,7 @@ on:
       [
         codex/folder-batch-add-fix,
         codex/automatic-wechat-media-repair-20261018,
+        codex/automatic-media-clean-export-20261018,
         codex/backend-recovery-integration-20261014,
         codex/folder-selection-overlay-fix,
         codex/performance-five-candidate-20261014,
