@@ -18,6 +18,7 @@ on:
         codex/space-guard-production-compat-20261014,
         codex/periodic-auto-retention-20261017,
         codex/backup-daily-bounded-v1,
+        codex/daily-saved-media-combined,
         codex/export-real-metrics-only-20261014,
         codex/folder-rename-latency,
       ]
@@ -92,6 +93,8 @@ jobs:
           python -m unittest discover -s apps/server/scripts -p 'test_backup_space.py'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s apps/server/scripts -p 'test_periodic_lifecycle.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test scripts/local-release/combined-backup-media.test.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s apps/server/scripts -p 'test_sqlite_retention_plan.py'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
