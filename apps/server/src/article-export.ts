@@ -68,6 +68,7 @@ export async function buildArticleMarkdown(
   imageDirectory: 'attachments' | 'image' = 'attachments',
   limits?: { maxImages: number; maxBytes: number },
   allowPartialImages = false,
+  rendering: { includeTitle?: boolean; includeSourceLink?: boolean } = {},
 ) {
   const id = article.id;
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
@@ -333,7 +334,7 @@ export async function buildArticleMarkdown(
     title: article.title,
     contentHtml,
     markdown:
-      (article.sourceUrl ? metricsMarkdown(article) : '') +
+      (article.sourceUrl ? metricsMarkdown(article, rendering) : '') +
       (missingSources.size
         ? `> 正文图片获取失败：${missingSources.size} 个已知来源未保存。已保留正文和可取得的图片。\n\n`
         : '') +

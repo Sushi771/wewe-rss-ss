@@ -232,7 +232,7 @@ export class TrpcRouter {
             await fs.promises.mkdir(path.join(stage, 'image'));
             await fs.promises.writeFile(
               path.join(stage, 'index.md'),
-              `# ${article.title.replace(/[\r\n]/g, ' ')}\n\n正文或图片尚未完整归档，本篇无法完整离线阅读。\n`,
+              '正文或图片尚未完整归档，本篇无法完整离线阅读。\n',
             );
             return {
               articleId: article.id,
@@ -1092,6 +1092,11 @@ export class TrpcRouter {
       article,
       originUrl || 'http://localhost:4000',
       downloadPath,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { includeSourceLink: false },
     );
     return {
       ...exported,
