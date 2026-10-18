@@ -40,6 +40,8 @@ commit `f5d463f9ff3d3b47beec3e4c86f61d0eccd82756`, tests and fixtures. Only the
 matches the source. The existing occupancy fix remains unchanged. The main CI
 also runs the frozen-legacy-SQL scheduler comparison with its baseline history
 available, rather than attempting to scrape SQL removed from the runtime.
+Its full server type check also aligns the legacy Supertest fixture import with
+the source branch's default import; no test assertion or threshold changes.
 
 Cache flags now use one statement over the current page's saved IDs. Healthy
 inline bodies return flags only; ambiguous image attributes use a bounded linear
