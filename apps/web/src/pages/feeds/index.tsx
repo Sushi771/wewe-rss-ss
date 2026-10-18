@@ -1,3 +1,4 @@
+import { exportArticleBatches } from '@web/utils/export-article-batches';
 import { refreshFeedViews } from '@web/utils/refresh-feed-view';
 import {
   Avatar,
@@ -233,6 +234,8 @@ const Feeds = () => {
     new Set(),
   );
   const [isBatchExporting, setIsBatchExporting] = useState(false);
+  const exportController = useRef<AbortController | null>(null);
+  useEffect(() => () => exportController.current?.abort(), []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -245,15 +248,26 @@ const Feeds = () => {
   }, [isSearchOpen]);
 
   const handleBatchExport = async () => {
-    if (articleSelectedIds.size === 0) return;
+    if (articleSelectedIds.size === 0 || exportController.current) return;
+    const controller = new AbortController();
+    exportController.current = controller;
     setIsBatchExporting(true);
     const ids = Array.from(articleSelectedIds);
     let successCount = 0;
     try {
-      for (const articleId of ids) {
-        await queryUtils.client.article.saveToObsidian.mutate(articleId);
-        successCount++;
-      }
+      const result = await exportArticleBatches(
+        ids,
+        (batch, signal) =>
+          queryUtils.client.article.saveToObsidianBatch.mutate(
+            { ids: batch },
+            { signal },
+          ),
+        () => {
+          successCount++;
+        },
+        { signal: controller.signal },
+      );
+      if (result.cancelled) return;
       toast.success(`成功导出 ${successCount} 篇文章`);
       setArticleSelectedIds(new Set());
     } catch (err: unknown) {
@@ -261,6 +275,7 @@ const Feeds = () => {
         description: err instanceof Error ? err.message : String(err),
       });
     } finally {
+      exportController.current = null;
       setIsBatchExporting(false);
     }
   };

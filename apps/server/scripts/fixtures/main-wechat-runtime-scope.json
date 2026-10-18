@@ -136,7 +136,7 @@
     "constructor": "43a684c883509c60093e2aac843721e590497f5698985e2ac7e0a88bb925edeb",
     "logger": "5696fc4300fe79835d05e582fc2772b32cc4e3c338cc273e531873ac36857206",
     "readSearchCandidateSnapshot": "92da5507f2cb299b343402248fb9880d22e9a0e22089fabe324ff9be7ce950f2",
-    "buildOfflineFeedDirectory": "2559f2d865b30f03e6b26470f1efa8309726a87a6e674ecd6e0a1d2e7eefb143",
+    "buildOfflineFeedDirectory": "17308422464084bbf0ae295aa358abe2aedd29ee285718f47600cd219a75fb64",
     "collectionRouter": "575436db63750ea9c99b9088f9d9fb8d20de9f5eba2690670792abefadd77d75",
     "legacyAccountProcedure": "8938baf9176f6f681ee9bd3edeaf9900a75ad21c9f73bf4fb5da0d62ae7b58a0",
     "accountRouter": "e638a3fd29afd92c8e3fd1459dcae0f91d58209f71f63fe8d1942fd0b3b233d4",
@@ -144,7 +144,7 @@
     "getArticleMarkdown": "0a07a55ed1ed40a87d0edd672c8d8816e1c09019819bdcc259badc2c7a82503c",
     "platformRouter": "c578100884114d96f3a5a0c2c606e19ba6b0db54c8554b0a02aa87ec20cfc8b2",
     "appRouter": "4d20f25c9c265ef3042c9019d69f417401ef254fa045c98195d99d887a3654c9",
-    "applyMiddleware": "7aa60c6fc731d7a4fd5f81a422c8bdf7d3cff64b033c86083833c2fbb41ff8a1"
+    "applyMiddleware": "bb08abee7ea3425c754986e10421f92637ba044a461f2545847ef7f743addec7"
   },
   "articleRoutes": {
     "summary": "bbb705518b7bbc755ab930979a4892dda80ccc72021098f5804591bbca30ee82",
@@ -155,7 +155,8 @@
     "delete": "5b9eee2dc0e0042768020676a6c3b8f2936bc0baa9511ab38cb2884fb9eb2634",
     "exportMarkdown": "5f0ae52caf74eff4c50e10a05badc82c0638082e1cd560275890b0a716f467a2",
     "saveToObsidian": "4a4b5e5374d56a850ab27e91dc8a728106b560aa95573054e2bc63936459ae57",
-    "supplementSavedMedia": "445a52f4aff105987b5be0c9483a50cd0ea3b92b45bd15481ca1a5d92f5d7a85"
+    "supplementSavedMedia": "445a52f4aff105987b5be0c9483a50cd0ea3b92b45bd15481ca1a5d92f5d7a85",
+    "saveToObsidianBatch": "95193f77c4019df39361878b6ab828183500645e15c62a2679a4a2930cf17534"
   },
   "followups": {
     "preparationOccupancyRelease": {
@@ -172,6 +173,15 @@
       ],
       "scope": "Only the syncCachedWechat2RssPage member changes; page-scoped SQL and bounded linear media flags, no shared policy change",
       "testCompatibilityCommit": "f5d463f9ff3d3b47beec3e4c86f61d0eccd82756"
+    },
+    "boundedOfflineExport": {
+      "sourceCommit": "5740d6f42eb87d78e723cfe1d82d3fbf7e2f8292",
+      "sourceBase": "33ec7c3ebc20ce55d5f81259a5dd515912b5ca65",
+      "scope": "Only buildOfflineFeedDirectory changes: fixed lightweight membership and eight-body reads; other router/member/critical policy pins remain unchanged"
+    },
+    "retainedBatchExport": {
+      "sourceBase": "33ec7c3ebc20ce55d5f81259a5dd515912b5ca65",
+      "scope": "Add authenticated fixed-member local batch route and disconnect cancellation context; existing route, collection, native login and critical safety policy pins remain unchanged"
     }
   }
 }

@@ -125,6 +125,7 @@ test('actual provider gives one concise failed-operation toast with a details ac
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
       if (name === 'react')
         return {
+          useEffect: (effect) => effect(),
           useState: (value) => [
             typeof value === 'function' ? value() : value,
             () => {},
@@ -163,6 +164,8 @@ test('actual provider gives one concise failed-operation toast with a details ac
           serverOriginUrl: '',
         };
       if (name === '../utils/startup-status') return helpers;
+      if (name === '../utils/reading-query-cache')
+        return { installReadingCacheBudget() {} };
       throw Error('Unexpected dependency ' + name);
     },
   });

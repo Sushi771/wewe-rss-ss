@@ -1,3 +1,7 @@
+import {
+  LOCAL_EXPORT_BATCH_LIMIT,
+  saveCachedArticleBatch,
+} from '../article-local-export-batch';
 import { buildArticleMarkdown } from '../article-export';
 import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
 import { LocalArticleStore } from '../article-local-save';
@@ -1029,6 +1033,33 @@ export class TrpcRouter {
         }
       }),
 
+    saveToObsidianBatch: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            ids: z
+              .array(z.string().min(1).max(200))
+              .min(1)
+              .max(LOCAL_EXPORT_BATCH_LIMIT),
+          })
+          .strict(),
+      )
+      .mutation(async ({ input, ctx }) => {
+        if (privateOnlineMode())
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '线上站点只支持浏览器 ZIP 下载',
+          });
+        const { obsidianPath } =
+          this.configService.get<ConfigurationType['feed']>('feed')!;
+        return saveCachedArticleBatch(
+          this.prismaService,
+          input.ids,
+          obsidianPath,
+          () => Boolean((ctx as any).isExportCancelled?.()),
+        );
+      }),
+
     saveToObsidian: this.trpcService.protectedProcedure
       .input(z.string())
       .mutation(async ({ input: id }) => {
@@ -1201,7 +1232,7 @@ export class TrpcRouter {
       `/trpc`,
       trpcExpress.createExpressMiddleware({
         router: this.appRouter,
-        createContext: ({ req }) => {
+        createContext: ({ req, res }) => {
           const authCode =
             this.configService.get<ConfigurationType['auth']>('auth')!.code;
 
@@ -1219,6 +1250,8 @@ export class TrpcRouter {
           }
           return {
             errorMsg: null,
+            // A disconnected download stops after the current atomic article.
+            isExportCancelled: () => res.destroyed,
             isLocal:
               ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
                 req.socket.remoteAddress || '',

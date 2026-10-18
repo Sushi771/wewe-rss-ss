@@ -42,6 +42,51 @@ export type ArticlePreparation = ((
     images: string[],
   ) => Promise<void>;
 };
+type LockedSaveIdentity = Readonly<{
+  articleId: string;
+  source?: 'wechat2rss';
+  feedId: string;
+}>;
+type RetainedCandidate = {
+  folder: string;
+  group: string;
+  groupIdentity?: string;
+  feedId?: string;
+  articleId?: string;
+  source?: string;
+};
+type RetainedBatch = {
+  root: string;
+  active: boolean;
+  closing: boolean;
+  members: Set<string>;
+  busy: Set<string>;
+  operations: Set<Promise<unknown>>;
+  index?: RetainedCandidate[];
+};
+const retainedKey = (identity: LockedSaveIdentity) =>
+  JSON.stringify([identity.articleId, identity.source, identity.feedId]);
+const saveLockPath = (root: string, identity: LockedSaveIdentity) =>
+  path.join(
+    root,
+    '.wewe-save-' + exportIdentity(retainedKey(identity)) + '.lock',
+  );
+async function readManagedIdentity(directory: string) {
+  const file = path.join(directory, '.wewe-source.json');
+  try {
+    const stat = await fs.lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+    const value = JSON.parse(await fs.readFile(file, 'utf8')).identity;
+    if (typeof value !== 'string' || !value) throw new Error();
+    return value as string;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw fail(
+      'Managed source identity cannot be verified.',
+      'SAVE_RECEIPT_INVALID',
+    );
+  }
+}
 type SourceReceipt = {
   articleId: string;
   source?: 'wechat2rss';
@@ -74,6 +119,7 @@ type SavedArticle = {
 export const MAX_SAVED_VIDEO_BYTES = 100_000_000;
 const videoFilename = /^video_([a-f0-9]{64})\.mp4$/;
 const sourceDirectoryReservations = new Map<string, Promise<void>>();
+const batchIdentityReservations = new Set<string>();
 type VideoManifest = { filename: string; bytes: number; sha256: string };
 
 /** Internal prepared files only; the HTTP API never accepts paths or bytes. */
@@ -150,6 +196,7 @@ export async function validateLocalDirectory(directory: string) {
 /** Separate tool preferences; never edits the database, source config or existing Obsidian exports. */
 export class LocalArticleStore {
   private preferences?: Preferences;
+  private retainedBatch?: RetainedBatch;
   constructor(
     private readonly settingsFile: string,
     private readonly defaultDirectory = DEFAULT_ARTICLE_DIRECTORY,
@@ -217,31 +264,121 @@ export class LocalArticleStore {
     return this.persist({ ...(await this.read()), directory });
   }
 
-  async save(
+  /** Internal fixed-membership batch. Locks are the exact legacy per-article locks. */
+  async withRetainedBatch<T>(
+    identities: readonly PreparedArticle[],
+    directory: string,
+    run: (store: LocalArticleStore) => Promise<T>,
+  ): Promise<T> {
+    if (this.retainedBatch)
+      throw fail('Nested batch scope is not supported.', 'SAVE_BATCH_INVALID');
+    if (!identities.length || identities.length > 64)
+      throw fail('Batch identity limit exceeded.', 'SAVE_BATCH_LIMIT');
+    const frozen = identities.map((identity) => {
+      if (
+        !identity.exportSource ||
+        !identity.articleId ||
+        identity.articleId.length > 512 ||
+        !identity.exportSource.feedId ||
+        identity.exportSource.feedId.length > 256 ||
+        (identity.source !== undefined && identity.source !== 'wechat2rss')
+      )
+        throw fail('Invalid batch identity.', 'SAVE_BATCH_INVALID');
+      return Object.freeze({
+        articleId: identity.articleId,
+        source: identity.source,
+        feedId: identity.exportSource.feedId,
+      });
+    });
+    const root = await validateLocalDirectory(directory);
+    await fs.mkdir(root, { recursive: true });
+    const targets = [
+      ...new Map(
+        frozen.map((identity) => [saveLockPath(root, identity), identity]),
+      ).keys(),
+    ].sort();
+    const releases: (() => Promise<void>)[] = [];
+    const scoped = new LocalArticleStore(this.settingsFile, root);
+    const scope: RetainedBatch = {
+      root,
+      active: true,
+      closing: false,
+      members: new Set(frozen.map(retainedKey)),
+      busy: new Set(),
+      operations: new Set(),
+    };
+    try {
+      for (const key of targets) {
+        if (sourceDirectoryReservations.has(key))
+          throw fail('Article is already being saved.', 'SAVE_BUSY');
+        let release!: () => void;
+        const reservation = new Promise<void>((done) => {
+          release = done;
+        });
+        sourceDirectoryReservations.set(key, reservation);
+        batchIdentityReservations.add(key);
+        const claim: { token?: string } = {};
+        releases.push(async () => {
+          if (
+            claim.token &&
+            (await fs.readFile(key, 'utf8').catch(() => undefined)) ===
+              claim.token
+          )
+            await fs.unlink(key).catch(() => {});
+          if (sourceDirectoryReservations.get(key) === reservation) {
+            sourceDirectoryReservations.delete(key);
+            batchIdentityReservations.delete(key);
+          }
+          release();
+        });
+        claim.token = await this.acquireSaveLock(key);
+      }
+      scope.index = await this.buildRetainedIndex(root);
+      scoped.retainedBatch = scope;
+      return await run(scoped);
+    } finally {
+      scope.closing = true;
+      await Promise.allSettled([...scope.operations]);
+      scope.active = false;
+      scope.index = undefined;
+      for (const release of releases.reverse()) await release();
+    }
+  }
+
+  save(
     prepare: ArticlePreparation,
     now = new Date(),
     confirmedDirectory?: string,
   ): Promise<SavedArticle> {
-    const identity = prepare.identity;
-    if (!identity?.exportSource)
-      return this.savePrepared(prepare, now, confirmedDirectory);
-    const root = await validateLocalDirectory(
-      confirmedDirectory ?? (await this.read()).directory,
-    );
-    await fs.mkdir(root, { recursive: true });
-    await validateLocalDirectory(root);
-    const key = path.join(
-      root,
-      '.wewe-save-' +
-        exportIdentity(
-          JSON.stringify([
-            identity.articleId,
-            identity.source,
-            identity.exportSource.feedId,
-          ]),
-        ) +
-        '.lock',
-    );
+    const scope = this.retainedBatch;
+    if (scope && (!scope.active || scope.closing))
+      return Promise.reject(
+        fail('Batch scope has ended.', 'SAVE_BATCH_EXPIRED'),
+      );
+    const operation = this.saveInternal(prepare, now, confirmedDirectory);
+    if (scope) {
+      scope.operations.add(operation);
+      operation.then(
+        () => scope.operations.delete(operation),
+        () => scope.operations.delete(operation),
+      );
+    }
+    return operation;
+  }
+
+  private async withActualIdentityLock<T>(
+    root: string,
+    article: PreparedArticle,
+    run: (snapshot: PreparedArticle) => Promise<T>,
+  ): Promise<T> {
+    const snapshot = { ...article, exportSource: { ...article.exportSource! } };
+    const key = saveLockPath(root, {
+      articleId: snapshot.articleId,
+      source: snapshot.source,
+      feedId: snapshot.exportSource.feedId,
+    });
+    if (batchIdentityReservations.has(key))
+      throw fail('Article is reserved by a batch.', 'SAVE_BUSY');
     const previous = sourceDirectoryReservations.get(key);
     let release!: () => void;
     const reservation = new Promise<void>((done) => {
@@ -249,30 +386,111 @@ export class LocalArticleStore {
     });
     sourceDirectoryReservations.set(key, reservation);
     await previous;
+    let token: string | undefined;
+    try {
+      token = await this.acquireSaveLock(key);
+      return await run(snapshot);
+    } finally {
+      if (
+        token &&
+        (await fs.readFile(key, 'utf8').catch(() => undefined)) === token
+      )
+        await fs.unlink(key).catch(() => {});
+      if (sourceDirectoryReservations.get(key) === reservation)
+        sourceDirectoryReservations.delete(key);
+      release();
+    }
+  }
+
+  private async acquireSaveLock(key: string) {
+    const value = JSON.stringify({ pid: process.pid, token: randomUUID() });
+    try {
+      await fs.writeFile(key, value, { flag: 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const stat = await fs.lstat(key);
+      if (!stat.isFile() || stat.isSymbolicLink())
+        throw fail('Invalid article lock.', 'SAVE_LOCK_INVALID');
+      const old = await fs.readFile(key, 'utf8');
+      const pid = JSON.parse(old).pid;
+      if (!Number.isInteger(pid) || pid <= 0)
+        throw fail('Invalid article lock.', 'SAVE_LOCK_INVALID');
+      try {
+        process.kill(pid, 0);
+        throw fail('Article is already being saved.', 'SAVE_BUSY');
+      } catch (probe) {
+        if ((probe as NodeJS.ErrnoException).code !== 'ESRCH') throw probe;
+      }
+      if ((await fs.readFile(key, 'utf8')) !== old)
+        throw fail('Article lock changed.', 'SAVE_BUSY');
+      await fs.unlink(key);
+      await fs.writeFile(key, value, { flag: 'wx' });
+    }
+    return value;
+  }
+
+  private async saveInternal(
+    prepare: ArticlePreparation,
+    now = new Date(),
+    confirmedDirectory?: string,
+  ): Promise<SavedArticle> {
+    const identity = prepare.identity;
+    if (!identity?.exportSource) {
+      if (this.retainedBatch)
+        throw fail('Batch member needs an identity.', 'SAVE_BATCH_MEMBER');
+      return this.savePrepared(prepare, now, confirmedDirectory);
+    }
+    // Capture primitives before the first await. Preparations are internal but
+    // their identity object can otherwise be mutated while staging is pending.
+    const lockedIdentity: LockedSaveIdentity = Object.freeze({
+      articleId: identity.articleId,
+      source: identity.source,
+      feedId: identity.exportSource.feedId,
+    });
+    const root = await validateLocalDirectory(
+      confirmedDirectory ??
+        this.retainedBatch?.root ??
+        (await this.read()).directory,
+    );
+    await fs.mkdir(root, { recursive: true });
+    await validateLocalDirectory(root);
+    const key = saveLockPath(root, lockedIdentity);
+    const scope = this.retainedBatch;
+    if (
+      scope &&
+      (!scope.active ||
+        root !== scope.root ||
+        !scope.members.has(retainedKey(lockedIdentity)))
+    )
+      throw fail('Unknown batch member/root.', 'SAVE_BATCH_MEMBER');
+    if (scope?.busy.has(key))
+      throw fail('Batch member is already running.', 'SAVE_BUSY');
+    scope?.busy.add(key);
+    if (!scope && batchIdentityReservations.has(key))
+      throw fail('Article is reserved by a batch.', 'SAVE_BUSY');
+    const previous = scope ? undefined : sourceDirectoryReservations.get(key);
+    let release!: () => void;
+    const reservation = new Promise<void>((done) => {
+      release = done;
+    });
+    if (!scope) sourceDirectoryReservations.set(key, reservation);
+    await previous;
     let locked = false;
     try {
-      const value = JSON.stringify({ pid: process.pid, token: randomUUID() });
-      try {
-        await fs.writeFile(key, value, { flag: 'wx' });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        const old = await fs.readFile(key, 'utf8');
-        const pid = JSON.parse(old).pid;
-        if (!Number.isInteger(pid) || pid <= 0)
-          throw fail('保存锁无法核实。', 'SAVE_LOCK_INVALID');
-        try {
-          process.kill(pid, 0);
-          throw fail('本篇正在保存，请稍后重试。', 'SAVE_BUSY');
-        } catch (probe) {
-          if ((probe as NodeJS.ErrnoException).code !== 'ESRCH') throw probe;
-        }
-        if ((await fs.readFile(key, 'utf8')) !== old)
-          throw fail('保存锁已改变。', 'SAVE_BUSY');
-        await fs.unlink(key);
-        await fs.writeFile(key, value, { flag: 'wx' });
+      if (!scope) {
+        await this.acquireSaveLock(key);
+        locked = true;
       }
-      locked = true;
-      const retained = await this.findRetainedArticle(root, identity);
+      const retained = await this.findRetainedArticle(root, {
+        articleId: lockedIdentity.articleId,
+        source: lockedIdentity.source,
+        title: identity.title,
+        imageCount: identity.imageCount,
+        exportSource: {
+          ...identity.exportSource,
+          feedId: lockedIdentity.feedId,
+        },
+      });
       // A valid old receipt does not cover newly cached image sources. Reuse
       // its verified files and run the existing companion-note repair path.
       if (
@@ -315,11 +533,53 @@ export class LocalArticleStore {
           '旧回执缺少原图映射，无法只补缺失图片；保留原文件。',
           'SAVE_REPAIR_UNAVAILABLE',
         );
-      return await this.savePrepared(prepare, now, root, retained);
+      const saved = await this.savePrepared(
+        prepare,
+        now,
+        root,
+        retained,
+        lockedIdentity,
+      );
+      if (scope?.index) {
+        const group = path.dirname(saved.directory);
+        if (
+          !scope.index.some((candidate) => candidate.folder === saved.directory)
+        ) {
+          const groupIdentity = await readManagedIdentity(group);
+          if (groupIdentity === undefined)
+            throw fail(
+              'Published group identity changed.',
+              'SAVE_RECEIPT_INVALID',
+            );
+          scope.index.push({
+            folder: saved.directory,
+            group,
+            groupIdentity,
+            feedId: lockedIdentity.feedId,
+          });
+          if (
+            scope.index.length > 2048 ||
+            scope.index.reduce(
+              (sum, item) =>
+                sum +
+                (item.folder.length +
+                  item.group.length +
+                  (item.feedId || item.articleId || '').length +
+                  (item.groupIdentity || '').length) *
+                  2 +
+                128,
+              0,
+            ) > 1048576
+          )
+            scope.index = undefined;
+        }
+      }
+      return saved;
     } finally {
       if (locked) await fs.unlink(key).catch(() => {});
       release();
-      if (sourceDirectoryReservations.get(key) === reservation)
+      scope?.busy.delete(key);
+      if (!scope && sourceDirectoryReservations.get(key) === reservation)
         sourceDirectoryReservations.delete(key);
     }
   }
@@ -374,6 +634,7 @@ export class LocalArticleStore {
     /** Frozen by an authorized internal job; never taken from an HTTP body. */
     confirmedDirectory?: string,
     retained?: SavedArticle,
+    lockedIdentity?: LockedSaveIdentity,
   ): Promise<SavedArticle> {
     let stage: string | undefined;
     let final: string | undefined;
@@ -421,6 +682,16 @@ export class LocalArticleStore {
         );
       const article = await prepare(stage);
       if (
+        lockedIdentity &&
+        (article.articleId !== lockedIdentity.articleId ||
+          article.source !== lockedIdentity.source ||
+          article.exportSource?.feedId !== lockedIdentity.feedId)
+      )
+        throw fail(
+          'Prepared article changed its locked identity.',
+          'SAVE_IDENTITY_CONFLICT',
+        );
+      if (
         prepare.identity &&
         (article.articleId !== prepare.identity.articleId ||
           article.source !== prepare.identity.source ||
@@ -444,7 +715,17 @@ export class LocalArticleStore {
         throw fail('正文保存结果无效。', 'INVALID_PREPARED_ARTICLE');
       if (article.exportSource) {
         sourcedDateDirectory = dateDirectory;
-        return await this.publishSourcedArticle(root, stage, article, retained);
+        if (!lockedIdentity)
+          return await this.withActualIdentityLock(root, article, (snapshot) =>
+            this.publishSourcedArticle(root, stage!, snapshot, retained),
+          );
+        return await this.publishSourcedArticle(
+          root,
+          stage,
+          article,
+          retained,
+          lockedIdentity,
+        );
       }
       const shortId = createHash('sha256')
         .update(article.articleId)
@@ -680,6 +961,7 @@ export class LocalArticleStore {
     stage: string,
     article: PreparedArticle,
     repair?: SavedArticle,
+    lockedIdentity?: LockedSaveIdentity,
   ): Promise<SavedArticle> {
     const source = article.exportSource!;
     const publication = exportPublication(article.publishTime);
@@ -687,7 +969,22 @@ export class LocalArticleStore {
       source,
       article.publishTime,
     );
-    const retained = await this.findRetainedArticle(root, article);
+    // save() already searched under the cross-process article identity lock.
+    // Do not enumerate every publisher twice during the same locked operation.
+    // Repair receipts/files are still read now and checked again before commit.
+    if (
+      lockedIdentity &&
+      (article.articleId !== lockedIdentity.articleId ||
+        article.source !== lockedIdentity.source ||
+        source.feedId !== lockedIdentity.feedId)
+    )
+      throw fail(
+        'Prepared article changed its locked identity.',
+        'SAVE_IDENTITY_CONFLICT',
+      );
+    const retained = lockedIdentity
+      ? repair && (await this.readSourceReceipt(repair.directory, article))
+      : await this.findRetainedArticle(root, article);
     if (
       retained &&
       !repair &&
@@ -978,23 +1275,52 @@ export class LocalArticleStore {
   private async findRetainedArticle(root: string, article: PreparedArticle) {
     const matches: SavedArticle[] = [];
     const source = article.exportSource!;
-    const identity = async (directory: string) => {
-      const file = path.join(directory, '.wewe-source.json');
-      try {
-        const stat = await fs.lstat(file);
-        if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
-        const identity = JSON.parse(await fs.readFile(file, 'utf8')).identity;
-        if (typeof identity !== 'string' || !identity) throw new Error();
-        return identity;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-          return undefined;
-        throw fail(
-          '已有来源回执无法核实，未另存副本。',
-          'SAVE_RECEIPT_INVALID',
-        );
+    const identity = readManagedIdentity;
+    const scope = this.retainedBatch;
+    if (scope?.index) {
+      for (const candidate of scope.index) {
+        if (
+          candidate.feedId !== undefined &&
+          candidate.feedId !== source.feedId
+        )
+          continue;
+        if (
+          candidate.feedId === undefined &&
+          (candidate.articleId !== article.articleId ||
+            candidate.source !== article.source)
+        )
+          continue;
+        await validateLocalDirectory(candidate.group);
+        await validateLocalDirectory(candidate.folder);
+        if (candidate.feedId !== undefined) {
+          if (
+            (await identity(candidate.group)) !== candidate.groupIdentity ||
+            (await identity(candidate.folder)) !== candidate.feedId
+          )
+            throw fail(
+              'Batch source identity changed.',
+              'SAVE_RECEIPT_INVALID',
+            );
+          const result = await this.readSourceReceipt(
+            candidate.folder,
+            article,
+          );
+          if (result) matches.push(result);
+        } else {
+          const result = await this.readLegacyRetained(
+            candidate.folder,
+            article,
+          );
+          if (result) matches.push(result);
+        }
       }
-    };
+      if (matches.length > 1)
+        throw fail(
+          'Multiple saved versions require review.',
+          'SAVE_LEGACY_AMBIGUOUS',
+        );
+      return matches[0];
+    }
     for (const entry of await fs.readdir(root, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const group = path.join(root, entry.name);
@@ -1018,49 +1344,8 @@ export class LocalArticleStore {
           if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
           const folder = path.join(group, entry.name);
           await validateLocalDirectory(folder);
-          const marker = path.join(folder, '.wewe-article.json');
-          let receipt;
-          try {
-            const stat = await fs.lstat(marker);
-            if (!stat.isFile() || stat.isSymbolicLink()) continue;
-            receipt = JSON.parse(await fs.readFile(marker, 'utf8'));
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-            throw fail(
-              '已有文章回执无法核实，未另存副本。',
-              'SAVE_RECEIPT_INVALID',
-            );
-          }
-          if (
-            receipt.articleId !== article.articleId ||
-            receipt.source !== article.source
-          )
-            continue;
-          if (receipt.complete !== true || !Array.isArray(receipt.images))
-            throw fail(
-              '已有文章回执不完整，未另存副本。',
-              'SAVE_RECEIPT_INVALID',
-            );
-          const markdownPath = path.join(folder, '正文.md');
-          const note = await fs.lstat(markdownPath);
-          if (!note.isFile() || note.isSymbolicLink()) throw new Error();
-          await validateLocalDirectory(path.join(folder, 'image'));
-          for (const name of receipt.images) {
-            if (!/^image_[a-f0-9]{32}\.(png|jpe?g|gif|webp)$/.test(name))
-              throw new Error();
-            const image = await fs.lstat(path.join(folder, 'image', name));
-            if (!image.isFile() || image.isSymbolicLink()) throw new Error();
-          }
-          matches.push({
-            directory: folder,
-            markdownPath,
-            alreadySaved: true,
-            imageCount: receipt.images.length,
-            ...(receipt.mediaComplete === false
-              ? { mediaComplete: false }
-              : {}),
-            legacyLayoutRetained: true,
-          });
+          const result = await this.readLegacyRetained(folder, article);
+          if (result) matches.push(result);
         }
       }
     }
@@ -1070,6 +1355,114 @@ export class LocalArticleStore {
         'SAVE_LEGACY_AMBIGUOUS',
       );
     return matches[0];
+  }
+
+  private async readLegacyRetained(
+    folder: string,
+    article: PreparedArticle,
+  ): Promise<SavedArticle | undefined> {
+    const marker = path.join(folder, '.wewe-article.json');
+    let receipt;
+    try {
+      const stat = await fs.lstat(marker);
+      if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+      receipt = JSON.parse(await fs.readFile(marker, 'utf8'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw fail('已有文章回执无法核实，未另存副本。', 'SAVE_RECEIPT_INVALID');
+    }
+    if (
+      receipt.articleId !== article.articleId ||
+      receipt.source !== article.source
+    )
+      return undefined;
+    if (receipt.complete !== true || !Array.isArray(receipt.images))
+      throw fail('已有文章回执不完整，未另存副本。', 'SAVE_RECEIPT_INVALID');
+    const markdownPath = path.join(folder, '正文.md');
+    const note = await fs.lstat(markdownPath);
+    if (!note.isFile() || note.isSymbolicLink()) throw new Error();
+    await validateLocalDirectory(path.join(folder, 'image'));
+    for (const name of receipt.images) {
+      if (!/^image_[a-f0-9]{32}\.(png|jpe?g|gif|webp)$/.test(name))
+        throw new Error();
+      const image = await fs.lstat(path.join(folder, 'image', name));
+      if (!image.isFile() || image.isSymbolicLink()) throw new Error();
+    }
+    return {
+      directory: folder,
+      markdownPath,
+      alreadySaved: true,
+      imageCount: receipt.images.length,
+      ...(receipt.mediaComplete === false ? { mediaComplete: false } : {}),
+      legacyLayoutRetained: true,
+    };
+  }
+
+  private async buildRetainedIndex(
+    root: string,
+  ): Promise<RetainedCandidate[] | undefined> {
+    const result: RetainedCandidate[] = [];
+    let directories = 0,
+      bytes = 0;
+    for await (const entry of await fs.opendir(root)) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (++directories > 2048) return undefined;
+      const group = path.join(root, entry.name);
+      await validateLocalDirectory(group);
+      const groupIdentity = await readManagedIdentity(group);
+      if (
+        groupIdentity === undefined &&
+        !/^\d{4}-\d{2}-\d{2}$/.test(entry.name)
+      )
+        continue;
+      for await (const publisher of await fs.opendir(group)) {
+        if (!publisher.isDirectory() || publisher.isSymbolicLink()) continue;
+        if (++directories > 2048) return undefined;
+        const folder = path.join(group, publisher.name);
+        await validateLocalDirectory(folder);
+        let candidate: RetainedCandidate | undefined;
+        if (groupIdentity !== undefined) {
+          const feedId = await readManagedIdentity(folder);
+          if (feedId !== undefined)
+            candidate = { folder, group, groupIdentity, feedId };
+        } else {
+          const file = path.join(folder, '.wewe-article.json');
+          try {
+            const stat = await fs.lstat(file);
+            if (!stat.isFile() || stat.isSymbolicLink()) continue;
+            const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
+            if (
+              typeof receipt.articleId === 'string' &&
+              (receipt.source === undefined || receipt.source === 'wechat2rss')
+            )
+              candidate = {
+                folder,
+                group,
+                articleId: receipt.articleId,
+                source: receipt.source,
+              };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+              throw fail(
+                'Legacy receipt cannot be verified.',
+                'SAVE_RECEIPT_INVALID',
+              );
+          }
+        }
+        if (candidate) {
+          bytes +=
+            (candidate.folder.length +
+              candidate.group.length +
+              (candidate.feedId || candidate.articleId || '').length +
+              (candidate.groupIdentity || '').length) *
+              2 +
+            128;
+          if (bytes > 1048576) return undefined;
+          result.push(candidate);
+        }
+      }
+    }
+    return result;
   }
 
   private async readSourceReceipt(
