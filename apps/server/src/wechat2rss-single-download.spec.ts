@@ -197,7 +197,7 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     });
     const markdown = await readFile(join(folder, 'index.md'), 'utf8');
     expect(markdown).toContain('可靠正文');
-    expect(markdown).toContain('媒体完整性未确认');
+    expect(markdown).not.toContain('媒体完整性未确认');
     const saved = await readdir(join(folder, 'image'));
     expect(saved).toHaveLength(1);
     expect(await readFile(join(folder, 'image', saved[0]))).toEqual(png);

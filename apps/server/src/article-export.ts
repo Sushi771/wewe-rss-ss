@@ -80,6 +80,85 @@ export async function buildArticleMarkdown(
     );
   }
 
+  // Provider pages may retain a standalone WeChat launcher after the article.
+  // Match only this exact trailing control; author links and body images stay.
+  const launcherLabel = '跳转微信打开';
+  const launcherTarget = (href: string) => {
+    if (!href || href === '#' || /^javascript:(?:;|void\(0\);?)?$/i.test(href))
+      return true;
+    if (/^weixin:\/\//i.test(href)) return true;
+    try {
+      const target = new URL(href);
+      const source = new URL(url);
+      if (
+        target.protocol !== 'https:' ||
+        target.hostname !== 'mp.weixin.qq.com' ||
+        target.username ||
+        target.password ||
+        target.port ||
+        target.origin !== source.origin ||
+        target.pathname !== source.pathname
+      )
+        return false;
+      if (target.pathname.startsWith('/s/')) return true;
+      return (
+        target.pathname === '/s' &&
+        ['__biz', 'mid', 'idx'].every(
+          (key) =>
+            !!target.searchParams.get(key) &&
+            target.searchParams.get(key) === source.searchParams.get(key),
+        )
+      );
+    } catch {
+      return false;
+    }
+  };
+  for (const element of contentEl
+    .find('p, div, section, button, a, span')
+    .toArray()) {
+    const candidate = $(element);
+    if (
+      candidate.text().trim() !== launcherLabel ||
+      candidate.find(
+        'img, picture, video, audio, iframe, svg, canvas, object, embed, blockquote, ul, ol, table, pre, code',
+      ).length ||
+      (candidate.is('a, span') && !candidate.parent().is(contentEl))
+    )
+      continue;
+    const links = candidate.is('a') ? candidate : candidate.find('a');
+    if (
+      links
+        .toArray()
+        .some((link) => !launcherTarget($(link).attr('href') || ''))
+    )
+      continue;
+    let cursor = candidate;
+    let trailing = true;
+    while (!cursor.is(contentEl)) {
+      const parent = cursor.parent();
+      if (
+        !parent.length ||
+        (!parent.is(contentEl) && !parent.is('div, section, article'))
+      ) {
+        trailing = false;
+        break;
+      }
+      const siblings = parent.contents().toArray();
+      if (
+        siblings.slice(siblings.indexOf(cursor[0]) + 1).some((node) => {
+          if (node.type === 'comment') return false;
+          if (node.type === 'text') return !!node.data.trim();
+          return node.type !== 'tag' || node.name !== 'br';
+        })
+      ) {
+        trailing = false;
+        break;
+      }
+      cursor = parent;
+    }
+    if (trailing) candidate.remove();
+  }
+
   if (downloadPath) {
     const attachmentsDir = path.join(downloadPath, imageDirectory);
     if (!fs.existsSync(attachmentsDir)) {
@@ -189,12 +268,7 @@ export async function buildArticleMarkdown(
   return {
     title: article.title,
     contentHtml,
-    markdown:
-      (article.sourceUrl ? metricsMarkdown(article) : '') +
-      (mediaComplete
-        ? ''
-        : '> 媒体完整性未确认：原缓存含无源或未核图片项。已保存正文和可取得的图片，不代表原篇全部媒体已归档。\n\n') +
-      markdown,
+    markdown: (article.sourceUrl ? metricsMarkdown(article) : '') + markdown,
     mediaComplete,
   };
 }

@@ -57,7 +57,7 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
     expect(saved).toMatchObject({ imageCount: 1, mediaComplete: false });
     const markdown = await readFile(saved.markdownPath, 'utf8');
     expect(markdown).toContain('可靠正文');
-    expect(markdown).toContain('媒体完整性未确认');
+    expect(markdown).not.toContain('媒体完整性未确认');
     const images = await readdir(join(saved.directory, 'image'));
     expect(images).toHaveLength(1);
     expect(await readFile(join(saved.directory, 'image', images[0]))).toEqual(
@@ -92,7 +92,7 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
       imageCount: 1,
       mediaComplete: false,
     });
-    expect(await readFile(join(folder, 'index.md'), 'utf8')).toContain(
+    expect(await readFile(join(folder, 'index.md'), 'utf8')).not.toContain(
       '媒体完整性未确认',
     );
     expect(() =>
@@ -118,7 +118,7 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
     );
     expect(exported.mediaComplete).toBe(false);
     expect(exported.markdown).toContain('可靠正文');
-    expect(exported.markdown).toContain('媒体完整性未确认');
+    expect(exported.markdown).not.toContain('媒体完整性未确认');
     expect(exported.markdown).not.toContain('qpic.cn');
     expect(await readdir(join(folder, 'image'))).toHaveLength(1);
   });
