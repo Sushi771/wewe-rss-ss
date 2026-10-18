@@ -342,8 +342,8 @@ async function main() {
           baseline,
           node: process.version,
           engine:
-            (Prisma.prismaVersion as { client: string; engine?: string }).engine ??
-            null,
+            (Prisma.prismaVersion as { client: string; engine?: string })
+              .engine ?? null,
           articles: 6000,
           feeds: 200,
           bodyBytes: 32768,
