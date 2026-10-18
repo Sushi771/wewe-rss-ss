@@ -16,7 +16,7 @@ const ts = require(require.resolve('typescript', { paths: [server] }));
 const epoch = () => performance.timeOrigin + performance.now();
 test(
   'actual list/provider over local HTTP: summary cannot hold rows, pagination is fenced and failures stay visible',
-  { skip: !browser, timeout: 180000 },
+  { skip: !browser, timeout: 240000 },
   async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-article-http-'));
     const url =
@@ -88,7 +88,11 @@ test(
       await prisma.managementGroup.create({
         data: { id: 'group-a', name: 'Synthetic folder', platform: 'wechat' },
       });
-      for (let i = 0; i < 6; i++)
+      const feedCount = Number(process.env.ARTICLE_LIST_BENCHMARK_FEEDS || 6);
+      assert(
+        Number.isSafeInteger(feedCount) && feedCount >= 6 && feedCount <= 300,
+      );
+      for (let i = 0; i < feedCount; i++)
         await prisma.feed.create({
           data: {
             id: 'f' + i,
@@ -96,17 +100,18 @@ test(
             mpCover: '',
             mpIntro: '',
             updateTime: 0,
-            groupId: i < 3 ? 'group-a' : null,
+            groupId: i < feedCount / 2 ? 'group-a' : null,
           },
         });
       const count = Number(process.env.ARTICLE_LIST_BENCHMARK_ROWS || 1800);
-      assert(Number.isSafeInteger(count) && count >= 120 && count <= 3000);
+      assert(Number.isSafeInteger(count) && count >= 120 && count <= 12000);
       await prisma.$executeRawUnsafe(
         `WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x+1 < ?)
    INSERT INTO articles(id,mp_id,title,pic_url,publish_time,content_html,read_count,like_count,created_at)
-   SELECT 'article-'||printf('%06d',x),'f'||(x%6),'Synthetic '||x,'',1700000000+CAST(x/3 AS INTEGER),
+   SELECT 'article-'||printf('%06d',x),'f'||(x%?),'Synthetic '||x,'',1700000000+CAST(x/3 AS INTEGER),
    CASE WHEN x%7=0 THEN NULL WHEN x%7=1 THEN '' WHEN x%7=2 THEN ' ' ELSE '<p>'||replace(hex(zeroblob(32768)),'00','x')||'</p>' END,x%99,x%17,CURRENT_TIMESTAMP FROM n`,
         count,
+        feedCount,
       );
       const config = new ConfigService({
         auth: { code: 'synthetic' },
@@ -179,22 +184,42 @@ test(
         env,
         "export const serverOriginUrl=window.location.origin;export const enabledAuthCode=true;export const privateOnlineMode=false;export const acceptanceMode=false;export const appVersion='synthetic';export const isProd=false;",
       );
+      let listFile = path.join(web, 'src/pages/feeds/list.tsx');
+      let providerFile = path.join(web, 'src/provider/trpc.tsx');
+      const baseline = process.env.READING_BASELINE_SHA;
+      if (baseline) {
+        assert(/^[a-f0-9]{40}$/.test(baseline));
+        const { execFileSync } = require('node:child_process');
+        listFile = path.join(root, 'baseline-list.tsx');
+        providerFile = path.join(root, 'baseline-provider.tsx');
+        for (const [target, file] of [
+          [listFile, 'apps/web/src/pages/feeds/list.tsx'],
+          [providerFile, 'apps/web/src/provider/trpc.tsx'],
+        ])
+          fs.writeFileSync(
+            target,
+            execFileSync('git', ['show', baseline + ':' + file]),
+          );
+      }
       const source = `
 import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
 import {BrowserRouter,Routes,Route,useNavigate} from 'react-router-dom';
-import {TrpcProvider} from ${modulePath(path.join(web, 'src/provider/trpc.tsx'))};
+import {TrpcProvider} from ${modulePath(providerFile)};
+import {useQueryClient} from '@tanstack/react-query';
 import {trpc} from ${modulePath(path.join(web, 'src/utils/trpc.ts'))};
-import ArticleList from ${modulePath(path.join(web, 'src/pages/feeds/list.tsx'))};
+import ArticleList from ${modulePath(listFile)};
 import ${modulePath(path.join(web, 'src/index.css'))};
 localStorage.setItem('authCode','synthetic');
-function App(){const [filter,setFilter]=useState({}),[search,setSearch]=useState(''),[sort,setSort]=useState('publishTime'),[direction,setDirection]=useState('desc'),[selected,setSelected]=useState(new Set());const utils=trpc.useUtils();const navigate=useNavigate();
-window.fixture={setFilter,setSearch,setDirection,navigate,selected:()=>[...selected],refresh:()=>{window.dispatchEvent(new Event('wewe-articles-refresh'));return utils.article.list.invalidate();},fresh:()=>utils.article.list.reset()};
+document.addEventListener('load',(e)=>{if(e.target instanceof HTMLIFrameElement && e.target.src.startsWith('blob:'))window.readerLoaded=performance.now()},true);
+function App(){const [filter,setFilter]=useState({}),[search,setSearch]=useState(''),[sort,setSort]=useState('publishTime'),[direction,setDirection]=useState('desc'),[selected,setSelected]=useState(new Set());const utils=trpc.useUtils();const queryClient=useQueryClient();const navigate=useNavigate();
+window.fixture={pending:()=>queryClient.isFetching({queryKey:[['article','list']]}),setFilter,setSearch,setDirection,navigate,selected:()=>[...selected],refresh:()=>{window.dispatchEvent(new Event('wewe-articles-refresh'));return utils.article.list.invalidate();},fresh:()=>utils.article.list.reset()};
 return <div className="app-shell"><div className="app-route"><div className="feed-workspace"><div className="mac-content feed-content !min-w-0 !overflow-y-auto"><header className="shrink-0 p-4">文章列表</header><div className="feed-article-scroll flex-1 overflow-hidden"><ArticleList search={search} articleFilter={filter} sort={sort} onSortChange={setSort} direction={direction} onDirectionChange={setDirection} selectedIds={selected} onSelectionChange={setSelected}/></div></div></div></div></div>}
 createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider><Routes><Route path='/*' element={<App/>}/></Routes></TrpcProvider></BrowserRouter>);`;
       const measurements = [];
       await withFixture(
         source,
         async ({ evaluate, send, pause }) => {
+          await send('Performance.enable');
           const rows = () =>
             evaluate(
               "Array.from(document.querySelectorAll('[data-article-id]'),e=>e.dataset.articleId)",
@@ -449,13 +474,22 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                 (await rows()).length === 80 && requests.every((r) => r.status),
               'return restores the four previously loaded pages before fault injection',
             );
+            await evaluate(
+              'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))',
+            );
+            await until(
+              async () =>
+                (await evaluate('window.fixture.pending()')) === 0 &&
+                requests.every((r) => r.status),
+              'return revalidation settles before failure injection',
+            );
             phase = 'read-failure';
             failNext = true;
             await evaluate('void window.fixture.fresh()');
             await until(
               () =>
                 evaluate(
-                  "document.querySelector('[role=alert]')?.textContent.includes('文章列表读取失败')",
+                  "Array.from(document.querySelectorAll('[role=alert]')).some(e=>e.textContent.includes('文章列表读取失败'))",
                 ),
               'explicit list error',
             );
@@ -482,7 +516,13 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
             Number.isSafeInteger(samples) && samples >= 1 && samples <= 30,
           );
           for (let i = 0; i < samples; i++)
-            for (const stage of ['first', 'next', 'refresh']) {
+            for (const stage of [
+              'first',
+              'next',
+              'return',
+              'reader',
+              'refresh',
+            ]) {
               phase = stage + '-' + i;
               if (stage === 'first') {
                 const { identifier } = await send(
@@ -507,6 +547,83 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                   'next page sample',
                 );
                 measurements.push({ stage, ms: epoch() - start });
+              } else if (stage === 'return') {
+                await until(
+                  () => requests.every((r) => r.status),
+                  'settled before view switch',
+                );
+                await evaluate("window.fixture.setFilter({group:'group-a'})");
+                await until(
+                  async () =>
+                    (await rows()).length === 20 &&
+                    requests.every((r) => r.status),
+                  'other filter',
+                );
+                const before = requests.length;
+                const start = epoch();
+                await evaluate('window.fixture.setFilter({})');
+                await until(
+                  async () => (await rows()).length === 40,
+                  'return to two cached/restored pages',
+                );
+                const metrics = await send('Performance.getMetrics');
+                measurements.push({
+                  stage,
+                  ms: epoch() - start,
+                  requests: requests
+                    .slice(before)
+                    .filter((r) => r.procedures.includes('article.list'))
+                    .length,
+                  heapBytes: metrics.metrics.find(
+                    (m) => m.name === 'JSHeapUsedSize',
+                  )?.value,
+                });
+                await evaluate(
+                  'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))',
+                );
+                await until(
+                  async () =>
+                    (await evaluate('window.fixture.pending()===0')) &&
+                    requests.every((r) => r.status),
+                  'return revalidation settles',
+                );
+                measurements[measurements.length - 1].revalidatedMs =
+                  epoch() - start;
+                measurements[measurements.length - 1].totalListRequests =
+                  requests
+                    .slice(before)
+                    .filter((r) =>
+                      r.procedures.includes('article.list'),
+                    ).length;
+                await send('HeapProfiler.collectGarbage');
+                const retained = await send('Performance.getMetrics');
+                measurements[measurements.length - 1].retainedHeapBytes =
+                  retained.metrics.find(
+                    (m) => m.name === 'JSHeapUsedSize',
+                  )?.value;
+                measurements[measurements.length - 1].storageBytes =
+                  await evaluate(
+                    'JSON.stringify([Object.entries(localStorage),Object.entries(sessionStorage)]).length*2',
+                  );
+              } else if (stage === 'reader') {
+                for (const warmth of ['first-read', 'warm-read']) {
+                  const start = epoch();
+                  await evaluate(
+                    "window.readerLoaded=0;Array.from(document.querySelectorAll('[data-article-id]')).find(e=>Number(e.dataset.articleId.slice(8))%7>=3).querySelector('a.compact-title').click()",
+                  );
+                  await until(
+                    () => evaluate('Boolean(window.readerLoaded)'),
+                    'saved HTML iframe loaded',
+                  );
+                  measurements.push({ stage: warmth, ms: epoch() - start });
+                  await evaluate(
+                    `document.querySelector('button[aria-label="Close"]').click()`,
+                  );
+                  await until(
+                    () => evaluate('!document.querySelector("iframe[title]")'),
+                    'reader closes',
+                  );
+                }
               } else {
                 const start = epoch();
                 await evaluate('window.fixture.refresh()');
@@ -519,6 +636,20 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
             }
         },
         {
+          '../utils/trpc': path.join(web, 'src/utils/trpc.ts'),
+          '../utils/auth': path.join(web, 'src/utils/auth.ts'),
+          '../utils/startup-status': path.join(
+            web,
+            'src/utils/startup-status.ts',
+          ),
+          '../utils/reading-query-cache': path.join(
+            web,
+            'src/utils/reading-query-cache.ts',
+          ),
+          '@trpc/client': path.join(web, 'node_modules/@trpc/client'),
+          '@nextui-org/react': path.join(web, 'node_modules/@nextui-org/react'),
+          sonner: path.join(web, 'node_modules/sonner'),
+          dayjs: path.join(web, 'node_modules/dayjs'),
           'react-router-dom': path.join(web, 'node_modules/react-router-dom'),
           '../utils/env': env,
           '@web/utils/env': env,
@@ -527,6 +658,7 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
         },
         {
           productionStyles: true,
+          cleanupOwnedFixture: true,
           handleRequest: (req, res) => {
             if (req.url.startsWith('/trpc/')) {
               application(req, res);
@@ -546,6 +678,8 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
         scope:
           'actual ArticleList and TrpcProvider; original protected HTTP routes; synthetic 32KiB bodies; no page reuse',
         count,
+        feedCount,
+        baseline: baseline || null,
         requests: requests.map(({ start, sqlStart, ...r }) => r),
         measurements,
       };

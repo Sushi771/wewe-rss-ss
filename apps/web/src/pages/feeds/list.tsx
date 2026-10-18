@@ -1,3 +1,4 @@
+import { READING_CACHE_TIME } from '@web/utils/reading-query-cache';
 import {
   FC,
   useCallback,
@@ -70,6 +71,7 @@ const ArticleList: FC<ArticleListProps> = ({
   useEffect(() => setReaderFindOpen(false), [readingId]);
   const reading = trpc.article.byId.useQuery(readingId || '', {
     enabled: Boolean(readingId),
+    cacheTime: READING_CACHE_TIME,
   });
   const queryUtils = trpc.useUtils();
   const bodyRetry = trpc.article.retryBody.useMutation();
@@ -96,7 +98,7 @@ const ArticleList: FC<ArticleListProps> = ({
       mpId,
       search: search || undefined,
     },
-    { enabled: !filterInvalid, cacheTime: 0 },
+    { enabled: !filterInvalid, cacheTime: READING_CACHE_TIME },
   );
 
   useEffect(() => {
@@ -124,7 +126,7 @@ const ArticleList: FC<ArticleListProps> = ({
     {
       getNextPageParam: (lastPage) => lastPage.nextCursor,
       enabled: !filterInvalid,
-      cacheTime: 0,
+      cacheTime: READING_CACHE_TIME,
       keepPreviousData: false,
       retry: false,
     },

@@ -30,6 +30,7 @@ on:
     branches:
       [
         main,
+        codex/a5-export-title-source-20261018,
         codex/reading-ui-media-final-20261018,
         codex/daily-saved-media-combined,
         codex/automatic-wechat-media-repair-20261018,
@@ -174,6 +175,8 @@ jobs:
         run: node --test scripts/account-login-ui.test.cjs scripts/wechat2rss-login-ui.test.cjs
       - name: Test Wechat2RSS source-specific metric visibility offline
         run: node --test scripts/wechat-source-metrics-ui.test.cjs
+      - name: Verify deployed export adaptation boundaries and bounded session caches
+        run: node --test scripts/deployed-export-adaptation.test.cjs scripts/reading-query-cache.test.cjs scripts/export-article-batches.test.cjs
       - name: Test compact reading toolbar and collapsed diagnostics offline
         run: node --test scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs
       - name: Test current article cache and retry history offline

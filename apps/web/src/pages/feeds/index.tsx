@@ -1,3 +1,4 @@
+import { exportArticleBatches } from '@web/utils/export-article-batches';
 import {
   Button,
   Modal,
@@ -440,15 +441,18 @@ const Feeds = () => {
   const [isBatchExporting, setIsBatchExporting] = useState(false);
   const batchExporting = useRef(false);
   const exportCancelled = useRef(false);
+  const exportController = useRef<AbortController | null>(null);
   const [exportResult, setExportResult] = useState('');
   useEffect(
     () => () => {
       exportCancelled.current = true;
+      exportController.current?.abort();
     },
     [],
   );
   useEffect(() => {
     exportCancelled.current = true;
+    exportController.current?.abort();
     setArticleSelectedIds(new Set());
   }, [
     id,
@@ -479,6 +483,8 @@ const Feeds = () => {
       return;
     batchExporting.current = true;
     exportCancelled.current = false;
+    const controller = new AbortController();
+    exportController.current = controller;
     setIsBatchExporting(true);
     const batchSelection = articleSelectedIds;
     const counts = { new: 0, skipped: 0, repaired: 0, failed: 0 };
@@ -493,28 +499,50 @@ const Feeds = () => {
           search: search || undefined,
         });
       ids = Array.from(new Set(ids));
-      for (const articleId of ids) {
-        if (exportCancelled.current) break;
-        try {
-          const result =
-            await queryUtils.client.article.saveToObsidian.mutate(articleId);
-          if (result.datePendingReason)
-            exportNotices.add(`日期待核（${result.datePendingReason}）`);
-          if (result.legacyLayoutRetained)
-            exportNotices.add('保留原有位置及编辑');
-          const status =
-            result.mediaComplete === false
-              ? 'failed'
-              : (result.status ?? (result.alreadySaved ? 'skipped' : 'new'));
-          counts[status]++;
-        } catch (error) {
-          counts.failed++;
-          exportNotices.add(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
+      const recordSaved: Parameters<typeof exportArticleBatches>[2] = (
+        result,
+      ) => {
+        if (result.datePendingReason)
+          exportNotices.add(`日期待核（${result.datePendingReason}）`);
+        if (result.legacyLayoutRetained)
+          exportNotices.add('保留原有位置及编辑');
+        const status =
+          result.mediaComplete === false
+            ? 'failed'
+            : (result.status ?? (result.alreadySaved ? 'skipped' : 'new'));
+        counts[status]++;
         setExportResult(
           `新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`,
+        );
+      };
+      const receipt = await exportArticleBatches(
+        ids,
+        (batch, signal) =>
+          queryUtils.client.article.saveToObsidianBatch.mutate(
+            { ids: batch },
+            { signal },
+          ),
+        recordSaved,
+        {
+          signal: controller.signal,
+          cancelled: () => exportCancelled.current,
+          onFailed: (error, saved, articleId) => {
+            if (saved)
+              recordSaved({ ...saved, mediaComplete: false }, articleId);
+            else {
+              counts.failed++;
+              exportNotices.add(error.message);
+              setExportResult(
+                `新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`,
+              );
+            }
+          },
+        },
+      );
+      if (receipt.unconfirmed) {
+        exportCancelled.current = true;
+        exportNotices.add(
+          '当前批次回执未确认；已停止后续提交，已发出的单篇仍会安全收尾。重新导出会校验已有文件，不会自动重试。',
         );
       }
       const message = `${exportCancelled.current ? '已停止后续导出：' : ''}新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`;
@@ -535,6 +563,7 @@ const Feeds = () => {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      exportController.current = null;
       batchExporting.current = false;
       setIsBatchExporting(false);
     }
@@ -1404,6 +1433,7 @@ const Feeds = () => {
                   className="h-8"
                   onPress={() => {
                     exportCancelled.current = true;
+                    exportController.current?.abort();
                   }}
                 >
                   停止后续导出

@@ -1,3 +1,4 @@
+import { exportArticleBatches } from '../../../web/src/utils/export-article-batches';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -61,7 +62,10 @@ function evaluate(
     Set,
     Array,
     Error,
+    AbortController,
+    exportArticleBatches,
     exportCancelled: { current: false },
+    exportController: { current: null },
     ...scope,
   };
   vm.runInNewContext(
@@ -82,6 +86,7 @@ function exportFixture(ids: string[], save: (id: string) => Promise<any>) {
     articleSelectedIds: state.selected,
     batchExporting: { current: false },
     exportCancelled: { current: false },
+    exportController: { current: null },
     dateError: undefined,
     setExportResult: jest.fn(),
     setIsBatchExporting: (busy: boolean) => {
@@ -92,7 +97,38 @@ function exportFixture(ids: string[], save: (id: string) => Promise<any>) {
     ) => {
       state.selected = typeof next === 'function' ? next(state.selected) : next;
     },
-    queryUtils: { client: { article: { saveToObsidian: { mutate: save } } } },
+    queryUtils: {
+      client: {
+        article: {
+          saveToObsidianBatch: {
+            mutate: async ({ ids }: { ids: string[] }) => {
+              const results: any[] = [];
+              for (const id of ids) {
+                if (scope.exportCancelled.current) break;
+                try {
+                  const saved = await save(id);
+                  results.push({
+                    id,
+                    saved: {
+                      markdownPath: id + '.md',
+                      alreadySaved: false,
+                      ...saved,
+                    },
+                  });
+                } catch (error) {
+                  results.push({
+                    id,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                }
+              }
+              return { results, cancelled: scope.exportCancelled.current };
+            },
+          },
+        },
+      },
+    },
     toast: { success: jest.fn(), error: jest.fn(), warning: jest.fn() },
   };
   return {

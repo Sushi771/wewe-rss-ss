@@ -4,7 +4,8 @@ import { Article } from '@prisma/client';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { TRPCError } from '@trpc/server';
-import { buildArticleMarkdown, cachedMediaUnconfirmed } from './article-export';
+import { buildArticleMarkdown } from './article-export';
+import { cachedArticleMediaAnalysis } from './cached-article-media-analysis';
 import { decodeInlineImage, fetchAllowedImage } from './collection/image-fetch';
 import { ArticlePreparation } from './article-local-save';
 import { ArticleExportSource } from './article-export-source';
@@ -70,43 +71,37 @@ export function prepareCachedArticleLocalExport(
     sourceUrl: snapshot.sourceUrl,
     publishTime: snapshot.publishTime,
   };
-  const html = load(snapshot.contentHtml || '');
-  const content = html('.rich_media_content').length
-    ? html('.rich_media_content')
-    : html('#js_content');
-  prepare.hasUnarchivedMedia = (imageMap) =>
-    content
-      .find('img')
-      .toArray()
-      .some((element) => {
-        const src = html(element).attr('src') || '';
-        const source = src.startsWith('data:')
-          ? src
-          : html(element).attr('data-src') || src;
-        if (!source.trim()) return false;
-        const prefix = `image_${createHash('md5').update(source).digest('hex')}.`;
-        return !Object.keys(imageMap).some((name) => name.startsWith(prefix));
-      });
-  // A legacy receipt cannot prove media that the cached source omitted.
-  // Missing database content alone must not invalidate an existing export.
-  if (cachedMediaUnconfirmed(snapshot)) {
-    prepare.identity.mediaComplete = false;
-    prepare.identity.mediaStatus = 'unconfirmed';
-  }
-  prepare.canReuseLegacyImages = content
-    .find('img')
-    .toArray()
-    .every((element) => {
-      const src = html(element).attr('src') || '';
-      return (
-        src.startsWith('data:image/') ||
-        (!src && !html(element).attr('data-src'))
-      );
-    });
+  let analysis: ReturnType<typeof cachedArticleMediaAnalysis> | undefined;
+  const analyze = () => (analysis ??= cachedArticleMediaAnalysis(snapshot));
+  prepare.hasUnarchivedMedia = (imageMap) => {
+    const names = Object.keys(imageMap);
+    return analyze().sourcePrefixes.some(
+      (prefix) => !names.some((name) => name.startsWith(prefix)),
+    );
+  };
+  // New exports go directly to conversion. Retained receipts need content facts,
+  // not a second DOM retained for the lifetime of every preparation.
+  Object.defineProperties(prepare.identity, {
+    mediaComplete: {
+      enumerable: true,
+      get: () => (analyze().unconfirmed ? false : undefined),
+    },
+    mediaStatus: {
+      enumerable: true,
+      get: () => (analyze().unconfirmed ? 'unconfirmed' : undefined),
+    },
+  });
+  Object.defineProperty(prepare, 'canReuseLegacyImages', {
+    get: () => analyze().canReuseLegacyImages,
+  });
   prepare.seedImages = async (stage, folder, images) => {
     // Old receipts lack URL mappings. Archived inline bytes can still identify
     // existing content hashes without requesting any media or changing names.
     await fs.mkdir(join(stage, 'image'), { recursive: true });
+    const html = load(snapshot.contentHtml || '');
+    const content = html('.rich_media_content').length
+      ? html('.rich_media_content')
+      : html('#js_content');
     for (const element of content.find('img').toArray()) {
       const src = html(element).attr('src') || '';
       if (!src.startsWith('data:image/')) continue;
