@@ -88,7 +88,7 @@ jobs:
       - name: Build Server
         run: pnpm --filter server build
       - name: Test image replay and one-article import offline
-        run: node --test scripts/research/replay-browser-dom-images-copy.spec.cjs scripts/research/commit-browser-dom-images-once.spec.cjs
+        run: node --test scripts/research/replay-browser-dom-images-copy.spec.cjs scripts/research/replay-weread-directory-copy.spec.cjs scripts/research/commit-browser-dom-images-once.spec.cjs
 
   private-image:
     runs-on: ubuntu-latest
