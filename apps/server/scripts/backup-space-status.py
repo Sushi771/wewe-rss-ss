@@ -9,7 +9,8 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location('backup_sqlite', Path(__file__).with_name('backup-sqlite.py'))
 backup = importlib.util.module_from_spec(spec); spec.loader.exec_module(backup)
 
-def status(database, root, interval_seconds=900):
+def status(database, root, interval_seconds=None):
+    interval_seconds=backup.periodic_lifecycle().interval(interval_seconds)
     database, root = database.resolve(strict=True), root.resolve()
     files = backup.managed_files(root)
     databases = [file for file in files if file.suffix.lower() in ('.db','.sqlite','.sqlite3')]
@@ -27,7 +28,10 @@ def status(database, root, interval_seconds=900):
     days = more*interval_seconds/86400
     ready = used+expected <= max_bytes and len(databases)+1 <= max_copies and free-expected >= min_free
     warning = not ready or used/max_bytes >= .5 or len(databases)/max_copies >= .5 or days < 1
-    return {'root':str(root),'existingBytes':used,'existingCopies':len(databases),'sourceBytes':actual,'nextReservedBytes':expected,'freeBytes':free,'maxBytes':max_bytes,'maxCopies':max_copies,'minFreeBytes':min_free,'nextBackupAllowed':ready,'continuousChangedSnapshotIntervalSeconds':interval_seconds,'estimatedAdditionalFullSnapshots':more,'estimatedDaysAtContinuousChanges':round(days,2),'warning':warning,'automaticDeletion':False,'action':'Review verified recovery windows and propose a separately approved archive/move plan; do not delete unique recovery points' if warning else 'Review capacity at least daily'}
+    return {'root':str(root),'existingBytes':used,'existingCopies':len(databases),'sourceBytes':actual,'nextReservedBytes':expected,'freeBytes':free,'maxBytes':max_bytes,'maxCopies':max_copies,'minFreeBytes':min_free,'nextBackupAllowed':ready,'continuousChangedSnapshotIntervalSeconds':interval_seconds,'estimatedAdditionalFullSnapshots':more,'estimatedDaysAtContinuousChanges':round(days,2),'warning':warning,'automaticDeletion':False,
+            'periodicLifecycle':backup.periodic_lifecycle().read_status(database,root),
+            'forecastBasis':'continuously-changing-source; unchanged snapshots may be reused',
+            'action':'Review verified recovery windows and prepare a separately approved exact retirement; unique recovery points remain protected' if warning else 'Review capacity at least daily'}
 
 def archive_candidates(root, min_age_days=7):
     records=[]
@@ -48,10 +52,9 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--database',type=Path,required=True)
     parser.add_argument('--backup-root',type=Path)
-    parser.add_argument('--interval-seconds',type=int,default=900)
+    parser.add_argument('--interval-seconds',type=int)
     parser.add_argument('--archive-plan',action='store_true')
     args=parser.parse_args()
-    if args.interval_seconds<=0: raise ValueError('Invalid interval')
     root=(args.backup_root or Path(os.environ.get('SQLITE_PRODUCTION_BACKUP_ROOT',args.database.parent/'backups'))).resolve()
     report=status(args.database,root,args.interval_seconds)
     if args.archive_plan: report['reviewCandidates']=archive_candidates(root)

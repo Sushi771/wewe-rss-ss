@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+from types import SimpleNamespace
 import time
 import uuid
 
@@ -158,11 +159,16 @@ class ReadBudget:
             raise MaintenanceError('SCAN_DEADLINE')
     def json(self, path):
         self.tick()
-        size = path.stat().st_size
-        if size > 128*1024 or self.used + size > self.maximum:
-            raise MaintenanceError('READ_BUDGET_EXCEEDED')
-        self.used += size
-        return json.loads(path.read_text(encoding='utf-8-sig'))
+        before=identity(path)
+        with path.open('rb') as stream:
+            size=os.fstat(stream.fileno()).st_size
+            if size > 128*1024 or self.used + size > self.maximum:
+                raise MaintenanceError('READ_BUDGET_EXCEEDED')
+            data=stream.read(min(128*1024+1,self.maximum-self.used+1))
+        self.used += len(data)
+        if len(data)>128*1024 or self.used>self.maximum or identity(path)!=before:
+            raise MaintenanceError('READ_BUDGET_EXCEEDED_OR_CHANGED')
+        return json.loads(data.decode('utf-8-sig'))
     def sha(self, path):
         self.tick()
         before = identity(path)
@@ -259,6 +265,9 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
     database, root = local_path(str(database)), local_path(str(root))
     if database.is_relative_to(root): raise MaintenanceError('NESTED_SOURCE_DESTINATION')
     if any(database.is_relative_to(p) for p in backup.legacy_roots()):raise MaintenanceError('NESTED_SOURCE_LEGACY_ROOT')
+    lifecycle=None
+    if periodic_only and owned_lease is None and any(p.exists() for p in backup.periodic_lifecycle().paths(database,root)):
+        lifecycle,owned_lease,oldest,pending=backup.periodic_lifecycle().plan_binding(database,root)
     now = int(time.time()) if now is None else finite(now, 1, 2**53)
     age_days = finite(age_days, 1, 365)
     policy=retention_policy(policy)
@@ -377,7 +386,7 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
     if headroom<=(policy['reserveCopies'] if policy else 2):alarms.append('generation-reserve')
     if tier_summary.get('ordinaryTargetExceeded'):alarms.append('protected-time-windows-exceed-count-target')
     if tier_summary.get('ordinaryByteTargetExceeded'):alarms.append('protected-time-windows-exceed-byte-target')
-    rate=policy['expectedGenerationsPerDay'] if policy else 96
+    rate=policy['expectedGenerationsPerDay'] if policy else 86400/backup.periodic_lifecycle().interval()
     if headroom/rate<3:alarms.append('less-than-three-days-at-configured-rate')
     payload = {'format':FORMAT,'root':str(root),'database':str(database),'createdAtEpoch':now,'expiresAtEpoch':now+86400,
                'referenceDigest':ref_digest,'referenceRecords':records,'protected':refs,'candidates':candidates,'held':held,
@@ -390,6 +399,16 @@ def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**
                           'configuredGenerationsPerDay':rate,'nextReservedBytes':reserved,**tier_summary,
                           'automaticDeletion':False}}
     if periodic_only:payload['rootIdentity']=directory_identity(root)
+    if lifecycle is not None:
+        # Only the oldest member of THIS existing allocation can be confirmed.
+        allowed=[e for e in payload['candidates'] if e['path']==oldest]
+        if pending['path'] not in payload['protected']:raise MaintenanceError('PENDING_REFERENCE_REQUIRED')
+        for e in allowed:
+            e.update(representative=pending['path'],representativeIdentity=pending['identity'],representativeSha256=pending['sha256'])
+        payload['held'] += [{'path':e['path'],'reason':'outside exact pending lifecycle action'} for e in payload['candidates'] if e['path']!=oldest]
+        payload['candidates']=allowed
+        payload['summary'].update(candidateCount=len(allowed),candidateBytes=sum(e['bytes'] for e in allowed))
+        payload['periodicLifecycle']=lifecycle
     checksum = digest(payload)
     return {'batchId':f'retention-{now}-{checksum[:16]}','digest':checksum,'payload':payload}
 
@@ -454,6 +473,9 @@ def validate_batch(plan, approval, resource_report, now=None, read_bytes=64*1024
     now=int(time.time()) if now is None else now
     p=plan.get('payload',{})
     if p.get('format')!=FORMAT or plan.get('digest')!=digest(p): raise MaintenanceError('BATCH_DIGEST_MISMATCH')
+    if 'periodicLifecycle' in p and owned_lease is None:
+        binding,owned_lease,_oldest,_pending=backup.periodic_lifecycle().plan_binding(Path(p['database']),Path(p['root']))
+        if binding!=p['periodicLifecycle']:raise MaintenanceError('LIFECYCLE_BINDING_CHANGED')
     policy=retention_policy(policy)
     if p.get('policy',{}).get('retention')!=policy:raise MaintenanceError('RETENTION_POLICY_CHANGED')
     periodic_only=p.get('policy',{}).get('periodicOnly') is True
@@ -544,7 +566,7 @@ def validate_batch(plan, approval, resource_report, now=None, read_bytes=64*1024
 
 class WindowsPin:
     """Delete the verified object by handle, never by a re-resolved pathname."""
-    def __init__(self,path,expected,directory=False,delete=False,sharing=0):
+    def __init__(self,path,expected,directory=False,delete=False,sharing=0,writable=False):
         if os.name!='nt':raise MaintenanceError('VERIFIED_ROTATION_REQUIRES_WINDOWS')
         import ctypes
         from ctypes import wintypes
@@ -555,11 +577,11 @@ class WindowsPin:
         create.restype=wintypes.HANDLE
         # Directories deny rename. Selected data is exclusive; reference readers
         # and existing OS lock streams use explicit non-delete sharing modes.
-        access=(0 if directory else 0x80000000)|(0x10000 if delete else 0)
+        access=(0 if directory else 0x80000000)|(0x10000 if delete else 0)|(0x40000000 if writable else 0)
         if sharing not in (0,1,3):raise MaintenanceError('UNSAFE_PIN_SHARING')
         handle=create(str(path),access,3 if directory else sharing,None,3,0x00200000|(0x02000000 if directory else 0),None)
         if handle==wintypes.HANDLE(-1).value:raise MaintenanceError('EXCLUSIVE_OBJECT_PIN_FAILED')
-        try:self.fd=msvcrt.open_osfhandle(handle,os.O_RDONLY|os.O_BINARY)
+        try:self.fd=msvcrt.open_osfhandle(handle,(os.O_RDWR if writable else os.O_RDONLY)|os.O_BINARY)
         except BaseException:
             self.api.CloseHandle.argtypes=[wintypes.HANDLE];self.api.CloseHandle(handle);raise
         try:
@@ -834,6 +856,11 @@ def execute_periodic_batch(plan,approval,resource_report,now=None,read_bytes=64*
         raise MaintenanceError('PERIODIC_ROTATION_PLAN_REQUIRED')
     if plan['payload']['policy'].get('referenceConcurrency')!='current-publishers-and-pinned-manifests-v1':
         raise MaintenanceError('REFERENCE_CONCURRENCY_PLAN_REQUIRED')
+    database=Path(plan['payload']['database']);root=Path(plan['payload']['root'])
+    has_lifecycle=any(p.exists() for p in backup.periodic_lifecycle().paths(database,root))
+    if 'periodicLifecycle' in plan['payload']:
+        return backup.periodic_lifecycle().execute(plan,approval,resource_report,now,read_bytes,protected_paths,policy,SimpleNamespace(**globals()))
+    if has_lifecycle:raise MaintenanceError('LIFECYCLE_BOUND_ACTION_REQUIRED')
     result=validate_batch(plan,approval,resource_report,now,read_bytes,protected_paths,policy)
     if result['skipped']:raise MaintenanceError('ROTATION_BATCH_NOT_FULLY_PROVED')
     if os.name!='nt':raise MaintenanceError('VERIFIED_ROTATION_REQUIRES_WINDOWS')

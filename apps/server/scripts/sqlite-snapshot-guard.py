@@ -73,6 +73,7 @@ class SnapshotGuard:
         self.receipt = self.backup_root / f"snapshot-owner-{lock_name}.json"
         self.record = None
         self.failure = None
+        self.lifecycle_status = None
         self.reason = "startup-backup-required"
         self.fatal = False
         self.leases = {}
@@ -167,7 +168,9 @@ class SnapshotGuard:
             self.invalidate("snapshot-in-progress")
             start_wall, start_mono = self.clock()
             stage='copy'
-            report = self.backup(self.database, self.backup_root, prefix="periodic-snapshot")
+            report = self.backup(self.database, self.backup_root, prefix="periodic-snapshot",
+                                 **({'periodic_now':start_wall} if self.backup is backup_module.create_backup else {}))
+            self.lifecycle_status=report.get('periodicLifecycleStatus')
             self.retention_lease_identity=report.get('retentionLeaseIdentity')
             stage='verify'
             completed_wall, completed_mono = self.clock()
@@ -224,6 +227,9 @@ class SnapshotGuard:
                 self.persist()
         except Exception as error:
             self.failure=backup_module.safe_backup_failure(error,stage)
+            self.lifecycle_status=backup_module.periodic_lifecycle().read_status(self.database,self.backup_root)
+            if self.failure['code']=='SQLITE_PERIODIC_NOT_DUE' and self.lifecycle_status:
+                self.next_check=mono+max(1,min(self.interval,self.lifecycle_status.get('nextGenerationAtEpoch',wall+self.interval)-wall))
             reason = str(error)
             safe = reason if reason in {
                 "clock-rollback", "database-replaced", "owner-lock-replaced",
@@ -236,6 +242,7 @@ class SnapshotGuard:
 
     def status(self):
         return {'event':'periodic-snapshot-status','ok':self.record is not None,
+                **({'lifecycle':self.lifecycle_status} if self.lifecycle_status else {}),
                 **({'failure':self.failure} if self.record is None and self.failure else {}),
                 **({'retention':self.record['automaticRetention']} if self.record and 'automaticRetention' in self.record else {})}
 

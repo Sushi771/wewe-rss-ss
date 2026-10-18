@@ -415,6 +415,7 @@ function build(options = {}) {
       'backup-sqlite.py',
       'backup-space-status.py',
       'sqlite-retention-plan.py',
+        'periodic-lifecycle.py',
       'query-retention-resources.ps1',
       ...(legacy
         ? []
