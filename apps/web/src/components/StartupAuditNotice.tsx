@@ -1,4 +1,10 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  readStartupStatus,
+  startupBlockingMessage,
+  STORAGE_DETAILS_PATH,
+} from '@web/utils/startup-status';
 
 export default function StartupAuditNotice() {
   const [message, setMessage] = useState('');
@@ -8,15 +14,9 @@ export default function StartupAuditNotice() {
     const check = async () => {
       let delay = 1500;
       try {
-        const response = await fetch('/startup-status', {
-          cache: 'no-store',
-          signal: AbortSignal.timeout(5000),
-        });
-        if (response.ok) {
-          const state = await response.json();
-          if (!cancelled) setMessage(state.message || '');
-          delay = state.status === 'ready' ? 30000 : 1500;
-        }
+        const state = await readStartupStatus(AbortSignal.timeout(5000));
+        if (!cancelled) setMessage(startupBlockingMessage(state));
+        delay = state.status === 'ready' ? 30000 : 1500;
       } catch {
         /* A disconnected service must never be described as ready. */
       }
@@ -30,7 +30,10 @@ export default function StartupAuditNotice() {
   }, []);
   return message ? (
     <div role="status" className="border-divider border-b px-4 py-2 text-sm">
-      {message}
+      {message}{' '}
+      <Link to={STORAGE_DETAILS_PATH} className="text-primary underline">
+        查看详情
+      </Link>
     </div>
   ) : null;
 }

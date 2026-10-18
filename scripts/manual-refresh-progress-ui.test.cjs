@@ -53,6 +53,7 @@ function fixture(batch) {
         return {
           useRef: (value) => ({ current: value }),
           useState: (value) => [value, () => {}],
+          useEffect: () => {},
         };
       if (name === '@nextui-org/react')
         return { Button: 'Button', Progress: 'Progress' };

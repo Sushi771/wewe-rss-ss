@@ -21,6 +21,7 @@ on:
         codex/daily-saved-media-combined,
         codex/automatic-wechat-media-repair-20261018,
         codex/automatic-media-clean-export-20261018,
+        codex/reading-ui-media-final-20261018,
         codex/export-real-metrics-only-20261014,
         codex/folder-rename-latency,
       ]
@@ -30,6 +31,7 @@ on:
         main,
         codex/daily-saved-media-combined,
         codex/automatic-wechat-media-repair-20261018,
+        codex/automatic-media-clean-export-20261018,
         codex/manual-refresh-download-integration,
         codex/cold-launch-profile,
         codex/automatic-refresh-recovery-20261013,
@@ -162,6 +164,8 @@ jobs:
 
       - name: Type check Web
         run: pnpm --filter web build
+      - name: Test concise reading status and preserved browse state offline
+        run: node --test scripts/storage-status-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/feed-browse-state.test.cjs
       - name: Test account modal eligibility and viewport CSS contract (no UI or HTTP)
         run: node --test scripts/check-account-modal-logic.test.cjs
       - name: Test account expiry and explicit QR recovery offline
@@ -188,6 +192,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Test visible pagination and on-demand storage with actual browser components
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+          ARTICLE_LIST_BROWSER_SAMPLES: '1'
+        run: node --test --test-concurrency=1 scripts/article-list-browser.test.cjs scripts/reading-status-browser.test.cjs
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
       - name: Test independent media reconciliation and global stop offline

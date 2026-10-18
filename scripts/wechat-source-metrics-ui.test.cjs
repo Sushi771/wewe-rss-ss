@@ -131,6 +131,10 @@ function fixture({
       ];
     },
     useMemo: (fn) => fn(),
+    useRef(initial) {
+      const i = cursor++;
+      return (state[i] ||= { current: initial });
+    },
     useCallback: (fn) => fn,
     useEffect() {},
     useLayoutEffect() {},
