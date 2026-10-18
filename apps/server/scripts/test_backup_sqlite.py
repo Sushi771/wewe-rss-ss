@@ -22,7 +22,8 @@ class BackupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="synthetic-backup-")
         self.addCleanup(self.temp.cleanup)
-        self.database = Path(self.temp.name) / "source.db"
+        # Match the runtime's canonical URI, including Windows 8.3 temp aliases.
+        self.database = Path(self.temp.name).resolve() / "source.db"
         self.backups = Path(self.temp.name) / "backups"
         with closing(sqlite3.connect(self.database)) as db:
             db.executescript("CREATE TABLE feeds(id INTEGER PRIMARY KEY, value INTEGER);"
