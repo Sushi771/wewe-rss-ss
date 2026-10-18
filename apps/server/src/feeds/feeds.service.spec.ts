@@ -50,6 +50,7 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
   let base: string;
   let finishCatchup: () => void;
   let html: jest.SpyInstance;
+  let articleReads: any[];
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-rss-readiness-'));
@@ -66,6 +67,12 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
       CRON_EXPRESSION: '15 9 * * *',
     });
     prisma = new PrismaService();
+    articleReads = [];
+    prisma.$use(async (params, next) => {
+      if (params.model === 'Article' && params.action === 'findMany')
+        articleReads.push(params.args);
+      return next(params);
+    });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
     for (const name of (await fs.readdir(migrations)).sort()) {
       const sql = await fs
@@ -174,6 +181,15 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
     const xml = await result.text();
     expect((xml.match(/<item>/g) || []).length).toBe(20);
     expect(xml).not.toContain('synthetic body');
+    expect(articleReads[articleReads.length - 1].select).toEqual({
+      id: true,
+      title: true,
+      publishTime: true,
+      picUrl: true,
+      mpId: true,
+      sourceUrl: true,
+      lastBodyStatus: true,
+    });
   }
 
   it('bootstrap does not await pending catchup and summary RSS returns 20 without upstream or backup', async () => {
@@ -215,4 +231,142 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
     expect(html).not.toHaveBeenCalled();
     expect(backup.createVerifiedSqliteBackup).not.toHaveBeenCalled();
   });
+});
+
+describe('RSS summary projection preserves every output and full-text mode', () => {
+  const modes = [
+    {
+      label: 'explicit summary',
+      mode: 'summary',
+      configured: 'fulltext',
+      fulltext: false,
+    },
+    {
+      label: 'explicit fulltext',
+      mode: 'fulltext',
+      configured: 'summary',
+      fulltext: true,
+    },
+    {
+      label: 'configured summary',
+      mode: undefined,
+      configured: 'summary',
+      fulltext: false,
+    },
+    {
+      label: 'configured fulltext',
+      mode: undefined,
+      configured: 'fulltext',
+      fulltext: true,
+    },
+  ];
+  const cases = ['rss', 'json', 'atom'].flatMap((type) =>
+    modes.flatMap((mode) =>
+      [true, false].map((single) => ({ type, ...mode, single })),
+    ),
+  );
+  it.each(cases)(
+    '$type / $label / single=$single retains identical bytes and query bounds',
+    async ({ type, mode, configured, fulltext, single }) => {
+      const now = jest.spyOn(Date, 'now').mockReturnValue(1700000000000);
+      try {
+        const feed = {
+          id: 'MP_WXS_3895431412',
+          mpName: 'Synthetic publisher',
+          mpIntro: 'Original intro',
+          mpCover: '',
+          updateTime: 1700000000,
+        };
+        const article = {
+          id: 'saved-article',
+          title: 'Preserved title',
+          publishTime: 1699999999,
+          picUrl: '',
+          mpId: feed.id,
+          sourceUrl: 'https://mp.weixin.qq.com/s/saved',
+          lastBodyStatus: 'ready',
+          contentHtml: '<p>retained saved body</p>',
+          metrics: '{"read":42}',
+          readCount: 42,
+        };
+        const findMany = jest.fn(async (args) => [
+          args.select
+            ? Object.fromEntries(
+                Object.keys(args.select).map((key) => [key, article[key]]),
+              )
+            : article,
+        ]);
+        const prisma = {
+          feed: {
+            findFirst: jest.fn(async () => feed),
+            findMany: jest.fn(async () => [feed]),
+          },
+          article: { findMany },
+        };
+        const service = new FeedsService(
+          prisma as any,
+          {} as any,
+          new ConfigService({
+            feed: { originUrl: 'http://127.0.0.1', mode: configured },
+          }),
+        );
+        const upstream = jest
+          .spyOn(service, 'getHtmlByUrl')
+          .mockRejectedValue(Error('NO_UPSTREAM'));
+        const feedInfo = single
+          ? feed
+          : {
+              id: 'all',
+              mpName: 'WeWe-RSS All',
+              mpIntro: 'WeWe-RSS 全部文章',
+              mpCover: 'http://127.0.0.1/favicon.ico',
+              updateTime: 1700000000,
+            };
+        const broad = await service.renderFeed({
+          feedInfo: feedInfo as any,
+          articles: [article],
+          type,
+          mode,
+        });
+        const expected =
+          type === 'rss'
+            ? broad.rss2()
+            : type === 'json'
+              ? broad.json1()
+              : broad.atom1();
+        const result = await service.handleGenerateFeed({
+          id: single ? feed.id : undefined,
+          type,
+          mode,
+          limit: 20,
+          page: 2,
+        });
+        expect(result.content).toBe(expected);
+        expect(findMany).toHaveBeenCalledTimes(1);
+        const query = findMany.mock.calls[0][0];
+        expect(query.take).toBe(20);
+        expect(query.skip).toBe(20);
+        expect(query.orderBy).toEqual({ publishTime: 'desc' });
+        expect(query.where).toEqual(single ? { mpId: feed.id } : undefined);
+        if (fulltext) {
+          expect(query.select).toBeUndefined();
+          expect(result.content).toContain('retained saved body');
+        } else {
+          expect(Object.keys(query.select).sort()).toEqual([
+            'id',
+            'lastBodyStatus',
+            'mpId',
+            'picUrl',
+            'publishTime',
+            'sourceUrl',
+            'title',
+          ]);
+          expect(result.content).not.toContain('retained saved body');
+        }
+        expect(upstream).not.toHaveBeenCalled();
+      } finally {
+        now.mockRestore();
+      }
+    },
+  );
 });
