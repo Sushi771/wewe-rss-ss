@@ -27,7 +27,6 @@ const PRIVATE_BASE = path.join(
   ROOT,
   'private-data/single-account-update-20260930',
 );
-const PRODUCTION_DB = path.join(SERVER, 'data/wewe-rss.db');
 const HEX_SHA = /^[a-f0-9]{64}$/;
 const IMAGE_MIME = new Map([
   ['image/png', '.png'],
@@ -368,27 +367,38 @@ function assertOldRowsUnchanged(before, after) {
   }
 }
 
-/** The CLI never accepts a database path; tests can inject a synthetic one. */
+/** The CLI uses a public-schema fixture; tests may supply their own fixture. */
 async function runImageCopyRehearsal(options = {}) {
-  if (options.sourceDb && !process.env.NODE_TEST_CONTEXT)
+  if (
+    (options.sourceDb || options.keepTestDatabases) &&
+    !process.env.NODE_TEST_CONTEXT
+  )
     fail('TEST_DATABASE_OVERRIDE_FORBIDDEN');
   const guard = installNetworkGuard();
   const oldEnv = {
     database: process.env.DATABASE_URL,
     scheduled: process.env.DISABLE_SCHEDULED_UPDATES,
     privateMode: process.env.PRIVATE_ONLINE_MODE,
+    testBackupRoot: process.env.SQLITE_TEST_BACKUP_ROOT,
   };
-  let prisma;
+  let prisma, artifacts, artifactError;
   try {
     // Every image and every source occurrence is verified before SQLite opens.
     const loaded = loadVerifiedImageManifest(options);
-    const sourceDb = fs.realpathSync(options.sourceDb || PRODUCTION_DB);
+    artifacts = require('../local-release/test-artifacts.cjs').begin({
+      source: options.sourceDb,
+      realCopy: Boolean(options.sourceDb),
+      prepared: Boolean(options.sourceDb),
+      keep: Boolean(options.keepTestDatabases),
+      migrations: path.join(SERVER, 'prisma/migrations'),
+    });
+    const sourceDb = artifacts.database;
     const sourceHash = sha256(fs.readFileSync(sourceDb));
     // A main-file hash alone misses committed SQLite WAL changes. Compare
     // every logical source row as well before claiming the source is intact.
     const sourceBefore = snapshotTables(sourceDb);
-    const baseDir = fs.realpathSync(options.baseDir || PRIVATE_BASE);
-    const trialDir = fs.mkdtempSync(path.join(baseDir, 'image-replay-trial-'));
+    const trialDir = artifacts.audit;
+    process.env.SQLITE_TEST_BACKUP_ROOT = path.join(trialDir, 'backups');
     const copyDb = path.join(trialDir, 'trial.db');
     const source = new DatabaseSync(sourceDb, { readOnly: true });
     try {
@@ -396,6 +406,7 @@ async function runImageCopyRehearsal(options = {}) {
     } finally {
       source.close();
     }
+    artifacts.checkpoint();
     if (fs.realpathSync(copyDb).toLowerCase() === sourceDb.toLowerCase())
       fail('COPY_IS_SOURCE_DATABASE');
     fs.writeFileSync(
@@ -489,6 +500,7 @@ async function runImageCopyRehearsal(options = {}) {
       success: true,
       offline: true,
       copyOnly: true,
+      syntheticDatabase: !options.sourceDb,
       articleId: TARGET_ARTICLE_ID,
       imageOccurrences: loaded.counts.occurrences,
       uniqueImages: loaded.counts.unique,
@@ -499,6 +511,7 @@ async function runImageCopyRehearsal(options = {}) {
       sourceDatabaseUnchanged: true,
       networkRequests: guard.count(),
       integrityCheck: 'ok',
+      audit: trialDir,
     };
     fs.writeFileSync(
       path.join(trialDir, 'result.json'),
@@ -506,17 +519,32 @@ async function runImageCopyRehearsal(options = {}) {
       { flag: 'wx', mode: 0o600 },
     );
     return result;
+  } catch (error) {
+    artifactError = error;
+    throw error;
   } finally {
-    if (prisma) await prisma.$disconnect();
-    if (oldEnv.database === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = oldEnv.database;
-    if (oldEnv.scheduled === undefined)
-      delete process.env.DISABLE_SCHEDULED_UPDATES;
-    else process.env.DISABLE_SCHEDULED_UPDATES = oldEnv.scheduled;
-    if (oldEnv.privateMode === undefined)
-      delete process.env.PRIVATE_ONLINE_MODE;
-    else process.env.PRIVATE_ONLINE_MODE = oldEnv.privateMode;
-    guard.restore();
+    try {
+      if (prisma) await prisma.$disconnect();
+    } catch (error) {
+      // An unconfirmed disconnect must preserve files rather than deleting
+      // a database that may still have a writer. The owned lease stays held.
+      artifactError = error;
+      throw error;
+    } finally {
+      if (oldEnv.database === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = oldEnv.database;
+      if (oldEnv.scheduled === undefined)
+        delete process.env.DISABLE_SCHEDULED_UPDATES;
+      else process.env.DISABLE_SCHEDULED_UPDATES = oldEnv.scheduled;
+      if (oldEnv.privateMode === undefined)
+        delete process.env.PRIVATE_ONLINE_MODE;
+      else process.env.PRIVATE_ONLINE_MODE = oldEnv.privateMode;
+      if (oldEnv.testBackupRoot === undefined)
+        delete process.env.SQLITE_TEST_BACKUP_ROOT;
+      else process.env.SQLITE_TEST_BACKUP_ROOT = oldEnv.testBackupRoot;
+      guard.restore();
+    }
+    artifacts?.finish(artifactError);
   }
 }
 

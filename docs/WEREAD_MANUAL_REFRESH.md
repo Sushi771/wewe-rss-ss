@@ -60,7 +60,7 @@
 node scripts/research/replay-weread-directory-copy.cjs --manifest private-data/edge-success-20261004/offline-replay-manifest.json
 ```
 
-manifest 仅存被 Git 忽略的 `private-data/`，包含 `mpId/name`、两页 `pages` 的 `file/sha256`，以及 `bodies` 的 `file/sha256/reviewId/capturedAt/images`。`reviewId` 必须来自保存该正文时实际请求的身份，不通过标题猜测；当前单篇已与独立保存的 cover 响应核对相同。外部图片缓存记录包含 `file/sha256/url/mimeType`；已有内嵌图片无需再次请求。脚本校验各输入哈希，封锁网络，创建生产数据库的一致性副本，仅在副本保存及重复保存，并核对旧行和生产不变。报告在新建的私有演练目录 `result.json`，不含账号凭据。
+manifest 仅存被 Git 忽略的 `private-data/`，包含 `mpId/name`、两页 `pages` 的 `file/sha256`，以及 `bodies` 的 `file/sha256/reviewId/capturedAt/images`。`reviewId` 必须来自保存该正文时实际请求的身份，不通过标题猜测；当前单篇已与独立保存的 cover 响应核对相同。外部图片缓存记录包含 `file/sha256/url/mimeType`；已有内嵌图片无需再次请求。脚本校验各输入哈希并封锁网络，复用受管 `test-artifacts` 创建的公开迁移合成库，只在小型合成副本保存及重复保存，核对合成旧行不变。它不再读取或复制生产数据库。Prisma 确认断开后，成功和普通失败都会回收本次数据库及其 sidecar；`result.json`、受管 manifest 和空间摘要留在 `WEWE_TEST_OUTPUT_ROOT` 下。断开或文件身份不明则保留现场，不能据此清理历史文件。该演练不证明生产兼容或真实订阅恢复；详见 [开发演练产物](DEVELOPMENT_REHEARSAL_ARTIFACTS.md)。
 
 针对回归：
 
