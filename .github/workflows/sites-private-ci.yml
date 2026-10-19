@@ -5,6 +5,7 @@ on:
       - 'sites/private-reader/**'
       - 'scripts/sites-local-contract*'
       - 'docs/paid-sources/SITES_PRIVATE_READER_PREPARATION.md'
+      - 'docs/paid-sources/SITES_MINIMAL_REAL_CONNECTION.md'
       - '.github/workflows/sites-private-ci.yml'
 permissions:
   contents: read
@@ -25,3 +26,5 @@ jobs:
         run: node --test scripts/sites-local-contract.test.mjs sites/private-reader/test/*.test.mjs
       - name: Build local-only Worker ESM without registration or credentials
         run: node sites/private-reader/build.mjs
+      - name: Reuse existing cached Wechat validator regression without network or storage
+        run: pnpm --filter server exec jest --runInBand sites-wechat-cache.spec.ts
