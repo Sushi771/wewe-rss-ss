@@ -178,17 +178,25 @@ export async function validateLocalDirectory(directory: string) {
     current = path.dirname(current)
   )
     parts.unshift(current);
-  for (const current of parts) {
-    try {
-      const stat = await fs.lstat(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink())
-        throw fail(
-          '保存路径包含文件或链接目录，请选择普通本机文件夹。',
-          'UNSAFE_SAVE_DIRECTORY',
-        );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+  // Check every component afresh. Bound concurrent metadata I/O and drain it
+  // before returning/rejecting; never cache a successful filesystem check.
+  for (let offset = 0; offset < parts.length; offset += 8) {
+    const checked = await Promise.allSettled(
+      parts.slice(offset, offset + 8).map(async (current) => {
+        try {
+          const stat = await fs.lstat(current);
+          if (!stat.isDirectory() || stat.isSymbolicLink())
+            throw fail(
+              '保存路径包含文件或链接目录，请选择普通本机文件夹。',
+              'UNSAFE_SAVE_DIRECTORY',
+            );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }),
+    );
+    const failed = checked.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
   return resolved;
 }
@@ -1290,7 +1298,8 @@ export class LocalArticleStore {
             candidate.source !== article.source)
         )
           continue;
-        await validateLocalDirectory(candidate.group);
+        // folder validation also checks this exact group's ancestors. There is
+        // no filesystem operation between these two formerly repeated walks.
         await validateLocalDirectory(candidate.folder);
         if (candidate.feedId !== undefined) {
           if (

@@ -1,4 +1,4 @@
-import { load } from 'cheerio';
+import { load, CheerioAPI } from 'cheerio';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
@@ -23,11 +23,19 @@ export function cachedMediaUnconfirmed(
 ) {
   if (!article.contentHtml) return false;
   const $ = load(article.contentHtml);
+  return mediaUnconfirmedInDocument($, article.lastBodyStatus);
+}
+
+/** Same predicate for an already parsed, unmodified body; no DOM is retained. */
+function mediaUnconfirmedInDocument(
+  $: CheerioAPI,
+  lastBodyStatus: string | null,
+) {
   const content = $('.rich_media_content').length
     ? $('.rich_media_content')
     : $('#js_content');
   return (
-    article.lastBodyStatus === 'images-pending' ||
+    lastBodyStatus === 'images-pending' ||
     content.is('[data-wewe-image-pending]') ||
     content.find('[data-wewe-image-pending]').length > 0 ||
     content
@@ -114,10 +122,10 @@ export async function buildArticleMarkdown(
 
   // Sanitization may retain an image element while dropping an unsafe source.
   // Removing that element for Markdown is not evidence that all media is saved.
-  const mediaUnconfirmed = cachedMediaUnconfirmed({
-    ...article,
-    contentHtml: html,
-  });
+  const mediaUnconfirmed = mediaUnconfirmedInDocument(
+    $,
+    article.lastBodyStatus,
+  );
   let mediaComplete = !mediaUnconfirmed;
   const missingSources = new Set<string>();
 
