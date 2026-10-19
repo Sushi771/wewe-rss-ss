@@ -2273,6 +2273,19 @@ const Feeds = () => {
         <ModalContent>
           <ModalHeader>导出文章</ModalHeader>
           <ModalBody>
+            <p aria-label="导出对象" className="text-sm">
+              {id
+                ? `公众号：${currentMpInfo?.mpName || '当前公众号'}`
+                : '公众号：全部订阅'}
+              {'；范围：'}
+              {exportScope === 'selected'
+                ? '选中文章'
+                : exportScope === 'all'
+                  ? id
+                    ? '本号全部'
+                    : '所有订阅的全部文章'
+                  : '当前筛选（包含未加载分页）'}
+            </p>
             <fieldset className="space-y-2">
               <legend className="mb-2 text-sm">导出范围</legend>
               {(
@@ -2309,7 +2322,10 @@ const Feeds = () => {
               ))}
             </fieldset>
             <p className="text-xs text-neutral-500">
-              选中文章仅含你勾选的已加载文章；加载更多不会自动选中。当前筛选包含日期、搜索、文件夹内全部匹配文章，涵盖尚未加载的分页。全部忽略日期、搜索和文件夹。
+              选中文章仅含你勾选的已加载文章；加载更多不会自动选中。当前筛选包含日期、搜索、文件夹内全部匹配文章，涵盖尚未加载的分页。
+              {id
+                ? '本号全部只导出当前公众号，忽略日期、搜索和文件夹。'
+                : '全部文章覆盖所有订阅，忽略日期、搜索和文件夹。'}
             </p>
             <label className="flex flex-col gap-2 text-sm">
               导出方式
@@ -2332,7 +2348,7 @@ const Feeds = () => {
             <p className="text-xs text-neutral-500">
               {exportFormat === 'obsidian'
                 ? '使用原有目录与格式；同目录再次导出会校验已有文件，跳过或补齐。单次最多 5000 篇。'
-                : 'ZIP 使用原有整号 / 筛选快照格式，每次重新打包。浏览器不能检查本地下载历史。'}
+                : 'ZIP 只打包当前公众号的全部或筛选快照，不会跨号打包，也不支持选中文章。每次重新打包，浏览器不能检查本地下载历史。'}
               {!zipAvailable &&
                 ' ZIP 需先进入单个公众号，并选择当前筛选或本号全部。'}
             </p>
@@ -2350,6 +2366,10 @@ const Feeds = () => {
             )}
             <p role="status" className="text-sm">
               本次范围：{exportCount ?? '读取中'} 篇
+            </p>
+            <p className="text-xs text-neutral-500">
+              篇数为开始前读取；如有文章并发新增或移除，实际导出数量可能变化。Obsidian
+              以提交前取得的文章集合为准，ZIP 以打包时的本号快照为准。
             </p>
           </ModalBody>
           <ModalFooter>

@@ -45,7 +45,7 @@
     "scripts/local-release/restart.cjs": "d958e4f2be1bb1f3f031f809669dde57057ffa6c6c7b2cce993862b4c466a4cc",
     "scripts/local-release/startup-audit.cjs": "fd260bf9dbfd8d7ea4b9c509fc0ba7efdd86773d6e5dc6c14cd6fa09801867bd"
   },
-  "indexLayout": "5d49a665ec79aec9dad5b3594ee1543762e704fd08746f5c97ab4411d98e2d5b",
+  "indexLayout": "ce32507f1fe5ea09f13c43f7ab92bb50c3789d3da1bb14fd0595d35be21531e3",
   "articleExportConversion": "a46acea74e60a7f58ae169f74cd8cf6ce34984155bf6a1f683724ae8fe9c725b",
   "articleExportPredicate": "4f3b3d0e2ded2892353b737898b311f24b458c6b3bb693d7d13188658a5de309"
 }

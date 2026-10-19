@@ -341,6 +341,13 @@ test('single export entry shows actual scope counts, limits ZIP to supported sco
     );
   assert.equal(confirm().props.children[1], 37);
   f.find((n) => n.type === 'input' && n.props.value === 'all').props.onChange();
+  assert.match(f.text(), /公众号：Synthetic A；范围：本号全部/);
+  assert.match(f.text(), /本号全部只导出当前公众号/);
+  f.find(
+    (n) => n.type === 'select' && n.props['aria-label'] === '导出方式',
+  ).props.onChange({ target: { value: 'zip' } });
+  assert.match(f.text(), /ZIP 只打包当前公众号.*不会跨号打包/);
+  assert.match(f.text(), /文章并发新增或移除，实际导出数量可能变化/);
   assert.equal(confirm().props.children[1], 53);
   assert.equal(
     f.find((n) => n.type === 'option' && n.props.value === 'zip').props
@@ -351,6 +358,8 @@ test('single export entry shows actual scope counts, limits ZIP to supported sco
   assert(!f.find((n) => n.type === 'Modal' && n.props.isOpen));
   f.navigate('');
   entry().props.onPress();
+  f.find((n) => n.type === 'input' && n.props.value === 'all').props.onChange();
+  assert.match(f.text(), /公众号：全部订阅；范围：所有订阅的全部文章/);
   assert.equal(
     f.find((n) => n.type === 'option' && n.props.value === 'zip').props
       .disabled,
