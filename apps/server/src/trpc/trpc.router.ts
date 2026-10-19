@@ -190,10 +190,13 @@ export class TrpcRouter {
       throw new Error('Offline export article limit exceeded');
     // Freeze membership/order without retaining every cached body. Each body and
     // its export metadata are read together; later insertions cannot enter this request.
-    const articles = async function* (prisma: PrismaService) {
-      for (let offset = 0; offset < identities.length; offset += 8) {
+    const articles = async function* (
+      prisma: PrismaService,
+      members: typeof identities,
+    ) {
+      for (let offset = 0; offset < members.length; offset += 8) {
         if (cancelled()) throw new Error('Offline export cancelled');
-        const ids = identities.slice(offset, offset + 8).map((row) => row.id);
+        const ids = members.slice(offset, offset + 8).map((row) => row.id);
         const batch = await prisma.article.findMany({
           where: { mpId: feedId, id: { in: ids } },
           select: {
@@ -229,60 +232,90 @@ export class TrpcRouter {
       path.join(directory, '.unused-settings.json'),
       directory,
     );
-    for await (const article of articles(this.prismaService)) {
-      if (cancelled()) throw new Error('导出已取消');
-      try {
-        const saved = await store.save(
-          prepareCachedArticleLocalExport(article, source),
-          new Date(),
-          directory,
-        );
-        if (saved.mediaComplete === false) {
+    const render = async (
+      active: LocalArticleStore,
+      members: typeof identities,
+    ) => {
+      for await (const article of articles(this.prismaService, members)) {
+        if (cancelled()) throw new Error('Offline export cancelled');
+        try {
+          const saved = await active.save(
+            prepareCachedArticleLocalExport(article, source),
+            new Date(),
+            directory,
+          );
+          if (saved.mediaComplete === false) {
+            incomplete.push(
+              path
+                .relative(directory, saved.markdownPath)
+                .split(path.sep)
+                .join('/'),
+            );
+            incompleteDetails.push({
+              path: incomplete[incomplete.length - 1],
+              reason:
+                saved.mediaStatus === 'missing' ? 'missing' : 'unconfirmed',
+              missingImageCount: saved.missingImageCount,
+            });
+          } else complete++;
+        } catch {
+          if (cancelled()) throw new Error('Offline export cancelled');
+          const result = await active.save(
+            Object.assign(
+              async (stage: string) => {
+                await fs.promises.mkdir(path.join(stage, 'image'));
+                await fs.promises.writeFile(
+                  path.join(stage, 'index.md'),
+                  '正文或图片尚未完整归档，本篇无法完整离线阅读。\n',
+                );
+                return {
+                  articleId: article.id,
+                  title: article.title,
+                  imageCount: 0,
+                  mediaComplete: false,
+                  exportSource: source,
+                  sourceUrl: article.sourceUrl,
+                  publishTime: article.publishTime,
+                };
+              },
+              {
+                identity: {
+                  articleId: article.id,
+                  title: article.title,
+                  imageCount: 0,
+                  exportSource: source,
+                },
+              },
+            ),
+            new Date(),
+            directory,
+          );
           incomplete.push(
             path
-              .relative(directory, saved.markdownPath)
+              .relative(directory, result.markdownPath)
               .split(path.sep)
               .join('/'),
           );
           incompleteDetails.push({
             path: incomplete[incomplete.length - 1],
-            reason: saved.mediaStatus === 'missing' ? 'missing' : 'unconfirmed',
-            missingImageCount: saved.missingImageCount,
+            reason: article.contentHtml ? 'export-failed' : 'body-not-cached',
           });
-        } else complete++;
-      } catch {
-        if (cancelled()) throw new Error('导出已取消');
-        const result = await store.save(
-          async (stage) => {
-            await fs.promises.mkdir(path.join(stage, 'image'));
-            await fs.promises.writeFile(
-              path.join(stage, 'index.md'),
-              '正文或图片尚未完整归档，本篇无法完整离线阅读。\n',
-            );
-            return {
-              articleId: article.id,
-              title: article.title,
-              imageCount: 0,
-              mediaComplete: false,
-              exportSource: source,
-              sourceUrl: article.sourceUrl,
-              publishTime: article.publishTime,
-            };
-          },
-          new Date(),
-          directory,
-        );
-        incomplete.push(
-          path
-            .relative(directory, result.markdownPath)
-            .split(path.sep)
-            .join('/'),
-        );
-        incompleteDetails.push({
-          path: incomplete[incomplete.length - 1],
-          reason: article.contentHtml ? 'export-failed' : 'body-not-cached',
-        });
+        }
       }
+    };
+    for (let offset = 0; offset < identities.length; offset += 64) {
+      if (cancelled()) throw new Error('Offline export cancelled');
+      const members = identities.slice(offset, offset + 64);
+      await store.withRetainedBatch(
+        members.map(({ id }) => ({
+          articleId: id,
+          title: id,
+          imageCount: 0,
+          exportSource: source,
+        })),
+        directory,
+        (active) => render(active, members),
+      );
     }
     await fs.promises.writeFile(
       path.join(directory, 'README.md'),

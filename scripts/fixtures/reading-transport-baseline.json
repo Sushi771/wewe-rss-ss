@@ -1,0 +1,4 @@
+{
+  "source": "6b778e7d9cfa25daef4ed54239c4147a11fd3f9b",
+  "condition": "(operation) => operation.path === 'article.list'"
+}
