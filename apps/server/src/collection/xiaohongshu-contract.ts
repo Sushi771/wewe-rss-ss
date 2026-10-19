@@ -15,6 +15,9 @@ function identity(kind: 'author' | 'note', value: string): string {
   return JSON.stringify(['xiaohongshu', kind, value]);
 }
 
+// Share the existing archive keys with source adapters; URLs/tokens are not IDs.
+export { identity as xhsIdentity };
+
 export interface XhsNormalizedCandidate {
   authorId: string;
   noteId: string;
