@@ -8,7 +8,9 @@ const ts = require(
   require.resolve('typescript', { paths: [path.join(root, 'apps/server')] }),
 );
 const manifest = require('../apps/server/scripts/fixtures/main-wechat-runtime-scope.json');
-const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+// Git's Windows checkout conversion must not change source-policy fingerprints.
+const read = (file) =>
+  fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
 function tokens(text) {
   const scanner = ts.createScanner(

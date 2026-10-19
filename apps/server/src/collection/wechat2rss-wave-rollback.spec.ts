@@ -18,7 +18,7 @@ const serial = readFileSync(
     '../../scripts/fixtures/serial-refresh-worker.f82fade.ts.txt',
   ),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 if (
   createHash('sha256').update(serial).digest('hex') !==
   'b9428c814237d2eb60d55424619c2107418163c50ffe8a8793b10d5931658617'

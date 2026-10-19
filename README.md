@@ -4,12 +4,12 @@
 
 ## 版本范围
 
-本文按 **2026-10-13 集成版本 [`edb0ecb`](https://github.com/Sushi771/wewe-rss-ss/commit/edb0ecb799852a37bd26b7879a7962b10fbd98f3)** 的源码说明功能，代码位于 [`codex/manual-refresh-download-integration`](https://github.com/Sushi771/wewe-rss-ss/tree/codex/manual-refresh-download-integration)。默认 `main` 尚未包含这些集成改动；更新 README 不会升级默认分支代码、上游镜像或已有部署。以下功能、配置和命令均以该集成版本为准。
+默认 `main` 已合入订阅、缓存、阅读与导出的多项集成改动；本文源码链接固定到核对基线 [`33ec7c3`](https://github.com/Sushi771/wewe-rss-ss/commit/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65)（2026-10-18），不再以旧集成分支是否合入判断功能。独立集成提交 [`8a3141c`](https://github.com/Sushi771/wewe-rss-ss/commit/8a3141c43b1b09e92ebd75780f26c58939557906) 的分组/日期筛选、阅读器和后台启动审计接线尚未全部回流到该 main 基线。构建已有部署的替换包前必须核对这些差异；不能用 main 的旧接线覆盖已交付功能。README、开发分支或测试通过均不代表已有部署已升级。
 
 ## 已实现功能
 
 - **公众号订阅与更新**：通过实际注册并配置的来源添加订阅。Wechat2RSS 路径支持持久任务、增量缓存同步、手动刷新全部合资格订阅和后台自动轮次。来源选择受配置和订阅绑定约束。
-- **阅读与管理**：文章搜索、日期筛选、作者分组与拖拽排序、批量选择与操作、阅读位置保留、正文内查找，以及深浅主题。
+- **阅读与管理**：文章搜索、分组数据、拖拽排序、批量选择与操作、阅读位置保留及深浅主题。日期筛选、完整分组视图和正文内查找的已交付集成接线需按上述版本范围核对，不能仅凭底层组件存在认为 main 页面已接入。
 - **单篇链接下载**：在「工具 → 文章下载」粘贴公众号链接，确认保存位置。正文仅使用 Wechat2RSS 的可靠缓存；必要时通过已有队列按需订阅公众号并等待目标文章。无精确链接映射时提供缓存文章选择，不按标题或顺序猜测目标。
 - **本机归档**：保存 Markdown 和相对路径图片，可直接放入 Obsidian，支持目录选择与路径记忆。同目录通过稳定文章身份及回执预检，完整文件跳过、可确认的缺图补齐，保留用户编辑的正文和独立笔记。
 - **按范围导出**：按公众号、分组、搜索和日期导出当前筛选的完整本地集合，覆盖分页后的文章；另有 ZIP 快照导出。RSS、Atom、JSON Feed 和 OPML 继续用于阅读器与订阅源迁移。
@@ -20,7 +20,7 @@
 
 1. **注册来源和订阅**：后台读取私有配置，按公众号来源与启用状态选择适配器。Wechat2RSS 是外部授权实例，本项目负责管理、缓存和导出；旧微信读书登录或研究代码不等于当前已恢复的全文订阅服务。见 [Provider 注册][provider]、[订阅服务][subscription]。
 2. **排队刷新**：手动与自动刷新复用持久批次队列，串行提交、保留受理回执与单号冷却；重启后依靠原任务状态续接。鉴权、风控或未知受理会暂停流程。见 [批次实现][batches]、[调度说明][schedule-doc]。
-3. **同步缓存**：读取来源已有缓存，按稳定身份去重；无变化的完整文章跳过，新增及符合条件的正文缺口通过受保护写入保存。自动缓存阶段不下载媒体，不覆盖用户已有正文。见 [缓存实现][cache]、[缓存恢复说明][recovery-doc]。
+3. **同步缓存**：读取来源已有缓存，按稳定身份去重；无变化的完整文章跳过，新增及符合条件的正文缺口通过受保护写入保存。正文提交与自动媒体补齐分离；后者使用有界任务、退避和安全停闸，不阻塞正文回执，也不覆盖用户已有导出正文。见 [缓存实现][cache]、[缓存恢复说明][recovery-doc]。
 4. **离线保存**：先核对目录、身份和已有回执，再准备缺失媒体；图片校验后落盘，Markdown 使用相对路径。结果区分新增、跳过、补入和失败；媒体未齐不会被描述为完整归档。见 [保存实现][local-save]、[增量导出说明][export-doc]。
 
 ### 自动更新时段
@@ -54,7 +54,7 @@ RSS 示例：`/feeds/all.atom`、`/feeds/MP_WXS_<公众号ID>.json?limit=30`；�
 ```powershell
 git clone https://github.com/Sushi771/wewe-rss-ss.git wewe-rss-ss-test
 Set-Location wewe-rss-ss-test
-git checkout edb0ecb799852a37bd26b7879a7962b10fbd98f3
+git checkout 33ec7c3ebc20ce55d5f81259a5dd515912b5ca65
 $env:DATABASE_TYPE = 'sqlite'
 $env:DATABASE_URL = 'file:../data/wewe-rss-test.db'
 $env:HOST = '127.0.0.1'
@@ -94,7 +94,7 @@ pnpm start:server
 - **主库与任务**：SQLite 主库保存订阅、文章和管理信息；数据库同目录还保存调度水位、刷新队列、单篇任务及锁。备份和恢复需同时考虑这些状态，避免只搬库文件后重复提交。
 - **来源数据与归档**：Wechat2RSS 缓存/授权数据与本项目主库分开；Markdown、图片和手写笔记另在自己确认的目录。它们都不应上传公共仓库。
 - **一致性备份**：使用 SQLite backup API 的 [备份脚本][backup-code]，检查完整性及结果，再用副本演练升级或恢复。运行中不要只复制主 `.db` 忽略 WAL 状态。回退程序不能用旧库覆盖新增文章和编辑。
-- **运行空间**：监控主库、来源缓存、写前备份、导出与固定产物占用；保留可用备份和回滚版本后再整理旧产物。新空间保护规则仍在独立候选开发中，不属于本文版本的已交付能力，不能认为膨胀已永久解决。
+- **运行空间**：监控主库、来源缓存、写前备份、导出与固定产物占用；保留可用备份和回滚版本后再整理旧产物。代码已包含空间预算和有限恢复点管理；实际启用方式需按固定产物核对，不能认为磁盘膨胀已永久解决。
 - **访问边界**：本机绑定回环地址；远程配置 HTTPS 和受控访问，不直接暴露数据库、来源后台或私有目录。本人登录、合法授权和凭据保管由部署者负责。
 
 ## 已知边界与开发状态
@@ -107,7 +107,7 @@ pnpm start:server
 
 ## 相关文档
 
-链接固定在本文对应的集成提交，可区分当前实现与各文档中的历史记录：
+链接固定到本文核对基线，可区分源码、独立集成接线和文档中的历史记录：
 
 - [增量归档、筛选范围和 ZIP 合同][export-doc]
 - [单篇下载与缓存来源边界][download-doc]
@@ -120,19 +120,19 @@ pnpm start:server
 
 沿用 [MIT License](LICENSE)，原作者 **@cooderl**，原项目 [cooderl/wewe-rss](https://github.com/cooderl/wewe-rss)。本仓库是继续开发的 fork，与上游版本、镜像及第三方来源分别维护；来源服务的授权、条款和可用性仍由其提供方决定。
 
-[provider]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/collection/provider-registry.ts
-[subscription]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/trpc/trpc.service.ts
-[batches]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/collection/wechat2rss-subscription-batches.ts
-[cache]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/collection/insert-only-cache.ts
-[local-save]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/article-local-save.ts
-[schedule-code]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/src/feeds/active-refresh-schedule.ts
-[backup-code]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/apps/server/scripts/backup-sqlite.py
-[export-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/INCREMENTAL_ARTICLE_EXPORT.md
-[download-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/ARTICLE_DOWNLOAD_TOOL.md
-[schedule-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/ACTIVE_REFRESH_SCHEDULE.md
-[recovery-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/AUTO_REFRESH_RECOVERY_20261012.md
-[deployment-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/paid-sources/TECHNICAL_DEPLOYMENT.md
-[release-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/LOCAL_RELEASE_REHEARSAL.md
-[product-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/paid-sources/PRODUCT_REQUIREMENTS.md
-[development-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/DEVELOPMENT.md
-[layout-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/edb0ecb799852a37bd26b7879a7962b10fbd98f3/docs/OFFLINE_ARTICLE_LAYOUT.md
+[provider]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/provider-registry.ts
+[subscription]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/trpc/trpc.service.ts
+[batches]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/wechat2rss-subscription-batches.ts
+[cache]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/insert-only-cache.ts
+[local-save]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/article-local-save.ts
+[schedule-code]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/feeds/active-refresh-schedule.ts
+[backup-code]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/scripts/backup-sqlite.py
+[export-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/INCREMENTAL_ARTICLE_EXPORT.md
+[download-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/ARTICLE_DOWNLOAD_TOOL.md
+[schedule-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/ACTIVE_REFRESH_SCHEDULE.md
+[recovery-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/AUTO_REFRESH_RECOVERY_20261012.md
+[deployment-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/paid-sources/TECHNICAL_DEPLOYMENT.md
+[release-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/LOCAL_RELEASE_REHEARSAL.md
+[product-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/paid-sources/PRODUCT_REQUIREMENTS.md
+[development-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/DEVELOPMENT.md
+[layout-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/OFFLINE_ARTICLE_LAYOUT.md

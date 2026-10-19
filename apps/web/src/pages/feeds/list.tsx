@@ -13,6 +13,7 @@ import {
 import { trpc } from '@web/utils/trpc';
 import dayjs from 'dayjs';
 import { useParams } from 'react-router-dom';
+import { READING_CACHE_TIME } from '@web/utils/reading-query-cache';
 import { toast } from 'sonner';
 
 interface ArticleListProps {
@@ -49,6 +50,7 @@ const ArticleList: FC<ArticleListProps> = ({
   const [readingId, setReadingId] = useState<string | null>(null);
   const reading = trpc.article.byId.useQuery(readingId || '', {
     enabled: Boolean(readingId),
+    cacheTime: READING_CACHE_TIME,
   });
   const queryUtils = trpc.useUtils();
   const bodyRetry = trpc.article.retryBody.useMutation();
@@ -86,26 +88,11 @@ const ArticleList: FC<ArticleListProps> = ({
     },
     [onSortChange],
   );
-  const summary = trpc.article.summary.useQuery({
-    ...articleFilter,
-    mpId,
-    search: search || undefined,
-  });
 
   useEffect(() => {
     setSort('publishTime');
     onSelectionChange(new Set());
   }, [mpId, search, onSelectionChange, setSort]);
-
-  useEffect(() => {
-    if (
-      summary.data &&
-      ((sort === 'readCount' && !summary.data.readAvailable) ||
-        (sort === 'likeCount' && !summary.data.likeAvailable))
-    ) {
-      setSort('publishTime');
-    }
-  }, [summary.data, sort, setSort]);
 
   const {
     data,
@@ -129,10 +116,31 @@ const ArticleList: FC<ArticleListProps> = ({
     {
       getNextPageParam: (lastPage) => lastPage.nextCursor,
       retry: false,
-      cacheTime: 0,
+      cacheTime: READING_CACHE_TIME,
       keepPreviousData: false,
     },
   );
+
+  // Release the first list snapshot before the four summary aggregates compete
+  // for the single configured connection. Cached rows can render immediately.
+  const summary = trpc.article.summary.useQuery(
+    {
+      ...articleFilter,
+      mpId,
+      search: search || undefined,
+    },
+    { enabled: Boolean(data?.pages.length), cacheTime: READING_CACHE_TIME },
+  );
+
+  useEffect(() => {
+    if (
+      summary.data &&
+      ((sort === 'readCount' && !summary.data.readAvailable) ||
+        (sort === 'likeCount' && !summary.data.likeAvailable))
+    ) {
+      setSort('publishTime');
+    }
+  }, [summary.data, sort, setSort]);
 
   const listViewKey = JSON.stringify([
     mpId,
