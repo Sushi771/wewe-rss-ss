@@ -443,6 +443,37 @@ const Feeds = () => {
   const exportCancelled = useRef(false);
   const exportController = useRef<AbortController | null>(null);
   const [exportResult, setExportResult] = useState('');
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportScope, setExportScope] = useState<
+    'selected' | 'filtered' | 'all'
+  >('filtered');
+  const [exportFormat, setExportFormat] = useState<'obsidian' | 'zip'>(
+    'obsidian',
+  );
+  const filteredExportSummary = trpc.article.summary.useQuery(
+    {
+      ...articleDateFilter,
+      group: folderFilter,
+      mpId: id || '',
+      search: search || undefined,
+    },
+    {
+      enabled: exportOpen && !dateError,
+      retry: false,
+      refetchOnWindowFocus: false,
+    },
+  );
+  const allExportSummary = trpc.article.summary.useQuery(
+    { mpId: id || '' },
+    { enabled: exportOpen, retry: false, refetchOnWindowFocus: false },
+  );
+  const exportSummary =
+    exportScope === 'all' ? allExportSummary : filteredExportSummary;
+  const exportCount =
+    exportScope === 'selected'
+      ? articleSelectedIds.size
+      : exportSummary.data?.articles;
+  const zipAvailable = Boolean(id) && exportScope !== 'selected';
   useEffect(
     () => () => {
       exportCancelled.current = true;
@@ -454,6 +485,7 @@ const Feeds = () => {
     exportCancelled.current = true;
     exportController.current?.abort();
     setArticleSelectedIds(new Set());
+    setExportOpen(false);
   }, [
     id,
     search,
@@ -474,11 +506,11 @@ const Feeds = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isSearchOpen]);
 
-  const handleBatchExport = async (wholeScope = false) => {
+  const handleBatchExport = async (wholeScope = false, allArticles = false) => {
     if (
       batchExporting.current ||
       (!wholeScope && articleSelectedIds.size === 0) ||
-      dateError
+      (!allArticles && dateError)
     )
       return;
     batchExporting.current = true;
@@ -492,13 +524,18 @@ const Feeds = () => {
     let ids = Array.from(articleSelectedIds);
     try {
       if (wholeScope)
-        ids = await queryUtils.client.article.exportIds.query({
-          ...articleDateFilter,
-          group: folderFilter,
-          mpId: id || '',
-          search: search || undefined,
-        });
+        ids = await queryUtils.client.article.exportIds.query(
+          allArticles
+            ? { mpId: id || '' }
+            : {
+                ...articleDateFilter,
+                group: folderFilter,
+                mpId: id || '',
+                search: search || undefined,
+              },
+        );
       ids = Array.from(new Set(ids));
+      setExportResult(`正在导出 ${ids.length} 篇`);
       const recordSaved: Parameters<typeof exportArticleBatches>[2] = (
         result,
       ) => {
@@ -526,12 +563,14 @@ const Feeds = () => {
         {
           signal: controller.signal,
           cancelled: () => exportCancelled.current,
-          onFailed: (error, saved, articleId) => {
+          onFailed: (_error, saved, articleId) => {
             if (saved)
               recordSaved({ ...saved, mediaComplete: false }, articleId);
             else {
               counts.failed++;
-              exportNotices.add(error.message);
+              exportNotices.add(
+                '部分文章保存失败，请重新导出重试；已有文件会校验后跳过。',
+              );
               setExportResult(
                 `新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`,
               );
@@ -558,9 +597,10 @@ const Feeds = () => {
         setArticleSelectedIds((current) =>
           current === batchSelection ? new Set() : current,
         );
-    } catch (error) {
+    } catch {
       toast.error('未能取得完整导出范围', {
-        description: error instanceof Error ? error.message : String(error),
+        description:
+          '请缩小范围或稍后重试；单次最多导出 5000 篇，已有文件会保留。',
       });
     } finally {
       exportController.current = null;
@@ -1417,14 +1457,26 @@ const Feeds = () => {
                 </Button>
               </Tooltip>
               {/* Batch actions appear when there is something to act on. */}
-              {!privateOnlineMode && (
+              {(!privateOnlineMode || currentMpInfo) && (
                 <Button
                   size="sm"
                   className="h-8"
-                  isDisabled={isBatchExporting || Boolean(dateError)}
-                  onPress={() => handleBatchExport(true)}
+                  isDisabled={isBatchExporting}
+                  onPress={() => {
+                    setExportScope(
+                      !privateOnlineMode && articleSelectedIds.size
+                        ? 'selected'
+                        : dateError
+                          ? 'all'
+                          : 'filtered',
+                    );
+                    setExportFormat(privateOnlineMode ? 'zip' : 'obsidian');
+                    setExportOpen(true);
+                    void filteredExportSummary.refetch();
+                    void allExportSummary.refetch();
+                  }}
                 >
-                  导出当前筛选全部到 Obsidian
+                  导出文章
                 </Button>
               )}
               {isBatchExporting && (
@@ -1439,7 +1491,7 @@ const Feeds = () => {
                   停止后续导出
                 </Button>
               )}
-              {exportResult && (
+              {isBatchExporting && exportResult && (
                 <span role="status" aria-live="polite" className="text-xs">
                   {exportResult}
                 </span>
@@ -1463,21 +1515,6 @@ const Feeds = () => {
                   >
                     清空选择
                   </Button>
-                  {!privateOnlineMode && (
-                    <Button
-                      size="sm"
-                      color="primary"
-                      variant="flat"
-                      className="mr-2 h-8 font-medium"
-                      isLoading={isBatchExporting}
-                      isDisabled={
-                        isBatchExporting || articleSelectedIds.size === 0
-                      }
-                      onPress={() => handleBatchExport()}
-                    >
-                      批量导出 Obsidian ({articleSelectedIds.size})
-                    </Button>
-                  )}
                 </>
               )}
               {currentMpInfo ? (
@@ -1530,22 +1567,29 @@ const Feeds = () => {
                               result.message,
                               result.status,
                             );
-                            if (result.complete)
-                              toast.success(result.message, {
-                                duration: 8000,
-                              });
-                            else if (
-                              result.status === 'failed' ||
-                              result.status === 'blocked'
-                            )
-                              toast.error(result.message, {
-                                duration: 10000,
-                              });
-                            else
-                              toast.warning(result.message, {
-                                duration: 10000,
-                              });
                           }
+                          const failed = results.some((result) =>
+                            ['failed', 'blocked'].includes(result.status),
+                          );
+                          const complete =
+                            results.length > 0 &&
+                            results.every((result) => result.complete);
+                          if (complete)
+                            toast.success('本号更新完成', {
+                              id: `refresh:${mpId}`,
+                              duration: 3000,
+                            });
+                          else if (failed)
+                            toast.error(
+                              '更新未完成，已有内容保留；可再次点击更新本号重试。',
+                              { id: `refresh:${mpId}` },
+                            );
+                          else
+                            toast.warning(
+                              '部分内容已保存，请查看来源与更新详情。',
+                              { id: `refresh:${mpId}` },
+                            );
+
                           refreshFeedbackTimers.current.set(
                             mpId,
                             setTimeout(() => {
@@ -1567,7 +1611,8 @@ const Feeds = () => {
                             e instanceof Error ? e.message : '更新失败',
                           );
                           toast.error(
-                            e instanceof Error ? e.message : '更新失败',
+                            '更新未完成，已有内容保留；可再次点击更新本号重试。',
+                            { id: `refresh:${mpId}` },
                           );
                         } finally {
                           finishManualRefresh(mpId, token);
@@ -1599,22 +1644,6 @@ const Feeds = () => {
                       </span>
                     </Button>
                   </Tooltip>
-                  <a
-                    title="整号完整快照，忽略日期与搜索；每次重新打包，浏览器不能检查本地下载历史"
-                    href={`${serverOriginUrl}/download/feed/${currentMpInfo.id}.zip?scope=all`}
-                    className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
-                  >
-                    下载整号快照 ZIP
-                  </a>
-                  {!dateError && (
-                    <a
-                      title="包含当前日期、分组和搜索范围全部文章；完整快照，每次重新打包"
-                      href={`${serverOriginUrl}/download/feed/${currentMpInfo.id}.zip?${filteredZipQuery}`}
-                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
-                    >
-                      下载当前筛选 ZIP
-                    </a>
-                  )}
                 </>
               ) : (
                 <>
@@ -2236,6 +2265,124 @@ const Feeds = () => {
           </div>
         </div>
       </div>
+      <Modal
+        isOpen={exportOpen}
+        onClose={() => setExportOpen(false)}
+        scrollBehavior="inside"
+      >
+        <ModalContent>
+          <ModalHeader>导出文章</ModalHeader>
+          <ModalBody>
+            <fieldset className="space-y-2">
+              <legend className="mb-2 text-sm">导出范围</legend>
+              {(
+                [
+                  ['selected', `选中文章（${articleSelectedIds.size} 篇）`],
+                  [
+                    'filtered',
+                    `当前筛选（${filteredExportSummary.data?.articles ?? '读取中'} 篇）`,
+                  ],
+                  [
+                    'all',
+                    `${id ? '本号全部' : '全部文章'}（${allExportSummary.data?.articles ?? '读取中'} 篇）`,
+                  ],
+                ] as const
+              ).map(([scope, label]) => (
+                <label key={scope} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name="article-export-scope"
+                    value={scope}
+                    checked={exportScope === scope}
+                    disabled={
+                      scope === 'selected'
+                        ? privateOnlineMode || !articleSelectedIds.size
+                        : scope === 'filtered' && Boolean(dateError)
+                    }
+                    onChange={() => {
+                      setExportScope(scope);
+                      if (scope === 'selected') setExportFormat('obsidian');
+                    }}
+                  />
+                  {label}
+                </label>
+              ))}
+            </fieldset>
+            <p className="text-xs text-neutral-500">
+              选中文章仅含你勾选的已加载文章；加载更多不会自动选中。当前筛选包含日期、搜索、文件夹内全部匹配文章，涵盖尚未加载的分页。全部忽略日期、搜索和文件夹。
+            </p>
+            <label className="flex flex-col gap-2 text-sm">
+              导出方式
+              <select
+                aria-label="导出方式"
+                className="bg-background rounded border p-2"
+                value={exportFormat}
+                onChange={(event) =>
+                  setExportFormat(event.target.value as 'obsidian' | 'zip')
+                }
+              >
+                <option value="obsidian" disabled={privateOnlineMode}>
+                  保存到 Obsidian 目录（增量）
+                </option>
+                <option value="zip" disabled={!zipAvailable}>
+                  下载 ZIP 快照（本号当前筛选 / 全部）
+                </option>
+              </select>
+            </label>
+            <p className="text-xs text-neutral-500">
+              {exportFormat === 'obsidian'
+                ? '使用原有目录与格式；同目录再次导出会校验已有文件，跳过或补齐。单次最多 5000 篇。'
+                : 'ZIP 使用原有整号 / 筛选快照格式，每次重新打包。浏览器不能检查本地下载历史。'}
+              {!zipAvailable &&
+                ' ZIP 需先进入单个公众号，并选择当前筛选或本号全部。'}
+            </p>
+            {exportScope !== 'selected' && exportSummary.isError && (
+              <div role="alert" className="text-sm text-red-600">
+                范围篇数读取失败，请重试。
+                <Button
+                  size="sm"
+                  variant="light"
+                  onPress={() => void exportSummary.refetch()}
+                >
+                  重试读取篇数
+                </Button>
+              </div>
+            )}
+            <p role="status" className="text-sm">
+              本次范围：{exportCount ?? '读取中'} 篇
+            </p>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="flat" onPress={() => setExportOpen(false)}>
+              取消
+            </Button>
+            <Button
+              color="primary"
+              isDisabled={
+                isBatchExporting ||
+                !exportCount ||
+                (exportScope !== 'selected' &&
+                  (exportSummary.isFetching || exportSummary.isError)) ||
+                (exportFormat === 'zip' && !zipAvailable)
+              }
+              onPress={() => {
+                if (exportFormat === 'zip') {
+                  window.location.assign(
+                    `${serverOriginUrl}/download/feed/${id}.zip?${exportScope === 'all' ? 'scope=all' : filteredZipQuery}`,
+                  );
+                } else
+                  void handleBatchExport(
+                    exportScope !== 'selected',
+                    exportScope === 'all',
+                  );
+                setExportOpen(false);
+              }}
+            >
+              开始导出 {exportCount ?? ''} 篇
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
       <Modal
         isOpen={!!repairTarget}
         onOpenChange={(open) => {

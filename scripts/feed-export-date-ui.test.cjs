@@ -115,7 +115,10 @@ async function run(results, rejectAt, options = {}) {
   const js = ts.transpileModule('(' + initializer + ')', {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  await vm.runInContext(js, context)(options.wholeScope || false);
+  await vm.runInContext(js, context)(
+    options.wholeScope || false,
+    options.allArticles || false,
+  );
   return { calls, notifications, loading, selections, queries };
 }
 test('normal publication exports keep one compact success notice', async () => {
@@ -177,6 +180,15 @@ test('whole filtered scope freezes all 25 identities with filters and de-duplica
   );
   assert.match(r.notifications[0][1], /新增 25/);
   assert.deepEqual(r.selections, []);
+});
+
+test('all articles ignores search, dates and folder but retains current feed identity', async () => {
+  const r = await run([{}, {}], undefined, {
+    wholeScope: true,
+    allArticles: true,
+  });
+  assert.deepEqual({ ...r.queries[0] }, { mpId: 'MP_WXS_1234567890' });
+  assert.equal(r.calls.length, 2);
 });
 test('cancel stops subsequent submissions and retains selection for a resumable retry', async () => {
   const r = await run([{}, {}, {}], undefined, { cancelAfter: 1 });

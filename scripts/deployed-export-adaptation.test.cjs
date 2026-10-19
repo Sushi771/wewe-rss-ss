@@ -85,7 +85,7 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     pins.articleExportPredicate,
   );
 });
-test('the deployed toolbar, grouping and reading layout are unchanged', () => {
+test('the reviewed export dialog and production reading layout retain their approved snapshot', () => {
   const file = 'apps/web/src/pages/feeds/index.tsx';
   const ast = ts.createSourceFile(
     file,
@@ -102,8 +102,8 @@ test('the deployed toolbar, grouping and reading layout are unchanged', () => {
     )
     .find((node) => node.name.getText(ast) === 'Feeds');
   const returned = feeds.initializer.body.statements.find(ts.isReturnStatement);
-  // Only the existing Stop action gains transport cancellation. Its behavior
-  // and the abort receipt are exercised by the handler/HTTP regressions.
+  // This snapshot includes the authorized unified export dialog. The server,
+  // startup and data contracts above remain pinned to the deployment baseline.
   function shape(node) {
     if (
       ts.isExpressionStatement(node) &&

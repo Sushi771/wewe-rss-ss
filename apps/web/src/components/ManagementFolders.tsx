@@ -330,6 +330,7 @@ export default function ManagementFolders({
           key={addingTo.id}
           folder={addingTo}
           members={members}
+          folders={displayedFolders}
           error={error}
           disabled={disabled || saving}
           onClose={() => setAddingTo(undefined)}

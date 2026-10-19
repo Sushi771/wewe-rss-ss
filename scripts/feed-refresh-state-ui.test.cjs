@@ -18,6 +18,8 @@ function fixture({
   batchRunning = false,
   feedReadFails = false,
   manualBatch,
+  summaryFailed = false,
+  privateMode = false,
 } = {}) {
   let route = 'A',
     index = 0,
@@ -90,17 +92,23 @@ function fixture({
           {
             get(_, name) {
               return {
-                useQuery: () => ({
+                useQuery: (input) => ({
+                  isError: name === 'summary' && summaryFailed,
+                  isFetching: false,
                   data:
-                    name === 'list'
-                      ? { items: scope === 'feed' ? items : [] }
-                      : name === 'groups'
-                        ? { items: [] }
-                        : name === 'isRefreshAllMpArticlesRunning'
-                          ? batchRunning
-                          : name === 'manualRefreshBatches'
-                            ? { items: manualBatch ? [manualBatch] : [] }
-                            : undefined,
+                    name === 'summary'
+                      ? summaryFailed
+                        ? undefined
+                        : { articles: input.group ? 37 : 53 }
+                      : name === 'list'
+                        ? { items: scope === 'feed' ? items : [] }
+                        : name === 'groups'
+                          ? { items: [] }
+                          : name === 'isRefreshAllMpArticlesRunning'
+                            ? batchRunning
+                            : name === 'manualRefreshBatches'
+                              ? { items: manualBatch ? [manualBatch] : [] }
+                              : undefined,
                   refetch,
                 }),
                 useMutation: () => ({
@@ -238,7 +246,7 @@ function fixture({
                             : name === '@web/utils/env'
                               ? {
                                   acceptanceMode: false,
-                                  privateOnlineMode: false,
+                                  privateOnlineMode: privateMode,
                                   serverOriginUrl: '',
                                 }
                               : () => null,
@@ -289,6 +297,10 @@ function fixture({
     timers,
     render,
     button,
+    find: (predicate) => {
+      render();
+      return walk(tree, predicate);
+    },
     navigate: (id) => {
       route = id;
       render();
@@ -313,6 +325,72 @@ const complete = [
     complete: true,
   },
 ];
+
+test('single export entry shows actual scope counts, limits ZIP to supported scopes, and closes on route change', () => {
+  const f = fixture();
+  const entry = () =>
+    f.find((n) => n.type === 'Button' && n.props.children === '导出文章');
+  entry().props.onPress();
+  assert(f.find((n) => n.type === 'Modal' && n.props.isOpen));
+  const confirm = () =>
+    f.find(
+      (n) =>
+        n.type === 'Button' &&
+        Array.isArray(n.props.children) &&
+        n.props.children[0] === '开始导出 ',
+    );
+  assert.equal(confirm().props.children[1], 37);
+  f.find((n) => n.type === 'input' && n.props.value === 'all').props.onChange();
+  assert.equal(confirm().props.children[1], 53);
+  assert.equal(
+    f.find((n) => n.type === 'option' && n.props.value === 'zip').props
+      .disabled,
+    false,
+  );
+  f.navigate('B');
+  assert(!f.find((n) => n.type === 'Modal' && n.props.isOpen));
+  f.navigate('');
+  entry().props.onPress();
+  assert.equal(
+    f.find((n) => n.type === 'option' && n.props.value === 'zip').props
+      .disabled,
+    true,
+  );
+});
+
+test('scope read errors prevent export with retry and private mode retains ZIP without exposing local directory export', () => {
+  const f = fixture({ summaryFailed: true });
+  f.find(
+    (n) => n.type === 'Button' && n.props.children === '导出文章',
+  ).props.onPress();
+  assert(
+    f.find((n) => n.type === 'Button' && n.props.children === '重试读取篇数'),
+  );
+  assert.equal(
+    f.find(
+      (n) =>
+        n.type === 'Button' &&
+        Array.isArray(n.props.children) &&
+        n.props.children[0] === '开始导出 ',
+    ).props.isDisabled,
+    true,
+  );
+  assert.equal(f.requests.length, 0);
+  const p = fixture({ privateMode: true });
+  p.find(
+    (n) => n.type === 'Button' && n.props.children === '导出文章',
+  ).props.onPress();
+  assert.equal(
+    p.find((n) => n.type === 'select' && n.props['aria-label'] === '导出方式')
+      .props.value,
+    'zip',
+  );
+  assert.equal(
+    p.find((n) => n.type === 'option' && n.props.value === 'obsidian').props
+      .disabled,
+    true,
+  );
+});
 
 test('single-feed request remains scoped; switching and concurrent feeds never inherit mutation loading', async () => {
   const f = fixture();
@@ -345,9 +423,37 @@ test('single-feed request remains scoped; switching and concurrent feeds never i
   assert(
     f.events.some(
       (e) =>
-        Array.isArray(e) && e[0] === 'error' && e[1] === 'Synthetic B failure',
+        Array.isArray(e) &&
+        e[0] === 'error' &&
+        e[1].includes('可再次点击更新本号重试'),
     ),
   );
+});
+
+test('multiple successful receipts emit one operation notice; mixed failure stays retryable without exposing raw errors', async () => {
+  const f = fixture();
+  const pending = f.button().props.onPress();
+  f.requests[0].resolve([complete[0], { ...complete[0], source: 'second' }]);
+  await pending;
+  assert.equal(
+    f.events.filter((e) => Array.isArray(e) && e[0] === 'success').length,
+    1,
+  );
+  const next = f.button().props.onPress();
+  f.requests[1].resolve([
+    complete[0],
+    {
+      source: 'error',
+      status: 'failed',
+      complete: false,
+      message: 'SQLITE_INTERNAL_SYNTHETIC',
+    },
+  ]);
+  await next;
+  const errors = f.events.filter((e) => Array.isArray(e) && e[0] === 'error');
+  assert.equal(errors.length, 1);
+  assert(!errors[0][1].includes('SQLITE_INTERNAL'));
+  assert.equal(f.button().props.isDisabled, false);
 });
 test('single-feed work does not label overview or other feeds as updating; batch has its own lock', async () => {
   const f = fixture();

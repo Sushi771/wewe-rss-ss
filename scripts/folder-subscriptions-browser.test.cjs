@@ -40,7 +40,7 @@ import {createRoot} from 'react-dom/client';
 import {NextUIProvider} from ${modulePath(path.join(web, 'node_modules/@nextui-org/react/dist/index.mjs'))};
 import ManagementFolders from ${modulePath(path.join(web, 'src/components/ManagementFolders.tsx'))};
 function App(){
- const [rows,setRows]=useState(()=>JSON.parse(localStorage.getItem('rows')||'null')||Array.from({length:2000},(_,i)=>({id:'s'+i,name:'Subscription '+i,groupId:i===0?'g1':null})));
+ const [rows,setRows]=useState(()=>JSON.parse(localStorage.getItem('rows')||'null')||Array.from({length:2000},(_,i)=>({id:'s'+i,name:'Subscription '+i,groupId:i===0?'g1':i===5?'g2':null})));
  const [busy,setBusy]=useState(false);const [filter,setFilter]=useState('g1');
  const movedIntoFolder=useRef(false),dragSnapshot=useRef(rows);const draggedItem=null;
  const setDraggedItem=()=>{};const setOrderedFeeds=setRows;const setSelectedIds=()=>{};
@@ -119,14 +119,30 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
           await pause(150);
         };
         await openPicker();
+        assert.match(
+          await evaluate('document.querySelector("[role=dialog]").innerText'),
+          /所属：Folder B/,
+        );
+        await evaluate(
+          'document.querySelector("[aria-label=只看未分组]").click()',
+        );
+        await pause(60);
+        assert.doesNotMatch(
+          await evaluate('document.querySelector("[role=dialog]").innerText'),
+          /所属：Folder B|已在此文件夹/,
+        );
+        await evaluate(
+          'document.querySelector("[aria-label=只看未分组]").click()',
+        );
+        await pause(60);
         assert.equal(
           await evaluate(
-            'document.querySelectorAll("[role=dialog] input[type=checkbox]").length',
+            'document.querySelectorAll("[role=dialog] input[type=checkbox]:not([aria-label])").length',
           ),
           50,
         );
         await evaluate(
-          `window.fixture.setFail(true);Array.from(document.querySelectorAll('[role=dialog] input[type=checkbox]')).filter(n=>!n.disabled).slice(0,2).forEach(n=>n.click())`,
+          `window.fixture.setFail(true);Array.from(document.querySelectorAll('[role=dialog] input[type=checkbox]:not([aria-label])')).filter(n=>!n.disabled).slice(0,2).forEach(n=>n.click())`,
         );
         await pause(60);
         const add = () =>
@@ -142,7 +158,7 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         assert.equal(await evaluate('window.fixture.rows[2].groupId'), null);
         assert.equal(
           await evaluate(
-            'document.querySelectorAll("[role=dialog] input[type=checkbox]:checked:not(:disabled)").length',
+            'document.querySelectorAll("[role=dialog] input[type=checkbox]:not([aria-label]):checked:not(:disabled)").length',
           ),
           2,
         );
@@ -170,7 +186,7 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         await openPicker();
         assert.equal(
           await evaluate(
-            'document.querySelectorAll("[role=dialog] input[type=checkbox]:checked:disabled").length',
+            'document.querySelectorAll("[role=dialog] input[type=checkbox]:not([aria-label]):checked:disabled").length',
           ),
           4,
         );
@@ -179,7 +195,7 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         );
         assert.equal(
           await evaluate(
-            'document.querySelectorAll("[role=dialog] input[type=checkbox]").length',
+            'document.querySelectorAll("[role=dialog] input[type=checkbox]:not([aria-label])").length',
           ),
           1,
         );

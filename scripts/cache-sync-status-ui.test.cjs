@@ -109,16 +109,18 @@ test('automatic media failures, finite retry and operational pause remain visibl
   const view = render(feed, false, { media, mediaPause: 'disabled' });
   assert.match(
     view.text,
-    /图片补齐失败 1 篇.*MEDIA_RETRY_EXHAUSTED.*媒体未确认 1 篇.*图片待补 2 篇.*已尝试 3\/4.*自动图片下载已关闭/,
+    /图片补齐失败 1 篇.*媒体未确认 1 篇.*图片待补 2 篇.*已尝试 3\/4.*自动图片下载已关闭/,
   );
+  assert.doesNotMatch(view.text, /MEDIA_RETRY_EXHAUSTED/);
+  assert.match(view.tree.props.title, /MEDIA_RETRY_EXHAUSTED/);
   assert.match(
     render(feed, false, { media, mediaFailure: 'IMAGE_REQUEST_BLOCKED' }).text,
-    /图片补齐暂停.*IMAGE_REQUEST_BLOCKED/,
+    /图片补齐暂停/,
   );
   assert.match(
     render({ ...feed, feedId: 'B' }, false, {
       mediaFailure: 'MEDIA_WORKER_UNAVAILABLE',
     }).text,
-    /图片补齐暂停.*MEDIA_WORKER_UNAVAILABLE/,
+    /图片补齐暂停/,
   );
 });

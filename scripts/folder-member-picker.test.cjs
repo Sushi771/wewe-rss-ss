@@ -76,7 +76,8 @@ function fixture({ count = 2000, fail = false } = {}) {
     calls,
     render,
     find,
-    options: () => nodes.filter((n) => n.type === 'input'),
+    options: () =>
+      nodes.filter((n) => n.type === 'input' && !n.props['aria-label']),
   };
 }
 test('large list renders fifty options, excludes existing members, caps a single atomic batch at 100, and retains selection across pages/search', async () => {
@@ -135,4 +136,29 @@ test('failed batch retains checked rows and modal; pending save disables mutatio
   );
   f.find('Modal').props.onClose();
   assert(!f.calls.some((c) => c[0] === 'close'));
+});
+
+test('ungrouped filter composes with search, shows current folder labels and retains multi-selection', async () => {
+  const f = fixture({ count: 125 });
+  f.props.folders = [{ id: 'other', name: 'Existing folder' }];
+  f.props.members[3].groupId = null;
+  f.props.members[103].groupId = null;
+  f.render();
+  assert(f.find('span', (p) => p.children === '所属：Existing folder'));
+  assert(f.find('span', (p) => p.children === '未分组'));
+  f.options()[1].props.onChange();
+  f.find('Button', (p) => p.children === '下一页').props.onPress();
+  f.render();
+  f.find('input', (p) => p['aria-label'] === '只看未分组').props.onChange({
+    target: { checked: true },
+  });
+  f.render();
+  assert.equal(f.options().length, 2);
+  f.find('Input').props.onValueChange('103');
+  f.render();
+  assert.equal(f.options().length, 1);
+  f.options()[0].props.onChange();
+  f.render();
+  await f.find('Button', (p) => p.color === 'primary').props.onPress();
+  assert.deepEqual([...f.calls.find((c) => c[0] === 'add')[1]], ['s1', 's103']);
 });
