@@ -116,11 +116,24 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
           await evaluate(
             `Array.from(document.querySelectorAll('[role=menuitem]')).find(n=>n.textContent==='添加订阅').click()`,
           );
-          await pause(150);
+          // Dropdown popovers can also have role=dialog while their exit
+          // animation overlaps the actual modal. Wait for the picker itself.
+          for (let attempt = 0; attempt < 60; attempt++) {
+            if (
+              await evaluate(
+                `Boolean(document.querySelector('.subscription-dialog [aria-label="搜索已有订阅"]'))`,
+              )
+            )
+              return;
+            await pause(50);
+          }
+          assert.fail('Subscription picker did not open');
         };
         await openPicker();
         assert.match(
-          await evaluate('document.querySelector("[role=dialog]").innerText'),
+          await evaluate(
+            'document.querySelector(".subscription-dialog").innerText',
+          ),
           /所属：Folder B/,
         );
         await evaluate(
@@ -128,7 +141,9 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         );
         await pause(60);
         assert.doesNotMatch(
-          await evaluate('document.querySelector("[role=dialog]").innerText'),
+          await evaluate(
+            'document.querySelector(".subscription-dialog").innerText',
+          ),
           /所属：Folder B|已在此文件夹/,
         );
         await evaluate(
@@ -137,28 +152,30 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         await pause(60);
         assert.equal(
           await evaluate(
-            'document.querySelectorAll("[role=dialog] input[type=checkbox]:not([aria-label])").length',
+            'document.querySelectorAll(".subscription-dialog input[type=checkbox]:not([aria-label])").length',
           ),
           50,
         );
         await evaluate(
-          `window.fixture.setFail(true);Array.from(document.querySelectorAll('[role=dialog] input[type=checkbox]:not([aria-label])')).filter(n=>!n.disabled).slice(0,2).forEach(n=>n.click())`,
+          `window.fixture.setFail(true);Array.from(document.querySelectorAll('.subscription-dialog input[type=checkbox]:not([aria-label])')).filter(n=>!n.disabled).slice(0,2).forEach(n=>n.click())`,
         );
         await pause(60);
         const add = () =>
           evaluate(
-            `Array.from(document.querySelectorAll('[role=dialog] button')).find(n=>n.textContent.includes('添加所选')).click()`,
+            `Array.from(document.querySelectorAll('.subscription-dialog button')).find(n=>n.textContent.includes('添加所选')).click()`,
           );
         await add();
         await pause(100);
         assert.match(
-          await evaluate('document.querySelector("[role=dialog]").innerText'),
+          await evaluate(
+            'document.querySelector(".subscription-dialog").innerText',
+          ),
           /Synthetic save failed/,
         );
         assert.equal(await evaluate('window.fixture.rows[2].groupId'), null);
         assert.equal(
           await evaluate(
-            'document.querySelectorAll("[role=dialog] input[type=checkbox]:not([aria-label]):checked:not(:disabled)").length',
+            'document.querySelectorAll(".subscription-dialog input[type=checkbox]:not([aria-label]):checked:not(:disabled)").length',
           ),
           2,
         );
@@ -166,7 +183,9 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         await add();
         await pause(150);
         assert.equal(
-          await evaluate('Boolean(document.querySelector("[role=dialog]"))'),
+          await evaluate(
+            'Boolean(document.querySelector(".subscription-dialog"))',
+          ),
           false,
         );
         assert.deepEqual(
@@ -186,7 +205,7 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         await openPicker();
         assert.equal(
           await evaluate(
-            'document.querySelectorAll("[role=dialog] input[type=checkbox]:not([aria-label]):checked:disabled").length',
+            'document.querySelectorAll(".subscription-dialog input[type=checkbox]:not([aria-label]):checked:disabled").length',
           ),
           4,
         );
@@ -195,7 +214,7 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         );
         assert.equal(
           await evaluate(
-            'document.querySelectorAll("[role=dialog] input[type=checkbox]:not([aria-label])").length',
+            'document.querySelectorAll(".subscription-dialog input[type=checkbox]:not([aria-label])").length',
           ),
           1,
         );
