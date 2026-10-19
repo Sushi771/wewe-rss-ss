@@ -1,0 +1,34 @@
+name: Redbook source contract (offline)
+
+on:
+  pull_request:
+    paths:
+      - 'apps/server/src/collection/redbook-source-contract*'
+      - 'apps/server/src/collection/xiaohongshu-contract*'
+      - '.github/workflows/redbook-contract.yml'
+  push:
+    branches: [codex/redbook-source-contract-20261019]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify normalized source and existing archive contracts
+        run: pnpm --filter server exec jest --runInBand src/collection/redbook-source-contract.spec.ts src/collection/xiaohongshu-contract.spec.ts
+      - name: Verify existing task recovery without changing its scheduler
+        run: pnpm --filter server exec jest --runInBand src/collection/manual-refresh-batches.spec.ts src/collection/wechat2rss-subscription-tasks.spec.ts
+      - name: Check server types
+        run: pnpm --filter server exec tsc --noEmit --incremental false
