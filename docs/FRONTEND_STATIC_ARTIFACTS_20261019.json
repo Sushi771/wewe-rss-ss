@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "sourceCodeCommit": "adcb907e6f5c69f41cdecbbe1b879d5d9b0577c7",
+  "productionBaseCommit": "6b7afe8fb7ef84f22684601cd088487c3de3904f",
+  "artifactRoot": "output/frontend-static-scope-review",
+  "runtimeTargetPrefix": "server/client",
+  "nodeVersion": "24.11.1",
+  "viteVersion": "5.4.21",
+  "mode": "production",
+  "baseUrl": "/dash",
+  "files": [
+    {
+      "path": "index.hbs",
+      "bytes": 1649,
+      "sha256": "3deba38dcf27c753811121004730dc0db136a3688ee41336d7f4b4a16e8624ad",
+      "operationInNewRelease": "replace template"
+    },
+    {
+      "path": "assets/index-Cmj8HFwN.js",
+      "bytes": 1079024,
+      "sha256": "364a517ae19d83daf2d25f35e092c4700e5a6fc92e3d934075534168ef12cf70",
+      "operationInNewRelease": "add main bundle"
+    },
+    {
+      "path": "assets/index-BE6XSNxp.js",
+      "bytes": 70,
+      "sha256": "84b79a244a32d4b4e45e7cb78228e08b8a66eee70490726b8dcd8bab7f6d3611",
+      "operationInNewRelease": "add lazy module"
+    },
+    {
+      "path": "assets/index-pqj0VH68.css",
+      "bytes": 250069,
+      "sha256": "574da73d9550f94a79b9bdb4249f72c2bbdca0ada47d8769fee9ba9369cef9b7",
+      "operationInNewRelease": "reuse identical production CSS"
+    }
+  ],
+  "deployed": false,
+  "launchableReleasePrepared": false,
+  "databaseMigrationRequired": false,
+  "databaseBackupRequiredForStaticChange": false
+}
