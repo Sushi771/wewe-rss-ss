@@ -123,8 +123,11 @@ test('actual provider gives one concise failed-operation toast with a details ac
     console: { log() {}, error() {} },
     require(name) {
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
+      if (name === '../utils/reading-query-cache')
+        return { installReadingCacheBudget: () => () => {} };
       if (name === 'react')
         return {
+          useEffect: () => {},
           useState: (value) => [
             typeof value === 'function' ? value() : value,
             () => {},

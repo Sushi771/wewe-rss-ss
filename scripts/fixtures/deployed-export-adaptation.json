@@ -1,0 +1,50 @@
+{
+  "base": "8a3141c43b1b09e92ebd75780f26c58939557906",
+  "routerMembers": {
+    "wechat2RssAccounts": "8a2de7455235bae06069c667801ee36b09728003dda28464fdc42257b1eee1d6",
+    "constructor": "ebf13b23c11e932a0a266720b2ba4e6927d88fa6b71eeffc8b50e96411b3f247",
+    "xhs": "26bb68b6467fe124df7c607cf9d56bb0abf81254cccb6cd3ef929549a3289ae5",
+    "logger": "5696fc4300fe79835d05e582fc2772b32cc4e3c338cc273e531873ac36857206",
+    "readSearchCandidateSnapshot": "92da5507f2cb299b343402248fb9880d22e9a0e22089fabe324ff9be7ce950f2",
+    "collectionRouter": "11ef40bdcbbe2d11cde841cd4a9101e3321f23a9152e58e1252e87d4b8106b2d",
+    "legacyAccountProcedure": "8938baf9176f6f681ee9bd3edeaf9900a75ad21c9f73bf4fb5da0d62ae7b58a0",
+    "accountRouter": "36d5a84ab0e1d99ffd5e1dd6fb0d987f6d68c15f482528f26cd1a30f442be98c",
+    "feedRouter": "90e8983c001c549ee4dda80de845ab938153cee9b239e7ffe9b5bab08d17d11a",
+    "getArticleMarkdown": "0a07a55ed1ed40a87d0edd672c8d8816e1c09019819bdcc259badc2c7a82503c",
+    "platformRouter": "c578100884114d96f3a5a0c2c606e19ba6b0db54c8554b0a02aa87ec20cfc8b2",
+    "xiaohongshuRouter": "83baeda2d298f66b87586de0bc6dc7b877fe9b20a12e5f7f04f69b6fdebe07d3",
+    "appRouter": "1e6557e05681625b694b8ee246e45f430f87f7944d0786e645f4fea35c4f30df"
+  },
+  "articleRoutes": {
+    "supplementSavedMedia": "445a52f4aff105987b5be0c9483a50cd0ea3b92b45bd15481ca1a5d92f5d7a85",
+    "exportIds": "f63f85e0dda79604fe9afeea73e28338bb2a1368d96f88dac9bbd24ef5cc5f50",
+    "summary": "bbb705518b7bbc755ab930979a4892dda80ccc72021098f5804591bbca30ee82",
+    "list": "859c20ea7ae3b360746af9bd946380675dd9b85aa12f8edef09b22c13c2e241f",
+    "byId": "94fa0745ed79a0840ac204fdecaf2b214a90b3bdb3a6d2274ca807566496e840",
+    "retryBody": "19d3f3c9b805033f2488cf971b25dc40280f1116a687c2a2e17e5d7454d5c330",
+    "add": "823d432ee0046bcfd6cff7871fce76a075ea535a7e2dff782bf70c9c8a8244a2",
+    "delete": "5b9eee2dc0e0042768020676a6c3b8f2936bc0baa9511ab38cb2884fb9eb2634",
+    "exportMarkdown": "5f0ae52caf74eff4c50e10a05badc82c0638082e1cd560275890b0a716f467a2",
+    "saveToObsidian": "4a4b5e5374d56a850ab27e91dc8a728106b560aa95573054e2bc63936459ae57"
+  },
+  "criticalFiles": {
+    "apps/server/src/article-export.ts": "84cf4e1b7ed40f62e09d88fee96baa5aaa22776fb1e8b122174f1a615c5b9261",
+    "apps/server/src/article-export-source.ts": "97bbf7a725e4b2989498da36ec9b6ae7e2258f33d921c4141c0aeaa38e265c1a",
+    "apps/server/src/article-download.controller.ts": "af8b041c54a25b7d5a48aa1a9aebd1f98dc70224291e454d39112f369a004e09",
+    "apps/server/src/offline-export.controller.ts": "11e8124cb8589fb0d2e23f66bcd8fd5ea561e532b01c2f0023883f05c3e2c715",
+    "apps/server/src/article-list-page.ts": "ba1685718db050e9525e578063fcc324a4fbf3de2fd33a7612c3708e351df003",
+    "apps/server/src/article-list-cache.ts": "9fa5704f2ef933179416b93a3bbe81ff951131e372c82f3c69e567f012b7ef9d",
+    "apps/server/src/prisma/prisma.service.ts": "5e5887853c41a58205e6b6a22e217dff5501bfa964969044f510c9ef36731aaf",
+    "apps/server/src/collection/sqlite-backup.ts": "27deafbf7f5989de4821d232895548ff5a7480891c2ec5538ba6fde12c4a6010",
+    "apps/server/src/collection/sqlite-write-coordinator.ts": "1eda84e565f359b391eb22950cfb939d6e7ca18533e87a71d2e22c1b8523cfba",
+    "apps/server/src/feeds/cache-sync-engine.ts": "2fedb51d8bd17050983580410dc361bf97451786d25f4710bb08bad4632f2e09",
+    "apps/server/src/feeds/cache-sync.service.ts": "b0aae491d9158d37f3c52cb142a00d61df94478a38660dbf4db2c390a48f1bbc",
+    "apps/server/src/trpc/trpc.service.ts": "77ce1a2449603b891e53bfe50c0aa33f012173f5be7624013cc6ef09b64143c9",
+    "apps/web/src/components/ArticleReader.tsx": "5427dcc31fac30a42f7daaa09dcbf3e842013d8a65a29ec94c30750ceca1c071",
+    "apps/web/src/utils/article-reader-find.ts": "f46a6144c8dac9cce7cbb1f3835e1606b5be8b8bd8d192ac336fd73c8eac1b79",
+    "scripts/local-release/runtime.cjs": "9ec37483ce2db4cef403de34141c59178b34b83bd77d4627c1e5b40a5e758126",
+    "scripts/local-release/restart.cjs": "d958e4f2be1bb1f3f031f809669dde57057ffa6c6c7b2cce993862b4c466a4cc",
+    "scripts/local-release/startup-audit.cjs": "fd260bf9dbfd8d7ea4b9c509fc0ba7efdd86773d6e5dc6c14cd6fa09801867bd"
+  },
+  "indexLayout": "6d47878dc6885554eda020cf8efb16622b8eb69d51bef8b164fdf97d22880e2d"
+}

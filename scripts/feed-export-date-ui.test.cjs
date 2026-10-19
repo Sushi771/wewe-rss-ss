@@ -7,6 +7,20 @@ const { test } = require('node:test');
 const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
 );
+const batchModule = { exports: {} };
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync('apps/web/src/utils/export-article-batches.ts', 'utf8'),
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText,
+  { module: batchModule, exports: batchModule.exports, Set, Error },
+);
+const { exportArticleBatches } = batchModule.exports;
 const source = ts.createSourceFile(
   'feeds.tsx',
   fs.readFileSync('apps/web/src/pages/feeds/index.tsx', 'utf8'),
@@ -36,6 +50,9 @@ async function run(results, rejectAt, options = {}) {
     batchExporting: { current: false },
     exportCancelled: { current: false },
     dateError: undefined,
+    exportController: { current: null },
+    AbortController,
+    exportArticleBatches,
     articleDateFilter: { dateStart: '2026-10-11', dateEnd: '2026-10-11' },
     folderFilter: 'g',
     id: 'MP_WXS_1234567890',
@@ -56,14 +73,30 @@ async function run(results, rejectAt, options = {}) {
               return options.scopeIds || results.map((_, i) => 'fixture-' + i);
             },
           },
-          saveToObsidian: {
-            mutate: async (id) => {
-              calls.push(id);
-              if (calls.length === rejectAt)
-                throw new Error('synthetic save failure');
-              if (options.cancelAfter === calls.length)
-                context.exportCancelled.current = true;
-              return results[calls.length - 1];
+          saveToObsidianBatch: {
+            mutate: async ({ ids }) => {
+              const receipts = [];
+              for (const id of ids) {
+                if (context.exportCancelled.current) break;
+                calls.push(id);
+                if (options.cancelAfter === calls.length)
+                  context.exportCancelled.current = true;
+                if (calls.length === rejectAt)
+                  receipts.push({ id, error: 'synthetic save failure' });
+                else
+                  receipts.push({
+                    id,
+                    saved: {
+                      markdownPath: id + '.md',
+                      alreadySaved: false,
+                      ...results[calls.length - 1],
+                    },
+                  });
+              }
+              return {
+                results: receipts,
+                cancelled: context.exportCancelled.current,
+              };
             },
           },
         },

@@ -229,6 +229,8 @@ function fixture({
     module,
     exports: module.exports,
     require: (name) => {
+      if (name === '@web/utils/reading-query-cache')
+        return { READING_CACHE_TIME: 60000 };
       assert(name in modules, name);
       return modules[name];
     },

@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { httpBatchLink, httpLink, loggerLink, splitLink } from '@trpc/client';
 import { useNavigate } from 'react-router-dom';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { installReadingCacheBudget } from '../utils/reading-query-cache';
 import { toast } from 'sonner';
 import { isTRPCClientError, trpc } from '../utils/trpc';
 import { getAuthCode, setAuthCode } from '../utils/auth';
@@ -99,6 +100,8 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
         },
       }),
   );
+
+  useEffect(() => installReadingCacheBudget(queryClient), [queryClient]);
 
   const [trpcClient] = useState(() => {
     const transport = {

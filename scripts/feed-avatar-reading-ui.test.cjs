@@ -171,6 +171,7 @@ function readingFixture(cached) {
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@nextui-org/react': new Proxy({}, { get: (_, key) => key }),
     '@web/utils/trpc': { trpc },
+    '@web/utils/reading-query-cache': { READING_CACHE_TIME: 60_000 },
     '@web/components/ArticleReader': { default: 'ArticleReader' },
     // This fixture checks row content; scroll restoration has its own browser regression.
     '@web/utils/use-article-list-position': {

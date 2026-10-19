@@ -21,6 +21,20 @@ async function withFixture(source, run, aliases = {}, options = {}) {
   const temp = fs.mkdtempSync(
     path.join(os.tmpdir(), 'wewe-classification-ui-'),
   );
+  const cleanupOwned = () => {
+    const parent = fs.realpathSync(os.tmpdir());
+    const owned = path.resolve(temp);
+    assert(
+      path.dirname(owned) === parent &&
+        path.basename(owned).startsWith('wewe-classification-ui-'),
+    );
+    fs.rmSync(owned, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  };
   const entry = path.join(temp, 'fixture.tsx');
   fs.writeFileSync(entry, source);
   let productionPostcss;
@@ -59,41 +73,46 @@ async function withFixture(source, run, aliases = {}, options = {}) {
       ),
     ).href
   );
-  await build({
-    root: web,
-    configFile: false,
-    define: { 'process.env.NODE_ENV': '"development"' },
-    resolve: {
-      alias: {
-        react: path.join(web, 'node_modules/react'),
-        'react-dom': path.join(web, 'node_modules/react-dom'),
-        '@tanstack/react-query': path.join(
-          web,
-          'node_modules/@tanstack/react-query',
-        ),
-        ...aliases,
-      },
-    },
-    logLevel: 'error',
-    esbuild: { jsx: 'automatic' },
-    css: productionPostcss ? { postcss: productionPostcss } : undefined,
-    build: {
-      outDir: path.join(temp, 'bundle'),
-      emptyOutDir: true,
-      minify: false,
-      rollupOptions: {
-        onwarn(warning, warn) {
-          if (warning.code !== 'MODULE_LEVEL_DIRECTIVE') warn(warning);
+  try {
+    await build({
+      root: web,
+      configFile: false,
+      define: { 'process.env.NODE_ENV': '"development"' },
+      resolve: {
+        alias: {
+          react: path.join(web, 'node_modules/react'),
+          'react-dom': path.join(web, 'node_modules/react-dom'),
+          '@tanstack/react-query': path.join(
+            web,
+            'node_modules/@tanstack/react-query',
+          ),
+          ...aliases,
         },
       },
-      lib: {
-        entry,
-        name: 'Fixture',
-        formats: ['iife'],
-        fileName: () => 'fixture.js',
+      logLevel: 'error',
+      esbuild: { jsx: 'automatic' },
+      css: productionPostcss ? { postcss: productionPostcss } : undefined,
+      build: {
+        outDir: path.join(temp, 'bundle'),
+        emptyOutDir: true,
+        minify: false,
+        rollupOptions: {
+          onwarn(warning, warn) {
+            if (warning.code !== 'MODULE_LEVEL_DIRECTIVE') warn(warning);
+          },
+        },
+        lib: {
+          entry,
+          name: 'Fixture',
+          formats: ['iife'],
+          fileName: () => 'fixture.js',
+        },
       },
-    },
-  });
+    });
+  } catch (error) {
+    if (options.cleanupOwnedFixture) cleanupOwned();
+    throw error;
+  }
   const server = http.createServer((req, res) => {
     if (options.handleRequest?.(req, res)) return;
     if (req.url === '/fixture.js') {
@@ -293,6 +312,7 @@ async function withFixture(source, run, aliases = {}, options = {}) {
       child.stderr.destroy();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
+      if (options.cleanupOwnedFixture && exited) cleanupOwned();
     }
   }
 }
