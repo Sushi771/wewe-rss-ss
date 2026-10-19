@@ -70,7 +70,7 @@ test('update, download and search remain direct reading-toolbar actions', () => 
   const toolbar = feeds.classNode('feed-reading-toolbar');
   for (const marker of [
     'refreshMpArticles({ mpId })',
-    '/download/feed/',
+    'setExportOpen(true)',
     'setIsSearchOpen',
   ]) {
     const node = feeds.elements.find((n) =>

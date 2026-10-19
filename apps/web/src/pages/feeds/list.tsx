@@ -264,6 +264,9 @@ const ArticleList: FC<ArticleListProps> = ({
           )}
         </label>
       }
+      <p className="px-3 py-1 text-xs text-neutral-500">
+        全选仅勾选已加载的 {items.length} 篇；新增行需另行勾选。
+      </p>
       {isError && (
         <div role="alert" className="px-3 py-2 text-sm text-red-600">
           文章列表读取失败，请重试。

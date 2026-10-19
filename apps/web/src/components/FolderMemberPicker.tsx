@@ -17,6 +17,7 @@ const BATCH_LIMIT = 100;
 export default function FolderMemberPicker({
   folder,
   members,
+  folders = [],
   disabled,
   error,
   onClose,
@@ -24,12 +25,14 @@ export default function FolderMemberPicker({
 }: {
   folder: { id: string; name: string };
   members: FolderMember[];
+  folders?: { id: string; name: string }[];
   disabled: boolean;
   error?: string;
   onClose: () => void;
   onAdd: (ids: string[]) => Promise<boolean>;
 }) {
   const [search, setSearch] = useState('');
+  const [onlyUngrouped, setOnlyUngrouped] = useState(false);
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const candidates = useMemo(
@@ -41,10 +44,12 @@ export default function FolderMemberPicker({
   );
   const matches = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    return candidates.filter((member) =>
-      member.name.toLocaleLowerCase().includes(query),
+    return candidates.filter(
+      (member) =>
+        (!onlyUngrouped || !member.groupId) &&
+        member.name.toLocaleLowerCase().includes(query),
     );
-  }, [candidates, search]);
+  }, [candidates, search, onlyUngrouped]);
   const pages = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
   const currentPage = Math.min(page, pages - 1);
   const visible = matches.slice(
@@ -112,6 +117,18 @@ export default function FolderMemberPicker({
               setPage(0);
             }}
           />
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              aria-label="只看未分组"
+              checked={onlyUngrouped}
+              onChange={(event) => {
+                setOnlyUngrouped(event.target.checked);
+                setPage(0);
+              }}
+            />
+            只看未分组
+          </label>
           <div className="flex items-center justify-between text-sm">
             <span role="status">
               已选 {ids.length} / {BATCH_LIMIT}，匹配 {matches.length} 个
@@ -165,11 +182,13 @@ export default function FolderMemberPicker({
                   <span className="min-w-0 flex-1 break-words">
                     {member.name}
                   </span>
-                  {alreadyAdded && (
-                    <span className="shrink-0 text-xs text-neutral-500">
-                      已在文件夹
-                    </span>
-                  )}
+                  <span className="shrink-0 text-xs text-neutral-500">
+                    {alreadyAdded
+                      ? '已在此文件夹'
+                      : member.groupId
+                        ? `所属：${folders.find((item) => item.id === member.groupId)?.name || '其他文件夹'}`
+                        : '未分组'}
+                  </span>
                 </label>
               );
             })}

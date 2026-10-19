@@ -35,12 +35,10 @@ export default function CacheSyncStatus({ feedId }: { feedId: string }) {
     : '上游检查未确认';
   const pause = status.data?.mediaPause;
   const mediaState = status.data?.mediaFailure
-    ? `图片补齐暂停（${status.data.mediaFailure}）`
+    ? '图片补齐暂停，请查看详情'
     : media
       ? [
-          media.failed
-            ? `图片补齐失败 ${media.failed} 篇（${media.code || '待检查'}）`
-            : '',
+          media.failed ? `图片补齐失败 ${media.failed} 篇` : '',
           media.unconfirmed ? `媒体未确认 ${media.unconfirmed} 篇` : '',
           media.pending ? `图片待补 ${media.pending} 篇` : '',
           media.nextRetryAt
@@ -64,9 +62,14 @@ export default function CacheSyncStatus({ feedId }: { feedId: string }) {
       role="status"
       className="shrink-0 px-3 py-1 text-xs text-neutral-500"
       title={
-        feed?.nextUpdateTime
-          ? `下次上游检查 ${dayjs(feed.nextUpdateTime).format('MM-DD HH:mm')}`
-          : undefined
+        [
+          feed?.nextUpdateTime
+            ? `下次上游检查 ${dayjs(feed.nextUpdateTime).format('MM-DD HH:mm')}`
+            : '',
+          status.data?.mediaFailure || media?.code || '',
+        ]
+          .filter(Boolean)
+          .join('；') || undefined
       }
     >
       {time} · {state}
