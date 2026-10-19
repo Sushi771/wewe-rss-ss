@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { TrpcService } from './trpc/trpc.service';
 import { TrpcRouter } from './trpc/trpc.router';
+import { LocalArticleStore } from './article-local-save';
 
 describe('bounded cached-only offline feed export', () => {
   let root: string;
@@ -90,4 +91,16 @@ describe('bounded cached-only offline feed export', () => {
     ).rejects.toThrow(/\u53d6\u6d88/);
     expect(findMany).toHaveBeenCalledTimes(1);
   });
+  it('bounds retained discovery to 64 members and preserves missing-body fallback', async () => {
+    const { router, rows } = setup(65);
+    rows[1].contentHtml = '';
+    const batch = jest.spyOn(LocalArticleStore.prototype, 'withRetainedBatch');
+    const result = await router.buildOfflineFeedDirectory(feed.id, root);
+    expect(batch.mock.calls.map(([members]) => members.length)).toEqual([
+      64, 1,
+    ]);
+    expect(result).toMatchObject({ articles: 65, complete: 64 });
+    expect(result?.incomplete).toHaveLength(1);
+    expect(global.fetch).not.toHaveBeenCalled();
+  }, 30000);
 });

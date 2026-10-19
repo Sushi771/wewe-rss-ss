@@ -318,10 +318,15 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                 `(() => {const b=Array.from(document.querySelectorAll('button')).find(e=>/^(加载更多|重试加载|正在加载)/.test(e.textContent.trim()));if(!b)return null;const r=b.getBoundingClientRect();const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {text:b.textContent.trim(),disabled:b.disabled,top:r.top,bottom:r.bottom,height:innerHeight,visible:r.width>0&&r.top>=0&&r.bottom<=innerHeight,hit:hit?.closest('button')===b}})()`,
               );
             const bottom = async () => {
+              // Scrolling is user intent. The real pane cancels a pending
+              // refresh-position restoration on wheel; a bare scrollTop write
+              // can otherwise be overwritten by its already scheduled frame.
               await evaluate(
-                "(()=>{const e=document.querySelector('.compact-list').parentElement;e.scrollTop=e.scrollHeight})()",
+                "(()=>{const e=document.querySelector('.compact-list').parentElement;e.dispatchEvent(new WheelEvent('wheel',{bubbles:true,deltaY:e.scrollHeight}));e.scrollTop=e.scrollHeight})()",
               );
-              await pause(100);
+              await evaluate(
+                'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))',
+              );
               const f = await footer();
               assert(
                 f?.visible && f?.hit,

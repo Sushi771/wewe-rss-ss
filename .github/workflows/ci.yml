@@ -30,6 +30,7 @@ on:
     branches:
       [
         main,
+        codex/deployed-reading-export-adaptation-20261018,
         codex/a5-export-title-source-20261018,
         codex/reading-ui-media-final-20261018,
         codex/daily-saved-media-combined,

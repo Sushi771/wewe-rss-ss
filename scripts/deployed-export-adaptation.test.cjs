@@ -50,6 +50,40 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
   assert.deepEqual(routes, pins.articleRoutes);
   for (const [file, expected] of Object.entries(pins.criticalFiles))
     assert.equal(hash(read(file)), expected, file);
+  // Export conversion now reuses its current DOM. Pin all other conversion
+  // statements and the uncertainty predicate to the deployed source semantics.
+  const conversion = ts.createSourceFile(
+    'article-export.ts',
+    read('apps/server/src/article-export.ts'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const functions = conversion.statements.filter(ts.isFunctionDeclaration);
+  const build = functions.find(
+    (node) => node.name.text === 'buildArticleMarkdown',
+  );
+  const rest = build.body.statements.filter(
+    (node) =>
+      !ts.isVariableStatement(node) ||
+      !node.declarationList.declarations.some(
+        (decl) => decl.name.getText(conversion) === 'mediaUnconfirmed',
+      ),
+  );
+  assert.equal(
+    tokens(rest.map((node) => node.getText(conversion)).join('\n')),
+    pins.articleExportConversion,
+  );
+  const predicate = functions.find(
+    (node) => node.name.text === 'mediaUnconfirmedInDocument',
+  );
+  assert.equal(
+    tokens(
+      predicate.body.statements
+        .map((node) => node.getText(conversion))
+        .join('\n'),
+    ),
+    pins.articleExportPredicate,
+  );
 });
 test('the deployed toolbar, grouping and reading layout are unchanged', () => {
   const file = 'apps/web/src/pages/feeds/index.tsx';
