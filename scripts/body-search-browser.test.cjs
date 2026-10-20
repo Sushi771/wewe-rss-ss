@@ -49,7 +49,7 @@ test(
         '@wewe-rss/shared': ['packages/shared/src/index.ts'],
       },
     });
-    let prisma, release;
+    let prisma, release, prepareRelease;
     try {
       const { PrismaClient } = require(
         require.resolve('@prisma/client', { paths: [server] }),
@@ -131,6 +131,10 @@ test(
       const router = new TrpcRouter(service, prisma, config, {}, {}).appRouter;
       const application = express();
       application.use(express.json());
+      let preparationHeld = false;
+      const preparationLatch = new Promise((resolve) => {
+        prepareRelease = resolve;
+      });
       const requests = [];
       let phase = 'summary-held',
         failNext = false,
@@ -171,6 +175,11 @@ test(
               .slice(record.sqlStart)
               .reduce((s, e) => s + e.duration, 0);
           });
+          if (req.url.includes('article.prepareSearch') && !preparationHeld) {
+            preparationHeld = true;
+            preparationLatch.then(next);
+            return;
+          }
           if (req.url.includes('article.list') && failNext) {
             failNext = false;
             res
@@ -258,6 +267,7 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
           await evaluate(
             "Array.from(document.querySelectorAll('button')).find(x=>x.textContent==='停止整理').click()",
           );
+          prepareRelease();
           await until(
             () =>
               evaluate(
@@ -410,6 +420,7 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
       console.log(JSON.stringify(result));
     } finally {
       release?.();
+      prepareRelease?.();
       await prisma?.$disconnect();
       undo();
       require.extensions['.ts'] = oldLoader;

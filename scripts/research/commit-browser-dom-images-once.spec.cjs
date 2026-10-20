@@ -70,6 +70,7 @@ function makeSourceDb(file, { groups = true } = {}) {
           '20261010090000_management_group_order',
           '20261011090000_cache_insert_batches',
           '20261015090000_incremental_refresh_commits',
+          '20261020160000_local_body_search',
         ].includes(name)
       )
         continue;
@@ -432,6 +433,51 @@ test('retains the INSERT ledger and rejects its drift since rehearsal', async ()
     await assert.rejects(
       runOneArticleImport(options),
       /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+    );
+  });
+});
+
+test('retains old search documents and rejects drift since rehearsal', async () => {
+  await withRehearsal(async (options) => {
+    const db = new DatabaseSync(options.sourceDb);
+    try {
+      db.exec('UPDATE article_search_documents SET generation=generation+1');
+    } finally {
+      db.close();
+    }
+    options.expectedSourceSha256 = sha256(fs.readFileSync(options.sourceDb));
+    await assert.rejects(
+      runOneArticleImport(options),
+      /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+    );
+  });
+});
+
+test('rejects an altered search schema or unexpected new target projection', async () => {
+  await withRehearsal(async (options) => {
+    let db = new DatabaseSync(options.trialDir + '/trial.db');
+    try {
+      db.prepare(
+        'UPDATE article_search_documents SET pending=0 WHERE article_id=?',
+      ).run(TARGET_ARTICLE_ID);
+    } finally {
+      db.close();
+    }
+    assert.throws(
+      () => readSnapshot(options.trialDir + '/trial.db', true),
+      /TARGET_SEARCH_ROW_INVALID/,
+    );
+    db = new DatabaseSync(options.sourceDb);
+    try {
+      db.exec(
+        'ALTER TABLE article_search_documents ADD COLUMN unknown_column TEXT',
+      );
+    } finally {
+      db.close();
+    }
+    assert.throws(
+      () => readSnapshot(options.sourceDb),
+      /SQLITE_SCHEMA_UNEXPECTED/,
     );
   });
 });

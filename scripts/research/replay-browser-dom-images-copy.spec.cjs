@@ -17,11 +17,63 @@ const {
   collectBrowserDomImages,
 } = require('./collect-browser-dom-images-once.cjs');
 const {
+  assertOldRowsUnchanged,
   loadVerifiedImageManifest,
   runImageCopyRehearsal,
 } = require('./replay-browser-dom-images-copy.cjs');
 
 const ROOT = path.resolve(__dirname, '../..');
+test('immutable-row audit accepts only the derived row for a new article', () => {
+  const before = {
+    articles: [{ id: 'old', content_html: 'retained' }],
+    feeds: [{ id: 'feed' }],
+    article_search_documents: [
+      {
+        article_id: 'old',
+        body_text: 'retained',
+        body_cached: 1,
+        pending: 0,
+        generation: 3,
+      },
+    ],
+  };
+  const after = structuredClone(before);
+  after.articles.push({ id: 'new', content_html: 'new body' });
+  after.article_search_documents.push({
+    article_id: 'new',
+    body_text: '',
+    body_cached: 1,
+    pending: 1,
+    generation: 0,
+  });
+  assert.doesNotThrow(() => assertOldRowsUnchanged(before, after));
+  for (const alter of [
+    (value) => {
+      value.articles[0].content_html = 'changed';
+    },
+    (value) => {
+      value.feeds[0].id = 'changed';
+    },
+    (value) => {
+      value.article_search_documents[0].generation++;
+    },
+    (value) => {
+      value.article_search_documents[1].body_text = 'unexpected';
+    },
+    (value) => {
+      value.article_search_documents[1].article_id = 'orphan';
+    },
+    (value) => {
+      value.article_search_documents.push({
+        ...value.article_search_documents[1],
+      });
+    },
+  ]) {
+    const changed = structuredClone(after);
+    alter(changed);
+    assert.throws(() => assertOldRowsUnchanged(before, changed));
+  }
+});
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
   'base64',
