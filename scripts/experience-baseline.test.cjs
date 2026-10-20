@@ -300,17 +300,27 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
               "document.querySelectorAll('[data-article-id]').length===20",
             ),
           );
+          const startBackground = (label) => {
+            const state = { start: epoch(), end: 0 };
+            state.done = saveCachedArticleBatch(
+              prisma,
+              fixtures.map((x) => x.id),
+              path.join(root, label),
+            ).then((result) => {
+              state.end = epoch();
+              assert(result.results.every((x) => x.saved && !x.error));
+              return result;
+            });
+            return state;
+          };
+          const overlap = (start, end, bg) =>
+            bg
+              ? Math.max(0, Math.min(end, bg.end) - Math.max(start, bg.start))
+              : 0;
           const n = Number(process.env.EXPERIENCE_SAMPLES || 10);
           for (const f of fixtures)
             for (const parallel of [false, true])
               for (let i = 0; i < n; i++) {
-                let background;
-                if (parallel)
-                  background = saveCachedArticleBatch(
-                    prisma,
-                    fixtures.map((x) => x.id),
-                    path.join(root, 'parallel-' + f.name + '-' + i),
-                  );
                 for (const warmth of ['cold', 'warm']) {
                   if (warmth === 'cold') {
                     await send('Network.enable');
@@ -323,10 +333,14 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                     warmth,
                     i,
                   ].join('-');
+                  const background = parallel
+                    ? startBackground('reader-' + phase)
+                    : null;
                   const before = requests.length;
                   const start = await evaluate(
                     `(()=>{window.readerLoaded=0;const t=performance.now();document.querySelector('[data-article-id="${f.id}"] a.compact-title').click();return t})()`,
                   );
+                  const clickEpoch = epoch();
                   await until(() => evaluate('Boolean(window.readerLoaded)'));
                   const value = await evaluate(
                     "(async()=>{const d=document.querySelector('iframe[title]').contentDocument;await Promise.all([...d.images].map(i=>i.decode()));await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));return {text:d.body.innerText.length,images:[...d.images].map(i=>({ok:i.complete&&i.naturalWidth>0}))}})()",
@@ -337,7 +351,13 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                   const times = await evaluate(
                     `({loaded:window.readerLoaded-${start},complete:performance.now()-${start},resources:performance.getEntriesByType('resource').filter(x=>x.name.includes('article.byId')).map(x=>({ms:x.duration,end:x.responseEnd}))})`,
                   );
+                  const shownEpoch = epoch();
+                  if (background) await background.done;
+                  const overlapMs = overlap(clickEpoch, shownEpoch, background);
+                  if (parallel)
+                    assert(overlapMs > 0, 'reading background must overlap');
                   measurements.push({
+                    overlapMs,
                     stage: phase,
                     kind: f.name,
                     parallel,
@@ -363,11 +383,14 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                     evaluate('!document.querySelector("iframe[title]")'),
                   );
                 }
-                if (background) await background;
                 const directory = path.join(
                   root,
                   'archive-' + f.name + '-' + parallel + '-' + i,
                 );
+                const archiveBackground = parallel
+                  ? startBackground('archive-background-' + f.name + '-' + i)
+                  : null;
+                const archiveEpoch = epoch();
                 const start = performance.now();
                 const result = await saveCachedArticleBatch(
                   prisma,
@@ -375,6 +398,7 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                   directory,
                 );
                 const written = performance.now() - start;
+                const archiveWrittenEpoch = epoch();
                 assert.equal(result.results.length, 1);
                 const saved = result.results[0].saved;
                 assert(
@@ -394,15 +418,31 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                   );
                   assert(fs.readFileSync(file).length > 0);
                 }
+                const openVerifiedMs = performance.now() - start;
+                if (archiveBackground) await archiveBackground.done;
+                const overlapMs = overlap(
+                  archiveEpoch,
+                  archiveWrittenEpoch,
+                  archiveBackground,
+                );
+                if (parallel)
+                  assert(overlapMs > 0, 'archive background must overlap');
                 measurements.push({
+                  overlapMs,
                   warmth: 'cold',
                   stage: 'archive',
                   kind: f.name,
                   parallel,
                   writeMs: written,
-                  openVerifiedMs: performance.now() - start,
+                  openVerifiedMs,
                   images: refs.length,
                 });
+                const warmBackground = parallel
+                  ? startBackground(
+                      'warm-archive-background-' + f.name + '-' + i,
+                    )
+                  : null;
+                const repeatEpoch = epoch();
                 const repeatStart = performance.now();
                 const repeated = await saveCachedArticleBatch(
                   prisma,
@@ -410,6 +450,7 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                   directory,
                 );
                 const repeatWrite = performance.now() - repeatStart;
+                const repeatWrittenEpoch = epoch();
                 assert.equal(repeated.results[0].saved.alreadySaved, true);
                 assert.notEqual(repeated.results[0].saved.mediaComplete, false);
                 fs.readFileSync(repeated.results[0].saved.markdownPath);
@@ -420,13 +461,26 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                       decodeURIComponent(ref),
                     ),
                   );
+                const repeatOpenMs = performance.now() - repeatStart;
+                if (warmBackground) await warmBackground.done;
+                const repeatOverlapMs = overlap(
+                  repeatEpoch,
+                  repeatWrittenEpoch,
+                  warmBackground,
+                );
+                if (parallel)
+                  assert(
+                    repeatOverlapMs > 0,
+                    'warm archive background must overlap',
+                  );
                 measurements.push({
+                  overlapMs: repeatOverlapMs,
                   stage: 'archive',
                   kind: f.name,
                   parallel,
                   warmth: 'warm',
                   writeMs: repeatWrite,
-                  openVerifiedMs: performance.now() - repeatStart,
+                  openVerifiedMs: repeatOpenMs,
                   images: refs.length,
                 });
               }

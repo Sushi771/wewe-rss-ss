@@ -87,7 +87,7 @@ pnpm start:server
 | `WECHAT2RSS_ACTIVE_SCHEDULE` / `ENABLE_SCHEDULED_UPDATES` | 同时为 `1` 才请求启用主动轮次，还需来源与启动检查通过。                                             |
 | `DISABLE_SCHEDULED_UPDATES`                               | `1` 禁止定时更新；测试库保持关闭。                                                                  |
 
-自建容器模板与私有部署设计见 [技术部署文档][deployment-doc]。模板需按目标版本核对迁移、来源授权和计划开关，不能只运行容器就认为订阅已就绪。Windows 固定产物、启动与回滚机制见 [本机版本化部署][release-doc]；其中旧日期的部署记录属于历史，不是本次部署指令。
+Windows 固定产物、启动与回滚机制见 [本机版本化部署演练][deployment-doc]；其中旧日期的部署记录属于历史，不是本次部署指令。容器构建入口需按目标版本核对迁移、来源授权和计划开关，不能只运行容器就认为订阅已就绪。
 
 ### 数据、备份与安全
 
@@ -112,9 +112,9 @@ pnpm start:server
 - [增量归档、筛选范围和 ZIP 合同][export-doc]
 - [单篇下载与缓存来源边界][download-doc]
 - [主动更新调度][schedule-doc] / [自动缓存同步与恢复][recovery-doc]
-- [技术部署与来源配置][deployment-doc]
+- [Windows 固定产物与部署演练][deployment-doc]
 - [产品需求与规划][product-doc]（规划项不等于已交付）
-- [开发指南][development-doc] / [统一离线目录][layout-doc]
+- [开发指南][development-doc] / [本地增量归档合同][layout-doc]
 
 ## 许可证与致谢
 
