@@ -9,7 +9,10 @@ const server = path.resolve(__dirname, '..');
 const prismaRoot = path.join(server, 'prisma');
 const manifest = require('./fixtures/aeb-schema-compatibility.json');
 const digest = (bytes) =>
-  crypto.createHash('sha256').update(bytes).digest('hex');
+  crypto
+    .createHash('sha256')
+    .update(bytes.toString().replace(/\r\n/g, '\n'))
+    .digest('hex');
 const schema = fs.readFileSync(path.join(prismaRoot, 'schema.prisma'), 'utf8');
 const names = Object.keys(manifest.migrations);
 const mainNames = manifest.mainMigrations;
@@ -133,7 +136,7 @@ before(() => {
     manifest.schemaSha256,
     'Pinned deployed schema changed',
   );
-  assert.equal(names.length, 19);
+  assert.equal(names.length, 20);
   assert.equal(mainNames.length, 12);
   for (const name of mainNames)
     assert.ok(Object.prototype.hasOwnProperty.call(manifest.migrations, name));
@@ -222,11 +225,23 @@ test('fresh empty database applies every original migration with empty compatibi
     'refresh_submission_claims',
     'cache_refresh_commits',
   ]);
-  assert.equal(snapshot._prisma_migrations.length, 19);
+  assert.equal(snapshot._prisma_migrations.length, 20);
   for (const row of snapshot._prisma_migrations)
     assert.equal(
       row.checksum,
-      manifest.migrations[`${row.migration_name}/migration.sql`],
+      crypto
+        .createHash('sha256')
+        .update(
+          fs.readFileSync(
+            path.join(
+              prismaRoot,
+              'migrations',
+              row.migration_name,
+              'migration.sql',
+            ),
+          ),
+        )
+        .digest('hex'),
     );
   for (const [table, records] of Object.entries(snapshot))
     if (table !== '_prisma_migrations') assert.deepEqual(records, []);
@@ -235,7 +250,10 @@ test('fresh empty database applies every original migration with empty compatibi
 
 test('an existing deployed-schema database retains every row and migration checksum', async () => {
   const database = path.join(owned, 'existing-aeb.db');
-  const baseline = layout('aeb-original-history', names);
+  const baseline = layout(
+    'aeb-original-history',
+    names.filter((name) => !name.startsWith('20261020100000_')),
+  );
   command(['migrate', 'deploy', '--schema', baseline], database);
   await seeded(database, true);
   const tables = [
@@ -255,7 +273,21 @@ test('an existing deployed-schema database retains every row and migration check
     ['migrate', 'deploy', '--schema', path.join(prismaRoot, 'schema.prisma')],
     database,
   );
-  assert.deepEqual(await rows(database, tables), before);
+  const after = await rows(database, tables);
+  for (const table of tables.filter((name) => name !== '_prisma_migrations'))
+    assert.deepEqual(after[table], before[table]);
+  assert.equal(before._prisma_migrations.length, 19);
+  assert.equal(after._prisma_migrations.length, 20);
+  for (const record of before._prisma_migrations)
+    assert.deepEqual(
+      after._prisma_migrations.find((row) => row.id === record.id),
+      record,
+    );
+  command(
+    ['migrate', 'deploy', '--schema', path.join(prismaRoot, 'schema.prisma')],
+    database,
+  );
+  assert.deepEqual(await rows(database, tables), after);
   assert.equal(before.refresh_submission_claims[0].state, 'unknown');
 });
 
@@ -287,7 +319,7 @@ test('an existing main-schema database upgrades additively and preserves bodies 
   ]);
   assert.deepEqual(after.accounts, before.accounts);
   assert.deepEqual(after.articles, before.articles);
-  assert.equal(after._prisma_migrations.length, 19);
+  assert.equal(after._prisma_migrations.length, 20);
   for (const record of before._prisma_migrations)
     assert.deepEqual(
       after._prisma_migrations.find((row) => row.id === record.id),

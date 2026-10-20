@@ -171,6 +171,27 @@ describe('incremental export: synthetic files and mocked media only', () => {
     expect(await fs.readFile(first.markdownPath, 'utf8')).toBe('Edited body');
     expect(await fs.readdir(join(first.directory, 'image'))).toHaveLength(2);
   });
+  it('a complete receipt still discovers later images and preserves the edited original note', async () => {
+    const first = await store.save(
+      prepare({
+        contentHtml:
+          '<div id="js_content"><p>Body</p><img src="https://mmbiz.qpic.cn/a.png"></div>',
+      }),
+    );
+    expect(first.mediaComplete).not.toBe(false);
+    await fs.writeFile(first.markdownPath, 'User-edited original');
+    jest.mocked(images.fetchAllowedImage).mockClear();
+    const second = await store.save(prepare());
+    expect(second.status).toBe('repaired');
+    expect(second.imageCount).toBe(2);
+    expect(jest.mocked(images.fetchAllowedImage)).toHaveBeenCalledTimes(1);
+    expect(jest.mocked(images.fetchAllowedImage).mock.calls[0][0]).toContain(
+      '/b.png',
+    );
+    expect(await fs.readFile(first.markdownPath, 'utf8')).toBe(
+      'User-edited original',
+    );
+  });
   it('pending receipt can gain only newly available media with an independent companion note', async () => {
     const first = await store.save(
       prepare({

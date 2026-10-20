@@ -102,6 +102,7 @@ model Article {
   feed        Feed      @relation(fields: [mpId], references: [id], onDelete: Cascade)
 
   @@index([mpId])
+  @@index([publishTime, id])
   @@map("articles")
 }
 
