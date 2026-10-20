@@ -3,7 +3,7 @@
   "baseline": "main-wechat-runtime-scope.json",
   "criticalBlobs": {
     "apps/server/src/article-list-page.ts": "a73410f27eca5df0c4f3687ffeb4a373b7e22a473a005af15270716c869cac5a",
-    "apps/server/src/article-body-search.ts": "9c40525e615174d35602de0654c873ff084e6b8974647302afcd8ce2e22f88e4",
+    "apps/server/src/article-body-search.ts": "750fa5ffa47cf4c1b587491a8fddcc5761378c5611ae673cbb1a48caa6ea8d0f",
     "packages/shared/src/article-date-filter.ts": "1205b3e5b8a2c750ff0f29ed66f33181bbd5c721bbfca383171ea6c3e80d8699"
   },
   "routerMembers": {

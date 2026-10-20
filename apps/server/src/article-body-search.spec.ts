@@ -155,6 +155,67 @@ describe('local body search on actual Prisma SQLite', () => {
     expect(await p.articleSearchDocument.count()).toBe(0);
     expect(await ids('第三次')).toEqual([]);
   });
+  it('rejects an in-flight batch after delete and recreate with the same article ID', async () => {
+    await add('recreated', '<p>旧生命周期独有词</p>', '生命周期标题');
+    let reached!: () => void;
+    let resume!: () => void;
+    const captured = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let hold = true;
+    p.$use(async (params, next) => {
+      const result = await next(params);
+      if (
+        hold &&
+        params.model === 'ArticleSearchDocument' &&
+        params.action === 'findMany'
+      ) {
+        hold = false;
+        reached();
+        await released;
+      }
+      return result;
+    });
+    const inFlight = prepareBodySearch(p);
+    try {
+      await captured;
+      await p.article.delete({ where: { id: 'recreated' } });
+      await p.article.upsert({
+        where: { id: 'recreated' },
+        update: { contentHtml: '<p>新生命周期独有词</p>' },
+        create: {
+          id: 'recreated',
+          mpId: 'a',
+          title: '生命周期标题',
+          picUrl: '',
+          publishTime: day,
+          contentHtml: '<p>新生命周期独有词</p>',
+        },
+      });
+      expect(
+        (
+          await p.articleSearchDocument.findUniqueOrThrow({
+            where: { articleId: 'recreated' },
+          })
+        ).generation,
+      ).toBe(0);
+    } finally {
+      resume();
+    }
+    expect(await inFlight).toMatchObject({ total: 1, pending: 1, indexed: 0 });
+    expect(
+      await p.articleSearchDocument.findUniqueOrThrow({
+        where: { articleId: 'recreated' },
+      }),
+    ).toMatchObject({ pending: true, bodyText: '' });
+    expect(await ids('旧生命周期独有词')).toEqual([]);
+    await prepare();
+    expect(await ids('新生命周期独有词')).toEqual(['recreated']);
+    expect(await ids('旧生命周期独有词')).toEqual([]);
+  });
   it('covers nested inserts, bulk nulling, raw deletes and feed cascades without a Prisma hook', async () => {
     await p.feed.update({
       where: { id: 'a' },

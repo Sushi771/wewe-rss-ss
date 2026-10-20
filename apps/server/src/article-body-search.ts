@@ -25,7 +25,9 @@ export function visibleBodyText(html: string | null): string {
 }
 
 /** Bounded, resumable work while the user explicitly prepares local search.
- * Generation CAS makes a concurrent body replacement/deletion win. */
+ * Generation guards edits; the source-body predicate also guards deletion and
+ * same-ID recreation, whose generation can restart. An identical source body
+ * has the same projection and is safe to reuse across that lifecycle change. */
 export async function prepareBodySearch(prisma: PrismaClient) {
   const candidates = await prisma.$queryRaw<
     Array<{ article_id: string; bytes: bigint }>
@@ -58,6 +60,9 @@ export async function prepareBodySearch(prisma: PrismaClient) {
             articleId: row.articleId,
             pending: true,
             generation: row.generation,
+            article: {
+              is: { id: row.articleId, contentHtml: row.article.contentHtml },
+            },
           },
           data: { bodyText: row.text, pending: false },
         }),
