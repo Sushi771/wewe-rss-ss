@@ -53,6 +53,62 @@ const ArticleList: FC<ArticleListProps> = ({
     cacheTime: READING_CACHE_TIME,
   });
   const queryUtils = trpc.useUtils();
+  const searchStatus = trpc.article.searchStatus.useQuery(undefined, {
+    enabled: Boolean(search.trim()),
+    retry: false,
+    refetchInterval: search.trim() ? 5000 : false,
+  });
+  const { mutateAsync: prepareSearchBatch } =
+    trpc.article.prepareSearch.useMutation();
+  const [preparingSearch, setPreparingSearch] = useState(false);
+  const [searchPaused, setSearchPaused] = useState(false);
+  const searchActive = useRef(false);
+  useEffect(
+    () => () => {
+      searchActive.current = false;
+    },
+    [],
+  );
+  const buildSearch = useCallback(async () => {
+    if (searchActive.current) return;
+    searchActive.current = true;
+    setPreparingSearch(true);
+    try {
+      while (searchActive.current) {
+        const status = await prepareSearchBatch();
+        queryUtils.article.searchStatus.setData(undefined, status);
+        if (!status.pending) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await Promise.all([
+        queryUtils.article.list.invalidate(),
+        queryUtils.article.summary.invalidate(),
+      ]);
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : '正文搜索整理失败，可以稍后继续',
+      );
+    } finally {
+      searchActive.current = false;
+      setPreparingSearch(false);
+    }
+  }, [prepareSearchBatch, queryUtils]);
+  useEffect(() => {
+    setSearchPaused(false);
+    if (!search.trim()) searchActive.current = false;
+  }, [search]);
+  useEffect(() => {
+    if (
+      search.trim() &&
+      searchStatus.data?.pending &&
+      !searchPaused &&
+      !searchActive.current
+    )
+      void buildSearch();
+  }, [search, searchStatus.data?.pending, searchPaused, buildSearch]);
+
   const bodyRetry = trpc.article.retryBody.useMutation();
   const retryBody = async (articleId: string, title: string) => {
     try {
@@ -198,6 +254,48 @@ const ArticleList: FC<ArticleListProps> = ({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {search.trim() && (
+        <div className="shrink-0 border-b px-3 py-2 text-xs" role="status">
+          本地字面搜索：标题、公众号及已整理的缓存正文；不联网取文。
+          {searchStatus.data ? (
+            <>
+              全库 {searchStatus.data.total} 篇，未缓存正文{' '}
+              {searchStatus.data.uncached} 篇，待整理{' '}
+              {searchStatus.data.pending} 篇。
+              {searchStatus.data.pending > 0 && '结果尚未覆盖全部缓存正文。'}
+            </>
+          ) : (
+            '正文覆盖范围读取中。'
+          )}
+          {searchStatus.error && (
+            <span role="alert">
+              覆盖范围读取失败：{searchStatus.error.message}
+            </span>
+          )}
+          {preparingSearch ? (
+            <Button
+              size="sm"
+              onPress={() => {
+                searchActive.current = false;
+                setSearchPaused(true);
+              }}
+            >
+              停止整理
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onPress={() => {
+                setSearchPaused(false);
+                void buildSearch();
+              }}
+            >
+              整理本地正文搜索
+            </Button>
+          )}
+        </div>
+      )}
+
       <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
         排序
         <select
@@ -315,6 +413,16 @@ const ArticleList: FC<ArticleListProps> = ({
                 href={item.sourceUrl || `https://mp.weixin.qq.com/s/${item.id}`}
               >
                 {item.title}
+                {item.searchSnippet && (
+                  <span
+                    className="mt-1 block whitespace-normal break-words text-xs font-normal text-neutral-500"
+                    data-search-snippet
+                  >
+                    正文：{item.searchSnippet.before}
+                    <mark>{item.searchSnippet.match}</mark>
+                    {item.searchSnippet.after}
+                  </span>
+                )}
               </a>
               <div className="flex w-[300px] shrink-0 flex-col items-end gap-0.5 text-neutral-500">
                 <div

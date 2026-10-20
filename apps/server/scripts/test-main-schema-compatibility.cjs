@@ -134,9 +134,9 @@ before(() => {
   assert.equal(
     digest(schema),
     manifest.schemaSha256,
-    'Pinned deployed schema changed',
+    'Pinned additive schema manifest changed',
   );
-  assert.equal(names.length, 20);
+  assert.equal(names.length, 21);
   assert.equal(mainNames.length, 12);
   for (const name of mainNames)
     assert.ok(Object.prototype.hasOwnProperty.call(manifest.migrations, name));
@@ -225,7 +225,7 @@ test('fresh empty database applies every original migration with empty compatibi
     'refresh_submission_claims',
     'cache_refresh_commits',
   ]);
-  assert.equal(snapshot._prisma_migrations.length, 20);
+  assert.equal(snapshot._prisma_migrations.length, 21);
   for (const row of snapshot._prisma_migrations)
     assert.equal(
       row.checksum,
@@ -252,7 +252,7 @@ test('an existing deployed-schema database retains every row and migration check
   const database = path.join(owned, 'existing-aeb.db');
   const baseline = layout(
     'aeb-original-history',
-    names.filter((name) => !name.startsWith('20261020100000_')),
+    names.filter((name) => !name.startsWith('20261020')),
   );
   command(['migrate', 'deploy', '--schema', baseline], database);
   await seeded(database, true);
@@ -277,7 +277,7 @@ test('an existing deployed-schema database retains every row and migration check
   for (const table of tables.filter((name) => name !== '_prisma_migrations'))
     assert.deepEqual(after[table], before[table]);
   assert.equal(before._prisma_migrations.length, 19);
-  assert.equal(after._prisma_migrations.length, 20);
+  assert.equal(after._prisma_migrations.length, 21);
   for (const record of before._prisma_migrations)
     assert.deepEqual(
       after._prisma_migrations.find((row) => row.id === record.id),
@@ -319,7 +319,7 @@ test('an existing main-schema database upgrades additively and preserves bodies 
   ]);
   assert.deepEqual(after.accounts, before.accounts);
   assert.deepEqual(after.articles, before.articles);
-  assert.equal(after._prisma_migrations.length, 20);
+  assert.equal(after._prisma_migrations.length, 21);
   for (const record of before._prisma_migrations)
     assert.deepEqual(
       after._prisma_migrations.find((row) => row.id === record.id),

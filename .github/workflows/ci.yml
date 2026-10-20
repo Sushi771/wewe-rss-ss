@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, codex/main-delivered-media-ui-rss-20261018]
   pull_request:
-    branches: [main]
+    branches: [main, codex/experience-baseline-docs-20261020]
 
 jobs:
   lint-test:
@@ -51,6 +51,10 @@ jobs:
           LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
           ARTICLE_LIST_BROWSER_SAMPLES: '1'
         run: node --test scripts/article-list-browser.test.cjs
+      - name: Test local body search UI and snippet escaping
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+        run: node --test scripts/body-search-browser.test.cjs scripts/sqlite-statements.test.cjs
       - name: Test synthetic reading image and archive experience
         env:
           LAYOUT_TEST_BROWSER: /usr/bin/google-chrome

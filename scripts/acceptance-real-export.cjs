@@ -1,3 +1,4 @@
+const { splitSqliteStatements } = require('./sqlite-statements.cjs');
 // Real target HTML export regression in a newly created temporary SQLite DB.
 // This verifies export, NOT acquisition, paging, metrics, or complete history.
 const fs = require('node:fs/promises');
@@ -70,10 +71,9 @@ const { csvCell } = require(path.join(built, 'collection/collection-format'));
     ).sort()) {
       const folder = path.join(server, 'prisma/migrations', name);
       if (!(await fs.stat(folder)).isDirectory()) continue;
-      for (const sql of (
-        await fs.readFile(path.join(folder, 'migration.sql'), 'utf8')
+      for (const sql of splitSqliteStatements(
+        await fs.readFile(path.join(folder, 'migration.sql'), 'utf8'),
       )
-        .split(';')
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(sql);

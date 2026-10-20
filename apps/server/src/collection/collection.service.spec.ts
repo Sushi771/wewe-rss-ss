@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -46,10 +47,9 @@ describe('local collection with real SQLite migrations', () => {
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
     for (const name of (await fs.readdir(migrations)).sort()) {
       if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      for (const sql of (
-        await fs.readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
+      for (const sql of splitSqliteStatements(
+        await fs.readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
       )
-        .split(';')
         .map((s) => s.trim())
         .filter(Boolean)) {
         await prisma.$executeRawUnsafe(sql);

@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import * as os from 'node:os';
@@ -54,8 +55,7 @@ describe('validated refresh response proof (tiny owned SQLite, no network)', () 
       const sql = await fs
         .readFile(path.join(directory, name, 'migration.sql'), 'utf8')
         .catch(() => '');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);
