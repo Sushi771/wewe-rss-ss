@@ -4,7 +4,7 @@
 
 ## 版本范围
 
-默认 `main` 已合入订阅、缓存、阅读与导出的多项集成改动；本文源码链接固定到核对基线 [`33ec7c3`](https://github.com/Sushi771/wewe-rss-ss/commit/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65)（2026-10-18），不再以旧集成分支是否合入判断功能。独立集成提交 [`8a3141c`](https://github.com/Sushi771/wewe-rss-ss/commit/8a3141c43b1b09e92ebd75780f26c58939557906) 的分组/日期筛选、阅读器和后台启动审计接线尚未全部回流到该 main 基线。构建已有部署的替换包前必须核对这些差异；不能用 main 的旧接线覆盖已交付功能。README、开发分支或测试通过均不代表已有部署已升级。
+默认 `main` 已合入订阅、缓存、阅读与导出的多项集成改动；本文有效的历史源码链接固定到核对基线 [`33ec7c3`](https://github.com/Sushi771/wewe-rss-ss/commit/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65)（2026-10-18）；已修复的断链使用当前相对路径，不再以旧集成分支是否合入判断功能。独立集成提交 [`8a3141c`](https://github.com/Sushi771/wewe-rss-ss/commit/8a3141c43b1b09e92ebd75780f26c58939557906) 的分组/日期筛选、阅读器和后台启动审计接线尚未全部回流到该 main 基线。构建已有部署的替换包前必须核对这些差异；不能用 main 的旧接线覆盖已交付功能。README、开发分支或测试通过均不代表已有部署已升级。
 
 ## 已实现功能
 
@@ -123,16 +123,16 @@ pnpm start:server
 [provider]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/provider-registry.ts
 [subscription]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/trpc/trpc.service.ts
 [batches]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/wechat2rss-subscription-batches.ts
-[cache]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/insert-only-cache.ts
+[cache]: apps/server/src/collection/collection.service.ts
 [local-save]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/article-local-save.ts
 [schedule-code]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/feeds/active-refresh-schedule.ts
 [backup-code]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/scripts/backup-sqlite.py
-[export-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/INCREMENTAL_ARTICLE_EXPORT.md
-[download-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/ARTICLE_DOWNLOAD_TOOL.md
-[schedule-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/ACTIVE_REFRESH_SCHEDULE.md
-[recovery-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/AUTO_REFRESH_RECOVERY_20261012.md
-[deployment-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/paid-sources/TECHNICAL_DEPLOYMENT.md
+[export-doc]: docs/INCREMENTAL_ARTICLE_EXPORT.md
+[download-doc]: docs/paid-sources/PRODUCT_REQUIREMENTS.md#单篇下载与部署边界
+[schedule-doc]: apps/server/src/feeds/active-refresh-schedule.ts
+[recovery-doc]: docs/MAIN_WECHAT_RUNTIME_EXTRACTION.md
+[deployment-doc]: docs/LOCAL_RELEASE_REHEARSAL.md
 [release-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/LOCAL_RELEASE_REHEARSAL.md
-[product-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/paid-sources/PRODUCT_REQUIREMENTS.md
+[product-doc]: docs/paid-sources/PRODUCT_REQUIREMENTS.md
 [development-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/DEVELOPMENT.md
-[layout-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/OFFLINE_ARTICLE_LAYOUT.md
+[layout-doc]: docs/INCREMENTAL_ARTICLE_EXPORT.md
