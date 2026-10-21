@@ -44,6 +44,24 @@ const toolPins = () =>
 function checkPin(value) {
   equal(lib.fileHash(value.path), value.sha256);
 }
+function requireClientLayout(release) {
+  const client = path.join(release, 'server/client');
+  assert(
+    fs.lstatSync(client).isDirectory() &&
+      !fs.lstatSync(client).isSymbolicLink(),
+    'FRONTEND_INSTALLED_LAYOUT_MISMATCH',
+  );
+  assert(
+    lib.inside(release, canonical(client)) &&
+      !fs.existsSync(path.join(release, 'client')),
+    'FRONTEND_INSTALLED_LAYOUT_MISMATCH',
+  );
+  assert(
+    fs.lstatSync(path.join(client, 'index.hbs')).isFile() &&
+      fs.lstatSync(path.join(client, 'assets')).isDirectory(),
+    'FRONTEND_INSTALLED_LAYOUT_MISMATCH',
+  );
+}
 function requireSpace(root, allocation = 0) {
   const value = fs.statfsSync(root),
     available = Number(value.bavail) * Number(value.bsize);
@@ -71,8 +89,8 @@ function copyBudget(previous, manifest, files, root) {
   }
   const sourceSizes = { ...sizes };
   for (const file of files)
-    sizes['client/' + file.path] = Math.max(
-      sizes['client/' + file.path] || 0,
+    sizes['server/client/' + file.path] = Math.max(
+      sizes['server/client/' + file.path] || 0,
       file.bytes,
     );
   const round = (value) => Math.ceil(value / allocationUnit) * allocationUnit;
@@ -316,6 +334,7 @@ async function plan(options) {
   assert.equal(old.sourceCommit, BASE);
   assert.equal(old.desktopHelperIncluded, false);
   assert.equal(old.schemaCompatibility, 'current');
+  requireClientLayout(previous);
   const database = canonical(
     path.join(installation, 'apps/server/data/wewe-rss.db'),
   );
@@ -393,6 +412,7 @@ async function plan(options) {
       coverage:
         'other historical contents are retained untouched and not enumerated',
     },
+    frontendDirectory: 'server/client',
     budget,
     availableBytesAtPlan,
     reserveBytes,
@@ -436,6 +456,8 @@ function checkPlan(p) {
     'FRONTEND_HISTORY_AUDIT_NOT_CLAIMED',
   );
   equal(id(p.previous), p.previousIdentity);
+  equal(p.frontendDirectory, 'server/client');
+  requireClientLayout(p.previous);
   assert.equal(path.dirname(p.previous), p.root);
   checkPin(p.tool);
   if (p.writerObservation) checkPin(p.writerObservation);
@@ -452,7 +474,7 @@ function equivalent(old, next, files) {
   equal(next.links, old.links);
   const expected = { ...old.files };
   for (const f of files) {
-    const key = 'client/' + f.path;
+    const key = 'server/client/' + f.path;
     if (f.path !== 'index.hbs' && expected[key] && expected[key] !== f.sha256)
       throw Error('FRONTEND_EXISTING_ASSET_COLLISION');
     expected[key] = f.sha256;
@@ -520,7 +542,7 @@ function copyPackage(previous, candidate, manifest, budget, root) {
     }
   }
   for (const relative of Object.keys(manifest.files)) {
-    if (relative === 'client/index.hbs') continue; // create the replacement exclusively, never follow an overwritten target
+    if (relative === 'server/client/index.hbs') continue; // create the replacement exclusively, never follow an overwritten target
     copyFixed(
       path.join(previous, relative),
       path.join(candidate, relative),
@@ -596,7 +618,7 @@ async function apply(p, adapter) {
     );
     for (const f of p.files) {
       equal(lib.fileHash(f.input), f.sha256);
-      const target = path.join(candidate, 'client', f.path);
+      const target = path.join(candidate, 'server/client', f.path);
       assert(lib.inside(candidate, canonical(path.dirname(target))));
       if (f.path !== 'index.hbs' && fs.existsSync(target)) {
         assert(

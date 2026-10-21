@@ -35,8 +35,11 @@ async function fixture(t, extra = () => {}) {
     path.join(previous, 'server/prisma/migrations/20/migration.sql'),
     'fixed-schema',
   );
-  write(path.join(previous, 'client/index.hbs'), 'old template');
-  write(path.join(previous, 'client/assets/index-old.js'), 'retain old asset');
+  write(path.join(previous, 'server/client/index.hbs'), 'old template');
+  write(
+    path.join(previous, 'server/client/assets/index-old.js'),
+    'retain old asset',
+  );
   write(
     path.join(root, 'active.json'),
     JSON.stringify({ format: 1, id: 'old' }),
@@ -187,8 +190,17 @@ test('retain-only update preserves 146 historical slots including unmanifested d
     'fixed-backend',
   );
   const candidate = path.join(f.root, f.p.candidateId);
+  assert(!fs.existsSync(path.join(candidate, 'client')));
   assert.equal(
-    fs.readFileSync(path.join(candidate, 'client/assets/index-old.js'), 'utf8'),
+    fs.readFileSync(path.join(candidate, 'server/client/index.hbs'), 'utf8'),
+    'new frontend 0',
+  );
+  assert.equal(f.p.frontendDirectory, 'server/client');
+  assert.equal(
+    fs.readFileSync(
+      path.join(candidate, 'server/client/assets/index-old.js'),
+      'utf8',
+    ),
     'retain old asset',
   );
   assert.equal(
@@ -904,4 +916,25 @@ test('low free space rejects allocation and a mid-copy drop refuses publication'
       fs.statfsSync = prior;
     }
   }
+});
+test('ambiguous root client layout is refused rather than creating or updating it', async (t) => {
+  const f = await fixture(t);
+  f.write(path.join(f.previous, 'client/index.hbs'), 'unsupported root client');
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(f.previous, 'release.json'), 'utf8'),
+  );
+  f.write(
+    path.join(f.previous, 'release.json'),
+    JSON.stringify({ ...manifest, ...lib.fingerprint(f.previous) }),
+  );
+  await assert.rejects(
+    update.plan({
+      installation: f.p.installation,
+      web: path.join(f.p.installation, 'web'),
+      artifacts: path.join(f.p.installation, 'artifacts.json'),
+      expected: f.p.expected,
+    }),
+    /INSTALLED_LAYOUT_MISMATCH/,
+  );
+  assert.deepEqual(f.starts, []);
 });
