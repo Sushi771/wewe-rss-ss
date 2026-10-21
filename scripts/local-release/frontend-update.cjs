@@ -9,6 +9,10 @@ const assert = require('node:assert/strict');
 const { spawn } = lib.hostEffects.processes;
 const { parseArgs, parseEnv } = require('node:util');
 const { sameIdentity, processIdentity, waitReady } = require('./switch.cjs');
+const { argv: windowsArgv } = require('./windows-release-references.cjs');
+const QUERY_TIMEOUT_MS = 15000;
+const QUERY_MAX_BYTES = 4 * 1024 ** 2;
+const QUERY_MAX_ENTRIES = 4096;
 const SOURCE = 'f618e48f48ff0e3df1c646cb8a666a2461815732';
 const BASE = '48fdf73f4d770001bbb6de3e2383189811e56ccb';
 const GROWTH = 768 * 1024 ** 2;
@@ -107,9 +111,13 @@ function command(release, database) {
   );
   return { exe, args, line: [exe, ...args].join(' ') };
 }
-function classifyWriters(raw, installation, database) {
+function classifyWriters(raw, installation, database, options = {}) {
   assert.equal(raw.querySucceeded, true, 'FRONTEND_WRITER_QUERY_FAILED');
   assert(Array.isArray(raw.processes));
+  assert(
+    raw.processes.length <= QUERY_MAX_ENTRIES,
+    'FRONTEND_WRITER_ENTRY_LIMIT',
+  );
   assert(Number.isInteger(raw.collectorPid));
   const result = {
     querySucceeded: true,
@@ -118,19 +126,64 @@ function classifyWriters(raw, installation, database) {
     unknown: [],
     globalComplete: false,
   };
-  const prefix = installation.toLowerCase() + '\\',
-    db = database.toLowerCase();
+  const normalize = (value) => path.win32.normalize(value.replace(/\//g, '\\'));
+  const prefix =
+    normalize(installation).replace(/\\$/, '').toLowerCase() + '\\';
+  const resolveIdentity =
+    options.resolveIdentity || ((file) => id(canonical(file)));
+  const databaseIdentity = resolveIdentity(normalize(database));
+  if (options.databaseIdentity)
+    equal(databaseIdentity, options.databaseIdentity);
   for (const item of raw.processes) {
     if (item.ProcessId === raw.collectorPid) continue; // exact read-only collector, not a system exemption
-    const exe = (item.ExecutablePath || '').toLowerCase(),
-      line = (item.CommandLine || '').toLowerCase();
-    const appExe = exe.startsWith(prefix),
-      sameDb = line.includes(db);
-    if (appExe || sameDb) {
-      if (appExe && sameDb && /runtime\.cjs\s+start\s+--database\s+/.test(line))
-        result.applicationPids.push(item.ProcessId);
-      else result.conflicts.push(item.ProcessId);
-    } else if (!exe || !line) result.unknown.push(item.ProcessId);
+    const exe = item.ExecutablePath || '',
+      line = item.CommandLine || '';
+    const appExe = normalize(exe).toLowerCase().startsWith(prefix);
+    let args;
+    try {
+      args = windowsArgv(line);
+    } catch {
+      if (appExe || /--database\b|runtime\.cjs/i.test(line))
+        result.conflicts.push(item.ProcessId);
+      else result.unknown.push(item.ProcessId);
+      continue;
+    }
+    const databases = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--database') databases.push(args[++i]);
+      else if (args[i].startsWith('--database='))
+        databases.push(args[i].slice(11));
+    }
+    const runtime = args.some(
+      (arg, i) =>
+        path.win32.basename(arg).toLowerCase() === 'runtime.cjs' &&
+        args[i + 1] === 'start',
+    );
+    if (!appExe && !runtime && databases.length === 0) {
+      if (!exe || !line) result.unknown.push(item.ProcessId);
+      continue;
+    }
+    // A relative path has no trustworthy cwd in Win32_Process. Do not guess it.
+    if (
+      databases.length !== 1 ||
+      !databases[0] ||
+      !/^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/i.test(databases[0])
+    ) {
+      result.conflicts.push(item.ProcessId);
+      continue;
+    }
+    let sameDb;
+    try {
+      sameDb =
+        jsonHash(resolveIdentity(normalize(databases[0]))) ===
+        jsonHash(databaseIdentity);
+    } catch {
+      result.conflicts.push(item.ProcessId);
+      continue;
+    }
+    if (appExe && runtime && sameDb)
+      result.applicationPids.push(item.ProcessId);
+    else if (appExe || sameDb) result.conflicts.push(item.ProcessId);
   }
   for (const key of ['applicationPids', 'conflicts', 'unknown'])
     result[key].sort((a, b) => a - b);
@@ -469,13 +522,13 @@ async function apply(p, adapter) {
         lib.verifyRelease(p.previous);
         fallback = await adapter.start(p.previous, path.basename(p.previous));
         await adapter.ready(fallback);
-        sameIdentity(await adapter.snapshot(fallback.pid), {
+        const fallbackIdentity = await adapter.snapshot(fallback.pid);
+        sameIdentity(fallbackIdentity, {
           ...p.expected,
           pid: fallback.pid,
-          startUtc:
-            fallback.startUtc ||
-            (await adapter.snapshot(fallback.pid)).startUtc,
+          startUtc: fallback.startUtc || fallbackIdentity.startUtc,
         });
+        validateWriters(await adapter.writers(), fallbackIdentity);
         adapter.detach?.(fallback);
       } catch (fallbackError) {
         const failures = [error, fallbackError];
@@ -528,29 +581,38 @@ function productionAdapter(p) {
     writers: () =>
       classifyWriters(
         JSON.parse(
-          run('powershell.exe', [
-            '-NoProfile',
-            '-NonInteractive',
-            '-File',
-            path.join(__dirname, 'frontend-writers.ps1'),
-            '-Installation',
-            p.installation,
-            '-Database',
-            p.database,
-          ]),
+          run(
+            'powershell.exe',
+            [
+              '-NoProfile',
+              '-NonInteractive',
+              '-File',
+              path.join(__dirname, 'frontend-writers.ps1'),
+              '-Installation',
+              p.installation,
+              '-Database',
+              p.database,
+            ],
+            { timeout: QUERY_TIMEOUT_MS, maxBuffer: QUERY_MAX_BYTES },
+          ),
         ),
         p.installation,
         p.database,
+        { databaseIdentity: p.databaseIdentity },
       ),
     requireExited: async (expected) => {
       // A missing PID is confirmed by CIM, not by a failed inaccessible snapshot.
       const result = JSON.parse(
-        run('powershell.exe', [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(expected.pid)}'; ConvertTo-Json -Compress -InputObject ([bool]($null -eq $p))`,
-        ]),
+        run(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -OperationTimeoutSec 10 -Filter 'ProcessId=${Number(expected.pid)}'; ConvertTo-Json -Compress -InputObject ([bool]($null -eq $p))`,
+          ],
+          { timeout: QUERY_TIMEOUT_MS, maxBuffer: QUERY_MAX_BYTES },
+        ),
       );
       assert.equal(result, true, 'FRONTEND_OLD_INSTANCE_NOT_EXITED');
     },

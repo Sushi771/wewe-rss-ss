@@ -340,9 +340,166 @@ test('actual production writer classification retains unknowns and rejects relat
     },
     'C:\\app',
     'C:\\app\\data.db',
+    { resolveIdentity: () => ['synthetic-file-identity'] },
   );
   assert.deepEqual(observed.applicationPids, [101]);
   assert.deepEqual(observed.conflicts, [103]);
   assert.deepEqual(observed.unknown, [42]);
   assert.equal(observed.globalComplete, false);
+});
+test('same database is bound by actual identity across slashes, quoting, normalization and hard-link alias', (t) => {
+  const f = fixture(t),
+    alias = path.join(path.dirname(f.p.database), 'database-alias.db');
+  fs.linkSync(f.p.database, alias);
+  const values = [
+    f.p.database,
+    f.p.database.replace(/\\/g, '/'),
+    '"' + f.p.database + '"',
+    alias,
+    path.join(path.dirname(f.p.database), '..', 'data', 'wewe-rss.db'),
+  ];
+  for (const value of values) {
+    const raw = {
+      querySucceeded: true,
+      collectorPid: 900,
+      processes: [
+        {
+          ProcessId: 777,
+          ExecutablePath: 'C:\\external\\node.exe',
+          CommandLine:
+            'C:\\external\\node.exe C:\\other\\runtime.cjs start --database ' +
+            value,
+        },
+      ],
+    };
+    const observation = update.classifyWriters(
+      raw,
+      f.p.installation,
+      f.p.database,
+      { databaseIdentity: f.p.databaseIdentity },
+    );
+    assert.deepEqual(observation.conflicts, [777], value);
+    assert.throws(
+      () => update.validateWriters(observation, null),
+      /WRITER_CONFLICT/,
+    );
+  }
+});
+test('related unresolvable, relative, drive-relative and ambiguous database paths are refused', (t) => {
+  const f = fixture(t);
+  for (const value of [
+    'data.db',
+    'C:data.db',
+    '\\data.db',
+    'C:\\missing\\data.db',
+    '"unterminated',
+    '"' + f.p.database + '" --database other.db',
+  ]) {
+    const observation = update.classifyWriters(
+      {
+        querySucceeded: true,
+        collectorPid: 900,
+        processes: [
+          {
+            ProcessId: 777,
+            ExecutablePath: 'C:\\external\\node.exe',
+            CommandLine:
+              'C:\\external\\node.exe C:\\other\\runtime.cjs start --database ' +
+              value,
+          },
+        ],
+      },
+      f.p.installation,
+      f.p.database,
+    );
+    assert.deepEqual(observation.conflicts, [777], value);
+  }
+});
+test('rollback rechecks writers after ready and only stops its owned fallback on conflict', async (t) => {
+  const f = fixture(t),
+    writers = f.adapter.writers,
+    stopNew = f.adapter.stopNew,
+    stopped = [];
+  let afterReady = false,
+    checks = 0;
+  f.adapter.ready = async () => {
+    if (f.starts.length === 1) throw Error('NEW_FAILED');
+    afterReady = true;
+  };
+  f.adapter.writers = async () => {
+    const value = await writers();
+    if (afterReady) {
+      checks++;
+      return { ...value, conflicts: [888] };
+    }
+    return value;
+  };
+  f.adapter.stopNew = async (child) => {
+    stopped.push(child.pid);
+    await stopNew(child);
+  };
+  await assert.rejects(
+    update.apply(f.p, f.adapter),
+    /UPDATE_AND_ROLLBACK_FAILED/,
+  );
+  assert.equal(checks, 1);
+  assert.deepEqual(stopped, [202, 203]);
+  assert(!stopped.includes(888));
+  assert.equal(JSON.parse(fs.readFileSync(f.p.pointer.path)).id, 'old');
+});
+test(
+  'writer and exit queries enforce controller deadlines and output bounds without running PowerShell',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const prior = lib.run,
+      calls = [];
+    try {
+      lib.run = (exe, args, options) => {
+        calls.push({ args, options });
+        throw Object.assign(Error('synthetic timeout'), { code: 'ETIMEDOUT' });
+      };
+      const adapter = update.productionAdapter({
+        config: [],
+        installation: 'C:\\app',
+        database: 'C:\\app\\data.db',
+      });
+      assert.throws(() => adapter.writers(), /synthetic timeout/);
+      await assert.rejects(
+        adapter.requireExited({ pid: 101 }),
+        /synthetic timeout/,
+      );
+      assert.equal(calls.length, 2);
+      for (const call of calls) {
+        assert.equal(call.options.timeout, 15000);
+        assert.equal(call.options.maxBuffer, 4194304);
+      }
+      assert(calls[1].args.at(-1).includes('-OperationTimeoutSec 10'));
+      const source = fs.readFileSync(
+        path.join(__dirname, 'frontend-writers.ps1'),
+        'utf8',
+      );
+      assert(source.includes('-OperationTimeoutSec 10'));
+      assert(source.includes('-First 4097'));
+      assert(source.includes('-gt 4096'));
+      assert(source.includes('-gt 4194304'));
+    } finally {
+      lib.run = prior;
+    }
+  },
+);
+test('oversized writer enumeration is refused before classification', () => {
+  assert.throws(
+    () =>
+      update.classifyWriters(
+        {
+          querySucceeded: true,
+          collectorPid: 900,
+          processes: Array(4097).fill({}),
+        },
+        'C:\\app',
+        'C:\\app\\data.db',
+        { resolveIdentity: () => ['test'] },
+      ),
+    /ENTRY_LIMIT/,
+  );
 });
