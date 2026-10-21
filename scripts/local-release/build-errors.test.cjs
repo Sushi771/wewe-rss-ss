@@ -1,7 +1,103 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { finishBuild, buildFailureDiagnostic } = require('./build.cjs');
+const {
+  finishBuild,
+  buildFailureDiagnostic,
+  compilerFailure,
+  compilerEnvironment,
+} = require('./build.cjs');
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+
+test(
+  'fixed compiler environment disables native cache even when explicitly re-enabled by the tool',
+  { skip: typeof require('node:module').enableCompileCache !== 'function' },
+  (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-native-cache-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const code = `const m=require('node:module');const r=m.enableCompileCache(process.argv[1]);m.flushCompileCache();process.stdout.write(JSON.stringify({status:r.status,disabled:m.constants.compileCacheStatus.DISABLED}));`;
+    const disabled = path.join(root, 'disabled');
+    const result = spawnSync(process.execPath, ['-e', code, disabled], {
+      env: compilerEnvironment({
+        ...process.env,
+        NODE_DISABLE_COMPILE_CACHE: '0',
+        NODE_COMPILE_CACHE: disabled,
+      }),
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const status = JSON.parse(result.stdout);
+    assert.equal(status.status, status.disabled);
+    assert.equal(fs.existsSync(disabled), false);
+    const enabled = path.join(root, 'enabled');
+    const enabledEnv = { ...process.env, NODE_COMPILE_CACHE: enabled };
+    delete enabledEnv.NODE_DISABLE_COMPILE_CACHE;
+    const control = spawnSync(process.execPath, ['-e', code, enabled], {
+      env: enabledEnv,
+      encoding: 'utf8',
+    });
+    assert.equal(control.status, 0, control.stderr);
+    assert.equal(fs.existsSync(enabled), true);
+  },
+);
+
+test('actual compiler stdout, stderr and exit survive both finalization errors verbatim', () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `process.stdout.write('tsc stdout\\n类型错误');process.stderr.write('compiler stderr\\n');process.exitCode=2;`,
+    ],
+    { encoding: 'utf8' },
+  );
+  const primary = compilerFailure(result, process.execPath, ['synthetic-tsc']);
+  let failure;
+  try {
+    finishBuild(
+      primary,
+      {
+        finish() {
+          throw Error('held');
+        },
+      },
+      {
+        close() {
+          throw Error('unrequested');
+        },
+      },
+    );
+  } catch (error) {
+    failure = error;
+  }
+  const report = buildFailureDiagnostic(failure);
+  assert.equal(report.primaryError.compiler.status, 2);
+  assert.equal(report.primaryError.compiler.stdout, 'tsc stdout\n类型错误');
+  assert.equal(report.primaryError.compiler.stderr, 'compiler stderr\n');
+  assert.equal(report.closeErrors.length, 2);
+});
+
+test('spawn errors retain identity, streams and signal without inventing a successful exit', () => {
+  const error = Object.assign(Error('spawn refused'), { code: 'ENOENT' });
+  assert.equal(
+    compilerFailure(
+      { error, status: null, signal: 'SIGTERM', stdout: 'partial', stderr: '' },
+      'exact-node',
+      ['exact-tsc'],
+    ),
+    error,
+  );
+  assert.deepEqual(buildFailureDiagnostic(error).primaryError.compiler, {
+    executable: 'exact-node',
+    args: ['exact-tsc'],
+    status: null,
+    signal: 'SIGTERM',
+    stdout: 'partial',
+    stderr: '',
+  });
+});
 
 test('compiler primary error survives both reservation and scope finalization errors', () => {
   const primary = Object.assign(Error('spawn synthetic-generator ENOENT'), {

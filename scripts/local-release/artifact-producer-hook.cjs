@@ -162,6 +162,7 @@ for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
         stdio,
         env: {
           ...(options.env || process.env),
+          NODE_DISABLE_COMPILE_CACHE: '1',
           NODE_OPTIONS: process.env.NODE_OPTIONS,
           WEWE_ARTIFACT_ROOT: root,
           WEWE_ARTIFACT_FD: String(childFd),

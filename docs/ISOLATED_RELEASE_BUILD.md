@@ -144,6 +144,14 @@ another failed workspace, installation, runtime startup or production operation.
 
 ## Acceptance still required
 
+Compiler failures retain both captured streams, exit status and signal separately
+from finalization failures; the existing 16 MiB capture limit still applies.
+Pinned compiler children and their Node descendants force
+`NODE_DISABLE_COMPILE_CACHE=1` (supported by the fixed Node 24.11.1 runtime), so
+native compile-cache files never become accepted artifacts. The isolated
+TypeScript config also resolves shared-source `zod` declarations from the
+installed dependency graph without modifying the fixed source snapshot.
+
 Gate tests are not runnable-package or application-recovery evidence. Before any
 installation, build and fully verify both real packages, seed a small synthetic
 schema20 database with all nine business tables and an unknown submission claim,

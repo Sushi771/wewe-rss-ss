@@ -39,7 +39,7 @@ test('the single pinned generator shell request becomes a direct current-Node ch
     generator = path.join(base, 'generator with spaces.cjs');
   fs.writeFileSync(
     generator,
-    `require('node:fs').writeFileSync(require('node:path').join(process.env.WEWE_ARTIFACT_ROOT,'generated'),'synthetic generator bytes');`,
+    `const m=require('node:module');if(m.enableCompileCache&&m.enableCompileCache().status!==m.constants.compileCacheStatus.DISABLED)throw Error('native cache must stay disabled');require('node:fs').writeFileSync(require('node:path').join(process.env.WEWE_ARTIFACT_ROOT,'generated'),'synthetic generator bytes');`,
   );
   const hash = require('node:crypto')
     .createHash('sha256')

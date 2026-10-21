@@ -391,7 +391,7 @@ function build(options = {}) {
           stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
           encoding: 'utf8',
           maxBuffer: 16 * 1024 ** 2,
-          env: {
+          env: compilerEnvironment({
             ...commandOptions.env,
             NODE_OPTIONS:
               '--require ' +
@@ -403,13 +403,11 @@ function build(options = {}) {
             WEWE_PRISMA_GENERATOR_ENTRY: prismaGenerator.path,
             WEWE_PRISMA_GENERATOR_SHA256: prismaGenerator.sha256,
             WEWE_PRISMA_GENERATOR_COMMAND: prismaGeneratorCommand,
-          },
+          }),
         },
       );
       if (emission.error || emission.status !== 0)
-        throw (
-          emission.error || Error('Pinned compiler failed: ' + emission.stderr)
-        );
+        throw compilerFailure(emission, executable, args);
       const rows = emission.output[3]
         .split('\n')
         .filter(Boolean)
@@ -591,6 +589,8 @@ function build(options = {}) {
           slash(path.join(sourceRoot, 'packages/shared/src/index.ts')),
         ],
         '@prisma/client': [slash(client)],
+        // Shared snapshot sources have no node_modules junction of their own.
+        zod: [slash(path.join(packageDir('zod', server), 'index.d.ts'))],
       };
       const tsconfig = path.join(workspace, 'tsconfig.json');
       writeJson(tsconfig, {
@@ -914,6 +914,7 @@ function buildFailureDiagnostic(error) {
       code: value.code,
       message: String(value.message ?? value).slice(0, 8192),
       stack: value.stack?.slice(0, 8192),
+      compiler: value.compiler,
     };
   return {
     event: 'build-failed',
@@ -923,6 +924,27 @@ function buildFailureDiagnostic(error) {
       error: describe(error),
     })),
   };
+}
+
+function compilerFailure(result, executable, args) {
+  const error = result.error || Error('Pinned compiler failed');
+  // spawnSync already bounds the captured output to 16 MiB. Preserve both
+  // streams verbatim: tsc writes its useful type diagnostics to stdout.
+  error.compiler = {
+    executable,
+    args: [...args],
+    status: result.status,
+    signal: result.signal,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  };
+  return error;
+}
+
+function compilerEnvironment(env) {
+  // TypeScript calls enableCompileCache() itself. Its native writes bypass
+  // JS producer intents; Node's fixed disable flag prevents those writes.
+  return { ...env, NODE_DISABLE_COMPILE_CACHE: '1' };
 }
 
 function buildPair(options) {
@@ -1012,4 +1034,6 @@ module.exports = {
   verifyBuildEnvironment,
   finishBuild,
   buildFailureDiagnostic,
+  compilerFailure,
+  compilerEnvironment,
 };
