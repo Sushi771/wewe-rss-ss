@@ -127,6 +127,26 @@ for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
   cp[name] = function (executable, argv = [], options = {}, ...rest) {
     if (!Array.isArray(argv) || !options || typeof options !== 'object')
       throw Error('RELEASE_ARTIFACT_CHILD_OPTIONS_REQUIRED');
+    if (
+      options.shell &&
+      executable === process.env.WEWE_PRISMA_GENERATOR_COMMAND
+    ) {
+      const generator = process.env.WEWE_PRISMA_GENERATOR_ENTRY;
+      if (
+        !generator ||
+        !path.isAbsolute(generator) ||
+        !/^[a-f0-9]{64}$/.test(
+          process.env.WEWE_PRISMA_GENERATOR_SHA256 || '',
+        ) ||
+        fileDigest(generator) !== process.env.WEWE_PRISMA_GENERATOR_SHA256 ||
+        argv.length ||
+        name !== 'spawn'
+      )
+        throw Error('RELEASE_ARTIFACT_PRISMA_GENERATOR_BINDING_REQUIRED');
+      executable = process.execPath;
+      argv = [generator];
+      options = { ...options, shell: false };
+    }
     const stdio = Array.isArray(options.stdio)
       ? [...options.stdio]
       : Array(3).fill(options.stdio || 'pipe');
@@ -145,6 +165,11 @@ for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
           NODE_OPTIONS: process.env.NODE_OPTIONS,
           WEWE_ARTIFACT_ROOT: root,
           WEWE_ARTIFACT_FD: String(childFd),
+          WEWE_PRISMA_GENERATOR_ENTRY: process.env.WEWE_PRISMA_GENERATOR_ENTRY,
+          WEWE_PRISMA_GENERATOR_SHA256:
+            process.env.WEWE_PRISMA_GENERATOR_SHA256,
+          WEWE_PRISMA_GENERATOR_COMMAND:
+            process.env.WEWE_PRISMA_GENERATOR_COMMAND,
         },
       },
       ...rest,

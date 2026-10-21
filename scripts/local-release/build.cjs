@@ -330,11 +330,29 @@ function build(options = {}) {
         throw new Error('Release input differs from committed source: ' + file);
     }
   }
+  const prismaGenerator = options.buildOnly
+    ? (() => {
+        const file = path.join(
+          packageDir('@prisma/client', server),
+          'generator-build/index.js',
+        );
+        return { path: file, sha256: fileHash(file) };
+      })()
+    : undefined;
+  const prismaGeneratorCommand =
+    prismaGenerator &&
+    `${JSON.stringify(slash(process.execPath))} ${JSON.stringify(slash(prismaGenerator.path))}`;
   const sourceHash = hash(
-    JSON.stringify({ inputs, searchRollback: options.searchRollback === true }),
+    JSON.stringify({
+      inputs,
+      searchRollback: options.searchRollback === true,
+      prismaGenerator,
+    }),
   );
   const checkInputs = () => {
     if (!options.buildOnly) return;
+    if (fileHash(prismaGenerator.path) !== prismaGenerator.sha256)
+      throw Error('BUILD_PRISMA_GENERATOR_CHANGED');
     verifySourceSnapshot(
       sourceRoot,
       historical ? options.sourceCommit : currentCommit,
@@ -348,7 +366,13 @@ function build(options = {}) {
             (name) =>
               file === `apps/server/prisma/migrations/${name}/migration.sql`,
           ));
-      if (fileHash(path.join(tooling ? root : sourceRoot, file)) !== expected)
+      const actual =
+        file === 'apps/server/.env'
+          ? require('./lib.cjs')
+              .hostEffects.currentLease()
+              .hashSourceEnvironmentFixture(expected)
+          : fileHash(path.join(tooling ? root : sourceRoot, file));
+      if (actual !== expected)
         throw Error('Release input changed during compilation: ' + file);
     }
   };
@@ -376,6 +400,9 @@ function build(options = {}) {
               ),
             WEWE_ARTIFACT_ROOT: activeRelease,
             WEWE_ARTIFACT_FD: '3',
+            WEWE_PRISMA_GENERATOR_ENTRY: prismaGenerator.path,
+            WEWE_PRISMA_GENERATOR_SHA256: prismaGenerator.sha256,
+            WEWE_PRISMA_GENERATOR_COMMAND: prismaGeneratorCommand,
           },
         },
       );
@@ -429,6 +456,7 @@ function build(options = {}) {
         outputRoot: releaseRoot,
         runtimeSha256: fileHash(process.execPath),
         commands,
+        prismaGenerator,
       },
       reserveBytes: buildBudget.estimate(sourceServer),
       runtimeCopies: 1,
@@ -456,6 +484,7 @@ function build(options = {}) {
     sourceCommit: historical ? options.sourceCommit : currentCommit,
     sourceHash,
     sourceRoot,
+    prismaGenerator,
   };
   const shared =
     options.pairSession?.lease ||
@@ -513,7 +542,7 @@ function build(options = {}) {
         .readFileSync(path.join(sourceServer, 'prisma/schema.prisma'), 'utf8')
         .replace(
           'provider      = "prisma-client-js"',
-          `provider = "node ${slash(path.join(installed, 'generator-build/index.js'))}"\n  output = "${slash(client)}"`,
+          `provider = ${JSON.stringify(options.buildOnly ? prismaGeneratorCommand : `node ${slash(path.join(installed, 'generator-build/index.js'))}`)}\n  output = "${slash(client)}"`,
         )
         .replace(
           'binaryTargets = ["native", "linux-musl"]',

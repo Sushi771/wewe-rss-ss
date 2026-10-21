@@ -34,6 +34,60 @@ function compiler(root, code) {
   return rows.filter((row) => !row.producer);
 }
 
+test('the single pinned generator shell request becomes a direct current-Node child with a working intent pipe', (t) => {
+  const { base, root, tracker } = fixture(t),
+    generator = path.join(base, 'generator with spaces.cjs');
+  fs.writeFileSync(
+    generator,
+    `require('node:fs').writeFileSync(require('node:path').join(process.env.WEWE_ARTIFACT_ROOT,'generated'),'synthetic generator bytes');`,
+  );
+  const hash = require('node:crypto')
+    .createHash('sha256')
+    .update(fs.readFileSync(generator))
+    .digest('hex');
+  const command =
+    JSON.stringify(process.execPath.replace(/\\/g, '/')) +
+    ' ' +
+    JSON.stringify(generator.replace(/\\/g, '/'));
+  const env = {
+    ...process.env,
+    NODE_OPTIONS:
+      '--require ' +
+      JSON.stringify(path.join(__dirname, 'artifact-producer-hook.cjs')),
+    WEWE_ARTIFACT_ROOT: root,
+    WEWE_ARTIFACT_FD: '3',
+    WEWE_PRISMA_GENERATOR_ENTRY: generator,
+    WEWE_PRISMA_GENERATOR_SHA256: hash,
+    WEWE_PRISMA_GENERATOR_COMMAND: command,
+  };
+  const code = `const result=require('node:child_process').spawnSync; const child=require('node:child_process').spawn(process.env.WEWE_PRISMA_GENERATOR_COMMAND,[],{shell:true,stdio:['pipe','pipe','pipe']}); child.on('error',error=>{console.error(error);process.exitCode=1;});child.on('exit',code=>{process.exitCode=code;});`;
+  const result = spawnSync(process.execPath, ['-e', code], {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  tracker.apply(
+    result.output[3]
+      .split('\n')
+      .filter(Boolean)
+      .map(JSON.parse)
+      .filter((row) => !row.producer),
+  );
+  tracker.verify();
+  fs.unlinkSync(path.join(root, 'generated'));
+  fs.writeFileSync(generator, 'process.exit(0);');
+  const changed = spawnSync(process.execPath, ['-e', code], {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.notEqual(changed.status, 0);
+  assert.match(changed.stderr, /PRISMA_GENERATOR_BINDING_REQUIRED/);
+});
+
 test('compiler intent pipe binds synchronous, callback, promise and nested generator bytes without a disk receipt', (t) => {
   const { root, tracker } = fixture(t);
   const rows = compiler(

@@ -1014,6 +1014,83 @@ test('rehashing a declared environment fixture inside build-only fails at open b
     lease.close();
   }));
 
+test('the exact bound default env can be hashed without granting ordinary reads or accepting modified/private env', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      commit = '3a36428210f22ea1986f0a96a6066e7fdc9baf46';
+    const bytes = require('node:child_process').execFileSync(
+      'git',
+      ['cat-file', 'blob', 'HEAD:apps/server/.env'],
+      { cwd: path.resolve(__dirname, '../..'), windowsHide: true },
+    );
+    const file = path.join(f.current, 'apps/server/.env');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, bytes);
+    const source = scope.inspect([f.current]).roots[0];
+    Object.assign(f.policy.buildOnly, {
+      sourceCommit: commit,
+      sourceRoot: source.path,
+      sourceIdentity: source.identity,
+    });
+    f.save();
+    const lease = scope.open(
+      { ...request, sourceCommit: commit, sourceRoot: source.path },
+      f.options(),
+    );
+    const effects = require('./lib.cjs').hostEffects,
+      expected =
+        'efdafcfb690eb12efe9a7fa2a8bcf0977b1d4d31f31096123ae42e21fe6e28d6';
+    effects.context.run(lease, () => {
+      assert.equal(lease.hashSourceEnvironmentFixture(expected), expected);
+      assert.throws(
+        () => effects.fs.readFileSync(file),
+        /PRIVATE_INPUT_FORBIDDEN/,
+      );
+      const privateFile = path.join(path.dirname(file), '.env.local');
+      fs.writeFileSync(privateFile, 'SYNTHETIC_PRIVATE=1\n');
+      assert.throws(
+        () => effects.fs.readFileSync(privateFile),
+        /PRIVATE_INPUT_FORBIDDEN/,
+      );
+      fs.writeFileSync(
+        file,
+        Buffer.concat([bytes, Buffer.from('CHANGED=1\n')]),
+      );
+      assert.throws(
+        () => lease.hashSourceEnvironmentFixture(expected),
+        /FIXTURE_CHANGED/,
+      );
+      assert.throws(
+        () =>
+          lease.hashSourceEnvironmentFixture(
+            require('node:crypto')
+              .createHash('sha256')
+              .update(fs.readFileSync(file))
+              .digest('hex'),
+          ),
+        /BINDING_REQUIRED/,
+      );
+    });
+    lease.close();
+  }));
+
+test('a generator pin must match the reviewed request and installed bytes before any build claim', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      generator = path.join(f.current, 'node.exe');
+    const bytes = fs.readFileSync(generator),
+      pin = { path: generator, sha256: fileHash(generator) };
+    f.policy.buildOnly.prismaGenerator = pin;
+    f.save();
+    assert.throws(() => scope.open(request, f.options()), /BUILD_ONLY_BINDING/);
+    const bound = { ...request, prismaGenerator: pin };
+    fs.writeFileSync(generator, 'changed tool bytes');
+    assert.throws(() => scope.open(bound, f.options()), /BUILD_ONLY_BINDING/);
+    fs.writeFileSync(generator, bytes);
+    const lease = scope.open(bound, f.options());
+    lease.close();
+  }));
+
 test('rewriting completed artifacts and recomputing the disk ledger self-hash cannot establish a new build session', () =>
   fixture((f) => {
     const request = buildOnly(f),

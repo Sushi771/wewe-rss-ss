@@ -49,6 +49,16 @@ it cannot seal output as successful. Error messages/stacks are bounded in CLI
 diagnostics, while the original exception objects remain available to callers.
 This diagnostic change grants no interrupted-claim recovery or retry permission.
 
+The only environment-fixture hash exception is `apps/server/.env` in the exact
+candidate/repaired-UI rollback commits. It must be a regular 444-byte file matching
+the committed SHA256 `efdafcfb690eb12efe9a7fa2a8bcf0977b1d4d31f31096123ae42e21fe6e28d6`.
+The bound source lease returns only that digest; ordinary environment-file reads
+remain forbidden, and a modified file plus a recomputed hash cannot authorize it.
+The plans also bind the exact installed Prisma generator path/hash. Only its exact
+shell request is converted to the current pinned Node executable with a separate
+generator argument and `shell: false`, preserving stdio and the intent pipe that
+Windows shell descendants otherwise lose. No other command gains this rewrite.
+
 ## Narrow search-compatible rollback recipe
 
 Artifact acceptance uses a bounded in-memory table of producer intents. Parent

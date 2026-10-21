@@ -4,6 +4,45 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
+// Exact Git blob bytes for apps/server/.env in the two reviewed source commits.
+// This returns only a digest; it grants no general environment-file read.
+const BUILD_ENVIRONMENT_SHA256 =
+  'efdafcfb690eb12efe9a7fa2a8bcf0977b1d4d31f31096123ae42e21fe6e28d6';
+function hashCommittedBuildEnvironment(sourceRoot, commit, expectedSha256) {
+  if (
+    ![
+      '3a36428210f22ea1986f0a96a6066e7fdc9baf46',
+      'f618e48f48ff0e3df1c646cb8a666a2461815732',
+    ].includes(commit) ||
+    expectedSha256 !== BUILD_ENVIRONMENT_SHA256
+  )
+    throw Error('BUILD_ENVIRONMENT_FIXTURE_BINDING_REQUIRED');
+  const root = fs.realpathSync.native(sourceRoot),
+    file = path.join(root, 'apps/server/.env');
+  const before = fs.lstatSync(file, { bigint: true });
+  if (
+    !before.isFile() ||
+    before.isSymbolicLink() ||
+    before.nlink !== 1n ||
+    before.size !== 444n ||
+    fs.realpathSync.native(file) !== file
+  )
+    throw Error('BUILD_ENVIRONMENT_FIXTURE_CHANGED');
+  const actual = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(file))
+    .digest('hex');
+  const after = fs.lstatSync(file, { bigint: true });
+  if (
+    actual !== expectedSha256 ||
+    ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs', 'ctimeNs'].some(
+      (key) => before[key] !== after[key],
+    )
+  )
+    throw Error('BUILD_ENVIRONMENT_FIXTURE_CHANGED');
+  return actual;
+}
+
 function verifySourceSnapshot(sourceRoot, commit, repository) {
   const tree = execFileSync(
     'git',
@@ -89,4 +128,4 @@ if (require.main === module) {
     process.exitCode = 1;
   }
 }
-module.exports = { verifySourceSnapshot };
+module.exports = { verifySourceSnapshot, hashCommittedBuildEnvironment };

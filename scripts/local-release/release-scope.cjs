@@ -276,6 +276,13 @@ function open(request, options = {}, boundOperation) {
         (c) =>
           !path.isAbsolute(c.path) || !/^[a-f0-9]{64}$/.test(c.sha256 || ''),
       ) ||
+      hash(spec.prismaGenerator || null) !==
+        hash(request.prismaGenerator || null) ||
+      (spec.prismaGenerator &&
+        (!path.isAbsolute(spec.prismaGenerator.path || '') ||
+          !/^[a-f0-9]{64}$/.test(spec.prismaGenerator.sha256 || '') ||
+          fileHash(spec.prismaGenerator.path) !==
+            spec.prismaGenerator.sha256)) ||
       request.root !== spec.outputRoot ||
       canonical(spec.outputRoot) !== spec.outputRoot ||
       !policy.roots.some((r) => r.path === spec.outputRoot) ||
@@ -776,6 +783,16 @@ function open(request, options = {}, boundOperation) {
           throw new Error('RELEASE_SCOPE_NESTED_OPERATION_EXCEEDS_CLAIM');
       },
       inventoryMetrics: () => verifier.metrics(),
+      hashSourceEnvironmentFixture(expectedSha256) {
+        if (policy.phase !== 'build-only' || !buildSource?.sourceRoot)
+          throw Error('BUILD_ENVIRONMENT_FIXTURE_BINDING_REQUIRED');
+        check();
+        return require('./verify-source.cjs').hashCommittedBuildEnvironment(
+          buildSource.sourceRoot,
+          buildSource.sourceCommit,
+          expectedSha256,
+        );
+      },
       assertOwnedDirectory(folder) {
         assertWritable();
         const at = canonical(folder),
@@ -977,6 +994,8 @@ function open(request, options = {}, boundOperation) {
         );
         if (
           !source ||
+          hash(policy.buildOnly.prismaGenerator || null) !==
+            hash(next.prismaGenerator || null) ||
           builtSources.has(next.sourceCommit) ||
           next.kind !== 'build' ||
           next.buildOnly !== true ||
