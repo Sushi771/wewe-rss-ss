@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -81,8 +82,7 @@ describe('two explicitly bound publishers through original refresh/save (synthet
       const folder = path.join(migrations, name);
       if (!(await fs.stat(folder)).isDirectory()) continue;
       const sql = await fs.readFile(path.join(folder, 'migration.sql'), 'utf8');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

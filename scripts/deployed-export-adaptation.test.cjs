@@ -7,6 +7,7 @@ const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/server')] }),
 );
 const pins = require('./fixtures/deployed-export-adaptation.json');
+const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
 function tokens(text) {
@@ -22,6 +23,16 @@ function tokens(text) {
   return hash(result.join('\0'));
 }
 test('deployment baseline keeps existing routes and safety/startup/reader/title policies', () => {
+  assert.deepEqual(Object.keys(searchPins.criticalFiles).sort(), [
+    'apps/server/src/article-body-search.ts',
+    'apps/server/src/article-list-page.ts',
+  ]);
+  assert.deepEqual(Object.keys(searchPins.articleRoutes).sort(), [
+    'list',
+    'prepareSearch',
+    'searchStatus',
+    'summary',
+  ]);
   const file = 'apps/server/src/trpc/trpc.router.ts';
   const ast = ts.createSourceFile(
     file,
@@ -47,8 +58,14 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     }
   }
   assert.deepEqual(members, pins.routerMembers);
-  assert.deepEqual(routes, pins.articleRoutes);
-  for (const [file, expected] of Object.entries(pins.criticalFiles))
+  assert.deepEqual(routes, {
+    ...pins.articleRoutes,
+    ...searchPins.articleRoutes,
+  });
+  for (const [file, expected] of Object.entries({
+    ...pins.criticalFiles,
+    ...searchPins.criticalFiles,
+  }))
     assert.equal(hash(read(file)), expected, file);
   // Export conversion now reuses its current DOM. Pin all other conversion
   // statements and the uncertainty predicate to the deployed source semantics.

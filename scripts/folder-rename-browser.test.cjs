@@ -1,4 +1,5 @@
-'use strict';
+const { splitSqliteStatements } = require('./sqlite-statements.cjs');
+('use strict');
 // Synthetic-only HTTP -> original protected tRPC route -> real SQLite commit.
 // No production DB, timers, full AppModule, upstream services or external fetches.
 const fs = require('node:fs');
@@ -88,8 +89,8 @@ test(
         .readdirSync(path.join(serverPath, 'prisma/migrations'))
         .filter((n) => /^\d/.test(n))
         .sort())
-        for (const statement of fs
-          .readFileSync(
+        for (const statement of splitSqliteStatements(
+          fs.readFileSync(
             path.join(
               serverPath,
               'prisma/migrations',
@@ -97,8 +98,8 @@ test(
               'migration.sql',
             ),
             'utf8',
-          )
-          .split(';')
+          ),
+        )
           .map((s) => s.trim())
           .filter(Boolean))
           await prisma.$executeRawUnsafe(statement);

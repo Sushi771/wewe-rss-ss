@@ -5,6 +5,7 @@ on:
     branches:
       [
         main,
+        codex/local-body-search-deployed-compat-20261021,
         codex/sqlite-backup-bounded-20261014,
         codex/sqlite-backup-child-exit-20261014,
         codex/sqlite-backup-production-base-20261014,
@@ -205,7 +206,7 @@ jobs:
         env:
           LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
           ARTICLE_LIST_BROWSER_SAMPLES: '1'
-        run: node --test --test-concurrency=1 scripts/article-list-browser.test.cjs scripts/reading-status-browser.test.cjs
+        run: node --test --test-concurrency=1 scripts/article-list-browser.test.cjs scripts/reading-status-browser.test.cjs scripts/body-search-browser.test.cjs scripts/sqlite-statements.test.cjs
       - name: Test Server
         run: pnpm --filter server exec jest --runInBand
       - name: Test independent media reconciliation and global stop offline

@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { Test, TestingModule } from '@nestjs/testing';
 import { FeedsService } from './feeds.service';
 import { ConfigService } from '@nestjs/config';
@@ -83,8 +84,7 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
       const sql = await fs
         .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
         .catch(() => '');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

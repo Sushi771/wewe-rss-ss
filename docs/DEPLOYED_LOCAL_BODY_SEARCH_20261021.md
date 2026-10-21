@@ -1,0 +1,44 @@
+# Local search on the deployed baseline
+
+Main PR80 and PR81 provide the documentation/baseline and cached-body search.
+The installed app has an independent reading, selection and startup baseline.
+This adaptation starts at deployed source `48fdf73f4d770001bbb6de3e2383189811e56ccb`
+and transfers only the search behavior reviewed at
+`b0ad33919367ce79a764814d2116a30ebf03792f`.
+It does not merge the entire deployed-source branch into main or replace the
+installed UI with main's different reading layout.
+
+The search helper, projection migration, input constraints and list-page code
+are the reviewed implementation, including the atomic source-body snapshot
+guard against deletion and same-ID recreation. The existing router keeps its
+other procedures; only search status/preparation, filtered summary/list and
+filtered directory export use the new search helper. The existing UI retains
+its reader, date formatting, persisted sort, loaded-only selection and export
+controls, adding coverage, stop/resume and React text snippets.
+
+Migration 20 is already installed on the local app and is included unchanged
+for reproducible fresh packages. Migration 21 adds only a rebuildable derived
+table, indexes and synchronization triggers. It does not modify old article,
+subscription or account rows. Extraction is outside collection transactions.
+Uncached bodies are explicitly excluded; preparation never fetches an article.
+No AI, vectors, external transfer, Sites or new platform integration is added.
+
+The frozen deployed safety manifest remains unchanged. A narrowly enumerated
+overlay pins the two search/list helpers and four article routes. The original
+reader, login, collection, backup, write coordinator and startup fingerprints
+continue to be checked. Existing synthetic migration fixtures use the tested
+SQLite statement splitter because trigger bodies contain semicolons; no old
+business or audit assertions are removed.
+
+Release checks use fresh synthetic databases, exact source/package identities
+and a controlled single-writer transition. The user authorized in-place
+additive migration and local extraction but prohibited whole-database copies.
+Release rehearsal and preservation checks must respect that boundary; generic
+restart tools that automatically copy the database are unsuitable for this run.
+Rollback may change only program files/pointer after checking compatibility
+with the additive schema; it must not restore an old database or remove articles.
+
+The historical performance report remains attributed to its original measured
+version and synthetic cohorts. It is not a new performance measurement of
+this adaptation. Local production acceptance, stop/start times and exact final
+version belong in the private release record, never in committed article data.
