@@ -94,6 +94,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Prepare pinned dependencies for the real compiler output regressions
+        run: |
+          $compilerRoot = Join-Path $env:RUNNER_TEMP 'release-test-typescript'
+          npm install --prefix $compilerRoot --no-save --ignore-scripts --package-lock=false --no-audit --no-fund typescript@5.9.3 esbuild@0.21.5
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "WEWE_TEST_TYPESCRIPT_ROOT=$compilerRoot"
       - name: Test bounded SQLite recovery generation on synthetic databases
         env:
           PYTHONDONTWRITEBYTECODE: '1'

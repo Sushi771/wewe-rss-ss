@@ -151,6 +151,11 @@ Pinned compiler children and their Node descendants force
 native compile-cache files never become accepted artifacts. The isolated
 TypeScript config also resolves shared-source `zod` declarations from the
 installed dependency graph without modifying the fixed source snapshot.
+The isolated Vite config uses the React plugin's ESM entry and the same installed
+`zod` graph. Optional esbuild input spilling is refused so its existing memory
+IPC fallback avoids native temporary output files; ordinary output still has to
+match independently recorded producer bytes. Windows compiler regressions
+prepare only pinned TypeScript/esbuild dependencies with install scripts disabled.
 
 Gate tests are not runnable-package or application-recovery evidence. Before any
 installation, build and fully verify both real packages, seed a small synthetic

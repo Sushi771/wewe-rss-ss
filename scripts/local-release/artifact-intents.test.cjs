@@ -34,12 +34,54 @@ function compiler(root, code) {
   return rows.filter((row) => !row.producer);
 }
 
+test('standard omitted-argv child APIs preserve the inherited producer pipe', (t) => {
+  const { root } = fixture(t);
+  compiler(
+    root,
+    `const cp=require('node:child_process');const s=cp.spawnSync(process.execPath,{stdio:'ignore'});if(s.status!==0)throw Error(s.stderr);cp.execFileSync(process.execPath,{input:'',encoding:'utf8'});`,
+  );
+});
+
+test('ES module promise writes and removal preserve the requested artifact lifecycle', (t) => {
+  const { root, tracker } = fixture(t);
+  const rows = compiler(
+    root,
+    `(async()=>{const f=await import('node:fs/promises'),p=require('node:path').join(process.env.WEWE_ARTIFACT_ROOT,'removed');await f.writeFile(p,'temporary');await f.unlink(p);})();`,
+  );
+  tracker.apply(rows);
+  tracker.verify();
+});
+
+test('large real esbuild transforms use memory IPC without undeclared native spill files', (t) => {
+  const { root, tracker } = fixture(t);
+  const esbuild = require.resolve('esbuild', {
+    paths: [
+      process.env.WEWE_TEST_TYPESCRIPT_ROOT ||
+        path.dirname(
+          require.resolve('vite/package.json', {
+            paths: [path.join(__dirname, '../../apps/web')],
+          }),
+        ),
+    ],
+  });
+  const rows = compiler(
+    root,
+    `(async()=>{const fs=require('node:fs'),path=require('node:path');process.env.TEMP=process.env.TMP=process.env.WEWE_ARTIFACT_ROOT;const result=await require(${JSON.stringify(esbuild)}).transform('export const value='+JSON.stringify('x'.repeat(2**20)),{minify:true});fs.writeFileSync(path.join(process.env.WEWE_ARTIFACT_ROOT,'output.js'),result.code);})();`,
+  );
+  tracker.apply(rows);
+  tracker.verify();
+  assert.deepEqual(fs.readdirSync(root), ['output.js']);
+});
+
 test('the actual installed TypeScript compiler declares its descriptor-based output', (t) => {
   const { base, root, tracker } = fixture(t);
   const source = path.join(base, 'source.ts');
   fs.writeFileSync(source, 'export const answer: number = 42;');
   const ts = require.resolve('typescript/lib/typescript.js', {
-    paths: [path.join(__dirname, '../../apps/server')],
+    paths: [
+      process.env.WEWE_TEST_TYPESCRIPT_ROOT ||
+        path.join(__dirname, '../../apps/server'),
+    ],
   });
   const rows = compiler(
     root,

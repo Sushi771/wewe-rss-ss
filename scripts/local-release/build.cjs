@@ -675,6 +675,7 @@ function build(options = {}) {
             "from '@vitejs/plugin-react'",
             'export default defineConfig({',
             '__dirname',
+            'alias: [',
           ])
             if (!config.includes(anchor))
               throw new Error('Unsupported isolated Vite configuration');
@@ -693,11 +694,18 @@ function build(options = {}) {
               'from ' +
                 JSON.stringify(
                   slash(
-                    require.resolve('@vitejs/plugin-react', { paths: [web] }),
+                    path.join(
+                      packageDir('@vitejs/plugin-react', web),
+                      'dist/index.js',
+                    ),
                   ),
                 ),
             )
             .replaceAll('__dirname', JSON.stringify(slash(web)))
+            .replace(
+              'alias: [',
+              `alias: [{ find: /^zod$/, replacement: ${JSON.stringify(slash(path.join(packageDir('zod', server), 'index.js')))} },`,
+            )
             .replace(
               'export default defineConfig({',
               `export default defineConfig({\n root: ${JSON.stringify(slash(web))},\n envDir: ${JSON.stringify(slash(workspace))},\n cacheDir: ${JSON.stringify(slash(path.join(workspace, '.vite')))},`,

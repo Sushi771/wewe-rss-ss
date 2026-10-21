@@ -80,6 +80,16 @@ fs.closeSync = function (opened) {
   return result;
 };
 function verifyBeforeMutation(name, args) {
+  // esbuild already falls back to memory IPC when its optional input spill
+  // fails. Prefer that path: native .code side files have no JS byte intent.
+  if (
+    name === 'writeFile' &&
+    typeof args[0] === 'string' &&
+    /^esbuild-[a-f0-9]{64}$/.test(path.basename(args[0])) &&
+    path.dirname(path.resolve(args[0])) ===
+      path.resolve(require('node:os').tmpdir())
+  )
+    throw Error('RELEASE_ARTIFACT_ESBUILD_MEMORY_IPC_REQUIRED');
   if (
     ['unlink', 'rm', 'rmdir', 'rename'].includes(name) &&
     fs.existsSync(args[0])
@@ -188,6 +198,11 @@ for (const name of ['readFile', 'createReadStream']) {
 for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
   const original = cp[name];
   cp[name] = function (executable, argv = [], options = {}, ...rest) {
+    // Vite's dependency resolver uses Node's omitted-argv sync overload.
+    if (!Array.isArray(argv) && argv && typeof argv === 'object') {
+      options = argv;
+      argv = [];
+    }
     if (!Array.isArray(argv) || !options || typeof options !== 'object')
       throw Error('RELEASE_ARTIFACT_CHILD_OPTIONS_REQUIRED');
     if (
