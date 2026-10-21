@@ -976,3 +976,184 @@ test(
     }
   },
 );
+
+async function resumeFixture(t) {
+  const f = await fixture(t),
+    candidate = path.join(f.root, f.p.candidateId);
+  fs.cpSync(f.previous, candidate, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+  });
+  for (const file of f.p.files)
+    fs.copyFileSync(
+      file.input,
+      path.join(candidate, 'server/client', file.path),
+    );
+  const old = JSON.parse(fs.readFileSync(f.p.previousManifest.path));
+  f.write(
+    path.join(candidate, 'release.json'),
+    JSON.stringify({
+      ...old,
+      id: f.p.candidateId,
+      sourceCommit: SOURCE,
+      ...lib.fingerprint(candidate),
+    }),
+  );
+  const identity = (file) => {
+    const s = fs.lstatSync(file, { bigint: true });
+    return [s.dev, s.ino, s.birthtimeNs].map(String);
+  };
+  const q = path.join(f.p.installation, 'quarantine');
+  fs.mkdirSync(q);
+  const packages = [],
+    moved = [],
+    dirs = [];
+  for (const [label, root] of [
+    ['rollback', f.previous],
+    ['candidate', candidate],
+  ]) {
+    const targetDirectory = path.join(q, label + '-files');
+    fs.mkdirSync(targetDirectory);
+    const emptyDirectoryTarget = path.join(q, label + '-empty');
+    fs.mkdirSync(emptyDirectoryTarget);
+    const sourceDirectory = path.join(root, 'server/scripts/__pycache__');
+    const files = Array.from({ length: 3 }, (_, i) => {
+      const target = path.join(targetDirectory, 'cache-' + i + '.pyc');
+      f.write(target, 'synthetic cache ' + i);
+      return {
+        source: path.join(sourceDirectory, 'cache-' + i + '.pyc'),
+        target,
+        identity: identity(target),
+        sha256: lib.fileHash(target),
+      };
+    });
+    packages.push({
+      label,
+      root,
+      rootIdentity: identity(root),
+      manifest: {
+        path: path.join(root, 'release.json'),
+        sha256: lib.fileHash(path.join(root, 'release.json')),
+      },
+      targetDirectory,
+      targetDirectoryIdentity: identity(targetDirectory),
+      sourceDirectory,
+      sourceDirectoryIdentity: identity(emptyDirectoryTarget),
+      emptyDirectoryTarget,
+      files,
+    });
+    moved.push(
+      ...files.map((file) => ({ ...file, status: 'moved-and-verified' })),
+    );
+    dirs.push({
+      source: sourceDirectory,
+      target: emptyDirectoryTarget,
+      status: 'moved-empty-no-overwrite',
+    });
+  }
+  const originalPlan = path.join(f.p.installation, 'original-plan.json'),
+    cacheMovePlan = path.join(f.p.installation, 'move-plan.json'),
+    cacheMoveResult = path.join(f.p.installation, 'move-result.json');
+  f.write(originalPlan, JSON.stringify(f.p));
+  f.write(
+    cacheMovePlan,
+    JSON.stringify({
+      rootIdentity: f.p.rootIdentity,
+      installationIdentity: f.p.installationIdentity,
+      quarantine: q,
+      quarantineIdentity: identity(q),
+      packages,
+    }),
+  );
+  f.write(
+    cacheMoveResult,
+    JSON.stringify({
+      planSha256:
+        '73ffd16ecc339693efe4d653a051074576524c5aae1056b27dd2794bf1874e66',
+      passed: true,
+      files: moved,
+      directories: dirs,
+      packagesFullyVerified: 2,
+    }),
+  );
+  const originalHash = lib.fileHash;
+  // Substitute only fixture trust anchors; production CLI has no override for
+  // either independently reviewed original plan hash.
+  lib.fileHash = (file) =>
+    file === originalPlan
+      ? '2ce1d414469244e217a474fb86c31199212ba0587dfee135f14370a741df88b1'
+      : file === cacheMovePlan
+        ? '73ffd16ecc339693efe4d653a051074576524c5aae1056b27dd2794bf1874e66'
+        : originalHash(file);
+  t.after(() => {
+    lib.fileHash = originalHash;
+  });
+  const resumed = await update.resumePlan({
+    installation: f.p.installation,
+    web: path.join(f.p.installation, 'web'),
+    artifacts: path.join(f.p.installation, 'artifacts.json'),
+    expected: f.p.expected,
+    originalPlan,
+    cacheMovePlan,
+    cacheMoveResult,
+  });
+  return { ...f, resumed, candidate };
+}
+test('explicit resume uses the same owned directory without copying or rewriting it', async (t) => {
+  const f = await resumeFixture(t),
+    before = lib.releaseMetadata(f.candidate),
+    mkdir = fs.mkdirSync;
+  try {
+    fs.mkdirSync = (file, ...args) => {
+      assert(
+        !path.resolve(file).startsWith(f.candidate),
+        'must not create candidate during resume',
+      );
+      return mkdir(file, ...args);
+    };
+    const result = await update.resumeOwnedCandidate(f.resumed, f.adapter);
+    assert.equal(result.resumedExistingCandidate, true);
+    assert.equal(result.candidate, f.candidate);
+    assert.deepEqual(lib.releaseMetadata(f.candidate), before);
+    assert.equal(f.resumed.reserveBytes, 4 * f.resumed.budget.allocationUnit);
+  } finally {
+    fs.mkdirSync = mkdir;
+  }
+});
+test('ordinary apply cannot execute an explicit resume plan', async (t) => {
+  const f = await resumeFixture(t);
+  await assert.rejects(update.apply(f.resumed, f.adapter));
+  assert.deepEqual(f.starts, []);
+});
+test('resume refuses changed original directory identity before stopping', async (t) => {
+  const f = await resumeFixture(t);
+  f.resumed.resume.directoryIdentity = ['wrong'];
+  await assert.rejects(update.resumeOwnedCandidate(f.resumed, f.adapter));
+  assert.deepEqual(f.starts, []);
+});
+test('resume refuses changed candidate bytes without refreshing metadata', async (t) => {
+  const f = await resumeFixture(t);
+  f.write(path.join(f.candidate, 'server/main.cjs'), 'changed');
+  await assert.rejects(update.resumeOwnedCandidate(f.resumed, f.adapter));
+  assert.deepEqual(f.starts, []);
+});
+test('resume refuses forged original-plan pin and changed quarantine evidence', async (t) => {
+  const f = await resumeFixture(t);
+  f.resumed.resume.originalPlan.sha256 = '0'.repeat(64);
+  await assert.rejects(update.resumeOwnedCandidate(f.resumed, f.adapter));
+  assert.deepEqual(f.starts, []);
+});
+test('resume startup failure uses the existing rollback path and retains the candidate', async (t) => {
+  const f = await resumeFixture(t);
+  f.adapter.ready = async () => {
+    if (f.starts.length === 1) throw Error('RESUME_START_FAILED');
+  };
+  await assert.rejects(
+    update.resumeOwnedCandidate(f.resumed, f.adapter),
+    /RESUME_START_FAILED/,
+  );
+  assert.deepEqual(f.starts, [f.p.candidateId, 'old']);
+  assert(fs.existsSync(f.candidate));
+  assert.equal(JSON.parse(fs.readFileSync(f.p.pointer.path)).id, 'old');
+});

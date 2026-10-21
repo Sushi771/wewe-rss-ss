@@ -21,6 +21,10 @@ const BASE = '48fdf73f4d770001bbb6de3e2383189811e56ccb';
 const INSTALLED_PUBLISHER_SHA256 =
   '28bc6160cf040aa11c37e9413ea44e316eeb2923a482d12ba09b0c1458500009';
 const GROWTH = 768 * 1024 ** 2;
+const ORIGINAL_FAILED_PLAN_SHA256 =
+  '2ce1d414469244e217a474fb86c31199212ba0587dfee135f14370a741df88b1';
+const OWNED_CACHE_MOVE_PLAN_SHA256 =
+  '73ffd16ecc339693efe4d653a051074576524c5aae1056b27dd2794bf1874e66';
 const FREE = 4 * 1024 ** 3;
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const jsonHash = (value) => hash(JSON.stringify(value));
@@ -360,7 +364,9 @@ async function plan(options) {
   assert.equal(new Set(files.map((f) => f.path)).size, 4);
   assert(files.some((f) => f.path === 'index.hbs'));
   const budget = copyBudget(previous, old, files, root),
-    reserveBytes = budget.reserveBytes;
+    reserveBytes = options.forResume
+      ? 4 * budget.allocationUnit
+      : budget.reserveBytes;
   const availableBytesAtPlan = requireSpace(root, reserveBytes);
   const candidateId =
     'frontend-' + SOURCE.slice(0, 12) + '-' + crypto.randomUUID();
@@ -427,7 +433,10 @@ async function plan(options) {
 }
 function checkPlan(p) {
   assert.equal(p.format, 2);
-  assert.equal(p.kind, 'retain-only-frontend-v2');
+  assert(
+    ['retain-only-frontend-v2', 'resume-owned-frontend-v1'].includes(p.kind),
+    'FRONTEND_PLAN_OPERATION_INVALID',
+  );
   assert.equal(p.sourceCommit, SOURCE);
   assert.equal(p.baseCommit, BASE);
   equal(id(p.root), p.rootIdentity);
@@ -467,8 +476,112 @@ function checkPlan(p) {
     copyBudget(p.previous, read(p.previousManifest.path), p.files, p.root),
     p.budget,
   );
-  equal(p.reserveBytes, p.budget.reserveBytes);
+  equal(
+    p.reserveBytes,
+    p.kind === 'resume-owned-frontend-v1'
+      ? 4 * p.budget.allocationUnit
+      : p.budget.reserveBytes,
+  );
   p.config.forEach(checkPin);
+  if (p.kind === 'resume-owned-frontend-v1') verifyResume(p);
+}
+function verifyResume(p) {
+  const r = p.resume;
+  assert(r, 'FRONTEND_RESUME_PROOF_REQUIRED');
+  checkPin(r.originalPlan);
+  equal(r.originalPlan.sha256, ORIGINAL_FAILED_PLAN_SHA256);
+  checkPin(r.cacheMovePlan);
+  equal(r.cacheMovePlan.sha256, OWNED_CACHE_MOVE_PLAN_SHA256);
+  checkPin(r.cacheMoveResult);
+  const original = read(r.originalPlan.path),
+    moves = read(r.cacheMovePlan.path),
+    result = read(r.cacheMoveResult.path);
+  equal(original.candidateId, p.candidateId);
+  equal(original.previous, p.previous);
+  equal(original.previousManifest, p.previousManifest);
+  equal(original.files, p.files);
+  equal(original.root, p.root);
+  equal(original.previousIdentity, p.previousIdentity);
+  equal(moves.rootIdentity, p.rootIdentity);
+  equal(moves.installationIdentity, p.installationIdentity);
+  equal(id(moves.quarantine), moves.quarantineIdentity);
+  equal(result.planSha256, OWNED_CACHE_MOVE_PLAN_SHA256);
+  equal(result.passed, true);
+  equal(result.files.length, 6);
+  equal(result.directories.length, 2);
+  equal(result.packagesFullyVerified, 2);
+  const approved = moves.packages.find((pkg) => pkg.label === 'candidate');
+  assert(approved);
+  const candidate = path.join(p.root, p.candidateId);
+  equal(approved.root, candidate);
+  equal(approved.rootIdentity, r.directoryIdentity);
+  equal(approved.manifest, r.manifest);
+  equal(id(candidate), r.directoryIdentity);
+  checkPin(r.manifest);
+  equal(lib.releaseMetadata(candidate), r.metadata);
+  const manifest = lib.verifyRelease(candidate);
+  equal(manifest.id, p.candidateId);
+  equal(manifest.sourceCommit, SOURCE);
+  equivalent(
+    lib.verifyRelease(p.previous),
+    lib.fingerprint(candidate),
+    p.files,
+  );
+  for (const pkg of moves.packages) {
+    equal(id(pkg.root), pkg.rootIdentity);
+    checkPin(pkg.manifest);
+    equal(id(pkg.targetDirectory), pkg.targetDirectoryIdentity);
+    const directory = result.directories.find(
+      (entry) =>
+        entry.source === pkg.sourceDirectory &&
+        entry.target === pkg.emptyDirectoryTarget,
+    );
+    assert(directory && directory.status === 'moved-empty-no-overwrite');
+    equal(id(directory.target), pkg.sourceDirectoryIdentity);
+    equal(fs.readdirSync(directory.target), []);
+    assert(
+      !fs.existsSync(pkg.sourceDirectory),
+      'FRONTEND_RECOVERY_CACHE_REAPPEARED',
+    );
+    for (const file of pkg.files) {
+      const done = result.files.find(
+        (entry) => entry.source === file.source && entry.target === file.target,
+      );
+      assert(done && done.status === 'moved-and-verified');
+      equal(done.sha256, file.sha256);
+      equal(id(file.target), file.identity);
+      equal(lib.fileHash(file.target), file.sha256);
+      assert(!fs.existsSync(file.source), 'FRONTEND_RECOVERY_CACHE_REAPPEARED');
+    }
+  }
+}
+async function resumePlan(options) {
+  const originalPlan = pin(options.originalPlan),
+    cacheMovePlan = pin(options.cacheMovePlan),
+    cacheMoveResult = pin(options.cacheMoveResult);
+  equal(originalPlan.sha256, ORIGINAL_FAILED_PLAN_SHA256);
+  equal(cacheMovePlan.sha256, OWNED_CACHE_MOVE_PLAN_SHA256);
+  const original = read(originalPlan.path),
+    moves = read(cacheMovePlan.path),
+    approved = moves.packages.find((pkg) => pkg.label === 'candidate');
+  assert(approved);
+  // Common read-only planning allocates no candidate; replace its unused UUID
+  // with the sole previously created and reviewed candidate before saving.
+  const p = await plan({ ...options, forResume: true });
+  p.kind = 'resume-owned-frontend-v1';
+  p.candidateId = original.candidateId;
+  p.reserveBytes = 4 * p.budget.allocationUnit;
+  p.resume = {
+    originalPlan,
+    cacheMovePlan,
+    cacheMoveResult,
+    directoryIdentity: approved.rootIdentity,
+    manifest: approved.manifest,
+    metadata: lib.releaseMetadata(approved.root),
+    noCandidateCreation: true,
+  };
+  checkPlan(p);
+  return p;
 }
 function equivalent(old, next, files) {
   equal(next.links, old.links);
@@ -564,10 +677,18 @@ function copyPackage(previous, candidate, manifest, budget, root) {
   requireSpace(root);
 }
 async function apply(p, adapter) {
+  assert.equal(p.kind, 'retain-only-frontend-v2');
+  return executeUpdate(p, adapter, false);
+}
+async function resumeOwnedCandidate(p, adapter) {
+  assert.equal(p.kind, 'resume-owned-frontend-v1');
+  return executeUpdate(p, adapter, true);
+}
+async function executeUpdate(p, adapter, resuming) {
   assert(!lib.hostEffects.context.getStore(), 'FRONTEND_NESTED_HOST_OPERATION');
   checkPlan(p);
   assert(
-    !fs.existsSync(path.join(p.root, p.candidateId)),
+    resuming || !fs.existsSync(path.join(p.root, p.candidateId)),
     'FRONTEND_CANDIDATE_EXISTS; preserve it; no automatic retry',
   );
   const locks = [];
@@ -609,58 +730,68 @@ async function apply(p, adapter) {
       'FRONTEND_DISK_SPACE',
     );
     candidate = path.join(p.root, p.candidateId);
-    copyPackage(
-      p.previous,
-      candidate,
-      lib.verifyRelease(p.previous),
-      p.budget,
-      p.root,
-    );
-    for (const f of p.files) {
-      equal(lib.fileHash(f.input), f.sha256);
-      const target = path.join(candidate, 'server/client', f.path);
-      assert(lib.inside(candidate, canonical(path.dirname(target))));
-      if (f.path !== 'index.hbs' && fs.existsSync(target)) {
-        assert(
-          fs.lstatSync(target).isFile() &&
-            !fs.lstatSync(target).isSymbolicLink(),
-        );
-        equal(lib.fileHash(target), f.sha256);
-      } else copyFixed(f.input, target, f.bytes, p.root);
+    if (!resuming) {
+      copyPackage(
+        p.previous,
+        candidate,
+        lib.verifyRelease(p.previous),
+        p.budget,
+        p.root,
+      );
+      for (const f of p.files) {
+        equal(lib.fileHash(f.input), f.sha256);
+        const target = path.join(candidate, 'server/client', f.path);
+        assert(lib.inside(candidate, canonical(path.dirname(target))));
+        if (f.path !== 'index.hbs' && fs.existsSync(target)) {
+          assert(
+            fs.lstatSync(target).isFile() &&
+              !fs.lstatSync(target).isSymbolicLink(),
+          );
+          equal(lib.fileHash(target), f.sha256);
+        } else copyFixed(f.input, target, f.bytes, p.root);
+      }
+      // Expected file set is derived BEFORE copying. Never adopt an external write.
+      const copied = lib.fingerprint(candidate);
+      equivalent(oldSnapshot, copied, p.files);
+      const old = lib.verifyRelease(p.previous),
+        manifest = {
+          ...old,
+          id: p.candidateId,
+          sourceCommit: SOURCE,
+          sourceHash: jsonHash({
+            backendSourceHash: old.sourceHash,
+            frontend: p.files.map(({ path, sha256 }) => ({ path, sha256 })),
+          }),
+          ...copied,
+          frontendProvenance: {
+            reviewedHead: SOURCE,
+            backendReusedFrom: BASE,
+            oldManifestSha256: p.previousManifest.sha256,
+            oldHashedAssetsRetained: true,
+          },
+        };
+      const manifestBytes = Buffer.from(
+        JSON.stringify(manifest, null, 2) + '\n',
+      );
+      assert(
+        manifestBytes.length <= p.budget.manifestReserveBytes,
+        'FRONTEND_MANIFEST_RESERVATION_EXCEEDED',
+      );
+      requireSpace(p.root, manifestBytes.length);
+      fs.writeFileSync(path.join(candidate, 'release.json'), manifestBytes, {
+        flag: 'wx',
+      });
+      requireSpace(p.root);
     }
-    // Expected file set is derived BEFORE copying. Never adopt an external write.
-    const copied = lib.fingerprint(candidate);
-    equivalent(oldSnapshot, copied, p.files);
-    const old = lib.verifyRelease(p.previous),
-      manifest = {
-        ...old,
-        id: p.candidateId,
-        sourceCommit: SOURCE,
-        sourceHash: jsonHash({
-          backendSourceHash: old.sourceHash,
-          frontend: p.files.map(({ path, sha256 }) => ({ path, sha256 })),
-        }),
-        ...copied,
-        frontendProvenance: {
-          reviewedHead: SOURCE,
-          backendReusedFrom: BASE,
-          oldManifestSha256: p.previousManifest.sha256,
-          oldHashedAssetsRetained: true,
-        },
-      };
-    const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2) + '\n');
-    assert(
-      manifestBytes.length <= p.budget.manifestReserveBytes,
-      'FRONTEND_MANIFEST_RESERVATION_EXCEEDED',
-    );
-    requireSpace(p.root, manifestBytes.length);
-    fs.writeFileSync(path.join(candidate, 'release.json'), manifestBytes, {
-      flag: 'wx',
-    });
-    requireSpace(p.root);
-    const candidateManifest = pin(path.join(candidate, 'release.json'));
-    const candidateIdentity = id(candidate),
-      candidateMetadata = lib.releaseMetadata(candidate);
+    const candidateManifest = resuming
+      ? p.resume.manifest
+      : pin(path.join(candidate, 'release.json'));
+    const candidateIdentity = resuming
+        ? p.resume.directoryIdentity
+        : id(candidate),
+      candidateMetadata = resuming
+        ? p.resume.metadata
+        : lib.releaseMetadata(candidate);
     const verifyCandidate = () => {
       equal(id(candidate), candidateIdentity);
       checkPin(candidateManifest);
@@ -715,6 +846,7 @@ async function apply(p, adapter) {
       candidate,
       sourceCommit: SOURCE,
       oldStopped: true,
+      resumedExistingCandidate: resuming,
       globalReferenceCompleteness: p.globalReferenceCompleteness,
       databaseRestored: false,
       readOnlyCompanions: readOnlyCompanions.map((companion) => ({
@@ -932,24 +1064,40 @@ async function main() {
       artifacts: { type: 'string' },
       expected: { type: 'string' },
       'writer-observation': { type: 'string' },
+      'original-plan': { type: 'string' },
+      'cache-move-plan': { type: 'string' },
+      'cache-move-result': { type: 'string' },
+      'prepare-resume': { type: 'boolean', default: false },
+      resume: { type: 'boolean', default: false },
       plan: { type: 'string' },
       'approved-sha256': { type: 'string' },
       apply: { type: 'boolean', default: false },
     },
   });
-  if (values.apply) {
+  if (values.apply || values.resume) {
+    assert(!(values.apply && values.resume), 'FRONTEND_OPERATION_AMBIGUOUS');
     assert(
       /^[a-f0-9]{64}$/.test(values['approved-sha256'] || ''),
       'FRONTEND_REVIEWED_PLAN_REQUIRED',
     );
     equal(lib.fileHash(values.plan), values['approved-sha256']);
     const p = read(values.plan);
-    console.log(JSON.stringify(await apply(p, productionAdapter(p))));
+    console.log(
+      JSON.stringify(
+        await (values.resume ? resumeOwnedCandidate : apply)(
+          p,
+          productionAdapter(p),
+        ),
+      ),
+    );
   } else {
-    const p = await plan({
+    const p = await (values['prepare-resume'] ? resumePlan : plan)({
       ...values,
       writerObservation: values['writer-observation'],
       expected: read(values.expected),
+      originalPlan: values['original-plan'],
+      cacheMovePlan: values['cache-move-plan'],
+      cacheMoveResult: values['cache-move-result'],
     });
     fs.writeFileSync(values.plan, JSON.stringify(p, null, 2) + '\n', {
       flag: 'wx',
@@ -974,6 +1122,8 @@ if (require.main === module)
 module.exports = {
   plan,
   apply,
+  resumePlan,
+  resumeOwnedCandidate,
   equivalent,
   validateWriters,
   classifyWriters,
