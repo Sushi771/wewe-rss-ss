@@ -15,7 +15,7 @@
     "20260928030000_article_body_retry/migration.sql",
     "20260929010000_provider_refresh_cooldown/migration.sql"
   ],
-  "schemaSha256": "c57e7dd57ecda978f82c0dd7195983404e874d2e90119fa1f0b33db25e249a18",
+  "schemaSha256": "9938b4f296f6f7de6d83b6ca0e5ffacc7b84cb858fa0eb70140ffceca8ac7e7b",
   "migrations": {
     "20240301104100_init/migration.sql": "12d27bcdb235d4bc2f03397f511779dfa3f41860e9375d4e12bf571fe9eb297c",
     "20241214172323_has_history/migration.sql": "47c9ef3738a1fc3822a3378d006fbfea3b5eab5cc26c01174f673a2327461427",
@@ -36,6 +36,7 @@
     "20261011090000_cache_insert_batches/migration.sql": "eebe230ec29ce9173f63a693a5887298f98e2ebb56ad83ae1f8a15a24cc57284",
     "20261012043000_article_feed_lookup_index/migration.sql": "62fa4b8915e13b7db9dff2d5a39b8a37b993733d0f8f5198714622f2f98fcddc",
     "20261015090000_incremental_refresh_commits/migration.sql": "6dc686ed56807f72fc983250d0d2c233804fd17d0e6c05221cef85076b8cb589",
-    "20261020100000_article_global_sort_index/migration.sql": "ab37c8bae12abfadb6f314f663ae35c02b093585c9289fe2f59215f0f14e83c8"
+    "20261020100000_article_global_sort_index/migration.sql": "ab37c8bae12abfadb6f314f663ae35c02b093585c9289fe2f59215f0f14e83c8",
+    "20261020160000_local_body_search/migration.sql": "ff72e5e104374f9ce6b45ef8a9b0320a8bc310a26a447a33f2e4636cf2c36fad"
   }
 }

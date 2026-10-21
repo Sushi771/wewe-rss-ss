@@ -356,6 +356,34 @@ function snapshotTables(databasePath) {
 function assertOldRowsUnchanged(before, after) {
   assert.deepEqual(Object.keys(after), Object.keys(before));
   for (const [table, rows] of Object.entries(before)) {
+    if (table === 'article_search_documents') {
+      const previousIds = new Set(before.articles.map((row) => row.id));
+      const added = after.articles.filter((row) => !previousIds.has(row.id));
+      const current = new Map(after[table].map((row) => [row.article_id, row]));
+      assert.equal(after[table].length, rows.length + added.length);
+      for (const row of rows)
+        assert.deepEqual(
+          current.get(row.article_id),
+          row,
+          'OLD_SEARCH_ROW_MODIFIED',
+        );
+      for (const article of added)
+        assert.deepEqual(
+          { ...current.get(article.id) },
+          {
+            article_id: article.id,
+            body_text: '',
+            body_cached:
+              article.content_html != null && article.content_html !== ''
+                ? 1
+                : 0,
+            pending: 1,
+            generation: 0,
+          },
+          'NEW_SEARCH_ROW_INVALID',
+        );
+      continue;
+    }
     if (table !== 'articles') {
       assert.deepEqual(after[table], rows, `${table.toUpperCase()}_MODIFIED`);
       continue;
@@ -567,6 +595,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertOldRowsUnchanged,
   EXPECTED_DOM_SHA256,
   loadVerifiedImageManifest,
   runImageCopyRehearsal,

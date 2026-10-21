@@ -8,6 +8,7 @@ const ts = require(
   require.resolve('typescript', { paths: [path.join(root, 'apps/server')] }),
 );
 const manifest = require('../apps/server/scripts/fixtures/main-wechat-runtime-scope.json');
+const localSearch = require('./fixtures/local-body-search-runtime-scope.json');
 // Git's Windows checkout conversion must not change source-policy fingerprints.
 const read = (file) =>
   fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
@@ -45,15 +46,36 @@ test('the collection extraction preserves every unrelated main member and the se
     manifest.collectionMembers,
   );
 });
-test('native login remains main implementation and shared deployed safety policies are unmodified', () => {
+test('only the explicitly reviewed local search reading scope extends the frozen safety manifest', () => {
+  assert.deepEqual(
+    Object.keys(localSearch.criticalBlobs).sort(),
+    [
+      'apps/server/src/article-list-page.ts',
+      'apps/server/src/article-body-search.ts',
+      'packages/shared/src/article-date-filter.ts',
+    ].sort(),
+  );
+  assert.deepEqual(Object.keys(localSearch.routerMembers), [
+    'buildOfflineFeedDirectory',
+  ]);
+  assert.deepEqual(
+    Object.keys(localSearch.articleRoutes).sort(),
+    ['searchStatus', 'prepareSearch', 'summary', 'list'].sort(),
+  );
+});
+
+test('native login and safety policies remain pinned outside the explicit local search reading scope', () => {
   const service = members('apps/server/src/trpc/trpc.service.ts');
   for (const [name, expected] of Object.entries(manifest.nativeLoginMembers))
     assert.equal(service[name], expected, name);
-  for (const [file, expected] of Object.entries(manifest.criticalBlobs))
+  for (const [file, expected] of Object.entries({
+    ...manifest.criticalBlobs,
+    ...localSearch.criticalBlobs,
+  }))
     assert.equal(hash(read(file)), expected, file);
 });
 
-test('only the selected deployed media methods and export routes change on main', () => {
+test('only the selected media and explicit local search routes change', () => {
   assert.deepEqual(
     members('apps/server/src/trpc/trpc.service.ts'),
     manifest.trpcServiceMembers,
@@ -61,7 +83,10 @@ test('only the selected deployed media methods and export routes change on main'
   const file = 'apps/server/src/trpc/trpc.router.ts';
   const actual = members(file);
   delete actual.articleRouter;
-  assert.deepEqual(actual, manifest.routerMembers);
+  assert.deepEqual(actual, {
+    ...manifest.routerMembers,
+    ...localSearch.routerMembers,
+  });
   const ast = ts.createSourceFile(
     file,
     read(file),
@@ -79,7 +104,7 @@ test('only the selected deployed media methods and export routes change on main'
         tokens(node.getText(ast)),
       ]),
     ),
-    manifest.articleRoutes,
+    { ...manifest.articleRoutes, ...localSearch.articleRoutes },
   );
 });
 test('the main extraction excludes XHS and general download tools while keeping the authorized deployed lifecycle', () => {

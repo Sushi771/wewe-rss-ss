@@ -1,4 +1,10 @@
 import {
+  prepareBodySearch,
+  bodySearchCoverage,
+  findBodySearchIds,
+  bodySearchSummary,
+} from '../article-body-search';
+import {
   LOCAL_EXPORT_BATCH_LIMIT,
   saveCachedArticleBatch,
 } from '../article-local-export-batch';
@@ -180,12 +186,19 @@ export class TrpcRouter {
       include: { group: true },
     });
     if (!feed) return null;
-    const identities = await this.prismaService.article.findMany({
-      where: articleListWhere({ ...filter, mpId: feedId }),
-      take: 5001,
-      orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-      select: { id: true },
-    });
+    const identities = filter.search
+      ? await findBodySearchIds(
+          this.prismaService,
+          { ...filter, mpId: feedId },
+          5001,
+          true,
+        )
+      : await this.prismaService.article.findMany({
+          where: articleListWhere({ ...filter, mpId: feedId }),
+          take: 5001,
+          orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
+          select: { id: true },
+        });
     if (identities.length > 5000)
       throw new Error('Offline export article limit exceeded');
     // Freeze membership/order without retaining every cached body. Each body and
@@ -893,6 +906,12 @@ export class TrpcRouter {
   });
 
   articleRouter = this.trpcService.router({
+    searchStatus: this.trpcService.protectedProcedure.query(() =>
+      bodySearchCoverage(this.prismaService),
+    ),
+    prepareSearch: this.trpcService.protectedProcedure.mutation(() =>
+      prepareBodySearch(this.prismaService),
+    ),
     supplementSavedMedia: this.trpcService.protectedProcedure
       .input(z.object({ ids: savedMediaIds }).strict())
       .mutation(({ input, ctx }) => {
@@ -902,6 +921,8 @@ export class TrpcRouter {
     summary: this.trpcService.protectedProcedure
       .input(articleFilterSchema)
       .query(async ({ input }) => {
+        if (input.search?.trim())
+          return bodySearchSummary(this.prismaService, input);
         const where = articleListWhere(input);
         const [range, readAvailable, likeAvailable, cachedBodies] =
           await this.prismaService.$transaction([
@@ -949,7 +970,10 @@ export class TrpcRouter {
                 }
               : undefined,
           },
-          { databaseUrl: process.env.DATABASE_URL },
+          {
+            databaseUrl: process.env.DATABASE_URL,
+            search: input.search?.trim() ? input : undefined,
+          },
         );
         let nextCursor: typeof cursor | undefined = undefined;
         if (items.length > limit) {

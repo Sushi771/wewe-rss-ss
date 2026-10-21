@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -88,8 +89,7 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
         path.join(migrations, name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

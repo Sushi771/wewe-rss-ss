@@ -1,7 +1,8 @@
 import { Prisma } from '@prisma/client';
 import { ArticleFilter, articlePublicationRange } from '@wewe-rss/shared';
 
-/** List and summary must apply the same visible scope. */
+/** Metadata/legacy title scope. Body-aware routes use article-body-search
+ * for literal matching of title, publisher and normalized visible body text. */
 export function articleListWhere(
   input: ArticleFilter,
 ): Prisma.ArticleWhereInput {

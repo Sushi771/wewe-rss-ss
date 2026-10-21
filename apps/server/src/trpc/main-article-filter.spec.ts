@@ -1,3 +1,6 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -42,6 +45,16 @@ describe('main article filter compatibility with isolated SQLite', () => {
       id TEXT PRIMARY KEY, mp_id TEXT NOT NULL, title TEXT NOT NULL, pic_url TEXT NOT NULL, publish_time INTEGER NOT NULL,
       source_url TEXT UNIQUE, content_html TEXT, last_body_status TEXT, verified_source_url TEXT, last_body_retry TEXT,
       metrics TEXT, read_count INTEGER, like_count INTEGER, created_at DATETIME NOT NULL, updated_at DATETIME)`);
+    for (const statement of splitSqliteStatements(
+      readFileSync(
+        resolve(
+          __dirname,
+          '../../prisma/migrations/20261020160000_local_body_search/migration.sql',
+        ),
+        'utf8',
+      ),
+    ))
+      if (statement.trim()) await prisma.$executeRawUnsafe(statement);
     for (const id of ['group-a', 'group-b'])
       await prisma.managementGroup.create({
         data: { id, name: id, platform: 'wechat' },

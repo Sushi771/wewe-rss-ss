@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../scripts/sqlite-statements.cjs';
 /** Offline-only benchmark: creates its own SQLite and export tree; no input paths. */
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
@@ -109,8 +110,7 @@ async function main() {
           'utf8',
         )
         .catch(() => '');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((x) => x.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

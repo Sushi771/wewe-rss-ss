@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../scripts/sqlite-statements.cjs';
 /** Offline only: creates its own temporary SQLite; accepts no database URL/path.
  * Run from apps/server with ts-node/transpile-only + tsconfig-paths/register.
  * Optional PRISMA_QUERY_ENGINE_LIBRARY selects the audited engine for this child.
@@ -51,8 +52,7 @@ async function main() {
       const sql = await fs
         .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
         .catch(() => '');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((line) => line.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

@@ -1,4 +1,6 @@
 'use strict';
+const { splitSqliteStatements } = require('./sqlite-statements.cjs');
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -76,12 +78,12 @@ test(
         .readdirSync(path.join(server, 'prisma/migrations'))
         .filter((n) => /^\d/.test(n))
         .sort())
-        for (const statement of fs
-          .readFileSync(
+        for (const statement of splitSqliteStatements(
+          fs.readFileSync(
             path.join(server, 'prisma/migrations', migration, 'migration.sql'),
             'utf8',
-          )
-          .split(';')
+          ),
+        )
           .map((s) => s.trim())
           .filter(Boolean))
           await prisma.$executeRawUnsafe(statement);

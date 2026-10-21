@@ -1,0 +1,18 @@
+{
+  "iteration": "local-body-search-20261020",
+  "baseline": "main-wechat-runtime-scope.json",
+  "criticalBlobs": {
+    "apps/server/src/article-list-page.ts": "a73410f27eca5df0c4f3687ffeb4a373b7e22a473a005af15270716c869cac5a",
+    "apps/server/src/article-body-search.ts": "750fa5ffa47cf4c1b587491a8fddcc5761378c5611ae673cbb1a48caa6ea8d0f",
+    "packages/shared/src/article-date-filter.ts": "1205b3e5b8a2c750ff0f29ed66f33181bbd5c721bbfca383171ea6c3e80d8699"
+  },
+  "routerMembers": {
+    "buildOfflineFeedDirectory": "644bc7fe2a318178a3f9a61b80bdfd1364665c36f64ca8c85c157f1e5f7ae0f4"
+  },
+  "articleRoutes": {
+    "searchStatus": "eb8f41ad7e119a602bac1540f9416f0ae08c3cfaba0407a7ddc484de185f28da",
+    "prepareSearch": "33c9ce3834f029ad0c569a684dfec8c0ed4566d0c27081e771f1a8098430189e",
+    "summary": "f264055b40d0bab767e85908af425bf92398adc8de5a0bbfefb9ce8c31d4d70f",
+    "list": "61bc450dd537d3cf9b377ae96bc75b8c9811407d72b1287ebe96fc0654cf56e5"
+  }
+}
