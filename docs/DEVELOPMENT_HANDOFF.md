@@ -546,5 +546,4 @@ Tests use only bounded synthetic databases and owned temporary outputs. A hard
 quota is not automatic rotation or evidence that old production files were freed.
 No production data, configuration, service or deployed PR46 package was changed.
 
-
 2026-10-21 search release compatibility: strict native/Python schema checks now normalize only the exact reversed adjacent nullable TEXT additions `feeds.local_directory` / `feeds.public_album_ids`. Named column types/defaults/constraints and every other SQL object remain checked. Synthetic schema20/21 historical-order cases and changed type/default/NOT NULL rejection pass; full native startup suite 40/40. Production search migration has not run: the prior frontend was restored after a protected-backup call encountered the existing periodic lifecycle pending-confirmation allocation. Do not clear its marker or substitute an unverified old backup.
