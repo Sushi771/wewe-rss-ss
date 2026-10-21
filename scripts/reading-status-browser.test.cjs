@@ -189,9 +189,32 @@ const initial=${JSON.stringify(batch)};function App(){const [batch,setBatch]=use
         await until(
           () =>
             evaluate(
-              "Boolean(document.querySelector('#storage-backup[open]'))&&document.body.innerText.includes('请核对恢复点后处理')",
+              "Boolean(document.querySelector('#storage-backup[open]'))&&document.body.innerText.includes('更新和修改已暂停。')&&Boolean(document.querySelector('#storage-backup details'))",
             ),
           'details route opens and reads',
+        );
+        assert(requests > 0, 'details route reads the actual status endpoint');
+        assert.equal(
+          await evaluate(
+            "document.querySelector('#storage-backup details').open",
+          ),
+          false,
+        );
+        assert.equal(
+          await evaluate(
+            "document.body.innerText.includes('请核对恢复点后处理')",
+          ),
+          false,
+        );
+        await evaluate(
+          "document.querySelector('#storage-backup details summary').click()",
+        );
+        assert.equal(
+          await evaluate(
+            "document.body.innerText.includes('请核对恢复点后处理')",
+          ),
+          true,
+          'original diagnosis remains expandable',
         );
         await until(
           () =>

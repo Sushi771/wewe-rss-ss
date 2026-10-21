@@ -615,6 +615,8 @@ test('the async scope remains exclusive across a controller await boundary', () 
 
 function buildOnly(f) {
   f.policy.phase = 'build-only';
+  Object.assign(f.policy, scope.inspect([f.build]));
+  f.policy.protectedIds = [];
   delete f.policy.compatibilityProofSha256;
   f.policy.buildOnly = {
     sourceCommit: 'a'.repeat(40),
@@ -635,7 +637,7 @@ function buildOnly(f) {
     sourceHash: 'b'.repeat(64),
   };
 }
-test('build-only binds source and isolated output; incomplete references and install remain blocked', () =>
+test('build-only binds source and one new output root without querying global references; install remains blocked', () =>
   fixture((f) => {
     const request = buildOnly(f);
     for (const change of [
@@ -650,9 +652,11 @@ test('build-only binds source and isolated output; incomplete references and ins
         /BUILD_ONLY_BINDING/,
       );
     f.facts.complete = false;
-    assert.throws(() => scope.open(request, f.options()), /QUERY_INCOMPLETE/);
-    f.facts.complete = true;
-    const lease = scope.open(request, f.options());
+    const options = f.options();
+    options.query = () => {
+      throw Error('must not query global processes or history');
+    };
+    const lease = scope.open(request, options);
     assert.throws(
       () => lease.authorizePackage(f.current),
       /BUILD_ONLY_NO_INSTALL/,
@@ -754,5 +758,114 @@ test('a build-only policy cannot adopt an existing unmanaged output root', () =>
     assert.equal(
       fs.readFileSync(path.join(f.build, 'unowned'), 'utf8'),
       'preserve',
+    );
+  }));
+
+test('build-only refuses historical roots instead of silently excluding them', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    Object.assign(f.policy, scope.inspect([f.installed, f.build]));
+    f.save();
+    assert.throws(() => scope.open(request, f.options()), /BUILD_ONLY_BINDING/);
+  }));
+
+test('build-only retains failed outputs and refuses an interrupted claim rather than deleting or adopting them', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options());
+    const at = path.join(f.build, 'failed');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    fs.writeFileSync(
+      path.join(at, 'retained'),
+      'synthetic failed compiler output',
+    );
+    assert.throws(() => lease.allowCleanup([at]), /FAILED_OUTPUT_HELD/);
+    assert.throws(
+      () => lease.close(Error('synthetic compiler failure')),
+      /FAILED_OUTPUT_HELD/,
+    );
+    assert(fs.existsSync(path.join(at, 'retained')));
+    assert.throws(() => scope.open(request, f.options()), /INTERRUPTED_CLAIM/);
+  }));
+
+test('completed build output changes are not refreshed into acceptance', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options());
+    const at = path.join(f.build, 'candidate');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    fs.writeFileSync(path.join(at, 'artifact'), 'sealed');
+    lease.close();
+    fs.writeFileSync(path.join(at, 'artifact'), 'external change');
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /MANAGED_OUTPUT_CHANGED/,
+    );
+  }));
+
+test('forged ledger receipts are refused while a build lease owns the original state', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      second = scope.open(request, f.options());
+    const ledger = path.join(f.base, f.policy.scopeId + '.state.json');
+    const saved = fs.readFileSync(ledger),
+      doc = JSON.parse(saved);
+    doc.payload.outputs.push({
+      path: path.join(f.build, 'forged'),
+      complete: true,
+      digest: '0'.repeat(64),
+    });
+    doc.digest = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(doc.payload))
+      .digest('hex');
+    fs.writeFileSync(ledger, JSON.stringify(doc));
+    assert.throws(() => second.check(), /STATE_REPLACED/);
+    fs.writeFileSync(ledger, saved);
+    second.close();
+  }));
+
+test('a fixed two-source build policy accounts for retained first-package bytes at the second copy peak', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    const candidate = '3a36428210f22ea1986f0a96a6066e7fdc9baf46';
+    const rollback = 'f618e48f48ff0e3df1c646cb8a666a2461815732';
+    f.policy.buildOnly.sources = [
+      { sourceCommit: candidate, sourceHash: 'b'.repeat(64) },
+      { sourceCommit: rollback, sourceHash: 'c'.repeat(64) },
+    ];
+    delete f.policy.buildOnly.sourceCommit;
+    delete f.policy.buildOnly.sourceHash;
+    f.policy.maxBytes = 9000;
+    f.policy.maxGrowthBytes = 9000;
+    f.save();
+    const firstRequest = {
+      ...request,
+      sourceCommit: candidate,
+      reserveBytes: 8192,
+    };
+    const first = scope.open(firstRequest, f.options());
+    const at = path.join(f.build, 'candidate');
+    first.registerOutput(at);
+    fs.mkdirSync(at);
+    first.createdOutput(at);
+    fs.writeFileSync(path.join(at, 'artifact'), Buffer.alloc(4096));
+    first.close();
+    const next = {
+      ...request,
+      sourceCommit: rollback,
+      sourceHash: 'c'.repeat(64),
+      reserveBytes: 8192,
+    };
+    assert.throws(() => scope.open(next, f.options()), /COPY_PEAK_EXCEEDED/);
+    const second = scope.open({ ...next, reserveBytes: 1024 }, f.options());
+    second.close();
+    assert.throws(
+      () => scope.open({ ...next, sourceCommit: 'd'.repeat(40) }, f.options()),
+      /BUILD_ONLY_BINDING/,
     );
   }));

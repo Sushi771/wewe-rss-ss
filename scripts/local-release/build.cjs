@@ -157,7 +157,12 @@ function build(options = {}) {
     ? fs.realpathSync(options.sourceRoot)
     : root;
   const historical = sourceRoot !== root;
-  const legacy = historical && !options.searchRollback;
+  const reviewedSearchCandidate =
+    options.buildOnly &&
+    options.compact &&
+    options.sourceCommit === '3a36428210f22ea1986f0a96a6066e7fdc9baf46';
+  const legacy =
+    historical && !options.searchRollback && !reviewedSearchCandidate;
   if (
     options.searchRollback &&
     (!options.buildOnly ||
@@ -328,6 +333,31 @@ function build(options = {}) {
   const sourceHash = hash(
     JSON.stringify({ inputs, searchRollback: options.searchRollback === true }),
   );
+  const runCompiler = (executable, args, commandOptions) => {
+    const checkInputs = () => {
+      if (!options.buildOnly) return;
+      verifySourceSnapshot(
+        sourceRoot,
+        historical ? options.sourceCommit : currentCommit,
+        root,
+      );
+      for (const [file, expected] of Object.entries(inputs)) {
+        const tooling =
+          file.startsWith('scripts/local-release/') ||
+          (options.searchRollback &&
+            extensionNames.some(
+              (name) =>
+                file === `apps/server/prisma/migrations/${name}/migration.sql`,
+            ));
+        if (fileHash(path.join(tooling ? root : sourceRoot, file)) !== expected)
+          throw Error('Release input changed during compilation: ' + file);
+      }
+    };
+    checkInputs();
+    const result = run(executable, args, commandOptions);
+    checkInputs();
+    return result;
+  };
   if (options.plan && !options.buildOnly)
     throw new Error('--plan requires --build-only');
   const releaseRoot = options.buildOnly
@@ -456,7 +486,7 @@ function build(options = {}) {
       const cli = path.join(packageDir('prisma', server), 'build/index.js');
       fs.writeFileSync(
         path.join(workspace, 'generate.log'),
-        run(
+        runCompiler(
           process.execPath,
           [cli, 'generate', '--schema', path.join(workspace, 'schema.prisma')],
           {
@@ -491,7 +521,10 @@ function build(options = {}) {
       });
       const tsc = path.join(packageDir('typescript', server), 'bin/tsc');
       reservation.check();
-      run(process.execPath, [tsc, '-p', tsconfig], { cwd: sourceServer, env });
+      runCompiler(process.execPath, [tsc, '-p', tsconfig], {
+        cwd: sourceServer,
+        env,
+      });
       const compiledRoot = path.join(target, 'dist/apps/server/src');
       walk(path.join(target, 'dist'), (relative, kind) => {
         if (kind !== 'file' || !relative.endsWith('.js')) return;
@@ -528,14 +561,14 @@ function build(options = {}) {
         },
       });
       reservation.check();
-      run(process.execPath, [tsc, '-p', webConfig, '--noEmit'], {
+      runCompiler(process.execPath, [tsc, '-p', webConfig, '--noEmit'], {
         cwd: web,
         env,
       });
       if (legacy) {
         fs.writeFileSync(
           path.join(workspace, 'web.log'),
-          run(
+          runCompiler(
             process.execPath,
             [
               path.join(__dirname, 'build-legacy-web.cjs'),
@@ -588,7 +621,7 @@ function build(options = {}) {
         }
         fs.writeFileSync(
           path.join(workspace, 'web.log'),
-          run(
+          runCompiler(
             process.execPath,
             [
               path.join(packageDir('vite', web), 'bin/vite.js'),

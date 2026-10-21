@@ -14,19 +14,19 @@ Run `node scripts/local-release/build.cjs --compact --build-only --output-root <
 The read-only plan reports the committed source SHA, input digest, pinned compiler
 entry files, runtime hash and conservative copy reservation. Review these exact
 values in a release-scope policy with `phase: "build-only"` and the reported
-`buildOnly` object. Retain the normal roots/identity inventory, byte/runtime/free
-space limits, scan limits, protected historical package IDs, manifests, rollback
-plan, registry owner, native reference collector and pinned probe. The isolated
-output root must be a separate registered root, empty on first adoption. Existing
-history is still counted and hashed; it is not replaced by an empty inventory.
+`buildOnly` object. This phase registers exactly one new output root, empty on
+first adoption, and its separate registry/control directory. Retain their exact
+identities, source/tool/compiler pins, byte/runtime/free-space limits, bounded
+output inventory and exclusive locks. Production and historical roots must not
+be registered in this phase. Their contents and global native references remain
+unknown; this is no history inspection, deletion or installation authorization.
 
 Set the normal `WEWE_RELEASE_SCOPE_FILE` and `WEWE_RELEASE_SCOPE_SHA256` to the
-reviewed policy, then repeat the command without `--plan`. Native process,
-scheduled-task, shortcut, pointer, rollback and inflight coverage must remain
-complete. A denied/incomplete query stops the build; do not substitute synthetic
-facts for native observations. Build-only omits the _future pair compatibility
-proof_, and explicitly returns `verified: false` for that stage. It is never a
-candidate-installation acceptance.
+reviewed policy, then repeat the command without `--plan`. Build-only observes
+only its new output and control directories and does not query global processes,
+tasks, shortcuts or production pointers. It explicitly keeps global references
+unknown and pair compatibility unverified. Other release phases keep their
+existing reference requirements. This is never installation acceptance.
 
 The build runs inside the existing lease and build-budget locks. It creates only
 registered owned outputs, pins compiler entry hashes, rejects runtime/DB entry
@@ -39,16 +39,32 @@ boundaries in the owned release and build directories stop Prisma from finding
 an ancestor environment file. Untracked or changed environment files are refused.
 Source and dependency reads are still needed. The fixed build source and installed toolchain
 are trusted code; this is an operational boundary, not an OS sandbox for malicious
-dependencies (esbuild manages its own subprocess). Interruptions retain the
-existing held-claim/review behavior. No historical package is deleted to gain room.
+dependencies (esbuild manages its own subprocess). Source snapshots and input
+hashes are checked before and after compiler calls. Failed outputs and interrupted
+claims are retained for review; build-only cannot authorize their deletion.
 
 ## Narrow search-compatible rollback recipe
 
-Prepare an isolated source snapshot of
-`48fdf73f4d770001bbb6de3e2383189811e56ccb` with its lockfile dependencies available.
+Prepare an isolated source snapshot of the installed UI repair
+`f618e48f48ff0e3df1c646cb8a666a2461815732` with its lockfile dependencies available
+(the earlier `48fdf73f4d770001bbb6de3e2383189811e56ccb` remains accepted).
 Do not patch that snapshot or edit any frozen package. Use the current reviewed
-builder with `--source-root <snapshot> --source-commit 48fdf73f4d770001bbb6de3e2383189811e56ccb --search-rollback --compact`, plus the build-only flags above.
+builder with `--source-root <snapshot> --source-commit f618e48f48ff0e3df1c646cb8a666a2461815732 --search-rollback --compact`, plus the build-only flags above.
 Create and review a separate exact plan/policy for this source/input pair.
+
+For this rollout the candidate source snapshot is exactly
+`3a36428210f22ea1986f0a96a6066e7fdc9baf46`. One unchanged build-only policy may
+bind both exact `{sourceCommit, sourceHash}` plans in `buildOnly.sources`; only
+this candidate/repaired-UI rollback pair is accepted there. Both builds share
+one output inventory, lock and ledger. No third source or receipt refresh is
+authorized. Keep the original 768 MiB cumulative new-output budget and two
+runtime copies. Build sequentially: the copy peak is the retained completed
+first package **plus** the second build reservation, not one reservation reused
+as a two-package total. With reservations of 593,710,908 bytes each, the first
+package must be at most 211,595,460 bytes before the second can begin; actual
+bytes and free space are checked then. Otherwise stop and preserve it, without
+deleting packages or raising the budget. Reserve at least 4 GiB free disk after
+each allocation. Compiler workspace and temporary files stay in the reservation.
 
 The recipe compiles the original application and Prisma client, adds the exact
 global-sort migration20 and search migration21 only to the **new package**, and

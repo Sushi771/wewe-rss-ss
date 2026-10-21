@@ -195,7 +195,7 @@ function open(request, options = {}, boundOperation) {
     !policy.roots.length ||
     policy.roots.length > 32 ||
     !Array.isArray(policy.protectedIds) ||
-    !policy.protectedIds.length ||
+    (policy.phase !== 'build-only' && !policy.protectedIds.length) ||
     policy.protectedIds.length > 3 ||
     new Set(policy.protectedIds).size !== policy.protectedIds.length ||
     !Number.isSafeInteger(policy.maxBytes) ||
@@ -233,13 +233,40 @@ function open(request, options = {}, boundOperation) {
     throw new Error('RELEASE_SCOPE_PHASE_INVALID');
   if (policy.phase === 'build-only') {
     const spec = policy.buildOnly;
+    const sources = spec?.sources || (spec ? [spec] : []);
+    const source =
+      Array.isArray(sources) &&
+      sources.find(
+        (row) =>
+          row.sourceCommit === request.sourceCommit &&
+          row.sourceHash === request.sourceHash,
+      );
     if (
       request.kind !== 'build' ||
       request.buildOnly !== true ||
       request.transition ||
       !spec ||
-      !/^[a-f0-9]{40}$/.test(spec.sourceCommit || '') ||
-      !/^[a-f0-9]{64}$/.test(spec.sourceHash || '') ||
+      !source ||
+      !Array.isArray(sources) ||
+      sources.length < 1 ||
+      sources.length > 2 ||
+      sources.some(
+        (row) =>
+          !/^[a-f0-9]{40}$/.test(row.sourceCommit || '') ||
+          !/^[a-f0-9]{64}$/.test(row.sourceHash || ''),
+      ) ||
+      (spec.sources &&
+        (sources.length !== 2 ||
+          sources
+            .map((row) => row.sourceCommit)
+            .sort()
+            .join(',') !==
+            [
+              '3a36428210f22ea1986f0a96a6066e7fdc9baf46',
+              'f618e48f48ff0e3df1c646cb8a666a2461815732',
+            ]
+              .sort()
+              .join(','))) ||
       !/^[a-f0-9]{64}$/.test(spec.runtimeSha256 || '') ||
       spec.runtimeSha256 !== fileHash(process.execPath) ||
       !Array.isArray(spec.commands) ||
@@ -248,11 +275,10 @@ function open(request, options = {}, boundOperation) {
         (c) =>
           !path.isAbsolute(c.path) || !/^[a-f0-9]{64}$/.test(c.sha256 || ''),
       ) ||
-      request.sourceCommit !== spec.sourceCommit ||
-      request.sourceHash !== spec.sourceHash ||
       request.root !== spec.outputRoot ||
       canonical(spec.outputRoot) !== spec.outputRoot ||
       !policy.roots.some((r) => r.path === spec.outputRoot) ||
+      policy.roots.length !== 1 ||
       spec.outputRoot === path.resolve(__dirname, '../../.local-releases')
     )
       throw new Error('RELEASE_SCOPE_BUILD_ONLY_BINDING_REQUIRED');
@@ -352,6 +378,18 @@ function open(request, options = {}, boundOperation) {
     );
   };
   const references = (allowTransition = false) => {
+    if (policy.phase === 'build-only') {
+      // Only the new output root is observed. Do not fabricate global native
+      // completeness or use this limited observation for cleanup/publication.
+      const value = {
+        scope: 'new-build-outputs-only',
+        outputRoot: policy.buildOnly.outputRoot,
+        globalReferences: 'unknown',
+        compatibility: { stage: 'build-only', verified: false },
+        records: [],
+      };
+      return { value, digest: hash(value) };
+    }
     const value = query();
     verifier.assertBudget();
     const digest = validateReferences(value, policy);
@@ -775,6 +813,8 @@ function open(request, options = {}, boundOperation) {
       },
       allowCleanup(outputs) {
         assertWritable();
+        if (policy.phase === 'build-only')
+          throw new Error('RELEASE_SCOPE_BUILD_ONLY_FAILED_OUTPUT_HELD');
         check();
         const facts = references().value;
         if (
