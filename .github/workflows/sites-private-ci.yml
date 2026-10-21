@@ -1,0 +1,27 @@
+name: Private Sites reader preparation
+on:
+  pull_request:
+    paths:
+      - 'sites/private-reader/**'
+      - 'scripts/sites-local-contract*'
+      - 'docs/paid-sources/SITES_PRIVATE_READER_PREPARATION.md'
+      - '.github/workflows/sites-private-ci.yml'
+permissions:
+  contents: read
+jobs:
+  closed-reader:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Reuse original contract and test the closed reader end to end on synthetic data
+        run: node --test scripts/sites-local-contract.test.mjs sites/private-reader/test/*.test.mjs
+      - name: Build local-only Worker ESM without registration or credentials
+        run: node sites/private-reader/build.mjs
