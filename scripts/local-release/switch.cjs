@@ -22,6 +22,7 @@ const expectedPending = [
 ];
 
 function processIdentity(action, pid, port, expected) {
+  require('./lib.cjs').hostEffects.assertRuntime();
   if (
     process.platform === 'win32' &&
     process.env.LOCAL_RELEASE_FORCE_POWERSHELL !== '1'
@@ -197,6 +198,7 @@ async function waitReady(
 }
 
 async function stopOwned(child) {
+  require('./lib.cjs').hostEffects.assertRuntime();
   require('./lib.cjs').hostEffects.assertWritable();
   if (!child || child.exitCode !== null) return;
   const closed = once(child, 'close');
@@ -205,6 +207,7 @@ async function stopOwned(child) {
 }
 
 function loadProductionEnvironment() {
+  require('./lib.cjs').hostEffects.assertRuntime();
   require('./lib.cjs').hostEffects.assertWritable();
   const server = path.join(root, 'apps/server');
   // Node 内置 envFile 只填充缺失值；本机 .env.local 优先，文件内容不写入审计。

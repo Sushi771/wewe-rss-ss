@@ -19,6 +19,10 @@ function currentHostLease() {
 function assertHostWrite() {
   currentHostLease()?.assertWritable();
 }
+function assertRuntimeEffect() {
+  if (currentHostLease()?.policy?.phase === 'build-only')
+    throw new Error('RELEASE_SCOPE_BUILD_ONLY_RUNTIME_FORBIDDEN');
+}
 function assertUnscopedHostEffect() {
   if (currentHostLease())
     throw new Error('RELEASE_SCOPE_UNREGISTERED_HOST_EFFECT');
@@ -91,15 +95,27 @@ function guardedFiles(target, promises = false) {
       if (key === 'promises') return guardedPromises;
       const value = Reflect.get(object, key, object);
       const method = typeof key === 'string' ? key.replace(/Sync$/, '') : '';
-      if (typeof value !== 'function' || readOnlyFiles.has(method))
+      if (
+        typeof value !== 'function' ||
+        (readOnlyFiles.has(method) &&
+          !['readFile', 'createReadStream', 'openAsBlob', 'close'].includes(
+            method,
+          ))
+      )
         return value;
       return function (...args) {
-        if (method !== 'open' || writesOnOpen(args[1])) assertHostWrite();
+        const writing =
+          !readOnlyFiles.has(method) &&
+          (method !== 'open' || writesOnOpen(args[1]));
+        currentHostLease()?.assertFileAccess?.(method, args, writing);
+        if (writing) assertHostWrite();
         // Resolve dynamically so the existing offline preloader and test stubs
         // cannot be bypassed by an earlier captured native function.
         const result = new.target
           ? Reflect.construct(object[key], args)
           : Reflect.apply(object[key], object, args);
+        if (method === 'open' && typeof result === 'number')
+          currentHostLease()?.approveDescriptor?.(result);
         return promises && method === 'open'
           ? result.then(guardedFileHandle)
           : result;
@@ -126,6 +142,7 @@ const processes = new Proxy(nativeProcesses, {
       return value;
     const dispatch = (...args) => {
       assertHostWrite();
+      currentHostLease()?.assertBuildCommand?.(key, args);
       return Reflect.apply(target[key], target, args);
     };
     Object.defineProperty(dispatch, require('node:util').promisify.custom, {
@@ -135,6 +152,7 @@ const processes = new Proxy(nativeProcesses, {
           custom &&
           ((...args) => {
             assertHostWrite();
+            currentHostLease()?.assertBuildCommand?.(key, args);
             return Reflect.apply(custom, target, args);
           })
         );
@@ -149,6 +167,7 @@ const hostEffects = Object.freeze({
   processes,
   currentLease: currentHostLease,
   assertWritable: assertHostWrite,
+  assertRuntime: assertRuntimeEffect,
   assertUnscoped: assertUnscopedHostEffect,
 });
 

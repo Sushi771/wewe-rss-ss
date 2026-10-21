@@ -261,7 +261,7 @@ test('completed reservations and negative checks cannot create later output or e
     assert(!fs.existsSync(path.join(root, 'late')));
   }));
 test(
-  'the real build entry returns a verified reuse before estimation, compilation or runtime copy',
+  'the real build entry scopes verified reuse before returning without estimation or generation',
   { skip: process.platform !== 'win32' },
   () =>
     fixture((root) => {
@@ -270,6 +270,7 @@ test(
           find: guard.findReusable,
           estimate: guard.estimate,
           begin: guard.begin,
+          open: require('./release-scope.cjs').open,
         };
       let calls = 0;
       try {
@@ -290,16 +291,26 @@ test(
         guard.begin = () => {
           throw new Error('must not create a new generation');
         };
+        let scoped = false;
+        require('./release-scope.cjs').open = (request) => {
+          assert.equal(request.kind, 'build');
+          assert.equal(request.reserveBytes, 1);
+          assert.equal(request.runtimeCopies, 0);
+          scoped = true;
+          return { assertWritable() {}, close() {} };
+        };
         assert.equal(
           require('./build.cjs').build({ compact: true }),
           r.directory,
         );
         assert.equal(calls, 1);
+        assert.equal(scoped, true);
         assert.equal(guard.packageDirectories(root).length, 1);
       } finally {
         guard.findReusable = saved.find;
         guard.estimate = saved.estimate;
         guard.begin = saved.begin;
+        require('./release-scope.cjs').open = saved.open;
       }
     }),
 );

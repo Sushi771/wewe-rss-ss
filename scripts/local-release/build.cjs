@@ -100,12 +100,27 @@ function copyPackages(
 
 function build(options = {}) {
   require('./release-scope.cjs').assertWritableSession(['build']);
+  if (options.plan && !options.buildOnly)
+    throw new Error('--plan requires --build-only');
+  if (!options.buildOnly && options.outputRoot)
+    throw new Error('An output root requires --build-only');
   if (process.platform !== 'win32')
     throw new Error('此入口只验证 Windows 本机 SQLite 部署');
   const sourceRoot = options.sourceRoot
     ? fs.realpathSync(options.sourceRoot)
     : root;
-  const legacy = sourceRoot !== root;
+  const historical = sourceRoot !== root;
+  const legacy = historical && !options.searchRollback;
+  if (
+    options.searchRollback &&
+    (!options.buildOnly ||
+      !historical ||
+      options.sourceCommit !== '48fdf73f4d770001bbb6de3e2383189811e56ccb' ||
+      !options.compact)
+  )
+    throw new Error(
+      'Search rollback requires the fixed deployed source and compact runtime',
+    );
   if (legacy && options.compact)
     throw new Error('Compact packages only support the current schema');
   if (options.compact && Number(process.versions.node.split('.')[0]) < 24)
@@ -119,10 +134,23 @@ function build(options = {}) {
     options.sourceCommit !== '9755d166e398f77baf52317f63ef36024037881d'
   )
     throw new Error('旧版源码必须显式固定为已知可连接旧 schema 的提交');
-  if (legacy) verifySourceSnapshot(sourceRoot, options.sourceCommit, root);
+  if (historical) verifySourceSnapshot(sourceRoot, options.sourceCommit, root);
   const sourceServer = path.join(sourceRoot, 'apps/server');
   const sourceWeb = path.join(sourceRoot, 'apps/web');
-  if (legacy) {
+  if (options.buildOnly) {
+    if (!options.outputRoot)
+      throw new Error('Build-only requires an explicit isolated output root');
+    for (const directory of [sourceRoot, sourceServer, sourceWeb])
+      for (const name of [
+        '.env',
+        '.env.local',
+        '.env.production',
+        '.env.production.local',
+      ])
+        if (fs.existsSync(path.join(directory, name)))
+          throw new Error('Build-only refuses private build environment files');
+  }
+  if (historical && !options.buildOnly) {
     // 旧源码留在忽略目录，只借用已安装依赖；不覆盖运行中的 dist、Client 或 DLL。
     for (const [local, installed] of [
       [path.join(sourceRoot, 'node_modules'), path.join(root, 'node_modules')],
@@ -194,8 +222,17 @@ function build(options = {}) {
     inputs['tools/wechat-desktop-collector/collect.ps1'] = fileHash(
       path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
     );
+  const extensionNames = [
+    '20261020100000_article_global_sort_index',
+    '20261020160000_local_body_search',
+  ];
+  if (options.searchRollback)
+    for (const name of extensionNames) {
+      const file = `apps/server/prisma/migrations/${name}/migration.sql`;
+      inputs[file] = fileHash(path.join(root, file));
+    }
   let currentCommit = null;
-  if (!legacy) {
+  {
     currentCommit = run('git', ['rev-parse', 'HEAD'], { cwd: root }).trim();
     const tree = run(
       'git',
@@ -219,7 +256,17 @@ function build(options = {}) {
         .update(bytes)
         .digest('hex');
     for (const file of Object.keys(inputs)) {
-      const content = fs.readFileSync(path.join(sourceRoot, file));
+      const tooling =
+        file.startsWith('scripts/local-release/') ||
+        (options.searchRollback &&
+          extensionNames.some(
+            (name) =>
+              file === `apps/server/prisma/migrations/${name}/migration.sql`,
+          ));
+      if (historical && !tooling) continue; // Pinned snapshot was verified in full above.
+      const content = fs.readFileSync(
+        path.join(tooling ? root : sourceRoot, file),
+      );
       const normalized = Buffer.from(
         content.toString('utf8').replace(/\r\n/g, '\n'),
       );
@@ -231,300 +278,425 @@ function build(options = {}) {
         throw new Error('Release input differs from committed source: ' + file);
     }
   }
-  const sourceHash = hash(JSON.stringify(inputs));
-  const reusable = buildBudget.findReusable(
-    path.join(root, '.local-releases'),
-    {
-      sourceHash,
-      sourceCommit: legacy ? options.sourceCommit : currentCommit,
-      nodeVersion: process.version,
-      runtimeSha256: fileHash(process.execPath),
-      schemaCompatibility: legacy ? 'legacy-additive' : 'current',
-      executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
-    },
+  const sourceHash = hash(
+    JSON.stringify({ inputs, searchRollback: options.searchRollback === true }),
   );
-  if (reusable) {
-    console.log(
-      JSON.stringify({
-        release: reusable.directory,
-        id: reusable.manifest.id,
+  if (options.plan && !options.buildOnly)
+    throw new Error('--plan requires --build-only');
+  const releaseRoot = options.buildOnly
+    ? fs.realpathSync.native(options.outputRoot)
+    : path.join(root, '.local-releases');
+  if (!options.buildOnly && options.outputRoot)
+    throw new Error('An output root requires --build-only');
+  const commands = options.buildOnly
+    ? ['prisma', 'typescript', 'vite'].map((name, i) => {
+        const file = path.join(
+          packageDir(name, name === 'vite' ? sourceWeb : server),
+          ['build/index.js', 'bin/tsc', 'bin/vite.js'][i],
+        );
+        return { path: file, sha256: fileHash(file) };
+      })
+    : [];
+  if (options.plan) {
+    const plan = {
+      phase: 'build-only',
+      buildOnly: {
+        sourceCommit: historical ? options.sourceCommit : currentCommit,
         sourceHash,
-        reused: true,
-        sourceCommit: reusable.manifest.sourceCommit,
-      }),
-    );
-    return reusable.directory;
+        outputRoot: releaseRoot,
+        runtimeSha256: fileHash(process.execPath),
+        commands,
+      },
+      reserveBytes: buildBudget.estimate(sourceServer),
+      runtimeCopies: 1,
+    };
+    console.log(JSON.stringify(plan));
+    return plan;
   }
-  const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
-  const release = path.join(root, '.local-releases', id);
-  const requestedBytes = buildBudget.estimate(sourceServer);
+  const reusable = buildBudget.findReusable(releaseRoot, {
+    sourceHash,
+    sourceCommit: historical ? options.sourceCommit : currentCommit,
+    nodeVersion: process.version,
+    runtimeSha256: fileHash(process.execPath),
+    schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+    executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
+  });
+  const requestedBytes = reusable ? 1 : buildBudget.estimate(sourceServer);
   const shared = require('./release-scope.cjs').open({
     kind: 'build',
-    root: path.dirname(release),
+    root: releaseRoot,
     reserveBytes: requestedBytes,
-    runtimeCopies: 1,
+    runtimeCopies: reusable ? 0 : 1,
+    buildOnly: options.buildOnly === true,
+    sourceCommit: historical ? options.sourceCommit : currentCommit,
+    sourceHash,
   });
-  let reservation;
-  let failure;
-  try {
-    reservation = buildBudget.begin(path.dirname(release), requestedBytes, {
-      shared,
-    });
-    reservation.create(release);
-    const target = path.join(release, 'server');
-    fs.mkdirSync(target);
-    const workspace = path.join(release, 'build');
-    fs.mkdirSync(workspace);
-    const client = path.join(target, 'node_modules/.store/generated-prisma');
-    const installed = packageDir('@prisma/client', server);
-    const originalClient = path.dirname(
-      require.resolve('.prisma/client', { paths: [installed] }),
-    );
-    const engine = path.join(originalClient, 'query_engine-windows.dll.node');
-    const schema = fs
-      .readFileSync(path.join(sourceServer, 'prisma/schema.prisma'), 'utf8')
-      .replace(
-        'provider      = "prisma-client-js"',
-        `provider = "node ${slash(path.join(installed, 'generator-build/index.js'))}"\n  output = "${slash(client)}"`,
-      )
-      .replace(
-        'binaryTargets = ["native", "linux-musl"]',
-        'binaryTargets = ["native"]',
-      );
-    fs.writeFileSync(path.join(workspace, 'schema.prisma'), schema);
-    const env = cleanEnvironment({
-      NODE_ENV: 'production',
-      PRISMA_GENERATE_SKIP_AUTOINSTALL: '1',
-    });
-    const cli = path.join(packageDir('prisma', server), 'build/index.js');
-    fs.writeFileSync(
-      path.join(workspace, 'generate.log'),
-      run(
-        process.execPath,
-        [cli, 'generate', '--schema', path.join(workspace, 'schema.prisma')],
-        { cwd: server, env: { ...env, PRISMA_QUERY_ENGINE_LIBRARY: engine } },
-      ),
-    );
-    if (
-      fileHash(path.join(client, 'query_engine-windows.dll.node')) !==
-      fileHash(engine)
-    )
-      throw new Error('生成的 Prisma 引擎与现有 Client 不匹配');
-    const paths = {
-      '@server/*': [slash(path.join(sourceServer, 'src/*'))],
-      '@wewe-rss/shared': [
-        slash(path.join(sourceRoot, 'packages/shared/src/index.ts')),
-      ],
-      '@prisma/client': [slash(client)],
-    };
-    const tsconfig = path.join(workspace, 'tsconfig.json');
-    writeJson(tsconfig, {
-      extends: slash(path.join(sourceServer, 'tsconfig.build.json')),
-      compilerOptions: {
-        paths,
-        typeRoots: [slash(path.join(server, 'node_modules/@types'))],
-        incremental: false,
-        sourceMap: false,
-        declaration: false,
-        outDir: slash(path.join(target, 'dist')),
-      },
-    });
-    const tsc = path.join(packageDir('typescript', server), 'bin/tsc');
-    reservation.check();
-    run(process.execPath, [tsc, '-p', tsconfig], { cwd: sourceServer, env });
-    const compiledRoot = path.join(target, 'dist/apps/server/src');
-    walk(path.join(target, 'dist'), (relative, kind) => {
-      if (kind !== 'file' || !relative.endsWith('.js')) return;
-      const file = path.join(target, 'dist', relative);
-      const rewritten = fs
-        .readFileSync(file, 'utf8')
-        .replace(
-          /require\(["'](@server\/[^"']+|@wewe-rss\/shared)["']\)/g,
-          (_, name) => {
-            const resolved =
-              name === '@wewe-rss/shared'
-                ? path.join(target, 'dist/packages/shared/src/index')
-                : path.join(compiledRoot, name.slice('@server/'.length));
-            let local = slash(path.relative(path.dirname(file), resolved));
-            if (!local.startsWith('.')) local = './' + local;
-            if (!fs.existsSync(resolved + '.js'))
-              throw new Error(`编译别名未找到: ${name}`);
-            return `require(${JSON.stringify(local)})`;
-          },
-        );
-      fs.writeFileSync(file, rewritten);
-    });
-    const web = sourceWeb;
-    const webConfig = path.join(workspace, 'tsconfig.web.json');
-    writeJson(webConfig, {
-      extends: slash(path.join(web, 'tsconfig.json')),
-      compilerOptions: {
-        paths: { ...paths, '@web/*': [slash(path.join(web, 'src/*'))] },
-        typeRoots: [
-          slash(path.join(web, 'node_modules/@types')),
-          slash(path.join(server, 'node_modules/@types')),
-        ],
-        incremental: false,
-      },
-    });
-    reservation.check();
-    run(process.execPath, [tsc, '-p', webConfig, '--noEmit'], {
-      cwd: web,
-      env,
-    });
-    if (legacy) {
-      fs.writeFileSync(
-        path.join(workspace, 'web.log'),
-        run(
-          process.execPath,
-          [
-            path.join(__dirname, 'build-legacy-web.cjs'),
-            sourceWeb,
-            path.join(target, 'client'),
-          ],
-          { cwd: root, env },
-        ),
-      );
-    } else {
-      fs.writeFileSync(
-        path.join(workspace, 'web.log'),
-        run(
-          process.execPath,
-          [
-            path.join(packageDir('vite', web), 'bin/vite.js'),
-            'build',
-            '--outDir',
-            path.join(target, 'client'),
-          ],
-          { cwd: web, env },
-        ),
-      );
-    }
-    reservation.check();
-    fs.cpSync(path.join(sourceServer, 'prisma'), path.join(target, 'prisma'), {
-      recursive: true,
-    });
-    if (legacy)
-      fs.cpSync(
-        path.join(server, 'prisma/migrations'),
-        path.join(release, 'known-migrations'),
-        { recursive: true },
-      );
-    fs.mkdirSync(path.join(target, 'scripts'));
-    for (const file of [
-      'backup-sqlite.py',
-      'backup-space-status.py',
-      'sqlite-retention-plan.py',
-      'periodic-lifecycle.py',
-      'query-retention-resources.ps1',
-      ...(legacy
-        ? []
-        : [
-            'sqlite-snapshot-guard.py',
-            'article_history.py',
-            'article_history_host.py',
-            'article-history-browser.cjs',
-            'article-history-runtime.cjs',
-            'article-history-resources.ps1',
-          ]),
-      'verify-preservation.py',
-      'watch-wechat2rss-cache.py',
-      'read-wechat2rss-cache.py',
-    ])
-      fs.copyFileSync(
-        path.join(server, 'scripts', file),
-        path.join(target, 'scripts', file),
-      );
-    fs.copyFileSync(
-      path.join(sourceServer, 'package.json'),
-      path.join(target, 'package.json'),
-    );
-    for (const file of [
-      'lib.cjs',
-      'runtime.cjs',
-      'engine-audit.cjs',
-      'inspect-sqlite.py',
-      'prepare-start.py',
-      'startup-sqlite.cjs',
-      'space-budget.cjs',
-      'startup-audit.cjs',
-      'offline-guard.cjs',
-    ])
-      fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
-    fs.mkdirSync(path.join(release, 'runtime'));
-    reservation.check();
-    fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
-    const compact = options.compact
-      ? bundleServer(target, sourceServer, sourceWeb)
-      : undefined;
-    reservation.check();
-    const dependencies = options.compact
-      ? compact.dependencies
-      : copyPackages(target, client, sourceServer, () => reservation.check());
-    // Historical rollback packages retain their own helper. Current packages
-    // contain no desktop collector code or executable.
-    if (legacy) {
-      const helperDir = path.join(release, 'tools/wechat-desktop-collector');
-      fs.mkdirSync(helperDir, { recursive: true });
-      fs.copyFileSync(
-        path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
-        path.join(helperDir, 'collect.ps1'),
-      );
-    }
-    const manifest = {
-      format: 1,
-      id,
-      createdAt: new Date().toISOString(),
-      platform: process.platform,
-      arch: process.arch,
-      nodeVersion: process.version,
-      sourceHash,
-      sourceCommit: legacy ? options.sourceCommit : currentCommit,
-      schemaCompatibility: legacy ? 'legacy-additive' : 'current',
-      startupInspection: legacy ? 'full' : 'schema-only-v1',
-      ...(compact
-        ? {
-            executionLayout: 'compact-cjs-v1',
-            startupPreparation: 'node-background-backup-v1',
-            compact,
-          }
-        : {}),
-      inputs,
-      prisma: {
-        clientVersion: readJson(path.join(installed, 'package.json')).version,
-        cliVersion: readJson(
-          path.join(packageDir('prisma', server), 'package.json'),
-        ).version,
-        engineSha256: fileHash(engine),
-        engineCommit: actualEngineCommit(engine),
-      },
-      dependencies,
-      desktopHelperIncluded: legacy,
-      ...fingerprint(release),
-    };
-    reservation.check();
-    writeJson(path.join(release, 'release.json'), manifest);
-    reservation.check();
-    console.log(
-      JSON.stringify({
-        release,
-        id,
-        sourceHash,
-        dependencies: dependencies.length,
-        files: Object.keys(manifest.files).length,
-      }),
-    );
-    return release;
-  } catch (error) {
-    failure = error;
-    throw error;
-  } finally {
+  return require('./lib.cjs').hostEffects.context.run(shared, () => {
+    let reservation;
+    let failure;
     try {
-      reservation?.finish(failure);
+      if (reusable) {
+        console.log(
+          JSON.stringify({
+            release: reusable.directory,
+            id: reusable.manifest.id,
+            sourceHash,
+            reused: true,
+            sourceCommit: reusable.manifest.sourceCommit,
+          }),
+        );
+        return reusable.directory;
+      }
+      const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
+      const release = path.join(releaseRoot, id);
+      reservation = buildBudget.begin(path.dirname(release), requestedBytes, {
+        shared,
+      });
+      reservation.create(release);
+      const target = path.join(release, 'server');
+      fs.mkdirSync(target);
+      const workspace = path.join(release, 'build');
+      fs.mkdirSync(workspace);
+      const temporary = path.join(workspace, 'tmp');
+      fs.mkdirSync(temporary);
+      const client = path.join(target, 'node_modules/.store/generated-prisma');
+      const installed = packageDir('@prisma/client', server);
+      const originalClient = path.dirname(
+        require.resolve('.prisma/client', { paths: [installed] }),
+      );
+      const engine = path.join(originalClient, 'query_engine-windows.dll.node');
+      const schema = fs
+        .readFileSync(path.join(sourceServer, 'prisma/schema.prisma'), 'utf8')
+        .replace(
+          'provider      = "prisma-client-js"',
+          `provider = "node ${slash(path.join(installed, 'generator-build/index.js'))}"\n  output = "${slash(client)}"`,
+        )
+        .replace(
+          'binaryTargets = ["native", "linux-musl"]',
+          'binaryTargets = ["native"]',
+        );
+      fs.writeFileSync(path.join(workspace, 'schema.prisma'), schema);
+      let env = cleanEnvironment({
+        NODE_ENV: 'production',
+        PRISMA_GENERATE_SKIP_AUTOINSTALL: '1',
+      });
+      if (options.buildOnly)
+        env = Object.fromEntries(
+          Object.entries(env).filter(([key]) =>
+            /^(?:PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP|USERPROFILE|LOCALAPPDATA|APPDATA|NODE_ENV|CHECKPOINT_DISABLE|PRISMA_HIDE_UPDATE_MESSAGE|PRISMA_GENERATE_SKIP_AUTOINSTALL)$/i.test(
+              key,
+            ),
+          ),
+        );
+      if (options.buildOnly)
+        Object.assign(env, {
+          TEMP: temporary,
+          TMP: temporary,
+          JITI_CACHE: 'false',
+        });
+      const cli = path.join(packageDir('prisma', server), 'build/index.js');
+      fs.writeFileSync(
+        path.join(workspace, 'generate.log'),
+        run(
+          process.execPath,
+          [cli, 'generate', '--schema', path.join(workspace, 'schema.prisma')],
+          { cwd: server, env: { ...env, PRISMA_QUERY_ENGINE_LIBRARY: engine } },
+        ),
+      );
+      if (
+        fileHash(path.join(client, 'query_engine-windows.dll.node')) !==
+        fileHash(engine)
+      )
+        throw new Error('生成的 Prisma 引擎与现有 Client 不匹配');
+      const paths = {
+        '@server/*': [slash(path.join(sourceServer, 'src/*'))],
+        '@wewe-rss/shared': [
+          slash(path.join(sourceRoot, 'packages/shared/src/index.ts')),
+        ],
+        '@prisma/client': [slash(client)],
+      };
+      const tsconfig = path.join(workspace, 'tsconfig.json');
+      writeJson(tsconfig, {
+        extends: slash(path.join(sourceServer, 'tsconfig.build.json')),
+        compilerOptions: {
+          paths,
+          typeRoots: [slash(path.join(server, 'node_modules/@types'))],
+          incremental: false,
+          sourceMap: false,
+          declaration: false,
+          outDir: slash(path.join(target, 'dist')),
+        },
+      });
+      const tsc = path.join(packageDir('typescript', server), 'bin/tsc');
+      reservation.check();
+      run(process.execPath, [tsc, '-p', tsconfig], { cwd: sourceServer, env });
+      const compiledRoot = path.join(target, 'dist/apps/server/src');
+      walk(path.join(target, 'dist'), (relative, kind) => {
+        if (kind !== 'file' || !relative.endsWith('.js')) return;
+        const file = path.join(target, 'dist', relative);
+        const rewritten = fs
+          .readFileSync(file, 'utf8')
+          .replace(
+            /require\(["'](@server\/[^"']+|@wewe-rss\/shared)["']\)/g,
+            (_, name) => {
+              const resolved =
+                name === '@wewe-rss/shared'
+                  ? path.join(target, 'dist/packages/shared/src/index')
+                  : path.join(compiledRoot, name.slice('@server/'.length));
+              let local = slash(path.relative(path.dirname(file), resolved));
+              if (!local.startsWith('.')) local = './' + local;
+              if (!fs.existsSync(resolved + '.js'))
+                throw new Error(`编译别名未找到: ${name}`);
+              return `require(${JSON.stringify(local)})`;
+            },
+          );
+        fs.writeFileSync(file, rewritten);
+      });
+      const web = sourceWeb;
+      const webConfig = path.join(workspace, 'tsconfig.web.json');
+      writeJson(webConfig, {
+        extends: slash(path.join(web, 'tsconfig.json')),
+        compilerOptions: {
+          paths: { ...paths, '@web/*': [slash(path.join(web, 'src/*'))] },
+          typeRoots: [
+            slash(path.join(web, 'node_modules/@types')),
+            slash(path.join(server, 'node_modules/@types')),
+          ],
+          incremental: false,
+        },
+      });
+      reservation.check();
+      run(process.execPath, [tsc, '-p', webConfig, '--noEmit'], {
+        cwd: web,
+        env,
+      });
+      if (legacy) {
+        fs.writeFileSync(
+          path.join(workspace, 'web.log'),
+          run(
+            process.execPath,
+            [
+              path.join(__dirname, 'build-legacy-web.cjs'),
+              sourceWeb,
+              path.join(target, 'client'),
+            ],
+            { cwd: root, env },
+          ),
+        );
+      } else {
+        const isolatedConfig = path.join(workspace, 'vite.config.mts');
+        if (options.buildOnly) {
+          let config = fs.readFileSync(
+            path.join(web, 'vite.config.ts'),
+            'utf8',
+          );
+          for (const anchor of [
+            "from 'vite'",
+            "from '@vitejs/plugin-react'",
+            'export default defineConfig({',
+            '__dirname',
+          ])
+            if (!config.includes(anchor))
+              throw new Error('Unsupported isolated Vite configuration');
+          config = config
+            .replace(
+              "from 'vite'",
+              'from ' +
+                JSON.stringify(
+                  slash(
+                    path.join(packageDir('vite', web), 'dist/node/index.js'),
+                  ),
+                ),
+            )
+            .replace(
+              "from '@vitejs/plugin-react'",
+              'from ' +
+                JSON.stringify(
+                  slash(
+                    require.resolve('@vitejs/plugin-react', { paths: [web] }),
+                  ),
+                ),
+            )
+            .replaceAll('__dirname', JSON.stringify(slash(web)))
+            .replace(
+              'export default defineConfig({',
+              `export default defineConfig({\n root: ${JSON.stringify(slash(web))},\n envDir: ${JSON.stringify(slash(workspace))},\n cacheDir: ${JSON.stringify(slash(path.join(workspace, '.vite')))},`,
+            );
+          fs.writeFileSync(isolatedConfig, config);
+        }
+        fs.writeFileSync(
+          path.join(workspace, 'web.log'),
+          run(
+            process.execPath,
+            [
+              path.join(packageDir('vite', web), 'bin/vite.js'),
+              'build',
+              ...(options.buildOnly ? ['--config', isolatedConfig] : []),
+              '--outDir',
+              path.join(target, 'client'),
+            ],
+            { cwd: web, env },
+          ),
+        );
+      }
+      reservation.check();
+      fs.cpSync(
+        path.join(sourceServer, 'prisma'),
+        path.join(target, 'prisma'),
+        {
+          recursive: true,
+        },
+      );
+      if (options.searchRollback) {
+        for (const name of [
+          '20261020100000_article_global_sort_index',
+          '20261020160000_local_body_search',
+        ])
+          fs.cpSync(
+            path.join(server, 'prisma/migrations', name),
+            path.join(target, 'prisma/migrations', name),
+            { recursive: true, errorOnExist: true, force: false },
+          );
+        writeJson(path.join(target, 'prisma/migrations/search-rollback.json'), {
+          format: 1,
+          baseSourceCommit: options.sourceCommit,
+          optionalMigration: '20261020160000_local_body_search',
+        });
+      }
+      if (legacy)
+        fs.cpSync(
+          path.join(server, 'prisma/migrations'),
+          path.join(release, 'known-migrations'),
+          { recursive: true },
+        );
+      fs.mkdirSync(path.join(target, 'scripts'));
+      for (const file of [
+        'backup-sqlite.py',
+        'backup-space-status.py',
+        'sqlite-retention-plan.py',
+        'periodic-lifecycle.py',
+        'query-retention-resources.ps1',
+        ...(legacy
+          ? []
+          : [
+              'sqlite-snapshot-guard.py',
+              'article_history.py',
+              'article_history_host.py',
+              'article-history-browser.cjs',
+              'article-history-runtime.cjs',
+              'article-history-resources.ps1',
+            ]),
+        'verify-preservation.py',
+        'watch-wechat2rss-cache.py',
+        'read-wechat2rss-cache.py',
+      ])
+        fs.copyFileSync(
+          path.join(server, 'scripts', file),
+          path.join(target, 'scripts', file),
+        );
+      fs.copyFileSync(
+        path.join(sourceServer, 'package.json'),
+        path.join(target, 'package.json'),
+      );
+      for (const file of [
+        'lib.cjs',
+        'runtime.cjs',
+        'engine-audit.cjs',
+        'inspect-sqlite.py',
+        'prepare-start.py',
+        'startup-sqlite.cjs',
+        'space-budget.cjs',
+        'startup-audit.cjs',
+        'offline-guard.cjs',
+      ])
+        fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
+      fs.mkdirSync(path.join(release, 'runtime'));
+      reservation.check();
+      fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
+      let compact;
+      const previousEnvironment = process.env;
+      try {
+        if (options.buildOnly) process.env = env;
+        compact = options.compact
+          ? bundleServer(target, sourceServer, sourceWeb)
+          : undefined;
+      } finally {
+        process.env = previousEnvironment;
+      }
+      reservation.check();
+      const dependencies = options.compact
+        ? compact.dependencies
+        : copyPackages(target, client, sourceServer, () => reservation.check());
+      // Historical rollback packages retain their own helper. Current packages
+      // contain no desktop collector code or executable.
+      if (legacy) {
+        const helperDir = path.join(release, 'tools/wechat-desktop-collector');
+        fs.mkdirSync(helperDir, { recursive: true });
+        fs.copyFileSync(
+          path.join(sourceRoot, 'tools/wechat-desktop-collector/collect.ps1'),
+          path.join(helperDir, 'collect.ps1'),
+        );
+      }
+      const manifest = {
+        format: 1,
+        id,
+        createdAt: new Date().toISOString(),
+        platform: process.platform,
+        arch: process.arch,
+        nodeVersion: process.version,
+        sourceHash,
+        ...(options.buildOnly ? { buildStage: 'build-only' } : {}),
+        sourceCommit: historical ? options.sourceCommit : currentCommit,
+        toolingCommit: currentCommit,
+        ...(options.searchRollback
+          ? { rollbackCompatibility: 'search-additive-21-v1' }
+          : {}),
+        schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+        startupInspection: legacy ? 'full' : 'schema-only-v1',
+        ...(compact
+          ? {
+              executionLayout: 'compact-cjs-v1',
+              startupPreparation: 'node-background-backup-v1',
+              compact,
+            }
+          : {}),
+        inputs,
+        prisma: {
+          clientVersion: readJson(path.join(installed, 'package.json')).version,
+          cliVersion: readJson(
+            path.join(packageDir('prisma', server), 'package.json'),
+          ).version,
+          engineSha256: fileHash(engine),
+          engineCommit: actualEngineCommit(engine),
+        },
+        dependencies,
+        desktopHelperIncluded: legacy,
+        ...fingerprint(release),
+      };
+      reservation.check();
+      writeJson(path.join(release, 'release.json'), manifest);
+      reservation.check();
+      console.log(
+        JSON.stringify({
+          release,
+          id,
+          sourceHash,
+          dependencies: dependencies.length,
+          files: Object.keys(manifest.files).length,
+        }),
+      );
+      return release;
+    } catch (error) {
+      failure = error;
+      throw error;
     } finally {
-      shared.close(failure);
+      try {
+        reservation?.finish(failure);
+      } finally {
+        shared.close(failure);
+      }
     }
-  }
+  });
 }
 
 if (require.main === module) {
@@ -534,12 +706,20 @@ if (require.main === module) {
         'source-root': { type: 'string' },
         'source-commit': { type: 'string' },
         compact: { type: 'boolean', default: false },
+        'build-only': { type: 'boolean', default: false },
+        'output-root': { type: 'string' },
+        'search-rollback': { type: 'boolean', default: false },
+        plan: { type: 'boolean', default: false },
       },
     });
     build({
       sourceRoot: values['source-root'],
       sourceCommit: values['source-commit'],
       compact: values.compact,
+      buildOnly: values['build-only'],
+      outputRoot: values['output-root'],
+      searchRollback: values['search-rollback'],
+      plan: values.plan,
     });
   } catch (error) {
     console.error(error.message);

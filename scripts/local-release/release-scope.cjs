@@ -118,7 +118,13 @@ function validateReferences(value, policy) {
     value.uncertainChildren.length
   )
     throw new Error('RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
-  if (
+  if (policy.phase === 'build-only') {
+    if (
+      value.compatibility?.stage !== 'build-only' ||
+      value.compatibility.verified !== false
+    )
+      throw new Error('RELEASE_SCOPE_BUILD_STAGE_REQUIRED');
+  } else if (
     value.compatibility?.verified !== true ||
     value.compatibility.businessDatabaseRestored !== false ||
     value.compatibility.proofSha256 !== policy.compatibilityProofSha256
@@ -223,7 +229,37 @@ function open(request, options = {}, boundOperation) {
       policy.exception.maxGrowthBytes !== policy.maxGrowthBytes)
   )
     throw new Error('RELEASE_SCOPE_BASELINE_EXCEPTION_NOT_APPROVED');
-  if (!/^[a-f0-9]{64}$/.test(policy.compatibilityProofSha256 || ''))
+  if (policy.phase !== undefined && policy.phase !== 'build-only')
+    throw new Error('RELEASE_SCOPE_PHASE_INVALID');
+  if (policy.phase === 'build-only') {
+    const spec = policy.buildOnly;
+    if (
+      request.kind !== 'build' ||
+      request.buildOnly !== true ||
+      request.transition ||
+      !spec ||
+      !/^[a-f0-9]{40}$/.test(spec.sourceCommit || '') ||
+      !/^[a-f0-9]{64}$/.test(spec.sourceHash || '') ||
+      !/^[a-f0-9]{64}$/.test(spec.runtimeSha256 || '') ||
+      spec.runtimeSha256 !== fileHash(process.execPath) ||
+      !Array.isArray(spec.commands) ||
+      spec.commands.length > 3 ||
+      spec.commands.some(
+        (c) =>
+          !path.isAbsolute(c.path) || !/^[a-f0-9]{64}$/.test(c.sha256 || ''),
+      ) ||
+      request.sourceCommit !== spec.sourceCommit ||
+      request.sourceHash !== spec.sourceHash ||
+      request.root !== spec.outputRoot ||
+      canonical(spec.outputRoot) !== spec.outputRoot ||
+      !policy.roots.some((r) => r.path === spec.outputRoot) ||
+      spec.outputRoot === path.resolve(__dirname, '../../.local-releases')
+    )
+      throw new Error('RELEASE_SCOPE_BUILD_ONLY_BINDING_REQUIRED');
+  } else if (
+    request.buildOnly ||
+    !/^[a-f0-9]{64}$/.test(policy.compatibilityProofSha256 || '')
+  )
     throw new Error('RELEASE_SCOPE_COMPATIBILITY_UNPROVEN');
   const checkRoots = (inspectPaths) => {
     for (let i = 0; i < inspectPaths.length; i++) {
@@ -268,6 +304,7 @@ function open(request, options = {}, boundOperation) {
   const useMetadata = verifier.limits.checkpointMode === 'identity-times-v1';
   let fullValidated = false;
   const verifiedOutputs = new Set();
+  const descriptors = new Set();
   const directory = policy.registryDirectory,
     lock = path.join(directory, policy.scopeId + '.lock'),
     ledger = path.join(directory, policy.scopeId + '.state.json');
@@ -318,6 +355,13 @@ function open(request, options = {}, boundOperation) {
     const value = query();
     verifier.assertBudget();
     const digest = validateReferences(value, policy);
+    if (
+      policy.phase === 'build-only' &&
+      value.records.some((r) =>
+        contains(policy.buildOnly.outputRoot, canonical(r.packagePath)),
+      )
+    )
+      throw new Error('RELEASE_SCOPE_BUILD_ROOT_REFERENCED');
     const stable = (v) =>
       v.records
         .filter((r) => !['processes', 'pointers'].includes(r.kind))
@@ -438,6 +482,11 @@ function open(request, options = {}, boundOperation) {
       const sentinel = ledger + '.adopted';
       if (present(sentinel))
         throw new Error('RELEASE_SCOPE_LEDGER_MISSING_REQUIRES_REVIEW');
+      if (
+        policy.phase === 'build-only' &&
+        fs.readdirSync(policy.buildOnly.outputRoot).length
+      )
+        throw new Error('RELEASE_SCOPE_BUILD_ROOT_NOT_EMPTY');
       prior = { format: 1, configSha, outputs: [], claim: null };
       const initial = verifier.scan(policy.roots);
       if (
@@ -500,6 +549,86 @@ function open(request, options = {}, boundOperation) {
       policy,
       check,
       assertWritable,
+      approveDescriptor(fd) {
+        descriptors.add(fd);
+      },
+      assertFileAccess(method, args, writing) {
+        if (policy.phase !== 'build-only') return;
+        if (method === 'close') descriptors.delete(args[0]);
+        const paths = ['copyFile', 'cp', 'symlink', 'link', 'rename'].includes(
+          method,
+        )
+          ? args.slice(0, 2)
+          : [args[0]];
+        for (const at of paths.filter((v) => typeof v === 'string'))
+          if (
+            /\.(?:db|sqlite|sqlite3)(?:-(?:wal|shm|journal))?$/i.test(at) ||
+            /(?:^|[\\/])(?:\.env(?:\..*)?|active\.json)$/i.test(at)
+          )
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_PRIVATE_INPUT_FORBIDDEN');
+        if (!writing || ['close', 'fsync', 'fdatasync'].includes(method))
+          return;
+        const destinations = ['copyFile', 'cp', 'symlink', 'link'].includes(
+          method,
+        )
+          ? [args[1]]
+          : method === 'rename'
+            ? args.slice(0, 2)
+            : [args[0]];
+        for (const value of destinations) {
+          if (typeof value !== 'string') {
+            if (typeof value === 'number' && descriptors.has(value)) continue;
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_DESCRIPTOR_FORBIDDEN');
+          }
+          const at = path.resolve(value),
+            buildRoot = policy.buildOnly.outputRoot;
+          if (at === path.join(buildRoot, '.build-budget.lock')) continue;
+          if (method === 'mkdir' && at === buildRoot && present(at)) continue;
+          const output = prior.outputs.find(
+            (row) =>
+              row.claim === claim.id && !row.complete && contains(row.path, at),
+          );
+          if (!output)
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_WRITE_OUTSIDE_OUTPUT');
+          if (
+            present(at) &&
+            (fs.lstatSync(at).isSymbolicLink() ||
+              !contains(output.path, canonical(at)))
+          )
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_WRITE_LINK_ESCAPE');
+          let ancestor = path.dirname(at);
+          while (!present(ancestor)) ancestor = path.dirname(ancestor);
+          if (!contains(buildRoot, canonical(ancestor)))
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_WRITE_LINK_ESCAPE');
+        }
+      },
+      assertBuildCommand(method, args) {
+        if (policy.phase !== 'build-only') return;
+        const [executable, argv, commandOptions] = args;
+        const pinned =
+          Array.isArray(argv) &&
+          policy.buildOnly.commands.find((c) => c.path === argv[0]);
+        if (
+          !['execFileSync', 'execFile', 'spawn', 'spawnSync'].includes(
+            method,
+          ) ||
+          commandOptions?.shell ||
+          executable !== process.execPath ||
+          !Array.isArray(argv) ||
+          !argv.length ||
+          !pinned ||
+          fileHash(pinned.path) !== pinned.sha256 ||
+          !/(?:[\\/]typescript[\\/]bin[\\/]tsc|[\\/]prisma[\\/]build[\\/]index\.js|[\\/]vite[\\/]bin[\\/]vite\.js)$/.test(
+            argv[0],
+          ) ||
+          argv.some((v) =>
+            /^(?:--database|--production|--rehearsal|--eval|-e|--require|-r)$/.test(
+              v,
+            ),
+          )
+        )
+          throw new Error('RELEASE_SCOPE_BUILD_ONLY_COMMAND_FORBIDDEN');
+      },
       assertOperation(nested, nestedOptions = {}) {
         owner();
         const at = nested.root ? canonical(nested.root) : undefined;
@@ -537,6 +666,8 @@ function open(request, options = {}, boundOperation) {
       },
       authorizePackage(folder) {
         owner();
+        if (policy.phase === 'build-only')
+          throw new Error('RELEASE_SCOPE_BUILD_ONLY_NO_INSTALL');
         const m = read(
           path.join(canonical(folder), 'release.json'),
           8 * 1024 ** 2,
