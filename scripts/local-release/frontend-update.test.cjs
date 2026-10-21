@@ -794,3 +794,37 @@ test('a companion that outlives its stopped parent is not killed or ignored', as
   assert(!killed.includes(111));
   assert.deepEqual(f.starts, []);
 });
+test('changed companion creation identity or executable pin rejects before side effects', async (t) => {
+  for (const field of ['pid', 'startUtc', 'executable', 'interpreter']) {
+    const f = await fixture(t),
+      writers = f.adapter.writers;
+    const proof = {
+      pid: 111,
+      startUtc: '2026-10-21T00:01:00Z',
+      executable: 'C:\\python\\python.exe',
+      interpreter: {
+        path: 'C:\\python\\python.exe',
+        sha256:
+          '467014615a5255aca450ae88100dd2caf887da87657f00e3c2171ec44a685aec',
+      },
+      parent: f.p.expected,
+    };
+    f.p.readOnlyCompanions = [proof];
+    const changed = {
+      ...proof,
+      [field]:
+        field === 'pid'
+          ? 112
+          : field === 'interpreter'
+            ? { ...proof.interpreter, sha256: '0'.repeat(64) }
+            : 'changed',
+    };
+    f.adapter.writers = async () => ({
+      ...(await writers()),
+      readOnlyCompanions: [changed],
+    });
+    await assert.rejects(update.apply(f.p, f.adapter), /STATE_CHANGED/);
+    assert.deepEqual(f.starts, []);
+    assert(!fs.existsSync(path.join(f.root, f.p.candidateId)));
+  }
+});

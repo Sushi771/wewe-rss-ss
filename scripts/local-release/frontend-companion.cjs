@@ -13,6 +13,8 @@ const PINS = Object.freeze({
   'sqlite-retention-plan.py':
     'c3b8fb2c679109b5cf2de3e5a0144eab7095ea4340f83682d9444031d6e02fd6',
 });
+const INTERPRETER_SHA256 =
+  '467014615a5255aca450ae88100dd2caf887da87657f00e3c2171ec44a685aec';
 const same = (a, b) =>
   String(a).replace(/\//g, '\\').toLowerCase() ===
   String(b).replace(/\//g, '\\').toLowerCase();
@@ -54,8 +56,23 @@ function recognize(item, args, parent, expected, { hashFile = fileHash } = {}) {
       'server/scripts/sqlite-snapshot-guard.py',
     );
   const offset = args[1] === '-u' ? 2 : 1;
+  // argv[0] is the original launch token (the installed app uses "python").
+  // The OS-observed absolute image plus its exact bytes establish the program;
+  // never resolve this token through PATH or trust its name as identity.
   assert(
-    same(args[0], item.ExecutablePath) && same(args[offset], script),
+    /^[a-z]:[\\/]/i.test(item.ExecutablePath || ''),
+    'COMPANION_INTERPRETER_PATH_UNPROVEN',
+  );
+  assert.equal(
+    hashFile(item.ExecutablePath),
+    INTERPRETER_SHA256,
+    'COMPANION_INTERPRETER_CHANGED',
+  );
+  const interpreter = { path: item.ExecutablePath, sha256: INTERPRETER_SHA256 };
+  assert(
+    (same(args[0], item.ExecutablePath) ||
+      (!!args[0] && !/[\\/:]/.test(args[0]))) &&
+      same(args[offset], script),
     'COMPANION_ENTRY_UNPROVEN',
   );
   const values = {};
@@ -101,6 +118,7 @@ function recognize(item, args, parent, expected, { hashFile = fileHash } = {}) {
     pid: item.ProcessId,
     startUtc: item.CreationDate,
     executable: item.ExecutablePath,
+    interpreter,
     commandLine: item.CommandLine,
     parent: { ...expected },
     files,
@@ -108,4 +126,4 @@ function recognize(item, args, parent, expected, { hashFile = fileHash } = {}) {
     connectionSemantics: 'reviewed mode=ro plus PRAGMA query_only=ON',
   };
 }
-module.exports = { recognize, PINS };
+module.exports = { recognize, PINS, INTERPRETER_SHA256 };
