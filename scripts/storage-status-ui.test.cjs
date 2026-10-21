@@ -189,6 +189,21 @@ test('actual provider gives one concise failed-operation toast with a details ac
     notices[1][1].description.props.error.message,
     'Other request failed',
   );
+  const uncertain = {
+    message: '未收到有效的下载任务回执。',
+    data: { httpStatus: 503 },
+  };
+  options[0].defaultOptions.mutations.onError(uncertain);
+  assert.equal(notices[2][0], '请求未完成，请查看状态和详情。');
+  assert(!/重试|重新提交/.test(notices[2][0]));
+  const diagnostic = notices[2][1].description.props.error;
+  assert.equal(diagnostic, uncertain);
+  assert.match(
+    loadActualTs('apps/web/src/utils/operation-message.ts').failureMessage(
+      diagnostic,
+    ),
+    /尚未确认.*避免重复操作/,
+  );
 });
 
 test('reading page removes only the implementation note and retains real filter/position controls', () => {

@@ -41,12 +41,12 @@ function reason(state: string, code?: string) {
   if (code === 'SUBSCRIPTION_PAUSED') return '本地订阅已停用，已有内容保留。';
   if (code === 'LEGACY_IDENTITY_UNVERIFIED')
     return '部分旧文章身份待核实，已隔离并保留旧正文。';
-  if (code === 'CACHE_READ_FAILED') return '内容读取未完成，请继续查看进度。';
+  if (code === 'CACHE_READ_FAILED') return '内容读取未完成，请查看任务详情。';
   if (code === 'CACHE_IMAGES_PENDING')
     return '订阅已保留，正文已同步；部分图片或视频尚未确认完整，正文和有效图片可保存。';
   return state === 'blocked'
     ? '本条处理已暂停，请核对原请求状态。'
-    : '本条读取或处理未完成，请继续查看进度。';
+    : '本条读取或处理未完成，请查看任务详情。';
 }
 
 /** Durable local progress only; the backend owns submission and sequencing. */
@@ -323,7 +323,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                 isLoading={acting === batch.batchId}
                 onPress={() => act(batch.batchId, 'resume')}
               >
-                继续查看进度
+                继续处理
               </Button>
             ))}
         </section>
@@ -382,7 +382,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
             >
               {feeds.find((feed) => feed.id === task.feedId)?.mpName ||
                 '未完成任务'}
-              · 继续查看进度
+              · 继续处理
             </Button>
           ))}
         </details>
@@ -444,7 +444,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                 isLoading={acting === batchId}
                 onPress={() => act(batchId, 'resume')}
               >
-                继续查看进度
+                继续处理
               </Button>
             ))}
             {exceptions
@@ -465,7 +465,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                     }
                   }}
                 >
-                  继续查看进度
+                  继续处理
                 </Button>
               ))}
           </ModalBody>

@@ -327,7 +327,7 @@ export default function ArticleDownload() {
     } catch (cause) {
       if (!controller.signal.aborted) {
         setError(cause instanceof Error ? cause.message : '保存失败。');
-        toast.error('公众号操作未完成，请重试或查看任务状态。');
+        toast.error('公众号操作未完成，请先核对任务状态和已保存内容。');
         if (cause instanceof ArticleDownloadRequestError)
           setVerification(cause.verification);
       }

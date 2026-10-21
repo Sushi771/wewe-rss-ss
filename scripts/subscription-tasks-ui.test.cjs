@@ -318,8 +318,7 @@ test('a historical failed single task keeps a collapsed recovery action without 
   const action = f
     .render()
     .nodes.find(
-      (n) =>
-        n.type === 'Button' && n.props.children?.includes('· 继续查看进度'),
+      (n) => n.type === 'Button' && n.props.children?.includes('· 继续处理'),
     );
   assert(action);
   let finish;
@@ -400,7 +399,7 @@ test('refresh and changed technical messages do not repeat an acknowledged failu
     reopened.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
     false,
   );
-  assert(reopened.button('继续查看进度'));
+  assert(reopened.button('继续处理'));
 });
 test('historical failure at mount is quiet and failed or cancelled work never counts as success', () => {
   const f = fixture([
@@ -487,7 +486,7 @@ test('blocked batch pauses automatic actions; explicit resume guards duplicate c
   assert.deepEqual(f.calls, []);
   let done;
   f.setResumeWait(new Promise((r) => (done = r)));
-  const press = f.button('继续查看进度').props.onPress;
+  const press = f.button('继续处理').props.onPress;
   const first = press();
   await press();
   assert.equal(

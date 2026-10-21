@@ -92,7 +92,8 @@ export default function XiaohongshuDownload() {
     try {
       await action(controller.signal);
     } catch (cause) {
-      if (!controller.signal.aborted) toast.error('小红书操作未完成，请重试。');
+      if (!controller.signal.aborted)
+        toast.error('小红书操作未完成，请先核对已保存内容和详情。');
       if (!controller.signal.aborted)
         setError(cause instanceof Error ? cause.message : '操作失败。');
     } finally {

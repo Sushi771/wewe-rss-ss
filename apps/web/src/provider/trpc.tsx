@@ -65,7 +65,7 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
                     },
                   });
                 } else {
-                  toast.error('请求未完成，请稍后重试。', {
+                  toast.error('请求未完成，请查看状态和详情。', {
                     description: <FailureNotice error={error} />,
                   });
                 }
@@ -91,7 +91,7 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
                     },
                   });
                 } else {
-                  toast.error('请求未完成，请稍后重试。', {
+                  toast.error('请求未完成，请查看状态和详情。', {
                     description: <FailureNotice error={error} />,
                   });
                 }

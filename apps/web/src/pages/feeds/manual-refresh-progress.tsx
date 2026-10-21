@@ -183,7 +183,7 @@ export default function ManualRefreshProgress({
           isDisabled={acting}
           onPress={() => void act('resume')}
         >
-          继续查看进度
+          继续处理
         </Button>
       )}
       {error && <p role="alert">{error}</p>}
