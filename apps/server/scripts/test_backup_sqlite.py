@@ -281,5 +281,63 @@ class BackupTests(unittest.TestCase):
             if not worker.stdin.closed: worker.stdin.close()
 
 
+
+
+class AdditiveIndexCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.old = sqlite3.connect(':memory:')
+        self.new = sqlite3.connect(':memory:')
+        self.addCleanup(self.old.close)
+        self.addCleanup(self.new.close)
+        schema = ('CREATE TABLE _prisma_migrations(migration_name TEXT,checksum TEXT,finished_at TEXT,rolled_back_at TEXT);'
+                  'CREATE TABLE articles(id INTEGER PRIMARY KEY,publish_time INTEGER,body TEXT,metric INTEGER);'
+                  "INSERT INTO articles VALUES(1,1,'preserved body',17);"
+                  'CREATE TABLE notes(id INTEGER PRIMARY KEY,body TEXT);'
+                  "INSERT INTO notes VALUES(1,'preserved note');")
+        for db in (self.old,self.new):
+            db.executescript(schema)
+        self.migration = '20261020100000_article_global_sort_index'
+        sql = (SCRIPT.parent.parent/'prisma/migrations'/self.migration/'migration.sql').read_bytes().replace(b'\r\n',b'\n')
+        import hashlib
+        self.new.executescript(sql.decode())
+        self.new.execute('INSERT INTO _prisma_migrations VALUES(?,?,?,NULL)',
+                         (self.migration,hashlib.sha256(sql).hexdigest(),'synthetic-finished'))
+
+    def covered(self):
+        from types import SimpleNamespace
+        budget = SimpleNamespace(used=0, maximum=1024**2, tick=lambda:None)
+        return backup.snapshot_covers(self.new,self.old,budget)
+
+    def test_exact_index_migration_keeps_all_old_durable_rows(self):
+        self.assertTrue(self.covered())
+        self.new.execute("INSERT INTO articles VALUES(2,2,'additional body',21)")
+        self.assertTrue(self.covered())
+
+    def test_index_exception_never_discards_changed_or_missing_durable_values(self):
+        for sql in ("UPDATE articles SET body='changed'", 'UPDATE articles SET metric=18',
+                    'DELETE FROM articles', "UPDATE notes SET body='changed'", 'DELETE FROM notes'):
+            with self.subTest(sql=sql):
+                self.new.execute('SAVEPOINT mutation')
+                self.new.execute(sql)
+                self.assertFalse(self.covered())
+                self.new.execute('ROLLBACK TO mutation');self.new.execute('RELEASE mutation')
+
+    def test_unverified_receipt_and_other_schema_drift_still_fail(self):
+        for sql in ("UPDATE _prisma_migrations SET checksum='wrong'",
+                    'UPDATE _prisma_migrations SET finished_at=NULL',
+                    "UPDATE _prisma_migrations SET rolled_back_at='synthetic'",
+                    'DELETE FROM _prisma_migrations',
+                    'CREATE INDEX unknown_index ON articles(body)',
+                    'CREATE TABLE unknown_state(id INTEGER)',
+                    'DROP INDEX articles_publish_time_id_idx; CREATE INDEX articles_publish_time_id_idx ON articles(id,publish_time)'):
+            with self.subTest(sql=sql):
+                # DDL stays in the owned in-memory savepoint.
+                self.new.execute('SAVEPOINT mutation')
+                for statement in sql.split(';'):
+                    if statement.strip():self.new.execute(statement)
+                self.assertFalse(self.covered())
+                self.new.execute('ROLLBACK TO mutation');self.new.execute('RELEASE mutation')
+
+
 if __name__ == "__main__":
     unittest.main()
