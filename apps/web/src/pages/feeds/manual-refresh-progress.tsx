@@ -119,7 +119,7 @@ export default function ManualRefreshProgress({
         : batch.coverage.pending
           ? '等待完成'
           : batch.coverage.legitimateSkipped || batch.coverage.excluded
-            ? '含已跳过'
+            ? '部分订阅已跳过'
             : '需核对'
     : batch.state === 'paused'
       ? '已暂停'

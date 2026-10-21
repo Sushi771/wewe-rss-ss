@@ -262,6 +262,6 @@ test('an unexplained terminal gap is not invented as a legal skip or a full succ
     },
   });
   assert(f.progress.props.label.includes('需核对'));
-  assert(!f.progress.props.label.includes('含已跳过'));
+  assert(!f.progress.props.label.includes('部分订阅已跳过'));
   assert(!f.progress.props.label.includes('已全部更新'));
 });
