@@ -30,6 +30,15 @@ continue to be checked. Existing synthetic migration fixtures use the tested
 SQLite statement splitter because trigger bodies contain semicolons; no old
 business or audit assertions are removed.
 
+Windows lifecycle CI uses the installed, frozen Node 24.11.1 runtime. The
+floating Node 24 job resolved to 24.22.0 and refused copying into an already
+reserved empty directory before the original lifecycle assertions ran. The
+unchanged 21-test installer suite passes locally on 24.11.1. This pins the
+supported release target; it does not claim compatibility with newer runtimes
+or change any installer/release guard to accommodate them. The existing list
+HTTP fixture also accepts authenticated POST preparation, matching the main
+search fixture while retaining pagination and fault-injection assertions.
+
 Release checks use fresh synthetic databases, exact source/package identities
 and a controlled single-writer transition. The user authorized in-place
 additive migration and local extraction but prohibited whole-database copies.

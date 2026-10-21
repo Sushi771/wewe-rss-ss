@@ -122,6 +122,7 @@ test(
       const service = new TrpcService(prisma, config, {}, {});
       const router = new TrpcRouter(service, prisma, config, {}, {}).appRouter;
       const application = express();
+      application.use(express.json());
       const requests = [];
       let phase = 'summary-held',
         failNext = false,
@@ -153,7 +154,7 @@ test(
             sqlStart: sql.length,
           };
           requests.push(record);
-          assert.equal(req.method, 'GET');
+          assert(['GET', 'POST'].includes(req.method));
           assert.equal(req.headers.authorization, 'synthetic');
           res.once('finish', () => {
             record.ms = epoch() - record.start;
