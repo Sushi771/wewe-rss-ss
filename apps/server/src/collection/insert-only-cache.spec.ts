@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import * as registry from './provider-registry';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -69,8 +70,7 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
     tryInsertOnlyCachedPage(prisma, expected, page, listOnly);
   const initSql = async (file: string) => {
     const sql = await fs.readFile(file, 'utf8');
-    for (const statement of sql
-      .split(';')
+    for (const statement of splitSqliteStatements(sql)
       .map((s) => s.trim())
       .filter(Boolean))
       await prisma.$executeRawUnsafe(statement);

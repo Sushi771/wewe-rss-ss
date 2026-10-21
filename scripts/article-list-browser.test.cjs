@@ -1,4 +1,5 @@
-'use strict';
+const { splitSqliteStatements } = require('./sqlite-statements.cjs');
+('use strict');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -76,12 +77,12 @@ test(
         .readdirSync(path.join(server, 'prisma/migrations'))
         .filter((n) => /^\d/.test(n))
         .sort())
-        for (const statement of fs
-          .readFileSync(
+        for (const statement of splitSqliteStatements(
+          fs.readFileSync(
             path.join(server, 'prisma/migrations', migration, 'migration.sql'),
             'utf8',
-          )
-          .split(';')
+          ),
+        )
           .map((s) => s.trim())
           .filter(Boolean))
           await prisma.$executeRawUnsafe(statement);
@@ -121,6 +122,7 @@ test(
       const service = new TrpcService(prisma, config, {}, {});
       const router = new TrpcRouter(service, prisma, config, {}, {}).appRouter;
       const application = express();
+      application.use(express.json());
       const requests = [];
       let phase = 'summary-held',
         failNext = false,
@@ -152,7 +154,7 @@ test(
             sqlStart: sql.length,
           };
           requests.push(record);
-          assert.equal(req.method, 'GET');
+          assert(['GET', 'POST'].includes(req.method));
           assert.equal(req.headers.authorization, 'synthetic');
           res.once('finish', () => {
             record.ms = epoch() - record.start;

@@ -56,6 +56,16 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
         # Prisma 接受 Git 在 Windows checkout 中转换换行；内容改变仍拒绝。
         lf = content.replace(b"\r\n", b"\n")
         expected[directory.name] = {hashlib.sha256(data).hexdigest() for data in (content, lf, lf.replace(b"\n", b"\r\n"))}
+    search = "20261020160000_local_body_search"
+    optional_search = (migrations / "search-rollback.json").exists()
+    if optional_search:
+        marker = json.loads((migrations / "search-rollback.json").read_text(encoding="utf-8"))
+        source = marker.get("baseSourceCommit")
+        if source not in ("48fdf73f4d770001bbb6de3e2383189811e56ccb", "f618e48f48ff0e3df1c646cb8a666a2461815732") or marker != {"format": 1, "baseSourceCommit": source, "optionalMigration": search}:
+            raise ValueError("Rollback marker changed")
+        inventory = [[name, hashlib.sha256((migrations / name / "migration.sql").read_bytes().replace(b"\r\n", b"\n")).hexdigest()] for name in expected if name != search]
+        if digest(inventory) != "952c507616467fb5b9d428e1a54a4d09ef4257be03c07654a34956bf2edb6c76" or "ff72e5e104374f9ce6b45ef8a9b0320a8bc310a26a447a33f2e4636cf2c36fad" not in expected.get(search, set()):
+            raise ValueError("Rollback migrations changed")
     applied = set()
     for name, checksum, finished, rolled_back in connection.execute(
         "SELECT migration_name,checksum,finished_at,rolled_back_at FROM _prisma_migrations"
@@ -65,7 +75,7 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
         if finished is None or name not in expected or checksum not in expected[name] or name in applied:
             raise ValueError("迁移记录未完成、未知、重复或校验和不符: " + name)
         applied.add(name)
-    pending = sorted(set(expected) - applied)
+    pending = sorted(set(expected) - applied - ({search} if optional_search else set()))
     if require_current and pending:
         raise ValueError("数据库尚未迁移: " + ", ".join(pending))
     tables = {}
@@ -115,6 +125,15 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
                 count = connection.execute(f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" IS NOT NULL').fetchone()[0]
                 if count:
                     raise ValueError("迁移给旧行填入了非 null 值: " + column)
+    if optional_search or (require_current and search in expected):
+        with closing(sqlite3.connect(":memory:")) as reference:
+            for name in expected:
+                if optional_search and name == search and name not in applied:
+                    continue
+                reference.executescript((migrations / name / "migration.sql").read_text(encoding="utf-8"))
+            query = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name <> '_prisma_migrations' ORDER BY type,name"
+            if [[v.replace("\r\n", "\n") if isinstance(v, str) else v for v in row] for row in connection.execute(query)] != [[v.replace("\r\n", "\n") if isinstance(v, str) else v for v in row] for row in reference.execute(query)]:
+                raise ValueError("Unreviewed schema object or SQL drift")
     return {"database": str(database), "integrity": "ok", "pending": pending, "applied": sorted(applied), "tables": tables}
 
 

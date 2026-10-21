@@ -8,6 +8,7 @@ const ts = require(
 );
 const pins = require('./fixtures/deployed-export-adaptation.json');
 const copyPins = require('./fixtures/product-copy-layout.json');
+const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
 function tokens(text) {
@@ -23,6 +24,17 @@ function tokens(text) {
   return hash(result.join('\0'));
 }
 test('deployment baseline keeps existing routes and safety/startup/reader/title policies', () => {
+  assert.deepEqual(Object.keys(searchPins.criticalFiles).sort(), [
+    'apps/server/src/article-body-search.ts',
+    'apps/server/src/article-list-page.ts',
+  ]);
+  assert.deepEqual(Object.keys(searchPins.articleRoutes).sort(), [
+    'exportIds',
+    'list',
+    'prepareSearch',
+    'searchStatus',
+    'summary',
+  ]);
   const file = 'apps/server/src/trpc/trpc.router.ts';
   const ast = ts.createSourceFile(
     file,
@@ -48,9 +60,25 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     }
   }
   assert.deepEqual(members, pins.routerMembers);
-  assert.deepEqual(routes, pins.articleRoutes);
-  for (const [file, expected] of Object.entries(pins.criticalFiles))
-    assert.equal(hash(read(file)), expected, file);
+  assert.deepEqual(routes, {
+    ...pins.articleRoutes,
+    ...searchPins.articleRoutes,
+  });
+  for (const [file, expected] of Object.entries({
+    ...pins.criticalFiles,
+    ...searchPins.criticalFiles,
+  })) {
+    let source = read(file);
+    if (file === 'scripts/local-release/runtime.cjs') {
+      // The separately tested release scope adds exactly one entry guard. Keep
+      // every pre-existing runtime statement pinned to its deployed baseline.
+      const guarded =
+        "async function runtime() {\n  require('./lib.cjs').hostEffects.assertRuntime();\n";
+      assert.equal(source.split(guarded).length, 2);
+      source = source.replace(guarded, 'async function runtime() {\n');
+    }
+    assert.equal(hash(source), expected, file);
+  }
   // Export conversion now reuses its current DOM. Pin all other conversion
   // statements and the uncertainty predicate to the deployed source semantics.
   const conversion = ts.createSourceFile(

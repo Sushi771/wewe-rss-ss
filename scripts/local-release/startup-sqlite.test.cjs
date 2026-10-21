@@ -407,3 +407,132 @@ test('reuse rejects a WAL commit after pinned equality even with frozen source m
     writer.close();
   }
 });
+
+const searchMigration = '20261020160000_local_body_search';
+function rollbackFixture(
+  t,
+  schema21 = true,
+  baseSourceCommit = '48fdf73f4d770001bbb6de3e2383189811e56ccb',
+) {
+  const f = fixture(t, { current: true });
+  fs.writeFileSync(
+    path.join(f.migrations, 'search-rollback.json'),
+    JSON.stringify({
+      format: 1,
+      baseSourceCommit,
+      optionalMigration: searchMigration,
+    }),
+  );
+  if (!schema21) {
+    const db = new sqlite.DatabaseSync(f.database);
+    db.exec(
+      'DROP TRIGGER article_search_insert; DROP TRIGGER article_search_body_update; DROP TRIGGER article_search_delete; DROP TABLE article_search_documents',
+    );
+    db.prepare('DELETE FROM _prisma_migrations WHERE migration_name=?').run(
+      searchMigration,
+    );
+    db.close();
+  }
+  return f;
+}
+for (const schema21 of [false, true])
+  for (const source of [
+    '48fdf73f4d770001bbb6de3e2383189811e56ccb',
+    'f618e48f48ff0e3df1c646cb8a666a2461815732',
+  ])
+    test(
+      'strict rollback accepts schema' +
+        (schema21 ? 21 : 20) +
+        ' through native and Python gates for ' +
+        source.slice(0, 8),
+      (t) => {
+        const f = rollbackFixture(t, schema21, source),
+          before = fs.readFileSync(f.database);
+        assert.deepEqual(
+          inspectDatabase(f.database, f.migrations, { startupGate: true })
+            .pending,
+          [],
+        );
+        assert.deepEqual(pythonInspect(f.database, f.migrations).pending, []);
+        assert.deepEqual(fs.readFileSync(f.database), before);
+      },
+    );
+for (const [name, sql] of [
+  [
+    'unknown migration',
+    "INSERT INTO _prisma_migrations VALUES('future-danger','bad',1,NULL)",
+  ],
+  [
+    'changed migration',
+    "UPDATE _prisma_migrations SET checksum='bad' WHERE migration_name='20261020160000_local_body_search'",
+  ],
+  [
+    'unfinished migration',
+    "UPDATE _prisma_migrations SET finished_at=NULL WHERE migration_name='20261020160000_local_body_search'",
+  ],
+  [
+    'duplicate migration',
+    "INSERT INTO _prisma_migrations SELECT * FROM _prisma_migrations WHERE migration_name='20261020160000_local_body_search'",
+  ],
+  ['unknown table', 'CREATE TABLE future_business(id TEXT)'],
+  ['unknown view', 'CREATE VIEW future_view AS SELECT id FROM articles'],
+  [
+    'changed trigger',
+    'DROP TRIGGER article_search_delete; CREATE TRIGGER article_search_delete AFTER DELETE ON articles BEGIN DELETE FROM articles; END',
+  ],
+  [
+    'changed partial index',
+    'DROP INDEX article_search_cached_idx; CREATE INDEX article_search_cached_idx ON article_search_documents(body_cached) WHERE pending=0',
+  ],
+])
+  test('strict rollback rejects ' + name + ' in both inspectors', (t) => {
+    const f = rollbackFixture(t),
+      db = new sqlite.DatabaseSync(f.database);
+    db.exec(sql);
+    db.close();
+    assert.throws(
+      () => inspectDatabase(f.database, f.migrations, { startupGate: true }),
+      /migration|schema|drift/i,
+    );
+    assert.throws(
+      () => pythonInspect(f.database, f.migrations),
+      /migration|schema|drift/i,
+    );
+  });
+test('rollback cannot widen the optional extension to an unreviewed base or SQL', (t) => {
+  const f = rollbackFixture(t);
+  fs.appendFileSync(
+    path.join(f.migrations, searchMigration, 'migration.sql'),
+    '\nCREATE TABLE dangerous(id TEXT);',
+  );
+  assert.throws(
+    () => inspectDatabase(f.database, f.migrations, { startupGate: true }),
+    /search migration changed/,
+  );
+  assert.throws(
+    () => pythonInspect(f.database, f.migrations),
+    /Rollback migrations changed/,
+  );
+});
+test('rollback rejects an unreviewed source and extra marker fields in both inspectors', (t) => {
+  const f = rollbackFixture(
+    t,
+    true,
+    'f618e48f48ff0e3df1c646cb8a666a2461815732',
+  );
+  const markerPath = path.join(f.migrations, 'search-rollback.json');
+  const approved = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  for (const marker of [
+    { ...approved, baseSourceCommit: '0'.repeat(40) },
+    { ...approved, allowFutureMigrations: true },
+  ]) {
+    fs.writeFileSync(markerPath, JSON.stringify(marker));
+    assert.throws(() =>
+      inspectDatabase(f.database, f.migrations, { startupGate: true }),
+    );
+    assert.throws(
+      () => pythonInspect(f.database, f.migrations),
+      /Rollback marker changed/,
+    );
+  }
+});

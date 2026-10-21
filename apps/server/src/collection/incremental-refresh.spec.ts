@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import {
   incrementalWrite,
   assertIncrementalTransaction,
@@ -87,8 +88,7 @@ describe('ordinary incremental transactions and durable remote claims without sn
       const sql = await fs
         .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
         .catch(() => '');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

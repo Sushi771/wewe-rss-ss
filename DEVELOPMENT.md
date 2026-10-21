@@ -46,6 +46,11 @@ Use `pnpm` to run these common tasks:
 
 ## Quality Gates
 
+Release-tool changes must also follow [isolated build and strict search rollback](docs/ISOLATED_RELEASE_BUILD.md).
+Passing gate tests or CI does not establish that a frozen rollback package starts
+after migration21; the actual synthetic upgrade/application rollback remains a
+separate acceptance requirement.
+
 - **Pre-commit**: `lint-staged` and `husky` will automatically format your code.
 - **CI**: Every PR to `main` is checked for linting and build success.
 

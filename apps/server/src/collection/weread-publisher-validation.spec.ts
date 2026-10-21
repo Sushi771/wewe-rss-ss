@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import axios from 'axios';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -735,8 +736,9 @@ describe('publisher candidate directory: offline transport and success-only bind
       for (const child of (await fs.readdir(migrations)).sort()) {
         const file = path.join(migrations, child, 'migration.sql');
         try {
-          for (const sql of (await fs.readFile(file, 'utf8'))
-            .split(';')
+          for (const sql of splitSqliteStatements(
+            await fs.readFile(file, 'utf8'),
+          )
             .map((x) => x.trim())
             .filter(Boolean))
             await prisma.$executeRawUnsafe(sql);

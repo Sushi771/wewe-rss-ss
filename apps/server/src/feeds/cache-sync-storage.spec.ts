@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -64,8 +65,7 @@ describe('cache delta through original SQLite merge', () => {
     for (const name of (await fs.readdir(directory)).sort()) {
       const file = path.join(directory, name, 'migration.sql');
       const sql = await fs.readFile(file, 'utf8').catch(() => '');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((row) => row.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

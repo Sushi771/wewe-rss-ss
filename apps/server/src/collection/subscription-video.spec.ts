@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -191,8 +192,7 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
         join(migrations, name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);
