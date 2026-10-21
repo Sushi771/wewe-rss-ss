@@ -17,6 +17,7 @@ import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
 import { refreshCreatorBatch } from '@web/utils/xiaohongshu-refresh';
+import { failureMessage } from '@web/utils/operation-message';
 
 type SaveSettings = { directory: string; askEveryTime: boolean };
 type DirectoryChoice = SaveSettings & {
@@ -64,6 +65,7 @@ export default function Xiaohongshu() {
   const [displayName, setDisplayName] = useState('');
   const [profileUrl, setProfileUrl] = useState('');
   const [message, setMessage] = useState('');
+  const [operationError, setOperationError] = useState('');
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [managing, setManaging] = useState(false);
@@ -134,8 +136,8 @@ export default function Xiaohongshu() {
   }) =>
     note.status === 'complete'
       ? note.kind === 'video'
-        ? '视频缓存（结构字节已核，未解码/播放）'
-        : '图文缓存'
+        ? '视频已保存（播放未验证）'
+        : '图文已保存'
       : note.kind === 'video' || note.status === 'video-skipped'
         ? '视频未归档'
         : '正文或图片未归档';
@@ -166,15 +168,15 @@ export default function Xiaohongshu() {
     active.current = true;
     setBusy(true);
     setMessage('');
+    setOperationError('');
     try {
       await operation();
     } catch (cause) {
       setMessage(
-        '操作未完成；既有归档保留。' +
-          (cause instanceof Error
-            ? cause.message
-            : '请核对数据源或本地保存状态。'),
+        failureMessage(cause, '操作未完成，请检查服务设置或本机保存目录。') +
+          '已有归档保留。',
       );
+      setOperationError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       active.current = false;
       setBusy(false);
@@ -209,7 +211,7 @@ export default function Xiaohongshu() {
       creators.data?.items.find((creator) => creator.id === id)?.displayName ||
       '已选博主';
     receipts.current[id] =
-      name + '：' + result.message + ' 新增完整缓存笔记：' + result.added;
+      name + '：' + result.message + ' 新增已完整保存的笔记：' + result.added;
     await Promise.all([
       utils.xiaohongshu.list.invalidate(),
       utils.xiaohongshu.notes.invalidate(),
@@ -270,7 +272,7 @@ export default function Xiaohongshu() {
         URL.revokeObjectURL(url);
       }
       setMessage(
-        `${current.displayName}：已导出选中的 ${result.notes} 篇完整缓存笔记 ZIP。`,
+        `${current.displayName}：已导出选中的 ${result.notes} 篇已完整保存的笔记 ZIP。`,
       );
     });
   const handleLocalSave = () =>
@@ -326,7 +328,7 @@ export default function Xiaohongshu() {
       )
         throw new Error('本机视频保存数量或核验状态未确认，请核对已保存内容。');
       setMessage(
-        `${current.displayName}：本次新增保存 ${result.savedCount} 篇，已有保存 ${result.alreadySavedCount} 篇；每篇独立目录保存正文与 image 图片（有图时）。${videoCount > 0 ? `其中 ${videoCount} 篇含已归档 video 文件（含已有保存）；视频结构字节已核，尚未解码或播放。` : '本批次不含已归档视频。'}`,
+        `${current.displayName}：本次新增保存 ${result.savedCount} 篇，已有保存 ${result.alreadySavedCount} 篇；每篇正文和图片保存在各自的文件夹。${videoCount > 0 ? `其中 ${videoCount} 篇包含视频文件；请在本机确认能否播放。` : '本批次不含已归档视频。'}`,
       );
     });
   const handleChooseDirectory = () =>
@@ -660,16 +662,32 @@ export default function Xiaohongshu() {
         <div className="space-y-2 border-b border-neutral-200 px-4 py-3 text-sm dark:border-neutral-700">
           <p role="status">
             {capability.error
-              ? '来源状态查询失败，未自动更新。'
-              : capability.data?.message || '正在确认来源状态…'}
+              ? '更新状态读取失败，请稍后重试。'
+              : capability.data
+                ? capability.data.canRefresh
+                  ? '可以更新笔记。'
+                  : '尚未连接可用来源，暂时无法更新笔记。'
+                : '正在确认更新状态…'}
           </p>
+          {capability.data?.message && (
+            <details>
+              <summary>查看来源详情</summary>
+              <p>{capability.data.message}</p>
+            </details>
+          )}
           <p className="text-xs text-neutral-500">
-            添加博主只保存待接入记录。完整视频缓存仅核验结构与字节，尚未解码或播放；未取得视频仍显示“视频未归档”。
+            添加博主后需连接可用来源才能更新。已保存视频仍需确认能否播放；未取得的视频会标为“视频未归档”。
           </p>
           {message && (
             <p role="status" className="break-words">
               {message}
             </p>
+          )}
+          {operationError && (
+            <details>
+              <summary>查看错误详情</summary>
+              <p className="break-words">{operationError}</p>
+            </details>
           )}
           <details>
             <summary className="cursor-pointer break-all text-neutral-500">
@@ -736,7 +754,7 @@ export default function Xiaohongshu() {
         )}
         <div className="px-4 py-2 text-xs text-neutral-500">
           当前{search ? '筛选' : '博主'} {visibleNotes.length} 篇；已选择{' '}
-          {selectedNotes.length} 篇完整缓存笔记。
+          {selectedNotes.length} 篇已完整保存的笔记。
           {search && '修改搜索会清空选择。'}
         </div>
         {notes.error && (
@@ -883,20 +901,19 @@ export default function Xiaohongshu() {
           </ModalHeader>
           <ModalBody>
             <p className="text-sm text-neutral-500">
-              读取已归档正文与图片；视频笔记仅显示正文和封面，本次没有联网取文或加载视频。
+              这里可阅读已保存的正文和图片；视频笔记仅显示封面。
             </p>
             {body.isLoading ? (
               <Spinner />
             ) : body.error ? (
-              <p role="alert">正文未能读取，未向远端请求图片。</p>
+              <p role="alert">正文读取失败，请稍后重试。</p>
             ) : (
               body.data && (
                 <article className="space-y-3">
                   {body.data.kind === 'video' && body.data.video && (
                     <p className="text-sm text-neutral-500">
                       已缓存视频 {body.data.video.bytes.toLocaleString()}{' '}
-                      字节，结构字节已核，尚未解码或播放。保存到本机会包含
-                      video/ 文件；本页不加载视频字节。
+                      字节。播放尚未验证，请保存到本机后检查。
                     </p>
                   )}
                   <p className="whitespace-pre-wrap break-words">

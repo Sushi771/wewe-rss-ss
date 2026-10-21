@@ -119,7 +119,7 @@ export default function ManualRefreshProgress({
         : batch.coverage.pending
           ? '等待完成'
           : batch.coverage.legitimateSkipped || batch.coverage.excluded
-            ? '含合法跳过'
+            ? '部分订阅已跳过'
             : '需核对'
     : batch.state === 'paused'
       ? '已暂停'
@@ -155,11 +155,11 @@ export default function ManualRefreshProgress({
           size="sm"
           value={batch.coverage ? batch.coverage.completed : accepted}
           maxValue={batch.items.length}
-          aria-label="上游更新受理数量"
+          aria-label="已开始更新的订阅数量"
           label={
             batch.coverage
               ? `已完成 ${batch.coverage.completed}/${batch.coverage.expected} · ${status}`
-              : `共 ${batch.items.length} 个 · 排队 ${queued} · 上游已受理 ${accepted} · 缓存已同步 ${synced} · ${status}`
+              : `共 ${batch.items.length} 个 · 排队 ${queued} · 已开始 ${accepted} · 内容已同步 ${synced} · ${status}`
           }
         />
       )}
@@ -183,7 +183,7 @@ export default function ManualRefreshProgress({
           isDisabled={acting}
           onPress={() => void act('resume')}
         >
-          继续检查缓存
+          继续处理
         </Button>
       )}
       {error && <p role="alert">{error}</p>}
@@ -197,7 +197,7 @@ export default function ManualRefreshProgress({
         </summary>
         {batch.coverage && (
           <p>
-            {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 合法跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
+            {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 已跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
             {fullySuccessful ? '本轮全部更新完成。' : '本轮尚未全部更新完成。'}
           </p>
         )}
@@ -210,13 +210,13 @@ export default function ManualRefreshProgress({
               {item.state === 'queued'
                 ? '排队，尚未发送'
                 : item.state === 'submitting'
-                  ? '正在提交，回执待确认'
+                  ? '正在开始，结果待确认'
                   : item.state === 'cancelled'
                     ? '已取消，未发送'
                     : item.state === 'succeeded'
-                      ? '缓存已同步'
+                      ? '内容已同步'
                       : item.state === 'waiting'
-                        ? '等待缓存'
+                        ? '等待内容同步'
                         : '检查未完成'}
             </li>
           ))}

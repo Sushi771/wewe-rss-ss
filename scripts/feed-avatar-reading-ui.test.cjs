@@ -53,6 +53,15 @@ function load(file, modules) {
     module,
     exports: module.exports,
     require: (name) => {
+      if (name === '@web/components/OperationNotice')
+        return {
+          __esModule: true,
+          default: 'OperationNotice',
+          FailureNotice: 'FailureNotice',
+        };
+      if (name === '@web/components/ArticleSearchStatus')
+        return { __esModule: true, default: 'ArticleSearchStatus' };
+
       if (name === '@web/utils/feed-selection') return selection;
       if (name === '@web/utils/article-body-state')
         return loadActualTs('apps/web/src/utils/article-body-state.ts');
@@ -143,6 +152,10 @@ function readingFixture(cached) {
   const trpc = {
     useUtils: () => ({}),
     article: {
+      searchStatus: {
+        useQuery: () => ({ data: { total: 0, pending: 0, uncached: 0 } }),
+      },
+      prepareSearch: { useMutation: () => ({ mutateAsync: async () => ({}) }) },
       byId: {
         useQuery: (id, options) => {
           readInput = { id, options };
@@ -208,10 +221,12 @@ test('cached title remains a keyboard-focusable reading link without a duplicate
   const view = f.render();
   assert(!text(view).includes('阅读已缓存正文'));
   const link = nodes(view).find(
-    (n) => n.type === 'a' && n.props.children === 'Synthetic title',
+    (n) =>
+      n.type === 'a' &&
+      n.props['aria-label'] === '阅读已保存正文：Synthetic title',
   );
   assert(link.props.href);
-  assert.equal(link.props['aria-label'], '阅读缓存正文：Synthetic title');
+  assert.equal(link.props['aria-label'], '阅读已保存正文：Synthetic title');
   let prevented = false;
   link.props.onClick({
     preventDefault: () => {
@@ -222,16 +237,20 @@ test('cached title remains a keyboard-focusable reading link without a duplicate
   assert.equal(prevented, true);
   assert.equal(f.readInput.id, 'synthetic-article');
   assert.equal(f.readInput.options.enabled, true);
-  assert.match(text(f.render()), /失败|未能|无法/);
+  assert.match(
+    nodes(f.render()).find((n) => n.type === 'FailureNotice').props.fallback,
+    /失败|未能|无法/,
+  );
 });
 test('missing bodies retain a short warning and original link; no false complete claim', () => {
   const f = readingFixture(false);
   const view = f.render();
-  assert.match(text(view), /正文未缓存/);
+  assert.match(text(view), /正文尚未保存/);
   assert.match(text(view), /正文暂不可重试/);
   assert(!text(view).includes('Synthetic source unavailable'));
   const link = nodes(view).find(
-    (n) => n.type === 'a' && n.props.children === 'Synthetic title',
+    (n) =>
+      n.type === 'a' && n.props['aria-label'] === '打开原文：Synthetic title',
   );
   let prevented = false;
   link.props.onClick({

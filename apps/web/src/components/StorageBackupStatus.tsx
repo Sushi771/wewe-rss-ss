@@ -80,7 +80,10 @@ export default function StorageBackupStatus() {
                     : '更新和修改已暂停。'}
               </p>
               {state.message && (
-                <p className="text-default-500">{state.message}</p>
+                <details>
+                  <summary>诊断信息</summary>
+                  <p className="text-default-500">{state.message}</p>
+                </details>
               )}
             </>
           ) : null}

@@ -1,3 +1,4 @@
+import { FailureNotice } from '@web/components/OperationNotice';
 import {
   Button,
   Input,
@@ -338,9 +339,12 @@ export default function ManagementFolders({
         />
       )}
       {error && (
-        <p role="alert" className="break-words text-xs text-red-600">
-          {error}
-        </p>
+        <div role="alert" className="break-words text-xs text-red-600">
+          <FailureNotice
+            error={error}
+            fallback="保存未确认，请重新读取列表后核对；已有分类保留。"
+          />
+        </div>
       )}
       <Modal
         disableAnimation
@@ -359,7 +363,14 @@ export default function ManagementFolders({
               isDisabled={disabled}
               onValueChange={setName}
             />
-            {error && <p role="alert">{error}</p>}
+            {error && (
+              <div role="alert">
+                <FailureNotice
+                  error={error}
+                  fallback="保存未确认，请重新读取列表后核对；已有分类保留。"
+                />
+              </div>
+            )}
           </ModalBody>
           <ModalFooter>
             <Button

@@ -176,80 +176,82 @@ function fixture({
     clearTimeout: (key) => timers.delete(key),
     window: { addEventListener() {}, removeEventListener() {} },
     require: (name) =>
-      [
-        '@web/utils/use-feed-browse-state',
-        '@web/utils/use-cache-revision',
-      ].includes(name)
-        ? {
-            useCacheRevision: () => false,
-            useFeedBrowseState: () => {
-              // Refresh lifecycle tests stay isolated; actual persistence is covered by browser tests.
-              const [search, setSearch] = react.useState('');
-              const [folderFilter, setFolderFilter] = react.useState('all');
-              const [articleDates, setArticleDates] = react.useState({
-                mode: 'day',
-                start: '',
-                end: '',
-              });
-              const [articleDirection, setArticleDirection] =
-                react.useState('desc');
-              const [articleSort, setArticleSort] =
-                react.useState('publishTime');
-              return {
-                search,
-                setSearch,
-                folderFilter,
-                setFolderFilter,
-                articleDates,
-                setArticleDates,
-                articleDirection,
-                setArticleDirection,
-                articleSort,
-                setArticleSort,
-                clearBrowseState() {},
-                browseGeneration: 0,
-              };
-            },
-          }
-        : name === '@web/utils/article-date-selection'
-          ? dateSelection
-          : name === '@wewe-rss/shared'
-            ? articleDates
-            : name === 'react'
-              ? react
-              : name === 'react/jsx-runtime'
-                ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
-                : name === '@nextui-org/react'
-                  ? ui
-                  : name === '@web/utils/trpc'
-                    ? { trpc }
-                    : name === '@web/utils/refresh-feed-view'
-                      ? {
-                          refreshFeedViews: async (...operations) => {
-                            await Promise.all(operations.map((fn) => fn()));
-                          },
-                        }
-                      : name === 'react-router-dom'
+      name === '@web/components/ArticleExportGuidance'
+        ? { __esModule: true, default: 'ArticleExportGuidance' }
+        : [
+              '@web/utils/use-feed-browse-state',
+              '@web/utils/use-cache-revision',
+            ].includes(name)
+          ? {
+              useCacheRevision: () => false,
+              useFeedBrowseState: () => {
+                // Refresh lifecycle tests stay isolated; actual persistence is covered by browser tests.
+                const [search, setSearch] = react.useState('');
+                const [folderFilter, setFolderFilter] = react.useState('all');
+                const [articleDates, setArticleDates] = react.useState({
+                  mode: 'day',
+                  start: '',
+                  end: '',
+                });
+                const [articleDirection, setArticleDirection] =
+                  react.useState('desc');
+                const [articleSort, setArticleSort] =
+                  react.useState('publishTime');
+                return {
+                  search,
+                  setSearch,
+                  folderFilter,
+                  setFolderFilter,
+                  articleDates,
+                  setArticleDates,
+                  articleDirection,
+                  setArticleDirection,
+                  articleSort,
+                  setArticleSort,
+                  clearBrowseState() {},
+                  browseGeneration: 0,
+                };
+              },
+            }
+          : name === '@web/utils/article-date-selection'
+            ? dateSelection
+            : name === '@wewe-rss/shared'
+              ? articleDates
+              : name === 'react'
+                ? react
+                : name === 'react/jsx-runtime'
+                  ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
+                  : name === '@nextui-org/react'
+                    ? ui
+                    : name === '@web/utils/trpc'
+                      ? { trpc }
+                      : name === '@web/utils/refresh-feed-view'
                         ? {
-                            useParams: () => ({ id: route }),
-                            useNavigate: () => (next) => {
-                              route =
-                                next.split('/').at(-1) === 'feeds'
-                                  ? ''
-                                  : next.split('/').at(-1);
+                            refreshFeedViews: async (...operations) => {
+                              await Promise.all(operations.map((fn) => fn()));
                             },
                           }
-                        : name === 'sonner'
-                          ? { toast }
-                          : name === 'dayjs'
-                            ? () => ({ format: () => '' })
-                            : name === '@web/utils/env'
-                              ? {
-                                  acceptanceMode: false,
-                                  privateOnlineMode: privateMode,
-                                  serverOriginUrl: '',
-                                }
-                              : () => null,
+                        : name === 'react-router-dom'
+                          ? {
+                              useParams: () => ({ id: route }),
+                              useNavigate: () => (next) => {
+                                route =
+                                  next.split('/').at(-1) === 'feeds'
+                                    ? ''
+                                    : next.split('/').at(-1);
+                              },
+                            }
+                          : name === 'sonner'
+                            ? { toast }
+                            : name === 'dayjs'
+                              ? () => ({ format: () => '' })
+                              : name === '@web/utils/env'
+                                ? {
+                                    acceptanceMode: false,
+                                    privateOnlineMode: privateMode,
+                                    serverOriginUrl: '',
+                                  }
+                                : () => null,
   });
   function render() {
     for (let count = 0; count < 10; count++) {
@@ -341,13 +343,22 @@ test('single export entry shows actual scope counts, limits ZIP to supported sco
     );
   assert.equal(confirm().props.children[1], 37);
   f.find((n) => n.type === 'input' && n.props.value === 'all').props.onChange();
-  assert.match(f.text(), /公众号：Synthetic A；范围：本号全部/);
-  assert.match(f.text(), /本号全部只导出当前公众号/);
+  assert.match(f.text(), /公众号：Synthetic A/);
+  assert.equal(
+    f.find((n) => n.type === 'ArticleExportGuidance').props.singleFeed,
+    true,
+  );
   f.find(
     (n) => n.type === 'select' && n.props['aria-label'] === '导出方式',
   ).props.onChange({ target: { value: 'zip' } });
-  assert.match(f.text(), /ZIP 只打包当前公众号.*不会跨号打包/);
-  assert.match(f.text(), /文章并发新增或移除，实际导出数量可能变化/);
+  assert.equal(
+    f.find((n) => n.type === 'ArticleExportGuidance').props.format,
+    'zip',
+  );
+  assert.equal(
+    f.find((n) => n.type === 'ArticleExportGuidance').props.scope,
+    'all',
+  );
   assert.equal(confirm().props.children[1], 53);
   assert.equal(
     f.find((n) => n.type === 'option' && n.props.value === 'zip').props
@@ -359,7 +370,7 @@ test('single export entry shows actual scope counts, limits ZIP to supported sco
   f.navigate('');
   entry().props.onPress();
   f.find((n) => n.type === 'input' && n.props.value === 'all').props.onChange();
-  assert.match(f.text(), /公众号：全部订阅；范围：所有订阅的全部文章/);
+  assert.match(f.text(), /公众号：全部订阅/);
   assert.equal(
     f.find((n) => n.type === 'option' && n.props.value === 'zip').props
       .disabled,
@@ -423,7 +434,7 @@ test('single-feed request remains scoped; switching and concurrent feeds never i
   await pa;
   assert.equal(f.button().text, '更新中');
   f.navigate('A');
-  assert.equal(f.button().text, '缓存已同步');
+  assert.equal(f.button().text, '内容已同步');
   f.requests[1].reject(new Error('Synthetic B failure'));
   await pb;
   f.navigate('B');
@@ -480,7 +491,7 @@ test('single-feed work does not label overview or other feeds as updating; batch
   assert.equal(f.requests.length, 2);
   assert.equal(f.requests[1].name, 'beginRefreshAll');
   assert.equal(f.requests[1].input, undefined);
-  assert.equal(f.button(true).text, '正在受理');
+  assert.equal(f.button(true).text, '正在开始');
   f.navigate('B');
   assert.equal(f.button().text, '更新本号');
   assert.equal(f.button().props.isDisabled, true);

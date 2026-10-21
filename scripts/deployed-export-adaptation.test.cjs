@@ -7,6 +7,7 @@ const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/server')] }),
 );
 const pins = require('./fixtures/deployed-export-adaptation.json');
+const copyPins = require('./fixtures/product-copy-layout.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
 function tokens(text) {
@@ -115,5 +116,5 @@ test('the reviewed export dialog and production reading layout retain their appr
       ? [node.kind, children.map(shape).filter((child) => child !== undefined)]
       : [node.kind, node.getText(ast)];
   }
-  assert.equal(hash(JSON.stringify(shape(returned))), pins.indexLayout);
+  assert.equal(hash(JSON.stringify(shape(returned))), copyPins.indexLayout);
 });

@@ -142,10 +142,7 @@ test('rejection restores confirmed name and explicitly reports unconfirmed savin
     f.find('span', (p) => p.children === 'Proposed'),
     undefined,
   );
-  assert.match(
-    f.find('p', (p) => p.role === 'alert').props.children,
-    /未确认保存/,
-  );
+  assert.match(f.find('FailureNotice').props.error, /未确认保存/);
 });
 test('cancel and Esc do not save; blank, control and overlong names never submit; unchanged name is a no-op', () => {
   for (const mode of ['cancel', 'escape']) {

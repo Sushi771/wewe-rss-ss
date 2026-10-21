@@ -1,3 +1,4 @@
+import { FailureNotice } from '@web/components/OperationNotice';
 import { useState } from 'react';
 import {
   Button,
@@ -85,9 +86,12 @@ export default function PublicAlbums({
               </p>
             )}
             {collector.error && (
-              <p role="alert" className="text-sm text-red-600">
-                补采失败：{collector.error.message}
-              </p>
+              <div role="alert" className="text-sm text-red-600">
+                <FailureNotice
+                  error={collector.error}
+                  fallback="合集更新未完成，已有内容保留。"
+                />
+              </div>
             )}
           </ModalBody>
           <ModalFooter>
@@ -121,7 +125,9 @@ export default function PublicAlbums({
                   const message =
                     error instanceof Error ? error.message : '补采失败';
                   onResult('error', message);
-                  toast.error(message);
+                  toast.error('操作未完成，请查看详情。', {
+                    description: <FailureNotice error={message} />,
+                  });
                 } finally {
                   onBusyChange(false);
                 }
