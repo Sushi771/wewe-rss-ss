@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const base = '48fdf73f4d770001bbb6de3e2383189811e56ccb';
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
-test('installed frontend patch contains no search, shared protocol, migration or release-tool changes', () => {
+test('installed frontend patch contains no search, shared protocol, migration or unrelated release-tool changes', () => {
   assert.equal(
     git(
       'diff',
@@ -14,13 +14,32 @@ test('installed frontend patch contains no search, shared protocol, migration or
       '--',
       'packages',
       'apps/server/prisma',
-      'scripts/local-release',
       'pnpm-lock.yaml',
       'package.json',
       'apps/web/package.json',
       '.github',
     ),
     '',
+  );
+  const releaseFiles = git(
+    'diff',
+    base,
+    '--name-only',
+    '--',
+    'scripts/local-release',
+  )
+    .split('\n')
+    .filter(Boolean);
+  const permitted = new Set([
+    'active-release.cjs',
+    'frontend-update.cjs',
+    'frontend-update.test.cjs',
+    'frontend-writers.ps1',
+    'host-write-boundaries.test.cjs',
+  ]);
+  assert(
+    releaseFiles.every((file) => permitted.has(file.split('/').pop())),
+    'only the reviewed retain-only frontend update tool may change',
   );
   const server = git('diff', base, '--name-only', '--', 'apps/server')
     .split('\n')

@@ -16,6 +16,7 @@ const catalog = {
     'desktop-dependencies',
     'desktop-progress',
     'desktop-start',
+    'frontend-update',
     'identity-tool',
     'install-desktop',
     'install-lifecycle',
