@@ -456,7 +456,10 @@ function build(options = {}) {
         commands,
         prismaGenerator,
       },
-      reserveBytes: buildBudget.estimate(sourceServer),
+      reserveBytes: reservationBytes(
+        options,
+        buildBudget.estimate(sourceServer),
+      ),
       runtimeCopies: 1,
     };
     console.log(JSON.stringify(plan));
