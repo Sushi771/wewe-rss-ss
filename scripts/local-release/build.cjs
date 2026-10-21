@@ -98,6 +98,53 @@ function copyPackages(
   return versions;
 }
 
+// Validate tracked fixtures without parsing or passing their values to compilers.
+function verifyBuildEnvironment(sourceRoot, commit, repository) {
+  const result = [];
+  for (const directory of [
+    sourceRoot,
+    path.join(sourceRoot, 'apps/server'),
+    path.join(sourceRoot, 'apps/web'),
+  ])
+    for (const name of [
+      '.env',
+      '.env.local',
+      '.env.production',
+      '.env.production.local',
+    ]) {
+      const file = path.join(directory, name);
+      if (!fs.existsSync(file)) continue;
+      const relative = slash(path.relative(sourceRoot, file));
+      try {
+        const wanted = run('git', ['rev-parse', `${commit}:${relative}`], {
+          cwd: repository,
+        }).trim();
+        const stat = fs.lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink())
+          throw new Error('environment link');
+        const bytes = fs.readFileSync(file);
+        const blob = (value) =>
+          crypto
+            .createHash('sha1')
+            .update(`blob ${value.length}\0`)
+            .update(value)
+            .digest('hex');
+        if (
+          blob(bytes) !== wanted &&
+          blob(Buffer.from(bytes.toString('utf8').replace(/\r\n/g, '\n'))) !==
+            wanted
+        )
+          throw new Error('environment changed');
+      } catch {
+        throw new Error(
+          'Build-only refuses private or changed build environment files',
+        );
+      }
+      result.push(relative);
+    }
+  return result;
+}
+
 function build(options = {}) {
   require('./release-scope.cjs').assertWritableSession(['build']);
   if (options.plan && !options.buildOnly)
@@ -137,19 +184,15 @@ function build(options = {}) {
   if (historical) verifySourceSnapshot(sourceRoot, options.sourceCommit, root);
   const sourceServer = path.join(sourceRoot, 'apps/server');
   const sourceWeb = path.join(sourceRoot, 'apps/web');
-  if (options.buildOnly) {
-    if (!options.outputRoot)
-      throw new Error('Build-only requires an explicit isolated output root');
-    for (const directory of [sourceRoot, sourceServer, sourceWeb])
-      for (const name of [
-        '.env',
-        '.env.local',
-        '.env.production',
-        '.env.production.local',
-      ])
-        if (fs.existsSync(path.join(directory, name)))
-          throw new Error('Build-only refuses private build environment files');
-  }
+  if (options.buildOnly && !options.outputRoot)
+    throw new Error('Build-only requires an explicit isolated output root');
+  const committedEnvironmentFiles = options.buildOnly
+    ? verifyBuildEnvironment(
+        sourceRoot,
+        historical ? options.sourceCommit : 'HEAD',
+        root,
+      )
+    : [];
   if (historical && !options.buildOnly) {
     // 旧源码留在忽略目录，只借用已安装依赖；不覆盖运行中的 dist、Client 或 DLL。
     for (const [local, installed] of [
@@ -214,6 +257,7 @@ function build(options = {}) {
     'apps/web/vite.config.ts',
     'apps/web/tailwind.config.ts',
     'apps/web/postcss.config.js',
+    ...committedEnvironmentFiles,
   ])
     inputs[file] = fileHash(
       path.join(file.startsWith('tools/') ? root : sourceRoot, file),
@@ -353,10 +397,22 @@ function build(options = {}) {
         shared,
       });
       reservation.create(release);
+      if (options.buildOnly)
+        writeJson(path.join(release, 'package.json'), {
+          name: 'wewe-isolated-release',
+          version: '0.0.0',
+          private: true,
+        });
       const target = path.join(release, 'server');
       fs.mkdirSync(target);
       const workspace = path.join(release, 'build');
       fs.mkdirSync(workspace);
+      if (options.buildOnly)
+        writeJson(path.join(workspace, 'package.json'), {
+          name: 'wewe-isolated-build',
+          version: '0.0.0',
+          private: true,
+        });
       const temporary = path.join(workspace, 'tmp');
       fs.mkdirSync(temporary);
       const client = path.join(target, 'node_modules/.store/generated-prisma');
@@ -400,7 +456,10 @@ function build(options = {}) {
         run(
           process.execPath,
           [cli, 'generate', '--schema', path.join(workspace, 'schema.prisma')],
-          { cwd: server, env: { ...env, PRISMA_QUERY_ENGINE_LIBRARY: engine } },
+          {
+            cwd: options.buildOnly ? workspace : server,
+            env: { ...env, PRISMA_QUERY_ENGINE_LIBRARY: engine },
+          },
         ),
       );
       if (
@@ -726,4 +785,4 @@ if (require.main === module) {
     process.exitCode = 1;
   }
 }
-module.exports = { build, copyPackages };
+module.exports = { build, copyPackages, verifyBuildEnvironment };

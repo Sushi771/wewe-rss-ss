@@ -32,8 +32,12 @@ The build runs inside the existing lease and build-budget locks. It creates only
 registered owned outputs, pins compiler entry hashes, rejects runtime/DB entry
 points, private build environment files and pointer access, and clears service
 configuration from compiler environments. Vite's temporary config, environment
-directory, cache and output live in the owned build directory. Source and
-dependency reads are still needed. The fixed build source and installed toolchain
+directory, cache and output live in the owned build directory.
+Git-tracked environment fixtures must match their exact committed blobs and are
+recorded only as input hashes; they are never passed to compilers. Fixed package
+boundaries in the owned release and build directories stop Prisma from finding
+an ancestor environment file. Untracked or changed environment files are refused.
+Source and dependency reads are still needed. The fixed build source and installed toolchain
 are trusted code; this is an operational boundary, not an OS sandbox for malicious
 dependencies (esbuild manages its own subprocess). Interruptions retain the
 existing held-claim/review behavior. No historical package is deleted to gain room.

@@ -314,3 +314,38 @@ test(
       }
     }),
 );
+
+for (const mode of ['tracked', 'changed', 'untracked'])
+  test('isolated build environment fixture: ' + mode, () =>
+    fixture((root) => {
+      const { execFileSync } = require('node:child_process');
+      const git = (args) =>
+        execFileSync('git', args, {
+          cwd: root,
+          encoding: 'utf8',
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim();
+      git(['init']);
+      fs.writeFileSync(
+        path.join(root, '.env'),
+        'SYNTHETIC_FIXTURE=committed\n',
+      );
+      git(['add', '--', '.env']);
+      const tree = git(['write-tree']);
+      if (mode === 'changed')
+        fs.writeFileSync(
+          path.join(root, '.env'),
+          'SYNTHETIC_FIXTURE=modified\n',
+        );
+      if (mode === 'untracked')
+        fs.writeFileSync(
+          path.join(root, '.env.local'),
+          'SYNTHETIC_FIXTURE=private\n',
+        );
+      const verify = () =>
+        require('./build.cjs').verifyBuildEnvironment(root, tree, root);
+      if (mode === 'tracked') assert.deepEqual(verify(), ['.env']);
+      else assert.throws(verify, /private or changed/);
+    }),
+  );
