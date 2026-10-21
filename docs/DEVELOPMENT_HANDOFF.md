@@ -1,3 +1,22 @@
+## 2026-10-21: build-only artifact provenance correction, review before real builds
+
+The two independent review counterexamples now have explicit regressions: an
+unrequested file added during an active build cannot enter its completion receipt,
+and changing a completed output plus regenerating the ledger self-hash cannot
+authorize another build session. Expected artifact names and bytes originate in
+trusted producer memory and an inherited compiler pipe. Sealing checks those
+expectations inside the bounded receipt scan; additional artifact reads consume
+the existing cumulative scan budget. The exact candidate and repaired-UI rollback
+build sequentially under one held memory lease. A failed advance cannot retry with
+a smaller reservation. Output, ledger and interrupted claims remain for review.
+
+This changes release tools, their offline synthetic tests and delivery guidance;
+it does not change the frontend application, migrate a database, build the real
+pair, merge the PR or deploy search. The prior rejected policy remains rejected.
+Prepare new exact plans and a new policy for independent review before running
+the real pair. Candidate source remains `3a36428210f22ea1986f0a96a6066e7fdc9baf46`;
+strict compatible rollback remains `f618e48f48ff0e3df1c646cb8a666a2461815732`.
+
 ## 2026-10-18: bounded daily backup lifecycle, development only
 
 Prepared independently on exact `aeb7483c85db8d13f1345011266ae7ee6046adc0`. The Windows opt-in lifecycle persists the original physical generation boundary across restarts and limits admitted periodic data to three normal points plus one pending-confirmation point, under unchanged cumulative caps. Each permanent retirement still needs the existing exact action-time approval; partial outcomes retain the same spent allocation. Unknown/protected origins stay separate. Capacity diagnostics now derive 900/86400 cadence and display the actual interval. No production activation, database copy or retirement was performed. See [activation boundary, fixed-state protocol, exact review flow and synthetic coverage](PERIODIC_BACKUP_CONFIRMED_LIFECYCLE.md). This work is outside the current integration acceptance/main-merge range.

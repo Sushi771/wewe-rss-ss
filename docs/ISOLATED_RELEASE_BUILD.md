@@ -45,6 +45,19 @@ claims are retained for review; build-only cannot authorize their deletion.
 
 ## Narrow search-compatible rollback recipe
 
+Artifact acceptance uses a bounded in-memory table of producer intents. Parent
+writes bind their requested bytes or declared copy-source bytes before the write.
+Pinned compiler processes send those intents through an inherited anonymous pipe;
+their hook and the compiler entry files are included in the exact source/tooling
+input pins. Nested Node generators preserve their ordinary stdout/IPC and inherit
+the intent pipe. No mutable receipt file supplies this table. Unsupported or
+unreported writes fail the subsequent artifact check. Esbuild returns its output
+bytes to the controller with `write: false`. Temporary compiler outputs are checked
+against their own producer intents before reads and removals. The release manifest
+uses the intent table, with output-tree traversal only checking for missing,
+changed or extra artifacts. This remains a boundary for trusted pinned compiler
+code, not an OS sandbox for malicious dependencies.
+
 Prepare an isolated source snapshot of the installed UI repair
 `f618e48f48ff0e3df1c646cb8a666a2461815732` with its lockfile dependencies available
 (the earlier `48fdf73f4d770001bbb6de3e2383189811e56ccb` remains accepted).
@@ -55,9 +68,13 @@ Create and review a separate exact plan/policy for this source/input pair.
 For this rollout the candidate source snapshot is exactly
 `3a36428210f22ea1986f0a96a6066e7fdc9baf46`. One unchanged build-only policy may
 bind both exact `{sourceCommit, sourceHash}` plans in `buildOnly.sources`; only
-this candidate/repaired-UI rollback pair is accepted there. Both builds share
-one output inventory, lock and ledger. No third source or receipt refresh is
-authorized. Keep the original 768 MiB cumulative new-output budget and two
+this candidate/repaired-UI rollback pair is accepted there. Both builds must use
+one controller and the same held in-memory lease. Use the existing entry point:
+`node scripts/local-release/build.cjs --compact --build-only --output-root <output> --pair-candidate-root <candidate-exact> --pair-rollback-root <rollback-exact>`.
+The ledger is retained audit evidence, never authority to recover a new build
+session. Every later build-only open of an adopted ledger fails for review,
+including unchanged completed outputs. No third source, automatic retry after a
+failed advance, or receipt refresh is authorized. Keep the original 768 MiB cumulative new-output budget and two
 runtime copies. Build sequentially: the copy peak is the retained completed
 first package **plus** the second build reservation, not one reservation reused
 as a two-package total. With reservations of 593,710,908 bytes each, the first

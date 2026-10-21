@@ -109,13 +109,25 @@ function guardedFiles(target, promises = false) {
           (method !== 'open' || writesOnOpen(args[1]));
         currentHostLease()?.assertFileAccess?.(method, args, writing);
         if (writing) assertHostWrite();
+        const commitArtifacts =
+          writing &&
+          !promises &&
+          typeof key === 'string' &&
+          key.endsWith('Sync')
+            ? currentHostLease()?.prepareArtifactMutation?.(method, args)
+            : undefined;
         // Resolve dynamically so the existing offline preloader and test stubs
         // cannot be bypassed by an earlier captured native function.
         const result = new.target
           ? Reflect.construct(object[key], args)
           : Reflect.apply(object[key], object, args);
+        commitArtifacts?.();
         if (method === 'open' && typeof result === 'number')
-          currentHostLease()?.approveDescriptor?.(result);
+          currentHostLease()?.approveDescriptor?.(
+            result,
+            args[0],
+            writesOnOpen(args[1]),
+          );
         return promises && method === 'open'
           ? result.then(guardedFileHandle)
           : result;

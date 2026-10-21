@@ -333,31 +333,73 @@ function build(options = {}) {
   const sourceHash = hash(
     JSON.stringify({ inputs, searchRollback: options.searchRollback === true }),
   );
+  const checkInputs = () => {
+    if (!options.buildOnly) return;
+    verifySourceSnapshot(
+      sourceRoot,
+      historical ? options.sourceCommit : currentCommit,
+      root,
+    );
+    for (const [file, expected] of Object.entries(inputs)) {
+      const tooling =
+        file.startsWith('scripts/local-release/') ||
+        (options.searchRollback &&
+          extensionNames.some(
+            (name) =>
+              file === `apps/server/prisma/migrations/${name}/migration.sql`,
+          ));
+      if (fileHash(path.join(tooling ? root : sourceRoot, file)) !== expected)
+        throw Error('Release input changed during compilation: ' + file);
+    }
+  };
   const runCompiler = (executable, args, commandOptions) => {
-    const checkInputs = () => {
-      if (!options.buildOnly) return;
-      verifySourceSnapshot(
-        sourceRoot,
-        historical ? options.sourceCommit : currentCommit,
-        root,
-      );
-      for (const [file, expected] of Object.entries(inputs)) {
-        const tooling =
-          file.startsWith('scripts/local-release/') ||
-          (options.searchRollback &&
-            extensionNames.some(
-              (name) =>
-                file === `apps/server/prisma/migrations/${name}/migration.sql`,
-            ));
-        if (fileHash(path.join(tooling ? root : sourceRoot, file)) !== expected)
-          throw Error('Release input changed during compilation: ' + file);
-      }
-    };
     checkInputs();
-    const result = run(executable, args, commandOptions);
+    let result;
+    if (options.buildOnly) {
+      const lease = require('./lib.cjs').hostEffects.currentLease();
+      const emission = require('./lib.cjs').hostEffects.processes.spawnSync(
+        executable,
+        args,
+        {
+          ...commandOptions,
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+          encoding: 'utf8',
+          maxBuffer: 16 * 1024 ** 2,
+          env: {
+            ...commandOptions.env,
+            NODE_OPTIONS:
+              '--require ' +
+              JSON.stringify(
+                path.join(__dirname, 'artifact-producer-hook.cjs'),
+              ),
+            WEWE_ARTIFACT_ROOT: activeRelease,
+            WEWE_ARTIFACT_FD: '3',
+          },
+        },
+      );
+      if (emission.error || emission.status !== 0)
+        throw (
+          emission.error || Error('Pinned compiler failed: ' + emission.stderr)
+        );
+      const rows = emission.output[3]
+        .split('\n')
+        .filter(Boolean)
+        .map((row) => JSON.parse(row));
+      if (!rows.some((row) => row.producer === emission.pid))
+        throw Error('RELEASE_ARTIFACT_COMPILER_PRODUCER_MISSING');
+      lease.acceptCompilerIntents(
+        activeRelease,
+        rows.filter((row) => !row.producer),
+      );
+      lease.check();
+      result = emission.stdout;
+    } else result = run(executable, args, commandOptions);
     checkInputs();
     return result;
   };
+  let activeRelease;
   if (options.plan && !options.buildOnly)
     throw new Error('--plan requires --build-only');
   const releaseRoot = options.buildOnly
@@ -394,16 +436,18 @@ function build(options = {}) {
     console.log(JSON.stringify(plan));
     return plan;
   }
-  const reusable = buildBudget.findReusable(releaseRoot, {
-    sourceHash,
-    sourceCommit: historical ? options.sourceCommit : currentCommit,
-    nodeVersion: process.version,
-    runtimeSha256: fileHash(process.execPath),
-    schemaCompatibility: legacy ? 'legacy-additive' : 'current',
-    executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
-  });
+  const reusable =
+    !options.buildOnly &&
+    buildBudget.findReusable(releaseRoot, {
+      sourceHash,
+      sourceCommit: historical ? options.sourceCommit : currentCommit,
+      nodeVersion: process.version,
+      runtimeSha256: fileHash(process.execPath),
+      schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+      executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
+    });
   const requestedBytes = reusable ? 1 : buildBudget.estimate(sourceServer);
-  const shared = require('./release-scope.cjs').open({
+  const operation = {
     kind: 'build',
     root: releaseRoot,
     reserveBytes: requestedBytes,
@@ -412,7 +456,12 @@ function build(options = {}) {
     sourceCommit: historical ? options.sourceCommit : currentCommit,
     sourceHash,
     sourceRoot,
-  });
+  };
+  const shared =
+    options.pairSession?.lease ||
+    require('./release-scope.cjs').open(operation);
+  if (options.pairSession?.lease) shared.nextBuild(operation);
+  if (options.pairSession) options.pairSession.lease = shared;
   return require('./lib.cjs').hostEffects.context.run(shared, () => {
     let reservation;
     let failure;
@@ -431,6 +480,7 @@ function build(options = {}) {
       }
       const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
       const release = path.join(releaseRoot, id);
+      activeRelease = release;
       reservation = buildBudget.begin(path.dirname(release), requestedBytes, {
         shared,
       });
@@ -737,6 +787,7 @@ function build(options = {}) {
           path.join(helperDir, 'collect.ps1'),
         );
       }
+      checkInputs();
       const manifest = {
         format: 1,
         id,
@@ -771,7 +822,9 @@ function build(options = {}) {
         },
         dependencies,
         desktopHelperIncluded: legacy,
-        ...fingerprint(release),
+        ...(options.buildOnly
+          ? shared.artifactFingerprint(release)
+          : fingerprint(release)),
       };
       reservation.check();
       writeJson(path.join(release, 'release.json'), manifest);
@@ -793,10 +846,41 @@ function build(options = {}) {
       try {
         reservation?.finish(failure);
       } finally {
-        shared.close(failure);
+        if (!options.pairSession || failure) shared.close(failure);
       }
     }
   });
+}
+
+function buildPair(options) {
+  const pairSession = {};
+  let failure;
+  try {
+    const candidate = build({
+      ...options,
+      buildOnly: true,
+      compact: true,
+      sourceRoot: options.candidateRoot,
+      sourceCommit: '3a36428210f22ea1986f0a96a6066e7fdc9baf46',
+      searchRollback: false,
+      pairSession,
+    });
+    const rollback = build({
+      ...options,
+      buildOnly: true,
+      compact: true,
+      sourceRoot: options.rollbackRoot,
+      sourceCommit: 'f618e48f48ff0e3df1c646cb8a666a2461815732',
+      searchRollback: true,
+      pairSession,
+    });
+    return { candidate, rollback };
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    pairSession.lease?.close(failure);
+  }
 }
 
 if (require.main === module) {
@@ -810,9 +894,11 @@ if (require.main === module) {
         'output-root': { type: 'string' },
         'search-rollback': { type: 'boolean', default: false },
         plan: { type: 'boolean', default: false },
+        'pair-candidate-root': { type: 'string' },
+        'pair-rollback-root': { type: 'string' },
       },
     });
-    build({
+    const options = {
       sourceRoot: values['source-root'],
       sourceCommit: values['source-commit'],
       compact: values.compact,
@@ -820,10 +906,30 @@ if (require.main === module) {
       outputRoot: values['output-root'],
       searchRollback: values['search-rollback'],
       plan: values.plan,
-    });
+    };
+    if (values['pair-candidate-root'] || values['pair-rollback-root']) {
+      if (
+        !options.buildOnly ||
+        !values['pair-candidate-root'] ||
+        !values['pair-rollback-root'] ||
+        options.sourceRoot ||
+        options.sourceCommit ||
+        options.searchRollback
+      )
+        throw Error('Both exact pair roots and --build-only are required');
+      console.log(
+        JSON.stringify(
+          buildPair({
+            ...options,
+            candidateRoot: values['pair-candidate-root'],
+            rollbackRoot: values['pair-rollback-root'],
+          }),
+        ),
+      );
+    } else build(options);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
   }
 }
-module.exports = { build, copyPackages, verifyBuildEnvironment };
+module.exports = { build, buildPair, copyPackages, verifyBuildEnvironment };

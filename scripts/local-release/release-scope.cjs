@@ -336,11 +336,34 @@ function open(request, options = {}, boundOperation) {
     throw new Error('RELEASE_SCOPE_INVENTORY_VERSION_REVIEW_REQUIRED');
   const verifier = createVerifier(policy.scanBudget, {
     onSegment: options.onScanSegment,
+    onRecord(row, content) {
+      if (policy.phase !== 'build-only') return;
+      const at = path.join(row[0], row[1]);
+      for (const [root, tracker] of artifacts) {
+        if (!contains(root, at)) continue;
+        const expected = tracker.expected.get(at);
+        if (
+          !expected ||
+          expected.kind !==
+            { dir: 'directory', file: 'file', link: 'link' }[row[2]]
+        )
+          throw Error('RELEASE_ARTIFACT_UNREQUESTED: ' + at);
+        if (
+          (content !== undefined && content !== expected.sha256) ||
+          (row[2] === 'link' && row.at(-1) !== expected.target)
+        )
+          throw Error('RELEASE_ARTIFACT_CHANGED: ' + at);
+      }
+    },
   });
   const useMetadata = verifier.limits.checkpointMode === 'identity-times-v1';
   let fullValidated = false;
   const verifiedOutputs = new Set();
   const descriptors = new Set();
+  const descriptorWrites = new Map();
+  const artifacts = new Map();
+  const builtSources = new Set([request.sourceCommit]);
+  let pairAdvanceAttempted = false;
   const directory = policy.registryDirectory,
     lock = path.join(directory, policy.scopeId + '.lock'),
     ledger = path.join(directory, policy.scopeId + '.state.json');
@@ -495,6 +518,9 @@ function open(request, options = {}, boundOperation) {
         hash(identity(row.path)) !== hash(row.identity)
       )
         throw new Error('RELEASE_SCOPE_OWNED_OUTPUT_REPLACED');
+    if (policy.phase === 'build-only')
+      for (const row of prior.outputs)
+        if (row.identity && !row.complete) artifacts.get(row.path).verify();
     for (const root of policy.roots) {
       const disk = fs.statfsSync(root.path, { bigint: true });
       if (disk.bavail * disk.bsize < BigInt(MIN_FREE))
@@ -506,6 +532,8 @@ function open(request, options = {}, boundOperation) {
   };
   try {
     if (present(ledger)) {
+      if (policy.phase === 'build-only')
+        throw Error('RELEASE_SCOPE_BUILD_ONLY_NEW_SESSION_REQUIRES_REVIEW');
       ledgerIdentity = fileIdentity(ledger);
       prior = state(ledger);
       if (
@@ -604,12 +632,43 @@ function open(request, options = {}, boundOperation) {
       policy,
       check,
       assertWritable,
-      approveDescriptor(fd) {
+      approveDescriptor(fd, file, writing) {
         descriptors.add(fd);
+        if (
+          policy.phase === 'build-only' &&
+          writing &&
+          typeof file === 'string'
+        ) {
+          const at = path.resolve(file),
+            row = prior.outputs.find(
+              (r) =>
+                r.claim === claim.id && !r.complete && contains(r.path, at),
+            );
+          if (row && artifacts.has(row.path)) {
+            descriptorWrites.set(fd, {
+              at,
+              root: row.path,
+              bytes: Buffer.alloc(0),
+            });
+            artifacts.get(row.path).apply([
+              {
+                path: at,
+                kind: 'file',
+                size: 0,
+                sha256: require('./artifact-intents.cjs').digest(
+                  Buffer.alloc(0),
+                ),
+              },
+            ]);
+          }
+        }
       },
       assertFileAccess(method, args, writing) {
         if (policy.phase !== 'build-only') return;
-        if (method === 'close') descriptors.delete(args[0]);
+        if (method === 'close') {
+          descriptors.delete(args[0]);
+          descriptorWrites.delete(args[0]);
+        }
         const paths = ['copyFile', 'cp', 'symlink', 'link', 'rename'].includes(
           method,
         )
@@ -621,8 +680,20 @@ function open(request, options = {}, boundOperation) {
             /(?:^|[\\/])(?:\.env(?:\..*)?|active\.json)$/i.test(at)
           )
             throw new Error('RELEASE_SCOPE_BUILD_ONLY_PRIVATE_INPUT_FORBIDDEN');
-        if (!writing || ['close', 'fsync', 'fdatasync'].includes(method))
+        if (!writing || ['close', 'fsync', 'fdatasync'].includes(method)) {
+          if (
+            ['readFile', 'createReadStream', 'openAsBlob', 'open'].includes(
+              method,
+            ) &&
+            typeof args[0] === 'string'
+          ) {
+            const at = path.resolve(args[0]),
+              row = prior.outputs.find((r) => contains(r.path, at));
+            if (row && artifacts.has(row.path))
+              artifacts.get(row.path).verify(at);
+          }
           return;
+        }
         const destinations = ['copyFile', 'cp', 'symlink', 'link'].includes(
           method,
         )
@@ -826,6 +897,146 @@ function open(request, options = {}, boundOperation) {
         if (!row || row.identity)
           throw new Error('RELEASE_SCOPE_OUTPUT_CLAIM_INVALID');
         row.identity = identity(at);
+        if (policy.phase === 'build-only')
+          artifacts.set(
+            at,
+            require('./artifact-intents.cjs').createArtifacts(at, (cost) =>
+              verifier.chargeArtifacts(cost),
+            ),
+          );
+        save();
+      },
+      prepareArtifactMutation(method, args) {
+        if (policy.phase !== 'build-only') return () => {};
+        if (method === 'open') return () => {};
+        if (method === 'write' && descriptorWrites.has(args[0])) {
+          const record = descriptorWrites.get(args[0]);
+          if (typeof args[1] !== 'string' || args[2] !== undefined)
+            throw Error('RELEASE_ARTIFACT_DESCRIPTOR_WRITE_UNSUPPORTED');
+          const bytes = Buffer.concat([record.bytes, Buffer.from(args[1])]);
+          if (bytes.length > 16 * 1024 ** 2)
+            throw Error('RELEASE_ARTIFACT_DESCRIPTOR_BUDGET');
+          return () => {
+            record.bytes = bytes;
+            artifacts.get(record.root).apply([
+              {
+                path: record.at,
+                kind: 'file',
+                size: bytes.length,
+                sha256: require('./artifact-intents.cjs').digest(bytes),
+              },
+            ]);
+          };
+        }
+        const destination = ['cp', 'copyFile', 'symlink'].includes(method)
+          ? args[1]
+          : args[0];
+        if (typeof destination !== 'string') return () => {};
+        const at = path.resolve(destination);
+        const row = prior.outputs.find(
+          (r) => r.claim === claim.id && !r.complete && contains(r.path, at),
+        );
+        if (!row || !artifacts.has(row.path)) return () => {};
+        const tracker = artifacts.get(row.path);
+        if (['rm', 'rmdir', 'unlink', 'rename'].includes(method))
+          tracker.verify(at);
+        const events = require('./artifact-intents.cjs').mutationEvents(
+          method,
+          args,
+          tracker.expected,
+        );
+        return () => tracker.apply(events);
+      },
+      acceptCompilerIntents(output, events) {
+        const row = prior.outputs.find(
+          (r) => r.path === output && r.claim === claim.id && !r.complete,
+        );
+        if (policy.phase !== 'build-only' || !row || !artifacts.has(output))
+          throw Error('RELEASE_ARTIFACT_OWNED_OUTPUT_REQUIRED');
+        artifacts.get(output).apply(events);
+      },
+      artifactFingerprint(output) {
+        if (!artifacts.has(output))
+          throw Error('RELEASE_ARTIFACT_OWNED_OUTPUT_REQUIRED');
+        return artifacts.get(output).fingerprint();
+      },
+      nextBuild(next) {
+        if (
+          closed ||
+          pairAdvanceAttempted ||
+          policy.phase !== 'build-only' ||
+          !policy.buildOnly.sources
+        )
+          throw Error('RELEASE_SCOPE_BUILD_PAIR_SESSION_REQUIRED');
+        pairAdvanceAttempted = true;
+        check();
+        const source = policy.buildOnly.sources.find(
+          (s) =>
+            s.sourceCommit === next.sourceCommit &&
+            s.sourceHash === next.sourceHash,
+        );
+        if (
+          !source ||
+          builtSources.has(next.sourceCommit) ||
+          next.kind !== 'build' ||
+          next.buildOnly !== true ||
+          next.root !== target ||
+          next.transition ||
+          !Number.isSafeInteger(next.reserveBytes) ||
+          next.reserveBytes < 1 ||
+          next.runtimeCopies !== 1 ||
+          (source.sourceRoot &&
+            (next.sourceRoot !== source.sourceRoot ||
+              canonical(source.sourceRoot) !== source.sourceRoot ||
+              hash(identity(source.sourceRoot)) !==
+                hash(source.sourceIdentity)))
+        )
+          throw Error('RELEASE_SCOPE_BUILD_ONLY_BINDING_REQUIRED');
+        for (const row of prior.outputs.filter((r) => r.claim === claim.id)) {
+          artifacts.get(row.path).verify();
+          const receipt = verifier.scan([
+            { path: row.path, identity: row.identity },
+          ]);
+          Object.assign(row, {
+            digest: receipt.digest,
+            metadataDigest: receipt.metadataDigest,
+            complete: true,
+          });
+        }
+        save();
+        const measure = check();
+        if (
+          measure.bytes + next.reserveBytes > policy.maxBytes ||
+          measure.bytes + next.reserveBytes - policy.baseline.bytes >
+            policy.maxGrowthBytes
+        )
+          throw Error('RELEASE_SCOPE_COPY_PEAK_EXCEEDED');
+        if (
+          measure.runtimeCopies + 1 - policy.baseline.runtimeCopies >
+          policy.maxNewRuntimeCopies
+        )
+          throw Error('RELEASE_SCOPE_RUNTIME_COPY_PEAK_EXCEEDED');
+        const disk = fs.statfsSync(target, { bigint: true });
+        if (
+          disk.bavail * disk.bsize - BigInt(next.reserveBytes) <
+          BigInt(MIN_FREE)
+        )
+          throw Error('RELEASE_SCOPE_PHYSICAL_RESERVE_EXCEEDED');
+        claim = {
+          id: crypto.randomUUID(),
+          kind: 'build',
+          root: target,
+          reserveBytes: next.reserveBytes,
+          runtimeCopies: 1,
+          startBytes: measure.bytes,
+          startRuntimeCopies: measure.runtimeCopies,
+          refs,
+          outputs: [],
+        };
+        prior.claim = claim;
+        buildSource = source;
+        request = next;
+        builtSources.add(next.sourceCommit);
         save();
       },
       allowCleanup(outputs) {
