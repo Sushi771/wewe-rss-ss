@@ -36,7 +36,7 @@ function verifySourceSnapshot(sourceRoot, commit, repository) {
     if (gitHash(content) !== match[2]) {
       // Windows archive 展开后可能按仓库文本规则使用 CRLF；只接受这一种等价转换。
       const normalized = Buffer.from(
-        new TextDecoder('utf-8', { fatal: true })
+        new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
           .decode(content)
           .replace(/\r\n/g, '\n'),
       );
