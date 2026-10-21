@@ -8,7 +8,7 @@ const lib = require('./lib.cjs');
 const update = require('./frontend-update.cjs');
 const SOURCE = 'f618e48f48ff0e3df1c646cb8a666a2461815732';
 const BASE = '48fdf73f4d770001bbb6de3e2383189811e56ccb';
-function fixture(t, extra = () => {}) {
+async function fixture(t, extra = () => {}) {
   const installation = fs.mkdtempSync(
     path.join(os.tmpdir(), 'frontend-retain-'),
   );
@@ -97,7 +97,7 @@ function fixture(t, extra = () => {}) {
     port: 4000,
   };
   extra({ root, write, previous });
-  const p = update.plan({ installation, web, artifacts, expected });
+  const p = await update.plan({ installation, web, artifacts, expected });
   let current = { ...expected };
   const starts = [];
   const adapter = {
@@ -164,7 +164,7 @@ function fixture(t, extra = () => {}) {
   };
 }
 test('retain-only update preserves 146 historical slots including unmanifested directories', async (t) => {
-  const f = fixture(t, ({ root, write }) => {
+  const f = await fixture(t, ({ root, write }) => {
     for (let i = 0; i < 145; i++)
       write(path.join(root, 'history-' + i, 'kept'), 'history');
   });
@@ -189,11 +189,11 @@ test('retain-only update preserves 146 historical slots including unmanifested d
     fs.readFileSync(path.join(candidate, 'server/main.cjs'), 'utf8'),
     'fixed-backend',
   );
-  assert.equal(update.inventory(f.root).slots, 147);
+  assert.equal((await update.inventory(f.root)).slots, 147);
 });
 for (const field of ['pid', 'startUtc', 'executable', 'commandLine'])
   test('refuses wrong or reused process ' + field, async (t) => {
-    const f = fixture(t);
+    const f = await fixture(t);
     f.adapter.snapshot = async () => ({
       ...f.p.expected,
       [field]: field === 'pid' ? 999 : 'wrong',
@@ -202,13 +202,13 @@ for (const field of ['pid', 'startUtc', 'executable', 'commandLine'])
     assert.deepEqual(f.starts, []);
   });
 test('old instance must be confirmed exited before any replacement', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.adapter.stop = async () => ({ stopped: true });
   await assert.rejects(update.apply(f.p, f.adapter), /ROLLBACK_FAILED/);
   assert.deepEqual(f.starts, []);
 });
 test('port conflict blocks new start and fallback; keeps database and packages', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.adapter.requireFreePort = async () => {
     throw Error('PORT_CONFLICT');
   };
@@ -217,14 +217,14 @@ test('port conflict blocks new start and fallback; keeps database and packages',
   assert.equal(fs.readFileSync(f.p.database, 'utf8'), 'synthetic; not opened');
 });
 test('pointer race is never overwritten', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.adapter.verifyAssets = async () =>
     f.write(f.p.pointer.path, JSON.stringify({ format: 1, id: 'other-owner' }));
   await assert.rejects(update.apply(f.p, f.adapter), /ROLLBACK_FAILED/);
   assert.equal(JSON.parse(fs.readFileSync(f.p.pointer.path)).id, 'other-owner');
 });
 test('external candidate write is rejected instead of refreshing receipt', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   const ready = f.adapter.ready;
   f.adapter.ready = async (child) => {
     await ready(child);
@@ -239,7 +239,7 @@ test('external candidate write is rejected instead of refreshing receipt', async
   assert.equal(JSON.parse(fs.readFileSync(f.p.pointer.path)).id, 'old');
 });
 test('new start failure starts the unchanged old package without database restore', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.adapter.ready = async () => {
     if (f.starts.length === 1) throw Error('NEW_FAILED');
   };
@@ -248,7 +248,7 @@ test('new start failure starts the unchanged old package without database restor
   assert.equal(fs.readFileSync(f.p.database, 'utf8'), 'synthetic; not opened');
 });
 test('rollback failure is explicit and never publishes the candidate', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.adapter.ready = async () => {
     throw Error('START_FAILED');
   };
@@ -285,7 +285,7 @@ test('ordinary unknown system properties do not claim global completeness', () =
   );
 });
 test('changed history and changed source artifact are rejected before stop', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.write(path.join(f.previous, 'server/main.cjs'), 'changed history');
   await assert.rejects(update.apply(f.p, f.adapter));
   assert.deepEqual(f.starts, []);
@@ -300,7 +300,7 @@ test('forged extra backend entry cannot be adopted into a frontend manifest', ()
   );
 });
 test('source artifact mutation is rejected before stopping the old instance', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   let stops = 0;
   f.adapter.stop = async () => {
     stops++;
@@ -311,7 +311,7 @@ test('source artifact mutation is rejected before stopping the old instance', as
   assert.equal(stops, 0);
 });
 test('foreign publication lock is preserved and blocks every effect', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   const file = path.join(f.p.installation, '.active-release.lock');
   f.write(file, 'another publisher');
   await assert.rejects(update.apply(f.p, f.adapter), /EEXIST/);
@@ -353,8 +353,8 @@ test('actual production writer classification retains unknowns and rejects relat
   assert.deepEqual(observed.unknown, [42]);
   assert.equal(observed.globalComplete, false);
 });
-test('same database is bound by actual identity across slashes, quoting, normalization and hard-link alias', (t) => {
-  const f = fixture(t),
+test('same database is bound by actual identity across slashes, quoting, normalization and hard-link alias', async (t) => {
+  const f = await fixture(t),
     alias = path.join(path.dirname(f.p.database), 'database-alias.db');
   fs.linkSync(f.p.database, alias);
   const values = [
@@ -392,8 +392,8 @@ test('same database is bound by actual identity across slashes, quoting, normali
     );
   }
 });
-test('related unresolvable, relative, drive-relative and ambiguous database paths are refused', (t) => {
-  const f = fixture(t);
+test('related unresolvable, relative, drive-relative and ambiguous database paths are refused', async (t) => {
+  const f = await fixture(t);
   for (const value of [
     'data.db',
     'C:data.db',
@@ -424,7 +424,7 @@ test('related unresolvable, relative, drive-relative and ambiguous database path
   }
 });
 test('rollback rechecks writers after ready and only stops its owned fallback on conflict', async (t) => {
-  const f = fixture(t),
+  const f = await fixture(t),
     writers = f.adapter.writers,
     stopNew = f.adapter.stopNew,
     stopped = [];
@@ -623,8 +623,8 @@ test('bounded local-drive observation is required even with an injected resolver
     assert.equal(calls, 0);
   }
 });
-test('local junction is refused before looking up any child beneath it', (t) => {
-  const f = fixture(t),
+test('local junction is refused before looking up any child beneath it', async (t) => {
+  const f = await fixture(t),
     redirect = path.join(path.dirname(f.p.database), 'redirect'),
     prior = fs.lstatSync;
   let childLookups = 0;
@@ -666,8 +666,8 @@ test('local junction is refused before looking up any child beneath it', (t) => 
     fs.lstatSync = prior;
   }
 });
-test('plan accepts only the reviewed installed publisher rather than the development module', (t) => {
-  const f = fixture(t);
+test('plan accepts only the reviewed installed publisher rather than the development module', async (t) => {
+  const f = await fixture(t);
   assert.equal(
     f.p.publicationTool.sha256,
     '28bc6160cf040aa11c37e9413ea44e316eeb2923a482d12ba09b0c1458500009',
@@ -676,7 +676,7 @@ test('plan accepts only the reviewed installed publisher rather than the develop
     f.p.publicationTool.path,
     fs.readFileSync(path.join(__dirname, 'active-release.cjs')),
   );
-  assert.throws(
+  await assert.rejects(
     () =>
       update.plan({
         installation: f.p.installation,
@@ -690,7 +690,7 @@ test('plan accepts only the reviewed installed publisher rather than the develop
   assert(!fs.existsSync(path.join(f.root, '.build-budget.lock')));
 });
 test('publisher changed after plan is rejected before creating locks or candidate or stopping processes', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   let stops = 0;
   f.adapter.stop = async () => {
     stops++;
@@ -708,7 +708,7 @@ test('publisher changed after plan is rejected before creating locks or candidat
     assert(!fs.existsSync(path.join(f.root, name)));
 });
 test('changing the plan pin to match an arbitrary publisher cannot authorize it', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.write(
     f.p.publicationTool.path,
     'arbitrary lock-looking publisher .active-release.lock',
@@ -719,11 +719,78 @@ test('changing the plan pin to match an arbitrary publisher cannot authorize it'
   assert.deepEqual(f.starts, []);
 });
 test('identical publisher bytes at a different path cannot replace the installed-path pin', async (t) => {
-  const f = fixture(t),
+  const f = await fixture(t),
     alternate = path.join(f.p.installation, 'alternate-publisher.cjs');
   f.write(alternate, fs.readFileSync(f.p.publicationTool.path));
   f.p.publicationTool.path = alternate;
   await assert.rejects(update.apply(f.p, f.adapter), /STATE_CHANGED/);
   assert(!fs.existsSync(path.join(f.root, '.build-budget.lock')));
+  assert.deepEqual(f.starts, []);
+});
+test('reviewed read-only companion remains recorded and its exit is required after stopping the parent', async (t) => {
+  const f = await fixture(t),
+    writers = f.adapter.writers,
+    exited = f.adapter.requireExited,
+    observed = [];
+  const companion = {
+    pid: 111,
+    startUtc: '2026-10-21T00:01:00Z',
+    parent: f.p.expected,
+    role: 'read-only-business-database',
+  };
+  f.p.readOnlyCompanions = [companion];
+  f.adapter.writers = async () => {
+    const v = await writers();
+    return {
+      ...v,
+      readOnlyCompanions: v.applicationPids[0] === 101 ? [companion] : [],
+    };
+  };
+  f.adapter.requireExited = async (identity) => {
+    observed.push(identity.pid);
+    await exited(identity);
+  };
+  const result = await update.apply(f.p, f.adapter);
+  assert(observed.includes(111));
+  assert.equal(result.readOnlyCompanions[0].oldOwnerExitConfirmed, true);
+});
+test('unreviewed/restarted companion rejects before copying or stopping', async (t) => {
+  const f = await fixture(t),
+    writers = f.adapter.writers;
+  f.adapter.writers = async () => ({
+    ...(await writers()),
+    readOnlyCompanions: [{ pid: 999, startUtc: 'new', parent: f.p.expected }],
+  });
+  await assert.rejects(update.apply(f.p, f.adapter), /STATE_CHANGED/);
+  assert.deepEqual(f.starts, []);
+  assert(!fs.existsSync(path.join(f.root, f.p.candidateId)));
+});
+test('a companion that outlives its stopped parent is not killed or ignored', async (t) => {
+  const f = await fixture(t),
+    writers = f.adapter.writers,
+    exited = f.adapter.requireExited,
+    killed = [];
+  const companion = {
+    pid: 111,
+    startUtc: '2026-10-21T00:01:00Z',
+    parent: f.p.expected,
+  };
+  f.p.readOnlyCompanions = [companion];
+  f.adapter.writers = async () => ({
+    ...(await writers()),
+    readOnlyCompanions: [companion],
+  });
+  f.adapter.requireExited = async (identity) => {
+    if (identity.pid === 111) throw Error('COMPANION_STILL_ALIVE');
+    await exited(identity);
+  };
+  f.adapter.stopNew = async (child) => {
+    killed.push(child.pid);
+  };
+  await assert.rejects(
+    update.apply(f.p, f.adapter),
+    /UPDATE_AND_ROLLBACK_FAILED/,
+  );
+  assert(!killed.includes(111));
   assert.deepEqual(f.starts, []);
 });

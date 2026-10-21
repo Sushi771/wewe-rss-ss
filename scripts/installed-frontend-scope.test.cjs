@@ -34,6 +34,10 @@ test('installed frontend patch contains no search, shared protocol, migration or
     'active-release.cjs',
     'frontend-update.cjs',
     'frontend-update.test.cjs',
+    'frontend-inventory.cjs',
+    'frontend-inventory.test.cjs',
+    'frontend-companion.cjs',
+    'frontend-companion.test.cjs',
     'frontend-writers.ps1',
     'host-write-boundaries.test.cjs',
   ]);

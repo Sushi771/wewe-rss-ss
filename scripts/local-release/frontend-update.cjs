@@ -10,6 +10,7 @@ const { spawn } = lib.hostEffects.processes;
 const { parseArgs, parseEnv } = require('node:util');
 const { sameIdentity, processIdentity, waitReady } = require('./switch.cjs');
 const { argv: windowsArgv } = require('./windows-release-references.cjs');
+const { recognize: recognizeCompanion } = require('./frontend-companion.cjs');
 const QUERY_TIMEOUT_MS = 15000;
 const QUERY_MAX_BYTES = 4 * 1024 ** 2;
 const QUERY_MAX_ENTRIES = 4096;
@@ -43,44 +44,7 @@ const toolPins = () =>
 function checkPin(value) {
   equal(lib.fileHash(value.path), value.sha256);
 }
-function inventory(root, excluded = []) {
-  const rows = [],
-    deadline = Date.now() + 60000;
-  let bytes = 0,
-    slots = 0,
-    entries = 0;
-  function visit(at, relative = '') {
-    if (excluded.includes(relative)) return;
-    if (++entries > 1500000 || Date.now() > deadline)
-      throw Error('FRONTEND_INVENTORY_BUDGET');
-    const s = fs.lstatSync(at, { bigint: true });
-    const identity = [s.dev, s.ino, s.birthtimeNs].map(String);
-    if (s.isSymbolicLink()) {
-      // Junction aliases are not followed or double-counted. Escapes are refused.
-      assert(lib.inside(root, canonical(at)), 'FRONTEND_HISTORY_LINK_ESCAPE');
-      rows.push([relative, 'link', identity, canonical(at)]);
-    } else if (s.isDirectory()) {
-      rows.push([relative, 'directory', identity]);
-      for (const name of fs.readdirSync(at).sort()) {
-        if (!relative && excluded.includes(name)) continue;
-        if (!relative && fs.lstatSync(path.join(at, name)).isDirectory())
-          slots++;
-        visit(path.join(at, name), relative ? relative + '/' + name : name);
-      }
-    } else {
-      assert(s.isFile(), 'FRONTEND_UNSUPPORTED_ENTRY');
-      bytes += Number(s.size);
-      rows.push([
-        relative,
-        'file',
-        identity,
-        ...[s.size, s.mtimeNs, s.ctimeNs].map(String),
-      ]);
-    }
-  }
-  visit(root);
-  return { bytes, slots, entries, digest: jsonHash(rows) };
-}
+const { inventory } = require('./frontend-inventory.cjs');
 function lock(root, name) {
   const file = path.join(root, name),
     token = crypto.randomUUID();
@@ -129,6 +93,7 @@ function classifyWriters(raw, installation, database, options = {}) {
     conflicts: [],
     unknown: [],
     globalComplete: false,
+    readOnlyCompanions: [],
   };
   const normalize = (value) => path.win32.normalize(value.replace(/\//g, '\\'));
   const requireLocalPath = (value) => {
@@ -232,7 +197,24 @@ function classifyWriters(raw, installation, database, options = {}) {
     }
     if (appExe && runtime && sameDb)
       result.applicationPids.push(item.ProcessId);
-    else if (appExe || sameDb) result.conflicts.push(item.ProcessId);
+    else if (appExe || sameDb) {
+      try {
+        const parent = raw.processes.find(
+          (p) => p.ProcessId === item.ParentProcessId,
+        );
+        result.readOnlyCompanions.push(
+          recognizeCompanion(
+            item,
+            args,
+            parent,
+            options.expected,
+            options.companionOptions,
+          ),
+        );
+      } catch {
+        result.conflicts.push(item.ProcessId);
+      }
+    }
   }
   for (const key of ['applicationPids', 'conflicts', 'unknown'])
     result[key].sort((a, b) => a - b);
@@ -256,8 +238,12 @@ function validateWriters(observation, expected) {
   );
   if (expected) equal(observation.applicationPids, [expected.pid]);
   else equal(observation.applicationPids, []);
+  for (const companion of observation.readOnlyCompanions || []) {
+    assert(expected, 'FRONTEND_COMPANION_NOT_EXITED');
+    sameIdentity(companion.parent, expected);
+  }
 }
-function plan(options) {
+async function plan(options) {
   const installation = canonical(options.installation),
     root = canonical(path.join(installation, '.local-releases'));
   const publicationTool = pin(
@@ -296,8 +282,10 @@ function plan(options) {
     });
   assert.equal(new Set(files.map((f) => f.path)).size, 4);
   assert(files.some((f) => f.path === 'index.hbs'));
-  const baseline = inventory(root),
-    oldBytes = inventory(previous).bytes;
+  const baseline = await inventory(root, [], {
+      onProgress: options.onInventoryProgress,
+    }),
+    oldBytes = (await inventory(previous)).bytes;
   const reserveBytes =
     oldBytes + files.reduce((n, f) => n + f.bytes, 0) + 1024 * 1024;
   assert(reserveBytes <= GROWTH, 'FRONTEND_GROWTH_EXCEEDS_RETAIN_ONLY_LIMIT');
@@ -320,6 +308,17 @@ function plan(options) {
   equal(expected.commandLine, cmd.line);
   equal(expected.executable.toLowerCase(), cmd.exe.toLowerCase());
   equal(expected.port, 4000);
+  const writerObservation = options.writerObservation
+    ? pin(options.writerObservation)
+    : null;
+  const observedWriters = writerObservation
+    ? classifyWriters(read(writerObservation.path), installation, database, {
+        expected,
+        databaseIdentity: id(database),
+      })
+    : null;
+  if (observedWriters) validateWriters(observedWriters, expected);
+  const readOnlyCompanions = observedWriters?.readOnlyCompanions || [];
   return {
     format: 1,
     kind: 'retain-only-frontend-v1',
@@ -342,6 +341,8 @@ function plan(options) {
     maxTotalBytes: baseline.bytes + reserveBytes,
     candidateId,
     expected,
+    writerObservation,
+    readOnlyCompanions,
     globalReferenceCompleteness: 'unknown; no cleanup authorized',
     tool: pin(__filename),
     tools: toolPins(),
@@ -372,6 +373,7 @@ function checkPlan(p) {
   equal(p.maxTotalBytes, p.baseline.bytes + p.reserveBytes);
   assert.equal(path.dirname(p.previous), p.root);
   checkPin(p.tool);
+  if (p.writerObservation) checkPin(p.writerObservation);
   equal(toolPins(), p.tools);
   checkPin(p.previousManifest);
   p.config.forEach(checkPin);
@@ -428,11 +430,11 @@ async function apply(p, adapter) {
   ];
   const history = () => inventory(p.root, [...names, p.candidateId]);
   const pointerCheck = () => checkPin(p.pointer);
-  const before = () => {
+  const before = async () => {
     checkPlan(p);
     locks.forEach((l) => l.check());
     pointerCheck();
-    equal(history(), p.baseline);
+    equal(await history(), p.baseline);
     checkPin(p.previousManifest);
     lib.verifyRelease(p.previous);
   };
@@ -441,10 +443,13 @@ async function apply(p, adapter) {
       locks.push(
         lock(name === '.active-release.lock' ? p.installation : p.root, name),
       );
-    before();
+    await before();
     oldSnapshot = lib.fingerprint(p.previous);
     sameIdentity(await adapter.snapshot(p.expected.pid), p.expected);
-    validateWriters(await adapter.writers(), p.expected);
+    const initialWriters = await adapter.writers();
+    validateWriters(initialWriters, p.expected);
+    const readOnlyCompanions = initialWriters.readOnlyCompanions || [];
+    equal(readOnlyCompanions, p.readOnlyCompanions || []);
     const free = fs.statfsSync(p.root);
     assert(
       Number(free.bavail) * Number(free.bsize) >= FREE + p.reserveBytes,
@@ -500,9 +505,9 @@ async function apply(p, adapter) {
       equivalent(oldSnapshot, lib.fingerprint(candidate), p.files);
     };
     verifyCandidate();
-    before();
+    await before();
     assert(
-      inventory(candidate).bytes <= p.reserveBytes,
+      (await inventory(candidate)).bytes <= p.reserveBytes,
       'FRONTEND_RESERVATION_EXCEEDED',
     );
     // Recheck exact identity, all app writers, pointer and frozen history before stopping.
@@ -512,9 +517,11 @@ async function apply(p, adapter) {
     const result = await adapter.stop(p.expected);
     assert.equal(result.stopped, true, 'FRONTEND_OLD_INSTANCE_NOT_EXITED');
     await adapter.requireExited(p.expected);
+    for (const companion of readOnlyCompanions)
+      await adapter.requireExited(companion);
     validateWriters(await adapter.writers(), null);
     await adapter.requireFreePort();
-    before();
+    await before();
     verifyCandidate();
     newProcess = await adapter.start(candidate, p.candidateId);
     await adapter.ready(newProcess);
@@ -525,10 +532,10 @@ async function apply(p, adapter) {
     equal(running.commandLine, cmd.line);
     equal(running.port, 4000);
     validateWriters(await adapter.writers(), running);
-    before();
+    await before();
     verifyCandidate();
     await adapter.verifyAssets(p.files);
-    before();
+    await before();
     verifyCandidate();
     // Shared publication lock remains owned through the compare and rename.
     const temp = path.join(p.root, 'active-' + crypto.randomUUID() + '.tmp');
@@ -547,6 +554,10 @@ async function apply(p, adapter) {
       oldStopped: true,
       globalReferenceCompleteness: p.globalReferenceCompleteness,
       databaseRestored: false,
+      readOnlyCompanions: readOnlyCompanions.map((companion) => ({
+        ...companion,
+        oldOwnerExitConfirmed: true,
+      })),
     };
   } catch (error) {
     if (newProcess) {
@@ -624,8 +635,13 @@ function productionAdapter(p) {
     )
       delete env[key];
   const run = lib.run;
+  let applicationIdentity = p.expected;
   const adapter = {
-    snapshot: (pid) => processIdentity('Snapshot', pid, 4000),
+    snapshot: (pid) => {
+      const actual = processIdentity('Snapshot', pid, 4000);
+      applicationIdentity = actual;
+      return actual;
+    },
     stop: (expected) => processIdentity('Stop', expected.pid, 4000, expected),
     writers: () =>
       classifyWriters(
@@ -647,7 +663,7 @@ function productionAdapter(p) {
         ),
         p.installation,
         p.database,
-        { databaseIdentity: p.databaseIdentity },
+        { databaseIdentity: p.databaseIdentity, expected: applicationIdentity },
       ),
     requireExited: async (expected) => {
       // A missing PID is confirmed by CIM, not by a failed inaccessible snapshot.
@@ -749,6 +765,7 @@ async function main() {
       web: { type: 'string' },
       artifacts: { type: 'string' },
       expected: { type: 'string' },
+      'writer-observation': { type: 'string' },
       plan: { type: 'string' },
       'approved-sha256': { type: 'string' },
       apply: { type: 'boolean', default: false },
@@ -763,7 +780,15 @@ async function main() {
     const p = read(values.plan);
     console.log(JSON.stringify(await apply(p, productionAdapter(p))));
   } else {
-    const p = plan({ ...values, expected: read(values.expected) });
+    const p = await plan({
+      ...values,
+      writerObservation: values['writer-observation'],
+      expected: read(values.expected),
+      onInventoryProgress: (progress) =>
+        process.stderr.write(
+          JSON.stringify({ type: 'inventory-progress', ...progress }) + '\n',
+        ),
+    });
     fs.writeFileSync(values.plan, JSON.stringify(p, null, 2) + '\n', {
       flag: 'wx',
       mode: 0o600,
@@ -781,6 +806,14 @@ async function main() {
 }
 if (require.main === module)
   main().catch((error) => {
+    if (error.inventory)
+      console.error(
+        JSON.stringify({
+          type: 'inventory-failed',
+          code: error.message,
+          ...error.inventory,
+        }),
+      );
     console.error(error.stack);
     process.exitCode = 1;
   });
