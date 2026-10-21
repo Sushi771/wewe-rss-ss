@@ -148,6 +148,10 @@ function fixture({
       },
     }),
     article: {
+      searchStatus: {
+        useQuery: () => ({ data: { total: 0, pending: 0, uncached: 0 } }),
+      },
+      prepareSearch: { useMutation: () => ({ mutateAsync: async () => ({}) }) },
       byId: { useQuery: () => ({}) },
       retryBody: {
         useMutation: () => ({
