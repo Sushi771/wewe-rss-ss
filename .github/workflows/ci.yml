@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v3
         with:
           version: 9
@@ -21,6 +23,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install
+
+      - name: Check README repository links
+        run: node --test scripts/check-readme-links.test.cjs
 
       - name: Format check
         run: pnpm fmt.check
@@ -46,6 +51,11 @@ jobs:
           LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
           ARTICLE_LIST_BROWSER_SAMPLES: '1'
         run: node --test scripts/article-list-browser.test.cjs
+      - name: Test synthetic reading image and archive experience
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+          EXPERIENCE_SAMPLES: '1'
+        run: node --test scripts/experience-baseline.test.cjs
       - name: Test delivered status and media UI offline
         run: node --test scripts/reading-transport.test.cjs scripts/reading-query-cache.test.cjs scripts/export-article-batches.test.cjs scripts/storage-status-ui.test.cjs scripts/cache-sync-status-ui.test.cjs scripts/local-release/space-budget.test.cjs
       - name: Test delivered reading and automatic media components in a browser

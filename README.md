@@ -4,7 +4,7 @@
 
 ## 版本范围
 
-默认 `main` 已合入订阅、缓存、阅读与导出的多项集成改动；本文源码链接固定到核对基线 [`33ec7c3`](https://github.com/Sushi771/wewe-rss-ss/commit/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65)（2026-10-18），不再以旧集成分支是否合入判断功能。独立集成提交 [`8a3141c`](https://github.com/Sushi771/wewe-rss-ss/commit/8a3141c43b1b09e92ebd75780f26c58939557906) 的分组/日期筛选、阅读器和后台启动审计接线尚未全部回流到该 main 基线。构建已有部署的替换包前必须核对这些差异；不能用 main 的旧接线覆盖已交付功能。README、开发分支或测试通过均不代表已有部署已升级。
+默认 `main` 已合入订阅、缓存、阅读与导出的多项集成改动；本文有效的历史源码链接固定到核对基线 [`33ec7c3`](https://github.com/Sushi771/wewe-rss-ss/commit/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65)（2026-10-18）；已修复的断链使用当前相对路径，不再以旧集成分支是否合入判断功能。独立集成提交 [`8a3141c`](https://github.com/Sushi771/wewe-rss-ss/commit/8a3141c43b1b09e92ebd75780f26c58939557906) 的分组/日期筛选、阅读器和后台启动审计接线尚未全部回流到该 main 基线。构建已有部署的替换包前必须核对这些差异；不能用 main 的旧接线覆盖已交付功能。README、开发分支或测试通过均不代表已有部署已升级。
 
 ## 已实现功能
 
@@ -87,7 +87,7 @@ pnpm start:server
 | `WECHAT2RSS_ACTIVE_SCHEDULE` / `ENABLE_SCHEDULED_UPDATES` | 同时为 `1` 才请求启用主动轮次，还需来源与启动检查通过。                                             |
 | `DISABLE_SCHEDULED_UPDATES`                               | `1` 禁止定时更新；测试库保持关闭。                                                                  |
 
-自建容器模板与私有部署设计见 [技术部署文档][deployment-doc]。模板需按目标版本核对迁移、来源授权和计划开关，不能只运行容器就认为订阅已就绪。Windows 固定产物、启动与回滚机制见 [本机版本化部署][release-doc]；其中旧日期的部署记录属于历史，不是本次部署指令。
+Windows 固定产物、启动与回滚机制见 [本机版本化部署演练][deployment-doc]；其中旧日期的部署记录属于历史，不是本次部署指令。容器构建入口需按目标版本核对迁移、来源授权和计划开关，不能只运行容器就认为订阅已就绪。
 
 ### 数据、备份与安全
 
@@ -112,9 +112,9 @@ pnpm start:server
 - [增量归档、筛选范围和 ZIP 合同][export-doc]
 - [单篇下载与缓存来源边界][download-doc]
 - [主动更新调度][schedule-doc] / [自动缓存同步与恢复][recovery-doc]
-- [技术部署与来源配置][deployment-doc]
+- [Windows 固定产物与部署演练][deployment-doc]
 - [产品需求与规划][product-doc]（规划项不等于已交付）
-- [开发指南][development-doc] / [统一离线目录][layout-doc]
+- [开发指南][development-doc] / [本地增量归档合同][layout-doc]
 
 ## 许可证与致谢
 
@@ -123,16 +123,16 @@ pnpm start:server
 [provider]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/provider-registry.ts
 [subscription]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/trpc/trpc.service.ts
 [batches]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/wechat2rss-subscription-batches.ts
-[cache]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/collection/insert-only-cache.ts
+[cache]: apps/server/src/collection/collection.service.ts
 [local-save]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/article-local-save.ts
 [schedule-code]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/src/feeds/active-refresh-schedule.ts
 [backup-code]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/apps/server/scripts/backup-sqlite.py
-[export-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/INCREMENTAL_ARTICLE_EXPORT.md
-[download-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/ARTICLE_DOWNLOAD_TOOL.md
-[schedule-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/ACTIVE_REFRESH_SCHEDULE.md
-[recovery-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/AUTO_REFRESH_RECOVERY_20261012.md
-[deployment-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/paid-sources/TECHNICAL_DEPLOYMENT.md
+[export-doc]: docs/INCREMENTAL_ARTICLE_EXPORT.md
+[download-doc]: docs/paid-sources/PRODUCT_REQUIREMENTS.md#单篇下载与部署边界
+[schedule-doc]: apps/server/src/feeds/active-refresh-schedule.ts
+[recovery-doc]: docs/MAIN_WECHAT_RUNTIME_EXTRACTION.md
+[deployment-doc]: docs/LOCAL_RELEASE_REHEARSAL.md
 [release-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/LOCAL_RELEASE_REHEARSAL.md
-[product-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/paid-sources/PRODUCT_REQUIREMENTS.md
+[product-doc]: docs/paid-sources/PRODUCT_REQUIREMENTS.md
 [development-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/DEVELOPMENT.md
-[layout-doc]: https://github.com/Sushi771/wewe-rss-ss/blob/33ec7c3ebc20ce55d5f81259a5dd515912b5ca65/docs/OFFLINE_ARTICLE_LAYOUT.md
+[layout-doc]: docs/INCREMENTAL_ARTICLE_EXPORT.md
