@@ -798,6 +798,9 @@ function productionAdapter(p) {
     )
       delete env[key];
   const run = lib.run;
+  // Match the existing controlled restart: Python helpers must not mutate the
+  // immutable candidate or rollback package by creating __pycache__ files.
+  env.PYTHONDONTWRITEBYTECODE = '1';
   let applicationIdentity = p.expected;
   const adapter = {
     snapshot: (pid) => {

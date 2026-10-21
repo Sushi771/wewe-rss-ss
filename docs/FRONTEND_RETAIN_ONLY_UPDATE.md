@@ -15,3 +15,5 @@
 使用异步新CLI准备私有计划；计划包含真实路径和进程信息，只留本机。独立核对完整计划SHA后才允许apply。不能复用旧同步私有脚本或旧计划格式。当前仅合成数据反例通过，尚未执行本版真实计划或更新。
 
 已核实的实际布局：模板和资源固定在server/client/index.hbs及server/client/assets，根client不存在。预算、预期文件集、复制排除与资源写入全部使用server/client；计划显式绑定frontendDirectory。根client歧义布局拒绝，不创建该目录来绕过。
+
+候选启动和旧包回退均强制继承PYTHONDONTWRITEBYTECODE=1，与原受控重启一致，禁止Python辅助进程向不可变包写入字节码缓存。未在清单中的运行时文件仍拒绝，不刷新清单接纳。

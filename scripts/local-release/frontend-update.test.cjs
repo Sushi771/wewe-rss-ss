@@ -938,3 +938,41 @@ test('ambiguous root client layout is refused rather than creating or updating i
   );
   assert.deepEqual(f.starts, []);
 });
+test(
+  'both candidate and rollback inherit Python no-bytecode policy even if caller disabled it',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const cp = require('node:child_process'),
+      { EventEmitter } = require('node:events'),
+      prior = cp.spawn,
+      priorEnv = process.env.PYTHONDONTWRITEBYTECODE,
+      seen = [];
+    try {
+      process.env.PYTHONDONTWRITEBYTECODE = '0';
+      cp.spawn = (exe, args, options) => {
+        seen.push({ exe, args, options });
+        const child = new EventEmitter();
+        child.pid = 123;
+        child.exitCode = null;
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      };
+      const adapter = update.productionAdapter({
+        installation: 'C:\\app',
+        database: 'C:\\app\\data.db',
+        config: [],
+      });
+      await adapter.start('C:\\app\\candidate', 'candidate');
+      await adapter.start('C:\\app\\old', 'old');
+      assert.equal(seen.length, 2);
+      for (const call of seen) {
+        assert.equal(call.options.env.PYTHONDONTWRITEBYTECODE, '1');
+        assert.equal(call.options.env.LOCAL_RELEASE_REUSE_VERIFIED, '0');
+      }
+    } finally {
+      cp.spawn = prior;
+      if (priorEnv === undefined) delete process.env.PYTHONDONTWRITEBYTECODE;
+      else process.env.PYTHONDONTWRITEBYTECODE = priorEnv;
+    }
+  },
+);
