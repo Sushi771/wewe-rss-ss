@@ -21,7 +21,12 @@ function fixture(t, extra = () => {}) {
   };
   write(
     path.join(installation, 'scripts/local-release/active-release.cjs'),
-    fs.readFileSync(path.join(__dirname, 'active-release.cjs')),
+    JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, '../fixtures/installed-pointer-lock.json'),
+        'utf8',
+      ),
+    ).source,
   );
   write(path.join(previous, 'runtime/node.exe'), 'fixed-runtime');
   write(path.join(previous, 'runtime.cjs'), 'fixed-startup');
@@ -660,4 +665,65 @@ test('local junction is refused before looking up any child beneath it', (t) => 
   } finally {
     fs.lstatSync = prior;
   }
+});
+test('plan accepts only the reviewed installed publisher rather than the development module', (t) => {
+  const f = fixture(t);
+  assert.equal(
+    f.p.publicationTool.sha256,
+    '28bc6160cf040aa11c37e9413ea44e316eeb2923a482d12ba09b0c1458500009',
+  );
+  f.write(
+    f.p.publicationTool.path,
+    fs.readFileSync(path.join(__dirname, 'active-release.cjs')),
+  );
+  assert.throws(
+    () =>
+      update.plan({
+        installation: f.p.installation,
+        web: path.join(f.p.installation, 'web'),
+        artifacts: path.join(f.p.installation, 'artifacts.json'),
+        expected: f.p.expected,
+      }),
+    /STATE_CHANGED/,
+  );
+  assert.deepEqual(f.starts, []);
+  assert(!fs.existsSync(path.join(f.root, '.build-budget.lock')));
+});
+test('publisher changed after plan is rejected before creating locks or candidate or stopping processes', async (t) => {
+  const f = fixture(t);
+  let stops = 0;
+  f.adapter.stop = async () => {
+    stops++;
+    return { stopped: true };
+  };
+  f.write(f.p.publicationTool.path, 'unreviewed host change');
+  await assert.rejects(update.apply(f.p, f.adapter), /STATE_CHANGED/);
+  assert.equal(stops, 0);
+  assert.deepEqual(f.starts, []);
+  for (const name of [
+    '.build-budget.lock',
+    '.frontend-update.lock',
+    f.p.candidateId,
+  ])
+    assert(!fs.existsSync(path.join(f.root, name)));
+});
+test('changing the plan pin to match an arbitrary publisher cannot authorize it', async (t) => {
+  const f = fixture(t);
+  f.write(
+    f.p.publicationTool.path,
+    'arbitrary lock-looking publisher .active-release.lock',
+  );
+  f.p.publicationTool.sha256 = lib.fileHash(f.p.publicationTool.path);
+  await assert.rejects(update.apply(f.p, f.adapter), /STATE_CHANGED/);
+  assert(!fs.existsSync(path.join(f.root, '.build-budget.lock')));
+  assert.deepEqual(f.starts, []);
+});
+test('identical publisher bytes at a different path cannot replace the installed-path pin', async (t) => {
+  const f = fixture(t),
+    alternate = path.join(f.p.installation, 'alternate-publisher.cjs');
+  f.write(alternate, fs.readFileSync(f.p.publicationTool.path));
+  f.p.publicationTool.path = alternate;
+  await assert.rejects(update.apply(f.p, f.adapter), /STATE_CHANGED/);
+  assert(!fs.existsSync(path.join(f.root, '.build-budget.lock')));
+  assert.deepEqual(f.starts, []);
 });

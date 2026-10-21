@@ -15,6 +15,10 @@ const QUERY_MAX_BYTES = 4 * 1024 ** 2;
 const QUERY_MAX_ENTRIES = 4096;
 const SOURCE = 'f618e48f48ff0e3df1c646cb8a666a2461815732';
 const BASE = '48fdf73f4d770001bbb6de3e2383189811e56ccb';
+// Independently reviewed installed publisher: only the mutex was added to its
+// existing implementation. Do not replace it with the newer development module.
+const INSTALLED_PUBLISHER_SHA256 =
+  '28bc6160cf040aa11c37e9413ea44e316eeb2923a482d12ba09b0c1458500009';
 const GROWTH = 768 * 1024 ** 2;
 const FREE = 4 * 1024 ** 3;
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
@@ -259,10 +263,7 @@ function plan(options) {
   const publicationTool = pin(
     path.join(installation, 'scripts/local-release/active-release.cjs'),
   );
-  equal(
-    publicationTool.sha256,
-    lib.fileHash(path.join(__dirname, 'active-release.cjs')),
-  );
+  equal(publicationTool.sha256, INSTALLED_PUBLISHER_SHA256);
   const pointer = pin(path.join(root, 'active.json')),
     active = read(pointer.path);
   const previous = canonical(path.join(root, active.id));
@@ -352,11 +353,14 @@ function checkPlan(p) {
   assert.equal(p.baseCommit, BASE);
   equal(id(p.root), p.rootIdentity);
   equal(id(p.installation), p.installationIdentity);
-  checkPin(p.publicationTool);
   equal(
-    p.publicationTool.sha256,
-    lib.fileHash(path.join(__dirname, 'active-release.cjs')),
+    p.publicationTool.path,
+    canonical(
+      path.join(p.installation, 'scripts/local-release/active-release.cjs'),
+    ),
   );
+  checkPin(p.publicationTool);
+  equal(p.publicationTool.sha256, INSTALLED_PUBLISHER_SHA256);
   equal(canonical(path.join(p.installation, '.local-releases')), p.root);
   equal(
     canonical(path.join(p.installation, 'apps/server/data/wewe-rss.db')),
