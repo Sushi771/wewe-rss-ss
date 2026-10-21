@@ -7,6 +7,7 @@ const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/server')] }),
 );
 const pins = require('./fixtures/deployed-export-adaptation.json');
+const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
@@ -120,7 +121,7 @@ test('the reviewed export dialog and production reading layout retain their appr
     )
     .find((node) => node.name.getText(ast) === 'Feeds');
   const returned = feeds.initializer.body.statements.find(ts.isReturnStatement);
-  // This snapshot includes the authorized unified export dialog. The server,
+  // This snapshot includes the authorized unified export dialog. Product wording and expandable diagnostics are reviewed separately. The server,
   // startup and data contracts above remain pinned to the deployment baseline.
   function shape(node) {
     if (
@@ -133,5 +134,5 @@ test('the reviewed export dialog and production reading layout retain their appr
       ? [node.kind, children.map(shape).filter((child) => child !== undefined)]
       : [node.kind, node.getText(ast)];
   }
-  assert.equal(hash(JSON.stringify(shape(returned))), pins.indexLayout);
+  assert.equal(hash(JSON.stringify(shape(returned))), copyPins.indexLayout);
 });

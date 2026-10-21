@@ -1,3 +1,7 @@
+## 2026-10-21：前端产品文案，隔离开发、未部署
+
+基于 PR82 的 `7bbdeef40019708c17f2f2aaed631ee78926d9a7` 修复导出弹窗长篇实现说明，并检查搜索、更新进度、账号、下载、导入和归档的同类提示。常态显示用户状态与下一步，技术原文移入详情；保留权限、数据检查、空间不足、验证、部分保存及未确认结果。范围/排序/阅读器/选择/导出业务逻辑保持原状，迁移、服务端和发布工具未修改。测试及浏览器验收边界见 [界面提示说明](PRODUCT_COPY.md)，精确 SHA 与 CI 以草稿 PR 最终记录为准。未执行真实采集、生产写库或部署。
+
 ## 2026-10-18: bounded daily backup lifecycle, development only
 
 Prepared independently on exact `aeb7483c85db8d13f1345011266ae7ee6046adc0`. The Windows opt-in lifecycle persists the original physical generation boundary across restarts and limits admitted periodic data to three normal points plus one pending-confirmation point, under unchanged cumulative caps. Each permanent retirement still needs the existing exact action-time approval; partial outcomes retain the same spent allocation. Unknown/protected origins stay separate. Capacity diagnostics now derive 900/86400 cadence and display the actual interval. No production activation, database copy or retirement was performed. See [activation boundary, fixed-state protocol, exact review flow and synthetic coverage](PERIODIC_BACKUP_CONFIRMED_LIFECYCLE.md). This work is outside the current integration acceptance/main-merge range.

@@ -34,6 +34,23 @@ vm.runInNewContext(
   { timeout: 1000 },
 );
 const expressions: Record<string, string> = {};
+const messageExports: Record<string, unknown> = {};
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync(
+      path.resolve(__dirname, '../../../web/src/utils/operation-message.ts'),
+      'utf8',
+    ),
+    {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2021,
+        module: ts.ModuleKind.CommonJS,
+      },
+    },
+  ).outputText,
+  { exports: messageExports },
+  { timeout: 1000 },
+);
 function visit(node: ts.Node) {
   if (ts.isVariableDeclaration(node) && node.initializer)
     expressions[node.name.getText(ast)] = node.initializer.getText(ast);
@@ -64,6 +81,7 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
       name: '待接入备注',
       url: 'https://www.xiaohongshu.com/synthetic-profile',
       message: '',
+      diagnostic: '',
       creator: '',
       note: 'old-note',
       busy: false,
@@ -74,6 +92,8 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
       active: { current: false },
       setBusy: (v: boolean) => (state.busy = v),
       setMessage: (v: string) => (state.message = v),
+      setOperationError: (v: string) => (state.diagnostic = v),
+      failureMessage: messageExports.failureMessage,
       displayName: state.name,
       profileUrl: state.url,
       setDisplayName: (v: string) => (state.name = v),
@@ -201,7 +221,7 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     state.creator = 'b';
     finish({ message: '窗口已完成', added: 1, status: 'complete' });
     await update;
-    expect(state.message).toBe('博主A：窗口已完成 新增完整缓存笔记：1');
+    expect(state.message).toBe('博主A：窗口已完成 新增已完整保存的笔记：1');
     expect(scope.receipts.current.a).toBe(state.message);
     expect(text).toMatch(
       /disabled=\{busy\}[\s\S]*?aria-pressed=\{creatorId === creator.id\}/,
@@ -479,7 +499,7 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     expect(link.click).toHaveBeenCalledTimes(1);
     expect(link.remove).toHaveBeenCalledTimes(1);
     expect(scope.URL.revokeObjectURL).toHaveBeenCalledWith('blob:synthetic');
-    expect(state.message).toContain('2 篇完整缓存笔记 ZIP');
+    expect(state.message).toContain('2 篇已完整保存的笔记 ZIP');
   });
   it('includes complete cached video in selection and excludes video without a complete archive', () => {
     const selectedNotes = evaluate('selectedNotes', {
@@ -520,11 +540,11 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
       ]);
       expect(state.message).toContain('新增保存 1 篇');
       if (videoCount) {
-        expect(state.message).toContain('1 篇含已归档 video 文件');
-        expect(state.message).toContain('尚未解码或播放');
+        expect(state.message).toContain('1 篇包含视频文件');
+        expect(state.message).toContain('请在本机确认能否播放');
       } else {
         expect(state.message).toContain('本批次不含已归档视频');
-        expect(state.message).not.toContain('含已归档 video 文件');
+        expect(state.message).not.toContain('包含视频文件');
       }
     },
   );
@@ -543,8 +563,8 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
     });
     await evaluate('handleLocalSave', scope)();
     expect(state.message).toContain('新增保存 0 篇，已有保存 1 篇');
-    expect(state.message).toContain('1 篇含已归档 video 文件（含已有保存）');
-    expect(state.message).toContain('尚未解码或播放');
+    expect(state.message).toContain('1 篇包含视频文件');
+    expect(state.message).toContain('请在本机确认能否播放');
   });
   it.each([
     {},
@@ -582,15 +602,17 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
   it('labels cached video honestly and renders metadata and cover only without requesting media', () => {
     const status = evaluate('noteStatus', {});
     expect(status({ status: 'complete', kind: 'video' })).toBe(
-      '视频缓存（结构字节已核，未解码/播放）',
+      '视频已保存（播放未验证）',
     );
-    expect(status({ status: 'complete', kind: 'image-text' })).toBe('图文缓存');
+    expect(status({ status: 'complete', kind: 'image-text' })).toBe(
+      '图文已保存',
+    );
     expect(status({ status: 'video-skipped', kind: 'video' })).toBe(
       '视频未归档',
     );
     expect(text).not.toContain('完整图文');
     expect(text).toContain('body.data.video.bytes');
-    expect(text).toContain('本页不加载视频字节');
+    expect(text).toContain('视频笔记仅显示封面');
     expect(text).not.toMatch(
       /<video\b|video\/mp4;base64|video\.bytes\.toString|video\.url|createElement\(['"]video/,
     );

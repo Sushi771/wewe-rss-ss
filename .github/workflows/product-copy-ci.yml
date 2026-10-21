@@ -1,0 +1,52 @@
+name: Product copy regressions
+on:
+  push:
+    branches: [fix/product-facing-copy]
+  pull_request:
+    branches: [codex/local-body-search-deployed-compat-20261021]
+permissions:
+  contents: read
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.11.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Frontend lint, types and build
+        run: |
+          pnpm --filter web lint
+          pnpm --filter web build
+      - name: Existing interaction and preservation contracts
+        run: node --test scripts/*ui.test.cjs scripts/article-body-state.test.cjs scripts/export-article-batches.test.cjs scripts/deployed-export-adaptation.test.cjs
+      - name: Synthetic browser acceptance
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+        run: |
+          test -x "$LAYOUT_TEST_BROWSER"
+          node --test --test-concurrency=1 scripts/product-copy-browser.test.cjs scripts/product-export-browser.test.cjs scripts/body-search-browser.test.cjs scripts/article-list-browser.test.cjs scripts/feed-browse-state-browser.test.cjs
+  server-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.11.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter server exec jest --runInBand

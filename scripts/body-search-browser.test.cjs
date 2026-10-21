@@ -253,25 +253,27 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
             'initial list',
           );
           await evaluate("window.fixture.setSearch('命中词')");
+          await until(()=>evaluate("Boolean(Array.from(document.querySelectorAll('summary')).find(x=>x.textContent==='查看搜索范围'))"),'search scope control');
+          await evaluate("Array.from(document.querySelectorAll('summary')).find(x=>x.textContent==='查看搜索范围').click()");
           await until(
-            () => evaluate("document.body.innerText.includes('待整理 260 篇')"),
+            () => evaluate("document.body.innerText.includes('搜索准备中 260 篇')"),
             'unindexed scope shown',
           );
           await until(
             () =>
               evaluate(
-                "Array.from(document.querySelectorAll('button')).some(x=>x.textContent==='停止整理')",
+                "Array.from(document.querySelectorAll('button')).some(x=>x.textContent==='暂停准备')",
               ),
             'automatic batch begins',
           );
           await evaluate(
-            "Array.from(document.querySelectorAll('button')).find(x=>x.textContent==='停止整理').click()",
+            "Array.from(document.querySelectorAll('button')).find(x=>x.textContent==='暂停准备').click()",
           );
           prepareRelease();
           await until(
             () =>
               evaluate(
-                "document.body.innerText.includes('待整理 132 篇') && Array.from(document.querySelectorAll('button')).some(x=>x.textContent==='整理本地正文搜索')",
+                "document.body.innerText.includes('搜索准备中 132 篇') && Array.from(document.querySelectorAll('button')).some(x=>x.textContent==='继续准备正文搜索')",
               ),
             'stop after current bounded batch',
           );
@@ -286,7 +288,7 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
             'stopped indexing must not silently continue',
           );
           await evaluate(
-            "Array.from(document.querySelectorAll('button')).find(x=>x.textContent==='整理本地正文搜索').click()",
+            "Array.from(document.querySelectorAll('button')).find(x=>x.textContent==='继续准备正文搜索').click()",
           );
           await until(
             () =>
@@ -308,7 +310,7 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
             '命中词',
           );
           assert.equal(
-            await evaluate("document.body.innerText.includes('待整理 0 篇')"),
+            await evaluate("document.body.innerText.includes('搜索准备中 0 篇')"),
             true,
           );
           assert.equal(
