@@ -32,7 +32,10 @@ test('cached bodies exceeding the V8 whole-string limit retain the exact baselin
   assert.equal(digestRows(rows()), expected.digest('hex'));
 });
 
-function fixture(t, { current = false } = {}) {
+function fixture(
+  t,
+  { current = false, historicalFeedOrder = false, localColumn = 'TEXT' } = {},
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-startup-sqlite-'));
   t.after(() => {
     assert.equal(path.dirname(root), os.tmpdir());
@@ -56,12 +59,23 @@ function fixture(t, { current = false } = {}) {
     for (const entry of fs
       .readdirSync(migrations, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .sort((a, b) => a.name.localeCompare(b.name))) {
+      .sort((a, b) => {
+        const order = (n) =>
+          historicalFeedOrder && n === '20260927080000_local_collection'
+            ? '20260927040000_local_collection'
+            : n;
+        return order(a.name).localeCompare(order(b.name));
+      })) {
       const sql = fs.readFileSync(
         path.join(migrations, entry.name, 'migration.sql'),
         'utf8',
       );
-      db.exec(sql);
+      db.exec(
+        sql.replace(
+          'ADD COLUMN "local_directory" TEXT',
+          'ADD COLUMN "local_directory" ' + localColumn,
+        ),
+      );
       db.prepare('INSERT INTO _prisma_migrations VALUES(?,?,1,NULL)').run(
         entry.name,
         hash(sql),
@@ -413,8 +427,9 @@ function rollbackFixture(
   t,
   schema21 = true,
   baseSourceCommit = '48fdf73f4d770001bbb6de3e2383189811e56ccb',
+  historical = {},
 ) {
-  const f = fixture(t, { current: true });
+  const f = fixture(t, { current: true, ...historical });
   fs.writeFileSync(
     path.join(f.migrations, 'search-rollback.json'),
     JSON.stringify({
@@ -536,3 +551,61 @@ test('rollback rejects an unreviewed source and extra marker fields in both insp
     );
   }
 });
+
+for (const schema21 of [false, true]) {
+  test(
+    'historical reversed feed additions pass both strict gates at schema' +
+      (schema21 ? 21 : 20),
+    (t) => {
+      const f = rollbackFixture(
+        t,
+        schema21,
+        'f618e48f48ff0e3df1c646cb8a666a2461815732',
+        { historicalFeedOrder: true },
+      );
+      const check = new sqlite.DatabaseSync(f.database, { readOnly: true });
+      const columns = check
+        .prepare('PRAGMA table_info(feeds)')
+        .all()
+        .map((x) => x.name);
+      check.close();
+      assert(
+        columns.indexOf('local_directory') <
+          columns.indexOf('public_album_ids'),
+      );
+      const before = fs.readFileSync(f.database);
+      assert.deepEqual(
+        inspectDatabase(f.database, f.migrations, { startupGate: true })
+          .pending,
+        [],
+      );
+      assert.deepEqual(pythonInspect(f.database, f.migrations).pending, []);
+      assert.deepEqual(fs.readFileSync(f.database), before);
+    },
+  );
+}
+for (const localColumn of [
+  'INTEGER',
+  "TEXT DEFAULT 'unexpected'",
+  "TEXT NOT NULL DEFAULT ''",
+]) {
+  test(
+    'historical feed order still rejects column contract ' + localColumn,
+    (t) => {
+      const f = rollbackFixture(
+        t,
+        true,
+        'f618e48f48ff0e3df1c646cb8a666a2461815732',
+        { historicalFeedOrder: true, localColumn },
+      );
+      assert.throws(
+        () => inspectDatabase(f.database, f.migrations, { startupGate: true }),
+        /schema|drift/i,
+      );
+      assert.throws(
+        () => pythonInspect(f.database, f.migrations),
+        /schema|drift/i,
+      );
+    },
+  );
+}
