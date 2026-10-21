@@ -118,6 +118,30 @@ SQLite object definitions, including triggers and partial indexes, allowing only
 CRLF/LF normalization. Unknown tables, views, migrations and SQL drift fail closed.
 Neither inspector migrates or downgrades the database.
 
+## One reviewed held partial workspace
+
+The one-off `buildOnly.recoveryOf` format `held-6643-v1` accepts only a reviewed
+plan plus separately pinned intent/moved receipts for the four-directory,
+three-file partial workspace (`package.json`, `build/package.json`,
+`build/schema.prisma`). It contains no relocation or cleanup operation. The old
+policy, raw ledger identity/hash, sentinel and failed-claim binding remain checked;
+the retained subtree must match the approved identities, hashes and 6,643 bytes.
+It is frozen evidence, never an imported compiler receipt or executable package.
+
+The existing pair controller starts candidate then rollback in a fresh memory
+lease, also holding the original scope lock. A separate exclusive, append-only
+association marker makes this admission single-use even under a different new
+scope id. The new ledger records the old claim and proof hashes. A changed marker
+or evidence fails closed. Existing adopted ledgers still cannot reopen.
+
+The retained baseline is exactly 6,643 bytes, zero runtimes and eight entries.
+Moving earns no capacity credit; retained bytes and new package bytes share the
+original cap. With the unchanged second reservation the first new candidate must
+be at most 211,523,281 bytes before rollback can begin. Original controls remain
+unchanged and the control-file peak stays within 64 KiB. This admission requires
+its own exact reviewed policy and current plans; it does not authorize a retry,
+another failed workspace, installation, runtime startup or production operation.
+
 ## Acceptance still required
 
 Gate tests are not runnable-package or application-recovery evidence. Before any

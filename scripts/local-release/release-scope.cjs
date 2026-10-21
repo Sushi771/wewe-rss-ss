@@ -172,6 +172,219 @@ function validateReferences(value, policy) {
   }
   return hash(value);
 }
+// One bounded adoption of the reviewed 6,643-byte partial workspace. This never
+// moves/deletes evidence or imports old output receipts as compiler authority.
+function heldRecovery(policy) {
+  const spec = policy.buildOnly?.recoveryOf;
+  if (!spec) return;
+  const fail = () => {
+    throw Error('RELEASE_SCOPE_HELD_RECOVERY_BINDING_INVALID');
+  };
+  const document = (ref) => {
+    const stat = ref?.path && fs.lstatSync(ref.path);
+    if (
+      !stat ||
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.size > 128 * 1024
+    )
+      fail();
+    if (
+      !ref ||
+      !path.isAbsolute(ref.path || '') ||
+      !/^[a-f0-9]{64}$/.test(ref.sha256 || '') ||
+      canonical(ref.path) !== ref.path ||
+      fileHash(ref.path) !== ref.sha256
+    )
+      fail();
+    return read(ref.path, 128 * 1024);
+  };
+  if (spec.format !== 'held-6643-v1' || policy.phase !== 'build-only') fail();
+  const plan = document(spec.plan),
+    intent = document(spec.intent),
+    moved = document(spec.moved);
+  const old = plan.originalFailure,
+    roots = plan.roots,
+    map = plan.move;
+  if (
+    !/^[a-f0-9-]{36}$/.test(old?.scopeId || '') ||
+    policy.baseline.bytes !== 6643 ||
+    policy.baseline.runtimeCopies !== 0 ||
+    policy.baseline.entries !== 8
+  )
+    fail();
+  if (
+    plan.kind !== 'one-off-retain-failed-6643-bytes' ||
+    !old ||
+    !roots ||
+    !map ||
+    !/^[a-f0-9-]{36}$/.test(old.claimId || '') ||
+    old.scopeId === policy.scopeId ||
+    roots.outputRoot !== policy.buildOnly.outputRoot ||
+    roots.registry !== policy.registryDirectory ||
+    hash(roots.outputIdentity) !== hash(policy.roots[0].identity) ||
+    hash(roots.registryIdentity) !== hash(policy.registryIdentity) ||
+    map.retainedBytes !== 6643 ||
+    map.destination !== path.join(roots.outputRoot, '.held-' + old.claimId) ||
+    path.dirname(map.source) !== roots.outputRoot ||
+    present(map.source)
+  )
+    fail();
+  const originalPolicy = document(old.policy),
+    failure = document({ path: old.receiptPath, sha256: old.receiptSha256 });
+  const ledger = document({ path: old.ledgerPath, sha256: old.ledgerSha256 });
+  const sentinelStat = fs.lstatSync(old.adoptionSentinel.path);
+  if (
+    !sentinelStat.isFile() ||
+    sentinelStat.isSymbolicLink() ||
+    sentinelStat.size !== 64 ||
+    canonical(old.adoptionSentinel.path) !== old.adoptionSentinel.path
+  )
+    fail();
+  if (
+    originalPolicy.phase !== 'build-only' ||
+    originalPolicy.roots?.length !== 1 ||
+    originalPolicy.roots[0].path !== roots.outputRoot ||
+    hash(originalPolicy.roots[0].identity) !== hash(roots.outputIdentity) ||
+    hash(originalPolicy.registryIdentity) !== hash(roots.registryIdentity) ||
+    hash(identity(roots.registry)) !== hash(roots.registryIdentity) ||
+    ledger.payload?.configSha !== old.policy.sha256 ||
+    failure.policy?.sha256 !== old.policy.sha256 ||
+    moved.controller?.check?.querySucceeded !== true ||
+    moved.controller.check.matchingCount !== 0
+  )
+    fail();
+  if (
+    old.ledgerPath !== path.join(roots.registry, old.scopeId + '.state.json') ||
+    hash(fileIdentity(old.ledgerPath)) !== hash(old.ledgerFileIdentity) ||
+    old.adoptionSentinel.path !== old.ledgerPath + '.adopted' ||
+    fileHash(old.adoptionSentinel.path) !== old.adoptionSentinel.sha256 ||
+    originalPolicy.scopeId !== old.scopeId ||
+    originalPolicy.registryDirectory !== roots.registry ||
+    originalPolicy.buildOnly?.outputRoot !== roots.outputRoot ||
+    policy.maxBytes > originalPolicy.maxBytes ||
+    policy.maxGrowthBytes > originalPolicy.maxGrowthBytes ||
+    policy.maxNewRuntimeCopies > originalPolicy.maxNewRuntimeCopies ||
+    failure.exitCode !== 1 ||
+    failure.controllerSession !== plan.controllerExit?.originalExecSession ||
+    failure.claim?.id !== old.claimId ||
+    !ledger.payload ||
+    ledger.digest !== hash(ledger.payload) ||
+    hash(ledger.payload.claim) !== hash(old.claim) ||
+    ledger.payload.claim?.id !== old.claimId ||
+    ledger.payload.outputs?.length !== 1 ||
+    ledger.payload.outputs[0].complete !== false ||
+    ledger.payload.outputs[0].path !== map.source ||
+    ledger.payload.outputs[0].claim !== old.claimId
+  )
+    fail();
+  for (const receipt of [intent, moved])
+    if (
+      receipt.planSha256 !== spec.plan.sha256 ||
+      receipt.original?.claimId !== old.claimId ||
+      receipt.original?.policySha256 !== old.policy.sha256 ||
+      receipt.original?.ledgerSha256 !== old.ledgerSha256 ||
+      receipt.source !== map.source ||
+      receipt.destination !== map.destination ||
+      receipt.retainedBytes !== 6643 ||
+      receipt.capacityFreedBytes !== 0 ||
+      receipt.oldOutputSuccessful !== false ||
+      hash(receipt.files) !== hash(map.files) ||
+      hash(receipt.directories) !== hash(map.directories)
+    )
+      fail();
+  if (
+    spec.intent.path !== plan.appendOnlyMapping?.intentPath ||
+    spec.moved.path !== plan.appendOnlyMapping?.movedPath ||
+    path.dirname(spec.intent.path) !== roots.registry ||
+    path.dirname(spec.moved.path) !== roots.registry ||
+    moved.status !== 'failed-retained-relocated' ||
+    moved.intentSha256 !== spec.intent.sha256 ||
+    moved.sourceAbsent !== true ||
+    moved.destinationVerified !== true ||
+    moved.oldLedgerUnchanged !== true ||
+    moved.oldSentinelUnchanged !== true
+  )
+    fail();
+  if (
+    hash(identity(map.destination)) !==
+    hash(map.directories?.find((row) => row.relative === '')?.identity)
+  )
+    fail();
+  const names = ['build/package.json', 'build/schema.prisma', 'package.json'];
+  const directories = ['', 'build', 'build/tmp', 'server'];
+  const expectedFiles = new Map(
+    (map.files || []).map((row) => [row.path.replace(/\\/g, '/'), row]),
+  );
+  const expectedDirs = new Map(
+    (map.directories || []).map((row) => [
+      row.relative.replace(/\\/g, '/'),
+      row.identity,
+    ]),
+  );
+  if (map.files?.length !== 3 || map.directories?.length !== 4) fail();
+  if (
+    hash([...expectedFiles.keys()].sort()) !== hash(names) ||
+    hash([...expectedDirs.keys()].sort()) !== hash(directories) ||
+    map.files.reduce((sum, row) => sum + row.bytes, 0) !== 6643
+  )
+    fail();
+  let seenFiles = 0,
+    seenDirs = 0;
+  const visit = (at, relative = '') => {
+    if (
+      ++seenDirs > 4 ||
+      hash(identity(at)) !== hash(expectedDirs.get(relative))
+    )
+      fail();
+    for (const entry of fs.readdirSync(at, { withFileTypes: true })) {
+      const file = path.join(at, entry.name),
+        key = relative ? relative + '/' + entry.name : entry.name;
+      if (entry.isSymbolicLink()) fail();
+      if (entry.isDirectory()) visit(file, key);
+      else {
+        const expected = expectedFiles.get(key),
+          stat = fs.lstatSync(file);
+        if (
+          ++seenFiles > 3 ||
+          !entry.isFile() ||
+          !expected ||
+          stat.nlink !== 1 ||
+          stat.size !== expected.bytes ||
+          fileHash(file) !== expected.sha256
+        )
+          fail();
+      }
+    }
+  };
+  visit(map.destination);
+  if (seenFiles !== 3 || seenDirs !== 4) fail();
+  const controls = fs.readdirSync(roots.registry);
+  if (
+    controls.length > 128 ||
+    controls.reduce((sum, name) => {
+      const s = fs.lstatSync(path.join(roots.registry, name));
+      if (!s.isFile() || s.isSymbolicLink()) fail();
+      return sum + s.size;
+    }, 0) > 65536
+  )
+    throw Error('RELEASE_SCOPE_RECOVERY_CONTROL_BUDGET');
+  return {
+    oldScopeId: old.scopeId,
+    oldClaimId: old.claimId,
+    oldLedgerSha256: old.ledgerSha256,
+    planSha256: spec.plan.sha256,
+    intentSha256: spec.intent.sha256,
+    movedSha256: spec.moved.sha256,
+    heldPath: map.destination,
+    retainedBytes: 6643,
+    associationPath: path.join(
+      roots.registry,
+      'recovery-' + old.claimId + '.fresh-session.private.json',
+    ),
+  };
+}
+
 function open(request, options = {}, boundOperation) {
   if (session()) throw new Error('RELEASE_SCOPE_NESTED_OPEN_FORBIDDEN');
   request = { runtimeCopies: 0, ...request };
@@ -242,6 +455,13 @@ function open(request, options = {}, boundOperation) {
           row.sourceCommit === request.sourceCommit &&
           row.sourceHash === request.sourceHash,
       );
+    if (
+      spec?.recoveryOf &&
+      (!Array.isArray(spec.sources) ||
+        request.pairSession !== true ||
+        request.sourceCommit !== '3a36428210f22ea1986f0a96a6066e7fdc9baf46')
+    )
+      throw Error('RELEASE_SCOPE_RECOVERY_PAIR_REQUIRED');
     if (
       request.kind !== 'build' ||
       request.buildOnly !== true ||
@@ -385,9 +605,32 @@ function open(request, options = {}, boundOperation) {
     refs,
     initialFacts,
     claim,
-    ledgerIdentity;
+    ledgerIdentity,
+    recovery,
+    recoveryLock,
+    recoveryLockIdentity,
+    associationSha;
   const configIdentity = fileIdentity(file);
+  const recoveryControlBudget = (extra = 0) => {
+    if (!recovery) return;
+    const names = fs.readdirSync(directory);
+    if (
+      names.length > 128 ||
+      names.reduce(
+        (n, name) => n + fs.lstatSync(path.join(directory, name)).size,
+        extra,
+      ) > 65536
+    )
+      throw Error('RELEASE_SCOPE_RECOVERY_CONTROL_BUDGET');
+  };
   const save = () => {
+    if (recovery) {
+      const bytes = Buffer.byteLength(
+        JSON.stringify({ payload: prior, digest: hash(prior) }),
+      );
+      if (bytes > 8192) throw Error('RELEASE_SCOPE_RECOVERY_CONTROL_BUDGET');
+      recoveryControlBudget(bytes + (present(ledger + '.adopted') ? 0 : 64));
+    }
     atomic(ledger, prior);
     ledgerIdentity = fileIdentity(ledger);
   };
@@ -403,6 +646,14 @@ function open(request, options = {}, boundOperation) {
           hash(fileIdentity(ledger)) !== hash(ledgerIdentity)))
     )
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
+    if (
+      recoveryLock &&
+      (fs.readFileSync(recoveryLock, 'utf8') !== token ||
+        hash(fileIdentity(recoveryLock)) !== hash(recoveryLockIdentity))
+    )
+      throw Error('RELEASE_SCOPE_RECOVERY_OWNER_CHANGED');
+    if (associationSha && fileHash(recovery.associationPath) !== associationSha)
+      throw Error('RELEASE_SCOPE_RECOVERY_ASSOCIATION_CHANGED');
   };
   const query = () => {
     if (options.query) return options.query();
@@ -459,6 +710,8 @@ function open(request, options = {}, boundOperation) {
   };
   const check = (allowTransition = false) => {
     owner();
+    if (recovery && hash(heldRecovery(policy)) !== hash(recovery))
+      throw Error('RELEASE_SCOPE_HELD_RECOVERY_BINDING_INVALID');
     checkRoots(policy.roots);
     if (
       buildSource?.sourceRoot &&
@@ -538,6 +791,15 @@ function open(request, options = {}, boundOperation) {
     return measure;
   };
   try {
+    recovery = heldRecovery(policy);
+    if (recovery) {
+      const at = path.join(directory, recovery.oldScopeId + '.lock');
+      fs.writeFileSync(at, token, { flag: 'wx', mode: 0o600 });
+      recoveryLock = at;
+      recoveryLockIdentity = fileIdentity(at);
+      if (hash(heldRecovery(policy)) !== hash(recovery))
+        throw Error('RELEASE_SCOPE_HELD_RECOVERY_BINDING_INVALID');
+    }
     if (present(ledger)) {
       if (policy.phase === 'build-only')
         throw Error('RELEASE_SCOPE_BUILD_ONLY_NEW_SESSION_REQUIRES_REVIEW');
@@ -574,10 +836,37 @@ function open(request, options = {}, boundOperation) {
         throw new Error('RELEASE_SCOPE_LEDGER_MISSING_REQUIRES_REVIEW');
       if (
         policy.phase === 'build-only' &&
-        fs.readdirSync(policy.buildOnly.outputRoot).length
+        (recovery
+          ? hash(fs.readdirSync(policy.buildOnly.outputRoot)) !==
+            hash([path.basename(recovery.heldPath)])
+          : fs.readdirSync(policy.buildOnly.outputRoot).length)
       )
         throw new Error('RELEASE_SCOPE_BUILD_ROOT_NOT_EMPTY');
       prior = { format: 1, configSha, outputs: [], claim: null };
+      if (recovery) {
+        if (present(recovery.associationPath))
+          throw Error('RELEASE_SCOPE_RECOVERY_ASSOCIATION_ALREADY_SPENT');
+        const association = {
+          format: 1,
+          kind: 'held-6643-fresh-memory-session',
+          ...recovery,
+          newScopeId: policy.scopeId,
+          configSha,
+        };
+        const bytes = Buffer.from(JSON.stringify(association));
+        if (bytes.length > 4096)
+          throw Error('RELEASE_SCOPE_RECOVERY_CONTROL_BUDGET');
+        recoveryControlBudget(bytes.length + 8192 + 64);
+        const fd = fs.openSync(recovery.associationPath, 'wx', 0o600);
+        try {
+          fs.writeFileSync(fd, bytes);
+          fs.fsyncSync(fd);
+        } finally {
+          fs.closeSync(fd);
+        }
+        associationSha = fileHash(recovery.associationPath);
+        prior.recovery = { ...recovery, associationSha256: associationSha };
+      }
       const initial = verifier.scan(policy.roots);
       if (
         initial.digest !== policy.baseline.digest ||
@@ -994,6 +1283,10 @@ function open(request, options = {}, boundOperation) {
         );
         if (
           !source ||
+          (recovery &&
+            (next.pairSession !== true ||
+              next.sourceCommit !==
+                'f618e48f48ff0e3df1c646cb8a666a2461815732')) ||
           hash(policy.buildOnly.prismaGenerator || null) !==
             hash(next.prismaGenerator || null) ||
           builtSources.has(next.sourceCommit) ||
@@ -1100,12 +1393,14 @@ function open(request, options = {}, boundOperation) {
           save();
         } finally {
           owner();
+          if (recoveryLock) fs.unlinkSync(recoveryLock);
           fs.unlinkSync(lock);
         }
       },
     };
   } catch (error) {
     owner();
+    if (recoveryLock) fs.unlinkSync(recoveryLock);
     fs.unlinkSync(lock);
     throw error;
   }
@@ -1151,6 +1446,8 @@ function within(request, run, options) {
 }
 module.exports = {
   inspect,
+  // Read-only preparation; open repeats validation while holding common locks.
+  inspectHeldRecovery: heldRecovery,
   open,
   within,
   session,

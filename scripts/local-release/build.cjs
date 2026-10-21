@@ -485,6 +485,7 @@ function build(options = {}) {
     sourceHash,
     sourceRoot,
     prismaGenerator,
+    pairSession: Boolean(options.pairSession),
   };
   const shared =
     options.pairSession?.lease ||
