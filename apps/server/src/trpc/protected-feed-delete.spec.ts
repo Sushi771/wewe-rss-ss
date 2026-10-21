@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -70,8 +71,7 @@ describe('protected existing deletion routes through actual router and SQLite mi
       const sql = await fs
         .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
         .catch(() => '');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((x) => x.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
@@ -35,8 +36,7 @@ describe('full filter export scope on an isolated SQLite database; no external r
         join(migrations, entry.name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((x) => x.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

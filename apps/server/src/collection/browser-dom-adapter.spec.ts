@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -745,8 +746,7 @@ describe('browser-DOM evidence adapter and isolated replay', () => {
         if (!(await fs.stat(path.join(migrations, name))).isDirectory())
           continue;
         const file = path.join(migrations, name, 'migration.sql');
-        for (const sql of (await fs.readFile(file, 'utf8'))
-          .split(';')
+        for (const sql of splitSqliteStatements(await fs.readFile(file, 'utf8'))
           .map((s) => s.trim())
           .filter(Boolean)) {
           await prisma.$executeRawUnsafe(sql);

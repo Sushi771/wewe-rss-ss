@@ -143,6 +143,10 @@ function readingFixture(cached) {
   const trpc = {
     useUtils: () => ({}),
     article: {
+      searchStatus: {
+        useQuery: () => ({ data: { total: 0, pending: 0, uncached: 0 } }),
+      },
+      prepareSearch: { useMutation: () => ({ mutateAsync: async () => ({}) }) },
       byId: {
         useQuery: (id, options) => {
           readInput = { id, options };
@@ -208,7 +212,9 @@ test('cached title remains a keyboard-focusable reading link without a duplicate
   const view = f.render();
   assert(!text(view).includes('阅读已缓存正文'));
   const link = nodes(view).find(
-    (n) => n.type === 'a' && n.props.children === 'Synthetic title',
+    (n) =>
+      n.type === 'a' &&
+      n.props['aria-label'] === '阅读缓存正文：Synthetic title',
   );
   assert(link.props.href);
   assert.equal(link.props['aria-label'], '阅读缓存正文：Synthetic title');
@@ -231,7 +237,8 @@ test('missing bodies retain a short warning and original link; no false complete
   assert.match(text(view), /正文暂不可重试/);
   assert(!text(view).includes('Synthetic source unavailable'));
   const link = nodes(view).find(
-    (n) => n.type === 'a' && n.props.children === 'Synthetic title',
+    (n) =>
+      n.type === 'a' && n.props['aria-label'] === '打开原文：Synthetic title',
   );
   let prevented = false;
   link.props.onClick({

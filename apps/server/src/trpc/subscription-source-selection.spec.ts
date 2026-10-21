@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
@@ -44,8 +45,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
         path.join(migrations, directory, 'migration.sql'),
         'utf8',
       );
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

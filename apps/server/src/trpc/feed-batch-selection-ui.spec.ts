@@ -186,6 +186,10 @@ function listFixture(initialItems: string[]) {
   };
   const trpc = {
     article: {
+      searchStatus: {
+        useQuery: () => ({ data: { total: 0, pending: 0, uncached: 0 } }),
+      },
+      prepareSearch: { useMutation: () => ({ mutateAsync: jest.fn() }) },
       byId: { useQuery: () => ({}) },
       summary: { useQuery: () => ({ data: { articles: items.length } }) },
       retryBody: { useMutation: () => ({}) },
@@ -396,6 +400,7 @@ describe('feed batch selection actual UI and export handlers, offline', () => {
     const cleared = jest.fn();
     evaluate(reset!.arguments[0].getText(index.ast), {
       setArticleSelectedIds: cleared,
+      setExportOpen: jest.fn(),
     })();
     expect(cleared.mock.calls[0][0].size).toBe(0);
     const child = index.elements.find(
@@ -417,6 +422,7 @@ describe('feed batch selection actual UI and export handlers, offline', () => {
     )!;
     evaluate(reset.arguments[0].getText(index.ast), {
       setArticleSelectedIds: f.setSelected,
+      setExportOpen: jest.fn(),
     })();
     f.setProps({ direction: 'asc' });
     f.render();

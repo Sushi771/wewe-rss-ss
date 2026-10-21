@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -57,8 +58,7 @@ describe('ordinary collection boundaries on synthetic SQLite', () => {
       const sql = await fs
         .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
         .catch(() => '');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await db.$executeRawUnsafe(statement);

@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -18,10 +19,9 @@ describe('real application Prisma admission with actual Python backup and SQLite
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
     for (const name of (await readdir(migrations)).sort()) {
       if (!(await stat(path.join(migrations, name))).isDirectory()) continue;
-      for (const sql of (
-        await readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
+      for (const sql of splitSqliteStatements(
+        await readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
       )
-        .split(';')
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(sql);

@@ -1,4 +1,5 @@
-'use strict';
+const { splitSqliteStatements } = require('./sqlite-statements.cjs');
+('use strict');
 // Same-file synthetic comparison against the 9967904 list algorithm. No app
 // startup, production data, upstream requests, page cache or OS-cache flushing.
 const { test } = require('node:test');
@@ -143,12 +144,12 @@ test(
         .readdirSync(path.join(server, 'prisma/migrations'))
         .filter((n) => /^\d/.test(n))
         .sort())
-        for (const sql of fs
-          .readFileSync(
+        for (const sql of splitSqliteStatements(
+          fs.readFileSync(
             path.join(server, 'prisma/migrations', migration, 'migration.sql'),
             'utf8',
-          )
-          .split(';')
+          ),
+        )
           .map((s) => s.trim())
           .filter(Boolean))
           await prisma.$executeRawUnsafe(sql);
