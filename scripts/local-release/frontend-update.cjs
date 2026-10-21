@@ -127,11 +127,56 @@ function classifyWriters(raw, installation, database, options = {}) {
     globalComplete: false,
   };
   const normalize = (value) => path.win32.normalize(value.replace(/\//g, '\\'));
+  const requireLocalPath = (value) => {
+    // Reject UNC, extended/device namespaces, relative roots and ADS before any IO.
+    assert(
+      typeof value === 'string' && /^[a-z]:[\\/]/i.test(value),
+      'FRONTEND_LOCAL_DATABASE_PATH_REQUIRED',
+    );
+    assert(!value.slice(2).includes(':'), 'FRONTEND_DEVICE_PATH_REFUSED');
+    const normalized = normalize(value),
+      drive = normalized.slice(0, 2).toUpperCase();
+    assert(
+      Array.isArray(raw.logicalDisks) && raw.logicalDisks.length <= 32,
+      'FRONTEND_LOCAL_DRIVE_UNPROVEN',
+    );
+    const matches = raw.logicalDisks.filter(
+      (disk) => String(disk.DeviceID).toUpperCase() === drive,
+    );
+    assert(
+      matches.length === 1 &&
+        matches[0].DriveType === 3 &&
+        Object.hasOwn(matches[0], 'ProviderName') &&
+        !matches[0].ProviderName,
+      'FRONTEND_LOCAL_DRIVE_UNPROVEN',
+    );
+    for (const part of normalized.slice(3).split('\\'))
+      assert(
+        part &&
+          !/[. ]$/.test(part) &&
+          !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part),
+        'FRONTEND_DEVICE_PATH_REFUSED',
+      );
+    return normalized;
+  };
   const prefix =
     normalize(installation).replace(/\\$/, '').toLowerCase() + '\\';
   const resolveIdentity =
-    options.resolveIdentity || ((file) => id(canonical(file)));
-  const databaseIdentity = resolveIdentity(normalize(database));
+    options.resolveIdentity ||
+    ((file) => {
+      // Check each local component without following links. A local junction may
+      // lead to UNC; never realpath/lstat a child below an unverified reparse link.
+      let at = file.slice(0, 3),
+        identity;
+      for (const part of file.slice(3).split('\\')) {
+        at = path.win32.join(at, part);
+        const stat = fs.lstatSync(at, { bigint: true });
+        assert(!stat.isSymbolicLink(), 'FRONTEND_DATABASE_LINK_REFUSED');
+        identity = [stat.dev, stat.ino, stat.birthtimeNs].map(String);
+      }
+      return identity;
+    });
+  const databaseIdentity = resolveIdentity(requireLocalPath(database));
   if (options.databaseIdentity)
     equal(databaseIdentity, options.databaseIdentity);
   for (const item of raw.processes) {
@@ -175,7 +220,7 @@ function classifyWriters(raw, installation, database, options = {}) {
     let sameDb;
     try {
       sameDb =
-        jsonHash(resolveIdentity(normalize(databases[0]))) ===
+        jsonHash(resolveIdentity(requireLocalPath(databases[0]))) ===
         jsonHash(databaseIdentity);
     } catch {
       result.conflicts.push(item.ProcessId);

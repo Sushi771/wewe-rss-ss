@@ -318,6 +318,7 @@ test('actual production writer classification retains unknowns and rejects relat
     {
       querySucceeded: true,
       collectorPid: 100,
+      logicalDisks: [{ DeviceID: 'C:', DriveType: 3, ProviderName: null }],
       processes: [
         {
           ProcessId: 100,
@@ -362,6 +363,7 @@ test('same database is bound by actual identity across slashes, quoting, normali
     const raw = {
       querySucceeded: true,
       collectorPid: 900,
+      logicalDisks: [{ DeviceID: 'C:', DriveType: 3, ProviderName: null }],
       processes: [
         {
           ProcessId: 777,
@@ -399,6 +401,7 @@ test('related unresolvable, relative, drive-relative and ambiguous database path
       {
         querySucceeded: true,
         collectorPid: 900,
+        logicalDisks: [{ DeviceID: 'C:', DriveType: 3, ProviderName: null }],
         processes: [
           {
             ProcessId: 777,
@@ -494,6 +497,7 @@ test('oversized writer enumeration is refused before classification', () => {
         {
           querySucceeded: true,
           collectorPid: 900,
+          logicalDisks: [{ DeviceID: 'C:', DriveType: 3, ProviderName: null }],
           processes: Array(4097).fill({}),
         },
         'C:\\app',
@@ -502,4 +506,158 @@ test('oversized writer enumeration is refused before classification', () => {
       ),
     /ENTRY_LIMIT/,
   );
+});
+test('UNC, device namespaces, mapped network drives and unknown drives never reach identity resolver', () => {
+  const values = [
+    '\\\\server\\share\\data.db',
+    '//server/share/data.db',
+    '\\\\?\\UNC\\server\\share\\data.db',
+    '\\\\?\\C:\\app\\data.db',
+    '\\\\.\\C:\\app\\data.db',
+    '\\??\\C:\\app\\data.db',
+    'Z:\\data.db',
+    'Y:/data.db',
+    'E:\\data.db',
+    'F:\\data.db',
+    'C:\\app\\data.db:stream',
+    'C:\\app\\NUL',
+  ];
+  for (const value of values) {
+    const calls = [],
+      resolveIdentity = (file) => {
+        calls.push(file);
+        return ['local-identity'];
+      };
+    const result = update.classifyWriters(
+      {
+        querySucceeded: true,
+        collectorPid: 900,
+        logicalDisks: [
+          { DeviceID: 'C:', DriveType: 3, ProviderName: null },
+          { DeviceID: 'Z:', DriveType: 4, ProviderName: '\\\\server\\share' },
+          { DeviceID: 'E:', DriveType: 0, ProviderName: null },
+          { DeviceID: 'F:', DriveType: 3, ProviderName: '\\\\server\\share' },
+        ],
+        processes: [
+          {
+            ProcessId: 777,
+            ExecutablePath: 'C:\\external\\node.exe',
+            CommandLine:
+              'node C:\\other\\runtime.cjs start --database ' + value,
+          },
+        ],
+      },
+      'C:\\app',
+      'C:\\app\\data.db',
+      { resolveIdentity },
+    );
+    assert.deepEqual(result.conflicts, [777], value);
+    assert.deepEqual(
+      calls,
+      ['C:\\app\\data.db'],
+      value + ' must not trigger remote/path IO',
+    );
+  }
+});
+test('unproven target drive and UNC target fail before any identity lookup', () => {
+  for (const database of ['\\\\server\\share\\data.db', 'Z:\\data.db']) {
+    let calls = 0;
+    assert.throws(
+      () =>
+        update.classifyWriters(
+          {
+            querySucceeded: true,
+            collectorPid: 900,
+            processes: [],
+            logicalDisks: [
+              { DeviceID: 'C:', DriveType: 3, ProviderName: null },
+            ],
+          },
+          'C:\\app',
+          database,
+          {
+            resolveIdentity: () => {
+              calls++;
+              return ['never'];
+            },
+          },
+        ),
+      /LOCAL_/,
+    );
+    assert.equal(calls, 0);
+  }
+});
+test('bounded local-drive observation is required even with an injected resolver', () => {
+  for (const logicalDisks of [
+    undefined,
+    [],
+    [{ DeviceID: 'C:', DriveType: 3 }],
+    Array(33).fill({ DeviceID: 'C:', DriveType: 3, ProviderName: null }),
+  ]) {
+    let calls = 0;
+    assert.throws(
+      () =>
+        update.classifyWriters(
+          {
+            querySucceeded: true,
+            collectorPid: 900,
+            processes: [],
+            logicalDisks,
+          },
+          'C:\\app',
+          'C:\\app\\data.db',
+          {
+            resolveIdentity: () => {
+              calls++;
+              return ['never'];
+            },
+          },
+        ),
+      /LOCAL_DRIVE_UNPROVEN/,
+    );
+    assert.equal(calls, 0);
+  }
+});
+test('local junction is refused before looking up any child beneath it', (t) => {
+  const f = fixture(t),
+    redirect = path.join(path.dirname(f.p.database), 'redirect'),
+    prior = fs.lstatSync;
+  let childLookups = 0;
+  try {
+    fs.lstatSync = (file, ...args) => {
+      if (String(file).toLowerCase() === redirect.toLowerCase())
+        return { isSymbolicLink: () => true };
+      if (
+        String(file)
+          .toLowerCase()
+          .startsWith(redirect.toLowerCase() + '\\')
+      ) {
+        childLookups++;
+        throw Error('remote child lookup forbidden');
+      }
+      return prior(file, ...args);
+    };
+    const result = update.classifyWriters(
+      {
+        querySucceeded: true,
+        collectorPid: 900,
+        logicalDisks: [{ DeviceID: 'C:', DriveType: 3, ProviderName: null }],
+        processes: [
+          {
+            ProcessId: 777,
+            ExecutablePath: 'C:\\external\\node.exe',
+            CommandLine:
+              'node C:\\other\\runtime.cjs start --database ' +
+              path.join(redirect, 'data.db'),
+          },
+        ],
+      },
+      f.p.installation,
+      f.p.database,
+    );
+    assert.deepEqual(result.conflicts, [777]);
+    assert.equal(childLookups, 0);
+  } finally {
+    fs.lstatSync = prior;
+  }
 });
