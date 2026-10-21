@@ -43,6 +43,12 @@ dependencies (esbuild manages its own subprocess). Source snapshots and input
 hashes are checked before and after compiler calls. Failed outputs and interrupted
 claims are retained for review; build-only cannot authorize their deletion.
 
+Build failures report the primary exception separately from `reservation.finish`
+and `scope.close` errors. A finalization failure also closes the lease as failed;
+it cannot seal output as successful. Error messages/stacks are bounded in CLI
+diagnostics, while the original exception objects remain available to callers.
+This diagnostic change grants no interrupted-claim recovery or retry permission.
+
 ## Narrow search-compatible rollback recipe
 
 Artifact acceptance uses a bounded in-memory table of producer intents. Parent

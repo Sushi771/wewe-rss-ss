@@ -843,13 +843,56 @@ function build(options = {}) {
       failure = error;
       throw error;
     } finally {
-      try {
-        reservation?.finish(failure);
-      } finally {
-        if (!options.pairSession || failure) shared.close(failure);
-      }
+      finishBuild(failure, reservation, shared, !options.pairSession);
     }
   });
+}
+
+// Finalization must hold failed output without replacing the compiler failure.
+// Keep the two close stages distinct, and still attempt the scope close if the
+// reservation close fails. A finish failure must never seal output as success.
+function finishBuild(primaryError, reservation, shared, closeShared = true) {
+  const closeErrors = [];
+  try {
+    reservation?.finish(primaryError);
+  } catch (error) {
+    closeErrors.push({ stage: 'reservation.finish', error });
+  }
+  if (closeShared || primaryError || closeErrors.length) {
+    try {
+      shared?.close(primaryError || closeErrors[0]?.error);
+    } catch (error) {
+      closeErrors.push({ stage: 'scope.close', error });
+    }
+  }
+  if (closeErrors.length) {
+    const error = new AggregateError(
+      [primaryError, ...closeErrors.map((row) => row.error)].filter(Boolean),
+      primaryError?.message || 'BUILD_FINALIZATION_FAILED',
+      { cause: primaryError || closeErrors[0].error },
+    );
+    error.primaryError = primaryError || null;
+    error.closeErrors = closeErrors;
+    throw error;
+  }
+}
+
+function buildFailureDiagnostic(error) {
+  const describe = (value) =>
+    value && {
+      name: value.name,
+      code: value.code,
+      message: String(value.message ?? value).slice(0, 8192),
+      stack: value.stack?.slice(0, 8192),
+    };
+  return {
+    event: 'build-failed',
+    primaryError: describe(error.closeErrors ? error.primaryError : error),
+    closeErrors: (error.closeErrors || []).map(({ stage, error }) => ({
+      stage,
+      error: describe(error),
+    })),
+  };
 }
 
 function buildPair(options) {
@@ -879,7 +922,7 @@ function buildPair(options) {
     failure = error;
     throw error;
   } finally {
-    pairSession.lease?.close(failure);
+    finishBuild(failure, undefined, pairSession.lease);
   }
 }
 
@@ -928,8 +971,15 @@ if (require.main === module) {
       );
     } else build(options);
   } catch (error) {
-    console.error(error.message);
+    console.error(JSON.stringify(buildFailureDiagnostic(error)));
     process.exitCode = 1;
   }
 }
-module.exports = { build, buildPair, copyPackages, verifyBuildEnvironment };
+module.exports = {
+  build,
+  buildPair,
+  copyPackages,
+  verifyBuildEnvironment,
+  finishBuild,
+  buildFailureDiagnostic,
+};

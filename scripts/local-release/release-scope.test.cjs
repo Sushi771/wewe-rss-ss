@@ -935,6 +935,85 @@ test('independent artifact reads consume the existing cumulative scan budget', (
     assert(fs.existsSync(path.join(at, 'artifact')));
   }));
 
+test('primary compiler failure and both close errors remain distinct while the failed claim and output stay held', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options());
+    const effects = require('./lib.cjs').hostEffects;
+    let at;
+    effects.context.run(lease, () => {
+      const reservation = require('./build-budget.cjs').begin(
+        f.build,
+        request.reserveBytes,
+        { shared: lease },
+      );
+      at = path.join(f.build, 'candidate');
+      reservation.create(at);
+      effects.fs.writeFileSync(
+        path.join(at, 'retained'),
+        'synthetic compiler partial output',
+      );
+      const primary = Object.assign(Error('synthetic generator spawn ENOENT'), {
+        code: 'ENOENT',
+      });
+      assert.throws(
+        () => require('./build.cjs').finishBuild(primary, reservation, lease),
+        (error) => {
+          assert.equal(error.primaryError, primary);
+          assert.equal(error.cause, primary);
+          assert.deepEqual(
+            error.closeErrors.map((row) => row.stage),
+            ['reservation.finish', 'scope.close'],
+          );
+          assert.match(
+            error.closeErrors[0].error.message,
+            /FAILED_OUTPUT_HELD/,
+          );
+          assert.match(
+            error.closeErrors[1].error.message,
+            /FAILED_OUTPUT_HELD/,
+          );
+          return true;
+        },
+      );
+    });
+    assert.equal(
+      fs.readFileSync(path.join(at, 'retained'), 'utf8'),
+      'synthetic compiler partial output',
+    );
+    const ledger = JSON.parse(
+      fs.readFileSync(path.join(f.base, f.policy.scopeId + '.state.json')),
+    ).payload;
+    assert(ledger.claim);
+    assert.equal(ledger.outputs[0].complete, false);
+    assert.equal(ledger.outputs[0].claim, ledger.claim.id);
+    assert(!fs.existsSync(path.join(f.build, '.build-budget.lock')));
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /NEW_SESSION_REQUIRES_REVIEW/,
+    );
+  }));
+
+test('rehashing a declared environment fixture inside build-only fails at open before any compiler dispatch', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options());
+    const fixtureFile = path.join(f.current, '.env');
+    fs.writeFileSync(fixtureFile, 'SYNTHETIC_FIXTURE_ONLY=1\n');
+    const expected = fileHash(fixtureFile);
+    const effects = require('./lib.cjs').hostEffects;
+    let dispatched = false;
+    effects.context.run(lease, () => {
+      assert.throws(() => {
+        // Same ordering as runCompiler: checkInputs before spawnSync.
+        assert.equal(fileHash(fixtureFile), expected);
+        dispatched = true;
+      }, /RELEASE_SCOPE_BUILD_ONLY_PRIVATE_INPUT_FORBIDDEN/);
+    });
+    assert.equal(dispatched, false);
+    lease.close();
+  }));
+
 test('rewriting completed artifacts and recomputing the disk ledger self-hash cannot establish a new build session', () =>
   fixture((f) => {
     const request = buildOnly(f),
