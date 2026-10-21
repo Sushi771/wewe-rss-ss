@@ -30,8 +30,10 @@ Bind the exact package pair and independently review the production migration
 and transition plan before executing it. Retain the old database path and data;
 do not copy production data to a development checkout or upload article bodies.
 
-The current PR83 build-only implementation still opens the normal release-scope
-policy and its full native reference collector. The frontend retain-only plan
-does not authorize it. No applicable policy or complete package-pair evidence is
-claimed by this integration, and no production migration/restart is performed.
-No new build architecture or relaxed reference proof has been added here.
+The existing build-only entry now observes its exact new output/control scope,
+retaining global references as unknown. It binds the two fixed source snapshots,
+compiler/input hashes and directory identities, shares the cumulative budget and
+holds failed or changed outputs. It cannot install, launch or publish packages.
+Other release modes keep their previous reference checks. The frontend plan is
+inapplicable; the separately prepared exact two-package policy requires review.
+No actual package-pair proof or production migration/restart is claimed here.

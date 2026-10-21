@@ -62,7 +62,8 @@ runtime copies. Build sequentially: the copy peak is the retained completed
 first package **plus** the second build reservation, not one reservation reused
 as a two-package total. With reservations of 593,710,908 bytes each, the first
 package must be at most 211,595,460 bytes before the second can begin; actual
-bytes and free space are checked then. Otherwise stop and preserve it, without
+bytes and free space are checked then. Subtract the policy's own control-file
+reservation from that bound as well (64 KiB gives 211,529,924 bytes). Otherwise stop and preserve it, without
 deleting packages or raising the budget. Reserve at least 4 GiB free disk after
 each allocation. Compiler workspace and temporary files stay in the reservation.
 
