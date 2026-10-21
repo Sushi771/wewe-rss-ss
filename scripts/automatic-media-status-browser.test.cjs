@@ -52,7 +52,7 @@ createRoot(document.getElementById('root')).render(<QueryClientProvider client={
           await pause(80);
           assert.match(
             await evaluate('document.body.innerText'),
-            /图片补齐失败 1 篇.*MEDIA_RETRY_EXHAUSTED.*媒体未确认 1 篇/,
+            /图片补齐失败 1 篇.*MEDIA_RETRY_EXHAUSTED.*图片完整性待确认 1 篇/,
           );
           await evaluate(
             `window.fixture.set({mediaFailure:'IMAGE_REQUEST_BLOCKED'});window.fixture.seed()`,

@@ -1,4 +1,3 @@
-import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -80,20 +79,38 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-body-retry-'));
-    databaseUrl = `file:${path.join(root, 'test.db').replace(/\\/g, '/')}`;
-    prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    const databasePath = path.join(root, 'test.db');
+    databaseUrl = `file:${databasePath.replace(/\\/g, '/')}`;
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      const sql = await fs.readFile(
-        path.join(migrations, name, 'migration.sql'),
-        'utf8',
-      );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
+    // Build this unique fixture through one SQLite connection before Prisma
+    // opens it. Migration PRAGMAs and redefine-table DDL must share a session;
+    // pooled, statement-by-statement setup can mix that session state.
+    // Node 24 built-in; the project still uses older Node declaration files.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { DatabaseSync } = require('node:sqlite');
+    const setup = new DatabaseSync(databasePath);
+    try {
+      expect(setup.prepare('SELECT name FROM sqlite_master').all()).toEqual([]);
+      for (const name of (await fs.readdir(migrations)).sort()) {
+        if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+          continue;
+        const sql = await fs.readFile(
+          path.join(migrations, name, 'migration.sql'),
+          'utf8',
+        );
+        try {
+          setup.exec(sql);
+        } catch (error) {
+          throw Object.assign(
+            new Error(`Synthetic body-retry migration failed: ${name}`),
+            { cause: error },
+          );
+        }
+      }
+    } finally {
+      setup.close();
     }
+    prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
     collection = new CollectionService(prisma as any);
     (axios.create as jest.Mock).mockReturnValue({
       interceptors: { response: { use: jest.fn() } },

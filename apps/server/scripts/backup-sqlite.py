@@ -431,6 +431,26 @@ def snapshot_equal(source, copied):
     return True
 
 
+def reviewed_global_sort_index_addition(current, previous, old_schema, new_schema):
+    """Only the exact deployed additive index migration can differ in coverage."""
+    index = ('index', 'articles_publish_time_id_idx', 'articles',
+             'CREATE INDEX "articles_publish_time_id_idx" ON "articles"("publish_time", "id")')
+    if index in old_schema or new_schema.count(index) != 1:
+        return False
+    if [row for row in new_schema if row != index] != old_schema:
+        return False
+    migration = '20261020100000_article_global_sort_index'
+    try:
+        if previous.execute('SELECT 1 FROM _prisma_migrations WHERE migration_name=?', (migration,)).fetchone():
+            return False
+        rows = current.execute('SELECT checksum,finished_at,rolled_back_at FROM _prisma_migrations WHERE migration_name=?', (migration,)).fetchall()
+    except sqlite3.Error:
+        return False
+    checksums = {'ab37c8bae12abfadb6f314f663ae35c02b093585c9289fe2f59215f0f14e83c8', '70cdfbbbebff0bbccea46cffeb50dff443948b0a050b7fb66d168c8750bb64bc'}
+    return (len(rows) == 1 and rows[0][0] in checksums
+            and rows[0][1] is not None and rows[0][2] is None)
+
+
 def snapshot_covers(current, previous, budget):
     """All old typed durable rows survive; only derived feed summaries differ.
 
@@ -438,7 +458,9 @@ def snapshot_covers(current, previous, budget):
     is discarded. A changed durable value or deleted row holds the old point.
     """
     schema="SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
-    if list(current.execute(schema))!=list(previous.execute(schema)):return False
+    old_schema, new_schema = list(previous.execute(schema)), list(current.execute(schema))
+    if old_schema != new_schema and not reviewed_global_sort_index_addition(current, previous, old_schema, new_schema):
+        return False
     quote=lambda value:'"'+value.replace('"','""')+'"'
     derived_feed={'sync_time','update_time','updated_at','has_history','last_collection_result','provider_refresh_attempt_time'}
     count=0

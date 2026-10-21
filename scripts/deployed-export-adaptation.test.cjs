@@ -7,6 +7,7 @@ const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/server')] }),
 );
 const pins = require('./fixtures/deployed-export-adaptation.json');
+const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
@@ -66,8 +67,18 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
   for (const [file, expected] of Object.entries({
     ...pins.criticalFiles,
     ...searchPins.criticalFiles,
-  }))
-    assert.equal(hash(read(file)), expected, file);
+  })) {
+    let source = read(file);
+    if (file === 'scripts/local-release/runtime.cjs') {
+      // The separately tested release scope adds exactly one entry guard. Keep
+      // every pre-existing runtime statement pinned to its deployed baseline.
+      const guarded =
+        "async function runtime() {\n  require('./lib.cjs').hostEffects.assertRuntime();\n";
+      assert.equal(source.split(guarded).length, 2);
+      source = source.replace(guarded, 'async function runtime() {\n');
+    }
+    assert.equal(hash(source), expected, file);
+  }
   // Export conversion now reuses its current DOM. Pin all other conversion
   // statements and the uncertainty predicate to the deployed source semantics.
   const conversion = ts.createSourceFile(
@@ -133,5 +144,5 @@ test('the reviewed export dialog and production reading layout retain their appr
       ? [node.kind, children.map(shape).filter((child) => child !== undefined)]
       : [node.kind, node.getText(ast)];
   }
-  assert.equal(hash(JSON.stringify(shape(returned))), pins.indexLayout);
+  assert.equal(hash(JSON.stringify(shape(returned))), copyPins.indexLayout);
 });

@@ -157,7 +157,7 @@ const AccountPage = () => {
     try {
       await accounts.refetch({ throwOnError: true });
     } catch {
-      if (mounted.current) setError('实例账号状态读取失败，请手动重试。');
+      if (mounted.current) setError('账号状态读取失败，请手动重试。');
     } finally {
       checkingRef.current = false;
       if (mounted.current) setChecking(false);
@@ -217,7 +217,7 @@ const AccountPage = () => {
         <p role="status">
           {error ||
             (accounts.isError
-              ? '实例账号状态读取失败，请手动重试。'
+              ? '账号状态读取失败，请手动重试。'
               : snapshot?.message || '尚未读取账号状态，请点击刷新账号状态。')}
         </p>
         {snapshot?.checkedAt && (
@@ -279,7 +279,7 @@ const AccountPage = () => {
           >
             {starting && <Spinner label="正在获取二维码…" />}
             {!starting && login?.state === 'waiting' && !login.qrcode && (
-              <Spinner label="正在等待实例生成二维码…" />
+              <Spinner label="正在生成二维码…" />
             )}
             <p role="status">{login?.message}</p>
             {login?.state === 'waiting' && login.qrcode && (
@@ -291,7 +291,7 @@ const AccountPage = () => {
             )}
             {login?.state === 'waiting' && (
               <p className="text-default-500 text-xs">
-                二维码最多等待三分钟。关闭窗口会停止本次轮询。
+                二维码最多等待三分钟。关闭窗口会停止检查登录状态。
               </p>
             )}
           </ModalBody>

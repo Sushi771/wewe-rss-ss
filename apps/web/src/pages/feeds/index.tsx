@@ -1,3 +1,7 @@
+import ArticleExportGuidance from '@web/components/ArticleExportGuidance';
+import OperationNotice, {
+  FailureNotice,
+} from '@web/components/OperationNotice';
 import { exportArticleBatches } from '@web/utils/export-article-batches';
 import {
   Button,
@@ -222,7 +226,7 @@ const Feeds = () => {
             ),
           )
         ) {
-          toast.warning('缓存已同步，部分正文或图片仍待核');
+          toast.warning('文章已同步，部分正文或图片尚未确认完整');
         }
         try {
           await refreshSavedSubscriptions(false);
@@ -284,11 +288,11 @@ const Feeds = () => {
   const handleRepairConfirm = async () => {
     if (addingSubscriptions.current || !repairTarget) return;
     if (!defaultAddCapability?.existingRepairAvailable) {
-      toast.error('当前来源修复不可用，未发目录请求。');
+      toast.error('当前无法修复来源，请先检查服务状态。');
       return;
     }
     if (!addAccountId) {
-      toast.error('请先选择正常Web登录账号');
+      toast.error('请先选择已登录且可用的账号');
       return;
     }
     const target = repairTarget;
@@ -319,9 +323,22 @@ const Feeds = () => {
         .join('；');
       setRepairMessages([details]);
       if (result.accepted && !result.pending && result.feed?.id === target.id) {
-        toast.success('本号来源已修复', { description: details });
+        toast.success('本号来源已修复', {
+          description: (
+            <OperationNotice message="查看来源修复结果">
+              {details}
+            </OperationNotice>
+          ),
+        });
         setRepairTarget(null);
-      } else toast.warning('本号来源修复未完成', { description: details });
+      } else
+        toast.warning('本号来源修复未完成', {
+          description: (
+            <OperationNotice message="查看来源修复结果">
+              {details}
+            </OperationNotice>
+          ),
+        });
     } catch (error) {
       if (!cancelSubscriptions.current) {
         const message =
@@ -329,7 +346,14 @@ const Feeds = () => {
             ? error.message
             : '来源修复未完成，旧数据保留。';
         setRepairMessages([message]);
-        toast.error('来源修复未完成', { description: message });
+        toast.error('来源修复未完成', {
+          description: (
+            <FailureNotice
+              error={message}
+              fallback="来源修复未完成，已有内容保留。"
+            />
+          ),
+        });
       }
     } finally {
       addingSubscriptions.current = false;
@@ -581,7 +605,7 @@ const Feeds = () => {
       if (receipt.unconfirmed) {
         exportCancelled.current = true;
         exportNotices.add(
-          '当前批次回执未确认；已停止后续提交，已发出的单篇仍会安全收尾。重新导出会校验已有文件，不会自动重试。',
+          '部分导出结果尚未确认，已停止后续导出。请先检查保存目录；已有文件会保留，不会自动重试。',
         );
       }
       const message = `${exportCancelled.current ? '已停止后续导出：' : ''}新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`;
@@ -743,7 +767,7 @@ const Feeds = () => {
       toast.error('暂不能新增订阅', {
         description: addCapabilityError
           ? '暂时无法检查订阅服务，请稍后刷新页面；链接已保留。'
-          : 'Wechat2RSS 暂不可用，请先检查实例配置与账号登录；链接已保留。',
+          : '订阅服务暂不可用，请先检查服务设置和账号登录；链接已保留。',
       });
       return;
     }
@@ -1639,7 +1663,7 @@ const Feeds = () => {
                         {refreshingMpIds.includes(currentMpInfo.id)
                           ? '更新中'
                           : refreshedMpIds.includes(currentMpInfo.id)
-                            ? '缓存已同步'
+                            ? '内容已同步'
                             : '更新本号'}
                       </span>
                     </Button>
@@ -1672,16 +1696,20 @@ const Feeds = () => {
                         toast.info(
                           `${batch.reused ? '继续查看原批次' : '更新请求已排队'}：共 ${batch.total} 个，待发送 ${batch.queuedCount} 个`,
                           {
-                            description: `${batch.skippedCount ? `${batch.skippedCount} 个停用或其他来源订阅未提交。` : ''}后台串行提交并查询缓存，关闭页面后仍继续。`,
+                            description: `${batch.skippedCount ? `${batch.skippedCount} 个停用或其他来源订阅未提交。` : ''}更新会依次进行，关闭页面后仍会继续。`,
                           },
                         );
                         await manualBatches.refetch();
                       } catch (e) {
                         if (!isCurrentRefresh('', token)) return;
                         toast.error(
-                          e instanceof Error
-                            ? e.message
-                            : '更新请求未确认，请查询原批次；不要重复点击。',
+                          <FailureNotice
+                            error={
+                              e instanceof Error
+                                ? e.message
+                                : '更新请求未确认，请查询原批次；不要重复点击。'
+                            }
+                          />,
                         );
                       } finally {
                         finishManualRefresh('', token);
@@ -1707,12 +1735,12 @@ const Feeds = () => {
                     <span className="text-[14px]">
                       {isRefreshAllMpArticlesRunning || isManualBatchRefreshing
                         ? isManualBatchRefreshing
-                          ? '正在受理'
+                          ? '正在开始'
                           : manualBatch?.state === 'paused'
                             ? '更新已暂停'
                             : '后台更新中'
                         : isRefreshedAll
-                          ? '缓存已同步'
+                          ? '内容已同步'
                           : '更新全部'}
                     </span>
                   </Button>
@@ -1795,7 +1823,9 @@ const Feeds = () => {
                                     result.status,
                                   );
                                   if (result.status === 'blocked')
-                                    toast.error(result.message);
+                                    toast.error(
+                                      <FailureNotice error={result.message} />,
+                                    );
                                   else toast.warning(result.message);
                                 } catch (error) {
                                   rememberUpdate(
@@ -1806,9 +1836,13 @@ const Feeds = () => {
                                       : '历史采集失败',
                                   );
                                   toast.error(
-                                    error instanceof Error
-                                      ? error.message
-                                      : '历史采集失败',
+                                    <FailureNotice
+                                      error={
+                                        error instanceof Error
+                                          ? error.message
+                                          : '历史采集失败'
+                                      }
+                                    />,
                                   );
                                 } finally {
                                   await refetchFeedList();
@@ -2064,7 +2098,10 @@ const Feeds = () => {
                   <div className="px-4 pb-3">
                     {searchCandidatesError ? (
                       <p role="alert" className="text-red-600">
-                        {searchCandidatesError.message}
+                        <FailureNotice
+                          error={searchCandidatesError}
+                          fallback="候选文章暂时无法读取，请稍后重试。"
+                        />
                       </p>
                     ) : searchCandidates ? (
                       <>
@@ -2143,7 +2180,10 @@ const Feeds = () => {
                     )}
                     {candidateScanError && (
                       <p role="alert" className="mt-2 text-red-600">
-                        {candidateScanError.message}
+                        <FailureNotice
+                          error={candidateScanError}
+                          fallback="检查未完成，请稍后重试。"
+                        />
                       </p>
                     )}
                   </div>
@@ -2277,14 +2317,6 @@ const Feeds = () => {
               {id
                 ? `公众号：${currentMpInfo?.mpName || '当前公众号'}`
                 : '公众号：全部订阅'}
-              {'；范围：'}
-              {exportScope === 'selected'
-                ? '选中文章'
-                : exportScope === 'all'
-                  ? id
-                    ? '本号全部'
-                    : '所有订阅的全部文章'
-                  : '当前筛选（包含未加载分页）'}
             </p>
             <fieldset className="space-y-2">
               <legend className="mb-2 text-sm">导出范围</legend>
@@ -2321,12 +2353,7 @@ const Feeds = () => {
                 </label>
               ))}
             </fieldset>
-            <p className="text-xs text-neutral-500">
-              选中文章仅含你勾选的已加载文章；加载更多不会自动选中。当前筛选包含日期、搜索、文件夹内全部匹配文章，涵盖尚未加载的分页。
-              {id
-                ? '本号全部只导出当前公众号，忽略日期、搜索和文件夹。'
-                : '全部文章覆盖所有订阅，忽略日期、搜索和文件夹。'}
-            </p>
+
             <label className="flex flex-col gap-2 text-sm">
               导出方式
               <select
@@ -2338,20 +2365,19 @@ const Feeds = () => {
                 }
               >
                 <option value="obsidian" disabled={privateOnlineMode}>
-                  保存到 Obsidian 目录（增量）
+                  保存到 Obsidian 目录
                 </option>
                 <option value="zip" disabled={!zipAvailable}>
-                  下载 ZIP 快照（本号当前筛选 / 全部）
+                  下载 ZIP 文件
                 </option>
               </select>
             </label>
-            <p className="text-xs text-neutral-500">
-              {exportFormat === 'obsidian'
-                ? '使用原有目录与格式；同目录再次导出会校验已有文件，跳过或补齐。单次最多 5000 篇。'
-                : 'ZIP 只打包当前公众号的全部或筛选快照，不会跨号打包，也不支持选中文章。每次重新打包，浏览器不能检查本地下载历史。'}
-              {!zipAvailable &&
-                ' ZIP 需先进入单个公众号，并选择当前筛选或本号全部。'}
-            </p>
+            <ArticleExportGuidance
+              singleFeed={Boolean(id)}
+              scope={exportScope}
+              format={exportFormat}
+              zipAvailable={zipAvailable}
+            />
             {exportScope !== 'selected' && exportSummary.isError && (
               <div role="alert" className="text-sm text-red-600">
                 范围篇数读取失败，请重试。
@@ -2364,13 +2390,6 @@ const Feeds = () => {
                 </Button>
               </div>
             )}
-            <p role="status" className="text-sm">
-              本次范围：{exportCount ?? '读取中'} 篇
-            </p>
-            <p className="text-xs text-neutral-500">
-              篇数为开始前读取；如有文章并发新增或移除，实际导出数量可能变化。Obsidian
-              以提交前取得的文章集合为准，ZIP 以打包时的本号快照为准。
-            </p>
           </ModalBody>
           <ModalFooter>
             <Button variant="flat" onPress={() => setExportOpen(false)}>
@@ -2414,19 +2433,19 @@ const Feeds = () => {
           <ModalBody>
             <p>本次公众号：{repairTarget?.mpName}</p>
             <p className="text-default-600 text-sm">
-              使用已有订阅身份验证目录，无需重新提供单篇原文。所选账号验证成功后更新最近10篇正文和图片，后续使用原更新本号入口；失败保留历史数据和停止记录，不自动重试或切换账号。
+              使用所选账号修复当前订阅并更新最近10篇正文和图片。已有文章会保留；遇到限制会停止，不会自动重试或更换账号。
             </p>
             {!defaultAddCapability?.existingRepairAvailable && (
               <p role="status">
                 {addCapabilityError
-                  ? '来源状态读取失败，本次未发目录请求。'
+                  ? '来源状态读取失败，请稍后重试。'
                   : '正在核对来源；不可用时不能开始修复。'}
               </p>
             )}
             <label className="flex flex-col gap-2 text-sm">
-              用于本号来源修复的正常Web账号
+              用于修复的网页登录账号
               <select
-                aria-label="用于本号来源修复的正常Web账号"
+                aria-label="用于修复的网页登录账号"
                 value={addAccountId}
                 onChange={(event) => {
                   if (!addingSubscriptions.current)
@@ -2435,7 +2454,7 @@ const Feeds = () => {
                 disabled={isAddFeedLoading}
                 className="bg-content1 rounded-md border p-2"
               >
-                <option value="">请选择正常Web登录账号</option>
+                <option value="">请选择已登录且可用的账号</option>
                 {addAccounts?.items.map((account) => (
                   <option
                     key={account.id}
@@ -2443,7 +2462,7 @@ const Feeds = () => {
                     disabled={account.status !== 1 || !account.nativeLoginAt}
                   >
                     {account.platformName || account.name}
-                    {!account.nativeLoginAt ? '（需正常Web登录）' : ''}
+                    {!account.nativeLoginAt ? '（需在网页完成登录）' : ''}
                   </option>
                 ))}
               </select>
@@ -2451,11 +2470,16 @@ const Feeds = () => {
             {addAccountsError && (
               <p role="alert">账号列表读取失败，请在账号页核对正常登录。</p>
             )}
-            {repairMessages.map((message, index) => (
-              <p key={index} role="status">
-                {message}
-              </p>
-            ))}
+            {repairMessages.length > 0 && (
+              <details>
+                <summary>查看修复结果详情</summary>
+                {repairMessages.map((message, index) => (
+                  <p key={index} role="status">
+                    {message}
+                  </p>
+                ))}
+              </details>
+            )}
           </ModalBody>
           <ModalFooter>
             <Button variant="flat" onPress={handleCancelRepair}>
@@ -2517,7 +2541,7 @@ const Feeds = () => {
                     {addCapabilityError
                       ? '服务状态读取失败，请刷新页面后重试。'
                       : defaultAddCapability
-                        ? 'Wechat2RSS 暂不可用，请先检查实例配置与账号登录。'
+                        ? '订阅服务暂不可用，请先检查服务设置和账号登录。'
                         : '正在检查订阅服务…'}
                   </p>
                 )}

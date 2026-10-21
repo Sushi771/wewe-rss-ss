@@ -133,6 +133,17 @@ function page({
     },
     './article-verification-notice': { default: 'Notice' },
   };
+  const diagnostics = compile('apps/web/src/utils/operation-message.ts', () => {
+    throw Error('unexpected diagnostic dependency');
+  });
+  modules['@web/components/OperationNotice'] = compile(
+    'apps/web/src/components/OperationNotice.tsx',
+    (name) => {
+      if (name === '../utils/operation-message') return diagnostics;
+      if (name in modules) return modules[name];
+      throw Error('unexpected operation notice dependency');
+    },
+  );
   const fetch = async (url, options) => {
     calls.push({ url, method: options.method, body: options.body });
     if (fetchReply) {
@@ -736,7 +747,11 @@ test('a fixed ready task locks its directory and explains that a new destination
   const h = page({ destinationBound: true });
   assert.equal(h.button('选择下载路径').props.isDisabled, true);
   const text = JSON.stringify(h.render());
-  assert.ok(text.includes('取得新的接收许可'));
+  assert.ok(
+    text.includes(
+      '本次下载已固定保存目录。如需更改，请取消本次任务后重新下载。',
+    ),
+  );
   assert.equal(text.includes('可重新选择路径后保存'), false);
   h.button('选择下载路径').props.onPress();
   assert.equal(h.calls.length, 0);
@@ -908,7 +923,7 @@ test('ordinary single download shows Wechat2RSS-only cache errors without select
   await flush();
   assert.ok(h.state[3].includes('Wechat2RSS缓存'));
   assert.deepEqual(h.notifications, [
-    '公众号操作未完成，请重试或查看任务状态。',
+    '公众号操作未完成，请先核对任务状态和已保存内容。',
   ]);
   h.runEffects();
   await flush();

@@ -1,3 +1,4 @@
+import { FailureNotice } from '@web/components/OperationNotice';
 import { READING_CACHE_TIME } from '@web/utils/reading-query-cache';
 import {
   FC,
@@ -434,10 +435,10 @@ const ArticleList: FC<ArticleListProps> = ({
                 rel="noopener noreferrer"
                 title={
                   item.bodyCached
-                    ? '点击标题阅读缓存正文'
-                    : '打开原文；本地正文未缓存'
+                    ? '点击标题阅读已保存正文'
+                    : '正文尚未保存，点击打开原文'
                 }
-                aria-label={`${item.bodyCached ? '阅读缓存正文' : '打开原文'}：${item.title}`}
+                aria-label={`${item.bodyCached ? '阅读已保存正文' : '打开原文'}：${item.title}`}
                 onClick={(event) => {
                   position.rememberForReader();
                   if (item.bodyCached) {
@@ -597,13 +598,16 @@ const ArticleList: FC<ArticleListProps> = ({
         <ModalContent>
           <ModalHeader>{reading.data?.title || '读取已保存正文'}</ModalHeader>
           <ModalBody>
-            <p className="text-sm text-neutral-500">
-              读取本地已保存正文与图片；本次没有联网取文。
-            </p>
+            <p className="text-sm text-neutral-500">阅读已保存的正文和图片。</p>
             {reading.isLoading ? (
               <Spinner />
             ) : reading.error ? (
-              <p role="alert">正文读取失败：{reading.error.message}</p>
+              <div role="alert">
+                <FailureNotice
+                  error={reading.error}
+                  fallback="正文读取失败，请稍后重试或打开原文。"
+                />
+              </div>
             ) : reading.data?.contentHtml ? (
               <ArticleReader
                 key={readingId}
@@ -612,7 +616,7 @@ const ArticleList: FC<ArticleListProps> = ({
                 onFindOpenChange={setReaderFindOpen}
               />
             ) : (
-              <p role="alert">尚无已保存正文；没有自动请求腾讯原文。</p>
+              <p role="alert">正文尚未保存，可打开原文阅读。</p>
             )}
           </ModalBody>
         </ModalContent>

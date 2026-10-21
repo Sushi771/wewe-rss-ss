@@ -97,7 +97,7 @@ const item = {
   feedId: 'synthetic-feed',
   state: 'waiting',
   accepted: true,
-  message: '上游已受理，缓存仍在生成。',
+  message: '已开始，缓存仍在生成。',
 };
 test('actual progress component distinguishes queued, upstream accepted and synchronized cache counts', () => {
   const f = fixture({
@@ -111,11 +111,9 @@ test('actual progress component distinguishes queued, upstream accepted and sync
   });
   assert.equal(f.progress.props.value, 2);
   assert.equal(f.progress.props.maxValue, 3);
-  assert(
-    f.progress.props.label.includes('排队 1 · 上游已受理 2 · 缓存已同步 1'),
-  );
-  assert(f.text.includes('等待缓存'));
-  assert(f.text.includes('缓存已同步'));
+  assert(f.progress.props.label.includes('排队 1 · 已开始 2 · 内容已同步 1'));
+  assert(f.text.includes('等待内容同步'));
+  assert(f.text.includes('内容已同步'));
   assert(!f.text.includes('全部正文已完成'));
   assert.equal(f.requests.length, 0);
 });
@@ -229,7 +227,7 @@ test('legal exclusions remain visibly different from a fully updated round', () 
     items: [],
   };
   const excluded = fixture({ ...base, coverage });
-  assert(excluded.text.includes('合法跳过 1'));
+  assert(excluded.text.includes('已跳过 1'));
   assert(excluded.text.includes('本轮尚未全部更新完成。'));
   const done = fixture({
     ...base,
@@ -264,6 +262,6 @@ test('an unexplained terminal gap is not invented as a legal skip or a full succ
     },
   });
   assert(f.progress.props.label.includes('需核对'));
-  assert(!f.progress.props.label.includes('含合法跳过'));
+  assert(!f.progress.props.label.includes('部分订阅已跳过'));
   assert(!f.progress.props.label.includes('已全部更新'));
 });

@@ -13,8 +13,8 @@ vm.runInNewContext(
   { exports: compiled },
 );
 test('availability is derived only from current cache, without history labels', () => {
-  assert.equal(compiled.articleBodyState(true).current, '正文已缓存，可阅读');
-  assert.equal(compiled.articleBodyState(false).current, '正文未缓存');
+  assert.equal(compiled.articleBodyState(true).current, '正文已保存，可阅读');
+  assert.equal(compiled.articleBodyState(false).current, '正文尚未保存');
   assert.equal(compiled.articleBodyState(false).needsBody, true);
   assert(!Object.hasOwn(compiled.articleBodyState(true), 'history'));
 });

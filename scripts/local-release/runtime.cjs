@@ -131,6 +131,7 @@ function guardNativePath(release, manifest, file) {
 }
 
 async function runtime() {
+  require('./lib.cjs').hostEffects.assertRuntime();
   require('./lib.cjs').hostEffects.assertWritable();
   const { values, positionals } = parseArgs({
     allowPositionals: true,

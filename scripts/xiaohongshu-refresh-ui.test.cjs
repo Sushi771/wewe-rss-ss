@@ -150,8 +150,7 @@ test('download initial failure ends loading text and offers a working local retr
   assert.ok(!nodes.includes('正在读取设置…'));
   const retry = nodes.find(
     (node) =>
-      node.type === 'Button' &&
-      node.props.children === '重新读取本地设置与能力',
+      node.type === 'Button' && node.props.children === '重新读取下载设置',
   );
   assert.ok(retry && !retry.props.isDisabled);
   fixture.enableRetry();

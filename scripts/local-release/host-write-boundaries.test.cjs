@@ -16,6 +16,7 @@ const catalog = {
     'desktop-dependencies',
     'desktop-progress',
     'desktop-start',
+    'frontend-update',
     'identity-tool',
     'install-desktop',
     'install-lifecycle',
@@ -33,8 +34,16 @@ const catalog = {
     'test-artifacts',
   ],
   indirect: ['lifecycle-owner-fixture', 'recover-test-run', 'startup-audit'],
-  pure: ['engine-audit', 'refresh-wave-rollback-compat'],
-  readonly: ['scope-inventory', 'verify-source', 'windows-release-references'],
+  pure: ['engine-audit', 'refresh-wave-rollback-compat', 'frontend-companion'],
+  readonly: [
+    'artifact-intents',
+    'scope-inventory',
+    'verify-source',
+    'windows-release-references',
+  ],
+  // The exact compiler-only preload captures producer bytes over an inherited
+  // pipe. It does not run as a host controller or a packaged runtime module.
+  producer: ['artifact-producer-hook'],
   registry: ['release-scope'],
   gateway: ['lib'],
 };
@@ -57,6 +66,7 @@ test('host effects use the common gateway; native imports are limited to named r
     ...catalog.readonly,
     ...catalog.registry,
     ...catalog.gateway,
+    ...catalog.producer,
   ]);
   for (const name of Object.values(catalog).flat()) {
     const source = fs.readFileSync(path.join(__dirname, name + '.cjs'), 'utf8');
@@ -68,6 +78,20 @@ test('host effects use the common gateway; native imports are limited to named r
     if (catalog.guarded.includes(name))
       assert.match(source, /hostEffects\.(?:fs|processes)/, name);
   }
+});
+
+test('the compiler-only producer hook refuses standalone loading without its inherited pipe', () => {
+  const result = require('node:child_process').spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'artifact-producer-hook.cjs')],
+    {
+      env: { ...process.env, WEWE_ARTIFACT_FD: '', WEWE_ARTIFACT_ROOT: '' },
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /RELEASE_ARTIFACT_PIPE_REQUIRED/);
 });
 
 test('the native read-only exceptions contain no filesystem mutation calls', () => {

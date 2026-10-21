@@ -442,6 +442,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         fail('REFERENCE_APPLICATION_ACTION_UNREVIEWED');
       return [...refs.values()];
     }
+    const rollbackIds = new Set();
+    let proof;
     for (const file of cfg.rollbackFiles) {
       const raw = watchPinned(file),
         doc = JSON.parse(raw.toString('utf8'));
@@ -455,46 +457,51 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       for (const p of doc.packages) {
         const ref = packageAt(p.path);
         if (p.id !== ref.packageId) fail('REFERENCE_ROLLBACK_BINDING_INVALID');
+        rollbackIds.add(ref.packageId);
         record('rollback', ref, {
           identity: hash([canonical(file.path), digest(raw), ref.packagePath]),
         });
       }
     }
     result.categories.pointers = result.categories.rollback = true;
-    const proofRaw = watchPinned(cfg.compatibilityProof),
+    if (policy.phase === 'build-only') {
+      result.compatibility = { stage: 'build-only', verified: false };
+    } else {
+      const proofRaw = watchPinned(cfg.compatibilityProof);
       proof = JSON.parse(proofRaw.toString('utf8'));
-    if (
-      digest(proofRaw) !== policy.compatibilityProofSha256 ||
-      proof.format !== 1 ||
-      proof.kind !== 'additive-schema-unknown-claim-rollback' ||
-      proof.businessDatabaseRestored !== false ||
-      [
-        'additiveSchema',
-        'unknownClaimsPreserved',
-        'businessRowsPreserved',
-        'rollbackStarted',
-      ].some((k) => proof.checks?.[k] !== true)
-    )
-      fail('REFERENCE_COMPATIBILITY_UNPROVEN');
-    for (const role of ['candidate', 'rollback']) {
-      const p = proof[role];
       if (
-        !p ||
-        !policy.protectedIds.includes(p.id) ||
-        policy.packageProofs[p.id] !== p.manifestSha256 ||
-        !packages.some(
-          (ref) =>
-            ref.packageId === p.id &&
-            manifests.get(ref.packagePath).m.sourceCommit === p.sourceCommit,
-        )
+        digest(proofRaw) !== policy.compatibilityProofSha256 ||
+        proof.format !== 1 ||
+        proof.kind !== 'additive-schema-unknown-claim-rollback' ||
+        proof.businessDatabaseRestored !== false ||
+        [
+          'additiveSchema',
+          'unknownClaimsPreserved',
+          'businessRowsPreserved',
+          'rollbackStarted',
+        ].some((k) => proof.checks?.[k] !== true)
       )
-        fail('REFERENCE_COMPATIBILITY_BINDING_INVALID');
+        fail('REFERENCE_COMPATIBILITY_UNPROVEN');
+      for (const role of ['candidate', 'rollback']) {
+        const p = proof[role];
+        if (
+          !p ||
+          !policy.protectedIds.includes(p.id) ||
+          policy.packageProofs[p.id] !== p.manifestSha256 ||
+          !packages.some(
+            (ref) =>
+              ref.packageId === p.id &&
+              manifests.get(ref.packagePath).m.sourceCommit === p.sourceCommit,
+          )
+        )
+          fail('REFERENCE_COMPATIBILITY_BINDING_INVALID');
+      }
+      result.compatibility = {
+        verified: true,
+        businessDatabaseRestored: false,
+        proofSha256: digest(proofRaw),
+      };
     }
-    result.compatibility = {
-      verified: true,
-      businessDatabaseRestored: false,
-      proofSha256: digest(proofRaw),
-    };
     function processMap(list) {
       if (!Array.isArray(list) || list.length > 8192)
         fail('REFERENCE_PROCESS_QUERY_INVALID');
@@ -837,7 +844,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           ['current', 'candidate', 'rollback'].some(
             (role) => !state.managedIds.includes(state.roles[role]),
           ) ||
-          state.roles.rollback !== proof.rollback.id
+          (policy.phase === 'build-only'
+            ? !rollbackIds.has(state.roles.rollback)
+            : state.roles.rollback !== proof.rollback.id)
         )
           fail('REFERENCE_UNREVIEWED_ROLLBACK_ROLE');
       } else watch(lifecycle, false);

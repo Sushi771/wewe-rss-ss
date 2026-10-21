@@ -46,6 +46,7 @@ function sqlite() {
   return require('node:sqlite');
 }
 function open(database) {
+  require('./lib.cjs').hostEffects.assertRuntime();
   const { DatabaseSync } = sqlite();
   const connection = new DatabaseSync(database, {
     readOnly: true,
@@ -138,6 +139,50 @@ function inspectConnection(
     );
   }
   const applied = new Set();
+  const optionalSearch = fs.existsSync(
+    path.join(migrations, 'search-rollback.json'),
+  );
+  const searchMigration = '20261020160000_local_body_search';
+  if (optionalSearch) {
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(migrations, 'search-rollback.json'), 'utf8'),
+    );
+    assert(
+      [
+        '48fdf73f4d770001bbb6de3e2383189811e56ccb',
+        'f618e48f48ff0e3df1c646cb8a666a2461815732',
+      ].includes(marker.baseSourceCommit),
+      'Rollback source changed',
+    );
+    assert.deepEqual(marker, {
+      format: 1,
+      baseSourceCommit: marker.baseSourceCommit,
+      optionalMigration: searchMigration,
+    });
+    const inventory = [...expected.keys()]
+      .filter((name) => name !== searchMigration)
+      .map((name) => [
+        name,
+        hash(
+          fs
+            .readFileSync(path.join(migrations, name, 'migration.sql'), 'utf8')
+            .replace(/\r\n/g, '\n'),
+        ),
+      ]);
+    assert.equal(
+      hash(JSON.stringify(inventory)),
+      '952c507616467fb5b9d428e1a54a4d09ef4257be03c07654a34956bf2edb6c76',
+      'Rollback base migrations changed',
+    );
+    assert(
+      expected
+        .get(searchMigration)
+        ?.has(
+          'ff72e5e104374f9ce6b45ef8a9b0320a8bc310a26a447a33f2e4636cf2c36fad',
+        ),
+      'Rollback search migration changed',
+    );
+  }
   for (const row of connection
     .prepare(
       'SELECT migration_name,checksum,finished_at,rolled_back_at FROM _prisma_migrations',
@@ -156,19 +201,53 @@ function inspectConnection(
     applied.add(row.migration_name);
   }
   const pending = [...expected.keys()]
-    .filter((name) => !applied.has(name))
+    .filter(
+      (name) =>
+        !applied.has(name) && !(optionalSearch && name === searchMigration),
+    )
     .sort();
   assert.deepEqual(pending, [], 'Pending migrations are forbidden at startup');
-  if (startupGate || capture) {
+  if (startupGate || capture || optionalSearch) {
     // Reconstruct the packaged schema in memory. Migration receipts alone, or
     // a few selected columns, cannot establish compatibility with this client.
     const { DatabaseSync } = sqlite();
     const reference = new DatabaseSync(':memory:');
     try {
       for (const name of expected.keys())
-        reference.exec(
-          fs.readFileSync(path.join(migrations, name, 'migration.sql'), 'utf8'),
+        if (!(optionalSearch && name === searchMigration && !applied.has(name)))
+          reference.exec(
+            fs.readFileSync(
+              path.join(migrations, name, 'migration.sql'),
+              'utf8',
+            ),
+          );
+      if (optionalSearch || expected.has(searchMigration)) {
+        const schema = (db) =>
+          db
+            .prepare(
+              "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name <> '_prisma_migrations' ORDER BY type,name",
+            )
+            .all()
+            .map((row) => ({
+              ...row,
+              // Only the two historically reversed nullable TEXT additions commute.
+              // All other SQL and the named PRAGMA contracts remain exact.
+              sql:
+                row.type === 'table' && row.name === 'feeds'
+                  ? (row.sql
+                      ?.replace(/\r\n/g, '\n')
+                      .replace(
+                        ', "local_directory" TEXT, "public_album_ids" TEXT,',
+                        ', "public_album_ids" TEXT, "local_directory" TEXT,',
+                      ) ?? null)
+                  : (row.sql?.replace(/\r\n/g, '\n') ?? null),
+            }));
+        assert.deepEqual(
+          schema(connection),
+          schema(reference),
+          'Unreviewed schema object or SQL drift',
         );
+      }
       for (const { name } of reference
         .prepare(
           "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -266,6 +345,7 @@ function inspectConnection(
   };
 }
 function recoverHotJournal(database) {
+  require('./lib.cjs').hostEffects.assertRuntime();
   require('./lib.cjs').hostEffects.assertWritable();
   if (
     fs.existsSync(database + '-journal') &&
@@ -282,6 +362,7 @@ function recoverHotJournal(database) {
   }
 }
 function inspectDatabase(database, migrations, options) {
+  require('./lib.cjs').hostEffects.assertRuntime();
   database = fs.realpathSync.native(database);
   if (options?.startupGate) recoverHotJournal(database);
   const connection = open(database);
@@ -292,6 +373,7 @@ function inspectDatabase(database, migrations, options) {
   }
 }
 function auditCurrentDatabase(database, migrations, baselineFile) {
+  require('./lib.cjs').hostEffects.assertRuntime();
   database = fs.realpathSync.native(database);
   recoverHotJournal(database);
   const before = fs.statSync(database, { bigint: true });
@@ -399,6 +481,7 @@ function verifyCurrentSnapshot(database, backup, stage) {
   }
 }
 async function prepareStart(database, migrations, backupRoot, baselineFile) {
+  require('./lib.cjs').hostEffects.assertRuntime();
   require('./lib.cjs').hostEffects.assertWritable();
   database = fs.realpathSync.native(database);
   backupRoot = budget.canonical(backupRoot);

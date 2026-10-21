@@ -39,7 +39,7 @@ test('actual list rendering shows current availability and keeps retry history o
   };
   for (const row of [item, JSON.parse(JSON.stringify(item))]) {
     const view = fixture({ items: [row] }).render();
-    assert.match(view.text, /正文已缓存，可阅读/);
+    assert.match(view.text, /正文已保存，可阅读/);
     assert.doesNotMatch(
       JSON.stringify(view.nodes),
       /上次原文重试|HTTP 302|原文请求失败|1700000000/,
@@ -59,7 +59,7 @@ test('actual list rendering keeps missing-cache actions available and hides hist
     bodyRetry: { allowed: true, reason: '' },
   };
   const missing = fixture({ items: [item] }).render();
-  assert.match(missing.text, /正文未缓存/);
+  assert.match(missing.text, /正文尚未保存/);
   assert.doesNotMatch(missing.text, /上次原文重试|HTTP 302/);
   assert(
     missing.nodes.some(
@@ -77,7 +77,7 @@ test('actual list rendering keeps missing-cache actions available and hides hist
       },
     ],
   }).render();
-  assert.match(ready.text, /正文已缓存，可阅读/);
+  assert.match(ready.text, /正文已保存，可阅读/);
   assert.doesNotMatch(ready.text, /上次原文重试|已补入正文|HTTP 302/);
 });
 test('current failed user retry gives a concise toast without publishing audit details into the row', async () => {
@@ -233,6 +233,15 @@ function fixture({
     module,
     exports: module.exports,
     require: (name) => {
+      if (name === '@web/components/OperationNotice')
+        return {
+          __esModule: true,
+          default: 'OperationNotice',
+          FailureNotice: 'FailureNotice',
+        };
+      if (name === '@web/components/ArticleSearchStatus')
+        return { __esModule: true, default: 'ArticleSearchStatus' };
+
       if (name === '@web/utils/reading-query-cache')
         return { READING_CACHE_TIME: 60000 };
       assert(name in modules, name);

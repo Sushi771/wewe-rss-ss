@@ -1,3 +1,22 @@
+## 2026-10-21: build-only artifact provenance correction, review before real builds
+
+The two independent review counterexamples now have explicit regressions: an
+unrequested file added during an active build cannot enter its completion receipt,
+and changing a completed output plus regenerating the ledger self-hash cannot
+authorize another build session. Expected artifact names and bytes originate in
+trusted producer memory and an inherited compiler pipe. Sealing checks those
+expectations inside the bounded receipt scan; additional artifact reads consume
+the existing cumulative scan budget. The exact candidate and repaired-UI rollback
+build sequentially under one held memory lease. A failed advance cannot retry with
+a smaller reservation. Output, ledger and interrupted claims remain for review.
+
+This changes release tools, their offline synthetic tests and delivery guidance;
+it does not change the frontend application, migrate a database, build the real
+pair, merge the PR or deploy search. The prior rejected policy remains rejected.
+Prepare new exact plans and a new policy for independent review before running
+the real pair. Candidate source remains `3a36428210f22ea1986f0a96a6066e7fdc9baf46`;
+strict compatible rollback remains `f618e48f48ff0e3df1c646cb8a666a2461815732`.
+
 ## 2026-10-18: bounded daily backup lifecycle, development only
 
 Prepared independently on exact `aeb7483c85db8d13f1345011266ae7ee6046adc0`. The Windows opt-in lifecycle persists the original physical generation boundary across restarts and limits admitted periodic data to three normal points plus one pending-confirmation point, under unchanged cumulative caps. Each permanent retirement still needs the existing exact action-time approval; partial outcomes retain the same spent allocation. Unknown/protected origins stay separate. Capacity diagnostics now derive 900/86400 cadence and display the actual interval. No production activation, database copy or retirement was performed. See [activation boundary, fixed-state protocol, exact review flow and synthetic coverage](PERIODIC_BACKUP_CONFIRMED_LIFECYCLE.md). This work is outside the current integration acceptance/main-merge range.
@@ -526,3 +545,7 @@ times. Protected high-risk backup reuse and retention/deletion rules are unchang
 Tests use only bounded synthetic databases and owned temporary outputs. A hard
 quota is not automatic rotation or evidence that old production files were freed.
 No production data, configuration, service or deployed PR46 package was changed.
+
+2026-10-21 search release compatibility: strict native/Python schema checks now normalize only the exact reversed adjacent nullable TEXT additions `feeds.local_directory` / `feeds.public_album_ids`. Named column types/defaults/constraints and every other SQL object remain checked. Synthetic schema20/21 historical-order cases and changed type/default/NOT NULL rejection pass; full native startup suite 40/40. Production search migration has not run: the prior frontend was restored after a protected-backup call encountered the existing periodic lifecycle pending-confirmation allocation. Do not clear its marker or substitute an unverified old backup.
+
+2026-10-21 periodic coverage follow-up: coverage now permits only the exact added articles publish-time/id index with its known completed migration receipt; every old typed durable row must still survive. Changed body/metric/note, missing row, invalid receipt and unrelated schema/index drift remain held. This maintenance-checker change does not authorize retirement or change the running package; the pending lifecycle action includes permanent deletion and remains subject to exact user approval.

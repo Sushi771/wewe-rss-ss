@@ -118,7 +118,13 @@ function validateReferences(value, policy) {
     value.uncertainChildren.length
   )
     throw new Error('RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
-  if (
+  if (policy.phase === 'build-only') {
+    if (
+      value.compatibility?.stage !== 'build-only' ||
+      value.compatibility.verified !== false
+    )
+      throw new Error('RELEASE_SCOPE_BUILD_STAGE_REQUIRED');
+  } else if (
     value.compatibility?.verified !== true ||
     value.compatibility.businessDatabaseRestored !== false ||
     value.compatibility.proofSha256 !== policy.compatibilityProofSha256
@@ -166,6 +172,219 @@ function validateReferences(value, policy) {
   }
   return hash(value);
 }
+// One bounded adoption of the reviewed 6,643-byte partial workspace. This never
+// moves/deletes evidence or imports old output receipts as compiler authority.
+function heldRecovery(policy) {
+  const spec = policy.buildOnly?.recoveryOf;
+  if (!spec) return;
+  const fail = () => {
+    throw Error('RELEASE_SCOPE_HELD_RECOVERY_BINDING_INVALID');
+  };
+  const document = (ref) => {
+    const stat = ref?.path && fs.lstatSync(ref.path);
+    if (
+      !stat ||
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.size > 128 * 1024
+    )
+      fail();
+    if (
+      !ref ||
+      !path.isAbsolute(ref.path || '') ||
+      !/^[a-f0-9]{64}$/.test(ref.sha256 || '') ||
+      canonical(ref.path) !== ref.path ||
+      fileHash(ref.path) !== ref.sha256
+    )
+      fail();
+    return read(ref.path, 128 * 1024);
+  };
+  if (spec.format !== 'held-6643-v1' || policy.phase !== 'build-only') fail();
+  const plan = document(spec.plan),
+    intent = document(spec.intent),
+    moved = document(spec.moved);
+  const old = plan.originalFailure,
+    roots = plan.roots,
+    map = plan.move;
+  if (
+    !/^[a-f0-9-]{36}$/.test(old?.scopeId || '') ||
+    policy.baseline.bytes !== 6643 ||
+    policy.baseline.runtimeCopies !== 0 ||
+    policy.baseline.entries !== 8
+  )
+    fail();
+  if (
+    plan.kind !== 'one-off-retain-failed-6643-bytes' ||
+    !old ||
+    !roots ||
+    !map ||
+    !/^[a-f0-9-]{36}$/.test(old.claimId || '') ||
+    old.scopeId === policy.scopeId ||
+    roots.outputRoot !== policy.buildOnly.outputRoot ||
+    roots.registry !== policy.registryDirectory ||
+    hash(roots.outputIdentity) !== hash(policy.roots[0].identity) ||
+    hash(roots.registryIdentity) !== hash(policy.registryIdentity) ||
+    map.retainedBytes !== 6643 ||
+    map.destination !== path.join(roots.outputRoot, '.held-' + old.claimId) ||
+    path.dirname(map.source) !== roots.outputRoot ||
+    present(map.source)
+  )
+    fail();
+  const originalPolicy = document(old.policy),
+    failure = document({ path: old.receiptPath, sha256: old.receiptSha256 });
+  const ledger = document({ path: old.ledgerPath, sha256: old.ledgerSha256 });
+  const sentinelStat = fs.lstatSync(old.adoptionSentinel.path);
+  if (
+    !sentinelStat.isFile() ||
+    sentinelStat.isSymbolicLink() ||
+    sentinelStat.size !== 64 ||
+    canonical(old.adoptionSentinel.path) !== old.adoptionSentinel.path
+  )
+    fail();
+  if (
+    originalPolicy.phase !== 'build-only' ||
+    originalPolicy.roots?.length !== 1 ||
+    originalPolicy.roots[0].path !== roots.outputRoot ||
+    hash(originalPolicy.roots[0].identity) !== hash(roots.outputIdentity) ||
+    hash(originalPolicy.registryIdentity) !== hash(roots.registryIdentity) ||
+    hash(identity(roots.registry)) !== hash(roots.registryIdentity) ||
+    ledger.payload?.configSha !== old.policy.sha256 ||
+    failure.policy?.sha256 !== old.policy.sha256 ||
+    moved.controller?.check?.querySucceeded !== true ||
+    moved.controller.check.matchingCount !== 0
+  )
+    fail();
+  if (
+    old.ledgerPath !== path.join(roots.registry, old.scopeId + '.state.json') ||
+    hash(fileIdentity(old.ledgerPath)) !== hash(old.ledgerFileIdentity) ||
+    old.adoptionSentinel.path !== old.ledgerPath + '.adopted' ||
+    fileHash(old.adoptionSentinel.path) !== old.adoptionSentinel.sha256 ||
+    originalPolicy.scopeId !== old.scopeId ||
+    originalPolicy.registryDirectory !== roots.registry ||
+    originalPolicy.buildOnly?.outputRoot !== roots.outputRoot ||
+    policy.maxBytes > originalPolicy.maxBytes ||
+    policy.maxGrowthBytes > originalPolicy.maxGrowthBytes ||
+    policy.maxNewRuntimeCopies > originalPolicy.maxNewRuntimeCopies ||
+    failure.exitCode !== 1 ||
+    failure.controllerSession !== plan.controllerExit?.originalExecSession ||
+    failure.claim?.id !== old.claimId ||
+    !ledger.payload ||
+    ledger.digest !== hash(ledger.payload) ||
+    hash(ledger.payload.claim) !== hash(old.claim) ||
+    ledger.payload.claim?.id !== old.claimId ||
+    ledger.payload.outputs?.length !== 1 ||
+    ledger.payload.outputs[0].complete !== false ||
+    ledger.payload.outputs[0].path !== map.source ||
+    ledger.payload.outputs[0].claim !== old.claimId
+  )
+    fail();
+  for (const receipt of [intent, moved])
+    if (
+      receipt.planSha256 !== spec.plan.sha256 ||
+      receipt.original?.claimId !== old.claimId ||
+      receipt.original?.policySha256 !== old.policy.sha256 ||
+      receipt.original?.ledgerSha256 !== old.ledgerSha256 ||
+      receipt.source !== map.source ||
+      receipt.destination !== map.destination ||
+      receipt.retainedBytes !== 6643 ||
+      receipt.capacityFreedBytes !== 0 ||
+      receipt.oldOutputSuccessful !== false ||
+      hash(receipt.files) !== hash(map.files) ||
+      hash(receipt.directories) !== hash(map.directories)
+    )
+      fail();
+  if (
+    spec.intent.path !== plan.appendOnlyMapping?.intentPath ||
+    spec.moved.path !== plan.appendOnlyMapping?.movedPath ||
+    path.dirname(spec.intent.path) !== roots.registry ||
+    path.dirname(spec.moved.path) !== roots.registry ||
+    moved.status !== 'failed-retained-relocated' ||
+    moved.intentSha256 !== spec.intent.sha256 ||
+    moved.sourceAbsent !== true ||
+    moved.destinationVerified !== true ||
+    moved.oldLedgerUnchanged !== true ||
+    moved.oldSentinelUnchanged !== true
+  )
+    fail();
+  if (
+    hash(identity(map.destination)) !==
+    hash(map.directories?.find((row) => row.relative === '')?.identity)
+  )
+    fail();
+  const names = ['build/package.json', 'build/schema.prisma', 'package.json'];
+  const directories = ['', 'build', 'build/tmp', 'server'];
+  const expectedFiles = new Map(
+    (map.files || []).map((row) => [row.path.replace(/\\/g, '/'), row]),
+  );
+  const expectedDirs = new Map(
+    (map.directories || []).map((row) => [
+      row.relative.replace(/\\/g, '/'),
+      row.identity,
+    ]),
+  );
+  if (map.files?.length !== 3 || map.directories?.length !== 4) fail();
+  if (
+    hash([...expectedFiles.keys()].sort()) !== hash(names) ||
+    hash([...expectedDirs.keys()].sort()) !== hash(directories) ||
+    map.files.reduce((sum, row) => sum + row.bytes, 0) !== 6643
+  )
+    fail();
+  let seenFiles = 0,
+    seenDirs = 0;
+  const visit = (at, relative = '') => {
+    if (
+      ++seenDirs > 4 ||
+      hash(identity(at)) !== hash(expectedDirs.get(relative))
+    )
+      fail();
+    for (const entry of fs.readdirSync(at, { withFileTypes: true })) {
+      const file = path.join(at, entry.name),
+        key = relative ? relative + '/' + entry.name : entry.name;
+      if (entry.isSymbolicLink()) fail();
+      if (entry.isDirectory()) visit(file, key);
+      else {
+        const expected = expectedFiles.get(key),
+          stat = fs.lstatSync(file);
+        if (
+          ++seenFiles > 3 ||
+          !entry.isFile() ||
+          !expected ||
+          stat.nlink !== 1 ||
+          stat.size !== expected.bytes ||
+          fileHash(file) !== expected.sha256
+        )
+          fail();
+      }
+    }
+  };
+  visit(map.destination);
+  if (seenFiles !== 3 || seenDirs !== 4) fail();
+  const controls = fs.readdirSync(roots.registry);
+  if (
+    controls.length > 128 ||
+    controls.reduce((sum, name) => {
+      const s = fs.lstatSync(path.join(roots.registry, name));
+      if (!s.isFile() || s.isSymbolicLink()) fail();
+      return sum + s.size;
+    }, 0) > 65536
+  )
+    throw Error('RELEASE_SCOPE_RECOVERY_CONTROL_BUDGET');
+  return {
+    oldScopeId: old.scopeId,
+    oldClaimId: old.claimId,
+    oldLedgerSha256: old.ledgerSha256,
+    planSha256: spec.plan.sha256,
+    intentSha256: spec.intent.sha256,
+    movedSha256: spec.moved.sha256,
+    heldPath: map.destination,
+    retainedBytes: 6643,
+    associationPath: path.join(
+      roots.registry,
+      'recovery-' + old.claimId + '.fresh-session.private.json',
+    ),
+  };
+}
+
 function open(request, options = {}, boundOperation) {
   if (session()) throw new Error('RELEASE_SCOPE_NESTED_OPEN_FORBIDDEN');
   request = { runtimeCopies: 0, ...request };
@@ -189,7 +408,7 @@ function open(request, options = {}, boundOperation) {
     !policy.roots.length ||
     policy.roots.length > 32 ||
     !Array.isArray(policy.protectedIds) ||
-    !policy.protectedIds.length ||
+    (policy.phase !== 'build-only' && !policy.protectedIds.length) ||
     policy.protectedIds.length > 3 ||
     new Set(policy.protectedIds).size !== policy.protectedIds.length ||
     !Number.isSafeInteger(policy.maxBytes) ||
@@ -223,7 +442,87 @@ function open(request, options = {}, boundOperation) {
       policy.exception.maxGrowthBytes !== policy.maxGrowthBytes)
   )
     throw new Error('RELEASE_SCOPE_BASELINE_EXCEPTION_NOT_APPROVED');
-  if (!/^[a-f0-9]{64}$/.test(policy.compatibilityProofSha256 || ''))
+  if (policy.phase !== undefined && policy.phase !== 'build-only')
+    throw new Error('RELEASE_SCOPE_PHASE_INVALID');
+  let buildSource;
+  if (policy.phase === 'build-only') {
+    const spec = policy.buildOnly;
+    const sources = spec?.sources || (spec ? [spec] : []);
+    const source =
+      Array.isArray(sources) &&
+      sources.find(
+        (row) =>
+          row.sourceCommit === request.sourceCommit &&
+          row.sourceHash === request.sourceHash,
+      );
+    if (
+      spec?.recoveryOf &&
+      (!Array.isArray(spec.sources) ||
+        request.pairSession !== true ||
+        request.sourceCommit !== '3a36428210f22ea1986f0a96a6066e7fdc9baf46')
+    )
+      throw Error('RELEASE_SCOPE_RECOVERY_PAIR_REQUIRED');
+    if (
+      request.kind !== 'build' ||
+      request.buildOnly !== true ||
+      request.transition ||
+      !spec ||
+      !source ||
+      !Array.isArray(sources) ||
+      sources.length < 1 ||
+      sources.length > 2 ||
+      sources.some(
+        (row) =>
+          !/^[a-f0-9]{40}$/.test(row.sourceCommit || '') ||
+          !/^[a-f0-9]{64}$/.test(row.sourceHash || ''),
+      ) ||
+      (spec.sources &&
+        (sources.length !== 2 ||
+          sources
+            .map((row) => row.sourceCommit)
+            .sort()
+            .join(',') !==
+            [
+              '3a36428210f22ea1986f0a96a6066e7fdc9baf46',
+              'f618e48f48ff0e3df1c646cb8a666a2461815732',
+            ]
+              .sort()
+              .join(','))) ||
+      !/^[a-f0-9]{64}$/.test(spec.runtimeSha256 || '') ||
+      spec.runtimeSha256 !== fileHash(process.execPath) ||
+      !Array.isArray(spec.commands) ||
+      spec.commands.length > 3 ||
+      spec.commands.some(
+        (c) =>
+          !path.isAbsolute(c.path) || !/^[a-f0-9]{64}$/.test(c.sha256 || ''),
+      ) ||
+      hash(spec.prismaGenerator || null) !==
+        hash(request.prismaGenerator || null) ||
+      (spec.prismaGenerator &&
+        (!path.isAbsolute(spec.prismaGenerator.path || '') ||
+          !/^[a-f0-9]{64}$/.test(spec.prismaGenerator.sha256 || '') ||
+          fileHash(spec.prismaGenerator.path) !==
+            spec.prismaGenerator.sha256)) ||
+      request.root !== spec.outputRoot ||
+      canonical(spec.outputRoot) !== spec.outputRoot ||
+      !policy.roots.some((r) => r.path === spec.outputRoot) ||
+      policy.roots.length !== 1 ||
+      spec.outputRoot === path.resolve(__dirname, '../../.local-releases')
+    )
+      throw new Error('RELEASE_SCOPE_BUILD_ONLY_BINDING_REQUIRED');
+    if (
+      source.sourceRoot &&
+      (request.sourceRoot !== source.sourceRoot ||
+        canonical(source.sourceRoot) !== source.sourceRoot ||
+        hash(identity(source.sourceRoot)) !== hash(source.sourceIdentity) ||
+        contains(spec.outputRoot, source.sourceRoot))
+    )
+      throw Error('RELEASE_SCOPE_BUILD_ONLY_SOURCE_IDENTITY_CHANGED');
+    buildSource = source;
+  } else if (
+    request.buildOnly ||
+    !/^[a-f0-9]{64}$/.test(policy.compatibilityProofSha256 || '')
+  )
     throw new Error('RELEASE_SCOPE_COMPATIBILITY_UNPROVEN');
   const checkRoots = (inspectPaths) => {
     for (let i = 0; i < inspectPaths.length; i++) {
@@ -264,10 +563,34 @@ function open(request, options = {}, boundOperation) {
     throw new Error('RELEASE_SCOPE_INVENTORY_VERSION_REVIEW_REQUIRED');
   const verifier = createVerifier(policy.scanBudget, {
     onSegment: options.onScanSegment,
+    onRecord(row, content) {
+      if (policy.phase !== 'build-only') return;
+      const at = path.join(row[0], row[1]);
+      for (const [root, tracker] of artifacts) {
+        if (!contains(root, at)) continue;
+        const expected = tracker.expected.get(at);
+        if (
+          !expected ||
+          expected.kind !==
+            { dir: 'directory', file: 'file', link: 'link' }[row[2]]
+        )
+          throw Error('RELEASE_ARTIFACT_UNREQUESTED: ' + at);
+        if (
+          (content !== undefined && content !== expected.sha256) ||
+          (row[2] === 'link' && row.at(-1) !== expected.target)
+        )
+          throw Error('RELEASE_ARTIFACT_CHANGED: ' + at);
+      }
+    },
   });
   const useMetadata = verifier.limits.checkpointMode === 'identity-times-v1';
   let fullValidated = false;
   const verifiedOutputs = new Set();
+  const descriptors = new Set();
+  const descriptorWrites = new Map();
+  const artifacts = new Map();
+  const builtSources = new Set([request.sourceCommit]);
+  let pairAdvanceAttempted = false;
   const directory = policy.registryDirectory,
     lock = path.join(directory, policy.scopeId + '.lock'),
     ledger = path.join(directory, policy.scopeId + '.state.json');
@@ -282,9 +605,32 @@ function open(request, options = {}, boundOperation) {
     refs,
     initialFacts,
     claim,
-    ledgerIdentity;
+    ledgerIdentity,
+    recovery,
+    recoveryLock,
+    recoveryLockIdentity,
+    associationSha;
   const configIdentity = fileIdentity(file);
+  const recoveryControlBudget = (extra = 0) => {
+    if (!recovery) return;
+    const names = fs.readdirSync(directory);
+    if (
+      names.length > 128 ||
+      names.reduce(
+        (n, name) => n + fs.lstatSync(path.join(directory, name)).size,
+        extra,
+      ) > 65536
+    )
+      throw Error('RELEASE_SCOPE_RECOVERY_CONTROL_BUDGET');
+  };
   const save = () => {
+    if (recovery) {
+      const bytes = Buffer.byteLength(
+        JSON.stringify({ payload: prior, digest: hash(prior) }),
+      );
+      if (bytes > 8192) throw Error('RELEASE_SCOPE_RECOVERY_CONTROL_BUDGET');
+      recoveryControlBudget(bytes + (present(ledger + '.adopted') ? 0 : 64));
+    }
     atomic(ledger, prior);
     ledgerIdentity = fileIdentity(ledger);
   };
@@ -300,6 +646,14 @@ function open(request, options = {}, boundOperation) {
           hash(fileIdentity(ledger)) !== hash(ledgerIdentity)))
     )
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
+    if (
+      recoveryLock &&
+      (fs.readFileSync(recoveryLock, 'utf8') !== token ||
+        hash(fileIdentity(recoveryLock)) !== hash(recoveryLockIdentity))
+    )
+      throw Error('RELEASE_SCOPE_RECOVERY_OWNER_CHANGED');
+    if (associationSha && fileHash(recovery.associationPath) !== associationSha)
+      throw Error('RELEASE_SCOPE_RECOVERY_ASSOCIATION_CHANGED');
   };
   const query = () => {
     if (options.query) return options.query();
@@ -315,9 +669,28 @@ function open(request, options = {}, boundOperation) {
     );
   };
   const references = (allowTransition = false) => {
+    if (policy.phase === 'build-only') {
+      // Only the new output root is observed. Do not fabricate global native
+      // completeness or use this limited observation for cleanup/publication.
+      const value = {
+        scope: 'new-build-outputs-only',
+        outputRoot: policy.buildOnly.outputRoot,
+        globalReferences: 'unknown',
+        compatibility: { stage: 'build-only', verified: false },
+        records: [],
+      };
+      return { value, digest: hash(value) };
+    }
     const value = query();
     verifier.assertBudget();
     const digest = validateReferences(value, policy);
+    if (
+      policy.phase === 'build-only' &&
+      value.records.some((r) =>
+        contains(policy.buildOnly.outputRoot, canonical(r.packagePath)),
+      )
+    )
+      throw new Error('RELEASE_SCOPE_BUILD_ROOT_REFERENCED');
     const stable = (v) =>
       v.records
         .filter((r) => !['processes', 'pointers'].includes(r.kind))
@@ -337,7 +710,16 @@ function open(request, options = {}, boundOperation) {
   };
   const check = (allowTransition = false) => {
     owner();
+    if (recovery && hash(heldRecovery(policy)) !== hash(recovery))
+      throw Error('RELEASE_SCOPE_HELD_RECOVERY_BINDING_INVALID');
     checkRoots(policy.roots);
+    if (
+      buildSource?.sourceRoot &&
+      (canonical(buildSource.sourceRoot) !== buildSource.sourceRoot ||
+        hash(identity(buildSource.sourceRoot)) !==
+          hash(buildSource.sourceIdentity))
+    )
+      throw Error('RELEASE_SCOPE_BUILD_ONLY_SOURCE_IDENTITY_CHANGED');
     if (present(ledger) && hash(state(ledger)) !== hash(prior))
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
     const measure = verifier.scan(
@@ -396,6 +778,9 @@ function open(request, options = {}, boundOperation) {
         hash(identity(row.path)) !== hash(row.identity)
       )
         throw new Error('RELEASE_SCOPE_OWNED_OUTPUT_REPLACED');
+    if (policy.phase === 'build-only')
+      for (const row of prior.outputs)
+        if (row.identity && !row.complete) artifacts.get(row.path).verify();
     for (const root of policy.roots) {
       const disk = fs.statfsSync(root.path, { bigint: true });
       if (disk.bavail * disk.bsize < BigInt(MIN_FREE))
@@ -406,7 +791,18 @@ function open(request, options = {}, boundOperation) {
     return measure;
   };
   try {
+    recovery = heldRecovery(policy);
+    if (recovery) {
+      const at = path.join(directory, recovery.oldScopeId + '.lock');
+      fs.writeFileSync(at, token, { flag: 'wx', mode: 0o600 });
+      recoveryLock = at;
+      recoveryLockIdentity = fileIdentity(at);
+      if (hash(heldRecovery(policy)) !== hash(recovery))
+        throw Error('RELEASE_SCOPE_HELD_RECOVERY_BINDING_INVALID');
+    }
     if (present(ledger)) {
+      if (policy.phase === 'build-only')
+        throw Error('RELEASE_SCOPE_BUILD_ONLY_NEW_SESSION_REQUIRES_REVIEW');
       ledgerIdentity = fileIdentity(ledger);
       prior = state(ledger);
       if (
@@ -438,7 +834,39 @@ function open(request, options = {}, boundOperation) {
       const sentinel = ledger + '.adopted';
       if (present(sentinel))
         throw new Error('RELEASE_SCOPE_LEDGER_MISSING_REQUIRES_REVIEW');
+      if (
+        policy.phase === 'build-only' &&
+        (recovery
+          ? hash(fs.readdirSync(policy.buildOnly.outputRoot)) !==
+            hash([path.basename(recovery.heldPath)])
+          : fs.readdirSync(policy.buildOnly.outputRoot).length)
+      )
+        throw new Error('RELEASE_SCOPE_BUILD_ROOT_NOT_EMPTY');
       prior = { format: 1, configSha, outputs: [], claim: null };
+      if (recovery) {
+        if (present(recovery.associationPath))
+          throw Error('RELEASE_SCOPE_RECOVERY_ASSOCIATION_ALREADY_SPENT');
+        const association = {
+          format: 1,
+          kind: 'held-6643-fresh-memory-session',
+          ...recovery,
+          newScopeId: policy.scopeId,
+          configSha,
+        };
+        const bytes = Buffer.from(JSON.stringify(association));
+        if (bytes.length > 4096)
+          throw Error('RELEASE_SCOPE_RECOVERY_CONTROL_BUDGET');
+        recoveryControlBudget(bytes.length + 8192 + 64);
+        const fd = fs.openSync(recovery.associationPath, 'wx', 0o600);
+        try {
+          fs.writeFileSync(fd, bytes);
+          fs.fsyncSync(fd);
+        } finally {
+          fs.closeSync(fd);
+        }
+        associationSha = fileHash(recovery.associationPath);
+        prior.recovery = { ...recovery, associationSha256: associationSha };
+      }
       const initial = verifier.scan(policy.roots);
       if (
         initial.digest !== policy.baseline.digest ||
@@ -500,6 +928,129 @@ function open(request, options = {}, boundOperation) {
       policy,
       check,
       assertWritable,
+      approveDescriptor(fd, file, writing) {
+        descriptors.add(fd);
+        if (
+          policy.phase === 'build-only' &&
+          writing &&
+          typeof file === 'string'
+        ) {
+          const at = path.resolve(file),
+            row = prior.outputs.find(
+              (r) =>
+                r.claim === claim.id && !r.complete && contains(r.path, at),
+            );
+          if (row && artifacts.has(row.path)) {
+            descriptorWrites.set(fd, {
+              at,
+              root: row.path,
+              bytes: Buffer.alloc(0),
+            });
+            artifacts.get(row.path).apply([
+              {
+                path: at,
+                kind: 'file',
+                size: 0,
+                sha256: require('./artifact-intents.cjs').digest(
+                  Buffer.alloc(0),
+                ),
+              },
+            ]);
+          }
+        }
+      },
+      assertFileAccess(method, args, writing) {
+        if (policy.phase !== 'build-only') return;
+        if (method === 'close') {
+          descriptors.delete(args[0]);
+          descriptorWrites.delete(args[0]);
+        }
+        const paths = ['copyFile', 'cp', 'symlink', 'link', 'rename'].includes(
+          method,
+        )
+          ? args.slice(0, 2)
+          : [args[0]];
+        for (const at of paths.filter((v) => typeof v === 'string'))
+          if (
+            /\.(?:db|sqlite|sqlite3)(?:-(?:wal|shm|journal))?$/i.test(at) ||
+            /(?:^|[\\/])(?:\.env(?:\..*)?|active\.json)$/i.test(at)
+          )
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_PRIVATE_INPUT_FORBIDDEN');
+        if (!writing || ['close', 'fsync', 'fdatasync'].includes(method)) {
+          if (
+            ['readFile', 'createReadStream', 'openAsBlob', 'open'].includes(
+              method,
+            ) &&
+            typeof args[0] === 'string'
+          ) {
+            const at = path.resolve(args[0]),
+              row = prior.outputs.find((r) => contains(r.path, at));
+            if (row && artifacts.has(row.path))
+              artifacts.get(row.path).verify(at);
+          }
+          return;
+        }
+        const destinations = ['copyFile', 'cp', 'symlink', 'link'].includes(
+          method,
+        )
+          ? [args[1]]
+          : method === 'rename'
+            ? args.slice(0, 2)
+            : [args[0]];
+        for (const value of destinations) {
+          if (typeof value !== 'string') {
+            if (typeof value === 'number' && descriptors.has(value)) continue;
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_DESCRIPTOR_FORBIDDEN');
+          }
+          const at = path.resolve(value),
+            buildRoot = policy.buildOnly.outputRoot;
+          if (at === path.join(buildRoot, '.build-budget.lock')) continue;
+          if (method === 'mkdir' && at === buildRoot && present(at)) continue;
+          const output = prior.outputs.find(
+            (row) =>
+              row.claim === claim.id && !row.complete && contains(row.path, at),
+          );
+          if (!output)
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_WRITE_OUTSIDE_OUTPUT');
+          if (
+            present(at) &&
+            (fs.lstatSync(at).isSymbolicLink() ||
+              !contains(output.path, canonical(at)))
+          )
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_WRITE_LINK_ESCAPE');
+          let ancestor = path.dirname(at);
+          while (!present(ancestor)) ancestor = path.dirname(ancestor);
+          if (!contains(buildRoot, canonical(ancestor)))
+            throw new Error('RELEASE_SCOPE_BUILD_ONLY_WRITE_LINK_ESCAPE');
+        }
+      },
+      assertBuildCommand(method, args) {
+        if (policy.phase !== 'build-only') return;
+        const [executable, argv, commandOptions] = args;
+        const pinned =
+          Array.isArray(argv) &&
+          policy.buildOnly.commands.find((c) => c.path === argv[0]);
+        if (
+          !['execFileSync', 'execFile', 'spawn', 'spawnSync'].includes(
+            method,
+          ) ||
+          commandOptions?.shell ||
+          executable !== process.execPath ||
+          !Array.isArray(argv) ||
+          !argv.length ||
+          !pinned ||
+          fileHash(pinned.path) !== pinned.sha256 ||
+          !/(?:[\\/]typescript[\\/]bin[\\/]tsc|[\\/]prisma[\\/]build[\\/]index\.js|[\\/]vite[\\/]bin[\\/]vite\.js)$/.test(
+            argv[0],
+          ) ||
+          argv.some((v) =>
+            /^(?:--database|--production|--rehearsal|--eval|-e|--require|-r)$/.test(
+              v,
+            ),
+          )
+        )
+          throw new Error('RELEASE_SCOPE_BUILD_ONLY_COMMAND_FORBIDDEN');
+      },
       assertOperation(nested, nestedOptions = {}) {
         owner();
         const at = nested.root ? canonical(nested.root) : undefined;
@@ -521,6 +1072,16 @@ function open(request, options = {}, boundOperation) {
           throw new Error('RELEASE_SCOPE_NESTED_OPERATION_EXCEEDS_CLAIM');
       },
       inventoryMetrics: () => verifier.metrics(),
+      hashSourceEnvironmentFixture(expectedSha256) {
+        if (policy.phase !== 'build-only' || !buildSource?.sourceRoot)
+          throw Error('BUILD_ENVIRONMENT_FIXTURE_BINDING_REQUIRED');
+        check();
+        return require('./verify-source.cjs').hashCommittedBuildEnvironment(
+          buildSource.sourceRoot,
+          buildSource.sourceCommit,
+          expectedSha256,
+        );
+      },
       assertOwnedDirectory(folder) {
         assertWritable();
         const at = canonical(folder),
@@ -537,6 +1098,8 @@ function open(request, options = {}, boundOperation) {
       },
       authorizePackage(folder) {
         owner();
+        if (policy.phase === 'build-only')
+          throw new Error('RELEASE_SCOPE_BUILD_ONLY_NO_INSTALL');
         const m = read(
           path.join(canonical(folder), 'release.json'),
           8 * 1024 ** 2,
@@ -640,10 +1203,158 @@ function open(request, options = {}, boundOperation) {
         if (!row || row.identity)
           throw new Error('RELEASE_SCOPE_OUTPUT_CLAIM_INVALID');
         row.identity = identity(at);
+        if (policy.phase === 'build-only')
+          artifacts.set(
+            at,
+            require('./artifact-intents.cjs').createArtifacts(at, (cost) =>
+              verifier.chargeArtifacts(cost),
+            ),
+          );
+        save();
+      },
+      prepareArtifactMutation(method, args) {
+        if (policy.phase !== 'build-only') return () => {};
+        if (method === 'open') return () => {};
+        if (method === 'write' && descriptorWrites.has(args[0])) {
+          const record = descriptorWrites.get(args[0]);
+          if (typeof args[1] !== 'string' || args[2] !== undefined)
+            throw Error('RELEASE_ARTIFACT_DESCRIPTOR_WRITE_UNSUPPORTED');
+          const bytes = Buffer.concat([record.bytes, Buffer.from(args[1])]);
+          if (bytes.length > 16 * 1024 ** 2)
+            throw Error('RELEASE_ARTIFACT_DESCRIPTOR_BUDGET');
+          return () => {
+            record.bytes = bytes;
+            artifacts.get(record.root).apply([
+              {
+                path: record.at,
+                kind: 'file',
+                size: bytes.length,
+                sha256: require('./artifact-intents.cjs').digest(bytes),
+              },
+            ]);
+          };
+        }
+        const destination = ['cp', 'copyFile', 'symlink'].includes(method)
+          ? args[1]
+          : args[0];
+        if (typeof destination !== 'string') return () => {};
+        const at = path.resolve(destination);
+        const row = prior.outputs.find(
+          (r) => r.claim === claim.id && !r.complete && contains(r.path, at),
+        );
+        if (!row || !artifacts.has(row.path)) return () => {};
+        const tracker = artifacts.get(row.path);
+        if (['rm', 'rmdir', 'unlink', 'rename'].includes(method))
+          tracker.verify(at);
+        const events = require('./artifact-intents.cjs').mutationEvents(
+          method,
+          args,
+          tracker.expected,
+        );
+        return () => tracker.apply(events);
+      },
+      acceptCompilerIntents(output, events) {
+        const row = prior.outputs.find(
+          (r) => r.path === output && r.claim === claim.id && !r.complete,
+        );
+        if (policy.phase !== 'build-only' || !row || !artifacts.has(output))
+          throw Error('RELEASE_ARTIFACT_OWNED_OUTPUT_REQUIRED');
+        artifacts.get(output).apply(events);
+      },
+      artifactFingerprint(output) {
+        if (!artifacts.has(output))
+          throw Error('RELEASE_ARTIFACT_OWNED_OUTPUT_REQUIRED');
+        return artifacts.get(output).fingerprint();
+      },
+      nextBuild(next) {
+        if (
+          closed ||
+          pairAdvanceAttempted ||
+          policy.phase !== 'build-only' ||
+          !policy.buildOnly.sources
+        )
+          throw Error('RELEASE_SCOPE_BUILD_PAIR_SESSION_REQUIRED');
+        pairAdvanceAttempted = true;
+        check();
+        const source = policy.buildOnly.sources.find(
+          (s) =>
+            s.sourceCommit === next.sourceCommit &&
+            s.sourceHash === next.sourceHash,
+        );
+        if (
+          !source ||
+          (recovery &&
+            (next.pairSession !== true ||
+              next.sourceCommit !==
+                'f618e48f48ff0e3df1c646cb8a666a2461815732')) ||
+          hash(policy.buildOnly.prismaGenerator || null) !==
+            hash(next.prismaGenerator || null) ||
+          builtSources.has(next.sourceCommit) ||
+          next.kind !== 'build' ||
+          next.buildOnly !== true ||
+          next.root !== target ||
+          next.transition ||
+          !Number.isSafeInteger(next.reserveBytes) ||
+          next.reserveBytes < 1 ||
+          next.runtimeCopies !== 1 ||
+          (source.sourceRoot &&
+            (next.sourceRoot !== source.sourceRoot ||
+              canonical(source.sourceRoot) !== source.sourceRoot ||
+              hash(identity(source.sourceRoot)) !==
+                hash(source.sourceIdentity)))
+        )
+          throw Error('RELEASE_SCOPE_BUILD_ONLY_BINDING_REQUIRED');
+        for (const row of prior.outputs.filter((r) => r.claim === claim.id)) {
+          artifacts.get(row.path).verify();
+          const receipt = verifier.scan([
+            { path: row.path, identity: row.identity },
+          ]);
+          Object.assign(row, {
+            digest: receipt.digest,
+            metadataDigest: receipt.metadataDigest,
+            complete: true,
+          });
+        }
+        save();
+        const measure = check();
+        if (
+          measure.bytes + next.reserveBytes > policy.maxBytes ||
+          measure.bytes + next.reserveBytes - policy.baseline.bytes >
+            policy.maxGrowthBytes
+        )
+          throw Error('RELEASE_SCOPE_COPY_PEAK_EXCEEDED');
+        if (
+          measure.runtimeCopies + 1 - policy.baseline.runtimeCopies >
+          policy.maxNewRuntimeCopies
+        )
+          throw Error('RELEASE_SCOPE_RUNTIME_COPY_PEAK_EXCEEDED');
+        const disk = fs.statfsSync(target, { bigint: true });
+        if (
+          disk.bavail * disk.bsize - BigInt(next.reserveBytes) <
+          BigInt(MIN_FREE)
+        )
+          throw Error('RELEASE_SCOPE_PHYSICAL_RESERVE_EXCEEDED');
+        claim = {
+          id: crypto.randomUUID(),
+          kind: 'build',
+          root: target,
+          reserveBytes: next.reserveBytes,
+          runtimeCopies: 1,
+          startBytes: measure.bytes,
+          startRuntimeCopies: measure.runtimeCopies,
+          refs,
+          outputs: [],
+        };
+        prior.claim = claim;
+        buildSource = source;
+        request = next;
+        builtSources.add(next.sourceCommit);
         save();
       },
       allowCleanup(outputs) {
         assertWritable();
+        if (policy.phase === 'build-only')
+          throw new Error('RELEASE_SCOPE_BUILD_ONLY_FAILED_OUTPUT_HELD');
         check();
         const facts = references().value;
         if (
@@ -682,12 +1393,14 @@ function open(request, options = {}, boundOperation) {
           save();
         } finally {
           owner();
+          if (recoveryLock) fs.unlinkSync(recoveryLock);
           fs.unlinkSync(lock);
         }
       },
     };
   } catch (error) {
     owner();
+    if (recoveryLock) fs.unlinkSync(recoveryLock);
     fs.unlinkSync(lock);
     throw error;
   }
@@ -733,6 +1446,8 @@ function within(request, run, options) {
 }
 module.exports = {
   inspect,
+  // Read-only preparation; open repeats validation while holding common locks.
+  inspectHeldRecovery: heldRecovery,
   open,
   within,
   session,

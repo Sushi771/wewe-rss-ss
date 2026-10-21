@@ -612,3 +612,597 @@ test('the async scope remains exclusive across a controller await boundary', () 
     const lease = f.open();
     lease.close();
   }));
+
+function buildOnly(f) {
+  f.policy.phase = 'build-only';
+  Object.assign(f.policy, scope.inspect([f.build]));
+  f.policy.protectedIds = [];
+  delete f.policy.compatibilityProofSha256;
+  f.policy.buildOnly = {
+    sourceCommit: 'a'.repeat(40),
+    sourceHash: 'b'.repeat(64),
+    outputRoot: f.build,
+    runtimeSha256: fileHash(process.execPath),
+    commands: [],
+  };
+  f.facts.compatibility = { stage: 'build-only', verified: false };
+  f.save();
+  return {
+    kind: 'build',
+    root: f.build,
+    reserveBytes: 4096,
+    runtimeCopies: 1,
+    buildOnly: true,
+    sourceCommit: 'a'.repeat(40),
+    sourceHash: 'b'.repeat(64),
+  };
+}
+function ownedWrite(lease, file, bytes) {
+  const effects = require('./lib.cjs').hostEffects;
+  return effects.context.run(lease, () =>
+    effects.fs.writeFileSync(file, bytes),
+  );
+}
+test('build-only binds source and one new output root without querying global references; install remains blocked', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    for (const change of [
+      { kind: 'install' },
+      { sourceHash: 'c'.repeat(64) },
+      { root: f.installed },
+      { transition: true },
+      { buildOnly: false },
+    ])
+      assert.throws(
+        () => scope.open({ ...request, ...change }, f.options()),
+        /BUILD_ONLY_BINDING/,
+      );
+    f.facts.complete = false;
+    const options = f.options();
+    options.query = () => {
+      throw Error('must not query global processes or history');
+    };
+    const lease = scope.open(request, options);
+    assert.throws(
+      () => lease.authorizePackage(f.current),
+      /BUILD_ONLY_NO_INSTALL/,
+    );
+    lease.close();
+  }));
+test('build-only creates owned artifacts but rejects database, private config, process and pointer effects', () =>
+  fixture(async (f) => {
+    const request = buildOnly(f),
+      gateway = require('./lib.cjs').hostEffects;
+    await scope.within(
+      request,
+      async (lease) => {
+        const output = path.join(f.build, 'candidate');
+        lease.registerOutput(output);
+        gateway.fs.mkdirSync(output);
+        lease.createdOutput(output);
+        gateway.fs.writeFileSync(
+          path.join(output, 'build.log'),
+          'synthetic compiler output',
+        );
+        const fd = gateway.fs.openSync(path.join(output, 'second.log'), 'wx');
+        gateway.fs.writeSync(fd, 'owned');
+        gateway.fs.closeSync(fd);
+        assert.throws(
+          () => gateway.fs.writeSync(fd, 'late'),
+          /DESCRIPTOR_FORBIDDEN/,
+        );
+        assert.throws(
+          () =>
+            gateway.fs.writeFileSync(
+              path.join(f.current, 'changed'),
+              'forbidden',
+            ),
+          /WRITE_OUTSIDE_OUTPUT/,
+        );
+        assert.throws(
+          () => gateway.fs.readFileSync(path.join(f.base, 'production.db')),
+          /PRIVATE_INPUT/,
+        );
+        assert.throws(
+          () =>
+            gateway.fs.writeFileSync(path.join(output, 'active.json'), '{}'),
+          /PRIVATE_INPUT/,
+        );
+        assert.throws(
+          () =>
+            require('./startup-sqlite.cjs').inspectDatabase(
+              path.join(f.base, 'production.db'),
+              '',
+            ),
+          /RUNTIME_FORBIDDEN/,
+        );
+        assert.throws(
+          () => require('./switch.cjs').loadProductionEnvironment(),
+          /RUNTIME_FORBIDDEN/,
+        );
+        await assert.rejects(
+          require('./runtime.cjs').runtime(),
+          /RUNTIME_FORBIDDEN/,
+        );
+        await assert.rejects(
+          require('./restart.cjs').controlledRestart({ production: true }),
+          /NOT_AUTHORIZED/,
+        );
+        assert.throws(
+          () =>
+            gateway.processes.execFileSync(process.execPath, [
+              '-e',
+              'process.exit(0)',
+            ]),
+          /COMMAND_FORBIDDEN/,
+        );
+        await assert.rejects(
+          async () =>
+            require('node:util').promisify(gateway.processes.execFile)(
+              process.execPath,
+              ['-e', 'process.exit(0)'],
+            ),
+          /COMMAND_FORBIDDEN/,
+        );
+      },
+      f.options(),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(f.build, 'candidate/build.log'), 'utf8'),
+      'synthetic compiler output',
+    );
+    assert(!fs.existsSync(path.join(f.current, 'changed')));
+  }));
+test('a build-only policy cannot adopt an existing unmanaged output root', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    fs.writeFileSync(path.join(f.build, 'unowned'), 'preserve');
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /BUILD_ROOT_NOT_EMPTY/,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(f.build, 'unowned'), 'utf8'),
+      'preserve',
+    );
+  }));
+
+test('build-only refuses historical roots instead of silently excluding them', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    Object.assign(f.policy, scope.inspect([f.installed, f.build]));
+    f.save();
+    assert.throws(() => scope.open(request, f.options()), /BUILD_ONLY_BINDING/);
+  }));
+
+test('build-only retains failed outputs and refuses an interrupted claim rather than deleting or adopting them', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options());
+    const at = path.join(f.build, 'failed');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    ownedWrite(
+      lease,
+      path.join(at, 'retained'),
+      'synthetic failed compiler output',
+    );
+    assert.throws(() => lease.allowCleanup([at]), /FAILED_OUTPUT_HELD/);
+    assert.throws(
+      () => lease.close(Error('synthetic compiler failure')),
+      /FAILED_OUTPUT_HELD/,
+    );
+    assert(fs.existsSync(path.join(at, 'retained')));
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /NEW_SESSION_REQUIRES_REVIEW/,
+    );
+    assert(
+      JSON.parse(
+        fs.readFileSync(path.join(f.base, f.policy.scopeId + '.state.json')),
+      ).payload.claim,
+    );
+  }));
+
+test('completed build output changes are not refreshed into acceptance', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options());
+    const at = path.join(f.build, 'candidate');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    ownedWrite(lease, path.join(at, 'artifact'), 'sealed');
+    lease.close();
+    fs.writeFileSync(path.join(at, 'artifact'), 'external change');
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /NEW_SESSION_REQUIRES_REVIEW/,
+    );
+  }));
+
+test('forged ledger receipts are refused while a build lease owns the original state', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      second = scope.open(request, f.options());
+    const ledger = path.join(f.base, f.policy.scopeId + '.state.json');
+    const saved = fs.readFileSync(ledger),
+      doc = JSON.parse(saved);
+    doc.payload.outputs.push({
+      path: path.join(f.build, 'forged'),
+      complete: true,
+      digest: '0'.repeat(64),
+    });
+    doc.digest = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(doc.payload))
+      .digest('hex');
+    fs.writeFileSync(ledger, JSON.stringify(doc));
+    assert.throws(() => second.check(), /STATE_REPLACED/);
+    fs.writeFileSync(ledger, saved);
+    second.close();
+  }));
+
+test('a fixed two-source build policy accounts for retained first-package bytes at the second copy peak', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    const candidate = '3a36428210f22ea1986f0a96a6066e7fdc9baf46';
+    const rollback = 'f618e48f48ff0e3df1c646cb8a666a2461815732';
+    f.policy.buildOnly.sources = [
+      { sourceCommit: candidate, sourceHash: 'b'.repeat(64) },
+      { sourceCommit: rollback, sourceHash: 'c'.repeat(64) },
+    ];
+    delete f.policy.buildOnly.sourceCommit;
+    delete f.policy.buildOnly.sourceHash;
+    f.policy.maxBytes = 9000;
+    f.policy.maxGrowthBytes = 9000;
+    f.save();
+    const firstRequest = {
+      ...request,
+      sourceCommit: candidate,
+      reserveBytes: 8192,
+    };
+    const first = scope.open(firstRequest, f.options());
+    const at = path.join(f.build, 'candidate');
+    first.registerOutput(at);
+    fs.mkdirSync(at);
+    first.createdOutput(at);
+    ownedWrite(first, path.join(at, 'artifact'), Buffer.alloc(4096));
+    const next = {
+      ...request,
+      sourceCommit: rollback,
+      sourceHash: 'c'.repeat(64),
+      reserveBytes: 8192,
+    };
+    assert.throws(() => first.nextBuild(next), /COPY_PEAK_EXCEEDED/);
+    assert.throws(
+      () => first.nextBuild({ ...next, reserveBytes: 1024 }),
+      /BUILD_PAIR_SESSION_REQUIRED/,
+    );
+    assert.throws(
+      () => first.close(Error('copy peak exceeded')),
+      /FAILED_OUTPUT_HELD/,
+    );
+  }));
+
+test('an external unrequested file during an active build is never absorbed into a receipt', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options()),
+      at = path.join(f.build, 'candidate');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    ownedWrite(lease, path.join(at, 'expected-artifact'), 'trusted bytes');
+    fs.writeFileSync(
+      path.join(at, 'external-unrequested-artifact'),
+      'preserve',
+    );
+    assert.throws(() => lease.check(), /ARTIFACT_UNREQUESTED/);
+    assert.throws(() => lease.close(), /ARTIFACT_UNREQUESTED/);
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /NEW_SESSION_REQUIRES_REVIEW/,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(at, 'external-unrequested-artifact'), 'utf8'),
+      'preserve',
+    );
+    const saved = JSON.parse(
+      fs.readFileSync(path.join(f.base, f.policy.scopeId + '.state.json')),
+    ).payload;
+    assert(saved.claim);
+    assert.equal(saved.outputs[0].complete, false);
+  }));
+
+test('independent artifact reads consume the existing cumulative scan budget', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    f.policy.scanBudget = { operationReadBytes: 4, scanReadBytes: 4096 };
+    f.save();
+    const lease = scope.open(request, f.options()),
+      at = path.join(f.build, 'candidate');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    ownedWrite(lease, path.join(at, 'artifact'), 'eight');
+    assert.throws(() => lease.check(), /SCAN_READ_BUDGET/);
+    assert.throws(
+      () => lease.close(Error('budget exceeded')),
+      /SCAN_READ_BUDGET/,
+    );
+    assert(fs.existsSync(path.join(at, 'artifact')));
+  }));
+
+test('primary compiler failure and both close errors remain distinct while the failed claim and output stay held', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options());
+    const effects = require('./lib.cjs').hostEffects;
+    let at;
+    effects.context.run(lease, () => {
+      const reservation = require('./build-budget.cjs').begin(
+        f.build,
+        request.reserveBytes,
+        { shared: lease },
+      );
+      at = path.join(f.build, 'candidate');
+      reservation.create(at);
+      effects.fs.writeFileSync(
+        path.join(at, 'retained'),
+        'synthetic compiler partial output',
+      );
+      const primary = Object.assign(Error('synthetic generator spawn ENOENT'), {
+        code: 'ENOENT',
+      });
+      assert.throws(
+        () => require('./build.cjs').finishBuild(primary, reservation, lease),
+        (error) => {
+          assert.equal(error.primaryError, primary);
+          assert.equal(error.cause, primary);
+          assert.deepEqual(
+            error.closeErrors.map((row) => row.stage),
+            ['reservation.finish', 'scope.close'],
+          );
+          assert.match(
+            error.closeErrors[0].error.message,
+            /FAILED_OUTPUT_HELD/,
+          );
+          assert.match(
+            error.closeErrors[1].error.message,
+            /FAILED_OUTPUT_HELD/,
+          );
+          return true;
+        },
+      );
+    });
+    assert.equal(
+      fs.readFileSync(path.join(at, 'retained'), 'utf8'),
+      'synthetic compiler partial output',
+    );
+    const ledger = JSON.parse(
+      fs.readFileSync(path.join(f.base, f.policy.scopeId + '.state.json')),
+    ).payload;
+    assert(ledger.claim);
+    assert.equal(ledger.outputs[0].complete, false);
+    assert.equal(ledger.outputs[0].claim, ledger.claim.id);
+    assert(!fs.existsSync(path.join(f.build, '.build-budget.lock')));
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /NEW_SESSION_REQUIRES_REVIEW/,
+    );
+  }));
+
+test('rehashing a declared environment fixture inside build-only fails at open before any compiler dispatch', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options());
+    const fixtureFile = path.join(f.current, '.env');
+    fs.writeFileSync(fixtureFile, 'SYNTHETIC_FIXTURE_ONLY=1\n');
+    const expected = fileHash(fixtureFile);
+    const effects = require('./lib.cjs').hostEffects;
+    let dispatched = false;
+    effects.context.run(lease, () => {
+      assert.throws(() => {
+        // Same ordering as runCompiler: checkInputs before spawnSync.
+        assert.equal(fileHash(fixtureFile), expected);
+        dispatched = true;
+      }, /RELEASE_SCOPE_BUILD_ONLY_PRIVATE_INPUT_FORBIDDEN/);
+    });
+    assert.equal(dispatched, false);
+    lease.close();
+  }));
+
+test('the exact bound default env can be hashed without granting ordinary reads or accepting modified/private env', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      commit = '3a36428210f22ea1986f0a96a6066e7fdc9baf46';
+    const bytes = require('node:child_process').execFileSync(
+      'git',
+      ['cat-file', 'blob', 'HEAD:apps/server/.env'],
+      { cwd: path.resolve(__dirname, '../..'), windowsHide: true },
+    );
+    const file = path.join(f.current, 'apps/server/.env');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, bytes);
+    const source = scope.inspect([f.current]).roots[0];
+    Object.assign(f.policy.buildOnly, {
+      sourceCommit: commit,
+      sourceRoot: source.path,
+      sourceIdentity: source.identity,
+    });
+    f.save();
+    const lease = scope.open(
+      { ...request, sourceCommit: commit, sourceRoot: source.path },
+      f.options(),
+    );
+    const effects = require('./lib.cjs').hostEffects,
+      expected =
+        'efdafcfb690eb12efe9a7fa2a8bcf0977b1d4d31f31096123ae42e21fe6e28d6';
+    effects.context.run(lease, () => {
+      assert.equal(lease.hashSourceEnvironmentFixture(expected), expected);
+      assert.throws(
+        () => effects.fs.readFileSync(file),
+        /PRIVATE_INPUT_FORBIDDEN/,
+      );
+      const privateFile = path.join(path.dirname(file), '.env.local');
+      fs.writeFileSync(privateFile, 'SYNTHETIC_PRIVATE=1\n');
+      assert.throws(
+        () => effects.fs.readFileSync(privateFile),
+        /PRIVATE_INPUT_FORBIDDEN/,
+      );
+      fs.writeFileSync(
+        file,
+        Buffer.concat([bytes, Buffer.from('CHANGED=1\n')]),
+      );
+      assert.throws(
+        () => lease.hashSourceEnvironmentFixture(expected),
+        /FIXTURE_CHANGED/,
+      );
+      assert.throws(
+        () =>
+          lease.hashSourceEnvironmentFixture(
+            require('node:crypto')
+              .createHash('sha256')
+              .update(fs.readFileSync(file))
+              .digest('hex'),
+          ),
+        /BINDING_REQUIRED/,
+      );
+    });
+    lease.close();
+  }));
+
+test('a generator pin must match the reviewed request and installed bytes before any build claim', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      generator = path.join(f.current, 'node.exe');
+    const bytes = fs.readFileSync(generator),
+      pin = { path: generator, sha256: fileHash(generator) };
+    f.policy.buildOnly.prismaGenerator = pin;
+    f.save();
+    assert.throws(() => scope.open(request, f.options()), /BUILD_ONLY_BINDING/);
+    const bound = { ...request, prismaGenerator: pin };
+    fs.writeFileSync(generator, 'changed tool bytes');
+    assert.throws(() => scope.open(bound, f.options()), /BUILD_ONLY_BINDING/);
+    fs.writeFileSync(generator, bytes);
+    const lease = scope.open(bound, f.options());
+    lease.close();
+  }));
+
+test('rewriting completed artifacts and recomputing the disk ledger self-hash cannot establish a new build session', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      lease = scope.open(request, f.options()),
+      at = path.join(f.build, 'candidate');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    ownedWrite(lease, path.join(at, 'artifact'), 'original');
+    lease.close();
+    fs.writeFileSync(path.join(at, 'artifact'), 'changed');
+    const baseline = scope.inspect([at]).baseline,
+      ledger = path.join(f.base, f.policy.scopeId + '.state.json');
+    const document = JSON.parse(fs.readFileSync(ledger));
+    Object.assign(document.payload.outputs[0], {
+      digest: baseline.digest,
+      metadataDigest: baseline.metadataDigest,
+    });
+    document.digest = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(document.payload))
+      .digest('hex');
+    fs.writeFileSync(ledger, JSON.stringify(document));
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /NEW_SESSION_REQUIRES_REVIEW/,
+    );
+    assert.equal(fs.readFileSync(path.join(at, 'artifact'), 'utf8'), 'changed');
+  }));
+
+test('the exact pair advances in one held memory session and protects the first package', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      candidate = '3a36428210f22ea1986f0a96a6066e7fdc9baf46',
+      rollback = 'f618e48f48ff0e3df1c646cb8a666a2461815732';
+    f.policy.buildOnly.sources = [
+      { sourceCommit: candidate, sourceHash: request.sourceHash },
+      { sourceCommit: rollback, sourceHash: 'c'.repeat(64) },
+    ];
+    f.save();
+    const lease = scope.open(
+        { ...request, sourceCommit: candidate },
+        f.options(),
+      ),
+      at = path.join(f.build, 'candidate');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    ownedWrite(lease, path.join(at, 'artifact'), 'first');
+    lease.nextBuild({
+      ...request,
+      sourceCommit: rollback,
+      sourceHash: 'c'.repeat(64),
+    });
+    lease.check();
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /BUILD_ONLY_BINDING|EEXIST/,
+    );
+    fs.writeFileSync(path.join(at, 'artifact'), 'other');
+    assert.throws(
+      () => lease.check(),
+      /MANAGED_OUTPUT_CHANGED|ARTIFACT_CHANGED/,
+    );
+    assert.throws(
+      () => lease.close(Error('first package changed')),
+      /MANAGED_OUTPUT_CHANGED|ARTIFACT_CHANGED/,
+    );
+  }));
+
+test('build-only source path and directory identity cannot change after review', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    const source = scope.inspect([f.current]).roots[0];
+    Object.assign(f.policy.buildOnly, {
+      sourceRoot: source.path,
+      sourceIdentity: source.identity,
+    });
+    f.save();
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /SOURCE_IDENTITY_CHANGED/,
+    );
+    const bound = { ...request, sourceRoot: source.path };
+    const lease = scope.open(bound, f.options());
+    lease.close();
+    fs.renameSync(f.current, f.current + '-old');
+    fs.mkdirSync(f.current);
+    assert.throws(
+      () => scope.open(bound, f.options()),
+      /SOURCE_IDENTITY_CHANGED/,
+    );
+  }));
+
+test('a build source replaced while the lease is held stops the next checkpoint', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      source = scope.inspect([f.current]).roots[0];
+    Object.assign(f.policy.buildOnly, {
+      sourceRoot: source.path,
+      sourceIdentity: source.identity,
+    });
+    f.save();
+    const lease = scope.open(
+      { ...request, sourceRoot: source.path },
+      f.options(),
+    );
+    fs.renameSync(f.current, f.current + '-replaced');
+    fs.mkdirSync(f.current);
+    assert.throws(() => lease.check(), /SOURCE_IDENTITY_CHANGED/);
+    assert.throws(
+      () => lease.close(Error('source replaced')),
+      /SOURCE_IDENTITY_CHANGED/,
+    );
+  }));

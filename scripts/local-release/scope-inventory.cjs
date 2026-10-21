@@ -117,6 +117,7 @@ function createVerifier(configuration, options = {}) {
       budget();
     }
     function record(row, content) {
+      options.onRecord?.(row, content);
       const line = JSON.stringify(row) + '\n';
       metadata.update(line);
       if (!metadataOnly)
@@ -309,6 +310,11 @@ function createVerifier(configuration, options = {}) {
   return {
     scan,
     limits,
+    chargeArtifacts({ entries = 0, bytes = 0 }) {
+      metrics.visitedEntries += entries;
+      metrics.readBytes += bytes;
+      this.assertBudget();
+    },
     assertBudget() {
       if (now() - started > limits.durationMs)
         throw new Error('RELEASE_SCOPE_SCAN_TIME_BUDGET');

@@ -66,10 +66,13 @@ function bundleServer(target, packageSource, builderSource) {
       nodePaths: [path.join(packageSource, 'node_modules')],
       external: external.filter((item) => name !== 'hbs' || item !== 'hbs'),
       metafile: true,
+      write: false,
       logLevel: 'silent',
     });
     if (result.warnings.length)
       throw new Error('Compact bundle has unresolved build warnings');
+    for (const output of result.outputFiles)
+      fs.writeFileSync(output.path, output.contents, { flag: 'wx' });
     for (const file of Object.keys(result.metafile.inputs)) inputs.add(file);
   }
   // Retain dependency provenance even though runtime files are now embedded.
@@ -121,6 +124,7 @@ function bundleServer(target, packageSource, builderSource) {
   const compiled = fs.realpathSync(path.join(target, 'dist'));
   if (!inside(fs.realpathSync(target), compiled))
     throw new Error('Compiled staging directory escaped the new package');
+  require('./lib.cjs').hostEffects.currentLease()?.check();
   fs.rmSync(compiled, { recursive: true });
   return {
     tool: 'esbuild',

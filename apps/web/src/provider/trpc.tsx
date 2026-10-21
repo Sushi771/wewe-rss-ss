@@ -1,3 +1,4 @@
+import { FailureNotice } from '../components/OperationNotice';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { httpBatchLink, httpLink, loggerLink, splitLink } from '@trpc/client';
 import { useNavigate } from 'react-router-dom';
@@ -49,9 +50,9 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
               console.error('queries onError: ', error);
               if (isTRPCClientError(error)) {
                 if (error.data?.httpStatus === 401) {
-                  toast.error('无权限', {
+                  toast.error('登录已失效或无权操作，请检查账号。', {
                     id: 'wewe-auth-required',
-                    description: error.message,
+                    description: <FailureNotice error={error} />,
                   });
 
                   handleNoAuth();
@@ -64,8 +65,8 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
                     },
                   });
                 } else {
-                  toast.error('请求失败!', {
-                    description: error.message,
+                  toast.error('请求未完成，请查看状态和详情。', {
+                    description: <FailureNotice error={error} />,
                   });
                 }
               }
@@ -76,9 +77,9 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
               console.error('mutations onError: ', error);
               if (isTRPCClientError(error)) {
                 if (error.data?.httpStatus === 401) {
-                  toast.error('无权限', {
+                  toast.error('登录已失效或无权操作，请检查账号。', {
                     id: 'wewe-auth-required',
-                    description: error.message,
+                    description: <FailureNotice error={error} />,
                   });
                   handleNoAuth();
                 } else if (isStorageFailure(error.message)) {
@@ -90,8 +91,8 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
                     },
                   });
                 } else {
-                  toast.error('请求失败!', {
-                    description: error.message,
+                  toast.error('请求未完成，请查看状态和详情。', {
+                    description: <FailureNotice error={error} />,
                   });
                 }
               }

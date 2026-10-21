@@ -84,6 +84,23 @@ async function writeActiveReleaseAsync(candidate, options) {
 }
 
 function storePointer({ release, manifest }, options = {}) {
+  // All current publication paths share the retain-only update's publication
+  // lock. Historical packages are never rewritten to acquire this cooperation.
+  // Fixed administrative mutex beside the release root, not a package output.
+  // Creating it inside a frozen inventory would invalidate that inventory.
+  const lock = path.join(root, '.active-release.lock');
+  const token = randomUUID();
+  fs.writeFileSync(lock, token, { flag: 'wx', mode: 0o600 });
+  try {
+    return storePointerLocked({ release, manifest }, options);
+  } finally {
+    if (fs.readFileSync(lock, 'utf8') !== token)
+      throw new Error('ACTIVE_RELEASE_LOCK_OWNER_CHANGED');
+    fs.unlinkSync(lock);
+  }
+}
+
+function storePointerLocked({ release, manifest }, options = {}) {
   const scope = require('./release-scope.cjs').session();
   if (scope) {
     if (options.recovery === true) scope.authorizeRecoveryPackage(release);

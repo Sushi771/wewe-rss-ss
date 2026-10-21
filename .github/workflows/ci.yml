@@ -5,6 +5,7 @@ on:
     branches:
       [
         main,
+        codex/release-build-rollback-20261021,
         codex/local-body-search-deployed-compat-20261021,
         codex/sqlite-backup-bounded-20261014,
         codex/sqlite-backup-child-exit-20261014,
@@ -31,6 +32,7 @@ on:
     branches:
       [
         main,
+        codex/local-body-search-deployed-compat-20261021,
         codex/export-stage-profile-20261018,
         codex/deployed-reading-export-adaptation-20261018,
         codex/a5-export-title-source-20261018,
@@ -92,6 +94,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Prepare pinned dependencies for the real compiler output regressions
+        run: |
+          $compilerRoot = Join-Path $env:RUNNER_TEMP 'release-test-typescript'
+          npm install --prefix $compilerRoot --no-save --ignore-scripts --package-lock=false --no-audit --no-fund typescript@5.9.3 esbuild@0.21.5
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "WEWE_TEST_TYPESCRIPT_ROOT=$compilerRoot"
       - name: Test bounded SQLite recovery generation on synthetic databases
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -101,7 +109,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:TEMP = $fixtureTemp
           $env:TMP = $fixtureTemp
-          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs scripts/local-release/entry-budget.test.cjs
+          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/held-recovery.test.cjs scripts/local-release/artifact-intents.test.cjs scripts/local-release/build-errors.test.cjs scripts/local-release/verify-source.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs scripts/local-release/entry-budget.test.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s apps/server/scripts -p 'test_backup_space.py'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -153,7 +161,7 @@ jobs:
         run: pnpm install
 
       - name: Test finite release generation and installation lifetimes offline
-        run: node --test --test-concurrency=1 scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs
+        run: node --test --test-concurrency=1 scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/held-recovery.test.cjs scripts/local-release/artifact-intents.test.cjs scripts/local-release/build-errors.test.cjs scripts/local-release/verify-source.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs
 
       - name: Format check
         run: pnpm fmt.check
