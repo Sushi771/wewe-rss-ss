@@ -16,6 +16,69 @@ if (!Number.isInteger(fd) || fd < 3 || !path.isAbsolute(root || ''))
 const write = fs.writeSync.bind(fs);
 const known = new Map();
 const tracker = createArtifacts(root);
+// TypeScript's sys writer uses openSync/writeSync/closeSync rather than
+// writeFileSync. Bind those sequential writes to their requested input bytes.
+const descriptors = new Map();
+const openSync = fs.openSync.bind(fs),
+  closeSync = fs.closeSync.bind(fs);
+fs.openSync = function (file, flags, ...rest) {
+  if (flags === 'r' || flags === 'rs' || flags === 0)
+    return openSync(file, flags, ...rest);
+  if (!['w', 'wx'].includes(flags))
+    throw Error('RELEASE_ARTIFACT_DESCRIPTOR_MODE_UNSUPPORTED');
+  const at = path.resolve(file),
+    relative = path.relative(root, at);
+  if (relative.startsWith('..') || path.isAbsolute(relative))
+    throw Error('RELEASE_ARTIFACT_COMPILER_WRITE_OUTSIDE_OUTPUT');
+  const opened = openSync(file, flags, ...rest);
+  descriptors.set(opened, {
+    path: at,
+    size: 0,
+    hash: require('node:crypto').createHash('sha256'),
+  });
+  return opened;
+};
+fs.writeSync = function (opened, data, ...args) {
+  const state = descriptors.get(opened);
+  if (!state) {
+    if (opened === 1 || opened === 2) return write(opened, data, ...args);
+    throw Error('RELEASE_ARTIFACT_DESCRIPTOR_UNKNOWN');
+  }
+  const bytes =
+    typeof data === 'string'
+      ? Buffer.from(data, args[1] || 'utf8')
+      : Buffer.from(
+          data.buffer,
+          data.byteOffset + (args[0] || 0),
+          args[1] ?? data.byteLength,
+        );
+  const position = typeof data === 'string' ? args[0] : args[2];
+  if (position != null && position !== state.size)
+    throw Error('RELEASE_ARTIFACT_DESCRIPTOR_NON_SEQUENTIAL');
+  const requested = Buffer.from(bytes);
+  if (state.size + requested.length > 768 * 1024 ** 2)
+    throw Error('RELEASE_ARTIFACT_BYTE_BUDGET');
+  const written = write(opened, data, ...args);
+  state.hash.update(requested.subarray(0, written));
+  state.size += written;
+  return written;
+};
+fs.closeSync = function (opened) {
+  const state = descriptors.get(opened);
+  const result = closeSync(opened);
+  if (state) {
+    descriptors.delete(opened);
+    send([
+      {
+        path: state.path,
+        kind: 'file',
+        size: state.size,
+        sha256: state.hash.digest('hex'),
+      },
+    ]);
+  }
+  return result;
+};
 function verifyBeforeMutation(name, args) {
   if (
     ['unlink', 'rm', 'rmdir', 'rename'].includes(name) &&

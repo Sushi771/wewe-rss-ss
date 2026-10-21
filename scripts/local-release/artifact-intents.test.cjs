@@ -34,6 +34,68 @@ function compiler(root, code) {
   return rows.filter((row) => !row.producer);
 }
 
+test('the actual installed TypeScript compiler declares its descriptor-based output', (t) => {
+  const { base, root, tracker } = fixture(t);
+  const source = path.join(base, 'source.ts');
+  fs.writeFileSync(source, 'export const answer: number = 42;');
+  const ts = require.resolve('typescript/lib/typescript.js', {
+    paths: [path.join(__dirname, '../../apps/server')],
+  });
+  const rows = compiler(
+    root,
+    `const ts=require(${JSON.stringify(ts)});const program=ts.createProgram([${JSON.stringify(source)}],{noLib:true,types:[],skipLibCheck:true,outDir:process.env.WEWE_ARTIFACT_ROOT,module:ts.ModuleKind.CommonJS});program.emit();`,
+  );
+  tracker.apply(rows);
+  tracker.verify();
+  assert.match(
+    fs.readFileSync(path.join(root, 'source.js'), 'utf8'),
+    /answer = 42/,
+  );
+  fs.writeFileSync(path.join(root, 'injected.js'), 'external');
+  assert.throws(() => tracker.verify(), /UNREQUESTED/);
+});
+
+test('descriptor writes bind requested chunks and refuse append and outside paths before writing', (t) => {
+  const { base, root, tracker } = fixture(t);
+  const rows = compiler(
+    root,
+    `const fs=require('node:fs'),p=require('node:path');const fd=fs.openSync(p.join(process.env.WEWE_ARTIFACT_ROOT,'chunks'),'wx');fs.writeSync(fd,'first');fs.writeSync(fd,Buffer.from('second'),0,6,null);fs.closeSync(fd);`,
+  );
+  tracker.apply(rows);
+  tracker.verify();
+  assert.equal(
+    fs.readFileSync(path.join(root, 'chunks'), 'utf8'),
+    'firstsecond',
+  );
+  for (const [file, flag, code] of [
+    [path.join(base, 'outside'), 'w', 'OUTSIDE_OUTPUT'],
+    [path.join(root, 'append'), 'a', 'MODE_UNSUPPORTED'],
+  ]) {
+    const r = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `require('node:fs').openSync(${JSON.stringify(file)},${JSON.stringify(flag)});`,
+      ],
+      {
+        env: {
+          ...process.env,
+          NODE_OPTIONS:
+            '--require ' +
+            JSON.stringify(path.join(__dirname, 'artifact-producer-hook.cjs')),
+          WEWE_ARTIFACT_ROOT: root,
+          WEWE_ARTIFACT_FD: '3',
+        },
+        stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+        encoding: 'utf8',
+      },
+    );
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, new RegExp(code));
+    assert.equal(fs.existsSync(file), false);
+  }
+});
+
 test('the single pinned generator shell request becomes a direct current-Node child with a working intent pipe', (t) => {
   const { base, root, tracker } = fixture(t),
     generator = path.join(base, 'generator with spaces.cjs');
