@@ -454,7 +454,14 @@ function verifyRelease(directory, { reuseVerified = false } = {}) {
   }
   const current = fingerprint(directory);
   for (const field of ['files', 'links']) {
-    if (JSON.stringify(current[field]) !== JSON.stringify(manifest[field]))
+    if (
+      JSON.stringify(
+        Object.entries(current[field]).sort(([a], [b]) => a.localeCompare(b)),
+      ) !==
+      JSON.stringify(
+        Object.entries(manifest[field]).sort(([a], [b]) => a.localeCompare(b)),
+      )
+    )
       throw new Error(`产物完整性核验失败: ${field}`);
   }
   if (reuseVerified) {

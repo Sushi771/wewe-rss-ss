@@ -4,6 +4,26 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const guard = require('./build-budget.cjs');
+test('manifest map order is irrelevant while extra and changed artifact bytes still fail verification', () =>
+  fixture((root) => {
+    const { fingerprint, verifyRelease } = require('./lib.cjs');
+    const made = release(root, 'ordered');
+    fs.writeFileSync(path.join(made.directory, 'a.txt'), 'a');
+    fs.writeFileSync(path.join(made.directory, 'z.txt'), 'z');
+    const file = path.join(made.directory, 'release.json'),
+      manifest = JSON.parse(fs.readFileSync(file));
+    Object.assign(manifest, fingerprint(made.directory));
+    manifest.files = Object.fromEntries(
+      Object.entries(manifest.files).reverse(),
+    );
+    fs.writeFileSync(file, JSON.stringify(manifest));
+    assert.equal(verifyRelease(made.directory).id, 'ordered');
+    fs.writeFileSync(path.join(made.directory, 'extra'), 'external');
+    assert.throws(() => verifyRelease(made.directory), /files/);
+    fs.unlinkSync(path.join(made.directory, 'extra'));
+    fs.writeFileSync(path.join(made.directory, 'a.txt'), 'changed');
+    assert.throws(() => verifyRelease(made.directory), /files/);
+  }));
 function fixture(run) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-build-budget-'));
   const previous = process.env.WEWE_RELEASE_MAX_BYTES;

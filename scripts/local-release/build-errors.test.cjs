@@ -6,11 +6,34 @@ const {
   buildFailureDiagnostic,
   compilerFailure,
   compilerEnvironment,
+  reservationBytes,
 } = require('./build.cjs');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+
+test('explicit compact build reservation remains finite and can only lower the conservative estimate', () => {
+  const mode = { buildOnly: true, compact: true };
+  assert.equal(reservationBytes({}, 593710908), 593710908);
+  assert.equal(
+    reservationBytes({ ...mode, reserveBytes: 167772160 }, 593710908),
+    167772160,
+  );
+  for (const reserveBytes of [0, -1, NaN, Infinity, 593710909])
+    assert.throws(
+      () => reservationBytes({ ...mode, reserveBytes }, 593710908),
+      /positive byte limit/,
+    );
+  assert.throws(
+    () => reservationBytes({ compact: true, reserveBytes: 1 }, 100),
+    /compact build-only/,
+  );
+  assert.throws(
+    () => reservationBytes({ buildOnly: true, reserveBytes: 1 }, 100),
+    /compact build-only/,
+  );
+});
 
 test(
   'fixed compiler environment disables native cache even when explicitly re-enabled by the tool',

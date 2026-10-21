@@ -472,7 +472,9 @@ function build(options = {}) {
       schemaCompatibility: legacy ? 'legacy-additive' : 'current',
       executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
     });
-  const requestedBytes = reusable ? 1 : buildBudget.estimate(sourceServer);
+  const requestedBytes = reusable
+    ? 1
+    : reservationBytes(options, buildBudget.estimate(sourceServer));
   const operation = {
     kind: 'build',
     root: releaseRoot,
@@ -955,6 +957,21 @@ function compilerEnvironment(env) {
   return { ...env, NODE_DISABLE_COMPILE_CACHE: '1' };
 }
 
+function reservationBytes(options, estimate) {
+  if (options.reserveBytes === undefined) return estimate;
+  if (
+    !options.buildOnly ||
+    !options.compact ||
+    !Number.isSafeInteger(options.reserveBytes) ||
+    options.reserveBytes < 1 ||
+    options.reserveBytes > estimate
+  )
+    throw Error(
+      'A compact build-only reservation must be a positive byte limit no larger than the estimate',
+    );
+  return options.reserveBytes;
+}
+
 function buildPair(options) {
   const pairSession = {};
   let failure;
@@ -997,6 +1014,7 @@ if (require.main === module) {
         'output-root': { type: 'string' },
         'search-rollback': { type: 'boolean', default: false },
         plan: { type: 'boolean', default: false },
+        'reserve-bytes': { type: 'string' },
         'pair-candidate-root': { type: 'string' },
         'pair-rollback-root': { type: 'string' },
       },
@@ -1009,6 +1027,10 @@ if (require.main === module) {
       outputRoot: values['output-root'],
       searchRollback: values['search-rollback'],
       plan: values.plan,
+      reserveBytes:
+        values['reserve-bytes'] === undefined
+          ? undefined
+          : Number(values['reserve-bytes']),
     };
     if (values['pair-candidate-root'] || values['pair-rollback-root']) {
       if (
@@ -1044,4 +1066,5 @@ module.exports = {
   buildFailureDiagnostic,
   compilerFailure,
   compilerEnvironment,
+  reservationBytes,
 };

@@ -156,6 +156,11 @@ The isolated Vite config uses the React plugin's ESM entry and the same installe
 IPC fallback avoids native temporary output files; ordinary output still has to
 match independently recorded producer bytes. Windows compiler regressions
 prepare only pinned TypeScript/esbuild dependencies with install scripts disabled.
+Manifest file/link maps compare their sorted entries, so producer insertion order
+does not masquerade as changed bytes. A compact build-only invocation may set
+`--reserve-bytes` to a positive value no larger than the conservative dependency
+estimate. The exact policy and actual-copy checks still enforce the total byte
+ceiling and retain an overflowing output; this option never adds capacity.
 
 Gate tests are not runnable-package or application-recovery evidence. Before any
 installation, build and fully verify both real packages, seed a small synthetic
