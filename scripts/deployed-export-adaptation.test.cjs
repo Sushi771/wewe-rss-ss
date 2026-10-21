@@ -28,6 +28,7 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     'apps/server/src/article-list-page.ts',
   ]);
   assert.deepEqual(Object.keys(searchPins.articleRoutes).sort(), [
+    'exportIds',
     'list',
     'prepareSearch',
     'searchStatus',

@@ -1219,12 +1219,14 @@ export class TrpcRouter {
       .input(articleFilterSchema)
       .query(async ({ input }) => {
         // One frozen identity list avoids live cursor drift during a long export.
-        const items = await this.prismaService.article.findMany({
-          where: articleListWhere(input),
-          orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-          select: { id: true },
-          take: 5001,
-        });
+        const items = input.search?.trim()
+          ? await findBodySearchIds(this.prismaService, input, 5001, true)
+          : await this.prismaService.article.findMany({
+              where: articleListWhere(input),
+              orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
+              select: { id: true },
+              take: 5001,
+            });
         if (items.length > 5000)
           throw new TRPCError({
             code: 'BAD_REQUEST',

@@ -24,11 +24,21 @@ Uncached bodies are explicitly excluded; preparation never fetches an article.
 No AI, vectors, external transfer, Sites or new platform integration is added.
 
 The frozen deployed safety manifest remains unchanged. A narrowly enumerated
-overlay pins the two search/list helpers and four article routes. The original
+overlay pins the two search/list helpers and five article routes. The original
 reader, login, collection, backup, write coordinator and startup fingerprints
 continue to be checked. Existing synthetic migration fixtures use the tested
 SQLite statement splitter because trigger bodies contain semicolons; no old
 business or audit assertions are removed.
+
+The deployed-only `article.exportIds` also uses body-aware matching for a
+nonempty search. This makes current-filter Obsidian identity discovery agree
+with list/summary and filtered directory export, including body-only matches.
+It retains the 5001-row probe, rejects more than5000 identities, orders by
+publication descending/identity ascending and returns a frozen identity array.
+Direct actual-SQLite regressions cover body-only and mixed title/body matches,
+publisher/group/date intersections, invalidated body exclusion, frozen results
+after a later body update, and the existing export cap. Selected-ID export
+continues to use its existing explicit membership.
 
 Windows lifecycle CI uses the installed, frozen Node 24.11.1 runtime. The
 floating Node 24 job resolved to 24.22.0 and refused copying into an already

@@ -216,6 +216,94 @@ describe('local body search on actual Prisma SQLite', () => {
     expect(await ids('新生命周期独有词')).toEqual(['recreated']);
     expect(await ids('旧生命周期独有词')).toEqual([]);
   });
+  it('freezes the same body-aware filtered scope for list, summary and current-filter export', async () => {
+    await add('a-body', '<p>正文独有验收 范围唯一词</p>', 'ordinary');
+    await add('a-title', '<p>ordinary</p>', '范围唯一词 title');
+    await add('a-earlier', '<p>范围唯一词</p>', 'ordinary');
+    await add('a-later', '<p>范围唯一词</p>', 'ordinary');
+    await add('b-other', '<p>范围唯一词</p>', 'ordinary', 'b');
+    await p.feed.update({ where: { id: 'b' }, data: { groupId: null } });
+    await p.article.update({
+      where: { id: 'a-earlier' },
+      data: { publishTime: day - 1 },
+    });
+    await p.article.update({
+      where: { id: 'a-later' },
+      data: { publishTime: day + 86400 },
+    });
+    await prepare();
+    const config = {
+      get: (key: string) =>
+        key === 'platform' ? { url: '' } : { updateDelayTime: 0 },
+    } as any;
+    const caller = new TrpcRouter(
+      new TrpcService(p as any, config, {} as any, {} as any),
+      p as any,
+      config,
+      {} as any,
+      {} as any,
+    ).appRouter.createCaller({ errorMsg: null, isLocal: true });
+    const unique = { search: '正文独有验收' };
+    expect((await caller.article.list(unique)).items.map((x) => x.id)).toEqual([
+      'a-body',
+    ]);
+    expect((await caller.article.summary(unique)).articles).toBe(1);
+    expect(await caller.article.exportIds(unique)).toEqual(['a-body']);
+    const filter = {
+      search: '范围唯一词',
+      mpId: 'a',
+      group: 'g',
+      dateStart: '2026-01-02',
+      dateEnd: '2026-01-02',
+    };
+    const listed = (await caller.article.list(filter)).items
+      .map((x) => x.id)
+      .sort();
+    const frozen = await caller.article.exportIds(filter);
+    expect(listed).toEqual(['a-body', 'a-title']);
+    expect(frozen).toEqual(listed);
+    expect((await caller.article.summary(filter)).articles).toBe(frozen.length);
+    expect(
+      await caller.article.exportIds({ ...filter, group: 'ungrouped' }),
+    ).toEqual([]);
+    expect(
+      await caller.article.exportIds({
+        ...filter,
+        dateStart: '2026-01-03',
+        dateEnd: '2026-01-03',
+      }),
+    ).toEqual(['a-later']);
+    await p.article.update({
+      where: { id: 'a-body' },
+      data: { contentHtml: '<p>replacement pending</p>' },
+    });
+    expect(await caller.article.exportIds(filter)).toEqual(['a-title']);
+    expect((await caller.article.list(filter)).items.map((x) => x.id)).toEqual([
+      'a-title',
+    ]);
+    expect((await caller.article.summary(filter)).articles).toBe(1);
+    expect(frozen).toEqual(['a-body', 'a-title']);
+  });
+  it('retains the 5001 identity probe and rejects current-filter exports over 5000', async () => {
+    await p.$executeRaw`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<5001) INSERT INTO articles(id,mp_id,title,pic_url,publish_time) SELECT 'cap-'||x,'a','上限词','',${day} FROM n`;
+    const config = {
+      get: (key: string) =>
+        key === 'platform' ? { url: '' } : { updateDelayTime: 0 },
+    } as any;
+    const caller = new TrpcRouter(
+      new TrpcService(p as any, config, {} as any, {} as any),
+      p as any,
+      config,
+      {} as any,
+      {} as any,
+    ).appRouter.createCaller({ errorMsg: null, isLocal: true });
+    await expect(
+      caller.article.exportIds({ search: '上限词' }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    await expect(caller.article.exportIds({})).rejects.toMatchObject({
+      code: 'BAD_REQUEST',
+    });
+  });
   it('covers nested inserts, bulk nulling, raw deletes and feed cascades without a Prisma hook', async () => {
     await p.feed.update({
       where: { id: 'a' },
