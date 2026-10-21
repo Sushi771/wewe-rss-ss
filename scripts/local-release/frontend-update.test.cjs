@@ -8,6 +8,71 @@ const lib = require('./lib.cjs');
 const update = require('./frontend-update.cjs');
 const SOURCE = 'f618e48f48ff0e3df1c646cb8a666a2461815732';
 const BASE = '48fdf73f4d770001bbb6de3e2383189811e56ccb';
+test(
+  "HTTP validation accepts indirect Vite chunks but rejects stale HTML and changed chunk bytes",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "frontend-http-"));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const template =
+      '<script src="/dash/assets/entry.js"></script><link href="/dash/assets/style.css">';
+    const contents = {
+      "index.hbs": template,
+      "assets/entry.js": 'import("./chunk.js")',
+      "assets/chunk.js": "export const value = 1;",
+      "assets/style.css": "body{}",
+    };
+    const files = Object.entries(contents).map(([name, text]) => {
+      const input = path.join(directory, name);
+      fs.mkdirSync(path.dirname(input), { recursive: true });
+      fs.writeFileSync(input, text);
+      return { path: name, input, sha256: lib.fileHash(input) };
+    });
+    const originalFetch = global.fetch;
+    t.after(() => {
+      global.fetch = originalFetch;
+    });
+    let html = template,
+      corruptChunk = false;
+    const fetched = [];
+    global.fetch = async (url) => {
+      fetched.push(url);
+      const name = url.endsWith("/dash") ? "index.hbs" : url.split("/dash/")[1];
+      return new Response(
+        name === "index.hbs"
+          ? html
+          : corruptChunk && name === "assets/chunk.js"
+            ? "changed"
+            : contents[name],
+      );
+    };
+    const adapter = update.productionAdapter({ config: [] });
+    await adapter.verifyAssets(files);
+    assert(fetched.some((url) => url.endsWith("/assets/chunk.js")));
+    html = template.replace("entry.js", "old.js");
+    await assert.rejects(
+      adapter.verifyAssets(files),
+      /FRONTEND_STALE_TEMPLATE/,
+    );
+    html = template + '<script src="/dash/assets/old.js"></script>';
+    await assert.rejects(
+      adapter.verifyAssets(files),
+      /FRONTEND_STALE_TEMPLATE/,
+    );
+    html = template;
+    corruptChunk = true;
+    await assert.rejects(
+      adapter.verifyAssets(files),
+      /FRONTEND_UPDATE_STATE_CHANGED/,
+    );
+    corruptChunk = false;
+    fs.appendFileSync(files[0].input, "<!--changed-->");
+    await assert.rejects(
+      adapter.verifyAssets(files),
+      /FRONTEND_UPDATE_STATE_CHANGED/,
+    );
+  },
+);
 async function fixture(t, extra = () => {}) {
   const installation = fs.mkdtempSync(
     path.join(os.tmpdir(), 'frontend-retain-'),
