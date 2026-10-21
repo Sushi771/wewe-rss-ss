@@ -231,6 +231,7 @@ function open(request, options = {}, boundOperation) {
     throw new Error('RELEASE_SCOPE_BASELINE_EXCEPTION_NOT_APPROVED');
   if (policy.phase !== undefined && policy.phase !== 'build-only')
     throw new Error('RELEASE_SCOPE_PHASE_INVALID');
+  let buildSource;
   if (policy.phase === 'build-only') {
     const spec = policy.buildOnly;
     const sources = spec?.sources || (spec ? [spec] : []);
@@ -282,6 +283,15 @@ function open(request, options = {}, boundOperation) {
       spec.outputRoot === path.resolve(__dirname, '../../.local-releases')
     )
       throw new Error('RELEASE_SCOPE_BUILD_ONLY_BINDING_REQUIRED');
+    if (
+      source.sourceRoot &&
+      (request.sourceRoot !== source.sourceRoot ||
+        canonical(source.sourceRoot) !== source.sourceRoot ||
+        hash(identity(source.sourceRoot)) !== hash(source.sourceIdentity) ||
+        contains(spec.outputRoot, source.sourceRoot))
+    )
+      throw Error('RELEASE_SCOPE_BUILD_ONLY_SOURCE_IDENTITY_CHANGED');
+    buildSource = source;
   } else if (
     request.buildOnly ||
     !/^[a-f0-9]{64}$/.test(policy.compatibilityProofSha256 || '')
@@ -420,6 +430,13 @@ function open(request, options = {}, boundOperation) {
   const check = (allowTransition = false) => {
     owner();
     checkRoots(policy.roots);
+    if (
+      buildSource?.sourceRoot &&
+      (canonical(buildSource.sourceRoot) !== buildSource.sourceRoot ||
+        hash(identity(buildSource.sourceRoot)) !==
+          hash(buildSource.sourceIdentity))
+    )
+      throw Error('RELEASE_SCOPE_BUILD_ONLY_SOURCE_IDENTITY_CHANGED');
     if (present(ledger) && hash(state(ledger)) !== hash(prior))
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
     const measure = verifier.scan(

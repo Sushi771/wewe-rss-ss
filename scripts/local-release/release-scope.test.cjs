@@ -869,3 +869,49 @@ test('a fixed two-source build policy accounts for retained first-package bytes 
       /BUILD_ONLY_BINDING/,
     );
   }));
+
+test('build-only source path and directory identity cannot change after review', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    const source = scope.inspect([f.current]).roots[0];
+    Object.assign(f.policy.buildOnly, {
+      sourceRoot: source.path,
+      sourceIdentity: source.identity,
+    });
+    f.save();
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /SOURCE_IDENTITY_CHANGED/,
+    );
+    const bound = { ...request, sourceRoot: source.path };
+    const lease = scope.open(bound, f.options());
+    lease.close();
+    fs.renameSync(f.current, f.current + '-old');
+    fs.mkdirSync(f.current);
+    assert.throws(
+      () => scope.open(bound, f.options()),
+      /SOURCE_IDENTITY_CHANGED/,
+    );
+  }));
+
+test('a build source replaced while the lease is held stops the next checkpoint', () =>
+  fixture((f) => {
+    const request = buildOnly(f),
+      source = scope.inspect([f.current]).roots[0];
+    Object.assign(f.policy.buildOnly, {
+      sourceRoot: source.path,
+      sourceIdentity: source.identity,
+    });
+    f.save();
+    const lease = scope.open(
+      { ...request, sourceRoot: source.path },
+      f.options(),
+    );
+    fs.renameSync(f.current, f.current + '-replaced');
+    fs.mkdirSync(f.current);
+    assert.throws(() => lease.check(), /SOURCE_IDENTITY_CHANGED/);
+    assert.throws(
+      () => lease.close(Error('source replaced')),
+      /SOURCE_IDENTITY_CHANGED/,
+    );
+  }));

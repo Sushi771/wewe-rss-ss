@@ -380,6 +380,10 @@ function build(options = {}) {
       buildOnly: {
         sourceCommit: historical ? options.sourceCommit : currentCommit,
         sourceHash,
+        sourceRoot,
+        sourceIdentity: ['dev', 'ino', 'birthtimeNs'].map((key) =>
+          String(fs.lstatSync(sourceRoot, { bigint: true })[key]),
+        ),
         outputRoot: releaseRoot,
         runtimeSha256: fileHash(process.execPath),
         commands,
@@ -407,6 +411,7 @@ function build(options = {}) {
     buildOnly: options.buildOnly === true,
     sourceCommit: historical ? options.sourceCommit : currentCommit,
     sourceHash,
+    sourceRoot,
   });
   return require('./lib.cjs').hostEffects.context.run(shared, () => {
     let reservation;
