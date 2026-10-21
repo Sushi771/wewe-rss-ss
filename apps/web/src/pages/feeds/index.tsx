@@ -2433,7 +2433,7 @@ const Feeds = () => {
           <ModalBody>
             <p>本次公众号：{repairTarget?.mpName}</p>
             <p className="text-default-600 text-sm">
-              使用已有订阅身份验证目录，无需重新提供单篇原文。所选账号验证成功后更新最近10篇正文和图片，后续使用原更新本号入口；失败保留历史数据和停止记录，不自动重试或切换账号。
+              使用所选账号修复当前订阅并更新最近10篇正文和图片。已有文章会保留；遇到限制会停止，不会自动重试或更换账号。
             </p>
             {!defaultAddCapability?.existingRepairAvailable && (
               <p role="status">
@@ -2443,9 +2443,9 @@ const Feeds = () => {
               </p>
             )}
             <label className="flex flex-col gap-2 text-sm">
-              用于本号来源修复的正常Web账号
+              用于修复的网页登录账号
               <select
-                aria-label="用于本号来源修复的正常Web账号"
+                aria-label="用于修复的网页登录账号"
                 value={addAccountId}
                 onChange={(event) => {
                   if (!addingSubscriptions.current)
@@ -2454,7 +2454,7 @@ const Feeds = () => {
                 disabled={isAddFeedLoading}
                 className="bg-content1 rounded-md border p-2"
               >
-                <option value="">请选择正常Web登录账号</option>
+                <option value="">请选择已登录且可用的账号</option>
                 {addAccounts?.items.map((account) => (
                   <option
                     key={account.id}
@@ -2462,7 +2462,7 @@ const Feeds = () => {
                     disabled={account.status !== 1 || !account.nativeLoginAt}
                   >
                     {account.platformName || account.name}
-                    {!account.nativeLoginAt ? '（需正常Web登录）' : ''}
+                    {!account.nativeLoginAt ? '（需在网页完成登录）' : ''}
                   </option>
                 ))}
               </select>
