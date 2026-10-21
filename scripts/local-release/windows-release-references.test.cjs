@@ -833,3 +833,19 @@ if (process.platform === 'win32')
         directoryIdentity(path.dirname(f.shortcut)),
       );
     }));
+
+test('build-only probe retains real reference coverage without claiming pair compatibility', () =>
+  fixture((f) => {
+    f.policy.phase = 'build-only';
+    delete f.policy.compatibilityProofSha256;
+    delete f.policy.windowsReferences.compatibilityProof;
+    const result = f.run();
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.compatibility, {
+      stage: 'build-only',
+      verified: false,
+    });
+    assert(result.records.some((r) => r.kind === 'processes'));
+    f.native.categories.tasks = false;
+    assert.equal(f.run().complete, false);
+  }));

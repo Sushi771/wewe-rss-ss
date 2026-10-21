@@ -612,3 +612,147 @@ test('the async scope remains exclusive across a controller await boundary', () 
     const lease = f.open();
     lease.close();
   }));
+
+function buildOnly(f) {
+  f.policy.phase = 'build-only';
+  delete f.policy.compatibilityProofSha256;
+  f.policy.buildOnly = {
+    sourceCommit: 'a'.repeat(40),
+    sourceHash: 'b'.repeat(64),
+    outputRoot: f.build,
+    runtimeSha256: fileHash(process.execPath),
+    commands: [],
+  };
+  f.facts.compatibility = { stage: 'build-only', verified: false };
+  f.save();
+  return {
+    kind: 'build',
+    root: f.build,
+    reserveBytes: 4096,
+    runtimeCopies: 1,
+    buildOnly: true,
+    sourceCommit: 'a'.repeat(40),
+    sourceHash: 'b'.repeat(64),
+  };
+}
+test('build-only binds source and isolated output; incomplete references and install remain blocked', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    for (const change of [
+      { kind: 'install' },
+      { sourceHash: 'c'.repeat(64) },
+      { root: f.installed },
+      { transition: true },
+      { buildOnly: false },
+    ])
+      assert.throws(
+        () => scope.open({ ...request, ...change }, f.options()),
+        /BUILD_ONLY_BINDING/,
+      );
+    f.facts.complete = false;
+    assert.throws(() => scope.open(request, f.options()), /QUERY_INCOMPLETE/);
+    f.facts.complete = true;
+    const lease = scope.open(request, f.options());
+    assert.throws(
+      () => lease.authorizePackage(f.current),
+      /BUILD_ONLY_NO_INSTALL/,
+    );
+    lease.close();
+  }));
+test('build-only creates owned artifacts but rejects database, private config, process and pointer effects', () =>
+  fixture(async (f) => {
+    const request = buildOnly(f),
+      gateway = require('./lib.cjs').hostEffects;
+    await scope.within(
+      request,
+      async (lease) => {
+        const output = path.join(f.build, 'candidate');
+        lease.registerOutput(output);
+        gateway.fs.mkdirSync(output);
+        lease.createdOutput(output);
+        gateway.fs.writeFileSync(
+          path.join(output, 'build.log'),
+          'synthetic compiler output',
+        );
+        const fd = gateway.fs.openSync(path.join(output, 'second.log'), 'wx');
+        gateway.fs.writeSync(fd, 'owned');
+        gateway.fs.closeSync(fd);
+        assert.throws(
+          () => gateway.fs.writeSync(fd, 'late'),
+          /DESCRIPTOR_FORBIDDEN/,
+        );
+        assert.throws(
+          () =>
+            gateway.fs.writeFileSync(
+              path.join(f.current, 'changed'),
+              'forbidden',
+            ),
+          /WRITE_OUTSIDE_OUTPUT/,
+        );
+        assert.throws(
+          () => gateway.fs.readFileSync(path.join(f.base, 'production.db')),
+          /PRIVATE_INPUT/,
+        );
+        assert.throws(
+          () =>
+            gateway.fs.writeFileSync(path.join(output, 'active.json'), '{}'),
+          /PRIVATE_INPUT/,
+        );
+        assert.throws(
+          () =>
+            require('./startup-sqlite.cjs').inspectDatabase(
+              path.join(f.base, 'production.db'),
+              '',
+            ),
+          /RUNTIME_FORBIDDEN/,
+        );
+        assert.throws(
+          () => require('./switch.cjs').loadProductionEnvironment(),
+          /RUNTIME_FORBIDDEN/,
+        );
+        await assert.rejects(
+          require('./runtime.cjs').runtime(),
+          /RUNTIME_FORBIDDEN/,
+        );
+        await assert.rejects(
+          require('./restart.cjs').controlledRestart({ production: true }),
+          /NOT_AUTHORIZED/,
+        );
+        assert.throws(
+          () =>
+            gateway.processes.execFileSync(process.execPath, [
+              '-e',
+              'process.exit(0)',
+            ]),
+          /COMMAND_FORBIDDEN/,
+        );
+        await assert.rejects(
+          async () =>
+            require('node:util').promisify(gateway.processes.execFile)(
+              process.execPath,
+              ['-e', 'process.exit(0)'],
+            ),
+          /COMMAND_FORBIDDEN/,
+        );
+      },
+      f.options(),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(f.build, 'candidate/build.log'), 'utf8'),
+      'synthetic compiler output',
+    );
+    assert(!fs.existsSync(path.join(f.current, 'changed')));
+  }));
+test('a build-only policy cannot adopt an existing unmanaged output root', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    fs.writeFileSync(path.join(f.build, 'unowned'), 'preserve');
+    assert.throws(
+      () => scope.open(request, f.options()),
+      /BUILD_ROOT_NOT_EMPTY/,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(f.build, 'unowned'), 'utf8'),
+      'preserve',
+    );
+  }));

@@ -5,6 +5,7 @@ on:
     branches:
       [
         main,
+        codex/release-build-rollback-20261021,
         codex/local-body-search-deployed-compat-20261021,
         codex/sqlite-backup-bounded-20261014,
         codex/sqlite-backup-child-exit-20261014,
@@ -31,6 +32,7 @@ on:
     branches:
       [
         main,
+        codex/local-body-search-deployed-compat-20261021,
         codex/export-stage-profile-20261018,
         codex/deployed-reading-export-adaptation-20261018,
         codex/a5-export-title-source-20261018,
