@@ -85,6 +85,8 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     // Build this unique fixture through one SQLite connection before Prisma
     // opens it. Migration PRAGMAs and redefine-table DDL must share a session;
     // pooled, statement-by-statement setup can mix that session state.
+    // Node 24 built-in; the project still uses older Node declaration files.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { DatabaseSync } = require('node:sqlite');
     const setup = new DatabaseSync(databasePath);
     try {
