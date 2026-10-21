@@ -44,10 +44,68 @@ const toolPins = () =>
 function checkPin(value) {
   equal(lib.fileHash(value.path), value.sha256);
 }
-const { inventory } = require('./frontend-inventory.cjs');
+function requireSpace(root, allocation = 0) {
+  const value = fs.statfsSync(root),
+    available = Number(value.bavail) * Number(value.bsize);
+  const rounded = allocation
+    ? Math.ceil(allocation / Number(value.bsize)) * Number(value.bsize)
+    : 0;
+  assert(available >= FREE + rounded, 'FRONTEND_DISK_SPACE');
+  return available;
+}
+function copyBudget(previous, manifest, files, root) {
+  const allocationUnit = Number(fs.statfsSync(root).bsize);
+  assert(Number.isSafeInteger(allocationUnit) && allocationUnit > 0);
+  const directories = Object.keys(lib.releaseMetadata(previous))
+    .filter((relative) =>
+      fs.lstatSync(path.join(previous, relative)).isDirectory(),
+    )
+    .sort((a, b) => a.length - b.length || a.localeCompare(b));
+  const sizes = {};
+  let copyFileBytes = 0;
+  for (const relative of Object.keys(manifest.files)) {
+    const stat = fs.lstatSync(path.join(previous, relative));
+    assert(stat.isFile() && !stat.isSymbolicLink());
+    sizes[relative] = stat.size;
+    copyFileBytes += stat.size;
+  }
+  const sourceSizes = { ...sizes };
+  for (const file of files)
+    sizes['client/' + file.path] = Math.max(
+      sizes['client/' + file.path] || 0,
+      file.bytes,
+    );
+  const round = (value) => Math.ceil(value / allocationUnit) * allocationUnit;
+  const manifestReserveBytes =
+    Buffer.byteLength(JSON.stringify(manifest, null, 2)) +
+    Buffer.byteLength(
+      JSON.stringify(
+        files.map(({ path, sha256 }) => ({ path, sha256 })),
+        null,
+        2,
+      ),
+    ) +
+    8192;
+  const reserveBytes =
+    Object.values(sizes).reduce((sum, size) => sum + round(size), 0) +
+    round(manifestReserveBytes) +
+    (directories.length + Object.keys(manifest.links).length + 4) *
+      allocationUnit;
+  assert(reserveBytes <= GROWTH, 'FRONTEND_GROWTH_EXCEEDS_RETAIN_ONLY_LIMIT');
+  return {
+    allocationUnit,
+    directories,
+    sourceSizes,
+    copyFileBytes,
+    resourceBytes: files.reduce((sum, file) => sum + file.bytes, 0),
+    manifestReserveBytes,
+    reserveBytes,
+  };
+}
 function lock(root, name) {
   const file = path.join(root, name),
     token = crypto.randomUUID();
+  requireSpace(root, Buffer.byteLength(token));
   fs.writeFileSync(file, token, { flag: 'wx', mode: 0o600 });
   const identity = id(file);
   return {
@@ -282,18 +340,9 @@ async function plan(options) {
     });
   assert.equal(new Set(files.map((f) => f.path)).size, 4);
   assert(files.some((f) => f.path === 'index.hbs'));
-  const baseline = await inventory(root, [], {
-      onProgress: options.onInventoryProgress,
-    }),
-    oldBytes = (await inventory(previous)).bytes;
-  const reserveBytes =
-    oldBytes + files.reduce((n, f) => n + f.bytes, 0) + 1024 * 1024;
-  assert(reserveBytes <= GROWTH, 'FRONTEND_GROWTH_EXCEEDS_RETAIN_ONLY_LIMIT');
-  const free = fs.statfsSync(root);
-  assert(
-    Number(free.bavail) * Number(free.bsize) >= FREE + reserveBytes,
-    'FRONTEND_DISK_SPACE',
-  );
+  const budget = copyBudget(previous, old, files, root),
+    reserveBytes = budget.reserveBytes;
+  const availableBytesAtPlan = requireSpace(root, reserveBytes);
   const candidateId =
     'frontend-' + SOURCE.slice(0, 12) + '-' + crypto.randomUUID();
   const expected = options.expected;
@@ -320,8 +369,8 @@ async function plan(options) {
   if (observedWriters) validateWriters(observedWriters, expected);
   const readOnlyCompanions = observedWriters?.readOnlyCompanions || [];
   return {
-    format: 1,
-    kind: 'retain-only-frontend-v1',
+    format: 2,
+    kind: 'retain-only-frontend-v2',
     sourceCommit: SOURCE,
     baseCommit: BASE,
     installation,
@@ -331,14 +380,22 @@ async function plan(options) {
     rootIdentity: id(root),
     pointer,
     previous,
+    previousIdentity: id(previous),
     previousManifest: pin(path.join(previous, 'release.json')),
     database,
     databaseIdentity: id(database),
     config,
     files,
-    baseline,
+    historyAudit: {
+      status: 'not-audited',
+      bytes: null,
+      slots: null,
+      coverage:
+        'other historical contents are retained untouched and not enumerated',
+    },
+    budget,
+    availableBytesAtPlan,
     reserveBytes,
-    maxTotalBytes: baseline.bytes + reserveBytes,
     candidateId,
     expected,
     writerObservation,
@@ -349,7 +406,8 @@ async function plan(options) {
   };
 }
 function checkPlan(p) {
-  assert.equal(p.kind, 'retain-only-frontend-v1');
+  assert.equal(p.format, 2);
+  assert.equal(p.kind, 'retain-only-frontend-v2');
   assert.equal(p.sourceCommit, SOURCE);
   assert.equal(p.baseCommit, BASE);
   equal(id(p.root), p.rootIdentity);
@@ -370,12 +428,24 @@ function checkPlan(p) {
   equal(id(p.database), p.databaseIdentity);
   assert(/^frontend-[a-f0-9]{12}-[a-f0-9-]{36}$/.test(p.candidateId));
   assert(p.reserveBytes > 0 && p.reserveBytes <= GROWTH);
-  equal(p.maxTotalBytes, p.baseline.bytes + p.reserveBytes);
+  equal(p.historyAudit.status, 'not-audited');
+  equal(p.historyAudit.bytes, null);
+  equal(p.historyAudit.slots, null);
+  assert(
+    !Object.hasOwn(p, 'baseline') && !Object.hasOwn(p, 'maxTotalBytes'),
+    'FRONTEND_HISTORY_AUDIT_NOT_CLAIMED',
+  );
+  equal(id(p.previous), p.previousIdentity);
   assert.equal(path.dirname(p.previous), p.root);
   checkPin(p.tool);
   if (p.writerObservation) checkPin(p.writerObservation);
   equal(toolPins(), p.tools);
   checkPin(p.previousManifest);
+  equal(
+    copyBudget(p.previous, read(p.previousManifest.path), p.files, p.root),
+    p.budget,
+  );
+  equal(p.reserveBytes, p.budget.reserveBytes);
   p.config.forEach(checkPin);
 }
 function equivalent(old, next, files) {
@@ -389,34 +459,95 @@ function equivalent(old, next, files) {
   }
   equal(Object.entries(next.files).sort(), Object.entries(expected).sort());
 }
-function copyPackage(previous, candidate) {
-  fs.mkdirSync(candidate); // must be new; never merge into an existing directory
-  function copy(from, to) {
-    for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
-      const source = path.join(from, entry.name),
-        target = path.join(to, entry.name);
-      if (entry.isSymbolicLink()) {
-        const resolved = canonical(source);
-        assert(lib.inside(previous, resolved));
-        fs.symlinkSync(
-          path.join(candidate, path.relative(previous, resolved)),
-          target,
-          fs.statSync(source).isDirectory() ? 'junction' : 'file',
-        );
-      } else if (entry.isDirectory()) {
-        fs.mkdirSync(target);
-        copy(source, target);
-      } else {
-        assert(entry.isFile());
-        fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+function copyFixed(source, target, bytes, root) {
+  requireSpace(root, bytes);
+  const input = fs.openSync(source, 'r'),
+    before = fs.fstatSync(input, { bigint: true });
+  let output;
+  try {
+    assert(
+      before.isFile() && Number(before.size) === bytes,
+      'FRONTEND_SOURCE_SIZE_CHANGED',
+    );
+    output = fs.openSync(target, 'wx');
+    const buffer = Buffer.alloc(65536);
+    let remaining = bytes;
+    while (remaining) {
+      const count = fs.readSync(
+        input,
+        buffer,
+        0,
+        Math.min(buffer.length, remaining),
+        null,
+      );
+      assert(count > 0, 'FRONTEND_SOURCE_TRUNCATED');
+      let written = 0;
+      while (written < count) {
+        const amount = fs.writeSync(output, buffer, written, count - written);
+        assert(amount > 0, 'FRONTEND_WRITE_MADE_NO_PROGRESS');
+        written += amount;
       }
+      remaining -= count;
+    }
+    assert.equal(
+      fs.readSync(input, buffer, 0, 1, null),
+      0,
+      'FRONTEND_SOURCE_GREW',
+    );
+    const after = fs.fstatSync(input, { bigint: true });
+    equal(
+      [before.dev, before.ino, before.size, before.mtimeNs, before.ctimeNs].map(
+        String,
+      ),
+      [after.dev, after.ino, after.size, after.mtimeNs, after.ctimeNs].map(
+        String,
+      ),
+    );
+    fs.fsyncSync(output);
+  } finally {
+    if (output !== undefined) fs.closeSync(output);
+    fs.closeSync(input);
+  }
+  requireSpace(root);
+}
+function copyPackage(previous, candidate, manifest, budget, root) {
+  requireSpace(root, budget.reserveBytes);
+  fs.mkdirSync(candidate);
+  for (const relative of budget.directories) {
+    if (relative) {
+      requireSpace(root, budget.allocationUnit);
+      fs.mkdirSync(path.join(candidate, relative));
     }
   }
-  copy(previous, candidate);
+  for (const relative of Object.keys(manifest.files)) {
+    if (relative === 'client/index.hbs') continue; // create the replacement exclusively, never follow an overwritten target
+    copyFixed(
+      path.join(previous, relative),
+      path.join(candidate, relative),
+      budget.sourceSizes[relative],
+      root,
+    );
+  }
+  for (const [relative, target] of Object.entries(manifest.links)) {
+    const original = canonical(path.join(previous, relative));
+    assert(lib.inside(previous, original));
+    equal(lib.slash(path.relative(previous, original)), target);
+    requireSpace(root, budget.allocationUnit);
+    fs.symlinkSync(
+      path.join(candidate, target),
+      path.join(candidate, relative),
+      fs.statSync(original).isDirectory() ? 'junction' : 'file',
+    );
+  }
+  requireSpace(root);
 }
 async function apply(p, adapter) {
   assert(!lib.hostEffects.context.getStore(), 'FRONTEND_NESTED_HOST_OPERATION');
   checkPlan(p);
+  assert(
+    !fs.existsSync(path.join(p.root, p.candidateId)),
+    'FRONTEND_CANDIDATE_EXISTS; preserve it; no automatic retry',
+  );
   const locks = [];
   let candidate,
     stopped = false,
@@ -428,13 +559,13 @@ async function apply(p, adapter) {
     '.active-release.lock',
     '.frontend-update.lock',
   ];
-  const history = () => inventory(p.root, [...names, p.candidateId]);
+
   const pointerCheck = () => checkPin(p.pointer);
   const before = async () => {
     checkPlan(p);
     locks.forEach((l) => l.check());
     pointerCheck();
-    equal(await history(), p.baseline);
+    requireSpace(p.root);
     checkPin(p.previousManifest);
     lib.verifyRelease(p.previous);
   };
@@ -456,19 +587,24 @@ async function apply(p, adapter) {
       'FRONTEND_DISK_SPACE',
     );
     candidate = path.join(p.root, p.candidateId);
-    copyPackage(p.previous, candidate);
+    copyPackage(
+      p.previous,
+      candidate,
+      lib.verifyRelease(p.previous),
+      p.budget,
+      p.root,
+    );
     for (const f of p.files) {
       equal(lib.fileHash(f.input), f.sha256);
       const target = path.join(candidate, 'client', f.path);
       assert(lib.inside(candidate, canonical(path.dirname(target))));
-      if (f.path !== 'index.hbs' && fs.existsSync(target))
-        equal(lib.fileHash(target), f.sha256);
-      else
-        fs.copyFileSync(
-          f.input,
-          target,
-          f.path === 'index.hbs' ? 0 : fs.constants.COPYFILE_EXCL,
+      if (f.path !== 'index.hbs' && fs.existsSync(target)) {
+        assert(
+          fs.lstatSync(target).isFile() &&
+            !fs.lstatSync(target).isSymbolicLink(),
         );
+        equal(lib.fileHash(target), f.sha256);
+      } else copyFixed(f.input, target, f.bytes, p.root);
     }
     // Expected file set is derived BEFORE copying. Never adopt an external write.
     const copied = lib.fingerprint(candidate);
@@ -490,10 +626,16 @@ async function apply(p, adapter) {
           oldHashedAssetsRetained: true,
         },
       };
-    fs.writeFileSync(
-      path.join(candidate, 'release.json'),
-      JSON.stringify(manifest, null, 2) + '\n',
+    const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2) + '\n');
+    assert(
+      manifestBytes.length <= p.budget.manifestReserveBytes,
+      'FRONTEND_MANIFEST_RESERVATION_EXCEEDED',
     );
+    requireSpace(p.root, manifestBytes.length);
+    fs.writeFileSync(path.join(candidate, 'release.json'), manifestBytes, {
+      flag: 'wx',
+    });
+    requireSpace(p.root);
     const candidateManifest = pin(path.join(candidate, 'release.json'));
     const candidateIdentity = id(candidate),
       candidateMetadata = lib.releaseMetadata(candidate);
@@ -506,10 +648,7 @@ async function apply(p, adapter) {
     };
     verifyCandidate();
     await before();
-    assert(
-      (await inventory(candidate)).bytes <= p.reserveBytes,
-      'FRONTEND_RESERVATION_EXCEEDED',
-    );
+    requireSpace(p.root);
     // Recheck exact identity, all app writers, pointer and frozen history before stopping.
     sameIdentity(await adapter.snapshot(p.expected.pid), p.expected);
     validateWriters(await adapter.writers(), p.expected);
@@ -539,12 +678,14 @@ async function apply(p, adapter) {
     verifyCandidate();
     // Shared publication lock remains owned through the compare and rename.
     const temp = path.join(p.root, 'active-' + crypto.randomUUID() + '.tmp');
+    requireSpace(p.root, 4096);
     fs.writeFileSync(
       temp,
       JSON.stringify({ format: 1, id: p.candidateId }) + '\n',
       { flag: 'wx' },
     );
     pointerCheck();
+    requireSpace(p.root);
     fs.renameSync(temp, p.pointer.path);
     adapter.detach?.(newProcess);
     return {
@@ -784,10 +925,6 @@ async function main() {
       ...values,
       writerObservation: values['writer-observation'],
       expected: read(values.expected),
-      onInventoryProgress: (progress) =>
-        process.stderr.write(
-          JSON.stringify({ type: 'inventory-progress', ...progress }) + '\n',
-        ),
     });
     fs.writeFileSync(values.plan, JSON.stringify(p, null, 2) + '\n', {
       flag: 'wx',
@@ -798,29 +935,20 @@ async function main() {
         plan: values.plan,
         sha256: lib.fileHash(values.plan),
         applied: false,
-        historySlots: p.baseline.slots,
-        historyBytes: p.baseline.bytes,
+        historyAudit: p.historyAudit,
+        reserveBytes: p.reserveBytes,
       }),
     );
   }
 }
 if (require.main === module)
   main().catch((error) => {
-    if (error.inventory)
-      console.error(
-        JSON.stringify({
-          type: 'inventory-failed',
-          code: error.message,
-          ...error.inventory,
-        }),
-      );
     console.error(error.stack);
     process.exitCode = 1;
   });
 module.exports = {
   plan,
   apply,
-  inventory,
   equivalent,
   validateWriters,
   classifyWriters,

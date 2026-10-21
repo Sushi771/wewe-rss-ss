@@ -17,7 +17,6 @@ const catalog = {
     'desktop-progress',
     'desktop-start',
     'frontend-update',
-    'frontend-inventory',
     'identity-tool',
     'install-desktop',
     'install-lifecycle',

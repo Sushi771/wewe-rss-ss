@@ -168,7 +168,13 @@ test('retain-only update preserves 146 historical slots including unmanifested d
     for (let i = 0; i < 145; i++)
       write(path.join(root, 'history-' + i, 'kept'), 'history');
   });
-  assert.equal(f.p.baseline.slots, 146);
+  assert.deepEqual(f.p.historyAudit, {
+    status: 'not-audited',
+    bytes: null,
+    slots: null,
+    coverage:
+      'other historical contents are retained untouched and not enumerated',
+  });
   const result = await update.apply(f.p, f.adapter);
   assert.equal(result.passed, true);
   assert.equal(result.databaseRestored, false);
@@ -189,7 +195,12 @@ test('retain-only update preserves 146 historical slots including unmanifested d
     fs.readFileSync(path.join(candidate, 'server/main.cjs'), 'utf8'),
     'fixed-backend',
   );
-  assert.equal((await update.inventory(f.root)).slots, 147);
+  assert.equal(
+    fs
+      .readdirSync(f.root, { withFileTypes: true })
+      .filter((v) => v.isDirectory()).length,
+    147,
+  );
 });
 for (const field of ['pid', 'startUtc', 'executable', 'commandLine'])
   test('refuses wrong or reused process ' + field, async (t) => {
@@ -826,5 +837,71 @@ test('changed companion creation identity or executable pin rejects before side 
     await assert.rejects(update.apply(f.p, f.adapter), /STATE_CHANGED/);
     assert.deepEqual(f.starts, []);
     assert(!fs.existsSync(path.join(f.root, f.p.candidateId)));
+  }
+});
+test('unrelated historical contents are not enumerated, frozen or modified', async (t) => {
+  const f = await fixture(t),
+    history = path.join(f.root, 'unreviewed-history'),
+    old = fs.readdirSync;
+  f.write(path.join(history, 'unknown'), 'changed outside this write scope');
+  try {
+    fs.readdirSync = (target, ...args) => {
+      if (
+        path.resolve(target) === path.resolve(f.root) ||
+        path.resolve(target).startsWith(history)
+      )
+        throw Error('unrelated inventory prohibited');
+      return old(target, ...args);
+    };
+    const result = await update.apply(f.p, f.adapter);
+    assert.equal(result.passed, true);
+    assert.equal(
+      fs.readFileSync(path.join(history, 'unknown'), 'utf8'),
+      'changed outside this write scope',
+    );
+    assert.equal(f.p.historyAudit.bytes, null);
+    assert.equal(f.p.historyAudit.slots, null);
+    assert(!Object.hasOwn(f.p, 'baseline'));
+    assert(!Object.hasOwn(f.p, 'maxTotalBytes'));
+  } finally {
+    fs.readdirSync = old;
+  }
+});
+test('candidate reservation and remaining disk space cannot be enlarged or falsified', async (t) => {
+  const f = await fixture(t);
+  assert(f.p.reserveBytes <= 768 * 1024 ** 2);
+  assert(f.p.availableBytesAtPlan >= 4 * 1024 ** 3 + f.p.reserveBytes);
+  f.p.reserveBytes++;
+  await assert.rejects(update.apply(f.p, f.adapter), /STATE_CHANGED/);
+  assert.deepEqual(f.starts, []);
+});
+test('existing failed candidate is retained with its ID and never merged or automatically retried', async (t) => {
+  const f = await fixture(t),
+    candidate = path.join(f.root, f.p.candidateId);
+  f.write(path.join(candidate, 'unowned'), 'must retain');
+  await assert.rejects(update.apply(f.p, f.adapter), /CANDIDATE_EXISTS/);
+  assert.equal(
+    fs.readFileSync(path.join(candidate, 'unowned'), 'utf8'),
+    'must retain',
+  );
+  assert.deepEqual(f.starts, []);
+});
+test('low free space rejects allocation and a mid-copy drop refuses publication', async (t) => {
+  for (const when of ['before', 'during']) {
+    const f = await fixture(t),
+      prior = fs.statfsSync;
+    let calls = 0;
+    try {
+      fs.statfsSync = (target, ...args) => {
+        const value = prior(target, ...args);
+        calls++;
+        return when === 'before' || calls > 8 ? { ...value, bavail: 0 } : value;
+      };
+      await assert.rejects(update.apply(f.p, f.adapter), /DISK_SPACE/);
+      assert.deepEqual(f.starts, []);
+      assert.equal(JSON.parse(fs.readFileSync(f.p.pointer.path)).id, 'old');
+    } finally {
+      fs.statfsSync = prior;
+    }
   }
 });
