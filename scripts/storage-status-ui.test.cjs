@@ -122,6 +122,8 @@ test('actual provider gives one concise failed-operation toast with a details ac
     exports: loaded.exports,
     console: { log() {}, error() {} },
     require(name) {
+      if (name === '../components/OperationNotice')
+        return { FailureNotice: 'FailureNotice' };
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
       if (name === '../utils/reading-query-cache')
         return { installReadingCacheBudget: () => () => {} };
@@ -183,7 +185,10 @@ test('actual provider gives one concise failed-operation toast with a details ac
     message: 'Other request failed',
     data: { httpStatus: 500 },
   });
-  assert.equal(notices[1][1].description, 'Other request failed');
+  assert.equal(
+    notices[1][1].description.props.error.message,
+    'Other request failed',
+  );
 });
 
 test('reading page removes only the implementation note and retains real filter/position controls', () => {

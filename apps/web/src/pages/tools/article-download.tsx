@@ -1,3 +1,4 @@
+import { FailureNotice } from '@web/components/OperationNotice';
 import { Button, Checkbox, Input } from '@nextui-org/react';
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { getAuthCode } from '@web/utils/auth';
@@ -531,7 +532,7 @@ export default function ArticleDownload() {
             </div>
             {browserActive && browserTask?.destinationBound && (
               <p className="mt-2 text-sm">
-                本次任务的保存目录已固定。若需更改，请取消任务，重新确认目录并取得新的接收许可后创建任务。
+                本次下载已固定保存目录。如需更改，请取消本次任务后重新下载。
               </p>
             )}
             {!settings && (
@@ -614,7 +615,7 @@ export default function ArticleDownload() {
                   saving: '正在保存',
                   saved:
                     singleTask.mediaComplete === false
-                      ? '已保存；媒体完整性未确认'
+                      ? '已保存；部分图片或视频尚未确认完整'
                       : '已保存',
                   blocked: '下载已暂停',
                   failed: '下载未完成',
@@ -885,12 +886,13 @@ export default function ArticleDownload() {
             </p>
           )}
           {error && (
-            <p
+            <div
               role="alert"
               className="bg-danger-50 text-danger rounded-xl p-4 text-sm"
             >
-              操作未完成，请重试或查看任务状态。
-            </p>
+              操作未完成，请先查看任务状态。
+              <FailureNotice error={error} />
+            </div>
           )}
           {error && verification && (
             <ArticleVerificationNotice verification={verification} />
@@ -901,11 +903,11 @@ export default function ArticleDownload() {
                 {saved.alreadySaved
                   ? '已保存，保留已有笔记'
                   : saved.mediaComplete === false
-                    ? '正文和有效图片已保存；媒体完整性未确认'
+                    ? '正文和有效图片已保存；部分图片或视频尚未确认完整'
                     : '正文和图片已保存到本机'}
               </p>
               {saved.mediaComplete === false && saved.alreadySaved && (
-                <p>媒体完整性未确认；已有正文和有效图片保留。</p>
+                <p>部分图片或视频尚未确认完整；已有正文和有效图片保留。</p>
               )}
               {exportResultNotice(saved) && (
                 <p role="status" className="mt-1 text-sm">

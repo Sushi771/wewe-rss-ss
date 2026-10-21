@@ -1,3 +1,5 @@
+import ArticleSearchStatus from '@web/components/ArticleSearchStatus';
+import { FailureNotice } from '@web/components/OperationNotice';
 import { READING_CACHE_TIME } from '@web/utils/reading-query-cache';
 import {
   FC,
@@ -106,11 +108,9 @@ const ArticleList: FC<ArticleListProps> = ({
         queryUtils.article.summary.invalidate(),
       ]);
     } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : '正文搜索整理失败，可以稍后继续',
-      );
+      toast.error('正文搜索准备未完成，可以稍后继续', {
+        description: <FailureNotice error={error} />,
+      });
     } finally {
       searchActive.current = false;
       setPreparingSearch(false);
@@ -280,45 +280,19 @@ const ArticleList: FC<ArticleListProps> = ({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {search.trim() && (
-        <div className="shrink-0 border-b px-3 py-2 text-xs" role="status">
-          本地字面搜索：标题、公众号及已整理的缓存正文；不联网取文。
-          {searchStatus.data ? (
-            <>
-              全库 {searchStatus.data.total} 篇，未缓存正文{' '}
-              {searchStatus.data.uncached} 篇，待整理{' '}
-              {searchStatus.data.pending} 篇。
-              {searchStatus.data.pending > 0 && '结果尚未覆盖全部缓存正文。'}
-            </>
-          ) : (
-            '正文覆盖范围读取中。'
-          )}
-          {searchStatus.error && (
-            <span role="alert">
-              覆盖范围读取失败：{searchStatus.error.message}
-            </span>
-          )}
-          {preparingSearch ? (
-            <Button
-              size="sm"
-              onPress={() => {
-                searchActive.current = false;
-                setSearchPaused(true);
-              }}
-            >
-              停止整理
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              onPress={() => {
-                setSearchPaused(false);
-                void buildSearch();
-              }}
-            >
-              整理本地正文搜索
-            </Button>
-          )}
-        </div>
+        <ArticleSearchStatus
+          data={searchStatus.data}
+          error={searchStatus.error}
+          preparing={preparingSearch}
+          onPause={() => {
+            searchActive.current = false;
+            setSearchPaused(true);
+          }}
+          onContinue={() => {
+            setSearchPaused(false);
+            void buildSearch();
+          }}
+        />
       )}
 
       {
@@ -434,10 +408,10 @@ const ArticleList: FC<ArticleListProps> = ({
                 rel="noopener noreferrer"
                 title={
                   item.bodyCached
-                    ? '点击标题阅读缓存正文'
-                    : '打开原文；本地正文未缓存'
+                    ? '点击标题阅读已保存正文'
+                    : '正文尚未保存，点击打开原文'
                 }
-                aria-label={`${item.bodyCached ? '阅读缓存正文' : '打开原文'}：${item.title}`}
+                aria-label={`${item.bodyCached ? '阅读已保存正文' : '打开原文'}：${item.title}`}
                 onClick={(event) => {
                   position.rememberForReader();
                   if (item.bodyCached) {
@@ -597,13 +571,16 @@ const ArticleList: FC<ArticleListProps> = ({
         <ModalContent>
           <ModalHeader>{reading.data?.title || '读取已保存正文'}</ModalHeader>
           <ModalBody>
-            <p className="text-sm text-neutral-500">
-              读取本地已保存正文与图片；本次没有联网取文。
-            </p>
+            <p className="text-sm text-neutral-500">阅读已保存的正文和图片。</p>
             {reading.isLoading ? (
               <Spinner />
             ) : reading.error ? (
-              <p role="alert">正文读取失败：{reading.error.message}</p>
+              <div role="alert">
+                <FailureNotice
+                  error={reading.error}
+                  fallback="正文读取失败，请稍后重试或打开原文。"
+                />
+              </div>
             ) : reading.data?.contentHtml ? (
               <ArticleReader
                 key={readingId}
@@ -612,7 +589,7 @@ const ArticleList: FC<ArticleListProps> = ({
                 onFindOpenChange={setReaderFindOpen}
               />
             ) : (
-              <p role="alert">尚无已保存正文；没有自动请求腾讯原文。</p>
+              <p role="alert">正文尚未保存，可打开原文阅读。</p>
             )}
           </ModalBody>
         </ModalContent>

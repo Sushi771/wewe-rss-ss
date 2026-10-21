@@ -188,7 +188,11 @@ test('stock detail panel is removed while a simple article count and per-article
     list.classNode('compact-col-title').getText(list.ast),
     /summary.data.articles/,
   );
-  assert(list.text.includes('正文未缓存'));
+  assert(
+    fs
+      .readFileSync('apps/web/src/utils/article-body-state.ts', 'utf8')
+      .includes('正文尚未保存'),
+  );
 });
 test('Wechat2RSS or mixed view hides metric CSV without removing existing-file import', () => {
   const local = feeds.elements.find(

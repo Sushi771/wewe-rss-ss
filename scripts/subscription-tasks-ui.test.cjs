@@ -281,7 +281,7 @@ test('main shows only real progress and waits without inventing cache percentage
   assert.equal(progress.props.maxValue, 2);
   assert.match(
     progress.props.label,
-    /上游已受理 0 \/ 共 2.*内容同步 0.*等待缓存/,
+    /已开始 0 \/ 共 2.*内容同步 0.*等待内容同步/,
   );
   assert(!view.text.includes('添加进度与记录'));
   assert(!view.text.includes('历史记录'));
@@ -319,7 +319,7 @@ test('a historical failed single task keeps a collapsed recovery action without 
     .render()
     .nodes.find(
       (n) =>
-        n.type === 'Button' && n.props.children?.includes('· 继续检查缓存'),
+        n.type === 'Button' && n.props.children?.includes('· 继续查看进度'),
     );
   assert(action);
   let finish;
@@ -400,7 +400,7 @@ test('refresh and changed technical messages do not repeat an acknowledged failu
     reopened.render().nodes.find((n) => n.type === 'Modal').props.isOpen,
     false,
   );
-  assert(reopened.button('继续检查原请求'));
+  assert(reopened.button('继续查看进度'));
 });
 test('historical failure at mount is quiet and failed or cancelled work never counts as success', () => {
   const f = fixture([
@@ -487,7 +487,7 @@ test('blocked batch pauses automatic actions; explicit resume guards duplicate c
   assert.deepEqual(f.calls, []);
   let done;
   f.setResumeWait(new Promise((r) => (done = r)));
-  const press = f.button('继续检查原请求').props.onPress;
+  const press = f.button('继续查看进度').props.onPress;
   const first = press();
   await press();
   assert.equal(
@@ -719,7 +719,7 @@ test('six-link paused progress reports the accepted first feed separately from u
   assert.equal(progress.props.value, 1);
   assert.match(
     progress.props.label,
-    /上游已受理 1 \/ 共 6.*内容同步 0.*提交已暂停/,
+    /已开始 1 \/ 共 6.*内容同步 0.*提交已暂停/,
   );
   assert.deepEqual(f.calls, []);
 });
@@ -743,12 +743,12 @@ test('image-pending completion preserves the subscription and warns without clai
   };
   await f.deliver([partial]);
   let view = f.render();
-  assert(view.text.includes('正文已同步；媒体完整性未确认'));
+  assert(view.text.includes('正文已同步；部分图片或视频尚未确认完整'));
   assert(view.text.includes('正文和有效图片可保存'));
   assert(!view.text.includes('完整离线保存尚未就绪'));
   assert(!view.text.includes('部分订阅暂未完成'));
   assert(!view.nodes.some((node) => node.type === 'Progress'));
-  assert.match(f.notifications[0][0], /订阅已保留.*媒体完整性未确认/);
+  assert.match(f.notifications[0][0], /订阅已保留.*部分图片或视频尚未确认完整/);
   await f.button('知道了').props.onPress();
   await f.deliver([{ ...partial, updatedAt: Date.now() }]);
   view = f.render();

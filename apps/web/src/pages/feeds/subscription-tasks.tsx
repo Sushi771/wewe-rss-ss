@@ -41,12 +41,12 @@ function reason(state: string, code?: string) {
   if (code === 'SUBSCRIPTION_PAUSED') return '本地订阅已停用，已有内容保留。';
   if (code === 'LEGACY_IDENTITY_UNVERIFIED')
     return '部分旧文章身份待核实，已隔离并保留旧正文。';
-  if (code === 'CACHE_READ_FAILED') return '缓存读取未完成，请继续检查原请求。';
+  if (code === 'CACHE_READ_FAILED') return '内容读取未完成，请继续查看进度。';
   if (code === 'CACHE_IMAGES_PENDING')
-    return '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。';
+    return '订阅已保留，正文已同步；部分图片或视频尚未确认完整，正文和有效图片可保存。';
   return state === 'blocked'
     ? '本条处理已暂停，请核对原请求状态。'
-    : '本条读取或处理未完成，请继续检查原请求。';
+    : '本条读取或处理未完成，请继续查看进度。';
 }
 
 /** Durable local progress only; the backend owns submission and sequencing. */
@@ -192,7 +192,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
       )
         toast.success(
           batch.items.some((item) => item.code === 'CACHE_IMAGES_PENDING')
-            ? `订阅已保留 ${batch.items.length} / 共 ${batch.items.length}；正文已同步；媒体完整性未确认，正文和有效图片可保存。`
+            ? `订阅已保留 ${batch.items.length} / 共 ${batch.items.length}；正文已同步；部分图片或视频尚未确认完整，正文和有效图片可保存。`
             : `添加完成 ${batch.items.length} / 共 ${batch.items.length}`,
           { duration: 3000 },
         );
@@ -209,7 +209,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
       )
         toast.success(
           task.code === 'CACHE_IMAGES_PENDING'
-            ? '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。'
+            ? '订阅已保留，正文已同步；部分图片或视频尚未确认完整，正文和有效图片可保存。'
             : '添加完成 1 / 共 1',
           { duration: 3000 },
         );
@@ -279,8 +279,8 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
           className="subscription-progress-summary"
         >
           <Progress
-            aria-label="正在受理添加请求"
-            label="正在受理添加请求"
+            aria-label="正在添加订阅"
+            label="正在添加订阅"
             isIndeterminate
             size="sm"
           />
@@ -297,7 +297,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
             value={accepted}
             maxValue={total}
             showValueLabel={false}
-            label={`上游已受理 ${accepted} / 共 ${total} · 内容同步 ${completed}${paused ? ' · 提交已暂停' : waiting ? ' · 等待缓存' : ' · 处理中'}`}
+            label={`已开始 ${accepted} / 共 ${total} · 内容同步 ${completed}${paused ? ' · 提交已暂停' : waiting ? ' · 等待内容同步' : ' · 处理中'}`}
             size="sm"
           />
           {active.map((batch) => (
@@ -323,7 +323,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                 isLoading={acting === batch.batchId}
                 onPress={() => act(batch.batchId, 'resume')}
               >
-                继续检查原请求
+                继续查看进度
               </Button>
             ))}
         </section>
@@ -382,7 +382,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
             >
               {feeds.find((feed) => feed.id === task.feedId)?.mpName ||
                 '未完成任务'}
-              · 继续检查缓存
+              · 继续查看进度
             </Button>
           ))}
         </details>
@@ -413,7 +413,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
           <ModalBody tabIndex={0} aria-label="添加异常">
             <p role="alert">
               {exceptions.every((item) => item.code === 'CACHE_IMAGES_PENDING')
-                ? '订阅已保留，正文已同步；媒体完整性未确认，正文和有效图片可保存。'
+                ? '订阅已保留，正文已同步；部分图片或视频尚未确认完整，正文和有效图片可保存。'
                 : '部分内容需要处理，已保存的订阅与正文保留。'}
             </p>
             <details className="subscription-task-reason">
@@ -444,7 +444,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                 isLoading={acting === batchId}
                 onPress={() => act(batchId, 'resume')}
               >
-                继续检查原请求
+                继续查看进度
               </Button>
             ))}
             {exceptions
@@ -465,7 +465,7 @@ const SubscriptionTasks = ({ feeds, adding, onSaved }: Props) => {
                     }
                   }}
                 >
-                  继续检查原请求
+                  继续查看进度
                 </Button>
               ))}
           </ModalBody>

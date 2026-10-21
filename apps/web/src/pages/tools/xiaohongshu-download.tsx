@@ -1,3 +1,4 @@
+import { FailureNotice } from '@web/components/OperationNotice';
 import { Button, Checkbox, Input } from '@nextui-org/react';
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { getAuthCode } from '@web/utils/auth';
@@ -243,7 +244,7 @@ export default function XiaohongshuDownload() {
                 })
               }
             >
-              重新读取本地设置与能力
+              重新读取下载设置
             </Button>
           )}
         </form>
@@ -259,12 +260,13 @@ export default function XiaohongshuDownload() {
             </p>
           )}
           {error && (
-            <p
+            <div
               role="alert"
               className="bg-danger-50 text-danger rounded-xl p-4 text-sm"
             >
-              操作未完成，请重试。
-            </p>
+              操作未完成，请检查下载状态。
+              <FailureNotice error={error} />
+            </div>
           )}
           {saved && (
             <div className="border-success-200 bg-success-50 rounded-lg border p-3">
@@ -272,7 +274,7 @@ export default function XiaohongshuDownload() {
                 {saved.alreadySaved
                   ? '已保存，保留现有笔记'
                   : saved.videoCount
-                    ? '正文和媒体缓存已保存到本地'
+                    ? '正文和图片、视频已保存到本机'
                     : '正文和图片已保存到本地'}
               </p>
               <p className="text-default-600 mt-2 break-all text-sm">

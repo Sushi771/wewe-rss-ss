@@ -1,3 +1,4 @@
+import { FailureNotice } from '@web/components/OperationNotice';
 import {
   Button,
   Input,
@@ -96,9 +97,12 @@ export default function FolderMemberPicker({
         <ModalHeader>添加订阅到「{folder.name}」</ModalHeader>
         <ModalBody>
           {error && (
-            <p role="alert" className="text-sm text-red-600">
-              {error}
-            </p>
+            <div role="alert" className="text-sm text-red-600">
+              <FailureNotice
+                error={error}
+                fallback="分类保存未确认，请重新读取列表后核对。"
+              />
+            </div>
           )}
           {disabled && (
             <p role="status" className="text-sm">
