@@ -43,6 +43,10 @@ export default function ManualRefreshProgress({
   const busy = useRef(false);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState('');
+  const [disclosure, setDisclosure] = useState<{
+    batchId: string;
+    open: boolean;
+  }>();
   const coverage = batch?.coverage;
   const fullySuccessful = Boolean(
     batch?.state === 'completed' &&
@@ -140,6 +144,12 @@ export default function ManualRefreshProgress({
         hour12: false,
       }).format(finished)}`
     : '上次更新成功';
+  // Polling may change the batch state. Only a new batch gets its default;
+  // the user's choice for this batch must survive running/paused/completed.
+  const detailsOpen =
+    disclosure?.batchId === batch.batchId
+      ? disclosure.open
+      : batch.state === 'paused';
   return (
     <section
       aria-label={fullySuccessful ? '最近更新' : '全部更新进度'}
@@ -187,40 +197,53 @@ export default function ManualRefreshProgress({
         </Button>
       )}
       {error && <p role="alert">{error}</p>}
-      <details open={batch.state === 'paused'}>
-        <summary>
+      <details open={detailsOpen} className="w-full">
+        <summary
+          className="cursor-pointer select-none py-1"
+          aria-expanded={detailsOpen}
+          onClick={(event) => {
+            event.preventDefault();
+            setDisclosure({ batchId: batch.batchId, open: !detailsOpen });
+          }}
+        >
           {fullySuccessful
             ? recentSuccess === batch.batchId
               ? '本轮全部更新完成。'
               : lastSuccess
-            : '查看逐号进度'}
+            : detailsOpen
+              ? '收起逐号进度'
+              : '查看逐号进度'}
         </summary>
-        {batch.coverage && (
-          <p>
-            {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 已跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
-            {fullySuccessful ? '本轮全部更新完成。' : '本轮尚未全部更新完成。'}
-          </p>
-        )}
-        <ul>
-          {batch.items.map((item) => (
-            <li key={item.index} className="py-1 text-xs">
-              {feeds.find((feed) => feed.id === item.feedId)?.mpName ||
-                `第 ${item.index + 1} 个公众号`}
-              ：
-              {item.state === 'queued'
-                ? '排队，尚未发送'
-                : item.state === 'submitting'
-                  ? '正在开始，结果待确认'
-                  : item.state === 'cancelled'
-                    ? '已取消，未发送'
-                    : item.state === 'succeeded'
-                      ? '内容已同步'
-                      : item.state === 'waiting'
-                        ? '等待内容同步'
-                        : '检查未完成'}
-            </li>
-          ))}
-        </ul>
+        <div className="max-h-64 overflow-y-auto">
+          {batch.coverage && (
+            <p>
+              {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 已跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
+              {fullySuccessful
+                ? '本轮全部更新完成。'
+                : '本轮尚未全部更新完成。'}
+            </p>
+          )}
+          <ul>
+            {batch.items.map((item) => (
+              <li key={item.index} className="py-1 text-xs">
+                {feeds.find((feed) => feed.id === item.feedId)?.mpName ||
+                  `第 ${item.index + 1} 个公众号`}
+                ：
+                {item.state === 'queued'
+                  ? '排队，尚未发送'
+                  : item.state === 'submitting'
+                    ? '正在开始，结果待确认'
+                    : item.state === 'cancelled'
+                      ? '已取消，未发送'
+                      : item.state === 'succeeded'
+                        ? '内容已同步'
+                        : item.state === 'waiting'
+                          ? '等待内容同步'
+                          : '检查未完成'}
+              </li>
+            ))}
+          </ul>
+        </div>
       </details>
     </section>
   );
