@@ -577,7 +577,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       if (
         page.authorId !== creator.externalAuthorId ||
         !Array.isArray(page.notes) ||
-        page.notes.length > 30 ||
+        page.notes.length > 60 ||
         (page.nextCursor !== null &&
           (typeof page.nextCursor !== 'string' ||
             !page.nextCursor ||

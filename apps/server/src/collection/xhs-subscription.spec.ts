@@ -13,7 +13,7 @@ import { XhsNormalizedCandidate } from './xiaohongshu-contract';
 import { LocalArticleStore } from '../article-local-save';
 import { RedbookSubscriptionAdapter } from './xhs-redbook-subscription';
 import { xhsNoteFilterSchema } from '@wewe-rss/shared';
-import { allowedRedbookMediaUrl } from './redbook-response';
+import { allowedRedbookMediaUrl, mapRedbookPage } from './redbook-response';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
@@ -247,6 +247,61 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     await expect(
       service.downloadNotes({ creatorId, noteIds: ['foreign'] }),
     ).rejects.toThrow('XHS_SELECTION_INVALID');
+    expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('commits and searches all 32 notes when a bounded page exceeds the requested 30', async () => {
+    const notes = Array.from({ length: 32 }, (_, i) => ({
+      authorId: author.id,
+      noteId: `bounded32-${i}`,
+      title: `bounded32 title ${i}`,
+      publishedAt: 0,
+      kind: 'image-text' as const,
+    }));
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: author.id,
+      nextCursor: null,
+      notes,
+    });
+    const { taskId } = await service.refresh({ id: creatorId });
+    expect(await finish(taskId)).toMatchObject({
+      state: 'completed',
+      total: 32,
+      completed: 32,
+      remaining: 0,
+    });
+    expect(await db.xhsNote.count({ where: { creatorId } })).toBe(32);
+    expect(
+      (await cache.notes(creatorId, { creatorId, search: 'bounded32' })).items,
+    ).toHaveLength(32);
+    const rows = await db.$queryRawUnsafe<Array<{ document: string }>>(
+      'SELECT document FROM xhs_subscription_tasks WHERE id = ?',
+      taskId,
+    );
+    expect(JSON.parse(rows[0].document)).toMatchObject({
+      listedIds: notes.map((note) => noteKey(note.noteId)),
+      listFinished: true,
+    });
+    expect(source.list).toHaveBeenCalledTimes(1);
+    expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('rejects a page above 60 before writing any of its note metadata', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    const before = await db.xhsNote.findMany();
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: author.id,
+      nextCursor: null,
+      notes: Array.from({ length: 61 }, (_, i) => ({
+        authorId: author.id,
+        noteId: `oversize-${i}`,
+        title: 'synthetic oversize page',
+        publishedAt: 0,
+        kind: 'image-text',
+      })),
+    });
+    expect(
+      await finish((await service.refresh({ id: creatorId })).taskId),
+    ).toMatchObject({ state: 'blocked', total: 0, completed: 0 });
+    expect(await db.xhsNote.findMany()).toEqual(before);
     expect(source.detail).not.toHaveBeenCalled();
   });
   it('stops after one failed detail instead of dispatching the rest of a batch', async () => {
@@ -689,6 +744,48 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
 });
 
 describe('Redbook split adapter', () => {
+  it('maps all 32 notes with stable author identity and retains the page bound', () => {
+    const notes = Array.from({ length: 32 }, (_, i) => ({
+      note_id: `synthetic-page-${i}`,
+      xsec_token: `synthetic-token-${i}`,
+      type: 'normal',
+      display_title: `synthetic title ${i}`,
+      time: 1760000000,
+      user: { user_id: author.id },
+      cover: {},
+      interact_info: {},
+    }));
+    const page = { notes, has_more: true, cursor: 'synthetic-next' };
+    const mapped = mapRedbookPage(page, author.id);
+    expect(mapped.notes).toHaveLength(32);
+    expect(mapped.notes[31]).toEqual({
+      noteId: 'synthetic-page-31',
+      authorId: author.id,
+      xsecToken: 'synthetic-token-31',
+    });
+    expect(mapped).toMatchObject({
+      nextCursor: 'synthetic-next',
+      hasMore: true,
+    });
+    expect(() =>
+      mapRedbookPage(
+        { ...page, notes: Array.from({ length: 61 }, () => notes[0]) },
+        author.id,
+      ),
+    ).toThrow('REDBOOK_SCHEMA_REJECTED');
+    expect(() =>
+      mapRedbookPage(
+        {
+          ...page,
+          notes: [
+            ...notes.slice(0, 31),
+            { ...notes[31], user: { user_id: 'foreign-author' } },
+          ],
+        },
+        author.id,
+      ),
+    ).toThrow('REDBOOK_AUTHOR_MISMATCH');
+  });
   it('upgrades allowlisted CDN images to HTTPS and rejects non-CDN sources', () => {
     expect(
       allowedRedbookMediaUrl('http://sns-webpic-qc.xhscdn.com/synthetic.jpg')

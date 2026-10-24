@@ -57,7 +57,9 @@ export function mapRedbookPage(
   const page = record(raw);
   if (
     !Array.isArray(page.notes) ||
-    page.notes.length > 30 ||
+    // A request for 30 can return extra entries (32 observed). Retain every
+    // checked item, with a separate finite response bound rather than truncation.
+    page.notes.length > 60 ||
     typeof page.has_more !== 'boolean'
   )
     throw new Error('REDBOOK_SCHEMA_REJECTED');
