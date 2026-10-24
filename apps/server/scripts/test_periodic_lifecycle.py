@@ -162,6 +162,31 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual({p: p.read_bytes() for p in self.copies()}, before)
         finally: guard.close()
 
+    def test_reusing_a_separate_protected_point_does_not_refresh_periodic_point_coverage(self):
+        self.create()
+        periodic = lifecycle.read_status(self.database, self.root)
+        self.change()
+        self.now += 86400
+        with patch.object(backup, 'datetime') as clock:
+            clock.now.return_value = datetime.fromtimestamp(self.now, timezone.utc)
+            protected = backup.create_backup(self.database, self.root, prefix='before-owned-change')
+        guard = guard_module.SnapshotGuard(self.database, self.root, interval=86400, max_age=86400,
+            wall=lambda: self.now, monotonic=lambda: 1000)
+        try:
+            guard.tick()
+            self.assertEqual(guard.record['backup'], protected['backup'])
+            self.assertTrue(guard.query()['fresh'])
+            status = guard.status()['lifecycle']
+            self.assertEqual(status['lastGeneratedAtMs'], periodic['lastGeneratedAtMs'])
+            self.assertEqual(status['lastVerifiedAtMs'], periodic['lastVerifiedAtMs'])
+            self.assertEqual(status['coverageAtMs'], periodic['coverageAtMs'])
+            self.assertEqual(status['verificationBasis'], 'creation-receipt')
+            self.assertNotIn('periodicLifecyclePoint', guard.status())
+            self.assertNotIn('backup', status)
+            self.assertEqual(len(self.copies()), 1)
+        finally:
+            guard.close()
+
     def test_capacity_does_not_override_pending_rotation_and_status_never_deletes(self):
         self.fill()
         module = load('space_status_fixture','backup-space-status.py')

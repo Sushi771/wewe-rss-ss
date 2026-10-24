@@ -42,6 +42,10 @@ Unknown times are null. Reading indexed metadata does not perform a fresh full
 integrity check. Verification time must never replace generation time or imply
 that intervening writes are covered. These display fields never authorize a
 write, lease, restore or deletion. No new public HTTP route is introduced.
+An owner's later verification updates periodic timestamps only when its backup
+path and hash match the indexed periodic point. Reusing another protected point
+does not refresh the older periodic point's verification or coverage. This
+private identity binding is excluded from public status.
 
 Capacity forecasting adds `capacityAllowsNextBackup`; `nextBackupAllowed` also
 accounts for lifecycle holds. Capacity estimates remain estimates under
@@ -81,8 +85,11 @@ require a separately authorized maintenance window.
   an isolated package from committed source using the regular builder and its
   bounded build-only scope, verifies the helper/runtime closure, generates one
   tiny synthetic recovery point, restores to a new path and starts the restored
-  application under the external-operation guard. Full table digests before and
-  after restore/start must agree. It never reads a production database/session.
+  application under the external-operation guard. All table digests must agree
+  immediately after restore. The fixture also contains one XHS cached body/image
+  and one running list checkpoint: after startup, every non-task table remains
+  identical and only the task's expected blocked/interrupted recovery fields may
+  change. It never reads a production database/session.
 
 Run the drill with `WEWE_OFFLINE_REBUILD=1` and Node's test runner. Artifacts are
 retained beneath ignored `output/release-repro/` for local inspection; they are

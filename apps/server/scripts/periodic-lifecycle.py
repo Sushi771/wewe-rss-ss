@@ -339,6 +339,15 @@ class Store:
                 'coverageAtMs': coverage, 'coverageBasis': 'copy-start' if coverage is not None else 'unknown',
                 'automaticDeletion': False}
 
+    def report(self, report):
+        points = self.state['normal'] + ([self.state['pending']] if self.state['pending'] else [])
+        latest = max(points, key=lambda p: p['at'], default=None)
+        return {**report, 'periodicLifecycleStatus': self.status(),
+                # Private owner binding, never part of the public status. A
+                # reusable protected point may differ from the indexed periodic
+                # point whose generation/verification times status describes.
+                'periodicLifecyclePoint': {'backup': latest['path'], 'sha256': latest['sha256']} if latest else None}
+
     def close(self):
         self.stack.close()
 
@@ -398,7 +407,7 @@ def create(backup, database, root, timeout, diagnostics, copy_timeout, now=None)
             # can be reused only after the independent complete existing proof.
             reused = backup.reusable(database, root, deadline, allow_periodic=True)
             if reused:
-                return {**reused, 'periodicLifecycleStatus': store.status()}
+                return store.report(reused)
             if s['pending'] or len(s['normal']) > 3:
                 fail('PENDING_CONFIRMATION')
             if now < s['lastGenerationEpoch'] + settings['interval']:
@@ -434,7 +443,7 @@ def create(backup, database, root, timeout, diagnostics, copy_timeout, now=None)
                 s['pending'] = p
                 s['status'] = 'pending-confirmation'
             store.save()
-            return {**report, 'diagnostics': diagnostics.report(), 'periodicLifecycleStatus': store.status()}
+            return store.report({**report, 'diagnostics': diagnostics.report()})
 
 
 def read_status(database, root):

@@ -138,6 +138,38 @@ test(
       '--migrations',
       path.join(release, 'server/prisma/migrations'),
     ]);
+    const interrupted = {
+      taskId: 'bd52a9f5-ea01-4a25-a1b5-16f7bb8146a7',
+      creatorId: 'synthetic-recovery-creator',
+      kind: 'list',
+      state: 'running',
+      total: 1,
+      completed: 1,
+      skipped: 0,
+      failed: 0,
+      remaining: 0,
+      message: 'synthetic interruption',
+      noteIds: [],
+      items: {},
+      cursor: 'synthetic-next-page',
+      cursorHistory: [null],
+      listedIds: [
+        JSON.stringify(['xiaohongshu', 'note', 'synthetic-recovery-note']),
+      ],
+      listFinished: false,
+    };
+    run(python, [
+      '-c',
+      `import sqlite3,sys,json
+c=sqlite3.connect(sys.argv[1]); t=json.loads(sys.argv[2])
+c.execute("INSERT INTO xhs_creators(id,profile_url,display_name,external_author_id) VALUES(?,?,?,?)",(t['creatorId'],'https://www.xiaohongshu.com/user/profile/synthetic-recovery-author','Synthetic recovery author','synthetic-recovery-author'))
+c.execute("INSERT INTO xhs_notes(id,creator_id,title,publish_time,status,content_html,kind) VALUES(?,?,?,?,?,?,?)",(t['listedIds'][0],t['creatorId'],'Synthetic body',1760000000,'complete',sys.argv[3],'image-text'))
+c.execute("INSERT INTO xhs_subscription_tasks VALUES(?,?,?,?,?)",(t['taskId'],t['creatorId'],t['state'],json.dumps(t,separators=(',',':')),1))
+c.commit(); c.close()`,
+      database,
+      JSON.stringify(interrupted),
+      '<p>Preserve this synthetic paragraph.</p><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=">',
+    ]);
     const backup = JSON.parse(
       run(python, [
         path.join(release, 'server/scripts/backup-sqlite.py'),
@@ -226,7 +258,29 @@ test(
       await closed;
       fs.closeSync(log);
     }
-    assert.deepEqual(summarize(restored), before);
+    const afterStart = summarize(restored);
+    assert.deepEqual(afterStart.integrity, before.integrity);
+    for (const [table, digest] of Object.entries(before.tables))
+      if (table !== 'xhs_subscription_tasks')
+        assert.deepEqual(afterStart.tables[table], digest, table);
+    const recoveredTask = JSON.parse(
+      run(python, [
+        '-c',
+        "import sqlite3,json,sys; c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True); rows=list(c.execute('SELECT id,creator_id,state,document FROM xhs_subscription_tasks')); assert len(rows)==1; r=rows[0]; print(json.dumps({'id':r[0],'creatorId':r[1],'state':r[2],'document':json.loads(r[3])}))",
+        restored,
+      ]),
+    );
+    assert.deepEqual(recoveredTask, {
+      id: interrupted.taskId,
+      creatorId: interrupted.creatorId,
+      state: 'blocked',
+      document: {
+        ...interrupted,
+        state: 'blocked',
+        code: 'XHS_TASK_INTERRUPTED',
+        message: '任务被中断，请重新选择剩余项目。',
+      },
+    });
     const blocked = JSON.parse(fs.readFileSync(guard, 'utf8'));
     assert.deepEqual(blocked, {
       installed: true,
@@ -241,6 +295,8 @@ test(
       helperCount: 14,
       recoveryPointsCreated: 1,
       restoredDigestMatches: true,
+      nonTaskTablesPreserved: true,
+      taskRecoveredAsBlocked: true,
       healthy,
       processStopped: true,
       externalGuard: blocked,

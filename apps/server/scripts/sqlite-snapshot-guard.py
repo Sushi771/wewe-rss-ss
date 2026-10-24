@@ -74,6 +74,7 @@ class SnapshotGuard:
         self.record = None
         self.failure = None
         self.lifecycle_status = None
+        self.lifecycle_point = None
         self.reason = "startup-backup-required"
         self.fatal = False
         self.leases = {}
@@ -172,6 +173,7 @@ class SnapshotGuard:
             report = self.backup(self.database, self.backup_root, prefix="periodic-snapshot",
                                  **({'periodic_now':start_wall} if self.backup is backup_module.create_backup else {}))
             self.lifecycle_status=report.get('periodicLifecycleStatus')
+            self.lifecycle_point=report.get('periodicLifecyclePoint')
             self.retention_lease_identity=report.get('retentionLeaseIdentity')
             stage='verify'
             completed_wall, completed_mono = self.clock()
@@ -244,7 +246,8 @@ class SnapshotGuard:
 
     def status(self):
         lifecycle = dict(self.lifecycle_status) if self.lifecycle_status else None
-        if lifecycle and self.record:
+        if (lifecycle and self.record and self.lifecycle_point ==
+                {'backup': self.record['backup'], 'sha256': self.record['sha256']}):
             lifecycle.update(lastVerifiedAtMs=self.record['lastVerifiedAtMs'],
                              verificationBasis='current-owner-hash',
                              coverageAtMs=self.record['coverageAtMs'],

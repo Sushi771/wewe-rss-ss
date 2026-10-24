@@ -21,6 +21,7 @@
 | `refresh` | `{id}` | `{taskId,creatorId}`，仅列表 |
 | `downloadNotes` | `{creatorId,noteIds,pickToken?}` | `{taskId,creatorId}`，选中详情与本机保存 |
 | `task` | `{taskId}` | 持久任务的公开状态快照 |
+| `recentTasks` | `{creatorId?,limit?}`，默认10、最大20 | `{items:XhsSubscriptionTask[]}`，返回活动或可恢复任务，排除已被后继接管及已完成任务 |
 | `cancelTask` | `{taskId}` | 返回任务快照，当前原子保存可能尚在收尾 |
 | `resumeTask` | `{taskId,pickToken?}` | 新 `{taskId,creatorId}`，复用旧检查点 |
 | `notes` | `{creatorId?,groupId?,search?,dateStart?,dateEnd?}` | 全部/分组/作者匹配元数据，无cursor/take服务端分页 |
@@ -52,11 +53,11 @@ URL校验允许HTTPS的 `www.xiaohongshu.com/user/profile/{id}`、`/explore/{id}
 
 重启将queued/running持久任务标记为 `blocked/XHS_TASK_INTERRUPTED`，不发网络；用户显式续跑。该机制针对单一本机后端，不提供多进程调度保证。
 
-### 任务一致性改进（待实现结果校准）
+### 任务一致性改进（隔离候选，未部署）
 
-页面找回必须从受保护的持久任务查询获得身份和状态，不依赖页面内存。最终接口由实现窗口与前端确认后补入共享契约；本版不预设新端点名称。
+受保护的 `recentTasks` 提供任务发现，活动任务优先，其后按更新时间和ID稳定排序；可按博主过滤。快照增加 `resumedFromTaskId` / `supersededByTaskId`。恢复创建后继与标记前驱在同一事务中完成；旧任务不能重复产生后继，也不能用迟到回执覆盖接管关系。前端页面接线与刷新交互仍待独立验收。
 
-基线 `run` 的finally先 `await persist(t)` 再释放pending/controller；终态persist抛错可能跳过释放。因此须用故障注入证明：执行器清理不依赖终态写入成功，同时持久状态未确认时不能误报成功或放行同一工作重放。核对必须区分“未写入”“已写入但应答丢失”“仍不确定”，保留原任务和错误码；具体状态、阻挡及恢复接口待实现回填。不得仅以删内存锁宣布修复。
+基线finally的终态persist抛错会跳过pending/controller释放，已用真实临时SQLite和原保存器重现。候选通过嵌套finally保证执行器释放；提交应答丢失时独立重读持久行，不能确认则保留本机回执屏障，返回 `XHS_TASK_RECEIPT_UNCERTAIN` 且 `resumable:false`，禁止重放。查询可进行本地核对，不调用来源；核对成功后可变为可恢复。错误码可能仍记录未知回执历史，界面须以最新 `resumable` 判断能否继续，不能仅按code锁死。业务错误保留安全错误码。
 
 ## 原始证据与独立核对
 
