@@ -499,6 +499,116 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       result.completed + result.skipped + result.failed + result.remaining,
     ).toBe(result.total);
   });
+  it('finds a committed successor after a lost resume response and rejects a stale parent writer', async () => {
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: 'foreign',
+      notes: [],
+      nextCursor: null,
+    });
+    const parent = await service.refresh({ id: creatorId });
+    await settled(parent.taskId);
+    const staleParent = await (service as any).loadTask(parent.taskId);
+    let release!: () => void;
+    (source.list as jest.Mock).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ authorId: author.id, notes: [], nextCursor: null });
+        }),
+    );
+    // The caller loses this response; discovery must use SQLite, not its ID.
+    const submitted = await service.resumeTask(parent);
+    for (let i = 0; i < 1000 && !release; i++)
+      await new Promise((r) => setTimeout(r, 5));
+    expect(release).toBeDefined();
+    const observer = new PrismaClient({
+      datasources: {
+        db: {
+          url:
+            'file:' + path.join(root, 'synthetic.sqlite').replace(/\\/g, '/'),
+        },
+      },
+    });
+    try {
+      const rows = await observer.$queryRaw<
+        Array<{ id: string; document: string }>
+      >`SELECT id, document FROM xhs_subscription_tasks ORDER BY id`;
+      expect(rows).toHaveLength(2);
+      const persistedParent = JSON.parse(
+        rows.find((row) => row.id === parent.taskId)!.document,
+      );
+      const persistedChild = JSON.parse(
+        rows.find((row) => row.id !== parent.taskId)!.document,
+      );
+      expect(persistedParent.supersededByTaskId).toBe(persistedChild.taskId);
+      expect(persistedChild.resumedFromTaskId).toBe(parent.taskId);
+      const reloaded = new XhsSubscriptionService(observer as any, source);
+      expect(await reloaded.recentTasks({ creatorId, limit: 1 })).toMatchObject(
+        {
+          items: [{ taskId: persistedChild.taskId, state: 'running' }],
+        },
+      );
+      await expect((service as any).persist(staleParent)).rejects.toThrow(
+        'XHS_TASK_SUPERSEDED',
+      );
+      await expect(service.resumeTask(parent)).rejects.toThrow(
+        'XHS_TASK_SUPERSEDED',
+      );
+      expect((await service.task(parent)).supersededByTaskId).toBe(
+        submitted.taskId,
+      );
+    } finally {
+      release?.();
+      await finish(submitted.taskId);
+      await observer.$disconnect();
+    }
+    expect((await service.recentTasks({ creatorId })).items).toEqual([]);
+    expect(source.list).toHaveBeenCalledTimes(2);
+  });
+  it('discovers an unacknowledged initial task without its ID and reconciles without restarting or dispatching', async () => {
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: 'foreign',
+      notes: [],
+      nextCursor: null,
+    });
+    const older = await service.refresh({ id: creatorId });
+    await settled(older.taskId);
+    const requests = (source.list as jest.Mock).mock.calls.length;
+    const fault = jest
+      .spyOn(service as any, 'persistIn')
+      .mockRejectedValue(Error('synthetic receipt write failure'));
+    await expect(service.refresh({ id: creatorId })).rejects.toThrow(
+      'XHS_TASK_RECEIPT_UNCERTAIN',
+    );
+    expect((service as any).pending.size).toBe(0);
+    const unknown = (await service.recentTasks({ creatorId, limit: 1 }))
+      .items[0];
+    expect(unknown.taskId).not.toBe(older.taskId);
+    expect(unknown).toMatchObject({
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      resumable: false,
+    });
+    expect(
+      await db.$queryRaw<
+        Array<{ count: bigint }>
+      >`SELECT COUNT(*) AS count FROM xhs_subscription_tasks WHERE id=${unknown.taskId}`,
+    ).toEqual([{ count: 0n }]);
+    fault.mockRestore();
+    const reconciled = (await service.recentTasks({ creatorId, limit: 1 }))
+      .items[0];
+    expect(reconciled).toMatchObject({
+      taskId: unknown.taskId,
+      state: 'blocked',
+      resumable: true,
+    });
+    const rows = await db.$queryRaw<
+      Array<{ state: string; document: string }>
+    >`SELECT state, document FROM xhs_subscription_tasks WHERE id=${unknown.taskId}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe('blocked');
+    expect(JSON.parse(rows[0].document).taskId).toBe(unknown.taskId);
+    expect(source.list).toHaveBeenCalledTimes(requests);
+  });
   it('updates metadata only, then separately downloads actual body/image bytes and skips duplicates', async () => {
     expect(
       await finish((await service.refresh({ id: creatorId })).taskId),
