@@ -616,7 +616,10 @@ function build(options = {}) {
           ),
         );
       } else {
-        const isolatedConfig = path.join(workspace, 'vite.config.mts');
+        // require.resolve selects the installed React plugin's CJS entry. Keep
+        // this generated config CJS too; bundling that entry into an ESM config
+        // otherwise turns its native node:path require into a runtime failure.
+        const isolatedConfig = path.join(workspace, 'vite.config.cts');
         if (options.buildOnly) {
           let config = fs.readFileSync(
             path.join(web, 'vite.config.ts'),
