@@ -120,6 +120,7 @@ async function inspectSaved(markdownPath: string) {
         execFileSync(
           process.env.XHS_TEST_PYTHON || 'python',
           [
+            '-B',
             path.join(__dirname, 'test-support/decode-integrity-image.py'),
             file,
           ],
@@ -127,6 +128,7 @@ async function inspectSaved(markdownPath: string) {
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'pipe'],
             timeout: 10000,
+            windowsHide: true,
           },
         ),
       );
@@ -162,6 +164,9 @@ describe('independent synthetic body/image oracle against the original local sav
   });
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(tmpdir(), 'xhs-integrity-oracle-'));
+  });
+  afterEach(async () => {
+    if (root) await fs.rm(root, { recursive: true, force: true });
   });
   async function archive(contentHtml = html) {
     const row = {

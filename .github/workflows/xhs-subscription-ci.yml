@@ -2,7 +2,7 @@ name: XHS subscription offline
 
 on:
   push:
-    branches: [codex/xhs-subscription-integration]
+    branches: [codex/xhs-subscription-integration, codex/xhs-depth-integration]
   pull_request:
     branches: [fix/desktop-docker-cold-start]
 
@@ -19,11 +19,20 @@ jobs:
     timeout-minutes: 20
     env:
       XHS_SUBSCRIPTION_LIVE_ENABLED: '0'
+      XHS_TEST_PYTHON: python
+      PYTHONDONTWRITEBYTECODE: '1'
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install independent synthetic image decoder (test only)
+        run: >-
+          python -m pip install --disable-pip-version-check --only-binary=:all:
+          --index-url https://pypi.org/simple 'Pillow==12.1.1'
       - uses: pnpm/action-setup@v3
         with:
           version: 9
