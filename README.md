@@ -11,7 +11,7 @@
 
 ## 小红书订阅功能开发（2026-10-24）
 
-小红书已实现“链接识别作者 → 确认订阅 → 仅更新列表 → 选中图文下载到本机”，复用公众号共享控件、分组和日期筛选，支持跨批选择、持久检查点、取消续跑及每100篇分包ZIP。当前后台122项、前端44项合成回归及205篇三批ZIP浏览器验证通过；搜索与全量查询等准确边界见[产品说明](docs/xiaohongshu/PRODUCT.md)、[交互设计](docs/xiaohongshu/DESIGN.md)、[技术接口](docs/xiaohongshu/TECHNICAL.md)、[开发交接](docs/xiaohongshu/DEVELOPMENT.md)和[验收记录](docs/xiaohongshu/ACCEPTANCE.md)。真实来源接线仍在开发，真实主页及账号小批验收待授权，未部署生产。
+小红书已实现链接识别、确认订阅、列表更新、选中图文保存及取消续跑，复用公众号共享控件、分组、日期及正文阅读器，支持全部/分组/作者搜索和分批ZIP。后台271项、前端及公众号关联50项合成回归、两端类型检查、定向lint与前端构建通过。原生来源、DPAPI及安全媒体已接线，真实访问默认关闭；主页解析器及正式会话/账号小批验收待核实和授权。详见[产品说明](docs/xiaohongshu/PRODUCT.md)、[交互设计](docs/xiaohongshu/DESIGN.md)、[技术接口](docs/xiaohongshu/TECHNICAL.md)、[开发交接](docs/xiaohongshu/DEVELOPMENT.md)和[验收记录](docs/xiaohongshu/ACCEPTANCE.md)。未部署生产。
 
 ## 本机 Wechat2RSS 配置准备（2026-10-09）
 

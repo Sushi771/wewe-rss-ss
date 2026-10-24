@@ -1,0 +1,46 @@
+name: XHS subscription offline
+
+on:
+  push:
+    branches: [codex/xhs-subscription-integration]
+  pull_request:
+    branches: [fix/desktop-docker-cold-start]
+
+permissions:
+  contents: read
+
+jobs:
+  focused-offline:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      XHS_SUBSCRIPTION_LIVE_ENABLED: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.11.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Synthetic source, session, storage and shared grouping regressions
+        run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu)|trpc/(xiaohongshu-ui|management-groups)|article-local-save|xhs-single-download|xhs-video-download)'
+      - name: Shared UI and WeChat regressions
+        run: node --test scripts/xhs-subscription-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs
+      - name: Types
+        run: |
+          pnpm --filter server exec tsc --noEmit
+          pnpm --filter web exec tsc --noEmit
+      - name: Focused web lint and build
+        run: |
+          pnpm --filter web exec eslint src/pages/feeds/xiaohongshu.tsx src/components/SubscriptionPrimitives.tsx src/pages/feeds/index.tsx src/pages/feeds/list.tsx src/pages/feeds/manual-refresh-progress.tsx src/provider/trpc.tsx src/utils/xiaohongshu-subscription.ts
+          pnpm --filter web build
