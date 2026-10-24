@@ -10,13 +10,30 @@ import {
   Spinner,
   Switch,
 } from '@nextui-org/react';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import dayjs from 'dayjs';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ArticleDateFilter from '@web/components/ArticleDateFilter';
+import type { ArticleDateSelection } from '@web/utils/article-date-selection';
+import { dateSelectionFilter } from '@web/utils/article-date-selection';
+import {
+  articleFilterSchema,
+  formatShanghaiPublicationTime,
+} from '@wewe-rss/shared';
 import ManagementFolders from '@web/components/ManagementFolders';
 import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
-import { refreshCreatorBatch } from '@web/utils/xiaohongshu-refresh';
+import {
+  selectedImageNotes,
+  taskFinished,
+  taskText,
+  watchSubscriptionTask,
+} from '@web/utils/xiaohongshu-subscription';
+import type {
+  SubscriptionClient,
+  SubscriptionResolution,
+  SubscriptionTask,
+  TaskReceipt,
+} from '@web/utils/xiaohongshu-subscription';
 import { failureMessage } from '@web/utils/operation-message';
 
 type SaveSettings = { directory: string; askEveryTime: boolean };
@@ -62,7 +79,23 @@ export default function Xiaohongshu() {
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
   const [noteId, setNoteId] = useState('');
-  const [displayName, setDisplayName] = useState('');
+  const [resolution, setResolution] = useState<SubscriptionResolution | null>(
+    null,
+  );
+  const [subscriptionGroup, setSubscriptionGroup] = useState('');
+  const [taskId, setTaskId] = useState('');
+  const [task, setTask] = useState<SubscriptionTask | null>(null);
+  const [progressOpen, setProgressOpen] = useState(true);
+  const [cancelling, setCancelling] = useState(false);
+  const taskRunning = useRef(false);
+  const queuedCreators = useRef<string[]>([]);
+  const cancelPending = useRef(false);
+  const subscriptionApi = useMemo(
+    () =>
+      (utils.client as unknown as { xiaohongshu: SubscriptionClient })
+        .xiaohongshu,
+    [utils.client],
+  );
   const [profileUrl, setProfileUrl] = useState('');
   const [message, setMessage] = useState('');
   const [operationError, setOperationError] = useState('');
@@ -74,11 +107,42 @@ export default function Xiaohongshu() {
   const [selectedCreators, setSelectedCreators] = useState<string[]>([]);
   const [search, setSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
+  const [dateSelection, setDateSelection] = useState<ArticleDateSelection>({
+    mode: 'range',
+    start: '',
+    end: '',
+  });
+  const parsedDates = useMemo(
+    () => articleFilterSchema.safeParse(dateSelectionFilter(dateSelection)),
+    [dateSelection],
+  );
+  const dateError = parsedDates.success
+    ? undefined
+    : parsedDates.error.issues[0]?.message;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [saveSettings, setSaveSettings] = useState<SaveSettings | null>(null);
   const [directory, setDirectory] = useState('');
   const active = useRef(false);
-  const receipts = useRef<Record<string, string>>({});
+
+  const startTask = useCallback(
+    (receipt: TaskReceipt, kind: 'list' | 'download', total = 0) => {
+      if (!receipt.taskId)
+        throw new Error('未收到任务编号，请重新读取页面确认操作结果。');
+      taskRunning.current = true;
+      setTask({
+        kind,
+        state: 'queued',
+        total,
+        completed: 0,
+        skipped: 0,
+        failed: 0,
+        remaining: total,
+      });
+      setProgressOpen(true);
+      setTaskId(receipt.taskId);
+    },
+    [],
+  );
   useEffect(() => {
     let current = true;
     void localApi<SaveSettings>('/settings')
@@ -89,8 +153,7 @@ export default function Xiaohongshu() {
         }
       })
       .catch(() => {
-        if (current)
-          setMessage('本机保存设置读取失败，可重新读取；ZIP 导出仍可用。');
+        if (current) setMessage('本机保存设置读取失败，请重新读取后保存。');
       });
     return () => {
       current = false;
@@ -107,29 +170,24 @@ export default function Xiaohongshu() {
           ? !creator.groupId
           : creator.groupId === folderFilter),
     ) || [];
-  const notes = trpc.xiaohongshu.notes.useQuery(
-    { creatorId },
-    { enabled: !!current, retry: false },
-  );
+  const notesInput = {
+    creatorId,
+    search: search.trim() || undefined,
+    ...dateSelectionFilter(dateSelection),
+  };
+  const notes = trpc.xiaohongshu.notes.useQuery(notesInput, {
+    enabled: !!current && !dateError,
+    retry: false,
+  });
   const body = trpc.xiaohongshu.body.useQuery(
     { creatorId, noteId },
     { enabled: !!current && !!noteId, retry: false },
   );
-  const visibleNotes = useMemo(
-    () =>
-      (notes.data?.items || []).filter((note) =>
-        note.title
-          .toLocaleLowerCase()
-          .includes(search.trim().toLocaleLowerCase()),
-      ),
-    [notes.data, search],
-  );
+  const visibleNotes = dateError ? [] : notes.data?.items || [];
   const selectableNotes = visibleNotes.filter(
-    (note) => note.status === 'complete',
+    (note) => note.kind === 'image-text',
   );
-  const selectedNotes = visibleNotes.filter(
-    (note) => note.status === 'complete' && selectedIds.has(note.id),
-  );
+  const selectedNotes = selectedImageNotes(visibleNotes, selectedIds);
   const noteStatus = (note: {
     status: string;
     kind: 'image-text' | 'video';
@@ -144,14 +202,79 @@ export default function Xiaohongshu() {
   const allSelected =
     selectableNotes.length > 0 &&
     selectableNotes.every((note) => selectedIds.has(note.id));
-  const add = trpc.xiaohongshu.add.useMutation();
   const edit = trpc.xiaohongshu.edit.useMutation();
   const remove = trpc.xiaohongshu.remove.useMutation();
-  const refresh = trpc.xiaohongshu.refresh.useMutation();
   const exportNotes = trpc.xiaohongshu.export.useMutation();
   const saveGroup = trpc.xiaohongshu.saveGroup.useMutation({ retry: false });
   const removeGroup = trpc.xiaohongshu.removeGroup.useMutation();
   const moveCreators = trpc.xiaohongshu.moveCreators.useMutation();
+  useEffect(() => {
+    if (!taskId) return;
+    const controller = new AbortController();
+    void watchSubscriptionTask({
+      taskId,
+      query: (input) => subscriptionApi.task.query(input),
+      signal: controller.signal,
+      onTask: (next) => {
+        setTask(next);
+        setOperationError('');
+        if (taskFinished(next)) {
+          const nextCreator =
+            next.state === 'completed'
+              ? queuedCreators.current.shift()
+              : undefined;
+          if (nextCreator) {
+            void subscriptionApi.refresh
+              .mutate({ id: nextCreator })
+              .then((receipt) => startTask(receipt, 'list'))
+              .catch((cause) => {
+                queuedCreators.current = [];
+                taskRunning.current = false;
+                active.current = false;
+                setBusy(false);
+                setOperationError(
+                  failureMessage(cause, '下一位博主列表更新未开始。'),
+                );
+              });
+            void utils.xiaohongshu.list.invalidate();
+            void utils.xiaohongshu.notes.invalidate();
+            return;
+          }
+          queuedCreators.current = [];
+          taskRunning.current = false;
+          active.current = false;
+          cancelPending.current = false;
+          setCancelling(false);
+          setBusy(false);
+          setMessage(taskText(next));
+          setSelectedIds(new Set());
+          void utils.xiaohongshu.list.invalidate();
+          void utils.xiaohongshu.notes.invalidate();
+        }
+      },
+      onError: () =>
+        setOperationError(
+          '进度暂时无法读取，正在重新连接。请勿重复开始；可尝试取消任务。',
+        ),
+    });
+    return () => controller.abort();
+  }, [taskId, subscriptionApi, utils, startTask]);
+  const handleCancelTask = async () => {
+    if (!taskId || !taskRunning.current || cancelPending.current) return;
+    cancelPending.current = true;
+    queuedCreators.current = [];
+    setCancelling(true);
+    try {
+      await subscriptionApi.cancelTask.mutate({ taskId });
+      if (taskRunning.current)
+        setMessage('已请求取消，正在确认已完成和剩余笔记。');
+    } catch (cause) {
+      cancelPending.current = false;
+      setCancelling(false);
+      if (taskRunning.current)
+        setOperationError(failureMessage(cause, '取消未确认，请重试取消。'));
+    }
+  };
   useEffect(() => {
     if (
       !active.current &&
@@ -172,14 +295,17 @@ export default function Xiaohongshu() {
     try {
       await operation();
     } catch (cause) {
+      if (!taskRunning.current) queuedCreators.current = [];
       setMessage(
         failureMessage(cause, '操作未完成，请检查服务设置或本机保存目录。') +
           '已有归档保留。',
       );
       setOperationError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      active.current = false;
-      setBusy(false);
+      if (!taskRunning.current) {
+        active.current = false;
+        setBusy(false);
+      }
     }
   };
   const selectCreator = (id: string) => {
@@ -187,8 +313,9 @@ export default function Xiaohongshu() {
     setCreatorId(id);
     setNoteId('');
     setSearch('');
+    setDateSelection({ mode: 'range', start: '', end: '' });
     setSelectedIds(new Set());
-    setMessage(receipts.current[id] || '');
+    setMessage('');
     setMobileSidebarOpen(false);
   };
   const handleSearch = (value: string) => {
@@ -206,54 +333,67 @@ export default function Xiaohongshu() {
     });
   };
   const updateCreator = async (id: string) => {
-    const result = await refresh.mutateAsync({ id });
-    const name =
-      creators.data?.items.find((creator) => creator.id === id)?.displayName ||
-      '已选博主';
-    receipts.current[id] =
-      name + '：' + result.message + ' 新增已完整保存的笔记：' + result.added;
-    await Promise.all([
-      utils.xiaohongshu.list.invalidate(),
-      utils.xiaohongshu.notes.invalidate(),
-    ]);
-    setMessage(receipts.current[id]);
-    return result.status;
+    setSelectedIds(new Set());
+    startTask(await subscriptionApi.refresh.mutate({ id }), 'list');
   };
+  const handleRefreshAll = () =>
+    run(async () => {
+      const ids = (creators.data?.items || [])
+        .filter((creator) => creator.enabled)
+        .map((creator) => creator.id);
+      if (!ids.length) return;
+      queuedCreators.current = ids.slice(1);
+      await updateCreator(ids[0]);
+    });
+  const handleResolve = () =>
+    run(async () => {
+      setResolution(null);
+      const result = await subscriptionApi.resolveSubscription.mutate({
+        url: profileUrl.trim(),
+      });
+      setResolution(result);
+    });
   const handleAdd = () =>
     run(async () => {
-      const result = await add.mutateAsync({ displayName, profileUrl });
-      setMessage(result.message);
+      if (!resolution) return;
+      if (new Date(resolution.expiresAt).getTime() <= Date.now()) {
+        setResolution(null);
+        throw new Error('作者确认已过期，请重新识别链接。');
+      }
+      const result = await subscriptionApi.subscribe.mutate({
+        resolutionId: resolution.resolutionId,
+        ...(subscriptionGroup && !resolution.existingCreatorId
+          ? { groupId: subscriptionGroup }
+          : {}),
+      });
+      if (result.subscribed !== true)
+        throw new Error('订阅尚未确认，请重新读取博主列表。');
+      setMessage(
+        result.created
+          ? '订阅成功，可更新笔记列表后选择图文保存。'
+          : '已订阅此博主，可更新笔记列表。',
+      );
       await utils.xiaohongshu.list.invalidate();
-      setCreatorId(result.creator.id);
+      setCreatorId(result.creatorId);
       setNoteId('');
       setSelectedIds(new Set());
       setFolderFilter('all');
-      setDisplayName('');
       setProfileUrl('');
+      setResolution(null);
       setAdding(false);
-    });
-  const handleRefreshAll = () =>
-    run(async () => {
-      if (!capability.data?.canRefresh) return;
-      const items = creators.data?.items || [];
-      const enabled = items.filter((creator) => creator.enabled);
-      const result = await refreshCreatorBatch(
-        enabled.map((creator) => creator.id),
-        updateCreator,
-      );
-      const detail = result.failedId
-        ? result.error || receipts.current[result.failedId] || '更新未完成。'
-        : '';
-      setMessage(
-        `批量更新：完成 ${result.completed} 位，未完成 ${result.failedId ? 1 : 0} 位，未执行 ${result.remaining} 位；已停用跳过 ${items.length - enabled.length} 位。${detail}`,
-      );
     });
   const handleDownload = () =>
     run(async () => {
       if (!current || !selectedNotes.length) return;
+      const archived = selectedNotes.filter(
+        (note) => note.status === 'complete',
+      );
+      if (!archived.length) return;
+      if (archived.length > 100)
+        throw new Error('每次最多导出 100 篇，请减少选择后再试。');
       const result = await exportNotes.mutateAsync({
         creatorId: current.id,
-        noteIds: selectedNotes.map((note) => note.id),
+        noteIds: archived.map((note) => note.id),
       });
       const bytes = Uint8Array.from(atob(result.base64), (char) =>
         char.charCodeAt(0),
@@ -278,6 +418,8 @@ export default function Xiaohongshu() {
   const handleLocalSave = () =>
     run(async () => {
       if (!current || !saveSettings || !selectedNotes.length) return;
+      if (selectedNotes.length > 100)
+        throw new Error('每次最多保存 100 篇，请减少选择后再试。');
       let pickToken: string | undefined;
       if (saveSettings.askEveryTime) {
         const chosen = await localApi<DirectoryChoice>('/directory', {});
@@ -292,44 +434,12 @@ export default function Xiaohongshu() {
         });
         setDirectory(chosen.directory);
       }
-      const result = await localApi<{
-        saved: boolean;
-        savedCount: number;
-        alreadySavedCount: number;
-        videoCount?: number;
-        videoDecoded?: boolean;
-        videoVerification?: string;
-      }>('/xiaohongshu/save', {
+      const receipt = await subscriptionApi.downloadNotes.mutate({
         creatorId: current.id,
         noteIds: selectedNotes.map((note) => note.id),
         ...(pickToken ? { pickToken } : {}),
       });
-      if (
-        result.saved !== true ||
-        !Number.isInteger(result.savedCount) ||
-        result.savedCount < 0 ||
-        !Number.isInteger(result.alreadySavedCount) ||
-        result.alreadySavedCount < 0 ||
-        result.savedCount + result.alreadySavedCount !== selectedNotes.length
-      )
-        throw new Error('本机保存数量未确认，请核对已保存内容。');
-      const videoCount =
-        result.videoCount === undefined ? 0 : result.videoCount;
-      const selectedVideoCount = selectedNotes.filter(
-        (note) => note.kind === 'video',
-      ).length;
-      if (
-        !Number.isInteger(videoCount) ||
-        videoCount < 0 ||
-        videoCount !== selectedVideoCount ||
-        (videoCount > 0 &&
-          (result.videoDecoded !== false ||
-            result.videoVerification !== 'container-and-bytes'))
-      )
-        throw new Error('本机视频保存数量或核验状态未确认，请核对已保存内容。');
-      setMessage(
-        `${current.displayName}：本次新增保存 ${result.savedCount} 篇，已有保存 ${result.alreadySavedCount} 篇；每篇正文和图片保存在各自的文件夹。${videoCount > 0 ? `其中 ${videoCount} 篇包含视频文件；请在本机确认能否播放。` : '本批次不含已归档视频。'}`,
-      );
+      startTask(receipt, 'download', selectedNotes.length);
     });
   const handleChooseDirectory = () =>
     run(async () => {
@@ -423,9 +533,18 @@ export default function Xiaohongshu() {
               size="sm"
               variant="light"
               isDisabled={busy}
-              onPress={() => setAdding(true)}
+              onPress={() => {
+                setResolution(null);
+                setProfileUrl('');
+                setSubscriptionGroup(
+                  folderFilter !== 'all' && folderFilter !== 'ungrouped'
+                    ? folderFilter
+                    : '',
+                );
+                setAdding(true);
+              }}
             >
-              添加
+              订阅
             </Button>
           </div>
         </div>
@@ -597,7 +716,7 @@ export default function Xiaohongshu() {
                 })
               }
             >
-              刷新此博主
+              更新笔记列表
             </Button>
             <Button
               size="sm"
@@ -609,24 +728,32 @@ export default function Xiaohongshu() {
               }
               onPress={handleRefreshAll}
             >
-              刷新全部
+              更新全部列表
             </Button>
             <Button
               size="sm"
               color="primary"
               variant="flat"
-              isDisabled={busy || !saveSettings || !selectedNotes.length}
+              isDisabled={
+                busy ||
+                !saveSettings ||
+                !selectedNotes.length ||
+                selectedNotes.length > 100
+              }
               onPress={handleLocalSave}
             >
-              保存到本机 ({selectedNotes.length})
+              下载图文到本地 ({selectedNotes.length})
             </Button>
             <Button
               size="sm"
               variant="light"
-              isDisabled={busy || !selectedNotes.length}
+              isDisabled={
+                busy ||
+                !selectedNotes.some((note) => note.status === 'complete')
+              }
               onPress={handleDownload}
             >
-              导出 ZIP（可选）
+              导出已保存 ZIP
             </Button>
             <Button
               size="sm"
@@ -676,12 +803,43 @@ export default function Xiaohongshu() {
             </details>
           )}
           <p className="text-xs text-neutral-500">
-            添加博主后需连接可用来源才能更新。已保存视频仍需确认能否播放；未取得的视频会标为“视频未归档”。
+            订阅后先更新笔记列表，再勾选图文下载正文与图片。已保存的图文会自动去重。
           </p>
           {message && (
             <p role="status" className="break-words">
               {message}
             </p>
+          )}
+          {task && (
+            <div className="rounded-lg border p-3" aria-label="笔记任务进度">
+              <div className="flex flex-wrap items-center gap-2">
+                <span>
+                  {task.kind === 'list' ? '更新笔记列表' : '下载并保存图文'}
+                </span>
+                <Button
+                  size="sm"
+                  variant="light"
+                  onPress={() => setProgressOpen(!progressOpen)}
+                >
+                  {progressOpen ? '收起进度' : '展开进度'}
+                </Button>
+                {!taskFinished(task) && (
+                  <Button
+                    size="sm"
+                    variant="flat"
+                    isDisabled={cancelling}
+                    onPress={handleCancelTask}
+                  >
+                    {cancelling ? '正在取消' : '取消任务'}
+                  </Button>
+                )}
+              </div>
+              {progressOpen && (
+                <p role="status" className="mt-2 break-words">
+                  {taskText(task)}
+                </p>
+              )}
+            </div>
           )}
           {operationError && (
             <details>
@@ -735,17 +893,27 @@ export default function Xiaohongshu() {
               )}
             </div>
             <p className="mt-2 text-xs text-neutral-500">
-              选中笔记逐篇保存正文、image 图片（有图时）及 video
-              文件（有视频时），ZIP
-              可单独导出。文件夹只管理订阅，不改变保存目录。
+              选中图文逐篇保存正文与图片，ZIP
+              可单独导出已保存的内容。文件夹只管理订阅，不改变保存目录。
             </p>
           </details>
         </div>
+        <fieldset disabled={busy} className="disabled:opacity-60">
+          <ArticleDateFilter
+            value={dateSelection}
+            error={dateError}
+            onChange={(value) => {
+              if (active.current) return;
+              setDateSelection(value);
+              setSelectedIds(new Set());
+            }}
+          />
+        </fieldset>
         {searchOpen && (
           <div className="px-4 py-2">
             <Input
-              aria-label="搜索笔记标题"
-              placeholder="搜索笔记标题…"
+              aria-label="搜索笔记标题或正文"
+              placeholder="搜索标题或已保存正文…"
               value={search}
               onValueChange={handleSearch}
               isDisabled={busy}
@@ -756,6 +924,9 @@ export default function Xiaohongshu() {
           当前{search ? '筛选' : '博主'} {visibleNotes.length} 篇；已选择{' '}
           {selectedNotes.length} 篇已完整保存的笔记。
           {search && '修改搜索会清空选择。'}
+          {selectedNotes.length > 100 && (
+            <span role="alert">每次最多保存或导出 100 篇，请减少选择。</span>
+          )}
         </div>
         {notes.error && (
           <p role="alert" className="px-4 py-2 text-sm">
@@ -768,7 +939,7 @@ export default function Xiaohongshu() {
               <div className="compact-col-check">
                 <Checkbox
                   size="sm"
-                  aria-label="选择筛选结果全部完整笔记"
+                  aria-label="选择筛选后全部图文笔记"
                   isDisabled={busy || !selectableNotes.length}
                   isSelected={allSelected}
                   isIndeterminate={!allSelected && selectedNotes.length > 0}
@@ -794,7 +965,7 @@ export default function Xiaohongshu() {
                   <Checkbox
                     size="sm"
                     aria-label={`选择笔记 ${note.title}`}
-                    isDisabled={busy || note.status !== 'complete'}
+                    isDisabled={busy || note.kind !== 'image-text'}
                     isSelected={selectedIds.has(note.id)}
                     onValueChange={(value) => selectNote(note.id, value)}
                   />
@@ -810,13 +981,7 @@ export default function Xiaohongshu() {
                   {note.title}
                 </button>
                 <div className="col-start-2 flex min-w-0 shrink-0 flex-col items-start gap-1 py-1 text-xs text-neutral-500 md:ml-auto md:items-end">
-                  <span>
-                    {note.publishTime > 0
-                      ? dayjs(note.publishTime * 1000).format(
-                          'YYYY-MM-DD HH:mm',
-                        )
-                      : '发布时间未知'}
-                  </span>
+                  <span>{formatShanghaiPublicationTime(note.publishTime)}</span>
                   <span className="whitespace-normal text-left md:max-w-[150px] md:text-right">
                     {noteStatus(note)}
                   </span>
@@ -834,7 +999,7 @@ export default function Xiaohongshu() {
                   ? '选择一个博主查看笔记。'
                   : search
                     ? '没有匹配的笔记。'
-                    : '暂无已归档笔记，接入真实数据源后才能更新。'}
+                    : '暂无笔记，请更新笔记列表后选择图文保存。'}
               </p>
             )}
           </div>
@@ -847,42 +1012,83 @@ export default function Xiaohongshu() {
         }}
       >
         <ModalContent>
-          <ModalHeader>添加小红书博主</ModalHeader>
+          <ModalHeader>订阅小红书博主</ModalHeader>
           <ModalBody>
             <p className="text-sm text-neutral-500">
-              保存公开主页待接入记录，不会自动登录或读取笔记。
+              粘贴笔记链接或博主主页链接，确认作者后订阅。
             </p>
             <Input
-              label="博主备注名称"
-              value={displayName}
-              onValueChange={setDisplayName}
-              isDisabled={busy}
-              maxLength={120}
-            />
-            <Input
-              label="小红书公开主页链接"
+              label="笔记或博主主页链接"
               value={profileUrl}
-              onValueChange={setProfileUrl}
+              onValueChange={(value) => {
+                setProfileUrl(value);
+                setResolution(null);
+              }}
               isDisabled={busy}
               maxLength={2000}
             />
+            {resolution && (
+              <div
+                className="space-y-2 rounded-lg border p-3"
+                aria-label="确认订阅作者"
+              >
+                <p>
+                  {resolution.inputKind === 'note' ? '笔记作者' : '博主'}：
+                  {resolution.author.name}
+                </p>
+                <p className="break-all text-xs text-neutral-500">
+                  {resolution.author.profileUrl}
+                </p>
+                {resolution.existingCreatorId && (
+                  <p>已订阅此博主，确认后可查看笔记。</p>
+                )}
+                <label className="block text-sm">
+                  订阅文件夹
+                  <select
+                    className="mt-1 w-full rounded border bg-transparent p-2"
+                    aria-label="订阅文件夹"
+                    value={subscriptionGroup}
+                    disabled={busy || !!resolution.existingCreatorId}
+                    onChange={(event) =>
+                      setSubscriptionGroup(event.target.value)
+                    }
+                  >
+                    <option value="">未分组</option>
+                    {groups.data?.items.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
             {message && <p role="status">{message}</p>}
           </ModalBody>
           <ModalFooter>
             <Button
               variant="flat"
               isDisabled={busy}
-              onPress={() => setAdding(false)}
+              onPress={() => {
+                setAdding(false);
+                setResolution(null);
+              }}
             >
               取消
             </Button>
-            <Button
-              color="primary"
-              isDisabled={busy || !displayName.trim() || !profileUrl.trim()}
-              onPress={handleAdd}
-            >
-              保存待接入博主
-            </Button>
+            {resolution ? (
+              <Button color="primary" isDisabled={busy} onPress={handleAdd}>
+                {resolution.existingCreatorId ? '查看已订阅博主' : '确认订阅'}
+              </Button>
+            ) : (
+              <Button
+                color="primary"
+                isDisabled={busy || !profileUrl.trim()}
+                onPress={handleResolve}
+              >
+                识别作者
+              </Button>
+            )}
           </ModalFooter>
         </ModalContent>
       </Modal>
