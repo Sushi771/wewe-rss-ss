@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { load } from 'cheerio';
+import { articlePublicationRange, XhsNoteFilter } from '@wewe-rss/shared';
 import { decodeInlineImage } from './image-fetch';
 import {
   buildCompleteArticleDownload,
@@ -497,10 +498,21 @@ export class XiaohongshuService {
     if (!c) return fail('找不到该博主。', 'NOT_FOUND');
     return c;
   }
-  async notes(creatorId: string) {
+  async notes(creatorId: string, filter?: XhsNoteFilter) {
     await this.getCreator(creatorId);
     const notes = await this.prisma.xhsNote.findMany({
-      where: { creatorId },
+      where: {
+        creatorId,
+        ...(filter?.search
+          ? {
+              OR: [
+                { title: { contains: filter.search } },
+                { contentHtml: { contains: filter.search } },
+              ],
+            }
+          : {}),
+        ...(filter ? { publishTime: articlePublicationRange(filter) } : {}),
+      },
       orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
       select: cachedNoteMetadataSelect,
     });
@@ -736,7 +748,7 @@ export class XiaohongshuService {
       video: cachedVideoMetadata(note),
     };
   }
-  async export(creatorId: string, noteIds?: string[]) {
+  async export(creatorId: string, noteIds?: string[], filter?: XhsNoteFilter) {
     await this.getCreator(creatorId);
     const selected =
       noteIds === undefined ? undefined : managementMemberIds(noteIds, 300);
@@ -744,6 +756,15 @@ export class XiaohongshuService {
       where: {
         creatorId,
         status: 'complete',
+        ...(filter?.search
+          ? {
+              OR: [
+                { title: { contains: filter.search } },
+                { contentHtml: { contains: filter.search } },
+              ],
+            }
+          : {}),
+        ...(filter ? { publishTime: articlePublicationRange(filter) } : {}),
         ...(selected ? { id: { in: selected } } : {}),
       },
       orderBy: [{ publishTime: 'asc' }, { id: 'asc' }],

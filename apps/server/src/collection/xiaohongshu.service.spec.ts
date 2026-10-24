@@ -193,7 +193,7 @@ describe('production XHS router/service → additive SQLite and original export 
       platform: { url: '' },
       feed: { updateDelayTime: 0 },
     });
-    return new TrpcRouter(
+    const api = new TrpcRouter(
       new TrpcService(prisma as any, config, {} as any, {} as any),
       prisma as any,
       config,
@@ -201,6 +201,11 @@ describe('production XHS router/service → additive SQLite and original export 
       {} as any,
       service,
     ).appRouter.createCaller({ errorMsg, isLocal: true });
+    // Legacy normalized cache seam is tested directly; public refresh now queues metadata only.
+    return {
+      xiaohongshu: api.xiaohongshu,
+      legacyRefresh: ({ id }: { id: string }) => service.refresh(id),
+    };
   }
   it('uses protected real routes, persists pending creators, refuses unconfigured refresh/download', async () => {
     await expect(
@@ -209,7 +214,7 @@ describe('production XHS router/service → additive SQLite and original export 
     const api = caller();
     expect((await api.xiaohongshu.capability()).canRefresh).toBe(false);
     expect((await api.xiaohongshu.list()).items).toHaveLength(1);
-    expect((await api.xiaohongshu.refresh({ id: creatorId })).status).toBe(
+    expect((await api.legacyRefresh({ id: creatorId })).status).toBe(
       'unconfigured',
     );
     await expect(api.xiaohongshu.export({ creatorId })).rejects.toMatchObject({
@@ -222,9 +227,7 @@ describe('production XHS router/service → additive SQLite and original export 
     expect(repeated.created).toBe(false);
     expect(repeated.subscribed).toBe(false);
     await api.xiaohongshu.edit({ id: creatorId, enabled: false });
-    expect((await api.xiaohongshu.refresh({ id: creatorId })).status).toBe(
-      'paused',
-    );
+    expect((await api.legacyRefresh({ id: creatorId })).status).toBe('paused');
     await api.xiaohongshu.remove({ id: creatorId });
     expect((await api.xiaohongshu.list()).items).toHaveLength(0);
   });
@@ -248,7 +251,7 @@ describe('production XHS router/service → additive SQLite and original export 
       { ...candidate('synthetic-video'), kind: 'video' },
     ]);
     const api = caller(new XiaohongshuService(prisma as any, normalized));
-    expect((await api.xiaohongshu.refresh({ id: creatorId })).added).toBe(1);
+    expect((await api.legacyRefresh({ id: creatorId })).added).toBe(1);
     const list = await api.xiaohongshu.notes({ creatorId });
     expect(list.items).toHaveLength(2);
     const note = list.items.find((n) => n.status === 'complete')!;
@@ -256,7 +259,7 @@ describe('production XHS router/service → additive SQLite and original export 
     expect(body.text).toBe(candidate().text);
     expect(body.images).toEqual(['data:image/png;base64,' + png]);
     const before = await prisma.xhsNote.findMany();
-    expect((await api.xiaohongshu.refresh({ id: creatorId })).added).toBe(0);
+    expect((await api.legacyRefresh({ id: creatorId })).added).toBe(0);
     expect(await prisma.xhsNote.findMany()).toEqual(before);
     await expect(
       api.xiaohongshu.remove({ id: creatorId }),
@@ -302,9 +305,9 @@ describe('production XHS router/service → additive SQLite and original export 
           ],
         });
       await expect(
-        caller(
-          new XiaohongshuService(prisma as any, normalized),
-        ).xiaohongshu.refresh({ id: creatorId }),
+        caller(new XiaohongshuService(prisma as any, normalized)).legacyRefresh(
+          { id: creatorId },
+        ),
       ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
       expect(await prisma.xhsNote.count()).toBe(0);
       expect(
@@ -318,7 +321,7 @@ describe('production XHS router/service → additive SQLite and original export 
   );
   it('keeps old full content when a later normalized response is incomplete', async () => {
     const api = caller(new XiaohongshuService(prisma as any, source()));
-    await api.xiaohongshu.refresh({ id: creatorId });
+    await api.legacyRefresh({ id: creatorId });
     const old = await prisma.xhsNote.findMany();
     await expect(
       caller(
@@ -328,7 +331,7 @@ describe('production XHS router/service → additive SQLite and original export 
             { ...candidate(), text: '', textStatus: 'unknown', images: [] },
           ]),
         ),
-      ).xiaohongshu.refresh({ id: creatorId }),
+      ).legacyRefresh({ id: creatorId }),
     ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
     expect(await prisma.xhsNote.findMany()).toEqual(old);
   });
@@ -452,12 +455,12 @@ describe('production XHS router/service → additive SQLite and original export 
     const pending = new Promise<never>((_, r) => (reject = r));
     const normalized: XhsSource = { read: jest.fn().mockReturnValue(pending) };
     const api = caller(new XiaohongshuService(prisma as any, normalized));
-    const first = api.xiaohongshu.refresh({ id: creatorId });
+    const first = api.legacyRefresh({ id: creatorId });
     while (!(normalized.read as jest.Mock).mock.calls.length)
       await new Promise((r) => setTimeout(r, 1));
-    await expect(
-      api.xiaohongshu.refresh({ id: creatorId }),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(api.legacyRefresh({ id: creatorId })).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
     await expect(
       api.xiaohongshu.edit({ id: creatorId, enabled: false }),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
@@ -471,6 +474,6 @@ describe('production XHS router/service → additive SQLite and original export 
       evidenceVerified: true,
       pages: [{ requestCursor: null, nextCursor: null, items: [candidate()] }],
     });
-    expect((await api.xiaohongshu.refresh({ id: creatorId })).added).toBe(1);
+    expect((await api.legacyRefresh({ id: creatorId })).added).toBe(1);
   });
 });

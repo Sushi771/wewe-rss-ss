@@ -25,6 +25,8 @@ import { articleListWhere, articleListOrder } from '../article-list-filter';
 import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
+import { XhsSubscriptionService } from '../collection/xhs-subscription.service';
+import { xhsNoteFilterSchema } from '@wewe-rss/shared';
 import { z } from 'zod';
 import {
   AccountSchemas,
@@ -115,6 +117,7 @@ export class TrpcRouter {
     private readonly wereadService: WereadService,
     private readonly collectionService: CollectionService,
     @Optional() private readonly xiaohongshuService?: XiaohongshuService,
+    @Optional() private readonly xhsSubscriptions?: XhsSubscriptionService,
   ) {}
 
   private get xhs() {
@@ -1595,9 +1598,53 @@ export class TrpcRouter {
   });
 
   xiaohongshuRouter = this.trpcService.router({
-    capability: this.trpcService.protectedProcedure.query(() =>
-      this.xhs.capability(),
-    ),
+    resolveSubscription: this.trpcService.protectedProcedure
+      .input(z.object({ url: z.string().min(1).max(8192) }).strict())
+      .mutation(({ input }) =>
+        this.xhsSubscriptions!.resolveSubscription(input),
+      ),
+    subscribe: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            resolutionId: z.string().uuid(),
+            groupId: z.string().min(1).max(128).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhsSubscriptions!.subscribe(input)),
+    downloadNotes: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteIds: z.array(z.string().min(1).max(300)).min(1).max(100),
+            pickToken: z.string().max(128).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        if (
+          !(ctx as { isLocal?: boolean }).isLocal ||
+          privateOnlineMode() ||
+          process.env.WEWE_ACCEPTANCE_MODE === '1'
+        )
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '本地下载仅允许本机使用。',
+          });
+        return this.xhsSubscriptions!.downloadNotes(input);
+      }),
+    task: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().uuid() }).strict())
+      .query(({ input }) => this.xhsSubscriptions!.task(input)),
+    cancelTask: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().uuid() }).strict())
+      .mutation(({ input }) => this.xhsSubscriptions!.cancelTask(input)),
+    capability: this.trpcService.protectedProcedure.query(() => ({
+      ...this.xhs.capability(),
+      ...this.xhsSubscriptions?.capability(),
+    })),
     list: this.trpcService.protectedProcedure
       .input(
         z
@@ -1653,8 +1700,8 @@ export class TrpcRouter {
       .input(z.object({ id: z.string().min(1).max(128) }).strict())
       .mutation(({ input }) => this.xhs.remove(input.id)),
     notes: this.trpcService.protectedProcedure
-      .input(z.object({ creatorId: z.string().min(1).max(128) }).strict())
-      .query(({ input }) => this.xhs.notes(input.creatorId)),
+      .input(xhsNoteFilterSchema)
+      .query(({ input }) => this.xhs.notes(input.creatorId, input)),
     body: this.trpcService.protectedProcedure
       .input(
         z
@@ -1667,21 +1714,27 @@ export class TrpcRouter {
       .query(({ input }) => this.xhs.body(input.creatorId, input.noteId)),
     refresh: this.trpcService.protectedProcedure
       .input(z.object({ id: z.string().min(1).max(128) }).strict())
-      .mutation(({ input }) => this.xhs.refresh(input.id)),
+      .mutation(({ input }) => this.xhsSubscriptions!.refresh(input)),
     export: this.trpcService.protectedProcedure
       .input(
         z
           .object({
             creatorId: z.string().min(1).max(128),
+            search: articleFilterShape.search,
+            dateStart: articleFilterShape.dateStart,
+            dateEnd: articleFilterShape.dateEnd,
             noteIds: z
               .array(z.string().min(1).max(300))
               .min(1)
               .max(100)
               .optional(),
           })
-          .strict(),
+          .strict()
+          .refine(orderedArticleDates),
       )
-      .mutation(({ input }) => this.xhs.export(input.creatorId, input.noteIds)),
+      .mutation(({ input }) =>
+        this.xhs.export(input.creatorId, input.noteIds, input),
+      ),
   });
 
   appRouter = this.trpcService.router({
