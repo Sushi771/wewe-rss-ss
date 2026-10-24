@@ -10,6 +10,45 @@ export type SubscriptionTask = Omit<
   'taskId' | 'creatorId' | 'message'
 > & { message?: string; resumable?: boolean };
 export type TaskReceipt = { taskId: string; creatorId?: string };
+export type RecoveredTask = XhsSubscriptionTask;
+
+export function preferredRecoveredTask(tasks: readonly RecoveredTask[]) {
+  return (
+    tasks.find((task) => !taskFinished(task)) ||
+    tasks.find((task) => task.resumable || taskSettling(task))
+  );
+}
+
+export function canAdoptRecoveredTask(input: {
+  requestedGeneration: number;
+  currentGeneration: number;
+  busy: boolean;
+  alreadyRecovered: boolean;
+}) {
+  return (
+    input.requestedGeneration === input.currentGeneration &&
+    !input.busy &&
+    !input.alreadyRecovered
+  );
+}
+
+export function taskNextStep(task: SubscriptionTask) {
+  if (taskSettling(task))
+    return '正在结束当前保存，请等待确认；不会重复开始任务。';
+  if (!taskFinished(task)) return '正在查看已存在任务的进度，不会创建新采集。';
+  if (task.state === 'completed')
+    return '此任务已完成，可继续阅读或导出已保存内容。';
+  if (
+    task.code?.startsWith('XHS_SOURCE_') ||
+    task.code === 'XHS_SESSION_REQUIRED'
+  )
+    return '请先通过本机安全工具处理连接、验证或访问限制，再明确继续；已有内容保留。';
+  if (task.code === 'XHS_RESUME_DIRECTORY_CHANGED')
+    return '请选回此任务原来的保存目录，再继续未完成内容。';
+  return task.resumable
+    ? `任务尚未完成${task.remaining > 0 ? `，剩余 ${task.remaining} 项` : ''}。点击“继续未完成任务”后才会再次执行；已有内容保留。`
+    : '任务尚未完成，请重新读取状态确认下一步；已有内容保留。';
+}
 export const taskFinished = (task: SubscriptionTask) =>
   task.state !== 'queued' && task.state !== 'running';
 
