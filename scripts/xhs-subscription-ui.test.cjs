@@ -137,6 +137,16 @@ function fixture() {
     cancelledPicker = false,
     failStatus = false;
   let bodyData = null;
+  let connectionData = {
+    liveEnabled: false,
+    connected: false,
+    stored: null,
+    verified: false,
+    canConnect: false,
+    canPersist: false,
+    restartRequiresReparse: true,
+  };
+  let nextTask = 0;
   let releaseResolve;
   const api = Object.fromEntries(
     [
@@ -181,8 +191,15 @@ function fixture() {
             taskStatus = status('running', 'list');
             return { taskId: 'list-task', creatorId: input.id };
           }
-          if (name === 'downloadNotes')
-            return { taskId: 'download-task', creatorId: input.creatorId };
+          if (name === 'downloadNotes') {
+            taskStatus = status('running');
+            return {
+              taskId: nextTask++
+                ? 'download-task-' + nextTask
+                : 'download-task',
+              creatorId: input.creatorId,
+            };
+          }
           if (name === 'resumeTask') {
             taskStatus = status('running');
             return { taskId: 'resumed-task', creatorId: 'creator-a' };
@@ -210,11 +227,43 @@ function fixture() {
       },
     },
     xiaohongshu: Object.fromEntries(
-      ['list', 'notes', 'body', 'groups'].map((name) => [name, invalidation]),
+      ['list', 'notes', 'body', 'groups', 'capability'].map((name) => [
+        name,
+        invalidation,
+      ]),
     ),
   };
   const query = (data) => ({ data, isLoading: false, error: null });
   const router = {
+    connectionStatus: {
+      useQuery: () => ({
+        ...query(connectionData),
+        refetch: async () => {
+          calls.push(['connectionStatus']);
+          return { data: connectionData };
+        },
+      }),
+    },
+    restoreSession: {
+      useMutation: () => ({
+        mutateAsync: async () => {
+          calls.push(['restoreSession']);
+          connectionData = { ...connectionData, connected: true };
+        },
+      }),
+    },
+    disconnectSession: {
+      useMutation: () => ({
+        mutateAsync: async () => {
+          calls.push(['disconnectSession']);
+          connectionData = {
+            ...connectionData,
+            connected: false,
+            stored: false,
+          };
+        },
+      }),
+    },
     capability: { useQuery: () => query({ canRefresh: true }) },
     list: { useQuery: () => query(creators) },
     groups: {
@@ -225,21 +274,39 @@ function fixture() {
       useQuery: (input) => {
         const range = shared.articlePublicationRange(input);
         return query({
-          items: items.filter(
-            (note) =>
-              (!input.search ||
-                (
-                  note.title + (note.id === 'pending' ? ' 合成正文关键词' : '')
-                ).includes(input.search)) &&
-              (!range ||
-                (note.publishTime > 0 &&
-                  (range.gte === undefined || note.publishTime >= range.gte) &&
-                  (range.lt === undefined || note.publishTime < range.lt))),
-          ),
+          items: items
+            .map((note) => ({
+              creatorId: 'creator-a',
+              creatorName: '合成作者',
+              groupId: null,
+              ...note,
+            }))
+            .filter(
+              (note) =>
+                (!input.creatorId || note.creatorId === input.creatorId) &&
+                (input.groupId === undefined ||
+                  note.groupId === input.groupId) &&
+                (!input.search ||
+                  (
+                    note.title +
+                    note.creatorName +
+                    (note.id === 'pending' ? ' 合成正文关键词' : '')
+                  ).includes(input.search)) &&
+                (!range ||
+                  (note.publishTime > 0 &&
+                    (range.gte === undefined ||
+                      note.publishTime >= range.gte) &&
+                    (range.lt === undefined || note.publishTime < range.lt))),
+            ),
         });
       },
     },
-    body: { useQuery: () => query(bodyData) },
+    body: {
+      useQuery: (input) => {
+        if (input.noteId) calls.push(['bodyLookup', input]);
+        return query(bodyData);
+      },
+    },
   };
   api.notes = {
     query: async (input) => {
@@ -369,10 +436,14 @@ function fixture() {
     render,
     find,
     button,
-    async start() {
+    async start(all = false) {
       render();
       await tick();
       render();
+      if (!all) {
+        find('button', '合成作者').props.onClick();
+        render();
+      }
     },
     dispose() {
       slots.forEach((slot) => slot?.cleanup?.());
@@ -380,6 +451,7 @@ function fixture() {
     },
     settings(o) {
       if ('body' in o) bodyData = o.body;
+      if ('connection' in o) connectionData = o.connection;
       if (o.kind) resolveKind = o.kind;
       if ('existing' in o) existing = o.existing;
       if ('expired' in o) expired = o.expired;
@@ -595,6 +667,7 @@ test('management folders retain move/filter handlers and selections above 100 re
     );
     f.find('ManagementFolders').props.onFilter('group-a');
     assert.equal(f.find('ManagementFolders').props.filter, 'group-a');
+    f.find('ManagementFolders').props.onFilter('all');
     for (let i = 0; i < 101; i++)
       f.items.push({
         id: `synthetic-${i}`,
@@ -892,6 +965,172 @@ test('saved note uses the common reader/find component, preserves images, and re
     modal.props.onClose();
     reader = f.find('ArticleReader');
     assert.equal(reader.props.findOpen, false);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('global/group queries preserve authors, exports dispatch by author and reading uses the actual owner', async () => {
+  const f = fixture();
+  const oldDocument = global.document,
+    oldCreate = URL.createObjectURL,
+    oldRevoke = URL.revokeObjectURL;
+  global.document = {
+    body: { appendChild() {} },
+    createElement: () => ({ click() {}, remove() {} }),
+  };
+  URL.createObjectURL = () => 'blob:synthetic';
+  URL.revokeObjectURL = () => {};
+  try {
+    f.items.push({
+      id: 'author-b-note',
+      creatorId: 'creator-b',
+      creatorName: '第二作者',
+      groupId: 'group-a',
+      title: '分组正文',
+      kind: 'image-text',
+      status: 'complete',
+      publishTime: 1,
+    });
+    await f.start(true);
+    assert.ok(f.find('Checkbox', '选择笔记 分组正文'));
+    await f.button('选择当前筛选全部').props.onPress();
+    await f.button('导出已保存 ZIP').props.onPress();
+    await f.button('开始导出').props.onPress();
+    const exports = f.calls.filter(([name]) => name === 'export');
+    assert.ok(exports.some(([, input]) => input.creatorId === 'creator-a'));
+    assert.deepEqual(
+      exports.find(([, input]) => input.creatorId === 'creator-b')[1].noteIds,
+      ['author-b-note'],
+    );
+    f.find('ManagementFolders').props.onFilter('group-a');
+    assert.ok(f.find('Checkbox', '选择笔记 分组正文'));
+    assert.equal(f.find('Checkbox', '选择笔记 苹果图文'), undefined);
+    await f.button('导出已保存 ZIP').props.onPress();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'filtered')
+      .props.onChange();
+    await f.button('开始导出').props.onPress();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'notesScope').at(-1)[1].groupId,
+      'group-a',
+    );
+    f.render()
+      .find((n) => n.type === 'button' && n.props.children === '分组正文')
+      .props.onClick();
+    f.render();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'bodyLookup').at(-1)[1].creatorId,
+      'creator-b',
+    );
+    f.find('ManagementFolders').props.onFilter('ungrouped');
+    assert.equal(f.find('Checkbox', '选择笔记 分组正文'), undefined);
+  } finally {
+    f.dispose();
+    global.document = oldDocument;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('mixed-author downloads run serially, stop queued authors on cancellation, and preserve the selected scope', async () => {
+  const f = fixture();
+  try {
+    f.items.push({
+      id: 'author-b-pending',
+      creatorId: 'creator-b',
+      creatorName: '第二作者',
+      groupId: null,
+      title: '第二图文',
+      kind: 'image-text',
+      status: 'pending',
+      publishTime: 1,
+    });
+    f.items.push({
+      id: 'author-c-pending',
+      creatorId: 'creator-c',
+      creatorName: '第三作者',
+      groupId: null,
+      title: '第三图文',
+      kind: 'image-text',
+      status: 'pending',
+      publishTime: 1,
+    });
+    await f.start(true);
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    f.find('Checkbox', '选择笔记 第二图文').props.onValueChange(true);
+    f.find('Checkbox', '选择笔记 第三图文').props.onValueChange(true);
+    await f.button('下载图文到本地 (3)').props.onPress();
+    f.render();
+    await tick();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'downloadNotes').length,
+      1,
+    );
+    f.setTask(status('completed'));
+    await tick();
+    f.render();
+    await tick();
+    const downloads = f.calls.filter(([name]) => name === 'downloadNotes');
+    assert.equal(downloads.length, 2);
+    assert.deepEqual(downloads[1][1].noteIds, ['author-b-pending']);
+    assert.equal(downloads[1][1].creatorId, 'creator-b');
+    await f.button('取消任务').props.onPress();
+    await tick();
+    f.render();
+    assert.ok(f.button('下载图文到本地 (3)'));
+    assert.equal(
+      f.calls.filter(([name]) => name === 'downloadNotes').length,
+      2,
+      'cancel must not submit the queued third author',
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('connection controls stay default-off, never request secrets or connect automatically, and restore/disconnect only when pressed', async () => {
+  const f = fixture();
+  try {
+    await f.start(true);
+    assert.equal(f.button('恢复本机会话').props.isDisabled, true);
+    assert.equal(f.button('断开本机会话').props.isDisabled, true);
+    assert.equal(
+      f.calls.some(([name]) => /Session/.test(name)),
+      false,
+    );
+    assert.equal(
+      f
+        .render()
+        .some(
+          (n) =>
+            n.type === 'Input' &&
+            /a1|webSession|cookie/i.test(
+              n.props.label || n.props['aria-label'] || '',
+            ),
+        ),
+      false,
+    );
+    f.settings({
+      connection: {
+        liveEnabled: true,
+        connected: false,
+        stored: true,
+        verified: false,
+      },
+    });
+    const restore = f.button('恢复本机会话');
+    await Promise.all([restore.props.onPress(), restore.props.onPress()]);
+    assert.equal(
+      f.calls.filter(([name]) => name === 'restoreSession').length,
+      1,
+    );
+    await f.button('断开本机会话').props.onPress();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'disconnectSession').length,
+      1,
+    );
+    assert.ok(f.find('Checkbox', '选择笔记 苹果存档'));
   } finally {
     f.dispose();
   }

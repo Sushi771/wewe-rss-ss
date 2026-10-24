@@ -134,3 +134,43 @@ export function noteReaderHtml(body: {
     );
   return `<article><p style="white-space:pre-wrap">${escape(body.text)}</p>${body.images.map((src, index) => `<img src="${escape(src)}" alt="第 ${index + 1} 张归档图片">`).join('')}</article>`;
 }
+
+/** Keep per-author authorization and ZIP boundaries while reporting one frozen scope. */
+export async function exportArchiveGroups<
+  T extends { notes: number },
+>(options: {
+  notes: readonly { id: string; creatorId: string }[];
+  send: (creatorId: string, ids: string[]) => Promise<T>;
+  save: (
+    receipt: T,
+    part: number,
+    parts: number,
+    creatorId: string,
+    authors: number,
+  ) => void;
+  signal: AbortSignal;
+  onProgress: (completed: number, total: number) => void;
+}) {
+  const groups = new Map<string, string[]>();
+  for (const note of options.notes) {
+    const ids = groups.get(note.creatorId) || [];
+    if (!ids.includes(note.id)) ids.push(note.id);
+    groups.set(note.creatorId, ids);
+  }
+  const total = [...groups.values()].reduce((sum, ids) => sum + ids.length, 0);
+  let completed = 0;
+  for (const [creatorId, ids] of groups) {
+    const offset = completed;
+    const result = await exportArchiveBatches({
+      ids,
+      signal: options.signal,
+      send: (ids) => options.send(creatorId, ids),
+      save: (receipt, part, parts) =>
+        options.save(receipt, part, parts, creatorId, groups.size),
+      onProgress: (count) => options.onProgress(offset + count, total),
+    });
+    completed += result.completed;
+    if (result.cancelled) return { completed, total, cancelled: true };
+  }
+  return { completed, total, cancelled: false };
+}
