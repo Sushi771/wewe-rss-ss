@@ -2,7 +2,7 @@
 
 ## 小红书订阅开发（2026-10-24）
 
-小红书开发以本机交付源码 `f609bda0334f17f6c28ff84020d31cd5c47f3417` 为基线；维护入口见[开发交接](docs/xiaohongshu/DEVELOPMENT.md)、[技术说明](docs/xiaohongshu/TECHNICAL.md)和[验收记录](docs/xiaohongshu/ACCEPTANCE.md)。原生来源默认关闭，已完成271项后台及50项关联前端合成回归；严格主页schema、加密会话迁移、两种入口订阅、有界列表及3篇归档/重复保存已完成隔离实测。页面20条追加基于后端全量查询。GitHub采用基于交付分支的draft PR，仅包含本任务差异，不合并或部署；聚焦离线CI见 `.github/workflows/xhs-subscription-ci.yml`。
+当前小红书公开基线为 `9e1b81a8d095390bce968a137fd88d23ba5252df`，对应 r2 已本机上线。本轮在新隔离分支改进任务刷新找回、终态持久失败处理、显式继续、独立内容证据及单源组包恢复；不部署、不发真实请求、不读真实凭据、不删除历史数据。维护入口见[开发交接](docs/xiaohongshu/DEVELOPMENT.md)、[技术标准](docs/xiaohongshu/TECHNICAL.md)、[反例验收](docs/xiaohongshu/ACCEPTANCE.md)及[本机维护](docs/LOCAL_RELEASE_REHEARSAL.md)。新实现commit和验证结果由主负责人集成后校准，源码与本地交付统一通过draft PR协调。
 
 ## Owner Web session stops (2026-10-03)
 

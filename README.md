@@ -11,13 +11,13 @@
 
 ## 小红书订阅功能开发（2026-10-24）
 
-小红书已实现链接识别、确认订阅、列表更新、选中图文保存及取消续跑，复用公众号共享控件、分组、日期及正文阅读器，支持全部/分组/作者搜索和分批ZIP。后台271项、前端及公众号关联50项合成回归、两端类型检查、定向lint与前端构建通过。原生来源、DPAPI及安全媒体已接线，真实访问默认关闭；严格主页解析器、本机加密登录迁移、两种入口订阅、32条有界列表及3篇完整图文归档已完成隔离实测；重复保存零额外网络，生产访问仍关闭。详见[产品说明](docs/xiaohongshu/PRODUCT.md)、[交互设计](docs/xiaohongshu/DESIGN.md)、[技术接口](docs/xiaohongshu/TECHNICAL.md)、[开发交接](docs/xiaohongshu/DEVELOPMENT.md)和[验收记录](docs/xiaohongshu/ACCEPTANCE.md)。未部署生产。
+小红书公开源码 `9e1b81a8d095390bce968a137fd88d23ba5252df` 对应 r2 已在本机上线，日常服务正常。已核验两种入口同作者复用订阅、32个候选、3篇正文及12图归档、重复保存零额外请求；全历史与持续更新仍待验收。本轮深入改进聚焦任务找回、失败核对、显式继续、独立内容验证及单源组包恢复，不新增生产操作。见[产品说明](docs/xiaohongshu/PRODUCT.md)、[交互设计](docs/xiaohongshu/DESIGN.md)、[技术证据](docs/xiaohongshu/TECHNICAL.md)、[开发交接](docs/xiaohongshu/DEVELOPMENT.md)和[验收标准](docs/xiaohongshu/ACCEPTANCE.md)。
 
 ## 本机 Wechat2RSS 配置准备（2026-10-09）
 
 本轮继续准备现有 Wechat2RSS Provider 的本机接入，密钥由用户随后在本机填写。准确文件入口、字段及检查命令见[本机填写与接入检查](docs/WECHAT2RSS_LOCAL_SETUP.md)：实例配置使用已有 `.env.wechat2rss`，WeWe 配置使用已有 `apps/server/.env.local`，保留其他设置，不用模板覆盖私有文件。
 
-小红书按用户选择准备 Rnote Web＋蒲公英源码包及同产品免费测试 Key。独立空目录、私有候选配置和离线检查命令见[本机接入准备](docs/paid-sources/XHS_SOURCE_PREPARATION.md)；真实来源尚未注册，配置格式通过不会启用刷新。
+10月9日的小红书来源采购与本机准备见[历史接入准备](docs/paid-sources/XHS_SOURCE_PREPARATION.md)。当前原生来源已接线并完成有界验证，状态以本页上方的小红书说明为准；旧准备记录不作为重新配置或采集指令。
 
 填写后可在项目根目录执行 `node scripts/acceptance-wechat2rss.cjs --deployment-config`，仅核两端配置一致性，不启动、联网、启用来源或写库。需要与源码对应的后台构建；不能与 `--execute` 混用。来源启用、目标绑定和受控部署另行处理，授权、正常登录、最新十篇完整正文与实际图片、原刷新去重仍待真实验收。下面的历史方向与配置说明保留供追溯，当前填写操作以新指南为准。
 
