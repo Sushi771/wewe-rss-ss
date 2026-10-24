@@ -142,6 +142,9 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       active: { current: false },
       taskRunning: { current: false },
       cancelPending: { current: false },
+      activityGeneration: { current: 0 },
+      recoveryAttempted: { current: false },
+      readRecentRef: { current: jest.fn().mockResolvedValue(undefined) },
       queuedCreators: { current: [] },
       queuedDownloads: { current: [] },
       nextDownloadRef: { current: undefined },
@@ -524,6 +527,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       expect(actual.task).toEqual(task);
       expect(actual.message).toBe(taskExports.taskText(task));
       expect(scope.taskRunning.current).toBe(false);
+      expect(scope.readRecentRef.current).toHaveBeenCalledTimes(1);
       expect(
         scope.utils.xiaohongshu.capability.invalidate,
       ).toHaveBeenCalledTimes(1);
