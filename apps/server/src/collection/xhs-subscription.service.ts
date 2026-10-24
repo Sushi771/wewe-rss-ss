@@ -462,7 +462,13 @@ export class XhsSubscriptionService implements OnModuleInit {
       skipped: t.skipped,
       failed: t.failed,
       remaining: t.remaining,
-      code: uncertain ? 'XHS_TASK_RECEIPT_UNCERTAIN' : t.code,
+      // Keep private receipt history, but never label a reconciled public
+      // checkpoint as still uncertain: the UI correctly fences that code.
+      code: uncertain
+        ? 'XHS_TASK_RECEIPT_UNCERTAIN'
+        : t.code === 'XHS_TASK_RECEIPT_UNCERTAIN'
+          ? 'XHS_TASK_CHECKPOINT_RECONCILED'
+          : t.code,
       message: uncertain
         ? '任务回执尚未核实；未重放任何动作，请重新读取状态。'
         : t.message,

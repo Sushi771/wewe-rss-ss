@@ -41,7 +41,7 @@ also allowlisted by `safePeriodicLifecycleStatus`:
 Unknown times are null. Reading indexed metadata does not perform a fresh full
 integrity check. Verification time must never replace generation time or imply
 that intervening writes are covered. These display fields never authorize a
-write, lease, restore or deletion. No new public HTTP route is introduced.
+write, lease, restore or deletion. The existing read-only /startup-status response includes a sanitized periodicBackup snapshot from the latest owner event; no new route is introduced. Owner exit clears the display snapshot. The tools page separates generation, verification, coverage, their bases, and observation time; reading status never starts backup work or acquires a lease.
 An owner's later verification updates periodic timestamps only when its backup
 path and hash match the indexed periodic point. Reusing another protected point
 does not refresh the older periodic point's verification or coverage. This

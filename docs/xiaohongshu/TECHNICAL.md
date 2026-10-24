@@ -55,9 +55,9 @@ URL校验允许HTTPS的 `www.xiaohongshu.com/user/profile/{id}`、`/explore/{id}
 
 ### 任务一致性改进（隔离候选，未部署）
 
-受保护的 `recentTasks` 提供任务发现，活动任务优先，其后按更新时间和ID稳定排序；可按博主过滤。快照增加 `resumedFromTaskId` / `supersededByTaskId`。恢复创建后继与标记前驱在同一事务中完成；旧任务不能重复产生后继，也不能用迟到回执覆盖接管关系。前端页面接线与刷新交互仍待独立验收。
+受保护的 `recentTasks` 提供任务发现，活动任务优先，其后按更新时间和ID稳定排序；可按博主过滤。快照增加 `resumedFromTaskId` / `supersededByTaskId`。恢复创建后继与标记前驱在同一事务中完成；旧任务不能重复产生后继，也不能用迟到回执覆盖接管关系。前端页面以limit=10读取最近任务，保持后端顺序；唯一候选可采用，多候选由用户选择。重进与重读仅查询状态，继续必须显式操作。真实HTTP联调沿该前端恢复助手、实际tRPC路由与临时SQLite验证。
 
-基线finally的终态persist抛错会跳过pending/controller释放，已用真实临时SQLite和原保存器重现。候选通过嵌套finally保证执行器释放；提交应答丢失时独立重读持久行，不能确认则保留本机回执屏障，返回 `XHS_TASK_RECEIPT_UNCERTAIN` 且 `resumable:false`，禁止重放。查询可进行本地核对，不调用来源；核对成功后可变为可恢复。错误码可能仍记录未知回执历史，界面须以最新 `resumable` 判断能否继续，不能仅按code锁死。业务错误保留安全错误码。
+基线finally的终态persist抛错会跳过pending/controller释放，已用真实临时SQLite和原保存器重现。候选通过嵌套finally保证执行器释放；提交应答丢失时独立重读持久行，不能确认则保留本机回执屏障，返回 `XHS_TASK_RECEIPT_UNCERTAIN` 且 `resumable:false`，禁止重放。查询可进行本地核对，不调用来源；核对成功后可变为可恢复。私有记录可保留未知回执历史；本地核对完成且屏障已解除后，公开快照改为 `XHS_TASK_CHECKPOINT_RECONCILED`，避免前端对未知代码的安全阻挡永久锁死已核对任务。继续仍须最新 `resumable:true` 且未被后继接管。业务错误保留安全错误码。
 
 ## 原始证据与独立核对
 
