@@ -47,7 +47,10 @@ function fixture() {
   const slots = [],
     effects = [],
     calls = [];
-  const element = (type, props) => ({ type, props: props || {} });
+  const element = (type, props) =>
+    typeof type === 'function'
+      ? type(props || {})
+      : { type, props: props || {} };
   const react = {
     useState(value) {
       const i = index++;
@@ -195,7 +198,11 @@ function fixture() {
   };
   const invalidation = { invalidate: async () => {} };
   const utils = {
-    client: { xiaohongshu: api },
+    client: {
+      get xiaohongshu() {
+        return { ...api };
+      },
+    },
     xiaohongshu: Object.fromEntries(
       ['list', 'notes', 'body', 'groups'].map((name) => [name, invalidation]),
     ),
@@ -262,14 +269,29 @@ function fixture() {
       'ModalContent',
       'ModalFooter',
       'Spinner',
+      'Progress',
+      'Tooltip',
+      'Popover',
+      'PopoverContent',
+      'PopoverTrigger',
       'Switch',
     ].map((name) => [name, name]),
+  );
+  const primitives = load(
+    'apps/web/src/components/SubscriptionPrimitives.tsx',
+    {
+      'react/jsx-runtime': { jsx: element, jsxs: element },
+      '@nextui-org/react': ui,
+    },
   );
   const page = load('apps/web/src/pages/feeds/xiaohongshu.tsx', {
     react,
     'react/jsx-runtime': { jsx: element, jsxs: element },
     '@nextui-org/react': ui,
-    '@web/utils/trpc': { trpc: { useUtils: () => utils, xiaohongshu: router } },
+    '@web/utils/trpc': {
+      trpc: { useUtils: () => ({ ...utils }), xiaohongshu: router },
+    },
+    '@web/components/SubscriptionPrimitives': primitives,
     '@web/components/ManagementFolders': 'ManagementFolders',
     '@web/components/ArticleDateFilter': 'ArticleDateFilter',
     '@web/utils/article-date-selection': dateHelpers,
@@ -363,7 +385,7 @@ function fixture() {
   };
 }
 
-test('note/profile resolution requires confirmation, preserves grouping, and never refreshes automatically', async () => {
+test('note/profile resolution requires confirmation, preserves grouping, and refreshes only after successful new subscription', async () => {
   for (const kind of ['note', 'profile']) {
     const f = fixture();
     try {
@@ -380,12 +402,15 @@ test('note/profile resolution requires confirmation, preserves grouping, and nev
       const confirm = f.button('确认订阅');
       await Promise.all([confirm.props.onPress(), confirm.props.onPress()]);
       assert.equal(f.calls.filter(([name]) => name === 'subscribe').length, 1);
-      assert.deepEqual(f.calls.at(-1), [
-        'subscribe',
-        { resolutionId: 'resolution-a', groupId: 'group-a' },
-      ]);
-      assert.ok(
-        f.render().includes('订阅成功，可更新笔记列表后选择图文保存。'),
+      assert.deepEqual(
+        f.calls.find(([name]) => name === 'subscribe'),
+        ['subscribe', { resolutionId: 'resolution-a', groupId: 'group-a' }],
+      );
+      assert.equal(f.calls.filter(([name]) => name === 'refresh').length, 1);
+      assert.equal(
+        f.calls.findIndex(([name]) => name === 'refresh') >
+          f.calls.findIndex(([name]) => name === 'subscribe'),
+        true,
       );
     } finally {
       f.dispose();
@@ -416,7 +441,7 @@ test('existing subscription feedback, changed input invalidation, and expired co
   }
 });
 
-test('date and title filters reset selection; pending image notes selectable, videos excluded; ZIP uses saved subset', async () => {
+test('date and title filters reset selection; pending image notes selectable, uncached videos excluded; ZIP keeps cached video', async () => {
   const f = fixture();
   const oldDocument = global.document;
   const oldCreate = URL.createObjectURL,
@@ -429,8 +454,8 @@ test('date and title filters reset selection; pending image notes selectable, vi
   URL.revokeObjectURL = () => {};
   try {
     await f.start();
-    f.find('Checkbox', '选择筛选后全部图文笔记').props.onValueChange(true);
-    assert.equal(f.find('Checkbox', '选择笔记 视频').props.isDisabled, true);
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
+    assert.equal(f.find('Checkbox', '选择笔记 视频').props.isDisabled, false);
     assert.equal(
       f.find('Checkbox', '选择笔记 苹果图文').props.isSelected,
       true,
@@ -439,6 +464,7 @@ test('date and title filters reset selection; pending image notes selectable, vi
     assert.deepEqual(f.calls.find(([n]) => n === 'export')[1].noteIds, [
       'saved',
       'old',
+      'video',
     ]);
     f.find('ArticleDateFilter').props.onChange({
       mode: 'day',
@@ -450,7 +476,7 @@ test('date and title filters reset selection; pending image notes selectable, vi
       false,
     );
     assert.equal(f.find('Checkbox', '选择笔记 旧笔记'), undefined);
-    f.find('Checkbox', '选择筛选后全部图文笔记').props.onValueChange(true);
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
     await f.button('搜索笔记').props.onPress();
     f.find('Input', '搜索笔记标题或正文').props.onValueChange('存档');
     assert.equal(f.find('Checkbox', '选择笔记 苹果图文'), undefined);
@@ -466,10 +492,7 @@ test('date and title filters reset selection; pending image notes selectable, vi
       start: '2026-10-25',
       end: '2026-10-24',
     });
-    assert.equal(
-      f.find('Checkbox', '选择筛选后全部图文笔记').props.isDisabled,
-      true,
-    );
+    assert.equal(f.find('Checkbox', '全选已加载').props.isDisabled, true);
   } finally {
     f.dispose();
     global.document = oldDocument;
@@ -502,9 +525,17 @@ test('local picker cancellation does not download; repeated download and cancel 
     await tick();
     f.render();
     assert.equal(f.calls.filter(([n]) => n === 'cancelTask').length, 1);
-    await f.button('收起进度').props.onPress();
-    assert.ok(f.button('展开进度'));
+    f.find('summary', '收起进度').props.onClick({ preventDefault() {} });
+    assert.ok(f.find('summary', '查看进度'));
     assert.equal(f.button('更新笔记列表').props.isDisabled, false);
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    f.render();
+    await tick();
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果图文').props.isSelected,
+      true,
+      'terminal polling must not clear a new selection',
+    );
   } finally {
     f.dispose();
   }
@@ -556,7 +587,7 @@ test('management folders retain move and filter handlers; excessive selection is
         status: 'pending',
         publishTime: 0,
       });
-    f.find('Checkbox', '选择筛选后全部图文笔记').props.onValueChange(true);
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
     const download = f.button('下载图文到本地 (104)');
     assert.equal(download.props.isDisabled, true);
     await download.props.onPress();

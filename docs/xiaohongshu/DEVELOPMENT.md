@@ -49,3 +49,16 @@ pnpm build:web
 - 文档中的支持链接、字段格式、状态、错误码、上限、任务存储和重启边界与最终实现一致。
 
 提交前用 `git diff --check` 和变更清单检查，只纳入本轮授权文件。不提交凭据、私人笔记、数据库/备份、真实响应、本机审计或构建产物。主负责人完成校准后在 [ACCEPTANCE](ACCEPTANCE.md)填写证据；未执行项继续明确标注待验收。
+
+
+## 前端共享组件回归
+
+修改共享订阅组件时同时核对公众号和小红书。相关合成回归：
+
+```sh
+node --test scripts/xhs-subscription-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs
+```
+
+`trpc.useUtils()` 的工具代理不应成为任务轮询 effect 的重启条件。任务 effect 由任务 ID 驱动，用 ref 获取客户端，终态清除轮询 ID。回归夹具须模拟每次渲染返回新的工具包装对象，并确认终态后的新选择不被清掉。
+
+独立合成预览可以检验弹窗、响应布局、选择与取消；只有真实服务及归档验证才能确认订阅来源、完整正文、媒体和本机保存。前端通过不关闭尚未接线的来源、主页字段及批量任务验收项。

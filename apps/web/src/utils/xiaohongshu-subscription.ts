@@ -1,51 +1,15 @@
-/** Local contract boundary until the server router includes subscription tasks. */
-export type SubscriptionResolution = {
-  resolutionId: string;
-  inputKind: 'note' | 'profile';
-  author: { id: string; name: string; profileUrl: string; avatarUrl?: string };
-  existingCreatorId: string | null;
-  expiresAt: string | number;
-};
-export type SubscriptionTask = {
-  kind: 'list' | 'download';
-  state:
-    | 'queued'
-    | 'running'
-    | 'completed'
-    | 'partial'
-    | 'blocked'
-    | 'cancelled'
-    | 'failed';
-  total: number;
-  completed: number;
-  skipped: number;
-  failed: number;
-  remaining: number;
-  code?: string;
-  message?: string;
-};
+import type {
+  XhsSubscriptionResolution,
+  XhsSubscriptionTask,
+} from '@wewe-rss/shared';
+
+export type SubscriptionResolution = XhsSubscriptionResolution;
+/** The optimistic receipt has counts before the first persisted task response. */
+export type SubscriptionTask = Omit<
+  XhsSubscriptionTask,
+  'taskId' | 'creatorId' | 'message'
+> & { message?: string };
 export type TaskReceipt = { taskId: string; creatorId?: string };
-export type SubscriptionClient = {
-  resolveSubscription: {
-    mutate(input: { url: string }): Promise<SubscriptionResolution>;
-  };
-  subscribe: {
-    mutate(input: {
-      resolutionId: string;
-      groupId?: string;
-    }): Promise<{ creatorId: string; created: boolean; subscribed: true }>;
-  };
-  refresh: { mutate(input: { id: string }): Promise<TaskReceipt> };
-  downloadNotes: {
-    mutate(input: {
-      creatorId: string;
-      noteIds: string[];
-      pickToken?: string;
-    }): Promise<TaskReceipt>;
-  };
-  task: { query(input: { taskId: string }): Promise<SubscriptionTask> };
-  cancelTask: { mutate(input: { taskId: string }): Promise<unknown> };
-};
 export const taskFinished = (task: SubscriptionTask) =>
   task.state !== 'queued' && task.state !== 'running';
 
@@ -74,7 +38,7 @@ export function taskText(task: SubscriptionTask): string {
 /** Poll receipts only: a lost status response must never start another download. */
 export async function watchSubscriptionTask(options: {
   taskId: string;
-  query: SubscriptionClient['task']['query'];
+  query: (input: { taskId: string }) => Promise<SubscriptionTask>;
   signal: AbortSignal;
   onTask: (task: SubscriptionTask) => void;
   onError: (cause: unknown) => void;

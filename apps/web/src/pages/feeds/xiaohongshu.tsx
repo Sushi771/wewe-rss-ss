@@ -1,4 +1,13 @@
 import {
+  SubscriptionSearch,
+  SubscriptionMore,
+  SubscriptionToolbar,
+  SubscriptionDialog,
+  ContentSortControls,
+  ContentSelectionHeader,
+  SubscriptionProgress,
+} from '@web/components/SubscriptionPrimitives';
+import {
   Button,
   Checkbox,
   Input,
@@ -29,7 +38,6 @@ import {
   watchSubscriptionTask,
 } from '@web/utils/xiaohongshu-subscription';
 import type {
-  SubscriptionClient,
   SubscriptionResolution,
   SubscriptionTask,
   TaskReceipt,
@@ -91,11 +99,11 @@ export default function Xiaohongshu() {
   const queuedCreators = useRef<string[]>([]);
   const cancelPending = useRef(false);
   const subscriptionApi = useMemo(
-    () =>
-      (utils.client as unknown as { xiaohongshu: SubscriptionClient })
-        .xiaohongshu,
+    () => utils.client.xiaohongshu,
     [utils.client],
   );
+  const taskApiRef = useRef({ subscriptionApi, utils });
+  taskApiRef.current = { subscriptionApi, utils };
   const [profileUrl, setProfileUrl] = useState('');
   const [message, setMessage] = useState('');
   const [operationError, setOperationError] = useState('');
@@ -105,10 +113,11 @@ export default function Xiaohongshu() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [folderFilter, setFolderFilter] = useState('all');
   const [selectedCreators, setSelectedCreators] = useState<string[]>([]);
+  const [direction, setDirection] = useState<'asc' | 'desc'>('desc');
   const [search, setSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [dateSelection, setDateSelection] = useState<ArticleDateSelection>({
-    mode: 'range',
+    mode: 'day',
     start: '',
     end: '',
   });
@@ -183,11 +192,32 @@ export default function Xiaohongshu() {
     { creatorId, noteId },
     { enabled: !!current && !!noteId, retry: false },
   );
-  const visibleNotes = dateError ? [] : notes.data?.items || [];
+  const visibleNotes = useMemo(
+    () =>
+      dateError
+        ? []
+        : [...(notes.data?.items || [])].sort((a, b) => {
+            if (!a.publishTime || !b.publishTime)
+              return a.publishTime
+                ? -1
+                : b.publishTime
+                  ? 1
+                  : a.id.localeCompare(b.id);
+            return (
+              (direction === 'asc'
+                ? a.publishTime - b.publishTime
+                : b.publishTime - a.publishTime) || a.id.localeCompare(b.id)
+            );
+          }),
+    [dateError, notes.data, direction],
+  );
   const selectableNotes = visibleNotes.filter(
-    (note) => note.kind === 'image-text',
+    (note) => note.kind === 'image-text' || note.status === 'complete',
   );
   const selectedNotes = selectedImageNotes(visibleNotes, selectedIds);
+  const selectedArchives = visibleNotes.filter(
+    (note) => selectedIds.has(note.id) && note.status === 'complete',
+  );
   const noteStatus = (note: {
     status: string;
     kind: 'image-text' | 'video';
@@ -210,6 +240,7 @@ export default function Xiaohongshu() {
   const moveCreators = trpc.xiaohongshu.moveCreators.useMutation();
   useEffect(() => {
     if (!taskId) return;
+    const { subscriptionApi, utils } = taskApiRef.current;
     const controller = new AbortController();
     void watchSubscriptionTask({
       taskId,
@@ -240,6 +271,7 @@ export default function Xiaohongshu() {
             void utils.xiaohongshu.notes.invalidate();
             return;
           }
+          setTaskId('');
           queuedCreators.current = [];
           taskRunning.current = false;
           active.current = false;
@@ -258,7 +290,7 @@ export default function Xiaohongshu() {
         ),
     });
     return () => controller.abort();
-  }, [taskId, subscriptionApi, utils, startTask]);
+  }, [taskId, startTask]);
   const handleCancelTask = async () => {
     if (!taskId || !taskRunning.current || cancelPending.current) return;
     cancelPending.current = true;
@@ -313,9 +345,14 @@ export default function Xiaohongshu() {
     setCreatorId(id);
     setNoteId('');
     setSearch('');
-    setDateSelection({ mode: 'range', start: '', end: '' });
+    setDateSelection({ mode: 'day', start: '', end: '' });
     setSelectedIds(new Set());
     setMessage('');
+    if (!taskRunning.current) {
+      setTaskId('');
+      setTask(null);
+      setOperationError('');
+    }
     setMobileSidebarOpen(false);
   };
   const handleSearch = (value: string) => {
@@ -370,7 +407,7 @@ export default function Xiaohongshu() {
         throw new Error('订阅尚未确认，请重新读取博主列表。');
       setMessage(
         result.created
-          ? '订阅成功，可更新笔记列表后选择图文保存。'
+          ? '订阅成功，正在读取笔记列表。'
           : '已订阅此博主，可更新笔记列表。',
       );
       await utils.xiaohongshu.list.invalidate();
@@ -381,13 +418,19 @@ export default function Xiaohongshu() {
       setProfileUrl('');
       setResolution(null);
       setAdding(false);
+      if (result.created) {
+        try {
+          await updateCreator(result.creatorId);
+        } catch (cause) {
+          setMessage('订阅已保存，笔记列表暂未读取。可稍后更新列表。');
+          setOperationError(failureMessage(cause, '列表更新未开始。'));
+        }
+      }
     });
   const handleDownload = () =>
     run(async () => {
-      if (!current || !selectedNotes.length) return;
-      const archived = selectedNotes.filter(
-        (note) => note.status === 'complete',
-      );
+      if (!current) return;
+      const archived = selectedArchives;
       if (!archived.length) return;
       if (archived.length > 100)
         throw new Error('每次最多导出 100 篇，请减少选择后再试。');
@@ -473,10 +516,7 @@ export default function Xiaohongshu() {
     ]);
   };
   return (
-    <main
-      className="flex h-full min-h-0 min-w-0 flex-col md:flex-row"
-      aria-label="小红书博主与笔记管理"
-    >
+    <main className="feed-workspace" aria-label="小红书博主与笔记管理">
       <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
         <label className="min-w-0 flex-1 text-xs text-neutral-500">
           当前博主
@@ -510,7 +550,7 @@ export default function Xiaohongshu() {
       </div>
       <aside
         id="xiaohongshu-management-sidebar"
-        className={`mac-sidebar max-h-[45vh] !w-full !min-w-0 overflow-y-auto md:!flex md:max-h-none md:!w-[260px] ${mobileSidebarOpen ? '!flex' : '!hidden'}`}
+        className={`mac-sidebar feed-sidebar ${mobileSidebarOpen ? 'feed-sidebar-open' : ''}`}
         aria-label="小红书博主列表"
       >
         <div className="flex items-center justify-between px-4 py-3">
@@ -535,6 +575,8 @@ export default function Xiaohongshu() {
               isDisabled={busy}
               onPress={() => {
                 setResolution(null);
+                setMessage('');
+                setOperationError('');
                 setProfileUrl('');
                 setSubscriptionGroup(
                   folderFilter !== 'all' && folderFilter !== 'ungrouped'
@@ -678,58 +720,55 @@ export default function Xiaohongshu() {
         )}
       </aside>
       <section
-        className="mac-content !min-w-0 flex-1"
+        className="mac-content feed-content !min-w-0 !overflow-y-auto"
         aria-label="小红书笔记列表"
       >
-        <div className="mac-toolbar !h-auto !flex-wrap !py-2">
-          <div className="flex w-full min-w-0 items-center gap-3">
+        {task && (
+          <SubscriptionProgress
+            ariaLabel="笔记任务进度"
+            compact={taskFinished(task)}
+            value={task.completed + task.skipped}
+            total={task.total}
+            progressLabel="已完成的笔记数量"
+            label={taskText(task)}
+            open={progressOpen}
+            onOpenChange={setProgressOpen}
+            summary={progressOpen ? '收起进度' : '查看进度'}
+            actions={
+              !taskFinished(task) ? (
+                <Button
+                  size="sm"
+                  variant="light"
+                  isDisabled={cancelling}
+                  onPress={handleCancelTask}
+                >
+                  {cancelling ? '正在取消' : '取消任务'}
+                </Button>
+              ) : null
+            }
+          >
+            <p role="status" className="py-1 text-xs">
+              {taskText(task)}
+            </p>
+          </SubscriptionProgress>
+        )}
+        <SubscriptionToolbar>
+          <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 sm:flex-1 sm:basis-0">
             <h1 className="truncate text-[15px] font-semibold">
               {current?.displayName || '小红书笔记'}
             </h1>
-            {current && (
-              <Switch
-                size="sm"
-                isSelected={current.enabled}
-                isDisabled={busy}
-                aria-label={`启用 ${current.displayName}`}
-                onValueChange={(enabled) =>
-                  run(async () => {
-                    await edit.mutateAsync({ id: current.id, enabled });
-                    await utils.xiaohongshu.list.invalidate();
-                  })
-                }
-              >
-                启用更新
-              </Switch>
-            )}
+            <span role="status" className="text-xs text-neutral-500">
+              {capability.data?.canRefresh ? '可更新笔记列表' : '阅读本地存量'}
+            </span>
           </div>
-          <div className="flex w-full flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              className="mac-btn-outline"
-              isDisabled={
-                busy || !current?.enabled || !capability.data?.canRefresh
-              }
-              onPress={() =>
-                run(async () => {
-                  if (current) await updateCreator(current.id);
-                })
-              }
-            >
-              更新笔记列表
-            </Button>
-            <Button
-              size="sm"
-              variant="light"
-              isDisabled={
-                busy ||
-                !capability.data?.canRefresh ||
-                !creators.data?.items.some((creator) => creator.enabled)
-              }
-              onPress={handleRefreshAll}
-            >
-              更新全部列表
-            </Button>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <SubscriptionSearch
+              open={searchOpen}
+              label="搜索笔记"
+              controls="xhs-search-panel"
+              disabled={busy || !current}
+              onToggle={() => setSearchOpen(!searchOpen)}
+            />
             <Button
               size="sm"
               color="primary"
@@ -747,157 +786,165 @@ export default function Xiaohongshu() {
             <Button
               size="sm"
               variant="light"
-              isDisabled={
-                busy ||
-                !selectedNotes.some((note) => note.status === 'complete')
-              }
+              isDisabled={busy || !selectedArchives.length}
               onPress={handleDownload}
             >
               导出已保存 ZIP
             </Button>
             <Button
               size="sm"
-              variant="light"
-              isDisabled={busy || !current}
-              onPress={() => setSearchOpen(!searchOpen)}
+              className="mac-btn-outline"
+              isDisabled={
+                busy || !current?.enabled || !capability.data?.canRefresh
+              }
+              onPress={() =>
+                run(async () => {
+                  if (current) await updateCreator(current.id);
+                })
+              }
             >
-              搜索笔记
+              更新笔记列表
             </Button>
-            {current && managing && (
-              <Button
-                size="sm"
-                color="danger"
-                variant="light"
-                isDisabled={busy || current._count.notes > 0}
-                onPress={() => {
-                  if (
-                    window.confirm(
-                      '移除此待接入博主？已有归档的博主请使用停用。',
-                    )
-                  )
-                    void run(async () => {
-                      await remove.mutateAsync({ id: current.id });
-                      await utils.xiaohongshu.list.invalidate();
-                    });
-                }}
-              >
-                移除待接入博主
-              </Button>
-            )}
-          </div>
-        </div>
-        <div className="space-y-2 border-b border-neutral-200 px-4 py-3 text-sm dark:border-neutral-700">
-          <p role="status">
-            {capability.error
-              ? '更新状态读取失败，请稍后重试。'
-              : capability.data
-                ? capability.data.canRefresh
-                  ? '可以更新笔记。'
-                  : '尚未连接可用来源，暂时无法更新笔记。'
-                : '正在确认更新状态…'}
-          </p>
-          {capability.data?.message && (
-            <details>
-              <summary>查看来源详情</summary>
-              <p>{capability.data.message}</p>
-            </details>
-          )}
-          <p className="text-xs text-neutral-500">
-            订阅后先更新笔记列表，再勾选图文下载正文与图片。已保存的图文会自动去重。
-          </p>
-          {message && (
-            <p role="status" className="break-words">
-              {message}
-            </p>
-          )}
-          {task && (
-            <div className="rounded-lg border p-3" aria-label="笔记任务进度">
-              <div className="flex flex-wrap items-center gap-2">
-                <span>
-                  {task.kind === 'list' ? '更新笔记列表' : '下载并保存图文'}
-                </span>
-                <Button
+            <SubscriptionMore key={creatorId}>
+              {current && (
+                <Switch
                   size="sm"
-                  variant="light"
-                  onPress={() => setProgressOpen(!progressOpen)}
-                >
-                  {progressOpen ? '收起进度' : '展开进度'}
-                </Button>
-                {!taskFinished(task) && (
-                  <Button
-                    size="sm"
-                    variant="flat"
-                    isDisabled={cancelling}
-                    onPress={handleCancelTask}
-                  >
-                    {cancelling ? '正在取消' : '取消任务'}
-                  </Button>
-                )}
-              </div>
-              {progressOpen && (
-                <p role="status" className="mt-2 break-words">
-                  {taskText(task)}
-                </p>
-              )}
-            </div>
-          )}
-          {operationError && (
-            <details>
-              <summary>查看错误详情</summary>
-              <p className="break-words">{operationError}</p>
-            </details>
-          )}
-          <details>
-            <summary className="cursor-pointer break-all text-neutral-500">
-              本机保存设置 · {saveSettings?.directory || '尚未读取'}
-            </summary>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <Input
-                aria-label="本机保存目录"
-                className="min-w-0 flex-1 basis-64"
-                value={directory}
-                isReadOnly
-              />
-              <Button
-                size="sm"
-                variant="flat"
-                isDisabled={busy}
-                onPress={handleChooseDirectory}
-              >
-                选择目录
-              </Button>
-              <Switch
-                size="sm"
-                aria-label="每次保存选择目录"
-                isSelected={saveSettings?.askEveryTime || false}
-                isDisabled={busy || !saveSettings}
-                onValueChange={(value) => handleSaveSettings(value)}
-              >
-                每次保存选择目录
-              </Switch>
-              {!saveSettings && (
-                <Button
-                  size="sm"
+                  isSelected={current.enabled}
                   isDisabled={busy}
-                  onPress={() =>
+                  aria-label={`启用 ${current.displayName}`}
+                  onValueChange={(enabled) =>
                     run(async () => {
-                      const settings =
-                        await localApi<SaveSettings>('/settings');
-                      setSaveSettings(settings);
-                      setDirectory(settings.directory);
+                      await edit.mutateAsync({ id: current.id, enabled });
+                      await utils.xiaohongshu.list.invalidate();
                     })
                   }
                 >
-                  重新读取
+                  启用更新
+                </Switch>
+              )}
+              <Button
+                size="sm"
+                variant="light"
+                isDisabled={
+                  busy ||
+                  !capability.data?.canRefresh ||
+                  !creators.data?.items.some((creator) => creator.enabled)
+                }
+                onPress={handleRefreshAll}
+              >
+                更新全部列表
+              </Button>
+              {current && managing && (
+                <Button
+                  size="sm"
+                  color="danger"
+                  variant="light"
+                  isDisabled={busy || current._count.notes > 0}
+                  onPress={() => {
+                    if (
+                      window.confirm(
+                        '移除此待接入博主？已有归档的博主请使用停用。',
+                      )
+                    )
+                      void run(async () => {
+                        await remove.mutateAsync({ id: current.id });
+                        await utils.xiaohongshu.list.invalidate();
+                      });
+                  }}
+                >
+                  移除待接入博主
                 </Button>
               )}
-            </div>
-            <p className="mt-2 text-xs text-neutral-500">
-              选中图文逐篇保存正文与图片，ZIP
-              可单独导出已保存的内容。文件夹只管理订阅，不改变保存目录。
+            </SubscriptionMore>
+          </div>
+        </SubscriptionToolbar>
+        {message && (
+          <p role="status" className="px-3 py-1 text-xs">
+            {message}
+          </p>
+        )}
+        <details className="feed-reading-details shrink-0 border-b border-neutral-200 px-3 py-2 text-xs dark:border-neutral-700">
+          <summary className="cursor-pointer text-neutral-500">
+            来源与本机保存设置{operationError ? ' · 有错误待查看' : ''}
+          </summary>
+          <div className="space-y-2 py-2">
+            <p role="status">
+              {capability.error
+                ? '更新状态读取失败，请稍后重试。'
+                : capability.data
+                  ? capability.data.canRefresh
+                    ? '可以更新笔记。'
+                    : '尚未连接可用来源，暂时无法更新笔记。'
+                  : '正在确认更新状态…'}
             </p>
-          </details>
-        </div>
+            {capability.data?.message && (
+              <details>
+                <summary>查看来源详情</summary>
+                <p>{capability.data.message}</p>
+              </details>
+            )}
+            <p className="text-xs text-neutral-500">
+              订阅后先更新笔记列表，再勾选图文下载正文与图片。已保存的图文会自动去重。
+            </p>
+
+            {operationError && (
+              <details>
+                <summary>查看错误详情</summary>
+                <p className="break-words">{operationError}</p>
+              </details>
+            )}
+            <details>
+              <summary className="cursor-pointer break-all text-neutral-500">
+                本机保存设置 · {saveSettings?.directory || '尚未读取'}
+              </summary>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Input
+                  aria-label="本机保存目录"
+                  className="min-w-0 flex-1 basis-64"
+                  value={directory}
+                  isReadOnly
+                />
+                <Button
+                  size="sm"
+                  variant="flat"
+                  isDisabled={busy}
+                  onPress={handleChooseDirectory}
+                >
+                  选择目录
+                </Button>
+                <Switch
+                  size="sm"
+                  aria-label="每次保存选择目录"
+                  isSelected={saveSettings?.askEveryTime || false}
+                  isDisabled={busy || !saveSettings}
+                  onValueChange={(value) => handleSaveSettings(value)}
+                >
+                  每次保存选择目录
+                </Switch>
+                {!saveSettings && (
+                  <Button
+                    size="sm"
+                    isDisabled={busy}
+                    onPress={() =>
+                      run(async () => {
+                        const settings =
+                          await localApi<SaveSettings>('/settings');
+                        setSaveSettings(settings);
+                        setDirectory(settings.directory);
+                      })
+                    }
+                  >
+                    重新读取
+                  </Button>
+                )}
+              </div>
+              <p className="mt-2 text-xs text-neutral-500">
+                选中图文逐篇保存正文与图片，ZIP
+                可单独导出已保存的内容。文件夹只管理订阅，不改变保存目录。
+              </p>
+            </details>
+          </div>
+        </details>
         <fieldset disabled={busy} className="disabled:opacity-60">
           <ArticleDateFilter
             value={dateSelection}
@@ -920,9 +967,21 @@ export default function Xiaohongshu() {
             />
           </div>
         )}
-        <div className="px-4 py-2 text-xs text-neutral-500">
+        <ContentSortControls
+          sort="publishTime"
+          onSortChange={() => {}}
+          direction={direction}
+          onDirectionChange={(value) => {
+            setDirection(value);
+            setSelectedIds(new Set());
+          }}
+          options={[{ value: 'publishTime', label: '发布时间' }]}
+          disabled={busy}
+        />
+        <div className="px-3 py-1 text-xs text-neutral-500">
           当前{search ? '筛选' : '博主'} {visibleNotes.length} 篇；已选择{' '}
-          {selectedNotes.length} 篇已完整保存的笔记。
+          {selectedNotes.length}{' '}
+          篇图文。全选仅勾选已加载内容；新笔记需另行勾选。
           {search && '修改搜索会清空选择。'}
           {selectedNotes.length > 100 && (
             <span role="alert">每次最多保存或导出 100 篇，请减少选择。</span>
@@ -933,29 +992,27 @@ export default function Xiaohongshu() {
             笔记列表读取失败，既有归档未改动。
           </p>
         )}
-        <div className="flex-1 overflow-y-auto">
+        <div
+          className="feed-article-scroll mt-2 min-h-0 flex-1 overflow-y-auto"
+          role="region"
+          aria-label="笔记列表"
+          tabIndex={0}
+        >
           <div className="compact-list">
-            <div className="compact-list-header !flex-wrap">
-              <div className="compact-col-check">
-                <Checkbox
-                  size="sm"
-                  aria-label="选择筛选后全部图文笔记"
-                  isDisabled={busy || !selectableNotes.length}
-                  isSelected={allSelected}
-                  isIndeterminate={!allSelected && selectedNotes.length > 0}
-                  onValueChange={(value) => {
-                    if (!active.current)
-                      setSelectedIds(
-                        value
-                          ? new Set(selectableNotes.map((note) => note.id))
-                          : new Set(),
-                      );
-                  }}
-                />
-              </div>
-              <div className="compact-col-title">笔记标题</div>
-              <div className="hidden text-xs md:block">发布时间 · 归档状态</div>
-            </div>
+            <ContentSelectionHeader
+              title={<>笔记标题 · {visibleNotes.length} 篇</>}
+              selected={allSelected}
+              indeterminate={!allSelected && selectedIds.size > 0}
+              disabled={busy || !selectableNotes.length}
+              onChange={(value) => {
+                if (!active.current)
+                  setSelectedIds(
+                    value
+                      ? new Set(selectableNotes.map((note) => note.id))
+                      : new Set(),
+                  );
+              }}
+            />
             {visibleNotes.map((note) => (
               <div
                 key={note.id}
@@ -965,7 +1022,10 @@ export default function Xiaohongshu() {
                   <Checkbox
                     size="sm"
                     aria-label={`选择笔记 ${note.title}`}
-                    isDisabled={busy || note.kind !== 'image-text'}
+                    isDisabled={
+                      busy ||
+                      (note.kind !== 'image-text' && note.status !== 'complete')
+                    }
                     isSelected={selectedIds.has(note.id)}
                     onValueChange={(value) => selectNote(note.id, value)}
                   />
@@ -1005,11 +1065,15 @@ export default function Xiaohongshu() {
           </div>
         </div>
       </section>
-      <Modal
+      <SubscriptionDialog
         isOpen={adding}
         onClose={() => {
-          if (!active.current) setAdding(false);
+          if (!active.current) {
+            setAdding(false);
+            setResolution(null);
+          }
         }}
+        isKeyboardDismissDisabled={busy}
       >
         <ModalContent>
           <ModalHeader>订阅小红书博主</ModalHeader>
@@ -1091,7 +1155,7 @@ export default function Xiaohongshu() {
             )}
           </ModalFooter>
         </ModalContent>
-      </Modal>
+      </SubscriptionDialog>
       <Modal
         isOpen={!!noteId}
         onClose={() => {

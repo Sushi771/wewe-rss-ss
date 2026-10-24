@@ -1,4 +1,5 @@
-import { Button, Progress } from '@nextui-org/react';
+import { SubscriptionProgress } from '@web/components/SubscriptionPrimitives';
+import { Button } from '@nextui-org/react';
 import { useEffect, useRef, useState } from 'react';
 import { trpc } from '@web/utils/trpc';
 
@@ -151,100 +152,87 @@ export default function ManualRefreshProgress({
       ? disclosure.open
       : batch.state === 'paused';
   return (
-    <section
-      aria-label={fullySuccessful ? '最近更新' : '全部更新进度'}
-      aria-live="polite"
-      className={
+    <SubscriptionProgress
+      ariaLabel={fullySuccessful ? '最近更新' : '全部更新进度'}
+      compact={fullySuccessful}
+      value={batch.coverage ? batch.coverage.completed : accepted}
+      total={batch.items.length}
+      progressLabel="已开始更新的订阅数量"
+      label={
+        batch.coverage
+          ? `已完成 ${batch.coverage.completed}/${batch.coverage.expected} · ${status}`
+          : `共 ${batch.items.length} 个 · 排队 ${queued} · 已开始 ${accepted} · 内容已同步 ${synced} · ${status}`
+      }
+      open={detailsOpen}
+      onOpenChange={(open) => setDisclosure({ batchId: batch.batchId, open })}
+      summary={
         fullySuccessful
-          ? 'px-3 py-1 text-xs text-neutral-500'
-          : 'subscription-progress-summary'
+          ? recentSuccess === batch.batchId
+            ? '本轮全部更新完成。'
+            : lastSuccess
+          : detailsOpen
+            ? '收起逐号进度'
+            : '查看逐号进度'
+      }
+      notice={
+        !fullySuccessful && batch.coverage && batch.coverage.anomalies > 0 ? (
+          <p role="alert">部分更新需要处理，请查看详情。</p>
+        ) : null
+      }
+      actions={
+        <>
+          {' '}
+          {['queued', 'running', 'paused'].includes(batch.state) && (
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={acting}
+              onPress={() => void act('stop')}
+            >
+              停止剩余更新
+            </Button>
+          )}
+          {canResume && (
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={acting}
+              onPress={() => void act('resume')}
+            >
+              继续处理
+            </Button>
+          )}
+          {error && <p role="alert">{error}</p>}
+        </>
       }
     >
-      {!fullySuccessful && (
-        <Progress
-          size="sm"
-          value={batch.coverage ? batch.coverage.completed : accepted}
-          maxValue={batch.items.length}
-          aria-label="已开始更新的订阅数量"
-          label={
-            batch.coverage
-              ? `已完成 ${batch.coverage.completed}/${batch.coverage.expected} · ${status}`
-              : `共 ${batch.items.length} 个 · 排队 ${queued} · 已开始 ${accepted} · 内容已同步 ${synced} · ${status}`
-          }
-        />
+      {' '}
+      {batch.coverage && (
+        <p>
+          {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 已跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
+          {fullySuccessful ? '本轮全部更新完成。' : '本轮尚未全部更新完成。'}
+        </p>
       )}
-      {!fullySuccessful && batch.coverage && batch.coverage.anomalies > 0 && (
-        <p role="alert">部分更新需要处理，请查看详情。</p>
-      )}
-      {['queued', 'running', 'paused'].includes(batch.state) && (
-        <Button
-          size="sm"
-          variant="light"
-          isDisabled={acting}
-          onPress={() => void act('stop')}
-        >
-          停止剩余更新
-        </Button>
-      )}
-      {canResume && (
-        <Button
-          size="sm"
-          variant="light"
-          isDisabled={acting}
-          onPress={() => void act('resume')}
-        >
-          继续处理
-        </Button>
-      )}
-      {error && <p role="alert">{error}</p>}
-      <details open={detailsOpen} className="w-full">
-        <summary
-          className="cursor-pointer select-none py-1"
-          aria-expanded={detailsOpen}
-          onClick={(event) => {
-            event.preventDefault();
-            setDisclosure({ batchId: batch.batchId, open: !detailsOpen });
-          }}
-        >
-          {fullySuccessful
-            ? recentSuccess === batch.batchId
-              ? '本轮全部更新完成。'
-              : lastSuccess
-            : detailsOpen
-              ? '收起逐号进度'
-              : '查看逐号进度'}
-        </summary>
-        <div className="max-h-64 overflow-y-auto">
-          {batch.coverage && (
-            <p>
-              {`本轮应更新 ${batch.coverage.expected} · 本轮已提交 ${batch.coverage.submitted} · 已完成 ${batch.coverage.completed} · 已跳过 ${batch.coverage.legitimateSkipped} · 待完成 ${batch.coverage.pending} · 异常 ${batch.coverage.anomalies}。`}
-              {fullySuccessful
-                ? '本轮全部更新完成。'
-                : '本轮尚未全部更新完成。'}
-            </p>
-          )}
-          <ul>
-            {batch.items.map((item) => (
-              <li key={item.index} className="py-1 text-xs">
-                {feeds.find((feed) => feed.id === item.feedId)?.mpName ||
-                  `第 ${item.index + 1} 个公众号`}
-                ：
-                {item.state === 'queued'
-                  ? '排队，尚未发送'
-                  : item.state === 'submitting'
-                    ? '正在开始，结果待确认'
-                    : item.state === 'cancelled'
-                      ? '已取消，未发送'
-                      : item.state === 'succeeded'
-                        ? '内容已同步'
-                        : item.state === 'waiting'
-                          ? '等待内容同步'
-                          : '检查未完成'}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </details>
-    </section>
+      <ul>
+        {batch.items.map((item) => (
+          <li key={item.index} className="py-1 text-xs">
+            {feeds.find((feed) => feed.id === item.feedId)?.mpName ||
+              `第 ${item.index + 1} 个公众号`}
+            ：
+            {item.state === 'queued'
+              ? '排队，尚未发送'
+              : item.state === 'submitting'
+                ? '正在开始，结果待确认'
+                : item.state === 'cancelled'
+                  ? '已取消，未发送'
+                  : item.state === 'succeeded'
+                    ? '内容已同步'
+                    : item.state === 'waiting'
+                      ? '等待内容同步'
+                      : '检查未完成'}
+          </li>
+        ))}
+      </ul>
+    </SubscriptionProgress>
   );
 }
