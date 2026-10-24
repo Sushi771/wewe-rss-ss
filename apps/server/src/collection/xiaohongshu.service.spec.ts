@@ -297,6 +297,124 @@ describe('production XHS router/service → additive SQLite and original export 
       createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'),
     );
   });
+  it('shares literal visible-body/creator search across global, group and creator lists and real ZIP export', async () => {
+    const group = await prisma.managementGroup.create({
+      data: {
+        id: 'synthetic-search-group',
+        name: 'Synthetic search group',
+        platform: 'xiaohongshu',
+      },
+    });
+    const foreign = await prisma.managementGroup.create({
+      data: {
+        id: 'synthetic-search-wechat',
+        name: 'Synthetic other platform',
+        platform: 'wechat',
+      },
+    });
+    await prisma.xhsCreator.update({
+      where: { id: creatorId },
+      data: { displayName: 'AlphaAuthor', groupId: null },
+    });
+    const second = await prisma.xhsCreator.create({
+      data: {
+        id: 'synthetic-search-second',
+        displayName: 'BlueAuthor',
+        profileUrl:
+          'https://www.xiaohongshu.com/user/profile/synthetic-search-second',
+        groupId: group.id,
+      },
+    });
+    const firstId = JSON.stringify(['xiaohongshu', 'note', 'search-first']),
+      secondId = JSON.stringify(['xiaohongshu', 'note', 'search-second']);
+    await prisma.xhsNote.create({
+      data: {
+        id: firstId,
+        creatorId,
+        title: 'Literal Entry',
+        publishTime: 1760000000,
+        status: 'complete',
+        kind: 'image-text',
+        contentHtml:
+          '<div id="js_content"><p>Visible A&amp;B 100%_</p><script>script-only-secret</script><span hidden>hidden-only-secret</span><span style="display:none">style-only-secret</span><img alt="attribute-only-secret" src="data:image/png;base64,' +
+          png +
+          '"></div>',
+      },
+    });
+    await prisma.xhsNote.create({
+      data: {
+        id: secondId,
+        creatorId: second.id,
+        title: 'Second Entry',
+        publishTime: 1760000001,
+        status: 'complete',
+        kind: 'image-text',
+        contentHtml: '<div id="js_content"><p>Other visible words</p></div>',
+      },
+    });
+    const api = caller().xiaohongshu;
+    expect((await api.notes({})).items.map((n) => n.creatorId)).toEqual([
+      second.id,
+      creatorId,
+    ]);
+    expect((await api.notes({ search: 'a&b' })).items.map((n) => n.id)).toEqual(
+      [firstId],
+    );
+    expect(
+      (await api.notes({ search: '100%_' })).items.map((n) => n.id),
+    ).toEqual([firstId]);
+    expect((await api.notes({ search: 'BLUEAUTHOR' })).items).toMatchObject([
+      {
+        id: secondId,
+        creatorId: second.id,
+        creatorName: 'BlueAuthor',
+        groupId: group.id,
+      },
+    ]);
+    expect(
+      (await api.notes({ search: 'entry', groupId: null })).items.map(
+        (n) => n.id,
+      ),
+    ).toEqual([firstId]);
+    expect(
+      (await api.notes({ search: 'visible', groupId: group.id })).items.map(
+        (n) => n.id,
+      ),
+    ).toEqual([secondId]);
+    expect((await api.notes({ creatorId, groupId: group.id })).items).toEqual(
+      [],
+    );
+    for (const term of [
+      'script-only-secret',
+      'hidden-only-secret',
+      'style-only-secret',
+      'attribute-only-secret',
+      'image/png',
+      'iVBORw0KGgo',
+      '<p>',
+    ]) {
+      expect((await api.notes({ search: term })).items).toHaveLength(0);
+      await expect(api.export({ search: term })).rejects.toMatchObject({
+        code: 'PRECONDITION_FAILED',
+      });
+    }
+    await expect(api.notes({ groupId: foreign.id })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    expect((await api.export({ search: 'visible' })).notes).toBe(2);
+    expect(
+      (await api.export({ search: 'BLUEAUTHOR', groupId: group.id })).notes,
+    ).toBe(1);
+    expect((await api.export({ search: '100%_', groupId: null })).notes).toBe(
+      1,
+    );
+    await expect(
+      api.export({ groupId: group.id, noteIds: [firstId] }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(
+      JSON.stringify((await api.notes({ search: 'visible' })).items),
+    ).not.toContain('contentHtml');
+  }, 30000);
   it.each(['unverified', 'summary', 'author', 'media', 'cursor'])(
     'rejects failed %s evidence before writing trusted notes',
     async (kind) => {

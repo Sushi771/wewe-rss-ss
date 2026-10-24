@@ -3,7 +3,8 @@ import { articleFilterShape, orderedArticleDates } from './article-date-filter';
 
 export const xhsNoteFilterSchema = z
   .object({
-    creatorId: z.string().min(1).max(128),
+    creatorId: z.string().min(1).max(128).optional(),
+    groupId: z.string().min(1).max(128).nullable().optional(),
     search: articleFilterShape.search,
     dateStart: articleFilterShape.dateStart,
     dateEnd: articleFilterShape.dateEnd,
