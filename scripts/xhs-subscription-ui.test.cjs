@@ -136,6 +136,7 @@ function fixture() {
     expired = false,
     cancelledPicker = false,
     failStatus = false;
+  let bodyData = null;
   let releaseResolve;
   const api = Object.fromEntries(
     [
@@ -238,7 +239,7 @@ function fixture() {
         });
       },
     },
-    body: { useQuery: () => query(null) },
+    body: { useQuery: () => query(bodyData) },
   };
   api.notes = {
     query: async (input) => {
@@ -274,6 +275,7 @@ function fixture() {
       'Button',
       'Input',
       'Checkbox',
+      'Chip',
       'Modal',
       'ModalHeader',
       'ModalBody',
@@ -304,6 +306,7 @@ function fixture() {
     },
     '@web/components/SubscriptionPrimitives': primitives,
     '@web/components/ManagementFolders': 'ManagementFolders',
+    '@web/components/ArticleReader': 'ArticleReader',
     '@web/components/ArticleDateFilter': 'ArticleDateFilter',
     '@web/utils/article-date-selection': dateHelpers,
     '@wewe-rss/shared': shared,
@@ -376,6 +379,7 @@ function fixture() {
       global.fetch = previousFetch;
     },
     settings(o) {
+      if ('body' in o) bodyData = o.body;
       if (o.kind) resolveKind = o.kind;
       if ('existing' in o) existing = o.existing;
       if ('expired' in o) expired = o.expired;
@@ -813,6 +817,81 @@ test('resuming waits for executor release, uses original task identity and newly
       f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
       true,
     );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('search clear and hidden-filter feedback match WeChat; Escape closes input without dropping filter', async () => {
+  const previousWindow = global.window;
+  const listeners = new Map();
+  global.window = {
+    addEventListener: (name, callback) => listeners.set(name, callback),
+    removeEventListener: (name, callback) => {
+      if (listeners.get(name) === callback) listeners.delete(name);
+    },
+  };
+  const f = fixture();
+  try {
+    await f.start();
+    await f.button('搜索笔记').props.onPress();
+    const input = f.find('Input', '搜索笔记标题或正文');
+    assert.equal(input.props.autoFocus, true);
+    assert.equal(input.props.isClearable, true);
+    assert.equal(input.props.maxLength, 200);
+    assert.ok(f.render().some((node) => node.props?.id === 'xhs-search-panel'));
+    input.props.onValueChange('存档');
+    f.render();
+    listeners.get('keydown')({ key: 'Escape' });
+    assert.equal(f.find('Input', '搜索笔记标题或正文'), undefined);
+    const chip = f.find('Chip', '搜索：存档；清除关键词');
+    assert.ok(chip);
+    chip.props.onClose();
+    assert.equal(f.find('Chip', '搜索：存档；清除关键词'), undefined);
+    assert.ok(f.find('Checkbox', '选择笔记 苹果图文'));
+    await f.button('搜索笔记').props.onPress();
+    f.find('Input', '搜索笔记标题或正文').props.onValueChange('存档');
+    f.find('Input', '搜索笔记标题或正文').props.onClear();
+    assert.equal(f.find('Input', '搜索笔记标题或正文').props.value, '');
+  } finally {
+    f.dispose();
+    global.window = previousWindow;
+  }
+});
+
+test('saved note uses the common reader/find component, preserves images, and reserves Escape while finding', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.settings({
+      body: {
+        title: '合成正文',
+        text: 'A <script> & 关键词\n第二段',
+        images: ['data:image/png;base64,c3ludGhldGlj'],
+        kind: 'image-text',
+      },
+    });
+    f.render()
+      .find(
+        (node) => node.type === 'button' && node.props.children === '苹果存档',
+      )
+      .props.onClick();
+    let reader = f.find('ArticleReader');
+    assert.ok(reader);
+    assert.match(reader.props.contentHtml, /A &lt;script&gt; &amp; 关键词/);
+    assert.match(
+      reader.props.contentHtml,
+      /data:image\/png;base64,c3ludGhldGlj/,
+    );
+    assert.equal(reader.props.findOpen, false);
+    reader.props.onFindOpenChange(true);
+    const modal = f
+      .render()
+      .find((node) => node.type === 'Modal' && node.props.size === '4xl');
+    assert.equal(modal.props.isKeyboardDismissDisabled, true);
+    modal.props.onClose();
+    reader = f.find('ArticleReader');
+    assert.equal(reader.props.findOpen, false);
   } finally {
     f.dispose();
   }

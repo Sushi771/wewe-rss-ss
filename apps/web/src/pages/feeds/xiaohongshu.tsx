@@ -12,6 +12,7 @@ import {
 import {
   Button,
   Checkbox,
+  Chip,
   Input,
   Modal,
   ModalBody,
@@ -23,6 +24,7 @@ import {
 } from '@nextui-org/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ArticleDateFilter from '@web/components/ArticleDateFilter';
+import ArticleReader from '@web/components/ArticleReader';
 import type { ArticleDateSelection } from '@web/utils/article-date-selection';
 import { dateSelectionFilter } from '@web/utils/article-date-selection';
 import {
@@ -37,6 +39,7 @@ import {
   exportArchiveBatches,
   toggleLoadedSelection,
   selectedImageNotes,
+  noteReaderHtml,
   taskFinished,
   taskSettling,
   taskText,
@@ -92,6 +95,8 @@ export default function Xiaohongshu() {
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
   const [noteId, setNoteId] = useState('');
+  const [readerFindOpen, setReaderFindOpen] = useState(false);
+  useEffect(() => setReaderFindOpen(false), [noteId]);
   const [loadedCount, setLoadedCount] = useState(20);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState<
@@ -139,6 +144,15 @@ export default function Xiaohongshu() {
     start: '',
     end: '',
   });
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !noteId && !adding && !exportOpen)
+        setSearchOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [noteId, adding, exportOpen]);
   const parsedDates = useMemo(
     () => articleFilterSchema.safeParse(dateSelectionFilter(dateSelection)),
     [dateSelection],
@@ -211,6 +225,10 @@ export default function Xiaohongshu() {
   const body = trpc.xiaohongshu.body.useQuery(
     { creatorId, noteId },
     { enabled: !!current && !!noteId, retry: false },
+  );
+  const readerHtml = useMemo(
+    () => (body.data ? noteReaderHtml(body.data) : ''),
+    [body.data],
   );
   const visibleNotes = useMemo(
     () =>
@@ -1127,8 +1145,12 @@ export default function Xiaohongshu() {
           />
         </fieldset>
         {searchOpen && (
-          <div className="px-4 py-2">
+          <div id="xhs-search-panel" className="px-4 py-2">
             <Input
+              autoFocus
+              isClearable
+              onClear={() => handleSearch('')}
+              maxLength={200}
               aria-label="搜索笔记标题或正文"
               placeholder="搜索标题或已保存正文…"
               value={search}
@@ -1136,6 +1158,30 @@ export default function Xiaohongshu() {
               isDisabled={busy}
             />
           </div>
+        )}
+        {!searchOpen && search !== '' && (
+          <div className="min-w-0 shrink-0 px-4 py-2">
+            <Chip
+              size="sm"
+              variant="flat"
+              title={`搜索：${search}`}
+              aria-label={`搜索：${search}；清除关键词`}
+              isDisabled={busy}
+              onClose={() => handleSearch('')}
+              classNames={{
+                base: 'max-w-full',
+                content: 'min-w-0 truncate',
+                closeButton: 'shrink-0',
+              }}
+            >
+              搜索：{search}
+            </Chip>
+          </div>
+        )}
+        {search.trim() && (
+          <p role="status" className="px-4 py-1 text-xs text-neutral-500">
+            搜索当前博主的标题与已保存正文；未下载的正文不在搜索范围内。搜索不会联网取文。
+          </p>
         )}
         <div className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
           <Button
@@ -1436,8 +1482,12 @@ export default function Xiaohongshu() {
       </SubscriptionDialog>
       <Modal
         isOpen={!!noteId}
+        isKeyboardDismissDisabled={readerFindOpen}
         onClose={() => {
-          if (!active.current) setNoteId('');
+          if (!active.current) {
+            setReaderFindOpen(false);
+            setNoteId('');
+          }
         }}
         size="4xl"
         scrollBehavior="inside"
@@ -1464,17 +1514,12 @@ export default function Xiaohongshu() {
                       字节。播放尚未验证，请保存到本机后检查。
                     </p>
                   )}
-                  <p className="whitespace-pre-wrap break-words">
-                    {body.data.text}
-                  </p>
-                  {body.data.images.map((src, index) => (
-                    <img
-                      key={index}
-                      src={src}
-                      alt={`第 ${index + 1} 张归档${body.data?.kind === 'video' ? '封面' : '图片'}`}
-                      className="h-auto max-w-full"
-                    />
-                  ))}
+                  <ArticleReader
+                    key={`${creatorId}:${noteId}`}
+                    contentHtml={readerHtml}
+                    findOpen={readerFindOpen}
+                    onFindOpenChange={setReaderFindOpen}
+                  />
                 </article>
               )
             )}

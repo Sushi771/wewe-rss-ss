@@ -113,3 +113,24 @@ export async function exportArchiveBatches<
   }
   return { completed, total: ids.length, cancelled: false };
 }
+
+/** Compose the existing verified text/image response for the shared inert reader.
+ * Note text remains text, including HTML-looking snippets and literal symbols. */
+export function noteReaderHtml(body: {
+  text: string;
+  images: readonly string[];
+}) {
+  const escape = (value: string) =>
+    value.replace(
+      /[&<>"']/g,
+      (char) =>
+        ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;',
+        })[char]!,
+    );
+  return `<article><p style="white-space:pre-wrap">${escape(body.text)}</p>${body.images.map((src, index) => `<img src="${escape(src)}" alt="第 ${index + 1} 张归档图片">`).join('')}</article>`;
+}
