@@ -12,6 +12,8 @@ const messages = {
     '未找到已安装的 Docker Desktop。请检查原安装，不要重新安装或迁移数据。',
   DOCKER_NOT_READY:
     'Docker 引擎未能在两分钟内就绪。请打开原 Docker Desktop 检查状态，再点图标。',
+  DOCKER_STATUS_UNAVAILABLE:
+    '暂时无法确认 Docker Desktop 的运行状态。请稍后重试；原容器和数据未改动。',
   CONTAINER_PIN_MISSING:
     '缺少既有容器身份记录。请由维护者恢复 private-data/desktop-start/container.json。',
   CONTAINER_MISMATCH:
@@ -42,7 +44,12 @@ function safeFailure(error) {
     : 'WEWE_START_FAILED';
   return { code, message: messages[code] };
 }
-function command(executable, args, timeout = 5000) {
+function command(
+  executable,
+  args,
+  timeout = 5000,
+  code = 'CONTAINER_UNAVAILABLE',
+) {
   return new Promise((resolve, reject) =>
     execFile(
       executable,
@@ -54,9 +61,7 @@ function command(executable, args, timeout = 5000) {
         encoding: 'utf8',
       },
       (error, stdout) =>
-        error
-          ? reject(failure('CONTAINER_UNAVAILABLE'))
-          : resolve(stdout.trim()),
+        error ? reject(failure(code)) : resolve(stdout.trim()),
     ),
   );
 }
@@ -176,25 +181,27 @@ function realAdapter(installation) {
           resolve();
         });
       }),
-    desktopRunning: async () => {
+    desktopRunning: async (timeout = 5000) => {
       const ps = path.join(
         process.env.SystemRoot,
         'System32/WindowsPowerShell/v1.0/powershell.exe',
       );
-      return (
-        (
-          await command(
-            ps,
-            [
-              '-NoProfile',
-              '-NonInteractive',
-              '-Command',
-              "[bool](Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue)",
-            ],
-            5000,
-          )
-        ).toLowerCase() === 'true'
-      );
+      const value = (
+        await command(
+          ps,
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            "[bool](Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue)",
+          ],
+          timeout,
+          'DOCKER_STATUS_UNAVAILABLE',
+        )
+      ).toLowerCase();
+      if (!['true', 'false'].includes(value))
+        throw failure('DOCKER_STATUS_UNAVAILABLE');
+      return value === 'true';
     },
     inspect: async (pin) => {
       // A missing/redirected persistent store must not silently become a fresh license instance.
@@ -294,13 +301,41 @@ async function ensureDependencies(
   if (!(await a.engineReady(3000))) {
     if (reuseOnly) throw failure('DOCKER_NOT_READY');
     onProgress('engine');
-    if (!(await a.desktopRunning())) await a.launchDesktop();
-    await waitReady(
-      a,
-      (timeout) => a.engineReady(timeout),
-      120000,
-      'DOCKER_NOT_READY',
-    );
+    const end = a.now() + 120000;
+    let desktopConfirmed = false;
+    let statusUnreadable = false;
+    for (;;) {
+      if (a.now() >= end)
+        throw failure(
+          statusUnreadable ? 'DOCKER_STATUS_UNAVAILABLE' : 'DOCKER_NOT_READY',
+        );
+      // A cold process query can time out before Docker is ready. Unknown is
+      // not stopped: retry within the same deadline, without duplicate starts.
+      if (!desktopConfirmed) {
+        try {
+          const running = await a.desktopRunning(
+            Math.max(1, Math.min(5000, end - a.now())),
+          );
+          statusUnreadable = false;
+          if (a.now() >= end) throw failure('DOCKER_NOT_READY');
+          if (!running) await a.launchDesktop();
+          desktopConfirmed = true;
+        } catch (error) {
+          if (error.code !== 'DOCKER_STATUS_UNAVAILABLE') throw error;
+          statusUnreadable = true;
+        }
+      }
+      if (
+        a.now() < end &&
+        (await a.engineReady(Math.max(1, Math.min(3000, end - a.now()))))
+      )
+        break;
+      if (a.now() >= end)
+        throw failure(
+          statusUnreadable ? 'DOCKER_STATUS_UNAVAILABLE' : 'DOCKER_NOT_READY',
+        );
+      await a.sleep(Math.min(1000, end - a.now()));
+    }
   }
   onProgress('dependency');
   let c = validateContainer(await a.inspect(pin), pin, projectRoot);

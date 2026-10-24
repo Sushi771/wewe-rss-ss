@@ -313,6 +313,146 @@ test('Desktop already starting is waited for without another Desktop process', a
   await ensureDependencies(f.a, pin, options);
   assert.equal(f.calls.includes('desktop'), false);
 });
+
+test('cold Desktop status query failure recovers before one pinned start', async () => {
+  let reads = 0;
+  let engine = false;
+  const f = fixture({
+    engineReady: async () => engine,
+    desktopRunning: async () => {
+      if (++reads === 1) throw failure('DOCKER_STATUS_UNAVAILABLE');
+      return false;
+    },
+    launchDesktop: async () => {
+      f.calls.push('desktop');
+      engine = true;
+    },
+  });
+  f.setContainer(container(false));
+  assert.deepEqual(await ensureDependencies(f.a, pin, options), {
+    status: 'started',
+  });
+  assert.equal(reads, 2);
+  assert.equal(f.calls.filter((c) => c === 'desktop').length, 1);
+  assert.equal(f.calls.filter((c) => c.startsWith('start:')).length, 1);
+});
+
+test('engine recovering during unreadable Desktop query is reused without launch', async () => {
+  let engines = 0;
+  const f = fixture({
+    engineReady: async () => ++engines > 1,
+    desktopRunning: async () => {
+      throw failure('DOCKER_STATUS_UNAVAILABLE');
+    },
+  });
+  await ensureDependencies(f.a, pin, options);
+  assert.equal(f.calls.includes('desktop'), false);
+});
+
+test('persistent unreadable Desktop status has bounded accurate failure and no container effects', async () => {
+  const f = fixture({
+    engineReady: async () => false,
+    desktopRunning: async (timeout) => {
+      assert.ok(timeout > 0 && timeout <= 5000);
+      await f.a.sleep(timeout);
+      throw failure('DOCKER_STATUS_UNAVAILABLE');
+    },
+  });
+  await assert.rejects(ensureDependencies(f.a, pin, options), {
+    code: 'DOCKER_STATUS_UNAVAILABLE',
+  });
+  assert.equal(f.a.now(), 120000);
+  assert.deepEqual(f.calls, []);
+});
+
+test('real Desktop adapter classifies command timeouts, read failure and malformed output separately from containers', async () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, 'desktop-dependencies.cjs'),
+    'utf8',
+  );
+  for (const output of [
+    Error('private detail'),
+    Object.assign(Error('timeout'), { killed: true }),
+    '',
+    'unknown',
+    'True',
+    'False',
+  ]) {
+    const module = { exports: {} };
+    vm.runInNewContext(source, {
+      module,
+      __dirname,
+      process,
+      Buffer,
+      setTimeout,
+      fetch,
+      require: (name) =>
+        name === './lib.cjs'
+          ? {
+              hostEffects: {
+                fs,
+                processes: {
+                  execFile: (_, args, options, callback) => {
+                    assert.equal(options.timeout, 1234);
+                    assert.ok(
+                      args.includes(
+                        "[bool](Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue)",
+                      ),
+                    );
+                    callback(
+                      output instanceof Error ? output : null,
+                      output instanceof Error ? '' : output,
+                    );
+                  },
+                },
+              },
+            }
+          : require(name),
+    });
+    const check = module.exports.realAdapter({}).desktopRunning(1234);
+    if (output === 'True' || output === 'False')
+      assert.equal(await check, output === 'True');
+    else
+      await assert.rejects(
+        check,
+        (e) =>
+          e.code === 'DOCKER_STATUS_UNAVAILABLE' &&
+          !e.message.includes('private detail'),
+      );
+  }
+});
+
+test('repeated opens and retry after a failed lookup preserve one Desktop and container start', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-cold-retry-'));
+  const lock = path.join(dir, 'launch.lock');
+  let engine = false;
+  let blocked = true;
+  const f = fixture({
+    engineReady: async () => engine,
+    desktopRunning: async () => {
+      if (blocked) throw failure('DOCKER_STATUS_UNAVAILABLE');
+      return false;
+    },
+    launchDesktop: async () => {
+      f.calls.push('desktop');
+      engine = true;
+    },
+  });
+  f.setContainer(container(false));
+  const open = () =>
+    withLaunchLock(lock, () => ensureDependencies(f.a, pin, options));
+  try {
+    await assert.rejects(open(), { code: 'DOCKER_STATUS_UNAVAILABLE' });
+    assert.equal(fs.existsSync(lock), false);
+    blocked = false;
+    await Promise.all([open(), open()]);
+    await open();
+    assert.equal(f.calls.filter((c) => c === 'desktop').length, 1);
+    assert.equal(f.calls.filter((c) => c.startsWith('start:')).length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true });
+  }
+});
 test('engine timeout is bounded and never inspects or starts container', async () => {
   const f = fixture({ engineReady: async () => false });
   await assert.rejects(ensureDependencies(f.a, pin, options), {
@@ -320,6 +460,18 @@ test('engine timeout is bounded and never inspects or starts container', async (
   });
   assert.equal(f.a.now(), 120000);
   assert.deepEqual(f.calls, ['desktop']);
+});
+
+test('Desktop alive with failed internal service never passes engine readiness or starts another Desktop', async () => {
+  const f = fixture({
+    engineReady: async () => false,
+    desktopRunning: async () => true,
+  });
+  await assert.rejects(ensureDependencies(f.a, pin, options), {
+    code: 'DOCKER_NOT_READY',
+  });
+  assert.equal(f.a.now(), 120000);
+  assert.deepEqual(f.calls, []);
 });
 test('health timeout cannot pass readiness and remains bounded', async () => {
   const f = fixture({ healthy: async () => false });
