@@ -9,6 +9,10 @@
 
 </div>
 
+## 小红书订阅功能开发（2026-10-24）
+
+本轮目标为“笔记/主页链接识别作者 → 确认订阅 → 更新列表 → 勾选图文批量下载正文图片到本机 → 增量去重”。[产品说明](docs/xiaohongshu/PRODUCT.md)、[交互设计](docs/xiaohongshu/DESIGN.md)、[技术与接口](docs/xiaohongshu/TECHNICAL.md)、[开发交接](docs/xiaohongshu/DEVELOPMENT.md)和[验收矩阵](docs/xiaohongshu/ACCEPTANCE.md)已建立初稿，待实现集成校准；目标行为不代表已完成验收。本轮仅使用合成数据，真实扩大采集与生产部署仍待确认。
+
 ## 本机 Wechat2RSS 配置准备（2026-10-09）
 
 本轮继续准备现有 Wechat2RSS Provider 的本机接入，密钥由用户随后在本机填写。准确文件入口、字段及检查命令见[本机填写与接入检查](docs/WECHAT2RSS_LOCAL_SETUP.md)：实例配置使用已有 `.env.wechat2rss`，WeWe 配置使用已有 `apps/server/.env.local`，保留其他设置，不用模板覆盖私有文件。
