@@ -8,16 +8,39 @@ export type SubscriptionResolution = XhsSubscriptionResolution;
 export type SubscriptionTask = Omit<
   XhsSubscriptionTask,
   'taskId' | 'creatorId' | 'message'
-> & { message?: string; resumable?: boolean };
+> & {
+  message?: string;
+  resumable?: boolean;
+  resumedFromTaskId?: string;
+  supersededByTaskId?: string;
+};
 export type TaskReceipt = { taskId: string; creatorId?: string };
-export type RecoveredTask = XhsSubscriptionTask;
+export type RecoveredTask = XhsSubscriptionTask & {
+  resumedFromTaskId?: string;
+  supersededByTaskId?: string;
+};
+export type RecentTasksClient = {
+  recentTasks: {
+    query(input?: {
+      creatorId?: string;
+      limit?: number;
+    }): Promise<{ items: RecoveredTask[] }>;
+  };
+};
 
 export function preferredRecoveredTask(tasks: readonly RecoveredTask[]) {
-  return (
-    tasks.find((task) => !taskFinished(task)) ||
-    tasks.find((task) => task.resumable || taskSettling(task))
+  const eligible = tasks.filter((task) => !task.supersededByTaskId);
+  const active = eligible.filter(
+    (task) => !taskFinished(task) || taskSettling(task),
   );
+  if (active.length) return active.length === 1 ? active[0] : undefined;
+  const resumable = eligible.filter((task) => mayResumeTask(task));
+  return resumable.length === 1 ? resumable[0] : undefined;
 }
+export const mayResumeTask = (task: SubscriptionTask) =>
+  task.resumable === true &&
+  !task.supersededByTaskId &&
+  task.code !== 'XHS_TASK_RECEIPT_UNCERTAIN';
 
 export function canAdoptRecoveredTask(input: {
   requestedGeneration: number;
@@ -33,6 +56,10 @@ export function canAdoptRecoveredTask(input: {
 }
 
 export function taskNextStep(task: SubscriptionTask) {
+  if (task.supersededByTaskId)
+    return '此任务已由新任务接续，请查看接续任务；不会再次续跑旧任务。';
+  if (task.code === 'XHS_TASK_RECEIPT_UNCERTAIN')
+    return '上次提交的回执无法确认，已停止自动重试。请先核对本地任务与已保存内容；不能直接续跑或自动重发。';
   if (taskSettling(task))
     return '正在结束当前保存，请等待确认；不会重复开始任务。';
   if (!taskFinished(task)) return '正在查看已存在任务的进度，不会创建新采集。';
@@ -53,7 +80,11 @@ export const taskFinished = (task: SubscriptionTask) =>
   task.state !== 'queued' && task.state !== 'running';
 
 export const taskSettling = (task: SubscriptionTask) =>
-  taskFinished(task) && task.state !== 'completed' && task.resumable === false;
+  taskFinished(task) &&
+  task.state !== 'completed' &&
+  task.resumable === false &&
+  task.code !== 'XHS_TASK_RECEIPT_UNCERTAIN' &&
+  !task.supersededByTaskId;
 
 export function selectedImageNotes<T extends { id: string; kind: string }>(
   notes: T[],

@@ -82,7 +82,7 @@ const status = (state = 'running', kind = 'download') => ({
   remaining: state === 'completed' ? 0 : 2,
 });
 
-function fixture() {
+function fixture(options = {}) {
   let index = 0;
   const slots = [],
     effects = [],
@@ -170,7 +170,9 @@ function fixture() {
       publishTime: 0,
     },
   ];
-  let taskStatus = status();
+  let taskStatus = options.taskStatus || status();
+  let recentItems = options.recentTasks || [];
+  const recoveryQueries = [];
   let resolveKind = 'note',
     existing = null,
     expired = false,
@@ -252,6 +254,13 @@ function fixture() {
       },
     ]),
   );
+  api.recentTasks = {
+    query: async (input) => {
+      recoveryQueries.push(input);
+      if (options.discoveryGate) await options.discoveryGate;
+      return { items: recentItems };
+    },
+  };
   api.task = {
     query: async (input) => {
       calls.push(['task', input]);
@@ -409,6 +418,12 @@ function fixture() {
       '@nextui-org/react': ui,
     },
   );
+  const Recovery = load('apps/web/src/components/XhsTaskRecovery.tsx', {
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    '@nextui-org/react': ui,
+    './SubscriptionPrimitives': primitives,
+    '@web/utils/xiaohongshu-subscription': helpers,
+  }).default;
   const page = load('apps/web/src/pages/feeds/xiaohongshu.tsx', {
     react,
     'react/jsx-runtime': { jsx: element, jsxs: element },
@@ -418,6 +433,7 @@ function fixture() {
     },
     '@web/components/SubscriptionPrimitives': primitives,
     '@web/components/ManagementFolders': 'ManagementFolders',
+    '@web/components/XhsTaskRecovery': Recovery,
     '@web/components/ArticleReader': 'ArticleReader',
     '@web/components/ArticleDateFilter': 'ArticleDateFilter',
     '@web/utils/article-date-selection': dateHelpers,
@@ -476,6 +492,7 @@ function fixture() {
   };
   return {
     calls,
+    recoveryQueries,
     creators,
     items,
     render,
@@ -496,6 +513,7 @@ function fixture() {
     },
     settings(o) {
       if ('body' in o) bodyData = o.body;
+      if ('recentTasks' in o) recentItems = o.recentTasks;
       if ('connection' in o) connectionData = o.connection;
       if (o.kind) resolveKind = o.kind;
       if ('existing' in o) existing = o.existing;
@@ -1211,6 +1229,170 @@ test('moving group membership invalidates cached note scope and clears stale sel
       false,
     );
   } finally {
+    f.dispose();
+  }
+});
+
+test('fresh page discovers and monitors an existing task using local reads only; cancel/reentry offers explicit resume', async () => {
+  const active = {
+    ...status('running', 'list'),
+    taskId: 'persisted-task',
+    creatorId: 'creator-a',
+  };
+  const first = fixture({ recentTasks: [active], taskStatus: active });
+  try {
+    await first.start(true);
+    await tick();
+    first.render();
+    assert.deepEqual(first.recoveryQueries[0], { limit: 10 });
+    assert.ok(
+      first.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'persisted-task',
+      ),
+    );
+    assert.equal(
+      first.calls.some(([name]) =>
+        [
+          'resumeTask',
+          'refresh',
+          'downloadNotes',
+          'subscribe',
+          'restoreSession',
+        ].includes(name),
+      ),
+      false,
+    );
+    await first.button('取消任务').props.onPress();
+    await tick();
+    first.render();
+  } finally {
+    first.dispose();
+  }
+  const cancelled = { ...active, state: 'cancelled', resumable: true };
+  const second = fixture({ recentTasks: [cancelled], taskStatus: cancelled });
+  try {
+    await second.start(true);
+    assert.ok(second.button('继续未完成任务'));
+    assert.equal(
+      second.calls.some(([name]) =>
+        ['resumeTask', 'refresh', 'downloadNotes'].includes(name),
+      ),
+      false,
+    );
+    await second.button('继续未完成任务').props.onPress();
+    second.render();
+    await tick();
+    assert.equal(
+      second.calls.find(([name]) => name === 'resumeTask')[1].taskId,
+      'persisted-task',
+    );
+    assert.ok(
+      second.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'resumed-task',
+      ),
+    );
+  } finally {
+    second.dispose();
+  }
+});
+
+test('uncertain receipt and consumed old task never enable unsafe resume or endless settling polls', async () => {
+  const old = {
+    ...status('cancelled'),
+    taskId: 'consumed',
+    creatorId: 'creator-a',
+    resumable: true,
+    supersededByTaskId: 'child',
+  };
+  const child = {
+    ...status('running'),
+    taskId: 'child',
+    creatorId: 'creator-a',
+    resumedFromTaskId: 'consumed',
+  };
+  const f = fixture({ recentTasks: [old, child], taskStatus: child });
+  try {
+    await f.start(true);
+    await tick();
+    f.render();
+    assert.ok(
+      f.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'child',
+      ),
+    );
+    assert.equal(
+      f.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'consumed',
+      ),
+      false,
+    );
+  } finally {
+    f.dispose();
+  }
+  const uncertain = {
+    ...status('failed'),
+    taskId: 'uncertain',
+    creatorId: 'creator-a',
+    resumable: false,
+    code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+  };
+  const g = fixture({ recentTasks: [uncertain], taskStatus: uncertain });
+  try {
+    await g.start(true);
+    await g.button('查看未完成任务').props.onPress();
+    g.render();
+    await tick();
+    assert.equal(g.find('Button', '继续未完成任务'), undefined);
+    assert.equal(
+      g.calls.some(([name]) => name === 'task' || name === 'resumeTask'),
+      false,
+    );
+    assert.ok(
+      g
+        .render()
+        .some(
+          (n) => typeof n === 'string' && n.includes('不能直接续跑或自动重发'),
+        ),
+    );
+  } finally {
+    g.dispose();
+  }
+});
+
+test('late discovery does not replace a newly started task or clear selections after terminal state', async () => {
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const previous = {
+    ...status('running'),
+    taskId: 'late-old',
+    creatorId: 'creator-a',
+  };
+  const f = fixture({ recentTasks: [previous], discoveryGate: gate });
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    await f.button('下载图文到本地 (1)').props.onPress();
+    f.render();
+    release();
+    await tick();
+    f.render();
+    assert.equal(
+      f.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'late-old',
+      ),
+      false,
+    );
+    f.setTask({ ...status('completed'), resumable: false });
+    await tick();
+    f.render();
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    await tick();
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      true,
+    );
+  } finally {
+    release();
     f.dispose();
   }
 });

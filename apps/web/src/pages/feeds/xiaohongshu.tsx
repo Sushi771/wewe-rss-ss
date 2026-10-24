@@ -32,6 +32,7 @@ import {
   formatShanghaiPublicationTime,
 } from '@wewe-rss/shared';
 import ManagementFolders from '@web/components/ManagementFolders';
+import XhsTaskRecovery from '@web/components/XhsTaskRecovery';
 import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
@@ -41,6 +42,10 @@ import {
   selectedImageNotes,
   noteReaderHtml,
   taskFinished,
+  mayResumeTask,
+  preferredRecoveredTask,
+  canAdoptRecoveredTask,
+  taskNextStep,
   taskSettling,
   taskText,
   watchSubscriptionTask,
@@ -49,6 +54,8 @@ import type {
   SubscriptionResolution,
   SubscriptionTask,
   TaskReceipt,
+  RecoveredTask,
+  RecentTasksClient,
 } from '@web/utils/xiaohongshu-subscription';
 import { failureMessage } from '@web/utils/operation-message';
 
@@ -183,10 +190,99 @@ export default function Xiaohongshu() {
   const [directory, setDirectory] = useState('');
   const active = useRef(false);
 
+  const [recoveredTasks, setRecoveredTasks] = useState<RecoveredTask[]>([]);
+  const [recoveryLoading, setRecoveryLoading] = useState(true);
+  const [recoveryError, setRecoveryError] = useState(false);
+  const [recoveryOpen, setRecoveryOpen] = useState(true);
+  const activityGeneration = useRef(0);
+  const recoveryAttempted = useRef(false);
+  const recoveryRequest = useRef(0);
+  const readRecentRef = useRef<() => Promise<void>>(async () => {});
+  const adoptRecoveredTask = useCallback((record: RecoveredTask) => {
+    if (active.current) return;
+    activityGeneration.current++;
+    recoveryAttempted.current = true;
+    queuedCreators.current = [];
+    queuedDownloads.current = [];
+    lastTaskId.current = record.taskId;
+    setTaskCreatorId(record.creatorId);
+    setTask(record);
+    setZipProgress(null);
+    setOperationError('');
+    setProgressOpen(true);
+    cancelPending.current = false;
+    setCancelling(false);
+    const watching = !taskFinished(record) || taskSettling(record);
+    taskRunning.current = watching;
+    active.current = watching;
+    setBusy(watching);
+    setTaskId(watching ? record.taskId : '');
+    setMessage('已找回本地任务记录。继续未完成内容需要明确点击。');
+  }, []);
+  const readRecentTasks = useCallback(async () => {
+    const request = ++recoveryRequest.current;
+    const generation = activityGeneration.current;
+    setRecoveryLoading(true);
+    setRecoveryError(false);
+    try {
+      // Exact supplied contract; this local boundary disappears after backend integration.
+      const client = taskApiRef.current
+        .subscriptionApi as typeof subscriptionApi & RecentTasksClient;
+      const result = await client.recentTasks.query({ limit: 10 });
+      if (request !== recoveryRequest.current) return;
+      setRecoveredTasks(result.items);
+      const chosen = preferredRecoveredTask(result.items);
+      if (
+        canAdoptRecoveredTask({
+          requestedGeneration: generation,
+          currentGeneration: activityGeneration.current,
+          busy: active.current,
+          alreadyRecovered: recoveryAttempted.current,
+        })
+      ) {
+        recoveryAttempted.current = true;
+        if (chosen) adoptRecoveredTask(chosen);
+      }
+    } catch {
+      if (request === recoveryRequest.current) setRecoveryError(true);
+    } finally {
+      if (request === recoveryRequest.current) setRecoveryLoading(false);
+    }
+  }, [adoptRecoveredTask]);
+  readRecentRef.current = readRecentTasks;
+  const invalidateRecoveryRequest = useCallback(() => {
+    recoveryRequest.current++;
+  }, []);
+  useEffect(() => {
+    void readRecentTasks();
+    return invalidateRecoveryRequest;
+  }, [readRecentTasks, invalidateRecoveryRequest]);
+  const selectRecoveredTask = async (record: RecoveredTask) => {
+    if (active.current) return;
+    if (!record.supersededByTaskId) return adoptRecoveredTask(record);
+    const child = recoveredTasks.find(
+      (item) => item.taskId === record.supersededByTaskId,
+    );
+    if (child) return adoptRecoveredTask(child);
+    const generation = ++activityGeneration.current;
+    recoveryAttempted.current = true;
+    try {
+      const childRecord = await subscriptionApi.task.query({
+        taskId: record.supersededByTaskId,
+      });
+      if (generation === activityGeneration.current && !active.current)
+        adoptRecoveredTask(childRecord);
+    } catch {
+      if (generation === activityGeneration.current)
+        setOperationError('接续任务暂时无法读取，请重新读取本地任务记录。');
+    }
+  };
   const startTask = useCallback(
     (receipt: TaskReceipt, kind: 'list' | 'download', total = 0) => {
       if (!receipt.taskId)
         throw new Error('未收到任务编号，请重新读取页面确认操作结果。');
+      activityGeneration.current++;
+      recoveryAttempted.current = true;
       setZipProgress(null);
       taskRunning.current = true;
       setTask({
@@ -370,6 +466,7 @@ export default function Xiaohongshu() {
           setCancelling(false);
           setBusy(false);
           setMessage(taskText(next));
+          void readRecentRef.current();
           void utils.xiaohongshu.list.invalidate();
           void utils.xiaohongshu.notes.invalidate();
           void utils.xiaohongshu.capability.invalidate();
@@ -385,7 +482,7 @@ export default function Xiaohongshu() {
   }, [taskId, startTask]);
   const handleResumeTask = () =>
     run(async () => {
-      if (!task?.resumable || !lastTaskId.current) return;
+      if (!task || !mayResumeTask(task) || !lastTaskId.current) return;
       let pickToken: string | undefined;
       if (task.kind === 'download' && saveSettings?.askEveryTime) {
         const chosen = await localApi<DirectoryChoice>('/directory', {});
@@ -400,11 +497,16 @@ export default function Xiaohongshu() {
         });
         setDirectory(chosen.directory);
       }
+      const previousTaskId = lastTaskId.current;
       const receipt = await subscriptionApi.resumeTask.mutate({
         taskId: lastTaskId.current,
         ...(pickToken ? { pickToken } : {}),
       });
+      setRecoveredTasks((previous) =>
+        previous.filter((record) => record.taskId !== previousTaskId),
+      );
       startTask(receipt, task.kind, task.total);
+      void readRecentRef.current();
     });
   const handleCancelTask = async () => {
     if (!taskId || !taskRunning.current || cancelPending.current) return;
@@ -964,6 +1066,21 @@ export default function Xiaohongshu() {
         className="mac-content feed-content !min-w-0 !overflow-y-auto"
         aria-label="小红书笔记列表"
       >
+        <XhsTaskRecovery
+          tasks={recoveredTasks}
+          loading={recoveryLoading}
+          error={recoveryError}
+          disabled={busy}
+          selectedTaskId={task ? lastTaskId.current : ''}
+          open={recoveryOpen}
+          onOpenChange={setRecoveryOpen}
+          onRetry={() => void readRecentTasks()}
+          onSelect={(record) => void selectRecoveredTask(record)}
+          authorName={(id) =>
+            creators.data?.items.find((item) => item.id === id)?.displayName ||
+            '已保存的博主任务'
+          }
+        />
         {zipProgress && (
           <SubscriptionProgress
             ariaLabel="ZIP 导出进度"
@@ -1032,7 +1149,7 @@ export default function Xiaohongshu() {
                 >
                   {cancelling ? '正在取消' : '取消任务'}
                 </Button>
-              ) : task.resumable ? (
+              ) : mayResumeTask(task) ? (
                 <Button
                   size="sm"
                   variant="light"
@@ -1051,6 +1168,9 @@ export default function Xiaohongshu() {
           >
             <p role="status" className="py-1 text-xs">
               {taskText(task)}
+            </p>
+            <p className="py-1 text-xs text-neutral-500">
+              {taskNextStep(task)}
             </p>
           </SubscriptionProgress>
         )}
