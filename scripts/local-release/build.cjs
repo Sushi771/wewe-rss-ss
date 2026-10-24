@@ -50,6 +50,38 @@ const RUNTIME_WRAPPERS = Object.freeze([
   'offline-guard.cjs',
 ]);
 
+function isolatedViteConfig(web, workspace) {
+  let config = fs.readFileSync(path.join(web, 'vite.config.ts'), 'utf8');
+  for (const anchor of [
+    "import { defineConfig } from 'vite';",
+    "import react from '@vitejs/plugin-react';",
+    'export default defineConfig({',
+    '__dirname',
+  ])
+    if (!config.includes(anchor))
+      throw new Error('Unsupported isolated Vite configuration');
+  // A native package resolver avoids bundling either installed CJS or ESM
+  // dependency internals into the generated configuration's module format.
+  config = config
+    .replace(
+      "import { defineConfig } from 'vite';",
+      "const { defineConfig } = packageRequire('vite');",
+    )
+    .replace(
+      "import react from '@vitejs/plugin-react';",
+      "const react = packageRequire('@vitejs/plugin-react');",
+    )
+    .replaceAll('__dirname', JSON.stringify(slash(web)))
+    .replace(
+      'export default defineConfig({',
+      `export default defineConfig({\n root: ${JSON.stringify(slash(web))},\n envDir: ${JSON.stringify(slash(workspace))},\n cacheDir: ${JSON.stringify(slash(path.join(workspace, '.vite')))},`,
+    );
+  return (
+    `import { createRequire } from 'node:module';\nconst packageRequire = createRequire(${JSON.stringify(path.join(web, 'package.json'))});\n` +
+    config
+  );
+}
+
 function copyRuntimeClosure(sourceRoot, release, { legacy = false } = {}) {
   const helpers = legacy
     ? SERVER_HELPERS.filter(
@@ -616,48 +648,9 @@ function build(options = {}) {
           ),
         );
       } else {
-        // require.resolve selects the installed React plugin's CJS entry. Keep
-        // this generated config CJS too; bundling that entry into an ESM config
-        // otherwise turns its native node:path require into a runtime failure.
-        const isolatedConfig = path.join(workspace, 'vite.config.cts');
+        const isolatedConfig = path.join(workspace, 'vite.config.mts');
         if (options.buildOnly) {
-          let config = fs.readFileSync(
-            path.join(web, 'vite.config.ts'),
-            'utf8',
-          );
-          for (const anchor of [
-            "from 'vite'",
-            "from '@vitejs/plugin-react'",
-            'export default defineConfig({',
-            '__dirname',
-          ])
-            if (!config.includes(anchor))
-              throw new Error('Unsupported isolated Vite configuration');
-          config = config
-            .replace(
-              "from 'vite'",
-              'from ' +
-                JSON.stringify(
-                  slash(
-                    path.join(packageDir('vite', web), 'dist/node/index.js'),
-                  ),
-                ),
-            )
-            .replace(
-              "from '@vitejs/plugin-react'",
-              'from ' +
-                JSON.stringify(
-                  slash(
-                    require.resolve('@vitejs/plugin-react', { paths: [web] }),
-                  ),
-                ),
-            )
-            .replaceAll('__dirname', JSON.stringify(slash(web)))
-            .replace(
-              'export default defineConfig({',
-              `export default defineConfig({\n root: ${JSON.stringify(slash(web))},\n envDir: ${JSON.stringify(slash(workspace))},\n cacheDir: ${JSON.stringify(slash(path.join(workspace, '.vite')))},`,
-            );
-          fs.writeFileSync(isolatedConfig, config);
+          fs.writeFileSync(isolatedConfig, isolatedViteConfig(web, workspace));
         }
         fs.writeFileSync(
           path.join(workspace, 'web.log'),
@@ -881,4 +874,5 @@ module.exports = {
   copyRuntimeClosure,
   SERVER_HELPERS,
   RUNTIME_WRAPPERS,
+  isolatedViteConfig,
 };

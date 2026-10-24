@@ -7,6 +7,7 @@ const {
   copyRuntimeClosure,
   SERVER_HELPERS,
   RUNTIME_WRAPPERS,
+  isolatedViteConfig,
 } = require('./build.cjs');
 const { fingerprint, verifyRelease, hostEffects } = require('./lib.cjs');
 
@@ -86,6 +87,30 @@ test('a missing history helper cannot produce a successful five-helper package',
     );
   assert.throws(() => copyRuntimeClosure(source, release), /ENOENT/);
   assert(!fs.existsSync(path.join(release, 'release.json')));
+});
+
+test('isolated Vite config loads installed packages without rebundling module formats', async (t) => {
+  const root = fixture(t);
+  const web = path.resolve(__dirname, '../../apps/web');
+  const config = path.join(root, 'vite.config.mts');
+  fs.writeFileSync(config, isolatedViteConfig(web, root));
+  const { packageDir } = require('./lib.cjs');
+  const { pathToFileURL } = require('node:url');
+  const vite = await import(
+    pathToFileURL(path.join(packageDir('vite', web), 'dist/node/index.js')).href
+  );
+  const loaded = await vite.loadConfigFromFile(
+    { command: 'build', mode: 'production' },
+    config,
+  );
+  assert.equal(loaded.config.root, web.replace(/\\/g, '/'));
+  assert.equal(loaded.config.envDir, root.replace(/\\/g, '/'));
+  assert.equal(loaded.config.base, '/dash');
+  assert(
+    loaded.config.plugins
+      .flat()
+      .some((plugin) => plugin?.name?.includes('react')),
+  );
 });
 
 test('guarded writes publish artifact evidence only after success and bind opened descriptors', (t) => {
