@@ -26,6 +26,8 @@ import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
 import { XhsSubscriptionService } from '../collection/xhs-subscription.service';
+import { XhsSubscriptionRuntime } from '../collection/xhs-subscription-runtime';
+import { xhsPublicCode } from '../collection/xhs-subscription-errors';
 import { xhsNoteFilterSchema } from '@wewe-rss/shared';
 import { z } from 'zod';
 import {
@@ -118,12 +120,29 @@ export class TrpcRouter {
     private readonly collectionService: CollectionService,
     @Optional() private readonly xiaohongshuService?: XiaohongshuService,
     @Optional() private readonly xhsSubscriptions?: XhsSubscriptionService,
+    @Optional() private readonly xhsRuntime?: XhsSubscriptionRuntime,
   ) {}
 
   private get xhs() {
     return (
       this.xiaohongshuService ?? new XiaohongshuService(this.prismaService)
     );
+  }
+  private requireLocalXhsConnection(ctx: unknown) {
+    if (
+      !(ctx as { isLocalSave?: boolean }).isLocalSave ||
+      privateOnlineMode() ||
+      process.env.WEWE_ACCEPTANCE_MODE === '1'
+    )
+      throw new TRPCError({
+        code: 'FORBIDDEN',
+        message: '连接管理仅允许本机同源页面使用。',
+      });
+    if (!this.xhsRuntime)
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: 'XHS_RUNTIME_UNAVAILABLE',
+      });
   }
 
   private readonly logger = new Logger(this.constructor.name);
@@ -1598,6 +1617,50 @@ export class TrpcRouter {
   });
 
   xiaohongshuRouter = this.trpcService.router({
+    connectionStatus: this.trpcService.protectedProcedure.query(({ ctx }) => {
+      this.requireLocalXhsConnection(ctx);
+      return this.xhsRuntime!.connectionStatus();
+    }),
+    connectSession: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            a1: z.string().min(1).max(8192),
+            webSession: z.string().min(1).max(8192),
+            persist: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .mutation(async ({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        try {
+          return await this.xhsRuntime!.connectSession(input);
+        } catch (error) {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: xhsPublicCode(error, 'XHS_CONNECTION_FAILED'),
+          });
+        }
+      }),
+    restoreSession: this.trpcService.protectedProcedure.mutation(
+      async ({ ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        try {
+          return await this.xhsRuntime!.restoreSession();
+        } catch (error) {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: xhsPublicCode(error, 'XHS_CONNECTION_FAILED'),
+          });
+        }
+      },
+    ),
+    disconnectSession: this.trpcService.protectedProcedure.mutation(
+      ({ ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsRuntime!.disconnectSession();
+      },
+    ),
     resolveSubscription: this.trpcService.protectedProcedure
       .input(z.object({ url: z.string().min(1).max(8192) }).strict())
       .mutation(({ input }) =>

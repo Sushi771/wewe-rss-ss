@@ -45,3 +45,14 @@ export type XhsSubscriptionTask = {
   message: string;
   resumable?: boolean;
 };
+export type XhsConnectionStatus = {
+  liveEnabled: boolean;
+  connected: boolean;
+  stored: boolean | null;
+  verified: boolean;
+  canConnect: boolean;
+  canPersist: boolean;
+  restartRequiresReparse: true;
+  code?: string;
+  message: string;
+};

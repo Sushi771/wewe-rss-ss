@@ -96,11 +96,17 @@ export class RedbookClient {
     userId: string,
     options: RedbookUserPageOptions = {},
   ): Promise<unknown> {
-    return this.request('GET', PROFILE_PATH, {
-      target_user_id: checkedId(userId),
-      xsec_token: checkedText(options.xsecToken ?? '', 4096),
-      xsec_source: checkedText(options.xsecSource ?? '', 128),
-    });
+    return this.request(
+      'GET',
+      PROFILE_PATH,
+      {
+        target_user_id: checkedId(userId),
+        xsec_token: checkedText(options.xsecToken ?? '', 4096),
+        xsec_source: checkedText(options.xsecSource ?? '', 128),
+      },
+      undefined,
+      options.signal,
+    );
   }
 
   getUserNotes(

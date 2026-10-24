@@ -32,6 +32,13 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  capability?(): {
+    sourceConfigured: boolean;
+    canSubscribe: boolean;
+    canRefresh: boolean;
+    canDownload: boolean;
+    message: string;
+  };
   resolve(
     url: string,
   ): Promise<{ inputKind: 'note' | 'profile'; author: XhsAuthor }>;
@@ -110,6 +117,13 @@ export class XhsSubscriptionService implements OnModuleInit {
     this.save = save;
   }
   capability() {
+    if (this.source?.capability) {
+      const capability = this.source.capability();
+      return {
+        ...capability,
+        canDownload: capability.canDownload && !!this.save,
+      };
+    }
     return {
       sourceConfigured: !!this.source,
       canSubscribe: !!this.source,

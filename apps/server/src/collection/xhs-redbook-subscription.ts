@@ -8,6 +8,7 @@ import { XhsSubscriptionSource } from './xhs-subscription.service';
 import { XhsAuthor } from '@wewe-rss/shared';
 import { XhsShortLinkResolver } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { selectXhsNativeDetail } from './xhs-native-media';
 
 const record = (v: unknown): Record<string, unknown> => {
   if (!v || typeof v !== 'object' || Array.isArray(v))
@@ -66,6 +67,14 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     )
       throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
     return { token, source, expiresAt: this.now() + this.lifetime };
+  }
+  clearAccessContext() {
+    for (const access of [...this.tokens.values(), ...this.authors.values()]) {
+      access.token = '';
+      access.source = '';
+    }
+    this.tokens.clear();
+    this.authors.clear();
   }
   private options(authorId: string): RedbookUserPageOptions {
     const context = this.authors.get(authorId);
@@ -187,11 +196,15 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
             : options.signal,
         }));
     return mapRedbookDetail(
-      await this.client.getNoteById(
+      selectXhsNativeDetail(
+        await this.client.getNoteById(
+          noteId,
+          access.token,
+          access.source,
+          signal,
+        ),
+        authorId,
         noteId,
-        access.token,
-        access.source,
-        signal,
       ),
       authorId,
       noteId,
