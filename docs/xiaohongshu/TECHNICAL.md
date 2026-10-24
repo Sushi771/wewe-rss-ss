@@ -66,4 +66,4 @@ Windows凭据库为SQLite所在目录下 `.wewe-xhs-session/session.dpapi`，Cur
 
 原生HTTPS传输只允许edith指定的otherinfo/user_posted/feed路径，禁止重定向和隐式重试；媒体只允许已审核CDN，独立无Cookie请求，按实际流式字节及原归档预算限制。HTTP媒体候选仅对原白名单同主机同路径升级HTTPS，正常校验证书。真实规格以响应和解码为准。
 
-默认工厂尚未配置已核实的profile parser，主页解析会明确返回 `XHS_PROFILE_SCHEMA_UNRECOGNIZED`。端点与合成schema测试已完成，真实主页响应schema及当前账号列表、正文/图片与增量仍需授权后核实并补上严格解析器，不能把此版本称为已完成真实订阅验收。结果与剩余项见 [ACCEPTANCE](ACCEPTANCE.md)。
+默认工厂已配置严格otherinfo解析器：要求内部result成功及basic_info的有界昵称/展示号；稳定作者ID绑定已签名target_user_id及完全匹配的响应URL。red_id不作为稳定ID，若响应携带冲突user_id立即拒绝。独立授权验收已通过主页解析和确认订阅，列表及归档尚未完成。固定上游的v2列表路由返回404，显式改用同一上游支持的v1路由，不自动重试或切换端点；v1已返回成功信封，隔离验收在本地列表数量/结构检查停止，具体数量未保留，需补充脱敏诊断后再次有界核实。结果与剩余项见 [ACCEPTANCE](ACCEPTANCE.md)。

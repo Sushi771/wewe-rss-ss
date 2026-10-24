@@ -13,6 +13,7 @@ const dims = (v: any) => ({
  * source URL is logged; only a proven full-image candidate on the two CDNs wins. */
 export function chooseXhsNativeImage(image: any): string {
   const choices: { url: string; area: number; priority: number }[] = [];
+  const compatibility: typeof choices = [];
   const slot = dims(image);
   const add = (
     raw: unknown,
@@ -44,8 +45,25 @@ export function chooseXhsNativeImage(image: any): string {
     )
       return;
     try {
-      choices.push({
-        url: allowedRedbookMediaUrl(raw).href,
+      // Reject normalization hazards before the shared validator upgrades HTTP.
+      // Explicit default ports and empty userinfo/fragments must also fail closed.
+      if (
+        /^https?:\/\/[^/?#]*[:@]/i.test(raw) ||
+        raw.includes('#') ||
+        /[\\\x00-\x1f\x7f]/.test(decodeURI(raw))
+      )
+        return;
+      const original = new URL(raw);
+      const validated = allowedRedbookMediaUrl(raw);
+      if (
+        validated.hostname !== original.hostname ||
+        validated.pathname !== original.pathname ||
+        validated.search !== original.search
+      )
+        return;
+      const pool = original.protocol === 'https:' ? choices : compatibility;
+      pool.push({
+        url: validated.href,
         area: size.width * size.height,
         priority:
           field === 'url_size_large' ? 3 : field === 'info_list' ? 2 : 1,
@@ -75,9 +93,11 @@ export function chooseXhsNativeImage(image: any): string {
         if (variant && typeof variant === 'object')
           add(variant.url, 'info_list', variant.image_scene, false, variant);
   }
-  choices.sort((a, b) => b.area - a.area || b.priority - a.priority);
-  if (!choices.length) throw Error('XHS_NATIVE_MEDIA_UNAVAILABLE');
-  return choices[0].url;
+  // Compatibility is a fallback only after every native HTTPS candidate fails.
+  const selected = choices.length ? choices : compatibility;
+  selected.sort((a, b) => b.area - a.area || b.priority - a.priority);
+  if (!selected.length) throw Error('XHS_NATIVE_MEDIA_UNAVAILABLE');
+  return selected[0].url;
 }
 export function selectXhsNativeDetail(
   raw: any,

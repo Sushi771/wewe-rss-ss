@@ -5,7 +5,23 @@ import {
   createXhsMediaTransport,
   XhsHttpsRequest,
 } from './xhs-http-transport';
-import { RedbookRequest } from './redbook-client';
+import { RedbookClient, RedbookRequest } from './redbook-client';
+
+it('uses the explicitly reviewed v1 list route once without endpoint fallback', async () => {
+  const transport = jest.fn(async (input: RedbookRequest) => ({
+    status: 200,
+    url: input.url,
+    body: { success: true, code: 0, data: {} },
+  }));
+  await new RedbookClient({
+    transport,
+    cookies: () => ({ a1: 'synthetic-device', web_session: 'synthetic-session' }),
+  }).getUserNotes('synthetic-author');
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect(new URL(transport.mock.calls[0][0].url).pathname).toBe(
+    '/api/sns/web/v1/user_posted',
+  );
+});
 
 function httpsFixture(
   options: {

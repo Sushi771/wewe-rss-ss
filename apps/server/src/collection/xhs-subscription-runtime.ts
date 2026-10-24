@@ -29,6 +29,7 @@ import {
   createXhsMediaTransport,
 } from './xhs-http-transport';
 import type { XhsConnectionStatus } from '@wewe-rss/shared';
+import { parseXhsProfile } from './xhs-profile';
 
 type RuntimeOptions = {
   enabled: () => boolean;
@@ -312,5 +313,6 @@ export function createLocalXhsSubscriptionRuntime() {
       !privateOnlineMode() &&
       process.env.WEWE_ACCEPTANCE_MODE !== '1',
     vault,
+    profileParser: parseXhsProfile,
   });
 }

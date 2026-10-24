@@ -55,7 +55,9 @@ export interface RedbookUserPageOptions {
 }
 
 const HOST = 'https://edith.xiaohongshu.com';
-const LIST_PATH = '/api/sns/web/v2/user_posted';
+// The pinned upstream also supports v1; v2 returned HTTP 404 in the bounded
+// acceptance. Choose the reviewed route explicitly, without automatic retries.
+const LIST_PATH = '/api/sns/web/v1/user_posted';
 const DETAIL_PATH = '/api/sns/web/v1/feed';
 const PROFILE_PATH = '/api/sns/web/v1/user/otherinfo';
 
