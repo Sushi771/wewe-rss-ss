@@ -2,7 +2,7 @@
 
 ## 小红书订阅开发（2026-10-24）
 
-从精确基线 `f609bda0334f17f6c28ff84020d31cd5c47f3417` 在隔离分支实现，不修改原运行目录。先阅读[小红书开发步骤与交接](docs/xiaohongshu/DEVELOPMENT.md)、[共享接口和任务架构](docs/xiaohongshu/TECHNICAL.md)及[验收矩阵](docs/xiaohongshu/ACCEPTANCE.md)。复用现有模型、分组、保存器、目录设置与事务协调，保持“确认订阅、仅列表更新、选中下载”三个明确动作。当前文档为待实现校准的初稿；只用合成数据测试，不执行真实扩大采集或生产部署。各窗口交接 commit 后由主负责人统一集成并推送 draft PR。
+小红书文档已按集成源码 `e962a5b38fe8281ee29814915370b476ede7140e` 校准，原始基线为 `f609bda0334f17f6c28ff84020d31cd5c47f3417`。维护入口见[开发交接](docs/xiaohongshu/DEVELOPMENT.md)、[接口及持久任务](docs/xiaohongshu/TECHNICAL.md)和[验收记录](docs/xiaohongshu/ACCEPTANCE.md)。已有合成回归和205篇分批ZIP验证；页面20条追加仍基于后端全量查询。真实来源、DPAPI及安全媒体接线由独立窗口继续，真实验收待授权，未部署生产。由主负责人统一推送draft PR。
 
 ## Owner Web session stops (2026-10-03)
 
