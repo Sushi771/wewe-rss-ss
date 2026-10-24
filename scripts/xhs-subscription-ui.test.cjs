@@ -243,6 +243,7 @@ function fixture(options = {}) {
             };
           }
           if (name === 'resumeTask') {
+            if (options.resumeError) throw Error(options.resumeError);
             taskStatus = status('running');
             return { taskId: 'resumed-task', creatorId: 'creator-a' };
           }
@@ -1393,6 +1394,45 @@ test('late discovery does not replace a newly started task or clear selections a
     );
   } finally {
     release();
+    f.dispose();
+  }
+});
+
+test('uncertain resume receipt immediately removes stale continue action and only rereads local history', async () => {
+  const previous = {
+    ...status('cancelled'),
+    taskId: 'old-resume',
+    creatorId: 'creator-a',
+    resumable: true,
+  };
+  const f = fixture({
+    recentTasks: [previous],
+    taskStatus: previous,
+    resumeError: 'XHS_TASK_RECEIPT_UNCERTAIN',
+  });
+  try {
+    await f.start(true);
+    f.settings({
+      recentTasks: [
+        {
+          ...previous,
+          state: 'blocked',
+          resumable: false,
+          code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+        },
+      ],
+    });
+    await f.button('继续未完成任务').props.onPress();
+    await tick();
+    f.render();
+    assert.equal(f.find('Button', '继续未完成任务'), undefined);
+    assert.equal(f.calls.filter(([name]) => name === 'resumeTask').length, 1);
+    assert.ok(f.recoveryQueries.length >= 2);
+    assert.equal(
+      f.calls.some(([name]) => name === 'refresh' || name === 'downloadNotes'),
+      false,
+    );
+  } finally {
     f.dispose();
   }
 });

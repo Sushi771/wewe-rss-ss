@@ -498,10 +498,36 @@ export default function Xiaohongshu() {
         setDirectory(chosen.directory);
       }
       const previousTaskId = lastTaskId.current;
-      const receipt = await subscriptionApi.resumeTask.mutate({
-        taskId: lastTaskId.current,
-        ...(pickToken ? { pickToken } : {}),
-      });
+      const receipt = await subscriptionApi.resumeTask
+        .mutate({
+          taskId: lastTaskId.current,
+          ...(pickToken ? { pickToken } : {}),
+        })
+        .catch((cause: unknown) => {
+          if (
+            cause instanceof Error &&
+            cause.message.includes('XHS_TASK_RECEIPT_UNCERTAIN')
+          ) {
+            const block = {
+              state: 'blocked' as const,
+              resumable: false,
+              code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+              message: '续跑回执无法确认，请先重新读取本地任务记录。',
+            };
+            setTask((previous) =>
+              previous ? { ...previous, ...block } : previous,
+            );
+            setRecoveredTasks((previous) =>
+              previous.map((record) =>
+                record.taskId === previousTaskId
+                  ? { ...record, ...block }
+                  : record,
+              ),
+            );
+            void readRecentRef.current();
+          }
+          throw cause;
+        });
       setRecoveredTasks((previous) =>
         previous.filter((record) => record.taskId !== previousTaskId),
       );
