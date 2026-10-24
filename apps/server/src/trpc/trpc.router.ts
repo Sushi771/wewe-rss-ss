@@ -1618,7 +1618,7 @@ export class TrpcRouter {
         z
           .object({
             creatorId: z.string().min(1).max(128),
-            noteIds: z.array(z.string().min(1).max(300)).min(1).max(100),
+            noteIds: z.array(z.string().min(1).max(300)).min(1),
             pickToken: z.string().max(128).optional(),
           })
           .strict(),
@@ -1641,6 +1641,27 @@ export class TrpcRouter {
     cancelTask: this.trpcService.protectedProcedure
       .input(z.object({ taskId: z.string().uuid() }).strict())
       .mutation(({ input }) => this.xhsSubscriptions!.cancelTask(input)),
+    resumeTask: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            taskId: z.string().uuid(),
+            pickToken: z.string().max(128).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        if (
+          !(ctx as { isLocalSave?: boolean }).isLocalSave ||
+          privateOnlineMode() ||
+          process.env.WEWE_ACCEPTANCE_MODE === '1'
+        )
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '任务续跑仅允许本机同源页面使用。',
+          });
+        return this.xhsSubscriptions!.resumeTask(input);
+      }),
     capability: this.trpcService.protectedProcedure.query(() => ({
       ...this.xhs.capability(),
       ...this.xhsSubscriptions?.capability(),

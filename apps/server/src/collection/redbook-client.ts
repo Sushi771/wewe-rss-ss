@@ -27,6 +27,7 @@ export interface RedbookRequest {
   redirect: 'error';
   timeoutMs: number;
   maxResponseBytes: number;
+  signal?: AbortSignal;
 }
 
 export interface RedbookResponse {
@@ -50,11 +51,13 @@ export interface RedbookClientOptions {
 export interface RedbookUserPageOptions {
   xsecToken?: string | null;
   xsecSource?: string | null;
+  signal?: AbortSignal;
 }
 
 const HOST = 'https://edith.xiaohongshu.com';
 const LIST_PATH = '/api/sns/web/v2/user_posted';
 const DETAIL_PATH = '/api/sns/web/v1/feed';
+const PROFILE_PATH = '/api/sns/web/v1/user/otherinfo';
 
 function checkedText(value: string, maxLength: number): string {
   if (
@@ -85,50 +88,76 @@ function reasonFor(
   return undefined;
 }
 
-/** Only the two audited read endpoints. No network transport is enabled by default. */
+/** Audited read endpoints only. No network transport is enabled by default. */
 export class RedbookClient {
   constructor(private readonly options: RedbookClientOptions = {}) {}
+
+  getUserInfo(
+    userId: string,
+    options: RedbookUserPageOptions = {},
+  ): Promise<unknown> {
+    return this.request('GET', PROFILE_PATH, {
+      target_user_id: checkedId(userId),
+      xsec_token: checkedText(options.xsecToken ?? '', 4096),
+      xsec_source: checkedText(options.xsecSource ?? '', 128),
+    });
+  }
 
   getUserNotes(
     userId: string,
     cursor = '',
     options: RedbookUserPageOptions = {},
   ): Promise<unknown> {
-    return this.request('GET', LIST_PATH, {
-      num: 30,
-      cursor: checkedText(cursor, 2048),
-      user_id: checkedId(userId),
-      image_formats: 'jpg,webp',
-      xsec_token: checkedText(options.xsecToken ?? '', 4096),
-      xsec_source: checkedText(options.xsecSource ?? '', 128),
-    });
+    return this.request(
+      'GET',
+      LIST_PATH,
+      {
+        num: 30,
+        cursor: checkedText(cursor, 2048),
+        user_id: checkedId(userId),
+        image_formats: 'jpg,webp',
+        xsec_token: checkedText(options.xsecToken ?? '', 4096),
+        xsec_source: checkedText(options.xsecSource ?? '', 128),
+      },
+      undefined,
+      options.signal,
+    );
   }
 
   getNoteById(
     noteId: string,
     xsecToken: string,
     xsecSource = 'pc_feed',
+    signal?: AbortSignal,
   ): Promise<unknown> {
-    return this.request('POST', DETAIL_PATH, undefined, {
-      source_note_id: checkedId(noteId),
-      image_formats: ['jpg', 'webp'],
-      extra: { need_body_topic: 1 },
-      xsec_source: checkedText(xsecSource, 128),
-      xsec_token: checkedText(xsecToken, 4096),
-    });
+    return this.request(
+      'POST',
+      DETAIL_PATH,
+      undefined,
+      {
+        source_note_id: checkedId(noteId),
+        image_formats: ['jpg', 'webp'],
+        extra: { need_body_topic: 1 },
+        xsec_source: checkedText(xsecSource, 128),
+        xsec_token: checkedText(xsecToken, 4096),
+      },
+      signal,
+    );
   }
 
   private async request(
     method: 'GET' | 'POST',
-    path: typeof LIST_PATH | typeof DETAIL_PATH,
+    path: typeof LIST_PATH | typeof DETAIL_PATH | typeof PROFILE_PATH,
     params?: Record<string, string | number | string[]>,
     payload?: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (!this.options.transport || !this.options.cookies)
       throw new RedbookPauseError('configuration');
     let response: RedbookResponse;
     const uri = method === 'GET' ? buildGetUri(path, params) : path;
     try {
+      signal?.throwIfAborted();
       const cookies = { ...this.options.cookies() };
       if (
         !cookies.a1 ||
@@ -164,7 +193,9 @@ export class RedbookClient {
         redirect: 'error',
         timeoutMs: 15_000,
         maxResponseBytes: 8 * 1024 * 1024,
+        ...(signal ? { signal } : {}),
       });
+      signal?.throwIfAborted();
     } catch (error) {
       if (error instanceof RedbookPauseError) throw error;
       throw new RedbookPauseError('transport');

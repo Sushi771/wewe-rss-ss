@@ -43,4 +43,5 @@ export type XhsSubscriptionTask = {
   remaining: number;
   code?: string;
   message: string;
+  resumable?: boolean;
 };

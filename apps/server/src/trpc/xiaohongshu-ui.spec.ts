@@ -406,16 +406,15 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     expect(state.busy).toBe(false);
     expect(state.error).toContain('synthetic');
   });
-  it('blocks selections above 100 before any local or provider action', async () => {
-    const { scope } = harness();
-    scope.selectedNotes = Array.from({ length: 101 }, (_, i) => ({
-      id: String(i),
-      kind: 'image-text',
-      status: 'listed',
-    }));
+  it('does not invent progress when the backend fails to return a task receipt', async () => {
+    const { scope, state } = harness();
+    scope.subscriptionApi.downloadNotes.mutate.mockResolvedValue({});
     await evaluate('handleLocalSave', scope)();
     expect(scope.localApi).not.toHaveBeenCalled();
-    expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
+    expect(scope.subscriptionApi.downloadNotes.mutate).toHaveBeenCalledTimes(1);
+    expect(state.task).toBeNull();
+    expect(scope.taskRunning.current).toBe(false);
+    expect(state.busy).toBe(false);
   });
   it('clears remaining creator work on cancel, sends one request and retains the busy guard until confirmation', async () => {
     const { scope, state } = harness();
