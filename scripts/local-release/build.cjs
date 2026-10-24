@@ -821,11 +821,25 @@ function build(options = {}) {
       failure = error;
       throw error;
     } finally {
+      const cleanupErrors = [];
       try {
         reservation?.finish(failure);
-      } finally {
-        shared.close(failure);
+      } catch (error) {
+        cleanupErrors.push(error);
       }
+      try {
+        shared.close(failure || cleanupErrors[0]);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      // Keep the first compiler/copy failure visible even if a later scope
+      // deadline or preservation check also holds cleanup for review.
+      if (cleanupErrors.length)
+        throw new AggregateError(
+          [...(failure ? [failure] : []), ...cleanupErrors],
+          'Release build/cleanup failed',
+          { cause: failure || cleanupErrors[0] },
+        );
     }
   });
 }

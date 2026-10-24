@@ -44,6 +44,17 @@ test(
       maxGrowthBytes: scope.DEFAULT_BYTES,
       maxNewRuntimeCopies: 1,
       protectedIds: ['synthetic-only'],
+      // Compilation counts toward the existing operation wall clock. Select the
+      // supported longer profile for this explicit drill, retaining small-profile
+      // byte/entry ceilings. No production policy or global default is changed.
+      scanBudget: {
+        profile: 'legacy-stream-v1',
+        durationMs: 180000,
+        scanEntries: 100000,
+        operationEntries: 1000000,
+        scanReadBytes: 1024 ** 3,
+        operationReadBytes: 2 * 1024 ** 3,
+      },
       buildOnly: plan.buildOnly,
     };
     const config = path.join(audit, 'build-only-policy.json');
