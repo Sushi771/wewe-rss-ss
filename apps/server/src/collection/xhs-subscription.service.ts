@@ -74,6 +74,10 @@ type Save = (
 type Destination = (pickToken?: string) => Promise<string>;
 const active = (t: XhsSubscriptionTask) =>
   t.state === 'queued' || t.state === 'running';
+const ahead = (saved: Task, t: Task) =>
+  saved.completed + saved.skipped > t.completed + t.skipped ||
+  (saved.cursorHistory?.length ?? 0) > (t.cursorHistory?.length ?? 0) ||
+  (!!saved.listFinished && !t.listFinished);
 const key = (id: string) => JSON.stringify(['xiaohongshu', 'note', id]);
 const reject = (code: string, message = code): never => {
   throw new TRPCError({ code: 'PRECONDITION_FAILED', message });
@@ -103,6 +107,8 @@ export class XhsSubscriptionService implements OnModuleInit {
   private pending = new Map<string, Task>();
   private lane = Promise.resolve();
   private controllers = new Map<string, AbortController>();
+  private uncertain = new Map<string, Task>();
+  private reconciling = new Map<string, Promise<void>>();
   private reserve?: Destination;
   private save?: Save;
   constructor(
@@ -158,7 +164,11 @@ export class XhsSubscriptionService implements OnModuleInit {
       task.state = 'blocked';
       task.code = 'XHS_TASK_INTERRUPTED';
       task.message = '任务被中断，请重新选择剩余项目。';
-      await this.persist(task);
+      try {
+        await this.persist(task);
+      } catch {
+        /* Expose a local receipt barrier; never start work. */
+      }
     }
   }
   async resolveSubscription(input: {
@@ -310,12 +320,65 @@ export class XhsSubscriptionService implements OnModuleInit {
     return this.enqueue('download', input.creatorId, ids, directory);
   }
   private async persist(t: Task) {
-    const json = JSON.stringify(t);
-    await this.write(Buffer.byteLength(json) + 4096, (tx) =>
-      this.persistIn(tx, t),
-    );
+    const snapshot = JSON.parse(JSON.stringify(t)) as Task;
+    const json = JSON.stringify(snapshot);
+    try {
+      await this.write(Buffer.byteLength(json) + 4096, (tx) =>
+        this.persistIn(tx, snapshot),
+      );
+      this.uncertain.delete(t.taskId);
+    } catch (error) {
+      // An acknowledgement can fail after COMMIT. Read durable evidence before
+      // classifying it; do not repeat a network request or local archive action.
+      try {
+        const saved = await this.loadTask(t.taskId);
+        if (JSON.stringify(saved) === json) {
+          this.uncertain.delete(t.taskId);
+          return;
+        }
+        if (ahead(saved, snapshot))
+          Object.assign(snapshot, saved, {
+            state: 'blocked',
+            code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+          });
+      } catch {
+        /* unknown durable state */
+      }
+      if (xhsPublicCode(error, '') === 'XHS_TASK_SUPERSEDED') throw error;
+      this.uncertain.set(t.taskId, snapshot);
+      throw new XhsSubscriptionError('XHS_TASK_RECEIPT_UNCERTAIN');
+    }
   }
-  private persistIn(tx: Prisma.TransactionClient, t: Task) {
+  private async persistIn(tx: Prisma.TransactionClient, t: Task) {
+    const own = await tx.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${t.taskId}`;
+    const saved = own.length
+      ? (JSON.parse(own[0].document) as Task)
+      : undefined;
+    if (
+      saved?.supersededByTaskId &&
+      saved.supersededByTaskId !== t.supersededByTaskId
+    )
+      throw new XhsSubscriptionError('XHS_TASK_SUPERSEDED');
+    if (saved && ahead(saved, t))
+      throw new XhsSubscriptionError('XHS_TASK_RECEIPT_UNCERTAIN');
+    if (t.resumedFromTaskId) {
+      const rows = await tx.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${t.resumedFromTaskId}`;
+      if (!rows.length) return reject('XHS_TASK_NOT_FOUND');
+      const parent = JSON.parse(rows[0].document) as Task;
+      if (
+        parent.creatorId !== t.creatorId ||
+        (parent.supersededByTaskId && parent.supersededByTaskId !== t.taskId)
+      )
+        throw new XhsSubscriptionError('XHS_TASK_SUPERSEDED');
+      if (!parent.supersededByTaskId) {
+        parent.supersededByTaskId = t.taskId;
+        await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(parent)}, updated_at=${BigInt(Date.now())} WHERE id=${parent.taskId}`;
+      }
+    }
     const json = JSON.stringify(t);
     return tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id, creator_id, state, document, updated_at) VALUES (${t.taskId}, ${t.creatorId}, ${t.state}, ${json}, ${BigInt(Date.now())}) ON CONFLICT(id) DO UPDATE SET state=excluded.state, document=excluded.document, updated_at=excluded.updated_at`;
   }
@@ -327,6 +390,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     checkpoint?: Task,
   ) {
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
+    if ([...this.uncertain.values()].some((t) => t.creatorId === creatorId))
+      return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     if ([...this.pending.values()].some((t) => t.creatorId === creatorId))
       return reject('XHS_TASK_CONFLICT');
     if ([...this.pending.values()].filter(active).length >= 20)
@@ -355,6 +420,8 @@ export class XhsSubscriptionService implements OnModuleInit {
       message: '等待处理',
       directory,
       code: undefined,
+      resumedFromTaskId: checkpoint?.taskId,
+      supersededByTaskId: undefined,
     };
     this.pending.set(t.taskId, t);
     try {
@@ -378,27 +445,111 @@ export class XhsSubscriptionService implements OnModuleInit {
     return JSON.parse(rows[0].document) as Task;
   }
   async task(input: { taskId: string }): Promise<XhsSubscriptionTask> {
-    const t = await this.loadTask(input.taskId);
+    await this.reconcile(input.taskId);
+    const t =
+      this.uncertain.get(input.taskId) ?? (await this.loadTask(input.taskId));
+    return this.view(t);
+  }
+  private view(t: Task): XhsSubscriptionTask {
+    const uncertain = this.uncertain.has(t.taskId);
     return {
       taskId: t.taskId,
       creatorId: t.creatorId,
       kind: t.kind,
-      state: t.state,
+      state: uncertain ? 'blocked' : t.state,
       total: t.total,
       completed: t.completed,
       skipped: t.skipped,
       failed: t.failed,
       remaining: t.remaining,
-      code: t.code,
-      message: t.message,
+      code: uncertain ? 'XHS_TASK_RECEIPT_UNCERTAIN' : t.code,
+      message: uncertain
+        ? '任务回执尚未核实；未重放任何动作，请重新读取状态。'
+        : t.message,
+      resumedFromTaskId: t.resumedFromTaskId,
+      supersededByTaskId: t.supersededByTaskId,
       resumable:
+        !uncertain &&
+        !t.supersededByTaskId &&
         !this.pending.has(t.taskId) &&
         ['cancelled', 'blocked', 'partial', 'failed'].includes(t.state),
     };
   }
+  private async reconcile(taskId: string) {
+    if (!this.uncertain.has(taskId) || this.pending.has(taskId)) return;
+    const current = this.reconciling.get(taskId);
+    if (current) return current;
+    const work = (async () => {
+      const snapshot = this.uncertain.get(taskId)!;
+      try {
+        const durable = await this.loadTask(taskId);
+        if (durable.supersededByTaskId) {
+          this.uncertain.delete(taskId);
+          return;
+        }
+        if (JSON.stringify(durable) === JSON.stringify(snapshot)) {
+          this.uncertain.delete(taskId);
+          return;
+        }
+        if (ahead(durable, snapshot)) Object.assign(snapshot, durable);
+      } catch {
+        /* Receipt may not have been inserted; repair only local state. */
+      }
+      snapshot.state = 'blocked';
+      snapshot.code = 'XHS_TASK_RECEIPT_UNCERTAIN';
+      snapshot.message = '已核对本地检查点；请明确续跑，系统不会自动重放。';
+      try {
+        await this.persist(snapshot);
+      } catch {
+        /* retain the creator barrier */
+      }
+    })();
+    this.reconciling.set(taskId, work);
+    try {
+      await work;
+    } finally {
+      this.reconciling.delete(taskId);
+    }
+  }
+  async recentTasks(
+    input: { creatorId?: string; limit?: number } = {},
+  ): Promise<{ items: XhsSubscriptionTask[] }> {
+    const limit = input.limit ?? 10;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 20)
+      return reject('XHS_TASK_LIMIT_INVALID');
+    for (const t of [...this.uncertain.values()])
+      if (!input.creatorId || t.creatorId === input.creatorId)
+        await this.reconcile(t.taskId);
+    const creatorClause = input.creatorId
+      ? Prisma.sql`AND t.creator_id=${input.creatorId}`
+      : Prisma.empty;
+    const rows = await this.db.$queryRaw<Array<{ document: string }>>(
+      Prisma.sql`SELECT t.document FROM xhs_subscription_tasks t JOIN xhs_creators c ON c.id=t.creator_id WHERE t.state IN ('queued','running','blocked','partial','cancelled','failed') ${creatorClause} AND json_extract(t.document,'$.supersededByTaskId') IS NULL ORDER BY CASE WHEN t.state IN ('queued','running') THEN 0 ELSE 1 END,t.updated_at DESC,t.id DESC LIMIT ${limit}`,
+    );
+    // A receipt barrier must remain discoverable even when older recoverable
+    // tasks fill the requested page. Never expose its private checkpoint.
+    const tasks = new Map<string, Task>();
+    for (const t of this.uncertain.values())
+      if (
+        (!input.creatorId || t.creatorId === input.creatorId) &&
+        !t.supersededByTaskId
+      )
+        tasks.set(t.taskId, t);
+    for (const row of rows) {
+      const t = JSON.parse(row.document) as Task;
+      if (!tasks.has(t.taskId)) tasks.set(t.taskId, t);
+    }
+    return {
+      items: [...tasks.values()].slice(0, limit).map((t) => this.view(t)),
+    };
+  }
   async resumeTask(input: { taskId: string; pickToken?: string }) {
     if (this.pending.has(input.taskId)) return reject('XHS_TASK_SETTLING');
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId))
+      return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     const previous = await this.loadTask(input.taskId);
+    if (previous.supersededByTaskId) return reject('XHS_TASK_SUPERSEDED');
     if (!['cancelled', 'blocked', 'partial', 'failed'].includes(previous.state))
       return reject('XHS_TASK_NOT_RESUMABLE');
     await this.creator(previous.creatorId);
@@ -557,9 +708,12 @@ export class XhsSubscriptionService implements OnModuleInit {
         t.message = '任务已停止，请检查安全连接和来源数据。';
       }
     } finally {
-      await this.persist(t);
-      this.pending.delete(t.taskId);
-      this.controllers.delete(t.taskId);
+      try {
+        await this.persist(t);
+      } finally {
+        this.pending.delete(t.taskId);
+        this.controllers.delete(t.taskId);
+      }
     }
   }
   private async updateList(t: Task, creator: XhsCreator) {

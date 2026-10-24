@@ -45,6 +45,8 @@ export type XhsSubscriptionTask = {
   code?: string;
   message: string;
   resumable?: boolean;
+  resumedFromTaskId?: string;
+  supersededByTaskId?: string;
 };
 export type XhsConnectionStatus = {
   liveEnabled: boolean;
