@@ -14,6 +14,9 @@ import { LocalArticleStore } from '../article-local-save';
 import { RedbookSubscriptionAdapter } from './xhs-redbook-subscription';
 import { xhsNoteFilterSchema } from '@wewe-rss/shared';
 import { allowedRedbookMediaUrl } from './redbook-response';
+import { TrpcService } from '../trpc/trpc.service';
+import { TrpcRouter } from '../trpc/trpc.router';
+import { ConfigService } from '@nestjs/config';
 
 const author = {
   id: 'synthetic-author',
@@ -153,6 +156,43 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     await expect(
       service.subscribe({ resolutionId: 'expired' }),
     ).rejects.toThrow('XHS_RESOLUTION_EXPIRED');
+  });
+  it('exposes the agreed task API through protected routes and gates local writes', async () => {
+    const config = new ConfigService({
+      auth: { code: 'synthetic-auth' },
+      platform: { url: '' },
+      feed: { updateDelayTime: 0 },
+    });
+    const router = new TrpcRouter(
+      new TrpcService(db as any, config, {} as any, {} as any),
+      db as any,
+      config,
+      {} as any,
+      {} as any,
+      cache,
+      service,
+    ).appRouter;
+    await expect(
+      router
+        .createCaller({ errorMsg: 'synthetic unauthorized' })
+        .xiaohongshu.resolveSubscription({ url: author.profileUrl }),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    const api = router.createCaller({ errorMsg: null, isLocalSave: true });
+    const { taskId } = await api.xiaohongshu.refresh({ id: creatorId });
+    await finish(taskId);
+    expect(await api.xiaohongshu.task({ taskId })).toMatchObject({
+      kind: 'list',
+      state: 'completed',
+    });
+    expect(
+      (await api.xiaohongshu.notes({ creatorId, search: '合成' })).items,
+    ).toHaveLength(1);
+    await expect(
+      router
+        .createCaller({ errorMsg: null, isLocal: true, isLocalSave: false })
+        .xiaohongshu.downloadNotes({ creatorId, noteIds: [noteKey('note-a')] }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(source.detail).not.toHaveBeenCalled();
   });
   it('updates metadata only, then separately downloads actual body/image bytes and skips duplicates', async () => {
     expect(
@@ -302,6 +342,29 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     });
     expect(source.detail).not.toHaveBeenCalled();
   });
+  it('keeps cancellation terminal if an in-flight detail subsequently rejects', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    let rejectDetail!: (error: Error) => void;
+    (source.detail as jest.Mock).mockImplementation(
+      () => new Promise((_resolve, reject) => (rejectDetail = reject)),
+    );
+    const { taskId } = await service.downloadNotes({
+      creatorId,
+      noteIds: [noteKey('note-a')],
+    });
+    while (!rejectDetail) await new Promise((r) => setTimeout(r, 5));
+    await service.cancelTask({ taskId });
+    rejectDetail(new Error('synthetic late transport failure'));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await service.task({ taskId })).toMatchObject({
+      state: 'cancelled',
+      failed: 0,
+      remaining: 1,
+    });
+    expect(
+      await db.xhsNote.findUnique({ where: { id: noteKey('note-a') } }),
+    ).toMatchObject({ status: 'listed', contentHtml: null });
+  });
   it('filters cached title/body and Shanghai dates without inventing unknown dates', async () => {
     await finish((await service.refresh({ id: creatorId })).taskId);
     expect(
@@ -373,9 +436,18 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
 
 describe('Redbook split adapter', () => {
   it('upgrades allowlisted CDN images to HTTPS and rejects non-CDN sources', () => {
-    expect(allowedRedbookMediaUrl('http://sns-webpic-qc.xhscdn.com/synthetic.jpg').href).toBe('https://sns-webpic-qc.xhscdn.com/synthetic.jpg');
-    expect(() => allowedRedbookMediaUrl('http://127.0.0.1/synthetic.jpg')).toThrow();
-    expect(() => allowedRedbookMediaUrl('http://sns-webpic-qc.xhscdn.com:80/synthetic.jpg')).toThrow();
+    expect(
+      allowedRedbookMediaUrl('http://sns-webpic-qc.xhscdn.com/synthetic.jpg')
+        .href,
+    ).toBe('https://sns-webpic-qc.xhscdn.com/synthetic.jpg');
+    expect(() =>
+      allowedRedbookMediaUrl('http://127.0.0.1/synthetic.jpg'),
+    ).toThrow();
+    expect(() =>
+      allowedRedbookMediaUrl(
+        'http://sns-webpic-qc.xhscdn.com:80/synthetic.jpg',
+      ),
+    ).toThrow();
   });
   it('requires verified profile and performs zero media/detail calls during profile/list actions', async () => {
     const client = {

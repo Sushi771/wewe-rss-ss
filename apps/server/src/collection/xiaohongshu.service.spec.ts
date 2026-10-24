@@ -29,7 +29,11 @@ jest.mock('../offline-archive', () => ({
         destination,
         source,
       ],
-      { encoding: 'utf8', windowsHide: true },
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        cwd: path.resolve(__dirname, '../..'),
+      },
     );
     if (child.status !== 0) throw new Error('ACTUAL_ARCHIVE_CHILD_FAILED');
   },
@@ -266,6 +270,12 @@ describe('production XHS router/service → additive SQLite and original export 
     ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
     const exported = await api.xiaohongshu.export({ creatorId });
     expect(exported.notes).toBe(1);
+    await expect(
+      api.xiaohongshu.export({ creatorId, search: 'synthetic-no-match' }),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    await expect(
+      api.xiaohongshu.export({ creatorId, dateStart: '2026-01-01' }),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
     const zip = path.join(root, 'offline.zip');
     await fs.writeFile(zip, Buffer.from(exported.base64, 'base64'));
     // Inspect actual ZIP bytes and relative media paths with standard Python;

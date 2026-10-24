@@ -116,9 +116,13 @@ export class XhsSubscriptionService implements OnModuleInit {
   }
   capability() {
     return {
+      sourceConfigured: !!this.source,
       canSubscribe: !!this.source,
       canRefresh: !!this.source,
       canDownload: !!this.source && !!this.save,
+      message: this.source
+        ? '可识别作者并确认订阅；更新列表与图文下载分开执行。'
+        : '尚未配置已核实的作者资料与安全连接，暂不可识别订阅或获取新笔记。',
     };
   }
   private write<T>(
@@ -362,7 +366,10 @@ export class XhsSubscriptionService implements OnModuleInit {
     return this.task(input);
   }
   private async run(t: Task, directory?: string) {
-    if (!active(t)) return;
+    if (!active(t)) {
+      this.pending.delete(t.taskId);
+      return;
+    }
     try {
       const creator = await this.creator(t.creatorId);
       t.state = 'running';

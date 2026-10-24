@@ -1625,7 +1625,7 @@ export class TrpcRouter {
       )
       .mutation(({ input, ctx }) => {
         if (
-          !(ctx as { isLocal?: boolean }).isLocal ||
+          !(ctx as { isLocalSave?: boolean }).isLocalSave ||
           privateOnlineMode() ||
           process.env.WEWE_ACCEPTANCE_MODE === '1'
         )
@@ -1771,6 +1771,14 @@ export class TrpcRouter {
             errorMsg: null,
             // A disconnected download stops after the current atomic article.
             isExportCancelled: () => res.destroyed,
+            isLocalSave:
+              ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
+                req.socket.remoteAddress || '',
+              ) &&
+              /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(
+                `${req.protocol}://${req.get('host')}`,
+              ) &&
+              req.headers.origin === `${req.protocol}://${req.get('host')}`,
             isLocal:
               ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
                 req.socket.remoteAddress || '',
