@@ -159,6 +159,7 @@ class SnapshotGuard:
                         # can commit immediately after the last read; never claim
                         # the later time as a proven unchanged boundary.
                         self.record["coverageAtMs"] = int(wall * 1000)
+                        self.record["lastVerifiedAtMs"] = int(self.clock()[0] * 1000)
                         self.record["coverageMono"] = mono
                         self.persist()
                         self.failure=None
@@ -207,6 +208,7 @@ class SnapshotGuard:
                 "backupReused": report.get("reused") is True,
                 "copyStartedAtUtc": report.get("startedAtUtc"),
                 "copySucceededAtUtc": report.get("createdAtUtc"),
+                "lastVerifiedAtMs": int(completed_wall * 1000),
                 "backupStartedAtMs": int(start_wall * 1000),
                 "backupSucceededAtMs": int(completed_wall * 1000),
                 "backupStartedMono": start_mono, "backupSucceededMono": completed_mono,
@@ -241,8 +243,14 @@ class SnapshotGuard:
             self.invalidate(safe, fatal=safe in {"database-replaced", "owner-lock-replaced"})
 
     def status(self):
+        lifecycle = dict(self.lifecycle_status) if self.lifecycle_status else None
+        if lifecycle and self.record:
+            lifecycle.update(lastVerifiedAtMs=self.record['lastVerifiedAtMs'],
+                             verificationBasis='current-owner-hash',
+                             coverageAtMs=self.record['coverageAtMs'],
+                             coverageBasis='verified-unchanged' if not self.record['dirty'] else 'copy-start')
         return {'event':'periodic-snapshot-status','ok':self.record is not None,
-                **({'lifecycle':self.lifecycle_status} if self.lifecycle_status else {}),
+                **({'lifecycle':lifecycle} if lifecycle else {}),
                 **({'failure':self.failure} if self.record is None and self.failure else {}),
                 **({'retention':self.record['automaticRetention']} if self.record and 'automaticRetention' in self.record else {})}
 

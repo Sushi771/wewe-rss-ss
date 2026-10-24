@@ -27,9 +27,11 @@ def status(database, root, interval_seconds=None):
     more = max(0,min(max_copies-len(databases), (max_bytes-used-expected)//actual+1, (free-min_free-expected)//actual+1))
     days = more*interval_seconds/86400
     ready = used+expected <= max_bytes and len(databases)+1 <= max_copies and free-expected >= min_free
-    warning = not ready or used/max_bytes >= .5 or len(databases)/max_copies >= .5 or days < 1
-    return {'root':str(root),'existingBytes':used,'existingCopies':len(databases),'sourceBytes':actual,'nextReservedBytes':expected,'freeBytes':free,'maxBytes':max_bytes,'maxCopies':max_copies,'minFreeBytes':min_free,'nextBackupAllowed':ready,'continuousChangedSnapshotIntervalSeconds':interval_seconds,'estimatedAdditionalFullSnapshots':more,'estimatedDaysAtContinuousChanges':round(days,2),'warning':warning,'automaticDeletion':False,
-            'periodicLifecycle':backup.periodic_lifecycle().read_status(database,root),
+    lifecycle = backup.periodic_lifecycle().read_status(database,root)
+    paused = lifecycle is not None and lifecycle.get('generationPaused', lifecycle.get('status') != 'ready')
+    warning = paused or not ready or used/max_bytes >= .5 or len(databases)/max_copies >= .5 or days < 1
+    return {'root':str(root),'existingBytes':used,'existingCopies':len(databases),'sourceBytes':actual,'nextReservedBytes':expected,'freeBytes':free,'maxBytes':max_bytes,'maxCopies':max_copies,'minFreeBytes':min_free,'capacityAllowsNextBackup':ready,'nextBackupAllowed':ready and not paused,'continuousChangedSnapshotIntervalSeconds':interval_seconds,'estimatedAdditionalFullSnapshots':more,'estimatedDaysAtContinuousChanges':round(days,2),'warning':warning,'automaticDeletion':False,
+            'periodicLifecycle':lifecycle,
             'forecastBasis':'continuously-changing-source; unchanged snapshots may be reused',
             'action':'Review verified recovery windows and prepare a separately approved exact retirement; unique recovery points remain protected' if warning else 'Review capacity at least daily'}
 

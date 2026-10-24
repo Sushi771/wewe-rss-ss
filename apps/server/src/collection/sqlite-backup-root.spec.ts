@@ -5,6 +5,17 @@ import {
   resolveSqliteBackupRoot,
 } from './sqlite-backup-root';
 describe('one SQLite backup root for every entrypoint', () => {
+  it('reports rotation rather than capacity exhaustion when space is available', () => {
+    const lifecycle = { status: 'pending-confirmation' };
+    expect(
+      backupForecastMessage({
+        capacityAllowsNextBackup: true,
+        nextBackupAllowed: false,
+        warning: true,
+        periodicLifecycle: lifecycle,
+      }),
+    ).toBe(periodicLifecycleMessage(lifecycle));
+  });
   it('shows actual cadence and estimate for both daily and 15-minute forecasts', () => {
     expect(
       backupForecastMessage({

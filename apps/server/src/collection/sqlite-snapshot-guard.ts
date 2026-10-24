@@ -119,12 +119,34 @@ export function safePeriodicLifecycleStatus(value: unknown) {
     (input[key] as number) <= maximum
       ? (input[key] as number)
       : null;
+  const time = (key: string) => count(key, 8640000000000000);
+  const paused = input.status !== 'ready';
   return {
     status: String(input.status),
     normalCopies: count('normalCopies', 48),
     pendingCopies: count('pendingCopies', 1),
     intervalSeconds: count('intervalSeconds', 86400),
     automaticDeletion: false,
+    generationPaused: paused,
+    generationPauseReason:
+      input.status === 'pending-confirmation'
+        ? 'pending-confirmation'
+        : paused
+          ? 'lifecycle-held'
+          : null,
+    lastGeneratedAtMs: time('lastGeneratedAtMs'),
+    lastVerifiedAtMs: time('lastVerifiedAtMs'),
+    coverageAtMs: time('coverageAtMs'),
+    verificationBasis: ['creation-receipt', 'current-owner-hash'].includes(
+      String(input.verificationBasis),
+    )
+      ? String(input.verificationBasis)
+      : 'unknown',
+    coverageBasis: ['copy-start', 'verified-unchanged'].includes(
+      String(input.coverageBasis),
+    )
+      ? String(input.coverageBasis)
+      : 'unknown',
   };
 }
 

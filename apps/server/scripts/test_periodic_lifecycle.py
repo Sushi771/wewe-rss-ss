@@ -136,6 +136,43 @@ class LifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'LIFECYCLE_HELD'):self.create()
         self.assertEqual(len(self.copies()),4)
 
+    def test_pending_status_preserves_generation_and_coverage_after_later_verification(self):
+        report = self.fill()
+        before = {p: p.read_bytes() for p in self.copies()}
+        state = self.state()
+        status = lifecycle.read_status(self.database, self.root)
+        created = int(datetime.fromisoformat(report['createdAtUtc']).timestamp()*1000)
+        self.assertTrue(status['generationPaused'])
+        self.assertEqual(status['generationPauseReason'], 'pending-confirmation')
+        self.assertEqual(status['lastGeneratedAtMs'], created)
+        self.assertEqual(status['lastVerifiedAtMs'], created)
+        self.assertEqual(status['coverageAtMs'], int(state['lastGenerationEpoch']*1000))
+        self.now += 86400
+        guard = guard_module.SnapshotGuard(self.database,self.root,interval=86400,max_age=86400,
+            wall=lambda:self.now,monotonic=lambda:1000)
+        try:
+            guard.tick()
+            live = guard.status()['lifecycle']
+            self.assertTrue(live['generationPaused'])
+            self.assertEqual(live['lastGeneratedAtMs'], created)
+            self.assertGreater(live['lastVerifiedAtMs'], created)
+            self.assertEqual(live['verificationBasis'], 'current-owner-hash')
+            self.assertEqual(lifecycle.read_status(self.database,self.root), status)
+            self.assertEqual(self.state(), state)
+            self.assertEqual({p: p.read_bytes() for p in self.copies()}, before)
+        finally: guard.close()
+
+    def test_capacity_does_not_override_pending_rotation_and_status_never_deletes(self):
+        self.fill()
+        module = load('space_status_fixture','backup-space-status.py')
+        before = {p: p.read_bytes() for p in self.copies()}
+        report = module.status(self.database, self.root, 86400)
+        self.assertTrue(report['capacityAllowsNextBackup'])
+        self.assertFalse(report['nextBackupAllowed'])
+        self.assertTrue(report['warning'])
+        self.assertFalse(report['automaticDeletion'])
+        self.assertEqual({p: p.read_bytes() for p in self.copies()}, before)
+
     def test_copy_failure_spends_same_credit_before_io_and_cannot_retry(self):
         with patch.object(backup,'_create_backup',side_effect=TimeoutError('owned copy fault')):
             with self.assertRaises(TimeoutError):self.create()
