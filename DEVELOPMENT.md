@@ -1,5 +1,9 @@
 # Development Guide
 
+## 小红书订阅开发（2026-10-24）
+
+小红书开发以本机交付源码 `f609bda0334f17f6c28ff84020d31cd5c47f3417` 为基线；维护入口见[开发交接](docs/xiaohongshu/DEVELOPMENT.md)、[技术说明](docs/xiaohongshu/TECHNICAL.md)和[验收记录](docs/xiaohongshu/ACCEPTANCE.md)。原生来源默认关闭，已完成271项后台及50项关联前端合成回归；严格主页schema和加密会话迁移已实测，列表及真实账号3篇归档仍待完成。页面20条追加基于后端全量查询。GitHub采用基于交付分支的draft PR，仅包含本任务差异，不合并或部署；聚焦离线CI见 `.github/workflows/xhs-subscription-ci.yml`。
+
 ## Owner Web session stops (2026-10-03)
 
 The latest-item source validates the bound owner session before interpreting a

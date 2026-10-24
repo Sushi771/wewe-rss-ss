@@ -25,6 +25,10 @@ import { articleListWhere, articleListOrder } from '../article-list-filter';
 import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
+import { XhsSubscriptionService } from '../collection/xhs-subscription.service';
+import { XhsSubscriptionRuntime } from '../collection/xhs-subscription-runtime';
+import { xhsPublicCode } from '../collection/xhs-subscription-errors';
+import { xhsNoteFilterSchema } from '@wewe-rss/shared';
 import { z } from 'zod';
 import {
   AccountSchemas,
@@ -104,6 +108,24 @@ const searchCandidateSnapshotSchema = z.object({
   }),
 });
 
+export function isLocalXhsStatusRequest(input: {
+  method: string;
+  protocol: string;
+  host: string;
+  remoteAddress?: string;
+  origin?: string;
+}): boolean {
+  const origin = `${input.protocol}://${input.host}`;
+  return (
+    input.method === 'GET' &&
+    ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
+      input.remoteAddress || '',
+    ) &&
+    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(origin) &&
+    (input.origin === undefined || input.origin === origin)
+  );
+}
+
 @Injectable()
 export class TrpcRouter {
   private readonly wechat2RssAccounts = new Wechat2RssAccounts();
@@ -115,12 +137,36 @@ export class TrpcRouter {
     private readonly wereadService: WereadService,
     private readonly collectionService: CollectionService,
     @Optional() private readonly xiaohongshuService?: XiaohongshuService,
+    @Optional() private readonly xhsSubscriptions?: XhsSubscriptionService,
+    @Optional() private readonly xhsRuntime?: XhsSubscriptionRuntime,
   ) {}
 
   private get xhs() {
     return (
       this.xiaohongshuService ?? new XiaohongshuService(this.prismaService)
     );
+  }
+  private requireLocalXhsAccess(ctx: unknown, readOnly = false) {
+    if (
+      !(
+        (ctx as { isLocalSave?: boolean }).isLocalSave ||
+        (readOnly && (ctx as { isLocalXhsRead?: boolean }).isLocalXhsRead)
+      ) ||
+      privateOnlineMode() ||
+      process.env.WEWE_ACCEPTANCE_MODE === '1'
+    )
+      throw new TRPCError({
+        code: 'FORBIDDEN',
+        message: '小红书来源访问仅允许本机同源页面使用。',
+      });
+  }
+  private requireLocalXhsConnection(ctx: unknown, readOnly = false) {
+    this.requireLocalXhsAccess(ctx, readOnly);
+    if (!this.xhsRuntime)
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: 'XHS_RUNTIME_UNAVAILABLE',
+      });
   }
 
   private readonly logger = new Logger(this.constructor.name);
@@ -1595,9 +1641,119 @@ export class TrpcRouter {
   });
 
   xiaohongshuRouter = this.trpcService.router({
-    capability: this.trpcService.protectedProcedure.query(() =>
-      this.xhs.capability(),
+    connectionStatus: this.trpcService.protectedProcedure.query(({ ctx }) => {
+      this.requireLocalXhsConnection(ctx, true);
+      return this.xhsRuntime!.connectionStatus();
+    }),
+    connectSession: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            a1: z.string().min(1).max(8192),
+            webSession: z.string().min(1).max(8192),
+            persist: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .mutation(async ({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        try {
+          return await this.xhsRuntime!.connectSession(input);
+        } catch (error) {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: xhsPublicCode(error, 'XHS_CONNECTION_FAILED'),
+          });
+        }
+      }),
+    restoreSession: this.trpcService.protectedProcedure.mutation(
+      async ({ ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        try {
+          return await this.xhsRuntime!.restoreSession();
+        } catch (error) {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: xhsPublicCode(error, 'XHS_CONNECTION_FAILED'),
+          });
+        }
+      },
     ),
+    disconnectSession: this.trpcService.protectedProcedure.mutation(
+      ({ ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsRuntime!.disconnectSession();
+      },
+    ),
+    resolveSubscription: this.trpcService.protectedProcedure
+      .input(z.object({ url: z.string().min(1).max(8192) }).strict())
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSubscriptions!.resolveSubscription(input);
+      }),
+    subscribe: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            resolutionId: z.string().uuid(),
+            groupId: z.string().min(1).max(128).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input }) => this.xhsSubscriptions!.subscribe(input)),
+    downloadNotes: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteIds: z.array(z.string().min(1).max(300)).min(1),
+            pickToken: z.string().max(128).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        if (
+          !(ctx as { isLocalSave?: boolean }).isLocalSave ||
+          privateOnlineMode() ||
+          process.env.WEWE_ACCEPTANCE_MODE === '1'
+        )
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '本地下载仅允许本机使用。',
+          });
+        return this.xhsSubscriptions!.downloadNotes(input);
+      }),
+    task: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().uuid() }).strict())
+      .query(({ input }) => this.xhsSubscriptions!.task(input)),
+    cancelTask: this.trpcService.protectedProcedure
+      .input(z.object({ taskId: z.string().uuid() }).strict())
+      .mutation(({ input }) => this.xhsSubscriptions!.cancelTask(input)),
+    resumeTask: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            taskId: z.string().uuid(),
+            pickToken: z.string().max(128).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        if (
+          !(ctx as { isLocalSave?: boolean }).isLocalSave ||
+          privateOnlineMode() ||
+          process.env.WEWE_ACCEPTANCE_MODE === '1'
+        )
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '任务续跑仅允许本机同源页面使用。',
+          });
+        return this.xhsSubscriptions!.resumeTask(input);
+      }),
+    capability: this.trpcService.protectedProcedure.query(() => ({
+      ...this.xhs.capability(),
+      ...this.xhsSubscriptions?.capability(),
+    })),
     list: this.trpcService.protectedProcedure
       .input(
         z
@@ -1653,8 +1809,8 @@ export class TrpcRouter {
       .input(z.object({ id: z.string().min(1).max(128) }).strict())
       .mutation(({ input }) => this.xhs.remove(input.id)),
     notes: this.trpcService.protectedProcedure
-      .input(z.object({ creatorId: z.string().min(1).max(128) }).strict())
-      .query(({ input }) => this.xhs.notes(input.creatorId)),
+      .input(xhsNoteFilterSchema)
+      .query(({ input }) => this.xhs.notes(input.creatorId, input)),
     body: this.trpcService.protectedProcedure
       .input(
         z
@@ -1667,21 +1823,31 @@ export class TrpcRouter {
       .query(({ input }) => this.xhs.body(input.creatorId, input.noteId)),
     refresh: this.trpcService.protectedProcedure
       .input(z.object({ id: z.string().min(1).max(128) }).strict())
-      .mutation(({ input }) => this.xhs.refresh(input.id)),
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSubscriptions!.refresh(input);
+      }),
     export: this.trpcService.protectedProcedure
       .input(
         z
           .object({
-            creatorId: z.string().min(1).max(128),
+            creatorId: z.string().min(1).max(128).optional(),
+            groupId: z.string().min(1).max(128).nullable().optional(),
+            search: articleFilterShape.search,
+            dateStart: articleFilterShape.dateStart,
+            dateEnd: articleFilterShape.dateEnd,
             noteIds: z
               .array(z.string().min(1).max(300))
               .min(1)
               .max(100)
               .optional(),
           })
-          .strict(),
+          .strict()
+          .refine(orderedArticleDates),
       )
-      .mutation(({ input }) => this.xhs.export(input.creatorId, input.noteIds)),
+      .mutation(({ input }) =>
+        this.xhs.export(input.creatorId, input.noteIds, input),
+      ),
   });
 
   appRouter = this.trpcService.router({
@@ -1718,6 +1884,23 @@ export class TrpcRouter {
             errorMsg: null,
             // A disconnected download stops after the current atomic article.
             isExportCancelled: () => res.destroyed,
+            // Browser same-origin GETs omit Origin. This flag grants status
+            // reads only; mutations still require explicit same-origin proof.
+            isLocalXhsRead: isLocalXhsStatusRequest({
+              method: req.method,
+              protocol: req.protocol,
+              host: req.get('host') || '',
+              remoteAddress: req.socket.remoteAddress,
+              origin: req.headers.origin,
+            }),
+            isLocalSave:
+              ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
+                req.socket.remoteAddress || '',
+              ) &&
+              /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(
+                `${req.protocol}://${req.get('host')}`,
+              ) &&
+              req.headers.origin === `${req.protocol}://${req.get('host')}`,
             isLocal:
               ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
                 req.socket.remoteAddress || '',

@@ -9,6 +9,14 @@ import { SUBSCRIPTION_DISCOVERY } from '../collection/subscription-add';
 import { createNativeSubscriptionDiscovery } from '../collection/subscription-native-adapter';
 import { resolveWereadPublisherOriginal } from '../collection/weread-public-original';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
+import {
+  XHS_SUBSCRIPTION_SOURCE,
+  XhsSubscriptionService,
+} from '../collection/xhs-subscription.service';
+import {
+  createLocalXhsSubscriptionRuntime,
+  XhsSubscriptionRuntime,
+} from '../collection/xhs-subscription-runtime';
 
 @Module({
   imports: [PrismaModule, WereadModule],
@@ -18,6 +26,12 @@ import { XiaohongshuService } from '../collection/xiaohongshu.service';
     TrpcRouter,
     CollectionService,
     XiaohongshuService,
+    XhsSubscriptionService,
+    {
+      provide: XhsSubscriptionRuntime,
+      useFactory: createLocalXhsSubscriptionRuntime,
+    },
+    { provide: XHS_SUBSCRIPTION_SOURCE, useExisting: XhsSubscriptionRuntime },
     {
       provide: SUBSCRIPTION_DISCOVERY,
       inject: [PrismaService, CollectionService],
@@ -34,6 +48,12 @@ import { XiaohongshuService } from '../collection/xiaohongshu.service';
         }),
     },
   ],
-  exports: [TrpcService, TrpcRouter, XiaohongshuService],
+  exports: [
+    TrpcService,
+    TrpcRouter,
+    XiaohongshuService,
+    XhsSubscriptionService,
+    XhsSubscriptionRuntime,
+  ],
 })
 export class TrpcModule {}
