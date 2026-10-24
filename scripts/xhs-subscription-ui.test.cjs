@@ -32,6 +32,46 @@ const zod = require(
 );
 const shared = load('packages/shared/src/article-date-filter.ts', { zod });
 const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
+test('shared transport logger excludes signed-link resolution and session fields in both directions', () => {
+  const source = fs.readFileSync('apps/web/src/provider/trpc.tsx', 'utf8');
+  const ast = ts.createSourceFile(
+    'provider.tsx',
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let enabled;
+  function visit(node) {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.getText(ast) === 'loggerLink'
+    ) {
+      enabled = node.arguments[0].properties
+        .find((p) => p.name?.getText(ast) === 'enabled')
+        .initializer.getText(ast);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.ok(enabled);
+  const permitLog = new Function('return (' + enabled + ')')();
+  for (const direction of ['up', 'down']) {
+    for (const route of [
+      'xiaohongshu.resolveSubscription',
+      'xiaohongshu.connectSession',
+    ])
+      assert.equal(
+        permitLog({
+          direction,
+          path: route,
+          input: { secret: 'synthetic-only' },
+        }),
+        false,
+      );
+  }
+  assert.equal(permitLog({ direction: 'up', path: 'article.list' }), true);
+});
 const status = (state = 'running', kind = 'download') => ({
   kind,
   state,
@@ -219,7 +259,6 @@ function fixture() {
       return taskStatus;
     },
   };
-  const invalidation = { invalidate: async () => {} };
   const utils = {
     client: {
       get xiaohongshu() {
@@ -227,10 +266,16 @@ function fixture() {
       },
     },
     xiaohongshu: Object.fromEntries(
-      ['list', 'notes', 'body', 'groups', 'capability'].map((name) => [
-        name,
-        invalidation,
-      ]),
+      ['list', 'notes', 'body', 'groups', 'capability', 'connectionStatus'].map(
+        (name) => [
+          name,
+          {
+            invalidate: async () => {
+              calls.push(['invalidate', name]);
+            },
+          },
+        ],
+      ),
     ),
   };
   const query = (data) => ({ data, isLoading: false, error: null });
@@ -1131,6 +1176,40 @@ test('connection controls stay default-off, never request secrets or connect aut
       1,
     );
     assert.ok(f.find('Checkbox', '选择笔记 苹果存档'));
+    f.calls.length = 0;
+    f.button('重新读取连接状态').props.onPress();
+    await tick();
+    assert.ok(f.calls.some(([name]) => name === 'connectionStatus'));
+    assert.ok(
+      f.calls.some(
+        ([name, target]) => name === 'invalidate' && target === 'capability',
+      ),
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('moving group membership invalidates cached note scope and clears stale selection', async () => {
+  const f = fixture();
+  try {
+    await f.start(true);
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      true,
+    );
+    f.calls.length = 0;
+    await f.find('ManagementFolders').props.onMove(['creator-a'], 'group-a');
+    assert.ok(
+      f.calls.some(
+        ([name, target]) => name === 'invalidate' && target === 'notes',
+      ),
+    );
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      false,
+    );
   } finally {
     f.dispose();
   }

@@ -108,6 +108,24 @@ const searchCandidateSnapshotSchema = z.object({
   }),
 });
 
+export function isLocalXhsStatusRequest(input: {
+  method: string;
+  protocol: string;
+  host: string;
+  remoteAddress?: string;
+  origin?: string;
+}): boolean {
+  const origin = `${input.protocol}://${input.host}`;
+  return (
+    input.method === 'GET' &&
+    ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
+      input.remoteAddress || '',
+    ) &&
+    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(origin) &&
+    (input.origin === undefined || input.origin === origin)
+  );
+}
+
 @Injectable()
 export class TrpcRouter {
   private readonly wechat2RssAccounts = new Wechat2RssAccounts();
@@ -128,16 +146,22 @@ export class TrpcRouter {
       this.xiaohongshuService ?? new XiaohongshuService(this.prismaService)
     );
   }
-  private requireLocalXhsConnection(ctx: unknown) {
+  private requireLocalXhsAccess(ctx: unknown, readOnly = false) {
     if (
-      !(ctx as { isLocalSave?: boolean }).isLocalSave ||
+      !(
+        (ctx as { isLocalSave?: boolean }).isLocalSave ||
+        (readOnly && (ctx as { isLocalXhsRead?: boolean }).isLocalXhsRead)
+      ) ||
       privateOnlineMode() ||
       process.env.WEWE_ACCEPTANCE_MODE === '1'
     )
       throw new TRPCError({
         code: 'FORBIDDEN',
-        message: '连接管理仅允许本机同源页面使用。',
+        message: '小红书来源访问仅允许本机同源页面使用。',
       });
+  }
+  private requireLocalXhsConnection(ctx: unknown, readOnly = false) {
+    this.requireLocalXhsAccess(ctx, readOnly);
     if (!this.xhsRuntime)
       throw new TRPCError({
         code: 'PRECONDITION_FAILED',
@@ -1618,7 +1642,7 @@ export class TrpcRouter {
 
   xiaohongshuRouter = this.trpcService.router({
     connectionStatus: this.trpcService.protectedProcedure.query(({ ctx }) => {
-      this.requireLocalXhsConnection(ctx);
+      this.requireLocalXhsConnection(ctx, true);
       return this.xhsRuntime!.connectionStatus();
     }),
     connectSession: this.trpcService.protectedProcedure
@@ -1663,9 +1687,10 @@ export class TrpcRouter {
     ),
     resolveSubscription: this.trpcService.protectedProcedure
       .input(z.object({ url: z.string().min(1).max(8192) }).strict())
-      .mutation(({ input }) =>
-        this.xhsSubscriptions!.resolveSubscription(input),
-      ),
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSubscriptions!.resolveSubscription(input);
+      }),
     subscribe: this.trpcService.protectedProcedure
       .input(
         z
@@ -1798,7 +1823,10 @@ export class TrpcRouter {
       .query(({ input }) => this.xhs.body(input.creatorId, input.noteId)),
     refresh: this.trpcService.protectedProcedure
       .input(z.object({ id: z.string().min(1).max(128) }).strict())
-      .mutation(({ input }) => this.xhsSubscriptions!.refresh(input)),
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSubscriptions!.refresh(input);
+      }),
     export: this.trpcService.protectedProcedure
       .input(
         z
@@ -1856,6 +1884,15 @@ export class TrpcRouter {
             errorMsg: null,
             // A disconnected download stops after the current atomic article.
             isExportCancelled: () => res.destroyed,
+            // Browser same-origin GETs omit Origin. This flag grants status
+            // reads only; mutations still require explicit same-origin proof.
+            isLocalXhsRead: isLocalXhsStatusRequest({
+              method: req.method,
+              protocol: req.protocol,
+              host: req.get('host') || '',
+              remoteAddress: req.socket.remoteAddress,
+              origin: req.headers.origin,
+            }),
             isLocalSave:
               ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
                 req.socket.remoteAddress || '',

@@ -9,7 +9,7 @@ import {
   XhsSubscriptionService,
 } from './xhs-subscription.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { TrpcRouter } from '../trpc/trpc.router';
+import { TrpcRouter, isLocalXhsStatusRequest } from '../trpc/trpc.router';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcModule } from '../trpc/trpc.module';
 import { RedbookTransport } from './redbook-client';
@@ -91,6 +91,7 @@ function fixture() {
     },
   );
   const media = jest.fn(async (url: URL, _options: any) => {
+    void _options;
     const response = new Response(png, {
       headers: { 'content-type': 'image/png' },
     });
@@ -400,6 +401,20 @@ describe('default-off production source wiring with synthetic sessions only', ()
     });
     expect(storage.load).not.toHaveBeenCalled();
     expect(storage.store).not.toHaveBeenCalled();
+    const readOnly = router.createCaller({
+      errorMsg: null,
+      isLocalXhsRead: true,
+    });
+    expect(await readOnly.xiaohongshu.connectionStatus()).toMatchObject({
+      connected: false,
+    });
+    await expect(readOnly.xiaohongshu.restoreSession()).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
+    await expect(
+      readOnly.xiaohongshu.resolveSubscription({ url: noteUrl }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(storage.load).not.toHaveBeenCalled();
     const local = router.createCaller({ errorMsg: null, isLocalSave: true });
     expect(
       await local.xiaohongshu.connectSession({
@@ -410,5 +425,26 @@ describe('default-off production source wiring with synthetic sessions only', ()
     expect(await local.xiaohongshu.disconnectSession()).toMatchObject({
       connected: false,
     });
+  });
+  it('permits Origin-less loopback GET status only and rejects remote, foreign Host and cross-site Origin', () => {
+    const local = {
+      method: 'GET',
+      protocol: 'http',
+      host: '127.0.0.1:4239',
+      remoteAddress: '127.0.0.1',
+    };
+    expect(isLocalXhsStatusRequest(local)).toBe(true);
+    expect(
+      isLocalXhsStatusRequest({ ...local, origin: 'http://127.0.0.1:4239' }),
+    ).toBe(true);
+    for (const change of [
+      { method: 'POST' },
+      { host: 'attacker.test:4239' },
+      { remoteAddress: '192.0.2.1' },
+      { origin: 'https://attacker.test' },
+      { origin: 'http://127.0.0.1:4240' },
+      { origin: 'null' },
+    ])
+      expect(isLocalXhsStatusRequest({ ...local, ...change })).toBe(false);
   });
 });

@@ -372,6 +372,8 @@ export default function Xiaohongshu() {
           setMessage(taskText(next));
           void utils.xiaohongshu.list.invalidate();
           void utils.xiaohongshu.notes.invalidate();
+          void utils.xiaohongshu.capability.invalidate();
+          void utils.xiaohongshu.connectionStatus.invalidate();
         }
       },
       onError: () =>
@@ -724,9 +726,12 @@ export default function Xiaohongshu() {
       setMessage('已记住保存设置。');
     });
   const invalidateFolders = async () => {
+    setSelectedIds(new Set());
+    setNoteId('');
     await Promise.all([
       utils.xiaohongshu.groups.invalidate(),
       utils.xiaohongshu.list.invalidate(),
+      utils.xiaohongshu.notes.invalidate(),
     ]);
   };
   return (
@@ -1197,7 +1202,12 @@ export default function Xiaohongshu() {
                   size="sm"
                   variant="light"
                   isDisabled={busy}
-                  onPress={() => void connection.refetch()}
+                  onPress={() =>
+                    void Promise.all([
+                      connection.refetch(),
+                      utils.xiaohongshu.capability.invalidate(),
+                    ])
+                  }
                 >
                   重新读取连接状态
                 </Button>

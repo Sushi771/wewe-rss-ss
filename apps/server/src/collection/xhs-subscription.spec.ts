@@ -186,6 +186,16 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         .createCaller({ errorMsg: 'synthetic unauthorized' })
         .xiaohongshu.resolveSubscription({ url: author.profileUrl }),
     ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    const remote = router.createCaller({ errorMsg: null, isLocalSave: false });
+    const previousResolutions = (source.resolve as jest.Mock).mock.calls.length;
+    await expect(
+      remote.xiaohongshu.resolveSubscription({ url: author.profileUrl }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(
+      remote.xiaohongshu.refresh({ id: creatorId }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(source.resolve).toHaveBeenCalledTimes(previousResolutions);
+    expect(source.list).not.toHaveBeenCalled();
     const api = router.createCaller({ errorMsg: null, isLocalSave: true });
     const { taskId } = await api.xiaohongshu.refresh({ id: creatorId });
     await finish(taskId);

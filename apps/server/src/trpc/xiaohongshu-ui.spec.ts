@@ -143,16 +143,28 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       taskRunning: { current: false },
       cancelPending: { current: false },
       queuedCreators: { current: [] },
+      queuedDownloads: { current: [] },
+      nextDownloadRef: { current: undefined },
+      lastTaskId: { current: '' },
+      zipController: { current: null },
       profileUrl: state.url,
+      creatorId: 'a',
       taskId: 'task-one',
       resolution: null,
       subscriptionGroup: '',
       failureMessage: messageExports.failureMessage,
       taskFinished: taskExports.taskFinished,
+      taskSettling: taskExports.taskSettling,
       taskText: taskExports.taskText,
       selectedImageNotes: taskExports.selectedImageNotes,
+      exportArchiveGroups: taskExports.exportArchiveGroups,
       current: { id: 'a', displayName: '合成作者' },
-      selectedNotes: [{ id: 'note-a', status: 'listed', kind: 'image-text' }],
+      selectedNotes: [
+        { id: 'note-a', creatorId: 'a', status: 'listed', kind: 'image-text' },
+      ],
+      selectedArchives: [],
+      exportScope: 'selected',
+      notesInput: { creatorId: 'a' },
       saveSettings: { directory: 'synthetic-only', askEveryTime: false },
       creators: {
         data: {
@@ -167,6 +179,10 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
         xiaohongshu: {
           list: { invalidate: invalidated },
           notes: { invalidate: invalidated },
+          capability: { invalidate: jest.fn().mockResolvedValue(undefined) },
+          connectionStatus: {
+            invalidate: jest.fn().mockResolvedValue(undefined),
+          },
         },
       },
       subscriptionApi: {
@@ -202,7 +218,9 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       setDateSelection: 'dates',
       setSelectedIds: 'selected',
     }))
-      scope[setter] = jest.fn((v: unknown) => (state[property] = v));
+      scope[setter] = jest.fn((v: any) => {
+        state[property] = typeof v === 'function' ? v(state[property]) : v;
+      });
     for (const name of [
       'setProgressOpen',
       'setCancelling',
@@ -212,11 +230,20 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       'setAdding',
       'setSearch',
       'setMobileSidebarOpen',
+      'setLoadedCount',
+      'setExportOpen',
+      'setZipProgress',
+      'setTaskCreatorId',
     ])
       scope[name] = jest.fn();
     scope.startTask = evaluate('startTask', scope);
     scope.run = evaluate('run', scope);
     scope.updateCreator = evaluate('updateCreator', scope);
+    scope.startDownloadJob = evaluate('startDownloadJob', scope);
+    scope.nextDownloadRef.current = scope.startDownloadJob;
+    scope.taskApiRef = {
+      current: { subscriptionApi: scope.subscriptionApi, utils: scope.utils },
+    };
     return { scope, state, invalidated };
   }
   function watch(scope: any) {
@@ -497,6 +524,12 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       expect(actual.task).toEqual(task);
       expect(actual.message).toBe(taskExports.taskText(task));
       expect(scope.taskRunning.current).toBe(false);
+      expect(
+        scope.utils.xiaohongshu.capability.invalidate,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        scope.utils.xiaohongshu.connectionStatus.invalidate,
+      ).toHaveBeenCalledTimes(1);
     },
   );
   it('clears selection on search/creator/date changes and blocks changes during work', () => {
@@ -506,7 +539,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     expect(state.selected.size).toBe(0);
     evaluate('selectCreator', scope)('b');
     expect(state.creator).toBe('b');
-    expect(state.dates).toEqual({ mode: 'range', start: '', end: '' });
+    expect(state.dates).toEqual({ mode: 'day', start: '', end: '' });
     expect(scope.setMobileSidebarOpen).toHaveBeenCalledWith(false);
     scope.active.current = true;
     scope.setSearch.mockClear();
@@ -533,16 +566,22 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     expect(status({ status: 'video-skipped', kind: 'video' })).toContain(
       '未归档',
     );
-    expect(text).toContain('body.data.images.map');
+    const html = taskExports.noteReaderHtml({
+      text: 'Saved body <script> & symbols',
+      images: ['data:image/png;base64,c3ludGhldGlj'],
+    });
+    expect(html).toContain('Saved body &lt;script&gt; &amp; symbols');
+    expect(html).toContain('src="data:image/png;base64,c3ludGhldGlj"');
+    expect(text).toContain('noteReaderHtml(body.data)');
+    expect(text).toContain('<ArticleReader');
     expect(text).not.toMatch(
       /<video\b|video\/mp4;base64|dangerouslySetInnerHTML/,
     );
   });
   it('exports only selected complete caches as ZIP and revokes its object URL', async () => {
     const { scope } = harness();
-    scope.selectedNotes = [
-      { id: 'complete', status: 'complete' },
-      { id: 'listed', status: 'listed' },
+    scope.selectedArchives = [
+      { id: 'complete', creatorId: 'a', status: 'complete' },
     ];
     const link = { click: jest.fn(), remove: jest.fn() };
     scope.document = {
@@ -611,11 +650,14 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       'trpc.xiaohongshu.body.useQuery',
       'trpc.xiaohongshu.export.useMutation',
       'compact-list',
-      'mac-toolbar',
-      'md:flex-row',
+      '<SubscriptionToolbar',
+      'feed-workspace',
     ])
       expect(text).toContain(marker);
-    expect(text.indexOf('onPress={handleLocalSave}')).toBeLessThan(
+    expect(text.indexOf('onPress={() => handleLocalSave()}')).toBeGreaterThan(
+      -1,
+    );
+    expect(text.indexOf('onPress={() => handleLocalSave()}')).toBeLessThan(
       text.indexOf('onPress={handleDownload}'),
     );
     expect(text).not.toMatch(/prototypes\/|toast\.success/);
@@ -730,27 +772,18 @@ describe('shared single-level management folder actual handlers (offline)', () =
       expect(contents).toMatch(
         /\[mobileSidebarOpen, setMobileSidebarOpen\] = useState\(false\)/,
       );
-      if (contents === feeds) {
-        expect(contents).toContain(
-          "mobileSidebarOpen ? 'feed-sidebar-open' : ''",
-        );
-        expect(contents).toContain('mac-sidebar feed-sidebar');
-        const css = fs.readFileSync(
-          path.resolve(__dirname, '../../../web/src/index.css'),
-          'utf8',
-        );
-        expect(css).toMatch(
-          /\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*none/,
-        );
-        expect(css).toMatch(
-          /@media \(min-width: 768px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
-        );
-      } else {
-        // XHS keeps its existing important utilities; WeChat now owns its
-        // mobile and desktop geometry in the single-scroll sidebar stylesheet.
-        expect(contents).toContain("mobileSidebarOpen ? '!flex' : '!hidden'");
-        expect(contents).toContain('md:!flex');
-      }
+      expect(contents).toContain(
+        "mobileSidebarOpen ? 'feed-sidebar-open' : ''",
+      );
+      expect(contents).toContain('mac-sidebar feed-sidebar');
+      const css = fs.readFileSync(
+        path.resolve(__dirname, '../../../web/src/index.css'),
+        'utf8',
+      );
+      expect(css).toMatch(/\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*none/);
+      expect(css).toMatch(
+        /@media \(min-width: 768px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
+      );
       expect(contents).toContain('!min-w-0');
       expect(contents).toContain('aria-expanded={mobileSidebarOpen}');
     }
