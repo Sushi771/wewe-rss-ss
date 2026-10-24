@@ -1,4 +1,6 @@
 import {
+  ContentExportScope,
+  ContentLoadMore,
   SubscriptionSearch,
   SubscriptionMore,
   SubscriptionToolbar,
@@ -32,8 +34,11 @@ import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
 import {
+  exportArchiveBatches,
+  toggleLoadedSelection,
   selectedImageNotes,
   taskFinished,
+  taskSettling,
   taskText,
   watchSubscriptionTask,
 } from '@web/utils/xiaohongshu-subscription';
@@ -87,6 +92,18 @@ export default function Xiaohongshu() {
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
   const [noteId, setNoteId] = useState('');
+  const [loadedCount, setLoadedCount] = useState(20);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportScope, setExportScope] = useState<
+    'selected' | 'filtered' | 'all'
+  >('selected');
+  const zipController = useRef<AbortController | null>(null);
+  const [zipProgress, setZipProgress] = useState<{
+    completed: number;
+    total: number;
+    state: 'running' | 'completed' | 'cancelled' | 'failed';
+  } | null>(null);
+  useEffect(() => () => zipController.current?.abort(), []);
   const [resolution, setResolution] = useState<SubscriptionResolution | null>(
     null,
   );
@@ -96,6 +113,7 @@ export default function Xiaohongshu() {
   const [progressOpen, setProgressOpen] = useState(true);
   const [cancelling, setCancelling] = useState(false);
   const taskRunning = useRef(false);
+  const lastTaskId = useRef('');
   const queuedCreators = useRef<string[]>([]);
   const cancelPending = useRef(false);
   const subscriptionApi = useMemo(
@@ -137,6 +155,7 @@ export default function Xiaohongshu() {
     (receipt: TaskReceipt, kind: 'list' | 'download', total = 0) => {
       if (!receipt.taskId)
         throw new Error('未收到任务编号，请重新读取页面确认操作结果。');
+      setZipProgress(null);
       taskRunning.current = true;
       setTask({
         kind,
@@ -148,6 +167,7 @@ export default function Xiaohongshu() {
         remaining: total,
       });
       setProgressOpen(true);
+      lastTaskId.current = receipt.taskId;
       setTaskId(receipt.taskId);
     },
     [],
@@ -211,7 +231,8 @@ export default function Xiaohongshu() {
           }),
     [dateError, notes.data, direction],
   );
-  const selectableNotes = visibleNotes.filter(
+  const loadedNotes = visibleNotes.slice(0, loadedCount);
+  const selectableNotes = loadedNotes.filter(
     (note) => note.kind === 'image-text' || note.status === 'complete',
   );
   const selectedNotes = selectedImageNotes(visibleNotes, selectedIds);
@@ -229,6 +250,17 @@ export default function Xiaohongshu() {
       : note.kind === 'video' || note.status === 'video-skipped'
         ? '视频未归档'
         : '正文或图片未归档';
+  const allArchiveNotes = trpc.xiaohongshu.notes.useQuery(
+    { creatorId },
+    { enabled: !!current && exportOpen && exportScope === 'all', retry: false },
+  );
+  const exportPreviewCount =
+    exportScope === 'selected'
+      ? selectedArchives.length
+      : (exportScope === 'all'
+          ? allArchiveNotes.data?.items
+          : visibleNotes
+        )?.filter((note) => note.status === 'complete').length;
   const allSelected =
     selectableNotes.length > 0 &&
     selectableNotes.every((note) => selectedIds.has(note.id));
@@ -249,7 +281,7 @@ export default function Xiaohongshu() {
       onTask: (next) => {
         setTask(next);
         setOperationError('');
-        if (taskFinished(next)) {
+        if (taskFinished(next) && !taskSettling(next)) {
           const nextCreator =
             next.state === 'completed'
               ? queuedCreators.current.shift()
@@ -279,7 +311,6 @@ export default function Xiaohongshu() {
           setCancelling(false);
           setBusy(false);
           setMessage(taskText(next));
-          setSelectedIds(new Set());
           void utils.xiaohongshu.list.invalidate();
           void utils.xiaohongshu.notes.invalidate();
         }
@@ -291,6 +322,29 @@ export default function Xiaohongshu() {
     });
     return () => controller.abort();
   }, [taskId, startTask]);
+  const handleResumeTask = () =>
+    run(async () => {
+      if (!task?.resumable || !lastTaskId.current) return;
+      let pickToken: string | undefined;
+      if (task.kind === 'download' && saveSettings?.askEveryTime) {
+        const chosen = await localApi<DirectoryChoice>('/directory', {});
+        if (chosen.cancelled) {
+          setMessage('已取消续跑目录选择，原任务保留。');
+          return;
+        }
+        pickToken = chosen.pickToken;
+        setSaveSettings({
+          directory: chosen.directory,
+          askEveryTime: chosen.askEveryTime,
+        });
+        setDirectory(chosen.directory);
+      }
+      const receipt = await subscriptionApi.resumeTask.mutate({
+        taskId: lastTaskId.current,
+        ...(pickToken ? { pickToken } : {}),
+      });
+      startTask(receipt, task.kind, task.total);
+    });
   const handleCancelTask = async () => {
     if (!taskId || !taskRunning.current || cancelPending.current) return;
     cancelPending.current = true;
@@ -344,6 +398,9 @@ export default function Xiaohongshu() {
     if (active.current) return;
     setCreatorId(id);
     setNoteId('');
+    setLoadedCount(20);
+    setExportOpen(false);
+    setZipProgress(null);
     setSearch('');
     setDateSelection({ mode: 'day', start: '', end: '' });
     setSelectedIds(new Set());
@@ -357,6 +414,8 @@ export default function Xiaohongshu() {
   };
   const handleSearch = (value: string) => {
     if (active.current) return;
+    setLoadedCount(20);
+    setExportOpen(false);
     setSearch(value);
     setSelectedIds(new Set());
   };
@@ -430,39 +489,88 @@ export default function Xiaohongshu() {
   const handleDownload = () =>
     run(async () => {
       if (!current) return;
-      const archived = selectedArchives;
-      if (!archived.length) return;
-      if (archived.length > 100)
-        throw new Error('每次最多导出 100 篇，请减少选择后再试。');
-      const result = await exportNotes.mutateAsync({
-        creatorId: current.id,
-        noteIds: archived.map((note) => note.id),
-      });
-      const bytes = Uint8Array.from(atob(result.base64), (char) =>
-        char.charCodeAt(0),
-      );
-      const url = URL.createObjectURL(
-        new Blob([bytes], { type: result.mimeType }),
-      );
-      const link = document.createElement('a');
+      const controller = new AbortController();
+      zipController.current = controller;
+      const creator = current;
+      const scope = exportScope;
+      const selectedSnapshot = [...selectedArchives];
+      const filterSnapshot = { ...notesInput };
+      setExportOpen(false);
+      setTask(null);
+      setProgressOpen(true);
+      setZipProgress({ completed: 0, total: 0, state: 'running' });
+      let completed = 0;
+      let total = 0;
       try {
-        link.href = url;
-        link.download = result.filename;
-        document.body.appendChild(link);
-        link.click();
+        const candidates =
+          scope === 'selected'
+            ? selectedSnapshot
+            : (
+                await utils.client.xiaohongshu.notes.query(
+                  scope === 'all' ? { creatorId: creator.id } : filterSnapshot,
+                )
+              ).items;
+        if (controller.signal.aborted) {
+          setZipProgress({ completed, total, state: 'cancelled' });
+          return;
+        }
+        const ids = candidates
+          .filter((note) => note.status === 'complete')
+          .map((note) => note.id);
+        total = ids.length;
+        if (!ids.length) throw new Error('此范围暂无已保存完整的笔记。');
+        setZipProgress({ completed, total, state: 'running' });
+        const result = await exportArchiveBatches({
+          ids,
+          signal: controller.signal,
+          send: (noteIds) =>
+            exportNotes.mutateAsync({ creatorId: creator.id, noteIds }),
+          save: (receipt, part, parts) => {
+            const bytes = Uint8Array.from(atob(receipt.base64), (char) =>
+              char.charCodeAt(0),
+            );
+            const url = URL.createObjectURL(
+              new Blob([bytes], { type: receipt.mimeType }),
+            );
+            const link = document.createElement('a');
+            try {
+              link.href = url;
+              link.download =
+                parts > 1
+                  ? receipt.filename.replace(/\.zip$/i, '') +
+                    `-part-${part}-of-${parts}.zip`
+                  : receipt.filename;
+              document.body.appendChild(link);
+              link.click();
+            } finally {
+              link.remove();
+              URL.revokeObjectURL(url);
+            }
+          },
+          onProgress: (count, size) => {
+            completed = count;
+            setZipProgress({ completed, total: size, state: 'running' });
+          },
+        });
+        setZipProgress({
+          completed: result.completed,
+          total: result.total,
+          state: result.cancelled ? 'cancelled' : 'completed',
+        });
+        setMessage(
+          `${creator.displayName}：ZIP 导出${result.cancelled ? '已取消' : '已完成'}，已交给浏览器下载 ${result.completed}/${result.total} 篇。`,
+        );
+      } catch (cause) {
+        setZipProgress({ completed, total, state: 'failed' });
+        throw cause;
       } finally {
-        link.remove();
-        URL.revokeObjectURL(url);
+        if (zipController.current === controller) zipController.current = null;
       }
-      setMessage(
-        `${current.displayName}：已导出选中的 ${result.notes} 篇已完整保存的笔记 ZIP。`,
-      );
     });
-  const handleLocalSave = () =>
+  const handleLocalSave = (archivedOnly = false) =>
     run(async () => {
-      if (!current || !saveSettings || !selectedNotes.length) return;
-      if (selectedNotes.length > 100)
-        throw new Error('每次最多保存 100 篇，请减少选择后再试。');
+      const targets = archivedOnly ? selectedArchives : selectedNotes;
+      if (!current || !saveSettings || !targets.length) return;
       let pickToken: string | undefined;
       if (saveSettings.askEveryTime) {
         const chosen = await localApi<DirectoryChoice>('/directory', {});
@@ -479,10 +587,10 @@ export default function Xiaohongshu() {
       }
       const receipt = await subscriptionApi.downloadNotes.mutate({
         creatorId: current.id,
-        noteIds: selectedNotes.map((note) => note.id),
+        noteIds: targets.map((note) => note.id),
         ...(pickToken ? { pickToken } : {}),
       });
-      startTask(receipt, 'download', selectedNotes.length);
+      startTask(receipt, 'download', targets.length);
     });
   const handleChooseDirectory = () =>
     run(async () => {
@@ -723,10 +831,48 @@ export default function Xiaohongshu() {
         className="mac-content feed-content !min-w-0 !overflow-y-auto"
         aria-label="小红书笔记列表"
       >
+        {zipProgress && (
+          <SubscriptionProgress
+            ariaLabel="ZIP 导出进度"
+            compact={zipProgress.state !== 'running'}
+            value={zipProgress.completed}
+            total={zipProgress.total}
+            progressLabel="已导出的笔记数量"
+            label={`ZIP 导出 ${zipProgress.completed}/${zipProgress.total}`}
+            open={progressOpen}
+            onOpenChange={setProgressOpen}
+            summary={progressOpen ? '收起进度' : '查看进度'}
+            actions={
+              zipProgress.state === 'running' ? (
+                <Button
+                  size="sm"
+                  variant="light"
+                  onPress={() => zipController.current?.abort()}
+                >
+                  取消导出
+                </Button>
+              ) : null
+            }
+          >
+            <p role="status">
+              ZIP 导出
+              {
+                {
+                  running: '进行中',
+                  completed: '已完成',
+                  cancelled: '已取消',
+                  failed: '未完成',
+                }[zipProgress.state]
+              }
+              ：{zipProgress.completed}/{zipProgress.total} 篇。每 100
+              篇生成一个文件。
+            </p>
+          </SubscriptionProgress>
+        )}
         {task && (
           <SubscriptionProgress
             ariaLabel="笔记任务进度"
-            compact={taskFinished(task)}
+            compact={taskFinished(task) && !taskSettling(task)}
             value={task.completed + task.skipped}
             total={task.total}
             progressLabel="已完成的笔记数量"
@@ -744,7 +890,21 @@ export default function Xiaohongshu() {
                 >
                   {cancelling ? '正在取消' : '取消任务'}
                 </Button>
+              ) : task.resumable ? (
+                <Button
+                  size="sm"
+                  variant="light"
+                  isDisabled={busy}
+                  onPress={handleResumeTask}
+                >
+                  继续未完成任务
+                </Button>
               ) : null
+            }
+            notice={
+              taskSettling(task) ? (
+                <p role="status">正在结束当前保存，确认后可继续未完成任务。</p>
+              ) : undefined
             }
           >
             <p role="status" className="py-1 text-xs">
@@ -773,21 +933,21 @@ export default function Xiaohongshu() {
               size="sm"
               color="primary"
               variant="flat"
-              isDisabled={
-                busy ||
-                !saveSettings ||
-                !selectedNotes.length ||
-                selectedNotes.length > 100
-              }
-              onPress={handleLocalSave}
+              isDisabled={busy || !saveSettings || !selectedNotes.length}
+              onPress={() => handleLocalSave()}
             >
               下载图文到本地 ({selectedNotes.length})
             </Button>
             <Button
               size="sm"
               variant="light"
-              isDisabled={busy || !selectedArchives.length}
-              onPress={handleDownload}
+              isDisabled={busy || !current}
+              onPress={() => {
+                setExportScope(
+                  selectedArchives.length ? 'selected' : 'filtered',
+                );
+                setExportOpen(true);
+              }}
             >
               导出已保存 ZIP
             </Button>
@@ -806,6 +966,14 @@ export default function Xiaohongshu() {
               更新笔记列表
             </Button>
             <SubscriptionMore key={creatorId}>
+              <Button
+                size="sm"
+                variant="light"
+                isDisabled={busy || !saveSettings || !selectedArchives.length}
+                onPress={() => handleLocalSave(true)}
+              >
+                保存已选归档到本地
+              </Button>
               {current && (
                 <Switch
                   size="sm"
@@ -951,6 +1119,8 @@ export default function Xiaohongshu() {
             error={dateError}
             onChange={(value) => {
               if (active.current) return;
+              setLoadedCount(20);
+              setExportOpen(false);
               setDateSelection(value);
               setSelectedIds(new Set());
             }}
@@ -967,11 +1137,45 @@ export default function Xiaohongshu() {
             />
           </div>
         )}
+        <div className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
+          <Button
+            size="sm"
+            variant="light"
+            isDisabled={busy || !visibleNotes.length}
+            onPress={() => {
+              if (!active.current)
+                setSelectedIds(
+                  new Set(
+                    visibleNotes
+                      .filter(
+                        (note) =>
+                          note.kind === 'image-text' ||
+                          note.status === 'complete',
+                      )
+                      .map((note) => note.id),
+                  ),
+                );
+            }}
+          >
+            选择当前筛选全部
+          </Button>
+          <Button
+            size="sm"
+            variant="light"
+            isDisabled={busy || !selectedIds.size}
+            onPress={() => {
+              if (!active.current) setSelectedIds(new Set());
+            }}
+          >
+            清空选择
+          </Button>
+        </div>
         <ContentSortControls
           sort="publishTime"
           onSortChange={() => {}}
           direction={direction}
           onDirectionChange={(value) => {
+            setLoadedCount(20);
             setDirection(value);
             setSelectedIds(new Set());
           }}
@@ -981,11 +1185,8 @@ export default function Xiaohongshu() {
         <div className="px-3 py-1 text-xs text-neutral-500">
           当前{search ? '筛选' : '博主'} {visibleNotes.length} 篇；已选择{' '}
           {selectedNotes.length}{' '}
-          篇图文。全选仅勾选已加载内容；新笔记需另行勾选。
+          篇图文。全选勾选已加载内容；可继续加载并追加选择。
           {search && '修改搜索会清空选择。'}
-          {selectedNotes.length > 100 && (
-            <span role="alert">每次最多保存或导出 100 篇，请减少选择。</span>
-          )}
         </div>
         {notes.error && (
           <p role="alert" className="px-4 py-2 text-sm">
@@ -1008,12 +1209,20 @@ export default function Xiaohongshu() {
                 if (!active.current)
                   setSelectedIds(
                     value
-                      ? new Set(selectableNotes.map((note) => note.id))
-                      : new Set(),
+                      ? toggleLoadedSelection(
+                          selectedIds,
+                          selectableNotes.map((note) => note.id),
+                          true,
+                        )
+                      : toggleLoadedSelection(
+                          selectedIds,
+                          selectableNotes.map((note) => note.id),
+                          false,
+                        ),
                   );
               }}
             />
-            {visibleNotes.map((note) => (
+            {loadedNotes.map((note) => (
               <div
                 key={note.id}
                 className="compact-row article-row !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center"
@@ -1048,6 +1257,15 @@ export default function Xiaohongshu() {
                 </div>
               </div>
             ))}
+            {loadedNotes.length < visibleNotes.length && (
+              <ContentLoadMore
+                loading={false}
+                disabled={busy}
+                onLoad={() => {
+                  if (!active.current) setLoadedCount((count) => count + 20);
+                }}
+              />
+            )}
             {notes.isLoading && current && (
               <div className="flex justify-center p-4">
                 <Spinner size="sm" />
@@ -1065,6 +1283,66 @@ export default function Xiaohongshu() {
           </div>
         </div>
       </section>
+      <SubscriptionDialog
+        isOpen={exportOpen}
+        onClose={() => {
+          if (!active.current) setExportOpen(false);
+        }}
+      >
+        <ModalContent>
+          <ModalHeader>导出已保存笔记</ModalHeader>
+          <ModalBody>
+            <p aria-label="导出对象" className="text-sm">
+              博主：{current?.displayName || '请选择博主'}
+            </p>
+            <ContentExportScope
+              name="xhs-export-scope"
+              value={exportScope}
+              options={[
+                {
+                  value: 'selected',
+                  label: `选中笔记（${selectedArchives.length} 篇完整归档）`,
+                  disabled: !selectedArchives.length,
+                },
+                {
+                  value: 'filtered',
+                  label: '当前筛选（含尚未加载的笔记）',
+                  disabled: !!dateError,
+                },
+                { value: 'all', label: '本博主全部（忽略搜索及日期）' },
+              ]}
+              onChange={setExportScope}
+              disabled={busy}
+            />
+            <p className="text-xs text-neutral-500">
+              只导出已完整保存的正文与媒体；视频归档可一起导出。超过 100
+              篇自动分批生成 ZIP，开始后范围固定。
+            </p>
+            <p role="status">
+              范围内完整归档：{exportPreviewCount ?? '读取中'} 篇。
+            </p>
+            {exportScope === 'all' && allArchiveNotes.error && (
+              <p role="alert">范围读取失败，请关闭后重新打开。</p>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="flat" onPress={() => setExportOpen(false)}>
+              取消
+            </Button>
+            <Button
+              color="primary"
+              isDisabled={
+                busy ||
+                !exportPreviewCount ||
+                (exportScope === 'filtered' && !!dateError)
+              }
+              onPress={handleDownload}
+            >
+              开始导出
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </SubscriptionDialog>
       <SubscriptionDialog
         isOpen={adding}
         onClose={() => {

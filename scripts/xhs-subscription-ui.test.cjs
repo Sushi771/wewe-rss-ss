@@ -144,6 +144,7 @@ function fixture() {
       'refresh',
       'downloadNotes',
       'cancelTask',
+      'resumeTask',
     ].map((name) => [
       name,
       {
@@ -181,6 +182,10 @@ function fixture() {
           }
           if (name === 'downloadNotes')
             return { taskId: 'download-task', creatorId: input.creatorId };
+          if (name === 'resumeTask') {
+            taskStatus = status('running');
+            return { taskId: 'resumed-task', creatorId: 'creator-a' };
+          }
           if (name === 'cancelTask') {
             taskStatus = status('cancelled', taskStatus.kind);
             return {};
@@ -234,6 +239,12 @@ function fixture() {
       },
     },
     body: { useQuery: () => query(null) },
+  };
+  api.notes = {
+    query: async (input) => {
+      calls.push(['notesScope', input]);
+      return router.notes.useQuery(input).data;
+    },
   };
   for (const name of [
     'edit',
@@ -461,6 +472,7 @@ test('date and title filters reset selection; pending image notes selectable, un
       true,
     );
     await f.button('导出已保存 ZIP').props.onPress();
+    await f.button('开始导出').props.onPress();
     assert.deepEqual(f.calls.find(([n]) => n === 'export')[1].noteIds, [
       'saved',
       'old',
@@ -568,7 +580,7 @@ test('list refresh has distinct progress; status outages never resubmit work; pa
   }
 });
 
-test('management folders retain move and filter handlers; excessive selection is stopped before picker or download', async () => {
+test('management folders retain move/filter handlers and selections above 100 remain downloadable', async () => {
   const f = fixture();
   try {
     await f.start();
@@ -587,13 +599,13 @@ test('management folders retain move and filter handlers; excessive selection is
         status: 'pending',
         publishTime: 0,
       });
-    f.find('Checkbox', '全选已加载').props.onValueChange(true);
+    await f.button('选择当前筛选全部').props.onPress();
     const download = f.button('下载图文到本地 (104)');
-    assert.equal(download.props.isDisabled, true);
+    assert.equal(download.props.isDisabled, false);
     await download.props.onPress();
     assert.equal(
       f.calls.filter(([name]) => name === 'downloadNotes').length,
-      0,
+      1,
     );
   } finally {
     f.dispose();
@@ -631,4 +643,177 @@ test('poller abort prevents stale completion; all terminal states and counts rem
     helpers.taskText({ ...status('partial'), skipped: 1, failed: 1 }),
     /跳过 1，失败 1，剩余 2/,
   );
+});
+
+test('cross-page loaded selection preserves earlier IDs; filtered export includes unloaded matches and batches above 100', async () => {
+  const f = fixture();
+  const oldDocument = global.document,
+    oldCreate = URL.createObjectURL,
+    oldRevoke = URL.revokeObjectURL;
+  const filenames = [];
+  global.document = {
+    body: { appendChild() {} },
+    createElement: () => ({
+      click() {
+        filenames.push(this.download);
+      },
+      remove() {},
+    }),
+  };
+  URL.createObjectURL = () => 'blob:synthetic';
+  URL.revokeObjectURL = () => {};
+  try {
+    for (let i = 0; i < 205; i++)
+      f.items.push({
+        id: `batch-${String(i).padStart(3, '0')}`,
+        title: `批量 ${i}`,
+        kind: 'image-text',
+        status: 'complete',
+        publishTime: Date.parse('2026-10-24T00:00Z') / 1000,
+      });
+    f.items.push({
+      id: 'excluded-day',
+      title: '批量 日期外',
+      kind: 'image-text',
+      status: 'complete',
+      publishTime: Date.parse('2026-10-20T00:00Z') / 1000,
+    });
+    await f.start();
+    await f.button('搜索笔记').props.onPress();
+    f.find('Input', '搜索笔记标题或正文').props.onValueChange('批量');
+    f.find('ArticleDateFilter').props.onChange({
+      mode: 'day',
+      start: '2026-10-24',
+      end: '',
+    });
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
+    assert.ok(f.button('下载图文到本地 (20)'));
+    await f.button('加载更多').props.onPress();
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
+    assert.ok(f.button('下载图文到本地 (40)'));
+    assert.equal(f.find('Checkbox', '选择笔记 批量 204'), undefined);
+    await f.button('导出已保存 ZIP').props.onPress();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'filtered')
+      .props.onChange();
+    await f.button('开始导出').props.onPress();
+    const exports = f.calls
+      .filter(([name]) => name === 'export')
+      .map(([, input]) => input);
+    assert.deepEqual(
+      exports.map((input) => input.noteIds.length),
+      [100, 100, 5],
+    );
+    assert.equal(new Set(exports.flatMap((input) => input.noteIds)).size, 205);
+    assert.ok(!exports.some((input) => input.noteIds.includes('excluded-day')));
+    assert.deepEqual(f.calls.find(([name]) => name === 'notesScope')[1], {
+      creatorId: 'creator-a',
+      search: '批量',
+      dateStart: '2026-10-24',
+      dateEnd: '2026-10-24',
+    });
+    assert.deepEqual(filenames, [
+      'synthetic-part-1-of-3.zip',
+      'synthetic-part-2-of-3.zip',
+      'synthetic-part-3-of-3.zip',
+    ]);
+    assert.ok(f.button('下载图文到本地 (40)'));
+  } finally {
+    f.dispose();
+    global.document = oldDocument;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('archive batches stop after cancellation or uncertain response and never replay; receipts validate counts', async () => {
+  const ids = Array.from({ length: 225 }, (_, i) => `id-${i}`);
+  const controller = new AbortController();
+  const sends = [],
+    saved = [];
+  const result = await helpers.exportArchiveBatches({
+    ids,
+    signal: controller.signal,
+    send: async (batch) => {
+      sends.push(batch);
+      return { notes: batch.length };
+    },
+    save: (receipt) => {
+      saved.push(receipt);
+      controller.abort();
+    },
+    onProgress() {},
+  });
+  assert.equal(result.cancelled, true);
+  assert.equal(result.completed, 100);
+  assert.equal(sends.length, 1);
+  assert.equal(saved.length, 1);
+  let attempts = 0;
+  await assert.rejects(
+    helpers.exportArchiveBatches({
+      ids,
+      signal: new AbortController().signal,
+      send: async () => {
+        attempts++;
+        throw Error('lost response');
+      },
+      save: assert.fail,
+      onProgress: assert.fail,
+    }),
+    /lost response/,
+  );
+  assert.equal(attempts, 1);
+  await assert.rejects(
+    helpers.exportArchiveBatches({
+      ids: ['one'],
+      signal: new AbortController().signal,
+      send: async () => ({ notes: 0 }),
+      save: assert.fail,
+      onProgress: assert.fail,
+    }),
+    /回执篇数/,
+  );
+});
+
+test('resuming waits for executor release, uses original task identity and newly returned task ID, and retains new selections', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    await f.button('下载图文到本地 (1)').props.onPress();
+    f.render();
+    await tick();
+    f.setTask({ ...status('cancelled'), resumable: false });
+    await tick();
+    assert.equal(f.find('Button', '继续未完成任务'), undefined);
+    assert.equal(f.button('更新笔记列表').props.isDisabled, true);
+    f.setTask({ ...status('cancelled'), resumable: true });
+    await tick();
+    const resume = f.button('继续未完成任务');
+    await Promise.all([resume.props.onPress(), resume.props.onPress()]);
+    assert.deepEqual(
+      f.calls.find(([name]) => name === 'resumeTask'),
+      ['resumeTask', { taskId: 'download-task', pickToken: 'synthetic-grant' }],
+    );
+    assert.equal(f.calls.filter(([name]) => name === 'resumeTask').length, 1);
+    f.render();
+    await tick();
+    assert.ok(
+      f.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'resumed-task',
+      ),
+    );
+    f.setTask({ ...status('completed'), resumable: false });
+    await tick();
+    f.render();
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    await tick();
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      true,
+    );
+  } finally {
+    f.dispose();
+  }
 });

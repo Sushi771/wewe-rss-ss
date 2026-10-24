@@ -1,4 +1,5 @@
 import {
+  ContentLoadMore,
   ContentSortControls,
   ContentSelectionHeader,
 } from '@web/components/SubscriptionPrimitives';
@@ -515,33 +516,16 @@ const ArticleList: FC<ArticleListProps> = ({
           {!isLoading &&
             !filterInvalid &&
             (hasNextPage || (isError && items.length > 0)) && (
-              <div
-                data-article-pagination
-                className="flex flex-col items-center gap-2 p-4"
-              >
-                {isError && (
-                  <p role="alert" className="text-sm text-red-600">
-                    加载未完成，已有文章保留。
-                  </p>
-                )}
-                <Button
-                  size="sm"
-                  variant="light"
-                  isDisabled={isFetching}
-                  isLoading={isFetchingNextPage}
-                  onPress={() =>
-                    void (isError && !nextPageFailed
-                      ? refetch({ cancelRefetch: false })
-                      : loadNext())
-                  }
-                >
-                  {isFetchingNextPage
-                    ? '正在加载…'
-                    : isError
-                      ? '重试加载'
-                      : '加载更多'}
-                </Button>
-              </div>
+              <ContentLoadMore
+                loading={isFetchingNextPage}
+                disabled={isFetching}
+                error={isError}
+                onLoad={() =>
+                  void (isError && !nextPageFailed
+                    ? refetch({ cancelRefetch: false })
+                    : loadNext())
+                }
+              />
             )}
 
           {!isLoading &&

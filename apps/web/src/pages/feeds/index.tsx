@@ -1,4 +1,5 @@
 import {
+  ContentExportScope,
   SubscriptionSearch,
   SubscriptionMore,
   SubscriptionToolbar,
@@ -2283,41 +2284,30 @@ const Feeds = () => {
                 ? `公众号：${currentMpInfo?.mpName || '当前公众号'}`
                 : '公众号：全部订阅'}
             </p>
-            <fieldset className="space-y-2">
-              <legend className="mb-2 text-sm">导出范围</legend>
-              {(
-                [
-                  ['selected', `选中文章（${articleSelectedIds.size} 篇）`],
-                  [
-                    'filtered',
-                    `当前筛选（${filteredExportSummary.data?.articles ?? '读取中'} 篇）`,
-                  ],
-                  [
-                    'all',
-                    `${id ? '本号全部' : '全部文章'}（${allExportSummary.data?.articles ?? '读取中'} 篇）`,
-                  ],
-                ] as const
-              ).map(([scope, label]) => (
-                <label key={scope} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="radio"
-                    name="article-export-scope"
-                    value={scope}
-                    checked={exportScope === scope}
-                    disabled={
-                      scope === 'selected'
-                        ? privateOnlineMode || !articleSelectedIds.size
-                        : scope === 'filtered' && Boolean(dateError)
-                    }
-                    onChange={() => {
-                      setExportScope(scope);
-                      if (scope === 'selected') setExportFormat('obsidian');
-                    }}
-                  />
-                  {label}
-                </label>
-              ))}
-            </fieldset>
+            <ContentExportScope
+              name="article-export-scope"
+              value={exportScope}
+              options={[
+                {
+                  value: 'selected',
+                  label: `选中文章（${articleSelectedIds.size} 篇）`,
+                  disabled: privateOnlineMode || !articleSelectedIds.size,
+                },
+                {
+                  value: 'filtered',
+                  label: `当前筛选（${filteredExportSummary.data?.articles ?? '读取中'} 篇）`,
+                  disabled: Boolean(dateError),
+                },
+                {
+                  value: 'all',
+                  label: `${id ? '本号全部' : '全部文章'}（${allExportSummary.data?.articles ?? '读取中'} 篇）`,
+                },
+              ]}
+              onChange={(scope) => {
+                setExportScope(scope);
+                if (scope === 'selected') setExportFormat('obsidian');
+              }}
+            />
 
             <label className="flex flex-col gap-2 text-sm">
               导出方式

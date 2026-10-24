@@ -8,10 +8,13 @@ export type SubscriptionResolution = XhsSubscriptionResolution;
 export type SubscriptionTask = Omit<
   XhsSubscriptionTask,
   'taskId' | 'creatorId' | 'message'
-> & { message?: string };
+> & { message?: string; resumable?: boolean };
 export type TaskReceipt = { taskId: string; creatorId?: string };
 export const taskFinished = (task: SubscriptionTask) =>
   task.state !== 'queued' && task.state !== 'running';
+
+export const taskSettling = (task: SubscriptionTask) =>
+  taskFinished(task) && task.state !== 'completed' && task.resumable === false;
 
 export function selectedImageNotes<T extends { id: string; kind: string }>(
   notes: T[],
@@ -49,7 +52,7 @@ export async function watchSubscriptionTask(options: {
       const task = await options.query({ taskId: options.taskId });
       if (options.signal.aborted) return;
       options.onTask(task);
-      if (taskFinished(task)) return;
+      if (taskFinished(task) && !taskSettling(task)) return;
     } catch (cause) {
       if (options.signal.aborted) return;
       options.onError(cause);
@@ -65,4 +68,48 @@ export async function watchSubscriptionTask(options: {
       if (options.signal.aborted) done();
     });
   }
+}
+
+/** Loading another page never changes the selected IDs from earlier pages. */
+export function toggleLoadedSelection(
+  previous: Set<string>,
+  ids: readonly string[],
+  selected: boolean,
+) {
+  const next = new Set(previous);
+  for (const id of ids) {
+    if (selected) next.add(id);
+    else next.delete(id);
+  }
+  return next;
+}
+
+/** Each ZIP is bounded; a lost response stops the operation without replay. */
+export async function exportArchiveBatches<
+  T extends { notes: number },
+>(options: {
+  ids: readonly string[];
+  send: (ids: string[]) => Promise<T>;
+  save: (receipt: T, part: number, parts: number) => void;
+  signal: AbortSignal;
+  onProgress: (completed: number, total: number) => void;
+}) {
+  const ids = [...new Set(options.ids)];
+  let completed = 0;
+  const parts = Math.ceil(ids.length / 100);
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    if (options.signal.aborted)
+      return { completed, total: ids.length, cancelled: true };
+    const batch = ids.slice(offset, offset + 100);
+    const receipt = await options.send(batch);
+    if (receipt.notes !== batch.length)
+      throw new Error('导出回执篇数与所选范围不一致，已停止后续分批。');
+    // A cancellation can arrive while the current ZIP is being generated.
+    if (options.signal.aborted)
+      return { completed, total: ids.length, cancelled: true };
+    options.save(receipt, offset / 100 + 1, parts);
+    completed += batch.length;
+    options.onProgress(completed, ids.length);
+  }
+  return { completed, total: ids.length, cancelled: false };
 }

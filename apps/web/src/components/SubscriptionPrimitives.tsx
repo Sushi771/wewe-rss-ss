@@ -258,3 +258,75 @@ export function SubscriptionProgress({
     </section>
   );
 }
+
+/** Shared scope control; callers supply source-specific labels and eligibility. */
+export function ContentExportScope({
+  name,
+  value,
+  options,
+  onChange,
+  disabled = false,
+}: {
+  name: string;
+  value: 'selected' | 'filtered' | 'all';
+  options: {
+    value: 'selected' | 'filtered' | 'all';
+    label: string;
+    disabled?: boolean;
+  }[];
+  onChange: (value: 'selected' | 'filtered' | 'all') => void;
+  disabled?: boolean;
+}) {
+  return (
+    <fieldset className="space-y-2" disabled={disabled}>
+      <legend className="mb-2 text-sm">导出范围</legend>
+      {options.map((option) => (
+        <label key={option.value} className="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            name={name}
+            value={option.value}
+            checked={value === option.value}
+            disabled={option.disabled}
+            onChange={() => onChange(option.value)}
+          />
+          {option.label}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+export function ContentLoadMore({
+  loading,
+  disabled,
+  error,
+  onLoad,
+}: {
+  loading: boolean;
+  disabled?: boolean;
+  error?: boolean;
+  onLoad: () => void;
+}) {
+  return (
+    <div
+      className="flex flex-col items-center gap-2 p-4"
+      data-content-pagination
+    >
+      {error && (
+        <p role="alert" className="text-sm text-red-600">
+          加载未完成，已有内容保留。
+        </p>
+      )}
+      <Button
+        size="sm"
+        variant="light"
+        isDisabled={disabled}
+        isLoading={loading}
+        onPress={onLoad}
+      >
+        {loading ? '正在加载…' : error ? '重试加载' : '加载更多'}
+      </Button>
+    </div>
+  );
+}
