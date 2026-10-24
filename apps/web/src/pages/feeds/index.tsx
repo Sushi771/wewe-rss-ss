@@ -1,3 +1,10 @@
+import {
+  ContentExportScope,
+  SubscriptionSearch,
+  SubscriptionMore,
+  SubscriptionToolbar,
+  SubscriptionDialog,
+} from '@web/components/SubscriptionPrimitives';
 import ArticleExportGuidance from '@web/components/ArticleExportGuidance';
 import OperationNotice, {
   FailureNotice,
@@ -17,9 +24,6 @@ import {
   Checkbox,
   Input,
   Chip,
-  Popover,
-  PopoverTrigger,
-  PopoverContent,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import { refreshFeedViews } from '@web/utils/refresh-feed-view';
@@ -1429,7 +1433,7 @@ const Feeds = () => {
               全部更新进度查询失败，请刷新页面核对原批次；不会自动重新提交。
             </p>
           )}
-          <div className="mac-toolbar feed-reading-toolbar !h-auto shrink-0 !flex-wrap !gap-2 !px-3 !py-2">
+          <SubscriptionToolbar>
             <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 sm:flex-1 sm:basis-0">
               <span className="min-w-0 truncate text-[15px] font-semibold">
                 {currentMpId
@@ -1452,34 +1456,12 @@ const Feeds = () => {
               )}
             </div>
             <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <Tooltip content={isSearchOpen ? '关闭搜索' : '搜索文章'}>
-                <Button
-                  isIconOnly
-                  size="sm"
-                  variant="light"
-                  color={isSearchOpen ? 'primary' : 'default'}
-                  aria-label={isSearchOpen ? '关闭文章搜索' : '搜索文章'}
-                  aria-expanded={isSearchOpen}
-                  aria-controls="article-search-panel"
-                  className="h-8 w-8 min-w-0"
-                  onPress={() => setIsSearchOpen(!isSearchOpen)}
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <circle cx="11" cy="11" r="8" />
-                    <path d="m21 21-4.3-4.3" />
-                  </svg>
-                </Button>
-              </Tooltip>
+              <SubscriptionSearch
+                open={isSearchOpen}
+                label={isSearchOpen ? '关闭文章搜索' : '搜索文章'}
+                controls="article-search-panel"
+                onToggle={() => setIsSearchOpen(!isSearchOpen)}
+              />
               {/* Batch actions appear when there is something to act on. */}
               {(!privateOnlineMode || currentMpInfo) && (
                 <Button
@@ -1746,145 +1728,94 @@ const Feeds = () => {
                   </Button>
                 </>
               )}
-              <Popover
-                key={currentMpId}
-                placement="bottom-end"
-                className="feed-reading-more"
-              >
-                <PopoverTrigger>
-                  <Button
-                    size="sm"
-                    variant="light"
-                    className="mac-action-link min-w-0 shrink-0 px-2 text-sm"
-                    aria-label="更多订阅操作"
-                  >
-                    更多
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="flex max-h-[60dvh] w-80 max-w-[calc(100vw-2rem)] flex-row flex-wrap items-center gap-3 overflow-auto rounded-lg border border-neutral-200 bg-white p-4 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
-                  {currentMpInfo ? (
-                    <div className="mr-4 flex items-center gap-4">
-                      <div className="hidden whitespace-nowrap text-[14px] font-light text-neutral-400 lg:block">
-                        更新通道：{collectionChannelLabel}
-                      </div>
+              <SubscriptionMore key={currentMpId}>
+                {currentMpInfo ? (
+                  <div className="mr-4 flex items-center gap-4">
+                    <div className="hidden whitespace-nowrap text-[14px] font-light text-neutral-400 lg:block">
+                      更新通道：{collectionChannelLabel}
+                    </div>
 
+                    <Tooltip
+                      content={
+                        collectionChannel === 'wechat2rss'
+                          ? '定时使用同一后台来源；全局定时任务仍需在服务端启用。'
+                          : collectionChannel === 'public-album'
+                            ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
+                            : '尚无可用的后台来源；定时任务会记录阻塞状态'
+                      }
+                    >
+                      <div className="flex items-center">
+                        <Switch
+                          size="sm"
+                          onValueChange={async (value) => {
+                            await updateMpInfo({
+                              id: currentMpInfo.id,
+                              data: { status: value ? 1 : 0 },
+                            });
+                            await refetchFeedList();
+                          }}
+                          isSelected={currentMpInfo?.status === 1}
+                        />
+                      </div>
+                    </Tooltip>
+
+                    {currentMpInfo.hasHistory === 1 && (
                       <Tooltip
                         content={
-                          collectionChannel === 'wechat2rss'
-                            ? '定时使用同一后台来源；全局定时任务仍需在服务端启用。'
-                            : collectionChannel === 'public-album'
-                              ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
-                              : '尚无可用的后台来源；定时任务会记录阻塞状态'
+                          inProgressHistoryMp?.id === currentMpInfo.id
+                            ? '停止获取'
+                            : '获取历史文章'
                         }
                       >
-                        <div className="flex items-center">
-                          <Switch
-                            size="sm"
-                            onValueChange={async (value) => {
-                              await updateMpInfo({
-                                id: currentMpInfo.id,
-                                data: { status: value ? 1 : 0 },
-                              });
-                              await refetchFeedList();
-                            }}
-                            isSelected={currentMpInfo?.status === 1}
-                          />
-                        </div>
-                      </Tooltip>
-
-                      {currentMpInfo.hasHistory === 1 && (
-                        <Tooltip
-                          content={
-                            inProgressHistoryMp?.id === currentMpInfo.id
-                              ? '停止获取'
-                              : '获取历史文章'
-                          }
-                        >
-                          <Button
-                            isIconOnly
-                            size="sm"
-                            variant="light"
-                            className="h-8 w-8 min-w-0"
-                            isLoading={isGetHistoryArticlesLoading}
-                            onPress={async () => {
-                              if (
-                                inProgressHistoryMp?.id === currentMpInfo.id
-                              ) {
-                                await getHistoryArticles({ mpId: '' });
-                              } else {
-                                try {
-                                  const result = await getHistoryArticles({
-                                    mpId: currentMpInfo.id,
-                                  });
-                                  rememberUpdate(
-                                    currentMpInfo.id,
-                                    result.source,
-                                    result.message,
-                                    result.status,
-                                  );
-                                  if (result.status === 'blocked')
-                                    toast.error(
-                                      <FailureNotice error={result.message} />,
-                                    );
-                                  else toast.warning(result.message);
-                                } catch (error) {
-                                  rememberUpdate(
-                                    currentMpInfo.id,
-                                    'error',
-                                    error instanceof Error
-                                      ? error.message
-                                      : '历史采集失败',
-                                  );
-                                  toast.error(
-                                    <FailureNotice
-                                      error={
-                                        error instanceof Error
-                                          ? error.message
-                                          : '历史采集失败'
-                                      }
-                                    />,
-                                  );
-                                } finally {
-                                  await refetchFeedList();
-                                  await queryUtils.article.list.reset();
-                                  await queryUtils.article.summary.invalidate();
-                                }
-                              }
-                              await refetchInProgressHistoryMp();
-                            }}
-                          >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              width="16"
-                              height="16"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            >
-                              <path d="M12 8v4l3 3" />
-                              <circle cx="12" cy="12" r="10" />
-                            </svg>
-                          </Button>
-                        </Tooltip>
-                      )}
-
-                      <Tooltip content="删除此订阅 (保留文章)">
                         <Button
                           isIconOnly
                           size="sm"
                           variant="light"
-                          color="danger"
-                          className="h-8 w-8 min-w-0 opacity-40 hover:opacity-100"
-                          isLoading={isDeleteFeedLoading}
+                          className="h-8 w-8 min-w-0"
+                          isLoading={isGetHistoryArticlesLoading}
                           onPress={async () => {
-                            if (window.confirm('确定删除吗？')) {
-                              await deleteFeed(currentMpInfo.id);
-                              navigate('/dash/feeds');
-                              await refetchFeedList();
+                            if (inProgressHistoryMp?.id === currentMpInfo.id) {
+                              await getHistoryArticles({ mpId: '' });
+                            } else {
+                              try {
+                                const result = await getHistoryArticles({
+                                  mpId: currentMpInfo.id,
+                                });
+                                rememberUpdate(
+                                  currentMpInfo.id,
+                                  result.source,
+                                  result.message,
+                                  result.status,
+                                );
+                                if (result.status === 'blocked')
+                                  toast.error(
+                                    <FailureNotice error={result.message} />,
+                                  );
+                                else toast.warning(result.message);
+                              } catch (error) {
+                                rememberUpdate(
+                                  currentMpInfo.id,
+                                  'error',
+                                  error instanceof Error
+                                    ? error.message
+                                    : '历史采集失败',
+                                );
+                                toast.error(
+                                  <FailureNotice
+                                    error={
+                                      error instanceof Error
+                                        ? error.message
+                                        : '历史采集失败'
+                                    }
+                                  />,
+                                );
+                              } finally {
+                                await refetchFeedList();
+                                await queryUtils.article.list.reset();
+                                await queryUtils.article.summary.invalidate();
+                              }
                             }
+                            await refetchInProgressHistoryMp();
                           }}
                         >
                           <svg
@@ -1898,132 +1829,167 @@ const Feeds = () => {
                             strokeLinecap="round"
                             strokeLinejoin="round"
                           >
-                            <path d="M3 6h18" />
-                            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-                            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                            <line x1="10" y1="11" x2="10" y2="17" />
-                            <line x1="14" y1="11" x2="14" y2="17" />
+                            <path d="M12 8v4l3 3" />
+                            <circle cx="12" cy="12" r="10" />
                           </svg>
                         </Button>
                       </Tooltip>
-                    </div>
-                  ) : null}
-                  {currentMpInfo && !acceptanceMode && (
-                    <Tooltip content="补采成功后，将保存公开合集为后续普通更新和定时任务使用的通道；失败保留原通道。">
-                      <span className="inline-flex">
-                        <PublicAlbums
-                          mpId={currentMpInfo.id}
-                          name={currentMpInfo.mpName}
-                          albumIds={currentAlbumIds}
-                          hasLocalDirectory={!!currentMpInfo.localDirectory}
+                    )}
+
+                    <Tooltip content="删除此订阅 (保留文章)">
+                      <Button
+                        isIconOnly
+                        size="sm"
+                        variant="light"
+                        color="danger"
+                        className="h-8 w-8 min-w-0 opacity-40 hover:opacity-100"
+                        isLoading={isDeleteFeedLoading}
+                        onPress={async () => {
+                          if (window.confirm('确定删除吗？')) {
+                            await deleteFeed(currentMpInfo.id);
+                            navigate('/dash/feeds');
+                            await refetchFeedList();
+                          }
+                        }}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M3 6h18" />
+                          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                          <line x1="10" y1="11" x2="10" y2="17" />
+                          <line x1="14" y1="11" x2="14" y2="17" />
+                        </svg>
+                      </Button>
+                    </Tooltip>
+                  </div>
+                ) : null}
+
+                {currentMpInfo && !acceptanceMode && (
+                  <Tooltip content="补采成功后，将保存公开合集为后续普通更新和定时任务使用的通道；失败保留原通道。">
+                    <span className="inline-flex">
+                      <PublicAlbums
+                        mpId={currentMpInfo.id}
+                        name={currentMpInfo.mpName}
+                        albumIds={currentAlbumIds}
+                        hasLocalDirectory={!!currentMpInfo.localDirectory}
+                        isDisabled={
+                          refreshingMpIds.includes(currentMpInfo.id) ||
+                          isManualBatchRefreshing ||
+                          !!isRefreshAllMpArticlesRunning ||
+                          isCollectingAlbums
+                        }
+                        onBusyChange={setIsCollectingAlbums}
+                        onResult={(source, message) =>
+                          rememberUpdate(currentMpInfo.id, source, message)
+                        }
+                      />
+                    </span>
+                  </Tooltip>
+                )}
+
+                {!privateOnlineMode && (
+                  <LocalCollection
+                    showMetricsExport={
+                      currentMpInfo
+                        ? collectionChannel !== 'wechat2rss'
+                        : !(feedData?.items || []).some(
+                            (feed) =>
+                              feed.collectionRoute.channel === 'wechat2rss',
+                          )
+                    }
+                    mpId={currentMpInfo?.id}
+                    directory={currentMpInfo?.localDirectory}
+                    name={currentMpInfo?.mpName}
+                    search={search}
+                    articleFilter={{
+                      ...articleDateFilter,
+                      group: folderFilter,
+                    }}
+                    filterInvalid={Boolean(dateError)}
+                    selectedIds={articleSelectedIds}
+                    onImported={(message) => {
+                      if (currentMpInfo)
+                        rememberUpdate(currentMpInfo.id, 'local', message);
+                    }}
+                  />
+                )}
+
+                {currentMpInfo ? (
+                  <>
+                    {currentMpInfo.status === 1 &&
+                      (!currentMpInfo.collectionChannel ||
+                        currentMpInfo.collectionChannel === 'unavailable') && (
+                        <Button
+                          size="sm"
+                          className="mac-btn-outline"
                           isDisabled={
+                            isAddFeedLoading ||
                             refreshingMpIds.includes(currentMpInfo.id) ||
                             isManualBatchRefreshing ||
                             !!isRefreshAllMpArticlesRunning ||
                             isCollectingAlbums
                           }
-                          onBusyChange={setIsCollectingAlbums}
-                          onResult={(source, message) =>
-                            rememberUpdate(currentMpInfo.id, source, message)
-                          }
-                        />
-                      </span>
-                    </Tooltip>
-                  )}
-                  {!privateOnlineMode && (
-                    <LocalCollection
-                      showMetricsExport={
-                        currentMpInfo
-                          ? collectionChannel !== 'wechat2rss'
-                          : !(feedData?.items || []).some(
-                              (feed) =>
-                                feed.collectionRoute.channel === 'wechat2rss',
-                            )
-                      }
-                      mpId={currentMpInfo?.id}
-                      directory={currentMpInfo?.localDirectory}
-                      name={currentMpInfo?.mpName}
-                      search={search}
-                      articleFilter={{
-                        ...articleDateFilter,
-                        group: folderFilter,
-                      }}
-                      filterInvalid={Boolean(dateError)}
-                      selectedIds={articleSelectedIds}
-                      onImported={(message) => {
-                        if (currentMpInfo)
-                          rememberUpdate(currentMpInfo.id, 'local', message);
-                      }}
-                    />
-                  )}
-                  {currentMpInfo ? (
-                    <>
-                      {currentMpInfo.status === 1 &&
-                        (!currentMpInfo.collectionChannel ||
-                          currentMpInfo.collectionChannel ===
-                            'unavailable') && (
-                          <Button
-                            size="sm"
-                            className="mac-btn-outline"
-                            isDisabled={
-                              isAddFeedLoading ||
-                              refreshingMpIds.includes(currentMpInfo.id) ||
-                              isManualBatchRefreshing ||
-                              !!isRefreshAllMpArticlesRunning ||
-                              isCollectingAlbums
-                            }
-                            onPress={() => handleOpenRepair(currentMpInfo)}
-                          >
-                            修复本号来源
-                          </Button>
-                        )}
-                      <a
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
-                        className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
-                      >
-                        RSS
-                      </a>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        size="sm"
-                        className="mac-btn-outline h-8"
-                        onPress={handleExportOpml}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
+                          onPress={() => handleOpenRepair(currentMpInfo)}
                         >
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                          <polyline points="7 10 12 15 17 10" />
-                          <line x1="12" y1="15" x2="12" y2="3" />
-                        </svg>
-                        <span className="text-[14px]">导出 OPML</span>
-                      </Button>
-                      <a
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        href={`${serverOriginUrl}/feeds/all.atom`}
-                        className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
+                          修复本号来源
+                        </Button>
+                      )}
+                    <a
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
+                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
+                    >
+                      RSS
+                    </a>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      size="sm"
+                      className="mac-btn-outline h-8"
+                      onPress={handleExportOpml}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
                       >
-                        RSS
-                      </a>
-                    </>
-                  )}
-                </PopoverContent>
-              </Popover>
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      <span className="text-[14px]">导出 OPML</span>
+                    </Button>
+                    <a
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      href={`${serverOriginUrl}/feeds/all.atom`}
+                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
+                    >
+                      RSS
+                    </a>
+                  </>
+                )}
+              </SubscriptionMore>
             </div>
-          </div>
+          </SubscriptionToolbar>
           {cacheUnavailable && (
             <p
               role="status"
@@ -2318,41 +2284,30 @@ const Feeds = () => {
                 ? `公众号：${currentMpInfo?.mpName || '当前公众号'}`
                 : '公众号：全部订阅'}
             </p>
-            <fieldset className="space-y-2">
-              <legend className="mb-2 text-sm">导出范围</legend>
-              {(
-                [
-                  ['selected', `选中文章（${articleSelectedIds.size} 篇）`],
-                  [
-                    'filtered',
-                    `当前筛选（${filteredExportSummary.data?.articles ?? '读取中'} 篇）`,
-                  ],
-                  [
-                    'all',
-                    `${id ? '本号全部' : '全部文章'}（${allExportSummary.data?.articles ?? '读取中'} 篇）`,
-                  ],
-                ] as const
-              ).map(([scope, label]) => (
-                <label key={scope} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="radio"
-                    name="article-export-scope"
-                    value={scope}
-                    checked={exportScope === scope}
-                    disabled={
-                      scope === 'selected'
-                        ? privateOnlineMode || !articleSelectedIds.size
-                        : scope === 'filtered' && Boolean(dateError)
-                    }
-                    onChange={() => {
-                      setExportScope(scope);
-                      if (scope === 'selected') setExportFormat('obsidian');
-                    }}
-                  />
-                  {label}
-                </label>
-              ))}
-            </fieldset>
+            <ContentExportScope
+              name="article-export-scope"
+              value={exportScope}
+              options={[
+                {
+                  value: 'selected',
+                  label: `选中文章（${articleSelectedIds.size} 篇）`,
+                  disabled: privateOnlineMode || !articleSelectedIds.size,
+                },
+                {
+                  value: 'filtered',
+                  label: `当前筛选（${filteredExportSummary.data?.articles ?? '读取中'} 篇）`,
+                  disabled: Boolean(dateError),
+                },
+                {
+                  value: 'all',
+                  label: `${id ? '本号全部' : '全部文章'}（${allExportSummary.data?.articles ?? '读取中'} 篇）`,
+                },
+              ]}
+              onChange={(scope) => {
+                setExportScope(scope);
+                if (scope === 'selected') setExportFormat('obsidian');
+              }}
+            />
 
             <label className="flex flex-col gap-2 text-sm">
               导出方式
@@ -2500,24 +2455,10 @@ const Feeds = () => {
           </ModalFooter>
         </ModalContent>
       </Modal>
-      <Modal
+      <SubscriptionDialog
         isOpen={isOpen}
         onOpenChange={(open) => (open ? handleOpenAdd() : handleCancelAdd())}
-        portalContainer={
-          typeof document === 'undefined' ? undefined : document.body
-        }
-        placement="center"
-        scrollBehavior="inside"
         isKeyboardDismissDisabled={false}
-        classNames={{
-          backdrop: 'subscription-dialog-backdrop',
-          wrapper: 'subscription-dialog-overlay',
-          base: 'subscription-dialog',
-          header: 'subscription-dialog-header',
-          body: 'subscription-dialog-body',
-          footer: 'subscription-dialog-footer',
-          closeButton: 'subscription-dialog-close',
-        }}
       >
         <ModalContent>
           {() => (
@@ -2583,7 +2524,7 @@ const Feeds = () => {
             </>
           )}
         </ModalContent>
-      </Modal>
+      </SubscriptionDialog>
     </>
   );
 };

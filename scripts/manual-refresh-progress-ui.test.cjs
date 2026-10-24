@@ -11,7 +11,8 @@ const ts = require(
 function fixture(batch) {
   const requests = [],
     changes = [];
-  const jsx = (type, props) => ({ type, props });
+  const jsx = (type, props) =>
+    typeof type === 'function' ? type(props) : { type, props };
   const trpc = {
     feed: Object.fromEntries(
       ['stopSubscriptionBatch', 'resumeSubscriptionBatch'].map((name) => [
@@ -57,6 +58,37 @@ function fixture(batch) {
         };
       if (name === '@nextui-org/react')
         return { Button: 'Button', Progress: 'Progress' };
+      if (name === '@web/components/SubscriptionPrimitives') {
+        const shared = { exports: {} };
+        const output = ts.transpileModule(
+          fs.readFileSync(
+            'apps/web/src/components/SubscriptionPrimitives.tsx',
+            'utf8',
+          ),
+          {
+            compilerOptions: {
+              module: ts.ModuleKind.CommonJS,
+              jsx: ts.JsxEmit.ReactJSX,
+              target: ts.ScriptTarget.ES2022,
+            },
+          },
+        ).outputText;
+        vm.runInNewContext(output, {
+          module: shared,
+          exports: shared.exports,
+          require: (dependency) => {
+            if (dependency === 'react/jsx-runtime') return { jsx, jsxs: jsx };
+            if (dependency === '@nextui-org/react')
+              return {
+                Progress: 'Progress',
+                Checkbox: 'Checkbox',
+                Modal: 'Modal',
+              };
+            throw new Error(`Unexpected dependency ${dependency}`);
+          },
+        });
+        return shared.exports;
+      }
       if (name === '@web/utils/trpc') return { trpc };
       throw new Error(`Unexpected dependency ${name}`);
     },

@@ -89,8 +89,9 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
     return {
       service,
       xhs,
-      api: router.createCaller({ errorMsg, isLocal: true }),
-      openWindow: () => router.createCaller({ errorMsg, isLocal: true }),
+      api: router.createCaller({ errorMsg, isLocal: true, isLocalSave: true }),
+      openWindow: () =>
+        router.createCaller({ errorMsg, isLocal: true, isLocalSave: true }),
     };
   };
   beforeAll(async () => {
@@ -809,7 +810,7 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       ).moved,
     ).toBe(1);
   });
-  it('serializes concurrent group mutation across namespaces and creator assignment against refresh', async () => {
+  it('serializes concurrent group mutation across namespaces and cached-source refresh assignment', async () => {
     const backend = caller();
     const { api } = backend;
     const otherWindow = backend.openWindow();
@@ -848,8 +849,10 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
           reject = r;
         }),
     );
-    const refreshApi = caller(null, { read }).api;
-    const refresh = refreshApi.xiaohongshu.refresh({ id: 'creator-a' });
+    const { api: refreshApi, xhs: cacheService } = caller(null, { read });
+    // This source.read fixture covers the retained cache service's activity lock.
+    // The RPC refresh now starts a separate persistent subscription task.
+    const refresh = cacheService.refresh('creator-a');
     while (!reject) await new Promise((r) => setTimeout(r, 1));
     await expect(
       refreshApi.xiaohongshu.moveCreators({

@@ -39,7 +39,13 @@ function parse(file) {
 }
 const feeds = parse('apps/web/src/pages/feeds/index.tsx'),
   list = parse('apps/web/src/pages/feeds/list.tsx');
-const more = feeds.classNode('feed-reading-more'),
+const primitives = parse('apps/web/src/components/SubscriptionPrimitives.tsx');
+const toolbar = feeds.elements.find(
+  (n) => feeds.opening(n).tagName.getText(feeds.ast) === 'SubscriptionToolbar',
+);
+const more = feeds.elements.find(
+    (n) => feeds.opening(n).tagName.getText(feeds.ast) === 'SubscriptionMore',
+  ),
   details = feeds.classNode('feed-reading-details');
 function within(node, parent) {
   while (node) {
@@ -67,14 +73,16 @@ test('management controls and low-frequency imports are inside a collapsed More 
   assert(within(deleted, more));
 });
 test('update, download and search remain direct reading-toolbar actions', () => {
-  const toolbar = feeds.classNode('feed-reading-toolbar');
+  assert(toolbar);
   for (const marker of [
     'refreshMpArticles({ mpId })',
     'setExportOpen(true)',
     'setIsSearchOpen',
   ]) {
     const node = feeds.elements.find((n) =>
-      ['onPress', 'href'].some((k) => feeds.value(n, k).includes(marker)),
+      ['onPress', 'onToggle', 'href'].some((k) =>
+        feeds.value(n, k).includes(marker),
+      ),
     );
     assert(node, marker);
     assert(within(node, toolbar));
@@ -116,7 +124,7 @@ test('responsive toolbar wraps and More uses a viewport portal outside the clipp
     /!overflow-y-auto/,
   );
   assert.match(
-    feeds.value(feeds.classNode('feed-reading-toolbar'), 'className'),
+    primitives.value(primitives.classNode('feed-reading-toolbar'), 'className'),
     /!h-auto.*!flex-wrap/,
   );
   assert(
@@ -126,22 +134,39 @@ test('responsive toolbar wraps and More uses a viewport portal outside the clipp
         feeds.value(n, 'className').includes('sm:basis-0'),
     ),
   );
-  const panel = feeds.elements.find(
+  const panel = primitives.elements.find(
     (n) =>
-      within(n, more) &&
-      feeds.value(n, 'className').includes('max-w-[calc(100vw-2rem)]'),
+      within(n, primitives.classNode('feed-reading-more')) &&
+      primitives.value(n, 'className').includes('max-w-[calc(100vw-2rem)]'),
   );
   assert(panel);
-  assert.equal(feeds.opening(more).tagName.getText(feeds.ast), 'Popover');
   assert.equal(
-    feeds.opening(panel).tagName.getText(feeds.ast),
+    feeds.opening(more).tagName.getText(feeds.ast),
+    'SubscriptionMore',
+  );
+  assert.equal(
+    primitives
+      .opening(primitives.classNode('feed-reading-more'))
+      .tagName.getText(primitives.ast),
+    'Popover',
+  );
+  assert.equal(
+    primitives.opening(panel).tagName.getText(primitives.ast),
     'PopoverContent',
   );
   // NextUI's default portal escapes the mac-content overflow:hidden ancestor.
-  assert(!feeds.attr(more, 'portalContainer'));
-  assert.doesNotMatch(feeds.value(panel, 'className'), /absolute|top-full/);
-  assert.match(feeds.value(panel, 'className'), /max-h-\[60dvh\]/);
-  assert.match(feeds.value(panel, 'className'), /overflow-auto/);
+  assert(
+    !primitives.attr(
+      primitives.classNode('feed-reading-more'),
+      'portalContainer',
+    ),
+  );
+  assert.doesNotMatch(
+    primitives.value(panel, 'className'),
+    /absolute|top-full/,
+  );
+  assert.match(primitives.value(panel, 'className'), /max-h-\[60dvh\]/);
+  assert.match(primitives.value(panel, 'className'), /overflow-auto/);
 });
 test('short reading status preserves failure, paused and partial meanings', () => {
   function status(scope) {
@@ -177,15 +202,20 @@ test('short reading status preserves failure, paused and partial meanings', () =
   assert.equal(status({}), '阅读本地存量');
   const notice = feeds.elements.find(
     (n) =>
-      feeds.value(n, 'role').includes('updateFailed') &&
-      within(n, feeds.classNode('feed-reading-toolbar')),
+      feeds.value(n, 'role').includes('updateFailed') && within(n, toolbar),
   );
   assert(notice);
 });
 test('stock detail panel is removed while a simple article count and per-article cache status remain', () => {
   assert(!list.classNode('feed-stock-details'));
   assert.match(
-    list.classNode('compact-col-title').getText(list.ast),
+    list.elements
+      .find(
+        (n) =>
+          list.opening(n).tagName.getText(list.ast) ===
+          'ContentSelectionHeader',
+      )
+      .getText(list.ast),
     /summary.data.articles/,
   );
   assert(

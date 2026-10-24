@@ -9,6 +9,10 @@
 
 </div>
 
+## 小红书订阅功能开发（2026-10-24）
+
+小红书已实现链接识别、确认订阅、列表更新、选中图文保存及取消续跑，复用公众号共享控件、分组、日期及正文阅读器，支持全部/分组/作者搜索和分批ZIP。后台271项、前端及公众号关联50项合成回归、两端类型检查、定向lint与前端构建通过。原生来源、DPAPI及安全媒体已接线，真实访问默认关闭；严格主页解析器、本机加密登录迁移、两种入口订阅、32条有界列表及3篇完整图文归档已完成隔离实测；重复保存零额外网络，生产访问仍关闭。详见[产品说明](docs/xiaohongshu/PRODUCT.md)、[交互设计](docs/xiaohongshu/DESIGN.md)、[技术接口](docs/xiaohongshu/TECHNICAL.md)、[开发交接](docs/xiaohongshu/DEVELOPMENT.md)和[验收记录](docs/xiaohongshu/ACCEPTANCE.md)。未部署生产。
+
 ## 本机 Wechat2RSS 配置准备（2026-10-09）
 
 本轮继续准备现有 Wechat2RSS Provider 的本机接入，密钥由用户随后在本机填写。准确文件入口、字段及检查命令见[本机填写与接入检查](docs/WECHAT2RSS_LOCAL_SETUP.md)：实例配置使用已有 `.env.wechat2rss`，WeWe 配置使用已有 `apps/server/.env.local`，保留其他设置，不用模板覆盖私有文件。

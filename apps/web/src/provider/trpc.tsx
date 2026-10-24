@@ -120,7 +120,14 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
     return trpc.createClient({
       links: [
         loggerLink({
-          enabled: () => true,
+          // Signed share links and session fields must never enter console logs.
+          enabled: (operation) =>
+            'path' in operation &&
+            typeof operation.path === 'string' &&
+            ![
+              'xiaohongshu.resolveSubscription',
+              'xiaohongshu.connectSession',
+            ].includes(operation.path),
         }),
         splitLink({
           // Each reading response must be independent of slower background

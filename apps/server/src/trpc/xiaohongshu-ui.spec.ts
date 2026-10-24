@@ -4,8 +4,8 @@ import * as vm from 'node:vm';
 import * as ts from 'typescript';
 
 const filename = path.resolve(
-  __dirname,
-  '../../../web/src/pages/feeds/xiaohongshu.tsx',
+  process.env.XHS_UI_SOURCE_ROOT || path.resolve(__dirname, '../../../web'),
+  'src/pages/feeds/xiaohongshu.tsx',
 );
 const text = fs.readFileSync(filename, 'utf8');
 const ast = ts.createSourceFile(
@@ -75,39 +75,97 @@ function evaluate(
   );
   return context.module.exports;
 }
-describe('formal XHS UI actual handlers (offline, not visual acceptance)', () => {
+const taskExports: Record<string, any> = {};
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync(
+      path.resolve(
+        path.dirname(filename),
+        '../../utils/xiaohongshu-subscription.ts',
+      ),
+      'utf8',
+    ),
+    {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2021,
+        module: ts.ModuleKind.CommonJS,
+      },
+    },
+  ).outputText,
+  { exports: taskExports, Error, setTimeout, clearTimeout },
+  { timeout: 1000 },
+);
+const effects: Record<string, string> = {};
+function collectTaskEffect(node: ts.Node) {
+  if (
+    ts.isCallExpression(node) &&
+    node.expression.getText(ast) === 'useEffect' &&
+    node.arguments[0]?.getText(ast).includes('watchSubscriptionTask')
+  )
+    effects.taskEffect = node.arguments[0].getText(ast);
+  ts.forEachChild(node, collectTaskEffect);
+}
+collectTaskEffect(ast);
+
+describe('formal XHS async subscription UI actual handlers (offline, not visual acceptance)', () => {
+  const terminal = (state = 'completed') => ({
+    kind: 'download',
+    state,
+    total: 2,
+    completed: state === 'completed' ? 2 : 0,
+    skipped: 0,
+    failed: 0,
+    remaining: state === 'completed' ? 0 : 2,
+  });
   function harness() {
-    const state = {
-      name: '待接入备注',
-      url: 'https://www.xiaohongshu.com/synthetic-profile',
-      message: '',
-      diagnostic: '',
-      creator: '',
-      note: 'old-note',
+    const state: any = {
       busy: false,
+      message: '',
+      error: '',
+      creator: '',
+      note: 'old',
+      url: 'https://www.xiaohongshu.com/user/profile/synthetic',
+      resolution: null,
+      task: null,
+      taskId: '',
+      selected: new Set(),
+      dates: null,
     };
     const invalidated = jest.fn().mockResolvedValue(undefined);
     const scope: any = {
       Error,
+      Date,
+      Set,
+      Promise,
+      AbortController,
+      useCallback: (fn: unknown) => fn,
       active: { current: false },
-      setBusy: (v: boolean) => (state.busy = v),
-      setMessage: (v: string) => (state.message = v),
-      setOperationError: (v: string) => (state.diagnostic = v),
-      failureMessage: messageExports.failureMessage,
-      displayName: state.name,
+      taskRunning: { current: false },
+      cancelPending: { current: false },
+      queuedCreators: { current: [] },
+      queuedDownloads: { current: [] },
+      nextDownloadRef: { current: undefined },
+      lastTaskId: { current: '' },
+      zipController: { current: null },
       profileUrl: state.url,
-      setDisplayName: (v: string) => (state.name = v),
-      setProfileUrl: (v: string) => (state.url = v),
-      setCreatorId: (v: string) => (state.creator = v),
-      setNoteId: (v: string) => (state.note = v),
-      setSelectedIds: jest.fn(),
-      setFolderFilter: jest.fn(),
-      setAdding: jest.fn(),
-      setSearch: jest.fn(),
-      setMobileSidebarOpen: jest.fn(),
-      add: { mutateAsync: jest.fn() },
-      utils: { xiaohongshu: { list: { invalidate: invalidated } } },
-      capability: { data: { canRefresh: false } },
+      creatorId: 'a',
+      taskId: 'task-one',
+      resolution: null,
+      subscriptionGroup: '',
+      failureMessage: messageExports.failureMessage,
+      taskFinished: taskExports.taskFinished,
+      taskSettling: taskExports.taskSettling,
+      taskText: taskExports.taskText,
+      selectedImageNotes: taskExports.selectedImageNotes,
+      exportArchiveGroups: taskExports.exportArchiveGroups,
+      current: { id: 'a', displayName: '合成作者' },
+      selectedNotes: [
+        { id: 'note-a', creatorId: 'a', status: 'listed', kind: 'image-text' },
+      ],
+      selectedArchives: [],
+      exportScope: 'selected',
+      notesInput: { creatorId: 'a' },
+      saveSettings: { directory: 'synthetic-only', askEveryTime: false },
       creators: {
         data: {
           items: [
@@ -117,166 +175,462 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
           ],
         },
       },
-      updateCreator: jest.fn(),
-      refreshCreatorBatch: batchExports.refreshCreatorBatch,
-      receipts: { current: {} },
+      utils: {
+        xiaohongshu: {
+          list: { invalidate: invalidated },
+          notes: { invalidate: invalidated },
+          capability: { invalidate: jest.fn().mockResolvedValue(undefined) },
+          connectionStatus: {
+            invalidate: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+      },
+      subscriptionApi: {
+        resolveSubscription: { mutate: jest.fn() },
+        subscribe: { mutate: jest.fn() },
+        refresh: {
+          mutate: jest
+            .fn()
+            .mockResolvedValue({ taskId: 'task-one', creatorId: 'a' }),
+        },
+        downloadNotes: {
+          mutate: jest
+            .fn()
+            .mockResolvedValue({ taskId: 'download-one', creatorId: 'a' }),
+        },
+        cancelTask: { mutate: jest.fn().mockResolvedValue(undefined) },
+        task: { query: jest.fn() },
+      },
+      localApi: jest.fn(),
+      exportNotes: { mutateAsync: jest.fn() },
+      watchSubscriptionTask: jest.fn().mockResolvedValue(undefined),
     };
+    for (const [setter, property] of Object.entries({
+      setBusy: 'busy',
+      setMessage: 'message',
+      setOperationError: 'error',
+      setCreatorId: 'creator',
+      setNoteId: 'note',
+      setProfileUrl: 'url',
+      setResolution: 'resolution',
+      setTask: 'task',
+      setTaskId: 'taskId',
+      setDateSelection: 'dates',
+      setSelectedIds: 'selected',
+    }))
+      scope[setter] = jest.fn((v: any) => {
+        state[property] = typeof v === 'function' ? v(state[property]) : v;
+      });
+    for (const name of [
+      'setProgressOpen',
+      'setCancelling',
+      'setSaveSettings',
+      'setDirectory',
+      'setFolderFilter',
+      'setAdding',
+      'setSearch',
+      'setMobileSidebarOpen',
+      'setLoadedCount',
+      'setExportOpen',
+      'setZipProgress',
+      'setTaskCreatorId',
+    ])
+      scope[name] = jest.fn();
+    scope.startTask = evaluate('startTask', scope);
     scope.run = evaluate('run', scope);
+    scope.updateCreator = evaluate('updateCreator', scope);
+    scope.startDownloadJob = evaluate('startDownloadJob', scope);
+    scope.nextDownloadRef.current = scope.startDownloadJob;
+    scope.taskApiRef = {
+      current: { subscriptionApi: scope.subscriptionApi, utils: scope.utils },
+    };
     return { scope, state, invalidated };
   }
-  it('saves only a pending record and clears input only after actual persistence', async () => {
+  function watch(scope: any) {
+    evaluate('taskEffect', scope, effects)();
+    return scope.watchSubscriptionTask.mock.calls[0][0];
+  }
+  it('resolves author information for confirmation without subscribing, listing or downloading', async () => {
     const { scope, state } = harness();
-    scope.add.mutateAsync.mockResolvedValue({
-      subscribed: false,
-      creator: { id: 'pending' },
-      message: '已保存待接入博主；尚未读取笔记。',
-    });
-    await evaluate('handleAdd', scope)();
-    expect(scope.add.mutateAsync).toHaveBeenCalledWith({
-      displayName: '待接入备注',
-      profileUrl: 'https://www.xiaohongshu.com/synthetic-profile',
-    });
-    expect(state.message).toContain('待接入');
-    expect(state.creator).toBe('pending');
-    expect(state.name).toBe('');
-    expect(state.note).toBe('');
+    const resolution = {
+      resolutionId: 'resolve-one',
+      author: { id: 'author', name: '已核实作者' },
+      expiresAt: Date.now() + 60000,
+    };
+    scope.subscriptionApi.resolveSubscription.mutate.mockResolvedValue(
+      resolution,
+    );
+    await evaluate('handleResolve', scope)();
+    expect(
+      scope.subscriptionApi.resolveSubscription.mutate,
+    ).toHaveBeenCalledWith({ url: state.url });
+    expect(state.resolution).toEqual(resolution);
+    expect(scope.subscriptionApi.subscribe.mutate).not.toHaveBeenCalled();
+    expect(scope.subscriptionApi.refresh.mutate).not.toHaveBeenCalled();
+    expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
   });
-  it('keeps inputs when persistence fails and does not invent a success', async () => {
+  it('retains input when resolution fails and does not invent success', async () => {
     const { scope, state } = harness();
-    scope.add.mutateAsync.mockRejectedValue(new Error('synthetic failure'));
-    await evaluate('handleAdd', scope)();
-    expect(state.name).toBe('待接入备注');
+    scope.subscriptionApi.resolveSubscription.mutate.mockRejectedValue(
+      new Error('synthetic resolve failure'),
+    );
+    await evaluate('handleResolve', scope)();
     expect(state.url).toContain('synthetic');
+    expect(state.resolution).toBeNull();
+    expect(state.error).toContain('synthetic');
+  });
+  it('confirms only the server resolution, applies the chosen group and clears input after persistence', async () => {
+    const { scope, state, invalidated } = harness();
+    scope.resolution = {
+      resolutionId: 'resolve-one',
+      expiresAt: Date.now() + 60000,
+      existingCreatorId: null,
+    };
+    scope.subscriptionGroup = 'xhs-group';
+    scope.subscriptionApi.subscribe.mutate.mockResolvedValue({
+      subscribed: true,
+      created: true,
+      creatorId: 'subscribed',
+    });
+    await evaluate('handleAdd', scope)();
+    expect(scope.subscriptionApi.subscribe.mutate).toHaveBeenCalledWith({
+      resolutionId: 'resolve-one',
+      groupId: 'xhs-group',
+    });
+    expect(state.creator).toBe('subscribed');
+    expect(state.url).toBe('');
+    expect(state.note).toBe('');
+    expect(invalidated).toHaveBeenCalled();
+    expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
+  });
+  it('does not submit stale confirmation or clear an input after rejected persistence', async () => {
+    const { scope, state } = harness();
+    scope.resolution = { resolutionId: 'old', expiresAt: Date.now() - 1 };
+    await evaluate('handleAdd', scope)();
+    expect(scope.subscriptionApi.subscribe.mutate).not.toHaveBeenCalled();
+    expect(state.url).toContain('synthetic');
+    scope.resolution.expiresAt = Date.now() + 60000;
+    scope.subscriptionApi.subscribe.mutate.mockRejectedValue(
+      new Error('synthetic persistence failure'),
+    );
+    await evaluate('handleAdd', scope)();
     expect(state.creator).toBe('');
-    expect(state.message).toContain('未完成');
+    expect(state.url).toContain('synthetic');
   });
-  it('does not send an update when the source is unconfigured', async () => {
-    const { scope } = harness();
-    await evaluate('handleRefreshAll', scope)();
-    expect(scope.updateCreator).not.toHaveBeenCalled();
-  });
-  it('skips paused creators and stops the batch at an incomplete window', async () => {
+  it('starts a metadata-only list task and holds the busy guard until its terminal receipt', async () => {
     const { scope, state } = harness();
-    scope.capability.data.canRefresh = true;
-    scope.updateCreator.mockResolvedValue('partial');
-    await evaluate('handleRefreshAll', scope)();
-    expect(scope.updateCreator.mock.calls).toEqual([['a']]);
-    expect(state.message).toContain(
-      '完成 0 位，未完成 1 位，未执行 1 位；已停用跳过 1 位',
-    );
+    await scope.run(() => scope.updateCreator('a'));
+    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledWith({
+      id: 'a',
+    });
+    expect(state.task).toMatchObject({ kind: 'list', state: 'queued' });
+    expect(state.busy).toBe(true);
+    expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
+    const callbacks = watch(scope);
+    callbacks.onTask({ ...terminal(), kind: 'list' });
+    expect(state.busy).toBe(false);
+    expect(scope.active.current).toBe(false);
   });
-  it('reports all completed creators without counting paused creators as completed', async () => {
+  it('skips paused creators, queues sequential list work and stops at a partial result', async () => {
     const { scope, state } = harness();
-    scope.capability.data.canRefresh = true;
-    scope.updateCreator.mockResolvedValue('complete');
     await evaluate('handleRefreshAll', scope)();
-    expect(scope.updateCreator.mock.calls).toEqual([['a'], ['b']]);
-    expect(state.message).toContain(
-      '完成 2 位，未完成 0 位，未执行 0 位；已停用跳过 1 位',
-    );
+    expect(scope.subscriptionApi.refresh.mutate.mock.calls).toEqual([
+      [{ id: 'a' }],
+    ]);
+    expect(scope.queuedCreators.current).toEqual(['b']);
+    watch(scope).onTask({ ...terminal('partial'), kind: 'list' });
+    expect(scope.queuedCreators.current).toEqual([]);
+    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledTimes(1);
+    expect(state.task.state).toBe('partial');
   });
-  it('retains completed count when a later update throws and does not replay', async () => {
+  it('advances a completed creator once and retains busy state for the next queued task', async () => {
     const { scope, state } = harness();
-    scope.capability.data.canRefresh = true;
-    scope.updateCreator
-      .mockResolvedValueOnce('complete')
-      .mockRejectedValueOnce(new Error('synthetic failure'));
     await evaluate('handleRefreshAll', scope)();
-    expect(scope.updateCreator.mock.calls).toEqual([['a'], ['b']]);
-    expect(state.message).toContain(
-      '完成 1 位，未完成 1 位，未执行 0 位；已停用跳过 1 位',
-    );
-    expect(state.message).toContain('synthetic failure');
+    watch(scope).onTask({ ...terminal(), kind: 'list' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(scope.subscriptionApi.refresh.mutate.mock.calls).toEqual([
+      [{ id: 'a' }],
+      [{ id: 'b' }],
+    ]);
+    expect(state.busy).toBe(true);
   });
-  it('prevents duplicate in-flight UI actions and releases its guard', async () => {
+  it('retains the completed receipt when the next creator fails without replaying', async () => {
+    const { scope, state } = harness();
+    await evaluate('handleRefreshAll', scope)();
+    scope.subscriptionApi.refresh.mutate.mockRejectedValue(
+      new Error('synthetic queue failure'),
+    );
+    watch(scope).onTask({ ...terminal(), kind: 'list' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledTimes(2);
+    expect(state.error).toContain('未开始');
+    expect(state.busy).toBe(false);
+  });
+  it('prevents duplicate actions and releases its guard when no task was started', async () => {
     const { scope, state } = harness();
     let finish!: () => void;
-    const operation = jest.fn(() => new Promise<void>((r) => (finish = r)));
-    const first = scope.run(operation);
-    await scope.run(operation);
-    expect(operation).toHaveBeenCalledTimes(1);
+    const op = jest.fn(() => new Promise<void>((r) => (finish = r)));
+    const first = scope.run(op);
+    await scope.run(op);
+    expect(op).toHaveBeenCalledTimes(1);
     expect(state.busy).toBe(true);
     finish();
     await first;
     expect(state.busy).toBe(false);
-    expect(scope.active.current).toBe(false);
   });
-  it('labels late and batch update receipts with their actual creator and disables selection during operations', async () => {
+  it('downloads selected listed image notes through the task API without creating a browser ZIP', async () => {
     const { scope, state } = harness();
-    let finish!: (result: unknown) => void;
-    scope.creators.data.items[0].displayName = '博主A';
-    scope.refresh = {
-      mutateAsync: jest.fn(
-        () =>
-          new Promise((r) => {
-            finish = r;
-          }),
-      ),
-    };
-    scope.receipts = { current: {} };
-    scope.utils.xiaohongshu.notes = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-    const update = evaluate('updateCreator', scope)('a');
-    state.creator = 'b';
-    finish({ message: '窗口已完成', added: 1, status: 'complete' });
-    await update;
-    expect(state.message).toBe('博主A：窗口已完成 新增已完整保存的笔记：1');
-    expect(scope.receipts.current.a).toBe(state.message);
-    expect(text).toMatch(
-      /disabled=\{busy\}[\s\S]*?aria-pressed=\{creatorId === creator.id\}/,
-    );
-    state.creator = 'a';
-    scope.active.current = true;
-    evaluate('selectCreator', scope)('b');
-    expect(state.creator).toBe('a');
-    expect(text).toContain('if (active.current) return;');
-  });
-  it('uses selected complete cached-note IDs for local save and creates no browser ZIP', async () => {
-    const { scope, state } = harness();
-    scope.current = { id: 'a', displayName: '博主A' };
-    scope.saveSettings = {
-      directory: 'synthetic-configured-directory',
-      askEveryTime: false,
-    };
-    scope.selectedNotes = [{ id: 'note-a', status: 'complete' }];
-    scope.localApi = jest
-      .fn()
-      .mockResolvedValue({ saved: true, savedCount: 1, alreadySavedCount: 0 });
-    scope.exportNotes = { mutateAsync: jest.fn() };
     await evaluate('handleLocalSave', scope)();
-    expect(scope.localApi.mock.calls).toEqual([
-      ['/xiaohongshu/save', { creatorId: 'a', noteIds: ['note-a'] }],
-    ]);
+    expect(scope.subscriptionApi.downloadNotes.mutate).toHaveBeenCalledWith({
+      creatorId: 'a',
+      noteIds: ['note-a'],
+    });
+    expect(scope.localApi).not.toHaveBeenCalled();
     expect(scope.exportNotes.mutateAsync).not.toHaveBeenCalled();
-    expect(state.message).toContain('新增保存 1 篇');
-    expect(text.indexOf('onPress={handleLocalSave}')).toBeLessThan(
-      text.indexOf('onPress={handleDownload}'),
-    );
+    expect(state.task).toMatchObject({
+      kind: 'download',
+      state: 'queued',
+      total: 1,
+    });
+    expect(state.message).not.toContain('完成');
   });
-  it('stops a local-save batch on native picker cancellation or a failed save without retrying', async () => {
+  it('stops at native picker cancellation and never dispatches the download', async () => {
     const { scope, state } = harness();
-    scope.current = { id: 'a', displayName: '博主A' };
-    scope.saveSettings = {
-      directory: 'synthetic-configured-directory',
-      askEveryTime: true,
-    };
-    scope.selectedNotes = [
-      { id: 'one', status: 'complete' },
-      { id: 'two', status: 'complete' },
-    ];
-    scope.localApi = jest.fn().mockResolvedValue({ cancelled: true });
-    scope.setSaveSettings = jest.fn();
+    scope.saveSettings.askEveryTime = true;
+    scope.localApi.mockResolvedValue({ cancelled: true });
     await evaluate('handleLocalSave', scope)();
     expect(scope.localApi.mock.calls).toEqual([['/directory', {}]]);
-    expect(state.message).toContain('已取消');
-    scope.saveSettings.askEveryTime = false;
-    scope.localApi.mockReset().mockRejectedValue(new Error('SYNTHETIC_FAILED'));
-    await evaluate('handleLocalSave', scope)();
-    expect(scope.localApi).toHaveBeenCalledTimes(1);
-    expect(state.message).toContain('未完成');
+    expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
+    expect(state.busy).toBe(false);
   });
-  it('is wired into the real application/navigation and uses no prototype fixture or remote body HTML', () => {
+  it('passes the native picker token for a bounded batch and does not accept a path parameter', async () => {
+    const { scope } = harness();
+    scope.saveSettings.askEveryTime = true;
+    scope.localApi.mockResolvedValue({
+      pickToken: 'native-grant',
+      directory: 'synthetic-picked',
+      askEveryTime: true,
+    });
+    await evaluate('handleLocalSave', scope)();
+    expect(scope.subscriptionApi.downloadNotes.mutate).toHaveBeenCalledWith({
+      creatorId: 'a',
+      noteIds: ['note-a'],
+      pickToken: 'native-grant',
+    });
+    expect(scope.setDirectory).toHaveBeenCalledWith('synthetic-picked');
+  });
+  it('does not retry a failed task submission or display an archive success', async () => {
+    const { scope, state } = harness();
+    scope.subscriptionApi.downloadNotes.mutate.mockRejectedValue(
+      new Error('synthetic submit failure'),
+    );
+    await evaluate('handleLocalSave', scope)();
+    expect(scope.subscriptionApi.downloadNotes.mutate).toHaveBeenCalledTimes(1);
+    expect(state.task).toBeNull();
+    expect(state.busy).toBe(false);
+    expect(state.error).toContain('synthetic');
+  });
+  it('does not invent progress when the backend fails to return a task receipt', async () => {
+    const { scope, state } = harness();
+    scope.subscriptionApi.downloadNotes.mutate.mockResolvedValue({});
+    await evaluate('handleLocalSave', scope)();
+    expect(scope.localApi).not.toHaveBeenCalled();
+    expect(scope.subscriptionApi.downloadNotes.mutate).toHaveBeenCalledTimes(1);
+    expect(state.task).toBeNull();
+    expect(scope.taskRunning.current).toBe(false);
+    expect(state.busy).toBe(false);
+  });
+  it('clears remaining creator work on cancel, sends one request and retains the busy guard until confirmation', async () => {
+    const { scope, state } = harness();
+    await evaluate('handleRefreshAll', scope)();
+    const cancel = evaluate('handleCancelTask', scope);
+    await cancel();
+    await cancel();
+    expect(scope.queuedCreators.current).toEqual([]);
+    expect(scope.subscriptionApi.cancelTask.mutate).toHaveBeenCalledTimes(1);
+    expect(state.busy).toBe(true);
+    watch(scope).onTask({ ...terminal('cancelled'), kind: 'list' });
+    expect(state.busy).toBe(false);
+  });
+  it('keeps a failed cancellation unconfirmed and permits an explicit later retry', async () => {
+    const { scope, state } = harness();
+    scope.taskRunning.current = true;
+    scope.subscriptionApi.cancelTask.mutate.mockRejectedValue(
+      new Error('synthetic cancel failure'),
+    );
+    await evaluate('handleCancelTask', scope)();
+    expect(scope.cancelPending.current).toBe(false);
+    expect(state.error).toContain('取消未确认');
+    expect(scope.taskRunning.current).toBe(true);
+  });
+  it('reports progress failure without resubmitting or unlocking an in-flight task', () => {
+    const { scope, state } = harness();
+    scope.taskRunning.current = true;
+    scope.active.current = true;
+    state.busy = true;
+    watch(scope).onError(new Error('synthetic receipt loss'));
+    expect(state.busy).toBe(true);
+    expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
+    expect(state.error).toBeTruthy();
+  });
+  it('polls queued/running receipts through a lost response until terminal state without resubmission', async () => {
+    const query = jest
+      .fn()
+      .mockResolvedValueOnce(terminal('queued'))
+      .mockRejectedValueOnce(new Error('synthetic receipt loss'))
+      .mockResolvedValueOnce(terminal());
+    const onTask = jest.fn(),
+      onError = jest.fn();
+    await taskExports.watchSubscriptionTask({
+      taskId: 'one',
+      query,
+      signal: new AbortController().signal,
+      onTask,
+      onError,
+      interval: 1,
+    });
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(onTask).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+  it('aborts polling on cleanup and ignores late receipts', async () => {
+    const controller = new AbortController();
+    let finish!: (v: unknown) => void;
+    const onTask = jest.fn();
+    const pending = taskExports.watchSubscriptionTask({
+      taskId: 'one',
+      query: () => new Promise((r) => (finish = r)),
+      signal: controller.signal,
+      onTask,
+      onError: jest.fn(),
+      interval: 1,
+    });
+    controller.abort();
+    finish(terminal());
+    await pending;
+    expect(onTask).not.toHaveBeenCalled();
+  });
+  it.each(['completed', 'partial', 'blocked', 'cancelled', 'failed'])(
+    'retains honest %s counters and releases terminal UI state',
+    (state) => {
+      const { scope, state: actual } = harness();
+      scope.taskRunning.current = true;
+      scope.active.current = true;
+      const task = terminal(state);
+      watch(scope).onTask(task);
+      expect(actual.task).toEqual(task);
+      expect(actual.message).toBe(taskExports.taskText(task));
+      expect(scope.taskRunning.current).toBe(false);
+      expect(
+        scope.utils.xiaohongshu.capability.invalidate,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        scope.utils.xiaohongshu.connectionStatus.invalidate,
+      ).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('clears selection on search/creator/date changes and blocks changes during work', () => {
+    const { scope, state } = harness();
+    evaluate('handleSearch', scope)('search');
+    expect(scope.setSearch).toHaveBeenCalledWith('search');
+    expect(state.selected.size).toBe(0);
+    evaluate('selectCreator', scope)('b');
+    expect(state.creator).toBe('b');
+    expect(state.dates).toEqual({ mode: 'day', start: '', end: '' });
+    expect(scope.setMobileSidebarOpen).toHaveBeenCalledWith(false);
+    scope.active.current = true;
+    scope.setSearch.mockClear();
+    evaluate('handleSearch', scope)('ignored');
+    evaluate('selectCreator', scope)('a');
+    evaluate('selectNote', scope)('ignored', true);
+    expect(scope.setSearch).not.toHaveBeenCalled();
+    expect(state.creator).toBe('b');
+  });
+  it('restricts first-release downloads to image notes while keeping existing video status/cover honest', () => {
+    expect(
+      taskExports
+        .selectedImageNotes(
+          [
+            { id: 'image', kind: 'image-text' },
+            { id: 'video', kind: 'video' },
+          ],
+          new Set(['image', 'video']),
+        )
+        .map((n: any) => n.id),
+    ).toEqual(['image']);
+    const status = evaluate('noteStatus', {});
+    expect(status({ status: 'complete', kind: 'video' })).toContain('未验证');
+    expect(status({ status: 'video-skipped', kind: 'video' })).toContain(
+      '未归档',
+    );
+    const html = taskExports.noteReaderHtml({
+      text: 'Saved body <script> & symbols',
+      images: ['data:image/png;base64,c3ludGhldGlj'],
+    });
+    expect(html).toContain('Saved body &lt;script&gt; &amp; symbols');
+    expect(html).toContain('src="data:image/png;base64,c3ludGhldGlj"');
+    expect(text).toContain('noteReaderHtml(body.data)');
+    expect(text).toContain('<ArticleReader');
+    expect(text).not.toMatch(
+      /<video\b|video\/mp4;base64|dangerouslySetInnerHTML/,
+    );
+  });
+  it('exports only selected complete caches as ZIP and revokes its object URL', async () => {
+    const { scope } = harness();
+    scope.selectedArchives = [
+      { id: 'complete', creatorId: 'a', status: 'complete' },
+    ];
+    const link = { click: jest.fn(), remove: jest.fn() };
+    scope.document = {
+      createElement: jest.fn(() => link),
+      body: { appendChild: jest.fn() },
+    };
+    scope.URL = {
+      createObjectURL: jest.fn(() => 'blob:synthetic'),
+      revokeObjectURL: jest.fn(),
+    };
+    scope.Blob = Blob;
+    scope.atob = atob;
+    scope.Uint8Array = Uint8Array;
+    scope.exportNotes.mutateAsync.mockResolvedValue({
+      base64: 'U1lOVEhFVElD',
+      filename: 'synthetic.zip',
+      mimeType: 'application/zip',
+      notes: 1,
+    });
+    await evaluate('handleDownload', scope)();
+    expect(scope.exportNotes.mutateAsync).toHaveBeenCalledWith({
+      creatorId: 'a',
+      noteIds: ['complete'],
+    });
+    expect(link.click).toHaveBeenCalledTimes(1);
+    expect(link.remove).toHaveBeenCalled();
+    expect(scope.URL.revokeObjectURL).toHaveBeenCalledWith('blob:synthetic');
+  });
+  it('preserves native directory selection, cancellation and preference-only updates', async () => {
+    const { scope } = harness();
+    scope.localApi.mockResolvedValueOnce({ cancelled: true });
+    await evaluate('handleChooseDirectory', scope)();
+    expect(scope.setDirectory).not.toHaveBeenCalled();
+    scope.localApi.mockResolvedValueOnce({
+      directory: 'chosen',
+      askEveryTime: true,
+    });
+    await evaluate('handleChooseDirectory', scope)();
+    expect(scope.setDirectory).toHaveBeenCalledWith('chosen');
+    scope.localApi.mockResolvedValueOnce({
+      directory: 'chosen',
+      askEveryTime: false,
+    });
+    await evaluate('handleSaveSettings', scope)(false);
+    expect(scope.localApi).toHaveBeenLastCalledWith('/settings', {
+      askEveryTime: false,
+    });
+  });
+  it('retains real navigation, groups, date filtering, cached preview and primary local-save actions', () => {
     expect(
       fs.readFileSync(
         path.resolve(__dirname, '../../../web/src/App.tsx'),
@@ -289,334 +643,24 @@ describe('formal XHS UI actual handlers (offline, not visual acceptance)', () =>
         'utf8',
       ),
     ).toContain("href: '/xiaohongshu'");
-    expect(text).toContain('trpc.xiaohongshu.body.useQuery');
-    expect(text).toContain('trpc.xiaohongshu.export.useMutation');
-    expect(text).not.toMatch(
-      /prototypes\/|dangerouslySetInnerHTML|toast\.success/,
+    for (const marker of [
+      '<ManagementFolders',
+      '<ArticleDateFilter',
+      'dateSelectionFilter(dateSelection)',
+      'trpc.xiaohongshu.body.useQuery',
+      'trpc.xiaohongshu.export.useMutation',
+      'compact-list',
+      '<SubscriptionToolbar',
+      'feed-workspace',
+    ])
+      expect(text).toContain(marker);
+    expect(text.indexOf('onPress={() => handleLocalSave()}')).toBeGreaterThan(
+      -1,
     );
-    expect(text).toContain('md:flex-row');
-    expect(text).toContain('mac-toolbar');
-    expect(text).toContain('compact-list');
-  });
-  it('clears selection on search and keeps creator/selection unchanged while processing', () => {
-    const { scope, state } = harness();
-    scope.setSelectedIds = jest.fn();
-    scope.setSearch = jest.fn();
-    evaluate('handleSearch', scope)('new title');
-    expect(scope.setSearch).toHaveBeenCalledWith('new title');
-    expect(scope.setSelectedIds.mock.calls[0][0].size).toBe(0);
-    scope.active.current = true;
-    scope.setSearch.mockClear();
-    scope.setSelectedIds.mockClear();
-    evaluate('handleSearch', scope)('ignored');
-    evaluate('selectNote', scope)('ignored', true);
-    expect(scope.setSearch).not.toHaveBeenCalled();
-    expect(scope.setSelectedIds).not.toHaveBeenCalled();
-    expect(state.creator).toBe('');
-  });
-  it('closes mobile management after selecting a creator and keeps it unchanged while busy', () => {
-    const { scope, state } = harness();
-    scope.receipts = { current: { a: '博主A：旧回执' } };
-    evaluate('selectCreator', scope)('a');
-    expect(state.creator).toBe('a');
-    expect(state.message).toBe('博主A：旧回执');
-    expect(scope.setMobileSidebarOpen).toHaveBeenCalledWith(false);
-    scope.setMobileSidebarOpen.mockClear();
-    scope.active.current = true;
-    evaluate('selectCreator', scope)('b');
-    expect(state.creator).toBe('a');
-    expect(scope.setMobileSidebarOpen).not.toHaveBeenCalled();
-  });
-  it('selects only matching complete notes and excludes hidden selection and unarchived video', () => {
-    const scope = {
-      notes: {
-        data: {
-          items: [
-            { id: 'a', title: 'Match A', status: 'complete' },
-            { id: 'b', title: 'Other', status: 'complete' },
-            { id: 'v', title: 'Match Video', status: 'video-skipped' },
-          ],
-        },
-      },
-      search: 'match',
-      useMemo: (fn: () => unknown) => fn(),
-    };
-    const visibleNotes = evaluate('visibleNotes', scope);
-    const selectedNotes = evaluate('selectedNotes', {
-      visibleNotes,
-      selectedIds: new Set(['a', 'b', 'v']),
-    });
-    expect(selectedNotes.map((note: { id: string }) => note.id)).toEqual(['a']);
-  });
-  it('chooses a batch directory once and sends all selected IDs with one picker credential', async () => {
-    const { scope, state } = harness();
-    scope.current = { id: 'a', displayName: '博主A' };
-    scope.saveSettings = { directory: 'old', askEveryTime: true };
-    scope.selectedNotes = [{ id: 'one' }, { id: 'two' }];
-    scope.setSaveSettings = jest.fn();
-    scope.setDirectory = jest.fn();
-    scope.localApi = jest
-      .fn()
-      .mockResolvedValueOnce({
-        directory: 'chosen',
-        askEveryTime: true,
-        pickToken: 'synthetic-token',
-      })
-      .mockResolvedValueOnce({
-        saved: true,
-        savedCount: 1,
-        alreadySavedCount: 1,
-      });
-    await evaluate('handleLocalSave', scope)();
-    expect(scope.localApi.mock.calls).toEqual([
-      ['/directory', {}],
-      [
-        '/xiaohongshu/save',
-        {
-          creatorId: 'a',
-          noteIds: ['one', 'two'],
-          pickToken: 'synthetic-token',
-        },
-      ],
-    ]);
-    expect(state.message).toContain('新增保存 1 篇，已有保存 1 篇');
-  });
-  it.each([
-    [0, 2],
-    [1, 1],
-  ])(
-    'confirms an existing or mixed batch with %i newly saved and %i already saved notes',
-    async (savedCount, alreadySavedCount) => {
-      const { scope, state } = harness();
-      scope.current = { id: 'a', displayName: '博主A' };
-      scope.saveSettings = { directory: 'old', askEveryTime: false };
-      scope.selectedNotes = [{ id: 'one' }, { id: 'two' }];
-      scope.localApi = jest
-        .fn()
-        .mockResolvedValue({ saved: true, savedCount, alreadySavedCount });
-      await evaluate('handleLocalSave', scope)();
-      expect(scope.localApi).toHaveBeenCalledTimes(1);
-      expect(state.message).toContain(
-        `博主A：本次新增保存 ${savedCount} 篇，已有保存 ${alreadySavedCount} 篇`,
-      );
-      expect(state.message).not.toContain('未完成');
-      expect(state.message).not.toContain('其中');
-    },
-  );
-  it.each([
-    [-1, 3],
-    [3, -1],
-    [0.5, 1.5],
-    [1.5, 0.5],
-    ['1', 1],
-    [1, '1'],
-    [0, undefined],
-    [undefined, 0],
-    [0, null],
-    [0, Infinity],
-    [NaN, 2],
-    [1, 2],
-  ])(
-    'rejects malformed or mismatched save counters %s and %s',
-    async (savedCount, alreadySavedCount) => {
-      const { scope, state } = harness();
-      scope.current = { id: 'a', displayName: '博主A' };
-      scope.saveSettings = { directory: 'old', askEveryTime: false };
-      scope.selectedNotes = [{ id: 'one' }, { id: 'two' }];
-      scope.localApi = jest
-        .fn()
-        .mockResolvedValue({ saved: true, savedCount, alreadySavedCount });
-      await evaluate('handleLocalSave', scope)();
-      expect(state.message).toContain('未完成');
-      expect(state.message).not.toContain('本次新增保存');
-      expect(scope.localApi).toHaveBeenCalledTimes(1);
-    },
-  );
-  it('does not label an unconfirmed count as successful and keeps server partial-save evidence', async () => {
-    const { scope, state } = harness();
-    scope.current = { id: 'a', displayName: '博主A' };
-    scope.saveSettings = { directory: 'old', askEveryTime: false };
-    scope.selectedNotes = [{ id: 'one' }, { id: 'two' }];
-    scope.localApi = jest
-      .fn()
-      .mockResolvedValue({ saved: true, savedCount: 1, alreadySavedCount: 0 });
-    await evaluate('handleLocalSave', scope)();
-    expect(state.message).toContain('未完成');
-    expect(state.message).not.toContain('2 篇已保存');
-    scope.localApi.mockRejectedValue(new Error('已保存1篇，余下未保存'));
-    await evaluate('handleLocalSave', scope)();
-    expect(state.message).toContain('已保存1篇');
-  });
-  it('updates only the original askEveryTime setting and retains the native picker contract', async () => {
-    const { scope } = harness();
-    scope.saveSettings = { directory: 'old', askEveryTime: false };
-    scope.setSaveSettings = jest.fn();
-    scope.setDirectory = jest.fn();
-    scope.localApi = jest
-      .fn()
-      .mockResolvedValue({ directory: 'old', askEveryTime: true });
-    await evaluate('handleSaveSettings', scope)(true);
-    expect(scope.localApi).toHaveBeenCalledWith('/settings', {
-      askEveryTime: true,
-    });
-    scope.localApi.mockReset().mockResolvedValue({ cancelled: true });
-    await evaluate('handleChooseDirectory', scope)();
-    expect(scope.setDirectory).toHaveBeenCalledTimes(1);
-  });
-  it('exports exactly the selected notes and cleans up the browser download resource', async () => {
-    const { scope, state } = harness();
-    const link = {
-      href: '',
-      download: '',
-      click: jest.fn(),
-      remove: jest.fn(),
-    };
-    scope.current = { id: 'a', displayName: '博主A' };
-    scope.selectedNotes = [{ id: 'one' }, { id: 'two' }];
-    scope.exportNotes = {
-      mutateAsync: jest.fn().mockResolvedValue({
-        base64: '',
-        mimeType: 'application/zip',
-        filename: 'synthetic.zip',
-        notes: 2,
-      }),
-    };
-    scope.atob = () => '';
-    scope.Blob = Blob;
-    scope.URL = {
-      createObjectURL: jest.fn().mockReturnValue('blob:synthetic'),
-      revokeObjectURL: jest.fn(),
-    };
-    scope.document = {
-      createElement: () => link,
-      body: { appendChild: jest.fn() },
-    };
-    await evaluate('handleDownload', scope)();
-    expect(scope.exportNotes.mutateAsync).toHaveBeenCalledWith({
-      creatorId: 'a',
-      noteIds: ['one', 'two'],
-    });
-    expect(link.click).toHaveBeenCalledTimes(1);
-    expect(link.remove).toHaveBeenCalledTimes(1);
-    expect(scope.URL.revokeObjectURL).toHaveBeenCalledWith('blob:synthetic');
-    expect(state.message).toContain('2 篇已完整保存的笔记 ZIP');
-  });
-  it('includes complete cached video in selection and excludes video without a complete archive', () => {
-    const selectedNotes = evaluate('selectedNotes', {
-      visibleNotes: [
-        { id: 'image', kind: 'image-text', status: 'complete' },
-        { id: 'video', kind: 'video', status: 'complete' },
-        { id: 'pending-video', kind: 'video', status: 'video-skipped' },
-      ],
-      selectedIds: new Set(['image', 'video', 'pending-video']),
-    });
-    expect(selectedNotes.map((note: { id: string }) => note.id)).toEqual([
-      'image',
-      'video',
-    ]);
-  });
-  it.each([
-    ['image-text', 0],
-    ['video', 1],
-  ])(
-    'sends complete %s IDs through the original batch save and displays confirmed video count %i',
-    async (kind, videoCount) => {
-      const { scope, state } = harness();
-      scope.current = { id: 'a', displayName: '博主A' };
-      scope.saveSettings = { directory: 'old', askEveryTime: false };
-      scope.selectedNotes = [{ id: 'one', status: 'complete', kind }];
-      scope.localApi = jest.fn().mockResolvedValue({
-        saved: true,
-        savedCount: 1,
-        alreadySavedCount: 0,
-        videoCount,
-        ...(videoCount
-          ? { videoDecoded: false, videoVerification: 'container-and-bytes' }
-          : {}),
-      });
-      await evaluate('handleLocalSave', scope)();
-      expect(scope.localApi.mock.calls).toEqual([
-        ['/xiaohongshu/save', { creatorId: 'a', noteIds: ['one'] }],
-      ]);
-      expect(state.message).toContain('新增保存 1 篇');
-      if (videoCount) {
-        expect(state.message).toContain('1 篇包含视频文件');
-        expect(state.message).toContain('请在本机确认能否播放');
-      } else {
-        expect(state.message).toContain('本批次不含已归档视频');
-        expect(state.message).not.toContain('包含视频文件');
-      }
-    },
-  );
-  it('confirms existing video without treating it as newly saved or decoded', async () => {
-    const { scope, state } = harness();
-    scope.current = { id: 'a', displayName: '博主A' };
-    scope.saveSettings = { directory: 'old', askEveryTime: false };
-    scope.selectedNotes = [{ id: 'one', status: 'complete', kind: 'video' }];
-    scope.localApi = jest.fn().mockResolvedValue({
-      saved: true,
-      savedCount: 0,
-      alreadySavedCount: 1,
-      videoCount: 1,
-      videoDecoded: false,
-      videoVerification: 'container-and-bytes',
-    });
-    await evaluate('handleLocalSave', scope)();
-    expect(state.message).toContain('新增保存 0 篇，已有保存 1 篇');
-    expect(state.message).toContain('1 篇包含视频文件');
-    expect(state.message).toContain('请在本机确认能否播放');
-  });
-  it.each([
-    {},
-    { videoCount: 0 },
-    { videoCount: -1 },
-    { videoCount: 0.5 },
-    { videoCount: 2 },
-    { videoCount: null },
-    { videoCount: 1 },
-    {
-      videoCount: 1,
-      videoDecoded: true,
-      videoVerification: 'container-and-bytes',
-    },
-    { videoCount: 1, videoDecoded: false, videoVerification: 'unknown' },
-  ])(
-    'keeps unconfirmed or mismatched video evidence out of the success receipt (%j)',
-    async (evidence) => {
-      const { scope, state } = harness();
-      scope.current = { id: 'a', displayName: '博主A' };
-      scope.saveSettings = { directory: 'old', askEveryTime: false };
-      scope.selectedNotes = [{ id: 'one', status: 'complete', kind: 'video' }];
-      scope.localApi = jest.fn().mockResolvedValue({
-        saved: true,
-        savedCount: 1,
-        alreadySavedCount: 0,
-        ...evidence,
-      });
-      await evaluate('handleLocalSave', scope)();
-      expect(state.message).toContain('未完成');
-      expect(state.message).not.toContain('新增保存');
-      expect(scope.localApi).toHaveBeenCalledTimes(1);
-    },
-  );
-  it('labels cached video honestly and renders metadata and cover only without requesting media', () => {
-    const status = evaluate('noteStatus', {});
-    expect(status({ status: 'complete', kind: 'video' })).toBe(
-      '视频已保存（播放未验证）',
+    expect(text.indexOf('onPress={() => handleLocalSave()}')).toBeLessThan(
+      text.indexOf('onPress={handleDownload}'),
     );
-    expect(status({ status: 'complete', kind: 'image-text' })).toBe(
-      '图文已保存',
-    );
-    expect(status({ status: 'video-skipped', kind: 'video' })).toBe(
-      '视频未归档',
-    );
-    expect(text).not.toContain('完整图文');
-    expect(text).toContain('body.data.video.bytes');
-    expect(text).toContain('视频笔记仅显示封面');
-    expect(text).not.toMatch(
-      /<video\b|video\/mp4;base64|video\.bytes\.toString|video\.url|createElement\(['"]video/,
-    );
-    expect(text).toContain('body.data.images.map');
+    expect(text).not.toMatch(/prototypes\/|toast\.success/);
   });
 });
 
@@ -728,27 +772,18 @@ describe('shared single-level management folder actual handlers (offline)', () =
       expect(contents).toMatch(
         /\[mobileSidebarOpen, setMobileSidebarOpen\] = useState\(false\)/,
       );
-      if (contents === feeds) {
-        expect(contents).toContain(
-          "mobileSidebarOpen ? 'feed-sidebar-open' : ''",
-        );
-        expect(contents).toContain('mac-sidebar feed-sidebar');
-        const css = fs.readFileSync(
-          path.resolve(__dirname, '../../../web/src/index.css'),
-          'utf8',
-        );
-        expect(css).toMatch(
-          /\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*none/,
-        );
-        expect(css).toMatch(
-          /@media \(min-width: 768px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
-        );
-      } else {
-        // XHS keeps its existing important utilities; WeChat now owns its
-        // mobile and desktop geometry in the single-scroll sidebar stylesheet.
-        expect(contents).toContain("mobileSidebarOpen ? '!flex' : '!hidden'");
-        expect(contents).toContain('md:!flex');
-      }
+      expect(contents).toContain(
+        "mobileSidebarOpen ? 'feed-sidebar-open' : ''",
+      );
+      expect(contents).toContain('mac-sidebar feed-sidebar');
+      const css = fs.readFileSync(
+        path.resolve(__dirname, '../../../web/src/index.css'),
+        'utf8',
+      );
+      expect(css).toMatch(/\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*none/);
+      expect(css).toMatch(
+        /@media \(min-width: 768px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
+      );
       expect(contents).toContain('!min-w-0');
       expect(contents).toContain('aria-expanded={mobileSidebarOpen}');
     }

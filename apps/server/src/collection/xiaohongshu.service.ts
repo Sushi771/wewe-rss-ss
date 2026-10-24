@@ -21,6 +21,8 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { load } from 'cheerio';
+import { articlePublicationRange, XhsNoteFilter } from '@wewe-rss/shared';
+import { visibleBodyText } from '../article-body-search';
 import { decodeInlineImage } from './image-fetch';
 import {
   buildCompleteArticleDownload,
@@ -94,6 +96,7 @@ function cachedVideoMetadata(
 }
 const cachedNoteMetadataSelect = {
   id: true,
+  creatorId: true,
   title: true,
   publishTime: true,
   status: true,
@@ -102,6 +105,22 @@ const cachedNoteMetadataSelect = {
   videoExpectedBytes: true,
   videoSha256: true,
 } satisfies Prisma.XhsNoteSelect;
+
+/** Literal visible-text search, shared by cache listing and ZIP selection. */
+export function xhsNoteMatchesSearch(
+  note: { title: string; creatorName: string; contentHtml?: string | null },
+  search?: string | null,
+) {
+  const term = (search ?? '').trim().toLowerCase();
+  return (
+    !term ||
+    note.title.toLowerCase().includes(term) ||
+    note.creatorName.toLowerCase().includes(term) ||
+    visibleBodyText(note.contentHtml ?? null)
+      .toLowerCase()
+      .includes(term)
+  );
+}
 
 type ManagementPlatform = 'wechat' | 'xiaohongshu';
 // Shared process lock protects both platform namespaces while checking membership.
@@ -497,17 +516,68 @@ export class XiaohongshuService {
     if (!c) return fail('找不到该博主。', 'NOT_FOUND');
     return c;
   }
-  async notes(creatorId: string) {
-    await this.getCreator(creatorId);
-    const notes = await this.prisma.xhsNote.findMany({
-      where: { creatorId },
+  private async matchingNotes(
+    creatorId?: string,
+    filter?: XhsNoteFilter,
+    completeOnly = false,
+    selected?: string[],
+  ) {
+    creatorId ??= filter?.creatorId;
+    if (creatorId) await this.getCreator(creatorId);
+    if (typeof filter?.groupId === 'string')
+      await getManagementGroup(this.prisma, 'xiaohongshu', filter.groupId);
+    const candidates = await this.prisma.xhsNote.findMany({
+      where: {
+        ...(creatorId ? { creatorId } : {}),
+        ...(filter?.groupId !== undefined
+          ? { creator: { groupId: filter.groupId } }
+          : {}),
+        ...(completeOnly ? { status: 'complete' } : {}),
+        ...(selected ? { id: { in: selected } } : {}),
+        ...(filter ? { publishTime: articlePublicationRange(filter) } : {}),
+      },
       orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-      select: cachedNoteMetadataSelect,
+      select: {
+        ...cachedNoteMetadataSelect,
+        creator: { select: { displayName: true, groupId: true } },
+      },
     });
+    const matched: typeof candidates = [];
+    for (const note of candidates) {
+      const metadata = {
+        title: note.title,
+        creatorName: note.creator.displayName,
+      };
+      if (xhsNoteMatchesSearch(metadata, filter?.search)) {
+        matched.push(note);
+        continue;
+      }
+      // Decode one body at a time; do not materialize all inline image payloads
+      // together or build another cache/index merely to support literal search.
+      const body = await this.prisma.xhsNote.findFirst({
+        where: { id: note.id, creatorId: note.creatorId },
+        select: { contentHtml: true },
+      });
+      if (
+        body &&
+        xhsNoteMatchesSearch(
+          { ...metadata, contentHtml: body.contentHtml },
+          filter?.search,
+        )
+      )
+        matched.push(note);
+    }
+    return matched;
+  }
+  async notes(creatorId?: string, filter?: XhsNoteFilter) {
+    const notes = await this.matchingNotes(creatorId, filter);
     return {
       platform: 'xiaohongshu' as const,
       items: notes.map((note) => ({
         id: note.id,
+        creatorId: note.creatorId,
+        creatorName: note.creator.displayName,
+        groupId: note.creator.groupId,
         title: note.title,
         publishTime: note.publishTime,
         status: note.status,
@@ -736,32 +806,41 @@ export class XiaohongshuService {
       video: cachedVideoMetadata(note),
     };
   }
-  async export(creatorId: string, noteIds?: string[]) {
-    await this.getCreator(creatorId);
+  async export(creatorId?: string, noteIds?: string[], filter?: XhsNoteFilter) {
     const selected =
       noteIds === undefined ? undefined : managementMemberIds(noteIds, 300);
-    const notes = await this.prisma.xhsNote.findMany({
-      where: {
-        creatorId,
-        status: 'complete',
-        ...(selected ? { id: { in: selected } } : {}),
-      },
-      orderBy: [{ publishTime: 'asc' }, { id: 'asc' }],
-      select: { ...cachedNoteMetadataSelect, contentHtml: true },
-    });
-    if (selected && notes.length !== selected.length)
-      return fail('选中笔记必须完整且属于该博主，未导出。', 'BAD_REQUEST');
-    if (!notes.length) return fail('没有已核验完整图文，尚不能下载。');
+    const matched = await this.matchingNotes(creatorId, filter, true, selected);
+    matched.sort(
+      (a, b) =>
+        a.publishTime - b.publishTime ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+    if (selected && matched.length !== selected.length)
+      return fail('所选笔记不完整或不属于当前筛选范围。', 'BAD_REQUEST');
+    if (!matched.length) return fail('当前范围没有匹配的完整缓存笔记。');
+    const notes: Array<
+      Prisma.XhsNoteGetPayload<{
+        select: typeof cachedNoteMetadataSelect & { contentHtml: true };
+      }>
+    > = [];
     let archiveBytes = 0;
-    for (const note of notes) {
+    for (const match of matched) {
+      const note = await this.prisma.xhsNote.findFirst({
+        where: { id: match.id, creatorId: match.creatorId, status: 'complete' },
+        select: { ...cachedNoteMetadataSelect, contentHtml: true },
+      });
+      if (!note)
+        return fail('导出期间笔记身份或缓存已变化，请重新读取。', 'CONFLICT');
       const video = cachedVideoMetadata(note);
       if (note.kind === 'video' && !video)
-        return fail('视频缓存元数据不完整，未导出。');
+        return fail('视频缓存元数据不完整，未打包。');
       archiveBytes +=
         Buffer.byteLength(note.contentHtml || '') + (video?.bytes || 0);
       if (archiveBytes > 25_000_000)
-        return fail('归档超过浏览器下载的大小限制，未生成截断数据。');
+        return fail('归档超过当前下载的大小限制，未生成截断内容。');
+      notes.push(note);
     }
+
     // Reuse cached-only original Markdown/image export and ZIP packaging. Never
     // request a signed CDN URL or pass an XHS ID to the WeChat download route.
     const root = await fs.mkdtemp(path.join(tmpdir(), 'wewe-xhs-export-'));
@@ -775,7 +854,10 @@ export class XiaohongshuService {
             folder,
             createHash('sha256').update(note.id).digest('hex').slice(0, 24),
           );
-          const prepare = await this.prepareLocalDownload(creatorId, note.id);
+          const prepare = await this.prepareLocalDownload(
+            note.creatorId,
+            note.id,
+          );
           await fs.mkdir(directory);
           await prepare(directory);
           await fs.rename(

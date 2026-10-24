@@ -3,6 +3,17 @@ generator client {
   binaryTargets = ["native", "linux-musl"]
 }
 
+// Private task documents contain stable note IDs and progress, never request tokens.
+model XhsSubscriptionTask {
+  id String @id
+  creatorId String @map("creator_id")
+  state String
+  document String
+  updatedAt BigInt @map("updated_at")
+  @@index([creatorId, state])
+  @@map("xhs_subscription_tasks")
+}
+
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")

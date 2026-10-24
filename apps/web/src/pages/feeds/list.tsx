@@ -1,3 +1,8 @@
+import {
+  ContentLoadMore,
+  ContentSortControls,
+  ContentSelectionHeader,
+} from '@web/components/SubscriptionPrimitives';
 import { FailureNotice } from '@web/components/OperationNotice';
 import { READING_CACHE_TIME } from '@web/utils/reading-query-cache';
 import {
@@ -323,45 +328,31 @@ const ArticleList: FC<ArticleListProps> = ({
       )}
 
       {
-        <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
-          排序
-          {
-            <select
-              aria-label="文章排序"
-              className="bg-background rounded border px-2 py-1"
-              value={sort}
-              onChange={(e) => {
-                setSort(e.target.value as typeof sort);
-                onSelectionChange(new Set());
-              }}
-            >
-              <option value="publishTime">发布时间</option>
-              {readSortingAvailable && (
-                <option value="readCount">阅读量从高到低</option>
-              )}
-              {likeSortingAvailable && (
-                <option value="likeCount">点赞量从高到低</option>
-              )}
-            </select>
-          }
-          {sort === 'publishTime' && (
-            <select
-              aria-label="发布时间顺序"
-              className="bg-background rounded border px-2 py-1"
-              value={direction}
-              onChange={(event) => {
-                onDirectionChange(event.target.value as 'asc' | 'desc');
-                onSelectionChange(new Set());
-              }}
-            >
-              <option value="desc">最新在前</option>
-              <option value="asc">最早在前</option>
-            </select>
-          )}
+        <ContentSortControls
+          sort={sort}
+          onSortChange={(next) => {
+            setSort(next as typeof sort);
+            onSelectionChange(new Set());
+          }}
+          direction={direction}
+          onDirectionChange={(next) => {
+            onDirectionChange(next);
+            onSelectionChange(new Set());
+          }}
+          options={[
+            { value: 'publishTime', label: '发布时间' },
+            ...(readSortingAvailable
+              ? [{ value: 'readCount', label: '阅读量从高到低' }]
+              : []),
+            ...(likeSortingAvailable
+              ? [{ value: 'likeCount', label: '点赞量从高到低' }]
+              : []),
+          ]}
+        >
           {!hasWechat2Rss && (readSortingAvailable || likeSortingAvailable) && (
             <span>带“+”为下限。收藏仅显示源数据，不以分享或在看代替。</span>
           )}
-        </label>
+        </ContentSortControls>
       }
       <p className="px-3 py-1 text-xs text-neutral-500">
         全选仅勾选已加载的 {items.length} 篇；新增行需另行勾选。
@@ -385,26 +376,20 @@ const ArticleList: FC<ArticleListProps> = ({
         className="mt-2 min-h-0 flex-1 overflow-y-auto"
       >
         <div className="compact-list">
-          <div className="compact-list-header">
-            <div className="compact-col-check">
-              <Checkbox
-                aria-label="全选已加载"
-                size="sm"
-                isSelected={selection.allSelected}
-                isIndeterminate={selection.isIndeterminate}
-                isDisabled={isSelectionDisabled || items.length === 0}
-                onValueChange={handleSelectAll}
-              />
-            </div>
-            <div className="compact-col-title min-w-0 whitespace-nowrap">
-              <span className="mr-2 text-xs">全选已加载</span>
-              文章标题
-              {!filterInvalid &&
-                summary.data &&
-                ` · ${summary.data.articles} 篇`}
-            </div>
-            <div className="compact-col-metadata !hidden md:!flex">信息</div>
-          </div>
+          <ContentSelectionHeader
+            selected={selection.allSelected}
+            indeterminate={selection.isIndeterminate}
+            disabled={isSelectionDisabled || items.length === 0}
+            onChange={handleSelectAll}
+            title={
+              <>
+                文章标题
+                {!filterInvalid &&
+                  summary.data &&
+                  ` · ${summary.data.articles} 篇`}
+              </>
+            }
+          />
 
           {items?.map((item) => (
             <div
@@ -531,33 +516,16 @@ const ArticleList: FC<ArticleListProps> = ({
           {!isLoading &&
             !filterInvalid &&
             (hasNextPage || (isError && items.length > 0)) && (
-              <div
-                data-article-pagination
-                className="flex flex-col items-center gap-2 p-4"
-              >
-                {isError && (
-                  <p role="alert" className="text-sm text-red-600">
-                    加载未完成，已有文章保留。
-                  </p>
-                )}
-                <Button
-                  size="sm"
-                  variant="light"
-                  isDisabled={isFetching}
-                  isLoading={isFetchingNextPage}
-                  onPress={() =>
-                    void (isError && !nextPageFailed
-                      ? refetch({ cancelRefetch: false })
-                      : loadNext())
-                  }
-                >
-                  {isFetchingNextPage
-                    ? '正在加载…'
-                    : isError
-                      ? '重试加载'
-                      : '加载更多'}
-                </Button>
-              </div>
+              <ContentLoadMore
+                loading={isFetchingNextPage}
+                disabled={isFetching}
+                error={isError}
+                onLoad={() =>
+                  void (isError && !nextPageFailed
+                    ? refetch({ cancelRefetch: false })
+                    : loadNext())
+                }
+              />
             )}
 
           {!isLoading &&

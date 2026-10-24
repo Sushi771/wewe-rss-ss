@@ -33,6 +33,7 @@ import {
 import { BrowserTaskBroker, BrowserTaskError } from './browser-task';
 import { BrowserArticleTasks } from './browser-article-tasks';
 import { XiaohongshuService } from './collection/xiaohongshu.service';
+import { XhsSubscriptionService } from './collection/xhs-subscription.service';
 import {
   XHS_SINGLE_SOURCE,
   XhsSingleSource,
@@ -57,7 +58,60 @@ export class ArticleDownloadController implements OnModuleDestroy {
     @Inject(XHS_SINGLE_SOURCE)
     private readonly xhsSingleSource?: XhsSingleSource,
     @Optional() private readonly subscriptionQueue?: TrpcService,
+    @Optional() private readonly xhsSubscriptions?: XhsSubscriptionService,
   ) {
+    xhsSubscriptions?.bindLocalSaver(
+      async (pickToken) => {
+        if (
+          this.running ||
+          this.pickerRunning ||
+          privateOnlineMode() ||
+          process.env.WEWE_ACCEPTANCE_MODE === '1'
+        )
+          throw new ArticleDownloadError('本地保存暂不可用。', 409);
+        const settings = await this.localStore().read();
+        if (
+          settings.askEveryTime &&
+          (!this.pickerGrant || this.pickerGrant !== pickToken)
+        )
+          throw new ArticleDownloadError('请先选择本次保存目录。', 409);
+        this.pickerGrant = undefined;
+        return settings.directory;
+      },
+      async (creator, noteId, directory) => {
+        if (this.running || this.pickerRunning)
+          throw new ArticleDownloadError('本地保存正在使用。', 409);
+        this.running = true;
+        try {
+          const prepare = await this.xiaohongshu!.prepareLocalDownload(
+            creator.id,
+            noteId,
+          );
+          const group = creator.groupId
+            ? await this.prisma!.managementGroup.findUnique({
+                where: { id: creator.groupId },
+              })
+            : null;
+          const source = {
+            feedId: creator.id,
+            feedName: creator.displayName,
+            groupId: group?.id,
+            groupName: group?.name,
+          };
+          const withSource = async (stage: string) => ({
+            ...(await prepare(stage)),
+            exportSource: source,
+          });
+          return await this.localStore().save(
+            withSource,
+            new Date(),
+            directory,
+          );
+        } finally {
+          this.running = false;
+        }
+      },
+    );
     // Default AppModule supplies no broker. An explicitly approved short-lived
     // opt-in root supplies the same configured broker to both controllers.
     this.browserTasks = new BrowserArticleTasks(
