@@ -29,6 +29,12 @@ import { XhsSubscriptionService } from '../collection/xhs-subscription.service';
 import { XhsSubscriptionRuntime } from '../collection/xhs-subscription-runtime';
 import { xhsPublicCode } from '../collection/xhs-subscription-errors';
 import { xhsNoteFilterSchema } from '@wewe-rss/shared';
+import { XhsEngagementService } from '../collection/xhs-engagement.service';
+import {
+  xhsCreatorFilterSchema,
+  xhsNumericFilterShape,
+  xhsNumericRange,
+} from '@wewe-rss/shared';
 import { z } from 'zod';
 import {
   AccountSchemas,
@@ -139,6 +145,7 @@ export class TrpcRouter {
     @Optional() private readonly xiaohongshuService?: XiaohongshuService,
     @Optional() private readonly xhsSubscriptions?: XhsSubscriptionService,
     @Optional() private readonly xhsRuntime?: XhsSubscriptionRuntime,
+    @Optional() private readonly xhsEngagement?: XhsEngagementService,
   ) {}
 
   private get xhs() {
@@ -1766,12 +1773,7 @@ export class TrpcRouter {
       ...this.xhsSubscriptions?.capability(),
     })),
     list: this.trpcService.protectedProcedure
-      .input(
-        z
-          .object({ groupId: z.string().min(1).max(128).nullable().optional() })
-          .strict()
-          .optional(),
-      )
+      .input(xhsCreatorFilterSchema.optional())
       .query(({ input }) => this.xhs.list(input)),
     groups: this.trpcService.protectedProcedure.query(() => this.xhs.groups()),
     saveGroup: this.trpcService.protectedProcedure
@@ -1822,6 +1824,51 @@ export class TrpcRouter {
     notes: this.trpcService.protectedProcedure
       .input(xhsNoteFilterSchema)
       .query(({ input }) => this.xhs.notes(input.creatorId, input)),
+    engagement: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteId: z.string().min(1).max(300),
+            offset: z.number().int().min(0).max(1000000).optional(),
+            limit: z.number().int().min(1).max(200).optional(),
+          })
+          .strict(),
+      )
+      .query(({ input }) => this.xhs.engagement(input)),
+    collectComments: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteId: z.string().min(1).max(300),
+            rootId: z
+              .string()
+              .regex(/^[a-zA-Z0-9_-]{1,128}$/)
+              .optional(),
+            maxPages: z.number().int().min(1).max(5),
+            maxItems: z.number().int().min(1).max(200),
+            restart: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsEngagement!.collect(input);
+      }),
+    refreshMetrics: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteId: z.string().min(1).max(300).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsEngagement!.refreshMetrics(input);
+      }),
     body: this.trpcService.protectedProcedure
       .input(
         z
@@ -1851,6 +1898,7 @@ export class TrpcRouter {
           .object({
             creatorId: z.string().min(1).max(128).optional(),
             groupId: z.string().min(1).max(128).nullable().optional(),
+            ...xhsNumericFilterShape,
             search: articleFilterShape.search,
             dateStart: articleFilterShape.dateStart,
             dateEnd: articleFilterShape.dateEnd,
@@ -1861,7 +1909,8 @@ export class TrpcRouter {
               .optional(),
           })
           .strict()
-          .refine(orderedArticleDates),
+          .refine(orderedArticleDates)
+          .refine(xhsNumericRange),
       )
       .mutation(({ input }) =>
         this.xhs.export(input.creatorId, input.noteIds, input),

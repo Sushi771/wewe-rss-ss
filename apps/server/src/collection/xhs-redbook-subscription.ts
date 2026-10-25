@@ -9,6 +9,11 @@ import { XhsAuthor } from '@wewe-rss/shared';
 import { XhsShortLinkResolver } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { selectXhsNativeDetail } from './xhs-native-media';
+import {
+  mapXhsComments,
+  xhsNoteMetrics,
+  xhsProfileMetrics,
+} from './xhs-engagement-contract';
 
 const record = (v: unknown): Record<string, unknown> => {
   if (!v || typeof v !== 'object' || Array.isArray(v))
@@ -48,7 +53,8 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     private readonly client: Pick<
       RedbookClient,
       'getUserInfo' | 'getUserNotes' | 'getNoteById'
-    >,
+    > &
+      Partial<Pick<RedbookClient, 'getComments' | 'getSubComments'>>,
     options: Options = {},
     private readonly media?: RedbookMediaTransport,
   ) {
@@ -210,5 +216,57 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
       noteId,
       media,
     );
+  }
+  async metrics(authorId: string, noteId?: string) {
+    if (!noteId) {
+      const raw = await this.client.getUserInfo(
+        authorId,
+        this.options(authorId),
+      );
+      let author: XhsAuthor;
+      try {
+        author = this.profileParser(raw, authorId);
+      } catch (error) {
+        if (error instanceof XhsSubscriptionError) throw error;
+        throw new XhsSubscriptionError('XHS_PROFILE_SCHEMA_UNRECOGNIZED');
+      }
+      if (!author || author.id !== authorId)
+        throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+      return xhsProfileMetrics(raw);
+    }
+    const access = this.tokens.get(JSON.stringify([authorId, noteId]));
+    if (!access || access.expiresAt <= this.now())
+      throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
+    const raw = record(
+      await this.client.getNoteById(noteId, access.token, access.source),
+    );
+    const items = raw.items;
+    if (!Array.isArray(items) || items.length !== 1)
+      throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+    const item = record(items[0]),
+      card = record(item.note_card);
+    if (
+      item.id !== noteId ||
+      card.note_id !== noteId ||
+      record(card.user).user_id !== authorId
+    )
+      throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+    return xhsNoteMetrics(card);
+  }
+  async comments(
+    authorId: string,
+    noteId: string,
+    cursor: string,
+    rootId?: string,
+  ) {
+    const access = this.tokens.get(JSON.stringify([authorId, noteId]));
+    if (!access || access.expiresAt <= this.now())
+      throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
+    if (!this.client.getComments || !this.client.getSubComments)
+      throw new XhsSubscriptionError('XHS_SOURCE_UNCONFIGURED');
+    const raw = rootId
+      ? await this.client.getSubComments(noteId, rootId, cursor)
+      : await this.client.getComments(noteId, cursor, access.token);
+    return mapXhsComments(raw, rootId ?? null);
   }
 }

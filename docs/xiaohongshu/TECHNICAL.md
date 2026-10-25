@@ -1,6 +1,14 @@
 # 小红书订阅技术说明
 
+2026-10-25 开发补充：新增三张 XHS 投影表，不改公众号表；四数来源为 interact_info，粉丝来源为 interactions[type=fans].count，following/评论时间/精确回复对象无契约时 null。公开 main 自报 redbook 0.8.2，未声称 npm 包逐字节核验。评论 HTTP 只读 routes 与原签名/单次请求运输复用，须额外 `XHS_COMMENT_COLLECTION_ENABLED=1` 且原 live gate 和会话就绪才可执行；本轮未开启。每页评论与游标同事务，rootId 仅表达楼层，parentId 未知。notes offset>0 需回传 queryVersion，过期报 XHS_QUERY_STALE_RESTART，筛选导出也可校验同一版本。LocalArticleStore 的可信 afterSave hook 在正文保留后仍执行，XHS 附页通过内容摘要命名、原子非覆盖发布；手改冲突产新版本，失败不能报告快照成功。详见 [字段/数据流/回退矩阵](../XIAOHONGSHU_INTEGRATION.md)。
+
 `refresh({id,maxPages?})`接受1–10页的可选上限，现有前端明确传2。上限冻结在任务document，不新增迁移；每次明确续跑从持久游标开始重新计算该次页数，达到上限且仍有后续时返回`XHS_LIST_PAGE_LIMIT_REACHED`，不派发下一页。未提供上限的旧内部调用保持兼容。
+
+此处是请求页数限制，并非累计30条或60条上限。来源请求30条只是期望页大小；每个响应最多接受60条，完整保留合法返回，不擅自截断。两页可能合计62条；已有32条完整入库及61条整页拒绝反例，不能据页数合同推导固定累计条数。
+
+下载回执的完成收敛要求 `failed=remaining=0`、完成与跳过之和等于总数，且冻结的每个选中ID均有 completed/skipped 记录；不能仅据计数判定成功。最后检查点失败后只重写本地终态，绝不重做来源/文件动作；最终写入仍不确定则保持屏障。已持久化但旧码为UNCERTAIN的完整回执，结算后只在公开视图收敛为completed；下载没有未完成项时，UI和resume接口都禁止空续跑。列表remaining=0但有游标的续跑语义不变。
+
+图文 `prepareLocalDownload` 只从严格校验的缓存身份三元组构造 `https://www.xiaohongshu.com/explore/<noteId>`，以单个Markdown链接写入正文来源块。该准备器不再让保存器的源元数据重复添加同一URL；标题仍由原模板生成一次。不请求原文，不重写既有文件。
 
 `connectionStatus.requestAttempts`只返回进程实例ID及profiles/lists/details/media/shortLinks计数，不包含URL、token、请求头或响应。计数在来源传输被调用前递增，表示已发起或结果未知的尝试，不能把超时解释为零请求；状态读取和会话恢复不重置或增加它。比较前后差值必须确认实例ID相同，重启后的计数不能与旧实例直接相减。
 
@@ -18,20 +26,20 @@
 
 共享类型位于 `packages/shared/src/xhs-subscription.ts`，router沿用 `protectedProcedure`。
 
-| 调用 | 输入 | 返回/职责 |
-| --- | --- | --- |
-| `resolveSubscription` | `{url}` | `{resolutionId,inputKind,author,existingCreatorId,expiresAt}`，只解析 |
-| `subscribe` | `{resolutionId,groupId?}` | `{creatorId,created,subscribed:true}` |
-| `refresh` | `{id}` | `{taskId,creatorId}`，仅列表 |
-| `downloadNotes` | `{creatorId,noteIds,pickToken?}` | `{taskId,creatorId}`，选中详情与本机保存 |
-| `task` | `{taskId}` | 持久任务的公开状态快照 |
-| `recentTasks` | `{creatorId?,limit?}`，默认10、最大20 | `{items:XhsSubscriptionTask[]}`，返回活动或可恢复任务，排除已被后继接管及已完成任务 |
-| `cancelTask` | `{taskId}` | 返回任务快照，当前原子保存可能尚在收尾 |
-| `resumeTask` | `{taskId,pickToken?}` | 新 `{taskId,creatorId}`，复用旧检查点 |
-| `notes` | `{creatorId?,groupId?,search?,dateStart?,dateEnd?}` | 全部/分组/作者匹配元数据，无cursor/take服务端分页 |
-| `export` | `{creatorId?,groupId?,search?,dateStart?,dateEnd?,noteIds?}` | `{filename,mimeType,base64,notes}`，完整缓存ZIP；显式ID每批1–100个 |
-| `connectionStatus` | 无 | 连接、保存与平台验证状态，不含秘密 |
-| `connectSession` / `restoreSession` / `disconnectSession` | 最小会话字段及可选保存 / 无 / 无 | 显式连接、恢复或断开，本机同源保护 |
+| 调用                                                      | 输入                                                         | 返回/职责                                                                           |
+| --------------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `resolveSubscription`                                     | `{url}`                                                      | `{resolutionId,inputKind,author,existingCreatorId,expiresAt}`，只解析               |
+| `subscribe`                                               | `{resolutionId,groupId?}`                                    | `{creatorId,created,subscribed:true}`                                               |
+| `refresh`                                                 | `{id,maxPages?}`                                             | `{taskId,creatorId}`，仅列表                                                        |
+| `downloadNotes`                                           | `{creatorId,noteIds,pickToken?}`                             | `{taskId,creatorId}`，选中详情与本机保存                                            |
+| `task`                                                    | `{taskId}`                                                   | 持久任务的公开状态快照                                                              |
+| `recentTasks`                                             | `{creatorId?,limit?}`，默认10、最大20                        | `{items:XhsSubscriptionTask[]}`，返回活动或可恢复任务，排除已被后继接管及已完成任务 |
+| `cancelTask`                                              | `{taskId}`                                                   | 返回任务快照，当前原子保存可能尚在收尾                                              |
+| `resumeTask`                                              | `{taskId,pickToken?}`                                        | 新 `{taskId,creatorId}`，复用旧检查点                                               |
+| `notes`                                                   | `{creatorId?,groupId?,search?,dateStart?,dateEnd?,metric?,min?,max?,metricDirection?,offset?,limit?,queryVersion?}` | `{items,total,queryVersion}`，全保存范围先过滤再分页；过期明确重读                                   |
+| `export`                                                  | `{creatorId?,groupId?,search?,dateStart?,dateEnd?,metric?,min?,max?,metricDirection?,queryVersion?,noteIds?}` | `{filename,mimeType,base64,notes}`，完整缓存ZIP；显式ID每批1–100个                  |
+| `connectionStatus`                                        | 无                                                           | 连接、保存与平台验证状态，不含秘密                                                  |
+| `connectSession` / `restoreSession` / `disconnectSession` | 最小会话字段及可选保存 / 无 / 无                             | 显式连接、恢复或断开，本机同源保护                                                  |
 
 `inputKind='note'|'profile'`；`author={id,name,profileUrl,avatarUrl?}`；`existingCreatorId` 无值为 `null`；`expiresAt` 为Unix毫秒。解析ID及任务ID是UUID，博主ID最长128、笔记ID最长300、URL最长8192、pickToken最长128字符。日期使用共享上海自然日过滤，起止必须有序。
 
@@ -67,13 +75,13 @@ URL校验允许HTTPS的 `www.xiaohongshu.com/user/profile/{id}`、`/explore/{id}
 
 专家从解析前和保存后的材料两端检查，不能只核对应用生成的摘要：
 
-| 原始材料类别 | 要证明什么 | 独立检查方式 |
-| --- | --- | --- |
-| 获授权留存的原响应字节、请求目标/游标关联 | 作者、条目数、分页语义；请求30而响应32的边界 | 独立枚举原结构并与落库稳定ID集合对照，不调用被测映射器 |
-| 原正文与实际Markdown字节 | 没有删段、改序、替换字符或摘要冒充全文 | 独立提取段落，仅允许HTML/Markdown转义与空白规范化，保留标点、Unicode字符及顺序 |
-| 原图片字节及有序来源清单、实际保存图片 | 图片正确、完整且次序一致 | 独立解码器检查可打开，逐项比对内容哈希和有序引用；同图数不能代替身份与顺序 |
-| SQLite事务前后副本、任务原始行、注入故障时间线 | 提交与任务状态一致、旧内容保留、不重放 | 独立SQLite查询/完整性及外键检查、非目标字段对照、记录实际请求次数 |
-| 固定源码、依赖锁、构建清单、产物及恢复副本 | 运行代码来源完整且可恢复 | 干净隔离重建，逐输入/产物核对；包若含时间戳则明确比较规则，不伪称逐字节可重现 |
+| 原始材料类别                                   | 要证明什么                                   | 独立检查方式                                                                   |
+| ---------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------ |
+| 获授权留存的原响应字节、请求目标/游标关联      | 作者、条目数、分页语义；请求30而响应32的边界 | 独立枚举原结构并与落库稳定ID集合对照，不调用被测映射器                         |
+| 原正文与实际Markdown字节                       | 没有删段、改序、替换字符或摘要冒充全文       | 独立提取段落，仅允许HTML/Markdown转义与空白规范化，保留标点、Unicode字符及顺序 |
+| 原图片字节及有序来源清单、实际保存图片         | 图片正确、完整且次序一致                     | 独立解码器检查可打开，逐项比对内容哈希和有序引用；同图数不能代替身份与顺序     |
+| SQLite事务前后副本、任务原始行、注入故障时间线 | 提交与任务状态一致、旧内容保留、不重放       | 独立SQLite查询/完整性及外键检查、非目标字段对照、记录实际请求次数              |
+| 固定源码、依赖锁、构建清单、产物及恢复副本     | 运行代码来源完整且可恢复                     | 干净隔离重建，逐输入/产物核对；包若含时间戳则明确比较规则，不伪称逐字节可重现  |
 
 正文允许的规范化只有转义和空白；不得以删标点、Unicode折叠、排序段落、忽略差异或重新摘要获得相等。独立核对不复用被测解析器及其输出作为唯一期望值；独立图片解码也不单独证明图片来自正确笔记。测试用合成原始字节与手工核实的期望，真实原始材料仅留私有证据区，本轮不读取。
 
@@ -96,3 +104,20 @@ Windows凭据库为SQLite所在目录下 `.wewe-xhs-session/session.dpapi`，Cur
 ## 周期退役覆盖比较
 
 `backup-sqlite.py::snapshot_covers` 仅豁免普通 `feeds.sync_time`、`update_time`、`updated_at`、`last_collection_result`、`provider_refresh_attempt_time`。`has_history`、主键、生成列、其他表同名字段与schema继续严格。`indexed_reference_review` 只核已登记根的顶层元数据并绑定命名空间/身份/SHA，未知项不放行；`indexed_typed_coverage` 在SQLite内部比较所有类型值，只返回计数，REAL位级证明不足时保持阻塞。同schema保留点可作覆盖见证，不强迫新schema的pending越过结构检查。此只读计划路径不调用旧全局时间分层扫描/执行入口；永久动作仍须单独批准及原生句柄、引用、占用和生命周期复核。
+
+
+## 统一候选：目录保存、接口与最小发布
+
+博主指标刷新必须先将同一响应交给既有注入 profileParser(raw, expectedAuthorId)，复用其内层 result 与显式 user_id 校验；解析失败或作者身份不符时不进入写事务，原完整快照和采集时间保留。不能仅凭 interactions 粉丝数写入指定博主。
+
+日常主流程是直接保存到本地/Obsidian 目录：每篇正文.md、image/ 与已核验完整视频的 video/，无需压缩或解压。工具栏主按钮沿用直接保存；“更多”保留已选完整归档的直接保存及兼容 ZIP 入口。ZIP 是可选传输格式，其测试不能替代目录落盘验收。
+
+`prepareLocalDownload` 与视频模板共用严格稳定身份 canonical helper；返回 sourceUrl=null，正文只保留一次原文链接，避免保存器再插一次。控制器 exportSource 包装透传 afterSave；afterSave 即使正文已存在也运行。快照以 note 身份及内容哈希命名，原子硬链接发布；相同内容复用，用户修改旧附页则保留并创建/复用冲突版本。发布失败明确失败。直接保存回执独立报告 snapshotsSaved / snapshotSavedCount，不能用 body skipped 冒充新评论已更新。
+
+`notes` 在全保存范围过滤后给 total/queryVersion。跨页必须同版本，筛选/排序改变清空选择；ZIP 每批复用完整确认范围及版本，而非按作者重新定义版本。保存正文与评论时展示各自采集时间，缺失/缩写数据为 null；关注、评论时间和精确回复对象仍待真实契约证据。互动刷新不隐式获取评论。
+
+发布需由父窗口统一获批后执行：1）固定最终 SHA 和依赖锁，校验离线 CI；2）先停止唯一写者，按既有增量写入/备份政策确认恢复点，不为前端修改复制整库；3）仅应用 20261025090000_xhs_engagement 增量迁移，检查外键与原公众号行摘要；4）切换同 SHA server dist、client 和 schema，保持两个开关为0；5）再启动并读回运行 SHA，做下述小批量目录验收。此分支未执行任何步骤。
+
+回滚使用 f8fbb3c 程序及前端，保留新增 XHS 表和文件，禁止 down/drop 或删除新附页。合成库已覆盖旧生成 Prisma client 对新增 schema 的旧行读写；这证明数据兼容，不等于生产旧进程启动已验收。恢复时检查固定迁移记录，不重跑已应用迁移。
+
+批准后最小真实验收只读既有两篇/十五图归档及62条列表，禁止为了重验重复采集：直接保存到指定测试目录（Markdown+image/video），核对稳定笔记身份、原段落/标点、媒体顺序/字节、单原文链接与可读性；重复保存和手写正文/附页后再次保存应保留原字节，只新增正确快照。互动/评论真实字段验收需另批一次明确上限的请求；无批准就只用合成A→A+B附页验收。原持久异常根因仍未知，不更改历史回执。

@@ -1,3 +1,4 @@
+import { xhsOriginalLink } from './collection/xhs-original-link';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -376,7 +377,7 @@ export function prepareXhsVideoDownload(input: XhsVerifiedVideoCache) {
     return async (directory: string) => {
       const prepared = await buildCompleteArticleDownload(
         article,
-        '小红书已核视频缓存（笔记身份：' + draft.noteKey + '）',
+        '[原文](' + xhsOriginalLink(draft.noteKey) + ')',
         directory,
       );
       await mkdir(join(directory, 'video'));
@@ -392,7 +393,7 @@ export function prepareXhsVideoDownload(input: XhsVerifiedVideoCache) {
           ')\n\n' +
           '视频缓存已通过容器与字节一致性校验；解码及真实来源完整性须由上游另行核实。\n',
       );
-      return { ...prepared, videoCount: 1 };
+      return { ...prepared, sourceUrl: null, videoCount: 1 };
     };
   } catch {
     throw invalid();

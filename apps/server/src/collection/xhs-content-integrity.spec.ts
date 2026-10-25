@@ -96,7 +96,10 @@ async function inspectSaved(markdownPath: string) {
     .split(/\n[ \t]*\n+/)
     .map((s) => s.trim())
     .filter(Boolean);
-  if (blocks.shift() !== `原文来源：小红书本地缓存（笔记身份：${noteId}）`)
+  if (
+    blocks.shift() !==
+    '原文来源：[原文](https://www.xiaohongshu.com/explore/synthetic-integrity)'
+  )
     fail('ORACLE_PROVENANCE_MISMATCH');
   const body = blocks.map((block) =>
     normalize(block.replace(/!\[[^\]]*\]\(([^)\r\n]+)\)/g, '[IMAGE]')),
@@ -186,6 +189,20 @@ describe('independent synthetic body/image oracle against the original local sav
     const cache = new XiaohongshuService({
       xhsNote: { findFirst: async () => row },
     } as any);
+    // This independent body/media oracle intentionally has no database engine.
+    // Engagement persistence/export is exercised against real synthetic SQLite
+    // in xhs-engagement.spec; retain this fixed empty-snapshot seam here.
+    jest
+      .spyOn(cache, 'engagement')
+      .mockResolvedValue({
+        metrics: null,
+        creatorMetrics: null,
+        comments: [],
+        windows: [],
+        totalSaved: 0,
+        returned: 0,
+        offset: 0,
+      });
     const prepare = await cache.prepareLocalDownload(row.creatorId, row.id);
     const store = new LocalArticleStore(path.join(root, 'settings.json'), root);
     return store.save(

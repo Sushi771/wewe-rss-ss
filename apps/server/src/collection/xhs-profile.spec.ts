@@ -12,7 +12,7 @@ const sample = () => ({
 });
 describe('reviewed request-bound XHS profile parser (offline)', () => {
   it('uses the signed request ID and ignores display IDs and avatar URLs', () => {
-    expect(parseXhsProfile(sample(), AUTHOR)).toEqual({
+    expect(parseXhsProfile(sample(), AUTHOR)).toMatchObject({
       id: AUTHOR,
       name: 'Synthetic creator',
       profileUrl: 'https://www.xiaohongshu.com/user/profile/' + AUTHOR,
@@ -36,7 +36,10 @@ describe('reviewed request-bound XHS profile parser (offline)', () => {
     { ...sample(), result: { success: true, code: 1 } },
     { ...sample(), result: { success: true, code: '0' } },
     { ...sample(), basic_info: { nickname: '', red_id: 'display' } },
-    { ...sample(), basic_info: { nickname: 'a'.repeat(121), red_id: 'display' } },
+    {
+      ...sample(),
+      basic_info: { nickname: 'a'.repeat(121), red_id: 'display' },
+    },
     { ...sample(), basic_info: { nickname: 'name\n', red_id: 'display' } },
     { ...sample(), basic_info: { nickname: 'name', red_id: null } },
   ])('rejects unrecognized or unsuccessful profile data', (raw) => {

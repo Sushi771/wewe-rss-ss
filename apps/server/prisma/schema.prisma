@@ -163,9 +163,38 @@ model XhsNote {
   videoExpectedBytes Int? @map("video_expected_bytes")
   videoSha256 String?   @map("video_sha256")
   creator     XhsCreator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  savedComments XhsSavedComment[]
+  commentWindows XhsCommentWindow[]
 
   @@index([creatorId, publishTime])
   @@map("xhs_notes")
+}
+
+model XhsMetricSnapshot {
+  ownerKind String @map("owner_kind")
+  ownerId String @map("owner_id")
+  document String
+  @@id([ownerKind, ownerId])
+  @@map("xhs_metric_snapshots")
+}
+model XhsSavedComment {
+  noteId String @map("note_id")
+  commentId String @map("comment_id")
+  rootId String? @map("root_id")
+  parentId String? @map("parent_id")
+  document String
+  note XhsNote @relation(fields: [noteId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  @@id([noteId, commentId])
+  @@index([noteId, rootId, commentId], map: "xhs_saved_comments_root")
+  @@map("xhs_saved_comments")
+}
+model XhsCommentWindow {
+  noteId String @map("note_id")
+  scope String
+  document String
+  note XhsNote @relation(fields: [noteId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  @@id([noteId, scope])
+  @@map("xhs_comment_windows")
 }
 
 // Rebuildable local projection; body HTML and media data URLs are never indexed.

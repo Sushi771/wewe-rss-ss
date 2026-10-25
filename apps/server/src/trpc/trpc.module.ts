@@ -9,6 +9,7 @@ import { SUBSCRIPTION_DISCOVERY } from '../collection/subscription-add';
 import { createNativeSubscriptionDiscovery } from '../collection/subscription-native-adapter';
 import { resolveWereadPublisherOriginal } from '../collection/weread-public-original';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
+import { XhsEngagementService } from '../collection/xhs-engagement.service';
 import {
   XHS_SUBSCRIPTION_SOURCE,
   XhsSubscriptionService,
@@ -27,6 +28,7 @@ import {
     CollectionService,
     XiaohongshuService,
     XhsSubscriptionService,
+    XhsEngagementService,
     {
       provide: XhsSubscriptionRuntime,
       useFactory: createLocalXhsSubscriptionRuntime,

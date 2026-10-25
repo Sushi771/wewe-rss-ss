@@ -329,6 +329,9 @@ function fixture(options = {}) {
       useQuery: (input) => {
         const range = shared.articlePublicationRange(input);
         return query({
+          ...(options.queryVersion
+            ? { queryVersion: options.queryVersion }
+            : {}),
           items: items
             .map((note) => ({
               creatorId: 'creator-a',
@@ -359,7 +362,22 @@ function fixture(options = {}) {
     body: {
       useQuery: (input) => {
         if (input.noteId) calls.push(['bodyLookup', input]);
-        return query(bodyData);
+        return query(
+          bodyData
+            ? {
+                ...bodyData,
+                engagement: bodyData.engagement ?? {
+                  metrics: null,
+                  creatorMetrics: null,
+                  comments: [],
+                  windows: [],
+                  totalSaved: 0,
+                  returned: 0,
+                  offset: 0,
+                },
+              }
+            : bodyData,
+        );
       },
     },
   };
@@ -425,6 +443,20 @@ function fixture(options = {}) {
     './SubscriptionPrimitives': primitives,
     '@web/utils/xiaohongshu-subscription': helpers,
   }).default;
+  router.refreshMetrics = {
+    useMutation: () => ({ isLoading: false, mutateAsync: async () => {} }),
+  };
+  router.collectComments = {
+    useMutation: () => ({ isLoading: false, mutateAsync: async () => {} }),
+  };
+  router.engagement = { useQuery: () => query(undefined) };
+  const engagement = load('apps/web/src/components/XhsEngagement.tsx', {
+    react,
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    '@web/utils/trpc': {
+      trpc: { useUtils: () => ({ ...utils }), xiaohongshu: router },
+    },
+  });
   const page = load('apps/web/src/pages/feeds/xiaohongshu.tsx', {
     react,
     'react/jsx-runtime': { jsx: element, jsxs: element },
@@ -435,6 +467,7 @@ function fixture(options = {}) {
     '@web/components/SubscriptionPrimitives': primitives,
     '@web/components/ManagementFolders': 'ManagementFolders',
     '@web/components/XhsTaskRecovery': Recovery,
+    '@web/components/XhsEngagement': engagement,
     '@web/components/ArticleReader': 'ArticleReader',
     '@web/components/ArticleDateFilter': 'ArticleDateFilter',
     '@web/utils/article-date-selection': dateHelpers,
@@ -484,7 +517,9 @@ function fixture(options = {}) {
         n.type === type &&
         (n.props['aria-label'] === text ||
           n.props.label === text ||
-          all(n.props.children).join('') === text),
+          all(n.props.children)
+            .filter((child) => typeof child !== 'object')
+            .join('') === text),
     );
   const button = (text) => {
     const node = find('Button', text);
@@ -1035,7 +1070,8 @@ test('saved note uses the common reader/find component, preserves images, and re
 });
 
 test('global/group queries preserve authors, exports dispatch by author and reading uses the actual owner', async () => {
-  const f = fixture();
+  const queryVersion = 'a'.repeat(64);
+  const f = fixture({ queryVersion });
   const oldDocument = global.document,
     oldCreate = URL.createObjectURL,
     oldRevoke = URL.revokeObjectURL;
@@ -1062,9 +1098,12 @@ test('global/group queries preserve authors, exports dispatch by author and read
     await f.button('导出已保存 ZIP').props.onPress();
     await f.button('开始导出').props.onPress();
     const exports = f.calls.filter(([name]) => name === 'export');
-    assert.ok(exports.some(([, input]) => input.creatorId === 'creator-a'));
+    assert.ok(exports.some(([, input]) => input.noteIds.includes('saved')));
+    assert.ok(exports.every(([, input]) => input.creatorId === undefined));
+    assert.ok(exports.every(([, input]) => input.queryVersion === queryVersion));
     assert.deepEqual(
-      exports.find(([, input]) => input.creatorId === 'creator-b')[1].noteIds,
+      exports.find(([, input]) => input.noteIds.includes('author-b-note'))[1]
+        .noteIds,
       ['author-b-note'],
     );
     f.find('ManagementFolders').props.onFilter('group-a');
@@ -1075,6 +1114,8 @@ test('global/group queries preserve authors, exports dispatch by author and read
       .find((n) => n.type === 'input' && n.props.value === 'filtered')
       .props.onChange();
     await f.button('开始导出').props.onPress();
+    assert.equal(f.calls.filter(([name]) => name === 'export').at(-1)[1].queryVersion, queryVersion);
+    assert.equal(f.calls.filter(([name]) => name === 'export').at(-1)[1].groupId, 'group-a');
     assert.equal(
       f.calls.filter(([name]) => name === 'notesScope').at(-1)[1].groupId,
       'group-a',

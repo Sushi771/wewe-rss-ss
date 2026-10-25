@@ -7,6 +7,7 @@ const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/server')] }),
 );
 const pins = require('./fixtures/deployed-export-adaptation.json');
+const xhsCompatibility = require('./fixtures/xhs-integration-router-compatibility.json');
 const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
@@ -59,7 +60,24 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
       members[key] = tokens(member.getText(ast));
     }
   }
-  assert.deepEqual(members, pins.routerMembers);
+  // Keep every unrelated historical pin. This explicit layer records the four
+  // independently reproduced f8fbb3c XHS differences and the two reviewed
+  // engagement injection/router changes; it is not a full router repin.
+  assert.deepEqual(Object.keys(xhsCompatibility.baseline).sort(), [
+    'constructor',
+    'requireLocalXhsAccess',
+    'requireLocalXhsConnection',
+    'xiaohongshuRouter',
+  ]);
+  assert.deepEqual(Object.keys(xhsCompatibility.engagement).sort(), [
+    'constructor',
+    'xiaohongshuRouter',
+  ]);
+  assert.deepEqual(members, {
+    ...pins.routerMembers,
+    ...xhsCompatibility.baseline,
+    ...xhsCompatibility.engagement,
+  });
   assert.deepEqual(routes, {
     ...pins.articleRoutes,
     ...searchPins.articleRoutes,
@@ -67,8 +85,35 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
   for (const [file, expected] of Object.entries({
     ...pins.criticalFiles,
     ...searchPins.criticalFiles,
+    ...xhsCompatibility.criticalFiles,
   })) {
     let source = read(file);
+    if (file === 'apps/server/src/article-download.controller.ts') {
+      const additions = [
+        [
+          'import { basename, dirname, isAbsolute, join }',
+          'import { dirname, isAbsolute, join }',
+        ],
+        ['          withSource.afterSave = prepare.afterSave;\n', ''],
+        [
+          '    let snapshotSavedCount = 0;\n    const snapshotFiles: string[] = [];\n',
+          '',
+        ],
+        [
+          "        if (result.supplement) {\n          snapshotFiles.push(basename(result.supplement.path));\n          if (result.supplement.status !== 'retained') snapshotSavedCount++;\n        }\n",
+          '',
+        ],
+        ['        snapshotSavedCount,\n        snapshotFiles,\n', ''],
+      ];
+      for (const [addition, original] of additions) {
+        assert.equal(
+          source.split(addition).length,
+          2,
+          'reviewed XHS supplement seam',
+        );
+        source = source.replace(addition, original);
+      }
+    }
     if (file === 'scripts/local-release/runtime.cjs') {
       // The separately tested release scope adds exactly one entry guard. Keep
       // every pre-existing runtime statement pinned to its deployed baseline.

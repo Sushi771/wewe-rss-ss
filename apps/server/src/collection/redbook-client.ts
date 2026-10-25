@@ -60,6 +60,8 @@ const HOST = 'https://edith.xiaohongshu.com';
 const LIST_PATH = '/api/sns/web/v1/user_posted';
 const DETAIL_PATH = '/api/sns/web/v1/feed';
 const PROFILE_PATH = '/api/sns/web/v1/user/otherinfo';
+const COMMENTS_PATH = '/api/sns/web/v2/comment/page';
+const REPLIES_PATH = '/api/sns/web/v2/comment/sub/page';
 
 function checkedText(value: string, maxLength: number): string {
   if (
@@ -93,6 +95,27 @@ function reasonFor(
 /** Audited read endpoints only. No network transport is enabled by default. */
 export class RedbookClient {
   constructor(private readonly options: RedbookClientOptions = {}) {}
+
+  getComments(noteId: string, cursor = '', token = ''): Promise<unknown> {
+    return this.request('GET', COMMENTS_PATH, {
+      note_id: checkedId(noteId),
+      cursor: checkedText(cursor, 2048),
+      image_formats: 'jpg,webp,avif',
+      xsec_token: checkedText(token, 4096),
+    });
+  }
+  getSubComments(
+    noteId: string,
+    rootId: string,
+    cursor = '',
+  ): Promise<unknown> {
+    return this.request('GET', REPLIES_PATH, {
+      note_id: checkedId(noteId),
+      root_comment_id: checkedId(rootId),
+      num: 30,
+      cursor: checkedText(cursor, 2048),
+    });
+  }
 
   getUserInfo(
     userId: string,
@@ -155,7 +178,12 @@ export class RedbookClient {
 
   private async request(
     method: 'GET' | 'POST',
-    path: typeof LIST_PATH | typeof DETAIL_PATH | typeof PROFILE_PATH,
+    path:
+      | typeof LIST_PATH
+      | typeof DETAIL_PATH
+      | typeof PROFILE_PATH
+      | typeof COMMENTS_PATH
+      | typeof REPLIES_PATH,
     params?: Record<string, string | number | string[]>,
     payload?: Record<string, unknown>,
     signal?: AbortSignal,

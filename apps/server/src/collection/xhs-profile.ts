@@ -1,11 +1,13 @@
 import type { XhsProfileParser } from './xhs-redbook-subscription';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { xhsProfileMetrics } from './xhs-engagement-contract';
 
 const fail = (): never => {
   throw new XhsSubscriptionError('XHS_PROFILE_SCHEMA_UNRECOGNIZED');
 };
 function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return fail();
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return fail();
   return value as Record<string, unknown>;
 }
 function text(value: unknown, limit: number) {
@@ -38,6 +40,7 @@ export const parseXhsProfile: XhsProfileParser = (raw, expectedAuthorId) => {
   return {
     id: expectedAuthorId,
     name,
+    metrics: xhsProfileMetrics(raw),
     profileUrl: `https://www.xiaohongshu.com/user/profile/${expectedAuthorId}`,
   };
 };

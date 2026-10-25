@@ -10,6 +10,8 @@ import {
 export type XhsHttpsRequest = typeof https.request;
 const API_HOST = 'edith.xiaohongshu.com';
 const METHODS: Record<string, string> = {
+  '/api/sns/web/v2/comment/page': 'GET',
+  '/api/sns/web/v2/comment/sub/page': 'GET',
   '/api/sns/web/v1/user/otherinfo': 'GET',
   '/api/sns/web/v1/user_posted': 'GET',
   '/api/sns/web/v1/feed': 'POST',

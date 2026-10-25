@@ -1,8 +1,14 @@
 import { z } from 'zod';
 import { articleFilterShape, orderedArticleDates } from './article-date-filter';
+import {
+  xhsNumericFilterShape,
+  xhsNumericRange,
+  XhsMetricSnapshot,
+} from './xhs-engagement';
 
 export const xhsNoteFilterSchema = z
   .object({
+    ...xhsNumericFilterShape,
     creatorId: z.string().min(1).max(128).optional(),
     groupId: z.string().min(1).max(128).nullable().optional(),
     search: articleFilterShape.search,
@@ -10,13 +16,15 @@ export const xhsNoteFilterSchema = z
     dateEnd: articleFilterShape.dateEnd,
   })
   .strict()
-  .refine(orderedArticleDates);
+  .refine(orderedArticleDates)
+  .refine(xhsNumericRange);
 export type XhsNoteFilter = z.infer<typeof xhsNoteFilterSchema>;
 export type XhsAuthor = {
   id: string;
   name: string;
   profileUrl: string;
   avatarUrl?: string;
+  metrics?: XhsMetricSnapshot;
 };
 export type XhsSubscriptionResolution = {
   resolutionId: string;
@@ -42,6 +50,7 @@ export type XhsSubscriptionTask = {
   skipped: number;
   failed: number;
   remaining: number;
+  snapshotsSaved?: number;
   code?: string;
   message: string;
   resumable?: boolean;
@@ -56,6 +65,8 @@ export type XhsConnectionStatus = {
     details: number;
     media: number;
     shortLinks: number;
+    comments?: number;
+    replies?: number;
   };
   liveEnabled: boolean;
   connected: boolean;

@@ -38,6 +38,10 @@ const note = (): XhsNormalizedCandidate => ({
   expectedImageCount: 1,
   images: [{ ordinal: 1, inlineData: 'data:image/png;base64,' + png }],
 });
+// Match actual persisted XHS identities; raw supplier IDs are not cache keys.
+const noteA = JSON.stringify(['xiaohongshu', 'note', 'note-a']);
+const noteB = JSON.stringify(['xiaohongshu', 'note', 'note-b']);
+const noteC = JSON.stringify(['xiaohongshu', 'note', 'note-c']);
 const cached = (id: string, creatorId = 'creator-a') => ({
   id,
   creatorId,
@@ -77,7 +81,7 @@ describe('XHS single tool and bounded cache batch use original local publication
       .get(path)
       .set('host', '127.0.0.1')
       .set('authorization', 'fixture-access');
-  const batch = (ids = ['note-a', 'note-b', 'note-c'], pickToken?: string) =>
+  const batch = (ids = [noteA, noteB, noteC], pickToken?: string) =>
     post(batchPath, {
       creatorId: 'creator-a',
       noteIds: ids,
@@ -127,6 +131,17 @@ describe('XHS single tool and bounded cache batch use original local publication
           : []),
       ],
     }).compile();
+    // Fixed body/media HTTP fixture has no database engine. Snapshot persistence
+    // and repeat publication have their own real-SQLite/local-publisher oracles.
+    jest.spyOn(module.get(XiaohongshuService), 'engagement').mockResolvedValue({
+      metrics: null,
+      creatorMetrics: null,
+      comments: [],
+      windows: [],
+      totalSaved: 0,
+      returned: 0,
+      offset: 0,
+    });
     app = module.createNestApplication();
     await app.init();
   };
@@ -146,7 +161,7 @@ describe('XHS single tool and bounded cache batch use original local publication
     findFirst
       .mockReset()
       .mockImplementation(async ({ where }) =>
-        ['note-a', 'note-b', 'note-c'].includes(where.id) &&
+        [noteA, noteB, noteC].includes(where.id) &&
         where.creatorId === 'creator-a'
           ? cached(where.id)
           : null,
@@ -338,11 +353,11 @@ describe('XHS single tool and bounded cache batch use original local publication
 
   it('prevalidates every creator-bound cached identity before any batch files', async () => {
     findFirst.mockImplementation(async ({ where }) =>
-      where.id === 'note-a' ? cached('note-a') : null,
+      where.id === noteA ? cached(noteA) : null,
     );
-    expect((await batch(['note-a', 'other-creators-note'])).status).toBe(422);
+    expect((await batch([noteA, 'other-creators-note'])).status).toBe(422);
     expect(findFirst.mock.calls.map(([arg]) => arg.where)).toEqual([
-      { id: 'note-a', creatorId: 'creator-a', status: 'complete' },
+      { id: noteA, creatorId: 'creator-a', status: 'complete' },
       { id: 'other-creators-note', creatorId: 'creator-a', status: 'complete' },
     ]);
     expect(await fs.readdir(destination)).toEqual([]);
@@ -381,13 +396,12 @@ describe('XHS single tool and bounded cache batch use original local publication
     expect((await batch()).status).toBe(409);
     const selected = await post('/download/article/directory');
     expect(
-      (await batch(['note-a', 'note-a', 'note-b'], selected.body.pickToken))
-        .body,
+      (await batch([noteA, noteA, noteB], selected.body.pickToken)).body,
     ).toMatchObject({ saved: true, savedCount: 2, alreadySavedCount: 0 });
-    expect((await batch(['note-a'], selected.body.pickToken)).status).toBe(409);
+    expect((await batch([noteA], selected.body.pickToken)).status).toBe(409);
     const again = await post('/download/article/directory');
     expect(
-      (await batch(['note-a', 'note-b'], again.body.pickToken)).body,
+      (await batch([noteA, noteB], again.body.pickToken)).body,
     ).toMatchObject({ savedCount: 0, alreadySavedCount: 2 });
     expect(await files()).toHaveLength(2);
     expect(picker.pickArticleDirectory).toHaveBeenCalledTimes(2);
@@ -400,7 +414,7 @@ describe('XHS single tool and bounded cache batch use original local publication
     expect((await post('/download/article/directory')).body).toEqual({
       cancelled: true,
     });
-    expect((await batch(['note-a'], first.body.pickToken)).status).toBe(409);
+    expect((await batch([noteA], first.body.pickToken)).status).toBe(409);
     expect((await get('/download/article/settings')).body).toEqual({
       directory: destination,
       askEveryTime: true,
@@ -420,15 +434,15 @@ describe('XHS single tool and bounded cache batch use original local publication
     findFirst.mockImplementationOnce(async () => {
       entered();
       await pause;
-      return cached('note-a');
+      return cached(noteA);
     });
-    const pending = batch(['note-a']).then((result) => result);
+    const pending = batch([noteA]).then((result) => result);
     await started;
     expect(
       (await post('/download/article/settings', { askEveryTime: true })).status,
     ).toBe(409);
     expect((await post('/download/article/directory')).status).toBe(409);
-    expect((await batch(['note-b'])).status).toBe(409);
+    expect((await batch([noteB])).status).toBe(409);
     expect((await post(singlePath, { url })).status).toBe(409);
     release();
     expect((await pending).status).toBe(200);
@@ -483,7 +497,7 @@ describe('XHS single tool and bounded cache batch use original local publication
 
   it('retains authentication/local-origin/host/private-mode/acceptance gates on both new routes', async () => {
     for (const [path, body] of [
-      [batchPath, { creatorId: 'creator-a', noteIds: ['note-a'] }],
+      [batchPath, { creatorId: 'creator-a', noteIds: [noteA] }],
       [singlePath, { url }],
     ] as const) {
       expect((await post(path, body).unset('authorization')).status).toBe(401);
@@ -511,13 +525,13 @@ describe('XHS single tool and bounded cache batch use original local publication
       { creatorId: 'creator-a', noteIds: [] },
       {
         creatorId: 'creator-a',
-        noteIds: Array.from({ length: 101 }, () => 'note-a'),
+        noteIds: Array.from({ length: 101 }, () => noteA),
       },
-      { creatorId: 'creator-a', noteIds: ['note-a'], directory: destination },
+      { creatorId: 'creator-a', noteIds: [noteA], directory: destination },
       {
         creatorId: 'creator-a',
-        noteIds: ['note-a'],
-        contentHtml: cached('note-a').contentHtml,
+        noteIds: [noteA],
+        contentHtml: cached(noteA).contentHtml,
       },
     ])
       expect((await post(batchPath, body)).status).toBe(400);

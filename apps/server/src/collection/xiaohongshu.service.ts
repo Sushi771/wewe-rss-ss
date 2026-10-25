@@ -1,3 +1,4 @@
+import { xhsOriginalLink } from './xhs-original-link';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { TRPCError } from '@trpc/server';
 import { PrismaService } from '../prisma/prisma.service';
@@ -29,6 +30,17 @@ import {
   verifiedDownloadBody,
 } from '../article-verified-download';
 import { ArticleDownloadError } from '../article-download';
+import {
+  XhsCreatorFilter,
+  XhsMetricSnapshot,
+  xhsMetricSelection,
+} from '@wewe-rss/shared';
+import { readXhsMetrics, readXhsComments } from './xhs-engagement-store';
+import { xhsEngagementMarkdown } from './xhs-engagement-export';
+import {
+  withXhsLocalSnapshot,
+  xhsLocalSnapshotPublisher,
+} from './xhs-local-snapshot';
 import {
   inspectCachedMp4,
   prepareXhsVideoDownload,
@@ -410,16 +422,21 @@ export class XiaohongshuService {
         : '待接入数据源；可以管理待接入博主，尚不能读取新笔记。',
     };
   }
-  async list(input?: { groupId?: string | null }) {
+  async list(input?: XhsCreatorFilter) {
     if (typeof input?.groupId === 'string')
       await getManagementGroup(this.prisma, 'xiaohongshu', input.groupId);
+    const metrics = await readXhsMetrics(this.prisma, 'creator');
+    const items = await this.prisma.xhsCreator.findMany({
+      where: input?.groupId === undefined ? {} : { groupId: input.groupId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: { _count: { select: { notes: true } } },
+    });
     return {
       platform: 'xiaohongshu' as const,
-      items: await this.prisma.xhsCreator.findMany({
-        where: input?.groupId === undefined ? {} : { groupId: input.groupId },
-        orderBy: { createdAt: 'asc' },
-        include: { _count: { select: { notes: true } } },
-      }),
+      items: xhsMetricSelection(
+        items.map((c) => ({ ...c, metrics: metrics.get(c.id) ?? null })),
+        input,
+      ),
     };
   }
   groups() {
@@ -567,25 +584,64 @@ export class XiaohongshuService {
       )
         matched.push(note);
     }
-    return matched;
+    const metrics = await readXhsMetrics(this.prisma, 'note');
+    return xhsMetricSelection(
+      matched.map((n) => ({ ...n, metrics: metrics.get(n.id) ?? null })),
+      filter,
+    );
   }
   async notes(creatorId?: string, filter?: XhsNoteFilter) {
     const notes = await this.matchingNotes(creatorId, filter);
+    const queryVersion = this.noteQueryVersion(notes);
+    if (
+      (filter?.offset && !filter.queryVersion) ||
+      (filter?.queryVersion && filter.queryVersion !== queryVersion)
+    )
+      return fail('XHS_QUERY_STALE_RESTART', 'CONFLICT');
     return {
+      queryVersion,
       platform: 'xiaohongshu' as const,
-      items: notes.map((note) => ({
-        id: note.id,
-        creatorId: note.creatorId,
-        creatorName: note.creator.displayName,
-        groupId: note.creator.groupId,
-        title: note.title,
-        publishTime: note.publishTime,
-        status: note.status,
-        kind:
-          note.kind === 'video' ? ('video' as const) : ('image-text' as const),
-        video: cachedVideoMetadata(note),
-      })),
+      total: notes.length,
+      items: notes
+        .slice(
+          filter?.offset ?? 0,
+          filter?.limit === undefined
+            ? undefined
+            : (filter.offset ?? 0) + filter.limit,
+        )
+        .map((note) => ({
+          id: note.id,
+          creatorId: note.creatorId,
+          creatorName: note.creator.displayName,
+          groupId: note.creator.groupId,
+          title: note.title,
+          publishTime: note.publishTime,
+          status: note.status,
+          kind:
+            note.kind === 'video'
+              ? ('video' as const)
+              : ('image-text' as const),
+          video: cachedVideoMetadata(note),
+          metrics: note.metrics,
+        })),
     };
+  }
+  private noteQueryVersion(
+    rows: Array<{
+      id: string;
+      title: string;
+      status: string;
+      publishTime: number;
+      metrics: XhsMetricSnapshot | null;
+    }>,
+  ) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify(
+          rows.map((n) => [n.id, n.title, n.status, n.publishTime, n.metrics]),
+        ),
+      )
+      .digest('hex');
   }
   async refresh(id: string) {
     if (this.active.has(id))
@@ -773,6 +829,45 @@ export class XiaohongshuService {
       this.active.delete(id);
     }
   }
+  async engagement(input: {
+    creatorId: string;
+    noteId: string;
+    offset?: number;
+    limit?: number;
+  }) {
+    const note = await this.prisma.xhsNote.findFirst({
+      where: { id: input.noteId, creatorId: input.creatorId },
+      select: { id: true },
+    });
+    if (!note) return fail('XHS_NOTE_NOT_FOUND', 'NOT_FOUND');
+    return this.prisma.$transaction(async (tx) => {
+      const [metrics, creators, comments] = await Promise.all([
+        readXhsMetrics(tx, 'note'),
+        readXhsMetrics(tx, 'creator'),
+        readXhsComments(tx, input.noteId, input.offset, input.limit),
+      ]);
+      return {
+        metrics: metrics.get(input.noteId) ?? null,
+        creatorMetrics: creators.get(input.creatorId) ?? null,
+        ...comments,
+      };
+    });
+  }
+  private async exportEngagement(
+    creatorId: string,
+    noteId: string,
+    metrics?: XhsMetricSnapshot | null,
+  ) {
+    const view = await this.engagement({ creatorId, noteId, limit: 20000 });
+    if (view.totalSaved > view.returned)
+      return fail('XHS_COMMENT_EXPORT_LIMIT');
+    const markdown = xhsEngagementMarkdown(
+      metrics === undefined ? view : { ...view, metrics },
+    );
+    if (Buffer.byteLength(markdown) > 5_000_000)
+      return fail('XHS_COMMENT_EXPORT_LIMIT');
+    return markdown;
+  }
   async body(creatorId: string, noteId: string) {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
@@ -790,6 +885,7 @@ export class XiaohongshuService {
         return inline;
       });
     return {
+      engagement: await this.engagement({ creatorId, noteId }),
       title: note.title,
       publishTime: note.publishTime,
       text: content
@@ -809,7 +905,17 @@ export class XiaohongshuService {
   async export(creatorId?: string, noteIds?: string[], filter?: XhsNoteFilter) {
     const selected =
       noteIds === undefined ? undefined : managementMemberIds(noteIds, 300);
-    const matched = await this.matchingNotes(creatorId, filter, true, selected);
+    const scope = await this.matchingNotes(creatorId, filter);
+    if (
+      filter?.queryVersion &&
+      filter.queryVersion !== this.noteQueryVersion(scope)
+    )
+      return fail('XHS_QUERY_STALE_RESTART', 'CONFLICT');
+    const selectedSet = selected ? new Set(selected) : undefined;
+    const matched = scope.filter(
+      (n) => n.status === 'complete' && (!selectedSet || selectedSet.has(n.id)),
+    );
+    const selectedMetrics = new Map(matched.map((n) => [n.id, n.metrics]));
     matched.sort(
       (a, b) =>
         a.publishTime - b.publishTime ||
@@ -857,6 +963,7 @@ export class XiaohongshuService {
           const prepare = await this.prepareLocalDownload(
             note.creatorId,
             note.id,
+            selectedMetrics.get(note.id),
           );
           await fs.mkdir(directory);
           await prepare(directory);
@@ -864,6 +971,10 @@ export class XiaohongshuService {
             path.join(directory, 'index.md'),
             path.join(directory, '正文.md'),
           );
+          await prepare.afterSave?.({
+            directory,
+            markdownPath: path.join(directory, '正文.md'),
+          });
           continue;
         }
         const result = await buildArticleMarkdown(
@@ -877,10 +988,29 @@ export class XiaohongshuService {
         const filename =
           createHash('sha256').update(note.id).digest('hex').slice(0, 24) +
           '.md';
+        const snapshot = await this.exportEngagement(
+          note.creatorId,
+          note.id,
+          selectedMetrics.get(note.id),
+        );
         await fs.writeFile(
           path.join(folder, filename),
-          '# ' + note.title.replace(/[\r\n]/g, ' ') + '\n\n' + result.markdown,
+          '# ' +
+            note.title.replace(/[\r\n]/g, ' ') +
+            '\n\n[原文](' +
+            xhsOriginalLink(note.id) +
+            ')\n\n' +
+            result.markdown +
+            snapshot,
         );
+        await xhsLocalSnapshotPublisher(
+          note.id,
+          note.title,
+          snapshot,
+        )?.({
+          directory: folder,
+          markdownPath: path.join(folder, filename),
+        });
       }
       const zip = path.join(root, 'archive.zip');
       const { archiveDirectory } = await import('../offline-archive');
@@ -902,7 +1032,11 @@ export class XiaohongshuService {
   /** Snapshot only this creator's complete cached note, never accept page content
    * or a path from the caller. Original local saver grants the destination.
    */
-  async prepareLocalDownload(creatorId: string, noteId: string) {
+  async prepareLocalDownload(
+    creatorId: string,
+    noteId: string,
+    metrics?: XhsMetricSnapshot | null,
+  ) {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
     });
@@ -912,6 +1046,7 @@ export class XiaohongshuService {
         422,
         { code: 'XHS_CACHED_ARTICLE_UNAVAILABLE' },
       );
+    xhsOriginalLink(note.id);
     if (note.kind === 'video') {
       const creator = await this.getCreator(creatorId);
       const metadata = cachedVideoMetadata(note);
@@ -959,7 +1094,7 @@ export class XiaohongshuService {
           422,
           { code: 'XHS_CACHED_VIDEO_INVALID' },
         );
-      return prepareXhsVideoDownload({
+      const prepare = prepareXhsVideoDownload({
         evidenceVerified: true,
         note: {
           authorId: creator.externalAuthorId,
@@ -987,6 +1122,17 @@ export class XiaohongshuService {
           sha256: metadata.sha256,
         },
       });
+      const snapshot = await this.exportEngagement(creatorId, noteId, metrics);
+      return withXhsLocalSnapshot(
+        async (directory: string) => {
+          const result = await prepare(directory);
+          await fs.appendFile(path.join(directory, 'index.md'), snapshot);
+          return result;
+        },
+        note.id,
+        note.title,
+        snapshot,
+      );
     }
     if (
       note.videoBytes !== null ||
@@ -999,17 +1145,27 @@ export class XiaohongshuService {
         422,
         { code: 'XHS_CACHED_VIDEO_INVALID' },
       );
+    const sourceUrl = xhsOriginalLink(note.id);
     const article = {
       ...note,
       contentHtml: verifiedDownloadBody(note.contentHtml),
       lastBodyStatus: 'available',
       metrics: null,
     };
-    return (directory: string) =>
-      buildCompleteArticleDownload(
-        article,
-        '小红书本地缓存（笔记身份：' + note.id + '）',
-        directory,
-      );
+    const snapshot = await this.exportEngagement(creatorId, noteId, metrics);
+    return withXhsLocalSnapshot(
+      async (directory: string) => {
+        const result = await buildCompleteArticleDownload(
+          article,
+          '[原文](' + sourceUrl + ')',
+          directory,
+        );
+        await fs.appendFile(path.join(directory, 'index.md'), snapshot);
+        return { ...result, sourceUrl: null };
+      },
+      note.id,
+      note.title,
+      snapshot,
+    );
   }
 }

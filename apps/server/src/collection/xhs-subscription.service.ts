@@ -21,6 +21,8 @@ import {
 import { verifiedDownloadBody } from '../article-verified-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
+import { saveXhsMetrics } from './xhs-engagement-store';
+import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
 
 export const XHS_SUBSCRIPTION_SOURCE = Symbol('XHS_SUBSCRIPTION_SOURCE');
 export type XhsListedNote = {
@@ -32,11 +34,19 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  metrics?(authorId: string, noteId?: string): Promise<XhsMetricSnapshot>;
+  comments?(
+    authorId: string,
+    noteId: string,
+    cursor: string,
+    rootId?: string,
+  ): Promise<{ comments: XhsSavedComment[]; nextCursor: string | null }>;
   capability?(): {
     sourceConfigured: boolean;
     canSubscribe: boolean;
     canRefresh: boolean;
     canDownload: boolean;
+    canCollectComments?: boolean;
     message: string;
   };
   resolve(
@@ -71,10 +81,21 @@ type Save = (
   creator: XhsCreator,
   noteId: string,
   destination: string,
-) => Promise<{ alreadySaved: boolean; mediaComplete?: boolean }>;
+) => Promise<{
+  alreadySaved: boolean;
+  mediaComplete?: boolean;
+  supplement?: { status: string };
+}>;
 type Destination = (pickToken?: string) => Promise<string>;
 const active = (t: XhsSubscriptionTask) =>
   t.state === 'queued' || t.state === 'running';
+const finishedDownload = (t: Task) =>
+  t.kind === 'download' &&
+  t.failed === 0 &&
+  t.remaining === 0 &&
+  t.completed + t.skipped === t.total &&
+  t.noteIds.length === t.total &&
+  t.noteIds.every((id) => ['completed', 'skipped'].includes(t.items[id]));
 const ahead = (saved: Task, t: Task) =>
   saved.completed + saved.skipped > t.completed + t.skipped ||
   (saved.cursorHistory?.length ?? 0) > (t.cursorHistory?.length ?? 0) ||
@@ -213,6 +234,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       id: author.id,
       name: author.name.trim(),
       profileUrl: author.profileUrl,
+      ...(author.metrics ? { metrics: author.metrics } : {}),
       ...(author.avatarUrl && /^https:\/\//.test(author.avatarUrl)
         ? { avatarUrl: author.avatarUrl }
         : {}),
@@ -281,6 +303,7 @@ export class XhsSubscriptionService implements OnModuleInit {
               groupId: input.groupId,
             },
           });
+      await saveXhsMetrics(tx, 'creator', creator.id, author.metrics);
       return {
         creatorId: creator.id,
         created: !old,
@@ -469,33 +492,52 @@ export class XhsSubscriptionService implements OnModuleInit {
   }
   private view(t: Task): XhsSubscriptionTask {
     const uncertain = this.uncertain.has(t.taskId);
+    // Only a durable, settled receipt can close an old all-finished checkpoint.
+    // Counter equality alone is not proof: every selected item must be recorded.
+    const reconciledComplete =
+      !uncertain &&
+      !this.pending.has(t.taskId) &&
+      t.state === 'blocked' &&
+      t.code === 'XHS_TASK_RECEIPT_UNCERTAIN' &&
+      finishedDownload(t);
+    const state = uncertain
+      ? 'blocked'
+      : reconciledComplete
+        ? 'completed'
+        : t.state;
     return {
       taskId: t.taskId,
       creatorId: t.creatorId,
       kind: t.kind,
-      state: uncertain ? 'blocked' : t.state,
+      state,
       total: t.total,
       completed: t.completed,
       skipped: t.skipped,
       failed: t.failed,
       remaining: t.remaining,
+      snapshotsSaved: t.snapshotsSaved,
       // Keep private receipt history, but never label a reconciled public
       // checkpoint as still uncertain: the UI correctly fences that code.
       code: uncertain
         ? 'XHS_TASK_RECEIPT_UNCERTAIN'
-        : t.code === 'XHS_TASK_RECEIPT_UNCERTAIN'
-          ? 'XHS_TASK_CHECKPOINT_RECONCILED'
-          : t.code,
+        : reconciledComplete
+          ? undefined
+          : t.code === 'XHS_TASK_RECEIPT_UNCERTAIN'
+            ? 'XHS_TASK_CHECKPOINT_RECONCILED'
+            : t.code,
       message: uncertain
         ? '任务回执尚未核实；未重放任何动作，请重新读取状态。'
-        : t.message,
+        : reconciledComplete
+          ? '处理完成'
+          : t.message,
       resumedFromTaskId: t.resumedFromTaskId,
       supersededByTaskId: t.supersededByTaskId,
       resumable:
         !uncertain &&
         !t.supersededByTaskId &&
         !this.pending.has(t.taskId) &&
-        ['cancelled', 'blocked', 'partial', 'failed'].includes(t.state),
+        (t.kind === 'list' || t.total > t.completed + t.skipped) &&
+        ['cancelled', 'blocked', 'partial', 'failed'].includes(state),
     };
   }
   private async reconcile(taskId: string) {
@@ -573,6 +615,11 @@ export class XhsSubscriptionService implements OnModuleInit {
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     const previous = await this.loadTask(input.taskId);
     if (previous.supersededByTaskId) return reject('XHS_TASK_SUPERSEDED');
+    if (
+      previous.kind === 'download' &&
+      previous.total <= previous.completed + previous.skipped
+    )
+      return reject('XHS_TASK_NOT_RESUMABLE');
     if (!['cancelled', 'blocked', 'partial', 'failed'].includes(previous.state))
       return reject('XHS_TASK_NOT_RESUMABLE');
     await this.creator(previous.creatorId);
@@ -681,6 +728,7 @@ export class XhsSubscriptionService implements OnModuleInit {
                     where: { id, creatorId: creator.id },
                   });
                   if (!current) return reject('XHS_SELECTION_CHANGED');
+                  await saveXhsMetrics(tx, 'note', id, note.metrics);
                   if (current.status !== 'complete' || !current.contentHtml)
                     await tx.xhsNote.update({
                       where: { id },
@@ -696,6 +744,8 @@ export class XhsSubscriptionService implements OnModuleInit {
               }
               if (!active(t)) break;
               const saved = await this.save!(creator, id, directory!);
+              if (saved.supplement && saved.supplement.status !== 'retained')
+                t.snapshotsSaved = (t.snapshotsSaved ?? 0) + 1;
               if (saved.mediaComplete === false)
                 return reject('XHS_LOCAL_MEDIA_INCOMPLETE');
               if (saved.alreadySaved) {
@@ -723,12 +773,25 @@ export class XhsSubscriptionService implements OnModuleInit {
         t.state = t.failed || t.remaining ? 'partial' : 'completed';
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
+        if (t.snapshotsSaved)
+          t.message += ` 已新增 ${t.snapshotsSaved} 份“互动与评论”快照附页；正文保留策略不变。`;
       }
     } catch (error) {
       if (active(t)) {
-        t.state = 'blocked';
-        t.code = xhsPublicCode(error, 'XHS_TASK_BLOCKED');
-        t.message = '任务已停止，请检查安全连接和来源数据。';
+        // A failed last item checkpoint must not permanently turn confirmed
+        // local results into a blocked task. The final persist below still has
+        // to acknowledge these exact results; uncertainty continues to fence
+        // the public view if that write cannot be confirmed. Never replay saves.
+        const confirmedResults =
+          xhsPublicCode(error, '') === 'XHS_TASK_RECEIPT_UNCERTAIN' &&
+          finishedDownload(t);
+        t.state = confirmedResults ? 'completed' : 'blocked';
+        t.code = confirmedResults
+          ? undefined
+          : xhsPublicCode(error, 'XHS_TASK_BLOCKED');
+        t.message = confirmedResults
+          ? '处理完成'
+          : '任务已停止，请检查安全连接和来源数据。';
       }
     } finally {
       try {

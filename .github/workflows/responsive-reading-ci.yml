@@ -1,0 +1,72 @@
+name: Responsive reading workspace
+
+on:
+  push:
+    branches: [codex/responsive-shared-layout, codex/xhs-unified-integration]
+  pull_request:
+    branches: [codex/xhs-depth-integration]
+    paths:
+      - 'apps/web/**'
+      - 'scripts/responsive-layout-browser.test.cjs'
+      - 'scripts/article-date-shortcuts-browser.test.cjs'
+      - 'scripts/feed-refresh-state-ui.test.cjs'
+      - 'scripts/**'
+      - 'packages/shared/**'
+      - 'apps/server/src/trpc/**'
+      - '.github/workflows/responsive-reading-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  responsive-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: 'file:./ci-placeholder.sqlite'
+      XHS_SUBSCRIPTION_LIVE_ENABLED: '0'
+      XHS_COMMENT_COLLECTION_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Web lint, types and compiled frontend
+        run: |
+          pnpm --filter web lint
+          pnpm --filter web build
+      - name: Scope, selection, export, progress and cancellation regressions
+        run: >-
+          node --test
+          scripts/feed-refresh-state-ui.test.cjs
+          scripts/feed-reading-ui.test.cjs
+          scripts/feed-export-date-ui.test.cjs
+          scripts/article-body-state.test.cjs
+          scripts/article-date-shortcuts.test.cjs
+          scripts/feed-browse-state.test.cjs
+          scripts/folder-member-picker.test.cjs
+          scripts/deployed-export-adaptation.test.cjs
+      - name: Compiled frontend geometry and pointer interactions
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/responsive-layout-browser.test.cjs
+      - name: Calendar, source pane and dialog browser regressions
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+        run: >-
+          node --test
+          scripts/article-date-shortcuts-browser.test.cjs
+          scripts/feed-sidebar-layout.test.cjs
+          scripts/subscription-dialog-layout.test.cjs

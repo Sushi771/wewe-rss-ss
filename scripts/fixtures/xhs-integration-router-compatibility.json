@@ -1,0 +1,18 @@
+{
+  "base": "f8fbb3c740417fece3d018e919523b7605a3f1dc",
+  "reason": "Independent baseline/candidate reproduced old mismatches. Only these XHS members differ; all historical non-XHS pins remain unchanged. The controller hash also already differed in f8fbb3c from the older 8a3141c fixture; the test removes only the reviewed supplement additions before comparing this exact f8fbb3c file. Unchanged runtime.cjs also matches exact f8fbb3c after the historical guard normalization, not the older fixture.",
+  "baseline": {
+    "constructor": "e46a31ccc603b7858b21e891ce985c0eee4251639f5d0909998458fbfe5004ab",
+    "xiaohongshuRouter": "988122cdb2ee5522d541ff681de6f642793cd7a0daa7d6c50ddfa1a40c4e6a1a",
+    "requireLocalXhsAccess": "66d70fc93025f3911f10b80865c6ad55d88b882fe0638f28de3dd924f58ef9f3",
+    "requireLocalXhsConnection": "744490042a94711e8f07bdd0c89bb59c678c136dab3ccbc3854c8dd327bb0a44"
+  },
+  "engagement": {
+    "constructor": "3c07aef7833accacf1492b22944d8112b2853cdc254355032904581deff246bc",
+    "xiaohongshuRouter": "555a21ec879f4b804dd01ad24fab4408478513750c93abc5543b7f6088b0f88b"
+  },
+  "criticalFiles": {
+    "apps/server/src/article-download.controller.ts": "93e459360921e0864e6710754b2157f3036e6d249158b7f6535b7705891a6f78",
+    "scripts/local-release/runtime.cjs": "8249727bbd2f4304d7264b443957e9262317dccaf6dde276a27feb6031f84f68"
+  }
+}

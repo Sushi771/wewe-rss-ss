@@ -168,6 +168,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       selectedArchives: [],
       exportScope: 'selected',
       notesInput: { creatorId: 'a' },
+      notes: { data: { queryVersion: undefined } },
       saveSettings: { directory: 'synthetic-only', askEveryTime: false },
       creators: {
         data: {
@@ -787,7 +788,7 @@ describe('shared single-level management folder actual handlers (offline)', () =
       );
       expect(css).toMatch(/\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*none/);
       expect(css).toMatch(
-        /@media \(min-width: 768px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
+        /@container workspace \(min-width: 1100px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
       );
       expect(contents).toContain('!min-w-0');
       expect(contents).toContain('aria-expanded={mobileSidebarOpen}');

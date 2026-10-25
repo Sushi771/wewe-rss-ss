@@ -1,3 +1,4 @@
+const noteKey = (id: string) => JSON.stringify(['xiaohongshu', 'note', id]);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
@@ -27,7 +28,7 @@ jest.mock('../offline-archive', () => ({
         destination,
         source,
       ],
-      { encoding: 'utf8', windowsHide: true },
+      { encoding: 'utf8', windowsHide: true, cwd: path.resolve(__dirname, '../..') },
     );
     if (child.status !== 0) throw new Error('ACTUAL_ARCHIVE_CHILD_FAILED');
   },
@@ -156,10 +157,10 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
         id,
       );
     for (const [id, creatorId, status] of [
-      ['note-a', 'creator-a', 'complete'],
-      ['note-b', 'creator-a', 'complete'],
-      ['note-other', 'creator-b', 'complete'],
-      ['note-video', 'creator-a', 'video-skipped'],
+      [noteKey('note-a'), 'creator-a', 'complete'],
+      [noteKey('note-b'), 'creator-a', 'complete'],
+      [noteKey('note-other'), 'creator-b', 'complete'],
+      [noteKey('note-video'), 'creator-a', 'video-skipped'],
     ])
       await prisma.xhsNote.create({
         data: {
@@ -944,8 +945,8 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
   it('exports only selected complete same-creator notes in an actual ZIP, rejecting foreign and incomplete selections', async () => {
     const { api } = caller();
     for (const noteIds of [
-      ['note-a', 'note-other'],
-      ['note-video'],
+      [noteKey('note-a'), noteKey('note-other')],
+      [noteKey('note-video')],
       ['missing'],
       [],
     ])
@@ -954,7 +955,7 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
     const result = await api.xiaohongshu.export({
       creatorId: 'creator-a',
-      noteIds: ['note-a', 'note-a'],
+      noteIds: [noteKey('note-a'), noteKey('note-a')],
     });
     expect(result.notes).toBe(1);
     const zip = path.join(root, 'selected.zip');

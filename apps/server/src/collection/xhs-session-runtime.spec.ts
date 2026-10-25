@@ -101,6 +101,89 @@ function fixture() {
   return { api, media };
 }
 describe('default-off production source wiring with synthetic sessions only', () => {
+  it('keeps comment collection separately default-off without loading credentials or issuing a request', () => {
+    const storage = vault(),
+      api = jest.fn();
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      vault: storage,
+      api,
+    });
+    expect(runtime.capability().canCollectComments).toBe(false);
+    expect(() =>
+      runtime.comments('synthetic-author', 'synthetic-note', ''),
+    ).toThrow('XHS_COMMENT_COLLECTION_DISABLED');
+    expect(api).not.toHaveBeenCalled();
+    expect(storage.load).not.toHaveBeenCalled();
+    runtime.onModuleDestroy();
+  });
+  it('routes explicit top/reply pages through injected transport and stops without retries after signature rejection', async () => {
+    const base = fixture();
+    let rejectSignature = false;
+    const api = jest.fn(async (request: Parameters<RedbookTransport>[0]) => {
+      if (!new URL(request.url).pathname.includes('/comment/'))
+        return base.api(request);
+      if (rejectSignature)
+        return {
+          status: 406,
+          url: request.url,
+          body: { success: false, code: 300015 },
+        };
+      return {
+        status: 200,
+        url: request.url,
+        body: {
+          success: true,
+          code: 0,
+          data: {
+            comments: [
+              {
+                id: request.url.includes('/sub/page') ? 'reply' : 'root',
+                content: 'synthetic-only',
+                like_count: '0',
+                user_info: { nickname: 'Synthetic' },
+              },
+            ],
+            has_more: false,
+            cursor: '',
+          },
+        },
+      };
+    });
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      commentsEnabled: () => true,
+      api,
+      media: base.media,
+    });
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    await runtime.resolve(noteUrl);
+    expect(
+      (await runtime.comments(author.id, 'synthetic-note', '')).comments[0],
+    ).toMatchObject({ id: 'root', rootId: null, likes: 0 });
+    expect(
+      (await runtime.comments(author.id, 'synthetic-note', '', 'root'))
+        .comments[0],
+    ).toMatchObject({ id: 'reply', rootId: 'root', parentId: null });
+    expect((await runtime.connectionStatus()).requestAttempts).toMatchObject({
+      comments: 1,
+      replies: 1,
+    });
+    rejectSignature = true;
+    await expect(
+      runtime.comments(author.id, 'synthetic-note', ''),
+    ).rejects.toThrow('signature');
+    const count = api.mock.calls.length;
+    await expect(
+      runtime.comments(author.id, 'synthetic-note', ''),
+    ).rejects.toThrow('XHS_SOURCE_SIGNATURE_BLOCKED');
+    expect(api).toHaveBeenCalledTimes(count);
+    expect(runtime.capability().canCollectComments).toBe(false);
+    runtime.onModuleDestroy();
+  });
   it('registers the production source alias and never treats a disabled source as refresh-ready', async () => {
     const providers = Reflect.getMetadata('providers', TrpcModule);
     expect(
