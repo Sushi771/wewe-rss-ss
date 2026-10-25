@@ -289,6 +289,10 @@ def indexed_reference_review(root, candidate, budget, bound_controls=()):
             if not metadata:continue
             if file.is_symlink() or (hasattr(file,'is_junction') and file.is_junction()):
                 unknown.append({'path':str(file),'reason':'linked-metadata'});continue
+            recognized=(str(file) in controls or file.name in ('retention-protected.json','verification.json','.space-budget-status.json')
+                or file.name.startswith(('.latest-','snapshot-owner-','refresh-recovery-owner-')))
+            if not recognized:
+                unknown.append({'path':str(file),'reason':'unknown-reference-metadata'});continue
             value=budget.json(file);kind=None
             if str(file) in controls:kind='bound-lifecycle-control'
             elif file.name=='retention-protected.json':

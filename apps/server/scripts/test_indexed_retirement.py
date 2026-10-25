@@ -70,7 +70,13 @@ class ReferenceTests(unittest.TestCase):
 
     def test_unknown_metadata_and_live_protection_hold_the_candidate(self):
         self.write(self.archive/'unknown.json',{'target':str(self.target)})
-        out=self.review();self.assertFalse(out['complete']);self.assertEqual(out['unknown'][0]['reason'],'unknown-reference-metadata')
+        budget=r.ReadBudget();read=budget.json
+        def known_only(file):
+            self.assertNotEqual(file.name,'unknown.json','unknown contents must never be extracted')
+            return read(file)
+        budget.json=known_only
+        out=r.indexed_reference_review(self.root,self.target,budget)
+        self.assertFalse(out['complete']);self.assertEqual(out['unknown'][0]['reason'],'unknown-reference-metadata')
         self.write(self.root/'snapshot-owner-test.json',{'backup':str(self.target)})
         self.assertTrue(self.review()['candidateReferenced'])
 
