@@ -29,6 +29,11 @@ import { XhsSubscriptionService } from '../collection/xhs-subscription.service';
 import { XhsSubscriptionRuntime } from '../collection/xhs-subscription-runtime';
 import { xhsPublicCode } from '../collection/xhs-subscription-errors';
 import { xhsNoteFilterSchema } from '@wewe-rss/shared';
+import {
+  xhsCreatorFilterSchema,
+  xhsNumericFilterShape,
+  xhsNumericRange,
+} from '@wewe-rss/shared';
 import { z } from 'zod';
 import {
   AccountSchemas,
@@ -1766,12 +1771,7 @@ export class TrpcRouter {
       ...this.xhsSubscriptions?.capability(),
     })),
     list: this.trpcService.protectedProcedure
-      .input(
-        z
-          .object({ groupId: z.string().min(1).max(128).nullable().optional() })
-          .strict()
-          .optional(),
-      )
+      .input(xhsCreatorFilterSchema.optional())
       .query(({ input }) => this.xhs.list(input)),
     groups: this.trpcService.protectedProcedure.query(() => this.xhs.groups()),
     saveGroup: this.trpcService.protectedProcedure
@@ -1822,6 +1822,18 @@ export class TrpcRouter {
     notes: this.trpcService.protectedProcedure
       .input(xhsNoteFilterSchema)
       .query(({ input }) => this.xhs.notes(input.creatorId, input)),
+    engagement: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteId: z.string().min(1).max(300),
+            offset: z.number().int().min(0).max(1000000).optional(),
+            limit: z.number().int().min(1).max(200).optional(),
+          })
+          .strict(),
+      )
+      .query(({ input }) => this.xhs.engagement(input)),
     body: this.trpcService.protectedProcedure
       .input(
         z
@@ -1851,6 +1863,7 @@ export class TrpcRouter {
           .object({
             creatorId: z.string().min(1).max(128).optional(),
             groupId: z.string().min(1).max(128).nullable().optional(),
+            ...xhsNumericFilterShape,
             search: articleFilterShape.search,
             dateStart: articleFilterShape.dateStart,
             dateEnd: articleFilterShape.dateEnd,
@@ -1861,7 +1874,8 @@ export class TrpcRouter {
               .optional(),
           })
           .strict()
-          .refine(orderedArticleDates),
+          .refine(orderedArticleDates)
+          .refine(xhsNumericRange),
       )
       .mutation(({ input }) =>
         this.xhs.export(input.creatorId, input.noteIds, input),

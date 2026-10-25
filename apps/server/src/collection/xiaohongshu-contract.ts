@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { decodeInlineImage } from './image-fetch';
+import type { XhsMetricSnapshot } from '@wewe-rss/shared';
 
 // Internal normalized contract only. No A/B response mapping, URL fetch, database
 // registration or trusted Provider is implemented here. Real evidence is pending.
@@ -16,6 +17,7 @@ function identity(kind: 'author' | 'note', value: string): string {
 }
 
 export interface XhsNormalizedCandidate {
+  metrics?: XhsMetricSnapshot;
   authorId: string;
   noteId: string;
   kind: 'image-text' | 'video';

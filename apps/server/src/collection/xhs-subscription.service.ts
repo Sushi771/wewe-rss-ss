@@ -21,6 +21,8 @@ import {
 import { verifiedDownloadBody } from '../article-verified-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
+import { saveXhsMetrics } from './xhs-engagement-store';
+import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
 
 export const XHS_SUBSCRIPTION_SOURCE = Symbol('XHS_SUBSCRIPTION_SOURCE');
 export type XhsListedNote = {
@@ -32,6 +34,13 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  metrics?(authorId: string, noteId?: string): Promise<XhsMetricSnapshot>;
+  comments?(
+    authorId: string,
+    noteId: string,
+    cursor: string,
+    rootId?: string,
+  ): Promise<{ comments: XhsSavedComment[]; nextCursor: string | null }>;
   capability?(): {
     sourceConfigured: boolean;
     canSubscribe: boolean;
@@ -213,6 +222,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       id: author.id,
       name: author.name.trim(),
       profileUrl: author.profileUrl,
+      ...(author.metrics ? { metrics: author.metrics } : {}),
       ...(author.avatarUrl && /^https:\/\//.test(author.avatarUrl)
         ? { avatarUrl: author.avatarUrl }
         : {}),
@@ -281,6 +291,7 @@ export class XhsSubscriptionService implements OnModuleInit {
               groupId: input.groupId,
             },
           });
+      await saveXhsMetrics(tx, 'creator', creator.id, author.metrics);
       return {
         creatorId: creator.id,
         created: !old,
@@ -681,6 +692,7 @@ export class XhsSubscriptionService implements OnModuleInit {
                     where: { id, creatorId: creator.id },
                   });
                   if (!current) return reject('XHS_SELECTION_CHANGED');
+                  await saveXhsMetrics(tx, 'note', id, note.metrics);
                   if (current.status !== 'complete' || !current.contentHtml)
                     await tx.xhsNote.update({
                       where: { id },

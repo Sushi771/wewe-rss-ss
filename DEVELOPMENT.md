@@ -1,5 +1,7 @@
 # Development Guide
 
+2026-10-25 XHS engagement development: additive raw-SQL projections and synthetic-only comment pagination are documented in [XIAOHONGSHU_INTEGRATION](docs/XIAOHONGSHU_INTEGRATION.md). Read-only UI/filter/export is integrated; comment execution is intentionally unregistered after automatic approval review rejected new HTTP/runtime paths under the no-new-request constraint. Do not deploy, register collection, or issue live requests without the parent task's separate confirmation. Keep the independent original-link/repeat-save fix when merging.
+
 ## 小红书订阅开发（2026-10-24）
 
 当前小红书公开基线为 `9e1b81a8d095390bce968a137fd88d23ba5252df`，对应 r2 已本机上线。本轮在新隔离分支改进任务刷新找回、终态持久失败处理、显式继续、独立内容证据及单源组包恢复；不部署、不发真实请求、不读真实凭据、不删除历史数据。维护入口见[开发交接](docs/xiaohongshu/DEVELOPMENT.md)、[技术标准](docs/xiaohongshu/TECHNICAL.md)、[反例验收](docs/xiaohongshu/ACCEPTANCE.md)及[本机维护](docs/LOCAL_RELEASE_REHEARSAL.md)。新实现commit和验证结果由主负责人集成后校准，源码与本地交付统一通过draft PR协调。

@@ -170,7 +170,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     });
     source.list = list;
     const first = await service.refresh({ id: creatorId, maxPages: 2 });
-    expect(await finish(first.taskId)).toMatchObject({
+    expect(await settled(first.taskId)).toMatchObject({
       state: 'blocked',
       code: 'XHS_LIST_PAGE_LIMIT_REACHED',
       completed: 2,

@@ -186,6 +186,20 @@ describe('independent synthetic body/image oracle against the original local sav
     const cache = new XiaohongshuService({
       xhsNote: { findFirst: async () => row },
     } as any);
+    // This independent body/media oracle intentionally has no database engine.
+    // Engagement persistence/export is exercised against real synthetic SQLite
+    // in xhs-engagement.spec; retain this fixed empty-snapshot seam here.
+    jest
+      .spyOn(cache, 'engagement')
+      .mockResolvedValue({
+        metrics: null,
+        creatorMetrics: null,
+        comments: [],
+        windows: [],
+        totalSaved: 0,
+        returned: 0,
+        offset: 0,
+      });
     const prepare = await cache.prepareLocalDownload(row.creatorId, row.id);
     const store = new LocalArticleStore(path.join(root, 'settings.json'), root);
     return store.save(
