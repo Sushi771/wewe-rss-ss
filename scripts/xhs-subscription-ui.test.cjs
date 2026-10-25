@@ -466,6 +466,7 @@ function fixture(options = {}) {
     },
     '@web/components/SubscriptionPrimitives': primitives,
     '@web/components/ManagementFolders': 'ManagementFolders',
+    '@web/components/XhsWholeCreator': 'XhsWholeCreator',
     '@web/components/XhsTaskRecovery': Recovery,
     '@web/components/XhsEngagement': engagement,
     '@web/components/ArticleReader': 'ArticleReader',
@@ -1100,7 +1101,9 @@ test('global/group queries preserve authors, exports dispatch by author and read
     const exports = f.calls.filter(([name]) => name === 'export');
     assert.ok(exports.some(([, input]) => input.noteIds.includes('saved')));
     assert.ok(exports.every(([, input]) => input.creatorId === undefined));
-    assert.ok(exports.every(([, input]) => input.queryVersion === queryVersion));
+    assert.ok(
+      exports.every(([, input]) => input.queryVersion === queryVersion),
+    );
     assert.deepEqual(
       exports.find(([, input]) => input.noteIds.includes('author-b-note'))[1]
         .noteIds,
@@ -1114,8 +1117,14 @@ test('global/group queries preserve authors, exports dispatch by author and read
       .find((n) => n.type === 'input' && n.props.value === 'filtered')
       .props.onChange();
     await f.button('开始导出').props.onPress();
-    assert.equal(f.calls.filter(([name]) => name === 'export').at(-1)[1].queryVersion, queryVersion);
-    assert.equal(f.calls.filter(([name]) => name === 'export').at(-1)[1].groupId, 'group-a');
+    assert.equal(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].queryVersion,
+      queryVersion,
+    );
+    assert.equal(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].groupId,
+      'group-a',
+    );
     assert.equal(
       f.calls.filter(([name]) => name === 'notesScope').at(-1)[1].groupId,
       'group-a',

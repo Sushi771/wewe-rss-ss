@@ -1,3 +1,4 @@
+import XhsWholeCreator from '@web/components/XhsWholeCreator';
 import {
   ContentExportScope,
   ContentLoadMore,
@@ -1162,6 +1163,7 @@ export default function Xiaohongshu() {
         className="mac-content feed-content !min-w-0 !overflow-y-auto"
         aria-label="小红书笔记列表"
       >
+        <XhsWholeCreator creatorId={creatorId} />
         <XhsTaskRecovery
           tasks={recoveredTasks}
           loading={recoveryLoading}

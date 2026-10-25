@@ -1,3 +1,4 @@
+import { XhsRequestBudget } from './xhs-request-budget';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -101,6 +102,54 @@ function fixture() {
   return { api, media };
 }
 describe('default-off production source wiring with synthetic sessions only', () => {
+  it('charges context reconstruction, queued work and media before transport without an extra dispatch', async () => {
+    const injected = fixture();
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      api: injected.api,
+      media: injected.media,
+      profileParser: () => author,
+    });
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    function allowance(limit: number) {
+      let used = 0;
+      return {
+        budget: new XhsRequestBudget({
+          reserve: async () => {
+            if (used >= limit) return false;
+            used++;
+            return true;
+          },
+          read: async (id) => ({ id, used, limit, nextAt: 0, intervalMs: 0 }),
+        }),
+        used: () => used,
+      };
+    }
+    const first = allowance(1);
+    await expect(
+      runtime.withRequestBudget(first.budget, 'first', () =>
+        runtime.list(author.id, null),
+      ),
+    ).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
+    expect(injected.api).toHaveBeenCalledTimes(1);
+    expect(first.used()).toBe(1);
+    const next = allowance(3);
+    await runtime.withRequestBudget(next.budget, 'next', async () => {
+      // Register a queued continuation inside the same admission scope.
+      await Promise.resolve().then(() => runtime.list(author.id, null));
+      await runtime.detail(author.id, 'synthetic-note');
+      await expect(
+        runtime.metrics(author.id, 'synthetic-note'),
+      ).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
+    });
+    expect(next.used()).toBe(3);
+    expect(injected.api).toHaveBeenCalledTimes(3);
+    expect(injected.media).toHaveBeenCalledTimes(1);
+    runtime.onModuleDestroy();
+  });
   it('keeps comment collection separately default-off without loading credentials or issuing a request', () => {
     const storage = vault(),
       api = jest.fn();

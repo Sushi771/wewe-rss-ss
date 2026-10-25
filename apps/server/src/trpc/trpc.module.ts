@@ -1,3 +1,4 @@
+import { XhsWholeCreatorService } from '../collection/xhs-whole-creator.service';
 import { Module } from '@nestjs/common';
 import { TrpcService } from '@server/trpc/trpc.service';
 import { TrpcRouter } from '@server/trpc/trpc.router';
@@ -29,6 +30,7 @@ import {
     XiaohongshuService,
     XhsSubscriptionService,
     XhsEngagementService,
+    XhsWholeCreatorService,
     {
       provide: XhsSubscriptionRuntime,
       useFactory: createLocalXhsSubscriptionRuntime,

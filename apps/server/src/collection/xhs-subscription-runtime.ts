@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { XhsRequestBudget } from './xhs-request-budget';
 import { OnModuleDestroy } from '@nestjs/common';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -51,6 +53,18 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
+  private readonly budgetScope = new AsyncLocalStorage<{
+    budget: XhsRequestBudget;
+    id: string;
+    failure?: unknown;
+  }>();
+  withRequestBudget<T>(
+    budget: XhsRequestBudget,
+    id: string,
+    work: () => Promise<T>,
+  ) {
+    return this.budgetScope.run({ budget, id }, work);
+  }
   private cookies?: XhsSessionCookies;
   private generation = 0;
   private sessionAbort = new AbortController();
@@ -128,6 +142,17 @@ export class XhsSubscriptionRuntime
     this.requireSession();
     const generation = this.generation,
       signal = this.sessionAbort.signal;
+    const admission = this.budgetScope.getStore();
+    if (admission) {
+      try {
+        await admission.budget.admit(admission.id);
+      } catch (error) {
+        admission.failure = error;
+        throw error;
+      }
+    }
+    this.requireSession();
+    if (signal.aborted) return failure('XHS_SESSION_CHANGED');
     const result = await operation();
     if (generation !== this.generation || signal.aborted)
       return failure('XHS_SESSION_CHANGED');
@@ -291,6 +316,8 @@ export class XhsSubscriptionRuntime
   private async withSession<T>(operation: () => Promise<T>) {
     this.requireSession();
     const generation = this.generation;
+    const admission = this.budgetScope.getStore();
+    if (admission) delete admission.failure;
     try {
       const result = await operation();
       if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
@@ -315,28 +342,50 @@ export class XhsSubscriptionRuntime
         this.sessionAbort.abort();
         this.adapter.clearAccessContext();
       }
+      // RedbookClient intentionally wraps transport failures. Preserve only the
+      // local pre-dispatch admission result, never provider text or responses.
+      if (!this.stopCode && admission?.failure) throw admission.failure;
       throw error;
     }
+  }
+  private async restoreContext(
+    authorId: string,
+    noteId?: string,
+    signal?: AbortSignal,
+  ) {
+    // Existing manual workflows retain their explicit reparse boundary.
+    if (this.budgetScope.getStore())
+      await this.adapter.restoreContext(authorId, noteId, signal);
   }
   resolve(url: string) {
     return this.withSession(() => this.adapter.resolve(url));
   }
   list(authorId: string, cursor: string | null, signal?: AbortSignal) {
-    return this.withSession(() => this.adapter.list(authorId, cursor, signal));
+    return this.withSession(async () => {
+      await this.restoreContext(authorId, undefined, signal);
+      return this.adapter.list(authorId, cursor, signal);
+    });
   }
   detail(authorId: string, noteId: string, signal?: AbortSignal) {
     return this.withSession(() =>
-      this.adapter.detail(authorId, noteId, signal),
+      this.restoreContext(authorId, noteId, signal).then(() =>
+        this.adapter.detail(authorId, noteId, signal),
+      ),
     );
   }
   metrics(authorId: string, noteId?: string) {
-    return this.withSession(() => this.adapter.metrics(authorId, noteId));
+    return this.withSession(async () => {
+      await this.restoreContext(authorId, noteId);
+      return this.adapter.metrics(authorId, noteId);
+    });
   }
   comments(authorId: string, noteId: string, cursor: string, rootId?: string) {
     if (this.options.commentsEnabled?.() !== true)
       return failure('XHS_COMMENT_COLLECTION_DISABLED');
     return this.withSession(() =>
-      this.adapter.comments(authorId, noteId, cursor, rootId),
+      this.restoreContext(authorId, noteId).then(() =>
+        this.adapter.comments(authorId, noteId, cursor, rootId),
+      ),
     );
   }
   onModuleDestroy() {

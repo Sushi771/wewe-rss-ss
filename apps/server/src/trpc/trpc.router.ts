@@ -1,3 +1,4 @@
+import { XhsWholeCreatorService } from '../collection/xhs-whole-creator.service';
 import {
   prepareBodySearch,
   bodySearchCoverage,
@@ -146,6 +147,7 @@ export class TrpcRouter {
     @Optional() private readonly xhsSubscriptions?: XhsSubscriptionService,
     @Optional() private readonly xhsRuntime?: XhsSubscriptionRuntime,
     @Optional() private readonly xhsEngagement?: XhsEngagementService,
+    @Optional() private readonly xhsWhole?: XhsWholeCreatorService,
   ) {}
 
   private get xhs() {
@@ -1855,6 +1857,51 @@ export class TrpcRouter {
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
         return this.xhsEngagement!.collect(input);
+      }),
+    wholeCreatorJobs: this.trpcService.protectedProcedure
+      .input(z.object({ creatorId: z.string().min(1).max(128) }).strict())
+      .query(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx, true);
+        return this.xhsWhole!.recent(input.creatorId);
+      }),
+    startWholeCreator: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            requestLimit: z.number().int().min(1).max(100000),
+            intervalMs: z.number().int().min(1000).max(60000),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsWhole!.start(input);
+      }),
+    resumeWholeCreator: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().uuid() }).strict())
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsWhole!.resume(input.id);
+      }),
+    extendWholeCreatorBudget: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            id: z.string().uuid(),
+            additional: z.number().int().min(1).max(100000),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsWhole!.extend(input.id, input.additional);
+      }),
+    cancelWholeCreator: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().uuid() }).strict())
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsWhole!.cancel(input.id);
       }),
     refreshMetrics: this.trpcService.protectedProcedure
       .input(

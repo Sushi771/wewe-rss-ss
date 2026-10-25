@@ -68,3 +68,19 @@ pnpm build:web
 独立内容检查只需运行 `pnpm --filter server exec jest --runInBand xhs-content-integrity.spec`。测试需要Python和Pillow，解释器可由 `XHS_TEST_PYTHON` 指定；缺失解码器会失败，不跳过或退化成只读图片头。XHS专用Windows/Linux CI沿既有 `actions/setup-python@v5` 约定选择Python3.12，通过官方PyPI安装固定 `Pillow==12.1.1`，仅用于测试；本机已用Python3.14/Pillow12.1.1执行6项通过，远端矩阵结果仍需发布后确认。源码未新增生产依赖。
 
 最终联调使用真实@trpc/client通过随机loopback端口调用实际路由，临时SQLite承担持久化；仅外部来源使用合成adapter。它先复现“核对后仍被前端未知代码阻挡”的失败，再确认未知时不执行、核对后显式继续、旧新关联、取消重进不重放。维护只读状态检查与storage-status-ui测试进入同一Windows/Linux CI。
+
+## 整号闭环维护与复验
+
+仅使用合成SQLite及注入来源运行离线验收，不以真实账号或生产库作测试夹具。运行 server 的 xhs-whole-creator、xhs-engagement、xhs-subscription、xhs-session-runtime 和 xhs-subscription-access 测试，再进行前后端类型检查与构建。含127.0.0.1的既有HTTP测试须在允许本地回环的测试环境执行，不能降低断言替代网络权限。
+
+故障排查先看任务stage/currentNote/code、预算used/limit/nextAt，再读现有评论窗口。额度耗尽不创建替代任务重置预算；明确追加仍保留used。来源上下文缺失按规范主页/列表合法流程恢复，无法核验时暂停；不保存明文短期token。重启不会恢复网络工作，需用户继续。
+
+升级前按既有单写者流程备份和演练增量迁移；二进制回退保留新增表、评论和用户文件，不执行破坏性down迁移。生产发布、真实来源契约与端到端真实目录验收是独立门禁，本次离线测试不能替代它们。
+
+## 独立审查修正
+
+显式继续使用受限状态CAS，将cancelled/paused等消费为queued并检查影响行数；普通检查点仍禁止迟到写入覆盖cancelled，并检查零行更新。并发继续只能调度一次。取消后继续的真实数据库与执行链反例保留。
+
+目录阶段只认原生保存器成功返回、且随逐篇任务检查点落盘的正文/媒体与附页回执；DB status=complete或视频skipped不是目录证据。旧下载任务completed而仍有待补时，按原目录授权边界创建新的待补选择并实际保存，不重放已确认保存项。反例通过原生LocalArticleStore发布正文和附页并验证真实文件。
+
+原post-COMMIT lost-ack回归在持久completed可见后显式等待执行lane，再断言pending为空；保留lost=true、saves=1、持久completed及pending=0全部断言，不以sleep消除竞态，也不提前释放持久化屏障。

@@ -73,10 +73,55 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     'constructor',
     'xiaohongshuRouter',
   ]);
+  // The whole-creator extension may change only this injection and five XHS routes.
+  // Remove those exact AST nodes and still enforce the previous engagement pins.
+  assert.deepEqual(Object.keys(xhsCompatibility.wholeCreator).sort(), [
+    'constructor',
+    'xiaohongshuRouter',
+  ]);
+  const wholeRoutes = [
+    'wholeCreatorJobs',
+    'startWholeCreator',
+    'resumeWholeCreator',
+    'cancelWholeCreator',
+    'extendWholeCreatorBudget',
+  ];
+  for (const key of ['constructor', 'xiaohongshuRouter']) {
+    const member = declaration.members.find(
+      (node) => (node.name?.getText(ast) || 'constructor') === key,
+    );
+    const removed =
+      key === 'constructor'
+        ? member.parameters.filter(
+            (parameter) => parameter.name.getText(ast) === 'xhsWhole',
+          )
+        : member.initializer.arguments[0].properties.filter((property) =>
+            wholeRoutes.includes(property.name.getText(ast)),
+          );
+    assert.equal(removed.length, key === 'constructor' ? 1 : 5);
+    let prior = member.getText(ast);
+    const offset = member.getStart(ast);
+    for (const node of [...removed].reverse()) {
+      assert.equal(
+        read(file)[node.end],
+        ',',
+        'exact additive seam must retain its delimiter',
+      );
+      prior =
+        prior.slice(0, node.getFullStart() - offset) +
+        prior.slice(node.end + 1 - offset);
+    }
+    assert.equal(
+      tokens(prior),
+      xhsCompatibility.engagement[key],
+      `unchanged pre-whole ${key}`,
+    );
+  }
   assert.deepEqual(members, {
     ...pins.routerMembers,
     ...xhsCompatibility.baseline,
     ...xhsCompatibility.engagement,
+    ...xhsCompatibility.wholeCreator,
   });
   assert.deepEqual(routes, {
     ...pins.articleRoutes,

@@ -43,6 +43,10 @@ type Options = {
   now?: () => number;
 };
 export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
+  private readonly rebuildCursors = new Map<
+    string,
+    { cursor: string | null; ended: boolean; expiresAt: number }
+  >();
   private readonly tokens = new Map<string, Access>();
   private readonly authors = new Map<string, Access>();
   private readonly now: () => number;
@@ -79,6 +83,7 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
       access.token = '';
       access.source = '';
     }
+    this.rebuildCursors.clear();
     this.tokens.clear();
     this.authors.clear();
   }
@@ -87,6 +92,48 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     if (!context || context.expiresAt <= this.now())
       throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
     return { xsecToken: context.token, xsecSource: context.source };
+  }
+  /** Rebuild only from the existing public profile/list flow. No token is saved. */
+  async restoreContext(
+    authorId: string,
+    noteId?: string,
+    signal?: AbortSignal,
+  ) {
+    id(authorId);
+    if (noteId) id(noteId);
+    const author = this.authors.get(authorId);
+    if (!author || author.expiresAt <= this.now()) {
+      this.rebuildCursors.delete(authorId);
+      const resolved = await this.resolve(
+        `https://www.xiaohongshu.com/user/profile/${authorId}`,
+      );
+      if (resolved.author.id !== authorId)
+        throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+    }
+    if (!noteId) return;
+    const key = JSON.stringify([authorId, noteId]);
+    if ((this.tokens.get(key)?.expiresAt ?? 0) > this.now()) return;
+    const prior = this.rebuildCursors.get(authorId);
+    if (prior && prior.expiresAt > this.now() && prior.ended)
+      throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+    let cursor: string | null =
+      prior && prior.expiresAt > this.now() ? prior.cursor : null;
+    const seen = new Set<string | null>();
+    do {
+      if (signal?.aborted)
+        throw new XhsSubscriptionError('XHS_TASK_INTERRUPTED');
+      if (seen.has(cursor)) throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
+      seen.add(cursor);
+      const page = await this.list(authorId, cursor, signal);
+      this.rebuildCursors.set(authorId, {
+        cursor: page.nextCursor,
+        ended: page.nextCursor === null,
+        expiresAt: this.now() + this.lifetime,
+      });
+      if (page.notes.some((note) => note.noteId === noteId)) return;
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_UNAVAILABLE');
   }
   async resolve(raw: string) {
     const url = await this.shortLinks.resolve(raw);

@@ -14,5 +14,9 @@
   "criticalFiles": {
     "apps/server/src/article-download.controller.ts": "93e459360921e0864e6710754b2157f3036e6d249158b7f6535b7705891a6f78",
     "scripts/local-release/runtime.cjs": "8249727bbd2f4304d7264b443957e9262317dccaf6dde276a27feb6031f84f68"
+  },
+  "wholeCreator": {
+    "constructor": "ae6ae0cedc5c4b489fd53eeb003dcb03d1ded4d6209726f2671d8ab89202bfea",
+    "xiaohongshuRouter": "dd814d5e21e77e89a2cd4260d652802fb14c0fbf6f956d5b3c44fc90bd7a9d8e"
   }
 }

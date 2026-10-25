@@ -261,6 +261,47 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
     await db.$executeRaw`DELETE FROM xhs_saved_comments`;
     await db.$executeRaw`DELETE FROM xhs_comment_windows`;
   });
+  it('segments 20001 saved comments without truncation and protects edited companion pages', async () => {
+    const content = '<'.repeat(40);
+    await db.$executeRaw`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<20001)
+      INSERT INTO xhs_saved_comments(note_id,comment_id,root_id,parent_id,document)
+      SELECT ${note},'large-'||n,NULL,NULL,json_object('id','large-'||n,'rootId',NULL,'parentId',NULL,
+      'content',${content},'authorId',NULL,'authorName',NULL,'likes',0,'publishedAt',NULL,'collectedAt',1)
+      FROM seq`;
+    const service = new XiaohongshuService(db as any);
+    const parts = await (service as any).exportEngagement(creator, note);
+    expect(Array.isArray(parts)).toBe(true);
+    expect(
+      parts.every((part: string) => Buffer.byteLength(part) < 5_000_000),
+    ).toBe(true);
+    const all = parts.join('');
+    expect(
+      new Set(
+        [...all.matchAll(/评论ID：large-(\d+)/g)].map((match) => match[1]),
+      ).size,
+    ).toBe(20001);
+    const { xhsLocalSnapshotPublisher } = await import('./xhs-local-snapshot');
+    const directory = await fs.mkdtemp(path.join(root, 'large-export-'));
+    const saved = { directory, markdownPath: path.join(directory, 'body.md') };
+    await fs.writeFile(saved.markdownPath, 'HANDWRITTEN BODY');
+    const publish = xhsLocalSnapshotPublisher(note, 'Synthetic large', parts)!;
+    await publish(saved);
+    const first = (await fs.readdir(directory)).sort();
+    expect(first.length).toBe(parts.length + 2);
+    await publish(saved);
+    expect((await fs.readdir(directory)).sort()).toEqual(first);
+    const part = first.find(
+      (name) => name.endsWith('.md') && name !== 'body.md',
+    )!;
+    await fs.writeFile(path.join(directory, part), 'HANDWRITTEN COMPANION');
+    await publish(saved);
+    expect(await fs.readFile(path.join(directory, part), 'utf8')).toBe(
+      'HANDWRITTEN COMPANION',
+    );
+    expect(await fs.readFile(saved.markdownPath, 'utf8')).toBe(
+      'HANDWRITTEN BODY',
+    );
+  }, 60000);
   it('preserves all WeChat rows; old generated Prisma client still reads/writes after migration', async () => {
     expect({
       feeds: await db.feed.findMany(),

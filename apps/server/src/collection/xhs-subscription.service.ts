@@ -76,6 +76,7 @@ type Task = XhsSubscriptionTask & {
   listedIds?: string[];
   listFinished?: boolean;
   pageLimit?: number;
+  localReceipts?: Record<string, { savedAt: number; supplementStatus: string }>;
   localFilesSaved?: number;
   localFilesReused?: number;
 };
@@ -341,6 +342,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     creatorId: string;
     noteIds: string[];
     pickToken?: string;
+    sameDirectoryAsTaskId?: string;
   }) {
     await this.creator(input.creatorId);
     const ids = [...new Set(input.noteIds)];
@@ -357,6 +359,15 @@ export class XhsSubscriptionService implements OnModuleInit {
       return reject('XHS_LOCAL_SAVE_UNAVAILABLE');
     // Freeze the existing native picker grant before any detail/network work.
     const directory = await this.reserve(input.pickToken);
+    if (input.sameDirectoryAsTaskId) {
+      const previous = await this.loadTask(input.sameDirectoryAsTaskId);
+      if (
+        previous.kind !== 'download' ||
+        previous.creatorId !== input.creatorId ||
+        previous.directory !== directory
+      )
+        return reject('XHS_RESUME_DIRECTORY_CHANGED');
+    }
     return this.enqueue('download', input.creatorId, ids, directory);
   }
   private async persist(t: Task) {
@@ -491,6 +502,24 @@ export class XhsSubscriptionService implements OnModuleInit {
     const t =
       this.uncertain.get(input.taskId) ?? (await this.loadTask(input.taskId));
     return this.view(t);
+  }
+  /** Durable positive saver receipts only; cache completeness and video skips are not evidence. */
+  async confirmedLocalSaves(input: { taskId: string }) {
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId))
+      return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const task = await this.loadTask(input.taskId);
+    return Object.entries(task.localReceipts ?? {})
+      .filter(
+        ([id, receipt]) =>
+          ['completed', 'skipped'].includes(task.items[id]) &&
+          Number.isSafeInteger(receipt.savedAt) &&
+          receipt.savedAt > 0 &&
+          ['new', 'retained', 'conflict-version'].includes(
+            receipt.supplementStatus,
+          ),
+      )
+      .map(([noteId, receipt]) => ({ noteId, ...receipt }));
   }
   private view(t: Task): XhsSubscriptionTask {
     const uncertain = this.uncertain.has(t.taskId);
@@ -750,6 +779,18 @@ export class XhsSubscriptionService implements OnModuleInit {
                 t.snapshotsSaved = (t.snapshotsSaved ?? 0) + 1;
               if (saved.mediaComplete === false)
                 return reject('XHS_LOCAL_MEDIA_INCOMPLETE');
+              if (
+                saved.supplement &&
+                ['new', 'retained', 'conflict-version'].includes(
+                  saved.supplement.status,
+                )
+              ) {
+                t.localReceipts ??= {};
+                t.localReceipts[id] = {
+                  savedAt: Date.now(),
+                  supplementStatus: saved.supplement.status,
+                };
+              }
               if (saved.alreadySaved) {
                 t.localFilesReused = (t.localFilesReused ?? 0) + 1;
                 t.skipped++;

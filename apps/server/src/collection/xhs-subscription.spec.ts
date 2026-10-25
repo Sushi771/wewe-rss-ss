@@ -84,6 +84,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     store = new LocalArticleStore(path.join(root, 'settings.json'), root);
   }, 30000);
   beforeEach(async () => {
+    // Previous terminal visibility does not imply its worker/finally has released the fixture lock.
+    if (service) await (service as any).lane;
     await db.$executeRawUnsafe('DELETE FROM xhs_subscription_tasks');
     await db.xhsNote.deleteMany();
     await db.xhsCreator.deleteMany();
@@ -132,6 +134,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     ).creatorId;
   });
   afterAll(async () => {
+    if (service) await (service as any).lane;
     await db?.$disconnect(); /* synthetic files retained in temp for diagnosis */
   });
   const finish = async (taskId: string) => {
@@ -153,6 +156,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
   it('limits each submitted list run and resumes the saved cursor only after explicit continuation', async () => {
     let page = 0;
     const list = jest.fn(async (_author: string, _cursor: string | null) => {
+      void _author;
+      void _cursor;
       page++;
       return {
         authorId: author.id,
@@ -539,6 +544,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       total: 1,
       remaining: 0,
     });
+    // COMMIT visibility precedes Promise/finally worker cleanup. Join the actual lane.
+    await (service as any).lane;
     expect(lost).toBe(true);
     expect(saves).toBe(1);
     expect((service as any).pending.size).toBe(0);

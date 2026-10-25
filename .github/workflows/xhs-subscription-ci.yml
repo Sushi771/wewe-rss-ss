@@ -59,7 +59,7 @@ jobs:
       - name: Synthetic source, session, storage and shared grouping regressions
         run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu)|trpc/(xiaohongshu-ui|management-groups)|article-local-save|xhs-single-download|xhs-video-download|article-verified-download)'
       - name: Shared UI and WeChat regressions
-        run: node --test scripts/xhs-subscription-ui.test.cjs scripts/xhs-task-recovery-ui.test.cjs scripts/storage-status-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs scripts/folder-member-picker.test.cjs scripts/deployed-export-adaptation.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/article-body-state.test.cjs scripts/feed-browse-state.test.cjs
+        run: node --test scripts/xhs-whole-creator-ui.test.cjs scripts/xhs-subscription-ui.test.cjs scripts/xhs-task-recovery-ui.test.cjs scripts/storage-status-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs scripts/folder-member-picker.test.cjs scripts/deployed-export-adaptation.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/article-body-state.test.cjs scripts/feed-browse-state.test.cjs
       - name: Existing maintenance status contract
         run: pnpm --filter server exec jest --runInBand --testPathPattern=startup-audit.spec --testNamePattern='existing status read'
       - name: Types
@@ -68,6 +68,6 @@ jobs:
           pnpm --filter web exec tsc --noEmit
       - name: Focused web lint and build
         run: |
-          pnpm --filter web exec eslint src/pages/feeds/xiaohongshu.tsx src/components/XhsEngagement.tsx src/components/SubscriptionPrimitives.tsx src/components/XhsTaskRecovery.tsx src/components/StorageBackupStatus.tsx src/utils/startup-status.ts src/pages/feeds/index.tsx src/pages/feeds/list.tsx src/pages/feeds/manual-refresh-progress.tsx src/provider/trpc.tsx src/utils/xiaohongshu-subscription.ts
+          pnpm --filter web exec eslint src/pages/feeds/xiaohongshu.tsx src/components/XhsWholeCreator.tsx src/components/XhsEngagement.tsx src/components/SubscriptionPrimitives.tsx src/components/XhsTaskRecovery.tsx src/components/StorageBackupStatus.tsx src/utils/startup-status.ts src/pages/feeds/index.tsx src/pages/feeds/list.tsx src/pages/feeds/manual-refresh-progress.tsx src/provider/trpc.tsx src/utils/xiaohongshu-subscription.ts
           pnpm --filter web build
           pnpm --filter server build

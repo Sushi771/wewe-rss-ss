@@ -858,16 +858,67 @@ export class XiaohongshuService {
     noteId: string,
     metrics?: XhsMetricSnapshot | null,
   ) {
-    const view = await this.engagement({ creatorId, noteId, limit: 20000 });
-    if (view.totalSaved > view.returned)
-      return fail('XHS_COMMENT_EXPORT_LIMIT');
-    const markdown = xhsEngagementMarkdown(
-      metrics === undefined ? view : { ...view, metrics },
+    const initial = await this.engagement({ creatorId, noteId, limit: 200 });
+    if (initial.totalSaved <= initial.returned) {
+      const markdown = xhsEngagementMarkdown(
+        metrics === undefined ? initial : { ...initial, metrics },
+      );
+      if (Buffer.byteLength(markdown) <= 4_000_000) return markdown;
+    }
+    return this.prisma.$transaction(
+      async (tx) => {
+        const target = await tx.xhsNote.findFirst({
+          where: { id: noteId, creatorId },
+          select: { id: true },
+        });
+        if (!target) return fail('XHS_NOTE_NOT_FOUND');
+        const noteMetrics = await readXhsMetrics(tx, 'note');
+        const creatorMetrics = await readXhsMetrics(tx, 'creator');
+        const first = await readXhsComments(tx, noteId, 0, 200);
+        const parts: string[] = [];
+        let current = '',
+          currentBytes = 0;
+        for (
+          let offset = 0;
+          offset < Math.max(1, first.totalSaved);
+          offset += 200
+        ) {
+          const page =
+            offset === 0
+              ? first
+              : await readXhsComments(tx, noteId, offset, 200);
+          const markdown = xhsEngagementMarkdown({
+            ...page,
+            metrics:
+              metrics === undefined
+                ? (noteMetrics.get(noteId) ?? null)
+                : metrics,
+            creatorMetrics: creatorMetrics.get(creatorId) ?? null,
+          });
+          for (const line of markdown.split(/(?<=\n)/)) {
+            const lineBytes = Buffer.byteLength(line);
+            if (current && currentBytes + lineBytes > 4_000_000) {
+              parts.push(current);
+              current = '';
+              currentBytes = 0;
+            }
+            current += line;
+            currentBytes += lineBytes;
+          }
+        }
+        if (current) parts.push(current);
+        return parts.length <= 1
+          ? (parts[0] ?? '')
+          : parts.map(
+              (part, index) =>
+                `\n\n## 评论分段 ${index + 1}/${parts.length}\n\n仅为已保存范围，未返回与受限内容未知。\n` +
+                part,
+            );
+      },
+      { timeout: 30000 },
     );
-    if (Buffer.byteLength(markdown) > 5_000_000)
-      return fail('XHS_COMMENT_EXPORT_LIMIT');
-    return markdown;
   }
+
   async body(creatorId: string, noteId: string) {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
@@ -1001,7 +1052,9 @@ export class XiaohongshuService {
             xhsOriginalLink(note.id) +
             ')\n\n' +
             result.markdown +
-            snapshot,
+            (Array.isArray(snapshot)
+              ? '\n\n评论分段见同目录附页。\n'
+              : snapshot),
         );
         await xhsLocalSnapshotPublisher(
           note.id,
@@ -1126,7 +1179,10 @@ export class XiaohongshuService {
       return withXhsLocalSnapshot(
         async (directory: string) => {
           const result = await prepare(directory);
-          await fs.appendFile(path.join(directory, 'index.md'), snapshot);
+          await fs.appendFile(
+            path.join(directory, 'index.md'),
+            Array.isArray(snapshot) ? '\n\n评论分段见同目录附页。\n' : snapshot,
+          );
           return result;
         },
         note.id,
@@ -1160,7 +1216,10 @@ export class XiaohongshuService {
           '[原文](' + sourceUrl + ')',
           directory,
         );
-        await fs.appendFile(path.join(directory, 'index.md'), snapshot);
+        await fs.appendFile(
+          path.join(directory, 'index.md'),
+          Array.isArray(snapshot) ? '\n\n评论分段见同目录附页。\n' : snapshot,
+        );
         return { ...result, sourceUrl: null };
       },
       note.id,

@@ -14,7 +14,7 @@ export function withXhsLocalSnapshot(
   prepare: ArticlePreparation,
   noteId: string,
   title: string,
-  snapshot: string,
+  snapshot: string | string[],
 ): ArticlePreparation {
   const publisher = xhsLocalSnapshotPublisher(noteId, title, snapshot);
   if (publisher) prepare.afterSave = publisher;
@@ -25,8 +25,38 @@ export function withXhsLocalSnapshot(
 export function xhsLocalSnapshotPublisher(
   noteId: string,
   title: string,
-  snapshot: string,
+  snapshot: string | string[],
 ): ArticlePreparation['afterSave'] {
+  if (Array.isArray(snapshot)) {
+    const publishers = snapshot.map((part, index) =>
+      xhsLocalSnapshotPublisher(
+        noteId,
+        `${title} (${index + 1}/${snapshot.length})`,
+        part,
+      ),
+    );
+    return async (saved) => {
+      const receipts: SavedSupplement[] = [];
+      for (const publish of publishers) {
+        const next = await publish?.(saved);
+        if (next) receipts.push(next);
+      }
+      if (receipts.length !== snapshot.length)
+        throw Error('XHS_COMMENT_EXPORT_EMPTY');
+      const manifest =
+        '# 评论附页索引\n\n' +
+        receipts
+          .map(
+            (receipt, index) =>
+              `- [分段 ${index + 1}/${receipts.length}](${encodeURIComponent(path.basename(receipt.path))}) SHA256 ${receipt.sha256}`,
+          )
+          .join('\n') +
+        '\n\n仅含本次已保存范围，未返回与受限内容仍未知。\n';
+      return xhsLocalSnapshotPublisher(noteId, title + ' 评论索引', manifest)!(
+        saved,
+      );
+    };
+  }
   const snapshotBytes = Buffer.from(
     `# 互动与评论快照 · ${title.replace(/[\r\n]/g, ' ').replace(/[<>]/g, '')}\n\n[原文](${xhsOriginalLink(noteId)})\n\n此附页由平台生成。正文及用户手写内容保持原样；再次保存若数据有变化，会新增快照文件，旧快照保留。\n${snapshot}`,
   );

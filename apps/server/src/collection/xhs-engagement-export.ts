@@ -41,7 +41,7 @@ export function xhsEngagementMarkdown(view: XhsEngagementView) {
   for (const w of view.windows)
     md += `\n- ${w.scope === 'top' ? '顶层' : '根评论 ' + plain(w.scope)}：${w.pages} 页；${w.state === 'returned-end' ? '该接口返回结束' : w.state === 'failed' ? '失败，保留部分结果' : '部分'}；${when(w.collectedAt)}${w.code ? '；' + plain(w.code) : ''}\n`;
   const emit = (c: XhsSavedComment, child = false) =>
-    `\n${child ? '### 回复' : '### 评论'} ${plain(c.authorName ?? '未知作者')}\n\n${plain(c.content)}\n\n点赞：${c.likes ?? '未知'}；发布时间：${c.publishedAt === null ? '未知' : when(c.publishedAt)}；采集：${when(c.collectedAt)}\n` +
+    `\n${child ? '### 回复' : '### 评论'} ${plain(c.authorName ?? '未知作者')}\n\n${plain(c.content)}\n\n评论ID：${plain(c.id)}\n\n点赞：${c.likes ?? '未知'}；发布时间：${c.publishedAt === null ? '未知' : when(c.publishedAt)}；采集：${when(c.collectedAt)}\n` +
     (child
       ? `\n所属根评论：${plain(c.rootId!)}；精确回复对象${c.parentId ? '：' + plain(c.parentId) : '未知'}。\n`
       : '');
