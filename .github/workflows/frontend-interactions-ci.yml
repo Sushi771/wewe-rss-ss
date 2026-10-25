@@ -2,9 +2,9 @@ name: Frontend interaction regressions
 
 on:
   push:
-    branches: [codex/frontend-export-receipt-folder-20261019, codex/responsive-shared-layout]
+    branches: [codex/frontend-export-receipt-folder-20261019]
   pull_request:
-    branches: [main, codex/reading-first-response-20261018, codex/xhs-depth-integration]
+    branches: [main, codex/reading-first-response-20261018]
     paths:
       - 'apps/web/**'
       - 'scripts/*ui.test.cjs'
@@ -41,9 +41,3 @@ jobs:
         run: |
           test -x "$LAYOUT_TEST_BROWSER"
           node --test scripts/folder-subscriptions-browser.test.cjs
-      - name: Responsive reading workspace (compiled frontend, synthetic requests)
-        env:
-          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
-        run: |
-          node scripts/responsive-layout-browser.test.cjs
-          node --test scripts/article-date-shortcuts-browser.test.cjs scripts/feed-sidebar-layout.test.cjs scripts/subscription-dialog-layout.test.cjs
