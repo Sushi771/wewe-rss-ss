@@ -1,4 +1,4 @@
-"""In-memory counterexamples for the single-column coverage exception.
+"""In-memory counterexamples for the exact five-column coverage exception.
 
 No production data, credentials, filesystem deletion or retirement execution.
 """
@@ -45,11 +45,11 @@ class CoverageTests(unittest.TestCase):
             self.assertEqual(new.serialize(),new_before)
             return result
 
-    def test_only_ordinary_feed_sync_time_may_differ_without_mutation(self):
-        self.assertTrue(self.compare("UPDATE feeds SET sync_time=99; INSERT INTO articles VALUES('new','new body','local://image-2',6);"))
+    def test_only_reviewed_ordinary_feed_status_columns_may_differ_without_mutation(self):
+        self.assertTrue(self.compare("UPDATE feeds SET sync_time=99,update_time=98,updated_at=97,last_collection_result='new result',provider_refresh_attempt_time=96; INSERT INTO articles VALUES('new','new body','local://image-2',6);"))
 
-    def test_other_previously_ignored_feed_fields_are_now_strict(self):
-        for column in ('update_time','updated_at','has_history','last_collection_result','provider_refresh_attempt_time','unknown_state'):
+    def test_has_history_and_unknown_feed_fields_remain_strict(self):
+        for column in ('has_history','unknown_state'):
             with self.subTest(column=column):
                 self.assertFalse(self.compare(f"UPDATE feeds SET sync_time=99,{column}='changed';"))
 
@@ -73,6 +73,14 @@ class CoverageTests(unittest.TestCase):
     def test_sync_time_primary_key_still_binds_identity(self):
         schema = 'CREATE TABLE feeds(sync_time INTEGER PRIMARY KEY,body TEXT); INSERT INTO feeds VALUES(1,"strict");'
         self.assertFalse(self.compare('UPDATE feeds SET sync_time=2',schema))
+
+    def test_all_reviewed_names_remain_strict_in_other_tables_and_generated_columns(self):
+        for column in ('sync_time','update_time','updated_at','last_collection_result','provider_refresh_attempt_time'):
+            with self.subTest(column=column):
+                schema=f'CREATE TABLE other(id INTEGER PRIMARY KEY,"{column}" TEXT); INSERT INTO other VALUES(1,"old");'
+                self.assertFalse(self.compare(f'UPDATE other SET "{column}"="new"',schema))
+                schema=f'CREATE TABLE feeds(id INTEGER PRIMARY KEY,value INTEGER,"{column}" INTEGER GENERATED ALWAYS AS(value*2) STORED); INSERT INTO feeds(id,value) VALUES(1,5);'
+                self.assertFalse(self.compare('UPDATE feeds SET value=6',schema))
 
 
 if __name__ == '__main__': unittest.main()

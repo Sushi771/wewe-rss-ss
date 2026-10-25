@@ -91,4 +91,4 @@ Windows凭据库为SQLite所在目录下 `.wewe-xhs-session/session.dpapi`，Cur
 
 ## 周期退役覆盖比较
 
-`backup-sqlite.py::snapshot_covers` 的普通列豁免集合限定为 `feeds.sync_time`。旧版另外五个摘要字段回归严格比较；主键、生成列、其他表同名列、schema及其他类型值均不豁免。比较结果不替代保护引用、对象身份、SHA、时限、占用证明和精确永久删除批准。不得从当前文章有覆盖推断历史整库可完全重建；开发分支修复不修改已安装运行包。
+`backup-sqlite.py::snapshot_covers` 仅豁免普通 `feeds.sync_time`、`update_time`、`updated_at`、`last_collection_result`、`provider_refresh_attempt_time`。`has_history`、主键、生成列、其他表同名字段与schema继续严格。`indexed_reference_review` 只核已登记根的顶层元数据并绑定命名空间/身份/SHA，未知项不放行；`indexed_typed_coverage` 在SQLite内部比较所有类型值，只返回计数，REAL位级证明不足时保持阻塞。同schema保留点可作覆盖见证，不强迫新schema的pending越过结构检查。此只读计划路径不调用旧全局时间分层扫描/执行入口；永久动作仍须单独批准及原生句柄、引用、占用和生命周期复核。

@@ -261,6 +261,115 @@ def files_and_refs(root, budget, protected_paths=()):
     reference_records.sort(key=lambda r:canonical_json(r))
     return files, data_files, refs, reference_records, state
 
+def indexed_reference_review(root, candidate, budget, bound_controls=()):
+    """Read-only reference evidence for one indexed point; never recurse.
+
+    Archive roots come from the existing identity-bound registration. Their
+    self-contained receipts cannot reference a different directory. Unknown
+    metadata is held, not silently classified as harmless. This evidence is not
+    a deletion lease: execution still needs fresh reference/resource validation.
+    """
+    root=local_path(str(root));candidate=local_path(str(candidate))
+    registration=backup.legacy_registration(root)
+    roots=[root,*registration['roots']]
+    if len(roots)>257:raise MaintenanceError('REFERENCE_ROOT_LIMIT')
+    controls={str(local_path(str(p))) for p in bound_controls}
+    records=[];protected={};unknown=[];entries=0;namespaces=[]
+    if registration['record']:records.append(registration['record'])
+    for folder in roots:
+        if candidate.is_relative_to(folder) and folder!=root:
+            unknown.append({'path':str(folder),'reason':'candidate-is-declared-archive'})
+        before=directory_identity(folder);names=[]
+        for file in sorted(folder.iterdir(),key=lambda p:p.name):
+            budget.tick();entries+=1
+            if entries>4096:raise MaintenanceError('REFERENCE_ENTRY_LIMIT')
+            names.append(file.name)
+            if file.is_dir():continue  # No database/history descent, including links.
+            metadata=file.suffix.lower() in ('.json','.init','.lock','.yaml','.yml','.toml')
+            if not metadata:continue
+            if file.is_symlink() or (hasattr(file,'is_junction') and file.is_junction()):
+                unknown.append({'path':str(file),'reason':'linked-metadata'});continue
+            value=budget.json(file);kind=None
+            if str(file) in controls:kind='bound-lifecycle-control'
+            elif file.name=='retention-protected.json':
+                if (not isinstance(value,dict) or set(value)!={'format','paths'}
+                        or value['format']!='sqlite-retention-protected-v1' or not isinstance(value['paths'],list)
+                        or len(value['paths'])>256):raise MaintenanceError('INVALID_PROTECTION_MANIFEST')
+                for target in value['paths']:protected[str(local_path(target))]='explicit manual protection'
+                kind='protection-manifest'
+            elif file.name.startswith(('.latest-','snapshot-owner-','refresh-recovery-owner-')):
+                target=local_path(value.get('backup'))
+                protected[str(target)]='current publisher reference';kind='publisher'
+            elif file.name=='verification.json':
+                target=local_path(value.get('backup'))
+                if target.parent!=folder or value.get('integrityCheck')!='ok' or not re.fullmatch('[a-f0-9]{64}',str(value.get('sha256',''))):
+                    unknown.append({'path':str(file),'reason':'non-self-contained-receipt'})
+                else:kind='self-contained-archive-receipt'
+            elif file.name=='.space-budget-status.json':
+                fields={'nextBackupAllowed','warning','estimatedDaysAtContinuousChanges','recordedAt'}
+                extra={'continuousChangedSnapshotIntervalSeconds','forecastBasis'}
+                if (set(value) not in (fields,fields|extra) or type(value.get('nextBackupAllowed')) is not bool
+                        or type(value.get('warning')) is not bool or not isinstance(value.get('recordedAt'),str)
+                        or len(value['recordedAt'])>80
+                        or type(value.get('estimatedDaysAtContinuousChanges')) not in (int,float)
+                        or not 0<=value['estimatedDaysAtContinuousChanges']<=1e12
+                        or (set(value)==fields|extra and (type(value.get('continuousChangedSnapshotIntervalSeconds')) is not int
+                            or not 60<=value['continuousChangedSnapshotIntervalSeconds']<=86400
+                            or value.get('forecastBasis')!='continuously-changing-source; unchanged snapshots may be reused'))):
+                    unknown.append({'path':str(file),'reason':'unknown-capacity-status'})
+                else:kind='non-authoritative-capacity-status'
+            else:unknown.append({'path':str(file),'reason':'unknown-reference-metadata'})
+            if kind:
+                checksum=budget.sha(file)
+                if checksum is None:raise MaintenanceError('REFERENCE_CHECKSUM_UNPROVED')
+                records.append({'path':str(file),'kind':kind,'identity':identity(file),'sha256':checksum})
+        if directory_identity(folder)!=before or names!=sorted(p.name for p in folder.iterdir()):
+            raise MaintenanceError('REFERENCE_NAMESPACE_CHANGED')
+        namespaces.append({'path':str(folder),'identity':before,'namesDigest':digest(names)})
+    if backup.legacy_registration(root)!=registration:raise MaintenanceError('LEGACY_REGISTRATION_CHANGED')
+    return {'format':'indexed-reference-review-v1','roots':namespaces,'records':records,
+            'protected':protected,'unknown':unknown,'entries':entries,'recursiveDatabaseReads':0,
+            'candidateReferenced':str(candidate) in protected,
+            'complete':not unknown and str(candidate) not in protected}
+
+
+def indexed_typed_coverage(connection):
+    """main=old and witness=retained, attached read-only by the caller.
+
+    Return counts, never table values (including account/session values). SQL
+    type tags and binary collation preserve strict comparison. REAL rows stay
+    held because SQL equality alone cannot prove signed-zero bit identity.
+    Caller supplies a bounded SQLite progress handler and read reservation.
+    """
+    schema="SELECT type,name,tbl_name,sql FROM {}.sqlite_master ORDER BY type,name"
+    if list(connection.execute(schema.format('main')))!=list(connection.execute(schema.format('witness'))):
+        return {'covers':False,'reason':'schema-differs','tables':[]}
+    quote=lambda s:'"'+s.replace('"','""')+'"'
+    allowed={'sync_time','update_time','updated_at','last_collection_result','provider_refresh_attempt_time'}
+    results=[]
+    tables=connection.execute("SELECT name FROM main.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+    for (table,) in tables:
+        info=list(connection.execute('PRAGMA main.table_xinfo('+quote(table)+')'))
+        if not info or any(row[6] not in (0,2,3) for row in info):
+            return {'covers':False,'reason':'unsupported-column','tables':results}
+        columns=[row[1] for row in info if table!='feeds' or row[1] not in allowed or row[6]!=0]
+        keys=[row[1] for row in sorted(info,key=lambda r:r[5]) if row[5]]
+        if not keys:
+            keys=[next((name for name in ('rowid','_rowid_','oid') if name not in [r[1].lower() for r in info]),None)]
+        if None in keys:return {'covers':False,'reason':'unproved-row-identity','tables':results}
+        columns=list(dict.fromkeys(keys+columns))
+        projection=','.join('typeof('+quote(c)+'),'+quote(c)+' COLLATE BINARY' for c in columns)
+        missing=connection.execute('SELECT COUNT(*) FROM (SELECT '+projection+' FROM main.'+quote(table)+
+            ' EXCEPT SELECT '+projection+' FROM witness.'+quote(table)+')').fetchone()[0]
+        nulls=connection.execute('SELECT COUNT(*) FROM main.'+quote(table)+' WHERE '+
+            ' OR '.join(quote(c)+' IS NULL' for c in keys)).fetchone()[0]
+        reals=connection.execute('SELECT COUNT(*) FROM main.'+quote(table)+' WHERE '+
+            ' OR '.join('typeof('+quote(c)+")='real'" for c in columns)).fetchone()[0]
+        results.append({'table':table,'uncoveredRows':missing,'nullKeys':nulls,'realRows':reals})
+    return {'covers':all(not any(row[k] for k in ('uncoveredRows','nullKeys','realRows')) for row in results),
+            'reason':'complete-typed-set-proof','tables':results,'credentialValuesReturned':False}
+
+
 def make_plan(database, root, now=None, protected_paths=(), read_bytes=64*1024**2, seconds=10, age_days=7, policy=None, periodic_only=False, owned_lease=None):
     database, root = local_path(str(database)), local_path(str(root))
     if database.is_relative_to(root): raise MaintenanceError('NESTED_SOURCE_DESTINATION')

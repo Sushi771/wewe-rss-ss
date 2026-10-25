@@ -97,26 +97,45 @@ not release/install pointers. No service switch or deployment occurs. A passing
 drill proves this source/toolchain and synthetic recovery case, not unattended
 production recovery or a new real-platform acceptance.
 
-## Exact coverage exception
+## Exact coverage exception and indexed review
 
-Periodic retirement comparison ignores only the ordinary stored column
-`feeds.sync_time`. The earlier six-column summary exception is narrowed: feed
-`update_time`, `updated_at`, `has_history`, `last_collection_result` and
-`provider_refresh_attempt_time` remain strict, as do unknown columns, article
-identity/body/media references, notes, metrics, generated values and schema.
-A sync-time column used in a primary key still binds identity. This comparison
-never grants permission to delete or overrides a protected-point reference.
+The ordinary feed-column exception is exactly `sync_time`, `update_time`,
+`updated_at`, `last_collection_result`, `provider_refresh_attempt_time`.
+`has_history`, unknown columns, article identity/body/media, notes, metrics,
+primary keys, generated values and schema remain strict. The five fields store
+operational summaries/times, not article bodies or media files; losing an old
+whole-database point still loses that historical operational state.
 
-Removing one specifically approved manual protection only permits fresh planning.
-Generate the existing exact batch without calling its executor; keep the
-three-normal/one-pending allowance and automatic deletion disabled. Before any
-separate irreversible approval, the batch must retain exact source/root/object
-identities, receipt hashes, reference records and a fresh resource check. All
-other protected points remain protected. A current-content coverage proof does
-not reconstruct a deleted historical whole-database snapshot. Production package
-code is not changed by a development-branch commit.
+A retained point with the exact old schema may prove coverage even when a newer
+pending generation has a different schema. Coverage witness and pending promotion
+are separate roles. Never normalize away schema differences or use a content-only
+comparison as proof that an old historical snapshot can be reconstructed.
 
-`test_snapshot_covers.py` uses in-memory SQLite only. It proves the one-column
-positive case without mutation, rejects every former extra exception, changed
-bodies/media/identities/types/schema, missing rows, unknown tables and generated
-or primary-key sync-time changes. The focused CI runs it on Linux and Windows.
+For a specifically approved retained set, `indexed_reference_review` checks only
+the managed root and the existing identity-registered archive roots' top-level
+metadata. It never recursively reads historical databases. Protection manifests,
+current publisher references, lifecycle controls, namespace names, file identities
+and hashes are bound; self-contained archive receipts must name their own folder.
+Unknown/linked metadata or an outstanding target reference holds the review.
+Capacity telemetry is recognized only by its strict known shape and is not an
+allocation or deletion authority. Namespace/reference checks must be repeated at
+execution; an old review never grants a lease.
+
+`indexed_typed_coverage` compares matching schemas and all typed old records
+inside SQLite, returning only counts. Binary collation and type tags preserve
+strictness. NULL keys, unsupported columns and REAL rows needing bitwise proof
+stay held. No account/session column values are returned to the caller.
+
+This is a read-only exact review, not a new automatic deletion entrypoint. It
+avoids inventing global day/week tiers for a single approved lifecycle action.
+The legacy general planner/executor is not invoked or relaxed. Actual permanent
+removal requires separate exact approval and fresh native object pins, source/
+lifecycle binding, reference/resource checks and retained-point verification.
+Three normal plus at most one pending and automatic deletion disabled remain
+unchanged. No production package is updated by this development commit.
+
+Targeted tests: `test_snapshot_covers.py` proves exactly five ordinary status
+exceptions and rejects changes to all other data, generated values, keys and
+schema. `test_indexed_retirement.py` proves typed-set equality without returning
+values, holds unknown references, verifies self-contained receipts and proves no
+history descent. Tests never invoke a retirement executor.
