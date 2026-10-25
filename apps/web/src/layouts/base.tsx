@@ -10,7 +10,7 @@ export function BaseLayout() {
     <div>
       <main className="app-shell">
         <Nav></Nav>
-        <div className="app-route mx-auto max-w-[1280px] pb-0">
+        <div className="app-route pb-0">
           <StartupAuditNotice />
           <Outlet />
         </div>
