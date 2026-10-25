@@ -397,7 +397,7 @@ const ArticleList: FC<ArticleListProps> = ({
               data-article-id={item.id}
               className={`compact-row article-row ${
                 item.bodyCached ? 'article-row-ready' : ''
-              } !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center`}
+              } content-article-row`}
             >
               <div className="compact-col-check">
                 <Checkbox
@@ -415,7 +415,7 @@ const ArticleList: FC<ArticleListProps> = ({
                 />
               </div>
               <a
-                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] md:!whitespace-nowrap dark:hover:text-[#0A84FF]"
+                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] dark:hover:text-[#0A84FF]"
                 target="_blank"
                 rel="noopener noreferrer"
                 title={
@@ -445,12 +445,14 @@ const ArticleList: FC<ArticleListProps> = ({
                   </span>
                 )}
               </a>
-              <div className="col-start-2 flex w-auto min-w-0 shrink-0 flex-col items-start gap-0.5 text-neutral-500 md:w-[300px] md:items-end">
+              <div className="content-article-metadata text-neutral-500">
                 <div
                   className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
-                  <span>{articleBodyState(item.bodyCached).current}</span>
+                  <span className={item.bodyCached ? 'sr-only' : undefined}>
+                    {articleBodyState(item.bodyCached).current}
+                  </span>
                   {!item.bodyCached && (
                     <Button
                       size="sm"
@@ -478,17 +480,18 @@ const ArticleList: FC<ArticleListProps> = ({
                     正文暂不可重试
                   </span>
                 )}
-                {(collectionChannels[item.mpId] ||
-                  item.feed?.collectionChannel) !== 'wechat2rss' && (
-                  <span
-                    className="whitespace-normal break-words text-xs md:whitespace-nowrap"
-                    title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
-                  >
-                    阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
-                    {metricDisplay(item.metrics, 'like')} · 收藏{' '}
-                    {metricDisplay(item.metrics, 'favorite')}
-                  </span>
-                )}
+                {item.metrics &&
+                  (collectionChannels[item.mpId] ||
+                    item.feed?.collectionChannel) !== 'wechat2rss' && (
+                    <span
+                      className="whitespace-normal break-words text-xs md:whitespace-nowrap"
+                      title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
+                    >
+                      阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
+                      {metricDisplay(item.metrics, 'like')} · 收藏{' '}
+                      {metricDisplay(item.metrics, 'favorite')}
+                    </span>
+                  )}
                 <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs md:flex-nowrap md:justify-end">
                   <span className="truncate">
                     {item.feed?.mpName || '未知'}

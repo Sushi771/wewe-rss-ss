@@ -867,7 +867,7 @@ export default function Xiaohongshu() {
   };
   return (
     <main className="feed-workspace" aria-label="小红书博主与笔记管理">
-      <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
+      <div className="feed-source-controls flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700">
         <label className="min-w-0 flex-1 text-xs text-neutral-500">
           当前博主
           <select
@@ -900,8 +900,17 @@ export default function Xiaohongshu() {
             if (!active.current) setMobileSidebarOpen(!mobileSidebarOpen);
           }}
         >
-          {mobileSidebarOpen ? '收起管理' : '管理博主'}
+          {mobileSidebarOpen ? '收起管理' : '管理与分组'}
         </Button>
+        {folderFilter !== 'all' && (
+          <span className="feed-active-group text-xs" role="status">
+            分组：
+            {folderFilter === 'ungrouped'
+              ? '未分组'
+              : groups.data?.items.find((folder) => folder.id === folderFilter)
+                  ?.name}
+          </span>
+        )}
       </div>
       <aside
         id="xiaohongshu-management-sidebar"
@@ -1617,7 +1626,7 @@ export default function Xiaohongshu() {
             {loadedNotes.map((note) => (
               <div
                 key={note.id}
-                className="compact-row article-row !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center"
+                className="compact-row article-row content-article-row"
               >
                 <div className="compact-col-check">
                   <Checkbox
@@ -1634,7 +1643,7 @@ export default function Xiaohongshu() {
                 <button
                   type="button"
                   disabled={busy || note.status !== 'complete'}
-                  className="compact-title min-w-0 !whitespace-normal break-words text-left text-[15px] hover:text-[#007AFF] disabled:text-neutral-500 md:!whitespace-nowrap"
+                  className="compact-title min-w-0 !whitespace-normal break-words text-left text-[15px] hover:text-[#007AFF] disabled:text-neutral-500"
                   onClick={() => {
                     if (!active.current) {
                       setReadingCreatorId(note.creatorId);
@@ -1644,7 +1653,7 @@ export default function Xiaohongshu() {
                 >
                   {note.title}
                 </button>
-                <div className="col-start-2 flex min-w-0 shrink-0 flex-col items-start gap-1 py-1 text-xs text-neutral-500 md:ml-auto md:items-end">
+                <div className="content-article-metadata text-xs text-neutral-500">
                   <span>{formatShanghaiPublicationTime(note.publishTime)}</span>
                   <span className="whitespace-normal text-left md:max-w-[150px] md:text-right">
                     {!creatorId && <span>{note.creatorName} · </span>}

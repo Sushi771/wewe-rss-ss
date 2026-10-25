@@ -1013,7 +1013,7 @@ const Feeds = () => {
   return (
     <>
       <div className="feed-workspace">
-        <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
+        <div className="feed-source-controls flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700">
           <label className="min-w-0 flex-1 text-xs text-neutral-500">
             当前公众号
             <select
@@ -1059,8 +1059,18 @@ const Feeds = () => {
               setMobileSidebarOpen(!mobileSidebarOpen);
             }}
           >
-            {mobileSidebarOpen ? '收起管理' : '管理公众号'}
+            {mobileSidebarOpen ? '收起管理' : '管理与分组'}
           </Button>
+          {folderFilter !== 'all' && (
+            <span className="feed-active-group text-xs" role="status">
+              分组：
+              {folderFilter === 'ungrouped'
+                ? '未分组'
+                : folders.data?.items.find(
+                    (folder) => folder.id === folderFilter,
+                  )?.name}
+            </span>
+          )}
         </div>
         <div
           id="wechat-management-sidebar"

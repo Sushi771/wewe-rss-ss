@@ -320,6 +320,9 @@ createRoot(document.getElementById('root')).render(<App/>);
           ),
       );
       await ready();
+      await evaluate(
+        "document.querySelector('.content-date-filter').open=true",
+      );
       const calendarClick = async (selector, touch = false) => {
         const p = await evaluate(
           `(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing '+${JSON.stringify(selector)});e.scrollIntoView({block:'nearest'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`,
