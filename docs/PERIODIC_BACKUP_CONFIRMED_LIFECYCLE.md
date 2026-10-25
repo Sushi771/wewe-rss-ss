@@ -64,6 +64,15 @@ human approval time. An expired token requires fresh technical preparation,
 including identity and resource checks, rather than silently changing its time.
 An expired or changed review still stops the action.
 
+When invoking the adapter from a separate operator process, explicitly carry the
+production registration context. Set `SQLITE_BACKUP_KIND=production` and bind
+`SQLITE_PRODUCTION_LEGACY_ROOTS_FILE` to the registration manifest already named
+and hash-bound in the reviewed reference records. Do not assume the operator
+inherits the application's environment, substitute an empty root list, or alter
+the approved review to clear a reference mismatch. Before any retry, inspect the
+journal for attempted/completed operations and uncertainty; correcting missing
+execution context is valid only when the original scope and fresh evidence match.
+
 The adapter acquires the existing snapshot/owner locks, pins indexed metadata and
 namespaces, rechecks typed coverage and exact SHA values, and queries the public
 Windows Restart Manager API. It changes neither execution policy nor process
