@@ -46,6 +46,7 @@ export interface XhsSubscriptionSource {
     canSubscribe: boolean;
     canRefresh: boolean;
     canDownload: boolean;
+    canCollectComments?: boolean;
     message: string;
   };
   resolve(
@@ -80,7 +81,11 @@ type Save = (
   creator: XhsCreator,
   noteId: string,
   destination: string,
-) => Promise<{ alreadySaved: boolean; mediaComplete?: boolean }>;
+) => Promise<{
+  alreadySaved: boolean;
+  mediaComplete?: boolean;
+  supplement?: { status: string };
+}>;
 type Destination = (pickToken?: string) => Promise<string>;
 const active = (t: XhsSubscriptionTask) =>
   t.state === 'queued' || t.state === 'running';
@@ -490,6 +495,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       skipped: t.skipped,
       failed: t.failed,
       remaining: t.remaining,
+      snapshotsSaved: t.snapshotsSaved,
       // Keep private receipt history, but never label a reconciled public
       // checkpoint as still uncertain: the UI correctly fences that code.
       code: uncertain
@@ -708,6 +714,8 @@ export class XhsSubscriptionService implements OnModuleInit {
               }
               if (!active(t)) break;
               const saved = await this.save!(creator, id, directory!);
+              if (saved.supplement && saved.supplement.status !== 'retained')
+                t.snapshotsSaved = (t.snapshotsSaved ?? 0) + 1;
               if (saved.mediaComplete === false)
                 return reject('XHS_LOCAL_MEDIA_INCOMPLETE');
               if (saved.alreadySaved) {
@@ -735,6 +743,8 @@ export class XhsSubscriptionService implements OnModuleInit {
         t.state = t.failed || t.remaining ? 'partial' : 'completed';
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
+        if (t.snapshotsSaved)
+          t.message += ` 已新增 ${t.snapshotsSaved} 份“互动与评论”快照附页；正文保留策略不变。`;
       }
     } catch (error) {
       if (active(t)) {

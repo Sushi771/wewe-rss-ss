@@ -29,6 +29,7 @@ import { XhsSubscriptionService } from '../collection/xhs-subscription.service';
 import { XhsSubscriptionRuntime } from '../collection/xhs-subscription-runtime';
 import { xhsPublicCode } from '../collection/xhs-subscription-errors';
 import { xhsNoteFilterSchema } from '@wewe-rss/shared';
+import { XhsEngagementService } from '../collection/xhs-engagement.service';
 import {
   xhsCreatorFilterSchema,
   xhsNumericFilterShape,
@@ -144,6 +145,7 @@ export class TrpcRouter {
     @Optional() private readonly xiaohongshuService?: XiaohongshuService,
     @Optional() private readonly xhsSubscriptions?: XhsSubscriptionService,
     @Optional() private readonly xhsRuntime?: XhsSubscriptionRuntime,
+    @Optional() private readonly xhsEngagement?: XhsEngagementService,
   ) {}
 
   private get xhs() {
@@ -1834,6 +1836,39 @@ export class TrpcRouter {
           .strict(),
       )
       .query(({ input }) => this.xhs.engagement(input)),
+    collectComments: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteId: z.string().min(1).max(300),
+            rootId: z
+              .string()
+              .regex(/^[a-zA-Z0-9_-]{1,128}$/)
+              .optional(),
+            maxPages: z.number().int().min(1).max(5),
+            maxItems: z.number().int().min(1).max(200),
+            restart: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsEngagement!.collect(input);
+      }),
+    refreshMetrics: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            noteId: z.string().min(1).max(300).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsEngagement!.refreshMetrics(input);
+      }),
     body: this.trpcService.protectedProcedure
       .input(
         z

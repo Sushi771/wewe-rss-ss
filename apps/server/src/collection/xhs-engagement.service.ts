@@ -150,6 +150,11 @@ export class XhsEngagementService {
     );
     if (!creator.enabled || !creator.externalAuthorId || !this.source?.comments)
       return fail('XHS_SOURCE_UNAVAILABLE');
+    if (
+      this.source.capability &&
+      this.source.capability().canCollectComments !== true
+    )
+      return fail('XHS_COMMENT_COLLECTION_DISABLED');
     if (this.active.has(input.noteId)) return fail('XHS_ENGAGEMENT_BUSY');
     this.active.add(input.noteId);
     try {

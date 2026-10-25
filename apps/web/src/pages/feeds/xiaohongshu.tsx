@@ -30,6 +30,7 @@ import {
   XhsMetricLine,
   XhsNumericFilter,
   XhsNumericFilterValue,
+  XhsCreatorMetricRefresh,
 } from '@web/components/XhsEngagement';
 import type { XhsMetric, XhsCreatorMetric } from '@wewe-rss/shared';
 import type { ArticleDateSelection } from '@web/utils/article-date-selection';
@@ -718,7 +719,10 @@ export default function Xiaohongshu() {
       const allScope = { creatorId: creatorId || undefined };
       const scope = exportScope;
       const selectedSnapshot = [...selectedArchives];
-      const filterSnapshot = { ...notesInput };
+      const filterSnapshot = {
+        ...notesInput,
+        queryVersion: notes.data?.queryVersion,
+      };
       setExportOpen(false);
       setTask(null);
       setProgressOpen(true);
@@ -1073,6 +1077,12 @@ export default function Xiaohongshu() {
             setSelectedIds(new Set());
           }}
         />
+        {current && (
+          <XhsCreatorMetricRefresh
+            creatorId={current.id}
+            enabled={!busy && capability.data?.canRefresh === true}
+          />
+        )}
         <ul>
           {visibleCreators.map((creator) => (
             <li
@@ -1933,6 +1943,10 @@ export default function Xiaohongshu() {
                       creatorId={readingCreatorId}
                       noteId={noteId}
                       initial={body.data.engagement}
+                      canCollectComments={
+                        capability.data?.canCollectComments === true
+                      }
+                      canRefreshMetrics={capability.data?.canRefresh === true}
                     />
                   )}
                 </article>

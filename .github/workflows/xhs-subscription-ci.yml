@@ -2,9 +2,14 @@ name: XHS subscription offline
 
 on:
   push:
-    branches: [codex/xhs-subscription-integration, codex/xhs-depth-integration]
+    branches:
+      [
+        codex/xhs-subscription-integration,
+        codex/xhs-depth-integration,
+        feat/xhs-engagement,
+      ]
   pull_request:
-    branches: [fix/desktop-docker-cold-start]
+    branches: [fix/desktop-docker-cold-start, codex/xhs-depth-integration]
 
 permissions:
   contents: read
@@ -19,6 +24,7 @@ jobs:
     timeout-minutes: 20
     env:
       XHS_SUBSCRIPTION_LIVE_ENABLED: '0'
+      XHS_COMMENT_COLLECTION_ENABLED: '0'
       XHS_TEST_PYTHON: python
       PYTHONDONTWRITEBYTECODE: '1'
     defaults:
@@ -59,5 +65,5 @@ jobs:
           pnpm --filter web exec tsc --noEmit
       - name: Focused web lint and build
         run: |
-          pnpm --filter web exec eslint src/pages/feeds/xiaohongshu.tsx src/components/SubscriptionPrimitives.tsx src/components/XhsTaskRecovery.tsx src/components/StorageBackupStatus.tsx src/utils/startup-status.ts src/pages/feeds/index.tsx src/pages/feeds/list.tsx src/pages/feeds/manual-refresh-progress.tsx src/provider/trpc.tsx src/utils/xiaohongshu-subscription.ts
+          pnpm --filter web exec eslint src/pages/feeds/xiaohongshu.tsx src/components/XhsEngagement.tsx src/components/SubscriptionPrimitives.tsx src/components/XhsTaskRecovery.tsx src/components/StorageBackupStatus.tsx src/utils/startup-status.ts src/pages/feeds/index.tsx src/pages/feeds/list.tsx src/pages/feeds/manual-refresh-progress.tsx src/provider/trpc.tsx src/utils/xiaohongshu-subscription.ts
           pnpm --filter web build

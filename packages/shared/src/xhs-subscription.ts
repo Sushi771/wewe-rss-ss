@@ -50,6 +50,7 @@ export type XhsSubscriptionTask = {
   skipped: number;
   failed: number;
   remaining: number;
+  snapshotsSaved?: number;
   code?: string;
   message: string;
   resumable?: boolean;
@@ -64,6 +65,8 @@ export type XhsConnectionStatus = {
     details: number;
     media: number;
     shortLinks: number;
+    comments?: number;
+    replies?: number;
   };
   liveEnabled: boolean;
   connected: boolean;

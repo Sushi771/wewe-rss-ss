@@ -14,7 +14,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request as Req, Response as Res } from 'express';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { ArticleDownloadError, downloadArticleUrl } from './article-download';
 import { LocalArticleStore } from './article-local-save';
@@ -102,6 +102,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
             ...(await prepare(stage)),
             exportSource: source,
           });
+          withSource.afterSave = prepare.afterSave;
           return await this.localStore().save(
             withSource,
             new Date(),
@@ -683,6 +684,8 @@ export class ArticleDownloadController implements OnModuleDestroy {
     let savedCount = 0;
     let alreadySavedCount = 0;
     let videoCount = 0;
+    let snapshotSavedCount = 0;
+    const snapshotFiles: string[] = [];
     this.running = true;
     try {
       if (
@@ -726,12 +729,18 @@ export class ArticleDownloadController implements OnModuleDestroy {
         if (result.alreadySaved) alreadySavedCount++;
         else savedCount++;
         videoCount += result.videoCount || 0;
+        if (result.supplement) {
+          snapshotFiles.push(basename(result.supplement.path));
+          if (result.supplement.status !== 'retained') snapshotSavedCount++;
+        }
       }
       res.setHeader('Cache-Control', 'private, no-store');
       return res.status(200).json({
         saved: true,
         savedCount,
         alreadySavedCount,
+        snapshotSavedCount,
+        snapshotFiles,
         videoCount,
         ...(videoCount
           ? { videoDecoded: false, videoVerification: 'container-and-bytes' }

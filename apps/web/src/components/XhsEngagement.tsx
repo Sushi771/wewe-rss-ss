@@ -32,11 +32,23 @@ export function XhsEngagementPanel({
   creatorId,
   noteId,
   initial,
+  canCollectComments = false,
+  canRefreshMetrics = false,
 }: {
   creatorId: string;
   noteId: string;
   initial: XhsEngagementView;
+  canCollectComments?: boolean;
+  canRefreshMetrics?: boolean;
 }) {
+  const utils = trpc.useUtils();
+  const collect = trpc.xiaohongshu.collectComments.useMutation({
+    retry: false,
+  });
+  const refresh = trpc.xiaohongshu.refreshMetrics.useMutation({ retry: false });
+  const [maxPages, setMaxPages] = useState(1),
+    [maxItems, setMaxItems] = useState(100);
+  const [error, setError] = useState('');
   const [open, setOpen] = useState(false),
     [offset, setOffset] = useState(0);
   const saved = trpc.xiaohongshu.engagement.useQuery(
@@ -44,11 +56,116 @@ export function XhsEngagementPanel({
     { enabled: open, retry: false, refetchOnWindowFocus: false },
   );
   const view = saved.data ?? initial;
+  const busy = collect.isLoading || refresh.isLoading;
+  const collectWindow = async (rootId?: string, restart = false) => {
+    setError('');
+    try {
+      await collect.mutateAsync({
+        creatorId,
+        noteId,
+        rootId,
+        maxPages,
+        maxItems,
+        restart,
+      });
+      await utils.xiaohongshu.engagement.invalidate({ creatorId, noteId });
+      await utils.xiaohongshu.body.invalidate({ creatorId, noteId });
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : '评论采集未完成，已保存范围保留。',
+      );
+    }
+  };
   return (
     <section
       className="border-default-200 space-y-3 border-t py-4"
       aria-label="小红书保存的互动数据"
     >
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <button
+          disabled={!canRefreshMetrics || busy}
+          onClick={async () => {
+            setError('');
+            try {
+              await refresh.mutateAsync({ creatorId, noteId });
+              await Promise.all([
+                utils.xiaohongshu.body.invalidate({ creatorId, noteId }),
+                utils.xiaohongshu.engagement.invalidate({ creatorId, noteId }),
+                utils.xiaohongshu.notes.invalidate(),
+              ]);
+            } catch (cause) {
+              setError(
+                cause instanceof Error
+                  ? cause.message
+                  : '快照刷新失败；原数据保留。',
+              );
+            }
+          }}
+        >
+          更新互动快照
+        </button>
+        <label>
+          本次最多{' '}
+          <select
+            aria-label="评论页数上限"
+            value={maxPages}
+            disabled={busy}
+            onChange={(e) => setMaxPages(Number(e.target.value))}
+          >
+            {[1, 2, 5].map((n) => (
+              <option key={n} value={n}>
+                {n} 页
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <select
+            aria-label="评论条数上限"
+            value={maxItems}
+            disabled={busy}
+            onChange={(e) => setMaxItems(Number(e.target.value))}
+          >
+            {[50, 100, 200].map((n) => (
+              <option key={n} value={n}>
+                {n} 条
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          disabled={!canCollectComments || busy}
+          onClick={() =>
+            void collectWindow(
+              undefined,
+              view.windows.some(
+                (w) => w.scope === 'top' && w.state === 'returned-end',
+              ),
+            )
+          }
+        >
+          {busy
+            ? '处理中'
+            : view.windows.some(
+                  (w) => w.scope === 'top' && w.state === 'returned-end',
+                )
+              ? '从首更新顶层评论'
+              : '保存/继续顶层评论'}
+        </button>
+      </div>
+      <p className="text-default-500 text-xs">
+        {canCollectComments
+          ? '仅本次显式获取顶层范围；楼中回复需逐楼操作。响应契约尚待真实验证。'
+          : '评论采集默认关闭；响应契约待真实验证。'}
+        新增本地评论请再次保存；变化会生成“互动与评论”附页，已有正文保留。
+      </p>
+      {error && (
+        <p role="alert" className="text-xs">
+          {error}
+        </p>
+      )}
       {view.metrics &&
         Object.values(view.metrics.values).some((v) => v !== null) && (
           <div>
@@ -116,6 +233,24 @@ export function XhsEngagementPanel({
                 <p className="whitespace-pre-wrap break-words text-sm">
                   {c.content}
                 </p>
+                {!c.rootId && (
+                  <button
+                    className="text-xs"
+                    disabled={!canCollectComments || busy}
+                    onClick={() =>
+                      void collectWindow(
+                        c.id,
+                        view.windows.some(
+                          (w) =>
+                            w.scope === `root:${c.id}` &&
+                            w.state === 'returned-end',
+                        ),
+                      )
+                    }
+                  >
+                    保存/更新此楼回复（本次有界）
+                  </button>
+                )}
               </li>
             ))}
           </ol>
@@ -142,6 +277,44 @@ export type XhsNumericFilterValue = {
   max?: number;
   metricDirection?: 'asc' | 'desc';
 };
+export function XhsCreatorMetricRefresh({
+  creatorId,
+  enabled,
+}: {
+  creatorId: string;
+  enabled: boolean;
+}) {
+  const utils = trpc.useUtils(),
+    refresh = trpc.xiaohongshu.refreshMetrics.useMutation({ retry: false });
+  const [error, setError] = useState('');
+  return (
+    <div className="px-3 py-1 text-xs">
+      <button
+        disabled={!enabled || refresh.isLoading}
+        onClick={async () => {
+          setError('');
+          try {
+            await refresh.mutateAsync({ creatorId });
+            await Promise.all([
+              utils.xiaohongshu.list.invalidate(),
+              utils.xiaohongshu.body.invalidate(),
+              utils.xiaohongshu.engagement.invalidate(),
+            ]);
+          } catch (cause) {
+            setError(
+              cause instanceof Error
+                ? cause.message
+                : '资料快照更新失败；原数据保留。',
+            );
+          }
+        }}
+      >
+        {refresh.isLoading ? '更新中' : '更新当前博主资料快照'}
+      </button>
+      {error && <p role="alert">{error}</p>}
+    </div>
+  );
+}
 export function XhsNumericFilter({
   value,
   onChange,

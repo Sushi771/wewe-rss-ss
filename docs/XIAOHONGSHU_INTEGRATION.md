@@ -2,13 +2,15 @@
 
 ## 2026-10-25 互动快照与评论（开发分支，未部署）
 
-开发验证结果：明确指定的 8 个相关测试集共 148 测试通过（测试上限 30 秒，包含真实本地发布器和独立 PNG 解码）；前后端 TypeScript 检查、Nest 后端构建、Vite 前端生产构建及 Prisma schema validate 通过。实际 React 组件的合成 SSR 已验证，浏览器视觉验收未进行。没有部署或新的真实小红书评论请求。
+第二阶段验证：默认关闭评论 adapter/mutation/UI 接线已用注入 transport 检查，签名拒绝后零重试；新增附页 oracle 覆盖 A→A+B、正文/图像字节不变、手改附页冲突版本与同版本复用、发布失败及再保存。20 个相关测试集共 350 项覆盖中，旧 HTTP 夹具先有 6 项因缺少快照查询而失败；补齐固定空快照后，相关 HTTP/UI 两组 51 项复验通过，其余 19 组通过。前后端类型/构建、相关 lint 通过。远端 CI 按最终 SHA 另核，不能把本机复验称为 CI 已通过。
+
+第一阶段开发验证结果：明确指定的 8 个相关测试集共 148 测试通过（测试上限 30 秒，包含真实本地发布器和独立 PNG 解码）；前后端 TypeScript 检查、Nest 后端构建、Vite 前端生产构建及 Prisma schema validate 通过。实际 React 组件的合成 SSR 已验证，浏览器视觉验收未进行。没有部署或新的真实小红书评论请求。
 
 产品与使用：仅针对平台已保存博主及内容。博主列表增加粉丝/关注数区间与升降排序，内容列表增加点赞/收藏/分享/评论数区间与升降排序。服务端先筛选全部已保存记录，再分页；空值排末，有区间时排除未知，同值按稳定 ID 排序。改变指标筛选清空相应勾选集。ZIP 选中/筛选范围复用同一服务端条件，超出当前筛选的选中 ID 拒绝导出；“全部”保持原有全范围语义。未获取数据不显示空指标表，也不把未知当 0。
 
-阅读与导出：正文媒体优先，之后为互动历史快照、博主资料快照，再为折叠评论（Markdown 为后置评论区）。显示采集时间、已保存条数、实际返回页数与失败/部分/该接口返回结束。顶层结束不等于回复完整，不宣称抓全。分享只有计数，不能推出分享者或去向。保存与重复抓取只更新系统快照/评论，不写用户手写正文；原本地发布器继续保护已存在/手改的正文，重新生成 ZIP 可取得当前数据库快照。此阶段不强制重写已有本地文件，也无无限周期刷新。
+阅读与导出：正文媒体优先，之后为互动历史快照、博主资料快照，再为折叠评论（Markdown 为后置评论区）。显示采集时间、已保存条数、实际返回页数与失败/部分/该接口返回结束。顶层结束不等于回复完整，不宣称抓全。分享只有计数，不能推出分享者或去向。保存与重复抓取只更新系统快照/评论，不写用户手写正文；原本地发布器继续保护已存在/手改的正文，重新生成 ZIP 可取得当前数据库快照。重复保存正文被保留时，也执行独立 afterSave 发布：数据变化新增内容摘要命名的“互动与评论-…”附页，同一快照复用；手改附页不覆盖，另产新版本。回执区分附页新增/复用/冲突新版本，附页失败整体报错，不能把正文 skipped 冒称最新评论导出成功。没有无限周期刷新。
 
-技术边界：`packages/shared/src/xhs-engagement.ts` 是公共类型/过滤契约；`xhs-engagement-contract.ts` 是严格的源码依据/待实测映射；`xhs-engagement-store.ts` 为参数化 SQL；`xhs-engagement.service.ts` 为**未注册的离线可注入分页执行器**；`XhsEngagement.tsx` 为独立业务组件，不改共用 CSS。已有 `body` 返回 `engagement`，`engagement` 只读查询支持 offset/limit（每页最多 200）；内容 notes 返回 total，支持 offset/limit。notes/export 接受 metric/min/max/metricDirection，博主 list 使用 fans/following。旧页面保持兼容的全列表返回，再进行原有加载更多。分页每次最多 5 页/200 条；不可截断一页后前移游标，超预算保留未消费游标。每页评论与下一游标同事务落盘；重复 ID 更新正文/点赞等系统字段，错误根归属拒绝；运行中断不自动发请求，明确续跑才使用已保存游标。
+技术边界：`packages/shared/src/xhs-engagement.ts` 是公共类型/过滤契约；`xhs-engagement-contract.ts` 是严格的源码依据/待实测映射；`xhs-engagement-store.ts` 为参数化 SQL；`xhs-engagement.service.ts` 为默认关闭、已注册的可注入分页执行器（原 live gate 之外，还需 XHS_COMMENT_COLLECTION_ENABLED=1；本轮未开启）；`XhsEngagement.tsx` 为独立业务组件，不改共用 CSS。已有 `body` 返回 `engagement`，`engagement` 只读查询支持 offset/limit（每页最多 200）；内容 notes 返回 total/queryVersion，支持 offset/limit；offset>0 须回传 queryVersion，跨页数据变化明确要求重开查询。筛选导出可绑定同一 queryVersion，使用已选择的指标快照，不混入较晚指标。notes/export 接受 metric/min/max/metricDirection，博主 list 使用 fans/following。旧页面保持兼容的全列表返回，再进行原有加载更多。分页每次最多 5 页/200 条；不可截断一页后前移游标，超预算保留未消费游标。每页评论与下一游标同事务落盘；重复 ID 更新正文/点赞等系统字段，错误根归属拒绝；运行中断不自动发请求，明确续跑才使用已保存游标。
 
 迁移与维护：`20261025090000_xhs_engagement` 仅新增 `xhs_metric_snapshots`、`xhs_saved_comments`、`xhs_comment_windows`，不重建公众号表。原生成 Prisma 客户端在迁移后仍能读写原表，回退应用保留新增表即可；生产应用迁移/回退仍须统一部署确认。不要在回退时删除新数据。评论表跟随笔记外键级联，评论游标只保存在私有数据库，公开 UI/导出不输出游标历史。
 
@@ -20,7 +22,7 @@
 | 四类互动数            | [src/cli.ts read](https://github.com/lucasygu/redbook/blob/main/src/cli.ts) 读取 interact_info.liked_count/collected_count/share_count/comment_count | 本次未取得真实计数响应；缺失/格式无效/单位缩略为 null，精确 0 单独保存             |
 | 粉丝                  | 同文件分析逻辑使用 interactions[type=fans].count；只接受精确非负整数或十进制整数字符串                                                               | 真实类型待核实；3.1万等不当作精确 31000                                            |
 | 关注                  | getUserInfo 返回 unknown，user CLI 原样输出                                                                                                          | 未确认计数字段，following 保持 null；不取笔记求和冒充累计指标                      |
-| 评论分页              | [src/lib/client.ts](https://github.com/lucasygu/redbook/blob/main/src/lib/client.ts) 有 getComments 与 getSubComments；CLI --all 仅顶层              | HTTP/运行时新接线被自动审批拒绝，尚未注册公开采集入口；无新增真实请求              |
+| 评论分页              | [src/lib/client.ts](https://github.com/lucasygu/redbook/blob/main/src/lib/client.ts) 有 getComments 与 getSubComments；CLI --all 仅顶层              | 开发边界澄清后默认关闭接线获准，collectComments 仅显式有界调用；无新增真实请求     |
 | 评论内容              | CLI 明确 content/user_info.nickname/like_count                                                                                                       | id/user_info.user_id/sub_comments 为严格合成契约，真实样本待核；不接受无 ID 评论   |
 | 发布时间/精确回复对象 | 未获可信响应契约                                                                                                                                     | publishedAt/parentId 保持 null；rootId 只表达请求/返回楼层归属，不冒充直接回复对象 |
 | 状态                  | 每页与游标原子提交、去重、限量、失败保留部分结果                                                                                                     | 无法保证隐藏/删除评论；406/签名拒绝在合成源中立即停止，不尝试重签/替代入口         |

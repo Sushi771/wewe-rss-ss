@@ -29,9 +29,14 @@ import {
   verifiedDownloadBody,
 } from '../article-verified-download';
 import { ArticleDownloadError } from '../article-download';
-import { XhsCreatorFilter, xhsMetricSelection } from '@wewe-rss/shared';
+import {
+  XhsCreatorFilter,
+  XhsMetricSnapshot,
+  xhsMetricSelection,
+} from '@wewe-rss/shared';
 import { readXhsMetrics, readXhsComments } from './xhs-engagement-store';
 import { xhsEngagementMarkdown } from './xhs-engagement-export';
+import { withXhsLocalSnapshot } from './xhs-local-snapshot';
 import {
   inspectCachedMp4,
   prepareXhsVideoDownload,
@@ -583,7 +588,14 @@ export class XiaohongshuService {
   }
   async notes(creatorId?: string, filter?: XhsNoteFilter) {
     const notes = await this.matchingNotes(creatorId, filter);
+    const queryVersion = this.noteQueryVersion(notes);
+    if (
+      (filter?.offset && !filter.queryVersion) ||
+      (filter?.queryVersion && filter.queryVersion !== queryVersion)
+    )
+      return fail('XHS_QUERY_STALE_RESTART', 'CONFLICT');
     return {
+      queryVersion,
       platform: 'xiaohongshu' as const,
       total: notes.length,
       items: notes
@@ -609,6 +621,23 @@ export class XiaohongshuService {
           metrics: note.metrics,
         })),
     };
+  }
+  private noteQueryVersion(
+    rows: Array<{
+      id: string;
+      title: string;
+      status: string;
+      publishTime: number;
+      metrics: XhsMetricSnapshot | null;
+    }>,
+  ) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify(
+          rows.map((n) => [n.id, n.title, n.status, n.publishTime, n.metrics]),
+        ),
+      )
+      .digest('hex');
   }
   async refresh(id: string) {
     if (this.active.has(id))
@@ -820,11 +849,17 @@ export class XiaohongshuService {
       };
     });
   }
-  private async exportEngagement(creatorId: string, noteId: string) {
+  private async exportEngagement(
+    creatorId: string,
+    noteId: string,
+    metrics?: XhsMetricSnapshot | null,
+  ) {
     const view = await this.engagement({ creatorId, noteId, limit: 20000 });
     if (view.totalSaved > view.returned)
       return fail('XHS_COMMENT_EXPORT_LIMIT');
-    const markdown = xhsEngagementMarkdown(view);
+    const markdown = xhsEngagementMarkdown(
+      metrics === undefined ? view : { ...view, metrics },
+    );
     if (Buffer.byteLength(markdown) > 5_000_000)
       return fail('XHS_COMMENT_EXPORT_LIMIT');
     return markdown;
@@ -866,7 +901,17 @@ export class XiaohongshuService {
   async export(creatorId?: string, noteIds?: string[], filter?: XhsNoteFilter) {
     const selected =
       noteIds === undefined ? undefined : managementMemberIds(noteIds, 300);
-    const matched = await this.matchingNotes(creatorId, filter, true, selected);
+    const scope = await this.matchingNotes(creatorId, filter);
+    if (
+      filter?.queryVersion &&
+      filter.queryVersion !== this.noteQueryVersion(scope)
+    )
+      return fail('XHS_QUERY_STALE_RESTART', 'CONFLICT');
+    const selectedSet = selected ? new Set(selected) : undefined;
+    const matched = scope.filter(
+      (n) => n.status === 'complete' && (!selectedSet || selectedSet.has(n.id)),
+    );
+    const selectedMetrics = new Map(matched.map((n) => [n.id, n.metrics]));
     matched.sort(
       (a, b) =>
         a.publishTime - b.publishTime ||
@@ -914,6 +959,7 @@ export class XiaohongshuService {
           const prepare = await this.prepareLocalDownload(
             note.creatorId,
             note.id,
+            selectedMetrics.get(note.id),
           );
           await fs.mkdir(directory);
           await prepare(directory);
@@ -940,7 +986,11 @@ export class XiaohongshuService {
             note.title.replace(/[\r\n]/g, ' ') +
             '\n\n' +
             result.markdown +
-            (await this.exportEngagement(note.creatorId, note.id)),
+            (await this.exportEngagement(
+              note.creatorId,
+              note.id,
+              selectedMetrics.get(note.id),
+            )),
         );
       }
       const zip = path.join(root, 'archive.zip');
@@ -963,7 +1013,11 @@ export class XiaohongshuService {
   /** Snapshot only this creator's complete cached note, never accept page content
    * or a path from the caller. Original local saver grants the destination.
    */
-  async prepareLocalDownload(creatorId: string, noteId: string) {
+  async prepareLocalDownload(
+    creatorId: string,
+    noteId: string,
+    metrics?: XhsMetricSnapshot | null,
+  ) {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
     });
@@ -1048,12 +1102,17 @@ export class XiaohongshuService {
           sha256: metadata.sha256,
         },
       });
-      const snapshot = await this.exportEngagement(creatorId, noteId);
-      return async (directory: string) => {
-        const result = await prepare(directory);
-        await fs.appendFile(path.join(directory, 'index.md'), snapshot);
-        return result;
-      };
+      const snapshot = await this.exportEngagement(creatorId, noteId, metrics);
+      return withXhsLocalSnapshot(
+        async (directory: string) => {
+          const result = await prepare(directory);
+          await fs.appendFile(path.join(directory, 'index.md'), snapshot);
+          return result;
+        },
+        note.id,
+        note.title,
+        snapshot,
+      );
     }
     if (
       note.videoBytes !== null ||
@@ -1072,15 +1131,20 @@ export class XiaohongshuService {
       lastBodyStatus: 'available',
       metrics: null,
     };
-    const snapshot = await this.exportEngagement(creatorId, noteId);
-    return async (directory: string) => {
-      const result = await buildCompleteArticleDownload(
-        article,
-        '小红书本地缓存（笔记身份：' + note.id + '）',
-        directory,
-      );
-      await fs.appendFile(path.join(directory, 'index.md'), snapshot);
-      return result;
-    };
+    const snapshot = await this.exportEngagement(creatorId, noteId, metrics);
+    return withXhsLocalSnapshot(
+      async (directory: string) => {
+        const result = await buildCompleteArticleDownload(
+          article,
+          '小红书本地缓存（笔记身份：' + note.id + '）',
+          directory,
+        );
+        await fs.appendFile(path.join(directory, 'index.md'), snapshot);
+        return result;
+      },
+      note.id,
+      note.title,
+      snapshot,
+    );
   }
 }

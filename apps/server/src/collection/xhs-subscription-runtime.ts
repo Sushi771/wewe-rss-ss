@@ -33,6 +33,7 @@ import type { XhsConnectionStatus } from '@wewe-rss/shared';
 import { parseXhsProfile } from './xhs-profile';
 
 type RuntimeOptions = {
+  commentsEnabled?: () => boolean;
   enabled: () => boolean;
   vault?: XhsSessionVault;
   api?: RedbookTransport;
@@ -65,6 +66,8 @@ export class XhsSubscriptionRuntime
     details: 0,
     media: 0,
     shortLinks: 0,
+    comments: 0,
+    replies: 0,
   };
   constructor(private readonly options: RuntimeOptions) {
     const api = options.api ?? createRedbookHttpTransport();
@@ -88,6 +91,10 @@ export class XhsSubscriptionRuntime
             else if (route.endsWith('/user_posted'))
               this.requestAttempts.lists++;
             else if (route.endsWith('/feed')) this.requestAttempts.details++;
+            else if (route.endsWith('/comment/page'))
+              this.requestAttempts.comments++;
+            else if (route.endsWith('/comment/sub/page'))
+              this.requestAttempts.replies++;
             return api({ ...request, signal: signal(request.signal) });
           })(),
         ),
@@ -194,6 +201,7 @@ export class XhsSubscriptionRuntime
       canSubscribe: ready,
       canRefresh: ready,
       canDownload: ready,
+      canCollectComments: ready && this.options.commentsEnabled?.() === true,
       liveEnabled: status.liveEnabled,
       connected: status.connected,
       restartRequiresReparse: true,
@@ -321,6 +329,16 @@ export class XhsSubscriptionRuntime
       this.adapter.detail(authorId, noteId, signal),
     );
   }
+  metrics(authorId: string, noteId?: string) {
+    return this.withSession(() => this.adapter.metrics(authorId, noteId));
+  }
+  comments(authorId: string, noteId: string, cursor: string, rootId?: string) {
+    if (this.options.commentsEnabled?.() !== true)
+      return failure('XHS_COMMENT_COLLECTION_DISABLED');
+    return this.withSession(() =>
+      this.adapter.comments(authorId, noteId, cursor, rootId),
+    );
+  }
   onModuleDestroy() {
     this.clearMemory();
   }
@@ -335,6 +353,7 @@ export function createLocalXhsSubscriptionRuntime() {
   if (process.platform === 'win32' && path.isAbsolute(database))
     vault = new XhsDpapiSessionVault(path.dirname(database));
   return new XhsSubscriptionRuntime({
+    commentsEnabled: () => process.env.XHS_COMMENT_COLLECTION_ENABLED === '1',
     enabled: () =>
       process.env.XHS_SUBSCRIPTION_LIVE_ENABLED === '1' &&
       !privateOnlineMode() &&

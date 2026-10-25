@@ -25,11 +25,12 @@ checked using synthetic cookies and fixed entropy for both GET and POST;
 Neither parity nor fixture success proves that the platform currently accepts
 these signatures.
 
-The client defaults to disabled transport. A future explicit credential
-handoff may supply an in-memory cookie provider and a constrained transport.
+The client defaults to disabled transport. The local runtime supplies an explicit
+in-memory credential handoff and constrained transport only behind the original
+default-off live gate. Comment/reply reads have a second independent default-off
+XHS_COMMENT_COLLECTION_ENABLED gate; status reads do not load credentials.
 That transport must enforce the supplied 15-second timeout, 8 MiB response
-limit, redirect rejection, and zero retries. No process environment activates
-transport. The only host is `edith.xiaohongshu.com`. No media download is
+limit, redirect rejection, and zero retries. The only host is `edith.xiaohongshu.com`. No media download is
 performed by this client and account cookies must never enter media requests.
 
 Only `jpg,webp` is requested. AVIF output is unsupported by the existing image

@@ -18,7 +18,10 @@ compiled.require = (name: string) =>
   name === '@web/utils/trpc'
     ? {
         trpc: {
+          useUtils: () => ({}),
           xiaohongshu: {
+            collectComments: { useMutation: () => ({ isLoading: false }) },
+            refreshMetrics: { useMutation: () => ({ isLoading: false }) },
             engagement: { useQuery: () => ({ data: undefined, error: null }) },
           },
         },
@@ -55,7 +58,8 @@ describe('actual XHS React business components with synthetic saved data (SSR)',
     );
     expect(html).not.toContain('已保存评论');
     expect(html).not.toContain('未知');
-    expect(source).not.toContain('collectComments');
+    expect(html).toContain('评论采集默认关闭');
+    expect(html).toContain('disabled');
   });
   it('renders zero, missing, historical time, partial state and escaped user text', () => {
     const view = {

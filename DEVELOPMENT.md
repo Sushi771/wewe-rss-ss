@@ -1,6 +1,6 @@
 # Development Guide
 
-2026-10-25 XHS engagement development: additive raw-SQL projections and synthetic-only comment pagination are documented in [XIAOHONGSHU_INTEGRATION](docs/XIAOHONGSHU_INTEGRATION.md). Read-only UI/filter/export is integrated; comment execution is intentionally unregistered after automatic approval review rejected new HTTP/runtime paths under the no-new-request constraint. Do not deploy, register collection, or issue live requests without the parent task's separate confirmation. Keep the independent original-link/repeat-save fix when merging.
+2026-10-25 XHS engagement development: additive raw-SQL projections and synthetic-only comment pagination are documented in [XIAOHONGSHU_INTEGRATION](docs/XIAOHONGSHU_INTEGRATION.md). UI/filter/export and explicit bounded comment operations are integrated behind a separate default-off comment gate. Development-only authorization was clarified; no live requests, credential reads, gate activation or deployment occurred. Repeated local exports publish immutable companion snapshots while retaining handwritten files. Do not enable collection or deploy without the parent task's separate confirmation. Keep the independent original-link/repeat-save fix when merging.
 
 ## 小红书订阅开发（2026-10-24）
 

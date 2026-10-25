@@ -16,6 +16,10 @@ export type XhsMetricSnapshot = {
   evidence: 'source-only' | 'verified-response';
 };
 export const xhsNumericFilterShape = {
+  queryVersion: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
   metric: z.enum(xhsMetricNames).optional(),
   min: z.number().int().nonnegative().safe().optional(),
   max: z.number().int().nonnegative().safe().optional(),

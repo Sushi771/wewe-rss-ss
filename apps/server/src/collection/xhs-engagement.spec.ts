@@ -369,8 +369,26 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
       metricDirection: 'asc',
       limit: 2,
       offset: 2,
+      queryVersion: result.queryVersion,
     });
     expect(next.items.map((r) => r.metrics?.values.likes)).toEqual([23]);
+    await saveXhsMetrics(
+      db,
+      'note',
+      key('note-24'),
+      xhsNoteMetrics({ interact_info: { liked_count: 22 } }, Date.now()),
+    );
+    await expect(
+      cache.notes(creator, {
+        metric: 'likes',
+        min: 21,
+        max: 23,
+        limit: 2,
+        offset: 2,
+        queryVersion: result.queryVersion,
+      }),
+    ).rejects.toThrow('XHS_QUERY_STALE_RESTART');
+    await db.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${key('note-24')}`;
     await expect(
       cache.export(creator, [note], { metric: 'likes', min: 21 }),
     ).rejects.toThrow();

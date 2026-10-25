@@ -168,6 +168,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       selectedArchives: [],
       exportScope: 'selected',
       notesInput: { creatorId: 'a' },
+      notes: { data: { queryVersion: undefined } },
       saveSettings: { directory: 'synthetic-only', askEveryTime: false },
       creators: {
         data: {

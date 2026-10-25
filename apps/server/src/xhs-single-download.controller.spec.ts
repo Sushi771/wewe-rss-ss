@@ -127,6 +127,17 @@ describe('XHS single tool and bounded cache batch use original local publication
           : []),
       ],
     }).compile();
+    // Fixed body/media HTTP fixture has no database engine. Snapshot persistence
+    // and repeat publication have their own real-SQLite/local-publisher oracles.
+    jest.spyOn(module.get(XiaohongshuService), 'engagement').mockResolvedValue({
+      metrics: null,
+      creatorMetrics: null,
+      comments: [],
+      windows: [],
+      totalSaved: 0,
+      returned: 0,
+      offset: 0,
+    });
     app = module.createNestApplication();
     await app.init();
   };
