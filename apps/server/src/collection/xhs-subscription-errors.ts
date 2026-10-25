@@ -8,6 +8,7 @@ export class XhsSubscriptionError extends Error {
 }
 const codes = new Set([
   'XHS_LIST_INVALID',
+  'XHS_LIST_PAGE_LIMIT_REACHED',
   'XHS_SELECTION_CHANGED',
   'XHS_NOTE_ID_INVALID',
   'XHS_DETAIL_INCOMPLETE',

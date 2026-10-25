@@ -150,6 +150,53 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     }
     throw Error('SYNTHETIC_SETTLEMENT_TIMEOUT');
   };
+  it('limits each submitted list run and resumes the saved cursor only after explicit continuation', async () => {
+    let page = 0;
+    const list = jest.fn(async (_author: string, _cursor: string | null) => {
+      page++;
+      return {
+        authorId: author.id,
+        nextCursor: page === 3 ? null : `cursor-${page}`,
+        notes: [
+          {
+            authorId: author.id,
+            noteId: `bounded-${page}`,
+            title: 'Synthetic bounded page',
+            publishedAt: 0,
+            kind: 'image-text' as const,
+          },
+        ],
+      };
+    });
+    source.list = list;
+    const first = await service.refresh({ id: creatorId, maxPages: 2 });
+    expect(await finish(first.taskId)).toMatchObject({
+      state: 'blocked',
+      code: 'XHS_LIST_PAGE_LIMIT_REACHED',
+      completed: 2,
+      resumable: true,
+    });
+    expect(source.list).toHaveBeenCalledTimes(2);
+    const rows = await db.xhsNote.findMany({ where: { creatorId } });
+    expect(rows).toHaveLength(2);
+    const fresh = new XhsSubscriptionService(db as any, source);
+    await fresh.onModuleInit();
+    expect((await fresh.recentTasks()).items[0].taskId).toBe(first.taskId);
+    expect(source.list).toHaveBeenCalledTimes(2);
+    const child = await fresh.resumeTask(first);
+    const task = await fresh.task(child);
+    expect(task.resumedFromTaskId).toBe(first.taskId);
+    for (let i = 0; i < 500; i++) {
+      if ((await fresh.task(child)).state === 'completed') break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(await fresh.task(child)).toMatchObject({
+      state: 'completed',
+      completed: 3,
+    });
+    expect(source.list).toHaveBeenCalledTimes(3);
+    expect(list.mock.calls[2][1]).toBe('cursor-2');
+  });
   it('joins the actual frontend recovery helpers to HTTP routes and durable SQLite without implicit replay', async () => {
     const config = new ConfigService({
       auth: { code: 'synthetic-auth' },

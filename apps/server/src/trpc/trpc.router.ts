@@ -1833,7 +1833,14 @@ export class TrpcRouter {
       )
       .query(({ input }) => this.xhs.body(input.creatorId, input.noteId)),
     refresh: this.trpcService.protectedProcedure
-      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .input(
+        z
+          .object({
+            id: z.string().min(1).max(128),
+            maxPages: z.number().int().min(1).max(10).optional(),
+          })
+          .strict(),
+      )
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
         return this.xhsSubscriptions!.refresh(input);

@@ -443,7 +443,7 @@ export default function Xiaohongshu() {
               : undefined;
           if (nextCreator) {
             void subscriptionApi.refresh
-              .mutate({ id: nextCreator })
+              .mutate({ id: nextCreator, maxPages: 2 })
               .then((receipt) => startTask(receipt, 'list'))
               .catch((cause) => {
                 queuedCreators.current = [];
@@ -624,7 +624,10 @@ export default function Xiaohongshu() {
   };
   const updateCreator = async (id: string) => {
     setSelectedIds(new Set());
-    startTask(await subscriptionApi.refresh.mutate({ id }), 'list');
+    startTask(
+      await subscriptionApi.refresh.mutate({ id, maxPages: 2 }),
+      'list',
+    );
   };
   const handleRefreshAll = () =>
     run(async () => {
@@ -1207,7 +1210,9 @@ export default function Xiaohongshu() {
                 (folderFilter === 'all' ? '全部笔记' : '分组笔记')}
             </h1>
             <span role="status" className="text-xs text-neutral-500">
-              {capability.data?.canRefresh ? '可更新笔记列表' : '阅读本地存量'}
+              {capability.data?.canRefresh
+                ? '每次更新最多读取 2 页，更多需明确继续'
+                : '阅读本地存量'}
             </span>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1343,6 +1348,16 @@ export default function Xiaohongshu() {
                               ? '本机会话可用。'
                               : '本机会话已就绪，平台验证尚未完成。'}
               </p>
+              {connection.data?.requestAttempts && (
+                <p className="text-default-500 text-xs">
+                  本进程请求尝试：作者{' '}
+                  {connection.data.requestAttempts.profiles}、列表{' '}
+                  {connection.data.requestAttempts.lists}、详情{' '}
+                  {connection.data.requestAttempts.details}、图片{' '}
+                  {connection.data.requestAttempts.media}
+                  。读取状态不增加请求；重启后计数重新开始。
+                </p>
+              )}
               <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"

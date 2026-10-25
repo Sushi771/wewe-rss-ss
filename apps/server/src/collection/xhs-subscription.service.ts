@@ -65,6 +65,7 @@ type Task = XhsSubscriptionTask & {
   cursorHistory?: (string | null)[];
   listedIds?: string[];
   listFinished?: boolean;
+  pageLimit?: number;
 };
 type Save = (
   creator: XhsCreator,
@@ -293,9 +294,23 @@ export class XhsSubscriptionService implements OnModuleInit {
       return reject('XHS_SUBSCRIPTION_REQUIRED');
     return c;
   }
-  async refresh(input: { id: string }) {
+  async refresh(input: { id: string; maxPages?: number }) {
+    if (
+      input.maxPages !== undefined &&
+      (!Number.isInteger(input.maxPages) ||
+        input.maxPages < 1 ||
+        input.maxPages > 10)
+    )
+      return reject('XHS_LIST_PAGE_LIMIT_INVALID');
     await this.creator(input.id);
-    return this.enqueue('list', input.id, []);
+    return this.enqueue(
+      'list',
+      input.id,
+      [],
+      undefined,
+      undefined,
+      input.maxPages,
+    );
   }
   async downloadNotes(input: {
     creatorId: string;
@@ -388,6 +403,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     noteIds: string[],
     directory?: string,
     checkpoint?: Task,
+    pageLimit?: number,
   ) {
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     if ([...this.uncertain.values()].some((t) => t.creatorId === creatorId))
@@ -398,6 +414,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       return reject('XHS_TASK_QUEUE_FULL');
     const t: Task = {
       ...checkpoint,
+      pageLimit: pageLimit ?? checkpoint?.pageLimit,
       taskId: randomUUID(),
       creatorId,
       kind,
@@ -725,7 +742,11 @@ export class XhsSubscriptionService implements OnModuleInit {
   private async updateList(t: Task, creator: XhsCreator) {
     const seen = new Set(t.cursorHistory ?? []);
     const notes = new Set(t.listedIds ?? []);
+    let pagesThisRun = 0;
     while (!t.listFinished && active(t)) {
+      if (t.pageLimit !== undefined && pagesThisRun >= t.pageLimit)
+        throw new XhsSubscriptionError('XHS_LIST_PAGE_LIMIT_REACHED');
+      pagesThisRun++;
       const cursor = t.cursor ?? null;
       if (seen.has(cursor)) throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
       const page = await this.source!.list(

@@ -56,6 +56,8 @@ export function canAdoptRecoveredTask(input: {
 }
 
 export function taskNextStep(task: SubscriptionTask) {
+  if (task.code === 'XHS_LIST_PAGE_LIMIT_REACHED')
+    return '已达到本次列表页数上限，可使用已列出的笔记；点击继续才会读取下一批，不会自动遍历全部历史。';
   if (task.supersededByTaskId)
     return '此任务已由新任务接续，请查看接续任务；不会再次续跑旧任务。';
   if (task.code === 'XHS_TASK_RECEIPT_UNCERTAIN')
