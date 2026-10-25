@@ -33,6 +33,11 @@ export type PreparedArticle = {
 export type ArticlePreparation = ((
   temporary: string,
 ) => Promise<PreparedArticle>) & {
+  /** Trusted internal supplement publisher, also runs when body is retained. */
+  afterSave?: (saved: {
+    directory: string;
+    markdownPath: string;
+  }) => Promise<SavedSupplement | undefined>;
   identity?: PreparedArticle;
   canReuseLegacyImages?: boolean;
   hasUnarchivedMedia?: (imageMap: Record<string, string>) => boolean;
@@ -41,6 +46,11 @@ export type ArticlePreparation = ((
     folder: string,
     images: string[],
   ) => Promise<void>;
+};
+export type SavedSupplement = {
+  path: string;
+  sha256: string;
+  status: 'new' | 'retained' | 'conflict-version';
 };
 type LockedSaveIdentity = Readonly<{
   articleId: string;
@@ -99,6 +109,7 @@ type SourceReceipt = {
   markdownSha256?: string;
 };
 type SavedArticle = {
+  supplement?: SavedSupplement;
   mediaStatus?: PreparedArticle['mediaStatus'];
   missingImageCount?: number;
   status?: 'new' | 'skipped' | 'repaired' | 'failed';
@@ -363,7 +374,13 @@ export class LocalArticleStore {
       return Promise.reject(
         fail('Batch scope has ended.', 'SAVE_BATCH_EXPIRED'),
       );
-    const operation = this.saveInternal(prepare, now, confirmedDirectory);
+    const operation = this.saveInternal(prepare, now, confirmedDirectory).then(
+      async (saved) => {
+        if (!prepare.afterSave) return saved;
+        const supplement = await prepare.afterSave(saved);
+        return supplement ? { ...saved, supplement } : saved;
+      },
+    );
     if (scope) {
       scope.operations.add(operation);
       operation.then(

@@ -21,6 +21,8 @@ import {
 import { verifiedDownloadBody } from '../article-verified-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
+import { saveXhsMetrics } from './xhs-engagement-store';
+import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
 
 export const XHS_SUBSCRIPTION_SOURCE = Symbol('XHS_SUBSCRIPTION_SOURCE');
 export type XhsListedNote = {
@@ -32,11 +34,19 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  metrics?(authorId: string, noteId?: string): Promise<XhsMetricSnapshot>;
+  comments?(
+    authorId: string,
+    noteId: string,
+    cursor: string,
+    rootId?: string,
+  ): Promise<{ comments: XhsSavedComment[]; nextCursor: string | null }>;
   capability?(): {
     sourceConfigured: boolean;
     canSubscribe: boolean;
     canRefresh: boolean;
     canDownload: boolean;
+    canCollectComments?: boolean;
     message: string;
   };
   resolve(
@@ -71,7 +81,11 @@ type Save = (
   creator: XhsCreator,
   noteId: string,
   destination: string,
-) => Promise<{ alreadySaved: boolean; mediaComplete?: boolean }>;
+) => Promise<{
+  alreadySaved: boolean;
+  mediaComplete?: boolean;
+  supplement?: { status: string };
+}>;
 type Destination = (pickToken?: string) => Promise<string>;
 const active = (t: XhsSubscriptionTask) =>
   t.state === 'queued' || t.state === 'running';
@@ -213,6 +227,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       id: author.id,
       name: author.name.trim(),
       profileUrl: author.profileUrl,
+      ...(author.metrics ? { metrics: author.metrics } : {}),
       ...(author.avatarUrl && /^https:\/\//.test(author.avatarUrl)
         ? { avatarUrl: author.avatarUrl }
         : {}),
@@ -281,6 +296,7 @@ export class XhsSubscriptionService implements OnModuleInit {
               groupId: input.groupId,
             },
           });
+      await saveXhsMetrics(tx, 'creator', creator.id, author.metrics);
       return {
         creatorId: creator.id,
         created: !old,
@@ -479,6 +495,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       skipped: t.skipped,
       failed: t.failed,
       remaining: t.remaining,
+      snapshotsSaved: t.snapshotsSaved,
       // Keep private receipt history, but never label a reconciled public
       // checkpoint as still uncertain: the UI correctly fences that code.
       code: uncertain
@@ -681,6 +698,7 @@ export class XhsSubscriptionService implements OnModuleInit {
                     where: { id, creatorId: creator.id },
                   });
                   if (!current) return reject('XHS_SELECTION_CHANGED');
+                  await saveXhsMetrics(tx, 'note', id, note.metrics);
                   if (current.status !== 'complete' || !current.contentHtml)
                     await tx.xhsNote.update({
                       where: { id },
@@ -696,6 +714,8 @@ export class XhsSubscriptionService implements OnModuleInit {
               }
               if (!active(t)) break;
               const saved = await this.save!(creator, id, directory!);
+              if (saved.supplement && saved.supplement.status !== 'retained')
+                t.snapshotsSaved = (t.snapshotsSaved ?? 0) + 1;
               if (saved.mediaComplete === false)
                 return reject('XHS_LOCAL_MEDIA_INCOMPLETE');
               if (saved.alreadySaved) {
@@ -723,6 +743,8 @@ export class XhsSubscriptionService implements OnModuleInit {
         t.state = t.failed || t.remaining ? 'partial' : 'completed';
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
+        if (t.snapshotsSaved)
+          t.message += ` 已新增 ${t.snapshotsSaved} 份“互动与评论”快照附页；正文保留策略不变。`;
       }
     } catch (error) {
       if (active(t)) {

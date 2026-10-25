@@ -1,5 +1,6 @@
 import { decodeInlineImage } from './image-fetch';
 import { XhsNormalizedCandidate } from './xiaohongshu-contract';
+import { xhsNoteMetrics } from './xhs-engagement-contract';
 
 /**
  * Provisional, fail-closed contract, NOT a real-response evidence assertion.
@@ -245,6 +246,7 @@ export async function mapRedbookDetail(
     authorId,
     noteId,
     kind: 'image-text',
+    metrics: xhsNoteMetrics((raw as any).items[0].note_card),
     // Existing archive contract stores epoch seconds, truncating milliseconds.
     publishedAt,
     title,

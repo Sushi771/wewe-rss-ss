@@ -25,6 +25,14 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ArticleDateFilter from '@web/components/ArticleDateFilter';
 import ArticleReader from '@web/components/ArticleReader';
+import {
+  XhsEngagementPanel,
+  XhsMetricLine,
+  XhsNumericFilter,
+  XhsNumericFilterValue,
+  XhsCreatorMetricRefresh,
+} from '@web/components/XhsEngagement';
+import type { XhsMetric, XhsCreatorMetric } from '@wewe-rss/shared';
 import type { ArticleDateSelection } from '@web/utils/article-date-selection';
 import { dateSelectionFilter } from '@web/utils/article-date-selection';
 import {
@@ -108,7 +116,24 @@ export default function Xiaohongshu() {
   const disconnectConnection = trpc.xiaohongshu.disconnectSession.useMutation({
     retry: false,
   });
-  const creators = trpc.xiaohongshu.list.useQuery(undefined, { retry: false });
+  const [creatorMetricFilter, setCreatorMetricFilter] = useState<
+    Omit<XhsNumericFilterValue, 'metric'> & { metric?: XhsCreatorMetric }
+  >({});
+  const [noteMetricFilter, setNoteMetricFilter] = useState<
+    Omit<XhsNumericFilterValue, 'metric'> & { metric?: XhsMetric }
+  >({});
+  const validCreatorRange =
+    creatorMetricFilter.min === undefined ||
+    creatorMetricFilter.max === undefined ||
+    creatorMetricFilter.min <= creatorMetricFilter.max;
+  const validNoteRange =
+    noteMetricFilter.min === undefined ||
+    noteMetricFilter.max === undefined ||
+    noteMetricFilter.min <= noteMetricFilter.max;
+  const creators = trpc.xiaohongshu.list.useQuery(creatorMetricFilter, {
+    retry: false,
+    enabled: validCreatorRange,
+  });
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
   const [readingCreatorId, setReadingCreatorId] = useState('');
@@ -329,6 +354,7 @@ export default function Xiaohongshu() {
           : creator.groupId === folderFilter),
     ) || [];
   const notesInput = {
+    ...noteMetricFilter,
     creatorId: creatorId || undefined,
     ...(folderFilter === 'all'
       ? {}
@@ -337,7 +363,7 @@ export default function Xiaohongshu() {
     ...dateSelectionFilter(dateSelection),
   };
   const notes = trpc.xiaohongshu.notes.useQuery(notesInput, {
-    enabled: !dateError,
+    enabled: !dateError && validNoteRange,
     retry: false,
   });
   const body = trpc.xiaohongshu.body.useQuery(
@@ -350,22 +376,24 @@ export default function Xiaohongshu() {
   );
   const visibleNotes = useMemo(
     () =>
-      dateError
+      dateError || !validNoteRange
         ? []
-        : [...(notes.data?.items || [])].sort((a, b) => {
-            if (!a.publishTime || !b.publishTime)
-              return a.publishTime
-                ? -1
-                : b.publishTime
-                  ? 1
-                  : a.id.localeCompare(b.id);
-            return (
-              (direction === 'asc'
-                ? a.publishTime - b.publishTime
-                : b.publishTime - a.publishTime) || a.id.localeCompare(b.id)
-            );
-          }),
-    [dateError, notes.data, direction],
+        : noteMetricFilter.metric
+          ? notes.data?.items || []
+          : [...(notes.data?.items || [])].sort((a, b) => {
+              if (!a.publishTime || !b.publishTime)
+                return a.publishTime
+                  ? -1
+                  : b.publishTime
+                    ? 1
+                    : a.id.localeCompare(b.id);
+              return (
+                (direction === 'asc'
+                  ? a.publishTime - b.publishTime
+                  : b.publishTime - a.publishTime) || a.id.localeCompare(b.id)
+              );
+            }),
+    [dateError, validNoteRange, noteMetricFilter.metric, notes.data, direction],
   );
   const loadedNotes = visibleNotes.slice(0, loadedCount);
   const selectableNotes = loadedNotes.filter(
@@ -691,7 +719,10 @@ export default function Xiaohongshu() {
       const allScope = { creatorId: creatorId || undefined };
       const scope = exportScope;
       const selectedSnapshot = [...selectedArchives];
-      const filterSnapshot = { ...notesInput };
+      const filterSnapshot = {
+        ...notesInput,
+        queryVersion: notes.data?.queryVersion,
+      };
       setExportOpen(false);
       setTask(null);
       setProgressOpen(true);
@@ -1037,6 +1068,21 @@ export default function Xiaohongshu() {
         >
           全部笔记
         </Button>
+        <XhsNumericFilter
+          creator
+          value={creatorMetricFilter}
+          onChange={(value) => {
+            setCreatorMetricFilter(value as typeof creatorMetricFilter);
+            setSelectedCreators([]);
+            setSelectedIds(new Set());
+          }}
+        />
+        {current && (
+          <XhsCreatorMetricRefresh
+            creatorId={current.id}
+            enabled={!busy && capability.data?.canRefresh === true}
+          />
+        )}
         <ul>
           {visibleCreators.map((creator) => (
             <li
@@ -1078,6 +1124,9 @@ export default function Xiaohongshu() {
                 onClick={() => selectCreator(creator.id)}
               >
                 {creator.displayName}
+                <span className="block truncate">
+                  <XhsMetricLine snapshot={creator.metrics} creator />
+                </span>
               </button>
               <span className="shrink-0 text-xs opacity-60">
                 {creator._count.notes}
@@ -1562,6 +1611,14 @@ export default function Xiaohongshu() {
             清空选择
           </Button>
         </div>
+        <XhsNumericFilter
+          value={noteMetricFilter}
+          onChange={(value) => {
+            setNoteMetricFilter(value as typeof noteMetricFilter);
+            setSelectedIds(new Set());
+            setLoadedCount(20);
+          }}
+        />
         <ContentSortControls
           sort="publishTime"
           onSortChange={() => {}}
@@ -1649,6 +1706,9 @@ export default function Xiaohongshu() {
                   <span className="whitespace-normal text-left md:max-w-[150px] md:text-right">
                     {!creatorId && <span>{note.creatorName} · </span>}
                     {noteStatus(note)}
+                    <span className="block">
+                      <XhsMetricLine snapshot={note.metrics} />
+                    </span>
                   </span>
                 </div>
               </div>
@@ -1877,6 +1937,18 @@ export default function Xiaohongshu() {
                     findOpen={readerFindOpen}
                     onFindOpenChange={setReaderFindOpen}
                   />
+                  {body.data && (
+                    <XhsEngagementPanel
+                      key={`engagement:${readingCreatorId}:${noteId}`}
+                      creatorId={readingCreatorId}
+                      noteId={noteId}
+                      initial={body.data.engagement}
+                      canCollectComments={
+                        capability.data?.canCollectComments === true
+                      }
+                      canRefreshMetrics={capability.data?.canRefresh === true}
+                    />
+                  )}
                 </article>
               )
             )}

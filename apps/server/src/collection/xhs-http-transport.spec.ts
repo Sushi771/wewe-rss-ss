@@ -7,6 +7,36 @@ import {
 } from './xhs-http-transport';
 import { RedbookClient, RedbookRequest } from './redbook-client';
 
+it('constructs only the reviewed bounded comment read routes with no retry or implicit paging (mock only)', async () => {
+  const transport = jest.fn(async (request) => ({
+    status: 200,
+    url: request.url,
+    body: { success: true, code: 0, data: {} },
+  }));
+  const client = new RedbookClient({
+    transport,
+    cookies: () => ({ a1: 'synthetic-a1', web_session: 'synthetic-session' }),
+  });
+  await client.getComments(
+    'synthetic-note',
+    'synthetic-cursor',
+    'synthetic-token',
+  );
+  await client.getSubComments(
+    'synthetic-note',
+    'synthetic-root',
+    'synthetic-next',
+  );
+  expect(transport).toHaveBeenCalledTimes(2);
+  const top = new URL(transport.mock.calls[0][0].url),
+    replies = new URL(transport.mock.calls[1][0].url);
+  expect(top.pathname).toBe('/api/sns/web/v2/comment/page');
+  expect(top.searchParams.get('cursor')).toBe('synthetic-cursor');
+  expect(replies.pathname).toBe('/api/sns/web/v2/comment/sub/page');
+  expect(replies.searchParams.get('root_comment_id')).toBe('synthetic-root');
+  expect(replies.searchParams.get('num')).toBe('30');
+});
+
 it('uses the explicitly reviewed v1 list route once without endpoint fallback', async () => {
   const transport = jest.fn(async (input: RedbookRequest) => ({
     status: 200,
@@ -15,7 +45,10 @@ it('uses the explicitly reviewed v1 list route once without endpoint fallback', 
   }));
   await new RedbookClient({
     transport,
-    cookies: () => ({ a1: 'synthetic-device', web_session: 'synthetic-session' }),
+    cookies: () => ({
+      a1: 'synthetic-device',
+      web_session: 'synthetic-session',
+    }),
   }).getUserNotes('synthetic-author');
   expect(transport).toHaveBeenCalledTimes(1);
   expect(new URL(transport.mock.calls[0][0].url).pathname).toBe(
