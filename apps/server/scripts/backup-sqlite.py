@@ -432,7 +432,7 @@ def snapshot_equal(source, copied):
 
 
 def snapshot_covers(current, previous, budget):
-    """All old typed durable rows survive; only derived feed summaries differ.
+    """All old typed durable rows survive except ordinary feeds.sync_time.
 
     No article field, note, metric, subscription identity or unknown table/column
     is discarded. A changed durable value or deleted row holds the old point.
@@ -440,7 +440,9 @@ def snapshot_covers(current, previous, budget):
     schema="SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
     if list(current.execute(schema))!=list(previous.execute(schema)):return False
     quote=lambda value:'"'+value.replace('"','""')+'"'
-    derived_feed={'sync_time','update_time','updated_at','has_history','last_collection_result','provider_refresh_attempt_time'}
+    # The reviewed exception is one ordinary column, not a class of timestamps
+    # or summaries. Generated values and primary-key identity remain strict.
+    derived_feed={'sync_time'}
     count=0
     for (table,) in previous.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
         info=stored_columns(previous,table)

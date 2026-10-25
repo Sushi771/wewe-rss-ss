@@ -96,3 +96,27 @@ retained beneath ignored `output/release-repro/` for local inspection; they are
 not release/install pointers. No service switch or deployment occurs. A passing
 drill proves this source/toolchain and synthetic recovery case, not unattended
 production recovery or a new real-platform acceptance.
+
+## Exact coverage exception
+
+Periodic retirement comparison ignores only the ordinary stored column
+`feeds.sync_time`. The earlier six-column summary exception is narrowed: feed
+`update_time`, `updated_at`, `has_history`, `last_collection_result` and
+`provider_refresh_attempt_time` remain strict, as do unknown columns, article
+identity/body/media references, notes, metrics, generated values and schema.
+A sync-time column used in a primary key still binds identity. This comparison
+never grants permission to delete or overrides a protected-point reference.
+
+Removing one specifically approved manual protection only permits fresh planning.
+Generate the existing exact batch without calling its executor; keep the
+three-normal/one-pending allowance and automatic deletion disabled. Before any
+separate irreversible approval, the batch must retain exact source/root/object
+identities, receipt hashes, reference records and a fresh resource check. All
+other protected points remain protected. A current-content coverage proof does
+not reconstruct a deleted historical whole-database snapshot. Production package
+code is not changed by a development-branch commit.
+
+`test_snapshot_covers.py` uses in-memory SQLite only. It proves the one-column
+positive case without mutation, rejects every former extra exception, changed
+bodies/media/identities/types/schema, missing rows, unknown tables and generated
+or primary-key sync-time changes. The focused CI runs it on Linux and Windows.
