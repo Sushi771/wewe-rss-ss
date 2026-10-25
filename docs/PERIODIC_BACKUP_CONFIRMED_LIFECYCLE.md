@@ -48,6 +48,46 @@ Approval never waives preservation: every durable old typed row, note, body, met
 
 ## Status and business effect
 
+### Independent fixed-point maintenance adapter
+
+`apps/server/scripts/fixed-retirement-executor.py` accepts an explicitly approved
+`sqlite-fixed-retirement-review-v1` document hash. It is an operator-run tool,
+outside the application's runtime helper bundle; installing it does not change
+the running package or enable automatic retirement. Its schema-compatible
+coverage witness and pending promotion target are separate, explicitly bound
+roles. A different-schema pending copy never substitutes for the coverage proof.
+
+Human approval of the unchanged exact objects is distinct from the locally issued
+300-second technical token. Token issuance records its current wall and monotonic
+clocks and the approval reference; it never refreshes or rewrites a historical
+human approval time. An expired token requires fresh technical preparation,
+including identity and resource checks, rather than silently changing its time.
+An expired or changed review still stops the action.
+
+The adapter acquires the existing snapshot/owner locks, pins indexed metadata and
+namespaces, rechecks typed coverage and exact SHA values, and queries the public
+Windows Restart Manager API. It changes neither execution policy nor process
+state. Occupied owners must release their lifetime lock through the normal
+maintenance procedure; deleting the lock file is forbidden. Unknown references
+remain blocking. Reads are bounded to the registered roots and named recovery
+files; there is no recursive historical-database scan.
+
+The only data objects retired are the review's database, receipt and empty
+directory. Attempted and completed native operations are recorded separately.
+Partial deletion, a lost native return, or a final state-save failure holds the
+lifecycle and cannot allocate another copy. Only complete retirement promotes
+the existing pending point and releases its allocation marker. The exact
+five-column ordinary runtime exception remains unchanged; body, media, schema,
+keys and generated values retain strict coverage checks.
+
+`python -m unittest discover -s apps/server/scripts -p test_fixed_retirement_executor.py -v`
+executes tiny owned Windows fixtures, including a real Restart Manager query,
+native deletion, distinct witness/promotion, unchanged retained hashes, replay
+rejection and subsequent fourth-copy allocation. Failure cases cover occupied
+owners/resources, object replacement, unknown references, technical-token expiry,
+native write/rename exclusion, partial deletion and uncertain allocation release.
+Windows CI runs these native cases; other platforms explicitly skip them.
+
 Owner IPC includes a finite, path-free lifecycle status and failure code. A not-due/held owner does not manufacture a lease from disk metadata. Product diagnostics explain pending confirmation and incomplete operations, and show the actual configured 15-minute/24-hour cadence in capacity estimates. Node/Python forecasts use `headroom * interval / 86400`, distinguish continuously changing data from unchanged reuse, and retain the existing hard ceilings. These estimates describe global space, not authority to bypass the separate pending gate or a guarantee of future successful copies.
 
 The history-reference consumer accepts both the original four-field capacity telemetry and the exact new six-field form, validating cadence and the fixed forecast-basis text. Unknown fields remain rejected. A ready lifecycle's exact source-bound control pair is observed by identity/hash and its normal recovery files only add protections; orphan/foreign controls and incomplete operations hold review. This does not turn telemetry or lifecycle metadata into deletion approval.
