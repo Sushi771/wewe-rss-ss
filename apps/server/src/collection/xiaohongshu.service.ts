@@ -999,17 +999,40 @@ export class XiaohongshuService {
         422,
         { code: 'XHS_CACHED_VIDEO_INVALID' },
       );
+    let tuple: unknown;
+    try {
+      tuple = JSON.parse(note.id);
+    } catch {
+      /* Reject below before constructing an original link. */
+    }
+    if (
+      !Array.isArray(tuple) ||
+      tuple.length !== 3 ||
+      tuple[0] !== 'xiaohongshu' ||
+      tuple[1] !== 'note' ||
+      typeof tuple[2] !== 'string' ||
+      !/^[a-zA-Z0-9_-]{1,128}$/.test(tuple[2]) ||
+      JSON.stringify(tuple) !== note.id
+    )
+      throw new ArticleDownloadError('笔记缓存身份无效，未保存。', 422, {
+        code: 'XHS_CACHED_NOTE_ID_INVALID',
+      });
+    const sourceUrl = 'https://www.xiaohongshu.com/explore/' + tuple[2];
     const article = {
       ...note,
       contentHtml: verifiedDownloadBody(note.contentHtml),
       lastBodyStatus: 'available',
       metrics: null,
     };
-    return (directory: string) =>
-      buildCompleteArticleDownload(
+    return async (directory: string) => ({
+      ...(await buildCompleteArticleDownload(
         article,
-        '小红书本地缓存（笔记身份：' + note.id + '）',
+        '[原文](' + sourceUrl + ')',
         directory,
-      );
+      )),
+      // The staged Markdown owns the original link. The local saver otherwise
+      // prepends the same canonical URL again in its source metadata block.
+      sourceUrl: null,
+    });
   }
 }

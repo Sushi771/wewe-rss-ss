@@ -96,7 +96,10 @@ async function inspectSaved(markdownPath: string) {
     .split(/\n[ \t]*\n+/)
     .map((s) => s.trim())
     .filter(Boolean);
-  if (blocks.shift() !== `原文来源：小红书本地缓存（笔记身份：${noteId}）`)
+  if (
+    blocks.shift() !==
+    '原文来源：[原文](https://www.xiaohongshu.com/explore/synthetic-integrity)'
+  )
     fail('ORACLE_PROVENANCE_MISMATCH');
   const body = blocks.map((block) =>
     normalize(block.replace(/!\[[^\]]*\]\(([^)\r\n]+)\)/g, '[IMAGE]')),

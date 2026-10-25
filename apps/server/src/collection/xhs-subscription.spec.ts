@@ -798,12 +798,181 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(files.some((f) => String(f).endsWith('.md'))).toBe(true);
     expect(files.some((f) => /\.png$/.test(String(f)))).toBe(true);
   }, 30000);
+  it.each([false, true])(
+    'completes two repeat saves with unchanged files when last checkpoint acknowledgement fails: %s',
+    async (loseCheckpoint) => {
+      (source.list as jest.Mock).mockResolvedValue({
+        authorId: author.id,
+        nextCursor: null,
+        notes: ['repeat-one', 'repeat-two'].map((noteId) => ({
+          authorId: author.id,
+          noteId,
+          title: 'Synthetic repeat',
+          publishedAt: 0,
+          kind: 'image-text',
+        })),
+      });
+      (source.detail as jest.Mock).mockImplementation(async (_author, id) =>
+        detail(id),
+      );
+      await finish((await service.refresh({ id: creatorId })).taskId);
+      const request = {
+        creatorId,
+        noteIds: ['repeat-one', 'repeat-two'].map(noteKey),
+      };
+      const first = await service.downloadNotes(request);
+      expect(await finish(first.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 2,
+        skipped: 0,
+        remaining: 0,
+      });
+      const files = (await fs.readdir(root, { recursive: true }))
+        .map(String)
+        .filter((file) => /\.(md|png)$/.test(file));
+      const digest = async () =>
+        Promise.all(
+          files.map(async (file) => {
+            const full = path.join(root, file);
+            return {
+              file,
+              bytes: createHash('sha256')
+                .update(await fs.readFile(full))
+                .digest('hex'),
+              mtime: (await fs.stat(full)).mtimeMs,
+            };
+          }),
+        );
+      const before = await digest();
+      const original = (service as any).persistIn.bind(service);
+      let lost = false;
+      const fault = jest
+        .spyOn(service as any, 'persistIn')
+        .mockImplementation(async (tx, task: any) => {
+          if (
+            loseCheckpoint &&
+            !lost &&
+            task.kind === 'download' &&
+            task.state === 'running' &&
+            task.skipped === 2
+          ) {
+            lost = true;
+            throw Error(
+              'synthetic final skipped checkpoint acknowledgement unavailable',
+            );
+          }
+          return original(tx, task);
+        });
+      const repeat = await service.downloadNotes(request);
+      for (let i = 0; i < 1000 && (service as any).pending.size; i++)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      expect((service as any).pending.size).toBe(0);
+      expect(await finish(repeat.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 0,
+        skipped: 2,
+        failed: 0,
+        remaining: 0,
+        resumable: false,
+      });
+      expect(source.detail).toHaveBeenCalledTimes(2);
+      expect(source.list).toHaveBeenCalledTimes(1);
+      expect(await digest()).toEqual(before);
+      const fresh = new XhsSubscriptionService(db as any, source);
+      expect(await fresh.task(repeat)).toMatchObject({
+        state: 'completed',
+        skipped: 2,
+      });
+      // Reproduce the historical durable receipt after process loss. A settled
+      // all-skipped checkpoint closes without a new task or any file action.
+      const rows = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${repeat.taskId}`;
+      const checkpoint = {
+        ...JSON.parse(rows[0].document),
+        state: 'blocked',
+        code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      };
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='blocked', document=${JSON.stringify(checkpoint)} WHERE id=${repeat.taskId}`;
+      expect(await fresh.task(repeat)).toMatchObject({
+        state: 'completed',
+        skipped: 2,
+        resumable: false,
+      });
+      await expect(fresh.resumeTask(repeat)).rejects.toThrow(
+        'XHS_TASK_NOT_RESUMABLE',
+      );
+      expect(source.detail).toHaveBeenCalledTimes(2);
+      expect(await digest()).toEqual(before);
+      expect(lost).toBe(loseCheckpoint);
+      fault.mockRestore();
+    },
+    30000,
+  );
   it('rejects another creator selection before details or saving', async () => {
     await finish((await service.refresh({ id: creatorId })).taskId);
     await expect(
       service.downloadNotes({ creatorId, noteIds: ['foreign'] }),
     ).rejects.toThrow('XHS_SELECTION_INVALID');
     expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('keeps uncertain, failed, cancelled and bounded-list receipts distinct from reconciled completion', () => {
+    const id = noteKey('synthetic-receipt');
+    const receipt = {
+      taskId: 'synthetic-receipt',
+      creatorId,
+      kind: 'download',
+      state: 'blocked',
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      total: 1,
+      completed: 0,
+      skipped: 1,
+      failed: 0,
+      remaining: 0,
+      noteIds: [id],
+      items: { [id]: 'skipped' },
+      message: '',
+    };
+    const view = (task: any) => (service as any).view(task);
+    expect(view(receipt)).toMatchObject({
+      state: 'completed',
+      resumable: false,
+      code: undefined,
+    });
+    (service as any).uncertain.set(receipt.taskId, receipt);
+    expect(view(receipt)).toMatchObject({
+      state: 'blocked',
+      resumable: false,
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+    });
+    (service as any).uncertain.clear();
+    expect(
+      view({ ...receipt, failed: 1, skipped: 0, items: { [id]: 'failed' } }),
+    ).toMatchObject({ state: 'blocked', resumable: true });
+    expect(view({ ...receipt, items: {} })).toMatchObject({
+      state: 'blocked',
+      resumable: false,
+    });
+    expect(
+      view({
+        ...receipt,
+        kind: 'list',
+        code: 'XHS_LIST_PAGE_LIMIT_REACHED',
+        cursor: 'next',
+      }),
+    ).toMatchObject({ state: 'blocked', resumable: true });
+    expect(view({ ...receipt, state: 'cancelled' })).toMatchObject({
+      state: 'cancelled',
+      resumable: false,
+    });
+    expect(
+      view({
+        ...receipt,
+        skipped: 0,
+        remaining: 1,
+        supersededByTaskId: 'successor',
+      }),
+    ).toMatchObject({ resumable: false });
   });
   it('commits and searches all 32 notes when a bounded page exceeds the requested 30', async () => {
     const notes = Array.from({ length: 32 }, (_, i) => ({
