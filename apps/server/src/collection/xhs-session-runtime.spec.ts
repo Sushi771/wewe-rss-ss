@@ -237,6 +237,23 @@ describe('default-off production source wiring with synthetic sessions only', ()
       credentials: 'omit',
     });
     expect(Object.keys(media.mock.calls[0][1].headers)).toEqual(['accept']);
+    const attemptStatus = await runtime.connectionStatus();
+    expect(attemptStatus.requestAttempts).toMatchObject({
+      profiles: 0,
+      lists: 1,
+      details: 2,
+      media: 1,
+      shortLinks: 0,
+    });
+    expect((await runtime.connectionStatus()).requestAttempts).toEqual(
+      attemptStatus.requestAttempts,
+    );
+    expect(JSON.stringify(attemptStatus.requestAttempts)).not.toContain(
+      cookies.a1,
+    );
+    expect(JSON.stringify(attemptStatus.requestAttempts)).not.toContain(
+      'xiaohongshu.com',
+    );
     expect(await runtime.connectionStatus()).toMatchObject({
       connected: true,
       verified: true,

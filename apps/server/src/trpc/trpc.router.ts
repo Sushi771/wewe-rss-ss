@@ -1726,6 +1726,17 @@ export class TrpcRouter {
     task: this.trpcService.protectedProcedure
       .input(z.object({ taskId: z.string().uuid() }).strict())
       .query(({ input }) => this.xhsSubscriptions!.task(input)),
+    recentTasks: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128).optional(),
+            limit: z.number().int().min(1).max(20).optional(),
+          })
+          .strict()
+          .optional(),
+      )
+      .query(({ input }) => this.xhsSubscriptions!.recentTasks(input)),
     cancelTask: this.trpcService.protectedProcedure
       .input(z.object({ taskId: z.string().uuid() }).strict())
       .mutation(({ input }) => this.xhsSubscriptions!.cancelTask(input)),
@@ -1822,7 +1833,14 @@ export class TrpcRouter {
       )
       .query(({ input }) => this.xhs.body(input.creatorId, input.noteId)),
     refresh: this.trpcService.protectedProcedure
-      .input(z.object({ id: z.string().min(1).max(128) }).strict())
+      .input(
+        z
+          .object({
+            id: z.string().min(1).max(128),
+            maxPages: z.number().int().min(1).max(10).optional(),
+          })
+          .strict(),
+      )
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
         return this.xhsSubscriptions!.refresh(input);

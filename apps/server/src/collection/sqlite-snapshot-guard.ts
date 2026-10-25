@@ -119,12 +119,34 @@ export function safePeriodicLifecycleStatus(value: unknown) {
     (input[key] as number) <= maximum
       ? (input[key] as number)
       : null;
+  const time = (key: string) => count(key, 8640000000000000);
+  const paused = input.status !== 'ready';
   return {
     status: String(input.status),
     normalCopies: count('normalCopies', 48),
     pendingCopies: count('pendingCopies', 1),
     intervalSeconds: count('intervalSeconds', 86400),
     automaticDeletion: false,
+    generationPaused: paused,
+    generationPauseReason:
+      input.status === 'pending-confirmation'
+        ? 'pending-confirmation'
+        : paused
+          ? 'lifecycle-held'
+          : null,
+    lastGeneratedAtMs: time('lastGeneratedAtMs'),
+    lastVerifiedAtMs: time('lastVerifiedAtMs'),
+    coverageAtMs: time('coverageAtMs'),
+    verificationBasis: ['creation-receipt', 'current-owner-hash'].includes(
+      String(input.verificationBasis),
+    )
+      ? String(input.verificationBasis)
+      : 'unknown',
+    coverageBasis: ['copy-start', 'verified-unchanged'].includes(
+      String(input.coverageBasis),
+    )
+      ? String(input.coverageBasis)
+      : 'unknown',
   };
 }
 
@@ -192,6 +214,14 @@ export class SqliteSnapshotGuard {
   private periodicFailed = false;
   private periodicFailureKey = '';
   private retentionStatusKey = '';
+  private lifecycleStatus?: ReturnType<typeof safePeriodicLifecycleStatus>;
+  private lifecycleObservedAtMs?: number;
+  /** Display-only cached owner event: no query, lease, scan or backup work. */
+  publicStatus() {
+    return this.lifecycleStatus && this.child
+      ? { ...this.lifecycleStatus, observedAtMs: this.lifecycleObservedAtMs }
+      : null;
+  }
   private starting?: Promise<void>;
   private generation?: string;
   private databasePath?: string;
@@ -308,6 +338,8 @@ export class SqliteSnapshotGuard {
             this.periodicFailureKey = message.ok ? '' : key;
             const retention = safePeriodicRetentionStatus(message.retention);
             const lifecycle = safePeriodicLifecycleStatus(message.lifecycle);
+            this.lifecycleStatus = lifecycle;
+            this.lifecycleObservedAtMs = Date.now();
             if (lifecycle) {
               const lifecycleKey = JSON.stringify(lifecycle);
               if (this.retentionStatusKey !== lifecycleKey)
@@ -385,6 +417,8 @@ export class SqliteSnapshotGuard {
   }
 
   stop(reason = 'snapshot-owner-stopped') {
+    this.lifecycleStatus = undefined;
+    this.lifecycleObservedAtMs = undefined;
     if (
       [
         'snapshot-owner-unavailable',
@@ -543,6 +577,7 @@ export class SqliteSnapshotGuard {
 const owner = new SqliteSnapshotGuard();
 export const startSqliteSnapshotGuard = () => owner.start();
 export const stopSqliteSnapshotGuard = () => owner.stop();
+export const periodicSnapshotPublicStatus = () => owner.publicStatus();
 export const queryFastInsertSnapshotGuard = () => owner.query();
 export const assertFastInsertSnapshotLease = (
   transaction: RawTransaction,

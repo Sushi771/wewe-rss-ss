@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { backupSpaceMessage } from './collection/sqlite-backup-root';
+import { periodicSnapshotPublicStatus } from './collection/sqlite-snapshot-guard';
 
 type Audit = {
   status: 'verifying' | 'ready' | 'failed';
@@ -52,6 +53,7 @@ export function startupAuditHttpGuard(
     return res.json({
       status: audit?.status ?? 'ready',
       writesAllowed: databaseWritesAllowed(),
+      periodicBackup: periodicSnapshotPublicStatus(),
       message: databaseWritesAllowed()
         ? backupSpaceMessage()
         : startupMessage(),

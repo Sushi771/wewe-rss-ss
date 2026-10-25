@@ -142,6 +142,9 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       active: { current: false },
       taskRunning: { current: false },
       cancelPending: { current: false },
+      activityGeneration: { current: 0 },
+      recoveryAttempted: { current: false },
+      readRecentRef: { current: jest.fn().mockResolvedValue(undefined) },
       queuedCreators: { current: [] },
       queuedDownloads: { current: [] },
       nextDownloadRef: { current: undefined },
@@ -322,6 +325,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     await scope.run(() => scope.updateCreator('a'));
     expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledWith({
       id: 'a',
+      maxPages: 2,
     });
     expect(state.task).toMatchObject({ kind: 'list', state: 'queued' });
     expect(state.busy).toBe(true);
@@ -335,7 +339,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     const { scope, state } = harness();
     await evaluate('handleRefreshAll', scope)();
     expect(scope.subscriptionApi.refresh.mutate.mock.calls).toEqual([
-      [{ id: 'a' }],
+      [{ id: 'a', maxPages: 2 }],
     ]);
     expect(scope.queuedCreators.current).toEqual(['b']);
     watch(scope).onTask({ ...terminal('partial'), kind: 'list' });
@@ -350,8 +354,8 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     await Promise.resolve();
     await Promise.resolve();
     expect(scope.subscriptionApi.refresh.mutate.mock.calls).toEqual([
-      [{ id: 'a' }],
-      [{ id: 'b' }],
+      [{ id: 'a', maxPages: 2 }],
+      [{ id: 'b', maxPages: 2 }],
     ]);
     expect(state.busy).toBe(true);
   });
@@ -524,6 +528,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       expect(actual.task).toEqual(task);
       expect(actual.message).toBe(taskExports.taskText(task));
       expect(scope.taskRunning.current).toBe(false);
+      expect(scope.readRecentRef.current).toHaveBeenCalledTimes(1);
       expect(
         scope.utils.xiaohongshu.capability.invalidate,
       ).toHaveBeenCalledTimes(1);

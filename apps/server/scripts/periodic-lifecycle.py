@@ -304,11 +304,49 @@ class Store:
 
     def status(self):
         s = self.state
+        # Read only the newest indexed receipt. Never use a status read or a
+        # filesystem mtime as a new verification/coverage event.
+        points = s['normal'] + ([s['pending']] if s['pending'] else [])
+        latest = max(points, key=lambda p: p['at'], default=None)
+        generated = None
+        coverage = None
+        if latest:
+            receipt = Path(latest['receipt'])
+            proof, raw = bounded_json(receipt)
+            if (retention().identity(receipt) != latest['receiptIdentity']
+                    or sha(raw) != latest['receiptSha256']
+                    or proof.get('source') != str(self.database)
+                    or proof.get('backup') != latest['path']
+                    or proof.get('sha256') != latest['sha256']):
+                fail()
+            stamp = datetime.fromisoformat(proof['createdAtUtc'].replace('Z', '+00:00'))
+            if stamp.tzinfo is None or not math.isfinite(stamp.timestamp()) or stamp.timestamp() < latest['at']:
+                fail()
+            generated = int(stamp.timestamp() * 1000)
+            coverage = int(latest['at'] * 1000)
+        paused = s['status'] != 'ready'
         return {'status': s['status'], 'normalCopies': len(s['normal']),
                 'pendingCopies': int(s['pending'] is not None), 'maximumNormalCopies': 3,
                 'maximumPendingCopies': 1, 'intervalSeconds': self.init['policy']['interval'],
                 'nextGenerationAtEpoch': s['lastGenerationEpoch'] + self.init['policy']['interval'],
+                'generationPaused': paused,
+                'generationPauseReason': 'pending-confirmation' if s['status'] == 'pending-confirmation' else ('lifecycle-held' if paused else None),
+                'lastGeneratedAtMs': generated,
+                # The creation receipt proves the initial full verification;
+                # only a running owner can report a later successful recheck.
+                'lastVerifiedAtMs': generated,
+                'verificationBasis': 'creation-receipt' if generated is not None else 'unknown',
+                'coverageAtMs': coverage, 'coverageBasis': 'copy-start' if coverage is not None else 'unknown',
                 'automaticDeletion': False}
+
+    def report(self, report):
+        points = self.state['normal'] + ([self.state['pending']] if self.state['pending'] else [])
+        latest = max(points, key=lambda p: p['at'], default=None)
+        return {**report, 'periodicLifecycleStatus': self.status(),
+                # Private owner binding, never part of the public status. A
+                # reusable protected point may differ from the indexed periodic
+                # point whose generation/verification times status describes.
+                'periodicLifecyclePoint': {'backup': latest['path'], 'sha256': latest['sha256']} if latest else None}
 
     def close(self):
         self.stack.close()
@@ -369,7 +407,7 @@ def create(backup, database, root, timeout, diagnostics, copy_timeout, now=None)
             # can be reused only after the independent complete existing proof.
             reused = backup.reusable(database, root, deadline, allow_periodic=True)
             if reused:
-                return {**reused, 'periodicLifecycleStatus': store.status()}
+                return store.report(reused)
             if s['pending'] or len(s['normal']) > 3:
                 fail('PENDING_CONFIRMATION')
             if now < s['lastGenerationEpoch'] + settings['interval']:
@@ -405,7 +443,7 @@ def create(backup, database, root, timeout, diagnostics, copy_timeout, now=None)
                 s['pending'] = p
                 s['status'] = 'pending-confirmation'
             store.save()
-            return {**report, 'diagnostics': diagnostics.report(), 'periodicLifecycleStatus': store.status()}
+            return store.report({**report, 'diagnostics': diagnostics.report()})
 
 
 def read_status(database, root):
@@ -416,7 +454,11 @@ def read_status(database, root):
         with Store(database, root) as store:
             return store.status()
     except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError):
-        return {'status': 'held', 'automaticDeletion': False}
+        return {'status': 'held', 'generationPaused': True,
+                'generationPauseReason': 'lifecycle-held',
+                'lastGeneratedAtMs': None, 'lastVerifiedAtMs': None, 'coverageAtMs': None,
+                'verificationBasis': 'unknown', 'coverageBasis': 'unknown',
+                'automaticDeletion': False}
 
 
 def plan_binding(database, root):

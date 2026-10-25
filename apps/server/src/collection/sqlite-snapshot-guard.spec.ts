@@ -32,6 +32,13 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
       pendingCopies: 1,
       intervalSeconds: 86400,
       automaticDeletion: false,
+      generationPaused: true,
+      generationPauseReason: 'pending-confirmation',
+      lastGeneratedAtMs: null,
+      lastVerifiedAtMs: null,
+      coverageAtMs: null,
+      verificationBasis: 'unknown',
+      coverageBasis: 'unknown',
     });
     expect(
       safePeriodicLifecycleStatus({ status: 'private/path' }),

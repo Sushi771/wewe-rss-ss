@@ -225,10 +225,17 @@ export function SubscriptionProgress({
     <section
       aria-label={ariaLabel}
       aria-live="polite"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || !open) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenChange(false);
+        event.currentTarget.querySelector<HTMLElement>('summary')?.focus();
+      }}
       className={
         compact
-          ? 'px-3 py-1 text-xs text-neutral-500'
-          : 'subscription-progress-summary'
+          ? 'min-w-0 break-words px-3 py-1 text-xs text-neutral-500'
+          : 'subscription-progress-summary min-w-0 break-words'
       }
     >
       {!compact && (
@@ -241,7 +248,7 @@ export function SubscriptionProgress({
         />
       )}
       {notice}
-      {actions}
+      {actions && <div className="flex min-w-0 flex-wrap gap-2">{actions}</div>}
       <details open={open} className="w-full">
         <summary
           className="cursor-pointer select-none py-1"

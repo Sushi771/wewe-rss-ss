@@ -230,7 +230,17 @@ function inspectConnection(
             .all()
             .map((row) => ({
               ...row,
-              sql: row.sql?.replace(/\r\n/g, '\n') ?? null,
+              // Only the two historically reversed nullable TEXT additions commute.
+              // All other SQL and the named PRAGMA contracts remain exact.
+              sql:
+                row.type === 'table' && row.name === 'feeds'
+                  ? (row.sql
+                      ?.replace(/\r\n/g, '\n')
+                      .replace(
+                        ', "local_directory" TEXT, "public_album_ids" TEXT,',
+                        ', "public_album_ids" TEXT, "local_directory" TEXT,',
+                      ) ?? null)
+                  : (row.sql?.replace(/\r\n/g, '\n') ?? null),
             }));
         assert.deepEqual(
           schema(connection),

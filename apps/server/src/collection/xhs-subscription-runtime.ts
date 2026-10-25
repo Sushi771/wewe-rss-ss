@@ -1,5 +1,6 @@
 import { OnModuleDestroy } from '@nestjs/common';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { privateOnlineMode } from '../private-access';
 import {
   RedbookClient,
@@ -57,6 +58,14 @@ export class XhsSubscriptionRuntime
   private verified = false;
   private stopCode?: string;
   private readonly adapter: RedbookSubscriptionAdapter;
+  private readonly requestAttempts = {
+    instanceId: randomUUID(),
+    profiles: 0,
+    lists: 0,
+    details: 0,
+    media: 0,
+    shortLinks: 0,
+  };
   constructor(private readonly options: RuntimeOptions) {
     const api = options.api ?? createRedbookHttpTransport();
     const media = options.media ?? createXhsMediaTransport();
@@ -72,7 +81,15 @@ export class XhsSubscriptionRuntime
       },
       transport: (request) =>
         this.guardTransport(() =>
-          api({ ...request, signal: signal(request.signal) }),
+          (() => {
+            const route = new URL(request.url).pathname;
+            if (route.endsWith('/user/otherinfo'))
+              this.requestAttempts.profiles++;
+            else if (route.endsWith('/user_posted'))
+              this.requestAttempts.lists++;
+            else if (route.endsWith('/feed')) this.requestAttempts.details++;
+            return api({ ...request, signal: signal(request.signal) });
+          })(),
         ),
     });
     this.adapter = new RedbookSubscriptionAdapter(
@@ -81,13 +98,22 @@ export class XhsSubscriptionRuntime
         profileParser: options.profileParser,
         shortLinks: new XhsShortLinkResolver(async (url, request) => {
           return this.guardTransport(() =>
-            shortLinks(url, { ...request, signal: signal(request.signal) }),
+            (() => {
+              this.requestAttempts.shortLinks++;
+              return shortLinks(url, {
+                ...request,
+                signal: signal(request.signal),
+              });
+            })(),
           );
         }),
       },
       (url, request) =>
         this.guardTransport(() =>
-          media(url, { ...request, signal: signal(request.signal) }),
+          (() => {
+            this.requestAttempts.media++;
+            return media(url, { ...request, signal: signal(request.signal) });
+          })(),
         ),
     );
   }
@@ -125,6 +151,7 @@ export class XhsSubscriptionRuntime
     const liveEnabled = this.enabled(),
       connected = liveEnabled && !!this.cookies;
     return {
+      requestAttempts: { ...this.requestAttempts },
       liveEnabled,
       connected,
       stored: liveEnabled ? this.stored : null,

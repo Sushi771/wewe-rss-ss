@@ -30,6 +30,10 @@ export function periodicLifecycleMessage(value: unknown) {
 export function backupForecastMessage(value: unknown) {
   if (!value || typeof value !== 'object') return '';
   const r = value as Record<string, unknown>;
+  const lifecycle = periodicLifecycleMessage(r.periodicLifecycle);
+  if (lifecycle) return lifecycle;
+  if (r.capacityAllowsNextBackup === true && r.nextBackupAllowed === false)
+    return '周期备份状态待核对，新恢复点生成暂停；现有恢复点保留。';
   if (r.nextBackupAllowed === false)
     return '备份空间预算已达到上限，新恢复点生成暂停；现有恢复点保留，请复核并单独确认处理。';
   if (!r.warning) return '';

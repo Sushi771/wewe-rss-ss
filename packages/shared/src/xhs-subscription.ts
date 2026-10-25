@@ -45,8 +45,18 @@ export type XhsSubscriptionTask = {
   code?: string;
   message: string;
   resumable?: boolean;
+  resumedFromTaskId?: string;
+  supersededByTaskId?: string;
 };
 export type XhsConnectionStatus = {
+  requestAttempts?: {
+    instanceId: string;
+    profiles: number;
+    lists: number;
+    details: number;
+    media: number;
+    shortLinks: number;
+  };
   liveEnabled: boolean;
   connected: boolean;
   stored: boolean | null;

@@ -14,6 +14,7 @@ import {
 } from './startup-audit';
 import { PrismaService } from './prisma/prisma.service';
 import { TrpcService } from './trpc/trpc.service';
+import * as snapshotStatus from './collection/sqlite-snapshot-guard';
 
 describe('startup audit lifecycle', () => {
   const global = globalThis as any;
@@ -32,6 +33,37 @@ describe('startup audit lifecycle', () => {
     startupAuditHttpGuard({ path, method, query } as any, res, next);
     return { res, next };
   }
+  it('the existing status read carries only the sanitized owner display snapshot and does not acquire a lease', () => {
+    const display = snapshotStatus.safePeriodicLifecycleStatus({
+      status: 'pending-confirmation',
+      normalCopies: 3,
+      pendingCopies: 1,
+      lastGeneratedAtMs: 10,
+      lastVerifiedAtMs: 20,
+      coverageAtMs: 10,
+      backup: 'private-path',
+      token: 'private-token',
+    })!;
+    const current = jest
+      .spyOn(snapshotStatus, 'periodicSnapshotPublicStatus')
+      .mockReturnValue({ ...display, observedAtMs: 30 });
+    const lease = jest.spyOn(snapshotStatus, 'queryFastInsertSnapshotGuard');
+    const payload = request('/startup-status').res.json.mock.calls[0][0];
+    expect(payload.periodicBackup).toMatchObject({
+      generationPaused: true,
+      normalCopies: 3,
+      pendingCopies: 1,
+      lastGeneratedAtMs: 10,
+      lastVerifiedAtMs: 20,
+      coverageAtMs: 10,
+    });
+    expect(JSON.stringify(payload)).not.toContain('private-');
+    expect(lease).not.toHaveBeenCalled();
+    current.mockReturnValue(null);
+    expect(
+      request('/startup-status').res.json.mock.calls[0][0].periodicBackup,
+    ).toBeNull();
+  });
   it('keeps cached reads, independent settings and private login usable; blocks write-triggering HTTP before side effects', async () => {
     global.__weweStartupAudit = {
       status: 'verifying',

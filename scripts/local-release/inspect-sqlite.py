@@ -132,7 +132,16 @@ def inspect_connection(connection, database, migrations, baseline=None, require_
                     continue
                 reference.executescript((migrations / name / "migration.sql").read_text(encoding="utf-8"))
             query = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name <> '_prisma_migrations' ORDER BY type,name"
-            if [[v.replace("\r\n", "\n") if isinstance(v, str) else v for v in row] for row in connection.execute(query)] != [[v.replace("\r\n", "\n") if isinstance(v, str) else v for v in row] for row in reference.execute(query)]:
+            def schema_rows(db):
+                rows = []
+                for row in db.execute(query):
+                    values = [v.replace("\r\n", "\n") if isinstance(v, str) else v for v in row]
+                    # This exact historical pair has no defaults or constraints.
+                    if values[0] == "table" and values[1] == "feeds" and values[3]:
+                        values[3] = values[3].replace(', "local_directory" TEXT, "public_album_ids" TEXT,', ', "public_album_ids" TEXT, "local_directory" TEXT,')
+                    rows.append(values)
+                return rows
+            if schema_rows(connection) != schema_rows(reference):
                 raise ValueError("Unreviewed schema object or SQL drift")
     return {"database": str(database), "integrity": "ok", "pending": pending, "applied": sorted(applied), "tables": tables}
 

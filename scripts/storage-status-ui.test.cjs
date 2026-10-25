@@ -7,6 +7,37 @@ const vm = require('node:vm');
 const { loadActualTs } = require('./offline-ts-fixture.cjs');
 const helpers = loadActualTs('apps/web/src/utils/startup-status.ts');
 
+test('periodic display distinguishes a 3+1 pause, generation, verification and coverage without promising a new copy', () => {
+  const state = {
+    generationPaused: true,
+    generationPauseReason: 'pending-confirmation',
+    normalCopies: 3,
+    pendingCopies: 1,
+    lastGeneratedAtMs: 1000000000000,
+    lastVerifiedAtMs: 1000000100000,
+    coverageAtMs: 1000000000000,
+    observedAtMs: 1000000200000,
+    verificationBasis: 'current-owner-hash',
+    coverageBasis: 'copy-start',
+  };
+  const text = helpers.periodicBackupLines(state).join('\n');
+  assert.match(text, /新增已暂停.*精确轮换确认/);
+  assert.match(text, /3 份常规，1 份待确认/);
+  for (const label of [
+    '最近生成：',
+    '最近验证：',
+    '数据覆盖至：',
+    '状态记录时间：',
+  ])
+    assert.ok(text.includes(label));
+  assert.match(text, /验证旧点不等于生成新副本/);
+  assert.match(helpers.periodicBackupLines(null).join(''), /尚不可用/);
+  assert.match(
+    helpers.periodicBackupLines({ ...state, coverageAtMs: null }).join(''),
+    /数据覆盖至：未知/,
+  );
+});
+
 test('nonblocking forecasts stay out of the reading banner; actual blocked checks have short true copy', () => {
   assert.equal(
     helpers.startupBlockingMessage({

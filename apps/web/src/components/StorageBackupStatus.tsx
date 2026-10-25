@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { readStartupStatus, StartupStatus } from '@web/utils/startup-status';
+import {
+  readStartupStatus,
+  StartupStatus,
+  periodicBackupLines,
+} from '@web/utils/startup-status';
 
 /** Read on demand in the existing tools page, not a permanent reading banner. */
 export default function StorageBackupStatus() {
@@ -85,6 +89,11 @@ export default function StorageBackupStatus() {
                   <p className="text-default-500">{state.message}</p>
                 </details>
               )}
+              <div aria-label="周期备份状态" className="space-y-1 break-words">
+                {periodicBackupLines(state.periodicBackup).map((line) => (
+                  <p key={line}>{line}</p>
+                ))}
+              </div>
             </>
           ) : null}
           <button

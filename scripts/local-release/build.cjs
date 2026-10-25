@@ -22,6 +22,105 @@ const {
 } = require('./lib.cjs');
 const root = path.resolve(__dirname, '../..');
 const server = path.join(root, 'apps/server');
+const SERVER_HELPERS = Object.freeze([
+  'backup-sqlite.py',
+  'backup-space-status.py',
+  'sqlite-retention-plan.py',
+  'periodic-lifecycle.py',
+  'query-retention-resources.ps1',
+  'sqlite-snapshot-guard.py',
+  'article_history.py',
+  'article_history_host.py',
+  'article-history-browser.cjs',
+  'article-history-runtime.cjs',
+  'article-history-resources.ps1',
+  'verify-preservation.py',
+  'watch-wechat2rss-cache.py',
+  'read-wechat2rss-cache.py',
+]);
+const RUNTIME_WRAPPERS = Object.freeze([
+  'lib.cjs',
+  'runtime.cjs',
+  'engine-audit.cjs',
+  'inspect-sqlite.py',
+  'prepare-start.py',
+  'startup-sqlite.cjs',
+  'space-budget.cjs',
+  'startup-audit.cjs',
+  'offline-guard.cjs',
+]);
+
+function isolatedViteConfig(web, workspace) {
+  let config = fs.readFileSync(path.join(web, 'vite.config.ts'), 'utf8');
+  for (const anchor of [
+    "import { defineConfig } from 'vite';",
+    "import react from '@vitejs/plugin-react';",
+    'export default defineConfig({',
+    '__dirname',
+  ])
+    if (!config.includes(anchor))
+      throw new Error('Unsupported isolated Vite configuration');
+  // A native package resolver avoids bundling either installed CJS or ESM
+  // dependency internals into the generated configuration's module format.
+  config = config
+    .replace(
+      "import { defineConfig } from 'vite';",
+      "const { defineConfig } = packageRequire('vite');",
+    )
+    .replace(
+      "import react from '@vitejs/plugin-react';",
+      "const react = packageRequire('@vitejs/plugin-react');",
+    )
+    .replaceAll('__dirname', JSON.stringify(slash(web)))
+    .replace(
+      'export default defineConfig({',
+      `export default defineConfig({\n root: ${JSON.stringify(slash(web))},\n envDir: ${JSON.stringify(slash(workspace))},\n cacheDir: ${JSON.stringify(slash(path.join(workspace, '.vite')))},`,
+    );
+  return (
+    `import { createRequire } from 'node:module';\nconst packageRequire = createRequire(${JSON.stringify(path.join(web, 'package.json'))});\n` +
+    config
+  );
+}
+
+function copyRuntimeClosure(sourceRoot, release, { legacy = false } = {}) {
+  const helpers = legacy
+    ? SERVER_HELPERS.filter(
+        (name) =>
+          ![
+            'sqlite-snapshot-guard.py',
+            'article_history.py',
+            'article_history_host.py',
+            'article-history-browser.cjs',
+            'article-history-runtime.cjs',
+            'article-history-resources.ps1',
+          ].includes(name),
+      )
+    : SERVER_HELPERS;
+  const entries = [
+    ...helpers.map((name) => [
+      `apps/server/scripts/${name}`,
+      `server/scripts/${name}`,
+    ]),
+    ...RUNTIME_WRAPPERS.map((name) => [`scripts/local-release/${name}`, name]),
+  ];
+  const copied = {};
+  for (const [source, destination] of entries) {
+    const file = path.join(sourceRoot, source);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      throw new Error('Invalid runtime source: ' + source);
+    const bytes = Buffer.from(
+      new TextDecoder('utf-8', { fatal: true })
+        .decode(fs.readFileSync(file))
+        .replace(/\r\n/g, '\n'),
+    );
+    const target = path.join(release, destination);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, bytes, { flag: 'wx' });
+    copied[destination] = { source, sha256: fileHash(target) };
+  }
+  return copied;
+}
 
 function copyPackages(
   destination,
@@ -369,15 +468,18 @@ function build(options = {}) {
     executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
   });
   const requestedBytes = reusable ? 1 : buildBudget.estimate(sourceServer);
-  const shared = require('./release-scope.cjs').open({
-    kind: 'build',
-    root: releaseRoot,
-    reserveBytes: requestedBytes,
-    runtimeCopies: reusable ? 0 : 1,
-    buildOnly: options.buildOnly === true,
-    sourceCommit: historical ? options.sourceCommit : currentCommit,
-    sourceHash,
-  });
+  const shared = require('./release-scope.cjs').open(
+    {
+      kind: 'build',
+      root: releaseRoot,
+      reserveBytes: requestedBytes,
+      runtimeCopies: reusable ? 0 : 1,
+      buildOnly: options.buildOnly === true,
+      sourceCommit: historical ? options.sourceCommit : currentCommit,
+      sourceHash,
+    },
+    options.scopeOptions,
+  );
   return require('./lib.cjs').hostEffects.context.run(shared, () => {
     let reservation;
     let failure;
@@ -548,43 +650,7 @@ function build(options = {}) {
       } else {
         const isolatedConfig = path.join(workspace, 'vite.config.mts');
         if (options.buildOnly) {
-          let config = fs.readFileSync(
-            path.join(web, 'vite.config.ts'),
-            'utf8',
-          );
-          for (const anchor of [
-            "from 'vite'",
-            "from '@vitejs/plugin-react'",
-            'export default defineConfig({',
-            '__dirname',
-          ])
-            if (!config.includes(anchor))
-              throw new Error('Unsupported isolated Vite configuration');
-          config = config
-            .replace(
-              "from 'vite'",
-              'from ' +
-                JSON.stringify(
-                  slash(
-                    path.join(packageDir('vite', web), 'dist/node/index.js'),
-                  ),
-                ),
-            )
-            .replace(
-              "from '@vitejs/plugin-react'",
-              'from ' +
-                JSON.stringify(
-                  slash(
-                    require.resolve('@vitejs/plugin-react', { paths: [web] }),
-                  ),
-                ),
-            )
-            .replaceAll('__dirname', JSON.stringify(slash(web)))
-            .replace(
-              'export default defineConfig({',
-              `export default defineConfig({\n root: ${JSON.stringify(slash(web))},\n envDir: ${JSON.stringify(slash(workspace))},\n cacheDir: ${JSON.stringify(slash(path.join(workspace, '.vite')))},`,
-            );
-          fs.writeFileSync(isolatedConfig, config);
+          fs.writeFileSync(isolatedConfig, isolatedViteConfig(web, workspace));
         }
         fs.writeFileSync(
           path.join(workspace, 'web.log'),
@@ -631,47 +697,13 @@ function build(options = {}) {
           path.join(release, 'known-migrations'),
           { recursive: true },
         );
-      fs.mkdirSync(path.join(target, 'scripts'));
-      for (const file of [
-        'backup-sqlite.py',
-        'backup-space-status.py',
-        'sqlite-retention-plan.py',
-        'periodic-lifecycle.py',
-        'query-retention-resources.ps1',
-        ...(legacy
-          ? []
-          : [
-              'sqlite-snapshot-guard.py',
-              'article_history.py',
-              'article_history_host.py',
-              'article-history-browser.cjs',
-              'article-history-runtime.cjs',
-              'article-history-resources.ps1',
-            ]),
-        'verify-preservation.py',
-        'watch-wechat2rss-cache.py',
-        'read-wechat2rss-cache.py',
-      ])
-        fs.copyFileSync(
-          path.join(server, 'scripts', file),
-          path.join(target, 'scripts', file),
-        );
+      // Current releases have one declared source tree. Historical rollback
+      // remains an explicitly labelled composition with current safety tooling.
+      const runtimeSources = copyRuntimeClosure(root, release, { legacy });
       fs.copyFileSync(
         path.join(sourceServer, 'package.json'),
         path.join(target, 'package.json'),
       );
-      for (const file of [
-        'lib.cjs',
-        'runtime.cjs',
-        'engine-audit.cjs',
-        'inspect-sqlite.py',
-        'prepare-start.py',
-        'startup-sqlite.cjs',
-        'space-budget.cjs',
-        'startup-audit.cjs',
-        'offline-guard.cjs',
-      ])
-        fs.copyFileSync(path.join(__dirname, file), path.join(release, file));
       fs.mkdirSync(path.join(release, 'runtime'));
       reservation.check();
       fs.copyFileSync(process.execPath, path.join(release, 'runtime/node.exe'));
@@ -710,6 +742,39 @@ function build(options = {}) {
         ...(options.buildOnly ? { buildStage: 'build-only' } : {}),
         sourceCommit: historical ? options.sourceCommit : currentCommit,
         toolingCommit: currentCommit,
+        provenance: {
+          format: 'declared-release-source-v1',
+          composition: historical
+            ? 'historical-app-current-tooling'
+            : 'single-source',
+          runtimeTextEncoding: 'utf8-crlf-to-lf-v1',
+          runtimeSources,
+          node: {
+            version: process.version,
+            sha256: fileHash(process.execPath),
+          },
+          buildTools: ['prisma', 'typescript', 'vite'].map((name) => {
+            const directory = packageDir(
+              name,
+              name === 'vite' ? sourceWeb : server,
+            );
+            const entry = {
+              prisma: 'build/index.js',
+              typescript: 'bin/tsc',
+              vite: 'bin/vite.js',
+            }[name];
+            return {
+              name,
+              version: readJson(path.join(directory, 'package.json')).version,
+              entrySha256: fileHash(path.join(directory, entry)),
+            };
+          }),
+          python: {
+            bundled: false,
+            configuration: 'SQLITE_BACKUP_PYTHON',
+            bytecode: 'disabled',
+          },
+        },
         ...(options.searchRollback
           ? { rollbackCompatibility: 'search-additive-21-v1' }
           : {}),
@@ -752,11 +817,25 @@ function build(options = {}) {
       failure = error;
       throw error;
     } finally {
+      const cleanupErrors = [];
       try {
         reservation?.finish(failure);
-      } finally {
-        shared.close(failure);
+      } catch (error) {
+        cleanupErrors.push(error);
       }
+      try {
+        shared.close(failure || cleanupErrors[0]);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      // Keep the first compiler/copy failure visible even if a later scope
+      // deadline or preservation check also holds cleanup for review.
+      if (cleanupErrors.length)
+        throw new AggregateError(
+          [...(failure ? [failure] : []), ...cleanupErrors],
+          'Release build/cleanup failed',
+          { cause: failure || cleanupErrors[0] },
+        );
     }
   });
 }
@@ -788,4 +867,12 @@ if (require.main === module) {
     process.exitCode = 1;
   }
 }
-module.exports = { build, copyPackages, verifyBuildEnvironment };
+module.exports = {
+  build,
+  copyPackages,
+  verifyBuildEnvironment,
+  copyRuntimeClosure,
+  SERVER_HELPERS,
+  RUNTIME_WRAPPERS,
+  isolatedViteConfig,
+};

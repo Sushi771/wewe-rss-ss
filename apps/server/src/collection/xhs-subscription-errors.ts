@@ -1,3 +1,4 @@
+import { TRPCError } from '@trpc/server';
 import { RedbookPauseError } from './redbook-client';
 /** Public fixed codes only. Never expose provider errors, URLs, tokens or bodies. */
 export class XhsSubscriptionError extends Error {
@@ -6,6 +7,17 @@ export class XhsSubscriptionError extends Error {
   }
 }
 const codes = new Set([
+  'XHS_LIST_INVALID',
+  'XHS_LIST_PAGE_LIMIT_REACHED',
+  'XHS_SELECTION_CHANGED',
+  'XHS_NOTE_ID_INVALID',
+  'XHS_DETAIL_INCOMPLETE',
+  'XHS_SUBSCRIPTION_CHANGED',
+  'XHS_SUBSCRIPTION_REQUIRED',
+  'XHS_NOTE_OWNER_CONFLICT',
+  'XHS_LOCAL_MEDIA_INCOMPLETE',
+  'XHS_TASK_RECEIPT_UNCERTAIN',
+  'XHS_TASK_SUPERSEDED',
   'XHS_SOURCE_AUTHENTICATION_BLOCKED',
   'XHS_SOURCE_VERIFICATION_BLOCKED',
   'XHS_SOURCE_PERMISSION_BLOCKED',
@@ -43,7 +55,11 @@ export function xhsPublicCode(error: unknown, fallback: string) {
     ].includes(error.reason)
   )
     return `XHS_SOURCE_${error.reason.toUpperCase()}_BLOCKED`;
-  return error instanceof XhsSubscriptionError && codes.has(error.code)
-    ? error.code
-    : fallback;
+  if (error instanceof XhsSubscriptionError && codes.has(error.code))
+    return error.code;
+  // Local business rejections have fixed allowlisted messages. Never forward
+  // arbitrary Error.message, provider response text or signed links.
+  if (error instanceof TRPCError && codes.has(error.message))
+    return error.message;
+  return fallback;
 }

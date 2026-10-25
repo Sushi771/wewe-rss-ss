@@ -190,6 +190,7 @@ async function runtime() {
     return dlopen.call(this, module, file, ...args);
   };
   const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
+  process.env.PYTHONDONTWRITEBYTECODE = '1';
   const backgroundAudit =
     command === 'start' &&
     manifest.startupPreparation === 'node-background-backup-v1' &&
@@ -221,6 +222,7 @@ async function runtime() {
     DATABASE_URL: sqliteRuntimeUrl(database),
     NODE_ENV: 'production',
     DATABASE_TYPE: 'sqlite',
+    PYTHONDONTWRITEBYTECODE: '1',
   });
   for (const key of Object.keys(process.env))
     if (/^(NODE_OPTIONS|NODE_PATH|PRISMA_.*|DATABASE_URL)$/i.test(key))
