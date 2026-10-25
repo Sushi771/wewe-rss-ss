@@ -76,6 +76,8 @@ type Task = XhsSubscriptionTask & {
   listedIds?: string[];
   listFinished?: boolean;
   pageLimit?: number;
+  localFilesSaved?: number;
+  localFilesReused?: number;
 };
 type Save = (
   creator: XhsCreator,
@@ -217,7 +219,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       author.profileUrl !==
         `https://www.xiaohongshu.com/user/profile/${author.id}` ||
       !['profile', 'note'].includes(value.inputKind) ||
-      (new URL(url).hostname !== 'xhslink.com' &&
+      (!['xhslink.com', 'xhslink.cn'].includes(new URL(url).hostname) &&
         value.inputKind !==
           (new URL(url).pathname.startsWith('/user/profile/')
             ? 'profile'
@@ -749,9 +751,11 @@ export class XhsSubscriptionService implements OnModuleInit {
               if (saved.mediaComplete === false)
                 return reject('XHS_LOCAL_MEDIA_INCOMPLETE');
               if (saved.alreadySaved) {
+                t.localFilesReused = (t.localFilesReused ?? 0) + 1;
                 t.skipped++;
                 t.items[id] = 'skipped';
               } else {
+                t.localFilesSaved = (t.localFilesSaved ?? 0) + 1;
                 t.completed++;
                 t.items[id] = 'completed';
               }
@@ -773,6 +777,8 @@ export class XhsSubscriptionService implements OnModuleInit {
         t.state = t.failed || t.remaining ? 'partial' : 'completed';
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
+        if (t.kind === 'download' && (t.localFilesSaved || t.localFilesReused))
+          t.message += ` 已写入 ${t.localFilesSaved ?? 0} 篇本地文件，复用 ${t.localFilesReused ?? 0} 篇已有本地文件；已有正文和手工修改保留。`;
         if (t.snapshotsSaved)
           t.message += ` 已新增 ${t.snapshotsSaved} 份“互动与评论”快照附页；正文保留策略不变。`;
       }

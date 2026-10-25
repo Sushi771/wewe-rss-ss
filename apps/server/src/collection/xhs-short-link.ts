@@ -24,6 +24,9 @@ export function xhsPublicInputUrl(raw: string) {
         url.search
       )
         throw Error();
+    } else if (url.hostname === 'xhslink.cn') {
+      if (!/^\/o\/[a-zA-Z0-9_-]{1,128}\/?$/.test(url.pathname) || url.search)
+        throw Error();
     } else if (
       url.hostname !== 'www.xiaohongshu.com' ||
       !/^\/(?:user\/profile|explore|discovery\/item)\/[a-zA-Z0-9_-]{1,128}\/?$/.test(
@@ -70,7 +73,7 @@ export class XhsShortLinkResolver {
   async resolve(raw: string) {
     let url = xhsPublicInputUrl(raw);
     const seen = new Set<string>();
-    for (let hop = 0; url.hostname === 'xhslink.com'; hop++) {
+    for (let hop = 0; ['xhslink.com', 'xhslink.cn'].includes(url.hostname); hop++) {
       if (!this.transport)
         throw new XhsSubscriptionError('XHS_SHORT_LINK_UNAVAILABLE');
       if (hop >= 5 || seen.has(url.href))
