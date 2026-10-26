@@ -3,6 +3,7 @@ const fs = require('node:fs'),
   http = require('node:http'),
   { spawn } = require('node:child_process'),
   assert = require('node:assert/strict');
+const { waitForBrowser } = require('./browser-readiness.cjs');
 const root = path.resolve(__dirname, '..'),
   base = path.join(root, 'apps/server/client'),
   evidence = fs.mkdtempSync(
@@ -321,21 +322,27 @@ const server = http.createServer((req, res) => {
       ],
       { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
     );
-    let errors = '';
-    child.stderr.on('data', (x) => (errors += x));
-    const portFile = path.join(profile, 'DevToolsActivePort');
-    for (let n = 0; n < 100 && !fs.existsSync(portFile); n++) await pause(100);
-    assert(fs.existsSync(portFile), errors.slice(-500));
-    const port = fs.readFileSync(portFile, 'utf8').split('\n')[0];
-    const tabs = await (
-      await fetch('http://127.0.0.1:' + port + '/json/list', {
-        signal: AbortSignal.timeout(5000),
-      })
-    ).json();
-    ws = new WebSocket(
-      tabs.find((x) => x.type === 'page' && x.url === 'about:blank')
-        .webSocketDebuggerUrl,
+    let errors = '',
+      spawnError = null;
+    child.stderr.on('data', (x) => {
+      errors = (errors + x).slice(-8192);
+    });
+    child.on('error', (error) => {
+      spawnError = error.code || 'UNKNOWN';
+    });
+    const ready = await waitForBrowser({
+      child,
+      profile,
+      stderr: () => errors,
+      spawnError: () => spawnError,
+    });
+    console.info(
+      JSON.stringify({
+        event: 'responsive-browser-ready',
+        ...ready.diagnostics,
+      }),
     );
+    ws = new WebSocket(ready.page.webSocketDebuggerUrl);
     await new Promise((r) => ws.addEventListener('open', r, { once: true }));
     let id = 0;
     const pending = new Map();
