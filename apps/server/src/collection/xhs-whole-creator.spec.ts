@@ -14,6 +14,12 @@ import { RedbookSubscriptionAdapter } from './xhs-redbook-subscription';
 const noteId = JSON.stringify(['xiaohongshu', 'note', 'note']);
 describe('whole creator durable offline closure', () => {
   let db: PrismaClient, folder: string;
+  const nativeTests: Promise<unknown>[] = [];
+  const nativeLanes: Array<() => Promise<unknown>> = [];
+  async function finishNativeWork() {
+    await Promise.allSettled(nativeTests);
+    for (const lane of nativeLanes) await lane();
+  }
   beforeAll(async () => {
     folder = await fs.mkdtemp(path.join(tmpdir(), 'whole-synthetic-'));
     db = new PrismaClient({
@@ -44,9 +50,10 @@ describe('whole creator durable offline closure', () => {
     });
   }, 30000);
   afterAll(async () => {
+    await finishNativeWork();
     await db.$disconnect();
     await fs.rm(folder, { recursive: true, force: true });
-  });
+  }, 40000);
   it('reads and atomically reserves real SQLite budgets', async () => {
     const { XhsSqliteBudgetStore } = await import('./xhs-request-budget-store');
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms) VALUES('probe',7,1000)`;
@@ -315,7 +322,7 @@ describe('whole creator durable offline closure', () => {
     expect(cancelTask).toHaveBeenCalledWith({ taskId: 'synthetic-child' });
     expect((await whole.view(started.id)).budget!.used).toBe(0);
   });
-  it('requeues a formerly skipped video after cache completion and requires actual native body/companion receipts', async () => {
+  const nativeVideoRoundtrip = async () => {
     const creatorId = 'video-creator',
       video = JSON.stringify(['xiaohongshu', 'note', 'late-video']);
     await db.xhsCreator.create({
@@ -399,6 +406,10 @@ describe('whole creator durable offline closure', () => {
       runtime,
       new XhsEngagementService(db as any, source),
     );
+    nativeLanes.push(
+      () => (whole as any).lane,
+      () => (subscriptions as any).lane,
+    );
     const started = await whole.start({
       creatorId,
       requestLimit: 7,
@@ -438,7 +449,12 @@ describe('whole creator durable offline closure', () => {
     expect(receipts[0].noteId).toBe(video);
     expect(completed.items[0].supplement).toBe('saved');
     expect(source.detail).not.toHaveBeenCalled();
-  });
+  };
+  it('requeues a formerly skipped video after cache completion and requires actual native body/companion receipts', () => {
+    const pending = nativeVideoRoundtrip();
+    nativeTests.push(pending);
+    return pending;
+  }, 40000);
 });
 
 describe('expired access context reconstruction', () => {
