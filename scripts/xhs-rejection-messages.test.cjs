@@ -1,7 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const ts = require('typescript');
+const path = require('node:path');
+const ts = require(
+  require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
+);
 function load(file) {
   const mod = { exports: {} };
   new Function('exports', 'module', ts.transpileModule(fs.readFileSync(file, 'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText)(mod.exports, mod);
