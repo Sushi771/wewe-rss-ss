@@ -30,17 +30,15 @@ const jsx = (type, props) =>
   typeof type === 'function' ? type(props || {}) : { type, props: props || {} };
 const primitives = load('apps/web/src/components/SubscriptionPrimitives.tsx', {
   'react/jsx-runtime': { jsx, jsxs: jsx },
+  '@web/components/AppOverlays': {
+    Modal: 'Modal',
+    Popover: 'Popover',
+    Tooltip: 'Tooltip',
+  },
   '@nextui-org/react': Object.fromEntries(
-    [
-      'Button',
-      'Checkbox',
-      'Modal',
-      'Popover',
-      'PopoverContent',
-      'PopoverTrigger',
-      'Progress',
-      'Tooltip',
-    ].map((name) => [name, name]),
+    ['Button', 'Checkbox', 'PopoverContent', 'PopoverTrigger', 'Progress'].map(
+      (name) => [name, name],
+    ),
   ),
 });
 const Recovery = load('apps/web/src/components/XhsTaskRecovery.tsx', {

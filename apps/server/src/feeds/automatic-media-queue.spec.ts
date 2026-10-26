@@ -317,7 +317,9 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
       try {
         await capacity.capacity(14_000_000);
         expect(disk).toHaveBeenCalledTimes(1);
-        expect(disk).toHaveBeenCalledWith(folder, { bigint: true });
+        expect(disk).toHaveBeenCalledWith(await fs.realpath(folder), {
+          bigint: true,
+        });
         expect(fetch).not.toHaveBeenCalled();
       } finally {
         disk.mockRestore();
