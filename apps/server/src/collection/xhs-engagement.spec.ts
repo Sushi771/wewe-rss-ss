@@ -253,14 +253,24 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
         );
     }
   }, 30000);
+  let resetPromise: Promise<void> | undefined;
   afterAll(async () => {
+    await resetPromise?.catch(() => undefined);
     await db?.$disconnect();
     if (root) await fs.rm(root, { recursive: true, force: true });
-  });
-  beforeEach(async () => {
-    await db.$executeRaw`DELETE FROM xhs_saved_comments`;
-    await db.$executeRaw`DELETE FROM xhs_comment_windows`;
-  });
+  }, 40000);
+  beforeEach(() => {
+    resetPromise = (async () => {
+      await db.$executeRaw`DELETE FROM xhs_saved_comments`;
+      await db.$executeRaw`DELETE FROM xhs_comment_windows`;
+    })();
+    return resetPromise;
+  }, 40000);
+  afterEach(async () => {
+    // A hook deadline is not cancellation. Keep its failure, but join reset
+    // before another fixture or final disconnect can use the same connection.
+    await resetPromise?.catch(() => undefined);
+  }, 40000);
   it('segments 20001 saved comments without truncation and protects edited companion pages', async () => {
     const content = '<'.repeat(40);
     await db.$executeRaw`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<20001)

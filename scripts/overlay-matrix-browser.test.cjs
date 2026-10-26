@@ -11,6 +11,39 @@ const root = path.resolve(__dirname, '..'),
 fs.mkdirSync(evidence, { recursive: true });
 const apiReads = [];
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// Wait only for the explicitly selected SubscriptionMore target. Never click
+// an obscuring parent or switch to another matching control during animation.
+async function waitPopoverClickable(ev, expression) {
+  const pinned = await ev(
+    `(()=>{const e=${expression},p=e?.closest('.feed-reading-more');if(!e||!p)return false;e.scrollIntoView({block:'nearest'});window.__overlayClickPin={e,p};return true})()`,
+  );
+  assert(pinned, 'same SubscriptionMore target/popover must exist');
+  const deadline = Date.now() + 3000;
+  let previous,
+    stable = 0,
+    sample;
+  while (Date.now() < deadline) {
+    sample = await ev(
+      `(()=>{const pin=window.__overlayClickPin,e=${expression},p=e?.closest('.feed-reading-more');if(!pin||e!==pin.e||p!==pin.p||!e.isConnected||!p.isConnected)return {same:false};const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);let visible=!e.disabled&&e.getAttribute('aria-disabled')!=='true';for(let n=e;n&&n!==p.parentElement;n=n.parentElement){const s=getComputedStyle(n);visible&&=s.display!=='none'&&s.visibility==='visible'&&Number(s.opacity)>=0.999&&s.pointerEvents!=='none'&&!(n.getAnimations?.()||[]).some(a=>a.playState==='running');}return {same:true,ok:visible&&r.width>0&&r.height>0&&(e===hit||e.contains(hit)),x:r.x,y:r.y,width:r.width,height:r.height}})()`,
+    );
+    assert(
+      sample?.same,
+      'SubscriptionMore target/popover changed while waiting',
+    );
+    const still =
+      previous &&
+      ['x', 'y', 'width', 'height'].every(
+        (key) => Math.abs(sample[key] - previous[key]) < 0.25,
+      );
+    stable = sample.ok && previous?.ok && still ? stable + 1 : 0;
+    if (stable >= 2) return;
+    previous = sample;
+    await pause(50);
+  }
+  assert.fail(
+    'SubscriptionMore target remained non-clickable: ' + JSON.stringify(sample),
+  );
+}
 const image =
   'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" rx="8" fill="%23007aff"/></svg>';
 // Deliberately non-login synthetic code with four distinct corner markers.
@@ -518,7 +551,8 @@ const server = http.createServer((req, res) => {
       );
       assert.fail(label);
     };
-    const click = async (expression) => {
+    const click = async (expression, stablePopover = false) => {
+      if (stablePopover) await waitPopoverClickable(ev, expression);
       const r = await ev(
         '(()=>{const e=' +
           expression +
@@ -526,7 +560,7 @@ const server = http.createServer((req, res) => {
       );
       assert(r, 'click target ' + expression);
       const hit = await ev(
-        `(()=>{const e=${expression}, hit=document.elementFromPoint(${r.x},${r.y});return {ok:e===hit||e.contains(hit),target:e.outerHTML.slice(0,150),hit:hit?.outerHTML.slice(0,150),x:${r.x},y:${r.y},body:[...document.body.children].map(e=>({tag:e.tagName,h:e.getBoundingClientRect().height,bottom:e.getBoundingClientRect().bottom})),shell:document.querySelector('.app-shell').scrollHeight}})()`,
+        `(()=>{const e=${expression}, hit=document.elementFromPoint(${r.x},${r.y});return {ok:(e===hit||e.contains(hit))&&(!${stablePopover}||(e===window.__overlayClickPin?.e&&e.closest('.feed-reading-more')===window.__overlayClickPin?.p)),target:e.outerHTML.slice(0,150),hit:hit?.outerHTML.slice(0,150),x:${r.x},y:${r.y},body:[...document.body.children].map(e=>({tag:e.tagName,h:e.getBoundingClientRect().height,bottom:e.getBoundingClientRect().bottom})),shell:document.querySelector('.app-shell').scrollHeight}})()`,
       );
       assert(hit.ok, JSON.stringify(hit));
       await send('Input.dispatchMouseEvent', {
@@ -541,6 +575,7 @@ const server = http.createServer((req, res) => {
         button: 'left',
         clickCount: 1,
       });
+      if (stablePopover) await ev('delete window.__overlayClickPin');
       await pause(300);
     };
     const key = async (name, code) => {
@@ -887,7 +922,7 @@ const server = http.createServer((req, res) => {
     await run('wechat-repair', async () => {
       await navigate();
       await more();
-      await click(button('修复本号来源'));
+      await click(button('修复本号来源'), true);
       await modalMatrix('wechat-repair');
     });
     for (const mode of ['create', 'rename'])
