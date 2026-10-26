@@ -1,3 +1,4 @@
+const restorePreOriginalLinkRouter = require('./xhs-original-link-router-seams.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -18,7 +19,7 @@ const service = read('apps/server/src/collection/xiaohongshu.service.ts');
 
 test('only the exact platform reader route was deleted; all archive/engagement/WeChat routes are preserved', () => {
   assert.equal(
-    hash(restoreXhsReaderRoute(ts, router)),
+    hash(restoreXhsReaderRoute(ts, restorePreOriginalLinkRouter(router))),
     seam.baselineRouterSha256,
   );
 });

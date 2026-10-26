@@ -36,6 +36,7 @@ const pause = (ms) => new Promise((r) => setTimeout(r, ms)),
   apiReads = [],
   requests = [],
   forbidden = [];
+const budgets = new Map();
 const noteKey = (i) =>
   JSON.stringify([
     'xiaohongshu',
@@ -49,6 +50,10 @@ const snapshot = {
   evidence: 'source-only',
 };
 const profile = { ...snapshot, values: { fans: 424242, following: null } };
+const sampleSnapshot = {
+  ...snapshot,
+  values: { likes: 7, collects: 4, shares: 2, comments: 6 },
+};
 const comments = Array.from({ length: 19 }, (_, i) => ({
   id: 'comment-' + i,
   rootId: i === 0 || i === 10 ? null : i < 10 ? 'comment-0' : 'comment-10',
@@ -102,18 +107,20 @@ const items = Array.from({ length: 266 }, (_, i) => ({
   creatorId: 'creator-one',
   creatorName: '合成博主',
   kind: i >= 252 ? 'video' : 'image-text',
-  status: i < 2 ? 'complete' : i >= 252 ? 'video-skipped' : 'listed',
-  publishTime: i === 2 ? 0 : 1791633600 - i * 86400,
+  status: i < 2 || i === 4 ? 'complete' : i >= 252 ? 'video-skipped' : 'listed',
+  publishTime: i === 3 ? 0 : 1791633600 - i * 86400,
   title:
     i === 2
       ? '合成笔记 2 ' + '用于窄窗验证的长标题'.repeat(8)
       : '合成笔记 ' + i,
-  metrics: i === 1 || i === 2 ? snapshot : null,
+  metrics: i === 2 ? sampleSnapshot : i === 4 ? snapshot : null,
 }));
 let slow = false;
 function data(name, input) {
   apiReads.push({ name, input });
   switch (name) {
+    case 'xiaohongshu.sourceRequestBudget':
+      return budgets.get(JSON.stringify(input)) ?? null;
     case 'xiaohongshu.list':
       return {
         items: [
@@ -129,10 +136,32 @@ function data(name, input) {
       };
     case 'xiaohongshu.notes':
       return { items, total: 266, queryVersion: 'f'.repeat(64) };
+    case 'xiaohongshu.recentTasks':
+      return {
+        items:
+          process.env.XHS_DATA_TEST_RECOVERY === '1'
+            ? [
+                {
+                  taskId: 'history-fixture',
+                  creatorId: 'creator-one',
+                  kind: 'download',
+                  state: 'completed',
+                  total: 266,
+                  completed: 2,
+                  skipped: 14,
+                  failed: 0,
+                  remaining: 250,
+                  resumable: false,
+                },
+              ]
+            : [],
+      };
     case 'xiaohongshu.engagement':
-      return input.noteId === noteKey(1) || input.noteId === noteKey(2)
-        ? engagement
-        : empty;
+      return input.noteId === noteKey(2)
+        ? { ...engagement, metrics: sampleSnapshot }
+        : input.noteId === noteKey(4)
+          ? engagement
+          : empty;
     case 'xiaohongshu.capability':
       return {
         configured: false,
@@ -176,6 +205,70 @@ const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://127.0.0.1');
   requests.push({ method: req.method, path: u.pathname });
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  if (
+    req.method === 'POST' &&
+    u.pathname === '/trpc/xiaohongshu.configureSourceRequestBudget'
+  ) {
+    let payload = '';
+    req.on('data', (chunk) => (payload += chunk));
+    req.on('end', () => {
+      const parsed = JSON.parse(payload),
+        input = parsed[0] ?? parsed;
+      apiReads.push({
+        name: 'xiaohongshu.configureSourceRequestBudget',
+        input,
+      });
+      const value = {
+        budgetId: 'synthetic-budget',
+        limit: input.totalLimit,
+        used: 2,
+        remaining: input.totalLimit - 2,
+        nextAt: 0,
+        intervalMs: input.intervalMs,
+      };
+      budgets.set(JSON.stringify(input.scope), value);
+      const result = { result: { data: value } };
+      res.end(
+        JSON.stringify(u.searchParams.get('batch') === '1' ? [result] : result),
+      );
+    });
+    return;
+  }
+  if (
+    req.method === 'POST' &&
+    u.pathname === '/trpc/xiaohongshu.prepareOriginalLink'
+  ) {
+    let payload = '';
+    req.on('data', (chunk) => (payload += chunk));
+    req.on('end', () => {
+      const parsed = JSON.parse(payload),
+        input = parsed[0] ?? parsed;
+      apiReads.push({ name: 'xiaohongshu.prepareOriginalLink', input });
+      const batch = u.searchParams.get('batch') === '1';
+      const result =
+        input.noteId === noteKey(0)
+          ? {
+              error: {
+                message: 'synthetic source failure',
+                code: -32603,
+                data: { code: 'FORBIDDEN', httpStatus: 403 },
+              },
+            }
+          : {
+              result: {
+                data: {
+                  state: 'ready',
+                  url:
+                    'https://www.xiaohongshu.com/explore/' +
+                    JSON.parse(input.noteId)[2] +
+                    (input.refreshContext ? '?xsec_token=synthetic-renewed&xsec_source=pc_share' : '?xsec_token=synthetic-private&xsec_source=pc_share'),
+                },
+              },
+            };
+      setTimeout(() => res.end(JSON.stringify(batch ? [result] : result)), 60);
+    });
+    return;
+  }
   if (req.method !== 'GET') {
     forbidden.push(req.url);
     res.statusCode = 405;
@@ -418,7 +511,40 @@ const server = http.createServer((req, res) => {
         Buffer.from(r.data, 'base64'),
       );
     };
-    // Every catalog row keeps its original link, irrespective of archive state.
+    if (process.env.XHS_DATA_TEST_RECOVERY === '1') {
+      const disclosure =
+        'document.querySelector(\'section[aria-label="最近笔记任务"] details\')';
+      await wait(`Boolean(${disclosure})`, 'recent task history rendered');
+      const opened = await ev(`${disclosure}.open`);
+      fs.writeFileSync(
+        path.join(evidence, 'recovery-default.json'),
+        JSON.stringify({ opened }, null, 2),
+      );
+      await shot('recovery-entry');
+      assert.equal(
+        opened,
+        false,
+        'recent task history must be collapsed on entry',
+      );
+      await click(`${disclosure}.querySelector('summary')`);
+      assert.equal(await ev(`${disclosure}.open`), true);
+      await key('Escape', 27);
+      assert.equal(await ev(`${disclosure}.open`), false);
+      await send('Page.reload', { ignoreCache: true });
+      await wait(`Boolean(${disclosure})`, 'recent task history after reload');
+      assert.equal(await ev(`${disclosure}.open`), false);
+      await wait(
+        'document.querySelectorAll(".content-article-row").length===20',
+        'rows after recovery reload',
+      );
+      if (process.env.XHS_DATA_TEST_RECOVERY_ONLY === '1') {
+        console.log(
+          'PASS actual compiled bundle: recent history collapsed on entry/reload; explicit open and Escape close.',
+        );
+        return;
+      }
+    }
+    // Every catalog row can explicitly prepare its original link, regardless of archive state.
     for (let count = 20; count < 266; count += 20) {
       await click(
         `[...document.querySelectorAll('button')].find(e=>e.textContent.includes('加载更多'))`,
@@ -428,48 +554,133 @@ const server = http.createServer((req, res) => {
       'document.querySelectorAll(".content-article-row").length===266',
       '266 rows loaded',
     );
+    assert.equal(
+      apiReads.filter((x) => x.name === 'xiaohongshu.prepareOriginalLink')
+        .length,
+      0,
+      'no link preparation on render',
+    );
+    const titles = await ev(
+      `[...document.querySelectorAll('[data-original-note-id]')].map(e=>e.getAttribute('data-original-note-id'))`,
+    );
+    assert.equal(titles.length, 266);
+    assert.equal(new Set(titles).size, 266);
+    titles.forEach((key) => assert(items.some((note) => note.id === key)));
+    for (const i of [2, 4]) {
+      await click(
+        `[...document.querySelectorAll('[data-original-note-id]')].find(e=>e.getAttribute('data-original-note-id')===${JSON.stringify(noteKey(i))})`,
+      );
+      await wait(
+        `Boolean([...document.querySelectorAll('.content-article-row')].find(row=>row.querySelector('button[data-note-id]')?.getAttribute('data-note-id')===${JSON.stringify(noteKey(i))})?.querySelector('a[target="_blank"]'))`,
+        'prepared link ready',
+      );
+    }
     const links = await ev(
-      `[...document.querySelectorAll('.content-article-row a')].map(a=>({href:a.getAttribute('href'),target:a.target,rel:a.rel}))`,
+      `[...document.querySelectorAll('.content-article-row a[target="_blank"]')].map(e=>({url:e.href,rel:e.rel,referrerPolicy:e.referrerPolicy}))`,
     );
-    assert.equal(links.length, 266);
-    const expectedLinks = new Set(
-      items.map(
-        (note) =>
-          'https://www.xiaohongshu.com/explore/' + JSON.parse(note.id)[2],
-      ),
-    );
-    assert.equal(new Set(links.map((link) => link.href)).size, 266);
-    links.forEach((link) => {
-      assert(expectedLinks.has(link.href));
-      assert.equal(link.target, '_blank');
+    assert.equal(links.length, 2);
+    for (const link of links) {
+      assert(link.url.includes('xsec_token=synthetic-private'));
       assert.equal(link.rel, 'noopener noreferrer');
-    });
+      assert.equal(link.referrerPolicy, 'no-referrer');
+    }
+    const beforeRenew = apiReads.filter(x=>x.name==='xiaohongshu.prepareOriginalLink').length;
+    await click(`document.querySelector('.xhs-note-origin-refresh')`);
+    await wait(`[...document.querySelectorAll('.xhs-note-title[href]')].some(e=>e.href.includes('synthetic-renewed'))`, 'explicit renewal settled');
+    assert.equal(apiReads.filter(x=>x.name==='xiaohongshu.prepareOriginalLink').length,beforeRenew+1);
+    assert.equal(apiReads.filter(x=>x.name==='xiaohongshu.prepareOriginalLink').at(-1).input.refreshContext,true);
+    checks.push({explicitRenewal:true});
+    await click(
+      `[...document.querySelectorAll('[data-original-note-id]')].find(e=>e.getAttribute('data-original-note-id')===${JSON.stringify(noteKey(0))})`,
+    );
+    await wait(
+      'Boolean(document.querySelector(".xhs-note-origin [role=alert]"))',
+      'fixed prepare failure visible',
+    );
+    assert.equal(
+      apiReads.filter((x) => x.name === 'xiaohongshu.prepareOriginalLink')
+        .length,
+      4,
+    );
     assert.equal(await ev('document.querySelectorAll("iframe").length'), 0);
     checks.push({
-      links: 266,
+      explicitPrepareTitles: 266,
       bodyReads: apiReads.filter((x) => x.name === 'xiaohongshu.body').length,
     });
-    for (const width of [320, 390, 768, 1024, 1440, 1580]) {
+    await send('Emulation.setDeviceMetricsOverride', {
+      width: 1580,
+      height: 768,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await ev(`document.querySelector('.feed-article-scroll').scrollTop=0`);
+    const cellValues = (i) =>
+      ev(
+        `[...(${action(i)}).closest('.content-article-row').querySelectorAll('[data-metric]')].map(e=>e.textContent.trim())`,
+      );
+    assert.deepEqual(await cellValues(0), ['—', '—', '—', '—']);
+    assert.deepEqual(await cellValues(2), ['7', '4', '2', '6']);
+    const listGeometry = await ev(
+      `(()=>{const row=document.querySelectorAll('.content-article-row')[1],list=document.querySelector('.feed-article-scroll');return {rowHeight:row.getBoundingClientRect().height,listTop:list.getBoundingClientRect().top,width:list.clientWidth,scrollWidth:list.scrollWidth}})()`,
+    );
+    assert(listGeometry.rowHeight <= 72, JSON.stringify(listGeometry));
+    assert(listGeometry.listTop < 300, JSON.stringify(listGeometry));
+    await shot('compact-list-1580');
+    checks.push({
+      listGeometry,
+      visibleMetricSample: [7, 4, 2, 6],
+      unknown: 'dash with uncollected label',
+    });
+    for (const width of [320, 390, 768, 1024, 1440, 1580, 2048]) {
       await send('Emulation.setDeviceMetricsOverride', {
         width,
         height: 768,
         deviceScaleFactor: 1,
         mobile: false,
       });
+      await shot('list-' + width);
+      assert(
+        await ev(
+          `(()=>{const title=(${action(2)}).closest('.content-article-row').querySelector('.xhs-note-title'),hint=title.querySelector('.xhs-note-origin-hint'),a=title.getBoundingClientRect(),b=hint.getBoundingClientRect();return b.right<=a.right+1&&b.bottom<=a.bottom+1})()`,
+        ),
+        'long titles retain a visible prepare/open label',
+      );
+      assert(
+        await ev(
+          `(()=>{const list=document.querySelector('.feed-article-scroll');return list.scrollWidth<=list.clientWidth+1})()`,
+        ),
+        'list fits available width',
+      );
       await click(action(2));
       await wait(
         'document.body.innerText.includes("已保存评论 19 条")',
         '19 comments available for listed note',
       );
+      // The real theme animates the portal. Wait for the required final geometry
+      // before measuring; keep the same bounds and centered-layout assertions.
+      await wait(
+        `(()=>{const e=document.querySelector('[role=dialog]');if(!e)return false;const r=e.getBoundingClientRect();return Math.abs(r.left+r.width/2-innerWidth/2)<3 && Math.abs(r.top+r.height/2-innerHeight/2)<3 && r.top>=23 && r.bottom<=innerHeight-23 && document.querySelector('.xhs-data-document').getBoundingClientRect().width<=721})()`,
+        'data panel reached centered viewport geometry',
+      );
       const layout = await ev(
         `(()=>{const dialog=document.querySelector('[role=dialog]'),scroll=document.querySelector('.xhs-data-scroll'),doc=document.querySelector('.xhs-data-document'),close=document.querySelector('button[aria-label="关闭互动与评论"]'),r=close.getBoundingClientRect();return {width:innerWidth,docWidth:doc.getBoundingClientRect().width,dialogWidth:dialog.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth>innerWidth+1,scrolls:[...dialog.querySelectorAll('*')].filter(e=>getComputedStyle(e).overflowY==='auto'&&e.scrollHeight>e.clientHeight+1).length,closeVisible:r.top>=0&&r.bottom<=innerHeight,text:dialog.innerText};})()`,
       );
       assert(!layout.overflow, JSON.stringify(layout));
-      assert(layout.docWidth <= 721);
+      layout.dialogRect = await ev(
+        `(()=>{const r=document.querySelector('[role=dialog]').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,viewportHeight:innerHeight}})()`,
+      );
+      assert(
+        await ev(
+          `(()=>{const r=document.querySelector('[role=dialog]').getBoundingClientRect();return Math.abs(r.left+r.width/2-innerWidth/2)<3 && Math.abs(r.top+r.height/2-innerHeight/2)<3 && r.top>=23 && r.bottom<=innerHeight-23})()`,
+        ),
+        'data panel centered with viewport margins',
+      );
+      if (layout.docWidth > 721) await shot('failure-document-width-' + width);
+      assert(layout.docWidth <= 721, JSON.stringify(layout));
       assert(layout.closeVisible);
       assert(layout.scrolls <= 1);
-      assert.match(layout.text, /赞 0/);
-      assert.match(layout.text, /分享 未知/);
+      assert.match(layout.text, /赞 7/);
+      assert.match(layout.text, /分享 2/);
       assert.match(layout.text, /粉丝 424,242/);
       assert(!layout.text.includes('关注 未知'));
       assert(!layout.text.includes('未保存文字正文'));
@@ -502,8 +713,38 @@ const server = http.createServer((req, res) => {
         'Escape closes data panel',
       );
     }
+    await send('Emulation.setDeviceMetricsOverride', {
+      width: 2048,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    const columns = await ev(
+      `(()=>{const head=document.querySelector('.xhs-note-head'),row=document.querySelectorAll('.content-article-row')[1],list=document.querySelector('.feed-article-scroll');const h=[...head.children].slice(3,7).map(e=>e.getBoundingClientRect().x),m=[...row.querySelectorAll('[data-metric]')].map(e=>e.getBoundingClientRect().x);return {h,m,rowHeight:row.getBoundingClientRect().height,listTop:list.getBoundingClientRect().top}})()`,
+    );
+    columns.h.forEach((x, i) =>
+      assert(Math.abs(x - columns.m[i]) < 1, JSON.stringify(columns)),
+    );
+    assert(columns.rowHeight <= 80);
+    assert(columns.listTop < 300);
+    checks.push({ desktop2048: columns });
+    await ev(
+      `document.querySelector('.feed-content').style.maxWidth='650px';document.querySelector('.feed-article-scroll').scrollTop=0`,
+    );
+    assert(
+      await ev(
+        `getComputedStyle(document.querySelector('.xhs-note-head')).display==='none'`,
+      ),
+    );
+    assert(
+      await ev(
+        `(()=>{const l=document.querySelector('.feed-article-scroll');return l.scrollWidth<=l.clientWidth+1})()`,
+      ),
+    );
+    await shot('sidebar-constrained-2048');
+    await ev(`document.querySelector('.feed-content').style.maxWidth=''`);
     // Four combinations: both complete notes, and two directory-only notes.
-    for (const i of [0, 1, 2, 3]) {
+    for (const i of [0, 4, 2, 3]) {
       await click(action(i));
       await wait(
         'document.querySelector("[role=dialog]")&&!document.body.innerText.includes("正在读取本地互动")',
@@ -512,7 +753,7 @@ const server = http.createServer((req, res) => {
       const text = await ev(
         'document.querySelector("[role=dialog]").innerText',
       );
-      assert.equal(text.includes('已保存评论 19 条'), i === 1 || i === 2);
+      assert.equal(text.includes('已保存评论 19 条'), i === 4 || i === 2);
       await click(
         'document.querySelector(\'button[aria-label="关闭互动与评论"]\')',
       );
@@ -528,7 +769,7 @@ const server = http.createServer((req, res) => {
     await click(action(0));
     await key('Escape', 27);
     await wait('!document.querySelector("[role=dialog]")', 'close pending');
-    await click(action(1));
+    await click(action(4));
     await wait(
       'document.body.innerText.includes("已保存评论 19 条")',
       'second data',
@@ -549,6 +790,76 @@ const server = http.createServer((req, res) => {
       await ev('document.querySelectorAll("[role=dialog]").length'),
       0,
     );
+    assert.equal(
+      apiReads.filter(
+        (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
+      ).length,
+      0,
+      'mount and title clicks never configure a budget',
+    );
+    await click(
+      `[...document.querySelectorAll('summary')].find(e=>e.textContent.includes('来源与本机保存设置'))`,
+    );
+    await wait(
+      `document.body.innerText.includes('共享来源请求额度 · 尚未配置')`,
+      'stable creator budget read',
+    );
+    await click(`document.querySelector('.xhs-source-budget summary')`);
+    await ev(
+      `(()=>{const e=document.querySelector('input[aria-label="来源请求总额度"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'20');e.dispatchEvent(new Event('input',{bubbles:true}));})()`,
+    );
+    await click(
+      `document.querySelector('.xhs-source-budget button[type=submit]')`,
+    );
+    await wait(
+      `document.body.innerText.includes('剩余 18 次 / 总计 20 次')`,
+      'explicit stable budget save',
+    );
+    const configCalls = apiReads.filter(
+      (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
+    );
+    assert.equal(configCalls.length, 1);
+    assert.deepEqual(configCalls[0].input, {
+      scope: { purpose: 'resolution' },
+      totalLimit: 20,
+      intervalMs: 5000,
+    });
+    assert.equal(
+      apiReads.filter((x) => x.name === 'xiaohongshu.prepareOriginalLink')
+        .length,
+      4,
+      'saving never retries a source request',
+    );
+    await shot('source-budget-2048');
+    await click(
+      `[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='订阅')`,
+    );
+    await wait(
+      `document.querySelector('[role=dialog]')?.innerText.includes('剩余 18 次 / 总计 20 次')`,
+      'subscription sees the same shared quota',
+    );
+    assert.equal(
+      await ev(`document.querySelectorAll('.xhs-source-budget').length`),
+      1,
+      'only one shared allowance is shown',
+    );
+    assert.equal(
+      apiReads.filter(
+        (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
+      ).length,
+      1,
+    );
+    await shot('shared-budget-subscription');
+    await key('Escape', 27);
+    await wait(
+      '!document.querySelector("[role=dialog]")',
+      'subscription closes',
+    );
+    for (const call of apiReads.filter(
+      (x) => x.name === 'xiaohongshu.prepareOriginalLink',
+    ))
+      assert.deepEqual(Object.keys(call.input), call.input.refreshContext ? ['noteId','refreshContext'] : ['noteId']);
+    checks.push({ explicitBudgetSaves: 1, autoConfigure: 0 });
     assert.deepEqual(forbidden, []);
     assert.equal(
       apiReads.filter((x) => x.name === 'xiaohongshu.body').length,
@@ -559,7 +870,7 @@ const server = http.createServer((req, res) => {
       JSON.stringify({ checks, forbidden, apiReads, requests }, null, 2),
     );
     console.log(
-      'PASS 266 safe external links; 6 responsive widths; four combinations; delayed close/switch; zero body reads. EVIDENCE=' +
+      'PASS 266 explicit link entries; 7 responsive widths; four combinations; delayed close/switch; zero body reads. EVIDENCE=' +
         evidence,
     );
   } finally {

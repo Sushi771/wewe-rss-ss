@@ -1,3 +1,4 @@
+const restorePreOriginalLinkRouter = require('./xhs-original-link-router-seams.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -40,7 +41,7 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
   const file = 'apps/server/src/trpc/trpc.router.ts';
   // Assert deletion, then reconstruct only the exact removed reader seam.
   // All old router/wholeCreator/engagement pins remain authoritative.
-  const pinnedRouterSource = restoreXhsReaderRoute(ts, read(file));
+  const pinnedRouterSource = restoreXhsReaderRoute(ts, restorePreOriginalLinkRouter(read(file)));
   const ast = ts.createSourceFile(
     file,
     pinnedRouterSource,
@@ -136,6 +137,17 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     ...searchPins.criticalFiles,
     ...xhsCompatibility.criticalFiles,
   })) {
+    // Reader-only files were intentionally removed; keep every download/cache
+    // baseline pin below and require these exact retired components to stay absent.
+    const removedReaders = {
+      'apps/web/src/components/ArticleReader.tsx': '5427dcc31fac30a42f7daaa09dcbf3e842013d8a65a29ec94c30750ceca1c071',
+      'apps/web/src/utils/article-reader-find.ts': 'f46a6144c8dac9cce7cbb1f3835e1606b5be8b8bd8d192ac336fd73c8eac1b79',
+    };
+    if (file in removedReaders) {
+      assert.equal(expected, removedReaders[file], 'exact retired reader pin');
+      assert.equal(fs.existsSync(file), false, file + ' must remain removed');
+      continue;
+    }
     let source = read(file);
     if (file === 'apps/server/src/article-download.controller.ts') {
       const additions = [

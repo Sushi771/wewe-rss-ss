@@ -223,6 +223,7 @@ function fixture({
                   ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
                   : [
                         '@nextui-org/react',
+                        '@web/components/AppOverlays',
                         '@web/components/SubscriptionPrimitives',
                       ].includes(name)
                     ? ui

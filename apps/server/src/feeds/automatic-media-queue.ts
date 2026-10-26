@@ -313,10 +313,9 @@ export class AutomaticMediaQueue {
   }
   private async capacity(required: number) {
     const folder = path.join(this.directory, 'bytes');
-    const files = await fs.readdir(folder);
-    if (files.length >= 256) throw Error('MEDIA_STORAGE_CAPACITY');
     let bytes = 0;
-    for (const name of files) {
+    for await (const entry of await fs.opendir(folder)) {
+      const name = entry.name;
       // A process death can leave our own bounded temp; count it, never follow
       // or delete it, and do not mistake it for a verified resource.
       if (!/^[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/.test(name))
@@ -325,8 +324,14 @@ export class AutomaticMediaQueue {
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 14_000_000)
         throw Error('MEDIA_STORAGE_INVALID');
       bytes += stat.size;
+      if (bytes + required > MAX_CACHE) throw Error('MEDIA_STORAGE_CAPACITY');
     }
     if (bytes + required > MAX_CACHE) throw Error('MEDIA_STORAGE_CAPACITY');
+    // Preserve the existing byte quota; tiny cached records do not exhaust an
+    // unrelated file-count limit. Reserve disk space before spending HTTP.
+    const disk = await fs.statfs(folder, { bigint: true });
+    if (disk.bavail * disk.bsize < BigInt(4 * 1024 ** 3 + required))
+      throw Error('MEDIA_STORAGE_CAPACITY');
   }
   private async store(key: string, url: string, inline: string) {
     const decoded = decodeInlineImage(inline);

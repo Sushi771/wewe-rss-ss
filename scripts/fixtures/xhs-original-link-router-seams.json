@@ -1,0 +1,26 @@
+[
+  {
+    "before": "",
+    "after": "import {\n  readXhsSourceBudget,\n  configureXhsSourceBudget,\n  prepareXhsOriginalLink,\n  resolveXhsSubscriptionWithBudget,\n} from '../collection/xhs-source-request-policy';\n"
+  },
+  {
+    "before": "",
+    "after": "  }\n  private async xhsSourceOperation<T>(work: () => Promise<T>) {\n    try {\n      return await work();\n    } catch (error) {\n      throw new TRPCError({\n        code: 'PRECONDITION_FAILED',\n        message: xhsPublicCode(error, 'XHS_REQUEST_POLICY_UNAVAILABLE'),\n      });\n    }\n"
+  },
+  {
+    "before": "",
+    "after": "    sourceRequestBudget: this.trpcService.protectedProcedure\n      .input(\n        z.discriminatedUnion('purpose', [\n          z.object({ purpose: z.literal('resolution') }).strict(),\n          z\n            .object({\n              purpose: z.literal('original-link'),\n              creatorId: z.string().min(1).max(128),\n            })\n            .strict(),\n        ]),\n      )\n      .query(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx, true);\n        return this.xhsSourceOperation(() =>\n          readXhsSourceBudget(this.prismaService, input),\n        );\n      }),\n    configureSourceRequestBudget: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            scope: z.discriminatedUnion('purpose', [\n              z.object({ purpose: z.literal('resolution') }).strict(),\n              z\n                .object({\n                  purpose: z.literal('original-link'),\n                  creatorId: z.string().min(1).max(128),\n                })\n                .strict(),\n            ]),\n            totalLimit: z.number().int().min(1).max(100000),\n            intervalMs: z.number().int().min(1000).max(60000),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() =>\n          configureXhsSourceBudget(\n            this.prismaService,\n            input.scope,\n            input.totalLimit,\n            input.intervalMs,\n          ),\n        );\n      }),\n    prepareOriginalLink: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            noteId: z.string().min(1).max(300),\n            budgetId: z.string().min(1).max(256).optional(),\n            refreshContext: z.boolean().optional(),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return prepareXhsOriginalLink(\n          this.prismaService,\n          this.xhsRuntime!,\n          input,\n        );\n      }),\n"
+  },
+  {
+    "before": "      .input(z.object({ url: z.string().min(1).max(8192) }).strict())\n",
+    "after": "      .input(\n        z\n          .object({\n            url: z.string().min(1).max(8192),\n            budgetId: z.string().min(1).max(256).optional(),\n          })\n          .strict(),\n      )\n"
+  },
+  {
+    "before": "        this.requireLocalXhsAccess(ctx);\n        return this.xhsSubscriptions!.resolveSubscription(input);\n",
+    "after": "        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() =>\n          resolveXhsSubscriptionWithBudget(\n            this.prismaService,\n            this.xhsRuntime!,\n            this.xhsSubscriptions!,\n            input,\n          ),\n        );\n"
+  },
+  {
+    "before": "",
+    "after": "          if (\n            req.url\n              .split('?')[0]\n              .split(',')\n              .some((name) => name.endsWith('xiaohongshu.prepareOriginalLink'))\n          ) {\n            res.setHeader('Cache-Control', 'no-store');\n            res.setHeader('Referrer-Policy', 'no-referrer');\n          }\n"
+  }
+]

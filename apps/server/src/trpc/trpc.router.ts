@@ -1,3 +1,9 @@
+import {
+  readXhsSourceBudget,
+  configureXhsSourceBudget,
+  prepareXhsOriginalLink,
+  resolveXhsSubscriptionWithBudget,
+} from '../collection/xhs-source-request-policy';
 import { XhsWholeCreatorService } from '../collection/xhs-whole-creator.service';
 import {
   prepareBodySearch,
@@ -168,6 +174,16 @@ export class TrpcRouter {
         code: 'FORBIDDEN',
         message: '小红书来源访问仅允许本机同源页面使用。',
       });
+  }
+  private async xhsSourceOperation<T>(work: () => Promise<T>) {
+    try {
+      return await work();
+    } catch (error) {
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: xhsPublicCode(error, 'XHS_REQUEST_POLICY_UNAVAILABLE'),
+      });
+    }
   }
   private requireLocalXhsConnection(ctx: unknown, readOnly = false) {
     this.requireLocalXhsAccess(ctx, readOnly);
@@ -1694,11 +1710,90 @@ export class TrpcRouter {
         return this.xhsRuntime!.disconnectSession();
       },
     ),
-    resolveSubscription: this.trpcService.protectedProcedure
-      .input(z.object({ url: z.string().min(1).max(8192) }).strict())
+    sourceRequestBudget: this.trpcService.protectedProcedure
+      .input(
+        z.discriminatedUnion('purpose', [
+          z.object({ purpose: z.literal('resolution') }).strict(),
+          z
+            .object({
+              purpose: z.literal('original-link'),
+              creatorId: z.string().min(1).max(128),
+            })
+            .strict(),
+        ]),
+      )
+      .query(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx, true);
+        return this.xhsSourceOperation(() =>
+          readXhsSourceBudget(this.prismaService, input),
+        );
+      }),
+    configureSourceRequestBudget: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            scope: z.discriminatedUnion('purpose', [
+              z.object({ purpose: z.literal('resolution') }).strict(),
+              z
+                .object({
+                  purpose: z.literal('original-link'),
+                  creatorId: z.string().min(1).max(128),
+                })
+                .strict(),
+            ]),
+            totalLimit: z.number().int().min(1).max(100000),
+            intervalMs: z.number().int().min(1000).max(60000),
+          })
+          .strict(),
+      )
       .mutation(({ input, ctx }) => {
-        this.requireLocalXhsAccess(ctx);
-        return this.xhsSubscriptions!.resolveSubscription(input);
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsSourceOperation(() =>
+          configureXhsSourceBudget(
+            this.prismaService,
+            input.scope,
+            input.totalLimit,
+            input.intervalMs,
+          ),
+        );
+      }),
+    prepareOriginalLink: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            noteId: z.string().min(1).max(300),
+            budgetId: z.string().min(1).max(256).optional(),
+            refreshContext: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return prepareXhsOriginalLink(
+          this.prismaService,
+          this.xhsRuntime!,
+          input,
+        );
+      }),
+    resolveSubscription: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            url: z.string().min(1).max(8192),
+            budgetId: z.string().min(1).max(256).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsSourceOperation(() =>
+          resolveXhsSubscriptionWithBudget(
+            this.prismaService,
+            this.xhsRuntime!,
+            this.xhsSubscriptions!,
+            input,
+          ),
+        );
       }),
     subscribe: this.trpcService.protectedProcedure
       .input(
@@ -1969,6 +2064,15 @@ export class TrpcRouter {
       trpcExpress.createExpressMiddleware({
         router: this.appRouter,
         createContext: ({ req, res }) => {
+          if (
+            req.url
+              .split('?')[0]
+              .split(',')
+              .some((name) => name.endsWith('xiaohongshu.prepareOriginalLink'))
+          ) {
+            res.setHeader('Cache-Control', 'no-store');
+            res.setHeader('Referrer-Policy', 'no-referrer');
+          }
           const authCode =
             this.configService.get<ConfigurationType['auth']>('auth')!.code;
 

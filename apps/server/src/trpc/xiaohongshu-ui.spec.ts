@@ -45,7 +45,7 @@ vm.runInNewContext(
     ),
     { compilerOptions: { module: ts.ModuleKind.CommonJS } },
   ).outputText,
-  { exports: presentationExports },
+  { exports: presentationExports, URL },
   { timeout: 1000 },
 );
 const expressions: Record<string, string> = {};
@@ -588,15 +588,18 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       '未归档',
     );
     expect(
-      presentationExports.xhsOriginalNoteUrl(
-        '["xiaohongshu","note","synthetic"]',
+      presentationExports.verifiedOriginalUrl(
+        '["xiaohongshu","note","000000000000000000000001"]',
+        'https://www.xiaohongshu.com/explore/000000000000000000000001?xsec_token=000000000000000000000001-only&xsec_source=pc_user',
       ),
-    ).toBe('https://www.xiaohongshu.com/explore/synthetic');
+    ).toBe(
+      'https://www.xiaohongshu.com/explore/000000000000000000000001?xsec_token=000000000000000000000001-only&xsec_source=pc_user',
+    );
     expect(taskExports.noteReaderHtml).toBeUndefined();
     expect(text).not.toContain('noteReaderHtml');
     expect(text).not.toContain('<ArticleReader');
     expect(text).not.toContain('trpc.xiaohongshu.body');
-    expect(text).toContain('href={xhsOriginalNoteUrl(note.id)}');
+    expect(text).toContain('<XhsOriginalLink');
     expect(text).not.toMatch(
       /<video\b|video\/mp4;base64|dangerouslySetInnerHTML/,
     );
@@ -670,7 +673,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       '<ManagementFolders',
       '<ArticleDateFilter',
       'dateSelectionFilter(dateSelection)',
-      'href={xhsOriginalNoteUrl(note.id)}',
+      '<XhsOriginalLink',
       'trpc.xiaohongshu.export.useMutation',
       'compact-list',
       '<SubscriptionToolbar',

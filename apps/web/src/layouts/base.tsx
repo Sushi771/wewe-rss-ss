@@ -15,7 +15,7 @@ export function BaseLayout() {
           <Outlet />
         </div>
       </main>
-      <Toaster richColors position="top-right" />
+      <Toaster richColors position="top-right" style={{ zIndex: 290 }} />
       <OwnerVerificationNotice />
     </div>
   );

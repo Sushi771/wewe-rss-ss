@@ -10,6 +10,18 @@ import worker, {
 } from './sites-local-contract.mjs';
 
 const originalFetch = globalThis.fetch;
+test('WeChat in-app body command is removed while download remains available', () => {
+  assert.throws(
+    () =>
+      parseSitesCommand({
+        action: 'body',
+        platform: 'wechat',
+        parentId: 'MP_WXS_12345',
+        id: 'cached',
+      }),
+    /BAD_REQUEST/,
+  );
+});
 before(() => {
   globalThis.fetch = () => {
     throw new Error('REAL_NETWORK_FORBIDDEN');
@@ -514,7 +526,7 @@ test('oversized transport results retain truncation even when the sender claims 
 const png =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
 const bodyCommand = {
-  action: 'body',
+  action: 'download',
   platform: 'wechat',
   authorId: 'MP_WXS_12345',
   itemId: 'old-short-id',

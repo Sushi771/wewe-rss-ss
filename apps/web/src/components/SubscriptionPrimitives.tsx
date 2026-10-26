@@ -1,12 +1,10 @@
+import { Modal, Popover, Tooltip } from '@web/components/AppOverlays';
 import {
   Button,
   Checkbox,
-  Modal,
-  Popover,
   PopoverContent,
   PopoverTrigger,
   Progress,
-  Tooltip,
 } from '@nextui-org/react';
 import type { ComponentProps, ReactNode } from 'react';
 

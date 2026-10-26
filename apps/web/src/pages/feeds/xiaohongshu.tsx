@@ -1,3 +1,4 @@
+import { Modal } from '@web/components/AppOverlays';
 import XhsWholeCreator from '@web/components/XhsWholeCreator';
 import {
   ContentExportScope,
@@ -7,7 +8,6 @@ import {
   SubscriptionToolbar,
   SubscriptionDialog,
   ContentSortControls,
-  ContentSelectionHeader,
   SubscriptionProgress,
 } from '@web/components/SubscriptionPrimitives';
 import {
@@ -15,7 +15,6 @@ import {
   Checkbox,
   Chip,
   Input,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,
@@ -25,10 +24,11 @@ import {
 } from '@nextui-org/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ArticleDateFilter from '@web/components/ArticleDateFilter';
-import {
-  noteArchiveStatus,
-  xhsOriginalNoteUrl,
-} from '@web/utils/xhs-note-presentation';
+import { noteArchiveStatus } from '@web/utils/xhs-note-presentation';
+import XhsOriginalLink from '@web/components/XhsOriginalLink';
+import type { PrepareXhsLink } from '@web/components/XhsOriginalLink';
+import XhsSourceBudget from '@web/components/XhsSourceBudget';
+import type { SourceBudgetApi } from '@web/components/XhsSourceBudget';
 import {
   XhsEngagementPanel,
   XhsMetricLine,
@@ -139,6 +139,8 @@ export default function Xiaohongshu() {
   });
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
+  const [sourceSettingsOpen, setSourceSettingsOpen] = useState(false);
+  const sourceSettingsRef = useRef<HTMLDetailsElement>(null);
   const [dataCreatorId, setDataCreatorId] = useState('');
   const queuedDownloads = useRef<
     Array<{ creatorId: string; noteIds: string[] }>
@@ -182,6 +184,32 @@ export default function Xiaohongshu() {
     () => utils.client.xiaohongshu,
     [utils.client],
   );
+  const prepareOriginalLink = useCallback<PrepareXhsLink>(
+    (input) => {
+      const client = subscriptionApi as typeof subscriptionApi & {
+        prepareOriginalLink: {
+          mutate: (input: {
+            noteId: string;
+            refreshContext?: boolean;
+          }) => ReturnType<PrepareXhsLink>;
+        };
+      };
+      return client.prepareOriginalLink.mutate({
+        noteId: input.noteId,
+        ...(input.refreshContext ? { refreshContext: true } : {}),
+      });
+    },
+    [subscriptionApi],
+  );
+  const sourceBudgetApi = subscriptionApi as typeof subscriptionApi &
+    SourceBudgetApi;
+  const showOriginalBudget = () => {
+    setSourceSettingsOpen(true);
+    if (sourceSettingsRef.current) {
+      sourceSettingsRef.current.open = true;
+      sourceSettingsRef.current.scrollIntoView({ block: 'nearest' });
+    }
+  };
   const taskApiRef = useRef({ subscriptionApi, utils });
   taskApiRef.current = { subscriptionApi, utils };
   const [profileUrl, setProfileUrl] = useState('');
@@ -225,32 +253,35 @@ export default function Xiaohongshu() {
   const [recoveredTasks, setRecoveredTasks] = useState<RecoveredTask[]>([]);
   const [recoveryLoading, setRecoveryLoading] = useState(true);
   const [recoveryError, setRecoveryError] = useState(false);
-  const [recoveryOpen, setRecoveryOpen] = useState(true);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
   const activityGeneration = useRef(0);
   const recoveryAttempted = useRef(false);
   const recoveryRequest = useRef(0);
   const readRecentRef = useRef<() => Promise<void>>(async () => {});
-  const adoptRecoveredTask = useCallback((record: RecoveredTask) => {
-    if (active.current) return;
-    activityGeneration.current++;
-    recoveryAttempted.current = true;
-    queuedCreators.current = [];
-    queuedDownloads.current = [];
-    lastTaskId.current = record.taskId;
-    setTaskCreatorId(record.creatorId);
-    setTask(record);
-    setZipProgress(null);
-    setOperationError('');
-    setProgressOpen(true);
-    cancelPending.current = false;
-    setCancelling(false);
-    const watching = !taskFinished(record) || taskSettling(record);
-    taskRunning.current = watching;
-    active.current = watching;
-    setBusy(watching);
-    setTaskId(watching ? record.taskId : '');
-    setMessage('已找回本地任务记录。继续未完成内容需要明确点击。');
-  }, []);
+  const adoptRecoveredTask = useCallback(
+    (record: RecoveredTask, expand = true) => {
+      if (active.current) return;
+      activityGeneration.current++;
+      recoveryAttempted.current = true;
+      queuedCreators.current = [];
+      queuedDownloads.current = [];
+      lastTaskId.current = record.taskId;
+      setTaskCreatorId(record.creatorId);
+      setTask(record);
+      setZipProgress(null);
+      setOperationError('');
+      setProgressOpen(expand);
+      cancelPending.current = false;
+      setCancelling(false);
+      const watching = !taskFinished(record) || taskSettling(record);
+      taskRunning.current = watching;
+      active.current = watching;
+      setBusy(watching);
+      setTaskId(watching ? record.taskId : '');
+      setMessage('已找回本地任务记录。继续未完成内容需要明确点击。');
+    },
+    [],
+  );
   const readRecentTasks = useCallback(async () => {
     const request = ++recoveryRequest.current;
     const generation = activityGeneration.current;
@@ -273,7 +304,7 @@ export default function Xiaohongshu() {
         })
       ) {
         recoveryAttempted.current = true;
-        if (chosen) adoptRecoveredTask(chosen);
+        if (chosen) adoptRecoveredTask(chosen, false);
       }
     } catch {
       if (request === recoveryRequest.current) setRecoveryError(true);
@@ -1383,11 +1414,24 @@ export default function Xiaohongshu() {
             {message}
           </p>
         )}
-        <details className="feed-reading-details shrink-0 border-b border-neutral-200 px-3 py-2 text-xs dark:border-neutral-700">
+        <details
+          ref={sourceSettingsRef}
+          onToggle={(event) => setSourceSettingsOpen(event.currentTarget.open)}
+          className="feed-reading-details shrink-0 border-b border-neutral-200 px-3 py-2 text-xs dark:border-neutral-700"
+        >
           <summary className="cursor-pointer text-neutral-500">
             来源与本机保存设置{operationError ? ' · 有错误待查看' : ''}
           </summary>
           <div className="space-y-2 py-2">
+            {sourceSettingsOpen && !adding && (
+              <section aria-label="共享来源请求额度">
+                <XhsSourceBudget
+                  key="shared-source-budget"
+                  api={sourceBudgetApi}
+                  scope={{ purpose: 'resolution' }}
+                />
+              </section>
+            )}
             <section aria-label="小红书连接状态" className="space-y-2">
               <p role="status">
                 {connection.error
@@ -1396,19 +1440,22 @@ export default function Xiaohongshu() {
                     ? '正在读取本机连接状态…'
                     : !connection.data.liveEnabled
                       ? '真实访问尚未启用，可查看已存数据和导出本地内容。'
-                      : connection.data.code === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
+                      : connection.data.code ===
+                          'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
                         ? '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。'
-                        : connection.data.code === 'XHS_SOURCE_VERIFICATION_BLOCKED'
+                        : connection.data.code ===
+                            'XHS_SOURCE_VERIFICATION_BLOCKED'
                           ? '来源明确提示需要验证，但当前没有可确认的验证入口；采集已停止，请先核查来源状态。'
                           : connection.data.code?.startsWith('XHS_SOURCE_')
                             ? '来源请求已暂停，请核查采集会话与来源状态后再明确连接。'
-                        : connection.data.code === 'XHS_DISCONNECT_INCOMPLETE'
-                          ? '连接已断开，但受保护记录清理未确认，请重新读取状态。'
-                          : !connection.data.connected
-                            ? '尚未连接，请通过本机安全连接工具完成连接。'
-                            : connection.data.verified
-                              ? '本机会话可用。'
-                              : '本机会话已就绪，平台验证尚未完成。'}
+                            : connection.data.code ===
+                                'XHS_DISCONNECT_INCOMPLETE'
+                              ? '连接已断开，但受保护记录清理未确认，请重新读取状态。'
+                              : !connection.data.connected
+                                ? '尚未连接，请通过本机安全连接工具完成连接。'
+                                : connection.data.verified
+                                  ? '本机会话可用。'
+                                  : '本机会话已就绪，平台验证尚未完成。'}
               </p>
               {connection.data?.requestAttempts && (
                 <p className="text-default-500 text-xs">
@@ -1539,116 +1586,117 @@ export default function Xiaohongshu() {
             </details>
           </div>
         </details>
-        <fieldset disabled={busy} className="disabled:opacity-60">
-          <ArticleDateFilter
-            value={dateSelection}
-            error={dateError}
-            onChange={(value) => {
-              if (active.current) return;
-              setLoadedCount(20);
-              setExportOpen(false);
-              setDateSelection(value);
-              setSelectedIds(new Set());
-            }}
-          />
-        </fieldset>
-        {searchOpen && (
-          <div id="xhs-search-panel" className="px-4 py-2">
-            <Input
-              autoFocus
-              isClearable
-              onClear={() => handleSearch('')}
-              maxLength={200}
-              aria-label="搜索笔记标题或正文"
-              placeholder="搜索标题或已保存正文…"
-              value={search}
-              onValueChange={handleSearch}
-              isDisabled={busy}
+        <div className="xhs-filter-bar">
+          <fieldset disabled={busy} className="disabled:opacity-60">
+            <ArticleDateFilter
+              value={dateSelection}
+              error={dateError}
+              onChange={(value) => {
+                if (active.current) return;
+                setLoadedCount(20);
+                setExportOpen(false);
+                setDateSelection(value);
+                setSelectedIds(new Set());
+              }}
             />
-          </div>
-        )}
-        {!searchOpen && search !== '' && (
-          <div className="min-w-0 shrink-0 px-4 py-2">
-            <Chip
+          </fieldset>
+          {searchOpen && (
+            <div id="xhs-search-panel" className="px-4 py-2">
+              <Input
+                autoFocus
+                isClearable
+                onClear={() => handleSearch('')}
+                maxLength={200}
+                aria-label="搜索笔记标题或正文"
+                placeholder="搜索标题或已保存正文…"
+                value={search}
+                onValueChange={handleSearch}
+                isDisabled={busy}
+              />
+            </div>
+          )}
+          {!searchOpen && search !== '' && (
+            <div className="min-w-0 shrink-0 px-4 py-2">
+              <Chip
+                size="sm"
+                variant="flat"
+                title={`搜索：${search}`}
+                aria-label={`搜索：${search}；清除关键词`}
+                isDisabled={busy}
+                onClose={() => handleSearch('')}
+                classNames={{
+                  base: 'max-w-full',
+                  content: 'min-w-0 truncate',
+                  closeButton: 'shrink-0',
+                }}
+              >
+                搜索：{search}
+              </Chip>
+            </div>
+          )}
+          {search.trim() && (
+            <p role="status" className="px-4 py-1 text-xs text-neutral-500">
+              搜索当前范围的标题、博主名与已保存正文；未下载的正文不在搜索范围内。搜索不会联网取文。
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
+            <Button
               size="sm"
-              variant="flat"
-              title={`搜索：${search}`}
-              aria-label={`搜索：${search}；清除关键词`}
-              isDisabled={busy}
-              onClose={() => handleSearch('')}
-              classNames={{
-                base: 'max-w-full',
-                content: 'min-w-0 truncate',
-                closeButton: 'shrink-0',
+              variant="light"
+              isDisabled={busy || !visibleNotes.length}
+              onPress={() => {
+                if (!active.current)
+                  setSelectedIds(
+                    new Set(
+                      visibleNotes
+                        .filter(
+                          (note) =>
+                            note.kind === 'image-text' ||
+                            note.status === 'complete',
+                        )
+                        .map((note) => note.id),
+                    ),
+                  );
               }}
             >
-              搜索：{search}
-            </Chip>
+              选择当前筛选全部
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={busy || !selectedIds.size}
+              onPress={() => {
+                if (!active.current) setSelectedIds(new Set());
+              }}
+            >
+              清空选择
+            </Button>
           </div>
-        )}
-        {search.trim() && (
-          <p role="status" className="px-4 py-1 text-xs text-neutral-500">
-            搜索当前范围的标题、博主名与已保存正文；未下载的正文不在搜索范围内。搜索不会联网取文。
-          </p>
-        )}
-        <div className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
-          <Button
-            size="sm"
-            variant="light"
-            isDisabled={busy || !visibleNotes.length}
-            onPress={() => {
-              if (!active.current)
-                setSelectedIds(
-                  new Set(
-                    visibleNotes
-                      .filter(
-                        (note) =>
-                          note.kind === 'image-text' ||
-                          note.status === 'complete',
-                      )
-                      .map((note) => note.id),
-                  ),
-                );
+          <XhsNumericFilter
+            value={noteMetricFilter}
+            onChange={(value) => {
+              setNoteMetricFilter(value as typeof noteMetricFilter);
+              setSelectedIds(new Set());
+              setLoadedCount(20);
             }}
-          >
-            选择当前筛选全部
-          </Button>
-          <Button
-            size="sm"
-            variant="light"
-            isDisabled={busy || !selectedIds.size}
-            onPress={() => {
-              if (!active.current) setSelectedIds(new Set());
+          />
+          <ContentSortControls
+            sort="publishTime"
+            onSortChange={() => {}}
+            direction={direction}
+            onDirectionChange={(value) => {
+              setLoadedCount(20);
+              setDirection(value);
+              setSelectedIds(new Set());
             }}
-          >
-            清空选择
-          </Button>
+            options={[{ value: 'publishTime', label: '发布时间' }]}
+            disabled={busy}
+          />
         </div>
-        <XhsNumericFilter
-          value={noteMetricFilter}
-          onChange={(value) => {
-            setNoteMetricFilter(value as typeof noteMetricFilter);
-            setSelectedIds(new Set());
-            setLoadedCount(20);
-          }}
-        />
-        <ContentSortControls
-          sort="publishTime"
-          onSortChange={() => {}}
-          direction={direction}
-          onDirectionChange={(value) => {
-            setLoadedCount(20);
-            setDirection(value);
-            setSelectedIds(new Set());
-          }}
-          options={[{ value: 'publishTime', label: '发布时间' }]}
-          disabled={busy}
-        />
-        <div className="px-3 py-1 text-xs text-neutral-500">
+        <div className="xhs-list-caption text-xs text-neutral-500">
           当前范围 {visibleNotes.length} 条目录 · 完整归档{' '}
-          {visibleNotes.filter((note) => note.status === 'complete').length}{' '}
-          篇；已选择 {selectedNotes.length}{' '}
-          篇图文。全选勾选已加载内容；可继续加载并追加选择。
+          {visibleNotes.filter((note) => note.status === 'complete').length} 篇
+          · 已选 {selectedNotes.length} 篇图文 · — 表示未采集，0 为真实数值。
           {search && '修改搜索会清空选择。'}
         </div>
         {notes.error && (
@@ -1662,35 +1710,43 @@ export default function Xiaohongshu() {
           aria-label="笔记列表"
           tabIndex={0}
         >
-          <div className="compact-list">
-            <ContentSelectionHeader
-              title={<>笔记标题 · {visibleNotes.length} 篇</>}
-              selected={allSelected}
-              indeterminate={!allSelected && selectedIds.size > 0}
-              disabled={busy || !selectableNotes.length}
-              onChange={(value) => {
-                if (!active.current)
-                  setSelectedIds(
-                    value
-                      ? toggleLoadedSelection(
-                          selectedIds,
-                          selectableNotes.map((note) => note.id),
-                          true,
-                        )
-                      : toggleLoadedSelection(
-                          selectedIds,
-                          selectableNotes.map((note) => note.id),
-                          false,
-                        ),
-                  );
-              }}
-            />
+          <div className="compact-list xhs-note-list">
+            <div className="xhs-note-head xhs-note-row">
+              <Checkbox
+                size="sm"
+                aria-label="全选已加载"
+                isSelected={allSelected}
+                isIndeterminate={!allSelected && selectedIds.size > 0}
+                isDisabled={busy || !selectableNotes.length}
+                onValueChange={(value) => {
+                  if (!active.current)
+                    setSelectedIds(
+                      value
+                        ? toggleLoadedSelection(
+                            selectedIds,
+                            selectableNotes.map((note) => note.id),
+                            true,
+                          )
+                        : toggleLoadedSelection(
+                            selectedIds,
+                            selectableNotes.map((note) => note.id),
+                            false,
+                          ),
+                    );
+                }}
+              />
+              <span>笔记标题 · {visibleNotes.length} 篇</span>
+              <span>发布时间</span>
+              <span>点赞</span>
+              <span>收藏</span>
+              <span>分享</span>
+              <span>评论</span>
+              <span>状态</span>
+              <span>操作</span>
+            </div>
             {loadedNotes.map((note) => (
-              <div
-                key={note.id}
-                className="compact-row article-row content-article-row"
-              >
-                <div className="compact-col-check">
+              <div key={note.id} className="content-article-row xhs-note-row">
+                <div className="compact-col-check xhs-note-check">
                   <Checkbox
                     size="sm"
                     aria-label={`选择笔记 ${note.title}`}
@@ -1702,46 +1758,70 @@ export default function Xiaohongshu() {
                     onValueChange={(value) => selectNote(note.id, value)}
                   />
                 </div>
-                <a
-                  href={xhsOriginalNoteUrl(note.id)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-disabled={!xhsOriginalNoteUrl(note.id)}
-                  title={
-                    xhsOriginalNoteUrl(note.id)
-                      ? '在小红书打开原文'
-                      : '原文链接不可用：笔记身份无效'
-                  }
-                  className="compact-title min-w-0 !whitespace-normal break-words text-left text-[15px] hover:text-[#007AFF]"
+                <XhsOriginalLink
+                  key={`original:${note.creatorId}:${note.id}`}
+                  creatorId={note.creatorId}
+                  noteId={note.id}
+                  title={note.title}
+                  author={!creatorId ? note.creatorName : undefined}
+                  prepare={prepareOriginalLink}
+                  onConfigure={showOriginalBudget}
+                />
+                <time
+                  className="xhs-note-date"
+                  title={formatShanghaiPublicationTime(note.publishTime)}
                 >
-                  {note.title}
-                </a>
-                <div className="content-article-metadata text-xs text-neutral-500">
-                  <span>{formatShanghaiPublicationTime(note.publishTime)}</span>
-                  <span className="whitespace-normal text-left md:max-w-[150px] md:text-right">
-                    {!creatorId && <span>{note.creatorName} · </span>}
-                    {noteArchiveStatus(note)}
-                    {!xhsOriginalNoteUrl(note.id) && (
-                      <span className="block">原文链接不可用</span>
-                    )}
-                    <button
-                      type="button"
-                      className="block py-1 text-[#007AFF]"
-                      aria-label={`查看互动与评论 ${note.title}`}
-                      data-note-id={note.id}
-                      onClick={() => {
-                        setDataNote(note);
-                        setDataCreatorId(note.creatorId);
-                        setNoteId(note.id);
-                      }}
-                    >
-                      互动与评论
-                    </button>
-                    <span className="block">
-                      <XhsMetricLine snapshot={note.metrics} />
-                    </span>
-                  </span>
-                </div>
+                  {note.publishTime
+                    ? formatShanghaiPublicationTime(note.publishTime)
+                    : '时间未知'}
+                </time>
+                {(['likes', 'collects', 'shares', 'comments'] as const).map(
+                  (metric) => {
+                    const value = note.metrics?.values[metric];
+                    const label = {
+                      likes: '点赞',
+                      collects: '收藏',
+                      shares: '分享',
+                      comments: '评论',
+                    }[metric];
+                    return (
+                      <span
+                        key={metric}
+                        className="xhs-note-metric"
+                        data-metric={metric}
+                        data-label={label}
+                        title={`${label}：${value == null ? '未采集' : value.toLocaleString('zh-CN')}`}
+                        aria-label={`${label}：${value == null ? '未采集' : value}`}
+                      >
+                        {value == null
+                          ? '—'
+                          : new Intl.NumberFormat('zh-CN', {
+                              notation: value >= 10000 ? 'compact' : 'standard',
+                              maximumFractionDigits: 1,
+                            }).format(value)}
+                      </span>
+                    );
+                  },
+                )}
+                <span
+                  className="xhs-note-status"
+                  title={noteArchiveStatus(note)}
+                >
+                  {note.status === 'complete' ? '已归档' : '仅目录'}
+                </span>
+                <button
+                  type="button"
+                  className="xhs-note-data-action"
+                  aria-label={`查看互动与评论 ${note.title}`}
+                  data-note-id={note.id}
+                  onClick={() => {
+                    setDataNote(note);
+                    setDataCreatorId(note.creatorId);
+                    setNoteId(note.id);
+                  }}
+                >
+                  互动 / 评论
+                </button>
               </div>
             ))}
             {loadedNotes.length < visibleNotes.length && (
@@ -1863,6 +1943,13 @@ export default function Xiaohongshu() {
               isDisabled={busy}
               maxLength={2000}
             />
+            {adding && (
+              <XhsSourceBudget
+                key="resolution-budget"
+                api={sourceBudgetApi}
+                scope={{ purpose: 'resolution' }}
+              />
+            )}
             {resolution && (
               <div
                 className="space-y-2 rounded-lg border p-3"

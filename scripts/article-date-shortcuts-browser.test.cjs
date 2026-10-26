@@ -15,16 +15,23 @@ const sourceRoot = process.env.DATE_SHORTCUTS_SOURCE || root;
 const web = path.join(root, 'apps/web');
 const chrome =
   process.env.LAYOUT_TEST_BROWSER ||
-  [
-    'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium',
-  ].find(fs.existsSync);
+  (process.env.PATH || '')
+    .split(path.delimiter)
+    .filter(Boolean)
+    .flatMap((directory) =>
+      [
+        'msedge.exe',
+        'chrome.exe',
+        'google-chrome',
+        'chromium',
+        'chromium-browser',
+      ].map((name) => path.join(directory, name)),
+    )
+    .find((file) => fs.existsSync(file) && fs.statSync(file).isFile());
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test(
-  'real offline calendar pointer/touch selection, Shanghai shortcuts, Escape, narrow layout and reader',
+  'real offline calendar pointer/touch selection, Shanghai shortcuts, Escape, narrow layout',
   { skip: !chrome, timeout: 120000 },
   async () => {
     const temp = fs.mkdtempSync(
@@ -39,14 +46,7 @@ import React,{useState} from ${modulePath(path.join(web, 'node_modules/react/ind
 import {createRoot} from ${modulePath(path.join(web, 'node_modules/react-dom/client.js'))};
 import ArticleDateFilter from ${modulePath(path.join(sourceRoot, 'apps/web/src/components/ArticleDateFilter.tsx'))};
 import {dateSelectionFilter} from ${modulePath(path.join(sourceRoot, 'apps/web/src/utils/article-date-selection.ts'))};
-import ArticleReader from ${modulePath(path.join(sourceRoot, 'apps/web/src/components/ArticleReader.tsx'))};
-import {markArticleText} from ${modulePath(path.join(sourceRoot, 'apps/web/src/utils/article-reader-find.ts'))};
-import {Modal,ModalContent,ModalBody,NextUIProvider} from ${modulePath(require.resolve('@nextui-org/react', { paths: [web] }).replace(/index\.js$/, 'index.mjs'))};
-window.markArticleText=markArticleText;
-window.blobs={created:[],revoked:[]};
-const create=URL.createObjectURL.bind(URL), revoke=URL.revokeObjectURL.bind(URL);
-URL.createObjectURL=blob=>{const url=create(blob);window.blobs.created.push(url);return url;};
-URL.revokeObjectURL=url=>{window.blobs.revoked.push(url);revoke(url);};
+import {NextUIProvider} from ${modulePath(require.resolve('@nextui-org/react', { paths: [web] }).replace(/index\.js$/, 'index.mjs'))};
 const OriginalDate=Date;
 window.testNow='2026-10-10T15:59:59Z';
 window.Date=class extends OriginalDate {constructor(...args){super(...(args.length?args:[window.testNow]));}};
@@ -54,15 +54,10 @@ window.restoreRealDate=()=>window.Date=OriginalDate;
 function App(){
  const [dates,setDates]=useState({mode:'day',start:'',end:''});
  const [selected,setSelected]=useState(['old']);
- const [reading,setReading]=useState(false),[find,setFind]=useState(false),[id,setId]=useState(0);
  const other={mpId:'a',group:'g',search:'keyword',direction:'asc'};
  window.fixture={dates,selected,filter:{...other,...dateSelectionFilter(dates)}};
  return <NextUIProvider><ArticleDateFilter value={dates} onChange={next=>{setDates(next);setSelected([])}}/>
- <button id="open-reader" onClick={()=>setReading(true)}>Read</button>
- <Modal isOpen={reading} onClose={()=>{setFind(false);setReading(false)}} isKeyboardDismissDisabled={find}>
- <ModalContent><ModalBody><button id="switch-reader" onClick={()=>{setFind(false);setId(id+1)}}>Switch</button>
- <ArticleReader key={id} contentHtml={id?'<p>Other body</p>':'<p>needle .*[x] <b>needle</b></p><p style="margin-top:1500px">needle</p><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="><a href="/saved">saved link</a><script>window.readerUnsafe=true</script>'} findOpen={find} onFindOpenChange={setFind}/>
- </ModalBody></ModalContent></Modal><div style={{height:1400}}>Offline scroll fixture</div></NextUIProvider>;
+<div style={{height:1400}}>Offline scroll fixture</div></NextUIProvider>;
 }
 createRoot(document.getElementById('root')).render(<App/>);
 `,
@@ -78,9 +73,11 @@ createRoot(document.getElementById('root')).render(<App/>);
     await build({
       root: web,
       configFile: false,
+      envFile: false,
       define: { 'process.env.NODE_ENV': '"production"' },
       resolve: {
         alias: {
+          '@web': path.join(sourceRoot, 'apps/web/src'),
           react: path.join(web, 'node_modules/react'),
           '@web/utils/article-date-selection': path.join(
             sourceRoot,
@@ -127,7 +124,6 @@ createRoot(document.getElementById('root')).render(<App/>);
               sourceRoot,
               'apps/web/src/components/ArticleDateFilter.tsx',
             ),
-            path.join(sourceRoot, 'apps/web/src/components/ArticleReader.tsx'),
             path.join(
               path.dirname(
                 require.resolve('@nextui-org/theme', {
@@ -512,150 +508,6 @@ createRoot(document.getElementById('root')).render(<App/>);
         'private calendar screenshot:',
         path.join(temp, 'calendar-390.png'),
       );
-
-      // Actual inert DOM helper, including root text and hostile literal input.
-      assert.deepEqual(
-        await evaluate(`(()=>{
-          const mark=window.markArticleText;
-          const source='root needle<p title="needle">跨<b>标签</b>😀 .*[x]</p><p>needle</p><script>needle</script><style>.needle{}</style><span hidden>needle</span><span aria-hidden="true">needle</span>';
-          const result=mark(document,source,'needle','test');
-          const template=document.createElement('template');template.innerHTML=result.html;
-          return {count:result.ids.length,inline:mark(document,source,'跨标签','x').ids.length,emoji:mark(document,source,'😀','x').ids.length,literal:mark(document,source,'.*[x]','x').ids.length,limit:mark(document,'<p>'+'a'.repeat(5001)+'</p>','a','x').truncated,attribute:template.content.querySelector('p').getAttribute('title'),scriptMarks:template.content.querySelectorAll('script mark,style mark,[hidden] mark').length};
-        })()`),
-        {
-          count: 2,
-          inline: 1,
-          emoji: 1,
-          literal: 1,
-          limit: true,
-          attribute: 'needle',
-          scriptMarks: 0,
-        },
-      );
-      const click = async (selector) => {
-        for (let i = 0; i < 50; i++) {
-          if (
-            await evaluate(
-              `Boolean(document.querySelector(${JSON.stringify(selector)}))`,
-            )
-          )
-            break;
-          await pause(50);
-        }
-        assert(
-          await evaluate(
-            `Boolean(document.querySelector(${JSON.stringify(selector)}))`,
-          ),
-          selector +
-            ': ' +
-            JSON.stringify({
-              errors: runtimeErrors,
-              body: await evaluate('document.body.innerText.slice(0,600)'),
-            }),
-        );
-        await evaluate(
-          `document.querySelector(${JSON.stringify(selector)}).click()`,
-        );
-        await pause(180);
-      };
-      const type = async (value) => {
-        await evaluate(
-          `(()=>{const el=document.querySelector('[aria-label="查找正文关键词"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`,
-        );
-        await pause(300);
-      };
-      const output = () =>
-        evaluate("document.querySelector('output').textContent");
-      const key = async (key, shiftKey = false) => {
-        await evaluate(
-          `document.querySelector('[aria-label="查找正文关键词"]').dispatchEvent(new KeyboardEvent('keydown',{key:${JSON.stringify(key)},shiftKey:${shiftKey},bubbles:true}))`,
-        );
-        await pause(180);
-      };
-      await click('#open-reader');
-      await click('[role="dialog"] button[aria-expanded="false"]');
-      await type('needle');
-      assert.equal(await output(), '1 / 3');
-      await key('Enter');
-      assert.equal(await output(), '2 / 3');
-      await key('Enter', true);
-      assert.equal(await output(), '1 / 3');
-      await click('[aria-label="上一处匹配"]');
-      assert.equal(await output(), '3 / 3');
-      await click('[aria-label="下一处匹配"]');
-      assert.equal(await output(), '1 / 3');
-      assert.deepEqual(
-        await evaluate(`(async()=>{
-        const frame=document.querySelector('iframe');
-        const body=await (await fetch(frame.src.split('#')[0])).text();
-        const template=document.createElement('template');template.innerHTML=body;
-        return {sandbox:frame.getAttribute('sandbox'),opaque:frame.contentDocument===null,image:template.content.querySelector('img').getAttribute('src').startsWith('data:'),link:template.content.querySelector('a').getAttribute('href'),unsafe:Boolean(window.readerUnsafe),narrow:frame.getBoundingClientRect().width<=390};
-      })()`),
-        {
-          sandbox: '',
-          opaque: true,
-          image: true,
-          link: '/saved',
-          unsafe: false,
-          narrow: true,
-        },
-      );
-      await type('.*[x]');
-      assert.equal(await output(), '1 / 1');
-      await type('absent');
-      assert.equal(await output(), '0 处匹配');
-      assert.equal(
-        await evaluate(
-          'document.querySelector(\'[aria-label="下一处匹配"]\').disabled',
-        ),
-        true,
-      );
-      await type('');
-      assert.equal(await output(), '输入关键词');
-      await key('Escape');
-      assert.equal(
-        await evaluate(
-          'Boolean(document.querySelector(\'[role="dialog"]\')) && !document.querySelector(\'[aria-label="查找正文关键词"]\')',
-        ),
-        true,
-      );
-      await click('[role="dialog"] button[aria-expanded="false"]');
-      await type('needle');
-      await click('#switch-reader');
-      assert.equal(
-        await evaluate(
-          'Boolean(document.querySelector(\'[aria-label="查找正文关键词"]\'))',
-        ),
-        false,
-      );
-      await click('[role="dialog"] button[aria-expanded="false"]');
-      await type('needle');
-      assert.equal(await output(), '0 处匹配');
-      await key('Escape');
-      await send('Input.dispatchKeyEvent', {
-        type: 'keyDown',
-        key: 'Escape',
-        code: 'Escape',
-        windowsVirtualKeyCode: 27,
-      });
-      await send('Input.dispatchKeyEvent', {
-        type: 'keyUp',
-        key: 'Escape',
-        code: 'Escape',
-        windowsVirtualKeyCode: 27,
-      });
-      await pause(450);
-      assert.equal(
-        await evaluate('Boolean(document.querySelector(\'[role="dialog"]\'))'),
-        false,
-      );
-      assert.equal(
-        await evaluate(
-          'window.blobs.created.every(url=>window.blobs.revoked.includes(url))',
-        ),
-        true,
-      );
-      assert.deepEqual(runtimeErrors, []);
     } finally {
       if (ws?.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));

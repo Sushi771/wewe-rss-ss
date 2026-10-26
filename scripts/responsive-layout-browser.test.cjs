@@ -5,9 +5,9 @@ const fs = require('node:fs'),
   assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..'),
   base = path.join(root, 'apps/server/client'),
-  evidence =
-    process.env.RESPONSIVE_TEST_EVIDENCE ||
-    fs.mkdtempSync(path.join(require('os').tmpdir(), 'wewe-responsive-test-'));
+  evidence = fs.mkdtempSync(
+    path.join(require('os').tmpdir(), 'wewe-responsive-test-'),
+  );
 fs.mkdirSync(evidence, { recursive: true });
 const apiReads = [];
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -37,11 +37,16 @@ const items = Array.from({ length: 120 }, (_, i) => ({
       : '阅读列表示例文章 ' + (i + 1),
   mpId: 'fixture-one',
   publishTime: 1791633600 - i * 86400,
-  bodyCached: true,
+  bodyCached: i % 2 === 0,
   bodyRetry: { allowed: false, reason: '离线演示' },
   feed: { mpName: '示例订阅', collectionChannel: 'wechat2rss' },
   metrics: null,
-  sourceUrl: 'https://example.invalid/article/' + i,
+  sourceUrl:
+    i === 2
+      ? null
+      : i === 3
+        ? 'javascript:alert(1)'
+        : 'https://mp.weixin.qq.com/s/synthetic-article-' + i,
 }));
 let scenario = 'normal',
   requests = [],
@@ -283,12 +288,19 @@ const server = http.createServer((req, res) => {
     const profile = fs.mkdtempSync(path.join(evidence, 'profile-'));
     const chrome =
       process.env.RESPONSIVE_TEST_BROWSER ||
-      [
-        'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-        'C:/Program Files/Google/Chrome/Application/chrome.exe',
-        '/usr/bin/google-chrome',
-        '/usr/bin/chromium',
-      ].find(fs.existsSync);
+      (process.env.PATH || '')
+        .split(path.delimiter)
+        .filter(Boolean)
+        .flatMap((directory) =>
+          [
+            'msedge.exe',
+            'chrome.exe',
+            'google-chrome',
+            'chromium',
+            'chromium-browser',
+          ].map((name) => path.join(directory, name)),
+        )
+        .find((file) => fs.existsSync(file) && fs.statSync(file).isFile());
     assert(
       chrome,
       'Set RESPONSIVE_TEST_BROWSER to an installed Chromium browser',
@@ -579,62 +591,86 @@ const server = http.createServer((req, res) => {
           );
       }
       await viewport(790, 900);
-      console.log('PASS ' + source + ' selection; START reader');
-      await ev(
-        '[...document.querySelectorAll("[role=region]")].filter(e=>/文章列表|笔记列表/.test(e.getAttribute("aria-label"))).forEach(e=>e.scrollTop=0)',
-      );
-      await click(
-        source === 'xiaohongshu'
-          ? `document.querySelector('.content-article-row button[aria-label^="查看互动与评论"]')`
-          : 'document.querySelector(".content-article-row .compact-title")',
-      );
-      await wait(
-        'Boolean(document.querySelector("[role=dialog]"))',
-        'reader opens',
+      console.log(
+        'PASS ' + source + ' selection; START data/original-link check',
       );
       if (source === 'xiaohongshu') {
+        await ev(
+          '[...document.querySelectorAll("[role=region]")].filter(e=>/文章列表|笔记列表/.test(e.getAttribute("aria-label"))).forEach(e=>e.scrollTop=0)',
+        );
         await click(
-          '[...document.querySelectorAll("[role=dialog] details summary")].find(e=>e.textContent.includes("已保存评论"))',
+          source === 'xiaohongshu'
+            ? `document.querySelector('.content-article-row button[aria-label^="查看互动与评论"]')`
+            : 'document.querySelector(".content-article-row .compact-title")',
         );
         await wait(
-          'document.querySelector("[role=dialog]").innerText.includes("仅合成回复")',
-          'saved comments rendered',
+          'Boolean(document.querySelector("[role=dialog]"))',
+          'reader opens',
         );
-        assert(
-          await ev(
-            'document.querySelector("[role=dialog]").innerText.includes("<script>literal</script>")',
-          ),
-        );
-        assert.equal(
-          await ev(
-            'document.querySelectorAll("[role=dialog] section[aria-label=小红书保存的互动数据] script").length',
-          ),
-          0,
-        );
-      }
-      for (const width of [390, 1660, 640, 790]) {
-        await viewport(width, 540, 1.25);
-        const box = await ev(
-          '(()=>{const r=document.querySelector("[role=dialog]").getBoundingClientRect();return {x:r.x,right:r.right,top:r.top,bottom:r.bottom,w:innerWidth,h:innerHeight}})()',
-        );
-        assert(
-          box.x >= 0 &&
-            box.right <= box.w + 1 &&
-            box.top >= 0 &&
-            box.bottom <= box.h + 1,
-          JSON.stringify(box),
-        );
-        assert.equal((await geometry()).checked, 2);
-        if (source === 'xiaohongshu' && width === 390) {
-          const shot = await send('Page.captureScreenshot', { format: 'png' });
-          fs.writeFileSync(
-            path.join(evidence, 'xiaohongshu-reader-comments-390.png'),
-            Buffer.from(shot.data, 'base64'),
+        if (source === 'xiaohongshu') {
+          await click(
+            '[...document.querySelectorAll("[role=dialog] details summary")].find(e=>e.textContent.includes("已保存评论"))',
+          );
+          await wait(
+            'document.querySelector("[role=dialog]").innerText.includes("仅合成回复")',
+            'saved comments rendered',
+          );
+          assert(
+            await ev(
+              'document.querySelector("[role=dialog]").innerText.includes("<script>literal</script>")',
+            ),
+          );
+          assert.equal(
+            await ev(
+              'document.querySelectorAll("[role=dialog] section[aria-label=小红书保存的互动数据] script").length',
+            ),
+            0,
           );
         }
+        for (const width of [390, 1660, 640, 790]) {
+          await viewport(width, 540, 1.25);
+          const box = await ev(
+            '(()=>{const r=document.querySelector("[role=dialog]").getBoundingClientRect();return {x:r.x,right:r.right,top:r.top,bottom:r.bottom,w:innerWidth,h:innerHeight}})()',
+          );
+          assert(
+            box.x >= 0 &&
+              box.right <= box.w + 1 &&
+              box.top >= 0 &&
+              box.bottom <= box.h + 1,
+            JSON.stringify(box),
+          );
+          assert.equal((await geometry()).checked, 2);
+          if (source === 'xiaohongshu' && width === 390) {
+            const shot = await send('Page.captureScreenshot', {
+              format: 'png',
+            });
+            fs.writeFileSync(
+              path.join(evidence, 'xiaohongshu-reader-comments-390.png'),
+              Buffer.from(shot.data, 'base64'),
+            );
+          }
+        }
+        await key('Escape', 27);
+        await pause(400); // Modal exit animation still owns pointer events until removed.
+      } else {
+        const links = await ev(
+          "[...document.querySelectorAll('.content-article-row .compact-title')].map(a=>({href:a.getAttribute('href'),target:a.target,rel:a.rel,disabled:a.getAttribute('aria-disabled'),label:a.textContent}))",
+        );
+        assert.equal(
+          links[0].href,
+          'https://mp.weixin.qq.com/s/synthetic-article-0',
+        );
+        assert.equal(
+          links[1].href,
+          'https://mp.weixin.qq.com/s/synthetic-article-1',
+        );
+        assert.equal(links[2].href, null);
+        assert.equal(links[3].href, null);
+        assert(links[2].label.includes('原文链接未保存或不可用'));
+        assert.equal(links[0].target, '_blank');
+        assert(links[0].rel.includes('noopener'));
+        assert.equal(await ev("document.querySelectorAll('iframe').length"), 0);
       }
-      await key('Escape', 27);
-      await pause(400); // Modal exit animation still owns pointer events until removed.
       await viewport(790, 900);
       await click(
         '[...document.querySelectorAll(".feed-reading-toolbar button")].find(e=>/更多/.test(e.textContent))',
@@ -699,9 +735,14 @@ const server = http.createServer((req, res) => {
       checks.push({
         source,
         functional:
-          'date/search/group summaries, cross-batch selection and reader retained across resize, More and export reachable',
+          'date/search/group summaries, cross-batch selection and original links/data panels retained across resize, More and export reachable',
       });
     }
+    assert.equal(
+      apiReads.filter((r) => r.name === 'article.byId').length,
+      0,
+      'removed reader never requests cached body',
+    );
     assert.deepEqual(forbidden, []);
     fs.writeFileSync(
       path.join(evidence, 'result.json'),

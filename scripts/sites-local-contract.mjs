@@ -7,7 +7,6 @@ const actions = [
   'capability',
   'authors',
   'items',
-  'body',
   'download',
   'refresh',
   'status',
@@ -50,7 +49,7 @@ export function parseSitesCommand(raw) {
     throw error('BAD_REQUEST');
   const keys = ['action', 'platform'];
   const list = ['authors', 'items'].includes(raw.action);
-  const content = ['body', 'download'].includes(raw.action);
+  const content = raw.action === 'download';
   // XHS reading is an external link; local native archival is a separate API.
   if (content && raw.platform === 'xiaohongshu') throw error('BAD_REQUEST');
   if (
@@ -416,7 +415,7 @@ export function sitesDownloadBlob(raw) {
 }
 
 function safeResult(command, raw) {
-  if (['body', 'download'].includes(command.action)) {
+  if (command.action === 'download') {
     if (raw?.authorId !== command.authorId || raw.itemId !== command.itemId)
       throw error('INVALID_RESPONSE');
     return cachedBody(command, raw);
@@ -620,8 +619,7 @@ export function createLocalSitesGateway({
         if (!caller) throw error('PC_UNAVAILABLE');
         if (command.action === 'refresh')
           return await refresh(command, context);
-        if (['body', 'download'].includes(command.action))
-          return await readBody(command);
+        if (command.action === 'download') return await readBody(command);
         const xhs = command.platform === 'xiaohongshu';
         let result;
         if (command.action === 'capability') {

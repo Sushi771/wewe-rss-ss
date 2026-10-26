@@ -68,8 +68,11 @@ export class XhsWholeCreatorService implements OnModuleInit {
       WHERE state IN ('queued','running')`,
     );
   }
-  private async load(id: string): Promise<Job> {
-    const rows = await this.db.$queryRaw<Array<{ document: string }>>`
+  private async load(
+    id: string,
+    db: Pick<Prisma.TransactionClient, '$queryRaw'> = this.db,
+  ): Promise<Job> {
+    const rows = await db.$queryRaw<Array<{ document: string }>>`
       SELECT document FROM xhs_whole_creator_jobs WHERE id=${id}`;
     if (!rows.length) throw new XhsSubscriptionError('XHS_TASK_NOT_FOUND');
     return JSON.parse(rows[0].document);
@@ -195,13 +198,13 @@ export class XhsWholeCreatorService implements OnModuleInit {
       throw error;
     }
   }
-  private async check(job: Job) {
-    const saved = await this.load(job.id);
+  private async check(job: Job, db: Prisma.TransactionClient = this.db) {
+    const saved = await this.load(job.id, db);
     if (saved.state === 'cancelled')
       throw new XhsSubscriptionError('XHS_TASK_CANCELLED');
     if (!['queued', 'running'].includes(saved.state))
       throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
-    const creator = await this.db.xhsCreator.findUnique({
+    const creator = await db.xhsCreator.findUnique({
       where: { id: job.creatorId },
     });
     if (!creator?.enabled)
@@ -346,15 +349,31 @@ export class XhsWholeCreatorService implements OnModuleInit {
       await this.save(job);
       const store = new XhsSqliteBudgetStore(this.db);
       // Serialize admission with short cancellable waits; every retry reaches the same durable gate.
+      const receipts = new Map<number, number>();
       const budget = new XhsRequestBudget({
         read: (key) => store.read(key),
+        assertReady: (tx) => this.check(job, tx),
+        rollback: async (key, before) => {
+          const at = receipts.get(before.used + 1);
+          if (at === undefined) return false;
+          receipts.delete(before.used + 1);
+          return this.write((tx) =>
+            new XhsSqliteBudgetStore(tx).rollback(key, before, at),
+          );
+        },
         reserve: async (key) => {
           for (;;) {
             await this.check(job);
             if (
-              await this.write((tx) =>
-                new XhsSqliteBudgetStore(tx).reserve(key, Date.now()),
-              )
+              await this.write(async (tx) => {
+                const gate = new XhsSqliteBudgetStore(tx);
+                const before = await gate.read(key),
+                  at = Date.now();
+                if (!(await gate.reserve(key, at))) return false;
+                receipts.clear();
+                receipts.set(before!.used + 1, at);
+                return true;
+              })
             )
               return true;
             const current = await store.read(key);

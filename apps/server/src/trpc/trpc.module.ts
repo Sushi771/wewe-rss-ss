@@ -1,3 +1,4 @@
+import { bindXhsSourceTotalBudget } from '../collection/xhs-source-request-policy';
 import { XhsWholeCreatorService } from '../collection/xhs-whole-creator.service';
 import { Module } from '@nestjs/common';
 import { TrpcService } from '@server/trpc/trpc.service';
@@ -33,7 +34,12 @@ import {
     XhsWholeCreatorService,
     {
       provide: XhsSubscriptionRuntime,
-      useFactory: createLocalXhsSubscriptionRuntime,
+      inject: [PrismaService],
+      useFactory: (db: PrismaService) => {
+        const runtime = createLocalXhsSubscriptionRuntime();
+        bindXhsSourceTotalBudget(db, runtime);
+        return runtime;
+      },
     },
     { provide: XHS_SUBSCRIPTION_SOURCE, useExisting: XhsSubscriptionRuntime },
     {

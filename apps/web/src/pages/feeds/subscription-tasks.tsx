@@ -1,7 +1,7 @@
+import { Modal } from '@web/components/AppOverlays';
 import {
   Button,
   Progress,
-  Modal,
   ModalContent,
   ModalHeader,
   ModalBody,

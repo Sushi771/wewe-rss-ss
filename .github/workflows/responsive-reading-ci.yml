@@ -75,3 +75,8 @@ jobs:
         env:
           RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
         run: node scripts/xhs-note-data-browser.test.cjs
+
+      - name: Original links and shared overlay interaction matrix
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/overlay-matrix-browser.test.cjs

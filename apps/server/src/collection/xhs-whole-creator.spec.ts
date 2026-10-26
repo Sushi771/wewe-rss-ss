@@ -10,6 +10,11 @@ import { XhsWholeCreatorService } from './xhs-whole-creator.service';
 import { XhsEngagementService } from './xhs-engagement.service';
 import { xhsNoteMetrics, mapXhsComments } from './xhs-engagement-contract';
 import { RedbookSubscriptionAdapter } from './xhs-redbook-subscription';
+import { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
+import { XhsRequestBudget } from './xhs-request-budget';
+import { XhsSqliteBudgetStore } from './xhs-request-budget-store';
+import { bindXhsSourceTotalBudget } from './xhs-source-request-policy';
+import { batchStorageLock } from './batch-storage-lock';
 
 const noteId = JSON.stringify(['xiaohongshu', 'note', 'note']);
 describe('whole creator durable offline closure', () => {
@@ -62,6 +67,759 @@ describe('whole creator durable offline closure', () => {
     expect(await store.reserve('probe', Date.now())).toBe(true);
     expect((await store.read('probe'))!.used).toBe(1);
   });
+  it.each(['missing', 'exhausted'] as const)(
+    'prechecks %s legacy budgets before touching any reservation',
+    async (state) => {
+      const reserve = jest.fn(async () => true);
+      const budget = new XhsRequestBudget({
+        reserve,
+        read: async () =>
+          state === 'missing'
+            ? null
+            : {
+                id: 'synthetic',
+                used: 1,
+                limit: 1,
+                nextAt: 9999,
+                intervalMs: 1000,
+              },
+      });
+      await expect(budget.check('synthetic', 0)).rejects.toThrow(
+        state === 'missing'
+          ? 'XHS_REQUEST_BUDGET_REQUIRED'
+          : 'XHS_REQUEST_BUDGET_EXHAUSTED',
+      );
+      expect(reserve).not.toHaveBeenCalled();
+    },
+  );
+  it('prechecks cooldown only for an explicit policy without bypassing reserve', async () => {
+    const store = {
+      read: async () => ({
+        id: 'synthetic',
+        used: 0,
+        limit: 2,
+        nextAt: 2000,
+        intervalMs: 1000,
+      }),
+      reserve: jest.fn(async () => false),
+    };
+    const legacy = new XhsRequestBudget(store);
+    await expect(legacy.check('synthetic', 1000)).resolves.toBeUndefined();
+    await expect(legacy.reserve('synthetic', 1000)).rejects.toThrow(
+      'XHS_REQUEST_RATE_PAUSED',
+    );
+    expect(store.reserve).toHaveBeenCalledTimes(1);
+    const immediate = new XhsRequestBudget({ ...store, waitAllowanceMs: 0 });
+    await expect(immediate.check('synthetic', 1000)).rejects.toThrow(
+      'XHS_REQUEST_RATE_PAUSED',
+    );
+    const bounded = new XhsRequestBudget({ ...store, waitAllowanceMs: 1000 });
+    await expect(bounded.check('synthetic', 1000)).resolves.toBeUndefined();
+    await expect(bounded.check('synthetic', 999)).rejects.toThrow(
+      'XHS_REQUEST_RATE_PAUSED',
+    );
+    expect(store.reserve).toHaveBeenCalledTimes(1);
+  });
+  const legacyRuntimeRate = async (
+    mode:
+      | 'complete'
+      | 'cancel'
+      | 'exhausted'
+      | 'shared-cancel'
+      | 'shared-exhausted',
+  ) => {
+    const creatorId = `synthetic-rate-${mode}`;
+    const shared = mode.startsWith('shared-');
+    const cancelling = mode.endsWith('cancel');
+    const profile = `https://www.xiaohongshu.com/user/profile/${creatorId}`;
+    await db.xhsCreator.create({
+      data: {
+        id: creatorId,
+        externalAuthorId: creatorId,
+        profileUrl: profile,
+        displayName: 'Synthetic rate',
+      },
+    });
+    if (shared)
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms)
+        VALUES('xhs:source-total',${mode === 'shared-exhausted' ? 1 : 2},1000)`;
+    const api = jest.fn(async (request) => ({
+      status: 200,
+      url: request.url,
+      body: { success: true, code: 0, data: {} },
+    }));
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      api,
+      profileParser: () => ({
+        id: creatorId,
+        name: 'Synthetic rate',
+        profileUrl: profile,
+      }),
+    });
+    await runtime.connectSession({
+      a1: 'synthetic-a1',
+      webSession: 'synthetic-session',
+    });
+    bindXhsSourceTotalBudget(db as any, runtime);
+    let jobId = '',
+      firstTotal: Awaited<ReturnType<XhsSqliteBudgetStore['read']>>;
+    const attempts: Array<{
+      at: number;
+      accepted: boolean;
+      priorNextAt: number;
+    }> = [];
+    let waiting!: () => void;
+    const cooldown = new Promise<void>((resolve) => (waiting = resolve));
+    const originalReserve = XhsSqliteBudgetStore.prototype.reserve;
+    const reserve = jest
+      .spyOn(XhsSqliteBudgetStore.prototype, 'reserve')
+      .mockImplementation(async function (this: XhsSqliteBudgetStore, id, now) {
+        const before = await this.read(id);
+        const accepted = await originalReserve.call(this, id, now);
+        if (id === jobId) {
+          attempts.push({ at: now, accepted, priorNextAt: before!.nextAt });
+          if (!accepted && before!.used < before!.limit && before!.nextAt > now)
+            waiting();
+        }
+        return accepted;
+      });
+    const subscriptions: any = {
+      refresh: async () => {
+        const rows = await db.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM xhs_whole_creator_jobs WHERE creator_id=${creatorId}`;
+        jobId = rows[0].id;
+        await runtime.resolve(profile);
+        firstTotal = await new XhsSqliteBudgetStore(db).read(
+          'xhs:source-total',
+        );
+        await runtime.resolve(profile);
+        return { taskId: 'synthetic-rate-list' };
+      },
+      task: async () => ({ state: 'completed' }),
+      cancelTask: jest.fn(async () => ({})),
+    };
+    const whole = new XhsWholeCreatorService(
+      db as any,
+      subscriptions,
+      runtime,
+      {
+        refreshMetrics: async () => ({ collectedAt: 1 }),
+      } as any,
+    );
+    nativeLanes.push(() => (whole as any).lane);
+    try {
+      const started = await whole.start({
+        creatorId,
+        requestLimit: mode === 'exhausted' ? 1 : 2,
+        intervalMs: shared ? 5000 : 1000,
+      });
+      if (cancelling) {
+        // Observe the actual old wrapper's rejected SQLite reservation, not a copied waiter.
+        const reachedWait = await Promise.race([
+          cooldown.then(() => true),
+          (whole as any).lane.then(() => false),
+        ]);
+        expect(reachedWait).toBe(true);
+        expect(attempts.some((attempt) => !attempt.accepted)).toBe(true);
+        await whole.cancel(started.id);
+      }
+      await (whole as any).lane;
+      const result = await whole.view(started.id);
+      expect(result.state).toBe(
+        mode === 'complete' ? 'completed' : cancelling ? 'cancelled' : 'paused',
+      );
+      if (cancelling) expect(result.code).toBe('XHS_TASK_CANCELLED');
+      else if (mode !== 'complete')
+        expect(result.code).toBe('XHS_REQUEST_BUDGET_EXHAUSTED');
+      const count = mode === 'complete' ? 2 : 1;
+      expect(api).toHaveBeenCalledTimes(count);
+      expect(result.budget!.used).toBe(count);
+      const admitted = attempts.filter((attempt) => attempt.accepted);
+      expect(admitted).toHaveLength(count);
+      if (mode === 'complete') {
+        expect(admitted[1].at).toBeGreaterThanOrEqual(admitted[1].priorNextAt);
+        expect(admitted[1].at - admitted[0].at).toBeGreaterThanOrEqual(1000);
+      }
+      if (shared) {
+        // Cancellation after total reservation rolls back only the undispatched request.
+        const total = await new XhsSqliteBudgetStore(db).read(
+          'xhs:source-total',
+        );
+        expect(total).toEqual(firstTotal!);
+        expect(total!.used).toBe(1);
+      }
+    } finally {
+      await (whole as any).lane;
+      reserve.mockRestore();
+      runtime.onModuleDestroy();
+      if (shared)
+        await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+    }
+  };
+  it.each([
+    'complete',
+    'cancel',
+    'exhausted',
+    'shared-cancel',
+    'shared-exhausted',
+  ] as const)(
+    'keeps real runtime admission compatible with the legacy whole-task waiter: %s',
+    (mode) => {
+      const pending = legacyRuntimeRate(mode);
+      nativeTests.push(pending);
+      return pending;
+    },
+    40000,
+  );
+  let dispatchFixture = 0;
+  const dispatchClock = async (mode: string) => {
+    const creatorId = `synthetic-dispatch-${mode}-${++dispatchFixture}`;
+    const profile = `https://www.xiaohongshu.com/user/profile/${creatorId}`;
+    await db.xhsCreator.create({
+      data: {
+        id: creatorId,
+        externalAuthorId: creatorId,
+        profileUrl: profile,
+        displayName: 'Synthetic dispatch clock',
+      },
+    });
+    const limit = mode === 'exhausted' ? 2 : mode === 'race-exhausted' ? 3 : 6;
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms)
+      VALUES('xhs:source-total',${limit},1000)`;
+    const times: number[] = [];
+    const api = jest.fn(async (request) => {
+      times.push(Date.now());
+      return {
+        status: 200,
+        url: request.url,
+        body: { success: true, code: 0, data: {} },
+      };
+    });
+    const makeRuntime = () =>
+      new XhsSubscriptionRuntime({
+        enabled: () => true,
+        api,
+        profileParser: () => ({
+          id: creatorId,
+          name: 'Synthetic',
+          profileUrl: profile,
+        }),
+      });
+    const runtime = makeRuntime(),
+      ordinary = makeRuntime();
+    for (const instance of [runtime, ordinary]) {
+      await instance.connectSession({
+        a1: 'synthetic-a1',
+        webSession: 'synthetic-session',
+      });
+      bindXhsSourceTotalBudget(db as any, instance);
+    }
+    let jobId = '',
+      signalWait!: () => void,
+      signalFinal!: () => void;
+    const legacyWaiting = new Promise<void>((r) => (signalWait = r));
+    const finalWaiting = new Promise<void>((r) => (signalFinal = r));
+    let localAdmitted = 0;
+    const original = XhsSqliteBudgetStore.prototype.reserve;
+    const spy = jest
+      .spyOn(XhsSqliteBudgetStore.prototype, 'reserve')
+      .mockImplementation(async function (this: XhsSqliteBudgetStore, id, now) {
+        const accepted = await original.call(this, id, now);
+        if (id === jobId) {
+          if (accepted) localAdmitted++;
+          else signalWait();
+        }
+        return accepted;
+      });
+    const wait = runtime.waitForSourceRate.bind(runtime);
+    jest.spyOn(runtime, 'waitForSourceRate').mockImplementation(async (ms) => {
+      if (localAdmitted === 2) signalFinal();
+      return wait(ms);
+    });
+    const subscriptions: any = {
+      refresh: async () => {
+        const rows = await db.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM xhs_whole_creator_jobs WHERE creator_id=${creatorId}`;
+        jobId = rows[0].id;
+        await runtime.resolve(profile);
+        await runtime.resolve(profile);
+        return { taskId: 'synthetic-clock-list' };
+      },
+      task: async () => ({ state: 'completed' }),
+      cancelTask: async () => ({}),
+    };
+    const whole = new XhsWholeCreatorService(
+      db as any,
+      subscriptions,
+      runtime,
+      { refreshMetrics: async () => ({ collectedAt: 1 }) } as any,
+    );
+    nativeLanes.push(() => (whole as any).lane);
+    const pending: Promise<unknown>[] = [];
+    try {
+      const started = await whole.start({
+        creatorId,
+        requestLimit: 2,
+        intervalMs: mode === 'final-cancel' ? 1500 : 2200,
+      });
+      if (mode === 'interleave' || mode === 'final-cancel') {
+        await legacyWaiting;
+        await ordinary.resolve(profile);
+        if (mode === 'final-cancel') {
+          expect(
+            await Promise.race([
+              finalWaiting.then(() => true),
+              (whole as any).lane.then(() => false),
+            ]),
+          ).toBe(true);
+          await whole.cancel(started.id);
+        }
+      }
+      await (whole as any).lane;
+      if (mode === 'serial') await ordinary.resolve(profile);
+      if (mode === 'concurrent' || mode === 'race-exhausted') {
+        pending.push(runtime.resolve(profile), ordinary.resolve(profile));
+        const results = await Promise.allSettled(pending);
+        expect(
+          results
+            .filter((r) => r.status === 'rejected')
+            .map((r) => (r as PromiseRejectedResult).reason.message),
+        ).toEqual(
+          mode === 'concurrent' ? [] : ['XHS_REQUEST_BUDGET_EXHAUSTED'],
+        );
+        expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(
+          mode === 'concurrent' ? 2 : 1,
+        );
+        if (mode === 'race-exhausted') {
+          const rejected = results.find((r) => r.status === 'rejected');
+          expect((rejected as PromiseRejectedResult).reason.message).toBe(
+            'XHS_REQUEST_BUDGET_EXHAUSTED',
+          );
+        }
+      }
+      if (mode === 'exhausted')
+        await expect(ordinary.resolve(profile)).rejects.toThrow(
+          'XHS_REQUEST_BUDGET_EXHAUSTED',
+        );
+      const expected =
+        mode === 'concurrent'
+          ? 4
+          : mode === 'final-cancel' || mode === 'exhausted'
+            ? 2
+            : 3;
+      expect(api).toHaveBeenCalledTimes(expected);
+      for (let i = 1; i < times.length; i++)
+        expect(times[i] - times[i - 1]).toBeGreaterThanOrEqual(1000);
+      const total = await new XhsSqliteBudgetStore(db).read('xhs:source-total');
+      expect(total!.used).toBe(expected);
+      expect(total!.nextAt).toBeGreaterThanOrEqual(
+        times[times.length - 1] + 1000,
+      );
+      const job = await whole.view(started.id);
+      expect(job.state).toBe(
+        mode === 'final-cancel' ? 'cancelled' : 'completed',
+      );
+      expect(job.budget!.used).toBe(mode === 'final-cancel' ? 1 : 2);
+    } finally {
+      await Promise.allSettled(pending);
+      await (whole as any).lane;
+      spy.mockRestore();
+      for (const instance of [runtime, ordinary]) instance.onModuleDestroy();
+      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+    }
+  };
+  it.each([
+    'serial',
+    'interleave',
+    'final-cancel',
+    'concurrent',
+    'race-exhausted',
+    'exhausted',
+  ])(
+    'spaces actual shared transport starts after whole-task waits: %s',
+    (mode) => {
+      const pending = (async () => {
+        for (let run = 0; run < (mode === 'concurrent' ? 3 : 1); run++)
+          await dispatchClock(mode);
+      })();
+      nativeTests.push(pending);
+      return pending;
+    },
+    40000,
+  );
+  it('a non-dispatch receipt is consumed once even if cleanup is called again', async () => {
+    let used = 0;
+    const rollback = jest.fn(async () => {
+      used--;
+      return true;
+    });
+    const gate = new XhsRequestBudget({
+      read: async (id) => ({ id, used, limit: 3, intervalMs: 0, nextAt: 0 }),
+      reserve: async () => {
+        used++;
+        return true;
+      },
+      rollback,
+    });
+    const undo = await gate.reserve('synthetic');
+    await undo();
+    await undo();
+    expect(used).toBe(0);
+    expect(rollback).toHaveBeenCalledTimes(1);
+  });
+  it.each(['response', 'commit-ack'])(
+    'keeps the shared charge and never replays after an uncertain %s',
+    async (mode) => {
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms)
+        VALUES('xhs:source-total',3,1000)`;
+      const api = jest.fn(async (request) => {
+        if (mode === 'response')
+          throw new Error('synthetic transport receipt lost');
+        return {
+          status: 200,
+          url: request.url,
+          body: { success: true, code: 0, data: {} },
+        };
+      });
+      const runtime = new XhsSubscriptionRuntime({
+        enabled: () => true,
+        api,
+        profileParser: () => ({
+          id: 'synthetic',
+          name: 'Synthetic',
+          profileUrl: 'https://www.xiaohongshu.com/user/profile/synthetic',
+        }),
+      });
+      await runtime.connectSession({
+        a1: 'synthetic-a1',
+        webSession: 'synthetic-session',
+      });
+      bindXhsSourceTotalBudget(db as any, runtime);
+      const original = db.$transaction.bind(db);
+      let lost = false;
+      const transaction = jest
+        .spyOn(db, '$transaction')
+        .mockImplementation((async (...args: any[]) => {
+          const result = await (original as any)(...args);
+          if (mode === 'commit-ack' && api.mock.calls.length && !lost) {
+            lost = true;
+            throw new Error('synthetic dispatch commit acknowledgment lost');
+          }
+          return result;
+        }) as any);
+      try {
+        await expect(
+          runtime.resolve('https://www.xiaohongshu.com/user/profile/synthetic'),
+        ).rejects.toThrow();
+        expect(api).toHaveBeenCalledTimes(1);
+        expect(
+          (await new XhsSqliteBudgetStore(db).read('xhs:source-total'))!.used,
+        ).toBe(1);
+        if (mode === 'commit-ack') expect(lost).toBe(true);
+      } finally {
+        transaction.mockRestore();
+        runtime.onModuleDestroy();
+        await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+      }
+    },
+    40000,
+  );
+  it.each(['ENOENT', 'EACCES'])(
+    'handles only a released admission lock while preserving other read errors: %s',
+    async (code) => {
+      const directory = path.join(folder, `lock-${code}`);
+      await fs.mkdir(directory);
+      const lock = path.join(directory, 'worker.lock');
+      const release = (await batchStorageLock(directory))!;
+      const readFile = fs.readFile.bind(fs);
+      let released = false;
+      const read = jest.spyOn(fs, 'readFile').mockImplementation((async (
+        ...args: any[]
+      ) => {
+        if (args[0] === lock) {
+          if (code === 'ENOENT') {
+            await release();
+            released = true;
+          } else
+            throw Object.assign(new Error('synthetic denied lock read'), {
+              code,
+            });
+        }
+        return (readFile as any)(...args);
+      }) as any);
+      try {
+        if (code === 'ENOENT')
+          await expect(batchStorageLock(directory)).resolves.toBeUndefined();
+        else
+          await expect(batchStorageLock(directory)).rejects.toMatchObject({
+            code,
+          });
+        expect(read).toHaveBeenCalledWith(lock, 'utf8');
+      } finally {
+        read.mockRestore();
+        if (!released) await release();
+      }
+      await expect(fs.access(lock + '.recovery')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      const next = await batchStorageLock(directory);
+      expect(next).toEqual(expect.any(Function));
+      await next!();
+    },
+  );
+  it.each(['before-fence', 'after-fence'])(
+    'observes committed cancellation at the final boundary: %s',
+    async (mode) => {
+      const creatorId = `synthetic-boundary-${mode}`;
+      const profile = `https://www.xiaohongshu.com/user/profile/${creatorId}`;
+      await db.xhsCreator.create({
+        data: {
+          id: creatorId,
+          externalAuthorId: creatorId,
+          profileUrl: profile,
+          displayName: 'Synthetic cancellation',
+        },
+      });
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms)
+        VALUES('xhs:source-total',2,1000)`;
+      const api = jest.fn(async (request) => ({
+        status: 200,
+        url: request.url,
+        body: { success: true, code: 0, data: {} },
+      }));
+      const runtime = new XhsSubscriptionRuntime({
+        enabled: () => true,
+        api,
+        profileParser: () => ({
+          id: creatorId,
+          name: 'Synthetic',
+          profileUrl: profile,
+        }),
+      });
+      await runtime.connectSession({
+        a1: 'synthetic-a1',
+        webSession: 'synthetic-session',
+      });
+      bindXhsSourceTotalBudget(db as any, runtime);
+      let jobId = '',
+        reserved = false,
+        injected = false;
+      const subscriptions: any = {
+        refresh: async () => {
+          const rows = await db.$queryRaw<
+            Array<{ id: string }>
+          >`SELECT id FROM xhs_whole_creator_jobs WHERE creator_id=${creatorId}`;
+          jobId = rows[0].id;
+          await runtime.resolve(profile);
+          return { taskId: 'synthetic-boundary-list' };
+        },
+        task: async () => ({ state: 'completed' }),
+        cancelTask: async () => ({}),
+      };
+      const whole = new XhsWholeCreatorService(
+        db as any,
+        subscriptions,
+        runtime,
+        { refreshMetrics: async () => ({ collectedAt: 1 }) } as any,
+      );
+      nativeLanes.push(() => (whole as any).lane);
+      const originalReserve = XhsSqliteBudgetStore.prototype.reserve;
+      const reserve = jest
+        .spyOn(XhsSqliteBudgetStore.prototype, 'reserve')
+        .mockImplementation(async function (
+          this: XhsSqliteBudgetStore,
+          id,
+          now,
+        ) {
+          const result = await originalReserve.call(this, id, now);
+          if (id === jobId && result) reserved = true;
+          return result;
+        });
+      const query = db.$queryRaw.bind(db);
+      const read = jest.spyOn(db, '$queryRaw').mockImplementation((async (
+        ...args: any[]
+      ) => {
+        const result = await (query as any)(...args);
+        if (
+          mode === 'before-fence' &&
+          reserved &&
+          !injected &&
+          String(args[0]).includes('SELECT * FROM xhs_request_budgets') &&
+          args.includes('xhs:source-total')
+        ) {
+          injected = true;
+          await whole.cancel(jobId);
+        }
+        return result;
+      }) as any);
+      const unsafeQuery = db.$queryRawUnsafe.bind(db);
+      const boundary = jest
+        .spyOn(db, '$queryRawUnsafe')
+        .mockImplementation((async (...args: any[]) => {
+          const result = await (unsafeQuery as any)(...args);
+          // This is after the first write helper has released its file lock, but
+          // before the second helper acquires admission and the SQLite write lock.
+          if (
+            mode === 'after-fence' &&
+            reserved &&
+            !injected &&
+            args[0] === 'PRAGMA database_list'
+          ) {
+            const markers = await query<Array<{ id: string }>>`
+            SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
+            if (markers.length) {
+              injected = true;
+              await whole.cancel(jobId);
+            }
+          }
+          return result;
+        }) as any);
+      try {
+        const started = await whole.start({
+          creatorId,
+          requestLimit: 2,
+          intervalMs: 1000,
+        });
+        await (whole as any).lane;
+        expect(injected).toBe(true);
+        expect(api).not.toHaveBeenCalled();
+        const job = await whole.view(started.id);
+        expect(job.state).toBe('cancelled');
+        expect(job.code).toBe('XHS_TASK_CANCELLED');
+        expect(job.budget!.used).toBe(0);
+        expect(
+          (await new XhsSqliteBudgetStore(db).read('xhs:source-total'))!.used,
+        ).toBe(0);
+        expect(
+          await query`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`,
+        ).toEqual([]);
+      } finally {
+        await (whole as any).lane;
+        boundary.mockRestore();
+        read.mockRestore();
+        reserve.mockRestore();
+        runtime.onModuleDestroy();
+        await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+      }
+    },
+    40000,
+  );
+  it.each(['before-start', 'after-start'])(
+    'keeps a durable cross-runtime fence when the actual transaction rolls back: %s',
+    async (mode) => {
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms)
+        VALUES('xhs:source-total',3,1000)`;
+      const profile =
+        'https://www.xiaohongshu.com/user/profile/synthetic-fence';
+      const api = jest.fn(async (request) => ({
+        status: 200,
+        url: request.url,
+        body: { success: true, code: 0, data: {} },
+      }));
+      const makeRuntime = () =>
+        new XhsSubscriptionRuntime({
+          enabled: () => true,
+          api,
+          profileParser: () => ({
+            id: 'synthetic-fence',
+            name: 'Synthetic',
+            profileUrl: profile,
+          }),
+        });
+      const runtime = makeRuntime();
+      await runtime.connectSession({
+        a1: 'synthetic-a1',
+        webSession: 'synthetic-session',
+      });
+      bindXhsSourceTotalBudget(db as any, runtime);
+      const original = db.$transaction.bind(db);
+      let rolledBack = false;
+      const transaction = jest.spyOn(db, '$transaction').mockImplementation(((
+        callback: any,
+        ...args: any[]
+      ) =>
+        (original as any)(
+          async (tx: any) => {
+            const result = await callback(tx);
+            const markers =
+              await tx.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
+            if (
+              !rolledBack &&
+              ((mode === 'after-start' && api.mock.calls.length === 1) ||
+                (mode === 'before-start' && markers.length === 1))
+            ) {
+              rolledBack = true;
+              throw new Error('synthetic transaction rollback before COMMIT');
+            }
+            return result;
+          },
+          ...args,
+        )) as any);
+      let reopened: PrismaClient | undefined,
+        second: XhsSubscriptionRuntime | undefined;
+      try {
+        await expect(runtime.resolve(profile)).rejects.toThrow();
+        expect(rolledBack).toBe(true);
+        const expected = mode === 'after-start' ? 1 : 0;
+        expect(api).toHaveBeenCalledTimes(expected);
+        expect(
+          (await new XhsSqliteBudgetStore(db).read('xhs:source-total'))!.used,
+        ).toBe(expected);
+        expect(
+          (await new XhsSqliteBudgetStore(db).read('xhs:source-total'))!.nextAt,
+        ).toBe(0);
+        transaction.mockRestore();
+        runtime.onModuleDestroy();
+        reopened = new PrismaClient({
+          datasources: {
+            db: {
+              url:
+                'file:' +
+                path.join(folder, 'synthetic.sqlite').replace(/\\/g, '/'),
+            },
+          },
+        });
+        second = makeRuntime();
+        await second.connectSession({
+          a1: 'synthetic-a1',
+          webSession: 'synthetic-session',
+        });
+        bindXhsSourceTotalBudget(reopened as any, second);
+        const markers = await reopened.$queryRaw<
+          Array<{ id: string }>
+        >`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
+        expect(markers).toHaveLength(expected);
+        if (mode === 'after-start') {
+          await expect(second.resolve(profile)).rejects.toThrow(
+            'XHS_REQUEST_RATE_PAUSED',
+          );
+          expect(api).toHaveBeenCalledTimes(1);
+          expect(
+            (await new XhsSqliteBudgetStore(reopened).read('xhs:source-total'))!
+              .used,
+          ).toBe(1);
+          expect(
+            await reopened.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`,
+          ).toEqual(markers);
+        } else {
+          await second.resolve(profile);
+          expect(api).toHaveBeenCalledTimes(1);
+          expect(
+            (await new XhsSqliteBudgetStore(reopened).read('xhs:source-total'))!
+              .used,
+          ).toBe(1);
+        }
+      } finally {
+        transaction.mockRestore();
+        runtime.onModuleDestroy();
+        second?.onModuleDestroy();
+        await reopened?.$disconnect();
+        await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:%'`;
+      }
+    },
+    40000,
+  );
   it('does not equate top end with root reply completion; resumes with same budget and cursor', async () => {
     let budget: any,
       failReply = true;

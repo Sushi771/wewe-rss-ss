@@ -1,10 +1,10 @@
+import { Popover } from '@web/components/AppOverlays';
 import { CalendarDate } from '@internationalized/date';
 import { useState } from 'react';
 import {
   Button,
   Calendar,
   NextUIProvider,
-  Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@nextui-org/react';

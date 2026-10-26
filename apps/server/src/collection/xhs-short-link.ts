@@ -15,7 +15,12 @@ export function xhsPublicInputUrl(raw: string) {
       url.username ||
       url.password ||
       url.port ||
-      url.hash
+      (url.hash &&
+        !(
+          url.hash === '#comment-section' &&
+          url.hostname === 'www.xiaohongshu.com' &&
+          /^\/(?:explore|discovery\/item)\//.test(url.pathname)
+        ))
     )
       throw Error();
     if (url.hostname === 'xhslink.com') {
@@ -73,7 +78,11 @@ export class XhsShortLinkResolver {
   async resolve(raw: string) {
     let url = xhsPublicInputUrl(raw);
     const seen = new Set<string>();
-    for (let hop = 0; ['xhslink.com', 'xhslink.cn'].includes(url.hostname); hop++) {
+    for (
+      let hop = 0;
+      ['xhslink.com', 'xhslink.cn'].includes(url.hostname);
+      hop++
+    ) {
       if (!this.transport)
         throw new XhsSubscriptionError('XHS_SHORT_LINK_UNAVAILABLE');
       if (hop >= 5 || seen.has(url.href))

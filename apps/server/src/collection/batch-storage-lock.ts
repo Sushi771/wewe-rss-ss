@@ -59,7 +59,15 @@ export async function batchStorageLock(
     const stat = await fs.lstat(lock).catch(() => undefined);
     if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.size > 20))
       return;
-    const raw = stat ? await fs.readFile(lock, 'utf8') : '';
+    let raw: string;
+    try {
+      raw = stat ? await fs.readFile(lock, 'utf8') : '';
+    } catch (error) {
+      // The live owner may release between lstat and readFile. No claim was
+      // acquired: return to the caller's existing bounded admission loop.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
     if (stat && (!/^[1-9]\d{0,9}$/.test(raw) || alive(Number(raw)))) return;
     if (stat) await fs.unlink(lock);
     return await take();

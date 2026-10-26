@@ -1,3 +1,5 @@
+import type { Prisma } from '@prisma/client';
+import { setTimeout as waitForRate } from 'node:timers/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { XhsRequestBudget } from './xhs-request-budget';
 import { OnModuleDestroy } from '@nestjs/common';
@@ -34,6 +36,13 @@ import {
 import type { XhsConnectionStatus } from '@wewe-rss/shared';
 import { parseXhsProfile } from './xhs-profile';
 
+type RequestAdmission = {
+  budget?: XhsRequestBudget;
+  id: string;
+  failure?: unknown;
+  parent?: RequestAdmission;
+  sourceTotalCovered?: boolean;
+};
 type RuntimeOptions = {
   commentsEnabled?: () => boolean;
   enabled: () => boolean;
@@ -53,17 +62,39 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
-  private readonly budgetScope = new AsyncLocalStorage<{
-    budget: XhsRequestBudget;
-    id: string;
-    failure?: unknown;
-  }>();
+  private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
   withRequestBudget<T>(
     budget: XhsRequestBudget,
     id: string,
     work: () => Promise<T>,
+    sourceTotalCovered = false,
   ) {
-    return this.budgetScope.run({ budget, id }, work);
+    const parent = this.budgetScope.getStore();
+    // Preserve an enclosing test/operator cap; the same budget object/ID is one gate.
+    for (let scope = parent; scope; scope = scope.parent)
+      if (scope.id === id && scope.budget === budget) return work();
+    return this.budgetScope.run(
+      { budget, id, parent, sourceTotalCovered },
+      work,
+    );
+  }
+  private readonly originalLinks = new Map<
+    string,
+    Promise<import('@wewe-rss/shared').XhsOriginalLinkResult>
+  >();
+  private sourceAdmission?: (
+    alreadyBudgeted: boolean,
+  ) => Promise<(() => Promise<void>) | void>;
+  private sourceDispatch?: <T>(
+    operation: () => Promise<T>,
+    ready: (tx?: Prisma.TransactionClient) => Promise<void>,
+  ) => Promise<T>;
+  bindSourceAdmission(
+    admit: (alreadyBudgeted: boolean) => Promise<(() => Promise<void>) | void>,
+    dispatch?: XhsSubscriptionRuntime['sourceDispatch'],
+  ) {
+    this.sourceAdmission ??= admit;
+    this.sourceDispatch ??= dispatch;
   }
   private cookies?: XhsSessionCookies;
   private generation = 0;
@@ -143,17 +174,55 @@ export class XhsSubscriptionRuntime
     const generation = this.generation,
       signal = this.sessionAbort.signal;
     const admission = this.budgetScope.getStore();
-    if (admission) {
+    const scopes: RequestAdmission[] = [];
+    for (let scope = admission; scope; scope = scope.parent)
+      if (scope.budget) scopes.push(scope);
+    const totalCovered = scopes.some((scope) => scope.sourceTotalCovered);
+    const undo: Array<() => Promise<void>> = [];
+    let dispatched = false;
+    const ready = async (tx?: Prisma.TransactionClient) => {
+      for (const scope of scopes) await scope.budget!.assertReady(tx);
+      this.requireSession();
+      if (generation !== this.generation || signal.aborted)
+        return failure('XHS_SESSION_CHANGED');
+    };
+    const dispatch = () => {
+      this.requireSession();
+      if (generation !== this.generation || signal.aborted)
+        return failure('XHS_SESSION_CHANGED');
+      dispatched = true;
       try {
-        await admission.budget.admit(admission.id);
+        return operation();
       } catch (error) {
-        admission.failure = error;
-        throw error;
+        return Promise.reject(error);
       }
+    };
+    let result: T;
+    try {
+      // Reject already-known failures before any reservation, including generic operator caps.
+      for (const scope of scopes) await scope.budget!.check(scope.id);
+      if (!totalCovered && this.sourceAdmission) {
+        const release = await this.sourceAdmission(scopes.length > 0);
+        if (release) undo.push(release);
+      }
+      for (const scope of scopes)
+        undo.push(await scope.budget!.reserve(scope.id));
+      await ready();
+      result = this.sourceDispatch
+        ? await this.sourceDispatch(dispatch, ready)
+        : await dispatch();
+    } catch (error) {
+      // Only a known non-dispatch permits reservation-specific CAS rollback.
+      for (const release of dispatched ? [] : undo.reverse()) {
+        try {
+          await release();
+        } catch {
+          /* retain conservatively */
+        }
+      }
+      if (!dispatched && admission) admission.failure = error;
+      throw error;
     }
-    this.requireSession();
-    if (signal.aborted) return failure('XHS_SESSION_CHANGED');
-    const result = await operation();
     if (generation !== this.generation || signal.aborted)
       return failure('XHS_SESSION_CHANGED');
     this.requireSession();
@@ -178,6 +247,7 @@ export class XhsSubscriptionRuntime
     this.cookies = undefined;
     this.verified = false;
     this.adapter.clearAccessContext();
+    this.originalLinks.clear();
   }
   private snapshot(code?: string): XhsConnectionStatus {
     const liveEnabled = this.enabled(),
@@ -317,7 +387,11 @@ export class XhsSubscriptionRuntime
       }
     });
   }
-  private async withSession<T>(operation: () => Promise<T>) {
+  private async withSession<T>(operation: () => Promise<T>): Promise<T> {
+    if (!this.budgetScope.getStore())
+      return this.budgetScope.run({ id: '' }, () =>
+        this.withSession(operation),
+      );
     this.requireSession();
     const generation = this.generation;
     const admission = this.budgetScope.getStore();
@@ -359,8 +433,49 @@ export class XhsSubscriptionRuntime
     signal?: AbortSignal,
   ) {
     // Existing manual workflows retain their explicit reparse boundary.
-    if (this.budgetScope.getStore())
-      await this.adapter.restoreContext(authorId, noteId, signal);
+    for (let scope = this.budgetScope.getStore(); scope; scope = scope.parent) {
+      if (scope.budget) {
+        await this.adapter.restoreContext(authorId, noteId, signal);
+        return;
+      }
+    }
+  }
+  assertSourceReady() {
+    this.requireSession();
+  }
+  async waitForSourceRate(ms: number) {
+    this.requireSession();
+    try {
+      await waitForRate(ms, undefined, { signal: this.sessionAbort.signal });
+    } catch {
+      this.requireSession();
+      return failure('XHS_SESSION_CHANGED');
+    }
+    this.requireSession();
+  }
+  cachedOriginalLink(authorId: string, noteId: string) {
+    this.requireSession();
+    return this.adapter.cachedOriginalLink(authorId, noteId);
+  }
+  prepareOriginalLink(
+    authorId: string,
+    noteId: string,
+    refreshContext = false,
+  ) {
+    this.requireSession();
+    const key = JSON.stringify([
+      this.generation,
+      authorId,
+      noteId,
+      refreshContext,
+    ]);
+    const active = this.originalLinks.get(key);
+    if (active) return active;
+    const pending = this.withSession(() =>
+      this.adapter.prepareOriginalLink(authorId, noteId, refreshContext),
+    ).finally(() => this.originalLinks.delete(key));
+    this.originalLinks.set(key, pending);
+    return pending;
   }
   resolve(url: string) {
     return this.withSession(() => this.adapter.resolve(url));

@@ -17,6 +17,8 @@ function load(file, imports = {}) {
   const mod = { exports: {} };
   new Function('require', 'exports', 'module', output)(
     (name) => {
+      if (name === '@web/components/AppOverlays' && imports['@nextui-org/react'])
+        return imports['@nextui-org/react'];
       if (!(name in imports)) throw Error(`Unexpected dependency ${name}`);
       return imports[name];
     },
@@ -59,6 +61,7 @@ test('shared transport logger excludes signed-link resolution and session fields
   for (const direction of ['up', 'down']) {
     for (const route of [
       'xiaohongshu.resolveSubscription',
+      'xiaohongshu.prepareOriginalLink',
       'xiaohongshu.connectSession',
     ])
       assert.equal(
@@ -493,6 +496,8 @@ function fixture(options = {}) {
     '@web/components/ManagementFolders': 'ManagementFolders',
     '@web/components/XhsWholeCreator': 'XhsWholeCreator',
     '@web/components/XhsTaskRecovery': Recovery,
+    '@web/components/XhsOriginalLink': 'XhsOriginalLink',
+    '@web/components/XhsSourceBudget': 'XhsSourceBudget',
     '@web/components/XhsEngagement': engagement,
     '@web/utils/xhs-note-presentation': load(
       'apps/web/src/utils/xhs-note-presentation.ts',
@@ -1319,6 +1324,44 @@ test('moving group membership invalidates cached note scope and clears stale sel
     );
   } finally {
     f.dispose();
+  }
+});
+
+test('recent task history starts collapsed on each entry and only explicit disclosure opens it', async () => {
+  for (let entry = 0; entry < 2; entry++) {
+    const f = fixture({
+      recentTasks: [
+        {
+          ...status('completed'),
+          taskId: 'history-only',
+          creatorId: 'creator-a',
+          resumable: false,
+        },
+      ],
+    });
+    try {
+      await f.start(true);
+      await tick();
+      const region = f
+        .render()
+        .find(
+          (node) =>
+            node.type === 'section' &&
+            node.props['aria-label'] === '最近笔记任务',
+        );
+      assert.ok(region);
+      assert.equal(region.props.children.at(-1).props.open, false);
+      f.find('summary', '查看最近任务').props.onClick({ preventDefault() {} });
+      assert.ok(f.find('summary', '收起最近任务'));
+      assert.equal(
+        f.calls.some(([name]) =>
+          ['resumeTask', 'refresh', 'downloadNotes'].includes(name),
+        ),
+        false,
+      );
+    } finally {
+      f.dispose();
+    }
   }
 });
 

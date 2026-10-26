@@ -1,3 +1,4 @@
+import { Modal, Tooltip } from '@web/components/AppOverlays';
 import {
   ContentExportScope,
   SubscriptionSearch,
@@ -12,14 +13,12 @@ import OperationNotice, {
 import { exportArticleBatches } from '@web/utils/export-article-batches';
 import {
   Button,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,
   ModalHeader,
   Switch,
   Textarea,
-  Tooltip,
   useDisclosure,
   Checkbox,
   Input,
@@ -976,7 +975,7 @@ const Feeds = () => {
             ? '部分内容已保存'
             : currentUpdate
               ? '已读取当前内容'
-              : '阅读本地存量';
+              : '查看已存目录';
 
   const handleExportOpml = async (ev) => {
     ev.preventDefault();

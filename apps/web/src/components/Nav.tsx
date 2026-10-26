@@ -1,3 +1,4 @@
+import { Tooltip } from '@web/components/AppOverlays';
 import {
   Button,
   Image,
@@ -6,7 +7,6 @@ import {
   NavbarBrand,
   NavbarContent,
   NavbarItem,
-  Tooltip,
 } from '@nextui-org/react';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import { UserIcon } from './UserIcon';

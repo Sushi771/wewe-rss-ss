@@ -11,6 +11,13 @@ export class XhsSqliteBudgetStore implements XhsBudgetStore {
       RETURNING id`;
     return rows.length === 1;
   }
+  async rollback(id: string, before: XhsBudget, reservedAt: number) {
+    const rows = await this.db.$queryRaw<Array<{ id: string }>>`
+      UPDATE xhs_request_budgets SET used=${before.used}, next_at=${BigInt(before.nextAt)}
+      WHERE id=${id} AND used=${before.used + 1}
+        AND next_at=${BigInt(reservedAt + before.intervalMs)} RETURNING id`;
+    return rows.length === 1;
+  }
   async read(id: string): Promise<XhsBudget | null> {
     const rows = await this.db.$queryRaw<
       Array<{

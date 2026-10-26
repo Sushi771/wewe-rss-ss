@@ -298,14 +298,94 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     await queue().tick();
     expect(fetch).toHaveBeenCalledTimes(3);
   });
+  it.each([0, 1, 600])(
+    'queries volume space once per capacity assessment with %i cache files',
+    async (count) => {
+      deps.canFetch = () => false;
+      const worker = queue();
+      await worker.tick();
+      const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
+      for (let n = 0; n < count; n++)
+        await fs.writeFile(
+          path.join(folder, `${n.toString(16).padStart(64, '0')}.json`),
+          '{}',
+        );
+      const capacity = worker as unknown as {
+        capacity(required: number): Promise<void>;
+      };
+      const disk = jest.spyOn(fs, 'statfs');
+      try {
+        await capacity.capacity(14_000_000);
+        expect(disk).toHaveBeenCalledTimes(1);
+        expect(disk).toHaveBeenCalledWith(folder, { bigint: true });
+        expect(fetch).not.toHaveBeenCalled();
+      } finally {
+        disk.mockRestore();
+      }
+    },
+  );
+  it('exits on the byte quota before querying volume space or spending HTTP', async () => {
+    deps.canFetch = () => false;
+    const worker = queue();
+    await worker.tick();
+    const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
+    for (let n = 0; n < 9; n++)
+      await fs.writeFile(
+        path.join(folder, `${n.toString(16).padStart(64, '0')}.json`),
+        Buffer.alloc(14_000_000),
+      );
+    const capacity = worker as unknown as {
+      capacity(required: number): Promise<void>;
+    };
+    const disk = jest.spyOn(fs, 'statfs');
+    try {
+      await expect(capacity.capacity(14_000_000)).rejects.toThrow(
+        'MEDIA_STORAGE_CAPACITY',
+      );
+      expect(disk).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      disk.mockRestore();
+    }
+  });
+  it.each([-1, 0])(
+    'preserves the 4 GiB plus requested reservation disk boundary (delta %i)',
+    async (delta) => {
+      deps.canFetch = () => false;
+      const worker = queue();
+      await worker.tick();
+      const actual = await fs.statfs(root, { bigint: true });
+      const capacity = worker as unknown as {
+        capacity(required: number): Promise<void>;
+      };
+      const disk = jest.spyOn(fs, 'statfs').mockResolvedValue({
+        ...actual,
+        bsize: 1n,
+        bavail: BigInt(4 * 1024 ** 3 + 14_000_000 + delta),
+      });
+      try {
+        if (delta < 0)
+          await expect(capacity.capacity(14_000_000)).rejects.toThrow(
+            'MEDIA_STORAGE_CAPACITY',
+          );
+        else
+          await expect(capacity.capacity(14_000_000)).resolves.toBeUndefined();
+        expect(disk).toHaveBeenCalledTimes(1);
+        expect(fetch).not.toHaveBeenCalled();
+      } finally {
+        disk.mockRestore();
+      }
+    },
+  );
+
   it('pauses before HTTP when its own cache is full and keeps the queue readable', async () => {
     deps.canFetch = () => false;
     await queue().tick();
     const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
-    for (let n = 0; n < 256; n++)
+    for (let n = 0; n < 9; n++)
       await fs.writeFile(
         path.join(folder, `${n.toString(16).padStart(64, '0')}.json`),
-        '{}',
+        Buffer.alloc(14_000_000),
       );
     deps.canFetch = () => true;
     await queue().tick();
