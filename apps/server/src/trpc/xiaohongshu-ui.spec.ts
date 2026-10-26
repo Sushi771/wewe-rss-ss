@@ -33,6 +33,21 @@ vm.runInNewContext(
   { exports: batchExports, Error },
   { timeout: 1000 },
 );
+const presentationExports: Record<string, any> = {};
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync(
+      path.resolve(
+        __dirname,
+        '../../../web/src/utils/xhs-note-presentation.ts',
+      ),
+      'utf8',
+    ),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS } },
+  ).outputText,
+  { exports: presentationExports },
+  { timeout: 1000 },
+);
 const expressions: Record<string, string> = {};
 const messageExports: Record<string, unknown> = {};
 vm.runInNewContext(
@@ -567,19 +582,21 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
         )
         .map((n: any) => n.id),
     ).toEqual(['image']);
-    const status = evaluate('noteStatus', {});
+    const status = presentationExports.noteArchiveStatus;
     expect(status({ status: 'complete', kind: 'video' })).toContain('未验证');
     expect(status({ status: 'video-skipped', kind: 'video' })).toContain(
       '未归档',
     );
-    const html = taskExports.noteReaderHtml({
-      text: 'Saved body <script> & symbols',
-      images: ['data:image/png;base64,c3ludGhldGlj'],
-    });
-    expect(html).toContain('Saved body &lt;script&gt; &amp; symbols');
-    expect(html).toContain('src="data:image/png;base64,c3ludGhldGlj"');
-    expect(text).toContain('noteReaderHtml(body.data)');
-    expect(text).toContain('<ArticleReader');
+    expect(
+      presentationExports.xhsOriginalNoteUrl(
+        '["xiaohongshu","note","synthetic"]',
+      ),
+    ).toBe('https://www.xiaohongshu.com/explore/synthetic');
+    expect(taskExports.noteReaderHtml).toBeUndefined();
+    expect(text).not.toContain('noteReaderHtml');
+    expect(text).not.toContain('<ArticleReader');
+    expect(text).not.toContain('trpc.xiaohongshu.body');
+    expect(text).toContain('href={xhsOriginalNoteUrl(note.id)}');
     expect(text).not.toMatch(
       /<video\b|video\/mp4;base64|dangerouslySetInnerHTML/,
     );
@@ -636,7 +653,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       askEveryTime: false,
     });
   });
-  it('retains real navigation, groups, date filtering, cached preview and primary local-save actions', () => {
+  it('retains real navigation, groups, date filtering, original links and primary local-save actions', () => {
     expect(
       fs.readFileSync(
         path.resolve(__dirname, '../../../web/src/App.tsx'),
@@ -653,7 +670,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       '<ManagementFolders',
       '<ArticleDateFilter',
       'dateSelectionFilter(dateSelection)',
-      'trpc.xiaohongshu.body.useQuery',
+      'href={xhsOriginalNoteUrl(note.id)}',
       'trpc.xiaohongshu.export.useMutation',
       'compact-list',
       '<SubscriptionToolbar',

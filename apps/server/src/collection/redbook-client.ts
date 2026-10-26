@@ -1,9 +1,11 @@
 import { buildGetUri, signMainApi, USER_AGENT } from './redbook-vendor/signing';
+import { redbookErrorSummary } from './redbook-error-summary';
 
 export type RedbookPauseReason =
   | 'configuration'
   | 'authentication'
   | 'verification'
+  | 'unknown_rejection'
   | 'permission'
   | 'signature'
   | 'rate_limit'
@@ -82,13 +84,15 @@ function checkedId(value: string): string {
 
 function reasonFor(
   status: number,
-  code?: unknown,
+  body?: unknown,
 ): RedbookPauseReason | undefined {
-  if (status === 461 || status === 471) return 'verification';
+  const { code, msg } = redbookErrorSummary(body);
   if (status === 406 || code === 300015) return 'signature';
   if (status === 429 || code === 300012) return 'rate_limit';
   if (status === 401 || code === -100 || code === -101) return 'authentication';
   if (status === 403 || code === -104) return 'permission';
+  if (msg === 'captcha required') return 'verification';
+  if (status === 461 || status === 471) return 'unknown_rejection';
   return undefined;
 }
 
@@ -237,7 +241,7 @@ export class RedbookClient {
       throw new RedbookPauseError('transport');
     }
     if (response.url !== HOST + uri) throw new RedbookPauseError('transport');
-    const statusReason = reasonFor(response.status);
+    const statusReason = reasonFor(response.status, response.body);
     if (statusReason) throw new RedbookPauseError(statusReason);
     if (
       !Number.isInteger(response.status) ||
@@ -249,8 +253,6 @@ export class RedbookClient {
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope))
       throw new RedbookPauseError('response');
     const data = envelope as Record<string, unknown>;
-    const codeReason = reasonFor(response.status, data.code);
-    if (codeReason) throw new RedbookPauseError(codeReason);
     if (
       data.success !== true ||
       (data.code !== undefined && data.code !== 0) ||

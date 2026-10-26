@@ -3,6 +3,10 @@ import { IncomingMessage, ClientRequest } from 'node:http';
 import { Readable, Transform } from 'node:stream';
 import { RedbookPauseError, RedbookTransport } from './redbook-client';
 import {
+  redbookErrorSummary,
+  REDBOOK_ERROR_MAX_BYTES,
+} from './redbook-error-summary';
+import {
   allowedRedbookMediaUrl,
   RedbookMediaTransport,
 } from './redbook-response';
@@ -92,6 +96,7 @@ export function createRedbookHttpTransport(
         done = false;
       const chunks: Buffer[] = [];
       let length = 0;
+      let errorStatus: number | undefined;
       const clear = () => {
         clearTimeout(timer);
         input.signal?.removeEventListener('abort', abort);
@@ -104,7 +109,11 @@ export function createRedbookHttpTransport(
         clear();
         res?.destroy();
         req?.destroy();
-        reject(stop());
+        // Once an HTTP rejection is known, preserve its stop semantics even if
+        // its optional diagnostic body is invalid, slow, interrupted or huge.
+        if (errorStatus !== undefined)
+          resolve({ status: errorStatus, url: input.url, body: {} });
+        else reject(stop());
       };
       const abort = () => fail();
       try {
@@ -118,17 +127,18 @@ export function createRedbookHttpTransport(
               return;
             }
             const status = res.statusCode ?? 502;
-            // Preserve only status for non-success responses; never retain platform
-            // error text, verification URLs or echoing request parameters.
-            if (status < 200 || status >= 300) {
-              done = true;
-              clear();
-              res.destroy();
-              resolve({ status, url: input.url, body: {} });
+            const rejected = status < 200 || status >= 300;
+            if (rejected) errorStatus = status;
+            // Redirects never need body inspection and are never followed.
+            if (status >= 300 && status < 400) {
+              fail();
               return;
             }
+            const limit = rejected
+              ? Math.min(input.maxResponseBytes, REDBOOK_ERROR_MAX_BYTES)
+              : input.maxResponseBytes;
             try {
-              contentLength(res, input.maxResponseBytes);
+              contentLength(res, limit);
               if (
                 !/^application\/json(?:;|$)/i.test(
                   String(res.headers['content-type'] ?? ''),
@@ -142,7 +152,7 @@ export function createRedbookHttpTransport(
             res.on('data', (part: Buffer) => {
               if (done) return;
               length += part.length;
-              if (length > input.maxResponseBytes) {
+              if (length > limit) {
                 part.fill(0);
                 fail();
                 return;
@@ -160,7 +170,11 @@ export function createRedbookHttpTransport(
                 const body: unknown = JSON.parse(bytes.toString('utf8'));
                 done = true;
                 clear();
-                resolve({ status, url: input.url, body });
+                resolve({
+                  status,
+                  url: input.url,
+                  body: rejected ? redbookErrorSummary(body) : body,
+                });
               } catch {
                 fail();
               } finally {

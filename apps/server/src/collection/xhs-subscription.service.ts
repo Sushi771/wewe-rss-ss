@@ -77,6 +77,7 @@ type Task = XhsSubscriptionTask & {
   listFinished?: boolean;
   pageLimit?: number;
   localReceipts?: Record<string, { savedAt: number; supplementStatus: string }>;
+  localArchives?: Record<string, { savedAt: number }>;
   localFilesSaved?: number;
   localFilesReused?: number;
 };
@@ -503,6 +504,21 @@ export class XhsSubscriptionService implements OnModuleInit {
       this.uncertain.get(input.taskId) ?? (await this.loadTask(input.taskId));
     return this.view(t);
   }
+  /** Confirmed native full-archive saves, independently of an optional interaction companion. */
+  async confirmedLocalArchives(input: { taskId: string }) {
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId))
+      return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const task = await this.loadTask(input.taskId);
+    return Object.entries(task.localArchives ?? {})
+      .filter(
+        ([id, receipt]) =>
+          ['completed', 'skipped'].includes(task.items[id]) &&
+          Number.isSafeInteger(receipt.savedAt) &&
+          receipt.savedAt > 0,
+      )
+      .map(([noteId, receipt]) => ({ noteId, ...receipt }));
+  }
   /** Durable positive saver receipts only; cache completeness and video skips are not evidence. */
   async confirmedLocalSaves(input: { taskId: string }) {
     await this.reconcile(input.taskId);
@@ -779,6 +795,9 @@ export class XhsSubscriptionService implements OnModuleInit {
                 t.snapshotsSaved = (t.snapshotsSaved ?? 0) + 1;
               if (saved.mediaComplete === false)
                 return reject('XHS_LOCAL_MEDIA_INCOMPLETE');
+              // Successful native body/media publication does not require a companion.
+              t.localArchives ??= {};
+              t.localArchives[id] = { savedAt: Date.now() };
               if (
                 saved.supplement &&
                 ['new', 'retained', 'conflict-version'].includes(

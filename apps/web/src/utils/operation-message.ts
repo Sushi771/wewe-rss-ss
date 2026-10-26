@@ -12,6 +12,11 @@ export function failureMessage(
   fallback = '操作未完成，请先查看状态和详情。',
 ) {
   const raw = operationDiagnostic(error);
+  if (raw.includes('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'))
+    return '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。';
+  if (raw.includes('XHS_SOURCE_VERIFICATION_BLOCKED'))
+    return '来源明确提示需要验证，但当前没有可确认的验证入口；采集已停止，请先核查来源状态。';
+
   if (/401|UNAUTHORIZED|无权限|未登录|登录.*过期/.test(raw))
     return '登录已失效或无权操作，请检查账号。';
   if (/403|FORBIDDEN|权限|授权/.test(raw))

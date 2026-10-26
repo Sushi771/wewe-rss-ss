@@ -51,6 +51,8 @@ export function parseSitesCommand(raw) {
   const keys = ['action', 'platform'];
   const list = ['authors', 'items'].includes(raw.action);
   const content = ['body', 'download'].includes(raw.action);
+  // XHS reading is an external link; local native archival is a separate API.
+  if (content && raw.platform === 'xiaohongshu') throw error('BAD_REQUEST');
   if (
     ['capability', 'refresh'].includes(raw.action) &&
     raw.platform === 'wechat'
@@ -512,31 +514,23 @@ export function createLocalSitesGateway({
   const binding = (c) =>
     JSON.stringify([c.platform, c.authorId, c.source ?? null]);
   async function readBody(command) {
-    let result;
-    if (command.platform === 'xiaohongshu') {
-      result = await caller.xiaohongshu.body({
-        creatorId: command.authorId,
-        noteId: command.itemId,
-      });
-    } else {
-      // This is the original cache-only lookup, never exportMarkdown/retryBody.
-      const row = await caller.article.byId(command.itemId);
-      if (row?.id !== command.itemId || row.mpId !== command.authorId)
-        throw error('NOT_FOUND');
-      if (!row.contentHtml || row.lastBodyStatus === 'unavailable')
-        throw error('CACHE_UNAVAILABLE');
-      if (typeof projectWechatCachedBody !== 'function')
-        throw error('CACHE_ADAPTER_UNCONFIGURED');
-      // Future server binding reuses verifiedDownloadBody + cached text extraction.
-      // It receives only cached HTML; no caller, URL, file path or image fetcher.
-      const decoded = await projectWechatCachedBody(row.contentHtml);
-      result = {
-        title: row.title,
-        publishTime: row.publishTime,
-        text: decoded?.text,
-        images: decoded?.images,
-      };
-    }
+    // This is the original cache-only lookup, never exportMarkdown/retryBody.
+    const row = await caller.article.byId(command.itemId);
+    if (row?.id !== command.itemId || row.mpId !== command.authorId)
+      throw error('NOT_FOUND');
+    if (!row.contentHtml || row.lastBodyStatus === 'unavailable')
+      throw error('CACHE_UNAVAILABLE');
+    if (typeof projectWechatCachedBody !== 'function')
+      throw error('CACHE_ADAPTER_UNCONFIGURED');
+    // Future server binding reuses verifiedDownloadBody + cached text extraction.
+    // It receives only cached HTML; no caller, URL, file path or image fetcher.
+    const decoded = await projectWechatCachedBody(row.contentHtml);
+    const result = {
+      title: row.title,
+      publishTime: row.publishTime,
+      text: decoded?.text,
+      images: decoded?.images,
+    };
     return cachedBody(command, result);
   }
   async function refresh(command, context) {

@@ -1,6 +1,6 @@
 import type { XhsEngagementView, XhsMetricSnapshot } from '@wewe-rss/shared';
 import { trpc } from '@web/utils/trpc';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export function XhsMetricLine({
   snapshot,
@@ -9,20 +9,25 @@ export function XhsMetricLine({
   snapshot: XhsMetricSnapshot | null;
   creator?: boolean;
 }) {
-  if (!snapshot || !Object.values(snapshot.values).some((v) => v !== null))
-    return null;
+  if (creator && !snapshot) return null;
   const fields = creator
     ? { fans: '粉丝', following: '关注' }
     : { likes: '赞', collects: '收藏', shares: '分享', comments: '评论' };
   return (
     <span
       className="text-default-500 text-xs"
-      title={`历史快照 · ${new Date(snapshot.collectedAt).toLocaleString()} · 真实响应待核实`}
+      title={`历史快照 · ${snapshot ? new Date(snapshot.collectedAt).toLocaleString() : '未保存'} · ${snapshot?.evidence === 'verified-response' ? '已核响应' : '响应契约待核实'}`}
     >
       {Object.entries(fields)
+        .filter(
+          ([key]) =>
+            !creator ||
+            key !== 'following' ||
+            snapshot?.values.following != null,
+        )
         .map(
           ([key, label]) =>
-            `${label} ${snapshot.values[key] === null || snapshot.values[key] === undefined ? '未知' : new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(snapshot.values[key]!)}`,
+            `${label} ${snapshot?.values[key] === null || snapshot?.values[key] === undefined ? '未知' : new Intl.NumberFormat('zh-CN').format(snapshot.values[key]!)}`,
         )
         .join(' · ')}
     </span>
@@ -31,13 +36,11 @@ export function XhsMetricLine({
 export function XhsEngagementPanel({
   creatorId,
   noteId,
-  initial,
   canCollectComments = false,
   canRefreshMetrics = false,
 }: {
   creatorId: string;
   noteId: string;
-  initial: XhsEngagementView;
   canCollectComments?: boolean;
   canRefreshMetrics?: boolean;
 }) {
@@ -49,15 +52,42 @@ export function XhsEngagementPanel({
   const [maxPages, setMaxPages] = useState(1),
     [maxItems, setMaxItems] = useState(100);
   const [error, setError] = useState('');
-  const [open, setOpen] = useState(false),
-    [offset, setOffset] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const alive = useRef(true),
+    operation = useRef(false);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   const saved = trpc.xiaohongshu.engagement.useQuery(
     { creatorId, noteId, offset, limit: 200 },
-    { enabled: open, retry: false, refetchOnWindowFocus: false },
+    { retry: false, refetchOnWindowFocus: false, keepPreviousData: false },
   );
-  const view = saved.data ?? initial;
+  const view: XhsEngagementView = saved.data ?? {
+    metrics: null,
+    creatorMetrics: null,
+    comments: [],
+    windows: [],
+    totalSaved: 0,
+    returned: 0,
+    offset,
+  };
+  const roots = view.comments.filter((c) => !c.rootId);
+  const comments = [
+    ...roots.flatMap((root) => [
+      root,
+      ...view.comments.filter((c) => c.rootId === root.id),
+    ]),
+    ...view.comments.filter(
+      (c) => c.rootId && !roots.some((root) => root.id === c.rootId),
+    ),
+  ];
   const busy = collect.isLoading || refresh.isLoading;
   const collectWindow = async (rootId?: string, restart = false) => {
+    if (operation.current || !alive.current) return;
+    operation.current = true;
     setError('');
     try {
       await collect.mutateAsync({
@@ -68,14 +98,17 @@ export function XhsEngagementPanel({
         maxItems,
         restart,
       });
+      if (!alive.current) return;
       await utils.xiaohongshu.engagement.invalidate({ creatorId, noteId });
-      await utils.xiaohongshu.body.invalidate({ creatorId, noteId });
     } catch (cause) {
+      if (!alive.current) return;
       setError(
         cause instanceof Error
           ? cause.message
           : '评论采集未完成，已保存范围保留。',
       );
+    } finally {
+      operation.current = false;
     }
   };
   return (
@@ -83,84 +116,107 @@ export function XhsEngagementPanel({
       className="border-default-200 space-y-3 border-t py-4"
       aria-label="小红书保存的互动数据"
     >
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <button
-          disabled={!canRefreshMetrics || busy}
-          onClick={async () => {
-            setError('');
-            try {
-              await refresh.mutateAsync({ creatorId, noteId });
-              await Promise.all([
-                utils.xiaohongshu.body.invalidate({ creatorId, noteId }),
-                utils.xiaohongshu.engagement.invalidate({ creatorId, noteId }),
-                utils.xiaohongshu.notes.invalidate(),
-              ]);
-            } catch (cause) {
-              setError(
-                cause instanceof Error
-                  ? cause.message
-                  : '快照刷新失败；原数据保留。',
-              );
-            }
-          }}
-        >
-          更新互动快照
-        </button>
-        <label>
-          本次最多{' '}
-          <select
-            aria-label="评论页数上限"
-            value={maxPages}
-            disabled={busy}
-            onChange={(e) => setMaxPages(Number(e.target.value))}
+      <h2 className="text-sm font-semibold">互动与评论</h2>
+      <XhsMetricLine snapshot={view.metrics} />
+      <details className="text-xs">
+        <summary className="cursor-pointer">采集操作</summary>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <button
+            disabled={!canRefreshMetrics || busy}
+            onClick={async () => {
+              if (operation.current || !alive.current) return;
+              operation.current = true;
+              setError('');
+              try {
+                await refresh.mutateAsync({ creatorId, noteId });
+                if (!alive.current) return;
+                await Promise.all([
+                  utils.xiaohongshu.engagement.invalidate({
+                    creatorId,
+                    noteId,
+                  }),
+                  utils.xiaohongshu.notes.invalidate(),
+                ]);
+              } catch (cause) {
+                if (!alive.current) return;
+                setError(
+                  cause instanceof Error
+                    ? cause.message
+                    : '快照刷新失败；原数据保留。',
+                );
+              } finally {
+                operation.current = false;
+              }
+            }}
           >
-            {[1, 2, 5].map((n) => (
-              <option key={n} value={n}>
-                {n} 页
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <select
-            aria-label="评论条数上限"
-            value={maxItems}
-            disabled={busy}
-            onChange={(e) => setMaxItems(Number(e.target.value))}
-          >
-            {[50, 100, 200].map((n) => (
-              <option key={n} value={n}>
-                {n} 条
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          disabled={!canCollectComments || busy}
-          onClick={() =>
-            void collectWindow(
-              undefined,
-              view.windows.some(
-                (w) => w.scope === 'top' && w.state === 'returned-end',
-              ),
-            )
-          }
-        >
-          {busy
-            ? '处理中'
-            : view.windows.some(
+            更新互动快照
+          </button>
+          <label>
+            本次最多{' '}
+            <select
+              aria-label="评论页数上限"
+              value={maxPages}
+              disabled={busy}
+              onChange={(e) => setMaxPages(Number(e.target.value))}
+            >
+              {[1, 2, 5].map((n) => (
+                <option key={n} value={n}>
+                  {n} 页
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <select
+              aria-label="评论条数上限"
+              value={maxItems}
+              disabled={busy}
+              onChange={(e) => setMaxItems(Number(e.target.value))}
+            >
+              {[50, 100, 200].map((n) => (
+                <option key={n} value={n}>
+                  {n} 条
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            disabled={!canCollectComments || busy}
+            onClick={() =>
+              void collectWindow(
+                undefined,
+                view.windows.some(
                   (w) => w.scope === 'top' && w.state === 'returned-end',
-                )
-              ? '从首更新顶层评论'
-              : '保存/继续顶层评论'}
-        </button>
-      </div>
-      <p className="text-default-500 text-xs">
-        {canCollectComments
-          ? '仅本次显式获取顶层范围；楼中回复需逐楼操作。响应契约尚待真实验证。'
-          : '评论采集默认关闭；响应契约待真实验证。'}
-        新增本地评论请再次保存；变化会生成“互动与评论”附页，已有正文保留。
-      </p>
+                ),
+              )
+            }
+          >
+            {busy
+              ? '处理中'
+              : view.windows.some(
+                    (w) => w.scope === 'top' && w.state === 'returned-end',
+                  )
+                ? '从首更新顶层评论'
+                : '保存/继续顶层评论'}
+          </button>
+        </div>
+        <p className="text-default-500 text-xs">
+          {canCollectComments
+            ? '仅本次显式获取顶层范围；楼中回复需逐楼操作。响应契约尚待真实验证。'
+            : '评论采集默认关闭；响应契约待真实验证。'}
+          新增本地评论请再次保存；变化会生成“互动与评论”附页，已有正文保留。
+        </p>
+      </details>
+      {saved.isLoading && (
+        <p role="status" className="text-xs">
+          正在读取本地互动与评论…
+        </p>
+      )}
+      {saved.error && (
+        <p role="alert" className="text-xs">
+          本地互动与评论读取失败，正文不受影响。
+        </p>
+      )}
       {error && (
         <p role="alert" className="text-xs">
           {error}
@@ -169,11 +225,12 @@ export function XhsEngagementPanel({
       {view.metrics &&
         Object.values(view.metrics.values).some((v) => v !== null) && (
           <div>
-            <XhsMetricLine snapshot={view.metrics} />
             <p className="text-default-500 text-xs">
               历史快照 · 采集于{' '}
               {new Date(view.metrics.collectedAt).toLocaleString()} ·
-              公开源码契约，真实响应待核实
+              {view.metrics.evidence === 'verified-response'
+                ? '已核响应'
+                : '响应契约待核实'}
             </p>
           </div>
         )}
@@ -187,8 +244,8 @@ export function XhsEngagementPanel({
             </p>
           </aside>
         )}
-      {(view.totalSaved > 0 || view.windows.length > 0) && (
-        <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+      {view.totalSaved > 0 || view.windows.length > 0 ? (
+        <details>
           <summary className="cursor-pointer text-sm">
             已保存评论 {view.totalSaved} 条
           </summary>
@@ -208,11 +265,9 @@ export function XhsEngagementPanel({
               {w.code ? ` · ${w.code}` : ''}
             </p>
           ))}
-          {saved.error && (
-            <p role="alert">已保存评论读取失败，可重新展开重试。</p>
-          )}
+          {saved.error && <p role="alert">已保存评论读取失败。</p>}
           <ol className="space-y-4 py-3">
-            {view.comments.map((c) => (
+            {comments.map((c) => (
               <li
                 key={c.id}
                 className={
@@ -221,17 +276,28 @@ export function XhsEngagementPanel({
               >
                 <p className="text-default-500 text-xs">
                   {c.authorName ?? '未知作者'} · 赞 {c.likes ?? '未知'} ·{' '}
-                  {c.publishedAt === null
+                  {c.publishedAt == null
                     ? '发布时间未知'
                     : new Date(c.publishedAt).toLocaleString()}
                 </p>
                 {c.rootId && (
                   <p className="text-default-500 break-all text-xs">
-                    所属根评论 {c.rootId}；精确回复对象{c.parentId ?? '未知'}
+                    回复于根评论{' '}
+                    {view.comments.find((root) => root.id === c.rootId)
+                      ?.authorName ?? c.rootId}
+                    ；精确回复对象{' '}
+                    {c.parentId
+                      ? (view.comments.find(
+                          (parent) => parent.id === c.parentId,
+                        )?.authorName ?? c.parentId)
+                      : '未知'}
                   </p>
                 )}
                 <p className="whitespace-pre-wrap break-words text-sm">
                   {c.content}
+                </p>
+                <p className="text-default-500 text-xs">
+                  采集于 {new Date(c.collectedAt).toLocaleString()}
                 </p>
                 {!c.rootId && (
                   <button
@@ -267,6 +333,13 @@ export function XhsEngagementPanel({
             )}
           </div>
         </details>
+      ) : (
+        !saved.isLoading &&
+        !saved.error && (
+          <p className="text-default-500 text-xs">
+            未保存评论；评论覆盖范围未知。
+          </p>
+        )
       )}
     </section>
   );
@@ -287,25 +360,38 @@ export function XhsCreatorMetricRefresh({
   const utils = trpc.useUtils(),
     refresh = trpc.xiaohongshu.refreshMetrics.useMutation({ retry: false });
   const [error, setError] = useState('');
+  const alive = useRef(true),
+    operation = useRef(false);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   return (
     <div className="px-3 py-1 text-xs">
       <button
         disabled={!enabled || refresh.isLoading}
         onClick={async () => {
+          if (operation.current || !alive.current) return;
+          operation.current = true;
           setError('');
           try {
             await refresh.mutateAsync({ creatorId });
+            if (!alive.current) return;
             await Promise.all([
               utils.xiaohongshu.list.invalidate(),
-              utils.xiaohongshu.body.invalidate(),
               utils.xiaohongshu.engagement.invalidate(),
             ]);
           } catch (cause) {
+            if (!alive.current) return;
             setError(
               cause instanceof Error
                 ? cause.message
                 : '资料快照更新失败；原数据保留。',
             );
+          } finally {
+            operation.current = false;
           }
         }}
       >

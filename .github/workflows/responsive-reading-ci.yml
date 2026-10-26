@@ -70,3 +70,8 @@ jobs:
           scripts/article-date-shortcuts-browser.test.cjs
           scripts/feed-sidebar-layout.test.cjs
           scripts/subscription-dialog-layout.test.cjs
+
+      - name: Original note links and independent interaction panel
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-note-data-browser.test.cjs

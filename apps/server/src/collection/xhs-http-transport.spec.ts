@@ -5,7 +5,11 @@ import {
   createXhsMediaTransport,
   XhsHttpsRequest,
 } from './xhs-http-transport';
-import { RedbookClient, RedbookRequest } from './redbook-client';
+import {
+  RedbookClient,
+  RedbookPauseError,
+  RedbookRequest,
+} from './redbook-client';
 
 it('constructs only the reviewed bounded comment read routes with no retry or implicit paging (mock only)', async () => {
   const transport = jest.fn(async (request) => ({
@@ -304,4 +308,177 @@ describe('separate bounded CDN stream (injected synthetic request only)', () => 
     await expect(read).rejects.toThrow('transport');
     expect(f.destroy).toHaveBeenCalled();
   });
+});
+import {
+  redbookErrorSummary,
+  REDBOOK_ERROR_MAX_BYTES,
+} from './redbook-error-summary';
+import { xhsPublicCode } from './xhs-subscription-errors';
+
+describe('bounded HTTP rejection classification (synthetic only)', () => {
+  it.each([
+    [461, {}, 'unknown_rejection'],
+    [471, { message: 'access denied' }, 'unknown_rejection'],
+    [461, { code: -100 }, 'authentication'],
+    [471, { code: -101 }, 'authentication'],
+    [401, { message: 'captcha required' }, 'authentication'],
+    [461, { msg: '请完成验证码验证' }, 'verification'],
+    [471, { message: 'captcha required' }, 'verification'],
+    [200, { success: false, code: -104 }, 'permission'],
+    [
+      461,
+      { msg: 'captcha required https://evil.test/?token=synthetic-secret' },
+      'unknown_rejection',
+    ],
+    [
+      471,
+      {
+        verification_url:
+          'https://www.xiaohongshu.com/?xsec_token=synthetic-secret',
+      },
+      'unknown_rejection',
+    ],
+  ])(
+    'classifies %s using only explicit allowlisted evidence',
+    async (status, body, reason) => {
+      const f = httpsFixture({
+        status: status as number,
+        parts: [Buffer.from(JSON.stringify(body))],
+      });
+      const client = new RedbookClient({
+        transport: createRedbookHttpTransport(f.request),
+        cookies: () => ({ a1: 'synthetic', web_session: 'synthetic' }),
+      });
+      const error = await client
+        .getSubComments('synthetic-note', 'synthetic-root')
+        .catch((error) => error);
+      expect(error).toBeInstanceOf(RedbookPauseError);
+      if (!(error instanceof RedbookPauseError))
+        throw new Error('expected pause');
+      expect(error.reason).toBe(reason);
+      expect(xhsPublicCode(error, 'fallback')).toBe(
+        `XHS_SOURCE_${String(reason).toUpperCase()}_BLOCKED`,
+      );
+      expect(JSON.stringify(error) + String(error)).not.toMatch(
+        /synthetic-secret|evil\.test|xsec_token/,
+      );
+      expect(f.raw).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([
+    [
+      { 'content-type': 'text/html' },
+      '<html>captcha required synthetic-secret</html>',
+    ],
+    [{ 'content-type': 'application/json' }, '{"msg":"captcha required"'],
+    [
+      { 'content-type': 'application/json' },
+      JSON.stringify({
+        msg: 'captcha required',
+        echo: 'synthetic-secret'.repeat(1000),
+      }),
+    ],
+    [
+      {
+        'content-type': 'application/json',
+        'content-length': String(REDBOOK_ERROR_MAX_BYTES + 1),
+      },
+      '{}',
+    ],
+  ])(
+    'keeps rejection status with no diagnostic data for invalid or excessive bodies',
+    async (headers, raw) => {
+      const f = httpsFixture({
+        status: 461,
+        headers: headers as Record<string, string>,
+        parts: [Buffer.from(raw as string)],
+      });
+      const result = await createRedbookHttpTransport(f.request)(
+        input({ maxResponseBytes: 8 * 1024 * 1024 }),
+      );
+      expect(result).toMatchObject({ status: 461, body: {} });
+      expect(f.raw).toHaveBeenCalledTimes(1);
+      expect(f.response?.destroyed).toBe(true);
+    },
+  );
+  it('projects only recognized codes and a canonical verification marker; never a link or raw prose', async () => {
+    const raw = {
+      code: -100,
+      msg: '需要验证码',
+      message: 'synthetic-secret',
+      data: { cookie: 'synthetic-secret' },
+      url: 'javascript:alert(1)',
+      verification_url: 'https://www.xiaohongshu.com/?token=synthetic-secret',
+    };
+    expect(redbookErrorSummary(raw)).toEqual({
+      code: -100,
+      msg: 'captcha required',
+    });
+    expect(
+      redbookErrorSummary({ code: '-100', msg: '需要验证码'.repeat(100) }),
+    ).toEqual({});
+    expect(
+      redbookErrorSummary({
+        code: 999999,
+        message: 'please captcha required now',
+      }),
+    ).toEqual({});
+    expect(redbookErrorSummary([raw])).toEqual({});
+    const f = httpsFixture({
+      status: 471,
+      parts: [Buffer.from(JSON.stringify(raw))],
+    });
+    expect((await createRedbookHttpTransport(f.request)(input())).body).toEqual(
+      { code: -100, msg: 'captcha required' },
+    );
+    expect(f.raw).toHaveBeenCalledTimes(1);
+  });
+  it('keeps an unknown rejection hard stop when its diagnostic body times out', async () => {
+    jest.useFakeTimers();
+    try {
+      const f = httpsFixture({ status: 471, hold: true });
+      const pending = createRedbookHttpTransport(f.request)(
+        input({ timeoutMs: 10 }),
+      );
+      await jest.advanceTimersByTimeAsync(10);
+      await expect(pending).resolves.toMatchObject({ status: 471, body: {} });
+      expect(f.raw).toHaveBeenCalledTimes(1);
+      expect(f.destroy).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+it('preserves a received 461 when the optional error stream fails', async () => {
+  const f = httpsFixture({ status: 461, hold: true });
+  const pending = createRedbookHttpTransport(f.request)(input());
+  while (!f.response) await Promise.resolve();
+  f.response!.write(
+    Buffer.from('{"msg":"captcha required", "echo":"synthetic-secret'),
+  );
+  f.response!.emit('error', new Error('synthetic-secret'));
+  await expect(pending).resolves.toMatchObject({ status: 461, body: {} });
+  expect(f.response?.destroyed).toBe(true);
+  expect(f.raw).toHaveBeenCalledTimes(1);
+});
+
+it('keeps thirteen successful requests separate from an unknown reply rejection', async () => {
+  const transport = jest.fn(async (request: RedbookRequest) => ({
+    url: request.url,
+    status: transport.mock.calls.length === 14 ? 461 : 200,
+    body: { success: true, code: 0, data: {} },
+  }));
+  const client = new RedbookClient({
+    transport,
+    cookies: () => ({ a1: 'synthetic', web_session: 'synthetic' }),
+  });
+  for (let i = 0; i < 13; i++) await client.getComments('synthetic-note');
+  await expect(
+    client.getSubComments('synthetic-note', 'synthetic-root'),
+  ).rejects.toThrow('unknown_rejection');
+  expect(transport).toHaveBeenCalledTimes(14);
+  expect(new URL(transport.mock.calls[13][0].url).pathname).toBe(
+    '/api/sns/web/v2/comment/sub/page',
+  );
 });

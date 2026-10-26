@@ -430,6 +430,16 @@ function fixture(options = {}) {
       'Switch',
     ].map((name) => [name, name]),
   );
+  ui.ModalContent = (props) => ({
+    type: 'ModalContent',
+    props: {
+      ...props,
+      children:
+        typeof props.children === 'function'
+          ? props.children(() => {})
+          : props.children,
+    },
+  });
   const primitives = load(
     'apps/web/src/components/SubscriptionPrimitives.tsx',
     {
@@ -449,7 +459,22 @@ function fixture(options = {}) {
   router.collectComments = {
     useMutation: () => ({ isLoading: false, mutateAsync: async () => {} }),
   };
-  router.engagement = { useQuery: () => query(undefined) };
+  ui.ModalContent = (props) => ({
+    type: 'ModalContent',
+    props: {
+      ...props,
+      children:
+        typeof props.children === 'function'
+          ? props.children(() => {})
+          : props.children,
+    },
+  });
+  router.engagement = {
+    useQuery: (input) => {
+      if (input.noteId) calls.push(['engagementLookup', input]);
+      return query(undefined);
+    },
+  };
   const engagement = load('apps/web/src/components/XhsEngagement.tsx', {
     react,
     'react/jsx-runtime': { jsx: element, jsxs: element },
@@ -469,7 +494,9 @@ function fixture(options = {}) {
     '@web/components/XhsWholeCreator': 'XhsWholeCreator',
     '@web/components/XhsTaskRecovery': Recovery,
     '@web/components/XhsEngagement': engagement,
-    '@web/components/ArticleReader': 'ArticleReader',
+    '@web/utils/xhs-note-presentation': load(
+      'apps/web/src/utils/xhs-note-presentation.ts',
+    ),
     '@web/components/ArticleDateFilter': 'ArticleDateFilter',
     '@web/utils/article-date-selection': dateHelpers,
     '@wewe-rss/shared': shared,
@@ -1032,45 +1059,51 @@ test('search clear and hidden-filter feedback match WeChat; Escape closes input 
   }
 });
 
-test('saved note uses the common reader/find component, preserves images, and reserves Escape while finding', async () => {
+test('note data opens independently of body; title is no longer an in-app reader', async () => {
   const f = fixture();
   try {
     await f.start();
-    f.settings({
-      body: {
-        title: '合成正文',
-        text: 'A <script> & 关键词\n第二段',
-        images: ['data:image/png;base64,c3ludGhldGlj'],
-        kind: 'image-text',
-      },
-    });
-    f.render()
-      .find(
-        (node) => node.type === 'button' && node.props.children === '苹果存档',
-      )
-      .props.onClick();
-    let reader = f.find('ArticleReader');
-    assert.ok(reader);
-    assert.match(reader.props.contentHtml, /A &lt;script&gt; &amp; 关键词/);
-    assert.match(
-      reader.props.contentHtml,
-      /data:image\/png;base64,c3ludGhldGlj/,
-    );
-    assert.equal(reader.props.findOpen, false);
-    reader.props.onFindOpenChange(true);
-    const modal = f
+    const dataButton = f
       .render()
-      .find((node) => node.type === 'Modal' && node.props.size === '4xl');
-    assert.equal(modal.props.isKeyboardDismissDisabled, true);
+      .find(
+        (node) =>
+          node.type === 'button' &&
+          node.props['aria-label'] === '查看互动与评论 苹果存档',
+      );
+    assert.ok(dataButton);
+    dataButton.props.onClick();
+    const nodes = f.render();
+    assert.ok(
+      nodes.some(
+        (node) =>
+          node.type === 'section' &&
+          node.props['aria-label'] === '小红书保存的互动数据',
+      ),
+    );
+    assert.equal(
+      nodes.some(
+        (node) => node.type === 'ArticleReader' || node.type === 'iframe',
+      ),
+      false,
+    );
+    assert.equal(f.calls.filter(([name]) => name === 'bodyLookup').length, 0);
+    const modal = nodes.find(
+      (node) => node.type === 'Modal' && node.props.size === '4xl',
+    );
     modal.props.onClose();
-    reader = f.find('ArticleReader');
-    assert.equal(reader.props.findOpen, false);
+    assert.equal(
+      f
+        .render()
+        .find((node) => node.type === 'Modal' && node.props.size === '4xl')
+        .props.isOpen,
+      false,
+    );
   } finally {
     f.dispose();
   }
 });
 
-test('global/group queries preserve authors, exports dispatch by author and reading uses the actual owner', async () => {
+test('global/group queries preserve authors, exports dispatch by author and data uses the actual owner', async () => {
   const queryVersion = 'a'.repeat(64);
   const f = fixture({ queryVersion });
   const oldDocument = global.document,
@@ -1130,11 +1163,16 @@ test('global/group queries preserve authors, exports dispatch by author and read
       'group-a',
     );
     f.render()
-      .find((n) => n.type === 'button' && n.props.children === '分组正文')
+      .find(
+        (n) =>
+          n.type === 'button' &&
+          n.props['aria-label'] === '查看互动与评论 分组正文',
+      )
       .props.onClick();
     f.render();
     assert.equal(
-      f.calls.filter(([name]) => name === 'bodyLookup').at(-1)[1].creatorId,
+      f.calls.filter(([name]) => name === 'engagementLookup').at(-1)[1]
+        .creatorId,
       'creator-b',
     );
     f.find('ManagementFolders').props.onFilter('ungrouped');

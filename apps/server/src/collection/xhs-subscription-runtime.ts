@@ -200,7 +200,11 @@ export class XhsSubscriptionRuntime
       message: !liveEnabled
         ? '真实访问尚未启用；未读取凭据。'
         : this.stopCode
-          ? '当前来源已停止，请先处理登录、验证或访问限制，再明确重新连接。'
+          ? this.stopCode === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
+            ? '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态，再明确重新连接。'
+            : this.stopCode === 'XHS_SOURCE_VERIFICATION_BLOCKED'
+              ? '来源明确提示需要验证；当前没有可确认的验证入口，采集已停止。'
+              : '当前来源已停止，请先处理登录、验证或访问限制，再明确重新连接。'
           : !connected
             ? '尚未连接；请由本机页面明确提供会话或恢复受保护记录。'
             : '本机会话已就绪；不代表平台已确认登录。重启后需重新解析链接。',
@@ -332,6 +336,7 @@ export class XhsSubscriptionRuntime
         [
           'authentication',
           'verification',
+          'unknown_rejection',
           'permission',
           'signature',
           'rate_limit',

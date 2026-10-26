@@ -67,11 +67,12 @@ export function taskNextStep(task: SubscriptionTask) {
   if (!taskFinished(task)) return '正在查看已存在任务的进度，不会创建新采集。';
   if (task.state === 'completed')
     return '此任务已完成，可继续阅读或导出已保存内容。';
-  if (
-    task.code?.startsWith('XHS_SOURCE_') ||
-    task.code === 'XHS_SESSION_REQUIRED'
-  )
-    return '请先通过本机安全工具处理连接、验证或访问限制，再明确继续；已有内容保留。';
+  if (task.code === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED')
+    return '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。';
+  if (task.code === 'XHS_SOURCE_VERIFICATION_BLOCKED')
+    return '来源明确提示需要验证，但当前没有可确认的验证入口；采集已停止，请先核查来源状态。';
+  if (task.code?.startsWith('XHS_SOURCE_') || task.code === 'XHS_SESSION_REQUIRED')
+    return '来源请求已暂停，请通过本机安全工具核查采集会话与来源状态后再明确连接；已保存数据保留。';
   if (task.code === 'XHS_RESUME_DIRECTORY_CHANGED')
     return '请选回此任务原来的保存目录，再继续未完成内容。';
   return task.resumable
@@ -184,27 +185,6 @@ export async function exportArchiveBatches<
     options.onProgress(completed, ids.length);
   }
   return { completed, total: ids.length, cancelled: false };
-}
-
-/** Compose the existing verified text/image response for the shared inert reader.
- * Note text remains text, including HTML-looking snippets and literal symbols. */
-export function noteReaderHtml(body: {
-  text: string;
-  images: readonly string[];
-}) {
-  const escape = (value: string) =>
-    value.replace(
-      /[&<>"']/g,
-      (char) =>
-        ({
-          '&': '&amp;',
-          '<': '&lt;',
-          '>': '&gt;',
-          '"': '&quot;',
-          "'": '&#39;',
-        })[char]!,
-    );
-  return `<article><p style="white-space:pre-wrap">${escape(body.text)}</p>${body.images.map((src, index) => `<img src="${escape(src)}" alt="第 ${index + 1} 张归档图片">`).join('')}</article>`;
 }
 
 /** Keep per-author authorization and ZIP boundaries while reporting one frozen scope. */

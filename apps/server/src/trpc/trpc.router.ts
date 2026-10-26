@@ -1916,16 +1916,6 @@ export class TrpcRouter {
         this.requireLocalXhsAccess(ctx);
         return this.xhsEngagement!.refreshMetrics(input);
       }),
-    body: this.trpcService.protectedProcedure
-      .input(
-        z
-          .object({
-            creatorId: z.string().min(1).max(128),
-            noteId: z.string().min(1).max(300),
-          })
-          .strict(),
-      )
-      .query(({ input }) => this.xhs.body(input.creatorId, input.noteId)),
     refresh: this.trpcService.protectedProcedure
       .input(
         z

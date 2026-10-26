@@ -25,7 +25,10 @@ import {
 } from '@nextui-org/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ArticleDateFilter from '@web/components/ArticleDateFilter';
-import ArticleReader from '@web/components/ArticleReader';
+import {
+  noteArchiveStatus,
+  xhsOriginalNoteUrl,
+} from '@web/utils/xhs-note-presentation';
 import {
   XhsEngagementPanel,
   XhsMetricLine,
@@ -49,7 +52,6 @@ import {
   exportArchiveGroups,
   toggleLoadedSelection,
   selectedImageNotes,
-  noteReaderHtml,
   taskFinished,
   mayResumeTask,
   preferredRecoveredTask,
@@ -137,7 +139,7 @@ export default function Xiaohongshu() {
   });
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
-  const [readingCreatorId, setReadingCreatorId] = useState('');
+  const [dataCreatorId, setDataCreatorId] = useState('');
   const queuedDownloads = useRef<
     Array<{ creatorId: string; noteIds: string[] }>
   >([]);
@@ -146,8 +148,12 @@ export default function Xiaohongshu() {
   >(async () => {});
   const [taskCreatorId, setTaskCreatorId] = useState('');
   const [noteId, setNoteId] = useState('');
-  const [readerFindOpen, setReaderFindOpen] = useState(false);
-  useEffect(() => setReaderFindOpen(false), [noteId]);
+  const [dataNote, setDataNote] = useState<{
+    title: string;
+    publishTime: number;
+    status: string;
+    kind: 'image-text' | 'video';
+  } | null>(null);
   const [loadedCount, setLoadedCount] = useState(20);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState<
@@ -367,14 +373,6 @@ export default function Xiaohongshu() {
     enabled: !dateError && validNoteRange,
     retry: false,
   });
-  const body = trpc.xiaohongshu.body.useQuery(
-    { creatorId: readingCreatorId, noteId },
-    { enabled: !!readingCreatorId && !!noteId, retry: false },
-  );
-  const readerHtml = useMemo(
-    () => (body.data ? noteReaderHtml(body.data) : ''),
-    [body.data],
-  );
   const visibleNotes = useMemo(
     () =>
       dateError || !validNoteRange
@@ -404,17 +402,6 @@ export default function Xiaohongshu() {
   const selectedArchives = visibleNotes.filter(
     (note) => selectedIds.has(note.id) && note.status === 'complete',
   );
-  const noteStatus = (note: {
-    status: string;
-    kind: 'image-text' | 'video';
-  }) =>
-    note.status === 'complete'
-      ? note.kind === 'video'
-        ? '视频已保存（播放未验证）'
-        : '图文已保存'
-      : note.kind === 'video' || note.status === 'video-skipped'
-        ? '视频未归档'
-        : '正文或图片未归档';
   const allArchiveNotes = trpc.xiaohongshu.notes.useQuery(
     { creatorId: creatorId || undefined },
     { enabled: exportOpen && exportScope === 'all', retry: false },
@@ -1098,6 +1085,7 @@ export default function Xiaohongshu() {
         />
         {current && (
           <XhsCreatorMetricRefresh
+            key={current.id}
             creatorId={current.id}
             enabled={!busy && capability.data?.canRefresh === true}
           />
@@ -1281,7 +1269,7 @@ export default function Xiaohongshu() {
             <span role="status" className="text-xs text-neutral-500">
               {capability.data?.canRefresh
                 ? '每次更新最多读取 2 页，更多需明确继续'
-                : '阅读本地存量'}
+                : '管理已有目录'}
             </span>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1407,9 +1395,13 @@ export default function Xiaohongshu() {
                   : !connection.data
                     ? '正在读取本机连接状态…'
                     : !connection.data.liveEnabled
-                      ? '真实访问尚未启用，可继续阅读和导出本地内容。'
-                      : connection.data.code?.startsWith('XHS_SOURCE_')
-                        ? '当前连接已暂停，请在本机安全工具中处理登录、验证或访问限制后重新连接。'
+                      ? '真实访问尚未启用，可查看已存数据和导出本地内容。'
+                      : connection.data.code === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
+                        ? '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。'
+                        : connection.data.code === 'XHS_SOURCE_VERIFICATION_BLOCKED'
+                          ? '来源明确提示需要验证，但当前没有可确认的验证入口；采集已停止，请先核查来源状态。'
+                          : connection.data.code?.startsWith('XHS_SOURCE_')
+                            ? '来源请求已暂停，请核查采集会话与来源状态后再明确连接。'
                         : connection.data.code === 'XHS_DISCONNECT_INCOMPLETE'
                           ? '连接已断开，但受保护记录清理未确认，请重新读取状态。'
                           : !connection.data.connected
@@ -1653,8 +1645,9 @@ export default function Xiaohongshu() {
           disabled={busy}
         />
         <div className="px-3 py-1 text-xs text-neutral-500">
-          当前{search ? '筛选' : '博主'} {visibleNotes.length} 篇；已选择{' '}
-          {selectedNotes.length}{' '}
+          当前范围 {visibleNotes.length} 条目录 · 完整归档{' '}
+          {visibleNotes.filter((note) => note.status === 'complete').length}{' '}
+          篇；已选择 {selectedNotes.length}{' '}
           篇图文。全选勾选已加载内容；可继续加载并追加选择。
           {search && '修改搜索会清空选择。'}
         </div>
@@ -1709,24 +1702,41 @@ export default function Xiaohongshu() {
                     onValueChange={(value) => selectNote(note.id, value)}
                   />
                 </div>
-                <button
-                  type="button"
-                  disabled={busy || note.status !== 'complete'}
-                  className="compact-title min-w-0 !whitespace-normal break-words text-left text-[15px] hover:text-[#007AFF] disabled:text-neutral-500"
-                  onClick={() => {
-                    if (!active.current) {
-                      setReadingCreatorId(note.creatorId);
-                      setNoteId(note.id);
-                    }
-                  }}
+                <a
+                  href={xhsOriginalNoteUrl(note.id)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-disabled={!xhsOriginalNoteUrl(note.id)}
+                  title={
+                    xhsOriginalNoteUrl(note.id)
+                      ? '在小红书打开原文'
+                      : '原文链接不可用：笔记身份无效'
+                  }
+                  className="compact-title min-w-0 !whitespace-normal break-words text-left text-[15px] hover:text-[#007AFF]"
                 >
                   {note.title}
-                </button>
+                </a>
                 <div className="content-article-metadata text-xs text-neutral-500">
                   <span>{formatShanghaiPublicationTime(note.publishTime)}</span>
                   <span className="whitespace-normal text-left md:max-w-[150px] md:text-right">
                     {!creatorId && <span>{note.creatorName} · </span>}
-                    {noteStatus(note)}
+                    {noteArchiveStatus(note)}
+                    {!xhsOriginalNoteUrl(note.id) && (
+                      <span className="block">原文链接不可用</span>
+                    )}
+                    <button
+                      type="button"
+                      className="block py-1 text-[#007AFF]"
+                      aria-label={`查看互动与评论 ${note.title}`}
+                      data-note-id={note.id}
+                      onClick={() => {
+                        setDataNote(note);
+                        setDataCreatorId(note.creatorId);
+                        setNoteId(note.id);
+                      }}
+                    >
+                      互动与评论
+                    </button>
                     <span className="block">
                       <XhsMetricLine snapshot={note.metrics} />
                     </span>
@@ -1920,67 +1930,70 @@ export default function Xiaohongshu() {
       </SubscriptionDialog>
       <Modal
         isOpen={!!noteId}
-        isKeyboardDismissDisabled={readerFindOpen}
         onClose={() => {
-          if (!active.current) {
-            setReaderFindOpen(false);
-            setNoteId('');
-          }
+          setNoteId('');
+          setDataCreatorId('');
+          setDataNote(null);
         }}
         size="4xl"
         placement="center"
         scrollBehavior="inside"
         classNames={{
-          wrapper: 'z-[200]',
+          wrapper: 'z-[200] xhs-data-wrapper',
           backdrop: 'z-[190]',
-          base: '!my-3 !max-h-[calc(100dvh-24px)] overflow-hidden',
+          base: 'xhs-data-dialog',
           header: 'shrink-0',
-          body: 'min-h-0 overflow-y-auto',
+          body: 'xhs-data-scroll',
+          closeButton: '!hidden',
         }}
       >
         <ModalContent>
-          <ModalHeader className="min-w-0 break-words pr-10">
-            {body.data?.title || '读取已保存正文'}
-          </ModalHeader>
-          <ModalBody>
-            <p className="text-sm text-neutral-500">
-              这里可阅读已保存的正文和图片；视频笔记仅显示封面。
-            </p>
-            {body.isLoading ? (
-              <Spinner />
-            ) : body.error ? (
-              <p role="alert">正文读取失败，请稍后重试。</p>
-            ) : (
-              body.data && (
-                <article className="space-y-3">
-                  {body.data.kind === 'video' && body.data.video && (
-                    <p className="text-sm text-neutral-500">
-                      已缓存视频 {body.data.video.bytes.toLocaleString()}{' '}
-                      字节。播放尚未验证，请保存到本机后检查。
+          {(onClose) => (
+            <>
+              <ModalHeader className="xhs-data-toolbar">
+                <span>互动与评论 · 本地快照</span>
+                <Button
+                  size="sm"
+                  variant="flat"
+                  onPress={onClose}
+                  aria-label="关闭互动与评论"
+                >
+                  关闭
+                </Button>
+              </ModalHeader>
+              <ModalBody>
+                <article
+                  className="xhs-data-document"
+                  key={`${dataCreatorId}:${noteId}`}
+                >
+                  <h1>{dataNote?.title || '互动与评论'}</h1>
+                  <p className="text-default-500 text-sm">
+                    {formatShanghaiPublicationTime(dataNote?.publishTime ?? 0)}
+                  </p>
+                  {dataNote && (
+                    <p className="text-default-500 text-xs">
+                      {noteArchiveStatus(dataNote)}
                     </p>
                   )}
-                  <ArticleReader
-                    key={`${readingCreatorId}:${noteId}`}
-                    contentHtml={readerHtml}
-                    findOpen={readerFindOpen}
-                    onFindOpenChange={setReaderFindOpen}
-                  />
-                  {body.data && (
+                  {noteId && (
                     <XhsEngagementPanel
-                      key={`engagement:${readingCreatorId}:${noteId}`}
-                      creatorId={readingCreatorId}
+                      key={`engagement:${dataCreatorId}:${noteId}`}
+                      creatorId={dataCreatorId}
                       noteId={noteId}
-                      initial={body.data.engagement}
                       canCollectComments={
                         capability.data?.canCollectComments === true
                       }
                       canRefreshMetrics={capability.data?.canRefresh === true}
                     />
                   )}
+                  <p className="text-default-500 text-xs">
+                    此处只展示本地已存数据。阅读原文请点击列表标题；下载到
+                    Obsidian 后可在本地阅读正文和图片。
+                  </p>
                 </article>
-              )
-            )}
-          </ModalBody>
+              </ModalBody>
+            </>
+          )}
         </ModalContent>
       </Modal>
     </main>

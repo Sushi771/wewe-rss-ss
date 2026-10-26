@@ -14,6 +14,8 @@ const file = path.resolve(
 );
 const compiled = new (Module as any)(file);
 const source = readFileSync(file, 'utf8');
+let savedView: unknown;
+const queryCalls: unknown[][] = [];
 compiled.require = (name: string) =>
   name === '@web/utils/trpc'
     ? {
@@ -22,7 +24,12 @@ compiled.require = (name: string) =>
           xiaohongshu: {
             collectComments: { useMutation: () => ({ isLoading: false }) },
             refreshMetrics: { useMutation: () => ({ isLoading: false }) },
-            engagement: { useQuery: () => ({ data: undefined, error: null }) },
+            engagement: {
+              useQuery: (...args: unknown[]) => {
+                queryCalls.push(args);
+                return { data: savedView, error: null };
+              },
+            },
           },
         },
       }
@@ -48,16 +55,25 @@ const empty = {
   offset: 0,
 };
 describe('actual XHS React business components with synthetic saved data (SSR)', () => {
-  it('does not show empty metric/comment tables or request collection', () => {
+  beforeEach(() => {
+    savedView = undefined;
+    queryCalls.length = 0;
+  });
+  it('shows unknown metrics honestly without requesting collection', () => {
     const html = renderToStaticMarkup(
       React.createElement(XhsEngagementPanel, {
         creatorId: 'synthetic',
         noteId: 'synthetic',
-        initial: empty,
       }),
     );
     expect(html).not.toContain('已保存评论');
-    expect(html).not.toContain('未知');
+    expect(html).toContain('赞 未知');
+    expect(queryCalls).toEqual([
+      [
+        { creatorId: 'synthetic', noteId: 'synthetic', offset: 0, limit: 200 },
+        { retry: false, refetchOnWindowFocus: false, keepPreviousData: false },
+      ],
+    ]);
     expect(html).toContain('评论采集默认关闭');
     expect(html).toContain('disabled');
   });
@@ -101,11 +117,11 @@ describe('actual XHS React business components with synthetic saved data (SSR)',
         },
       ],
     };
+    savedView = view;
     const html = renderToStaticMarkup(
       React.createElement(XhsEngagementPanel, {
         creatorId: 'synthetic',
         noteId: 'synthetic',
-        initial: view,
       }),
     );
     expect(html).toContain('赞 0');
@@ -133,6 +149,6 @@ describe('actual XHS React business components with synthetic saved data (SSR)',
       renderToStaticMarkup(
         React.createElement(XhsMetricLine, { snapshot: null }),
       ),
-    ).toBe('');
+    ).toContain('赞 未知');
   });
 });

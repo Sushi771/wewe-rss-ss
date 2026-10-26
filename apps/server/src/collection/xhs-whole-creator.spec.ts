@@ -124,6 +124,7 @@ describe('whole creator durable offline closure', () => {
         ),
       cancelTask: async () => ({}),
     };
+    subscriptions.confirmedLocalArchives = subscriptions.confirmedLocalSaves;
     let actualId = '';
     const runtime: any = {
       withRequestBudget: async (b: any, id: string, work: any) => {
@@ -426,7 +427,7 @@ describe('whole creator durable offline closure', () => {
     expect(saveFailure).toBeUndefined();
     expect(completed.state).toBe('completed');
     expect(completed.downloadTask).not.toBe(priorTask);
-    expect(actualSaves).toBe(1);
+    expect(actualSaves).toBe(2);
     expect(completed.items[0].supplement).toBe('saved');
     expect((await fs.stat(savedResult.markdownPath)).isFile()).toBe(true);
     expect((await fs.stat(savedResult.supplement.path)).isFile()).toBe(true);

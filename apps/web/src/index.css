@@ -1046,3 +1046,46 @@ button:active {
 .drag-handle:active {
   cursor: grabbing;
 }
+
+/* A local data panel scrolls once; its close control remains available. */
+.xhs-data-wrapper {
+  padding: 8px !important;
+  overflow: hidden !important;
+}
+.xhs-data-dialog {
+  width: min(900px, calc(100vw - 16px)) !important;
+  max-width: 900px !important;
+  max-height: calc(100dvh - 16px) !important;
+  margin: 0 !important;
+  overflow: hidden;
+}
+.xhs-data-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid #8883;
+  font-size: 14px;
+}
+.xhs-data-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 20px clamp(16px, 4vw, 40px) 32px !important;
+}
+.xhs-data-document {
+  width: 100%;
+  max-width: 720px;
+  margin-inline: auto;
+  overflow-wrap: anywhere;
+}
+.xhs-data-document h1 {
+  font-size: clamp(20px, 3vw, 28px);
+  line-height: 1.4;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.xhs-data-document > p {
+  margin-bottom: 12px;
+}

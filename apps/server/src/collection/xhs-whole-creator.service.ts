@@ -21,6 +21,7 @@ type Item = {
   metrics?: number;
   top?: number;
   replies?: number;
+  archive?: number;
   supplement?: number;
 };
 type Job = {
@@ -28,6 +29,7 @@ type Job = {
   creatorId: string;
   state: string;
   updatedAt: number;
+  archiveTask?: string;
   downloadTask?: string;
   listTask?: string;
   listEnd: boolean;
@@ -171,7 +173,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
     await this.save(job);
     if (job.listTask)
       await this.subscriptions.cancelTask({ taskId: job.listTask });
-    if (job.downloadTask)
+    if (job.archiveTask)
+      await this.subscriptions.cancelTask({ taskId: job.archiveTask });
+    if (job.downloadTask && job.downloadTask !== job.archiveTask)
       await this.subscriptions.cancelTask({ taskId: job.downloadTask });
     return this.view(id);
   }
@@ -256,6 +260,84 @@ export class XhsWholeCreatorService implements OnModuleInit {
         );
     }
   }
+  /** Both stages use the original full-media saver and durable positive receipts. */
+  private async saveStage(
+    job: Job,
+    notes: { id: string }[],
+    phase: 'archive' | 'supplement',
+  ) {
+    const taskKey = phase === 'archive' ? 'archiveTask' : 'downloadTask';
+    await this.check(job);
+    job.stage = phase;
+    delete job.currentNote;
+    await this.save(job);
+    const harvest = async (taskId: string) => {
+      const receipts =
+        phase === 'archive'
+          ? await this.subscriptions.confirmedLocalArchives({ taskId })
+          : await this.subscriptions.confirmedLocalSaves({ taskId });
+      for (const receipt of receipts)
+        if (job.items[receipt.noteId])
+          job.items[receipt.noteId][phase] = receipt.savedAt;
+      if (phase === 'supplement') {
+        for (const receipt of await this.subscriptions.confirmedLocalArchives({
+          taskId,
+        }))
+          if (job.items[receipt.noteId])
+            job.items[receipt.noteId].archive = receipt.savedAt;
+      }
+    };
+    const prior = job[taskKey]
+      ? await this.subscriptions.task({ taskId: job[taskKey] })
+      : undefined;
+    if (prior?.state === 'completed') {
+      await harvest(job[taskKey]!);
+      await this.save(job);
+    }
+    const toSave = notes
+      .filter((note) => !job.items[note.id]?.[phase])
+      .map((note) => note.id);
+    if (toSave.length) {
+      if (!job[taskKey] || prior?.state === 'completed') {
+        const task = await this.subscriptions.downloadNotes({
+          creatorId: job.creatorId,
+          noteIds: toSave,
+          sameDirectoryAsTaskId:
+            prior?.state === 'completed'
+              ? job[taskKey]
+              : phase === 'supplement'
+                ? job.archiveTask
+                : undefined,
+        });
+        job[taskKey] = task.taskId;
+        await this.checkpointChild(job, task.taskId);
+      } else if (prior && !['queued', 'running'].includes(prior.state)) {
+        const next = await this.subscriptions.resumeTask({
+          taskId: job[taskKey],
+        });
+        job[taskKey] = next.taskId;
+        await this.checkpointChild(job, next.taskId);
+      }
+      const listing = job.listTask;
+      job.listTask = job[taskKey];
+      try {
+        await this.waitList(job);
+      } finally {
+        job.listTask = listing;
+        await harvest(job[taskKey]!);
+        await this.save(job);
+      }
+      // A legacy resumed task may contain completed items without the new archive receipt.
+      // Reconfirm only those files through the protected saver, in the same directory.
+      if (
+        phase === 'archive' &&
+        prior &&
+        prior.state !== 'completed' &&
+        notes.some((note) => !job.items[note.id]?.archive)
+      )
+        await this.saveStage(job, notes, phase);
+    }
+  }
   private async run(id: string) {
     const job = await this.load(id);
     try {
@@ -310,6 +392,19 @@ export class XhsWholeCreatorService implements OnModuleInit {
           job.listEnd = true;
           await this.save(job);
         }
+        const notes = await this.db.xhsNote.findMany({
+          where: { creatorId: job.creatorId },
+          orderBy: { id: 'asc' },
+          select: { id: true },
+        });
+        for (const note of notes) job.items[note.id] ??= {};
+        // Adopt the old download child on upgrade, preserving its directory and receipts.
+        if (!job.archiveTask && job.downloadTask) {
+          job.archiveTask = job.downloadTask;
+          delete job.downloadTask;
+        }
+        // A first-note comment failure must not prevent the rest of the full archives.
+        await this.saveStage(job, notes, 'archive');
         if (!job.profile) {
           await this.check(job);
           const snapshot = await this.engagement.refreshMetrics({
@@ -318,11 +413,6 @@ export class XhsWholeCreatorService implements OnModuleInit {
           job.profile = snapshot.collectedAt;
           await this.save(job);
         }
-        const notes = await this.db.xhsNote.findMany({
-          where: { creatorId: job.creatorId },
-          orderBy: { id: 'asc' },
-          select: { id: true },
-        });
         for (const note of notes) {
           await this.check(job);
           job.currentNote = note.id;
@@ -356,57 +446,16 @@ export class XhsWholeCreatorService implements OnModuleInit {
             await this.save(job);
           }
         }
-        await this.check(job);
-        job.stage = 'supplement';
-        delete job.currentNote;
-        await this.save(job);
-        const harvest = async (taskId: string) => {
-          const receipts = await this.subscriptions.confirmedLocalSaves({
-            taskId,
-          });
-          for (const receipt of receipts)
-            if (job.items[receipt.noteId])
-              job.items[receipt.noteId].supplement = receipt.savedAt;
-        };
-        const prior = job.downloadTask
-          ? await this.subscriptions.task({ taskId: job.downloadTask })
-          : undefined;
-        if (prior?.state === 'completed') {
-          await harvest(job.downloadTask!);
-          await this.save(job);
-        }
-        const toSave = notes
-          .filter((note) => !job.items[note.id]?.supplement)
-          .map((note) => note.id);
-        if (toSave.length) {
-          if (!job.downloadTask || prior?.state === 'completed') {
-            const task = await this.subscriptions.downloadNotes({
-              creatorId: job.creatorId,
-              noteIds: toSave,
-              sameDirectoryAsTaskId:
-                prior?.state === 'completed' ? job.downloadTask : undefined,
-            });
-            job.downloadTask = task.taskId;
-            await this.checkpointChild(job, task.taskId);
-          } else if (prior && !['queued', 'running'].includes(prior.state)) {
-            const next = await this.subscriptions.resumeTask({
-              taskId: job.downloadTask,
-            });
-            job.downloadTask = next.taskId;
-            await this.checkpointChild(job, next.taskId);
-          }
-          const listing = job.listTask;
-          job.listTask = job.downloadTask;
-          try {
-            await this.waitList(job);
-          } finally {
-            job.listTask = listing;
-          }
-          await harvest(job.downloadTask!);
-          await this.save(job);
-        }
+        await this.saveStage(job, notes, 'supplement');
       });
-      job.state = Object.values(job.items).every((item) => item.supplement)
+      job.state = Object.values(job.items).every(
+        (item) =>
+          item.archive &&
+          item.supplement &&
+          item.metrics &&
+          item.top &&
+          item.replies,
+      )
         ? 'completed'
         : 'partial';
       if (job.state === 'partial') job.code = 'XHS_MEDIA_OR_SUPPLEMENT_PENDING';
@@ -436,6 +485,24 @@ export class XhsWholeCreatorService implements OnModuleInit {
         noteId: note.id,
         title: note.title,
         ...job.items[note.id],
+        archive: job.items[note.id]?.archive
+          ? ('saved' as const)
+          : ('pending' as const),
+        engagement:
+          job.items[note.id]?.metrics &&
+          job.items[note.id]?.top &&
+          job.items[note.id]?.replies
+            ? ('returned-range-complete' as const)
+            : job.items[note.id]?.metrics ||
+                job.items[note.id]?.top ||
+                job.items[note.id]?.started
+              ? ('partial' as const)
+              : ('unknown' as const),
+        localSave: job.items[note.id]?.supplement
+          ? ('saved' as const)
+          : job.code === 'XHS_TASK_RECEIPT_UNCERTAIN'
+            ? ('unknown' as const)
+            : ('pending' as const),
         status: job.items[note.id]?.supplement
           ? 'returned-range-complete'
           : job.currentNote === note.id && job.code

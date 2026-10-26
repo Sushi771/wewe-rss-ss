@@ -463,26 +463,31 @@ describe('default-off production source wiring with synthetic sessions only', ()
     );
     await expect(pending).rejects.toThrow('XHS_SESSION_CHANGED');
   });
-  it('stops the current session after verification/permission failures instead of dispatching again', async () => {
-    const api: jest.MockedFunction<RedbookTransport> = jest.fn(
-      async (request) => ({ status: 471, url: request.url, body: {} }),
-    );
-    const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
-    await runtime.connectSession({
-      a1: cookies.a1,
-      webSession: cookies.web_session,
-    });
-    await expect(runtime.resolve(noteUrl)).rejects.toThrow('verification');
-    expect(runtime.capability().canRefresh).toBe(false);
-    expect(await runtime.connectionStatus()).toMatchObject({
-      code: 'XHS_SOURCE_VERIFICATION_BLOCKED',
-      verified: false,
-    });
-    await expect(runtime.resolve(noteUrl)).rejects.toThrow(
-      'XHS_SOURCE_VERIFICATION_BLOCKED',
-    );
-    expect(api).toHaveBeenCalledTimes(1);
-  });
+  it.each([461, 471])(
+    'stops the current session after an unknown HTTP %s rejection instead of dispatching again',
+    async (status) => {
+      const api: jest.MockedFunction<RedbookTransport> = jest.fn(
+        async (request) => ({ status, url: request.url, body: {} }),
+      );
+      const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
+      await runtime.connectSession({
+        a1: cookies.a1,
+        webSession: cookies.web_session,
+      });
+      await expect(runtime.resolve(noteUrl)).rejects.toThrow(
+        'unknown_rejection',
+      );
+      expect(runtime.capability().canRefresh).toBe(false);
+      expect(await runtime.connectionStatus()).toMatchObject({
+        code: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+        verified: false,
+      });
+      await expect(runtime.resolve(noteUrl)).rejects.toThrow(
+        'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+      );
+      expect(api).toHaveBeenCalledTimes(1);
+    },
+  );
   it('does not claim protected-record deletion when cleanup failed, while memory access remains disconnected', async () => {
     const storage = vault();
     storage.disconnect.mockRejectedValue(Error('synthetic filesystem failure'));
@@ -597,3 +602,62 @@ describe('default-off production source wiring with synthetic sessions only', ()
       expect(isLocalXhsStatusRequest({ ...local, ...change })).toBe(false);
   });
 });
+
+it.each([
+  [461, {}, 'unknown_rejection'],
+  [471, {}, 'unknown_rejection'],
+  [461, { msg: 'captcha required' }, 'verification'],
+  [471, { code: -100 }, 'authentication'],
+])(
+  'hard stops HTTP %s without retry, refund or expansion of the request budget',
+  async (status, body, reason) => {
+    const api: jest.MockedFunction<RedbookTransport> = jest.fn(
+      async (request) => ({ status: status as number, url: request.url, body }),
+    );
+    const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    const state = {
+      id: 'synthetic-budget',
+      limit: 14,
+      used: 13,
+      nextAt: 0,
+      intervalMs: 0,
+    };
+    const reserve = jest.fn(async () => {
+      if (state.used >= state.limit) return false;
+      state.used++;
+      return true;
+    });
+    const budget = new XhsRequestBudget({
+      reserve,
+      read: async () => ({ ...state }),
+    });
+    await expect(
+      runtime.withRequestBudget(budget, state.id, () =>
+        runtime.resolve(noteUrl),
+      ),
+    ).rejects.toThrow(String(reason));
+    const code = `XHS_SOURCE_${String(reason).toUpperCase()}_BLOCKED`;
+    expect(await runtime.connectionStatus()).toMatchObject({
+      code,
+      verified: false,
+    });
+    expect(runtime.capability().canDownload).toBe(false);
+    await expect(
+      runtime.withRequestBudget(budget, state.id, () =>
+        runtime.resolve(noteUrl),
+      ),
+    ).rejects.toThrow(code);
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(reserve).toHaveBeenCalledTimes(1);
+    expect(state).toMatchObject({
+      limit: 14,
+      used: 14,
+      intervalMs: 0,
+      nextAt: 0,
+    });
+  },
+);

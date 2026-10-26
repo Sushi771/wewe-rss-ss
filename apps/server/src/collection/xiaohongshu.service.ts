@@ -24,7 +24,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { load } from 'cheerio';
 import { articlePublicationRange, XhsNoteFilter } from '@wewe-rss/shared';
 import { visibleBodyText } from '../article-body-search';
-import { decodeInlineImage } from './image-fetch';
 import {
   buildCompleteArticleDownload,
   verifiedDownloadBody,
@@ -917,41 +916,6 @@ export class XiaohongshuService {
       },
       { timeout: 30000 },
     );
-  }
-
-  async body(creatorId: string, noteId: string) {
-    const note = await this.prisma.xhsNote.findFirst({
-      where: { id: noteId, creatorId, status: 'complete' },
-      select: { ...cachedNoteMetadataSelect, contentHtml: true },
-    });
-    if (!note?.contentHtml) return fail('此笔记没有已核验的完整缓存。');
-    const $ = load(note.contentHtml),
-      content = $('#js_content');
-    const images = content
-      .find('img')
-      .toArray()
-      .map((img) => {
-        const inline = $(img).attr('src') || '';
-        decodeInlineImage(inline);
-        return inline;
-      });
-    return {
-      engagement: await this.engagement({ creatorId, noteId }),
-      title: note.title,
-      publishTime: note.publishTime,
-      text: content
-        .find('p')
-        .not(
-          '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
-        )
-        .toArray()
-        .map((p) => $(p).text())
-        .join('\n'),
-      images,
-      kind:
-        note.kind === 'video' ? ('video' as const) : ('image-text' as const),
-      video: cachedVideoMetadata(note),
-    };
   }
   async export(creatorId?: string, noteIds?: string[], filter?: XhsNoteFilter) {
     const selected =

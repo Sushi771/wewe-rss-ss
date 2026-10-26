@@ -1,10 +1,12 @@
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
+import { callProcedure } from '@trpc/server';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import axios from 'axios';
+import { load } from 'cheerio';
 import { spawnSync } from 'node:child_process';
 import { XiaohongshuService, XhsSource } from './xiaohongshu.service';
 import { XhsNormalizedCandidate } from './xiaohongshu-contract';
@@ -197,17 +199,19 @@ describe('production XHS router/service → additive SQLite and original export 
       platform: { url: '' },
       feed: { updateDelayTime: 0 },
     });
-    const api = new TrpcRouter(
+    const router = new TrpcRouter(
       new TrpcService(prisma as any, config, {} as any, {} as any),
       prisma as any,
       config,
       {} as any,
       {} as any,
       service,
-    ).appRouter.createCaller({ errorMsg, isLocal: true });
+    ).appRouter;
+    const api = router.createCaller({ errorMsg, isLocal: true });
     // Legacy normalized cache seam is tested directly; public refresh now queues metadata only.
     return {
       xiaohongshu: api.xiaohongshu,
+      procedures: router._def.procedures,
       legacyRefresh: ({ id }: { id: string }) => service.refresh(id),
     };
   }
@@ -235,6 +239,21 @@ describe('production XHS router/service → additive SQLite and original export 
     await api.xiaohongshu.remove({ id: creatorId });
     expect((await api.xiaohongshu.list()).items).toHaveLength(0);
   });
+  it('removes the platform reader route and service method without reading cached body data', async () => {
+    const read = jest.spyOn(prisma.xhsNote, 'findFirst');
+    expect('body' in XiaohongshuService.prototype).toBe(false);
+    await expect(async () =>
+      callProcedure({
+        procedures: caller().procedures,
+        path: 'xiaohongshu.body',
+        type: 'query',
+        ctx: { errorMsg: null, isLocal: true },
+        rawInput: { creatorId, noteId: 'synthetic' },
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(read).not.toHaveBeenCalled();
+    read.mockRestore();
+  });
   it.each([
     'http://127.0.0.1/private',
     'https://www.xiaohongshu.com/profile?token=synthetic',
@@ -259,9 +278,23 @@ describe('production XHS router/service → additive SQLite and original export 
     const list = await api.xiaohongshu.notes({ creatorId });
     expect(list.items).toHaveLength(2);
     const note = list.items.find((n) => n.status === 'complete')!;
-    const body = await api.xiaohongshu.body({ creatorId, noteId: note.id });
-    expect(body.text).toBe(candidate().text);
-    expect(body.images).toEqual(['data:image/png;base64,' + png]);
+    const cached = await prisma.xhsNote.findFirstOrThrow({
+      where: { creatorId, id: note.id },
+    });
+    const $ = load(cached.contentHtml!);
+    expect(
+      $('#js_content')
+        .find('p')
+        .toArray()
+        .map((p) => $(p).text())
+        .join('\n'),
+    ).toBe(candidate().text);
+    expect(
+      $('#js_content')
+        .find('img')
+        .toArray()
+        .map((img) => $(img).attr('src')),
+    ).toEqual(['data:image/png;base64,' + png]);
     const before = await prisma.xhsNote.findMany();
     expect((await api.legacyRefresh({ id: creatorId })).added).toBe(0);
     expect(await prisma.xhsNote.findMany()).toEqual(before);

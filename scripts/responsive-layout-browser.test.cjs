@@ -193,7 +193,7 @@ function data(name, input) {
       return {
         items: items.map((item, i) => ({
           ...item,
-          id: 'note-' + i,
+          id: JSON.stringify(['xiaohongshu', 'note', 'fixture-' + i]),
           creatorId: 'creator-one',
           creatorName: '合成博主',
           kind: 'image-text',
@@ -202,15 +202,6 @@ function data(name, input) {
       };
     case 'xiaohongshu.engagement':
       return engagement;
-    case 'xiaohongshu.body':
-      return {
-        engagement,
-        title: '合成笔记正文',
-        kind: 'image-text',
-        contentHtml: '<p>本地合成正文</p>',
-        text: '本地合成正文',
-        images: [],
-      };
     case 'collection.verificationStatus':
       return { notices: [] };
     default:
@@ -593,7 +584,9 @@ const server = http.createServer((req, res) => {
         '[...document.querySelectorAll("[role=region]")].filter(e=>/文章列表|笔记列表/.test(e.getAttribute("aria-label"))).forEach(e=>e.scrollTop=0)',
       );
       await click(
-        'document.querySelector(".content-article-row .compact-title")',
+        source === 'xiaohongshu'
+          ? `document.querySelector('.content-article-row button[aria-label^="查看互动与评论"]')`
+          : 'document.querySelector(".content-article-row .compact-title")',
       );
       await wait(
         'Boolean(document.querySelector("[role=dialog]"))',
@@ -634,7 +627,10 @@ const server = http.createServer((req, res) => {
         assert.equal((await geometry()).checked, 2);
         if (source === 'xiaohongshu' && width === 390) {
           const shot = await send('Page.captureScreenshot', { format: 'png' });
-          fs.writeFileSync(path.join(evidence, 'xiaohongshu-reader-comments-390.png'), Buffer.from(shot.data, 'base64'));
+          fs.writeFileSync(
+            path.join(evidence, 'xiaohongshu-reader-comments-390.png'),
+            Buffer.from(shot.data, 'base64'),
+          );
         }
       }
       await key('Escape', 27);

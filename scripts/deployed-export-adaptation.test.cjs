@@ -8,6 +8,7 @@ const ts = require(
 );
 const pins = require('./fixtures/deployed-export-adaptation.json');
 const xhsCompatibility = require('./fixtures/xhs-integration-router-compatibility.json');
+const { restoreXhsReaderRoute } = require('./xhs-reader-removal.cjs');
 const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
@@ -37,9 +38,12 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     'summary',
   ]);
   const file = 'apps/server/src/trpc/trpc.router.ts';
+  // Assert deletion, then reconstruct only the exact removed reader seam.
+  // All old router/wholeCreator/engagement pins remain authoritative.
+  const pinnedRouterSource = restoreXhsReaderRoute(ts, read(file));
   const ast = ts.createSourceFile(
     file,
-    read(file),
+    pinnedRouterSource,
     ts.ScriptTarget.Latest,
     true,
   );
@@ -103,7 +107,7 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     const offset = member.getStart(ast);
     for (const node of [...removed].reverse()) {
       assert.equal(
-        read(file)[node.end],
+        pinnedRouterSource[node.end],
         ',',
         'exact additive seam must retain its delimiter',
       );
