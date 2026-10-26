@@ -146,7 +146,7 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
       WECHAT2RSS_TOKEN: 'synthetic',
       WECHAT2RSS_CACHE_MEDIA: '0',
       SQLITE_PERIODIC_SNAPSHOT_ENABLED: '0',
-      WEWE_SAVED_MEDIA_ROOT: resources,
+      WEWE_SAVED_MEDIA_ROOT: await fs.realpath(resources),
     });
     delete process.env.WEWE_ACCEPTANCE_MODE;
     prisma = new PrismaService();
@@ -341,6 +341,31 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     },
     30000,
   );
+  it('accepts the canonical fixture root and rejects a resolver alias before opening files', async () => {
+    const canonical = await fs.realpath(resources);
+    expect(process.env.WEWE_SAVED_MEDIA_ROOT).toBe(canonical);
+    expect((await readSavedMediaManifest()).root).toBe(canonical);
+    // Model a Windows short-name/junction alias without requiring symlink
+    // privileges: resolving the configured alias points at our real fixture.
+    const alias = path.join(root, 'synthetic-resource-alias');
+    const realpath = fs.realpath.bind(fs);
+    const resolve = jest
+      .spyOn(fs, 'realpath')
+      .mockImplementation((async (value: any) =>
+        String(value) === alias ? canonical : realpath(value)) as any);
+    const open = jest.spyOn(fs, 'open');
+    process.env.WEWE_SAVED_MEDIA_ROOT = alias;
+    try {
+      await expect(readSavedMediaManifest()).rejects.toThrow(
+        'SAVED_MEDIA_ROOT_INVALID',
+      );
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+      open.mockRestore();
+      process.env.WEWE_SAVED_MEDIA_ROOT = canonical;
+    }
+  });
   it('updates only five existing bodies, including a legacy ID, through coordinator with zero network/backup and no historical feed/receipt changes', async () => {
     const marker = path.join(root, '.wechat2rss-media-blocked.json');
     await fs.writeFile(marker, 'synthetic existing media stop');

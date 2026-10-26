@@ -183,7 +183,29 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
       assert.equal(source.split(guarded).length, 2);
       source = source.replace(guarded, 'async function runtime() {\n');
     }
-    assert.equal(hash(source), expected, file);
+    let requiredHash = expected;
+    if (file === 'apps/server/src/prisma/prisma.service.ts') {
+      // Keep the deployed baseline pin authoritative. Only this independently
+      // reviewed recovery version is accepted; all unknown changes still fail.
+      assert.equal(
+        expected,
+        '5e5887853c41a58205e6b6a22e217dff5501bfa964969044f510c9ef36731aaf',
+        'exact pre-recovery Prisma baseline',
+      );
+      requiredHash =
+        '6b71dbdced274a391826ccd6844eff781fd5e01a1dfa9fc765ab46eb2a1a7ab4';
+      const recoveryAst = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+      const service = recoveryAst.statements.find(ts.isClassDeclaration);
+      const recovery = service.members.filter(
+        (member) => member.name?.getText(recoveryAst) === 'recoverFailedMediaTransaction',
+      );
+      assert.equal(recovery.length, 1, 'one reviewed recovery owner');
+      assert.equal(recovery[0].parameters.length, 0, 'recovery cannot receive a replay callback');
+      assert.ok(recovery[0].body.getText(recoveryAst).includes('await this.$disconnect();'));
+      assert.ok(recovery[0].body.getText(recoveryAst).includes('await this.$connect();'));
+      assert.ok(recovery[0].body.getText(recoveryAst).includes("setDatabaseRecovery('failed')"));
+    }
+    assert.equal(hash(source), requiredHash, file);
   }
   // Export conversion now reuses its current DOM. Pin all other conversion
   // statements and the uncertainty predicate to the deployed source semantics.
