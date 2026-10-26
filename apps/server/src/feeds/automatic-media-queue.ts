@@ -76,7 +76,7 @@ export type AutomaticMediaScanRow = Pick<
   SavedMediaSnapshot,
   'id' | 'mpId' | 'contentHtml'
 > &
-  Partial<SavedMediaSnapshot> & { oversized?: boolean };
+  Partial<SavedMediaSnapshot> & { oversized?: boolean; mediaReady?: boolean };
 export type AutomaticMediaDependencies = {
   now(): number;
   scan(
@@ -141,6 +141,63 @@ async function atomic(file: string, value: unknown, limit: number) {
     await fs.rename(temp, file);
   } finally {
     await fs.rm(temp, { force: true });
+  }
+}
+
+async function readCachedMedia(directory: string, key: string, url: string) {
+  try {
+    const record = JSON.parse(
+      (
+        await readBounded(
+          path.join(directory, 'bytes', `${key}.json`),
+          14_000_000,
+        )
+      ).toString('utf8'),
+    );
+    if (
+      record.version !== 1 ||
+      record.url !== url ||
+      record.key !== key ||
+      typeof record.inline !== 'string'
+    )
+      throw Error('MEDIA_BYTES_INVALID');
+    const decoded = decodeInlineImage(record.inline);
+    if (hash(decoded.bytes) !== record.sha256)
+      throw Error('MEDIA_BYTES_INVALID');
+    return record.inline as string;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+}
+
+/** Read verified local bytes only; no queue mutation, HTTP or budget change. */
+export async function readAutomaticMediaImage(url: string) {
+  allowedImageUrl(url);
+  const configured = process.env.DATABASE_URL || '';
+  if (!configured.startsWith('file:')) return;
+  try {
+    const database = await fs.realpath(
+      decodeURIComponent(configured.slice(5).split('?')[0]),
+    );
+    if (!(await fs.stat(database)).isFile())
+      throw Error('MEDIA_DATABASE_INVALID');
+    const directory = path.join(
+      path.dirname(database),
+      '.wechat2rss-automatic-media',
+    );
+    const normalized = (value: string) =>
+      process.platform === 'win32'
+        ? path.resolve(value).toLowerCase()
+        : path.resolve(value);
+    for (const folder of [directory, path.join(directory, 'bytes')])
+      if (normalized(await fs.realpath(folder)) !== normalized(folder))
+        throw Error('MEDIA_STORAGE_INVALID');
+    const inline = await readCachedMedia(directory, hash(url), url);
+    return inline ? decodeInlineImage(inline) : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
   }
 }
 
@@ -285,31 +342,8 @@ export class AutomaticMediaQueue {
       state.blocked ? 'IMAGE_REQUEST_BLOCKED' : code,
     );
   }
-  private async cached(key: string, url: string) {
-    try {
-      const record = JSON.parse(
-        (
-          await readBounded(
-            path.join(this.directory, 'bytes', `${key}.json`),
-            14_000_000,
-          )
-        ).toString('utf8'),
-      );
-      if (
-        record.version !== 1 ||
-        record.url !== url ||
-        record.key !== key ||
-        typeof record.inline !== 'string'
-      )
-        throw Error('MEDIA_BYTES_INVALID');
-      const decoded = decodeInlineImage(record.inline);
-      if (hash(decoded.bytes) !== record.sha256)
-        throw Error('MEDIA_BYTES_INVALID');
-      return record.inline as string;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
-    }
+  private cached(key: string, url: string) {
+    return readCachedMedia(this.directory, key, url);
   }
   private async capacity(required: number) {
     const folder = path.join(this.directory, 'bytes');
@@ -347,7 +381,11 @@ export class AutomaticMediaQueue {
     for (const row of rows) {
       const previous = state.articles.find((entry) => entry.id === row.id);
       const sources = row.oversized
-        ? { ready: false, urls: [], unknown: 1 }
+        ? {
+            ready: row.mediaReady === true,
+            urls: [],
+            unknown: row.mediaReady ? 0 : 1,
+          }
         : automaticMediaSources(row.contentHtml || '');
       if (sources.ready) {
         state.articles = state.articles.filter((entry) => entry.id !== row.id);
