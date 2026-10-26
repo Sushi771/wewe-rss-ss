@@ -131,7 +131,8 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     )!;
     return fs.readFile(path.join(folder, name));
   };
-  beforeEach(async () => {
+  let setupPromise: Promise<void> | undefined;
+  const setupFixture = async () => {
     jest.clearAllMocks();
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'exact-media-synthetic-'));
     resources = path.join(root, 'assets');
@@ -245,8 +246,15 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
     feedBefore = await prisma.feed.findUnique({ where: { id: mpId } });
     jest.spyOn(global, 'fetch').mockRejectedValue(Error('NETWORK_FORBIDDEN'));
-  });
+  };
+  beforeEach(() => {
+    setupPromise = setupFixture();
+    return setupPromise;
+  }, 40000);
   afterEach(async () => {
+    // A hook deadline does not cancel its Promise. Finish that exact setup
+    // before disconnecting/removing its database; Jest retains hook failure.
+    await setupPromise?.catch(() => undefined);
     service?.onModuleDestroy();
     await prisma?.$disconnect();
     jest.restoreAllMocks();
@@ -257,7 +265,7 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
       path.basename(root).startsWith('exact-media-synthetic-')
     )
       await fs.rm(root, { recursive: true, force: true });
-  });
+  }, 40000);
   (process.platform === 'win32' ? it : it.skip)(
     'combined: one fresh startup protection is reused at lifecycle initialization; media write/reentry and restart allocate no extra copy',
     async () => {
