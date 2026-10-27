@@ -1,4 +1,6 @@
-import { Modal } from '@web/components/AppOverlays';
+import { nextMetricOrder, orderNotes } from '@web/utils/xhs-metric-sort';
+import type { MetricKey, MetricOrder } from '@web/utils/xhs-metric-sort';
+import XhsCreatorAvatar from '@web/components/XhsCreatorAvatar';
 import XhsWholeCreator from '@web/components/XhsWholeCreator';
 import {
   ContentExportScope,
@@ -30,7 +32,6 @@ import type { PrepareXhsLink } from '@web/components/XhsOriginalLink';
 import XhsSourceBudget from '@web/components/XhsSourceBudget';
 import type { SourceBudgetApi } from '@web/components/XhsSourceBudget';
 import {
-  XhsEngagementPanel,
   XhsMetricLine,
   XhsNumericFilter,
   XhsNumericFilterValue,
@@ -141,7 +142,6 @@ export default function Xiaohongshu() {
   const [creatorId, setCreatorId] = useState('');
   const [sourceSettingsOpen, setSourceSettingsOpen] = useState(false);
   const sourceSettingsRef = useRef<HTMLDetailsElement>(null);
-  const [dataCreatorId, setDataCreatorId] = useState('');
   const queuedDownloads = useRef<
     Array<{ creatorId: string; noteIds: string[] }>
   >([]);
@@ -149,13 +149,6 @@ export default function Xiaohongshu() {
     (job: { creatorId: string; noteIds: string[] }) => Promise<void>
   >(async () => {});
   const [taskCreatorId, setTaskCreatorId] = useState('');
-  const [noteId, setNoteId] = useState('');
-  const [dataNote, setDataNote] = useState<{
-    title: string;
-    publishTime: number;
-    status: string;
-    kind: 'image-text' | 'video';
-  } | null>(null);
   const [loadedCount, setLoadedCount] = useState(20);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState<
@@ -221,6 +214,13 @@ export default function Xiaohongshu() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [folderFilter, setFolderFilter] = useState('all');
   const [selectedCreators, setSelectedCreators] = useState<string[]>([]);
+  const [metricOrder, setMetricOrder] = useState<MetricOrder>(null);
+  const sortMetric = (metric: MetricKey) => {
+    if (!active.current) {
+      setMetricOrder((value) => nextMetricOrder(value, metric));
+      setLoadedCount(20);
+    }
+  };
   const [direction, setDirection] = useState<'asc' | 'desc'>('desc');
   const [search, setSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
@@ -232,12 +232,12 @@ export default function Xiaohongshu() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !noteId && !adding && !exportOpen)
+      if (event.key === 'Escape' && !adding && !exportOpen)
         setSearchOpen(false);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [noteId, adding, exportOpen]);
+  }, [adding, exportOpen]);
   const parsedDates = useMemo(
     () => articleFilterSchema.safeParse(dateSelectionFilter(dateSelection)),
     [dateSelection],
@@ -408,22 +408,8 @@ export default function Xiaohongshu() {
     () =>
       dateError || !validNoteRange
         ? []
-        : noteMetricFilter.metric
-          ? notes.data?.items || []
-          : [...(notes.data?.items || [])].sort((a, b) => {
-              if (!a.publishTime || !b.publishTime)
-                return a.publishTime
-                  ? -1
-                  : b.publishTime
-                    ? 1
-                    : a.id.localeCompare(b.id);
-              return (
-                (direction === 'asc'
-                  ? a.publishTime - b.publishTime
-                  : b.publishTime - a.publishTime) || a.id.localeCompare(b.id)
-              );
-            }),
-    [dateError, validNoteRange, noteMetricFilter.metric, notes.data, direction],
+        : orderNotes(notes.data?.items || [], metricOrder, direction),
+    [dateError, validNoteRange, notes.data, metricOrder, direction],
   );
   const loadedNotes = visibleNotes.slice(0, loadedCount);
   const selectableNotes = loadedNotes.filter(
@@ -606,7 +592,6 @@ export default function Xiaohongshu() {
       !creators.data.items.some((creator) => creator.id === creatorId)
     ) {
       setCreatorId('');
-      setNoteId('');
       setSelectedIds(new Set());
     }
   }, [creators.data, creatorId]);
@@ -638,7 +623,6 @@ export default function Xiaohongshu() {
   const selectCreator = (id: string) => {
     if (active.current) return;
     setCreatorId(id);
-    setNoteId('');
     setLoadedCount(20);
     setExportOpen(false);
     setZipProgress(null);
@@ -715,7 +699,6 @@ export default function Xiaohongshu() {
       );
       await utils.xiaohongshu.list.invalidate();
       setCreatorId(result.creatorId);
-      setNoteId('');
       setSelectedIds(new Set());
       setFolderFilter('all');
       setProfileUrl('');
@@ -917,7 +900,6 @@ export default function Xiaohongshu() {
     });
   const invalidateFolders = async () => {
     setSelectedIds(new Set());
-    setNoteId('');
     await Promise.all([
       utils.xiaohongshu.groups.invalidate(),
       utils.xiaohongshu.list.invalidate(),
@@ -927,6 +909,15 @@ export default function Xiaohongshu() {
   return (
     <main className="feed-workspace" aria-label="小红书博主与笔记管理">
       <div className="feed-source-controls flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700">
+        {current && (
+          <XhsCreatorAvatar
+            url={
+              (current as typeof current & { avatarUrl?: string | null })
+                .avatarUrl
+            }
+            name={current.displayName}
+          />
+        )}
         <label className="min-w-0 flex-1 text-xs text-neutral-500">
           当前博主
           <select
@@ -1023,7 +1014,6 @@ export default function Xiaohongshu() {
             if (active.current) return;
             setFolderFilter(filter);
             setCreatorId('');
-            setNoteId('');
             setLoadedCount(20);
             setSelectedIds(new Set());
             setSelectedCreators([]);
@@ -1106,6 +1096,7 @@ export default function Xiaohongshu() {
           全部笔记
         </Button>
         <XhsNumericFilter
+          disabled={busy}
           creator
           value={creatorMetricFilter}
           onChange={(value) => {
@@ -1161,6 +1152,13 @@ export default function Xiaohongshu() {
                 className="min-w-0 flex-1 truncate text-left text-sm"
                 onClick={() => selectCreator(creator.id)}
               >
+                <XhsCreatorAvatar
+                  url={
+                    (creator as typeof creator & { avatarUrl?: string | null })
+                      .avatarUrl
+                  }
+                  name={creator.displayName}
+                />
                 {creator.displayName}
                 <span className="block truncate">
                   <XhsMetricLine snapshot={creator.metrics} creator />
@@ -1457,6 +1455,13 @@ export default function Xiaohongshu() {
                                   ? '本机会话可用。'
                                   : '本机会话已就绪，平台验证尚未完成。'}
               </p>
+              {connection.data && (
+                <p className="text-default-500 text-xs" role="status">
+                  {connection.data.riskCode
+                    ? '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。'
+                    : '未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。'}
+                </p>
+              )}
               {connection.data?.requestAttempts && (
                 <p className="text-default-500 text-xs">
                   本进程请求尝试：作者{' '}
@@ -1587,6 +1592,60 @@ export default function Xiaohongshu() {
           </div>
         </details>
         <div className="xhs-filter-bar">
+          <div className="xhs-active-filters" aria-label="已选条件">
+            {creatorMetricFilter.metric && (
+              <span>
+                博主 · {creatorMetricFilter.metric === 'fans' ? '粉丝' : '关注'}{' '}
+                {creatorMetricFilter.min ?? '不限'}–
+                {creatorMetricFilter.max ?? '不限'}
+              </span>
+            )}
+            {noteMetricFilter.metric && (
+              <span>
+                笔记 ·{' '}
+                {
+                  {
+                    likes: '点赞',
+                    collects: '收藏',
+                    shares: '分享',
+                    comments: '评论',
+                  }[noteMetricFilter.metric]
+                }{' '}
+                {noteMetricFilter.min ?? '不限'}–
+                {noteMetricFilter.max ?? '不限'}
+              </span>
+            )}
+            <span>
+              {metricOrder
+                ? {
+                    likes: '点赞',
+                    collects: '收藏',
+                    shares: '分享',
+                    comments: '评论',
+                  }[metricOrder.metric] +
+                  (metricOrder.direction === 'desc' ? ' ↓' : ' ↑')
+                : '按时间' + (direction === 'desc' ? ' ↓' : ' ↑')}
+            </span>
+            {(noteMetricFilter.metric ||
+              creatorMetricFilter.metric ||
+              search ||
+              dateSelection.start) && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setNoteMetricFilter({});
+                  setCreatorMetricFilter({});
+                  setSearch('');
+                  setDateSelection({ mode: 'day', start: '', end: '' });
+                  setLoadedCount(20);
+                  setSelectedIds(new Set());
+                }}
+              >
+                清除筛选
+              </button>
+            )}
+          </div>
           <fieldset disabled={busy} className="disabled:opacity-60">
             <ArticleDateFilter
               value={dateSelection}
@@ -1673,6 +1732,7 @@ export default function Xiaohongshu() {
             </Button>
           </div>
           <XhsNumericFilter
+            disabled={busy}
             value={noteMetricFilter}
             onChange={(value) => {
               setNoteMetricFilter(value as typeof noteMetricFilter);
@@ -1680,18 +1740,52 @@ export default function Xiaohongshu() {
               setLoadedCount(20);
             }}
           />
-          <ContentSortControls
-            sort="publishTime"
-            onSortChange={() => {}}
-            direction={direction}
-            onDirectionChange={(value) => {
-              setLoadedCount(20);
-              setDirection(value);
-              setSelectedIds(new Set());
-            }}
-            options={[{ value: 'publishTime', label: '发布时间' }]}
-            disabled={busy}
-          />
+          {metricOrder ? (
+            <div
+              className="flex flex-wrap items-center gap-2 text-xs"
+              aria-label="当前排序"
+            >
+              <span role="status">
+                当前排序：
+                {
+                  {
+                    likes: '点赞',
+                    collects: '收藏',
+                    shares: '分享',
+                    comments: '评论',
+                  }[metricOrder.metric]
+                }{' '}
+                · {metricOrder.direction === 'desc' ? '从高到低' : '从低到高'}
+              </span>
+              <Button
+                size="sm"
+                variant="light"
+                isDisabled={busy}
+                onPress={() => {
+                  if (!active.current) {
+                    setMetricOrder(null);
+                    setLoadedCount(20);
+                  }
+                }}
+              >
+                恢复时间排序
+              </Button>
+            </div>
+          ) : (
+            <ContentSortControls
+              sort="publishTime"
+              onSortChange={() => {}}
+              direction={direction}
+              onDirectionChange={(value) => {
+                setLoadedCount(20);
+                setDirection(value);
+                setMetricOrder(null);
+                setSelectedIds(new Set());
+              }}
+              options={[{ value: 'publishTime', label: '发布时间' }]}
+              disabled={busy}
+            />
+          )}
         </div>
         <div className="xhs-list-caption text-xs text-neutral-500">
           当前范围 {visibleNotes.length} 条目录 · 完整归档{' '}
@@ -1710,8 +1804,12 @@ export default function Xiaohongshu() {
           aria-label="笔记列表"
           tabIndex={0}
         >
-          <div className="compact-list xhs-note-list">
-            <div className="xhs-note-head xhs-note-row">
+          <div
+            className="compact-list xhs-note-list"
+            role="table"
+            aria-label="笔记数据"
+          >
+            <div className="xhs-note-head xhs-note-row" role="row">
               <Checkbox
                 size="sm"
                 aria-label="全选已加载"
@@ -1737,15 +1835,63 @@ export default function Xiaohongshu() {
               />
               <span>笔记标题 · {visibleNotes.length} 篇</span>
               <span>发布时间</span>
-              <span>点赞</span>
-              <span>收藏</span>
-              <span>分享</span>
-              <span>评论</span>
+              {(['likes', 'collects', 'shares', 'comments'] as const).map(
+                (metric) => (
+                  <span
+                    key={metric}
+                    role="columnheader"
+                    aria-sort={
+                      metricOrder?.metric === metric
+                        ? metricOrder.direction === 'desc'
+                          ? 'descending'
+                          : 'ascending'
+                        : 'none'
+                    }
+                  >
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => sortMetric(metric)}
+                      aria-label={
+                        {
+                          likes: '点赞',
+                          collects: '收藏',
+                          shares: '分享',
+                          comments: '评论',
+                        }[metric] +
+                        '排序：' +
+                        (metricOrder?.metric !== metric
+                          ? '从高到低'
+                          : metricOrder.direction === 'desc'
+                            ? '从低到高'
+                            : '恢复时间排序')
+                      }
+                    >
+                      {
+                        {
+                          likes: '点赞',
+                          collects: '收藏',
+                          shares: '分享',
+                          comments: '评论',
+                        }[metric]
+                      }
+                      {metricOrder?.metric === metric
+                        ? metricOrder.direction === 'desc'
+                          ? ' ↓'
+                          : ' ↑'
+                        : ' ↕'}
+                    </button>
+                  </span>
+                ),
+              )}
               <span>状态</span>
-              <span>操作</span>
             </div>
             {loadedNotes.map((note) => (
-              <div key={note.id} className="content-article-row xhs-note-row">
+              <div
+                key={note.id}
+                className="content-article-row xhs-note-row"
+                role="row"
+              >
                 <div className="compact-col-check xhs-note-check">
                   <Checkbox
                     size="sm"
@@ -1809,19 +1955,6 @@ export default function Xiaohongshu() {
                 >
                   {note.status === 'complete' ? '已归档' : '仅目录'}
                 </span>
-                <button
-                  type="button"
-                  className="xhs-note-data-action"
-                  aria-label={`查看互动与评论 ${note.title}`}
-                  data-note-id={note.id}
-                  onClick={() => {
-                    setDataNote(note);
-                    setDataCreatorId(note.creatorId);
-                    setNoteId(note.id);
-                  }}
-                >
-                  互动 / 评论
-                </button>
               </div>
             ))}
             {loadedNotes.length < visibleNotes.length && (
@@ -2015,74 +2148,6 @@ export default function Xiaohongshu() {
           </ModalFooter>
         </ModalContent>
       </SubscriptionDialog>
-      <Modal
-        isOpen={!!noteId}
-        onClose={() => {
-          setNoteId('');
-          setDataCreatorId('');
-          setDataNote(null);
-        }}
-        size="4xl"
-        placement="center"
-        scrollBehavior="inside"
-        classNames={{
-          wrapper: 'z-[200] xhs-data-wrapper',
-          backdrop: 'z-[190]',
-          base: 'xhs-data-dialog',
-          header: 'shrink-0',
-          body: 'xhs-data-scroll',
-          closeButton: '!hidden',
-        }}
-      >
-        <ModalContent>
-          {(onClose) => (
-            <>
-              <ModalHeader className="xhs-data-toolbar">
-                <span>互动与评论 · 本地快照</span>
-                <Button
-                  size="sm"
-                  variant="flat"
-                  onPress={onClose}
-                  aria-label="关闭互动与评论"
-                >
-                  关闭
-                </Button>
-              </ModalHeader>
-              <ModalBody>
-                <article
-                  className="xhs-data-document"
-                  key={`${dataCreatorId}:${noteId}`}
-                >
-                  <h1>{dataNote?.title || '互动与评论'}</h1>
-                  <p className="text-default-500 text-sm">
-                    {formatShanghaiPublicationTime(dataNote?.publishTime ?? 0)}
-                  </p>
-                  {dataNote && (
-                    <p className="text-default-500 text-xs">
-                      {noteArchiveStatus(dataNote)}
-                    </p>
-                  )}
-                  {noteId && (
-                    <XhsEngagementPanel
-                      key={`engagement:${dataCreatorId}:${noteId}`}
-                      creatorId={dataCreatorId}
-                      noteId={noteId}
-                      canCollectComments={
-                        capability.data?.canCollectComments === true
-                      }
-                      canRefreshMetrics={capability.data?.canRefresh === true}
-                    />
-                  )}
-                  <p className="text-default-500 text-xs">
-                    此处只展示本地已存数据。阅读原文请点击列表标题；下载到
-                    Obsidian 后可在本地阅读正文和图片。
-                  </p>
-                </article>
-              </ModalBody>
-            </>
-          )}
-        </ModalContent>
-      </Modal>
     </main>
   );
 }

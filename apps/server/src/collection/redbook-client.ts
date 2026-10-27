@@ -15,7 +15,11 @@ export type RedbookPauseReason =
 /** Deliberately excludes server text, URL, cookies, tokens and raw response. */
 export class RedbookPauseError extends Error {
   readonly paused = true;
-  constructor(readonly reason: RedbookPauseReason) {
+  constructor(
+    readonly reason: RedbookPauseReason,
+    readonly httpStatus?: number,
+    readonly endpoint?: 'profile' | 'list' | 'detail' | 'comments' | 'replies',
+  ) {
     super(`Redbook scan paused: ${reason}`);
     this.name = 'RedbookPauseError';
   }
@@ -242,7 +246,22 @@ export class RedbookClient {
     }
     if (response.url !== HOST + uri) throw new RedbookPauseError('transport');
     const statusReason = reasonFor(response.status, response.body);
-    if (statusReason) throw new RedbookPauseError(statusReason);
+    if (statusReason)
+      throw new RedbookPauseError(
+        statusReason,
+        [401, 403, 406, 429, 461, 471].includes(response.status)
+          ? response.status
+          : undefined,
+        path === PROFILE_PATH
+          ? 'profile'
+          : path === LIST_PATH
+            ? 'list'
+            : path === DETAIL_PATH
+              ? 'detail'
+              : path === COMMENTS_PATH
+                ? 'comments'
+                : 'replies',
+      );
     if (
       !Number.isInteger(response.status) ||
       response.status < 200 ||

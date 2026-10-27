@@ -529,8 +529,7 @@ const server = http.createServer((req, res) => {
       '20 initial rows',
     );
     cdpPhase = 'scenario';
-    const action = (i) =>
-      `[...document.querySelectorAll('.content-article-row button[data-note-id]')].find(e=>e.getAttribute('data-note-id')===${JSON.stringify(noteKey(i))})`;
+    const action = (i) => `[...document.querySelectorAll('.content-article-row')].find(row=>row.querySelector('[data-original-note-id]')?.getAttribute('data-original-note-id')===${JSON.stringify(noteKey(i))}||row.querySelector('a.xhs-note-title')?.href.includes('/explore/'+${JSON.stringify(JSON.parse(noteKey(i))[2])}))?.querySelector('.xhs-note-title')`;
     const shot = async (name) => {
       const r = await send('Page.captureScreenshot', { format: 'png' });
       fs.writeFileSync(
@@ -597,10 +596,7 @@ const server = http.createServer((req, res) => {
       await click(
         `[...document.querySelectorAll('[data-original-note-id]')].find(e=>e.getAttribute('data-original-note-id')===${JSON.stringify(noteKey(i))})`,
       );
-      await wait(
-        `Boolean([...document.querySelectorAll('.content-article-row')].find(row=>row.querySelector('button[data-note-id]')?.getAttribute('data-note-id')===${JSON.stringify(noteKey(i))})?.querySelector('a[target="_blank"]'))`,
-        'prepared link ready',
-      );
+      await wait(`Boolean((${action(i)})?.closest('.content-article-row').querySelector('a[target="_blank"]'))`,'prepared link ready');
     }
     const links = await ev(
       `[...document.querySelectorAll('.content-article-row a[target="_blank"]')].map(e=>({url:e.href,rel:e.rel,referrerPolicy:e.referrerPolicy}))`,
@@ -678,67 +674,9 @@ const server = http.createServer((req, res) => {
         ),
         'list fits available width',
       );
-      await click(action(2));
-      await wait(
-        'document.body.innerText.includes("已保存评论 19 条")',
-        '19 comments available for listed note',
-      );
-      // The real theme animates the portal. Wait for the required final geometry
-      // before measuring; keep the same bounds and centered-layout assertions.
-      await wait(
-        `(()=>{const e=document.querySelector('[role=dialog]');if(!e)return false;const r=e.getBoundingClientRect();return Math.abs(r.left+r.width/2-innerWidth/2)<3 && Math.abs(r.top+r.height/2-innerHeight/2)<3 && r.top>=23 && r.bottom<=innerHeight-23 && document.querySelector('.xhs-data-document').getBoundingClientRect().width<=721})()`,
-        'data panel reached centered viewport geometry',
-      );
-      const layout = await ev(
-        `(()=>{const dialog=document.querySelector('[role=dialog]'),scroll=document.querySelector('.xhs-data-scroll'),doc=document.querySelector('.xhs-data-document'),close=document.querySelector('button[aria-label="关闭互动与评论"]'),r=close.getBoundingClientRect();return {width:innerWidth,docWidth:doc.getBoundingClientRect().width,dialogWidth:dialog.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth>innerWidth+1,scrolls:[...dialog.querySelectorAll('*')].filter(e=>getComputedStyle(e).overflowY==='auto'&&e.scrollHeight>e.clientHeight+1).length,closeVisible:r.top>=0&&r.bottom<=innerHeight,text:dialog.innerText};})()`,
-      );
-      assert(!layout.overflow, JSON.stringify(layout));
-      layout.dialogRect = await ev(
-        `(()=>{const r=document.querySelector('[role=dialog]').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,viewportHeight:innerHeight}})()`,
-      );
-      assert(
-        await ev(
-          `(()=>{const r=document.querySelector('[role=dialog]').getBoundingClientRect();return Math.abs(r.left+r.width/2-innerWidth/2)<3 && Math.abs(r.top+r.height/2-innerHeight/2)<3 && r.top>=23 && r.bottom<=innerHeight-23})()`,
-        ),
-        'data panel centered with viewport margins',
-      );
-      if (layout.docWidth > 721) await shot('failure-document-width-' + width);
-      assert(layout.docWidth <= 721, JSON.stringify(layout));
-      assert(layout.closeVisible);
-      assert(layout.scrolls <= 1);
-      assert.match(layout.text, /赞 7/);
-      assert.match(layout.text, /分享 2/);
-      assert.match(layout.text, /粉丝 424,242/);
-      assert(!layout.text.includes('关注 未知'));
-      assert(!layout.text.includes('未保存文字正文'));
-      if (width === 390 || width === 1580) await shot('summary-' + width);
-      await click(
-        `[...document.querySelectorAll('.xhs-data-document summary')].find(e=>e.textContent.includes('已保存评论'))`,
-      );
-      assert.equal(
-        await ev(
-          'document.querySelectorAll(".xhs-data-document ol > li").length',
-        ),
-        19,
-      );
-      assert(
-        await ev(
-          'document.querySelector(".xhs-data-document").innerText.includes("精确回复对象 未知")',
-        ),
-      );
-      await ev('document.querySelector(".xhs-data-scroll").scrollTop=10000');
-      assert(
-        await ev(
-          `(()=>{const r=document.querySelector('button[aria-label="关闭互动与评论"]').getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()`,
-        ),
-      );
-      await shot('data-' + width);
-      checks.push(layout);
-      await key('Escape', 27);
-      await wait(
-        '!document.querySelector("[role=dialog]")',
-        'Escape closes data panel',
-      );
+      assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0,'deleted comment UI stays absent at every width');
+      assert.equal(apiReads.filter(x=>x.name==='xiaohongshu.engagement'||x.name==='xiaohongshu.collectComments').length,0,'render never reads comment bodies');
+      checks.push({width,commentEntry:false,commentQueries:0});
     }
     await send('Emulation.setDeviceMetricsOverride', {
       width: 2048,
@@ -760,7 +698,7 @@ const server = http.createServer((req, res) => {
     );
     assert(
       await ev(
-        `getComputedStyle(document.querySelector('.xhs-note-head')).display==='none'`,
+        `getComputedStyle(document.querySelector('.xhs-note-head')).display!=='none'`,
       ),
     );
     assert(
@@ -770,55 +708,12 @@ const server = http.createServer((req, res) => {
     );
     await shot('sidebar-constrained-2048');
     await ev(`document.querySelector('.feed-content').style.maxWidth=''`);
-    // Four combinations: both complete notes, and two directory-only notes.
-    for (const i of [0, 4, 2, 3]) {
-      await click(action(i));
-      await wait(
-        'document.querySelector("[role=dialog]")&&!document.body.innerText.includes("正在读取本地互动")',
-        'local data complete',
-      );
-      const text = await ev(
-        'document.querySelector("[role=dialog]").innerText',
-      );
-      assert.equal(text.includes('已保存评论 19 条'), i === 4 || i === 2);
-      await click(
-        'document.querySelector(\'button[aria-label="关闭互动与评论"]\')',
-      );
-      await wait('!document.querySelector("[role=dialog]")', 'close');
-    }
-    // A delayed result from a closed note cannot replace the next note's data.
-    slow = true;
-    cdpPhase = 'switch-reload';
-    await navigation.navigate('Page.reload', { ignoreCache: true }, 'switch-reload');
-    await wait(
-      'document.querySelectorAll(".content-article-row").length===20',
-      'reset rows',
-    );
-    cdpPhase = 'scenario';
-    await click(action(0));
-    await key('Escape', 27);
-    await wait('!document.querySelector("[role=dialog]")', 'close pending');
-    await click(action(4));
-    await wait(
-      'document.body.innerText.includes("已保存评论 19 条")',
-      'second data',
-    );
-    await pause(1100);
-    assert(
-      await ev(
-        'document.querySelector("[role=dialog]").innerText.includes("已保存评论 19 条")',
-      ),
-    );
-    await key('Escape', 27);
-    await wait(
-      '!document.querySelector("[role=dialog]")',
-      'final close animation settled',
-    );
-    await pause(100);
-    assert.equal(
-      await ev('document.querySelectorAll("[role=dialog]").length'),
-      0,
-    );
+    // Archived/listed notes retain their own counts; comment bodies are not displayed.
+    for(const i of [0,4,2,3]){const values=await cellValues(i);assert.equal(values.length,4);assert.deepEqual(values,i===2?['7','4','2','6']:i===4?['0','12','—','19']:['—','—','—','—']);}
+    assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0);
+    assert.equal(apiReads.filter(x=>x.name==='xiaohongshu.engagement'||x.name==='xiaohongshu.collectComments').length,0);
+    assert.equal(comments.length,19,'historical fixture comments remain unchanged');
+    checks.push({fourArchiveMetricCombinations:true,commentBodiesDisplayed:false,commentQueries:0});
     assert.equal(
       apiReads.filter(
         (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
@@ -899,7 +794,7 @@ const server = http.createServer((req, res) => {
       JSON.stringify({ checks, forbidden, apiReads, requests }, null, 2),
     );
     console.log(
-      'PASS 266 explicit link entries; 7 responsive widths; four combinations; delayed close/switch; zero body reads. EVIDENCE=' +
+      'PASS 266 explicit link entries; 7 responsive widths; four archive/count combinations; comment UI absent; zero body/comment reads. EVIDENCE=' +
         evidence,
     );
   } finally {

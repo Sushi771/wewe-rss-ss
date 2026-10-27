@@ -8,7 +8,6 @@ import { XhsEngagementService } from './xhs-engagement.service';
 import { XhsRequestBudget } from './xhs-request-budget';
 import { XhsSqliteBudgetStore } from './xhs-request-budget-store';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
-import { readCommentWindow, saveCommentWindow } from './xhs-engagement-store';
 import {
   incrementalWrite,
   assertIncrementalTransaction,
@@ -36,6 +35,7 @@ type Job = {
   profile?: number;
   items: Record<string, Item>;
   code?: string;
+  lastPauseCode?: string;
   currentNote?: string;
   stage?: string;
 };
@@ -137,6 +137,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
     const previous = job.state;
     job.state = 'queued';
+    if (job.code) job.lastPauseCode = job.code;
     delete job.code;
     job.updatedAt = Date.now();
     // Explicit resume may consume cancelled state; ordinary saves may not.
@@ -220,47 +221,6 @@ export class XhsWholeCreatorService implements OnModuleInit {
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-  private async comments(job: Job, noteId: string, rootId?: string) {
-    const scope = rootId ? `root:${rootId}` : 'top';
-    const item = job.items[noteId];
-    item.started ??= {};
-    if (!item.started[scope]) {
-      item.started[scope] = true;
-      // Generation reset and durable work marker must commit together.
-      await this.write(async (tx) => {
-        await saveCommentWindow(tx, noteId, {
-          scope,
-          nextCursor: '',
-          pages: 0,
-          state: 'partial',
-          code: null,
-          collectedAt: 0,
-          cursors: [],
-        });
-        const changed =
-          await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${job.id} AND state='running'`;
-        if (changed !== 1)
-          throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
-      });
-    }
-    for (;;) {
-      await this.check(job);
-      const before = await readCommentWindow(this.db, noteId, scope);
-      if (before.nextCursor === null && before.state === 'returned-end') return;
-      const result = await this.engagement.collect({
-        creatorId: job.creatorId,
-        noteId,
-        rootId,
-        maxPages: 1,
-        maxItems: 200,
-      });
-      const after = result.windows.find((w) => w.scope === scope);
-      if (!after || after.state === 'failed' || after.pages <= before.pages)
-        throw new XhsSubscriptionError(
-          after?.code ?? 'XHS_COMMENT_NO_PROGRESS',
-        );
     }
   }
   /** Both stages use the original full-media saver and durable positive receipts. */
@@ -446,34 +406,11 @@ export class XhsWholeCreatorService implements OnModuleInit {
             item.metrics = snapshot.collectedAt;
             await this.save(job);
           }
-          if (!item.top) {
-            job.stage = 'comments';
-            await this.save(job);
-            await this.comments(job, note.id);
-            item.top = Date.now();
-            await this.save(job);
-          }
-          if (!item.replies) {
-            job.stage = 'replies';
-            await this.save(job);
-            const roots = await this.db.$queryRaw<
-              Array<{ comment_id: string }>
-            >`SELECT comment_id FROM xhs_saved_comments WHERE note_id=${note.id} AND root_id IS NULL ORDER BY comment_id`;
-            for (const root of roots)
-              await this.comments(job, note.id, root.comment_id);
-            item.replies = Date.now();
-            await this.save(job);
-          }
         }
         await this.saveStage(job, notes, 'supplement');
       });
       job.state = Object.values(job.items).every(
-        (item) =>
-          item.archive &&
-          item.supplement &&
-          item.metrics &&
-          item.top &&
-          item.replies,
+        (item) => item.archive && item.supplement && item.metrics,
       )
         ? 'completed'
         : 'partial';
@@ -512,11 +449,11 @@ export class XhsWholeCreatorService implements OnModuleInit {
           job.items[note.id]?.top &&
           job.items[note.id]?.replies
             ? ('returned-range-complete' as const)
-            : job.items[note.id]?.metrics ||
-                job.items[note.id]?.top ||
-                job.items[note.id]?.started
-              ? ('partial' as const)
-              : ('unknown' as const),
+            : job.items[note.id]?.metrics
+              ? ('metrics-only' as const)
+              : job.items[note.id]?.top || job.items[note.id]?.started
+                ? ('partial' as const)
+                : ('unknown' as const),
         localSave: job.items[note.id]?.supplement
           ? ('saved' as const)
           : job.code === 'XHS_TASK_RECEIPT_UNCERTAIN'
@@ -533,7 +470,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
         deletion: 'unknown',
       })),
       message:
-        'Only the discovered accessible range is tracked. Private, deleted and unreturned content remain unknown; local supplements are separate.',
+        'Only the discovered accessible range is tracked. This run collects metrics without comment pages; previously saved comments may be incomplete. Private, deleted and unreturned content remain unknown; local supplements are separate.',
     };
   }
   async recent(creatorId: string) {

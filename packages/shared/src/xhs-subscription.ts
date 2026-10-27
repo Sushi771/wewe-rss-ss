@@ -70,6 +70,10 @@ export type XhsConnectionStatus = {
   };
   liveEnabled: boolean;
   connected: boolean;
+  /** In-memory state only; this does not inspect or decrypt the stored vault. */
+  sessionPresent?: boolean;
+  /** Current process stop; absence is not evidence that a past risk was lifted. */
+  riskCode?: string;
   stored: boolean | null;
   verified: boolean;
   canConnect: boolean;
@@ -83,6 +87,9 @@ export const xhsOriginalLinkCodes = [
   'XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE',
   'XHS_ORIGINAL_LINK_CONTEXT_UNAVAILABLE',
   'XHS_ORIGINAL_LINK_NOT_READY',
+  'XHS_SOURCE_RISK_UNAVAILABLE',
+  'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+  'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
   'XHS_NOTE_ID_INVALID',
   'XHS_SUBSCRIPTION_REQUIRED',
   'XHS_BUDGET_SCOPE_MISMATCH',

@@ -972,15 +972,7 @@ const server = http.createServer((req, res) => {
         await modalMatrix(state);
         scenario = 'normal';
       });
-    await run('xhs-data', async () => {
-      await navigate('/dash/xiaohongshu');
-      await wait(
-        "Boolean(document.querySelector('[aria-label^=查看互动与评论]'))",
-        'xhs data entry',
-      );
-      await click("document.querySelector('[aria-label^=查看互动与评论]')");
-      await modalMatrix('xhs-data');
-    });
+    await run('xhs-comments-removed',async()=>{await navigate('/dash/xiaohongshu');assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0);assert.equal(apiReads.filter(r=>r.name==='xiaohongshu.engagement'||r.name==='xiaohongshu.collectComments').length,0);cases.push({name:'xhs-comments-removed',status:'passed'});});
     await run('xhs-export', async () => {
       await navigate('/dash/xiaohongshu');
       await more();

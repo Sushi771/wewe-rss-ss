@@ -35,6 +35,7 @@ import {
 } from './xhs-http-transport';
 import type { XhsConnectionStatus } from '@wewe-rss/shared';
 import { parseXhsProfile } from './xhs-profile';
+import { XhsSourceRiskStore } from './xhs-source-risk-store';
 
 type RequestAdmission = {
   budget?: XhsRequestBudget;
@@ -51,6 +52,7 @@ type RuntimeOptions = {
   media?: RedbookMediaTransport;
   shortLinks?: XhsShortLinkTransport;
   profileParser?: XhsProfileParser;
+  requirePersistentRisk?: boolean;
 };
 const failure = (code: string): never => {
   throw new XhsSubscriptionError(code);
@@ -103,6 +105,11 @@ export class XhsSubscriptionRuntime
   private stored: boolean | null = null;
   private verified = false;
   private stopCode?: string;
+  private persistedRisk?: string;
+  private riskStore?: XhsSourceRiskStore;
+  bindRiskStore(store: XhsSourceRiskStore) {
+    this.riskStore ??= store;
+  }
   private readonly adapter: RedbookSubscriptionAdapter;
   private readonly requestAttempts = {
     instanceId: randomUUID(),
@@ -251,13 +258,16 @@ export class XhsSubscriptionRuntime
   }
   private snapshot(code?: string): XhsConnectionStatus {
     const liveEnabled = this.enabled(),
-      connected = liveEnabled && !!this.cookies;
+      connected = liveEnabled && !!this.cookies,
+      risk = this.stopCode ?? this.persistedRisk;
     return {
       requestAttempts: { ...this.requestAttempts },
       liveEnabled,
       connected,
+      sessionPresent: !!this.cookies,
+      riskCode: risk,
       stored: liveEnabled ? this.stored : null,
-      verified: connected && this.verified,
+      verified: connected && this.verified && !risk,
       canConnect: liveEnabled,
       canPersist: liveEnabled && !!this.options.vault,
       restartRequiresReparse: true,
@@ -265,22 +275,36 @@ export class XhsSubscriptionRuntime
         code ??
         (!liveEnabled
           ? 'XHS_LIVE_ACCESS_DISABLED'
-          : (this.stopCode ??
-            (!connected ? 'XHS_SESSION_REQUIRED' : undefined))),
+          : (risk ?? (!connected ? 'XHS_SESSION_REQUIRED' : undefined))),
       message: !liveEnabled
         ? '真实访问尚未启用；未读取凭据。'
-        : this.stopCode
-          ? this.stopCode === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
-            ? '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态，再明确重新连接。'
-            : this.stopCode === 'XHS_SOURCE_VERIFICATION_BLOCKED'
-              ? '来源明确提示需要验证；当前没有可确认的验证入口，采集已停止。'
-              : '当前来源已停止，请先处理登录、验证或访问限制，再明确重新连接。'
+        : risk
+          ? risk === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
+            ? '历史来源状态需要核查；未确认前不会发起来源请求。'
+            : risk === 'XHS_SOURCE_RISK_REVIEW_REQUIRED'
+              ? '来源操作仍在进行或结果未确认；请等待或核查后再操作。'
+              : risk === 'XHS_SOURCE_RISK_UNAVAILABLE'
+                ? '本机来源风险状态暂不可用；来源请求已停止。'
+                : risk === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
+                  ? '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。'
+                  : risk === 'XHS_SOURCE_VERIFICATION_BLOCKED'
+                    ? '来源明确提示需要验证；当前没有可确认的验证入口，采集已停止。'
+                    : '当前来源已停止，请先核查来源状态；重新连接不会自动解除限制。'
           : !connected
             ? '尚未连接；请由本机页面明确提供会话或恢复受保护记录。'
             : '本机会话已就绪；不代表平台已确认登录。重启后需重新解析链接。',
     };
   }
   async connectionStatus() {
+    if (this.riskStore) {
+      try {
+        this.persistedRisk = await this.riskStore.read();
+      } catch {
+        this.stopCode ??= 'XHS_SOURCE_RISK_UNAVAILABLE';
+      }
+    } else if (this.options.requirePersistentRisk) {
+      this.stopCode ??= 'XHS_SOURCE_RISK_UNAVAILABLE';
+    }
     if (!this.enabled()) return this.snapshot();
     if (this.options.vault) {
       try {
@@ -294,7 +318,11 @@ export class XhsSubscriptionRuntime
   }
   capability() {
     const status = this.snapshot(),
-      ready = status.liveEnabled && status.connected && !this.stopCode;
+      ready =
+        status.liveEnabled &&
+        status.connected &&
+        !this.stopCode &&
+        !this.persistedRisk;
     return {
       sourceConfigured: ready,
       canSubscribe: ready,
@@ -339,7 +367,6 @@ export class XhsSubscriptionRuntime
         }
         if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
         this.clearMemory();
-        this.stopCode = undefined;
         this.cookies = { ...next };
         return this.snapshot();
       } finally {
@@ -361,7 +388,6 @@ export class XhsSubscriptionRuntime
         }
         if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
         this.clearMemory();
-        this.stopCode = undefined;
         this.cookies = { ...next };
         this.stored = true;
         return this.snapshot();
@@ -376,7 +402,6 @@ export class XhsSubscriptionRuntime
   async disconnectSession() {
     return this.change(async () => {
       this.clearMemory();
-      this.stopCode = undefined;
       try {
         await this.options.vault?.disconnect();
         this.stored = false;
@@ -396,15 +421,41 @@ export class XhsSubscriptionRuntime
     const generation = this.generation;
     const admission = this.budgetScope.getStore();
     if (admission) delete admission.failure;
+    if (!this.riskStore && this.options.requirePersistentRisk)
+      return failure('XHS_SOURCE_RISK_UNAVAILABLE');
+    let riskOwner: string | undefined;
+    if (this.riskStore) {
+      try {
+        riskOwner = await this.riskStore.begin();
+      } catch (error) {
+        const code =
+          error instanceof XhsSubscriptionError
+            ? error.code
+            : 'XHS_SOURCE_RISK_UNAVAILABLE';
+        // A live concurrent operation also owns a pending fence. Reject this
+        // caller without poisoning the owner; a crash leaves the fence durable.
+        if (code !== 'XHS_SOURCE_RISK_REVIEW_REQUIRED') this.stopCode = code;
+        return failure(code);
+      }
+    }
     try {
       const result = await operation();
       if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
       this.requireSession();
+      if (riskOwner) {
+        const owner = riskOwner;
+        riskOwner = undefined;
+        try {
+          await this.riskStore!.finish(owner);
+        } catch {
+          this.stopCode = 'XHS_SOURCE_RISK_UNAVAILABLE';
+          return failure(this.stopCode);
+        }
+        this.persistedRisk = undefined;
+      }
       this.verified = true;
       return result;
     } catch (error) {
-      if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
-      if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
       if (
         error instanceof RedbookPauseError &&
         [
@@ -421,6 +472,42 @@ export class XhsSubscriptionRuntime
         this.sessionAbort.abort();
         this.adapter.clearAccessContext();
       }
+      if (riskOwner) {
+        const known =
+          admission?.failure instanceof XhsSubscriptionError
+            ? admission.failure
+            : error;
+        const code =
+          this.stopCode ??
+          ((admission?.failure === known &&
+            known instanceof XhsSubscriptionError &&
+            known.code === 'XHS_TASK_CANCELLED') ||
+          (known instanceof XhsSubscriptionError &&
+            [
+              'XHS_REQUEST_BUDGET_REQUIRED',
+              'XHS_REQUEST_BUDGET_EXHAUSTED',
+              'XHS_REQUEST_RATE_PAUSED',
+              'XHS_ACCESS_CONTEXT_UNAVAILABLE',
+              'XHS_ACCESS_CONTEXT_EXPIRED',
+            ].includes(known.code))
+            ? undefined
+            : 'XHS_SOURCE_RISK_REVIEW_REQUIRED');
+        try {
+          await this.riskStore!.finish(
+            riskOwner,
+            code,
+            error instanceof RedbookPauseError
+              ? { status: error.httpStatus, endpoint: error.endpoint }
+              : undefined,
+          );
+          this.persistedRisk = code;
+        } catch {
+          this.stopCode = 'XHS_SOURCE_RISK_UNAVAILABLE';
+          return failure(this.stopCode);
+        }
+      }
+      if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
+      if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
       // RedbookClient intentionally wraps transport failures. Preserve only the
       // local pre-dispatch admission result, never provider text or responses.
       if (!this.stopCode && admission?.failure) throw admission.failure;
@@ -529,5 +616,6 @@ export function createLocalXhsSubscriptionRuntime() {
       process.env.WEWE_ACCEPTANCE_MODE !== '1',
     vault,
     profileParser: parseXhsProfile,
+    requirePersistentRisk: true,
   });
 }

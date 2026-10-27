@@ -102,6 +102,69 @@ function fixture() {
   return { api, media };
 }
 describe('default-off production source wiring with synthetic sessions only', () => {
+  it('reports the process stop while disabled and restores a session without clearing it or dispatching', async () => {
+    let enabled = true;
+    const storage = vault();
+    const api: jest.MockedFunction<RedbookTransport> = jest.fn(
+      async (request) => ({
+        status: 461,
+        url: request.url,
+        body: {},
+      }),
+    );
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => enabled,
+      vault: storage,
+      api,
+    });
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    await expect(runtime.resolve(noteUrl)).rejects.toMatchObject({
+      reason: 'unknown_rejection',
+    });
+    expect(api).toHaveBeenCalledTimes(1);
+    enabled = false;
+    const disabled = await runtime.connectionStatus();
+    expect(disabled).toMatchObject({
+      liveEnabled: false,
+      connected: false,
+      sessionPresent: true,
+      riskCode: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+      code: 'XHS_LIVE_ACCESS_DISABLED',
+    });
+    expect(storage.status).not.toHaveBeenCalled();
+    expect(storage.load).not.toHaveBeenCalled();
+    expect(JSON.stringify(disabled)).not.toContain(cookies.a1);
+    expect(JSON.stringify(disabled)).not.toContain(cookies.web_session);
+    enabled = true;
+    const restored = await runtime.restoreSession();
+    expect(storage.load).toHaveBeenCalledTimes(1);
+    expect(restored).toMatchObject({
+      connected: true,
+      sessionPresent: true,
+      riskCode: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+      code: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    });
+    await expect(runtime.resolve(noteUrl)).rejects.toThrow(
+      'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    );
+    expect(api).toHaveBeenCalledTimes(1);
+    await runtime.disconnectSession();
+    expect((await runtime.connectionStatus()).riskCode).toBe(
+      'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    );
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    await expect(runtime.resolve(noteUrl)).rejects.toThrow(
+      'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    );
+    expect(api).toHaveBeenCalledTimes(1);
+    runtime.onModuleDestroy();
+  });
   it('charges context reconstruction, queued work and media before transport without an extra dispatch', async () => {
     const injected = fixture();
     const runtime = new XhsSubscriptionRuntime({

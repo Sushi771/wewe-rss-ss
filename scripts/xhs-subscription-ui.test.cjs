@@ -497,6 +497,8 @@ function fixture(options = {}) {
     '@web/components/XhsWholeCreator': 'XhsWholeCreator',
     '@web/components/XhsTaskRecovery': Recovery,
     '@web/components/XhsOriginalLink': 'XhsOriginalLink',
+    '@web/components/XhsCreatorAvatar': 'XhsCreatorAvatar',
+    '@web/utils/xhs-metric-sort': load('apps/web/src/utils/xhs-metric-sort.ts'),
     '@web/components/XhsSourceBudget': 'XhsSourceBudget',
     '@web/components/XhsEngagement': engagement,
     '@web/utils/xhs-note-presentation': load(
@@ -1064,51 +1066,9 @@ test('search clear and hidden-filter feedback match WeChat; Escape closes input 
   }
 });
 
-test('note data opens independently of body; title is no longer an in-app reader', async () => {
-  const f = fixture();
-  try {
-    await f.start();
-    const dataButton = f
-      .render()
-      .find(
-        (node) =>
-          node.type === 'button' &&
-          node.props['aria-label'] === '查看互动与评论 苹果存档',
-      );
-    assert.ok(dataButton);
-    dataButton.props.onClick();
-    const nodes = f.render();
-    assert.ok(
-      nodes.some(
-        (node) =>
-          node.type === 'section' &&
-          node.props['aria-label'] === '小红书保存的互动数据',
-      ),
-    );
-    assert.equal(
-      nodes.some(
-        (node) => node.type === 'ArticleReader' || node.type === 'iframe',
-      ),
-      false,
-    );
-    assert.equal(f.calls.filter(([name]) => name === 'bodyLookup').length, 0);
-    const modal = nodes.find(
-      (node) => node.type === 'Modal' && node.props.size === '4xl',
-    );
-    modal.props.onClose();
-    assert.equal(
-      f
-        .render()
-        .find((node) => node.type === 'Modal' && node.props.size === '4xl')
-        .props.isOpen,
-      false,
-    );
-  } finally {
-    f.dispose();
-  }
-});
+test('comment entry and panel are absent while native original-link and count data remain',async()=>{const f=fixture();try{await f.start();const nodes=f.render();assert.equal(nodes.some(n=>n.type==='button'&&String(n.props?.['aria-label']||'').startsWith('查看互动与评论')),false);assert.equal(nodes.some(n=>n.type==='Modal'&&n.props.size==='4xl'),false);assert(nodes.some(n=>n.type==='XhsOriginalLink'&&n.props.noteId==='saved'));assert.equal(f.calls.filter(([name])=>name==='bodyLookup'||name==='engagementLookup').length,0);}finally{f.dispose();}});
 
-test('global/group queries preserve authors, exports dispatch by author and data uses the actual owner', async () => {
+test('global/group queries preserve authors, exports dispatch by author and original links use the actual owner', async () => {
   const queryVersion = 'a'.repeat(64);
   const f = fixture({ queryVersion });
   const oldDocument = global.document,
@@ -1167,19 +1127,8 @@ test('global/group queries preserve authors, exports dispatch by author and data
       f.calls.filter(([name]) => name === 'notesScope').at(-1)[1].groupId,
       'group-a',
     );
-    f.render()
-      .find(
-        (n) =>
-          n.type === 'button' &&
-          n.props['aria-label'] === '查看互动与评论 分组正文',
-      )
-      .props.onClick();
-    f.render();
-    assert.equal(
-      f.calls.filter(([name]) => name === 'engagementLookup').at(-1)[1]
-        .creatorId,
-      'creator-b',
-    );
+    assert.equal(f.render().find(n=>n.type==='XhsOriginalLink'&&n.props.noteId==='author-b-note').props.creatorId,'creator-b');
+    assert.equal(f.calls.filter(([name])=>name==='engagementLookup').length,0);
     f.find('ManagementFolders').props.onFilter('ungrouped');
     assert.equal(f.find('Checkbox', '选择笔记 分组正文'), undefined);
   } finally {
@@ -1567,3 +1516,33 @@ test('uncertain resume receipt immediately removes stale continue action and onl
     f.dispose();
   }
 });
+
+test("disabled source displays recorded risk and unrecorded history remains unknown", async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    assert.ok(
+      f.find(
+        "p",
+        "未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。",
+      ),
+    );
+    f.settings({
+      connection: {
+        liveEnabled: false,
+        connected: false,
+        riskCode: "XHS_SOURCE_HISTORY_REVIEW_REQUIRED",
+      },
+    });
+    assert.ok(
+      f.find(
+        "p",
+        "本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。",
+      ),
+    );
+    assert.equal(f.calls.filter(([name]) => /Session/.test(name)).length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+

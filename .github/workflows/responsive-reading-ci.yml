@@ -54,7 +54,7 @@ jobs:
           scripts/cdp-navigation.test.cjs
           scripts/overlay-click-readiness.test.cjs
           scripts/feed-refresh-state-ui.test.cjs
-          scripts/feed-reading-ui.test.cjs
+          scripts/xhs-metric-sort.test.cjs scripts/feed-reading-ui.test.cjs
           scripts/feed-export-date-ui.test.cjs
           scripts/article-body-state.test.cjs
           scripts/article-date-shortcuts.test.cjs
@@ -74,7 +74,7 @@ jobs:
           scripts/feed-sidebar-layout.test.cjs
           scripts/subscription-dialog-layout.test.cjs
 
-      - name: Original note links and independent interaction panel
+      - name: Original note links, count cells and deleted comment UI
         env:
           RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
         run: node scripts/xhs-note-data-browser.test.cjs
@@ -83,3 +83,8 @@ jobs:
         env:
           RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
         run: node scripts/overlay-matrix-browser.test.cjs
+
+      - name: Metric header cycles, complete-set ordering and responsive counts
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-metric-sort-browser.test.cjs

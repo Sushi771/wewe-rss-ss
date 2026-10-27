@@ -19,10 +19,12 @@ test('unknown rejection never invents verification or exposes supplied diagnosti
   assert.doesNotMatch(message, /验证码|secret|evil|https:/);
   assert.match(taskNextStep({code}), /原因尚不明确/);
 });
-test('explicit verification acknowledges no confirmed entry without directing automatic navigation', () => {
+test('new explicit verification and ambiguous historical stops have distinct safe messages', () => {
   const code = 'XHS_SOURCE_VERIFICATION_BLOCKED';
+  assert.match(failureMessage(new Error(code)), /没有可确认的验证入口/);
+  assert.match(taskNextStep({code}), /具体原因尚待核查/);
+  assert.doesNotMatch(taskNextStep({code}), /明确提示需要验证/);
   for (const message of [failureMessage(new Error(code)), taskNextStep({code})]) {
-    assert.match(message, /没有可确认的验证入口/);
     assert.doesNotMatch(message, /https:|自动打开|完成官方验证/);
   }
 });

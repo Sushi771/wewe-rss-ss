@@ -820,43 +820,47 @@ describe('whole creator durable offline closure', () => {
     },
     40000,
   );
-  it('does not equate top end with root reply completion; resumes with same budget and cursor', async () => {
-    let budget: any,
-      failReply = true;
+  it('resumes legacy reply-stage jobs with metrics only, preserves old comments and budget, and refreshes incrementally', async () => {
+    let budget: any;
     const replyCalls: string[] = [];
     const source: any = {
-      metrics: async () => {
+      metrics: async (_author: string, note?: string) => {
         await budget.admit('budget-unused');
-        return xhsNoteMetrics({ interact_info: { liked_count: '0' } });
-      },
-      comments: async (
-        _author: string,
-        _note: string,
-        cursor: string,
-        root?: string,
-      ) => {
-        await budget.admit('budget-unused');
-        if (root) {
-          replyCalls.push(cursor);
-          if (failReply && cursor === 'next')
-            throw Error('synthetic interruption');
-        }
-        return mapXhsComments(
-          {
-            comments: [
-              {
-                id: root ? (cursor ? 'child2' : 'child1') : 'root',
-                content: 'Synthetic',
-                like_count: '0',
-                user_info: { user_id: 'u', nickname: 'Synthetic' },
-              },
-            ],
-            has_more: !!root && !cursor,
-            cursor: root && !cursor ? 'next' : '',
+        return xhsNoteMetrics({
+          interact_info: {
+            liked_count: '0',
+            comment_count: note === 'new-note' ? undefined : '7',
           },
-          root ?? null,
-        );
+        });
       },
+      comments: jest.fn(
+        async (
+          _author: string,
+          _note: string,
+          cursor: string,
+          root?: string,
+        ) => {
+          await budget.admit('budget-unused');
+          if (root) {
+            replyCalls.push(cursor);
+          }
+          return mapXhsComments(
+            {
+              comments: [
+                {
+                  id: root ? (cursor ? 'child2' : 'child1') : 'root',
+                  content: 'Synthetic',
+                  like_count: '0',
+                  user_info: { user_id: 'u', nickname: 'Synthetic' },
+                },
+              ],
+              has_more: !!root && !cursor,
+              cursor: root && !cursor ? 'next' : '',
+            },
+            root ?? null,
+          );
+        },
+      ),
       capability: () => ({ canCollectComments: true }),
     };
     const engagement = new XhsEngagementService(db as any, source);
@@ -906,7 +910,7 @@ describe('whole creator durable offline closure', () => {
     );
     const started = await service.start({
       creatorId: 'creator',
-      requestLimit: 20,
+      requestLimit: 1,
       intervalMs: 1000,
     });
     async function settled() {
@@ -919,10 +923,31 @@ describe('whole creator durable offline closure', () => {
     }
     const paused = await settled();
     expect(paused.state).toBe('paused');
-    expect(paused.items[0].top).toBeTruthy();
-    expect(paused.items[0].replies).toBeUndefined();
-    expect(paused.budget!.used).toBe(5);
-    failReply = false;
+    expect(paused.code).toBe('XHS_REQUEST_BUDGET_EXHAUSTED');
+    expect(paused.budget!.used).toBe(1);
+    const oldComment = JSON.stringify({
+      id: 'root',
+      rootId: null,
+      parentId: null,
+      content: 'historical',
+      collectedAt: 1,
+    });
+    await db.$executeRaw`INSERT INTO xhs_saved_comments(note_id,comment_id,root_id,parent_id,document) VALUES(${noteId},'root',NULL,NULL,${oldComment})`;
+    const oldSnapshot = xhsNoteMetrics(
+      { interact_info: { comment_count: '7' } },
+      123,
+    );
+    await db.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) VALUES('note',${noteId},${JSON.stringify(oldSnapshot)})`;
+    const savedRows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${started.id}`;
+    const legacy = JSON.parse(savedRows[0].document);
+    legacy.stage = 'replies';
+    legacy.currentNote = noteId;
+    legacy.code = 'XHS_SOURCE_VERIFICATION_BLOCKED';
+    legacy.items[noteId].metrics = 123;
+    legacy.items[noteId].top = 1;
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(legacy)} WHERE id=${started.id}`;
     service = new XhsWholeCreatorService(
       db as any,
       subscriptions,
@@ -933,16 +958,27 @@ describe('whole creator durable offline closure', () => {
     await service.resume(started.id);
     const completed = await settled();
     expect(completed.state).toBe('completed');
-    expect(completed.items[0].replies).toBeTruthy();
+    expect(completed.lastPauseCode).toBe('XHS_SOURCE_VERIFICATION_BLOCKED');
+    expect(completed.items[0].replies).toBeUndefined();
+    expect(completed.items[0].engagement).toBe('metrics-only');
     expect(completed.items[0].supplement).toBe('saved');
-    expect(replyCalls).toEqual(['', 'next', 'next']);
-    expect(completed.budget!.used).toBe(6);
+    expect(replyCalls).toEqual([]);
+    expect(source.comments).not.toHaveBeenCalled();
+    expect(completed.budget!.used).toBe(1);
     expect(actualId).toBe(started.id);
     const rows = await db.$queryRaw<
       Array<{ n: bigint }>
     >`SELECT count(*) n FROM xhs_saved_comments WHERE note_id=${noteId}`;
-    expect(Number(rows[0].n)).toBe(3);
-    // A new finite generation refreshes existing metrics and ended comment windows.
+    expect(Number(rows[0].n)).toBe(1);
+    const historical = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_saved_comments WHERE note_id=${noteId} AND comment_id='root'`;
+    expect(historical[0].document).toBe(oldComment);
+    const preserved = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${noteId}`;
+    expect(JSON.parse(preserved[0].document).values.comments).toBe(7);
+    // A new finite generation refreshes existing metrics and discovers new notes.
     subscriptions.refresh = async () => {
       await db.xhsNote.upsert({
         where: { id: noteId },
@@ -984,8 +1020,14 @@ describe('whole creator durable offline closure', () => {
     const increment = await wait(next.id);
     expect(increment.state).toBe('completed');
     expect(increment.items).toHaveLength(2);
-    expect(increment.budget!.used).toBe(9);
-    expect(replyCalls).toHaveLength(7);
+    const newId = JSON.stringify(['xiaohongshu', 'note', 'new-note']);
+    const unknown = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${newId}`;
+    expect(JSON.parse(unknown[0].document).values.comments).toBeNull();
+    expect(increment.budget!.used).toBe(3);
+    expect(replyCalls).toHaveLength(0);
+    expect(source.comments).not.toHaveBeenCalled();
     subscriptions.refresh = async () => ({ taskId: 'list3' });
     const bounded = await service.start({
       creatorId: 'creator',

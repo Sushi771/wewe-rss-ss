@@ -92,17 +92,8 @@ function fixture(view) {
     slots,
     release,
     metric: module.exports.XhsMetricLine,
-    render: () => {
-      index = 0;
-      return all(
-        module.exports.XhsEngagementPanel({
-          creatorId: 'creator-a',
-          noteId: 'exact-note',
-          canCollectComments: true,
-          canRefreshMetrics: true,
-        }),
-      );
-    },
+    panel: module.exports.XhsEngagementPanel,
+    refresh: () => { index = 0; return all(module.exports.XhsCreatorMetricRefresh({creatorId:'creator-a',enabled:true})); },
     unmount: () => cleanups.forEach((fn) => fn?.()),
     text: (node) =>
       all(node)
@@ -148,28 +139,12 @@ test('following unknown is omitted, a measured zero and other unknown values sta
     /赞 0 · 收藏 未知 · 分享 未知 · 评论 0/,
   );
 });
-test('engagement reads its own note without a body dependency and mutations lock synchronously', async () => {
-  const f = fixture(empty),
-    nodes = f.render();
-  assert.deepEqual(f.calls[0][1], {
-    creatorId: 'creator-a',
-    noteId: 'exact-note',
-    offset: 0,
-    limit: 200,
-  });
-  assert.equal(f.calls[0][2].keepPreviousData, false);
-  const button = nodes.find(
-    (n) => n.type === 'button' && n.props.children === '更新互动快照',
-  );
-  const first = button.props.onClick(),
-    second = button.props.onClick();
-  assert.equal(f.calls.filter((c) => c[0] === 'mutate').length, 1);
-  f.unmount();
-  f.release.reject(Error('synthetic late failure'));
-  await Promise.all([first, second]);
-  assert.equal(
-    f.calls.some((c) => c[0] === 'invalidate'),
-    false,
-  );
-  assert.equal(f.slots.includes('synthetic late failure'), false);
+test('deleted comment panel cannot read notes; retained creator refresh locks and ignores late results', async () => {
+  const f=fixture(empty);assert.equal(f.panel,undefined);
+  const nodes=f.refresh();assert.equal(f.calls.filter(c=>c[0]==='read').length,0);
+  const button=nodes.find(n=>n.type==='button');const first=button.props.onClick(),second=button.props.onClick();
+  assert.equal(f.calls.filter(c=>c[0]==='mutate').length,1);
+  assert.deepEqual(f.calls.find(c=>c[0]==='mutate')[1],{creatorId:'creator-a'});
+  f.unmount();f.release.reject(Error('synthetic late failure'));await Promise.all([first,second]);
+  assert.equal(f.calls.some(c=>c[0]==='invalidate'),false);assert.equal(f.slots.includes('synthetic late failure'),false);
 });

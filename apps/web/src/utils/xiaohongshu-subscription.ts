@@ -70,7 +70,7 @@ export function taskNextStep(task: SubscriptionTask) {
   if (task.code === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED')
     return '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。';
   if (task.code === 'XHS_SOURCE_VERIFICATION_BLOCKED')
-    return '来源明确提示需要验证，但当前没有可确认的验证入口；采集已停止，请先核查来源状态。';
+    return '历史来源请求已暂停，具体原因尚待核查；采集已停止，不会因重新连接自动解除。';
   if (task.code?.startsWith('XHS_SOURCE_') || task.code === 'XHS_SESSION_REQUIRED')
     return '来源请求已暂停，请通过本机安全工具核查采集会话与来源状态后再明确连接；已保存数据保留。';
   if (task.code === 'XHS_RESUME_DIRECTORY_CHANGED')
