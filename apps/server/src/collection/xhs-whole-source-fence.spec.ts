@@ -93,17 +93,22 @@ describe('whole creator durable checkpoint fence', () => {
     await db.$disconnect();
     await fs.rm(folder, { recursive: true, force: true });
   }, 40000);
-  it.each([[true, false, false, false], [false, false, false, false], [true, true, false, false], [false, false, true, false], [true, true, false, true]])(
-    'runs scoped checkpoints (list complete: %s, image: %s, directory only: %s, media zero: %s)',
-    async (listEnd, hasImage, directoryOnly, mediaZero) => {
+  it.each([[true, false, false, false, false, false], [false, false, false, false, false, false], [true, true, false, false, false, false], [false, false, true, false, false, false], [true, true, false, true, false, false], [false, false, true, false, true, false], [false, false, true, false, true, true]])(
+    'runs scoped checkpoints (list complete: %s, image: %s, directory only: %s, media zero: %s, 10s: %s, cancel: %s)',
+    async (listEnd, hasImage, directoryOnly, mediaZero, slow, cancelWait) => {
       const author = {
         id: scope.authorId,
         name: 'Synthetic',
         profileUrl:
           'https://www.xiaohongshu.com/user/profile/' + scope.authorId,
       };
+      const sentAt: number[] = [];
+      let sawProfile!: () => void;
+      const profileCalled = new Promise<void>((resolve) => { sawProfile = resolve; });
       const api = jest.fn(async (request: any) => {
         const u = new URL(request.url);
+        sentAt.push(Date.now());
+        if (u.pathname.endsWith('otherinfo')) sawProfile();
         const data = u.pathname.endsWith('otherinfo')
           ? { syntheticSchema: 1, author }
           : u.pathname.endsWith('user_posted')
@@ -163,8 +168,9 @@ describe('whole creator durable checkpoint fence', () => {
         a1: 'synthetic-a1',
         webSession: 'synthetic-session',
       });
-      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES('xhs:source-total',20,0,0,0)`;
-      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES(${scope.jobId},20,1000,0,0)`;
+      const sharedLimit = slow ? 6 : 20, sharedUsed = slow ? 2 : 0, interval = slow ? 10000 : 1000;
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES('xhs:source-total',${sharedLimit},${slow ? 10000 : 0},${sharedUsed},0)`;
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES(${scope.jobId},20,${interval},0,0)`;
       if (!listEnd) await db.xhsNote.deleteMany();
       const doc = {
         id: scope.jobId,
@@ -197,7 +203,7 @@ describe('whole creator durable checkpoint fence', () => {
         expectedAuthorId: scope.authorId,
         jobId: scope.jobId,
         requestLimit: 20,
-        intervalMs: 1000,
+        intervalMs: interval,
         phaseLimits: { profile: directoryOnly ? 1 : 10, list: directoryOnly ? 3 : 10, detail: directoryOnly ? 0 : 10, media: directoryOnly || mediaZero ? 0 : 10, metrics: directoryOnly ? 0 : 10 },
       };
       await expect(
@@ -207,8 +213,22 @@ describe('whole creator durable checkpoint fence', () => {
       expect(api).not.toHaveBeenCalled();
       await expect(whole.prepareHistoryGrant(grant)).rejects.toThrow();
       await whole.resume(scope.jobId);
+      if (cancelWait) {
+        await profileCalled;
+        await whole.cancel(scope.jobId);
+      }
       await (whole as any).lane;
       const result = await whole.view(scope.jobId);
+      if (cancelWait) {
+        expect(result.state).toBe('cancelled');
+        expect(api).toHaveBeenCalledTimes(1);
+        expect(media).not.toHaveBeenCalled();
+        const total = await db.$queryRaw<Array<{used: number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+        expect(total[0].used).toBe(3);
+        expect(result.budget!.used).toBe(1);
+        runtime.onModuleDestroy();
+        return;
+      }
       if (directoryOnly) {
         expect(result.state).toBe('paused');
         expect(result.listEnd).toBe(true);
@@ -220,6 +240,12 @@ describe('whole creator durable checkpoint fence', () => {
         expect(result.historyGrant!.used.media).toBe(0);
         expect(result.historyGrant!.used.profile).toBe(1);
         expect(result.historyGrant!.used.list).toBe(1);
+        if (slow) {
+          expect(sentAt[1] - sentAt[0]).toBeGreaterThanOrEqual(9900);
+          const total = await db.$queryRaw<Array<{used: number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+          expect(total[0].used).toBe(4);
+          expect(result.budget!.used).toBe(2);
+        }
         runtime.onModuleDestroy();
         return;
       }

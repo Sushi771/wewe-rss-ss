@@ -209,6 +209,7 @@ export class XhsSubscriptionRuntime
   private sourceAdmission?: (
     alreadyBudgeted: boolean,
     group?: WholeSourceGroup,
+    ready?: (tx?: Prisma.TransactionClient) => Promise<void>,
   ) => Promise<(() => Promise<void>) | void>;
   private sourceDispatch?: <T>(
     operation: () => Promise<T>,
@@ -220,6 +221,7 @@ export class XhsSubscriptionRuntime
     admit: (
       alreadyBudgeted: boolean,
       group?: WholeSourceGroup,
+      ready?: (tx?: Prisma.TransactionClient) => Promise<void>,
     ) => Promise<(() => Promise<void>) | void>,
     dispatch?: XhsSubscriptionRuntime['sourceDispatch'],
   ) {
@@ -410,6 +412,7 @@ export class XhsSubscriptionRuntime
         const release = await this.sourceAdmission(
           scopes.length > 0,
           this.wholeSourceGroup.getStore(),
+          ready,
         );
         if (release) undo.push(release);
       }

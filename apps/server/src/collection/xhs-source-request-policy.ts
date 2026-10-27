@@ -249,12 +249,12 @@ async function dispatchSource<T>(
     const row = await store.read(SOURCE_TOTAL);
     if (
       !row ||
-      row.nextAt - Date.now() > 1000 ||
+      (!group && row.nextAt - Date.now() > 1000) ||
       (await pendingWaitExpired(db, waiting, group?.marker))
     )
       fail('XHS_REQUEST_RATE_PAUSED');
     await runtime.waitForSourceRate(
-      Math.max(1, row.nextAt > Date.now() ? row.nextAt - Date.now() : 25),
+      Math.min(1000, Math.max(1, row.nextAt > Date.now() ? row.nextAt - Date.now() : 25)),
     );
   }
 }
@@ -265,20 +265,21 @@ export function bindXhsSourceTotalBudget(
   runtime: XhsSubscriptionRuntime,
 ) {
   runtime.bindSourceAdmission(
-    async (alreadyBudgeted, group) => {
+    async (alreadyBudgeted, group, ready) => {
       const store = new XhsSqliteBudgetStore(db);
       if (!(await store.read(SOURCE_TOTAL))) {
         if (!alreadyBudgeted) fail('XHS_REQUEST_BUDGET_REQUIRED');
         return;
       }
       const budget = new XhsRequestBudget({
-        waitAllowanceMs: 1000,
+        waitAllowanceMs: group ? undefined : 1000,
         rollback: () => write(db, (tx) => rollbackTotal(tx)),
         read: (id) => store.read(id),
         reserve: async (id, now) => {
           const waiting: { since?: number } = {};
           for (;;) {
             runtime.assertSourceReady();
+            if (group) await ready?.();
             if (await write(db, (tx) => reserveTotal(tx, now, group?.marker))) {
               return true;
             }
@@ -286,15 +287,15 @@ export function bindXhsSourceTotalBudget(
             if (
               !row ||
               row.used >= row.limit ||
-              row.nextAt - Date.now() > 1000 ||
+              (!group && row.nextAt - Date.now() > 1000) ||
               (await pendingWaitExpired(db, waiting, group?.marker))
             )
               return false;
             await runtime.waitForSourceRate(
-              Math.max(
+              Math.min(1000, Math.max(
                 1,
                 row.nextAt > Date.now() ? row.nextAt - Date.now() : 25,
-              ),
+              )),
             );
             now = Date.now();
           }
