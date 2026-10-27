@@ -12,7 +12,11 @@ import { ConfigService } from '@nestjs/config';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { TrpcService } from '../trpc/trpc.service';
 import { createHTTPServer } from '@trpc/server/adapters/standalone';
-import { createTRPCProxyClient, httpLink } from '@trpc/client';
+// Resolve the web client's declared dependency from its owning workspace.
+import { createRequire } from 'node:module';
+const { createTRPCProxyClient, httpLink } = createRequire(
+  path.resolve(__dirname, '../../../web/package.json'),
+)('@trpc/client') as { createTRPCProxyClient: <T>(options: unknown) => any; httpLink: (options: { url: string }) => unknown };
 
 describe('batch subscription with synthetic SQLite and transport', () => {
   let folder: string, db: PrismaClient;

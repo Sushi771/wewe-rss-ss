@@ -48,6 +48,15 @@ vm.runInNewContext(
   { exports: presentationExports, URL },
   { timeout: 1000 },
 );
+const filterExports: Record<string, any> = {};
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync(path.resolve(__dirname, '../../../web/src/utils/xhs-combined-filter.ts'), 'utf8'),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS } },
+  ).outputText,
+  { exports: filterExports },
+  { timeout: 1000 },
+);
 const expressions: Record<string, string> = {};
 const messageExports: Record<string, unknown> = {};
 vm.runInNewContext(
@@ -181,6 +190,8 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       ],
       selectedArchives: [],
       exportScope: 'selected',
+      compiledConditions: filterExports.compileFilter(filterExports.emptyCombinedFilter()),
+      filterNotes: filterExports.filterNotes,
       notesInput: { creatorId: 'a' },
       notes: { data: { queryVersion: undefined } },
       saveSettings: { directory: 'synthetic-only', askEveryTime: false },
@@ -631,6 +642,31 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       creatorId: 'a',
       noteIds: ['complete'],
     });
+    expect(link.click).toHaveBeenCalledTimes(1);
+    expect(link.remove).toHaveBeenCalled();
+    expect(scope.URL.revokeObjectURL).toHaveBeenCalledWith('blob:synthetic');
+  });
+  it('exports the filtered snapshot using real combined conditions', async () => {
+    const { scope } = harness();
+    scope.exportScope = 'filtered';
+    scope.compiledConditions = filterExports.compileFilter({ mode: 'and', conditions: [
+      { id: 1, metric: 'likes', operator: '>=', value: '2', upper: '' },
+    ] });
+    scope.utils.client = { xiaohongshu: { notes: { query: jest.fn().mockResolvedValue({
+      queryVersion: 'v1', items: [
+        { id: 'matched', creatorId: 'a', status: 'complete', metrics: { values: { likes: 2 } } },
+        { id: 'excluded', creatorId: 'a', status: 'complete', metrics: { values: { likes: 1 } } },
+        { id: 'unknown', creatorId: 'a', status: 'complete', metrics: null },
+      ],
+    }) } } };
+    const link = { click: jest.fn(), remove: jest.fn() };
+    scope.document = { createElement: jest.fn(() => link), body: { appendChild: jest.fn() } };
+    scope.URL = { createObjectURL: jest.fn(() => 'blob:synthetic'), revokeObjectURL: jest.fn() };
+    scope.Blob = Blob; scope.atob = atob; scope.Uint8Array = Uint8Array;
+    scope.exportNotes.mutateAsync.mockResolvedValue({ base64: 'U1lOVEhFVElD', filename: 'synthetic.zip', mimeType: 'application/zip', notes: 1 });
+    await evaluate('handleDownload', scope)();
+    expect(scope.utils.client.xiaohongshu.notes.query).toHaveBeenCalledWith({ creatorId: 'a' });
+    expect(scope.exportNotes.mutateAsync).toHaveBeenCalledWith({ creatorId: 'a', queryVersion: 'v1', noteIds: ['matched'] });
     expect(link.click).toHaveBeenCalledTimes(1);
     expect(link.remove).toHaveBeenCalled();
     expect(scope.URL.revokeObjectURL).toHaveBeenCalledWith('blob:synthetic');

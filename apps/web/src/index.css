@@ -1456,6 +1456,11 @@ button:active {
   align-items: center;
   gap: 6px 12px;
   padding: 8px 12px;
+  min-height: 56px;
+  max-height: min(45dvh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  contain: paint;
 }
 .xhs-filter-bar .content-date-filter {
   flex-basis: 100%;
@@ -1594,5 +1599,5 @@ button:active {
 .xhs-combined-filter input,
 .xhs-combined-filter select,
 .xhs-combined-filter button {
-  scroll-margin-top: 160px;
+  scroll-margin-block: 4px;
 }

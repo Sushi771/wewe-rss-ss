@@ -62,6 +62,7 @@ export default function XhsBatchSubscription({
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [readVersion, setReadVersion] = useState(0);
+  const intro = useRef<HTMLParagraphElement>(null);
   const operation = useRef(false),
     alive = useRef(true),
     generation = useRef(0),
@@ -129,6 +130,8 @@ export default function XhsBatchSubscription({
   const perform = async (kind: 'start' | 'resume' | 'cancel') => {
     if (operation.current) return;
     operation.current = true;
+    // Keep keyboard events in the dialog before disabling the focused action.
+    intro.current?.closest<HTMLElement>('[role="dialog"]')?.focus();
     setBusy(true);
     setError('');
     const version = ++generation.current;
@@ -213,7 +216,7 @@ export default function XhsBatchSubscription({
       <ModalContent>
         <ModalHeader>批量订阅小红书博主</ModalHeader>
         <ModalBody>
-          <p className="text-sm">
+          <p ref={intro} className="text-sm">
             每行粘贴链接，或直接粘贴整段分享文案。按博主去重后依次订阅；不会自动采集笔记或评论。
           </p>
           <label className="grid gap-2 text-sm">
