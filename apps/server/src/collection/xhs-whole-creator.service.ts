@@ -38,6 +38,14 @@ type Job = {
   lastPauseCode?: string;
   currentNote?: string;
   stage?: string;
+  sourceGrant?: {
+    creatorId: string;
+    authorId: string;
+    phases: string[];
+    limits: Record<string, number>;
+    used: Record<string, number>;
+  };
+  sourceFence?: { marker: string; phase: string; state: string };
 };
 /** A finite explicit run over durable existing primitives; restart never dispatches. */
 @Injectable()
@@ -79,11 +87,37 @@ export class XhsWholeCreatorService implements OnModuleInit {
   }
   private async save(job: Job) {
     job.updatedAt = Date.now();
-    const document = JSON.stringify(job);
-    const changed = await this.write(
-      (tx) => tx.$executeRaw`UPDATE xhs_whole_creator_jobs
-      SET state=${job.state},document=${document},updated_at=${BigInt(job.updatedAt)} WHERE id=${job.id} AND (state <> 'cancelled' OR ${job.state}='cancelled')`,
-    );
+    const changed = await this.write(async (tx) => {
+      const rows = await tx.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${job.id}`;
+      if (rows.length !== 1) return 0;
+      const durable = JSON.parse(rows[0].document);
+      const document: Record<string, any> = { ...job, items: { ...job.items } };
+      if (
+        typeof durable.profile === 'number' &&
+        durable.profile > (job.profile ?? 0)
+      )
+        document.profile = durable.profile;
+      for (const [id, previous] of Object.entries(durable.items ?? {}) as Array<
+        [string, Item]
+      >) {
+        if (
+          previous.metrics &&
+          previous.metrics > (document.items[id]?.metrics ?? 0)
+        )
+          document.items[id] = {
+            ...document.items[id],
+            metrics: previous.metrics,
+          };
+      }
+      for (const key of ['sourceFence', 'sourceGrant']) {
+        if (durable[key] !== undefined) document[key] = durable[key];
+        else delete document[key];
+      }
+      return tx.$executeRaw`UPDATE xhs_whole_creator_jobs
+      SET state=${job.state},document=${JSON.stringify(document)},updated_at=${BigInt(job.updatedAt)} WHERE id=${job.id} AND (state <> 'cancelled' OR ${job.state}='cancelled')`;
+    });
     if (changed !== 1) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
   }
   async start(input: {
@@ -128,6 +162,168 @@ export class XhsWholeCreatorService implements OnModuleInit {
     this.schedule(job.id);
     return this.view(job.id);
   }
+  /** Explicitly prepare a bounded history-review grant; never schedules work. */
+  async prepareHistoryGrant(input: {
+    creatorId: string;
+    expectedAuthorId: string;
+    jobId?: string;
+    requestLimit: number;
+    intervalMs: number;
+    phaseLimits: Record<'profile' | 'list' | 'detail' | 'metrics', number>;
+  }) {
+    const phases = ['profile', 'list', 'detail', 'metrics'] as const;
+    if (
+      !input.phaseLimits ||
+      Object.keys(input.phaseLimits).length !== phases.length ||
+      phases.some(
+        (p) => !Object.prototype.hasOwnProperty.call(input.phaseLimits, p),
+      ) ||
+      !/^[a-zA-Z0-9_-]{1,128}$/.test(input.expectedAuthorId) ||
+      !Number.isSafeInteger(input.requestLimit) ||
+      input.requestLimit < 1 ||
+      input.requestLimit > 100000 ||
+      !Number.isSafeInteger(input.intervalMs) ||
+      input.intervalMs < 1000 ||
+      input.intervalMs > 60000 ||
+      phases.some(
+        (p) =>
+          !Number.isSafeInteger(input.phaseLimits[p]) ||
+          input.phaseLimits[p] < 1 ||
+          input.phaseLimits[p] > input.requestLimit,
+      )
+    )
+      throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
+    return this.write(async (tx) => {
+      const risk = await tx.$queryRaw<
+        Array<{ state: string; code: string }>
+      >`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
+      if (
+        risk.length !== 1 ||
+        risk[0].state !== 'blocked' ||
+        risk[0].code !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
+      )
+        throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      const unresolved = await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT original.id FROM xhs_limited_recovery original WHERE original.state IN ('armed','started','unknown') AND NOT EXISTS(SELECT 1 FROM xhs_limited_recovery_append followup WHERE followup.id=original.id AND followup.note_id=original.note_id AND followup.author_id=original.author_id AND followup.state='finished') LIMIT 1`;
+      if (unresolved.length)
+        throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      const markers = await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' LIMIT 1`;
+      if (markers.length)
+        throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      const creator = await tx.xhsCreator.findUnique({
+        where: { id: input.creatorId },
+      });
+      if (
+        !creator?.enabled ||
+        creator.externalAuthorId !== input.expectedAuthorId
+      )
+        throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+      let job: Job;
+      if (input.jobId) {
+        const rows = await tx.$queryRaw<
+          Array<{ document: string; state: string }>
+        >`SELECT document,state FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND creator_id=${input.creatorId}`;
+        if (rows.length !== 1 || rows[0].state !== 'paused')
+          throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+        job = JSON.parse(rows[0].document) as Job;
+        if (
+          job.sourceFence ||
+          job.sourceGrant ||
+          ![
+            'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
+            'XHS_SOURCE_VERIFICATION_BLOCKED',
+          ].includes(job.code ?? '')
+        )
+          throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+        const budget = await new XhsSqliteBudgetStore(tx).read(job.id);
+        if (
+          !budget ||
+          budget.limit !== input.requestLimit ||
+          budget.intervalMs !== input.intervalMs
+        )
+          throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
+      } else {
+        const pending = await tx.$queryRaw<
+          Array<{ id: string }>
+        >`SELECT id FROM xhs_whole_creator_jobs WHERE creator_id=${input.creatorId} AND state <> 'completed'`;
+        if (pending.length) throw new XhsSubscriptionError('XHS_TASK_CONFLICT');
+        job = {
+          id: randomUUID(),
+          creatorId: input.creatorId,
+          state: 'paused',
+          updatedAt: Date.now(),
+          listEnd: false,
+          items: {},
+          code: 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
+        };
+        await tx.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms) VALUES(${job.id},${input.requestLimit},${input.intervalMs})`;
+        await tx.$executeRaw`INSERT INTO xhs_whole_creator_jobs(id,creator_id,state,document,updated_at) VALUES(${job.id},${job.creatorId},'paused',${JSON.stringify(job)},${BigInt(job.updatedAt)})`;
+      }
+      job.sourceGrant = {
+        creatorId: input.creatorId,
+        authorId: input.expectedAuthorId,
+        phases: [...phases],
+        limits: { ...input.phaseLimits },
+        used: { profile: 0, list: 0, detail: 0, metrics: 0 },
+      };
+      const changed =
+        await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${job.id} AND state='paused'`;
+      if (changed !== 1)
+        throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+      return { id: job.id, state: 'paused' as const };
+    });
+  }
+  /** Extend only the selected stage cap; used counters and job/global budgets stay intact. */
+  async extendHistoryPhase(input: {
+    id: string;
+    phase: 'profile' | 'list' | 'detail' | 'metrics';
+    newLimit: number;
+  }) {
+    if (
+      !['profile', 'list', 'detail', 'metrics'].includes(input.phase) ||
+      !Number.isSafeInteger(input.newLimit)
+    )
+      throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
+    return this.write(async (tx) => {
+      const rows = await tx.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${input.id} AND state='paused'`;
+      if (rows.length !== 1)
+        throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+      const job = JSON.parse(rows[0].document) as Job;
+      const risk = await tx.$queryRaw<
+        Array<{ state: string; code: string }>
+      >`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
+      const creator = await tx.xhsCreator.findUnique({
+        where: { id: job.creatorId },
+      });
+      const budget = await new XhsSqliteBudgetStore(tx).read(job.id);
+      if (
+        job.sourceFence ||
+        !job.sourceGrant ||
+        risk.length !== 1 ||
+        risk[0].state !== 'blocked' ||
+        risk[0].code !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED' ||
+        !creator?.enabled ||
+        creator.externalAuthorId !== job.sourceGrant.authorId ||
+        job.sourceGrant.creatorId !== job.creatorId ||
+        !budget ||
+        !Number.isSafeInteger(job.sourceGrant.limits[input.phase]) ||
+        input.newLimit <= job.sourceGrant.limits[input.phase] ||
+        input.newLimit > budget.limit
+      )
+        throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      job.sourceGrant.limits[input.phase] = input.newLimit;
+      const changed =
+        await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${input.id} AND state='paused' AND document=${rows[0].document}`;
+      if (changed !== 1)
+        throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+      return { id: job.id, state: 'paused' as const };
+    });
+  }
   async resume(id: string) {
     const job = await this.load(id);
     if (
@@ -135,6 +331,8 @@ export class XhsWholeCreatorService implements OnModuleInit {
       !['paused', 'partial', 'failed', 'cancelled'].includes(job.state)
     )
       throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    if (job.sourceFence)
+      throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     const previous = job.state;
     job.state = 'queued';
     if (job.code) job.lastPauseCode = job.code;
@@ -158,6 +356,8 @@ export class XhsWholeCreatorService implements OnModuleInit {
     )
       throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
     const job = await this.load(id);
+    if (job.sourceFence)
+      throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     if (
       this.running.has(id) ||
       job.state !== 'paused' ||
@@ -240,8 +440,17 @@ export class XhsWholeCreatorService implements OnModuleInit {
           ? await this.subscriptions.confirmedLocalArchives({ taskId })
           : await this.subscriptions.confirmedLocalSaves({ taskId });
       for (const receipt of receipts)
-        if (job.items[receipt.noteId])
+        if (job.items[receipt.noteId]) {
           job.items[receipt.noteId][phase] = receipt.savedAt;
+          if (
+            phase === 'archive' &&
+            'metricsCollectedAt' in receipt &&
+            Number.isSafeInteger(receipt.metricsCollectedAt) &&
+            (receipt.metricsCollectedAt as number) > 0
+          )
+            job.items[receipt.noteId].metrics =
+              receipt.metricsCollectedAt as number;
+        }
       if (phase === 'supplement') {
         for (const receipt of await this.subscriptions.confirmedLocalArchives({
           taskId,
@@ -347,68 +556,79 @@ export class XhsWholeCreatorService implements OnModuleInit {
           }
         },
       });
-      await this.runtime.withRequestBudget(budget, id, async () => {
-        if (!job.listEnd) {
-          if (!job.listTask) {
-            const task = await this.subscriptions.refresh({
-              id: job.creatorId,
-            });
-            job.listTask = task.taskId;
-            await this.checkpointChild(job, task.taskId);
-          } else {
-            const prior = await this.subscriptions.task({
-              taskId: job.listTask,
-            });
-            if (!['queued', 'running', 'completed'].includes(prior.state)) {
-              const next = await this.subscriptions.resumeTask({
+      const runWithBudget = () =>
+        this.runtime.withRequestBudget(budget, id, async () => {
+          if (!job.listEnd) {
+            if (!job.listTask) {
+              const task = await this.subscriptions.refresh({
+                id: job.creatorId,
+              });
+              job.listTask = task.taskId;
+              await this.checkpointChild(job, task.taskId);
+            } else {
+              const prior = await this.subscriptions.task({
                 taskId: job.listTask,
               });
-              job.listTask = next.taskId;
-              await this.checkpointChild(job, next.taskId);
+              if (!['queued', 'running', 'completed'].includes(prior.state)) {
+                const next = await this.subscriptions.resumeTask({
+                  taskId: job.listTask,
+                });
+                job.listTask = next.taskId;
+                await this.checkpointChild(job, next.taskId);
+              }
             }
-          }
-          await this.waitList(job);
-          job.listEnd = true;
-          await this.save(job);
-        }
-        const notes = await this.db.xhsNote.findMany({
-          where: { creatorId: job.creatorId },
-          orderBy: { id: 'asc' },
-          select: { id: true },
-        });
-        for (const note of notes) job.items[note.id] ??= {};
-        // Adopt the old download child on upgrade, preserving its directory and receipts.
-        if (!job.archiveTask && job.downloadTask) {
-          job.archiveTask = job.downloadTask;
-          delete job.downloadTask;
-        }
-        // A first-note comment failure must not prevent the rest of the full archives.
-        await this.saveStage(job, notes, 'archive');
-        if (!job.profile) {
-          await this.check(job);
-          const snapshot = await this.engagement.refreshMetrics({
-            creatorId: job.creatorId,
-          });
-          job.profile = snapshot.collectedAt;
-          await this.save(job);
-        }
-        for (const note of notes) {
-          await this.check(job);
-          job.currentNote = note.id;
-          const item = (job.items[note.id] ??= {});
-          if (!item.metrics) {
-            job.stage = 'metrics';
+            await this.waitList(job);
+            job.listEnd = true;
             await this.save(job);
+          }
+          const notes = await this.db.xhsNote.findMany({
+            where: { creatorId: job.creatorId },
+            orderBy: { id: 'asc' },
+            select: { id: true },
+          });
+          for (const note of notes) job.items[note.id] ??= {};
+          // Adopt the old download child on upgrade, preserving its directory and receipts.
+          if (!job.archiveTask && job.downloadTask) {
+            job.archiveTask = job.downloadTask;
+            delete job.downloadTask;
+          }
+          // A first-note comment failure must not prevent the rest of the full archives.
+          await this.saveStage(job, notes, 'archive');
+          if (!job.profile) {
+            await this.check(job);
             const snapshot = await this.engagement.refreshMetrics({
               creatorId: job.creatorId,
-              noteId: note.id,
             });
-            item.metrics = snapshot.collectedAt;
+            job.profile = snapshot.collectedAt;
             await this.save(job);
           }
-        }
-        await this.saveStage(job, notes, 'supplement');
-      });
+          for (const note of notes) {
+            await this.check(job);
+            job.currentNote = note.id;
+            const item = (job.items[note.id] ??= {});
+            if (!item.metrics) {
+              job.stage = 'metrics';
+              await this.save(job);
+              const snapshot = await this.engagement.refreshMetrics({
+                creatorId: job.creatorId,
+                noteId: note.id,
+              });
+              item.metrics = snapshot.collectedAt;
+              await this.save(job);
+            }
+          }
+          await this.saveStage(job, notes, 'supplement');
+        });
+      if (job.sourceGrant)
+        await this.runtime.withWholeAuthorization(
+          {
+            jobId: job.id,
+            creatorId: job.creatorId,
+            authorId: job.sourceGrant.authorId,
+          },
+          runWithBudget,
+        );
+      else await runWithBudget();
       job.state = Object.values(job.items).every(
         (item) => item.archive && item.supplement && item.metrics,
       )
@@ -430,11 +650,15 @@ export class XhsWholeCreatorService implements OnModuleInit {
       orderBy: { id: 'asc' },
       select: { id: true, title: true },
     });
+    const { sourceGrant, sourceFence, ...visibleJob } = job;
     return {
-      ...job,
+      ...visibleJob,
       budget,
       sourceTotalKnown: false,
+      historyGrant: sourceGrant ? { limits: sourceGrant.limits, used: sourceGrant.used } : undefined,
+      sourceCheckpoint: sourceFence ? { phase: sourceFence.phase, state: job.state === 'running' ? 'in-progress' as const : /^XHS_SOURCE_(?:AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(job.code ?? '') ? 'restricted' as const : 'unknown' as const } : undefined,
       resumable:
+        !sourceFence &&
         !this.running.has(id) &&
         ['paused', 'partial', 'failed', 'cancelled'].includes(job.state),
       items: notes.map((note) => ({

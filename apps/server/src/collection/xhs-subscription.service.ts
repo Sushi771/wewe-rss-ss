@@ -35,6 +35,17 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  withCheckpointGroup?<T>(
+    phase: 'profile' | 'list' | 'detail' | 'metrics',
+    authorId: string,
+    noteId: string | undefined,
+    work: () => Promise<T>,
+  ): Promise<T>;
+  checkpointWholeSource?(
+    tx: Prisma.TransactionClient,
+    collectedAt?: number,
+  ): Promise<void>;
+
   metrics?(authorId: string, noteId?: string): Promise<XhsMetricSnapshot>;
   comments?(
     authorId: string,
@@ -79,6 +90,7 @@ type Task = XhsSubscriptionTask & {
   pageLimit?: number;
   localReceipts?: Record<string, { savedAt: number; supplementStatus: string }>;
   localArchives?: Record<string, { savedAt: number }>;
+  detailMetrics?: Record<string, number>;
   localFilesSaved?: number;
   localFilesReused?: number;
 };
@@ -367,8 +379,10 @@ export class XhsSubscriptionService implements OnModuleInit {
       const changed =
         await tx.$executeRaw`UPDATE xhs_limited_recovery SET state='finished',media_manifest=${manifest},updated_at=${BigInt(Date.now())}
         WHERE id='single-round' AND owner=${owner} AND state='started'`;
-      const appended = await tx.$executeRaw`UPDATE xhs_limited_recovery_append SET state='finished',media_manifest=${manifest},updated_at=${BigInt(Date.now())} WHERE id='single-round' AND owner=${owner} AND state='started'`;
-      if (changed + appended !== 1) return reject('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      const appended =
+        await tx.$executeRaw`UPDATE xhs_limited_recovery_append SET state='finished',media_manifest=${manifest},updated_at=${BigInt(Date.now())} WHERE id='single-round' AND owner=${owner} AND state='started'`;
+      if (changed + appended !== 1)
+        return reject('XHS_SOURCE_RISK_REVIEW_REQUIRED');
       return {
         creatorId: creator.id,
         noteId,
@@ -556,6 +570,9 @@ export class XhsSubscriptionService implements OnModuleInit {
         await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(parent)}, updated_at=${BigInt(Date.now())} WHERE id=${parent.taskId}`;
       }
     }
+    // Preserve a detail receipt committed before an acknowledgement failure.
+    if (saved?.detailMetrics)
+      t.detailMetrics = { ...saved.detailMetrics, ...t.detailMetrics };
     const json = JSON.stringify(t);
     return tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id, creator_id, state, document, updated_at) VALUES (${t.taskId}, ${t.creatorId}, ${t.state}, ${json}, ${BigInt(Date.now())}) ON CONFLICT(id) DO UPDATE SET state=excluded.state, document=excluded.document, updated_at=excluded.updated_at`;
   }
@@ -642,7 +659,13 @@ export class XhsSubscriptionService implements OnModuleInit {
           Number.isSafeInteger(receipt.savedAt) &&
           receipt.savedAt > 0,
       )
-      .map(([noteId, receipt]) => ({ noteId, ...receipt }));
+      .map(([noteId, receipt]) => ({
+        noteId,
+        ...receipt,
+        ...(task.detailMetrics?.[noteId]
+          ? { metricsCollectedAt: task.detailMetrics[noteId] }
+          : {}),
+      }));
   }
   /** Durable positive saver receipts only; cache completeness and video skips are not evidence. */
   async confirmedLocalSaves(input: { taskId: string }) {
@@ -856,63 +879,114 @@ export class XhsSubscriptionService implements OnModuleInit {
                 const tuple = JSON.parse(id);
                 if (tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note')
                   return reject('XHS_NOTE_ID_INVALID');
-                const note = await this.source!.detail(
+                await this.withSourceCheckpoint(
+                  'detail',
                   creator.externalAuthorId!,
                   tuple[2],
-                  this.controllers.get(t.taskId)?.signal,
-                );
-                if (!active(t)) break;
-                const draft = xhsArchiveDraft(creator.externalAuthorId!, note);
-                if (
-                  draft.noteKey !== id ||
-                  draft.status !== 'candidate' ||
-                  !draft.readyForEvidenceCheck
-                )
-                  return reject('XHS_DETAIL_INCOMPLETE');
-                const html = verifiedDownloadBody(
-                  '<div id="js_content">' +
-                    draft.text
-                      .split('\n')
-                      .map((p) => '<p>' + esc(p) + '</p>')
-                      .join('') +
-                    draft.images
-                      .map(
-                        (i) =>
-                          '<img src="data:' +
-                          i.type +
-                          ';base64,' +
-                          i.bytes.toString('base64') +
-                          '">',
-                      )
-                      .join('') +
-                    '</div>',
-                );
-                await this.write(Buffer.byteLength(html) + 4096, async (tx) => {
-                  const currentCreator = await tx.xhsCreator.findUnique({
-                    where: { id: creator.id },
-                  });
-                  if (
-                    !currentCreator?.enabled ||
-                    currentCreator.externalAuthorId !== creator.externalAuthorId
-                  )
-                    return reject('XHS_SUBSCRIPTION_CHANGED');
-                  const current = await tx.xhsNote.findFirst({
-                    where: { id, creatorId: creator.id },
-                  });
-                  if (!current) return reject('XHS_SELECTION_CHANGED');
-                  await saveXhsMetrics(tx, 'note', id, note.metrics);
-                  if (current.status !== 'complete' || !current.contentHtml)
-                    await tx.xhsNote.update({
-                      where: { id },
-                      data: {
-                        title: draft.title,
-                        publishTime: note.publishedAt,
-                        contentHtml: html,
-                        status: 'complete',
-                        kind: 'image-text',
+                  async () => {
+                    const note = await this.source!.detail(
+                      creator.externalAuthorId!,
+                      tuple[2],
+                      this.controllers.get(t.taskId)?.signal,
+                    );
+                    if (!active(t)) return;
+                    const draft = xhsArchiveDraft(
+                      creator.externalAuthorId!,
+                      note,
+                    );
+                    if (
+                      draft.noteKey !== id ||
+                      draft.status !== 'candidate' ||
+                      !draft.readyForEvidenceCheck
+                    )
+                      return reject('XHS_DETAIL_INCOMPLETE');
+                    const html = verifiedDownloadBody(
+                      '<div id="js_content">' +
+                        draft.text
+                          .split('\n')
+                          .map((p) => '<p>' + esc(p) + '</p>')
+                          .join('') +
+                        draft.images
+                          .map(
+                            (i) =>
+                              '<img src="data:' +
+                              i.type +
+                              ';base64,' +
+                              i.bytes.toString('base64') +
+                              '">',
+                          )
+                          .join('') +
+                        '</div>',
+                    );
+                    await this.write(
+                      Buffer.byteLength(html) + 4096,
+                      async (tx) => {
+                        const currentCreator = await tx.xhsCreator.findUnique({
+                          where: { id: creator.id },
+                        });
+                        if (
+                          !currentCreator?.enabled ||
+                          currentCreator.externalAuthorId !==
+                            creator.externalAuthorId
+                        )
+                          return reject('XHS_SUBSCRIPTION_CHANGED');
+                        const current = await tx.xhsNote.findFirst({
+                          where: { id, creatorId: creator.id },
+                        });
+                        if (!current) return reject('XHS_SELECTION_CHANGED');
+                        await saveXhsMetrics(tx, 'note', id, note.metrics);
+                        if (
+                          note.metrics &&
+                          Number.isSafeInteger(note.metrics.collectedAt) &&
+                          note.metrics.collectedAt > 0
+                        ) {
+                          const rows = await tx.$queryRaw<
+                            Array<{ document: string }>
+                          >`SELECT document FROM xhs_subscription_tasks WHERE id=${t.taskId} AND state='running'`;
+                          if (rows.length !== 1)
+                            return reject('XHS_TASK_CANCELLED');
+                          const persisted = JSON.parse(
+                            rows[0].document,
+                          ) as Task;
+                          if (persisted.supersededByTaskId)
+                            return reject('XHS_TASK_SUPERSEDED');
+                          const detailMetrics = {
+                            ...persisted.detailMetrics,
+                            [id]: note.metrics.collectedAt,
+                          };
+                          const changed =
+                            await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=json_set(document,'$.detailMetrics',json(${JSON.stringify(detailMetrics)})),updated_at=${BigInt(Date.now())} WHERE id=${t.taskId} AND state='running'`;
+                          if (changed !== 1)
+                            return reject('XHS_TASK_CANCELLED');
+                        }
+                        if (
+                          current.status !== 'complete' ||
+                          !current.contentHtml
+                        )
+                          await tx.xhsNote.update({
+                            where: { id },
+                            data: {
+                              title: draft.title,
+                              publishTime: note.publishedAt,
+                              contentHtml: html,
+                              status: 'complete',
+                              kind: 'image-text',
+                            },
+                          });
+                        await this.source?.checkpointWholeSource?.(tx);
                       },
-                    });
-                });
+                    );
+                    if (
+                      note.metrics &&
+                      Number.isSafeInteger(note.metrics.collectedAt) &&
+                      note.metrics.collectedAt > 0
+                    )
+                      t.detailMetrics = {
+                        ...t.detailMetrics,
+                        [id]: note.metrics.collectedAt,
+                      };
+                  },
+                );
               }
               if (!active(t)) break;
               const saved = await this.save!(creator, id, directory!);
@@ -993,6 +1067,16 @@ export class XhsSubscriptionService implements OnModuleInit {
       }
     }
   }
+  private withSourceCheckpoint<T>(
+    phase: 'profile' | 'list' | 'detail' | 'metrics',
+    authorId: string,
+    noteId: string | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return this.source?.withCheckpointGroup
+      ? this.source.withCheckpointGroup(phase, authorId, noteId, work)
+      : work();
+  }
   private async updateList(t: Task, creator: XhsCreator) {
     const seen = new Set(t.cursorHistory ?? []);
     const notes = new Set(t.listedIds ?? []);
@@ -1003,109 +1087,117 @@ export class XhsSubscriptionService implements OnModuleInit {
       pagesThisRun++;
       const cursor = t.cursor ?? null;
       if (seen.has(cursor)) throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
-      const page = await this.source!.list(
+      await this.withSourceCheckpoint(
+        'list',
         creator.externalAuthorId!,
-        cursor,
-        this.controllers.get(t.taskId)?.signal,
-      );
-      if (!active(t)) return;
-      if (
-        page.authorId !== creator.externalAuthorId ||
-        !Array.isArray(page.notes) ||
-        page.notes.length > 60 ||
-        (page.nextCursor !== null &&
-          (typeof page.nextCursor !== 'string' ||
-            !page.nextCursor ||
-            page.nextCursor.length > 2048))
-      )
-        return reject('XHS_LIST_INVALID');
-      if (
-        page.nextCursor !== null &&
-        (page.nextCursor === cursor || seen.has(page.nextCursor))
-      )
-        throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
-      if (!page.notes.length && page.nextCursor !== null)
-        throw new XhsSubscriptionError('XHS_LIST_NO_PROGRESS');
-      const pageIds = new Set<string>();
-      let added = 0,
-        skipped = 0;
-      const next = await this.write(
-        32768 + Buffer.byteLength(JSON.stringify(t)),
-        async (tx) => {
-          const current = await tx.xhsCreator.findUnique({
-            where: { id: creator.id },
-          });
+        undefined,
+        async () => {
+          const page = await this.source!.list(
+            creator.externalAuthorId!,
+            cursor,
+            this.controllers.get(t.taskId)?.signal,
+          );
+          if (!active(t)) return;
           if (
-            !current?.enabled ||
-            current.externalAuthorId !== creator.externalAuthorId
+            page.authorId !== creator.externalAuthorId ||
+            !Array.isArray(page.notes) ||
+            page.notes.length > 60 ||
+            (page.nextCursor !== null &&
+              (typeof page.nextCursor !== 'string' ||
+                !page.nextCursor ||
+                page.nextCursor.length > 2048))
           )
-            return reject('XHS_SUBSCRIPTION_CHANGED');
-          for (const n of page.notes) {
-            if (
-              n.authorId !== creator.externalAuthorId ||
-              !/^[a-zA-Z0-9_-]{1,128}$/.test(n.noteId) ||
-              typeof n.title !== 'string' ||
-              n.title.length > 500 ||
-              !Number.isSafeInteger(n.publishedAt) ||
-              n.publishedAt < 0 ||
-              n.publishedAt > 2147483647 ||
-              !['image-text', 'video'].includes(n.kind)
-            )
-              return reject('XHS_LIST_INVALID');
-            const id = key(n.noteId);
-            if (notes.has(id) || pageIds.has(id)) continue;
-            pageIds.add(id);
-            const old = await tx.xhsNote.findUnique({ where: { id } });
-            if (old && old.creatorId !== creator.id)
-              return reject('XHS_NOTE_OWNER_CONFLICT');
-            if (old) {
-              skipped++;
-              continue;
-            }
-            await tx.xhsNote.create({
-              data: {
-                id,
-                creatorId: creator.id,
-                title: n.title,
-                publishTime: n.publishedAt,
-                kind: n.kind,
-                status: n.kind === 'video' ? 'video-skipped' : 'listed',
-              },
-            });
-            added++;
-          }
-          if (page.nextCursor !== null && !pageIds.size)
+            return reject('XHS_LIST_INVALID');
+          if (
+            page.nextCursor !== null &&
+            (page.nextCursor === cursor || seen.has(page.nextCursor))
+          )
+            throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
+          if (!page.notes.length && page.nextCursor !== null)
             throw new XhsSubscriptionError('XHS_LIST_NO_PROGRESS');
-          await tx.xhsCreator.update({
-            where: { id: creator.id },
-            data: {
-              lastCheckedAt: Math.floor(Date.now() / 1000),
-              lastStatus: page.nextCursor ? 'partial' : 'listed',
+          const pageIds = new Set<string>();
+          let added = 0,
+            skipped = 0;
+          const next = await this.write(
+            32768 + Buffer.byteLength(JSON.stringify(t)),
+            async (tx) => {
+              const current = await tx.xhsCreator.findUnique({
+                where: { id: creator.id },
+              });
+              if (
+                !current?.enabled ||
+                current.externalAuthorId !== creator.externalAuthorId
+              )
+                return reject('XHS_SUBSCRIPTION_CHANGED');
+              for (const n of page.notes) {
+                if (
+                  n.authorId !== creator.externalAuthorId ||
+                  !/^[a-zA-Z0-9_-]{1,128}$/.test(n.noteId) ||
+                  typeof n.title !== 'string' ||
+                  n.title.length > 500 ||
+                  !Number.isSafeInteger(n.publishedAt) ||
+                  n.publishedAt < 0 ||
+                  n.publishedAt > 2147483647 ||
+                  !['image-text', 'video'].includes(n.kind)
+                )
+                  return reject('XHS_LIST_INVALID');
+                const id = key(n.noteId);
+                if (notes.has(id) || pageIds.has(id)) continue;
+                pageIds.add(id);
+                const old = await tx.xhsNote.findUnique({ where: { id } });
+                if (old && old.creatorId !== creator.id)
+                  return reject('XHS_NOTE_OWNER_CONFLICT');
+                if (old) {
+                  skipped++;
+                  continue;
+                }
+                await tx.xhsNote.create({
+                  data: {
+                    id,
+                    creatorId: creator.id,
+                    title: n.title,
+                    publishTime: n.publishedAt,
+                    kind: n.kind,
+                    status: n.kind === 'video' ? 'video-skipped' : 'listed',
+                  },
+                });
+                added++;
+              }
+              if (page.nextCursor !== null && !pageIds.size)
+                throw new XhsSubscriptionError('XHS_LIST_NO_PROGRESS');
+              await tx.xhsCreator.update({
+                where: { id: creator.id },
+                data: {
+                  lastCheckedAt: Math.floor(Date.now() / 1000),
+                  lastStatus: page.nextCursor ? 'partial' : 'listed',
+                },
+              });
+              const checkpoint: Task = {
+                ...t,
+                total: t.total + pageIds.size,
+                completed: t.completed + added,
+                skipped: t.skipped + skipped,
+                remaining: 0,
+                cursor: page.nextCursor,
+                cursorHistory: [...seen, cursor],
+                listedIds: [...notes, ...pageIds],
+                listFinished: page.nextCursor === null,
+              };
+              // Page membership and continuation cursor commit together. Crashes cannot
+              // advance past uncommitted metadata or erase earlier complete bodies.
+              await this.persistIn(tx, checkpoint);
+              await this.source?.checkpointWholeSource?.(tx);
+              return checkpoint;
             },
-          });
-          const checkpoint: Task = {
-            ...t,
-            total: t.total + pageIds.size,
-            completed: t.completed + added,
-            skipped: t.skipped + skipped,
-            remaining: 0,
-            cursor: page.nextCursor,
-            cursorHistory: [...seen, cursor],
-            listedIds: [...notes, ...pageIds],
-            listFinished: page.nextCursor === null,
-          };
-          // Page membership and continuation cursor commit together. Crashes cannot
-          // advance past uncommitted metadata or erase earlier complete bodies.
-          await this.persistIn(tx, checkpoint);
-          return checkpoint;
+          );
+          const cancelled = !active(t);
+          Object.assign(t, next);
+          if (cancelled) t.state = 'cancelled';
+          seen.add(cursor);
+          pageIds.forEach((id) => notes.add(id));
+          if (!active(t)) return;
         },
       );
-      const cancelled = !active(t);
-      Object.assign(t, next);
-      if (cancelled) t.state = 'cancelled';
-      seen.add(cursor);
-      pageIds.forEach((id) => notes.add(id));
-      if (!active(t)) return;
       // Yield between pages, including synthetic immediate sources, so operators
       // can cancel a large job without waiting for enumeration to finish.
       await new Promise<void>((resolve) => setImmediate(resolve));

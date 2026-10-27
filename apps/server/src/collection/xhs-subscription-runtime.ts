@@ -40,6 +40,11 @@ import { XhsSourceRiskStore } from './xhs-source-risk-store';
 import { XhsLimitedRecoveryStore } from './xhs-limited-recovery-store';
 import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 import { sourceOriginalLink } from './xhs-source-original-link';
+import {
+  commitWholeSourceCheckpoint,
+  type WholeSourceGroup,
+  type Phase,
+} from './xhs-whole-source-fence';
 
 type RequestAdmission = {
   budget?: XhsRequestBudget;
@@ -69,6 +74,91 @@ export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
+  private readonly wholeSourceGroup = new AsyncLocalStorage<
+    WholeSourceGroup & { checkpointed: boolean; noteId?: string }
+  >();
+  private readonly wholeAuthorization = new AsyncLocalStorage<{
+    jobId: string;
+    creatorId: string;
+    authorId: string;
+  }>();
+  withWholeAuthorization<T>(
+    scope: { jobId: string; creatorId: string; authorId: string },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    if (this.wholeAuthorization.getStore())
+      return Promise.reject(
+        new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED'),
+      );
+    return this.wholeAuthorization.run(scope, work);
+  }
+  withCheckpointGroup<T>(
+    phase: Phase,
+    authorId: string,
+    noteId: string | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const scope = this.wholeAuthorization.getStore();
+    if (!scope) return work();
+    if (scope.authorId !== authorId)
+      return Promise.reject(
+        new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED'),
+      );
+    return this.withWholeSourceGroup({ ...scope, phase, noteId }, work);
+  }
+
+  async withWholeSourceGroup<T>(
+    scope: {
+      jobId: string;
+      creatorId: string;
+      authorId: string;
+      phase: Phase;
+      noteId?: string;
+    },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    if (this.wholeSourceGroup.getStore())
+      return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const group = {
+      ...scope,
+      marker: 'xhs:dispatch-pending:whole:' + randomUUID(),
+      acquired: false,
+      started: false,
+      checkpointed: false,
+    };
+    return this.wholeSourceGroup.run(group, async () => {
+      const result = await work();
+      if (group.acquired && !group.checkpointed)
+        return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      return result;
+    });
+  }
+  async checkpointWholeSource(
+    tx: Prisma.TransactionClient,
+    collectedAt?: number,
+  ) {
+    const group = this.wholeSourceGroup.getStore();
+    if (group?.acquired) {
+      if (!group.started) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      await commitWholeSourceCheckpoint(
+        tx,
+        group.jobId,
+        group.marker,
+        collectedAt,
+      );
+      group.checkpointed = true;
+    }
+  }
+  private checkWholeAuthor(authorId: string, noteId?: string) {
+    const group = this.wholeSourceGroup.getStore();
+    if (
+      group &&
+      (group.authorId !== authorId ||
+        (noteId !== undefined && group.noteId !== noteId))
+    )
+      return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+  }
+
   private readonly limitedRecoveryScope = new AsyncLocalStorage<{
     noteId: string;
     owner: string;
@@ -117,13 +207,18 @@ export class XhsSubscriptionRuntime
   >();
   private sourceAdmission?: (
     alreadyBudgeted: boolean,
+    group?: WholeSourceGroup,
   ) => Promise<(() => Promise<void>) | void>;
   private sourceDispatch?: <T>(
     operation: () => Promise<T>,
     ready: (tx?: Prisma.TransactionClient) => Promise<void>,
+    group?: WholeSourceGroup,
   ) => Promise<T>;
   bindSourceAdmission(
-    admit: (alreadyBudgeted: boolean) => Promise<(() => Promise<void>) | void>,
+    admit: (
+      alreadyBudgeted: boolean,
+      group?: WholeSourceGroup,
+    ) => Promise<(() => Promise<void>) | void>,
     dispatch?: XhsSubscriptionRuntime['sourceDispatch'],
   ) {
     this.sourceAdmission ??= admit;
@@ -166,6 +261,38 @@ export class XhsSubscriptionRuntime
         return { ...this.cookies! };
       },
       transport: async (request) => {
+        const group = this.wholeSourceGroup.getStore();
+        if (group) {
+          const url = new URL(request.url);
+          const route = url.pathname;
+          if (route === '/api/sns/web/v1/user/otherinfo') {
+            if (
+              request.method !== 'GET' ||
+              url.searchParams.get('target_user_id') !== group.authorId
+            )
+              return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          } else if (route === '/api/sns/web/v1/user_posted') {
+            if (
+              request.method !== 'GET' ||
+              url.searchParams.get('user_id') !== group.authorId
+            )
+              return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          } else if (route === '/api/sns/web/v1/feed') {
+            let body: any;
+            try {
+              body = JSON.parse(request.body || '');
+            } catch {
+              return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+            }
+            if (
+              request.method !== 'POST' ||
+              !group.noteId ||
+              body?.source_note_id !== group.noteId ||
+              !['detail', 'metrics'].includes(group.phase)
+            )
+              return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          } else return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        }
         const recovery = this.limitedRecoveryScope.getStore();
         if (recovery) {
           let body: any;
@@ -209,6 +336,8 @@ export class XhsSubscriptionRuntime
       {
         profileParser: options.profileParser,
         shortLinks: new XhsShortLinkResolver(async (url, request) => {
+          if (this.wholeSourceGroup.getStore())
+            return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
           return this.guardTransport(() =>
             (() => {
               this.requestAttempts.shortLinks++;
@@ -274,14 +403,21 @@ export class XhsSubscriptionRuntime
       // Reject already-known failures before any reservation, including generic operator caps.
       for (const scope of scopes) await scope.budget!.check(scope.id);
       if (!totalCovered && this.sourceAdmission) {
-        const release = await this.sourceAdmission(scopes.length > 0);
+        const release = await this.sourceAdmission(
+          scopes.length > 0,
+          this.wholeSourceGroup.getStore(),
+        );
         if (release) undo.push(release);
       }
       for (const scope of scopes)
         undo.push(await scope.budget!.reserve(scope.id));
       await ready();
       result = this.sourceDispatch
-        ? await this.sourceDispatch(dispatch, ready)
+        ? await this.sourceDispatch(
+            dispatch,
+            ready,
+            this.wholeSourceGroup.getStore(),
+          )
         : await dispatch();
       this.batchDispatchScope.getStore()?.onReceipt();
     } catch (error) {
@@ -309,7 +445,8 @@ export class XhsSubscriptionRuntime
     if (
       this.stopCode &&
       !(
-        this.limitedRecoveryScope.getStore() &&
+        (this.limitedRecoveryScope.getStore() ||
+          this.wholeSourceGroup.getStore()) &&
         this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
       )
     )
@@ -497,7 +634,11 @@ export class XhsSubscriptionRuntime
     if (!this.riskStore && this.options.requirePersistentRisk)
       return failure('XHS_SOURCE_RISK_UNAVAILABLE');
     let riskOwner: string | undefined;
-    if (this.riskStore && !this.limitedRecoveryScope.getStore()) {
+    if (
+      this.riskStore &&
+      !this.limitedRecoveryScope.getStore() &&
+      !this.wholeSourceGroup.getStore()
+    ) {
       try {
         riskOwner = await this.riskStore.begin();
       } catch (error) {
@@ -526,7 +667,11 @@ export class XhsSubscriptionRuntime
         }
         this.persistedRisk = undefined;
       }
-      if (!this.limitedRecoveryScope.getStore()) this.verified = true;
+      if (
+        !this.limitedRecoveryScope.getStore() &&
+        !this.wholeSourceGroup.getStore()
+      )
+        this.verified = true;
       return result;
     } catch (error) {
       if (
@@ -669,7 +814,9 @@ export class XhsSubscriptionRuntime
     if (!sourceOriginalLink(raw, url, noteId))
       return failure('XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE');
     if (isCancelled?.()) return failure('XHS_TASK_CANCELLED');
-    const owner = await (appendUnknownAttempt ? this.limitedRecoveryStore.armAppend(noteId, expectedAuthorId) : this.limitedRecoveryStore.arm(noteId, expectedAuthorId));
+    const owner = await (appendUnknownAttempt
+      ? this.limitedRecoveryStore.armAppend(noteId, expectedAuthorId)
+      : this.limitedRecoveryStore.arm(noteId, expectedAuthorId));
     const scope = { noteId, owner, started: false, isCancelled };
     return this.limitedRecoveryScope.run(scope, async () => {
       let projection: ReturnType<typeof inspectLimitedRecovery> | undefined;
@@ -733,12 +880,14 @@ export class XhsSubscriptionRuntime
     });
   }
   list(authorId: string, cursor: string | null, signal?: AbortSignal) {
+    this.checkWholeAuthor(authorId);
     return this.withSession(async () => {
       await this.restoreContext(authorId, undefined, signal);
       return this.adapter.list(authorId, cursor, signal);
     });
   }
   detail(authorId: string, noteId: string, signal?: AbortSignal) {
+    this.checkWholeAuthor(authorId, noteId);
     return this.withSession(() =>
       this.restoreContext(authorId, noteId, signal).then(() =>
         this.adapter.detail(authorId, noteId, signal),
@@ -746,6 +895,7 @@ export class XhsSubscriptionRuntime
     );
   }
   metrics(authorId: string, noteId?: string) {
+    this.checkWholeAuthor(authorId, noteId);
     return this.withSession(async () => {
       await this.restoreContext(authorId, noteId);
       return this.adapter.metrics(authorId, noteId);

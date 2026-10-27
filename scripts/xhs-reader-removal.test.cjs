@@ -93,3 +93,18 @@ test('batch routes are exact and local checks cannot be hidden by baseline resto
   assert.notEqual(changed, router);
   assert.throws(() => restorePreOriginalLinkRouter(changed), /exact PC-link router seam/);
 });
+
+test('whole history grants require explicit confirmation and local access at the exact reviewed seams', () => {
+  const fixture = require('./fixtures/xhs-original-link-router-seams.json');
+  for (const route of [fixture[9].after, fixture[10].after]) {
+    assert.equal(router.split(route).length, 2);
+    for (const [before, after] of [
+      ['confirmHistoryGrant: z.literal(true)', 'confirmHistoryGrant: z.boolean()'],
+      ['this.requireLocalXhsAccess(ctx);', 'void ctx;'],
+    ]) {
+      assert.equal(route.split(before).length, 2);
+      const changed=router.replace(route,route.replace(before,after));
+      assert.throws(()=>restorePreOriginalLinkRouter(changed), /exact PC-link router seam/);
+    }
+  }
+});

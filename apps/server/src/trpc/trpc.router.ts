@@ -2039,6 +2039,50 @@ export class TrpcRouter {
         this.requireLocalXhsAccess(ctx);
         return this.xhsWhole!.start(input);
       }),
+    prepareWholeCreatorHistoryGrant: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorId: z.string().min(1).max(128),
+            expectedAuthorId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
+            jobId: z.string().uuid().optional(),
+            requestLimit: z.number().int().min(1).max(100000),
+            intervalMs: z.number().int().min(1000).max(60000),
+            phaseLimits: z
+              .object({
+                profile: z.number().int().positive(),
+                list: z.number().int().positive(),
+                detail: z.number().int().positive(),
+                metrics: z.number().int().positive(),
+              })
+              .strict(),
+            confirmHistoryGrant: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.prepareHistoryGrant(input),
+        );
+      }),
+    extendWholeCreatorHistoryPhase: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            id: z.string().uuid(),
+            phase: z.enum(['profile', 'list', 'detail', 'metrics']),
+            newLimit: z.number().int().min(1).max(100000),
+            confirmHistoryGrant: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.extendHistoryPhase(input),
+        );
+      }),
     resumeWholeCreator: this.trpcService.protectedProcedure
       .input(z.object({ id: z.string().uuid() }).strict())
       .mutation(({ input, ctx }) => {

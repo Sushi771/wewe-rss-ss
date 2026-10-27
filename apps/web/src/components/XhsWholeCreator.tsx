@@ -34,7 +34,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
     <details className="min-w-0 rounded border p-3">
       <summary>整号互动覆盖与待补清单</summary>
       <p>
-        发现所有可返回笔记，逐篇更新指标、主评论及逐根回复。私密、删除、平台未返回内容未知，不显示全平台完成比例。正文媒体与目录附页另行保存。
+        发现平台返回的笔记，逐篇归档正文媒体并更新点赞、收藏、分享和评论数量。评论正文与回复采集暂停；私密、删除或平台未返回的内容仍为未知。
       </p>
       <label>
         本轮请求上限{' '}
@@ -72,12 +72,16 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
             {job.code}
           </p>
           <p>
-            指标 {job.items.filter((i) => i.metrics).length}；主评论{' '}
-            {job.items.filter((i) => i.top).length}；已知根回复{' '}
+            指标 {job.items.filter((i) => i.metrics).length}；历史主评论{' '}
+            {job.items.filter((i) => i.top).length}；历史已知根回复{' '}
             {job.items.filter((i) => i.replies).length}；附页已保存{' '}
             {job.items.filter((i) => i.supplement === 'saved').length} / 待补{' '}
             {job.items.filter((i) => i.supplement !== 'saved').length}
           </p>
+          {job.historyGrant && <p>阶段请求：{Object.entries(job.historyGrant.limits).map(([phase, cap]) => `${({profile:'资料', list:'目录', detail:'正文及媒体', metrics:'指标'} as Record<string,string>)[phase] ?? phase} ${job.historyGrant!.used[phase] ?? 0}/${cap}`).join('；')}</p>}
+          {job.sourceCheckpoint?.state === 'unknown' && <p role="alert">来源请求结果尚未确认，已暂停且不会自动重发；请先核对该阶段回执。</p>}
+          {job.sourceCheckpoint?.state === 'restricted' && <p role="alert">来源拒绝了该请求，任务已停止，不会自动重发。</p>}
+          {job.code === 'XHS_WHOLE_PHASE_BUDGET_EXHAUSTED' && <p role="alert">阶段额度已用完，调整对应额度后可明确继续；已用次数不会重置。</p>}
           <p>
             更新于 {new Date(job.updatedAt).toLocaleString()}
             。仅表示已发现可访问范围的互动阶段。

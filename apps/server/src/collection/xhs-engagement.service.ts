@@ -97,31 +97,41 @@ export class XhsEngagementService {
     );
     if (!creator.enabled || !creator.externalAuthorId || !this.source?.metrics)
       return fail('XHS_SOURCE_UNAVAILABLE');
+    const source = this.source;
+    const authorId = creator.externalAuthorId;
     const lock = input.noteId ?? input.creatorId;
     if (this.active.has(lock)) return fail('XHS_ENGAGEMENT_BUSY');
     this.active.add(lock);
     try {
-      const snapshot = await this.source.metrics(
-        creator.externalAuthorId,
-        externalNote,
-      );
-      await this.write(async (tx) => {
-        const current = await tx.xhsCreator.findUnique({
-          where: { id: creator.id },
+      const work = async () => {
+        const snapshot = await source!.metrics!(authorId!, externalNote);
+        await this.write(async (tx) => {
+          const current = await tx.xhsCreator.findUnique({
+            where: { id: creator.id },
+          });
+          if (
+            !current?.enabled ||
+            current.externalAuthorId !== creator.externalAuthorId
+          )
+            return fail('XHS_SUBSCRIPTION_CHANGED');
+          await saveXhsMetrics(
+            tx,
+            input.noteId ? 'note' : 'creator',
+            input.noteId ?? creator.id,
+            snapshot,
+          );
+          await this.source?.checkpointWholeSource?.(tx, snapshot.collectedAt);
         });
-        if (
-          !current?.enabled ||
-          current.externalAuthorId !== creator.externalAuthorId
-        )
-          return fail('XHS_SUBSCRIPTION_CHANGED');
-        await saveXhsMetrics(
-          tx,
-          input.noteId ? 'note' : 'creator',
-          input.noteId ?? creator.id,
-          snapshot,
-        );
-      });
-      return snapshot;
+        return snapshot;
+      };
+      return source!.withCheckpointGroup
+        ? await source!.withCheckpointGroup(
+            externalNote ? 'metrics' : 'profile',
+            authorId!,
+            externalNote,
+            work,
+          )
+        : await work();
     } finally {
       this.active.delete(lock);
     }

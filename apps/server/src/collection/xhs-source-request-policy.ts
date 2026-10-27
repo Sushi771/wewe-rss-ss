@@ -21,6 +21,12 @@ import {
   assertIncrementalTransaction,
 } from './incremental-write';
 import { sqliteWrites } from './sqlite-write-coordinator';
+import {
+  prepareWholeSourceFence,
+  markWholeSourceStarted,
+  releasePreparedWholeSourceFence,
+  type WholeSourceGroup,
+} from './xhs-whole-source-fence';
 const SOURCE_TOTAL = 'xhs:source-total';
 const DISPATCH_PREFIX = 'xhs:dispatch-pending:';
 class AdmissionUnavailable extends Error {}
@@ -116,27 +122,33 @@ export async function configureXhsSourceBudget(
 // never the earlier slot preceding another scope's cancellable wait.
 async function hasPendingDispatch(
   db: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  owned = '',
 ) {
   const rows = await db.$queryRaw<Array<{ id: string }>>`
-    SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} LIMIT 1`;
+    SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} LIMIT 1`;
   return rows.length > 0;
 }
 async function pendingWaitExpired(
   db: PrismaService,
   waiting: { since?: number },
+  owned = '',
 ) {
-  if (!(await hasPendingDispatch(db))) {
+  if (!(await hasPendingDispatch(db, owned))) {
     waiting.since = undefined;
     return false;
   }
   waiting.since ??= performance.now();
   return performance.now() - waiting.since >= 1000;
 }
-async function reserveTotal(tx: Prisma.TransactionClient, now: number) {
+async function reserveTotal(
+  tx: Prisma.TransactionClient,
+  now: number,
+  owned = '',
+) {
   return (
     (await tx.$executeRaw`UPDATE xhs_request_budgets SET used=used+1
     WHERE id=${SOURCE_TOTAL} AND used < request_limit AND next_at <= ${BigInt(now)}
-      AND NOT EXISTS (SELECT 1 FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'})`) ===
+      AND NOT EXISTS (SELECT 1 FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned})`) ===
     1
   );
 }
@@ -156,13 +168,18 @@ async function dispatchSource<T>(
   runtime: XhsSubscriptionRuntime,
   operation: () => Promise<T>,
   ready: (tx?: Prisma.TransactionClient) => Promise<void>,
+  group?: WholeSourceGroup,
 ): Promise<T> {
   const store = new XhsSqliteBudgetStore(db);
   const waiting: { since?: number } = {};
   for (;;) {
     await ready();
-    if (!(await store.read(SOURCE_TOTAL))) return operation();
-    const marker = DISPATCH_PREFIX + randomUUID();
+    if (!(await store.read(SOURCE_TOTAL))) {
+      if (group) fail('XHS_REQUEST_BUDGET_REQUIRED');
+      if (await hasPendingDispatch(db)) fail('XHS_REQUEST_RATE_PAUSED');
+      return operation();
+    }
+    const marker = group?.marker ?? DISPATCH_PREFIX + randomUUID();
     let started = false;
     let response: Promise<T> | undefined;
     try {
@@ -173,12 +190,20 @@ async function dispatchSource<T>(
           UPDATE xhs_request_budgets SET next_at=next_at
           WHERE id=${SOURCE_TOTAL} AND next_at <= ${BigInt(Date.now())}
           RETURNING id`;
-        if (!rows.length || (await hasPendingDispatch(tx)))
+        if (
+          !rows.length ||
+          (await hasPendingDispatch(tx, group?.acquired ? marker : ''))
+        )
           throw new AdmissionUnavailable();
         await ready(tx);
-        await tx.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms)
-          VALUES(${marker},1,1,${BigInt(Date.now())},0)`;
+        if (!group?.acquired) {
+          if (group) await prepareWholeSourceFence(tx, group);
+          else
+            await tx.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms)
+            VALUES(${marker},1,1,${BigInt(Date.now())},0)`;
+        }
       });
+      if (group) group.acquired = true;
       await write(db, async (tx) => {
         // Cancellation and dispatch serialize on this write lock. Any cancel
         // committed before it is acquired must be observed through this tx.
@@ -190,25 +215,28 @@ async function dispatchSource<T>(
           SELECT id FROM xhs_request_budgets WHERE id=${marker}`;
         if (!owned.length) fail('XHS_REQUEST_RATE_PAUSED');
         await ready(tx);
+        if (group) await markWholeSourceStarted(tx, group.jobId, marker);
         response = operation();
         started = true;
+        if (group) group.started = true;
         const dispatchedAt = Date.now();
         void response.catch(() => {});
         await tx.$executeRaw`UPDATE xhs_request_budgets
           SET next_at=${BigInt(dispatchedAt + Number(rows[0].interval_ms))}
           WHERE id=${SOURCE_TOTAL}`;
-        await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;
+        if (!group)
+          await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;
         // Only synchronous transport entry occurs inside this short transaction.
         // Network response latency is awaited after COMMIT.
       });
       return await response!;
     } catch (error) {
-      if (!started) {
+      if (!started && (!group || !group.started)) {
         try {
-          await write(
-            db,
-            (tx) =>
-              tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`,
+          await write(db, (tx) =>
+            group
+              ? releasePreparedWholeSourceFence(tx, group.jobId, marker)
+              : tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`,
           );
         } catch {
           /* The durable fence remains conservative on cleanup failure. */
@@ -220,7 +248,7 @@ async function dispatchSource<T>(
     if (
       !row ||
       row.nextAt - Date.now() > 1000 ||
-      (await pendingWaitExpired(db, waiting))
+      (await pendingWaitExpired(db, waiting, group?.marker))
     )
       fail('XHS_REQUEST_RATE_PAUSED');
     await runtime.waitForSourceRate(
@@ -235,7 +263,7 @@ export function bindXhsSourceTotalBudget(
   runtime: XhsSubscriptionRuntime,
 ) {
   runtime.bindSourceAdmission(
-    async (alreadyBudgeted) => {
+    async (alreadyBudgeted, group) => {
       const store = new XhsSqliteBudgetStore(db);
       if (!(await store.read(SOURCE_TOTAL))) {
         if (!alreadyBudgeted) fail('XHS_REQUEST_BUDGET_REQUIRED');
@@ -249,7 +277,7 @@ export function bindXhsSourceTotalBudget(
           const waiting: { since?: number } = {};
           for (;;) {
             runtime.assertSourceReady();
-            if (await write(db, (tx) => reserveTotal(tx, now))) {
+            if (await write(db, (tx) => reserveTotal(tx, now, group?.marker))) {
               return true;
             }
             const row = await store.read(id);
@@ -257,7 +285,7 @@ export function bindXhsSourceTotalBudget(
               !row ||
               row.used >= row.limit ||
               row.nextAt - Date.now() > 1000 ||
-              (await pendingWaitExpired(db, waiting))
+              (await pendingWaitExpired(db, waiting, group?.marker))
             )
               return false;
             await runtime.waitForSourceRate(
@@ -272,7 +300,8 @@ export function bindXhsSourceTotalBudget(
       });
       return budget.reserve(SOURCE_TOTAL);
     },
-    (operation, ready) => dispatchSource(db, runtime, operation, ready),
+    (operation, ready, group) =>
+      dispatchSource(db, runtime, operation, ready, group),
   );
 }
 async function withPolicy<T>(

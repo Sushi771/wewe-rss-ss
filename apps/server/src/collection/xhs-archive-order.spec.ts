@@ -178,7 +178,7 @@ describe('complete archive before interaction, independent query (synthetic only
       detail: jest.fn(async (_a, id) => {
         events.push('detail:' + id);
         await budget();
-        return candidate(id);
+        return { ...candidate(id), metrics: undefined };
       }),
       metrics: async () => {
         events.push('metrics');
@@ -304,6 +304,142 @@ describe('complete archive before interaction, independent query (synthetic only
     );
     expect(complete.archiveTask).not.toBe(complete.downloadTask);
   }, 30000);
+  it('reuses only this archive task detail metrics and refreshes missing metrics', async () => {
+    await seed('with-metrics');
+    await seed('without-metrics');
+    await seed('existing', true);
+    await saveXhsMetrics(
+      db,
+      'note',
+      key('existing'),
+      xhsNoteMetrics({ interact_info: { liked_count: '99' } }, 1),
+    );
+    let budget: any;
+    const detail = jest.fn(async (_author, id) => {
+      await budget();
+      const n = candidate(id);
+      return id === 'without-metrics' ? { ...n, metrics: undefined } : n;
+    });
+    const metrics = jest.fn(async (_author, id) => {
+      await budget();
+      return candidate(id).metrics;
+    });
+    const source: any = { detail, metrics };
+    const subscriptions = new XhsSubscriptionService(db as any, source);
+    subscriptions.bindLocalSaver(
+      async () => folder,
+      async () => ({
+        alreadySaved: false,
+        mediaComplete: true,
+        supplement: { status: 'new' },
+      }),
+    );
+    const runtime: any = {
+      withRequestBudget: async (b, id, work) => {
+        budget = () => b.admit(id);
+        return work();
+      },
+    };
+    const job = {
+      id: 'reuse-job',
+      creatorId: 'creator',
+      state: 'paused',
+      updatedAt: 1,
+      listEnd: true,
+      profile: 1,
+      items: {},
+    };
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used) VALUES('reuse-job',20,0,0)`;
+    await db.$executeRaw`INSERT INTO xhs_whole_creator_jobs(id,creator_id,state,document,updated_at) VALUES('reuse-job','creator','paused',${JSON.stringify(job)},1)`;
+    const whole = new XhsWholeCreatorService(
+      db as any,
+      subscriptions,
+      runtime,
+      new XhsEngagementService(db as any, source),
+    );
+    await whole.resume('reuse-job');
+    await (whole as any).lane;
+    const completed = await whole.view('reuse-job');
+    expect(completed.state).toBe('completed');
+    expect(detail).toHaveBeenCalledTimes(2);
+    expect(metrics).toHaveBeenCalledTimes(2);
+    expect(metrics).toHaveBeenCalledWith('author', 'without-metrics');
+    expect(metrics).toHaveBeenCalledWith('author', 'existing');
+    expect(completed.budget!.used).toBe(4);
+    const snapshot = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_metric_snapshots WHERE owner_id=${key('with-metrics')}`;
+    expect(JSON.parse(snapshot[0].document).values).toEqual({
+      likes: 0,
+      collects: 2,
+      shares: 3,
+      comments: 4,
+    });
+    const receipts = await subscriptions.confirmedLocalArchives({
+      taskId: completed.archiveTask!,
+    });
+    expect(
+      receipts.find((r) => r.noteId === key('with-metrics'))
+        ?.metricsCollectedAt,
+    ).toBeGreaterThan(0);
+    expect(
+      receipts.find((r) => r.noteId === key('without-metrics'))
+        ?.metricsCollectedAt,
+    ).toBeUndefined();
+    // A stale in-memory checkpoint after a lost acknowledgement cannot erase a committed detail receipt.
+    const rows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${completed.archiveTask!}`;
+    const stale = JSON.parse(rows[0].document);
+    delete stale.detailMetrics;
+    await db.$transaction((tx) => (subscriptions as any).persistIn(tx, stale));
+    const preserved = await subscriptions.confirmedLocalArchives({
+      taskId: completed.archiveTask!,
+    });
+    expect(
+      preserved.find((r) => r.noteId === key('with-metrics'))
+        ?.metricsCollectedAt,
+    ).toBeGreaterThan(0);
+  }, 40000);
+  it('retains a detail receipt across a saver failure and resumes without another detail request', async () => {
+    await seed('interrupted');
+    const source: any = {
+      detail: jest.fn(async (_author, id) => candidate(id)),
+    };
+    let fail = true;
+    const subscriptions = new XhsSubscriptionService(db as any, source);
+    subscriptions.bindLocalSaver(
+      async () => folder,
+      async () => {
+        if (fail) throw Error('synthetic save failure');
+        return {
+          alreadySaved: false,
+          mediaComplete: true,
+          supplement: { status: 'new' },
+        };
+      },
+    );
+    const first = await subscriptions.downloadNotes({
+      creatorId: 'creator',
+      noteIds: [key('interrupted')],
+    });
+    await (subscriptions as any).lane;
+    expect((await subscriptions.task(first)).state).not.toBe('completed');
+    const rows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${first.taskId}`;
+    expect(
+      JSON.parse(rows[0].document).detailMetrics[key('interrupted')],
+    ).toBeGreaterThan(0);
+    expect(source.detail).toHaveBeenCalledTimes(1);
+    fail = false;
+    const second = await subscriptions.resumeTask(first);
+    await (subscriptions as any).lane;
+    expect((await subscriptions.task(second)).state).toBe('completed');
+    expect(source.detail).toHaveBeenCalledTimes(1);
+    const receipts = await subscriptions.confirmedLocalArchives(second);
+    expect(receipts[0].metricsCollectedAt).toBeGreaterThan(0);
+  }, 40000);
   it('confirms a real native archive with no metrics/comments even when there is no companion', async () => {
     await seed('no-interaction', true);
     const api = new XiaohongshuService(db as any);

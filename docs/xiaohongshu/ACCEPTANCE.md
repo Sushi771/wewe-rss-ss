@@ -130,3 +130,6 @@ xhs-engagement.spec.ts 新增20001条合成评论分段：唯一评论ID集合�
 
 
 Limited recovery acceptance: use synthetic SQLite and injected transports to verify author/note mismatch, expiry, disabled source, one-time/concurrent/restart admission, shared budget exhaustion, refusal stop, no subsequent dispatch, unchanged historical risk, escaped body and exact zero/unknown metrics, no task creation, retained disabled creator and pending media. A separately approved real check must verify the returned original link, actual saved body/count fields and creator identity. The query-free media source manifest and fingerprints do not prove complete or subsequently downloadable images.
+
+
+整号授权离线验收应覆盖：绑定作者与阶段总额、未解决的未知旧回执禁止重新授权、不同作者隔离、派发前取消回滚、派发后失败或进程重启时保留栅栏、业务事务提交和栅栏解除原子性、重复增量刷新与正文详情指标复用。验证视频时须分别证明来源合同、完整缓存校验及本地导出；未验证的视频保持待补。

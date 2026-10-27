@@ -77,3 +77,17 @@ test('coverage separates root replies, supplements and unknown deletion; no perc
 });
 test('empty local coverage rendering never triggers a mutation', () =>
   assert.match(render([]), /整号互动覆盖与待补清单/));
+
+test('unknown source checkpoint is visible and continuation is disabled without exposing internal markers', () => {
+  const html=render([{id:'synthetic',state:'paused',listEnd:false,updatedAt:1,resumable:false,items:[],historyGrant:{limits:{detail:4},used:{detail:2}},sourceCheckpoint:{phase:'detail',state:'unknown'}}]);
+  assert.match(html, /来源请求结果尚未确认/);
+  assert.match(html, /正文及媒体 2\/4/);
+  assert.match(html, /disabled=""/);
+  assert.doesNotMatch(html, /dispatch-pending/);
+  assert.match(html, /评论正文与回复采集暂停/);
+});
+
+test('known source refusal is shown as restricted, not an unknown result', () => {
+ const html=render([{id:'synthetic',state:'paused',listEnd:false,updatedAt:1,resumable:false,items:[],code:'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',sourceCheckpoint:{phase:'detail',state:'restricted'}}]);
+ assert.match(html, /来源拒绝了该请求/);assert.doesNotMatch(html, /来源请求结果尚未确认/);assert.match(html, /disabled=""/);
+});
