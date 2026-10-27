@@ -531,7 +531,9 @@ describe('whole creator durable offline closure', () => {
       const directory = path.join(folder, `lock-${code}`);
       await fs.mkdir(directory);
       const lock = path.join(directory, 'worker.lock');
-      const release = (await batchStorageLock(directory))!;
+      // A claim created outside this module exercises the cross-process read path.
+      await fs.writeFile(lock, String(process.pid));
+      const release = async () => fs.unlink(lock);
       const readFile = fs.readFile.bind(fs);
       let released = false;
       const read = jest.spyOn(fs, 'readFile').mockImplementation((async (
