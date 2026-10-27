@@ -2050,10 +2050,11 @@ export class TrpcRouter {
             intervalMs: z.number().int().min(1000).max(60000),
             phaseLimits: z
               .object({
-                profile: z.number().int().positive(),
-                list: z.number().int().positive(),
-                detail: z.number().int().positive(),
-                metrics: z.number().int().positive(),
+                profile: z.number().int().nonnegative(),
+                list: z.number().int().nonnegative(),
+                detail: z.number().int().nonnegative(),
+                media: z.number().int().nonnegative(),
+                metrics: z.number().int().nonnegative(),
               })
               .strict(),
             confirmHistoryGrant: z.literal(true),
@@ -2071,7 +2072,7 @@ export class TrpcRouter {
         z
           .object({
             id: z.string().uuid(),
-            phase: z.enum(['profile', 'list', 'detail', 'metrics']),
+            phase: z.enum(['profile', 'list', 'detail', 'media', 'metrics']),
             newLimit: z.number().int().min(1).max(100000),
             confirmHistoryGrant: z.literal(true),
           })

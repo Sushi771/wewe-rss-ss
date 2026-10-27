@@ -44,6 +44,7 @@ import {
   commitWholeSourceCheckpoint,
   type WholeSourceGroup,
   type Phase,
+  type Charge,
 } from './xhs-whole-source-fence';
 
 type RequestAdmission = {
@@ -213,6 +214,7 @@ export class XhsSubscriptionRuntime
     operation: () => Promise<T>,
     ready: (tx?: Prisma.TransactionClient) => Promise<void>,
     group?: WholeSourceGroup,
+    charge?: Charge,
   ) => Promise<T>;
   bindSourceAdmission(
     admit: (
@@ -314,6 +316,8 @@ export class XhsSubscriptionRuntime
           );
           recovery.started = true;
         }
+        const route = new URL(request.url).pathname;
+        const charge: Charge = route.endsWith('/user/otherinfo') ? 'profile' : route.endsWith('/user_posted') ? 'list' : group?.phase === 'metrics' ? 'metrics' : 'detail';
         return this.guardTransport(() =>
           (() => {
             const route = new URL(request.url).pathname;
@@ -328,7 +332,7 @@ export class XhsSubscriptionRuntime
               this.requestAttempts.replies++;
             return api({ ...request, signal: signal(request.signal) });
           })(),
-        );
+        charge);
       },
     });
     this.adapter = new RedbookSubscriptionAdapter(
@@ -355,10 +359,10 @@ export class XhsSubscriptionRuntime
             this.requestAttempts.media++;
             return media(url, { ...request, signal: signal(request.signal) });
           })(),
-        ),
+        'media'),
     );
   }
-  private async guardTransport<T>(operation: () => Promise<T>) {
+  private async guardTransport<T>(operation: () => Promise<T>, charge?: Charge) {
     this.requireSession();
     const generation = this.generation,
       signal = this.sessionAbort.signal;
@@ -417,6 +421,7 @@ export class XhsSubscriptionRuntime
             dispatch,
             ready,
             this.wholeSourceGroup.getStore(),
+            charge,
           )
         : await dispatch();
       this.batchDispatchScope.getStore()?.onReceipt();

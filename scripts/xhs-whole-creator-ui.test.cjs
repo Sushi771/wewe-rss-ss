@@ -81,7 +81,7 @@ test('empty local coverage rendering never triggers a mutation', () =>
 test('unknown source checkpoint is visible and continuation is disabled without exposing internal markers', () => {
   const html=render([{id:'synthetic',state:'paused',listEnd:false,updatedAt:1,resumable:false,items:[],historyGrant:{limits:{detail:4},used:{detail:2}},sourceCheckpoint:{phase:'detail',state:'unknown'}}]);
   assert.match(html, /来源请求结果尚未确认/);
-  assert.match(html, /正文及媒体 2\/4/);
+  assert.match(html, /正文详情 2\/4/);
   assert.match(html, /disabled=""/);
   assert.doesNotMatch(html, /dispatch-pending/);
   assert.match(html, /评论正文与回复采集暂停/);

@@ -32,7 +32,7 @@ it('requires explicit local authorization and never starts the prepared job', as
     expectedAuthorId: 'author',
     requestLimit: 20,
     intervalMs: 1000,
-    phaseLimits: { profile: 2, list: 2, detail: 10, metrics: 2 },
+    phaseLimits: { profile: 2, list: 2, detail: 10, media: 10, metrics: 2 },
     confirmHistoryGrant: true as const,
   };
   await expect(

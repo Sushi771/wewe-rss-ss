@@ -26,6 +26,7 @@ import {
   markWholeSourceStarted,
   releasePreparedWholeSourceFence,
   type WholeSourceGroup,
+  type Charge,
 } from './xhs-whole-source-fence';
 const SOURCE_TOTAL = 'xhs:source-total';
 const DISPATCH_PREFIX = 'xhs:dispatch-pending:';
@@ -169,6 +170,7 @@ async function dispatchSource<T>(
   operation: () => Promise<T>,
   ready: (tx?: Prisma.TransactionClient) => Promise<void>,
   group?: WholeSourceGroup,
+  charge?: Charge,
 ): Promise<T> {
   const store = new XhsSqliteBudgetStore(db);
   const waiting: { since?: number } = {};
@@ -215,7 +217,7 @@ async function dispatchSource<T>(
           SELECT id FROM xhs_request_budgets WHERE id=${marker}`;
         if (!owned.length) fail('XHS_REQUEST_RATE_PAUSED');
         await ready(tx);
-        if (group) await markWholeSourceStarted(tx, group.jobId, marker);
+        if (group) await markWholeSourceStarted(tx, group.jobId, marker, charge);
         response = operation();
         started = true;
         if (group) group.started = true;
@@ -300,8 +302,8 @@ export function bindXhsSourceTotalBudget(
       });
       return budget.reserve(SOURCE_TOTAL);
     },
-    (operation, ready, group) =>
-      dispatchSource(db, runtime, operation, ready, group),
+    (operation, ready, group, charge) =>
+      dispatchSource(db, runtime, operation, ready, group, charge),
   );
 }
 async function withPolicy<T>(

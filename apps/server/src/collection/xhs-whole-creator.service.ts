@@ -169,9 +169,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
     jobId?: string;
     requestLimit: number;
     intervalMs: number;
-    phaseLimits: Record<'profile' | 'list' | 'detail' | 'metrics', number>;
+    phaseLimits: Record<'profile' | 'list' | 'detail' | 'media' | 'metrics', number>;
   }) {
-    const phases = ['profile', 'list', 'detail', 'metrics'] as const;
+    const phases = ['profile', 'list', 'detail', 'media', 'metrics'] as const;
     if (
       !input.phaseLimits ||
       Object.keys(input.phaseLimits).length !== phases.length ||
@@ -188,7 +188,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       phases.some(
         (p) =>
           !Number.isSafeInteger(input.phaseLimits[p]) ||
-          input.phaseLimits[p] < 1 ||
+          input.phaseLimits[p] < 0 ||
           input.phaseLimits[p] > input.requestLimit,
       )
     )
@@ -267,7 +267,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
         authorId: input.expectedAuthorId,
         phases: [...phases],
         limits: { ...input.phaseLimits },
-        used: { profile: 0, list: 0, detail: 0, metrics: 0 },
+        used: { profile: 0, list: 0, detail: 0, media: 0, metrics: 0 },
       };
       const changed =
         await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${job.id} AND state='paused'`;
@@ -279,11 +279,11 @@ export class XhsWholeCreatorService implements OnModuleInit {
   /** Extend only the selected stage cap; used counters and job/global budgets stay intact. */
   async extendHistoryPhase(input: {
     id: string;
-    phase: 'profile' | 'list' | 'detail' | 'metrics';
+    phase: 'profile' | 'list' | 'detail' | 'media' | 'metrics';
     newLimit: number;
   }) {
     if (
-      !['profile', 'list', 'detail', 'metrics'].includes(input.phase) ||
+      !['profile', 'list', 'detail', 'media', 'metrics'].includes(input.phase) ||
       !Number.isSafeInteger(input.newLimit)
     )
       throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
@@ -581,6 +581,10 @@ export class XhsWholeCreatorService implements OnModuleInit {
             job.listEnd = true;
             await this.save(job);
           }
+          // An explicit zero detail cap is a directory-only stop, not permission
+          // to launch an archive child or issue a speculative detail request.
+          if (job.sourceGrant && job.sourceGrant.limits.detail === 0)
+            throw new XhsSubscriptionError('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
           const notes = await this.db.xhsNote.findMany({
             where: { creatorId: job.creatorId },
             orderBy: { id: 'asc' },

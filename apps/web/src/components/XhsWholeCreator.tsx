@@ -78,7 +78,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
             {job.items.filter((i) => i.supplement === 'saved').length} / 待补{' '}
             {job.items.filter((i) => i.supplement !== 'saved').length}
           </p>
-          {job.historyGrant && <p>阶段请求：{Object.entries(job.historyGrant.limits).map(([phase, cap]) => `${({profile:'资料', list:'目录', detail:'正文及媒体', metrics:'指标'} as Record<string,string>)[phase] ?? phase} ${job.historyGrant!.used[phase] ?? 0}/${cap}`).join('；')}</p>}
+          {job.historyGrant && <p>阶段请求：{Object.entries(job.historyGrant.limits).map(([phase, cap]) => `${({profile:'资料', list:'目录', detail:'正文详情', media:'媒体', metrics:'指标'} as Record<string,string>)[phase] ?? phase} ${job.historyGrant!.used[phase] ?? 0}/${cap}`).join('；')}</p>}
           {job.sourceCheckpoint?.state === 'unknown' && <p role="alert">来源请求结果尚未确认，已暂停且不会自动重发；请先核对该阶段回执。</p>}
           {job.sourceCheckpoint?.state === 'restricted' && <p role="alert">来源拒绝了该请求，任务已停止，不会自动重发。</p>}
           {job.code === 'XHS_WHOLE_PHASE_BUDGET_EXHAUSTED' && <p role="alert">阶段额度已用完，调整对应额度后可明确继续；已用次数不会重置。</p>}

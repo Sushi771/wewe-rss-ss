@@ -3,6 +3,7 @@ import { XhsSubscriptionError } from './xhs-subscription-errors';
 
 type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 export type Phase = 'profile' | 'list' | 'detail' | 'metrics';
+export type Charge = Phase | 'media';
 export type Scope = {
   jobId: string;
   creatorId: string;
@@ -42,7 +43,7 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     !Array.isArray(job.sourceGrant.phases) ||
     !job.sourceGrant.phases.includes(scope.phase) ||
     !Number.isSafeInteger(job.sourceGrant.limits?.[scope.phase]) ||
-    job.sourceGrant.limits[scope.phase] < 1 ||
+    job.sourceGrant.limits[scope.phase] < 0 ||
     !Number.isSafeInteger(job.sourceGrant.used?.[scope.phase]) ||
     job.sourceGrant.used[scope.phase] < 0 ||
     job.sourceFence
@@ -79,6 +80,7 @@ export async function markWholeSourceStarted(
   tx: Tx,
   jobId: string,
   marker: string,
+  charge?: Charge,
 ) {
   await noUnresolvedRecovery(tx);
   const rows = await tx.$queryRaw<
@@ -87,17 +89,23 @@ export async function markWholeSourceStarted(
   if (rows.length !== 1) return bad();
   const job = JSON.parse(rows[0].document);
   const fence = job.sourceFence,
-    grant = job.sourceGrant;
+    grant = job.sourceGrant,
+    category = charge ?? fence?.phase;
   if (
     !fence ||
     fence.marker !== marker ||
     !['prepared', 'started'].includes(fence.state) ||
     !grant ||
-    !Number.isSafeInteger(grant.limits?.[fence.phase]) ||
-    !Number.isSafeInteger(grant.used?.[fence.phase]) ||
-    grant.used[fence.phase] >= grant.limits[fence.phase]
+    !(['profile', 'list', 'detail', 'metrics', 'media'] as string[]).includes(category) ||
+    (category === 'media' && fence.phase !== 'detail') ||
+    (category === 'metrics' && fence.phase !== 'metrics') ||
+    (category === 'detail' && fence.phase !== 'detail') ||
+    !Number.isSafeInteger(grant.limits?.[category]) ||
+    !Number.isSafeInteger(grant.used?.[category])
   )
     return bad();
+  if (grant.used[category] >= grant.limits[category])
+    throw new XhsSubscriptionError('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
   if (fence.phase === 'detail' || fence.phase === 'metrics') {
     if (!fence.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(fence.noteId))
       return bad();
@@ -107,7 +115,7 @@ export async function markWholeSourceStarted(
     >`SELECT id FROM xhs_notes WHERE id=${noteKey} AND creator_id=${job.creatorId}`;
     if (notes.length !== 1) return bad();
   }
-  grant.used[fence.phase]++;
+  grant.used[category]++;
   fence.state = 'started';
   const changed =
     await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND state='running' AND document=${rows[0].document}`;
