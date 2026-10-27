@@ -1775,6 +1775,29 @@ export class TrpcRouter {
           input,
         );
       }),
+    recoverSingleNote: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            url: z.string().min(1).max(8192),
+            expectedAuthorId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
+            confirmLimitedRecovery: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsSourceOperation(async () => {
+          const result = await this.xhsRuntime!.resolveLimitedRecovery(
+            input.url,
+            input.expectedAuthorId,
+            (ctx as { isExportCancelled?: () => boolean }).isExportCancelled,
+          );
+          const saved =
+            await this.xhsSubscriptions!.commitLimitedRecovery(result);
+          return { ...saved, originalUrl: result.originalUrl };
+        });
+      }),
     resolveSubscription: this.trpcService.protectedProcedure
       .input(
         z
@@ -2068,7 +2091,11 @@ export class TrpcRouter {
             req.url
               .split('?')[0]
               .split(',')
-              .some((name) => name.endsWith('xiaohongshu.prepareOriginalLink'))
+              .some(
+                (name) =>
+                  name.endsWith('xiaohongshu.prepareOriginalLink') ||
+                  name.endsWith('xiaohongshu.recoverSingleNote'),
+              )
           ) {
             res.setHeader('Cache-Control', 'no-store');
             res.setHeader('Referrer-Policy', 'no-referrer');

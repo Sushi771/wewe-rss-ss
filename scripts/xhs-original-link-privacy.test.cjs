@@ -2,6 +2,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const ts=require(require.resolve('typescript',{paths:[path.resolve('apps/web')]}));
 const {createTRPCProxyClient,httpBatchLink,httpLink,loggerLink,splitLink}=require(require.resolve('@trpc/client',{paths:[path.resolve('apps/web')]}));
 const text=fs.readFileSync('apps/web/src/provider/trpc.tsx','utf8'),ast=ts.createSourceFile('provider.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+
 let loggerOptions,condition;const onErrors=[];
 function walk(n){if(ts.isCallExpression(n)&&n.expression.getText(ast)==='loggerLink')loggerOptions=n.arguments[0].getText(ast);if(ts.isCallExpression(n)&&n.expression.getText(ast)==='splitLink')condition=n.arguments[0].properties.find(p=>p.name?.getText(ast)==='condition').initializer.getText(ast);if(ts.isMethodDeclaration(n)&&n.name.getText(ast)==='onError')onErrors.push(n.getText(ast));ts.forEachChild(n,walk)}walk(ast);
 function evaluate(expression,console){const code=ts.transpileModule('module.exports = '+expression,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React}}).outputText;const module={exports:{}};new Function('module','console','isTRPCClientError',code)(module,console,()=>false);return module.exports}
@@ -19,4 +20,11 @@ test('actual mixed mutation responses and global error handlers never log a sign
   for(const fn of onErrors)evaluate('({'+fn+'}).onError',sink)(values[1].reason);
  }
  assert.equal(onErrors.length,2);assert(!JSON.stringify(logs).includes(marker));assert(!JSON.stringify(logs).includes('responseJSON'));assert(logs.some(x=>x[0]==='trpc'&&x[1]?.type==='mutation'));assert(logs.length>0);
+});
+
+test('bounded recovery is isolated and excluded from signed-input logging',()=>{
+ const sink={info:()=>{throw Error('unexpected log')},log:()=>{throw Error('unexpected log')},error:()=>{throw Error('unexpected log')}};
+ const logger=evaluate(loggerOptions,sink), split=evaluate(condition,sink);
+ for(const direction of ['up','down'])assert.equal(logger.enabled({path:'xiaohongshu.recoverSingleNote',direction}),false);
+ assert.equal(split({path:'xiaohongshu.recoverSingleNote'}),true);
 });

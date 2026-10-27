@@ -20,6 +20,7 @@ import {
   fetchXhsShortLink,
   XhsShortLinkResolver,
   XhsShortLinkTransport,
+  xhsPublicInputUrl,
 } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { XhsSubscriptionSource } from './xhs-subscription.service';
@@ -36,6 +37,8 @@ import {
 import type { XhsConnectionStatus } from '@wewe-rss/shared';
 import { parseXhsProfile } from './xhs-profile';
 import { XhsSourceRiskStore } from './xhs-source-risk-store';
+import { XhsLimitedRecoveryStore } from './xhs-limited-recovery-store';
+import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 
 type RequestAdmission = {
   budget?: XhsRequestBudget;
@@ -65,6 +68,16 @@ export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
+  private readonly limitedRecoveryScope = new AsyncLocalStorage<{
+    noteId: string;
+    owner: string;
+    started: boolean;
+    isCancelled?: () => boolean;
+  }>();
+  private limitedRecoveryStore?: XhsLimitedRecoveryStore;
+  bindLimitedRecoveryStore(store: XhsLimitedRecoveryStore) {
+    this.limitedRecoveryStore ??= store;
+  }
   withRequestBudget<T>(
     budget: XhsRequestBudget,
     id: string,
@@ -134,8 +147,29 @@ export class XhsSubscriptionRuntime
         this.requireSession();
         return { ...this.cookies! };
       },
-      transport: (request) =>
-        this.guardTransport(() =>
+      transport: async (request) => {
+        const recovery = this.limitedRecoveryScope.getStore();
+        if (recovery) {
+          let body: any;
+          try {
+            body = JSON.parse(request.body || '');
+          } catch {
+            return failure('XHS_URL_INVALID');
+          }
+          if (
+            recovery.started ||
+            request.method !== 'POST' ||
+            new URL(request.url).pathname !== '/api/sns/web/v1/feed' ||
+            body?.source_note_id !== recovery.noteId
+          )
+            return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+          await this.limitedRecoveryStore!.start(
+            recovery.owner,
+            recovery.noteId,
+          );
+          recovery.started = true;
+        }
+        return this.guardTransport(() =>
           (() => {
             const route = new URL(request.url).pathname;
             if (route.endsWith('/user/otherinfo'))
@@ -149,7 +183,8 @@ export class XhsSubscriptionRuntime
               this.requestAttempts.replies++;
             return api({ ...request, signal: signal(request.signal) });
           })(),
-        ),
+        );
+      },
     });
     this.adapter = new RedbookSubscriptionAdapter(
       client,
@@ -188,12 +223,18 @@ export class XhsSubscriptionRuntime
     const undo: Array<() => Promise<void>> = [];
     let dispatched = false;
     const ready = async (tx?: Prisma.TransactionClient) => {
+      const recovery = this.limitedRecoveryScope.getStore();
+      if (recovery?.isCancelled?.()) return failure('XHS_TASK_CANCELLED');
+      if (recovery)
+        await this.limitedRecoveryStore!.assertActive(recovery.owner, tx);
       for (const scope of scopes) await scope.budget!.assertReady(tx);
       this.requireSession();
       if (generation !== this.generation || signal.aborted)
         return failure('XHS_SESSION_CHANGED');
     };
     const dispatch = () => {
+      if (this.limitedRecoveryScope.getStore()?.isCancelled?.())
+        return failure('XHS_TASK_CANCELLED');
       this.requireSession();
       if (generation !== this.generation || signal.aborted)
         return failure('XHS_SESSION_CHANGED');
@@ -240,7 +281,14 @@ export class XhsSubscriptionRuntime
   }
   private requireSession() {
     if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
-    if (this.stopCode) return failure(this.stopCode);
+    if (
+      this.stopCode &&
+      !(
+        this.limitedRecoveryScope.getStore() &&
+        this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
+      )
+    )
+      return failure(this.stopCode);
     if (!this.cookies) return failure('XHS_SESSION_REQUIRED');
   }
   private clearMemory() {
@@ -424,7 +472,7 @@ export class XhsSubscriptionRuntime
     if (!this.riskStore && this.options.requirePersistentRisk)
       return failure('XHS_SOURCE_RISK_UNAVAILABLE');
     let riskOwner: string | undefined;
-    if (this.riskStore) {
+    if (this.riskStore && !this.limitedRecoveryScope.getStore()) {
       try {
         riskOwner = await this.riskStore.begin();
       } catch (error) {
@@ -453,7 +501,7 @@ export class XhsSubscriptionRuntime
         }
         this.persistedRisk = undefined;
       }
-      this.verified = true;
+      if (!this.limitedRecoveryScope.getStore()) this.verified = true;
       return result;
     } catch (error) {
       if (
@@ -566,6 +614,95 @@ export class XhsSubscriptionRuntime
   }
   resolve(url: string) {
     return this.withSession(() => this.adapter.resolve(url));
+  }
+  async resolveLimitedRecovery(
+    raw: string,
+    expectedAuthorId: string,
+    isCancelled?: () => boolean,
+  ) {
+    const url = xhsPublicInputUrl(raw);
+    const match =
+      /^\/(?:explore|discovery\/item)\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(
+        url.pathname,
+      );
+    if (
+      url.hostname !== 'www.xiaohongshu.com' ||
+      !match ||
+      !url.searchParams.get('xsec_token')
+    )
+      return failure('XHS_URL_INVALID');
+    if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
+    if (!this.cookies) return failure('XHS_SESSION_REQUIRED');
+    if (!this.limitedRecoveryStore)
+      return failure('XHS_SOURCE_RISK_UNAVAILABLE');
+    if (!this.sourceAdmission || !this.sourceDispatch)
+      return failure('XHS_REQUEST_BUDGET_REQUIRED');
+    if (this.stopCode && this.stopCode !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED')
+      return failure(this.stopCode);
+    const noteId = match[1];
+    if (isCancelled?.()) return failure('XHS_TASK_CANCELLED');
+    const owner = await this.limitedRecoveryStore.arm(noteId, expectedAuthorId);
+    const scope = { noteId, owner, started: false, isCancelled };
+    return this.limitedRecoveryScope.run(scope, async () => {
+      let projection: ReturnType<typeof inspectLimitedRecovery> | undefined;
+      try {
+        const resolution = await this.withSession(() =>
+          this.adapter.resolve(raw, (value) => {
+            projection = value;
+          }),
+        );
+        if (
+          !scope.started ||
+          !projection ||
+          resolution.inputKind !== 'note' ||
+          resolution.author.id !== projection.authorId ||
+          projection.authorId !== expectedAuthorId
+        )
+          return failure('XHS_AUTHOR_MISMATCH');
+        const transientToken = url.searchParams.get('xsec_token')!;
+        if (
+          JSON.stringify({
+            author: resolution.author,
+            note: projection,
+          }).includes(transientToken)
+        )
+          return failure('XHS_DETAIL_INCOMPLETE');
+        const original = this.adapter.cachedOriginalLink(
+          expectedAuthorId,
+          noteId,
+        );
+        if (original?.state !== 'ready')
+          return failure('XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE');
+        return {
+          owner,
+          author: resolution.author,
+          note: projection,
+          originalUrl: original.url,
+        };
+      } catch (error) {
+        try {
+          if (
+            error instanceof RedbookPauseError &&
+            [
+              'authentication',
+              'verification',
+              'unknown_rejection',
+              'permission',
+              'signature',
+              'rate_limit',
+            ].includes(error.reason)
+          )
+            await this.limitedRecoveryStore!.recordRefusal(
+              owner,
+              `XHS_SOURCE_${error.reason.toUpperCase()}_BLOCKED`,
+            );
+          else await this.limitedRecoveryStore!.finish(owner, 'unknown');
+        } catch {
+          /* retain a durable uncertainty fence */
+        }
+        throw error;
+      }
+    });
   }
   list(authorId: string, cursor: string | null, signal?: AbortSignal) {
     return this.withSession(async () => {

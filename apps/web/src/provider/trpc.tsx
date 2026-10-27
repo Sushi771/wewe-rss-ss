@@ -135,6 +135,7 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
             typeof operation.path === 'string' &&
             ![
               'xiaohongshu.resolveSubscription',
+              'xiaohongshu.recoverSingleNote',
               'xiaohongshu.prepareOriginalLink',
               'xiaohongshu.connectSession',
             ].includes(operation.path),
@@ -149,6 +150,7 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
               'article.byId',
               'xiaohongshu.prepareOriginalLink',
               'xiaohongshu.resolveSubscription',
+              'xiaohongshu.recoverSingleNote',
               'xiaohongshu.connectSession',
             ].includes(operation.path),
           true: httpLink(transport),

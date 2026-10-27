@@ -14,6 +14,7 @@ import { XhsAuthor } from '@wewe-rss/shared';
 import { XhsShortLinkResolver } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { selectXhsNativeDetail } from './xhs-native-media';
+import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 import {
   mapXhsComments,
   xhsNoteMetrics,
@@ -160,7 +161,10 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     } while (cursor !== null);
     throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_UNAVAILABLE');
   }
-  async resolve(raw: string) {
+  async resolve(
+    raw: string,
+    inspect?: (value: ReturnType<typeof inspectLimitedRecovery>) => void,
+  ) {
     const revision = ++this.revision;
     const url = await this.shortLinks.resolve(raw);
     const inputKind = url.pathname.startsWith('/user/profile/')
@@ -211,6 +215,7 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
         name: user.nickname.trim(),
         profileUrl: `https://www.xiaohongshu.com/user/profile/${authorId}`,
       };
+      if (inspect) inspect(inspectLimitedRecovery(rawDetail, authorId, noteId));
       access.originalUrl = sourceOriginalLink(raw, url, noteId);
       access.linkChecked = true;
       const key = JSON.stringify([authorId, noteId]);

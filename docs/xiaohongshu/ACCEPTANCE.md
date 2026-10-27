@@ -127,3 +127,6 @@ xhs-engagement.spec.ts 新增20001条合成评论分段：唯一评论ID集合�
 真实编译UI标准：桌面紧凑四指标有稳定列宽和对齐，0/未知清晰，无右端挤成逐字纵列；长标题换行不挤掉指标或操作；窄屏卡片明确标签且无横向溢出。任务区默认收起，可展开查看阶段；少任务/空列表不制造大块占位；模态实际居中、矮窗口操作可达、Escape/焦点返回可靠。截图必须包含完整页面、任务展开/收起、互动模态、长标题/极大数/未知/空态及窄屏，不只截局部或依赖宽高数字。
 
 优先在隔离编译客户端以320/390/790/1024/1580宽、矮高和等效缩放实测滚轮/键盘、快速切换与迟到结果。最后真实PC原文打开必须另按明确许可和原请求预算执行：确认从实际标题动作得到的目标URL及正确笔记可见。合成URL匹配、popup创建或HTTP200都不能代替真实页面可读；若平台拒绝须记录受限，不能称任意token保证可读。
+
+
+Limited recovery acceptance: use synthetic SQLite and injected transports to verify author/note mismatch, expiry, disabled source, one-time/concurrent/restart admission, shared budget exhaustion, refusal stop, no subsequent dispatch, unchanged historical risk, escaped body and exact zero/unknown metrics, no task creation, retained disabled creator and pending media. A separately approved real check must verify the returned original link, actual saved body/count fields and creator identity. The query-free media source manifest and fingerprints do not prove complete or subsequently downloadable images.

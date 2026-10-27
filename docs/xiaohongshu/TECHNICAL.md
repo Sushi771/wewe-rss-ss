@@ -174,3 +174,12 @@ prepareOriginalLink只做已批准的原文跳转准备，不能复活平台正�
 先于最终写锁取得而已提交的取消必须阻止派发；明确未派发时只撤销本次预留。出站后的时钟事务若实际回滚，已提交的屏障继续阻止其他 runtime 和重启后的新请求；已花额度不退款，未知请求不重发。提交成功但确认丢失时，以已持久化的时钟和额度为准，同样不自动重发。
 
 该屏障没有自动到期清理。重连、重启、保存预算或扩额不会消除未完成的派发记账。持续出现请求暂停时，应先核查数据库提交错误与可验证回执；不得通过删除屏障、重置账本或重试未知请求来恢复。此状态不代表来源要求验证码。
+
+
+## Limited single-note recovery
+
+`recoverSingleNote` is a protected local-only explicit operation requiring a supplied official note URL, an independently known author ID and confirmation. It accepts only a historical-review stop, never a new authentication, verification or signature block. A durable, note/author-bound single-round claim expires after ten minutes and cannot be reissued, resumed or replayed after a crash. The shared source ledger and dispatch clock remain in force. This deliberately narrow flow permits only one detail dispatch; it performs no list, comment, reply, redirect or media requests.
+
+The returned note and author must match both authorized identities. Body text, four metric values and the subscription are committed together with the local recovery receipt. Unknown metrics remain null. Existing content is retained and a disabled subscription is not enabled. No background task or download is queued. Historical risk stays blocked after success; a new refusal is recorded without discarding the previous history.
+
+Images are not fetched in this flow. The receipt lists pending media ordinals, validated CDN source paths with all query parameters omitted, and one-way source fingerprints. Query omission is explicit; these paths must not be treated as verified replayable image URLs or fetched automatically. The note remains listed/partial rather than claiming complete media. Existing full archive/export gates continue to require complete media. Signed original URLs are returned only to the explicit caller with no-store/no-referrer headers, excluded from logging and normal list DTOs. This flow does not prove that a user can open the resulting PC link; actual platform acceptance remains a separate bounded verification.

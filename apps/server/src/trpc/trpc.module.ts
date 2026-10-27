@@ -1,5 +1,6 @@
 import { bindXhsSourceTotalBudget } from '../collection/xhs-source-request-policy';
 import { XhsSourceRiskStore } from '../collection/xhs-source-risk-store';
+import { XhsLimitedRecoveryStore } from '../collection/xhs-limited-recovery-store';
 import { XhsWholeCreatorService } from '../collection/xhs-whole-creator.service';
 import { Module } from '@nestjs/common';
 import { TrpcService } from '@server/trpc/trpc.service';
@@ -39,6 +40,7 @@ import {
       useFactory: (db: PrismaService) => {
         const runtime = createLocalXhsSubscriptionRuntime();
         runtime.bindRiskStore(new XhsSourceRiskStore(db));
+        runtime.bindLimitedRecoveryStore(new XhsLimitedRecoveryStore(db));
         bindXhsSourceTotalBudget(db, runtime);
         return runtime;
       },

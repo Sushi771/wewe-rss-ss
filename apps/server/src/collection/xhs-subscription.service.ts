@@ -23,6 +23,7 @@ import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
 import { saveXhsMetrics } from './xhs-engagement-store';
 import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
+import type { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 
 export const XHS_SUBSCRIPTION_SOURCE = Symbol('XHS_SUBSCRIPTION_SOURCE');
 export type XhsListedNote = {
@@ -262,6 +263,115 @@ export class XhsSubscriptionService implements OnModuleInit {
       existingCreatorId: existing?.id ?? null,
       expiresAt,
     };
+  }
+  /** Internal result only; source input and transient URLs never enter this transaction. */
+  async commitLimitedRecovery(input: {
+    owner: string;
+    author: XhsAuthor;
+    note: ReturnType<typeof inspectLimitedRecovery>;
+  }) {
+    const { owner, author, note } = input;
+    if (
+      author.id !== note.authorId ||
+      author.profileUrl !==
+        `https://www.xiaohongshu.com/user/profile/${author.id}` ||
+      !note.text.trim()
+    )
+      return reject('XHS_DETAIL_INCOMPLETE');
+    const noteId = key(note.noteId);
+    const html = verifiedDownloadBody(
+      '<div id="js_content">' +
+        note.text
+          .split('\n')
+          .map((p) => '<p>' + esc(p) + '</p>')
+          .join('') +
+        '</div>',
+    );
+    return this.write(Buffer.byteLength(html) + 8192, async (tx) => {
+      const claim = await tx.$queryRaw<
+        Array<{ note_id: string; author_id: string; state: string }>
+      >`
+        SELECT note_id,author_id,state FROM xhs_limited_recovery
+        WHERE id='single-round' AND owner=${owner}`;
+      if (
+        claim.length !== 1 ||
+        claim[0].state !== 'started' ||
+        claim[0].note_id !== note.noteId ||
+        claim[0].author_id !== author.id
+      )
+        return reject('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      const oldCreator = await tx.xhsCreator.findFirst({
+        where: {
+          OR: [
+            { externalAuthorId: author.id },
+            { profileUrl: author.profileUrl },
+          ],
+        },
+      });
+      if (
+        oldCreator?.externalAuthorId &&
+        oldCreator.externalAuthorId !== author.id
+      )
+        return reject('XHS_AUTHOR_CONFLICT');
+      if (oldCreator && !oldCreator.enabled)
+        return reject('XHS_SUBSCRIPTION_CHANGED');
+      const creator = oldCreator
+        ? await tx.xhsCreator.update({
+            where: { id: oldCreator.id },
+            data: { externalAuthorId: author.id, lastStatus: 'subscribed' },
+          })
+        : await tx.xhsCreator.create({
+            data: {
+              id: randomUUID(),
+              externalAuthorId: author.id,
+              profileUrl: author.profileUrl,
+              displayName: author.name,
+              lastStatus: 'subscribed',
+            },
+          });
+      const oldNote = await tx.xhsNote.findUnique({ where: { id: noteId } });
+      if (oldNote && oldNote.creatorId !== creator.id)
+        return reject('XHS_AUTHOR_CONFLICT');
+      const retained = !!oldNote?.contentHtml;
+      if (!oldNote)
+        await tx.xhsNote.create({
+          data: {
+            id: noteId,
+            creatorId: creator.id,
+            title: note.title,
+            publishTime: note.publishedAt,
+            kind: 'image-text',
+            status: 'listed',
+            contentHtml: html,
+          },
+        });
+      else if (!retained)
+        await tx.xhsNote.update({
+          where: { id: noteId },
+          data: {
+            title: note.title,
+            publishTime: note.publishedAt,
+            kind: 'image-text',
+            status: 'listed',
+            contentHtml: html,
+          },
+        });
+      await saveXhsMetrics(tx, 'note', noteId, note.metrics);
+      const manifest = JSON.stringify(note.media);
+      const changed =
+        await tx.$executeRaw`UPDATE xhs_limited_recovery SET state='finished',media_manifest=${manifest},updated_at=${BigInt(Date.now())}
+        WHERE id='single-round' AND owner=${owner} AND state='started'`;
+      if (changed !== 1) return reject('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      return {
+        creatorId: creator.id,
+        noteId,
+        subscribed: true as const,
+        body: retained ? ('retained' as const) : ('saved' as const),
+        media: note.media.length ? ('pending' as const) : ('none' as const),
+        mediaSourceEvidence: 'query-free-manifest' as const,
+        mediaCount: note.media.length,
+      };
+    });
   }
   async subscribe(input: { resolutionId: string; groupId?: string }) {
     const resolution = this.resolutions.get(input.resolutionId);
