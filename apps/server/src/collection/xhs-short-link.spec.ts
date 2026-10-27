@@ -12,6 +12,8 @@ it('extracts one official URL from synthetic share text without broadening redir
     `Synthetic ${short} https://xhslink.cn/o/Other`,
     'Synthetic http://xhslink.cn/o/Synthetic open',
     'Synthetic https://xhslink.cn.evil.invalid/o/Synthetic open',
+    'Synthetic https://www.xiaohongshu.com/explore/note?xsec_token=synthetic)&xsec_source=pc_share! open',
+    'Synthetic https://www.xiaohongshu.com/explore/note?xsec_source=pc_share&xsec_token=synthetic) open',
   ]) expect(() => xhsPublicInputUrl(text)).toThrow();
   let calls = 0;
   const resolver = new XhsShortLinkResolver(async (url) => {

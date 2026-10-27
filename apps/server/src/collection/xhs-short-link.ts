@@ -12,6 +12,8 @@ export function xhsPublicInputUrl(raw: string) {
     if (/\s/.test(raw)) {
       const links = raw.match(/https?:\/\/[^\s<>"']+/gi) ?? [];
       if (links.length !== 1) throw Error();
+      if (links[0].includes('?') && /[，。！？）】,;!?)]+$/u.test(links[0]))
+        throw Error();
       input = links[0].replace(/[，。！？）】,;!?)]+$/u, '');
     }
     if (/[\\\s\x00-\x1f\x7f]/.test(input) || /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(input))
