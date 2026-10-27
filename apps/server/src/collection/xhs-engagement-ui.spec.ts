@@ -61,23 +61,14 @@ describe('actual XHS React business components with synthetic saved data (SSR)',
   });
   it('shows unknown metrics honestly without requesting collection', () => {
     const html = renderToStaticMarkup(
-      React.createElement(XhsEngagementPanel, {
-        creatorId: 'synthetic',
-        noteId: 'synthetic',
-      }),
+      React.createElement(XhsMetricLine, { snapshot: null }),
     );
+    expect(XhsEngagementPanel).toBeUndefined();
     expect(html).not.toContain('已保存评论');
     expect(html).toContain('赞 未知');
-    expect(queryCalls).toEqual([
-      [
-        { creatorId: 'synthetic', noteId: 'synthetic', offset: 0, limit: 200 },
-        { retry: false, refetchOnWindowFocus: false, keepPreviousData: false },
-      ],
-    ]);
-    expect(html).toContain('评论采集默认关闭');
-    expect(html).toContain('disabled');
+    expect(queryCalls).toEqual([]);
   });
-  it('renders zero, missing, historical time, partial state and escaped user text', () => {
+  it('renders zero, unknown and historical time, hides old comments and escapes user text', () => {
     const view = {
       ...empty,
       metrics: {
@@ -119,20 +110,23 @@ describe('actual XHS React business components with synthetic saved data (SSR)',
     };
     savedView = view;
     const html = renderToStaticMarkup(
-      React.createElement(XhsEngagementPanel, {
-        creatorId: 'synthetic',
-        noteId: 'synthetic',
-      }),
+      React.createElement(XhsMetricLine, { snapshot: view.metrics }),
     );
     expect(html).toContain('赞 0');
     expect(html).toContain('分享 未知');
-    expect(html).toContain('采集于');
-    expect(html).toContain('失败，保留部分结果');
-    expect(html).toContain('精确回复对象');
-    expect(html).toContain('未知');
-    expect(html).toContain('&lt;script&gt;unsafe&lt;/script&gt;');
+    expect(html).toContain('历史快照');
     expect(html).not.toContain('<script>');
-    expect(html.indexOf('root body')).toBeLessThan(html.indexOf('reply body'));
+    expect(html).not.toContain('root body');
+    expect(html).not.toContain('reply body');
+    expect(queryCalls).toEqual([]);
+    const escaped = renderToStaticMarkup(
+      React.createElement(XhsNumericFilter, {
+        value: { metric: 'likes', min: '<script>unsafe</script>' },
+        onChange: () => {},
+      }),
+    );
+    expect(escaped).toContain('&lt;script&gt;unsafe&lt;/script&gt;');
+    expect(escaped).not.toContain('<script>');
   });
   it('keeps the numeric filter controls accessible and bounded to local saved scope', () => {
     const html = renderToStaticMarkup(

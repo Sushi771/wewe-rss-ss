@@ -8,7 +8,7 @@ import { XiaohongshuService } from './xiaohongshu.service';
 import { XhsWholeCreatorService } from './xhs-whole-creator.service';
 import { XhsEngagementService } from './xhs-engagement.service';
 import { saveXhsMetrics, saveCommentPage } from './xhs-engagement-store';
-import { xhsNoteMetrics, mapXhsComments } from './xhs-engagement-contract';
+import { xhsNoteMetrics } from './xhs-engagement-contract';
 import { LocalArticleStore } from '../article-local-save';
 
 const key = (id: string) => JSON.stringify(['xiaohongshu', 'note', id]);
@@ -141,7 +141,7 @@ describe('complete archive before interaction, independent query (synthetic only
       api.prepareLocalDownload('creator', key('c')),
     ).rejects.toThrow();
   });
-  it('resumes old replies checkpoint with the same 14/100 ledger; all full files exist before first reply failure; resume retains hand edits and refreshes supplement', async () => {
+  it('resumes an old replies checkpoint with its existing budget; archives precede metrics, old comments and hand edits survive a metrics interruption', async () => {
     for (const id of ['a', 'b', 'c']) await seed(id);
     await saveCommentPage(
       db,
@@ -170,7 +170,8 @@ describe('complete archive before interaction, independent query (synthetic only
       },
     );
     let budget: any,
-      failReply = true;
+      failMetric = true,
+      metricCalls = 0;
     const events: string[] = [],
       savedPaths = new Map<string, string>();
     const source: any = {
@@ -181,15 +182,12 @@ describe('complete archive before interaction, independent query (synthetic only
       }),
       metrics: async () => {
         events.push('metrics');
+        if (failMetric && ++metricCalls === 2)
+          throw Error('synthetic metrics interruption');
         await budget();
         return candidate('x').metrics;
       },
-      comments: async (_a, id, _cursor, root) => {
-        events.push('comments:' + id + ':' + root);
-        await budget();
-        if (root && failReply) throw Error('synthetic root failure');
-        return mapXhsComments({ comments: [], has_more: false });
-      },
+      comments: jest.fn(),
       capability: () => ({ canCollectComments: true }),
     };
     const subscriptions = new XhsSubscriptionService(db as any, source);
@@ -232,7 +230,7 @@ describe('complete archive before interaction, independent query (synthetic only
       profile: 1,
       items: { [key('a')]: { metrics: 1, top: 1 } },
     };
-    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used) VALUES('old-job',100,1000,14)`;
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used) VALUES('old-job',60,1000,7)`;
     await db.$executeRaw`INSERT INTO xhs_whole_creator_jobs(id,creator_id,state,document,updated_at) VALUES('old-job','creator','paused',${JSON.stringify(job)},1)`;
     let whole = new XhsWholeCreatorService(
       db as any,
@@ -242,7 +240,7 @@ describe('complete archive before interaction, independent query (synthetic only
     );
     await whole.onModuleInit();
     expect(events).toEqual([]);
-    expect((await whole.view('old-job')).budget!.used).toBe(14);
+    expect((await whole.view('old-job')).budget!.used).toBe(7);
     await whole.resume('old-job');
     await (whole as any).lane;
     const paused = await whole.view('old-job');
@@ -254,14 +252,15 @@ describe('complete archive before interaction, independent query (synthetic only
       'detail:c',
       'saved:c',
     ]);
-    expect(events[6]).toBe('comments:a:root');
+    expect(events.slice(6)).toEqual(['metrics', 'metrics']);
+    expect(source.comments).not.toHaveBeenCalled();
     expect(paused.state).toBe('paused');
-    expect(paused.budget!.used).toBe(18);
-    expect(paused.budget!.limit).toBe(100);
+    expect(paused.budget!.used).toBe(11);
+    expect(paused.budget!.limit).toBe(60);
     expect(paused.items.every((n) => n.archive === 'saved')).toBe(true);
     expect(paused.items.every((n) => n.supplement === 'pending')).toBe(true);
     expect(paused.items.find((n) => n.noteId === key('a'))!.engagement).toBe(
-      'partial',
+      'metrics-only',
     );
     for (const file of savedPaths.values())
       expect(await fs.readFile(file, 'utf8')).toContain(
@@ -269,7 +268,7 @@ describe('complete archive before interaction, independent query (synthetic only
       );
     const protectedPath = savedPaths.get(key('a'))!;
     await fs.appendFile(protectedPath, '\nSynthetic hand edit');
-    failReply = false;
+    failMetric = false;
     whole = new XhsWholeCreatorService(
       db as any,
       subscriptions,
@@ -289,6 +288,17 @@ describe('complete archive before interaction, independent query (synthetic only
       ),
     ).toBe(true);
     expect(source.detail).toHaveBeenCalledTimes(3);
+    expect(source.comments).not.toHaveBeenCalled();
+    expect(complete.budget!.used).toBe(12);
+    expect(complete.budget!.limit).toBe(60);
+    expect(
+      (await api.engagement({ creatorId: 'creator', noteId: key('a') }))
+        .comments,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'root', content: 'Synthetic root' }),
+      ]),
+    );
     expect(await fs.readFile(protectedPath, 'utf8')).toContain(
       'Synthetic hand edit',
     );

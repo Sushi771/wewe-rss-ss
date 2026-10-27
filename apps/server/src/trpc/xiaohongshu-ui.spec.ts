@@ -138,7 +138,6 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       message: '',
       error: '',
       creator: '',
-      note: 'old',
       url: 'https://www.xiaohongshu.com/user/profile/synthetic',
       resolution: null,
       task: null,
@@ -229,7 +228,6 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       setMessage: 'message',
       setOperationError: 'error',
       setCreatorId: 'creator',
-      setNoteId: 'note',
       setProfileUrl: 'url',
       setResolution: 'resolution',
       setTask: 'task',
@@ -318,7 +316,8 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     });
     expect(state.creator).toBe('subscribed');
     expect(state.url).toBe('');
-    expect(state.note).toBe('');
+    expect(text).not.toContain('setNoteId');
+    expect(text).not.toContain('XhsEngagementPanel');
     expect(invalidated).toHaveBeenCalled();
     expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
   });
