@@ -32,8 +32,11 @@ visit(ast);
 assert.ok(helper && click);
 async function run(mode) {
   let now = 0,
-    frame = 0;
+    frame = 0,
+    pressed = false;
   const events = [];
+  const listeners = new Map();
+  const pointerClicks = [];
   const body = { children: [] },
     popover = {
       isConnected: true,
@@ -53,19 +56,30 @@ async function run(mode) {
     contains: (e) => e === target,
     getBoundingClientRect() {
       const scale = mode === 'transient' && frame < 4 ? 0.8 : 1;
-      return { x: 100, y: 100, width: 100 * scale, height: 40 * scale };
+      return {
+        x: mode === 'press-move' && pressed ? 140 : 100,
+        y: 100,
+        width: 100 * scale,
+        height: 40 * scale,
+      };
     },
   };
   const browser = {
     window: null,
     document: {
       body,
+      addEventListener: (type, fn) => listeners.set(type, fn),
+      removeEventListener: (type, fn) => {
+        assert.equal(listeners.get(type), fn);
+        listeners.delete(type);
+      },
       querySelector: (s) =>
         s === '.app-shell' ? { scrollHeight: 900 } : target,
       elementFromPoint() {
         frame++;
         if (
           mode === 'persistent' ||
+          (mode === 'release-block' && pressed) ||
           (mode === 'transient' && frame < 5) ||
           (mode === 'late-block' && frame >= 4)
         )
@@ -84,6 +98,7 @@ async function run(mode) {
   vm.createContext(browser);
   const context = {
     assert,
+    pointerClicks,
     Date: { now: () => now },
     pause: async (ms) => {
       now += ms;
@@ -91,6 +106,10 @@ async function run(mode) {
     ev: async (expression) => vm.runInContext(expression, browser),
     send: async (method, params) => {
       events.push({ method, ...params });
+      pressed ||= params.type === 'mousePressed';
+      const types = params.type === 'mousePressed' ? ['pointerdown'] : ['pointerup', 'click'];
+      for (const type of types)
+        listeners.get(type)?.({ type, target, clientX: params.x, clientY: params.y });
     },
   };
   vm.createContext(context);
@@ -99,7 +118,7 @@ async function run(mode) {
     context,
   );
   const action = context.click("document.querySelector('#target')", true);
-  if (mode === 'transient') {
+  if (mode === 'transient' || mode === 'stable') {
     await action;
     assert.equal(events.length, 2);
     assert.deepEqual(
@@ -108,14 +127,16 @@ async function run(mode) {
     );
     assert.equal(events[0].clickCount, 1);
     assert.equal(events[1].clickCount, 1);
-    assert.ok(frame >= 7);
+    if (mode === 'transient') assert.ok(frame >= 7);
     assert.equal(browser.__overlayClickPin, undefined);
+    assert.equal(listeners.size, 0);
+    assert.deepEqual(Array.from(pointerClicks[0].events, (e) => e.type), ['pointerdown', 'pointerup', 'click']);
   } else {
     await assert.rejects(action);
     assert.equal(
       events.length,
-      0,
-      'failed hit/stability may not send a mouse event',
+      ['press-move', 'release-block'].includes(mode) ? 1 : 0,
+      'failed stability/hit may not send an additional mouse event',
     );
     if (mode === 'persistent') assert.ok(now >= 3000 && now <= 3050);
   }
@@ -134,4 +155,47 @@ test('persistent popover obstruction fails within the bound without a mouse even
 });
 test('the final hit assertion rejects a new obstruction after stability', async () => {
   await run('late-block');
+});
+
+test('a stable popover records one press/release and the actual pointer event sequence', async () => {
+  await run('stable');
+});
+
+test('movement after press fails before releasing at the stale position without another click', async () => {
+  await run('press-move');
+});
+
+test('obstruction after press fails before release without repeating the press', async () => {
+  await run('release-block');
+});
+
+test('all three import scenarios use the pinned popover wait without adding a click retry', () => {
+  const calls = [];
+  function collect(n) {
+    if (ts.isCallExpression(n) && n.expression.getText(ast) === 'click') {
+      const button = n.arguments[0];
+      if (button && ts.isCallExpression(button) &&
+          button.expression.getText(ast) === 'button' &&
+          button.arguments[0]?.text === '\u5bfc\u5165\u5df2\u6709\u6587\u4ef6') calls.push(n);
+    }
+    ts.forEachChild(n, collect);
+  }
+  collect(ast);
+  assert.equal(calls.length, 3);
+  for (const call of calls) assert.equal(call.arguments[1]?.kind, ts.SyntaxKind.TrueKeyword);
+  assert.equal((click.getText(ast).match(/send\('Input.dispatchMouseEvent'/g) || []).length, 2);
+  assert.match(source, /await modalMatrix\('wechat-import'\)/);
+  assert.match(source, /await modalMatrix\('wechat-import-long'\)/);
+  assert.match(source, /await modalMatrix\('toast-with-import'\)/);
+});
+
+test('CI retains only synthetic failure evidence and never uploads the temporary profile', () => {
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/responsive-reading-ci.yml'), 'utf8');
+  assert.match(workflow, /id: overlay-matrix/);
+  assert.match(workflow, /if: failure\(\) && steps\.overlay-matrix\.outputs\.evidence != ''/);
+  const block = workflow.split('name: Preserve failed synthetic overlay evidence')[1].split('- name:')[0];
+  assert.match(block, /\/failure\*\.json/);
+  assert.match(block, /\/failure\*\.png/);
+  assert.match(block, /\/result\.json/);
+  assert.doesNotMatch(block, /profile|path: \$\{\{[^\n]+\}\}\s*\n/);
 });

@@ -80,9 +80,21 @@ jobs:
         run: node scripts/xhs-note-data-browser.test.cjs
 
       - name: Original links and shared overlay interaction matrix
+        id: overlay-matrix
         env:
           RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
         run: node scripts/overlay-matrix-browser.test.cjs
+
+      - name: Preserve failed synthetic overlay evidence
+        if: failure() && steps.overlay-matrix.outputs.evidence != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-overlay-failure
+          path: |
+            ${{ steps.overlay-matrix.outputs.evidence }}/failure*.json
+            ${{ steps.overlay-matrix.outputs.evidence }}/failure*.png
+            ${{ steps.overlay-matrix.outputs.evidence }}/result.json
+          retention-days: 3
 
       - name: Metric header cycles, complete-set ordering and responsive counts
         env:

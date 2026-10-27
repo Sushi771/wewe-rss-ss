@@ -9,7 +9,10 @@ const root = path.resolve(__dirname, '..'),
     path.join(require('os').tmpdir(), 'wewe-overlay-matrix-'),
   );
 fs.mkdirSync(evidence, { recursive: true });
+if (process.env.GITHUB_OUTPUT)
+  fs.appendFileSync(process.env.GITHUB_OUTPUT, `evidence=${evidence}\n`);
 const apiReads = [];
+const pointerClicks = [];
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 // Wait only for the explicitly selected SubscriptionMore target. Never click
 // an obscuring parent or switch to another matching control during animation.
@@ -536,6 +539,7 @@ const server = http.createServer((req, res) => {
             label,
             requests,
             apiReads,
+            pointerClicks,
             page: await ev(
               '({text:document.body.innerText,html:document.documentElement.outerHTML.slice(-18000),toolbar:document.querySelector(".feed-reading-toolbar")?.outerHTML,active:document.activeElement?.outerHTML,docHeight:document.documentElement.scrollHeight,innerHeight})',
             ),
@@ -563,19 +567,36 @@ const server = http.createServer((req, res) => {
         `(()=>{const e=${expression}, hit=document.elementFromPoint(${r.x},${r.y});return {ok:(e===hit||e.contains(hit))&&(!${stablePopover}||(e===window.__overlayClickPin?.e&&e.closest('.feed-reading-more')===window.__overlayClickPin?.p)),target:e.outerHTML.slice(0,150),hit:hit?.outerHTML.slice(0,150),x:${r.x},y:${r.y},body:[...document.body.children].map(e=>({tag:e.tagName,h:e.getBoundingClientRect().height,bottom:e.getBoundingClientRect().bottom})),shell:document.querySelector('.app-shell').scrollHeight}})()`,
       );
       assert(hit.ok, JSON.stringify(hit));
+      const trace = { stablePopover, beforePress: hit };
+      if (stablePopover) {
+        pointerClicks.push(trace);
+        await ev(`(()=>{const pin=window.__overlayClickPin;pin.events=[];pin.observe=event=>{if(pin.events.length>=12)return;const r=pin.e.getBoundingClientRect();pin.events.push({type:event.type,same:pin.e===event.target||pin.e.contains(event.target),x:event.clientX,y:event.clientY,centerX:r.x+r.width/2,centerY:r.y+r.height/2});};for(const type of ['pointerdown','pointerup','click'])document.addEventListener(type,pin.observe,true)})()`);
+      }
       await send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
         ...r,
         button: 'left',
         clickCount: 1,
       });
+      if (stablePopover) {
+        trace.beforeRelease = await ev(`(()=>{const pin=window.__overlayClickPin,e=${expression},r=e?.getBoundingClientRect(),hit=document.elementFromPoint(${r.x},${r.y});return {same:!!pin&&e===pin.e&&e?.closest('.feed-reading-more')===pin.p,hit:!!e&&(e===hit||e.contains(hit)),centerX:r&&r.x+r.width/2,centerY:r&&r.y+r.height/2,events:pin?.events}})()`);
+        assert(
+          trace.beforeRelease.same &&
+            trace.beforeRelease.hit &&
+            Math.abs(trace.beforeRelease.centerX - r.x) < 0.25 &&
+            Math.abs(trace.beforeRelease.centerY - r.y) < 0.25,
+          'same popover target must remain under the single release: ' +
+            JSON.stringify(trace.beforeRelease),
+        );
+      }
       await send('Input.dispatchMouseEvent', {
         type: 'mouseReleased',
         ...r,
         button: 'left',
         clickCount: 1,
       });
-      if (stablePopover) await ev('delete window.__overlayClickPin');
+      if (stablePopover)
+        trace.events = await ev(`(()=>{const pin=window.__overlayClickPin;for(const type of ['pointerdown','pointerup','click'])document.removeEventListener(type,pin.observe,true);delete window.__overlayClickPin;return pin.events})()`);
       await pause(300);
     };
     const key = async (name, code) => {
@@ -861,14 +882,14 @@ const server = http.createServer((req, res) => {
     await run('wechat-import', async () => {
       await navigate();
       await more();
-      await click(button('导入已有文件'));
+      await click(button('导入已有文件'), true);
       await modalMatrix('wechat-import');
     });
     await run('wechat-import-long', async () => {
       scenario = 'import-long';
       await navigate();
       await more();
-      await click(button('导入已有文件'));
+      await click(button('导入已有文件'), true);
       await wait("Boolean(document.querySelector('.app-dialog input'))", 'import input mounted');
       await click("document.querySelector('.app-dialog input')");
       await send('Input.insertText', { text: 'C:/synthetic-only' });
@@ -1111,7 +1132,7 @@ const server = http.createServer((req, res) => {
       scenario = 'import-error';
       await navigate();
       await more();
-      await click(button('导入已有文件'));
+      await click(button('导入已有文件'), true);
       await wait("Boolean(document.querySelector('.app-dialog input'))", 'import input mounted');
       await click("document.querySelector('.app-dialog input')");
       await send('Input.insertText', { text: 'C:/synthetic-only' });
@@ -1197,6 +1218,7 @@ const server = http.createServer((req, res) => {
           forbidden,
           bodyCalls: 0,
           apiReads,
+      pointerClicks,
           source: 'compiled Vite app with local synthetic HTTP API',
         },
         null,
