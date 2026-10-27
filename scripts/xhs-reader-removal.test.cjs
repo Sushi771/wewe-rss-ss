@@ -49,3 +49,35 @@ test('changing a native download gate cannot hide behind the deleted reader seam
     seam.baselineServiceSha256,
   );
 });
+
+test('limited recovery compatibility rejects changed authorization, identity and response privacy seams', () => {
+  const fixture = require('./fixtures/xhs-original-link-router-seams.json');
+  const reviewed = fixture[2].after;
+  const routeStart = reviewed.indexOf('    recoverSingleNote:');
+  assert.ok(routeStart > 0);
+  const route = reviewed.slice(routeStart);
+  assert.equal(router.split(route).length, 2);
+  assert.equal(router.split(fixture[5].after).length, 2);
+  for (const [before, after] of [
+    ['this.requireLocalXhsConnection(ctx);', 'this.requireLocalXhsAccess(ctx);'],
+    ['confirmLimitedRecovery: z.literal(true)', 'confirmLimitedRecovery: z.boolean()'],
+    ['input.expectedAuthorId,', 'input.url,'],
+    ['await this.xhsSubscriptions!.commitLimitedRecovery(result)', 'await Promise.resolve(result)'],
+  ]) {
+    assert.equal(route.split(before).length, 2);
+    const changed = router.replace(route, route.replace(before, after));
+    assert.notEqual(changed, router);
+    assert.throws(() => restorePreOriginalLinkRouter(changed), /exact PC-link router seam/);
+  }
+  for (const [before, after] of [
+    ["name.endsWith('xiaohongshu.recoverSingleNote')", 'false'],
+    ["res.setHeader('Cache-Control', 'no-store');", "res.setHeader('Cache-Control', 'public');"],
+    ["res.setHeader('Referrer-Policy', 'no-referrer');", "res.setHeader('Referrer-Policy', 'unsafe-url');"],
+  ]) {
+    const headers = fixture[5].after;
+    assert.equal(headers.split(before).length, 2);
+    const changed = router.replace(headers, headers.replace(before, after));
+    assert.notEqual(changed, router);
+    assert.throws(() => restorePreOriginalLinkRouter(changed), /exact PC-link router seam/);
+  }
+});
