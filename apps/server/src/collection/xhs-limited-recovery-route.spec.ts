@@ -63,5 +63,7 @@ it('requires authenticated local access and explicit confirmation before limited
     media: 'pending',
   });
   expect(runtime.resolveLimitedRecovery).toHaveBeenCalledTimes(1);
-  expect(subscriptions.commitLimitedRecovery).toHaveBeenCalledTimes(1);
+  await local.xiaohongshu.recoverSingleNote({ ...input, appendUnknownAttempt: true });
+  expect(runtime.resolveLimitedRecovery).toHaveBeenLastCalledWith(input.url, input.expectedAuthorId, undefined, true);
+  expect(subscriptions.commitLimitedRecovery).toHaveBeenCalledTimes(2);
 });

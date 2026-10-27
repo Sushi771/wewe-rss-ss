@@ -51,6 +51,23 @@ export class XhsLimitedRecoveryStore {
     });
     return owner;
   }
+  /** One explicit additional attempt, bound to the immutable original uncertain claim. */
+  async armAppend(noteId: string, authorId: string) {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(noteId) || !/^[a-zA-Z0-9_-]{1,128}$/.test(authorId))
+      throw new XhsSubscriptionError('XHS_NOTE_ID_INVALID');
+    const owner = randomUUID();
+    await this.write(async (tx) => {
+      const now = BigInt(Date.now());
+      const inserted = await tx.$executeRaw`INSERT OR IGNORE INTO xhs_limited_recovery_append
+        (id,note_id,author_id,owner,state,created_at,updated_at,expires_at)
+        SELECT 'single-round',note_id,author_id,${owner},'armed',${now},${now},${now + 600000n}
+        FROM xhs_limited_recovery WHERE id='single-round' AND state='unknown'
+        AND note_id=${noteId} AND author_id=${authorId}
+        AND EXISTS(SELECT 1 FROM xhs_source_risk WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')`;
+      if (inserted !== 1) throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    });
+    return owner;
+  }
   /** Mark before dispatch. A crash after this point never permits replay. */
   async start(owner: string, noteId: string) {
     await this.write(async (tx) => {
@@ -58,7 +75,8 @@ export class XhsLimitedRecoveryStore {
         await tx.$executeRaw`UPDATE xhs_limited_recovery SET state='started',updated_at=${BigInt(Date.now())}
         WHERE id='single-round' AND owner=${owner} AND note_id=${noteId} AND state='armed' AND expires_at>${BigInt(Date.now())}
         AND EXISTS(SELECT 1 FROM xhs_source_risk WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')`;
-      if (changed !== 1)
+      const appended = await tx.$executeRaw`UPDATE xhs_limited_recovery_append SET state='started',updated_at=${BigInt(Date.now())} WHERE id='single-round' AND owner=${owner} AND note_id=${noteId} AND state='armed' AND expires_at>${BigInt(Date.now())} AND EXISTS(SELECT 1 FROM xhs_source_risk WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')`;
+      if (changed + appended !== 1)
         throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
     });
   }
@@ -67,7 +85,8 @@ export class XhsLimitedRecoveryStore {
       const changed =
         await tx.$executeRaw`UPDATE xhs_limited_recovery SET state=${result},updated_at=${BigInt(Date.now())}
         WHERE id='single-round' AND owner=${owner} AND state IN ('armed','started')`;
-      if (changed !== 1)
+      const appended = await tx.$executeRaw`UPDATE xhs_limited_recovery_append SET state=${result},updated_at=${BigInt(Date.now())} WHERE id='single-round' AND owner=${owner} AND state IN ('armed','started')`;
+      if (changed + appended !== 1)
         throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
     });
   }
@@ -79,6 +98,8 @@ export class XhsLimitedRecoveryStore {
       Array<{ id: string }>
     >`SELECT r.id FROM xhs_limited_recovery r
       WHERE r.id='single-round' AND r.owner=${owner} AND r.state='started' AND r.expires_at>${BigInt(Date.now())}
+      AND EXISTS(SELECT 1 FROM xhs_source_risk WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')
+      UNION ALL SELECT r.id FROM xhs_limited_recovery_append r WHERE r.id='single-round' AND r.owner=${owner} AND r.state='started' AND r.expires_at>${BigInt(Date.now())}
       AND EXISTS(SELECT 1 FROM xhs_source_risk WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')`;
     if (rows.length !== 1)
       throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
@@ -97,7 +118,8 @@ export class XhsLimitedRecoveryStore {
     await this.write(async (tx) => {
       const changed =
         await tx.$executeRaw`UPDATE xhs_limited_recovery SET code=${code},state='failed',updated_at=${BigInt(Date.now())} WHERE id='single-round' AND owner=${owner} AND state='started'`;
-      if (changed !== 1)
+      const appended = await tx.$executeRaw`UPDATE xhs_limited_recovery_append SET code=${code},state='failed',updated_at=${BigInt(Date.now())} WHERE id='single-round' AND owner=${owner} AND state='started'`;
+      if (changed + appended !== 1)
         throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
       await tx.$executeRaw`UPDATE xhs_source_risk SET code=${code},updated_at=${BigInt(Date.now())} WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'`;
     });

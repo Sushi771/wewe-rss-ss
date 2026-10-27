@@ -297,7 +297,8 @@ export class XhsSubscriptionService implements OnModuleInit {
         Array<{ note_id: string; author_id: string; state: string }>
       >`
         SELECT note_id,author_id,state FROM xhs_limited_recovery
-        WHERE id='single-round' AND owner=${owner}`;
+        WHERE id='single-round' AND owner=${owner}
+        UNION ALL SELECT note_id,author_id,state FROM xhs_limited_recovery_append WHERE id='single-round' AND owner=${owner}`;
       if (
         claim.length !== 1 ||
         claim[0].state !== 'started' ||
@@ -366,7 +367,8 @@ export class XhsSubscriptionService implements OnModuleInit {
       const changed =
         await tx.$executeRaw`UPDATE xhs_limited_recovery SET state='finished',media_manifest=${manifest},updated_at=${BigInt(Date.now())}
         WHERE id='single-round' AND owner=${owner} AND state='started'`;
-      if (changed !== 1) return reject('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      const appended = await tx.$executeRaw`UPDATE xhs_limited_recovery_append SET state='finished',media_manifest=${manifest},updated_at=${BigInt(Date.now())} WHERE id='single-round' AND owner=${owner} AND state='started'`;
+      if (changed + appended !== 1) return reject('XHS_SOURCE_RISK_REVIEW_REQUIRED');
       return {
         creatorId: creator.id,
         noteId,

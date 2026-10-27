@@ -1784,6 +1784,7 @@ export class TrpcRouter {
             url: z.string().min(1).max(8192),
             expectedAuthorId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
             confirmLimitedRecovery: z.literal(true),
+            appendUnknownAttempt: z.literal(true).optional(),
           })
           .strict(),
       )
@@ -1794,6 +1795,7 @@ export class TrpcRouter {
             input.url,
             input.expectedAuthorId,
             (ctx as { isExportCancelled?: () => boolean }).isExportCancelled,
+            input.appendUnknownAttempt === true,
           );
           const saved =
             await this.xhsSubscriptions!.commitLimitedRecovery(result);

@@ -644,6 +644,7 @@ export class XhsSubscriptionRuntime
     raw: string,
     expectedAuthorId: string,
     isCancelled?: () => boolean,
+    appendUnknownAttempt = false,
   ) {
     const url = xhsPublicInputUrl(raw);
     const match =
@@ -668,7 +669,7 @@ export class XhsSubscriptionRuntime
     if (!sourceOriginalLink(raw, url, noteId))
       return failure('XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE');
     if (isCancelled?.()) return failure('XHS_TASK_CANCELLED');
-    const owner = await this.limitedRecoveryStore.arm(noteId, expectedAuthorId);
+    const owner = await (appendUnknownAttempt ? this.limitedRecoveryStore.armAppend(noteId, expectedAuthorId) : this.limitedRecoveryStore.arm(noteId, expectedAuthorId));
     const scope = { noteId, owner, started: false, isCancelled };
     return this.limitedRecoveryScope.run(scope, async () => {
       let projection: ReturnType<typeof inspectLimitedRecovery> | undefined;

@@ -30,6 +30,7 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
     }
   }, 40000);
   beforeEach(async () => {
+    await db.$executeRaw`DELETE FROM xhs_limited_recovery_append`;
     await db.$executeRaw`DELETE FROM xhs_limited_recovery`;
     await db.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED',owner=NULL,http_status=NULL,endpoint=NULL WHERE id='source'`;
     await db.$executeRaw`DELETE FROM xhs_request_budgets`;
@@ -39,6 +40,47 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
     await fs.rm(folder, { recursive: true, force: true });
   }, 40000);
 
+  it('allows exactly one explicitly bound append while preserving the original uncertain claim', async () => {
+    const store = new XhsLimitedRecoveryStore(db as any);
+    const original = await store.arm('synthetic-note', 'synthetic-author');
+    await store.start(original, 'synthetic-note');
+    await store.finish(original, 'unknown');
+    await expect(store.armAppend('wrong-note', 'synthetic-author')).rejects.toThrow();
+    await expect(store.armAppend('synthetic-note', 'wrong-author')).rejects.toThrow();
+    const results = await Promise.allSettled([store.armAppend('synthetic-note', 'synthetic-author'), store.armAppend('synthetic-note', 'synthetic-author')]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const owner = (results.find((r) => r.status === 'fulfilled') as PromiseFulfilledResult<string>).value;
+    await store.start(owner, 'synthetic-note');
+    await store.assertActive(owner);
+    await store.finish(owner, 'unknown');
+    await expect(new XhsLimitedRecoveryStore(db as any).armAppend('synthetic-note', 'synthetic-author')).rejects.toThrow();
+    const rows = await db.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_limited_recovery`;
+    expect(rows[0].state).toBe('unknown');
+    const appended = await db.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_limited_recovery_append`;
+    expect(appended[0].state).toBe('unknown');
+  }, 40000);
+  it('cancels an appended attempt before dispatch without consuming the existing budget', async () => {
+    await db.$executeRaw`INSERT INTO xhs_limited_recovery(id,note_id,author_id,owner,state,created_at,updated_at,expires_at) VALUES('single-round','synthetic-note','author','old','unknown',0,0,0)`;
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,interval_ms) VALUES('xhs:source-total',3,1,0)`;
+    const api = jest.fn();
+    const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api, requirePersistentRisk: true });
+    runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
+    runtime.bindLimitedRecoveryStore(new XhsLimitedRecoveryStore(db as any));
+    bindXhsSourceTotalBudget(db as any, runtime);
+    await runtime.connectSession({ a1: 'synthetic-a1', webSession: 'synthetic-session' });
+    let checks = 0;
+    await expect(runtime.resolveLimitedRecovery(
+      'https://www.xiaohongshu.com/explore/synthetic-note?xsec_token=synthetic&xsec_source=pc_share',
+      'author', () => ++checks > 1, true,
+    )).rejects.toThrow();
+    expect(api).not.toHaveBeenCalled();
+    const rows = await db.$queryRaw<Array<{used:number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+    expect(rows[0].used).toBe(1);
+    await expect(new XhsLimitedRecoveryStore(db as any).armAppend('synthetic-note', 'author')).rejects.toThrow();
+    const old = await db.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_limited_recovery`;
+    expect(old[0].state).toBe('unknown');
+    runtime.onModuleDestroy();
+  }, 40000);
   it('preserves the risk, binds the note and consumes the one attempt before dispatch', async () => {
     const store = new XhsLimitedRecoveryStore(db as any);
     const owner = await store.arm('synthetic-note', 'synthetic-author');
@@ -81,6 +123,9 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
   });
   it.each([
     'success',
+    'append',
+    'append-refused',
+    'append-exhausted',
     'wrong-author',
     'exhausted',
     'refused',
@@ -90,8 +135,9 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
   ] as const)(
     'uses one scoped detail call and preserves history: %s',
     async (mode) => {
-      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,interval_ms) VALUES('xhs:source-total',3,${mode === 'exhausted' ? 3 : 0},1000)`;
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,interval_ms) VALUES('xhs:source-total',3,${mode === 'exhausted' || mode === 'append-exhausted' ? 3 : mode.startsWith('append') ? 1 : 0},1000)`;
       const note = `synthetic-${mode}`;
+      if (mode.startsWith('append')) await db.$executeRaw`INSERT INTO xhs_limited_recovery(id,note_id,author_id,owner,state,created_at,updated_at,expires_at) VALUES('single-round',${note},'author','original-owner','unknown',0,0,0)`;
       if (mode === 'disabled-creator') {
         await db.xhsNote.deleteMany();
         await db.xhsCreator.deleteMany();
@@ -106,7 +152,7 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
         });
       }
       const api = jest.fn(async (request: any) => ({
-        status: mode === 'refused' ? 461 : 200,
+        status: mode === 'refused' || mode === 'append-refused' ? 461 : 200,
         url: request.url,
         body: {
           success: true,
@@ -162,8 +208,8 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
         webSession: 'synthetic-session',
       });
       const url = `https://www.xiaohongshu.com/discovery/item/${note}?source=webshare&xhsshare=pc_web&xsec_token=synthetic-ephemeral&xsec_source=pc_share`;
-      const work = runtime.resolveLimitedRecovery(url, 'author');
-      if (mode === 'success' || mode === 'media') {
+      const work = runtime.resolveLimitedRecovery(url, 'author', undefined, mode.startsWith('append'));
+      if (mode === 'success' || mode === 'media' || mode === 'append') {
         const result = await work;
         const service = new XhsSubscriptionService(db as any, runtime);
         const saved = await service.commitLimitedRecovery(result);
@@ -200,24 +246,24 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
             .enabled,
         ).toBe(false);
       } else await expect(work).rejects.toThrow();
-      if (mode !== 'success' && mode !== 'media')
+      if (mode !== 'success' && mode !== 'media' && mode !== 'append')
         expect(
           await db.xhsNote.findUnique({
             where: { id: JSON.stringify(['xiaohongshu', 'note', note]) },
           }),
         ).toBeNull();
-      expect(api).toHaveBeenCalledTimes(mode === 'exhausted' ? 0 : 1);
+      expect(api).toHaveBeenCalledTimes(mode === 'exhausted' || mode === 'append-exhausted' ? 0 : 1);
       const budgets = await db.$queryRaw<
         Array<{ used: number }>
       >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
-      expect(budgets[0].used).toBe(mode === 'exhausted' ? 3 : 1);
+      expect(budgets[0].used).toBe(mode === 'exhausted' || mode === 'append-exhausted' ? 3 : mode.startsWith('append') ? 2 : 1);
       await expect(
         runtime.resolveLimitedRecovery(url, 'author'),
       ).rejects.toThrow();
       await expect(runtime.resolve(url)).rejects.toThrow();
       const risk = await new XhsSourceRiskStore(db as any).read();
       expect(risk).toBe(
-        mode === 'refused'
+        mode === 'refused' || mode === 'append-refused'
           ? 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
           : 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
       );
@@ -253,8 +299,8 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
   it('honors cancellation before reserving a recovery attempt or source budget', async () => {
     const api = jest.fn();
     const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
-    const arm = jest.fn();
-    runtime.bindLimitedRecoveryStore({ arm } as any);
+    const arm = jest.fn(), armAppend = jest.fn();
+    runtime.bindLimitedRecoveryStore({ arm, armAppend } as any);
     bindXhsSourceTotalBudget(db as any, runtime);
     await runtime.connectSession({
       a1: 'synthetic-a1',
@@ -280,6 +326,11 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
       ),
     ).rejects.toThrow('XHS_TASK_CANCELLED');
     expect(arm).not.toHaveBeenCalled();
+    await expect(runtime.resolveLimitedRecovery(
+      'https://www.xiaohongshu.com/explore/synthetic?xsec_token=synthetic&xsec_source=pc_share',
+      'author', () => true, true,
+    )).rejects.toThrow('XHS_TASK_CANCELLED');
+    expect(armAppend).not.toHaveBeenCalled();
     expect(api).not.toHaveBeenCalled();
     runtime.onModuleDestroy();
   });
