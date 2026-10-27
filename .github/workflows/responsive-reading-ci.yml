@@ -51,6 +51,7 @@ jobs:
         run: >-
           node --test
           scripts/browser-readiness.test.cjs
+          scripts/cdp-navigation.test.cjs
           scripts/overlay-click-readiness.test.cjs
           scripts/feed-refresh-state-ui.test.cjs
           scripts/feed-reading-ui.test.cjs

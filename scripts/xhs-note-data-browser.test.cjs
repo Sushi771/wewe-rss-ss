@@ -4,6 +4,7 @@ const fs = require('node:fs'),
   http = require('node:http'),
   { spawn } = require('node:child_process'),
   assert = require('node:assert/strict');
+const { cdpFailure, createNavigationBarrier } = require('./cdp-navigation.cjs');
 const root = path.resolve(__dirname, '..'),
   base =
     process.env.XHS_DATA_TEST_CLIENT || path.join(root, 'apps/server/client');
@@ -370,27 +371,51 @@ const server = http.createServer((req, res) => {
     );
     await new Promise((r) => ws.addEventListener('open', r, { once: true }));
     let id = 0;
+    let cdpPhase = 'scenario';
     const pending = new Map();
+    let navigation;
     ws.addEventListener('message', (e) => {
       const m = JSON.parse(e.data);
+      navigation?.onEvent(m);
       if (m.id) {
         const p = pending.get(m.id);
         if (!p) return;
         pending.delete(m.id);
         clearTimeout(p.timer);
-        m.error ? p.reject(Error(m.error.message)) : p.resolve(m.result);
+        m.error
+          ? p.reject(cdpFailure(p.method, p.phase, m.error))
+          : p.resolve(m.result);
       }
     });
-    const send = (method, params = {}) =>
+    ws.addEventListener('close', () => {
+      navigation?.close();
+      for (const p of pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(cdpFailure(p.method, p.phase, null, 'closed'));
+      }
+      pending.clear();
+    });
+    const send = (method, params = {}, phase = cdpPhase, timeoutMs = 10000) =>
       new Promise((resolve, reject) => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          reject(cdpFailure(method, phase, null, 'closed'));
+          return;
+        }
         const n = ++id;
         const timer = setTimeout(() => {
           pending.delete(n);
-          reject(Error('Isolated CDP timed out: ' + method));
-        }, 10000);
-        pending.set(n, { resolve, reject, timer });
-        ws.send(JSON.stringify({ id: n, method, params }));
+          reject(cdpFailure(method, phase, null, 'timeout'));
+        }, Math.min(10000, timeoutMs));
+        pending.set(n, { resolve, reject, timer, method, phase });
+        try {
+          ws.send(JSON.stringify({ id: n, method, params }));
+        } catch {
+          pending.delete(n);
+          clearTimeout(timer);
+          reject(cdpFailure(method, phase, null, 'closed'));
+        }
       });
+    navigation = createNavigationBarrier({ send });
     const ev = async (expression) => {
       const r = await send('Runtime.evaluate', {
         expression,
@@ -497,11 +522,13 @@ const server = http.createServer((req, res) => {
     await send('Runtime.enable');
     await send('Page.enable');
 
-    await send('Page.navigate', { url: origin + '/dash/xiaohongshu' });
+    cdpPhase = 'initial-navigation';
+    await navigation.navigate('Page.navigate', { url: origin + '/dash/xiaohongshu' }, 'initial-navigation');
     await wait(
       'document.querySelectorAll(".content-article-row").length===20',
       '20 initial rows',
     );
+    cdpPhase = 'scenario';
     const action = (i) =>
       `[...document.querySelectorAll('.content-article-row button[data-note-id]')].find(e=>e.getAttribute('data-note-id')===${JSON.stringify(noteKey(i))})`;
     const shot = async (name) => {
@@ -761,11 +788,13 @@ const server = http.createServer((req, res) => {
     }
     // A delayed result from a closed note cannot replace the next note's data.
     slow = true;
-    await send('Page.reload', { ignoreCache: true });
+    cdpPhase = 'switch-reload';
+    await navigation.navigate('Page.reload', { ignoreCache: true }, 'switch-reload');
     await wait(
       'document.querySelectorAll(".content-article-row").length===20',
       'reset rows',
     );
+    cdpPhase = 'scenario';
     await click(action(0));
     await key('Escape', 27);
     await wait('!document.querySelector("[role=dialog]")', 'close pending');
