@@ -61,6 +61,8 @@ test('limited recovery compatibility rejects changed authorization, identity and
   for (const [before, after] of [
     ['this.requireLocalXhsConnection(ctx);', 'this.requireLocalXhsAccess(ctx);'],
     ['confirmLimitedRecovery: z.literal(true)', 'confirmLimitedRecovery: z.boolean()'],
+    ['appendUnknownAttempt: z.literal(true).optional()', 'appendUnknownAttempt: z.boolean().optional()'],
+    ['input.appendUnknownAttempt === true,', 'true,'],
     ['input.expectedAuthorId,', 'input.url,'],
     ['await this.xhsSubscriptions!.commitLimitedRecovery(result)', 'await Promise.resolve(result)'],
   ]) {
