@@ -28,3 +28,12 @@ test('bounded recovery is isolated and excluded from signed-input logging',()=>{
  for(const direction of ['up','down'])assert.equal(logger.enabled({path:'xiaohongshu.recoverSingleNote',direction}),false);
  assert.equal(split({path:'xiaohongshu.recoverSingleNote'}),true);
 });
+
+test('batch creation and context resubmission are isolated and never enter logs',()=>{
+ const sink={info:()=>{throw Error('unexpected log')},log:()=>{throw Error('unexpected log')},error:()=>{throw Error('unexpected log')}};
+ const logger=evaluate(loggerOptions,sink),split=evaluate(condition,sink);
+ for(const path of ['xiaohongshu.startSubscriptionBatch','xiaohongshu.resumeSubscriptionBatch']){
+  for(const direction of ['up','down'])assert.equal(logger.enabled({path,direction,input:{text:'synthetic-secret'}}),false);
+  assert.equal(split({path}),true);
+ }
+});

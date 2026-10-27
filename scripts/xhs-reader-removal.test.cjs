@@ -81,3 +81,13 @@ test('limited recovery compatibility rejects changed authorization, identity and
     assert.throws(() => restorePreOriginalLinkRouter(changed), /exact PC-link router seam/);
   }
 });
+
+test('batch routes are exact and local checks cannot be hidden by baseline restoration', () => {
+  const fixture = require('./fixtures/xhs-original-link-router-seams.json');
+  const routes = fixture[8].after;
+  assert.equal(router.split(routes).length, 2);
+  assert.equal((routes.match(/requireLocalXhsConnection\(ctx/g) || []).length, 4);
+  const changed = router.replace(routes, routes.replace('this.requireLocalXhsConnection(ctx);', 'void ctx;'));
+  assert.notEqual(changed, router);
+  assert.throws(() => restorePreOriginalLinkRouter(changed), /exact PC-link router seam/);
+});

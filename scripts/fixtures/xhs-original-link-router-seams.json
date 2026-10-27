@@ -22,5 +22,17 @@
   {
     "before": "",
     "after": "          if (\n            req.url\n              .split('?')[0]\n              .split(',')\n              .some(\n                (name) =>\n                  name.endsWith('xiaohongshu.prepareOriginalLink') ||\n                  name.endsWith('xiaohongshu.recoverSingleNote'),\n              )\n          ) {\n            res.setHeader('Cache-Control', 'no-store');\n            res.setHeader('Referrer-Policy', 'no-referrer');\n          }\n"
+  },
+  {
+    "before": "",
+    "after": "import { XhsBatchSubscriptionService } from '../collection/xhs-batch-subscription.service';\n"
+  },
+  {
+    "before": "",
+    "after": "    @Optional() private readonly xhsBatch?: XhsBatchSubscriptionService,\n"
+  },
+  {
+    "before": "",
+    "after": "    startSubscriptionBatch: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            clientRequestId: z.string().uuid(),\n            text: z.string().min(1).max(65536),\n            groupId: z.string().min(1).max(128).optional(),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() => this.xhsBatch!.start(input));\n      }),\n    subscriptionBatch: this.trpcService.protectedProcedure\n      .input(z.object({ batchId: z.string().uuid() }).strict())\n      .query(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx, true);\n        return this.xhsSourceOperation(() => this.xhsBatch!.status(input));\n      }),\n    resumeSubscriptionBatch: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            batchId: z.string().uuid(),\n            text: z.string().min(1).max(65536),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() => this.xhsBatch!.resume(input));\n      }),\n    cancelSubscriptionBatch: this.trpcService.protectedProcedure\n      .input(z.object({ batchId: z.string().uuid() }).strict())\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() => this.xhsBatch!.cancel(input));\n      }),\n"
   }
 ]

@@ -186,3 +186,12 @@ Images are not fetched in this flow. The receipt lists pending media ordinals, v
 
 
 订阅输入可接受单个官方作者或笔记链接、受限短链，或包含一个此类链接的分享文案；短链展开仍受既有来源预算与重定向检查约束。官方 PC 分享参数 `xhsshare=pc_web` 与原始来源字段保留，重复参数、非官方主机及不受支持的参数仍拒绝。单篇受限恢复不展开短链；历史未知回执不会因输入变化而重置或自动重试。
+
+
+#### 批量订阅接口契约
+
+命名空间 `xiaohongshu`：`startSubscriptionBatch({clientRequestId, text, groupId?})` 返回批次；`subscriptionBatch({batchId})` 查询；`resumeSubscriptionBatch({batchId, text})` 显式补充上下文并恢复；`cancelSubscriptionBatch({batchId})` 请求取消。所有调用遵循现有本机鉴权。`clientRequestId` 是客户端为同一提交生成的 UUID，重复提交复用原批次，不重复派发。`text` 包含一条或多条官方 URL 或分享文案，最多 100 条有效链接，原始字符总长有界；链接身份去重，非官方和不合法输入按项给固定错误码。
+
+批次返回 `{batchId, state, items}`，状态为 `queued | running | paused | cancelled | completed`；项为 `{index, fingerprint, kind, state, code?, authorId?, creatorId?, duplicateOf?}`，项状态为 `queued | needs_context | resolving | unknown | subscribed | duplicate | failed`。返回值、持久回执和日志不含原始 URL、token 或响应原文。原始上下文仅保存在本进程内；重启后未派发的项进入 `needs_context`，重新粘贴后按无查询参数的官方链接身份匹配；已成功项不再派发。已派发但结果不确定的项为 `unknown`，不自动重试。
+
+按输入顺序逐项处理，复用原来源总预算、派发屏障和风险门闸；来源风险、预算耗尽或不可确定的派发结果暂停批次。作者身份验证后按作者去重，订阅写入和该项成功回执在同一数据库事务内提交。取消在最终派发边界生效；已经派发的项按实际回执或未知状态收口。已有单篇恢复未知记录原样保留；若短链目标尚无法核对该记录，在未解决前不派发该短链。此接口不创建历史归档或评论任务。

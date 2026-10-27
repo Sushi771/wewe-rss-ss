@@ -33,6 +33,7 @@ import { Wechat2RssAccounts } from '../wechat2rss-account';
 import { INestApplication, Injectable, Logger, Optional } from '@nestjs/common';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
 import { XhsSubscriptionService } from '../collection/xhs-subscription.service';
+import { XhsBatchSubscriptionService } from '../collection/xhs-batch-subscription.service';
 import { XhsSubscriptionRuntime } from '../collection/xhs-subscription-runtime';
 import { xhsPublicCode } from '../collection/xhs-subscription-errors';
 import { xhsNoteFilterSchema } from '@wewe-rss/shared';
@@ -154,6 +155,7 @@ export class TrpcRouter {
     @Optional() private readonly xhsRuntime?: XhsSubscriptionRuntime,
     @Optional() private readonly xhsEngagement?: XhsEngagementService,
     @Optional() private readonly xhsWhole?: XhsWholeCreatorService,
+    @Optional() private readonly xhsBatch?: XhsBatchSubscriptionService,
   ) {}
 
   private get xhs() {
@@ -1797,6 +1799,45 @@ export class TrpcRouter {
             await this.xhsSubscriptions!.commitLimitedRecovery(result);
           return { ...saved, originalUrl: result.originalUrl };
         });
+      }),
+    startSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            clientRequestId: z.string().uuid(),
+            text: z.string().min(1).max(65536),
+            groupId: z.string().min(1).max(128).optional(),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsSourceOperation(() => this.xhsBatch!.start(input));
+      }),
+    subscriptionBatch: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }).strict())
+      .query(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx, true);
+        return this.xhsSourceOperation(() => this.xhsBatch!.status(input));
+      }),
+    resumeSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            batchId: z.string().uuid(),
+            text: z.string().min(1).max(65536),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsSourceOperation(() => this.xhsBatch!.resume(input));
+      }),
+    cancelSubscriptionBatch: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }).strict())
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsSourceOperation(() => this.xhsBatch!.cancel(input));
       }),
     resolveSubscription: this.trpcService.protectedProcedure
       .input(

@@ -198,19 +198,24 @@ export class XhsSubscriptionService implements OnModuleInit {
       }
     }
   }
-  async resolveSubscription(input: {
-    url: string;
-  }): Promise<XhsSubscriptionResolution> {
+  async resolveSubscription(
+    input: {
+      url: string;
+    },
+    options?: { fixedErrors?: boolean },
+  ): Promise<XhsSubscriptionResolution> {
     const url = subscriptionUrl(input.url);
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     let value: Awaited<ReturnType<XhsSubscriptionSource['resolve']>>;
     try {
       value = await this.source.resolve(url);
     } catch (error) {
+      const code = xhsPublicCode(error, 'XHS_RESOLUTION_BLOCKED');
       return reject(
-        xhsPublicCode(error, 'XHS_RESOLUTION_BLOCKED'),
-        xhsPublicCode(error, 'XHS_RESOLUTION_BLOCKED') +
-          '：无法核实作者信息或资料结构，请检查安全连接。',
+        code,
+        options?.fixedErrors
+          ? code
+          : code + '：无法核实作者信息或资料结构，请检查安全连接。',
       );
     }
     const author = value.author;
@@ -373,7 +378,14 @@ export class XhsSubscriptionService implements OnModuleInit {
       };
     });
   }
-  async subscribe(input: { resolutionId: string; groupId?: string }) {
+  async subscribe(
+    input: { resolutionId: string; groupId?: string },
+    batchReceipt?: (
+      tx: Prisma.TransactionClient,
+      creatorId: string,
+      authorId: string,
+    ) => Promise<void>,
+  ) {
     const resolution = this.resolutions.get(input.resolutionId);
     if (!resolution || resolution.expiresAt <= Date.now())
       return reject('XHS_RESOLUTION_EXPIRED');
@@ -418,6 +430,7 @@ export class XhsSubscriptionService implements OnModuleInit {
             },
           });
       await saveXhsMetrics(tx, 'creator', creator.id, author.metrics);
+      if (batchReceipt) await batchReceipt(tx, creator.id, author.id);
       return {
         creatorId: creator.id,
         created: !old,

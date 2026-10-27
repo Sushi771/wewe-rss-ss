@@ -94,6 +94,23 @@ export class XhsSubscriptionRuntime
       work,
     );
   }
+  private readonly batchDispatchScope = new AsyncLocalStorage<{
+    assertReady: (tx?: Prisma.TransactionClient) => Promise<void>;
+    isCancelled: () => boolean;
+    onDispatch: () => void;
+    onReceipt: () => void;
+  }>();
+  withBatchDispatch<T>(
+    guard: {
+      assertReady: (tx?: Prisma.TransactionClient) => Promise<void>;
+      isCancelled: () => boolean;
+      onDispatch: () => void;
+      onReceipt: () => void;
+    },
+    work: () => Promise<T>,
+  ) {
+    return this.batchDispatchScope.run(guard, work);
+  }
   private readonly originalLinks = new Map<
     string,
     Promise<import('@wewe-rss/shared').XhsOriginalLinkResult>
@@ -224,6 +241,9 @@ export class XhsSubscriptionRuntime
     const undo: Array<() => Promise<void>> = [];
     let dispatched = false;
     const ready = async (tx?: Prisma.TransactionClient) => {
+      const batch = this.batchDispatchScope.getStore();
+      if (batch?.isCancelled()) return failure('XHS_TASK_CANCELLED');
+      if (batch) await batch.assertReady(tx);
       const recovery = this.limitedRecoveryScope.getStore();
       if (recovery?.isCancelled?.()) return failure('XHS_TASK_CANCELLED');
       if (recovery)
@@ -234,12 +254,15 @@ export class XhsSubscriptionRuntime
         return failure('XHS_SESSION_CHANGED');
     };
     const dispatch = () => {
+      const batch = this.batchDispatchScope.getStore();
+      if (batch?.isCancelled()) return failure('XHS_TASK_CANCELLED');
       if (this.limitedRecoveryScope.getStore()?.isCancelled?.())
         return failure('XHS_TASK_CANCELLED');
       this.requireSession();
       if (generation !== this.generation || signal.aborted)
         return failure('XHS_SESSION_CHANGED');
       dispatched = true;
+      batch?.onDispatch();
       try {
         return operation();
       } catch (error) {
@@ -260,6 +283,7 @@ export class XhsSubscriptionRuntime
       result = this.sourceDispatch
         ? await this.sourceDispatch(dispatch, ready)
         : await dispatch();
+      this.batchDispatchScope.getStore()?.onReceipt();
     } catch (error) {
       // Only a known non-dispatch permits reservation-specific CAS rollback.
       for (const release of dispatched ? [] : undo.reverse()) {

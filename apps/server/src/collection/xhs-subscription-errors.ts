@@ -7,6 +7,8 @@ export class XhsSubscriptionError extends Error {
   }
 }
 const codes = new Set([
+  'XHS_BATCH_INPUT_INVALID',
+  'XHS_GROUP_INVALID',
   'XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE',
   'XHS_ORIGINAL_LINK_CONTEXT_UNAVAILABLE',
   'XHS_ORIGINAL_LINK_NOT_READY',

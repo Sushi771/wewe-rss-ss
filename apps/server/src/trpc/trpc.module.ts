@@ -1,6 +1,7 @@
 import { bindXhsSourceTotalBudget } from '../collection/xhs-source-request-policy';
 import { XhsSourceRiskStore } from '../collection/xhs-source-risk-store';
 import { XhsLimitedRecoveryStore } from '../collection/xhs-limited-recovery-store';
+import { XhsBatchSubscriptionService } from '../collection/xhs-batch-subscription.service';
 import { XhsWholeCreatorService } from '../collection/xhs-whole-creator.service';
 import { Module } from '@nestjs/common';
 import { TrpcService } from '@server/trpc/trpc.service';
@@ -32,6 +33,7 @@ import {
     CollectionService,
     XiaohongshuService,
     XhsSubscriptionService,
+    XhsBatchSubscriptionService,
     XhsEngagementService,
     XhsWholeCreatorService,
     {

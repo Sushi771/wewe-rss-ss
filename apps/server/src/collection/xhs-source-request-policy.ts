@@ -383,14 +383,20 @@ export function resolveXhsSubscriptionWithBudget(
   db: PrismaService,
   runtime: XhsSubscriptionRuntime,
   subscriptions: XhsSubscriptionService,
-  input: { url: string; budgetId?: string },
+  input: { url: string; budgetId?: string; fixedErrors?: boolean },
 ) {
   return withPolicy(
     db,
     runtime,
     { purpose: 'resolution' },
     input.budgetId,
-    () => subscriptions.resolveSubscription({ url: input.url }),
+    () =>
+      input.fixedErrors
+        ? subscriptions.resolveSubscription(
+            { url: input.url },
+            { fixedErrors: true },
+          )
+        : subscriptions.resolveSubscription({ url: input.url }),
   );
 }
 export async function prepareXhsOriginalLink(

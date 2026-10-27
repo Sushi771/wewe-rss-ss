@@ -1,3 +1,13 @@
+import XhsBatchSubscription from '@web/components/XhsBatchSubscription';
+import type { BatchApi } from '@web/utils/xhs-subscription-batch';
+import XhsCombinedFilter from '@web/components/XhsCombinedFilter';
+import {
+  compileFilter,
+  filterNotes,
+  emptyCombinedFilter,
+  conditionLabel,
+} from '@web/utils/xhs-combined-filter';
+import type { CombinedFilter } from '@web/utils/xhs-combined-filter';
 import { nextMetricOrder, orderNotes } from '@web/utils/xhs-metric-sort';
 import type { MetricKey, MetricOrder } from '@web/utils/xhs-metric-sort';
 import XhsCreatorAvatar from '@web/components/XhsCreatorAvatar';
@@ -37,7 +47,7 @@ import {
   XhsNumericFilterValue,
   XhsCreatorMetricRefresh,
 } from '@web/components/XhsEngagement';
-import type { XhsMetric, XhsCreatorMetric } from '@wewe-rss/shared';
+import type { XhsCreatorMetric } from '@wewe-rss/shared';
 import type { ArticleDateSelection } from '@web/utils/article-date-selection';
 import { dateSelectionFilter } from '@web/utils/article-date-selection';
 import {
@@ -123,17 +133,17 @@ export default function Xiaohongshu() {
   const [creatorMetricFilter, setCreatorMetricFilter] = useState<
     Omit<XhsNumericFilterValue, 'metric'> & { metric?: XhsCreatorMetric }
   >({});
-  const [noteMetricFilter, setNoteMetricFilter] = useState<
-    Omit<XhsNumericFilterValue, 'metric'> & { metric?: XhsMetric }
-  >({});
+  const [noteConditions, setNoteConditions] =
+    useState<CombinedFilter>(emptyCombinedFilter);
+  const compiledConditions = useMemo(
+    () => compileFilter(noteConditions),
+    [noteConditions],
+  );
   const validCreatorRange =
     creatorMetricFilter.min === undefined ||
     creatorMetricFilter.max === undefined ||
     creatorMetricFilter.min <= creatorMetricFilter.max;
-  const validNoteRange =
-    noteMetricFilter.min === undefined ||
-    noteMetricFilter.max === undefined ||
-    noteMetricFilter.min <= noteMetricFilter.max;
+  const validNoteRange = compiledConditions.valid;
   const creators = trpc.xiaohongshu.list.useQuery(creatorMetricFilter, {
     retry: false,
     enabled: validCreatorRange,
@@ -210,6 +220,7 @@ export default function Xiaohongshu() {
   const [operationError, setOperationError] = useState('');
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const [managing, setManaging] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [folderFilter, setFolderFilter] = useState('all');
@@ -392,7 +403,6 @@ export default function Xiaohongshu() {
           : creator.groupId === folderFilter),
     ) || [];
   const notesInput = {
-    ...noteMetricFilter,
     creatorId: creatorId || undefined,
     ...(folderFilter === 'all'
       ? {}
@@ -408,8 +418,19 @@ export default function Xiaohongshu() {
     () =>
       dateError || !validNoteRange
         ? []
-        : orderNotes(notes.data?.items || [], metricOrder, direction),
-    [dateError, validNoteRange, notes.data, metricOrder, direction],
+        : orderNotes(
+            filterNotes(notes.data?.items || [], compiledConditions),
+            metricOrder,
+            direction,
+          ),
+    [
+      dateError,
+      validNoteRange,
+      notes.data,
+      metricOrder,
+      direction,
+      compiledConditions,
+    ],
   );
   const loadedNotes = visibleNotes.slice(0, loadedCount);
   const selectableNotes = loadedNotes.filter(
@@ -721,6 +742,7 @@ export default function Xiaohongshu() {
       const allScope = { creatorId: creatorId || undefined };
       const scope = exportScope;
       const selectedSnapshot = [...selectedArchives];
+      const combinationSnapshot = compiledConditions;
       const filterSnapshot = {
         ...notesInput,
         ...(notes.data?.queryVersion
@@ -746,7 +768,11 @@ export default function Xiaohongshu() {
             : {}),
         };
         const candidates =
-          scope === 'selected' ? selectedSnapshot : freshScope!.items;
+          scope === 'selected'
+            ? selectedSnapshot
+            : scope === 'filtered'
+              ? filterNotes(freshScope!.items, combinationSnapshot)
+              : freshScope!.items;
         if (controller.signal.aborted) {
           setZipProgress({ completed, total, state: 'cancelled' });
           return;
@@ -1302,6 +1328,14 @@ export default function Xiaohongshu() {
             </span>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={busy}
+              onPress={() => setBatchOpen(true)}
+            >
+              批量订阅
+            </Button>
             <SubscriptionSearch
               open={searchOpen}
               label="搜索笔记"
@@ -1600,21 +1634,9 @@ export default function Xiaohongshu() {
                 {creatorMetricFilter.max ?? '不限'}
               </span>
             )}
-            {noteMetricFilter.metric && (
-              <span>
-                笔记 ·{' '}
-                {
-                  {
-                    likes: '点赞',
-                    collects: '收藏',
-                    shares: '分享',
-                    comments: '评论',
-                  }[noteMetricFilter.metric]
-                }{' '}
-                {noteMetricFilter.min ?? '不限'}–
-                {noteMetricFilter.max ?? '不限'}
-              </span>
-            )}
+            {noteConditions.conditions.map((condition) => (
+              <span key={condition.id}>{conditionLabel(condition)}</span>
+            ))}
             <span>
               {metricOrder
                 ? {
@@ -1626,7 +1648,7 @@ export default function Xiaohongshu() {
                   (metricOrder.direction === 'desc' ? ' ↓' : ' ↑')
                 : '按时间' + (direction === 'desc' ? ' ↓' : ' ↑')}
             </span>
-            {(noteMetricFilter.metric ||
+            {(noteConditions.conditions.length > 0 ||
               creatorMetricFilter.metric ||
               search ||
               dateSelection.start) && (
@@ -1634,7 +1656,7 @@ export default function Xiaohongshu() {
                 type="button"
                 disabled={busy}
                 onClick={() => {
-                  setNoteMetricFilter({});
+                  setNoteConditions(emptyCombinedFilter());
                   setCreatorMetricFilter({});
                   setSearch('');
                   setDateSelection({ mode: 'day', start: '', end: '' });
@@ -1731,15 +1753,17 @@ export default function Xiaohongshu() {
               清空选择
             </Button>
           </div>
-          <XhsNumericFilter
+          <XhsCombinedFilter
             disabled={busy}
-            value={noteMetricFilter}
+            value={noteConditions}
             onChange={(value) => {
-              setNoteMetricFilter(value as typeof noteMetricFilter);
+              setNoteConditions(value);
               setSelectedIds(new Set());
               setLoadedCount(20);
+              setExportOpen(false);
             }}
           />
+
           {metricOrder ? (
             <div
               className="flex flex-wrap items-center gap-2 text-xs"
@@ -1983,6 +2007,23 @@ export default function Xiaohongshu() {
           </div>
         </div>
       </section>
+      <XhsBatchSubscription
+        open={batchOpen}
+        onClose={() => setBatchOpen(false)}
+        api={subscriptionApi as typeof subscriptionApi & BatchApi}
+        groups={groups.data?.items || []}
+        budget={
+          batchOpen ? (
+            <XhsSourceBudget
+              api={sourceBudgetApi}
+              scope={{ purpose: 'resolution' }}
+            />
+          ) : null
+        }
+        onSubscribed={() => {
+          void utils.xiaohongshu.list.invalidate();
+        }}
+      />
       <SubscriptionDialog
         isOpen={exportOpen}
         onClose={() => {

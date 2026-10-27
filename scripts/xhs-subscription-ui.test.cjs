@@ -498,6 +498,9 @@ function fixture(options = {}) {
     '@web/components/XhsTaskRecovery': Recovery,
     '@web/components/XhsOriginalLink': 'XhsOriginalLink',
     '@web/components/XhsCreatorAvatar': 'XhsCreatorAvatar',
+    '@web/components/XhsBatchSubscription': 'XhsBatchSubscription',
+    '@web/components/XhsCombinedFilter': 'XhsCombinedFilter',
+    '@web/utils/xhs-combined-filter': load('apps/web/src/utils/xhs-combined-filter.ts'),
     '@web/utils/xhs-metric-sort': load('apps/web/src/utils/xhs-metric-sort.ts'),
     '@web/components/XhsSourceBudget': 'XhsSourceBudget',
     '@web/components/XhsEngagement': engagement,
@@ -1546,3 +1549,4 @@ test("disabled source displays recorded risk and unrecorded history remains unkn
   }
 });
 
+test('combined filters preserve exact refreshed export ids and leave all export unfiltered',async()=>{const f=fixture({queryVersion:'a'.repeat(64)}),oldDocument=global.document,oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL;global.document={body:{appendChild(){}},createElement:()=>({click(){},remove(){}})};URL.createObjectURL=()=> 'blob:synthetic';URL.revokeObjectURL=()=>{};try{f.items.forEach((row,i)=>row.metrics={values:{likes:i*10,collects:i}});await f.start(true);const combo=f.render().find(n=>n.type==='XhsCombinedFilter');combo.props.onChange({mode:'and',conditions:[{id:1,metric:'likes',operator:'>=',value:'20',upper:''},{id:2,metric:'collects',operator:'<=',value:'2',upper:''}]});assert(f.find('Checkbox','选择笔记 旧笔记'));assert.equal(f.find('Checkbox','选择笔记 苹果存档'),undefined);await f.button('导出已保存 ZIP').props.onPress();f.render().find(n=>n.type==='input'&&n.props.value==='filtered').props.onChange();await f.button('开始导出').props.onPress();assert.deepEqual(f.calls.filter(([name])=>name==='export').at(-1)[1].noteIds,['old']);await f.button('导出已保存 ZIP').props.onPress();f.render().find(n=>n.type==='input'&&n.props.value==='all').props.onChange();await f.button('开始导出').props.onPress();const ids=f.calls.filter(([name])=>name==='export').at(-1)[1].noteIds;assert(ids.includes('saved')&&ids.includes('old')&&ids.includes('video'));}finally{f.dispose();global.document=oldDocument;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;}});

@@ -54,7 +54,7 @@ jobs:
           scripts/cdp-navigation.test.cjs
           scripts/overlay-click-readiness.test.cjs
           scripts/feed-refresh-state-ui.test.cjs
-          scripts/xhs-metric-sort.test.cjs scripts/feed-reading-ui.test.cjs
+          scripts/xhs-batch-subscription-ui.test.cjs scripts/xhs-combined-filter.test.cjs scripts/xhs-metric-sort.test.cjs scripts/feed-reading-ui.test.cjs
           scripts/feed-export-date-ui.test.cjs
           scripts/article-body-state.test.cjs
           scripts/article-date-shortcuts.test.cjs
@@ -100,3 +100,13 @@ jobs:
         env:
           RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
         run: node scripts/xhs-metric-sort-browser.test.cjs
+
+      - name: Combined metric filters and scoped export
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-combined-filter-browser.test.cjs
+
+      - name: Batch subscription receipts and explicit recovery
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-batch-subscription-browser.test.cjs

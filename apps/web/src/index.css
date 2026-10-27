@@ -1529,3 +1529,70 @@ button:active {
     gap: 6px;
   }
 }
+
+.xhs-combined-filter {
+  min-width: 0;
+  max-width: 100%;
+  font-size: 12px;
+  border: 1px solid var(--mac-separator);
+  border-radius: 8px;
+  padding: 8px;
+}
+.xhs-combined-filter summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.xhs-combined-filter[open] {
+  flex-basis: 100%;
+}
+.xhs-combined-controls {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  min-width: 0;
+}
+.xhs-condition-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--mac-separator);
+  padding-bottom: 10px;
+  min-width: 0;
+}
+.xhs-condition-row select {
+  min-width: 90px;
+  flex: 1;
+}
+.xhs-condition-row input {
+  width: 96px;
+  min-width: 72px;
+  flex: 1;
+}
+.xhs-combined-controls select,
+.xhs-combined-controls input {
+  border: 1px solid var(--mac-separator);
+  border-radius: 5px;
+  background: var(--mac-content-bg);
+  padding: 6px;
+  max-width: 100%;
+}
+.xhs-combined-controls button {
+  min-height: 32px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  color: var(--mac-blue);
+}
+.xhs-combined-controls button:focus-visible {
+  outline: 2px solid var(--mac-blue);
+}
+.xhs-condition-row [role='alert'] {
+  flex-basis: 100%;
+  color: #b42318;
+  margin: 0;
+}
+.xhs-combined-filter input,
+.xhs-combined-filter select,
+.xhs-combined-filter button {
+  scroll-margin-top: 160px;
+}
