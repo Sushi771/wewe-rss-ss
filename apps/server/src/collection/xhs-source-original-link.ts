@@ -26,8 +26,11 @@ export function sourceOriginalLink(
           'm_source',
           'note_flow_source',
           'source',
+          'xhsshare',
         ].includes(k),
       ) &&
+      (!pc.searchParams.has('xhsshare') ||
+        pc.searchParams.get('xhsshare') === 'pc_web') &&
       keys.every(
         (k) =>
           pc.searchParams.getAll(k).length === 1 &&

@@ -161,7 +161,7 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
         a1: 'synthetic-a1',
         webSession: 'synthetic-session',
       });
-      const url = `https://www.xiaohongshu.com/discovery/item/${note}?xsec_token=synthetic-ephemeral&xsec_source=pc_share`;
+      const url = `https://www.xiaohongshu.com/discovery/item/${note}?source=webshare&xhsshare=pc_web&xsec_token=synthetic-ephemeral&xsec_source=pc_share`;
       const work = runtime.resolveLimitedRecovery(url, 'author');
       if (mode === 'success' || mode === 'media') {
         const result = await work;
@@ -260,9 +260,21 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
       a1: 'synthetic-a1',
       webSession: 'synthetic-session',
     });
+    const budgetBefore = await db.$queryRaw<Array<{ used: bigint }>>`SELECT used FROM xhs_request_budgets ORDER BY id`;
+    for (const invalid of [
+      'https://www.xiaohongshu.com/explore/synthetic?xsec_token=synthetic&xsec_source=pc_share&redirect=evil',
+      'https://www.xiaohongshu.com/explore/synthetic?xsec_token=synthetic',
+      'https://www.xiaohongshu.com/explore/synthetic?xsec_token=synthetic&xsec_source=pc_share&xhsshare=unknown',
+    ]) {
+      await expect(runtime.resolveLimitedRecovery(invalid, 'author')).rejects.toThrow('XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE');
+      expect(arm).not.toHaveBeenCalled();
+      expect(api).not.toHaveBeenCalled();
+    }
+    const budgetAfter = await db.$queryRaw<Array<{ used: bigint }>>`SELECT used FROM xhs_request_budgets ORDER BY id`;
+    expect(budgetAfter).toEqual(budgetBefore);
     await expect(
       runtime.resolveLimitedRecovery(
-        'https://www.xiaohongshu.com/explore/synthetic?xsec_token=synthetic',
+        'https://www.xiaohongshu.com/explore/synthetic?xsec_token=synthetic&xsec_source=pc_share',
         'author',
         () => true,
       ),

@@ -5,11 +5,18 @@ export function xhsPublicInputUrl(raw: string) {
     if (
       typeof raw !== 'string' ||
       raw.length > 8192 ||
-      /[\\\s\x00-\x1f\x7f]/.test(raw) ||
-      /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(raw)
+      /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(raw)
     )
       throw Error();
-    const url = new URL(raw);
+    let input = raw;
+    if (/\s/.test(raw)) {
+      const links = raw.match(/https?:\/\/[^\s<>"']+/gi) ?? [];
+      if (links.length !== 1) throw Error();
+      input = links[0].replace(/[，。！？）】,;!?)]+$/u, '');
+    }
+    if (/[\\\s\x00-\x1f\x7f]/.test(input) || /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(input))
+      throw Error();
+    const url = new URL(input);
     if (
       url.protocol !== 'https:' ||
       url.username ||

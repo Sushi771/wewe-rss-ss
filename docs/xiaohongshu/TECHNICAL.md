@@ -183,3 +183,6 @@ prepareOriginalLink只做已批准的原文跳转准备，不能复活平台正�
 The returned note and author must match both authorized identities. Body text, four metric values and the subscription are committed together with the local recovery receipt. Unknown metrics remain null. Existing content is retained and a disabled subscription is not enabled. No background task or download is queued. Historical risk stays blocked after success; a new refusal is recorded without discarding the previous history.
 
 Images are not fetched in this flow. The receipt lists pending media ordinals, validated CDN source paths with all query parameters omitted, and one-way source fingerprints. Query omission is explicit; these paths must not be treated as verified replayable image URLs or fetched automatically. The note remains listed/partial rather than claiming complete media. Existing full archive/export gates continue to require complete media. Signed original URLs are returned only to the explicit caller with no-store/no-referrer headers, excluded from logging and normal list DTOs. This flow does not prove that a user can open the resulting PC link; actual platform acceptance remains a separate bounded verification.
+
+
+订阅输入可接受单个官方作者或笔记链接、受限短链，或包含一个此类链接的分享文案；短链展开仍受既有来源预算与重定向检查约束。官方 PC 分享参数 `xhsshare=pc_web` 与原始来源字段保留，重复参数、非官方主机及不受支持的参数仍拒绝。单篇受限恢复不展开短链；历史未知回执不会因输入变化而重置或自动重试。

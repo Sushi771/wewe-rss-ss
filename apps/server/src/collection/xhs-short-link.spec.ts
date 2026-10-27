@@ -2,6 +2,25 @@ import * as assert from 'node:assert/strict';
 import { XhsShortLinkResolver, xhsPublicInputUrl } from './xhs-short-link';
 import { RedbookSubscriptionAdapter } from './xhs-redbook-subscription';
 import { XhsSubscriptionService } from './xhs-subscription.service';
+it('extracts one official URL from synthetic share text without broadening redirect or host trust', async () => {
+  const short = 'https://xhslink.cn/o/Synthetic';
+  expect(xhsPublicInputUrl(`Synthetic share ${short} open the app`).href).toBe(short);
+  expect(xhsPublicInputUrl(`Synthetic share ${short}， open`).href).toBe(short);
+  for (const text of [
+    'Synthetic https://evil.invalid/o/Synthetic open',
+    `Synthetic ${short} https://evil.invalid/x`,
+    `Synthetic ${short} https://xhslink.cn/o/Other`,
+    'Synthetic http://xhslink.cn/o/Synthetic open',
+    'Synthetic https://xhslink.cn.evil.invalid/o/Synthetic open',
+  ]) expect(() => xhsPublicInputUrl(text)).toThrow();
+  let calls = 0;
+  const resolver = new XhsShortLinkResolver(async (url) => {
+    calls++;
+    return { status: 302, url: url.href, location: 'https://127.0.0.1/unsafe' };
+  });
+  await expect(resolver.resolve(`Synthetic ${short} open`)).rejects.toThrow();
+  expect(calls).toBe(1);
+});
 it('keeps official short links bounded and cookie-free while rejecting unsafe redirects and mismatched note identity', async () => { let cases = 0; const final = 'https://www.xiaohongshu.com/explore/' + 'a'.repeat(24) + '?xsec_token=synthetic-private&xsec_source=pc_share'; for (const u of ['https://xhslink.cn/o/Synthetic', 'https://xhslink.com/a/Synthetic']) {
     let calls = 0;
     const r = new XhsShortLinkResolver(async (url, o) => { calls++; assert.equal(o.redirect, 'manual'); assert.equal(o.credentials, 'omit'); assert.deepEqual(o.headers, { accept: 'text/html' }); return { status: 302, url: url.href, location: final }; });

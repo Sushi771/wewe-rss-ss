@@ -39,6 +39,7 @@ import { parseXhsProfile } from './xhs-profile';
 import { XhsSourceRiskStore } from './xhs-source-risk-store';
 import { XhsLimitedRecoveryStore } from './xhs-limited-recovery-store';
 import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
+import { sourceOriginalLink } from './xhs-source-original-link';
 
 type RequestAdmission = {
   budget?: XhsRequestBudget;
@@ -640,6 +641,8 @@ export class XhsSubscriptionRuntime
     if (this.stopCode && this.stopCode !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED')
       return failure(this.stopCode);
     const noteId = match[1];
+    if (!sourceOriginalLink(raw, url, noteId))
+      return failure('XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE');
     if (isCancelled?.()) return failure('XHS_TASK_CANCELLED');
     const owner = await this.limitedRecoveryStore.arm(noteId, expectedAuthorId);
     const scope = { noteId, owner, started: false, isCancelled };
