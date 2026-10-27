@@ -478,40 +478,45 @@ export class AutomaticMediaQueue {
   private async work(state: State) {
     let inspected = 0;
     for (const entry of [...state.articles]) {
+      // A body projection limit stops SQL embedding, not already queued cache
+      // work. Other exhausted/identity failures retain their original stop.
+      let cacheOnly = entry.code === 'MEDIA_BODY_LIMIT';
       if (
         this.closed ||
-        entry.writes >= 4 ||
-        entry.due > this.deps.now() ||
+        (!cacheOnly && entry.writes >= 4) ||
+        (!cacheOnly && entry.due > this.deps.now()) ||
         !entry.resources.length
       )
         continue;
       if (inspected++ >= 20) break;
       const images = new Map<string, string>();
+      const cached = new Set<string>();
       let cachedSize = 0;
       for (const key of entry.resources) {
         const resource = state.resources[key];
         const existing = await this.cached(key, resource.url);
         if (existing) {
+          cached.add(key);
           cachedSize += Buffer.byteLength(existing);
           if (cachedSize > 8_000_000) {
             entry.writes = 4;
             entry.code = 'MEDIA_BODY_LIMIT';
-            break;
+            cacheOnly = true;
           }
-          images.set(resource.url, existing);
+          if (!cacheOnly) images.set(resource.url, existing);
         }
       }
-      if (entry.writes >= 4) continue;
       const canRequest =
         !state.blocked &&
         this.deps.canFetch(entry.feedId) &&
         state.nextRequest <= this.deps.now() &&
         entry.resources.some(
           (key) =>
+            !cached.has(key) &&
             state.resources[key].state === 'pending' &&
             state.resources[key].due <= this.deps.now(),
         );
-      if (!images.size && !canRequest) {
+      if ((!images.size || cacheOnly) && !canRequest) {
         state.articles = [
           ...state.articles.filter((article) => article !== entry),
           entry,
@@ -529,16 +534,20 @@ export class AutomaticMediaQueue {
       }
       try {
         automaticMediaPlan(row, new Map());
-      } catch {
+      } catch (error) {
         entry.writes = 4;
-        entry.code = 'MEDIA_IDENTITY_UNVERIFIED';
+        entry.code =
+          error instanceof Error && error.message === 'MEDIA_BODY_LIMIT'
+            ? 'MEDIA_BODY_LIMIT'
+            : 'MEDIA_IDENTITY_UNVERIFIED';
         return;
       }
       let fetched = false;
       for (const key of entry.resources) {
         const resource = state.resources[key];
-        if (images.has(resource.url)) continue;
+        if (cached.has(key)) continue;
         if (
+          this.closed ||
           fetched ||
           state.blocked ||
           !this.deps.canFetch(entry.feedId) ||
@@ -555,6 +564,7 @@ export class AutomaticMediaQueue {
         // Reserve enough space for the largest permitted encoded response before
         // spending an upstream attempt. Capacity failure is a visible pause.
         await this.capacity(14_000_000);
+        if (this.closed) return;
         if (this.deps.now() - state.windowStart >= 3_600_000) {
           state.windowStart = this.deps.now();
           state.windowCount = 0;
@@ -571,12 +581,13 @@ export class AutomaticMediaQueue {
             : this.deps.now() + 1000;
         // A crash/ACK loss spends this attempt; restart respects the recorded due.
         await this.save(state);
+        if (this.closed) return;
         fetched = true;
         try {
           const value = await this.deps.fetch(resource.url);
           const inline = `data:${value.type};base64,${value.bytes.toString('base64')}`;
           await this.store(key, resource.url, inline);
-          images.set(resource.url, inline);
+          if (!cacheOnly) images.set(resource.url, inline);
           resource.code = undefined;
         } catch (error) {
           if (error instanceof ImageRequestBlockedError) {
@@ -610,7 +621,7 @@ export class AutomaticMediaQueue {
           }
         }
       }
-      if (images.size && !this.closed) {
+      if (images.size && !cacheOnly && !this.closed) {
         entry.writes++;
         entry.due = this.deps.now() + BACKOFF[entry.writes - 1];
         await this.save(state);
@@ -627,12 +638,11 @@ export class AutomaticMediaQueue {
           if (error instanceof Error && error.message === 'MEDIA_BODY_LIMIT') {
             entry.writes = 4;
             entry.code = 'MEDIA_BODY_LIMIT';
-            continue;
-          }
-          entry.code =
-            error instanceof Error && error.message === 'SAVED_MEDIA_CONFLICT'
-              ? 'MEDIA_BODY_CHANGED'
-              : 'MEDIA_SAVE_RETRY';
+          } else
+            entry.code =
+              error instanceof Error && error.message === 'SAVED_MEDIA_CONFLICT'
+                ? 'MEDIA_BODY_CHANGED'
+                : 'MEDIA_SAVE_RETRY';
         }
       }
       // Rotate pending rows so an unavailable resource never starves later feeds.

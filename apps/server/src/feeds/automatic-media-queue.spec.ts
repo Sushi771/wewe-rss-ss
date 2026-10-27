@@ -465,4 +465,187 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     expect(rows.get(row(1).id)!.contentHtml).toContain('data:image/');
     expect(rows.get(row(1).id)!.sourceUrl).toContain('new-saved-proof');
   });
+
+  const bodyLimited = async (count = 3) => {
+    const item = row(
+      1,
+      Array.from({ length: count }, (_, n) => url + '&n=' + n),
+    );
+    item.contentHtml += '<img data-wewe-image-unconfirmed="1">';
+    rows = new Map([[item.id, item]]);
+    commit.mockRejectedValue(Error('MEDIA_BODY_LIMIT'));
+    await queue().tick();
+    expect((await state()).articles[0]).toMatchObject({
+      writes: 4,
+      code: 'MEDIA_BODY_LIMIT',
+    });
+    return item;
+  };
+  it('drains only queued resources after a real body projection limit; restart reuses every cached byte', async () => {
+    const item = row(1, [url, url + '&n=1', url + '&n=2']);
+    item.contentHtml += 'x'.repeat(
+      7_999_700 - Buffer.byteLength(item.contentHtml!),
+    );
+    const before = item.contentHtml;
+    rows = new Map([[item.id, item]]);
+    await queue().tick();
+    expect((await state()).articles[0].code).toBe('MEDIA_BODY_LIMIT');
+    expect(commit).toHaveBeenCalledTimes(1);
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    for (let n = 0; n < 2; n++) {
+      now += 1001;
+      await queue().tick();
+    }
+    now += 60_001;
+    await queue().tick();
+    expect(fetch.mock.calls.map(([source]) => source)).toEqual([
+      url,
+      url + '&n=1',
+      url + '&n=2',
+    ]);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(item.contentHtml).toBe(before);
+    const saved = await state();
+    expect(saved.windowCount).toBe(3);
+    expect(
+      Object.values(saved.resources).map((resource: any) => resource.attempts),
+    ).toEqual([1, 1, 1]);
+    expect(
+      (
+        await fs.readdir(
+          path.join(root, '.wechat2rss-automatic-media', 'bytes'),
+        )
+      ).filter((name) => name.endsWith('.json')),
+    ).toHaveLength(3);
+    expect(publish.mock.lastCall[0][0]).toMatchObject({
+      failed: 1,
+      code: 'MEDIA_BODY_LIMIT',
+    });
+  }, 40_000);
+  it('preserves unknown slots and the body failure after cache completion, without repeated SQL or HTTP', async () => {
+    const item = await bodyLimited();
+    const before = item.contentHtml;
+    for (let n = 0; n < 3; n++) {
+      now += 60_001;
+      await queue().tick();
+    }
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(item.contentHtml).toBe(before);
+    expect(item.contentHtml).toContain('data-wewe-image-unconfirmed');
+    expect(publish.mock.lastCall[0][0]).toMatchObject({
+      failed: 1,
+      unconfirmed: 1,
+      code: 'MEDIA_BODY_LIMIT',
+    });
+  });
+  it('retains the persisted hourly allowance and download gate in cache-only mode', async () => {
+    await bodyLimited();
+    const saved = await state();
+    saved.windowCount = 120;
+    await fs.writeFile(stateFile(), JSON.stringify(saved));
+    now += 1001;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await state()).windowCount).toBe(120);
+    now += 3_600_001;
+    deps.canFetch = () => false;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    deps.canFetch = () => true;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((await state()).windowCount).toBe(1);
+  });
+  it('keeps cache-only retry backoff finite and preserves blocked-source stops across restart', async () => {
+    await bodyLimited();
+    fetch.mockRejectedValue(new ImageRequestTransientError());
+    for (const gap of [1001, 60_001, 300_001, 1_800_001]) {
+      now += gap;
+      await queue().tick();
+    }
+    const saved = await state();
+    const failed = Object.values(saved.resources).find(
+      (resource: any) => resource.state === 'failed',
+    );
+    expect(failed).toMatchObject({
+      attempts: 4,
+      code: 'MEDIA_RETRY_EXHAUSTED',
+    });
+    fetch.mockRejectedValue(new ImageRequestBlockedError(403));
+    now += 1001;
+    await queue().tick();
+    now += 86_400_000;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(6);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect((await state()).blocked).toBe(true);
+    expect(publish.mock.lastCall[1]).toBe('IMAGE_REQUEST_BLOCKED');
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+  it('does not spend an attempt when capacity fails in cache-only mode', async () => {
+    await bodyLimited();
+    const actual = await fs.statfs(root, { bigint: true });
+    const disk = jest
+      .spyOn(fs, 'statfs')
+      .mockResolvedValue({ ...actual, bsize: 1n, bavail: 4n * 1024n ** 3n });
+    try {
+      now += 1001;
+      await queue().tick();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect((await state()).windowCount).toBe(1);
+      expect(publish.mock.lastCall[1]).toBe('MEDIA_STORAGE_CAPACITY');
+    } finally {
+      disk.mockRestore();
+    }
+  });
+  it('closing cache-only work before dispatch spends nothing; reopening resumes without resetting history', async () => {
+    const item = await bodyLimited();
+    now += 1001;
+    const worker = queue();
+    deps.load = async () => {
+      worker.close();
+      return { ...item };
+    };
+    await worker.tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await state()).windowCount).toBe(1);
+    deps.load = async () => ({ ...item });
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((await state()).windowCount).toBe(2);
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+  it('keeps successful cache-only bytes on close during HTTP and never downloads them again', async () => {
+    await bodyLimited(2);
+    now += 1001;
+    const worker = queue();
+    fetch.mockImplementationOnce(async () => {
+      worker.close();
+      return { bytes: png, type: 'image/png' };
+    });
+    await worker.tick();
+    now += 60_001;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect((await state()).windowCount).toBe(2);
+    expect(
+      (
+        await fs.readdir(
+          path.join(root, '.wechat2rss-automatic-media', 'bytes'),
+        )
+      ).filter((name) => name.endsWith('.json')),
+    ).toHaveLength(2);
+  });
+  it('does not reuse an old body-limit exemption for a changed or conflicting author snapshot', async () => {
+    const item = await bodyLimited();
+    item.sourceUrl = row(3).sourceUrl;
+    now += 60_001;
+    await queue().tick();
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await state()).articles[0].code).toBe('MEDIA_IDENTITY_UNVERIFIED');
+  });
 });
