@@ -1601,3 +1601,12 @@ button:active {
 .xhs-combined-filter button {
   scroll-margin-block: 4px;
 }
+.feed-article-scroll:has(.xhs-note-head) {
+  container-type: size;
+  container-name: xhs-notes;
+}
+@container xhs-notes (max-height: 180px) {
+  .xhs-note-head {
+    position: static;
+  }
+}

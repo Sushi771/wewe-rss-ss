@@ -115,3 +115,8 @@ jobs:
         env:
           RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
         run: node scripts/xhs-batch-keyboard-browser.test.cjs
+
+      - name: Combined filter short-window title visibility
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-filter-short-review.cjs
