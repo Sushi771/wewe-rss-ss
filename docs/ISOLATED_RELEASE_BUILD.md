@@ -85,8 +85,18 @@ with the exact candidate/rollback pair proof authorize installation or switching
 A build-only policy cannot authorize those operations. Keep the full proof and
 machine audit private; commit only non-sensitive code, tests and documentation.
 
-As of this change, local gate tests have passed, but this restricted executor has
-not produced or started the real package pair. Its native CIM/task visibility was
-previously denied and junction creation also fails with EPERM in an explicitly
-writable test directory. These are unresolved environment blockers, not passing
-rehearsal results. Do not weaken assertions or fabricate complete native facts.
+## Private inventory format
+
+An explicitly reviewed format 2 policy may select `private-names-v1` and the
+`stream-dfs-private-v3` inventory. The inventory counts classified `.env`, `.git`
+and database entries using metadata without reading their contents; its receipt
+states that private content is not verified. Other files retain content hashing.
+This finite naming rule is not a detector for arbitrary secrets: review the
+actual accounting roots and permitted inputs before adoption. Older receipts and
+ledgers are not silently converted to this format.
+
+Before adoption, every configured protected physical package needs a pinned
+manifest and verified artifact contents; classified private paths cannot be
+manifest artifacts. Reference observation, capacity, claims and recovery checks
+remain required. This format does not itself authorize another user profile,
+complete a reference observation or authorize installation.

@@ -15,6 +15,8 @@ const hash = (v) =>
 const {
   createVerifier,
   FORMAT: INVENTORY_FORMAT,
+  PRIVATE_FORMAT,
+  PRIVATE_RULES,
 } = require('./scope-inventory.cjs');
 function read(file, max = 1024 * 1024) {
   const s = fs.lstatSync(file);
@@ -92,6 +94,7 @@ function inspect(paths, options = {}) {
         throw new Error('RELEASE_SCOPE_OVERLAPPING_ROOTS');
   const verifier = createVerifier(options.scanBudget, {
     onSegment: options.onSegment,
+    privateAccounting: options.privateAccounting,
   });
   const baseline = verifier.scan(roots);
   options.onMetrics?.(verifier.metrics());
@@ -189,7 +192,7 @@ function open(request, options = {}, boundOperation) {
     configSha = fileHash(file);
   if (
     configSha !== expected ||
-    policy.format !== 1 ||
+    ![1, 2].includes(policy.format) ||
     !/^[a-f0-9-]{36}$/.test(policy.scopeId) ||
     !Array.isArray(policy.roots) ||
     !policy.roots.length ||
@@ -293,13 +296,22 @@ function open(request, options = {}, boundOperation) {
     policy.roots.some((root) => contains(root.path, policy.registryDirectory))
   )
     throw new Error('RELEASE_SCOPE_REGISTRY_IDENTITY_INVALID');
+  const privateMode = policy.format === 2;
   if (
-    policy.baseline.format !== INVENTORY_FORMAT ||
+    (privateMode ?
+      policy.inventoryClassification !== PRIVATE_RULES ||
+      policy.baseline.format !== PRIVATE_FORMAT ||
+      policy.baseline.classification !== PRIVATE_RULES ||
+      policy.baseline.privateContentVerified !== false ||
+      !Number.isSafeInteger(policy.baseline.privateBytes) ||
+      !Number.isSafeInteger(policy.baseline.privateEntries) :
+      policy.inventoryClassification !== undefined || policy.baseline.format !== INVENTORY_FORMAT) ||
     !/^[a-f0-9]{64}$/.test(policy.baseline.metadataDigest || '')
   )
     throw new Error('RELEASE_SCOPE_INVENTORY_VERSION_REVIEW_REQUIRED');
   const verifier = createVerifier(policy.scanBudget, {
     onSegment: options.onScanSegment,
+    privateAccounting: privateMode ? PRIVATE_RULES : undefined,
   });
   const useMetadata = verifier.limits.checkpointMode === 'identity-times-v1';
   let fullValidated = false;
@@ -424,6 +436,8 @@ function open(request, options = {}, boundOperation) {
           [],
           { metadataOnly: useMetadata && verifiedOutputs.has(row.path) },
         );
+        if (privateMode && snapshot.privateEntries !== 0)
+          throw new Error('RELEASE_SCOPE_PRIVATE_MANAGED_OUTPUT');
         if (
           snapshot.metadataDigest !== row.metadataDigest ||
           ((!useMetadata || !verifiedOutputs.has(row.path)) &&
@@ -450,11 +464,38 @@ function open(request, options = {}, boundOperation) {
     return measure;
   };
   try {
+    if (privateMode) {
+      const packages = policy.windowsReferences?.packages;
+      if (!Array.isArray(packages) || packages.length < 1 || packages.length > 6)
+        throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+      const checked = new Set(), covered = new Set();
+      let proofBytes = 0;
+      for (const row of packages) {
+        if (!row || !policy.protectedIds.includes(row.id) || typeof row.path !== 'string' ||
+            !path.isAbsolute(row.path) || path.resolve(row.path) !== row.path ||
+            canonical(row.path) !== row.path ||
+            !policy.roots.some((root) => contains(root.path, row.path)) ||
+            checked.has(row.path.toLowerCase()))
+          throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+        const actualId = require('./private-artifact-proof.cjs').verifyManifest(
+          row.path, policy.packageProofs?.[row.id], (n) => {
+            proofBytes += n;
+            if (proofBytes > verifier.limits.scanReadBytes)
+              throw new Error('RELEASE_SCOPE_SCAN_READ_BUDGET');
+            verifier.chargeExternal(n);
+          });
+        if (actualId !== row.id) throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+        checked.add(row.path.toLowerCase());
+        covered.add(row.id);
+      }
+      if (policy.protectedIds.some((id) => !covered.has(id)))
+        throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+    }
     if (present(ledger)) {
       ledgerIdentity = fileIdentity(ledger);
       prior = state(ledger);
       if (
-        prior.format !== 1 ||
+        prior.format !== policy.format ||
         prior.configSha !== configSha ||
         !Array.isArray(prior.outputs) ||
         prior.outputs.length > 128 ||
@@ -487,7 +528,7 @@ function open(request, options = {}, boundOperation) {
         fs.readdirSync(policy.buildOnly.outputRoot).length
       )
         throw new Error('RELEASE_SCOPE_BUILD_ROOT_NOT_EMPTY');
-      prior = { format: 1, configSha, outputs: [], claim: null };
+      prior = { format: policy.format, configSha, outputs: [], claim: null };
       const initial = verifier.scan(policy.roots);
       if (
         initial.digest !== policy.baseline.digest ||
@@ -804,6 +845,8 @@ function open(request, options = {}, boundOperation) {
             const receipt = verifier.scan([
               { path: row.path, identity: row.identity },
             ]);
+            if (privateMode && receipt.privateEntries !== 0)
+              throw new Error('RELEASE_SCOPE_PRIVATE_MANAGED_OUTPUT');
             row.digest = receipt.digest;
             row.metadataDigest = receipt.metadataDigest;
             row.complete = true;

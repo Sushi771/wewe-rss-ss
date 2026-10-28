@@ -6,6 +6,84 @@ const test = require('node:test'),
   crypto = require('node:crypto');
 const scope = require('./release-scope.cjs');
 const { fileHash } = require('./lib.cjs');
+function enableV3(f) {
+  const m = { format: 1, id: 'current', files: { 'node.exe': fileHash(path.join(f.current, 'node.exe')) }, links: {} };
+  const file = path.join(f.current, 'release.json');
+  fs.writeFileSync(file, JSON.stringify(m));
+  f.policy.packageProofs = { current: fileHash(file) };
+  f.policy.protectedIds = ['current'];
+  f.policy.windowsReferences = { format: 1, packages: [{ id: 'current', path: f.current }] };
+  Object.assign(f.policy, scope.inspect([f.installed, f.build], { privateAccounting: 'private-names-v1' }));
+  f.policy.format = 2; f.policy.inventoryClassification = 'private-names-v1'; f.save();
+}
+test('v3 adoption and checkpoint preserve private accounting and reject a changed private entry', () =>
+  fixture((f) => {
+    const privateFile = path.join(f.current, '.env');
+    fs.writeFileSync(privateFile, 'synthetic');
+    enableV3(f);
+    const lease = f.open();
+    lease.check();
+    fs.appendFileSync(privateFile, 'changed');
+    assert.throws(() => lease.check(), /FROZEN_HISTORY_CHANGED/);
+    assert.throws(() => lease.close(new Error('changed')), /FROZEN_HISTORY_CHANGED/);
+  }));
+test('v3 must bind explicit format and rejects a v2 ledger', () =>
+  fixture((f) => {
+    const first = f.open(); first.close();
+    enableV3(f);
+    assert.throws(() => f.open(), /STATE_INVALID/);
+  }));
+test('a v3 managed output containing private material is rejected', () =>
+  fixture((f) => {
+    enableV3(f);
+    const lease = f.open();
+    const target = path.join(f.build, 'candidate');
+    lease.registerOutput(target); fs.mkdirSync(target); lease.createdOutput(target);
+    fs.writeFileSync(path.join(target, '.env'), 'synthetic');
+    assert.throws(() => lease.close(), /PRIVATE_MANAGED_OUTPUT/);
+  }));
+test('v3 checks unreferenced physical protected copies before probe', () =>
+  fixture((f) => {
+    enableV3(f);
+    const second = path.join(f.installed, 'second'); fs.mkdirSync(second);
+    const file = path.join(second, 'release.json');
+    fs.writeFileSync(file, JSON.stringify({ format: 1, id: 'second', files: { '.env': 'a'.repeat(64) }, links: {} }));
+    f.policy.windowsReferences.packages.push({ id: 'second', path: second });
+    f.policy.protectedIds.push('second'); f.policy.packageProofs.second = fileHash(file);
+    Object.assign(f.policy, scope.inspect([f.installed, f.build], { privateAccounting: 'private-names-v1' }));
+    f.save(); let queries = 0;
+    const options = f.options(); options.query = () => { queries++; return f.facts; };
+    assert.throws(() => scope.open({ kind: 'build', root: f.build, reserveBytes: 1 }, options), /PRIVATE_CONFLICT/);
+    assert.equal(queries, 0);
+  }));
+test('v3 first adoption queries only after actual checksummed ledger exists', () =>
+  fixture((f) => {
+    enableV3(f);
+    const options = f.options(), ledger = path.join(f.base, f.policy.scopeId + '.state.json');
+    let queries = 0;
+    options.query = () => {
+      queries++;
+      const doc = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+      assert.equal(doc.payload.format, 2);
+      return structuredClone(f.facts);
+    };
+    const first = scope.open({ kind: 'build', root: f.build, reserveBytes: 1 }, options);
+    first.close();
+    const second = scope.open({ kind: 'build', root: f.build, reserveBytes: 1 }, options);
+    second.close();
+    assert(queries >= 2);
+  }));
+test('v3 checks every physical copy of the same protected id', () =>
+  fixture((f) => {
+    enableV3(f);
+    const second = path.join(f.installed, 'second'); fs.mkdirSync(second);
+    fs.copyFileSync(path.join(f.current, 'release.json'), path.join(second, 'release.json'));
+    fs.writeFileSync(path.join(second, 'node.exe'), 'changed synthetic runtime');
+    f.policy.windowsReferences.packages.push({ id: 'current', path: second });
+    Object.assign(f.policy, scope.inspect([f.installed, f.build], { privateAccounting: 'private-names-v1' }));
+    f.save();
+    assert.throws(() => f.open(), /ARTIFACT_HASH_MISMATCH/);
+  }));
 test('elapsed reference-query time cannot reset or exceed the shared operation deadline before allocation', () =>
   fixture((f) => {
     f.policy.scanBudget = { durationMs: 2000 };
