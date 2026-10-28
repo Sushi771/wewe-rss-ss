@@ -30,7 +30,7 @@ function visit(n) {
 }
 visit(ast);
 assert.ok(helper && click);
-async function run(mode) {
+async function run(mode, stablePopover = true) {
   let now = 0,
     frame = 0,
     pressed = false;
@@ -40,6 +40,7 @@ async function run(mode) {
   const body = { children: [] },
     popover = {
       isConnected: true,
+      outerHTML: '<div data-slot="content" data-open="true"></div>',
       parentElement: body,
       getAnimations: () => [],
     };
@@ -117,7 +118,7 @@ async function run(mode) {
     helper.getText(ast) + '\nglobalThis.click=' + click.getText(ast) + ';',
     context,
   );
-  const action = context.click("document.querySelector('#target')", true);
+  const action = context.click("document.querySelector('#target')", stablePopover);
   if (mode === 'transient' || mode === 'stable') {
     await action;
     assert.equal(events.length, 2);
@@ -149,6 +150,27 @@ async function run(mode) {
 }
 test('transient popover animation settles before exactly one CDP mouse press/release', async () => {
   await run('transient');
+});
+
+test('xhs export uses the same pinned readiness before one click during a transient popover', async () => {
+  let exportCase, exportClick;
+  function findCase(n) {
+    if (ts.isCallExpression(n) && n.expression.getText(ast) === 'run' &&
+        n.arguments[0]?.text === 'xhs-export') exportCase = n.arguments[1];
+    ts.forEachChild(n, findCase);
+  }
+  findCase(ast);
+  assert.ok(exportCase);
+  function findClick(n) {
+    if (ts.isCallExpression(n) && n.expression.getText(ast) === 'click' &&
+        ts.isCallExpression(n.arguments[0]) &&
+        n.arguments[0].expression.getText(ast) === 'button' &&
+        n.arguments[0].arguments[0]?.text === '导出已保存 ZIP') exportClick = n;
+    ts.forEachChild(n, findClick);
+  }
+  findClick(exportCase);
+  assert.ok(exportClick);
+  await run('transient', exportClick.arguments[1]?.kind === ts.SyntaxKind.TrueKeyword);
 });
 test('persistent popover obstruction fails within the bound without a mouse event', async () => {
   await run('persistent');

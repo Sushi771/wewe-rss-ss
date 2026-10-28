@@ -997,7 +997,7 @@ const server = http.createServer((req, res) => {
     await run('xhs-export', async () => {
       await navigate('/dash/xiaohongshu');
       await more();
-      await click(button('导出已保存 ZIP'));
+      await click(button('导出已保存 ZIP'), true);
       await modalMatrix('xhs-export');
     });
     await run('xhs-add', async () => {
