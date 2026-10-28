@@ -5,11 +5,26 @@ import { useEffect, useRef, useState } from 'react';
 export function XhsMetricLine({
   snapshot,
   creator = false,
+  showUpdatedAt = true,
 }: {
   snapshot: XhsMetricSnapshot | null;
   creator?: boolean;
+  showUpdatedAt?: boolean;
 }) {
-  if (creator && !snapshot) return null;
+  if (creator) {
+    const fans = snapshot?.values.fans;
+    const following = snapshot?.values.following;
+    const collectedAt = snapshot?.collectedAt;
+    const date = collectedAt != null && Number.isFinite(new Date(collectedAt).getTime())
+      ? new Date(collectedAt).toLocaleString() : null;
+    return (
+      <span className="inline-flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 text-sm text-foreground" aria-label="博主资料">
+        <span>粉丝 <strong className="font-semibold tabular-nums">{fans == null ? '未采集' : new Intl.NumberFormat('zh-CN').format(fans)}</strong></span>
+        {following != null && <span>关注 <strong className="font-semibold tabular-nums">{new Intl.NumberFormat('zh-CN').format(following)}</strong></span>}
+        {showUpdatedAt && date && <span className="text-xs text-neutral-500">更新于 {date}</span>}
+      </span>
+    );
+  }
   const fields = creator
     ? { fans: '粉丝', following: '关注' }
     : { likes: '赞', collects: '收藏', shares: '分享', comments: '评论' };
@@ -84,7 +99,7 @@ export function XhsCreatorMetricRefresh({
           }
         }}
       >
-        {refresh.isLoading ? '更新中' : '更新当前博主资料快照'}
+        {refresh.isLoading ? '更新中' : '更新博主资料'}
       </button>
       {error && <p role="alert">{error}</p>}
     </div>

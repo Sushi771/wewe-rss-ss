@@ -1142,7 +1142,7 @@ export default function Xiaohongshu() {
           {visibleCreators.map((creator) => (
             <li
               key={creator.id}
-              className={`mac-sidebar-item ${creatorId === creator.id && !managing ? 'active' : ''}`}
+              className={`mac-sidebar-item !h-auto min-h-[48px] py-1 ${creatorId === creator.id && !managing ? 'active' : ''}`}
               draggable={!busy}
               onDragStart={(event) => {
                 if (active.current) {
@@ -1175,7 +1175,7 @@ export default function Xiaohongshu() {
                 type="button"
                 disabled={busy}
                 aria-pressed={creatorId === creator.id}
-                className="min-w-0 flex-1 truncate text-left text-sm"
+                className="min-w-0 flex-1 break-words text-left text-sm"
                 onClick={() => selectCreator(creator.id)}
               >
                 <XhsCreatorAvatar
@@ -1186,8 +1186,8 @@ export default function Xiaohongshu() {
                   name={creator.displayName}
                 />
                 {creator.displayName}
-                <span className="block truncate">
-                  <XhsMetricLine snapshot={creator.metrics} creator />
+                <span className="block min-w-0 break-words">
+                  <XhsMetricLine snapshot={creator.metrics} creator showUpdatedAt={false} />
                 </span>
               </button>
               <span className="shrink-0 text-xs opacity-60">
@@ -1321,6 +1321,7 @@ export default function Xiaohongshu() {
               {current?.displayName ||
                 (folderFilter === 'all' ? '全部笔记' : '分组笔记')}
             </h1>
+            {current && <XhsMetricLine snapshot={current.metrics} creator />}
             <span role="status" className="text-xs text-neutral-500">
               {capability.data?.canRefresh
                 ? '每次更新最多读取 2 页，更多需明确继续'

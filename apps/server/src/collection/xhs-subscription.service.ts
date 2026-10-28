@@ -14,6 +14,7 @@ import {
   assertIncrementalWriteAdmission,
 } from './incremental-write';
 import { sqliteWrites } from './sqlite-write-coordinator';
+import { startupAudit, waitForStartupAudit, assertDatabaseWritesAllowed } from '../startup-audit';
 import {
   XhsNormalizedCandidate,
   xhsArchiveDraft,
@@ -136,6 +137,9 @@ export function subscriptionUrl(raw: string) {
 
 @Injectable()
 export class XhsSubscriptionService implements OnModuleInit {
+  private startupRecovery: Promise<void> = Promise.resolve();
+  private startupRecoveryStarted = false;
+  private destroyed = false;
   private resolutions = new Map<
     string,
     {
@@ -194,10 +198,34 @@ export class XhsSubscriptionService implements OnModuleInit {
     );
   }
   async onModuleInit() {
+    if (startupAudit()?.status === 'verifying') {
+      this.startupRecovery = waitForStartupAudit().then(async (ok) => {
+        if (!ok || this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+        this.startupRecoveryStarted = true;
+        await this.recoverInterrupted();
+      });
+      void this.startupRecovery.catch(() => {});
+      return;
+    }
+    await this.recoverInterrupted();
+  }
+  private async readyForMutation() {
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+    assertDatabaseWritesAllowed();
+    await this.startupRecovery;
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+    assertDatabaseWritesAllowed();
+  }
+  async onModuleDestroy() {
+    this.destroyed = true;
+    if (this.startupRecoveryStarted) await this.startupRecovery.catch(() => {});
+  }
+  private async recoverInterrupted() {
     // A single local backend owns execution. Restart never silently replays network work.
     const rows = await this.db.$queryRaw<
       Array<{ document: string }>
     >`SELECT document FROM xhs_subscription_tasks WHERE state IN ('queued', 'running')`;
+    let recoveryFailed = false;
     for (const row of rows) {
       const task = JSON.parse(row.document) as Task;
       task.state = 'blocked';
@@ -207,8 +235,10 @@ export class XhsSubscriptionService implements OnModuleInit {
         await this.persist(task);
       } catch {
         /* Expose a local receipt barrier; never start work. */
+        recoveryFailed = true;
       }
     }
+    if (recoveryFailed) throw new XhsSubscriptionError('XHS_TASK_RECEIPT_UNCERTAIN');
   }
   async resolveSubscription(
     input: {
@@ -216,6 +246,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     },
     options?: { fixedErrors?: boolean },
   ): Promise<XhsSubscriptionResolution> {
+    await this.readyForMutation();
     const url = subscriptionUrl(input.url);
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     let value: Awaited<ReturnType<XhsSubscriptionSource['resolve']>>;
@@ -287,6 +318,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     author: XhsAuthor;
     note: ReturnType<typeof inspectLimitedRecovery>;
   }) {
+    await this.readyForMutation();
     const { owner, author, note } = input;
     if (
       author.id !== note.authorId ||
@@ -402,6 +434,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       authorId: string,
     ) => Promise<void>,
   ) {
+    await this.readyForMutation();
     const resolution = this.resolutions.get(input.resolutionId);
     if (!resolution || resolution.expiresAt <= Date.now())
       return reject('XHS_RESOLUTION_EXPIRED');
@@ -584,6 +617,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     checkpoint?: Task,
     pageLimit?: number,
   ) {
+    await this.readyForMutation();
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     if ([...this.uncertain.values()].some((t) => t.creatorId === creatorId))
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
@@ -804,6 +838,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     };
   }
   async resumeTask(input: { taskId: string; pickToken?: string }) {
+    await this.readyForMutation();
     if (this.pending.has(input.taskId)) return reject('XHS_TASK_SETTLING');
     await this.reconcile(input.taskId);
     if (this.uncertain.has(input.taskId))
@@ -835,6 +870,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     );
   }
   async cancelTask(input: { taskId: string }) {
+    await this.readyForMutation();
     const t = this.pending.get(input.taskId);
     if (t && active(t)) {
       t.state = 'cancelled';

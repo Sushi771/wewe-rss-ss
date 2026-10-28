@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { trpc } from "@web/utils/trpc";
 export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
-  const [page, setPage] = useState(0);
   const [limit, setLimit] = useState(100),
     [error, setError] = useState("");
   const [phase, setPhase] = useState<
@@ -39,10 +38,10 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
     }
   };
   return (
-    <details className="min-w-0 rounded border p-3">
-      <summary>整号互动覆盖与待补清单</summary>
+    <details className="min-w-0 border-b px-3 py-1 text-sm">
+      <summary>同步博主内容</summary>
       <p>
-        发现平台返回的笔记，逐篇归档正文媒体并更新点赞、收藏、分享和评论数量。评论正文与回复采集暂停；私密、删除或平台未返回的内容仍为未知。
+        同步已发现笔记的内容与互动数量。未取得的数据会保留为未知。
       </p>
       <label>
         本轮请求上限{" "}
@@ -73,30 +72,9 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
       {jobs.error && <p role="alert">覆盖状态读取失败，未开始新请求。</p>}
       {(jobs.data ?? []).map((job) => (
         <section key={job.id} className="my-2 min-w-0 border-t">
-          <p className="break-all">
-            状态：{job.state}；发现：{job.items.length}；列表结束：
-            {job.listEnd ? "已返回结束" : "待补"}；请求：
-            {job.budget?.used ?? "未知"}/{job.budget?.limit ?? "未知"}；
-            {job.code}
+          <p role="status">
+            {{ queued: '等待中', running: '同步中', paused: '已暂停', partial: '部分完成', failed: '未完成', cancelled: '已取消', completed: '已完成' }[job.state] ?? '状态待确认'} · 已发现 {job.items.length} 篇
           </p>
-          <p>
-            指标 {job.items.filter((i) => i.metrics).length}；历史主评论{" "}
-            {job.items.filter((i) => i.top).length}；历史已知根回复{" "}
-            {job.items.filter((i) => i.replies).length}；附页已保存{" "}
-            {job.items.filter((i) => i.supplement === "saved").length} / 待补{" "}
-            {job.items.filter((i) => i.supplement !== "saved").length}
-          </p>
-          {job.historyGrant && (
-            <p>
-              阶段请求：
-              {Object.entries(job.historyGrant.limits)
-                .map(
-                  ([phase, cap]) =>
-                    `${({ profile: "资料", list: "目录", detail: "正文详情", media: "媒体", metrics: "指标" } as Record<string, string>)[phase] ?? phase} ${job.historyGrant!.used[phase] ?? 0}/${cap}`,
-                )
-                .join("；")}
-            </p>
-          )}
           {job.sourceCheckpoint?.state === "unknown" && (
             <p role="alert">
               来源请求结果尚未确认，已暂停且不会自动重发；请先核对该阶段回执。
@@ -207,34 +185,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
               取消
             </button>
           )}
-          <details>
-            <summary>逐篇事实与缺口</summary>
-            <ul>
-              {job.items.slice(page * 50, (page + 1) * 50).map((item) => (
-                <li key={item.noteId} className="break-all">
-                  {item.title || item.noteId}：{item.status} {item.stage}{" "}
-                  {item.reason}；指标{" "}
-                  {item.metrics
-                    ? new Date(item.metrics).toLocaleString()
-                    : "待补"}
-                  ；主评 {item.top ? "已返回结束" : "待补"}；根回复{" "}
-                  {item.replies ? "已返回结束" : "待补"}；附页
-                  {item.supplement === "saved" ? "已保存" : "待补"}
-                  ；删除状态未知
-                </li>
-              ))}
-            </ul>
-            <button disabled={page === 0} onClick={() => setPage(page - 1)}>
-              上一页
-            </button>
-            <span>清单第 {page + 1} 页，每页50篇</span>
-            <button
-              disabled={(page + 1) * 50 >= job.items.length}
-              onClick={() => setPage(page + 1)}
-            >
-              下一页
-            </button>
-          </details>
+
         </section>
       ))}
     </details>

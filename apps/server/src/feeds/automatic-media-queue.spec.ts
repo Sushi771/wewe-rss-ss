@@ -331,11 +331,17 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     const worker = queue();
     await worker.tick();
     const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
-    for (let n = 0; n < 9; n++)
+    for (let n = 0; n < 153; n++)
       await fs.writeFile(
         path.join(folder, `${n.toString(16).padStart(64, '0')}.json`),
-        Buffer.alloc(14_000_000),
+        '{}',
       );
+    const original = fs.lstat.bind(fs);
+    const stat = jest.spyOn(fs as any, 'lstat').mockImplementation(async (name: any) => {
+      const result = await original(name);
+      if (/^[a-f0-9]{64}\.json$/.test(path.basename(String(name)))) Object.assign(result, { size: 14_000_000 });
+      return result;
+    });
     const capacity = worker as unknown as {
       capacity(required: number): Promise<void>;
     };
@@ -347,6 +353,7 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
       expect(disk).not.toHaveBeenCalled();
       expect(fetch).not.toHaveBeenCalled();
     } finally {
+      stat.mockRestore();
       disk.mockRestore();
     }
   });
@@ -384,16 +391,24 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     deps.canFetch = () => false;
     await queue().tick();
     const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
-    for (let n = 0; n < 9; n++)
+    for (let n = 0; n < 153; n++)
       await fs.writeFile(
         path.join(folder, `${n.toString(16).padStart(64, '0')}.json`),
-        Buffer.alloc(14_000_000),
+        '{}',
       );
-    deps.canFetch = () => true;
-    await queue().tick();
-    expect(fetch).not.toHaveBeenCalled();
-    expect((await state()).articles).toHaveLength(2);
-    expect(publish.mock.lastCall[1]).toBe('MEDIA_STORAGE_CAPACITY');
+    const original = fs.lstat.bind(fs);
+    const stat = jest.spyOn(fs as any, 'lstat').mockImplementation(async (name: any) => {
+      const result = await original(name);
+      if (/^[a-f0-9]{64}\.json$/.test(path.basename(String(name)))) Object.assign(result, { size: 14_000_000 });
+      return result;
+    });
+    try {
+      deps.canFetch = () => true;
+      await queue().tick();
+      expect(fetch).not.toHaveBeenCalled();
+      expect((await state()).articles).toHaveLength(2);
+      expect(publish.mock.lastCall[1]).toBe('MEDIA_STORAGE_CAPACITY');
+    } finally { stat.mockRestore(); }
   });
   it('retains backoff and cached bytes when SQL repeatedly fails, then reports a finite save failure', async () => {
     rows.delete(row(2).id);
@@ -648,4 +663,48 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect((await state()).articles[0].code).toBe('MEDIA_IDENTITY_UNVERIFIED');
   });
+  it('2GiB isolated: serialized bytes plus 14MB reservation has an exact boundary across restart', async () => {
+    deps.canFetch = () => false;
+    const worker = queue(); await worker.tick();
+    const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
+    for (let n=0;n<153;n++) await fs.writeFile(path.join(folder, `${n.toString(16).padStart(64,'0')}.json`), '{}');
+    const original = fs.lstat.bind(fs);
+    const stat = jest.spyOn(fs as any,'lstat').mockImplementation(async (name: any) => {
+      const result = await original(name); const base = path.basename(String(name));
+      const n = parseInt(base.slice(0,64),16);
+      if (/^[a-f0-9]{64}\.json$/.test(base) && n < 153) Object.assign(result,{size:n<152?14_000_000:5_483_648});
+      return result;
+    });
+    try {
+      const first=worker as unknown as {capacity(n:number):Promise<void>};
+      await expect(first.capacity(14_000_000)).resolves.toBeUndefined();
+      await expect(first.capacity(14_000_001)).rejects.toThrow('MEDIA_STORAGE_CAPACITY');
+      const restarted=queue(); await restarted.tick();
+      const again=restarted as unknown as {capacity(n:number):Promise<void>};
+      await expect(again.capacity(14_000_000)).resolves.toBeUndefined();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {stat.mockRestore();}
+  });
+  it('2GiB isolated: concurrent queue instances serialize one outbound attempt', async () => {
+    rows = new Map([row(1),row(2,[url+'&n=2'])].map((entry)=>[entry.id,entry]));
+    fetch.mockImplementation(async()=>{ await new Promise((resolve)=>setTimeout(resolve,100)); return {bytes:png,type:'image/png'}; });
+    const a=queue(), b=queue(); await Promise.all([a.tick(),b.tick()]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('2GiB isolated: concurrent reservation near quota never starts a second fetch after restart', async () => {
+    deps.canFetch=()=>false; rows=new Map([row(1),row(2,[url+'&n=2'])].map((entry)=>[entry.id,entry]));
+    const first=queue(); await first.tick();
+    const folder=path.join(root,'.wechat2rss-automatic-media','bytes');
+    for(let n=0;n<153;n++) await fs.writeFile(path.join(folder,`${n.toString(16).padStart(64,'0')}.json`),'{}');
+    const original=fs.lstat.bind(fs);
+    const stat=jest.spyOn(fs as any,'lstat').mockImplementation(async(name:any)=>{const result=await original(name);const base=path.basename(String(name));const n=parseInt(base.slice(0,64),16);if(/^[a-f0-9]{64}\.json$/.test(base)&&n<153)Object.assign(result,{size:n<152?14_000_000:5_483_648});return result;});
+    try {
+      deps.canFetch=()=>true; fetch.mockImplementation(async()=>{await new Promise((resolve)=>setTimeout(resolve,100));return {bytes:png,type:'image/png'};});
+      await Promise.all([first.tick(),queue().tick()]); expect(fetch).toHaveBeenCalledTimes(1);
+      now+=1001; await queue().tick(); expect(fetch).toHaveBeenCalledTimes(1);
+      expect(publish).toHaveBeenCalledWith(expect.anything(),'MEDIA_STORAGE_CAPACITY');
+    } finally {stat.mockRestore();}
+  });
+
 });

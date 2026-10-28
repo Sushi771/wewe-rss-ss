@@ -22,7 +22,7 @@ const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const MAX_STATE = 4_000_000;
 const MAX_ARTICLES = 1024;
 const MAX_RESOURCES = 2048;
-const MAX_CACHE = 128_000_000;
+const MAX_CACHE = 2 * 1024 ** 3;
 const BACKOFF = [60_000, 300_000, 1_800_000, 21_600_000];
 const resourceSchema = z
   .object({

@@ -117,15 +117,15 @@ test('following unknown is omitted, a measured zero and other unknown values sta
       collectedAt: 1760000000000,
       evidence: 'source-only',
     };
-  assert.equal(f.text(f.metric({ creator: true, snapshot })), '粉丝 1,615');
-  assert.equal(
+  assert.match(f.text(f.metric({ creator: true, snapshot })), /^粉丝 1,615更新于 /);
+  assert.match(
     f.text(
       f.metric({
         creator: true,
         snapshot: { ...snapshot, values: { fans: 0, following: 0 } },
       }),
     ),
-    '粉丝 0 · 关注 0',
+    /^粉丝 0关注 0更新于 /,
   );
   assert.match(
     f.text(

@@ -14,6 +14,7 @@ import {
   assertIncrementalWriteAdmission,
 } from './incremental-write';
 import { sqliteWrites } from './sqlite-write-coordinator';
+import { startupAudit, waitForStartupAudit, assertDatabaseWritesAllowed } from '../startup-audit';
 
 type Item = {
   started?: Record<string, boolean>;
@@ -50,6 +51,9 @@ type Job = {
 /** A finite explicit run over durable existing primitives; restart never dispatches. */
 @Injectable()
 export class XhsWholeCreatorService implements OnModuleInit {
+  private startupRecovery: Promise<void> = Promise.resolve();
+  private startupRecoveryStarted = false;
+  private destroyed = false;
   private running = new Set<string>();
   private lane = Promise.resolve();
   constructor(
@@ -70,6 +74,29 @@ export class XhsWholeCreatorService implements OnModuleInit {
     );
   }
   async onModuleInit() {
+    if (startupAudit()?.status === 'verifying') {
+      this.startupRecovery = waitForStartupAudit().then(async (ok) => {
+        if (!ok || this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+        this.startupRecoveryStarted = true;
+        await this.recoverInterrupted();
+      });
+      void this.startupRecovery.catch(() => {});
+      return;
+    }
+    await this.recoverInterrupted();
+  }
+  private async readyForMutation() {
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+    assertDatabaseWritesAllowed();
+    await this.startupRecovery;
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+    assertDatabaseWritesAllowed();
+  }
+  async onModuleDestroy() {
+    this.destroyed = true;
+    if (this.startupRecoveryStarted) await this.startupRecovery.catch(() => {});
+  }
+  private async recoverInterrupted() {
     await this.write(
       (tx) => tx.$executeRaw`UPDATE xhs_whole_creator_jobs
       SET state='paused', document=json_set(document,'$.state','paused','$.code','XHS_TASK_INTERRUPTED')
@@ -125,6 +152,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     requestLimit: number;
     intervalMs: number;
   }) {
+    await this.readyForMutation();
     if (
       !Number.isSafeInteger(input.requestLimit) ||
       input.requestLimit < 1 ||
@@ -174,6 +202,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       number
     >;
   }) {
+    await this.readyForMutation();
     const phases = ['profile', 'list', 'detail', 'media', 'metrics'] as const;
     if (
       !input.phaseLimits ||
@@ -285,6 +314,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     phase: 'profile' | 'list' | 'detail' | 'media' | 'metrics';
     newLimit: number;
   }) {
+    await this.readyForMutation();
     if (
       !['profile', 'list', 'detail', 'media', 'metrics'].includes(
         input.phase,
@@ -333,6 +363,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     });
   }
   async resume(id: string) {
+    await this.readyForMutation();
     await this.write(async (tx) => {
       const rows = await tx.$queryRaw<
         Array<{ state: string; document: string }>
@@ -362,6 +393,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     return this.view(id);
   }
   async extend(id: string, additional: number) {
+    await this.readyForMutation();
     if (
       !Number.isSafeInteger(additional) ||
       additional < 1 ||
@@ -424,6 +456,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     return this.resume(id);
   }
   async cancel(id: string) {
+    await this.readyForMutation();
     const job = await this.load(id);
     if (job.state === 'completed') return this.view(id);
     job.state = 'cancelled';

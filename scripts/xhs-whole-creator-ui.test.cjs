@@ -46,7 +46,7 @@ function render(data) {
     React.createElement(mod.exports.default, { creatorId: "synthetic" }),
   );
 }
-test("coverage separates root replies, supplements and unknown deletion; no percent claim", () => {
+test("daily summary hides technical inventory while retaining the pause and explicit continuation", () => {
   const html = render([
     {
       id: "synthetic",
@@ -69,10 +69,9 @@ test("coverage separates root replies, supplements and unknown deletion; no perc
       ],
     },
   ]);
-  assert.match(html, /主评/);
-  assert.match(html, /根回复/);
-  assert.match(html, /附页待补|待补/);
-  assert.match(html, /删除状态未知/);
+  assert.match(html, /已暂停/);
+  assert.match(html, /已发现 1 篇/);
+  assert.doesNotMatch(html, /主评|根回复|删除状态未知|Synthetic/);
   assert.match(html, /明确追加/);
   assert.doesNotMatch(html, /100%/);
 });
@@ -105,7 +104,7 @@ test("phase cap control is available only for a paused grant without an unresolv
   );
 });
 test("empty local coverage rendering never triggers a mutation", () =>
-  assert.match(render([]), /整号互动覆盖与待补清单/));
+  assert.match(render([]), /同步博主内容/));
 
 test("unknown source checkpoint is visible and continuation is disabled without exposing internal markers", () => {
   const html = render([
@@ -121,10 +120,10 @@ test("unknown source checkpoint is visible and continuation is disabled without 
     },
   ]);
   assert.match(html, /来源请求结果尚未确认/);
-  assert.match(html, /正文详情 2\/4/);
+  assert.doesNotMatch(html, /正文详情 2\/4/);
   assert.match(html, /disabled=""/);
   assert.doesNotMatch(html, /dispatch-pending/);
-  assert.match(html, /评论正文与回复采集暂停/);
+  assert.match(html, /不会自动重发/);
 });
 
 test("known source refusal is shown as restricted, not an unknown result", () => {
