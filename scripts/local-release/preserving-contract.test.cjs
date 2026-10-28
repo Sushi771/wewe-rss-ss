@@ -5,6 +5,27 @@ const { validatePreservingContract, validateSameSchema, validateActiveBinding } 
 const { referenceApplicability } = require('./preserving-contract.cjs');
 const { preservingRootRoles } = require('./preserving-contract.cjs');
 
+test('preserving reference diagnostic keeps known failures and strips arbitrary host text',()=>{
+  const d=require('./reference-diagnostics.cjs');
+  for(const code of ['REFERENCE_PROCESS_VISIBILITY_INCOMPLETE','REFERENCE_PROBE_IDENTITY_UNCERTAIN','REFERENCE_CONTROLLER_OWNER_UNCERTAIN','REFERENCE_INFLIGHT_STATE_INVALID','REFERENCE_NATIVE_DEADLINE'])assert.equal(d.safeReason(code),code);
+  for(const text of ['C:/private/file','https://example.invalid/?token=secret','REFERENCE_FAKE_SECRET_TOKEN','arbitrary exception'])assert.equal(d.safeReason(text),'REFERENCE_REASON_UNAVAILABLE');
+  const summary=d.referenceFailure({errors:['REFERENCE_CONTROLLER_OWNER_UNCERTAIN','https://example.invalid/?token=secret'],categories:{processes:true,tasks:false},uncertainChildren:[123]}, {processes:true,tasks:'not_applicable',shortcuts:'not_applicable',pointers:true,rollback:true,inflight:true});
+  assert(summary.includes('REFERENCE_CONTROLLER_OWNER_UNCERTAIN'));
+  assert(summary.includes('REFERENCE_CATEGORY_TASKS_UNAVAILABLE'));
+  assert(summary.includes('REFERENCE_UNCERTAIN_PROCESS'));
+  assert(!summary.includes('secret'));assert(!summary.includes('123'));assert(!summary.includes('http'));
+});
+test('preserving collector failure classification uses observable fixed signals only',()=>{
+  const {collectorFailure}=require('./reference-diagnostics.cjs');
+  for(const [input,expected] of [[{code:'ETIMEDOUT'},'REFERENCE_NATIVE_TIMEOUT'],[{code:'ENOENT'},'REFERENCE_NATIVE_EXECUTABLE_MISSING'],[{code:'EPERM'},'REFERENCE_NATIVE_ACCESS_DENIED'],[{stderr:'AuthorizationManager private-target'},'REFERENCE_NATIVE_SCRIPT_SECURITY_REJECTED'],[{stderr:'private-target arbitrary failure'},'REFERENCE_NATIVE_QUERY_FAILED']])assert.equal(collectorFailure(input),expected);
+});
+test('preserving probe CLI keeps fixed argument failure without running native collection',()=>{
+  const {execFileSync}=require('node:child_process');
+  const output=execFileSync(process.execPath,[path.join(__dirname,'windows-release-references.cjs')],{encoding:'utf8',windowsHide:true,timeout:10000});
+  const result=JSON.parse(output);assert.deepEqual(result.errors,['REFERENCE_POLICY_ARGUMENT_REQUIRED']);
+  assert.equal(result.complete,false);assert.deepEqual(result.records,[]);
+});
+
 test('preserving split root roles require strict build, v3 inventory and explicit controls',()=>{
   const p={format:2,phase:'build-only',preservingUpdate:{format:1,operation:'build',effects:['new-output-only'],rootRoles:{format:1,
     readOnlyRoots:[{path:path.resolve('old'),identity:['1','2','3']}],controls:[{path:path.resolve('old','active.json'),sha256:'a'.repeat(64),identity:['1','4','3']}]}}};

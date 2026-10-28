@@ -125,7 +125,7 @@ function validateReferences(value, policy) {
     !Array.isArray(value.uncertainChildren) ||
     value.uncertainChildren.length
   )
-    throw new Error('RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    throw new Error('RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE [' + require('./reference-diagnostics.cjs').referenceFailure(value,applicability.categories) + ']');
   if (policy.phase === 'build-only') {
     if (
       value.compatibility?.stage !== 'build-only' ||

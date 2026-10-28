@@ -889,9 +889,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     // Keep private paths/command lines out of errors. Full raw host evidence is
     // never printed. A failed category is not silently declared empty.
     result.errors.push(
-      /^REFERENCE_[A-Z_]+$/.test(error.message)
-        ? error.message
-        : 'REFERENCE_QUERY_FAILED',
+      require('./reference-diagnostics.cjs').safeReason(error.message),
     );
   }
   return result;
@@ -942,13 +940,15 @@ function main(policyFile) {
     '-PolicyFile',
     canonical(policyFile),
   ];
-  const output = execFileSync(collectorExecutable, collectorArgs, {
-    windowsHide: true,
-    encoding: 'utf8',
-    timeout: 20000,
-    maxBuffer: 4 * 1024 ** 2,
-  });
-  const native = JSON.parse(output.replace(/^\uFEFF/, ''));
+  let output;
+  try {
+    output = execFileSync(collectorExecutable, collectorArgs, {
+      windowsHide: true, encoding: 'utf8', timeout: 20000, maxBuffer: 4 * 1024 ** 2,
+    });
+  } catch(error) { fail(require('./reference-diagnostics.cjs').collectorFailure(error)); }
+  let native;
+  try { native=JSON.parse(output.replace(/^\uFEFF/, '')); }
+  catch { fail('REFERENCE_NATIVE_OUTPUT_INVALID'); }
   if (
     native.policySha256 !== digest(policyBytes) ||
     digest(bytes(policyFile)) !== digest(policyBytes) ||
@@ -1010,12 +1010,12 @@ if (require.main === module) {
   try {
     if (process.argv.length !== 3) fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
     value = main(process.argv[2]);
-  } catch {
+  } catch(error) {
     value = {
       complete: false,
       categories: Object.fromEntries(kinds.map((k) => [k, false])),
       records: [],
-      errors: ['REFERENCE_NATIVE_QUERY_FAILED'],
+      errors: [require('./reference-diagnostics.cjs').safeReason(error.message)],
       uncertainChildren: [],
     };
   }
