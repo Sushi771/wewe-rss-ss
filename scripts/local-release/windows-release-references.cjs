@@ -119,6 +119,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     const applicability = require('./preserving-contract.cjs').referenceApplicability(policy);
     const { preserving, buildOnly } = applicability;
     const rootRoles=require('./preserving-contract.cjs').preservingRootRoles(policy);
+    const controlOnly = buildOnly && !!rootRoles;
+    if(controlOnly){ result.processObservation='build-control-only'; result.categories.tasks=result.categories.shortcuts='not_applicable'; }
     if (
       !cfg ||
       cfg.format !== 1 ||
@@ -144,6 +146,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     )
       fail('REFERENCE_NATIVE_QUERY_INCOMPLETE');
     const referenceRoots=rootRoles ? [...policy.roots,...rootRoles.readOnlyRoots] : policy.roots;
+    if(controlOnly && (policy.roots.length!==1 || !same(canonical(policy.buildOnly?.outputRoot),canonical(policy.roots[0].path))))
+      fail('REFERENCE_POLICY_INVALID');
     const roots = referenceRoots.map((r) => canonical(r.path));
     const manifests = new Map(),
       watched = new Map();
@@ -536,10 +540,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         )
           continue;
         if (
-          !p.executable ||
+          !controlOnly && (!p.executable ||
           !p.commandLine ||
           typeof p.startUtc !== 'string' ||
-          !Number.isFinite(Date.parse(p.startUtc))
+          !Number.isFinite(Date.parse(p.startUtc)))
         )
           fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
         map.set(p.pid, p);
@@ -549,12 +553,23 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     const before = processMap(native.processesBefore),
       after = processMap(native.processesAfter),
       matched = new Map();
+    const visible = p => p && typeof p.executable==='string' && !!p.executable &&
+      typeof p.commandLine==='string' && !!p.commandLine && typeof p.startUtc==='string' && Number.isFinite(Date.parse(p.startUtc));
+    if(controlOnly){
+      if(!self)fail('REFERENCE_PROBE_IDENTITY_UNCERTAIN');
+      for(const pid of [callerPid,self.pid]){
+        const p=before.get(pid),q=after.get(pid);
+        if(!visible(p)||!visible(q)||hash(p)!==hash(q))fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
+        watch(canonical(p.executable),true,256*1024**2);
+      }
+    }
     if (self) {
       const p = before.get(self.pid),
         current = after.get(self.pid);
       if (
         !p ||
         !current ||
+        (controlOnly && (!visible(p)||!visible(current))) ||
         p.parentPid !== callerPid ||
         hash(p) !== hash(current) ||
         !same(canonical(p.executable), canonical(self.executable)) ||
@@ -568,6 +583,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       const child = children[0];
       if (
         !after.has(child.pid) ||
+        (controlOnly && (!visible(child)||!visible(after.get(child.pid)))) ||
         hash(child) !== hash(after.get(child.pid)) ||
         !same(
           canonical(child.executable),
@@ -588,6 +604,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         after.delete(pid);
       }
     }
+    if(!controlOnly){
     for (const p of before.values()) {
       const refs = resolveInvocation(
         argv(p.commandLine),
@@ -651,6 +668,16 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           fail('REFERENCE_PROCESS_APPEARED');
         }
       }
+    } else {
+      // Only the bound control chain is claimed observed. All other host activity
+      // remains outside this new-output-only operation's observation contract.
+      const output = canonical(policy.buildOnly.outputRoot).replaceAll('\\','/').toLowerCase();
+      for(const p of [...before.values(),...after.values()]){
+        if(p.pid===callerPid)continue;
+        if([p.executable,p.commandLine,p.workingDirectory].some(t=>typeof t==='string' && t.replaceAll('\\','/').toLowerCase().includes(output)))
+          fail('REFERENCE_PROCESS_APPEARED');
+      }
+    }
     result.categories.processes = true;
     if (
       (!buildOnly && (!Array.isArray(native.tasks) || native.tasks.length > 8192 ||

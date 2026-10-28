@@ -81,7 +81,8 @@ function splitPreservingBuild(f) {
     controls:[{path:pointer,identity:[s.dev,s.ino,s.birthtimeNs].map(String),sha256:fileHash(pointer)}]}};
   Object.assign(f.policy,scope.inspect([f.build],{privateAccounting:'private-names-v1'}));
   f.facts.complete=false;f.facts.observationComplete=true;
-  f.facts.categories.tasks=f.facts.categories.shortcuts='not_applicable';f.save();
+  f.facts.categories.tasks=f.facts.categories.shortcuts='not_applicable';
+  f.facts.processObservation='build-control-only';f.facts.records=f.facts.records.filter(r=>r.kind!=='processes');f.save();
   return {request,pointer};
 }
 test('preserving split build accounts only fresh output and keeps old roots read only',()=>fixture(f=>{
@@ -1111,3 +1112,38 @@ for(const missing of ['ledger','adoption','both'])
   if(missing==='adoption')assert(fs.readFileSync(x.ledger).equals(x.original));
   if(missing==='ledger')assert(fs.readFileSync(x.adopted).equals(x.origin));
  }));
+
+for(const mode of ['missing-marker','foreign-marker','process-record'])test('preserving split build rejects invalid control observation '+mode,()=>fixture(f=>{
+ const {request}=splitPreservingBuild(f);if(mode==='missing-marker')delete f.facts.processObservation;if(mode==='foreign-marker')f.facts.processObservation='complete';if(mode==='process-record')f.facts.records.push({kind:'processes'});assert.throws(()=>scope.open(request,f.options()),/REFERENCE_QUERY_INCOMPLETE/);
+}));
+test('original complete mode rejects build control marker',()=>fixture(f=>{f.facts.processObservation='build-control-only';assert.throws(()=>f.open(),/REFERENCE_QUERY_INCOMPLETE/);}));
+
+function successorReceipt(x,tag){
+ const bytes=fs.readFileSync(x.f.config),oldFile=path.join(x.f.base,'approved-predecessor-'+tag+'.json');fs.writeFileSync(oldFile,bytes);
+ const ledger=fs.readFileSync(x.ledger),d=JSON.parse(ledger),st=fs.lstatSync(x.ledger,{bigint:true}),h=d.payload.bindingRepair;
+ Object.assign(x.receipt,{format:2,initialPolicySha256:fs.readFileSync(x.adopted,'utf8'),oldPolicyPath:oldFile,oldPolicySha256:fileHash(oldFile),priorLedgerSha256:fileHash(x.ledger),priorPayloadDigest:d.digest,priorLedgerIdentity:[st.dev,st.ino,st.birthtimeNs].map(String),predecessorApprovalSha256:h.approvalSha256,predecessorSnapshotSha256:h.snapshotSha256,allowedDifferences:['buildOnly.sourceCommit','buildOnly.sourceHash']});
+ x.next.buildOnly.sourceCommit=tag.repeat(40);x.next.buildOnly.sourceHash=tag.repeat(64);x.request.sourceCommit=x.next.buildOnly.sourceCommit;x.request.sourceHash=x.next.buildOnly.sourceHash;x.save();return ledger;
+}
+test('preserving binding successor v1 to two separately approved v2 heads preserves audit and exact replay',()=>repairFixture(x=>{
+ x.open().close();const first=fs.readdirSync(x.f.base).filter(n=>n.includes('.binding-repair-'));const firstBytes=fs.readFileSync(path.join(x.f.base,first[0]));
+ for(const tag of ['d','e']){const previous=successorReceipt(x,tag);x.open().close();const committed=fs.readFileSync(x.ledger),d=JSON.parse(committed);assert.equal(d.payload.bindingRepair.format,2);assert.deepEqual(d.payload.futureCounter,{used:7,history:['keep']});const snapshot=JSON.parse(fs.readFileSync(x.ledger+'.binding-repair-'+fileHash(x.approval)+'.json'));assert(Buffer.from(snapshot.ledgerBase64,'base64').equals(previous));x.open().close();assert(fs.readFileSync(x.ledger).equals(committed));}
+ assert(fs.readFileSync(x.adopted).equals(x.origin));assert(fs.readFileSync(path.join(x.f.base,first[0])).equals(firstBytes));assert.equal(fs.readdirSync(x.f.base).filter(n=>n.includes('.binding-repair-')).length,3);
+}));
+for(const kind of ['old-approval','initial-policy','predecessor-approval','predecessor-snapshot','bad-snapshot','fork','budget','missing-approval'])test('preserving binding successor rejects '+kind,()=>repairFixture(x=>{
+ x.open().close();const oldApproval=fs.readFileSync(x.approval),previous=successorReceipt(x,'d');
+ if(kind==='initial-policy')x.receipt.initialPolicySha256='0'.repeat(64);
+ if(kind==='predecessor-approval')x.receipt.predecessorApprovalSha256='0'.repeat(64);
+ if(kind==='predecessor-snapshot')x.receipt.predecessorSnapshotSha256='0'.repeat(64);
+ if(kind==='fork')x.receipt.priorLedgerSha256='0'.repeat(64);
+ if(kind==='budget')x.next.maxGrowthBytes++;
+ if(kind==='bad-snapshot'){const h=JSON.parse(previous).payload.bindingRepair;fs.appendFileSync(x.ledger+'.binding-repair-'+h.approvalSha256+'.json','bad');}
+ x.save();if(kind==='old-approval')fs.writeFileSync(x.approval,oldApproval);
+ assert.throws(()=>x.open(kind==='missing-approval'?{bindingRepairFile:'',bindingRepairSha256:''}:{}),/BINDING_REPAIR|STATE_INVALID/);assert(fs.readFileSync(x.ledger).equals(previous));assert(fs.readFileSync(x.adopted).equals(x.origin));
+}));
+for(const stage of ['before-snapshot','before-commit','after-commit'])test('preserving binding successor fault '+stage+' retains valid authority',()=>repairFixture(x=>{
+ x.open().close();const previous=successorReceipt(x,'d');assert.throws(()=>x.open({onBindingRepairStep:n=>{if(n===stage)throw Error('synthetic');}}),/BINDING_REPAIR/);
+ const d=JSON.parse(fs.readFileSync(x.ledger));assert.equal(d.digest,require('node:crypto').createHash('sha256').update(JSON.stringify(d.payload)).digest('hex'));if(stage!=='after-commit')assert(fs.readFileSync(x.ledger).equals(previous));x.open().close();assert(fs.readFileSync(x.adopted).equals(x.origin));
+}));
+test('preserving binding successor concurrent child is refused by same lock',()=>repairFixture(x=>{
+ x.open().close();successorReceipt(x,'d');let called=false;x.open({onBindingRepairStep:n=>{if(n!=='before-commit')return;const script="try{require(process.argv[1]).open(JSON.parse(process.argv[2]),JSON.parse(process.argv[3]));process.exit(2)}catch(e){if(e.code!=='EEXIST')process.exit(3)}";const opts=x.options();delete opts.query;require('node:child_process').execFileSync(process.execPath,['-e',script,path.join(__dirname,'release-scope.cjs'),JSON.stringify(x.request),JSON.stringify(opts)],{windowsHide:true,timeout:10000});called=true;}}).close();assert(called);
+}));

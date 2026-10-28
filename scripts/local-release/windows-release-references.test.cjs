@@ -925,19 +925,33 @@ test('preserving restart and original mode do not accept build task exemptions',
     assert.equal(r.categories.tasks,true);assert(r.records.some(x=>x.kind==='tasks'));
   }));
 
-test('preserving split build resolves protected references outside accounting without weakening pins',()=>fixture(f=>{
-  const fresh=path.join(f.base,'fresh');fs.mkdirSync(fresh);
-  const st=fs.lstatSync(f.pointer,{bigint:true});
-  f.policy.format=2;f.policy.phase='build-only';f.policy.roots=[{path:fresh}];
-  f.policy.preservingUpdate={format:1,operation:'build',effects:['new-output-only'],rootRoles:{format:1,
-    readOnlyRoots:[{path:f.installed,identity:directoryIdentity(f.installed)}],
-    controls:[{...f.pin(f.pointer),identity:[st.dev,st.ino,st.birthtimeNs].map(String)}]}};
-  f.native.format=2;f.native.complete=false;f.native.observationComplete=true;
-  f.native.categories.tasks=f.native.categories.shortcuts='not_applicable';
-  const r=f.run();assert.deepEqual(r.errors,[]);assert.equal(r.observationComplete,true);
-  assert(r.records.some(x=>x.kind==='processes'&&x.packagePath===f.packages[0].path));
-  f.write(f.pointer,{format:1,id:'rollback'});
-  assert.equal(f.run().observationComplete,undefined);
+function buildControlFixture(f){
+ const fresh=path.join(f.base,'fresh');fs.mkdirSync(fresh);const st=fs.lstatSync(f.pointer,{bigint:true});
+ f.policy.format=2;f.policy.phase='build-only';f.policy.roots=[{path:fresh}];f.policy.buildOnly={outputRoot:fresh};
+ f.policy.preservingUpdate={format:1,operation:'build',effects:['new-output-only'],rootRoles:{format:1,readOnlyRoots:[{path:f.installed,identity:directoryIdentity(f.installed)}],controls:[{...f.pin(f.pointer),identity:[st.dev,st.ino,st.birthtimeNs].map(String)}]}};
+ f.native.format=2;f.native.complete=false;f.native.observationComplete=true;f.native.categories.tasks=f.native.categories.shortcuts='not_applicable';
+ const self={pid:200,executable:f.controller,argv:[f.controller,'probe.cjs'],collectorExecutable:f.worker,collectorArgv:[f.worker,'collector.ps1']};
+ const own=[f.process(200,99,f.controller,`${quote(f.controller)} probe.cjs`),f.process(201,200,f.worker,`${quote(f.worker)} collector.ps1`)];
+ f.native.processesBefore.push(...own);f.native.processesAfter.push(...structuredClone(own));
+ return {fresh,self,run:()=>probe(f.policy,f.native,{callerPid:99,self})};
+}
+test('preserving split build observes bound controls without claiming global process coverage',()=>fixture(f=>{
+ const c=buildControlFixture(f),r=c.run();assert.deepEqual(r.errors,[]);assert.equal(r.observationComplete,true);assert.equal(r.complete,false);assert.equal(r.processObservation,'build-control-only');assert.equal(r.categories.inflight,true);assert.equal(r.categories.tasks,'not_applicable');assert.equal(r.categories.shortcuts,'not_applicable');assert(!r.records.some(x=>x.kind==='processes'));
+ f.write(f.pointer,{format:1,id:'rollback'});assert.equal(c.run().observationComplete,undefined);
+}));
+test('preserving build control accepts out-of-scope unknown rows and shells; original mode refuses',()=>fixture(f=>{
+ const incomplete={pid:300,parentPid:1,name:'synthetic',executable:'',commandLine:'',startUtc:null};f.native.processesBefore.push(incomplete);f.native.processesAfter.push(structuredClone(incomplete));assert(f.run().errors.includes('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE'));
+ const c=buildControlFixture(f),shell=f.process(301,1,f.worker,`${quote(f.worker)} -Command synthetic`);f.native.processesBefore.push(shell);f.native.processesAfter.push(structuredClone(shell));assert.deepEqual(c.run().errors,[]);
+}));
+for(const kind of ['caller-missing','probe-missing','collector-missing','caller-changed','probe-changed','collector-changed','child','late-child','pid-duplicate','parent-invalid','output-before','output-after','native-error','control-pin','ledger'])test('preserving build control rejects '+kind,()=>fixture(f=>{
+ const c=buildControlFixture(f),before=f.native.processesBefore,after=f.native.processesAfter,ids={caller:99,probe:200,collector:201};
+ if(kind.endsWith('-missing'))before.find(p=>p.pid===ids[kind.split('-')[0]]).commandLine='';
+ if(kind.endsWith('-changed'))after.find(p=>p.pid===ids[kind.split('-')[0]]).startUtc='2026-02-01T00:00:00Z';
+ if(kind==='child'||kind==='late-child'){const p=f.process(202,201,f.worker,quote(f.worker));after.push(p);if(kind==='child')before.push(structuredClone(p));}
+ if(kind==='pid-duplicate')before.push(structuredClone(before[0]));if(kind==='parent-invalid')before[0].parentPid='bad';
+ if(kind==='output-before'||kind==='output-after')(kind==='output-before'?before:after).push(f.process(302,1,f.worker,`${quote(f.worker)} ${quote(c.fresh)}`));
+ if(kind==='native-error')f.native.errors.push('REFERENCE_NATIVE_QUERY_FAILED');if(kind==='control-pin')fs.appendFileSync(f.pointer,'changed');if(kind==='ledger'){f.state.configSha='b'.repeat(64);f.saveState();}
+ const result=c.run();assert.notEqual(result.observationComplete,true);assert(result.errors.length);assert.equal(result.complete,false);if(kind.startsWith('output-'))assert(result.errors.includes('REFERENCE_PROCESS_APPEARED'));
 }));
 
 if (process.platform === 'win32')

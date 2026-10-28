@@ -113,8 +113,10 @@ function validateReferences(value, policy) {
     'rollback',
     'inflight',
   ];
+  const controlOnly=applicability.buildOnly && !!roles;
   if (
     !value ||
+    (controlOnly ? value.processObservation!=='build-control-only' || value.records?.some(r=>r.kind==='processes') : value.processObservation!==undefined) ||
     (preserving ? value.complete !== false || value.observationComplete !== true : value.complete !== true) ||
     kinds.some((k) => value.categories?.[k] !== applicability.categories[k]) ||
     !Array.isArray(value.records) ||
@@ -382,7 +384,7 @@ function open(request, options = {}, boundOperation) {
     };
     if(!hex(repairSha)||!preserving||preserving.operation!=='build'||!rootRoles||policy.phase!=='build-only'||policy.format!==2)reject();
     const approvalBytes=bytes(repairPath,repairSha,65536),a=JSON.parse(approvalBytes);
-    if(a.format!==1||a.kind!=='adopted-empty-build-binding-repair'||a.scopeId!==policy.scopeId||
+    if(![1,2].includes(a.format)||a.kind!=='adopted-empty-build-binding-repair'||a.scopeId!==policy.scopeId||
       a.registryDirectory!==directory||hash(a.registryIdentity)!==hash(policy.registryIdentity)||
       a.newPolicySha256!==configSha||!hex(a.oldPolicySha256)||!hex(a.priorLedgerSha256)||!hex(a.priorPayloadDigest)||
       !hex(a.adoptionSha256)||!hex(a.auditedSourceIdentity)||!a.reviewEvidence||typeof a.reviewEvidence!=='string'||
@@ -398,7 +400,7 @@ function open(request, options = {}, boundOperation) {
       changes.some(x=>!['buildOnly.sourceCommit','buildOnly.sourceHash','probe.sha256'].includes(x))||
       old.scopeId!==policy.scopeId||old.format!==2||old.phase!=='build-only'||!old.preservingUpdate?.rootRoles)reject();
     const origin=bytes(ledger+'.adopted',a.adoptionSha256,64);
-    if(origin.toString('utf8')!==a.oldPolicySha256||prior.claim!==null||!Array.isArray(prior.outputs)||prior.outputs.length||prior.format!==2)reject();
+    if(origin.toString('utf8')!==(a.format===2?a.initialPolicySha256:a.oldPolicySha256)||prior.claim!==null||!Array.isArray(prior.outputs)||prior.outputs.length||prior.format!==2)reject();
     const current=bytes(ledger,null,65536),snapshotPath=ledger+'.binding-repair-'+repairSha+'.json';
     let original=current;
     if(prior.configSha===configSha){
@@ -409,12 +411,41 @@ function open(request, options = {}, boundOperation) {
     if(digest(original)!==a.priorLedgerSha256)reject();
     const before=JSON.parse(original);
     if(!before.payload||before.digest!==hash(before.payload)||before.digest!==a.priorPayloadDigest||
-      before.payload.configSha!==a.oldPolicySha256||before.payload.claim!==null||!Array.isArray(before.payload.outputs)||before.payload.outputs.length||before.payload.bindingRepair)reject();
+      before.payload.configSha!==a.oldPolicySha256||before.payload.claim!==null||!Array.isArray(before.payload.outputs)||before.payload.outputs.length)reject();
+    const head=(approval,approvalSha,snapshotSha)=>({format:approval.format,approvalSha256:approvalSha,oldPolicySha256:approval.oldPolicySha256,
+      newPolicySha256:approval.newPolicySha256,priorLedgerSha256:approval.priorLedgerSha256,priorPayloadDigest:approval.priorPayloadDigest,
+      adoptionSha256:approval.adoptionSha256,snapshotSha256:snapshotSha,auditedSourceIdentity:approval.auditedSourceIdentity,allowedDifferences:approval.allowedDifferences,
+      ...(approval.format===2?{initialPolicySha256:approval.initialPolicySha256,predecessorApprovalSha256:approval.predecessorApprovalSha256,predecessorSnapshotSha256:approval.predecessorSnapshotSha256}:{})});
+    const verifyChain=(payload,expectedPolicy,depth=0)=>{
+      if(depth>=16||payload.claim!==null||!Array.isArray(payload.outputs)||payload.outputs.length||payload.format!==2)reject();
+      const h=payload.bindingRepair;if(!h||![1,2].includes(h.format)||!hex(h.approvalSha256)||!hex(h.snapshotSha256)||payload.configSha!==expectedPolicy)reject();
+      const raw=bytes(ledger+'.binding-repair-'+h.approvalSha256+'.json',h.snapshotSha256,4*1024*1024),snap=JSON.parse(raw);
+      if(snap.format!==1)reject();
+      const doc=key=>Buffer.from(snap[key]||'','base64');
+      const approvedRaw=doc('approvalBase64'),approved=JSON.parse(approvedRaw),priorRaw=doc('ledgerBase64'),previous=JSON.parse(priorRaw),oldRaw=doc('oldPolicyBase64'),newRaw=doc('newPolicyBase64');
+      if(digest(approvedRaw)!==h.approvalSha256||approved.format!==h.format||approved.kind!==a.kind||approved.scopeId!==policy.scopeId||approved.registryDirectory!==directory||hash(approved.registryIdentity)!==hash(policy.registryIdentity)||approved.adoptionSha256!==a.adoptionSha256||!hex(approved.auditedSourceIdentity)||typeof approved.reviewEvidence!=='string'||!approved.reviewEvidence||digest(priorRaw)!==approved.priorLedgerSha256||!previous.payload||previous.digest!==hash(previous.payload)||previous.digest!==approved.priorPayloadDigest||previous.payload.configSha!==approved.oldPolicySha256||digest(oldRaw)!==approved.oldPolicySha256||digest(newRaw)!==expectedPolicy||approved.newPolicySha256!==expectedPolicy)reject();
+      const oldDoc=JSON.parse(oldRaw),newDoc=JSON.parse(newRaw),delta=differences(oldDoc,newDoc).sort();
+      if(!delta.length||!Array.isArray(approved.allowedDifferences)||hash(delta)!==hash([...approved.allowedDifferences].sort())||new Set(approved.allowedDifferences).size!==delta.length||delta.some(k=>!['buildOnly.sourceCommit','buildOnly.sourceHash','probe.sha256'].includes(k))||differences(newDoc,policy).some(k=>!['buildOnly.sourceCommit','buildOnly.sourceHash','probe.sha256'].includes(k)))reject();
+      if(hash(payload)!==hash({...previous.payload,configSha:expectedPolicy,bindingRepair:head(approved,h.approvalSha256,h.snapshotSha256)}))reject();
+      if(approved.format===1){
+        if(previous.payload.bindingRepair||previous.payload.claim!==null||!Array.isArray(previous.payload.outputs)||previous.payload.outputs.length||previous.payload.format!==2||approved.oldPolicySha256!==origin.toString('utf8'))reject();
+      }else{
+        if(approved.initialPolicySha256!==origin.toString('utf8')||!previous.payload.bindingRepair||approved.predecessorApprovalSha256!==previous.payload.bindingRepair.approvalSha256||approved.predecessorSnapshotSha256!==previous.payload.bindingRepair.snapshotSha256)reject();
+        verifyChain(previous.payload,approved.oldPolicySha256,depth+1);
+      }
+    };
+    const verifyPredecessor=()=>{
+      if(a.format===1){if(before.payload.bindingRepair)reject();}
+      else{
+        const h=before.payload.bindingRepair;
+        if(!hex(a.initialPolicySha256)||!hex(a.predecessorApprovalSha256)||!hex(a.predecessorSnapshotSha256)||!h||a.predecessorApprovalSha256!==h.approvalSha256||a.predecessorSnapshotSha256!==h.snapshotSha256)reject();
+        verifyChain(before.payload,a.oldPolicySha256);
+      }
+    };
+    verifyPredecessor();
     const snapshot=Buffer.from(JSON.stringify({format:1,ledgerBase64:original.toString('base64'),oldPolicyBase64:oldBytes.toString('base64'),newPolicyBase64:nextBytes.toString('base64'),approvalBase64:approvalBytes.toString('base64')}));
     if(snapshot.length>4*1024*1024)reject();
-    const after={...before.payload,configSha,bindingRepair:{format:1,approvalSha256:repairSha,oldPolicySha256:a.oldPolicySha256,
-      newPolicySha256:configSha,priorLedgerSha256:a.priorLedgerSha256,priorPayloadDigest:a.priorPayloadDigest,
-      adoptionSha256:a.adoptionSha256,snapshotSha256:digest(snapshot),auditedSourceIdentity:a.auditedSourceIdentity,allowedDifferences:a.allowedDifferences}};
+    const after={...before.payload,configSha,bindingRepair:head(a,repairSha,digest(snapshot))};
     const replay=prior.configSha===configSha;
     if(replay&&(hash(prior)!==hash(after)||!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot)))reject();
     const validate=()=>{
@@ -423,6 +454,7 @@ function open(request, options = {}, boundOperation) {
       if(measured.digest!==policy.baseline.digest||measured.metadataDigest!==policy.baseline.metadataDigest||measured.bytes!==policy.baseline.bytes||
         measured.runtimeCopies!==policy.baseline.runtimeCopies||fs.readdirSync(policy.buildOnly.outputRoot).length)reject();
       if(verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)reject();
+      verifyPredecessor();
       bytes(repairPath,repairSha,65536);bytes(a.oldPolicyPath,a.oldPolicySha256);bytes(file,configSha);bytes(ledger+'.adopted',a.adoptionSha256,64);
     };
     validate();if(replay)return;
@@ -470,9 +502,9 @@ function open(request, options = {}, boundOperation) {
     const value = query();
     verifier.assertBudget();
     const digest = validateReferences(value, policy);
-    if (preserving && !expectedProcesses)
+    if (preserving && !rootRoles && !expectedProcesses)
       expectedProcesses = structuredClone(value.records.filter((r) => r.kind === 'processes'));
-    if (preserving && refs) {
+    if (preserving && !rootRoles && refs) {
       const clean = (rows) => rows.map(({ ownedTransition, ...r }) => r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
       if (hash(clean(value.records.filter((r) => r.kind === 'processes'))) !== hash(clean(expectedProcesses)))
         throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
