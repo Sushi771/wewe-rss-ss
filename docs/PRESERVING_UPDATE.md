@@ -15,7 +15,10 @@ Install/restart policies bind a single `active.pointer`, its `pointerSha256`,
 start time and executable SHA-256. Both packages must contain exactly matching
 schema and migration manifest entries. This mode does not migrate a database.
 
-Process/task/pointer/rollback/inflight observations remain required. Shortcuts
+Process/pointer/rollback/inflight observations remain required. The strictly
+bound build-only/new-output-only operation does not query installation tasks or
+launcher closures; task and shortcut coverage are `not_applicable`. Install and
+restart retain their task/launcher requirements. Shortcuts
 are marked `not_applicable` for these preserving effects; the observation has
 `complete: false` and a separate `observationComplete` status. It must never be
 presented as complete machine-wide shortcut coverage. Unknown observations,
@@ -32,3 +35,14 @@ restoring or discarding business database changes.
 Synthetic orchestration tests use simulated process/HTTP adapters and an owned
 SQLite file. They do not establish native host observation or runnable-package
 acceptance. Those checks remain prerequisites before an actual installation.
+
+For strictly preserving build-only, `preservingUpdate.rootRoles.format: 1` may
+separate the one new-output accounting root from explicit `readOnlyRoots` and
+pinned `controls`. This requires inventory policy format 2. Old roots retain
+canonical identity checks, protected manifest/content proof and identity/time
+checkpoints; their history is not declared empty or charged as new allocation.
+Control paths bind exact file identity and SHA-256. Only the new output root may
+receive claims, allocations or writes. Its actual baseline may be zero only when
+it is an observed empty directory. Physical free-space and finite growth/runtime
+limits remain. Install/restart/full modes cannot select these root roles and
+retain their original complete accounting requirements.

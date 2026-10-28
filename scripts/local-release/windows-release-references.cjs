@@ -116,18 +116,16 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
   };
   try {
     const cfg = policy.windowsReferences;
-    const operation = policy.preservingUpdate?.operation;
-    const preserving = policy.preservingUpdate === undefined ? false : !!require('./preserving-contract.cjs').validatePreservingContract(policy, {
-      kind: operation, buildOnly: policy.phase === 'build-only', transition: false,
-    });
+    const applicability = require('./preserving-contract.cjs').referenceApplicability(policy);
+    const { preserving, buildOnly } = applicability;
+    const rootRoles=require('./preserving-contract.cjs').preservingRootRoles(policy);
     if (
       !cfg ||
       cfg.format !== 1 ||
       !Array.isArray(cfg.packages) ||
       cfg.packages.length < 1 ||
       cfg.packages.length > 6 ||
-      !Array.isArray(cfg.launchers) ||
-      cfg.launchers.length > 16 ||
+      (!buildOnly && (!Array.isArray(cfg.launchers) || cfg.launchers.length > 16)) ||
       !Array.isArray(cfg.rollbackFiles) ||
       cfg.rollbackFiles.length < 1 ||
       cfg.rollbackFiles.length > 16 ||
@@ -140,12 +138,13 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       (preserving ? native.format !== 2 || native.complete !== false || native.observationComplete !== true : native.format !== 1 || native.complete !== true) ||
       !Array.isArray(native.errors) ||
       native.errors.length ||
-      ['processes', 'tasks'].some(
-        (k) => native.categories?.[k] !== true,
-      ) || (preserving ? native.categories?.shortcuts !== 'not_applicable' : native.categories?.shortcuts !== true)
+      ['processes', 'tasks', 'shortcuts'].some(
+        (k) => native.categories?.[k] !== applicability.categories[k],
+      )
     )
       fail('REFERENCE_NATIVE_QUERY_INCOMPLETE');
-    const roots = policy.roots.map((r) => canonical(r.path));
+    const referenceRoots=rootRoles ? [...policy.roots,...rootRoles.readOnlyRoots] : policy.roots;
+    const roots = referenceRoots.map((r) => canonical(r.path));
     const manifests = new Map(),
       watched = new Map();
     const directoryWatches = new Map(),
@@ -211,6 +210,18 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       const value = watch(canonical(spec.path), true, limit);
       if (digest(value) !== spec.sha256) fail('REFERENCE_PIN_CHANGED');
       return value;
+    }
+    if(rootRoles){
+      for(const root of rootRoles.readOnlyRoots)
+        if(canonical(root.path)!==root.path || hash(directoryId(root.path))!==hash(root.identity))
+          fail('REFERENCE_PROTECTED_ROOT_CHANGED');
+      for(const control of rootRoles.controls){
+        if(!rootRoles.readOnlyRoots.some(r=>inside(r.path,control.path)))fail('REFERENCE_CONTROL_OUTSIDE_PROTECTED_ROOT');
+        require('./private-artifact-proof.cjs').verifyControl(control);
+        watchPinned(control);
+        const s=fs.lstatSync(control.path,{bigint:true});
+        if(hash([s.dev,s.ino,s.birthtimeNs].map(String))!==hash(control.identity))fail('REFERENCE_CONTROL_CHANGED');
+      }
     }
     function packageAt(at) {
       at = canonical(at);
@@ -288,7 +299,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       const file = path.join(root, 'active.json');
       if (watch(file, false)) pointers.set(file, pointer(file));
     }
-    const launchers = cfg.launchers.map((l) => {
+    const launchers = (buildOnly ? [] : cfg.launchers).map((l) => {
       if (
         !Array.isArray(l.argv) ||
         l.argv.length < 2 ||
@@ -314,7 +325,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         cwd: canonical(l.workingDirectory),
       };
     });
-    const harmlessActions = cfg.harmlessActions || [];
+    const harmlessActions = buildOnly ? [] : cfg.harmlessActions || [];
     if (!Array.isArray(harmlessActions) || harmlessActions.length > 64)
       fail('REFERENCE_HARMLESS_ACTION_POLICY_INVALID');
     for (const action of harmlessActions) {
@@ -331,7 +342,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     }
     const relevantText = (text) =>
       typeof text === 'string' &&
-      [...roots, ...cfg.launchers.map((l) => path.dirname(l.entry))].some(
+      [...roots, ...launchers.map((l) => path.dirname(l.entry))].some(
         (root) =>
           text.toLowerCase().includes(root.toLowerCase()) ||
           text
@@ -642,12 +653,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       }
     result.categories.processes = true;
     if (
-      !Array.isArray(native.tasks) ||
-      native.tasks.length > 8192 ||
-      !Array.isArray(native.shortcuts) ||
-      native.shortcuts.length > 8192 ||
-      !Array.isArray(native.tasksAfter) ||
-      hash(native.tasks) !== hash(native.tasksAfter)
+      (!buildOnly && (!Array.isArray(native.tasks) || native.tasks.length > 8192 ||
+        !Array.isArray(native.tasksAfter) || hash(native.tasks) !== hash(native.tasksAfter))) ||
+      (!buildOnly && (!Array.isArray(native.shortcuts) || native.shortcuts.length > 8192))
     )
       fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
     if (!preserving && (
@@ -703,7 +711,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         watchDirectory(coverage.path, coverage.identity);
       }
     }
-    for (const t of native.tasks) {
+    for (const t of (buildOnly ? [] : native.tasks)) {
       if (!t.identity || !Array.isArray(t.actions) || !t.actions.length)
         fail('REFERENCE_TASK_INVALID');
       for (const action of t.actions) {
@@ -718,7 +726,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           record('tasks', ref, { identity: hash([t.identity, action]) });
       }
     }
-    result.categories.tasks = true;
+    result.categories.tasks = applicability.categories.tasks;
     if (!preserving && (
       !Array.isArray(native.shortcutDirectories) ||
       native.shortcutDirectories.length > 4096
@@ -891,6 +899,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
 function main(policyFile) {
   const policyBytes = bytes(canonical(policyFile)),
     policy = JSON.parse(policyBytes.toString('utf8'));
+  require('./preserving-contract.cjs').referenceApplicability(policy);
+  require('./preserving-contract.cjs').preservingRootRoles(policy);
   const policyIdentity = identity(
     fs.lstatSync(canonical(policyFile), { bigint: true }),
   );

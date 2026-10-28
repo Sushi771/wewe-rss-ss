@@ -14,9 +14,9 @@ const directoryIdentity = (at) => {
   return [s.dev, s.ino, s.birthtimeNs].map(String);
 };
 function fixture(run) {
-  const base = fs.mkdtempSync(
+  const base = fs.realpathSync.native(fs.mkdtempSync(
     path.join(os.tmpdir(), 'wewe-reference-adapter-'),
-  );
+  ));
   const installed = path.join(base, 'installed'),
     registry = path.join(base, 'registry'),
     project = path.join(base, 'project');
@@ -218,7 +218,7 @@ function fixture(run) {
     run(f);
   } finally {
     assert(
-      path.dirname(base) === os.tmpdir() &&
+      path.dirname(base) === fs.realpathSync.native(os.tmpdir()) &&
         path.basename(base).startsWith('wewe-reference-adapter-'),
     );
     fs.rmSync(base, { recursive: true, force: true });
@@ -234,7 +234,7 @@ test('preserving build records shortcuts as not applicable without asserting com
     f.policy.phase = 'build-only';
     f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
     f.native.format = 2; f.native.complete = false; f.native.observationComplete = true;
-    f.native.categories.shortcuts = 'not_applicable';
+    f.native.categories.shortcuts = 'not_applicable'; f.native.categories.tasks = 'not_applicable';
     f.native.shortcuts = []; f.native.shortcutCoverage = []; f.native.shortcutDirectories = [];
     const result = f.run();
     assert.deepEqual(result.errors, []);
@@ -242,19 +242,19 @@ test('preserving build records shortcuts as not applicable without asserting com
     assert.equal(result.observationComplete, true);
     assert.equal(result.categories.shortcuts, 'not_applicable');
     assert.equal(result.categories.processes, true);
-    assert.equal(result.categories.tasks, true);
+    assert.equal(result.categories.tasks, 'not_applicable');
   }));
 test('preserving observation rejects changed process and incomplete task evidence', () =>
   fixture((f) => {
     f.policy.phase = 'build-only';
     f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
     f.native.format = 2; f.native.complete = false; f.native.observationComplete = true;
-    f.native.categories.shortcuts = 'not_applicable';
+    f.native.categories.shortcuts = 'not_applicable'; f.native.categories.tasks = 'not_applicable';
     f.native.shortcuts = []; f.native.shortcutCoverage = []; f.native.shortcutDirectories = [];
     f.native.processesAfter[0].startUtc = '2026-02-01T00:00:00.000Z';
     assert.equal(f.run().observationComplete, undefined);
     f.native.processesAfter = structuredClone(f.native.processesBefore);
-    f.native.tasksAfter = [];
+    f.native.categories.tasks = true;
     assert.equal(f.run().observationComplete, undefined);
   }));
 test('real contract emits all six complete categories from pinned synthetic sources', () =>
@@ -877,3 +877,91 @@ test('build-only probe retains real reference coverage without claiming pair com
     f.native.categories.tasks = false;
     assert.equal(f.run().complete, false);
   }));
+
+test('preserving build never reads inapplicable malformed task or launcher data', () =>
+  fixture((f) => {
+    f.policy.phase = 'build-only';
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.native.format = 2; f.native.complete = false; f.native.observationComplete = true;
+    f.native.categories.tasks = f.native.categories.shortcuts = 'not_applicable';
+    let taskQueries=0, launcherReads=0;
+    for (const key of ['tasks','tasksAfter','shortcuts','shortcutCoverage','shortcutDirectories'])
+      Object.defineProperty(f.native,key,{get(){taskQueries++;throw Error('inapplicable native query');}});
+    Object.defineProperty(f.policy.windowsReferences,'launchers',{get(){launcherReads++;throw Error('inapplicable launcher read');}});
+    const result=f.run(); assert.deepEqual(result.errors,[]);
+    assert.equal(result.observationComplete,true); assert.equal(result.complete,false);
+    assert.equal(result.categories.tasks,'not_applicable');
+    assert.equal(taskQueries,0);assert.equal(launcherReads,0);
+    assert(result.records.some(r=>r.kind==='processes'));
+    assert(!result.records.some(r=>['tasks','shortcuts'].includes(r.kind)));
+    f.state.claim={id:'foreign',root:f.installed,outputs:[f.packages[1].path]};f.saveState();
+    assert.equal(f.run().observationComplete,undefined);
+  }));
+test('preserving invalid build effects reject before any native observation', () =>
+  fixture((f) => {
+    f.policy.phase='build-only';
+    f.policy.preservingUpdate={format:1,operation:'build',effects:['new-output-only','approved-active-switch']};
+    let reads=0;Object.defineProperty(f.native,'categories',{get(){reads++;throw Error('native should not be touched');}});
+    assert.equal(f.run().observationComplete,undefined);assert.equal(reads,0);
+  }));
+
+test('preserving restart and original mode do not accept build task exemptions', () =>
+  fixture((f) => {
+    f.native.categories.tasks = 'not_applicable';
+    assert.equal(f.run().complete, false);
+    f.policy.preservingUpdate = { format: 1, operation: 'restart', effects: ['new-output-only','approved-active-switch'], active: {
+      pointer: f.pointer, currentId: 'current', candidateId: 'candidate',
+      pointerSha256: f.pin(f.pointer).sha256,
+      currentManifestSha256: f.pin(path.join(f.packages[0].path,'release.json')).sha256,
+      candidateManifestSha256: f.pin(path.join(f.packages[1].path,'release.json')).sha256,
+      oldProcess: { pid: 10, startUtc: f.native.processesBefore[0].startUtc,
+        executableSha256: f.pin(path.join(f.packages[0].path,'runtime.exe')).sha256 },
+    } };
+    f.native.format=2;f.native.complete=false;f.native.observationComplete=true;
+    f.native.categories.shortcuts='not_applicable';
+    assert.equal(f.run().observationComplete, undefined);
+    f.native.categories.tasks=true;
+    const r=f.run();assert.deepEqual(r.errors,[]);assert.equal(r.observationComplete,true);
+    assert.equal(r.categories.tasks,true);assert(r.records.some(x=>x.kind==='tasks'));
+  }));
+
+test('preserving split build resolves protected references outside accounting without weakening pins',()=>fixture(f=>{
+  const fresh=path.join(f.base,'fresh');fs.mkdirSync(fresh);
+  const st=fs.lstatSync(f.pointer,{bigint:true});
+  f.policy.format=2;f.policy.phase='build-only';f.policy.roots=[{path:fresh}];
+  f.policy.preservingUpdate={format:1,operation:'build',effects:['new-output-only'],rootRoles:{format:1,
+    readOnlyRoots:[{path:f.installed,identity:directoryIdentity(f.installed)}],
+    controls:[{...f.pin(f.pointer),identity:[st.dev,st.ino,st.birthtimeNs].map(String)}]}};
+  f.native.format=2;f.native.complete=false;f.native.observationComplete=true;
+  f.native.categories.tasks=f.native.categories.shortcuts='not_applicable';
+  const r=f.run();assert.deepEqual(r.errors,[]);assert.equal(r.observationComplete,true);
+  assert(r.records.some(x=>x.kind==='processes'&&x.packagePath===f.packages[0].path));
+  f.write(f.pointer,{format:1,id:'rollback'});
+  assert.equal(f.run().observationComplete,undefined);
+}));
+
+if (process.platform === 'win32')
+  test('preserving collector build uses synthetic processes without invoking task or shortcut queries', () =>
+    fixture((f) => {
+      const policyFile=path.join(f.base,'build-policy.json');
+      f.write(policyFile,{phase:'build-only',preservingUpdate:{format:1,operation:'build',effects:['new-output-only']}});
+      const literal=s=>"'"+s.replaceAll("'","''")+"'";
+      const harness=path.join(f.base,'collector-harness.ps1');
+      f.write(harness,`$ErrorActionPreference='Stop'
+$script:taskCalls=0
+function Get-CimInstance { [CmdletBinding()]param([string]$ClassName)
+  if($ClassName -ne 'Win32_Process'){throw 'SYNTHETIC_UNEXPECTED_CLASS'}
+  [pscustomobject]@{ProcessId=101;ParentProcessId=1;Name='synthetic.exe';ExecutablePath='C:\\synthetic.exe';CommandLine='synthetic';CreationDate=[datetime]'2026-01-01T00:00:00Z'}
+}
+function Get-ScheduledTask { [CmdletBinding()]param();$script:taskCalls++;throw 'SYNTHETIC_TASK_QUERY_FORBIDDEN' }
+$raw=(& { . ${literal(path.join(__dirname,'windows-release-reference-collector.ps1'))} -PolicyFile ${literal(policyFile)} } | Out-String)
+[pscustomobject]@{native=($raw | ConvertFrom-Json);taskCalls=$script:taskCalls} | ConvertTo-Json -Depth 10 -Compress
+`);
+      const output=execFileSync(path.join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),
+        ['-NoProfile','-NonInteractive','-File',harness],{windowsHide:true,encoding:'utf8',timeout:20000,maxBuffer:128*1024});
+      const r=JSON.parse(output.replace(/^\uFEFF/,''));
+      assert.equal(r.taskCalls,0);assert.equal(r.native.complete,false);
+      assert.equal(r.native.observationComplete,true);assert.deepEqual(r.native.errors,[]);
+      assert.equal(r.native.categories.tasks,'not_applicable');assert.equal(r.native.categories.shortcuts,'not_applicable');
+      assert.equal(r.native.categories.processes,true);assert.equal(r.native.processesBefore.length,1);
+    }));

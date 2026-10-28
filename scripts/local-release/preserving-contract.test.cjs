@@ -2,6 +2,31 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { validatePreservingContract, validateSameSchema, validateActiveBinding } = require('./preserving-contract.cjs');
+const { referenceApplicability } = require('./preserving-contract.cjs');
+const { preservingRootRoles } = require('./preserving-contract.cjs');
+
+test('preserving split root roles require strict build, v3 inventory and explicit controls',()=>{
+  const p={format:2,phase:'build-only',preservingUpdate:{format:1,operation:'build',effects:['new-output-only'],rootRoles:{format:1,
+    readOnlyRoots:[{path:path.resolve('old'),identity:['1','2','3']}],controls:[{path:path.resolve('old','active.json'),sha256:'a'.repeat(64),identity:['1','4','3']}]}}};
+  assert.equal(preservingRootRoles(p),p.preservingUpdate.rootRoles);
+  assert.throws(()=>preservingRootRoles({...p,format:1}),/ROOT_ROLES_INVALID/);
+  assert.throws(()=>preservingRootRoles({...p,phase:undefined}),/EFFECT_FORBIDDEN/);
+  assert.throws(()=>preservingRootRoles({...p,preservingUpdate:{...p.preservingUpdate,rootRoles:{...p.preservingUpdate.rootRoles,controls:[]}}}),/ROOT_ROLES_INVALID/);
+  for(const name of ['.env','secrets.db',path.join('.git','config')])
+    assert.throws(()=>preservingRootRoles({...p,preservingUpdate:{...p.preservingUpdate,rootRoles:{...p.preservingUpdate.rootRoles,
+      controls:[{...p.preservingUpdate.rootRoles.controls[0],path:path.resolve('old',name)}]}}}),/ROOT_ROLES_INVALID/);
+});
+
+test('preserving build applicability follows validated operation and effects only', () => {
+  const policy={phase:'build-only',preservingUpdate:{format:1,operation:'build',effects:['new-output-only']}};
+  const a=referenceApplicability(policy);
+  assert.equal(a.buildOnly,true);assert.equal(a.categories.tasks,'not_applicable');
+  for(const k of ['processes','pointers','rollback','inflight'])assert.equal(a.categories[k],true);
+  assert.equal(referenceApplicability({}).categories.tasks,true);
+  assert.throws(()=>referenceApplicability({...policy,phase:undefined}),/EFFECT_FORBIDDEN/);
+  assert.throws(()=>referenceApplicability({...policy,preservingUpdate:{...policy.preservingUpdate,effects:['new-output-only','approved-active-switch']}}),/EFFECT_FORBIDDEN/);
+  assert.throws(()=>referenceApplicability({...policy,preservingUpdate:{...policy.preservingUpdate,operation:'install'}}),/EFFECT_FORBIDDEN/);
+});
 
 test('ordinary policies preserve existing behavior', () => {
   assert.equal(validatePreservingContract({}, { kind: 'build' }), null);

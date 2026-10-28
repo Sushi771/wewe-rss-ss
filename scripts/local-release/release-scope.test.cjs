@@ -71,6 +71,59 @@ function enableV3(f) {
   Object.assign(f.policy, scope.inspect([f.installed, f.build], { privateAccounting: 'private-names-v1' }));
   f.policy.format = 2; f.policy.inventoryClassification = 'private-names-v1'; f.save();
 }
+
+function splitPreservingBuild(f) {
+  const request=buildOnly(f);enableV3(f);
+  const pointer=path.join(f.installed,'active.json');fs.writeFileSync(pointer,JSON.stringify({format:1,id:'current'}));
+  const s=fs.lstatSync(pointer,{bigint:true});
+  f.policy.preservingUpdate={format:1,operation:'build',effects:['new-output-only'],rootRoles:{format:1,
+    readOnlyRoots:[scope.inspect([f.installed],{privateAccounting:'private-names-v1'}).roots[0]],
+    controls:[{path:pointer,identity:[s.dev,s.ino,s.birthtimeNs].map(String),sha256:fileHash(pointer)}]}};
+  Object.assign(f.policy,scope.inspect([f.build],{privateAccounting:'private-names-v1'}));
+  f.facts.complete=false;f.facts.observationComplete=true;
+  f.facts.categories.tasks=f.facts.categories.shortcuts='not_applicable';f.save();
+  return {request,pointer};
+}
+test('preserving split build accounts only fresh output and keeps old roots read only',()=>fixture(f=>{
+  const archive=path.join(f.installed,'unrelated-history.bin');fs.writeFileSync(archive,'synthetic old history');
+  const {request,pointer}=splitPreservingBuild(f);assert.equal(f.policy.baseline.bytes,0);
+  let protectedReads=0;const open=fs.openSync;
+  const lease=patch(fs,'openSync',function(file,...args){
+    assert.notEqual(file,archive,'unrelated frozen history must not be opened for content');
+    if(file===path.join(f.current,'node.exe'))protectedReads++;
+    return open.call(this,file,...args);
+  },()=>scope.open(request,f.options()));
+  assert(protectedReads>0,'protected runtime content is verified');assert.equal(lease.check().bytes,0);
+  assert.throws(()=>lease.registerOutput(path.join(f.installed,'forbidden')),/ROOT|OUTPUT/);
+  lease.close();
+  const gateway=require('./lib.cjs').hostEffects;
+  scope.within(request,l=>{
+    assert.throws(()=>gateway.fs.writeFileSync(path.join(f.current,'bad'),'bad'),/WRITE_OUTSIDE_OUTPUT/);
+    assert.throws(()=>gateway.fs.writeFileSync(pointer,'{}'),/PRIVATE_INPUT/);
+    const at=path.join(f.build,'owned');l.registerOutput(at);gateway.fs.mkdirSync(at);l.createdOutput(at);
+    gateway.fs.writeFileSync(path.join(at,'file'),'owned');
+  },f.options());
+  assert.equal(fs.readFileSync(archive,'utf8'),'synthetic old history');
+}));
+for(const mutation of ['runtime','manifest','control'])test(`preserving split build rejects changed protected ${mutation}`,()=>fixture(f=>{
+  const {request,pointer}=splitPreservingBuild(f);const lease=scope.open(request,f.options());
+  fs.appendFileSync(mutation==='runtime'?path.join(f.current,'node.exe'):mutation==='manifest'?path.join(f.current,'release.json'):pointer,'changed');
+  assert.throws(()=>lease.check(),/PROTECTED_CHANGED|CONTROL_CHANGED/);
+  assert.throws(()=>lease.close(new Error('changed')),/PROTECTED_CHANGED|CONTROL_CHANGED/);
+}));
+test('preserving split build rejects replaced protected root and overlapping roles',()=>fixture(f=>{
+  const {request}=splitPreservingBuild(f);
+  f.policy.preservingUpdate.rootRoles.readOnlyRoots.push(f.policy.roots[0]);f.save();
+  assert.throws(()=>scope.open(request,f.options()),/OVERLAPPING_ROOTS/);
+  f.policy.preservingUpdate.rootRoles.readOnlyRoots.pop();f.save();
+  const moved=path.join(f.base,'old-installed');fs.renameSync(f.installed,moved);fs.mkdirSync(f.installed);
+  assert.throws(()=>scope.open(request,f.options()),/ROOT_CHANGED/);
+}));
+test('original complete mode still checks all historical accounting contents',()=>fixture(f=>{
+  const lease=f.open();fs.appendFileSync(path.join(f.current,'node.exe'),'changed');
+  assert.throws(()=>lease.check(),/FROZEN_HISTORY_CHANGED/);
+  assert.throws(()=>lease.close(new Error('changed')),/FROZEN_HISTORY_CHANGED/);
+}));
 test('v3 adoption and checkpoint preserve private accounting and reject a changed private entry', () =>
   fixture((f) => {
     const privateFile = path.join(f.current, '.env');
@@ -779,7 +832,7 @@ test('preserving build only accepts explicit inapplicable shortcuts and owned ne
   fixture((f) => {
     const request = buildOnly(f);
     f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
-    f.facts.complete = false; f.facts.observationComplete = true; f.facts.categories.shortcuts = 'not_applicable';
+    f.facts.complete = false; f.facts.observationComplete = true; f.facts.categories.shortcuts = 'not_applicable'; f.facts.categories.tasks = 'not_applicable';
     f.save();
     const gateway = require('./lib.cjs').hostEffects;
     scope.within(request, (lease) => {
@@ -795,7 +848,7 @@ test('preserving build refuses incomplete observation', () =>
   fixture((f) => {
     const request = buildOnly(f);
     f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
-    f.facts.complete = false; f.facts.observationComplete = false; f.facts.categories.shortcuts = 'not_applicable'; f.save();
+    f.facts.complete = false; f.facts.observationComplete = false; f.facts.categories.shortcuts = 'not_applicable'; f.facts.categories.tasks = 'not_applicable'; f.save();
     assert.throws(() => scope.open(request, f.options()), /QUERY_INCOMPLETE/);
   }));
 test('original complete mode rejects an inapplicable-shortcuts observation', () =>
@@ -808,7 +861,7 @@ test('preserving build leaves failed owned output and holds the claim', () =>
   fixture((f) => {
     const request = buildOnly(f);
     f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
-    f.facts.complete = false; f.facts.observationComplete = true; f.facts.categories.shortcuts = 'not_applicable'; f.save();
+    f.facts.complete = false; f.facts.observationComplete = true; f.facts.categories.shortcuts = 'not_applicable'; f.facts.categories.tasks = 'not_applicable'; f.save();
     const lease = scope.open(request, f.options());
     const target = path.join(f.build, 'failed-candidate');
     lease.registerOutput(target); fs.mkdirSync(target); lease.createdOutput(target);

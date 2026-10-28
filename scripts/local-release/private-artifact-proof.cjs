@@ -76,4 +76,17 @@ function verifyManifest(folder, manifestSha, charge = () => {}) {
   }
   return manifest.id;
 }
-module.exports = { verifyManifest };
+function verifyControl(spec, charge = () => {}) {
+  if (!spec || isPrivatePath(spec.path || '') || fs.realpathSync.native(spec.path) !== spec.path)
+    throw new Error('RELEASE_SCOPE_ARTIFACT_PRIVATE_CONFLICT');
+  const key = () => {
+    const s = fs.lstatSync(spec.path, { bigint: true });
+    return [s.dev, s.ino, s.birthtimeNs].map(String);
+  };
+  if (JSON.stringify(key()) !== JSON.stringify(spec.identity))
+    throw new Error('RELEASE_SCOPE_ARTIFACT_CHANGED');
+  readPinned(spec.path, 65536, spec.sha256, false, charge);
+  if (JSON.stringify(key()) !== JSON.stringify(spec.identity))
+    throw new Error('RELEASE_SCOPE_ARTIFACT_CHANGED');
+}
+module.exports = { verifyManifest, verifyControl };

@@ -101,7 +101,10 @@ function inspect(paths, options = {}) {
   return { roots, baseline };
 }
 function validateReferences(value, policy) {
-  const preserving = policy.preservingUpdate?.format === 1;
+  const applicability = require('./preserving-contract.cjs').referenceApplicability(policy);
+  const { preserving } = applicability;
+  const roles=require('./preserving-contract.cjs').preservingRootRoles(policy);
+  const referenceRoots=roles ? [...policy.roots,...roles.readOnlyRoots] : policy.roots;
   const kinds = [
     'processes',
     'tasks',
@@ -113,10 +116,10 @@ function validateReferences(value, policy) {
   if (
     !value ||
     (preserving ? value.complete !== false || value.observationComplete !== true : value.complete !== true) ||
-    kinds.some((k) => value.categories?.[k] !== (preserving && k === 'shortcuts' ? 'not_applicable' : true)) ||
+    kinds.some((k) => value.categories?.[k] !== applicability.categories[k]) ||
     !Array.isArray(value.records) ||
     value.records.length > 4096 ||
-    (preserving && value.records.some((r) => r.kind === 'shortcuts')) ||
+    value.records?.some((r) => applicability.categories[r.kind] === 'not_applicable') ||
     !Array.isArray(value.errors) ||
     value.errors.length ||
     !Array.isArray(value.uncertainChildren) ||
@@ -141,7 +144,7 @@ function validateReferences(value, policy) {
       typeof r.packageId !== 'string' ||
       !policy.protectedIds.includes(r.packageId) ||
       typeof r.packagePath !== 'string' ||
-      !policy.roots.some((root) =>
+      !referenceRoots.some((root) =>
         contains(root.path, canonical(r.packagePath)),
       ) ||
       typeof r.identity !== 'string' ||
@@ -154,7 +157,7 @@ function validateReferences(value, policy) {
         typeof r.viaPointer.path !== 'string' ||
         !path.isAbsolute(r.viaPointer.path) ||
         canonical(r.viaPointer.path) !== r.viaPointer.path ||
-        !policy.roots.some((root) => contains(root.path, r.viaPointer.path)) ||
+        !referenceRoots.some((root) => contains(root.path, r.viaPointer.path)) ||
         path.basename(r.viaPointer.path) !== 'active.json' ||
         !/^[a-f0-9]{64}$/.test(r.viaPointer.launcherSha256 || '') ||
         !value.records.some(
@@ -193,6 +196,7 @@ function open(request, options = {}, boundOperation) {
     policy = read(file),
     configSha = fileHash(file);
   const preserving = policy.preservingUpdate === undefined ? null : require('./preserving-contract.cjs').validatePreservingContract(policy, request);
+  const rootRoles=require('./preserving-contract.cjs').preservingRootRoles(policy);
   if (
     configSha !== expected ||
     ![1, 2].includes(policy.format) ||
@@ -285,7 +289,21 @@ function open(request, options = {}, boundOperation) {
           throw new Error('RELEASE_SCOPE_OVERLAPPING_ROOTS');
     }
   };
-  checkRoots(policy.roots);
+  const readOnlyRoots=rootRoles?.readOnlyRoots || [];
+  const referenceRoots=[...policy.roots,...readOnlyRoots];
+  checkRoots(referenceRoots);
+  if(rootRoles && (policy.roots.length!==1 || policy.roots[0].path!==policy.buildOnly.outputRoot))
+    throw new Error('RELEASE_PRESERVING_ACCOUNTING_ROOT_INVALID');
+  const checkControls=(charge=()=>{})=>{
+    for(const c of rootRoles?.controls || []){
+      if(canonical(c.path)!==c.path || !readOnlyRoots.some(r=>contains(r.path,c.path)) ||
+        hash(fileIdentity(c.path))!==hash(c.identity))
+        throw new Error('RELEASE_PRESERVING_CONTROL_CHANGED');
+      try { require('./private-artifact-proof.cjs').verifyControl(c,charge); }
+      catch { throw new Error('RELEASE_PRESERVING_CONTROL_CHANGED'); }
+    }
+  };
+  checkControls();
   const target = request.root ? canonical(request.root) : undefined;
   if (target && !policy.roots.some((root) => contains(root.path, target)))
     throw new Error('RELEASE_SCOPE_UNREGISTERED_ROOT');
@@ -296,7 +314,7 @@ function open(request, options = {}, boundOperation) {
     canonical(policy.registryDirectory) !== policy.registryDirectory ||
     hash(identity(policy.registryDirectory)) !==
       hash(policy.registryIdentity) ||
-    policy.roots.some((root) => contains(root.path, policy.registryDirectory))
+    referenceRoots.some((root) => contains(root.path, policy.registryDirectory))
   )
     throw new Error('RELEASE_SCOPE_REGISTRY_IDENTITY_INVALID');
   const privateMode = policy.format === 2;
@@ -318,6 +336,7 @@ function open(request, options = {}, boundOperation) {
   });
   const useMetadata = verifier.limits.checkpointMode === 'identity-times-v1';
   let fullValidated = false;
+  let protectedSnapshot, protectedPackages;
   const verifiedOutputs = new Set();
   let pointerCommit;
   const descriptors = new Set();
@@ -419,7 +438,13 @@ function open(request, options = {}, boundOperation) {
   };
   const check = (allowTransition = false) => {
     owner();
-    checkRoots(policy.roots);
+    checkRoots(referenceRoots);
+    checkControls(n=>verifier.chargeExternal(n));
+    if(rootRoles){
+      const current=verifier.scan(protectedPackages,[],{metadataOnly:true});
+      if(current.metadataDigest!==protectedSnapshot.metadataDigest)
+        throw new Error('RELEASE_PRESERVING_PROTECTED_CHANGED');
+    }
     if (present(ledger) && hash(state(ledger)) !== hash(prior))
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
     const measure = verifier.scan(
@@ -494,13 +519,21 @@ function open(request, options = {}, boundOperation) {
       const packages = policy.windowsReferences?.packages;
       if (!Array.isArray(packages) || packages.length < 1 || packages.length > 6)
         throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+      if(rootRoles){
+        protectedPackages=packages.map(row=>{
+          if(!row || !readOnlyRoots.some(root=>contains(root.path,row.path)))
+            throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+          return {path:row.path,identity:identity(row.path)};
+        });
+        protectedSnapshot=verifier.scan(protectedPackages,[],{metadataOnly:true});
+      }
       const checked = new Set(), covered = new Set();
       let proofBytes = 0;
       for (const row of packages) {
         if (!row || !policy.protectedIds.includes(row.id) || typeof row.path !== 'string' ||
             !path.isAbsolute(row.path) || path.resolve(row.path) !== row.path ||
             canonical(row.path) !== row.path ||
-            !policy.roots.some((root) => contains(root.path, row.path)) ||
+            !referenceRoots.some((root) => contains(root.path, row.path)) ||
             checked.has(row.path.toLowerCase()))
           throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
         const actualId = require('./private-artifact-proof.cjs').verifyManifest(
@@ -516,6 +549,8 @@ function open(request, options = {}, boundOperation) {
       }
       if (policy.protectedIds.some((id) => !covered.has(id)))
         throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+      if(rootRoles && verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)
+        throw new Error('RELEASE_PRESERVING_PROTECTED_CHANGED');
     }
     if (present(ledger)) {
       ledgerIdentity = fileIdentity(ledger);

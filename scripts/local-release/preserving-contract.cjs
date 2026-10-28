@@ -55,4 +55,28 @@ function validateActiveBinding(spec, observation) {
       o.process?.executableSha256 !== p.oldProcess?.executableSha256)
     throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
 }
-module.exports = { validatePreservingContract, validateSameSchema, validateActiveBinding };
+function referenceApplicability(policy) {
+  const spec = policy.preservingUpdate;
+  const validated = spec === undefined ? null : validatePreservingContract(policy, {
+    kind: spec?.operation, buildOnly: policy.phase === 'build-only', transition: false,
+  });
+  const preserving = validated !== null;
+  const buildOnly = preserving && validated.operation === 'build';
+  return { preserving, buildOnly, categories: {
+    processes: true, tasks: buildOnly ? 'not_applicable' : true,
+    shortcuts: preserving ? 'not_applicable' : true,
+    pointers: true, rollback: true, inflight: true,
+  } };
+}
+function preservingRootRoles(policy) {
+  const roles=policy.preservingUpdate?.rootRoles;
+  if(roles===undefined)return null;
+  if(!referenceApplicability(policy).buildOnly || policy.format!==2 || roles.format!==1 ||
+    !Array.isArray(roles.readOnlyRoots) || roles.readOnlyRoots.length<1 || roles.readOnlyRoots.length>8 ||
+    !Array.isArray(roles.controls) || roles.controls.length<1 || roles.controls.length>16 ||
+    roles.readOnlyRoots.some(r=>!r || !path.isAbsolute(r.path||'') || !Array.isArray(r.identity) || r.identity.length!==3 || r.identity.some(x=>typeof x!=='string')) ||
+    roles.controls.some(r=>!r || !path.isAbsolute(r.path||'') || require('./scope-inventory.cjs').isPrivatePath(r.path) || !hex(r.sha256) || !Array.isArray(r.identity) || r.identity.length!==3 || r.identity.some(x=>typeof x!=='string')))
+    throw new Error('RELEASE_PRESERVING_ROOT_ROLES_INVALID');
+  return roles;
+}
+module.exports = { validatePreservingContract, validateSameSchema, validateActiveBinding, referenceApplicability, preservingRootRoles };

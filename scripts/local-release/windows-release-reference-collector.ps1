@@ -54,8 +54,10 @@ try {
   $policySha=([BitConverter]::ToString($sha.ComputeHash($policyBytes))).Replace('-','').ToLowerInvariant()
   $policy=[Text.Encoding]::UTF8.GetString($policyBytes) | ConvertFrom-Json
   $preserving=($policy.preservingUpdate.format -eq 1 -and $policy.preservingUpdate.operation -in @('build','install','restart'))
+  $buildOnly=($preserving -and $policy.phase -eq 'build-only' -and $policy.preservingUpdate.operation -eq 'build' -and @($policy.preservingUpdate.effects).Count -eq 1 -and $policy.preservingUpdate.effects[0] -eq 'new-output-only')
+  if ($preserving -and ($policy.preservingUpdate.operation -eq 'build' -or $policy.phase -eq 'build-only') -and -not $buildOnly) { throw 'REFERENCE_NATIVE_BUILD_CONTRACT_INVALID' }
   $before=@(Processes)
-  $tasks=@(Tasks)
+  if (-not $buildOnly) { $tasks=@(Tasks) }
   if (-not $preserving) {
   # Current and common known folders cover this single-user adapter. Additional
   # non-special profiles are an explicit incomplete scope, never silently skipped.
@@ -121,7 +123,7 @@ try {
     }
   } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
   }
-  $tasksAfter=@(Tasks)
+  if (-not $buildOnly) { $tasksAfter=@(Tasks) }
   $after=@(Processes)
   Budget
 } catch {
@@ -132,7 +134,7 @@ try {
 $complete=$errors.Count -eq 0
 [PSCustomObject]@{
   format=$(if ($preserving) {2} else {1});complete=$(if ($preserving) {$false} else {$complete});observationComplete=$(if ($preserving) {$complete} else {$null});policySha256=$policySha
-  categories=@{processes=$complete;tasks=$complete;shortcuts=$(if ($preserving) {'not_applicable'} else {$complete})}
+  categories=@{processes=$complete;tasks=$(if ($buildOnly) {'not_applicable'} else {$complete});shortcuts=$(if ($preserving) {'not_applicable'} else {$complete})}
   errors=@($errors.ToArray());processesBefore=@($before);processesAfter=@($after)
   tasks=@($tasks);tasksAfter=@($tasksAfter);shortcuts=@($shortcuts.ToArray());shortcutCoverage=@($coverage.ToArray())
   shortcutDirectories=@($directorySnapshots.ToArray())
