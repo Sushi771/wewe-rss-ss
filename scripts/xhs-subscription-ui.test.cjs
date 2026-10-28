@@ -572,12 +572,20 @@ function fixture(options = {}) {
     render,
     find,
     button,
-    async start(all = false) {
+    async start(includeAll = false) {
       render();
       await tick();
       render();
-      if (!all) {
-        find('button', '合成作者').props.onClick();
+      if (!includeAll) {
+        const matches = render().filter(
+          (node) =>
+            node.type === 'button' &&
+            typeof node.props['aria-pressed'] === 'boolean' &&
+            all(node.props.children).includes('合成作者'),
+        );
+        assert.equal(matches.length, 1, 'one selectable creator named 合成作者');
+        assert.equal(typeof matches[0].props.onClick, 'function');
+        matches[0].props.onClick();
         render();
       }
     },
