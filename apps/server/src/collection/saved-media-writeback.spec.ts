@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { PrismaService } from '../prisma/prisma.service';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
@@ -132,7 +133,13 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     return fs.readFile(path.join(folder, name));
   };
   let setupPromise: Promise<void> | undefined;
+  let fixtureNumber = 0;
+  const timing = (stage: string, start: number, extra: object = {}) =>
+    console.info('SYNTHETIC_FIXTURE_TIMING', JSON.stringify({ case: fixtureNumber, stage, elapsedMs: Math.round(performance.now() - start), ...extra }));
   const setupFixture = async () => {
+    fixtureNumber++;
+    const overall = performance.now();
+    let stage = performance.now();
     jest.clearAllMocks();
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'exact-media-synthetic-'));
     resources = path.join(root, 'assets');
@@ -150,8 +157,11 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
       WEWE_SAVED_MEDIA_ROOT: await fs.realpath(resources),
     });
     delete process.env.WEWE_ACCEPTANCE_MODE;
+    timing('temp-ready', stage); stage = performance.now();
     prisma = new PrismaService();
+    timing('connect-start', stage);
     await prisma.$connect();
+    timing('connect-done', stage); stage = performance.now();
     forceCasFailure = false;
     conditionalWrites = 0;
     prisma.$use(async (params, next) =>
@@ -163,15 +173,24 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
         : next(params),
     );
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
+    let fileIndex = 0;
     for (const name of (await fs.readdir(migrations)).sort()) {
+      fileIndex++;
       const sql = await fs
         .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
         .catch(() => '');
+      let statementIndex = 0;
       for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
-        .filter(Boolean))
+        .filter(Boolean)) {
+        statementIndex++;
+        const started = performance.now();
+        timing('migration-statement-start', overall, { fileIndex, statementIndex });
         await prisma.$executeRawUnsafe(statement);
+        if (performance.now() - started >= 250) timing('migration-statement-slow', started, { fileIndex, statementIndex });
+      }
     }
+    timing('migrations-done', stage, { fileCount: fileIndex }); stage = performance.now();
     await prisma.feed.create({
       data: {
         id: mpId,
@@ -240,11 +259,13 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     });
     await prisma.$executeRaw`INSERT INTO cache_refresh_commits(id,mp_id,result_json,committed_at_ms) VALUES('historical',${mpId},'{}',1)`;
     await writeManifest();
+    timing('seed-done', stage); stage = performance.now();
     collector = new CollectionService(prisma);
     service = new TrpcService(prisma, config, {} as any, collector);
     router = new TrpcRouter(service, prisma, config, {} as any, {} as any);
     before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
     feedBefore = await prisma.feed.findUnique({ where: { id: mpId } });
+    timing('readback-done', stage); timing('setup-done', overall);
     jest.spyOn(global, 'fetch').mockRejectedValue(Error('NETWORK_FORBIDDEN'));
   };
   beforeEach(() => {
@@ -252,6 +273,8 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     return setupPromise;
   }, 40000);
   afterEach(async () => {
+    const teardownStarted = performance.now();
+    timing('teardown-start', teardownStarted);
     // A hook deadline does not cancel its Promise. Finish that exact setup
     // before disconnecting/removing its database; Jest retains hook failure.
     await setupPromise?.catch(() => undefined);
@@ -265,6 +288,7 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
       path.basename(root).startsWith('exact-media-synthetic-')
     )
       await fs.rm(root, { recursive: true, force: true });
+    timing('teardown-done', teardownStarted);
   }, 40000);
   (process.platform === 'win32' ? it : it.skip)(
     'combined: one fresh startup protection is reused at lifecycle initialization; media write/reentry and restart allocate no extra copy',
