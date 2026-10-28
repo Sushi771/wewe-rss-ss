@@ -6,7 +6,7 @@ const vm = require('node:vm'), crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { validateSameSchema } = require('./preserving-contract.cjs');
 const hash = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
-for (const failHealth of [false, true]) test('existing restart preserves SQLite and restores active after health failure=' + failHealth, async () => {
+for (const eol of [false, true]) for (const failHealth of [false, true]) test('existing restart preserves SQLite and restores active after health failure=' + failHealth + ' CRLF=' + eol, async () => {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-preserve-restart-')));
   const project = path.join(base, 'project'), dir = path.join(project, 'scripts/local-release');
   const database = path.join(project, 'apps/server/data/wewe-rss.db'), pointer = path.join(project, 'active.json');
@@ -17,11 +17,19 @@ for (const failHealth of [false, true]) test('existing restart preserves SQLite 
     const folder = path.join(project, id); fs.mkdirSync(path.join(folder, 'runtime'), { recursive: true });
     fs.writeFileSync(path.join(folder, 'runtime/node.exe'), 'inert-runtime');
     const m = { format: 1, id, schemaCompatibility: 'current', desktopHelperIncluded: false, files: { 'server/prisma/schema.prisma': 'a'.repeat(64), 'server/prisma/migrations/001/migration.sql': 'b'.repeat(64) }, links: {} };
+    if (eol) {
+      for (const [name, text] of [['server/prisma/schema.prisma', 'synthetic schema\n'], ['server/prisma/migrations/001/migration.sql', '-- synthetic migration\n'], ['server/prisma/migrations/migration_lock.toml', 'provider = \"sqlite\"\n']]) {
+        fs.mkdirSync(path.dirname(path.join(folder, name)), { recursive: true });
+        fs.writeFileSync(path.join(folder, name), id === 'current' ? text.replace(/\n/g, '\r\n') : text);
+        m.files[name] = hash(path.join(folder, name));
+      }
+    }
     manifests.set(folder, m); fs.writeFileSync(path.join(folder, 'release.json'), JSON.stringify(m));
   }
   const previous = path.join(project, 'current'), release = path.join(project, 'candidate');
-  validateSameSchema(manifests.get(previous), manifests.get(release));
+  if (!eol) validateSameSchema(manifests.get(previous), manifests.get(release));
   fs.writeFileSync(pointer, JSON.stringify({ format: 1, id: 'current' }));
+  let auditSummary;
   const events = [], old = { pid: 7, startUtc: '2026-01-01T00:00:00Z', executable: path.join(previous, 'runtime/node.exe'), port: 4000 };
   const active = { pointer, currentId: 'current', candidateId: 'candidate', pointerSha256: hash(pointer), currentManifestSha256: hash(path.join(previous, 'release.json')), candidateManifestSha256: hash(path.join(release, 'release.json')), oldProcess: { pid: old.pid, startUtc: old.startUtc, executableSha256: hash(old.executable) } };
   const lease = { policy: { preservingUpdate: { format: 1, operation: 'restart', active } }, authorizePackage() {}, check() {}, registerOutput() {}, createdOutput() {}, authorizeRecoveryPackage() { events.push('recovery-authorized'); } };
@@ -30,7 +38,7 @@ for (const failHealth of [false, true]) test('existing restart preserves SQLite 
   let exported;
   const lib = { hostEffects: { fs, processes: { spawn(exe, args) { const child = { pid: nextPid++, exitCode: null, unref() {} }; children.set(child.pid, { exe, args }); events.push(exe.includes('candidate') ? 'candidate-start' : 'old-start'); return child; } } },
     verifyRelease: (p) => manifests.get(p), verifyReleaseAsync: async (p) => manifests.get(p), fileHash: hash,
-    cleanEnvironment: (x) => x, inside: (r,p) => p.startsWith(r + path.sep), writeJson: (p,x) => fs.writeFileSync(p, JSON.stringify(x)),
+    cleanEnvironment: (x) => x, inside: (r,p) => p.startsWith(r + path.sep), writeJson: (p,x) => { if (path.basename(p) === 'summary.json') auditSummary = x; fs.writeFileSync(p, JSON.stringify(x)); },
     run(exe, args) { if (args.includes('--backup-root')) { const folder = args[args.indexOf('--backup-root')+1]; fs.mkdirSync(folder,{recursive:true}); const copy=path.join(folder,'snapshot.db'); fs.copyFileSync(database,copy); events.push('backup'); return JSON.stringify({integrityCheck:'ok',backup:copy,sha256:hash(copy)}); } return JSON.stringify({ pending: [], tables: { facts: { rows: 1 } } }); } };
   const scope = { assertWritableSession() {}, session: () => lease, within: async (r, callback) => callback(lease) };
   const switchAdapter = { loadProductionEnvironment() {}, unusedPort: async()=>41001, portOwnersAsync: async()=>[],
@@ -49,6 +57,7 @@ for (const failHealth of [false, true]) test('existing restart preserves SQLite 
     exported=module.exports;
     const promise=exported.controlledRestart({production:true,rehearsal:false,mode:'restart',release,previous,database,expected:{...old,commandLine:exported.commandLine(previous,database,4000)}});
     if(failHealth) await assert.rejects(promise,/synthetic-health-failure/); else assert.equal((await promise).passed,true);
+    assert.equal(auditSummary.schemaProof.comparison, eol ? 'crlf-to-lf-only' : 'raw-sha256');
     assert.equal(hash(database),dbHash);
     assert.equal(JSON.parse(fs.readFileSync(pointer)).id,failHealth?'current':'candidate');
     assert(events.indexOf('backup')<events.indexOf('old-stop'));

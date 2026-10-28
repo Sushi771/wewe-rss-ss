@@ -119,11 +119,16 @@ async function controlledRestartInner(options) {
       : await verifyReleaseAsync(previous, {
           reuseVerified: options.reuseVerified === true,
         });
+  let schemaProof;
   const preserving = require('./release-scope.cjs').session()?.policy?.preservingUpdate;
   if (preserving) {
     if (preserving.operation !== 'restart' || options.mode !== 'restart')
       throw new Error('RELEASE_PRESERVING_EFFECT_FORBIDDEN');
-    require('./preserving-contract.cjs').validateSameSchema(previousManifest, manifest);
+    schemaProof = require('./preserving-contract.cjs').validateSameSchema(previousManifest, manifest, {
+      oldRoot: previous, candidateRoot: release,
+      oldManifestSha256: preserving.active.currentManifestSha256,
+      candidateManifestSha256: preserving.active.candidateManifestSha256,
+    });
   }
   for (const item of [manifest, previousManifest]) {
     assert.equal(item.schemaCompatibility, 'current', '只允许当前 schema 产物');
@@ -498,6 +503,7 @@ async function controlledRestartInner(options) {
           reuseVerified: options.reuseVerified === true,
         });
       const summary = {
+        ...(schemaProof ? { schemaProof } : {}),
         passed: true,
         mode: options.production ? 'production' : 'rehearsal',
         action: options.mode,
@@ -532,6 +538,7 @@ async function controlledRestartInner(options) {
           if (options.production)
             await writeActiveReleaseAsync(previous, { recovery: true });
           const summary = {
+            ...(schemaProof ? { schemaProof } : {}),
             passed: options.rehearsal && options.injectFailure === true,
             mode: options.production ? 'production' : 'rehearsal',
             action: options.mode,

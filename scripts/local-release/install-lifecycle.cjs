@@ -294,6 +294,7 @@ function installPair(root, plan, options = {}) {
         runtimeCopies: missing.length,
       });
     const installOwned = () => {
+    let schemaProofs;
     const preserving = shared.policy?.preservingUpdate;
     if (preserving) {
       if (preserving.operation !== 'install' || preserving.active.pointer !== pointer ||
@@ -302,8 +303,11 @@ function installPair(root, plan, options = {}) {
           preserving.active.currentManifestSha256 !== current.manifestSha ||
           preserving.active.candidateManifestSha256 !== candidate.manifestSha)
         throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
-      require('./preserving-contract.cjs').validateSameSchema(current.manifest, candidate.manifest);
-      require('./preserving-contract.cjs').validateSameSchema(current.manifest, rollback.manifest);
+      schemaProofs = Object.fromEntries([['candidate', candidate], ['rollback', rollback]].map(([name, target]) =>
+        [name, require('./preserving-contract.cjs').validateSameSchema(current.manifest, target.manifest, {
+          oldRoot: current.folder, candidateRoot: target.folder,
+          oldManifestSha256: current.manifestSha, candidateManifestSha256: target.manifestSha,
+        })]));
     }
     shared.check();
     assertOwner();
@@ -384,6 +388,7 @@ function installPair(root, plan, options = {}) {
         (value) => !missing.some((row) => row.source.manifest.id === value),
       ),
       historicalDeletionPerformed: false,
+      ...(schemaProofs ? { schemaProofs } : {}),
     };
     };
     return shared.policy?.preservingUpdate ? require('./lib.cjs').hostEffects.context.run(shared, installOwned) : installOwned();

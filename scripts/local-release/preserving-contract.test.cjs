@@ -89,3 +89,98 @@ test('pointer, package and process changes individually fail the active binding'
   for (const field of ['pid', 'startUtc', 'executableSha256'])
     assert.throws(() => validateActiveBinding({ active: p }, { ...o, process: { ...o.process, [field]: 'changed' } }), /ACTIVE_BINDING_CHANGED/);
 });
+
+// Real package bytes, pinned raw manifests, and no database access.
+function schemaPackages(run, change = () => {}) {
+  const fs = require('node:fs'), os = require('node:os'), crypto = require('node:crypto');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-schema-eol-'));
+  const digest = (b) => crypto.createHash('sha256').update(b).digest('hex');
+  const files = { 'server/prisma/schema.prisma': 'model Example {\n  id Int @id\n}\n',
+    'server/prisma/migrations/001/migration.sql': '-- synthetic\nSELECT 1;\n',
+    'server/prisma/migrations/migration_lock.toml': 'provider = "sqlite"\n' };
+  const roots = ['old', 'candidate'].map((id) => path.join(base, id));
+  const manifests = roots.map((root, index) => {
+    const manifest = { format: 1, schemaCompatibility: 'current', files: {}, links: {} };
+    for (const [name, text] of Object.entries(files)) {
+      const bytes = Buffer.from(index ? text : text.replace(/\n/g, '\r\n'));
+      const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, bytes); manifest.files[name] = digest(bytes);
+    }
+    return manifest;
+  });
+  const writeManifests = () => roots.forEach((root, i) => fs.writeFileSync(path.join(root, 'release.json'), JSON.stringify(manifests[i])));
+  const update = (name, bytes) => { fs.writeFileSync(path.join(roots[1], name), bytes); manifests[1].files[name] = digest(bytes); };
+  try {
+    change({ fs, roots, manifests, update }); writeManifests();
+    const packages = { oldRoot: roots[0], candidateRoot: roots[1],
+      oldManifestSha256: digest(fs.readFileSync(path.join(roots[0], 'release.json'))),
+      candidateManifestSha256: digest(fs.readFileSync(path.join(roots[1], 'release.json'))) };
+    return run({ fs, roots, manifests, packages, validate: () => validateSameSchema(...manifests, packages) });
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+}
+test('schema CRLF-only fallback verifies raw bytes including migration_lock and retains both proofs', () => schemaPackages(({ validate, manifests, roots, fs }) => {
+  const before = roots.map((root) => fs.readFileSync(path.join(root, 'release.json')));
+  const proof = validate();
+  assert.equal(proof.comparison, 'crlf-to-lf-only'); assert.equal(proof.files.length, 3);
+  for (const row of proof.files) {
+    assert.equal(row.oldRawSha256, manifests[0].files[row.name]);
+    assert.equal(row.candidateRawSha256, manifests[1].files[row.name]);
+    assert.equal(row.normalizedSha256, manifests[1].files[row.name]);
+  }
+  roots.forEach((root, i) => assert.deepEqual(fs.readFileSync(path.join(root, 'release.json')), before[i]));
+}));
+for (const [label, bytes] of [
+  ['semantic change', '-- synthetic\nSELECT 2;\n'], ['space', '-- synthetic \nSELECT 1;\n'],
+  ['final newline', '-- synthetic\nSELECT 1;'], ['BOM', '\uFEFF-- synthetic\nSELECT 1;\n'],
+  ['lone CR', '-- synthetic\rSELECT 1;\n'],
+]) test('schema fallback rejects ' + label, () => schemaPackages(({ validate }) => {
+  assert.throws(validate, /SCHEMA_CHANGED/);
+}, ({ update }) => update('server/prisma/migrations/001/migration.sql', bytes)));
+for (const [label, bytes] of [['invalid UTF8', Buffer.from([0xc3, 0x28])], ['UTF16', Buffer.from('SELECT 1;\n', 'utf16le')]])
+  test('schema fallback rejects ' + label, () => schemaPackages(({ validate }) => assert.throws(validate, /SCHEMA_(UNPROVEN|CHANGED)/),
+    ({ update }) => update('server/prisma/migrations/001/migration.sql', bytes)));
+for (const mode of ['tampered bytes', 'missing file', 'extra file', 'manifest tampered', 'wrong pin', 'wrong manifest object', 'missing pin'])
+  test('schema fallback rejects ' + mode, () => schemaPackages(({ validate, fs, roots, manifests, packages }) => {
+    const file = path.join(roots[1], 'server/prisma/migrations/001/migration.sql');
+    if (mode === 'tampered bytes') fs.appendFileSync(file, 'changed');
+    if (mode === 'missing file') fs.unlinkSync(file);
+    if (mode === 'extra file') fs.writeFileSync(path.join(roots[1], 'server/prisma/migrations/unlisted.sql'), '-- extra');
+    if (mode === 'manifest tampered') fs.appendFileSync(path.join(roots[1], 'release.json'), ' ');
+    if (mode === 'wrong pin') packages.candidateManifestSha256 = 'f'.repeat(64);
+    if (mode === 'wrong manifest object') manifests[1].unexpected = true;
+    if (mode === 'missing pin') delete packages.candidateManifestSha256;
+    assert.throws(validate, /SCHEMA_UNPROVEN/);
+  }));
+for (const target of ['', 'server', 'server/prisma', 'server/prisma/migrations', 'server/prisma/migrations/001/migration.sql', 'release.json'])
+  test('schema fallback rejects link metadata at ' + (target || 'root') + ' without creating native links', () => schemaPackages(({ fs, roots, validate }) => {
+    const native = fs.lstatSync, denied = path.join(roots[1], target);
+    fs.lstatSync = function(file, ...args) { const s = native.call(this, file, ...args); if (path.resolve(file) === denied) s.isSymbolicLink = () => true; return s; };
+    try { assert.throws(validate, /SCHEMA_UNPROVEN/); } finally { fs.lstatSync = native; }
+  }));
+test('schema fallback rejects ancestor links declared in manifest', () => schemaPackages(({ validate }) => assert.throws(validate, /SCHEMA_UNPROVEN/),
+  ({ manifests }) => { manifests[1].links['server/prisma'] = 'outside'; }));
+test('schema fallback rejects changed file set before reading roots', () => schemaPackages(({ validate }) => assert.throws(validate, /SCHEMA_CHANGED/),
+  ({ update }) => update('server/prisma/migrations/002.sql', '-- added\n')));
+
+test('schema fallback supports mixed CRLF and LF without removing BOM or lone CR', () => schemaPackages(({ validate }) => {
+  assert.equal(validate().comparison, 'crlf-to-lf-only');
+}, ({ roots, fs, manifests, update }) => {
+  const name = 'server/prisma/migrations/001/migration.sql';
+  const text = '\uFEFF-- keep lone CR\rhere\nSELECT 1;\n';
+  update(name, text);
+  const old = Buffer.from(text.replace(/\n/g, '\r\n'));
+  fs.writeFileSync(path.join(roots[0], name), old);
+  manifests[0].files[name] = require('node:crypto').createHash('sha256').update(old).digest('hex');
+}));
+test('schema fallback rechecks old bytes metadata after reading the candidate', () => schemaPackages(({ validate, fs, roots }) => {
+  const native = fs.readFileSync, trigger = path.join(roots[1], 'release.json');
+  // fd reads reach the candidate manifest only after the old tree was inspected.
+  const open = fs.openSync; let armed = false;
+  fs.openSync = function(file, ...args) { if (file === trigger) armed = true; return open.call(this, file, ...args); };
+  fs.readFileSync = function(file, ...args) {
+    const result = native.call(this, file, ...args);
+    if (armed) { armed = false; fs.appendFileSync(path.join(roots[0], 'server/prisma/schema.prisma'), 'changed'); }
+    return result;
+  };
+  try { assert.throws(validate, /SCHEMA_UNPROVEN/); } finally { fs.readFileSync = native; fs.openSync = open; }
+}));

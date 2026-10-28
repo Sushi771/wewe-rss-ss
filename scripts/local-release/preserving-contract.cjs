@@ -30,21 +30,114 @@ function validatePreservingContract(policy, request) {
   }
   return spec;
 }
-function validateSameSchema(oldManifest, candidateManifest) {
+function validateSameSchema(oldManifest, candidateManifest, packages = {}) {
+  const fs = require('node:fs'), crypto = require('node:crypto');
+  const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
   const schema = 'server/prisma/schema.prisma', migrations = 'server/prisma/migrations/';
+  const relevant = (name) => name === schema || name.startsWith(migrations);
+  const validName = (name) => !name.includes('\\') && !name.includes(':') &&
+    !name.split('/').some((part) => !part || part === '.' || part === '..');
   function collect(manifest) {
     if (manifest?.format !== 1 || manifest.schemaCompatibility !== 'current' || !manifest.files || !manifest.links)
       throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
-    const entries = Object.entries(manifest.files).filter(([name]) => name === schema || name.startsWith(migrations))
+    const entries = Object.entries(manifest.files).filter(([name]) => relevant(name))
       .sort(([a], [b]) => a.localeCompare(b));
     if (!entries.some(([name]) => name === schema) || !entries.some(([name]) => name.startsWith(migrations)) ||
-        entries.some(([, digest]) => !hex(digest)) ||
-        Object.keys(manifest.links).some((name) => name === schema || name.startsWith(migrations)))
+        entries.some(([name, digest]) => !validName(name) || !hex(digest)) ||
+        Object.keys(manifest.links).some((name) => relevant(name) || name === 'server' ||
+          name === 'server/prisma' || name === 'server/prisma/migrations'))
       throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
     return entries;
   }
-  if (JSON.stringify(collect(oldManifest)) !== JSON.stringify(collect(candidateManifest)))
+  const oldEntries = collect(oldManifest), candidateEntries = collect(candidateManifest);
+  if (JSON.stringify(oldEntries) === JSON.stringify(candidateEntries))
+    return { format: 1, comparison: 'raw-sha256', files: oldEntries.map(([name, rawSha256]) => ({ name, rawSha256 })) };
+  if (JSON.stringify(oldEntries.map(([name]) => name)) !== JSON.stringify(candidateEntries.map(([name]) => name)) ||
+      !packages.oldRoot || !packages.candidateRoot)
     throw new Error('RELEASE_PRESERVING_SCHEMA_CHANGED');
+
+  // Only the unequal-hash path reads packages. Callers still perform full release
+  // verification. Each manifest pin and every schema/migration byte is rechecked
+  // here; no migration file or database checksum is rewritten.
+  const checks = [];
+  const identity = (s) => [s.dev, s.ino, s.mode, s.nlink, s.size, s.mtimeMs, s.ctimeMs, s.birthtimeMs].join(':');
+  function snapshot(file, directory = false) {
+    const s = fs.lstatSync(file);
+    if (s.isSymbolicLink() || (directory ? !s.isDirectory() : !s.isFile() || s.nlink !== 1))
+      throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+    const stamp = identity(s);
+    checks.push(() => {
+      const after = fs.lstatSync(file);
+      if (after.isSymbolicLink() || identity(after) !== stamp)
+        throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+    });
+    return s;
+  }
+  function read(file) {
+    const before = snapshot(file);
+    if (before.size > 8 * 1024 * 1024) throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+    const fd = fs.openSync(file, 'r');
+    try {
+      if (identity(fs.fstatSync(fd)) !== identity(before)) throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+      const bytes = fs.readFileSync(fd);
+      if (identity(fs.fstatSync(fd)) !== identity(before)) throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+      return bytes;
+    } finally { fs.closeSync(fd); }
+  }
+  function utf8(bytes) {
+    // ignoreBOM=true means preserve U+FEFF, rather than strip it. Fatal decoding
+    // rejects invalid UTF-8; round-trip equality also preserves all original bytes.
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+    return text;
+  }
+  function inspect(root, manifest, entries, manifestSha256) {
+    if (!path.isAbsolute(root) || !hex(manifestSha256)) throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+    snapshot(root, true);
+    if (path.resolve(fs.realpathSync.native(root)).toLowerCase() !== path.resolve(root).toLowerCase())
+      throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+    const manifestBytes = read(path.join(root, 'release.json'));
+    if (hash(manifestBytes) !== manifestSha256 || JSON.stringify(JSON.parse(utf8(manifestBytes))) !== JSON.stringify(manifest))
+      throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+    for (const name of ['server', 'server/prisma']) snapshot(path.join(root, name), true);
+    const names = [schema];
+    function walk(name) {
+      const folder = path.join(root, name); snapshot(folder, true);
+      const children = fs.readdirSync(folder).sort();
+      if (children.length > 4096 || names.length > 4096) throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+      for (const child of children) {
+        const relative = name + '/' + child, file = path.join(root, relative), s = fs.lstatSync(file);
+        if (!validName(relative) || s.isSymbolicLink()) throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+        if (s.isDirectory()) walk(relative);
+        else if (s.isFile()) names.push(relative);
+        else throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+      }
+    }
+    walk('server/prisma/migrations');
+    names.sort((a, b) => a.localeCompare(b));
+    if (JSON.stringify(names) !== JSON.stringify(entries.map(([name]) => name)))
+      throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+    return entries.map(([name, rawSha256]) => {
+      const bytes = read(path.join(root, name));
+      if (hash(bytes) !== rawSha256) throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+      const normalized = Buffer.from(utf8(bytes).replace(/\r\n/g, '\n'), 'utf8');
+      return { name, rawSha256, normalized, normalizedSha256: hash(normalized) };
+    });
+  }
+  try {
+    const old = inspect(packages.oldRoot, oldManifest, oldEntries, packages.oldManifestSha256);
+    const candidate = inspect(packages.candidateRoot, candidateManifest, candidateEntries, packages.candidateManifestSha256);
+    if (old.some((row, i) => !row.normalized.equals(candidate[i].normalized)))
+      throw new Error('RELEASE_PRESERVING_SCHEMA_CHANGED');
+    checks.forEach((check) => check());
+    return { format: 1, comparison: 'crlf-to-lf-only',
+      oldManifestSha256: packages.oldManifestSha256, candidateManifestSha256: packages.candidateManifestSha256,
+      files: old.map((row, i) => ({ name: row.name, oldRawSha256: row.rawSha256,
+        candidateRawSha256: candidate[i].rawSha256, normalizedSha256: row.normalizedSha256 })) };
+  } catch (error) {
+    if (error.message === 'RELEASE_PRESERVING_SCHEMA_CHANGED') throw error;
+    throw new Error('RELEASE_PRESERVING_SCHEMA_UNPROVEN');
+  }
 }
 function validateActiveBinding(spec, observation) {
   const p = spec?.active, o = observation;

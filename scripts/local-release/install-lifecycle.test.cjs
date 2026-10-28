@@ -15,8 +15,9 @@ function pkg(parent, id, schema = false) {
   fs.writeFileSync(path.join(folder, 'app.cjs'), 'synthetic ' + id);
   if (schema) {
   fs.mkdirSync(path.join(folder, 'server/prisma/migrations/001'), { recursive: true });
-  fs.writeFileSync(path.join(folder, 'server/prisma/schema.prisma'), 'synthetic schema');
-  fs.writeFileSync(path.join(folder, 'server/prisma/migrations/001/migration.sql'), '-- synthetic migration');
+  fs.writeFileSync(path.join(folder, 'server/prisma/schema.prisma'), 'synthetic schema\r\n');
+  fs.writeFileSync(path.join(folder, 'server/prisma/migrations/001/migration.sql'), '-- synthetic migration\r\n');
+  fs.writeFileSync(path.join(folder, 'server/prisma/migrations/migration_lock.toml'), 'provider = \"sqlite\"\r\n');
   }
   const manifest = {
     format: 1,
@@ -96,8 +97,17 @@ function fixture(run, schema = false) {
 function call(f, options = f.options) {
   return installPair(f.root, f.plan, options);
 }
-test('preserving install uses the real scope and copies new roles while keeping current and active unchanged', () =>
+for (const eol of [false, true]) test('preserving install uses the real scope and copies new roles while keeping current and active unchanged CRLF=' + eol, () =>
   fixture((f) => {
+    if (eol) for (const [name, folder] of [['candidate', f.candidate], ['rollback', f.rollback]]) {
+      const file = path.join(folder, 'release.json'), manifest = JSON.parse(fs.readFileSync(file));
+      for (const relative of Object.keys(manifest.files).filter((name) => name.startsWith('server/prisma/'))) {
+        const target = path.join(folder, relative);
+        fs.writeFileSync(target, fs.readFileSync(target, 'utf8').replace(/\r\n/g, '\n'));
+        manifest.files[relative] = fileHash(target);
+      }
+      fs.writeFileSync(file, JSON.stringify(manifest)); f.plan.proofs[name] = proof(folder);
+    }
     const scope = require('./release-scope.cjs'), crypto = require('node:crypto');
     const roots = [f.root, f.sources].map((p) => fs.realpathSync.native(p));
     const current = fs.realpathSync.native(f.current), candidate = fs.realpathSync.native(f.candidate), rollback = fs.realpathSync.native(f.rollback);
@@ -114,6 +124,7 @@ test('preserving install uses the real scope and copies new roles while keeping 
     const lease = scope.open({ kind: 'install', root: roots[0], reserveBytes: 1024 * 1024, runtimeCopies: 2 }, { configPath: config, configSha256: fileHash(config), query: () => structuredClone(facts) });
     const result = call(f, { ...f.options, scope: lease });
     assert.deepEqual(result.installedIds.sort(), ['candidate', 'rollback']);
+    for (const role of ['candidate', 'rollback']) assert.equal(result.schemaProofs[role].comparison, eol ? 'crlf-to-lf-only' : 'raw-sha256');
     assert.equal(fileHash(pointer), pointerHash);
     assert(fs.existsSync(path.join(f.root, 'candidate/release.json')));
   }, true));
