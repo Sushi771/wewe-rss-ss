@@ -116,6 +116,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
   };
   try {
     const cfg = policy.windowsReferences;
+    const operation = policy.preservingUpdate?.operation;
+    const preserving = policy.preservingUpdate === undefined ? false : !!require('./preserving-contract.cjs').validatePreservingContract(policy, {
+      kind: operation, buildOnly: policy.phase === 'build-only', transition: false,
+    });
     if (
       !cfg ||
       cfg.format !== 1 ||
@@ -133,13 +137,12 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       fail('REFERENCE_POLICY_INVALID');
     if (
       !native ||
-      native.format !== 1 ||
-      native.complete !== true ||
+      (preserving ? native.format !== 2 || native.complete !== false || native.observationComplete !== true : native.format !== 1 || native.complete !== true) ||
       !Array.isArray(native.errors) ||
       native.errors.length ||
-      ['processes', 'tasks', 'shortcuts'].some(
+      ['processes', 'tasks'].some(
         (k) => native.categories?.[k] !== true,
-      )
+      ) || (preserving ? native.categories?.shortcuts !== 'not_applicable' : native.categories?.shortcuts !== true)
     )
       fail('REFERENCE_NATIVE_QUERY_INCOMPLETE');
     const roots = policy.roots.map((r) => canonical(r.path));
@@ -644,7 +647,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       !Array.isArray(native.shortcuts) ||
       native.shortcuts.length > 8192 ||
       !Array.isArray(native.tasksAfter) ||
-      hash(native.tasks) !== hash(native.tasksAfter) ||
+      hash(native.tasks) !== hash(native.tasksAfter)
+    )
+      fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
+    if (!preserving && (
       !Array.isArray(native.shortcutCoverage) ||
       [
         'Desktop',
@@ -659,15 +665,15 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
             (r) => r.kind === k && ['enumerated', 'absent'].includes(r.status),
           ),
       )
-    )
+    ))
       fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
-    if (
+    if (!preserving && (
       native.shortcutCoverage.length !== 6 ||
       new Set(native.shortcutCoverage.map((c) => c.kind)).size !== 6 ||
       !Array.isArray(native.shortcutDirectories)
-    )
+    ))
       fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
-    for (const coverage of native.shortcutCoverage) {
+    for (const coverage of (preserving ? [] : native.shortcutCoverage)) {
       if (
         typeof coverage.path !== 'string' ||
         !path.isAbsolute(coverage.path) ||
@@ -713,12 +719,12 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       }
     }
     result.categories.tasks = true;
-    if (
+    if (!preserving && (
       !Array.isArray(native.shortcutDirectories) ||
       native.shortcutDirectories.length > 4096
-    )
+    ))
       fail('REFERENCE_SHORTCUT_DIRECTORY_QUERY_INCOMPLETE');
-    for (const dir of native.shortcutDirectories) {
+    for (const dir of (preserving ? [] : native.shortcutDirectories)) {
       if (
         !Array.isArray(dir.entries) ||
         !native.shortcutCoverage.some(
@@ -745,7 +751,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           fail('REFERENCE_SHORTCUT_DIRECTORY_QUERY_INCOMPLETE');
       }
     }
-    for (const s of native.shortcuts) {
+    for (const s of (preserving ? [] : native.shortcuts)) {
       if (
         !s.path ||
         !s.target ||
@@ -771,7 +777,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           ]),
         });
     }
-    result.categories.shortcuts = true;
+    result.categories.shortcuts = preserving ? 'not_applicable' : true;
     // The querying controller owns the scope lock. Its changing in-progress
     // intent is checked, but is not an external reference to its own output.
     const registry = canonical(policy.registryDirectory),
@@ -869,7 +875,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     result.records.sort((a, b) =>
       JSON.stringify(a).localeCompare(JSON.stringify(b)),
     );
-    result.complete = true;
+    if (preserving) result.observationComplete = true;
+    else result.complete = true;
   } catch (error) {
     // Keep private paths/command lines out of errors. Full raw host evidence is
     // never printed. A failed category is not silently declared empty.

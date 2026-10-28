@@ -101,6 +101,7 @@ function inspect(paths, options = {}) {
   return { roots, baseline };
 }
 function validateReferences(value, policy) {
+  const preserving = policy.preservingUpdate?.format === 1;
   const kinds = [
     'processes',
     'tasks',
@@ -111,10 +112,11 @@ function validateReferences(value, policy) {
   ];
   if (
     !value ||
-    value.complete !== true ||
-    kinds.some((k) => value.categories?.[k] !== true) ||
+    (preserving ? value.complete !== false || value.observationComplete !== true : value.complete !== true) ||
+    kinds.some((k) => value.categories?.[k] !== (preserving && k === 'shortcuts' ? 'not_applicable' : true)) ||
     !Array.isArray(value.records) ||
     value.records.length > 4096 ||
+    (preserving && value.records.some((r) => r.kind === 'shortcuts')) ||
     !Array.isArray(value.errors) ||
     value.errors.length ||
     !Array.isArray(value.uncertainChildren) ||
@@ -190,6 +192,7 @@ function open(request, options = {}, boundOperation) {
   const file = canonical(configPath),
     policy = read(file),
     configSha = fileHash(file);
+  const preserving = policy.preservingUpdate === undefined ? null : require('./preserving-contract.cjs').validatePreservingContract(policy, request);
   if (
     configSha !== expected ||
     ![1, 2].includes(policy.format) ||
@@ -316,6 +319,7 @@ function open(request, options = {}, boundOperation) {
   const useMetadata = verifier.limits.checkpointMode === 'identity-times-v1';
   let fullValidated = false;
   const verifiedOutputs = new Set();
+  let pointerCommit;
   const descriptors = new Set();
   const directory = policy.registryDirectory,
     lock = path.join(directory, policy.scopeId + '.lock'),
@@ -332,6 +336,7 @@ function open(request, options = {}, boundOperation) {
     initialFacts,
     claim,
     ledgerIdentity;
+  let expectedProcesses;
   const configIdentity = fileIdentity(file);
   const save = () => {
     atomic(ledger, prior);
@@ -367,6 +372,24 @@ function open(request, options = {}, boundOperation) {
     const value = query();
     verifier.assertBudget();
     const digest = validateReferences(value, policy);
+    if (preserving && !expectedProcesses)
+      expectedProcesses = structuredClone(value.records.filter((r) => r.kind === 'processes'));
+    if (preserving && refs) {
+      const clean = (rows) => rows.map(({ ownedTransition, ...r }) => r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      if (hash(clean(value.records.filter((r) => r.kind === 'processes'))) !== hash(clean(expectedProcesses)))
+        throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
+    }
+    if (preserving && preserving.operation !== 'build' && !refs) {
+      const a = preserving.active;
+      if (canonical(a.pointer) !== a.pointer || !policy.roots.some((r) => contains(r.path, a.pointer)) ||
+          fileHash(a.pointer) !== a.pointerSha256 || read(a.pointer).id !== a.currentId ||
+          policy.packageProofs?.[a.currentId] !== a.currentManifestSha256 ||
+          policy.packageProofs?.[a.candidateId] !== a.candidateManifestSha256 ||
+          !value.records.some((r) => r.kind === 'pointers' && r.pointerPath === a.pointer && r.packageId === a.currentId) ||
+          !value.records.some((r) => r.kind === 'processes' && r.packageId === a.currentId && r.pid === a.oldProcess.pid &&
+            r.startUtc === a.oldProcess.startUtc && r.executableSha256 === a.oldProcess.executableSha256))
+        throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+    }
     if (
       policy.phase === 'build-only' &&
       value.records.some((r) =>
@@ -376,7 +399,8 @@ function open(request, options = {}, boundOperation) {
       throw new Error('RELEASE_SCOPE_BUILD_ROOT_REFERENCED');
     const stable = (v) =>
       v.records
-        .filter((r) => !['processes', 'pointers'].includes(r.kind))
+        .filter((r) => r.kind !== 'pointers' && (preserving || r.kind !== 'processes'))
+        .map(({ ownedTransition, ...r }) => r)
         .map((r) =>
           r.viaPointer
             ? { ...r, packageId: undefined, packagePath: undefined }
@@ -386,7 +410,9 @@ function open(request, options = {}, boundOperation) {
     if (
       refs &&
       digest !== refs &&
-      (!allowTransition || hash(stable(value)) !== hash(stable(initialFacts)))
+      (!allowTransition || hash(stable(value)) !== hash(stable(preserving ? {
+        ...initialFacts, records: [...initialFacts.records.filter((r) => r.kind !== 'processes'), ...expectedProcesses],
+      } : initialFacts)))
     )
       throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
     return { value, digest };
@@ -590,10 +616,87 @@ function open(request, options = {}, boundOperation) {
       policy,
       check,
       assertWritable,
-      approveDescriptor(fd) {
-        descriptors.add(fd);
+      confirmPreservingProcessExit(pid, receipt) {
+        if (!preserving || preserving.operation !== 'restart') return;
+        owner();
+        if (receipt?.pid !== pid || receipt.stopped !== true)
+          throw new Error('RELEASE_PRESERVING_PROCESS_EXIT_UNCONFIRMED');
+        const known = expectedProcesses.filter((r) => r.pid === pid);
+        if (!known.length || (pid !== preserving.active.oldProcess.pid && !known.every((r) => r.ownedTransition === true)))
+          throw new Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
+        const facts = query(); validateReferences(facts, policy); verifier.assertBudget();
+        const next = expectedProcesses.filter((r) => r.pid !== pid);
+        const actual = facts.records.filter((r) => r.kind === 'processes');
+        const clean = (rows) => rows.map(({ ownedTransition, ...r }) => r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+        if (hash(clean(actual)) !== hash(clean(next))) throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
+        expectedProcesses = next;
+      },
+      bindPreservingChild(snapshot, packageId, expectedCommand) {
+        if (!preserving || preserving.operation !== 'restart') return;
+        owner();
+        const a = preserving.active;
+        const pkg = policy.windowsReferences?.packages?.find((p) => p.id === packageId &&
+          canonical(path.join(p.path, 'runtime/node.exe')) === canonical(snapshot.executable));
+        if (!pkg || ![a.currentId, a.candidateId].includes(packageId) || !Number.isInteger(snapshot.pid) || snapshot.pid < 1 ||
+            snapshot.pid === a.oldProcess.pid || expectedProcesses.some((r) => r.pid === snapshot.pid) || snapshot.commandLine !== expectedCommand)
+          throw new Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
+        const facts = query(); validateReferences(facts, policy); verifier.assertBudget();
+        const actual = facts.records.filter((r) => r.kind === 'processes');
+        const added = actual.filter((r) => r.pid === snapshot.pid);
+        const clean = (rows) => rows.map(({ ownedTransition, ...r }) => r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+        if (added.length !== 1 || added[0].packageId !== packageId || added[0].startUtc !== snapshot.startUtc ||
+            added[0].executableSha256 !== fileHash(snapshot.executable) ||
+            hash(clean(actual.filter((r) => r.pid !== snapshot.pid))) !== hash(clean(expectedProcesses)))
+          throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
+        expectedProcesses.push({ ...added[0], ownedTransition: true });
+      },
+      authorizePointerCommit(temporary, destination, id, recovery) {
+        if (!preserving) return;
+        owner();
+        const a = preserving.active;
+        if (preserving.operation !== 'restart' || destination !== a.pointer || path.dirname(temporary) !== path.dirname(destination) ||
+            !/^active-[a-f0-9-]+\.tmp$/.test(path.basename(temporary)) || read(temporary).format !== 1 || read(temporary).id !== id ||
+            id !== (recovery ? a.currentId : a.candidateId))
+          throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
+        const nextHash = crypto.createHash('sha256').update(JSON.stringify({ format: 1, id: a.candidateId }) + '\n').digest('hex');
+        if (!(recovery ? [a.pointerSha256, nextHash] : [a.pointerSha256]).includes(fileHash(destination)))
+          throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+        pointerCommit = { temporary, destination };
+      },
+      approveDescriptor(fd, file, writing) {
+        if (writing) descriptors.add(fd);
       },
       assertFileAccess(method, args, writing) {
+        if (preserving && preserving.operation !== 'build' && writing && !['close', 'fsync', 'fdatasync'].includes(method)) {
+          const values = ['copyFile', 'cp', 'symlink', 'link'].includes(method) ? [args[1]] : method === 'rename' ? args.slice(0, 2) : [args[0]];
+          for (const value of values) {
+            if (typeof value === 'number' && descriptors.has(value)) continue;
+            if (typeof value !== 'string') throw new Error('RELEASE_PRESERVING_DESCRIPTOR_FORBIDDEN');
+            const at = path.resolve(value), root = claim.root;
+            if (at === preserving.active.pointer) {
+              if (method !== 'rename' || !pointerCommit || args[0] !== pointerCommit.temporary || args[1] !== pointerCommit.destination)
+                throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
+            }
+            const admin = at === path.join(root, '.build-budget.lock') || at === path.join(path.dirname(root), '.active-release.lock') ||
+              at === path.join(root, '.release-lifecycle.json') || (path.dirname(at) === root && /^\.release-lifecycle\.json\.[a-f0-9-]+\.tmp$/.test(path.basename(at))) ||
+              (preserving.operation === 'restart' && (at === preserving.active.pointer || (path.dirname(at) === path.dirname(preserving.active.pointer) && /^active-[a-f0-9-]+\.tmp$/.test(path.basename(at)))));
+            if (admin) {
+              if (['rm', 'rmdir', 'unlink'].includes(method) && !at.endsWith('.lock') && !at.endsWith('.tmp'))
+                throw new Error('RELEASE_PRESERVING_CONTROL_DELETE_FORBIDDEN');
+              if (present(at) && fs.lstatSync(at).isSymbolicLink()) throw new Error('RELEASE_PRESERVING_WRITE_LINK_ESCAPE');
+              if (canonical(path.dirname(at)) !== path.dirname(at)) throw new Error('RELEASE_PRESERVING_WRITE_LINK_ESCAPE');
+              continue;
+            }
+            const output = prior.outputs.find((r) => r.claim === claim.id && !r.complete && contains(r.path, at));
+            if (!output || ['rm', 'rmdir', 'unlink'].includes(method)) throw new Error('RELEASE_PRESERVING_WRITE_OUTSIDE_OUTPUT');
+            if (present(at) && (fs.lstatSync(at).isSymbolicLink() || !contains(output.path, canonical(at))))
+              throw new Error('RELEASE_PRESERVING_WRITE_LINK_ESCAPE');
+            let ancestor = path.dirname(at);
+            while (!present(ancestor)) ancestor = path.dirname(ancestor);
+            if (!policy.roots.some((r) => contains(r.path, canonical(ancestor)))) throw new Error('RELEASE_PRESERVING_WRITE_LINK_ESCAPE');
+          }
+          if (method === 'rename' && pointerCommit && args[1] === pointerCommit.destination) pointerCommit = undefined;
+        }
         if (policy.phase !== 'build-only') return;
         if (method === 'close') descriptors.delete(args[0]);
         const paths = ['copyFile', 'cp', 'symlink', 'link', 'rename'].includes(
@@ -816,6 +919,7 @@ function open(request, options = {}, boundOperation) {
       },
       allowCleanup(outputs) {
         assertWritable();
+        if (preserving) throw new Error('RELEASE_PRESERVING_CLEANUP_FORBIDDEN');
         check();
         const facts = references().value;
         if (

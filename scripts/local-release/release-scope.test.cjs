@@ -6,6 +6,60 @@ const test = require('node:test'),
   crypto = require('node:crypto');
 const scope = require('./release-scope.cjs');
 const { fileHash } = require('./lib.cjs');
+function preservingRestart(f) {
+  fs.mkdirSync(path.join(f.current, 'runtime'));
+  fs.writeFileSync(path.join(f.current, 'runtime/node.exe'), 'synthetic-child-executable');
+  Object.assign(f.policy, scope.inspect([f.installed, f.build]));
+  const pointer=path.join(f.installed,'active.json'); fs.writeFileSync(pointer,JSON.stringify({format:1,id:'current'}));
+  f.policy.preservingUpdate={format:1,operation:'restart',effects:['new-output-only','approved-active-switch'],active:{pointer,pointerSha256:fileHash(pointer),currentId:'current',candidateId:'candidate',currentManifestSha256:'b'.repeat(64),candidateManifestSha256:'e'.repeat(64),oldProcess:{pid:process.pid,startUtc:f.facts.records[0].startUtc,executableSha256:'c'.repeat(64)}}};
+  f.policy.packageProofs={current:'b'.repeat(64),candidate:'e'.repeat(64)};
+  f.policy.windowsReferences={packages:[{id:'current',path:f.current}]};
+  f.facts.complete=false;f.facts.observationComplete=true;f.facts.categories.shortcuts='not_applicable';
+  f.facts.records.push({kind:'pointers',packageId:'current',packagePath:f.current,identity:'synthetic-pointer',pointerPath:pointer});f.save();
+  return {kind:'restart',root:f.installed,reserveBytes:4096,transition:true};
+}
+test('preserving transition rejects independent unapproved process counterexample',()=>fixture(f=>{
+  const request=preservingRestart(f);let admitted=false;
+  assert.throws(()=>scope.within(request,lease=>{
+    f.facts.records.push({...f.facts.records[0],pid:987654,startUtc:'2026-01-02T00:00:00Z',identity:'unapproved-secondary-writer'});
+    try{lease.check(true);admitted=true;}catch(e){if(!/REFERENCES_CHANGED|QUERY_INCOMPLETE|WRITER|PROCESS/.test(e.message))throw e;}
+  },f.options()),/REFERENCES_CHANGED/);
+  assert.equal(admitted,false);
+}));
+test('preserving transition binds owned child and health-failure fallback without ignoring other records',()=>fixture(f=>{
+  const request=preservingRestart(f), old=f.facts.records[0];
+  scope.within(request,lease=>{
+    f.facts.records=f.facts.records.filter(r=>r!==old);
+    assert.throws(()=>lease.confirmPreservingProcessExit(old.pid),/EXIT_UNCONFIRMED/);
+    lease.confirmPreservingProcessExit(old.pid,{pid:old.pid,stopped:true}); lease.check(true);
+    const executable=path.join(f.current,'runtime/node.exe');
+    const snapshot={pid:987653,startUtc:'2026-01-02T00:00:00Z',executable,commandLine:'synthetic-owned-command'};
+    const child={...old,pid:snapshot.pid,startUtc:snapshot.startUtc,executableSha256:fileHash(executable),identity:'owned-child'};
+    f.facts.records.push(child);
+    assert.throws(()=>lease.bindPreservingChild({...snapshot,pid:old.pid},'current',snapshot.commandLine),/PROCESS_UNAPPROVED/);
+    assert.throws(()=>lease.bindPreservingChild(snapshot,'current','different-command'),/PROCESS_UNAPPROVED/);
+    lease.bindPreservingChild(snapshot,'current',snapshot.commandLine); lease.check(true);
+    f.facts.records=f.facts.records.filter(r=>r!==child);
+    lease.confirmPreservingProcessExit(snapshot.pid,{pid:snapshot.pid,stopped:true}); lease.check(true);
+    const fallback={...snapshot,pid:987652};
+    f.facts.records.push({...child,pid:fallback.pid,identity:'owned-fallback'});
+    lease.bindPreservingChild(fallback,'current',fallback.commandLine); lease.check(true);
+  },f.options());
+}));
+test('preserving transition rejects changed existing identity',()=>fixture(f=>{
+  const request=preservingRestart(f);
+  assert.throws(()=>scope.within(request,lease=>{
+    f.facts.records[0].startUtc='2026-01-03T00:00:00Z';
+    assert.throws(()=>lease.check(true),/REFERENCES_CHANGED/);
+  },f.options()),/REFERENCES_CHANGED/);
+}));
+test('preserving transition refuses uncertain child evidence',()=>fixture(f=>{
+  const request=preservingRestart(f);
+  assert.throws(()=>scope.within(request,lease=>{
+    f.facts.uncertainChildren.push(987651);
+    assert.throws(()=>lease.check(true),/QUERY_INCOMPLETE/);
+  },f.options()),/QUERY_INCOMPLETE/);
+}));
 function enableV3(f) {
   assert.equal(f.current === fs.realpathSync.native(f.current), true, 'fixture package path must be canonical');
   const m = { format: 1, id: 'current', files: { 'node.exe': fileHash(path.join(f.current, 'node.exe')) }, links: {} };
@@ -721,6 +775,64 @@ function buildOnly(f) {
     sourceHash: 'b'.repeat(64),
   };
 }
+test('preserving build only accepts explicit inapplicable shortcuts and owned new output', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.facts.complete = false; f.facts.observationComplete = true; f.facts.categories.shortcuts = 'not_applicable';
+    f.save();
+    const gateway = require('./lib.cjs').hostEffects;
+    scope.within(request, (lease) => {
+      const candidate = path.join(f.build, 'preserved-candidate');
+      lease.registerOutput(candidate); gateway.fs.mkdirSync(candidate); lease.createdOutput(candidate);
+      gateway.fs.writeFileSync(path.join(candidate, 'owned'), 'synthetic');
+      assert.throws(() => gateway.fs.writeFileSync(path.join(f.current, 'old'), 'forbidden'), /WRITE_OUTSIDE_OUTPUT/);
+      assert.throws(() => gateway.fs.rmSync(f.current, { recursive: true }), /WRITE_OUTSIDE_OUTPUT/);
+      assert.throws(() => gateway.fs.writeFileSync(path.join(candidate, 'active.json'), '{}'), /PRIVATE_INPUT/);
+    }, f.options());
+  }));
+test('preserving build refuses incomplete observation', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.facts.complete = false; f.facts.observationComplete = false; f.facts.categories.shortcuts = 'not_applicable'; f.save();
+    assert.throws(() => scope.open(request, f.options()), /QUERY_INCOMPLETE/);
+  }));
+test('original complete mode rejects an inapplicable-shortcuts observation', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    f.facts.complete = false; f.facts.observationComplete = true; f.facts.categories.shortcuts = 'not_applicable';
+    assert.throws(() => scope.open(request, f.options()), /QUERY_INCOMPLETE/);
+  }));
+test('preserving build leaves failed owned output and holds the claim', () =>
+  fixture((f) => {
+    const request = buildOnly(f);
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.facts.complete = false; f.facts.observationComplete = true; f.facts.categories.shortcuts = 'not_applicable'; f.save();
+    const lease = scope.open(request, f.options());
+    const target = path.join(f.build, 'failed-candidate');
+    lease.registerOutput(target); fs.mkdirSync(target); lease.createdOutput(target);
+    assert.throws(() => lease.allowCleanup([target]), /PRESERVING_CLEANUP_FORBIDDEN/);
+    assert.throws(() => lease.close(new Error('synthetic failure')), /FAILED_OUTPUT_HELD/);
+    assert(fs.existsSync(target));
+    assert.throws(() => scope.open(request, f.options()), /INTERRUPTED_CLAIM/);
+  }));
+test('preserving restart denies direct active, old package and database writes', () =>
+  fixture((f) => {
+    const pointer = path.join(f.installed, 'active.json'); fs.writeFileSync(pointer, JSON.stringify({ format: 1, id: 'current' }));
+    f.policy.preservingUpdate = { format: 1, operation: 'restart', effects: ['new-output-only', 'approved-active-switch'], active: { pointer, pointerSha256: fileHash(pointer), currentId: 'current', candidateId: 'candidate', currentManifestSha256: 'b'.repeat(64), candidateManifestSha256: 'e'.repeat(64), oldProcess: { pid: process.pid, startUtc: f.facts.records[0].startUtc, executableSha256: 'c'.repeat(64) } } };
+    f.policy.packageProofs = { current: 'b'.repeat(64), candidate: 'e'.repeat(64) };
+    f.facts.complete = false; f.facts.observationComplete = true; f.facts.categories.shortcuts = 'not_applicable';
+    f.facts.records.push({ kind: 'pointers', packageId: 'current', packagePath: f.current, identity: 'synthetic-pointer', pointerPath: pointer }); f.save();
+    const gateway = require('./lib.cjs').hostEffects;
+    scope.within({ kind: 'restart', root: f.installed, reserveBytes: 4096 }, (lease) => {
+      assert.throws(() => gateway.fs.writeFileSync(pointer, '{}'), /POINTER_COMMIT_FORBIDDEN/);
+      assert.throws(() => gateway.fs.writeFileSync(path.join(f.current, 'old'), 'bad'), /WRITE_OUTSIDE_OUTPUT/);
+      assert.throws(() => gateway.fs.rmSync(f.current, { recursive: true }), /WRITE_OUTSIDE_OUTPUT/);
+      assert.throws(() => gateway.fs.writeFileSync(path.join(f.base, 'data.db'), 'bad'), /WRITE_OUTSIDE_OUTPUT/);
+      assert.throws(() => f.open(), /NESTED_OPEN/);
+    }, f.options());
+  }));
 test('build-only binds source and isolated output; incomplete references and install remain blocked', () =>
   fixture((f) => {
     const request = buildOnly(f);

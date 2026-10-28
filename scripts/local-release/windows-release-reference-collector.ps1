@@ -41,6 +41,7 @@ function Tasks {
     [PSCustomObject]@{
       identity=([string]$_.TaskPath+[string]$_.TaskName)
       actions=@($_.Actions | ForEach-Object {
+        if ($preserving -and (([string]$_.Execute+[string]$_.Arguments+[string]$_.WorkingDirectory) -match '%[A-Za-z_][A-Za-z0-9_]*%')) { throw 'REFERENCE_NATIVE_TASK_ENVIRONMENT_UNCERTAIN' }
         [PSCustomObject]@{execute=(Expand-ReferenceText ([string]$_.Execute));arguments=(Expand-ReferenceText ([string]$_.Arguments));workingDirectory=(Expand-ReferenceText ([string]$_.WorkingDirectory))}
       })
     }
@@ -52,8 +53,10 @@ try {
   $sha=[Security.Cryptography.SHA256]::Create()
   $policySha=([BitConverter]::ToString($sha.ComputeHash($policyBytes))).Replace('-','').ToLowerInvariant()
   $policy=[Text.Encoding]::UTF8.GetString($policyBytes) | ConvertFrom-Json
+  $preserving=($policy.preservingUpdate.format -eq 1 -and $policy.preservingUpdate.operation -in @('build','install','restart'))
   $before=@(Processes)
   $tasks=@(Tasks)
+  if (-not $preserving) {
   # Current and common known folders cover this single-user adapter. Additional
   # non-special profiles are an explicit incomplete scope, never silently skipped.
   $profiles=@(Get-CimInstance Win32_UserProfile -ErrorAction Stop | Where-Object { -not $_.Special })
@@ -117,6 +120,7 @@ try {
       $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='enumerated';identity=$rootProof.identity})
     }
   } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+  }
   $tasksAfter=@(Tasks)
   $after=@(Processes)
   Budget
@@ -127,8 +131,8 @@ try {
 }
 $complete=$errors.Count -eq 0
 [PSCustomObject]@{
-  format=1;complete=$complete;policySha256=$policySha
-  categories=@{processes=$complete;tasks=$complete;shortcuts=$complete}
+  format=$(if ($preserving) {2} else {1});complete=$(if ($preserving) {$false} else {$complete});observationComplete=$(if ($preserving) {$complete} else {$null});policySha256=$policySha
+  categories=@{processes=$complete;tasks=$complete;shortcuts=$(if ($preserving) {'not_applicable'} else {$complete})}
   errors=@($errors.ToArray());processesBefore=@($before);processesAfter=@($after)
   tasks=@($tasks);tasksAfter=@($tasksAfter);shortcuts=@($shortcuts.ToArray());shortcutCoverage=@($coverage.ToArray())
   shortcutDirectories=@($directorySnapshots.ToArray())

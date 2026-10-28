@@ -229,6 +229,34 @@ function reject(f, expected) {
   assert.equal(r.complete, false);
   assert(r.errors.includes(expected), JSON.stringify(r));
 }
+test('preserving build records shortcuts as not applicable without asserting complete coverage', () =>
+  fixture((f) => {
+    f.policy.phase = 'build-only';
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.native.format = 2; f.native.complete = false; f.native.observationComplete = true;
+    f.native.categories.shortcuts = 'not_applicable';
+    f.native.shortcuts = []; f.native.shortcutCoverage = []; f.native.shortcutDirectories = [];
+    const result = f.run();
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.complete, false);
+    assert.equal(result.observationComplete, true);
+    assert.equal(result.categories.shortcuts, 'not_applicable');
+    assert.equal(result.categories.processes, true);
+    assert.equal(result.categories.tasks, true);
+  }));
+test('preserving observation rejects changed process and incomplete task evidence', () =>
+  fixture((f) => {
+    f.policy.phase = 'build-only';
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.native.format = 2; f.native.complete = false; f.native.observationComplete = true;
+    f.native.categories.shortcuts = 'not_applicable';
+    f.native.shortcuts = []; f.native.shortcutCoverage = []; f.native.shortcutDirectories = [];
+    f.native.processesAfter[0].startUtc = '2026-02-01T00:00:00.000Z';
+    assert.equal(f.run().observationComplete, undefined);
+    f.native.processesAfter = structuredClone(f.native.processesBefore);
+    f.native.tasksAfter = [];
+    assert.equal(f.run().observationComplete, undefined);
+  }));
 test('real contract emits all six complete categories from pinned synthetic sources', () =>
   fixture((f) => {
     const r = f.run();

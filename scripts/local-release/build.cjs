@@ -485,6 +485,8 @@ function build(options = {}) {
     let failure;
     try {
       if (reusable) {
+        if (shared.policy.preservingUpdate)
+          throw new Error('RELEASE_PRESERVING_REUSE_FORBIDDEN');
         console.log(
           JSON.stringify({
             release: reusable.directory,

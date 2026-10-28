@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { installPair, DEFAULTS } = require('./install-lifecycle.cjs');
 const { fingerprint, fileHash } = require('./lib.cjs');
-function pkg(parent, id) {
+function pkg(parent, id, schema = false) {
   const folder = path.join(parent, id);
   fs.mkdirSync(path.join(folder, 'runtime'), { recursive: true });
   fs.writeFileSync(
@@ -13,6 +13,11 @@ function pkg(parent, id) {
     'synthetic-runtime-never-executed',
   );
   fs.writeFileSync(path.join(folder, 'app.cjs'), 'synthetic ' + id);
+  if (schema) {
+  fs.mkdirSync(path.join(folder, 'server/prisma/migrations/001'), { recursive: true });
+  fs.writeFileSync(path.join(folder, 'server/prisma/schema.prisma'), 'synthetic schema');
+  fs.writeFileSync(path.join(folder, 'server/prisma/migrations/001/migration.sql'), '-- synthetic migration');
+  }
   const manifest = {
     format: 1,
     platform: process.platform,
@@ -33,7 +38,7 @@ function proof(folder) {
     manifestSha256: fileHash(path.join(folder, 'release.json')),
   };
 }
-function fixture(run) {
+function fixture(run, schema = false) {
   const base = fs.mkdtempSync(
       path.join(os.tmpdir(), 'wewe-install-lifecycle-'),
     ),
@@ -41,9 +46,9 @@ function fixture(run) {
     sources = path.join(base, 'sources');
   fs.mkdirSync(root);
   fs.mkdirSync(sources);
-  const current = pkg(root, 'current'),
-    candidate = pkg(sources, 'candidate'),
-    rollback = pkg(sources, 'rollback');
+  const current = pkg(root, 'current', schema),
+    candidate = pkg(sources, 'candidate', schema),
+    rollback = pkg(sources, 'rollback', schema);
   fs.writeFileSync(
     path.join(root, 'active.json'),
     JSON.stringify({ format: 1, id: 'current' }),
@@ -91,6 +96,27 @@ function fixture(run) {
 function call(f, options = f.options) {
   return installPair(f.root, f.plan, options);
 }
+test('preserving install uses the real scope and copies new roles while keeping current and active unchanged', () =>
+  fixture((f) => {
+    const scope = require('./release-scope.cjs'), crypto = require('node:crypto');
+    const roots = [f.root, f.sources].map((p) => fs.realpathSync.native(p));
+    const current = fs.realpathSync.native(f.current), candidate = fs.realpathSync.native(f.candidate), rollback = fs.realpathSync.native(f.rollback);
+    const pointer = path.join(roots[0], 'active.json'), pointerHash = fileHash(pointer);
+    const policy = { format: 1, scopeId: crypto.randomUUID(), ...scope.inspect(roots), registryDirectory: fs.realpathSync.native(f.base), registryIdentity: scope.inspect([f.base]).roots[0].identity,
+      maxBytes: scope.DEFAULT_BYTES, maxGrowthBytes: 1024 * 1024, maxNewRuntimeCopies: 2, protectedIds: ['current', 'candidate', 'rollback'], compatibilityProofSha256: 'd'.repeat(64),
+      packageProofs: Object.fromEntries([current, candidate, rollback].map((p) => [path.basename(p), fileHash(path.join(p, 'release.json'))])) };
+    policy.preservingUpdate = { format: 1, operation: 'install', effects: ['new-output-only'], active: { pointer, pointerSha256: pointerHash, currentId: 'current', candidateId: 'candidate', currentManifestSha256: policy.packageProofs.current, candidateManifestSha256: policy.packageProofs.candidate, oldProcess: { pid: 7, startUtc: '2026-01-01T00:00:00Z', executableSha256: 'c'.repeat(64) } } };
+    const config = path.join(f.base, 'policy.json'); fs.writeFileSync(config, JSON.stringify(policy));
+    const facts = { complete: false, observationComplete: true, categories: { processes: true, tasks: true, shortcuts: 'not_applicable', pointers: true, rollback: true, inflight: true }, errors: [], uncertainChildren: [], compatibility: { verified: true, businessDatabaseRestored: false, proofSha256: 'd'.repeat(64) }, records: [
+      { kind: 'processes', packageId: 'current', packagePath: current, identity: 'synthetic-process', ...policy.preservingUpdate.active.oldProcess },
+      { kind: 'pointers', packageId: 'current', packagePath: current, identity: 'synthetic-pointer', pointerPath: pointer },
+    ] };
+    const lease = scope.open({ kind: 'install', root: roots[0], reserveBytes: 1024 * 1024, runtimeCopies: 2 }, { configPath: config, configSha256: fileHash(config), query: () => structuredClone(facts) });
+    const result = call(f, { ...f.options, scope: lease });
+    assert.deepEqual(result.installedIds.sort(), ['candidate', 'rollback']);
+    assert.equal(fileHash(pointer), pointerHash);
+    assert(fs.existsSync(path.join(f.root, 'candidate/release.json')));
+  }, true));
 function patch(object, key, value, run) {
   const saved = object[key];
   object[key] = value;

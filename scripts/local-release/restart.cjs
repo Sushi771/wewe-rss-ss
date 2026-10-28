@@ -119,6 +119,12 @@ async function controlledRestartInner(options) {
       : await verifyReleaseAsync(previous, {
           reuseVerified: options.reuseVerified === true,
         });
+  const preserving = require('./release-scope.cjs').session()?.policy?.preservingUpdate;
+  if (preserving) {
+    if (preserving.operation !== 'restart' || options.mode !== 'restart')
+      throw new Error('RELEASE_PRESERVING_EFFECT_FORBIDDEN');
+    require('./preserving-contract.cjs').validateSameSchema(previousManifest, manifest);
+  }
   for (const item of [manifest, previousManifest]) {
     assert.equal(item.schemaCompatibility, 'current', '只允许当前 schema 产物');
     assert.equal(typeof item.desktopHelperIncluded, 'boolean');
@@ -316,6 +322,15 @@ async function controlledRestartInner(options) {
         stdio: ['ignore', log, log],
       });
       fs.closeSync(log);
+      if (preserving) {
+        const snapshot = processIdentity('Snapshot', child.pid, port);
+        try {
+          scopeLease?.bindPreservingChild?.(snapshot, bundle.id, commandLine(bundlePath, database, port, bundle));
+        } catch (error) {
+          child.kill();
+          throw error;
+        }
+      }
       return child;
     };
     let oldChild;
@@ -348,8 +363,23 @@ async function controlledRestartInner(options) {
             '旧进程程序不属于指定产物',
           );
         }
+        if (preserving && options.production) {
+          const active = preserving.active;
+          if (fs.realpathSync(active.pointer) !== active.pointer || fs.lstatSync(active.pointer).isSymbolicLink())
+            throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+          const pointer = JSON.parse(fs.readFileSync(active.pointer, 'utf8'));
+          require('./preserving-contract.cjs').validateActiveBinding(preserving, {
+            pointerSha256: fileHash(active.pointer), pointerId: pointer.format === 1 ? pointer.id : undefined,
+            currentId: previousManifest.id, candidateId: manifest.id,
+            currentManifestSha256: fileHash(path.join(previous, 'release.json')),
+            candidateManifestSha256: fileHash(path.join(release, 'release.json')),
+            process: { pid: identity.pid, startUtc: identity.startUtc, executableSha256: fileHash(identity.executable) },
+          });
+          require('./release-scope.cjs').session()?.check();
+        }
         const result = processIdentity('Stop', identity.pid, port, identity);
         assert.equal(result.stopped, true);
+        if (preserving) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(identity.pid, { pid: identity.pid, stopped: result.stopped === true });
         stopped = true;
         finalBackup = backup(database, 'after-stop');
       } else {
@@ -485,6 +515,7 @@ async function controlledRestartInner(options) {
       return summary;
     } catch (error) {
       await stopOwned(newChild);
+      if (preserving && newChild) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(newChild.pid, { pid: newChild.pid, stopped: newChild.exitCode !== null || typeof newChild.signalCode === 'string' });
       if (stopped) {
         try {
           fallbackChild = start(

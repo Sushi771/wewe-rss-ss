@@ -293,6 +293,18 @@ function installPair(root, plan, options = {}) {
         reserveBytes: physical,
         runtimeCopies: missing.length,
       });
+    const installOwned = () => {
+    const preserving = shared.policy?.preservingUpdate;
+    if (preserving) {
+      if (preserving.operation !== 'install' || preserving.active.pointer !== pointer ||
+          preserving.active.pointerSha256 !== pointerSha || preserving.active.currentId !== current.manifest.id ||
+          preserving.active.candidateId !== candidate.manifest.id ||
+          preserving.active.currentManifestSha256 !== current.manifestSha ||
+          preserving.active.candidateManifestSha256 !== candidate.manifestSha)
+        throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+      require('./preserving-contract.cjs').validateSameSchema(current.manifest, candidate.manifest);
+      require('./preserving-contract.cjs').validateSameSchema(current.manifest, rollback.manifest);
+    }
     shared.check();
     assertOwner();
     if (fileHash(pointer) !== pointerSha)
@@ -373,6 +385,8 @@ function installPair(root, plan, options = {}) {
       ),
       historicalDeletionPerformed: false,
     };
+    };
+    return shared.policy?.preservingUpdate ? require('./lib.cjs').hostEffects.context.run(shared, installOwned) : installOwned();
   } finally {
     try {
       assertOwner();
