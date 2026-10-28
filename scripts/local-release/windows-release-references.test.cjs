@@ -979,3 +979,31 @@ $raw=(& { . ${literal(path.join(__dirname,'windows-release-reference-collector.p
       assert.equal(r.native.categories.tasks,'not_applicable');assert.equal(r.native.categories.shortcuts,'not_applicable');
       assert.equal(r.native.categories.processes,true);assert.equal(r.native.processesBefore.length,1);
     }));
+
+function consoleFixture(f){
+ const c=buildControlFixture(f),folder=path.join(f.base,'synthetic-system32');fs.mkdirSync(folder);const exe=path.join(folder,'conhost.exe');fs.writeFileSync(exe,'inert pinned system host fixture');const st=fs.lstatSync(exe,{bigint:true});
+ c.self.consoleHost={...f.pin(exe),identity:[st.dev,st.ino,st.size,st.birthtimeNs,st.mtimeNs,st.ctimeNs].map(String)};
+ const hosts=[f.process(202,200,exe,`\\??\\${exe} 0x1234`),f.process(203,201,exe,`\\??\\${exe} 0x5678`)];
+ f.native.processesBefore.push(...hosts);f.native.processesAfter.push(...structuredClone(hosts));return {...c,exe,hosts};
+}
+test('console control accepts two proven system hosts without claiming global complete',()=>fixture(f=>{
+ const c=consoleFixture(f),r=c.run();assert.deepEqual(r.errors,[]);assert.equal(r.observationComplete,true);assert.equal(r.complete,false);assert.equal(r.processObservation,'build-control-only');assert.equal(r.categories.inflight,true);assert(!r.records.some(r=>r.kind==='processes'));
+}));
+for(const mode of ['wrong-path','bad-pin','unknown-argument','extra-argument','extra-child','extra-host','changed-start','changed-parent','missing-field','output-reference','wrong-argv-path','missing-pin','changed-file','full-mode'])test('console control refuses '+mode,()=>fixture(f=>{
+ const c=consoleFixture(f),p=f.native.processesBefore.find(p=>p.pid===202),q=f.native.processesAfter.find(p=>p.pid===202);
+ if(mode==='wrong-path')p.executable=f.worker;
+ if(mode==='bad-pin')c.self.consoleHost.sha256='0'.repeat(64);
+ if(mode==='unknown-argument')p.commandLine=q.commandLine=`\\??\\${c.exe} -ForceV1`;
+ if(mode==='extra-argument')p.commandLine=q.commandLine+= ' --headless';
+ if(mode==='extra-child'){const child=f.process(204,202,f.worker,quote(f.worker));f.native.processesBefore.push(child);f.native.processesAfter.push(structuredClone(child));}
+ if(mode==='extra-host'){const child=f.process(204,200,c.exe,p.commandLine);f.native.processesBefore.push(child);f.native.processesAfter.push(structuredClone(child));}
+ if(mode==='changed-start')q.startUtc='2026-02-01T00:00:00Z';
+ if(mode==='changed-parent')q.parentPid=201;
+ if(mode==='missing-field')q.commandLine='';
+ if(mode==='output-reference')p.workingDirectory=q.workingDirectory=c.fresh;
+ if(mode==='wrong-argv-path')p.commandLine=q.commandLine=`\\??\\${f.worker} 0x1234`;
+ if(mode==='missing-pin')delete c.self.consoleHost;
+ if(mode==='changed-file')fs.appendFileSync(c.exe,'changed');
+ if(mode==='full-mode'){delete f.policy.preservingUpdate;f.native.format=1;f.native.complete=true;f.native.categories.tasks=f.native.categories.shortcuts=true;}
+ const r=c.run();assert.notEqual(r.observationComplete,true);assert(r.errors.length);assert.equal(r.complete,false);
+}));

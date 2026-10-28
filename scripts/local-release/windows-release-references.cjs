@@ -579,8 +579,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       const children = [...before.values()].filter(
         (p) => p.parentPid === self.pid,
       );
-      if (children.length !== 1) fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
-      const child = children[0];
+      const collectors=controlOnly ? children.filter(p=>visible(p)&&same(p.executable,self.collectorExecutable)&&hash(argv(p.commandLine))===hash(self.collectorArgv)) : children;
+      if (collectors.length !== 1) fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+      const child = collectors[0];
       if (
         !after.has(child.pid) ||
         (controlOnly && (!visible(child)||!visible(after.get(child.pid)))) ||
@@ -590,16 +591,34 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           canonical(self.collectorExecutable),
         ) ||
         hash(argv(child.commandLine)) !== hash(self.collectorArgv) ||
-        [...before.values(), ...after.values()].some(
+        !controlOnly && [...before.values(), ...after.values()].some(
           (p) =>
             p.parentPid === child.pid ||
             (p.parentPid === self.pid && p.pid !== child.pid),
         )
       )
         fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
-      // Exactly this hash-pinned read-only invocation is transient. Every other
-      // descendant is still retained, including children of the controller.
-      for (const pid of [self.pid, child.pid]) {
+      const consolePids=[];
+      if(controlOnly){
+        const related=[...before.values(),...after.values()];
+        const hosts=new Set(related.filter(p=>(p.parentPid===self.pid&&p.pid!==child.pid)||p.parentPid===child.pid).map(p=>p.pid));
+        if(hosts.size){
+          if(!self.consoleHost || !Array.isArray(self.consoleHost.identity))fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+          watchPinned(self.consoleHost,256*1024**2);
+          if(hash(identity(fs.lstatSync(canonical(self.consoleHost.path),{bigint:true})))!==hash(self.consoleHost.identity))fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+          const byParent=new Set();
+          for(const pid of hosts){
+            const p=before.get(pid),q=after.get(pid);
+            if(!visible(p)||!visible(q)||hash(p)!==hash(q)||byParent.has(p.parentPid)||!same(canonical(p.executable),canonical(self.consoleHost.path))||related.some(r=>r.parentPid===pid))fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+            const tokens=argv(p.commandLine),output=canonical(policy.buildOnly.outputRoot).replaceAll('\\','/').toLowerCase();
+            if(tokens.length!==2||!tokens[0].startsWith('\\??\\')||!same(tokens[0].slice(4),canonical(self.consoleHost.path))||!/^0x[0-9a-f]{1,16}$/i.test(tokens[1])||[p.executable,p.commandLine,p.workingDirectory].some(t=>typeof t==='string'&&t.replaceAll('\\','/').toLowerCase().includes(output)))fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+            byParent.add(p.parentPid);consolePids.push(pid);
+          }
+        }
+      }
+      // Only this bound query invocation and its proven system console hosts
+      // are transient. Arbitrary query descendants remain refused.
+      for (const pid of [self.pid, child.pid, ...consolePids]) {
         before.delete(pid);
         after.delete(pid);
       }
@@ -959,6 +978,10 @@ function main(policyFile) {
     process.env.SystemRoot,
     'System32/WindowsPowerShell/v1.0/powershell.exe',
   );
+  const controlOnly=require('./preserving-contract.cjs').referenceApplicability(policy).buildOnly && !!require('./preserving-contract.cjs').preservingRootRoles(policy);
+  const hostPath=controlOnly ? canonical(path.join(process.env.SystemRoot,'System32/conhost.exe')) : undefined;
+  if(controlOnly && !same(hostPath,path.join(process.env.SystemRoot,'System32/conhost.exe')))fail('REFERENCE_COLLECTOR_PIN_CHANGED');
+  const consoleHost=controlOnly ? {path:hostPath,sha256:digest(bytes(hostPath,256*1024**2)),identity:identity(fs.lstatSync(hostPath,{bigint:true}))} : undefined;
   const collectorArgs = [
     '-NoProfile',
     '-NonInteractive',
@@ -998,12 +1021,14 @@ function main(policyFile) {
     policy.windowsReferences.collectorIdentitySha256 !== digest(bytes(helper))
   )
     fail('REFERENCE_COLLECTOR_PIN_CHANGED');
+  if(consoleHost && (digest(bytes(hostPath,256*1024**2))!==consoleHost.sha256 || hash(identity(fs.lstatSync(hostPath,{bigint:true})))!==hash(consoleHost.identity)))fail('REFERENCE_COLLECTOR_PIN_CHANGED');
   const result = probe(policy, native, {
     self: {
       pid: process.pid,
       executable: process.execPath,
       argv: [process.execPath, process.argv[1], policyFile],
       collectorExecutable,
+      consoleHost,
       collectorArgv: [collectorExecutable, ...collectorArgs],
     },
   });
