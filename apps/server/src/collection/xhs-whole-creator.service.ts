@@ -169,7 +169,10 @@ export class XhsWholeCreatorService implements OnModuleInit {
     jobId?: string;
     requestLimit: number;
     intervalMs: number;
-    phaseLimits: Record<'profile' | 'list' | 'detail' | 'media' | 'metrics', number>;
+    phaseLimits: Record<
+      'profile' | 'list' | 'detail' | 'media' | 'metrics',
+      number
+    >;
   }) {
     const phases = ['profile', 'list', 'detail', 'media', 'metrics'] as const;
     if (
@@ -283,7 +286,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
     newLimit: number;
   }) {
     if (
-      !['profile', 'list', 'detail', 'media', 'metrics'].includes(input.phase) ||
+      !['profile', 'list', 'detail', 'media', 'metrics'].includes(
+        input.phase,
+      ) ||
       !Number.isSafeInteger(input.newLimit)
     )
       throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
@@ -301,8 +306,11 @@ export class XhsWholeCreatorService implements OnModuleInit {
         where: { id: job.creatorId },
       });
       const budget = await new XhsSqliteBudgetStore(tx).read(job.id);
+      const pending = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' LIMIT 1`;
       if (
         job.sourceFence ||
+        pending.length > 0 ||
         !job.sourceGrant ||
         risk.length !== 1 ||
         risk[0].state !== 'blocked' ||
@@ -325,26 +333,31 @@ export class XhsWholeCreatorService implements OnModuleInit {
     });
   }
   async resume(id: string) {
-    const job = await this.load(id);
-    if (
-      this.running.has(id) ||
-      !['paused', 'partial', 'failed', 'cancelled'].includes(job.state)
-    )
-      throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
-    if (job.sourceFence)
-      throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-    const previous = job.state;
-    job.state = 'queued';
-    if (job.code) job.lastPauseCode = job.code;
-    delete job.code;
-    job.updatedAt = Date.now();
-    // Explicit resume may consume cancelled state; ordinary saves may not.
-    const changed = await this.write(
-      (tx) => tx.$executeRaw`UPDATE xhs_whole_creator_jobs
-      SET state='queued',document=${JSON.stringify(job)},updated_at=${BigInt(job.updatedAt)}
-      WHERE id=${id} AND state=${previous}`,
-    );
-    if (changed !== 1) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    await this.write(async (tx) => {
+      const rows = await tx.$queryRaw<
+        Array<{ state: string; document: string }>
+      >`
+        SELECT state,document FROM xhs_whole_creator_jobs WHERE id=${id}`;
+      if (rows.length !== 1) throw new XhsSubscriptionError('XHS_TASK_NOT_FOUND');
+      if (
+        this.running.has(id) ||
+        !['paused', 'partial', 'failed', 'cancelled'].includes(rows[0].state)
+      )
+        throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+      const job = JSON.parse(rows[0].document) as Job;
+      if (job.sourceFence)
+        throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      job.state = 'queued';
+      if (job.code) job.lastPauseCode = job.code;
+      delete job.code;
+      job.updatedAt = Date.now();
+      // Explicit resume may consume cancelled state; ordinary saves may not.
+      const changed = await tx.$executeRaw`UPDATE xhs_whole_creator_jobs
+        SET state='queued',document=${JSON.stringify(job)},updated_at=${BigInt(job.updatedAt)}
+        WHERE id=${id} AND state=${rows[0].state} AND document=${rows[0].document}`;
+      if (changed !== 1)
+        throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    });
     this.schedule(id);
     return this.view(id);
   }
@@ -358,6 +371,46 @@ export class XhsWholeCreatorService implements OnModuleInit {
     const job = await this.load(id);
     if (job.sourceFence)
       throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    if (job.sourceGrant) {
+      if (this.running.has(id))
+        throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+      await this.write(async (tx) => {
+        const rows = await tx.$queryRaw<Array<{ document: string }>>`
+          SELECT document FROM xhs_whole_creator_jobs WHERE id=${id} AND state='paused'`;
+        if (rows.length !== 1)
+          throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+        const current = JSON.parse(rows[0].document) as Job;
+        const pending = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' LIMIT 1`;
+        const risk = await tx.$queryRaw<Array<{ state: string; code: string }>>`
+          SELECT state,code FROM xhs_source_risk WHERE id='source'`;
+        const creator = await tx.xhsCreator.findUnique({
+          where: { id: current.creatorId },
+        });
+        if (
+          current.sourceFence ||
+          pending.length ||
+          !current.sourceGrant ||
+          ![
+            'XHS_REQUEST_BUDGET_EXHAUSTED',
+            'XHS_WHOLE_PHASE_BUDGET_EXHAUSTED',
+          ].includes(current.code ?? '') ||
+          risk.length !== 1 ||
+          risk[0].state !== 'blocked' ||
+          risk[0].code !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED' ||
+          !creator?.enabled ||
+          creator.externalAuthorId !== current.sourceGrant.authorId ||
+          current.sourceGrant.creatorId !== current.creatorId
+        )
+          throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        const changed = await tx.$executeRaw`UPDATE xhs_request_budgets
+          SET request_limit=request_limit+${additional} WHERE id=${id} AND request_limit+${additional}<=100000`;
+        if (changed !== 1)
+          throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
+      });
+      // Explicit continuation is a separate operator action after all limits are reviewed.
+      return this.view(id);
+    }
     if (
       this.running.has(id) ||
       job.state !== 'paused' ||
@@ -659,8 +712,22 @@ export class XhsWholeCreatorService implements OnModuleInit {
       ...visibleJob,
       budget,
       sourceTotalKnown: false,
-      historyGrant: sourceGrant ? { limits: sourceGrant.limits, used: sourceGrant.used } : undefined,
-      sourceCheckpoint: sourceFence ? { phase: sourceFence.phase, state: job.state === 'running' ? 'in-progress' as const : /^XHS_SOURCE_(?:AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(job.code ?? '') ? 'restricted' as const : 'unknown' as const } : undefined,
+      historyGrant: sourceGrant
+        ? { limits: sourceGrant.limits, used: sourceGrant.used }
+        : undefined,
+      sourceCheckpoint: sourceFence
+        ? {
+            phase: sourceFence.phase,
+            state:
+              job.state === 'running'
+                ? ('in-progress' as const)
+                : /^XHS_SOURCE_(?:AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(
+                      job.code ?? '',
+                    )
+                  ? ('restricted' as const)
+                  : ('unknown' as const),
+          }
+        : undefined,
       resumable:
         !sourceFence &&
         !this.running.has(id) &&

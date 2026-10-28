@@ -93,9 +93,26 @@ describe('whole creator durable checkpoint fence', () => {
     await db.$disconnect();
     await fs.rm(folder, { recursive: true, force: true });
   }, 40000);
-  it.each([[true, false, false, false, false, false], [false, false, false, false, false, false], [true, true, false, false, false, false], [false, false, true, false, false, false], [true, true, false, true, false, false], [false, false, true, false, true, false], [false, false, true, false, true, true]])(
-    'runs scoped checkpoints (list complete: %s, image: %s, directory only: %s, media zero: %s, 10s: %s, cancel: %s)',
-    async (listEnd, hasImage, directoryOnly, mediaZero, slow, cancelWait) => {
+  it.each([
+    [true, false, false, false, false, false, false],
+    [false, false, false, false, false, false, false],
+    [true, true, false, false, false, false, false],
+    [false, false, true, false, false, false, false],
+    [true, true, false, true, false, false, false],
+    [false, false, true, false, true, false, false],
+    [false, false, true, false, true, true, false],
+    [false, true, true, false, false, false, true],
+  ])(
+    'runs scoped checkpoints (list complete: %s, image: %s, directory only: %s, media zero: %s, 10s: %s, cancel: %s, extend: %s)',
+    async (
+      listEnd,
+      hasImage,
+      directoryOnly,
+      mediaZero,
+      slow,
+      cancelWait,
+      continueStage,
+    ) => {
       const author = {
         id: scope.authorId,
         name: 'Synthetic',
@@ -104,7 +121,9 @@ describe('whole creator durable checkpoint fence', () => {
       };
       const sentAt: number[] = [];
       let sawProfile!: () => void;
-      const profileCalled = new Promise<void>((resolve) => { sawProfile = resolve; });
+      const profileCalled = new Promise<void>((resolve) => {
+        sawProfile = resolve;
+      });
       const api = jest.fn(async (request: any) => {
         const u = new URL(request.url);
         sentAt.push(Date.now());
@@ -136,7 +155,14 @@ describe('whole creator durable checkpoint fence', () => {
                       time: 1760000000000,
                       title: 'Synthetic',
                       desc: 'Synthetic body',
-                      image_list: hasImage ? [{url_default:'https://sns-webpic.xhscdn.com/synthetic.png'}] : [],
+                      image_list: hasImage
+                        ? [
+                            {
+                              url_default:
+                                'https://sns-webpic.xhscdn.com/synthetic.png',
+                            },
+                          ]
+                        : [],
                       interact_info: {
                         liked_count: '0',
                         collected_count: '2',
@@ -153,8 +179,17 @@ describe('whole creator durable checkpoint fence', () => {
           body: { success: true, code: 0, data },
         };
       });
-      const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=', 'base64');
-      const media = jest.fn(async () => new Response(png, {status:200, headers:{'content-type':'image/png'}}));
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+        'base64',
+      );
+      const media = jest.fn(
+        async () =>
+          new Response(png, {
+            status: 200,
+            headers: { 'content-type': 'image/png' },
+          }),
+      );
       const runtime = new XhsSubscriptionRuntime({
         enabled: () => true,
         api,
@@ -168,9 +203,12 @@ describe('whole creator durable checkpoint fence', () => {
         a1: 'synthetic-a1',
         webSession: 'synthetic-session',
       });
-      const sharedLimit = slow ? 6 : 20, sharedUsed = slow ? 2 : 0, interval = slow ? 10000 : 1000;
+      const sharedLimit = slow ? 6 : 20,
+        sharedUsed = slow ? 2 : 0,
+        interval = slow ? 10000 : 1000;
       await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES('xhs:source-total',${sharedLimit},${slow ? 10000 : 0},${sharedUsed},0)`;
-      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES(${scope.jobId},20,${interval},0,0)`;
+      const taskLimit = continueStage ? 4 : 20;
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES(${scope.jobId},${taskLimit},${interval},0,0)`;
       if (!listEnd) await db.xhsNote.deleteMany();
       const doc = {
         id: scope.jobId,
@@ -202,9 +240,15 @@ describe('whole creator durable checkpoint fence', () => {
         creatorId: scope.creatorId,
         expectedAuthorId: scope.authorId,
         jobId: scope.jobId,
-        requestLimit: 20,
+        requestLimit: taskLimit,
         intervalMs: interval,
-        phaseLimits: { profile: directoryOnly ? 1 : 10, list: directoryOnly ? 3 : 10, detail: directoryOnly ? 0 : 10, media: directoryOnly || mediaZero ? 0 : 10, metrics: directoryOnly ? 0 : 10 },
+        phaseLimits: {
+          profile: directoryOnly ? 1 : 10,
+          list: directoryOnly ? 3 : 10,
+          detail: directoryOnly ? 0 : 10,
+          media: directoryOnly || mediaZero ? 0 : 10,
+          metrics: directoryOnly ? 0 : 10,
+        },
       };
       await expect(
         whole.prepareHistoryGrant({ ...grant, expectedAuthorId: 'other' }),
@@ -223,7 +267,9 @@ describe('whole creator durable checkpoint fence', () => {
         expect(result.state).toBe('cancelled');
         expect(api).toHaveBeenCalledTimes(1);
         expect(media).not.toHaveBeenCalled();
-        const total = await db.$queryRaw<Array<{used: number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+        const total = await db.$queryRaw<
+          Array<{ used: number }>
+        >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
         expect(total[0].used).toBe(3);
         expect(result.budget!.used).toBe(1);
         runtime.onModuleDestroy();
@@ -234,7 +280,11 @@ describe('whole creator durable checkpoint fence', () => {
         expect(result.listEnd).toBe(true);
         expect(result.code).toBe('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
         expect(result.archiveTask).toBeUndefined();
-        expect(api.mock.calls.every(([r]: any[]) => !new URL(r.url).pathname.endsWith('/feed'))).toBe(true);
+        expect(
+          api.mock.calls.every(
+            ([r]: any[]) => !new URL(r.url).pathname.endsWith('/feed'),
+          ),
+        ).toBe(true);
         expect(media).not.toHaveBeenCalled();
         expect(result.historyGrant!.used.detail).toBe(0);
         expect(result.historyGrant!.used.media).toBe(0);
@@ -242,9 +292,120 @@ describe('whole creator durable checkpoint fence', () => {
         expect(result.historyGrant!.used.list).toBe(1);
         if (slow) {
           expect(sentAt[1] - sentAt[0]).toBeGreaterThanOrEqual(9900);
-          const total = await db.$queryRaw<Array<{used: number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+          const total = await db.$queryRaw<
+            Array<{ used: number }>
+          >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
           expect(total[0].used).toBe(4);
           expect(result.budget!.used).toBe(2);
+        }
+        if (continueStage) {
+          const before = await new XhsSqliteBudgetStore(db as any).read(
+            scope.jobId,
+          );
+          const totalBefore = await new XhsSqliteBudgetStore(db as any).read(
+            'xhs:source-total',
+          );
+          const apiBefore = api.mock.calls.length;
+          await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES('xhs:dispatch-pending:synthetic',1,0,1,0)`;
+          await expect(whole.extend(scope.jobId, 16)).rejects.toThrow(
+            'XHS_WHOLE_SOURCE_FENCE_BLOCKED',
+          );
+          await expect(
+            whole.extendHistoryPhase({
+              id: scope.jobId,
+              phase: 'detail',
+              newLimit: 1,
+            }),
+          ).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          expect(
+            await new XhsSqliteBudgetStore(db as any).read(scope.jobId),
+          ).toEqual(before);
+          await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:dispatch-pending:synthetic'`;
+          const extended = await whole.extend(scope.jobId, 16);
+          expect(extended.state).toBe('paused');
+          await whole.extendHistoryPhase({
+            id: scope.jobId,
+            phase: 'profile',
+            newLimit: 2,
+          });
+          for (const phase of ['detail', 'media', 'metrics'] as const)
+            await whole.extendHistoryPhase({
+              id: scope.jobId,
+              phase,
+              newLimit: 10,
+            });
+          const after = await new XhsSqliteBudgetStore(db as any).read(
+            scope.jobId,
+          );
+          expect(after).toMatchObject({
+            limit: 20,
+            used: before!.used,
+            nextAt: before!.nextAt,
+            intervalMs: before!.intervalMs,
+          });
+          expect(
+            await new XhsSqliteBudgetStore(db as any).read('xhs:source-total'),
+          ).toEqual(totalBefore);
+          expect(api).toHaveBeenCalledTimes(apiBefore);
+          expect(media).not.toHaveBeenCalled();
+          // A fresh runtime has no transient author/note context after restart.
+          runtime.onModuleDestroy();
+          const nextRuntime = new XhsSubscriptionRuntime({
+            enabled: () => true,
+            api,
+            media,
+            requirePersistentRisk: true,
+            profileParser: (raw: any) => raw.author,
+          });
+          nextRuntime.bindRiskStore(new XhsSourceRiskStore(db as any));
+          bindXhsSourceTotalBudget(db as any, nextRuntime);
+          await nextRuntime.connectSession({
+            a1: 'synthetic-a1',
+            webSession: 'synthetic-session',
+          });
+          const nextSubscriptions = new XhsSubscriptionService(
+            db as any,
+            nextRuntime,
+          );
+          nextSubscriptions.bindLocalSaver(
+            async () => folder,
+            async () => ({
+              alreadySaved: false,
+              mediaComplete: true,
+              supplement: { status: 'new' },
+            }),
+          );
+          const nextWhole = new XhsWholeCreatorService(
+            db as any,
+            nextSubscriptions,
+            nextRuntime,
+            new XhsEngagementService(db as any, nextRuntime),
+          );
+          await nextWhole.resume(scope.jobId);
+          await (nextWhole as any).lane;
+          const finished = await nextWhole.view(scope.jobId);
+          expect(finished.state).toBe('completed');
+          expect(finished.id).toBe(scope.jobId);
+          expect(finished.historyGrant!.used).toMatchObject({
+            profile: 2,
+            list: 2,
+            detail: 1,
+            media: 1,
+          });
+          expect(media).toHaveBeenCalledTimes(1);
+          expect(
+            (
+              await db.xhsNote.findUniqueOrThrow({
+                where: {
+                  id: JSON.stringify(['xiaohongshu', 'note', scope.noteId]),
+                },
+              })
+            ).contentHtml,
+          ).toContain('Synthetic body');
+          expect(await new XhsSourceRiskStore(db as any).read()).toBe(
+            'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
+          );
+          nextRuntime.onModuleDestroy();
         }
         runtime.onModuleDestroy();
         return;
@@ -375,7 +536,13 @@ describe('whole creator durable checkpoint fence', () => {
       jobId: scope.jobId,
       requestLimit: 20,
       intervalMs: 1000,
-      phaseLimits: { profile: 10, list: 10, detail: 10, media: 10, metrics: 10 },
+      phaseLimits: {
+        profile: 10,
+        list: 10,
+        detail: 10,
+        media: 10,
+        metrics: 10,
+      },
     };
     await expect(whole.prepareHistoryGrant(grant)).rejects.toThrow(
       'XHS_SOURCE_RISK_REVIEW_REQUIRED',
@@ -400,29 +567,128 @@ describe('whole creator durable checkpoint fence', () => {
     ).toBe('unknown');
   });
   it('does not treat an old exhausted budget as proof that a checkpoint is safe', async () => {
-    const job = { id: scope.jobId, creatorId: scope.creatorId, state: 'paused', updatedAt: 1, listEnd: false, items: {}, code: 'XHS_REQUEST_BUDGET_EXHAUSTED' };
+    const job = {
+      id: scope.jobId,
+      creatorId: scope.creatorId,
+      state: 'paused',
+      updatedAt: 1,
+      listEnd: false,
+      items: {},
+      code: 'XHS_REQUEST_BUDGET_EXHAUSTED',
+    };
     await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='paused',document=${JSON.stringify(job)} WHERE id=${scope.jobId}`;
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES(${scope.jobId},20,1000,20,0)`;
-    const whole = new XhsWholeCreatorService(db as any, {} as any, {} as any, {} as any);
-    await expect(whole.prepareHistoryGrant({ creatorId: scope.creatorId, expectedAuthorId: scope.authorId, jobId: scope.jobId, requestLimit: 20, intervalMs: 1000, phaseLimits: { profile: 1, list: 1, detail: 1, media: 1, metrics: 1 } })).rejects.toThrow('XHS_TASK_NOT_RESUMABLE');
-    const rows = await db.$queryRaw<Array<{used: number}>>`SELECT used FROM xhs_request_budgets WHERE id=${scope.jobId}`;
+    const whole = new XhsWholeCreatorService(
+      db as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+    await expect(
+      whole.prepareHistoryGrant({
+        creatorId: scope.creatorId,
+        expectedAuthorId: scope.authorId,
+        jobId: scope.jobId,
+        requestLimit: 20,
+        intervalMs: 1000,
+        phaseLimits: { profile: 1, list: 1, detail: 1, media: 1, metrics: 1 },
+      }),
+    ).rejects.toThrow('XHS_TASK_NOT_RESUMABLE');
+    const rows = await db.$queryRaw<
+      Array<{ used: number }>
+    >`SELECT used FROM xhs_request_budgets WHERE id=${scope.jobId}`;
     expect(rows[0].used).toBe(20);
   });
   it('enforces separate profile and list caps while preserving the shared fence', async () => {
-    const rows = await db.$queryRaw<Array<{document: string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    const rows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
     const job = JSON.parse(rows[0].document);
     job.sourceGrant.phases = ['list'];
-    job.sourceGrant.limits = { profile: 1, list: 3, detail: 0, media: 0, metrics: 0 };
-    job.sourceGrant.used = { profile: 0, list: 0, detail: 0, media: 0, metrics: 0 };
+    job.sourceGrant.limits = {
+      profile: 1,
+      list: 3,
+      detail: 0,
+      media: 0,
+      metrics: 0,
+    };
+    job.sourceGrant.used = {
+      profile: 0,
+      list: 0,
+      detail: 0,
+      media: 0,
+      metrics: 0,
+    };
     await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${scope.jobId}`;
-    await db.$transaction((tx) => prepareWholeSourceFence(tx, { ...scope, phase: 'list', noteId: undefined }));
-    await db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, 'profile'));
-    for (let n=0; n<3; n++) await db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, 'list'));
-    await expect(db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, 'list'))).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
-    await expect(db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, 'profile'))).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
-    const after = await db.$queryRaw<Array<{document: string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
-    expect(JSON.parse(after[0].document).sourceGrant.used).toEqual({ profile: 1, list: 3, detail: 0, media: 0, metrics: 0 });
-    expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`).toHaveLength(1);
+    await db.$transaction((tx) =>
+      prepareWholeSourceFence(tx, {
+        ...scope,
+        phase: 'list',
+        noteId: undefined,
+      }),
+    );
+    await db.$transaction((tx) =>
+      markWholeSourceStarted(tx, scope.jobId, marker, 'profile'),
+    );
+    for (let n = 0; n < 3; n++)
+      await db.$transaction((tx) =>
+        markWholeSourceStarted(tx, scope.jobId, marker, 'list'),
+      );
+    await expect(
+      db.$transaction((tx) =>
+        markWholeSourceStarted(tx, scope.jobId, marker, 'list'),
+      ),
+    ).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
+    await expect(
+      db.$transaction((tx) =>
+        markWholeSourceStarted(tx, scope.jobId, marker, 'profile'),
+      ),
+    ).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
+    const after = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    expect(JSON.parse(after[0].document).sourceGrant.used).toEqual({
+      profile: 1,
+      list: 3,
+      detail: 0,
+      media: 0,
+      metrics: 0,
+    });
+    expect(
+      await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`,
+    ).toHaveLength(1);
+  });
+  it('atomically admits one explicit continuation without overwriting its stage grant', async () => {
+    const rows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    const job = JSON.parse(rows[0].document);
+    job.state = 'paused';
+    job.code = 'XHS_WHOLE_PHASE_BUDGET_EXHAUSTED';
+    job.items = {};
+    job.listEnd = false;
+    job.updatedAt = 1;
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='paused',document=${JSON.stringify(job)} WHERE id=${scope.jobId}`;
+    const whole = new XhsWholeCreatorService(
+      db as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+    const schedule = jest
+      .spyOn(whole as any, 'schedule')
+      .mockImplementation(() => undefined);
+    const results = await Promise.allSettled([
+      whole.resume(scope.jobId),
+      whole.resume(scope.jobId),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect(schedule).toHaveBeenCalledTimes(1);
+    const after = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    expect(JSON.parse(after[0].document).sourceGrant).toEqual(job.sourceGrant);
   });
   it('holds the actual source-dispatch fence until the business transaction commits', async () => {
     const rows = await db.$queryRaw<
@@ -745,23 +1011,76 @@ describe('whole creator durable checkpoint fence', () => {
     runtime.onModuleDestroy();
   }, 40000);
   it('stops safely when a phase cap is reached inside an uncommitted multi-request group', async () => {
-    const rows = await db.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
-    const job = JSON.parse(rows[0].document); job.sourceGrant.phases=['list']; job.sourceGrant.limits={list:1,profile:1}; job.sourceGrant.used={list:0,profile:0};
+    const rows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    const job = JSON.parse(rows[0].document);
+    job.sourceGrant.phases = ['list'];
+    job.sourceGrant.limits = { list: 1, profile: 1 };
+    job.sourceGrant.used = { list: 0, profile: 0 };
     await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${scope.jobId}`;
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES('xhs:source-total',20,0,0,0)`;
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES(${scope.jobId},20,0,0,0)`;
-    const author={id:scope.authorId,name:'Synthetic',profileUrl:'https://www.xiaohongshu.com/user/profile/'+scope.authorId};
-    const api=jest.fn(async (request:any)=>({status:200,url:request.url,body:{success:true,code:0,data:new URL(request.url).pathname.endsWith('otherinfo')?{author}:{notes:[],has_more:false,cursor:''}}}));
-    const runtime=new XhsSubscriptionRuntime({enabled:()=>true,api,requirePersistentRisk:true,profileParser:(raw:any)=>raw.author});
-    runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});
-    const budget=new XhsRequestBudget(new XhsSqliteBudgetStore(db as any));
-    await expect(runtime.withWholeAuthorization({jobId:scope.jobId,creatorId:scope.creatorId,authorId:scope.authorId},()=>runtime.withRequestBudget(budget,scope.jobId,()=>runtime.withCheckpointGroup('list',scope.authorId,undefined,async()=>{await runtime.list(scope.authorId,null);await runtime.list(scope.authorId,null);} )))).rejects.toThrow();
+    const author = {
+      id: scope.authorId,
+      name: 'Synthetic',
+      profileUrl: 'https://www.xiaohongshu.com/user/profile/' + scope.authorId,
+    };
+    const api = jest.fn(async (request: any) => ({
+      status: 200,
+      url: request.url,
+      body: {
+        success: true,
+        code: 0,
+        data: new URL(request.url).pathname.endsWith('otherinfo')
+          ? { author }
+          : { notes: [], has_more: false, cursor: '' },
+      },
+    }));
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      api,
+      requirePersistentRisk: true,
+      profileParser: (raw: any) => raw.author,
+    });
+    runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
+    bindXhsSourceTotalBudget(db as any, runtime);
+    await runtime.connectSession({
+      a1: 'synthetic-a1',
+      webSession: 'synthetic-session',
+    });
+    const budget = new XhsRequestBudget(new XhsSqliteBudgetStore(db as any));
+    await expect(
+      runtime.withWholeAuthorization(
+        {
+          jobId: scope.jobId,
+          creatorId: scope.creatorId,
+          authorId: scope.authorId,
+        },
+        () =>
+          runtime.withRequestBudget(budget, scope.jobId, () =>
+            runtime.withCheckpointGroup(
+              'list',
+              scope.authorId,
+              undefined,
+              async () => {
+                await runtime.list(scope.authorId, null);
+                await runtime.list(scope.authorId, null);
+              },
+            ),
+          ),
+      ),
+    ).rejects.toThrow();
     expect(api).toHaveBeenCalledTimes(2);
-    const ledger=await db.$queryRaw<Array<{used:number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+    const ledger = await db.$queryRaw<
+      Array<{ used: number }>
+    >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
     expect(ledger[0].used).toBe(2);
-    expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:whole:%'`).toHaveLength(1);
+    expect(
+      await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:whole:%'`,
+    ).toHaveLength(1);
     runtime.onModuleDestroy();
-  },40000);
+  }, 40000);
   it('retains the dispatched fence across a failed business checkpoint and removes it atomically after success', async () => {
     await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
     await db.$transaction((tx) =>

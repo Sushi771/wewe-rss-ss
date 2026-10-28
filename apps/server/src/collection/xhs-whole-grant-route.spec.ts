@@ -58,4 +58,29 @@ it('requires explicit local authorization and never starts the prepared job', as
   ).toMatchObject({ state: 'paused' });
   expect(whole.prepareHistoryGrant).toHaveBeenCalledTimes(1);
   expect(whole.resume).not.toHaveBeenCalled();
+  const phase = {
+    id: '00000000-0000-4000-8000-000000000001',
+    phase: 'detail' as const,
+    newLimit: 10,
+    confirmHistoryGrant: true as const,
+  };
+  await expect(
+    router
+      .createCaller({ errorMsg: null, isLocalSave: false })
+      .xiaohongshu.extendWholeCreatorHistoryPhase(phase),
+  ).rejects.toThrow();
+  await expect(
+    local.xiaohongshu.extendWholeCreatorHistoryPhase({
+      ...phase,
+      confirmHistoryGrant: false,
+    } as any),
+  ).rejects.toThrow();
+  expect(whole.extendHistoryPhase).not.toHaveBeenCalled();
+  await expect(
+    local.xiaohongshu.extendWholeCreatorHistoryPhase(phase),
+  ).resolves.toMatchObject({ state: 'paused' });
+  expect(whole.extendHistoryPhase).toHaveBeenCalledWith(
+    expect.objectContaining({ id: phase.id, phase: 'detail', newLimit: 10 }),
+  );
+  expect(whole.resume).not.toHaveBeenCalled();
 });
