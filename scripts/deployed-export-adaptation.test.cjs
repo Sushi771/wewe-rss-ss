@@ -184,6 +184,19 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
       source = source.replace(guarded, 'async function runtime() {\n');
     }
     let requiredHash = expected;
+    if (file === 'scripts/local-release/restart.cjs') {
+      assert.equal(expected, 'd958e4f2be1bb1f3f031f809669dde57057ffa6c6c7b2cce993862b4c466a4cc', 'exact pre-preserving restart baseline');
+      requiredHash = 'f05c6c7c55cf8e263e594ed7474727c878b5b5eeaf8b0b1a4919e3d8ef8b2534';
+      const restartAst = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+      const calls = [];
+      const visit = (node) => {
+        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) calls.push(node.expression.name.text);
+        ts.forEachChild(node, visit);
+      };
+      visit(restartAst);
+      for (const [name, count] of [['validateSameSchema', 1], ['validateActiveBinding', 1], ['bindPreservingChild', 1], ['confirmPreservingProcessExit', 2]])
+        assert.equal(calls.filter((value) => value === name).length, count, 'reviewed preserving restart ' + name);
+    }
     if (file === 'apps/server/src/prisma/prisma.service.ts') {
       // Keep the deployed baseline pin authoritative. Only this independently
       // reviewed recovery version is accepted; all unknown changes still fail.
