@@ -136,6 +136,59 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
   let fixtureNumber = 0;
   const timing = (stage: string, start: number, extra: object = {}) =>
     console.info('SYNTHETIC_FIXTURE_TIMING', JSON.stringify({ case: fixtureNumber, stage, elapsedMs: Math.round(performance.now() - start), ...extra }));
+  let schemaRoot: string;
+  let schemaPromise: Promise<void> | undefined;
+  beforeAll(() => {
+    schemaPromise = (async () => {
+      const overall = performance.now();
+      let stage = overall;
+      schemaRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'exact-media-schema-'));
+      const savedUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = 'file:' + path.join(schemaRoot, 'schema.db').replaceAll('\\', '/') + '?connection_limit=1';
+      const schemaPrisma = new PrismaService();
+      try {
+        await schemaPrisma.$connect();
+    const migrations = path.resolve(__dirname, '../../prisma/migrations');
+    let fileIndex = 0;
+    for (const name of (await fs.readdir(migrations)).sort()) {
+      fileIndex++;
+      const sql = await fs
+        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
+        .catch(() => '');
+      let statementIndex = 0;
+      for (const statement of splitSqliteStatements(sql)
+        .map((s) => s.trim())
+        .filter(Boolean)) {
+        statementIndex++;
+        const started = performance.now();
+        timing('migration-statement-start', overall, { fileIndex, statementIndex });
+        await schemaPrisma.$executeRawUnsafe(statement);
+        if (performance.now() - started >= 250) timing('migration-statement-slow', started, { fileIndex, statementIndex });
+      }
+    }
+    timing('migrations-done', stage, { fileCount: fileIndex }); stage = performance.now();
+        await schemaPrisma.$queryRawUnsafe('PRAGMA journal_mode=DELETE');
+      } finally {
+        try { await schemaPrisma.$disconnect(); } finally {
+          if (savedUrl === undefined) delete process.env.DATABASE_URL;
+          else process.env.DATABASE_URL = savedUrl;
+        }
+      }
+      for (const suffix of ['-wal', '-shm', '-journal']) {
+        if (await fs.stat(path.join(schemaRoot, 'schema.db') + suffix).then(() => true, (e) => { if (e.code === 'ENOENT') return false; throw e; })) throw Error('SCHEMA_FIXTURE_HAS_SIDECAR');
+      }
+      await fs.chmod(path.join(schemaRoot, 'schema.db'), 0o444);
+      timing('schema-ready', overall);
+    })();
+    return schemaPromise;
+  }, 40000);
+  afterAll(async () => {
+    await schemaPromise?.catch(() => undefined);
+    if (schemaRoot && path.dirname(schemaRoot) === os.tmpdir() && path.basename(schemaRoot).startsWith('exact-media-schema-')) {
+      await fs.chmod(path.join(schemaRoot, 'schema.db'), 0o600).catch(() => undefined);
+      await fs.rm(schemaRoot, { recursive: true, force: true });
+    }
+  }, 40000);
   const setupFixture = async () => {
     fixtureNumber++;
     const overall = performance.now();
@@ -158,6 +211,8 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     });
     delete process.env.WEWE_ACCEPTANCE_MODE;
     timing('temp-ready', stage); stage = performance.now();
+    await fs.copyFile(path.join(schemaRoot, 'schema.db'), path.join(root, 'data.db'));
+    await fs.chmod(path.join(root, 'data.db'), 0o600);
     prisma = new PrismaService();
     timing('connect-start', stage);
     await prisma.$connect();
@@ -172,25 +227,8 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
         ? { count: 0 }
         : next(params),
     );
-    const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    let fileIndex = 0;
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      fileIndex++;
-      const sql = await fs
-        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
-        .catch(() => '');
-      let statementIndex = 0;
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean)) {
-        statementIndex++;
-        const started = performance.now();
-        timing('migration-statement-start', overall, { fileIndex, statementIndex });
-        await prisma.$executeRawUnsafe(statement);
-        if (performance.now() - started >= 250) timing('migration-statement-slow', started, { fileIndex, statementIndex });
-      }
-    }
-    timing('migrations-done', stage, { fileCount: fileIndex }); stage = performance.now();
+    timing('schema-copy-done', stage); stage = performance.now();
+    if (await prisma.feed.count() !== 0 || await prisma.article.count() !== 0) throw Error('SCHEMA_FIXTURE_NOT_EMPTY');
     await prisma.feed.create({
       data: {
         id: mpId,
