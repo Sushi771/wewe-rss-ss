@@ -55,6 +55,10 @@ jobs:
         with:
           node-version: 24.11.1
           cache: pnpm
+      - name: Privacy inventory and protected package regressions
+        run: |
+          node --test scripts/local-release/private-inventory.test.cjs scripts/local-release/private-artifact-proof.test.cjs
+          node --test --test-name-pattern='^(v3|a v3)' scripts/local-release/release-scope.test.cjs
       - run: pnpm install --frozen-lockfile
       - name: Synthetic source, session, storage and shared grouping regressions
         run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu|subscription-video|media-transaction|saved-media-writeback)|trpc/(xiaohongshu-ui|management-groups)|article-local-save|xhs-single-download|xhs-video-download|article-verified-download|feeds/(automatic-media-queue|automatic-media-storage)|media-large-export)'
