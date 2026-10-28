@@ -1,5 +1,6 @@
 import { TRPCError } from '@trpc/server';
 import { RedbookPauseError } from './redbook-client';
+import { XhsMediaError } from './xhs-media-error';
 /** Public fixed codes only. Never expose provider errors, URLs, tokens or bodies. */
 export class XhsSubscriptionError extends Error {
   constructor(readonly code: string) {
@@ -78,7 +79,9 @@ const codes = new Set([
   'XHS_CURSOR_CYCLE',
   'XHS_LIST_NO_PROGRESS',
 ]);
+const safeMediaCode = (code: string) => /^XHS_MEDIA_HTTP_[1-5][0-9]{2}$/.test(code) || ['XHS_MEDIA_REQUEST_REJECTED', 'XHS_MEDIA_RESPONSE_INVALID', 'XHS_MEDIA_TYPE_REJECTED', 'XHS_MEDIA_SIZE_REJECTED', 'XHS_MEDIA_EMPTY', 'XHS_MEDIA_BYTES_INVALID', 'XHS_MEDIA_TIMEOUT', 'XHS_MEDIA_ABORTED', 'XHS_MEDIA_TRANSPORT_FAILED'].includes(code);
 export function xhsPublicCode(error: unknown, fallback: string) {
+  if ((error instanceof XhsMediaError || error instanceof XhsSubscriptionError) && safeMediaCode(error.code)) return error.code;
   if (
     error instanceof RedbookPauseError &&
     [

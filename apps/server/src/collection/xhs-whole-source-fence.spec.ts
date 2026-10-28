@@ -102,6 +102,7 @@ describe('whole creator durable checkpoint fence', () => {
     [false, false, true, false, true, false, false],
     [false, false, true, false, true, true, false],
     [false, true, true, false, false, false, true],
+    [true, true, false, false, false, false, false, true],
   ])(
     'runs scoped checkpoints (list complete: %s, image: %s, directory only: %s, media zero: %s, 10s: %s, cancel: %s, extend: %s)',
     async (
@@ -112,6 +113,7 @@ describe('whole creator durable checkpoint fence', () => {
       slow,
       cancelWait,
       continueStage,
+      mediaDenied = false,
     ) => {
       const author = {
         id: scope.authorId,
@@ -185,8 +187,8 @@ describe('whole creator durable checkpoint fence', () => {
       );
       const media = jest.fn(
         async () =>
-          new Response(png, {
-            status: 200,
+          new Response(mediaDenied ? 'synthetic-secret' : png, {
+            status: mediaDenied ? 403 : 200,
             headers: { 'content-type': 'image/png' },
           }),
       );
@@ -263,6 +265,19 @@ describe('whole creator durable checkpoint fence', () => {
       }
       await (whole as any).lane;
       const result = await whole.view(scope.jobId);
+      if (mediaDenied) {
+        expect(result.state).toBe('paused');
+        expect(result.code).toBe('XHS_MEDIA_HTTP_403');
+        expect(result.sourceCheckpoint?.state).toBe('unknown');
+        expect(result.budget!.used).toBe(4);
+        expect(media).toHaveBeenCalledTimes(1);
+        const receipt = await subscriptions.task({taskId: result.archiveTask!});
+        expect(receipt.code).toBe('XHS_MEDIA_HTTP_403');
+        expect(JSON.stringify(receipt)).not.toContain('synthetic-secret');
+        await expect(whole.resume(scope.jobId)).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        runtime.onModuleDestroy();
+        return;
+      }
       if (cancelWait) {
         expect(result.state).toBe('cancelled');
         expect(api).toHaveBeenCalledTimes(1);

@@ -1,6 +1,9 @@
 import { decodeInlineImage } from './image-fetch';
 import { XhsNormalizedCandidate } from './xiaohongshu-contract';
 import { xhsNoteMetrics } from './xhs-engagement-contract';
+import { XhsMediaError, mediaHttpError } from './xhs-media-error';
+import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { RedbookPauseError } from './redbook-client';
 
 /**
  * Provisional, fail-closed contract, NOT a real-response evidence assertion.
@@ -134,24 +137,25 @@ async function downloadMedia(
       }),
       signal: AbortSignal.timeout(10_000),
     });
-  } catch {
+  } catch (error) {
     // Transport errors can contain signed URLs or secrets: return a fixed code.
-    throw new Error('REDBOOK_MEDIA_REQUEST_FAILED');
+    if (error instanceof XhsMediaError || error instanceof XhsSubscriptionError || error instanceof RedbookPauseError) throw error;
+    throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED');
   }
   const type = (response.headers.get('content-type') || '')
     .split(';')[0]
     .trim()
     .toLowerCase();
+  if (response.status !== 200) { await response.body?.cancel(); throw mediaHttpError(response.status); }
   if (
-    response.status !== 200 ||
     response.redirected ||
     (response.url && response.url !== url.href) ||
-    !/^image\/(png|jpeg|gif|webp)$/.test(type) ||
-    !response.body
+    !/^image\/(png|jpeg|gif|webp)$/.test(type)
   ) {
     await response.body?.cancel();
-    throw new Error('REDBOOK_MEDIA_RESPONSE_REJECTED');
+    throw new XhsMediaError(response.redirected || (response.url && response.url !== url.href) ? 'XHS_MEDIA_RESPONSE_INVALID' : 'XHS_MEDIA_TYPE_REJECTED');
   }
+  if (!response.body) throw new XhsMediaError('XHS_MEDIA_EMPTY');
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let length = 0;
@@ -162,21 +166,18 @@ async function downloadMedia(
       length += value.byteLength;
       if (length > Math.min(IMAGE_BUDGET, remainingBytes)) {
         await reader.cancel();
-        throw new Error('REDBOOK_MEDIA_BUDGET_EXCEEDED');
+        throw new XhsMediaError('XHS_MEDIA_SIZE_REJECTED');
       }
       chunks.push(Buffer.from(value));
     }
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === 'REDBOOK_MEDIA_BUDGET_EXCEEDED'
-    )
-      throw error;
-    throw new Error('REDBOOK_MEDIA_REQUEST_FAILED');
+    if (error instanceof XhsMediaError) throw error;
+    throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED');
   }
+  if (!length) throw new XhsMediaError('XHS_MEDIA_EMPTY');
   const inlineData = `data:${type};base64,${Buffer.concat(chunks).toString('base64')}`;
   // Existing archive validator checks actual container bytes, including MIME.
-  decodeInlineImage(inlineData);
+  try { decodeInlineImage(inlineData); } catch { throw new XhsMediaError('XHS_MEDIA_BYTES_INVALID'); }
   return { inlineData, byteLength: length };
 }
 

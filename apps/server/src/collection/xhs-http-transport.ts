@@ -1,6 +1,7 @@
 import * as https from 'node:https';
 import { IncomingMessage, ClientRequest } from 'node:http';
 import { Readable, Transform } from 'node:stream';
+import { XhsMediaError, mediaHttpError } from './xhs-media-error';
 import { RedbookPauseError, RedbookTransport } from './redbook-client';
 import {
   redbookErrorSummary,
@@ -212,7 +213,7 @@ export function createXhsMediaTransport(
           throw stop();
         options.signal.throwIfAborted();
       } catch {
-        reject(stop());
+        reject(new XhsMediaError('XHS_MEDIA_REQUEST_REJECTED'));
         return;
       }
       let req: ClientRequest | undefined,
@@ -226,16 +227,16 @@ export function createXhsMediaTransport(
         clearTimeout(timer);
         options.signal.removeEventListener('abort', abort);
       };
-      const fail = () => {
+      const fail = (error = new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED')) => {
         if (ended) return;
         ended = true;
         cleanup();
         res?.destroy();
         req?.destroy();
-        limiter?.destroy(stop());
-        if (!returned) reject(stop());
+        limiter?.destroy(error);
+        if (!returned) reject(error);
       };
-      const abort = () => fail();
+      const abort = () => fail(new XhsMediaError(options.signal.reason?.name === 'TimeoutError' ? 'XHS_MEDIA_TIMEOUT' : 'XHS_MEDIA_ABORTED'));
       try {
         req = request(
           url,
@@ -251,17 +252,21 @@ export function createXhsMediaTransport(
               return;
             }
             try {
-              if (res.statusCode !== 200) throw stop();
-              contentLength(res, 10_000_000);
+              if (res.statusCode !== 200) throw mediaHttpError(res.statusCode ?? 0);
+              const rawLength = res.headers['content-length'];
+              if (rawLength !== undefined && !/^\d+$/.test(String(rawLength)))
+                throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+              if (rawLength !== undefined && Number(rawLength) > 10_000_000)
+                throw new XhsMediaError('XHS_MEDIA_SIZE_REJECTED');
               const mime = String(res.headers['content-type'] ?? '')
                 .split(';')[0]
                 .trim()
                 .toLowerCase();
-              if (!/^image\/(png|jpeg|gif|webp)$/.test(mime)) throw stop();
+              if (!/^image\/(png|jpeg|gif|webp)$/.test(mime)) throw new XhsMediaError('XHS_MEDIA_TYPE_REJECTED');
               limiter = new Transform({
                 transform(part: Buffer, _encoding, callback) {
                   length += part.length;
-                  if (length > 10_000_000) callback(stop());
+                  if (length > 10_000_000) callback(new XhsMediaError('XHS_MEDIA_SIZE_REJECTED'));
                   else callback(null, part);
                 },
               });
@@ -278,8 +283,8 @@ export function createXhsMediaTransport(
                   cleanup();
                 }
               });
-              res.on('error', fail);
-              res.on('aborted', fail);
+              res.on('error', () => fail());
+              res.on('aborted', () => fail());
               res.on('end', () => {
                 ended = true;
                 cleanup();
@@ -291,13 +296,13 @@ export function createXhsMediaTransport(
               Object.defineProperty(response, 'url', { value: url.href });
               returned = true;
               resolve(response);
-            } catch {
-              fail();
+            } catch (error) {
+              fail(error instanceof XhsMediaError ? error : undefined);
             }
           },
         );
-        req.on('error', fail);
-        timer = setTimeout(fail, 10000);
+        req.on('error', () => fail());
+        timer = setTimeout(() => fail(new XhsMediaError('XHS_MEDIA_TIMEOUT')), 10000);
         timer.unref?.();
         options.signal.addEventListener('abort', abort, { once: true });
         if (options.signal.aborted) fail();

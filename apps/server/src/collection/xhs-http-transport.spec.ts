@@ -225,6 +225,29 @@ describe('native HTTPS metadata transport (injected synthetic request only)', ()
   });
 });
 describe('separate bounded CDN stream (injected synthetic request only)', () => {
+  it.each([403, 429, 461, 500, 503])('retains only the observed HTTP status %s and never retries', async (status) => {
+    const f = httpsFixture({ status, headers: { 'content-type': 'text/html' }, parts: [Buffer.from('synthetic-secret')] });
+    const error = await createXhsMediaTransport(f.request)(new URL('https://sns-webpic.xhscdn.com/synthetic?token=synthetic-secret'), mediaOptions()).catch((e) => e);
+    expect(error.message).toBe(`XHS_MEDIA_HTTP_${status}`);
+    expect(xhsPublicCode(error, 'fallback')).toBe(`XHS_MEDIA_HTTP_${status}`);
+    expect(String(error)).not.toContain('synthetic-secret');
+    expect(f.raw).toHaveBeenCalledTimes(1);
+  });
+  it('classifies actual type rejection without retaining header values', async () => {
+    const f = httpsFixture({ headers: { 'content-type': 'text/html; synthetic-secret' } });
+    const error = await createXhsMediaTransport(f.request)(new URL('https://sns-webpic.xhscdn.com/synthetic'), mediaOptions()).catch((e) => e);
+    expect(xhsPublicCode(error, 'fallback')).toBe('XHS_MEDIA_TYPE_REJECTED');
+    expect(String(error)).not.toContain('synthetic-secret');
+  });
+  it('distinguishes an observed timeout from an ordinary abort', async () => {
+    const f = httpsFixture({ headers: { 'content-type': 'image/png' }, hold: true });
+    const controller = new AbortController();
+    const response = await createXhsMediaTransport(f.request)(new URL('https://sns-webpic.xhscdn.com/synthetic'), mediaOptions(controller.signal));
+    const pending = response.arrayBuffer();
+    controller.abort(new DOMException('synthetic-secret', 'TimeoutError'));
+    await expect(pending).rejects.toThrow('XHS_MEDIA_TIMEOUT');
+    expect(f.raw).toHaveBeenCalledTimes(1);
+  });
   it('streams bytes without Cookie/Authorization and never follows redirects', async () => {
     const f = httpsFixture({
       headers: { 'content-type': 'image/png' },
@@ -251,7 +274,7 @@ describe('separate bounded CDN stream (injected synthetic request only)', () => 
         new URL('https://sns-webpic.xhscdn.com/synthetic'),
         mediaOptions(),
       ),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('XHS_MEDIA_HTTP_302');
     expect(redirected.raw).toHaveBeenCalledTimes(1);
   });
   it('rejects credential headers, non-CDN targets and cleartext before dispatch', async () => {
@@ -262,26 +285,28 @@ describe('separate bounded CDN stream (injected synthetic request only)', () => 
         ...mediaOptions(),
         headers: { accept: 'image/png', cookie: 'synthetic' },
       }),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('XHS_MEDIA_REQUEST_REJECTED');
     await expect(
       transport(new URL('https://127.0.0.1/synthetic'), mediaOptions()),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('XHS_MEDIA_REQUEST_REJECTED');
     await expect(
       transport(
         new URL('http://sns-webpic.xhscdn.com/synthetic'),
         mediaOptions(),
       ),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('XHS_MEDIA_REQUEST_REJECTED');
     expect(f.raw).not.toHaveBeenCalled();
   });
   it('bounds media by declared length and actual streamed bytes', async () => {
     const url = new URL('https://sns-webpic.xhscdn.com/synthetic');
+    const malformed = httpsFixture({ headers: { 'content-type': 'image/png', 'content-length': 'bad' } });
+    await expect(createXhsMediaTransport(malformed.request)(url, mediaOptions())).rejects.toThrow('XHS_MEDIA_RESPONSE_INVALID');
     const declared = httpsFixture({
       headers: { 'content-type': 'image/png', 'content-length': '10000001' },
     });
     await expect(
       createXhsMediaTransport(declared.request)(url, mediaOptions()),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('XHS_MEDIA_SIZE_REJECTED');
     const streamed = httpsFixture({
       headers: { 'content-type': 'image/png' },
       parts: [Buffer.alloc(6000000), Buffer.alloc(5000000)],
@@ -290,7 +315,7 @@ describe('separate bounded CDN stream (injected synthetic request only)', () => 
       url,
       mediaOptions(),
     );
-    await expect(response.arrayBuffer()).rejects.toThrow('transport');
+    await expect(response.arrayBuffer()).rejects.toThrow('XHS_MEDIA_SIZE_REJECTED');
     expect(streamed.destroy).toHaveBeenCalled();
   });
   it('propagates cancellation after headers into the consumer stream', async () => {
@@ -305,7 +330,7 @@ describe('separate bounded CDN stream (injected synthetic request only)', () => 
     );
     const read = response.arrayBuffer();
     controller.abort();
-    await expect(read).rejects.toThrow('transport');
+    await expect(read).rejects.toThrow('XHS_MEDIA_ABORTED');
     expect(f.destroy).toHaveBeenCalled();
   });
 });
