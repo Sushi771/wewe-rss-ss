@@ -7,6 +7,7 @@ const test = require('node:test'),
 const scope = require('./release-scope.cjs');
 const { fileHash } = require('./lib.cjs');
 function enableV3(f) {
+  assert.equal(f.current === fs.realpathSync.native(f.current), true, 'fixture package path must be canonical');
   const m = { format: 1, id: 'current', files: { 'node.exe': fileHash(path.join(f.current, 'node.exe')) }, links: {} };
   const file = path.join(f.current, 'release.json');
   fs.writeFileSync(file, JSON.stringify(m));
@@ -84,6 +85,13 @@ test('v3 checks every physical copy of the same protected id', () =>
     f.save();
     assert.throws(() => f.open(), /ARTIFACT_HASH_MISMATCH/);
   }));
+test('v3 rejects a noncanonical package spelling before artifact access', () =>
+  fixture((f) => {
+    enableV3(f);
+    f.policy.windowsReferences.packages[0].path = f.current + path.sep + '.';
+    f.save();
+    assert.throws(() => f.open(), /ARTIFACT_BINDING_INVALID/);
+  }));
 test('elapsed reference-query time cannot reset or exceed the shared operation deadline before allocation', () =>
   fixture((f) => {
     f.policy.scanBudget = { durationMs: 2000 };
@@ -160,7 +168,7 @@ test('old inventory format cannot be silently upgraded or adopted as a fresh bas
     assert(!fs.existsSync(path.join(f.base, f.policy.scopeId + '.state.json')));
   }));
 function fixture(run) {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-release-scope-')),
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-release-scope-'))),
     installed = path.join(base, 'installed'),
     build = path.join(base, 'build'),
     current = path.join(installed, 'current');
