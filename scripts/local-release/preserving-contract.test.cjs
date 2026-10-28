@@ -93,7 +93,8 @@ test('pointer, package and process changes individually fail the active binding'
 // Real package bytes, pinned raw manifests, and no database access.
 function schemaPackages(run, change = () => {}) {
   const fs = require('node:fs'), os = require('node:os'), crypto = require('node:crypto');
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-schema-eol-'));
+  // Windows TEMP can use an 8.3 alias; the contract requires real package roots.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-schema-eol-')));
   const digest = (b) => crypto.createHash('sha256').update(b).digest('hex');
   const files = { 'server/prisma/schema.prisma': 'model Example {\n  id Int @id\n}\n',
     'server/prisma/migrations/001/migration.sql': '-- synthetic\nSELECT 1;\n',

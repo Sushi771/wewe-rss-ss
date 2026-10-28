@@ -234,8 +234,9 @@ async function controlledRestartInner(options) {
     const backgroundPreparation =
       options.mode === 'start' &&
       manifest.startupPreparation === 'node-background-backup-v1';
+    const productionRestart = options.production && options.mode === 'restart';
     const sourceBefore =
-      pinnedPreparation || backgroundPreparation
+      productionRestart || pinnedPreparation || backgroundPreparation
         ? null
         : inspect(source, [
             ...(options.mode === 'start' &&
@@ -247,6 +248,7 @@ async function controlledRestartInner(options) {
           ]);
     if (sourceBefore)
       assert.deepEqual(sourceBefore.pending, [], '数据库仍有待应用迁移');
+    let restartSourceIdentity;
     let database = source;
     let port = 4000;
     if (options.rehearsal) {
@@ -273,7 +275,18 @@ async function controlledRestartInner(options) {
         artifacts?.checkpoint();
       }
       port = options.port || (await unusedPort());
-    } else if (options.mode === 'restart') backup(source, 'before-stop');
+    } else if (productionRestart) {
+      // Capacity/layout is metadata-only; backup reuse can otherwise read every
+      // live row. The full protected backup remains mandatory after confirmed stop.
+      const info = fs.lstatSync(source);
+      assert(info.isFile() && !info.isSymbolicLink() && info.ino, 'RELEASE_RESTART_SOURCE_IDENTITY_UNPROVEN');
+      restartSourceIdentity = [info.dev, info.ino, info.birthtimeMs];
+      const capacity = JSON.parse(run(python, [
+        path.join(release, 'server/scripts/backup-space-status.py'), '--database', source,
+        '--backup-root', require('./space-budget.cjs').productionRoot(source),
+      ], { env }));
+      assert.equal(capacity.capacityAllowsNextBackup, true, 'RELEASE_RESTART_BACKUP_CAPACITY_UNAVAILABLE');
+    }
 
     const marker = (bundle) => {
       if (options.rehearsal)
@@ -382,6 +395,11 @@ async function controlledRestartInner(options) {
           });
           require('./release-scope.cjs').session()?.check();
         }
+        if (productionRestart) {
+          const info = fs.lstatSync(database);
+          assert(info.isFile() && !info.isSymbolicLink(), 'RELEASE_RESTART_SOURCE_IDENTITY_UNPROVEN');
+          assert.deepEqual([info.dev, info.ino, info.birthtimeMs], restartSourceIdentity, 'RELEASE_RESTART_SOURCE_IDENTITY_CHANGED');
+        }
         const result = processIdentity('Stop', identity.pid, port, identity);
         assert.equal(result.stopped, true);
         if (preserving) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(identity.pid, { pid: identity.pid, stopped: result.stopped === true });
@@ -469,9 +487,11 @@ async function controlledRestartInner(options) {
         } else finalBackup = backup(database, 'before-start');
       }
       if (!preparedBaseline && !backgroundPreparation) {
-        const finalBefore = inspect(database, ['--output', baseline]);
+        // The verified final SQLite backup is closed before its full baseline read.
+        // Production restart never opens a full inspection transaction on the live DB.
+        const finalBefore = inspect(productionRestart ? finalBackup.backup : database, ['--output', baseline]);
         assert.deepEqual(finalBefore.pending, []);
-        inspect(finalBackup.backup, ['--baseline', baseline]);
+        if (!productionRestart) inspect(finalBackup.backup, ['--baseline', baseline]);
       }
       if (options.injectFailure) throw new Error('INJECTED_NEW_START_FAILURE');
       newChild = start(release, manifest, 'new');

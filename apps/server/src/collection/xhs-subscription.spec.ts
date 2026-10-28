@@ -822,7 +822,11 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       (source.detail as jest.Mock).mockImplementation(async (_author, id) =>
         detail(id),
       );
-      await finish((await service.refresh({ id: creatorId })).taskId);
+      const listed = await service.refresh({ id: creatorId });
+      await finish(listed.taskId);
+      await (service as any).lane;
+      expect((service as any).pending.has(listed.taskId)).toBe(false);
+      expect((service as any).controllers.has(listed.taskId)).toBe(false);
       const request = {
         creatorId,
         noteIds: ['repeat-one', 'repeat-two'].map(noteKey),
@@ -834,6 +838,9 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         skipped: 0,
         remaining: 0,
       });
+      await (service as any).lane;
+      expect((service as any).pending.has(first.taskId)).toBe(false);
+      expect((service as any).controllers.has(first.taskId)).toBe(false);
       const files = (await fs.readdir(root, { recursive: true }))
         .map(String)
         .filter((file) => /\.(md|png)$/.test(file));
@@ -916,6 +923,46 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     },
     30000,
   );
+  it('keeps enqueue fenced after durable completion until the original lane releases', async () => {
+    const listed = await service.refresh({ id: creatorId });
+    await finish(listed.taskId);
+    await (service as any).lane;
+    const request = { creatorId, noteIds: [noteKey('note-a')] };
+    let reached!: () => void, release!: () => void;
+    const committed = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = (service as any).persist.bind(service);
+    let held = false;
+    const fault = jest.spyOn(service as any, 'persist').mockImplementation(async (task: any) => {
+      await original(task);
+      if (!held && task.kind === 'download' && task.state === 'completed') {
+        held = true;
+        reached();
+        await gate;
+      }
+    });
+    try {
+      const first = await service.downloadNotes(request);
+      await committed;
+      expect(await finish(first.taskId)).toMatchObject({ state: 'completed', completed: 1 });
+      expect((service as any).pending.has(first.taskId)).toBe(true);
+      expect((service as any).controllers.has(first.taskId)).toBe(true);
+      await expect(service.downloadNotes(request)).rejects.toThrow('XHS_TASK_CONFLICT');
+      expect(source.detail).toHaveBeenCalledTimes(1);
+      release();
+      await (service as any).lane;
+      expect((service as any).pending.has(first.taskId)).toBe(false);
+      expect((service as any).controllers.has(first.taskId)).toBe(false);
+      const repeat = await service.downloadNotes(request);
+      await (service as any).lane;
+      expect(await finish(repeat.taskId)).toMatchObject({ state: 'completed', skipped: 1 });
+      expect(source.detail).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await (service as any).lane;
+      fault.mockRestore();
+    }
+  }, 30000);
   it('rejects another creator selection before details or saving', async () => {
     await finish((await service.refresh({ id: creatorId })).taskId);
     await expect(
