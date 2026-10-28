@@ -51,6 +51,7 @@ jobs:
         run: >-
           node --test
           scripts/browser-readiness.test.cjs
+          scripts/xhs-avatar-fallback.test.cjs
           scripts/cdp-navigation.test.cjs
           scripts/overlay-click-readiness.test.cjs
           scripts/feed-refresh-state-ui.test.cjs
@@ -120,3 +121,8 @@ jobs:
         env:
           RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
         run: node scripts/xhs-filter-short-review.cjs
+
+      - name: Creator avatar fallback and long-name layout
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-avatar-name-browser.test.cjs

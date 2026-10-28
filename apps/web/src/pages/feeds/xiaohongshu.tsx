@@ -1174,6 +1174,7 @@ export default function Xiaohongshu() {
               <button
                 type="button"
                 disabled={busy}
+                title={creator.displayName}
                 aria-pressed={creatorId === creator.id}
                 className="min-w-0 flex-1 break-words text-left text-sm"
                 onClick={() => selectCreator(creator.id)}
@@ -1185,7 +1186,7 @@ export default function Xiaohongshu() {
                   }
                   name={creator.displayName}
                 />
-                {creator.displayName}
+                <span className="xhs-creator-name">{creator.displayName}</span>
                 <span className="block min-w-0 break-words">
                   <XhsMetricLine snapshot={creator.metrics} creator showUpdatedAt={false} />
                 </span>

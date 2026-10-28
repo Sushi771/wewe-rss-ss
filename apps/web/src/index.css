@@ -1610,3 +1610,12 @@ button:active {
     position: static;
   }
 }
+
+/* Keep creator names compact while retaining their full button text and title. */
+.xhs-creator-name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
