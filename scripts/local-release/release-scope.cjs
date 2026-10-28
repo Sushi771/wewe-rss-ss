@@ -357,6 +357,85 @@ function open(request, options = {}, boundOperation) {
     ledgerIdentity;
   let expectedProcesses;
   const configIdentity = fileIdentity(file);
+  // Narrow reviewed binding repair; uses this existing scope lock and never adopts.
+  const repairPath=options.bindingRepairFile || process.env.WEWE_RELEASE_BINDING_REPAIR_FILE;
+  const repairSha=options.bindingRepairSha256 || process.env.WEWE_RELEASE_BINDING_REPAIR_SHA256;
+  const repairBinding=()=>{
+    try {
+    if(!repairPath&&!repairSha)return;
+    const reject=()=>{throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED');};
+    const hex=x=>typeof x==='string'&&/^[a-f0-9]{64}$/.test(x);
+    const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
+    const bytes=(at,wanted,max=1024*1024)=>{
+      if(typeof at!=='string'||!path.isAbsolute(at)||require('./scope-inventory.cjs').isPrivatePath(at)||canonical(at)!==at)reject();
+      const before=fs.lstatSync(at,{bigint:true});
+      if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n||before.size>BigInt(max))reject();
+      const key=s=>[s.dev,s.ino,s.birthtimeNs,s.size,s.mtimeNs,s.ctimeNs,s.nlink].map(String);
+      const fd=fs.openSync(at,'r');let b;
+      try{
+        if(hash(key(before))!==hash(key(fs.fstatSync(fd,{bigint:true}))))reject();
+        b=Buffer.alloc(Number(before.size));let pos=0;
+        while(pos<b.length){const n=fs.readSync(fd,b,pos,b.length-pos,null);if(!n)reject();pos+=n;}
+        if(hash(key(before))!==hash(key(fs.fstatSync(fd,{bigint:true})))||hash(key(before))!==hash(key(fs.lstatSync(at,{bigint:true}))))reject();
+      }finally{fs.closeSync(fd);}
+      if(wanted&&digest(b)!==wanted)reject();return b;
+    };
+    if(!hex(repairSha)||!preserving||preserving.operation!=='build'||!rootRoles||policy.phase!=='build-only'||policy.format!==2)reject();
+    const approvalBytes=bytes(repairPath,repairSha,65536),a=JSON.parse(approvalBytes);
+    if(a.format!==1||a.kind!=='adopted-empty-build-binding-repair'||a.scopeId!==policy.scopeId||
+      a.registryDirectory!==directory||hash(a.registryIdentity)!==hash(policy.registryIdentity)||
+      a.newPolicySha256!==configSha||!hex(a.oldPolicySha256)||!hex(a.priorLedgerSha256)||!hex(a.priorPayloadDigest)||
+      !hex(a.adoptionSha256)||!hex(a.auditedSourceIdentity)||!a.reviewEvidence||typeof a.reviewEvidence!=='string'||
+      !Array.isArray(a.priorLedgerIdentity)||a.priorLedgerIdentity.length!==3||!Array.isArray(a.allowedDifferences))reject();
+    const oldBytes=bytes(a.oldPolicyPath,a.oldPolicySha256),nextBytes=bytes(file,configSha),old=JSON.parse(oldBytes);
+    const differences=(x,y,p='')=>{
+      if(JSON.stringify(x)===JSON.stringify(y))return [];
+      if(!x||!y||typeof x!=='object'||typeof y!=='object'||Array.isArray(x)||Array.isArray(y))return [p];
+      return [...new Set([...Object.keys(x),...Object.keys(y)])].sort().flatMap(k=>differences(x[k],y[k],p?p+'.'+k:k));
+    };
+    const changes=differences(old,policy).sort();
+    if(!changes.length||hash(changes)!==hash([...a.allowedDifferences].sort())||new Set(a.allowedDifferences).size!==changes.length||
+      changes.some(x=>!['buildOnly.sourceCommit','buildOnly.sourceHash','probe.sha256'].includes(x))||
+      old.scopeId!==policy.scopeId||old.format!==2||old.phase!=='build-only'||!old.preservingUpdate?.rootRoles)reject();
+    const origin=bytes(ledger+'.adopted',a.adoptionSha256,64);
+    if(origin.toString('utf8')!==a.oldPolicySha256||prior.claim!==null||!Array.isArray(prior.outputs)||prior.outputs.length||prior.format!==2)reject();
+    const current=bytes(ledger,null,65536),snapshotPath=ledger+'.binding-repair-'+repairSha+'.json';
+    let original=current;
+    if(prior.configSha===configSha){
+      if(!prior.bindingRepair||prior.bindingRepair.approvalSha256!==repairSha||!present(snapshotPath))reject();
+      const saved=bytes(snapshotPath,prior.bindingRepair.snapshotSha256,4*1024*1024);
+      original=Buffer.from(JSON.parse(saved).ledgerBase64||'','base64');
+    }else if(prior.configSha!==a.oldPolicySha256||digest(current)!==a.priorLedgerSha256||hash(fileIdentity(ledger))!==hash(a.priorLedgerIdentity))reject();
+    if(digest(original)!==a.priorLedgerSha256)reject();
+    const before=JSON.parse(original);
+    if(!before.payload||before.digest!==hash(before.payload)||before.digest!==a.priorPayloadDigest||
+      before.payload.configSha!==a.oldPolicySha256||before.payload.claim!==null||!Array.isArray(before.payload.outputs)||before.payload.outputs.length||before.payload.bindingRepair)reject();
+    const snapshot=Buffer.from(JSON.stringify({format:1,ledgerBase64:original.toString('base64'),oldPolicyBase64:oldBytes.toString('base64'),newPolicyBase64:nextBytes.toString('base64'),approvalBase64:approvalBytes.toString('base64')}));
+    if(snapshot.length>4*1024*1024)reject();
+    const after={...before.payload,configSha,bindingRepair:{format:1,approvalSha256:repairSha,oldPolicySha256:a.oldPolicySha256,
+      newPolicySha256:configSha,priorLedgerSha256:a.priorLedgerSha256,priorPayloadDigest:a.priorPayloadDigest,
+      adoptionSha256:a.adoptionSha256,snapshotSha256:digest(snapshot),auditedSourceIdentity:a.auditedSourceIdentity,allowedDifferences:a.allowedDifferences}};
+    const replay=prior.configSha===configSha;
+    if(replay&&(hash(prior)!==hash(after)||!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot)))reject();
+    const validate=()=>{
+      owner();checkRoots(referenceRoots);checkControls(n=>verifier.chargeExternal(n));
+      const measured=verifier.scan(policy.roots);
+      if(measured.digest!==policy.baseline.digest||measured.metadataDigest!==policy.baseline.metadataDigest||measured.bytes!==policy.baseline.bytes||
+        measured.runtimeCopies!==policy.baseline.runtimeCopies||fs.readdirSync(policy.buildOnly.outputRoot).length)reject();
+      if(verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)reject();
+      bytes(repairPath,repairSha,65536);bytes(a.oldPolicyPath,a.oldPolicySha256);bytes(file,configSha);bytes(ledger+'.adopted',a.adoptionSha256,64);
+    };
+    validate();if(replay)return;
+    options.onBindingRepairStep?.('before-snapshot');validate();
+    if(present(snapshotPath)){if(!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot))reject();}
+    else{const fd=fs.openSync(snapshotPath,'wx',0o600);try{fs.writeFileSync(fd,snapshot);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+    options.onBindingRepairStep?.('before-commit');validate();
+    if(!bytes(ledger,a.priorLedgerSha256,65536).equals(original)||hash(fileIdentity(ledger))!==hash(a.priorLedgerIdentity))reject();
+    atomic(ledger,after);ledgerIdentity=fileIdentity(ledger);prior=after;
+    options.onBindingRepairStep?.('after-commit');
+    } catch { throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED'); }
+  };
+
   const save = () => {
     atomic(ledger, prior);
     ledgerIdentity = fileIdentity(ledger);
@@ -515,6 +594,8 @@ function open(request, options = {}, boundOperation) {
     return measure;
   };
   try {
+    if ((repairPath || repairSha) && (!present(ledger) || !present(ledger + '.adopted')))
+      throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED');
     if (privateMode) {
       const packages = policy.windowsReferences?.packages;
       if (!Array.isArray(packages) || packages.length < 1 || packages.length > 6)
@@ -555,6 +636,7 @@ function open(request, options = {}, boundOperation) {
     if (present(ledger)) {
       ledgerIdentity = fileIdentity(ledger);
       prior = state(ledger);
+      repairBinding();
       if (
         prior.format !== policy.format ||
         prior.configSha !== configSha ||

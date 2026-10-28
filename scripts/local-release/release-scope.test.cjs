@@ -1007,3 +1007,107 @@ test('a build-only policy cannot adopt an existing unmanaged output root', () =>
       'preserve',
     );
   }));
+
+function repairFixture(run){return fixture(f=>{
+  const {request}=splitPreservingBuild(f),old=structuredClone(f.policy),next=structuredClone(f.policy);
+  old.buildOnly.sourceCommit='c'.repeat(40);old.buildOnly.sourceHash='c'.repeat(64);
+  const probe=path.join(f.base,'synthetic-probe.cjs');fs.writeFileSync(probe,'// never executed');
+  old.probe={path:probe,sha256:'a'.repeat(64)};next.probe={path:probe,sha256:fileHash(probe)};
+  const oldFile=path.join(f.base,'old-reviewed-policy.json');fs.writeFileSync(oldFile,JSON.stringify(old));
+  const oldSha=fileHash(oldFile),query=()=>structuredClone(f.facts);
+  f.facts.observationComplete=false;
+  assert.throws(()=>scope.open({...request,sourceCommit:old.buildOnly.sourceCommit,sourceHash:old.buildOnly.sourceHash},
+    {configPath:oldFile,configSha256:oldSha,query}),/REFERENCE_QUERY_INCOMPLETE/);
+  f.facts.observationComplete=true;
+  const ledger=path.join(f.base,f.policy.scopeId+'.state.json'),adopted=ledger+'.adopted';
+  const prior=JSON.parse(fs.readFileSync(ledger,'utf8'));prior.payload.futureCounter={used:7,history:['keep']};
+  prior.digest=require('node:crypto').createHash('sha256').update(JSON.stringify(prior.payload)).digest('hex');fs.writeFileSync(ledger,JSON.stringify(prior));
+  const original=fs.readFileSync(ledger),origin=fs.readFileSync(adopted),st=fs.lstatSync(ledger,{bigint:true});
+  const approval=path.join(f.base,'reviewed-binding-repair.json');
+  const receipt={format:1,kind:'adopted-empty-build-binding-repair',scopeId:old.scopeId,registryDirectory:old.registryDirectory,registryIdentity:old.registryIdentity,
+    oldPolicyPath:oldFile,oldPolicySha256:oldSha,newPolicySha256:'',priorLedgerSha256:fileHash(ledger),priorPayloadDigest:prior.digest,
+    priorLedgerIdentity:[st.dev,st.ino,st.birthtimeNs].map(String),adoptionSha256:fileHash(adopted),
+    auditedSourceIdentity:'b'.repeat(64),reviewEvidence:'synthetic independent approval',allowedDifferences:['buildOnly.sourceCommit','buildOnly.sourceHash','probe.sha256']};
+  const save=()=>{fs.writeFileSync(f.config,JSON.stringify(next));receipt.newPolicySha256=fileHash(f.config);fs.writeFileSync(approval,JSON.stringify(receipt));};save();
+  const options=()=>({configPath:f.config,configSha256:fileHash(f.config),query,bindingRepairFile:approval,bindingRepairSha256:fileHash(approval)});
+  run({f,request,old,next,receipt,save,options,ledger,adopted,approval,original,origin,prior,open:extra=>scope.open(request,{...options(),...extra})});
+});}
+test('preserving binding repair preserves origin, all counters and exact replay',()=>repairFixture(x=>{
+  x.open().close();let d=JSON.parse(fs.readFileSync(x.ledger));
+  assert.deepEqual(d.payload.futureCounter,x.prior.payload.futureCounter);assert.equal(d.payload.configSha,x.receipt.newPolicySha256);
+  assert.deepEqual(d.payload.outputs,[]);assert.equal(d.payload.claim,null);assert(d.payload.bindingRepair);
+  assert(fs.readFileSync(x.adopted).equals(x.origin));const saved=fs.readFileSync(x.ledger);
+  x.open().close();assert(fs.readFileSync(x.ledger).equals(saved));
+}));
+for(const kind of ['receipt','budget','root','claim','outputs','adoption','ledger','source-delta'])
+ test('preserving binding repair rejects '+kind,()=>repairFixture(x=>{
+  if(kind==='receipt')x.receipt.priorPayloadDigest='0'.repeat(64);
+  if(kind==='budget')x.next.maxGrowthBytes++;
+  if(kind==='root')x.next.roots[0].identity[1]='999';
+  if(kind==='source-delta')x.receipt.allowedDifferences.push('maxBytes');
+  if(kind==='claim'||kind==='outputs'){const d=JSON.parse(fs.readFileSync(x.ledger));if(kind==='claim')d.payload.claim={id:'unknown'};else d.payload.outputs=[{path:x.f.build}];d.digest=require('node:crypto').createHash('sha256').update(JSON.stringify(d.payload)).digest('hex');fs.writeFileSync(x.ledger,JSON.stringify(d));}
+  if(kind==='adoption')fs.writeFileSync(x.adopted,'0'.repeat(64));
+  if(kind==='ledger')fs.writeFileSync(x.ledger,'invalid');
+  x.save();const before=fs.readFileSync(x.ledger);assert.throws(()=>x.open());assert(fs.readFileSync(x.ledger).equals(before));
+}));
+for(const stage of ['before-snapshot','before-commit','after-commit'])
+ test('preserving binding repair interruption '+stage+' keeps authoritative state',()=>repairFixture(x=>{
+  assert.throws(()=>x.open({onBindingRepairStep:n=>{if(n===stage)throw Error('synthetic interruption');}}),/BINDING_REPAIR_REVIEW_REQUIRED/);
+  const d=JSON.parse(fs.readFileSync(x.ledger));assert.equal(d.digest,require('node:crypto').createHash('sha256').update(JSON.stringify(d.payload)).digest('hex'));
+  assert(fs.readFileSync(x.adopted).equals(x.origin));
+  if(stage==='after-commit')assert.equal(d.payload.configSha,x.receipt.newPolicySha256);else assert(fs.readFileSync(x.ledger).equals(x.original));
+  x.open().close();
+}));
+test('preserving binding repair concurrent child cannot acquire the existing scope lock',()=>repairFixture(x=>{
+  let called=false;x.open({onBindingRepairStep:n=>{if(n!=='before-commit')return;
+    const script="try{require(process.argv[1]).open(JSON.parse(process.argv[2]),JSON.parse(process.argv[3]));process.exit(2)}catch(e){if(e.code!=='EEXIST')process.exit(3)}";
+    const opts=x.options();delete opts.query;
+    require('node:child_process').execFileSync(process.execPath,['-e',script,path.join(__dirname,'release-scope.cjs'),JSON.stringify(x.request),JSON.stringify(opts)],{windowsHide:true,timeout:10000});called=true;
+  }}).close();assert.equal(called,true);
+}));
+test('preserving binding repair still stops on incomplete native facts after committing binding',()=>repairFixture(x=>{
+  x.f.facts.observationComplete=false;assert.throws(()=>x.open(),/REFERENCE_QUERY_INCOMPLETE/);
+  const d=JSON.parse(fs.readFileSync(x.ledger));assert.equal(d.payload.configSha,x.receipt.newPolicySha256);
+  assert.equal(d.payload.claim,null);assert.deepEqual(d.payload.outputs,[]);assert(fs.readFileSync(x.adopted).equals(x.origin));
+}));
+test('preserving binding repair rejects mismatched approval pin and missing approval',()=>repairFixture(x=>{
+  assert.throws(()=>x.open({bindingRepairSha256:'0'.repeat(64)}),/BINDING_REPAIR_REVIEW_REQUIRED/);
+  assert.throws(()=>scope.open(x.request,{configPath:x.f.config,configSha256:fileHash(x.f.config),query:()=>structuredClone(x.f.facts)}),/STATE_INVALID/);
+  assert(fs.readFileSync(x.ledger).equals(x.original));
+}));
+test('preserving binding repair rejects tampered audit snapshot on exact replay',()=>repairFixture(x=>{
+  x.open().close();const original=fs.readFileSync(x.ledger),snapshot=x.ledger+'.binding-repair-'+fileHash(x.approval)+'.json';
+  fs.appendFileSync(snapshot,'tampered');assert.throws(()=>x.open(),/BINDING_REPAIR_REVIEW_REQUIRED/);
+  assert(fs.readFileSync(x.ledger).equals(original));assert(fs.readFileSync(x.adopted).equals(x.origin));
+}));
+test('preserving binding repair compare and swap refuses a late changed counter',()=>repairFixture(x=>{
+  assert.throws(()=>x.open({onBindingRepairStep:n=>{if(n!=='before-commit')return;
+    const d=JSON.parse(fs.readFileSync(x.ledger));d.payload.futureCounter.used=8;
+    d.digest=require('node:crypto').createHash('sha256').update(JSON.stringify(d.payload)).digest('hex');fs.writeFileSync(x.ledger,JSON.stringify(d));
+  }}),/BINDING_REPAIR_REVIEW_REQUIRED/);
+  assert.equal(JSON.parse(fs.readFileSync(x.ledger)).payload.futureCounter.used,8);
+  assert(fs.readFileSync(x.adopted).equals(x.origin));
+}));
+for(const claim of [false,0])
+ test('preserving binding repair rejects non-null falsy claim '+String(claim),()=>repairFixture(x=>{
+  const d=JSON.parse(fs.readFileSync(x.ledger));d.payload.claim=claim;
+  d.digest=require('node:crypto').createHash('sha256').update(JSON.stringify(d.payload)).digest('hex');
+  fs.writeFileSync(x.ledger,JSON.stringify(d));
+  x.receipt.priorLedgerSha256=fileHash(x.ledger);x.receipt.priorPayloadDigest=d.digest;x.save();
+  const before=fs.readFileSync(x.ledger);
+  assert.throws(()=>x.open(),/RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED/);
+  assert(fs.readFileSync(x.ledger).equals(before));assert(fs.readFileSync(x.adopted).equals(x.origin));
+  assert.equal(fs.readdirSync(x.f.base).some(n=>n.includes('.binding-repair-')),false);
+ }));
+for(const missing of ['ledger','adoption','both'])
+ test('preserving binding repair refuses missing '+missing+' without adoption',()=>repairFixture(x=>{
+  if(missing!=='adoption')fs.unlinkSync(x.ledger);
+  if(missing!=='ledger')fs.unlinkSync(x.adopted);
+  const before=fs.readdirSync(x.f.base).sort();
+  assert.throws(()=>x.open(),/RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED/);
+  assert.deepEqual(fs.readdirSync(x.f.base).sort(),before);
+  assert.equal(fs.existsSync(x.ledger),missing==='adoption');
+  assert.equal(fs.existsSync(x.adopted),missing==='ledger');
+  if(missing==='adoption')assert(fs.readFileSync(x.ledger).equals(x.original));
+  if(missing==='ledger')assert(fs.readFileSync(x.adopted).equals(x.origin));
+ }));

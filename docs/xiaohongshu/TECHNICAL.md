@@ -1,5 +1,7 @@
 # 小红书订阅技术说明
 
+本页描述候选的接口与数据合同；已安装版本、构建和验证状态见[开发维护](DEVELOPMENT.md#本次交付状态2026-10-28)。合同存在不等于已部署。
+
 来源互动指标使用笔记详情 interact_info，粉丝来自 interactions 中的 fans 项。仅接受精确非负整数；缺失、缩写和 following 不明时保留未知。当前整号任务不调用主评论或回复，历史评论表及接口保留供兼容，不应将历史能力描述为本轮采集或展示目标。
 
 `refresh({id,maxPages?})`接受1–10页的可选上限，现有前端明确传2。上限冻结在任务document，不新增迁移；每次明确续跑从持久游标开始重新计算该次页数，达到上限且仍有后续时返回`XHS_LIST_PAGE_LIMIT_REACHED`，不派发下一页。未提供上限的旧内部调用保持兼容。
@@ -11,8 +13,6 @@
 图文 `prepareLocalDownload` 只从严格校验的缓存身份三元组构造 `https://www.xiaohongshu.com/explore/<noteId>`，以单个Markdown链接写入正文来源块。该准备器不再让保存器的源元数据重复添加同一URL；标题仍由原模板生成一次。不请求原文，不重写既有文件。
 
 `connectionStatus.requestAttempts`只返回进程实例ID及profiles/lists/details/media/shortLinks计数，不包含URL、token、请求头或响应。计数在来源传输被调用前递增，表示已发起或结果未知的尝试，不能把超时解释为零请求；状态读取和会话恢复不重置或增加它。比较前后差值必须确认实例ID相同，重启后的计数不能与旧实例直接相减。
-
-2026-10-24 对照源码 `9e1b81a8d095390bce968a137fd88d23ba5252df` 校准，原始基线为 `f609bda0334f17f6c28ff84020d31cd5c47f3417`。既有接口与后续改进设计分开标注；本机安装版本与运行状态仅留私有发布记录。
 
 ## 架构与数据
 
@@ -57,7 +57,7 @@ URL校验允许HTTPS的 `www.xiaohongshu.com/user/profile/{id}`、`/explore/{id}
 
 ## 列表、下载和持久检查点
 
-列表按来源游标持续枚举，不沿旧刷新页数窗口停止。请求页大小不等于响应条目上限；映射与入库接受最多60条有限单页响应，超限整页拒绝。游标最长2048字符；作者、类型、稳定ID和时间校验后，每页元数据及检查点原子提交。时间可为0表示未知，不用采集时刻冒充。跨页重复去重、重复游标、空页续游标及仅重复ID却继续翻页均有停止检查。已完整笔记不被新元数据降级。
+列表沿来源游标枚举，并受本次任务冻结的`maxPages`上限约束；未提供上限的旧内部调用保持兼容。请求页大小不等于响应条目上限；映射与入库接受最多60条有限单页响应，超限整页拒绝。游标最长2048字符；作者、类型、稳定ID和时间校验后，每页元数据及检查点原子提交。时间可为0表示未知，不用采集时刻冒充。跨页重复去重、重复游标、空页续游标及仅重复ID却继续翻页均有停止检查。已完整笔记不被新元数据降级。
 
 下载接受非空去重选择，按100个ID分块校验归属，没有固定100篇总选择上限。先消费原目录选择许可，再逐项详情；完整缓存可直接复用。详情须匹配作者/笔记、完整正文、预期图数、顺序及实际字节。先写完整缓存，再调用原保存器；缓存成功而本机失败仍不是保存完成。未缓存视频跳过，已完成项保留；详情/媒体/保存失败停止后续派发，回执为blocked或partial。
 
@@ -65,25 +65,11 @@ URL校验允许HTTPS的 `www.xiaohongshu.com/user/profile/{id}`、`/explore/{id}
 
 列表/下载任务重启将queued/running持久任务标记为 `blocked/XHS_TASK_INTERRUPTED`，不发网络；用户显式续跑。该机制针对单一本机后端，不提供多进程调度保证。
 
-### 任务一致性改进（隔离候选，未部署）
+### 任务一致性
 
-受保护的 `recentTasks` 提供任务发现，活动任务优先，其后按更新时间和ID稳定排序；可按博主过滤。快照增加 `resumedFromTaskId` / `supersededByTaskId`。恢复创建后继与标记前驱在同一事务中完成；旧任务不能重复产生后继，也不能用迟到回执覆盖接管关系。前端页面以limit=10读取最近任务，保持后端顺序；唯一候选可采用，多候选由用户选择。重进与重读仅查询状态，继续必须显式操作。真实HTTP联调沿该前端恢复助手、实际tRPC路由与临时SQLite验证。
+受保护的 `recentTasks` 提供任务发现，活动任务优先，其后按更新时间和ID稳定排序；可按博主过滤。快照增加 `resumedFromTaskId` / `supersededByTaskId`。恢复创建后继与标记前驱在同一事务中完成；旧任务不能重复产生后继，也不能用迟到回执覆盖接管关系。前端页面以limit=10读取最近任务，保持后端顺序；唯一候选可采用，多候选由用户选择。重进与重读仅查询状态，继续必须显式操作。对应反例见[验收D01–D04](ACCEPTANCE.md)。
 
-基线finally的终态persist抛错会跳过pending/controller释放，已用真实临时SQLite和原保存器重现。候选通过嵌套finally保证执行器释放；提交应答丢失时独立重读持久行，不能确认则保留本机回执屏障，返回 `XHS_TASK_RECEIPT_UNCERTAIN` 且 `resumable:false`，禁止重放。查询可进行本地核对，不调用来源；核对成功后可变为可恢复。私有记录可保留未知回执历史；本地核对完成且屏障已解除后，公开快照改为 `XHS_TASK_CHECKPOINT_RECONCILED`，避免前端对未知代码的安全阻挡永久锁死已核对任务。继续仍须最新 `resumable:true` 且未被后继接管。业务错误保留安全错误码。
-
-## 原始证据与独立核对
-
-专家从解析前和保存后的材料两端检查，不能只核对应用生成的摘要：
-
-| 原始材料类别                                   | 要证明什么                                   | 独立检查方式                                                                   |
-| ---------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------ |
-| 获授权留存的原响应字节及请求、游标关联 | 作者、条目集合和分页语义 | 独立枚举原结构并与落库稳定 ID 集合对照，不调用被测映射器 |
-| 原正文与实际Markdown字节                       | 没有删段、改序、替换字符或摘要冒充全文       | 独立提取段落，仅允许HTML/Markdown转义与空白规范化，保留标点、Unicode字符及顺序 |
-| 原图片字节及有序来源清单、实际保存图片         | 图片正确、完整且次序一致                     | 独立解码器检查可打开，逐项比对内容哈希和有序引用；同图数不能代替身份与顺序     |
-| SQLite事务前后副本、任务原始行、注入故障时间线 | 提交与任务状态一致、旧内容保留、不重放       | 独立SQLite查询/完整性及外键检查、非目标字段对照、记录实际请求次数              |
-| 固定源码、依赖锁、构建清单、产物及恢复副本     | 运行代码来源完整且可恢复                     | 干净隔离重建，逐输入/产物核对；包若含时间戳则明确比较规则，不伪称逐字节可重现  |
-
-正文允许的规范化只有转义和空白；不得以删标点、Unicode折叠、排序段落、忽略差异或重新摘要获得相等。独立核对不复用被测解析器及其输出作为唯一期望值；独立图片解码也不单独证明图片来自正确笔记。测试用合成原始字节与手工核实的期望，真实原始材料仅留私有证据区，本轮不读取。
+终态persist抛错时，嵌套finally仍须释放pending/controller；提交应答丢失时独立重读持久行，不能确认则保留本机回执屏障，返回 `XHS_TASK_RECEIPT_UNCERTAIN` 且 `resumable:false`，禁止重放。查询可进行本地核对，不调用来源；核对成功后可变为可恢复。私有记录可保留未知回执历史；本地核对完成且屏障已解除后，公开快照改为 `XHS_TASK_CHECKPOINT_RECONCILED`，避免前端对未知代码的安全阻挡永久锁死已核对任务。继续仍须最新 `resumable:true` 且未被后继接管。业务错误保留安全错误码。
 
 ## 搜索、页面和导出范围
 
@@ -101,25 +87,11 @@ Windows保存的最小会话数据由应用的私有存储管理，采用当前�
 
 默认工厂配置严格otherinfo解析器：要求内部result成功及basic_info的有界昵称/展示号；稳定作者ID绑定已签名target_user_id及完全匹配的响应URL。red_id不作为稳定ID，响应携带冲突user_id立即拒绝。列表显式使用既有上游支持的v1路由，不自动重试或切换端点。请求30不保证只返回30；映射与入库最多接受60条有限单页响应，保留全部合法条目，不静默截断。合成回归覆盖32条完整提交和61条整页拒绝。真实验收对象、实际请求和归档结果仅留获授权的私有记录；有后续游标时不宣称全史完成。验收合同见 [ACCEPTANCE](ACCEPTANCE.md)。
 
-## 周期退役覆盖比较
-
-`backup-sqlite.py::snapshot_covers` 仅豁免普通 `feeds.sync_time`、`update_time`、`updated_at`、`last_collection_result`、`provider_refresh_attempt_time`。`has_history`、主键、生成列、其他表同名字段与schema继续严格。`indexed_reference_review` 只核已登记根的顶层元数据并绑定命名空间/身份/SHA，未知项不放行；`indexed_typed_coverage` 在SQLite内部比较所有类型值，只返回计数，REAL位级证明不足时保持阻塞。同schema保留点可作覆盖见证，不强迫新schema的pending越过结构检查。此只读计划路径不调用旧全局时间分层扫描/执行入口；永久动作仍须单独批准及原生句柄、引用、占用和生命周期复核。
-
-## 统一候选：目录保存、接口与最小发布
+## 目录保存与指标
 
 博主指标刷新必须先将同一响应交给既有注入 profileParser(raw, expectedAuthorId)，复用其内层 result 与显式 user_id 校验；解析失败或作者身份不符时不进入写事务，原完整快照和采集时间保留。不能仅凭 interactions 粉丝数写入指定博主。
 
-日常主流程是直接保存到本地/Obsidian 目录：每篇正文.md、image/ 与已核验完整视频的 video/，无需压缩或解压。工具栏主按钮沿用直接保存；“更多”保留已选完整归档的直接保存及兼容 ZIP 入口。ZIP 是可选传输格式，其测试不能替代目录落盘验收。
-
 `prepareLocalDownload` 与视频模板共用严格稳定身份 canonical helper；返回 sourceUrl=null，正文只保留一次原文链接，避免保存器再插一次。控制器 exportSource 包装透传 afterSave；afterSave 即使正文已存在也运行。快照以 note 身份及内容哈希命名，原子硬链接发布；相同内容复用，用户修改旧附页则保留并创建/复用冲突版本。发布失败明确失败。直接保存回执独立报告 snapshotsSaved / snapshotSavedCount，不能用 body skipped 冒充新评论已更新。
-
-`notes` 在全保存范围过滤后给 total/queryVersion；跨页保持同版本，筛选或服务端时间排序变化使旧选择失效。本地指标排序对全部筛选结果排序后分页，保留已选笔记并回到第一页。指标保留来源采集时间，缺失、缩写或非精确值为 null。当前任务不隐式采集评论正文或回复。
-
-发布由统一负责人核准后执行：1）固定最终 SHA 和依赖锁，校验离线 CI；2）先停止唯一写者，按既有增量写入/备份政策确认恢复点，不为前端修改复制整库；3）应用候选所需的增量迁移，检查外键与原公众号行摘要；4）切换同 SHA server dist、client 和 schema，保持来源开关关闭；5）启动并读回运行 SHA，再按单独获准范围做目录验收。实际执行状态仅留私有发布记录。
-
-回滚使用事先验证、与现场记录匹配的上一个程序和前端包；保留新增 XHS 表和文件，禁止 down/drop 或删除新附页。合成库兼容不等于旧进程在生产环境已验收；恢复时核对实际版本、迁移记录与风险状态，不重跑已应用迁移。
-
-最小真实验收优先复用已获授权的既有归档，避免为重验重复采集：核对正文、媒体顺序与字节、原文链接及可读性，重复保存时保护手改文件。指标字段的真实来源验证须遵守单独批准的请求范围和上限；当前不采集评论正文或回复。合成结果不替代真实来源与 Obsidian 验收，未知故障和历史回执不得推测改写。
 
 ## 整号任务、原子预算与分段附页
 
@@ -131,41 +103,23 @@ API：wholeCreatorJobs、startWholeCreator、resumeWholeCreator、cancelWholeCre
 
 历史已存评论的大数据导出能力保留：既有实现分页读取、分段与防覆盖发布，不因暂停新采集而删除旧数据。这是本地已有数据的历史能力，并不表示当前任务采集或展示评论正文，也不证明平台评论完整。
 
-## 独立审查修正
+## 取消与目录回执
 
-显式继续使用受限状态CAS，将cancelled/paused等消费为queued并检查影响行数；普通检查点仍禁止迟到写入覆盖cancelled，并检查零行更新。并发继续只能调度一次。取消后继续的真实数据库与执行链反例保留。
+显式继续使用受限状态CAS，将cancelled/paused等消费为queued并检查影响行数；普通检查点仍禁止迟到写入覆盖cancelled，并检查零行更新。并发继续只能调度一次。
 
-目录阶段只认原生保存器成功返回、且随逐篇任务检查点落盘的正文/媒体与附页回执；DB status=complete或视频skipped不是目录证据。旧下载任务completed而仍有待补时，按原目录授权边界创建新的待补选择并实际保存，不重放已确认保存项。反例通过原生LocalArticleStore发布正文和附页并验证真实文件。
-
-原post-COMMIT lost-ack回归在持久completed可见后显式等待执行lane，再断言pending为空；保留lost=true、saves=1、持久completed及pending=0全部断言，不以sleep消除竞态，也不提前释放持久化屏障。
-
-## 原文跳转与Obsidian下载合同
-
-产品边界：WeWe RSS负责订阅、筛选、指标和下载；当前暂停采集或展示评论正文及回复，仅保留来源返回的评论总数字段。公众号和小红书正文阅读器均已移除，标题打开或显式准备原始链接；正文和媒体仍可下载到 Obsidian 本地阅读，既有用户文件与历史评论数据不删除。
-
-设计前检查：按稳定笔记身份分别核对目录、正文、媒体、指标与本地保存回执，不能以目录结束代替归档完成。评论总数来自笔记详情来源字段，缺失或非精确值保持未知，不借评论分页猜测；历史评论数据独立保存且不宣称完整。
-
-| 需求 | 最小实现位置 | 独立验收与证据 |
-| --- | --- | --- |
-| 标题准备并打开原文 | 列表标题、prepareOriginalLink及既有canonical helper | 缓存/未缓存/视频均校验同身份官方HTTPS地址；显式准备或重新准备可在持久总预算与风险门闸内恢复来源上下文，缓存命中为零请求，普通浏览/状态查询不发来源请求。浏览器临时签名URL仅在点击响应与内存中使用；Markdown canonical不含访问token。无旧正文API调用或自动重试；合成链接断言不替代真实PC打开验收 |
-| 互动指标展示 | 本地已存笔记指标查询、列表列 | 按作者及笔记身份关联；点赞、收藏、分享和评论总数缺失与 0 区分，不展示评论正文或回复 |
-| 未知关注默认隐藏 | 博主资料与XhsMetricLine | null隐藏、真实0显示，不新增推测字段或来源请求 |
-| 分开下载各阶段 | WholeCreatorService 状态投影、原下载器/保存器 | 目录、正文、媒体、指标和本地保存分别报告；历史评论窗口保留并独立标示，不冒称本轮采集完成 |
-| Obsidian本地阅读 | 原 Markdown/媒体导出及既有保存器 | 检查实际正文、相对图片/视频引用、稳定身份、时间和部分状态；历史附页若存在，保留并单独验证 |
-| 文件保护与停止 | 原非覆盖发布器、runtime预算与错误码 | 手写正文/附页保护，同版复用，部分失败准确回执；验证拦截后不新增来源请求，缓存下载不作网络回退 |
+目录阶段只认原生保存器成功返回、且随逐篇任务检查点落盘的正文/媒体与附页回执；DB status=complete或视频skipped不是目录证据。旧下载任务completed而仍有待补时，按原目录授权边界创建新的待补选择并实际保存，不重放已确认保存项。
 
 删除边界：公众号和小红书的平台内正文入口、正文弹窗、ArticleReader及其专用组件、状态、hooks、调用路径均已移除；小红书阅读专用后端API及Sites阅读分支也已删除，不保留无调用的阅读兼容壳。共享article.byId仍被受保护的Sites下载路径用于缓存投影，因此保留；正文/媒体完整性校验、缓存与正文生成、指标评论接口、持久检查点及非覆盖保存均保留。不删除DB或已下载文件，公众号继续打开合法原链接。
 
-技术/API/schema 文档说明必要投影及保护路由。持久来源风险采用增量迁移保存固定非敏感状态；迁移仅能识别任务内已持久化的来源拒绝码，无此记录的既有历史仍需独立核查，不能以空标记证明风险解除。写入失败和未决操作不自动解除。真实正文/媒体采集与原文点击是两回事，用户浏览器打开小红书不授权后台恢复采集。
+持久来源风险采用增量迁移保存固定非敏感状态；迁移仅能识别任务内已持久化的来源拒绝码，无此记录的既有历史仍需独立核查，不能以空标记证明风险解除。写入失败和未决操作不自动解除。真实正文/媒体采集与原文点击是两回事，用户浏览器打开小红书不授权后台恢复采集。
 
 ## PC原文链接准备：最小实现与审查边界
 
 prepareOriginalLink只做已批准的原文跳转准备，不能复活平台正文阅读器。链接须以安全来源noteUrl或同作者、同note、有效上下文为证据；使用字符串身份，保留前导0。来源有显式source应保留；只有作者上下文且无显式source才按固定官方合同取pc_user，不猜token。
 
-所有冷恢复和普通resolveSubscription共享既有持久预算与会话停止规则，缓存命中不得发请求，禁止每次click新建额度、清stopCode、自动重连或重试。短期签名URL/token只留必要内存作用域，成功和异常路径都不得进入logger、任务行或其他持久存储。冻结时必须给出完整调用链和日志投影边界；仅mock prepare返回正确URL不足以证明安全与可用。
+所有冷恢复和普通resolveSubscription共享既有持久预算与会话停止规则，缓存命中不得发请求，禁止每次click新建额度、清stopCode、自动重连或重试。短期签名URL/token只留必要内存作用域，成功和异常路径都不得进入logger、任务行或其他持久存储。调用链、日志投影与独立验证见[验收](ACCEPTANCE.md)。
 
-前端prepared链接按作者/笔记/操作代次绑定；去重、切换和关闭必须使旧结果失效。通过实际构建的导航拦截记录核对目标而非仅查helper字符串。最终真实PC可读性是独立有界验收，不扩大当前采集许可。
-
+前端prepared链接按作者/笔记/操作代次绑定；去重、切换和关闭必须使旧结果失效。
 
 ### 派发许可、取消与未知提交
 
@@ -175,18 +129,15 @@ prepareOriginalLink只做已批准的原文跳转准备，不能复活平台正�
 
 该屏障没有自动到期清理。重连、重启、保存预算或扩额不会消除未完成的派发记账。持续出现请求暂停时，应先核查数据库提交错误与可验证回执；不得通过删除屏障、重置账本或重试未知请求来恢复。此状态不代表来源要求验证码。
 
-
 ## Limited single-note recovery
 
-`recoverSingleNote` is a protected local-only explicit operation requiring a supplied official note URL, an independently known author ID and confirmation. It accepts only a historical-review stop, never a new authentication, verification or signature block. A durable, note/author-bound single-round claim expires after ten minutes and cannot be reissued, resumed or replayed after a crash. The shared source ledger and dispatch clock remain in force. This deliberately narrow flow permits only one detail dispatch; it performs no list, comment, reply, redirect or media requests.
+`recoverSingleNote` is a protected local-only explicit operation requiring a supplied official note URL, an independently known author ID and confirmation. It accepts only a historical-review stop, never a new authentication, verification or signature block. A durable, note/author-bound single-round claim expires after ten minutes and is not automatically reissued, resumed or replayed after a crash. The shared source ledger and dispatch clock remain in force. This deliberately narrow flow permits only one detail dispatch; it performs no list, comment, reply, redirect or media requests.
 
 The returned note and author must match both authorized identities. Body text, four metric values and the subscription are committed together with the local recovery receipt. Unknown metrics remain null. Existing content is retained and a disabled subscription is not enabled. No background task or download is queued. Historical risk stays blocked after success; a new refusal is recorded without discarding the previous history.
 
 Images are not fetched in this flow. The receipt lists pending media ordinals, validated CDN source paths with all query parameters omitted, and one-way source fingerprints. Query omission is explicit; these paths must not be treated as verified replayable image URLs or fetched automatically. The note remains listed/partial rather than claiming complete media. Existing full archive/export gates continue to require complete media. Signed original URLs are returned only to the explicit caller with no-store/no-referrer headers, excluded from logging and normal list DTOs. This flow does not prove that a user can open the resulting PC link; actual platform acceptance remains a separate bounded verification.
 
-
 订阅输入可接受单个官方作者或笔记链接、受限短链，或包含一个此类链接的分享文案；短链展开仍受既有来源预算与重定向检查约束。官方 PC 分享参数 `xhsshare=pc_web` 与原始来源字段保留，重复参数、非官方主机及不受支持的参数仍拒绝。单篇受限恢复不展开短链；历史未知回执不会因输入变化而重置或自动重试。
-
 
 #### 批量订阅接口契约
 
@@ -196,12 +147,9 @@ Images are not fetched in this flow. The receipt lists pending media ordinals, v
 
 按输入顺序逐项处理，复用原来源总预算、派发屏障和风险门闸；来源风险、预算耗尽或不可确定的派发结果暂停批次。作者身份验证后按作者去重，订阅写入和该项成功回执在同一数据库事务内提交。取消在最终派发边界生效；已经派发的项按实际回执或未知状态收口。已有单篇恢复未知记录原样保留；若短链目标尚无法核对该记录，在未解决前不派发该短链。此接口不创建历史归档或评论任务。
 
-
 受限单篇恢复允许用户明确确认对原未知回执追加一次尝试。追加记录与原笔记及作者绑定，原回执保留；共享来源预算仍按累计使用量限制，拒绝或未知结果停止且不自动重放。追加不代表历史风险已解除，不下载额外媒体或采集评论正文。
 
-
 整号归档成功的详情响应若包含互动快照，正文、快照与任务的详情回执在同一事务记录；整号阶段复用该回执，已有正文且没有本次详情回执的笔记仍执行增量指标更新。未知字段保持未知。媒体读取尚未完成而详情映射失败时，不将正文或指标标记为已覆盖。
-
 
 历史来源状态待核时，只有明确确认并绑定已核验作者与整号任务的受限授权可准备阶段预算。准备授权不会启动任务、重置账本或清除历史风险；资料、列表、详情、媒体及指标按实际请求类型分别计入额度；上下文恢复亦按实际请求类型计账，所有请求仍受任务总额及来源总额约束。阶段额度可为零；详情额度为零时，目录结束即暂停，不创建正文下载任务。媒体额度不足时不派发媒体请求，已派发但尚未形成业务检查点的详情仍须核查。实际派发前持久登记栅栏，并在对应列表游标、正文及指标或指标快照事务提交时解除；中断、拒绝、取消或提交结果未知时保留栅栏并停止自动重发。已知未派发的取消可释放预留。明确风险阻断不会通过此授权解除。
 
@@ -215,15 +163,4 @@ Images are not fetched in this flow. The receipt lists pending media ordinals, v
 
 媒体失败回执仅保存固定分类及实际观察到的数值 HTTP 状态，不保存链接、签名、响应正文或任意异常信息。超时、传输、类型、空流、大小和图片字节错误分别报告；已派发但未提交的检查点仍保持未知，不自动重放。
 
-
-## 深度审查的接口与数据契约
-
-| 契约/实现位置 | 必须维持的不变量 | 原始证据与独立方法 |
-| --- | --- | --- |
-| 原文链接、稳定作者/笔记ID及来源mapper | token仅内存；同身份；0/未知/采集时间分开 | 脱敏HTTP字段结构和独立身份oracle；未获真实响应不宣称字段验证 |
-| WholeCreator、请求预算与source fence | 实际profile/list/detail/media分类；共享/任务/阶段累计；扩额paused；unknown不重放 | 直接查SQLite账本/JSON检查点；并发、取消、冷启动和丢应答注入 |
-| transport→mapper→子任务→整号错误 | 实际HTTP数值与传输失败分开；固定码，不存URL/异常正文 | 注入403/461/429/5xx、坏长度头/空流/大小/格式；逐层查持久回执 |
-| 正文/媒体及原保存器 | 业务检查点与正文/指标原子提交；正文/媒体/本地回执分开；手改不覆盖 | DB内容与实际媒体字节、哈希/解码、相对链接和重复保存对照 |
-| SQLite协调器、锁与启动 | 写入须持物理锁至释放；故障清理不自动重放；重启不派发 | 启动阶段/固定错误、子进程退出与冷启动、同/跨进程锁反例 |
-
-API变更同步后台、共享类型、前端操作及固定码显示；schema/检查点和构建迁移逐字节配对。现有正文/指标依赖媒体映射完成的边界保持；分离为独立持久阶段属于待开发方案，不能只改“完整”标签。所有契约测试均不自动取得来源访问或生产操作许可。
+正文/指标仍依赖媒体映射完成；拆成独立持久阶段属于待开发方案，不能只改“完整”标签。接口回归与证据边界见[验收](ACCEPTANCE.md)，发布和恢复顺序见[开发维护](DEVELOPMENT.md)。

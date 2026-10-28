@@ -1,5 +1,6 @@
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PrismaService } from '../prisma/prisma.service';
@@ -38,7 +39,58 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
       `https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=${n}&idx=1`,
     );
   let setupPromise: Promise<void> | undefined;
+  let schemaRoot: string;
+  let schemaPromise: Promise<void> | undefined;
+  let fixtureNumber = 0;
+  const timing = (stage: string, start: number) =>
+    console.info('SYNTHETIC_FIXTURE_TIMING', JSON.stringify({ case: fixtureNumber, stage, elapsedMs: Math.round(performance.now() - start) }));
+  beforeAll(() => {
+    schemaPromise = (async () => {
+      const started = performance.now();
+      schemaRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'automatic-media-schema-'));
+      const savedUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = 'file:' + path.join(schemaRoot, 'schema.db').replaceAll('\\', '/') + '?connection_limit=1';
+      let schemaPrisma: PrismaService | undefined;
+      try {
+        schemaPrisma = new PrismaService();
+        await schemaPrisma.$connect();
+    const migrations = path.resolve(__dirname, '../../prisma/migrations');
+    for (const name of (await fs.readdir(migrations)).sort()) {
+      const sql = await fs
+        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
+        .catch(() => '');
+      for (const statement of splitSqliteStatements(sql)
+        .map((value) => value.trim())
+        .filter(Boolean))
+        await schemaPrisma.$executeRawUnsafe(statement);
+    }
+        await schemaPrisma.$queryRawUnsafe('PRAGMA journal_mode=DELETE');
+      } finally {
+        try { await schemaPrisma?.$disconnect(); } finally {
+          if (savedUrl === undefined) delete process.env.DATABASE_URL;
+          else process.env.DATABASE_URL = savedUrl;
+        }
+      }
+      for (const suffix of ['-wal', '-shm', '-journal']) {
+        if (await fs.stat(path.join(schemaRoot, 'schema.db') + suffix).then(() => true, (e) => { if (e.code === 'ENOENT') return false; throw e; }))
+          throw Error('SCHEMA_FIXTURE_HAS_SIDECAR');
+      }
+      await fs.chmod(path.join(schemaRoot, 'schema.db'), 0o444);
+      timing('schema-ready', started);
+    })();
+    return schemaPromise;
+  }, 40000);
+  afterAll(async () => {
+    await schemaPromise?.catch(() => undefined);
+    if (schemaRoot && path.dirname(schemaRoot) === os.tmpdir() && path.basename(schemaRoot).startsWith('automatic-media-schema-')) {
+      await fs.chmod(path.join(schemaRoot, 'schema.db'), 0o600).catch(() => undefined);
+      await fs.rm(schemaRoot, { recursive: true, force: true });
+    }
+  }, 40000);
   const setupFixture = async () => {
+    fixtureNumber++;
+    const overall = performance.now();
+    let stage = overall;
     jest.clearAllMocks();
     while (takeMediaHints().length) {
       /* isolate process-local hints */
@@ -57,18 +109,14 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
     });
     delete process.env.WEWE_ACCEPTANCE_MODE;
     jest.spyOn(startup, 'databaseWritesAllowed').mockReturnValue(true);
+    await fs.copyFile(path.join(schemaRoot, 'schema.db'), path.join(root, 'data.db'));
+    await fs.chmod(path.join(root, 'data.db'), 0o600);
+    timing('schema-copy', stage); stage = performance.now();
     prisma = new PrismaService();
     await prisma.$connect();
-    const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      const sql = await fs
-        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
-        .catch(() => '');
-      for (const statement of splitSqliteStatements(sql)
-        .map((value) => value.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    timing('connect', stage); stage = performance.now();
+    if (await prisma.feed.count() !== 0 || await prisma.article.count() !== 0)
+      throw Error('SCHEMA_FIXTURE_NOT_EMPTY');
     await prisma.feed.create({
       data: {
         id: mpId,
@@ -101,6 +149,8 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
         },
       });
     }
+    timing('seed', stage);
+    timing('setup', overall);
     trpc = new TrpcService(
       prisma,
       { get: () => ({ url: '', updateDelayTime: 0 }) } as any,
@@ -124,6 +174,7 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
     jest.restoreAllMocks();
     process.env = { ...env };
     if (
+      root &&
       path.dirname(root) === os.tmpdir() &&
       path.basename(root).startsWith('automatic-media-sqlite-')
     )

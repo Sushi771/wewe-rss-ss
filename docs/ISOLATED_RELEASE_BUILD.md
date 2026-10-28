@@ -20,11 +20,14 @@ plan, registry owner, native reference collector and pinned probe. The isolated
 output root must be a separate registered root, empty on first adoption. Existing
 history is still counted and hashed; it is not replaced by an empty inventory.
 
-Set the normal `WEWE_RELEASE_SCOPE_FILE` and `WEWE_RELEASE_SCOPE_SHA256` to the
-reviewed policy, then repeat the command without `--plan`. Native process,
-scheduled-task, shortcut, pointer, rollback and inflight coverage must remain
-complete. A denied/incomplete query stops the build; do not substitute synthetic
-facts for native observations. Build-only omits the _future pair compatibility
+Set `WEWE_RELEASE_SCOPE_FILE` and `WEWE_RELEASE_SCOPE_SHA256` to the
+reviewed policy, then repeat the command without `--plan`. The default mode
+requires complete native process, scheduled-task, shortcut, pointer, rollback and
+inflight coverage. The opt-in [preserving update contract](PRESERVING_UPDATE.md)
+defines narrower applicable categories for strictly new-output-only operations;
+it must not be reported as complete machine-wide coverage. A denied or incomplete
+required query stops the operation; do not substitute synthetic facts.
+Build-only omits the _future pair compatibility
 proof_, and explicitly returns `verified: false` for that stage. It is never a
 candidate-installation acceptance.
 
@@ -68,10 +71,11 @@ SQLite object definitions, including triggers and partial indexes, allowing only
 CRLF/LF normalization. Unknown tables, views, migrations and SQL drift fail closed.
 Neither inspector migrates or downgrades the database.
 
-## Acceptance still required
+## Acceptance for the search-migration rollback recipe
 
-Gate tests are not runnable-package or application-recovery evidence. Before any
-installation, build and fully verify both real packages, seed a small synthetic
+Gate tests are not runnable-package or application-recovery evidence. For the
+schema20-to-schema21 recipe above, build and fully verify both real packages,
+seed a small synthetic
 schema20 database with all nine business tables and an unknown submission claim,
 record its row digests, apply the exact migration21 and receipt, and start the
 actual candidate and rollback through their HTTP/runtime paths. Check the business
@@ -80,10 +84,16 @@ injected candidate-start failure and prove rollback actually starts. Record
 `businessDatabaseRestored: false`, package/source/manifest bindings, process
 identities, bounded logs and the four independent preservation/rollback checks.
 
-Only after this evidence is independently reviewed may a **new formal policy**
-with the exact candidate/rollback pair proof authorize installation or switching.
-A build-only policy cannot authorize those operations. Keep the full proof and
-machine audit private; commit only non-sensitive code, tests and documentation.
+Only after the applicable evidence is reviewed may an installation policy bind
+the exact candidate/rollback pair. A same-schema update does not require this
+historical migration recipe or a newly built rollback package; it still needs
+verified package/schema bindings, data compatibility and runnable fallback
+evidence. Existing valid evidence may be reused when its inputs and conditions
+remain unchanged. The current verifier's accepted proof format must be checked;
+do not label an unimplemented same-schema proof branch as available.
+A build-only policy cannot authorize installation or switching. Keep full private
+proofs local; publish only non-sensitive code, tests and documentation. Version and delivery status are maintained in
+[development](xiaohongshu/DEVELOPMENT.md#本次交付状态2026-10-28).
 
 ## Private inventory format
 

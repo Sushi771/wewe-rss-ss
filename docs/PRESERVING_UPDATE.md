@@ -7,8 +7,10 @@ operations must continue using that original mode.
 
 `preservingUpdate.format` is `1`. `operation` matches the actual `build`,
 `install` or `restart` request. Build effects are exactly `new-output-only` and
-require the existing build-only source/runtime/command bindings. Existing output
-reuse is refused; failed output and its claim remain held for review.
+require the existing build-only source/runtime/command bindings. Existing complete
+output reuse is refused in this mode. Allocated failed outputs and their claims
+remain held for review; an admission failure before allocation may instead leave
+an adopted ledger with no claim or outputs. Inspect the actual receipt and state.
 
 Install/restart policies bind a single `active.pointer`, its `pointerSha256`,
 `currentId`, `candidateId`, both manifest SHA-256 values and `oldProcess` PID,
@@ -46,3 +48,28 @@ receive claims, allocations or writes. Its actual baseline may be zero only when
 it is an observed empty directory. Physical free-space and finite growth/runtime
 limits remain. Install/restart/full modes cannot select these root roles and
 retain their original complete accounting requirements.
+
+## Repairing an existing registration
+
+When a policy-pin change conflicts with an existing registration, inspect its
+actual receipt and state before selecting a repair. Keep version and delivery
+status in [development](xiaohongshu/DEVELOPMENT.md#本次交付状态2026-10-28);
+machine-specific registration and failure details remain private.
+
+A bounded repair must bind the exact old/new policies and state bytes, recheck
+the original directory identities, applicable inventory, owner and limits, retain
+the original evidence and a verifiable repair receipt, and preserve crash-safe
+state handling. Empty outputs do not authorize resetting history or hand-editing
+a hash. An unexpected claim, output, identity, policy difference or owner stops
+that repair. A new scope, generic continuation or second budget mechanism is not
+an automatic substitute for resolving the actual mismatch.
+
+This is a repair criterion, not a claim that such a repair or build has passed.
+Required native observation still runs in the actual scope context. Any narrower
+applicability needs an explicit operation boundary and counterexample tests;
+an actual access denial must not be bypassed or relabeled as success.
+
+Package verification and installation are separate stages. Build does not call
+`installPair`; installation checks the actual inventory and may use its existing
+`adoptLegacy` interface when applicable. Do not infer a lifecycle conflict from
+missing information or make an installation-only check a build prerequisite.
