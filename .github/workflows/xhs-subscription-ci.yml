@@ -61,10 +61,10 @@ jobs:
           node --test --test-name-pattern='^(v3|a v3)' scripts/local-release/release-scope.test.cjs
       - name: Preserving update effects and process transitions
         run: |
-          node --test scripts/local-release/preserving-contract.test.cjs scripts/local-release/preserving-restart.test.cjs scripts/local-release/legacy-restart-cleanup.test.cjs
-          node --test scripts/local-release/project-writer-gate.test.cjs scripts/local-release/guarded-prisma.test.cjs
+          node --test --test-concurrency=1 scripts/local-release/preserving-contract.test.cjs scripts/local-release/preserving-restart.test.cjs scripts/local-release/legacy-restart-cleanup.test.cjs
+          node --test --test-concurrency=1 scripts/local-release/project-writer-gate.test.cjs scripts/local-release/guarded-prisma.test.cjs
           node --test --test-name-pattern='^legacy (adapter|boundary)' scripts/local-release/release-scope.test.cjs
-          node --test --test-name-pattern='^(preserving|original complete)' scripts/local-release/release-scope.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/windows-release-references.test.cjs
+          node --test --test-concurrency=1 --test-name-pattern='^(preserving|original complete)' scripts/local-release/release-scope.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/windows-release-references.test.cjs
       - run: pnpm install --frozen-lockfile
       - name: Synthetic source, session, storage and shared grouping regressions
         run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu|subscription-video|media-transaction|saved-media-writeback)|trpc/(xiaohongshu-ui|management-groups)|platform-export-target|article-folder-picker|xhs-cached-local-export|article-local-save|xhs-single-download|xhs-video-download|article-verified-download|feeds/(automatic-media-queue|automatic-media-storage)|media-large-export)'
