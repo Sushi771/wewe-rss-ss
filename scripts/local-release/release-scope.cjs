@@ -447,6 +447,66 @@ function open(request, options = {}, boundOperation) {
       }finally{fs.closeSync(fd);}
       if(wanted&&digest(b)!==wanted)reject();return b;
     };
+    if(!hex(repairSha))reject();
+    const preliminary=JSON.parse(bytes(repairPath,repairSha,65536));
+    if(preliminary.kind==='adopted-empty-install-caller-binding-repair'){
+      const a=preliminary;
+      if(a.format!==1||!preserving||preserving.operation!=='install'||!effectScope||policy.format!==2||
+        a.scopeId!==policy.scopeId||a.registryDirectory!==directory||hash(a.registryIdentity)!==hash(policy.registryIdentity)||
+        a.newPolicySha256!==configSha||!hex(a.oldPolicySha256)||!hex(a.priorLedgerSha256)||!hex(a.priorPayloadDigest)||
+        !hex(a.adoptionSha256)||!hex(a.auditedSourceIdentity)||typeof a.reviewEvidence!=='string'||!a.reviewEvidence||
+        !Array.isArray(a.priorLedgerIdentity)||a.priorLedgerIdentity.length!==3||!a.launcher||typeof a.launcher!=='object'||Array.isArray(a.launcher))reject();
+      const oldBytes=bytes(a.oldPolicyPath,a.oldPolicySha256),nextBytes=bytes(file,configSha),old=JSON.parse(oldBytes);
+      const differences=(x,y,p='')=>{
+        if(JSON.stringify(x)===JSON.stringify(y))return [];
+        if(!x||!y||typeof x!=='object'||typeof y!=='object'||Array.isArray(x)||Array.isArray(y))return [p];
+        return [...new Set([...Object.keys(x),...Object.keys(y)])].sort().flatMap(k=>differences(x[k],y[k],p?p+'.'+k:k));
+      };
+      const changes=differences(old,policy).sort(),oldLaunchers=old.windowsReferences?.launchers,newLaunchers=policy.windowsReferences?.launchers;
+      if(!Array.isArray(oldLaunchers)||!Array.isArray(newLaunchers)||newLaunchers.length!==oldLaunchers.length+1||
+        hash(newLaunchers.slice(0,-1))!==hash(oldLaunchers)||hash(newLaunchers.at(-1))!==hash(a.launcher)||
+        !Array.isArray(a.allowedDifferences)||hash(changes)!==hash([...a.allowedDifferences].sort())||
+        new Set(a.allowedDifferences).size!==changes.length||!changes.includes('windowsReferences.launchers')||
+        changes.some(k=>!['windowsReferences.launchers','probe.sha256'].includes(k))||
+        old.scopeId!==policy.scopeId||old.format!==2||old.preservingUpdate?.operation!=='install'||!old.preservingUpdate?.effectScope)reject();
+      const origin=bytes(ledger+'.adopted',a.adoptionSha256,64);
+      if(origin.toString('utf8')!==a.oldPolicySha256||prior.claim!==null||!Array.isArray(prior.outputs)||prior.outputs.length||prior.format!==2)reject();
+      const current=bytes(ledger,null,65536),snapshotPath=ledger+'.binding-repair-'+repairSha+'.json';
+      let original=current;
+      if(prior.configSha===configSha){
+        if(!prior.bindingRepair||prior.bindingRepair.approvalSha256!==repairSha||!present(snapshotPath))reject();
+        original=Buffer.from(JSON.parse(bytes(snapshotPath,prior.bindingRepair.snapshotSha256,4*1024*1024)).ledgerBase64||'','base64');
+      }else if(prior.configSha!==a.oldPolicySha256||digest(current)!==a.priorLedgerSha256||hash(fileIdentity(ledger))!==hash(a.priorLedgerIdentity))reject();
+      if(digest(original)!==a.priorLedgerSha256)reject();
+      const before=JSON.parse(original);
+      if(!before.payload||before.digest!==hash(before.payload)||before.digest!==a.priorPayloadDigest||before.payload.format!==2||
+        before.payload.configSha!==a.oldPolicySha256||before.payload.claim!==null||!Array.isArray(before.payload.outputs)||before.payload.outputs.length||before.payload.bindingRepair)reject();
+      const approvalBytes=bytes(repairPath,repairSha,65536);
+      const snapshot=Buffer.from(JSON.stringify({format:1,ledgerBase64:original.toString('base64'),oldPolicyBase64:oldBytes.toString('base64'),newPolicyBase64:nextBytes.toString('base64'),approvalBase64:approvalBytes.toString('base64')}));
+      if(snapshot.length>4*1024*1024)reject();
+      const after={...before.payload,configSha,bindingRepair:{kind:a.kind,approvalSha256:repairSha,snapshotSha256:digest(snapshot),oldPolicySha256:a.oldPolicySha256,newPolicySha256:configSha}};
+      const replay=prior.configSha===configSha;
+      if(replay&&(hash(prior)!==hash(after)||!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot)))reject();
+      const validate=()=>{
+        owner();checkRoots(referenceRoots);checkControls(n=>verifier.chargeExternal(n));
+        const measured=measureScope([]);
+        if(measured.digest!==policy.baseline.digest||measured.metadataDigest!==policy.baseline.metadataDigest||
+          measured.namespaceDigest!==policy.baseline.namespaceDigest||hash(measured.allocationStates)!==hash(policy.baseline.allocationStates)||
+          effectScope.allocations.some(x=>x.mode!=='exclusive-package'||present(x.path))||
+          measured.bytes>policy.maxBytes||measured.bytes-policy.baseline.bytes>policy.maxGrowthBytes||
+          measured.runtimeCopies-policy.baseline.runtimeCopies>policy.maxNewRuntimeCopies||
+          verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)reject();
+        bytes(repairPath,repairSha,65536);bytes(a.oldPolicyPath,a.oldPolicySha256);bytes(file,configSha);bytes(ledger+'.adopted',a.adoptionSha256,64);
+      };
+      validate();if(replay)return;
+      options.onBindingRepairStep?.('before-snapshot');validate();
+      if(present(snapshotPath)){if(!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot))reject();}
+      else{const fd=fs.openSync(snapshotPath,'wx',0o600);try{fs.writeFileSync(fd,snapshot);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+      options.onBindingRepairStep?.('before-commit');validate();
+      if(!bytes(ledger,a.priorLedgerSha256,65536).equals(original)||hash(fileIdentity(ledger))!==hash(a.priorLedgerIdentity))reject();
+      atomic(ledger,after);ledgerIdentity=fileIdentity(ledger);prior=after;
+      options.onBindingRepairStep?.('after-commit');return;
+    }
     if(!hex(repairSha)||!preserving||preserving.operation!=='build'||!rootRoles||policy.phase!=='build-only'||policy.format!==2)reject();
     const approvalBytes=bytes(repairPath,repairSha,65536),a=JSON.parse(approvalBytes);
     if(![1,2].includes(a.format)||a.kind!=='adopted-empty-build-binding-repair'||a.scopeId!==policy.scopeId||

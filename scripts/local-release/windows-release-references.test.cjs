@@ -283,6 +283,62 @@ function projectEffectFixture(f) {
   f.native.processesBefore.push(...own);f.native.processesAfter.push(...structuredClone(own));
   f.run=()=>probe(f.policy,f.native,{callerPid:99,self});return self;
 }
+function installCallerFixture(f) {
+  projectEffectFixture(f);
+  f.policy.preservingUpdate.operation = 'install';
+  f.policy.preservingUpdate.effects = ['new-output-only'];
+  f.policy.preservingUpdate.effectScope.allocations = [{ path: f.packages[1].path, mode: 'exclusive-package' }];
+  const folder = path.join(f.project, 'scripts/local-release');
+  fs.mkdirSync(folder, { recursive: true });
+  const entry = path.join(folder, 'install-lifecycle.cjs');
+  const plan = path.join(f.registry, 'reviewed-install-plan.json');
+  f.write(entry, '// inert reviewed install entry');
+  f.write(plan, { root: f.installed, plan: { current: 'current', candidate: f.packages[1].path, rollback: f.packages[2].path } });
+  const tokens = [f.controller, entry, '--plan', plan];
+  for (const list of [f.native.processesBefore, f.native.processesAfter])
+    list.find(p => p.pid === 99).commandLine = tokens.map(quote).join(' ');
+  f.policy.windowsReferences.launchers.push({
+    entry, argv: tokens, executable: f.pin(f.controller), files: [f.pin(entry), f.pin(plan)],
+    workingDirectory: f.project, cwdIndependent: true, pointerPath: f.pointer,
+  });
+  return { entry, plan, tokens };
+}
+test('install caller: existing exact launcher resolves the reviewed original-project entry', () => fixture(f => {
+  installCallerFixture(f);
+  const r = f.run();
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.observationComplete, true);
+  assert.equal(r.complete, false);
+  assert.equal(r.categories.inflight, true);
+  assert(r.records.some(row => row.kind === 'processes' && row.pid === 99 && row.packageId === 'current'));
+  assert(r.records.some(row => row.kind === 'processes' && row.pid === 10));
+  assert.equal(r.records.filter(row => row.kind === 'tasks').length, 1);
+}));
+for (const mutation of ['entry-bytes', 'plan-bytes', 'extra-argument', 'wrong-plan-argument', 'native-executable', 'executable-bytes', 'changed-start', 'changed-command', 'missing-caller', 'wrong-parent', 'extra-project-script', 'late-writer-child'])
+  test('install caller: existing launcher refuses ' + mutation, () => fixture(f => {
+    const c = installCallerFixture(f);
+    const before = f.native.processesBefore.find(p => p.pid === 99);
+    const after = f.native.processesAfter.find(p => p.pid === 99);
+    if (mutation === 'entry-bytes') fs.appendFileSync(c.entry, '// changed');
+    if (mutation === 'plan-bytes') fs.appendFileSync(c.plan, ' ');
+    if (mutation === 'extra-argument') before.commandLine = after.commandLine += ' --unexpected';
+    if (mutation === 'wrong-plan-argument') before.commandLine = after.commandLine = [f.controller, c.entry, '--plan', f.compatibility].map(quote).join(' ');
+    if (mutation === 'native-executable') before.executable = after.executable = f.worker;
+    if (mutation === 'executable-bytes') fs.appendFileSync(f.controller, 'changed');
+    if (mutation === 'changed-start') after.startUtc = '2026-02-01T00:00:00.000Z';
+    if (mutation === 'changed-command') after.commandLine += ' --unexpected';
+    if (mutation === 'missing-caller') before.commandLine = '';
+    if (mutation === 'wrong-parent') f.native.processesBefore.find(p => p.pid === 200).parentPid = 1;
+    if (mutation === 'extra-project-script') {
+      const script = path.join(f.project, 'unapproved.cjs'); f.write(script, '// inert');
+      const row = f.process(804, 1, f.worker, [f.worker, script].map(quote).join(' '));
+      f.native.processesBefore.push(row); f.native.processesAfter.push(structuredClone(row));
+    }
+    if (mutation === 'late-writer-child') f.native.processesAfter.push(f.process(804, 99, f.worker, quote(f.worker)));
+    const r = f.run(); assert.notEqual(r.observationComplete, true); assert(r.errors.length);
+    assert.equal(r.complete, false);
+    if (mutation === 'native-executable') assert(r.errors.includes('REFERENCE_LAUNCHER_EXECUTABLE_CHANGED'));
+  }));
 test('effect references observe only the bound project without claiming whole-host completeness',()=>fixture(f=>{
   projectEffectFixture(f);
   const unknown={pid:800,parentPid:1,name:'unrelated',executable:'',commandLine:'',startUtc:null};

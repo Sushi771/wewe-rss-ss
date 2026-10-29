@@ -371,7 +371,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       }
       if (relevantText(token)) fail('REFERENCE_COMMAND_PATH_UNRESOLVED');
     }
-    function resolveInvocation(tokens, cwd, isProcess = false, kind = 'tasks') {
+    function resolveInvocation(tokens, cwd, isProcess = false, kind = 'tasks', processExecutable) {
       const launch = launchers.find(
         (l) =>
           hash(tokens) === hash(l.argv) &&
@@ -379,6 +379,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
             ? same(canonical(cwd), l.cwd)
             : isProcess && l.cwdIndependent === true),
       );
+      if (launch && isProcess && (!processExecutable ||
+        !same(canonical(processExecutable), canonical(launch.executable.path))))
+        fail('REFERENCE_LAUNCHER_EXECUTABLE_CHANGED');
       if (launch)
         return [
           {
@@ -643,6 +646,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         argv(p.commandLine),
         p.workingDirectory,
         true,
+        undefined,
+        p.executable,
       );
       const executableRef = pathReference(p.executable);
       if (
@@ -695,6 +700,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           argv(p.commandLine),
           p.workingDirectory,
           true,
+          undefined,
+          p.executable,
         );
         if (
           refs.length ||

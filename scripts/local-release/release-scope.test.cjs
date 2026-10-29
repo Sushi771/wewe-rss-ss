@@ -1266,3 +1266,68 @@ for(const stage of ['before-snapshot','before-commit','after-commit'])test('pres
 test('preserving binding successor concurrent child is refused by same lock',()=>repairFixture(x=>{
  x.open().close();successorReceipt(x,'d');let called=false;x.open({onBindingRepairStep:n=>{if(n!=='before-commit')return;const script="try{require(process.argv[1]).open(JSON.parse(process.argv[2]),JSON.parse(process.argv[3]));process.exit(2)}catch(e){if(e.code!=='EEXIST')process.exit(3)}";const opts=x.options();delete opts.query;require('node:child_process').execFileSync(process.execPath,['-e',script,path.join(__dirname,'release-scope.cjs'),JSON.stringify(x.request),JSON.stringify(opts)],{windowsHide:true,timeout:10000});called=true;}}).close();assert(called);
 }));
+function installCallerRepairFixture(run){return fixture(f=>{
+  const e=effectInstallScope(f);f.policy.windowsReferences.launchers=[];f.save();
+  const old=structuredClone(f.policy),oldFile=path.join(f.base,'old-install-policy.json');fs.writeFileSync(oldFile,JSON.stringify(old));
+  const oldSha=fileHash(oldFile),query=()=>structuredClone(f.facts);f.facts.observationComplete=false;
+  assert.throws(()=>scope.open(e.request,{configPath:oldFile,configSha256:oldSha,query}),/REFERENCE_QUERY_INCOMPLETE/);
+  f.facts.observationComplete=true;
+  const ledger=path.join(f.base,old.scopeId+'.state.json'),adopted=ledger+'.adopted';
+  const prior=JSON.parse(fs.readFileSync(ledger));prior.payload.futureCounter={used:7,history:['keep']};
+  prior.digest=crypto.createHash('sha256').update(JSON.stringify(prior.payload)).digest('hex');fs.writeFileSync(ledger,JSON.stringify(prior));
+  const original=fs.readFileSync(ledger),origin=fs.readFileSync(adopted),st=fs.lstatSync(ledger,{bigint:true});
+  const next=structuredClone(old),launcher={synthetic:'exact reviewed launcher'};next.windowsReferences.launchers.push(launcher);
+  const approval=path.join(f.base,'install-caller-approval.json');
+  const receipt={format:1,kind:'adopted-empty-install-caller-binding-repair',scopeId:old.scopeId,registryDirectory:old.registryDirectory,registryIdentity:old.registryIdentity,
+    oldPolicyPath:oldFile,oldPolicySha256:oldSha,newPolicySha256:'',priorLedgerSha256:fileHash(ledger),priorPayloadDigest:prior.digest,
+    priorLedgerIdentity:[st.dev,st.ino,st.birthtimeNs].map(String),adoptionSha256:fileHash(adopted),auditedSourceIdentity:'b'.repeat(64),
+    reviewEvidence:'synthetic approval',allowedDifferences:['windowsReferences.launchers'],launcher};
+  const save=()=>{fs.writeFileSync(f.config,JSON.stringify(next));receipt.newPolicySha256=fileHash(f.config);fs.writeFileSync(approval,JSON.stringify(receipt));};save();
+  const options=()=>({configPath:f.config,configSha256:fileHash(f.config),query,bindingRepairFile:approval,bindingRepairSha256:fileHash(approval)});
+  run({f,e,old,next,receipt,save,options,ledger,adopted,approval,original,origin,prior,open:extra=>scope.open(e.request,{...options(),...extra})});
+});}
+test('install caller repair: preserves state and exact replay',()=>installCallerRepairFixture(x=>{
+  x.open().close();const state=JSON.parse(fs.readFileSync(x.ledger)).payload;
+  assert.deepEqual(state.futureCounter,x.prior.payload.futureCounter);assert.equal(state.configSha,x.receipt.newPolicySha256);
+  assert.equal(state.claim,null);assert.deepEqual(state.outputs,[]);assert(fs.readFileSync(x.adopted).equals(x.origin));
+  const saved=fs.readFileSync(x.ledger);x.open().close();assert(fs.readFileSync(x.ledger).equals(saved));
+}));
+for(const kind of ['launcher','extra launcher','budget','root','claim','outputs','adoption','ledger identity','prior repair','allocation','pointer'])
+ test('install caller repair: rejects '+kind,()=>installCallerRepairFixture(x=>{
+  if(kind==='launcher')x.receipt.launcher={synthetic:'different'};
+  if(kind==='extra launcher')x.next.windowsReferences.launchers.push({synthetic:'extra'});
+  if(kind==='budget')x.next.maxGrowthBytes++;
+  if(kind==='root')x.next.roots[0].identity[1]='999';
+  if(kind==='ledger identity')x.receipt.priorLedgerIdentity[1]='999';
+  if(kind==='claim'||kind==='outputs'||kind==='prior repair'){
+    const d=JSON.parse(fs.readFileSync(x.ledger));if(kind==='claim')d.payload.claim={id:'unknown'};if(kind==='outputs')d.payload.outputs=[{path:x.e.target}];if(kind==='prior repair')d.payload.bindingRepair={unreviewed:true};
+    d.digest=crypto.createHash('sha256').update(JSON.stringify(d.payload)).digest('hex');fs.writeFileSync(x.ledger,JSON.stringify(d));
+    const st=fs.lstatSync(x.ledger,{bigint:true});x.receipt.priorLedgerSha256=fileHash(x.ledger);x.receipt.priorPayloadDigest=d.digest;x.receipt.priorLedgerIdentity=[st.dev,st.ino,st.birthtimeNs].map(String);
+  }
+  if(kind==='adoption')fs.writeFileSync(x.adopted,'0'.repeat(64));
+  if(kind==='allocation')fs.mkdirSync(x.e.target);
+  if(kind==='pointer')fs.writeFileSync(x.old.preservingUpdate.active.pointer,'{}');
+  x.save();const before=fs.readFileSync(x.ledger);assert.throws(()=>x.open());assert(fs.readFileSync(x.ledger).equals(before));
+ }));
+for(const stage of ['before-snapshot','before-commit','after-commit'])
+ test('install caller repair: interruption '+stage,()=>installCallerRepairFixture(x=>{
+  assert.throws(()=>x.open({onBindingRepairStep:n=>{if(n===stage)throw Error('interrupt');}}),/BINDING_REPAIR_REVIEW_REQUIRED/);
+  const d=JSON.parse(fs.readFileSync(x.ledger));assert.equal(d.digest,crypto.createHash('sha256').update(JSON.stringify(d.payload)).digest('hex'));
+  assert(fs.readFileSync(x.adopted).equals(x.origin));if(stage==='after-commit')assert.equal(d.payload.configSha,x.receipt.newPolicySha256);else assert(fs.readFileSync(x.ledger).equals(x.original));
+  x.open().close();
+ }));
+test('install caller repair: rejects tampered replay snapshot',()=>installCallerRepairFixture(x=>{
+  x.open().close();const saved=fs.readFileSync(x.ledger);fs.appendFileSync(x.ledger+'.binding-repair-'+fileHash(x.approval)+'.json','changed');
+  assert.throws(()=>x.open(),/BINDING_REPAIR_REVIEW_REQUIRED/);assert(fs.readFileSync(x.ledger).equals(saved));
+}));
+test('install caller repair: rejects concurrent lock acquisition',()=>installCallerRepairFixture(x=>{
+ let checked=false;x.open({onBindingRepairStep:n=>{if(n==='before-commit'){assert.throws(()=>x.open(),/EEXIST/);checked=true;}}}).close();assert(checked);
+}));
+test('install caller repair: compare and swap rejects late ledger change',()=>installCallerRepairFixture(x=>{
+ assert.throws(()=>x.open({onBindingRepairStep:n=>{if(n!=='before-commit')return;const d=JSON.parse(fs.readFileSync(x.ledger));d.payload.futureCounter.used=8;d.digest=crypto.createHash('sha256').update(JSON.stringify(d.payload)).digest('hex');fs.writeFileSync(x.ledger,JSON.stringify(d));}}),/BINDING_REPAIR_REVIEW_REQUIRED/);
+ assert.equal(JSON.parse(fs.readFileSync(x.ledger)).payload.futureCounter.used,8);assert(fs.readFileSync(x.adopted).equals(x.origin));
+}));
+test('install caller repair: unknown reference remains refused after binding',()=>installCallerRepairFixture(x=>{
+ x.f.facts.observationComplete=false;assert.throws(()=>x.open(),/REFERENCE_QUERY_INCOMPLETE/);
+ const state=JSON.parse(fs.readFileSync(x.ledger)).payload;assert.equal(state.configSha,x.receipt.newPolicySha256);assert.equal(state.claim,null);assert.deepEqual(state.outputs,[]);
+}));
