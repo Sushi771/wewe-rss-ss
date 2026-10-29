@@ -1,4 +1,5 @@
 const restorePreOriginalLinkRouter = require('./xhs-original-link-router-seams.cjs');
+const restorePlatformDirectory = require('./xhs-platform-directory-seams.cjs');
 const restorePreReviewedRecoveryRouter = require('./xhs-reviewed-recovery-router-seams.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -27,6 +28,20 @@ function tokens(text) {
     result.push(scanner.getTokenText());
   return hash(result.join('\0'));
 }
+
+test('platform directory seams retain every prior controller and source statement', () => {
+ const originals={'apps/server/src/article-download.controller.ts':'4923fa9409ce762b28863e97788de0912dcb7060','apps/server/src/article-export-source.ts':'c2e7642b52e4a3a15d684eec219e87e3ff260ade','apps/server/src/collection/xiaohongshu.service.ts':'652a04c360f6c013790debac23626a7c7293da7c'};
+ for(const [file,expected] of Object.entries(originals)){
+  const restored=restorePlatformDirectory(file,read(file));
+  assert.equal(crypto.createHash('sha1').update('blob '+Buffer.byteLength(restored)+'\0').update(restored).digest('hex'),expected);
+ }
+});
+
+test('platform directory seams refuse changes to any reviewed addition',()=>{
+ const seams=require('./fixtures/xhs-platform-directory-seams.json');
+ for(const [file,entries] of Object.entries(seams))for(const seam of entries)
+  assert.throws(()=>restorePlatformDirectory(file,read(file).replace(seam.after,seam.after+'/* changed */').replace(seam.after,'/* removed */')),/exact reviewed platform directory seam/);
+});
 
 test('reviewed recovery seam retains the exact existing router source', () => {
   const restored = restorePreReviewedRecoveryRouter(ts, read('apps/server/src/trpc/trpc.router.ts'));
@@ -165,7 +180,7 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
       assert.equal(fs.existsSync(file), false, file + ' must remain removed');
       continue;
     }
-    let source = read(file);
+    let source = restorePlatformDirectory(file, read(file));
     if (file === 'apps/server/src/article-download.controller.ts') {
       const additions = [
         [

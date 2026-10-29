@@ -89,7 +89,7 @@ type DirectoryChoice = SaveSettings & {
 const localApi = async <T,>(endpoint: string, payload?: object): Promise<T> => {
   const auth = getAuthCode();
   const response = await fetch(
-    `${serverOriginUrl || ''}/download/article${endpoint}`,
+    `${serverOriginUrl || ''}/download/article${endpoint}${endpoint === '/settings' || endpoint === '/directory' ? '?target=xiaohongshu' : ''}`,
     {
       method: payload ? 'POST' : 'GET',
       credentials: 'include',
@@ -1188,7 +1188,11 @@ export default function Xiaohongshu() {
                 />
                 <span className="xhs-creator-name">{creator.displayName}</span>
                 <span className="block min-w-0 break-words">
-                  <XhsMetricLine snapshot={creator.metrics} creator showUpdatedAt={false} />
+                  <XhsMetricLine
+                    snapshot={creator.metrics}
+                    creator
+                    showUpdatedAt={false}
+                  />
                 </span>
               </button>
               <span className="shrink-0 text-xs opacity-60">

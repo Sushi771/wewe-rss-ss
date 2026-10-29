@@ -92,6 +92,7 @@ export async function buildCompleteArticleDownload(
   source: string,
   directory: string,
   allowUnconfirmedMedia = false,
+  sourceLayout = false,
 ): Promise<PreparedArticle> {
   if (article.lastBodyStatus === 'unavailable') throw unavailable();
   const contentHtml = verifiedDownloadBody(
@@ -115,6 +116,9 @@ export async function buildCompleteArticleDownload(
       throw unavailable();
     },
     'image',
+    undefined,
+    false,
+    sourceLayout ? { includeTitle: false, includeSourceLink: false } : {},
   );
   const title = article.title.replace(/[\r\n]/g, ' ').replace(
     /[&<>"']/g,
@@ -129,7 +133,9 @@ export async function buildCompleteArticleDownload(
   );
   await writeFile(
     join(directory, 'index.md'),
-    `# ${title}\n\n原文来源：${source}\n\n${markdown}\n`,
+    sourceLayout
+      ? markdown
+      : `# ${title}\n\n原文来源：${source}\n\n${markdown}\n`,
   );
   return {
     articleId: article.id,

@@ -107,7 +107,7 @@ function downloadFixture() {
     return {
       ok: true,
       json: async () =>
-        endpoint.endsWith('/settings')
+        endpoint.endsWith('/settings?target=xiaohongshu')
           ? { directory: 'fixture-only', askEveryTime: false }
           : { available: false, message: '来源尚未配置' },
     };

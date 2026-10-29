@@ -1,3 +1,4 @@
+import { ArticlePreparation } from '../article-local-save';
 import { xhsOriginalLink } from './xhs-original-link';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { TRPCError } from '@trpc/server';
@@ -1053,6 +1054,53 @@ export class XiaohongshuService {
     creatorId: string,
     noteId: string,
     metrics?: XhsMetricSnapshot | null,
+  ): Promise<ArticlePreparation> {
+    const creator = await this.getCreator(creatorId);
+    const note = await this.prisma.xhsNote.findFirst({
+      where: { id: noteId, creatorId, status: 'complete' },
+    });
+    if (!note) throw new ArticleDownloadError('笔记缓存不存在。', 422);
+    const group = creator.groupId
+      ? await this.prisma.managementGroup.findUnique({
+          where: { id: creator.groupId },
+        })
+      : null;
+    const exportSource = {
+      feedId: creator.id,
+      feedName: creator.displayName,
+      groupId: group?.id,
+      groupName: group?.name,
+      platform: 'xiaohongshu' as const,
+    };
+    const prepare = await this.prepareCachedLocalDownload(
+      creatorId,
+      noteId,
+      metrics,
+    );
+    const identity = {
+      articleId: note.id,
+      title: note.title,
+      imageCount: 0,
+      videoCount: note.kind === 'video' ? 1 : 0,
+      exportSource,
+      publishTime: note.publishTime,
+      sourceUrl: xhsOriginalLink(note.id),
+    };
+    const wrapped: ArticlePreparation = async (stage) => ({
+      ...(await prepare(stage)),
+      exportSource,
+      publishTime: note.publishTime,
+      sourceUrl: identity.sourceUrl,
+    });
+    wrapped.identity = identity;
+    wrapped.afterSave = prepare.afterSave;
+    return wrapped;
+  }
+
+  private async prepareCachedLocalDownload(
+    creatorId: string,
+    noteId: string,
+    metrics?: XhsMetricSnapshot | null,
   ) {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
@@ -1111,34 +1159,37 @@ export class XiaohongshuService {
           422,
           { code: 'XHS_CACHED_VIDEO_INVALID' },
         );
-      const prepare = prepareXhsVideoDownload({
-        evidenceVerified: true,
-        note: {
-          authorId: creator.externalAuthorId,
-          noteId: tuple[2],
-          kind: 'video',
-          publishedAt: note.publishTime,
-          title: note.title,
-          text: content
-            .find('p')
-            .not(
-              '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
-            )
-            .toArray()
-            .map((p) => $(p).text())
-            .join('\n'),
-          textStatus: 'full',
-          expectedImageCount: images.length,
-          images,
+      const prepare = prepareXhsVideoDownload(
+        {
+          evidenceVerified: true,
+          note: {
+            authorId: creator.externalAuthorId,
+            noteId: tuple[2],
+            kind: 'video',
+            publishedAt: note.publishTime,
+            title: note.title,
+            text: content
+              .find('p')
+              .not(
+                '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
+              )
+              .toArray()
+              .map((p) => $(p).text())
+              .join('\n'),
+            textStatus: 'full',
+            expectedImageCount: images.length,
+            images,
+          },
+          video: {
+            complete: true,
+            mimeType: metadata.mimeType,
+            bytes,
+            expectedBytes: metadata.bytes,
+            sha256: metadata.sha256,
+          },
         },
-        video: {
-          complete: true,
-          mimeType: metadata.mimeType,
-          bytes,
-          expectedBytes: metadata.bytes,
-          sha256: metadata.sha256,
-        },
-      });
+        true,
+      );
       const snapshot = await this.exportEngagement(creatorId, noteId, metrics);
       return withXhsLocalSnapshot(
         async (directory: string) => {
@@ -1179,6 +1230,8 @@ export class XiaohongshuService {
           article,
           '[原文](' + sourceUrl + ')',
           directory,
+          false,
+          true,
         );
         await fs.appendFile(
           path.join(directory, 'index.md'),

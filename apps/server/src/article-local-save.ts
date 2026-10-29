@@ -1,6 +1,7 @@
 import { TRPCError } from '@trpc/server';
 import * as fs from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { ArticleDownloadError } from './article-download';
@@ -13,8 +14,9 @@ import {
   exportSourceMarkdown,
 } from './article-export-source';
 
-export const DEFAULT_ARTICLE_DIRECTORY =
-  'C:\\Users\\ss\\Documents\\Obsidian Vault\\公众号的文章（待分类）';
+export const DEFAULT_ARTICLE_DIRECTORY = path.join(
+  homedir(), 'Documents', 'Obsidian Vault', '公众号的文章（待分类）',
+);
 type Preferences = { directory: string; askEveryTime: boolean };
 export type PreparedArticle = {
   articleId: string;
@@ -105,6 +107,7 @@ type SourceReceipt = {
   mediaComplete?: boolean;
   markdown: string;
   images: string[];
+  videos?: Awaited<ReturnType<typeof checkedVideo>>[];
   imageMap?: Record<string, string>;
   markdownSha256?: string;
 };
@@ -219,6 +222,7 @@ export class LocalArticleStore {
   constructor(
     private readonly settingsFile: string,
     private readonly defaultDirectory = DEFAULT_ARTICLE_DIRECTORY,
+    private readonly defaultAskEveryTime = false,
   ) {}
 
   async read(): Promise<Preferences> {
@@ -243,7 +247,7 @@ export class LocalArticleStore {
           );
         this.preferences = {
           directory: this.defaultDirectory,
-          askEveryTime: false,
+          askEveryTime: this.defaultAskEveryTime,
         };
       }
     }
@@ -1084,8 +1088,6 @@ export class LocalArticleStore {
       if (existing && !repair) return { ...existing, ...publication };
       // WeChat article exports have no videos. Other adapters retain their
       // original per-article layout unless they explicitly supply this contract.
-      if (article.videoCount)
-        throw fail('来源导出暂不支持视频。', 'INVALID_PREPARED_VIDEO');
       let markdown = await fs.readFile(path.join(stage, 'index.md'), 'utf8');
       if (!markdown.trim() || markdown.includes('attachments/'))
         throw fail('正文或图片引用无效。', 'INVALID_PREPARED_ARTICLE');
@@ -1145,6 +1147,53 @@ export class LocalArticleStore {
           '图片数量与内部保存合同不一致。',
           'INVALID_PREPARED_ARTICLE',
         );
+      const videos: Awaited<ReturnType<typeof checkedVideo>>[] = [];
+      const stagedVideo = path.join(stage, 'video');
+      const videoNames = await fs.readdir(stagedVideo).catch((error) => {
+        if (error.code === 'ENOENT') return [] as string[];
+        throw error;
+      });
+      if (videoNames.length !== (article.videoCount || 0))
+        throw fail('视频数量不一致。', 'INVALID_PREPARED_VIDEO');
+      if (videoNames.length) {
+        const videoDir = path.join(folder, 'video');
+        await validateLocalDirectory(videoDir);
+        await fs.mkdir(videoDir, { recursive: true });
+        await validateLocalDirectory(videoDir);
+        for (const name of videoNames) {
+          const video = await checkedVideo(stagedVideo, name);
+          if (!markdown.includes('video/' + name))
+            throw fail('缺少相对视频链接。', 'INVALID_PREPARED_VIDEO');
+          const bytes = await fs.readFile(path.join(stagedVideo, name));
+          if (
+            bytes.length !== video.bytes ||
+            createHash('sha256').update(bytes).digest('hex') !== video.sha256
+          )
+            throw fail('视频缓存已改变。', 'INVALID_PREPARED_VIDEO');
+          const destination = path.join(videoDir, name);
+          if (destination.length > 255)
+            throw fail('视频保存路径过长。', 'SAVE_PATH_TOO_LONG');
+          try {
+            const output = await fs.open(destination, 'wx');
+            created.push(destination);
+            try {
+              await output.writeFile(bytes);
+            } finally {
+              await output.close();
+            }
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+            const stat = await fs.lstat(destination);
+            if (
+              !stat.isFile() ||
+              stat.isSymbolicLink() ||
+              !(await fs.readFile(destination)).equals(bytes)
+            )
+              throw fail('视频冲突，未覆盖。', 'INVALID_PREPARED_VIDEO');
+          }
+          videos.push(video);
+        }
+      }
       if (repair) {
         const missing = repair.missingImages || [];
         for (const name of missing) {
@@ -1247,6 +1296,7 @@ export class LocalArticleStore {
             markdown: path.basename(candidate),
             images: [...publishedImages],
             imageMap,
+            videos,
             markdownSha256: createHash('sha256').update(markdown).digest('hex'),
           };
           await fs.writeFile(pendingPath, JSON.stringify(journal), {
@@ -1281,6 +1331,7 @@ export class LocalArticleStore {
         markdownPath,
         alreadySaved: false,
         imageCount: publishedImages.size,
+        videoCount: videos.length,
         status: article.mediaComplete === false ? 'failed' : 'new',
         mediaStatus: article.mediaStatus,
         missingImageCount: article.missingImageCount,
@@ -1541,6 +1592,20 @@ export class LocalArticleStore {
           ))
       )
         throw new Error();
+      if (article.videoCount && receipt.videos?.length !== article.videoCount)
+        throw fail('视频回执不完整。', 'SAVE_RECEIPT_INVALID');
+      if (receipt.videos !== undefined) {
+        if (!Array.isArray(receipt.videos) || receipt.videos.length > 1)
+          throw new Error();
+        for (const video of receipt.videos) {
+          const checked = await checkedVideo(
+            path.join(folder, 'video'),
+            video.filename,
+          );
+          if (checked.sha256 !== video.sha256 || checked.bytes !== video.bytes)
+            throw new Error();
+        }
+      }
       const markdownPath = path.join(folder, receipt.markdown);
       let note;
       try {
@@ -1608,6 +1673,7 @@ export class LocalArticleStore {
         missingImages,
         alreadySaved: true,
         imageCount: receipt.images.length,
+        videoCount: receipt.videos?.length || 0,
         ...(receipt.mediaComplete === false ? { mediaComplete: false } : {}),
       };
     } catch (error) {

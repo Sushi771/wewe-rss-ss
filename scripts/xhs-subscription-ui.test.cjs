@@ -525,7 +525,7 @@ function fixture(options = {}) {
   global.fetch = async (url) => ({
     ok: true,
     json: async () =>
-      url.endsWith('/directory')
+      url.endsWith('/directory?target=xiaohongshu')
         ? {
             directory: 'synthetic-only',
             askEveryTime: true,

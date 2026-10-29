@@ -321,7 +321,10 @@ const escape = (text: string) =>
  * expectedBytes/hash protect transport; evidenceVerified is the trusted adapter's
  * upstream evidence obligation. Neither declares successful video decoding.
  */
-export function prepareXhsVideoDownload(input: XhsVerifiedVideoCache) {
+export function prepareXhsVideoDownload(
+  input: XhsVerifiedVideoCache,
+  sourceLayout = false,
+) {
   try {
     check(input.evidenceVerified === true && input.note.kind === 'video');
     const draft = xhsArchiveDraft(input.note.authorId, {
@@ -379,6 +382,8 @@ export function prepareXhsVideoDownload(input: XhsVerifiedVideoCache) {
         article,
         '[原文](' + xhsOriginalLink(draft.noteKey) + ')',
         directory,
+        false,
+        sourceLayout,
       );
       await mkdir(join(directory, 'video'));
       await writeFile(join(directory, 'video', filename), bytes, {

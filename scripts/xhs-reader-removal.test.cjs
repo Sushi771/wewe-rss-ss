@@ -1,4 +1,5 @@
 const restorePreOriginalLinkRouter = require('./xhs-original-link-router-seams.cjs');
+const restorePlatformDirectory = require('./xhs-platform-directory-seams.cjs');
 const restorePreReviewedRecoveryRouter = require('./xhs-reviewed-recovery-router-seams.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -26,7 +27,7 @@ test('only the exact platform reader route was deleted; all archive/engagement/W
 });
 test('only the exact reader method/import were deleted; native download/cache/export implementation is preserved', () => {
   assert.equal(
-    hash(restoreXhsReaderService(ts, service)),
+    hash(restoreXhsReaderService(ts, restorePlatformDirectory('apps/server/src/collection/xiaohongshu.service.ts', service))),
     seam.baselineServiceSha256,
   );
   for (const name of ['prepareLocalDownload', 'export', 'engagement'])
