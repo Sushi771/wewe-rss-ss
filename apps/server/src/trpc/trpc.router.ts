@@ -2020,7 +2020,7 @@ export class TrpcRouter {
         return this.xhsEngagement!.collect(input);
       }),
     prepareWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
-      .input(z.object({jobId:z.string().min(1).max(128),confirmUnknownRetry:z.literal(true)}).strict())
+      .input(z.object({jobId:z.string().min(1).max(128),confirmUnknownRetry:z.literal(true),confirmLegacyUnknown:z.literal(true).optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareReviewedAttempt(input));}),
     executeWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),attemptId:z.string().regex(/^[a-f0-9]{64}$/),url:z.string().min(1).max(8192),confirmUnknownRetry:z.literal(true)}).strict())

@@ -14,6 +14,10 @@ import { TrpcRouter, isLocalXhsStatusRequest } from '../trpc/trpc.router';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcModule } from '../trpc/trpc.module';
 import { RedbookTransport } from './redbook-client';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
+import { tmpdir } from 'node:os';
+import { projectWriterGate } from './project-writer-boundary';
 
 const cookies = {
   a1: 'synthetic-a1-only',
@@ -352,6 +356,11 @@ describe('default-off production source wiring with synthetic sessions only', ()
   });
   it('keeps the normal host factory default off without inspecting credentials', async () => {
     const old = process.env.XHS_SUBSCRIPTION_LIVE_ENABLED;
+    const oldUrl = process.env.DATABASE_URL;
+    const dir = await fs.mkdtemp(path.join(tmpdir(), 'xhs-disabled-boundary-'));
+    const file = path.join(dir, 'synthetic.sqlite');
+    await fs.writeFile(file, '', { flag: 'wx' });
+    process.env.DATABASE_URL = 'file:' + file.replace(/\\/g, '/');
     delete process.env.XHS_SUBSCRIPTION_LIVE_ENABLED;
     try {
       const runtime = createLocalXhsSubscriptionRuntime();
@@ -362,6 +371,10 @@ describe('default-off production source wiring with synthetic sessions only', ()
       });
       runtime.onModuleDestroy();
     } finally {
+      projectWriterGate().writerForUrl(process.env.DATABASE_URL)?.close();
+      if (oldUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = oldUrl;
+      await fs.rm(dir, { recursive: true, force: true });
       if (old === undefined) delete process.env.XHS_SUBSCRIPTION_LIVE_ENABLED;
       else process.env.XHS_SUBSCRIPTION_LIVE_ENABLED = old;
     }

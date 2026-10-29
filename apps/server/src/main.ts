@@ -1,3 +1,4 @@
+import {projectWriterGate} from './collection/project-writer-boundary';
 import { NestFactory } from '@nestjs/core';
 import { TrpcRouter } from '@server/trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
@@ -39,6 +40,7 @@ console.log('appVersion: v' + appVersion);
 
 async function bootstrap() {
   assertPrivateConfig();
+  projectWriterGate().writerForUrl(process.env.DATABASE_URL, join(process.cwd(), 'prisma')); // Before Nest can initialize DB or schedules.
   const browserOptIn = readBrowserTaskOptIn();
   const app = await NestFactory.create<NestExpressApplication>(
     browserTaskApplication(browserOptIn),

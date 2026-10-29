@@ -21,6 +21,7 @@ const {
   unusedPort,
   waitReady,
   stopOwned,
+  observeProjectWriters,
   loadProductionEnvironment,
 } = require('./switch.cjs');
 const { writeActiveReleaseAsync } = require('./active-release.cjs');
@@ -37,6 +38,11 @@ function requireFreePort(port) {
   const owners = portOwners(port);
   assert.deepEqual(owners, [], `端口 ${port} 已有监听进程，拒绝启动`);
 }
+function launchCommandLine(executable,args){
+  return [executable,...args].map(value=>/[\s"]/.test(value)?'"'+value.replace(/(\\*)"/g,'$1$1\\"').replace(/(\\+)$/,'$1$1')+'"':value).join(' ');
+}
+
+const {loadLegacyMaintenance}=require('./legacy-maintenance-loader.cjs');
 
 function commandLine(release, database, port, verifiedManifest) {
   const node = path.join(release, 'runtime/node.exe');
@@ -90,6 +96,7 @@ async function controlledRestart(options) {
 }
 async function controlledRestartInner(options) {
   if (process.platform !== 'win32') throw new Error('仅支持 Windows 本机');
+  if (options.legacyMaintenanceCheckpoint !== undefined && (typeof options.legacyMaintenanceCheckpoint !== 'function' || options.mode !== 'restart' || !require('./release-scope.cjs').session()?.policy?.preservingUpdate)) throw Error('LEGACY_MAINTENANCE_UNSUPPORTED');
   if (options.production === options.rehearsal)
     throw new Error('须且只能选择 --production 或 --rehearsal');
   if (options.mode !== 'start' && options.mode !== 'restart')
@@ -119,6 +126,10 @@ async function controlledRestartInner(options) {
       : await verifyReleaseAsync(previous, {
           reuseVerified: options.reuseVerified === true,
         });
+  if(options.legacyJobId!==undefined){
+    if(options.legacyMaintenanceCheckpoint!==undefined||options.mode!=='restart')throw Error('LEGACY_MAINTENANCE_UNSUPPORTED');
+    options={...options,legacyMaintenanceCheckpoint:loadLegacyMaintenance(release,manifest,options.legacyJobId)};
+  }
   let schemaProof;
   const preserving = require('./release-scope.cjs').session()?.policy?.preservingUpdate;
   if (preserving) {
@@ -133,6 +144,12 @@ async function controlledRestartInner(options) {
   for (const item of [manifest, previousManifest]) {
     assert.equal(item.schemaCompatibility, 'current', '只允许当前 schema 产物');
     assert.equal(typeof item.desktopHelperIncluded, 'boolean');
+  }
+  if (options.legacyMaintenanceCheckpoint) {
+    const boundaryHash=fileHash(path.join(__dirname,'project-writer-gate.cjs'));
+    if (!preserving || [manifest,previousManifest].some(item=>item.schemaCompatibility!=='current'||item.desktopHelperIncluded!==false||item.executionLayout!=='compact-cjs-v1') ||
+        manifest.files?.['project-writer-gate.cjs']!==boundaryHash || manifest.files?.['runtime.cjs']!==fileHash(path.join(__dirname,'runtime.cjs')))
+      throw Error('LEGACY_MAINTENANCE_CANDIDATE_BOUNDARY_UNAVAILABLE');
   }
   if (options.production) {
     assert.equal(source, fs.realpathSync(productionDatabase));
@@ -340,20 +357,20 @@ async function controlledRestartInner(options) {
         stdio: ['ignore', log, log],
       });
       fs.closeSync(log);
+      if(label==='new')newChild=child;
       if (preserving) {
-        const snapshot = processIdentity('Snapshot', child.pid, port);
-        try {
-          scopeLease?.bindPreservingChild?.(snapshot, bundle.id, commandLine(bundlePath, database, port, bundle));
-        } catch (error) {
-          child.kill();
-          throw error;
-        }
+        const expectedCommand=launchCommandLine(path.join(bundlePath,'runtime/node.exe'),args);
+        const snapshot = processIdentity('OwnedSnapshot', child.pid, port,{executable:path.join(bundlePath,'runtime/node.exe'),commandLine:expectedCommand});
+        ownedIdentities.set(child.pid,{identity:snapshot,packageId:bundle.id,commandLine:expectedCommand});
+        scopeLease?.bindPreservingChild?.(snapshot, bundle.id, expectedCommand);
       }
       return child;
     };
     let oldChild;
     let newChild;
     let fallbackChild;
+    const ownedIdentities=new Map();
+    let oldStopCheckpoint;
     let stopped = false;
     let finalBackup;
     const baseline = path.join(audit, 'final-baseline.json');
@@ -402,9 +419,16 @@ async function controlledRestartInner(options) {
         }
         const result = processIdentity('Stop', identity.pid, port, identity);
         assert.equal(result.stopped, true);
-        if (preserving) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(identity.pid, { pid: identity.pid, stopped: result.stopped === true });
         stopped = true;
+        oldStopCheckpoint={identity,stopReceipt:result,scopeLease:require('./release-scope.cjs').session()};
+        if (preserving) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(identity.pid, { pid: identity.pid, stopped: result.stopped === true });
         finalBackup = backup(database, 'after-stop');
+        if (!options.legacyMaintenanceCheckpoint) require('./project-writer-gate.cjs').retireStoppedWriter(database, {identity,stopReceipt:result,scopeLease:require('./release-scope.cjs').session()});
+        if (options.legacyMaintenanceCheckpoint) {
+          const scopeLease=require('./release-scope.cjs').requireSession();
+          const roots=scopeLease.legacyMaintenanceRoots(identity);
+          await options.legacyMaintenanceCheckpoint({ identity, stopReceipt: result, stoppedAt: Date.now(), scopeLease, backup: finalBackup, database,observeProjectWriters:()=>observeProjectWriters(roots,port) });
+        }
       } else {
         if (backgroundPreparation) {
           require(path.join(release, 'startup-sqlite.cjs')).inspectDatabase(
@@ -540,8 +564,14 @@ async function controlledRestartInner(options) {
       if (options.production) newChild.unref();
       return summary;
     } catch (error) {
-      await stopOwned(newChild);
-      if (preserving && newChild) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(newChild.pid, { pid: newChild.pid, stopped: newChild.exitCode !== null || typeof newChild.signalCode === 'string' });
+      if(newChild){
+        const owned=ownedIdentities.get(newChild.pid);
+        const receipt=await stopOwned(newChild,owned?.identity);
+        if(preserving)require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(newChild.pid,receipt||{pid:newChild.pid,stopped:newChild.exitCode!==null||typeof newChild.signalCode==='string'},owned);
+        if(owned)require('./project-writer-gate.cjs').retireStoppedWriter(database,{identity:owned.identity,stopReceipt:receipt,scopeLease:require('./release-scope.cjs').session()});
+        else if(fs.existsSync(require('./project-writer-gate.cjs').binding(database).file))throw Error('PROJECT_WRITER_BOUNDARY_UNPROVEN');
+      }
+      if(oldStopCheckpoint)require('./project-writer-gate.cjs').retireStoppedWriter(database,oldStopCheckpoint);
       if (stopped) {
         try {
           fallbackChild = start(
@@ -624,6 +654,7 @@ async function main() {
       'expected-command-line': { type: 'string' },
       'prepared-rehearsal': { type: 'boolean', default: false },
       'cold-launch-rehearsal': { type: 'boolean', default: false },
+      'legacy-job-id': {type:'string'},
     },
   });
   if (!values.release || (values.production && !values.database))
@@ -642,6 +673,7 @@ async function main() {
     injectFailure: values['inject-new-start-failure'],
     preparedRehearsal: values['prepared-rehearsal'],
     coldLaunchRehearsal: values['cold-launch-rehearsal'],
+    legacyJobId:values['legacy-job-id'],
     expected:
       values.production && values.mode === 'restart'
         ? {
@@ -660,4 +692,4 @@ if (require.main === module)
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });
-module.exports = { controlledRestart, commandLine, requireFreePort };
+module.exports = { controlledRestart, commandLine, requireFreePort, loadLegacyMaintenance,launchCommandLine };

@@ -6,6 +6,36 @@ const test = require('node:test'),
   crypto = require('node:crypto');
 const scope = require('./release-scope.cjs');
 const { fileHash } = require('./lib.cjs');
+test('legacy boundary observes only twice and its repeated lease checks never query complete references',()=>fixture(f=>{
+ const request=preservingRestart(f),exe=path.join(f.current,'runtime/node.exe');f.policy.preservingUpdate.active.oldProcess.executableSha256=fileHash(exe);f.facts.records[0].executableSha256=fileHash(exe);f.save();
+ const snapshot={pid:process.pid,startUtc:f.facts.records[0].startUtc,executable:exe,commandLine:'synthetic'},options=f.options();let queries=0,observations=0;const query=options.query;options.query=()=>{queries++;return query();};
+ scope.within(request,lease=>{f.facts.records=f.facts.records.filter(r=>r.kind!=='processes');lease.confirmPreservingProcessExit(snapshot.pid,{pid:snapshot.pid,stopped:true});const before=queries;
+   const boundary=lease.legacyMaintenanceBoundary(snapshot,()=>{observations++;return{complete:true,active:[]};});for(let n=0;n<35;n++)boundary.check();boundary.observe();boundary.observe();assert.equal(queries,before);assert.equal(observations,2);
+ },options);
+}));
+test('legacy adapter requires the existing confirmed stop and an empty project process observation (synthetic reference port)',()=>fixture(f=>{
+  const request=preservingRestart(f),exe=path.join(f.current,'runtime/node.exe');
+  f.policy.preservingUpdate.active.oldProcess.executableSha256=fileHash(exe);f.facts.records[0].executableSha256=fileHash(exe);f.save();
+  const snapshot={pid:process.pid,startUtc:f.facts.records[0].startUtc,executable:exe,commandLine:'synthetic command'};
+  let saved;
+  scope.within(request,lease=>{
+    saved=lease;assert.throws(()=>lease.assertLegacyMaintenanceQuiescent(snapshot));
+    f.facts.records=f.facts.records.filter(r=>r.kind!=='processes');
+    lease.confirmPreservingProcessExit(snapshot.pid,{pid:snapshot.pid,stopped:true});
+    const state=lease.assertLegacyMaintenanceQuiescent(snapshot);assert.match(state.projectIdentity,/^[a-f0-9]{64}$/);assert(state.claimAcquiredAt<=state.exitedAt);
+    assert.throws(()=>lease.assertLegacyMaintenanceQuiescent({...snapshot,startUtc:'wrong'}));
+  },f.options());
+  assert.throws(()=>saved.assertLegacyMaintenanceQuiescent(snapshot));
+}));
+test('legacy adapter refuses a new project writer after the confirmed stop (synthetic reference port)',()=>fixture(f=>{
+  const request=preservingRestart(f),exe=path.join(f.current,'runtime/node.exe');
+  f.policy.preservingUpdate.active.oldProcess.executableSha256=fileHash(exe);f.facts.records[0].executableSha256=fileHash(exe);f.save();
+  const snapshot={pid:process.pid,startUtc:f.facts.records[0].startUtc,executable:exe,commandLine:'synthetic command'},old={...f.facts.records[0]};
+  scope.within(request,lease=>{f.facts.records=f.facts.records.filter(r=>r.kind!=='processes');lease.confirmPreservingProcessExit(snapshot.pid,{pid:snapshot.pid,stopped:true});
+    f.facts.records.push({...old,pid:old.pid+1,identity:'synthetic-new-writer'});
+    try{assert.throws(()=>lease.assertLegacyMaintenanceQuiescent(snapshot));}finally{f.facts.records=f.facts.records.filter(r=>r.kind!=='processes');}
+  },f.options());
+}));
 function preservingRestart(f) {
   fs.mkdirSync(path.join(f.current, 'runtime'));
   fs.writeFileSync(path.join(f.current, 'runtime/node.exe'), 'synthetic-child-executable');

@@ -143,6 +143,8 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
       const overall = performance.now();
       let stage = overall;
       schemaRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'exact-media-schema-'));
+      // The application starts after migration has created the physical DB file.
+      await fs.writeFile(path.join(schemaRoot, 'schema.db'), '', { flag: 'wx' });
       const savedUrl = process.env.DATABASE_URL;
       process.env.DATABASE_URL = 'file:' + path.join(schemaRoot, 'schema.db').replaceAll('\\', '/') + '?connection_limit=1';
       const schemaPrisma = new PrismaService();

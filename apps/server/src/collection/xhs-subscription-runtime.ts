@@ -1,3 +1,4 @@
+import {projectWriterGate} from './project-writer-boundary';
 import { consumeReviewedTransportPermit } from './xhs-reviewed-dispatch';
 import type { AttemptScope } from './xhs-reviewed-attempt';
 import { createDispatchOwner } from './xhs-dispatch-owner';
@@ -982,6 +983,7 @@ export class XhsSubscriptionRuntime
 export function createLocalXhsSubscriptionRuntime() {
   let vault: XhsSessionVault | undefined;
   const raw = process.env.DATABASE_URL ?? '';
+  const writerLease = projectWriterGate().writerForUrl(raw, path.join(process.cwd(), 'prisma'));
   const database = raw.startsWith('file:')
     ? decodeURIComponent(raw.slice(5).split('?')[0])
     : '';
@@ -989,10 +991,12 @@ export function createLocalXhsSubscriptionRuntime() {
     vault = new XhsDpapiSessionVault(path.dirname(database));
   return new XhsSubscriptionRuntime({
     commentsEnabled: () => process.env.XHS_COMMENT_COLLECTION_ENABLED === '1',
-    enabled: () =>
-      process.env.XHS_SUBSCRIPTION_LIVE_ENABLED === '1' &&
+    enabled: () => {
+      writerLease?.check();
+      return process.env.XHS_SUBSCRIPTION_LIVE_ENABLED === '1' &&
       !privateOnlineMode() &&
-      process.env.WEWE_ACCEPTANCE_MODE !== '1',
+      process.env.WEWE_ACCEPTANCE_MODE !== '1';
+    },
     vault,
     profileParser: parseXhsProfile,
     requirePersistentRisk: true,

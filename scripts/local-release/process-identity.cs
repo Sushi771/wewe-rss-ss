@@ -75,7 +75,7 @@ namespace WeWe.LocalRelease {
         int pid = int.Parse(args[1], CultureInfo.InvariantCulture);
         int port = int.Parse(args[2], CultureInfo.InvariantCulture);
         Require(port >= 1 && port <= 65535, "Invalid port");
-        Require(new[] { "Port", "Discover", "Snapshot", "Stop" }.Contains(action), "Invalid action");
+        Require(new[] { "Port", "Discover", "Snapshot", "Stop", "OwnedSnapshot", "OwnedStop", "Tree" }.Contains(action), "Invalid action");
         var json = new JavaScriptSerializer();
         var owners = TcpTable.Read(port, true);
         Require(owners.All(x => x.OwningProcess != 0), "TCP owner is unavailable");
@@ -87,6 +87,26 @@ namespace WeWe.LocalRelease {
           var pids = owners.Select(x => x.OwningProcess).Distinct().ToArray();
           Require(pids.Length == 1, "Port has multiple listener owners");
           pid = checked((int)pids[0]);
+        }
+        if (action == "Tree") {
+          Require(pid > 0, "Invalid project root PID");
+          var pending = new Queue<int>(); pending.Enqueue(pid);
+          var visited = new HashSet<int>(); var records = new Dictionary<int, object>();
+          var watch = Stopwatch.StartNew();
+          while (pending.Count > 0) {
+            int parent = pending.Dequeue(); if (!visited.Add(parent)) continue;
+            Require(visited.Count <= 64 && watch.ElapsedMilliseconds <= 15000, "Project process observation limit");
+            using (var query = new ManagementObjectSearcher("SELECT ProcessId,ParentProcessId,ExecutablePath,CommandLine FROM Win32_Process WHERE ProcessId=" + parent + " OR ParentProcessId=" + parent))
+            using (var rows = query.Get()) foreach (ManagementObject row in rows) using (row) {
+              int child = Convert.ToInt32(row["ProcessId"]); string executable = (string)row["ExecutablePath"], command = (string)row["CommandLine"];
+              Require(!String.IsNullOrEmpty(executable) && !String.IsNullOrEmpty(command), "Project process metadata unavailable");
+              using (var process = Process.GetProcessById(child)) { var handle = process.Handle;
+                records[child] = new { pid=child, parentPid=Convert.ToInt32(row["ParentProcessId"]), startUtc=process.StartTime.ToUniversalTime().ToString("o"), executable, commandLine=command };
+              }
+              if (child != parent) pending.Enqueue(child);
+            }
+          }
+          Console.WriteLine(json.Serialize(new { complete=true, active=records.Values.ToArray(), portOwners=owners })); return 0;
         }
         Require(pid > 0, "Invalid target PID");
         using (var process = Process.GetProcessById(pid)) {
@@ -107,14 +127,16 @@ namespace WeWe.LocalRelease {
           }
           Require(!String.IsNullOrEmpty(executable) && !String.IsNullOrEmpty(command), "Process identity is unavailable");
           owners = TcpTable.Read(port, true);
-          Require(owners.Length > 0 && owners.All(x => x.OwningProcess == pid), "Port is not exclusively owned by target PID");
+          bool owned = action == "OwnedSnapshot" || action == "OwnedStop";
+          if (!owned) Require(owners.Length > 0 && owners.All(x => x.OwningProcess == pid), "Port is not exclusively owned by target PID");
+          if (owned) Require(!String.IsNullOrEmpty(args[4]) && !String.IsNullOrEmpty(args[5]) && String.Equals(executable,args[4],StringComparison.OrdinalIgnoreCase) && command==args[5], "Owned process launch identity changed");
           Require(!process.HasExited, "Process already exited");
           var identity = new System.Collections.Generic.Dictionary<string, object> {
             { "pid", pid }, { "startUtc", start.ToString("o") }, { "executable", executable },
             { "commandLine", command }, { "port", port },
             { "localAddresses", owners.Select(x => x.LocalAddress).Distinct().OrderBy(x => x, StringComparer.Ordinal).ToArray() }
           };
-          if (action == "Stop") {
+          if (action == "Stop" || action == "OwnedStop") {
             Require(args.Skip(3).All(x => !String.IsNullOrEmpty(x)), "Stop requires the full expected identity");
             Require(start.ToString("o") == args[3] && String.Equals(executable, args[4], StringComparison.OrdinalIgnoreCase) && command == args[5], "Process identity changed; stop refused");
             process.Kill();

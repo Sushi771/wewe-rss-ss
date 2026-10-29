@@ -1,3 +1,4 @@
+import {projectWriterGate} from '../collection/project-writer-boundary';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Prisma, PrismaClient } from '@prisma/client';
@@ -17,8 +18,10 @@ import {
 export class PrismaService extends PrismaClient implements OnModuleInit {
   private readonly recoveryOwner = new AsyncLocalStorage<boolean>();
   private recovery: Promise<void> | undefined;
+  private writerLease: { check(): void } | undefined;
 
   recoverFailedMediaTransaction(): Promise<void> {
+    this.writerLease?.check();
     if (this.recovery) return this.recovery;
     setDatabaseRecovery('recovering');
     this.recovery = this.recoveryOwner.run(true, async () => {
@@ -67,6 +70,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
         ? { log: [{ emit: 'event', level: 'query' }] }
         : undefined,
     );
+    this.writerLease = projectWriterGate().writerForUrl(process.env.DATABASE_URL, require('node:path').join(process.cwd(), 'prisma'));
     if (articleListReadTimingEnabled())
       (
         this as unknown as {
@@ -86,6 +90,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
         databaseRecoveryStatus() !== 'ready'
       )
         throw Error('SQLITE_RECOVERY_UNAVAILABLE');
+      this.writerLease?.check();
       return transaction(...args);
     };
     // Preserve both transaction forms; defer engine admission, not individual
@@ -123,6 +128,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
       );
     }) as typeof this.$transaction;
     this.$use(async (params, next) => {
+      this.writerLease?.check();
       // Only the fixed reconnect probe may use the client during recovery.
       if (this.recoveryOwner.getStore()) return next(params);
       if (databaseRecoveryStatus() !== 'ready')

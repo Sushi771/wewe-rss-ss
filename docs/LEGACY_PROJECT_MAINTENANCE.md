@@ -1,0 +1,40 @@
+# Legacy unknown recovery candidate
+
+This change extends the existing reviewed recovery workflow and preserves the platform picker and cached-export behavior. It does not reconstruct an old dispatch owner or declare its remote result failed. A completed new attempt leaves the original unknown and old budget charges intact.
+
+The boundary is finite: the configured SQLite database, the managed project's application/start entries below, and the preserving controller's registered project process references. It makes no claim about arbitrary programs elsewhere on the machine. An unexpected registered process, unreadable scoped reference, changed claim, changed database identity, live competing lease, or unsupported package prevents maintenance.
+
+## Entry map
+
+| Entry | Admission or exclusion |
+|---|---|
+| Nest bootstrap; HTTP/tRPC mutations; feed, collection, Weread and XHS services; resumed jobs, cron and in-process queues | `main.ts` admits before Nest; `PrismaService` admits before engine operations and checks the same lease for middleware and transactions. All these routes share the application process. |
+| XHS profile/list/detail/metrics, short links, media; single, batch, whole-creator and reviewed recovery | The configured runtime holds/checks the same database lease. Existing request budgets, persistent risk, session, author, original-link and physical-dispatch checks remain in force. |
+| Packaged start, restart, switch, fallback, desktop/logon start | Existing release-scope serialization remains authoritative. Candidate `runtime.cjs` acquires the database lease before startup inspection/Prisma/app entry. A verified stop can retire only an exactly matching old writer lease. Old Stop identity is retained before backup, so backup failure can retire that exact lease before rollback. Candidate identity is captured before listener/bind readiness; failed or unbound candidates are stopped by the same observed identity and their exact lease retired before rollback. A changed receipt, replaced lease, late writer or unobserved crash retains the lease and refuses rollback admission. |
+| Direct `start`, `dev`, debug and `start:prod` | They enter the same guarded Nest/Prisma bootstrap. Source development resolves the shared module from the server workspace; compact runtime supplies its manifest-verified module in memory. |
+| Defined `migrate`, `studio`, `start:migrate:prod` scripts | `guarded-prisma.cjs` resolves the same environment/schema database and holds the lease through the CLI child. Conflicting environments and unsupported command forms reject. Failure/interruption retains the lease for review. |
+| Standalone acceptance and copy-smoke importers | Existing disposable-copy restrictions remain. They are outside this live-database maintenance profile; no extra hand-written lease wrappers are added to them. |
+| Backup/snapshot guard, backup capacity, retention/lifecycle planning, cache monitors and history readers | Inspected source connections use read-only SQLite; writes concern backup/artifact roots. An active scoped helper still prevents the controller's empty-process observation; SQLite EXCLUSIVE also rejects a conflicting reader transaction. These connections are not silently called business writers. |
+| Account/feed/check/debug scripts | Current implementations issue queries only. No source dispatch or application DML was found. |
+| Prepared rehearsal/test-artifact builders and legacy additive fixture resume | Existing owned-copy restrictions remain; these paths do not authorize a live-database legacy proof. |
+| Old portable generator and arbitrary dependency-CLI/custom SQLite invocations | Outside the supported maintenance profile. The callback requires current-schema compact old/new packages, desktop helper absent, and exact candidate runtime/gate asset hashes. Such tools are not evidence of project quiescence. |
+
+The instance namespace follows the canonical database path across replacement; its record separately binds the physical file identity. Replacing the database invalidates the old admission without opening another writer namespace. Hard-link aliases reject. A stale file is never cleared merely because a PID is absent.
+
+## Controlled operation
+
+The existing restart operator accepts `--legacy-job-id <jobId>`. After package verification it loads `server/legacy-maintenance.cjs` through the fixed manifest-checked `legacy-maintenance-loader.cjs`; compact builds bundle the actual adapter before deleting dist. The operator supplies the live checkpoint to `recordLegacyProjectMaintenance(checkpoint, jobId)`. It accepts the live preserving lease, the exact identity/Stop receipt after confirmed process exit, the closed-source backup checkpoint, and the selected job. It does not accept an HTTP proof document and does not stop/start a process itself.
+
+The real release lease derives a cheap maintenance capability from its confirmed-exit set, project lock, nonce and unchanged ledger. Physical observations occur exactly before the SQLite probe and before persistence. They query only the previously registered project PID roots/subtrees and the application port through the existing native identity/IP Helper utility; no complete reference collection occurs inside a proof. Getters perform only cheap lease and database identity checks. A late live helper/writer rejects final persistence; the original 30-second observation freshness bound remains. The database instance lease excludes new guarded application/CLI writers. Maintenance then performs an EXCLUSIVE/ROLLBACK probe and closed consistent scope snapshots, followed by `BEGIN IMMEDIATE`, fresh checks and CAS persistence. Its scope binds job, author, note, database/project identities, original unknown digest, cumulative budgets and phase grant. The added proof says `oldOwner: null`, `oldResult: unknown`, `allowsRetry: false`.
+
+The existing reviewed-attempt API accepts a separate `confirmLegacyUnknown: true` only after this server record exists. Preparation and consumption bind the same proof, original record, physical database and exact budget digest; unrelated unresolved recovery still blocks. At most one separately owned request is charged through the existing task/shared/phase budgets and physical transport permit. Business content, metrics and its new receipt keep the existing transaction. A crash after consumption stays consumed/unknown; there is no replay or budget reset.
+
+The page explains that the old request lacks a process record, its result remains unknown, and a new request can incur duplicate costs. The action uses the existing explicit preparation/execute confirmations. There is no background maintenance or diagnostic panel.
+
+## Validation and remaining work
+
+Native maintenance tests run only in the Windows CI step; portable startup/CLI guards run in both matrix jobs. These reuse Jest and node:test without a new dependency or framework. Existing historical hashes remain enforced through exact added-statement seams with tampering counterexamples.
+
+The source-disconnected compact exercise now loads the actual bundled adapter and fixed operator loader, performs real owned-process stops, writes a synthetic maintenance proof with the same gate, and successfully rolls back a failed candidate. A separate owned live-helper case is refused without a proof. The source adapter and operation still require independent review and same-head CI before any production operation; real Strong source requests and the actual installation were not exercised. CLI administration tests continue to test a synthetic spawn port rather than a real production migration or Studio session.
+
+The missing historical facts remain the original owner's exact system identity and the old request's remote outcome. A user can decide whether to approve one bounded maintenance window and then one exact note/phase attempt while accepting that uncertainty. A successful local maintenance proof cannot decide those historical facts. Real-source completion and later whole-job continuation require their own explicit authorization and validation.

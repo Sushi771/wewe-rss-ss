@@ -190,6 +190,17 @@ function recoveryInteraction(initial) {
   const nodes=(tree,predicate)=>{const found=[];function walk(n){if(!n||typeof n!=='object')return;if(Array.isArray(n)){n.forEach(walk);return;}if(predicate(n))found.push(n);walk(n.props?.children);}walk(tree);return found;};
   return {calls,draw,nodes,setData:v=>{data=v;},setWork:v=>{work=v;},get refetches(){return refetches;}};
 }
+
+test('legacy recovery explains the remaining unknown and submits separate consent only after confirmation',async()=>{
+  const base={id:'job',state:'paused',items:[],updatedAt:1,reviewedRecovery:{state:'review-required',noteId:'note',phase:'detail',legacyUnknown:true}};
+  assert.match(render([base]),/旧请求缺少进程记录/);
+  assert.match(render([base]),/再次请求可能重复产生费用/);
+  const h=recoveryInteraction([base]);let tree=h.draw();assert.equal(h.calls.length,0);
+  h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});
+  tree=h.draw();const button=h.nodes(tree,n=>n.type==='button'&&typeof n.props.onClick==='function'&&n.props.onClick.toString().includes('recover('))[0];
+  assert.equal(button.props.disabled,false);button.props.onClick();await new Promise(setImmediate);
+  assert.equal(h.calls.length,1);assert.deepEqual(h.calls[0],{name:'prepareWholeCreatorReviewedAttempt',input:{jobId:'job',confirmUnknownRetry:true,confirmLegacyUnknown:true}});
+});
 test("product actions prepare without a request and execute once after a second explicit confirmation", async()=>{
   const base={id:'job',state:'paused',items:[],updatedAt:1,reviewedRecovery:{state:'review-required',noteId:'note',phase:'detail'}};
   const h=recoveryInteraction([base]);let tree=h.draw();assert.equal(h.calls.length,0);

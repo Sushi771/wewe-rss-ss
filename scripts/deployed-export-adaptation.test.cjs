@@ -1,6 +1,7 @@
 const restorePreOriginalLinkRouter = require('./xhs-original-link-router-seams.cjs');
 const restorePlatformDirectory = require('./xhs-platform-directory-seams.cjs');
 const restorePreReviewedRecoveryRouter = require('./xhs-reviewed-recovery-router-seams.cjs');
+const restoreLegacyWriter = require('./legacy-writer-seams.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -16,6 +17,13 @@ const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+test('legacy writer additions cannot hide changed original admission or restart gates',()=>{
+ const seams=require('./fixtures/legacy-writer-seams.json');
+ for(const [file,entries]of Object.entries(seams))for(const seam of entries){
+   const source=read(file);assert.equal(source.split(seam.after).length,2);
+   assert.throws(()=>restoreLegacyWriter(file,source.replace(seam.after,'/* changed legacy writer gate */')),/exact candidate legacy writer seam/);
+ }
+});
 function tokens(text) {
   const scanner = ts.createScanner(
     ts.ScriptTarget.Latest,
@@ -180,7 +188,7 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
       assert.equal(fs.existsSync(file), false, file + ' must remain removed');
       continue;
     }
-    let source = restorePlatformDirectory(file, read(file));
+    let source = restoreLegacyWriter(file,restorePlatformDirectory(file, read(file)));
     if (file === 'apps/server/src/article-download.controller.ts') {
       const additions = [
         [

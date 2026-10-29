@@ -9,6 +9,7 @@ import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs
 it('defers the actual whole-creator hook under the startup write gate', async () => {
   const dir = await fs.mkdtemp(path.join(tmpdir(), 'xhs-audit-repro-'));
   const previous = process.env.DATABASE_URL;
+  await fs.writeFile(path.join(dir, 'synthetic.sqlite'), '', { flag: 'wx' });
   process.env.DATABASE_URL = 'file:' + path.join(dir, 'synthetic.sqlite').replace(/\\/g, '/');
   const db = new PrismaService();
   try {

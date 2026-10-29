@@ -48,6 +48,8 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
     schemaPromise = (async () => {
       const started = performance.now();
       schemaRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'automatic-media-schema-'));
+      // Match the migrated application's physical database boundary.
+      await fs.writeFile(path.join(schemaRoot, 'schema.db'), '', { flag: 'wx' });
       const savedUrl = process.env.DATABASE_URL;
       process.env.DATABASE_URL = 'file:' + path.join(schemaRoot, 'schema.db').replaceAll('\\', '/') + '?connection_limit=1';
       let schemaPrisma: PrismaService | undefined;

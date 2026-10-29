@@ -61,12 +61,20 @@ jobs:
           node --test --test-name-pattern='^(v3|a v3)' scripts/local-release/release-scope.test.cjs
       - name: Preserving update effects and process transitions
         run: |
-          node --test scripts/local-release/preserving-contract.test.cjs scripts/local-release/preserving-restart.test.cjs
+          node --test scripts/local-release/preserving-contract.test.cjs scripts/local-release/preserving-restart.test.cjs scripts/local-release/legacy-restart-cleanup.test.cjs
+          node --test scripts/local-release/project-writer-gate.test.cjs scripts/local-release/guarded-prisma.test.cjs
+          node --test --test-name-pattern='^legacy (adapter|boundary)' scripts/local-release/release-scope.test.cjs
           node --test --test-name-pattern='^(preserving|original complete)' scripts/local-release/release-scope.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/windows-release-references.test.cjs
       - run: pnpm install --frozen-lockfile
       - name: Synthetic source, session, storage and shared grouping regressions
         run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu|subscription-video|media-transaction|saved-media-writeback)|trpc/(xiaohongshu-ui|management-groups)|platform-export-target|article-folder-picker|xhs-cached-local-export|article-local-save|xhs-single-download|xhs-video-download|article-verified-download|feeds/(automatic-media-queue|automatic-media-storage)|media-large-export)'
+      - name: Legacy maintenance native synthetic regressions
+        if: runner.os == 'Windows'
+        run: |
+          pnpm --filter server exec jest --runInBand --testPathPattern='collection/legacy-(maintenance|project-adapter)'
+          node --test scripts/local-release/legacy-compact-maintenance.test.cjs
       - name: Shared UI and WeChat regressions
+        # Native process-start identity and confirmed owned-child exit are Windows contracts.
         run: node --test scripts/xhs-original-link-privacy.test.cjs scripts/xhs-original-link-ui.test.cjs scripts/xhs-source-budget-ui.test.cjs scripts/xhs-rejection-messages.test.cjs scripts/xhs-note-links.test.cjs scripts/xhs-engagement-visibility.test.cjs scripts/sites-local-contract.test.mjs scripts/xhs-reader-removal.test.cjs scripts/xhs-whole-creator-ui.test.cjs scripts/xhs-subscription-ui.test.cjs scripts/xhs-task-recovery-ui.test.cjs scripts/storage-status-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/xhs-batch-subscription-ui.test.cjs scripts/xhs-combined-filter.test.cjs scripts/xhs-metric-sort.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs scripts/folder-member-picker.test.cjs scripts/deployed-export-adaptation.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/article-body-state.test.cjs scripts/feed-browse-state.test.cjs scripts/wechat-original-link.test.cjs scripts/feed-avatar-reading-ui.test.cjs scripts/wechat-source-metrics-ui.test.cjs scripts/export-article-batches.test.cjs scripts/export-interruption-ui.test.cjs
       - name: Existing maintenance status contract
         run: pnpm --filter server exec jest --runInBand --testPathPattern=startup-audit.spec --testNamePattern='existing status read'

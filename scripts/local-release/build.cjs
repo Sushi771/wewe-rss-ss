@@ -42,6 +42,8 @@ const RUNTIME_WRAPPERS = Object.freeze([
   'lib.cjs',
   'runtime.cjs',
   'engine-audit.cjs',
+  'project-writer-gate.cjs',
+  'legacy-maintenance-loader.cjs',
   'inspect-sqlite.py',
   'prepare-start.py',
   'startup-sqlite.cjs',

@@ -402,6 +402,8 @@ function open(request, options = {}, boundOperation) {
   let protectedSnapshot, protectedPackages;
   const verifiedOutputs = new Set();
   let pointerCommit;
+  let legacyStopped;
+  const legacyClaimAcquiredAt = Date.now();
   const descriptors = new Set();
   const transientControls = new Set();
   const approvedPointerHashes = new Set();
@@ -891,13 +893,48 @@ function open(request, options = {}, boundOperation) {
       policy,
       check,
       assertWritable,
-      confirmPreservingProcessExit(pid, receipt) {
+      legacyMaintenanceRoots(snapshot) {
+        owner();
+        if(preserving?.operation!=='restart'||snapshot?.pid!==preserving.active.oldProcess.pid||snapshot.startUtc!==preserving.active.oldProcess.startUtc||!Array.isArray(expectedProcesses))
+          throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
+        return Object.freeze([...new Set([snapshot.pid,...initialFacts.records.filter(p=>p.kind==='processes').map(p=>p.pid)])]);
+      },
+      legacyMaintenanceBoundary(snapshot,observe) {
+        const executableHash=fileHash(snapshot.executable);
+        const checked=()=>{
+          owner();assertWritable(['restart']);checkRoots(referenceRoots);
+          if(present(ledger)&&hash(state(ledger))!==hash(prior))throw Error('RELEASE_SCOPE_STATE_REPLACED');
+          const a=preserving?.active;
+          if(preserving?.operation!=='restart'||!legacyStopped||!Array.isArray(expectedProcesses)||expectedProcesses.length||
+              snapshot?.pid!==a.oldProcess.pid||snapshot.startUtc!==a.oldProcess.startUtc||executableHash!==a.oldProcess.executableSha256)
+            throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
+          return Object.freeze({projectIdentity:hash({scopeId:policy.scopeId,roots:referenceRoots.map(r=>r.path)}),exitedAt:legacyStopped,claimAcquiredAt:legacyClaimAcquiredAt});
+        };
+        if(typeof observe!=='function')throw Error('LEGACY_MAINTENANCE_BOUNDED_OBSERVER_REQUIRED');
+        checked();
+        return Object.freeze({check:checked,observe(){const context=checked(),fact=observe();checked();if(fact?.complete!==true||!Array.isArray(fact.active)||fact.active.length)throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');return Object.freeze({...context,observedAt:Date.now()});}});
+      },
+      assertLegacyMaintenanceQuiescent(snapshot) {
+        owner(); check(true);
+        const observed=references(true).value;
+        const a = preserving?.active;
+        if (preserving?.operation !== 'restart' || !legacyStopped || !Array.isArray(expectedProcesses) || expectedProcesses.length ||
+            snapshot?.pid !== a.oldProcess.pid || snapshot.startUtc !== a.oldProcess.startUtc ||
+            fileHash(snapshot.executable) !== a.oldProcess.executableSha256 ||
+            observed.records.some(r => r.kind === 'processes'))
+          throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
+        return Object.freeze({ projectIdentity: hash({ scopeId: policy.scopeId, roots: referenceRoots.map(r => r.path) }), exitedAt: legacyStopped, claimAcquiredAt: legacyClaimAcquiredAt });
+      },
+      confirmPreservingProcessExit(pid, receipt, owned) {
         if (!preserving || preserving.operation !== 'restart') return;
         owner();
         if (receipt?.pid !== pid || receipt.stopped !== true)
           throw new Error('RELEASE_PRESERVING_PROCESS_EXIT_UNCONFIRMED');
         const known = expectedProcesses.filter((r) => r.pid === pid);
-        if (!known.length || (pid !== preserving.active.oldProcess.pid && !known.every((r) => r.ownedTransition === true)))
+        if(!known.length&&owned){
+          const s=owned.identity,pkg=policy.windowsReferences?.packages?.find(p=>p.id===owned.packageId&&canonical(path.join(p.path,'runtime/node.exe'))===canonical(s.executable));
+          if(!pkg||![preserving.active.currentId,preserving.active.candidateId].includes(pkg.id)||pid!==s.pid||s.commandLine!==owned.commandLine||['pid','startUtc','executable','commandLine'].some(k=>receipt[k]!==s[k]))throw Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
+        }else if (!known.length || (pid !== preserving.active.oldProcess.pid && !known.every((r) => r.ownedTransition === true)))
           throw new Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
         const facts = query(); validateReferences(facts, policy); verifier.assertBudget();
         const next = expectedProcesses.filter((r) => r.pid !== pid);
@@ -905,6 +942,7 @@ function open(request, options = {}, boundOperation) {
         const clean = (rows) => rows.map(({ ownedTransition, ...r }) => r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
         if (hash(clean(actual)) !== hash(clean(next))) throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
         expectedProcesses = next;
+        if (pid === preserving.active.oldProcess.pid) legacyStopped = Date.now();
       },
       bindPreservingChild(snapshot, packageId, expectedCommand) {
         if (!preserving || preserving.operation !== 'restart') return;

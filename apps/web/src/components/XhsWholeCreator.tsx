@@ -34,7 +34,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
   });
   const prepareRecovery = trpc.xiaohongshu.prepareWholeCreatorReviewedAttempt.useMutation({ retry: false });
   const runRecovery = trpc.xiaohongshu.executeWholeCreatorReviewedAttempt.useMutation({ retry: false });
-  const recover = async (jobId: string, attemptId?: string) => {
+  const recover = async (jobId: string, attemptId?: string, legacyUnknown = false) => {
     if (recoveryBusy.current || recoveryJob !== jobId || !confirmed) return;
     recoveryBusy.current = true;
     setRecovering(true);
@@ -44,7 +44,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
     setConfirmed(false);
     try {
       if (attemptId) await runRecovery.mutateAsync({ jobId, attemptId, url, confirmUnknownRetry: true });
-      else await prepareRecovery.mutateAsync({ jobId, confirmUnknownRetry: true });
+      else await prepareRecovery.mutateAsync({ jobId, confirmUnknownRetry: true, ...(legacyUnknown ? {confirmLegacyUnknown: true as const} : {}) });
     } catch {
       setError("本次操作结果待核对，请查看最新恢复回执；不会自动重发。");
     } finally {
@@ -134,13 +134,14 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
                       </label>
                     </>
                   )}
+                  {job.reviewedRecovery.legacyUnknown && <p>旧请求缺少进程记录，原结果仍然未知。本机维护记录不代表远端失败，再次请求可能重复产生费用。</p>}
                   <label>
                     <input type="checkbox" checked={recoveryJob === job.id && confirmed} disabled={recovering}
                       onChange={e => { setRecoveryJob(job.id); setConfirmed(e.target.checked); }} />
                     我已知原请求结果未知，确认只为这篇笔记增加一次请求，不重置已用预算。
                   </label>
                   <button disabled={recovering || recoveryJob !== job.id || !confirmed || (job.reviewedRecovery.state === "prepared" && !recoveryUrl.trim())}
-                    onClick={() => void recover(job.id, job.reviewedRecovery?.state === "prepared" ? job.reviewedRecovery.attemptId : undefined)}>
+                    onClick={() => void recover(job.id, job.reviewedRecovery?.state === "prepared" ? job.reviewedRecovery.attemptId : undefined, job.reviewedRecovery?.legacyUnknown === true)}>
                     {job.reviewedRecovery.state === "prepared" ? "仅执行这一次恢复" : "核对并准备一次恢复"}
                   </button>
                 </>

@@ -6,12 +6,15 @@ import { PrismaService } from '../prisma/prisma.service';
 import { XhsWholeCreatorService } from './xhs-whole-creator.service';
 import { XhsSubscriptionService } from './xhs-subscription.service';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
+import { projectWriterGate } from './project-writer-boundary';
 // ZIP export is unrelated to startup; Jest's CommonJS runner cannot load its ESM dependency.
 jest.mock('../offline-archive', () => ({ archiveDirectory: jest.fn() }));
 
 it.each([true, false, 'shutdown'] as const)('starts real Nest during audit and applies recovery only when ready: %s', async (auditOk) => {
   const dir = await fs.mkdtemp(path.join(tmpdir(), 'xhs-nest-repro-'));
   const previousDir = process.cwd(), previous = { ...process.env };
+  // Load the actual checked-out boundary before moving runtime artifacts to Temp.
+  const gate = projectWriterGate();
   process.chdir(dir);
   process.env.DATABASE_URL = 'file:' + path.join(dir, 'synthetic.sqlite').replace(/\\/g, '/');
   process.env.NODE_ENV = 'test';
@@ -71,6 +74,7 @@ it.each([true, false, 'shutdown'] as const)('starts real Nest during audit and a
     }
     delete (globalThis as any).__weweStartupAudit;
     await db.$disconnect();
+    gate.writerForUrl(process.env.DATABASE_URL)?.close();
     process.chdir(previousDir);
     process.env = previous;
     await fs.rm(dir, {recursive:true,force:true});

@@ -1,3 +1,4 @@
+import { reviewLegacyUnknown } from './xhs-legacy-review';
 import { dispatchReviewedWholeSource } from './xhs-source-request-policy';
 import { attemptDigest, originalAttemptDigest, createReviewedAttempt, reviewedRecoveryView } from './xhs-reviewed-attempt';
 import { reviewWholeUnknown, WholeUnknownReview } from './xhs-whole-unknown-review';
@@ -365,7 +366,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       return { id: job.id, state: 'paused' as const };
     });
   }
-  async prepareReviewedAttempt(input:{jobId:string;confirmUnknownRetry:true}) {
+  async prepareReviewedAttempt(input:{jobId:string;confirmUnknownRetry:true;confirmLegacyUnknown?:true}) {
     await this.readyForMutation();
     if(input.confirmUnknownRetry!==true)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     return this.write(async tx=>{
@@ -373,7 +374,8 @@ export class XhsWholeCreatorService implements OnModuleInit {
       if(rows.length!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
       let job=JSON.parse(rows[0].document);const f=job.sourceFence;
       if(f&&!job.unknownReview){
-        await reviewWholeUnknown(tx,{jobId:input.jobId,expectedAuthorId:rows[0].author,expectedMarker:f.marker,expectedNoteId:f.noteId,decision:'request-retry'});
+        if(f.owner===undefined) await reviewLegacyUnknown(tx,input.jobId,rows[0].author,input.confirmLegacyUnknown===true);
+        else await reviewWholeUnknown(tx,{jobId:input.jobId,expectedAuthorId:rows[0].author,expectedMarker:f.marker,expectedNoteId:f.noteId,decision:'request-retry'});
         const current=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state='paused'`;
         if(current.length!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
         job=JSON.parse(current[0].document);
@@ -381,7 +383,8 @@ export class XhsWholeCreatorService implements OnModuleInit {
       const budgets=await tx.$queryRaw<Array<{id:string;used:number}>>`SELECT id,used FROM xhs_request_budgets WHERE id IN (${input.jobId},'xhs:source-total')`;
       const task=budgets.find(b=>b.id===input.jobId),shared=budgets.find(b=>b.id==='xhs:source-total');
       if(!task||!shared||!f||!job.unknownReview)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-      const scope=job.reviewAttempt?.scope ?? {jobId:input.jobId,authorId:rows[0].author,noteId:f.noteId,phase:f.phase,originalHash:originalAttemptDigest(job),reviewId:attemptDigest(job.unknownReview),maxRequests:1,taskUsedCeiling:task.used+1,sharedUsedCeiling:shared.used+1,expiresAt:Date.now()+900000};
+      if(f?.owner===undefined&&input.confirmLegacyUnknown!==true)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      const scope=job.reviewAttempt?.scope ?? {...(f.owner===undefined?{legacyProofId:job.legacyMaintenanceProof?.proofId}:{}),jobId:input.jobId,authorId:rows[0].author,noteId:f.noteId,phase:f.phase,originalHash:originalAttemptDigest(job),reviewId:attemptDigest(job.unknownReview),maxRequests:1,taskUsedCeiling:task.used+1,sharedUsedCeiling:shared.used+1,expiresAt:Date.now()+900000};
       if(scope.jobId!==input.jobId||scope.maxRequests!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
       return createReviewedAttempt(tx,scope);
     });

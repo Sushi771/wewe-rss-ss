@@ -10,11 +10,24 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
+import { projectWriterGate } from './project-writer-boundary';
 
 describe('owned media commit recovery', () => {
-  afterEach(() => {
+  let fixtureRoot: string, previousUrl: string | undefined;
+  beforeEach(async () => {
+    previousUrl = process.env.DATABASE_URL;
+    fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'media-recovery-boundary-'));
+    const file = path.join(fixtureRoot, 'synthetic.sqlite');
+    await fs.writeFile(file, '', { flag: 'wx' });
+    process.env.DATABASE_URL = 'file:' + file.replace(/\\/g, '/');
+  });
+  afterEach(async () => {
     setDatabaseRecovery('ready');
     jest.useRealTimers();
+    projectWriterGate().writerForUrl(process.env.DATABASE_URL)?.close();
+    if (previousUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousUrl;
+    await fs.rm(fixtureRoot, { recursive: true, force: true });
   });
   const failure = { code: 'P2028' };
   it('does not replay or recover a successful callback', async () => {
@@ -154,6 +167,7 @@ describe('owned media commit recovery', () => {
       path.join(os.tmpdir(), 'media-commit-synthetic-'),
     );
     const file = path.join(root, 'synthetic.sqlite');
+    await fs.writeFile(file, '', { flag: 'wx' });
     process.env.DATABASE_URL = `file:${file.replace(/\\/g, '/')}?connection_limit=1`;
     const db = new PrismaService();
     const python = process.platform === 'win32' ? 'python' : 'python3';
@@ -234,6 +248,7 @@ describe('owned media commit recovery', () => {
     } finally {
       reader?.stdin?.end('\n');
       await db.$disconnect();
+      projectWriterGate().writerForUrl(process.env.DATABASE_URL)?.close();
       if (previous === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = previous;
       await fs.rm(root, { recursive: true, force: true });
