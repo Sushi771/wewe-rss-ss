@@ -4,7 +4,7 @@ const {spawn,execFileSync}=require('node:child_process'); const {once}=require('
 const gate = require('./project-writer-gate.cjs');
 const moduleFile = require.resolve('./project-writer-gate.cjs');
 function fixture(run) {
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'project-writer-test-')),database=path.join(root,'synthetic.db');fs.writeFileSync(database,'synthetic gate fixture');
+  const root=fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()),'project-writer-test-')),database=path.join(root,'synthetic.db');fs.writeFileSync(database,'synthetic gate fixture');
   return Promise.resolve().then(()=>run(database,root)).finally(()=>{assert.equal(path.dirname(root),fs.realpathSync.native(os.tmpdir()));assert(path.basename(root).startsWith('project-writer-test-'));fs.rmSync(root,{recursive:true,force:true});});
 }
 function contender(database) {

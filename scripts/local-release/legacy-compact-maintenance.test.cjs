@@ -65,7 +65,7 @@ if(process.argv[2]==='--isolated')isolated().then(x=>console.log(JSON.stringify(
 else{
  const test=require('node:test');
  test('real compact maintenance loader works without source; actual candidate failure retires its lease and rolls back',async t=>{
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'legacy-compact-v2-')),release=path.join(root,'package'),source=path.resolve(__dirname,'../..'),target=path.join(release,'server'),compiled=path.join(target,'dist/apps/server/src/collection');
+  const root=fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()),'legacy-compact-v2-')),release=path.join(root,'package'),source=path.resolve(__dirname,'../..'),target=path.join(release,'server'),compiled=path.join(target,'dist/apps/server/src/collection');
   const ts=require(require.resolve('typescript',{paths:[path.join(source,'apps/server')]}));
   try{
    fs.mkdirSync(compiled,{recursive:true});fs.writeFileSync(path.join(compiled,'../main.js'),'exports.fixture=true;');

@@ -4,7 +4,7 @@ const source=fs.readFileSync(path.join(__dirname,'restart.cjs'),'utf8').replace(
 const from=source.indexOf('      if(newChild){',source.indexOf('} catch (error) {',source.indexOf('const baseline ='))),to=source.indexOf('    } finally {\n      if (options.rehearsal)',from);
 assert(from>0&&to>from);const runCatch=new Function('ctx','return(async()=>{with(ctx){'+source.slice(from,to)+'}})()');
 for(const kind of ['after-stop-backup-failure','bound-candidate-health-failure','unbound-candidate-bind-failure','wrong-stop-receipt','late-writer-race','crash-without-observed-identity'])test('exact restart catch: '+kind,async()=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'legacy-catch-')),database=path.join(root,'synthetic.db');fs.writeFileSync(database,'synthetic');
+ const root=fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()),'legacy-catch-')),database=path.join(root,'synthetic.db');fs.writeFileSync(database,'synthetic');
  const old={pid:11111,startUtc:'2026-01-01T00:00:00.0000000Z',executable:process.execPath,commandLine:'synthetic old'},candidate={...old,pid:22222,commandLine:'synthetic candidate'};
  const owner=kind==='after-stop-backup-failure'?old:candidate,b=gate.binding(database),nonce=crypto.randomUUID();
  const record={version:1,mode:'writer',databaseIdentity:b.databaseIdentity,pid:owner.pid,startUtc:owner.startUtc,executableHash:hash(fs.readFileSync(owner.executable)),commandHash:hash(owner.commandLine),nonce};
