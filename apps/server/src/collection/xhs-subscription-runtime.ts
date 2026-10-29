@@ -81,15 +81,16 @@ export class XhsSubscriptionRuntime
   private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
   private readonly wholeSourceGroup = new AsyncLocalStorage<
-    WholeSourceGroup & { checkpointed: boolean; noteId?: string }
+    WholeSourceGroup & { checkpointed: boolean; noteId?: string; sessionGeneration: number }
   >();
   private readonly wholeAuthorization = new AsyncLocalStorage<{
     jobId: string;
     creatorId: string;
     authorId: string;
+    generationId?: string;
   }>();
   withWholeAuthorization<T>(
-    scope: { jobId: string; creatorId: string; authorId: string },
+    scope: { jobId: string; creatorId: string; authorId: string; generationId?: string },
     work: () => Promise<T>,
   ): Promise<T> {
     if (this.wholeAuthorization.getStore())
@@ -120,6 +121,7 @@ export class XhsSubscriptionRuntime
       authorId: string;
       phase: Phase;
       noteId?: string;
+      generationId?: string;
     },
     work: () => Promise<T>,
   ): Promise<T> {
@@ -134,6 +136,7 @@ export class XhsSubscriptionRuntime
       acquired: false,
       started: false,
       checkpointed: false,
+      sessionGeneration: this.generation,
     };
     return this.wholeSourceGroup.run(group, async () => {
       const result = await work();
@@ -148,6 +151,9 @@ export class XhsSubscriptionRuntime
   ) {
     const group = this.wholeSourceGroup.getStore();
     if (group?.acquired) {
+      this.requireSession();
+      if (group.sessionGeneration !== this.generation || this.sessionAbort.signal.aborted)
+        return failure('XHS_SESSION_CHANGED');
       if (!group.started) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
       await commitWholeSourceCheckpoint(
         tx,
@@ -155,6 +161,7 @@ export class XhsSubscriptionRuntime
         group.marker,
         group.owner,
         collectedAt,
+        group.generationId,
       );
       group.checkpointed = true;
     }
@@ -280,12 +287,14 @@ export class XhsSubscriptionRuntime
           const route = url.pathname;
           if (route === '/api/sns/web/v1/user/otherinfo') {
             if (
+              (group.generationId && group.phase !== 'profile') ||
               request.method !== 'GET' ||
               url.searchParams.get('target_user_id') !== group.authorId
             )
               return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
           } else if (route === '/api/sns/web/v1/user_posted') {
             if (
+              (group.generationId && group.phase !== 'list') ||
               request.method !== 'GET' ||
               url.searchParams.get('user_id') !== group.authorId
             )
@@ -357,7 +366,8 @@ export class XhsSubscriptionRuntime
       {
         profileParser: options.profileParser,
         shortLinks: new XhsShortLinkResolver(async (url, request) => {
-          if (this.wholeSourceGroup.getStore())
+          const group = this.wholeSourceGroup.getStore();
+          if (group && (!group.generationId || group.phase !== 'profile'))
             return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
           return this.guardTransport(() =>
             (() => {
@@ -367,7 +377,7 @@ export class XhsSubscriptionRuntime
                 signal: signal(request.signal),
               });
             })(),
-          );
+          group ? 'profile' : undefined);
         }),
       },
       (url, request) =>

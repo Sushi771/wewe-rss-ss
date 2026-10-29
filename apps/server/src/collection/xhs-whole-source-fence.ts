@@ -1,6 +1,7 @@
 import { DispatchOwner, ownsDispatch } from './xhs-dispatch-owner';
 import type { Prisma } from '@prisma/client';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { activeWholeFence, setActiveWholeFence, historicalGenerationMarker } from './xhs-whole-generation';
 
 type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 export type Phase = 'profile' | 'list' | 'detail' | 'metrics';
@@ -13,6 +14,7 @@ export type Scope = {
   marker: string;
   phase: Phase;
   noteId?: string;
+  generationId?: string;
 };
 export type WholeSourceGroup = Scope & { acquired: boolean; started: boolean };
 const bad = (): never => {
@@ -28,6 +30,7 @@ export async function noUnresolvedRecovery(tx: Tx) {
 /** Must execute under the same SQLite write lock as dispatch admission. */
 export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
   await noUnresolvedRecovery(tx);
+  const retained = await historicalGenerationMarker(tx, scope);
   if (!/^xhs:dispatch-pending:whole:[a-f0-9-]{36}$/.test(scope.marker))
     return bad();
   const rows = await tx.$queryRaw<Array<{ document: string }>>`
@@ -48,7 +51,7 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     job.sourceGrant.limits[scope.phase] < 0 ||
     !Number.isSafeInteger(job.sourceGrant.used?.[scope.phase]) ||
     job.sourceGrant.used[scope.phase] < 0 ||
-    job.sourceFence
+    activeWholeFence(job) || (!!job.generation && job.generation.id !== scope.generationId)
   )
     return bad();
   if (job.sourceGrant.used[scope.phase] >= job.sourceGrant.limits[scope.phase])
@@ -57,6 +60,7 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     if (!scope.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(scope.noteId))
       return bad();
     const noteKey = JSON.stringify(['xiaohongshu', 'note', scope.noteId]);
+    if (scope.generationId && (!job.listEnd || !Array.isArray(job.generation.directoryIds) || !job.generation.directoryIds.includes(noteKey))) return bad();
     const notes = await tx.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM xhs_notes WHERE id=${noteKey} AND creator_id=${scope.creatorId}`;
@@ -64,17 +68,17 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
   } else if (scope.noteId) return bad();
   const active = await tx.$queryRaw<
     Array<{ id: string }>
-  >`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' LIMIT 1`;
+  >`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' AND id<>${retained} LIMIT 1`;
   if (active.length) return bad();
   const owner = scope.owner;
   if (!ownsDispatch(owner, scope.owner)) return bad();
-  job.sourceFence = {
+  setActiveWholeFence(job, {
     owner,
     marker: scope.marker,
     phase: scope.phase,
     noteId: scope.noteId,
     state: 'prepared',
-  };
+  });
   const changed =
     await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${scope.jobId} AND state='running' AND document=${rows[0].document}`;
   if (changed !== 1) return bad();
@@ -87,6 +91,7 @@ export async function markWholeSourceStarted(
   marker: string,
   expectedOwner: DispatchOwner,
   charge?: Charge,
+  generationId?: string,
 ) {
   await noUnresolvedRecovery(tx);
   const rows = await tx.$queryRaw<
@@ -94,7 +99,9 @@ export async function markWholeSourceStarted(
   >`SELECT j.document FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id JOIN xhs_source_risk r ON r.id='source' WHERE j.id=${jobId} AND j.state='running' AND c.enabled=1 AND c.external_author_id=json_extract(j.document,'$.sourceGrant.authorId') AND j.creator_id=json_extract(j.document,'$.sourceGrant.creatorId') AND r.state='blocked' AND r.code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED' AND EXISTS(SELECT 1 FROM xhs_request_budgets WHERE id=${marker})`;
   if (rows.length !== 1) return bad();
   const job = JSON.parse(rows[0].document);
-  const fence = job.sourceFence,
+  if (job.generation?.id !== generationId) return bad();
+  await historicalGenerationMarker(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
+  const fence = activeWholeFence(job),
     grant = job.sourceGrant,
     category = charge ?? fence?.phase;
   if (
@@ -103,6 +110,7 @@ export async function markWholeSourceStarted(
     fence.marker !== marker ||
     !['prepared', 'started'].includes(fence.state) ||
     !grant ||
+    (generationId && category !== fence.phase && !(category === 'media' && fence.phase === 'detail')) ||
     !(['profile', 'list', 'detail', 'metrics', 'media'] as string[]).includes(category) ||
     (category === 'media' && fence.phase !== 'detail') ||
     (category === 'metrics' && fence.phase !== 'metrics') ||
@@ -117,6 +125,7 @@ export async function markWholeSourceStarted(
     if (!fence.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(fence.noteId))
       return bad();
     const noteKey = JSON.stringify(['xiaohongshu', 'note', fence.noteId]);
+    if (generationId && (!job.listEnd || !Array.isArray(job.generation.directoryIds) || !job.generation.directoryIds.includes(noteKey))) return bad();
     const notes = await tx.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM xhs_notes WHERE id=${noteKey} AND creator_id=${job.creatorId}`;
@@ -135,13 +144,16 @@ export async function commitWholeSourceCheckpoint(
   marker: string,
   expectedOwner: DispatchOwner,
   collectedAt?: number,
+  generationId?: string,
 ) {
   const rows = await tx.$queryRaw<
     Array<{ document: string }>
   >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${jobId} AND state='running' AND EXISTS(SELECT 1 FROM xhs_request_budgets WHERE id=${marker})`;
   if (rows.length !== 1) return bad();
   const job = JSON.parse(rows[0].document),
-    fence = job.sourceFence;
+    fence = activeWholeFence(job);
+  if (job.generation?.id !== generationId) return bad();
+  await historicalGenerationMarker(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
   if (!fence || !ownsDispatch(fence.owner, expectedOwner) || fence.marker !== marker || fence.state !== 'started')
     return bad();
   if (fence.phase === 'profile' || fence.phase === 'metrics') {
@@ -156,7 +168,7 @@ export async function commitWholeSourceCheckpoint(
     }
   }
   job.lastSourceOwnerReceipt = { marker, owner: fence.owner, state: 'checkpointed' };
-  delete job.sourceFence;
+  setActiveWholeFence(job, undefined);
   const changed =
     await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND state='running' AND document=${rows[0].document}`;
   if (changed !== 1) return bad();
@@ -171,12 +183,15 @@ export async function releasePreparedWholeSourceFence(
   jobId: string,
   marker: string,
   expectedOwner: DispatchOwner,
+  generationId?: string,
 ) {
   const ownerRows = await tx.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${jobId}`;
-  if (ownerRows.length !== 1 || !ownsDispatch(JSON.parse(ownerRows[0].document).sourceFence?.owner, expectedOwner)) return bad();
-
+  if (ownerRows.length !== 1) return bad();
+  const job = JSON.parse(ownerRows[0].document), fence = activeWholeFence(job);
+  if (job.generation?.id !== generationId || !ownsDispatch(fence?.owner, expectedOwner) || fence.marker !== marker || fence.state !== 'prepared') return bad();
+  setActiveWholeFence(job, undefined);
   const changed =
-    await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_remove(document,'$.sourceFence'),updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND json_extract(document,'$.sourceFence.marker')=${marker} AND json_extract(document,'$.sourceFence.state')='prepared' AND EXISTS(SELECT 1 FROM xhs_request_budgets WHERE id=${marker})`;
+    await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND document=${ownerRows[0].document} AND EXISTS(SELECT 1 FROM xhs_request_budgets WHERE id=${marker})`;
   if (changed !== 1) return bad();
   const removed =
     await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;

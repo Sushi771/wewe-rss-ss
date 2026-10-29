@@ -11,7 +11,7 @@ const text = fs.readFileSync(
   "apps/web/src/components/XhsWholeCreator.tsx",
   "utf8",
 );
-function render(data) {
+function render(data, component = 'default') {
   const output = ts.transpileModule(text, {
     compilerOptions: {
       target: ts.ScriptTarget.ES2021,
@@ -36,6 +36,8 @@ function render(data) {
       extendWholeCreatorHistoryPhase: { useMutation: mutation },
       prepareWholeCreatorReviewedAttempt: { useMutation: mutation },
       executeWholeCreatorReviewedAttempt: { useMutation: mutation },
+      prepareWholeCreatorGeneration: { useMutation: mutation },
+      executeWholeCreatorGeneration: { useMutation: mutation },
     },
   };
   const mod = { exports: {} };
@@ -45,7 +47,7 @@ function render(data) {
     mod,
   );
   return renderToStaticMarkup(
-    React.createElement(mod.exports.default, { creatorId: "synthetic" }),
+    React.createElement(mod.exports[component], component === 'default' ? { creatorId: "synthetic" } : { job: data, refresh: async () => {} }),
   );
 }
 test("daily summary hides technical inventory while retaining the pause and explicit continuation", () => {
@@ -177,16 +179,16 @@ test("reviewed recovery distinguishes a saved retry from the original unknown an
   assert.match(legacy,/需要人工核对/);assert.doesNotMatch(legacy,/仅执行这一次恢复|核对并准备一次恢复/);
 });
 
-function recoveryInteraction(initial) {
+function recoveryInteraction(initial, component = 'default') {
   const slots=[],calls=[];let index=0,data=initial,refetches=0,work=async()=>({});
   const hooks={useState(value){const at=index++;if(!(at in slots))slots[at]=value;return[slots[at],v=>{slots[at]=typeof v==='function'?v(slots[at]):v;}];},useRef(value){const at=index++;if(!(at in slots))slots[at]={current:value};return slots[at];}};
   const mutation=name=>({useMutation:options=>{assert.equal(options.retry,false);return{isLoading:false,mutateAsync:async input=>{calls.push({name,input});return work(name,input);}};}});
   const api={wholeCreatorJobs:{useQuery:()=>({data,refetch:async()=>{refetches++;}})}};
-  for(const name of ['startWholeCreator','resumeWholeCreator','cancelWholeCreator','extendWholeCreatorBudget','extendWholeCreatorHistoryPhase','prepareWholeCreatorReviewedAttempt','executeWholeCreatorReviewedAttempt'])api[name]=mutation(name);
+  for(const name of ['startWholeCreator','resumeWholeCreator','cancelWholeCreator','extendWholeCreatorBudget','extendWholeCreatorHistoryPhase','prepareWholeCreatorReviewedAttempt','executeWholeCreatorReviewedAttempt','prepareWholeCreatorGeneration','executeWholeCreatorGeneration'])api[name]=mutation(name);
   const mod={exports:{}};
   const output=ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2021,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;
   new Function('require','exports','module',output)(name=>name==='react'?hooks:name==='@web/utils/trpc'?{trpc:{xiaohongshu:api}}:resolve(name),mod.exports,mod);
-  const draw=()=>{index=0;return mod.exports.default({creatorId:'synthetic'});};
+  const draw=()=>{index=0;return mod.exports[component](component === 'default' ? {creatorId:'synthetic'} : {job:data,refresh:api.wholeCreatorJobs.useQuery().refetch});};
   const nodes=(tree,predicate)=>{const found=[];function walk(n){if(!n||typeof n!=='object')return;if(Array.isArray(n)){n.forEach(walk);return;}if(predicate(n))found.push(n);walk(n.props?.children);}walk(tree);return found;};
   return {calls,draw,nodes,setData:v=>{data=v;},setWork:v=>{work=v;},get refetches(){return refetches;}};
 }
@@ -239,4 +241,30 @@ test("AUDIT: terminal recovery copy describes user results without storage diagn
   const html=render([{id:"job",state:"paused",items:[],updatedAt:1,reviewedRecovery:{state,receipt:{body:"saved",media:"none",mediaCount:0}}}]);
   assert.doesNotMatch(html,/落盘|已记账/);
  }
+});
+
+const generationJob = {id:'job',canPrepareGeneration:true,budget:{used:6,limit:310},historyGrant:{limits:{profile:2,list:3,detail:5,media:300,metrics:0},used:{profile:2,list:2,detail:1,media:1,metrics:0}}};
+test('whole generation explains cumulative counts and separates preparation from source execution', async()=>{
+ const html=render(generationJob,'XhsWholeGeneration');
+ assert.match(html,/旧次数继续保留/);assert.match(html,/剩余 304 次本地请求额度/);assert.match(html,/准备操作不发来源请求/);
+ assert.doesNotMatch(html,/计费|收费|dispatch-pending|proofId|originDigest/);
+ const h=recoveryInteraction(generationJob,'XhsWholeGeneration');let tree=h.draw();assert.equal(h.calls.length,0);
+ h.nodes(tree,n=>n.type==='input'&&n.props.type==='url')[0].props.onChange({target:{value:'https://xhslink.cn/o/Synthetic'}});
+ tree=h.draw();h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});
+ tree=h.draw();const prepare=h.nodes(tree,n=>n.type==='button')[0];assert.equal(prepare.props.disabled,false);
+ let finish;h.setWork(()=>new Promise(r=>{finish=r}));prepare.props.onClick();prepare.props.onClick();assert.equal(h.calls.length,1);
+ assert.equal(h.calls[0].name,'prepareWholeCreatorGeneration');assert.equal(h.calls[0].input.confirmUnknown,true);
+ assert.equal(h.calls[0].input.profileUrl,'https://xhslink.cn/o/Synthetic');finish({});await new Promise(setImmediate);
+ const prepared={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'generation',state:'prepared',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:true}};
+ h.setData(prepared);tree=h.draw();assert.equal(h.nodes(tree,n=>n.type==='button')[0].props.disabled,true);
+ h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();
+ h.setWork(async()=>{h.setData({...prepared,generationRecovery:{...prepared.generationRecovery,state:'paused',newResult:'unknown',resumable:false}});throw Error('synthetic lost response')});
+ h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);
+ assert.equal(h.calls.length,2);assert.deepEqual(h.calls[1],{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true}});
+ tree=h.draw();assert.equal(h.nodes(tree,n=>n.type==='button').length,0);assert.equal(h.calls.length,2);
+});
+test('whole generation shows missing separately and never promises full coverage from a cache count',()=>{
+ const html=render({...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:2,missing:1,directoryComplete:true,originalNoteStatus:'not-returned',resumable:false,newResult:'unknown'}},'XhsWholeGeneration');
+ assert.match(html,/目录已到末页/);assert.match(html,/本次返回 2 篇/);assert.match(html,/不认定为删除/);assert.match(html,/本次还有请求结果未确认/);
+ assert.doesNotMatch(html,/100%|计费|收费|明确开始或继续/);
 });

@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const reviewed = {
+  prepareWholeCreatorGeneration: 'a6479de8618ec55f3a68fcc8cfe2b2874328aede67741113eb2ce0b5443dfcda',
+  executeWholeCreatorGeneration: '97b2128fd06d0bb14a3b91cd28cb07c3690248fc12913952c64ca9e2ae167dec',
   prepareWholeCreatorReviewedAttempt: '32944638bc18f0be29aae435cec3821e17c65f77559c7c0ec17c7309dd04ebae',
   executeWholeCreatorReviewedAttempt: '3698fd1ccb5184c5b622561a5d5ae8fff2498d6f75188a26446d517b46ab6665',
   reviewWholeCreatorUnknown: '016910f26d7d4345a1f0687cf778bdce77a462ebc7a5f7ad679cbf98b3bc126f',
@@ -11,7 +13,7 @@ module.exports = function restorePreReviewedRecoveryRouter(ts, source) {
   const declaration = ast.statements.find(ts.isClassDeclaration);
   const member = declaration.members.find(node => node.name?.getText(ast) === 'xiaohongshuRouter');
   const routes = member.initializer.arguments[0].properties.filter(node => Object.hasOwn(reviewed, node.name.getText(ast)));
-  assert.equal(routes.length, 3, 'all reviewed recovery routes must be present');
+  assert.equal(routes.length, 5, 'all reviewed recovery routes must be present');
   for (const node of routes) {
     const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.JSX, node.getText(ast));
     const tokens = [];

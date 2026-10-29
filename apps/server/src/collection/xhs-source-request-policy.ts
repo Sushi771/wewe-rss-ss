@@ -1,5 +1,6 @@
 import { dispatchReviewedSource } from './xhs-reviewed-dispatch';
 import type { AttemptScope } from './xhs-reviewed-attempt';
+import { historicalGenerationMarker } from './xhs-whole-generation';
 import { randomUUID } from 'node:crypto';
 import {
   xhsOriginalLinkCodes,
@@ -127,17 +128,20 @@ export async function configureXhsSourceBudget(
 async function hasPendingDispatch(
   db: Pick<Prisma.TransactionClient, '$queryRaw'>,
   owned = '',
+  retained = '',
 ) {
   const rows = await db.$queryRaw<Array<{ id: string }>>`
-    SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} LIMIT 1`;
+    SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id<>${retained} LIMIT 1`;
   return rows.length > 0;
 }
 async function pendingWaitExpired(
   db: PrismaService,
   waiting: { since?: number },
   owned = '',
+  group?: WholeSourceGroup,
 ) {
-  if (!(await hasPendingDispatch(db, owned))) {
+  const retained = group ? await historicalGenerationMarker(db, group) : '';
+  if (!(await hasPendingDispatch(db, owned, retained))) {
     waiting.since = undefined;
     return false;
   }
@@ -148,11 +152,12 @@ async function reserveTotal(
   tx: Prisma.TransactionClient,
   now: number,
   owned = '',
+  retained = '',
 ) {
   return (
     (await tx.$executeRaw`UPDATE xhs_request_budgets SET used=used+1
     WHERE id=${SOURCE_TOTAL} AND used < request_limit AND next_at <= ${BigInt(now)}
-      AND NOT EXISTS (SELECT 1 FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned})`) ===
+      AND NOT EXISTS (SELECT 1 FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id<>${retained})`) ===
     1
   );
 }
@@ -191,13 +196,14 @@ async function dispatchSource<T>(
       // A durable fence precedes all outbound work. It has no timed expiry:
       // a failed clock commit must block other runtimes and process restarts.
       await write(db, async (tx) => {
+        const retained = group ? await historicalGenerationMarker(tx, group) : '';
         const rows = await tx.$queryRaw<Array<{ id: string }>>`
           UPDATE xhs_request_budgets SET next_at=next_at
           WHERE id=${SOURCE_TOTAL} AND next_at <= ${BigInt(Date.now())}
           RETURNING id`;
         if (
           !rows.length ||
-          (await hasPendingDispatch(tx, group?.acquired ? marker : ''))
+          (await hasPendingDispatch(tx, group?.acquired ? marker : '', retained))
         )
           throw new AdmissionUnavailable();
         await ready(tx);
@@ -220,7 +226,7 @@ async function dispatchSource<T>(
           SELECT id FROM xhs_request_budgets WHERE id=${marker}`;
         if (!owned.length) fail('XHS_REQUEST_RATE_PAUSED');
         await ready(tx);
-        if (group) await markWholeSourceStarted(tx, group.jobId, marker, group.owner, charge);
+        if (group) await markWholeSourceStarted(tx, group.jobId, marker, group.owner, charge, group.generationId);
         response = operation();
         started = true;
         if (group) group.started = true;
@@ -240,7 +246,7 @@ async function dispatchSource<T>(
         try {
           await write(db, (tx) =>
             group
-              ? releasePreparedWholeSourceFence(tx, group.jobId, marker, group.owner)
+              ? releasePreparedWholeSourceFence(tx, group.jobId, marker, group.owner, group.generationId)
               : tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`,
           );
         } catch {
@@ -253,7 +259,7 @@ async function dispatchSource<T>(
     if (
       !row ||
       (!group && row.nextAt - Date.now() > 1000) ||
-      (await pendingWaitExpired(db, waiting, group?.marker))
+      (await pendingWaitExpired(db, waiting, group?.marker, group))
     )
       fail('XHS_REQUEST_RATE_PAUSED');
     await runtime.waitForSourceRate(
@@ -283,7 +289,7 @@ export function bindXhsSourceTotalBudget(
           for (;;) {
             runtime.assertSourceReady();
             if (group) await ready?.();
-            if (await write(db, (tx) => reserveTotal(tx, now, group?.marker))) {
+            if (await write(db, async (tx) => reserveTotal(tx, now, group?.marker, group ? await historicalGenerationMarker(tx, group) : ''))) {
               return true;
             }
             const row = await store.read(id);
@@ -291,7 +297,7 @@ export function bindXhsSourceTotalBudget(
               !row ||
               row.used >= row.limit ||
               (!group && row.nextAt - Date.now() > 1000) ||
-              (await pendingWaitExpired(db, waiting, group?.marker))
+              (await pendingWaitExpired(db, waiting, group?.marker, group))
             )
               return false;
             await runtime.waitForSourceRate(

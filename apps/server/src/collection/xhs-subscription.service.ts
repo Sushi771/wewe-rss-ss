@@ -693,6 +693,15 @@ export class XhsSubscriptionService implements OnModuleInit {
       this.uncertain.get(input.taskId) ?? (await this.loadTask(input.taskId));
     return this.view(t);
   }
+  /** Exact membership of a positively checkpointed directory, including pre-existing notes. */
+  async confirmedDirectory(input: { taskId: string }) {
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId)) return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const task = await this.loadTask(input.taskId);
+    if (task.state !== 'completed' || !task.listFinished || !Array.isArray(task.listedIds))
+      return reject('XHS_LIST_INCOMPLETE');
+    return [...task.listedIds];
+  }
   /** Confirmed native full-archive saves, independently of an optional interaction companion. */
   async confirmedLocalArchives(input: { taskId: string }) {
     await this.reconcile(input.taskId);

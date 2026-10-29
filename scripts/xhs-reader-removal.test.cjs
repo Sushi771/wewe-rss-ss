@@ -19,6 +19,12 @@ const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
 const router = read('apps/server/src/trpc/trpc.router.ts');
 const service = read('apps/server/src/collection/xiaohongshu.service.ts');
 
+test('generation admission changes cannot hide behind the reviewed recovery seam', () => {
+  const changed = router.replace('confirmUnknown:z.literal(true)', 'confirmUnknown:z.literal(false)');
+  assert.notEqual(changed, router);
+  assert.throws(() => restorePreReviewedRecoveryRouter(ts, changed), /exact reviewed recovery route/);
+});
+
 test('only the exact platform reader route was deleted; all archive/engagement/WeChat routes are preserved', () => {
   assert.equal(
     hash(restoreXhsReaderRoute(ts, restorePreOriginalLinkRouter(restorePreReviewedRecoveryRouter(ts, router)))),

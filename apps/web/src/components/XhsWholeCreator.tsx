@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { trpc } from "@web/utils/trpc";
+
 export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
   const [limit, setLimit] = useState(100),
     [error, setError] = useState("");
@@ -98,18 +99,19 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
       {jobs.error && <p role="alert">覆盖状态读取失败，未开始新请求。</p>}
       {(jobs.data ?? []).map((job) => (
         <section key={job.id} className="my-2 min-w-0 border-t">
+          {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} />}
           <p role="status">
             {{ queued: '等待中', running: '同步中', paused: '已暂停', partial: '部分完成', failed: '未完成', cancelled: '已取消', completed: '已完成' }[job.state] ?? '状态待确认'} · 已发现 {job.items.length} 篇
           </p>
-          {job.sourceCheckpoint?.state === "unknown" && (
+          {!job.generationRecovery && job.sourceCheckpoint?.state === "unknown" && (
             <p role="alert">
               来源请求结果尚未确认，已暂停且不会自动重发；请先核对该阶段回执。
             </p>
           )}
-          {job.sourceCheckpoint?.state === "restricted" && (
+          {!job.generationRecovery && job.sourceCheckpoint?.state === "restricted" && (
             <p role="alert">来源拒绝了该请求，任务已停止，不会自动重发。</p>
           )}
-          {job.reviewedRecovery && (
+          {job.reviewedRecovery && !job.canPrepareGeneration && (
             <div className="my-2 space-y-2 rounded border p-2">
               <p>原请求结果仍未知。本次恢复只补取指定笔记的正文和指标，沿用累计预算；图片和评论不会发起请求，也不会自动继续整号任务。</p>
               {job.reviewedRecovery.state === "checkpointed" ? (
@@ -255,4 +257,77 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
       ))}
     </details>
   );
+}
+
+const phases = ['profile', 'list', 'detail', 'media', 'metrics'] as const;
+const labels = { profile: '主页与资料', list: '目录', detail: '正文', media: '图片与视频', metrics: '互动数量' };
+type Limits = Record<(typeof phases)[number], number>;
+type Job = {
+  id: string;
+  canPrepareGeneration: boolean;
+  budget: { limit: number; used: number } | null;
+  historyGrant?: { limits: Record<string, number>; used: Record<string, number> };
+  generationRecovery?: {
+    id: string; state: string; profileUrl: string; discovered: number; missing: number;
+    directoryComplete: boolean; originalNoteStatus: string; newResult?: string; resumable: boolean;
+  };
+};
+/** Explicit preparation and execution stay separate; an uncertain response never retries itself. */
+export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => Promise<unknown> }) {
+  const [url, setUrl] = useState('');
+  const [confirmed, setConfirmed] = useState(false);
+  const [limits, setLimits] = useState<Partial<Limits>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const lock = useRef(false);
+  const prepare = trpc.xiaohongshu.prepareWholeCreatorGeneration.useMutation({ retry: false });
+  const execute = trpc.xiaohongshu.executeWholeCreatorGeneration.useMutation({ retry: false });
+  if (!job.canPrepareGeneration && !job.generationRecovery) return null;
+  const g = job.generationRecovery;
+  const cap = job.budget?.limit ?? 0;
+  const remaining = Math.max(0, cap - (job.budget?.used ?? 0));
+  const phaseLimits = Object.fromEntries(phases.map(p => [p, limits[p] ?? Math.min(cap,
+    Math.max(job.historyGrant?.limits[p] ?? 0, (job.historyGrant?.used[p] ?? 0) + ({ profile: 4, list: 20, detail: 100, media: 200, metrics: 100 }[p])))])) as Limits;
+  const valid = phases.every(p => Number.isSafeInteger(phaseLimits[p]) && phaseLimits[p] >= (job.historyGrant?.limits[p] ?? 0) && phaseLimits[p] <= cap);
+  const run = async () => {
+    if (lock.current || !confirmed) return;
+    lock.current = true; setBusy(true); setError(''); setConfirmed(false);
+    try {
+      if (g) await execute.mutateAsync({ jobId: job.id, generationId: g.id, confirmUnknown: true });
+      else await prepare.mutateAsync({ jobId: job.id, profileUrl: url, confirmUnknown: true, phaseLimits });
+    } catch { setError('操作未确认，请刷新查看进度后再决定。不会自动重复提交。'); }
+    finally {
+      await refresh().catch(() => setError('进度读取失败，请刷新核对。不会自动重发请求。'));
+      lock.current = false; setBusy(false);
+    }
+  };
+  return <div className="my-2 space-y-2 rounded border p-2">
+    <p>从主页继续整号采集。原请求结果仍是未知，旧次数继续保留；新尝试使用剩余 {remaining} 次本地请求额度。图片、视频和互动数量随正文补齐，评论正文保持关闭。</p>
+    {g ? <>
+      <p role="status">{g.state === 'completed' ? '本次可访问内容已完成' : g.state === 'running' ? '正在继续采集' : '等待明确继续'}；目录{g.directoryComplete ? '已到末页' : '未完成'}，本次返回 {g.discovered} 篇。</p>
+      {!!g.missing && <p>已有缓存中 {g.missing} 篇未在本次完整目录返回，保留原文件并单独记录，不认定为删除。</p>}
+      {g.newResult === 'unknown' && <p role="alert">本次还有请求结果未确认，已停止；需核对后才能继续，不能重复提交。</p>}
+      {g.newResult === 'restricted' && <p role="alert">来源限制或平台验证已阻止本次采集。请先按平台正常流程处理，应用不会自动重试。</p>}
+    </> : <>
+      <label>作者主页或官方主页分享链接
+        <input aria-label="恢复整号的主页链接" type="url" autoComplete="off" value={url} disabled={busy}
+          onChange={e => { setUrl(e.target.value); setConfirmed(false); }} />
+      </label>
+      <p>确认各阶段累计上限；下面的已用次数不会清零，所有阶段也受任务和共享总上限约束。</p>
+      {phases.map(p => <label key={p} className="block">{labels[p]}：已用 {job.historyGrant?.used[p] ?? 0}，累计上限
+        <input aria-label={`${labels[p]}累计上限`} type="number" min={job.historyGrant?.limits[p] ?? 0} max={cap} value={phaseLimits[p]} disabled={busy}
+          onChange={e => { setLimits(v => ({ ...v, [p]: Number(e.target.value) })); setConfirmed(false); }} />
+      </label>)}
+    </>}
+    {(!g || g.resumable) && <>
+      <label><input type="checkbox" checked={confirmed} disabled={busy} onChange={e => setConfirmed(e.target.checked)} />
+        我知道旧请求仍未知；确认在上述累计上限内验证这个作者并继续剩余内容，平台限制或验证出现时停止。
+      </label>
+      <button disabled={busy || !confirmed || (!g && (!url.trim() || !valid)) || remaining === 0} onClick={() => void run()}>
+        {g ? '明确开始或继续本次整号采集' : '核对并准备整号新尝试'}
+      </button>
+      {!g && <p>准备操作不发来源请求，核对后还需点击开始。</p>}
+    </>}
+    {error && <p role="alert">{error}</p>}
+  </div>;
 }
