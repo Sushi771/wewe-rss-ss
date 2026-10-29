@@ -17,7 +17,10 @@ function load(file, imports = {}) {
   const mod = { exports: {} };
   new Function('require', 'exports', 'module', output)(
     (name) => {
-      if (name === '@web/components/AppOverlays' && imports['@nextui-org/react'])
+      if (
+        name === '@web/components/AppOverlays' &&
+        imports['@nextui-org/react']
+      )
         return imports['@nextui-org/react'];
       if (!(name in imports)) throw Error(`Unexpected dependency ${name}`);
       return imports[name];
@@ -500,7 +503,9 @@ function fixture(options = {}) {
     '@web/components/XhsCreatorAvatar': 'XhsCreatorAvatar',
     '@web/components/XhsBatchSubscription': 'XhsBatchSubscription',
     '@web/components/XhsCombinedFilter': 'XhsCombinedFilter',
-    '@web/utils/xhs-combined-filter': load('apps/web/src/utils/xhs-combined-filter.ts'),
+    '@web/utils/xhs-combined-filter': load(
+      'apps/web/src/utils/xhs-combined-filter.ts',
+    ),
     '@web/utils/xhs-metric-sort': load('apps/web/src/utils/xhs-metric-sort.ts'),
     '@web/components/XhsSourceBudget': 'XhsSourceBudget',
     '@web/components/XhsEngagement': engagement,
@@ -522,18 +527,54 @@ function fixture(options = {}) {
     },
   }).default;
   const previousFetch = global.fetch;
-  global.fetch = async (url) => ({
-    ok: true,
-    json: async () =>
-      url.endsWith('/directory?target=xiaohongshu')
-        ? {
-            directory: 'synthetic-only',
-            askEveryTime: true,
-            cancelled: cancelledPicker,
-            pickToken: 'synthetic-grant',
-          }
-        : { directory: 'synthetic-only', askEveryTime: true },
-  });
+  let cacheMode = 'normal';
+  global.fetch = async (url, request) => {
+    if (url.endsWith('/xiaohongshu/cache-export')) {
+      const payload = JSON.parse(request.body);
+      calls.push(['cacheExport', payload]);
+      if (cacheMode === 'lost') throw Error('transport lost');
+      if(['audit-status','audit-cancel','audit-code'].includes(cacheMode))return {ok:true,json:async()=>({results:payload.items.map(item=>cacheMode==='audit-code'?{id:item.id,error:'XHS_CACHED_SAVE_FAILED'}:{id:item.id,saved:{alreadySaved:false,status:cacheMode==='audit-status'?'failed':'new'}}),cancelled:cacheMode==='audit-cancel'?'false':false})};
+
+      if (cacheMode === 'bad')
+        return {
+          ok: true,
+          json: async () => ({
+            results: [{ id: payload.items[0].id }],
+            cancelled: false,
+          }),
+        };
+      if (cacheMode === 'pending')
+        return new Promise((resolve, reject) =>
+          request.signal.addEventListener(
+            'abort',
+            () => reject(Error('aborted')),
+            { once: true },
+          ),
+        );
+      return {
+        ok: true,
+        json: async () => ({
+          results: payload.items.map((item) => ({
+            id: item.id,
+            saved: { alreadySaved: false, status: 'new' },
+          })),
+          cancelled: false,
+        }),
+      };
+    }
+    return {
+      ok: true,
+      json: async () =>
+        url.endsWith('/directory?target=xiaohongshu')
+          ? {
+              directory: 'synthetic-only',
+              askEveryTime: true,
+              cancelled: cancelledPicker,
+              pickToken: 'synthetic-grant',
+            }
+          : { directory: 'synthetic-only', askEveryTime: true },
+    };
+  };
   let tree;
   const all = (node) =>
     node == null
@@ -583,7 +624,11 @@ function fixture(options = {}) {
             typeof node.props['aria-pressed'] === 'boolean' &&
             all(node.props.children).includes('合成作者'),
         );
-        assert.equal(matches.length, 1, 'one selectable creator named 合成作者');
+        assert.equal(
+          matches.length,
+          1,
+          'one selectable creator named 合成作者',
+        );
         assert.equal(typeof matches[0].props.onClick, 'function');
         matches[0].props.onClick();
         render();
@@ -594,6 +639,7 @@ function fixture(options = {}) {
       global.fetch = previousFetch;
     },
     settings(o) {
+      if ('cacheMode' in o) cacheMode = o.cacheMode;
       if ('body' in o) bodyData = o.body;
       if ('recentTasks' in o) recentItems = o.recentTasks;
       if ('connection' in o) connectionData = o.connection;
@@ -1077,7 +1123,38 @@ test('search clear and hidden-filter feedback match WeChat; Escape closes input 
   }
 });
 
-test('comment entry and panel are absent while native original-link and count data remain',async()=>{const f=fixture();try{await f.start();const nodes=f.render();assert.equal(nodes.some(n=>n.type==='button'&&String(n.props?.['aria-label']||'').startsWith('查看互动与评论')),false);assert.equal(nodes.some(n=>n.type==='Modal'&&n.props.size==='4xl'),false);assert(nodes.some(n=>n.type==='XhsOriginalLink'&&n.props.noteId==='saved'));assert.equal(f.calls.filter(([name])=>name==='bodyLookup'||name==='engagementLookup').length,0);}finally{f.dispose();}});
+test('comment entry and panel are absent while native original-link and count data remain', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    const nodes = f.render();
+    assert.equal(
+      nodes.some(
+        (n) =>
+          n.type === 'button' &&
+          String(n.props?.['aria-label'] || '').startsWith('查看互动与评论'),
+      ),
+      false,
+    );
+    assert.equal(
+      nodes.some((n) => n.type === 'Modal' && n.props.size === '4xl'),
+      false,
+    );
+    assert(
+      nodes.some(
+        (n) => n.type === 'XhsOriginalLink' && n.props.noteId === 'saved',
+      ),
+    );
+    assert.equal(
+      f.calls.filter(
+        ([name]) => name === 'bodyLookup' || name === 'engagementLookup',
+      ).length,
+      0,
+    );
+  } finally {
+    f.dispose();
+  }
+});
 
 test('global/group queries preserve authors, exports dispatch by author and original links use the actual owner', async () => {
   const queryVersion = 'a'.repeat(64);
@@ -1138,8 +1215,19 @@ test('global/group queries preserve authors, exports dispatch by author and orig
       f.calls.filter(([name]) => name === 'notesScope').at(-1)[1].groupId,
       'group-a',
     );
-    assert.equal(f.render().find(n=>n.type==='XhsOriginalLink'&&n.props.noteId==='author-b-note').props.creatorId,'creator-b');
-    assert.equal(f.calls.filter(([name])=>name==='engagementLookup').length,0);
+    assert.equal(
+      f
+        .render()
+        .find(
+          (n) =>
+            n.type === 'XhsOriginalLink' && n.props.noteId === 'author-b-note',
+        ).props.creatorId,
+      'creator-b',
+    );
+    assert.equal(
+      f.calls.filter(([name]) => name === 'engagementLookup').length,
+      0,
+    );
     f.find('ManagementFolders').props.onFilter('ungrouped');
     assert.equal(f.find('Checkbox', '选择笔记 分组正文'), undefined);
   } finally {
@@ -1528,27 +1616,27 @@ test('uncertain resume receipt immediately removes stale continue action and onl
   }
 });
 
-test("disabled source displays recorded risk and unrecorded history remains unknown", async () => {
+test('disabled source displays recorded risk and unrecorded history remains unknown', async () => {
   const f = fixture();
   try {
     await f.start();
     assert.ok(
       f.find(
-        "p",
-        "未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。",
+        'p',
+        '未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。',
       ),
     );
     f.settings({
       connection: {
         liveEnabled: false,
         connected: false,
-        riskCode: "XHS_SOURCE_HISTORY_REVIEW_REQUIRED",
+        riskCode: 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
       },
     });
     assert.ok(
       f.find(
-        "p",
-        "本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。",
+        'p',
+        '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。',
       ),
     );
     assert.equal(f.calls.filter(([name]) => /Session/.test(name)).length, 0);
@@ -1557,4 +1645,121 @@ test("disabled source displays recorded risk and unrecorded history remains unkn
   }
 });
 
-test('combined filters preserve exact refreshed export ids and leave all export unfiltered',async()=>{const f=fixture({queryVersion:'a'.repeat(64)}),oldDocument=global.document,oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL;global.document={body:{appendChild(){}},createElement:()=>({click(){},remove(){}})};URL.createObjectURL=()=> 'blob:synthetic';URL.revokeObjectURL=()=>{};try{f.items.forEach((row,i)=>row.metrics={values:{likes:i*10,collects:i}});await f.start(true);const combo=f.render().find(n=>n.type==='XhsCombinedFilter');combo.props.onChange({mode:'and',conditions:[{id:1,metric:'likes',operator:'>=',value:'20',upper:''},{id:2,metric:'collects',operator:'<=',value:'2',upper:''}]});assert(f.find('Checkbox','选择笔记 旧笔记'));assert.equal(f.find('Checkbox','选择笔记 苹果存档'),undefined);await f.button('导出已保存 ZIP').props.onPress();f.render().find(n=>n.type==='input'&&n.props.value==='filtered').props.onChange();await f.button('开始导出').props.onPress();assert.deepEqual(f.calls.filter(([name])=>name==='export').at(-1)[1].noteIds,['old']);await f.button('导出已保存 ZIP').props.onPress();f.render().find(n=>n.type==='input'&&n.props.value==='all').props.onChange();await f.button('开始导出').props.onPress();const ids=f.calls.filter(([name])=>name==='export').at(-1)[1].noteIds;assert(ids.includes('saved')&&ids.includes('old')&&ids.includes('video'));}finally{f.dispose();global.document=oldDocument;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;}});
+test('combined filters preserve exact refreshed export ids and leave all export unfiltered', async () => {
+  const f = fixture({ queryVersion: 'a'.repeat(64) }),
+    oldDocument = global.document,
+    oldCreate = URL.createObjectURL,
+    oldRevoke = URL.revokeObjectURL;
+  global.document = {
+    body: { appendChild() {} },
+    createElement: () => ({ click() {}, remove() {} }),
+  };
+  URL.createObjectURL = () => 'blob:synthetic';
+  URL.revokeObjectURL = () => {};
+  try {
+    f.items.forEach(
+      (row, i) => (row.metrics = { values: { likes: i * 10, collects: i } }),
+    );
+    await f.start(true);
+    const combo = f.render().find((n) => n.type === 'XhsCombinedFilter');
+    combo.props.onChange({
+      mode: 'and',
+      conditions: [
+        { id: 1, metric: 'likes', operator: '>=', value: '20', upper: '' },
+        { id: 2, metric: 'collects', operator: '<=', value: '2', upper: '' },
+      ],
+    });
+    assert(f.find('Checkbox', '选择笔记 旧笔记'));
+    assert.equal(f.find('Checkbox', '选择笔记 苹果存档'), undefined);
+    await f.button('导出已保存 ZIP').props.onPress();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'filtered')
+      .props.onChange();
+    await f.button('开始导出').props.onPress();
+    assert.deepEqual(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].noteIds,
+      ['old'],
+    );
+    await f.button('导出已保存 ZIP').props.onPress();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'all')
+      .props.onChange();
+    await f.button('开始导出').props.onPress();
+    const ids = f.calls.filter(([name]) => name === 'export').at(-1)[1].noteIds;
+    assert(
+      ids.includes('saved') && ids.includes('old') && ids.includes('video'),
+    );
+  } finally {
+    f.dispose();
+    global.document = oldDocument;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('archived-only action freezes one cache scope and never calls source-capable downloadNotes', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    f.render();
+    await f.button('保存已选归档到本地').props.onPress();
+    assert.deepEqual(f.calls.find(([n]) => n === 'cacheExport')[1], {
+      items: [{ id: 'saved', creatorId: 'creator-a' }],
+    });
+    assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+test('a lost cache-only receipt is not replayed or routed to a source download', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.settings({ cacheMode: 'lost' });
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    f.render();
+    await f.button('保存已选归档到本地').props.onPress();
+    assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
+    assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('cache-only stop aborts its single scope request; malformed receipts cannot fall back to source work', async () => {
+  for (const mode of ['bad', 'pending']) {
+    const f = fixture();
+    try {
+      await f.start();
+      f.settings({ cacheMode: mode });
+      f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+      f.render();
+      const pending = f.button('保存已选归档到本地').props.onPress();
+      if (mode === 'pending') {
+        await tick();
+        f.render();
+        await f.button('停止后续缓存保存').props.onPress();
+      }
+      await pending;
+      assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
+      assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+    } finally {
+      f.dispose();
+    }
+  }
+});
+
+test('AUDIT: malformed saved status and cancellation type cannot claim cache completion',async()=>{
+ for(const mode of ['audit-status','audit-cancel']){
+  const f=fixture();try{await f.start();f.settings({cacheMode:mode});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();await f.button('保存已选归档到本地').props.onPress();
+   const visible=f.render().filter(n=>typeof n==='string').join(' ');
+   assert.match(visible,/回执未确认|回执不完整/);assert.equal(f.calls.filter(([n])=>n==='cacheExport').length,1);
+  }finally{f.dispose()}
+ }
+});
+test('AUDIT: failed cache receipt displays a user explanation without backend codes',async()=>{
+ const f=fixture();try{await f.start();f.settings({cacheMode:'audit-code'});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();await f.button('保存已选归档到本地').props.onPress();
+  const visible=f.render().filter(n=>typeof n==='string').join(' ');assert.doesNotMatch(visible,/XHS_CACHED_SAVE_FAILED/);assert.match(visible,/失败 1/);
+ }finally{f.dispose()}
+});

@@ -86,12 +86,17 @@ type DirectoryChoice = SaveSettings & {
   cancelled?: boolean;
   pickToken?: string;
 };
-const localApi = async <T,>(endpoint: string, payload?: object): Promise<T> => {
+const localApi = async <T,>(
+  endpoint: string,
+  payload?: object,
+  signal?: AbortSignal,
+): Promise<T> => {
   const auth = getAuthCode();
   const response = await fetch(
     `${serverOriginUrl || ''}/download/article${endpoint}${endpoint === '/settings' || endpoint === '/directory' ? '?target=xiaohongshu' : ''}`,
     {
       method: payload ? 'POST' : 'GET',
+      signal,
       credentials: 'include',
       headers: {
         ...(auth ? { authorization: auth } : {}),
@@ -259,6 +264,9 @@ export default function Xiaohongshu() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [saveSettings, setSaveSettings] = useState<SaveSettings | null>(null);
   const [directory, setDirectory] = useState('');
+  const cacheExportController = useRef<AbortController | null>(null);
+  const [cacheExporting, setCacheExporting] = useState(false);
+  useEffect(() => () => cacheExportController.current?.abort(), []);
   const active = useRef(false);
 
   const [recoveredTasks, setRecoveredTasks] = useState<RecoveredTask[]>([]);
@@ -871,6 +879,86 @@ export default function Xiaohongshu() {
     run(async () => {
       const targets = archivedOnly ? selectedArchives : selectedNotes;
       if (!saveSettings || !targets.length) return;
+      if (archivedOnly) {
+        const items = targets.map((note) => ({
+          id: note.id,
+          creatorId: note.creatorId,
+        }));
+        if (items.length > 5000)
+          throw Error('单次最多导出 5000 篇，请缩小所选范围。');
+        const controller = new AbortController();
+        cacheExportController.current = controller;
+        setCacheExporting(true);
+        setMessage(`正在保存 ${items.length} 篇已选归档，仅使用缓存。`);
+        try {
+          const receipt = await localApi<{
+            results: Array<{
+              id: string;
+              saved?: { alreadySaved: boolean; status?: string };
+              error?: string;
+            }>;
+            cancelled: boolean;
+          }>('/xiaohongshu/cache-export', { items }, controller.signal);
+          if (
+            !receipt ||
+            typeof receipt.cancelled !== 'boolean' ||
+            !Array.isArray(receipt.results) ||
+            receipt.results.length > items.length ||
+            receipt.results.some(
+              (result, index) =>
+                result.id !== items[index].id ||
+                (!result.saved && !result.error) ||
+                Boolean(result.saved && result.error) ||
+                (result.error && typeof result.error !== 'string') ||
+                (result.saved &&
+                  (typeof result.saved.alreadySaved !== 'boolean' ||
+                    (result.saved.status !== undefined &&
+                      !['new', 'skipped', 'repaired'].includes(result.saved.status)))),
+            ) ||
+            (!receipt.cancelled && receipt.results.length !== items.length)
+          )
+            throw Error('缓存保存回执不完整，请先检查目录；不会自动重试。');
+          const saved = receipt.results.filter(
+            (result) => result.saved && !result.error,
+          );
+          const failed = receipt.results.filter((result) => result.error);
+          const missing = failed.filter((result) =>
+            [
+              'XHS_CACHED_ARTICLE_UNAVAILABLE',
+              'VERIFIED_ARTICLE_UNAVAILABLE',
+              'XHS_CACHED_VIDEO_UNAVAILABLE',
+              'XHS_CACHED_VIDEO_INVALID',
+            ].includes(result.error!),
+          ).length;
+          setMessage(
+            `${receipt.cancelled ? '已取消：' : ''}新增 ${saved.filter((result) => !result.saved!.alreadySaved && result.saved!.status !== 'repaired').length} · 跳过 ${saved.filter((result) => result.saved!.alreadySaved && result.saved!.status !== 'repaired').length} · 补齐 ${saved.filter((result) => result.saved!.status === 'repaired').length} · 失败 ${failed.length}${missing ? `（${missing} 篇缓存正文或图片不完整）` : ''}。已有文件保留。`,
+          );
+          if (failed.length)
+            setOperationError(
+              failed
+                .map(
+                  (result) =>
+                    `${targets.find((note) => note.id === result.id)?.title || '笔记'}：${['XHS_CACHED_ARTICLE_UNAVAILABLE', 'VERIFIED_ARTICLE_UNAVAILABLE', 'XHS_CACHED_VIDEO_UNAVAILABLE', 'XHS_CACHED_VIDEO_INVALID'].includes(result.error!) ? '缓存正文或图片不完整' : '保存未完成，请检查本机目录或磁盘空间'}`,
+                )
+                .join('；'),
+            );
+        } catch (error) {
+          setMessage(
+            controller.signal.aborted
+              ? '已停止后续保存；本次结果未完全确认，请检查目录，不会自动重试。'
+              : '保存回执未确认，请先检查目录；不会自动重试。',
+          );
+          if (!controller.signal.aborted)
+            setOperationError(
+              error instanceof Error ? error.message : String(error),
+            );
+        } finally {
+          if (cacheExportController.current === controller)
+            cacheExportController.current = null;
+          setCacheExporting(false);
+        }
+        return;
+      }
       const byAuthor = new Map<string, string[]>();
       for (const note of targets) {
         const ids = byAuthor.get(note.creatorId) || [];
@@ -1227,6 +1315,15 @@ export default function Xiaohongshu() {
             '已保存的博主任务'
           }
         />
+        {cacheExporting && (
+          <Button
+            size="sm"
+            variant="light"
+            onPress={() => cacheExportController.current?.abort()}
+          >
+            停止后续缓存保存
+          </Button>
+        )}
         {zipProgress && (
           <SubscriptionProgress
             ariaLabel="ZIP 导出进度"

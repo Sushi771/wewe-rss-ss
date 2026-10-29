@@ -1058,7 +1058,7 @@ export class XiaohongshuService {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
     });
-    if (!note) throw new ArticleDownloadError('笔记缓存不存在。', 422);
+    if (!note) throw new ArticleDownloadError('笔记缓存不存在。', 422, { code: 'XHS_CACHED_ARTICLE_UNAVAILABLE' });
     const creator = await this.prisma.xhsCreator.findUnique({where:{id:creatorId}});
     if (!creator) throw new ArticleDownloadError('找不到该博主。', 422);
     const group = creator.groupId

@@ -1,4 +1,10 @@
 import {
+  freezeCachedXhsSelection,
+  saveFrozenXhsCache,
+  XHS_CACHED_SCOPE_LIMIT,
+  XhsCachedTarget,
+} from './xhs-cached-local-export';
+import {
   Body,
   Controller,
   Get,
@@ -369,6 +375,14 @@ export class ArticleDownloadController implements OnModuleDestroy {
     if (this.running || this.pickerRunning)
       return res.status(409).json({ message: '请等待当前操作完成。' });
     this.pickerRunning = true;
+    const controller = new AbortController();
+    const onAborted = () => controller.abort();
+    const onClosed = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    req.once('aborted', onAborted);
+    res.once('close', onClosed);
+    if (req.aborted || res.destroyed) controller.abort();
     try {
       const xhs = this.exportTarget(req) === 'xiaohongshu';
       if (xhs) this.xhsPickerGrant = undefined;
@@ -376,9 +390,12 @@ export class ArticleDownloadController implements OnModuleDestroy {
       const store = this.localStore(this.exportTarget(req));
       const selected = await pickArticleDirectory(
         (await store.read()).directory,
+        { platform: xhs ? 'xiaohongshu' : 'wechat', signal: controller.signal },
       );
+      if (controller.signal.aborted) return;
       if (selected === null) return res.json({ cancelled: true });
       const settings = await store.rememberPickedDirectory(selected);
+      if (controller.signal.aborted) return;
       const token = randomUUID();
       if (xhs) this.xhsPickerGrant = token;
       else this.pickerGrant = token;
@@ -388,8 +405,10 @@ export class ArticleDownloadController implements OnModuleDestroy {
         cancelled: false,
       });
     } catch (error) {
-      return this.failure(error, res);
+      if (!controller.signal.aborted) return this.failure(error, res);
     } finally {
+      req.removeListener('aborted', onAborted);
+      res.removeListener('close', onClosed);
       this.pickerRunning = false;
     }
   }
@@ -642,6 +661,106 @@ export class ArticleDownloadController implements OnModuleDestroy {
       message:
         '公众号单篇下载仅使用 Wechat2RSS 缓存；不接收其他渠道正文，未保存。',
     });
+  }
+
+  @Post('article/xiaohongshu/cache-export')
+  @HttpCode(200)
+  async exportXhsCachedSelection(
+    @Body() body: unknown,
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    if (
+      privateOnlineMode() ||
+      process.env.WEWE_ACCEPTANCE_MODE === '1' ||
+      !this.xiaohongshu ||
+      !this.prisma
+    )
+      return res.status(409).json({ message: '当前模式不能保存本地缓存。' });
+    if (this.running || this.pickerRunning)
+      return res.status(409).json({ message: '请等待当前本地操作完成。' });
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const close = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', close);
+    if (req.aborted || res.destroyed) controller.abort();
+    this.running = true;
+    try {
+      const items = (body as { items?: unknown })?.items;
+      if (
+        !body ||
+        Array.isArray(body) ||
+        Object.keys(body).some((key) => key !== 'items') ||
+        !Array.isArray(items) ||
+        !items.length ||
+        items.length > XHS_CACHED_SCOPE_LIMIT ||
+        items.some(
+          (item) =>
+            !item ||
+            typeof item !== 'object' ||
+            Array.isArray(item) ||
+            Object.keys(item).some(
+              (key) => !['id', 'creatorId'].includes(key),
+            ) ||
+            typeof item.id !== 'string' ||
+            !item.id ||
+            item.id.length > 300 ||
+            typeof item.creatorId !== 'string' ||
+            !item.creatorId ||
+            item.creatorId.length > 128,
+        )
+      )
+        throw new ArticleDownloadError('所选归档范围无效。', 400, {
+          code: 'XHS_CACHED_SCOPE_INVALID',
+        });
+      // Freeze membership and trusted metadata before the single native selection.
+      // This request grants only these IDs at its selected XHS target; no reusable token.
+      const frozen = await freezeCachedXhsSelection(
+        this.prisma,
+        items as XhsCachedTarget[],
+      );
+      if (controller.signal.aborted) return;
+      const store = this.localStore('xiaohongshu');
+      const settings = await store.read();
+      let directory = settings.directory;
+      if (settings.askEveryTime) {
+        this.xhsPickerGrant = undefined;
+        this.pickerRunning = true;
+        const selected = await pickArticleDirectory(directory, {
+          platform: 'xiaohongshu',
+          count: frozen.length,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        if (selected === null)
+          return res.json({ results: [], cancelled: true });
+        directory = (await store.rememberPickedDirectory(selected)).directory;
+        this.pickerRunning = false;
+      }
+      if (controller.signal.aborted) return;
+      const receipt = await saveFrozenXhsCache(
+        frozen,
+        store,
+        directory,
+        (creator, id) => this.xiaohongshu!.prepareLocalDownload(creator, id),
+        () => controller.signal.aborted,
+      );
+      if (!controller.signal.aborted) {
+        res.setHeader('Cache-Control', 'private, no-store');
+        return res.json(receipt);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) return this.failure(error, res);
+    } finally {
+      req.removeListener('aborted', abort);
+      res.removeListener('close', close);
+      this.pickerRunning = false;
+      this.running = false;
+    }
   }
 
   @Post('article/xiaohongshu/:noteId/save')
