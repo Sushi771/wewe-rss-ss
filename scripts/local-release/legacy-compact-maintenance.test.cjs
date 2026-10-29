@@ -46,7 +46,7 @@ async function isolated(){
     assert.equal(proof.allowsRetry,false);assert.equal(saved.legacyMaintenanceProof.oldResult,'unknown');assert.equal(observations,2);assert.equal(queries,2);
     candidate=startBackend(port);await started.get(candidate.pid);
     const candidateIdentity=effects.processIdentity('OwnedSnapshot',candidate.pid,port,{executable:process.execPath,commandLine:command(port)});
-    const restartSource=fs.readFileSync(path.join(control,'restart.cjs'),'utf8'),from=restartSource.indexOf('      if(newChild){',restartSource.indexOf('const baseline =')),to=restartSource.indexOf('    } finally {\n      if (options.rehearsal)',from);
+    const restartSource=fs.readFileSync(path.join(control,'restart.cjs'),'utf8').replace(/\r\n/g,'\n'),from=restartSource.indexOf('      if(newChild){',restartSource.indexOf('const baseline =')),to=restartSource.indexOf('    } finally {\n      if (options.rehearsal)',from);
     assert(from>0&&to>from);const catchRun=new Function('ctx','return(async()=>{with(ctx){'+restartSource.slice(from,to)+'}})()');
     const ctx={newChild:candidate,ownedIdentities:new Map([[candidate.pid,{identity:candidateIdentity,packageId:'candidate',commandLine:candidateIdentity.commandLine}]]),oldStopCheckpoint:checkpoint,
       error:Error('synthetic candidate health failure'),stopped:true,preserving:true,stopOwned:effects.stopOwned,

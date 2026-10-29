@@ -1,6 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto');
 const gate=require('./project-writer-gate.cjs');const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
-const source=fs.readFileSync(path.join(__dirname,'restart.cjs'),'utf8');
+const source=fs.readFileSync(path.join(__dirname,'restart.cjs'),'utf8').replace(/\r\n/g,'\n');
 const from=source.indexOf('      if(newChild){',source.indexOf('} catch (error) {',source.indexOf('const baseline ='))),to=source.indexOf('    } finally {\n      if (options.rehearsal)',from);
 assert(from>0&&to>from);const runCatch=new Function('ctx','return(async()=>{with(ctx){'+source.slice(from,to)+'}})()');
 for(const kind of ['after-stop-backup-failure','bound-candidate-health-failure','unbound-candidate-bind-failure','wrong-stop-receipt','late-writer-race','crash-without-observed-identity'])test('exact restart catch: '+kind,async()=>{
