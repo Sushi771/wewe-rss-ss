@@ -1,0 +1,24 @@
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const reviewed = {
+  prepareWholeCreatorReviewedAttempt: 'e1736068dfce7e680c251f3acaf2ef29c637c60f11aa9604470d2f1f5fdc6d7b',
+  executeWholeCreatorReviewedAttempt: '3698fd1ccb5184c5b622561a5d5ae8fff2498d6f75188a26446d517b46ab6665',
+  reviewWholeCreatorUnknown: '016910f26d7d4345a1f0687cf778bdce77a462ebc7a5f7ad679cbf98b3bc126f',
+};
+// Remove only the exact reviewed additions before enforcing historical pins.
+module.exports = function restorePreReviewedRecoveryRouter(ts, source) {
+  const ast = ts.createSourceFile('router.ts', source, ts.ScriptTarget.Latest, true);
+  const declaration = ast.statements.find(ts.isClassDeclaration);
+  const member = declaration.members.find(node => node.name?.getText(ast) === 'xiaohongshuRouter');
+  const routes = member.initializer.arguments[0].properties.filter(node => Object.hasOwn(reviewed, node.name.getText(ast)));
+  assert.equal(routes.length, 3, 'all reviewed recovery routes must be present');
+  for (const node of routes) {
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.JSX, node.getText(ast));
+    const tokens = [];
+    while (scanner.scan() !== ts.SyntaxKind.EndOfFileToken) tokens.push(scanner.getTokenText());
+    assert.equal(crypto.createHash('sha256').update(tokens.join('\0')).digest('hex'), reviewed[node.name.getText(ast)], 'exact reviewed recovery route');
+    assert.equal(source[node.end], ',', 'reviewed route delimiter');
+  }
+  for (const node of [...routes].reverse()) source = source.slice(0, node.getFullStart()) + source.slice(node.end + 1);
+  return source;
+};

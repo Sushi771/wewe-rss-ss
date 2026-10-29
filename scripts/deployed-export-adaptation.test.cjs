@@ -1,4 +1,5 @@
 const restorePreOriginalLinkRouter = require('./xhs-original-link-router-seams.cjs');
+const restorePreReviewedRecoveryRouter = require('./xhs-reviewed-recovery-router-seams.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -26,6 +27,22 @@ function tokens(text) {
     result.push(scanner.getTokenText());
   return hash(result.join('\0'));
 }
+
+test('reviewed recovery seam retains the exact existing router source', () => {
+  const restored = restorePreReviewedRecoveryRouter(ts, read('apps/server/src/trpc/trpc.router.ts'));
+  const blob = crypto.createHash('sha1').update('blob '+Buffer.byteLength(restored)+'\0').update(restored).digest('hex');
+  assert.equal(blob, '782fbcd89c949bd06063488594e05b316d61008d', 'exact pre-recovery router from the reviewed baseline');
+});
+
+test('reviewed recovery seam rejects missing routes and changed writable authentication', () => {
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  for (const name of ['prepareWholeCreatorReviewedAttempt', 'executeWholeCreatorReviewedAttempt', 'reviewWholeCreatorUnknown']) {
+    const declaration = name+': this.trpcService.protectedProcedure';
+    assert.equal(source.split(declaration).length, 2);
+    assert.throws(() => restorePreReviewedRecoveryRouter(ts, source.replace(declaration, name+': this.trpcService.publicProcedure')), /exact reviewed recovery route/);
+    assert.throws(() => restorePreReviewedRecoveryRouter(ts, source.replace(name+':', 'unreviewedReplacement:')), /all reviewed recovery routes/);
+  }
+});
 test('deployment baseline keeps existing routes and safety/startup/reader/title policies', () => {
   assert.deepEqual(Object.keys(searchPins.criticalFiles).sort(), [
     'apps/server/src/article-body-search.ts',
@@ -41,7 +58,7 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
   const file = 'apps/server/src/trpc/trpc.router.ts';
   // Assert deletion, then reconstruct only the exact removed reader seam.
   // All old router/wholeCreator/engagement pins remain authoritative.
-  const pinnedRouterSource = restoreXhsReaderRoute(ts, restorePreOriginalLinkRouter(read(file)));
+  const pinnedRouterSource = restoreXhsReaderRoute(ts, restorePreOriginalLinkRouter(restorePreReviewedRecoveryRouter(ts, read(file))));
   const ast = ts.createSourceFile(
     file,
     pinnedRouterSource,
