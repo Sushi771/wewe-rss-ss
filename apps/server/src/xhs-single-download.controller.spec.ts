@@ -88,17 +88,11 @@ describe('XHS single tool and bounded cache batch use original local publication
       ...(pickToken ? { pickToken } : {}),
     });
   const files = async () => {
-    const days = await fs.readdir(destination);
-    return (
-      await Promise.all(
-        days.map(async (day) => {
-          const directory = join(destination, day);
-          return (await fs.readdir(directory)).map((entry) =>
-            join(directory, entry),
-          );
-        }),
-      )
-    ).flat();
+    const walk=async(directory:string):Promise<string[]>=>{
+      const entries=await fs.readdir(directory,{withFileTypes:true});
+      return (await Promise.all(entries.filter(e=>!e.name.startsWith('.')).map(e=>e.isDirectory()?walk(join(directory,e.name)):e.name.endsWith('.md')?[join(directory,e.name)]:[]))).flat();
+    };
+    return (await walk(destination)).sort();
   };
   const boot = async (withSource = true, videoEvidenceSupported = false) => {
     const module = await Test.createTestingModule({
@@ -116,7 +110,7 @@ describe('XHS single tool and bounded cache batch use original local publication
             xhsCreator: {
               findUnique: async ({ where }: { where: { id: string } }) =>
                 where.id === 'creator-a'
-                  ? { id: 'creator-a', externalAuthorId: 'verified-author' }
+                  ? { id: 'creator-a', displayName:'Synthetic creator', groupId:null, externalAuthorId: 'verified-author' }
                   : null,
             },
           },
@@ -153,7 +147,7 @@ describe('XHS single tool and bounded cache batch use original local publication
     await fs.mkdir(destination);
     process.env.DATABASE_URL = 'file:' + join(temporary, 'unused.sqlite');
     await fs.writeFile(
-      join(temporary, '.article-download-settings.json'),
+      join(temporary, '.xiaohongshu-download-settings.json'),
       JSON.stringify({ directory: destination, askEveryTime: false }),
     );
     sourceResult = { requestedUrl: url, evidenceVerified: true, note: note() };
@@ -259,15 +253,15 @@ describe('XHS single tool and bounded cache batch use original local publication
       videoDecoded: false,
       videoVerification: 'container-and-bytes',
     });
-    const [folder] = await files();
-    const markdownPath = join(folder, '正文.md');
+    const [markdownPath] = await files();
+    const folder=dirname(markdownPath);
     const filename = 'video_' + sha256 + '.mp4';
     expect(await fs.readFile(join(folder, 'video', filename))).toEqual(mp4);
     expect(await fs.readFile(markdownPath, 'utf8')).toContain(
       '(video/' + filename + ')',
     );
     const marker = JSON.parse(
-      await fs.readFile(join(folder, '.wewe-article.json'), 'utf8'),
+      await fs.readFile(join(folder, '.wewe-articles', (await fs.readdir(join(folder,'.wewe-articles'))).find(n=>n.endsWith('.json'))!), 'utf8'),
     );
     expect(marker.videos).toEqual([{ filename, bytes: mp4.length, sha256 }]);
     expect(marker.images).toHaveLength(1);
@@ -280,7 +274,7 @@ describe('XHS single tool and bounded cache batch use original local publication
       videoCount: 1,
       videoDecoded: false,
     });
-    expect(await files()).toEqual([folder]);
+    expect(await files()).toEqual([markdownPath]);
     expect(await fs.readFile(markdownPath, 'utf8')).toContain(
       'user subscribed video note kept',
     );
@@ -297,7 +291,7 @@ describe('XHS single tool and bounded cache batch use original local publication
       videoVerification: 'container-and-bytes',
       contentSource: 'saved-xiaohongshu',
     });
-    expect(await files()).toEqual([folder]);
+    expect(await files()).toEqual([markdownPath]);
   });
 
   it('rejects damaged subscribed video bytes or mixed creator selections before any batch publication', async () => {
@@ -358,6 +352,7 @@ describe('XHS single tool and bounded cache batch use original local publication
     expect((await batch([noteA, 'other-creators-note'])).status).toBe(422);
     expect(findFirst.mock.calls.map(([arg]) => arg.where)).toEqual([
       { id: noteA, creatorId: 'creator-a', status: 'complete' },
+      { id: noteA, creatorId: 'creator-a', status: 'complete' },
       { id: 'other-creators-note', creatorId: 'creator-a', status: 'complete' },
     ]);
     expect(await fs.readdir(destination)).toEqual([]);
@@ -365,12 +360,12 @@ describe('XHS single tool and bounded cache batch use original local publication
   });
 
   it('preserves first complete Markdown/PNG on second disk failure and never writes third', async () => {
-    const originalCopy = fs.copyFile;
+    const originalCopy = fs.open;
     let copies = 0;
-    jest.spyOn(mutableFs, 'copyFile').mockImplementation(async (...args) => {
-      if (++copies === 2)
+    jest.spyOn(mutableFs, 'open').mockImplementation(async (...args:any[]) => {
+      if (args[1]==='wx' && String(args[0]).endsWith('.md') && ++copies === 2)
         throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
-      await originalCopy(...args);
+      return (originalCopy as any)(...args);
     });
     const result = await batch();
     expect(result.status).toBe(422);
@@ -381,25 +376,25 @@ describe('XHS single tool and bounded cache batch use original local publication
     });
     const folders = await files();
     expect(folders).toHaveLength(1);
-    expect(await fs.readFile(join(folders[0], '正文.md'), 'utf8')).toContain(
+    expect(await fs.readFile(folders[0], 'utf8')).toContain(
       '缓存完整正文',
     );
-    const images = await fs.readdir(join(folders[0], 'image'));
-    expect(await fs.readFile(join(folders[0], 'image', images[0]))).toEqual(
+    const images = await fs.readdir(join(dirname(folders[0]), 'image'));
+    expect(await fs.readFile(join(dirname(folders[0]), 'image', images[0]))).toEqual(
       Buffer.from(png, 'base64'),
     );
     expect(copies).toBe(2);
   });
 
   it('uses one native grant for the whole batch, deduplicates IDs and preserves repeats', async () => {
-    await post('/download/article/settings', { askEveryTime: true });
+    await post('/download/article/settings?target=xiaohongshu', { askEveryTime: true });
     expect((await batch()).status).toBe(409);
-    const selected = await post('/download/article/directory');
+    const selected = await post('/download/article/directory?target=xiaohongshu');
     expect(
       (await batch([noteA, noteA, noteB], selected.body.pickToken)).body,
     ).toMatchObject({ saved: true, savedCount: 2, alreadySavedCount: 0 });
     expect((await batch([noteA], selected.body.pickToken)).status).toBe(409);
-    const again = await post('/download/article/directory');
+    const again = await post('/download/article/directory?target=xiaohongshu');
     expect(
       (await batch([noteA, noteB], again.body.pickToken)).body,
     ).toMatchObject({ savedCount: 0, alreadySavedCount: 2 });
@@ -408,14 +403,14 @@ describe('XHS single tool and bounded cache batch use original local publication
   });
 
   it('cancelled picker revokes old grant and does not change directory or save', async () => {
-    await post('/download/article/settings', { askEveryTime: true });
-    const first = await post('/download/article/directory');
+    await post('/download/article/settings?target=xiaohongshu', { askEveryTime: true });
+    const first = await post('/download/article/directory?target=xiaohongshu');
     jest.mocked(picker.pickArticleDirectory).mockResolvedValueOnce(null);
-    expect((await post('/download/article/directory')).body).toEqual({
+    expect((await post('/download/article/directory?target=xiaohongshu')).body).toEqual({
       cancelled: true,
     });
     expect((await batch([noteA], first.body.pickToken)).status).toBe(409);
-    expect((await get('/download/article/settings')).body).toEqual({
+    expect((await get('/download/article/settings?target=xiaohongshu')).body).toEqual({
       directory: destination,
       askEveryTime: true,
     });
@@ -439,9 +434,9 @@ describe('XHS single tool and bounded cache batch use original local publication
     const pending = batch([noteA]).then((result) => result);
     await started;
     expect(
-      (await post('/download/article/settings', { askEveryTime: true })).status,
+      (await post('/download/article/settings?target=xiaohongshu', { askEveryTime: true })).status,
     ).toBe(409);
-    expect((await post('/download/article/directory')).status).toBe(409);
+    expect((await post('/download/article/directory?target=xiaohongshu')).status).toBe(409);
     expect((await batch([noteB])).status).toBe(409);
     expect((await post(singlePath, { url })).status).toBe(409);
     release();
@@ -461,7 +456,7 @@ describe('XHS single tool and bounded cache batch use original local publication
         release = resolve;
       });
     });
-    const pending = post('/download/article/directory').then(
+    const pending = post('/download/article/directory?target=xiaohongshu').then(
       (result) => result,
     );
     await started;
@@ -485,12 +480,12 @@ describe('XHS single tool and bounded cache batch use original local publication
         await pause;
         return originalPersist.call(this, value);
       });
-    const settings = post('/download/article/settings', {
+    const settings = post('/download/article/settings?target=xiaohongshu', {
       askEveryTime: true,
     }).then((result) => result);
     await startedSetting;
     expect((await batch()).status).toBe(409);
-    expect((await post('/download/article/directory')).status).toBe(409);
+    expect((await post('/download/article/directory?target=xiaohongshu')).status).toBe(409);
     releaseSetting();
     expect((await settings).status).toBe(200);
   });
@@ -538,7 +533,7 @@ describe('XHS single tool and bounded cache batch use original local publication
     expect((await post(singlePath, { url, note: note() })).status).toBe(400);
     expect(
       (
-        await post('/download/article/settings', {
+        await post('/download/article/settings?target=xiaohongshu', {
           directory: destination,
           askEveryTime: false,
         })
@@ -589,10 +584,10 @@ describe('XHS single tool and bounded cache batch use original local publication
   });
 
   it('consumes standalone grant once, requires fresh selection and blocks source before grant', async () => {
-    await post('/download/article/settings', { askEveryTime: true });
+    await post('/download/article/settings?target=xiaohongshu', { askEveryTime: true });
     expect((await post(singlePath, { url })).status).toBe(409);
     expect(sourceRead).not.toHaveBeenCalled();
-    const selected = await post('/download/article/directory');
+    const selected = await post('/download/article/directory?target=xiaohongshu');
     expect(
       (await post(singlePath, { url, pickToken: selected.body.pickToken }))
         .status,

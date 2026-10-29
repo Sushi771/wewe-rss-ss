@@ -1055,11 +1055,12 @@ export class XiaohongshuService {
     noteId: string,
     metrics?: XhsMetricSnapshot | null,
   ): Promise<ArticlePreparation> {
-    const creator = await this.getCreator(creatorId);
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
     });
     if (!note) throw new ArticleDownloadError('笔记缓存不存在。', 422);
+    const creator = await this.prisma.xhsCreator.findUnique({where:{id:creatorId}});
+    if (!creator) throw new ArticleDownloadError('找不到该博主。', 422);
     const group = creator.groupId
       ? await this.prisma.managementGroup.findUnique({
           where: { id: creator.groupId },

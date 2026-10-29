@@ -503,7 +503,7 @@ describe('production XHS router/service → additive SQLite and original export 
     const destination = path.join(root, 'direct-save');
     await fs.mkdir(destination, { recursive: true });
     await fs.writeFile(
-      path.join(root, '.article-download-settings.json'),
+      path.join(root, '.xiaohongshu-download-settings.json'),
       JSON.stringify({ directory: destination, askEveryTime: false }),
     );
     const module = await Test.createTestingModule({
@@ -556,9 +556,9 @@ describe('production XHS router/service → additive SQLite and original export 
         imageCount: 1,
         alreadySaved: false,
       });
-      expect(path.basename(first.body.markdownPath)).toBe('正文.md');
+      expect(path.basename(first.body.markdownPath)).toBe(note.title+'.md');
       expect(path.relative(destination, first.body.directory)).toMatch(
-        /^\d{4}-\d{2}-\d{2}[\\/]/,
+        /^\d{4}-\d{2}-\d{2}_未分组[\\/]/,
       );
       const md = await fs.readFile(first.body.markdownPath, 'utf8');
       expect(md).toContain('完整合成正文');
@@ -576,15 +576,15 @@ describe('production XHS router/service → additive SQLite and original export 
       expect(await fs.readFile(first.body.markdownPath, 'utf8')).toContain(
         '用户本地笔记',
       );
-      await post('/download/article/settings', { askEveryTime: true });
+      await post('/download/article/settings?target=xiaohongshu', { askEveryTime: true });
       expect((await post()).status).toBe(409);
       jest.spyOn(picker, 'pickArticleDirectory').mockResolvedValue(null);
       expect(
-        (await post('/download/article/directory', {})).body.cancelled,
+        (await post('/download/article/directory?target=xiaohongshu', {})).body.cancelled,
       ).toBe(true);
       expect((await post()).status).toBe(409);
       jest.mocked(picker.pickArticleDirectory).mockResolvedValue(destination);
-      const picked = await post('/download/article/directory', {});
+      const picked = await post('/download/article/directory?target=xiaohongshu', {});
       expect(
         (await post(undefined, { creatorId, pickToken: picked.body.pickToken }))
           .status,
@@ -593,7 +593,7 @@ describe('production XHS router/service → additive SQLite and original export 
         (await post(undefined, { creatorId, pickToken: picked.body.pickToken }))
           .status,
       ).toBe(409);
-      await post('/download/article/settings', { askEveryTime: false });
+      await post('/download/article/settings?target=xiaohongshu', { askEveryTime: false });
       process.env.WEWE_ACCEPTANCE_MODE = '1';
       expect((await post()).status).toBe(409);
       delete process.env.WEWE_ACCEPTANCE_MODE;

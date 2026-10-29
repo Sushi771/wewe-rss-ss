@@ -86,21 +86,12 @@ async function inspectSaved(markdownPath: string) {
   const markdown = await fs.readFile(markdownPath, 'utf8');
   const references = imageLinks(markdown);
   if (references.length !== 3) fail('ORACLE_IMAGE_COUNT_MISMATCH');
-  // Strict, single heading boundary followed by one known provenance block.
-  // Only export metadata before this boundary is outside this body-only oracle.
-  const parts = markdown
-    .replace(/\r\n/g, '\n')
-    .split('# Synthetic integrity note\n\n');
-  if (parts.length !== 2) fail('ORACLE_BODY_BOUNDARY_MISMATCH');
-  const blocks = parts[1]
-    .split(/\n[ \t]*\n+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (
-    blocks.shift() !==
-    '原文来源：[原文](https://www.xiaohongshu.com/explore/synthetic-integrity)'
-  )
-    fail('ORACLE_PROVENANCE_MISMATCH');
+  // Exact common-publisher metadata boundary. No body punctuation, paragraph
+  // membership or image ordering is discarded by this oracle.
+  if(path.basename(markdownPath)!=='Synthetic integrity note.md')fail('ORACLE_TITLE_MISMATCH');
+  const prefix='公众号：Synthetic creator\n\n分组：未分组\n\n原文发布日期（上海时间）：2025-10-09\n\n原文链接：https://www.xiaohongshu.com/explore/synthetic-integrity\n\n';
+  if(!markdown.startsWith(prefix)||markdown.indexOf(prefix,prefix.length)>=0)fail('ORACLE_PROVENANCE_MISMATCH');
+  const blocks=markdown.slice(prefix.length).split(/\n[ \t]*\n+/).map(s=>s.trim()).filter(Boolean);
   const body = blocks.map((block) =>
     normalize(block.replace(/!\[[^\]]*\]\(([^)\r\n]+)\)/g, '[IMAGE]')),
   );
@@ -188,6 +179,7 @@ describe('independent synthetic body/image oracle against the original local sav
     // Fixed synthetic cache seam; the actual preparation and saver remain intact.
     const cache = new XiaohongshuService({
       xhsNote: { findFirst: async () => row },
+    xhsCreator: { findUnique: async ({where}:any) => where.id==='synthetic-creator'?{id:where.id,displayName:'Synthetic creator',externalAuthorId:'synthetic-author',groupId:null}:null },
     } as any);
     // This independent body/media oracle intentionally has no database engine.
     // Engagement persistence/export is exercised against real synthetic SQLite

@@ -421,7 +421,7 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       alreadySaved: false,
     });
     const markdown = await fs.readFile(saved.markdownPath, 'utf8');
-    expect(saved.markdownPath.endsWith('正文.md')).toBe(true);
+    expect(saved.markdownPath.endsWith(fixture().note.title+'.md')).toBe(true);
     expect(markdown).toContain(fixture().note.text);
     expect(markdown).toContain('image/image_');
     expect(markdown).toContain('video/video_' + hash(mp4()) + '.mp4');
