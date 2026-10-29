@@ -9,11 +9,19 @@ import { ArticleDownloadController } from './article-download.controller';
 import { ConfigService } from '@nestjs/config';
 
 describe('shared native directory picker lifecycle without opening a window', () => {
+  let hostPlatform: PropertyDescriptor;
   let callback: any;
   let script: string;
   let launchOptions: any;
   let kill: jest.Mock;
   beforeEach(() => {
+    hostPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    // All native process/window APIs below are mocked. Run the Windows protocol
+    // on every CI host while separately asserting the non-Windows refusal.
+    Object.defineProperty(process, 'platform', {
+      ...hostPlatform,
+      value: 'win32',
+    });
     kill = jest.fn();
     jest
       .mocked(cp.execFile)
@@ -27,7 +35,20 @@ describe('shared native directory picker lifecycle without opening a window', ()
         return { kill } as any;
       }) as any);
   });
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', hostPlatform);
+    jest.restoreAllMocks();
+  });
+  it('refuses non-Windows hosts before launching any native child', async () => {
+    Object.defineProperty(process, 'platform', {
+      ...hostPlatform,
+      value: 'linux',
+    });
+    await expect(pickArticleDirectory('C:\\synthetic')).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(cp.execFile).not.toHaveBeenCalled();
+  });
   it('keeps the one-argument WeChat API and disposes a topmost owner around the owned dialog', async () => {
     const pending = pickArticleDirectory('C:\\synthetic');
     expect(script).toContain('$owner.TopMost = $true');
@@ -94,16 +115,19 @@ describe('shared native directory picker lifecycle without opening a window', ()
     const internal = controller as any;
     jest.spyOn(internal, 'authorized').mockReturnValue(true);
     const remember = jest.fn();
-    jest.spyOn(internal, 'localStore').mockReturnValue({
-      read: async () => ({ directory: 'C:\\synthetic', askEveryTime: true }),
-      rememberPickedDirectory: remember,
-    });
+    jest
+      .spyOn(internal, 'localStore')
+      .mockReturnValue({
+        read: async () => ({ directory: 'C:\\synthetic', askEveryTime: true }),
+        rememberPickedDirectory: remember,
+      });
     const req: any = Object.assign(new EventEmitter(), {
       query: { target: 'xiaohongshu' },
       aborted: false,
     });
     const res: any = Object.assign(new EventEmitter(), {
       writableEnded: false,
+      setHeader: jest.fn(),
       status: jest.fn().mockReturnThis(),
       json: jest.fn().mockReturnThis(),
     });
@@ -191,12 +215,10 @@ describe('shared native directory picker lifecycle without opening a window', ()
       directory: 'C:\\selected',
       askEveryTime: true,
     }));
-    jest
-      .spyOn(internal, 'localStore')
-      .mockReturnValue({
-        read: async () => ({ directory: 'C:\\synthetic', askEveryTime: true }),
-        rememberPickedDirectory: remember,
-      });
+    jest.spyOn(internal, 'localStore').mockReturnValue({
+      read: async () => ({ directory: 'C:\\synthetic', askEveryTime: true }),
+      rememberPickedDirectory: remember,
+    });
     const req: any = Object.assign(new EventEmitter(), {
       query: { target: 'xiaohongshu' },
       aborted: false,

@@ -1096,6 +1096,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       })),
     });
     await finish((await service.refresh({ id: creatorId })).taskId);
+    // Terminal persistence precedes finally cleanup; wait before the next enqueue.
+    await (service as any).lane;
     (source.detail as jest.Mock).mockRejectedValue(
       new Error('synthetic authentication stop'),
     );
