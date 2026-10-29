@@ -185,3 +185,59 @@ test('schema fallback rechecks old bytes metadata after reading the candidate', 
   };
   try { assert.throws(validate, /SCHEMA_UNPROVEN/); } finally { fs.readFileSync = native; fs.openSync = open; }
 }));
+
+function sameSchemaCompatibility(run) {
+  return schemaPackages(({ fs, roots, manifests, packages, validate }) => {
+    const digest = (value) => require('node:crypto').createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const proof = { format: 1, kind: 'same-schema-unknown-claim-rollback', businessDatabaseRestored: false,
+      checks: { sameSchema: true, isolatedRuntimeStarted: true, unknownClaimsPreserved: true, businessRowsPreserved: true, rollbackStarted: true },
+      schemaProofSha256: digest(validate()),
+      rollback: { id: 'old', sourceCommit: '1'.repeat(40), manifestSha256: packages.oldManifestSha256 },
+      candidate: { id: 'candidate', sourceCommit: '2'.repeat(40), manifestSha256: packages.candidateManifestSha256 } };
+    const policy = { preservingUpdate: { format: 1, operation: 'restart', effects: ['new-output-only', 'approved-active-switch'],
+      active: { pointer: path.join(roots[0], 'active.json'), currentId: 'old', candidateId: 'candidate',
+        pointerSha256: 'a'.repeat(64), currentManifestSha256: packages.oldManifestSha256,
+        candidateManifestSha256: packages.candidateManifestSha256,
+        oldProcess: { pid: 7, startUtc: '2026-01-01T00:00:00Z', executableSha256: 'b'.repeat(64) } } },
+      packageProofs: { old: packages.oldManifestSha256, candidate: packages.candidateManifestSha256 } };
+    const rows = roots.map((root, index) => ({ root, manifest: manifests[index], manifestSha256: index ? packages.candidateManifestSha256 : packages.oldManifestSha256 }));
+    return run({ proof, policy, rows, fs, roots, validate: () => require('./preserving-contract.cjs').validateSameSchemaCompatibility(proof, policy, rows) });
+  }, ({ manifests }) => manifests.forEach((manifest, index) => Object.assign(manifest, { id: index ? 'candidate' : 'old', sourceCommit: String(index + 1).repeat(40) })));
+}
+test('same-schema compatibility binds strict package proof without claiming an additive migration', () => sameSchemaCompatibility(({ validate, proof }) => {
+  assert.equal(validate(), proof);
+  assert.equal(proof.checks.additiveSchema, undefined);
+}));
+test('same-schema compatibility also admits the separately bound install operation', () => sameSchemaCompatibility(({ validate, proof, policy }) => {
+  policy.preservingUpdate.operation = 'install'; policy.preservingUpdate.effects = ['new-output-only'];
+  assert.equal(validate(), proof);
+}));
+test('effect scope requires exact versioned allocations and never applies to original full mode',()=>sameSchemaCompatibility(({policy,roots})=>{
+  policy.format=2;policy.roots=roots.map(path=>({path}));policy.preservingUpdate.operation='install';policy.preservingUpdate.effects=['new-output-only'];
+  const spec={format:1,container:roots[0],allocations:[{path:path.join(roots[0],'candidate'),mode:'exclusive-package'}],taskIdentities:[],lifecycleSha256:null};
+  policy.preservingUpdate.effectScope=spec;
+  const check=()=>require('./preserving-contract.cjs').preservingEffectScope(policy);
+  assert.equal(check(),spec);
+  for(const mutation of ['version','allocation','control','phase','extra authority']){
+    const copy=structuredClone(policy),s=copy.preservingUpdate.effectScope;
+    if(mutation==='version')s.format=2;
+    if(mutation==='allocation')s.allocations[0].path=roots[0];
+    if(mutation==='control')s.lifecycleSha256=undefined;
+    if(mutation==='phase')copy.phase='build-only';
+    if(mutation==='extra authority')s.deleteHistory=true;
+    assert.throws(()=>require('./preserving-contract.cjs').preservingEffectScope(copy),/EFFECT_SCOPE_INVALID/);
+  }
+}));
+for (const mutation of ['no preserving contract', 'wrong active role', 'bad schema proof', 'missing runtime', 'unknown reset', 'wrong manifest', 'wrong commit', 'changed SQL', 'unbound physical copy'])
+  test('same-schema compatibility refuses ' + mutation, () => sameSchemaCompatibility((f) => {
+    if (mutation === 'no preserving contract') delete f.policy.preservingUpdate;
+    if (mutation === 'wrong active role') f.policy.preservingUpdate.active.currentId = 'different';
+    if (mutation === 'bad schema proof') f.proof.schemaProofSha256 = 'f'.repeat(64);
+    if (mutation === 'missing runtime') delete f.proof.checks.isolatedRuntimeStarted;
+    if (mutation === 'unknown reset') f.proof.checks.unknownClaimsPreserved = false;
+    if (mutation === 'wrong manifest') f.rows[0].manifestSha256 = 'f'.repeat(64);
+    if (mutation === 'wrong commit') f.rows[1].manifest = { ...f.rows[1].manifest, sourceCommit: 'f'.repeat(40) };
+    if (mutation === 'changed SQL') f.fs.appendFileSync(path.join(f.roots[1], 'server/prisma/migrations/001/migration.sql'), 'SELECT 2;');
+    if (mutation === 'unbound physical copy') f.rows.push({ ...f.rows[1], manifestSha256: 'f'.repeat(64) });
+    assert.throws(f.validate, /COMPATIBILITY|SCHEMA_/);
+  }));

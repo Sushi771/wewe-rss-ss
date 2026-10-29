@@ -96,9 +96,66 @@ function inspect(paths, options = {}) {
     onSegment: options.onSegment,
     privateAccounting: options.privateAccounting,
   });
-  const baseline = verifier.scan(roots);
+  const projectedPolicy = { format: 2, roots, preservingUpdate: options.preservingUpdate };
+  const effects = options.preservingUpdate && require('./preserving-contract.cjs').preservingEffectScope(projectedPolicy);
+  const baseline = effects ? projectionScan(projectedPolicy, verifier) : verifier.scan(roots);
   options.onMetrics?.(verifier.metrics());
   return { roots, baseline };
+}
+// Explicit effect projection: all immediate historical names/identities remain
+// bound, while only approved allocations and mutable controls consume new space.
+// This is not a full-content inventory of the containing historical directory.
+function projectionScan(policy, verifier, outputs = [], transients = [], approvedPointerHashes = []) {
+  const spec = policy.preservingUpdate, effects = require('./preserving-contract.cjs').preservingEffectScope(policy);
+  if (!effects) throw new Error('RELEASE_PRESERVING_EFFECT_SCOPE_INVALID');
+  const controls = [spec.active.pointer, path.join(effects.container, '.build-budget.lock'), path.join(effects.container, '.release-lifecycle.json'), path.join(path.dirname(effects.container), '.active-release.lock')];
+  if (![spec.active.pointerSha256, ...approvedPointerHashes].includes(fileHash(spec.active.pointer)))
+    throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+  const ignored = new Set([...controls.filter((p) => p !== path.join(effects.container, '.release-lifecycle.json')),
+    ...effects.allocations.map((a) => a.path), ...outputs.map((r) => r.path), ...transients]);
+  const namespaces = policy.roots.map((root) => {
+    const before = identity(root.path), names = fs.readdirSync(root.path).sort();
+    if (names.length > 4096) throw new Error('RELEASE_PRESERVING_NAMESPACE_LIMIT');
+    const rows = names.filter((name) => !ignored.has(path.join(root.path, name))).map((name) => {
+      const s = fs.lstatSync(path.join(root.path, name), { bigint: true });
+      return [name, s.isSymbolicLink() ? 'link-metadata-unverified' : s.isDirectory() ? 'directory' : s.isFile() ? 'file-metadata-unverified' : 'unsupported',
+        ...[s.dev, s.ino, s.birthtimeNs].map(String)];
+    });
+    if (hash(before) !== hash(identity(root.path)) || hash(names) !== hash(fs.readdirSync(root.path).sort()))
+      throw new Error('RELEASE_PRESERVING_NAMESPACE_CHANGED');
+    return { path: root.path, identity: before, entries: rows };
+  });
+  const lifecycle = path.join(effects.container, '.release-lifecycle.json');
+  if (effects.lifecycleSha256 === null ? present(lifecycle) : !present(lifecycle) || fileHash(lifecycle) !== effects.lifecycleSha256)
+    throw new Error('RELEASE_PRESERVING_LIFECYCLE_CHANGED');
+  const empty = crypto.createHash('sha256').update(JSON.stringify({ format: PRIVATE_FORMAT, classification: PRIVATE_RULES }) + '\n').digest('hex');
+  let bytes = 0, runtimeCopies = 0, entries = namespaces.reduce((n, r) => n + r.entries.length + 1, 0);
+  const allocationStates = [], receipts = [];
+  for (const allocation of effects.allocations) {
+    const exists = present(allocation.path);
+    allocationStates.push({ path: allocation.path, observed: exists ? 'present' : 'absent' });
+    let scan;
+    if (exists) {
+      if (!exists.isDirectory() || exists.isSymbolicLink() || canonical(allocation.path) !== allocation.path)
+        throw new Error('RELEASE_PRESERVING_ALLOCATION_INVALID');
+      scan = verifier.scan([{ path: allocation.path, identity: identity(allocation.path) }], outputs.map((r) => r.path));
+      if (scan.privateEntries) throw new Error('RELEASE_SCOPE_PRIVATE_MANAGED_OUTPUT');
+    }
+    bytes += scan?.bytes || 0; runtimeCopies += scan?.runtimeCopies || 0; entries += scan?.entries || 0;
+    receipts.push([allocation.path, allocation.mode, scan?.digest || empty, scan?.metadataDigest || empty]);
+  }
+  for (const control of controls) {
+    const s = present(control);
+    if (s) {
+      if (!s.isFile() || s.isSymbolicLink() || s.size > 65536) throw new Error('RELEASE_PRESERVING_CONTROL_INVALID');
+      bytes += s.size;
+    }
+  }
+  const metadataDigest = hash(['preserving-effects-v1', namespaces, receipts.map(([p,m,d,md]) => [p,m,md])]);
+  return { format: 'preserving-effects-v1', classification: PRIVATE_RULES, privateContentVerified: false,
+    historyContentVerified: false, historyEntries: namespaces.reduce((n, r) => n + r.entries.length, 0),
+    namespaceDigest: hash(namespaces), allocationStates, bytes, runtimeCopies, entries,
+    metadataDigest, digest: hash(['preserving-effects-v1', namespaces, receipts.map(([p,m,d]) => [p,m,d])]) };
 }
 function validateReferences(value, policy) {
   const applicability = require('./preserving-contract.cjs').referenceApplicability(policy);
@@ -114,9 +171,10 @@ function validateReferences(value, policy) {
     'inflight',
   ];
   const controlOnly=applicability.buildOnly && !!roles;
+  const projectOnly=applicability.projectOnly;
   if (
     !value ||
-    (controlOnly ? value.processObservation!=='build-control-only' || value.records?.some(r=>r.kind==='processes') : value.processObservation!==undefined) ||
+    (controlOnly ? value.processObservation!=='build-control-only' || value.records?.some(r=>r.kind==='processes') : projectOnly ? value.processObservation!=='preserving-project-only' : value.processObservation!==undefined) ||
     (preserving ? value.complete !== false || value.observationComplete !== true : value.complete !== true) ||
     kinds.some((k) => value.categories?.[k] !== applicability.categories[k]) ||
     !Array.isArray(value.records) ||
@@ -199,6 +257,7 @@ function open(request, options = {}, boundOperation) {
     configSha = fileHash(file);
   const preserving = policy.preservingUpdate === undefined ? null : require('./preserving-contract.cjs').validatePreservingContract(policy, request);
   const rootRoles=require('./preserving-contract.cjs').preservingRootRoles(policy);
+  const effectScope=require('./preserving-contract.cjs').preservingEffectScope(policy);
   if (
     configSha !== expected ||
     ![1, 2].includes(policy.format) ||
@@ -321,7 +380,9 @@ function open(request, options = {}, boundOperation) {
     throw new Error('RELEASE_SCOPE_REGISTRY_IDENTITY_INVALID');
   const privateMode = policy.format === 2;
   if (
-    (privateMode ?
+    (effectScope ? policy.inventoryClassification !== PRIVATE_RULES || policy.baseline.format !== 'preserving-effects-v1' ||
+      policy.baseline.classification !== PRIVATE_RULES || policy.baseline.historyContentVerified !== false || policy.baseline.privateContentVerified !== false ||
+      !/^[a-f0-9]{64}$/.test(policy.baseline.namespaceDigest || '') : privateMode ?
       policy.inventoryClassification !== PRIVATE_RULES ||
       policy.baseline.format !== PRIVATE_FORMAT ||
       policy.baseline.classification !== PRIVATE_RULES ||
@@ -342,6 +403,10 @@ function open(request, options = {}, boundOperation) {
   const verifiedOutputs = new Set();
   let pointerCommit;
   const descriptors = new Set();
+  const transientControls = new Set();
+  const approvedPointerHashes = new Set();
+  const measureScope = (outputs = []) => effectScope ? projectionScan(policy, verifier, outputs, [...transientControls], [...approvedPointerHashes]) :
+    verifier.scan(policy.roots, outputs.map((row) => row.path), { metadataOnly: useMetadata && fullValidated });
   const directory = policy.registryDirectory,
     lock = path.join(directory, policy.scopeId + '.lock'),
     ledger = path.join(directory, policy.scopeId + '.state.json');
@@ -551,18 +616,14 @@ function open(request, options = {}, boundOperation) {
     owner();
     checkRoots(referenceRoots);
     checkControls(n=>verifier.chargeExternal(n));
-    if(rootRoles){
+    if(rootRoles || effectScope){
       const current=verifier.scan(protectedPackages,[],{metadataOnly:true});
       if(current.metadataDigest!==protectedSnapshot.metadataDigest)
         throw new Error('RELEASE_PRESERVING_PROTECTED_CHANGED');
     }
     if (present(ledger) && hash(state(ledger)) !== hash(prior))
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
-    const measure = verifier.scan(
-      policy.roots,
-      prior.outputs.map((row) => row.path),
-      { metadataOnly: useMetadata && fullValidated },
-    );
+    const measure = measureScope(prior.outputs);
     if (
       measure.metadataDigest !== policy.baseline.metadataDigest ||
       ((!useMetadata || !fullValidated) &&
@@ -632,9 +693,9 @@ function open(request, options = {}, boundOperation) {
       const packages = policy.windowsReferences?.packages;
       if (!Array.isArray(packages) || packages.length < 1 || packages.length > 6)
         throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
-      if(rootRoles){
+      if(rootRoles || effectScope){
         protectedPackages=packages.map(row=>{
-          if(!row || !readOnlyRoots.some(root=>contains(root.path,row.path)))
+          if(!row || !(effectScope ? policy.roots : readOnlyRoots).some(root=>contains(root.path,row.path)))
             throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
           return {path:row.path,identity:identity(row.path)};
         });
@@ -662,7 +723,7 @@ function open(request, options = {}, boundOperation) {
       }
       if (policy.protectedIds.some((id) => !covered.has(id)))
         throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
-      if(rootRoles && verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)
+      if((rootRoles || effectScope) && verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)
         throw new Error('RELEASE_PRESERVING_PROTECTED_CHANGED');
     }
     if (present(ledger)) {
@@ -704,15 +765,20 @@ function open(request, options = {}, boundOperation) {
       )
         throw new Error('RELEASE_SCOPE_BUILD_ROOT_NOT_EMPTY');
       prior = { format: policy.format, configSha, outputs: [], claim: null };
-      const initial = verifier.scan(policy.roots);
+      const initial = measureScope();
       if (
         initial.digest !== policy.baseline.digest ||
-        initial.metadataDigest !== policy.baseline.metadataDigest
+        initial.metadataDigest !== policy.baseline.metadataDigest ||
+        effectScope && hash(initial.allocationStates) !== hash(policy.baseline.allocationStates)
       )
         throw new Error('RELEASE_SCOPE_BASELINE_MISMATCH');
       fullValidated = true;
       save();
       fs.writeFileSync(sentinel, configSha, { flag: 'wx', mode: 0o600 });
+    }
+    if (effectScope) for (const allocation of effectScope.allocations) {
+      if (allocation.mode === 'exclusive-package' && present(allocation.path) && !prior.outputs.some((row) => row.path === allocation.path && row.complete))
+        throw new Error('RELEASE_PRESERVING_ALLOCATION_OCCUPIED');
     }
     const facts = references();
     refs = facts.digest;
@@ -811,6 +877,7 @@ function open(request, options = {}, boundOperation) {
         if (!(recovery ? [a.pointerSha256, nextHash] : [a.pointerSha256]).includes(fileHash(destination)))
           throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
         pointerCommit = { temporary, destination };
+        if (effectScope) approvedPointerHashes.add(fileHash(temporary));
       },
       approveDescriptor(fd, file, writing) {
         if (writing) descriptors.add(fd);
@@ -822,6 +889,16 @@ function open(request, options = {}, boundOperation) {
             if (typeof value === 'number' && descriptors.has(value)) continue;
             if (typeof value !== 'string') throw new Error('RELEASE_PRESERVING_DESCRIPTOR_FORBIDDEN');
             const at = path.resolve(value), root = claim.root;
+            if (effectScope && (at === path.join(root, '.release-lifecycle.json') ||
+                path.dirname(at) === root && /^\.release-lifecycle\.json\./.test(path.basename(at))))
+              throw new Error('RELEASE_PRESERVING_CONTROL_WRITE_FORBIDDEN');
+            if (effectScope && preserving.operation === 'restart' && path.dirname(at) === path.dirname(preserving.active.pointer) &&
+                /^active-[a-f0-9-]+\.tmp$/.test(path.basename(at)) && method === 'writeFile') {
+              if (present(at) || args[2]?.flag !== 'wx') throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
+              transientControls.add(at);
+            }
+            if (effectScope && path.dirname(at) === path.dirname(preserving.active.pointer) && /^active-[a-f0-9-]+\.tmp$/.test(path.basename(at)) && !transientControls.has(at))
+              throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
             if (at === preserving.active.pointer) {
               if (method !== 'rename' || !pointerCommit || args[0] !== pointerCommit.temporary || args[1] !== pointerCommit.destination)
                 throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
@@ -1016,12 +1093,13 @@ function open(request, options = {}, boundOperation) {
           throw new Error('RELEASE_SCOPE_RECOVERY_PROOF_CHANGED');
         const proof = JSON.parse(raw.toString('utf8')),
           m = read(path.join(folder, 'release.json'), 8 * 1024 ** 2);
+        const sameSchema = proof.kind === 'same-schema-unknown-claim-rollback';
         if (
           proof.format !== 1 ||
-          proof.kind !== 'additive-schema-unknown-claim-rollback' ||
+          (!sameSchema && proof.kind !== 'additive-schema-unknown-claim-rollback') ||
           proof.businessDatabaseRestored !== false ||
           [
-            'additiveSchema',
+            ...(sameSchema ? [] : ['additiveSchema']),
             'unknownClaimsPreserved',
             'businessRowsPreserved',
             'rollbackStarted',
@@ -1032,6 +1110,15 @@ function open(request, options = {}, boundOperation) {
             fileHash(path.join(folder, 'release.json'))
         )
           throw new Error('RELEASE_SCOPE_RECOVERY_TARGET_UNPROVEN');
+        if (sameSchema) {
+          try {
+            require('./preserving-contract.cjs').validateSameSchemaCompatibility(proof, policy,
+              policy.windowsReferences.packages.map((p) => {
+                const root = canonical(p.path), file = path.join(root, 'release.json');
+                return { root, manifest: read(file, 8 * 1024 ** 2), manifestSha256: fileHash(file) };
+              }));
+          } catch { throw new Error('RELEASE_SCOPE_RECOVERY_TARGET_UNPROVEN'); }
+        }
         // This authorizes only the already installed compatible app. It grants
         // no new output, copy budget, registry reset or database restoration.
         return proof.rollback;
@@ -1041,6 +1128,8 @@ function open(request, options = {}, boundOperation) {
         check();
         const at = path.resolve(output),
           parent = canonical(path.dirname(at));
+        if (effectScope && !effectScope.allocations.some((a) => a.mode === 'exclusive-package' ? at === a.path : at !== a.path && contains(a.path, at)))
+          throw new Error('RELEASE_PRESERVING_ALLOCATION_INVALID');
         if (
           path.dirname(at) !== parent ||
           !policy.roots.some((root) => contains(root.path, at)) ||

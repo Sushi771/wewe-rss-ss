@@ -26,16 +26,54 @@ function Processes {
   if ($items.Count -gt 8192) { throw 'REFERENCE_NATIVE_PROCESS_LIMIT' }
   @($items | ForEach-Object {
     Budget
+    $startUtc=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null })
+    if ($projectOnly) {
+      $related=([int]$_.ProcessId -eq [int]$policy.preservingUpdate.active.oldProcess.pid)
+      foreach ($text in @([string]$_.ExecutablePath,[string]$_.CommandLine)) {
+        foreach ($needle in $projectNeedles) {
+          if ($needle -and $text.Replace('/','\').IndexOf($needle.Replace('/','\'),[StringComparison]::OrdinalIgnoreCase) -ge 0) { $related=$true }
+        }
+      }
+      if ($related) {
+        # Same clock as process-identity.ps1 Snapshot; CIM truncates sub-microsecond
+        # precision. Do not round or relax the bound old/new process comparison.
+        $nativeProcess=[Diagnostics.Process]::GetProcessById([int]$_.ProcessId)
+        try {
+          $null=$nativeProcess.Handle
+          $nativeStart=$nativeProcess.StartTime.ToUniversalTime()
+          if ($_.CreationDate -and [Math]::Abs(($_.CreationDate.ToUniversalTime()-$nativeStart).TotalSeconds) -gt 1) { throw 'REFERENCE_PROCESS_CHANGED' }
+          $startUtc=$nativeStart.ToString('o')
+        }
+        finally { $nativeProcess.Dispose() }
+      }
+    }
     [PSCustomObject]@{
       pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;name=[string]$_.Name
       executable=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine
-      startUtc=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null })
+      startUtc=$startUtc
     }
   })
 }
 function Tasks {
   $items=@(Get-ScheduledTask -ErrorAction Stop)
   if ($items.Count -gt 8192) { throw 'REFERENCE_NATIVE_TASK_LIMIT' }
+  if ($projectOnly) {
+    # Retain-only operations bind the known project task and visible references;
+    # unrelated task actions are not interpreted or claimed compatible.
+    $needles=@($policy.roots | ForEach-Object { [string]$_.path }) + @($policy.windowsReferences.launchers | ForEach-Object { [IO.Path]::GetDirectoryName([string]$_.entry); [string]$_.workingDirectory })
+    $items=@($items | Where-Object {
+      $taskIdentity=[string]$_.TaskPath+[string]$_.TaskName
+      if (@($effectScope.taskIdentities) -contains $taskIdentity) { return $true }
+      foreach ($action in $_.Actions) {
+        foreach ($text in @([string]$action.Execute,[string]$action.Arguments,[string]$action.WorkingDirectory)) {
+          foreach ($needle in $needles) {
+            if ($needle -and $text.Replace('/','\').IndexOf($needle.Replace('/','\'),[StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+          }
+        }
+      }
+      return $false
+    })
+  }
   @($items | Sort-Object TaskPath,TaskName | ForEach-Object {
     Budget
     [PSCustomObject]@{
@@ -55,6 +93,9 @@ try {
   $policy=[Text.Encoding]::UTF8.GetString($policyBytes) | ConvertFrom-Json
   $preserving=($policy.preservingUpdate.format -eq 1 -and $policy.preservingUpdate.operation -in @('build','install','restart'))
   $buildOnly=($preserving -and $policy.phase -eq 'build-only' -and $policy.preservingUpdate.operation -eq 'build' -and @($policy.preservingUpdate.effects).Count -eq 1 -and $policy.preservingUpdate.effects[0] -eq 'new-output-only')
+  $effectScope=$policy.preservingUpdate.effectScope
+  $projectOnly=($preserving -and -not $buildOnly -and $effectScope.format -eq 1)
+  $projectNeedles=@($policy.roots | ForEach-Object { [string]$_.path }) + @($policy.windowsReferences.launchers | ForEach-Object { [IO.Path]::GetDirectoryName([string]$_.entry); [string]$_.workingDirectory })
   if ($preserving -and ($policy.preservingUpdate.operation -eq 'build' -or $policy.phase -eq 'build-only') -and -not $buildOnly) { throw 'REFERENCE_NATIVE_BUILD_CONTRACT_INVALID' }
   $before=@(Processes)
   if (-not $buildOnly) { $tasks=@(Tasks) }

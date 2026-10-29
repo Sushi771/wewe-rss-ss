@@ -97,6 +97,39 @@ function fixture(run, schema = false) {
 function call(f, options = f.options) {
   return installPair(f.root, f.plan, options);
 }
+test('effect install retains 144 historical directories without adopting or reading them', () => fixture((f) => {
+  const scope = require('./release-scope.cjs'), crypto = require('node:crypto');
+  for (let i=0;i<144;i++) {
+    const at=path.join(f.root,'history-'+i);fs.mkdirSync(at);fs.writeFileSync(path.join(at,'release.json'),'unmanaged historical metadata');fs.writeFileSync(path.join(at,'.env'),'synthetic-not-readable');
+  }
+  f.plan.rollback=f.current;f.plan.proofs.rollback=proof(f.current);
+  assert.throws(()=>call(f),/ADOPTION_REQUIRES_EXACT_INVENTORY/,'original global mode keeps its cap');
+  const roots=[f.root,f.sources].map(p=>fs.realpathSync.native(p)), current=fs.realpathSync.native(f.current),candidate=fs.realpathSync.native(f.candidate);
+  const pointer=path.join(roots[0],'active.json'),s=fs.lstatSync(f.base,{bigint:true});
+  const policy={format:2,scopeId:crypto.randomUUID(),inventoryClassification:'private-names-v1',registryDirectory:fs.realpathSync.native(f.base),registryIdentity:[s.dev,s.ino,s.birthtimeNs].map(String),
+    maxBytes:scope.DEFAULT_BYTES,maxGrowthBytes:1024*1024,maxNewRuntimeCopies:1,protectedIds:['current','candidate'],compatibilityProofSha256:'d'.repeat(64),
+    packageProofs:{current:fileHash(path.join(current,'release.json')),candidate:fileHash(path.join(candidate,'release.json'))},windowsReferences:{packages:[{id:'current',path:current},{id:'candidate',path:candidate}]}};
+  policy.preservingUpdate={format:1,operation:'install',effects:['new-output-only'],active:{pointer,pointerSha256:fileHash(pointer),currentId:'current',candidateId:'candidate',currentManifestSha256:policy.packageProofs.current,candidateManifestSha256:policy.packageProofs.candidate,oldProcess:{pid:7,startUtc:'2026-01-01T00:00:00Z',executableSha256:'c'.repeat(64)}},
+    effectScope:{format:1,container:roots[0],allocations:[{path:path.join(roots[0],'candidate'),mode:'exclusive-package'}],taskIdentities:[],lifecycleSha256:null}};
+  const facts={complete:false,observationComplete:true,processObservation:'preserving-project-only',categories:{processes:true,tasks:true,shortcuts:'not_applicable',pointers:true,rollback:true,inflight:true},errors:[],uncertainChildren:[],compatibility:{verified:true,businessDatabaseRestored:false,proofSha256:'d'.repeat(64)},records:[
+    {kind:'processes',packageId:'current',packagePath:current,identity:'owned',...policy.preservingUpdate.active.oldProcess},
+    {kind:'pointers',packageId:'current',packagePath:current,identity:'active',pointerPath:pointer}]};
+  const open=fs.openSync;let historicalReads=0;
+  fs.openSync=function(file,...args){if(typeof file==='string'&&file.includes(path.sep+'history-')){historicalReads++;throw Error('historical-content-must-not-open');}return open.call(this,file,...args);};
+  try{
+    Object.assign(policy,scope.inspect(roots,{privateAccounting:'private-names-v1',preservingUpdate:policy.preservingUpdate}));
+    assert.equal(policy.baseline.format,'preserving-effects-v1');assert(policy.baseline.historyEntries>=145);assert.equal(policy.baseline.historyContentVerified,false);
+    const config=path.join(f.base,'effect-policy.json');fs.writeFileSync(config,JSON.stringify(policy));
+    const lease=scope.open({kind:'install',root:roots[0],reserveBytes:1024*1024,runtimeCopies:1},{configPath:config,configSha256:fileHash(config),query:()=>structuredClone(facts)});
+    const result=call(f,{...f.options,scope:lease});
+    assert.equal(result.historyObservation.adopted,false);assert(result.historyObservation.count>=144);
+    assert.equal(historicalReads,0);assert.equal(fs.existsSync(path.join(roots[0],'.release-lifecycle.json')),false);
+    assert.equal(fileHash(pointer),policy.preservingUpdate.active.pointerSha256);
+    assert.equal(fileHash(path.join(roots[0],'candidate','release.json')),policy.packageProofs.candidate);
+    const ledger=JSON.parse(fs.readFileSync(path.join(f.base,policy.scopeId+'.state.json'))).payload;
+    assert.equal(ledger.claim,null);assert.equal(ledger.outputs.length,1);assert.equal(ledger.outputs[0].complete,true);
+  }finally{fs.openSync=open;}
+},true));
 for (const eol of [false, true]) test('preserving install uses the real scope and copies new roles while keeping current and active unchanged CRLF=' + eol, () =>
   fixture((f) => {
     if (eol) for (const [name, folder] of [['candidate', f.candidate], ['rollback', f.rollback]]) {

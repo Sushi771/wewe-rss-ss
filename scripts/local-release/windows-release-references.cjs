@@ -120,7 +120,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     const { preserving, buildOnly } = applicability;
     const rootRoles=require('./preserving-contract.cjs').preservingRootRoles(policy);
     const controlOnly = buildOnly && !!rootRoles;
+    const projectOnly = applicability.projectOnly, narrowControl = controlOnly || projectOnly;
+    const effectScope = projectOnly && require('./preserving-contract.cjs').preservingEffectScope(policy);
     if(controlOnly){ result.processObservation='build-control-only'; result.categories.tasks=result.categories.shortcuts='not_applicable'; }
+    if(projectOnly) result.processObservation='preserving-project-only';
     if (
       !cfg ||
       cfg.format !== 1 ||
@@ -346,7 +349,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     }
     const relevantText = (text) =>
       typeof text === 'string' &&
-      [...roots, ...launchers.map((l) => path.dirname(l.entry))].some(
+      [...roots, ...launchers.map((l) => path.dirname(l.entry)), ...(projectOnly ? launchers.map((l) => l.cwd) : [])].some(
         (root) =>
           text.toLowerCase().includes(root.toLowerCase()) ||
           text
@@ -487,13 +490,14 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     } else {
       const proofRaw = watchPinned(cfg.compatibilityProof);
       proof = JSON.parse(proofRaw.toString('utf8'));
+      const sameSchema = proof.kind === 'same-schema-unknown-claim-rollback';
       if (
         digest(proofRaw) !== policy.compatibilityProofSha256 ||
         proof.format !== 1 ||
-        proof.kind !== 'additive-schema-unknown-claim-rollback' ||
+        (!sameSchema && proof.kind !== 'additive-schema-unknown-claim-rollback') ||
         proof.businessDatabaseRestored !== false ||
         [
-          'additiveSchema',
+          ...(sameSchema ? [] : ['additiveSchema']),
           'unknownClaimsPreserved',
           'businessRowsPreserved',
           'rollbackStarted',
@@ -513,6 +517,13 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           )
         )
           fail('REFERENCE_COMPATIBILITY_BINDING_INVALID');
+      }
+      if (sameSchema) {
+        try {
+          require('./preserving-contract.cjs').validateSameSchemaCompatibility(proof, policy,
+            packages.map((ref) => ({ root: ref.packagePath, manifest: manifests.get(ref.packagePath).m,
+              manifestSha256: policy.packageProofs[ref.packageId] })));
+        } catch { fail('REFERENCE_COMPATIBILITY_UNPROVEN'); }
       }
       result.compatibility = {
         verified: true,
@@ -540,7 +551,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         )
           continue;
         if (
-          !controlOnly && (!p.executable ||
+          !narrowControl && (!p.executable ||
           !p.commandLine ||
           typeof p.startUtc !== 'string' ||
           !Number.isFinite(Date.parse(p.startUtc)))
@@ -555,7 +566,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       matched = new Map();
     const visible = p => p && typeof p.executable==='string' && !!p.executable &&
       typeof p.commandLine==='string' && !!p.commandLine && typeof p.startUtc==='string' && Number.isFinite(Date.parse(p.startUtc));
-    if(controlOnly){
+    if(narrowControl){
       if(!self)fail('REFERENCE_PROBE_IDENTITY_UNCERTAIN');
       for(const pid of [callerPid,self.pid]){
         const p=before.get(pid),q=after.get(pid);
@@ -569,7 +580,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       if (
         !p ||
         !current ||
-        (controlOnly && (!visible(p)||!visible(current))) ||
+        (narrowControl && (!visible(p)||!visible(current))) ||
         p.parentPid !== callerPid ||
         hash(p) !== hash(current) ||
         !same(canonical(p.executable), canonical(self.executable)) ||
@@ -579,19 +590,19 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       const children = [...before.values()].filter(
         (p) => p.parentPid === self.pid,
       );
-      const collectors=controlOnly ? children.filter(p=>visible(p)&&same(p.executable,self.collectorExecutable)&&hash(argv(p.commandLine))===hash(self.collectorArgv)) : children;
+      const collectors=narrowControl ? children.filter(p=>visible(p)&&same(p.executable,self.collectorExecutable)&&hash(argv(p.commandLine))===hash(self.collectorArgv)) : children;
       if (collectors.length !== 1) fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
       const child = collectors[0];
       if (
         !after.has(child.pid) ||
-        (controlOnly && (!visible(child)||!visible(after.get(child.pid)))) ||
+        (narrowControl && (!visible(child)||!visible(after.get(child.pid)))) ||
         hash(child) !== hash(after.get(child.pid)) ||
         !same(
           canonical(child.executable),
           canonical(self.collectorExecutable),
         ) ||
         hash(argv(child.commandLine)) !== hash(self.collectorArgv) ||
-        !controlOnly && [...before.values(), ...after.values()].some(
+        !narrowControl && [...before.values(), ...after.values()].some(
           (p) =>
             p.parentPid === child.pid ||
             (p.parentPid === self.pid && p.pid !== child.pid),
@@ -599,7 +610,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       )
         fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
       const consolePids=[];
-      if(controlOnly){
+      if(narrowControl){
         const related=[...before.values(),...after.values()];
         const hosts=new Set(related.filter(p=>(p.parentPid===self.pid&&p.pid!==child.pid)||p.parentPid===child.pid).map(p=>p.pid));
         if(hosts.size){
@@ -610,8 +621,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           for(const pid of hosts){
             const p=before.get(pid),q=after.get(pid);
             if(!visible(p)||!visible(q)||hash(p)!==hash(q)||byParent.has(p.parentPid)||!same(canonical(p.executable),canonical(self.consoleHost.path))||related.some(r=>r.parentPid===pid))fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
-            const tokens=argv(p.commandLine),output=canonical(policy.buildOnly.outputRoot).replaceAll('\\','/').toLowerCase();
-            if(tokens.length!==2||!tokens[0].startsWith('\\??\\')||!same(tokens[0].slice(4),canonical(self.consoleHost.path))||!/^0x[0-9a-f]{1,16}$/i.test(tokens[1])||[p.executable,p.commandLine,p.workingDirectory].some(t=>typeof t==='string'&&t.replaceAll('\\','/').toLowerCase().includes(output)))fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+            const tokens=argv(p.commandLine),outputs=(controlOnly ? [policy.buildOnly.outputRoot] : effectScope.allocations.map(a=>a.path)).map(p=>p.replaceAll('\\','/').toLowerCase());
+            if(tokens.length!==2||!tokens[0].startsWith('\\??\\')||!same(tokens[0].slice(4),canonical(self.consoleHost.path))||!/^0x[0-9a-f]{1,16}$/i.test(tokens[1])||[p.executable,p.commandLine,p.workingDirectory].some(t=>typeof t==='string'&&outputs.some(output=>t.replaceAll('\\','/').toLowerCase().includes(output))))fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
             byParent.add(p.parentPid);consolePids.push(pid);
           }
         }
@@ -625,6 +636,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     }
     if(!controlOnly){
     for (const p of before.values()) {
+      if (projectOnly && p.pid !== policy.preservingUpdate.active.oldProcess.pid &&
+          ![p.executable,p.commandLine,p.workingDirectory].some(relevantText)) continue;
+      if (projectOnly && !visible(p)) fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
       const refs = resolveInvocation(
         argv(p.commandLine),
         p.workingDirectory,
@@ -650,6 +664,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     for (const [pid, refs] of matched) {
       const p = before.get(pid),
         current = after.get(pid);
+      if (projectOnly && (!visible(p) || !visible(current))) fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
       if (!current || hash(p) !== hash(current)) {
         result.uncertainChildren.push(pid);
         fail('REFERENCE_PROCESS_CHANGED');
@@ -673,6 +688,9 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     }
     for (const p of after.values())
       if (!matched.has(p.pid)) {
+        if (projectOnly && p.pid !== policy.preservingUpdate.active.oldProcess.pid && !matched.has(p.parentPid) &&
+            ![p.executable,p.commandLine,p.workingDirectory].some(relevantText)) continue;
+        if (projectOnly && !visible(p)) fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
         const refs = resolveInvocation(
           argv(p.commandLine),
           p.workingDirectory,
@@ -698,9 +716,13 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       }
     }
     result.categories.processes = true;
+    const relevantTask = (t) => effectScope.taskIdentities.includes(t?.identity) ||
+      Array.isArray(t?.actions) && t.actions.some((a)=>[a.execute,a.arguments,a.workingDirectory].some(relevantText));
+    const taskRows = projectOnly && Array.isArray(native.tasks) ? native.tasks.filter(relevantTask) : native.tasks;
+    const taskRowsAfter = projectOnly && Array.isArray(native.tasksAfter) ? native.tasksAfter.filter(relevantTask) : native.tasksAfter;
     if (
       (!buildOnly && (!Array.isArray(native.tasks) || native.tasks.length > 8192 ||
-        !Array.isArray(native.tasksAfter) || hash(native.tasks) !== hash(native.tasksAfter))) ||
+        !Array.isArray(native.tasksAfter) || hash(taskRows) !== hash(taskRowsAfter))) ||
       (!buildOnly && (!Array.isArray(native.shortcuts) || native.shortcuts.length > 8192))
     )
       fail('REFERENCE_HOST_COVERAGE_INCOMPLETE');
@@ -757,7 +779,10 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         watchDirectory(coverage.path, coverage.identity);
       }
     }
-    for (const t of (buildOnly ? [] : native.tasks)) {
+    for (const t of (buildOnly ? [] : taskRows)) {
+      if (projectOnly && !effectScope.taskIdentities.includes(t.identity) &&
+          !t.actions?.some(a=>[a.execute,a.arguments,a.workingDirectory].some(relevantText))) continue;
+      if (projectOnly && !effectScope.taskIdentities.includes(t.identity)) fail('REFERENCE_TASK_INVALID');
       if (!t.identity || !Array.isArray(t.actions) || !t.actions.length)
         fail('REFERENCE_TASK_INVALID');
       for (const action of t.actions) {
@@ -772,6 +797,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           record('tasks', ref, { identity: hash([t.identity, action]) });
       }
     }
+    if (projectOnly && effectScope.taskIdentities.some(id=>!taskRows.some(t=>t.identity===id))) fail('REFERENCE_TASK_INVALID');
     result.categories.tasks = applicability.categories.tasks;
     if (!preserving && (
       !Array.isArray(native.shortcutDirectories) ||
@@ -978,7 +1004,8 @@ function main(policyFile) {
     process.env.SystemRoot,
     'System32/WindowsPowerShell/v1.0/powershell.exe',
   );
-  const controlOnly=require('./preserving-contract.cjs').referenceApplicability(policy).buildOnly && !!require('./preserving-contract.cjs').preservingRootRoles(policy);
+  const applicability=require('./preserving-contract.cjs').referenceApplicability(policy);
+  const controlOnly=applicability.buildOnly && !!require('./preserving-contract.cjs').preservingRootRoles(policy) || applicability.projectOnly;
   const hostPath=controlOnly ? canonical(path.join(process.env.SystemRoot,'System32/conhost.exe')) : undefined;
   if(controlOnly && !same(hostPath,path.join(process.env.SystemRoot,'System32/conhost.exe')))fail('REFERENCE_COLLECTOR_PIN_CHANGED');
   const consoleHost=controlOnly ? {path:hostPath,sha256:digest(bytes(hostPath,256*1024**2)),identity:identity(fs.lstatSync(hostPath,{bigint:true}))} : undefined;

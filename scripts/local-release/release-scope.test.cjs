@@ -18,6 +18,125 @@ function preservingRestart(f) {
   f.facts.records.push({kind:'pointers',packageId:'current',packagePath:f.current,identity:'synthetic-pointer',pointerPath:pointer});f.save();
   return {kind:'restart',root:f.installed,reserveBytes:4096,transition:true};
 }
+function sameSchemaRecovery(f) {
+  const request = preservingRestart(f), candidate = path.join(f.installed, 'candidate');
+  fs.mkdirSync(candidate);
+  const manifests = [f.current, candidate].map((root, index) => {
+    const manifest = { format: 1, id: index ? 'candidate' : 'current', sourceCommit: String(index + 1).repeat(40), schemaCompatibility: 'current', files: {}, links: {} };
+    for (const [name, text] of Object.entries({ 'server/prisma/schema.prisma': 'model Example {\n id Int @id\n}\n', 'server/prisma/migrations/001/migration.sql': 'SELECT 1;\n' })) {
+      const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); manifest.files[name] = fileHash(file);
+    }
+    fs.writeFileSync(path.join(root, 'release.json'), JSON.stringify(manifest)); return manifest;
+  });
+  const oldHash = fileHash(path.join(f.current, 'release.json')), newHash = fileHash(path.join(candidate, 'release.json'));
+  f.policy.packageProofs = { current: oldHash, candidate: newHash };
+  Object.assign(f.policy.preservingUpdate.active, { currentManifestSha256: oldHash, candidateManifestSha256: newHash });
+  const proof = { format: 1, kind: 'same-schema-unknown-claim-rollback', businessDatabaseRestored: false,
+    checks: { sameSchema: true, isolatedRuntimeStarted: true, unknownClaimsPreserved: true, businessRowsPreserved: true, rollbackStarted: true },
+    rollback: { id: 'current', sourceCommit: manifests[0].sourceCommit, manifestSha256: oldHash },
+    candidate: { id: 'candidate', sourceCommit: manifests[1].sourceCommit, manifestSha256: newHash },
+    schemaProofSha256: crypto.createHash('sha256').update(JSON.stringify(require('./preserving-contract.cjs').validateSameSchema(...manifests))).digest('hex') };
+  const proofPath = path.join(f.base, 'same-schema-proof.json');
+  f.policy.windowsReferences.packages.push({ id: 'candidate', path: candidate });
+  const saveProof = () => {
+    fs.writeFileSync(proofPath, JSON.stringify(proof)); f.policy.compatibilityProofSha256 = fileHash(proofPath);
+    f.policy.windowsReferences.compatibilityProof = { path: proofPath, sha256: f.policy.compatibilityProofSha256 };
+    f.facts.compatibility.proofSha256 = f.policy.compatibilityProofSha256;
+    Object.assign(f.policy, scope.inspect([f.installed, f.build])); f.save();
+  };
+  saveProof(); return { request, proof, saveProof, candidate };
+}
+test('same-schema recovery authorizes only the pinned old package without restoring business data', () => fixture((f) => {
+  const s = sameSchemaRecovery(f);
+  scope.within(s.request, (lease) => assert.deepEqual(lease.authorizeRecoveryPackage(f.current), s.proof.rollback), f.options());
+}));
+test('existing additive recovery proof remains accepted by its original branch', () => fixture((f) => {
+  const s = sameSchemaRecovery(f); s.proof.kind = 'additive-schema-unknown-claim-rollback';
+  s.proof.checks.additiveSchema = true; delete s.proof.checks.sameSchema; delete s.proof.checks.isolatedRuntimeStarted;
+  s.saveProof();
+  scope.within(s.request, (lease) => assert.deepEqual(lease.authorizeRecoveryPackage(f.current), s.proof.rollback), f.options());
+}));
+function effectRestart(f) {
+  const s = sameSchemaRecovery(f);
+  f.policy.format=2;f.policy.inventoryClassification='private-names-v1';f.policy.protectedIds=['current','candidate'];
+  f.policy.preservingUpdate.effectScope={format:1,container:f.installed,allocations:[{path:f.build,mode:'audit-children'}],taskIdentities:[],lifecycleSha256:null};
+  f.facts.processObservation='preserving-project-only';
+  Object.assign(f.policy,scope.inspect([f.installed,f.build],{privateAccounting:'private-names-v1',preservingUpdate:f.policy.preservingUpdate}));f.save();
+  return s;
+}
+test('effect restart accounts real audit outputs and rejects old-file or unapproved pointer writes',()=>fixture(f=>{
+  const s=effectRestart(f),gateway=require('./lib.cjs').hostEffects;
+  scope.within(s.request,lease=>{
+    assert.throws(()=>gateway.fs.writeFileSync(path.join(f.current,'forbidden'),'bad'),/WRITE_OUTSIDE_OUTPUT/);
+    assert.throws(()=>gateway.fs.writeFileSync(f.policy.preservingUpdate.active.pointer,'{}'),/POINTER_COMMIT_FORBIDDEN/);
+    assert.throws(()=>gateway.fs.writeFileSync(path.join(f.installed,'.release-lifecycle.json'),'{}'),/CONTROL_WRITE_FORBIDDEN/);
+    assert.throws(()=>gateway.fs.unlinkSync(path.join(f.installed,'active-11111111-1111-1111-1111-111111111111.tmp')),/POINTER_COMMIT_FORBIDDEN/);
+    assert.throws(()=>lease.registerOutput(path.join(f.installed,'unapproved')),/ALLOCATION_INVALID/);
+    const at=path.join(f.build,'audit');lease.registerOutput(at);gateway.fs.mkdirSync(at);lease.createdOutput(at);gateway.fs.writeFileSync(path.join(at,'receipt.json'),'{}');
+    assert(lease.check().bytes>f.policy.baseline.bytes);
+  },f.options());
+  const state=JSON.parse(fs.readFileSync(path.join(f.base,f.policy.scopeId+'.state.json'))).payload;
+  assert.equal(state.claim,null);assert.equal(state.outputs.length,1);assert.equal(state.outputs[0].complete,true);
+}));
+for(const mutation of ['parent name','protected package','active pointer','lifecycle control'])test('effect restart refuses changed '+mutation,()=>fixture(f=>{
+  const s=effectRestart(f),lease=scope.open(s.request,f.options());
+  if(mutation==='parent name')fs.mkdirSync(path.join(f.installed,'unexpected-history'));
+  if(mutation==='protected package')fs.appendFileSync(path.join(f.current,'server/prisma/schema.prisma'),'changed');
+  if(mutation==='active pointer')fs.writeFileSync(f.policy.preservingUpdate.active.pointer,'{}');
+  if(mutation==='lifecycle control')fs.writeFileSync(path.join(f.installed,'.release-lifecycle.json'),'{}');
+  assert.throws(()=>lease.check(),/FROZEN_HISTORY_CHANGED|PROTECTED_CHANGED|ACTIVE_BINDING_CHANGED|LIFECYCLE_CHANGED/);
+  assert.throws(()=>lease.close(new Error('changed')),/FROZEN_HISTORY_CHANGED|PROTECTED_CHANGED|ACTIVE_BINDING_CHANGED|LIFECYCLE_CHANGED/);
+}));
+test('effect restart rejects concurrent writer and preserves an interrupted claim without resetting usage',()=>fixture(f=>{
+  const s=effectRestart(f),lease=scope.open(s.request,f.options());
+  assert.throws(()=>scope.open(s.request,f.options()),/EEXIST/);
+  const at=path.join(f.build,'interrupted');lease.registerOutput(at);fs.mkdirSync(at);lease.createdOutput(at);fs.writeFileSync(path.join(at,'data'),'owned');
+  assert.throws(()=>lease.close(new Error('interrupted')),/FAILED_OUTPUT_HELD_REQUIRES_REVIEW/);
+  const file=path.join(f.base,f.policy.scopeId+'.state.json'),before=fs.readFileSync(file);
+  assert.throws(()=>scope.open(s.request,f.options()),/INTERRUPTED_CLAIM_REQUIRES_REVIEW/);
+  assert.deepEqual(fs.readFileSync(file),before);assert(fs.existsSync(at));
+}));
+function effectInstallScope(f) {
+  const s=effectRestart(f),source=path.join(f.build,'candidate');fs.renameSync(s.candidate,source);
+  f.policy.windowsReferences.packages.find(p=>p.id==='candidate').path=source;
+  Object.assign(f.policy.preservingUpdate,{operation:'install',effects:['new-output-only']});
+  f.policy.preservingUpdate.effectScope.allocations=[{path:s.candidate,mode:'exclusive-package'}];
+  Object.assign(f.policy,scope.inspect([f.installed,f.build],{privateAccounting:'private-names-v1',preservingUpdate:f.policy.preservingUpdate}));f.save();
+  return {target:s.candidate,request:{kind:'install',root:f.installed,reserveBytes:1024*1024,runtimeCopies:1}};
+}
+test('effect install refuses an appeared target without adopting it',()=>fixture(f=>{
+  const e=effectInstallScope(f);fs.mkdirSync(e.target);
+  assert.throws(()=>scope.open(e.request,f.options()),/BASELINE_MISMATCH|ALLOCATION_OCCUPIED/);
+  assert.equal(fs.readdirSync(e.target).length,0);
+}));
+test('effect install refuses replaced owned output and keeps failed bytes for review',()=>fixture(f=>{
+  const e=effectInstallScope(f),lease=scope.open(e.request,f.options());lease.registerOutput(e.target);fs.mkdirSync(e.target);lease.createdOutput(e.target);
+  const moved=path.join(f.base,'held-output');fs.renameSync(e.target,moved);fs.mkdirSync(e.target);
+  assert.throws(()=>lease.check(),/OWNED_OUTPUT_REPLACED/);
+  assert.throws(()=>lease.close(new Error('replaced')),/OWNED_OUTPUT_REPLACED/);
+  assert(fs.existsSync(moved));assert(fs.existsSync(e.target));
+}));
+test('effect install carries completed copy usage and cannot obtain a second runtime allowance',()=>fixture(f=>{
+  const e=effectInstallScope(f);e.request.reserveBytes=4096;f.policy.maxNewRuntimeCopies=1;f.save();
+  scope.within(e.request,lease=>{lease.registerOutput(e.target);fs.mkdirSync(e.target);lease.createdOutput(e.target);fs.writeFileSync(path.join(e.target,'node.exe'),'synthetic-counted-copy');},f.options());
+  const ledger=path.join(f.base,f.policy.scopeId+'.state.json'),before=fs.readFileSync(ledger);
+  assert.throws(()=>scope.open(e.request,f.options()),/RUNTIME_COPY_PEAK_EXCEEDED/);
+  assert.deepEqual(fs.readFileSync(ledger),before);assert.equal(JSON.parse(before).payload.outputs.length,1);
+}));
+test('effect scope retains exact native process time matching without rounding a changed tick',()=>fixture(f=>{
+  const s=effectRestart(f);f.policy.preservingUpdate.active.oldProcess.startUtc='2026-01-01T00:00:00.0000001Z';f.save();
+  assert.throws(()=>scope.open(s.request,f.options()),/ACTIVE_BINDING_CHANGED/);
+}));
+for (const mutation of ['runtime evidence', 'schema digest', 'candidate manifest', 'restored database'])
+  test('same-schema recovery refuses changed ' + mutation, () => fixture((f) => {
+    const s = sameSchemaRecovery(f);
+    if (mutation === 'runtime evidence') s.proof.checks.isolatedRuntimeStarted = false;
+    if (mutation === 'schema digest') s.proof.schemaProofSha256 = 'f'.repeat(64);
+    if (mutation === 'candidate manifest') s.proof.candidate.manifestSha256 = 'f'.repeat(64);
+    if (mutation === 'restored database') s.proof.businessDatabaseRestored = true;
+    s.saveProof();
+    scope.within(s.request, (lease) => assert.throws(() => lease.authorizeRecoveryPackage(f.current), /RECOVERY_TARGET_UNPROVEN/), f.options());
+  }));
 test('preserving transition rejects independent unapproved process counterexample',()=>fixture(f=>{
   const request=preservingRestart(f);let admitted=false;
   assert.throws(()=>scope.within(request,lease=>{

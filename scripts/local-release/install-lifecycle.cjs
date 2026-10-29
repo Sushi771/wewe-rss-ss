@@ -152,6 +152,16 @@ function installPair(root, plan, options = {}) {
   require('./release-scope.cjs').assertWritableSession(['install']);
   options.scope?.assertWritable?.(['install']);
   root = canonical(root);
+  let selectedPolicy = options.scope?.policy || require('./release-scope.cjs').session()?.policy;
+  if (!selectedPolicy && process.env.WEWE_RELEASE_SCOPE_FILE && /^[a-f0-9]{64}$/.test(process.env.WEWE_RELEASE_SCOPE_SHA256 || '')) {
+    const file = canonical(process.env.WEWE_RELEASE_SCOPE_FILE), s = fs.lstatSync(file);
+    if (!s.isFile() || s.isSymbolicLink() || s.size > 1024 * 1024 || fileHash(file) !== process.env.WEWE_RELEASE_SCOPE_SHA256)
+      throw new Error('RELEASE_FROZEN_PLAN_MISMATCH');
+    selectedPolicy = JSON.parse(fs.readFileSync(file, 'utf8'));
+  }
+  const retainOnly = selectedPolicy && require('./preserving-contract.cjs').preservingEffectScope(selectedPolicy);
+  if (retainOnly && (selectedPolicy.preservingUpdate.operation !== 'install' || retainOnly.container !== root))
+    throw new Error('RELEASE_PRESERVING_EFFECT_FORBIDDEN');
   const maxBytes = options.maxBytes ?? DEFAULTS.bytes,
     minFree = options.minFree ?? DEFAULTS.free;
   if (
@@ -228,10 +238,15 @@ function installPair(root, plan, options = {}) {
     const ids = sorted([...sources.keys()]);
     if (ids.length > DEFAULTS.packages)
       throw new Error('RELEASE_PACKAGE_LIMIT_EXCEEDED');
-    const prior = loadState(stateFile),
-      found = artifacts(root);
+    const prior = retainOnly ? undefined : loadState(stateFile),
+      found = retainOnly ? fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort() : artifacts(root);
     let legacy;
-    if (prior) {
+    if (retainOnly) {
+      if (retainOnly.lifecycleSha256 === null ? exists(stateFile) : !exists(stateFile) || fileHash(stateFile) !== retainOnly.lifecycleSha256)
+        throw new Error('RELEASE_PRESERVING_LIFECYCLE_CHANGED');
+      // Observed names are retained, unmanaged history, not a new global adoption.
+      legacy = found.filter((value) => !ids.includes(value));
+    } else if (prior) {
       legacy = prior.legacyIds;
       if (
         options.adoptLegacy !== undefined &&
@@ -294,6 +309,8 @@ function installPair(root, plan, options = {}) {
         runtimeCopies: missing.length,
       });
     const installOwned = () => {
+    if (retainOnly && !equal(require('./preserving-contract.cjs').preservingEffectScope(shared.policy), retainOnly))
+      throw new Error('RELEASE_FROZEN_PLAN_MISMATCH');
     let schemaProofs;
     const preserving = shared.policy?.preservingUpdate;
     if (preserving) {
@@ -315,7 +332,7 @@ function installPair(root, plan, options = {}) {
       throw new Error('RELEASE_CURRENT_CHANGED');
     // Persist exact managed intent before copying: a killed install cannot turn
     // partial output into a new unbounded legacy baseline on the next attempt.
-    store(stateFile, {
+    if (!retainOnly) store(stateFile, {
       format: 1,
       legacyIds: legacy,
       managedIds: ids,
@@ -365,7 +382,7 @@ function installPair(root, plan, options = {}) {
         throw new Error('RELEASE_INSTALLED_PROOF_CHANGED');
       finalBytes += final.bytes;
     }
-    if (
+    if (!retainOnly &&
       artifacts(root).some(
         (value) => !ids.includes(value) && !legacy.includes(value),
       )
@@ -388,6 +405,7 @@ function installPair(root, plan, options = {}) {
         (value) => !missing.some((row) => row.source.manifest.id === value),
       ),
       historicalDeletionPerformed: false,
+      ...(retainOnly ? { historyObservation: { kind: 'immediate-directory-names-only', count: legacy.length, contentVerified: false, adopted: false } } : {}),
       ...(schemaProofs ? { schemaProofs } : {}),
     };
     };

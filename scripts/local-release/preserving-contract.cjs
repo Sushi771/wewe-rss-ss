@@ -155,11 +155,33 @@ function referenceApplicability(policy) {
   });
   const preserving = validated !== null;
   const buildOnly = preserving && validated.operation === 'build';
-  return { preserving, buildOnly, categories: {
+  const projectOnly = !!preservingEffectScope(policy);
+  return { preserving, buildOnly, projectOnly, categories: {
     processes: true, tasks: buildOnly ? 'not_applicable' : true,
     shortcuts: preserving ? 'not_applicable' : true,
     pointers: true, rollback: true, inflight: true,
   } };
+}
+function preservingEffectScope(policy) {
+  const spec = policy.preservingUpdate, effects = spec?.effectScope;
+  if (effects === undefined) return null;
+  const invalid = () => { throw new Error('RELEASE_PRESERVING_EFFECT_SCOPE_INVALID'); };
+  if (!spec || !['install', 'restart'].includes(spec.operation) || policy.format !== 2 || policy.phase !== undefined) invalid();
+  validatePreservingContract(policy, { kind: spec.operation });
+  if (effects.format !== 1 || Object.keys(effects).some((key) => !['format','container','allocations','taskIdentities','lifecycleSha256'].includes(key)) ||
+      !Array.isArray(policy.roots) || effects.container !== path.dirname(spec.active.pointer) ||
+      !policy.roots?.some((r) => r.path === effects.container) ||
+      !Array.isArray(effects.allocations) || effects.allocations.length !== 1 ||
+      !Array.isArray(effects.taskIdentities) || effects.taskIdentities.length > 16 ||
+      new Set(effects.taskIdentities).size !== effects.taskIdentities.length ||
+      effects.taskIdentities.some((v) => typeof v !== 'string' || !v || v.length > 260 || /[\0\r\n]/.test(v)) ||
+      !(effects.lifecycleSha256 === null || hex(effects.lifecycleSha256))) invalid();
+  const allocation = effects.allocations[0];
+  if (!allocation || Object.keys(allocation).some((key) => !['path','mode'].includes(key)) || !path.isAbsolute(allocation.path || '') || path.resolve(allocation.path) !== allocation.path ||
+      !policy.roots.some((r) => { const rel = path.relative(r.path, allocation.path); return !rel || !rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel); })) invalid();
+  if (spec.operation === 'install' ? allocation.mode !== 'exclusive-package' || allocation.path !== path.join(effects.container, spec.active.candidateId) :
+      allocation.mode !== 'audit-children' || effects.container === allocation.path || allocation.path.startsWith(effects.container + path.sep)) invalid();
+  return effects;
 }
 function preservingRootRoles(policy) {
   const roles=policy.preservingUpdate?.rootRoles;
@@ -172,4 +194,40 @@ function preservingRootRoles(policy) {
     throw new Error('RELEASE_PRESERVING_ROOT_ROLES_INVALID');
   return roles;
 }
-module.exports = { validatePreservingContract, validateSameSchema, validateActiveBinding, referenceApplicability, preservingRootRoles };
+// Both callers supply manifests already bound by the existing physical-package
+// verifier. This proof is restricted to the approved preserving pair; it never
+// claims that a same-schema update performed an additive migration.
+function validateSameSchemaCompatibility(proof, policy, packages) {
+  const spec = policy.preservingUpdate;
+  const invalid = () => { throw new Error('RELEASE_PRESERVING_COMPATIBILITY_UNPROVEN'); };
+  if (!spec || !['install', 'restart'].includes(spec.operation)) invalid();
+  validatePreservingContract(policy, { kind: spec.operation });
+  if (proof?.format !== 1 || proof.kind !== 'same-schema-unknown-claim-rollback' ||
+      proof.businessDatabaseRestored !== false || !hex(proof.schemaProofSha256) ||
+      ['sameSchema', 'isolatedRuntimeStarted', 'unknownClaimsPreserved', 'businessRowsPreserved', 'rollbackStarted']
+        .some((key) => proof.checks?.[key] !== true) ||
+      !Array.isArray(packages) || packages.length < 2 || packages.length > 6)
+    invalid();
+  const bound = {};
+  for (const role of ['rollback', 'candidate']) {
+    const p = proof[role], current = role === 'rollback';
+    if (!p || p.id !== (current ? spec.active.currentId : spec.active.candidateId) ||
+        p.manifestSha256 !== (current ? spec.active.currentManifestSha256 : spec.active.candidateManifestSha256) ||
+        policy.packageProofs?.[p.id] !== p.manifestSha256 || !hex(p.manifestSha256) ||
+        !/^[a-f0-9]{40}$/.test(p.sourceCommit || '')) invalid();
+    bound[role] = packages.filter((row) => row.manifest?.id === p.id);
+    if (!bound[role].length || bound[role].some((row) =>
+      !path.isAbsolute(row.root || '') || row.manifestSha256 !== p.manifestSha256 ||
+      row.manifest.sourceCommit !== p.sourceCommit)) invalid();
+  }
+  for (const old of bound.rollback) for (const candidate of bound.candidate) {
+    const compared = validateSameSchema(old.manifest, candidate.manifest, {
+      oldRoot: old.root, candidateRoot: candidate.root,
+      oldManifestSha256: old.manifestSha256, candidateManifestSha256: candidate.manifestSha256,
+    });
+    if (require('node:crypto').createHash('sha256').update(JSON.stringify(compared)).digest('hex') !== proof.schemaProofSha256)
+      invalid();
+  }
+  return proof;
+}
+module.exports = { validatePreservingContract, validateSameSchema, validateActiveBinding, referenceApplicability, preservingRootRoles, preservingEffectScope, validateSameSchemaCompatibility };

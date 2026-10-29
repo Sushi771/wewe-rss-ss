@@ -229,6 +229,86 @@ function reject(f, expected) {
   assert.equal(r.complete, false);
   assert(r.errors.includes(expected), JSON.stringify(r));
 }
+
+function sameSchemaPair(f) {
+  const manifests = f.packages.slice(0, 2).map((pkg, index) => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(pkg.path, 'release.json')));
+    manifest.schemaCompatibility = 'current'; manifest.files = {}; manifest.links = {};
+    for (const [name, text] of Object.entries({ 'server/prisma/schema.prisma': 'model Example {\n id Int @id\n}\n',
+      'server/prisma/migrations/001/migration.sql': 'SELECT 1;\n', 'server/prisma/migrations/migration_lock.toml': 'provider = "sqlite"\n' })) {
+      const bytes = Buffer.from(index ? text : text.replace(/\n/g, '\r\n'));
+      fs.mkdirSync(path.dirname(path.join(pkg.path, name)), { recursive: true }); fs.writeFileSync(path.join(pkg.path, name), bytes);
+      manifest.files[name] = sha(bytes);
+    }
+    f.write(path.join(pkg.path, 'release.json'), manifest); f.policy.packageProofs[pkg.id] = f.pin(path.join(pkg.path, 'release.json')).sha256;
+    return manifest;
+  });
+  f.proof.kind = 'same-schema-unknown-claim-rollback'; delete f.proof.checks.additiveSchema;
+  f.proof.checks.sameSchema = f.proof.checks.isolatedRuntimeStarted = true;
+  f.proof.rollback = { id: 'current', sourceCommit: manifests[0].sourceCommit, manifestSha256: f.policy.packageProofs.current };
+  f.proof.candidate.manifestSha256 = f.policy.packageProofs.candidate;
+  f.proof.schemaProofSha256 = hash(require('./preserving-contract.cjs').validateSameSchema(...manifests, {
+    oldRoot: f.packages[0].path, candidateRoot: f.packages[1].path,
+    oldManifestSha256: f.policy.packageProofs.current, candidateManifestSha256: f.policy.packageProofs.candidate,
+  }));
+  f.policy.preservingUpdate = { format: 1, operation: 'restart', effects: ['new-output-only', 'approved-active-switch'], active: {
+    pointer: f.pointer, pointerSha256: f.pin(f.pointer).sha256, currentId: 'current', candidateId: 'candidate',
+    currentManifestSha256: f.policy.packageProofs.current, candidateManifestSha256: f.policy.packageProofs.candidate,
+    oldProcess: { pid: 10, startUtc: f.native.processesBefore[0].startUtc, executableSha256: f.pin(path.join(f.packages[0].path, 'runtime.exe')).sha256 },
+  } };
+  f.native.format = 2; f.native.complete = false; f.native.observationComplete = true; f.native.categories.shortcuts = 'not_applicable';
+  f.repinProof();
+}
+test('same-schema reference proof uses the exact preserving pair and keeps native categories mandatory', () => fixture((f) => {
+  sameSchemaPair(f); const result = f.run(); assert.deepEqual(result.errors, []); assert.equal(result.observationComplete, true);
+  assert.equal(result.compatibility.verified, true); assert.equal(result.complete, false);
+  f.native.categories.tasks = 'not_applicable'; reject(f, 'REFERENCE_NATIVE_QUERY_INCOMPLETE');
+}));
+for (const mutation of ['runtime evidence', 'schema bytes', 'schema digest', 'active manifest', 'additive disguise'])
+  test('same-schema reference proof refuses changed ' + mutation, () => fixture((f) => {
+    sameSchemaPair(f);
+    if (mutation === 'runtime evidence') f.proof.checks.isolatedRuntimeStarted = false;
+    if (mutation === 'schema bytes') fs.appendFileSync(path.join(f.packages[1].path, 'server/prisma/migrations/001/migration.sql'), 'SELECT 2;');
+    if (mutation === 'schema digest') f.proof.schemaProofSha256 = 'f'.repeat(64);
+    if (mutation === 'active manifest') f.policy.preservingUpdate.active.candidateManifestSha256 = 'f'.repeat(64);
+    if (mutation === 'additive disguise') delete f.proof.checks.sameSchema;
+    f.repinProof(); reject(f, 'REFERENCE_COMPATIBILITY_UNPROVEN');
+  }));
+function projectEffectFixture(f) {
+  sameSchemaPair(f); const audit=path.join(f.base,'audit');fs.mkdirSync(audit);
+  f.policy.format=2;f.policy.roots.push({path:audit});
+  f.policy.preservingUpdate.effectScope={format:1,container:f.installed,allocations:[{path:audit,mode:'audit-children'}],taskIdentities:['\\SyntheticLogon'],lifecycleSha256:null};
+  const self={pid:200,executable:f.controller,argv:[f.controller,'probe.cjs'],collectorExecutable:f.worker,collectorArgv:[f.worker,'collector.ps1']};
+  const own=[f.process(200,99,f.controller,`${quote(f.controller)} probe.cjs`),f.process(201,200,f.worker,`${quote(f.worker)} collector.ps1`)];
+  f.native.processesBefore.push(...own);f.native.processesAfter.push(...structuredClone(own));
+  f.run=()=>probe(f.policy,f.native,{callerPid:99,self});return self;
+}
+test('effect references observe only the bound project without claiming whole-host completeness',()=>fixture(f=>{
+  projectEffectFixture(f);
+  const unknown={pid:800,parentPid:1,name:'unrelated',executable:'',commandLine:'',startUtc:null};
+  const shell=f.process(801,1,f.worker,`${quote(f.worker)} -Command unrelated`);
+  f.native.processesBefore.push(unknown,shell);f.native.processesAfter.push(structuredClone(unknown),structuredClone(shell));
+  const unrelated={identity:'\\Unrelated',actions:[{execute:'%UNKNOWN%',arguments:'-Command unrelated',workingDirectory:''}]};
+  f.native.tasks.push(unrelated);f.native.tasksAfter.push(structuredClone(unrelated));
+  f.native.tasksAfter.find(t=>t.identity==='\\Unrelated').actions[0].arguments='-Command unrelated-later';
+  const r=f.run();assert.deepEqual(r.errors,[]);assert.equal(r.complete,false);assert.equal(r.observationComplete,true);assert.equal(r.processObservation,'preserving-project-only');
+  assert(r.records.some(x=>x.kind==='processes'&&x.pid===10));assert.equal(r.records.filter(x=>x.kind==='tasks').length,1);
+  assert.equal(r.records.find(x=>x.kind==='tasks').identity,hash([f.native.tasks[0].identity,f.native.tasks[0].actions[0]]));
+  assert(!r.records.some(x=>x.pid===800||x.pid===801));
+  delete f.policy.preservingUpdate.effectScope;assert(f.run().errors.includes('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE'));
+}));
+for(const mutation of ['old process fields','extra project task','missing project task','unknown writer child','unapproved project script','control changed','unknown collector child'])
+  test('effect references refuse '+mutation,()=>fixture(f=>{
+    projectEffectFixture(f);
+    if(mutation==='old process fields')for(const list of [f.native.processesBefore,f.native.processesAfter])list.find(p=>p.pid===10).commandLine='';
+    if(mutation==='extra project task'){const t={...f.native.tasks[0],identity:'\\UnapprovedProjectTask'};f.native.tasks.push(t);f.native.tasksAfter.push(structuredClone(t));}
+    if(mutation==='missing project task')f.native.tasks=f.native.tasksAfter=[];
+    if(mutation==='unknown writer child'){const p={pid:802,parentPid:10,name:'unknown',executable:'',commandLine:'',startUtc:null};f.native.processesBefore.push(p);f.native.processesAfter.push(structuredClone(p));}
+    if(mutation==='unapproved project script'){const script=path.join(f.project,'unapproved.cjs');fs.writeFileSync(script,'// inert');const p=f.process(804,1,f.worker,`${quote(f.worker)} ${quote(script)}`);f.native.processesBefore.push(p);f.native.processesAfter.push(structuredClone(p));}
+    if(mutation==='control changed')f.native.processesAfter.find(p=>p.pid===200).startUtc='2026-01-02T00:00:00Z';
+    if(mutation==='unknown collector child'){const p=f.process(803,201,f.worker,quote(f.worker));f.native.processesBefore.push(p);f.native.processesAfter.push(structuredClone(p));}
+    assert.equal(f.run().observationComplete,undefined);assert(f.run().errors.length);
+  }));
 test('preserving build records shortcuts as not applicable without asserting complete coverage', () =>
   fixture((f) => {
     f.policy.phase = 'build-only';
