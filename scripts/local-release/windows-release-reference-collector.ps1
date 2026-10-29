@@ -95,7 +95,10 @@ try {
   $buildOnly=($preserving -and $policy.phase -eq 'build-only' -and $policy.preservingUpdate.operation -eq 'build' -and @($policy.preservingUpdate.effects).Count -eq 1 -and $policy.preservingUpdate.effects[0] -eq 'new-output-only')
   $effectScope=$policy.preservingUpdate.effectScope
   $projectOnly=($preserving -and -not $buildOnly -and $effectScope.format -eq 1)
-  $projectNeedles=@($policy.roots | ForEach-Object { [string]$_.path }) + @($policy.windowsReferences.launchers | ForEach-Object { [IO.Path]::GetDirectoryName([string]$_.entry); [string]$_.workingDirectory })
+  $projectNeedles=@()
+  if ($projectOnly) {
+    $projectNeedles=@($policy.roots | ForEach-Object { [string]$_.path }) + @($policy.windowsReferences.launchers | ForEach-Object { [IO.Path]::GetDirectoryName([string]$_.entry); [string]$_.workingDirectory })
+  }
   if ($preserving -and ($policy.preservingUpdate.operation -eq 'build' -or $policy.phase -eq 'build-only') -and -not $buildOnly) { throw 'REFERENCE_NATIVE_BUILD_CONTRACT_INVALID' }
   $before=@(Processes)
   if (-not $buildOnly) { $tasks=@(Tasks) }

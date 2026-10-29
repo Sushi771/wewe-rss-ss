@@ -718,8 +718,8 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     result.categories.processes = true;
     const relevantTask = (t) => effectScope.taskIdentities.includes(t?.identity) ||
       Array.isArray(t?.actions) && t.actions.some((a)=>[a.execute,a.arguments,a.workingDirectory].some(relevantText));
-    const taskRows = projectOnly && Array.isArray(native.tasks) ? native.tasks.filter(relevantTask) : native.tasks;
-    const taskRowsAfter = projectOnly && Array.isArray(native.tasksAfter) ? native.tasksAfter.filter(relevantTask) : native.tasksAfter;
+    const taskRows = buildOnly ? [] : projectOnly && Array.isArray(native.tasks) ? native.tasks.filter(relevantTask) : native.tasks;
+    const taskRowsAfter = buildOnly ? [] : projectOnly && Array.isArray(native.tasksAfter) ? native.tasksAfter.filter(relevantTask) : native.tasksAfter;
     if (
       (!buildOnly && (!Array.isArray(native.tasks) || native.tasks.length > 8192 ||
         !Array.isArray(native.tasksAfter) || hash(taskRows) !== hash(taskRowsAfter))) ||
