@@ -33,6 +33,9 @@ async function isolated(){
   const claim={policy:{preservingUpdate:{operation:'restart',active:{oldProcess:identity}}},check,assertWritable:k=>{check();assert.deepEqual(k,['restart']);},assertLegacyMaintenanceQuiescent(){throw Error('COMPLETE_REFERENCE_QUERY_FORBIDDEN');},
    legacyMaintenanceBoundary:(_identity,observe)=>({check:state,observe(){state();const f=observe();state();if(!f.complete||f.active.length)throw Error('LIVE_PROJECT_CHILD');return{...state(),observedAt:Date.now()};}}),confirmPreservingProcessExit(_pid,r,owned){check();assert.equal(r.stopped,true);for(const key of ['pid','startUtc','executable','commandLine'])assert.equal(r[key],owned.identity[key]);}};
   const observeProjectWriters=()=>{observations++;const f=effects.observeProjectWriters([identity.pid,...(helper?[helper.pid]:[])],port);queries+=f.queries;durations.push(f.durationMs);return f;};
+  for(const asset of [path.join(release,'project-writer-gate.cjs'),path.join(control,'project-writer-gate.cjs'),path.join(release,'server/legacy-maintenance.cjs')]){
+    const bytes=fs.readFileSync(asset);try{fs.appendFileSync(asset,'\n// unexpected runtime bytes\n');assert.throws(()=>controller.loadLegacyMaintenance(release,manifest,'job'),/LEGACY_MAINTENANCE_ENTRY_UNPROVEN/);}finally{fs.writeFileSync(asset,bytes);}
+  }
   const callback=controller.loadLegacyMaintenance(release,manifest,'job');assert.equal(globalThis[Symbol.for('wewe.project-writer-api.v1')],gate);
   const checkpoint={identity,stopReceipt,scopeLease:claim,database,backup:{closed:true},observeProjectWriters};
   const startedAt=performance.now();let proof;
@@ -54,7 +57,7 @@ async function isolated(){
       start(){fallback=startBackend(port);return fallback;},waitReady:async(_port,c)=>started.get(c.pid),port,processIdentity:effects.processIdentity,writeActiveReleaseAsync:async()=>{},writeJson(){}};
     assert.equal((await catchRun(ctx)).rollbackUsed,true);assert.notEqual(fallback.pid,candidate.pid);assert.equal(JSON.parse(fs.readFileSync(gate.binding(database).file)).pid,fallback.pid);
   }
-  return{sourceUnavailable:true,compactEntry:true,sameGate:true,mode,observations,completeReferenceQueries:0,narrowQueries:queries,observerMs:durations,proofElapsedMs:elapsedMs,originalUnknownRetained:true,budgets:[6,8],rollbackUsed:mode!=='live-child'};
+  return{sourceUnavailable:true,compactEntry:true,sameGate:true,tamperedAssetsRejected:3,mode,observations,completeReferenceQueries:0,narrowQueries:queries,observerMs:durations,proofElapsedMs:elapsedMs,originalUnknownRetained:true,budgets:[6,8],rollbackUsed:mode!=='live-child'};
  }finally{
    for(const child of [old,candidate,fallback])if(child&&child.exitCode===null&&child.signalCode===null){try{const port=(await started.get(child.pid)).port;const i=effects.processIdentity('OwnedSnapshot',child.pid,port,{executable:process.execPath,commandLine:controller.launchCommandLine(process.execPath,child.spawnargs.slice(1))});const r=await effects.stopOwned(child,i);gate.retireStoppedWriter(database,{identity:i,stopReceipt:r,scopeLease:{check,assertWritable:()=>check()}});}catch(error){const closed=once(child,'close');child.kill();await closed;throw error;}}
    if(helperChild)await effects.stopOwned(helperChild,helper);
@@ -73,6 +76,8 @@ else{
    const generated=path.join(target,'node_modules/.store/generated-prisma');fs.mkdirSync(generated,{recursive:true});fs.writeFileSync(path.join(generated,'package.json'),JSON.stringify({name:'@prisma/client',version:'fixture'}));fs.writeFileSync(path.join(generated,'index.js'),'exports.fixture=true;');
    require('./build.cjs').copyRuntimeClosure(source,release);const bundled=require('./compact.cjs').bundleServer(target,path.join(source,'apps/server'),path.join(source,'apps/web'));assert.equal(bundled.legacyMaintenance,'legacy-maintenance.cjs');assert(!fs.existsSync(path.join(target,'dist')));
    const control=path.join(release,'scripts/local-release');fs.mkdirSync(control,{recursive:true});for(const f of fs.readdirSync(__dirname))if(/\.(?:cjs|ps1|cs)$/.test(f)&&!f.includes('.test.'))fs.copyFileSync(path.join(__dirname,f),path.join(control,f));
+   // Windows checkout bytes differ from the existing LF-normalized runtime closure.
+   const controllerGate=path.join(control,'project-writer-gate.cjs');fs.writeFileSync(controllerGate,fs.readFileSync(controllerGate,'utf8').replace(/\r?\n/g,'\r\n'));
    const native=require('./identity-tool.cjs').identityTool();assert(native);const cache=path.relative(source,path.dirname(native));fs.mkdirSync(path.join(release,cache),{recursive:true});for(const f of ['process-identity.exe','verified.json'])fs.copyFileSync(path.join(path.dirname(native),f),path.join(release,cache,f));
    fs.copyFileSync(__filename,path.join(release,'exercise.cjs'));
    fs.writeFileSync(path.join(release,'backend.cjs'),`const path=require('node:path');if(process.argv[4]==='helper'){process.send({ready:true});setInterval(()=>{},1000);}else{require('./project-writer-gate.cjs').acquireWriter(process.argv[2]);const server=require('node:net').createServer();server.listen(+process.argv[3],'127.0.0.1',()=>process.send({port:server.address().port}));process.on('message',m=>{if(m==='helper'){const args=[__filename,process.argv[2],process.argv[3],'helper'];const c=require('node:child_process').spawn(process.execPath,args,{stdio:['ignore','ignore','inherit','ipc'],windowsHide:true});c.once('message',()=>process.send({pid:c.pid}));}});}`);
