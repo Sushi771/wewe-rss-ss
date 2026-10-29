@@ -1,7 +1,8 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const ts=require('typescript');
+const path=require('node:path');
+const ts=require(require.resolve('typescript',{paths:[path.resolve('apps/web')]}));
 const source=fs.readFileSync('apps/web/src/pages/feeds/index.tsx','utf8');
 const tree=ts.createSourceFile('index.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 let handler;
