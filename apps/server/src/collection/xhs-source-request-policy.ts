@@ -1,3 +1,5 @@
+import { dispatchReviewedSource } from './xhs-reviewed-dispatch';
+import type { AttemptScope } from './xhs-reviewed-attempt';
 import { randomUUID } from 'node:crypto';
 import {
   xhsOriginalLinkCodes,
@@ -37,8 +39,9 @@ function fail(code: string): never {
 async function write<T>(
   db: PrismaService,
   run: (tx: Prisma.TransactionClient) => Promise<T>,
+  reserveBytes=8192,
 ) {
-  return incrementalWrite(db, 8192, () =>
+  return incrementalWrite(db, reserveBytes, () =>
     sqliteWrites.write(async () => {
       await assertIncrementalWriteAdmission();
       return db.$transaction(async (tx) => {
@@ -217,7 +220,7 @@ async function dispatchSource<T>(
           SELECT id FROM xhs_request_budgets WHERE id=${marker}`;
         if (!owned.length) fail('XHS_REQUEST_RATE_PAUSED');
         await ready(tx);
-        if (group) await markWholeSourceStarted(tx, group.jobId, marker, charge);
+        if (group) await markWholeSourceStarted(tx, group.jobId, marker, group.owner, charge);
         response = operation();
         started = true;
         if (group) group.started = true;
@@ -237,7 +240,7 @@ async function dispatchSource<T>(
         try {
           await write(db, (tx) =>
             group
-              ? releasePreparedWholeSourceFence(tx, group.jobId, marker)
+              ? releasePreparedWholeSourceFence(tx, group.jobId, marker, group.owner)
               : tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`,
           );
         } catch {
@@ -489,4 +492,8 @@ export async function prepareXhsOriginalLink(
         : 'XHS_ORIGINAL_LINK_NOT_READY',
     };
   }
+}
+
+export function dispatchReviewedWholeSource<T,R>(db:PrismaService,input:AttemptScope,id:string,request:{authorId:string;noteId:string;phase:string},ready:()=>void|Promise<void>,transport:(permit: import('./xhs-reviewed-dispatch').ReviewedTransportPermit)=>Promise<T>,checkpoint:(tx:Prisma.TransactionClient,value:T)=>Promise<R>){
+ return dispatchReviewedSource(fn=>write(db,tx=>fn(tx),8*1024*1024+65536),input,id,request,ready,transport,(tx,value)=>checkpoint(tx as Prisma.TransactionClient,value));
 }

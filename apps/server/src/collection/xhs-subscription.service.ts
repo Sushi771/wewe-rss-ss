@@ -313,6 +313,19 @@ export class XhsSubscriptionService implements OnModuleInit {
     };
   }
   /** Internal result only; source input and transient URLs never enter this transaction. */
+  async commitReviewedRecovery(tx: Prisma.TransactionClient, creatorId:string, input:{author:XhsAuthor;note:ReturnType<typeof inspectLimitedRecovery>}) {
+    const {author,note}=input;
+    if(author.id!==note.authorId||author.profileUrl!==`https://www.xiaohongshu.com/user/profile/${author.id}`||!note.text.trim())return reject('XHS_DETAIL_INCOMPLETE');
+    const creator=await tx.xhsCreator.findUnique({where:{id:creatorId}});
+    if(!creator?.enabled||creator.externalAuthorId!==author.id)return reject('XHS_AUTHOR_MISMATCH');
+    const noteId=key(note.noteId),old=await tx.xhsNote.findUnique({where:{id:noteId}});
+    if(old&&old.creatorId!==creatorId)return reject('XHS_AUTHOR_CONFLICT');
+    const html=verifiedDownloadBody('<div id="js_content">'+note.text.split('\n').map(p=>'<p>'+esc(p)+'</p>').join('')+'</div>');
+    if(!old)await tx.xhsNote.create({data:{id:noteId,creatorId,title:note.title,publishTime:note.publishedAt,kind:'image-text',status:'listed',contentHtml:html}});
+    else if(!old.contentHtml)await tx.xhsNote.update({where:{id:noteId},data:{title:note.title,publishTime:note.publishedAt,kind:'image-text',contentHtml:html}});
+    await saveXhsMetrics(tx,'note',noteId,note.metrics);
+    return {creatorId,noteId,subscribed:true,body:old?.contentHtml?'retained':'saved',media:note.media.length?'pending':'none',mediaCount:note.media.length};
+  }
   async commitLimitedRecovery(input: {
     owner: string;
     author: XhsAuthor;

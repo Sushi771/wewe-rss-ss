@@ -2019,6 +2019,18 @@ export class TrpcRouter {
         this.requireLocalXhsAccess(ctx);
         return this.xhsEngagement!.collect(input);
       }),
+    prepareWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
+      .input(z.object({jobId:z.string().min(1).max(128),confirmUnknownRetry:z.literal(true)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareReviewedAttempt(input));}),
+    executeWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
+      .input(z.object({jobId:z.string().min(1).max(128),attemptId:z.string().regex(/^[a-f0-9]{64}$/),url:z.string().min(1).max(8192),confirmUnknownRetry:z.literal(true)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.executeReviewedAttempt(input));}),
+    reviewWholeCreatorUnknown: this.trpcService.protectedProcedure
+      .input(z.object({jobId:z.string().min(1).max(128),expectedAuthorId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),expectedMarker:z.string().regex(/^xhs:dispatch-pending:whole:[a-f0-9-]{36}$/),expectedNoteId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),decision:z.enum(['defer','request-retry'])}).strict())
+      .mutation(({input,ctx}) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsWhole!.reviewUnknown(input);
+      }),
     wholeCreatorJobs: this.trpcService.protectedProcedure
       .input(z.object({ creatorId: z.string().min(1).max(128) }).strict())
       .query(({ input, ctx }) => {

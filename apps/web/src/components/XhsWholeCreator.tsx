@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { trpc } from "@web/utils/trpc";
 export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
   const [limit, setLimit] = useState(100),
@@ -7,6 +7,11 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
     "profile" | "list" | "detail" | "media" | "metrics"
   >("detail");
   const [phaseLimit, setPhaseLimit] = useState(1);
+  const [recoveryJob, setRecoveryJob] = useState("");
+  const [recoveryUrl, setRecoveryUrl] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const recoveryBusy = useRef(false);
   const jobs = trpc.xiaohongshu.wholeCreatorJobs.useQuery(
     { creatorId },
     { enabled: !!creatorId, retry: false, refetchInterval: 3000 },
@@ -27,6 +32,27 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
   const cancel = trpc.xiaohongshu.cancelWholeCreator.useMutation({
     retry: false,
   });
+  const prepareRecovery = trpc.xiaohongshu.prepareWholeCreatorReviewedAttempt.useMutation({ retry: false });
+  const runRecovery = trpc.xiaohongshu.executeWholeCreatorReviewedAttempt.useMutation({ retry: false });
+  const recover = async (jobId: string, attemptId?: string) => {
+    if (recoveryBusy.current || recoveryJob !== jobId || !confirmed) return;
+    recoveryBusy.current = true;
+    setRecovering(true);
+    setError("");
+    const url = recoveryUrl;
+    setRecoveryUrl("");
+    setConfirmed(false);
+    try {
+      if (attemptId) await runRecovery.mutateAsync({ jobId, attemptId, url, confirmUnknownRetry: true });
+      else await prepareRecovery.mutateAsync({ jobId, confirmUnknownRetry: true });
+    } catch {
+      setError("本次操作结果待核对，请查看最新恢复回执；不会自动重发。");
+    } finally {
+      await jobs.refetch().catch(() => { setError("恢复回执读取失败，请刷新后核对；不会自动重发。"); });
+      recoveryBusy.current = false;
+      setRecovering(false);
+    }
+  };
   if (!creatorId) return null;
   const execute = async (work: () => Promise<unknown>) => {
     setError("");
@@ -82,6 +108,44 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
           )}
           {job.sourceCheckpoint?.state === "restricted" && (
             <p role="alert">来源拒绝了该请求，任务已停止，不会自动重发。</p>
+          )}
+          {job.reviewedRecovery && (
+            <div className="my-2 space-y-2 rounded border p-2">
+              <p>原请求结果仍未知。本次恢复只补取指定笔记的正文和指标，沿用累计预算；图片和评论不会发起请求，也不会自动继续整号任务。</p>
+              {job.reviewedRecovery.state === "checkpointed" ? (
+                <p role="status">本次恢复已保存：正文{job.reviewedRecovery.receipt?.body === "retained" ? "保留已有内容" : "已保存"}，图片{job.reviewedRecovery.receipt?.media === "pending" ? "待补齐" : "无"}。原请求仍待核对。</p>
+              ) : job.reviewedRecovery.state === "consumed" ? (
+                <p role="alert">本次恢复已提交，但保存结果尚未确认；结果未知，不能再次执行。</p>
+              ) : job.reviewedRecovery.state === "restricted" ? (
+                <p role="alert">本次恢复遇到来源限制，已停止，不能再次执行。原请求仍待核对。</p>
+              ) : job.reviewedRecovery.state === "blocked" ? (
+                <p>当前任务缺少可用的恢复依据，需要人工核对后处理。</p>
+              ) : job.reviewedRecovery.state === "expired" ? (
+                <p>本次确认已过期，需要重新核对；不会自动创建或执行新的尝试。</p>
+              ) : (
+                <>
+                  <p className="break-all">待核对笔记：{job.reviewedRecovery.noteId}，阶段：{job.reviewedRecovery.phase === "detail" ? "正文" : job.reviewedRecovery.phase === "metrics" ? "互动数量" : "待确认"}</p>
+                  {job.reviewedRecovery.state === "prepared" && (
+                    <>
+                      <p>确认有效期至 {new Date(job.reviewedRecovery.expiresAt!).toLocaleString()}；执行前服务端会再次核对条件。</p>
+                      <label>该笔记的官方分享链接
+                        <input aria-label="恢复笔记的官方分享链接" type="url" autoComplete="off" value={recoveryJob === job.id ? recoveryUrl : ""} disabled={recovering}
+                          onChange={e => { setRecoveryJob(job.id); setRecoveryUrl(e.target.value); setConfirmed(false); }} />
+                      </label>
+                    </>
+                  )}
+                  <label>
+                    <input type="checkbox" checked={recoveryJob === job.id && confirmed} disabled={recovering}
+                      onChange={e => { setRecoveryJob(job.id); setConfirmed(e.target.checked); }} />
+                    我已知原请求结果未知，确认只为这篇笔记增加一次请求，不重置已用预算。
+                  </label>
+                  <button disabled={recovering || recoveryJob !== job.id || !confirmed || (job.reviewedRecovery.state === "prepared" && !recoveryUrl.trim())}
+                    onClick={() => void recover(job.id, job.reviewedRecovery?.state === "prepared" ? job.reviewedRecovery.attemptId : undefined)}>
+                    {job.reviewedRecovery.state === "prepared" ? "仅执行这一次恢复" : "核对并准备一次恢复"}
+                  </button>
+                </>
+              )}
+            </div>
           )}
           {job.code === "XHS_WHOLE_PHASE_BUDGET_EXHAUSTED" && (
             <p role="alert">

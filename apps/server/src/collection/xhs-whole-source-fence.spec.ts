@@ -1,3 +1,10 @@
+jest.mock('./xhs-dispatch-owner-observation', () => ({observeDispatchOwner: jest.fn(() => 'dead')}));
+import { observeDispatchOwner } from './xhs-dispatch-owner-observation';
+import { reviewWholeUnknown } from './xhs-whole-unknown-review';
+jest.mock('./xhs-dispatch-owner', () => ({
+ createDispatchOwner: () => ({ pid: 1234, startIdentity: 'synthetic-start', nonce: '00000000-0000-4000-8000-000000000001' }),
+ ownsDispatch: (v: any, expected: any) => !!expected && v?.pid === 1234 && v?.startIdentity === 'synthetic-start' && v?.nonce === expected.nonce,
+}));
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -23,6 +30,7 @@ describe('whole creator durable checkpoint fence', () => {
   const marker =
     'xhs:dispatch-pending:whole:00000000-0000-4000-8000-000000000001';
   const scope = {
+    owner: {pid:1234,startIdentity:'synthetic-start',nonce:'00000000-0000-4000-8000-000000000001'},
     jobId: 'synthetic-job',
     creatorId: 'synthetic-creator',
     authorId: 'synthetic-author',
@@ -30,6 +38,94 @@ describe('whole creator durable checkpoint fence', () => {
     phase: 'detail' as const,
     noteId: 'synthetic-note',
   };
+  it('keeps the owner through checkpoint and stale task saves preserve the terminal receipt', async () => {
+    const stale = JSON.parse((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`)[0].document);
+    await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
+    const read = async () => JSON.parse((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`)[0].document);
+    const owner = (await read()).sourceFence.owner;
+    expect(owner).toMatchObject({pid:1234, startIdentity:'synthetic-start'});
+    await db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, scope.owner));
+    expect((await read()).sourceFence.owner).toEqual(owner);
+    await db.$transaction((tx) => commitWholeSourceCheckpoint(tx, scope.jobId, marker, scope.owner));
+    expect((await read()).sourceFence).toBeUndefined();
+    expect((await read()).lastSourceOwnerReceipt).toEqual({marker,owner,state:'checkpointed'});
+    const whole = new XhsWholeCreatorService(db as any,{} as any,{} as any,{} as any);
+    await (whole as any).save(stale);
+    expect((await read()).lastSourceOwnerReceipt).toEqual({marker,owner,state:'checkpointed'});
+  });
+  it('rejects a legacy fence without owner at both dispatch and checkpoint', async () => {
+    await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_remove(document,'$.sourceFence.owner') WHERE id=${scope.jobId}`;
+    await expect(db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, scope.owner))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    await expect(db.$transaction((tx) => commitWholeSourceCheckpoint(tx, scope.jobId, marker, scope.owner))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+  });
+  it('rejects replacement of the durable nonce by a different valid nonce',async()=>{
+    await db.$transaction(tx=>prepareWholeSourceFence(tx,scope));
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_set(document,'$.sourceFence.owner.nonce','00000000-0000-4000-8000-000000000002') WHERE id=${scope.jobId}`;
+    await expect(db.$transaction(tx=>markWholeSourceStarted(tx,scope.jobId,marker,scope.owner))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    await expect(db.$transaction(tx=>releasePreparedWholeSourceFence(tx,scope.jobId,marker,scope.owner))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_set(document,'$.sourceFence.state','started') WHERE id=${scope.jobId}`;
+    await expect(db.$transaction(tx=>commitWholeSourceCheckpoint(tx,scope.jobId,marker,scope.owner))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+  });
+  async function reviewFixture() {
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',312,8,10000,10000)`;
+    await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
+    await db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, scope.owner));
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='paused',document=json_set(document,'$.state','paused','$.code','XHS_DOWNLOAD_BLOCKED') WHERE id=${scope.jobId}`;
+    return {jobId:scope.jobId,expectedAuthorId:scope.authorId,expectedNoteId:scope.noteId,expectedMarker:marker,decision:'request-retry' as const};
+  }
+  it('records one decision idempotently without changing the unknown fence, failure or budget', async () => {
+    const input=await reviewFixture();
+    const first=await db.$transaction(tx=>reviewWholeUnknown(tx,input));
+    expect(first.executionAllowed).toBe(false);
+    expect(await db.$transaction(tx=>reviewWholeUnknown(tx,input))).toEqual(first);
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    const doc=JSON.parse(rows[0].document);
+    expect(doc.sourceFence.state).toBe('started');expect(doc.code).toBe('XHS_DOWNLOAD_BLOCKED');
+    expect((await db.$queryRaw<Array<{used:number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`)[0].used).toBe(8);
+    await expect(db.$transaction(tx=>reviewWholeUnknown(tx,{...input,decision:'defer'}))).rejects.toThrow();
+  });
+  it.each(['alive','unknown'])('refuses %s owner', async state => {
+    const input=await reviewFixture();
+    (observeDispatchOwner as jest.Mock).mockReturnValueOnce(state);
+    await expect(db.$transaction(tx=>reviewWholeUnknown(tx,input))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+  });
+  it('refuses legacy owner and mismatched identity scope', async () => {
+    const input=await reviewFixture();
+    await expect(db.$transaction(tx=>reviewWholeUnknown(tx,{...input,expectedAuthorId:'other'}))).rejects.toThrow();
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_remove(document,'$.sourceFence.owner') WHERE id=${scope.jobId}`;
+    await expect(db.$transaction(tx=>reviewWholeUnknown(tx,input))).rejects.toThrow();
+  });
+  it('rolls back a decision on a failed transaction without clearing any fence', async () => {
+    const input=await reviewFixture();
+    await expect(db.$transaction(async tx=>{await reviewWholeUnknown(tx,input);throw Error('synthetic crash');})).rejects.toThrow('synthetic crash');
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    expect(JSON.parse(rows[0].document).unknownReview).toBeUndefined();
+    expect(JSON.parse(rows[0].document).sourceFence).toBeDefined();
+  });
+  it('refuses another durable writer', async () => {
+    const input=await reviewFixture();
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:dispatch-pending:other',1,1,1,1)`;
+    await expect(db.$transaction(tx=>reviewWholeUnknown(tx,input))).rejects.toThrow();
+  });
+  it('records concurrent identical confirmations only once', async () => {
+    const input=await reviewFixture();
+    const out=await Promise.allSettled([db.$transaction(tx=>reviewWholeUnknown(tx,input)),db.$transaction(tx=>reviewWholeUnknown(tx,input))]);
+    expect(out.some(x=>x.status==='fulfilled')).toBe(true);
+    expect(await db.$transaction(tx=>reviewWholeUnknown(tx,input))).toMatchObject({state:'recorded',executionAllowed:false});
+  });
+  it('rejects state changes after the original decision', async () => {
+    const input=await reviewFixture();await db.$transaction(tx=>reviewWholeUnknown(tx,input));
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_set(document,'$.sourceGrant.used.detail',2) WHERE id=${scope.jobId}`;
+    await expect(db.$transaction(tx=>reviewWholeUnknown(tx,input))).rejects.toThrow();
+  });
+  it('preserves the attempt handoff against stale task saves',async()=>{
+    const stale=JSON.parse((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`)[0].document);
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_set(document,'$.reviewAttempt',json('{"id":"attempt","state":"consumed"}')) WHERE id=${scope.jobId}`;
+    const whole=new XhsWholeCreatorService(db as any,{} as any,{} as any,{} as any);await (whole as any).save(stale);
+    const row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    expect(JSON.parse(row[0].document).reviewAttempt).toEqual({id:'attempt',state:'consumed'});
+  });
   beforeAll(async () => {
     folder = await fs.mkdtemp(path.join(tmpdir(), 'xhs-whole-fence-'));
     db = new PrismaClient({
@@ -643,20 +739,20 @@ describe('whole creator durable checkpoint fence', () => {
       }),
     );
     await db.$transaction((tx) =>
-      markWholeSourceStarted(tx, scope.jobId, marker, 'profile'),
+      markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'profile'),
     );
     for (let n = 0; n < 3; n++)
       await db.$transaction((tx) =>
-        markWholeSourceStarted(tx, scope.jobId, marker, 'list'),
+        markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'list'),
       );
     await expect(
       db.$transaction((tx) =>
-        markWholeSourceStarted(tx, scope.jobId, marker, 'list'),
+        markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'list'),
       ),
     ).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
     await expect(
       db.$transaction((tx) =>
-        markWholeSourceStarted(tx, scope.jobId, marker, 'profile'),
+        markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'profile'),
       ),
     ).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
     const after = await db.$queryRaw<
@@ -1099,11 +1195,11 @@ describe('whole creator durable checkpoint fence', () => {
   it('retains the dispatched fence across a failed business checkpoint and removes it atomically after success', async () => {
     await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
     await db.$transaction((tx) =>
-      markWholeSourceStarted(tx, scope.jobId, marker),
+      markWholeSourceStarted(tx, scope.jobId, marker, scope.owner),
     );
     await expect(
       db.$transaction(async (tx) => {
-        await commitWholeSourceCheckpoint(tx, scope.jobId, marker);
+        await commitWholeSourceCheckpoint(tx, scope.jobId, marker, scope.owner);
         throw Error('synthetic rollback');
       }),
     ).rejects.toThrow();
@@ -1125,7 +1221,7 @@ describe('whole creator durable checkpoint fence', () => {
       await reopened.$disconnect();
     }
     await db.$transaction((tx) =>
-      commitWholeSourceCheckpoint(tx, scope.jobId, marker),
+      commitWholeSourceCheckpoint(tx, scope.jobId, marker, scope.owner),
     );
     expect(
       await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`,
@@ -1145,11 +1241,11 @@ describe('whole creator durable checkpoint fence', () => {
     const metricScope = { ...scope, phase: 'metrics' as const };
     await db.$transaction((tx) => prepareWholeSourceFence(tx, metricScope));
     await db.$transaction((tx) =>
-      markWholeSourceStarted(tx, scope.jobId, marker),
+      markWholeSourceStarted(tx, scope.jobId, marker, scope.owner),
     );
     await expect(
       db.$transaction(async (tx) => {
-        await commitWholeSourceCheckpoint(tx, scope.jobId, marker, 1234);
+        await commitWholeSourceCheckpoint(tx, scope.jobId, marker, scope.owner, 1234);
         throw Error('synthetic rollback');
       }),
     ).rejects.toThrow();
@@ -1158,7 +1254,7 @@ describe('whole creator durable checkpoint fence', () => {
     >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
     expect(JSON.parse(before[0].document).items[key].metrics).toBeUndefined();
     await db.$transaction((tx) =>
-      commitWholeSourceCheckpoint(tx, scope.jobId, marker, 1234),
+      commitWholeSourceCheckpoint(tx, scope.jobId, marker, scope.owner, 1234),
     );
     const whole = new XhsWholeCreatorService(
       db as any,
@@ -1178,12 +1274,12 @@ describe('whole creator durable checkpoint fence', () => {
   it('keeps the in-flight fence when cancellation commits before the checkpoint', async () => {
     await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
     await db.$transaction((tx) =>
-      markWholeSourceStarted(tx, scope.jobId, marker),
+      markWholeSourceStarted(tx, scope.jobId, marker, scope.owner),
     );
     await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='cancelled',document=json_set(document,'$.state','cancelled') WHERE id=${scope.jobId}`;
     await expect(
       db.$transaction((tx) =>
-        commitWholeSourceCheckpoint(tx, scope.jobId, marker),
+        commitWholeSourceCheckpoint(tx, scope.jobId, marker, scope.owner),
       ),
     ).rejects.toThrow();
     expect(
@@ -1197,7 +1293,7 @@ describe('whole creator durable checkpoint fence', () => {
     const stale = JSON.parse(rows[0].document);
     await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
     await db.$transaction((tx) =>
-      markWholeSourceStarted(tx, scope.jobId, marker),
+      markWholeSourceStarted(tx, scope.jobId, marker, scope.owner),
     );
     const whole = new XhsWholeCreatorService(
       db as any,
@@ -1219,18 +1315,18 @@ describe('whole creator durable checkpoint fence', () => {
   it('releases only a proven pre-dispatch cancellation and never releases a started attempt', async () => {
     await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
     await db.$transaction((tx) =>
-      releasePreparedWholeSourceFence(tx, scope.jobId, marker),
+      releasePreparedWholeSourceFence(tx, scope.jobId, marker, scope.owner),
     );
     expect(
       await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`,
     ).toHaveLength(0);
     await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
     await db.$transaction((tx) =>
-      markWholeSourceStarted(tx, scope.jobId, marker),
+      markWholeSourceStarted(tx, scope.jobId, marker, scope.owner),
     );
     await expect(
       db.$transaction((tx) =>
-        releasePreparedWholeSourceFence(tx, scope.jobId, marker),
+        releasePreparedWholeSourceFence(tx, scope.jobId, marker, scope.owner),
       ),
     ).rejects.toThrow();
     expect(

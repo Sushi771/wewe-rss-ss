@@ -1,3 +1,4 @@
+import { DispatchOwner, ownsDispatch } from './xhs-dispatch-owner';
 import type { Prisma } from '@prisma/client';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 
@@ -5,6 +6,7 @@ type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 export type Phase = 'profile' | 'list' | 'detail' | 'metrics';
 export type Charge = Phase | 'media';
 export type Scope = {
+  owner: DispatchOwner;
   jobId: string;
   creatorId: string;
   authorId: string;
@@ -16,7 +18,7 @@ export type WholeSourceGroup = Scope & { acquired: boolean; started: boolean };
 const bad = (): never => {
   throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
 };
-async function noUnresolvedRecovery(tx: Tx) {
+export async function noUnresolvedRecovery(tx: Tx) {
   const rows = await tx.$queryRaw<
     Array<{ id: string }>
   >`SELECT original.id FROM xhs_limited_recovery original WHERE original.state IN ('armed','started','unknown') AND NOT EXISTS(SELECT 1 FROM xhs_limited_recovery_append followup WHERE followup.id=original.id AND followup.note_id=original.note_id AND followup.author_id=original.author_id AND followup.state='finished') LIMIT 1`;
@@ -64,7 +66,10 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     Array<{ id: string }>
   >`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' LIMIT 1`;
   if (active.length) return bad();
+  const owner = scope.owner;
+  if (!ownsDispatch(owner, scope.owner)) return bad();
   job.sourceFence = {
+    owner,
     marker: scope.marker,
     phase: scope.phase,
     noteId: scope.noteId,
@@ -80,6 +85,7 @@ export async function markWholeSourceStarted(
   tx: Tx,
   jobId: string,
   marker: string,
+  expectedOwner: DispatchOwner,
   charge?: Charge,
 ) {
   await noUnresolvedRecovery(tx);
@@ -93,6 +99,7 @@ export async function markWholeSourceStarted(
     category = charge ?? fence?.phase;
   if (
     !fence ||
+    !ownsDispatch(fence.owner, expectedOwner) ||
     fence.marker !== marker ||
     !['prepared', 'started'].includes(fence.state) ||
     !grant ||
@@ -126,6 +133,7 @@ export async function commitWholeSourceCheckpoint(
   tx: Tx,
   jobId: string,
   marker: string,
+  expectedOwner: DispatchOwner,
   collectedAt?: number,
 ) {
   const rows = await tx.$queryRaw<
@@ -134,7 +142,7 @@ export async function commitWholeSourceCheckpoint(
   if (rows.length !== 1) return bad();
   const job = JSON.parse(rows[0].document),
     fence = job.sourceFence;
-  if (!fence || fence.marker !== marker || fence.state !== 'started')
+  if (!fence || !ownsDispatch(fence.owner, expectedOwner) || fence.marker !== marker || fence.state !== 'started')
     return bad();
   if (fence.phase === 'profile' || fence.phase === 'metrics') {
     if (!Number.isSafeInteger(collectedAt) || !collectedAt || collectedAt < 1)
@@ -147,6 +155,7 @@ export async function commitWholeSourceCheckpoint(
       job.items[key].metrics = collectedAt;
     }
   }
+  job.lastSourceOwnerReceipt = { marker, owner: fence.owner, state: 'checkpointed' };
   delete job.sourceFence;
   const changed =
     await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND state='running' AND document=${rows[0].document}`;
@@ -161,7 +170,11 @@ export async function releasePreparedWholeSourceFence(
   tx: Tx,
   jobId: string,
   marker: string,
+  expectedOwner: DispatchOwner,
 ) {
+  const ownerRows = await tx.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${jobId}`;
+  if (ownerRows.length !== 1 || !ownsDispatch(JSON.parse(ownerRows[0].document).sourceFence?.owner, expectedOwner)) return bad();
+
   const changed =
     await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_remove(document,'$.sourceFence'),updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND json_extract(document,'$.sourceFence.marker')=${marker} AND json_extract(document,'$.sourceFence.state')='prepared' AND EXISTS(SELECT 1 FROM xhs_request_budgets WHERE id=${marker})`;
   if (changed !== 1) return bad();

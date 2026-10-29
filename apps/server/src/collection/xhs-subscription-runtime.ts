@@ -1,3 +1,6 @@
+import { consumeReviewedTransportPermit } from './xhs-reviewed-dispatch';
+import type { AttemptScope } from './xhs-reviewed-attempt';
+import { createDispatchOwner } from './xhs-dispatch-owner';
 import type { Prisma } from '@prisma/client';
 import { setTimeout as waitForRate } from 'node:timers/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -74,6 +77,7 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
+  private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
   private readonly wholeSourceGroup = new AsyncLocalStorage<
     WholeSourceGroup & { checkpointed: boolean; noteId?: string }
@@ -120,8 +124,11 @@ export class XhsSubscriptionRuntime
   ): Promise<T> {
     if (this.wholeSourceGroup.getStore())
       return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const owner = createDispatchOwner();
+    if (!owner) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     const group = {
       ...scope,
+      owner,
       marker: 'xhs:dispatch-pending:whole:' + randomUUID(),
       acquired: false,
       started: false,
@@ -145,6 +152,7 @@ export class XhsSubscriptionRuntime
         tx,
         group.jobId,
         group.marker,
+        group.owner,
         collectedAt,
       );
       group.checkpointed = true;
@@ -297,6 +305,12 @@ export class XhsSubscriptionRuntime
               return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
           } else return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
         }
+        const reviewed = this.reviewedSingle.getStore();
+        if (reviewed) {
+          let body: any;
+          try { body=JSON.parse(request.body || ''); } catch { return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); }
+          if(request.method!=='POST'||new URL(request.url).pathname!=='/api/sns/web/v1/feed'||body?.source_note_id!==reviewed.scope.noteId) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        }
         const recovery = this.limitedRecoveryScope.getStore();
         if (recovery) {
           let body: any;
@@ -366,6 +380,17 @@ export class XhsSubscriptionRuntime
   }
   private async guardTransport<T>(operation: () => Promise<T>, charge?: Charge) {
     this.requireSession();
+    const reviewed=this.reviewedSingle.getStore();
+    if(reviewed){
+      if(reviewed.started||charge!=='detail'||!['detail','metrics'].includes(reviewed.scope.phase))return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      reviewed.started=true;
+      const generation=this.generation,signal=this.sessionAbort.signal;
+      return reviewed.dispatch(()=>{
+        this.requireSession();
+        if(generation!==this.generation||signal.aborted)return failure('XHS_SESSION_CHANGED');
+        return operation();
+      });
+    }
     const generation = this.generation,
       signal = this.sessionAbort.signal;
     const admission = this.budgetScope.getStore();
@@ -454,7 +479,7 @@ export class XhsSubscriptionRuntime
       this.stopCode &&
       !(
         (this.limitedRecoveryScope.getStore() ||
-          this.wholeSourceGroup.getStore()) &&
+          this.wholeSourceGroup.getStore() || this.reviewedSingle.getStore()) &&
         this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
       )
     )
@@ -645,7 +670,7 @@ export class XhsSubscriptionRuntime
     if (
       this.riskStore &&
       !this.limitedRecoveryScope.getStore() &&
-      !this.wholeSourceGroup.getStore()
+      !this.wholeSourceGroup.getStore() && !this.reviewedSingle.getStore()
     ) {
       try {
         riskOwner = await this.riskStore.begin();
@@ -677,7 +702,7 @@ export class XhsSubscriptionRuntime
       }
       if (
         !this.limitedRecoveryScope.getStore() &&
-        !this.wholeSourceGroup.getStore()
+        !this.wholeSourceGroup.getStore() && !this.reviewedSingle.getStore()
       )
         this.verified = true;
       return result;
@@ -792,6 +817,37 @@ export class XhsSubscriptionRuntime
   }
   resolve(url: string) {
     return this.withSession(() => this.adapter.resolve(url));
+  }
+  reviewedReadyCheck() {
+    const generation=this.generation;
+    return () => {
+      if(!this.enabled())return failure('XHS_LIVE_ACCESS_DISABLED');
+      if(!this.cookies)return failure('XHS_SESSION_REQUIRED');
+      if(this.stopCode && this.stopCode!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')return failure(this.stopCode);
+      if(generation!==this.generation||this.sessionAbort.signal.aborted)return failure('XHS_SESSION_CHANGED');
+    };
+  }
+  reviewedFailureCode() {
+    return this.stopCode && /^XHS_SOURCE_(AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(this.stopCode) ? this.stopCode : undefined;
+  }
+  validateReviewedInput(raw:string,scope:AttemptScope) {
+    const url=xhsPublicInputUrl(raw);
+    const match=/^\/(?:explore|discovery\/item)\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(url.pathname);
+    if(url.protocol!=='https:'||url.hostname!=='www.xiaohongshu.com'||match?.[1]!==scope.noteId||!url.searchParams.get('xsec_token')||!sourceOriginalLink(raw,url,scope.noteId))return failure('XHS_URL_INVALID');
+    return url;
+  }
+  async resolveReviewedNote(raw:string,scope:AttemptScope,permit:unknown) {
+    const capability=consumeReviewedTransportPermit(permit,scope);
+    const url=this.validateReviewedInput(raw,scope);
+    if(this.reviewedSingle.getStore())return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    this.reviewedReadyCheck()();
+    return this.reviewedSingle.run({scope,started:false,dispatch:capability.dispatch},async()=>{
+      let note:ReturnType<typeof inspectLimitedRecovery>|undefined;
+      const resolution=await this.withSession(()=>this.adapter.resolve(raw,value=>{note=value}));
+      if(!this.reviewedSingle.getStore()!.started||!note||resolution.inputKind!=='note'||note.noteId!==scope.noteId||note.authorId!==scope.authorId||resolution.author.id!==scope.authorId)return failure('XHS_AUTHOR_MISMATCH');
+      if(JSON.stringify({author:resolution.author,note}).includes(url.searchParams.get('xsec_token')!))return failure('XHS_DETAIL_INCOMPLETE');
+      return {author:resolution.author,note};
+    });
   }
   async resolveLimitedRecovery(
     raw: string,

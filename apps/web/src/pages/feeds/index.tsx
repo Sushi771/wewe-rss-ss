@@ -549,6 +549,7 @@ const Feeds = () => {
     const counts = { new: 0, skipped: 0, repaired: 0, failed: 0 };
     const exportNotices = new Set<string>();
     let ids = Array.from(articleSelectedIds);
+    let exportStarted = false;
     try {
       if (wholeScope)
         ids = await queryUtils.client.article.exportIds.query(
@@ -579,6 +580,7 @@ const Feeds = () => {
           `新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`,
         );
       };
+      exportStarted = true;
       const receipt = await exportArticleBatches(
         ids,
         (batch, signal) =>
@@ -625,10 +627,19 @@ const Feeds = () => {
           current === batchSelection ? new Set() : current,
         );
     } catch {
-      toast.error('未能取得完整导出范围', {
-        description:
-          '请缩小范围或稍后重试；单次最多导出 5000 篇，已有文件会保留。',
-      });
+      if (exportStarted) {
+        const message = `导出中断，已停止：新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`;
+        setExportResult(message);
+        toast.warning(message, {
+          description: '部分结果尚未确认，请先检查保存目录；不会自动重试。',
+        });
+      } else {
+        setExportResult('未能取得完整导出范围');
+        toast.error('未能取得完整导出范围', {
+          description:
+            '请缩小范围或稍后重试；单次最多导出 5000 篇，已有文件会保留。',
+        });
+      }
     } finally {
       exportController.current = null;
       batchExporting.current = false;
