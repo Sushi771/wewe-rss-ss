@@ -131,7 +131,8 @@ async function run(mode, stablePopover = true) {
     if (mode === 'transient') assert.ok(frame >= 7);
     assert.equal(browser.__overlayClickPin, undefined);
     assert.equal(listeners.size, 0);
-    assert.deepEqual(Array.from(pointerClicks[0].events, (e) => e.type), ['pointerdown', 'pointerup', 'click']);
+    if (stablePopover) assert.deepEqual(Array.from(pointerClicks[0].events, (e) => e.type), ['pointerdown', 'pointerup', 'click']);
+    else assert.equal(pointerClicks.length, 0);
   } else {
     await assert.rejects(action);
     assert.equal(
@@ -152,7 +153,7 @@ test('transient popover animation settles before exactly one CDP mouse press/rel
   await run('transient');
 });
 
-test('xhs export uses the same pinned readiness before one click during a transient popover', async () => {
+test('xhs export uses the visible toolbar target for one checked pointer click', async () => {
   let exportCase, exportClick;
   function findCase(n) {
     if (ts.isCallExpression(n) && n.expression.getText(ast) === 'run' &&
@@ -165,12 +166,13 @@ test('xhs export uses the same pinned readiness before one click during a transi
     if (ts.isCallExpression(n) && n.expression.getText(ast) === 'click' &&
         ts.isCallExpression(n.arguments[0]) &&
         n.arguments[0].expression.getText(ast) === 'button' &&
-        n.arguments[0].arguments[0]?.text === '导出已保存 ZIP') exportClick = n;
+        n.arguments[0].arguments[0]?.text === '导出笔记') exportClick = n;
     ts.forEachChild(n, findClick);
   }
   findClick(exportCase);
   assert.ok(exportClick);
-  await run('transient', exportClick.arguments[1]?.kind === ts.SyntaxKind.TrueKeyword);
+  assert.equal(exportClick.arguments.length, 1, 'toolbar target does not use popover-only readiness');
+  await run('stable', false);
 });
 test('persistent popover obstruction fails within the bound without a mouse event', async () => {
   await run('persistent');
