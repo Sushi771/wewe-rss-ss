@@ -1,3 +1,4 @@
+const { waitForBrowser } = require('./browser-readiness.cjs');
 const fs = require('node:fs'),
   path = require('node:path'),
   http = require('node:http'),
@@ -479,21 +480,12 @@ const server = http.createServer((req, res) => {
       ],
       { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
     );
-    let errors = '';
-    child.stderr.on('data', (x) => (errors += x));
-    const portFile = path.join(profile, 'DevToolsActivePort');
-    for (let n = 0; n < 100 && !fs.existsSync(portFile); n++) await pause(100);
-    assert(fs.existsSync(portFile), errors.slice(-500));
-    const port = fs.readFileSync(portFile, 'utf8').split('\n')[0];
-    const tabs = await (
-      await fetch('http://127.0.0.1:' + port + '/json/list', {
-        signal: AbortSignal.timeout(5000),
-      })
-    ).json();
-    ws = new WebSocket(
-      tabs.find((x) => x.type === 'page' && x.url === 'about:blank')
-        .webSocketDebuggerUrl,
-    );
+    let errors = '', spawnError = null;
+    child.stderr.on('data', (x) => (errors = (errors + x).slice(-8192)));
+    child.on('error', (error) => { spawnError = error.code || 'UNKNOWN'; });
+    const ready = await waitForBrowser({ child, profile, stderr: () => errors, spawnError: () => spawnError });
+    console.info(JSON.stringify({ event: 'overlay-browser-ready', ...ready.diagnostics }));
+    ws = new WebSocket(ready.page.webSocketDebuggerUrl);
     await new Promise((r) => ws.addEventListener('open', r, { once: true }));
     let id = 0;
     const pending = new Map();
@@ -996,8 +988,7 @@ const server = http.createServer((req, res) => {
     await run('xhs-comments-removed',async()=>{await navigate('/dash/xiaohongshu');assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0);assert.equal(apiReads.filter(r=>r.name==='xiaohongshu.engagement'||r.name==='xiaohongshu.collectComments').length,0);cases.push({name:'xhs-comments-removed',status:'passed'});});
     await run('xhs-export', async () => {
       await navigate('/dash/xiaohongshu');
-      await more();
-      await click(button('导出已保存 ZIP'), true);
+      await click(button('导出笔记'));
       await modalMatrix('xhs-export');
     });
     await run('xhs-add', async () => {
