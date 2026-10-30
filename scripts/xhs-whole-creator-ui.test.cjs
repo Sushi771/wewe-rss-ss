@@ -252,6 +252,10 @@ test('received response and local storage failures have distinct readable reason
  const local=render({...base,generationRecovery:{...base.generationRecovery,failure:{stage:'storage',outcome:'local-failure',code:'XHS_STORAGE_FAILED',status:200}}},'XhsWholeGeneration');
  assert.match(local,/资料保存失败/);assert.doesNotMatch(local,/XHS_STORAGE_FAILED|P2002/);
 });
+test('directory mismatch explains the local pause without claiming an unknown request',()=>{
+ const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:23,missing:0,directoryComplete:true,resumable:true,failure:{stage:'archive',outcome:'local-failure',code:'XHS_RESUME_DIRECTORY_CHANGED'}}};
+ const html=render(job,'XhsWholeGeneration');assert.match(html,/保存目录与本次任务已使用的目录不同/);assert.doesNotMatch(html,/请求结果尚未确认|XHS_RESUME_DIRECTORY_CHANGED/);
+});
 test('review of this generation never executes until another explicit confirmation',async()=>{
  const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false,reviewable:true,newResult:'unknown'}};
  const h=recoveryInteraction(job,'XhsWholeGeneration');let tree=h.draw();assert.equal(h.calls.length,0);

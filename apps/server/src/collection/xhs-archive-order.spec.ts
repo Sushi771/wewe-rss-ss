@@ -32,6 +32,21 @@ const candidate = (id: string) => ({
   }),
 });
 describe('complete archive before interaction, independent query (synthetic only)', () => {
+  // Jest timeouts do not cancel the test body. Keep its promise so teardown
+  // cannot reset the shared fixture while that body can still schedule work.
+  let testBody: Promise<unknown> = Promise.resolve();
+  let setupPromise: Promise<void> = Promise.resolve();
+  let fixtureReady = true;
+  let cleanupPromise: Promise<void> | undefined;
+  const track = (fn: (...args: any[]) => unknown) => (...args: any[]) => {
+    testBody = Promise.resolve().then(() => fn(...args));
+    return testBody;
+  };
+  const it = Object.assign(
+    (name: any, fn: any, timeout?: number) => globalThis.it(name, track(fn), timeout),
+    { each: (rows: any) => (name: any, fn: any, timeout?: number) => globalThis.it.each(rows)(name, track(fn), timeout) },
+  ) as jest.It;
+
   let db: PrismaClient, folder: string;
   beforeAll(async () => {
     folder = await fs.mkdtemp(path.join(tmpdir(), 'xhs-order-synthetic-'));
@@ -52,7 +67,10 @@ describe('complete archive before interaction, independent query (synthetic only
         await db.$executeRawUnsafe(sql);
     }
   }, 30000);
-  beforeEach(async () => {
+  beforeEach(() => {
+    if (!fixtureReady) throw new Error("Previous test cleanup is still running");
+    fixtureReady=false; cleanupPromise=undefined; testBody=Promise.resolve();
+    setupPromise=(async () => {
     await db.$executeRaw`DELETE FROM xhs_whole_creator_jobs`;
     await db.$executeRaw`DELETE FROM xhs_request_budgets`;
     await db.$executeRaw`DELETE FROM xhs_metric_snapshots`;
@@ -66,8 +84,14 @@ describe('complete archive before interaction, independent query (synthetic only
         displayName: 'Synthetic',
       },
     });
+    })(); return setupPromise;
+  });
+  afterEach(async () => {
+    cleanupPromise ??= (async () => { await setupPromise.catch(() => {}); await testBody.catch(() => {}); fixtureReady=true; })();
+    await cleanupPromise;
   });
   afterAll(async () => {
+    if (!fixtureReady) throw new Error("Test fixture still in use");
     await db.$disconnect();
     await fs.rm(folder, { recursive: true, force: true });
   });

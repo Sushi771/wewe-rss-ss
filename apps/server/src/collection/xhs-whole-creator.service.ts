@@ -668,15 +668,22 @@ export class XhsWholeCreatorService implements OnModuleInit {
       .map((note) => note.id);
     if (toSave.length) {
       if (!job[taskKey] || prior?.state === 'completed' || settledGenerationChild) {
+        const historicalTasks = job.generation?.origin?.tasks;
+        const isHistorical = (id?: string) => !!id && !!historicalTasks &&
+          [historicalTasks.archiveTask, historicalTasks.downloadTask].includes(id);
+        const currentGenerationChild = job.generation
+          ? [job.archiveTask, job.downloadTask].find(id => id && !isHistorical(id))
+          : undefined;
+        const directoryReference = currentGenerationChild ??
+          (prior?.state === 'completed' || settledGenerationChild
+            ? job[taskKey] : phase === 'supplement' ? job.archiveTask : undefined);
+        const oldGenerationTask = isHistorical(directoryReference);
         const task = await this.subscriptions.downloadNotes({
           creatorId: job.creatorId,
           noteIds: toSave,
-          sameDirectoryAsTaskId:
-            prior?.state === 'completed' || settledGenerationChild
-              ? job[taskKey]
-              : phase === 'supplement'
-                ? job.archiveTask
-                : undefined,
+          // A historical child belongs to the former target. New generation
+          // children remain bound to the first current-generation directory.
+          sameDirectoryAsTaskId: oldGenerationTask ? undefined : directoryReference,
         });
         job[taskKey] = task.taskId;
         await this.checkpointChild(job, task.taskId);

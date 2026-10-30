@@ -10,6 +10,7 @@ export class XhsSubscriptionError extends Error {
 const codes = new Set([
   'XHS_LOCAL_PROGRAM_ERROR',
   'XHS_LOCAL_OPERATION_FAILED',
+  'XHS_RESUME_DIRECTORY_CHANGED',
   'XHS_STORAGE_FAILED',
   'XHS_BATCH_INPUT_INVALID',
   'XHS_GROUP_INVALID',

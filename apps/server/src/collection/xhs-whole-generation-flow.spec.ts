@@ -30,6 +30,21 @@ import { prepareWholeSourceFence, markWholeSourceStarted, commitWholeSourceCheck
 
 const hash = (v:unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 describe('whole creator generation through real runtime, policy and SQLite', () => {
+  // Jest timeouts do not cancel the test body. Keep its promise so teardown
+  // cannot reset the shared fixture while that body can still schedule work.
+  let testBody: Promise<unknown> = Promise.resolve();
+  let setupPromise: Promise<void> = Promise.resolve();
+  let fixtureReady = true;
+  let cleanupPromise: Promise<void> | undefined;
+  const track = (fn: (...args: any[]) => unknown) => (...args: any[]) => {
+    testBody = Promise.resolve().then(() => fn(...args));
+    return testBody;
+  };
+  const it = Object.assign(
+    (name: any, fn: any, timeout?: number) => globalThis.it(name, track(fn), timeout),
+    { each: (rows: any) => (name: any, fn: any, timeout?: number) => globalThis.it.each(rows)(name, track(fn), timeout) },
+  ) as jest.It;
+
   let db:PrismaClient, folder:string, runtime:XhsSubscriptionRuntime, subscriptions:XhsSubscriptionService, whole:XhsWholeCreatorService;
   let api:jest.Mock, shortLinks:jest.Mock, media:jest.Mock, original:any, live:boolean;
   const marker='xhs:dispatch-pending:whole:00000000-0000-4000-8000-000000000001';
@@ -61,7 +76,11 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     // expired dispatch ALS inherited by response-event receipt callbacks.
     db.$use(async(params,next)=>['queryRaw','executeRaw'].includes(params.action)?sqliteWrites.write(()=>next(params)):next(params));
   },40000);
-  beforeEach(async()=>{
+  beforeEach(()=>{
+    if (!fixtureReady) throw new Error("Previous test cleanup is still running");
+    fixtureReady=false; cleanupPromise=undefined; testBody=Promise.resolve();
+    whole=undefined as any; subscriptions=undefined as any; runtime=undefined as any;
+    setupPromise=(async()=>{
     (observeDispatchOwner as jest.Mock).mockReturnValue('dead');
     await db.$executeRaw`DELETE FROM xhs_limited_recovery_append`;await db.$executeRaw`DELETE FROM xhs_limited_recovery`;
     await db.$executeRaw`DELETE FROM xhs_subscription_tasks`;await db.$executeRaw`DELETE FROM xhs_whole_creator_jobs`;
@@ -91,9 +110,13 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     });
     shortLinks=jest.fn(async(url:URL)=>({status:302,url:url.href,location:author.profileUrl}));
     media=jest.fn(async()=>{throw Error('unexpected synthetic media request');});live=true;services();
+    })(); return setupPromise;
   });
-  afterEach(async()=>{await drain();await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();jest.restoreAllMocks();});
-  afterAll(async()=>{await db.$disconnect();await rm(folder,{recursive:true,force:true});},40000);
+  afterEach(async()=>{
+    cleanupPromise ??= (async()=>{await setupPromise.catch(()=>{});await testBody.catch(()=>{});if(whole) await (whole as any).lane;if(subscriptions) await (subscriptions as any).lane;if(whole) await whole.onModuleDestroy();if(subscriptions) await subscriptions.onModuleDestroy();if(runtime) runtime.onModuleDestroy();jest.restoreAllMocks();fixtureReady=true;})();
+    await cleanupPromise;
+  });
+  afterAll(async()=>{if (!fixtureReady) throw new Error("Test fixture still in use");await db.$disconnect();await rm(folder,{recursive:true,force:true});},40000);
   async function assertUnknownPreserved(){
     const job=await read();expect(job.sourceFence).toEqual(original.sourceFence);expect(job.legacyMaintenanceProof).toEqual(original.legacyMaintenanceProof);
     expect(job.legacyMaintenanceProof).toMatchObject({oldOwner:null,oldResult:'unknown',allowsRetry:false});
@@ -466,7 +489,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const freshKey=JSON.stringify(['xiaohongshu','note','fresh']);
     await db.xhsNote.update({where:{id:noteKey},data:{status:'listed',contentHtml:'<p>old partial cache must remain</p>'}});
     await db.xhsNote.create({data:{id:freshKey,creatorId:'creator',title:'Fresh',publishTime:0,kind:'image-text',status:'listed'}});
-    const old={taskId:'old-archive',creatorId:'creator',kind:'download',state:'blocked',noteIds:[noteKey,freshKey],items:{},directory:folder,
+    const old={taskId:'old-archive',creatorId:'creator',kind:'download',state:'blocked',noteIds:[noteKey,freshKey],items:{},directory:folder+'-old',
       total:2,completed:0,skipped:0,failed:1,remaining:2,code:'XHS_DOWNLOAD_BLOCKED',message:'Synthetic interrupted old selection'};
     const oldRaw=JSON.stringify(old);
     await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('old-archive','creator','blocked',${oldRaw},1)`;
@@ -483,7 +506,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toBe('<p>old partial cache must remain</p>');
     expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='old-archive'`)[0].document).toBe(oldRaw);
     const current=await read();expect(current.generation.missingIds).toContain(noteKey);expect(current.archiveTask).not.toBe('old-archive');
-    expect(createChild).toHaveBeenCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:'old-archive'});
+    expect(createChild).toHaveBeenCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:undefined});
     const child=JSON.parse((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${current.archiveTask}`)[0].document);
     expect(child.noteIds).toEqual([freshKey]);expect(child.directory).toBe(folder);expect(saves).toHaveBeenCalledTimes(1);
     await assertUnknownPreserved();
@@ -516,4 +539,41 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(saves.mock.calls.map(args=>args[1])).toEqual([doneKey,freshKey]);
     await assertUnknownPreserved();
   });
+  it('refuses a new target after a generation child exists even with two historical children',async()=>{
+    const doneKey=JSON.stringify(['xiaohongshu','note','a-done']),missingKey=JSON.stringify(['xiaohongshu','note','b-missing']),freshKey=JSON.stringify(['xiaohongshu','note','c-fresh']);
+    for (const taskId of ['old-archive','old-download']) {
+      const old={taskId,creatorId:'creator',kind:'download',state:'blocked',noteIds:[noteKey],items:{},directory:folder+'-old',total:1,completed:0,skipped:0,failed:1,remaining:1,code:'XHS_DOWNLOAD_BLOCKED'};
+      await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},'creator','blocked',${JSON.stringify(old)},1)`;
+    }
+    const oldJob=await read();oldJob.archiveTask='old-archive';oldJob.downloadTask='old-download';
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(oldJob)} WHERE id='job'`;
+    directory(['a-done','b-missing','c-fresh']);let interrupted=false;
+    const saves=jest.fn(async(_creator:any,id:string)=>{
+      if(id===doneKey&&!interrupted){interrupted=true;live=false;}
+      return {alreadySaved:false,mediaComplete:true,supplement:{status:'new'}};
+    });
+    subscriptions.bindLocalSaver(async()=>folder,saves);
+    const createChild=jest.spyOn(subscriptions,'downloadNotes');
+    await (whole as any).prepareGeneration(input);const generationId=(await read()).generation.id;
+    await execute(generationId);await drain();const paused=await read();
+    expect(paused.state).toBe('paused');expect(paused.generation.activeFence).toBeUndefined();expect(requestedDetails()).toEqual(['a-done']);
+    expect(paused.items[doneKey].archive).toBeGreaterThan(0);expect(paused.items[doneKey].metrics).toBeGreaterThan(0);
+    const oldChildRaw=(await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${paused.archiveTask}`)[0].document;
+    // The omitted note retains its first-run access context, so old noteIds would
+    // really dispatch it; this is not a token-absence or mocked service shortcut.
+    directory(['a-done','c-fresh']);live=true;
+    subscriptions.bindLocalSaver(async()=>folder+'-changed',saves);
+    await execute(generationId);await drain();const current=await read();
+    expect(current.state).toBe('paused');expect(current.generation.localFailure).toEqual({stage:'archive',code:'XHS_RESUME_DIRECTORY_CHANGED'});expect(requestedDetails()).toEqual(['a-done']);
+    expect(current.archiveTask).toBe(paused.archiveTask);expect(saves).toHaveBeenCalledTimes(1);
+    expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${paused.archiveTask}`)[0].document).toBe(oldChildRaw);
+    await assertUnknownPreserved();
+  });
+
+  it('retains only the fixed directory conflict code and never arbitrary local messages',()=>{
+    const {TRPCError}=require('@trpc/server');const {safeSourceFailure}=require('./xhs-source-receipt');
+    expect(safeSourceFailure(new TRPCError({code:'PRECONDITION_FAILED',message:'XHS_RESUME_DIRECTORY_CHANGED'}),'admitted').code).toBe('XHS_RESUME_DIRECTORY_CHANGED');
+    expect(safeSourceFailure(new Error('private path synthetic-secret'),'admitted').code).toBe('XHS_LOCAL_OPERATION_FAILED');
+  });
+
 });
