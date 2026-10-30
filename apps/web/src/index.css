@@ -1206,6 +1206,11 @@ button:active {
 .xhs-note-status {
   white-space: nowrap;
 }
+.xhs-note-status {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .xhs-note-metric {
   font-variant-numeric: tabular-nums;
 }

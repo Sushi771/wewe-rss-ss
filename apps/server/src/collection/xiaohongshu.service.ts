@@ -612,7 +612,7 @@ export class XiaohongshuService {
       if (task.basicResults?.[note.id] === 'missing') return 'missing' as const;
       return 'pending' as const;
     };
-    const queryVersion = createHash('sha256').update(JSON.stringify([this.noteQueryVersion(notes), notes.map(n => [n.id,stateOf(n)])])).digest('hex');
+    const queryVersion = this.noteQueryVersion(notes);
     if (
       (filter?.offset && !filter.queryVersion) ||
       (filter?.queryVersion && filter.queryVersion !== queryVersion)
