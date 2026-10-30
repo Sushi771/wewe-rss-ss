@@ -104,7 +104,13 @@ export class XhsSubscriptionRuntime
     g.receiptTail = (g.receiptTail ?? Promise.resolve()).then(() => g.persistReceipt!(value));
     void g.receiptTail.catch(() => {});
   }
-  async sourceStorage<T>(work: () => Promise<T>): Promise<T> { this.observeSourceStage('storage'); return work(); }
+  async sourceStorage<T>(work: () => Promise<T>): Promise<T> {
+    this.observeSourceStage('storage');
+    // Drain before opening the business write, never inside its transaction.
+    // Otherwise the checkpoint can remove the fence before any receipt is saved.
+    await this.wholeSourceGroup.getStore()?.receiptTail;
+    return work();
+  }
   private readonly wholeAuthorization = new AsyncLocalStorage<{
     jobId: string;
     creatorId: string;
@@ -1010,6 +1016,15 @@ export class XhsSubscriptionRuntime
     });
   }
   hasAuthorContext(authorId: string): boolean { return this.adapter.hasAuthorContext(authorId); }
+  restoreCheckpointAuthorContext(profile:{id:string;profileUrl:string;collectedAt:number}) {
+    const scope=this.wholeAuthorization.getStore();
+    if(!scope?.generationId || scope.authorId!==profile?.id ||
+        profile.profileUrl!==`https://www.xiaohongshu.com/user/profile/${scope.authorId}` ||
+        !Number.isSafeInteger(profile.collectedAt) || profile.collectedAt<=0)
+      return failure('XHS_AUTHOR_MISMATCH');
+    this.reviewedReadyCheck()();
+    this.adapter.restoreDefaultAuthorAccess(profile.id);
+  }
   list(authorId: string, cursor: string | null, signal?: AbortSignal) {
     this.checkWholeAuthor(authorId);
     return this.withSession(async () => {

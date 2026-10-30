@@ -113,6 +113,23 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     });
   }
   const requestedDetails=()=>api.mock.calls.filter(([r]:any[])=>new URL(r.url).pathname.endsWith('/feed')).map(([r]:any[])=>JSON.parse(r.body).source_note_id);
+  it('waits for source receipts before the business checkpoint can remove its fence',async()=>{
+    let release!:()=>void,entered!:()=>void,workStarted=false;
+    const delayed=new Promise<void>(resolve=>release=resolve),atStorage=new Promise<void>(resolve=>entered=resolve);
+    const writer=(runtime as any).receiptWriter;
+    (runtime as any).receiptWriter=async(scope:any,receipt:any)=>{await delayed;return writer(scope,receipt);};
+    const storage=runtime.sourceStorage.bind(runtime);
+    jest.spyOn(runtime,'sourceStorage').mockImplementation(work=>{
+      const pending=storage(async()=>{workStarted=true;return work();});entered();return pending;
+    });
+    jest.spyOn(subscriptions,'refresh').mockRejectedValueOnce(Error('synthetic child creation failure'));
+    await whole.prepareGeneration(input);await execute();await atStorage;
+    try { expect(workStarted).toBe(false); } finally { release(); }
+    await drain();const paused=await read();
+    expect(paused.generation.profile.id).toBe('author');expect(paused.generation.activeFence).toBeUndefined();
+    expect(paused.generation.lastSourceReceipt).toMatchObject({stage:'checkpoint',outcome:'checkpointed',settled:true,status:200});
+    expect(paused.generation.lastSourceReceipt.events).toContainEqual({stage:'response',status:200});
+  });
   it('continues after the durable profile checkpoint without resolving the homepage again',async()=>{
     const refresh=subscriptions.refresh.bind(subscriptions);let interrupted=false;
     jest.spyOn(subscriptions,'refresh').mockImplementation(async input=>{if(!interrupted){interrupted=true;throw Error('synthetic local child creation failure');}return refresh(input);});
@@ -125,6 +142,46 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await execute(generationId);await drain();const completed=await read();
     expect(resolve).toHaveBeenCalledTimes(1);expect(completed.state).toBe('completed');expect(completed.generation.profile).toEqual(paused.generation.profile);
     expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
+  });
+  it('resumes a checkpointed profile after restart at its exhausted cap using normal default list options',async()=>{
+    const refresh=subscriptions.refresh.bind(subscriptions);let interrupted=false;
+    jest.spyOn(subscriptions,'refresh').mockImplementation(async value=>{if(!interrupted){interrupted=true;throw Error('synthetic child creation failure');}return refresh(value);});
+    await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,profile:4}});
+    const generationId=(await read()).generation.id;await execute(generationId);await drain();
+    const paused=await read();expect(paused.generation.profile.id).toBe('author');expect(paused.sourceGrant.used.profile).toBe(4);
+    const requestsBefore=api.mock.calls.length,linksBefore=shortLinks.mock.calls.length;
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();
+    expect(runtime.hasAuthorContext('author')).toBe(false);
+    await execute(generationId);await drain();const finished=await read();
+    expect({state:finished.state,code:finished.code,phase:finished.generation.activeFence?.phase,routes:api.mock.calls.slice(requestsBefore).map(([r]:any[])=>new URL(r.url).pathname)}).toMatchObject({state:'completed'});expect(finished.listEnd).toBe(true);expect(finished.sourceGrant.used.profile).toBe(4);
+    expect(finished.generation.profile).toEqual(paused.generation.profile);expect(shortLinks).toHaveBeenCalledTimes(linksBefore);
+    const next=api.mock.calls.slice(requestsBefore).map(([request]:any[])=>new URL(request.url));
+    expect(next[0].pathname.endsWith('user_posted')).toBe(true);expect(next.some(url=>url.pathname.endsWith('otherinfo'))).toBe(false);
+    expect(next[0].searchParams.get('xsec_token')).toBe('');expect(next[0].searchParams.get('xsec_source')).toBe('');
+    expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
+  });
+  it.each([401,461])('retains a real list refusal %s after restoring checkpoint identity without a profile retry',async status=>{
+    jest.spyOn(subscriptions,'refresh').mockRejectedValueOnce(Error('synthetic child creation failure'));
+    await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,profile:4}});
+    const generationId=(await read()).generation.id;await execute(generationId);await drain();
+    const beforeRequests=api.mock.calls.length,beforeLinks=shortLinks.mock.calls.length;
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();
+    api.mockImplementation(async(request:any)=>({status,url:request.url,body:{success:false,code:-1}}));
+    await execute(generationId);await drain();const paused=await read();
+    expect(paused.state).toBe('paused');expect(paused.generation.activeFence.phase).toBe('list');
+    expect(paused.generation.lastSourceReceipt).toMatchObject({status,settled:true,outcome:'response-received'});
+    expect(paused.sourceGrant.used.profile).toBe(4);expect(api).toHaveBeenCalledTimes(beforeRequests+1);expect(shortLinks).toHaveBeenCalledTimes(beforeLinks);
+    expect((await db.$queryRaw<any[]>`SELECT state,code FROM xhs_source_risk WHERE id='source'`)[0]).toMatchObject({state:'blocked',code:status===401?'XHS_SOURCE_AUTHENTICATION_BLOCKED':'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'});
+    await expect(execute(generationId)).rejects.toThrow();expect(api).toHaveBeenCalledTimes(beforeRequests+1);await assertUnknownPreserved();
+  });
+  it('refuses checkpoint identity restoration outside its generation or for a foreign author',async()=>{
+    expect(()=>runtime.restoreCheckpointAuthorContext({...author,collectedAt:1})).toThrow();
+    await whole.prepareGeneration(input);const current=await read();
+    current.generation.profile={...author,id:'foreign',collectedAt:1};
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(current)} WHERE id='job'`;
+    const before=await currentBudget();await execute(current.generation.id);await drain();
+    expect((await read()).code).toBe('XHS_AUTHOR_MISMATCH');expect(await currentBudget()).toEqual(before);
+    expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();
   });
   const receiptSecret='synthetic-SECRET-cookie-token-body-url-message';
   async function checkedFailureReceipt(settled=true) {

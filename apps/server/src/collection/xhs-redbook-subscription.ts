@@ -108,6 +108,12 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     const access=this.authors.get(authorId);
     return !!access && access.expiresAt>this.now();
   }
+  /** A verified public identity needs no invented share token. The normal list
+   * client supports empty/default options; the actual response decides access. */
+  restoreDefaultAuthorAccess(authorId: string) {
+    id(authorId);
+    if (!this.hasAuthorContext(authorId)) this.authors.set(authorId,this.access('',''));
+  }
   private options(authorId: string): RedbookUserPageOptions {
     const context = this.authors.get(authorId);
     if (!context || context.expiresAt <= this.now())

@@ -1,5 +1,26 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto');
 const gate=require('./project-writer-gate.cjs');const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
+// This control-flow fixture still acquires a real writer lease. Observe this
+// test worker through the existing native tool, as runtime startup does, rather
+// than cold-starting PowerShell/CIM on its first synthetic fallback.
+test.before(async()=>{
+ if(process.platform!=='win32')return;
+ const {createServer}=require('node:net'),{once}=require('node:events'),{execFileSync}=require('node:child_process');
+ const root=fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()),'legacy-catch-identity-')),server=createServer();
+ try{
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  const tool=require('./identity-tool.cjs').identityTool({cacheRoot:path.join(root,'native')});
+  assert(tool,'native identity tool must be available for Windows fixtures');
+  const observed=JSON.parse(execFileSync(tool,['Snapshot',String(process.pid),String(server.address().port),'','',''],{encoding:'utf8',windowsHide:true,timeout:5000,maxBuffer:65536}));
+  assert.equal(observed.pid,process.pid);assert.equal(observed.executable.toLowerCase(),process.execPath.toLowerCase());
+  assert(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}Z$/.test(observed.startUtc));assert.equal(typeof observed.commandLine,'string');assert(observed.commandLine.length>0);
+  globalThis[Symbol.for('wewe.project-writer-self.v1')]=Object.freeze({pid:observed.pid,startUtc:observed.startUtc,executableHash:hash(fs.readFileSync(observed.executable)),commandHash:hash(observed.commandLine)});
+ }finally{
+  if(server.listening)await new Promise((resolve,reject)=>server.close(e=>e?reject(e):resolve()));
+  assert.equal(path.dirname(root),fs.realpathSync.native(os.tmpdir()));assert(path.basename(root).startsWith('legacy-catch-identity-'));fs.rmSync(root,{recursive:true,force:true});
+ }
+});
+
 const source=fs.readFileSync(path.join(__dirname,'restart.cjs'),'utf8').replace(/\r\n/g,'\n');
 const from=source.indexOf('      if(newChild){',source.indexOf('} catch (error) {',source.indexOf('const baseline ='))),to=source.indexOf('    } finally {\n      if (options.rehearsal)',from);
 assert(from>0&&to>from);const runCatch=new Function('ctx','return(async()=>{with(ctx){'+source.slice(from,to)+'}})()');

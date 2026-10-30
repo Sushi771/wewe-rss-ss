@@ -756,7 +756,11 @@ export class XhsWholeCreatorService implements OnModuleInit {
       });
       const runWithBudget = () =>
         this.runtime.withRequestBudget(budget, id, async () => {
-          if (job.generation && (!job.generation.profile || !this.runtime.hasAuthorContext(job.sourceGrant!.authorId))) {
+          if (job.generation?.profile) {
+            localStage='profile';
+            this.runtime.restoreCheckpointAuthorContext(job.generation.profile);
+          }
+          if (job.generation && !job.generation.profile) {
             localStage='profile';
             // A supplied homepage is resolved through the ordinary source, under this generation's profile cap.
             await this.runtime.withCheckpointGroup('profile', job.sourceGrant!.authorId, undefined, async () => {
@@ -831,6 +835,10 @@ export class XhsWholeCreatorService implements OnModuleInit {
           localStage='archive';
           await this.saveStage(job, notes, 'archive');
           localStage='metrics';
+          if (!job.profile && job.generation?.profile) {
+            job.profile=job.generation.profile.collectedAt;
+            await this.save(job);
+          }
           if (!job.profile) {
             await this.check(job);
             const snapshot = await this.engagement.refreshMetrics({
