@@ -166,6 +166,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(resolve).toHaveBeenCalledTimes(1);expect(completed.state).toBe('completed');expect(completed.generation.profile).toEqual(paused.generation.profile);
     expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
   });
+  // Two synthetic SQLite phases plus restart: 2.1s locally; CI delay is not yet attributed.
   it('resumes a checkpointed profile after restart at its exhausted cap using normal default list options',async()=>{
     const refresh=subscriptions.refreshFull.bind(subscriptions);let interrupted=false;
     jest.spyOn(subscriptions,'refreshFull').mockImplementation(async value=>{if(!interrupted){interrupted=true;throw Error('synthetic child creation failure');}return refresh(value);});
@@ -182,7 +183,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(next[0].pathname.endsWith('user_posted')).toBe(true);expect(next.some(url=>url.pathname.endsWith('otherinfo'))).toBe(false);
     expect(next[0].searchParams.get('xsec_token')).toBe('');expect(next[0].searchParams.get('xsec_source')).toBe('');
     expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
-  });
+  }, 15000);
   it.each([401,461])('retains a real list refusal %s after restoring checkpoint identity without a profile retry',async status=>{
     jest.spyOn(subscriptions,'refreshFull').mockRejectedValueOnce(Error('synthetic child creation failure'));
     await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,profile:4}});

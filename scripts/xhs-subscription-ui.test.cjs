@@ -201,6 +201,7 @@ function fixture(options = {}) {
       'resolveSubscription',
       'subscribe',
       'refresh',
+      'refreshFull',
       'downloadNotes',
       'cancelTask',
       'resumeTask',
@@ -234,8 +235,9 @@ function fixture(options = {}) {
               creatorId: 'creator-a',
               created: !existing,
               subscribed: true,
+              ...(!existing ? { collection: { taskId: 'list-task', creatorId: 'creator-a' } } : {}),
             };
-          if (name === 'refresh') {
+          if (name === 'refresh' || name === 'refreshFull') {
             taskStatus = status('running', 'list');
             return { taskId: 'list-task', creatorId: input.id };
           }
@@ -528,7 +530,9 @@ function fixture(options = {}) {
   }).default;
   const previousFetch = global.fetch;
   let cacheMode = 'normal';
+  const directoryCalls=[];
   global.fetch = async (url, request) => {
+    if (/\/directory(?:-confirm)?\?/.test(url)) directoryCalls.push(url);
     if (url.endsWith('/xiaohongshu/cache-export')) {
       const payload = JSON.parse(request.body);
       calls.push(['cacheExport', payload]);
@@ -562,6 +566,7 @@ function fixture(options = {}) {
         }),
       };
     }
+    if (url.endsWith('/directory-confirm?target=xiaohongshu')) return {ok:true,json:async()=>({directory:'synthetic-only',askEveryTime:true,pickToken:'synthetic-grant'})};
     return {
       ok: true,
       json: async () =>
@@ -608,6 +613,8 @@ function fixture(options = {}) {
   return {
     calls,
     recoveryQueries,
+    directoryCalls,
+    all,
     creators,
     items,
     render,
@@ -634,6 +641,10 @@ function fixture(options = {}) {
         render();
       }
     },
+    async openZip() { await button('导出笔记').props.onPress(); find('select', '导出方式').props.onChange({target:{value:'zip'}}); render(); },
+    async startExport(twice=false) { const n=render().find(x=>x.type==='Button' && all(x.props.children).join('').startsWith('开始导出')); assert.ok(n, 'export confirmation button'); n.props.onPress(); if(twice)n.props.onPress(); for(let i=0;i<8;i++)await tick(); },
+    async openLocalExport(twice=false) { await button('导出笔记').props.onPress(); render(); await this.startExport(twice); await tick(); },
+    async confirmDirectory(accept=true) { await tick(); render(); if(accept)button('确认保存').props.onPress(); else {const footer=render().find(n=>n.type==='ModalFooter'&&all(n.props.children).some(x=>x?.type==='Button'&&all(x.props.children).join('')==='确认保存'));assert.ok(footer);const cancelExport=all(footer.props.children).find(x=>x?.type==='Button'&&all(x.props.children).join('')==='取消');assert.ok(cancelExport);cancelExport.props.onPress();} },
     dispose() {
       slots.forEach((slot) => slot?.cleanup?.());
       global.fetch = previousFetch;
@@ -684,12 +695,8 @@ test('note/profile resolution requires confirmation, preserves grouping, and ref
         f.calls.find(([name]) => name === 'subscribe'),
         ['subscribe', { resolutionId: 'resolution-a', groupId: 'group-a' }],
       );
-      assert.equal(f.calls.filter(([name]) => name === 'refresh').length, 1);
-      assert.equal(
-        f.calls.findIndex(([name]) => name === 'refresh') >
-          f.calls.findIndex(([name]) => name === 'subscribe'),
-        true,
-      );
+      assert.equal(f.calls.filter(([name]) => name === 'refreshFull').length, 0);
+      assert.equal(f.calls.filter(([name]) => name === 'refresh').length, 0);
     } finally {
       f.dispose();
     }
@@ -738,8 +745,8 @@ test('date and title filters reset selection; pending image notes selectable, un
       f.find('Checkbox', '选择笔记 苹果图文').props.isSelected,
       true,
     );
-    await f.button('导出已保存 ZIP').props.onPress();
-    await f.button('开始导出').props.onPress();
+    await f.openZip();
+    await f.startExport();
     assert.deepEqual(f.calls.find(([n]) => n === 'export')[1].noteIds, [
       'saved',
       'old',
@@ -780,17 +787,38 @@ test('date and title filters reset selection; pending image notes selectable, un
   }
 });
 
-test('local picker cancellation does not download; repeated download and cancel clicks start one operation; progress collapses', async () => {
+test('cancelling the native directory picker retains settings and submits no work', async () => {
+  const f=fixture();
+  try {
+    await f.start(); f.settings({cancelledPicker:true});
+    await f.button('选择目录').props.onPress();
+    assert.equal(f.directoryCalls.filter(url=>url.includes('/directory?')).length,1);
+    assert.equal(f.calls.filter(([name])=>['downloadNotes','cacheExport','refreshFull'].includes(name)).length,0);
+    assert(f.render().filter(x=>typeof x==='string').join(' ').includes('已取消目录选择'));
+  } finally { f.dispose(); }
+});
+
+test('cancelling the archived save confirmation submits no work', async () => {
+  const f=fixture();
+  try {
+    await f.start(); f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true); f.render();
+    const pending=f.button('保存已选归档到本地').props.onPress();
+    await f.confirmDirectory(false); await pending;
+    assert.equal(f.calls.filter(([name])=>['downloadNotes','cacheExport'].includes(name)).length,0);
+    assert.equal(f.directoryCalls.filter(url=>url.includes('/directory-confirm?')).length,0);
+  } finally { f.dispose(); }
+});
+
+test('export confirmation cancellation submits nothing; repeated export and cancel clicks start one operation', async () => {
   const f = fixture();
   try {
     await f.start();
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
-    f.settings({ cancelledPicker: true });
-    await f.button('下载图文到本地 (1)').props.onPress();
+    await f.button('导出笔记').props.onPress();
+    const footer=f.render().find(n=>n.type==='ModalFooter'&&f.all(n.props.children).some(x=>x?.type==='Button'&&f.all(x.props.children).join('').startsWith('开始导出')));
+    assert.ok(footer);const cancelExport=f.all(footer.props.children).find(x=>x?.type==='Button'&&f.all(x.props.children).join('')==='取消');assert.ok(cancelExport);cancelExport.props.onPress();
     assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
-    f.settings({ cancelledPicker: false });
-    const download = f.button('下载图文到本地 (1)');
-    await Promise.all([download.props.onPress(), download.props.onPress()]);
+    await f.openLocalExport(true);
     f.render();
     await tick();
     assert.deepEqual(f.calls.find(([n]) => n === 'downloadNotes')[1], {
@@ -806,7 +834,7 @@ test('local picker cancellation does not download; repeated download and cancel 
     assert.equal(f.calls.filter(([n]) => n === 'cancelTask').length, 1);
     f.find('summary', '收起进度').props.onClick({ preventDefault() {} });
     assert.ok(f.find('summary', '查看进度'));
-    assert.equal(f.button('更新笔记列表').props.isDisabled, false);
+    assert.equal(f.button('更新本号').props.isDisabled, false);
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
     f.render();
     await tick();
@@ -820,26 +848,38 @@ test('local picker cancellation does not download; repeated download and cancel 
   }
 });
 
+test('subscription and cache update never request a save directory', async () => {
+  const f=fixture();
+  try {
+    await f.start(); await f.resolve(); await f.button('确认订阅').props.onPress();
+    assert.equal(f.directoryCalls.length,0);
+    f.render(); await tick(); f.setTask(status('completed','list')); await tick(); f.render();
+    await f.button('更新本号').props.onPress();
+    assert.equal(f.calls.filter(([name])=>name==='refreshFull').length,1);
+    assert.equal(f.directoryCalls.length,0);
+  } finally { f.dispose(); }
+});
+
 test('list refresh has distinct progress; status outages never resubmit work; partial completion unlocks controls', async () => {
   const f = fixture();
   try {
     await f.start();
-    const refresh = f.button('更新笔记列表');
+    const refresh = f.button('更新本号');
     await Promise.all([refresh.props.onPress(), refresh.props.onPress()]);
     f.settings({ failStatus: true });
     f.render();
     await tick();
-    assert.equal(f.calls.filter(([n]) => n === 'refresh').length, 1);
-    assert.equal(f.button('更新笔记列表').props.isDisabled, true);
+    assert.equal(f.calls.filter(([n]) => n === 'refreshFull').length, 1);
+    assert.equal(f.button('更新本号').props.isDisabled, true);
     f.settings({ failStatus: false });
     f.setTask(status('partial', 'list'));
     await tick();
-    assert.equal(f.button('更新笔记列表').props.isDisabled, false);
+    assert.equal(f.button('更新本号').props.isDisabled, false);
     assert.ok(
       f
         .render()
         .some(
-          (n) => typeof n === 'string' && n.includes('更新笔记列表：部分完成'),
+          (n) => typeof n === 'string' && n.includes('部分完成'),
         ),
     );
   } finally {
@@ -868,9 +908,7 @@ test('management folders retain move/filter handlers and selections above 100 re
         publishTime: 0,
       });
     await f.button('选择当前筛选全部').props.onPress();
-    const download = f.button('下载图文到本地 (104)');
-    assert.equal(download.props.isDisabled, false);
-    await download.props.onPress();
+    await f.openLocalExport();
     assert.equal(
       f.calls.filter(([name]) => name === 'downloadNotes').length,
       1,
@@ -955,17 +993,17 @@ test('cross-page loaded selection preserves earlier IDs; filtered export include
       end: '',
     });
     f.find('Checkbox', '全选已加载').props.onValueChange(true);
-    assert.ok(f.button('下载图文到本地 (20)'));
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
     await f.button('加载更多').props.onPress();
     assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
     f.find('Checkbox', '全选已加载').props.onValueChange(true);
-    assert.ok(f.button('下载图文到本地 (40)'));
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
     assert.equal(f.find('Checkbox', '选择笔记 批量 204'), undefined);
-    await f.button('导出已保存 ZIP').props.onPress();
+    await f.openZip();
     f.render()
       .find((n) => n.type === 'input' && n.props.value === 'filtered')
       .props.onChange();
-    await f.button('开始导出').props.onPress();
+    await f.startExport();
     const exports = f.calls
       .filter(([name]) => name === 'export')
       .map(([, input]) => input);
@@ -986,7 +1024,7 @@ test('cross-page loaded selection preserves earlier IDs; filtered export include
       'synthetic-part-2-of-3.zip',
       'synthetic-part-3-of-3.zip',
     ]);
-    assert.ok(f.button('下载图文到本地 (40)'));
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
   } finally {
     f.dispose();
     global.document = oldDocument;
@@ -1049,17 +1087,19 @@ test('resuming waits for executor release, uses original task identity and newly
   try {
     await f.start();
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
-    await f.button('下载图文到本地 (1)').props.onPress();
+    await f.openLocalExport();
     f.render();
     await tick();
     f.setTask({ ...status('cancelled'), resumable: false });
     await tick();
     assert.equal(f.find('Button', '继续未完成任务'), undefined);
-    assert.equal(f.button('更新笔记列表').props.isDisabled, true);
+    assert.equal(f.button('更新本号').props.isDisabled, true);
     f.setTask({ ...status('cancelled'), resumable: true });
     await tick();
     const resume = f.button('继续未完成任务');
-    await Promise.all([resume.props.onPress(), resume.props.onPress()]);
+    const resumes = Promise.all([resume.props.onPress(), resume.props.onPress()]);
+    await f.confirmDirectory();
+    await resumes;
     assert.deepEqual(
       f.calls.find(([name]) => name === 'resumeTask'),
       ['resumeTask', { taskId: 'download-task', pickToken: 'synthetic-grant' }],
@@ -1182,8 +1222,8 @@ test('global/group queries preserve authors, exports dispatch by author and orig
     await f.start(true);
     assert.ok(f.find('Checkbox', '选择笔记 分组正文'));
     await f.button('选择当前筛选全部').props.onPress();
-    await f.button('导出已保存 ZIP').props.onPress();
-    await f.button('开始导出').props.onPress();
+    await f.openZip();
+    await f.startExport();
     const exports = f.calls.filter(([name]) => name === 'export');
     assert.ok(exports.some(([, input]) => input.noteIds.includes('saved')));
     assert.ok(exports.every(([, input]) => input.creatorId === undefined));
@@ -1198,11 +1238,11 @@ test('global/group queries preserve authors, exports dispatch by author and orig
     f.find('ManagementFolders').props.onFilter('group-a');
     assert.ok(f.find('Checkbox', '选择笔记 分组正文'));
     assert.equal(f.find('Checkbox', '选择笔记 苹果图文'), undefined);
-    await f.button('导出已保存 ZIP').props.onPress();
+    await f.openZip();
     f.render()
       .find((n) => n.type === 'input' && n.props.value === 'filtered')
       .props.onChange();
-    await f.button('开始导出').props.onPress();
+    await f.startExport();
     assert.equal(
       f.calls.filter(([name]) => name === 'export').at(-1)[1].queryVersion,
       queryVersion,
@@ -1265,7 +1305,7 @@ test('mixed-author downloads run serially, stop queued authors on cancellation, 
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
     f.find('Checkbox', '选择笔记 第二图文').props.onValueChange(true);
     f.find('Checkbox', '选择笔记 第三图文').props.onValueChange(true);
-    await f.button('下载图文到本地 (3)').props.onPress();
+    await f.openLocalExport();
     f.render();
     await tick();
     assert.equal(
@@ -1283,7 +1323,7 @@ test('mixed-author downloads run serially, stop queued authors on cancellation, 
     await f.button('取消任务').props.onPress();
     await tick();
     f.render();
-    assert.ok(f.button('下载图文到本地 (3)'));
+    assert.equal(f.find('Checkbox', '选择笔记 苹果图文').props.isSelected, true);
     assert.equal(
       f.calls.filter(([name]) => name === 'downloadNotes').length,
       2,
@@ -1551,7 +1591,7 @@ test('late discovery does not replace a newly started task or clear selections a
   try {
     await f.start();
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
-    await f.button('下载图文到本地 (1)').props.onPress();
+    await f.openLocalExport();
     f.render();
     release();
     await tick();
@@ -1601,7 +1641,9 @@ test('uncertain resume receipt immediately removes stale continue action and onl
         },
       ],
     });
-    await f.button('继续未完成任务').props.onPress();
+    const resumePending = f.button('继续未完成任务').props.onPress();
+    await f.confirmDirectory();
+    await resumePending;
     await tick();
     f.render();
     assert.equal(f.find('Button', '继续未完成任务'), undefined);
@@ -1671,20 +1713,20 @@ test('combined filters preserve exact refreshed export ids and leave all export 
     });
     assert(f.find('Checkbox', '选择笔记 旧笔记'));
     assert.equal(f.find('Checkbox', '选择笔记 苹果存档'), undefined);
-    await f.button('导出已保存 ZIP').props.onPress();
+    await f.openZip();
     f.render()
       .find((n) => n.type === 'input' && n.props.value === 'filtered')
       .props.onChange();
-    await f.button('开始导出').props.onPress();
+    await f.startExport();
     assert.deepEqual(
       f.calls.filter(([name]) => name === 'export').at(-1)[1].noteIds,
       ['old'],
     );
-    await f.button('导出已保存 ZIP').props.onPress();
+    await f.openZip();
     f.render()
       .find((n) => n.type === 'input' && n.props.value === 'all')
       .props.onChange();
-    await f.button('开始导出').props.onPress();
+    await f.startExport();
     const ids = f.calls.filter(([name]) => name === 'export').at(-1)[1].noteIds;
     assert(
       ids.includes('saved') && ids.includes('old') && ids.includes('video'),
@@ -1703,9 +1745,10 @@ test('archived-only action freezes one cache scope and never calls source-capabl
     await f.start();
     f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
     f.render();
-    await f.button('保存已选归档到本地').props.onPress();
+    const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
     assert.deepEqual(f.calls.find(([n]) => n === 'cacheExport')[1], {
       items: [{ id: 'saved', creatorId: 'creator-a' }],
+      pickToken: 'synthetic-grant',
     });
     assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
   } finally {
@@ -1719,7 +1762,7 @@ test('a lost cache-only receipt is not replayed or routed to a source download',
     f.settings({ cacheMode: 'lost' });
     f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
     f.render();
-    await f.button('保存已选归档到本地').props.onPress();
+    const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
     assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
     assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
   } finally {
@@ -1736,6 +1779,7 @@ test('cache-only stop aborts its single scope request; malformed receipts cannot
       f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
       f.render();
       const pending = f.button('保存已选归档到本地').props.onPress();
+      await f.confirmDirectory();
       if (mode === 'pending') {
         await tick();
         f.render();
@@ -1752,14 +1796,14 @@ test('cache-only stop aborts its single scope request; malformed receipts cannot
 
 test('AUDIT: malformed saved status and cancellation type cannot claim cache completion',async()=>{
  for(const mode of ['audit-status','audit-cancel']){
-  const f=fixture();try{await f.start();f.settings({cacheMode:mode});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();await f.button('保存已选归档到本地').props.onPress();
+  const f=fixture();try{await f.start();f.settings({cacheMode:mode});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
    const visible=f.render().filter(n=>typeof n==='string').join(' ');
    assert.match(visible,/回执未确认|回执不完整/);assert.equal(f.calls.filter(([n])=>n==='cacheExport').length,1);
   }finally{f.dispose()}
  }
 });
 test('AUDIT: failed cache receipt displays a user explanation without backend codes',async()=>{
- const f=fixture();try{await f.start();f.settings({cacheMode:'audit-code'});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();await f.button('保存已选归档到本地').props.onPress();
+ const f=fixture();try{await f.start();f.settings({cacheMode:'audit-code'});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
   const visible=f.render().filter(n=>typeof n==='string').join(' ');assert.doesNotMatch(visible,/XHS_CACHED_SAVE_FAILED/);assert.match(visible,/失败 1/);
  }finally{f.dispose()}
 });
