@@ -62,7 +62,7 @@ jobs:
       - name: Preserving update effects and process transitions
         run: |
           node --test --test-concurrency=1 scripts/local-release/preserving-contract.test.cjs scripts/local-release/preserving-restart.test.cjs scripts/local-release/legacy-restart-cleanup.test.cjs
-          node --test --test-concurrency=1 scripts/local-release/project-writer-gate.test.cjs scripts/local-release/guarded-prisma.test.cjs
+          node --test --test-concurrency=1 scripts/local-release/writer-self.fixture.test.cjs scripts/local-release/project-writer-gate.test.cjs scripts/local-release/guarded-prisma.test.cjs
           node --test --test-name-pattern='^legacy (adapter|boundary)' scripts/local-release/release-scope.test.cjs
           node --test --test-concurrency=1 --test-name-pattern='^(preserving|original complete)' scripts/local-release/release-scope.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/windows-release-references.test.cjs
       - run: pnpm install --frozen-lockfile

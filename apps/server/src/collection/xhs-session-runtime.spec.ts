@@ -1,3 +1,4 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { XhsRequestBudget } from './xhs-request-budget';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';

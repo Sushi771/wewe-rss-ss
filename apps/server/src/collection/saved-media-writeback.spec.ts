@@ -1,3 +1,4 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';

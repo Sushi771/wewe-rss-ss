@@ -1,3 +1,4 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { mediaTransaction } from './media-transaction';
 import { sqliteWrites } from './sqlite-write-coordinator';
 import { PrismaService } from '../prisma/prisma.service';

@@ -1,3 +1,4 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -17,6 +18,7 @@ describe('ordinary account edits and explicit credential protection (synthetic S
   let api: ReturnType<TrpcRouter['appRouter']['createCaller']>;
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-ordinary-account-'));
+    await fs.writeFile(path.join(root,'fixture.db'),'',{flag:'wx'});
     Object.assign(process.env, {
       DATABASE_URL: 'file:' + path.join(root, 'fixture.db'),
       SQLITE_BACKUP_KIND: 'test',

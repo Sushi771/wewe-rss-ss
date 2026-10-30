@@ -15,15 +15,19 @@ describe('reviewed recovery product chain',()=>{
  const marker='xhs:dispatch-pending:whole:00000000-0000-4000-8000-000000000001';
  beforeAll(async()=>{folder=await mkdtemp(path.join(tmpdir(),'xhs-product-'));db=new PrismaClient({datasources:{db:{url:'file:'+path.join(folder,'s.db').replace(/\\/g,'/')}}});const root=path.resolve(__dirname,'../../prisma/migrations');for(const name of (await readdir(root)).sort())if((await stat(path.join(root,name))).isDirectory())for(const sql of splitSqliteStatements(await readFile(path.join(root,name,'migration.sql'),'utf8')))await db.$executeRawUnsafe(sql)},40000);
  beforeEach(async()=>{
-   await db.$executeRaw`DELETE FROM xhs_limited_recovery_append`;await db.$executeRaw`DELETE FROM xhs_limited_recovery`;
-  await db.$executeRaw`DELETE FROM xhs_request_budgets`;await db.$executeRaw`DELETE FROM xhs_whole_creator_jobs`;await db.$executeRaw`DELETE FROM xhs_metric_snapshots`;await db.xhsNote.deleteMany();await db.xhsCreator.deleteMany();
-  await db.xhsCreator.create({data:{id:'creator',profileUrl:'https://www.xiaohongshu.com/user/profile/author',displayName:'Synthetic',externalAuthorId:'author'}});
+  // One atomic reset/seed, instead of eleven durable autocommits per example.
+  // Keep the ordinary 5s hook bound and leave all product assertions unchanged.
+  const a=await db.$transaction(async tx=>{
+  await tx.$executeRaw`DELETE FROM xhs_limited_recovery_append`;await tx.$executeRaw`DELETE FROM xhs_limited_recovery`;
+  await tx.$executeRaw`DELETE FROM xhs_request_budgets`;await tx.$executeRaw`DELETE FROM xhs_whole_creator_jobs`;await tx.$executeRaw`DELETE FROM xhs_metric_snapshots`;await tx.xhsNote.deleteMany();await tx.xhsCreator.deleteMany();
+  await tx.xhsCreator.create({data:{id:'creator',profileUrl:'https://www.xiaohongshu.com/user/profile/author',displayName:'Synthetic',externalAuthorId:'author'}});
   const owner={pid:11,startIdentity:'638000000000000000',nonce:'00000000-0000-4000-8000-000000000001'};const grant={used:{detail:1},limits:{detail:5}};
   const doc:any={id:'job',creatorId:'creator',state:'paused',items:{},sourceFence:{marker,phase:'detail',noteId:'note',state:'started',owner},code:'XHS_DOWNLOAD_BLOCKED',sourceGrant:grant};doc.unknownReview={marker,owner,decision:'request-retry',originalCode:doc.code,originalGrant:grant,recordedAt:10};
-  await db.$executeRaw`INSERT INTO xhs_whole_creator_jobs(id,creator_id,state,document,updated_at) VALUES('job','creator','paused',${JSON.stringify(doc)},1)`;
-  await db.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED',owner=NULL WHERE id='source'`;
-  await db.$executeRaw`INSERT INTO xhs_request_budgets(id,used,request_limit,next_at,interval_ms) VALUES('job',6,310,0,10000),('xhs:source-total',8,312,0,10000),(${marker},1,1,0,0)`;
-  const scope={jobId:'job',authorId:'author',noteId:'note',phase:'detail',originalHash:originalAttemptDigest(doc),reviewId:attemptDigest(doc.unknownReview),maxRequests:1,taskUsedCeiling:7,sharedUsedCeiling:9,expiresAt:Date.now()+60000};const a=await db.$transaction(tx=>createReviewedAttempt(tx,scope));
+  await tx.$executeRaw`INSERT INTO xhs_whole_creator_jobs(id,creator_id,state,document,updated_at) VALUES('job','creator','paused',${JSON.stringify(doc)},1)`;
+  await tx.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED',owner=NULL WHERE id='source'`;
+  await tx.$executeRaw`INSERT INTO xhs_request_budgets(id,used,request_limit,next_at,interval_ms) VALUES('job',6,310,0,10000),('xhs:source-total',8,312,0,10000),(${marker},1,1,0,0)`;
+  const scope={jobId:'job',authorId:'author',noteId:'note',phase:'detail',originalHash:originalAttemptDigest(doc),reviewId:attemptDigest(doc.unknownReview),maxRequests:1,taskUsedCeiling:7,sharedUsedCeiling:9,expiresAt:Date.now()+60000};return createReviewedAttempt(tx,scope);
+  });
   input={jobId:'job',attemptId:a.id,url:'https://www.xiaohongshu.com/explore/note?xsec_token=synthetic-access&xsec_source=pc_share',confirmUnknownRetry:true};
   live=true;api=jest.fn(async(request:any)=>({status:200,url:request.url,body:{success:true,code:0,data:{items:[{id:'note',note_card:{note_id:'note',user:{user_id:'author',nickname:'Synthetic'},type:'normal',time:1760000000000,title:'Synthetic',desc:'Synthetic body',image_list:[],interact_info:{liked_count:'0',collected_count:'2',share_count:'3',comment_count:'4'}}}]}}}));media=jest.fn();
   runtime=new XhsSubscriptionRuntime({enabled:()=>live,api,media,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));(runtime as any).cookies={a1:'synthetic',web_session:'synthetic'};(runtime as any).stopCode='XHS_SOURCE_HISTORY_REVIEW_REQUIRED';
