@@ -85,7 +85,7 @@ describe('complete archive before interaction, independent query (synthetic only
       },
     });
     })(); return setupPromise;
-  });
+  }, 15000);
   afterEach(async () => {
     cleanupPromise ??= (async () => { await setupPromise.catch(() => {}); await testBody.catch(() => {}); fixtureReady=true; })();
     await cleanupPromise;

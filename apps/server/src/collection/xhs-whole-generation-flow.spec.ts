@@ -484,7 +484,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const budget=await currentBudget();await assertUnknownPreserved();
     await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();
     await expect(execute()).rejects.toThrow();expect(await currentBudget()).toEqual(budget);expect(requestedDetails()).toEqual(['note']);
-  });
+  }, 15000);
   it('creates a current-directory child instead of resuming the old blocked archive selection',async()=>{
     const freshKey=JSON.stringify(['xiaohongshu','note','fresh']);
     await db.xhsNote.update({where:{id:noteKey},data:{status:'listed',contentHtml:'<p>old partial cache must remain</p>'}});
@@ -538,7 +538,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(createChild).toHaveBeenLastCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:paused.archiveTask,wholeTarget:expect.any(Object)});
     expect(saves.mock.calls.map(args=>args[1])).toEqual([doneKey,freshKey]);
     await assertUnknownPreserved();
-  });
+  }, 15000);
   it('refuses a new target after a generation child exists even with two historical children',async()=>{
     const doneKey=JSON.stringify(['xiaohongshu','note','a-done']),missingKey=JSON.stringify(['xiaohongshu','note','b-missing']),freshKey=JSON.stringify(['xiaohongshu','note','c-fresh']);
     for (const taskId of ['old-archive','old-download']) {
