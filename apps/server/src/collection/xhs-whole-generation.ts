@@ -71,7 +71,7 @@ export async function historicalGenerationMarker(tx: Tx, scope: GenerationScope)
   const r = await jobRow(tx, scope.jobId), job = r.job, g = job.generation;
   if (r.creator_id !== scope.creatorId || r.author !== scope.authorId || job.id !== scope.jobId ||
       !generationMatches(job) || g.id !== scope.generationId || !['prepared', 'running'].includes(g.state) ||
-      !['paused', 'queued', 'running'].includes(r.state) || job.reviewAttempt) return bad();
+      !['paused', 'partial', 'queued', 'running'].includes(r.state) || job.reviewAttempt) return bad();
   await riskReady(tx); await noOtherRecovery(tx);
   const budgets = await budgetRows(tx, scope.jobId);
   if (budgets.length !== 2) return bad();

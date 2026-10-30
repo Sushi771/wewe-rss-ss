@@ -2027,7 +2027,7 @@ export class TrpcRouter {
         phaseLimits:z.object({profile:z.number().int().nonnegative(),list:z.number().int().nonnegative(),detail:z.number().int().nonnegative(),media:z.number().int().nonnegative(),metrics:z.number().int().nonnegative()}).strict().default({profile:100000,list:100000,detail:100000,media:100000,metrics:100000}) }).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareGeneration(input));}),
     executeWholeCreatorGeneration: this.trpcService.protectedProcedure
-      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true),pickToken:z.string().max(128).optional()}).strict())
+      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true),pickToken:z.string().max(128).optional(),selectedIds:z.array(z.string().min(1).max(300)).min(1).max(1000).optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.executeGeneration(input));}),
     prepareWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),confirmUnknownRetry:z.literal(true),confirmLegacyUnknown:z.literal(true).optional()}).strict())

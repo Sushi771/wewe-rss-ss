@@ -201,8 +201,14 @@ export class XhsSubscriptionRuntime
     const rows = await tx.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId} AND creator_id=${creatorId} AND state='running'`;
     if (tasks.length !== 1 || rows.length !== 1) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     const task = JSON.parse(tasks[0].document), job = JSON.parse(rows[0].document);
-    if (task.collectionStage !== 'details' || task.listFinished !== true ||
-        JSON.stringify(task.listedIds) !== JSON.stringify(ids) || job.listTask !== taskId ||
+    const sameIds = (a: unknown, b: unknown) => Array.isArray(a) && Array.isArray(b) &&
+      JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+    const selected = job.generation?.selectedIds;
+    const directoryMatches = selected
+      ? task.collectionScope === 'selected' && (task.selectionComplete === true || task.listFinished === true) &&
+        sameIds(task.selectedIds, selected) && sameIds(ids, selected)
+      : task.listFinished === true && JSON.stringify(task.listedIds) === JSON.stringify(ids);
+    if (task.collectionStage !== 'details' || !directoryMatches || job.listTask !== taskId ||
         job.generation?.id !== scope.generationId || job.generation?.activeFence ||
         job.sourceGrant?.authorId !== scope.authorId)
       return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');

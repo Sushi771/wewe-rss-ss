@@ -20,7 +20,7 @@ import {
   xhsArchiveDraft,
 } from './xiaohongshu-contract';
 import { verifiedDownloadBody } from '../article-verified-download';
-import { prepareXhsVideoDownload } from '../xhs-video-download';
+import { prepareXhsVideoDownload, inspectCachedMp4 } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
 import { saveXhsMetrics } from './xhs-engagement-store';
@@ -96,6 +96,7 @@ type Task = XhsSubscriptionTask & {
   collectionScope?: 'recent' | 'all' | 'selected';
   selectedIds?: string[];
   selectionComplete?: boolean;
+  reuseCompleteCache?: boolean;
   collectionStage?: 'listing' | 'details';
   cacheResults?: Record<string, 'completed'>;
   localReceipts?: Record<string, { savedAt: number; supplementStatus: string }>;
@@ -558,7 +559,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       input.maxPages,
     );
   }
-  async refreshFull(input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[] }, startAfter?: Promise<boolean>) {
+  async refreshFull(input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[]; reuseCompleteCache?: boolean }, startAfter?: Promise<boolean>) {
     await this.creator(input.id);
     const scope = input.scope ?? 'recent';
     if (!['recent', 'all', 'selected'].includes(scope)) return reject('XHS_SELECTION_INVALID');
@@ -573,7 +574,8 @@ export class XhsSubscriptionService implements OnModuleInit {
           return reject('XHS_SELECTION_INVALID');
       }
     }
-    return this.enqueue('list', input.id, [], undefined, undefined, undefined, true, scope, ids, startAfter);
+    if (input.reuseCompleteCache && scope !== 'selected') return reject('XHS_SELECTION_INVALID');
+    return this.enqueue('list', input.id, [], undefined, undefined, undefined, true, scope, ids, startAfter, input.reuseCompleteCache);
   }
   async downloadNotes(input: {
     creatorId: string;
@@ -687,6 +689,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     collectionScope?: Task['collectionScope'],
     selectedIds?: string[],
     startAfter?: Promise<boolean>,
+    reuseCompleteCache?: boolean,
   ) {
     await this.readyForMutation();
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
@@ -704,6 +707,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       collectDetails: collectDetails || checkpoint?.collectDetails,
       collectionScope: collectionScope ?? checkpoint?.collectionScope,
       selectedIds: selectedIds ?? checkpoint?.selectedIds,
+      reuseCompleteCache: reuseCompleteCache ?? checkpoint?.reuseCompleteCache,
       collectionStage: checkpoint?.collectionStage ?? (collectDetails ? 'listing' : undefined),
       taskId: randomUUID(),
       creatorId,
@@ -764,6 +768,19 @@ export class XhsSubscriptionService implements OnModuleInit {
     const t =
       this.uncertain.get(input.taskId) ?? (await this.loadTask(input.taskId));
     return this.view(t);
+  }
+  async matchesSelectedTask(input: {taskId: string; creatorId: string; noteIds: string[]}) {
+    const task = await this.loadTask(input.taskId);
+    return task.creatorId === input.creatorId && task.collectDetails === true && task.reuseCompleteCache === true && task.collectionScope === 'selected' &&
+      Array.isArray(task.selectedIds) && JSON.stringify([...task.selectedIds].sort()) === JSON.stringify([...input.noteIds].sort());
+  }
+  async confirmedSelection(input: {taskId: string; creatorId: string; noteIds: string[]}) {
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId) || !(await this.matchesSelectedTask(input))) return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const task = await this.loadTask(input.taskId);
+    if (task.state !== 'completed' || task.collectionStage !== 'details' ||
+        !input.noteIds.every(id => task.items[id] === 'completed')) return reject('XHS_LIST_INCOMPLETE');
+    return [...input.noteIds];
   }
   /** Exact membership of a positively checkpointed directory, including pre-existing notes. */
   async confirmedDirectory(input: { taskId: string }) {
@@ -1033,6 +1050,24 @@ export class XhsSubscriptionService implements OnModuleInit {
               where: { id, creatorId: creator.id },
             });
             if (!old) return reject('XHS_SELECTION_CHANGED');
+            if (t.reuseCompleteCache && t.collectionScope === 'selected' && old.status === 'complete' && old.publishTime > 0 && old.contentHtml) {
+              let cacheValid = false;
+              try {
+                if (old.contentHtml.includes('data-wewe-image-pending')) throw Error('incomplete');
+                verifiedDownloadBody(old.contentHtml);
+                if (old.kind === 'video') {
+                  if (!old.videoBytes || old.videoMimeType !== 'video/mp4' || !old.videoSha256 || !old.videoExpectedBytes) throw Error('incomplete');
+                  const video = inspectCachedMp4(Buffer.from(old.videoBytes));
+                  if (video.sha256 !== old.videoSha256 || video.bytes !== old.videoExpectedBytes) throw Error('incomplete');
+                } else if (old.kind !== 'image-text') throw Error('incomplete');
+                cacheValid = true;
+              } catch { /* incomplete cache is fetched within the approved selection */ }
+              if (cacheValid) {
+                t.items[id] = 'completed'; t.completed++; t.remaining = t.total - t.completed - t.skipped - t.failed;
+                await this.persist(t);
+                continue;
+              }
+            }
             if (
               old.kind === 'video' &&
               !t.collectDetails && (old.status !== 'complete' || !old.contentHtml)

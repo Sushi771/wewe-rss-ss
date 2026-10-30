@@ -505,6 +505,66 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(child.noteIds).toEqual([freshKey]);expect(child.directory).toBeUndefined();expect(saves).not.toHaveBeenCalled();
     await assertUnknownPreserved();
   });
+  it('never dispatches a historical unknown note when a narrowed recovery is explicitly selected',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'safe',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']); await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await (whole as any).executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    expect(requestedDetails()).not.toContain('note');expect(requestedDetails()).toEqual(['safe']);await assertUnknownPreserved();
+  },15000);
+  it('keeps the narrowed scope through interruption and reuses verified cached bodies',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]);
+    const cached=key('a-cached'), first=key('b-first'), second=key('c-second');
+    for(const id of [cached,first,second]) await db.xhsNote.create({data:{id,creatorId:'creator',title:id,publishTime:id===cached?100:0,kind:'image-text',status:id===cached?'complete':'listed',contentHtml:id===cached?'<div id="js_content"><p>Verified cached body</p></div>':null}});
+    directory(['note','a-cached','b-first','c-second']);let stopped=false;
+    const checkpoint=runtime.checkpointWholeSource.bind(runtime);
+    jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,at)=>{await checkpoint(tx,at);if(!stopped && (runtime as any).wholeSourceGroup.getStore()?.phase==='detail'){stopped=true;live=false;}});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;const selectedIds=[cached,first,second];
+    const run=()=>whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds});
+    await run();await drain();expect((await read()).state).toBe('paused');expect(requestedDetails()).toEqual(['b-first']);
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();live=true;
+    await expect(whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[first,second]})).rejects.toThrow();
+    await run();await drain();const result=await read();expect(requestedDetails()).toEqual(['b-first','c-second']);
+    expect(result.generation.selectedIds).toEqual(selectedIds);expect(result.generation.missingIds).toContain(noteKey);expect(result.state).toBe('partial');
+    expect((await db.xhsNote.findUnique({where:{id:cached}}))?.contentHtml).toContain('Verified cached body');
+    await run();await drain();expect(requestedDetails()).toEqual(['b-first','c-second']);await assertUnknownPreserved();
+  },20000);
+  it('stops narrowed recovery at a platform refusal and cannot replay after restart',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'safe',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(request:any)=>new URL(request.url).pathname.endsWith('/feed')?{status:461,url:request.url,body:{success:false,code:461}}:normal(request));
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    const run=()=>whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});
+    await expect(whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe,noteKey]})).rejects.toThrow();
+    await run();await drain();expect((await read()).state).toBe('paused');expect(requestedDetails()).toEqual(['safe']);const budget=await currentBudget();
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();
+    await expect(run()).rejects.toThrow();expect(requestedDetails()).toEqual(['safe']);expect(await currentBudget()).toEqual(budget);await assertUnknownPreserved();
+  },15000);
+  it('replaces an old completed directory-only child after local failure and caches every returned body and image',async()=>{
+    const ids=['note',...Array.from({length:22},(_,i)=>`old-${i}`)];
+    const keys=ids.map(id=>JSON.stringify(['xiaohongshu','note',id]));
+    for(const [index,id] of ids.entries()) if(index) await db.xhsNote.create({data:{id:keys[index],creatorId:'creator',title:id,publishTime:0,kind:'image-text',status:'listed'}});
+    const oldChild={taskId:'old-list',creatorId:'creator',kind:'list',state:'completed',total:23,completed:23,skipped:0,failed:0,remaining:0,listFinished:true,listedIds:keys,items:{}};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('old-list','creator','completed',${JSON.stringify(oldChild)},1)`;
+    const initial=await read();initial.listEnd=true;initial.listTask='old-list';
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(initial)} WHERE id='job'`;
+    directory(ids);const oldApi=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const response=await oldApi(req);if(new URL(req.url).pathname.endsWith('/feed') && JSON.parse(req.body).source_note_id==='note')response.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/synthetic.png'}];return response;});
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=','base64');
+    media.mockImplementation(async()=>new Response(png,{status:200,headers:{'content-type':'image/png'}}));
+    const refresh=subscriptions.refreshFull.bind(subscriptions);let first=true;
+    jest.spyOn(subscriptions,'refreshFull').mockImplementation(async args=>{if(first){first=false;throw Error('synthetic local failure');}return refresh(args);});
+    await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,detail:30}});const generationId=(await read()).generation.id;
+    await execute(generationId);await drain();const paused=await read();
+    expect(paused.state).toBe('paused');expect(paused.generation.localFailure).toMatchObject({stage:'list-task'});expect(requestedDetails()).toEqual([]);
+    await execute(generationId);await drain();const done=await read();
+    expect(done.state).toBe('completed');expect(done.listTask).not.toBe('old-list');expect(done.generation.directoryIds).toHaveLength(23);
+    expect(new Set(requestedDetails()).size).toBe(23);expect(requestedDetails()).toHaveLength(23);expect(media).toHaveBeenCalledTimes(1);
+    const notes=await db.xhsNote.findMany({where:{creatorId:'creator'}});expect(notes).toHaveLength(23);expect(notes.every(n=>n.status==='complete'&&n.contentHtml&&n.publishTime>0)).toBe(true);
+    expect(notes.find(n=>n.id===noteKey)?.contentHtml).toContain('data:image/png;base64,');
+    const priorCount=api.mock.calls.length;await expect(execute(generationId)).rejects.toThrow();expect(api).toHaveBeenCalledTimes(priorCount);
+    await assertUnknownPreserved();
+  },40000);
   it('rebuilds directory membership on continuation and avoids repeating a completed detail',async()=>{
     const doneKey=JSON.stringify(['xiaohongshu','note','a-done']),missingKey=JSON.stringify(['xiaohongshu','note','b-missing']),freshKey=JSON.stringify(['xiaohongshu','note','c-fresh']);
     directory(['a-done','b-missing','c-fresh']);let stopped=false;
