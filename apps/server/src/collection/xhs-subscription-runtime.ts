@@ -5,7 +5,7 @@ import type { AttemptScope } from './xhs-reviewed-attempt';
 import { createDispatchOwner } from './xhs-dispatch-owner';
 import type { Prisma } from '@prisma/client';
 import { setTimeout as waitForRate } from 'node:timers/promises';
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { XhsRequestBudget } from './xhs-request-budget';
 import { OnModuleDestroy } from '@nestjs/common';
 import * as path from 'node:path';
@@ -83,7 +83,7 @@ export class XhsSubscriptionRuntime
   private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
   private readonly wholeSourceGroup = new AsyncLocalStorage<
-    WholeSourceGroup & { checkpointed: boolean; noteId?: string; sessionGeneration: number; receipt?: SafeSourceReceipt; receiptTail?: Promise<unknown>; dispatchFailureCode?:string; closed:boolean }
+    WholeSourceGroup & { checkpointed: boolean; noteId?: string; sessionGeneration: number; receipt?: SafeSourceReceipt; receiptTail?: Promise<unknown>; persistReceipt?:(receipt:SafeSourceReceipt)=>Promise<unknown>; dispatchFailureCode?:string; closed:boolean }
   >();
   private receiptWriter?: (scope: SourceReceiptScope, receipt: SafeSourceReceipt) => Promise<unknown>;
   bindWholeReceipt(writer: (scope: SourceReceiptScope, receipt: SafeSourceReceipt) => Promise<unknown>) { this.receiptWriter ??= writer; }
@@ -101,7 +101,7 @@ export class XhsSubscriptionRuntime
       ...(status ? {status} : {}) } as SafeSourceReceipt;
     if (stage==='transport' && !notSent) { delete g.receipt.status; delete g.receipt.code; g.receipt.outcome='in-progress'; }
     const value = { ...g.receipt };
-    g.receiptTail = (g.receiptTail ?? Promise.resolve()).then(() => this.receiptWriter!(g,value));
+    g.receiptTail = (g.receiptTail ?? Promise.resolve()).then(() => g.persistReceipt!(value));
     void g.receiptTail.catch(() => {});
   }
   async sourceStorage<T>(work: () => Promise<T>): Promise<T> { this.observeSourceStage('storage'); return work(); }
@@ -151,7 +151,7 @@ export class XhsSubscriptionRuntime
       return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     const owner = createDispatchOwner();
     if (!owner) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-    const group: WholeSourceGroup & { checkpointed:boolean; sessionGeneration:number; receipt?:SafeSourceReceipt; receiptTail?:Promise<unknown>; dispatchFailureCode?:string; closed:boolean } = {
+    const group: WholeSourceGroup & { checkpointed:boolean; sessionGeneration:number; receipt?:SafeSourceReceipt; receiptTail?:Promise<unknown>; persistReceipt?:(receipt:SafeSourceReceipt)=>Promise<unknown>; dispatchFailureCode?:string; closed:boolean } = {
       ...scope,
       owner,
       marker: 'xhs:dispatch-pending:whole:' + randomUUID(),
@@ -162,6 +162,9 @@ export class XhsSubscriptionRuntime
       sessionGeneration: this.generation,
     };
     return this.wholeSourceGroup.run(group, async () => {
+      // Native callbacks can inherit an expired dispatch transaction admission.
+      // Capture the group entry, so each receipt obtains its own guarded write.
+      group.persistReceipt=AsyncResource.bind((receipt:SafeSourceReceipt)=>this.receiptWriter!(group,receipt));
       try {
         const result = await work();
         if (group.acquired && !group.checkpointed) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
@@ -178,7 +181,7 @@ export class XhsSubscriptionRuntime
           if (restriction) classified.code=restriction;
           const terminal = {...receipt,...classified, outcome:classified.outcome==='local-failure' ? 'local-failure' : receipt.status ? 'response-received' : receipt.outcome==='not-sent' ? 'not-sent' : classified.outcome,settled:!group.dispatchFailureCode} as SafeSourceReceipt;
           try { await group.receiptTail; } catch { /* terminal attempts its own durable write */ }
-          try { await this.receiptWriter(group,terminal); } catch { /* original unknown remains conservative */ }
+          try { await group.persistReceipt!(terminal); } catch { /* original unknown remains conservative */ }
         }
         throw error;
       }
@@ -1006,6 +1009,7 @@ export class XhsSubscriptionRuntime
       }
     });
   }
+  hasAuthorContext(authorId: string): boolean { return this.adapter.hasAuthorContext(authorId); }
   list(authorId: string, cursor: string | null, signal?: AbortSignal) {
     this.checkWholeAuthor(authorId);
     return this.withSession(async () => {

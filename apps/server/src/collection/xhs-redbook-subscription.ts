@@ -104,6 +104,10 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     this.tokens.clear();
     this.authors.clear();
   }
+  hasAuthorContext(authorId: string): boolean {
+    const access=this.authors.get(authorId);
+    return !!access && access.expiresAt>this.now();
+  }
   private options(authorId: string): RedbookUserPageOptions {
     const context = this.authors.get(authorId);
     if (!context || context.expiresAt <= this.now())

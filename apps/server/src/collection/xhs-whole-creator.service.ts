@@ -709,6 +709,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
   }
   private async run(id: string) {
     const job = await this.load(id);
+    let localStage: 'prepare'|'profile'|'list-task'|'list-wait'|'archive'|'metrics'|'supplement'='prepare';
     try {
       await this.check(job);
       job.state = 'running';
@@ -755,7 +756,8 @@ export class XhsWholeCreatorService implements OnModuleInit {
       });
       const runWithBudget = () =>
         this.runtime.withRequestBudget(budget, id, async () => {
-          if (job.generation) {
+          if (job.generation && (!job.generation.profile || !this.runtime.hasAuthorContext(job.sourceGrant!.authorId))) {
+            localStage='profile';
             // A supplied homepage is resolved through the ordinary source, under this generation's profile cap.
             await this.runtime.withCheckpointGroup('profile', job.sourceGrant!.authorId, undefined, async () => {
               const result = await this.runtime.resolve(job.generation!.profileUrl);
@@ -778,6 +780,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             });
           }
           if (!job.listEnd) {
+            localStage='list-task';
             if (!job.listTask) {
               const task = await this.subscriptions.refresh({
                 id: job.creatorId,
@@ -796,6 +799,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
                 await this.checkpointChild(job, next.taskId);
               }
             }
+            localStage='list-wait';
             await this.waitList(job);
             job.listEnd = true;
             if (job.generation) job.generation.directoryIds = await this.subscriptions.confirmedDirectory({ taskId: job.listTask! });
@@ -824,7 +828,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
             delete job.downloadTask;
           }
           // A first-note comment failure must not prevent the rest of the full archives.
+          localStage='archive';
           await this.saveStage(job, notes, 'archive');
+          localStage='metrics';
           if (!job.profile) {
             await this.check(job);
             const snapshot = await this.engagement.refreshMetrics({
@@ -848,6 +854,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
               await this.save(job);
             }
           }
+          localStage='supplement';
           await this.saveStage(job, notes, 'supplement');
         });
       if (job.sourceGrant)
@@ -873,6 +880,12 @@ export class XhsWholeCreatorService implements OnModuleInit {
       job.code = job.generation ? safeSourceFailure(error,current.generation?.activeFence?.receipt?.stage ?? 'admitted').code : xhsPublicCode(error, 'XHS_WHOLE_CREATOR_PAUSED');
       const restriction = job.generation ? this.runtime.reviewedFailureCode() : undefined;
       if (job.generation && restriction) job.code = restriction;
+      if (job.generation && !current.generation?.activeFence && !restriction) await this.write(async tx=>{
+        const durable=await this.load(id,tx);
+        if(!durable.generation || durable.generation.id!==job.generation!.id || durable.generation.activeFence)return;
+        durable.generation.localFailure={stage:localStage,code:job.code};
+        await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(durable)} WHERE id=${id}`;
+      });
       if (job.generation && restriction) await this.write(async tx => {
         await tx.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code=${restriction} WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'`;
       });
@@ -899,7 +912,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
         profileUrl: String(generation.profileUrl), profile: generation.profile, directoryComplete: job.listEnd, discovered: Number(generation.directoryIds?.length ?? 0),
         missing: Number(generation.missingIds?.length ?? 0), originalNoteStatus: String(generation.originalNoteStatus ?? 'unknown'),
         newResult: restricted ? 'restricted' as const : newFence ? 'unknown' as const : undefined,
-        failure: generation.lastSourceReceipt?.code ? {stage:String(generation.lastSourceReceipt.stage),outcome:String(generation.lastSourceReceipt.outcome),code:String(generation.lastSourceReceipt.code ?? ''),status:generation.lastSourceReceipt.status as number|undefined,requiresStop:!!newFence && newFence.receipt?.settled===false && newFence.owner?.pid===process.pid} : undefined,
+        failure: generation.lastSourceReceipt?.code ? {stage:String(generation.lastSourceReceipt.stage),outcome:String(generation.lastSourceReceipt.outcome),code:String(generation.lastSourceReceipt.code ?? ''),status:generation.lastSourceReceipt.status as number|undefined,requiresStop:!!newFence && newFence.receipt?.settled===false && newFence.owner?.pid===process.pid} : job.state==='paused' && generation.localFailure ? {stage:String(generation.localFailure.stage),outcome:'local-failure',code:String(generation.localFailure.code),status:undefined,requiresStop:false} : undefined,
         reviewable: historyReady && !!newFence && job.state==='paused' && !this.running.has(id) && (newFence.receipt?.settled===true || newFence.owner?.pid!==process.pid),
         resumable: historyReady && generationMatches(job) && !newFence && !this.running.has(id) && ['paused','partial','failed','cancelled'].includes(job.state) && generation.state !== 'completed' } : undefined,
       canPrepareGeneration: historyReady && !generation && !reviewAttempt && legacyProofMatches(job, job.id, sourceGrant?.authorId) && job.state === 'paused',

@@ -6,8 +6,10 @@ jest.mock('./xhs-dispatch-owner', () => ({
 }));
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { AsyncResource } from 'node:async_hooks';
 import { createRedbookHttpTransport } from './xhs-http-transport';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { sqliteWrites } from './sqlite-write-coordinator';
 import { RedbookPauseError } from './redbook-client';
 import { writeSourceReceipt } from './xhs-source-receipt';
 import { observeDispatchOwner } from './xhs-dispatch-owner-observation';
@@ -55,6 +57,9 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const migrations=path.resolve(__dirname,'../../prisma/migrations');
     for(const name of (await readdir(migrations)).sort())if((await stat(path.join(migrations,name))).isDirectory())
       for(const sql of splitSqliteStatements(await readFile(path.join(migrations,name,'migration.sql'),'utf8')))await db.$executeRawUnsafe(sql);
+    // Match PrismaService's raw-query coordinator admission. A bare client misses
+    // expired dispatch ALS inherited by response-event receipt callbacks.
+    db.$use(async(params,next)=>['queryRaw','executeRaw'].includes(params.action)?sqliteWrites.write(()=>next(params)):next(params));
   },40000);
   beforeEach(async()=>{
     (observeDispatchOwner as jest.Mock).mockReturnValue('dead');
@@ -108,6 +113,19 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     });
   }
   const requestedDetails=()=>api.mock.calls.filter(([r]:any[])=>new URL(r.url).pathname.endsWith('/feed')).map(([r]:any[])=>JSON.parse(r.body).source_note_id);
+  it('continues after the durable profile checkpoint without resolving the homepage again',async()=>{
+    const refresh=subscriptions.refresh.bind(subscriptions);let interrupted=false;
+    jest.spyOn(subscriptions,'refresh').mockImplementation(async input=>{if(!interrupted){interrupted=true;throw Error('synthetic local child creation failure');}return refresh(input);});
+    const resolve=jest.spyOn(runtime,'resolve');
+    await whole.prepareGeneration(input);const generationId=(await read()).generation.id;
+    await execute(generationId);await drain();const paused=await read();
+    expect(paused.state).toBe('paused');expect(paused.generation.profile.id).toBe('author');expect(paused.generation.activeFence).toBeUndefined();
+    expect(paused.generation.lastSourceReceipt.outcome).toBe('checkpointed');expect(resolve).toHaveBeenCalledTimes(1);
+    expect(paused.generation.localFailure).toEqual({stage:'list-task',code:'XHS_LOCAL_OPERATION_FAILED'});
+    await execute(generationId);await drain();const completed=await read();
+    expect(resolve).toHaveBeenCalledTimes(1);expect(completed.state).toBe('completed');expect(completed.generation.profile).toEqual(paused.generation.profile);
+    expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
+  });
   const receiptSecret='synthetic-SECRET-cookie-token-body-url-message';
   async function checkedFailureReceipt(settled=true) {
     const job=await read(),receipt=job.generation.lastSourceReceipt;
@@ -189,13 +207,18 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(retained.map(r=>r.id).sort()).toEqual([marker,failedFence.marker].sort());
     (runtime as any).options.profileParser=(raw:any)=>raw.author;
     const normal=api.getMockImplementation()!;let lateCode:string|undefined,lateChecked=false,newMarker:string|undefined;
+    // Test-side late-writer inspection owns its own context, not the source's
+    // expired dispatch transaction context tested by the real middleware above.
+    const inspectLate=AsyncResource.bind(async()=>{
+      lateChecked=true;newMarker=(await read()).generation.activeFence.marker;
+      try { await db.$transaction(tx=>writeSourceReceipt(tx,{jobId:'job',creatorId:'creator',authorId:'author',generationId,marker:failedFence.marker,owner:failedFence.owner},failedFence.receipt)); }
+      catch(error){lateCode=(error as XhsSubscriptionError).code;}
+      expect((await read()).generation.activeFence.marker).toBe(newMarker);
+    });
     api.mockImplementation(async(request:any)=>{
       const value=await normal(request);
       if(!lateChecked&&new URL(request.url).pathname.endsWith('otherinfo')) {
-        lateChecked=true;newMarker=(await read()).generation.activeFence.marker;
-        try { await db.$transaction(tx=>writeSourceReceipt(tx,{jobId:'job',creatorId:'creator',authorId:'author',generationId,marker:failedFence.marker,owner:failedFence.owner},failedFence.receipt)); }
-        catch(error){lateCode=(error as XhsSubscriptionError).code;}
-        expect((await read()).generation.activeFence.marker).toBe(newMarker);
+        await inspectLate();
       }
       return value;
     });
@@ -359,7 +382,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(requestedDetails()).toEqual(['note','second']);
     expect(saves.mock.calls.map(args=>args[1])).toEqual([noteKey,JSON.stringify(['xiaohongshu','note','second'])]);
     expect(completed.items[noteKey].archive).toBe(paused.items[noteKey].archive);expect(completed.items[noteKey].metrics).toBe(paused.items[noteKey].metrics);
-    expect(shortLinks).toHaveBeenCalledTimes(2);expect(api.mock.calls.filter(([r]:any[])=>new URL(r.url).pathname.endsWith('user_posted'))).toHaveLength(2);
+    expect(shortLinks).toHaveBeenCalledTimes(1);expect(api.mock.calls.filter(([r]:any[])=>new URL(r.url).pathname.endsWith('user_posted'))).toHaveLength(2);
     const afterBudget=await currentBudget();expect(afterBudget[0].used).toBeGreaterThan(beforeBudget[0].used);expect(afterBudget[1].used).toBeGreaterThan(beforeBudget[1].used);
     await assertUnknownPreserved();
   });
