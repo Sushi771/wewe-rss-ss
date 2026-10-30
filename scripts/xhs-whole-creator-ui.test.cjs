@@ -244,7 +244,7 @@ test("AUDIT: terminal recovery copy describes user results without storage diagn
  }
 });
 
-const generationJob = {id:'job',canPrepareGeneration:true,budget:{used:6,limit:310},historyGrant:{limits:{profile:2,list:3,detail:5,media:300,metrics:0},used:{profile:2,list:2,detail:1,media:1,metrics:0}}};
+const generationJob = {id:'job',items:[{noteId:'synthetic-safe',title:'Safe'}],canPrepareGeneration:true,budget:{used:6,limit:310},historyGrant:{limits:{profile:2,list:3,detail:5,media:300,metrics:0},used:{profile:2,list:2,detail:1,media:1,metrics:0}}};
 test('received response and local storage failures have distinct readable reasons without backend diagnostics',()=>{
  const base={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false,newResult:'unknown'}};
  const received=render({...base,generationRecovery:{...base.generationRecovery,failure:{stage:'response',outcome:'response-received',code:'XHS_SOURCE_TRANSPORT_BLOCKED',status:200}}},'XhsWholeGeneration');
@@ -281,16 +281,16 @@ test('whole generation explains cumulative counts and separates preparation from
  assert.equal(h.calls[0].input.profileUrl,'https://xhslink.cn/o/Synthetic');finish({});await new Promise(setImmediate);
  const prepared={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'generation',state:'prepared',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:true}};
  h.setData(prepared);tree=h.draw();assert.equal(h.nodes(tree,n=>n.type==='button')[0].props.disabled,true);
- h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();
+ h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox').at(-1).props.onChange({target:{checked:true}});tree=h.draw();
  h.setWork(async()=>{h.setData({...prepared,generationRecovery:{...prepared.generationRecovery,state:'paused',newResult:'unknown',resumable:false}});throw Error('synthetic lost response')});
  h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);
- assert.equal(h.calls.length,2);assert.deepEqual(h.calls[1],{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true}});
+ assert.equal(h.calls.length,2);assert.deepEqual(h.calls[1],{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true,selectedIds:['synthetic-safe']}});
  tree=h.draw();assert.equal(h.nodes(tree,n=>n.type==='button').length,0);assert.equal(h.calls.length,2);
 });
 test('cache recovery waits for explicit consent and never opens export directory chooser',async()=>{
  const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'generation',state:'prepared',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,resumable:true}};
  const h=recoveryInteraction(job,'XhsWholeGeneration');let selections=0;h.setChoose(async()=>{selections++;throw Error('unexpected directory selection');});let tree=h.draw();const button=h.nodes(tree,n=>n.type==='button')[0];assert.equal(button.props.disabled,true);assert.equal(h.calls.length,0);
- h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);assert.equal(selections,0);assert.deepEqual(h.calls,[{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true}}]);
+ h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox').at(-1).props.onChange({target:{checked:true}});tree=h.draw();h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);assert.equal(selections,0);assert.deepEqual(h.calls,[{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true,selectedIds:['synthetic-safe']}}]);
 });
 test('whole generation shows missing separately and never promises full coverage from a cache count',()=>{
  const html=render({...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:2,missing:1,directoryComplete:true,originalNoteStatus:'not-returned',resumable:false,newResult:'unknown'}},'XhsWholeGeneration');
