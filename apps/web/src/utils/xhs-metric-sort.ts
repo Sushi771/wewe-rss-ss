@@ -1,3 +1,6 @@
+export function nextTimeOrder(current: 'asc' | 'desc' | null, metricActive: boolean): 'asc' | 'desc' | null {
+  return metricActive || !current ? 'asc' : current === 'asc' ? 'desc' : null;
+}
 export type MetricKey = 'likes' | 'collects' | 'shares' | 'comments';
 export type MetricOrder = {
   metric: MetricKey;

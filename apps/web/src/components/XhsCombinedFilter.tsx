@@ -1,6 +1,5 @@
 import {
   compileFilter,
-  conditionLabel,
   emptyCombinedFilter,
   metricLabels,
 } from '@web/utils/xhs-combined-filter';
@@ -24,12 +23,7 @@ export default function XhsCombinedFilter({
     });
   return (
     <details className="xhs-combined-filter">
-      <summary>
-        笔记数值筛选 ·{' '}
-        {value.conditions.length
-          ? `${value.conditions.length} 个条件 · ${value.mode === 'and' ? '全部满足' : '任一满足'}`
-          : '不限'}
-      </summary>
+      <summary>筛选{value.conditions.length ? `（${value.conditions.length}）` : ''}</summary>
       <fieldset disabled={disabled} className="xhs-combined-controls">
         <legend className="sr-only">组合筛选条件</legend>
         <label>
@@ -169,16 +163,6 @@ export default function XhsCombinedFilter({
             清空条件
           </button>
         </div>
-        <p className="text-xs text-neutral-500">
-          区间包含上下限；未知值不满足数值条件，0 为真实数值。空条件组不筛选。
-        </p>
-        {value.conditions.length > 0 && compiled.valid && (
-          <p className="text-xs">
-            {value.conditions
-              .map(conditionLabel)
-              .join(value.mode === 'and' ? ' 且 ' : ' 或 ')}
-          </p>
-        )}
       </fieldset>
     </details>
   );

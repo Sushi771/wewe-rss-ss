@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { trpc } from "@web/utils/trpc";
 
-export default function XhsWholeCreator({ creatorId, chooseDirectory }: { creatorId: string; chooseDirectory: () => Promise<{cancelled?:boolean;pickToken?:string}> }) {
+export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
   const [limit, setLimit] = useState(100),
     [error, setError] = useState("");
   const [phase, setPhase] = useState<
@@ -99,7 +99,7 @@ export default function XhsWholeCreator({ creatorId, chooseDirectory }: { creato
       {jobs.error && <p role="alert">覆盖状态读取失败，未开始新请求。</p>}
       {(jobs.data ?? []).map((job) => (
         <section key={job.id} className="my-2 min-w-0 border-t">
-          {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} chooseDirectory={chooseDirectory} />}
+          {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} />}
           <p role="status">
             {{ queued: '等待中', running: '同步中', paused: '已暂停', partial: '部分完成', failed: '未完成', cancelled: '已取消', completed: '已完成' }[job.state] ?? '状态待确认'} · 已发现 {job.items.length} 篇
           </p>
@@ -275,7 +275,7 @@ type Job = {
   };
 };
 /** Explicit preparation and execution stay separate; an uncertain response never retries itself. */
-export function XhsWholeGeneration({ job, refresh, chooseDirectory }: { job: Job; refresh: () => Promise<unknown>; chooseDirectory: () => Promise<{cancelled?:boolean;pickToken?:string}> }) {
+export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => Promise<unknown> }) {
   const [url, setUrl] = useState('');
   const [confirmed, setConfirmed] = useState(false);
   const [limits, setLimits] = useState<Partial<Limits>>({});
@@ -298,7 +298,7 @@ export function XhsWholeGeneration({ job, refresh, chooseDirectory }: { job: Job
     let submitted = false;
     try {
       if (g?.reviewable) { submitted=true; await review.mutateAsync({ jobId:job.id,generationId:g.id,confirmUnknown:true }); }
-      else if (g) { const chosen=await chooseDirectory(); if(chosen.cancelled) {setError('已取消目录选择，未开始采集。'); return;} submitted=true; await execute.mutateAsync({ jobId: job.id, generationId: g.id, confirmUnknown: true, ...(chosen.pickToken ? {pickToken:chosen.pickToken} : {}) }); }
+      else if (g) { submitted=true; await execute.mutateAsync({ jobId: job.id, generationId: g.id, confirmUnknown: true }); }
       else { submitted=true; await prepare.mutateAsync({ jobId: job.id, profileUrl: url, confirmUnknown: true, phaseLimits }); }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : '';

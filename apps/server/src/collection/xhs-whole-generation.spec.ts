@@ -130,9 +130,9 @@ describe('explicit whole creator generation preserves unknown origin and cumulat
     await expect(db.$transaction(tx => createWholeGeneration(tx, {...input,confirmUnknown:false} as any,10000))).rejects.toThrow();
     const job = await read(); job.reviewAttempt={state:'consumed'}; await write(job); await expect(create()).rejects.toThrow();
   });
-  it('rejects phase quota reduction or limits beyond the unchanged parent cap', async () => {
+  it('rejects a counter regression but allows observed counts beyond the historical parent cap', async () => {
     await expect(db.$transaction(tx => createWholeGeneration(tx, {...input,phaseLimits:{...phaseLimits,detail:4}},10000))).rejects.toThrow();
-    await expect(db.$transaction(tx => createWholeGeneration(tx, {...input,phaseLimits:{...phaseLimits,detail:311}},10000))).rejects.toThrow();
+    await expect(db.$transaction(tx => createWholeGeneration(tx, {...input,phaseLimits:{...phaseLimits,detail:311}},10000))).resolves.toMatchObject({state:'prepared'});
   });
   it('rolls back intent on interruption without changing any historical facts', async () => {
     const before = await read();

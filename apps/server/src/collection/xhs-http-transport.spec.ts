@@ -507,3 +507,21 @@ it('keeps thirteen successful requests separate from an unknown reply rejection'
     '/api/sns/web/v2/comment/sub/page',
   );
 });
+
+
+describe('bounded video transport with synthetic responses', () => {
+  const options = () => ({redirect:'manual' as const,credentials:'omit' as const,headers:{accept:'video/mp4'},signal:new AbortController().signal});
+  it('uses the permitted video CDN without credentials and keeps the declared length', async () => {
+    const f=httpsFixture({headers:{'content-type':'video/mp4','content-length':'4'},parts:[Buffer.from('test')]});
+    const response=await createXhsMediaTransport(f.request)(new URL('https://sns-video-bd.xhscdn.com/synthetic?token=synthetic'),options());
+    expect(response.headers.get('content-length')).toBe('4');expect(Buffer.from(await response.arrayBuffer()).toString()).toBe('test');
+    expect(f.raw.mock.calls[0][1].headers).toEqual({accept:'video/mp4'});
+  });
+  it.each(['https://evil.invalid/file','https://sns-webpic.xhscdn.com/file','http://sns-video-bd.xhscdn.com/file'])('rejects foreign or insecure video URL %s before dispatch',async url=>{
+    const f=httpsFixture();await expect(createXhsMediaTransport(f.request)(new URL(url),options())).rejects.toThrow('XHS_MEDIA_REQUEST_REJECTED');expect(f.raw).not.toHaveBeenCalled();
+  });
+  it.each([undefined,'100000001'])('rejects missing or excessive video length %s',async length=>{
+    const f=httpsFixture({headers:{'content-type':'video/mp4',...(length?{'content-length':length}:{})}});
+    await expect(createXhsMediaTransport(f.request)(new URL('https://sns-video-bd.xhscdn.com/file'),options())).rejects.toThrow();
+  });
+});

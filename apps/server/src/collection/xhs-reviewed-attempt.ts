@@ -53,7 +53,7 @@ async function state(tx:Tx,input:AttemptScope,now:number){
  const budgets=await tx.$queryRaw<Array<{id:string;used:number;request_limit:number;next_at:bigint;interval_ms:number}>>`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets WHERE id IN (${input.jobId},'xhs:source-total')`;
  if(budgets.length!==2)return bad();
  if(legacy&&legacyBudgetDigest(job,budgets,input.jobId)!==job.legacyMaintenanceProof.scope.budgetDigest)return bad();
- for(const b of budgets){const cap=b.id===input.jobId?input.taskUsedCeiling:input.sharedUsedCeiling;if(!Number.isSafeInteger(cap)||cap>b.request_limit||cap<b.used+input.maxRequests)return bad();}
+ for(const b of budgets){const cap=b.id===input.jobId?input.taskUsedCeiling:input.sharedUsedCeiling;if(!Number.isSafeInteger(cap)||cap<b.used+input.maxRequests)return bad();}
  const pending=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
  const writers=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1`;
  if(pending.length!==1||pending[0].id!==f.marker||writers.length)return bad();

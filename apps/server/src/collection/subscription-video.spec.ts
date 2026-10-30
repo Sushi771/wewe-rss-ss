@@ -9,6 +9,7 @@ import axios from 'axios';
 import { load } from 'cheerio';
 import { inspectCachedMp4, XhsVerifiedVideoCache } from '../xhs-video-download';
 import { LocalArticleStore } from '../article-local-save';
+import { freezeCachedXhsSelection, saveFrozenXhsCache } from '../xhs-cached-local-export';
 import {
   XiaohongshuService,
   XhsSource,
@@ -444,6 +445,17 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
     expect(await fs.readFile(saved.markdownPath, 'utf8')).toContain(
       'local annotation',
     );
+  });
+  it('exports a complete cached video through the frozen cache publisher without source access', async () => {
+    const api = service(); await api.refresh('creator');
+    const frozen = await freezeCachedXhsSelection(prisma, [{id: videoKey, creatorId:'creator'}]);
+    const output = join(root, 'cached-video-output');
+    const store = new LocalArticleStore(join(root, 'cached-video-preferences.json'), output, true);
+    const receipt = await saveFrozenXhsCache(frozen, store, output, (creator,id) => api.prepareLocalDownload(creator,id));
+    expect(receipt.results).toHaveLength(1);expect(receipt.results[0].error).toBeUndefined();
+    const markdownPath = receipt.results[0].saved!.markdownPath;const markdown = await fs.readFile(markdownPath,'utf8');
+    expect(markdown).toContain('video/video_' + hash(mp4()) + '.mp4');
+    expect(await fs.readFile(join(dirname(markdownPath),'video','video_' + hash(mp4()) + '.mp4'))).toEqual(mp4());
   });
   it('retains complete image/video archives on duplicates and promotes only missing skipped video data without changing identity/time', async () => {
     const api = service([videoNote(), videoNote('old-skipped')]);

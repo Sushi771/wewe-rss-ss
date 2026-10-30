@@ -1,3 +1,4 @@
+import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { LocalArticleStore, ArticlePreparation } from '../article-local-save';
 import { xhsLocalSnapshotPublisher } from './xhs-local-snapshot';
 import { XhsSubscriptionService } from './xhs-subscription.service';
@@ -68,7 +69,7 @@ describe('whole creator durable offline closure', () => {
     expect((await store.read('probe'))!.used).toBe(1);
   });
   it.each(['missing', 'exhausted'] as const)(
-    'prechecks %s legacy budgets before touching any reservation',
+    'handles %s legacy budget metadata without touching any reservation',
     async (state) => {
       const reserve = jest.fn(async () => true);
       const budget = new XhsRequestBudget({
@@ -84,11 +85,8 @@ describe('whole creator durable offline closure', () => {
                 intervalMs: 1000,
               },
       });
-      await expect(budget.check('synthetic', 0)).rejects.toThrow(
-        state === 'missing'
-          ? 'XHS_REQUEST_BUDGET_REQUIRED'
-          : 'XHS_REQUEST_BUDGET_EXHAUSTED',
-      );
+      if (state === 'missing') await expect(budget.check('synthetic', 0)).rejects.toThrow('XHS_REQUEST_BUDGET_REQUIRED');
+      else await expect(budget.check('synthetic', 0)).resolves.toBeUndefined();
       expect(reserve).not.toHaveBeenCalled();
     },
   );
@@ -171,6 +169,8 @@ describe('whole creator durable offline closure', () => {
     }> = [];
     let waiting!: () => void;
     const cooldown = new Promise<void>((resolve) => (waiting = resolve));
+    const originalWait = runtime.waitForSourceRate.bind(runtime);
+    const waitSpy = jest.spyOn(runtime, 'waitForSourceRate').mockImplementation(async ms => { if (cancelling) waiting(); return originalWait(ms); });
     const originalReserve = XhsSqliteBudgetStore.prototype.reserve;
     const reserve = jest
       .spyOn(XhsSqliteBudgetStore.prototype, 'reserve')
@@ -221,23 +221,21 @@ describe('whole creator durable offline closure', () => {
           (whole as any).lane.then(() => false),
         ]);
         expect(reachedWait).toBe(true);
-        expect(attempts.some((attempt) => !attempt.accepted)).toBe(true);
+        expect(waitSpy).toHaveBeenCalled();
         await whole.cancel(started.id);
       }
       await (whole as any).lane;
       const result = await whole.view(started.id);
       expect(result.state).toBe(
-        mode === 'complete' ? 'completed' : cancelling ? 'cancelled' : 'paused',
+        cancelling ? 'cancelled' : 'completed',
       );
       if (cancelling) expect(result.code).toBe('XHS_TASK_CANCELLED');
-      else if (mode !== 'complete')
-        expect(result.code).toBe('XHS_REQUEST_BUDGET_EXHAUSTED');
-      const count = mode === 'complete' ? 2 : 1;
+      const count = cancelling ? 1 : 2;
       expect(api).toHaveBeenCalledTimes(count);
       expect(result.budget!.used).toBe(count);
       const admitted = attempts.filter((attempt) => attempt.accepted);
       expect(admitted).toHaveLength(count);
-      if (mode === 'complete') {
+      if (!cancelling) {
         expect(admitted[1].at).toBeGreaterThanOrEqual(admitted[1].priorNextAt);
         expect(admitted[1].at - admitted[0].at).toBeGreaterThanOrEqual(1000);
       }
@@ -246,15 +244,15 @@ describe('whole creator durable offline closure', () => {
         const total = await new XhsSqliteBudgetStore(db).read(
           'xhs:source-total',
         );
-        expect(total).toEqual(firstTotal!);
-        expect(total!.used).toBe(1);
+        if (cancelling) expect(total).toEqual(firstTotal!);
+        expect(total!.used).toBe(count);
       }
     } finally {
       await (whole as any).lane;
       reserve.mockRestore();
+      waitSpy.mockRestore();
       runtime.onModuleDestroy();
-      if (shared)
-        await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total'`;
     }
   };
   it.each([
@@ -385,29 +383,14 @@ describe('whole creator durable offline closure', () => {
           results
             .filter((r) => r.status === 'rejected')
             .map((r) => (r as PromiseRejectedResult).reason.message),
-        ).toEqual(
-          mode === 'concurrent' ? [] : ['XHS_REQUEST_BUDGET_EXHAUSTED'],
-        );
-        expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(
-          mode === 'concurrent' ? 2 : 1,
-        );
-        if (mode === 'race-exhausted') {
-          const rejected = results.find((r) => r.status === 'rejected');
-          expect((rejected as PromiseRejectedResult).reason.message).toBe(
-            'XHS_REQUEST_BUDGET_EXHAUSTED',
-          );
-        }
+        ).toEqual([]);
+        expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
       }
-      if (mode === 'exhausted')
-        await expect(ordinary.resolve(profile)).rejects.toThrow(
-          'XHS_REQUEST_BUDGET_EXHAUSTED',
-        );
+      if (mode === 'exhausted') await ordinary.resolve(profile);
       const expected =
-        mode === 'concurrent'
+        mode === 'concurrent' || mode === 'race-exhausted'
           ? 4
-          : mode === 'final-cancel' || mode === 'exhausted'
-            ? 2
-            : 3;
+          : mode === 'final-cancel' ? 2 : 3;
       expect(api).toHaveBeenCalledTimes(expected);
       for (let i = 1; i < times.length; i++)
         expect(times[i] - times[i - 1]).toBeGreaterThanOrEqual(1000);
@@ -824,10 +807,12 @@ describe('whole creator durable offline closure', () => {
   );
   it('resumes legacy reply-stage jobs with metrics only, preserves old comments and budget, and refreshes incrementally', async () => {
     let budget: any;
+    let pauseOnce = true;
     const replyCalls: string[] = [];
     const source: any = {
       metrics: async (_author: string, note?: string) => {
         await budget.admit('budget-unused');
+        if (pauseOnce) { pauseOnce = false; throw new XhsSubscriptionError('XHS_SOURCE_VERIFICATION_BLOCKED'); }
         return xhsNoteMetrics({
           interact_info: {
             liked_count: '0',
@@ -925,7 +910,7 @@ describe('whole creator durable offline closure', () => {
     }
     const paused = await settled();
     expect(paused.state).toBe('paused');
-    expect(paused.code).toBe('XHS_REQUEST_BUDGET_EXHAUSTED');
+    expect(paused.code).toBe('XHS_SOURCE_VERIFICATION_BLOCKED');
     expect(paused.budget!.used).toBe(1);
     const oldComment = JSON.stringify({
       id: 'root',
@@ -966,7 +951,7 @@ describe('whole creator durable offline closure', () => {
     expect(completed.items[0].supplement).toBe('saved');
     expect(replyCalls).toEqual([]);
     expect(source.comments).not.toHaveBeenCalled();
-    expect(completed.budget!.used).toBe(1);
+    expect(completed.budget!.used).toBe(2);
     expect(actualId).toBe(started.id);
     const rows = await db.$queryRaw<
       Array<{ n: bigint }>
@@ -1036,13 +1021,10 @@ describe('whole creator durable offline closure', () => {
       requestLimit: 2,
       intervalMs: 1000,
     });
-    const exhausted = await wait(bounded.id);
-    expect(exhausted.code).toBe('XHS_REQUEST_BUDGET_EXHAUSTED');
-    expect(exhausted.budget!.used).toBe(2);
-    await service.resume(bounded.id);
-    expect((await wait(bounded.id)).budget!.used).toBe(2);
-    await service.extend(bounded.id, 1);
-    expect((await wait(bounded.id)).budget!.used).toBe(3);
+    const observed = await wait(bounded.id);
+    expect(observed.state).toBe('completed');
+    expect(observed.budget!.used).toBe(3);
+    expect(replyCalls).toHaveLength(0);
   }, 40000);
   it('explicitly consumes cancelled state once while ordinary late saves remain fenced', async () => {
     const id = 'synthetic-cancelled';

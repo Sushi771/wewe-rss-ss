@@ -8,7 +8,7 @@ import {
   conditionLabel,
 } from '@web/utils/xhs-combined-filter';
 import type { CombinedFilter } from '@web/utils/xhs-combined-filter';
-import { nextMetricOrder, orderNotes } from '@web/utils/xhs-metric-sort';
+import { nextMetricOrder, nextTimeOrder, orderNotes } from '@web/utils/xhs-metric-sort';
 import type { MetricKey, MetricOrder } from '@web/utils/xhs-metric-sort';
 import XhsCreatorAvatar from '@web/components/XhsCreatorAvatar';
 import XhsWholeCreator from '@web/components/XhsWholeCreator';
@@ -19,7 +19,6 @@ import {
   SubscriptionMore,
   SubscriptionToolbar,
   SubscriptionDialog,
-  ContentSortControls,
   SubscriptionProgress,
 } from '@web/components/SubscriptionPrimitives';
 import {
@@ -39,8 +38,6 @@ import ArticleDateFilter from '@web/components/ArticleDateFilter';
 import { noteArchiveStatus } from '@web/utils/xhs-note-presentation';
 import XhsOriginalLink from '@web/components/XhsOriginalLink';
 import type { PrepareXhsLink } from '@web/components/XhsOriginalLink';
-import XhsSourceBudget from '@web/components/XhsSourceBudget';
-import type { SourceBudgetApi } from '@web/components/XhsSourceBudget';
 import {
   XhsMetricLine,
   XhsNumericFilter,
@@ -64,6 +61,9 @@ import {
   toggleLoadedSelection,
   selectedImageNotes,
   taskFinished,
+  canContinueCreatorQueue,
+  withCachedExportSummary,
+  batchVideoWarning,
   mayResumeTask,
   preferredRecoveredTask,
   canAdoptRecoveredTask,
@@ -93,7 +93,7 @@ const localApi = async <T,>(
 ): Promise<T> => {
   const auth = getAuthCode();
   const response = await fetch(
-    `${serverOriginUrl || ''}/download/article${endpoint}${endpoint === '/settings' || endpoint === '/directory' ? '?target=xiaohongshu' : ''}`,
+    `${serverOriginUrl || ''}/download/article${endpoint}${endpoint === '/settings' || endpoint === '/directory' || endpoint === '/directory-confirm' ? '?target=xiaohongshu' : ''}`,
     {
       method: payload ? 'POST' : 'GET',
       signal,
@@ -156,12 +156,14 @@ export default function Xiaohongshu() {
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
   const [sourceSettingsOpen, setSourceSettingsOpen] = useState(false);
+  const [diagnosticOpen, setDiagnosticOpen] = useState(false);
   const sourceSettingsRef = useRef<HTMLDetailsElement>(null);
   const queuedDownloads = useRef<
-    Array<{ creatorId: string; noteIds: string[] }>
+    Array<{ creatorId: string; noteIds: string[]; confirmedDirectory?: string }>
   >([]);
+  const batchPartialCreators = useRef<string[]>([]);
   const nextDownloadRef = useRef<
-    (job: { creatorId: string; noteIds: string[] }) => Promise<void>
+    (job: { creatorId: string; noteIds: string[]; confirmedDirectory?: string }) => Promise<void>
   >(async () => {});
   const [taskCreatorId, setTaskCreatorId] = useState('');
   const [loadedCount, setLoadedCount] = useState(20);
@@ -192,6 +194,10 @@ export default function Xiaohongshu() {
     () => utils.client.xiaohongshu,
     [utils.client],
   );
+  // Adapt the in-development cache collection contract at one boundary.
+  const fullCollectionApi = subscriptionApi as typeof subscriptionApi & {
+    refreshFull: { mutate: (input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[] }) => Promise<TaskReceipt> };
+  };
   const prepareOriginalLink = useCallback<PrepareXhsLink>(
     (input) => {
       const client = subscriptionApi as typeof subscriptionApi & {
@@ -209,9 +215,7 @@ export default function Xiaohongshu() {
     },
     [subscriptionApi],
   );
-  const sourceBudgetApi = subscriptionApi as typeof subscriptionApi &
-    SourceBudgetApi;
-  const showOriginalBudget = () => {
+  const showSourceSettings = () => {
     setSourceSettingsOpen(true);
     if (sourceSettingsRef.current) {
       sourceSettingsRef.current.open = true;
@@ -234,10 +238,12 @@ export default function Xiaohongshu() {
   const sortMetric = (metric: MetricKey) => {
     if (!active.current) {
       setMetricOrder((value) => nextMetricOrder(value, metric));
+      setTimeOrder(null);
       setLoadedCount(20);
     }
   };
-  const [direction, setDirection] = useState<'asc' | 'desc'>('desc');
+  const [timeOrder, setTimeOrder] = useState<'asc' | 'desc' | null>(null);
+  const direction = timeOrder ?? 'desc';
   const [search, setSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [dateSelection, setDateSelection] = useState<ArticleDateSelection>({
@@ -262,9 +268,33 @@ export default function Xiaohongshu() {
     ? undefined
     : parsedDates.error.issues[0]?.message;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [xhsExportFormat, setXhsExportFormat] = useState<'obsidian' | 'zip'>('obsidian');
   const [saveSettings, setSaveSettings] = useState<SaveSettings | null>(null);
   const [directory, setDirectory] = useState('');
+  const [confirmDirectory, setConfirmDirectory] = useState<string | null>(null);
+  const directoryConfirm = useRef<((confirmed: boolean) => void) | null>(null);
+  useEffect(() => () => { directoryConfirm.current?.(false); directoryConfirm.current = null; }, []);
+  const authorizeConfirmedDirectory = async (directory: string) => {
+    const result = await localApi<DirectoryChoice>('/directory-confirm', { directory });
+    setSaveSettings({ directory: result.directory, askEveryTime: result.askEveryTime });
+    setDirectory(result.directory);
+    return { pickToken: result.pickToken };
+  };
+  const chooseConfirmedDirectory = async (): Promise<{ cancelled?: boolean; pickToken?: string }> => {
+    const settings = await localApi<SaveSettings>('/settings');
+    if (directoryConfirm.current) throw new Error('已有保存目录确认正在进行。');
+    const confirmed = await new Promise<boolean>(resolve => { directoryConfirm.current = resolve; setConfirmDirectory(settings.directory); });
+    if (!confirmed) return { cancelled: true };
+    return authorizeConfirmedDirectory(settings.directory);
+  };
+  const finishDirectoryConfirmation = (confirmed: boolean) => {
+    const resolve = directoryConfirm.current;
+    directoryConfirm.current = null;
+    setConfirmDirectory(null);
+    resolve?.(confirmed);
+  };
   const cacheExportController = useRef<AbortController | null>(null);
+  const cacheExportSummary = useRef('');
   const [cacheExporting, setCacheExporting] = useState(false);
   useEffect(() => () => cacheExportController.current?.abort(), []);
   const active = useRef(false);
@@ -360,7 +390,7 @@ export default function Xiaohongshu() {
     }
   };
   const startTask = useCallback(
-    (receipt: TaskReceipt, kind: 'list' | 'download', total = 0) => {
+    (receipt: TaskReceipt, kind: 'list' | 'download', total = 0, collecting = false) => {
       if (!receipt.taskId)
         throw new Error('未收到任务编号，请重新读取页面确认操作结果。');
       activityGeneration.current++;
@@ -375,6 +405,7 @@ export default function Xiaohongshu() {
         skipped: 0,
         failed: 0,
         remaining: total,
+        ...(collecting ? { collectDetails: true, collectionStage: 'listing' as const } : {}),
       });
       setProgressOpen(true);
       setTaskCreatorId(receipt.creatorId || '');
@@ -441,9 +472,7 @@ export default function Xiaohongshu() {
     ],
   );
   const loadedNotes = visibleNotes.slice(0, loadedCount);
-  const selectableNotes = loadedNotes.filter(
-    (note) => note.kind === 'image-text' || note.status === 'complete',
-  );
+  const selectableNotes = loadedNotes;
   const selectedNotes = selectedImageNotes(visibleNotes, selectedIds);
   const selectedArchives = visibleNotes.filter(
     (note) => selectedIds.has(note.id) && note.status === 'complete',
@@ -459,6 +488,10 @@ export default function Xiaohongshu() {
           ? allArchiveNotes.data?.items
           : visibleNotes
         )?.filter((note) => note.status === 'complete').length;
+  const savePreviewNotes = (exportScope === 'selected' ? visibleNotes.filter(note => selectedIds.has(note.id)) :
+    exportScope === 'all' ? allArchiveNotes.data?.items : visibleNotes)?.filter(note => note.kind === 'image-text' || note.status === 'complete');
+  const savePreviewCount = savePreviewNotes?.length;
+  const effectiveExportCount = xhsExportFormat === 'obsidian' ? savePreviewCount : exportPreviewCount;
   const allSelected =
     selectableNotes.length > 0 &&
     selectableNotes.every((note) => selectedIds.has(note.id));
@@ -481,7 +514,7 @@ export default function Xiaohongshu() {
         setOperationError('');
         if (taskFinished(next) && !taskSettling(next)) {
           const nextDownload =
-            next.state === 'completed'
+            canContinueCreatorQueue(next) && next.state === 'completed'
               ? queuedDownloads.current.shift()
               : undefined;
           if (nextDownload) {
@@ -491,30 +524,33 @@ export default function Xiaohongshu() {
               active.current = false;
               setTaskId('');
               setBusy(false);
-              setOperationError(
-                failureMessage(cause, '下一位博主的保存未开始。'),
-              );
+              setOperationError(failureMessage(cause, '下一位博主的保存未开始。'));
+              setMessage(withCachedExportSummary(cacheExportSummary.current, '后续保存未开始，请检查任务状态。'));
+              cacheExportSummary.current = '';
             });
             void utils.xiaohongshu.notes.invalidate();
             return;
           }
           queuedDownloads.current = [];
+          const videoPartial = next.state === 'partial' && next.collectionStage === 'details' && next.code === 'XHS_VIDEO_CACHE_UNAVAILABLE';
+          if (videoPartial && queuedCreators.current.length) batchPartialCreators.current.push(taskCreatorId);
           const nextCreator =
-            next.state === 'completed'
+            canContinueCreatorQueue(next)
               ? queuedCreators.current.shift()
               : undefined;
           if (nextCreator) {
-            void subscriptionApi.refresh
-              .mutate({ id: nextCreator, maxPages: 2 })
-              .then((receipt) => startTask(receipt, 'list'))
+            void fullCollectionApi.refreshFull
+              .mutate({ id: nextCreator, scope: 'recent' })
+              .then((receipt) => startTask(receipt, 'list', 0, true))
               .catch((cause) => {
                 queuedCreators.current = [];
                 taskRunning.current = false;
                 active.current = false;
                 setBusy(false);
-                setOperationError(
-                  failureMessage(cause, '下一位博主列表更新未开始。'),
-                );
+                setOperationError(failureMessage(cause, '下一位博主采集未开始。'));
+                setMessage(batchVideoWarning(batchPartialCreators.current.length));
+                batchPartialCreators.current = [];
+
               });
             void utils.xiaohongshu.list.invalidate();
             void utils.xiaohongshu.notes.invalidate();
@@ -527,7 +563,10 @@ export default function Xiaohongshu() {
           cancelPending.current = false;
           setCancelling(false);
           setBusy(false);
-          setMessage(taskText(next));
+          const partialCount = batchPartialCreators.current.length;
+          setMessage(withCachedExportSummary(cacheExportSummary.current, [taskText(next), batchVideoWarning(partialCount)].filter(Boolean).join(' ')));
+          cacheExportSummary.current = '';
+          batchPartialCreators.current = [];
           void readRecentRef.current();
           void utils.xiaohongshu.list.invalidate();
           void utils.xiaohongshu.notes.invalidate();
@@ -546,18 +585,10 @@ export default function Xiaohongshu() {
     run(async () => {
       if (!task || !mayResumeTask(task) || !lastTaskId.current) return;
       let pickToken: string | undefined;
-      if (task.kind === 'download' && saveSettings?.askEveryTime) {
-        const chosen = await localApi<DirectoryChoice>('/directory', {});
-        if (chosen.cancelled) {
-          setMessage('已取消续跑目录选择，原任务保留。');
-          return;
-        }
+      if (task.kind === 'download') {
+        const chosen = await chooseConfirmedDirectory();
+        if (chosen.cancelled) { setMessage('已取消保存，原任务未改变。'); return; }
         pickToken = chosen.pickToken;
-        setSaveSettings({
-          directory: chosen.directory,
-          askEveryTime: chosen.askEveryTime,
-        });
-        setDirectory(chosen.directory);
       }
       const previousTaskId = lastTaskId.current;
       const receipt = await subscriptionApi.resumeTask
@@ -593,7 +624,7 @@ export default function Xiaohongshu() {
       setRecoveredTasks((previous) =>
         previous.filter((record) => record.taskId !== previousTaskId),
       );
-      startTask(receipt, task.kind, task.total);
+      startTask(receipt, task.kind, task.total, task.collectDetails === true || !!task.collectionStage);
       void readRecentRef.current();
     });
   const handleCancelTask = async () => {
@@ -637,10 +668,9 @@ export default function Xiaohongshu() {
         queuedCreators.current = [];
         queuedDownloads.current = [];
       }
-      setMessage(
-        failureMessage(cause, '操作未完成，请检查服务设置或本机保存目录。') +
-          '已有归档保留。',
-      );
+      setMessage(withCachedExportSummary(cacheExportSummary.current,
+        failureMessage(cause, '操作未完成，请检查服务设置或本机保存目录。') + '已有归档保留。'));
+      cacheExportSummary.current = '';
       setOperationError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (!taskRunning.current) {
@@ -682,12 +712,17 @@ export default function Xiaohongshu() {
       return next;
     });
   };
-  const updateCreator = async (id: string) => {
-    setSelectedIds(new Set());
-    startTask(
-      await subscriptionApi.refresh.mutate({ id, maxPages: 2 }),
-      'list',
-    );
+  const updateCreator = async (id: string, scope: 'recent' | 'all' | 'selected' = 'recent', noteIds?: string[]) => {
+    const receipt = await fullCollectionApi.refreshFull.mutate({ id, scope, ...(scope === 'selected' ? { noteIds } : {}) });
+    startTask(receipt, 'list', 0, true);
+  };
+  const handleScopedUpdate = (scope: 'all' | 'selected') => {
+    if (!current || !current.enabled) { setMessage('请先选择并启用博主。'); return; }
+    if (!capability.data?.canRefresh) { showSourceSettings(); setMessage('来源尚未就绪，请在来源设置中恢复会话或处理平台限制后再更新。'); return; }
+    const ids = visibleNotes.filter(note => note.creatorId === current.id && selectedIds.has(note.id)).map(note => note.id);
+    if (scope === 'selected' && !ids.length) { setMessage('请先选择要更新的笔记。'); return; }
+    if (ids.length > 1000) { setMessage('所选笔记超过单次上限，请缩小范围。'); return; }
+    void run(async () => { await updateCreator(current.id, scope, scope === 'selected' ? ids : undefined); });
   };
   const handleRefreshAll = () =>
     run(async () => {
@@ -695,6 +730,7 @@ export default function Xiaohongshu() {
         .filter((creator) => creator.enabled)
         .map((creator) => creator.id);
       if (!ids.length) return;
+      batchPartialCreators.current = [];
       queuedCreators.current = ids.slice(1);
       await updateCreator(ids[0]);
     });
@@ -718,29 +754,18 @@ export default function Xiaohongshu() {
         ...(subscriptionGroup && !resolution.existingCreatorId
           ? { groupId: subscriptionGroup }
           : {}),
-      });
-      if (result.subscribed !== true)
-        throw new Error('订阅尚未确认，请重新读取博主列表。');
-      setMessage(
-        result.created
-          ? '订阅成功，正在读取笔记列表。'
-          : '已订阅此博主，可更新笔记列表。',
-      );
-      await utils.xiaohongshu.list.invalidate();
-      setCreatorId(result.creatorId);
-      setSelectedIds(new Set());
-      setFolderFilter('all');
-      setProfileUrl('');
-      setResolution(null);
-      setAdding(false);
-      if (result.created) {
-        try {
-          await updateCreator(result.creatorId);
-        } catch (cause) {
-          setMessage('订阅已保存，笔记列表暂未读取。可稍后更新列表。');
-          setOperationError(failureMessage(cause, '列表更新未开始。'));
-        }
+      }) as Awaited<ReturnType<typeof subscriptionApi.subscribe.mutate>> & { collection?: TaskReceipt; collectionError?: string };
+      if (result.subscribed !== true) throw new Error('订阅尚未确认，请重新读取博主列表。');
+      setCreatorId(result.creatorId); setSelectedIds(new Set()); setFolderFilter('all');
+      setProfileUrl(''); setResolution(null); setAdding(false);
+      if (result.collection?.taskId) {
+        setMessage('已订阅，正在采集内容。');
+        startTask(result.collection, 'list', 0, true);
+      } else {
+        setMessage('订阅已保存，采集尚未开始，请检查来源状态后更新本号。');
+        if (result.collectionError) setOperationError(failureMessage(new Error(result.collectionError), '采集未开始。'));
       }
+      await utils.xiaohongshu.list.invalidate().catch(() => setOperationError('博主列表暂未刷新，请稍后重试。'));
     });
   const handleDownload = () =>
     run(async () => {
@@ -846,27 +871,15 @@ export default function Xiaohongshu() {
   const startDownloadJob = async (job: {
     creatorId: string;
     noteIds: string[];
+    confirmedDirectory?: string;
   }) => {
     if (!saveSettings) throw new Error('请先读取本机保存设置。');
-    let pickToken: string | undefined;
-    if (saveSettings.askEveryTime) {
-      const chosen = await localApi<DirectoryChoice>('/directory', {});
-      if (chosen.cancelled) {
-        queuedDownloads.current = [];
-        taskRunning.current = false;
-        active.current = false;
-        setTaskId('');
-        setBusy(false);
-        setMessage('已取消目录选择，未开始后续保存。');
-        return;
-      }
-      pickToken = chosen.pickToken;
-      setSaveSettings({
-        directory: chosen.directory,
-        askEveryTime: chosen.askEveryTime,
-      });
-      setDirectory(chosen.directory);
+    const chosen = job.confirmedDirectory ? await authorizeConfirmedDirectory(job.confirmedDirectory) : await chooseConfirmedDirectory();
+    if ('cancelled' in chosen && chosen.cancelled) {
+      queuedDownloads.current = []; taskRunning.current = false; active.current = false;
+      setTaskId(''); setBusy(false); setMessage('已取消保存，未开始下载。'); return;
     }
+    const pickToken = chosen.pickToken;
     const receipt = await subscriptionApi.downloadNotes.mutate({
       creatorId: job.creatorId,
       noteIds: job.noteIds,
@@ -875,17 +888,28 @@ export default function Xiaohongshu() {
     startTask(receipt, 'download', job.noteIds.length);
   };
   nextDownloadRef.current = startDownloadJob;
-  const handleLocalSave = (archivedOnly = false) =>
+  const handleLocalSave = (archivedOnly = false, scope: 'selected' | 'filtered' | 'all' = 'selected', confirmedDirectory?: string, confirmedIds?: string[]) =>
     run(async () => {
-      const targets = archivedOnly ? selectedArchives : selectedNotes;
+      cacheExportSummary.current = '';
+      let targets = archivedOnly ? selectedArchives : visibleNotes.filter(note => selectedIds.has(note.id) && (note.kind === 'image-text' || note.status === 'complete'));
+      if (!archivedOnly && scope !== 'selected') {
+        const result = await utils.client.xiaohongshu.notes.query(scope === 'all' ? { creatorId: creatorId || undefined } : notesInput);
+        const matching = scope === 'filtered' ? filterNotes(result.items, compiledConditions) : result.items;
+        targets = matching.filter(note => note.kind === 'image-text' || note.status === 'complete');
+      }
+      if (confirmedIds && (targets.length !== confirmedIds.length || targets.some(note => !confirmedIds.includes(note.id)))) throw Error('导出范围已变化，请重新确认。');
       if (!saveSettings || !targets.length) return;
-      if (archivedOnly) {
-        const items = targets.map((note) => ({
+      if (archivedOnly || targets.some(note => note.status === 'complete')) {
+        const cachedTargets = archivedOnly ? targets : targets.filter(note => note.status === 'complete');
+        let cacheFailed = false;
+        const items = cachedTargets.map((note) => ({
           id: note.id,
           creatorId: note.creatorId,
         }));
         if (items.length > 5000)
           throw Error('单次最多导出 5000 篇，请缩小所选范围。');
+        const chosen = confirmedDirectory ? await authorizeConfirmedDirectory(confirmedDirectory) : await chooseConfirmedDirectory();
+        if ('cancelled' in chosen && chosen.cancelled) { setMessage('已取消保存，未开始导出。'); return; }
         const controller = new AbortController();
         cacheExportController.current = controller;
         setCacheExporting(true);
@@ -898,7 +922,7 @@ export default function Xiaohongshu() {
               error?: string;
             }>;
             cancelled: boolean;
-          }>('/xiaohongshu/cache-export', { items }, controller.signal);
+          }>('/xiaohongshu/cache-export', { items, pickToken: chosen.pickToken }, controller.signal);
           if (
             !receipt ||
             typeof receipt.cancelled !== 'boolean' ||
@@ -922,6 +946,8 @@ export default function Xiaohongshu() {
             (result) => result.saved && !result.error,
           );
           const failed = receipt.results.filter((result) => result.error);
+          cacheFailed = receipt.cancelled || failed.length > 0;
+          if (!cacheFailed && !archivedOnly && targets.length > cachedTargets.length) cacheExportSummary.current = `已确认缓存阶段 ${saved.length}/${items.length} 篇。`;
           const missing = failed.filter((result) =>
             [
               'XHS_CACHED_ARTICLE_UNAVAILABLE',
@@ -938,11 +964,12 @@ export default function Xiaohongshu() {
               failed
                 .map(
                   (result) =>
-                    `${targets.find((note) => note.id === result.id)?.title || '笔记'}：${['XHS_CACHED_ARTICLE_UNAVAILABLE', 'VERIFIED_ARTICLE_UNAVAILABLE', 'XHS_CACHED_VIDEO_UNAVAILABLE', 'XHS_CACHED_VIDEO_INVALID'].includes(result.error!) ? '缓存正文或图片不完整' : '保存未完成，请检查本机目录或磁盘空间'}`,
+                    `${cachedTargets.find((note) => note.id === result.id)?.title || '笔记'}：${['XHS_CACHED_ARTICLE_UNAVAILABLE', 'VERIFIED_ARTICLE_UNAVAILABLE', 'XHS_CACHED_VIDEO_UNAVAILABLE', 'XHS_CACHED_VIDEO_INVALID'].includes(result.error!) ? '缓存正文或图片不完整' : '保存未完成，请检查本机目录或磁盘空间'}`,
                 )
                 .join('；'),
             );
         } catch (error) {
+          cacheFailed = true;
           setMessage(
             controller.signal.aborted
               ? '已停止后续保存；本次结果未完全确认，请检查目录，不会自动重试。'
@@ -957,7 +984,9 @@ export default function Xiaohongshu() {
             cacheExportController.current = null;
           setCacheExporting(false);
         }
-        return;
+        if (archivedOnly || cacheFailed) return;
+        targets = targets.filter(note => note.status !== 'complete');
+        if (!targets.length) return;
       }
       const byAuthor = new Map<string, string[]>();
       for (const note of targets) {
@@ -968,6 +997,7 @@ export default function Xiaohongshu() {
       const jobs = [...byAuthor].map(([creatorId, noteIds]) => ({
         creatorId,
         noteIds,
+        ...(confirmedDirectory ? { confirmedDirectory } : {}),
       }));
       queuedDownloads.current = jobs.slice(1);
       await startDownloadJob(jobs[0]);
@@ -1299,13 +1329,6 @@ export default function Xiaohongshu() {
         className="mac-content feed-content !min-w-0 !overflow-y-auto"
         aria-label="小红书笔记列表"
       >
-        <XhsWholeCreator creatorId={creatorId} chooseDirectory={async () => {
-              const settings = await localApi<SaveSettings>('/settings');
-              if (!settings.askEveryTime) return {};
-              const chosen = await localApi<DirectoryChoice>('/directory', {});
-              if (!chosen.cancelled) setSaveSettings({directory:chosen.directory,askEveryTime:chosen.askEveryTime});
-              return {cancelled:chosen.cancelled,pickToken:chosen.pickToken};
-            }} />
         <XhsTaskRecovery
           tasks={recoveredTasks}
           loading={recoveryLoading}
@@ -1432,19 +1455,11 @@ export default function Xiaohongshu() {
             {current && <XhsMetricLine snapshot={current.metrics} creator />}
             <span role="status" className="text-xs text-neutral-500">
               {capability.data?.canRefresh
-                ? '每次更新最多读取 2 页，更多需明确继续'
+                ? '默认采集来源返回的前 30 篇。'
                 : '管理已有目录'}
             </span>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="light"
-              isDisabled={busy}
-              onPress={() => setBatchOpen(true)}
-            >
-              批量订阅
-            </Button>
             <SubscriptionSearch
               open={searchOpen}
               label="搜索笔记"
@@ -1456,40 +1471,30 @@ export default function Xiaohongshu() {
               size="sm"
               color="primary"
               variant="flat"
-              isDisabled={busy || !saveSettings || !selectedNotes.length}
-              onPress={() => handleLocalSave()}
+              isDisabled={busy}
+              onPress={() => { setExportScope(selectedIds.size ? 'selected' : 'filtered'); setXhsExportFormat('obsidian'); setExportOpen(true); }}
             >
-              下载图文到本地 ({selectedNotes.length})
+              导出笔记
             </Button>
             <Button
               size="sm"
               className="mac-btn-outline"
-              isDisabled={
-                busy || !current?.enabled || !capability.data?.canRefresh
-              }
-              onPress={() =>
-                run(async () => {
-                  if (current) await updateCreator(current.id);
-                })
-              }
+              isDisabled={busy || !creators.data?.items.some(creator => creator.enabled)}
+              onPress={() => {
+                if (!capability.data?.canRefresh) { showSourceSettings(); setMessage('来源尚未就绪，请在来源设置中恢复会话或处理平台限制后再更新。'); return; }
+                if (current) {
+                  if (!current.enabled) { setMessage('该博主已暂停，请先启用后再更新。'); return; }
+                  void run(async () => { await updateCreator(current.id); });
+                } else handleRefreshAll();
+              }}
             >
-              更新笔记列表
+              {current ? '更新本号' : '更新全部'}
             </Button>
             <SubscriptionMore key={creatorId}>
-              <Button
-                size="sm"
-                variant="light"
-                isDisabled={busy}
-                onPress={() => {
-                  setExportScope(
-                    selectedArchives.length ? 'selected' : 'filtered',
-                  );
-                  setExportOpen(true);
-                }}
-              >
-                导出已保存 ZIP
-              </Button>
-
+              {current && <Button size="sm" variant="light" isDisabled={busy} onPress={() => handleScopedUpdate('all')}>更新本号全部内容</Button>}
+              {current && <Button size="sm" variant="light" isDisabled={busy || !selectedIds.size} onPress={() => handleScopedUpdate('selected')}>更新所选内容</Button>}
+              <Button size="sm" variant="light" isDisabled={busy} onPress={() => setBatchOpen(true)}>批量订阅</Button>
+              <Button size="sm" variant="light" onPress={() => setDiagnosticOpen(true)}>来源诊断</Button>
               <Button
                 size="sm"
                 variant="light"
@@ -1514,18 +1519,6 @@ export default function Xiaohongshu() {
                   启用更新
                 </Switch>
               )}
-              <Button
-                size="sm"
-                variant="light"
-                isDisabled={
-                  busy ||
-                  !capability.data?.canRefresh ||
-                  !creators.data?.items.some((creator) => creator.enabled)
-                }
-                onPress={handleRefreshAll}
-              >
-                更新全部列表
-              </Button>
               {current && managing && (
                 <Button
                   size="sm"
@@ -1564,15 +1557,6 @@ export default function Xiaohongshu() {
             来源与本机保存设置{operationError ? ' · 有错误待查看' : ''}
           </summary>
           <div className="space-y-2 py-2">
-            {sourceSettingsOpen && !adding && (
-              <section aria-label="共享来源请求额度">
-                <XhsSourceBudget
-                  key="shared-source-budget"
-                  api={sourceBudgetApi}
-                  scope={{ purpose: 'resolution' }}
-                />
-              </section>
-            )}
             <section aria-label="小红书连接状态" className="space-y-2">
               <p role="status">
                 {connection.error
@@ -1838,13 +1822,7 @@ export default function Xiaohongshu() {
                 if (!active.current)
                   setSelectedIds(
                     new Set(
-                      visibleNotes
-                        .filter(
-                          (note) =>
-                            note.kind === 'image-text' ||
-                            note.status === 'complete',
-                        )
-                        .map((note) => note.id),
+                      visibleNotes.map((note) => note.id),
                     ),
                   );
               }}
@@ -1873,57 +1851,11 @@ export default function Xiaohongshu() {
             }}
           />
 
-          {metricOrder ? (
-            <div
-              className="flex flex-wrap items-center gap-2 text-xs"
-              aria-label="当前排序"
-            >
-              <span role="status">
-                当前排序：
-                {
-                  {
-                    likes: '点赞',
-                    collects: '收藏',
-                    shares: '分享',
-                    comments: '评论',
-                  }[metricOrder.metric]
-                }{' '}
-                · {metricOrder.direction === 'desc' ? '从高到低' : '从低到高'}
-              </span>
-              <Button
-                size="sm"
-                variant="light"
-                isDisabled={busy}
-                onPress={() => {
-                  if (!active.current) {
-                    setMetricOrder(null);
-                    setLoadedCount(20);
-                  }
-                }}
-              >
-                恢复时间排序
-              </Button>
-            </div>
-          ) : (
-            <ContentSortControls
-              sort="publishTime"
-              onSortChange={() => {}}
-              direction={direction}
-              onDirectionChange={(value) => {
-                setLoadedCount(20);
-                setDirection(value);
-                setMetricOrder(null);
-                setSelectedIds(new Set());
-              }}
-              options={[{ value: 'publishTime', label: '发布时间' }]}
-              disabled={busy}
-            />
-          )}
         </div>
         <div className="xhs-list-caption text-xs text-neutral-500">
           当前范围 {visibleNotes.length} 条目录 · 完整归档{' '}
           {visibleNotes.filter((note) => note.status === 'complete').length} 篇
-          · 已选 {selectedNotes.length} 篇图文 · — 表示未采集，0 为真实数值。
+          · 已选 {selectedIds.size} 篇 · — 表示未采集，0 为真实数值。
           {search && '修改搜索会清空选择。'}
         </div>
         {notes.error && (
@@ -1967,7 +1899,11 @@ export default function Xiaohongshu() {
                 }}
               />
               <span>笔记标题 · {visibleNotes.length} 篇</span>
-              <span>发布时间</span>
+              <span role="columnheader" aria-sort={metricOrder || !timeOrder ? 'none' : timeOrder === 'asc' ? 'ascending' : 'descending'}>
+                <button type="button" disabled={busy} aria-label={`发布时间排序：${metricOrder || !timeOrder ? '从早到晚' : timeOrder === 'asc' ? '从晚到早' : '恢复默认'}`} onClick={() => { if (!active.current) { setMetricOrder(null); setTimeOrder(nextTimeOrder(timeOrder, !!metricOrder)); setLoadedCount(20); } }}>
+                  发布时间{!metricOrder && timeOrder ? timeOrder === 'asc' ? ' ↑' : ' ↓' : ' ↕'}
+                </button>
+              </span>
               {(['likes', 'collects', 'shares', 'comments'] as const).map(
                 (metric) => (
                   <span
@@ -2029,10 +1965,7 @@ export default function Xiaohongshu() {
                   <Checkbox
                     size="sm"
                     aria-label={`选择笔记 ${note.title}`}
-                    isDisabled={
-                      busy ||
-                      (note.kind !== 'image-text' && note.status !== 'complete')
-                    }
+                    isDisabled={busy}
                     isSelected={selectedIds.has(note.id)}
                     onValueChange={(value) => selectNote(note.id, value)}
                   />
@@ -2044,7 +1977,7 @@ export default function Xiaohongshu() {
                   title={note.title}
                   author={!creatorId ? note.creatorName : undefined}
                   prepare={prepareOriginalLink}
-                  onConfigure={showOriginalBudget}
+                  onConfigure={showSourceSettings}
                 />
                 <time
                   className="xhs-note-date"
@@ -2121,18 +2054,27 @@ export default function Xiaohongshu() {
         onClose={() => setBatchOpen(false)}
         api={subscriptionApi as typeof subscriptionApi & BatchApi}
         groups={groups.data?.items || []}
-        budget={
-          batchOpen ? (
-            <XhsSourceBudget
-              api={sourceBudgetApi}
-              scope={{ purpose: 'resolution' }}
-            />
-          ) : null
-        }
+        budget={null}
         onSubscribed={() => {
           void utils.xiaohongshu.list.invalidate();
         }}
       />
+      <SubscriptionDialog isOpen={diagnosticOpen} onClose={() => setDiagnosticOpen(false)}>
+        <ModalContent><ModalHeader>来源诊断</ModalHeader><ModalBody>
+          <p>来源访问受限或需要验证时，采集会暂停。请检查来源状态后再继续。</p>
+          {creatorId && <XhsWholeCreator creatorId={creatorId} />}
+        </ModalBody><ModalFooter><Button onPress={() => setDiagnosticOpen(false)}>关闭</Button></ModalFooter></ModalContent>
+      </SubscriptionDialog>
+      <SubscriptionDialog isOpen={confirmDirectory !== null} onClose={() => finishDirectoryConfirmation(false)}>
+        <ModalContent>
+          <ModalHeader>确认保存位置</ModalHeader>
+          <ModalBody><p>本次内容将保存到：</p><p className="break-all" aria-label="保存目录">{confirmDirectory}</p></ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={() => finishDirectoryConfirmation(false)}>取消</Button>
+            <Button color="primary" onPress={() => finishDirectoryConfirmation(true)}>确认保存</Button>
+          </ModalFooter>
+        </ModalContent>
+      </SubscriptionDialog>
       <SubscriptionDialog
         isOpen={exportOpen}
         onClose={() => {
@@ -2140,7 +2082,7 @@ export default function Xiaohongshu() {
         }}
       >
         <ModalContent>
-          <ModalHeader>导出已保存笔记</ModalHeader>
+          <ModalHeader>导出笔记</ModalHeader>
           <ModalBody>
             <p aria-label="导出对象" className="text-sm">
               范围：
@@ -2153,8 +2095,8 @@ export default function Xiaohongshu() {
               options={[
                 {
                   value: 'selected',
-                  label: `选中笔记（${selectedArchives.length} 篇完整归档）`,
-                  disabled: !selectedArchives.length,
+                  label: `选中笔记（${xhsExportFormat === 'obsidian' ? (savePreviewCount ?? 0) : selectedArchives.length} 篇）`,
+                  disabled: !(xhsExportFormat === 'obsidian' ? (savePreviewCount ?? 0) : selectedArchives.length),
                 },
                 {
                   value: 'filtered',
@@ -2171,13 +2113,13 @@ export default function Xiaohongshu() {
               onChange={setExportScope}
               disabled={busy}
             />
-            <p className="text-xs text-neutral-500">
-              只导出已完整保存的正文与媒体；视频归档可一起导出。超过 100
-              篇自动分批生成 ZIP，开始后范围固定。
-            </p>
-            <p role="status">
-              范围内完整归档：{exportPreviewCount ?? '读取中'} 篇。
-            </p>
+            <label className="flex flex-col gap-2 text-sm">导出方式
+              <select aria-label="导出方式" className="bg-background rounded border p-2" value={xhsExportFormat} onChange={event => setXhsExportFormat(event.target.value as 'obsidian' | 'zip')}>
+                <option value="obsidian">保存到 Obsidian 目录</option><option value="zip">下载 ZIP 文件</option>
+              </select>
+            </label>
+            {xhsExportFormat === 'obsidian' ? <div><p className="break-all text-sm">保存目录：{saveSettings?.directory || '正在读取'}</p><p className="text-xs text-neutral-500">此入口保存图文和已完整缓存的视频。</p></div> : <p className="text-xs text-neutral-500">ZIP 仅包含已完整归档的笔记及媒体。</p>}
+            <p role="status">本次范围：{effectiveExportCount ?? '读取中'} 篇。</p>
             {exportScope === 'all' && allArchiveNotes.error && (
               <p role="alert">范围读取失败，请关闭后重新打开。</p>
             )}
@@ -2190,12 +2132,13 @@ export default function Xiaohongshu() {
               color="primary"
               isDisabled={
                 busy ||
-                !exportPreviewCount ||
+                !effectiveExportCount ||
+                (xhsExportFormat === 'obsidian' && !saveSettings) ||
                 (exportScope === 'filtered' && !!dateError)
               }
-              onPress={handleDownload}
+              onPress={() => { if (xhsExportFormat === 'zip') handleDownload(); else { setExportOpen(false); handleLocalSave(false, exportScope, saveSettings?.directory, savePreviewNotes?.map(note => note.id)); } }}
             >
-              开始导出
+              开始导出 {effectiveExportCount ?? ''} 篇
             </Button>
           </ModalFooter>
         </ModalContent>
@@ -2226,13 +2169,6 @@ export default function Xiaohongshu() {
               isDisabled={busy}
               maxLength={2000}
             />
-            {adding && (
-              <XhsSourceBudget
-                key="resolution-budget"
-                api={sourceBudgetApi}
-                scope={{ purpose: 'resolution' }}
-              />
-            )}
             {resolution && (
               <div
                 className="space-y-2 rounded-lg border p-3"

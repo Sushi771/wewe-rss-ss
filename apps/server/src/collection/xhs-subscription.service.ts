@@ -20,6 +20,7 @@ import {
   xhsArchiveDraft,
 } from './xiaohongshu-contract';
 import { verifiedDownloadBody } from '../article-verified-download';
+import { prepareXhsVideoDownload } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
 import { saveXhsMetrics } from './xhs-engagement-store';
@@ -47,6 +48,7 @@ export interface XhsSubscriptionSource {
     collectedAt?: number,
   ): Promise<void>;
   sourceStorage?<T>(work: () => Promise<T>): Promise<T>;
+  checkpointWholeDirectory?(tx: Prisma.TransactionClient, taskId: string, creatorId: string, ids: string[]): Promise<void>;
 
   metrics?(authorId: string, noteId?: string): Promise<XhsMetricSnapshot>;
   comments?(
@@ -90,6 +92,12 @@ type Task = XhsSubscriptionTask & {
   listedIds?: string[];
   listFinished?: boolean;
   pageLimit?: number;
+  collectDetails?: boolean;
+  collectionScope?: 'recent' | 'all' | 'selected';
+  selectedIds?: string[];
+  selectionComplete?: boolean;
+  collectionStage?: 'listing' | 'details';
+  cacheResults?: Record<string, 'completed'>;
   localReceipts?: Record<string, { savedAt: number; supplementStatus: string }>;
   localArchives?: Record<string, { savedAt: number }>;
   detailMetrics?: Record<string, number>;
@@ -116,7 +124,8 @@ const finishedDownload = (t: Task) =>
   t.noteIds.length === t.total &&
   t.noteIds.every((id) => ['completed', 'skipped'].includes(t.items[id]));
 const ahead = (saved: Task, t: Task) =>
-  saved.completed + saved.skipped > t.completed + t.skipped ||
+  (saved.collectionStage === t.collectionStage && saved.completed + saved.skipped > t.completed + t.skipped) ||
+  (saved.collectionStage === 'details' && t.collectionStage !== 'details') ||
   (saved.cursorHistory?.length ?? 0) > (t.cursorHistory?.length ?? 0) ||
   (!!saved.listFinished && !t.listFinished);
 const key = (id: string) => JSON.stringify(['xiaohongshu', 'note', id]);
@@ -462,13 +471,14 @@ export class XhsSubscriptionService implements OnModuleInit {
       creatorId: string,
       authorId: string,
     ) => Promise<void>,
+    startAfter?: Promise<boolean>,
   ) {
     await this.readyForMutation();
     const resolution = this.resolutions.get(input.resolutionId);
     if (!resolution || resolution.expiresAt <= Date.now())
       return reject('XHS_RESOLUTION_EXPIRED');
     const { author } = resolution.value;
-    return this.write(4096, async (tx) => {
+    const subscribed = await this.write(4096, async (tx) => {
       if (
         input.groupId &&
         !(await tx.managementGroup.findFirst({
@@ -515,6 +525,14 @@ export class XhsSubscriptionService implements OnModuleInit {
         subscribed: true as const,
       };
     });
+    // The creator is already committed; a failed enqueue is reported explicitly
+    // rather than implying that the subscription transaction was rolled back.
+    try {
+      const collection = await this.refreshFull({ id: subscribed.creatorId }, startAfter);
+      return { ...subscribed, collection };
+    } catch (error) {
+      return { ...subscribed, collectionError: xhsPublicCode(error, 'XHS_TASK_BLOCKED') };
+    }
   }
   private async creator(id: string) {
     const c = await this.db.xhsCreator.findUnique({ where: { id } });
@@ -539,6 +557,23 @@ export class XhsSubscriptionService implements OnModuleInit {
       undefined,
       input.maxPages,
     );
+  }
+  async refreshFull(input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[] }, startAfter?: Promise<boolean>) {
+    await this.creator(input.id);
+    const scope = input.scope ?? 'recent';
+    if (!['recent', 'all', 'selected'].includes(scope)) return reject('XHS_SELECTION_INVALID');
+    const ids = [...new Set(input.noteIds ?? [])];
+    if ((scope !== 'selected' && input.noteIds !== undefined) ||
+        (scope === 'selected' && (!ids.length || ids.length > 1000 || ids.some(id => !id || id.length > 300))))
+      return reject('XHS_SELECTION_INVALID');
+    if (scope === 'selected') {
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const batch = ids.slice(offset, offset + 100);
+        if (await this.db.xhsNote.count({ where: { creatorId: input.id, id: { in: batch } } }) !== batch.length)
+          return reject('XHS_SELECTION_INVALID');
+      }
+    }
+    return this.enqueue('list', input.id, [], undefined, undefined, undefined, true, scope, ids, startAfter);
   }
   async downloadNotes(input: {
     creatorId: string;
@@ -648,6 +683,10 @@ export class XhsSubscriptionService implements OnModuleInit {
     directory?: string,
     checkpoint?: Task,
     pageLimit?: number,
+    collectDetails = false,
+    collectionScope?: Task['collectionScope'],
+    selectedIds?: string[],
+    startAfter?: Promise<boolean>,
   ) {
     await this.readyForMutation();
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
@@ -655,11 +694,17 @@ export class XhsSubscriptionService implements OnModuleInit {
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     if ([...this.pending.values()].some((t) => t.creatorId === creatorId))
       return reject('XHS_TASK_CONFLICT');
-    if ([...this.pending.values()].filter(active).length >= 20)
+    // A batch is bounded by its existing 100-entry input contract. Its
+    // children remain behind the shared batch barrier and use the same serial lane.
+    if (!startAfter && [...this.pending.values()].filter(active).length >= 20)
       return reject('XHS_TASK_QUEUE_FULL');
     const t: Task = {
       ...checkpoint,
       pageLimit: pageLimit ?? checkpoint?.pageLimit,
+      collectDetails: collectDetails || checkpoint?.collectDetails,
+      collectionScope: collectionScope ?? checkpoint?.collectionScope,
+      selectedIds: selectedIds ?? checkpoint?.selectedIds,
+      collectionStage: checkpoint?.collectionStage ?? (collectDetails ? 'listing' : undefined),
       taskId: randomUUID(),
       creatorId,
       kind,
@@ -693,7 +738,15 @@ export class XhsSubscriptionService implements OnModuleInit {
       throw e;
     }
     this.lane = this.lane
-      .then(() => this.run(t, directory))
+      .then(async () => {
+        if (startAfter && !(await startAfter)) {
+          t.state = 'cancelled';
+          t.message = 'XHS_TASK_CANCELLED';
+          try { await this.persist(t); } finally { this.pending.delete(t.taskId); }
+          return;
+        }
+        return this.run(t, directory);
+      })
       .catch(() => {
         /* persisted checkpoint remains recoverable; do not replay */
       });
@@ -779,6 +832,8 @@ export class XhsSubscriptionService implements OnModuleInit {
       taskId: t.taskId,
       creatorId: t.creatorId,
       kind: t.kind,
+      collectionStage: t.collectionStage,
+      collectionScope: t.collectionScope,
       state,
       total: t.total,
       completed: t.completed,
@@ -902,12 +957,23 @@ export class XhsSubscriptionService implements OnModuleInit {
       if (directory !== previous.directory)
         return reject('XHS_RESUME_DIRECTORY_CHANGED');
     }
+    // Access contexts live in memory. Re-enumerate the directory after an
+    // explicit resume, but preserve proven completed details and never replay
+    // them. Existing unknown-source fences still gate each request.
+    const checkpoint: Task = previous.collectDetails
+      ? { ...previous, collectionStage: 'listing', cursor: null, cursorHistory: [],
+          listedIds: [], listFinished: false, selectionComplete: false, noteIds: [], total: 0, completed: 0,
+          skipped: 0, failed: 0, remaining: 0, items: {},
+          cacheResults: { ...previous.cacheResults, ...Object.fromEntries(
+            Object.entries(previous.items).filter(([, state]) => state === 'completed'),
+          ) } as Record<string, 'completed'> }
+      : previous;
     return this.enqueue(
       previous.kind,
       previous.creatorId,
-      previous.noteIds,
+      checkpoint.noteIds,
       directory,
-      previous,
+      checkpoint,
     );
   }
   async cancelTask(input: { taskId: string }) {
@@ -933,8 +999,30 @@ export class XhsSubscriptionService implements OnModuleInit {
       t.state = 'running';
       t.message = '处理中';
       await this.persist(t);
-      if (t.kind === 'list') await this.updateList(t, creator);
-      else
+      if (t.kind === 'list' && t.collectionStage !== 'details') {
+        await this.updateList(t, creator);
+        if (active(t) && t.collectDetails && (t.listFinished || t.selectionComplete)) {
+          t.collectionStage = 'details';
+          const discovered = t.listedIds ?? [];
+          t.noteIds = t.collectionScope === 'recent' ? discovered.slice(0, 30)
+            : t.collectionScope === 'selected' ? discovered.filter(id => t.selectedIds?.includes(id))
+            : [...discovered];
+          if (t.collectionScope === 'selected' && t.noteIds.length !== t.selectedIds?.length)
+            return reject('XHS_SELECTION_CHANGED');
+          t.items = Object.fromEntries(t.noteIds
+            .filter(id => t.cacheResults?.[id] === 'completed')
+            .map(id => [id, 'completed' as const]));
+          t.total = t.noteIds.length;
+          t.completed = Object.keys(t.items).length;
+          t.skipped = t.failed = 0;
+          t.remaining = t.total - t.completed;
+          await this.write(Buffer.byteLength(JSON.stringify(t)) + 4096, async tx => {
+            await this.persistIn(tx, t);
+            await this.source?.checkpointWholeDirectory?.(tx, t.taskId, t.creatorId, t.noteIds);
+          });
+        }
+      }
+      if (t.kind === 'download' || t.collectionStage === 'details')
         for (const id of t.noteIds) {
           if (!active(t)) break;
           if (t.items[id] === 'completed' || t.items[id] === 'skipped')
@@ -947,12 +1035,12 @@ export class XhsSubscriptionService implements OnModuleInit {
             if (!old) return reject('XHS_SELECTION_CHANGED');
             if (
               old.kind === 'video' &&
-              (old.status !== 'complete' || !old.contentHtml)
+              !t.collectDetails && (old.status !== 'complete' || !old.contentHtml)
             ) {
               t.skipped++;
               t.items[id] = 'skipped';
             } else {
-              if (old.status !== 'complete' || !old.contentHtml) {
+              if (t.collectDetails || old.status !== 'complete' || !old.contentHtml) {
                 const tuple = JSON.parse(id);
                 if (tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note')
                   return reject('XHS_NOTE_ID_INVALID');
@@ -967,14 +1055,18 @@ export class XhsSubscriptionService implements OnModuleInit {
                       this.controllers.get(t.taskId)?.signal,
                     );
                     if (!active(t)) return;
+                    if (old.kind && old.kind !== note.kind) return reject('XHS_DETAIL_INCOMPLETE');
+                    const video = note.kind === 'video' ? note.video : undefined;
+                    if (note.kind === 'video' && !video) return reject('XHS_VIDEO_CACHE_UNAVAILABLE');
+                    if (video) prepareXhsVideoDownload({evidenceVerified:true,note,video});
                     const draft = xhsArchiveDraft(
                       creator.externalAuthorId!,
-                      note,
+                      video ? {...note,kind:'image-text'} : note,
                     );
                     if (
                       draft.noteKey !== id ||
                       draft.status !== 'candidate' ||
-                      !draft.readyForEvidenceCheck
+                      (!video && !draft.readyForEvidenceCheck)
                     )
                       return reject('XHS_DETAIL_INCOMPLETE');
                     const html = verifiedDownloadBody(
@@ -993,10 +1085,11 @@ export class XhsSubscriptionService implements OnModuleInit {
                               '">',
                           )
                           .join('') +
+                        (video && !draft.text.trim() && !draft.images.length ? '<p title="wewe-empty-video-caption">Video</p>' : '') +
                         '</div>',
                     );
                     await this.write(
-                      Buffer.byteLength(html) + 4096,
+                      Buffer.byteLength(html) + (video?.bytes.length ?? 0) + 4096,
                       async (tx) => {
                         const currentCreator = await tx.xhsCreator.findUnique({
                           where: { id: creator.id },
@@ -1037,7 +1130,7 @@ export class XhsSubscriptionService implements OnModuleInit {
                             return reject('XHS_TASK_CANCELLED');
                         }
                         if (
-                          current.status !== 'complete' ||
+                          t.collectDetails || current.status !== 'complete' ||
                           !current.contentHtml
                         )
                           await tx.xhsNote.update({
@@ -1047,12 +1140,23 @@ export class XhsSubscriptionService implements OnModuleInit {
                               publishTime: note.publishedAt,
                               contentHtml: html,
                               status: 'complete',
-                              kind: 'image-text',
+                              kind: video ? 'video' : 'image-text',
+                              ...(video ? { videoBytes: video.bytes, videoMimeType: video.mimeType, videoExpectedBytes: video.expectedBytes, videoSha256: video.sha256 } : {}),
                             },
                           });
+                        if (t.collectDetails) {
+                          await this.persistIn(tx, { ...t, items: { ...t.items, [id]: 'completed' },
+                            completed: t.completed + 1,
+                            remaining: t.total - t.completed - 1 - t.skipped - t.failed });
+                        }
                         await this.source?.checkpointWholeSource?.(tx);
                       },
                     );
+                    if (t.collectDetails) {
+                      t.items[id] = 'completed';
+                      t.completed++;
+                      t.remaining = t.total - t.completed - t.skipped - t.failed;
+                    }
                     if (
                       note.metrics &&
                       Number.isSafeInteger(note.metrics.collectedAt) &&
@@ -1066,6 +1170,10 @@ export class XhsSubscriptionService implements OnModuleInit {
                 );
               }
               if (!active(t)) break;
+              if (t.collectDetails) {
+                await this.persist(t);
+                continue;
+              }
               const saved = await this.save!(creator, id, directory!);
               if (saved.supplement && saved.supplement.status !== 'retained')
                 t.snapshotsSaved = (t.snapshotsSaved ?? 0) + 1;
@@ -1104,6 +1212,7 @@ export class XhsSubscriptionService implements OnModuleInit {
             // Do not continue dispatching the rest of a batch after such a stop.
             t.state = t.completed || t.skipped ? 'partial' : 'blocked';
             t.code = xhsPublicCode(error, 'XHS_DOWNLOAD_BLOCKED');
+            if (t.code === 'XHS_VIDEO_CACHE_UNAVAILABLE') t.code = 'XHS_VIDEO_SOURCE_UNVERIFIED';
             t.message = '下载已停止，请检查连接或本地保存状态。';
           }
           t.remaining = t.total - t.completed - t.skipped - t.failed;
@@ -1158,7 +1267,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     const seen = new Set(t.cursorHistory ?? []);
     const notes = new Set(t.listedIds ?? []);
     let pagesThisRun = 0;
-    while (!t.listFinished && active(t)) {
+    while (!t.listFinished && !t.selectionComplete && active(t)) {
       if (t.pageLimit !== undefined && pagesThisRun >= t.pageLimit)
         throw new XhsSubscriptionError('XHS_LIST_PAGE_LIMIT_REACHED');
       pagesThisRun++;
@@ -1259,6 +1368,9 @@ export class XhsSubscriptionService implements OnModuleInit {
                 cursorHistory: [...seen, cursor],
                 listedIds: [...notes, ...pageIds],
                 listFinished: page.nextCursor === null,
+                selectionComplete: t.collectDetails && (t.collectionScope === 'recent'
+                  ? notes.size + pageIds.size >= 30
+                  : t.collectionScope === 'selected' && (t.selectedIds ?? []).every(id => notes.has(id) || pageIds.has(id))),
               };
               // Page membership and continuation cursor commit together. Crashes cannot
               // advance past uncommitted metadata or erase earlier complete bodies.

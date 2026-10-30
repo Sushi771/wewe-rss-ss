@@ -1743,8 +1743,8 @@ export class TrpcRouter {
                 })
                 .strict(),
             ]),
-            totalLimit: z.number().int().min(1).max(100000),
-            intervalMs: z.number().int().min(1000).max(60000),
+            totalLimit: z.number().int().min(1).max(100000).default(100000),
+            intervalMs: z.number().int().min(1000).max(60000).default(5000),
           })
           .strict(),
       )
@@ -2024,7 +2024,7 @@ export class TrpcRouter {
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.reviewGeneration(input));}),
     prepareWholeCreatorGeneration: this.trpcService.protectedProcedure
       .input(z.object({ jobId:z.string().min(1).max(128), profileUrl:z.string().min(1).max(8192), confirmUnknown:z.literal(true),
-        phaseLimits:z.object({profile:z.number().int().nonnegative(),list:z.number().int().nonnegative(),detail:z.number().int().nonnegative(),media:z.number().int().nonnegative(),metrics:z.number().int().nonnegative()}).strict() }).strict())
+        phaseLimits:z.object({profile:z.number().int().nonnegative(),list:z.number().int().nonnegative(),detail:z.number().int().nonnegative(),media:z.number().int().nonnegative(),metrics:z.number().int().nonnegative()}).strict().default({profile:100000,list:100000,detail:100000,media:100000,metrics:100000}) }).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareGeneration(input));}),
     executeWholeCreatorGeneration: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true),pickToken:z.string().max(128).optional()}).strict())
@@ -2052,8 +2052,8 @@ export class TrpcRouter {
         z
           .object({
             creatorId: z.string().min(1).max(128),
-            requestLimit: z.number().int().min(1).max(100000),
-            intervalMs: z.number().int().min(1000).max(60000),
+            requestLimit: z.number().int().min(1).max(100000).default(100000),
+            intervalMs: z.number().int().min(1000).max(60000).default(5000),
           })
           .strict(),
       )
@@ -2068,8 +2068,8 @@ export class TrpcRouter {
             creatorId: z.string().min(1).max(128),
             expectedAuthorId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
             jobId: z.string().uuid().optional(),
-            requestLimit: z.number().int().min(1).max(100000),
-            intervalMs: z.number().int().min(1000).max(60000),
+            requestLimit: z.number().int().min(1).max(100000).default(100000),
+            intervalMs: z.number().int().min(1000).max(60000).default(5000),
             phaseLimits: z
               .object({
                 profile: z.number().int().nonnegative(),
@@ -2078,7 +2078,7 @@ export class TrpcRouter {
                 media: z.number().int().nonnegative(),
                 metrics: z.number().int().nonnegative(),
               })
-              .strict(),
+              .strict().default({profile:100000,list:100000,detail:100000,media:100000,metrics:100000}),
             confirmHistoryGrant: z.literal(true),
           })
           .strict(),
@@ -2143,6 +2143,12 @@ export class TrpcRouter {
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
         return this.xhsEngagement!.refreshMetrics(input);
+      }),
+    refreshFull: this.trpcService.protectedProcedure
+      .input(z.object({ id: z.string().min(1).max(128), scope: z.enum(['recent','all','selected']).optional(), noteIds: z.array(z.string().min(1).max(300)).min(1).max(1000).optional() }).strict())
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSubscriptions!.refreshFull(input);
       }),
     refresh: this.trpcService.protectedProcedure
       .input(

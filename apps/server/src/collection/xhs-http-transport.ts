@@ -10,6 +10,7 @@ import {
 } from './redbook-error-summary';
 import {
   allowedRedbookMediaUrl,
+  allowedRedbookVideoUrl,
   RedbookMediaTransport,
 } from './redbook-response';
 
@@ -211,8 +212,9 @@ export function createXhsMediaTransport(
   return (url, options) =>
     new Promise((resolve, reject) => {
       try {
+        const video = options.headers.accept === 'video/mp4';
         if (
-          allowedRedbookMediaUrl(url.href).href !== url.href ||
+          (video ? allowedRedbookVideoUrl(url.href).href : allowedRedbookMediaUrl(url.href).href) !== url.href ||
           options.redirect !== 'manual' ||
           options.credentials !== 'omit' ||
           Object.keys(options.headers).some((k) => k !== 'accept')
@@ -223,6 +225,8 @@ export function createXhsMediaTransport(
         reject(new XhsMediaError('XHS_MEDIA_REQUEST_REJECTED'));
         return;
       }
+      const video = options.headers.accept === 'video/mp4';
+      const mediaLimit = video ? 100_000_000 : 10_000_000;
       let req: ClientRequest | undefined,
         res: IncomingMessage | undefined,
         limiter: Transform | undefined;
@@ -263,17 +267,18 @@ export function createXhsMediaTransport(
               const rawLength = res.headers['content-length'];
               if (rawLength !== undefined && !/^\d+$/.test(String(rawLength)))
                 throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
-              if (rawLength !== undefined && Number(rawLength) > 10_000_000)
+              if (rawLength !== undefined && Number(rawLength) > mediaLimit)
                 throw new XhsMediaError('XHS_MEDIA_SIZE_REJECTED');
               const mime = String(res.headers['content-type'] ?? '')
                 .split(';')[0]
                 .trim()
                 .toLowerCase();
-              if (!/^image\/(png|jpeg|gif|webp)$/.test(mime)) throw new XhsMediaError('XHS_MEDIA_TYPE_REJECTED');
+              if (video ? mime !== 'video/mp4' : !/^image\/(png|jpeg|gif|webp)$/.test(mime)) throw new XhsMediaError('XHS_MEDIA_TYPE_REJECTED');
+              if (video && rawLength === undefined) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
               limiter = new Transform({
                 transform(part: Buffer, _encoding, callback) {
                   length += part.length;
-                  if (length > 10_000_000) callback(new XhsMediaError('XHS_MEDIA_SIZE_REJECTED'));
+                  if (length > mediaLimit) callback(new XhsMediaError('XHS_MEDIA_SIZE_REJECTED'));
                   else callback(null, part);
                 },
               });
@@ -298,7 +303,7 @@ export function createXhsMediaTransport(
               });
               const response = new Response(
                 Readable.toWeb(res.pipe(limiter)) as ReadableStream<Uint8Array>,
-                { status: 200, headers: { 'content-type': mime } },
+                { status: 200, headers: { 'content-type': mime, ...(rawLength === undefined ? {} : {'content-length': String(rawLength)}) } },
               );
               Object.defineProperty(response, 'url', { value: url.href });
               returned = true;

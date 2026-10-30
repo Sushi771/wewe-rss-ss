@@ -18,7 +18,7 @@ import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createHTTPServer } from '@trpc/server/adapters/standalone';
 import { createRequire } from 'node:module';
 const { createTRPCProxyClient, httpLink } = createRequire(
@@ -126,12 +126,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         );
       },
     );
-    const resolution = await service.resolveSubscription({
-      url: author.profileUrl,
-    });
-    creatorId = (
-      await service.subscribe({ resolutionId: resolution.resolutionId })
-    ).creatorId;
+    creatorId = randomUUID();
+    await db.xhsCreator.create({ data: { id: creatorId, externalAuthorId: author.id, profileUrl: author.profileUrl, displayName: author.name, enabled: true } });
   });
   afterAll(async () => {
     if (service) await (service as any).lane;
@@ -323,7 +319,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         groupId: 'wrong-platform',
       }),
     ).rejects.toThrow('XHS_GROUP_INVALID');
-    expect(await service.subscribe({ resolutionId: r.resolutionId })).toEqual({
+    expect(await service.subscribe({ resolutionId: r.resolutionId })).toMatchObject({
       creatorId,
       created: false,
       subscribed: true,

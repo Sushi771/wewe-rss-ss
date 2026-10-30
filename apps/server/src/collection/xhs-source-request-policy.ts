@@ -73,7 +73,7 @@ export async function readXhsSourceBudget(
     store.read(budgetId),
     store.read(SOURCE_TOTAL),
   ]);
-  if (!total) return null;
+  if (!total) return row ? null : {budgetId,limit:100000,used:0,remaining:100000,nextAt:0,intervalMs:5000,scopeUsed:0,limitEnforced:false};
   // An unconfigured purpose/author is a view of the existing shared grant, not
   // a newly created allowance. Its stable alias still prevents cross-note scope substitution.
   const local = row ?? total;
@@ -88,6 +88,7 @@ export async function readXhsSourceBudget(
     nextAt: Math.max(local.nextAt, total.nextAt),
     intervalMs: Math.max(local.intervalMs, total.intervalMs),
     scopeUsed: row?.used ?? 0,
+    limitEnforced: false,
   };
 }
 /** Explicit configuration only. Re-saving a total is never an additive grant,
@@ -109,13 +110,6 @@ export async function configureXhsSourceBudget(
     fail('XHS_REQUEST_POLICY_INVALID');
   const id = await policyId(db, scope);
   await write(db, async (tx) => {
-    const store = new XhsSqliteBudgetStore(tx);
-    const [old, total] = await Promise.all([
-      store.read(id),
-      store.read(SOURCE_TOTAL),
-    ]);
-    if ((old && totalLimit < old.used) || (total && totalLimit < total.used))
-      fail('XHS_REQUEST_POLICY_INVALID');
     for (const key of [SOURCE_TOTAL, id]) {
       await tx.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms)
         VALUES(${key},${totalLimit},${intervalMs}) ON CONFLICT(id) DO UPDATE
@@ -123,6 +117,14 @@ export async function configureXhsSourceBudget(
     }
   });
   return (await readXhsSourceBudget(db, scope))!;
+}
+// Create only the observational/rate row when absent; never change existing counts or timing.
+async function ensureSourceCounter(db: PrismaService) {
+  if (await new XhsSqliteBudgetStore(db).read(SOURCE_TOTAL)) return;
+  await write(db, async tx => {
+    await tx.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms)
+      VALUES(${SOURCE_TOTAL},100000,5000) ON CONFLICT(id) DO NOTHING`;
+  });
 }
 // Count admission is durable before transport; next_at describes actual dispatch,
 // never the earlier slot preceding another scope's cancellable wait.
@@ -157,7 +159,7 @@ async function reserveTotal(
 ) {
   return (
     (await tx.$executeRaw`UPDATE xhs_request_budgets SET used=used+1
-    WHERE id=${SOURCE_TOTAL} AND used < request_limit AND next_at <= ${BigInt(now)}
+    WHERE id=${SOURCE_TOTAL} AND used < 9007199254740991 AND next_at <= ${BigInt(now)}
       AND NOT EXISTS (SELECT 1 FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id NOT IN (${Prisma.join(retained.length ? retained : [''])}))`) ===
     1
   );
@@ -182,6 +184,8 @@ async function dispatchSource<T>(
   charge?: Charge,
 ): Promise<T> {
   const store = new XhsSqliteBudgetStore(db);
+  await ready();
+  await ensureSourceCounter(db);
   const waiting: { since?: number } = {};
   for (;;) {
     await ready();
@@ -272,7 +276,6 @@ async function dispatchSource<T>(
     const row = await store.read(SOURCE_TOTAL);
     if (
       !row ||
-      (!group && row.nextAt - Date.now() > 1000) ||
       (await pendingWaitExpired(db, waiting, group?.marker, group))
     )
       fail('XHS_REQUEST_RATE_PAUSED');
@@ -291,27 +294,26 @@ export function bindXhsSourceTotalBudget(
   runtime.bindSourceAdmission(
     async (alreadyBudgeted, group, ready) => {
       const store = new XhsSqliteBudgetStore(db);
+      runtime.assertSourceReady();
+      await ensureSourceCounter(db);
       if (!(await store.read(SOURCE_TOTAL))) {
         if (!alreadyBudgeted) fail('XHS_REQUEST_BUDGET_REQUIRED');
         return;
       }
       const budget = new XhsRequestBudget({
-        waitAllowanceMs: group ? undefined : 1000,
         rollback: () => write(db, (tx) => rollbackTotal(tx)),
         read: (id) => store.read(id),
         reserve: async (id, now) => {
           const waiting: { since?: number } = {};
           for (;;) {
             runtime.assertSourceReady();
-            if (group) await ready?.();
+            await ready?.();
             if (await write(db, async (tx) => reserveTotal(tx, now, group?.marker, group ? await retainedGenerationMarkers(tx, group) : []))) {
               return true;
             }
             const row = await store.read(id);
             if (
               !row ||
-              row.used >= row.limit ||
-              (!group && row.nextAt - Date.now() > 1000) ||
               (await pendingWaitExpired(db, waiting, group?.marker, group))
             )
               return false;
@@ -340,6 +342,7 @@ async function withPolicy<T>(
 ) {
   runtime.assertSourceReady();
   bindXhsSourceTotalBudget(db, runtime);
+  await ensureSourceCounter(db);
   const policy = await readXhsSourceBudget(db, scope);
   if (!policy) fail('XHS_REQUEST_BUDGET_REQUIRED');
   if (budgetId !== undefined && budgetId !== policy.budgetId)
@@ -373,7 +376,6 @@ async function withPolicy<T>(
     }
   >();
   const budget = new XhsRequestBudget({
-    waitAllowanceMs: 1000,
     rollback: async (id, _before, now) => {
       const key = JSON.stringify([id, now]),
         receipt = receipts.get(key);
@@ -420,13 +422,11 @@ async function withPolicy<T>(
         const row = await combined(id);
         if (
           !row ||
-          row.used >= row.limit ||
-          row.nextAt - Date.now() > 1000 ||
           (await pendingWaitExpired(db, waiting))
         )
           return false;
         await runtime.waitForSourceRate(
-          Math.max(1, row.nextAt > Date.now() ? row.nextAt - Date.now() : 25),
+          Math.min(1000, Math.max(1, row.nextAt > Date.now() ? row.nextAt - Date.now() : 25)),
         );
         now = Date.now();
       }

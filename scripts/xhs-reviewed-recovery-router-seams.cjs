@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const cacheRoutes = require('./fixtures/xhs-cache-router-seams.json');
 const reviewed = {
   reviewWholeCreatorGeneration: '6a00210d437bbad3dad74131eac7382b3a3f4a152d4834b4a0f81a7904c93479',
   prepareWholeCreatorGeneration: 'a6479de8618ec55f3a68fcc8cfe2b2874328aede67741113eb2ce0b5443dfcda',
@@ -10,6 +11,11 @@ const reviewed = {
 };
 // Remove only the exact reviewed additions before enforcing historical pins.
 module.exports = function restorePreReviewedRecoveryRouter(ts, source) {
+  for (const route of cacheRoutes) {
+    const exact = route.before === null ? '    ' + route.after + ',\n' : route.after;
+    assert.equal(source.split(exact).length, 2, 'exact cache collection route: ' + route.name);
+    source = source.replace(exact, route.before ?? '');
+  }
   const ast = ts.createSourceFile('router.ts', source, ts.ScriptTarget.Latest, true);
   const declaration = ast.statements.find(ts.isClassDeclaration);
   const member = declaration.members.find(node => node.name?.getText(ast) === 'xiaohongshuRouter');

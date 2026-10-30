@@ -58,8 +58,6 @@ export function generationReviewMarkers(job: any): string[] {
         !Number.isSafeInteger(r.reviewedAt) || r.reviewedAt < reviewedAt || r.id !== hash(reviewIdentity(g.id, r)) || !floor ||
         Object.keys(floor).length !== 3 || !Number.isSafeInteger(floor.taskUsed) || floor.taskUsed < taskFloor ||
         !Number.isSafeInteger(floor.sharedUsed) || floor.sharedUsed < sharedFloor ||
-        floor.taskUsed > g.origin.budgets.find((b: Budget) => b.id === job.id).request_limit ||
-        floor.sharedUsed > g.origin.budgets.find((b: Budget) => b.id === 'xhs:source-total').request_limit ||
         !floor.phaseUsed || Object.keys(floor.phaseUsed).length !== phases.length || phases.some(p =>
           !Number.isSafeInteger(floor.phaseUsed[p]) || floor.phaseUsed[p] < phaseFloor[p] || job.sourceGrant.used[p] < floor.phaseUsed[p])) return bad();
     seen.add(r.fence.marker); markers.push(r.fence.marker);
@@ -104,7 +102,7 @@ export async function reviewGenerationUnknown(tx: Tx, input: { jobId: string; ge
   const previous = g.reviews?.[g.reviews.length - 1]?.budgetFloors;
   for (const origin of g.origin.budgets) {
     const live = budgets.find(b => b.id === origin.id), floor = origin.id === input.jobId ? previous?.taskUsed : previous?.sharedUsed;
-    if (!live || !Number.isSafeInteger(live.used) || live.used < Math.max(origin.used, floor ?? 0) || live.used > live.request_limit ||
+    if (!live || !Number.isSafeInteger(live.used) || live.used < Math.max(origin.used, floor ?? 0) ||
         live.request_limit !== origin.request_limit || live.interval_ms !== origin.interval_ms) return bad();
   }
   const pending = await tx.$queryRaw<Array<{ id: string; used: number; request_limit: number }>>`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;

@@ -29,6 +29,8 @@ type Item = {
   authorId?: string;
   creatorId?: string;
   duplicateOf?: number;
+  collectionTaskId?: string;
+  collectionError?: string;
 };
 type Batch = {
   batchId: string;
@@ -213,7 +215,9 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
     });
   }
   private schedule(id: string, urls: Map<string, string>) {
-    const active = { cancelled: false, urls };
+    let release!: (mayCollect: boolean) => void;
+    const whenSettled = new Promise<boolean>(resolve => { release = resolve; });
+    const active = { cancelled: false, urls, whenSettled, release };
     this.active.set(id, active);
     const work = this.lane
       .then(() => this.run(id, active))
@@ -231,9 +235,15 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
           await this.save(tx, batch);
         });
       })
-      .finally(() => {
-        active.urls.clear();
-        this.active.delete(id);
+      .finally(async () => {
+        let mayCollect = false;
+        try { mayCollect = !active.cancelled && (await this.read(this.db, id)).state === 'completed'; }
+        catch { /* uncertain batch state cannot authorize a child */ }
+        finally {
+          active.release(mayCollect);
+          active.urls.clear();
+          this.active.delete(id);
+        }
       });
     this.lane = work.catch(() => undefined);
   }
@@ -244,7 +254,7 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
   }
   private async run(
     id: string,
-    active: { cancelled: boolean; urls: Map<string, string> },
+    active: { cancelled: boolean; urls: Map<string, string>; whenSettled: Promise<boolean> },
   ) {
     await this.write(async (tx) => {
       const b = await this.read(tx, id);
@@ -414,7 +424,7 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
             await this.save(tx, b);
           });
         } else {
-          await this.subscriptions.subscribe(
+          const subscribed = await this.subscriptions.subscribe(
             { resolutionId: result.resolutionId, groupId: batch.groupId },
             async (tx, creatorId, authorId) => {
               const b = await this.read(tx, id);
@@ -431,7 +441,16 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
               });
               await this.save(tx, b);
             },
+            active.whenSettled,
           );
+          await this.write(async tx => {
+            const b = await this.read(tx, id), current = b.items[item.index];
+            if (current.state !== 'subscribed' || current.creatorId !== subscribed.creatorId)
+              return fail('XHS_TASK_STATE_CHANGED');
+            if ('collection' in subscribed) current.collectionTaskId = subscribed.collection.taskId;
+            else current.collectionError = subscribed.collectionError;
+            await this.save(tx, b);
+          });
         }
         active.urls.delete(item.fingerprint);
       } catch (error) {

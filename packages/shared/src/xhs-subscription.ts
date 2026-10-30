@@ -37,6 +37,8 @@ export type XhsSubscriptionTask = {
   taskId: string;
   creatorId: string;
   kind: 'list' | 'download';
+  collectionStage?: 'listing' | 'details';
+  collectionScope?: 'recent' | 'all' | 'selected';
   state:
     | 'queued'
     | 'running'
@@ -130,4 +132,6 @@ export type XhsSourceBudgetView = {
   nextAt: number;
   intervalMs: number;
   scopeUsed?: number;
+  /** Legacy count limits are retained for compatibility and are not enforced. */
+  limitEnforced?: false;
 };

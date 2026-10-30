@@ -7,7 +7,7 @@ export class XhsSqliteBudgetStore implements XhsBudgetStore {
   async reserve(id: string, now: number) {
     const rows = await this.db.$queryRaw<Array<{ id: string }>>`
       UPDATE xhs_request_budgets SET used=used+1, next_at=${BigInt(now)}+interval_ms
-      WHERE id=${id} AND used < request_limit AND next_at <= ${BigInt(now)}
+      WHERE id=${id} AND used < 9007199254740991 AND next_at <= ${BigInt(now)}
       RETURNING id`;
     return rows.length === 1;
   }

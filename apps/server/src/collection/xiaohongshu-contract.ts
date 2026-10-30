@@ -18,6 +18,7 @@ function identity(kind: 'author' | 'note', value: string): string {
 
 export interface XhsNormalizedCandidate {
   metrics?: XhsMetricSnapshot;
+  video?: { complete: boolean; mimeType: 'video/mp4'; bytes: Buffer; expectedBytes: number; sha256: string };
   authorId: string;
   noteId: string;
   kind: 'image-text' | 'video';

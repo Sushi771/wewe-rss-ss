@@ -38,6 +38,22 @@ describe('whole creator durable checkpoint fence', () => {
     phase: 'detail' as const,
     noteId: 'synthetic-note',
   };
+  it('continues observed task counts beyond a historical limit while keeping request spacing', async () => {
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('synthetic-budget',1,1,0,5000)`;
+    const store = new XhsSqliteBudgetStore(db as any), budget = new XhsRequestBudget(store);
+    await expect(budget.check('synthetic-budget', 1000)).resolves.toBeUndefined();
+    expect(await store.reserve('synthetic-budget', 1000)).toBe(true);
+    expect(await store.reserve('synthetic-budget', 1001)).toBe(false);
+    expect(await store.reserve('synthetic-budget', 6000)).toBe(true);
+    expect(await store.read('synthetic-budget')).toMatchObject({limit:1,used:3,nextAt:11000,intervalMs:5000});
+  });
+  it('counts source phases beyond old limits without losing the durable fence', async () => {
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_set(document,'$.sourceGrant.used.detail',2) WHERE id=${scope.jobId}`;
+    await db.$transaction(tx => prepareWholeSourceFence(tx,scope));
+    await db.$transaction(tx => markWholeSourceStarted(tx,scope.jobId,marker,scope.owner));
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    const doc=JSON.parse(rows[0].document);expect(doc.sourceGrant.used.detail).toBe(3);expect(doc.sourceGrant.limits.detail).toBe(2);expect(doc.sourceFence.state).toBe('started');
+  });
   it('keeps the owner through checkpoint and stale task saves preserve the terminal receipt', async () => {
     const stale = JSON.parse((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`)[0].document);
     await db.$transaction((tx) => prepareWholeSourceFence(tx, scope));
@@ -387,148 +403,11 @@ describe('whole creator durable checkpoint fence', () => {
         return;
       }
       if (directoryOnly) {
-        expect(result.state).toBe('paused');
         expect(result.listEnd).toBe(true);
-        expect(result.code).toBe('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
-        expect(result.archiveTask).toBeUndefined();
-        expect(
-          api.mock.calls.every(
-            ([r]: any[]) => !new URL(r.url).pathname.endsWith('/feed'),
-          ),
-        ).toBe(true);
-        expect(media).not.toHaveBeenCalled();
-        expect(result.historyGrant!.used.detail).toBe(0);
-        expect(result.historyGrant!.used.media).toBe(0);
-        expect(result.historyGrant!.used.profile).toBe(1);
-        expect(result.historyGrant!.used.list).toBe(1);
-        if (slow) {
-          expect(sentAt[1] - sentAt[0]).toBeGreaterThanOrEqual(9900);
-          const total = await db.$queryRaw<
-            Array<{ used: number }>
-          >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
-          expect(total[0].used).toBe(4);
-          expect(result.budget!.used).toBe(2);
-        }
-        if (continueStage) {
-          const before = await new XhsSqliteBudgetStore(db as any).read(
-            scope.jobId,
-          );
-          const totalBefore = await new XhsSqliteBudgetStore(db as any).read(
-            'xhs:source-total',
-          );
-          const apiBefore = api.mock.calls.length;
-          await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES('xhs:dispatch-pending:synthetic',1,0,1,0)`;
-          await expect(whole.extend(scope.jobId, 16)).rejects.toThrow(
-            'XHS_WHOLE_SOURCE_FENCE_BLOCKED',
-          );
-          await expect(
-            whole.extendHistoryPhase({
-              id: scope.jobId,
-              phase: 'detail',
-              newLimit: 1,
-            }),
-          ).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-          expect(
-            await new XhsSqliteBudgetStore(db as any).read(scope.jobId),
-          ).toEqual(before);
-          await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:dispatch-pending:synthetic'`;
-          const extended = await whole.extend(scope.jobId, 16);
-          expect(extended.state).toBe('paused');
-          await whole.extendHistoryPhase({
-            id: scope.jobId,
-            phase: 'profile',
-            newLimit: 2,
-          });
-          for (const phase of ['detail', 'media', 'metrics'] as const)
-            await whole.extendHistoryPhase({
-              id: scope.jobId,
-              phase,
-              newLimit: 10,
-            });
-          const after = await new XhsSqliteBudgetStore(db as any).read(
-            scope.jobId,
-          );
-          expect(after).toMatchObject({
-            limit: 20,
-            used: before!.used,
-            nextAt: before!.nextAt,
-            intervalMs: before!.intervalMs,
-          });
-          expect(
-            await new XhsSqliteBudgetStore(db as any).read('xhs:source-total'),
-          ).toEqual(totalBefore);
-          expect(api).toHaveBeenCalledTimes(apiBefore);
-          expect(media).not.toHaveBeenCalled();
-          // A fresh runtime has no transient author/note context after restart.
-          runtime.onModuleDestroy();
-          const nextRuntime = new XhsSubscriptionRuntime({
-            enabled: () => true,
-            api,
-            media,
-            requirePersistentRisk: true,
-            profileParser: (raw: any) => raw.author,
-          });
-          nextRuntime.bindRiskStore(new XhsSourceRiskStore(db as any));
-          bindXhsSourceTotalBudget(db as any, nextRuntime);
-          await nextRuntime.connectSession({
-            a1: 'synthetic-a1',
-            webSession: 'synthetic-session',
-          });
-          const nextSubscriptions = new XhsSubscriptionService(
-            db as any,
-            nextRuntime,
-          );
-          nextSubscriptions.bindLocalSaver(
-            async () => folder,
-            async () => ({
-              alreadySaved: false,
-              mediaComplete: true,
-              supplement: { status: 'new' },
-            }),
-          );
-          const nextWhole = new XhsWholeCreatorService(
-            db as any,
-            nextSubscriptions,
-            nextRuntime,
-            new XhsEngagementService(db as any, nextRuntime),
-          );
-          await nextWhole.resume(scope.jobId);
-          await (nextWhole as any).lane;
-          const finished = await nextWhole.view(scope.jobId);
-          expect(finished.state).toBe('completed');
-          expect(finished.id).toBe(scope.jobId);
-          expect(finished.historyGrant!.used).toMatchObject({
-            profile: 2,
-            list: 2,
-            detail: 1,
-            media: 1,
-          });
-          expect(media).toHaveBeenCalledTimes(1);
-          expect(
-            (
-              await db.xhsNote.findUniqueOrThrow({
-                where: {
-                  id: JSON.stringify(['xiaohongshu', 'note', scope.noteId]),
-                },
-              })
-            ).contentHtml,
-          ).toContain('Synthetic body');
-          expect(await new XhsSourceRiskStore(db as any).read()).toBe(
-            'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
-          );
-          nextRuntime.onModuleDestroy();
-        }
-        runtime.onModuleDestroy();
-        return;
+        expect(result.historyGrant!.used.detail).toBe(1);
+        if (slow) expect(sentAt[1] - sentAt[0]).toBeGreaterThanOrEqual(9900);
       }
-      if (mediaZero) {
-        expect(result.state).toBe('paused');
-        expect(media).not.toHaveBeenCalled();
-        expect(result.historyGrant!.used.media).toBe(0);
-        expect(result.sourceCheckpoint?.state).toBe('unknown');
-        runtime.onModuleDestroy();
-        return;
-      }
+      if (mediaZero) expect(result.historyGrant!.used.media).toBe(1);
       expect(result.state).toBe('completed');
       expect(api).toHaveBeenCalledTimes(3);
       expect(result.budget!.used).toBe(hasImage ? 4 : 3);
@@ -710,7 +589,7 @@ describe('whole creator durable checkpoint fence', () => {
     >`SELECT used FROM xhs_request_budgets WHERE id=${scope.jobId}`;
     expect(rows[0].used).toBe(20);
   });
-  it('enforces separate profile and list caps while preserving the shared fence', async () => {
+  it('continues separate observed profile and list counts while preserving the shared fence', async () => {
     const rows = await db.$queryRaw<
       Array<{ document: string }>
     >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
@@ -745,22 +624,14 @@ describe('whole creator durable checkpoint fence', () => {
       await db.$transaction((tx) =>
         markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'list'),
       );
-    await expect(
-      db.$transaction((tx) =>
-        markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'list'),
-      ),
-    ).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
-    await expect(
-      db.$transaction((tx) =>
-        markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'profile'),
-      ),
-    ).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
+    await db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'list'));
+    await db.$transaction((tx) => markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'profile'));
     const after = await db.$queryRaw<
       Array<{ document: string }>
     >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
     expect(JSON.parse(after[0].document).sourceGrant.used).toEqual({
-      profile: 1,
-      list: 3,
+      profile: 2,
+      list: 4,
       detail: 0,
       media: 0,
       metrics: 0,
@@ -1043,85 +914,17 @@ describe('whole creator durable checkpoint fence', () => {
     expect(api).toHaveBeenCalledTimes(1);
     runtime.onModuleDestroy();
   }, 40000);
-  it('enforces the cumulative phase cap with no source call or budget consumption', async () => {
-    const rows = await db.$queryRaw<
-      Array<{ document: string }>
-    >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+  it('still rejects an unauthorized source phase after an old limit is exceeded', async () => {
+    const rows = await db.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
     const job = JSON.parse(rows[0].document);
     job.sourceGrant.phases = ['list'];
     job.sourceGrant.limits = { list: 1 };
-    job.sourceGrant.used = { list: 1 };
+    job.sourceGrant.used = { list: 2 };
     await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${scope.jobId}`;
-    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES('xhs:source-total',20,0,1,0)`;
-    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,interval_ms,used,next_at) VALUES(${scope.jobId},20,0,1,0)`;
-    const api = jest.fn();
-    const runtime = new XhsSubscriptionRuntime({
-      enabled: () => true,
-      api,
-      requirePersistentRisk: true,
-    });
-    runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
-    bindXhsSourceTotalBudget(db as any, runtime);
-    await runtime.connectSession({
-      a1: 'synthetic-a1',
-      webSession: 'synthetic-session',
-    });
-    const budget = new XhsRequestBudget(new XhsSqliteBudgetStore(db as any));
-    await expect(
-      runtime.withWholeAuthorization(
-        {
-          jobId: scope.jobId,
-          creatorId: scope.creatorId,
-          authorId: scope.authorId,
-        },
-        () =>
-          runtime.withRequestBudget(budget, scope.jobId, () =>
-            runtime.withCheckpointGroup('list', scope.authorId, undefined, () =>
-              runtime.list(scope.authorId, null),
-            ),
-          ),
-      ),
-    ).rejects.toThrow('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
-    expect(api).not.toHaveBeenCalled();
-    const used = await db.$queryRaw<
-      Array<{ id: string; used: number }>
-    >`SELECT id,used FROM xhs_request_budgets WHERE id IN (${scope.jobId},'xhs:source-total') ORDER BY id`;
-    expect(used.map((r) => r.used)).toEqual([1, 1]);
-    expect(
-      await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:whole:%'`,
-    ).toHaveLength(0);
-    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='paused',document=json_set(document,'$.state','paused') WHERE id=${scope.jobId}`;
-    const whole = new XhsWholeCreatorService(
-      db as any,
-      {} as any,
-      {} as any,
-      {} as any,
-    );
-    await whole.extendHistoryPhase({
-      id: scope.jobId,
-      phase: 'list',
-      newLimit: 2,
-    });
-    const after = await db.$queryRaw<
-      Array<{ document: string }>
-    >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
-    expect(JSON.parse(after[0].document).sourceGrant).toMatchObject({
-      limits: { list: 2 },
-      used: { list: 1 },
-    });
-    expect(
-      (
-        await db.$queryRaw<
-          Array<{ used: number }>
-        >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`
-      )[0].used,
-    ).toBe(1);
-    await expect(
-      whole.extendHistoryPhase({ id: scope.jobId, phase: 'list', newLimit: 2 }),
-    ).rejects.toThrow();
-    runtime.onModuleDestroy();
-  }, 40000);
-  it('stops safely when a phase cap is reached inside an uncommitted multi-request group', async () => {
+    await expect(db.$transaction(tx => prepareWholeSourceFence(tx, {...scope,phase:'profile',noteId:undefined}))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`).toHaveLength(0);
+  });
+  it('keeps an uncommitted multi-request group fenced after exceeding the historical phase count', async () => {
     const rows = await db.$queryRaw<
       Array<{ document: string }>
     >`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
@@ -1182,11 +985,11 @@ describe('whole creator durable checkpoint fence', () => {
           ),
       ),
     ).rejects.toThrow();
-    expect(api).toHaveBeenCalledTimes(2);
+    expect(api).toHaveBeenCalledTimes(3);
     const ledger = await db.$queryRaw<
       Array<{ used: number }>
     >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
-    expect(ledger[0].used).toBe(2);
+    expect(ledger[0].used).toBe(3);
     expect(
       await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:whole:%'`,
     ).toHaveLength(1);

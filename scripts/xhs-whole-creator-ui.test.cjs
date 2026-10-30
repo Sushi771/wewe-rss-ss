@@ -287,13 +287,10 @@ test('whole generation explains cumulative counts and separates preparation from
  assert.equal(h.calls.length,2);assert.deepEqual(h.calls[1],{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true}});
  tree=h.draw();assert.equal(h.nodes(tree,n=>n.type==='button').length,0);assert.equal(h.calls.length,2);
 });
-test('cancelling directory chooser never executes or dispatches',async()=>{
+test('cache recovery waits for explicit consent and never opens export directory chooser',async()=>{
  const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'generation',state:'prepared',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,resumable:true}};
- const h=recoveryInteraction(job,'XhsWholeGeneration');h.setChoose(async()=>({cancelled:true}));let tree=h.draw();h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);assert.equal(h.calls.length,0);
-});
-test('selected directory authorization is passed once with explicit continuation',async()=>{
- const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'generation',state:'prepared',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,resumable:true}};
- const h=recoveryInteraction(job,'XhsWholeGeneration');let selections=0;h.setChoose(async()=>{selections++;return {pickToken:'synthetic-pick'};});let tree=h.draw();h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);assert.equal(selections,1);assert.deepEqual(h.calls,[{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true,pickToken:'synthetic-pick'}}]);
+ const h=recoveryInteraction(job,'XhsWholeGeneration');let selections=0;h.setChoose(async()=>{selections++;throw Error('unexpected directory selection');});let tree=h.draw();const button=h.nodes(tree,n=>n.type==='button')[0];assert.equal(button.props.disabled,true);assert.equal(h.calls.length,0);
+ h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);assert.equal(selections,0);assert.deepEqual(h.calls,[{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true}}]);
 });
 test('whole generation shows missing separately and never promises full coverage from a cache count',()=>{
  const html=render({...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:2,missing:1,directoryComplete:true,originalNoteStatus:'not-returned',resumable:false,newResult:'unknown'}},'XhsWholeGeneration');

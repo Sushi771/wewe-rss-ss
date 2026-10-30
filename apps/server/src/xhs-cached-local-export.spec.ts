@@ -302,6 +302,15 @@ describe('frozen cached XHS export scope without source fallback', () => {
     const res:any=Object.assign(new EventEmitter(),{writableEnded:false,setHeader:jest.fn(),status:jest.fn().mockReturnThis(),json:jest.fn().mockReturnThis()});
     return {f,store,c,req,res};
   }
+  it('confirmed remembered XHS directory exports the frozen cache once without a native dialog or source',async()=>{
+    const h=auditEndpoint();h.req.query={target:'xiaohongshu'};
+    const settings=await h.store.read();
+    await h.c.confirmXhsDirectory({directory:settings.directory},h.req,h.res);
+    const grant=h.res.json.mock.calls[0][0].pickToken;expect(grant).toBeTruthy();h.res.json.mockClear();
+    await h.c.exportXhsCachedSelection({items:h.f.items,pickToken:grant},h.req,h.res);
+    expect(h.res.json.mock.calls[0][0].results).toHaveLength(2);expect(pickArticleDirectory).not.toHaveBeenCalled();expect(global.fetch).not.toHaveBeenCalled();expect(h.f.source.read).not.toHaveBeenCalled();
+    h.res.status.mockClear();await h.c.exportXhsCachedSelection({items:h.f.items,pickToken:grant},h.req,h.res);expect(h.res.status).toHaveBeenCalledWith(400);
+  });
   it.each(['no-origin','foreign-origin','bad-auth','remote-client'])('AUDIT: authenticates %s before freezing or native selection',async mode=>{
     const h=auditEndpoint();
     if(mode==='no-origin')delete h.req.headers.origin;

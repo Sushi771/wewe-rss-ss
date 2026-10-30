@@ -18,7 +18,7 @@ export function legacyProofMatches(job: any, jobId: string, authorId?: string) {
 }
 export function legacyBudgetDigest(job: any, rows: Array<{ id: string; used: number; request_limit: number; next_at: bigint | number; interval_ms: number }>, jobId: string) {
   const values = [rows.find(r => r.id === jobId), rows.find(r => r.id === 'xhs:source-total')];
-  if (values.some(r => !r || !Number.isSafeInteger(r.used) || r.used < 0 || !Number.isSafeInteger(r.request_limit) || r.used > r.request_limit)) return bad();
+  if (values.some(r => !r || !Number.isSafeInteger(r.used) || r.used < 0 || !Number.isSafeInteger(r.request_limit))) return bad();
   return digest({ budgets: values.map(r => ({ id: r!.id, used: Number(r!.used), limit: Number(r!.request_limit), nextAt: String(r!.next_at), intervalMs: Number(r!.interval_ms) })), phaseGrant: job.sourceGrant ?? null });
 }
 export async function assertLegacyDatabase(tx: Pick<Prisma.TransactionClient, '$queryRaw'>, job: any) {

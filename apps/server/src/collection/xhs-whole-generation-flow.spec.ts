@@ -145,7 +145,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     jest.spyOn(runtime,'sourceStorage').mockImplementation(work=>{
       const pending=storage(async()=>{workStarted=true;return work();});entered();return pending;
     });
-    jest.spyOn(subscriptions,'refresh').mockRejectedValueOnce(Error('synthetic child creation failure'));
+    jest.spyOn(subscriptions,'refreshFull').mockRejectedValueOnce(Error('synthetic child creation failure'));
     await whole.prepareGeneration(input);await execute();await atStorage;
     try { expect(workStarted).toBe(false); } finally { release(); }
     await drain();const paused=await read();
@@ -154,8 +154,8 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(paused.generation.lastSourceReceipt.events).toContainEqual({stage:'response',status:200});
   });
   it('continues after the durable profile checkpoint without resolving the homepage again',async()=>{
-    const refresh=subscriptions.refresh.bind(subscriptions);let interrupted=false;
-    jest.spyOn(subscriptions,'refresh').mockImplementation(async input=>{if(!interrupted){interrupted=true;throw Error('synthetic local child creation failure');}return refresh(input);});
+    const refresh=subscriptions.refreshFull.bind(subscriptions);let interrupted=false;
+    jest.spyOn(subscriptions,'refreshFull').mockImplementation(async input=>{if(!interrupted){interrupted=true;throw Error('synthetic local child creation failure');}return refresh(input);});
     const resolve=jest.spyOn(runtime,'resolve');
     await whole.prepareGeneration(input);const generationId=(await read()).generation.id;
     await execute(generationId);await drain();const paused=await read();
@@ -167,8 +167,8 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
   });
   it('resumes a checkpointed profile after restart at its exhausted cap using normal default list options',async()=>{
-    const refresh=subscriptions.refresh.bind(subscriptions);let interrupted=false;
-    jest.spyOn(subscriptions,'refresh').mockImplementation(async value=>{if(!interrupted){interrupted=true;throw Error('synthetic child creation failure');}return refresh(value);});
+    const refresh=subscriptions.refreshFull.bind(subscriptions);let interrupted=false;
+    jest.spyOn(subscriptions,'refreshFull').mockImplementation(async value=>{if(!interrupted){interrupted=true;throw Error('synthetic child creation failure');}return refresh(value);});
     await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,profile:4}});
     const generationId=(await read()).generation.id;await execute(generationId);await drain();
     const paused=await read();expect(paused.generation.profile.id).toBe('author');expect(paused.sourceGrant.used.profile).toBe(4);
@@ -184,7 +184,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
   });
   it.each([401,461])('retains a real list refusal %s after restoring checkpoint identity without a profile retry',async status=>{
-    jest.spyOn(subscriptions,'refresh').mockRejectedValueOnce(Error('synthetic child creation failure'));
+    jest.spyOn(subscriptions,'refreshFull').mockRejectedValueOnce(Error('synthetic child creation failure'));
     await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,profile:4}});
     const generationId=(await read()).generation.id;await execute(generationId);await drain();
     const beforeRequests=api.mock.calls.length,beforeLinks=shortLinks.mock.calls.length;
@@ -372,9 +372,10 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await assertUnknownPreserved();
   });
   it('chains approved homepage, profile, directory and body with legitimate list context and cumulative counts',async()=>{
+    subscriptions.bindLocalSaver(async()=>{throw Error('unexpected picker');},async()=>{throw Error('unexpected export');});
     await (whole as any).prepareGeneration(input);expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();
     await execute();await drain();const job=await read();
-    expect(job.state).toBe('completed');expect(job.listEnd).toBe(true);
+    expect(job.state).toBe('completed');expect(job.listEnd).toBe(true);expect(job.items[noteKey].cached).toBe(true);expect(job.items[noteKey].archive).toBeUndefined();
     expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic recovered body');
     const routes=api.mock.calls.map(([r]:any[])=>new URL(r.url).pathname);
     expect(routes.some(r=>r.endsWith('otherinfo'))).toBe(true);expect(routes.some(r=>r.endsWith('user_posted'))).toBe(true);expect(routes.some(r=>r.endsWith('/feed'))).toBe(true);
@@ -444,27 +445,19 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect((await db.xhsNote.findUnique({where:{id:freshKey}}))?.contentHtml).toContain('Synthetic body fresh');
     await assertUnknownPreserved();
   });
-  it('explicitly resumes the same generation after a known pre-dispatch interruption and skips durable first-note successes',async()=>{
-    directory(['note','second']);let interrupted=false;
-    const saves=jest.fn(async(_creator:any,id:string)=>{
-      // The body/metrics transaction has already committed. Turning the source off here
-      // leaves a durable local save receipt and stops the next note before dispatch.
-      if(id===noteKey&&!interrupted){interrupted=true;live=false;}
-      return {alreadySaved:false,mediaComplete:true,supplement:{status:'new'}};
+  it('explicitly resumes a known interruption and skips committed cached details',async()=>{
+    directory(['note','second']);let stopped=false;
+    const checkpoint=runtime.checkpointWholeSource.bind(runtime);
+    jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,at)=>{
+      await checkpoint(tx,at);
+      if(!stopped && (runtime as any).wholeSourceGroup.getStore()?.phase==='detail'){stopped=true;live=false;}
     });
-    subscriptions.bindLocalSaver(async()=>folder,saves);
     await (whole as any).prepareGeneration(input);const id=(await read()).generation.id;await execute(id);await drain();
     const paused=await read();expect(paused.state).toBe('paused');expect(paused.generation.activeFence).toBeUndefined();
-    expect(paused.items[noteKey].archive).toBeGreaterThan(0);expect(paused.items[noteKey].metrics).toBeGreaterThan(0);
-    expect(requestedDetails()).toEqual(['note']);const beforeBudget=await currentBudget();
+    expect(requestedDetails()).toEqual(['note']);const child=await subscriptions.task({taskId:paused.listTask});expect(child.completed).toBe(1);
     live=true;await execute(id);await drain();const completed=await read();
     expect(completed.state).toBe('completed');expect(completed.generation.id).toBe(id);
-    expect(requestedDetails()).toEqual(['note','second']);
-    expect(saves.mock.calls.map(args=>args[1])).toEqual([noteKey,JSON.stringify(['xiaohongshu','note','second'])]);
-    expect(completed.items[noteKey].archive).toBe(paused.items[noteKey].archive);expect(completed.items[noteKey].metrics).toBe(paused.items[noteKey].metrics);
-    expect(shortLinks).toHaveBeenCalledTimes(1);expect(api.mock.calls.filter(([r]:any[])=>new URL(r.url).pathname.endsWith('user_posted'))).toHaveLength(2);
-    const afterBudget=await currentBudget();expect(afterBudget[0].used).toBeGreaterThan(beforeBudget[0].used);expect(afterBudget[1].used).toBeGreaterThan(beforeBudget[1].used);
-    await assertUnknownPreserved();
+    expect(requestedDetails()).toEqual(['note','second']);await assertUnknownPreserved();
   });
   it('retains both unknown markers and consumed counts when a successful body response loses its checkpoint transaction',async()=>{
     const checkpoint=runtime.checkpointWholeSource.bind(runtime);let failed=false;
@@ -505,69 +498,42 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(requestedDetails()).toEqual(['fresh']);
     expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toBe('<p>old partial cache must remain</p>');
     expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='old-archive'`)[0].document).toBe(oldRaw);
-    const current=await read();expect(current.generation.missingIds).toContain(noteKey);expect(current.archiveTask).not.toBe('old-archive');
-    expect(createChild).toHaveBeenCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:undefined,wholeTarget:expect.any(Object)});
-    const child=JSON.parse((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${current.archiveTask}`)[0].document);
-    expect(child.noteIds).toEqual([freshKey]);expect(child.directory).toBe(folder);expect(saves).toHaveBeenCalledTimes(1);
+    const current=await read();expect(current.generation.missingIds).toContain(noteKey);expect(current.archiveTask).toBe('old-archive');
+    expect(createChild).not.toHaveBeenCalled();
+    const child=JSON.parse((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${current.listTask}`)[0].document);
+    expect(child.noteIds).toEqual([freshKey]);expect(child.directory).toBeUndefined();expect(saves).not.toHaveBeenCalled();
     await assertUnknownPreserved();
   });
-  it('rebuilds the child selection when a second approved directory drops an unfinished note',async()=>{
+  it('rebuilds directory membership on continuation and avoids repeating a completed detail',async()=>{
     const doneKey=JSON.stringify(['xiaohongshu','note','a-done']),missingKey=JSON.stringify(['xiaohongshu','note','b-missing']),freshKey=JSON.stringify(['xiaohongshu','note','c-fresh']);
-    directory(['a-done','b-missing','c-fresh']);let interrupted=false;
-    const saves=jest.fn(async(_creator:any,id:string)=>{
-      if(id===doneKey&&!interrupted){interrupted=true;live=false;}
-      return {alreadySaved:false,mediaComplete:true,supplement:{status:'new'}};
+    directory(['a-done','b-missing','c-fresh']);let stopped=false;
+    const checkpoint=runtime.checkpointWholeSource.bind(runtime);
+    jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,at)=>{
+      await checkpoint(tx,at);if(!stopped && (runtime as any).wholeSourceGroup.getStore()?.phase==='detail'){stopped=true;live=false;}
     });
-    subscriptions.bindLocalSaver(async()=>folder,saves);
-    const createChild=jest.spyOn(subscriptions,'downloadNotes');
-    await (whole as any).prepareGeneration(input);const generationId=(await read()).generation.id;
+    await whole.prepareGeneration(input);const generationId=(await read()).generation.id;
     await execute(generationId);await drain();const paused=await read();
-    expect(paused.state).toBe('paused');expect(paused.generation.activeFence).toBeUndefined();expect(requestedDetails()).toEqual(['a-done']);
-    expect(paused.items[doneKey].archive).toBeGreaterThan(0);expect(paused.items[doneKey].metrics).toBeGreaterThan(0);
-    const oldChildRaw=(await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${paused.archiveTask}`)[0].document;
-    // The omitted note retains its first-run access context, so old noteIds would
-    // really dispatch it; this is not a token-absence or mocked service shortcut.
-    directory(['a-done','c-fresh']);live=true;
-    await execute(generationId);await drain();const current=await read();
+    expect(paused.state).toBe('paused');expect(requestedDetails()).toEqual(['a-done']);
+    directory(['a-done','c-fresh']);live=true;await execute(generationId);await drain();const current=await read();
     expect(requestedDetails()).toEqual(['a-done','c-fresh']);
     expect(current.generation.directoryIds).toEqual([doneKey,freshKey]);expect(current.generation.missingIds).toContain(missingKey);
-    expect(current.items[doneKey].archive).toBe(paused.items[doneKey].archive);expect(current.items[doneKey].metrics).toBe(paused.items[doneKey].metrics);
     expect((await db.xhsNote.findUnique({where:{id:missingKey}}))?.status).toBe('listed');
     expect(await db.xhsMetricSnapshot.count({where:{ownerKind:'note',ownerId:missingKey}})).toBe(0);
-    expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${paused.archiveTask}`)[0].document).toBe(oldChildRaw);
-    expect(createChild).toHaveBeenLastCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:paused.archiveTask,wholeTarget:expect.any(Object)});
-    expect(saves.mock.calls.map(args=>args[1])).toEqual([doneKey,freshKey]);
     await assertUnknownPreserved();
   }, 15000);
-  it('refuses a new target after a generation child exists even with two historical children',async()=>{
-    const doneKey=JSON.stringify(['xiaohongshu','note','a-done']),missingKey=JSON.stringify(['xiaohongshu','note','b-missing']),freshKey=JSON.stringify(['xiaohongshu','note','c-fresh']);
+  it('leaves historical export children unchanged when caching without a destination',async()=>{
+    const originals = new Map<string,string>();
     for (const taskId of ['old-archive','old-download']) {
       const old={taskId,creatorId:'creator',kind:'download',state:'blocked',noteIds:[noteKey],items:{},directory:folder+'-old',total:1,completed:0,skipped:0,failed:1,remaining:1,code:'XHS_DOWNLOAD_BLOCKED'};
-      await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},'creator','blocked',${JSON.stringify(old)},1)`;
+      const raw=JSON.stringify(old);originals.set(taskId,raw);
+      await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},'creator','blocked',${raw},1)`;
     }
-    const oldJob=await read();oldJob.archiveTask='old-archive';oldJob.downloadTask='old-download';
-    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(oldJob)} WHERE id='job'`;
-    directory(['a-done','b-missing','c-fresh']);let interrupted=false;
-    const saves=jest.fn(async(_creator:any,id:string)=>{
-      if(id===doneKey&&!interrupted){interrupted=true;live=false;}
-      return {alreadySaved:false,mediaComplete:true,supplement:{status:'new'}};
-    });
-    subscriptions.bindLocalSaver(async()=>folder,saves);
-    const createChild=jest.spyOn(subscriptions,'downloadNotes');
-    await (whole as any).prepareGeneration(input);const generationId=(await read()).generation.id;
-    await execute(generationId);await drain();const paused=await read();
-    expect(paused.state).toBe('paused');expect(paused.generation.activeFence).toBeUndefined();expect(requestedDetails()).toEqual(['a-done']);
-    expect(paused.items[doneKey].archive).toBeGreaterThan(0);expect(paused.items[doneKey].metrics).toBeGreaterThan(0);
-    const oldChildRaw=(await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${paused.archiveTask}`)[0].document;
-    // The omitted note retains its first-run access context, so old noteIds would
-    // really dispatch it; this is not a token-absence or mocked service shortcut.
-    directory(['a-done','c-fresh']);live=true;
-    subscriptions.bindLocalSaver(async()=>folder+'-changed',saves);
-    await expect(execute(generationId)).rejects.toThrow('XHS_RESUME_DIRECTORY_CHANGED');await drain();const current=await read();
-    expect(current.state).toBe('paused');expect(current.generation.directoryIds).toEqual(paused.generation.directoryIds);expect(requestedDetails()).toEqual(['a-done']);
-    expect(current.archiveTask).toBe(paused.archiveTask);expect(saves).toHaveBeenCalledTimes(1);
-    expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${paused.archiveTask}`)[0].document).toBe(oldChildRaw);
-    await assertUnknownPreserved();
+    const job=await read();job.archiveTask='old-archive';job.downloadTask='old-download';
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id='job'`;
+    const pick=jest.fn(async()=>{throw Error('unexpected picker');}),save=jest.fn(async()=>{throw Error('unexpected export');});subscriptions.bindLocalSaver(pick,save);
+    await whole.prepareGeneration(input);await execute();await drain();expect((await read()).state).toBe('completed');
+    for(const [taskId,raw] of originals) expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`)[0].document).toBe(raw);
+    expect(pick).not.toHaveBeenCalled();expect(save).not.toHaveBeenCalled();await assertUnknownPreserved();
   });
 
   it('retains only the fixed directory conflict code and never arbitrary local messages',()=>{
@@ -579,25 +545,26 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(safeSourceFailure(new ArticleDownloadError('private path synthetic-secret',409,{code:'OTHER'}),'admitted').code).toBe('XHS_LOCAL_OPERATION_FAILED');
   });
 
-  it('reserves once before dispatch, rejects duplicate start and releases the target after completion',async()=>{
-    await whole.prepareGeneration(input);const id=(await read()).generation.id;let release!:()=>void, entered!:()=>void;
-    const gate=new Promise<void>(r=>release=r), started=new Promise<void>(r=>entered=r);let target:object|undefined,count=0;
-    const reserve=subscriptions.prepareWholeTarget.bind(subscriptions);jest.spyOn(subscriptions,'prepareWholeTarget').mockImplementation(async(...args)=>{count++;entered();await gate;target=await reserve(...args);return target;});
-    const first=execute(id);await started;try{await expect(execute(id)).rejects.toThrow();expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();}finally{release();}
-    await first;await drain();expect((await read()).state).toBe('completed');expect(count).toBe(1);expect(target).toBeDefined();expect((subscriptions as any).wholeTargets.has(target)).toBe(false);await assertUnknownPreserved();
+  it('starts one cache child and rejects duplicate execution',async()=>{
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    let release!:()=>void,entered!:()=>void; const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);
+    const refresh=subscriptions.refreshFull.bind(subscriptions);let count=0;
+    jest.spyOn(subscriptions,'refreshFull').mockImplementation(async args=>{count++;entered();await gate;return refresh(args);});
+    const first=execute(id);await started;
+    try {await expect(execute(id)).rejects.toThrow();} finally {release();}
+    await first;await drain();expect((await read()).state).toBe('completed');expect(count).toBe(1);await assertUnknownPreserved();
   });
-  it('refuses missing directory authorization before queueing or calling the source',async()=>{
-    await whole.prepareGeneration(input);const before=await read(),budget=await currentBudget();subscriptions.bindLocalSaver(async()=>{throw Error('picker required');},async()=>({alreadySaved:false,mediaComplete:true}));
-    await expect(execute(before.generation.id)).rejects.toThrow('picker required');expect(await read()).toEqual(before);expect(await currentBudget()).toEqual(budget);expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();
+  it('continues without local directory authorization or export',async()=>{
+    await whole.prepareGeneration(input);const job=await read();const pick=jest.fn(async()=>{throw Error('unexpected picker');});
+    const save=jest.fn(async()=>{throw Error('unexpected export');});subscriptions.bindLocalSaver(pick,save);
+    await execute(job.generation.id);await drain();expect((await read()).state).toBe('completed');expect(pick).not.toHaveBeenCalled();expect(save).not.toHaveBeenCalled();await assertUnknownPreserved();
   });
-
-  it('does not queue when the job changes while directory authorization is pending',async()=>{
-    await whole.prepareGeneration(input);const before=await read(),budget=await currentBudget();let release!:()=>void,entered!:()=>void,target:object|undefined;
-    const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r),reserve=subscriptions.prepareWholeTarget.bind(subscriptions);
-    jest.spyOn(subscriptions,'prepareWholeTarget').mockImplementation(async(...args)=>{entered();await gate;target=await reserve(...args);return target;});
-    const pending=execute(before.generation.id);await started;const changed={...before,state:'cancelled'};
-    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='cancelled',document=${JSON.stringify(changed)} WHERE id='job'`;
-    release();await expect(pending).rejects.toThrow();expect((await read()).state).toBe('cancelled');expect(await currentBudget()).toEqual(budget);expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();expect((subscriptions as any).wholeTargets.has(target)).toBe(false);
+  it('does not leave a dispatched child when cancellation wins child checkpoint',async()=>{
+    await whole.prepareGeneration(input);const job=await read();let release!:()=>void,entered!:()=>void;
+    const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r),refresh=subscriptions.refreshFull.bind(subscriptions);
+    jest.spyOn(subscriptions,'refreshFull').mockImplementation(async args=>{entered();await gate;return refresh(args);});
+    const first=execute(job.generation.id);await started;await whole.cancel('job');release();await first;await drain();
+    expect((await read()).state).toBe('cancelled');await assertUnknownPreserved();
   });
 
 });

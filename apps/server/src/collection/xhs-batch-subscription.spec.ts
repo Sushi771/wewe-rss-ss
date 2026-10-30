@@ -20,6 +20,7 @@ const { createTRPCProxyClient, httpLink } = createRequire(
 
 describe('batch subscription with synthetic SQLite and transport', () => {
   let folder: string, db: PrismaClient;
+  let workers: Array<{ runtime: XhsSubscriptionRuntime; service: XhsBatchSubscriptionService; subscriptions: XhsSubscriptionService }> = [];
   beforeAll(async () => {
     folder = await fs.mkdtemp(path.join(os.tmpdir(), 'xhs-batch-synthetic-'));
     db = new PrismaClient({
@@ -44,6 +45,15 @@ describe('batch subscription with synthetic SQLite and transport', () => {
     await db.$executeRaw`DELETE FROM xhs_request_budgets`;
     await db.$executeRaw`UPDATE xhs_source_risk SET state='clear',code=NULL,owner=NULL,http_status=NULL,endpoint=NULL WHERE id='source'`;
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,interval_ms) VALUES('xhs:source-total',20,0,1000)`;
+  }, 40000);
+  afterEach(async () => {
+    for (const w of workers) {
+      w.runtime.onModuleDestroy();
+      await (w.service as any).lane;
+      await (w.subscriptions as any).lane;
+      await w.subscriptions.onModuleDestroy();
+    }
+    workers = [];
   }, 40000);
   afterAll(async () => {
     await db.$disconnect();
@@ -109,6 +119,7 @@ describe('batch subscription with synthetic SQLite and transport', () => {
       subscriptions,
     );
     await service.onModuleInit();
+    workers.push({ runtime, service, subscriptions });
     return { api, runtime, service, subscriptions };
   }
   it('commits one author and persistent receipts, deduplicates URLs and never stores access context', async () => {
@@ -124,6 +135,7 @@ describe('batch subscription with synthetic SQLite and transport', () => {
       'duplicate',
     ]);
     expect(result.items[0].creatorId).toBe(result.items[2].creatorId);
+    expect(result.items[0].collectionTaskId).toBeTruthy();
     expect(api).toHaveBeenCalledTimes(2);
     const rows = await db.$queryRaw<
       Array<{ document: string }>
@@ -143,6 +155,20 @@ describe('batch subscription with synthetic SQLite and transport', () => {
     expect(api).toHaveBeenCalledTimes(2);
     runtime.onModuleDestroy();
   }, 40000);
+  it('queues collection for all 21 distinct authors in one completed batch',async()=>{
+    const {service,runtime,subscriptions}=await setup(async (request:any)=>{
+      const note=JSON.parse(request.body).source_note_id;
+      return {status:200,url:request.url,body:{success:true,code:0,data:{items:[{id:note,note_card:{note_id:note,user:{user_id:'author-'+note,nickname:'Synthetic'},type:'normal',title:'Synthetic',desc:'body',image_list:[]}}]}}};
+    });
+    await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=0,next_at=0 WHERE id='xhs:source-total'`;
+    const text=Array.from({length:21},(_,i)=>link('unique-'+i)).join('\n');
+    await service.start({clientRequestId:id,text});await (service as any).lane;
+    const batch=await service.status({batchId:id});expect(batch.state).toBe('completed');
+    expect(batch.items.filter(item=>item.state==='subscribed')).toHaveLength(21);
+    expect(batch.items.filter(item=>!!item.collectionTaskId)).toHaveLength(21);
+    expect(batch.items.some(item=>!!item.collectionError)).toBe(false);
+    runtime.onModuleDestroy();await (subscriptions as any).lane;
+  },40000);
   it('retains an uncertain in-flight item after cancellation and never replays it on resume', async () => {
     let release!: () => void, entered!: () => void;
     const started = new Promise<void>((r) => (entered = r)),

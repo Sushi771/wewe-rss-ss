@@ -1552,8 +1552,8 @@ button:active {
 }
 .xhs-combined-controls {
   display: grid;
-  gap: 12px;
-  margin-top: 12px;
+  gap: 6px;
+  margin-top: 6px;
   min-width: 0;
 }
 .xhs-condition-row {
@@ -1561,18 +1561,16 @@ button:active {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  border-bottom: 1px solid var(--mac-separator);
-  padding-bottom: 10px;
   min-width: 0;
 }
 .xhs-condition-row select {
   min-width: 90px;
-  flex: 1;
+  flex: 0 1 auto;
 }
 .xhs-condition-row input {
   width: 96px;
   min-width: 72px;
-  flex: 1;
+  flex: 0 1 96px;
 }
 .xhs-combined-controls select,
 .xhs-combined-controls input {

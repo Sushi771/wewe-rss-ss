@@ -32,9 +32,8 @@ export function generationMatches(job: any): boolean {
         legacyBudgetDigest(historicalJob(job), snapshotBudgets(o.budgets), job.id) !== job.legacyMaintenanceProof.scope.budgetDigest ||
         !grant || grant.creatorId !== job.creatorId || grant.authorId !== o.grant?.authorId ||
         JSON.stringify(grant.phases) !== JSON.stringify(o.grant.phases) || Object.keys(g.phaseLimits ?? {}).length !== phases.length) return false;
-    const cap = o.budgets.find((b: any) => b.id === job.id)?.request_limit;
-    return phases.every(p => Number.isSafeInteger(g.phaseLimits[p]) && g.phaseLimits[p] >= o.grant.limits[p] && g.phaseLimits[p] <= cap &&
-      grant.limits?.[p] === g.phaseLimits[p] && Number.isSafeInteger(grant.used?.[p]) && grant.used[p] >= o.grant.used[p] && grant.used[p] <= grant.limits[p]);
+    return phases.every(p => Number.isSafeInteger(g.phaseLimits[p]) && g.phaseLimits[p] >= o.grant.limits[p] &&
+      grant.limits?.[p] === g.phaseLimits[p] && Number.isSafeInteger(grant.used?.[p]) && grant.used[p] >= o.grant.used[p] );
   } catch { return false; }
 }
 
@@ -78,7 +77,7 @@ export async function historicalGenerationMarker(tx: Tx, scope: GenerationScope)
   if (budgets.length !== 2) return bad();
   for (const old of g.origin.budgets) {
     const live = budgets.find(b => b.id === old.id);
-    if (!live || !Number.isSafeInteger(live.used) || live.used < old.used || live.used > live.request_limit ||
+    if (!live || !Number.isSafeInteger(live.used) || live.used < old.used ||
         live.request_limit !== old.request_limit || live.interval_ms !== old.interval_ms) return bad();
   }
   const markers = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
@@ -114,7 +113,7 @@ export async function createWholeGeneration(tx: Tx, input: { jobId: string; prof
   if (legacyBudgetDigest(job, budgets, input.jobId) !== job.legacyMaintenanceProof.scope.budgetDigest || !task ||
       !input.phaseLimits || Object.keys(input.phaseLimits).length !== phases.length || phases.some(p =>
         !Number.isSafeInteger(input.phaseLimits[p]) || !Number.isSafeInteger(job.sourceGrant.limits?.[p]) || !Number.isSafeInteger(job.sourceGrant.used?.[p]) ||
-        input.phaseLimits[p] < job.sourceGrant.limits[p] || input.phaseLimits[p] < job.sourceGrant.used[p] || input.phaseLimits[p] > task.request_limit)) return bad();
+        input.phaseLimits[p] < job.sourceGrant.limits[p] || input.phaseLimits[p] < job.sourceGrant.used[p])) return bad();
   const markers = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
   const writers = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1`;
   if (markers.length !== 1 || markers[0].id !== job.sourceFence.marker || writers.length) return bad();

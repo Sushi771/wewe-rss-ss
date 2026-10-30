@@ -54,8 +54,6 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     activeWholeFence(job) || (!!job.generation && job.generation.id !== scope.generationId)
   )
     return bad();
-  if (job.sourceGrant.used[scope.phase] >= job.sourceGrant.limits[scope.phase])
-    throw new XhsSubscriptionError('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
   if (scope.phase === 'detail' || scope.phase === 'metrics') {
     if (!scope.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(scope.noteId))
       return bad();
@@ -119,8 +117,6 @@ export async function markWholeSourceStarted(
     !Number.isSafeInteger(grant.used?.[category])
   )
     return bad();
-  if (grant.used[category] >= grant.limits[category])
-    throw new XhsSubscriptionError('XHS_WHOLE_PHASE_BUDGET_EXHAUSTED');
   if (fence.phase === 'detail' || fence.phase === 'metrics') {
     if (!fence.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(fence.noteId))
       return bad();
@@ -131,6 +127,8 @@ export async function markWholeSourceStarted(
     >`SELECT id FROM xhs_notes WHERE id=${noteKey} AND creator_id=${job.creatorId}`;
     if (notes.length !== 1) return bad();
   }
+  // Count is observation; prevent unsafe-integer corruption without imposing a business quota.
+  if (grant.used[category] >= Number.MAX_SAFE_INTEGER) return bad();
   grant.used[category]++;
   fence.state = 'started';
   const changed =

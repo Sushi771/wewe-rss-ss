@@ -26,7 +26,7 @@ export async function dispatchReviewedSource<T,R>(write:RecoveryWriter,input:Att
    const rows=await tx.$queryRaw<Array<{id:string;interval_ms:number;used:number;next_at:bigint}>>`SELECT id,used,next_at,interval_ms FROM xhs_request_budgets WHERE id IN (${input.jobId},'xhs:source-total')`;
    if(rows.length!==2||rows.some(r=>Number(r.next_at)>now||!Number.isSafeInteger(Number(r.interval_ms))||Number(r.interval_ms)<1000))return bad();
    for(const row of rows){const cap=row.id===input.jobId?input.taskUsedCeiling:input.sharedUsedCeiling;
-     const n=await tx.$executeRaw`UPDATE xhs_request_budgets SET used=used+1,next_at=${BigInt(now+Number(row.interval_ms))} WHERE id=${row.id} AND used=${row.used} AND used<request_limit AND used<${cap} AND next_at<=${BigInt(now)}`;if(n!==1)return bad();}
+     const n=await tx.$executeRaw`UPDATE xhs_request_budgets SET used=used+1,next_at=${BigInt(now+Number(row.interval_ms))} WHERE id=${row.id} AND used=${row.used} AND used<9007199254740991 AND used<${cap} AND next_at<=${BigInt(now)}`;if(n!==1)return bad();}
    const jobRows=await tx.$queryRaw<Array<{document:string;creator_id:string}>>`SELECT document,creator_id FROM xhs_whole_creator_jobs WHERE id=${input.jobId}`;
    const job=JSON.parse(jobRows[0].document),grant=job.sourceGrant;
    if(!grant||!Number.isSafeInteger(grant.used?.[input.phase])||grant.used[input.phase]<0||!Number.isSafeInteger(grant.limits?.[input.phase])||grant.limits[input.phase]<0||grant.used[input.phase]>=grant.limits[input.phase])return bad();

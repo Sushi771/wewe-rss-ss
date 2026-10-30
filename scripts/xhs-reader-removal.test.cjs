@@ -104,7 +104,9 @@ test('batch routes are exact and local checks cannot be hidden by baseline resto
 
 test('whole history grants require explicit confirmation and local access at the exact reviewed seams', () => {
   const fixture = require('./fixtures/xhs-original-link-router-seams.json');
-  for (const route of [fixture[9].after, fixture[10].after]) {
+  const cacheRoutes = require('./fixtures/xhs-cache-router-seams.json');
+  const revisedHistory = cacheRoutes.find(route => route.name === 'prepareWholeCreatorHistoryGrant').after;
+  for (const route of [revisedHistory, fixture[10].after]) {
     assert.equal(router.split(route).length, 2);
     for (const [before, after] of [
       ['confirmHistoryGrant: z.literal(true)', 'confirmHistoryGrant: z.boolean()'],
@@ -112,7 +114,11 @@ test('whole history grants require explicit confirmation and local access at the
     ]) {
       assert.equal(route.split(before).length, 2);
       const changed=router.replace(route,route.replace(before,after));
-      assert.throws(()=>restorePreOriginalLinkRouter(changed), /exact PC-link router seam/);
+      assert.throws(()=>restorePreOriginalLinkRouter(restorePreReviewedRecoveryRouter(ts, changed)), /exact (?:PC-link router seam|cache collection route)/);
     }
   }
+});
+
+test('cache collection routes reject any unreviewed alteration',()=>{
+ const routes=require('./fixtures/xhs-cache-router-seams.json');for(const route of routes){const changed=router.replace(route.after,route.after.replace('protectedProcedure','publicProcedure'));assert.notEqual(changed,router);assert.throws(()=>restorePreReviewedRecoveryRouter(ts,changed),/exact cache collection route/);}
 });

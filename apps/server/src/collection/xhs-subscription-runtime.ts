@@ -193,6 +193,25 @@ export class XhsSubscriptionRuntime
       }
     });
   }
+  async checkpointWholeDirectory(tx: Prisma.TransactionClient, taskId: string, creatorId: string, ids: string[]) {
+    const scope = this.wholeAuthorization.getStore();
+    if (!scope?.generationId) return;
+    if (scope.creatorId !== creatorId) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const tasks = await tx.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId} AND creator_id=${creatorId} AND state='running'`;
+    const rows = await tx.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId} AND creator_id=${creatorId} AND state='running'`;
+    if (tasks.length !== 1 || rows.length !== 1) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const task = JSON.parse(tasks[0].document), job = JSON.parse(rows[0].document);
+    if (task.collectionStage !== 'details' || task.listFinished !== true ||
+        JSON.stringify(task.listedIds) !== JSON.stringify(ids) || job.listTask !== taskId ||
+        job.generation?.id !== scope.generationId || job.generation?.activeFence ||
+        job.sourceGrant?.authorId !== scope.authorId)
+      return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    job.listEnd = true;
+    job.generation.directoryIds = ids;
+    const changed = await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${scope.jobId} AND state='running' AND document=${rows[0].document}`;
+    if (changed !== 1) return failure('XHS_TASK_STATE_CHANGED');
+  }
+
   async checkpointWholeSource(
     tx: Prisma.TransactionClient,
     collectedAt?: number,

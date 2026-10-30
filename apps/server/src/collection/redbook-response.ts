@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { inspectCachedMp4 } from '../xhs-video-download';
 import { decodeInlineImage } from './image-fetch';
 import { XhsNormalizedCandidate } from './xiaohongshu-contract';
 import { xhsNoteMetrics } from './xhs-engagement-contract';
@@ -108,6 +110,16 @@ export function allowedRedbookMediaUrl(raw: string): URL {
   return url;
 }
 
+/** Fixed video CDN only; signed query strings stay in memory and are never logged. */
+export function allowedRedbookVideoUrl(raw: string): URL {
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new XhsSubscriptionError('XHS_VIDEO_CACHE_UNAVAILABLE'); }
+  if (url.protocol !== 'https:' || url.hostname !== 'sns-video-bd.xhscdn.com' ||
+      url.port || url.username || url.password || url.hash || /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(raw))
+    throw new XhsSubscriptionError('XHS_VIDEO_CACHE_UNAVAILABLE');
+  return url;
+}
+
 /** Inject a reviewed transport explicitly. No ambient fetch or account headers. */
 export type RedbookMediaTransport = (
   url: URL,
@@ -197,7 +209,7 @@ export function inspectRedbookDetail(
     throw new Error('REDBOOK_NOTE_MISMATCH');
   if (identifier(record(card.user).user_id) !== authorId)
     throw new Error('REDBOOK_AUTHOR_MISMATCH');
-  if (card.type !== 'normal') throw new Error('REDBOOK_NOTE_KIND_REJECTED');
+  if (card.type !== 'normal' && card.type !== 'video') throw new Error('REDBOOK_NOTE_KIND_REJECTED');
   if (
     !Number.isSafeInteger(card.time) ||
     (card.time as number) < 1356998400000 ||
@@ -212,7 +224,7 @@ export function inspectRedbookDetail(
   const urls = card.image_list.map((image) =>
     allowedRedbookMediaUrl(boundedString(record(image).url_default, 8192)),
   );
-  if (!text.trim() && urls.length === 0)
+  if (card.type === 'normal' && !text.trim() && urls.length === 0)
     throw new Error('REDBOOK_BODY_REJECTED');
   return {
     authorId,
@@ -221,6 +233,8 @@ export function inspectRedbookDetail(
     text,
     urls,
     publishedAt: Math.floor((card.time as number) / 1000),
+    kind: card.type === 'video' ? 'video' as const : 'image-text' as const,
+    card,
   };
 }
 
@@ -230,8 +244,16 @@ export async function mapRedbookDetail(
   expectedNoteId: string,
   transport: RedbookMediaTransport = blockedMediaTransport,
 ): Promise<XhsNormalizedCandidate> {
-  const { authorId, noteId, title, text, urls, publishedAt } =
+  const { authorId, noteId, title, text, urls, publishedAt, kind, card } =
     inspectRedbookDetail(raw, expectedAuthorId, expectedNoteId);
+  let videoUrl: URL | undefined;
+  if (kind === 'video') {
+    try {
+      const rawVideo = record(card.video), media = record(rawVideo.media), stream = record(media.stream);
+      if (!Array.isArray(stream.h264) || !stream.h264.length) throw Error();
+      videoUrl = allowedRedbookVideoUrl(boundedString(record(stream.h264[0]).master_url, 8192));
+    } catch { throw new XhsSubscriptionError('XHS_VIDEO_CACHE_UNAVAILABLE'); }
+  }
   let totalBytes = 0;
   const images: XhsNormalizedCandidate['images'] = [];
   for (const url of urls) {
@@ -243,10 +265,33 @@ export async function mapRedbookDetail(
     totalBytes += media.byteLength;
     images.push({ ordinal: images.length + 1, inlineData: media.inlineData });
   }
+  let video: XhsNormalizedCandidate['video'];
+  if (kind === 'video') {
+    // One explicit source variant; never synthesize or try alternate URLs.
+    const url = videoUrl!;
+    let response: Response;
+    try { response = await transport(url, { redirect: 'manual', credentials: 'omit', headers: Object.freeze({ accept: 'video/mp4' }), signal: AbortSignal.timeout(10_000) }); }
+    catch (e) { if (e instanceof XhsMediaError || e instanceof XhsSubscriptionError || e instanceof RedbookPauseError) throw e; throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED'); }
+    if (response.status !== 200) { await response.body?.cancel(); throw mediaHttpError(response.status); }
+    const length = response.headers.get('content-length'), mime = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (response.redirected || (response.url && response.url !== url.href) || mime !== 'video/mp4' || !length || !/^[0-9]+$/.test(length) || Number(length) <= 0 || Number(length) > 100_000_000 || !response.body) {
+      await response.body?.cancel(); throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+    }
+    const reader = response.body.getReader(), chunks: Buffer[] = []; let n = 0;
+    try { for (;;) { const part = await reader.read(); if (part.done) break; n += part.value.byteLength;
+      if (n > Number(length) || n > 100_000_000) { await reader.cancel(); throw new XhsMediaError('XHS_MEDIA_SIZE_REJECTED'); }
+      chunks.push(Buffer.from(part.value)); } }
+    catch (e) { if (e instanceof XhsMediaError) throw e; throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED'); }
+    if (n !== Number(length)) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+    const bytes = Buffer.concat(chunks), sha256 = createHash('sha256').update(bytes).digest('hex');
+    try { if (inspectCachedMp4(bytes).sha256 !== sha256) throw Error(); } catch { throw new XhsMediaError('XHS_MEDIA_BYTES_INVALID'); }
+    video = {complete:true,mimeType:'video/mp4',bytes,expectedBytes:n,sha256};
+  }
   return {
     authorId,
     noteId,
-    kind: 'image-text',
+    kind,
+    ...(video ? { video } : {}),
     metrics: xhsNoteMetrics((raw as any).items[0].note_card),
     // Existing archive contract stores epoch seconds, truncating milliseconds.
     publishedAt,

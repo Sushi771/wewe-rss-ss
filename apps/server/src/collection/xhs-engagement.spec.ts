@@ -462,6 +462,9 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
       url: 'https://www.xiaohongshu.com/user/profile/author',
     });
     await service.subscribe({ resolutionId: resolved.resolutionId });
+    // This fixture exercises the manual saver and has no list adapter; let the
+    // automatic cache task settle before using the same creator.
+    await (service as any).lane;
     expect(
       (await readXhsMetrics(db, 'creator')).get(creator)?.values.fans,
     ).toBe(0);
