@@ -181,7 +181,7 @@ test("reviewed recovery distinguishes a saved retry from the original unknown an
 });
 
 function recoveryInteraction(initial, component = 'default') {
-  const slots=[],calls=[];let index=0,data=initial,refetches=0,work=async()=>({});
+  const slots=[],calls=[];let index=0,data=initial,refetches=0,work=async()=>({}),choose=async()=>({});
   const hooks={useState(value){const at=index++;if(!(at in slots))slots[at]=value;return[slots[at],v=>{slots[at]=typeof v==='function'?v(slots[at]):v;}];},useRef(value){const at=index++;if(!(at in slots))slots[at]={current:value};return slots[at];}};
   const mutation=name=>({useMutation:options=>{assert.equal(options.retry,false);return{isLoading:false,mutateAsync:async input=>{calls.push({name,input});return work(name,input);}};}});
   const api={wholeCreatorJobs:{useQuery:()=>({data,refetch:async()=>{refetches++;}})}};
@@ -189,9 +189,9 @@ function recoveryInteraction(initial, component = 'default') {
   const mod={exports:{}};
   const output=ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2021,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;
   new Function('require','exports','module',output)(name=>name==='react'?hooks:name==='@web/utils/trpc'?{trpc:{xiaohongshu:api}}:resolve(name),mod.exports,mod);
-  const draw=()=>{index=0;return mod.exports[component](component === 'default' ? {creatorId:'synthetic'} : {job:data,refresh:api.wholeCreatorJobs.useQuery().refetch});};
+  const draw=()=>{index=0;return mod.exports[component](component === 'default' ? {creatorId:'synthetic'} : {job:data,refresh:api.wholeCreatorJobs.useQuery().refetch,chooseDirectory:()=>choose()});};
   const nodes=(tree,predicate)=>{const found=[];function walk(n){if(!n||typeof n!=='object')return;if(Array.isArray(n)){n.forEach(walk);return;}if(predicate(n))found.push(n);walk(n.props?.children);}walk(tree);return found;};
-  return {calls,draw,nodes,setData:v=>{data=v;},setWork:v=>{work=v;},get refetches(){return refetches;}};
+  return {calls,draw,nodes,setData:v=>{data=v;},setWork:v=>{work=v;},setChoose:v=>{choose=v;},get refetches(){return refetches;}};
 }
 
 test('legacy recovery explains the remaining unknown and submits separate consent only after confirmation',async()=>{
@@ -256,6 +256,10 @@ test('directory mismatch explains the local pause without claiming an unknown re
  const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:23,missing:0,directoryComplete:true,resumable:true,failure:{stage:'archive',outcome:'local-failure',code:'XHS_RESUME_DIRECTORY_CHANGED'}}};
  const html=render(job,'XhsWholeGeneration');assert.match(html,/保存目录与本次任务已使用的目录不同/);assert.doesNotMatch(html,/请求结果尚未确认|XHS_RESUME_DIRECTORY_CHANGED/);
 });
+test('missing picker grant explains local selection without unknown request claim',()=>{
+ const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:23,missing:0,directoryComplete:true,resumable:true,failure:{stage:'archive',outcome:'local-failure',code:'XHS_SAVE_DIRECTORY_SELECTION_REQUIRED'}}};
+ const html=render(job,'XhsWholeGeneration');assert.match(html,/请先选择本次小红书保存目录/);assert.doesNotMatch(html,/请求结果尚未确认|XHS_SAVE_DIRECTORY_SELECTION_REQUIRED/);
+});
 test('review of this generation never executes until another explicit confirmation',async()=>{
  const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false,reviewable:true,newResult:'unknown'}};
  const h=recoveryInteraction(job,'XhsWholeGeneration');let tree=h.draw();assert.equal(h.calls.length,0);
@@ -282,6 +286,14 @@ test('whole generation explains cumulative counts and separates preparation from
  h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);
  assert.equal(h.calls.length,2);assert.deepEqual(h.calls[1],{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true}});
  tree=h.draw();assert.equal(h.nodes(tree,n=>n.type==='button').length,0);assert.equal(h.calls.length,2);
+});
+test('cancelling directory chooser never executes or dispatches',async()=>{
+ const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'generation',state:'prepared',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,resumable:true}};
+ const h=recoveryInteraction(job,'XhsWholeGeneration');h.setChoose(async()=>({cancelled:true}));let tree=h.draw();h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);assert.equal(h.calls.length,0);
+});
+test('selected directory authorization is passed once with explicit continuation',async()=>{
+ const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'generation',state:'prepared',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,resumable:true}};
+ const h=recoveryInteraction(job,'XhsWholeGeneration');let selections=0;h.setChoose(async()=>{selections++;return {pickToken:'synthetic-pick'};});let tree=h.draw();h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);assert.equal(selections,1);assert.deepEqual(h.calls,[{name:'executeWholeCreatorGeneration',input:{jobId:'job',generationId:'generation',confirmUnknown:true,pickToken:'synthetic-pick'}}]);
 });
 test('whole generation shows missing separately and never promises full coverage from a cache count',()=>{
  const html=render({...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:2,missing:1,directoryComplete:true,originalNoteStatus:'not-returned',resumable:false,newResult:'unknown'}},'XhsWholeGeneration');

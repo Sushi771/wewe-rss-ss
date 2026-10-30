@@ -78,14 +78,14 @@ export class ArticleDownloadController implements OnModuleDestroy {
           process.env.WEWE_ACCEPTANCE_MODE === '1'
         )
           throw new ArticleDownloadError('本地保存暂不可用。', 409);
-        const settings = await this.localStore('xiaohongshu').read();
-        if (
-          settings.askEveryTime &&
-          (!this.xhsPickerGrant || this.xhsPickerGrant !== pickToken)
-        )
-          throw new ArticleDownloadError('请先选择本次保存目录。', 409);
-        this.xhsPickerGrant = undefined;
-        return settings.directory;
+        this.running = true;
+        try {
+          const settings = await this.localStore('xiaohongshu').read();
+          if (settings.askEveryTime && (!this.xhsPickerGrant || this.xhsPickerGrant !== pickToken))
+            throw new ArticleDownloadError('请先选择本次保存目录。', 409, { code: 'DIRECTORY_PICK_REQUIRED' });
+          this.xhsPickerGrant = undefined;
+          return settings.directory;
+        } finally { this.running = false; }
       },
       async (creator, noteId, directory) => {
         if (this.running || this.pickerRunning)

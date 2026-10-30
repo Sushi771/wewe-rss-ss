@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { trpc } from "@web/utils/trpc";
 
-export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
+export default function XhsWholeCreator({ creatorId, chooseDirectory }: { creatorId: string; chooseDirectory: () => Promise<{cancelled?:boolean;pickToken?:string}> }) {
   const [limit, setLimit] = useState(100),
     [error, setError] = useState("");
   const [phase, setPhase] = useState<
@@ -99,7 +99,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
       {jobs.error && <p role="alert">覆盖状态读取失败，未开始新请求。</p>}
       {(jobs.data ?? []).map((job) => (
         <section key={job.id} className="my-2 min-w-0 border-t">
-          {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} />}
+          {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} chooseDirectory={chooseDirectory} />}
           <p role="status">
             {{ queued: '等待中', running: '同步中', paused: '已暂停', partial: '部分完成', failed: '未完成', cancelled: '已取消', completed: '已完成' }[job.state] ?? '状态待确认'} · 已发现 {job.items.length} 篇
           </p>
@@ -275,7 +275,7 @@ type Job = {
   };
 };
 /** Explicit preparation and execution stay separate; an uncertain response never retries itself. */
-export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => Promise<unknown> }) {
+export function XhsWholeGeneration({ job, refresh, chooseDirectory }: { job: Job; refresh: () => Promise<unknown>; chooseDirectory: () => Promise<{cancelled?:boolean;pickToken?:string}> }) {
   const [url, setUrl] = useState('');
   const [confirmed, setConfirmed] = useState(false);
   const [limits, setLimits] = useState<Partial<Limits>>({});
@@ -295,11 +295,18 @@ export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => 
   const run = async () => {
     if (lock.current || !confirmed) return;
     lock.current = true; setBusy(true); setError(''); setConfirmed(false);
+    let submitted = false;
     try {
-      if (g?.reviewable) await review.mutateAsync({ jobId:job.id,generationId:g.id,confirmUnknown:true });
-      else if (g) await execute.mutateAsync({ jobId: job.id, generationId: g.id, confirmUnknown: true });
-      else await prepare.mutateAsync({ jobId: job.id, profileUrl: url, confirmUnknown: true, phaseLimits });
-    } catch { setError('操作未确认，请刷新查看进度后再决定。不会自动重复提交。'); }
+      if (g?.reviewable) { submitted=true; await review.mutateAsync({ jobId:job.id,generationId:g.id,confirmUnknown:true }); }
+      else if (g) { const chosen=await chooseDirectory(); if(chosen.cancelled) {setError('已取消目录选择，未开始采集。'); return;} submitted=true; await execute.mutateAsync({ jobId: job.id, generationId: g.id, confirmUnknown: true, ...(chosen.pickToken ? {pickToken:chosen.pickToken} : {}) }); }
+      else { submitted=true; await prepare.mutateAsync({ jobId: job.id, profileUrl: url, confirmUnknown: true, phaseLimits }); }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : '';
+      if (!submitted) setError('目录选择未完成，未开始采集。');
+      else if (message === 'XHS_SAVE_DIRECTORY_SELECTION_REQUIRED') setError('请先选择本次小红书保存目录，再明确继续。');
+      else if (message === 'XHS_RESUME_DIRECTORY_CHANGED') setError('保存目录与本次任务已使用的目录不同，请选回原目录。');
+      else setError('操作未确认，请刷新查看进度后再决定。不会自动重复提交。');
+    }
     finally {
       await refresh().catch(() => setError('进度读取失败，请刷新核对。不会自动重发请求。'));
       lock.current = false; setBusy(false);
@@ -308,7 +315,7 @@ export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => 
   return <div className="my-2 space-y-2 rounded border p-2">
     <p>从主页继续整号采集。原请求结果仍是未知，旧次数继续保留；新尝试使用剩余 {remaining} 次本地请求额度。图片、视频和互动数量随正文补齐，评论正文保持关闭。</p>
     {g ? <>
-      {g.failure && g.failure.outcome !== 'checkpointed' && <p role="alert">{g.failure.status && g.failure.status >= 400 ? '来源已明确拒绝本次请求，请先处理来源限制。' : g.failure.requiresStop ? '本次执行需要先由受控维护确认已停止，确认后才能准备继续；次数和原未知结果已保留。' : g.failure.code === 'XHS_RESUME_DIRECTORY_CHANGED' ? '保存目录与本次任务已使用的目录不同，已暂停。请选回本次任务原目录，再明确继续；已保存文件保留。' : g.failure.stage === 'storage' || g.failure.stage === 'checkpoint' ? '资料保存失败，请核对本机保存状态后准备继续。' : g.failure.stage === 'parse' ? '来源已返回资料，但当前程序无法识别其格式，需要修复后继续。' : g.failure.outcome === 'local-failure' ? '本机保存步骤未完成，请检查保存目录与本机状态后继续。' : g.failure.outcome === 'not-sent' ? '请求未发送，请核对连接和任务状态后准备继续。' : g.failure.outcome === 'response-received' ? '来源已响应，但资料未能完成处理；请核对原因后准备继续。' : '请求结果尚未确认，需先核对执行已停止，再准备继续。'}</p>}
+      {g.failure && g.failure.outcome !== 'checkpointed' && <p role="alert">{g.failure.status && g.failure.status >= 400 ? '来源已明确拒绝本次请求，请先处理来源限制。' : g.failure.requiresStop ? '本次执行需要先由受控维护确认已停止，确认后才能准备继续；次数和原未知结果已保留。' : g.failure.code === 'XHS_SAVE_DIRECTORY_SELECTION_REQUIRED' ? '请先选择本次小红书保存目录，再明确继续。' : g.failure.code === 'XHS_RESUME_DIRECTORY_CHANGED' ? '保存目录与本次任务已使用的目录不同，已暂停。请选回本次任务原目录，再明确继续；已保存文件保留。' : g.failure.stage === 'storage' || g.failure.stage === 'checkpoint' ? '资料保存失败，请核对本机保存状态后准备继续。' : g.failure.stage === 'parse' ? '来源已返回资料，但当前程序无法识别其格式，需要修复后继续。' : g.failure.outcome === 'local-failure' ? '本机保存步骤未完成，请检查保存目录与本机状态后继续。' : g.failure.outcome === 'not-sent' ? '请求未发送，请核对连接和任务状态后准备继续。' : g.failure.outcome === 'response-received' ? '来源已响应，但资料未能完成处理；请核对原因后准备继续。' : '请求结果尚未确认，需先核对执行已停止，再准备继续。'}</p>}
       <p role="status">{g.state === 'completed' ? '本次可访问内容已完成' : g.state === 'running' ? '正在继续采集' : '等待明确继续'}；目录{g.directoryComplete ? '已到末页' : '未完成'}，本次返回 {g.discovered} 篇。</p>
       {!!g.missing && <p>已有缓存中 {g.missing} 篇未在本次完整目录返回，保留原文件并单独记录，不认定为删除。</p>}
       {g.newResult === 'unknown' && !g.failure && <p role="alert">本次还有请求结果未确认，已停止；需核对后才能继续，不能重复提交。</p>}

@@ -64,6 +64,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
   private startupRecoveryStarted = false;
   private destroyed = false;
   private running = new Set<string>();
+  private starting = new Set<string>();
   private lane = Promise.resolve();
   constructor(
     private readonly db: PrismaService,
@@ -437,9 +438,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
     await this.write(tx => createWholeGeneration(tx, input));
     return this.view(input.jobId);
   }
-  async executeGeneration(input: { jobId: string; generationId: string; confirmUnknown: true }) {
+  async executeGeneration(input: { jobId: string; generationId: string; confirmUnknown: true; pickToken?: string }) {
     if (input.confirmUnknown !== true) throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-    return this.resume(input.jobId, input.generationId);
+    return this.resume(input.jobId, input.generationId, input.pickToken);
   }
   async reviewGeneration(input: {jobId:string;generationId:string;confirmUnknown:true}) {
     await this.readyForMutation();
@@ -447,14 +448,30 @@ export class XhsWholeCreatorService implements OnModuleInit {
     await this.write(tx => reviewGenerationUnknown(tx,input));
     return this.view(input.jobId);
   }
-  async resume(id: string, generationId?: string) {
+  async resume(id: string, generationId?: string, pickToken?: string) {
     await this.readyForMutation();
+    if (this.starting.has(id) || this.running.has(id)) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    this.starting.add(id);
+    let target:object | undefined;
+    let admissionSnapshot: {state:string;document:string} | undefined;
+    try {
+      if (generationId) {
+        const rows = await this.db.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_whole_creator_jobs WHERE id=${id}`;
+        if (rows.length !== 1) throw new XhsSubscriptionError('XHS_TASK_NOT_FOUND');
+        admissionSnapshot=rows[0];const job = JSON.parse(rows[0].document) as Job;
+        if (!['paused','partial','failed','cancelled'].includes(rows[0].state) || job.generation?.id !== generationId || !generationMatches(job) || activeWholeFence(job) || job.generation.state === 'completed')
+          throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        const old=job.generation.origin?.tasks;
+        const current=[job.archiveTask,job.downloadTask].filter((x):x is string=>!!x && ![old?.archiveTask,old?.downloadTask].includes(x));
+        target=await this.subscriptions.prepareWholeTarget(job.creatorId,pickToken,current);
+      }
     await this.write(async (tx) => {
       const rows = await tx.$queryRaw<
         Array<{ state: string; document: string }>
       >`
         SELECT state,document FROM xhs_whole_creator_jobs WHERE id=${id}`;
       if (rows.length !== 1) throw new XhsSubscriptionError('XHS_TASK_NOT_FOUND');
+      if (this.destroyed || (admissionSnapshot && (rows[0].state !== admissionSnapshot.state || rows[0].document !== admissionSnapshot.document))) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
       if (
         this.running.has(id) ||
         !['paused', 'partial', 'failed', 'cancelled'].includes(rows[0].state)
@@ -483,14 +500,16 @@ export class XhsWholeCreatorService implements OnModuleInit {
       delete job.code;
       job.updatedAt = Date.now();
       // Explicit resume may consume cancelled state; ordinary saves may not.
+      if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
       const changed = await tx.$executeRaw`UPDATE xhs_whole_creator_jobs
         SET state='queued',document=${JSON.stringify(job)},updated_at=${BigInt(job.updatedAt)}
         WHERE id=${id} AND state=${rows[0].state} AND document=${admissionDocument}`;
       if (changed !== 1)
         throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
     });
-    this.schedule(id);
+    this.schedule(id,target);target=undefined;
     return this.view(id);
+    } finally { this.starting.delete(id); if(target) this.subscriptions.releaseWholeTarget(target); }
   }
   async extend(id: string, additional: number) {
     await this.readyForMutation();
@@ -569,12 +588,12 @@ export class XhsWholeCreatorService implements OnModuleInit {
       await this.subscriptions.cancelTask({ taskId: job.downloadTask });
     return this.view(id);
   }
-  private schedule(id: string) {
+  private schedule(id: string, target?:object) {
     this.running.add(id);
     this.lane = this.lane
-      .then(() => this.run(id))
+      .then(() => this.run(id,target))
       .catch(() => {})
-      .finally(() => this.running.delete(id));
+      .finally(() => {this.running.delete(id);if(target)this.subscriptions.releaseWholeTarget(target);});
   }
   private async checkpointChild(job: Job, taskId: string) {
     try {
@@ -586,7 +605,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
     }
   }
   private async check(job: Job, db: Prisma.TransactionClient = this.db) {
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
     const saved = await this.load(job.id, db);
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
     if (saved.generation?.id !== job.generation?.id)
       throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
     if (saved.state === 'cancelled')
@@ -596,6 +617,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     const creator = await db.xhsCreator.findUnique({
       where: { id: job.creatorId },
     });
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
     if (!creator?.enabled)
       throw new XhsSubscriptionError('XHS_SUBSCRIPTION_CHANGED');
   }
@@ -616,6 +638,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     job: Job,
     notes: { id: string }[],
     phase: 'archive' | 'supplement',
+    target?: object,
   ) {
     const taskKey = phase === 'archive' ? 'archiveTask' : 'downloadTask';
     await this.check(job);
@@ -681,6 +704,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
         const task = await this.subscriptions.downloadNotes({
           creatorId: job.creatorId,
           noteIds: toSave,
+          wholeTarget: target,
           // A historical child belongs to the former target. New generation
           // children remain bound to the first current-generation directory.
           sameDirectoryAsTaskId: oldGenerationTask ? undefined : directoryReference,
@@ -711,11 +735,13 @@ export class XhsWholeCreatorService implements OnModuleInit {
         prior.state !== 'completed' &&
         notes.some((note) => !job.items[note.id]?.archive)
       )
-        await this.saveStage(job, notes, phase);
+        await this.saveStage(job, notes, phase,target);
     }
   }
-  private async run(id: string) {
+  private async run(id: string, target?:object) {
+    if (this.destroyed) return;
     const job = await this.load(id);
+    if (this.destroyed) return;
     let localStage: 'prepare'|'profile'|'list-task'|'list-wait'|'archive'|'metrics'|'supplement'='prepare';
     try {
       await this.check(job);
@@ -840,7 +866,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
           }
           // A first-note comment failure must not prevent the rest of the full archives.
           localStage='archive';
-          await this.saveStage(job, notes, 'archive');
+          await this.saveStage(job, notes, 'archive',target);
           localStage='metrics';
           if (!job.profile && job.generation?.profile) {
             job.profile=job.generation.profile.collectedAt;
@@ -870,7 +896,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             }
           }
           localStage='supplement';
-          await this.saveStage(job, notes, 'supplement');
+          await this.saveStage(job, notes, 'supplement',target);
         });
       if (job.sourceGrant)
         await this.runtime.withWholeAuthorization(

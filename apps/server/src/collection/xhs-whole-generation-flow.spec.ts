@@ -506,7 +506,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toBe('<p>old partial cache must remain</p>');
     expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='old-archive'`)[0].document).toBe(oldRaw);
     const current=await read();expect(current.generation.missingIds).toContain(noteKey);expect(current.archiveTask).not.toBe('old-archive');
-    expect(createChild).toHaveBeenCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:undefined});
+    expect(createChild).toHaveBeenCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:undefined,wholeTarget:expect.any(Object)});
     const child=JSON.parse((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${current.archiveTask}`)[0].document);
     expect(child.noteIds).toEqual([freshKey]);expect(child.directory).toBe(folder);expect(saves).toHaveBeenCalledTimes(1);
     await assertUnknownPreserved();
@@ -535,7 +535,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect((await db.xhsNote.findUnique({where:{id:missingKey}}))?.status).toBe('listed');
     expect(await db.xhsMetricSnapshot.count({where:{ownerKind:'note',ownerId:missingKey}})).toBe(0);
     expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${paused.archiveTask}`)[0].document).toBe(oldChildRaw);
-    expect(createChild).toHaveBeenLastCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:paused.archiveTask});
+    expect(createChild).toHaveBeenLastCalledWith({creatorId:'creator',noteIds:[freshKey],sameDirectoryAsTaskId:paused.archiveTask,wholeTarget:expect.any(Object)});
     expect(saves.mock.calls.map(args=>args[1])).toEqual([doneKey,freshKey]);
     await assertUnknownPreserved();
   });
@@ -563,8 +563,8 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     // really dispatch it; this is not a token-absence or mocked service shortcut.
     directory(['a-done','c-fresh']);live=true;
     subscriptions.bindLocalSaver(async()=>folder+'-changed',saves);
-    await execute(generationId);await drain();const current=await read();
-    expect(current.state).toBe('paused');expect(current.generation.localFailure).toEqual({stage:'archive',code:'XHS_RESUME_DIRECTORY_CHANGED'});expect(requestedDetails()).toEqual(['a-done']);
+    await expect(execute(generationId)).rejects.toThrow('XHS_RESUME_DIRECTORY_CHANGED');await drain();const current=await read();
+    expect(current.state).toBe('paused');expect(current.generation.directoryIds).toEqual(paused.generation.directoryIds);expect(requestedDetails()).toEqual(['a-done']);
     expect(current.archiveTask).toBe(paused.archiveTask);expect(saves).toHaveBeenCalledTimes(1);
     expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${paused.archiveTask}`)[0].document).toBe(oldChildRaw);
     await assertUnknownPreserved();
@@ -574,6 +574,30 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const {TRPCError}=require('@trpc/server');const {safeSourceFailure}=require('./xhs-source-receipt');
     expect(safeSourceFailure(new TRPCError({code:'PRECONDITION_FAILED',message:'XHS_RESUME_DIRECTORY_CHANGED'}),'admitted').code).toBe('XHS_RESUME_DIRECTORY_CHANGED');
     expect(safeSourceFailure(new Error('private path synthetic-secret'),'admitted').code).toBe('XHS_LOCAL_OPERATION_FAILED');
+    const {ArticleDownloadError}=require('../article-download');
+    expect(safeSourceFailure(new ArticleDownloadError('private path synthetic-secret',409,{code:'DIRECTORY_PICK_REQUIRED'}),'admitted').code).toBe('XHS_SAVE_DIRECTORY_SELECTION_REQUIRED');
+    expect(safeSourceFailure(new ArticleDownloadError('private path synthetic-secret',409,{code:'OTHER'}),'admitted').code).toBe('XHS_LOCAL_OPERATION_FAILED');
+  });
+
+  it('reserves once before dispatch, rejects duplicate start and releases the target after completion',async()=>{
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;let release!:()=>void, entered!:()=>void;
+    const gate=new Promise<void>(r=>release=r), started=new Promise<void>(r=>entered=r);let target:object|undefined,count=0;
+    const reserve=subscriptions.prepareWholeTarget.bind(subscriptions);jest.spyOn(subscriptions,'prepareWholeTarget').mockImplementation(async(...args)=>{count++;entered();await gate;target=await reserve(...args);return target;});
+    const first=execute(id);await started;try{await expect(execute(id)).rejects.toThrow();expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();}finally{release();}
+    await first;await drain();expect((await read()).state).toBe('completed');expect(count).toBe(1);expect(target).toBeDefined();expect((subscriptions as any).wholeTargets.has(target)).toBe(false);await assertUnknownPreserved();
+  });
+  it('refuses missing directory authorization before queueing or calling the source',async()=>{
+    await whole.prepareGeneration(input);const before=await read(),budget=await currentBudget();subscriptions.bindLocalSaver(async()=>{throw Error('picker required');},async()=>({alreadySaved:false,mediaComplete:true}));
+    await expect(execute(before.generation.id)).rejects.toThrow('picker required');expect(await read()).toEqual(before);expect(await currentBudget()).toEqual(budget);expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();
+  });
+
+  it('does not queue when the job changes while directory authorization is pending',async()=>{
+    await whole.prepareGeneration(input);const before=await read(),budget=await currentBudget();let release!:()=>void,entered!:()=>void,target:object|undefined;
+    const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r),reserve=subscriptions.prepareWholeTarget.bind(subscriptions);
+    jest.spyOn(subscriptions,'prepareWholeTarget').mockImplementation(async(...args)=>{entered();await gate;target=await reserve(...args);return target;});
+    const pending=execute(before.generation.id);await started;const changed={...before,state:'cancelled'};
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='cancelled',document=${JSON.stringify(changed)} WHERE id='job'`;
+    release();await expect(pending).rejects.toThrow();expect((await read()).state).toBe('cancelled');expect(await currentBudget()).toEqual(budget);expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();expect((subscriptions as any).wholeTargets.has(target)).toBe(false);
   });
 
 });

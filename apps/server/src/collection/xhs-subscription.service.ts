@@ -153,6 +153,7 @@ export class XhsSubscriptionService implements OnModuleInit {
   private controllers = new Map<string, AbortController>();
   private uncertain = new Map<string, Task>();
   private reconciling = new Map<string, Promise<void>>();
+  private wholeTargets = new WeakMap<object, {creatorId:string; directory:string}>();
   private reserve?: Destination;
   private save?: Save;
   constructor(
@@ -166,6 +167,19 @@ export class XhsSubscriptionService implements OnModuleInit {
     this.reserve = reserve;
     this.save = save;
   }
+  async prepareWholeTarget(creatorId:string, pickToken?:string, currentTaskIds:string[] = []) {
+    if (!this.reserve || !this.save) return reject('XHS_LOCAL_SAVE_UNAVAILABLE');
+    const directory = await this.reserve(pickToken);
+    for (const taskId of currentTaskIds) {
+      const task = await this.loadTask(taskId);
+      if (task.kind !== 'download' || task.creatorId !== creatorId || task.directory !== directory)
+        return reject('XHS_RESUME_DIRECTORY_CHANGED');
+    }
+    const target = Object.freeze({});
+    this.wholeTargets.set(target, {creatorId,directory});
+    return target;
+  }
+  releaseWholeTarget(target:object) { this.wholeTargets.delete(target); }
   capability() {
     if (this.source?.capability) {
       const capability = this.source.capability();
@@ -531,6 +545,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     noteIds: string[];
     pickToken?: string;
     sameDirectoryAsTaskId?: string;
+    wholeTarget?: object;
   }) {
     await this.creator(input.creatorId);
     const ids = [...new Set(input.noteIds)];
@@ -546,7 +561,9 @@ export class XhsSubscriptionService implements OnModuleInit {
     if (!this.reserve || !this.save)
       return reject('XHS_LOCAL_SAVE_UNAVAILABLE');
     // Freeze the existing native picker grant before any detail/network work.
-    const directory = await this.reserve(input.pickToken);
+    const held = input.wholeTarget && this.wholeTargets.get(input.wholeTarget);
+    if (input.wholeTarget && (!held || held.creatorId !== input.creatorId)) return reject('XHS_LOCAL_SAVE_UNAVAILABLE');
+    const directory = held ? held.directory : await this.reserve(input.pickToken);
     if (input.sameDirectoryAsTaskId) {
       const previous = await this.loadTask(input.sameDirectoryAsTaskId);
       if (

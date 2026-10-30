@@ -1299,7 +1299,13 @@ export default function Xiaohongshu() {
         className="mac-content feed-content !min-w-0 !overflow-y-auto"
         aria-label="小红书笔记列表"
       >
-        <XhsWholeCreator creatorId={creatorId} />
+        <XhsWholeCreator creatorId={creatorId} chooseDirectory={async () => {
+              const settings = await localApi<SaveSettings>('/settings');
+              if (!settings.askEveryTime) return {};
+              const chosen = await localApi<DirectoryChoice>('/directory', {});
+              if (!chosen.cancelled) setSaveSettings({directory:chosen.directory,askEveryTime:chosen.askEveryTime});
+              return {cancelled:chosen.cancelled,pickToken:chosen.pickToken};
+            }} />
         <XhsTaskRecovery
           tasks={recoveredTasks}
           loading={recoveryLoading}
