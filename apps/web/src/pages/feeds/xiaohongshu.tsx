@@ -59,7 +59,6 @@ import { serverOriginUrl } from '@web/utils/env';
 import {
   exportArchiveGroups,
   toggleLoadedSelection,
-  selectedImageNotes,
   taskFinished,
   canContinueCreatorQueue,
   withCachedExportSummary,
@@ -155,7 +154,6 @@ export default function Xiaohongshu() {
   });
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
-  const [sourceSettingsOpen, setSourceSettingsOpen] = useState(false);
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
   const sourceSettingsRef = useRef<HTMLDetailsElement>(null);
   const queuedDownloads = useRef<
@@ -216,14 +214,13 @@ export default function Xiaohongshu() {
     [subscriptionApi],
   );
   const showSourceSettings = () => {
-    setSourceSettingsOpen(true);
     if (sourceSettingsRef.current) {
       sourceSettingsRef.current.open = true;
       sourceSettingsRef.current.scrollIntoView({ block: 'nearest' });
     }
   };
-  const taskApiRef = useRef({ subscriptionApi, utils });
-  taskApiRef.current = { subscriptionApi, utils };
+  const taskApiRef = useRef({ subscriptionApi, utils, fullCollectionApi, taskCreatorId });
+  taskApiRef.current = { subscriptionApi, utils, fullCollectionApi, taskCreatorId };
   const [profileUrl, setProfileUrl] = useState('');
   const [message, setMessage] = useState('');
   const [operationError, setOperationError] = useState('');
@@ -473,7 +470,6 @@ export default function Xiaohongshu() {
   );
   const loadedNotes = visibleNotes.slice(0, loadedCount);
   const selectableNotes = loadedNotes;
-  const selectedNotes = selectedImageNotes(visibleNotes, selectedIds);
   const selectedArchives = visibleNotes.filter(
     (note) => selectedIds.has(note.id) && note.status === 'complete',
   );
@@ -503,7 +499,7 @@ export default function Xiaohongshu() {
   const moveCreators = trpc.xiaohongshu.moveCreators.useMutation();
   useEffect(() => {
     if (!taskId) return;
-    const { subscriptionApi, utils } = taskApiRef.current;
+    const { subscriptionApi, utils, fullCollectionApi, taskCreatorId } = taskApiRef.current;
     const controller = new AbortController();
     void watchSubscriptionTask({
       taskId,
@@ -1550,7 +1546,6 @@ export default function Xiaohongshu() {
         )}
         <details
           ref={sourceSettingsRef}
-          onToggle={(event) => setSourceSettingsOpen(event.currentTarget.open)}
           className="feed-reading-details shrink-0 border-b border-neutral-200 px-3 py-2 text-xs dark:border-neutral-700"
         >
           <summary className="cursor-pointer text-neutral-500">
