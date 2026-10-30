@@ -724,56 +724,15 @@ const server = http.createServer((req, res) => {
     await click(
       `[...document.querySelectorAll('summary')].find(e=>e.textContent.includes('来源与本机保存设置'))`,
     );
-    await wait(
-      `document.body.innerText.includes('共享来源请求额度 · 尚未配置')`,
-      'stable creator budget read',
-    );
-    await click(`document.querySelector('.xhs-source-budget summary')`);
-    await ev(
-      `(()=>{const e=document.querySelector('input[aria-label="来源请求总额度"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'20');e.dispatchEvent(new Event('input',{bubbles:true}));})()`,
-    );
-    await click(
-      `document.querySelector('.xhs-source-budget button[type=submit]')`,
-    );
-    await wait(
-      `document.body.innerText.includes('剩余 18 次 / 总计 20 次')`,
-      'explicit stable budget save',
-    );
-    const configCalls = apiReads.filter(
-      (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
-    );
-    assert.equal(configCalls.length, 1);
-    assert.deepEqual(configCalls[0].input, {
-      scope: { purpose: 'resolution' },
-      totalLimit: 20,
-      intervalMs: 5000,
-    });
-    assert.equal(
-      apiReads.filter((x) => x.name === 'xiaohongshu.prepareOriginalLink')
-        .length,
-      4,
-      'saving never retries a source request',
-    );
-    await shot('source-budget-2048');
-    await click(
-      `[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='订阅')`,
-    );
-    await wait(
-      `document.querySelector('[role=dialog]')?.innerText.includes('剩余 18 次 / 总计 20 次')`,
-      'subscription sees the same shared quota',
-    );
-    assert.equal(
-      await ev(`document.querySelectorAll('.xhs-source-budget').length`),
-      1,
-      'only one shared allowance is shown',
-    );
-    assert.equal(
-      apiReads.filter(
-        (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
-      ).length,
-      1,
-    );
-    await shot('shared-budget-subscription');
+    assert.equal(await ev("document.querySelectorAll('.xhs-source-budget').length"), 0, 'no cumulative quota control in source settings');
+    assert.equal(apiReads.filter(x => x.name === 'xiaohongshu.configureSourceRequestBudget').length, 0);
+    assert.equal(apiReads.filter(x => x.name === 'xiaohongshu.prepareOriginalLink').length, 4, 'opening settings does not repeat a source request');
+    await shot('source-settings-2048');
+    await click(`[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='订阅')`);
+    await wait('Boolean(document.querySelector("[role=dialog]"))', 'subscription dialog');
+    assert.equal(await ev("document.querySelectorAll('.xhs-source-budget').length"), 0, 'subscription does not expose a cumulative quota control');
+    assert.equal(apiReads.filter(x => x.name === 'xiaohongshu.configureSourceRequestBudget').length, 0);
+    await shot('subscription-without-quota');
     await key('Escape', 27);
     await wait(
       '!document.querySelector("[role=dialog]")',
@@ -783,7 +742,7 @@ const server = http.createServer((req, res) => {
       (x) => x.name === 'xiaohongshu.prepareOriginalLink',
     ))
       assert.deepEqual(Object.keys(call.input), call.input.refreshContext ? ['noteId','refreshContext'] : ['noteId']);
-    checks.push({ explicitBudgetSaves: 1, autoConfigure: 0 });
+    checks.push({ cumulativeQuotaControlAbsent: true, autoConfigure: 0 });
     assert.deepEqual(forbidden, []);
     assert.equal(
       apiReads.filter((x) => x.name === 'xiaohongshu.body').length,
