@@ -38,6 +38,7 @@ function render(data, component = 'default') {
       executeWholeCreatorReviewedAttempt: { useMutation: mutation },
       prepareWholeCreatorGeneration: { useMutation: mutation },
       executeWholeCreatorGeneration: { useMutation: mutation },
+      reviewWholeCreatorGeneration: { useMutation: mutation },
     },
   };
   const mod = { exports: {} };
@@ -184,7 +185,7 @@ function recoveryInteraction(initial, component = 'default') {
   const hooks={useState(value){const at=index++;if(!(at in slots))slots[at]=value;return[slots[at],v=>{slots[at]=typeof v==='function'?v(slots[at]):v;}];},useRef(value){const at=index++;if(!(at in slots))slots[at]={current:value};return slots[at];}};
   const mutation=name=>({useMutation:options=>{assert.equal(options.retry,false);return{isLoading:false,mutateAsync:async input=>{calls.push({name,input});return work(name,input);}};}});
   const api={wholeCreatorJobs:{useQuery:()=>({data,refetch:async()=>{refetches++;}})}};
-  for(const name of ['startWholeCreator','resumeWholeCreator','cancelWholeCreator','extendWholeCreatorBudget','extendWholeCreatorHistoryPhase','prepareWholeCreatorReviewedAttempt','executeWholeCreatorReviewedAttempt','prepareWholeCreatorGeneration','executeWholeCreatorGeneration'])api[name]=mutation(name);
+  for(const name of ['startWholeCreator','resumeWholeCreator','cancelWholeCreator','extendWholeCreatorBudget','extendWholeCreatorHistoryPhase','prepareWholeCreatorReviewedAttempt','executeWholeCreatorReviewedAttempt','prepareWholeCreatorGeneration','executeWholeCreatorGeneration','reviewWholeCreatorGeneration'])api[name]=mutation(name);
   const mod={exports:{}};
   const output=ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2021,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;
   new Function('require','exports','module',output)(name=>name==='react'?hooks:name==='@web/utils/trpc'?{trpc:{xiaohongshu:api}}:resolve(name),mod.exports,mod);
@@ -244,6 +245,21 @@ test("AUDIT: terminal recovery copy describes user results without storage diagn
 });
 
 const generationJob = {id:'job',canPrepareGeneration:true,budget:{used:6,limit:310},historyGrant:{limits:{profile:2,list:3,detail:5,media:300,metrics:0},used:{profile:2,list:2,detail:1,media:1,metrics:0}}};
+test('received response and local storage failures have distinct readable reasons without backend diagnostics',()=>{
+ const base={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false,newResult:'unknown'}};
+ const received=render({...base,generationRecovery:{...base.generationRecovery,failure:{stage:'response',outcome:'response-received',code:'XHS_SOURCE_TRANSPORT_BLOCKED',status:200}}},'XhsWholeGeneration');
+ assert.match(received,/来源已响应，但资料未能完成处理/);assert.doesNotMatch(received,/请求结果尚未确认|XHS_SOURCE_|owner|marker/);
+ const local=render({...base,generationRecovery:{...base.generationRecovery,failure:{stage:'storage',outcome:'local-failure',code:'XHS_STORAGE_FAILED',status:200}}},'XhsWholeGeneration');
+ assert.match(local,/资料保存失败/);assert.doesNotMatch(local,/XHS_STORAGE_FAILED|P2002/);
+});
+test('review of this generation never executes until another explicit confirmation',async()=>{
+ const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false,reviewable:true,newResult:'unknown'}};
+ const h=recoveryInteraction(job,'XhsWholeGeneration');let tree=h.draw();assert.equal(h.calls.length,0);
+ h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();
+ h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);
+ assert.deepEqual(h.calls,[{name:'reviewWholeCreatorGeneration',input:{jobId:'job',generationId:'g',confirmUnknown:true}}]);
+ h.setData({...job,generationRecovery:{...job.generationRecovery,reviewable:false,resumable:true}});tree=h.draw();assert.equal(h.nodes(tree,n=>n.type==='button')[0].props.disabled,true);assert.equal(h.calls.length,1);
+});
 test('whole generation explains cumulative counts and separates preparation from source execution', async()=>{
  const html=render(generationJob,'XhsWholeGeneration');
  assert.match(html,/旧次数继续保留/);assert.match(html,/剩余 304 次本地请求额度/);assert.match(html,/准备操作不发来源请求/);

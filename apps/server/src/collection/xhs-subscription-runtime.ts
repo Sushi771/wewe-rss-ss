@@ -1,4 +1,5 @@
 import {projectWriterGate} from './project-writer-boundary';
+import { safeSourceFailure, type SafeSourceReceipt, type SafeSourceStage, type SourceReceiptScope } from './xhs-source-receipt';
 import { consumeReviewedTransportPermit } from './xhs-reviewed-dispatch';
 import type { AttemptScope } from './xhs-reviewed-attempt';
 import { createDispatchOwner } from './xhs-dispatch-owner';
@@ -12,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { privateOnlineMode } from '../private-access';
 import {
   RedbookClient,
+  redbookResponseReason,
   RedbookPauseError,
   RedbookTransport,
 } from './redbook-client';
@@ -81,8 +83,28 @@ export class XhsSubscriptionRuntime
   private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
   private readonly wholeSourceGroup = new AsyncLocalStorage<
-    WholeSourceGroup & { checkpointed: boolean; noteId?: string; sessionGeneration: number }
+    WholeSourceGroup & { checkpointed: boolean; noteId?: string; sessionGeneration: number; receipt?: SafeSourceReceipt; receiptTail?: Promise<unknown>; dispatchFailureCode?:string; closed:boolean }
   >();
+  private receiptWriter?: (scope: SourceReceiptScope, receipt: SafeSourceReceipt) => Promise<unknown>;
+  bindWholeReceipt(writer: (scope: SourceReceiptScope, receipt: SafeSourceReceipt) => Promise<unknown>) { this.receiptWriter ??= writer; }
+  markDispatchPersistenceFailure() {
+    const group=this.wholeSourceGroup.getStore();
+    if(group?.generationId) { group.dispatchFailureCode='XHS_STORAGE_FAILED'; const admission=this.budgetScope.getStore(); if(admission) admission.failure=new XhsSubscriptionError('XHS_STORAGE_FAILED'); }
+  }
+  observeSourceStage(stage: SafeSourceStage, status?: number, notSent = false) {
+    const g = this.wholeSourceGroup.getStore();
+    if (!g?.generationId || g.closed || !this.receiptWriter) return;
+    if (stage!=='transport' && g.receipt?.stage===stage && g.receipt.status===status) return;
+    g.receipt = { ...(g.receipt ?? {}), generationId:g.generationId, marker:g.marker, owner:g.owner, phase:g.phase, stage,
+      sequence:(g.receipt?.sequence ?? 0) + (stage==='transport' && !notSent ? 1 : 0),
+      outcome:notSent ? 'not-sent' : status ? 'response-received' : g.receipt?.outcome ?? 'in-progress', settled:false,
+      ...(status ? {status} : {}) } as SafeSourceReceipt;
+    if (stage==='transport' && !notSent) { delete g.receipt.status; delete g.receipt.code; g.receipt.outcome='in-progress'; }
+    const value = { ...g.receipt };
+    g.receiptTail = (g.receiptTail ?? Promise.resolve()).then(() => this.receiptWriter!(g,value));
+    void g.receiptTail.catch(() => {});
+  }
+  async sourceStorage<T>(work: () => Promise<T>): Promise<T> { this.observeSourceStage('storage'); return work(); }
   private readonly wholeAuthorization = new AsyncLocalStorage<{
     jobId: string;
     creatorId: string;
@@ -129,20 +151,37 @@ export class XhsSubscriptionRuntime
       return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     const owner = createDispatchOwner();
     if (!owner) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-    const group = {
+    const group: WholeSourceGroup & { checkpointed:boolean; sessionGeneration:number; receipt?:SafeSourceReceipt; receiptTail?:Promise<unknown>; dispatchFailureCode?:string; closed:boolean } = {
       ...scope,
       owner,
       marker: 'xhs:dispatch-pending:whole:' + randomUUID(),
       acquired: false,
       started: false,
       checkpointed: false,
+      closed: false,
       sessionGeneration: this.generation,
     };
     return this.wholeSourceGroup.run(group, async () => {
-      const result = await work();
-      if (group.acquired && !group.checkpointed)
-        return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-      return result;
+      try {
+        const result = await work();
+        if (group.acquired && !group.checkpointed) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        group.closed=true;
+        await group.receiptTail;
+        return result;
+      } catch (error) {
+        group.closed=true;
+        if (scope.generationId && this.receiptWriter) {
+          const receipt = group.receipt ?? {generationId:scope.generationId,marker:group.marker,owner,phase:scope.phase,stage:'admitted',outcome:'in-progress',settled:false} as SafeSourceReceipt;
+          const classified = safeSourceFailure(error,receipt.stage);
+          if (group.dispatchFailureCode) classified.code=group.dispatchFailureCode;
+          const restriction=this.reviewedFailureCode();
+          if (restriction) classified.code=restriction;
+          const terminal = {...receipt,...classified, outcome:classified.outcome==='local-failure' ? 'local-failure' : receipt.status ? 'response-received' : receipt.outcome==='not-sent' ? 'not-sent' : classified.outcome,settled:!group.dispatchFailureCode} as SafeSourceReceipt;
+          try { await group.receiptTail; } catch { /* terminal attempts its own durable write */ }
+          try { await this.receiptWriter(group,terminal); } catch { /* original unknown remains conservative */ }
+        }
+        throw error;
+      }
     });
   }
   async checkpointWholeSource(
@@ -151,6 +190,7 @@ export class XhsSubscriptionRuntime
   ) {
     const group = this.wholeSourceGroup.getStore();
     if (group?.acquired) {
+      this.observeSourceStage('checkpoint');
       this.requireSession();
       if (group.sessionGeneration !== this.generation || this.sessionAbort.signal.aborted)
         return failure('XHS_SESSION_CHANGED');
@@ -268,7 +308,7 @@ export class XhsSubscriptionRuntime
     replies: 0,
   };
   constructor(private readonly options: RuntimeOptions) {
-    const api = options.api ?? createRedbookHttpTransport();
+    const api = options.api ?? createRedbookHttpTransport(undefined, (stage,status,notSent) => this.observeSourceStage(stage,status,notSent));
     const media = options.media ?? createXhsMediaTransport();
     const shortLinks = options.shortLinks ?? fetchXhsShortLink;
     const signal = (other?: AbortSignal) =>
@@ -356,7 +396,12 @@ export class XhsSubscriptionRuntime
               this.requestAttempts.comments++;
             else if (route.endsWith('/comment/sub/page'))
               this.requestAttempts.replies++;
-            return api({ ...request, signal: signal(request.signal) });
+            this.observeSourceStage('transport');
+            return api({ ...request, signal: signal(request.signal) }).then(value => {
+              this.observeSourceStage('response',value.status);
+              if (group?.generationId) { const reason=redbookResponseReason(value.status,value.body); if(reason) { this.stopCode=`XHS_SOURCE_${reason.toUpperCase()}_BLOCKED`;this.verified=false; } }
+              return value;
+            });
           })(),
         charge);
       },
@@ -364,13 +409,14 @@ export class XhsSubscriptionRuntime
     this.adapter = new RedbookSubscriptionAdapter(
       client,
       {
-        profileParser: options.profileParser,
+        profileParser: options.profileParser ? (raw,id) => { this.observeSourceStage('parse'); return options.profileParser!(raw,id); } : undefined,
         shortLinks: new XhsShortLinkResolver(async (url, request) => {
           const group = this.wholeSourceGroup.getStore();
           if (group && (!group.generationId || group.phase !== 'profile'))
             return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
           return this.guardTransport(() =>
             (() => {
+              this.observeSourceStage('transport');
               this.requestAttempts.shortLinks++;
               return shortLinks(url, {
                 ...request,
@@ -383,6 +429,7 @@ export class XhsSubscriptionRuntime
       (url, request) =>
         this.guardTransport(() =>
           (() => {
+            this.observeSourceStage('transport');
             this.requestAttempts.media++;
             return media(url, { ...request, signal: signal(request.signal) });
           })(),
@@ -466,6 +513,11 @@ export class XhsSubscriptionRuntime
       this.batchDispatchScope.getStore()?.onReceipt();
     } catch (error) {
       // Only a known non-dispatch permits reservation-specific CAS rollback.
+      const group=this.wholeSourceGroup.getStore();
+      if(group?.generationId && error && typeof error==='object' && 'code' in error && typeof error.code==='string' && /^P\d{4}$/.test(error.code)) {
+        group.dispatchFailureCode='XHS_STORAGE_FAILED';
+        if(admission) admission.failure=error;
+      }
       for (const release of dispatched ? [] : undo.reverse()) {
         try {
           await release();
@@ -827,7 +879,7 @@ export class XhsSubscriptionRuntime
     return pending;
   }
   resolve(url: string) {
-    return this.withSession(() => this.adapter.resolve(url));
+    return this.withSession(() => this.adapter.resolve(url)).then(value => {this.observeSourceStage('parse');return value;});
   }
   reviewedReadyCheck() {
     const generation=this.generation;

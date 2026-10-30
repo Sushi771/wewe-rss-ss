@@ -1,4 +1,5 @@
 import * as https from 'node:https';
+import type { SafeSourceStage } from './xhs-source-receipt';
 import { IncomingMessage, ClientRequest } from 'node:http';
 import { Readable, Transform } from 'node:stream';
 import { XhsMediaError, mediaHttpError } from './xhs-media-error';
@@ -47,6 +48,7 @@ function contentLength(res: IncomingMessage, limit: number) {
  * may carry Cookie; no fallback endpoint, proxy, retry or ambient browser auth. */
 export function createRedbookHttpTransport(
   request: XhsHttpsRequest = https.request,
+  observe?: (stage: SafeSourceStage, status?: number, notSent?: boolean) => void,
 ): RedbookTransport {
   return (input) =>
     new Promise((resolve, reject) => {
@@ -88,6 +90,7 @@ export function createRedbookHttpTransport(
           throw stop();
         input.signal?.throwIfAborted();
       } catch {
+        observe?.('transport',undefined,true);
         reject(stop());
         return;
       }
@@ -128,6 +131,7 @@ export function createRedbookHttpTransport(
               return;
             }
             const status = res.statusCode ?? 502;
+            observe?.('response',status);
             const rejected = status < 200 || status >= 300;
             if (rejected) errorStatus = status;
             // Redirects never need body inspection and are never followed.
@@ -168,6 +172,7 @@ export function createRedbookHttpTransport(
               try {
                 input.signal?.throwIfAborted();
                 bytes = Buffer.concat(chunks);
+                observe?.('parse');
                 const body: unknown = JSON.parse(bytes.toString('utf8'));
                 done = true;
                 clear();
@@ -185,12 +190,14 @@ export function createRedbookHttpTransport(
           },
         );
         req.on('error', fail);
+        req.once('finish', () => { if (!done) observe?.('sent'); });
         timer = setTimeout(fail, input.timeoutMs);
         timer.unref?.();
         input.signal?.addEventListener('abort', abort, { once: true });
         if (input.signal?.aborted) fail();
         else req.end(input.body);
       } catch {
+        if (!req) observe?.('transport',undefined,true);
         fail();
       }
     });

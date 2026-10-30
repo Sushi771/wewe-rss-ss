@@ -2019,6 +2019,9 @@ export class TrpcRouter {
         this.requireLocalXhsAccess(ctx);
         return this.xhsEngagement!.collect(input);
       }),
+    reviewWholeCreatorGeneration: this.trpcService.protectedProcedure
+      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.reviewGeneration(input));}),
     prepareWholeCreatorGeneration: this.trpcService.protectedProcedure
       .input(z.object({ jobId:z.string().min(1).max(128), profileUrl:z.string().min(1).max(8192), confirmUnknown:z.literal(true),
         phaseLimits:z.object({profile:z.number().int().nonnegative(),list:z.number().int().nonnegative(),detail:z.number().int().nonnegative(),media:z.number().int().nonnegative(),metrics:z.number().int().nonnegative()}).strict() }).strict())

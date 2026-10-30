@@ -36,7 +36,7 @@ export class XhsEngagementService {
     private readonly source?: XhsSubscriptionSource,
   ) {}
   private write<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) {
-    return incrementalWrite(this.db, 2_000_000, () =>
+    const work = () => incrementalWrite(this.db, 2_000_000, () =>
       sqliteWrites.write(async () => {
         await assertIncrementalWriteAdmission();
         return this.db.$transaction(async (tx) => {
@@ -45,6 +45,7 @@ export class XhsEngagementService {
         });
       }),
     );
+    return this.source?.sourceStorage ? this.source.sourceStorage(work) : work();
   }
   private async target(creatorId: string, noteId?: string) {
     const creator = await this.db.xhsCreator.findUnique({

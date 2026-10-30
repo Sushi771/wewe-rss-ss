@@ -5,6 +5,12 @@ jest.mock('./xhs-dispatch-owner', () => ({
   ownsDispatch: (v:any,e:any) => !!v && !!e && v.nonce===e.nonce && v.pid===e.pid && v.startIdentity===e.startIdentity,
 }));
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { createRedbookHttpTransport } from './xhs-http-transport';
+import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { RedbookPauseError } from './redbook-client';
+import { writeSourceReceipt } from './xhs-source-receipt';
+import { observeDispatchOwner } from './xhs-dispatch-owner-observation';
 import { PrismaClient } from '@prisma/client';
 import { mkdtemp, rm, readdir, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -51,6 +57,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
       for(const sql of splitSqliteStatements(await readFile(path.join(migrations,name,'migration.sql'),'utf8')))await db.$executeRawUnsafe(sql);
   },40000);
   beforeEach(async()=>{
+    (observeDispatchOwner as jest.Mock).mockReturnValue('dead');
     await db.$executeRaw`DELETE FROM xhs_limited_recovery_append`;await db.$executeRaw`DELETE FROM xhs_limited_recovery`;
     await db.$executeRaw`DELETE FROM xhs_subscription_tasks`;await db.$executeRaw`DELETE FROM xhs_whole_creator_jobs`;
     await db.$executeRaw`DELETE FROM xhs_metric_snapshots`;await db.$executeRaw`DELETE FROM xhs_request_budgets`;
@@ -101,6 +108,157 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     });
   }
   const requestedDetails=()=>api.mock.calls.filter(([r]:any[])=>new URL(r.url).pathname.endsWith('/feed')).map(([r]:any[])=>JSON.parse(r.body).source_note_id);
+  const receiptSecret='synthetic-SECRET-cookie-token-body-url-message';
+  async function checkedFailureReceipt(settled=true) {
+    const job=await read(),receipt=job.generation.lastSourceReceipt;
+    expect(receipt).toBeDefined();expect(receipt.settled).toBe(settled);
+    expect(job.generation.activeFence.receipt).toEqual(receipt);
+    expect(Object.keys(receipt).every(k=>['generationId','marker','owner','phase','sequence','stage','outcome','settled','code','status','events'].includes(k))).toBe(true);
+    expect(JSON.stringify(receipt)).not.toContain(receiptSecret);
+    for(const event of receipt.events??[])expect(Object.keys(event).every(k=>['stage','status'].includes(k))).toBe(true);
+    await assertUnknownPreserved();return receipt;
+  }
+
+  it('receipts native request construction failure as not-sent without an HTTP status',async()=>{
+    const request=jest.fn(()=>{throw new TypeError(receiptSecret);});
+    const observed=jest.fn((stage:any,status?:number,notSent?:boolean)=>runtime.observeSourceStage(stage,status,notSent));
+    const native=createRedbookHttpTransport(request as any,observed);api.mockImplementation(native);
+    await (whole as any).prepareGeneration(input);await execute();await drain();
+    expect(request).toHaveBeenCalledTimes(1);expect(observed).toHaveBeenCalledWith('transport',undefined,true);
+    const receipt=await checkedFailureReceipt();expect(receipt.outcome).toBe('not-sent');expect(receipt.status).toBeUndefined();
+    expect(receipt.events.some((e:any)=>e.stage==='sent')).toBe(false);
+  });
+  it('receipts HTTP 461 while retaining the durable platform restriction',async()=>{
+    api.mockImplementation(async(request:any)=>({status:461,url:request.url,body:{success:false,code:461,message:receiptSecret}}));
+    await (whole as any).prepareGeneration(input);await execute();await drain();
+    const receipt=await checkedFailureReceipt();expect(receipt).toMatchObject({status:461,outcome:'response-received',code:'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'});
+    const risk=(await db.$queryRaw<Array<{state:string;code:string}>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`)[0];
+    expect(risk).toEqual({state:'blocked',code:'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'});expect((await whole.view('job')).generationRecovery?.newResult).toBe('restricted');
+  });
+  it('receipts profile parser rejection after HTTP 200 using only a fixed parser code',async()=>{
+    (runtime as any).options.profileParser=()=>{const error=new XhsSubscriptionError('XHS_PROFILE_SCHEMA_UNRECOGNIZED');error.message=receiptSecret;throw error;};
+    await (whole as any).prepareGeneration(input);await execute();await drain();
+    const receipt=await checkedFailureReceipt();expect(receipt).toMatchObject({status:200,stage:'parse',outcome:'response-received',code:'XHS_PROFILE_SCHEMA_UNRECOGNIZED'});
+    expect((await read()).generation.profile).toBeUndefined();expect(api).toHaveBeenCalledTimes(1);
+  });
+  it('receipts a real profile transaction storage failure without refunding dispatched counts',async()=>{
+    await (whole as any).prepareGeneration(input);
+    const transaction=db.$transaction.bind(db);let rejected=false;
+    jest.spyOn(db,'$transaction').mockImplementation(((fn:any,options:any)=>transaction(async(tx:any)=>fn(new Proxy(tx,{get(target,key){
+      if(key==='xhsCreator')return new Proxy(target.xhsCreator,{get(model,method){if(method==='update')return async()=>{rejected=true;throw Object.assign(Error(receiptSecret),{code:'P2002'});};return model[method];}});
+      return target[key];
+    }})),options)) as any);
+    await execute();await drain();expect(rejected).toBe(true);
+    const receipt=await checkedFailureReceipt();expect(receipt).toMatchObject({status:200,stage:'storage',outcome:'local-failure',code:'XHS_STORAGE_FAILED'});
+    expect((await read()).generation.profile).toBeUndefined();expect((await db.xhsCreator.findUnique({where:{id:'creator'}}))?.lastCheckedAt).toBe(0);
+    expect(await currentBudget()).toEqual([{id:'job',used:8},{id:'xhs:source-total',used:10}]);
+  });
+  it('receipts native sent then transport failure as unknown with no HTTP status',async()=>{
+    const request=jest.fn(()=>{
+      const req:any=new EventEmitter();req.destroy=jest.fn();req.end=()=>{req.emit('finish');queueMicrotask(()=>req.emit('error',new RedbookPauseError('transport')));};return req;
+    });
+    api.mockImplementation(createRedbookHttpTransport(request as any,(stage,status,notSent)=>runtime.observeSourceStage(stage,status,notSent)));
+    await (whole as any).prepareGeneration(input);await execute();await drain();
+    const receipt=await checkedFailureReceipt();expect(receipt).toMatchObject({stage:'sent',outcome:'unknown',code:'XHS_SOURCE_TRANSPORT_BLOCKED'});expect(receipt.status).toBeUndefined();
+    expect(receipt.events.some((e:any)=>e.stage==='sent')).toBe(true);expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('receipts checkpoint rollback after HTTP 200 without claiming a saved profile',async()=>{
+    const checkpoint=runtime.checkpointWholeSource.bind(runtime);let rolledBack=false;
+    jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,collectedAt)=>{await checkpoint(tx,collectedAt);rolledBack=true;throw Error(receiptSecret);});
+    await (whole as any).prepareGeneration(input);await execute();await drain();expect(rolledBack).toBe(true);
+    const receipt=await checkedFailureReceipt();expect(receipt).toMatchObject({stage:'checkpoint',status:200,outcome:'local-failure'});
+    const job=await read();expect(job.generation.profile).toBeUndefined();expect(job.profile).toBeUndefined();expect(job.generation.activeFence.state).toBe('started');
+    expect(await db.xhsMetricSnapshot.count()).toBe(0);expect(await currentBudget()).toEqual([{id:'job',used:8},{id:'xhs:source-total',used:10}]);
+  });
+  it('explicitly reviews a settled parser failure then completes the same generation with both historical markers retained',async()=>{
+    (observeDispatchOwner as jest.Mock).mockReturnValue('alive');
+    (runtime as any).options.profileParser=()=>{throw new XhsSubscriptionError('XHS_PROFILE_SCHEMA_UNRECOGNIZED');};
+    await (whole as any).prepareGeneration(input);const generationId=(await read()).generation.id;
+    await execute(generationId);await drain();const failed=await read(),failedFence=failed.generation.activeFence;
+    expect(failedFence.receipt).toMatchObject({stage:'parse',status:200,settled:true,code:'XHS_PROFILE_SCHEMA_UNRECOGNIZED'});
+    const beforeCounts=await currentBudget(),beforeRequests=api.mock.calls.length+shortLinks.mock.calls.length;
+    const reviewInput={jobId:'job',generationId,confirmUnknown:true as const};
+    await whole.reviewGeneration(reviewInput);await drain();const reviewed=await read();
+    expect(reviewed.state).toBe('paused');expect(reviewed.generation.activeFence).toBeUndefined();
+    expect(reviewed.generation.reviews).toHaveLength(1);expect(reviewed.generation.reviews[0].fence).toEqual(failedFence);
+    expect(reviewed.generation.lastSourceReceipt).toEqual(failedFence.receipt);
+    expect(await currentBudget()).toEqual(beforeCounts);expect(api.mock.calls.length+shortLinks.mock.calls.length).toBe(beforeRequests);
+    await expect(whole.reviewGeneration(reviewInput)).rejects.toThrow();
+    expect(await read()).toEqual(reviewed);expect(api.mock.calls.length+shortLinks.mock.calls.length).toBe(beforeRequests);
+    const retained=await db.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' ORDER BY id`;
+    expect(retained.map(r=>r.id).sort()).toEqual([marker,failedFence.marker].sort());
+    (runtime as any).options.profileParser=(raw:any)=>raw.author;
+    const normal=api.getMockImplementation()!;let lateCode:string|undefined,lateChecked=false,newMarker:string|undefined;
+    api.mockImplementation(async(request:any)=>{
+      const value=await normal(request);
+      if(!lateChecked&&new URL(request.url).pathname.endsWith('otherinfo')) {
+        lateChecked=true;newMarker=(await read()).generation.activeFence.marker;
+        try { await db.$transaction(tx=>writeSourceReceipt(tx,{jobId:'job',creatorId:'creator',authorId:'author',generationId,marker:failedFence.marker,owner:failedFence.owner},failedFence.receipt)); }
+        catch(error){lateCode=(error as XhsSubscriptionError).code;}
+        expect((await read()).generation.activeFence.marker).toBe(newMarker);
+      }
+      return value;
+    });
+    await execute(generationId);await drain();const completed=await read();
+    expect(lateChecked).toBe(true);expect(lateCode).toBe('XHS_WHOLE_SOURCE_FENCE_BLOCKED');expect(newMarker).not.toBe(failedFence.marker);
+    expect(completed.state).toBe('completed');expect(completed.generation.id).toBe(generationId);expect(completed.generation.activeFence).toBeUndefined();
+    expect(completed.generation.reviews).toEqual(reviewed.generation.reviews);
+    expect(await db.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' ORDER BY id`).toEqual(retained);
+    expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic recovered body');
+    const total=api.mock.calls.length+shortLinks.mock.calls.length;
+    expect(await currentBudget()).toEqual([{id:'job',used:6+total},{id:'xhs:source-total',used:8+total}]);
+    await assertUnknownPreserved();
+  });
+  // Initial regression run: after HTTP 200 the P2028 receipt incorrectly reported
+  // XHS_SOURCE_TRANSPORT_BLOCKED instead of XHS_STORAGE_FAILED (1 failed, 20 skipped).
+  it.each([200,461])('waits for an in-flight second transport before recording HTTP %s after dispatch rollback',async status=>{
+    (observeDispatchOwner as jest.Mock).mockReturnValue('alive');
+    const normal=api.getMockImplementation()!;
+    let release!:()=>void,rollbackDone!:()=>void,entered=false,injected=false,runFinished=false;
+    const responseGate=new Promise<void>(resolve=>{release=resolve;});
+    const rolledBack=new Promise<void>(resolve=>{rollbackDone=resolve;});
+    api.mockImplementation(async(request:any)=>{entered=true;await responseGate;return status===200?normal(request):{status,url:request.url,body:{success:false,code:status,message:receiptSecret}};});
+    await (whole as any).prepareGeneration(input);const generationId=(await read()).generation.id;
+    const transaction=db.$transaction.bind(db);
+    jest.spyOn(db,'$transaction').mockImplementation(((fn:any,options:any)=>transaction(async(tx:any)=>fn(new Proxy(tx,{get(target,key){
+      if(key==='$executeRaw')return async(strings:TemplateStringsArray,...values:any[])=>{
+        const sql=Array.from(strings).join('?').replace(/\s+/g,' ').trim();
+        if(entered&&!injected&&/^UPDATE xhs_request_budgets SET next_at=\? WHERE id=\?$/.test(sql)&&values[1]==='xhs:source-total'){
+          injected=true;throw Object.assign(Error(receiptSecret),{code:'P2028'});
+        }
+        return target.$executeRaw(strings,...values);
+      };
+      return target[key];
+    }})),options).catch((error:any)=>{if(error?.code==='P2028')rollbackDone();throw error;})) as any);
+    try {
+      await execute(generationId);void (whole as any).lane.then(()=>{runFinished=true;});
+      await rolledBack;
+      // Give the failed dispatch stack a chance to settle if it incorrectly detached
+      // the actual transport promise. The response gate itself remains unresolved.
+      await new Promise(resolve=>setTimeout(resolve,100));
+      expect(entered).toBe(true);expect(injected).toBe(true);expect(runFinished).toBe(false);
+      const pending=await read();expect(pending.state).toBe('running');expect(pending.generation.activeFence.state).toBe('started');
+      expect(pending.generation.activeFence.receipt?.settled).not.toBe(true);expect(pending.generation.lastSourceReceipt?.settled).not.toBe(true);
+      expect(shortLinks).toHaveBeenCalledTimes(1);expect(api).toHaveBeenCalledTimes(1);
+      await expect(whole.reviewGeneration({jobId:'job',generationId,confirmUnknown:true})).rejects.toThrow();
+      expect(await currentBudget()).toEqual([{id:'job',used:8},{id:'xhs:source-total',used:10}]);
+      expect(pending.sourceGrant.used.profile).toBe(original.sourceGrant.used.profile+2);
+    } finally {release();await drain();}
+    // Dispatch persistence failed after entry: even a returned response cannot
+    // prove every native stream is quiescent. Keep it unreviewable by a live owner.
+    const receipt=await checkedFailureReceipt(false);expect(receipt.code).toBe(status===200?'XHS_STORAGE_FAILED':'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');expect(receipt.status).toBe(status);
+    const paused=await read();expect(paused.state).toBe('paused');expect(paused.generation.profile).toBeUndefined();expect(paused.generation.reviews).toBeUndefined();
+    expect(paused.sourceGrant.used.profile).toBe(original.sourceGrant.used.profile+2);
+    if(status===461){
+      const risk=(await db.$queryRaw<Array<{state:string;code:string}>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`)[0];
+      expect(risk).toEqual({state:'blocked',code:'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'});
+    }
+    await expect(whole.reviewGeneration({jobId:'job',generationId,confirmUnknown:true})).rejects.toThrow();
+    const markers=await db.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
+    expect(markers.map(r=>r.id).sort()).toEqual([marker,paused.generation.activeFence.marker].sort());
+    expect(await currentBudget()).toEqual([{id:'job',used:8},{id:'xhs:source-total',used:10}]);
+    expect(api).toHaveBeenCalledTimes(1);expect(shortLinks).toHaveBeenCalledTimes(1);
+  });
 
   it('leaves ordinary homepage resolution fenced, including after a prepared generation',async()=>{
     await expect(runtime.resolve(input.profileUrl)).rejects.toThrow();

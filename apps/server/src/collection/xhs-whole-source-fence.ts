@@ -1,7 +1,7 @@
 import { DispatchOwner, ownsDispatch } from './xhs-dispatch-owner';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
-import { activeWholeFence, setActiveWholeFence, historicalGenerationMarker } from './xhs-whole-generation';
+import { activeWholeFence, setActiveWholeFence, retainedGenerationMarkers } from './xhs-whole-generation';
 
 type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 export type Phase = 'profile' | 'list' | 'detail' | 'metrics';
@@ -30,7 +30,7 @@ export async function noUnresolvedRecovery(tx: Tx) {
 /** Must execute under the same SQLite write lock as dispatch admission. */
 export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
   await noUnresolvedRecovery(tx);
-  const retained = await historicalGenerationMarker(tx, scope);
+  const retained = await retainedGenerationMarkers(tx, scope);
   if (!/^xhs:dispatch-pending:whole:[a-f0-9-]{36}$/.test(scope.marker))
     return bad();
   const rows = await tx.$queryRaw<Array<{ document: string }>>`
@@ -68,7 +68,7 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
   } else if (scope.noteId) return bad();
   const active = await tx.$queryRaw<
     Array<{ id: string }>
-  >`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' AND id<>${retained} LIMIT 1`;
+  >`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' AND id NOT IN (${Prisma.join(retained.length ? retained : [''])}) LIMIT 1`;
   if (active.length) return bad();
   const owner = scope.owner;
   if (!ownsDispatch(owner, scope.owner)) return bad();
@@ -100,7 +100,7 @@ export async function markWholeSourceStarted(
   if (rows.length !== 1) return bad();
   const job = JSON.parse(rows[0].document);
   if (job.generation?.id !== generationId) return bad();
-  await historicalGenerationMarker(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
+  await retainedGenerationMarkers(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
   const fence = activeWholeFence(job),
     grant = job.sourceGrant,
     category = charge ?? fence?.phase;
@@ -153,7 +153,7 @@ export async function commitWholeSourceCheckpoint(
   const job = JSON.parse(rows[0].document),
     fence = activeWholeFence(job);
   if (job.generation?.id !== generationId) return bad();
-  await historicalGenerationMarker(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
+  await retainedGenerationMarkers(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
   if (!fence || !ownsDispatch(fence.owner, expectedOwner) || fence.marker !== marker || fence.state !== 'started')
     return bad();
   if (fence.phase === 'profile' || fence.phase === 'metrics') {
@@ -168,6 +168,7 @@ export async function commitWholeSourceCheckpoint(
     }
   }
   job.lastSourceOwnerReceipt = { marker, owner: fence.owner, state: 'checkpointed' };
+  if (job.generation && fence.receipt) job.generation.lastSourceReceipt = { ...fence.receipt, stage:'checkpoint', outcome:'checkpointed', settled:true };
   setActiveWholeFence(job, undefined);
   const changed =
     await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND state='running' AND document=${rows[0].document}`;

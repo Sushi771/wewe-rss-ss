@@ -270,6 +270,8 @@ type Job = {
   generationRecovery?: {
     id: string; state: string; profileUrl: string; discovered: number; missing: number;
     directoryComplete: boolean; originalNoteStatus: string; newResult?: string; resumable: boolean;
+    reviewable?: boolean;
+    failure?: {stage:string;outcome:string;code:string;status?:number;requiresStop?:boolean};
   };
 };
 /** Explicit preparation and execution stay separate; an uncertain response never retries itself. */
@@ -282,6 +284,7 @@ export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => 
   const lock = useRef(false);
   const prepare = trpc.xiaohongshu.prepareWholeCreatorGeneration.useMutation({ retry: false });
   const execute = trpc.xiaohongshu.executeWholeCreatorGeneration.useMutation({ retry: false });
+  const review = trpc.xiaohongshu.reviewWholeCreatorGeneration.useMutation({ retry: false });
   if (!job.canPrepareGeneration && !job.generationRecovery) return null;
   const g = job.generationRecovery;
   const cap = job.budget?.limit ?? 0;
@@ -293,7 +296,8 @@ export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => 
     if (lock.current || !confirmed) return;
     lock.current = true; setBusy(true); setError(''); setConfirmed(false);
     try {
-      if (g) await execute.mutateAsync({ jobId: job.id, generationId: g.id, confirmUnknown: true });
+      if (g?.reviewable) await review.mutateAsync({ jobId:job.id,generationId:g.id,confirmUnknown:true });
+      else if (g) await execute.mutateAsync({ jobId: job.id, generationId: g.id, confirmUnknown: true });
       else await prepare.mutateAsync({ jobId: job.id, profileUrl: url, confirmUnknown: true, phaseLimits });
     } catch { setError('操作未确认，请刷新查看进度后再决定。不会自动重复提交。'); }
     finally {
@@ -304,9 +308,10 @@ export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => 
   return <div className="my-2 space-y-2 rounded border p-2">
     <p>从主页继续整号采集。原请求结果仍是未知，旧次数继续保留；新尝试使用剩余 {remaining} 次本地请求额度。图片、视频和互动数量随正文补齐，评论正文保持关闭。</p>
     {g ? <>
+      {g.failure && g.failure.outcome !== 'checkpointed' && <p role="alert">{g.failure.status && g.failure.status >= 400 ? '来源已明确拒绝本次请求，请先处理来源限制。' : g.failure.requiresStop ? '本次执行需要先由受控维护确认已停止，确认后才能准备继续；次数和原未知结果已保留。' : g.failure.stage === 'storage' || g.failure.stage === 'checkpoint' ? '资料保存失败，请核对本机保存状态后准备继续。' : g.failure.stage === 'parse' ? '来源已返回资料，但当前程序无法识别其格式，需要修复后继续。' : g.failure.outcome === 'not-sent' ? '请求未发送，请核对连接和任务状态后准备继续。' : g.failure.outcome === 'response-received' ? '来源已响应，但资料未能完成处理；请核对原因后准备继续。' : '请求结果尚未确认，需先核对执行已停止，再准备继续。'}</p>}
       <p role="status">{g.state === 'completed' ? '本次可访问内容已完成' : g.state === 'running' ? '正在继续采集' : '等待明确继续'}；目录{g.directoryComplete ? '已到末页' : '未完成'}，本次返回 {g.discovered} 篇。</p>
       {!!g.missing && <p>已有缓存中 {g.missing} 篇未在本次完整目录返回，保留原文件并单独记录，不认定为删除。</p>}
-      {g.newResult === 'unknown' && <p role="alert">本次还有请求结果未确认，已停止；需核对后才能继续，不能重复提交。</p>}
+      {g.newResult === 'unknown' && !g.failure && <p role="alert">本次还有请求结果未确认，已停止；需核对后才能继续，不能重复提交。</p>}
       {g.newResult === 'restricted' && <p role="alert">来源限制或平台验证已阻止本次采集。请先按平台正常流程处理，应用不会自动重试。</p>}
     </> : <>
       <label>作者主页或官方主页分享链接
@@ -319,12 +324,12 @@ export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => 
           onChange={e => { setLimits(v => ({ ...v, [p]: Number(e.target.value) })); setConfirmed(false); }} />
       </label>)}
     </>}
-    {(!g || g.resumable) && <>
+    {(!g || g.resumable || g.reviewable) && <>
       <label><input type="checkbox" checked={confirmed} disabled={busy} onChange={e => setConfirmed(e.target.checked)} />
         我知道旧请求仍未知；确认在上述累计上限内验证这个作者并继续剩余内容，平台限制或验证出现时停止。
       </label>
       <button disabled={busy || !confirmed || (!g && (!url.trim() || !valid)) || remaining === 0} onClick={() => void run()}>
-        {g ? '明确开始或继续本次整号采集' : '核对并准备整号新尝试'}
+        {g?.reviewable ? '核对本次执行并准备继续' : g ? '明确开始或继续本次整号采集' : '核对并准备整号新尝试'}
       </button>
       {!g && <p>准备操作不发来源请求，核对后还需点击开始。</p>}
     </>}

@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client';
 import { assertLegacyDatabase, legacyBudgetDigest, legacyProofMatches } from './xhs-legacy-review';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { generationReviewMarkers } from './xhs-generation-review';
 
 type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 type Budget = { id: string; used: number; request_limit: number; next_at: bigint | number; interval_ms: number };
@@ -82,10 +83,19 @@ export async function historicalGenerationMarker(tx: Tx, scope: GenerationScope)
   }
   const markers = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
   const retained = g.origin.fence.marker, active = g.activeFence?.marker;
-  if (!markers.some(m => m.id === retained) || markers.some(m => m.id !== retained && m.id !== active)) return bad();
+  const reviewed = generationReviewMarkers(job);
+  const floor = g.reviews?.at(-1)?.budgetFloors;
+  if (floor && (budgets.find(b=>b.id===scope.jobId)!.used<floor.taskUsed || budgets.find(b=>b.id==='xhs:source-total')!.used<floor.sharedUsed)) return bad();
+  if (!markers.some(m => m.id === retained) || reviewed.some(id=>!markers.some(m=>m.id===id)) || markers.some(m => m.id !== retained && m.id !== active && !reviewed.includes(m.id))) return bad();
   const writers = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') AND id<>${scope.jobId} LIMIT 1`;
   if (writers.length) return bad();
   return retained;
+}
+export async function retainedGenerationMarkers(tx: Tx, scope: GenerationScope): Promise<string[]> {
+  const original = await historicalGenerationMarker(tx,scope);
+  if (!original) return [];
+  const r = await jobRow(tx,scope.jobId);
+  return [original,...generationReviewMarkers(r.job)];
 }
 
 /** Records an explicit new generation without scheduling, source calls, or refunding any counter. */

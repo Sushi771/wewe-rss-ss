@@ -21,6 +21,8 @@ import { sqliteWrites } from './sqlite-write-coordinator';
 import { startupAudit, waitForStartupAudit, assertDatabaseWritesAllowed } from '../startup-audit';
 import { activeWholeFence, createWholeGeneration, generationMatches, historicalGenerationMarker, GenerationPhaseLimits } from './xhs-whole-generation';
 import { saveXhsMetrics } from './xhs-engagement-store';
+import { safeSourceFailure } from './xhs-source-receipt';
+import { reviewGenerationUnknown } from './xhs-generation-review';
 
 type Item = {
   started?: Record<string, boolean>;
@@ -439,6 +441,12 @@ export class XhsWholeCreatorService implements OnModuleInit {
     if (input.confirmUnknown !== true) throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     return this.resume(input.jobId, input.generationId);
   }
+  async reviewGeneration(input: {jobId:string;generationId:string;confirmUnknown:true}) {
+    await this.readyForMutation();
+    if (this.running.has(input.jobId)) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    await this.write(tx => reviewGenerationUnknown(tx,input));
+    return this.view(input.jobId);
+  }
   async resume(id: string, generationId?: string) {
     await this.readyForMutation();
     await this.write(async (tx) => {
@@ -756,7 +764,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
                   author.profileUrl !== `https://www.xiaohongshu.com/user/profile/${author.id}` || !author.name?.trim())
                 throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
               const collectedAt = Date.now();
-              await this.write(async tx => {
+              await this.runtime.sourceStorage(() => this.write(async tx => {
                 await this.check(job, tx);
                 const current = await this.load(job.id, tx);
                 await tx.xhsCreator.update({ where: { id: job.creatorId }, data: { displayName: author.name, lastCheckedAt: Math.floor(collectedAt / 1000) } });
@@ -765,7 +773,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
                   ...(author.avatarUrl ? { avatarUrl: author.avatarUrl } : {}), ...(author.metrics ? { metrics: author.metrics } : {}), collectedAt };
                 await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(current)} WHERE id=${job.id} AND state='running'`;
                 await this.runtime.checkpointWholeSource(tx, collectedAt);
-              });
+              }));
               Object.assign(job, await this.load(id));
             });
           }
@@ -862,7 +870,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     } catch (error) {
       const current = await this.load(id);
       job.state = current.state === 'cancelled' ? 'cancelled' : 'paused';
-      job.code = xhsPublicCode(error, 'XHS_WHOLE_CREATOR_PAUSED');
+      job.code = job.generation ? safeSourceFailure(error,current.generation?.activeFence?.receipt?.stage ?? 'admitted').code : xhsPublicCode(error, 'XHS_WHOLE_CREATOR_PAUSED');
       const restriction = job.generation ? this.runtime.reviewedFailureCode() : undefined;
       if (job.generation && restriction) job.code = restriction;
       if (job.generation && restriction) await this.write(async tx => {
@@ -891,6 +899,8 @@ export class XhsWholeCreatorService implements OnModuleInit {
         profileUrl: String(generation.profileUrl), profile: generation.profile, directoryComplete: job.listEnd, discovered: Number(generation.directoryIds?.length ?? 0),
         missing: Number(generation.missingIds?.length ?? 0), originalNoteStatus: String(generation.originalNoteStatus ?? 'unknown'),
         newResult: restricted ? 'restricted' as const : newFence ? 'unknown' as const : undefined,
+        failure: generation.lastSourceReceipt?.code ? {stage:String(generation.lastSourceReceipt.stage),outcome:String(generation.lastSourceReceipt.outcome),code:String(generation.lastSourceReceipt.code ?? ''),status:generation.lastSourceReceipt.status as number|undefined,requiresStop:!!newFence && newFence.receipt?.settled===false && newFence.owner?.pid===process.pid} : undefined,
+        reviewable: historyReady && !!newFence && job.state==='paused' && !this.running.has(id) && (newFence.receipt?.settled===true || newFence.owner?.pid!==process.pid),
         resumable: historyReady && generationMatches(job) && !newFence && !this.running.has(id) && ['paused','partial','failed','cancelled'].includes(job.state) && generation.state !== 'completed' } : undefined,
       canPrepareGeneration: historyReady && !generation && !reviewAttempt && legacyProofMatches(job, job.id, sourceGrant?.authorId) && job.state === 'paused',
       budget,

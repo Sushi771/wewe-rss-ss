@@ -86,7 +86,7 @@ function checkedId(value: string): string {
   return value;
 }
 
-function reasonFor(
+export function redbookResponseReason(
   status: number,
   body?: unknown,
 ): RedbookPauseReason | undefined {
@@ -245,7 +245,7 @@ export class RedbookClient {
       throw new RedbookPauseError('transport');
     }
     if (response.url !== HOST + uri) throw new RedbookPauseError('transport');
-    const statusReason = reasonFor(response.status, response.body);
+    const statusReason = redbookResponseReason(response.status, response.body);
     if (statusReason)
       throw new RedbookPauseError(
         statusReason,

@@ -46,6 +46,7 @@ export interface XhsSubscriptionSource {
     tx: Prisma.TransactionClient,
     collectedAt?: number,
   ): Promise<void>;
+  sourceStorage?<T>(work: () => Promise<T>): Promise<T>;
 
   metrics?(authorId: string, noteId?: string): Promise<XhsMetricSnapshot>;
   comments?(
@@ -187,7 +188,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     bytes: number,
     fn: (tx: Prisma.TransactionClient) => Promise<T>,
   ) {
-    return incrementalWrite(this.db, bytes, () =>
+    const work = () => incrementalWrite(this.db, bytes, () =>
       sqliteWrites.write(async () => {
         await assertIncrementalWriteAdmission();
         return this.db.$transaction(async (tx) => {
@@ -196,6 +197,7 @@ export class XhsSubscriptionService implements OnModuleInit {
         });
       }),
     );
+    return this.source?.sourceStorage ? this.source.sourceStorage(work) : work();
   }
   async onModuleInit() {
     if (startupAudit()?.status === 'verifying') {

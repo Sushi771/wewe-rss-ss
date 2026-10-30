@@ -1,12 +1,13 @@
 import { dispatchReviewedSource } from './xhs-reviewed-dispatch';
 import type { AttemptScope } from './xhs-reviewed-attempt';
-import { historicalGenerationMarker } from './xhs-whole-generation';
+import { retainedGenerationMarkers } from './xhs-whole-generation';
+import { writeSourceReceipt } from './xhs-source-receipt';
 import { randomUUID } from 'node:crypto';
 import {
   xhsOriginalLinkCodes,
   type XhsOriginalLinkCode,
 } from '@wewe-rss/shared';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type {
   XhsOriginalLinkResult,
@@ -128,10 +129,10 @@ export async function configureXhsSourceBudget(
 async function hasPendingDispatch(
   db: Pick<Prisma.TransactionClient, '$queryRaw'>,
   owned = '',
-  retained = '',
+  retained: string[] = [],
 ) {
   const rows = await db.$queryRaw<Array<{ id: string }>>`
-    SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id<>${retained} LIMIT 1`;
+    SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id NOT IN (${Prisma.join(retained.length ? retained : [''])}) LIMIT 1`;
   return rows.length > 0;
 }
 async function pendingWaitExpired(
@@ -140,7 +141,7 @@ async function pendingWaitExpired(
   owned = '',
   group?: WholeSourceGroup,
 ) {
-  const retained = group ? await historicalGenerationMarker(db, group) : '';
+  const retained = group ? await retainedGenerationMarkers(db, group) : [];
   if (!(await hasPendingDispatch(db, owned, retained))) {
     waiting.since = undefined;
     return false;
@@ -152,12 +153,12 @@ async function reserveTotal(
   tx: Prisma.TransactionClient,
   now: number,
   owned = '',
-  retained = '',
+  retained: string[] = [],
 ) {
   return (
     (await tx.$executeRaw`UPDATE xhs_request_budgets SET used=used+1
     WHERE id=${SOURCE_TOTAL} AND used < request_limit AND next_at <= ${BigInt(now)}
-      AND NOT EXISTS (SELECT 1 FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id<>${retained})`) ===
+      AND NOT EXISTS (SELECT 1 FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id NOT IN (${Prisma.join(retained.length ? retained : [''])}))`) ===
     1
   );
 }
@@ -191,12 +192,13 @@ async function dispatchSource<T>(
     }
     const marker = group?.marker ?? DISPATCH_PREFIX + randomUUID();
     let started = false;
+    let dispatchCommitted = false;
     let response: Promise<T> | undefined;
     try {
       // A durable fence precedes all outbound work. It has no timed expiry:
       // a failed clock commit must block other runtimes and process restarts.
       await write(db, async (tx) => {
-        const retained = group ? await historicalGenerationMarker(tx, group) : '';
+        const retained = group ? await retainedGenerationMarkers(tx, group) : [];
         const rows = await tx.$queryRaw<Array<{ id: string }>>`
           UPDATE xhs_request_budgets SET next_at=next_at
           WHERE id=${SOURCE_TOTAL} AND next_at <= ${BigInt(Date.now())}
@@ -215,6 +217,11 @@ async function dispatchSource<T>(
         }
       });
       if (group) group.acquired = true;
+      // Generation phase usage must survive a later dispatch transaction rollback.
+      if (group?.generationId) await write(db, async tx => {
+        await ready(tx);
+        await markWholeSourceStarted(tx,group.jobId,marker,group.owner,charge,group.generationId);
+      });
       await write(db, async (tx) => {
         // Cancellation and dispatch serialize on this write lock. Any cancel
         // committed before it is acquired must be observed through this tx.
@@ -226,7 +233,7 @@ async function dispatchSource<T>(
           SELECT id FROM xhs_request_budgets WHERE id=${marker}`;
         if (!owned.length) fail('XHS_REQUEST_RATE_PAUSED');
         await ready(tx);
-        if (group) await markWholeSourceStarted(tx, group.jobId, marker, group.owner, charge, group.generationId);
+        if (group && !group.generationId) await markWholeSourceStarted(tx, group.jobId, marker, group.owner, charge, group.generationId);
         response = operation();
         started = true;
         if (group) group.started = true;
@@ -240,8 +247,15 @@ async function dispatchSource<T>(
         // Only synchronous transport entry occurs inside this short transaction.
         // Network response latency is awaited after COMMIT.
       });
+      dispatchCommitted = true;
       return await response!;
     } catch (error) {
+      // A dispatch transaction can fail after transport entry. Its network promise
+      // must settle before the owning stack can attest quiescence for review.
+      if (started && response) {
+        if (!dispatchCommitted) runtime.markDispatchPersistenceFailure?.();
+        try { await response; } catch { /* preserve the original persistence error */ }
+      }
       if (!started && (!group || !group.started)) {
         try {
           await write(db, (tx) =>
@@ -273,6 +287,7 @@ export function bindXhsSourceTotalBudget(
   db: PrismaService,
   runtime: XhsSubscriptionRuntime,
 ) {
+  runtime.bindWholeReceipt?.((scope,receipt) => write(db, tx => writeSourceReceipt(tx,scope,receipt)));
   runtime.bindSourceAdmission(
     async (alreadyBudgeted, group, ready) => {
       const store = new XhsSqliteBudgetStore(db);
@@ -289,7 +304,7 @@ export function bindXhsSourceTotalBudget(
           for (;;) {
             runtime.assertSourceReady();
             if (group) await ready?.();
-            if (await write(db, async (tx) => reserveTotal(tx, now, group?.marker, group ? await historicalGenerationMarker(tx, group) : ''))) {
+            if (await write(db, async (tx) => reserveTotal(tx, now, group?.marker, group ? await retainedGenerationMarkers(tx, group) : []))) {
               return true;
             }
             const row = await store.read(id);
