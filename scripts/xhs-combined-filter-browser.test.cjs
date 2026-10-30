@@ -600,8 +600,8 @@ const server = http.createServer((req, res) => {
     assert(await ev("document.querySelector('.xhs-combined-filter [role=alert]').textContent.includes('非负数')"));
     await input('条件 1 数值','100');await count(20);
     await click(button('添加条件'));await select('条件 2 指标','collects');await select('条件 2 比较方式','<=');await input('条件 2 数值','2');await count(8);
-    await click("document.querySelector('[role=columnheader] button')");assert.equal(await ev("document.querySelector('.content-article-row [data-metric=likes]').textContent.trim()"),'119');
-    await select('条件匹配方式','or');await count(64);assert.equal(await ev("document.querySelector('[role=columnheader]').getAttribute('aria-sort')"),'descending');
+    await click("document.querySelector('[role=columnheader] button[aria-label^=点赞排序]')");assert.equal(await ev("document.querySelector('.content-article-row [data-metric=likes]').textContent.trim()"),'119');
+    await select('条件匹配方式','or');await count(64);assert.equal(await ev("document.querySelector('[role=columnheader] button[aria-label^=点赞排序]').closest('[role=columnheader]').getAttribute('aria-sort')"),'descending');
     results.push({name:'and-or-global-filter-before-sort',status:'passed'});
     await click("document.querySelector('button[aria-label=\"删除条件 2\"]')");await select('条件 1 比较方式','between');await input('条件 1 下限','0');await input('条件 1 上限','0');await count(1);assert.equal(await ev("document.querySelector('.content-article-row [data-metric=likes]').textContent.trim()"),'0');
     await input('条件 1 下限','-1');assert(await ev("document.querySelector('.xhs-combined-filter [role=alert]').textContent.includes('非负数')"));await count(0);
