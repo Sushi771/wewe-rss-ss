@@ -29,6 +29,8 @@ export class XhsRequestBudget {
   async check(id: string, now = Date.now()) {
     const budget = await this.store.read(id);
     if (!budget) throw new XhsSubscriptionError('XHS_REQUEST_BUDGET_REQUIRED');
+    if (budget.used >= Number.MAX_SAFE_INTEGER)
+      throw new XhsSubscriptionError('XHS_REQUEST_BUDGET_EXHAUSTED');
     if (
       this.store.waitAllowanceMs !== undefined &&
       budget.nextAt > now + this.store.waitAllowanceMs

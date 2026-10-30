@@ -183,9 +183,8 @@ describe('protected transient original links and durable source budgets (offline
     expect(again.used).toBe(3);
     expect(again.nextAt).toBe(123);
     expect(again.limit).toBe(20);
-    await expect(
-      configureXhsSourceBudget(db as any, scope, 2, 1000),
-    ).rejects.toThrow('XHS_REQUEST_POLICY_INVALID');
+    const lowered = await configureXhsSourceBudget(db as any, scope, 2, 1000);
+    expect(lowered).toMatchObject({ used: 3, limit: 2, limitEnforced: false, nextAt: 123 });
     const legacy = await db.$queryRaw<
       any[]
     >`SELECT used,request_limit,next_at FROM xhs_request_budgets WHERE id='legacy-synthetic'`;
@@ -193,16 +192,13 @@ describe('protected transient original links and durable source budgets (offline
     expect(Number(legacy[0].request_limit)).toBe(31);
     expect(Number(legacy[0].next_at)).toBe(99);
   });
-  it('blocks ordinary resolution before transport without a policy, then counts its profile exactly once', async () => {
+  it('initializes the counter for resolution and preserves it through policy configuration', async () => {
     const f = fixture();
     await f.runtime.connectSession(cookies);
     const subscriptions = new XhsSubscriptionService(db as any, f.runtime);
-    await expect(
-      resolveXhsSubscriptionWithBudget(db as any, f.runtime, subscriptions, {
-        url: profile,
-      }),
-    ).rejects.toThrow('XHS_REQUEST_BUDGET_REQUIRED');
-    expect(f.api).not.toHaveBeenCalled();
+    await resolveXhsSubscriptionWithBudget(db as any, f.runtime, subscriptions, { url: profile });
+    expect(f.api).toHaveBeenCalledTimes(1);
+    now += 5000; // Advance the synthetic clock past the default interval.
     await configureXhsSourceBudget(
       db as any,
       { purpose: 'resolution' },
@@ -216,10 +212,10 @@ describe('protected transient original links and durable source budgets (offline
       { url: profile },
     );
     expect(resolved.author.id).toBe(external);
-    expect(f.api).toHaveBeenCalledTimes(1);
+    expect(f.api).toHaveBeenCalledTimes(2);
     expect(
       (await readXhsSourceBudget(db as any, { purpose: 'resolution' }))!.used,
-    ).toBe(1);
+    ).toBe(2);
   });
   it('returns only supplied verified note URLs, preserving case/leading zero with free cached clicks', async () => {
     const f = fixture();
@@ -287,30 +283,30 @@ describe('protected transient original links and durable source budgets (offline
     ).toEqual({ state: 'not_ready', code: 'XHS_NOTE_ID_INVALID' });
     expect(f.api).not.toHaveBeenCalled();
   });
-  it('exhaustion pauses before list dispatch, keeps spent quota, and never retries', async () => {
+  it('continues above the historic count and reuses the cached original link', async () => {
     const f = fixture();
     await f.runtime.connectSession(cookies);
     await configureXhsSourceBudget(db as any, scope, 1, 1000);
     expect(
       await prepareXhsOriginalLink(db as any, f.runtime, { noteId }),
-    ).toEqual({ state: 'not_ready', code: 'XHS_REQUEST_BUDGET_EXHAUSTED' });
-    expect(f.api).toHaveBeenCalledTimes(1);
-    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(1);
+    ).toMatchObject({ state: 'ready' });
+    expect(f.api).toHaveBeenCalledTimes(2);
+    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(2);
     expect(
       (await prepareXhsOriginalLink(db as any, f.runtime, { noteId })).state,
-    ).toBe('not_ready');
-    expect(f.api).toHaveBeenCalledTimes(1);
+    ).toBe('ready');
+    expect(f.api).toHaveBeenCalledTimes(2);
   });
-  it('preserves a future cooldown without dispatch or changing used', async () => {
+  it('waits for a future cooldown before dispatch and preserves the counter', async () => {
     const f = fixture();
     await f.runtime.connectSession(cookies);
     const p = await configureXhsSourceBudget(db as any, scope, 20, 1000);
     await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=${BigInt(now + 60000)} WHERE id=${p.budgetId}`;
-    expect(
-      await prepareXhsOriginalLink(db as any, f.runtime, { noteId }),
-    ).toEqual({ state: 'not_ready', code: 'XHS_REQUEST_RATE_PAUSED' });
-    expect(f.api).not.toHaveBeenCalled();
-    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(0);
+    const wait = jest.spyOn(f.runtime, 'waitForSourceRate').mockImplementation(async () => { expect(f.api).not.toHaveBeenCalled(); now += 60000; });
+    expect((await prepareXhsOriginalLink(db as any, f.runtime, { noteId })).state).toBe('ready');
+    expect(wait).toHaveBeenCalled();
+    expect(f.api).toHaveBeenCalledTimes(2);
+    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(2);
   });
   it('unknown refusal stops the shared session; later clicks cannot clear risk or dispatch', async () => {
     const f = fixture({ status: 461 });
@@ -363,7 +359,7 @@ describe('protected transient original links and durable source budgets (offline
       await prepareXhsOriginalLink(db as any, f.runtime, { noteId }),
     ).toEqual({ state: 'ready', url: supplied });
   });
-  it('concurrent resolution consumes the one reservation once and never overspends', async () => {
+  it('concurrent resolution retains both actual request counts past the former cap', async () => {
     const f = fixture();
     await f.runtime.connectSession(cookies);
     const subscriptions = new XhsSubscriptionService(db as any, f.runtime);
@@ -381,11 +377,11 @@ describe('protected transient original links and durable source budgets (offline
         url: profile,
       }),
     ]);
-    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    expect(f.api).toHaveBeenCalledTimes(1);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    expect(f.api).toHaveBeenCalledTimes(2);
     expect(
       (await readXhsSourceBudget(db as any, { purpose: 'resolution' }))!.used,
-    ).toBe(1);
+    ).toBe(2);
   });
   it('expires a supplied URL and rebuilds only legal same-author context', async () => {
     let clock = 0;
@@ -466,7 +462,7 @@ describe('protected transient original links and durable source budgets (offline
       ),
     ).toBeUndefined();
   });
-  it('shares the same total across resolution and original-link scopes rather than multiplying grants', async () => {
+  it('preserves a shared count across scopes after the former limit', async () => {
     const f = fixture();
     await f.runtime.connectSession(cookies);
     const subscriptions = new XhsSubscriptionService(db as any, f.runtime);
@@ -486,13 +482,9 @@ describe('protected transient original links and durable source budgets (offline
     expect(
       (await prepareXhsOriginalLink(db as any, f.runtime, { noteId })).state,
     ).toBe('ready');
-    await expect(
-      resolveXhsSubscriptionWithBudget(db as any, f.runtime, subscriptions, {
-        url: profile,
-      }),
-    ).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
-    expect(f.api).toHaveBeenCalledTimes(2);
-    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(2);
+    await resolveXhsSubscriptionWithBudget(db as any, f.runtime, subscriptions, { url: profile });
+    expect(f.api).toHaveBeenCalledTimes(3);
+    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(3);
     expect(
       (await readXhsSourceBudget(db as any, { purpose: 'resolution' }))!
         .remaining,
@@ -534,7 +526,7 @@ describe('protected transient original links and durable source budgets (offline
             subscriptions,
             { url: profile },
           ),
-        ).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
+        ).rejects.toThrow('XHS_REQUEST_RATE_PAUSED');
       },
     );
     expect(used).toBe(1);
@@ -610,17 +602,16 @@ describe('protected transient original links and durable source budgets (offline
       readonly.xiaohongshu.prepareOriginalLink({ noteId }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     const local = router.createCaller({ errorMsg: null, isLocalSave: true });
-    await expect(
-      local.xiaohongshu.resolveSubscription({ url: profile }),
-    ).rejects.toMatchObject({ message: 'XHS_REQUEST_BUDGET_REQUIRED' });
-    expect(f.api).not.toHaveBeenCalled();
+    await local.xiaohongshu.resolveSubscription({ url: profile });
+    expect(f.api).toHaveBeenCalledTimes(1);
+    now += 5000; // The initial default cooldown remains in force.
     await local.xiaohongshu.configureSourceRequestBudget({
       scope: { purpose: 'resolution' },
       totalLimit: 20,
       intervalMs: 1000,
     });
     await local.xiaohongshu.resolveSubscription({ url: profile });
-    expect(f.api).toHaveBeenCalledTimes(1);
+    expect(f.api).toHaveBeenCalledTimes(2);
   });
 
   it('one source configuration covers normal link restoration without creating per-click or per-author allowances', async () => {
@@ -823,7 +814,7 @@ describe('protected transient original links and durable source budgets (offline
     ).toBeUndefined();
   });
 
-  it('the bound source total caps direct runtime profile calls outside a route wrapper too', async () => {
+  it('counts direct runtime profile calls beyond the historical source total', async () => {
     const f = fixture();
     await f.runtime.connectSession(cookies);
     await configureXhsSourceBudget(
@@ -834,13 +825,11 @@ describe('protected transient original links and durable source budgets (offline
     );
     bindXhsSourceTotalBudget(db as any, f.runtime);
     await f.runtime.resolve(profile);
-    await expect(f.runtime.resolve(profile)).rejects.toThrow(
-      'XHS_REQUEST_BUDGET_EXHAUSTED',
-    );
-    expect(f.api).toHaveBeenCalledTimes(1);
+    await f.runtime.resolve(profile);
+    expect(f.api).toHaveBeenCalledTimes(2);
     expect(
       (await readXhsSourceBudget(db as any, { purpose: 'resolution' }))!.used,
-    ).toBe(1);
+    ).toBe(2);
   });
   it('reconnecting cannot reset a bound durable source total', async () => {
     const f = fixture();
@@ -854,19 +843,17 @@ describe('protected transient original links and durable source budgets (offline
     bindXhsSourceTotalBudget(db as any, f.runtime);
     await f.runtime.resolve(profile);
     await f.runtime.connectSession(cookies);
-    await expect(f.runtime.resolve(profile)).rejects.toThrow(
-      'XHS_REQUEST_BUDGET_EXHAUSTED',
-    );
-    expect(f.api).toHaveBeenCalledTimes(1);
+    await f.runtime.resolve(profile);
+    expect(f.api).toHaveBeenCalledTimes(2);
+    expect((await readXhsSourceBudget(db as any, { purpose: 'resolution' }))!.used).toBe(2);
   });
-  it('production binding rejects an otherwise unbudgeted direct dispatch before a source grant exists', async () => {
+  it('production binding initializes and counts a direct dispatch without a preconfigured grant', async () => {
     const f = fixture();
     await f.runtime.connectSession(cookies);
     bindXhsSourceTotalBudget(db as any, f.runtime);
-    await expect(f.runtime.resolve(profile)).rejects.toThrow(
-      'XHS_REQUEST_BUDGET_REQUIRED',
-    );
-    expect(f.api).not.toHaveBeenCalled();
+    await f.runtime.resolve(profile);
+    expect(f.api).toHaveBeenCalledTimes(1);
+    expect((await readXhsSourceBudget(db as any, { purpose: 'resolution' }))!.used).toBe(1);
   });
   it('bounds generated PC URLs and never accepts an empty or control-bearing source token', () => {
     for (const token of ['', 'synthetic\nvalue', '中'.repeat(2000)])
@@ -923,7 +910,7 @@ describe('protected transient original links and durable source budgets (offline
     ).toEqual(fresh);
     expect(f.api).toHaveBeenCalledTimes(2);
   });
-  it('explicit renewal cannot bypass an exhausted source budget', async () => {
+  it('explicit renewal preserves counts beyond the former source limit', async () => {
     const f = fixture();
     await f.runtime.connectSession(cookies);
     const subscriptions = new XhsSubscriptionService(db as any, f.runtime);
@@ -944,8 +931,9 @@ describe('protected transient original links and durable source budgets (offline
         noteId,
         refreshContext: true,
       }),
-    ).toEqual({ state: 'not_ready', code: 'XHS_REQUEST_BUDGET_EXHAUSTED' });
-    expect(f.api).toHaveBeenCalledTimes(1);
+    ).toMatchObject({ state: 'ready' });
+    expect(f.api).toHaveBeenCalledTimes(2);
+    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(2);
   });
   it.each(['exhausted', 'cooldown', 'reserve-race'])(
     'an outer %s rejection cannot charge the shared source ledger',
@@ -975,34 +963,19 @@ describe('protected transient original links and durable source budgets (offline
       expect(await readXhsSourceBudget(db as any, scope)).toEqual(before);
     },
   );
-  it('shared exhaustion or cooldown cannot spend an available outer cap', async () => {
-    for (const mode of ['exhausted', 'cooldown']) {
-      const f = fixture();
-      await f.runtime.connectSession(cookies);
-      await configureXhsSourceBudget(db as any, scope, 20, 1000);
-      await db.$executeRaw`UPDATE xhs_request_budgets SET used=${mode === 'exhausted' ? 20 : 0},next_at=${BigInt(mode === 'cooldown' ? now + 60000 : 0)}`;
-      const reserve = jest.fn(async () => true),
-        outer = new XhsRequestBudget({
-          reserve,
-          read: async (id) => ({
-            id,
-            limit: 20,
-            used: 0,
-            nextAt: 0,
-            intervalMs: 0,
-          }),
-        });
-      expect(
-        (
-          await f.runtime.withRequestBudget(outer, 'synthetic-outer', () =>
-            prepareXhsOriginalLink(db as any, f.runtime, { noteId }),
-          )
-        ).state,
-      ).toBe('not_ready');
-      expect(reserve).not.toHaveBeenCalled();
-      expect(f.api).not.toHaveBeenCalled();
-      await db.$executeRaw`DELETE FROM xhs_request_budgets`;
-    }
+  it('shared cooldown waits before consuming an available outer scope', async () => {
+    const f = fixture();
+    await f.runtime.connectSession(cookies);
+    await configureXhsSourceBudget(db as any, scope, 20, 1000);
+    await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=${BigInt(now + 60000)} WHERE id='xhs:source-total'`;
+    const reserve = jest.fn(async () => true);
+    const outer = new XhsRequestBudget({ reserve, read: async (id) => ({ id, limit: 20, used: 0, nextAt: 0, intervalMs: 0 }) });
+    const wait = jest.spyOn(f.runtime, 'waitForSourceRate').mockImplementation(async () => { expect(f.api).not.toHaveBeenCalled(); now += 60000; });
+    const result = await f.runtime.withRequestBudget(outer, 'synthetic-outer', () => prepareXhsOriginalLink(db as any, f.runtime, { noteId }));
+    expect(result.state).toBe('ready');
+    expect(wait).toHaveBeenCalled();
+    expect(f.api).toHaveBeenCalledTimes(2);
+    expect(reserve).toHaveBeenCalledTimes(2);
   });
   it.each([true, false])(
     'a refresh wins over the older in-flight response, newer finishes first=%s',

@@ -596,7 +596,7 @@ const server = http.createServer((req, res) => {
       if(source==='xiaohongshu'){
         assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0);
         assert.equal(await ev("document.querySelectorAll('.content-article-row [data-original-note-id]').length"),40);
-        for(const width of [390,1660,640,790]){await viewport(width,540,1.25);assert.equal((await geometry()).checked,2);assert(!(await geometry()).overflow);assert.equal(await ev("[...document.querySelectorAll('[role=columnheader] button')].filter(e=>e.getBoundingClientRect().width>0).length"),4);}
+        for(const width of [390,1660,640,790]){await viewport(width,540,1.25);assert.equal((await geometry()).checked,2);assert(!(await geometry()).overflow);const headers=await ev("[...document.querySelectorAll('[role=columnheader] button')].filter(e=>e.getBoundingClientRect().width>0).map(e=>e.textContent.trim().split(' ')[0])");assert.deepEqual(headers.filter(x=>x!=='发布时间'),['点赞','收藏','分享','评论']);if(width===1660)assert(headers.includes('发布时间'));}
         assert.equal(apiReads.filter(r=>r.name==='xiaohongshu.engagement'||r.name==='xiaohongshu.collectComments').length,0);
       } else {
         const links = await ev(
@@ -627,14 +627,8 @@ const server = http.createServer((req, res) => {
       );
       await key('Escape', 27);
       await pause(400);
-      if (source === 'xiaohongshu') {
-        await click(
-          '[...document.querySelectorAll(".feed-reading-toolbar button")].find(e=>/更多/.test(e.textContent))',
-        );
-        await pause(150);
-      }
       await click(
-        '[...document.querySelectorAll("button")].find(e=>/^(导出文章|导出已保存 ZIP)$/.test(e.textContent))',
+        '[...document.querySelectorAll("button")].find(e=>/^(导出文章|导出笔记)$/.test(e.textContent))',
       );
       await wait(
         'Boolean(document.querySelector("[role=dialog]"))',

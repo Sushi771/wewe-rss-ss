@@ -312,6 +312,8 @@ export function bindXhsSourceTotalBudget(
               return true;
             }
             const row = await store.read(id);
+            if (row && row.used >= Number.MAX_SAFE_INTEGER)
+              fail('XHS_REQUEST_BUDGET_EXHAUSTED');
             if (
               !row ||
               (await pendingWaitExpired(db, waiting, group?.marker, group))
@@ -420,6 +422,9 @@ async function withPolicy<T>(
           if (!(error instanceof AdmissionUnavailable)) throw error;
         }
         const row = await combined(id);
+        const local = await store.read(id);
+        if ((row && row.used >= Number.MAX_SAFE_INTEGER) || (local && local.used >= Number.MAX_SAFE_INTEGER))
+          fail('XHS_REQUEST_BUDGET_EXHAUSTED');
         if (
           !row ||
           (await pendingWaitExpired(db, waiting))

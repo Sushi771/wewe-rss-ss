@@ -106,6 +106,13 @@ function fixture() {
   });
   return { api, media };
 }
+it('rejects an unsafe counter boundary before reserve without resetting it', async () => {
+  const reserve = jest.fn(async () => true);
+  const budget = new XhsRequestBudget({ reserve, read: async id => ({ id, used: Number.MAX_SAFE_INTEGER, limit: 1, nextAt: 0, intervalMs: 0 }) });
+  await expect(budget.check('synthetic')).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
+  expect(reserve).not.toHaveBeenCalled();
+});
+
 describe('default-off production source wiring with synthetic sessions only', () => {
   it('reports the process stop while disabled and restores a session without clearing it or dispatching', async () => {
     let enabled = true;
@@ -201,7 +208,7 @@ describe('default-off production source wiring with synthetic sessions only', ()
       runtime.withRequestBudget(first.budget, 'first', () =>
         runtime.list(author.id, null),
       ),
-    ).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
+    ).rejects.toThrow('XHS_REQUEST_RATE_PAUSED');
     expect(injected.api).toHaveBeenCalledTimes(1);
     expect(first.used()).toBe(1);
     const next = allowance(3);
@@ -211,7 +218,7 @@ describe('default-off production source wiring with synthetic sessions only', ()
       await runtime.detail(author.id, 'synthetic-note');
       await expect(
         runtime.metrics(author.id, 'synthetic-note'),
-      ).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
+      ).rejects.toThrow('XHS_REQUEST_RATE_PAUSED');
     });
     expect(next.used()).toBe(3);
     expect(injected.api).toHaveBeenCalledTimes(3);

@@ -209,7 +209,7 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
       });
       const url = `https://www.xiaohongshu.com/discovery/item/${note}?source=webshare&xhsshare=pc_web&xsec_token=synthetic-ephemeral&xsec_source=pc_share`;
       const work = runtime.resolveLimitedRecovery(url, 'author', undefined, mode.startsWith('append'));
-      if (mode === 'success' || mode === 'media' || mode === 'append') {
+      if (mode === 'success' || mode === 'media' || mode === 'append' || mode === 'exhausted' || mode === 'append-exhausted') {
         const result = await work;
         const service = new XhsSubscriptionService(db as any, runtime);
         const saved = await service.commitLimitedRecovery(result);
@@ -246,17 +246,17 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
             .enabled,
         ).toBe(false);
       } else await expect(work).rejects.toThrow();
-      if (mode !== 'success' && mode !== 'media' && mode !== 'append')
+      if (mode !== 'success' && mode !== 'media' && mode !== 'append' && mode !== 'exhausted' && mode !== 'append-exhausted')
         expect(
           await db.xhsNote.findUnique({
             where: { id: JSON.stringify(['xiaohongshu', 'note', note]) },
           }),
         ).toBeNull();
-      expect(api).toHaveBeenCalledTimes(mode === 'exhausted' || mode === 'append-exhausted' ? 0 : 1);
+      expect(api).toHaveBeenCalledTimes(1);
       const budgets = await db.$queryRaw<
         Array<{ used: number }>
       >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
-      expect(budgets[0].used).toBe(mode === 'exhausted' || mode === 'append-exhausted' ? 3 : mode.startsWith('append') ? 2 : 1);
+      expect(budgets[0].used).toBe(mode === 'exhausted' || mode === 'append-exhausted' ? 4 : mode.startsWith('append') ? 2 : 1);
       await expect(
         runtime.resolveLimitedRecovery(url, 'author'),
       ).rejects.toThrow();

@@ -198,7 +198,7 @@ describe('durable synthetic source risk fence', () => {
       runtime.withRequestBudget(budget, 'synthetic', () =>
         runtime.resolve(profile),
       ),
-    ).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
+    ).rejects.toThrow('XHS_REQUEST_RATE_PAUSED');
     expect(await risk.read()).toBeUndefined();
     expect(api).toHaveBeenCalledTimes(1);
     await runtime.resolve(profile);

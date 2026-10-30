@@ -182,6 +182,11 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       taskFinished: taskExports.taskFinished,
       taskSettling: taskExports.taskSettling,
       taskText: taskExports.taskText,
+      withCachedExportSummary: taskExports.withCachedExportSummary,
+      canContinueCreatorQueue: taskExports.canContinueCreatorQueue,
+      batchVideoWarning: taskExports.batchVideoWarning,
+      cacheExportSummary: { current: '' },
+      batchPartialCreators: { current: [] },
       selectedImageNotes: taskExports.selectedImageNotes,
       exportArchiveGroups: taskExports.exportArchiveGroups,
       current: { id: 'a', displayName: '合成作者' },
@@ -189,6 +194,8 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
         { id: 'note-a', creatorId: 'a', status: 'listed', kind: 'image-text' },
       ],
       selectedArchives: [],
+      visibleNotes: [{ id: 'note-a', creatorId: 'a', status: 'listed', kind: 'image-text' }],
+      selectedIds: new Set(['note-a']),
       exportScope: 'selected',
       compiledConditions: filterExports.compileFilter(filterExports.emptyCombinedFilter()),
       filterNotes: filterExports.filterNotes,
@@ -231,6 +238,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
         task: { query: jest.fn() },
       },
       localApi: jest.fn(),
+      chooseConfirmedDirectory: jest.fn().mockResolvedValue({}),
       exportNotes: { mutateAsync: jest.fn() },
       watchSubscriptionTask: jest.fn().mockResolvedValue(undefined),
     };
@@ -264,13 +272,14 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       'setTaskCreatorId',
     ])
       scope[name] = jest.fn();
+    scope.fullCollectionApi = { refreshFull: { mutate: jest.fn().mockResolvedValue({ taskId: 'task-one', creatorId: 'a' }) } };
     scope.startTask = evaluate('startTask', scope);
     scope.run = evaluate('run', scope);
     scope.updateCreator = evaluate('updateCreator', scope);
     scope.startDownloadJob = evaluate('startDownloadJob', scope);
     scope.nextDownloadRef.current = scope.startDownloadJob;
     scope.taskApiRef = {
-      current: { subscriptionApi: scope.subscriptionApi, utils: scope.utils },
+      current: { subscriptionApi: scope.subscriptionApi, utils: scope.utils, fullCollectionApi: scope.fullCollectionApi, taskCreatorId: 'a' },
     };
     return { scope, state, invalidated };
   }
@@ -294,7 +303,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     ).toHaveBeenCalledWith({ url: state.url });
     expect(state.resolution).toEqual(resolution);
     expect(scope.subscriptionApi.subscribe.mutate).not.toHaveBeenCalled();
-    expect(scope.subscriptionApi.refresh.mutate).not.toHaveBeenCalled();
+    expect(scope.fullCollectionApi.refreshFull.mutate).not.toHaveBeenCalled();
     expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
   });
   it('retains input when resolution fails and does not invent success', async () => {
@@ -346,12 +355,12 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     expect(state.creator).toBe('');
     expect(state.url).toContain('synthetic');
   });
-  it('starts a metadata-only list task and holds the busy guard until its terminal receipt', async () => {
+  it('starts a recent full-cache task and holds the busy guard until its terminal receipt', async () => {
     const { scope, state } = harness();
     await scope.run(() => scope.updateCreator('a'));
-    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledWith({
+    expect(scope.fullCollectionApi.refreshFull.mutate).toHaveBeenCalledWith({
       id: 'a',
-      maxPages: 2,
+      scope: 'recent',
     });
     expect(state.task).toMatchObject({ kind: 'list', state: 'queued' });
     expect(state.busy).toBe(true);
@@ -364,13 +373,13 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
   it('skips paused creators, queues sequential list work and stops at a partial result', async () => {
     const { scope, state } = harness();
     await evaluate('handleRefreshAll', scope)();
-    expect(scope.subscriptionApi.refresh.mutate.mock.calls).toEqual([
-      [{ id: 'a', maxPages: 2 }],
+    expect(scope.fullCollectionApi.refreshFull.mutate.mock.calls).toEqual([
+      [{ id: 'a', scope: 'recent' }],
     ]);
     expect(scope.queuedCreators.current).toEqual(['b']);
     watch(scope).onTask({ ...terminal('partial'), kind: 'list' });
     expect(scope.queuedCreators.current).toEqual([]);
-    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledTimes(1);
+    expect(scope.fullCollectionApi.refreshFull.mutate).toHaveBeenCalledTimes(1);
     expect(state.task.state).toBe('partial');
   });
   it('advances a completed creator once and retains busy state for the next queued task', async () => {
@@ -379,23 +388,23 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     watch(scope).onTask({ ...terminal(), kind: 'list' });
     await Promise.resolve();
     await Promise.resolve();
-    expect(scope.subscriptionApi.refresh.mutate.mock.calls).toEqual([
-      [{ id: 'a', maxPages: 2 }],
-      [{ id: 'b', maxPages: 2 }],
+    expect(scope.fullCollectionApi.refreshFull.mutate.mock.calls).toEqual([
+      [{ id: 'a', scope: 'recent' }],
+      [{ id: 'b', scope: 'recent' }],
     ]);
     expect(state.busy).toBe(true);
   });
   it('retains the completed receipt when the next creator fails without replaying', async () => {
     const { scope, state } = harness();
     await evaluate('handleRefreshAll', scope)();
-    scope.subscriptionApi.refresh.mutate.mockRejectedValue(
+    scope.fullCollectionApi.refreshFull.mutate.mockRejectedValue(
       new Error('synthetic queue failure'),
     );
     watch(scope).onTask({ ...terminal(), kind: 'list' });
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledTimes(2);
+    expect(scope.fullCollectionApi.refreshFull.mutate).toHaveBeenCalledTimes(2);
     expect(state.error).toContain('未开始');
     expect(state.busy).toBe(false);
   });
@@ -430,16 +439,16 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
   it('stops at native picker cancellation and never dispatches the download', async () => {
     const { scope, state } = harness();
     scope.saveSettings.askEveryTime = true;
-    scope.localApi.mockResolvedValue({ cancelled: true });
+    scope.chooseConfirmedDirectory.mockResolvedValue({ cancelled: true });
     await evaluate('handleLocalSave', scope)();
-    expect(scope.localApi.mock.calls).toEqual([['/directory', {}]]);
+    expect(scope.chooseConfirmedDirectory).toHaveBeenCalledTimes(1);
     expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
     expect(state.busy).toBe(false);
   });
   it('passes the native picker token for a bounded batch and does not accept a path parameter', async () => {
     const { scope } = harness();
     scope.saveSettings.askEveryTime = true;
-    scope.localApi.mockResolvedValue({
+    scope.chooseConfirmedDirectory.mockResolvedValue({
       pickToken: 'native-grant',
       directory: 'synthetic-picked',
       askEveryTime: true,
@@ -450,7 +459,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       noteIds: ['note-a'],
       pickToken: 'native-grant',
     });
-    expect(scope.setDirectory).toHaveBeenCalledWith('synthetic-picked');
+    expect(scope.chooseConfirmedDirectory).toHaveBeenCalledTimes(1);
   });
   it('does not retry a failed task submission or display an archive success', async () => {
     const { scope, state } = harness();
@@ -715,11 +724,11 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       'feed-workspace',
     ])
       expect(text).toContain(marker);
-    expect(text.indexOf('onPress={() => handleLocalSave()}')).toBeGreaterThan(
+    expect(text.indexOf('onPress={() => handleLocalSave(true)}')).toBeGreaterThan(
       -1,
     );
-    expect(text.indexOf('onPress={() => handleLocalSave()}')).toBeLessThan(
-      text.indexOf('onPress={handleDownload}'),
+    expect(text.indexOf('onPress={() => handleLocalSave(true)}')).toBeLessThan(
+      text.indexOf("if (xhsExportFormat === 'zip') handleDownload()"),
     );
     expect(text).not.toMatch(/prototypes\/|toast\.success/);
   });

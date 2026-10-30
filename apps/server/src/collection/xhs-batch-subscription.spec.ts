@@ -330,23 +330,34 @@ describe('batch subscription with synthetic SQLite and transport', () => {
     expect(claim[0].state).toBe('unknown');
     runtime.onModuleDestroy();
   }, 40000);
-  it('pauses on exhausted budget without a source dispatch or increment', async () => {
+  it('fails closed at the integer counter boundary without transport or resetting history', async () => {
+    await db.$executeRaw`UPDATE xhs_request_budgets SET used=${BigInt(Number.MAX_SAFE_INTEGER)},next_at=0 WHERE id='xhs:source-total'`;
+    const { api, runtime, service } = await setup();
+    await service.start({ clientRequestId: id, text: link('note-boundary') });
+    await (service as any).lane;
+    const batch = await service.status({ batchId: id });
+    expect(batch.state).toBe('paused');
+    expect(api).not.toHaveBeenCalled();
+    const rows = await db.$queryRaw<Array<{ used: string }>>`SELECT CAST(used AS TEXT) AS used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+    expect(rows[0].used).toBe(String(Number.MAX_SAFE_INTEGER));
+    runtime.onModuleDestroy();
+  }, 40000);
+  it('continues past a historical count limit and preserves its counter', async () => {
     await db.$executeRaw`UPDATE xhs_request_budgets SET used=request_limit WHERE id='xhs:source-total'`;
     const { api, runtime, service } = await setup();
     await service.start({ clientRequestId: id, text: link('note-i') });
     await (service as any).lane;
     const batch = await service.status({ batchId: id });
-    expect(batch.state).toBe('paused');
-    expect(batch.items[0].state).toBe('needs_context');
-    expect(batch.items[0].code).toBe('XHS_REQUEST_BUDGET_EXHAUSTED');
-    expect(api).not.toHaveBeenCalled();
+    expect(batch.state).toBe('completed');
+    expect(batch.items[0].state).toBe('subscribed');
+    expect(api).toHaveBeenCalledTimes(1);
     const rows = await db.$queryRaw<
       Array<{ used: bigint }>
     >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
-    expect(Number(rows[0].used)).toBe(20);
+    expect(Number(rows[0].used)).toBe(21);
     runtime.onModuleDestroy();
   }, 40000);
-  it('keeps a completed redirect known when the subsequent detail request exceeds the shared budget', async () => {
+  it('counts both a redirect and detail beyond the former shared limit', async () => {
     await db.$executeRaw`UPDATE xhs_request_budgets SET request_limit=1 WHERE id='xhs:source-total'`;
     const short = jest.fn(async (url: URL) => ({
       status: 302,
@@ -360,15 +371,14 @@ describe('batch subscription with synthetic SQLite and transport', () => {
     });
     await (service as any).lane;
     const batch = await service.status({ batchId: id });
-    expect(batch.state).toBe('paused');
-    expect(batch.items[0].state).toBe('needs_context');
-    expect(batch.items[0].code).toBe('XHS_REQUEST_BUDGET_EXHAUSTED');
+    expect(batch.state).toBe('completed');
+    expect(batch.items[0].state).toBe('subscribed');
     expect(short).toHaveBeenCalledTimes(1);
-    expect(api).not.toHaveBeenCalled();
+    expect(api).toHaveBeenCalledTimes(1);
     const rows = await db.$queryRaw<
       Array<{ used: bigint }>
     >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;
-    expect(Number(rows[0].used)).toBe(1);
+    expect(Number(rows[0].used)).toBe(2);
     runtime.onModuleDestroy();
   }, 40000);
   it('rolls back creator changes if its receipt transaction fails', async () => {
