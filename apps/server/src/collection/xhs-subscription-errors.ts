@@ -87,7 +87,7 @@ const codes = new Set([
   'XHS_CURSOR_CYCLE',
   'XHS_LIST_NO_PROGRESS',
 ]);
-const safeMediaCode = (code: string) => /^XHS_MEDIA_HTTP_[1-5][0-9]{2}$/.test(code) || ['XHS_MEDIA_REQUEST_REJECTED', 'XHS_MEDIA_RESPONSE_INVALID', 'XHS_MEDIA_TYPE_REJECTED', 'XHS_MEDIA_SIZE_REJECTED', 'XHS_MEDIA_EMPTY', 'XHS_MEDIA_BYTES_INVALID', 'XHS_MEDIA_TIMEOUT', 'XHS_MEDIA_ABORTED', 'XHS_MEDIA_TRANSPORT_FAILED'].includes(code);
+const safeMediaCode = (code: string) => /^XHS_MEDIA_HTTP_[1-5][0-9]{2}$/.test(code) || ['XHS_MEDIA_URL_REJECTED', 'XHS_MEDIA_REQUEST_REJECTED', 'XHS_MEDIA_RESPONSE_INVALID', 'XHS_MEDIA_TYPE_REJECTED', 'XHS_MEDIA_SIZE_REJECTED', 'XHS_MEDIA_EMPTY', 'XHS_MEDIA_BYTES_INVALID', 'XHS_MEDIA_TIMEOUT', 'XHS_MEDIA_ABORTED', 'XHS_MEDIA_TRANSPORT_FAILED'].includes(code);
 export function xhsPublicCode(error: unknown, fallback: string) {
   if (error instanceof ArticleDownloadError && error.status === 409 && error.diagnostic.code === 'DIRECTORY_PICK_REQUIRED') return 'XHS_SAVE_DIRECTORY_SELECTION_REQUIRED';
   if ((error instanceof XhsMediaError || error instanceof XhsSubscriptionError) && safeMediaCode(error.code)) return error.code;

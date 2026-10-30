@@ -163,7 +163,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(paused.generation.lastSourceReceipt.outcome).toBe('checkpointed');expect(resolve).toHaveBeenCalledTimes(1);
     expect(paused.generation.localFailure).toEqual({stage:'list-task',code:'XHS_LOCAL_OPERATION_FAILED'});
     await execute(generationId);await drain();const completed=await read();
-    expect(resolve).toHaveBeenCalledTimes(1);expect(completed.state).toBe('completed');expect(completed.generation.profile).toEqual(paused.generation.profile);
+    expect(resolve).toHaveBeenCalledTimes(1);expect(completed.state).toBe('partial');expect(completed.generation.profile).toEqual(paused.generation.profile);
     expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
   });
   // Two synthetic SQLite phases plus restart: 2.1s locally; CI delay is not yet attributed.
@@ -177,7 +177,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();
     expect(runtime.hasAuthorContext('author')).toBe(false);
     await execute(generationId);await drain();const finished=await read();
-    expect({state:finished.state,code:finished.code,phase:finished.generation.activeFence?.phase,routes:api.mock.calls.slice(requestsBefore).map(([r]:any[])=>new URL(r.url).pathname)}).toMatchObject({state:'completed'});expect(finished.listEnd).toBe(true);expect(finished.sourceGrant.used.profile).toBe(4);
+    expect({state:finished.state,code:finished.code,phase:finished.generation.activeFence?.phase,routes:api.mock.calls.slice(requestsBefore).map(([r]:any[])=>new URL(r.url).pathname)}).toMatchObject({state:'partial'});expect(finished.listEnd).toBe(true);expect(finished.sourceGrant.used.profile).toBe(4);
     expect(finished.generation.profile).toEqual(paused.generation.profile);expect(shortLinks).toHaveBeenCalledTimes(linksBefore);
     const next=api.mock.calls.slice(requestsBefore).map(([request]:any[])=>new URL(request.url));
     expect(next[0].pathname.endsWith('user_posted')).toBe(true);expect(next.some(url=>url.pathname.endsWith('otherinfo'))).toBe(false);
@@ -305,7 +305,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     });
     await execute(generationId);await drain();const completed=await read();
     expect(lateChecked).toBe(true);expect(lateCode).toBe('XHS_WHOLE_SOURCE_FENCE_BLOCKED');expect(newMarker).not.toBe(failedFence.marker);
-    expect(completed.state).toBe('completed');expect(completed.generation.id).toBe(generationId);expect(completed.generation.activeFence).toBeUndefined();
+    expect(completed.state).toBe('partial');expect(completed.generation.id).toBe(generationId);expect(completed.generation.activeFence).toBeUndefined();
     expect(completed.generation.reviews).toEqual(reviewed.generation.reviews);
     expect(await db.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' ORDER BY id`).toEqual(retained);
     expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic recovered body');
@@ -376,7 +376,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     subscriptions.bindLocalSaver(async()=>{throw Error('unexpected picker');},async()=>{throw Error('unexpected export');});
     await (whole as any).prepareGeneration(input);expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();
     await execute();await drain();const job=await read();
-    expect(job.state).toBe('completed');expect(job.listEnd).toBe(true);expect(job.items[noteKey].cached).toBe(true);expect(job.items[noteKey].archive).toBeUndefined();
+    expect(job.state).toBe('partial');expect(job.listEnd).toBe(true);expect(job.generation.basicCompleted).toBe(true);expect(job.items[noteKey].archive).toBeUndefined();
     expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic recovered body');
     const routes=api.mock.calls.map(([r]:any[])=>new URL(r.url).pathname);
     expect(routes.some(r=>r.endsWith('otherinfo'))).toBe(true);expect(routes.some(r=>r.endsWith('user_posted'))).toBe(true);expect(routes.some(r=>r.endsWith('/feed'))).toBe(true);
@@ -388,7 +388,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(job.sourceGrant.used.detail).toBeGreaterThan(original.sourceGrant.used.detail);
     expect((await db.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`)).toEqual([{id:marker}]);
     await assertUnknownPreserved();
-    const before=count;await expect(execute()).rejects.toThrow();expect(api.mock.calls.length+shortLinks.mock.calls.length).toBe(before);
+    const before=count;await execute();await drain();expect(api.mock.calls.length+shortLinks.mock.calls.length).toBe(before);
   });
   it('rejects duplicate execution while the one approved generation is queued or running',async()=>{
     await (whole as any).prepareGeneration(input);const id=(await read()).generation.id;
@@ -457,7 +457,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const paused=await read();expect(paused.state).toBe('paused');expect(paused.generation.activeFence).toBeUndefined();
     expect(requestedDetails()).toEqual(['note']);const child=await subscriptions.task({taskId:paused.listTask});expect(child.completed).toBe(1);
     live=true;await execute(id);await drain();const completed=await read();
-    expect(completed.state).toBe('completed');expect(completed.generation.id).toBe(id);
+    expect(completed.state).toBe('partial');expect(completed.generation.id).toBe(id);
     expect(requestedDetails()).toEqual(['note','second']);await assertUnknownPreserved();
   });
   it('retains both unknown markers and consumed counts when a successful body response loses its checkpoint transaction',async()=>{
@@ -505,6 +505,80 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(child.noteIds).toEqual([freshKey]);expect(child.directory).toBeUndefined();expect(saves).not.toHaveBeenCalled();
     await assertUnknownPreserved();
   });
+  it('allows media dispatch after a synthetic admission wait over ten seconds',async()=>{
+    const fullRefresh=subscriptions.refreshFull.bind(subscriptions);jest.spyOn(subscriptions,'refreshFull').mockImplementation(args=>fullRefresh({...args,basicOnly:false,reuseCompleteCache:false}));
+    const base=api.getMockImplementation()!;api.mockImplementation(async(req:any)=>{const result=await base(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/synthetic.png'}];return result;});
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=','base64');
+    media.mockImplementation(async(_url:any,options:any)=>{expect(options.signal.aborted).toBe(false);return new Response(png,{status:200,headers:{'content-type':'image/png'}});});
+    const originalDispatch=(runtime as any).sourceDispatch;(runtime as any).sourceDispatch=async(op:any,ready:any,group:any,charge:any)=>{if(charge==='media')await new Promise(r=>setTimeout(r,10100));return originalDispatch(op,ready,group,charge);};
+    await whole.prepareGeneration(input);await execute();await drain();expect(media).toHaveBeenCalledTimes(1);expect((await read()).state).toBe('partial');await assertUnknownPreserved();
+  },25000);
+  it('sends no media request when the task is cancelled while admission is waiting',async()=>{
+    const fullRefresh=subscriptions.refreshFull.bind(subscriptions);jest.spyOn(subscriptions,'refreshFull').mockImplementation(args=>fullRefresh({...args,basicOnly:false,reuseCompleteCache:false}));
+    const base=api.getMockImplementation()!;api.mockImplementation(async(req:any)=>{const result=await base(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/synthetic.png'}];return result;});
+    let enter!:()=>void,release!:()=>void;const queued=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>release=r);const originalDispatch=(runtime as any).sourceDispatch;
+    (runtime as any).sourceDispatch=async(op:any,ready:any,group:any,charge:any)=>{if(charge==='media'){enter();await gate;}return originalDispatch(op,ready,group,charge);};
+    await whole.prepareGeneration(input);await execute();await queued;try{await whole.cancel('job');}finally{release();}await drain();expect(media).not.toHaveBeenCalled();expect((await read()).state).toBe('cancelled');await assertUnknownPreserved();
+  },15000);
+  it('commits selected basic fields from one detail without media and leaves excluded unknown pending',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const response=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))response.body.data.items[0].note_card.image_list=[{url_default:'https://invalid.example/never-sent'}];return response;});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    const row=await db.xhsNote.findUnique({where:{id:safe}}),job=await read();
+    expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();expect(row?.publishTime).toBe(1760000000);expect(row?.contentHtml).toContain('Synthetic body safe');expect(row?.status).toBe('listed');
+    const metrics=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${safe}`;expect(JSON.parse(metrics[0].document).values).toMatchObject({likes:1,collects:2,shares:3,comments:4});
+    expect(job.state).toBe('partial');expect(job.generation.basicCompleted).toBe(true);expect(job.generation.missingIds).toContain(noteKey);await assertUnknownPreserved();
+  },15000);
+  it('resumes committed basic fields without replay after interruption',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), ids=[key('safe-a'),key('safe-b')];
+    for(const id of ids)await db.xhsNote.create({data:{id,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe-a','safe-b']);let stopped=false;const checkpoint=runtime.checkpointWholeSource.bind(runtime);
+    jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,at)=>{await checkpoint(tx,at);if(!stopped&&(runtime as any).wholeSourceGroup.getStore()?.phase==='detail'){stopped=true;live=false;}});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;const run=()=>whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:ids});
+    await run();await drain();expect(requestedDetails()).toEqual(['safe-a']);expect((await read()).state).toBe('paused');
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();live=true;await run();await drain();
+    expect(requestedDetails()).toEqual(['safe-a','safe-b']);expect(media).not.toHaveBeenCalled();expect((await read()).generation.basicCompleted).toBe(true);await assertUnknownPreserved();
+  },20000);
+  it('excludes a newly unknown detail and carries earlier basic receipts without replay',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), a=key('safe-a'), b=key('safe-b');
+    for(const id of [a,b])await db.xhsNote.create({data:{id,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe-a','safe-b']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const response=await normal(req);if(new URL(req.url).pathname.endsWith('/feed')&&JSON.parse(req.body).source_note_id==='safe-b')response.body.data.items=[];return response;});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[a,b]});await drain();
+    expect(requestedDetails()).toEqual(['safe-a','safe-b']);const failed=await read();expect(failed.generation.activeFence?.noteId).toBe('safe-b');
+    await expect(whole.reviewGeneration({jobId:'job',generationId:id,confirmUnknown:true})).rejects.toThrow();
+    await whole.reviewGeneration({jobId:'job',generationId:id,confirmUnknown:true,excludeUnknown:true});const reviewed=await read();
+    expect(reviewed.generation.selectedIds).toEqual([a]);expect(reviewed.generation.reviews.at(-1).decision).toBe('exclude');expect(reviewed.generation.carriedBasicResults[a]).toBe('complete');
+    expect(await db.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`).toHaveLength(2);
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[a]});await drain();
+    expect(requestedDetails()).toEqual(['safe-a','safe-b']);expect((await read()).generation.missingIds).toEqual(expect.arrayContaining([noteKey,b]));await assertUnknownPreserved();
+  },20000);
+  it('excludes an unknown note from an older media child before starting basic collection',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), a=key('safe-a'), b=key('safe-b');
+    for(const id of [a,b])await db.xhsNote.create({data:{id,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe-a','safe-b']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const response=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))response.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/synthetic.png'}];return response;});
+    const {XhsMediaError}=require('./xhs-media-error');media.mockImplementation(async()=>{throw new XhsMediaError('XHS_MEDIA_REQUEST_REJECTED');});
+    const refresh=subscriptions.refreshFull.bind(subscriptions);const oldMode=jest.spyOn(subscriptions,'refreshFull').mockImplementation(args=>refresh({...args,basicOnly:false}));
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[a,b]});await drain();
+    const paused=await read();expect(paused.generation.activeFence?.noteId).toBe('safe-a');expect(requestedDetails()).toEqual(['safe-a']);oldMode.mockRestore();
+    await whole.reviewGeneration({jobId:'job',generationId:id,confirmUnknown:true,excludeUnknown:true});
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[b]});await drain();
+    expect(requestedDetails()).toEqual(['safe-a','safe-b']);expect(media).toHaveBeenCalledTimes(1);expect((await db.xhsNote.findUnique({where:{id:b}}))?.contentHtml).toContain('Synthetic body safe-b');await assertUnknownPreserved();
+  },20000);
+  it('collects a synthetic 21-note basic range while excluding two unknown notes',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), safe=Array.from({length:21},(_,i)=>'safe-'+String(i).padStart(2,'0'));
+    for(const name of ['second-unknown',...safe])await db.xhsNote.create({data:{id:key(name),creatorId:'creator',title:name,publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','second-unknown',...safe]);await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,detail:30}});const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:safe.map(key)});await drain();
+    expect(requestedDetails()).toEqual(safe);expect(media).not.toHaveBeenCalled();const job=await read();expect(job.state).toBe('partial');expect(job.generation.missingIds).toEqual(expect.arrayContaining([noteKey,key('second-unknown')]));
+    const notes=await db.xhsNote.findMany({where:{id:{in:safe.map(key)}}});expect(notes).toHaveLength(21);expect(notes.every(n=>n.publishTime===1760000000&&!!n.contentHtml&&n.status==='listed')).toBe(true);
+    expect(await db.xhsMetricSnapshot.count({where:{ownerKind:'note',ownerId:{in:safe.map(key)}}})).toBe(21);await assertUnknownPreserved();
+  },40000);
   it('never dispatches a historical unknown note when a narrowed recovery is explicitly selected',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'safe',publishTime:0,kind:'image-text',status:'listed'}});
@@ -516,6 +590,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]);
     const cached=key('a-cached'), first=key('b-first'), second=key('c-second');
     for(const id of [cached,first,second]) await db.xhsNote.create({data:{id,creatorId:'creator',title:id,publishTime:id===cached?100:0,kind:'image-text',status:id===cached?'complete':'listed',contentHtml:id===cached?'<div id="js_content"><p>Verified cached body</p></div>':null}});
+    await db.xhsMetricSnapshot.create({data:{ownerKind:'note',ownerId:cached,document:JSON.stringify({values:{likes:1,collects:1,shares:1,comments:1},collectedAt:Date.now(),contract:'synthetic',evidence:'source-only'})}});
     directory(['note','a-cached','b-first','c-second']);let stopped=false;
     const checkpoint=runtime.checkpointWholeSource.bind(runtime);
     jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,at)=>{await checkpoint(tx,at);if(!stopped && (runtime as any).wholeSourceGroup.getStore()?.phase==='detail'){stopped=true;live=false;}});
@@ -540,7 +615,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();
     await expect(run()).rejects.toThrow();expect(requestedDetails()).toEqual(['safe']);expect(await currentBudget()).toEqual(budget);await assertUnknownPreserved();
   },15000);
-  it('replaces an old completed directory-only child after local failure and caches every returned body and image',async()=>{
+  it('replaces an old completed directory-only child and saves all returned basic fields',async()=>{
     const ids=['note',...Array.from({length:22},(_,i)=>`old-${i}`)];
     const keys=ids.map(id=>JSON.stringify(['xiaohongshu','note',id]));
     for(const [index,id] of ids.entries()) if(index) await db.xhsNote.create({data:{id:keys[index],creatorId:'creator',title:id,publishTime:0,kind:'image-text',status:'listed'}});
@@ -558,11 +633,11 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await execute(generationId);await drain();const paused=await read();
     expect(paused.state).toBe('paused');expect(paused.generation.localFailure).toMatchObject({stage:'list-task'});expect(requestedDetails()).toEqual([]);
     await execute(generationId);await drain();const done=await read();
-    expect(done.state).toBe('completed');expect(done.listTask).not.toBe('old-list');expect(done.generation.directoryIds).toHaveLength(23);
-    expect(new Set(requestedDetails()).size).toBe(23);expect(requestedDetails()).toHaveLength(23);expect(media).toHaveBeenCalledTimes(1);
-    const notes=await db.xhsNote.findMany({where:{creatorId:'creator'}});expect(notes).toHaveLength(23);expect(notes.every(n=>n.status==='complete'&&n.contentHtml&&n.publishTime>0)).toBe(true);
-    expect(notes.find(n=>n.id===noteKey)?.contentHtml).toContain('data:image/png;base64,');
-    const priorCount=api.mock.calls.length;await expect(execute(generationId)).rejects.toThrow();expect(api).toHaveBeenCalledTimes(priorCount);
+    expect(done.state).toBe('partial');expect(done.listTask).not.toBe('old-list');expect(done.generation.directoryIds).toHaveLength(23);
+    expect(new Set(requestedDetails()).size).toBe(23);expect(requestedDetails()).toHaveLength(23);expect(media).not.toHaveBeenCalled();
+    const notes=await db.xhsNote.findMany({where:{creatorId:'creator'}});expect(notes).toHaveLength(23);expect(notes.every(n=>n.status==='listed'&&n.contentHtml&&n.publishTime>0)).toBe(true);
+    expect(notes.find(n=>n.id===noteKey)?.contentHtml).toContain('Synthetic body');
+    const priorCount=api.mock.calls.length;await execute(generationId);await drain();expect(api).toHaveBeenCalledTimes(priorCount);
     await assertUnknownPreserved();
   },40000);
   it('rebuilds directory membership on continuation and avoids repeating a completed detail',async()=>{
@@ -592,7 +667,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const job=await read();job.archiveTask='old-archive';job.downloadTask='old-download';
     await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id='job'`;
     const pick=jest.fn(async()=>{throw Error('unexpected picker');}),save=jest.fn(async()=>{throw Error('unexpected export');});subscriptions.bindLocalSaver(pick,save);
-    await whole.prepareGeneration(input);await execute();await drain();expect((await read()).state).toBe('completed');
+    await whole.prepareGeneration(input);await execute();await drain();expect((await read()).state).toBe('partial');
     for(const [taskId,raw] of originals) expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`)[0].document).toBe(raw);
     expect(pick).not.toHaveBeenCalled();expect(save).not.toHaveBeenCalled();await assertUnknownPreserved();
   });
@@ -613,12 +688,12 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     jest.spyOn(subscriptions,'refreshFull').mockImplementation(async args=>{count++;entered();await gate;return refresh(args);});
     const first=execute(id);await started;
     try {await expect(execute(id)).rejects.toThrow();} finally {release();}
-    await first;await drain();expect((await read()).state).toBe('completed');expect(count).toBe(1);await assertUnknownPreserved();
+    await first;await drain();expect((await read()).state).toBe('partial');expect(count).toBe(1);await assertUnknownPreserved();
   });
   it('continues without local directory authorization or export',async()=>{
     await whole.prepareGeneration(input);const job=await read();const pick=jest.fn(async()=>{throw Error('unexpected picker');});
     const save=jest.fn(async()=>{throw Error('unexpected export');});subscriptions.bindLocalSaver(pick,save);
-    await execute(job.generation.id);await drain();expect((await read()).state).toBe('completed');expect(pick).not.toHaveBeenCalled();expect(save).not.toHaveBeenCalled();await assertUnknownPreserved();
+    await execute(job.generation.id);await drain();expect((await read()).state).toBe('partial');expect(pick).not.toHaveBeenCalled();expect(save).not.toHaveBeenCalled();await assertUnknownPreserved();
   });
   it('does not leave a dispatched child when cancellation wins child checkpoint',async()=>{
     await whole.prepareGeneration(input);const job=await read();let release!:()=>void,entered!:()=>void;

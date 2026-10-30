@@ -19,6 +19,7 @@ import {
   XhsNormalizedCandidate,
   xhsArchiveDraft,
 } from './xiaohongshu-contract';
+import type { mapRedbookBasicDetail } from './redbook-response';
 import { verifiedDownloadBody } from '../article-verified-download';
 import { prepareXhsVideoDownload, inspectCachedMp4 } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
@@ -77,6 +78,7 @@ export interface XhsSubscriptionSource {
     notes: XhsListedNote[];
     nextCursor: string | null;
   }>;
+  basicDetail?(authorId: string, noteId: string, signal?: AbortSignal): Promise<ReturnType<typeof mapRedbookBasicDetail>>;
   detail(
     authorId: string,
     noteId: string,
@@ -96,6 +98,8 @@ type Task = XhsSubscriptionTask & {
   collectionScope?: 'recent' | 'all' | 'selected';
   selectedIds?: string[];
   selectionComplete?: boolean;
+  basicOnly?: boolean;
+  basicResults?: Record<string, 'complete' | 'missing'>;
   reuseCompleteCache?: boolean;
   collectionStage?: 'listing' | 'details';
   cacheResults?: Record<string, 'completed'>;
@@ -529,7 +533,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     // The creator is already committed; a failed enqueue is reported explicitly
     // rather than implying that the subscription transaction was rolled back.
     try {
-      const collection = await this.refreshFull({ id: subscribed.creatorId }, startAfter);
+      const collection = await this.refreshFull({ id: subscribed.creatorId, scope: 'all', basicOnly: true, reuseCompleteCache: true }, startAfter);
       return { ...subscribed, collection };
     } catch (error) {
       return { ...subscribed, collectionError: xhsPublicCode(error, 'XHS_TASK_BLOCKED') };
@@ -559,7 +563,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       input.maxPages,
     );
   }
-  async refreshFull(input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[]; reuseCompleteCache?: boolean }, startAfter?: Promise<boolean>) {
+  async refreshFull(input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[]; reuseCompleteCache?: boolean; basicOnly?: boolean; carriedBasicResults?: Record<string,'complete'|'missing'> }, startAfter?: Promise<boolean>) {
     await this.creator(input.id);
     const scope = input.scope ?? 'recent';
     if (!['recent', 'all', 'selected'].includes(scope)) return reject('XHS_SELECTION_INVALID');
@@ -574,8 +578,9 @@ export class XhsSubscriptionService implements OnModuleInit {
           return reject('XHS_SELECTION_INVALID');
       }
     }
-    if (input.reuseCompleteCache && scope !== 'selected') return reject('XHS_SELECTION_INVALID');
-    return this.enqueue('list', input.id, [], undefined, undefined, undefined, true, scope, ids, startAfter, input.reuseCompleteCache);
+    if (input.carriedBasicResults && (scope !== 'selected' || !input.basicOnly || Object.entries(input.carriedBasicResults).some(([id,state]) => !ids.includes(id) || !['complete','missing'].includes(state)))) return reject('XHS_SELECTION_INVALID');
+    if (input.reuseCompleteCache && scope !== 'selected' && !input.basicOnly) return reject('XHS_SELECTION_INVALID');
+    return this.enqueue('list', input.id, [], undefined, undefined, undefined, true, scope, ids, startAfter, input.reuseCompleteCache, input.basicOnly, input.carriedBasicResults);
   }
   async downloadNotes(input: {
     creatorId: string;
@@ -690,6 +695,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     selectedIds?: string[],
     startAfter?: Promise<boolean>,
     reuseCompleteCache?: boolean,
+    basicOnly?: boolean,
+    carriedBasicResults?: Record<string,'complete'|'missing'>,
   ) {
     await this.readyForMutation();
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
@@ -708,6 +715,9 @@ export class XhsSubscriptionService implements OnModuleInit {
       collectionScope: collectionScope ?? checkpoint?.collectionScope,
       selectedIds: selectedIds ?? checkpoint?.selectedIds,
       reuseCompleteCache: reuseCompleteCache ?? checkpoint?.reuseCompleteCache,
+      basicOnly: basicOnly ?? checkpoint?.basicOnly,
+      basicResults: carriedBasicResults ?? checkpoint?.basicResults,
+      cacheResults: carriedBasicResults ? Object.fromEntries(Object.keys(carriedBasicResults).map(id=>[id,'completed' as const])) : checkpoint?.cacheResults,
       collectionStage: checkpoint?.collectionStage ?? (collectDetails ? 'listing' : undefined),
       taskId: randomUUID(),
       creatorId,
@@ -769,12 +779,13 @@ export class XhsSubscriptionService implements OnModuleInit {
       this.uncertain.get(input.taskId) ?? (await this.loadTask(input.taskId));
     return this.view(t);
   }
-  async matchesSelectedTask(input: {taskId: string; creatorId: string; noteIds: string[]}) {
+  async isBasicTask(input: {taskId: string; creatorId: string}) { const t = await this.loadTask(input.taskId); return t.creatorId === input.creatorId && t.collectDetails === true && t.basicOnly === true; }
+  async matchesSelectedTask(input: {taskId: string; creatorId: string; noteIds: string[]; basicOnly?: boolean}) {
     const task = await this.loadTask(input.taskId);
-    return task.creatorId === input.creatorId && task.collectDetails === true && task.reuseCompleteCache === true && task.collectionScope === 'selected' &&
+    return task.creatorId === input.creatorId && task.collectDetails === true && task.reuseCompleteCache === true && (input.basicOnly === undefined || task.basicOnly === input.basicOnly) && task.collectionScope === 'selected' &&
       Array.isArray(task.selectedIds) && JSON.stringify([...task.selectedIds].sort()) === JSON.stringify([...input.noteIds].sort());
   }
-  async confirmedSelection(input: {taskId: string; creatorId: string; noteIds: string[]}) {
+  async confirmedSelection(input: {taskId: string; creatorId: string; noteIds: string[]; basicOnly?: boolean}) {
     await this.reconcile(input.taskId);
     if (this.uncertain.has(input.taskId) || !(await this.matchesSelectedTask(input))) return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     const task = await this.loadTask(input.taskId);
@@ -851,6 +862,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       kind: t.kind,
       collectionStage: t.collectionStage,
       collectionScope: t.collectionScope,
+      collectionMode: t.collectDetails ? (t.basicOnly ? 'basic' : 'full') : undefined,
       state,
       total: t.total,
       completed: t.completed,
@@ -1050,6 +1062,47 @@ export class XhsSubscriptionService implements OnModuleInit {
               where: { id, creatorId: creator.id },
             });
             if (!old) return reject('XHS_SELECTION_CHANGED');
+            if (t.basicOnly && t.reuseCompleteCache && old.status === 'complete' && old.publishTime > 0 && old.contentHtml) {
+              let reusable = false;
+              try {
+                if (old.contentHtml.includes('data-wewe-image-pending')) throw Error('incomplete');
+                verifiedDownloadBody(old.contentHtml);
+                if (old.kind === 'video') {
+                  if (!old.videoBytes || old.videoMimeType !== 'video/mp4' || !old.videoSha256 || !old.videoExpectedBytes) throw Error('incomplete');
+                  const video = inspectCachedMp4(Buffer.from(old.videoBytes));
+                  if (video.sha256 !== old.videoSha256 || video.bytes !== old.videoExpectedBytes) throw Error('incomplete');
+                } else if (old.kind !== 'image-text') throw Error('incomplete');
+                const snapshots=await this.db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${id}`;
+                const snapshot=snapshots.length === 1 ? JSON.parse(snapshots[0].document) : null;
+                reusable = Number.isSafeInteger(snapshot?.collectedAt) && snapshot.collectedAt > 0 && typeof snapshot.contract === 'string' && !!snapshot.contract && ['source-only','verified-response'].includes(snapshot.evidence) && ['likes','collects','shares','comments'].every(k => Number.isSafeInteger(snapshot.values?.[k]) && snapshot.values[k] >= 0);
+              } catch { /* incomplete evidence must be refreshed */ }
+              if (reusable) {t.basicResults={...t.basicResults,[id]:'complete'};t.items[id]='completed';t.completed++;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
+            }
+            if (t.basicOnly && t.collectDetails) {
+              if (!this.source?.basicDetail) return reject('XHS_SOURCE_UNCONFIGURED');
+              const tuple = JSON.parse(id);
+              if (!Array.isArray(tuple) || tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note' || typeof tuple[2] !== 'string') return reject('XHS_NOTE_ID_INVALID');
+              await this.withSourceCheckpoint('detail', creator.externalAuthorId!, tuple[2], async () => {
+                const note = await this.source!.basicDetail!(creator.externalAuthorId!, tuple[2], this.controllers.get(t.taskId)?.signal);
+                if (!active(t)) return;
+                if (note.noteId !== tuple[2] || note.authorId !== creator.externalAuthorId || (old.kind && old.kind !== note.kind)) return reject('XHS_DETAIL_INCOMPLETE');
+                const basicResult: 'complete' | 'missing' = note.publishedAt !== null && ['likes','collects','shares','comments'].every(k => Number.isSafeInteger(note.metrics.values[k]) && (note.metrics.values[k] as number) >= 0) ? 'complete' : 'missing';
+                const html = note.text?.trim() ? verifiedDownloadBody('<div id="js_content">' + note.text.split('\n').map(p => '<p>' + esc(p) + '</p>').join('') + '</div>') : undefined;
+                await this.write(Buffer.byteLength(html ?? '') + 8192, async tx => {
+                  const currentCreator = await tx.xhsCreator.findUnique({where:{id:creator.id}});
+                  if (!currentCreator?.enabled || currentCreator.externalAuthorId !== creator.externalAuthorId) return reject('XHS_SUBSCRIPTION_CHANGED');
+                  const current = await tx.xhsNote.findFirst({where:{id,creatorId:creator.id}});
+                  if (!current || !active(t)) return reject('XHS_TASK_CANCELLED');
+                  await tx.xhsNote.update({where:{id},data:{...(note.title !== null ? {title:note.title} : {}),...(note.publishedAt !== null ? {publishTime:note.publishedAt} : {}),...(!current.contentHtml && html ? {contentHtml:html} : {})}});
+                  await saveXhsMetrics(tx,'note',id,note.metrics);
+                  await this.persistIn(tx,{...t,basicResults:{...t.basicResults,[id]:basicResult},items:{...t.items,[id]:'completed'},completed:t.completed+1,remaining:t.total-t.completed-1-t.skipped-t.failed});
+                  await this.source?.checkpointWholeSource?.(tx);
+                });
+                t.basicResults={...t.basicResults,[id]:basicResult};t.items[id]='completed';t.completed++;t.remaining=t.total-t.completed-t.skipped-t.failed;
+              });
+              await this.persist(t);
+              continue;
+            }
             if (t.reuseCompleteCache && t.collectionScope === 'selected' && old.status === 'complete' && old.publishTime > 0 && old.contentHtml) {
               let cacheValid = false;
               try {
@@ -1257,6 +1310,7 @@ export class XhsSubscriptionService implements OnModuleInit {
         t.state = t.failed || t.remaining ? 'partial' : 'completed';
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
+        if (t.basicOnly && t.state === 'completed') t.message = '基础信息处理完成；缺失字段仍为未知，媒体待补。';
         if (t.kind === 'download' && (t.localFilesSaved || t.localFilesReused))
           t.message += ` 已写入 ${t.localFilesSaved ?? 0} 篇本地文件，复用 ${t.localFilesReused ?? 0} 篇已有本地文件；已有正文和手工修改保留。`;
         if (t.snapshotsSaved)

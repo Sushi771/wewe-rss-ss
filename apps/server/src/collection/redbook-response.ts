@@ -147,7 +147,7 @@ async function downloadMedia(
       headers: Object.freeze({
         accept: 'image/png,image/jpeg,image/gif,image/webp',
       }),
-      signal: AbortSignal.timeout(10_000),
+      signal: new AbortController().signal,
     });
   } catch (error) {
     // Transport errors can contain signed URLs or secrets: return a fixed code.
@@ -191,6 +191,23 @@ async function downloadMedia(
   // Existing archive validator checks actual container bytes, including MIME.
   try { decodeInlineImage(inlineData); } catch { throw new XhsMediaError('XHS_MEDIA_BYTES_INVALID'); }
   return { inlineData, byteLength: length };
+}
+
+/** Identity-bound, media-independent projection of one already returned detail. */
+export function mapRedbookBasicDetail(raw: unknown, expectedAuthorId: string, expectedNoteId: string) {
+  const authorId = identifier(expectedAuthorId), noteId = identifier(expectedNoteId);
+  const detail = record(raw);
+  if (!Array.isArray(detail.items) || detail.items.length !== 1) throw new Error('REDBOOK_SCHEMA_REJECTED');
+  const item = record(detail.items[0]), card = record(item.note_card);
+  if (identifier(item.id) !== noteId || identifier(card.note_id) !== noteId) throw new Error('REDBOOK_NOTE_MISMATCH');
+  if (identifier(record(card.user).user_id) !== authorId) throw new Error('REDBOOK_AUTHOR_MISMATCH');
+  if (card.type !== 'normal' && card.type !== 'video') throw new Error('REDBOOK_NOTE_KIND_REJECTED');
+  const timestamp = card.time;
+  const publishedAt = Number.isSafeInteger(timestamp) && (timestamp as number) >= 1356998400000 && (timestamp as number) <= Date.now() + 5 * 60_000
+    ? Math.floor((timestamp as number) / 1000) : null;
+  const title = typeof card.title === 'string' && card.title.length <= 500 ? card.title : null;
+  const text = typeof card.desc === 'string' && card.desc.length <= 1_000_000 ? card.desc : null;
+  return {authorId,noteId,kind:card.type === 'video' ? 'video' as const : 'image-text' as const,publishedAt,title,text,metrics:xhsNoteMetrics(card)};
 }
 
 export function inspectRedbookDetail(
@@ -270,7 +287,7 @@ export async function mapRedbookDetail(
     // One explicit source variant; never synthesize or try alternate URLs.
     const url = videoUrl!;
     let response: Response;
-    try { response = await transport(url, { redirect: 'manual', credentials: 'omit', headers: Object.freeze({ accept: 'video/mp4' }), signal: AbortSignal.timeout(10_000) }); }
+    try { response = await transport(url, { redirect: 'manual', credentials: 'omit', headers: Object.freeze({ accept: 'video/mp4' }), signal: new AbortController().signal }); }
     catch (e) { if (e instanceof XhsMediaError || e instanceof XhsSubscriptionError || e instanceof RedbookPauseError) throw e; throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED'); }
     if (response.status !== 200) { await response.body?.cancel(); throw mediaHttpError(response.status); }
     const length = response.headers.get('content-length'), mime = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();

@@ -2014,7 +2014,8 @@ export default function Xiaohongshu() {
                   className="xhs-note-status"
                   title={noteArchiveStatus(note)}
                 >
-                  {note.status === 'complete' ? '已归档' : '仅目录'}
+                  {{ pending: '尚未尝试', complete: '基础数据已取得', missing: '来源缺字段', skipped: '已跳过', needs_review: '需核对' }[note.basicStatus] ?? '尚未尝试'}
+                  {' · '}{note.status === 'complete' ? '已归档' : '媒体未归档'}
                 </span>
               </div>
             ))}

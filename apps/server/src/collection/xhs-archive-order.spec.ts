@@ -110,6 +110,13 @@ describe('complete archive before interaction, independent query (synthetic only
       },
     });
   }
+  it('distinguishes unattempted, missing, complete, excluded and uncertain basic results',async()=>{
+    for(const id of ['a','b','c','d','e'])await seed(id);
+    const task={taskId:'basic-test',creatorId:'creator',basicOnly:true,collectionScope:'selected',selectedIds:['a','b','c','d'].map(key),items:{[key('a')]:'completed',[key('b')]:'completed',[key('c')]:'failed'},basicResults:{[key('a')]:'complete',[key('b')]:'missing'}};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('basic-test','creator','partial',${JSON.stringify(task)},1)`;
+    const result=await new XiaohongshuService(db as any).notes('creator');const states=Object.fromEntries(result.items.map(n=>[n.id,n.basicStatus]));
+    expect(states).toEqual({[key('a')]:'complete',[key('b')]:'missing',[key('c')]:'needs_review',[key('d')]:'pending',[key('e')]:'skipped'});
+  });
   it('keeps directory-only entries normal and engagement independent across archive/metrics four combinations', async () => {
     for (const id of ['a', 'b', 'c', 'd', 'e'])
       await seed(id, ['a', 'b'].includes(id));

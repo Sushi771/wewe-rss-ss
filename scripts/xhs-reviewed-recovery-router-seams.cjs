@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const cacheRoutes = require('./fixtures/xhs-cache-router-seams.json');
 const reviewed = {
-  reviewWholeCreatorGeneration: '6a00210d437bbad3dad74131eac7382b3a3f4a152d4834b4a0f81a7904c93479',
+  reviewWholeCreatorGeneration: 'cfb034a14b0d09b8aa23cb46fb319fff9053e19c365c3ecaa9090cd457f086c9',
   prepareWholeCreatorGeneration: 'a6479de8618ec55f3a68fcc8cfe2b2874328aede67741113eb2ce0b5443dfcda',
   executeWholeCreatorGeneration: 'fe873f68bbeaf0e25feb61973c9e8becd7508337969f04cc81f345768784950b',
   prepareWholeCreatorReviewedAttempt: '32944638bc18f0be29aae435cec3821e17c65f77559c7c0ec17c7309dd04ebae',

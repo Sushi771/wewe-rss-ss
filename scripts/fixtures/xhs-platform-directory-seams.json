@@ -87,6 +87,14 @@
     {
       "before": "          article,\n          '[原文](' + sourceUrl + ')',\n          directory,\n        );\n        await fs.appendFile(\n          path.join(directory, 'index.md'),\n",
       "after": "          article,\n          '[原文](' + sourceUrl + ')',\n          directory,\n          false,\n          true,\n        );\n        await fs.appendFile(\n          path.join(directory, 'index.md'),\n"
+    },
+    {
+      "before": "    const notes = await this.matchingNotes(creatorId, filter);\n    const queryVersion = this.noteQueryVersion(notes);\n",
+      "after": "    const notes = await this.matchingNotes(creatorId, filter);\n    const creatorIds = [...new Set(notes.map(n => n.creatorId))];\n    const tasks: Array<{creator_id:string;document:string}> = [];\n    for (let offset=0;offset<creatorIds.length;offset+=500) {\n      const batch=creatorIds.slice(offset,offset+500);\n      tasks.push(...await this.prisma.$queryRaw<Array<{creator_id:string;document:string}>>`\n        SELECT creator_id,document FROM (\n          SELECT creator_id,document,ROW_NUMBER() OVER (PARTITION BY creator_id ORDER BY updated_at DESC,id DESC) AS rn\n          FROM xhs_subscription_tasks WHERE creator_id IN (${Prisma.join(batch)}) AND json_extract(document,'$.basicOnly')=1\n        ) WHERE rn=1`);\n    }\n    const latest = new Map(tasks.map(row => [row.creator_id, JSON.parse(row.document)]));\n    const stateOf = (note: typeof notes[number]) => {\n      const task = latest.get(note.creatorId);\n      if (task?.collectionScope === 'selected' && Array.isArray(task.selectedIds) && !task.selectedIds.includes(note.id)) return 'skipped' as const;\n      if (task?.items?.[note.id] === 'failed') return 'needs_review' as const;\n      if (task?.items?.[note.id] !== 'completed') return 'pending' as const;\n      if (task.basicResults?.[note.id] === 'complete') return 'complete' as const;\n      if (task.basicResults?.[note.id] === 'missing') return 'missing' as const;\n      return 'pending' as const;\n    };\n    const queryVersion = createHash('sha256').update(JSON.stringify([this.noteQueryVersion(notes), notes.map(n => [n.id,stateOf(n)])])).digest('hex');\n"
+    },
+    {
+      "before": "",
+      "after": "          basicStatus: stateOf(note),\n"
     }
   ]
 }

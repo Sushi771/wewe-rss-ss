@@ -465,7 +465,7 @@ export class XhsSubscriptionRuntime
           (() => {
             this.observeSourceStage('transport');
             this.requestAttempts.media++;
-            return media(url, { ...request, signal: signal(request.signal) });
+            return media(url, { ...request, signal: AbortSignal.any([signal(request.signal), AbortSignal.timeout(10_000)]) });
           })(),
         'media'),
     );
@@ -1056,6 +1056,10 @@ export class XhsSubscriptionRuntime
       await this.restoreContext(authorId, undefined, signal);
       return this.adapter.list(authorId, cursor, signal);
     });
+  }
+  basicDetail(authorId: string, noteId: string, signal?: AbortSignal) {
+    this.checkWholeAuthor(authorId, noteId);
+    return this.withSession(() => this.restoreContext(authorId, noteId, signal).then(() => this.adapter.basicDetail(authorId, noteId, signal)));
   }
   detail(authorId: string, noteId: string, signal?: AbortSignal) {
     this.checkWholeAuthor(authorId, noteId);

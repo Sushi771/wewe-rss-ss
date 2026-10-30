@@ -592,7 +592,27 @@ export class XiaohongshuService {
   }
   async notes(creatorId?: string, filter?: XhsNoteFilter) {
     const notes = await this.matchingNotes(creatorId, filter);
-    const queryVersion = this.noteQueryVersion(notes);
+    const creatorIds = [...new Set(notes.map(n => n.creatorId))];
+    const tasks: Array<{creator_id:string;document:string}> = [];
+    for (let offset=0;offset<creatorIds.length;offset+=500) {
+      const batch=creatorIds.slice(offset,offset+500);
+      tasks.push(...await this.prisma.$queryRaw<Array<{creator_id:string;document:string}>>`
+        SELECT creator_id,document FROM (
+          SELECT creator_id,document,ROW_NUMBER() OVER (PARTITION BY creator_id ORDER BY updated_at DESC,id DESC) AS rn
+          FROM xhs_subscription_tasks WHERE creator_id IN (${Prisma.join(batch)}) AND json_extract(document,'$.basicOnly')=1
+        ) WHERE rn=1`);
+    }
+    const latest = new Map(tasks.map(row => [row.creator_id, JSON.parse(row.document)]));
+    const stateOf = (note: typeof notes[number]) => {
+      const task = latest.get(note.creatorId);
+      if (task?.collectionScope === 'selected' && Array.isArray(task.selectedIds) && !task.selectedIds.includes(note.id)) return 'skipped' as const;
+      if (task?.items?.[note.id] === 'failed') return 'needs_review' as const;
+      if (task?.items?.[note.id] !== 'completed') return 'pending' as const;
+      if (task.basicResults?.[note.id] === 'complete') return 'complete' as const;
+      if (task.basicResults?.[note.id] === 'missing') return 'missing' as const;
+      return 'pending' as const;
+    };
+    const queryVersion = createHash('sha256').update(JSON.stringify([this.noteQueryVersion(notes), notes.map(n => [n.id,stateOf(n)])])).digest('hex');
     if (
       (filter?.offset && !filter.queryVersion) ||
       (filter?.queryVersion && filter.queryVersion !== queryVersion)
@@ -623,6 +643,7 @@ export class XiaohongshuService {
               : ('image-text' as const),
           video: cachedVideoMetadata(note),
           metrics: note.metrics,
+          basicStatus: stateOf(note),
         })),
     };
   }

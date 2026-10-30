@@ -2020,7 +2020,7 @@ export class TrpcRouter {
         return this.xhsEngagement!.collect(input);
       }),
     reviewWholeCreatorGeneration: this.trpcService.protectedProcedure
-      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true)}).strict())
+      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true),excludeUnknown:z.literal(true).optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.reviewGeneration(input));}),
     prepareWholeCreatorGeneration: this.trpcService.protectedProcedure
       .input(z.object({ jobId:z.string().min(1).max(128), profileUrl:z.string().min(1).max(8192), confirmUnknown:z.literal(true),
@@ -2148,7 +2148,7 @@ export class TrpcRouter {
       .input(z.object({ id: z.string().min(1).max(128), scope: z.enum(['recent','all','selected']).optional(), noteIds: z.array(z.string().min(1).max(300)).min(1).max(1000).optional() }).strict())
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
-        return this.xhsSubscriptions!.refreshFull(input);
+        return this.xhsSubscriptions!.refreshFull({ ...input, scope: input.scope === 'selected' ? 'selected' : 'all', basicOnly: true, reuseCompleteCache: true });
       }),
     refresh: this.trpcService.protectedProcedure
       .input(

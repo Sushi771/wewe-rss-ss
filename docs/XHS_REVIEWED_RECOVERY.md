@@ -33,3 +33,9 @@ Only a positively completed directory determines the current returned membership
 
 Offline regressions: `xhs-whole-generation.spec.ts`, `xhs-whole-generation-flow.spec.ts`, and the generation interaction cases in `scripts/xhs-whole-creator-ui.test.cjs`. Real account/session/platform behavior and full accessible coverage still require the installed application test; synthetic success is not that acceptance.
 
+
+## Scoped basic-data continuation
+
+A selected recovery can explicitly exclude a newly uncertain detail from its remaining scope. The original and new unknown markers remain intact; no uncertain detail is retried. Durable successful basic-field receipts for the remaining selection are carried into the replacement task. The basic phase stores verified publication time, available metric values and text before any media operation; missing values remain unknown, and the task does not claim a complete media archive. A source restriction or an uncertain request still stops the run.
+
+Media transport deadlines start only after admission and rate-limit waiting; cancellation remains effective while queued. URL rejection, cancellation and timeout use fixed codes without retaining signed URLs. This change does not establish the cause of any particular previous failure.

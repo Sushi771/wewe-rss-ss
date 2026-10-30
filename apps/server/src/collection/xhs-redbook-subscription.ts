@@ -6,6 +6,7 @@ import type { XhsOriginalLinkResult } from '@wewe-rss/shared';
 import { RedbookClient, RedbookUserPageOptions } from './redbook-client';
 import {
   mapRedbookDetail,
+  mapRedbookBasicDetail,
   mapRedbookPage,
   RedbookMediaTransport,
 } from './redbook-response';
@@ -346,6 +347,12 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
         code: 'XHS_ORIGINAL_LINK_CONTEXT_UNAVAILABLE',
       }
     );
+  }
+  async basicDetail(authorId: string, noteId: string, signal?: AbortSignal) {
+    const access = this.tokens.get(JSON.stringify([authorId, noteId]));
+    if (!access || access.expiresAt <= this.now()) throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
+    const raw = await this.client.getNoteById(noteId, access.token, access.source, signal);
+    return mapRedbookBasicDetail(raw, authorId, noteId);
   }
   async detail(authorId: string, noteId: string, signal?: AbortSignal) {
     const access = this.tokens.get(JSON.stringify([authorId, noteId]));

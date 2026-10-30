@@ -39,6 +39,7 @@ export type XhsSubscriptionTask = {
   kind: 'list' | 'download';
   collectionStage?: 'listing' | 'details';
   collectionScope?: 'recent' | 'all' | 'selected';
+  collectionMode?: 'basic' | 'full';
   state:
     | 'queued'
     | 'running'

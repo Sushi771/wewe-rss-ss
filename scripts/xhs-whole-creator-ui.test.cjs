@@ -297,3 +297,17 @@ test('whole generation shows missing separately and never promises full coverage
  assert.match(html,/目录已到末页/);assert.match(html,/本次返回 2 篇/);assert.match(html,/不认定为删除/);assert.match(html,/本次还有请求结果未确认/);
  assert.doesNotMatch(html,/100%|计费|收费|明确开始或继续/);
 });
+
+
+test('unknown detail exclusion requires an explicit choice and sends it only on review', async()=>{
+ const job={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:1,missing:0,directoryComplete:true,originalNoteStatus:'unknown',resumable:false,reviewable:true,excludeUnknownRequired:true}};
+ const h=recoveryInteraction(job,'XhsWholeGeneration'); let tree=h.draw();
+ assert.match(render(job,'XhsWholeGeneration'),/跳过结果未知的笔记/);
+ let boxes=h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox');
+ boxes.at(-1).props.onChange({target:{checked:true}});tree=h.draw();
+ assert.equal(h.nodes(tree,n=>n.type==='button')[0].props.disabled,true);
+ boxes=h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox'); boxes[0].props.onChange({target:{checked:true}});tree=h.draw();
+ boxes=h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox'); boxes.at(-1).props.onChange({target:{checked:true}});tree=h.draw();
+ h.nodes(tree,n=>n.type==='button')[0].props.onClick();await new Promise(setImmediate);
+ assert.deepEqual(h.calls,[{name:'reviewWholeCreatorGeneration',input:{jobId:'job',generationId:'g',confirmUnknown:true,excludeUnknown:true}}]);
+});

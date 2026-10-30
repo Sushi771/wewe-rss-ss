@@ -9,7 +9,7 @@ type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 type Budget = { id: string; used: number; request_limit: number; interval_ms: number };
 const phases = ['profile', 'list', 'detail', 'media', 'metrics'] as const;
 type Floors = { taskUsed: number; sharedUsed: number; phaseUsed: Record<(typeof phases)[number], number> };
-export type GenerationUnknownReview = { fence: any; reviewedAt: number; decision: 'request-retry'; budgetFloors: Floors; id: string };
+export type GenerationUnknownReview = { fence: any; reviewedAt: number; decision: 'request-retry' | 'exclude'; budgetFloors: Floors; id: string };
 const bad = (): never => { throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); };
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const clone = (value: any) => JSON.parse(JSON.stringify(value));
@@ -53,7 +53,8 @@ export function generationReviewMarkers(job: any): string[] {
   const markers: string[] = [];
   for (const r of g.reviews as GenerationUnknownReview[]) {
     const floor = r?.budgetFloors;
-    if (!r || Object.keys(r).length !== 5 || r.decision !== 'request-retry' || !fenceValid(r.fence) ||
+    if (!r || Object.keys(r).length !== 5 || !['request-retry','exclude'].includes(r.decision) || !fenceValid(r.fence) ||
+        (r.decision === 'exclude' && (r.fence.phase !== 'detail' || !Array.isArray(g.selectedIds) || g.selectedIds.includes(JSON.stringify(['xiaohongshu','note',r.fence.noteId])))) ||
         (r.fence.receipt !== undefined && !receiptBound(job, r.fence)) || seen.has(r.fence.marker) ||
         !Number.isSafeInteger(r.reviewedAt) || r.reviewedAt < reviewedAt || r.id !== hash(reviewIdentity(g.id, r)) || !floor ||
         Object.keys(floor).length !== 3 || !Number.isSafeInteger(floor.taskUsed) || floor.taskUsed < taskFloor ||
@@ -74,8 +75,8 @@ function settledReceipt(job: any, fence: any): boolean {
 }
 
 /** Explicit review only: preserve all unknown facts and marker rows, without dispatch or refunds. */
-export async function reviewGenerationUnknown(tx: Tx, input: { jobId: string; generationId: string; confirmUnknown: true }, now = Date.now()) {
-  if (!input || Object.keys(input).length !== 3 || typeof input.jobId !== 'string' || !input.jobId || input.jobId.length > 128 ||
+export async function reviewGenerationUnknown(tx: Tx, input: { jobId: string; generationId: string; confirmUnknown: true; excludeUnknown?: true }, now = Date.now()) {
+  if (!input || Object.keys(input).some(k=>!['jobId','generationId','confirmUnknown','excludeUnknown'].includes(k)) || (input.excludeUnknown !== undefined && input.excludeUnknown !== true) || typeof input.jobId !== 'string' || !input.jobId || input.jobId.length > 128 ||
       typeof input.generationId !== 'string' || !/^[a-f0-9-]{36}$/.test(input.generationId) ||
       input.confirmUnknown !== true || !Number.isSafeInteger(now) || now < 1) return bad();
   const lock = await tx.$queryRaw<Array<{ id: string }>>`UPDATE xhs_request_budgets SET next_at=next_at WHERE id='xhs:source-total' RETURNING id`;
@@ -108,7 +109,26 @@ export async function reviewGenerationUnknown(tx: Tx, input: { jobId: string; ge
   const pending = await tx.$queryRaw<Array<{ id: string; used: number; request_limit: number }>>`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
   const allowed = [g.origin.fence.marker, ...previousMarkers, fence.marker];
   if (new Set(allowed).size !== allowed.length || pending.length !== allowed.length || pending.some(p => !allowed.includes(p.id) || p.used !== 1 || p.request_limit !== 1)) return bad();
-  const entry: Omit<GenerationUnknownReview, 'id'> = { fence: clone(fence), reviewedAt: now, decision: 'request-retry', budgetFloors: {
+  if (g.selectedIds && input.excludeUnknown !== true) return bad();
+  if (input.excludeUnknown) {
+    if (!Array.isArray(g.selectedIds) || fence.phase !== 'detail' || !fence.noteId) return bad();
+    const excluded = JSON.stringify(['xiaohongshu','note',fence.noteId]);
+    if (!g.selectedIds.includes(excluded) || g.selectedIds.length < 2) return bad();
+    const selected = g.selectedIds.filter((id:string) => id !== excluded);
+    let carried: Record<string,'complete'|'missing'> = {...(g.carriedBasicResults ?? {})};
+    if (job.listTask) {
+      const rows = await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask} AND creator_id=${row.creator_id}`;
+      if (rows.length !== 1) return bad();
+      const child=JSON.parse(rows[0].document);
+      if (child.collectionScope !== 'selected' || !Array.isArray(child.selectedIds) || JSON.stringify([...child.selectedIds].sort()) !== JSON.stringify([...g.selectedIds].sort())) return bad();
+      if (child.basicOnly === true) for (const id of selected) {
+        if (child.items?.[id] === 'completed' && ['complete','missing'].includes(child.basicResults?.[id])) carried[id]=child.basicResults[id];
+      }
+    }
+    carried=Object.fromEntries(Object.entries(carried).filter(([id,state])=>selected.includes(id) && ['complete','missing'].includes(state)));
+    g.selectedIds=selected;g.carriedBasicResults=carried;delete g.directoryIds;delete g.basicCompleted;delete g.localFailure;job.listEnd=false;delete job.listTask;
+  }
+  const entry: Omit<GenerationUnknownReview, 'id'> = { fence: clone(fence), reviewedAt: now, decision: input.excludeUnknown ? 'exclude' : 'request-retry', budgetFloors: {
     taskUsed: budgets.find(b => b.id === input.jobId)!.used, sharedUsed: budgets.find(b => b.id === 'xhs:source-total')!.used, phaseUsed: clone(job.sourceGrant.used),
   } };
   g.reviews = [...(g.reviews ?? []), { ...entry, id: hash(reviewIdentity(g.id, entry)) }];

@@ -213,16 +213,25 @@ export function createXhsMediaTransport(
     new Promise((resolve, reject) => {
       try {
         const video = options.headers.accept === 'video/mp4';
+        if ((video ? allowedRedbookVideoUrl(url.href).href : allowedRedbookMediaUrl(url.href).href) !== url.href)
+          throw stop();
+      } catch {
+        reject(new XhsMediaError('XHS_MEDIA_URL_REJECTED'));
+        return;
+      }
+      try {
         if (
-          (video ? allowedRedbookVideoUrl(url.href).href : allowedRedbookMediaUrl(url.href).href) !== url.href ||
           options.redirect !== 'manual' ||
           options.credentials !== 'omit' ||
           Object.keys(options.headers).some((k) => k !== 'accept')
         )
           throw stop();
-        options.signal.throwIfAborted();
       } catch {
         reject(new XhsMediaError('XHS_MEDIA_REQUEST_REJECTED'));
+        return;
+      }
+      if (options.signal.aborted) {
+        reject(new XhsMediaError(options.signal.reason?.name === 'TimeoutError' ? 'XHS_MEDIA_TIMEOUT' : 'XHS_MEDIA_ABORTED'));
         return;
       }
       const video = options.headers.accept === 'video/mp4';
@@ -317,7 +326,7 @@ export function createXhsMediaTransport(
         timer = setTimeout(() => fail(new XhsMediaError('XHS_MEDIA_TIMEOUT')), 10000);
         timer.unref?.();
         options.signal.addEventListener('abort', abort, { once: true });
-        if (options.signal.aborted) fail();
+        if (options.signal.aborted) abort();
         else req.end();
       } catch {
         fail();

@@ -167,10 +167,11 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(JSON.parse(metrics[0].document).values).toEqual({likes: 0, collects: 12, comments: null, shares: 4});
   });
   it('automatically queues a collection when a subscription is confirmed', async () => {
+    source.basicDetail = jest.fn(async (_author,id) => ({...detail(id),metrics:{values:{likes:1,collects:2,shares:3,comments:4},collectedAt:Date.now(),contract:'synthetic',evidence:'source-only' as const}}));
     const resolution = await service.resolveSubscription({url:author.profileUrl});
     const result = await service.subscribe({resolutionId: resolution.resolutionId});
     if (!('collection' in result)) throw Error(result.collectionError);
-    expect((await finish(result.collection.taskId)).state).toBe('completed');
+    expect((await finish(result.collection.taskId)).state).toBe('completed');expect(source.basicDetail).toHaveBeenCalledTimes(1);expect(source.detail).not.toHaveBeenCalled();
   });
   it('does not claim an unsupported video was cached', async () => {
     source.list = jest.fn(async () => ({ authorId: author.id, nextCursor:null, notes:[{authorId:author.id,noteId:'video',title:'video',publishedAt:0,kind:'video' as const}]}));
@@ -254,7 +255,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       if (!('collection' in result)) throw Error(result.collectionError);
       let state = await real.task({taskId:result.collection.taskId});
       for (let i=0;i<1000 && ['queued','running'].includes(state.state);i++) { await new Promise(r=>setTimeout(r,20)); state=await real.task({taskId:result.collection.taskId}); }
-      expect(state).toMatchObject({state:'completed',collectionScope:'recent',total:1,completed:1});
+      expect(state).toMatchObject({state:'completed',collectionScope:'all',total:1,completed:1});
       expect((await db.xhsNote.findUnique({where:{id:noteKey('runtime-note')}}))?.contentHtml).toContain('Actual source body');
       const snapshot=await db.xhsMetricSnapshot.findUnique({where:{ownerKind_ownerId:{ownerKind:'note',ownerId:noteKey('runtime-note')}}});
       expect(JSON.parse(snapshot!.document).values).toEqual({likes:0,collects:2,shares:3,comments:4});

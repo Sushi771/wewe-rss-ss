@@ -157,7 +157,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       if (durable.listEnd && Array.isArray(durable.generation?.directoryIds)) document.listEnd = true;
       if (document.generation) {
         document.generation = { ...document.generation, state: ['queued','running'].includes(job.state) ? 'running' : job.state === 'completed' ? 'completed' : 'paused' };
-        for (const key of ['directoryIds','missingIds','originalNoteStatus'])
+        for (const key of ['directoryIds','missingIds','originalNoteStatus','basicCompleted'])
           if (job.generation?.[key] !== undefined) document.generation[key] = job.generation[key];
       }
       return tx.$executeRaw`UPDATE xhs_whole_creator_jobs
@@ -443,7 +443,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     if (input.confirmUnknown !== true) throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     return this.resume(input.jobId, input.generationId, input.pickToken, input.selectedIds);
   }
-  async reviewGeneration(input: {jobId:string;generationId:string;confirmUnknown:true}) {
+  async reviewGeneration(input: {jobId:string;generationId:string;confirmUnknown:true;excludeUnknown?:true}) {
     await this.readyForMutation();
     if (this.running.has(input.jobId)) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
     await this.write(tx => reviewGenerationUnknown(tx,input));
@@ -838,7 +838,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             localStage='list-task';
             if (!job.listTask) {
               const task = job.generation
-                ? await this.subscriptions.refreshFull(job.generation.selectedIds ? { id: job.creatorId, scope: 'selected', noteIds: job.generation.selectedIds, reuseCompleteCache: true } : { id: job.creatorId, scope: 'all' })
+                ? await this.subscriptions.refreshFull(job.generation.selectedIds ? { id: job.creatorId, scope: 'selected', noteIds: job.generation.selectedIds, reuseCompleteCache: true, basicOnly: true, carriedBasicResults: job.generation.carriedBasicResults } : { id: job.creatorId, scope: 'all', basicOnly: true, reuseCompleteCache: true })
                 : await this.subscriptions.refresh({ id: job.creatorId });
               job.listTask = task.taskId;
               await this.checkpointChild(job, task.taskId);
@@ -846,9 +846,10 @@ export class XhsWholeCreatorService implements OnModuleInit {
               const prior = await this.subscriptions.task({
                 taskId: job.listTask,
               });
-              if (job.generation?.selectedIds && !(await this.subscriptions.matchesSelectedTask({taskId: job.listTask, creatorId: job.creatorId, noteIds: job.generation.selectedIds}))) throw new XhsSubscriptionError('XHS_SELECTION_CHANGED');
+              if (job.generation?.selectedIds && !(await this.subscriptions.matchesSelectedTask({taskId: job.listTask, creatorId: job.creatorId, noteIds: job.generation.selectedIds, basicOnly: true}))) throw new XhsSubscriptionError('XHS_SELECTION_CHANGED');
+              if (job.generation && prior.collectionStage === 'details' && !(await this.subscriptions.isBasicTask({taskId:job.listTask,creatorId:job.creatorId}))) throw new XhsSubscriptionError('XHS_SELECTION_CHANGED');
               if (job.generation && prior.state === 'completed' && prior.collectionStage !== 'details') {
-                const next = await this.subscriptions.refreshFull(job.generation.selectedIds ? { id: job.creatorId, scope: 'selected', noteIds: job.generation.selectedIds, reuseCompleteCache: true } : { id: job.creatorId, scope: 'all' });
+                const next = await this.subscriptions.refreshFull(job.generation.selectedIds ? { id: job.creatorId, scope: 'selected', noteIds: job.generation.selectedIds, reuseCompleteCache: true, basicOnly: true, carriedBasicResults: job.generation.carriedBasicResults } : { id: job.creatorId, scope: 'all', basicOnly: true, reuseCompleteCache: true });
                 job.listTask = next.taskId;
                 await this.checkpointChild(job, next.taskId);
               } else if (!['queued', 'running', 'completed'].includes(prior.state)) {
@@ -862,7 +863,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             localStage='list-wait';
             await this.waitList(job);
             job.listEnd = true;
-            if (job.generation) job.generation.directoryIds = job.generation.selectedIds ? await this.subscriptions.confirmedSelection({taskId: job.listTask!, creatorId: job.creatorId, noteIds: job.generation.selectedIds}) : await this.subscriptions.confirmedDirectory({ taskId: job.listTask! });
+            if (job.generation) job.generation.directoryIds = job.generation.selectedIds ? await this.subscriptions.confirmedSelection({taskId: job.listTask!, creatorId: job.creatorId, noteIds: job.generation.selectedIds, basicOnly: true}) : await this.subscriptions.confirmedDirectory({ taskId: job.listTask! });
             await this.save(job);
           }
           const cachedNotes = await this.db.xhsNote.findMany({
@@ -881,8 +882,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
           if (job.generation) {
             // The child has positively completed both listing and all cache
             // details; do not manufacture local archive/export receipts.
-            for (const note of notes) job.items[note.id].cached = true;
-            cacheComplete = true;
+            // Basic fields are persisted; media is a separate pending phase.
+            job.generation.basicCompleted = true;
+            cacheComplete = false;
             return;
           }
           // Adopt the old download child on upgrade, preserving its directory and receipts.
@@ -972,11 +974,11 @@ export class XhsWholeCreatorService implements OnModuleInit {
       ...visibleJob,
       reviewedRecovery: generation ? undefined : reviewedRecoveryView(job),
       generationRecovery: generation ? { id: String(generation.id), state: generation.state === 'prepared' && job.state === 'paused' ? 'prepared' : job.state, originalResult: 'unknown' as const,
-        profileUrl: String(generation.profileUrl), profile: generation.profile, selectedIds: generation.selectedIds as string[] | undefined, excludedIds: [generation.origin.fence, ...(generation.reviews ?? []).map((r: any) => r.fence)].filter((f: any) => !!f.noteId).map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])) as string[], directoryComplete: job.listEnd && !generation.selectedIds, selectionComplete: job.listEnd && !!generation.selectedIds && ['partial','completed'].includes(job.state), discovered: Number(generation.directoryIds?.length ?? 0),
+        profileUrl: String(generation.profileUrl), profile: generation.profile, basicCompleted: !!generation.basicCompleted, selectedIds: generation.selectedIds as string[] | undefined, excludedIds: [generation.origin.fence, ...(generation.reviews ?? []).map((r: any) => r.fence)].filter((f: any) => !!f.noteId).map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])) as string[], directoryComplete: job.listEnd && !generation.selectedIds, selectionComplete: job.listEnd && !!generation.selectedIds && ['partial','completed'].includes(job.state), discovered: Number(generation.directoryIds?.length ?? 0),
         missing: Number(generation.missingIds?.length ?? 0), originalNoteStatus: String(generation.originalNoteStatus ?? 'unknown'),
-        newResult: restricted ? 'restricted' as const : newFence ? 'unknown' as const : undefined,
+        excludeUnknownRequired: !!generation.selectedIds, newResult: restricted ? 'restricted' as const : newFence ? 'unknown' as const : undefined,
         failure: generation.lastSourceReceipt?.code ? {stage:String(generation.lastSourceReceipt.stage),outcome:String(generation.lastSourceReceipt.outcome),code:String(generation.lastSourceReceipt.code ?? ''),status:generation.lastSourceReceipt.status as number|undefined,requiresStop:!!newFence && newFence.receipt?.settled===false && newFence.owner?.pid===process.pid} : job.state==='paused' && generation.localFailure ? {stage:String(generation.localFailure.stage),outcome:'local-failure',code:String(generation.localFailure.code),status:undefined,requiresStop:false} : undefined,
-        reviewable: !generation.selectedIds && historyReady && !!newFence && job.state==='paused' && !this.running.has(id) && (newFence.receipt?.settled===true || newFence.owner?.pid!==process.pid),
+        reviewable: historyReady && !!newFence && job.state==='paused' && !this.running.has(id) && (!generation.selectedIds || (newFence.phase==='detail' && !!newFence.noteId && generation.selectedIds.length>1 && generation.selectedIds.includes(JSON.stringify(['xiaohongshu','note',newFence.noteId])))) && (newFence.receipt?.settled===true || newFence.owner?.pid!==process.pid),
         resumable: historyReady && generationMatches(job) && !newFence && !this.running.has(id) && ['paused','partial','failed','cancelled'].includes(job.state) && generation.state !== 'completed' } : undefined,
       canPrepareGeneration: historyReady && !generation && !reviewAttempt && legacyProofMatches(job, job.id, sourceGrant?.authorId) && job.state === 'paused',
       budget,

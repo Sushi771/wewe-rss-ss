@@ -22,6 +22,6 @@
   {
     "name": "refreshFull",
     "before": null,
-    "after": "refreshFull: this.trpcService.protectedProcedure\n      .input(z.object({ id: z.string().min(1).max(128), scope: z.enum(['recent','all','selected']).optional(), noteIds: z.array(z.string().min(1).max(300)).min(1).max(1000).optional() }).strict())\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSubscriptions!.refreshFull(input);\n      })"
+    "after": "refreshFull: this.trpcService.protectedProcedure\n      .input(z.object({ id: z.string().min(1).max(128), scope: z.enum(['recent','all','selected']).optional(), noteIds: z.array(z.string().min(1).max(300)).min(1).max(1000).optional() }).strict())\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSubscriptions!.refreshFull({ ...input, scope: input.scope === 'selected' ? 'selected' : 'all', basicOnly: true, reuseCompleteCache: true });\n      })"
   }
 ]

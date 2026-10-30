@@ -248,6 +248,20 @@ describe('separate bounded CDN stream (injected synthetic request only)', () => 
     await expect(pending).rejects.toThrow('XHS_MEDIA_TIMEOUT');
     expect(f.raw).toHaveBeenCalledTimes(1);
   });
+  it.each([['TimeoutError','XHS_MEDIA_TIMEOUT'], ['AbortError','XHS_MEDIA_ABORTED']])('classifies pre-dispatch %s without sending', async (name, code) => {
+    const f = httpsFixture(), c = new AbortController(); c.abort(new DOMException('synthetic-secret',name));
+    const error = await createXhsMediaTransport(f.request)(new URL('https://sns-webpic.xhscdn.com/synthetic?token=synthetic-secret'),mediaOptions(c.signal)).catch(e => e);
+    expect(xhsPublicCode(error,'fallback')).toBe(code); expect(String(error)).not.toContain('synthetic-secret'); expect(f.raw).not.toHaveBeenCalled();
+  });
+  it('interrupts an HTTP stream at the transport deadline', async () => {
+    jest.useFakeTimers();
+    try {
+      const f=httpsFixture({headers:{'content-type':'image/png'},hold:true});
+      const pendingResponse=createXhsMediaTransport(f.request)(new URL('https://sns-webpic.xhscdn.com/synthetic'),mediaOptions());
+      await jest.advanceTimersByTimeAsync(0);const response=await pendingResponse;const body=response.arrayBuffer();
+      const rejected=expect(body).rejects.toThrow('XHS_MEDIA_TIMEOUT');await jest.advanceTimersByTimeAsync(10000);await rejected;expect(f.raw).toHaveBeenCalledTimes(1);
+    } finally {jest.useRealTimers();}
+  });
   it('streams bytes without Cookie/Authorization and never follows redirects', async () => {
     const f = httpsFixture({
       headers: { 'content-type': 'image/png' },
@@ -288,13 +302,13 @@ describe('separate bounded CDN stream (injected synthetic request only)', () => 
     ).rejects.toThrow('XHS_MEDIA_REQUEST_REJECTED');
     await expect(
       transport(new URL('https://127.0.0.1/synthetic'), mediaOptions()),
-    ).rejects.toThrow('XHS_MEDIA_REQUEST_REJECTED');
+    ).rejects.toThrow('XHS_MEDIA_URL_REJECTED');
     await expect(
       transport(
         new URL('http://sns-webpic.xhscdn.com/synthetic'),
         mediaOptions(),
       ),
-    ).rejects.toThrow('XHS_MEDIA_REQUEST_REJECTED');
+    ).rejects.toThrow('XHS_MEDIA_URL_REJECTED');
     expect(f.raw).not.toHaveBeenCalled();
   });
   it('bounds media by declared length and actual streamed bytes', async () => {
@@ -518,7 +532,7 @@ describe('bounded video transport with synthetic responses', () => {
     expect(f.raw.mock.calls[0][1].headers).toEqual({accept:'video/mp4'});
   });
   it.each(['https://evil.invalid/file','https://sns-webpic.xhscdn.com/file','http://sns-video-bd.xhscdn.com/file'])('rejects foreign or insecure video URL %s before dispatch',async url=>{
-    const f=httpsFixture();await expect(createXhsMediaTransport(f.request)(new URL(url),options())).rejects.toThrow('XHS_MEDIA_REQUEST_REJECTED');expect(f.raw).not.toHaveBeenCalled();
+    const f=httpsFixture();await expect(createXhsMediaTransport(f.request)(new URL(url),options())).rejects.toThrow('XHS_MEDIA_URL_REJECTED');expect(f.raw).not.toHaveBeenCalled();
   });
   it.each([undefined,'100000001'])('rejects missing or excessive video length %s',async length=>{
     const f=httpsFixture({headers:{'content-type':'video/mp4',...(length?{'content-length':length}:{})}});
