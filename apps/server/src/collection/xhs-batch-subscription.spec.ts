@@ -123,7 +123,14 @@ describe('batch subscription with synthetic SQLite and transport', () => {
     return { api, runtime, service, subscriptions };
   }
   it('commits one author and persistent receipts, deduplicates URLs and never stores access context', async () => {
-    const { api, runtime, service } = await setup();
+    const { api, runtime, service, subscriptions } = await setup();
+    let releaseCollection!: () => void;
+    const collectionGate = new Promise<void>((resolve) => { releaseCollection = resolve; });
+    const refresh = subscriptions.refreshFull.bind(subscriptions);
+    const delayed = jest.spyOn(subscriptions, 'refreshFull').mockImplementation((input, startAfter) =>
+      refresh(input, Promise.all([startAfter ?? Promise.resolve(true), collectionGate]).then(([ready]) => ready)),
+    );
+    try {
     const text = [link('note-a'), link('note-a'), link('note-b')].join('\n');
     await service.start({ clientRequestId: id, text });
     await (service as any).lane;
@@ -153,7 +160,12 @@ describe('batch subscription with synthetic SQLite and transport', () => {
       'duplicate',
     );
     expect(api).toHaveBeenCalledTimes(2);
-    runtime.onModuleDestroy();
+    } finally {
+      releaseCollection();
+      await (subscriptions as any).lane;
+      delayed.mockRestore();
+      runtime.onModuleDestroy();
+    }
   }, 40000);
   it('queues collection for all 21 distinct authors in one completed batch',async()=>{
     const {service,runtime,subscriptions}=await setup(async (request:any)=>{

@@ -66,6 +66,7 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
     errorMsg: string | null = null,
     source?: XhsSource,
     collection: any = {},
+    client: PrismaClient = prisma,
   ) => {
     const config = new ConfigService({
       auth: { code: 'fixture' },
@@ -73,15 +74,15 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       feed: { updateDelayTime: 0 },
     });
     const service = new TrpcService(
-      prisma as any,
+      client as any,
       config,
       {} as any,
       collection,
     );
-    const xhs = new XiaohongshuService(prisma as any, source);
+    const xhs = new XiaohongshuService(client as any, source);
     const router = new TrpcRouter(
       service,
-      prisma as any,
+      client as any,
       config,
       {} as any,
       {} as any,
@@ -362,13 +363,26 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       const snapshots = jest
         .spyOn(backup, 'createVerifiedSqliteBackup')
         .mockRejectedValue(new Error('UNEXPECTED_FULL_BACKUP'));
-      await prisma.$executeRawUnsafe('PRAGMA synchronous=OFF');
+      // SQLite synchronous is connection-local. Use a dedicated single-connection
+      // pool so the transaction exercises the very connection configured here.
+      const guarded = new PrismaClient({ datasources: { db: { url: `${process.env.DATABASE_URL}?connection_limit=1` } } });
+      await guarded.$executeRawUnsafe('PRAGMA synchronous=OFF');
+      let actualSynchronous: number | undefined;
+      const transaction = guarded.$transaction.bind(guarded);
+      const observed = jest.spyOn(guarded, '$transaction').mockImplementationOnce(((action: any) =>
+        transaction(async (tx) => {
+          const rows = await tx.$queryRawUnsafe<Array<{ synchronous: number }>>('PRAGMA synchronous');
+          actualSynchronous = Number(rows[0]?.synchronous);
+          return action(tx);
+        })) as any);
       try {
-        await expect(operation(caller().api)).rejects.toThrow(
+        await expect(operation(caller(null, undefined, {}, guarded).api)).rejects.toThrow(
           'INCREMENTAL_DURABILITY_MODE_UNPROVED',
         );
+        expect(actualSynchronous).toBe(0);
       } finally {
-        await prisma.$executeRawUnsafe('PRAGMA synchronous=FULL');
+        observed.mockRestore();
+        await guarded.$disconnect();
       }
       const volume = await fs.statfs(root, { bigint: true });
       const disk = jest
