@@ -638,7 +638,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     }
     expect(JSON.stringify((await read()).reviewAttempt)).toBe(before);expect(api.mock.calls.length).toBe(calls);await assertUnknownPreserved();
   },15000);
-  it.each(['success','cached','old-prepared','profile-rebuild','profile-wrong','second-page','lost','second-lost','restricted','wrong-author','missing','exhausted','ready-restart','ready-cached'] as const)('recovers only one excluded note through bounded context: %s',async mode=>{
+  it.each(['success','cached','old-prepared','profile-rebuild','profile-wrong','second-page','lost','second-lost','restricted','wrong-author','missing','exhausted','ready-restart','ready-cached','session-missing','expired-context','binding-mismatch','source-preblocked'] as const)('recovers only one excluded note through bounded context: %s',async mode=>{
     await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
     const initial=await read(),proof=initial.legacyMaintenanceProof,initialBudgets=await db.$queryRaw<any[]>`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total')`;
     proof.scope.budgetDigest=legacyBudgetDigest(initial,initialBudgets,'job');proof.proofId=hash({scope:proof.scope,lockIdentity:proof.lockIdentity,lockNonce:proof.lockNonce,holder:proof.holder,snapshot:proof.snapshot});
@@ -670,7 +670,19 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const context=await whole.prepareReviewedContext({jobId:'job',excludedNoteId:'note',confirmUnknownRetry:true});
     if(mode==='old-prepared'){expect((await read()).reviewAttempt).toEqual(oldAttempt);const view=await whole.view('job');expect(view.contextRecovery?.state).toBe('prepared');expect(view.reviewedRecovery).toBeUndefined();}
     const executeContext=()=>whole.executeReviewedContext({jobId:'job',contextId:context.id,confirmUnknownRetry:true});
-    if(mode==='ready-restart'||mode==='ready-cached'){
+    if(['session-missing','expired-context','binding-mismatch','source-preblocked'].includes(mode)){
+      const budgets=await currentBudget(),calls=api.mock.calls.length;
+      if(mode==='session-missing')(runtime as any).cookies=undefined;
+      if(mode==='source-preblocked')(runtime as any).stopCode='XHS_SOURCE_RATE_LIMIT_BLOCKED';
+      const clock=mode==='expired-context'?jest.spyOn(Date,'now').mockReturnValue(Date.now()+16*60*1000):undefined;
+      try {
+        const request=mode==='binding-mismatch'?whole.executeReviewedContext({jobId:'job',contextId:'b'.repeat(64),confirmUnknownRetry:true}):executeContext();
+        const expected=mode==='session-missing'?'XHS_SESSION_REQUIRED':mode==='expired-context'?'XHS_ACCESS_CONTEXT_EXPIRED':mode==='source-preblocked'?'XHS_SOURCE_RATE_LIMIT_BLOCKED':'XHS_WHOLE_SOURCE_FENCE_BLOCKED';
+        await expect(request).rejects.toThrow(expected);
+      } finally {clock?.mockRestore();}
+      expect(api.mock.calls.length).toBe(calls);expect(requestedDetails()).toEqual([]);expect(await currentBudget()).toEqual(budgets);
+      const after=await read();expect(after.reviewContext.state).toBe('prepared');expect(after.reviewContext.stages).toHaveLength(0);
+    } else if(mode==='ready-restart'||mode==='ready-cached'){
       const prepare=jest.spyOn(whole,'prepareReviewedAttempt').mockRejectedValueOnce(new Error('synthetic interruption after ready'));
       await expect(executeContext()).rejects.toThrow('synthetic interruption after ready');prepare.mockRestore();
       expect((await read()).reviewContext.state).toBe('ready');expect(requestedDetails()).toEqual([]);
@@ -802,7 +814,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(requestedDetails()).toEqual([]);expect(media).not.toHaveBeenCalled();
     expect((await db.xhsNote.findUnique({where:{id:safe}}))?.contentHtml).toContain('Existing body');await assertUnknownPreserved();
   },15000);
-  it.each(['success','lost','restricted','media-invalid','active'] as const)('allows one explicitly bound excluded detail from a partial generation without replay: %s',async mode=>{
+  it.each(['success','lost','restricted','media-invalid','active','two-unsigned-restart','two-signed-restart','two-signed-live','two-unknown','two-invalid'] as const)('allows one explicitly bound excluded detail from a partial generation without replay: %s',async mode=>{
     await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
     const initial=await read(),proof=initial.legacyMaintenanceProof;
     const initialBudgets=await db.$queryRaw<any[]>`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total')`;
@@ -815,7 +827,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     directory(['note','safe']);
     const normal=api.getMockImplementation()!;
     let enter!:()=>void,release!:()=>void;const entered=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>release=r);
-    api.mockImplementation(async(req:any)=>{if(new URL(req.url).pathname.endsWith('/feed')&&JSON.parse(req.body).source_note_id==='note'){if(mode==='lost')throw new RedbookPauseError('transport');if(mode==='restricted')return {status:461,url:req.url,body:{success:false,code:-1}};if(mode==='active'){enter();await gate;}}const response=await normal(req);if(new URL(req.url).pathname.endsWith('/feed')&&JSON.parse(req.body).source_note_id==='note')response.body.data.items[0].note_card.image_list=[{url_default:mode==='media-invalid'?'https://invalid.example/image.png':'https://sns-webpic.xhscdn.com/synthetic.png?synthetic=secret'}];return response;});
+    api.mockImplementation(async(req:any)=>{if(new URL(req.url).pathname.endsWith('/feed')&&JSON.parse(req.body).source_note_id==='note'){if(mode==='lost')throw new RedbookPauseError('transport');if(mode==='restricted')return {status:461,url:req.url,body:{success:false,code:-1}};if(mode==='active'){enter();await gate;}}const response=await normal(req);if(new URL(req.url).pathname.endsWith('/feed')&&JSON.parse(req.body).source_note_id==='note')response.body.data.items[0].note_card.image_list=mode.startsWith('two-')?[{url_default:'https://sns-webpic.xhscdn.com/a.png'+(['two-unsigned-restart','two-unknown','two-invalid'].includes(mode)?'':'?synthetic=secret')},{url_default:'https://sns-webpic.xhscdn.com/b.png'+(['two-unsigned-restart','two-unknown','two-invalid'].includes(mode)?'':'?synthetic=secret')}]:[{url_default:mode==='media-invalid'?'https://invalid.example/image.png':'https://sns-webpic.xhscdn.com/synthetic.png?synthetic=secret'}];return response;});
     await whole.prepareGeneration(input);const id=(await read()).generation.id;
     await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
     expect((await read()).state).toBe('partial');
@@ -828,13 +840,13 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
       const pending=call();await entered;
       try { expect((await whole.view('job')).reviewedRecovery?.state).toBe('in-progress');await expect(call()).rejects.toThrow(); } finally {release();}
       await pending;
-    } else if(mode==='success'||mode==='media-invalid')await call();else await expect(call()).rejects.toThrow();
+    } else if(mode==='success'||mode==='media-invalid'||mode.startsWith('two-'))await call();else await expect(call()).rejects.toThrow();
     await expect(call()).rejects.toThrow();
     expect(requestedDetails().slice(before)).toEqual(['note']);
-    const job=await read();expect(job.sourceFence.state).toBe('started');expect(job.reviewAttempt.state).toBe(['success','media-invalid','active'].includes(mode)?'checkpointed':'consumed');
-    if(['success','media-invalid','active'].includes(mode)){
+    const job=await read();expect(job.sourceFence.state).toBe('started');expect(job.reviewAttempt.state).toBe((['success','media-invalid','active'].includes(mode)||mode.startsWith('two-'))?'checkpointed':'consumed');
+    if(['success','media-invalid','active'].includes(mode)||mode.startsWith('two-')){
       if(mode==='media-invalid')expect(job.reviewAttempt.receipt).toMatchObject({media:'needs-review',mediaFailure:'XHS_MEDIA_MANIFEST_UNAVAILABLE'});
-      else expect(job.reviewAttempt.receipt.mediaManifest).toMatchObject([{ordinal:1,state:'not-downloaded',sourceQueryOmitted:true}]);
+      else if(!mode.startsWith('two-'))expect(job.reviewAttempt.receipt.mediaManifest).toMatchObject([{ordinal:1,state:'not-downloaded',sourceQueryOmitted:true}]);
       expect(JSON.stringify(job.reviewAttempt.receipt)).not.toContain('synthetic=secret');
       expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic body note');
       const listed=await new XiaohongshuService(db as any).notes('creator');
@@ -846,9 +858,26 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
         expect(await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:[noteKey]})).toEqual({state:'nothing-missing'});
         expect(requestedDetails()).toEqual(['safe']);
         expect((await whole.view('job')).generationRecovery?.mediaRecoverableIds).toContain(noteKey);
+        (runtime as any).transientMedia.clear(); // simulate an older receipt after restart
         await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[noteKey]});await drain();
         const afterMedia=await read();expect(afterMedia.generation.mediaResults[noteKey]).toBe('needs-detail-refresh');
         expect(afterMedia.reviewAttempt.state).toBe('checkpointed');expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();
+      }
+      if(mode.startsWith('two-')){
+        expect(job.reviewAttempt.receipt.mediaManifest).toHaveLength(2);
+        expect(job.reviewAttempt.receipt.mediaManifest.every((x:any)=>x.sourceQueryOmitted===(!['two-unsigned-restart','two-unknown','two-invalid'].includes(mode)))).toBe(true);
+        const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=','base64');
+        media.mockImplementation(async()=>new Response(png,{status:200,headers:{'content-type':'image/png'}}));
+        if(mode!=='two-signed-live')(runtime as any).transientMedia.clear();
+        if(mode==='two-unknown'||mode==='two-invalid'){
+          const altered=await read();for(const entry of altered.reviewAttempt.receipt.mediaManifest){if(mode==='two-unknown')delete entry.sourceQueryOmitted;else entry.sourceUrl='https://untrusted.invalid/synthetic.png';}
+          await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(altered)} WHERE id='job'`;
+        }
+        api.mockClear();await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=0 WHERE id IN ('job','xhs:source-total')`;
+        await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[noteKey]});await drain();
+        const afterMedia=await read();expect(requestedDetails()).toEqual([]);expect(afterMedia.reviewAttempt.state).toBe('checkpointed');
+        if(['two-signed-restart','two-unknown','two-invalid'].includes(mode)){expect(afterMedia.generation.mediaResults[noteKey]).toBe('needs-detail-refresh');expect(media).not.toHaveBeenCalled();}
+        else {expect(afterMedia.generation.mediaResults[noteKey]).toBe('complete');expect(media).toHaveBeenCalledTimes(2);const saved=await db.xhsNote.findUniqueOrThrow({where:{id:noteKey}});expect((saved.contentHtml!.match(/data-xhs-media/g)||[])).toHaveLength(2);await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[noteKey]});await drain();expect(media).toHaveBeenCalledTimes(2);}
       }
     } else expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toBeNull();
     if(mode==='restricted')expect((await db.$queryRaw<Array<{code:string}>>`SELECT code FROM xhs_source_risk WHERE id='source'`)[0].code).toBe('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');

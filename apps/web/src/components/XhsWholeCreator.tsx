@@ -1,6 +1,40 @@
 import { useRef, useState } from "react";
 import { trpc } from "@web/utils/trpc";
 
+// Only fixed server codes are rendered; raw errors may contain private URLs.
+const reviewedContextReasons:Record<string,string> = {
+  XHS_SESSION_REQUIRED:'小红书会话不可用，请检查连接状态。',
+  XHS_SESSION_CHANGED:'小红书会话已变化，请检查连接状态。',
+  XHS_SESSION_BUSY:'连接状态正在变更，请先查看当前回执。',
+  XHS_SOURCE_HISTORY_REVIEW_REQUIRED:'历史来源状态仍需核对，请查看当前回执。',
+  XHS_SOURCE_RISK_REVIEW_REQUIRED:'来源请求仍在处理或结果未确认，请先查看当前回执。',
+  XHS_SOURCE_RISK_UNAVAILABLE:'来源状态暂不可用，请先查看当前回执。',
+  XHS_TASK_CONFLICT:'任务正在处理，请先查看当前回执。',
+  XHS_TASK_STATE_CHANGED:'任务状态已变化，请刷新后核对回执。',
+  XHS_LIVE_ACCESS_DISABLED:'小红书来源访问当前未启用，请检查连接状态。',
+  XHS_ACCESS_CONTEXT_EXPIRED:'恢复准备已过期，请核对状态后重新准备。',
+  XHS_ACCESS_CONTEXT_UNAVAILABLE:'未找到有效的笔记访问上下文，请核对状态后重新准备。',
+  XHS_WHOLE_SOURCE_FENCE_BLOCKED:'任务范围、恢复许可或状态未通过核对，请先查看当前回执。',
+  XHS_REQUEST_BUDGET_REQUIRED:'请求预算不可用，请检查当前任务状态。',
+  XHS_REQUEST_BUDGET_EXHAUSTED:'请求预算已用尽，请检查当前任务状态。',
+  XHS_WHOLE_PHASE_BUDGET_EXHAUSTED:'当前阶段的请求额度已用尽，请检查当前任务状态。',
+  XHS_REQUEST_RATE_PAUSED:'来源请求当前暂停，请先查看状态。',
+  XHS_SOURCE_AUTHENTICATION_BLOCKED:'来源要求重新认证，采集已停止。',
+  XHS_SOURCE_VERIFICATION_BLOCKED:'来源要求验证，采集已停止。',
+  XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED:'来源拒绝了请求，采集已停止。',
+  XHS_SOURCE_PERMISSION_BLOCKED:'来源拒绝访问，采集已停止。',
+  XHS_SOURCE_SIGNATURE_BLOCKED:'来源签名校验失败，采集已停止。',
+  XHS_SOURCE_RATE_LIMIT_BLOCKED:'来源限制了请求频率，采集已停止。',
+  XHS_SOURCE_TRANSPORT_BLOCKED:'来源请求未能确认，请查看当前回执。',
+  XHS_SOURCE_RESPONSE_BLOCKED:'来源响应未能确认，请查看当前回执。',
+  XHS_REQUEST_POLICY_UNAVAILABLE:'请求状态暂不可用，请查看当前回执。',
+};
+function reviewedContextFailure(error:unknown,stage:'准备'|'执行') {
+  const raw=error && typeof error==='object' && 'message' in error && typeof error.message==='string' ? error.message : '';
+  const reason=Object.prototype.hasOwnProperty.call(reviewedContextReasons,raw) ? reviewedContextReasons[raw] : undefined;
+  return reason ? `单篇恢复${stage}未完成：${reason}（${raw}）不会自动重发。` : `单篇恢复${stage}未确认，请查看当前回执；不会自动重发。`;
+}
+
 export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { creatorId: string; selectedNoteIds?: string[] }) {
   const [limit, setLimit] = useState(100),
     [error, setError] = useState("");
@@ -44,8 +78,8 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
     try {
       if(contextId)await runContext.mutateAsync({jobId,contextId,confirmUnknownRetry:true});
       else if(noteId)await prepareContext.mutateAsync({jobId,excludedNoteId:noteId,confirmUnknownRetry:true});
-    } catch {setError('恢复未完成，请查看当前状态；不会自动重发。');}
-    finally {await jobs.refetch().catch(()=>setError('状态刷新失败，请先刷新核对。'));recoveryBusy.current=false;setRecovering(false);}
+    } catch (error) {setError(reviewedContextFailure(error,contextId?'执行':'准备'));}
+    finally {await jobs.refetch().catch(()=>setError(previous=>`${previous ? previous+' ' : ''}状态刷新失败，请先刷新核对。`));recoveryBusy.current=false;setRecovering(false);}
   };
   const recover = async (jobId: string, attemptId?: string, legacyUnknown = false, excludedNoteId?: string) => {
     if (recoveryBusy.current || recoveryJob !== jobId || !confirmed) return;
@@ -112,7 +146,8 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
       {(jobs.data ?? []).map((job) => (
         <section key={job.id} className="my-2 min-w-0 border-t">
           {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} />}
-          {!!job.generationRecovery?.retryableExcludedIds?.length && !job.reviewedRecovery && (
+          {job.generationRecovery && !job.generationRecovery.handoffDone && <XhsHistoryHandoff jobId={job.id} generationId={job.generationRecovery.id} items={job.items} refresh={() => jobs.refetch()} />}
+          {!!job.generationRecovery?.retryableExcludedIds?.length && (!job.reviewedRecovery || job.reviewedRecovery.state === "checkpointed") && (
             <div className="my-2 space-y-2 rounded border p-2">
               <p>历史请求结果未知；请选择一篇。最多请求作者 1 次、目录 2 页及目标详情 1 次，不请求图片；已取得的上下文优先复用。</p>
               <label>选择已排除的笔记
@@ -305,6 +340,17 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
 }
 
 const phases = ['profile', 'list', 'detail', 'media', 'metrics'] as const;
+function XhsHistoryHandoff({jobId,generationId,items,refresh}:{jobId:string;generationId:string;items:{noteId:string;title:string}[];refresh:()=>Promise<unknown>}) {
+  const [snapshot,setSnapshot]=useState<{digest:string;excludedIds:string[];historicalAttemptCount:number}>();
+  const [checked,setChecked]=useState(false),[error,setError]=useState('');
+  const prepare=trpc.xiaohongshu.prepareXhsHistoryHandoff.useMutation({retry:false});
+  const confirm=trpc.xiaohongshu.confirmXhsHistoryHandoff.useMutation({retry:false});
+  return <details><summary>核查历史来源暂停</summary><p>保留历史未知记录和原请求；没有新成功回执的笔记继续排除并显示待核对。确认后其他内容可按定时计划继续。</p>
+    <button disabled={prepare.isLoading||confirm.isLoading} onClick={async()=>{setChecked(false);setSnapshot(undefined);try{setSnapshot(await prepare.mutateAsync({jobId,generationId}));setError('');}catch{setError('当前状态不满足交接条件，请核对活动任务和未知请求。');}}}>核查当前范围</button>
+    {snapshot&&<><p>历史未知请求 {snapshot.historicalAttemptCount} 次；继续排除待核对笔记 {snapshot.excludedIds.length} 篇。</p><label><input type="checkbox" checked={checked} onChange={e=>setChecked(e.target.checked)}/>我已核查范围，同意保留历史未知证据及待核对排除。</label><button disabled={!checked||confirm.isLoading} onClick={async()=>{try{await confirm.mutateAsync({jobId,generationId,digest:snapshot.digest,confirm:true});setSnapshot(undefined);await refresh();}catch{setSnapshot(undefined);setError('交接未确认或状态已变化，请刷新核对；不会自动重试。');}}}>确认历史交接</button></>}
+    {snapshot&&<ul>{snapshot.excludedIds.map(id=><li key={id}>{items.find(item=>item.noteId===id)?.title || '未命名笔记'}</li>)}</ul>}
+    {error&&<p role="alert">{error}</p>}</details>;
+}
 const labels = { profile: '主页与资料', list: '目录', detail: '正文', media: '图片与视频', metrics: '互动数量' };
 type Limits = Record<(typeof phases)[number], number>;
 type Job = {
@@ -314,7 +360,7 @@ type Job = {
   historyGrant?: { limits: Record<string, number>; used: Record<string, number> };
   items: {noteId: string; title: string}[];
   generationRecovery?: {
-    id: string; state: string; profileUrl: string; discovered: number; missing: number;
+    id: string; state: string; profileUrl: string; discovered: number; missing: number; handoffDone?:boolean;
     directoryComplete: boolean; selectionComplete?: boolean; basicCompleted?: boolean; excludeUnknownRequired?: boolean; originalNoteStatus: string; newResult?: string; resumable: boolean;
     selectedIds?: string[]; excludedIds?: string[];
     reviewable?: boolean;
@@ -415,6 +461,7 @@ export function XhsSelectedMedia({ job, selectedNoteIds, refresh }: {
 }) {
   const [confirmedKey, setConfirmedKey] = useState('');
   const [basicConfirmedKey, setBasicConfirmedKey] = useState('');
+  const [boundedBasic, setBoundedBasic] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const lock = useRef(false);
@@ -428,7 +475,7 @@ export function XhsSelectedMedia({ job, selectedNoteIds, refresh }: {
     selectedNoteIds.length > 0 && selectedNoteIds.length <= 1000 &&
     new Set(selectedNoteIds).size === selectedNoteIds.length &&
     items.every(Boolean);
-  const basicEligible = eligible && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id));
+  const basicEligible = eligible && (!boundedBasic || selectedNoteIds.length <= 8) && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id));
   const mediaEligible = eligible && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id) && !(generation?.mediaRecoverableIds ?? []).includes(id));
   const run = async () => {
     if (lock.current || !mediaEligible || confirmedKey !== key || !generation) return;
@@ -447,7 +494,7 @@ export function XhsSelectedMedia({ job, selectedNoteIds, refresh }: {
     if (lock.current || !basicEligible || basicConfirmedKey !== key || !generation) return;
     lock.current = true; setBusy(true); setBasicConfirmedKey(''); setMessage('');
     try {
-      const receipt = await resumeBasic.mutateAsync({jobId: job.id, generationId: generation.id, noteIds: [...selectedNoteIds]});
+      const receipt = await resumeBasic.mutateAsync({jobId: job.id, generationId: generation.id, noteIds: [...selectedNoteIds], ...(boundedBasic ? {bounded: true as const} : {})});
       setMessage('state' in receipt && receipt.state === 'nothing-missing'
         ? '所选笔记基础字段已齐全，未发起采集。'
         : '已提交所选基础缺项补取，请查看任务状态。');
@@ -464,6 +511,7 @@ export function XhsSelectedMedia({ job, selectedNoteIds, refresh }: {
     {selectedNoteIds.length > 0 && <>
       <p>已选 {selectedNoteIds.length} 篇。仅补本任务可处理的所选笔记；历史未知请求和来源限制不会自动重发。</p>
       {!basicEligible && !mediaEligible && <p role="status">所选笔记不在可续补范围，或任务、来源状态仍需核对。</p>}
+      <label><input type="checkbox" checked={boundedBasic} disabled={busy} onChange={e => { setBoundedBasic(e.target.checked); setBasicConfirmedKey(''); }} />本轮限制：作者最多 1 次、目录最多 2 页、每篇详情最多 1 次（最多 8 篇），不请求图片；超限即停止。</label>
       <label><input type="checkbox" checked={basicConfirmedKey === key} disabled={busy || !basicEligible} onChange={e => setBasicConfirmedKey(e.target.checked ? key : '')} />确认仅补所选笔记缺失的发布时间和互动数据。</label>
       <button disabled={busy || !basicEligible || basicConfirmedKey !== key} onClick={() => void runBasic()}>补所选基础缺项</button>
       <label><input type="checkbox" checked={confirmedKey === key} disabled={busy || !mediaEligible} onChange={e => setConfirmedKey(e.target.checked ? key : '')} />确认补缺所选笔记的图片。</label>

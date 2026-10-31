@@ -42,6 +42,25 @@ describe('whole creator durable checkpoint fence', () => {
     phase: 'detail' as const,
     noteId: 'synthetic-note',
   };
+  it('serializes bounded repair admission across two connections and never charges the same note twice',async()=>{
+    const noteId=JSON.stringify(['xiaohongshu','note',scope.noteId]);
+    const bounds={profile:1,list:2,detail:1,media:0,used:{profile:0,list:0,detail:0,media:0},detailIds:[]};
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    const job=JSON.parse(rows[0].document);job.basicRepairRequest={noteIds:[noteId],bounds};
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${scope.jobId}`;
+    const other=new PrismaClient({datasources:{db:{url:'file:'+path.join(folder,'test.sqlite').replace(/\\/g,'/')}}});
+    const scopes=[scope,{...scope,marker:'xhs:dispatch-pending:whole:00000000-0000-4000-8000-000000000099'}];
+    try {
+      const result=await Promise.allSettled([db.$transaction(tx=>prepareWholeSourceFence(tx,scopes[0])),other.$transaction(tx=>prepareWholeSourceFence(tx,scopes[1]))]);
+      expect(result.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+      const winner=scopes[result[0].status==='fulfilled'?0:1];
+      await db.$transaction(tx=>markWholeSourceStarted(tx,winner.jobId,winner.marker,winner.owner,'detail'));
+      await expect(other.$transaction(tx=>markWholeSourceStarted(tx,winner.jobId,winner.marker,winner.owner,'detail'))).rejects.toThrow();
+      const saved=await other.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+      expect(JSON.parse(saved[0].document).basicRepairRequest.bounds.used.detail).toBe(1);
+      expect(JSON.parse(saved[0].document).basicRepairRequest.bounds.detailIds).toEqual([noteId]);
+    } finally {await other.$disconnect();}
+  });
   it('atomically reserves a media item with the real whole-source fence and rolls both back on failure', async () => {
     const id = JSON.stringify(['xiaohongshu','note',scope.noteId]);
     const raw = { items: [{ id: scope.noteId, note_card: { note_id: scope.noteId, user: { user_id: scope.authorId }, type: 'normal', time: 1760000000000, title: 'Synthetic', desc: 'Synthetic', image_list: [{ url_default: 'https://sns-webpic.xhscdn.com/synthetic.png' }] } }] };

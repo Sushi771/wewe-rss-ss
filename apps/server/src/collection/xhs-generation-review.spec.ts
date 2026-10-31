@@ -10,8 +10,11 @@ import { PrismaClient } from '@prisma/client';
 import { observeDispatchOwner } from './xhs-dispatch-owner-observation';
 import { ownsDispatch } from './xhs-dispatch-owner';
 import { legacyBudgetDigest } from './xhs-legacy-review';
-import { generationMatches, activeWholeFence } from './xhs-whole-generation';
+import { generationMatches, activeWholeFence,verifiedReviewedNoteIds } from './xhs-whole-generation';
 import { generationReviewMarkers, reviewGenerationUnknown } from './xhs-generation-review';
+import { prepareHistoryHandoff, confirmHistoryHandoff,readHistoryHandoffs,claimReviewedRisk,releaseReviewedRisk } from './xhs-history-handoff';
+import { createReviewedContextIntent,originalAttemptDigest } from './xhs-reviewed-attempt';
+import { admitScheduledXhs,scheduledTaskId } from './xhs-scheduled-admission';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 describe('explicit review appends generation unknown without deleting markers or refunding counts', () => {
@@ -36,7 +39,7 @@ describe('explicit review appends generation unknown without deleting markers or
     await db.$executeRawUnsafe('CREATE TABLE xhs_whole_creator_jobs(id TEXT PRIMARY KEY,creator_id TEXT,state TEXT,document TEXT,updated_at INTEGER)');
     await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,state TEXT)');
     await db.$executeRawUnsafe('CREATE TABLE xhs_request_budgets(id TEXT PRIMARY KEY,used INTEGER,request_limit INTEGER,next_at INTEGER,interval_ms INTEGER)');
-    await db.$executeRawUnsafe('CREATE TABLE xhs_source_risk(id TEXT PRIMARY KEY,state TEXT,code TEXT)');
+    await db.$executeRawUnsafe('CREATE TABLE xhs_source_risk(id TEXT PRIMARY KEY,state TEXT,code TEXT,owner TEXT,http_status INTEGER,endpoint TEXT,updated_at INTEGER)');
     await db.$executeRawUnsafe('CREATE TABLE xhs_limited_recovery(id TEXT,note_id TEXT,author_id TEXT,state TEXT)');
     await db.$executeRawUnsafe('CREATE TABLE xhs_limited_recovery_append(id TEXT,note_id TEXT,author_id TEXT,state TEXT)');
     await db.$executeRawUnsafe("INSERT INTO xhs_creators VALUES('creator','author',1)");
@@ -48,7 +51,7 @@ describe('explicit review appends generation unknown without deleting markers or
     await db.$executeRaw`DELETE FROM xhs_source_risk`;await db.$executeRaw`DELETE FROM xhs_subscription_tasks`;
     await db.$executeRaw`DELETE FROM xhs_limited_recovery`;await db.$executeRaw`DELETE FROM xhs_limited_recovery_append`;
     await db.$executeRaw`UPDATE xhs_creators SET enabled=1,external_author_id='author'`;
-    await db.$executeRawUnsafe("INSERT INTO xhs_source_risk VALUES('source','blocked','XHS_SOURCE_HISTORY_REVIEW_REQUIRED')");
+    await db.$executeRawUnsafe("INSERT INTO xhs_source_risk(id,state,code) VALUES('source','blocked','XHS_SOURCE_HISTORY_REVIEW_REQUIRED')");
     await db.$executeRawUnsafe("INSERT INTO xhs_request_budgets VALUES('job',7,310,10000,10000),('xhs:source-total',9,312,10000,10000)");
     await db.$executeRaw`INSERT INTO xhs_request_budgets VALUES(${oldMarker},1,1,10000,0),(${marker},1,1,20000,0)`;
     const originBudgets = [{id:'job',used:6,request_limit:310,next_at:0,interval_ms:10000},{id:'xhs:source-total',used:8,request_limit:312,next_at:0,interval_ms:10000}];
@@ -68,6 +71,96 @@ describe('explicit review appends generation unknown without deleting markers or
     await db.$executeRaw`INSERT INTO xhs_whole_creator_jobs VALUES('job','creator','paused',${JSON.stringify(job)},1000)`;
   });
   afterAll(async()=>{await db.$disconnect();await fs.rm(root,{recursive:true,force:true});});
+
+  it('handoff transaction retains historical evidence and rejects a stale or repeated confirmation',async()=>{
+    const original=await read();
+    original.generation.selectedIds=[JSON.stringify(['xiaohongshu','note','note']),JSON.stringify(['xiaohongshu','note','safe'])];
+    await write(original);
+    await db.$transaction(tx=>reviewGenerationUnknown(tx,{...input,excludeUnknown:true},2000));
+    const snapshot=await db.$transaction(tx=>prepareHistoryHandoff(tx,'job',input.generationId));
+    expect(snapshot.excludedIds).toEqual([JSON.stringify(['xiaohongshu','note','note'])]);
+    await db.$executeRaw`INSERT INTO xhs_request_budgets VALUES(${nextMarker},1,1,0,0)`;
+    await expect(db.$transaction(tx=>confirmHistoryHandoff(tx,{...input,digest:snapshot.digest,confirm:true},3000))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${nextMarker}`;
+    const before=await budgets();
+    expect(await db.$transaction(tx=>confirmHistoryHandoff(tx,{...input,digest:snapshot.digest,confirm:true},3000))).toEqual({state:'confirmed',excludedCount:1});
+    const saved=await read();
+    expect(saved.generation.reviews).toHaveLength(1);
+    expect(saved.historyHandoff.reviewIds).toEqual([saved.generation.reviews[0].id]);
+    expect(saved.sourceFence).toEqual(original.sourceFence);
+    expect(await budgets()).toEqual(before);
+    expect((await readHistoryHandoffs(db)).markers).toEqual([oldMarker,marker].sort());
+    await db.$transaction(tx=>claimReviewedRisk(tx,saved,owner.nonce));
+    await expect(db.$transaction(tx=>claimReviewedRisk(tx,saved,'00000000-0000-4000-8000-000000000099'))).rejects.toThrow();
+    await expect(db.$transaction(tx=>releaseReviewedRisk(tx,saved,'00000000-0000-4000-8000-000000000099'))).rejects.toThrow();
+    expect((await db.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_source_risk WHERE id='source'`)[0].state).toBe('pending');
+    await db.$transaction(tx=>releaseReviewedRisk(tx,saved,owner.nonce));
+    await db.$executeRawUnsafe('DROP TABLE xhs_subscription_tasks');
+    await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,creator_id TEXT,state TEXT,document TEXT,updated_at INTEGER)');
+    try {
+      const round='2026-10-31/09:15',taskId=scheduledTaskId(round,'creator','basic');
+      const admit=()=>db.$transaction(tx=>admitScheduledXhs(tx,{round,creatorId:'creator',phase:'basic',task:{taskId,creatorId:'creator',state:'queued'},now:3001}));
+      await db.$transaction(tx=>claimReviewedRisk(tx,saved,owner.nonce));
+      expect((await admit()).kind).toBe('deferred');
+      await db.$transaction(tx=>releaseReviewedRisk(tx,saved,owner.nonce));
+      expect((await admit()).kind).toBe('created');
+      const scheduled=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+      expect(JSON.parse(scheduled[0].document).historyExcludedIds).toEqual(snapshot.excludedIds);
+    } finally {
+      await db.$executeRawUnsafe('DROP TABLE xhs_subscription_tasks');
+      await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,state TEXT)');
+    }
+    expect((await db.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_source_risk WHERE id='source'`)[0].state).toBe('clear');
+    await expect(db.$transaction(tx=>confirmHistoryHandoff(tx,{...input,digest:snapshot.digest,confirm:true},3001))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+  });
+
+  it('handoff serializes two SQLite connections and survives reopening',async()=>{
+    const original=await read();
+    original.generation.selectedIds=[JSON.stringify(['xiaohongshu','note','note']),JSON.stringify(['xiaohongshu','note','safe'])];
+    await write(original);
+    await db.$transaction(tx=>reviewGenerationUnknown(tx,{...input,excludeUnknown:true},2000));
+    const snapshot=await db.$transaction(tx=>prepareHistoryHandoff(tx,'job',input.generationId));
+    const other=new PrismaClient({datasources:{db:{url:'file:'+path.join(root,'fixture.db').replace(/\\/g,'/')}}});
+    const run=(client:PrismaClient)=>client.$transaction(tx=>confirmHistoryHandoff(tx,{...input,digest:snapshot.digest,confirm:true},3000));
+    try {
+      const results=await Promise.allSettled([run(db),run(other)]);
+      expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+      expect(results.filter(r=>r.status==='rejected')).toHaveLength(1);
+    } finally {await other.$disconnect();}
+    const reopened=new PrismaClient({datasources:{db:{url:'file:'+path.join(root,'fixture.db').replace(/\\/g,'/')}}});
+    try {
+      const rows=await reopened.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id='job'`;
+      const saved=JSON.parse(rows[0].document);
+      expect(saved.historyHandoff.excludedIds).toEqual(snapshot.excludedIds);
+      expect(saved.sourceFence).toEqual(original.sourceFence);
+      expect(await reopened.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id IN (${oldMarker},${marker})`).toHaveLength(2);
+    } finally {await reopened.$disconnect();}
+  });
+
+  it('archives a settled independent receipt before preparing a different historical note after handoff',async()=>{
+    const original=await read();original.state='partial';original.generation.activeFence.noteId='other';
+    original.generation.selectedIds=[JSON.stringify(['xiaohongshu','note','other']),JSON.stringify(['xiaohongshu','note','safe'])];
+    original.state='paused';await write(original);
+    await db.$transaction(tx=>reviewGenerationUnknown(tx,{...input,excludeUnknown:true},2000));
+    const job=await read();job.state='partial';
+    const scope={jobId:'job',generationId:input.generationId,authorId:'author',noteId:'other',phase:'detail',maxRequests:1,reviewId:hash(job.generation.reviews[0].fence)};
+    job.reviewAttempt={id:hash(scope),scope,state:'checkpointed',owner,dispatch:{state:'checkpointed',transportEntered:true,marker:'xhs:dispatch-pending:review:'+hash(scope),creatorId:'creator',owner},receipt:{creatorId:'creator',noteId:JSON.stringify(['xiaohongshu','note','other']),body:'saved',media:'pending',mediaCount:2,mediaManifest:[{ordinal:1},{ordinal:2}]}};
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='partial',document=${JSON.stringify(job)} WHERE id='job'`;
+    const snapshot=await prepareHistoryHandoff(db,'job',input.generationId);
+    await db.$transaction(tx=>confirmHistoryHandoff(tx,{jobId:'job',generationId:input.generationId,digest:snapshot.digest,confirm:true},2500));
+    const fresh=await read();
+    await db.$transaction(tx=>createReviewedContextIntent(tx,{jobId:'job',generationId:input.generationId,authorId:'author',noteId:'note',phase:'detail',originalHash:originalAttemptDigest(fresh),reviewId:hash(fresh.generation.origin.fence),maxRequests:1,taskUsedCeiling:11,sharedUsedCeiling:13,expiresAt:4000},3000));
+    const saved=await read();expect(saved.reviewAttempt).toBeUndefined();expect(saved.reviewAttemptHistory[0]).toEqual(job.reviewAttempt);
+    expect(saved.reviewContext.scope.noteId).toBe('note');
+    expect((await readHistoryHandoffs(db)).excludedByCreator.creator).toEqual([JSON.stringify(['xiaohongshu','note','note'])]);
+    const bscope={...scope,noteId:'note',reviewId:hash(saved.generation.origin.fence)};
+    saved.reviewAttempt={id:hash(bscope),scope:bscope,state:'checkpointed',owner,dispatch:{state:'checkpointed',transportEntered:true,marker:'xhs:dispatch-pending:review:'+hash(bscope),creatorId:'creator',owner},receipt:{creatorId:'creator',noteId:JSON.stringify(['xiaohongshu','note','note']),body:'saved',media:'none',mediaCount:0}};
+    delete saved.reviewContext;await write(saved);
+    expect((await readHistoryHandoffs(db)).excludedByCreator.creator).toEqual([]);
+    await expect(db.$transaction(tx=>createReviewedContextIntent(tx,{jobId:'job',generationId:input.generationId,authorId:'author',noteId:'other',phase:'detail',originalHash:originalAttemptDigest(saved),reviewId:hash(saved.generation.reviews[0].fence),maxRequests:1,taskUsedCeiling:11,sharedUsedCeiling:13,expiresAt:4000},3000))).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const corrupted=JSON.parse(JSON.stringify(saved));corrupted.reviewAttemptHistory[0].dispatch.owner.nonce='00000000-0000-4000-8000-000000000099';corrupted.historyHandoff.settledAttempt.dispatch.owner.nonce='00000000-0000-4000-8000-000000000099';
+    expect(verifiedReviewedNoteIds(corrupted)).toEqual([JSON.stringify(['xiaohongshu','note','note'])]);
+  });
 
   it('appends the exact unknown fence and floors, while keeping the job paused and every marker/count unchanged',async()=>{
     const before=await read(), counts=await budgets();

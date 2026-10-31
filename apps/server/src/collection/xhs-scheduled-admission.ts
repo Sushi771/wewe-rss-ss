@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
+import { readHistoryHandoffs } from './xhs-history-handoff';
 
 type Phase = 'basic' | 'media';
-type Task = { taskId:string; creatorId:string; state:string; noteIds?:string[] };
+type Task = { taskId:string; creatorId:string; state:string; noteIds?:string[];historyExcludedIds?:string[] };
 type Tx = { $queryRaw<T>(strings:TemplateStringsArray,...values:unknown[]):Promise<T>; $executeRaw(strings:TemplateStringsArray,...values:unknown[]):Promise<number> };
-export type Admission = { kind:'created'|'existing'|'blocked'|'deferred'; taskId:string; reason?:string };
+export type Admission = { kind:'created'|'existing'|'blocked'|'deferred'; taskId:string; reason?:string; historyExcludedIds?:string[] };
 
 /** The id is the persistent round/creator/phase binding; never derive it from a request token. */
 export function scheduledTaskId(round:string,creatorId:string,phase:Phase,batch=0) {
@@ -22,7 +23,8 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
   if(existing.length){const old=JSON.parse(existing[0].document);if(old.creatorId!==creatorId||old.schedule?.round!==round||old.schedule?.phase!==phase||(old.schedule?.batch??0)!==batch||(phase==='media'&&JSON.stringify(old.noteIds)!==JSON.stringify(task.noteIds)))throw Error('XHS_SCHEDULE_BINDING_MISMATCH');return {kind:'existing',taskId};}
   const creator=await tx.$queryRaw<Array<{enabled:number;external_author_id:string|null}>>`SELECT enabled,external_author_id FROM xhs_creators WHERE id=${creatorId}`;
   const risk=await tx.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_source_risk WHERE id='source'`;
-  const fences=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' LIMIT 1`;
+  const history=await readHistoryHandoffs(tx as any);
+  const fences=(await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`).filter(f=>!history.markers.includes(f.id));
   const jobs=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_whole_creator_jobs WHERE creator_id=${creatorId} AND state IN ('queued','running') LIMIT 1`;
   const tasks=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_subscription_tasks WHERE creator_id=${creatorId} AND state IN ('queued','running') LIMIT 1`;
   // A live source request or creator task is not a settled failure. Observe it
@@ -35,7 +37,7 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
   if(!reason && input.preBlocked)reason=input.preBlocked;
   if(!reason && phase==='media'){
     const basicId=scheduledTaskId(round,creatorId,'basic');const predecessor=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${basicId}`;
-    if(predecessor.length!==1||predecessor[0].state!=='completed'||JSON.parse(predecessor[0].document).failed!==0)reason='XHS_SCHEDULE_BASIC_INCOMPLETE';
+    if(predecessor.length!==1||!(predecessor[0].state==='completed'||(predecessor[0].state==='partial'&&JSON.parse(predecessor[0].document).code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'))||JSON.parse(predecessor[0].document).failed!==0)reason='XHS_SCHEDULE_BASIC_INCOMPLETE';
     else {
       const basic=JSON.parse(predecessor[0].document),expected=Array.isArray(basic.noteIds)?basic.noteIds.slice(batch*1000,(batch+1)*1000):undefined;
       if(!expected?.length || JSON.stringify(task.noteIds)!==JSON.stringify(expected))reason='XHS_SCHEDULE_BATCH_MISMATCH';
@@ -43,7 +45,9 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
     }
   }
   const value={...task,state:reason?'blocked':'queued',...(reason?{code:reason,message:'本轮未执行，需核对后处理。'}:{}),schedule:{round,phase,...(phase==='media'?{batch}:{})}};
+  const historyExcludedIds=history.excludedByCreator[creatorId] ?? [];
+  if(phase==='basic'&&historyExcludedIds.length)value.historyExcludedIds=historyExcludedIds;
   const count=await tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id,creator_id,state,document,updated_at) VALUES (${taskId},${creatorId},${value.state},${JSON.stringify(value)},${BigInt(now)}) ON CONFLICT(id) DO NOTHING`;
   if(count!==1)throw Error('XHS_SCHEDULE_CONCURRENT_ADMISSION');
-  return reason?{kind:'blocked',taskId,reason}:{kind:'created',taskId};
+  return reason?{kind:'blocked',taskId,reason}:{kind:'created',taskId,historyExcludedIds};
 }

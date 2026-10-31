@@ -96,6 +96,7 @@ export interface XhsSubscriptionSource {
 }
 type Task = XhsSubscriptionTask & {
   schedule?: {round:string;phase:'basic'|'media';batch?:number};
+  historyExcludedIds?: string[];
   scheduledMediaResults?: Record<string,'complete'|'needs-review'|'needs-detail-refresh'>;
   noteIds: string[];
   items: Record<string, 'completed' | 'skipped' | 'failed'>;
@@ -782,6 +783,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       const admitted = await this.write(Buffer.byteLength(JSON.stringify(t)) + 4096, tx => admitScheduledXhs(tx, { ...scheduled, creatorId, task:t, now:Date.now() }));
       if (admitted.kind === 'deferred') return {taskId:t.taskId,creatorId,state:'deferred' as const};
       if (admitted.kind !== 'created') return {taskId:t.taskId,creatorId,scheduledState:admitted.kind};
+      if(scheduled.phase==='basic')t.historyExcludedIds=admitted.historyExcludedIds;
     }
     this.pending.set(t.taskId, t);
     try {
@@ -1097,6 +1099,8 @@ export class XhsSubscriptionService implements OnModuleInit {
           t.noteIds = t.collectionScope === 'recent' ? discovered.slice(0, 30)
             : t.collectionScope === 'selected' ? discovered.filter(id => t.selectedIds?.includes(id))
             : [...discovered];
+          if(t.schedule?.phase==='basic' && t.historyExcludedIds?.length)
+            t.noteIds=t.noteIds.filter(id=>!t.historyExcludedIds!.includes(id));
           if (t.collectionScope === 'selected' && t.noteIds.length !== t.selectedIds?.length)
             return reject('XHS_SELECTION_CHANGED');
           t.items = Object.fromEntries(t.noteIds
@@ -1372,8 +1376,12 @@ export class XhsSubscriptionService implements OnModuleInit {
         }
       if (active(t)) {
         t.state = t.failed || t.remaining ? 'partial' : 'completed';
+        if(t.state==='completed' && t.schedule?.phase==='basic' && t.historyExcludedIds?.length) {
+          t.state='partial';t.code='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED';
+        }
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
+        if(t.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED')t.message="历史待核对：${t.historyExcludedIds!.length} 篇，其余基础采集已完成。";
         if (t.basicOnly && t.state === 'completed') t.message = '基础信息处理完成；缺失字段仍为未知，媒体待补。';
         if (t.kind === 'download' && (t.localFilesSaved || t.localFilesReused))
           t.message += ` 已写入 ${t.localFilesSaved ?? 0} 篇本地文件，复用 ${t.localFilesReused ?? 0} 篇已有本地文件；已有正文和手工修改保留。`;
@@ -1413,7 +1421,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     for(const id of t.noteIds) {
       if(!active(t)) return;
       const rows=await this.db.$queryRaw<Array<{document:string;state:string}>>`SELECT document,state FROM xhs_subscription_tasks WHERE id=${basicId} AND creator_id=${creator.id}`;
-      if(rows.length!==1 || rows[0].state!=='completed') return reject('XHS_SCHEDULE_BASIC_INCOMPLETE');
+      if(rows.length!==1 || (rows[0].state!=='completed' && !(rows[0].state==='partial' && JSON.parse(rows[0].document).code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'))) return reject('XHS_SCHEDULE_BASIC_INCOMPLETE');
       const basic=JSON.parse(rows[0].document) as Task, slot=basic.mediaManifests?.[id];
       if(!basic.noteIds.includes(id)) return reject('XHS_SELECTION_CHANGED');
       if(!slot?.manifest || slot.state==='needs-review') {t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-review'};t.skipped++;t.items[id]='skipped';t.remaining--;await this.persist(t);continue;}

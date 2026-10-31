@@ -9,7 +9,7 @@ import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { XhsRequestBudget } from './xhs-request-budget';
 import { OnModuleDestroy } from '@nestjs/common';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { privateOnlineMode } from '../private-access';
 import {
   RedbookClient,
@@ -17,7 +17,8 @@ import {
   RedbookPauseError,
   RedbookTransport,
 } from './redbook-client';
-import { RedbookMediaTransport } from './redbook-response';
+import { allowedRedbookMediaUrl, RedbookMediaTransport } from './redbook-response';
+import type { XhsMediaManifest } from './xhs-native-media';
 import {
   RedbookSubscriptionAdapter,
   XhsProfileParser,
@@ -362,6 +363,13 @@ export class XhsSubscriptionRuntime
   private riskStore?: XhsSourceRiskStore;
   bindRiskStore(store: XhsSourceRiskStore) {
     this.riskStore ??= store;
+  }
+  /** Called only after a committed, explicitly confirmed history handoff. */
+  async refreshAfterHistoryHandoff() {
+    if (!this.riskStore) return failure('XHS_SOURCE_RISK_UNAVAILABLE');
+    const risk=await this.riskStore.read();
+    this.persistedRisk=risk;
+    if (!risk && this.stopCode==='XHS_SOURCE_HISTORY_REVIEW_REQUIRED') this.stopCode=undefined;
   }
   private readonly adapter: RedbookSubscriptionAdapter;
   private readonly mediaTransport: RedbookMediaTransport;
@@ -1014,9 +1022,15 @@ export class XhsSubscriptionRuntime
     this.reviewedReadyCheck()();
     return this.reviewedSingle.run({scope,started:false,dispatch:capability.dispatch},async()=>{
       let note:ReturnType<typeof inspectLimitedRecovery>|undefined;
-      const resolution=await this.withSession(()=>this.adapter.resolve(raw,value=>{note=value}));
+      let media:Parameters<NonNullable<Parameters<RedbookSubscriptionAdapter['resolve']>[1]>>[1];
+      const resolution=await this.withSession(()=>this.adapter.resolve(raw,(value,projection)=>{note=value;media=projection;}));
       if(!this.reviewedSingle.getStore()!.started||!note||resolution.inputKind!=='note'||note.noteId!==scope.noteId||note.authorId!==scope.authorId||resolution.author.id!==scope.authorId)return failure('XHS_AUTHOR_MISMATCH');
       if(JSON.stringify({author:resolution.author,note}).includes(url.searchParams.get('xsec_token')!))return failure('XHS_DETAIL_INCOMPLETE');
+      if(media && !note.mediaFailure && media.manifest.images.length===note.media.length && media.manifest.images.every((image,i)=>image.ordinal===note!.media[i].ordinal && image.resourceKey===note!.media[i].sourceFingerprint)) {
+        const id=JSON.stringify([scope.authorId,scope.noteId]);
+        if(this.transientMedia.size>=1000 && !this.transientMedia.has(id))this.transientMedia.delete(this.transientMedia.keys().next().value!);
+        this.transientMedia.set(id,{generation:this.generation,expiresAt:Date.now()+600000,version:media.manifest.version,getUrl:media.getUrl});
+      }
       return {author:resolution.author,note};
     });
   }
@@ -1146,6 +1160,23 @@ export class XhsSubscriptionRuntime
     return result;
   }
   withScheduledMediaSession<T>(work:(transport:RedbookMediaTransport)=>Promise<T>) { return this.withSession(()=>work(this.mediaTransport)); }
+  /** Rehydrate only a confirmed receipt's query-free URLs; never infer a signature. */
+  restoreReviewedMediaUrls(manifest:XhsMediaManifest,entries:unknown) {
+    if(!Array.isArray(entries)||entries.length!==manifest.images.length||entries.length>60)return;
+    const version=createHash('sha256').update(JSON.stringify([manifest.authorId,manifest.noteId,manifest.images])).digest('hex');
+    if(version!==manifest.version)return;
+    const urls=new Map<string,string>();
+    for(let i=0;i<entries.length;i++){
+      const e=entries[i],image=manifest.images[i];
+      if(!e||e.ordinal!==i+1||image.ordinal!==i+1||e.sourceFingerprint!==image.resourceKey||e.sourceQueryOmitted!==false||typeof e.sourceUrl!=='string'||e.sourceUrl.length>8192)continue;
+      try {const url=allowedRedbookMediaUrl(e.sourceUrl);if(url.search||url.hash||createHash('sha256').update(url.href).digest('hex')!==image.resourceKey)continue;urls.set(image.resourceKey!,url.href);} catch { /* unsafe or stale addresses stay pending */ }
+    }
+    if(!urls.size)return;
+    const id=JSON.stringify([manifest.authorId,manifest.noteId]),old=this.transientMedia.get(id),now=Date.now();
+    const prior=old&&old.generation===this.generation&&old.expiresAt>now&&old.version===version?old:undefined;
+    if(this.transientMedia.size>=1000&&!this.transientMedia.has(id))this.transientMedia.delete(this.transientMedia.keys().next().value!);
+    this.transientMedia.set(id,{generation:this.generation,expiresAt:prior?.expiresAt??now+600000,version,getUrl:key=>prior?.getUrl(key)??urls.get(key)});
+  }
   getTransientMediaUrl(authorId:string,noteId:string,version:string,resourceKey:string) {
     if(!this.cookies||this.sessionAbort.signal.aborted||(this.stopCode && this.stopCode!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'))return undefined;
     const id=JSON.stringify([authorId,noteId]), entry=this.transientMedia.get(id);

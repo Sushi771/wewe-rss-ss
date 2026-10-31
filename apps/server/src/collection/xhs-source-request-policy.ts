@@ -1,6 +1,7 @@
 import { dispatchReviewedSource, dispatchReviewedContextStage, type ContextBinding } from './xhs-reviewed-dispatch';
 import type { AttemptScope } from './xhs-reviewed-attempt';
 import { retainedGenerationMarkers } from './xhs-whole-generation';
+import { readHistoryHandoffs } from './xhs-history-handoff';
 import { writeSourceReceipt } from './xhs-source-receipt';
 import { randomUUID } from 'node:crypto';
 import {
@@ -133,6 +134,7 @@ async function hasPendingDispatch(
   owned = '',
   retained: string[] = [],
 ) {
+  retained = [...new Set([...retained, ...(await readHistoryHandoffs(db)).markers])];
   const rows = await db.$queryRaw<Array<{ id: string }>>`
     SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id NOT IN (${Prisma.join(retained.length ? retained : [''])}) LIMIT 1`;
   return rows.length > 0;
@@ -157,6 +159,7 @@ async function reserveTotal(
   owned = '',
   retained: string[] = [],
 ) {
+  retained = [...new Set([...retained, ...(await readHistoryHandoffs(tx)).markers])];
   return (
     (await tx.$executeRaw`UPDATE xhs_request_budgets SET used=used+1
     WHERE id=${SOURCE_TOTAL} AND used < 9007199254740991 AND next_at <= ${BigInt(now)}

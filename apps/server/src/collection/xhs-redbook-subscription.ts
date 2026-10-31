@@ -174,7 +174,7 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
   }
   async resolve(
     raw: string,
-    inspect?: (value: ReturnType<typeof inspectLimitedRecovery>) => void,
+    inspect?: (value: ReturnType<typeof inspectLimitedRecovery>, media?: ReturnType<typeof extractXhsMediaManifest>) => void,
   ) {
     const revision = ++this.revision;
     const url = await this.shortLinks.resolve(raw);
@@ -226,7 +226,12 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
         name: user.nickname.trim(),
         profileUrl: `https://www.xiaohongshu.com/user/profile/${authorId}`,
       };
-      if (inspect) inspect(inspectLimitedRecovery(rawDetail, authorId, noteId));
+      if (inspect) {
+        const note=inspectLimitedRecovery(rawDetail, authorId, noteId);
+        let media:ReturnType<typeof extractXhsMediaManifest>|undefined;
+        try { media=extractXhsMediaManifest(rawDetail, authorId, noteId); } catch { /* preserve valid basic data */ }
+        inspect(note,media);
+      }
       access.originalUrl = sourceOriginalLink(raw, url, noteId);
       access.linkChecked = true;
       const key = JSON.stringify([authorId, noteId]);

@@ -13,7 +13,9 @@ export class XhsScheduledRunner {
       if(!basic.taskId)throw Error('XHS_SCHEDULE_ADMISSION_UNKNOWN');
       const b=await this.service.task({taskId:basic.taskId});
       if(['queued','running'].includes(b.state)){pending=true;continue;}
-      if(b.state!=='completed'||b.failed){incomplete=true;continue;} // persisted task is blocked/partial, never call it success.
+      const historyPartial=b.state==='partial' && b.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED' && !b.failed;
+      if(historyPartial)incomplete=true;
+      if((b.state!=='completed'&&!historyPartial)||b.failed){incomplete=true;continue;}
       for(let batch=0;;batch++) {
         const media=await this.service.scheduleCreatorPhase({round,creatorId:author.id,phase:'media',batch});
         if(media.state==='nothing-to-archive')break;

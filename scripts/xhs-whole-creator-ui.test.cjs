@@ -39,6 +39,8 @@ function render(data, component = 'default') {
       prepareWholeCreatorReviewedContext: { useMutation: mutation },
       executeWholeCreatorReviewedContext: { useMutation: mutation },
       prepareWholeCreatorGeneration: { useMutation: mutation },
+      prepareXhsHistoryHandoff: { useMutation: mutation },
+      confirmXhsHistoryHandoff: { useMutation: mutation },
       executeWholeCreatorGeneration: { useMutation: mutation },
       reviewWholeCreatorGeneration: { useMutation: mutation },
       resumeWholeCreatorMedia: { useMutation: mutation },
@@ -224,6 +226,17 @@ test('author context recovery shows its exact budget and requires explicit confi
   button=h.nodes(tree,n=>n.type==='button'&&n.props.children==='执行单篇恢复')[0];assert.equal(button.props.disabled,false);button.props.onClick();await new Promise(setImmediate);
   assert.deepEqual(h.calls,[{name:'executeWholeCreatorReviewedContext',input:{jobId:'job',contextId:'a'.repeat(64),confirmUnknownRetry:true}}]);
 });
+test('context errors show only fixed actionable codes without replay or private text',async()=>{
+  for(const code of ['XHS_SESSION_REQUIRED','XHS_ACCESS_CONTEXT_EXPIRED','XHS_WHOLE_SOURCE_FENCE_BLOCKED','XHS_SOURCE_RATE_LIMIT_BLOCKED','synthetic-private-token https://example.invalid/?secret=synthetic']){
+    const job={id:'job',state:'partial',items:[],updatedAt:1,contextRecovery:{id:'a'.repeat(64),noteId:'synthetic-note',state:'prepared'}};
+    const h=recoveryInteraction([job]);h.setWork(async()=>{throw Error(code)});let tree=h.draw();
+    h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();
+    h.nodes(tree,n=>n.type==='button'&&n.props.children==='执行单篇恢复')[0].props.onClick();await new Promise(setImmediate);tree=h.draw();
+    const rendered=JSON.stringify(tree);assert.match(rendered,/单篇恢复执行/);assert.match(rendered,/不会自动重发/);assert.equal(h.calls.length,1);
+    if(code.startsWith('XHS_'))assert.ok(rendered.includes(code));else {assert.ok(!rendered.includes('synthetic-private-token'));assert.ok(!rendered.includes('example.invalid'));}
+  }
+});
+
 test('a completed but insufficient context permits only explicit re-preparation',async()=>{
   const job={id:'job',state:'partial',items:[],updatedAt:1,contextRecovery:{id:'a'.repeat(64),noteId:'synthetic-note',state:'incomplete'}};
   const h=recoveryInteraction([job]);let tree=h.draw();assert.equal(h.calls.length,0);

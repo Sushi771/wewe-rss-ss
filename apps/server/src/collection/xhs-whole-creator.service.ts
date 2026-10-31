@@ -19,10 +19,11 @@ import {
 } from './incremental-write';
 import { sqliteWrites } from './sqlite-write-coordinator';
 import { startupAudit, waitForStartupAudit, assertDatabaseWritesAllowed } from '../startup-audit';
-import { activeWholeFence, createWholeGeneration, generationMatches, generationReviewSettled, historicalGenerationMarker, GenerationPhaseLimits } from './xhs-whole-generation';
+import { activeWholeFence, createWholeGeneration, generationMatches, generationReviewSettled, verifiedReviewedNoteIds, historicalGenerationMarker, GenerationPhaseLimits } from './xhs-whole-generation';
 import { saveXhsMetrics } from './xhs-engagement-store';
 import { safeSourceFailure } from './xhs-source-receipt';
 import { reviewGenerationUnknown } from './xhs-generation-review';
+import { prepareHistoryHandoff, confirmHistoryHandoff,readHistoryHandoffs } from './xhs-history-handoff';
 import { resumeWholeMedia } from './xhs-whole-media-resume';
 import { selectMissingBasic } from './xhs-missing-basic';
 
@@ -51,7 +52,7 @@ type Job = {
   currentNote?: string;
   stage?: string;
   mediaRequest?: { taskId:string; noteIds:string[] };
-  basicRepairRequest?: { noteIds:string[]; taskId?:string };
+  basicRepairRequest?: { noteIds:string[]; taskId?:string; bounds?:{profile:number;list:number;detail:number;media:number;used:{profile:number;list:number;detail:number;media:number};detailIds:string[]} };
   sourceGrant?: {
     creatorId: string;
     authorId: string;
@@ -138,6 +139,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       const durable = JSON.parse(rows[0].document);
       if (durable.generation?.id !== job.generation?.id) return 0;
       const document: Record<string, any> = { ...job, items: { ...job.items } };
+      if (durable.historyHandoff) document.historyHandoff=durable.historyHandoff;
       if (
         typeof durable.profile === 'number' &&
         durable.profile > (job.profile ?? 0)
@@ -443,9 +445,10 @@ export class XhsWholeCreatorService implements OnModuleInit {
       const resuming=context?.state==='ready';
       const attempt=job.reviewAttempt, a=attempt?.scope;
       const readyAttempt=!attempt || (attempt.state==='prepared' && !attempt.owner && !attempt.dispatch && attempt.id===attemptDigest(a) && attempt.id!==scope?.oldPreparedId && a?.jobId===input.jobId && a?.generationId===scope?.generationId && a?.authorId===scope?.authorId && a?.noteId===scope?.noteId && a?.phase==='detail' && a?.maxRequests===1);
-      if(!scope||context.id!==input.contextId||attemptDigest(scope)!==input.contextId||scope.expiresAt<=Date.now()||!Array.isArray(context.stages)||
+      if(!scope||context.id!==input.contextId||attemptDigest(scope)!==input.contextId||!Array.isArray(context.stages)||
         (resuming ? (!readyAttempt||context.stages.some((v:any)=>v.state!=='settled'||v.transportEntered!==true||!['profile','list'].includes(v.phase))) : (context.state!=='prepared'||context.stages.length!==0||(attempt ? attempt.state!=='prepared'||attempt.id!==scope.oldPreparedId||attemptDigest(attempt.scope)!==attempt.id||!!attempt.owner||!!attempt.dispatch : !!scope.oldPreparedId)))||
         scope.jobId!==input.jobId||scope.authorId!==job.sourceGrant?.authorId||scope.generationId!==job.generation?.id||!excludedGenerationFence(job,scope.noteId)||originalAttemptDigest({...job,sourceGrant:scope.originalGrant})!==scope.originalHash)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      if(!Number.isSafeInteger(scope.expiresAt)||scope.expiresAt<=Date.now())throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
       const ready=this.runtime.reviewedReadyCheck();ready();
       let cached=this.runtime.reviewedCachedOriginalLink(scope.authorId,scope.noteId),cursor:string|null=null;
       const seen=new Set<string|null>();
@@ -528,6 +531,21 @@ export class XhsWholeCreatorService implements OnModuleInit {
     await this.readyForMutation();
     return this.write((tx) => reviewWholeUnknown(tx, input));
   }
+  async prepareHistoryHandoff(input:{jobId:string;generationId:string}) {
+    await this.readyForMutation();
+    if(this.starting.has(input.jobId)||this.running.has(input.jobId)||this.reviewing.has(input.jobId))throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    return this.db.$transaction(tx=>prepareHistoryHandoff(tx,input.jobId,input.generationId));
+  }
+  async confirmHistoryHandoff(input:{jobId:string;generationId:string;digest:string;confirm:true}) {
+    await this.readyForMutation();
+    if(this.starting.has(input.jobId)||this.running.has(input.jobId)||this.reviewing.has(input.jobId))throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    this.starting.add(input.jobId);
+    try {
+      const result=await this.write(tx=>confirmHistoryHandoff(tx,input));
+      await this.runtime.refreshAfterHistoryHandoff();
+      return result;
+    } finally {this.starting.delete(input.jobId);}
+  }
   async prepareGeneration(input: { jobId: string; profileUrl: string; confirmUnknown: true; phaseLimits: GenerationPhaseLimits }) {
     await this.readyForMutation();
     if (this.running.has(input.jobId)) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
@@ -550,14 +568,15 @@ export class XhsWholeCreatorService implements OnModuleInit {
         if(rows.length!==1||rows[0].state!=='partial')throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
         const job=JSON.parse(rows[0].document) as Job,g=job.generation;
         if(!g||g.id!==generationId||!generationMatches(job)||!generationReviewSettled(job)||activeWholeFence(job)||g.state==='completed'||!job.listEnd||!job.listTask||!Array.isArray(g.directoryIds)||!job.sourceGrant)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-        const recovered=(job as any).reviewAttempt?.receipt?.noteId as string|undefined;
+        const mediaAttempt=[(job as any).reviewAttempt,...((job as any).reviewAttemptHistory??[])].find(a=>a&&noteIds.includes(a.receipt?.noteId)&&generationReviewSettled({...job,reviewAttempt:a}));
+        const recovered=mediaAttempt?.receipt?.noteId as string|undefined;
         if(noteIds.some(id=>typeof id!=='string'||(!g.directoryIds.includes(id)&&id!==recovered)))throw new XhsSubscriptionError('XHS_SELECTION_INVALID');
         const fences=[g.origin.fence,...(g.reviews??[]).map((r:any)=>r.fence)];
         if(fences.some((f:any)=>f.noteId&&noteIds.includes(JSON.stringify(['xiaohongshu','note',f.noteId]))&&JSON.stringify(['xiaohongshu','note',f.noteId])!==recovered))throw new XhsSubscriptionError('XHS_SELECTION_INVALID');
         const tasks=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask} AND creator_id=${job.creatorId}`;
         if(tasks.length!==1)throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
         if(recovered&&noteIds.includes(recovered)){
-          const task=JSON.parse(tasks[0].document),receipt=(job as any).reviewAttempt.receipt,scope=(job as any).reviewAttempt.scope;
+          const task=JSON.parse(tasks[0].document),receipt=mediaAttempt.receipt,scope=mediaAttempt.scope;
           task.mediaManifests??={};
           if(!task.mediaManifests[recovered]){
             const entries=receipt.mediaManifest;
@@ -584,7 +603,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     } finally {this.starting.delete(jobId);}
   }
   /** Explicitly retry only selected missing basic fields under this generation. */
-  async resumeMissingBasic(input:{jobId:string;generationId:string;noteIds:string[]}) {
+  async resumeMissingBasic(input:{jobId:string;generationId:string;noteIds:string[];bounded?:true}) {
     await this.readyForMutation();
     const {jobId,generationId,noteIds}=input;
     if(this.starting.has(jobId)||this.running.has(jobId)||this.reviewing.has(jobId))throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
@@ -596,6 +615,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
         const job=JSON.parse(rows[0].document) as Job,g=job.generation;
         if(!g||g.id!==generationId||!generationMatches(job)||!generationReviewSettled(job)||activeWholeFence(job)||g.state==='completed'||!job.listEnd||!job.listTask||!Array.isArray(g.directoryIds)||!job.sourceGrant)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
         const existing=job.basicRepairRequest;
+        if(existing && (!!existing.bounds !== !!input.bounded || (existing.bounds && (existing.bounds.profile!==1 || existing.bounds.list!==2 || existing.bounds.detail!==existing.noteIds.length || existing.bounds.media!==0))))throw new XhsSubscriptionError('XHS_SELECTION_INVALID');
         let selected:string[];
         if(existing?.taskId){
           if(!Array.isArray(noteIds)||!noteIds.length||noteIds.length>1000||new Set(noteIds).size!==noteIds.length||noteIds.some(id=>typeof id!=='string'||!g.directoryIds.includes(id))||
@@ -611,12 +631,13 @@ export class XhsWholeCreatorService implements OnModuleInit {
           const selection=await selectMissingBasic(tx as any,job.creatorId,noteIds);
           if(selection.noteIds.some(id=>!g.directoryIds.includes(id)))throw new XhsSubscriptionError('XHS_SELECTION_INVALID');
           if(!selection.noteIds.length)return selection.noteIds;
+          if(input.bounded && selection.noteIds.length>8)throw new XhsSubscriptionError('XHS_SELECTION_INVALID');
           selected=selection.noteIds;
         }
         g.state='prepared';const prepared=JSON.stringify(job);
         if(await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${prepared} WHERE id=${jobId} AND state=${rows[0].state} AND document=${rows[0].document}`!==1)throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
         await historicalGenerationMarker(tx,{jobId,creatorId:job.creatorId,authorId:job.sourceGrant.authorId,generationId});
-        if(!existing){job.basicRepairRequest={noteIds:selected};g.basicRepair={noteIds:selected};}
+        if(!existing){job.basicRepairRequest={noteIds:selected,...(input.bounded?{bounds:{profile:1,list:2,detail:selected.length,media:0,used:{profile:0,list:0,detail:0,media:0},detailIds:[]}}:{})};g.basicRepair={noteIds:selected};}
         g.state='running';job.state='queued';job.updatedAt=Date.now();delete job.code;
         if(await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='queued',document=${JSON.stringify(job)},updated_at=${BigInt(job.updatedAt)} WHERE id=${jobId} AND state=${rows[0].state} AND document=${prepared}`!==1)throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
         return selected;
@@ -1052,6 +1073,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
               const slot=JSON.parse(rows[0].document).mediaManifests?.[noteId];
               let state:'complete'|'needs-review'|'needs-detail-refresh'='needs-review';
               if(slot?.manifest && slot.state!=='needs-review'){
+                const reviewed=[(job as any).reviewAttempt,...((job as any).reviewAttemptHistory??[])].find(a=>a?.receipt?.noteId===noteId&&generationReviewSettled({...job,reviewAttempt:a}));
+                if(reviewed && reviewed.scope?.authorId===slot.manifest.authorId && reviewed.scope?.noteId===slot.manifest.noteId)
+                  this.runtime.restoreReviewedMediaUrls(slot.manifest,reviewed.receipt.mediaManifest);
                 const result=await resumeWholeMedia(this.db, fn=>this.write(tx=>fn(tx),20_000_000),this.runtime,{jobId:job.id,creatorId:job.creatorId,taskId:request.taskId,generationId:job.generation?.id},slot.manifest);
                 state=result.pending?'needs-detail-refresh':'complete';
               }
@@ -1224,10 +1248,13 @@ export class XhsWholeCreatorService implements OnModuleInit {
       orderBy: { id: 'asc' },
       select: { id: true, title: true },
     });
-    const { sourceGrant, sourceFence, unknownReview, reviewAttempt, reviewAttemptHistory, reviewContext, reviewContextHistory, lastSourceOwnerReceipt, legacyMaintenanceProof, generation, ...visibleJob } = job as Job & Record<string, any>;
+    const { sourceGrant, sourceFence, unknownReview, reviewAttempt, reviewAttemptHistory, reviewContext, reviewContextHistory, lastSourceOwnerReceipt, legacyMaintenanceProof, generation, historyHandoff, ...visibleJob } = job as Job & Record<string, any>;
     const newFence = generation && generationMatches(job) ? activeWholeFence(job) : undefined;
     const risk = await this.db.$queryRaw<Array<{ state: string; code: string }>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
-    const historyReady = risk.length === 1 && risk[0].state === 'blocked' && risk[0].code === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED';
+    const handed=!!(job as any).historyHandoff && risk.length===1 && risk[0].state==='clear' && (await readHistoryHandoffs(this.db)).jobIds.includes(job.id);
+    const settledPrevious=!!reviewAttempt&&generationReviewSettled(job);
+    const verifiedNotes=verifiedReviewedNoteIds(job);
+    const historyReady = handed || (risk.length === 1 && risk[0].state === 'blocked' && risk[0].code === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED');
     const oldPrepared = !!generation && reviewAttempt?.state==='prepared' && !reviewAttempt.owner && !reviewAttempt.dispatch && !!reviewAttempt.scope && reviewAttempt.id===attemptDigest(reviewAttempt.scope) && reviewAttempt.scope.generationId===generation.id && !!excludedGenerationFence(job,reviewAttempt.scope.noteId);
     const restricted = /^XHS_SOURCE_(?:AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(job.code ?? '');
     return {
@@ -1237,11 +1264,11 @@ export class XhsWholeCreatorService implements OnModuleInit {
         state: this.reviewing.has(id) ? 'in-progress' as const : reviewContext.failureCode ? 'restricted' as const : reviewContext.state==='started' ? 'unknown' as const : reviewContext.state==='ready' ? 'ready' as const : reviewContext.state==='prepared' && reviewContext.stages?.length===0 && reviewContext.scope?.expiresAt>Date.now() ? 'prepared' as const : reviewContext.state==='prepared' && Array.isArray(reviewContext.stages) && reviewContext.stages.every((v:any)=>v.state==='settled'&&v.transportEntered===true) ? 'incomplete' as const : 'needs-review' as const,
       } : undefined,
       reviewedRecovery: generation && (!reviewAttempt || oldPrepared || (reviewContext?.state==='ready' && reviewAttempt.state==='prepared' && !reviewAttempt.owner && !reviewAttempt.dispatch)) ? undefined : reviewedRecoveryView(job,Date.now(),this.reviewing.has(id)),
-      generationRecovery: generation ? { id: String(generation.id), state: generation.state === 'prepared' && job.state === 'paused' ? 'prepared' : job.state, originalResult: 'unknown' as const,
-        mediaRecoverableIds: reviewAttempt && generationReviewSettled(job) ? [reviewAttempt.receipt.noteId as string] : [],
+      generationRecovery: generation ? { id: String(generation.id), state: generation.state === 'prepared' && job.state === 'paused' ? 'prepared' : job.state, originalResult: 'unknown' as const, handoffDone: !!(job as any).historyHandoff,
+        mediaRecoverableIds: [...new Set<string>([reviewAttempt,...(reviewAttemptHistory??[])].filter(a=>a&&generationReviewSettled({...job,reviewAttempt:a})).map(a=>a.receipt.noteId as string))],
         profileUrl: String(generation.profileUrl), profile: generation.profile, basicCompleted: !!generation.basicCompleted, selectedIds: generation.selectedIds as string[] | undefined, excludedIds: [generation.origin.fence, ...(generation.reviews ?? []).map((r: any) => r.fence)].filter((f: any) => !!f.noteId).map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])) as string[], directoryComplete: job.listEnd && !generation.selectedIds, selectionComplete: job.listEnd && !!generation.selectedIds && ['partial','completed'].includes(job.state), discovered: Number(generation.directoryIds?.length ?? 0),
         missing: Number(generation.missingIds?.length ?? 0), originalNoteStatus: String(generation.originalNoteStatus ?? 'unknown'),
-        retryableExcludedIds: historyReady && !restricted && job.state==='partial' && (!reviewAttempt||oldPrepared) && !reviewContext && !this.running.has(id) ? [generation.origin.fence,...(generation.reviews??[]).filter((r:any)=>r.decision==='exclude').map((r:any)=>r.fence)].filter((f:any)=>typeof f?.noteId==='string' && (!oldPrepared||f.noteId===reviewAttempt.scope.noteId) && !!excludedGenerationFence(job,f.noteId)).map((f:any)=>JSON.stringify(['xiaohongshu','note',f.noteId])) as string[] : [],
+        retryableExcludedIds: historyReady && !restricted && job.state==='partial' && (!reviewAttempt||oldPrepared||settledPrevious) && (!reviewContext||settledPrevious) && !this.running.has(id) ? [generation.origin.fence,...(generation.reviews??[]).filter((r:any)=>r.decision==='exclude').map((r:any)=>r.fence)].filter((f:any)=>typeof f?.noteId==='string' && (!oldPrepared||f.noteId===reviewAttempt.scope.noteId) && !verifiedNotes.includes(JSON.stringify(['xiaohongshu','note',f.noteId])) && !!excludedGenerationFence(job,f.noteId)).map((f:any)=>JSON.stringify(['xiaohongshu','note',f.noteId])) as string[] : [],
         excludeUnknownRequired: !!generation.selectedIds, newResult: restricted ? 'restricted' as const : newFence ? (job.state === 'running' && this.running.has(id) ? 'in-progress' as const : 'unknown' as const) : undefined,
         failure: generation.lastSourceReceipt?.code ? {stage:String(generation.lastSourceReceipt.stage),outcome:String(generation.lastSourceReceipt.outcome),code:String(generation.lastSourceReceipt.code ?? ''),status:generation.lastSourceReceipt.status as number|undefined,requiresStop:!!newFence && newFence.receipt?.settled===false && newFence.owner?.pid===process.pid} : job.state==='paused' && generation.localFailure ? {stage:String(generation.localFailure.stage),outcome:'local-failure',code:String(generation.localFailure.code),status:undefined,requiresStop:false} : undefined,
         reviewable: historyReady && !!newFence && !newFence.mediaAttempt && job.state==='paused' && !this.running.has(id) && (!generation.selectedIds || (newFence.phase==='detail' && !!newFence.noteId && generation.selectedIds.length>1 && generation.selectedIds.includes(JSON.stringify(['xiaohongshu','note',newFence.noteId])))) && (newFence.receipt?.settled===true || newFence.owner?.pid!==process.pid),

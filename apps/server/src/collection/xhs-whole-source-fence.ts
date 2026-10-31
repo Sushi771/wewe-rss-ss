@@ -1,5 +1,6 @@
 import { DispatchOwner, ownsDispatch } from './xhs-dispatch-owner';
 import { Prisma } from '@prisma/client';
+import { assertReviewedRisk,claimReviewedRisk,releaseReviewedRisk } from './xhs-history-handoff';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { activeWholeFence, setActiveWholeFence, retainedGenerationMarkers, generationReviewSettled } from './xhs-whole-generation';
 
@@ -39,7 +40,7 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     JOIN xhs_source_risk r ON r.id='source'
     WHERE j.id=${scope.jobId} AND j.creator_id=${scope.creatorId} AND j.state='running'
     AND c.enabled=1 AND c.external_author_id=${scope.authorId}
-    AND r.state='blocked' AND r.code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'`;
+    AND ((r.state='blocked' AND r.code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED') OR r.state IN ('clear','pending'))`;
   if (rows.length !== 1) return bad();
   const job = JSON.parse(rows[0].document);
   if (scope.mediaAttempt) {
@@ -70,7 +71,7 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     if (!scope.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(scope.noteId))
       return bad();
     const noteKey = JSON.stringify(['xiaohongshu', 'note', scope.noteId]);
-    const recoveredMedia=!!scope.mediaAttempt && generationReviewSettled(job) && job.reviewAttempt?.receipt?.noteId===noteKey;
+    const recoveredMedia=!!scope.mediaAttempt && [job.reviewAttempt,...(job.reviewAttemptHistory??[])].some(a=>a?.receipt?.noteId===noteKey && generationReviewSettled({...job,reviewAttempt:a}));
     if (scope.generationId && (!job.listEnd || !Array.isArray(job.generation.directoryIds) || (!job.generation.directoryIds.includes(noteKey) && !recoveredMedia))) return bad();
     const notes = await tx.$queryRaw<
       Array<{ id: string }>
@@ -83,6 +84,7 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
   if (active.length) return bad();
   const owner = scope.owner;
   if (!ownsDispatch(owner, scope.owner)) return bad();
+  await claimReviewedRisk(tx,job,owner.nonce);
   setActiveWholeFence(job, {
     owner,
     marker: scope.marker,
@@ -108,10 +110,11 @@ export async function markWholeSourceStarted(
   await noUnresolvedRecovery(tx);
   const rows = await tx.$queryRaw<
     Array<{ document: string }>
-  >`SELECT j.document FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id JOIN xhs_source_risk r ON r.id='source' WHERE j.id=${jobId} AND j.state='running' AND c.enabled=1 AND c.external_author_id=json_extract(j.document,'$.sourceGrant.authorId') AND j.creator_id=json_extract(j.document,'$.sourceGrant.creatorId') AND r.state='blocked' AND r.code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED' AND EXISTS(SELECT 1 FROM xhs_request_budgets WHERE id=${marker})`;
+  >`SELECT j.document FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id JOIN xhs_source_risk r ON r.id='source' WHERE j.id=${jobId} AND j.state='running' AND c.enabled=1 AND c.external_author_id=json_extract(j.document,'$.sourceGrant.authorId') AND j.creator_id=json_extract(j.document,'$.sourceGrant.creatorId') AND ((r.state='blocked' AND r.code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED') OR r.state IN ('clear','pending')) AND EXISTS(SELECT 1 FROM xhs_request_budgets WHERE id=${marker})`;
   if (rows.length !== 1) return bad();
   const job = JSON.parse(rows[0].document);
   if (job.generation?.id !== generationId) return bad();
+  await assertReviewedRisk(tx,job,expectedOwner.nonce);
   await retainedGenerationMarkers(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
   const fence = activeWholeFence(job),
     grant = job.sourceGrant,
@@ -136,12 +139,29 @@ export async function markWholeSourceStarted(
     if (!fence.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(fence.noteId))
       return bad();
     const noteKey = JSON.stringify(['xiaohongshu', 'note', fence.noteId]);
-    const recoveredMedia=!!fence.mediaAttempt && generationReviewSettled(job) && job.reviewAttempt?.receipt?.noteId===noteKey;
+    const recoveredMedia=!!fence.mediaAttempt && [job.reviewAttempt,...(job.reviewAttemptHistory??[])].some(a=>a?.receipt?.noteId===noteKey && generationReviewSettled({...job,reviewAttempt:a}));
     if (generationId && (!job.listEnd || !Array.isArray(job.generation.directoryIds) || (!job.generation.directoryIds.includes(noteKey) && !recoveredMedia))) return bad();
     const notes = await tx.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM xhs_notes WHERE id=${noteKey} AND creator_id=${job.creatorId}`;
     if (notes.length !== 1) return bad();
+  }
+  // The selected basic-repair round has a separate durable, per-category cap.
+  // Increment in this same transaction before transport entry; a crash consumes
+  // the attempt and cannot silently grant a new request on restart.
+  const repair = job.basicRepairRequest;
+  if (repair?.bounds) {
+    const b = repair.bounds;
+    if (!b || !Array.isArray(repair.noteIds) || repair.noteIds.length < 1 || repair.noteIds.length > 8 ||
+        b.profile !== 1 || b.list !== 2 || b.detail !== repair.noteIds.length || b.media !== 0 ||
+        !b.used || !Array.isArray(b.detailIds) || !['profile','list','detail','media'].includes(category) ||
+        !Number.isSafeInteger(b.used[category]) || b.used[category] < 0 || b.used[category] >= b[category]) return bad();
+    if (category === 'detail') {
+      const key=JSON.stringify(['xiaohongshu','note',fence.noteId]);
+      if (!repair.noteIds.includes(key) || b.detailIds.includes(key)) return bad();
+      b.detailIds.push(key);
+    }
+    b.used[category]++;
   }
   // Count is observation; prevent unsafe-integer corruption without imposing a business quota.
   if (grant.used[category] >= Number.MAX_SAFE_INTEGER) return bad();
@@ -194,6 +214,7 @@ export async function commitWholeSourceCheckpoint(
   const removed =
     await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;
   if (removed !== 1) return bad();
+  await releaseReviewedRisk(tx,job,expectedOwner.nonce);
 }
 
 /** Release a media fence only with its own persisted resource receipt. */
@@ -220,6 +241,7 @@ export async function commitWholeMediaCheckpoint(tx: Tx, jobId: string, marker: 
   if (changed !== 1) return bad();
   const removed = await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;
   if (removed !== 1) return bad();
+  await releaseReviewedRisk(tx,job,expectedOwner.nonce);
 }
 
 /** Only the original dispatch stack may call this after proving transport never started. */
@@ -241,4 +263,5 @@ export async function releasePreparedWholeSourceFence(
   const removed =
     await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;
   if (removed !== 1) return bad();
+  await releaseReviewedRisk(tx,job,expectedOwner.nonce);
 }

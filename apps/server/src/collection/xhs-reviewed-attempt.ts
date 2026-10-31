@@ -7,6 +7,8 @@ import { legacyProofMatches, legacyBudgetDigest, assertLegacyDatabase } from './
 import { noUnresolvedRecovery } from './xhs-whole-source-fence';
 import { generationMatches } from './xhs-whole-generation';
 import { generationReviewMarkers } from './xhs-generation-review';
+import { assertReviewedRisk,claimReviewedRisk,releaseReviewedRisk } from './xhs-history-handoff';
+import { generationReviewSettled,verifiedReviewedNoteIds } from './xhs-whole-generation';
 type Tx=Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>;
 export const attemptDigest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const originalAttemptDigest=(job:any)=>attemptDigest({fence:job.sourceFence,code:job.code,grant:job.sourceGrant});
@@ -60,11 +62,11 @@ async function state(tx:Tx,input:AttemptScope,now:number){
  if(lock.length!==1) return bad();
  await noUnresolvedRecovery(tx);
  const risk=await tx.$queryRaw<Array<{state:string;code:string}>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
- if(risk.length!==1||risk[0].state!=='blocked'||risk[0].code!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')return bad();
  const rows=await tx.$queryRaw<Array<{document:string;state:string;creator_id:string;author:string;enabled:number|boolean}>>`SELECT j.document,j.state,j.creator_id,c.external_author_id AS author,c.enabled AS enabled FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${input.jobId}`;
  const expectedState=input.generationId?'partial':'paused';
  if(rows.length!==1||rows[0].state!==expectedState||rows[0].author!==input.authorId||(rows[0].enabled!==1&&rows[0].enabled!==true))return bad();
  const job=JSON.parse(rows[0].document),f=job.sourceFence,r=job.unknownReview;
+ await assertReviewedRisk(tx,job);
  if(input.generationId){
    const excluded=excludedGenerationFence(job,input.noteId);
    if(job.id!==input.jobId||job.creatorId!==rows[0].creator_id||job.state!=='partial'||job.generation?.id!==input.generationId||input.phase!=='detail'||input.maxRequests!==1||!excluded||attemptDigest(excluded)!==input.reviewId||originalAttemptDigest(job)!==input.originalHash)return bad();
@@ -91,6 +93,7 @@ async function state(tx:Tx,input:AttemptScope,now:number){
 /** Creates only a bounded intent. Never retires an unknown dispatch or schedules work. */
 export async function createReviewedAttempt(tx:Tx,input:AttemptScope,now=Date.now()){
  const s=await state(tx,input,now),id=attemptDigest(input);
+ if(input.generationId && verifiedReviewedNoteIds(s.job).includes(JSON.stringify(['xiaohongshu','note',input.noteId])))return bad();
  if(s.job.reviewContext && s.job.reviewContext.state!=='ready')return bad();
  if(s.job.reviewAttempt){if(s.job.reviewAttempt.id===id&&attemptDigest(s.job.reviewAttempt.scope)===id&&s.job.reviewAttempt.state==='prepared')return {id,state:'prepared' as const};return bad();}
  s.job.reviewAttempt={id,scope:input,state:'prepared',budgets:s.budgets};
@@ -102,6 +105,17 @@ export async function createReviewedAttempt(tx:Tx,input:AttemptScope,now=Date.no
 export async function createReviewedContextIntent(tx:Tx,input:AttemptScope,now=Date.now()){
  if(!input.generationId || input.phase!=='detail' || input.maxRequests!==1)return bad();
  const s=await state(tx,input,now);
+ if(verifiedReviewedNoteIds(s.job).includes(JSON.stringify(['xiaohongshu','note',input.noteId])))return bad();
+ if(s.job.reviewAttempt && generationReviewSettled(s.job)) {
+   const previous=s.job.reviewContext, completed=s.job.reviewAttempt;
+   if(previous && (!previous.scope || previous.id!==attemptDigest(previous.scope) || previous.state!=='ready' ||
+     previous.scope.jobId!==input.jobId || previous.scope.generationId!==input.generationId || previous.scope.authorId!==input.authorId || previous.scope.noteId!==completed.scope.noteId ||
+     !Array.isArray(previous.stages) || previous.stages.some((v:any)=>v.state!=='settled'||v.transportEntered!==true)))return bad();
+   if(!Array.isArray(s.job.reviewAttemptHistory))s.job.reviewAttemptHistory=[];
+   if(s.job.reviewAttemptHistory.length>=20)return bad();
+   s.job.reviewAttemptHistory.push(s.job.reviewAttempt);delete s.job.reviewAttempt;
+   if(s.job.reviewContext){if(!Array.isArray(s.job.reviewContextHistory))s.job.reviewContextHistory=[];if(s.job.reviewContextHistory.length>=20)return bad();s.job.reviewContextHistory.push(s.job.reviewContext);delete s.job.reviewContext;}
+ }
  const old=s.job.reviewAttempt;
  if(old && !preservedPrepared(s.job,{jobId:input.jobId,generationId:input.generationId,authorId:input.authorId,noteId:input.noteId,oldPreparedId:old.id}))return bad();
  const previous=s.job.reviewContext;
@@ -151,6 +165,7 @@ export async function startReviewedContextStage(tx:Tx,jobId:string,id:string,pha
  if(!Array.isArray(job.sourceGrant.phases)||!job.sourceGrant.phases.includes(phase)||!Number.isSafeInteger(job.sourceGrant.used[phase])||job.sourceGrant.used[phase]>=job.sourceGrant.limits[phase])return bad();
  const owner=createDispatchOwner();if(!owner)return bad();
  const marker=`xhs:dispatch-pending:context:${id}:${c.stages.length+1}`;
+ await claimReviewedRisk(tx,job,owner.nonce);
  for(const b of budgetRows){const n=await tx.$executeRaw`UPDATE xhs_request_budgets SET used=used+1,next_at=${BigInt(now+b.interval_ms)} WHERE id=${b.id} AND used=${b.used} AND next_at<=${BigInt(now)}`;if(n!==1)return bad();}
  job.sourceGrant.used[phase]++;context.state='started';context.stages.push({phase,state:'started',marker,owner});
  const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${jobId} AND state='partial' AND document=${rows[0].document}`;
@@ -167,12 +182,13 @@ export async function settleReviewedContextStage(tx:Tx,jobId:string,id:string,ma
    stage?.state!=='started'||stage.transportEntered!==true||stage.marker!==marker||!ownsDispatch(stage.owner,owner)||
    originalAttemptDigest({...job,sourceGrant:s.originalGrant})!==s.originalHash)return bad();
  const risk=await tx.$queryRaw<Array<{state:string;code:string}>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
- if(risk.length!==1||risk[0].state!=='blocked'||risk[0].code!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')return bad();
+ await assertReviewedRisk(tx,job,owner.nonce);
  stage.state='settled';c.state='prepared';
  const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${jobId} AND state='partial' AND document=${rows[0].document}`;
  if(n!==1)return bad();
  const removed=await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker} AND used=1 AND request_limit=1`;
  if(removed!==1)return bad();
+ await releaseReviewedRisk(tx,job,owner.nonce);
  return {state:'settled' as const};
 }
 /** Recheck the durable stage and source gate at the physical transport entry. */
@@ -189,7 +205,8 @@ export async function enterReviewedContextStage(tx:Tx,jobId:string,id:string,mar
  const children=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_subscription_tasks WHERE state IN ('queued','running') LIMIT 1`;
  const pending=await tx.$queryRaw<Array<{id:string;used:number;request_limit:number}>>`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
  const allowed=[job.generation.origin.fence.marker,...generationReviewMarkers(job),marker];
- if(risk.length!==1||risk[0].state!=='blocked'||risk[0].code!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'||writers.length||children.length||
+ await assertReviewedRisk(tx,job,owner.nonce);
+ if(writers.length||children.length||
     new Set(allowed).size!==allowed.length||pending.length!==allowed.length||pending.some(p=>!allowed.includes(p.id)||p.used!==1||p.request_limit!==1))return bad();
  stage.transportEntered=true;const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${jobId} AND state='partial' AND document=${rows[0].document}`;
  if(n!==1)return bad();return {state:'entered' as const};
@@ -203,7 +220,7 @@ export async function markReviewedContextReady(tx:Tx,jobId:string,id:string,expe
     c.state!=='prepared'||!preservedPrepared(job,s)||!Array.isArray(c.stages)||c.stages.some((v:any)=>v.state!=='settled'||v.transportEntered!==true||!['profile','list'].includes(v.phase))||
     originalAttemptDigest({...job,sourceGrant:s.originalGrant})!==s.originalHash)return bad();
  const risk=await tx.$queryRaw<Array<{state:string;code:string}>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
- if(risk.length!==1||risk[0].state!=='blocked'||risk[0].code!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')return bad();
+ await assertReviewedRisk(tx,job);
  if(job.reviewAttempt){if(!Array.isArray(job.reviewAttemptHistory))job.reviewAttemptHistory=[];if(job.reviewAttemptHistory.length>=20)return bad();job.reviewAttemptHistory.push(job.reviewAttempt);delete job.reviewAttempt;}
  c.state='ready';const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${jobId} AND state='partial' AND document=${rows[0].document}`;
  if(n!==1)return bad();return {state:'ready' as const};
@@ -214,6 +231,7 @@ export async function consumeReviewedAttempt(tx:Tx,input:AttemptScope,id:string,
  if(s.job.reviewContext && (s.job.reviewContext.state!=='ready'||s.job.reviewContext.scope?.oldPreparedId===id))return bad();
  if(!a||a.id!==id||id!==attemptDigest(input)||attemptDigest(a.scope)!==id||a.state!=='prepared'||JSON.stringify(a.budgets)!==JSON.stringify(s.budgets))return bad();
  const owner=createDispatchOwner();if(!owner)return bad();
+ await claimReviewedRisk(tx,s.job,owner.nonce);
  a.state='consumed';a.owner=owner;a.consumedAt=now;
  const expectedState=input.generationId?'partial':'paused';
  const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(s.job)} WHERE id=${input.jobId} AND state=${expectedState} AND document=${s.raw}`;

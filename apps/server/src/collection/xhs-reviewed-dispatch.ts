@@ -3,6 +3,7 @@ import { consumeReviewedAttempt, AttemptScope, attemptDigest, startReviewedConte
 import { ownsDispatch } from './xhs-dispatch-owner';
 import { noUnresolvedRecovery } from './xhs-whole-source-fence';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { assertReviewedRisk,releaseReviewedRisk } from './xhs-history-handoff';
 type Tx=Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>;
 export type RecoveryWriter=<T>(fn:(tx:Tx)=>Promise<T>)=>Promise<T>;
 const bad=():never=>{throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED')};
@@ -75,7 +76,7 @@ export async function dispatchReviewedSource<T,R>(write:RecoveryWriter,input:Att
      if(rows.length!==1)return bad();const job=JSON.parse(rows[0].document),a=job.reviewAttempt;
      if((rows[0].enabled!==1&&rows[0].enabled!==true)||rows[0].author!==input.authorId||a?.dispatch?.creatorId!==rows[0].creator_id||a?.id!==id||a.state!=='consumed'||a.dispatch?.marker!==marker||a.dispatch.transportEntered||!ownsDispatch(a.dispatch.owner,owner))return bad();
      const risk=await tx.$queryRaw<Array<{code:string}>>`SELECT code FROM xhs_source_risk WHERE id='source' AND state='blocked'`;
-     if(risk.length!==1||risk[0].code!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')return bad();
+     await assertReviewedRisk(tx,job,owner.nonce);
      if(input.generationId){
        const writers=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1`;
        const children=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_subscription_tasks WHERE state IN ('queued','running') LIMIT 1`;
@@ -103,6 +104,7 @@ export async function dispatchReviewedSource<T,R>(write:RecoveryWriter,input:Att
    const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${input.jobId} AND state=${expectedState} AND document=${rows[0].document}`;
    if(n!==1)return bad();
    const removed=await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;if(removed!==1)return bad();
+   await releaseReviewedRisk(tx,job,owner.nonce);
    return result;
  });
 }

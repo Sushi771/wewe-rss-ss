@@ -4,6 +4,7 @@ import { assertLegacyDatabase, legacyBudgetDigest, legacyProofMatches } from './
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { generationReviewMarkers } from './xhs-generation-review';
+import { assertReviewedRisk } from './xhs-history-handoff';
 
 type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 type Budget = { id: string; used: number; request_limit: number; next_at: bigint | number; interval_ms: number };
@@ -26,6 +27,21 @@ export function generationReviewSettled(job:any):boolean {
     a.state==='checkpointed' && d?.state==='checkpointed' && d.transportEntered===true && d.marker==='xhs:dispatch-pending:review:'+a.id && d.creatorId===job.creatorId &&
     r?.creatorId===job.creatorId && r.noteId===JSON.stringify(['xiaohongshu','note',s.noteId]) && ['saved','retained'].includes(r.body) &&
     ['pending','none','needs-review'].includes(r.media) && Number.isSafeInteger(r.mediaCount) && r.mediaCount>=0;
+}
+/** Successful receipts remain usable after process exit; compare their persisted owner identities. */
+export function verifiedReviewedNoteIds(job:any):string[] {
+  if(!generationMatches(job))return [];
+  try { generationReviewMarkers(job); } catch { return []; }
+  const candidates=[job.reviewAttempt,...(Array.isArray(job.reviewAttemptHistory)?job.reviewAttemptHistory:[]),job.historyHandoff?.settledAttempt];
+  const ids:string[]=[];
+  for(const a of candidates){
+    const o=a?.owner,d=a?.dispatch?.owner;
+    if(!o||!d||!Number.isSafeInteger(o.pid)||o.pid<1||typeof o.startIdentity!=='string'||!/^[0-9]{15,20}$/.test(o.startIdentity)||
+      typeof o.nonce!=='string'||!/^[a-f0-9-]{36}$/.test(o.nonce)||o.pid!==d.pid||o.startIdentity!==d.startIdentity||o.nonce!==d.nonce||
+      !generationReviewSettled({...job,reviewAttempt:a}))continue;
+    ids.push(a.receipt.noteId);
+  }
+  return [...new Set(ids)].sort();
 }
 const identity = (g: any) => ({ id: g.id, profileUrl: g.profileUrl, createdAt: g.createdAt, phaseLimits: g.phaseLimits, origin: g.origin });
 function historicalJob(job: any) {
@@ -75,7 +91,8 @@ async function jobRow(tx: Tx, id: string) {
   if (rows.length !== 1 || (rows[0].enabled !== 1 && rows[0].enabled !== true)) return bad();
   return { ...rows[0], job: JSON.parse(rows[0].document) };
 }
-async function riskReady(tx: Tx) {
+async function riskReady(tx: Tx, job?:any) {
+  if(job?.historyHandoff){await assertReviewedRisk(tx,job,job.generation?.activeFence?.owner?.nonce);return;}
   const rows = await tx.$queryRaw<Array<{ state: string; code: string }>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
   if (rows.length !== 1 || rows[0].state !== 'blocked' || rows[0].code !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED') return bad();
 }
@@ -86,7 +103,7 @@ export async function historicalGenerationMarker(tx: Tx, scope: GenerationScope)
   if (r.creator_id !== scope.creatorId || r.author !== scope.authorId || job.id !== scope.jobId ||
       !generationMatches(job) || g.id !== scope.generationId || !['prepared', 'running'].includes(g.state) ||
       !['paused', 'partial', 'queued', 'running'].includes(r.state) || !generationReviewSettled(job)) return bad();
-  await riskReady(tx); await noOtherRecovery(tx);
+  await riskReady(tx,job); await noOtherRecovery(tx);
   const budgets = await budgetRows(tx, scope.jobId);
   if (budgets.length !== 2) return bad();
   for (const old of g.origin.budgets) {
