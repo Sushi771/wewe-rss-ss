@@ -28,6 +28,7 @@ import { bindXhsSourceTotalBudget } from './xhs-source-request-policy';
 import { legacyBudgetDigest } from './xhs-legacy-review';
 import { createWholeGeneration } from './xhs-whole-generation';
 import { prepareWholeSourceFence, markWholeSourceStarted, commitWholeSourceCheckpoint } from './xhs-whole-source-fence';
+import { attemptDigest, createReviewedContextIntent, consumeReviewedAttempt, originalAttemptDigest, startReviewedContextStage, enterReviewedContextStage, settleReviewedContextStage } from './xhs-reviewed-attempt';
 
 const hash = (v:unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 describe('whole creator generation through real runtime, policy and SQLite', () => {
@@ -576,6 +577,125 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect((await subscriptions.task({taskId:job.listTask})).mediaSummary).toMatchObject({pendingImages:1,needsDetailRefreshNotes:1});
     expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();await assertUnknownPreserved();
   },15000);
+  it.each(['fresh','old-prepared','entry-rollback'] as const)('separates versioned context intent from old detail permits: %s',async mode=>{
+    await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
+    const initial=await read(),proof=initial.legacyMaintenanceProof,initialBudgets=await db.$queryRaw<any[]>`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total')`;
+    proof.scope.budgetDigest=legacyBudgetDigest(initial,initialBudgets,'job');
+    proof.proofId=hash({scope:proof.scope,lockIdentity:proof.lockIdentity,lockNonce:proof.lockNonce,holder:proof.holder,snapshot:proof.snapshot});
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(initial)} WHERE id='job'`;original=JSON.parse(JSON.stringify(initial));
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    if(mode==='old-prepared')await whole.prepareReviewedAttempt({jobId:'job',confirmUnknownRetry:true,excludedNoteId:'note'});
+    const job=await read(), rows=await db.$queryRaw<Array<{id:string;used:number}>>`SELECT id,used FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total')`;
+    const task=rows.find(x=>x.id==='job')!,shared=rows.find(x=>x.id==='xhs:source-total')!;
+    const scope={jobId:'job',generationId:id,authorId:'author',noteId:'note',phase:'detail',originalHash:originalAttemptDigest(job),reviewId:attemptDigest(job.generation.origin.fence),maxRequests:1,taskUsedCeiling:task.used+4,sharedUsedCeiling:shared.used+4,expiresAt:Date.now()+60000};
+    const before=JSON.stringify(job.reviewAttempt),calls=api.mock.calls.length;
+    if(mode==='old-prepared'){
+      const old=job.reviewAttempt;await expect(db.$transaction(tx=>createReviewedContextIntent(tx,scope))).resolves.toMatchObject({state:'prepared'});
+      expect((await read()).reviewAttempt).toEqual(old);
+      await expect(db.$transaction(tx=>consumeReviewedAttempt(tx,old.scope,old.id))).rejects.toThrow();
+    }
+    else {
+      const intent=await db.$transaction(tx=>createReviewedContextIntent(tx,scope));expect(intent.state).toBe('prepared');
+      await expect(db.$transaction(tx=>createReviewedContextIntent(tx,scope))).rejects.toThrow();
+      await expect(whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]})).rejects.toThrow();
+      expect((await read()).reviewContext.scope.limits).toEqual({profile:1,list:2,detail:1,media:0});
+      await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=0 WHERE id IN ('job','xhs:source-total')`;
+      const target={authorId:'author',noteId:'note'};
+      await expect(db.$transaction(tx=>startReviewedContextStage(tx,'job',intent.id,'list',{...target,authorId:'wrong'}))).rejects.toThrow();
+      const attempts=await Promise.allSettled([db.$transaction(tx=>startReviewedContextStage(tx,'job',intent.id,'list',target)),db.$transaction(tx=>startReviewedContextStage(tx,'job',intent.id,'list',target))]);
+      const started=attempts.filter((v):v is PromiseFulfilledResult<Awaited<ReturnType<typeof startReviewedContextStage>>>=>v.status==='fulfilled');
+      expect(started).toHaveLength(1);const first=started[0].value;
+      await expect(db.$transaction(tx=>startReviewedContextStage(tx,'job',intent.id,'list',target))).rejects.toThrow();
+      expect((await read()).reviewContext.stages[0].state).toBe('started');
+      if(mode==='entry-rollback'){
+        await expect(db.$transaction(async tx=>{await enterReviewedContextStage(tx,'job',intent.id,first.marker,first.owner);throw Error('synthetic entry commit failure');})).rejects.toThrow();
+        expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${first.marker}`).toHaveLength(1);
+        await expect(db.$transaction(tx=>startReviewedContextStage(tx,'job',intent.id,'list',target))).rejects.toThrow();
+        expect(api.mock.calls.length).toBe(calls);await assertUnknownPreserved();return;
+      }
+      await db.$transaction(tx=>enterReviewedContextStage(tx,'job',intent.id,first.marker,first.owner));
+      await db.$transaction(tx=>settleReviewedContextStage(tx,'job',intent.id,first.marker,first.owner));
+      await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=0 WHERE id IN ('job','xhs:source-total')`;
+      const second=await db.$transaction(tx=>startReviewedContextStage(tx,'job',intent.id,'list',target));
+      await db.$transaction(tx=>enterReviewedContextStage(tx,'job',intent.id,second.marker,second.owner));
+      await db.$transaction(tx=>settleReviewedContextStage(tx,'job',intent.id,second.marker,second.owner));
+      await expect(db.$transaction(tx=>startReviewedContextStage(tx,'job',intent.id,'list',target))).rejects.toThrow();
+    }
+    expect(JSON.stringify((await read()).reviewAttempt)).toBe(before);expect(api.mock.calls.length).toBe(calls);await assertUnknownPreserved();
+  },15000);
+  it.each(['success','cached','old-prepared','profile-rebuild','profile-wrong','second-page','lost','second-lost','restricted','wrong-author','missing','exhausted','ready-restart','ready-cached'] as const)('recovers only one excluded note through bounded context: %s',async mode=>{
+    await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
+    const initial=await read(),proof=initial.legacyMaintenanceProof,initialBudgets=await db.$queryRaw<any[]>`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total')`;
+    proof.scope.budgetDigest=legacyBudgetDigest(initial,initialBudgets,'job');proof.proofId=hash({scope:proof.scope,lockIdentity:proof.lockIdentity,lockNonce:proof.lockNonce,holder:proof.holder,snapshot:proof.snapshot});
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(initial)} WHERE id='job'`;original=JSON.parse(JSON.stringify(initial));
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);await whole.prepareGeneration(input);const generationId=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId,confirmUnknown:true,selectedIds:[safe]});await drain();
+    if(mode==='profile-rebuild'||mode==='profile-wrong')await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_remove(document,'$.generation.profile') WHERE id='job'`;
+    if(mode!=='cached')(runtime as any).adapter.clearAccessContext();
+    const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{
+      if(mode==='profile-wrong'&&new URL(req.url).pathname.endsWith('/user/otherinfo'))return {status:200,url:req.url,body:{success:true,code:0,data:{author:{...author,id:'other'}}}};
+      if(new URL(req.url).pathname.endsWith('/user_posted')){
+        if(mode==='lost')throw new RedbookPauseError('transport');
+        if(mode==='second-lost'){const cursor=new URL(req.url).searchParams.get('cursor');if(cursor)throw new RedbookPauseError('transport');return {status:200,url:req.url,body:{success:true,code:0,data:{notes:[{note_id:'safe',user:{user_id:'author'},xsec_token:'synthetic-list-token'}],has_more:true,cursor:'page-2'}}};}
+        if(mode==='restricted')return {status:461,url:req.url,body:{success:false,code:461}};
+        if(mode==='second-page'){const cursor=new URL(req.url).searchParams.get('cursor');return {status:200,url:req.url,body:{success:true,code:0,data:{notes:[{note_id:cursor?'note':'safe',user:{user_id:'author'},xsec_token:'synthetic-list-token'}],has_more:!cursor,cursor:cursor?'':'page-2'}}};}
+        if(mode==='exhausted'){const cursor=new URL(req.url).searchParams.get('cursor');return {status:200,url:req.url,body:{success:true,code:0,data:{notes:[{note_id:cursor?'other-2':'other-1',user:{user_id:'author'},xsec_token:'synthetic-list-token'}],has_more:true,cursor:cursor?'page-3':'page-2'}}};}
+        if(mode==='wrong-author')return {status:200,url:req.url,body:{success:true,code:0,data:{notes:[{note_id:'note',user:{user_id:'other'},xsec_token:'synthetic'}],has_more:false,cursor:''}}};
+        if(mode==='missing')return {status:200,url:req.url,body:{success:true,code:0,data:{notes:[],has_more:false,cursor:''}}};
+      }
+      return normal(req);
+    });
+    api.mockClear();await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=0 WHERE id IN ('job','xhs:source-total')`;
+    if(mode==='old-prepared')await whole.prepareReviewedAttempt({jobId:'job',excludedNoteId:'note',confirmUnknownRetry:true});
+    const oldAttempt=(await read()).reviewAttempt;
+    if(mode==='old-prepared'){const view=await whole.view('job');expect(view.reviewedRecovery).toBeUndefined();expect(view.generationRecovery?.retryableExcludedIds).toContain(noteKey);}
+    const context=await whole.prepareReviewedContext({jobId:'job',excludedNoteId:'note',confirmUnknownRetry:true});
+    if(mode==='old-prepared'){expect((await read()).reviewAttempt).toEqual(oldAttempt);const view=await whole.view('job');expect(view.contextRecovery?.state).toBe('prepared');expect(view.reviewedRecovery).toBeUndefined();}
+    const executeContext=()=>whole.executeReviewedContext({jobId:'job',contextId:context.id,confirmUnknownRetry:true});
+    if(mode==='ready-restart'||mode==='ready-cached'){
+      const prepare=jest.spyOn(whole,'prepareReviewedAttempt').mockRejectedValueOnce(new Error('synthetic interruption after ready'));
+      await expect(executeContext()).rejects.toThrow('synthetic interruption after ready');prepare.mockRestore();
+      expect((await read()).reviewContext.state).toBe('ready');expect(requestedDetails()).toEqual([]);
+      const calls=api.mock.calls.length;
+      if(mode==='ready-restart'){
+        runtime.onModuleDestroy();services();
+        expect((await whole.view('job')).contextRecovery?.state).toBe('ready');
+        await expect(executeContext()).rejects.toThrow();expect(api.mock.calls.length).toBe(calls);
+        const next=await whole.prepareReviewedContext({jobId:'job',excludedNoteId:'note',confirmUnknownRetry:true});
+        expect((await read()).reviewContextHistory).toHaveLength(1);expect(api.mock.calls.length).toBe(calls);
+        await whole.executeReviewedContext({jobId:'job',contextId:next.id,confirmUnknownRetry:true});
+      }else await executeContext();
+      expect(requestedDetails()).toEqual(['note']);expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic body note');
+      const done=api.mock.calls.length;await expect(executeContext()).rejects.toThrow();expect(api.mock.calls.length).toBe(done);
+    } else if(mode==='success'||mode==='cached'||mode==='old-prepared'||mode==='profile-rebuild'||mode==='second-page'){
+      await expect(executeContext()).resolves.toMatchObject({noteId:noteKey});
+      expect(requestedDetails()).toEqual(['note']);expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic body note');
+      expect(api.mock.calls.filter(([req]:any[])=>new URL(req.url).pathname.endsWith('/user_posted'))).toHaveLength(mode==='cached'?0:mode==='second-page'?2:1);
+      if(mode==='profile-rebuild')expect(api.mock.calls.filter(([req]:any[])=>new URL(req.url).pathname.endsWith('/user/otherinfo'))).toHaveLength(1);
+      const calls=api.mock.calls.length;await expect(executeContext()).rejects.toThrow();expect(api.mock.calls.length).toBe(calls);
+      if(mode==='old-prepared')expect((await read()).reviewAttemptHistory).toEqual([oldAttempt]);
+    } else {
+      await expect(executeContext()).rejects.toThrow();const calls=api.mock.calls.length;
+      if(mode==='lost'||mode==='second-lost'){runtime.onModuleDestroy();services();}
+      await expect(executeContext()).rejects.toThrow();expect(api.mock.calls.length).toBe(calls);expect(requestedDetails()).toEqual([]);
+      const after=await read();expect(JSON.stringify(after)).not.toContain('synthetic-list-token');
+      if(mode==='lost'||mode==='second-lost')expect(after.reviewContext.stages.at(-1).state).toBe('started');
+      if(mode==='restricted')expect((await db.$queryRaw<Array<{code:string}>>`SELECT code FROM xhs_source_risk WHERE id='source'`)[0].code).toBe('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');
+      if(mode==='missing'||mode==='exhausted'){
+        expect(api.mock.calls.filter(([req]:any[])=>new URL(req.url).pathname.endsWith('/user_posted'))).toHaveLength(mode==='exhausted'?2:1);
+        const again=await whole.prepareReviewedContext({jobId:'job',excludedNoteId:'note',confirmUnknownRetry:true});
+        expect(again.id).not.toBe(context.id);expect((await read()).reviewContextHistory).toHaveLength(1);expect(api.mock.calls.length).toBe(calls);
+      }
+    }
+    expect(media).not.toHaveBeenCalled();await assertUnknownPreserved();
+  },20000);
   it('explicitly resumes selected media without repeating detail and refuses the historical unknown',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});

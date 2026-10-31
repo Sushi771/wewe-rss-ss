@@ -1,4 +1,4 @@
-import { dispatchReviewedSource } from './xhs-reviewed-dispatch';
+import { dispatchReviewedSource, dispatchReviewedContextStage, type ContextBinding } from './xhs-reviewed-dispatch';
 import type { AttemptScope } from './xhs-reviewed-attempt';
 import { retainedGenerationMarkers } from './xhs-whole-generation';
 import { writeSourceReceipt } from './xhs-source-receipt';
@@ -527,4 +527,7 @@ export async function prepareXhsOriginalLink(
 
 export function dispatchReviewedWholeSource<T,R>(db:PrismaService,input:AttemptScope,id:string,request:{authorId:string;noteId:string;phase:string},ready:()=>void|Promise<void>,transport:(permit: import('./xhs-reviewed-dispatch').ReviewedTransportPermit)=>Promise<T>,checkpoint:(tx:Prisma.TransactionClient,value:T)=>Promise<R>){
  return dispatchReviewedSource(fn=>write(db,tx=>fn(tx),8*1024*1024+65536),input,id,request,ready,transport,(tx,value)=>checkpoint(tx as Prisma.TransactionClient,value));
+}
+export function dispatchReviewedWholeContext<T>(db:PrismaService,binding:ContextBinding,ready:()=>void|Promise<void>,transport:(permit:object)=>Promise<T>){
+ return dispatchReviewedContextStage(fn=>write(db,tx=>fn(tx)),binding,ready,transport);
 }

@@ -36,6 +36,8 @@ function render(data, component = 'default') {
       extendWholeCreatorHistoryPhase: { useMutation: mutation },
       prepareWholeCreatorReviewedAttempt: { useMutation: mutation },
       executeWholeCreatorReviewedAttempt: { useMutation: mutation },
+      prepareWholeCreatorReviewedContext: { useMutation: mutation },
+      executeWholeCreatorReviewedContext: { useMutation: mutation },
       prepareWholeCreatorGeneration: { useMutation: mutation },
       executeWholeCreatorGeneration: { useMutation: mutation },
       reviewWholeCreatorGeneration: { useMutation: mutation },
@@ -187,7 +189,7 @@ function recoveryInteraction(initial, component = 'default') {
   const hooks={useState(value){const at=index++;if(!(at in slots))slots[at]=value;return[slots[at],v=>{slots[at]=typeof v==='function'?v(slots[at]):v;}];},useRef(value){const at=index++;if(!(at in slots))slots[at]={current:value};return slots[at];}};
   const mutation=name=>({useMutation:options=>{assert.equal(options.retry,false);return{isLoading:false,mutateAsync:async input=>{calls.push({name,input});return work(name,input);}};}});
   const api={wholeCreatorJobs:{useQuery:()=>({data,refetch:async()=>{refetches++;}})}};
-  for(const name of ['startWholeCreator','resumeWholeCreator','cancelWholeCreator','extendWholeCreatorBudget','extendWholeCreatorHistoryPhase','prepareWholeCreatorReviewedAttempt','executeWholeCreatorReviewedAttempt','prepareWholeCreatorGeneration','executeWholeCreatorGeneration','reviewWholeCreatorGeneration','resumeWholeCreatorMedia','resumeWholeCreatorMissingBasic'])api[name]=mutation(name);
+  for(const name of ['startWholeCreator','resumeWholeCreator','cancelWholeCreator','extendWholeCreatorBudget','extendWholeCreatorHistoryPhase','prepareWholeCreatorReviewedAttempt','executeWholeCreatorReviewedAttempt','prepareWholeCreatorReviewedContext','executeWholeCreatorReviewedContext','prepareWholeCreatorGeneration','executeWholeCreatorGeneration','reviewWholeCreatorGeneration','resumeWholeCreatorMedia','resumeWholeCreatorMissingBasic'])api[name]=mutation(name);
   const mod={exports:{}};
   const output=ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2021,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;
   new Function('require','exports','module',output)(name=>name==='react'?hooks:name==='@web/utils/trpc'?{trpc:{xiaohongshu:api}}:resolve(name),mod.exports,mod);
@@ -205,13 +207,41 @@ test('partial generation prepares only an explicitly selected excluded note',asy
   h.nodes(tree,n=>n.type==='select'&&h.nodes(n,x=>x.type==='option'&&x.props.value===id).length)[0].props.onChange({target:{value:id}});
   tree=h.draw();h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});
   tree=h.draw();assert.equal(button().props.disabled,false);button().props.onClick();await new Promise(setImmediate);
-  assert.deepEqual(h.calls,[{name:'prepareWholeCreatorReviewedAttempt',input:{jobId:'job',confirmUnknownRetry:true,excludedNoteId:'synthetic-note'}}]);
+  assert.deepEqual(h.calls,[{name:'prepareWholeCreatorReviewedContext',input:{jobId:'job',confirmUnknownRetry:true,excludedNoteId:'synthetic-note'}}]);
 });
 test('single recovery distinguishes live execution and an unrecognized media manifest',()=>{
   const base={id:'job',state:'partial',items:[],updatedAt:1,reviewedRecovery:{state:'in-progress',noteId:'note',phase:'detail'}};
   const live=render([base]);assert.match(live,/单篇详情请求执行中/);assert.doesNotMatch(live,/本次恢复已提交，但结果未确认/);
   const saved=render([{...base,reviewedRecovery:{state:'checkpointed',receipt:{body:'saved',media:'needs-review',mediaCount:0}}}]);
   assert.match(saved,/图片清单待核对/);assert.doesNotMatch(saved,/图片无/);
+});
+test('author context recovery shows its exact budget and requires explicit confirmation without a link',async()=>{
+  const job={id:'job',state:'partial',items:[],updatedAt:1,contextRecovery:{id:'a'.repeat(64),noteId:'synthetic-note',state:'prepared'}};
+  const h=recoveryInteraction([job]);let tree=h.draw();
+  assert.match(JSON.stringify(tree),/目录 2 页/);assert.equal(h.nodes(tree,n=>n.type==='input'&&n.props.type==='url').length,0);
+  let button=h.nodes(tree,n=>n.type==='button'&&n.props.children==='执行单篇恢复')[0];assert.equal(button.props.disabled,true);
+  h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();
+  button=h.nodes(tree,n=>n.type==='button'&&n.props.children==='执行单篇恢复')[0];assert.equal(button.props.disabled,false);button.props.onClick();await new Promise(setImmediate);
+  assert.deepEqual(h.calls,[{name:'executeWholeCreatorReviewedContext',input:{jobId:'job',contextId:'a'.repeat(64),confirmUnknownRetry:true}}]);
+});
+test('a completed but insufficient context permits only explicit re-preparation',async()=>{
+  const job={id:'job',state:'partial',items:[],updatedAt:1,contextRecovery:{id:'a'.repeat(64),noteId:'synthetic-note',state:'incomplete'}};
+  const h=recoveryInteraction([job]);let tree=h.draw();assert.equal(h.calls.length,0);
+  let button=h.nodes(tree,n=>n.type==='button'&&n.props.children==='重新准备')[0];assert.equal(button.props.disabled,true);
+  h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();
+  button=h.nodes(tree,n=>n.type==='button'&&n.props.children==='重新准备')[0];button.props.onClick();await new Promise(setImmediate);
+  assert.deepEqual(h.calls,[{name:'prepareWholeCreatorReviewedContext',input:{jobId:'job',excludedNoteId:'synthetic-note',confirmUnknownRetry:true}}]);
+});
+
+test('ready context requires confirmation for continuation or re-preparation',async()=>{
+  const job={id:'job',state:'partial',items:[],updatedAt:1,contextRecovery:{id:'a'.repeat(64),noteId:'synthetic-note',state:'ready'}};
+  for(const [label,name,input] of [['继续单篇恢复','executeWholeCreatorReviewedContext',{jobId:'job',contextId:'a'.repeat(64),confirmUnknownRetry:true}],['重新准备','prepareWholeCreatorReviewedContext',{jobId:'job',excludedNoteId:'synthetic-note',confirmUnknownRetry:true}]]){
+    const h=recoveryInteraction([job]);let tree=h.draw();assert.equal(h.calls.length,0);
+    assert.equal(h.nodes(tree,n=>n.type==='button'&&n.props.children===label)[0].props.disabled,true);
+    h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});tree=h.draw();
+    h.nodes(tree,n=>n.type==='button'&&n.props.children===label)[0].props.onClick();await new Promise(setImmediate);
+    assert.deepEqual(h.calls,[{name,input}]);
+  }
 });
 
 test('legacy recovery explains the remaining unknown and submits separate consent only after confirmation',async()=>{

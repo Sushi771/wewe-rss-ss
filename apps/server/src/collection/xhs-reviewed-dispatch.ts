@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import { consumeReviewedAttempt, AttemptScope, attemptDigest } from './xhs-reviewed-attempt';
+import { consumeReviewedAttempt, AttemptScope, attemptDigest, startReviewedContextStage, enterReviewedContextStage, settleReviewedContextStage } from './xhs-reviewed-attempt';
 import { ownsDispatch } from './xhs-dispatch-owner';
 import { noUnresolvedRecovery } from './xhs-whole-source-fence';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
@@ -14,6 +14,34 @@ export function consumeReviewedTransportPermit(permit:unknown,scope:AttemptScope
  const bound=permits.get(permit);permits.delete(permit);
  if(!bound||bound.digest!==attemptDigest(scope)||!ownsDispatch(bound.owner,bound.owner))return bad();
  return bound;
+}
+export type ContextBinding={jobId:string;id:string;authorId:string;noteId:string;phase:'profile'|'list'};
+const contextPermits=new WeakMap<object,{binding:ContextBinding;dispatch:<T>(operation:()=>Promise<T>)=>Promise<T>}>();
+export function consumeReviewedContextPermit(permit:unknown,binding:ContextBinding){
+ if(!permit||typeof permit!=='object')return bad();
+ const found=contextPermits.get(permit);contextPermits.delete(permit);
+ if(!found||JSON.stringify(found.binding)!==JSON.stringify(binding))return bad();
+ return found;
+}
+/** Each context request is charged and fenced at transport entry and settled only after parsing. */
+export async function dispatchReviewedContextStage<T>(write:RecoveryWriter,binding:ContextBinding,ready:()=>void|Promise<void>,transport:(permit:object)=>Promise<T>){
+ await ready();let started:Awaited<ReturnType<typeof startReviewedContextStage>>|undefined,entered=false;
+ const dispatch=async <V>(operation:()=>Promise<V>)=>{
+   if(entered)return bad();entered=true;let response:Promise<V>|undefined;
+   try{
+     await ready();started=await write(tx=>startReviewedContextStage(tx,binding.jobId,binding.id,binding.phase,binding));
+     await write(async tx=>{
+       await enterReviewedContextStage(tx,binding.jobId,binding.id,started!.marker,started!.owner);
+       await ready();response=operation();void response.catch(()=>{});
+     });
+     return await response!;
+   }catch(error){if(response)try{await response}catch{}throw error;}
+ };
+ const permit={};contextPermits.set(permit,{binding,dispatch});let result:T;
+ try{result=await transport(permit);}finally{contextPermits.delete(permit);}
+ if(!started||!entered)return bad();await ready();
+ await write(tx=>settleReviewedContextStage(tx,binding.jobId,binding.id,started!.marker,started!.owner));
+ return result;
 }
 /** One physical request; caller's normal runtime must provide authenticated transport and business checkpoint. */
 export async function dispatchReviewedSource<T,R>(write:RecoveryWriter,input:AttemptScope,id:string,request:{authorId:string;noteId:string;phase:string},ready:()=>void|Promise<void>,transport:(permit:ReviewedTransportPermit)=>Promise<T>,checkpoint:(tx:Tx,value:T)=>Promise<R>){

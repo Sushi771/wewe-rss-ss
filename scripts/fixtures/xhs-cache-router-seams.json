@@ -43,5 +43,15 @@
     "name": "resumeWholeCreatorMissingBasic",
     "before": null,
     "after": "resumeWholeCreatorMissingBasic: this.trpcService.protectedProcedure\n      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),noteIds:z.array(z.string().min(1).max(300)).min(1).max(1000)}).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.resumeMissingBasic(input));})"
+  },
+  {
+    "name": "prepareWholeCreatorReviewedContext",
+    "before": null,
+    "after": "prepareWholeCreatorReviewedContext: this.trpcService.protectedProcedure\n      .input(z.object({jobId:z.string().min(1).max(128),excludedNoteId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),confirmUnknownRetry:z.literal(true)}).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareReviewedContext(input));})"
+  },
+  {
+    "name": "executeWholeCreatorReviewedContext",
+    "before": null,
+    "after": "executeWholeCreatorReviewedContext: this.trpcService.protectedProcedure\n      .input(z.object({jobId:z.string().min(1).max(128),contextId:z.string().regex(/^[a-f0-9]{64}$/),confirmUnknownRetry:z.literal(true)}).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.executeReviewedContext(input));})"
   }
 ]

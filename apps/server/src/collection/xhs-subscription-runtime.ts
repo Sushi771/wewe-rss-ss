@@ -1,6 +1,6 @@
 import {projectWriterGate} from './project-writer-boundary';
 import { safeSourceFailure, type SafeSourceReceipt, type SafeSourceStage, type SourceReceiptScope } from './xhs-source-receipt';
-import { consumeReviewedTransportPermit } from './xhs-reviewed-dispatch';
+import { consumeReviewedTransportPermit, consumeReviewedContextPermit, type ContextBinding } from './xhs-reviewed-dispatch';
 import type { AttemptScope } from './xhs-reviewed-attempt';
 import { createDispatchOwner } from './xhs-dispatch-owner';
 import type { Prisma } from '@prisma/client';
@@ -83,6 +83,7 @@ export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
   private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
+  private readonly reviewedContext = new AsyncLocalStorage<{ binding: ContextBinding; started:boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
   private readonly wholeSourceGroup = new AsyncLocalStorage<
     WholeSourceGroup & { checkpointed: boolean; noteId?: string; sessionGeneration: number; receipt?: SafeSourceReceipt; receiptTail?: Promise<unknown>; persistReceipt?:(receipt:SafeSourceReceipt)=>Promise<unknown>; dispatchFailureCode?:string; closed:boolean }
@@ -428,6 +429,14 @@ export class XhsSubscriptionRuntime
           try { body=JSON.parse(request.body || ''); } catch { return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); }
           if(request.method!=='POST'||new URL(request.url).pathname!=='/api/sns/web/v1/feed'||body?.source_note_id!==reviewed.scope.noteId) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
         }
+        const context = this.reviewedContext.getStore();
+        if(context){
+          const url=new URL(request.url);
+          const matchesList=context.binding.phase==='list'&&url.pathname==='/api/sns/web/v1/user_posted'&&url.searchParams.get('user_id')===context.binding.authorId;
+          const matchesProfile=context.binding.phase==='profile'&&url.pathname==='/api/sns/web/v1/user/otherinfo'&&url.searchParams.get('target_user_id')===context.binding.authorId;
+          if(request.method!=='GET'||(!matchesList&&!matchesProfile))
+            return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        }
         const recovery = this.limitedRecoveryScope.getStore();
         if (recovery) {
           let body: any;
@@ -504,6 +513,13 @@ export class XhsSubscriptionRuntime
   }
   private async guardTransport<T>(operation: () => Promise<T>, charge?: Charge) {
     this.requireSession();
+    const context=this.reviewedContext.getStore();
+    if(context){
+      if(context.started||charge!==context.binding.phase)return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      context.started=true;
+      const generation=this.generation,signal=this.sessionAbort.signal;
+      return context.dispatch(()=>{this.reviewedReadyCheck()();if(generation!==this.generation||signal.aborted)return failure('XHS_SESSION_CHANGED');return operation();});
+    }
     const reviewed=this.reviewedSingle.getStore();
     if(reviewed){
       if(reviewed.started||charge!=='detail'||!['detail','metrics'].includes(reviewed.scope.phase))return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
@@ -608,7 +624,7 @@ export class XhsSubscriptionRuntime
       this.stopCode &&
       !(
         (this.limitedRecoveryScope.getStore() ||
-          this.wholeSourceGroup.getStore() || this.reviewedSingle.getStore()) &&
+          this.wholeSourceGroup.getStore() || this.reviewedSingle.getStore() || this.reviewedContext.getStore()) &&
         this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
       )
     )
@@ -800,7 +816,7 @@ export class XhsSubscriptionRuntime
     if (
       this.riskStore &&
       !this.limitedRecoveryScope.getStore() &&
-      !this.wholeSourceGroup.getStore() && !this.reviewedSingle.getStore()
+      !this.wholeSourceGroup.getStore() && !this.reviewedSingle.getStore() && !this.reviewedContext.getStore()
     ) {
       try {
         riskOwner = await this.riskStore.begin();
@@ -832,7 +848,7 @@ export class XhsSubscriptionRuntime
       }
       if (
         !this.limitedRecoveryScope.getStore() &&
-        !this.wholeSourceGroup.getStore() && !this.reviewedSingle.getStore()
+        !this.wholeSourceGroup.getStore() && !this.reviewedSingle.getStore() && !this.reviewedContext.getStore()
       )
         this.verified = true;
       return result;
@@ -926,6 +942,10 @@ export class XhsSubscriptionRuntime
     this.requireSession();
     return this.adapter.cachedOriginalLink(authorId, noteId);
   }
+  reviewedCachedOriginalLink(authorId:string,noteId:string) {
+    this.reviewedReadyCheck()();
+    return this.adapter.cachedOriginalLink(authorId,noteId);
+  }
   prepareOriginalLink(
     authorId: string,
     noteId: string,
@@ -966,6 +986,26 @@ export class XhsSubscriptionRuntime
     const match=/^\/(?:explore|discovery\/item)\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(url.pathname);
     if(url.protocol!=='https:'||url.hostname!=='www.xiaohongshu.com'||match?.[1]!==scope.noteId||!url.searchParams.get('xsec_token')||!sourceOriginalLink(raw,url,scope.noteId))return failure('XHS_URL_INVALID');
     return url;
+  }
+  async listReviewedContext(binding:ContextBinding,profile:{id:string;profileUrl:string;collectedAt:number},cursor:string|null,permit:unknown){
+    const capability=consumeReviewedContextPermit(permit,binding);
+    if(binding.phase!=='list'||profile?.id!==binding.authorId||profile.profileUrl!==`https://www.xiaohongshu.com/user/profile/${binding.authorId}`||!Number.isSafeInteger(profile.collectedAt)||profile.collectedAt<=0||this.reviewedContext.getStore()||this.reviewedSingle.getStore())return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    this.reviewedReadyCheck()();this.adapter.restoreDefaultAuthorAccess(binding.authorId);
+    return this.reviewedContext.run({binding,started:false,dispatch:capability.dispatch},async()=>{
+      const page=await this.withSession(()=>this.adapter.list(binding.authorId,cursor));
+      if(!this.reviewedContext.getStore()!.started||page.authorId!==binding.authorId)return failure('XHS_AUTHOR_MISMATCH');
+      return page;
+    });
+  }
+  async resolveReviewedContextAuthor(binding:ContextBinding,permit:unknown){
+    const capability=consumeReviewedContextPermit(permit,binding);
+    if(binding.phase!=='profile'||this.reviewedContext.getStore()||this.reviewedSingle.getStore())return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    this.reviewedReadyCheck()();
+    return this.reviewedContext.run({binding,started:false,dispatch:capability.dispatch},async()=>{
+      const resolved=await this.withSession(()=>this.adapter.resolve(`https://www.xiaohongshu.com/user/profile/${binding.authorId}`));
+      if(!this.reviewedContext.getStore()!.started||resolved.inputKind!=='profile'||resolved.author.id!==binding.authorId||resolved.author.profileUrl!==`https://www.xiaohongshu.com/user/profile/${binding.authorId}`)return failure('XHS_AUTHOR_MISMATCH');
+      return {...resolved.author,collectedAt:Date.now()};
+    });
   }
   async resolveReviewedNote(raw:string,scope:AttemptScope,permit:unknown) {
     const capability=consumeReviewedTransportPermit(permit,scope);

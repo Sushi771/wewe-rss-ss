@@ -2047,6 +2047,12 @@ export class TrpcRouter {
     executeWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),attemptId:z.string().regex(/^[a-f0-9]{64}$/),url:z.string().min(1).max(8192),confirmUnknownRetry:z.literal(true)}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.executeReviewedAttempt(input));}),
+    prepareWholeCreatorReviewedContext: this.trpcService.protectedProcedure
+      .input(z.object({jobId:z.string().min(1).max(128),excludedNoteId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),confirmUnknownRetry:z.literal(true)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareReviewedContext(input));}),
+    executeWholeCreatorReviewedContext: this.trpcService.protectedProcedure
+      .input(z.object({jobId:z.string().min(1).max(128),contextId:z.string().regex(/^[a-f0-9]{64}$/),confirmUnknownRetry:z.literal(true)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.executeReviewedContext(input));}),
     reviewWholeCreatorUnknown: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),expectedAuthorId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),expectedMarker:z.string().regex(/^xhs:dispatch-pending:whole:[a-f0-9-]{36}$/),expectedNoteId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),decision:z.enum(['defer','request-retry'])}).strict())
       .mutation(({input,ctx}) => {

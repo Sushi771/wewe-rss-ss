@@ -1,6 +1,6 @@
 import { reviewLegacyUnknown, legacyProofMatches } from './xhs-legacy-review';
-import { dispatchReviewedWholeSource } from './xhs-source-request-policy';
-import { attemptDigest, originalAttemptDigest, createReviewedAttempt, reviewedRecoveryView, excludedGenerationFence } from './xhs-reviewed-attempt';
+import { dispatchReviewedWholeSource, dispatchReviewedWholeContext } from './xhs-source-request-policy';
+import { attemptDigest, originalAttemptDigest, createReviewedAttempt, createReviewedContextIntent, markReviewedContextReady, reviewedRecoveryView, excludedGenerationFence } from './xhs-reviewed-attempt';
 import { reviewWholeUnknown, WholeUnknownReview } from './xhs-whole-unknown-review';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
@@ -155,7 +155,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             metrics: previous.metrics,
           };
       }
-      for (const key of ['sourceFence', 'sourceGrant', 'lastSourceOwnerReceipt', 'unknownReview', 'reviewAttempt', 'legacyMaintenanceProof', 'generation']) {
+      for (const key of ['sourceFence', 'sourceGrant', 'lastSourceOwnerReceipt', 'unknownReview', 'reviewAttempt', 'reviewAttemptHistory', 'reviewContext', 'reviewContextHistory', 'legacyMaintenanceProof', 'generation']) {
         if (durable[key] !== undefined) document[key] = durable[key];
         else delete document[key];
       }
@@ -419,6 +419,80 @@ export class XhsWholeCreatorService implements OnModuleInit {
       return createReviewedAttempt(tx,scope);
     });
   }
+  async prepareReviewedContext(input:{jobId:string;excludedNoteId:string;confirmUnknownRetry:true}) {
+    await this.readyForMutation();
+    if(input.confirmUnknownRetry!==true||this.starting.has(input.jobId)||this.running.has(input.jobId)||this.reviewing.has(input.jobId))throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    return this.write(async tx=>{
+      const rows=await tx.$queryRaw<Array<{document:string;author:string}>>`SELECT j.document,c.external_author_id AS author FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${input.jobId} AND j.state='partial'`;
+      if(rows.length!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      const job=JSON.parse(rows[0].document),f=excludedGenerationFence(job,input.excludedNoteId);
+      const budgets=await tx.$queryRaw<Array<{id:string;used:number}>>`SELECT id,used FROM xhs_request_budgets WHERE id IN (${input.jobId},'xhs:source-total')`;
+      const task=budgets.find(x=>x.id===input.jobId),shared=budgets.find(x=>x.id==='xhs:source-total');
+      if(!f||!task||!shared||job.sourceGrant?.authorId!==rows[0].author)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      return createReviewedContextIntent(tx,{jobId:input.jobId,generationId:job.generation.id,authorId:rows[0].author,noteId:input.excludedNoteId,phase:'detail',originalHash:originalAttemptDigest(job),reviewId:attemptDigest(f),maxRequests:1,taskUsedCeiling:task.used+4,sharedUsedCeiling:shared.used+4,expiresAt:Date.now()+900000});
+    });
+  }
+  async executeReviewedContext(input:{jobId:string;contextId:string;confirmUnknownRetry:true}) {
+    await this.readyForMutation();
+    if(input.confirmUnknownRetry!==true||this.starting.has(input.jobId)||this.reviewing.has(input.jobId)||this.running.has(input.jobId))throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    this.reviewing.add(input.jobId);
+    try {
+      const rows=await this.db.$queryRaw<Array<{document:string;creator_id:string}>>`SELECT document,creator_id FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state='partial'`;
+      if(rows.length!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      const job=JSON.parse(rows[0].document),context=job.reviewContext,scope=context?.scope;let profile=job.generation?.profile;
+      const resuming=context?.state==='ready';
+      const attempt=job.reviewAttempt, a=attempt?.scope;
+      const readyAttempt=!attempt || (attempt.state==='prepared' && !attempt.owner && !attempt.dispatch && attempt.id===attemptDigest(a) && attempt.id!==scope?.oldPreparedId && a?.jobId===input.jobId && a?.generationId===scope?.generationId && a?.authorId===scope?.authorId && a?.noteId===scope?.noteId && a?.phase==='detail' && a?.maxRequests===1);
+      if(!scope||context.id!==input.contextId||attemptDigest(scope)!==input.contextId||scope.expiresAt<=Date.now()||!Array.isArray(context.stages)||
+        (resuming ? (!readyAttempt||context.stages.some((v:any)=>v.state!=='settled'||v.transportEntered!==true||!['profile','list'].includes(v.phase))) : (context.state!=='prepared'||context.stages.length!==0||(attempt ? attempt.state!=='prepared'||attempt.id!==scope.oldPreparedId||attemptDigest(attempt.scope)!==attempt.id||!!attempt.owner||!!attempt.dispatch : !!scope.oldPreparedId)))||
+        scope.jobId!==input.jobId||scope.authorId!==job.sourceGrant?.authorId||scope.generationId!==job.generation?.id||!excludedGenerationFence(job,scope.noteId)||originalAttemptDigest({...job,sourceGrant:scope.originalGrant})!==scope.originalHash)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      const ready=this.runtime.reviewedReadyCheck();ready();
+      let cached=this.runtime.reviewedCachedOriginalLink(scope.authorId,scope.noteId),cursor:string|null=null;
+      const seen=new Set<string|null>();
+      const waitForBudget=async()=>{
+        const budgets=await this.db.$queryRaw<Array<{next_at:bigint}>>`SELECT next_at FROM xhs_request_budgets WHERE id IN (${input.jobId},'xhs:source-total')`;
+        if(budgets.length!==2)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        const delay=Math.max(0,...budgets.map(b=>Number(b.next_at)-Date.now()));
+        if(delay>60000)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        if(delay)await new Promise(resolve=>setTimeout(resolve,delay));ready();
+      };
+      if(resuming&&cached?.state!=='ready')throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+      if(cached?.state!=='ready'&&!profile){
+        await waitForBudget();
+        const binding={jobId:input.jobId,id:input.contextId,authorId:scope.authorId,noteId:scope.noteId,phase:'profile' as const};
+        profile=await dispatchReviewedWholeContext(this.db,binding,ready,permit=>this.runtime.resolveReviewedContextAuthor(binding,permit));
+      }
+      for(let page=0;cached?.state!=='ready'&&page<2;page++){
+        if(!profile)throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+        if(seen.has(cursor))throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');seen.add(cursor);
+        await waitForBudget();
+        const binding={jobId:input.jobId,id:input.contextId,authorId:scope.authorId,noteId:scope.noteId,phase:'list' as const};
+        const result=await dispatchReviewedWholeContext(this.db,binding,ready,permit=>this.runtime.listReviewedContext(binding,profile,cursor,permit));
+        cached=this.runtime.reviewedCachedOriginalLink(scope.authorId,scope.noteId);
+        if(cached?.state==='ready')break;
+        cursor=result.nextCursor;if(cursor===null)break;
+      }
+      if(cached?.state!=='ready')throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+      this.runtime.validateReviewedInput(cached.url,{...scope,phase:'detail',maxRequests:1});
+      if(!resuming)await this.write(tx=>markReviewedContextReady(tx,input.jobId,input.contextId,{authorId:scope.authorId,noteId:scope.noteId}));
+      const detail=await this.prepareReviewedAttempt({jobId:input.jobId,confirmUnknownRetry:true,excludedNoteId:scope.noteId});
+      const fresh=await this.db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state='partial'`;
+      if(fresh.length!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      const currentAttempt=JSON.parse(fresh[0].document).reviewAttempt;
+      if(!currentAttempt||currentAttempt.id!==detail.id)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      await waitForBudget();
+      const url=cached.url;
+      return await dispatchReviewedWholeSource(this.db,currentAttempt.scope,currentAttempt.id,{authorId:scope.authorId,noteId:scope.noteId,phase:'detail'},ready,permit=>this.runtime.resolveReviewedNote(url,currentAttempt.scope,permit),(tx,result)=>this.subscriptions.commitReviewedRecovery(tx,rows[0].creator_id,result));
+    } catch(error) {
+      const code=this.runtime.reviewedFailureCode();
+      if(code)await this.write(async tx=>{
+        await tx.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code=${code} WHERE id='source'`;
+        const current=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state='partial'`;
+        if(current.length===1){const job=JSON.parse(current[0].document);if(job.reviewContext?.id===input.contextId){job.reviewContext.failureCode=code;if(job.reviewAttempt?.state==='consumed')job.reviewAttempt.failureCode=code;await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${input.jobId} AND state='partial' AND document=${current[0].document}`;}}
+      });
+      throw error;
+    } finally {this.reviewing.delete(input.jobId);}
+  }
   async executeReviewedAttempt(input:{jobId:string;attemptId:string;url:string;confirmUnknownRetry:true}) {
     await this.readyForMutation();
     if(input.confirmUnknownRetry!==true)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
@@ -564,7 +638,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
   }
   async resume(id: string, generationId?: string, pickToken?: string, selectedIds?: string[]) {
     await this.readyForMutation();
-    if (this.starting.has(id) || this.running.has(id)) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    if (this.starting.has(id) || this.running.has(id) || this.reviewing.has(id)) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
     this.starting.add(id);
     let target:object | undefined;
     let admissionSnapshot: {state:string;document:string} | undefined;
@@ -1150,19 +1224,24 @@ export class XhsWholeCreatorService implements OnModuleInit {
       orderBy: { id: 'asc' },
       select: { id: true, title: true },
     });
-    const { sourceGrant, sourceFence, unknownReview, reviewAttempt, lastSourceOwnerReceipt, legacyMaintenanceProof, generation, ...visibleJob } = job as Job & Record<string, any>;
+    const { sourceGrant, sourceFence, unknownReview, reviewAttempt, reviewAttemptHistory, reviewContext, reviewContextHistory, lastSourceOwnerReceipt, legacyMaintenanceProof, generation, ...visibleJob } = job as Job & Record<string, any>;
     const newFence = generation && generationMatches(job) ? activeWholeFence(job) : undefined;
     const risk = await this.db.$queryRaw<Array<{ state: string; code: string }>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
     const historyReady = risk.length === 1 && risk[0].state === 'blocked' && risk[0].code === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED';
+    const oldPrepared = !!generation && reviewAttempt?.state==='prepared' && !reviewAttempt.owner && !reviewAttempt.dispatch && !!reviewAttempt.scope && reviewAttempt.id===attemptDigest(reviewAttempt.scope) && reviewAttempt.scope.generationId===generation.id && !!excludedGenerationFence(job,reviewAttempt.scope.noteId);
     const restricted = /^XHS_SOURCE_(?:AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(job.code ?? '');
     return {
       ...visibleJob,
-      reviewedRecovery: generation && !reviewAttempt ? undefined : reviewedRecoveryView(job,Date.now(),this.reviewing.has(id)),
+      contextRecovery: reviewContext && (!reviewAttempt || oldPrepared || (reviewContext.state==='ready' && reviewAttempt.state==='prepared' && !reviewAttempt.owner && !reviewAttempt.dispatch)) ? {
+        id:String(reviewContext.id), noteId:String(reviewContext.scope?.noteId ?? ''),
+        state: this.reviewing.has(id) ? 'in-progress' as const : reviewContext.failureCode ? 'restricted' as const : reviewContext.state==='started' ? 'unknown' as const : reviewContext.state==='ready' ? 'ready' as const : reviewContext.state==='prepared' && reviewContext.stages?.length===0 && reviewContext.scope?.expiresAt>Date.now() ? 'prepared' as const : reviewContext.state==='prepared' && Array.isArray(reviewContext.stages) && reviewContext.stages.every((v:any)=>v.state==='settled'&&v.transportEntered===true) ? 'incomplete' as const : 'needs-review' as const,
+      } : undefined,
+      reviewedRecovery: generation && (!reviewAttempt || oldPrepared || (reviewContext?.state==='ready' && reviewAttempt.state==='prepared' && !reviewAttempt.owner && !reviewAttempt.dispatch)) ? undefined : reviewedRecoveryView(job,Date.now(),this.reviewing.has(id)),
       generationRecovery: generation ? { id: String(generation.id), state: generation.state === 'prepared' && job.state === 'paused' ? 'prepared' : job.state, originalResult: 'unknown' as const,
         mediaRecoverableIds: reviewAttempt && generationReviewSettled(job) ? [reviewAttempt.receipt.noteId as string] : [],
         profileUrl: String(generation.profileUrl), profile: generation.profile, basicCompleted: !!generation.basicCompleted, selectedIds: generation.selectedIds as string[] | undefined, excludedIds: [generation.origin.fence, ...(generation.reviews ?? []).map((r: any) => r.fence)].filter((f: any) => !!f.noteId).map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])) as string[], directoryComplete: job.listEnd && !generation.selectedIds, selectionComplete: job.listEnd && !!generation.selectedIds && ['partial','completed'].includes(job.state), discovered: Number(generation.directoryIds?.length ?? 0),
         missing: Number(generation.missingIds?.length ?? 0), originalNoteStatus: String(generation.originalNoteStatus ?? 'unknown'),
-        retryableExcludedIds: historyReady && !restricted && job.state==='partial' && !reviewAttempt && !this.running.has(id) ? [generation.origin.fence,...(generation.reviews??[]).filter((r:any)=>r.decision==='exclude').map((r:any)=>r.fence)].filter((f:any)=>typeof f?.noteId==='string' && !!excludedGenerationFence(job,f.noteId)).map((f:any)=>JSON.stringify(['xiaohongshu','note',f.noteId])) as string[] : [],
+        retryableExcludedIds: historyReady && !restricted && job.state==='partial' && (!reviewAttempt||oldPrepared) && !reviewContext && !this.running.has(id) ? [generation.origin.fence,...(generation.reviews??[]).filter((r:any)=>r.decision==='exclude').map((r:any)=>r.fence)].filter((f:any)=>typeof f?.noteId==='string' && (!oldPrepared||f.noteId===reviewAttempt.scope.noteId) && !!excludedGenerationFence(job,f.noteId)).map((f:any)=>JSON.stringify(['xiaohongshu','note',f.noteId])) as string[] : [],
         excludeUnknownRequired: !!generation.selectedIds, newResult: restricted ? 'restricted' as const : newFence ? (job.state === 'running' && this.running.has(id) ? 'in-progress' as const : 'unknown' as const) : undefined,
         failure: generation.lastSourceReceipt?.code ? {stage:String(generation.lastSourceReceipt.stage),outcome:String(generation.lastSourceReceipt.outcome),code:String(generation.lastSourceReceipt.code ?? ''),status:generation.lastSourceReceipt.status as number|undefined,requiresStop:!!newFence && newFence.receipt?.settled===false && newFence.owner?.pid===process.pid} : job.state==='paused' && generation.localFailure ? {stage:String(generation.localFailure.stage),outcome:'local-failure',code:String(generation.localFailure.code),status:undefined,requiresStop:false} : undefined,
         reviewable: historyReady && !!newFence && !newFence.mediaAttempt && job.state==='paused' && !this.running.has(id) && (!generation.selectedIds || (newFence.phase==='detail' && !!newFence.noteId && generation.selectedIds.length>1 && generation.selectedIds.includes(JSON.stringify(['xiaohongshu','note',newFence.noteId])))) && (newFence.receipt?.settled===true || newFence.owner?.pid!==process.pid),

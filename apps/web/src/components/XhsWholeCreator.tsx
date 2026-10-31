@@ -36,6 +36,17 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
   });
   const prepareRecovery = trpc.xiaohongshu.prepareWholeCreatorReviewedAttempt.useMutation({ retry: false });
   const runRecovery = trpc.xiaohongshu.executeWholeCreatorReviewedAttempt.useMutation({ retry: false });
+  const prepareContext = trpc.xiaohongshu.prepareWholeCreatorReviewedContext.useMutation({ retry: false });
+  const runContext = trpc.xiaohongshu.executeWholeCreatorReviewedContext.useMutation({ retry: false });
+  const recoverFromAuthor = async (jobId:string, noteId?:string, contextId?:string) => {
+    if(recoveryBusy.current || recoveryJob!==jobId || !confirmed)return;
+    recoveryBusy.current=true;setRecovering(true);setConfirmed(false);setError('');
+    try {
+      if(contextId)await runContext.mutateAsync({jobId,contextId,confirmUnknownRetry:true});
+      else if(noteId)await prepareContext.mutateAsync({jobId,excludedNoteId:noteId,confirmUnknownRetry:true});
+    } catch {setError('恢复未完成，请查看当前状态；不会自动重发。');}
+    finally {await jobs.refetch().catch(()=>setError('状态刷新失败，请先刷新核对。'));recoveryBusy.current=false;setRecovering(false);}
+  };
   const recover = async (jobId: string, attemptId?: string, legacyUnknown = false, excludedNoteId?: string) => {
     if (recoveryBusy.current || recoveryJob !== jobId || !confirmed) return;
     recoveryBusy.current = true;
@@ -103,7 +114,7 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
           {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} />}
           {!!job.generationRecovery?.retryableExcludedIds?.length && !job.reviewedRecovery && (
             <div className="my-2 space-y-2 rounded border p-2">
-              <p>历史请求结果仍未知。仅可明确选择一篇，核对后准备一次详情恢复；已保存内容保留。</p>
+              <p>历史请求结果未知；请选择一篇。最多请求作者 1 次、目录 2 页及目标详情 1 次，不请求图片；已取得的上下文优先复用。</p>
               <label>选择已排除的笔记
                 <select value={recoveryJob === job.id ? excludedNote : ''} disabled={recovering} onChange={e=>{setRecoveryJob(job.id);setExcludedNote(e.target.value);setConfirmed(false);}}>
                   <option value="">请选择</option>
@@ -111,9 +122,25 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
                 </select>
               </label>
               <label><input type="checkbox" checked={recoveryJob===job.id && confirmed} disabled={recovering} onChange={e=>{setRecoveryJob(job.id);setConfirmed(e.target.checked);}} />我确认只为所选笔记准备一次详情恢复。</label>
-              <button disabled={recovering || recoveryJob!==job.id || !confirmed || !job.generationRecovery.retryableExcludedIds.includes(excludedNote)} onClick={()=>{const tuple=JSON.parse(excludedNote);void recover(job.id,undefined,false,tuple[2]);}}>核对并准备单篇恢复</button>
+              <button disabled={recovering || recoveryJob!==job.id || !confirmed || !job.generationRecovery.retryableExcludedIds.includes(excludedNote)} onClick={()=>{const tuple=JSON.parse(excludedNote);void recoverFromAuthor(job.id,tuple[2]);}}>核对并准备单篇恢复</button>
             </div>
           )}
+          {job.contextRecovery && !job.reviewedRecovery && <div className="my-2 space-y-2 rounded border p-2">
+            {job.contextRecovery.state==='prepared' ? <>
+              <p>恢复范围仅限该笔记：最多作者 1 次、目录 2 页、详情 1 次，图片 0 次。来源受限或结果未知即停止。</p>
+              <label><input type="checkbox" checked={recoveryJob===job.id && confirmed} disabled={recovering} onChange={e=>{setRecoveryJob(job.id);setConfirmed(e.target.checked);}} />确认按上述范围恢复</label>
+              <button disabled={recovering||recoveryJob!==job.id||!confirmed} onClick={()=>void recoverFromAuthor(job.id,undefined,job.contextRecovery?.id)}>执行单篇恢复</button>
+            </> : job.contextRecovery.state==='ready' ? <>
+              <p role="status">上下文已就绪，详情尚未发送。若重启后上下文已失效，请重新准备；不会自动重发未知请求。</p>
+              <label><input type="checkbox" checked={recoveryJob===job.id && confirmed} disabled={recovering} onChange={e=>{setRecoveryJob(job.id);setConfirmed(e.target.checked);}} />确认继续或重新准备该笔记</label>
+              <button disabled={recovering||recoveryJob!==job.id||!confirmed} onClick={()=>void recoverFromAuthor(job.id,undefined,job.contextRecovery?.id)}>继续单篇恢复</button>
+              <button disabled={recovering||recoveryJob!==job.id||!confirmed} onClick={()=>void recoverFromAuthor(job.id,job.contextRecovery?.noteId)}>重新准备</button>
+            </> : job.contextRecovery.state==='incomplete' ? <>
+              <p role="status">目录检查未完成或未找到目标；可以明确确认后重新准备，预算仍为作者最多 1 次、目录 2 页、详情 1 次。</p>
+              <label><input type="checkbox" checked={recoveryJob===job.id && confirmed} disabled={recovering} onChange={e=>{setRecoveryJob(job.id);setConfirmed(e.target.checked);}} />确认重新准备该笔记</label>
+              <button disabled={recovering||recoveryJob!==job.id||!confirmed} onClick={()=>void recoverFromAuthor(job.id,job.contextRecovery?.noteId)}>重新准备</button>
+            </> : <p role="status">{job.contextRecovery.state==='in-progress'?'正在恢复，请勿重复提交。':job.contextRecovery.state==='restricted'?'来源受限，已停止。':job.contextRecovery.state==='unknown'?'请求结果未知，已停止且不会自动重发。':'上下文未完成，请先核对；不会自动重发。'}</p>}
+          </div>}
           <p role="status">
             {{ queued: '等待中', running: '同步中', paused: '已暂停', partial: '部分完成', failed: '未完成', cancelled: '已取消', completed: '已完成' }[job.state] ?? '状态待确认'} · 已发现 {job.items.length} 篇
           </p>

@@ -17,7 +17,7 @@ const bad = (): never => { throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENC
  * after its one authorized dispatch has a durable, identity-bound receipt. */
 export function generationReviewSettled(job:any):boolean {
   const a=job?.reviewAttempt;
-  if(!a)return true;
+  if(!a)return !job?.reviewContext;
   const s=a.scope,r=a.receipt,d=a.dispatch,g=job.generation;
   const fences=g?[g.origin?.fence,...(Array.isArray(g.reviews)?g.reviews.filter((x:any)=>x?.decision==='exclude').map((x:any)=>x.fence):[])].filter((f:any)=>f?.phase==='detail'&&f?.state==='started'&&f?.noteId===s?.noteId):[];
   return !!s && !!g && a.id===hash(s) && s.jobId===job.id && s.generationId===g.id && s.authorId===job.sourceGrant?.authorId &&
