@@ -27,6 +27,11 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
   );
   const url = 'https://mmbiz.qpic.cn/exact-resource?wx_fmt=png';
   let root: string, file: string, now: number;
+  let capacityTestWork: Promise<unknown> | undefined;
+  const trackCapacity = (work: () => Promise<void>) => {
+    capacityTestWork = work();
+    return capacityTestWork;
+  };
   let rows: Map<string, SavedMediaSnapshot>;
   let deps: AutomaticMediaDependencies;
   let fetch: jest.Mock, commit: jest.Mock, publish: jest.Mock, stop: jest.Mock;
@@ -51,6 +56,7 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     path.join(root, '.wechat2rss-automatic-media', 'queue.json');
   const state = async () => JSON.parse(await fs.readFile(stateFile(), 'utf8'));
   beforeEach(async () => {
+    capacityTestWork = undefined;
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'automatic-media-offline-'));
     file = path.join(root, 'data.db');
     await fs.writeFile(file, 'synthetic identity only');
@@ -101,8 +107,11 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     };
   });
   afterEach(async () => {
+    // Jest's timeout does not cancel the body. Join it before removing its
+    // files, without converting the timeout into a passing test.
+    await capacityTestWork?.catch(() => undefined);
     await fs.rm(root, { recursive: true, force: true });
-  });
+  }, 40000);
   it('deduplicates an exact URL across articles/jobs/restarts, then stores inline bytes without losing notes', async () => {
     await queue().tick();
     now += 1001;
@@ -663,11 +672,13 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect((await state()).articles[0].code).toBe('MEDIA_IDENTITY_UNVERIFIED');
   });
-  it('2GiB isolated: serialized bytes plus 14MB reservation has an exact boundary across restart', async () => {
+  it('2GiB isolated: serialized bytes plus 14MB reservation has an exact boundary across restart', () => trackCapacity(async () => {
+    const started = performance.now();
     deps.canFetch = () => false;
     const worker = queue(); await worker.tick();
     const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
     for (let n=0;n<153;n++) await fs.writeFile(path.join(folder, `${n.toString(16).padStart(64,'0')}.json`), '{}');
+    const prepared = performance.now();
     const original = fs.lstat.bind(fs);
     const stat = jest.spyOn(fs as any,'lstat').mockImplementation(async (name: any) => {
       const result = await original(name); const base = path.basename(String(name));
@@ -679,12 +690,14 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
       const first=worker as unknown as {capacity(n:number):Promise<void>};
       await expect(first.capacity(14_000_000)).resolves.toBeUndefined();
       await expect(first.capacity(14_000_001)).rejects.toThrow('MEDIA_STORAGE_CAPACITY');
+      const checked = performance.now();
       const restarted=queue(); await restarted.tick();
       const again=restarted as unknown as {capacity(n:number):Promise<void>};
       await expect(again.capacity(14_000_000)).resolves.toBeUndefined();
       expect(fetch).not.toHaveBeenCalled();
+      console.info('capacity timing ms', { setup: Math.round(prepared-started), checks: Math.round(checked-prepared), restart: Math.round(performance.now()-checked) });
     } finally {stat.mockRestore();}
-  });
+  }));
   it('2GiB isolated: concurrent queue instances serialize one outbound attempt', async () => {
     rows = new Map([row(1),row(2,[url+'&n=2'])].map((entry)=>[entry.id,entry]));
     fetch.mockImplementation(async()=>{ await new Promise((resolve)=>setTimeout(resolve,100)); return {bytes:png,type:'image/png'}; });
@@ -692,19 +705,23 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('2GiB isolated: concurrent reservation near quota never starts a second fetch after restart', async () => {
+  it('2GiB isolated: concurrent reservation near quota never starts a second fetch after restart', () => trackCapacity(async () => {
+    const started = performance.now();
     deps.canFetch=()=>false; rows=new Map([row(1),row(2,[url+'&n=2'])].map((entry)=>[entry.id,entry]));
     const first=queue(); await first.tick();
     const folder=path.join(root,'.wechat2rss-automatic-media','bytes');
     for(let n=0;n<153;n++) await fs.writeFile(path.join(folder,`${n.toString(16).padStart(64,'0')}.json`),'{}');
+    const prepared = performance.now();
     const original=fs.lstat.bind(fs);
     const stat=jest.spyOn(fs as any,'lstat').mockImplementation(async(name:any)=>{const result=await original(name);const base=path.basename(String(name));const n=parseInt(base.slice(0,64),16);if(/^[a-f0-9]{64}\.json$/.test(base)&&n<153)Object.assign(result,{size:n<152?14_000_000:5_483_648});return result;});
     try {
       deps.canFetch=()=>true; fetch.mockImplementation(async()=>{await new Promise((resolve)=>setTimeout(resolve,100));return {bytes:png,type:'image/png'};});
       await Promise.all([first.tick(),queue().tick()]); expect(fetch).toHaveBeenCalledTimes(1);
+      const concurrent = performance.now();
       now+=1001; await queue().tick(); expect(fetch).toHaveBeenCalledTimes(1);
       expect(publish).toHaveBeenCalledWith(expect.anything(),'MEDIA_STORAGE_CAPACITY');
+      console.info('capacity concurrency timing ms', { setup: Math.round(prepared-started), concurrent: Math.round(concurrent-prepared), restart: Math.round(performance.now()-concurrent) });
     } finally {stat.mockRestore();}
-  });
+  }));
 
 });
