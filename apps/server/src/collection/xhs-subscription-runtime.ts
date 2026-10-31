@@ -1145,6 +1145,7 @@ export class XhsSubscriptionRuntime
     }
     return result;
   }
+  withScheduledMediaSession<T>(work:(transport:RedbookMediaTransport)=>Promise<T>) { return this.withSession(()=>work(this.mediaTransport)); }
   getTransientMediaUrl(authorId:string,noteId:string,version:string,resourceKey:string) {
     if(!this.cookies||this.sessionAbort.signal.aborted||(this.stopCode && this.stopCode!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'))return undefined;
     const id=JSON.stringify([authorId,noteId]), entry=this.transientMedia.get(id);

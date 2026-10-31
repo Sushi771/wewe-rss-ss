@@ -68,6 +68,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Synthetic source, session, storage and shared grouping regressions
         run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu|subscription-video|media-transaction|saved-media-writeback)|trpc/(xiaohongshu-ui|management-groups)|platform-export-target|article-folder-picker|xhs-cached-local-export|article-local-save|xhs-single-download|xhs-video-download|article-verified-download|feeds/(automatic-media-queue|automatic-media-storage)|media-large-export)'
+      - name: Scheduled round admission and batching
+        run: node --experimental-transform-types --test apps/server/src/collection/xhs-scheduled-admission.test.mjs apps/server/src/collection/xhs-scheduled-runner.test.mjs
       - name: Legacy maintenance native synthetic regressions
         if: runner.os == 'Windows'
         run: |

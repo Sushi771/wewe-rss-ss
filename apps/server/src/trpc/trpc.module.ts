@@ -1,3 +1,4 @@
+import { XhsScheduledService } from '../collection/xhs-scheduled.service';
 import { bindXhsSourceTotalBudget } from '../collection/xhs-source-request-policy';
 import { XhsSourceRiskStore } from '../collection/xhs-source-risk-store';
 import { XhsLimitedRecoveryStore } from '../collection/xhs-limited-recovery-store';
@@ -33,6 +34,7 @@ import {
     CollectionService,
     XiaohongshuService,
     XhsSubscriptionService,
+    XhsScheduledService,
     XhsBatchSubscriptionService,
     XhsEngagementService,
     XhsWholeCreatorService,
