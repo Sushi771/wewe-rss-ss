@@ -38,6 +38,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
   let setupPromise: Promise<void> = Promise.resolve();
   let fixtureReady = true;
   let cleanupPromise: Promise<void> | undefined;
+  let restoreDeleteJournal = false;
   const track = (fn: (...args: any[]) => unknown) => (...args: any[]) => {
     testBody = Promise.resolve().then(() => fn(...args));
     return testBody;
@@ -58,6 +59,16 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
   const currentBudget=async()=>db.$queryRaw<Array<{id:string;used:number}>>`SELECT id,used FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total') ORDER BY id`;
   const execute=async(id?:string)=>(whole as any).executeGeneration({jobId:'job',generationId:id??(await read()).generation.id,confirmUnknown:true});
   const drain=async()=>{await (whole as any).lane;await (subscriptions as any).lane;};
+  // Only the two bulk fixtures use WAL; durable FULL synchronization remains
+  // required by the production transaction guard and is checked here too.
+  const useDurableWal=async()=>{
+    const before=await db.$queryRawUnsafe<Array<{journal_mode:string}>>('PRAGMA journal_mode');
+    if(!['delete','wal'].includes(before[0]?.journal_mode?.toLowerCase()))throw Error('Unexpected synthetic journal mode');
+    restoreDeleteJournal=before[0].journal_mode.toLowerCase()==='delete';
+    const mode=await db.$queryRawUnsafe<Array<{journal_mode:string}>>('PRAGMA journal_mode=WAL');
+    const sync=await db.$queryRawUnsafe<Array<{synchronous:bigint}>>('PRAGMA synchronous');
+    expect(mode[0].journal_mode.toLowerCase()).toBe('wal');expect(Number(sync[0].synchronous)).toBeGreaterThanOrEqual(2);
+  };
   function services() {
     runtime=new XhsSubscriptionRuntime({enabled:()=>live,api,shortLinks,media,requirePersistentRisk:true,profileParser:(raw:any)=>raw.author});
     runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
@@ -115,7 +126,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     })(); return setupPromise;
   },15000);
   afterEach(async()=>{
-    cleanupPromise ??= (async()=>{await setupPromise.catch(()=>{});await testBody.catch(()=>{});if(whole) await (whole as any).lane;if(subscriptions) await (subscriptions as any).lane;if(whole) await whole.onModuleDestroy();if(subscriptions) await subscriptions.onModuleDestroy();if(runtime) runtime.onModuleDestroy();jest.restoreAllMocks();fixtureReady=true;})();
+    cleanupPromise ??= (async()=>{await setupPromise.catch(()=>{});await testBody.catch(()=>{});if(whole) await (whole as any).lane;if(subscriptions) await (subscriptions as any).lane;if(whole) await whole.onModuleDestroy();if(subscriptions) await subscriptions.onModuleDestroy();if(runtime) runtime.onModuleDestroy();if(restoreDeleteJournal){await db.$disconnect();db=new PrismaClient({datasources:{db:{url:'file:'+path.join(folder,'fixture.db').replace(/\\/g,'/')}}});db.$use(async(params,next)=>['queryRaw','executeRaw'].includes(params.action)?sqliteWrites.write(()=>next(params)):next(params));const mode=await db.$queryRawUnsafe<Array<{journal_mode:string}>>('PRAGMA journal_mode=DELETE');if(mode[0]?.journal_mode?.toLowerCase()!=='delete')throw Error('Synthetic journal restoration failed');restoreDeleteJournal=false;}jest.restoreAllMocks();fixtureReady=true;})();
     await cleanupPromise;
   },40000);
   afterAll(async()=>{if (!fixtureReady) throw new Error("Test fixture still in use");await db.$disconnect();await rm(folder,{recursive:true,force:true});},40000);
@@ -716,6 +727,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await assertUnknownPreserved();
   },20000);
   it('repairs only eight selected missing basics and reuses fourteen complete notes',async()=>{
+    await useDurableWal();
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), names=Array.from({length:22},(_,i)=>'repair-'+String(i).padStart(2,'0'));
     for(const name of [...names,'second-unknown'])await db.xhsNote.create({data:{id:key(name),creatorId:'creator',title:name,publishTime:0,kind:'image-text',status:'listed'}});
     directory(['note',...names,'second-unknown']);const normal=api.getMockImplementation()!;let first=true;
@@ -888,6 +900,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(requestedDetails()).toEqual(['safe-a','safe-b']);expect(media).toHaveBeenCalledTimes(1);expect((await db.xhsNote.findUnique({where:{id:b}}))?.contentHtml).toContain('Synthetic body safe-b');await assertUnknownPreserved();
   },20000);
   it('collects a synthetic 21-note basic range while excluding two unknown notes',async()=>{
+    await useDurableWal();
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), safe=Array.from({length:21},(_,i)=>'safe-'+String(i).padStart(2,'0'));
     for(const name of ['second-unknown',...safe])await db.xhsNote.create({data:{id:key(name),creatorId:'creator',title:name,publishTime:0,kind:'image-text',status:'listed'}});
     directory(['note','second-unknown',...safe]);await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,detail:30}});const id=(await read()).generation.id;
