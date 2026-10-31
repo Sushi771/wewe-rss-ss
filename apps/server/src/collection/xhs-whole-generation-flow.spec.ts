@@ -291,14 +291,16 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(await db.xhsMetricSnapshot.count()).toBe(0);expect(await currentBudget()).toEqual([{id:'job',used:8},{id:'xhs:source-total',used:10}]);
   });
   it('explicitly reviews a settled parser failure then completes the same generation with both historical markers retained',async()=>{
+    const diagStart=performance.now();
+    const diagMark=(step:string)=>console.info('RECOVERY_CI_STAGE',{case:'parser',step,elapsedMs:Math.round(performance.now()-diagStart)});
     (observeDispatchOwner as jest.Mock).mockReturnValue('alive');
     (runtime as any).options.profileParser=()=>{throw new XhsSubscriptionError('XHS_PROFILE_SCHEMA_UNRECOGNIZED');};
-    await (whole as any).prepareGeneration(input);const generationId=(await read()).generation.id;
-    await execute(generationId);await drain();const failed=await read(),failedFence=failed.generation.activeFence;
+    await (whole as any).prepareGeneration(input);diagMark('prepared');const generationId=(await read()).generation.id;
+    await execute(generationId);await drain();diagMark('first-drained');const failed=await read(),failedFence=failed.generation.activeFence;
     expect(failedFence.receipt).toMatchObject({stage:'parse',status:200,settled:true,code:'XHS_PROFILE_SCHEMA_UNRECOGNIZED'});
     const beforeCounts=await currentBudget(),beforeRequests=api.mock.calls.length+shortLinks.mock.calls.length;
     const reviewInput={jobId:'job',generationId,confirmUnknown:true as const};
-    await whole.reviewGeneration(reviewInput);await drain();const reviewed=await read();
+    await whole.reviewGeneration(reviewInput);await drain();diagMark('reviewed');const reviewed=await read();
     expect(reviewed.state).toBe('paused');expect(reviewed.generation.activeFence).toBeUndefined();
     expect(reviewed.generation.reviews).toHaveLength(1);expect(reviewed.generation.reviews[0].fence).toEqual(failedFence);
     expect(reviewed.generation.lastSourceReceipt).toEqual(failedFence.receipt);
@@ -324,7 +326,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
       }
       return value;
     });
-    await execute(generationId);await drain();const completed=await read();
+    await execute(generationId);await drain();diagMark('resume-drained');const completed=await read();
     expect(lateChecked).toBe(true);expect(lateCode).toBe('XHS_WHOLE_SOURCE_FENCE_BLOCKED');expect(newMarker).not.toBe(failedFence.marker);
     expect(completed.state).toBe('partial');expect(completed.generation.id).toBe(generationId);expect(completed.generation.activeFence).toBeUndefined();
     expect(completed.generation.reviews).toEqual(reviewed.generation.reviews);
@@ -468,16 +470,18 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await assertUnknownPreserved();
   });
   it('explicitly resumes a known interruption and skips committed cached details',async()=>{
+    const diagStart=performance.now();
+    const diagMark=(step:string)=>console.info('RECOVERY_CI_STAGE',{case:'interruption',step,elapsedMs:Math.round(performance.now()-diagStart)});
     directory(['note','second']);let stopped=false;
     const checkpoint=runtime.checkpointWholeSource.bind(runtime);
     jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,at)=>{
       await checkpoint(tx,at);
       if(!stopped && (runtime as any).wholeSourceGroup.getStore()?.phase==='detail'){stopped=true;live=false;}
     });
-    await (whole as any).prepareGeneration(input);const id=(await read()).generation.id;await execute(id);await drain();
+    await (whole as any).prepareGeneration(input);diagMark('prepared');const id=(await read()).generation.id;await execute(id);await drain();diagMark('first-drained');
     const paused=await read();expect(paused.state).toBe('paused');expect(paused.generation.activeFence).toBeUndefined();
     expect(requestedDetails()).toEqual(['note']);const child=await subscriptions.task({taskId:paused.listTask});expect(child.completed).toBe(1);
-    live=true;await execute(id);await drain();const completed=await read();
+    live=true;await execute(id);await drain();diagMark('resume-drained');const completed=await read();
     expect(completed.state).toBe('partial');expect(completed.generation.id).toBe(id);
     expect(requestedDetails()).toEqual(['note','second']);await assertUnknownPreserved();
   });

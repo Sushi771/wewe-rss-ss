@@ -453,6 +453,8 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
     );
   });
   it('carries existing profile/detail responses through subscription transactions without extra source calls or handwritten overwrite', async () => {
+    const diagStart = performance.now();
+    const diagMark = (step: string) => console.info('RECOVERY_CI_STAGE', { case: 'engagement', step, elapsedMs: Math.round(performance.now() - diagStart) });
     const profileMetrics = xhsProfileMetrics(
       { interactions: [{ type: 'fans', count: '0' }] },
       300,
@@ -478,6 +480,7 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
       'author',
       'note',
     );
+    diagMark('detail-mapped');
     const source = {
       resolve: async () => ({
         inputKind: 'profile' as const,
@@ -498,10 +501,10 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
     const resolved = await service.resolveSubscription({
       url: 'https://www.xiaohongshu.com/user/profile/author',
     });
-    await service.subscribe({ resolutionId: resolved.resolutionId });
+    await service.subscribe({ resolutionId: resolved.resolutionId }); diagMark('subscribed');
     // This fixture exercises the manual saver and has no list adapter; let the
     // automatic cache task settle before using the same creator.
-    await (service as any).lane;
+    await (service as any).lane; diagMark('automatic-lane-drained');
     expect(
       (await readXhsMetrics(db, 'creator')).get(creator)?.values.fans,
     ).toBe(0);
@@ -523,6 +526,7 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
       (await service.downloadNotes({ creatorId: creator, noteIds: [note] }))
         .taskId,
     );
+    diagMark('first-download-complete');
     expect((await readXhsMetrics(db, 'note')).get(note)?.values).toMatchObject({
       likes: 19,
       shares: 0,
@@ -538,6 +542,7 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
       (await service.downloadNotes({ creatorId: creator, noteIds: [note] }))
         .taskId,
     );
+    diagMark('second-download-complete');
     expect(source.detail).toHaveBeenCalledTimes(1);
     expect(
       (await db.xhsNote.findUnique({ where: { id: note } }))?.contentHtml,

@@ -298,15 +298,17 @@ describe('protected transient original links and durable source budgets (offline
     expect(f.api).toHaveBeenCalledTimes(2);
   });
   it('waits for a future cooldown before dispatch and preserves the counter', async () => {
+    const diagStart = performance.now();
+    const diagMark = (step: string) => console.info('RECOVERY_CI_STAGE', { case: 'cooldown', step, elapsedMs: Math.round(performance.now() - diagStart) });
     const f = fixture();
-    await f.runtime.connectSession(cookies);
-    const p = await configureXhsSourceBudget(db as any, scope, 20, 1000);
+    await f.runtime.connectSession(cookies); diagMark('session-ready');
+    const p = await configureXhsSourceBudget(db as any, scope, 20, 1000); diagMark('budget-configured');
     await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=${BigInt(now + 60000)} WHERE id=${p.budgetId}`;
     const wait = jest.spyOn(f.runtime, 'waitForSourceRate').mockImplementation(async () => { expect(f.api).not.toHaveBeenCalled(); now += 60000; });
-    expect((await prepareXhsOriginalLink(db as any, f.runtime, { noteId })).state).toBe('ready');
+    expect((await prepareXhsOriginalLink(db as any, f.runtime, { noteId })).state).toBe('ready'); diagMark('link-prepared');
     expect(wait).toHaveBeenCalled();
     expect(f.api).toHaveBeenCalledTimes(2);
-    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(2);
+    expect((await readXhsSourceBudget(db as any, scope))!.used).toBe(2); diagMark('counter-checked');
   });
   it('unknown refusal stops the shared session; later clicks cannot clear risk or dispatch', async () => {
     const f = fixture({ status: 461 });
