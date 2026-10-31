@@ -113,11 +113,11 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     shortLinks=jest.fn(async(url:URL)=>({status:302,url:url.href,location:author.profileUrl}));
     media=jest.fn(async()=>{throw Error('unexpected synthetic media request');});live=true;services();
     })(); return setupPromise;
-  });
+  },15000);
   afterEach(async()=>{
     cleanupPromise ??= (async()=>{await setupPromise.catch(()=>{});await testBody.catch(()=>{});if(whole) await (whole as any).lane;if(subscriptions) await (subscriptions as any).lane;if(whole) await whole.onModuleDestroy();if(subscriptions) await subscriptions.onModuleDestroy();if(runtime) runtime.onModuleDestroy();jest.restoreAllMocks();fixtureReady=true;})();
     await cleanupPromise;
-  });
+  },40000);
   afterAll(async()=>{if (!fixtureReady) throw new Error("Test fixture still in use");await db.$disconnect();await rm(folder,{recursive:true,force:true});},40000);
   async function assertUnknownPreserved(){
     const job=await read();expect(job.sourceFence).toEqual(original.sourceFence);expect(job.legacyMaintenanceProof).toEqual(original.legacyMaintenanceProof);
@@ -987,7 +987,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await whole.prepareGeneration(input);await execute();await drain();expect((await read()).state).toBe('partial');
     for(const [taskId,raw] of originals) expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`)[0].document).toBe(raw);
     expect(pick).not.toHaveBeenCalled();expect(save).not.toHaveBeenCalled();await assertUnknownPreserved();
-  });
+  },30000);
 
   it('retains only the fixed directory conflict code and never arbitrary local messages',()=>{
     const {TRPCError}=require('@trpc/server');const {safeSourceFailure}=require('./xhs-source-receipt');

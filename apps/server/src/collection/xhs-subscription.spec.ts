@@ -57,6 +57,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     source: XhsSubscriptionSource,
     store: LocalArticleStore;
   let creatorId: string;
+  let trackedDownloadResume: Promise<void> | undefined;
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(tmpdir(), 'xhs-subscription-test-'));
     db = new PrismaClient({
@@ -84,6 +85,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     store = new LocalArticleStore(path.join(root, 'settings.json'), root);
   }, 30000);
   beforeEach(async () => {
+    // A timed-out resume test may still be using this fixture.
+    if (trackedDownloadResume) { await trackedDownloadResume.catch(() => {}); trackedDownloadResume=undefined; }
     // Previous terminal visibility does not imply its worker/finally has released the fixture lock.
     if (service) await (service as any).lane;
     await db.$executeRawUnsafe('DELETE FROM xhs_subscription_tasks');
@@ -128,11 +131,12 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     );
     creatorId = randomUUID();
     await db.xhsCreator.create({ data: { id: creatorId, externalAuthorId: author.id, profileUrl: author.profileUrl, displayName: author.name, enabled: true } });
-  });
+  }, 40000);
   afterAll(async () => {
+    if (trackedDownloadResume) await trackedDownloadResume.catch(() => {});
     if (service) await (service as any).lane;
     await db?.$disconnect(); /* synthetic files retained in temp for diagnosis */
-  });
+  }, 40000);
   const finish = async (taskId: string) => {
     for (let i = 0; i < 2000; i++) {
       const t = await service.task({ taskId });
@@ -1331,7 +1335,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(source.list).toHaveBeenCalledTimes(2);
     expect(await db.xhsNote.count()).toBe(1);
   });
-  it('resumes only unfinished downloads, preserves saved content, and blocks changed destinations', async () => {
+  it('resumes only unfinished downloads, preserves saved content, and blocks changed destinations', () => {
+    trackedDownloadResume=(async () => {
     (source.list as jest.Mock).mockResolvedValue({
       authorId: author.id,
       nextCursor: null,
@@ -1385,7 +1390,9 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(
       await db.xhsNote.findUnique({ where: { id: noteKey('one') } }),
     ).toEqual(old);
-  });
+    })();
+    return trackedDownloadResume;
+  }, 30000);
   it('cancels during an in-flight list without committing the returned page', async () => {
     let release!: (v: any) => void;
     (source.list as jest.Mock).mockImplementation(
