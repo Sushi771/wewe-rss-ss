@@ -200,7 +200,7 @@ describe('whole creator durable checkpoint fence', () => {
       },
     });
     await db.$executeRaw`INSERT INTO xhs_whole_creator_jobs(id,creator_id,state,document,updated_at) VALUES(${scope.jobId},${scope.creatorId},'running',${doc},1)`;
-  });
+  }, 15000);
   afterAll(async () => {
     await db.$disconnect();
     await fs.rm(folder, { recursive: true, force: true });

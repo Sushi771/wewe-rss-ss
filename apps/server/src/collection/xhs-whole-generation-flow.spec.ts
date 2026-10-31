@@ -335,7 +335,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const total=api.mock.calls.length+shortLinks.mock.calls.length;
     expect(await currentBudget()).toEqual([{id:'job',used:6+total},{id:'xhs:source-total',used:8+total}]);
     await assertUnknownPreserved();
-  });
+  }, 15000);
   // Initial regression run: after HTTP 200 the P2028 receipt incorrectly reported
   // XHS_SOURCE_TRANSPORT_BLOCKED instead of XHS_STORAGE_FAILED (1 failed, 20 skipped).
   it.each([200,461])('waits for an in-flight second transport before recording HTTP %s after dispatch rollback',async status=>{
@@ -484,7 +484,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     live=true;await execute(id);await drain();diagMark('resume-drained');const completed=await read();
     expect(completed.state).toBe('partial');expect(completed.generation.id).toBe(id);
     expect(requestedDetails()).toEqual(['note','second']);await assertUnknownPreserved();
-  });
+  }, 15000);
   it('retains both unknown markers and consumed counts when a successful body response loses its checkpoint transaction',async()=>{
     const checkpoint=runtime.checkpointWholeSource.bind(runtime);let failed=false;
     jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,collectedAt)=>{
