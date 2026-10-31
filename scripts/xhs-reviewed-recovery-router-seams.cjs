@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const cacheRoutes = require('./fixtures/xhs-cache-router-seams.json');
 const reviewed = {
+  prepareXhsHistoryHandoff: '476459a9d1f88857253c0879c14a1c1931de5c2720265b01d641d72bd55f722f',
+  confirmXhsHistoryHandoff: '726e8b70d47125b914c14b1b144a8d83318c71c00fe87385a013915bd9906ade',
   reviewWholeCreatorGeneration: 'cfb034a14b0d09b8aa23cb46fb319fff9053e19c365c3ecaa9090cd457f086c9',
   prepareWholeCreatorGeneration: 'a6479de8618ec55f3a68fcc8cfe2b2874328aede67741113eb2ce0b5443dfcda',
   executeWholeCreatorGeneration: 'fe873f68bbeaf0e25feb61973c9e8becd7508337969f04cc81f345768784950b',
@@ -20,7 +22,7 @@ module.exports = function restorePreReviewedRecoveryRouter(ts, source) {
   const declaration = ast.statements.find(ts.isClassDeclaration);
   const member = declaration.members.find(node => node.name?.getText(ast) === 'xiaohongshuRouter');
   const routes = member.initializer.arguments[0].properties.filter(node => Object.hasOwn(reviewed, node.name.getText(ast)));
-  assert.equal(routes.length, 6, 'all reviewed recovery routes must be present');
+  assert.equal(routes.length, 8, 'all reviewed recovery routes must be present');
   for (const node of routes) {
     const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.JSX, node.getText(ast));
     const tokens = [];

@@ -59,7 +59,7 @@ test('reviewed recovery seam retains the exact existing router source', () => {
 
 test('reviewed recovery seam rejects missing routes and changed writable authentication', () => {
   const source = read('apps/server/src/trpc/trpc.router.ts');
-  for (const name of ['prepareWholeCreatorReviewedAttempt', 'executeWholeCreatorReviewedAttempt', 'reviewWholeCreatorUnknown']) {
+  for (const name of ['prepareWholeCreatorReviewedAttempt', 'executeWholeCreatorReviewedAttempt', 'reviewWholeCreatorUnknown', 'prepareXhsHistoryHandoff', 'confirmXhsHistoryHandoff']) {
     const declaration = name+': this.trpcService.protectedProcedure';
     assert.equal(source.split(declaration).length, 2);
     assert.throws(() => restorePreReviewedRecoveryRouter(ts, source.replace(declaration, name+': this.trpcService.publicProcedure')), /exact reviewed recovery route/);
