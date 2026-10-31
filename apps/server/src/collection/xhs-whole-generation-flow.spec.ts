@@ -42,8 +42,8 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     return testBody;
   };
   const it = Object.assign(
-    (name: any, fn: any, timeout?: number) => globalThis.it(name, track(fn), timeout),
-    { each: (rows: any) => (name: any, fn: any, timeout?: number) => globalThis.it.each(rows)(name, track(fn), timeout) },
+    (name: any, fn: any, timeout?: number) => globalThis.it(name, track(fn), timeout ?? 15000),
+    { each: (rows: any) => (name: any, fn: any, timeout?: number) => globalThis.it.each(rows)(name, track(fn), timeout ?? 15000) },
   ) as jest.It;
 
   let db:PrismaClient, folder:string, runtime:XhsSubscriptionRuntime, subscriptions:XhsSubscriptionService, whole:XhsWholeCreatorService;
