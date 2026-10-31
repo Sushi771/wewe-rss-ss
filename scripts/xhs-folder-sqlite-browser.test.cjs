@@ -48,5 +48,5 @@ if(process.env.XHS_FIXTURE_SMOKE==='1'){smoke().then(()=>console.log('synthetic 
   await wait('window.fixture.data?.items.length===3');await move('C','上移');assert.deepEqual(await ids(),['A','C','B']);await send('Page.reload');await wait('window.fixture.data?.items.length===3');assert.deepEqual(await ids(),['A','C','B']);
   await evaluate(`document.querySelector('[aria-label="新建文件夹"]').click()`);await pause(100);await evaluate(`(()=>{const i=document.querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,'D');i.dispatchEvent(new Event('input',{bubbles:true}));})()`);await pause(100);await evaluate(`Array.from(document.querySelectorAll('button')).find(n=>n.textContent==='保存').click()`);await wait('window.fixture.data?.items.length===4');await move('D','上移');assert.deepEqual(await ids(),['A','C','D','B']);await send('Page.reload');await wait('window.fixture.data?.items.length===4');assert.deepEqual(await ids(),['A','C','D','B']);
   assert.equal((await db.prisma.xhsCreator.findUnique({where:{id:'synthetic-author'}})).groupId,db.ids.b);
- },{}, {handleRequest:handler(db),cleanupOwnedFixture:true});}finally{await db.close()}
+ },{'@web':path.join(web,'src')}, {handleRequest:handler(db),cleanupOwnedFixture:true});}finally{await db.close()}
 });
