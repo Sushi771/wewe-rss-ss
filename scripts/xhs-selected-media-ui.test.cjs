@@ -34,8 +34,18 @@ test('lost acknowledgment refreshes status and never automatically retries',asyn
 
 test('recovery basic requires selected confirmation and distinguishes nothing missing from submitted task',async()=>{
  for(const [receipt,label] of [[{state:'nothing-missing'},/基础字段已齐全/],[{id:'job',state:'queued'},/已提交所选基础缺项/]]){
- const f=fixture(job,[id]);let tree=f.draw();const button=()=>f.nodes(tree,n=>n.type==='button')[0];assert.equal(button().props.disabled,true);f.nodes(tree,n=>n.type==='input')[0].props.onChange({target:{checked:true}});tree=f.draw();f.setWork(async()=>receipt);button().props.onClick();await tick();tree=f.draw();assert.deepEqual(f.calls,[{jobId:'job',generationId:'gen',noteIds:[id]}]);assert.match(f.strings(tree),label);assert.equal(f.refetches,1);assert.equal(button().props.disabled,true);
+ const f=fixture(job,[id]);let tree=f.draw();const button=()=>f.nodes(tree,n=>n.type==='button')[0];assert.equal(button().props.disabled,true);f.nodes(tree,n=>n.type==='input')[1].props.onChange({target:{checked:true}});tree=f.draw();f.setWork(async()=>receipt);button().props.onClick();await tick();tree=f.draw();assert.deepEqual(f.calls,[{jobId:'job',generationId:'gen',noteIds:[id]}]);assert.match(f.strings(tree),label);assert.equal(f.refetches,1);assert.equal(button().props.disabled,true);
  }
+});
+
+test('bounded basic repair requires fresh selection confirmation and carries the limit',async()=>{
+ const f=fixture(job,[id]);let tree=f.draw();const boxes=()=>f.nodes(tree,n=>n.type==='input'),button=()=>f.nodes(tree,n=>n.type==='button')[0];
+ boxes()[1].props.onChange({target:{checked:true}});tree=f.draw();assert.equal(button().props.disabled,false);
+ boxes()[0].props.onChange({target:{checked:true}});tree=f.draw();assert.equal(button().props.disabled,true);assert.deepEqual(f.calls,[]);
+ boxes()[1].props.onChange({target:{checked:true}});tree=f.draw();assert.equal(button().props.disabled,false);button().props.onClick();await tick();
+ assert.deepEqual(f.calls,[{jobId:'job',generationId:'gen',noteIds:[id],bounded:true}]);
+ const ids=Array.from({length:9},(_,i)=>JSON.stringify(['xiaohongshu','note',`n${i}`]));
+ const many=fixture({...job,items:ids.map(noteId=>({noteId,title:'Synthetic'}))},ids);let t=many.draw();many.nodes(t,n=>n.type==='input')[0].props.onChange({target:{checked:true}});t=many.draw();assert.equal(many.nodes(t,n=>n.type==='button')[0].props.disabled,true);assert.deepEqual(many.calls,[]);
 });
 
 
