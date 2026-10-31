@@ -72,6 +72,38 @@ describe('explicit review appends generation unknown without deleting markers or
   });
   afterAll(async()=>{await db.$disconnect();await fs.rm(root,{recursive:true,force:true});});
 
+  it('handoff preserves a reviewed unknown profile and blocks only that author until a later identity-bound profile checkpoint',async()=>{
+    const job=await read();job.generation.activeFence.phase='profile';delete job.generation.activeFence.noteId;await write(job);
+    await review(2000);
+    const next=await read();next.generation.selectedIds=[JSON.stringify(['xiaohongshu','note','other']),JSON.stringify(['xiaohongshu','note','safe'])];
+    next.generation.activeFence={owner:{...owner},marker:nextMarker,state:'started',phase:'detail',noteId:'other'};
+    next.sourceGrant.used.detail++;await write(next);
+    await db.$executeRaw`INSERT INTO xhs_request_budgets VALUES(${nextMarker},1,1,0,0)`;
+    await db.$executeRaw`UPDATE xhs_request_budgets SET used=used+1 WHERE id IN ('job','xhs:source-total')`;
+    await db.$transaction(tx=>reviewGenerationUnknown(tx,{...input,excludeUnknown:true},3000));
+    const snapshot=await prepareHistoryHandoff(db,'job',input.generationId);
+    expect(snapshot.historicalAttemptCount).toBe(3);expect(snapshot.profileReviewIds).toHaveLength(1);expect(snapshot.pendingProfileReviewIds).toHaveLength(1);
+    expect(snapshot.excludedIds).toEqual([JSON.stringify(['xiaohongshu','note','note']),JSON.stringify(['xiaohongshu','note','other'])]);
+    const withProfile=await read();withProfile.generation.profile={id:'author',name:'Synthetic',profileUrl:'https://www.xiaohongshu.com/user/profile/author',collectedAt:2001};withProfile.sourceGrant.used.profile++;
+    await write(withProfile);expect((await prepareHistoryHandoff(db,'job',input.generationId)).pendingProfileReviewIds).toEqual([]);
+    withProfile.generation.profile.collectedAt=1999;await write(withProfile);expect((await prepareHistoryHandoff(db,'job',input.generationId)).pendingProfileReviewIds).toHaveLength(1);
+    withProfile.generation.profile.collectedAt=2001;withProfile.sourceGrant.used.profile--;await write(withProfile);expect((await prepareHistoryHandoff(db,'job',input.generationId)).pendingProfileReviewIds).toHaveLength(1);withProfile.sourceGrant.used.profile++;
+    withProfile.generation.profile.id='wrong';await write(withProfile);expect((await prepareHistoryHandoff(db,'job',input.generationId)).pendingProfileReviewIds).toHaveLength(1);
+    delete withProfile.generation.profile;withProfile.sourceGrant.used.profile--;await write(withProfile);
+    const fresh=await prepareHistoryHandoff(db,'job',input.generationId);
+    await db.$transaction(tx=>confirmHistoryHandoff(tx,{...input,digest:fresh.digest,confirm:true},4000));
+    expect((await readHistoryHandoffs(db)).profilePendingCreators).toEqual(['creator']);
+    expect(await budgets()).toEqual(expect.arrayContaining([expect.objectContaining({id:oldMarker,used:1,request_limit:1}),expect.objectContaining({id:marker,used:1,request_limit:1}),expect.objectContaining({id:nextMarker,used:1,request_limit:1})]));
+    await db.$executeRawUnsafe('DROP TABLE xhs_subscription_tasks');await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,creator_id TEXT,state TEXT,document TEXT,updated_at INTEGER)');
+    try {
+      await db.$executeRaw`INSERT INTO xhs_creators VALUES('other-creator','other-author',1)`;
+      const round='2026-10-31/09:15';
+      const admit=(creatorId:string)=>db.$transaction(tx=>admitScheduledXhs(tx,{round,creatorId,phase:'basic',task:{taskId:scheduledTaskId(round,creatorId,'basic'),creatorId,state:'queued'},now:4001}));
+      expect(await admit('creator')).toMatchObject({kind:'blocked',reason:'XHS_SCHEDULE_HISTORY_PROFILE_REVIEW_REQUIRED'});
+      expect(await admit('other-creator')).toMatchObject({kind:'created'});
+    } finally {await db.$executeRaw`DELETE FROM xhs_creators WHERE id='other-creator'`;await db.$executeRawUnsafe('DROP TABLE xhs_subscription_tasks');await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,state TEXT)');}
+  });
+
   it('handoff transaction retains historical evidence and rejects a stale or repeated confirmation',async()=>{
     const original=await read();
     original.generation.selectedIds=[JSON.stringify(['xiaohongshu','note','note']),JSON.stringify(['xiaohongshu','note','safe'])];

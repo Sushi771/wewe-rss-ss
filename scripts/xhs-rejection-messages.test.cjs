@@ -12,6 +12,11 @@ function load(file) {
 }
 const {failureMessage} = load('apps/web/src/utils/operation-message.ts');
 const {taskNextStep} = load('apps/web/src/utils/xiaohongshu-subscription.ts');
+test('historical source pause reports review instead of a directory error and hides diagnostics',()=>{
+  const message=failureMessage(new Error('XHS_SOURCE_HISTORY_REVIEW_REQUIRED https://evil.invalid/?token=secret'),'fallback');
+  assert.match(message,/历史来源请求结果尚需核对/);
+  assert.doesNotMatch(message,/目录|secret|evil|https:/);
+});
 test('unknown rejection never invents verification or exposes supplied diagnostic secrets', () => {
   const code = 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED';
   const message = failureMessage(new Error(code + ' captcha https://evil.invalid/?token=secret'));

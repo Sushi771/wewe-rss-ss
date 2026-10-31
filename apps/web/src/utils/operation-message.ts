@@ -12,6 +12,8 @@ export function failureMessage(
   fallback = '操作未完成，请先查看状态和详情。',
 ) {
   const raw = operationDiagnostic(error);
+  if (raw.includes('XHS_SOURCE_HISTORY_REVIEW_REQUIRED'))
+    return '历史来源请求结果尚需核对，新增订阅暂未开始。请先查看来源状态和历史采集任务。';
   if (raw.includes('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'))
     return '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。';
   if (raw.includes('XHS_SOURCE_VERIFICATION_BLOCKED'))

@@ -341,13 +341,14 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
 
 const phases = ['profile', 'list', 'detail', 'media', 'metrics'] as const;
 function XhsHistoryHandoff({jobId,generationId,items,refresh}:{jobId:string;generationId:string;items:{noteId:string;title:string}[];refresh:()=>Promise<unknown>}) {
-  const [snapshot,setSnapshot]=useState<{digest:string;excludedIds:string[];historicalAttemptCount:number}>();
+  const [snapshot,setSnapshot]=useState<{digest:string;excludedIds:string[];profileReviewIds?:string[];pendingProfileReviewIds?:string[];historicalAttemptCount:number}>();
   const [checked,setChecked]=useState(false),[error,setError]=useState('');
   const prepare=trpc.xiaohongshu.prepareXhsHistoryHandoff.useMutation({retry:false});
   const confirm=trpc.xiaohongshu.confirmXhsHistoryHandoff.useMutation({retry:false});
   return <details><summary>核查历史来源暂停</summary><p>保留历史未知记录和原请求；没有新成功回执的笔记继续排除并显示待核对。确认后其他内容可按定时计划继续。</p>
     <button disabled={prepare.isLoading||confirm.isLoading} onClick={async()=>{setChecked(false);setSnapshot(undefined);try{setSnapshot(await prepare.mutateAsync({jobId,generationId}));setError('');}catch{setError('当前状态不满足交接条件，请核对活动任务和未知请求。');}}}>核查当前范围</button>
     {snapshot&&<><p>历史未知请求 {snapshot.historicalAttemptCount} 次；继续排除待核对笔记 {snapshot.excludedIds.length} 篇。</p><label><input type="checkbox" checked={checked} onChange={e=>setChecked(e.target.checked)}/>我已核查范围，同意保留历史未知证据及待核对排除。</label><button disabled={!checked||confirm.isLoading} onClick={async()=>{try{await confirm.mutateAsync({jobId,generationId,digest:snapshot.digest,confirm:true});setSnapshot(undefined);await refresh();}catch{setSnapshot(undefined);setError('交接未确认或状态已变化，请刷新核对；不会自动重试。');}}}>确认历史交接</button></>}
+    {snapshot&&!!snapshot.pendingProfileReviewIds?.length&&<p role="status">该作者有历史主页请求结果未知且缺少后续成功记录，作者自动采集仍待核对；其他作者不因此排除。</p>}
     {snapshot&&<ul>{snapshot.excludedIds.map(id=><li key={id}>{items.find(item=>item.noteId===id)?.title || '未命名笔记'}</li>)}</ul>}
     {error&&<p role="alert">{error}</p>}</details>;
 }

@@ -33,6 +33,7 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
   let reason:string|undefined;
   if(creator.length!==1||creator[0].enabled!==1||!creator[0].external_author_id)reason='XHS_SCHEDULE_CREATOR_DISABLED';
   else if(risk.length!==1||risk[0].state!=='clear'||fences.length)reason='XHS_SCHEDULE_SOURCE_BLOCKED';
+  else if(history.profilePendingCreators.includes(creatorId))reason='XHS_SCHEDULE_HISTORY_PROFILE_REVIEW_REQUIRED';
   else if(jobs.length||tasks.length)return {kind:'deferred',taskId,reason:'XHS_SCHEDULE_TASK_ACTIVE'};
   if(!reason && input.preBlocked)reason=input.preBlocked;
   if(!reason && phase==='media'){

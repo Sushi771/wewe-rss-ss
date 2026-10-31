@@ -6,6 +6,13 @@ import { XhsSubscriptionError } from './xhs-subscription-errors';
 
 type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 const blocked = (): never => { throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); };
+/** A later profile checkpoint is written atomically with the source checkpoint. */
+function profileReviewPending(job:any,review:any):boolean {
+  const p=job.generation?.profile, author=job.sourceGrant?.authorId, floor=review.budgetFloors?.phaseUsed?.profile;
+  return !(p && typeof author==='string' && p.id===author && p.profileUrl===`https://www.xiaohongshu.com/user/profile/${author}` &&
+    typeof p.name==='string' && !!p.name.trim() && Number.isSafeInteger(p.collectedAt) && p.collectedAt>review.reviewedAt &&
+    Number.isSafeInteger(floor) && Number.isSafeInteger(job.sourceGrant.used?.profile) && job.sourceGrant.used.profile>floor);
+}
 
 /** Read-only preparation. Confirmation must repeat this check under the writer lock. */
 export async function prepareHistoryHandoff(tx: Tx, jobId: string, generationId: string) {
@@ -24,8 +31,8 @@ export async function prepareHistoryHandoff(tx: Tx, jobId: string, generationId:
       g.activeFence || !generationReviewSettled(job) || !Array.isArray(g.selectedIds)) return blocked();
   const reviewed = generationReviewMarkers(job);
   const fences = [g.origin.fence, ...(g.reviews ?? []).map((r: any) => r.fence)];
-  if (fences.some((f: any) => f?.phase !== 'detail' || !/^[a-zA-Z0-9_-]{1,128}$/.test(f.noteId ?? '') ||
-      g.selectedIds.includes(JSON.stringify(['xiaohongshu','note',f.noteId])))) return blocked();
+  if (g.origin.fence?.phase!=='detail' || (g.reviews??[]).some((r:any)=>r.fence?.phase==='profile' && (r.decision!=='request-retry'||r.fence.noteId!==undefined)) ||
+      fences.some((f:any)=>f?.phase==='profile' ? f.noteId!==undefined : f?.phase!=='detail' || !/^[a-zA-Z0-9_-]{1,128}$/.test(f.noteId ?? '') || g.selectedIds.includes(JSON.stringify(['xiaohongshu','note',f.noteId])))) return blocked();
   const risk = await tx.$queryRaw<Array<{state:string;code:string|null;owner:string|null;http_status:number|null;endpoint:string|null}>>`SELECT state,code,owner,http_status,endpoint FROM xhs_source_risk WHERE id='source'`;
   if (risk.length !== 1 || risk[0].state !== 'blocked' || risk[0].code !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED' || risk[0].owner !== null || risk[0].http_status !== null || risk[0].endpoint !== null) return blocked();
   const jobs = await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1`;
@@ -37,14 +44,16 @@ export async function prepareHistoryHandoff(tx: Tx, jobId: string, generationId:
   if (new Set(expected).size !== expected.length || pending.length !== expected.length ||
       pending.some((p,i) => p.id !== expected[i] || p.used !== 1 || p.request_limit !== 1)) return blocked();
   const resolved = verifiedReviewedNoteIds(job);
-  const excludedIds = [...new Set<string>(fences.map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])))].filter(id => !resolved.includes(id)).sort();
+  const excludedIds = [...new Set<string>(fences.filter((f:any)=>f.phase==='detail').map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])))].filter(id => !resolved.includes(id)).sort();
+  const profileReviewIds=(g.reviews??[]).filter((r:any)=>r.fence.phase==='profile').map((r:any)=>r.id);
+  const pendingProfileReviewIds=(g.reviews??[]).filter((r:any)=>r.fence.phase==='profile' && profileReviewPending(job,r)).map((r:any)=>r.id);
   const budgets = await tx.$queryRaw<Array<{id:string;used:number;request_limit:number;interval_ms:number}>>`SELECT id,used,request_limit,interval_ms FROM xhs_request_budgets WHERE id IN (${jobId},'xhs:source-total') ORDER BY id`;
   if (budgets.length !== 2 || g.origin.budgets.some((old:any) => {
     const live = budgets.find(b => b.id === old.id);
     return !live || !Number.isSafeInteger(live.used) || live.used < old.used || live.request_limit !== old.request_limit || live.interval_ms !== old.interval_ms;
   })) return blocked();
   const digest = createHash('sha256').update(JSON.stringify({jobId,generationId,creatorId:row.creator_id,authorId:row.author,document:row.document,risk:risk[0],pending,budgets})).digest('hex');
-  return { digest, jobId, generationId, creatorId:row.creator_id, excludedIds, historicalAttemptCount:fences.length };
+  return { digest, jobId, generationId, creatorId:row.creator_id, excludedIds, profileReviewIds,pendingProfileReviewIds, historicalAttemptCount:fences.length };
 }
 
 /** The caller must use the existing incremental SQLite writer transaction. */
@@ -67,7 +76,7 @@ export async function confirmHistoryHandoff(tx: Tx, input:{jobId:string;generati
   job.historyHandoff = {version:1, digest:input.digest, generationId:input.generationId,
     originDigest:job.generation.originDigest, reviewIds:(job.generation.reviews ?? []).map((r:any)=>r.id),
     markers:[job.generation.origin.fence.marker,...generationReviewMarkers(job)].sort(),
-    excludedIds:snapshot.excludedIds, ...(settledAttempt?{settledAttempt}:{}), confirmedAt:now};
+    excludedIds:snapshot.excludedIds, profileReviewIds:snapshot.profileReviewIds, ...(settledAttempt?{settledAttempt}:{}), confirmedAt:now};
   const changed = await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(now)} WHERE id=${input.jobId} AND state=${rows[0].state} AND document=${rows[0].document}`;
   if (changed !== 1) return blocked();
   const risk = await tx.$executeRaw`UPDATE xhs_source_risk SET state='clear',code=NULL,owner=NULL,http_status=NULL,endpoint=NULL,updated_at=${BigInt(now)} WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED' AND owner IS NULL AND http_status IS NULL AND endpoint IS NULL`;
@@ -80,7 +89,7 @@ export async function readHistoryHandoffs(tx: Pick<Prisma.TransactionClient,'$qu
   const rows = await tx.$queryRaw<Array<{document:string;creator_id:string;author:string}>>`
     SELECT j.document,j.creator_id,c.external_author_id AS author FROM xhs_whole_creator_jobs j
     JOIN xhs_creators c ON c.id=j.creator_id WHERE json_type(j.document,'$.historyHandoff')='object'`;
-  const markers:string[] = [], excludedByCreator:Record<string,string[]> = {}, jobIds:string[]=[];
+  const markers:string[] = [], excludedByCreator:Record<string,string[]> = {}, profilePendingCreators:string[]=[], jobIds:string[]=[];
   for (const row of rows) {
     let job:any; try { job=JSON.parse(row.document); } catch { return blocked(); }
     const h=job.historyHandoff, g=job.generation;
@@ -92,8 +101,11 @@ export async function readHistoryHandoffs(tx: Pick<Prisma.TransactionClient,'$qu
     if (!Array.isArray(h.markers) || JSON.stringify(h.markers)!==JSON.stringify(expected) ||
         !Array.isArray(h.excludedIds) || new Set(expected).size!==expected.length || expected.some((id:string)=>markers.includes(id))) return blocked();
     const fences=[g.origin.fence,...(g.reviews ?? []).map((r:any)=>r.fence)];
-    if (fences.some((f:any)=>f.phase!=='detail'||!/^[a-zA-Z0-9_-]{1,128}$/.test(f.noteId ?? ''))) return blocked();
-    const possible=[...new Set<string>(fences.map((f:any)=>JSON.stringify(['xiaohongshu','note',f.noteId])))].sort();
+    const profileReviews=(g.reviews??[]).filter((r:any)=>r.fence.phase==='profile');
+    if(g.origin.fence.phase!=='detail'||profileReviews.some((r:any)=>r.decision!=='request-retry'||r.fence.noteId!==undefined)||
+      JSON.stringify(h.profileReviewIds??[])!==JSON.stringify(profileReviews.map((r:any)=>r.id))||fences.some((f:any)=>f.phase==='profile'?f.noteId!==undefined:f.phase!=='detail'||!/^[a-zA-Z0-9_-]{1,128}$/.test(f.noteId ?? ''))) return blocked();
+    if(profileReviews.some((r:any)=>profileReviewPending(job,r)))profilePendingCreators.push(row.creator_id);
+    const possible=[...new Set<string>(fences.filter((f:any)=>f.phase==='detail').map((f:any)=>JSON.stringify(['xiaohongshu','note',f.noteId])))].sort();
     if (h.excludedIds.some((id:unknown)=>typeof id!=='string'||!possible.includes(id)) || new Set(h.excludedIds).size!==h.excludedIds.length) return blocked();
     const resolved=verifiedReviewedNoteIds(job);
     // Every historical note must either still be excluded or have a validated new receipt.
@@ -106,7 +118,7 @@ export async function readHistoryHandoffs(tx: Pick<Prisma.TransactionClient,'$qu
     const found=await tx.$queryRaw<Array<{used:number;request_limit:number}>>`SELECT used,request_limit FROM xhs_request_budgets WHERE id=${id}`;
     if (found.length!==1 || found[0].used!==1 || found[0].request_limit!==1) return blocked();
   }
-  return {markers,excludedByCreator,jobIds};
+  return {markers,excludedByCreator,profilePendingCreators,jobIds};
 }
 
 /** Explicit historical recovery shares the ordinary persistent source owner after handoff. */
