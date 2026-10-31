@@ -765,9 +765,11 @@ describe('shared single-level management folder actual handlers (offline)', () =
       selectedIds: ['a', 'b'],
       dragType: 'application/x-wewe-xiaohongshu',
       onMove: jest.fn().mockResolvedValue(undefined),
+      move: undefined as unknown,
       run: undefined as unknown,
     };
     scope.run = evaluate('run', scope, table);
+    scope.move = evaluate('move', scope, table);
     return scope;
   }
   it('moves a selected batch atomically and ignores foreign-platform or external drops', async () => {
