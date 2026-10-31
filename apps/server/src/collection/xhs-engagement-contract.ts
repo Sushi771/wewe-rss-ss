@@ -6,6 +6,26 @@ const object = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : {};
+export type XhsFieldDiagnostic = {
+  field: 'collected_count' | 'share_count';
+  present: boolean | null;
+  type: string;
+  result: 'parsed' | 'absent' | 'absent-container' | 'invalid-container' | 'null' | 'invalid-format' | 'invalid-type';
+  parsed: number | null;
+  persistence?: 'stored' | 'missing' | 'mismatch' | 'not-parsed';
+};
+export type XhsDiagnosedMetrics = XhsMetricSnapshot & {
+  fieldDiagnostics?: Partial<Record<'collects' | 'shares', XhsFieldDiagnostic>>;
+  valueCollectedAt?: Record<string, number>;
+};
+function fieldDiagnostic(info: Record<string, unknown>, field: 'collected_count' | 'share_count', container: 'object' | 'absent' | 'invalid'): XhsFieldDiagnostic {
+  if (container !== 'object') return { field, present: null, type: 'unavailable', result: container === 'absent' ? 'absent-container' : 'invalid-container', parsed: null };
+  const present = Object.prototype.hasOwnProperty.call(info, field), value = info[field];
+  const type = !present ? 'absent' : value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  const parsed = xhsExactCount(value);
+  const result = parsed !== null ? 'parsed' : !present ? 'absent' : value === null ? 'null' : typeof value === 'string' || typeof value === 'number' ? 'invalid-format' : 'invalid-type';
+  return { field, present, type, result, parsed };
+}
 /** Exact integers only. Abbreviated/rounded display counts remain unknown. */
 export function xhsExactCount(v: unknown): number | null {
   if (typeof v === 'string' && /^(0|[1-9]\d{0,15})$/.test(v)) v = Number(v);
@@ -14,8 +34,10 @@ export function xhsExactCount(v: unknown): number | null {
 export function xhsNoteMetrics(
   card: unknown,
   at = Date.now(),
-): XhsMetricSnapshot {
-  const info = object(object(card).interact_info);
+): XhsDiagnosedMetrics {
+  const raw = object(card), rawInfo = raw.interact_info;
+  const container = !Object.prototype.hasOwnProperty.call(raw, 'interact_info') ? 'absent' : rawInfo && typeof rawInfo === 'object' && !Array.isArray(rawInfo) ? 'object' : 'invalid';
+  const info = object(rawInfo);
   return {
     values: {
       likes: xhsExactCount(info.liked_count),
@@ -23,6 +45,7 @@ export function xhsNoteMetrics(
       shares: xhsExactCount(info.share_count),
       comments: xhsExactCount(info.comment_count),
     },
+    fieldDiagnostics: { collects: fieldDiagnostic(info, 'collected_count', container), shares: fieldDiagnostic(info, 'share_count', container) },
     collectedAt: at,
     contract: XHS_ENGAGEMENT_CONTRACT,
     evidence: 'source-only',

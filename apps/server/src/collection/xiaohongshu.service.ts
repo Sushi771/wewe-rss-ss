@@ -594,6 +594,7 @@ export class XiaohongshuService {
     const notes = await this.matchingNotes(creatorId, filter);
     const creatorIds = [...new Set(notes.map(n => n.creatorId))];
     const tasks: Array<{creator_id:string;document:string}> = [];
+    const recoveries: Array<{creator_id:string;document:string}> = [];
     for (let offset=0;offset<creatorIds.length;offset+=500) {
       const batch=creatorIds.slice(offset,offset+500);
       tasks.push(...await this.prisma.$queryRaw<Array<{creator_id:string;document:string}>>`
@@ -601,10 +602,19 @@ export class XiaohongshuService {
           SELECT creator_id,document,ROW_NUMBER() OVER (PARTITION BY creator_id ORDER BY updated_at DESC,id DESC) AS rn
           FROM xhs_subscription_tasks WHERE creator_id IN (${Prisma.join(batch)}) AND json_extract(document,'$.basicOnly')=1
         ) WHERE rn=1`);
+      recoveries.push(...await this.prisma.$queryRaw<Array<{creator_id:string;document:string}>>`
+        SELECT creator_id,document FROM xhs_whole_creator_jobs WHERE creator_id IN (${Prisma.join(batch)})
+        AND json_extract(document,'$.reviewAttempt.state')='checkpointed'`);
     }
     const latest = new Map(tasks.map(row => [row.creator_id, JSON.parse(row.document)]));
+    const recovered = new Set<string>();
+    for (const row of recoveries) {
+      const attempt=JSON.parse(row.document).reviewAttempt, receipt=attempt?.receipt;
+      if (attempt?.state==='checkpointed' && attempt.dispatch?.state==='checkpointed' && receipt?.creatorId===row.creator_id && typeof receipt.noteId==='string' && ['saved','retained'].includes(receipt.body)) recovered.add(JSON.stringify([row.creator_id,receipt.noteId]));
+    }
     const stateOf = (note: typeof notes[number]) => {
       const task = latest.get(note.creatorId);
+      if (recovered.has(JSON.stringify([note.creatorId,note.id]))) return note.publishTime>0 && ['likes','collects','shares','comments'].every(k=>Number.isSafeInteger(note.metrics?.values?.[k]) && (note.metrics!.values[k] as number)>=0) ? 'complete' as const : 'missing' as const;
       if (task?.collectionScope === 'selected' && Array.isArray(task.selectedIds) && !task.selectedIds.includes(note.id)) return 'skipped' as const;
       if (task?.items?.[note.id] === 'failed') return 'needs_review' as const;
       if (task?.items?.[note.id] !== 'completed') return 'pending' as const;

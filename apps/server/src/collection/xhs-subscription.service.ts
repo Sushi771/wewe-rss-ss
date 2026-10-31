@@ -350,11 +350,12 @@ export class XhsSubscriptionService implements OnModuleInit {
     if(!creator?.enabled||creator.externalAuthorId!==author.id)return reject('XHS_AUTHOR_MISMATCH');
     const noteId=key(note.noteId),old=await tx.xhsNote.findUnique({where:{id:noteId}});
     if(old&&old.creatorId!==creatorId)return reject('XHS_AUTHOR_CONFLICT');
+    if(old?.kind && old.kind!==note.kind)return reject('XHS_DETAIL_INCOMPLETE');
     const html=verifiedDownloadBody('<div id="js_content">'+note.text.split('\n').map(p=>'<p>'+esc(p)+'</p>').join('')+'</div>');
-    if(!old)await tx.xhsNote.create({data:{id:noteId,creatorId,title:note.title,publishTime:note.publishedAt,kind:'image-text',status:'listed',contentHtml:html}});
-    else if(!old.contentHtml)await tx.xhsNote.update({where:{id:noteId},data:{title:note.title,publishTime:note.publishedAt,kind:'image-text',contentHtml:html}});
+    if(!old)await tx.xhsNote.create({data:{id:noteId,creatorId,title:note.title,publishTime:note.publishedAt,kind:note.kind,status:'listed',contentHtml:html}});
+    else await tx.xhsNote.update({where:{id:noteId},data:{...(old.publishTime > 0 || note.publishedAt <= 0 ? {} : {publishTime:note.publishedAt}),...(!old.contentHtml ? {title:note.title,kind:note.kind,contentHtml:html} : {})}});
     await saveXhsMetrics(tx,'note',noteId,note.metrics);
-    return {creatorId,noteId,subscribed:true,body:old?.contentHtml?'retained':'saved',media:note.media.length?'pending':'none',mediaCount:note.media.length};
+    return {creatorId,noteId,subscribed:true,body:old?.contentHtml?'retained':'saved',media:note.mediaFailure?'needs-review':note.media.length?'pending':'none',mediaCount:note.media.length,mediaManifest:note.media,...(note.mediaFailure?{mediaFailure:note.mediaFailure}:{})};
   }
   async commitLimitedRecovery(input: {
     owner: string;
@@ -367,7 +368,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       author.id !== note.authorId ||
       author.profileUrl !==
         `https://www.xiaohongshu.com/user/profile/${author.id}` ||
-      !note.text.trim()
+      !note.text.trim() || note.mediaFailure
     )
       return reject('XHS_DETAIL_INCOMPLETE');
     const noteId = key(note.noteId);

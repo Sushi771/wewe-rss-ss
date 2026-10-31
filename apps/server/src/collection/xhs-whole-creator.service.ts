@@ -1,6 +1,6 @@
 import { reviewLegacyUnknown, legacyProofMatches } from './xhs-legacy-review';
 import { dispatchReviewedWholeSource } from './xhs-source-request-policy';
-import { attemptDigest, originalAttemptDigest, createReviewedAttempt, reviewedRecoveryView } from './xhs-reviewed-attempt';
+import { attemptDigest, originalAttemptDigest, createReviewedAttempt, reviewedRecoveryView, excludedGenerationFence } from './xhs-reviewed-attempt';
 import { reviewWholeUnknown, WholeUnknownReview } from './xhs-whole-unknown-review';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -65,6 +65,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
   private startupRecoveryStarted = false;
   private destroyed = false;
   private running = new Set<string>();
+  private reviewing = new Set<string>();
   private starting = new Set<string>();
   private lane = Promise.resolve();
   constructor(
@@ -379,10 +380,22 @@ export class XhsWholeCreatorService implements OnModuleInit {
       return { id: job.id, state: 'paused' as const };
     });
   }
-  async prepareReviewedAttempt(input:{jobId:string;confirmUnknownRetry:true;confirmLegacyUnknown?:true}) {
+  async prepareReviewedAttempt(input:{jobId:string;confirmUnknownRetry:true;confirmLegacyUnknown?:true;excludedNoteId?:string}) {
     await this.readyForMutation();
     if(input.confirmUnknownRetry!==true)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     return this.write(async tx=>{
+      if(input.excludedNoteId){
+        if(this.running.has(input.jobId))throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        const rows=await tx.$queryRaw<Array<{document:string;author:string}>>`SELECT j.document,c.external_author_id AS author FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${input.jobId} AND j.state='partial'`;
+        if(rows.length!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        const job=JSON.parse(rows[0].document),f=excludedGenerationFence(job,input.excludedNoteId);
+        const budgets=await tx.$queryRaw<Array<{id:string;used:number}>>`SELECT id,used FROM xhs_request_budgets WHERE id IN (${input.jobId},'xhs:source-total')`;
+        const task=budgets.find(b=>b.id===input.jobId),shared=budgets.find(b=>b.id==='xhs:source-total');
+        if(!f||!task||!shared||job.sourceGrant?.authorId!==rows[0].author)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        const scope=job.reviewAttempt?.scope ?? {jobId:input.jobId,authorId:rows[0].author,noteId:input.excludedNoteId,phase:'detail',generationId:job.generation.id,originalHash:originalAttemptDigest(job),reviewId:attemptDigest(f),maxRequests:1,taskUsedCeiling:task.used+1,sharedUsedCeiling:shared.used+1,expiresAt:Date.now()+900000};
+        if(scope.generationId!==job.generation.id||scope.noteId!==input.excludedNoteId||scope.maxRequests!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        return createReviewedAttempt(tx,scope);
+      }
       const rows=await tx.$queryRaw<Array<{document:string;author:string}>>`SELECT j.document,c.external_author_id AS author FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${input.jobId} AND j.state='paused'`;
       if(rows.length!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
       let job=JSON.parse(rows[0].document);const f=job.sourceFence;
@@ -405,28 +418,32 @@ export class XhsWholeCreatorService implements OnModuleInit {
   async executeReviewedAttempt(input:{jobId:string;attemptId:string;url:string;confirmUnknownRetry:true}) {
     await this.readyForMutation();
     if(input.confirmUnknownRetry!==true)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
-    const rows=await this.db.$queryRaw<Array<{document:string;creator_id:string}>>`SELECT document,creator_id FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state='paused'`;
+    const rows=await this.db.$queryRaw<Array<{document:string;creator_id:string;state:string}>>`SELECT document,creator_id,state FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state IN ('paused','partial')`;
     if(rows.length!==1)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     const job=JSON.parse(rows[0].document),a=job.reviewAttempt;
-    if(!a||a.id!==input.attemptId||a.scope?.jobId!==input.jobId||attemptDigest(a.scope)!==a.id)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    if(!a||a.id!==input.attemptId||a.scope?.jobId!==input.jobId||attemptDigest(a.scope)!==a.id||rows[0].state!==(a.scope.generationId?'partial':'paused'))throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     this.runtime.validateReviewedInput(input.url,a.scope);
     const ready=this.runtime.reviewedReadyCheck();
+    if(this.reviewing.has(input.jobId))throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    this.reviewing.add(input.jobId);
     try {
       return await dispatchReviewedWholeSource(this.db,a.scope,a.id,{authorId:a.scope.authorId,noteId:a.scope.noteId,phase:a.scope.phase},ready,permit=>this.runtime.resolveReviewedNote(input.url,a.scope,permit),(tx,result)=>this.subscriptions.commitReviewedRecovery(tx,rows[0].creator_id,result));
     } catch(error) {
       const code=this.runtime.reviewedFailureCode();
       if(code)await this.write(async tx=>{
         await tx.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code=${code} WHERE id='source'`;
-        const current=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state='paused'`;
+        const current=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state=${rows[0].state}`;
         if(current.length===1){
           const durable=JSON.parse(current[0].document);
           if(durable.reviewAttempt?.id===a.id&&durable.reviewAttempt.state==='consumed'){
             durable.reviewAttempt.failureCode=code;
-            await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(durable)} WHERE id=${input.jobId} AND state='paused' AND document=${current[0].document}`;
+            await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(durable)} WHERE id=${input.jobId} AND state=${rows[0].state} AND document=${current[0].document}`;
           }
         }
       });
       throw error;
+    } finally {
+      this.reviewing.delete(input.jobId);
     }
   }
   async reviewUnknown(input: WholeUnknownReview) {
@@ -972,11 +989,12 @@ export class XhsWholeCreatorService implements OnModuleInit {
     const restricted = /^XHS_SOURCE_(?:AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(job.code ?? '');
     return {
       ...visibleJob,
-      reviewedRecovery: generation ? undefined : reviewedRecoveryView(job),
+      reviewedRecovery: generation && !reviewAttempt ? undefined : reviewedRecoveryView(job,Date.now(),this.reviewing.has(id)),
       generationRecovery: generation ? { id: String(generation.id), state: generation.state === 'prepared' && job.state === 'paused' ? 'prepared' : job.state, originalResult: 'unknown' as const,
         profileUrl: String(generation.profileUrl), profile: generation.profile, basicCompleted: !!generation.basicCompleted, selectedIds: generation.selectedIds as string[] | undefined, excludedIds: [generation.origin.fence, ...(generation.reviews ?? []).map((r: any) => r.fence)].filter((f: any) => !!f.noteId).map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])) as string[], directoryComplete: job.listEnd && !generation.selectedIds, selectionComplete: job.listEnd && !!generation.selectedIds && ['partial','completed'].includes(job.state), discovered: Number(generation.directoryIds?.length ?? 0),
         missing: Number(generation.missingIds?.length ?? 0), originalNoteStatus: String(generation.originalNoteStatus ?? 'unknown'),
-        excludeUnknownRequired: !!generation.selectedIds, newResult: restricted ? 'restricted' as const : newFence ? 'unknown' as const : undefined,
+        retryableExcludedIds: historyReady && !restricted && job.state==='partial' && !reviewAttempt && !this.running.has(id) ? [generation.origin.fence,...(generation.reviews??[]).filter((r:any)=>r.decision==='exclude').map((r:any)=>r.fence)].filter((f:any)=>typeof f?.noteId==='string' && !!excludedGenerationFence(job,f.noteId)).map((f:any)=>JSON.stringify(['xiaohongshu','note',f.noteId])) as string[] : [],
+        excludeUnknownRequired: !!generation.selectedIds, newResult: restricted ? 'restricted' as const : newFence ? (job.state === 'running' && this.running.has(id) ? 'in-progress' as const : 'unknown' as const) : undefined,
         failure: generation.lastSourceReceipt?.code ? {stage:String(generation.lastSourceReceipt.stage),outcome:String(generation.lastSourceReceipt.outcome),code:String(generation.lastSourceReceipt.code ?? ''),status:generation.lastSourceReceipt.status as number|undefined,requiresStop:!!newFence && newFence.receipt?.settled===false && newFence.owner?.pid===process.pid} : job.state==='paused' && generation.localFailure ? {stage:String(generation.localFailure.stage),outcome:'local-failure',code:String(generation.localFailure.code),status:undefined,requiresStop:false} : undefined,
         reviewable: historyReady && !!newFence && job.state==='paused' && !this.running.has(id) && (!generation.selectedIds || (newFence.phase==='detail' && !!newFence.noteId && generation.selectedIds.length>1 && generation.selectedIds.includes(JSON.stringify(['xiaohongshu','note',newFence.noteId])))) && (newFence.receipt?.settled===true || newFence.owner?.pid!==process.pid),
         resumable: historyReady && generationMatches(job) && !newFence && !this.running.has(id) && ['paused','partial','failed','cancelled'].includes(job.state) && generation.state !== 'completed' } : undefined,

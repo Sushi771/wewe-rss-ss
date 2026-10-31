@@ -167,6 +167,10 @@ export async function commitWholeSourceCheckpoint(
   }
   job.lastSourceOwnerReceipt = { marker, owner: fence.owner, state: 'checkpointed' };
   if (job.generation && fence.receipt) job.generation.lastSourceReceipt = { ...fence.receipt, stage:'checkpoint', outcome:'checkpointed', settled:true };
+  if (job.generation && fence.phase === 'detail' && fence.noteId) {
+    const key = JSON.stringify(['xiaohongshu','note',fence.noteId]);
+    job.generation.detailReceipts = { ...(job.generation.detailReceipts ?? {}), [key]: { outcome:'checkpointed', at:Date.now(), ...(Number.isInteger(fence.receipt?.status) ? {status:fence.receipt.status} : {}) } };
+  }
   setActiveWholeFence(job, undefined);
   const changed =
     await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND state='running' AND document=${rows[0].document}`;

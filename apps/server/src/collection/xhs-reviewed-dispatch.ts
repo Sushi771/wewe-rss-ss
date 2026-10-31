@@ -17,6 +17,7 @@ export function consumeReviewedTransportPermit(permit:unknown,scope:AttemptScope
 }
 /** One physical request; caller's normal runtime must provide authenticated transport and business checkpoint. */
 export async function dispatchReviewedSource<T,R>(write:RecoveryWriter,input:AttemptScope,id:string,request:{authorId:string;noteId:string;phase:string},ready:()=>void|Promise<void>,transport:(permit:ReviewedTransportPermit)=>Promise<T>,checkpoint:(tx:Tx,value:T)=>Promise<R>){
+ const expectedState=input.generationId?'partial':'paused';
  if(input.maxRequests!==1||request.authorId!==input.authorId||request.noteId!==input.noteId||request.phase!==input.phase||!['detail','metrics'].includes(request.phase))return bad();
  await ready();
  const marker='xhs:dispatch-pending:review:'+id;
@@ -42,13 +43,18 @@ export async function dispatchReviewedSource<T,R>(write:RecoveryWriter,input:Att
    let response:Promise<V>|undefined;
    await write(async tx=>{
      await noUnresolvedRecovery(tx);
-     const rows=await tx.$queryRaw<Array<{document:string;creator_id:string;enabled:number|boolean;author:string}>>`SELECT j.document,j.creator_id,c.enabled,c.external_author_id AS author FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${input.jobId} AND j.state='paused'`;
+     const rows=await tx.$queryRaw<Array<{document:string;creator_id:string;enabled:number|boolean;author:string}>>`SELECT j.document,j.creator_id,c.enabled,c.external_author_id AS author FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${input.jobId} AND j.state=${expectedState}`;
      if(rows.length!==1)return bad();const job=JSON.parse(rows[0].document),a=job.reviewAttempt;
      if((rows[0].enabled!==1&&rows[0].enabled!==true)||rows[0].author!==input.authorId||a?.dispatch?.creatorId!==rows[0].creator_id||a?.id!==id||a.state!=='consumed'||a.dispatch?.marker!==marker||a.dispatch.transportEntered||!ownsDispatch(a.dispatch.owner,owner))return bad();
      const risk=await tx.$queryRaw<Array<{code:string}>>`SELECT code FROM xhs_source_risk WHERE id='source' AND state='blocked'`;
      if(risk.length!==1||risk[0].code!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')return bad();
+     if(input.generationId){
+       const writers=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1`;
+       const children=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_subscription_tasks WHERE state IN ('queued','running') LIMIT 1`;
+       if(writers.length||children.length)return bad();
+     }
      await ready();a.dispatch.transportEntered=true;
-     const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${input.jobId} AND state='paused' AND document=${rows[0].document}`;if(n!==1)return bad();
+     const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${input.jobId} AND state=${expectedState} AND document=${rows[0].document}`;if(n!==1)return bad();
      response=operation();void response.catch(()=>{});
      const at=Date.now();
      await tx.$executeRaw`UPDATE xhs_request_budgets SET next_at=${BigInt(at)}+interval_ms WHERE id IN (${input.jobId},'xhs:source-total')`;
@@ -60,13 +66,13 @@ export async function dispatchReviewedSource<T,R>(write:RecoveryWriter,input:Att
  try{response=await transport(permit);}finally{permits.delete(permit);}
  await ready();
  return write(async tx=>{
-   const rows=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state='paused'`;
+   const rows=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${input.jobId} AND state=${expectedState}`;
    if(rows.length!==1)return bad();const job=JSON.parse(rows[0].document),a=job.reviewAttempt;
    if(a?.id!==id||a.state!=='consumed'||a.dispatch?.marker!==marker||a.dispatch.transportEntered!==true||!ownsDispatch(a.dispatch.owner,owner))return bad();
    const result=await checkpoint(tx,response);
    a.state='checkpointed';a.dispatch.state='checkpointed';a.checkpointedAt=Date.now();
-   if(result && typeof result==='object'){a.receipt={};for(const key of ['creatorId','noteId','subscribed','body','media','mediaCount'])if(key in result)a.receipt[key]=(result as Record<string,unknown>)[key];}
-   const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${input.jobId} AND state='paused' AND document=${rows[0].document}`;
+   if(result && typeof result==='object'){a.receipt={};for(const key of ['creatorId','noteId','subscribed','body','media','mediaCount','mediaManifest','mediaFailure'])if(key in result)a.receipt[key]=(result as Record<string,unknown>)[key];}
+   const n=await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${input.jobId} AND state=${expectedState} AND document=${rows[0].document}`;
    if(n!==1)return bad();
    const removed=await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;if(removed!==1)return bad();
    return result;

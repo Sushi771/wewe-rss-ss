@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { XhsWholeCreatorService } from './xhs-whole-creator.service';
 import { XhsSubscriptionService } from './xhs-subscription.service';
+import { XiaohongshuService } from './xiaohongshu.service';
 import { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
 import { XhsEngagementService } from './xhs-engagement.service';
 import { XhsSourceRiskStore } from './xhs-source-risk-store';
@@ -136,6 +137,26 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     });
   }
   const requestedDetails=()=>api.mock.calls.filter(([r]:any[])=>new URL(r.url).pathname.endsWith('/feed')).map(([r]:any[])=>JSON.parse(r.body).source_note_id);
+  it('distinguishes a live dispatch from an interrupted unknown without retrying',async()=>{
+    let enter!:()=>void,release!:()=>void;
+    const entered=new Promise<void>(resolve=>enter=resolve),gate=new Promise<void>(resolve=>release=resolve);
+    api.mockImplementation(async()=>{enter();await gate;throw new RedbookPauseError('transport');});
+    await whole.prepareGeneration(input);await execute();await entered;
+    try {
+      const current=(await whole.view('job')).generationRecovery!;
+      expect(current.state).toBe('running');expect(current.newResult).toBe('in-progress');
+      expect(current.resumable).toBe(false);expect(current.reviewable).toBe(false);
+    } finally { release(); }
+    await drain();
+    const stopped=(await whole.view('job')).generationRecovery!;
+    expect(stopped.state).toBe('paused');expect(stopped.newResult).toBe('unknown');
+    expect(stopped.resumable).toBe(false);expect(api).toHaveBeenCalledTimes(1);
+    const stale=await read();stale.state='running';
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(stale)} WHERE id='job'`;
+    const restarted=(await whole.view('job')).generationRecovery!;
+    expect(restarted.newResult).toBe('unknown');expect(restarted.resumable).toBe(false);
+    await assertUnknownPreserved();
+  });
   it('waits for source receipts before the business checkpoint can remove its fence',async()=>{
     let release!:()=>void,entered!:()=>void,workStarted=false;
     const delayed=new Promise<void>(resolve=>release=resolve),atStorage=new Promise<void>(resolve=>entered=resolve);
@@ -530,8 +551,54 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const row=await db.xhsNote.findUnique({where:{id:safe}}),job=await read();
     expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();expect(row?.publishTime).toBe(1760000000);expect(row?.contentHtml).toContain('Synthetic body safe');expect(row?.status).toBe('listed');
     const metrics=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${safe}`;expect(JSON.parse(metrics[0].document).values).toMatchObject({likes:1,collects:2,shares:3,comments:4});
-    expect(job.state).toBe('partial');expect(job.generation.basicCompleted).toBe(true);expect(job.generation.missingIds).toContain(noteKey);await assertUnknownPreserved();
+    expect(job.state).toBe('partial');expect(job.generation.basicCompleted).toBe(true);expect(job.generation.missingIds).toContain(noteKey);expect(job.generation.detailReceipts[safe]).toMatchObject({outcome:'checkpointed'});await assertUnknownPreserved();
   },15000);
+  it.each(['success','lost','restricted','media-invalid','active'] as const)('allows one explicitly bound excluded detail from a partial generation without replay: %s',async mode=>{
+    await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
+    const initial=await read(),proof=initial.legacyMaintenanceProof;
+    const initialBudgets=await db.$queryRaw<any[]>`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total')`;
+    proof.scope.budgetDigest=legacyBudgetDigest(initial,initialBudgets,'job');
+    proof.proofId=hash({scope:proof.scope,lockIdentity:proof.lockIdentity,lockNonce:proof.lockNonce,holder:proof.holder,snapshot:proof.snapshot});
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(initial)} WHERE id='job'`;
+    original=JSON.parse(JSON.stringify(initial));
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);
+    const normal=api.getMockImplementation()!;
+    let enter!:()=>void,release!:()=>void;const entered=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>release=r);
+    api.mockImplementation(async(req:any)=>{if(new URL(req.url).pathname.endsWith('/feed')&&JSON.parse(req.body).source_note_id==='note'){if(mode==='lost')throw new RedbookPauseError('transport');if(mode==='restricted')return {status:461,url:req.url,body:{success:false,code:-1}};if(mode==='active'){enter();await gate;}}const response=await normal(req);if(new URL(req.url).pathname.endsWith('/feed')&&JSON.parse(req.body).source_note_id==='note')response.body.data.items[0].note_card.image_list=[{url_default:mode==='media-invalid'?'https://invalid.example/image.png':'https://sns-webpic.xhscdn.com/synthetic.png?synthetic=secret'}];return response;});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    expect((await read()).state).toBe('partial');
+    await expect(whole.prepareReviewedAttempt({jobId:'job',confirmUnknownRetry:true,excludedNoteId:'safe'})).rejects.toThrow();
+    await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=0 WHERE id IN ('job','xhs:source-total')`;
+    const prepared=await whole.prepareReviewedAttempt({jobId:'job',confirmUnknownRetry:true,excludedNoteId:'note'});
+    const before=requestedDetails().length;
+    const call=()=>whole.executeReviewedAttempt({jobId:'job',attemptId:prepared.id,url:'https://www.xiaohongshu.com/explore/note?xsec_token=synthetic-token&xsec_source=pc_share',confirmUnknownRetry:true});
+    if(mode==='active'){
+      const pending=call();await entered;
+      try { expect((await whole.view('job')).reviewedRecovery?.state).toBe('in-progress');await expect(call()).rejects.toThrow(); } finally {release();}
+      await pending;
+    } else if(mode==='success'||mode==='media-invalid')await call();else await expect(call()).rejects.toThrow();
+    await expect(call()).rejects.toThrow();
+    expect(requestedDetails().slice(before)).toEqual(['note']);
+    const job=await read();expect(job.sourceFence.state).toBe('started');expect(job.reviewAttempt.state).toBe(['success','media-invalid','active'].includes(mode)?'checkpointed':'consumed');
+    if(['success','media-invalid','active'].includes(mode)){
+      if(mode==='media-invalid')expect(job.reviewAttempt.receipt).toMatchObject({media:'needs-review',mediaFailure:'XHS_MEDIA_MANIFEST_UNAVAILABLE'});
+      else expect(job.reviewAttempt.receipt.mediaManifest).toMatchObject([{ordinal:1,state:'not-downloaded',sourceQueryOmitted:true}]);
+      expect(JSON.stringify(job.reviewAttempt.receipt)).not.toContain('synthetic=secret');
+      expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic body note');
+      const listed=await new XiaohongshuService(db as any).notes('creator');
+      expect(listed.items.find(item=>item.id===noteKey)?.basicStatus).toBe('complete');
+    } else expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toBeNull();
+    if(mode==='restricted')expect((await db.$queryRaw<Array<{code:string}>>`SELECT code FROM xhs_source_risk WHERE id='source'`)[0].code).toBe('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');
+    if(mode==='lost'){
+      expect((await whole.view('job')).reviewedRecovery?.state).toBe('consumed');
+      const restarted=new XhsWholeCreatorService(db as any,subscriptions,runtime,new XhsEngagementService(db as any,runtime));
+      expect((await restarted.view('job')).reviewedRecovery?.state).toBe('consumed');
+    }
+    await assertUnknownPreserved();
+  },20000);
   it('resumes committed basic fields without replay after interruption',async()=>{
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), ids=[key('safe-a'),key('safe-b')];
     for(const id of ids)await db.xhsNote.create({data:{id,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
@@ -556,6 +623,8 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(await db.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`).toHaveLength(2);
     await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[a]});await drain();
     expect(requestedDetails()).toEqual(['safe-a','safe-b']);expect((await read()).generation.missingIds).toEqual(expect.arrayContaining([noteKey,b]));await assertUnknownPreserved();
+    await expect(whole.prepareReviewedAttempt({jobId:'job',confirmUnknownRetry:true,excludedNoteId:'safe-a'})).rejects.toThrow();
+    await expect(whole.prepareReviewedAttempt({jobId:'job',confirmUnknownRetry:true,excludedNoteId:'safe-b'})).resolves.toMatchObject({state:'prepared'});
   },20000);
   it('excludes an unknown note from an older media child before starting basic collection',async()=>{
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), a=key('safe-a'), b=key('safe-b');

@@ -4,6 +4,7 @@ import type {
   XhsSavedComment,
   XhsCommentWindow,
 } from '@wewe-rss/shared';
+import type { XhsDiagnosedMetrics } from './xhs-engagement-contract';
 
 type Db = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 export async function saveXhsMetrics(
@@ -13,8 +14,22 @@ export async function saveXhsMetrics(
   snapshot?: XhsMetricSnapshot,
 ) {
   if (!snapshot) return;
+  let document: XhsDiagnosedMetrics = snapshot;
+  if (kind === 'note') {
+    const rows = await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind=${kind} AND owner_id=${owner}`;
+    const previous: XhsDiagnosedMetrics | undefined = rows.length ? JSON.parse(rows[0].document) : undefined;
+    const values = { ...snapshot.values }, valueCollectedAt: Record<string, number> = {};
+    for (const key of ['likes', 'collects', 'shares', 'comments']) {
+      if (Number.isSafeInteger(values[key]) && (values[key] as number) >= 0) valueCollectedAt[key] = snapshot.collectedAt;
+      else if (Number.isSafeInteger(previous?.values?.[key]) && (previous!.values[key] as number) >= 0) {
+        values[key] = previous!.values[key];
+        valueCollectedAt[key] = previous!.valueCollectedAt?.[key] ?? previous!.collectedAt;
+      }
+    }
+    document = { ...snapshot, values, valueCollectedAt };
+  }
   await db.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document)
-    VALUES(${kind},${owner},${JSON.stringify(snapshot)})
+    VALUES(${kind},${owner},${JSON.stringify(document)})
     ON CONFLICT(owner_kind,owner_id) DO UPDATE SET document=excluded.document
     WHERE json_extract(excluded.document,'$.collectedAt') >= json_extract(xhs_metric_snapshots.document,'$.collectedAt')`;
 }
@@ -23,9 +38,18 @@ export async function readXhsMetrics(db: Db, kind: 'note' | 'creator') {
     Array<{ owner_id: string; document: string }>
   >`
     SELECT owner_id,document FROM xhs_metric_snapshots WHERE owner_kind=${kind}`;
-  return new Map(
-    rows.map((r) => [r.owner_id, JSON.parse(r.document) as XhsMetricSnapshot]),
-  );
+  return new Map(rows.map((r) => {
+    const snapshot = JSON.parse(r.document) as XhsDiagnosedMetrics;
+    if (snapshot.fieldDiagnostics) {
+      for (const key of ['collects', 'shares'] as const) {
+        const diagnostic = snapshot.fieldDiagnostics[key];
+        if (!diagnostic) continue;
+        const stored = snapshot.values?.[key];
+        diagnostic.persistence = diagnostic.result !== 'parsed' ? 'not-parsed' : stored == null ? 'missing' : stored === diagnostic.parsed ? 'stored' : 'mismatch';
+      }
+    }
+    return [r.owner_id, snapshot] as const;
+  }));
 }
 export type PrivateCommentWindow = XhsCommentWindow & { cursors: string[] };
 export async function readCommentWindow(

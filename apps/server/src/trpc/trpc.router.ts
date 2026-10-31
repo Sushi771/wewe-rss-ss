@@ -2030,7 +2030,7 @@ export class TrpcRouter {
       .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true),pickToken:z.string().max(128).optional(),selectedIds:z.array(z.string().min(1).max(300)).min(1).max(1000).optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.executeGeneration(input));}),
     prepareWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
-      .input(z.object({jobId:z.string().min(1).max(128),confirmUnknownRetry:z.literal(true),confirmLegacyUnknown:z.literal(true).optional()}).strict())
+      .input(z.object({jobId:z.string().min(1).max(128),confirmUnknownRetry:z.literal(true),confirmLegacyUnknown:z.literal(true).optional(),excludedNoteId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/).optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareReviewedAttempt(input));}),
     executeWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),attemptId:z.string().regex(/^[a-f0-9]{64}$/),url:z.string().min(1).max(8192),confirmUnknownRetry:z.literal(true)}).strict())

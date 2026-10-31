@@ -194,6 +194,24 @@ function recoveryInteraction(initial, component = 'default') {
   return {calls,draw,nodes,setData:v=>{data=v;},setWork:v=>{work=v;},setChoose:v=>{choose=v;},get refetches(){return refetches;}};
 }
 
+test('partial generation prepares only an explicitly selected excluded note',async()=>{
+  const id=JSON.stringify(['xiaohongshu','note','synthetic-note']);
+  const job={id:'job',state:'partial',updatedAt:1,items:[{noteId:id,title:'Synthetic'}],generationRecovery:{id:'g',state:'partial',retryableExcludedIds:[id],profileUrl:'https://xhslink.cn/o/Synthetic',discovered:1,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false}};
+  const h=recoveryInteraction([job]);let tree=h.draw();assert.equal(h.calls.length,0);
+  const button=()=>h.nodes(tree,n=>n.type==='button'&&n.props.children==='核对并准备单篇恢复')[0];
+  assert.equal(button().props.disabled,true);
+  h.nodes(tree,n=>n.type==='select'&&h.nodes(n,x=>x.type==='option'&&x.props.value===id).length)[0].props.onChange({target:{value:id}});
+  tree=h.draw();h.nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});
+  tree=h.draw();assert.equal(button().props.disabled,false);button().props.onClick();await new Promise(setImmediate);
+  assert.deepEqual(h.calls,[{name:'prepareWholeCreatorReviewedAttempt',input:{jobId:'job',confirmUnknownRetry:true,excludedNoteId:'synthetic-note'}}]);
+});
+test('single recovery distinguishes live execution and an unrecognized media manifest',()=>{
+  const base={id:'job',state:'partial',items:[],updatedAt:1,reviewedRecovery:{state:'in-progress',noteId:'note',phase:'detail'}};
+  const live=render([base]);assert.match(live,/单篇详情请求执行中/);assert.doesNotMatch(live,/本次恢复已提交，但结果未确认/);
+  const saved=render([{...base,reviewedRecovery:{state:'checkpointed',receipt:{body:'saved',media:'needs-review',mediaCount:0}}}]);
+  assert.match(saved,/图片清单待核对/);assert.doesNotMatch(saved,/图片无/);
+});
+
 test('legacy recovery explains the remaining unknown and submits separate consent only after confirmation',async()=>{
   const base={id:'job',state:'paused',items:[],updatedAt:1,reviewedRecovery:{state:'review-required',noteId:'note',phase:'detail',legacyUnknown:true}};
   assert.match(render([base]),/旧请求缺少进程记录/);
@@ -245,6 +263,13 @@ test("AUDIT: terminal recovery copy describes user results without storage diagn
 });
 
 const generationJob = {id:'job',items:[{noteId:'synthetic-safe',title:'Safe'}],canPrepareGeneration:true,budget:{used:6,limit:310},historyGrant:{limits:{profile:2,list:3,detail:5,media:300,metrics:0},used:{profile:2,list:2,detail:1,media:1,metrics:0}}};
+test('a live generation does not display the stopped unknown warning',()=>{
+ const generationRecovery={id:'g',state:'running',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:1,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false,newResult:'in-progress'};
+ const live=render({...generationJob,canPrepareGeneration:false,generationRecovery},'XhsWholeGeneration');
+ assert.match(live,/正在继续采集/);assert.doesNotMatch(live,/本次还有请求结果未确认，已停止/);
+ const stopped=render({...generationJob,canPrepareGeneration:false,generationRecovery:{...generationRecovery,state:'paused',newResult:'unknown'}},'XhsWholeGeneration');
+ assert.match(stopped,/本次还有请求结果未确认，已停止/);
+});
 test('received response and local storage failures have distinct readable reasons without backend diagnostics',()=>{
  const base={...generationJob,canPrepareGeneration:false,generationRecovery:{id:'g',state:'paused',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:0,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false,newResult:'unknown'}};
  const received=render({...base,generationRecovery:{...base.generationRecovery,failure:{stage:'response',outcome:'response-received',code:'XHS_SOURCE_TRANSPORT_BLOCKED',status:200}}},'XhsWholeGeneration');

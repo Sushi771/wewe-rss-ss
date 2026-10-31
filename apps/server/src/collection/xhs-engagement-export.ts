@@ -3,6 +3,7 @@ import type {
   XhsMetricSnapshot,
   XhsSavedComment,
 } from '@wewe-rss/shared';
+import type { XhsDiagnosedMetrics } from './xhs-engagement-contract';
 const plain = (s: string) => s.replace(/[\\`*_{}\[\]<>#|!]/g, '\\$&');
 const when = (n: number) => (n > 0 ? new Date(n).toISOString() : '未知');
 export function xhsMetricMarkdown(
@@ -20,9 +21,9 @@ export function xhsMetricMarkdown(
   return (
     `\n\n## ${title}\n\n` +
     Object.entries(fields)
-      .map(([k, name]) => `${name}：${snapshot.values[k] ?? '未知'}`)
+      .map(([k, name]) => { const at = (snapshot as XhsDiagnosedMetrics).valueCollectedAt?.[k]; return `${name}：${snapshot.values[k] ?? '未知'}${snapshot.values[k] != null && Number.isSafeInteger(at) ? `（采集于 ${when(at!)}）` : ''}`; })
       .join(' · ') +
-    `\n\n采集时间：${when(snapshot.collectedAt)}；历史快照；契约证据：${snapshot.evidence === 'source-only' ? '公开源码，真实响应待核实' : '已核实响应'}。\n`
+    `\n\n快照更新时间：${when(snapshot.collectedAt)}；历史快照；契约证据：${snapshot.evidence === 'source-only' ? '公开源码，真实响应待核实' : '已核实响应'}。\n`
   );
 }
 export function xhsEngagementMarkdown(view: XhsEngagementView) {

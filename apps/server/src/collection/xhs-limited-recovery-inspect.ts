@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
-import { inspectRedbookDetail } from './redbook-response';
+import { allowedRedbookMediaUrl, mapRedbookBasicDetail } from './redbook-response';
 import { selectXhsNativeDetail } from './xhs-native-media';
-import { xhsNoteMetrics } from './xhs-engagement-contract';
 
 /** Offline projection only: no transport, storage or risk-state mutation. */
 export function inspectLimitedRecovery(
@@ -9,21 +8,26 @@ export function inspectLimitedRecovery(
   expectedAuthorId: string,
   expectedNoteId: string,
 ) {
-  const selected = selectXhsNativeDetail(raw, expectedAuthorId, expectedNoteId);
-  const detail = inspectRedbookDetail(
-    selected,
-    expectedAuthorId,
-    expectedNoteId,
-  );
-  const card = selected.items[0].note_card;
+  const detail = mapRedbookBasicDetail(raw, expectedAuthorId, expectedNoteId);
+  let urls: URL[] = [], mediaFailure: 'XHS_MEDIA_MANIFEST_UNAVAILABLE' | undefined;
+  try {
+    const selected = selectXhsNativeDetail(raw, expectedAuthorId, expectedNoteId);
+    urls = selected.items[0].note_card.image_list.map((image: {url_default:unknown}) => {
+      if (typeof image.url_default !== 'string' || image.url_default.length > 8192) throw Error();
+      return allowedRedbookMediaUrl(image.url_default);
+    });
+  } catch { mediaFailure = 'XHS_MEDIA_MANIFEST_UNAVAILABLE'; }
+  if (detail.kind === 'video') mediaFailure = 'XHS_MEDIA_MANIFEST_UNAVAILABLE';
   return {
     authorId: detail.authorId,
     noteId: detail.noteId,
-    title: detail.title,
-    text: detail.text,
-    publishedAt: detail.publishedAt,
-    metrics: xhsNoteMetrics(card),
-    media: detail.urls.map((url, index) => ({
+    kind: detail.kind,
+    title: detail.title ?? '',
+    text: detail.text ?? '',
+    publishedAt: detail.publishedAt ?? 0,
+    metrics: detail.metrics,
+    mediaFailure,
+    media: urls.map((url, index) => ({
       ordinal: index + 1,
       state: 'not-downloaded' as const,
       sourceFingerprint: createHash('sha256').update(url.href).digest('hex'),

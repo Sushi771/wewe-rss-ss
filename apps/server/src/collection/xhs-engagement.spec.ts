@@ -21,6 +21,7 @@ import { XhsEngagementService } from './xhs-engagement.service';
 import { XiaohongshuService } from './xiaohongshu.service';
 import { xhsMetricSelection, xhsNoteFilterSchema } from '@wewe-rss/shared';
 import { xhsEngagementMarkdown } from './xhs-engagement-export';
+import { xhsMetricMarkdown } from './xhs-engagement-export';
 import { RedbookPauseError } from './redbook-client';
 import { XhsSubscriptionService } from './xhs-subscription.service';
 import { mapRedbookDetail } from './redbook-response';
@@ -65,6 +66,19 @@ const page = (id: string, next: string | null) =>
     cursor: next ?? '',
   });
 describe('XHS metric contract: public source only, no real requests', () => {
+  it('records only allowlisted field presence, type and exact parse outcome', () => {
+    const absent = xhsNoteMetrics({ interact_info: {} }, 1);
+    expect(absent.fieldDiagnostics?.collects).toEqual({field:'collected_count',present:false,type:'absent',result:'absent',parsed:null});
+    expect(xhsNoteMetrics({}).fieldDiagnostics?.collects).toMatchObject({present:null,result:'absent-container'});
+    expect(xhsNoteMetrics({interact_info:'unexpected'}).fieldDiagnostics?.shares).toMatchObject({present:null,result:'invalid-container'});
+    const diagnostic = xhsNoteMetrics({interact_info:{collected_count:'0',share_count:'1.2万',token:'synthetic-secret'}},2);
+    expect(diagnostic.fieldDiagnostics?.collects).toMatchObject({present:true,type:'string',result:'parsed',parsed:0});
+    expect(diagnostic.fieldDiagnostics?.shares).toMatchObject({present:true,type:'string',result:'invalid-format',parsed:null});
+    expect(JSON.stringify(diagnostic)).not.toContain('synthetic-secret');
+    expect(JSON.stringify(diagnostic)).not.toContain('1.2万');
+    expect(xhsNoteMetrics({interact_info:{collected_count:null,share_count:{}}}).fieldDiagnostics).toMatchObject({collects:{result:'null',type:'null'},shares:{result:'invalid-type',type:'object'}});
+    expect(xhsNoteMetrics({interact_info:{collected_count:10,share_count:'15'}}).values).toMatchObject({collects:10,shares:15});
+  });
   it.each([
     null,
     undefined,
@@ -271,6 +285,29 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
     // before another fixture or final disconnect can use the same connection.
     await resetPromise?.catch(() => undefined);
   }, 40000);
+  it('preserves previous exact fields with their timestamps and diagnoses persistence', async () => {
+    const id = key('metric-diagnostic');
+    await saveXhsMetrics(db,'note',id,xhsNoteMetrics({interact_info:{liked_count:4,collected_count:10,share_count:11,comment_count:5}},100));
+    await saveXhsMetrics(db,'note',id,xhsNoteMetrics({interact_info:{liked_count:6,share_count:'1.2万',comment_count:7}},200));
+    let saved = (await readXhsMetrics(db,'note')).get(id) as any;
+    expect(saved.values).toEqual({likes:6,collects:10,shares:11,comments:7});
+    expect(saved.valueCollectedAt).toEqual({likes:200,collects:100,shares:100,comments:200});
+    expect(saved.fieldDiagnostics.collects).toMatchObject({result:'absent',persistence:'not-parsed'});
+    expect(saved.fieldDiagnostics.shares).toMatchObject({result:'invalid-format',persistence:'not-parsed'});
+    const markdown=xhsMetricMarkdown('metrics',saved,{likes:'likes',collects:'collects'});
+    expect(markdown).toContain('likes：6（采集于 1970-01-01T00:00:00.200Z）');
+    expect(markdown).toContain('collects：10（采集于 1970-01-01T00:00:00.100Z）');
+    await saveXhsMetrics(db,'note',id,xhsNoteMetrics({interact_info:{collected_count:'12',share_count:'0'}},300));
+    saved = (await readXhsMetrics(db,'note')).get(id) as any;
+    expect(saved.values).toEqual({likes:6,collects:12,shares:0,comments:7});
+    expect(saved.fieldDiagnostics.collects.persistence).toBe('stored');
+    await saveXhsMetrics(db,'note',id,{values:{likes:null,collects:1,shares:null,comments:null},collectedAt:250,contract:'synthetic',evidence:'source-only'});
+    saved = (await readXhsMetrics(db,'note')).get(id) as any;
+    expect(saved.values).toEqual({likes:6,collects:12,shares:0,comments:7});
+    await db.$executeRaw`UPDATE xhs_metric_snapshots SET document=json_set(document,'$.values.collects',NULL) WHERE owner_kind='note' AND owner_id=${id}`;
+    saved = (await readXhsMetrics(db,'note')).get(id) as any;
+    expect(saved.fieldDiagnostics.collects).toMatchObject({result:'parsed',parsed:12,persistence:'missing'});
+  },40000);
   it('segments 20001 saved comments without truncation and protects edited companion pages', async () => {
     const content = '<'.repeat(40);
     await db.$executeRaw`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<20001)

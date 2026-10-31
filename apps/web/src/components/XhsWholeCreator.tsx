@@ -10,6 +10,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
   const [phaseLimit, setPhaseLimit] = useState(1);
   const [recoveryJob, setRecoveryJob] = useState("");
   const [recoveryUrl, setRecoveryUrl] = useState("");
+  const [excludedNote, setExcludedNote] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const recoveryBusy = useRef(false);
@@ -35,7 +36,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
   });
   const prepareRecovery = trpc.xiaohongshu.prepareWholeCreatorReviewedAttempt.useMutation({ retry: false });
   const runRecovery = trpc.xiaohongshu.executeWholeCreatorReviewedAttempt.useMutation({ retry: false });
-  const recover = async (jobId: string, attemptId?: string, legacyUnknown = false) => {
+  const recover = async (jobId: string, attemptId?: string, legacyUnknown = false, excludedNoteId?: string) => {
     if (recoveryBusy.current || recoveryJob !== jobId || !confirmed) return;
     recoveryBusy.current = true;
     setRecovering(true);
@@ -45,7 +46,7 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
     setConfirmed(false);
     try {
       if (attemptId) await runRecovery.mutateAsync({ jobId, attemptId, url, confirmUnknownRetry: true });
-      else await prepareRecovery.mutateAsync({ jobId, confirmUnknownRetry: true, ...(legacyUnknown ? {confirmLegacyUnknown: true as const} : {}) });
+      else await prepareRecovery.mutateAsync({ jobId, confirmUnknownRetry: true, ...(legacyUnknown ? {confirmLegacyUnknown: true as const} : {}), ...(excludedNoteId ? {excludedNoteId} : {}) });
     } catch {
       setError("本次操作结果待核对，请查看最新恢复回执；不会自动重发。");
     } finally {
@@ -100,6 +101,19 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
       {(jobs.data ?? []).map((job) => (
         <section key={job.id} className="my-2 min-w-0 border-t">
           {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} />}
+          {!!job.generationRecovery?.retryableExcludedIds?.length && !job.reviewedRecovery && (
+            <div className="my-2 space-y-2 rounded border p-2">
+              <p>历史请求结果仍未知。仅可明确选择一篇，核对后准备一次详情恢复；已保存内容保留。</p>
+              <label>选择已排除的笔记
+                <select value={recoveryJob === job.id ? excludedNote : ''} disabled={recovering} onChange={e=>{setRecoveryJob(job.id);setExcludedNote(e.target.value);setConfirmed(false);}}>
+                  <option value="">请选择</option>
+                  {job.generationRecovery.retryableExcludedIds.map(id=><option key={id} value={id}>{job.items.find(item=>item.noteId===id)?.title || '未命名笔记'}</option>)}
+                </select>
+              </label>
+              <label><input type="checkbox" checked={recoveryJob===job.id && confirmed} disabled={recovering} onChange={e=>{setRecoveryJob(job.id);setConfirmed(e.target.checked);}} />我确认只为所选笔记准备一次详情恢复。</label>
+              <button disabled={recovering || recoveryJob!==job.id || !confirmed || !job.generationRecovery.retryableExcludedIds.includes(excludedNote)} onClick={()=>{const tuple=JSON.parse(excludedNote);void recover(job.id,undefined,false,tuple[2]);}}>核对并准备单篇恢复</button>
+            </div>
+          )}
           <p role="status">
             {{ queued: '等待中', running: '同步中', paused: '已暂停', partial: '部分完成', failed: '未完成', cancelled: '已取消', completed: '已完成' }[job.state] ?? '状态待确认'} · 已发现 {job.items.length} 篇
           </p>
@@ -115,7 +129,9 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
             <div className="my-2 space-y-2 rounded border p-2">
               <p>原请求结果仍未知。本次恢复只补取指定笔记的正文和指标，沿用累计预算；图片和评论不会发起请求，也不会自动继续整号任务。</p>
               {job.reviewedRecovery.state === "checkpointed" ? (
-                <p role="status">本次恢复已保存：正文{job.reviewedRecovery.receipt?.body === "retained" ? "保留已有内容" : "已保存"}，图片{job.reviewedRecovery.receipt?.media === "pending" ? "待补齐" : "无"}。原请求仍待核对。</p>
+                <p role="status">本次恢复已保存：正文{job.reviewedRecovery.receipt?.body === "retained" ? "保留已有内容" : "已保存"}，图片{job.reviewedRecovery.receipt?.media === "needs-review" ? "清单待核对" : job.reviewedRecovery.receipt?.media === "pending" ? "待补齐" : "无"}。原请求仍待核对。</p>
+              ) : job.reviewedRecovery.state === "in-progress" ? (
+                <p role="status">单篇详情请求执行中，请等待结果，勿重复提交。</p>
               ) : job.reviewedRecovery.state === "consumed" ? (
                 <p role="alert">本次恢复已提交，但保存结果尚未确认；结果未知，不能再次执行。</p>
               ) : job.reviewedRecovery.state === "restricted" ? (
