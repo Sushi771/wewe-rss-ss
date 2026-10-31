@@ -39,6 +39,8 @@ function render(data, component = 'default') {
       prepareWholeCreatorGeneration: { useMutation: mutation },
       executeWholeCreatorGeneration: { useMutation: mutation },
       reviewWholeCreatorGeneration: { useMutation: mutation },
+      resumeWholeCreatorMedia: { useMutation: mutation },
+      resumeWholeCreatorMissingBasic: { useMutation: mutation },
     },
   };
   const mod = { exports: {} };
@@ -185,7 +187,7 @@ function recoveryInteraction(initial, component = 'default') {
   const hooks={useState(value){const at=index++;if(!(at in slots))slots[at]=value;return[slots[at],v=>{slots[at]=typeof v==='function'?v(slots[at]):v;}];},useRef(value){const at=index++;if(!(at in slots))slots[at]={current:value};return slots[at];}};
   const mutation=name=>({useMutation:options=>{assert.equal(options.retry,false);return{isLoading:false,mutateAsync:async input=>{calls.push({name,input});return work(name,input);}};}});
   const api={wholeCreatorJobs:{useQuery:()=>({data,refetch:async()=>{refetches++;}})}};
-  for(const name of ['startWholeCreator','resumeWholeCreator','cancelWholeCreator','extendWholeCreatorBudget','extendWholeCreatorHistoryPhase','prepareWholeCreatorReviewedAttempt','executeWholeCreatorReviewedAttempt','prepareWholeCreatorGeneration','executeWholeCreatorGeneration','reviewWholeCreatorGeneration'])api[name]=mutation(name);
+  for(const name of ['startWholeCreator','resumeWholeCreator','cancelWholeCreator','extendWholeCreatorBudget','extendWholeCreatorHistoryPhase','prepareWholeCreatorReviewedAttempt','executeWholeCreatorReviewedAttempt','prepareWholeCreatorGeneration','executeWholeCreatorGeneration','reviewWholeCreatorGeneration','resumeWholeCreatorMedia','resumeWholeCreatorMissingBasic'])api[name]=mutation(name);
   const mod={exports:{}};
   const output=ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2021,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;
   new Function('require','exports','module',output)(name=>name==='react'?hooks:name==='@web/utils/trpc'?{trpc:{xiaohongshu:api}}:resolve(name),mod.exports,mod);

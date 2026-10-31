@@ -1939,6 +1939,12 @@ export class TrpcRouter {
       .input(xhsCreatorFilterSchema.optional())
       .query(({ input }) => this.xhs.list(input)),
     groups: this.trpcService.protectedProcedure.query(() => this.xhs.groups()),
+    reorderGroups: this.trpcService.protectedProcedure
+      .input(z.object({
+        ids: z.array(z.string().min(1).max(128)).min(1).max(1000),
+        expectedIds: z.array(z.string().min(1).max(128)).min(1).max(1000),
+      }).strict())
+      .mutation(({ input }) => this.xhs.reorderGroups(input)),
     saveGroup: this.trpcService.protectedProcedure
       .input(
         z
@@ -2029,6 +2035,12 @@ export class TrpcRouter {
     executeWholeCreatorGeneration: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true),pickToken:z.string().max(128).optional(),selectedIds:z.array(z.string().min(1).max(300)).min(1).max(1000).optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.executeGeneration(input));}),
+    resumeWholeCreatorMedia: this.trpcService.protectedProcedure
+      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),noteIds:z.array(z.string().min(1).max(300)).min(1).max(1000)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.resumeMedia(input));}),
+    resumeWholeCreatorMissingBasic: this.trpcService.protectedProcedure
+      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),noteIds:z.array(z.string().min(1).max(300)).min(1).max(1000)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.resumeMissingBasic(input));}),
     prepareWholeCreatorReviewedAttempt: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),confirmUnknownRetry:z.literal(true),confirmLegacyUnknown:z.literal(true).optional(),excludedNoteId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/).optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareReviewedAttempt(input));}),
@@ -2144,6 +2156,9 @@ export class TrpcRouter {
         this.requireLocalXhsAccess(ctx);
         return this.xhsEngagement!.refreshMetrics(input);
       }),
+    refreshMissingBasic: this.trpcService.protectedProcedure
+      .input(z.object({id:z.string().min(1).max(128),noteIds:z.array(z.string().min(1).max(300)).min(1).max(1000)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSubscriptions!.refreshMissingBasic(input);}),
     refreshFull: this.trpcService.protectedProcedure
       .input(z.object({ id: z.string().min(1).max(128), scope: z.enum(['recent','all','selected']).optional(), noteIds: z.array(z.string().min(1).max(300)).min(1).max(1000).optional() }).strict())
       .mutation(({ input, ctx }) => {

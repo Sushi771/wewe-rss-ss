@@ -238,6 +238,11 @@ async function dispatchSource<T>(
         if (!owned.length) fail('XHS_REQUEST_RATE_PAUSED');
         await ready(tx);
         if (group && !group.generationId) await markWholeSourceStarted(tx, group.jobId, marker, group.owner, charge, group.generationId);
+        if (group?.mediaAttempt && !group.mediaDispatched) {
+          if (charge !== 'media' || !group.mediaDispatch) fail('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          await group.mediaDispatch(tx);
+          group.mediaDispatched = true;
+        }
         response = operation();
         started = true;
         if (group) group.started = true;

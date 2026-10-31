@@ -18,10 +18,14 @@ import { XhsSqliteBudgetStore } from './xhs-request-budget-store';
 import { bindXhsSourceTotalBudget } from './xhs-source-request-policy';
 import { XhsSubscriptionService } from './xhs-subscription.service';
 import { XhsEngagementService } from './xhs-engagement.service';
+import { xhsMediaTaskStore } from './xhs-media-task-store';
+import { extractXhsMediaManifest } from './xhs-native-media';
+import { resumeWholeMedia } from './xhs-whole-media-resume';
 import {
   prepareWholeSourceFence,
   markWholeSourceStarted,
   commitWholeSourceCheckpoint,
+  commitWholeMediaCheckpoint,
   releasePreparedWholeSourceFence,
 } from './xhs-whole-source-fence';
 
@@ -38,6 +42,96 @@ describe('whole creator durable checkpoint fence', () => {
     phase: 'detail' as const,
     noteId: 'synthetic-note',
   };
+  it('atomically reserves a media item with the real whole-source fence and rolls both back on failure', async () => {
+    const id = JSON.stringify(['xiaohongshu','note',scope.noteId]);
+    const raw = { items: [{ id: scope.noteId, note_card: { note_id: scope.noteId, user: { user_id: scope.authorId }, type: 'normal', time: 1760000000000, title: 'Synthetic', desc: 'Synthetic', image_list: [{ url_default: 'https://sns-webpic.xhscdn.com/synthetic.png' }] } }] };
+    const { manifest } = extractXhsMediaManifest(raw, scope.authorId, scope.noteId);
+    await db.xhsNote.update({ where: { id }, data: { contentHtml: '<div id="js_content"><p>Synthetic</p></div>' } });
+    const doc = JSON.stringify({ mediaManifests: { [id]: { state: 'pending', manifest } } });
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('media-task',${scope.creatorId},'running',${doc},1)`;
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_set(document,'$.sourceGrant.limits.media',5,'$.sourceGrant.used.media',0,'$.detailReceipts.keep','unchanged') WHERE id=${scope.jobId}`;
+    const mediaScope = { ...scope, mediaAttempt: { taskId: 'media-task', ordinal: 1, resourceKey: manifest.images[0].resourceKey! } };
+    const writer: any = (work: any) => db.$transaction(work);
+    const store = (failAfterFence = false) => xhsMediaTaskStore(db as any, writer, { taskId: 'media-task', creatorId: scope.creatorId, noteId: id }, async (tx) => {
+      await prepareWholeSourceFence(tx as any, mediaScope);
+      if (failAfterFence) throw Error('synthetic admission rollback');
+    }, tx => commitWholeMediaCheckpoint(tx as any, scope.jobId, marker, scope.owner));
+    await expect(store(true).begin(manifest, 1)).rejects.toThrow('synthetic admission rollback');
+    expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`).toHaveLength(0);
+    let task = await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='media-task'`;
+    expect(JSON.parse(task[0].document).mediaManifests[id].items).toBeUndefined();
+    await store().begin(manifest, 1);
+    expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`).toHaveLength(1);
+    task = await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='media-task'`;
+    expect(JSON.parse(task[0].document).mediaManifests[id].items['1'].state).toBe('started');
+    await expect(store().begin(manifest, 1)).rejects.toThrow();
+    await expect(db.$transaction(tx => markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'detail'))).rejects.toThrow();
+    await db.$transaction(tx => markWholeSourceStarted(tx, scope.jobId, marker, scope.owner, 'media'));
+    await expect(db.$transaction(tx => commitWholeSourceCheckpoint(tx, scope.jobId, marker, scope.owner))).rejects.toThrow();
+    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
+    const failingWriter: any = (work: any) => db.$transaction(async tx => { await work(tx); throw Error('synthetic checkpoint rollback'); });
+    const interrupted = xhsMediaTaskStore(db as any, failingWriter, { taskId:'media-task',creatorId:scope.creatorId,noteId:id }, async()=>{ throw Error('not needed'); }, tx => commitWholeMediaCheckpoint(tx as any,scope.jobId,marker,scope.owner));
+    await expect(interrupted.commit(manifest,1,png)).rejects.toThrow('synthetic checkpoint rollback');
+    expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`).toHaveLength(1);
+    expect(await store().attemptState(manifest,1)).toBe('stop');
+    await store().commit(manifest,1,png);
+    expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id=${marker}`).toHaveLength(0);
+    const jobs = await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+    expect(JSON.parse(jobs[0].document).detailReceipts.keep).toBe('unchanged');
+    expect(Object.values(JSON.parse(jobs[0].document).mediaReceipts)[0]).toMatchObject({outcome:'saved',resourceKey:manifest.images[0].resourceKey});
+  }, 40000);
+  it('runs a synthetic media download through the real admission, source dispatch, and separate checkpoint', async () => {
+    const noteId=JSON.stringify(['xiaohongshu','note',scope.noteId]);
+    const raw={items:[{id:scope.noteId,note_card:{note_id:scope.noteId,user:{user_id:scope.authorId},type:'normal',time:1760000000000,title:'Synthetic',desc:'Synthetic',image_list:[{url_default:'https://sns-webpic.xhscdn.com/synthetic.png'}]}}]};
+    const {manifest,getUrl}=extractXhsMediaManifest(raw,scope.authorId,scope.noteId);
+    await db.xhsNote.update({where:{id:noteId},data:{contentHtml:'<div id="js_content"><p>Synthetic</p></div>'}});
+    const task=JSON.stringify({mediaManifests:{[noteId]:{state:'pending',manifest}}});
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('media-flow',${scope.creatorId},'running',${task},1)`;
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_set(document,'$.sourceGrant.limits.media',5,'$.sourceGrant.used.media',0,'$.detailReceipts.keep','unchanged') WHERE id=${scope.jobId}`;
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',20,0,0,0)`;
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=','base64');
+    let entered!:()=>void,release!:()=>void;
+    const dispatchEntered=new Promise<void>(resolve=>{entered=resolve;}), dispatchHold=new Promise<void>(resolve=>{release=resolve;});
+    const media=jest.fn(async()=>{if(media.mock.calls.length===1){entered();await dispatchHold;}return new Response(png,{status:200,headers:{'content-type':'image/png'}});});
+    const runtime=new XhsSubscriptionRuntime({enabled:()=>true,media});
+    runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);
+    await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});
+    (runtime as any).transientMedia.set(JSON.stringify([scope.authorId,scope.noteId]),{generation:(runtime as any).generation,expiresAt:Date.now()+60000,version:manifest.version,getUrl});
+    const writer:any=(work:any)=>db.$transaction(work);
+    try {
+      const first=resumeWholeMedia(db as any,writer,runtime,{jobId:scope.jobId,creatorId:scope.creatorId,taskId:'media-flow'},manifest);
+      await dispatchEntered;
+      const inflight=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='media-flow'`;
+      expect(JSON.parse(inflight[0].document).mediaManifests[noteId].items['1'].state).toBe('started');
+      try { await expect(resumeWholeMedia(db as any,writer,runtime,{jobId:scope.jobId,creatorId:scope.creatorId,taskId:'media-flow'},manifest)).rejects.toThrow(); }
+      finally { release(); }
+      expect(await first).toMatchObject({saved:1,pending:0});
+      expect(media).toHaveBeenCalledTimes(1);
+      expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:whole:%'`).toHaveLength(0);
+      const jobs=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId}`;
+      const job=JSON.parse(jobs[0].document);expect(job.detailReceipts.keep).toBe('unchanged');expect(Object.values(job.mediaReceipts)).toHaveLength(1);
+      expect(await resumeWholeMedia(db as any,writer,runtime,{jobId:scope.jobId,creatorId:scope.creatorId,taskId:'media-flow'},manifest)).toMatchObject({saved:0,pending:0});
+      expect(media).toHaveBeenCalledTimes(1);
+      const nextRaw={items:[{...raw.items[0],note_card:{...raw.items[0].note_card,image_list:[{url_default:'https://sns-webpic.xhscdn.com/second.png'}]}}]};
+      const next=extractXhsMediaManifest(nextRaw,scope.authorId,scope.noteId);
+      const nextTask=JSON.stringify({mediaManifests:{[noteId]:{state:'pending',manifest:next.manifest}}});
+      await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('media-crash',${scope.creatorId},'running',${nextTask},1)`;
+      (runtime as any).transientMedia.set(JSON.stringify([scope.authorId,scope.noteId]),{generation:(runtime as any).generation,expiresAt:Date.now()+60000,version:next.manifest.version,getUrl:next.getUrl});
+      let writes=0;
+      const interrupted:any=(work:any)=>db.$transaction(async tx=>{const value=await work(tx);if(++writes===2)throw Error('synthetic media checkpoint loss');return value;});
+      await expect(resumeWholeMedia(db as any,interrupted,runtime,{jobId:scope.jobId,creatorId:scope.creatorId,taskId:'media-crash'},next.manifest)).rejects.toThrow('synthetic media checkpoint loss');
+      expect(media).toHaveBeenCalledTimes(2);
+      expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:whole:%'`).toHaveLength(1);
+      const restarted=new XhsSubscriptionRuntime({enabled:()=>true,media});
+      restarted.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,restarted);
+      await restarted.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});
+      (restarted as any).transientMedia.set(JSON.stringify([scope.authorId,scope.noteId]),{generation:(restarted as any).generation,expiresAt:Date.now()+60000,version:next.manifest.version,getUrl:next.getUrl});
+      try {
+        await expect(resumeWholeMedia(db as any,writer,restarted,{jobId:scope.jobId,creatorId:scope.creatorId,taskId:'media-crash'},next.manifest)).rejects.toThrow();
+        expect(media).toHaveBeenCalledTimes(2);
+      } finally {restarted.onModuleDestroy();}
+    } finally {runtime.onModuleDestroy();}
+  },40000);
   it('continues observed task counts beyond a historical limit while keeping request spacing', async () => {
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('synthetic-budget',1,1,0,5000)`;
     const store = new XhsSqliteBudgetStore(db as any), budget = new XhsRequestBudget(store);

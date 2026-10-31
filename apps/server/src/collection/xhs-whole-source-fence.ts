@@ -1,7 +1,7 @@
 import { DispatchOwner, ownsDispatch } from './xhs-dispatch-owner';
 import { Prisma } from '@prisma/client';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
-import { activeWholeFence, setActiveWholeFence, retainedGenerationMarkers } from './xhs-whole-generation';
+import { activeWholeFence, setActiveWholeFence, retainedGenerationMarkers, generationReviewSettled } from './xhs-whole-generation';
 
 type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 export type Phase = 'profile' | 'list' | 'detail' | 'metrics';
@@ -15,8 +15,9 @@ export type Scope = {
   phase: Phase;
   noteId?: string;
   generationId?: string;
+  mediaAttempt?: { taskId: string; ordinal: number; resourceKey: string };
 };
-export type WholeSourceGroup = Scope & { acquired: boolean; started: boolean };
+export type WholeSourceGroup = Scope & { acquired: boolean; started: boolean; mediaDispatch?: (tx: Tx) => Promise<void>; mediaDispatched?: boolean };
 const bad = (): never => {
   throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
 };
@@ -41,6 +42,17 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     AND r.state='blocked' AND r.code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'`;
   if (rows.length !== 1) return bad();
   const job = JSON.parse(rows[0].document);
+  if (scope.mediaAttempt) {
+    const { taskId, ordinal, resourceKey } = scope.mediaAttempt;
+    if (scope.phase !== 'detail' || !scope.noteId || !taskId || taskId.length > 128 ||
+        !Number.isSafeInteger(ordinal) || ordinal < 1 || ordinal > 60 || !/^[a-f0-9]{64}$/.test(resourceKey)) return bad();
+    const tasks = await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId} AND creator_id=${scope.creatorId}`;
+    if (tasks.length !== 1) return bad();
+    const task = JSON.parse(tasks[0].document), noteKey = JSON.stringify(['xiaohongshu','note',scope.noteId]);
+    const slot = task.mediaManifests?.[noteKey], image = slot?.manifest?.images?.[ordinal-1];
+    if (slot?.manifest?.authorId !== scope.authorId || slot?.manifest?.noteId !== scope.noteId ||
+        image?.ordinal !== ordinal || image?.resourceKey !== resourceKey || slot?.items?.[String(ordinal)]) return bad();
+  }
   if (
     !job.sourceGrant ||
     job.sourceGrant.creatorId !== scope.creatorId ||
@@ -58,7 +70,8 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     if (!scope.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(scope.noteId))
       return bad();
     const noteKey = JSON.stringify(['xiaohongshu', 'note', scope.noteId]);
-    if (scope.generationId && (!job.listEnd || !Array.isArray(job.generation.directoryIds) || !job.generation.directoryIds.includes(noteKey))) return bad();
+    const recoveredMedia=!!scope.mediaAttempt && generationReviewSettled(job) && job.reviewAttempt?.receipt?.noteId===noteKey;
+    if (scope.generationId && (!job.listEnd || !Array.isArray(job.generation.directoryIds) || (!job.generation.directoryIds.includes(noteKey) && !recoveredMedia))) return bad();
     const notes = await tx.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM xhs_notes WHERE id=${noteKey} AND creator_id=${scope.creatorId}`;
@@ -76,6 +89,7 @@ export async function prepareWholeSourceFence(tx: Tx, scope: Scope) {
     phase: scope.phase,
     noteId: scope.noteId,
     state: 'prepared',
+    ...(scope.mediaAttempt ? { mediaAttempt: scope.mediaAttempt } : {}),
   });
   const changed =
     await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${scope.jobId} AND state='running' AND document=${rows[0].document}`;
@@ -111,6 +125,7 @@ export async function markWholeSourceStarted(
     (generationId && category !== fence.phase && !(category === 'media' && fence.phase === 'detail')) ||
     !(['profile', 'list', 'detail', 'metrics', 'media'] as string[]).includes(category) ||
     (category === 'media' && fence.phase !== 'detail') ||
+    (fence.mediaAttempt && category !== 'media') ||
     (category === 'metrics' && fence.phase !== 'metrics') ||
     (category === 'detail' && fence.phase !== 'detail') ||
     !Number.isSafeInteger(grant.limits?.[category]) ||
@@ -121,7 +136,8 @@ export async function markWholeSourceStarted(
     if (!fence.noteId || !/^[a-zA-Z0-9_-]{1,128}$/.test(fence.noteId))
       return bad();
     const noteKey = JSON.stringify(['xiaohongshu', 'note', fence.noteId]);
-    if (generationId && (!job.listEnd || !Array.isArray(job.generation.directoryIds) || !job.generation.directoryIds.includes(noteKey))) return bad();
+    const recoveredMedia=!!fence.mediaAttempt && generationReviewSettled(job) && job.reviewAttempt?.receipt?.noteId===noteKey;
+    if (generationId && (!job.listEnd || !Array.isArray(job.generation.directoryIds) || (!job.generation.directoryIds.includes(noteKey) && !recoveredMedia))) return bad();
     const notes = await tx.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM xhs_notes WHERE id=${noteKey} AND creator_id=${job.creatorId}`;
@@ -152,7 +168,7 @@ export async function commitWholeSourceCheckpoint(
     fence = activeWholeFence(job);
   if (job.generation?.id !== generationId) return bad();
   await retainedGenerationMarkers(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
-  if (!fence || !ownsDispatch(fence.owner, expectedOwner) || fence.marker !== marker || fence.state !== 'started')
+  if (!fence || fence.mediaAttempt || !ownsDispatch(fence.owner, expectedOwner) || fence.marker !== marker || fence.state !== 'started')
     return bad();
   if (fence.phase === 'profile' || fence.phase === 'metrics') {
     if (!Number.isSafeInteger(collectedAt) || !collectedAt || collectedAt < 1)
@@ -177,6 +193,32 @@ export async function commitWholeSourceCheckpoint(
   if (changed !== 1) return bad();
   const removed =
     await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;
+  if (removed !== 1) return bad();
+}
+
+/** Release a media fence only with its own persisted resource receipt. */
+export async function commitWholeMediaCheckpoint(tx: Tx, jobId: string, marker: string, expectedOwner: DispatchOwner, generationId?: string) {
+  const rows = await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${jobId} AND state='running' AND EXISTS(SELECT 1 FROM xhs_request_budgets WHERE id=${marker})`;
+  if (rows.length !== 1) return bad();
+  const job = JSON.parse(rows[0].document), fence = activeWholeFence(job), media = fence?.mediaAttempt;
+  if (job.generation?.id !== generationId || !media || fence.phase !== 'detail' || !fence.noteId ||
+      fence.marker !== marker || fence.state !== 'started' || !ownsDispatch(fence.owner, expectedOwner)) return bad();
+  await retainedGenerationMarkers(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
+  const tasks = await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${media.taskId} AND creator_id=${job.creatorId}`;
+  if (tasks.length !== 1) return bad();
+  const noteKey = JSON.stringify(['xiaohongshu','note',fence.noteId]);
+  const slot = JSON.parse(tasks[0].document).mediaManifests?.[noteKey], item = slot?.items?.[String(media.ordinal)];
+  if (slot?.manifest?.authorId !== job.sourceGrant.authorId || slot?.manifest?.noteId !== fence.noteId ||
+      slot?.manifest?.images?.[media.ordinal-1]?.resourceKey !== media.resourceKey || item?.resourceKey !== media.resourceKey ||
+      !((item.state === 'saved' && /^[a-f0-9]{64}$/.test(item.sha256 ?? '') && Number.isSafeInteger(item.bytes) && item.bytes > 0) ||
+        (item.state === 'refresh' && ['XHS_MEDIA_HTTP_404','XHS_MEDIA_HTTP_410'].includes(item.code)))) return bad();
+  const target = job.generation ?? job, key = JSON.stringify([media.taskId,noteKey,media.ordinal]);
+  target.mediaReceipts = { ...(target.mediaReceipts ?? {}), [key]: { resourceKey: media.resourceKey, outcome: item.state, at: Date.now() } };
+  job.lastSourceOwnerReceipt = { marker, owner: fence.owner, state: 'checkpointed' };
+  setActiveWholeFence(job, undefined);
+  const changed = await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(Date.now())} WHERE id=${jobId} AND state='running' AND document=${rows[0].document}`;
+  if (changed !== 1) return bad();
+  const removed = await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;
   if (removed !== 1) return bad();
 }
 

@@ -555,7 +555,120 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const row=await db.xhsNote.findUnique({where:{id:safe}}),job=await read();
     expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();expect(row?.publishTime).toBe(1760000000);expect(row?.contentHtml).toContain('Synthetic body safe');expect(row?.status).toBe('listed');
     const metrics=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${safe}`;expect(JSON.parse(metrics[0].document).values).toMatchObject({likes:1,collects:2,shares:3,comments:4});
+    const task=(await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask}`)[0].document;
+    expect(JSON.parse(task).mediaManifests[safe]).toMatchObject({state:'needs-review',manifest:{images:[{ordinal:1,resourceKey:null}]}});
+    expect(task).not.toContain('invalid.example');
     expect(job.state).toBe('partial');expect(job.generation.basicCompleted).toBe(true);expect(job.generation.missingIds).toContain(noteKey);expect(job.generation.detailReceipts[safe]).toMatchObject({outcome:'checkpointed'});await assertUnknownPreserved();
+  },15000);
+  it('checkpoints media identity with basic data while signed URLs remain session-only',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/a.png?token=synthetic-secret'}];return result;});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    const job=await read(),task=(await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask}`)[0].document;
+    const saved=JSON.parse(task).mediaManifests[safe];expect(saved.state).toBe('pending');expect(saved.manifest.images).toHaveLength(1);
+    expect(task).not.toContain('synthetic-secret');expect(task).not.toContain('sns-webpic');
+    expect((await subscriptions.task({taskId:job.listTask})).mediaSummary).toMatchObject({manifestNotes:1,declaredImages:1,pendingImages:1,needsDetailRefreshNotes:0});
+    expect(runtime.getTransientMediaUrl('author','safe',saved.manifest.version,saved.manifest.images[0].resourceKey)).toContain('synthetic-secret');
+    runtime.onModuleDestroy();expect(runtime.getTransientMediaUrl('author','safe',saved.manifest.version,saved.manifest.images[0].resourceKey)).toBeUndefined();
+    expect((await subscriptions.task({taskId:job.listTask})).mediaSummary).toMatchObject({pendingImages:1,needsDetailRefreshNotes:1});
+    expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();await assertUnknownPreserved();
+  },15000);
+  it('explicitly resumes selected media without repeating detail and refuses the historical unknown',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/a.png?token=synthetic-secret'}];return result;});
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=','base64');
+    media.mockImplementation(async()=>new Response(png,{status:200,headers:{'content-type':'image/png'}}));
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    const before=await read();expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();
+    await expect(whole.resumeMedia({jobId:'job',generationId:id,noteIds:[noteKey]})).rejects.toThrow();
+    await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[safe]});await drain();
+    const after=await read();expect(after.state).toBe('partial');expect(after.generation.mediaResults[safe]).toBe('complete');
+    expect(after.generation.detailReceipts[safe]).toEqual(before.generation.detailReceipts[safe]);
+    expect(requestedDetails()).toEqual(['safe']);expect(media).toHaveBeenCalledTimes(1);
+    const saved=await db.xhsNote.findUniqueOrThrow({where:{id:safe}});expect(saved.contentHtml).toContain('Synthetic body safe');expect(saved.contentHtml).toContain('data-xhs-media');
+    await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[safe]});await drain();expect(media).toHaveBeenCalledTimes(1);
+    await assertUnknownPreserved();
+  },20000);
+  it('repairs only eight selected missing basics and reuses fourteen complete notes',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), names=Array.from({length:22},(_,i)=>'repair-'+String(i).padStart(2,'0'));
+    for(const name of [...names,'second-unknown'])await db.xhsNote.create({data:{id:key(name),creatorId:'creator',title:name,publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note',...names,'second-unknown']);const normal=api.getMockImplementation()!;let first=true;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed')){const n=JSON.parse(req.body).source_note_id;if(n==='second-unknown')result.body.data.items=[];else if(first&&names.slice(0,8).includes(n))delete result.body.data.items[0].note_card.interact_info.collected_count;}return result;});
+    await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,detail:40}});const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[...names,'second-unknown'].map(key)});await drain();
+    expect(requestedDetails()).toEqual([...names,'second-unknown']);expect((await read()).state).toBe('paused');
+    await whole.reviewGeneration({jobId:'job',generationId:id,confirmUnknown:true,excludeUnknown:true});
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:names.map(key)});await drain();
+    expect(requestedDetails()).toEqual([...names,'second-unknown']);first=false;api.mockClear();
+    await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:[noteKey]})).rejects.toThrow();
+    await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:[key('second-unknown')]})).rejects.toThrow();
+    await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:names.map(key)});await drain();
+    expect(requestedDetails()).toEqual(names.slice(0,8));
+    const job=await read();expect(job.state).toBe('partial');expect(Object.keys(job.generation.basicRepairResults)).toHaveLength(8);
+    const tasks=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask}`;
+    const basic=JSON.parse(tasks[0].document).basicResults;for(const n of names)expect(basic[key(n)]).toBe('complete');
+    for(const name of names){const row=await db.xhsNote.findUniqueOrThrow({where:{id:key(name)}});expect(row.contentHtml).toContain('Synthetic body');}
+    expect(await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:names.map(key)})).toEqual({state:'nothing-missing'});
+    expect(requestedDetails()).toEqual(names.slice(0,8));expect(await db.$queryRaw`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`).toHaveLength(2);await assertUnknownPreserved();
+  },40000);
+  it('stops a missing-basic repair on a platform restriction and rejects duplicate submission',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]),names=['repair-a','repair-b'];
+    for(const n of names)await db.xhsNote.create({data:{id:key(n),creatorId:'creator',title:n,publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note',...names]);const normal=api.getMockImplementation()!;let initial=true;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed')){if(initial)delete result.body.data.items[0].note_card.interact_info.collected_count;else return {status:461,url:req.url,body:{success:false,code:461}};}return result;});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:names.map(key)});await drain();
+    initial=false;api.mockClear();
+    await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:names.map(key)});
+    await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:names.map(key)})).rejects.toThrow();
+    await drain();const job=await read();expect(job.state).toBe('paused');expect(requestedDetails()).toEqual(['repair-a']);
+    await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:names.map(key)})).rejects.toThrow();
+    expect(requestedDetails()).toEqual(['repair-a']);await assertUnknownPreserved();
+  },20000);
+  it('continues an interrupted selected basic repair from its persisted child without replaying completed detail',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]),names=['repair-a','repair-b'],ids=names.map(key);
+    for(const n of names)await db.xhsNote.create({data:{id:key(n),creatorId:'creator',title:n,publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note',...names]);const normal=api.getMockImplementation()!;let initial=true;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(initial&&new URL(req.url).pathname.endsWith('/feed'))delete result.body.data.items[0].note_card.interact_info.collected_count;return result;});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:ids});await drain();
+    initial=false;api.mockClear();let stopped=false;const checkpoint=runtime.checkpointWholeSource.bind(runtime);
+    jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,at)=>{await checkpoint(tx,at);if(!stopped&&(runtime as any).wholeSourceGroup.getStore()?.phase==='detail'){stopped=true;live=false;}});
+    await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:ids});await drain();
+    const paused=await read();expect(paused.state).toBe('paused');expect(paused.basicRepairRequest.taskId).toBeTruthy();expect(requestedDetails()).toEqual(['repair-a']);
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();live=true;
+    await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:[ids[1]]})).rejects.toThrow();
+    await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:ids});await drain();
+    const done=await read();if(done.state!=='partial'){const child=await subscriptions.task({taskId:done.basicRepairRequest.taskId});console.info('synthetic repair resume diagnostic',{code:done.code,childState:child.state,childCode:child.code,activeFence:done.generation.activeFence?.state,details:requestedDetails()});}expect({state:done.state,code:done.code}).toEqual({state:'partial',code:'XHS_MEDIA_OR_SUPPLEMENT_PENDING'});expect(requestedDetails()).toEqual(['repair-a','repair-b']);expect(done.basicRepairRequest).toBeUndefined();
+    await assertUnknownPreserved();
+  },30000);
+  it('marks a missing media manifest for review without treating it as zero images',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))delete result.body.data.items[0].note_card.image_list;return result;});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    const job=await read(),raw=(await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask}`)[0].document;
+    expect(JSON.parse(raw).mediaManifests[safe]).toEqual({state:'needs-review',code:'XHS_MEDIA_MANIFEST_UNAVAILABLE'});
+    expect((await subscriptions.task({taskId:job.listTask})).mediaSummary).toMatchObject({manifestNotes:0,needsReviewNotes:1,needsDetailRefreshNotes:1});
+    expect((await db.xhsNote.findUnique({where:{id:safe}}))?.contentHtml).toContain('Synthetic body safe');expect(media).not.toHaveBeenCalled();
+  },15000);
+  it('reuses complete basic fields even when media has not been archived',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'Saved',publishTime:1760000000,kind:'image-text',status:'listed',contentHtml:'<div id="js_content"><p>Existing body</p></div>'}});
+    const snapshot={values:{likes:1,collects:2,shares:3,comments:4},collectedAt:123,contract:'synthetic',evidence:'source-only'};
+    await db.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) VALUES('note',${safe},${JSON.stringify(snapshot)})`;
+    directory(['note','safe']);await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    expect(requestedDetails()).toEqual([]);expect(media).not.toHaveBeenCalled();
+    expect((await db.xhsNote.findUnique({where:{id:safe}}))?.contentHtml).toContain('Existing body');await assertUnknownPreserved();
   },15000);
   it.each(['success','lost','restricted','media-invalid','active'] as const)('allows one explicitly bound excluded detail from a partial generation without replay: %s',async mode=>{
     await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
@@ -594,6 +707,17 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
       expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toContain('Synthetic body note');
       const listed=await new XiaohongshuService(db as any).notes('creator');
       expect(listed.items.find(item=>item.id===noteKey)?.basicStatus).toBe('complete');
+      if(mode==='success'){
+        await db.$executeRaw`UPDATE xhs_metric_snapshots SET document=json_set(document,'$.values.collects',NULL) WHERE owner_kind='note' AND owner_id=${safe}`;
+        api.mockClear();await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:[safe]});await drain();
+        expect(requestedDetails()).toEqual(['safe']);expect((await read()).reviewAttempt.state).toBe('checkpointed');
+        expect(await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:[noteKey]})).toEqual({state:'nothing-missing'});
+        expect(requestedDetails()).toEqual(['safe']);
+        expect((await whole.view('job')).generationRecovery?.mediaRecoverableIds).toContain(noteKey);
+        await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[noteKey]});await drain();
+        const afterMedia=await read();expect(afterMedia.generation.mediaResults[noteKey]).toBe('needs-detail-refresh');
+        expect(afterMedia.reviewAttempt.state).toBe('checkpointed');expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();
+      }
     } else expect((await db.xhsNote.findUnique({where:{id:noteKey}}))?.contentHtml).toBeNull();
     if(mode==='restricted')expect((await db.$queryRaw<Array<{code:string}>>`SELECT code FROM xhs_source_risk WHERE id='source'`)[0].code).toBe('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');
     if(mode==='lost'){

@@ -48,6 +48,8 @@ import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 import { sourceOriginalLink } from './xhs-source-original-link';
 import {
   commitWholeSourceCheckpoint,
+  commitWholeMediaCheckpoint,
+  prepareWholeSourceFence,
   type WholeSourceGroup,
   type Phase,
   type Charge,
@@ -150,6 +152,7 @@ export class XhsSubscriptionRuntime
       phase: Phase;
       noteId?: string;
       generationId?: string;
+      mediaAttempt?: WholeSourceGroup['mediaAttempt'];
     },
     work: () => Promise<T>,
   ): Promise<T> {
@@ -193,6 +196,33 @@ export class XhsSubscriptionRuntime
       }
     });
   }
+  /** One media resource uses its own source fence and resource receipt. */
+  withWholeMediaAttempt<T>(scope: {jobId:string;creatorId:string;authorId:string;noteId:string;generationId?:string;mediaAttempt:NonNullable<WholeSourceGroup['mediaAttempt']>}, work: (hooks: {
+    reserve: (tx: Prisma.TransactionClient) => Promise<void>;
+    reserved: () => void;
+    dispatch: (start:(tx: Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>)=>Promise<void>) => void;
+    checkpoint: (tx: Prisma.TransactionClient) => Promise<void>;
+    storage: <R>(operation:()=>Promise<R>)=>Promise<R>;
+    transport: RedbookMediaTransport;
+  }) => Promise<T>): Promise<T> {
+    return this.withWholeSourceGroup({ ...scope, phase:'detail' }, async () => {
+      const group=this.wholeSourceGroup.getStore();
+      if (!group || !group.mediaAttempt || !this.sourceAdmission || !this.sourceDispatch) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      return this.withSession(() => work({
+        reserve: async tx => { this.requireSession(); await prepareWholeSourceFence(tx,group); },
+        reserved: () => { group.acquired=true; },
+        dispatch: start => { if(group.mediaDispatch || group.mediaDispatched) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); group.mediaDispatch = start; },
+        checkpoint: async tx => {
+          this.requireSession();
+          if (!group.acquired || !group.started || group.sessionGeneration!==this.generation || this.sessionAbort.signal.aborted) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          await commitWholeMediaCheckpoint(tx,group.jobId,group.marker,group.owner,group.generationId);
+          group.checkpointed=true;
+        },
+        storage: operation => this.sourceStorage(operation),
+        transport: this.mediaTransport,
+      }));
+    });
+  }
   async checkpointWholeDirectory(tx: Prisma.TransactionClient, taskId: string, creatorId: string, ids: string[]) {
     const scope = this.wholeAuthorization.getStore();
     if (!scope?.generationId) return;
@@ -203,17 +233,18 @@ export class XhsSubscriptionRuntime
     const task = JSON.parse(tasks[0].document), job = JSON.parse(rows[0].document);
     const sameIds = (a: unknown, b: unknown) => Array.isArray(a) && Array.isArray(b) &&
       JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
-    const selected = job.generation?.selectedIds;
+    const repair = job.generation?.basicRepair?.taskId === taskId ? job.generation.basicRepair : undefined;
+    const selected = repair?.noteIds ?? job.generation?.selectedIds;
     const directoryMatches = selected
       ? task.collectionScope === 'selected' && (task.selectionComplete === true || task.listFinished === true) &&
         sameIds(task.selectedIds, selected) && sameIds(ids, selected)
       : task.listFinished === true && JSON.stringify(task.listedIds) === JSON.stringify(ids);
-    if (task.collectionStage !== 'details' || !directoryMatches || job.listTask !== taskId ||
+    if (task.collectionStage !== 'details' || !directoryMatches || (!repair && job.listTask !== taskId) ||
         job.generation?.id !== scope.generationId || job.generation?.activeFence ||
         job.sourceGrant?.authorId !== scope.authorId)
       return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
     job.listEnd = true;
-    job.generation.directoryIds = ids;
+    if (!repair) job.generation.directoryIds = ids;
     const changed = await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${scope.jobId} AND state='running' AND document=${rows[0].document}`;
     if (changed !== 1) return failure('XHS_TASK_STATE_CHANGED');
   }
@@ -321,6 +352,7 @@ export class XhsSubscriptionRuntime
   private cookies?: XhsSessionCookies;
   private generation = 0;
   private sessionAbort = new AbortController();
+  private readonly transientMedia = new Map<string,{generation:number;expiresAt:number;version:string;getUrl:(key:string)=>string|undefined}>();
   private changing = false;
   private stored: boolean | null = null;
   private verified = false;
@@ -331,6 +363,7 @@ export class XhsSubscriptionRuntime
     this.riskStore ??= store;
   }
   private readonly adapter: RedbookSubscriptionAdapter;
+  private readonly mediaTransport: RedbookMediaTransport;
   private readonly requestAttempts = {
     instanceId: randomUUID(),
     profiles: 0,
@@ -440,6 +473,12 @@ export class XhsSubscriptionRuntime
         charge);
       },
     });
+    this.mediaTransport = (url, request) =>
+      this.guardTransport(() => {
+        this.observeSourceStage('transport');
+        this.requestAttempts.media++;
+        return media(url, { ...request, signal: AbortSignal.any([signal(request.signal), AbortSignal.timeout(10_000)]) });
+      }, 'media');
     this.adapter = new RedbookSubscriptionAdapter(
       client,
       {
@@ -460,14 +499,7 @@ export class XhsSubscriptionRuntime
           group ? 'profile' : undefined);
         }),
       },
-      (url, request) =>
-        this.guardTransport(() =>
-          (() => {
-            this.observeSourceStage('transport');
-            this.requestAttempts.media++;
-            return media(url, { ...request, signal: AbortSignal.any([signal(request.signal), AbortSignal.timeout(10_000)]) });
-          })(),
-        'media'),
+      this.mediaTransport,
     );
   }
   private async guardTransport<T>(operation: () => Promise<T>, charge?: Charge) {
@@ -594,6 +626,7 @@ export class XhsSubscriptionRuntime
     this.cookies = undefined;
     this.verified = false;
     this.adapter.clearAccessContext();
+    this.transientMedia.clear();
     this.originalLinks.clear();
   }
   private snapshot(code?: string): XhsConnectionStatus {
@@ -818,6 +851,7 @@ export class XhsSubscriptionRuntime
         this.stopCode = `XHS_SOURCE_${error.reason.toUpperCase()}_BLOCKED`;
         this.verified = false;
         this.sessionAbort.abort();
+        this.transientMedia.clear();
         this.adapter.clearAccessContext();
       }
       if (riskOwner) {
@@ -1060,6 +1094,22 @@ export class XhsSubscriptionRuntime
   basicDetail(authorId: string, noteId: string, signal?: AbortSignal) {
     this.checkWholeAuthor(authorId, noteId);
     return this.withSession(() => this.restoreContext(authorId, noteId, signal).then(() => this.adapter.basicDetail(authorId, noteId, signal)));
+  }
+  async basicDetailWithMedia(authorId: string, noteId: string, signal?: AbortSignal) {
+    this.checkWholeAuthor(authorId, noteId);
+    const result=await this.withSession(() => this.restoreContext(authorId, noteId, signal).then(() => this.adapter.basicDetailWithMedia(authorId, noteId, signal)));
+    if(result.media){
+      const id=JSON.stringify([authorId,noteId]);
+      if(this.transientMedia.size>=1000 && !this.transientMedia.has(id))this.transientMedia.delete(this.transientMedia.keys().next().value!);
+      this.transientMedia.set(id,{generation:this.generation,expiresAt:Date.now()+600000,version:result.media.manifest.version,getUrl:result.media.getUrl});
+    }
+    return result;
+  }
+  getTransientMediaUrl(authorId:string,noteId:string,version:string,resourceKey:string) {
+    if(!this.cookies||this.sessionAbort.signal.aborted||(this.stopCode && this.stopCode!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'))return undefined;
+    const id=JSON.stringify([authorId,noteId]), entry=this.transientMedia.get(id);
+    if(!entry||entry.generation!==this.generation||entry.expiresAt<=Date.now()||entry.version!==version){this.transientMedia.delete(id);return undefined;}
+    return entry.getUrl(resourceKey);
   }
   detail(authorId: string, noteId: string, signal?: AbortSignal) {
     this.checkWholeAuthor(authorId, noteId);

@@ -1,3 +1,4 @@
+import { toast } from 'sonner';
 import XhsBatchSubscription from '@web/components/XhsBatchSubscription';
 import type { BatchApi } from '@web/utils/xhs-subscription-batch';
 import XhsCombinedFilter from '@web/components/XhsCombinedFilter';
@@ -152,6 +153,7 @@ export default function Xiaohongshu() {
     retry: false,
     enabled: validCreatorRange,
   });
+  const allCreators = trpc.xiaohongshu.list.useQuery(undefined, { retry: false });
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
@@ -195,6 +197,7 @@ export default function Xiaohongshu() {
   // Adapt the in-development cache collection contract at one boundary.
   const fullCollectionApi = subscriptionApi as typeof subscriptionApi & {
     refreshFull: { mutate: (input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[] }) => Promise<TaskReceipt> };
+    refreshMissingBasic: { mutate: (input: { id:string; noteIds:string[] }) => Promise<TaskReceipt | {state:'nothing-missing'}> };
   };
   const prepareOriginalLink = useCallback<PrepareXhsLink>(
     (input) => {
@@ -495,6 +498,7 @@ export default function Xiaohongshu() {
   const remove = trpc.xiaohongshu.remove.useMutation();
   const exportNotes = trpc.xiaohongshu.export.useMutation();
   const saveGroup = trpc.xiaohongshu.saveGroup.useMutation({ retry: false });
+  const reorderGroups = trpc.xiaohongshu.reorderGroups.useMutation({ retry: false });
   const removeGroup = trpc.xiaohongshu.removeGroup.useMutation();
   const moveCreators = trpc.xiaohongshu.moveCreators.useMutation();
   useEffect(() => {
@@ -719,6 +723,13 @@ export default function Xiaohongshu() {
     if (scope === 'selected' && !ids.length) { setMessage('请先选择要更新的笔记。'); return; }
     if (ids.length > 1000) { setMessage('所选笔记超过单次上限，请缩小范围。'); return; }
     void run(async () => { await updateCreator(current.id, scope, scope === 'selected' ? ids : undefined); });
+  };
+  const handleMissingBasic = () => {
+    if (!current || !current.enabled) { setMessage('请先选择已启用的账号。'); return; }
+    if (!capability.data?.canRefresh) { showSourceSettings(); setMessage('请先核对来源会话及平台限制。'); return; }
+    const ids=visibleNotes.filter(note=>note.creatorId===current.id && selectedIds.has(note.id)).map(note=>note.id);
+    if (!ids.length || ids.length>1000) { setMessage('请选择不超过 1000 篇笔记。'); return; }
+    void run(async()=>{const receipt=await fullCollectionApi.refreshMissingBasic.mutate({id:current.id,noteIds:ids});if('taskId' in receipt)startTask(receipt,'list',0,true);else setMessage('所选笔记的基础字段已齐全，未发起采集。');});
   };
   const handleRefreshAll = () =>
     run(async () => {
@@ -1146,6 +1157,7 @@ export default function Xiaohongshu() {
         </div>
         <ManagementFolders
           folders={groups.data?.items || []}
+          members={allCreators.data?.items.map((creator) => ({ id: creator.id, name: creator.displayName, groupId: creator.groupId }))}
           filter={folderFilter}
           selectedIds={selectedCreators}
           dragType="application/x-wewe-xiaohongshu"
@@ -1161,6 +1173,22 @@ export default function Xiaohongshu() {
           onBusyChange={(value) => {
             active.current = value;
             setBusy(value);
+          }}
+          onReorder={async (ids, expectedIds) => {
+            await utils.xiaohongshu.groups.cancel();
+            const saved = await reorderGroups.mutateAsync({ ids, expectedIds });
+            await utils.xiaohongshu.groups.cancel();
+            const orders = new Map(saved.ids.map((id, order) => [id, order]));
+            utils.xiaohongshu.groups.setData(undefined, (previous) => {
+              if (!previous) return previous;
+              return { ...previous, items: previous.items
+                .map((folder) => ({ ...folder, order: orders.get(folder.id) ?? folder.order }))
+                .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id)) };
+            });
+            void groups.refetch().then(
+              (result) => { if (result.error) toast.warning('文件夹排序已保存，列表刷新失败，请稍后刷新页面核对'); },
+              () => toast.warning('文件夹排序已保存，列表刷新失败，请稍后刷新页面核对'),
+            );
           }}
           onSave={async (input) => {
             await utils.xiaohongshu.groups.cancel();
@@ -1189,15 +1217,32 @@ export default function Xiaohongshu() {
             await invalidateFolders();
           }}
           onMove={async (ids, groupId) => {
-            await moveCreators.mutateAsync({ ids, groupId });
+            await utils.xiaohongshu.list.cancel();
+            const saved = await moveCreators.mutateAsync({ ids, groupId });
+            await utils.xiaohongshu.list.cancel();
+            const moved = new Set(saved.ids);
+            const update = (previous: typeof creators.data) => previous && ({
+              ...previous,
+              items: previous.items.map((creator) => moved.has(creator.id) ? { ...creator, groupId: saved.groupId } : creator),
+            });
+            utils.xiaohongshu.list.setData(creatorMetricFilter, update);
+            utils.xiaohongshu.list.setData(undefined, update);
             setSelectedCreators([]);
-            await invalidateFolders();
+            setSelectedIds(new Set());
+            void Promise.all([
+              utils.xiaohongshu.groups.invalidate(undefined, undefined, { throwOnError: true }),
+              utils.xiaohongshu.list.invalidate(undefined, undefined, { throwOnError: true }),
+              utils.xiaohongshu.notes.invalidate(undefined, undefined, { throwOnError: true }),
+            ]).catch(() => toast.warning('分类已保存，列表刷新失败，请稍后刷新页面核对'));
           }}
         />
         {groups.error && (
           <p role="alert" className="px-4 text-sm">
             文件夹读取失败，请重新读取页面。
           </p>
+        )}
+        {allCreators.error && (
+          <p role="alert" className="px-4 text-sm">完整博主列表读取失败，暂无法添加订阅到文件夹。</p>
         )}
         {creators.error && (
           <p role="alert" className="px-4 text-sm">
@@ -1440,6 +1485,12 @@ export default function Xiaohongshu() {
             <p className="py-1 text-xs text-neutral-500">
               {taskNextStep(task)}
             </p>
+            {task.mediaSummary && <p role="status" className="py-1 text-xs text-neutral-500">
+              图片清单覆盖 {task.mediaSummary.manifestNotes} 篇，发现 {task.mediaSummary.declaredImages} 项；记录已保存 {task.mediaSummary.recordedSavedImages} 项，待处理 {task.mediaSummary.pendingImages} 项。
+              {task.mediaSummary.needsReviewNotes > 0 && ` ${task.mediaSummary.needsReviewNotes} 篇图片清单待核对。`}
+              {task.mediaSummary.blockedNotes > 0 && ` ${task.mediaSummary.blockedNotes} 篇请求结果待核对，已停止。`}
+              {task.mediaSummary.needsDetailRefreshNotes > 0 && ` ${task.mediaSummary.needsDetailRefreshNotes} 篇需核对后刷新详情；不会自动重试。`}
+            </p>}
           </SubscriptionProgress>
         )}
         <SubscriptionToolbar>
@@ -1489,6 +1540,8 @@ export default function Xiaohongshu() {
             <SubscriptionMore key={creatorId}>
               {current && <Button size="sm" variant="light" isDisabled={busy} onPress={() => handleScopedUpdate('all')}>更新本号全部内容</Button>}
               {current && <Button size="sm" variant="light" isDisabled={busy || !selectedIds.size} onPress={() => handleScopedUpdate('selected')}>更新所选内容</Button>}
+              {current && <Button size="sm" variant="light" isDisabled={busy || !selectedIds.size} onPress={handleMissingBasic}>仅补所选基础缺项</Button>}
+              {current && selectedIds.size > 0 && <Button size="sm" variant="light" isDisabled={busy} onPress={() => setDiagnosticOpen(true)}>补所选图片</Button>}
               <Button size="sm" variant="light" isDisabled={busy} onPress={() => setBatchOpen(true)}>批量订阅</Button>
               <Button size="sm" variant="light" onPress={() => setDiagnosticOpen(true)}>来源诊断</Button>
               <Button
@@ -2014,7 +2067,7 @@ export default function Xiaohongshu() {
                   className="xhs-note-status"
                   title={noteArchiveStatus(note)}
                 >
-                  {{ pending: '尚未尝试', complete: '基础数据已取得', missing: '来源缺字段', skipped: '已跳过', needs_review: '需核对' }[note.basicStatus] ?? '尚未尝试'}
+                  {{ pending: '尚未尝试', complete: '基础数据已取得', missing: '基础字段未取得', skipped: '已跳过', needs_review: '需核对' }[note.basicStatus] ?? '尚未尝试'}
                   {' · '}{note.status === 'complete' ? '已归档' : '媒体未归档'}
                 </span>
               </div>
@@ -2058,7 +2111,7 @@ export default function Xiaohongshu() {
       <SubscriptionDialog isOpen={diagnosticOpen} onClose={() => setDiagnosticOpen(false)}>
         <ModalContent><ModalHeader>来源诊断</ModalHeader><ModalBody>
           <p>来源访问受限或需要验证时，采集会暂停。请检查来源状态后再继续。</p>
-          {creatorId && <XhsWholeCreator creatorId={creatorId} />}
+          {creatorId && <XhsWholeCreator creatorId={creatorId} selectedNoteIds={[...selectedIds]} />}
         </ModalBody><ModalFooter><Button onPress={() => setDiagnosticOpen(false)}>关闭</Button></ModalFooter></ModalContent>
       </SubscriptionDialog>
       <SubscriptionDialog isOpen={confirmDirectory !== null} onClose={() => finishDirectoryConfirmation(false)}>

@@ -14,7 +14,7 @@ import { XhsSubscriptionSource } from './xhs-subscription.service';
 import { XhsAuthor } from '@wewe-rss/shared';
 import { XhsShortLinkResolver } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
-import { selectXhsNativeDetail } from './xhs-native-media';
+import { extractXhsMediaManifest, selectXhsNativeDetail } from './xhs-native-media';
 import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 import {
   mapXhsComments,
@@ -348,11 +348,17 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
       }
     );
   }
-  async basicDetail(authorId: string, noteId: string, signal?: AbortSignal) {
+  async basicDetailWithMedia(authorId: string, noteId: string, signal?: AbortSignal) {
     const access = this.tokens.get(JSON.stringify([authorId, noteId]));
     if (!access || access.expiresAt <= this.now()) throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
     const raw = await this.client.getNoteById(noteId, access.token, access.source, signal);
-    return mapRedbookBasicDetail(raw, authorId, noteId);
+    const basic = mapRedbookBasicDetail(raw, authorId, noteId);
+    // Media is optional: malformed or absent images must never discard the basic response.
+    try { return { basic, media: extractXhsMediaManifest(raw, authorId, noteId) }; }
+    catch { return { basic, media: null }; }
+  }
+  async basicDetail(authorId: string, noteId: string, signal?: AbortSignal) {
+    return (await this.basicDetailWithMedia(authorId, noteId, signal)).basic;
   }
   async detail(authorId: string, noteId: string, signal?: AbortSignal) {
     const access = this.tokens.get(JSON.stringify([authorId, noteId]));

@@ -66,6 +66,16 @@ test('reviewed recovery seam rejects missing routes and changed writable authent
     assert.throws(() => restorePreReviewedRecoveryRouter(ts, source.replace(name+':', 'unreviewedReplacement:')), /all reviewed recovery routes/);
   }
 });
+test('new selected recovery routes and group ordering retain their protected declarations', () => {
+  const source=read('apps/server/src/trpc/trpc.router.ts');
+  for(const name of ['reorderGroups','resumeWholeCreatorMedia','resumeWholeCreatorMissingBasic']) {
+    const fixture=require('./fixtures/xhs-cache-router-seams.json').find(entry=>entry.name===name);
+    assert.ok(fixture && fixture.before===null && fixture.after.includes('this.trpcService.protectedProcedure'));
+    const changed=fixture.after.replace('this.trpcService.protectedProcedure','this.trpcService.publicProcedure');
+    assert.notEqual(changed,fixture.after);
+    assert.throws(()=>restorePreReviewedRecoveryRouter(ts,source.replace(fixture.after,changed)),/exact cache collection route/);
+  }
+});
 test('deployment baseline keeps existing routes and safety/startup/reader/title policies', () => {
   assert.deepEqual(Object.keys(searchPins.criticalFiles).sort(), [
     'apps/server/src/article-body-search.ts',

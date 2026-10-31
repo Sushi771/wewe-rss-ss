@@ -442,6 +442,9 @@ export class XiaohongshuService {
   groups() {
     return managementGroups(this.prisma, 'xiaohongshu');
   }
+  reorderGroups(input: { ids: string[]; expectedIds: string[] }) {
+    return reorderManagementGroups(this.prisma, 'xiaohongshu', input);
+  }
   saveGroup(input: { id?: string; name: string }) {
     return saveManagementGroup(this.prisma, 'xiaohongshu', input);
   }

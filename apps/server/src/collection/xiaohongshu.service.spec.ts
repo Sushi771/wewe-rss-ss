@@ -215,6 +215,23 @@ describe('production XHS router/service → additive SQLite and original export 
       legacyRefresh: ({ id }: { id: string }) => service.refresh(id),
     };
   }
+  it('reorders XHS groups through the protected route without moving creators', async () => {
+    const api = caller().xiaohongshu;
+    const first = await api.saveGroup({ name: 'First synthetic group' });
+    const second = await api.saveGroup({ name: 'Second synthetic group' });
+    await api.moveCreators({ ids: [creatorId], groupId: first.id });
+    const original = (await api.groups()).items.map((group) => group.id);
+    const reversed = [...original].reverse();
+    await expect(caller(undefined, 'not signed in').xiaohongshu.reorderGroups({ ids: reversed, expectedIds: original })).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    await api.reorderGroups({ ids: reversed, expectedIds: original });
+    expect((await api.groups()).items.map((group) => group.id)).toEqual(reversed);
+    await expect(api.reorderGroups({ ids: original, expectedIds: original })).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(api.reorderGroups({ ids: [first.id, first.id], expectedIds: reversed })).rejects.toBeDefined();
+    const foreign = await prisma.managementGroup.create({ data: { id: 'synthetic-wechat-group', platform: 'wechat', name: 'Other platform', order: 0 } });
+    await expect(api.reorderGroups({ ids: [first.id, foreign.id], expectedIds: reversed })).rejects.toBeDefined();
+    expect((await prisma.xhsCreator.findUniqueOrThrow({ where: { id: creatorId } })).groupId).toBe(first.id);
+    expect((await api.groups()).items.map((group) => group.id)).toEqual(reversed);
+  });
   it('uses protected real routes, persists pending creators, refuses unconfigured refresh/download', async () => {
     await expect(
       caller(undefined, '未登录').xiaohongshu.list(),

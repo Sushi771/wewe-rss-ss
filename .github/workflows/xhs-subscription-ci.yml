@@ -78,6 +78,13 @@ jobs:
         run: node --test scripts/xhs-original-link-privacy.test.cjs scripts/xhs-original-link-ui.test.cjs scripts/xhs-source-budget-ui.test.cjs scripts/xhs-rejection-messages.test.cjs scripts/xhs-note-links.test.cjs scripts/xhs-engagement-visibility.test.cjs scripts/sites-local-contract.test.mjs scripts/xhs-reader-removal.test.cjs scripts/xhs-whole-creator-ui.test.cjs scripts/xhs-subscription-ui.test.cjs scripts/xhs-task-recovery-ui.test.cjs scripts/storage-status-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/xhs-batch-subscription-ui.test.cjs scripts/xhs-combined-filter.test.cjs scripts/xhs-metric-sort.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs scripts/folder-member-picker.test.cjs scripts/deployed-export-adaptation.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/article-body-state.test.cjs scripts/feed-browse-state.test.cjs scripts/wechat-original-link.test.cjs scripts/feed-avatar-reading-ui.test.cjs scripts/wechat-source-metrics-ui.test.cjs scripts/export-article-batches.test.cjs scripts/export-interruption-ui.test.cjs
       - name: Existing maintenance status contract
         run: pnpm --filter server exec jest --runInBand --testPathPattern=startup-audit.spec --testNamePattern='existing status read'
+      - name: Selected recovery and folder interactions
+        run: node --test scripts/xhs-selected-media-ui.test.cjs scripts/xhs-folder-isolated-ui.test.cjs scripts/xhs-folder-query-refresh.test.cjs
+      - name: Folder ordering with browser and SQLite
+        if: runner.os == 'Windows'
+        run: |
+          node -e "if (!require('./scripts/offline-browser-fixture.cjs').browser) process.exit(1)"
+          node --test scripts/xhs-folder-sqlite-browser.test.cjs
       - name: Types
         run: |
           pnpm --filter server exec tsc --noEmit

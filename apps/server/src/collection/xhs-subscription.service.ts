@@ -1,6 +1,6 @@
 import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
 import { TRPCError } from '@trpc/server';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Prisma, XhsCreator } from '@prisma/client';
 import {
   XhsAuthor,
@@ -20,11 +20,13 @@ import {
   xhsArchiveDraft,
 } from './xiaohongshu-contract';
 import type { mapRedbookBasicDetail } from './redbook-response';
+import type { XhsMediaManifest } from './xhs-native-media';
 import { verifiedDownloadBody } from '../article-verified-download';
 import { prepareXhsVideoDownload, inspectCachedMp4 } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
 import { saveXhsMetrics } from './xhs-engagement-store';
+import { selectMissingBasic } from './xhs-missing-basic';
 import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
 import type { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 
@@ -79,6 +81,8 @@ export interface XhsSubscriptionSource {
     nextCursor: string | null;
   }>;
   basicDetail?(authorId: string, noteId: string, signal?: AbortSignal): Promise<ReturnType<typeof mapRedbookBasicDetail>>;
+  basicDetailWithMedia?(authorId: string, noteId: string, signal?: AbortSignal): Promise<{basic:ReturnType<typeof mapRedbookBasicDetail>;media:{manifest:XhsMediaManifest;getUrl:(key:string)=>string|undefined}|null}>;
+  getTransientMediaUrl?(authorId:string,noteId:string,version:string,resourceKey:string):string|undefined;
   detail(
     authorId: string,
     noteId: string,
@@ -100,6 +104,7 @@ type Task = XhsSubscriptionTask & {
   selectionComplete?: boolean;
   basicOnly?: boolean;
   basicResults?: Record<string, 'complete' | 'missing'>;
+  mediaManifests?: Record<string,{state:'pending'|'none'|'needs-review';manifest?:XhsMediaManifest;code?:string;items?:Record<string,{state:string}>}>;
   reuseCompleteCache?: boolean;
   collectionStage?: 'listing' | 'details';
   cacheResults?: Record<string, 'completed'>;
@@ -564,6 +569,11 @@ export class XhsSubscriptionService implements OnModuleInit {
       input.maxPages,
     );
   }
+  async refreshMissingBasic(input:{id:string;noteIds:string[]}) {
+    const selected=await selectMissingBasic(this.db,input.id,input.noteIds);
+    if(!selected.noteIds.length)return {state:'nothing-missing' as const};
+    return this.refreshFull({id:input.id,scope:'selected',noteIds:selected.noteIds,basicOnly:true,reuseCompleteCache:true});
+  }
   async refreshFull(input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[]; reuseCompleteCache?: boolean; basicOnly?: boolean; carriedBasicResults?: Record<string,'complete'|'missing'> }, startAfter?: Promise<boolean>) {
     await this.creator(input.id);
     const scope = input.scope ?? 'recent';
@@ -681,6 +691,9 @@ export class XhsSubscriptionService implements OnModuleInit {
     // Preserve a detail receipt committed before an acknowledgement failure.
     if (saved?.detailMetrics)
       t.detailMetrics = { ...saved.detailMetrics, ...t.detailMetrics };
+    // A late task write must not erase already committed per-resource receipts.
+    if (saved?.mediaManifests)
+      t.mediaManifests = { ...t.mediaManifests, ...saved.mediaManifests };
     const json = JSON.stringify(t);
     return tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id, creator_id, state, document, updated_at) VALUES (${t.taskId}, ${t.creatorId}, ${t.state}, ${json}, ${BigInt(Date.now())}) ON CONFLICT(id) DO UPDATE SET state=excluded.state, document=excluded.document, updated_at=excluded.updated_at`;
   }
@@ -857,6 +870,21 @@ export class XhsSubscriptionService implements OnModuleInit {
       : reconciledComplete
         ? 'completed'
         : t.state;
+    const mediaEntries=Object.values(t.mediaManifests??{});
+    const mediaSummary=mediaEntries.length?{manifestNotes:mediaEntries.filter(entry=>!!entry.manifest).length,declaredImages:0,recordedSavedImages:0,pendingImages:0,needsReviewNotes:0,blockedNotes:0,needsDetailRefreshNotes:0}:undefined;
+    if(mediaSummary)for(const entry of mediaEntries){
+      if(entry.state==='needs-review')mediaSummary.needsReviewNotes++;
+      const manifest=entry.manifest;
+      if(!manifest){mediaSummary.needsDetailRefreshNotes++;continue;}
+      mediaSummary.declaredImages+=manifest.images.length;
+      let refresh=false,blocked=false;
+      for(const image of manifest.images){
+        const item=entry.items?.[String(image.ordinal)];
+        if(item?.state==='saved')mediaSummary.recordedSavedImages++;
+        else {mediaSummary.pendingImages++;if(['started','unknown','restricted'].includes(item?.state??''))blocked=true;else if(!image.resourceKey || !this.source?.getTransientMediaUrl?.(manifest.authorId,manifest.noteId,manifest.version,image.resourceKey))refresh=true;}
+      }
+      if(blocked)mediaSummary.blockedNotes++;else if(refresh)mediaSummary.needsDetailRefreshNotes++;
+    }
     return {
       taskId: t.taskId,
       creatorId: t.creatorId,
@@ -871,6 +899,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       failed: t.failed,
       remaining: t.remaining,
       snapshotsSaved: t.snapshotsSaved,
+      mediaSummary,
       // Keep private receipt history, but never label a reconciled public
       // checkpoint as still uncertain: the UI correctly fences that code.
       code: uncertain
@@ -963,7 +992,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       items: [...tasks.values()].slice(0, limit).map((t) => this.view(t)),
     };
   }
-  async resumeTask(input: { taskId: string; pickToken?: string }) {
+  async resumeTask(input: { taskId: string; pickToken?: string }, startAfter?: Promise<boolean>) {
     await this.readyForMutation();
     if (this.pending.has(input.taskId)) return reject('XHS_TASK_SETTLING');
     await this.reconcile(input.taskId);
@@ -1004,6 +1033,11 @@ export class XhsSubscriptionService implements OnModuleInit {
       checkpoint.noteIds,
       directory,
       checkpoint,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      startAfter,
     );
   }
   async cancelTask(input: { taskId: string }) {
@@ -1063,28 +1097,31 @@ export class XhsSubscriptionService implements OnModuleInit {
               where: { id, creatorId: creator.id },
             });
             if (!old) return reject('XHS_SELECTION_CHANGED');
-            if (t.basicOnly && t.reuseCompleteCache && old.status === 'complete' && old.publishTime > 0 && old.contentHtml) {
+            if (t.basicOnly && t.reuseCompleteCache && old.publishTime > 0 && old.contentHtml) {
               let reusable = false;
               try {
-                if (old.contentHtml.includes('data-wewe-image-pending')) throw Error('incomplete');
                 verifiedDownloadBody(old.contentHtml);
-                if (old.kind === 'video') {
-                  if (!old.videoBytes || old.videoMimeType !== 'video/mp4' || !old.videoSha256 || !old.videoExpectedBytes) throw Error('incomplete');
-                  const video = inspectCachedMp4(Buffer.from(old.videoBytes));
-                  if (video.sha256 !== old.videoSha256 || video.bytes !== old.videoExpectedBytes) throw Error('incomplete');
-                } else if (old.kind !== 'image-text') throw Error('incomplete');
+                if (old.kind !== 'video' && old.kind !== 'image-text') throw Error('incomplete');
                 const snapshots=await this.db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${id}`;
                 const snapshot=snapshots.length === 1 ? JSON.parse(snapshots[0].document) : null;
-                reusable = Number.isSafeInteger(snapshot?.collectedAt) && snapshot.collectedAt > 0 && typeof snapshot.contract === 'string' && !!snapshot.contract && ['source-only','verified-response'].includes(snapshot.evidence) && ['likes','collects','shares','comments'].every(k => Number.isSafeInteger(snapshot.values?.[k]) && snapshot.values[k] >= 0);
+                reusable = Number.isSafeInteger(snapshot?.collectedAt) && snapshot.collectedAt > 0 && typeof snapshot.contract === 'string' && !!snapshot.contract && ['source-only','verified-response'].includes(snapshot.evidence) && ['likes','collects','shares','comments'].every(k => {const at=snapshot.valueCollectedAt && Object.prototype.hasOwnProperty.call(snapshot.valueCollectedAt,k)?snapshot.valueCollectedAt[k]:snapshot.collectedAt;return Number.isSafeInteger(snapshot.values?.[k]) && snapshot.values[k] >= 0 && Number.isSafeInteger(at) && at>0;});
               } catch { /* incomplete evidence must be refreshed */ }
               if (reusable) {t.basicResults={...t.basicResults,[id]:'complete'};t.items[id]='completed';t.completed++;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
             }
             if (t.basicOnly && t.collectDetails) {
-              if (!this.source?.basicDetail) return reject('XHS_SOURCE_UNCONFIGURED');
+              if (!this.source?.basicDetail && !this.source?.basicDetailWithMedia) return reject('XHS_SOURCE_UNCONFIGURED');
               const tuple = JSON.parse(id);
               if (!Array.isArray(tuple) || tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note' || typeof tuple[2] !== 'string') return reject('XHS_NOTE_ID_INVALID');
               await this.withSourceCheckpoint('detail', creator.externalAuthorId!, tuple[2], async () => {
-                const note = await this.source!.basicDetail!(creator.externalAuthorId!, tuple[2], this.controllers.get(t.taskId)?.signal);
+                const projection = this.source!.basicDetailWithMedia ? await this.source!.basicDetailWithMedia(creator.externalAuthorId!,tuple[2],this.controllers.get(t.taskId)?.signal) : {basic:await this.source!.basicDetail!(creator.externalAuthorId!,tuple[2],this.controllers.get(t.taskId)?.signal),media:null};
+                const note=projection.basic, rawManifest=projection.media?.manifest;
+                let manifest:XhsMediaManifest|undefined;
+                if(rawManifest && rawManifest.authorId===creator.externalAuthorId && rawManifest.noteId===tuple[2] && Array.isArray(rawManifest.images) && rawManifest.images.length<=60 && rawManifest.images.every((image,i)=>image?.ordinal===i+1 && (image.resourceKey===null || /^[a-f0-9]{64}$/.test(image.resourceKey)))) {
+                  const images=rawManifest.images.map(image=>({ordinal:image.ordinal,resourceKey:image.resourceKey}));
+                  const version=createHash('sha256').update(JSON.stringify([rawManifest.authorId,rawManifest.noteId,images])).digest('hex');
+                  if(version===rawManifest.version)manifest={authorId:rawManifest.authorId,noteId:rawManifest.noteId,version,images};
+                }
+                const mediaReceipt: NonNullable<Task['mediaManifests']>[string] = manifest ? {state:note.kind==='video'||manifest.images.some(image=>!image.resourceKey)?'needs-review':manifest.images.length?'pending':'none',manifest} : {state:'needs-review',code:'XHS_MEDIA_MANIFEST_UNAVAILABLE'};
                 if (!active(t)) return;
                 if (note.noteId !== tuple[2] || note.authorId !== creator.externalAuthorId || (old.kind && old.kind !== note.kind)) return reject('XHS_DETAIL_INCOMPLETE');
                 const basicResult: 'complete' | 'missing' = note.publishedAt !== null && ['likes','collects','shares','comments'].every(k => Number.isSafeInteger(note.metrics.values[k]) && (note.metrics.values[k] as number) >= 0) ? 'complete' : 'missing';
@@ -1096,10 +1133,10 @@ export class XhsSubscriptionService implements OnModuleInit {
                   if (!current || !active(t)) return reject('XHS_TASK_CANCELLED');
                   await tx.xhsNote.update({where:{id},data:{...(note.title !== null ? {title:note.title} : {}),...(note.publishedAt !== null ? {publishTime:note.publishedAt} : {}),...(!current.contentHtml && html ? {contentHtml:html} : {})}});
                   await saveXhsMetrics(tx,'note',id,note.metrics);
-                  await this.persistIn(tx,{...t,basicResults:{...t.basicResults,[id]:basicResult},items:{...t.items,[id]:'completed'},completed:t.completed+1,remaining:t.total-t.completed-1-t.skipped-t.failed});
+                  await this.persistIn(tx,{...t,mediaManifests:{...t.mediaManifests,[id]:mediaReceipt},basicResults:{...t.basicResults,[id]:basicResult},items:{...t.items,[id]:'completed'},completed:t.completed+1,remaining:t.total-t.completed-1-t.skipped-t.failed});
                   await this.source?.checkpointWholeSource?.(tx);
                 });
-                t.basicResults={...t.basicResults,[id]:basicResult};t.items[id]='completed';t.completed++;t.remaining=t.total-t.completed-t.skipped-t.failed;
+                t.mediaManifests={...t.mediaManifests,[id]:mediaReceipt};t.basicResults={...t.basicResults,[id]:basicResult};t.items[id]='completed';t.completed++;t.remaining=t.total-t.completed-t.skipped-t.failed;
               });
               await this.persist(t);
               continue;

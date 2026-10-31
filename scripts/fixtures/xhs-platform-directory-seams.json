@@ -95,6 +95,10 @@
     {
       "before": "",
       "after": "          basicStatus: stateOf(note),\n"
+    },
+    {
+      "before": "",
+      "after": "  reorderGroups(input: { ids: string[]; expectedIds: string[] }) {\n    return reorderManagementGroups(this.prisma, 'xiaohongshu', input);\n  }\n"
     }
   ]
 }

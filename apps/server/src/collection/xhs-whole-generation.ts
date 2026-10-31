@@ -13,6 +13,20 @@ export type GenerationScope = { jobId: string; creatorId: string; authorId: stri
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const clone = (value: any) => JSON.parse(JSON.stringify(value));
 const bad = (): never => { throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); };
+/** Keep the historical attempt intact, but allow unrelated selected work only
+ * after its one authorized dispatch has a durable, identity-bound receipt. */
+export function generationReviewSettled(job:any):boolean {
+  const a=job?.reviewAttempt;
+  if(!a)return true;
+  const s=a.scope,r=a.receipt,d=a.dispatch,g=job.generation;
+  const fences=g?[g.origin?.fence,...(Array.isArray(g.reviews)?g.reviews.filter((x:any)=>x?.decision==='exclude').map((x:any)=>x.fence):[])].filter((f:any)=>f?.phase==='detail'&&f?.state==='started'&&f?.noteId===s?.noteId):[];
+  return !!s && !!g && a.id===hash(s) && s.jobId===job.id && s.generationId===g.id && s.authorId===job.sourceGrant?.authorId &&
+    fences.length===1 && s.reviewId===hash(fences[0]) && Array.isArray(g.selectedIds) && !g.selectedIds.includes(JSON.stringify(['xiaohongshu','note',s.noteId])) &&
+    s.phase==='detail' && s.maxRequests===1 && typeof s.noteId==='string' && /^[a-zA-Z0-9_-]{1,128}$/.test(s.noteId) &&
+    a.state==='checkpointed' && d?.state==='checkpointed' && d.transportEntered===true && d.marker==='xhs:dispatch-pending:review:'+a.id && d.creatorId===job.creatorId &&
+    r?.creatorId===job.creatorId && r.noteId===JSON.stringify(['xiaohongshu','note',s.noteId]) && ['saved','retained'].includes(r.body) &&
+    ['pending','none','needs-review'].includes(r.media) && Number.isSafeInteger(r.mediaCount) && r.mediaCount>=0;
+}
 const identity = (g: any) => ({ id: g.id, profileUrl: g.profileUrl, createdAt: g.createdAt, phaseLimits: g.phaseLimits, origin: g.origin });
 function historicalJob(job: any) {
   const o = job.generation.origin;
@@ -71,7 +85,7 @@ export async function historicalGenerationMarker(tx: Tx, scope: GenerationScope)
   const r = await jobRow(tx, scope.jobId), job = r.job, g = job.generation;
   if (r.creator_id !== scope.creatorId || r.author !== scope.authorId || job.id !== scope.jobId ||
       !generationMatches(job) || g.id !== scope.generationId || !['prepared', 'running'].includes(g.state) ||
-      !['paused', 'partial', 'queued', 'running'].includes(r.state) || job.reviewAttempt) return bad();
+      !['paused', 'partial', 'queued', 'running'].includes(r.state) || !generationReviewSettled(job)) return bad();
   await riskReady(tx); await noOtherRecovery(tx);
   const budgets = await budgetRows(tx, scope.jobId);
   if (budgets.length !== 2) return bad();

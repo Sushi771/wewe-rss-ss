@@ -134,7 +134,7 @@ const blockedMediaTransport: RedbookMediaTransport = async () => {
   throw new Error('REDBOOK_MEDIA_TRANSPORT_DISABLED');
 };
 
-async function downloadMedia(
+export async function downloadRedbookMedia(
   url: URL,
   remainingBytes: number,
   transport: RedbookMediaTransport,
@@ -274,7 +274,7 @@ export async function mapRedbookDetail(
   let totalBytes = 0;
   const images: XhsNormalizedCandidate['images'] = [];
   for (const url of urls) {
-    const media = await downloadMedia(
+    const media = await downloadRedbookMedia(
       url,
       MEDIA_BUDGET - totalBytes,
       transport,

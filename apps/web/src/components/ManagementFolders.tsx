@@ -78,13 +78,17 @@ export default function ManagementFolders({
       onBusyChange(false);
     }
   };
+  const move = (ids: string[], groupId: string | null) => {
+    if (new Set(ids).size > 100) throw new Error('一次最多移动 100 个订阅，请减少选择后再试。');
+    return onMove(ids, groupId);
+  };
   const drop = (event: React.DragEvent, groupId: string | null) => {
     event.preventDefault();
     if (disabled || active.current) return;
     const id = event.dataTransfer.getData(dragType);
     if (!id) return; // Ignore drops from another platform and external content.
     void run(() =>
-      onMove(selectedIds.includes(id) ? selectedIds : [id], groupId),
+      move(selectedIds.includes(id) ? selectedIds : [id], groupId),
     );
   };
   const reorder = (id: string, targetId: string) => {
@@ -312,7 +316,7 @@ export default function ManagementFolders({
             variant="flat"
             isDisabled={disabled}
             onPress={() =>
-              void run(() => onMove(selectedIds, destination || null))
+              void run(() => move(selectedIds, destination || null))
             }
           >
             移动已选
@@ -333,7 +337,7 @@ export default function ManagementFolders({
           error={error}
           disabled={disabled || saving}
           onClose={() => setAddingTo(undefined)}
-          onAdd={(ids) => run(() => onMove(ids, addingTo.id))}
+          onAdd={(ids) => run(() => move(ids, addingTo.id))}
         />
       )}
       {error && (

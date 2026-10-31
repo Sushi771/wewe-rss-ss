@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { trpc } from "@web/utils/trpc";
 
-export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
+export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { creatorId: string; selectedNoteIds?: string[] }) {
   const [limit, setLimit] = useState(100),
     [error, setError] = useState("");
   const [phase, setPhase] = useState<
@@ -117,6 +117,8 @@ export default function XhsWholeCreator({ creatorId }: { creatorId: string }) {
           <p role="status">
             {{ queued: '等待中', running: '同步中', paused: '已暂停', partial: '部分完成', failed: '未完成', cancelled: '已取消', completed: '已完成' }[job.state] ?? '状态待确认'} · 已发现 {job.items.length} 篇
           </p>
+          {job.generationRecovery && <XhsSelectedMedia job={job} selectedNoteIds={selectedNoteIds} refresh={() => jobs.refetch()} />}
+
           {!job.generationRecovery && job.sourceCheckpoint?.state === "unknown" && (
             <p role="alert">
               来源请求结果尚未确认，已暂停且不会自动重发；请先核对该阶段回执。
@@ -374,5 +376,72 @@ export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => 
       {!g && <p>准备操作不发来源请求，核对后还需点击开始。</p>}
     </>}
     {error && <p role="alert">{error}</p>}
+  </div>;
+}
+
+
+/** Explicit per-generation action; selection is never widened or auto-retried. */
+export function XhsSelectedMedia({ job, selectedNoteIds, refresh }: {
+  job: { id: string; state: string; items: { noteId: string; title: string; mediaResult?: 'complete' | 'needs-review' | 'needs-detail-refresh' }[];
+    generationRecovery?: { id: string; directoryComplete: boolean; selectionComplete?: boolean; resumable: boolean; excludedIds?: string[]; mediaRecoverableIds?: string[]; newResult?: string } | null };
+  selectedNoteIds: string[]; refresh: () => Promise<unknown>;
+}) {
+  const [confirmedKey, setConfirmedKey] = useState('');
+  const [basicConfirmedKey, setBasicConfirmedKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const lock = useRef(false);
+  const resumeMedia = trpc.xiaohongshu.resumeWholeCreatorMedia.useMutation({ retry: false });
+  const resumeBasic = trpc.xiaohongshu.resumeWholeCreatorMissingBasic.useMutation({ retry: false });
+  const generation = job.generationRecovery;
+  const key = JSON.stringify([job.id, generation?.id, selectedNoteIds]);
+  const items = selectedNoteIds.map(id => job.items.find(item => item.noteId === id));
+  const eligible = !!generation && generation.resumable && job.state === 'partial' &&
+    (generation.directoryComplete || generation.selectionComplete) && !generation.newResult &&
+    selectedNoteIds.length > 0 && selectedNoteIds.length <= 1000 &&
+    new Set(selectedNoteIds).size === selectedNoteIds.length &&
+    items.every(Boolean);
+  const basicEligible = eligible && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id));
+  const mediaEligible = eligible && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id) && !(generation?.mediaRecoverableIds ?? []).includes(id));
+  const run = async () => {
+    if (lock.current || !mediaEligible || confirmedKey !== key || !generation) return;
+    lock.current = true; setBusy(true); setConfirmedKey(''); setMessage('');
+    try {
+      await resumeMedia.mutateAsync({jobId: job.id, generationId: generation.id, noteIds: [...selectedNoteIds]});
+      setMessage('已提交所选图片补缺，请查看任务状态；已保存的图片会复用。');
+    } catch {
+      setMessage('本次操作未确认或受到来源限制，请先核对任务状态；不会自动重发。');
+    } finally {
+      await refresh().catch(() => setMessage('任务状态读取失败，请刷新核对；不会自动重发。'));
+      lock.current = false; setBusy(false);
+    }
+  };
+  const runBasic = async () => {
+    if (lock.current || !basicEligible || basicConfirmedKey !== key || !generation) return;
+    lock.current = true; setBusy(true); setBasicConfirmedKey(''); setMessage('');
+    try {
+      const receipt = await resumeBasic.mutateAsync({jobId: job.id, generationId: generation.id, noteIds: [...selectedNoteIds]});
+      setMessage('state' in receipt && receipt.state === 'nothing-missing'
+        ? '所选笔记基础字段已齐全，未发起采集。'
+        : '已提交所选基础缺项补取，请查看任务状态。');
+    } catch {
+      setMessage('本次操作未确认或受到来源限制，请先核对任务状态；不会自动重发。');
+    } finally {
+      await refresh().catch(() => setMessage('任务状态读取失败，请刷新核对；不会自动重发。'));
+      lock.current = false; setBusy(false);
+    }
+  };
+  const results = job.items.filter(item => item.mediaResult);
+  return <div className="my-2 text-xs">
+    {results.map(item => <p key={item.noteId}>{item.title || '未命名笔记'}：{item.mediaResult === 'complete' ? '图片已验证保存' : item.mediaResult === 'needs-detail-refresh' ? '图片地址失效或不可用，需受控刷新详情' : '图片清单缺失或待核对，需受控刷新详情'}</p>)}
+    {selectedNoteIds.length > 0 && <>
+      <p>已选 {selectedNoteIds.length} 篇。仅补本任务可处理的所选笔记；历史未知请求和来源限制不会自动重发。</p>
+      {!basicEligible && !mediaEligible && <p role="status">所选笔记不在可续补范围，或任务、来源状态仍需核对。</p>}
+      <label><input type="checkbox" checked={basicConfirmedKey === key} disabled={busy || !basicEligible} onChange={e => setBasicConfirmedKey(e.target.checked ? key : '')} />确认仅补所选笔记缺失的发布时间和互动数据。</label>
+      <button disabled={busy || !basicEligible || basicConfirmedKey !== key} onClick={() => void runBasic()}>补所选基础缺项</button>
+      <label><input type="checkbox" checked={confirmedKey === key} disabled={busy || !mediaEligible} onChange={e => setConfirmedKey(e.target.checked ? key : '')} />确认补缺所选笔记的图片。</label>
+      <button disabled={busy || !mediaEligible || confirmedKey !== key} onClick={() => void run()}>补缺所选图片</button>
+      {message && <p role="status">{message}</p>}
+    </>}
   </div>;
 }

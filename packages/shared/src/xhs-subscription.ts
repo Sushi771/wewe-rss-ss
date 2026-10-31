@@ -54,6 +54,7 @@ export type XhsSubscriptionTask = {
   failed: number;
   remaining: number;
   snapshotsSaved?: number;
+  mediaSummary?: {manifestNotes:number;declaredImages:number;recordedSavedImages:number;pendingImages:number;needsReviewNotes:number;blockedNotes:number;needsDetailRefreshNotes:number};
   code?: string;
   message: string;
   resumable?: boolean;
